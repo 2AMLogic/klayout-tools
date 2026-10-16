@@ -5684,23 +5684,25 @@ def _mapping_matches(actual: dict[str, Any], selector: Any, fold: Any) -> bool:
     return all(actual.get(fold(name)) == value for name, value in selector.items())
 
 
+def _fold_lower(name: Any) -> str:
+    return str(name).lower()
+
+
+# exclude-entry key -> predicate(point, selector value); an unknown key never matches.
+_EXCLUDE_KEY_MATCHERS: dict[str, Any] = {
+    "process": lambda point, value: point.process == value,
+    "temperature_c": lambda point, value: point.temperature_c == value,
+    "variant": lambda point, value: point.variant == value,
+    "supply_v": lambda point, value: _mapping_matches(point.supply_v, value, str),
+    "params": lambda point, value: _mapping_matches(point.params, value, _fold_lower),
+    "options": lambda point, value: _mapping_matches(point.options, value, _fold_lower),
+}
+
+
 def _matches_exclude(point: CornerPoint, entry: dict[str, Any]) -> bool:
-    scalars = {
-        "process": point.process,
-        "temperature_c": point.temperature_c,
-        "variant": point.variant,
-    }
     for key, value in entry.items():
-        if key == "supply_v":
-            if not _mapping_matches(point.supply_v, value, str):
-                return False
-        elif key == "params":
-            if not _mapping_matches(point.params, value, lambda n: str(n).lower()):
-                return False
-        elif key == "options":
-            if not _mapping_matches(point.options, value, lambda n: str(n).lower()):
-                return False
-        elif key not in scalars or scalars[key] != value:
+        matcher = _EXCLUDE_KEY_MATCHERS.get(key)
+        if matcher is None or not matcher(point, value):
             return False
     return True
 
