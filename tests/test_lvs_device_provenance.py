@@ -182,9 +182,8 @@ def test_gf180mcu_mos_provenance_cites_lvs_deck():
     (`gf180mcu_fd_pr__nfet_03v3`/`...pfet_03v3`) -- issue #904, the
     gf180mcu counterpart of #868's sky130 backfill.
 
-    The gf180mcu LVS pin is deliberately still open_pdks ``c6d73a3`` (not the
-    ``f6eeac7`` the sky130 and gf180mcu-DRC pins moved to in #3429): the LVS
-    rule decks changed in that re-pin and are re-verified in #3540."""
+    The gf180mcu LVS pin is open_pdks ``f6eeac7`` (re-verified in #3540 after
+    the LVS rule decks moved in the #3429 re-pin)."""
     assert GF180MCU_DECK.nfet_provenance == RuleProvenance(
         source_repo="google/globalfoundries-pdk-libs-gf180mcu_fd_pv",
         source_path="libs.tech/klayout/tech/lvs/rule_decks/mos_extraction.lvs",

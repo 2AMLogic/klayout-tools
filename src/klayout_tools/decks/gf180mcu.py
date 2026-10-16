@@ -2257,19 +2257,11 @@ UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {
 # #3429, a different pin: the DRC-side re-derivation cites `f6eeac7` against
 # the *DRC* rule decks, `klayout/tech/drc/...`, not the LVS ones below).
 #
-# **Deliberately still `c6d73a3`, not `f6eeac7` (issue #3429, 2026-10-16).**
-# Unlike the DRC-side constant above, the LVS rule decks this table
-# transcribes did not survive the `c6d73a3` -> `f6eeac7` re-pin unchanged:
-# `libs.tech/klayout/lvs/rule_decks/` moved to `libs.tech/klayout/tech/lvs/
-# rule_decks/` and `res_derivations.lvs` now splits every poly resistor into
-# `*_sub`/`*_nwell` body variants (e.g. `npolyf_u_layer` became
-# `npolyf_u_sub_layer`/`npolyf_u_nwell_layer`), `mimcap_derivations.lvs`
-# gates the virtual bottom plate on `MIM_OPTION`, and the `metal1`/`metaltop`
-# terminals became `metal1_con`/`metaltop_con` in the diode/general
-# derivations. None of that has been re-checked against this table's device
-# entries, so the pin keeps naming the tree they were actually verified
-# against. Retire this note (and bump the constant) once the follow-up
-# re-verification lands.
+# **Re-pinned from `c6d73a3` to `f6eeac7` (issue #3540, 2026-10-16).** The LVS
+# rule decks did not survive the #3429 re-pin unchanged (`libs.tech/klayout/lvs/
+# rule_decks/` moved to `libs.tech/klayout/tech/lvs/rule_decks/`, poly resistors
+# split into `*_sub`/`*_nwell` variants, the `metal1`/`metaltop` terminals became
+# `*_con`), so every entry below was re-read against `f6eeac7`.
 _GF180MCU_LVS_REPO = "google/globalfoundries-pdk-libs-gf180mcu_fd_pv"
 # Re-pinned to open_pdks `f6eeac7` (issue #3540, child B of #3420): the LVS rule
 # decks moved to `libs.tech/klayout/tech/lvs/rule_decks/` and were re-read there
