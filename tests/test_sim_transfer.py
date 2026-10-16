@@ -304,6 +304,7 @@ def test_deterministic():
 
 from klayout_tools.sim_transfer import (  # noqa: E402
     REASON_CROSSING_NOT_BRACKETED,
+    REASON_LOW_FREQUENCY_ON_AXIS,
     REASON_TOP_NOT_BELOW_UNITY,
     analyze_margins,
     grade_margins,
@@ -450,6 +451,23 @@ def test_benign_high_frequency_phase_excursion_is_not_a_negative_margin():
     assert (
         grade_margins(rep, min_phase_margin_deg=45.0, min_gain_margin_db=6.0) == "pass"
     )
+
+
+def test_first_sample_exactly_on_negative_real_axis_is_ambiguous():
+    # T starts at +20 dB exactly at -180 deg (offset snaps to 0.0), then |T|
+    # crosses unity with a healthy margin: only the start sits on the line.
+    rep = _margins([(0, 20, -180), (2, -10, -100), (4, -50, -100)])
+    assert rep.band["low_freq_mag_db"] == pytest.approx(20.0)
+    assert REASON_LOW_FREQUENCY_ON_AXIS in rep.ambiguity
+    assert grade_margins(rep, min_phase_margin_deg=45.0) == "ambiguous"
+
+
+@pytest.mark.parametrize(
+    ("deg", "flagged"), [(-180.0 + 1e-10, True), (-170.0, True), (-100.0, False)]
+)
+def test_low_frequency_axis_guard_boundaries(deg, flagged):
+    rep = _margins([(0, 20, deg), (2, -20, -100), (4, -60, -100)])
+    assert (REASON_LOW_FREQUENCY_ON_AXIS in rep.ambiguity) is flagged
 
 
 def test_margins_edge_cases():

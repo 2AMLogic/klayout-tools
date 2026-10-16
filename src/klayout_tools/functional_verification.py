@@ -3174,6 +3174,11 @@ def run_functional_verification(
             "engine_version": _engine_version(engine),
             "cocotb_version": _cocotb_version(),
             "results_xml": results_xml,
+            # Additive (issue #3013): the simulator/cocotb console transcript
+            # and the build transcript the run wrote, named by path (never
+            # inlined) like `results_xml`.
+            "test_log": test_log,
+            "build_log": build_log,
             "random_seed": _extract_random_seed_property(results_xml),
             # Additive (issue #3290): `options.source_defines` keyed by the
             # request.sources entry as resolved to an absolute path; `{}`

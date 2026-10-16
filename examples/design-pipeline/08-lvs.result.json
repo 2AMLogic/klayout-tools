@@ -4,11 +4,66 @@
   "layout": "06-layout.gds",
   "reference": "07-reference.spice",
   "top": "ota_5t_layout_0",
-  "status": "match",
-  "mismatch_count": 1,
-  "category_counts": {
-    "topology": 1
+  "reference_top": "OTA_5T_LAYOUT_0",
+  "parameter_tolerance": null,
+  "options": {
+    "combine_devices": false,
+    "combine_devices_per_circuit": null,
+    "combine_devices_max_attempts": 5,
+    "flatten_layout": false,
+    "flatten_reference": false,
+    "netgen_setup": null,
+    "parameter_tolerance": null,
+    "compare_parameters": null,
+    "power_connectivity": null,
+    "anchor_top_level_pins": null,
+    "strict_top_level_pin_count": false,
+    "supply_nets": [
+      "GND",
+      "VCC",
+      "VDD",
+      "VGND",
+      "VPWR",
+      "VSS"
+    ],
+    "finfet_bulk": null
   },
+  "hints_applied": null,
+  "status": "match",
+  "power_connectivity": {
+    "status": "unchecked",
+    "reason": "reference.form is 'plain-element', whose reference netlist carries its own power/ground pins and nets -- they take part in the ordinary compare, so this check (which exists to cover the signal-only 'gate-level-verilog' form) does not apply",
+    "power_pins": [],
+    "power_pins_derivation": null,
+    "instance_count": 0,
+    "expected_nets": null,
+    "unchecked_expected_pins": [],
+    "findings": [],
+    "finding_count": 0
+  },
+  "body_verification": {
+    "status": "unverified",
+    "reason": null,
+    "device_classes": [
+      "nfet"
+    ],
+    "device_count": 5,
+    "findings": [
+      {
+        "class": "nfet",
+        "device_count": 5
+      }
+    ],
+    "finding_count": 1
+  },
+  "device_parameter_coverage": [],
+  "mismatch_count": 3,
+  "error_count": 0,
+  "category_counts": {
+    "device.body_unverified": 1,
+    "topology": 2
+  },
+  "category_error_counts": {},
   "counts": {
     "nets": {
       "layout": 12,
@@ -26,14 +81,55 @@
       "matched": 4
     }
   },
+  "device_classes": [
+    "nfet",
+    "pfet",
+    "pnp",
+    "sky130_fd_pr__model__cap_mim",
+    "sky130_fd_pr__model__cap_mim_m4",
+    "resistor"
+  ],
   "environment": {
     "engine": "klayout",
-    "engine_version": "0.30.10",
-    "layout_sha256": "c7e9145fb8def74b60c69d65a17f3a37c251ec4abbcadde7fc9ad3a31041ebf6",
+    "engine_version": "0.30.12",
+    "netgen_binary": null,
+    "layout_sha256": "29db5dcb6d312194f661bc9ce38b080127801ad7453f188e70c5be3a5c11541d",
     "reference_sha256": "2b6722829721637bc2254158a5eca75ee1ee96cff2776fd608a4a73856ed4f90",
     "extracted_netlist": null
   },
+  "provenance": {
+    "klt_version": "0.7.1.dev517+gebd6e9c71ae3.dirty",
+    "klayout_version": "0.30.12",
+    "pdk": null,
+    "deck": {
+      "name": "sky130",
+      "content_hash": "sha256:411d30797095f35557025e80916139f2741e16097d06b15a86c077a23763c180",
+      "released": false
+    },
+    "input": {
+      "content_hash": "sha256:29db5dcb6d312194f661bc9ce38b080127801ad7453f188e70c5be3a5c11541d",
+      "role": "layout"
+    },
+    "klayout_version_mismatch": false
+  },
   "mismatches": [
+    {
+      "category": "device.body_unverified",
+      "severity": "warning",
+      "description": "5 NMOS device body terminal(s) were compared against the 'vsubs' deck-synthesized substrate net, not a real schematic net -- no drawn substrate-tap geometry resolved these device(s)' body terminal to a real net (see docs/cli/extract.md, \"Coverage\")",
+      "side": "layout",
+      "net": null,
+      "device": {
+        "layout": null,
+        "reference": null,
+        "class": "nfet"
+      },
+      "property": null,
+      "details": null,
+      "circuit": null,
+      "instance": null,
+      "subcircuit": null
+    },
     {
       "category": "topology",
       "severity": "warning",
@@ -41,7 +137,86 @@
       "side": "layout",
       "net": null,
       "device": null,
-      "property": null
+      "property": null,
+      "details": null,
+      "circuit": null,
+      "instance": null,
+      "subcircuit": null
+    },
+    {
+      "category": "topology",
+      "severity": "warning",
+      "description": "device class has no counterpart on the other side, but no devices of this class were extracted either -- not a real topology mismatch",
+      "side": "layout",
+      "net": null,
+      "device": null,
+      "property": null,
+      "details": null,
+      "circuit": null,
+      "instance": null,
+      "subcircuit": null
+    }
+  ],
+  "net_correspondence": [
+    {
+      "layout": "\\$2",
+      "reference": "FLT1",
+      "pin": false
+    },
+    {
+      "layout": "\\$3",
+      "reference": "FLT3",
+      "pin": false
+    },
+    {
+      "layout": "\\$6",
+      "reference": "FLT4",
+      "pin": false
+    },
+    {
+      "layout": "\\$7",
+      "reference": "G1",
+      "pin": false
+    },
+    {
+      "layout": "\\$8",
+      "reference": "G2",
+      "pin": false
+    },
+    {
+      "layout": "\\$9",
+      "reference": "G3",
+      "pin": false
+    },
+    {
+      "layout": "\\$10",
+      "reference": "G4",
+      "pin": false
+    },
+    {
+      "layout": "\\$11",
+      "reference": "G5",
+      "pin": false
+    },
+    {
+      "layout": "N1",
+      "reference": "N1",
+      "pin": true
+    },
+    {
+      "layout": "TAIL_A|TAIL_B",
+      "reference": "TAIL_NODE",
+      "pin": true
+    },
+    {
+      "layout": "VOUT",
+      "reference": "VOUT",
+      "pin": true
+    },
+    {
+      "layout": "vsubs",
+      "reference": "VSUBS",
+      "pin": true
     }
   ]
 }

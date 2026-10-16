@@ -2768,6 +2768,32 @@ def test_run_pex_distributed_rc_requires_critical_net(tmp_path, resistor_layout)
 
 
 @_SKIP_NO_NGSPICE
+def test_run_pex_substrate_tie_ohms_forwarded_to_extraction(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """`--substrate-tie-ohms` (issue #3089) reaches `run_extract` unchanged
+    (and `None` -- the default tie -- when the flag is not given)."""
+    import klayout_tools.pex as pex_module
+
+    seen: list[object] = []
+    real_run_extract = pex_module.run_extract
+
+    def _spy(*args, **kwargs):
+        seen.append(kwargs.get("substrate_tie_ohms", "missing"))
+        return real_run_extract(*args, **kwargs)
+
+    monkeypatch.setattr(pex_module, "run_extract", _spy)
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    run_pex(resistor_layout, [str(request)], "sky130", substrate_tie_ohms=1e-3)
+    run_pex(resistor_layout, [str(request)], "sky130")
+
+    assert seen == [1e-3, None]
+
+
+@_SKIP_NO_NGSPICE
 def test_run_pex_mom_rlc_net_threaded_through_to_extraction(tmp_path, resistor_layout):
     """`--mom-rlc-net`/`--mom-rlc-resistance-ohm`/`--mom-rlc-capacitance-ff`
     (issue #988, Epic #709 Phase 3a) are forwarded from `run_pex` to
@@ -3868,6 +3894,67 @@ def test_run_pex_measure_command_produces_delta_rows(
     assert report["passed"] == 2
     assert report["failed"] == 0
     assert report["errored"] == 0
+
+
+_ENV_RECORDING_HARNESS = _MEASURE_HARNESS.replace(
+    "import json, os, sys\n",
+    "import json, os, sys\n"
+    "open(os.path.join(os.environ['KLT_PEX_ARTIFACTS_DIR'], 'env.json'), 'w')"
+    ".write(json.dumps({k: os.environ.get(k) for k in "
+    "('KLT_PEX_BACKEND', 'KLT_SIM_BACKEND')}))",
+    1,
+)
+
+
+def _recorded_backend_env(tmp_path, side: str) -> dict:
+    return json.loads((tmp_path / "art" / "measure" / side / "env.json").read_text())
+
+
+@pytest.mark.parametrize("inherited", [None, "local"])
+def test_run_pex_measure_command_exports_backend_flag(
+    tmp_path, resistor_layout, measure_reference, monkeypatch, inherited
+):
+    """Issue #2962: `--backend` reaches the child, and beats a pre-set
+    `$KLT_SIM_BACKEND`, so a child `klt sim` obeys it."""
+    if inherited is None:
+        monkeypatch.delenv("KLT_SIM_BACKEND", raising=False)
+    else:
+        monkeypatch.setenv("KLT_SIM_BACKEND", inherited)
+    run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        output=str(tmp_path / "res.spice"),
+        artifacts_dir=str(tmp_path / "art"),
+        measure_command=_write_harness(tmp_path, _ENV_RECORDING_HARNESS),
+        reference_netlist=measure_reference,
+        backend="batch",
+    )
+    for side in ("schematic", "extracted"):
+        assert _recorded_backend_env(tmp_path, side) == {
+            "KLT_PEX_BACKEND": "batch",
+            "KLT_SIM_BACKEND": "batch",
+        }
+
+
+def test_run_pex_measure_command_leaves_backend_env_alone_without_flag(
+    tmp_path, resistor_layout, measure_reference, monkeypatch
+):
+    monkeypatch.setenv("KLT_SIM_BACKEND", "batch")
+    monkeypatch.delenv("KLT_PEX_BACKEND", raising=False)
+    run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        output=str(tmp_path / "res.spice"),
+        artifacts_dir=str(tmp_path / "art"),
+        measure_command=_write_harness(tmp_path, _ENV_RECORDING_HARNESS),
+        reference_netlist=measure_reference,
+    )
+    assert _recorded_backend_env(tmp_path, "schematic") == {
+        "KLT_PEX_BACKEND": None,
+        "KLT_SIM_BACKEND": "batch",
+    }
 
 
 def test_run_pex_measure_command_keeps_extraction_disclosures(
