@@ -14333,13 +14333,11 @@ def test_gf180mcu_parasitics_metals_covers_full_stack():
     assert m2.cap_perim_ff_um == pytest.approx(0.033298)
 
     # Metal5 (index 4, top metal of this 5-level stack): sheet from the
-    # resolved, pre-built gf180mcuD.tech for the pinned PDK commit
-    # (`resist (allm5)/metal5    60`, 60 milliohm/sq), the non-thick-metal
-    # `else` branch -- not the generic templated gf180mcu.tech's
-    # THICKMET1P1 row (40 milliohm/sq), which a prior curation (#571)
-    # mistakenly used (corrected by #572).
+    # resolved, pre-built gf180mcuD.tech for the pinned PDK commit f6eeac7
+    # (`resist (allm5)/metal5    40`, 40 milliohm/sq; it read 60 at the
+    # earlier c6d73a3 pin -- issue #3540).
     m5 = gf180mcu.PARASITICS.metals[4]
-    assert m5.sheet_res_ohm_sq == pytest.approx(0.06)
+    assert m5.sheet_res_ohm_sq == pytest.approx(0.04)
     assert m5.cap_area_ff_um2 == pytest.approx(0.005798)
     assert m5.cap_perim_ff_um == pytest.approx(0.030386)
 
@@ -14846,6 +14844,105 @@ def test_critical_net_unmatched_name_is_a_warning_not_an_error(tmp_path):
 def test_critical_net_requires_parasitics():
     with pytest.raises(ExtractError, match="--critical-net requires --parasitics"):
         run_extract("/nonexistent.gds", "sky130", critical_nets=["VIC"])
+
+
+# ---------------------------------------------------------------------------
+# Glob / all-nets selectors for --critical-net / --parasitics-net (issue #2974)
+# ---------------------------------------------------------------------------
+
+
+def _lateral_run(tmp_path, **kwargs):
+    path = _write_gds(_make_lateral_coupling_layout(), tmp_path / "lateral.gds")
+    return run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "lateral.spice"),
+        parasitics=True,
+        **kwargs,
+    )
+
+
+def test_critical_net_pattern_matches_explicit_names(tmp_path):
+    explicit = _lateral_run(tmp_path, critical_nets=["VIC"])["parasitics"]
+    pattern = _lateral_run(tmp_path, critical_net_patterns=["V*"])["parasitics"]
+    assert pattern["critical_nets"] == ["VIC"]
+    assert pattern["critical_net_patterns"] == ["V*"]
+    assert pattern["cc_count"] == explicit["cc_count"] == 1
+    assert pattern["total_coupling_capacitance_ff"] == pytest.approx(
+        explicit["total_coupling_capacitance_ff"]
+    )
+
+
+def test_critical_net_pattern_merges_with_exact_names(tmp_path):
+    para = _lateral_run(tmp_path, critical_nets=["FAR"], critical_net_patterns=["V*"])[
+        "parasitics"
+    ]
+    assert para["critical_nets"] == ["FAR", "VIC"]
+
+
+def test_no_selector_leaves_report_fields_absent(tmp_path):
+    para = _lateral_run(tmp_path, critical_nets=["VIC"])["parasitics"]
+    assert "critical_net_patterns" not in para
+    assert "critical_net_all" not in para
+    assert "parasitics_net_patterns" not in para
+
+
+def test_critical_net_pattern_zero_match_warns_distinctly(tmp_path):
+    report = _lateral_run(tmp_path, critical_net_patterns=["bl_*"])
+    assert any(
+        "--critical-net-pattern pattern(s) 'bl_*' match no net" in w
+        for w in report["warnings"]
+    )
+    assert report["parasitics"]["critical_nets"] == []
+
+
+def test_critical_net_pattern_zero_match_is_error_when_strict(tmp_path):
+    with pytest.raises(ExtractError, match="'bl_\\*' match no net.*strict-net"):
+        _lateral_run(tmp_path, critical_net_patterns=["bl_*"], strict_net_patterns=True)
+
+
+def test_critical_net_all_with_exclude(tmp_path):
+    para = _lateral_run(tmp_path, critical_net_all=True, critical_net_excludes=["FAR"])[
+        "parasitics"
+    ]
+    assert para["critical_nets"] == ["AGR", "VIC"]
+    assert para["critical_net_all"] is True
+    assert para["critical_net_excludes"] == ["FAR"]
+
+
+def test_parasitics_net_pattern_scopes_ground_pass(tmp_path):
+    para = _lateral_run(tmp_path, parasitics_net_patterns=["[AV]*"])["parasitics"]
+    assert para["parasitics_nets"] == ["AGR", "VIC"]
+    assert {entry["net"] for entry in para["nets"]} == {"AGR", "VIC"}
+
+
+def test_net_selector_flag_validation(tmp_path):
+    with pytest.raises(ExtractError, match="require --parasitics"):
+        run_extract("/nonexistent.gds", "sky130", critical_net_patterns=["V*"])
+    with pytest.raises(ExtractError, match="requires --critical-net-all"):
+        run_extract(
+            "/nonexistent.gds", "sky130", parasitics=True, critical_net_excludes=["x"]
+        )
+    with pytest.raises(ExtractError, match="--strict-net-patterns requires"):
+        run_extract(
+            "/nonexistent.gds", "sky130", parasitics=True, strict_net_patterns=True
+        )
+
+
+def test_distributed_rc_with_empty_resolving_pattern_errors(tmp_path):
+    with pytest.raises(ExtractError, match="resolved to no net"):
+        _lateral_run(tmp_path, critical_net_patterns=["bl_*"], distributed_rc=True)
+
+
+def test_net_selector_anonymous_nets_only_match_explicit_dollar_glob():
+    from klayout_tools.extract_netselect import NetSelectors
+
+    selectors = NetSelectors(error=ExtractError)
+    named = ["bl_0", "bl_1", "VSS"]
+    anonymous = ["\\$3"]
+    assert selectors._select("f", ["*"], named, anonymous) == set(named)
+    assert selectors._select("f", ["\\$*"], named, anonymous) == {"\\$3"}
+    assert selectors._select("f", [], named, anonymous, select_all=True) == set(named)
 
 
 # ---------------------------------------------------------------------------

@@ -235,6 +235,47 @@ def test_fixture_trips_exactly_its_expected_rules(fixture_run, index):
     assert tripped.get(index, set()) == set(_CASES[index].expect)
 
 
+_TOPOLOGY_GAPS = ("GATE.AUX.2", "ACTIVE.AUX.3")
+_PROBES = fx.topology_gap_probes()
+
+
+def test_topology_gaps_stay_declared_with_distinct_reasons():
+    """#3086: both rules are topological conditions, not missing thresholds;
+    the evidence is recorded but neither is enforced, so both stay gaps."""
+    gaps = {g.id: g for g in NOT_IMPLEMENTED}
+    for rule_id in _TOPOLOGY_GAPS:
+        assert rule_id in gaps
+        assert rule_id not in RULE_IDS
+        assert "topological condition" in gaps[rule_id].reason
+        assert "no distance bound to check" not in gaps[rule_id].reason
+        assert gaps[rule_id].tracked_by == "#2812"
+    assert gaps["GATE.AUX.2"].reason != gaps["ACTIVE.AUX.3"].reason
+    for rule_id in _TOPOLOGY_GAPS:
+        assert f'output("{rule_id}"' not in _deck_text()
+
+
+@pytest.fixture(scope="module")
+def probe_run(tmp_path_factory):
+    if not HAVE_KLAYOUT_BINARY:
+        pytest.skip("klayout binary is not installed on this machine")
+    path = tmp_path_factory.mktemp("asap7_probes") / "probes.gds"
+    fx.write_cases(str(path), _PROBES)
+    report = run_drc_klayout_engine(str(path), str(DECK_PATH))
+    tripped: dict[int, set[str]] = defaultdict(set)
+    for v in report["violations"]:
+        tripped[fx.slot_of(v["bbox"])].add(v["rule"])
+    return tripped
+
+
+@_needs_klayout
+@pytest.mark.parametrize("index", range(len(_PROBES)), ids=[c.name for c in _PROBES])
+def test_topology_gap_probes_stay_silent(probe_run, index):
+    """The DRM's illegal drawings pass the deck (apart from the narrow slots
+    ACTIVE.S.1 already reports and the strips ACTIVE.W.2 reports), which is
+    why the gaps remain declared."""
+    assert probe_run.get(index, set()) == set(_PROBES[index].expect)
+
+
 @_needs_klayout
 def test_declared_rule_categories_match_manifest(fixture_run):
     report, _ = fixture_run

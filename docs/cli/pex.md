@@ -8,7 +8,7 @@ Phase 1a of [Epic #709](https://github.com/2AMLogic/klayout-tools/issues/709)
 ("PEX-aware post-layout sim flow for klt").
 
 ```
-klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--outdir <dir>] [--backend <backend>] [--deck-option <key>=<value>]... [--pins <a,b,...>] [--rename-declared-pins] [--label-layer <role>=<layer>/<datatype>]... [--critical-net <net>]... [--distributed-rc] [--parasitic-variant <variant>]... [--mom-rlc-net <net>] [--mom-rlc-resistance-ohm <r>] [--mom-rlc-capacitance-ff <c>] [--mom-rlc-inductance-nh <l>] [--flatten-schematic] [--device-only-leg] [--format text|json]
+klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--outdir <dir>] [--backend <backend>] [--deck-option <key>=<value>]... [--pins <a,b,...>] [--rename-declared-pins] [--label-layer <role>=<layer>/<datatype>]... [--critical-net <net>]... [--critical-net-pattern <glob>]... [--critical-net-all] [--critical-net-exclude <glob>]... [--distributed-rc] [--parasitic-variant <variant>]... [--mom-rlc-net <net>] [--mom-rlc-resistance-ohm <r>] [--mom-rlc-capacitance-ff <c>] [--mom-rlc-inductance-nh <l>] [--flatten-schematic] [--device-only-leg] [--format text|json]
 klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <schematic.spice> [--measure-timeout-s <seconds>] [<every flag above>]
 ```
 
@@ -136,6 +136,11 @@ klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <
   rows) reflect it. Off by default -- byte-identical to before this feature
   existed. See [`extract.md`](extract.md)'s "Lateral (same-layer, sidewall)
   coupling capacitance for critical nets" section.
+- `--critical-net-pattern GLOB` / `--critical-net-all` /
+  `--critical-net-exclude GLOB` — glob and all-nets forms of
+  `--critical-net`, passed through to `klt extract` (issue #2974; see
+  [`extract.md`](extract.md)'s "Many nets" paragraph).
+  `extraction.critical_nets` echoes the resolved concrete names.
 - `--distributed-rc` — passed through to `klt extract --distributed-rc`
   (issue #977, Epic #709 Phase 2b); requires `--critical-net`. Replaces the
   single-lumped-star R/C model with a distributed, multi-segment ladder for

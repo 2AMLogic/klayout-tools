@@ -204,6 +204,7 @@ from .extract_abstract import (
     lef_layer_probe_roles,
 )
 from .extract_abstract import _sanitize_instance_name as _sanitize_instance_name
+from .extract_netselect import NetSelectors
 
 # The RC-parasitics subsystem lives in its own module (issue #1572, following
 # the same split as `extract_abstract.py`/`extract_spef.py` above). This
@@ -972,6 +973,76 @@ def _substrate_spreading_block(
     return block
 
 
+def _build_net_selectors(
+    critical_net_patterns: Sequence[str] | None,
+    critical_net_all: bool,
+    critical_net_excludes: Sequence[str] | None,
+    parasitics_net_patterns: Sequence[str] | None,
+    strict_net_patterns: bool,
+    *,
+    parasitics: bool,
+) -> NetSelectors | None:
+    """Validate the pattern/all-nets selector flags (issue #2974); ``None``
+    when none was given, so every report stays byte-identical to before."""
+    if critical_net_excludes and not critical_net_all:
+        raise ExtractError("--critical-net-exclude requires --critical-net-all")
+    selecting = critical_net_patterns or critical_net_all or parasitics_net_patterns
+    if not selecting and not strict_net_patterns:
+        return None
+    if not selecting:
+        raise ExtractError(
+            "--strict-net-patterns requires --critical-net-pattern, "
+            "--critical-net-all or --parasitics-net-pattern"
+        )
+    if not parasitics:
+        raise ExtractError(
+            "--critical-net-pattern/--critical-net-all/--parasitics-net-pattern "
+            "require --parasitics"
+        )
+    return NetSelectors(
+        critical_patterns=tuple(critical_net_patterns or ()),
+        critical_all=critical_net_all,
+        critical_excludes=tuple(critical_net_excludes or ()),
+        parasitics_patterns=tuple(parasitics_net_patterns or ()),
+        strict=strict_net_patterns,
+        error=ExtractError,
+    )
+
+
+def _selects_critical(net_selectors: NetSelectors | None) -> bool:
+    return net_selectors is not None and net_selectors.has_critical
+
+
+def _adopt_resolved_net_selectors(
+    net_selectors: NetSelectors | None,
+    critical_nets_set: frozenset[str] | None,
+    parasitics_nets_set: frozenset[str] | None,
+    distributed_rc: bool,
+) -> tuple[frozenset[str] | None, frozenset[str] | None]:
+    """Take the net sets :class:`NetSelectors` resolved during extraction
+    (issue #2974); ``--distributed-rc`` needs the resolved set non-empty."""
+    if net_selectors is None:
+        return critical_nets_set, parasitics_nets_set
+    critical_nets_set = net_selectors.critical_nets or critical_nets_set
+    parasitics_nets_set = net_selectors.parasitics_nets or parasitics_nets_set
+    if distributed_rc and not critical_nets_set:
+        raise ExtractError(
+            "--distributed-rc requires --critical-net: the requested "
+            "--critical-net-pattern/--critical-net-all resolved to no net"
+        )
+    return critical_nets_set, parasitics_nets_set
+
+
+def _report_net_selectors(
+    net_selectors: NetSelectors | None,
+    parasitics_report: dict[str, Any],
+    warnings: list[str],
+) -> None:
+    if net_selectors is not None:
+        parasitics_report.update(net_selectors.echo())
+        warnings.extend(net_selectors.warnings)
+
+
 def _require_parasitics(flag: str, value: Any, parasitics: bool) -> None:
     """Reject ``flag`` when it was given without ``--parasitics``.
 
@@ -1221,6 +1292,11 @@ def run_extract(
     def_net_names: bool = False,
     critical_nets: Sequence[str] | None = None,
     parasitics_nets: Sequence[str] | None = None,
+    critical_net_patterns: Sequence[str] | None = None,
+    critical_net_all: bool = False,
+    critical_net_excludes: Sequence[str] | None = None,
+    parasitics_net_patterns: Sequence[str] | None = None,
+    strict_net_patterns: bool = False,
     parasitics_top_cell_only: bool = False,
     distributed_rc: bool = False,
     resistance_paths: Sequence[tuple[int, str, str]] | None = None,
@@ -2590,7 +2666,19 @@ def run_extract(
     # that flag's own net set as the "which nets get the ladder" scope
     # rather than inventing a second net classification mechanism -- with
     # nothing named there is nothing to scope this onto.
-    if distributed_rc and not critical_nets_set:
+    net_selectors = _build_net_selectors(
+        critical_net_patterns,
+        critical_net_all,
+        critical_net_excludes,
+        parasitics_net_patterns,
+        strict_net_patterns,
+        parasitics=parasitics,
+    )
+    if (
+        distributed_rc
+        and not critical_nets_set
+        and not _selects_critical(net_selectors)
+    ):
         raise ExtractError("--distributed-rc requires --critical-net")
 
     # `--resistance-path` (issue #2765): validated up front, in a helper so
@@ -2716,6 +2804,7 @@ def run_extract(
         def_net_names=def_net_names,
         critical_nets=critical_nets_set,
         parasitics_nets=parasitics_nets_set,
+        net_selectors=net_selectors,
         parasitics_top_cell_only=parasitics_top_cell_only,
         def_pins=def_pins,
         pin_source_cells=pin_source_cells,
@@ -2735,6 +2824,12 @@ def run_extract(
         missing_flavour_markers=missing_flavour_markers,
         probes=probes,
         probe_results=probe_results,
+    )
+
+    # `--critical-net-pattern`/`--parasitics-net-pattern` (issue #2974): the
+    # selectors were resolved against the extracted nets inside the call above.
+    critical_nets_set, parasitics_nets_set = _adopt_resolved_net_selectors(
+        net_selectors, critical_nets_set, parasitics_nets_set, distributed_rc
     )
 
     # `--subcircuit` (issue #2245), layout-dependent half: both rejections
@@ -3220,7 +3315,9 @@ def run_extract(
         # `warnings` instead, mirroring `--pins`' "declared name matched no
         # promoted net" convention.
         parasitics_report["critical_nets"] = (
-            list(critical_nets) if critical_nets else []
+            sorted(critical_nets_set or ())
+            if _selects_critical(net_selectors)
+            else (list(critical_nets) if critical_nets else [])
         )
         # Additive field (issue #1700): echoes the `--parasitics-net` request
         # back verbatim (as given, not sorted/deduplicated) -- `[]` when the
@@ -3228,8 +3325,13 @@ def run_extract(
         # `parasitics.nets[]` would be indistinguishable from a layout whose
         # other nets genuinely had no ground-eligible geometry.
         parasitics_report["parasitics_nets"] = (
-            list(parasitics_nets) if parasitics_nets else []
+            sorted(parasitics_nets_set or ())
+            if net_selectors is not None and net_selectors.parasitics_patterns
+            else (list(parasitics_nets) if parasitics_nets else [])
         )
+        # Additive fields (issue #2974): the requested selectors, present
+        # only when one was given, plus their zero-match warnings.
+        _report_net_selectors(net_selectors, parasitics_report, warnings)
         if variants is not None:
             # Additive field (issue #3056): present only when
             # `--parasitic-variant` was given, so every other report is
@@ -4563,6 +4665,7 @@ def extract_netlist_from_layout(
     probe_results: list[dict[str, Any]] | None = None,
     critical_nets: frozenset[str] | None = None,
     parasitics_nets: frozenset[str] | None = None,
+    net_selectors: NetSelectors | None = None,
     parasitics_top_cell_only: bool = False,
     def_pins: frozenset[str] | None = None,
     pin_source_cells: frozenset[str] | None = None,
@@ -4831,8 +4934,10 @@ def extract_netlist_from_layout(
             "--mom-net": mom_net is not None,
             "--def-net-names": def_net_names,
             "--probe": bool(probes),
-            "--critical-net": bool(critical_nets),
-            "--parasitics-net": bool(parasitics_nets),
+            "--critical-net": bool(critical_nets)
+            or (net_selectors is not None and net_selectors.has_critical),
+            "--parasitics-net": bool(parasitics_nets)
+            or (net_selectors is not None and bool(net_selectors.parasitics_patterns)),
             "--def-pins": bool(def_pins),
             "--pin-source-cells": bool(pin_source_cells),
             "--rename-declared-pins": rename_declared_pins,
@@ -5007,6 +5112,7 @@ def extract_netlist_from_layout(
         def_net_names=def_net_names,
         critical_nets=critical_nets,
         parasitics_nets=parasitics_nets,
+        net_selectors=net_selectors,
         parasitics_top_cell_only=parasitics_top_cell_only,
         def_pins=def_pins,
         pin_source_cells=pin_source_cells,
@@ -7872,6 +7978,7 @@ def _extract_netlist(
     probe_results: list[dict[str, Any]] | None = None,
     critical_nets: frozenset[str] | None = None,
     parasitics_nets: frozenset[str] | None = None,
+    net_selectors: NetSelectors | None = None,
     parasitics_top_cell_only: bool = False,
     def_pins: frozenset[str] | None = None,
     pin_source_cells: frozenset[str] | None = None,
@@ -9970,6 +10077,11 @@ def _extract_netlist(
     substrate_taps: dict[str, Any] | None = None
     if parasitics_deck is not None:
         circuit = netlist.circuit_by_name(top_cell.name)
+        if net_selectors is not None:
+            # Issue #2974: patterns can only resolve once the nets exist.
+            critical_nets, parasitics_nets = net_selectors.resolve(
+                circuit, deck, critical_nets, parasitics_nets
+            )
         parasitic_nets = _compute_parasitics(
             l2n,
             circuit,
