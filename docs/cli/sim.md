@@ -4575,9 +4575,20 @@ successfully — that narration alone is not evidence the analysis failed
 (issue #205). The downgrade only applies when every one of the request's
 `measurements[]` actually came back with a value for this corner *and*
 ngspice's own `simulation(s) aborted` trailer is absent from the log; a
-corner with no `measurements[]` declared, a measurement that produced no
-value, or that trailer keeps `singular_matrix`/`nonconvergence` at
-`severity: "error"` and the corner at `status: "error"`, exactly as before.
+measurement that produced no value, or that trailer, keeps
+`singular_matrix`/`nonconvergence` at `severity: "error"` and the corner at
+`status: "error"`, exactly as before.
+
+A waveform-capture-only request (no `measurements[]`, issue #3246) has no
+measurement to confirm completion, so the captured waveform is the recovery
+basis instead: for a `tran` analysis with `options.waveforms: true`, the
+downgrade applies when the trailer is absent *and* the parsed waveform's last
+time point reaches the `tran` stop time (the second `analysis.args` token). A
+missing or truncated waveform, an unparseable `args`, or any non-`tran`
+analysis keeps the diagnostic at `severity: "error"`. When the waveform was
+the basis, the downgraded diagnostic's `message` says so. Declaring a dummy
+completion measurement is no longer needed to get this behavior.
+`options.fail_on_diagnostic` is unaffected (it matches on `code`).
 `netlist`/`timeout`/`measurement`/`unknown`/`timestep_too_small` are never
 downgraded.
 

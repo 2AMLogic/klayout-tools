@@ -1042,3 +1042,17 @@ def test_manifest_published_runner_mismatch_is_refused_before_upload(
     assert "0.1.0" in error["message"]
     assert fake.calls == []
     assert no_local_xschem == []
+
+
+def test_unevaluated_expr_in_collected_netlist_fails_on_batch(
+    repo, fake, no_local_xschem, tmp_path, capsys
+):
+    """Parity with the local backend (issue #3482): the gate also fires on the
+    netlist the runner returned, with the same stable `error.code`."""
+    fake.statuses = [_status("done")]
+    fake.outputs = _runner_outputs("* n\nX1 a b nfet ad=expr(1+2)\n.end\n")
+    output = tmp_path / "out.spice"
+
+    assert main(_argv(repo, output, "--backend", "batch")) == 1
+    assert _error(capsys)["code"] == "unevaluated_expr"
+    assert not output.exists()

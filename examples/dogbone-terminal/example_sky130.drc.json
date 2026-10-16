@@ -110,6 +110,7 @@
       "met1.area.1",
       "met1.enclosing.mcon.1",
       "met1.enclosing.via.1",
+      "met1.enclosing_adjacent.via.1",
       "met1.holes_area.1",
       "met1.ongrid.1",
       "met1.space.1",
@@ -118,6 +119,8 @@
       "met2.area.1",
       "met2.enclosing.via.1",
       "met2.enclosing.via2.1",
+      "met2.enclosing_adjacent.via.1",
+      "met2.enclosing_adjacent.via2.1",
       "met2.holes_area.1",
       "met2.ongrid.1",
       "met2.space.1",
@@ -127,6 +130,7 @@
       "met3.enclosing.capm.1",
       "met3.enclosing.via2.1",
       "met3.enclosing.via3.1",
+      "met3.enclosing_adjacent.via3.1",
       "met3.holes_area.1",
       "met3.ongrid.1",
       "met3.space.1",
@@ -367,6 +371,10 @@
         "reason": "no_applicable_geometry"
       },
       {
+        "id": "met1.enclosing_adjacent.via.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
         "id": "met1.holes_area.1",
         "reason": "no_applicable_geometry"
       },
@@ -396,6 +404,14 @@
       },
       {
         "id": "met2.enclosing.via2.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "met2.enclosing_adjacent.via.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "met2.enclosing_adjacent.via2.1",
         "reason": "no_applicable_geometry"
       },
       {
@@ -432,6 +448,10 @@
       },
       {
         "id": "met3.enclosing.via3.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "met3.enclosing_adjacent.via3.1",
         "reason": "no_applicable_geometry"
       },
       {

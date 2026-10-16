@@ -6830,15 +6830,18 @@ def _run_corner(
         {d["code"] for d in diagnostics if d["code"] in fail_on_diagnostic}
     )
 
+    waveform_complete = _capture_only_waveform_complete(
+        measurements_spec, raw_path, diagnostics, analysis
+    )
+
     if _recovered_from_stepping(
         measurements_spec,
         measurement_results,
         log_text,
         aborted_re=(_XYCE_SIMULATION_ABORTED_RE if is_xyce else _SIMULATION_ABORTED_RE),
+        waveform_complete=waveform_complete,
     ):
-        for diagnostic in diagnostics:
-            if diagnostic["code"] in ("singular_matrix", "nonconvergence"):
-                diagnostic["severity"] = "warning"
+        _downgrade_stepping_diagnostics(diagnostics, bool(measurements_spec))
 
     status = _grade_corner(diagnostics, measurement_results, disqualifying)
 
@@ -8731,6 +8734,7 @@ def _recovered_from_stepping(
     measurement_results: list[dict[str, Any]],
     log_text: str,
     aborted_re: re.Pattern[str] = _SIMULATION_ABORTED_RE,
+    waveform_complete: bool = False,
 ) -> bool:
     """True when a ``singular_matrix``/``nonconvergence`` classification for
     this corner should be treated as recovered (non-fatal) rather than fatal.
@@ -8753,20 +8757,85 @@ def _recovered_from_stepping(
     "this run never completed" trailer text.
 
     Conservative by construction: recovery requires *every* requested
-    measurement to have actually come back with a value (a corner with no
-    ``measurements[]`` at all has no independent signal to check against, so
-    it is never considered recovered), and the engine's own
-    simulation-aborted trailer must be absent -- either one failing
+    measurement to have actually come back with a value, and the engine's
+    own simulation-aborted trailer must be absent -- either one failing
     means the analysis never produced a trustworthy result and the
     classification stays fatal.
+
+    A corner with no ``measurements[]`` (a waveform-capture-only request,
+    issue #3246) has no measurement to check; its independent signal is
+    ``waveform_complete`` -- the captured ``tran`` waveform reached the
+    analysis stop time (:func:`_waveform_reached_tran_window`). Without it
+    such a corner is never considered recovered.
     """
     if not measurements_spec:
-        return False
+        return waveform_complete and not aborted_re.search(log_text)
     if any(m["status"] == "error" for m in measurement_results):
         return False
     if aborted_re.search(log_text):
         return False
     return True
+
+
+def _capture_only_waveform_complete(
+    measurements_spec: list[dict[str, Any]],
+    raw_path: str | None,
+    diagnostics: list[dict[str, Any]],
+    analysis: dict[str, Any],
+) -> bool:
+    """Issue #3246: for a waveform-capture-only ``tran`` request (no
+    ``measurements[]``) the captured waveform is the independent completion
+    signal. Parse the rawfile -- only when a ``singular_matrix`` /
+    ``nonconvergence`` diagnostic makes it matter -- and report whether it
+    reached the transient stop time. A truncated/unparseable rawfile stays
+    fatal (``False``).
+    """
+    if (
+        measurements_spec
+        or raw_path is None
+        or not any(
+            d["code"] in ("singular_matrix", "nonconvergence") for d in diagnostics
+        )
+        or not os.path.isfile(raw_path)
+    ):
+        return False
+    try:
+        waveform = parse_ascii_rawfile(raw_path)
+    except (SimError, ValueError):
+        return False
+    return _waveform_reached_tran_window(waveform, analysis)
+
+
+def _downgrade_stepping_diagnostics(
+    diagnostics: list[dict[str, Any]], has_measurements: bool
+) -> None:
+    """Downgrade recovered ``singular_matrix``/``nonconvergence`` diagnostics
+    to warnings; a capture-only corner also gets the reason appended."""
+    for diagnostic in diagnostics:
+        if diagnostic["code"] in ("singular_matrix", "nonconvergence"):
+            diagnostic["severity"] = "warning"
+            if not has_measurements:
+                diagnostic["message"] += (
+                    " (treated as recovered: the captured waveform "
+                    "reached the transient stop time)"
+                )
+
+
+def _waveform_reached_tran_window(
+    waveform: dict[str, Any] | None, analysis: dict[str, Any]
+) -> bool:
+    """True when ``waveform`` (a :func:`parse_ascii_rawfile` result) is a
+    ``tran`` waveform whose last time point reaches the analysis stop time
+    (issue #3246). ``False`` for a missing waveform, a non-``tran`` analysis
+    or unparseable ``args`` (see :func:`_parse_tran_window`), a non-time
+    sweep variable, or a waveform cut short of the window.
+    """
+    if not waveform or not waveform["points"] or not waveform["variables"]:
+        return False
+    window = _parse_tran_window(analysis)
+    if window is None or waveform["variables"][0]["name"].lower() != "time":
+        return False
+    return waveform["points"][-1][0] >= window[3] * (1 - 1e-4)
 
 
 def _parse_measurements(log_text: str) -> dict[str, float]:

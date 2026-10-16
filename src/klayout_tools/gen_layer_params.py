@@ -2595,6 +2595,63 @@ def _voltage_flavor_mark_layer(family: str, voltage_flavor: str) -> Any:
     return kdb.LayerInfo(*pair) if pair is not None else None
 
 
+#: Per-PDK-family MOS-capacitor marker layer drawn over a ``mos_array`` built
+#: with ``params.mos_cap`` (issue #3283): the layer that lets a deck recognise
+#: the gate-over-diffusion structure as a capacitor rather than a transistor.
+#: gf180mcu's is ``MOS_CAP_MK`` (166/5), the same ``*_MK`` marker family as the
+#: ``RES_MK`` (110/5), ``diode_mk`` (115/5), ``DRC_BJT`` (127/5) and
+#: ``efuse_mk`` (80/5) layers this repo's gf180mcu deck already cites (the
+#: deck's own ``res_exclude`` note lists ``mos_cap_mk`` by name). The 166/5
+#: number matches the official gf180mcu DRC deck's own
+#: ``mos_cap_mk = get_polygons(166, 5)``. A family with no entry
+#: is rejected with a ``GenError`` rather than drawing an unmarked cap.
+_PDK_MOS_CAP_MARK_LAYERS: dict[str, tuple[int, int]] = {
+    "gf180mcu": (166, 5),  # MOS_CAP_MK
+}
+
+
+def _mos_cap_min_width_um(
+    family: str, voltage_flavor_mark: Any
+) -> tuple[float, str] | None:
+    """``(min COMP width in um, deck rule id)`` that applies to a MOS
+    capacitor's diffusion in ``family``'s curated deck, or ``None`` when the
+    deck has no such rule. ``voltage_flavor_mark`` is the resolved
+    ``voltage_flavor`` marker ``kdb.LayerInfo`` (``None`` for the default
+    thin-oxide device): with one, the voltage-scoped rule that overlaps that
+    marker is selected; without, the rule that excludes it (or the plain
+    undifferentiated width rule on a family with no oxide split)."""
+    from .decks import UnknownDeckError, get_deck, get_nominal_dbu
+
+    active = _PDK_ROLE_LAYERS[family]["active"]
+    try:
+        rules = get_deck(family)
+        nominal_dbu_um = get_nominal_dbu(family)
+    except UnknownDeckError:
+        return None
+    mark = (
+        (voltage_flavor_mark.layer, voltage_flavor_mark.datatype)
+        if voltage_flavor_mark is not None
+        else None
+    )
+    candidates = []
+    for rule in rules:
+        if rule.check != "width" or rule.layer != active or rule.other_layer:
+            continue
+        derived = rule.derived_layer
+        if derived is None:
+            candidates.append(rule)
+        elif mark is not None and (
+            derived.intersect_with == mark and derived.mode == "overlapping"
+        ):
+            candidates.append(rule)
+        elif derived.mode == "not_interacting" and mark is None:
+            candidates.append(rule)
+    if not candidates:
+        return None
+    rule = max(candidates, key=lambda r: r.threshold_dbu)
+    return round(rule.threshold_dbu * nominal_dbu_um, 6), rule.id
+
+
 def _resistor_strip_layer_params(
     pdk_info: dict[str, Any], params: dict[str, Any]
 ) -> dict[str, Any]:
@@ -2700,7 +2757,30 @@ def _device_layer_params(
     sd_implant_role = "nplus" if flavor == "nfet" else "pplus"
     sd_implant = _role_layer_info(family, sd_implant_role)
     sd_implant_margin = _sd_implant_margin_um(family)
-    return {
+    # MOS capacitor (issue #3283): the marker layer must resolve and `w_um`
+    # must clear the deck's own COMP min-width rule for the selected oxide,
+    # else the request fails here rather than drawing an unmarked or
+    # sub-rule capacitor.
+    mos_cap_mark = None
+    if params.get("mos_cap"):
+        from .gen import GenError
+
+        pair = _PDK_MOS_CAP_MARK_LAYERS.get(family)
+        if pair is None:
+            raise GenError(
+                f"generator 'mos_array': params.mos_cap is not supported on "
+                f"PDK family '{family}' (no MOS-capacitor marker layer is "
+                "declared for it)"
+            )
+        mos_cap_mark = kdb.LayerInfo(*pair)
+        floor = _mos_cap_min_width_um(family, voltage_flavor_mark)
+        if floor is not None and params["w_um"] < floor[0]:
+            raise GenError(
+                f"generator 'mos_array': params.w_um must be >= {floor[0]} for "
+                f"a MOS capacitor on '{family}' (deck rule '{floor[1]}', the "
+                "minimum COMP width for the selected oxide)"
+            )
+    layer_params = {
         "active_layer": _role_layer_info(family, "active"),
         "poly_layer": _role_layer_info(family, "poly"),
         "contact_layer": _role_layer_info(family, "contact"),
@@ -2749,6 +2829,11 @@ def _device_layer_params(
         "sd_implant_present": sd_implant is not None and sd_implant_margin > 0,
         "sd_implant_margin_um": sd_implant_margin if sd_implant is not None else 0.0,
     }
+    if mos_cap_mark is not None:
+        # Only `mos_array` declares these PCell params (`diff_pair` shares this
+        # resolver), so they are added only for a `mos_cap` request.
+        layer_params["mos_cap_mark_layer"] = mos_cap_mark
+    return layer_params
 
 
 def _resistor_layer_params(

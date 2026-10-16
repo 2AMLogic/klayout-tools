@@ -82,6 +82,13 @@ not `klt --version`, if you need to detect this kind of drift. See
   polygon, in integer database units. The deck grows from 232 to 234 rule
   categories (`--expect-rule-categories 234`); both ids leave the "Not
   implemented" list. Additive; no `schema_version` bump.
+- **ASAP7 deck: eight SRAMDRC-scoped MOL rules** (issue #3083): `klt drc
+  --engine klayout --deck-file asap7.drc` now checks `SRAM.SDT.W.4`,
+  `SRAM.SDT.ACTIVE.OV.3`, `SRAM.SDT.LISD.OV.4`, `SRAM.LISD.S.4`,
+  `SRAM.LISD.AUX.1`, `SRAM.LIG.GATE.A.4`, `SRAM.LIG.AUX.2` and
+  `SRAM.LIG.GATE.OV.2`, moving them out of the documented gaps. The deck
+  declares 246 rule categories (was 238); pass `--expect-rule-categories 246`.
+  Additive; no `schema_version` bump.
 - **`klt lvs` no longer folds one device class into another under
   `options.combine_devices`** (issue #3019): with two MiM classes stacked in
   parallel on one net pair, `layout.file` could report a wrong combined layout
@@ -147,7 +154,7 @@ not `klt --version`, if you need to detect this kind of drift. See
   needs a new `DerivedLayer` mode, `"gate_endcap"`. `klt gen mos_array`/
   `diff_pair`/`esd_device` now draw a 0.15 µm endcap at both gate ends on
   sky130 (units are 0.15 µm taller at the bottom; the PCells gain a
-  `top_endcap_um` parameter). The deck grows from 138 to 139 rules. Committed
+  `top_endcap_um` parameter). The deck grows by one rule. Committed
   sky130 example layouts (`examples/design-pipeline` S7-S9, `dogbone-terminal`)
   were regenerated.
 
@@ -210,6 +217,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   now reports `unverified` (and emits `device.body_unverified`), matching the
   inline-extraction verdict. Inline-extraction results are unchanged.
 
+- **sky130 two-adjacent-edges enclosure rules** (issue #3316): new
+  `DrcRule.check` kind `"enclosing_adjacent"` (a cut is flagged once when two
+  adjacent edges are both enclosed by less than the threshold, as in
+  `sky130A_mr.drc`) and four sky130 rules using it: `met1.enclosing_adjacent.via.1`
+  (`via.5a`), `met2.enclosing_adjacent.via.1` (`m2.5`),
+  `met2.enclosing_adjacent.via2.1` (`via2.5`), `met3.enclosing_adjacent.via3.1`
+  (`via3.5`). The sky130 deck grows from 136 to 140 rules (additive; the
+  deck hash changes).
 - **Bipolar markers can be derived layer expressions** (issue #2860):
   `BipolarDevice.marker` now accepts a `LayerExpr`, a frozen AND/NOT tree
   of drawn layers that can nest, as well as a bare `(layer, datatype)`

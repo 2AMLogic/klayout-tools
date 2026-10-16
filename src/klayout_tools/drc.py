@@ -97,7 +97,13 @@ _SINGLE_LAYER_CHECKS = {"width", "space", "notch", "isolated"}
 # `_validate_threshold_max`/`_run_width_max_check` below.
 _MAX_BOUND_CHECKS = {"width"}
 # Check kinds that compare a region against another region (other_layer required).
-_TWO_LAYER_CHECKS = {"separation", "enclosing", "enclosed", "overlap"}
+_TWO_LAYER_CHECKS = {
+    "separation",
+    "enclosing",
+    "enclosed",
+    "overlap",
+    "enclosing_adjacent",
+}
 # Two-layer check kinds where the "enclosed" layer can lie entirely outside
 # the "enclosing" layer -- a case `Region.enclosing_check`/`enclosed_check`
 # never reports (they only measure *facing edges*, so zero spatial overlap
@@ -2320,6 +2326,8 @@ def _run_check(
     if check in _TWO_LAYER_CHECKS:
         if other_region is None:
             raise DrcError(f"rule '{rule.id}': check '{check}' requires other_layer")
+        if check == "enclosing_adjacent":
+            return _run_enclosing_adjacent_check(region, other_region, d)
         edge_pairs = getattr(region, f"{check}_check")(other_region, d)
 
         outside_region = None
@@ -2347,6 +2355,37 @@ def _run_check(
         return edge_pairs, outside_region
 
     raise DrcError(f"rule '{rule.id}': unsupported check kind '{check}'")
+
+
+def _run_enclosing_adjacent_check(
+    region: Any, other_region: Any, d: int
+) -> tuple[Any, Any]:
+    """``check="enclosing_adjacent"``: sky130's two-adjacent-edges enclosure
+    rules (``via.5a``, ``m2.5``, ``via2.5``, ``via3.5``, #3316).
+
+    Mirrors ``sky130A_mr.drc``: the cut edges whose enclosure is below ``d``
+    (``enclosing_check(...).second_edges``) are tested for a *corner* --
+    two short edges meeting at an angle under 100 degrees -- and every cut
+    touching such a corner is a violation. So a cut passes when its short
+    sides (< ``d``) are at most one side or two opposite sides; it fails
+    when two adjacent sides are both short. A cut with no facing edge at
+    all yields no edge pair and is not reported here (the sibling
+    ``enclosing`` rule already reports an escape).
+
+    Returns ``(empty EdgePairs, cuts)``: one polygon per offending cut
+    (reported through ``run_drc``'s polygon-term path), not one entry per
+    corner, which is the official deck's per-cut counting.
+    """
+    import klayout.db as kdb
+
+    short_edges = region.enclosing_check(
+        other_region, d, metrics=kdb.Metrics.Projection
+    ).second_edges()
+    corners = short_edges.width_check(
+        1, metrics=kdb.Metrics.Euclidian, ignore_angle=100
+    )
+    bad_cuts = other_region.interacting(corners.polygons(1))
+    return kdb.EdgePairs(), bad_cuts
 
 
 def _rule_input_layers(rule: DrcRule) -> set[tuple[int, int]]:
