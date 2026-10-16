@@ -37,7 +37,7 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         _clamp_cut_boxes,
         _close_implant_gaps,
         _diff_pair_layout,
-        _draw_npc_over_poly_contacts,
+        _draw_pcell_npc,
         _insert_boxes,
         _insert_implant_ring,
         _insert_ring,
@@ -541,15 +541,6 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.mfg_grid_um,
             )
 
-            if getattr(self, "npc_present"):  # noqa: B009
-                _draw_npc_over_poly_contacts(
-                    self.cell,
-                    self.layout.layer(getattr(self, "npc_layer")),  # noqa: B009
-                    li_contact,
-                    li_poly,
-                    dbu,
-                    getattr(self, "npc_margin_um"),  # noqa: B009
-                    getattr(self, "npc_min_space_um"),  # noqa: B009
-                )
+            _draw_pcell_npc(self, li_contact, li_poly, dbu)
 
     return {"diff_pair": _DiffPairPCell}

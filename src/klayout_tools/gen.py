@@ -3010,6 +3010,25 @@ def _draw_npc_over_poly_contacts(
     _close_implant_gaps(cell, npc_layer_index, dbu, min_space_um)
 
 
+def _draw_pcell_npc(
+    pcell: Any, contact_layer_index: int, poly_layer_index: int, dbu: float
+) -> None:
+    """Draw ``npc`` for a PCell instance carrying the ``npc_*`` parameters
+    (issue #2934), when its ``npc_present`` is set. Keeps the parameter
+    unpacking out of the PCell ``produce_impl`` bodies."""
+    if not getattr(pcell, "npc_present"):  # noqa: B009
+        return
+    _draw_npc_over_poly_contacts(
+        pcell.cell,
+        pcell.layout.layer(getattr(pcell, "npc_layer")),  # noqa: B009
+        contact_layer_index,
+        poly_layer_index,
+        dbu,
+        getattr(pcell, "npc_margin_um"),  # noqa: B009
+        getattr(pcell, "npc_min_space_um"),  # noqa: B009
+    )
+
+
 def _fixed_cut_side_um(side_um: float, fixed_size_um: float) -> float:
     """The cut side (um) actually drawn for a generator-sized ``side_um`` cut
     on a layer whose fixed size is ``fixed_size_um`` (issue #2585, see
