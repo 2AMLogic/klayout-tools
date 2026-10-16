@@ -825,6 +825,9 @@ reader's own. It answers "does the SPEF name the nets this design has", not
   port. `null` when pins cannot be listed. Pin names are matched
   spelling-insensitively (escape backslashes ignored) between OpenSTA's
   unannotated listing and the floating-pin query.
+  Measured on OpenROAD 26Q3 (issue #3668, reduced DEF): an output pin on no
+  net and one on a single-pin net are both classified floating; the
+  evidence query tolerates the NULL net OpenSTA returns for a no-net pin.
 - `partially_unannotated_driver_sample` — capped sample (at most 20) of the
   partially unannotated driver pins, so a caller can judge whether the count
   is real missing parasitics or a counting artefact. `null` when pins cannot

@@ -2941,8 +2941,12 @@ def _parasitic_annotation_lines() -> list[str]:
         "} klt_floating_drivers_msg",
         f'puts "{_FLOATING_DRIVERS_END}"',
         f'puts "{_DRIVER_NETS_BEGIN}"',
-        "catch {",
-        "  foreach klt_pin [get_pins -hierarchical *] {",
+        # A pin on no net yields a one-element list holding a NULL net in
+        # OpenSTA 26Q3 (measured, #3668): `get_full_name` on it raises and,
+        # uncaught, aborted the loop and dropped every later pin's evidence.
+        # Catch per pin; such a pin is already listed as floating above.
+        "foreach klt_pin [get_pins -hierarchical *] {",
+        "  catch {",
         '    if {[get_property $klt_pin direction] eq "output"} {',
         "      set klt_nets [get_nets -quiet -of_objects $klt_pin]",
         "      if {[llength $klt_nets] == 1} {",
@@ -2953,8 +2957,8 @@ def _parasitic_annotation_lines() -> list[str]:
         "        }",
         "      }",
         "    }",
-        "  }",
-        "} klt_driver_nets_msg",
+        "  } klt_driver_nets_msg",
+        "}",
         f'puts "{_DRIVER_NETS_END}"',
     ]
 
