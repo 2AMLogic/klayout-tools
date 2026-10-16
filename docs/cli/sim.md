@@ -4370,7 +4370,42 @@ a corner grid. A stock ngspice without the module still produces the
   ignored, `.subckt`-local declarations ignored), **not** a complete SPICE
   parser: `.include`d/`.lib` files and hierarchical targets are not resolved,
   so a waveform declared there is not detected, and an unresolved declaration
-  is never assumed to be DC. Rewriting waveform sources is out of scope.
+  is never assumed to be DC. The rejection message names
+  `corners.supply_waveforms` for a PWL/PULSE source; to sweep a ramped supply
+  see the next entry.
+- **`corners.supply_waveforms`** (`array<string>`, optional; issue #2902) —
+  names of `corners.supply_v` keys whose top-level **`PWL(...)`/`PULSE(...)`**
+  source is *rescaled* per corner instead of `alter`ed. Every entry must also
+  be a `corners.supply_v` key; no `alter` is emitted for it. The corner runs
+  against a per-corner copy of the netlist (`netlist.supply_waveforms.cir`
+  in the corner directory; relative `.include` targets are made absolute) in
+  which the source's voltage levels are multiplied by `supply / peak`, where
+  `peak` is the signed nominal level of largest magnitude: **the rail's peak equals the
+  swept supply value** and every other level moves proportionally (a
+  `PWL(0 0 1u 0.9 2u 1.8)` ramp swept to `1.2` becomes
+  `PWL(0 0 1u 0.6 2u 1.2)`; `PULSE` scales `V1`/`V2`; times and trailing
+  options such as `r=` are untouched). A negative-going source is swept with negative `supply_v`
+  values (`PWL(0 0 1n -1.8)` at `-1.62` scales by `0.9`); a `supply_v` whose
+  sign disagrees with the source's peak is rejected rather than mirrored, and
+  a zero supply flattens it. The rewrite is fail-closed: only plain numeric
+  levels in a parenthesised list of a top-level source are rewritten, and a
+  `{param}`/expression level, `SIN`/`EXP`/behavioural source, a source with
+  no waveform, or one declared only in an `.include`d file or `.subckt` is
+  rejected before any run with an error naming the source. Works on every
+  backend, including `--backend batch` (the worker reads the same field).
+  Each affected corner report gains an additive `supply_waveforms` object,
+  keyed by source, that discloses what was simulated:
+
+  ```json
+  "supply_waveforms": { "vdd": { "waveform": "pwl", "rule": "scale-peak-to-supply",
+    "supply_v": 1.2, "nominal_peak_v": 1.8, "scale": 0.6667,
+    "nominal_levels_v": [0.0, 1.8], "effective_levels_v": [0.0, 1.2] } }
+  ```
+
+  The key is absent for requests that do not use the option. A `.param`-driven
+  ramp level is not rewritten (use a numeric literal or the parameter axis,
+  #3035). `analysis_steps[]` per-step `alter`s keep their own waveform
+  rejection (#3117).
 - **`corners.variants`** (`array<{"name": string, "sources": {<source>: number | string}}>`,
   optional, issue #3252) — named, *correlated* bias arrangements crossed with
   the other axes (outer to inner: process, `supply_v`, variants, temperature).
