@@ -761,6 +761,90 @@ def test_validate_meas_card_op_error_points_at_expr(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# Dependent `spice` cards (issue #3038)
+# --------------------------------------------------------------------------- #
+
+
+def _spice_specs(*cards):
+    return [{"name": n, "spice": c} for n, c in cards]
+
+
+@pytest.mark.parametrize(
+    "dependent",
+    [
+        ".meas tran vos find v(rmp) at=t_flip",
+        ".meas tran vos find v(rmp) at = T_FLIP",  # case-insensitive
+        ".meas tran vos find v(rmp) when v(x)=t_flip",
+        ".meas tran vos avg v(rmp) from=t_flip to=2u",
+        ".meas tran vos avg v(rmp) from=1u to=t_flip",
+        ".meas tran vos find v(rmp) when v(dn)=0.5 rise=1 td=t_flip",
+    ],
+)
+def test_dependent_meas_card_refused(dependent):
+    specs = _spice_specs(
+        ("t_flip", ".meas tran t_flip when v(dn)=0.5 rise=1 td=8u"),
+        ("vos", dependent),
+    )
+    with pytest.raises(sim.SimError, match=r"'vos' references measurement 't_flip'"):
+        sim._validate_no_dependent_meas_cards(specs)
+
+
+def test_independent_meas_cards_accepted():
+    specs = _spice_specs(
+        ("vout", ".meas tran vout find v(vout) at=1u"),  # v(<name>) is a signal
+        ("i1", ".meas tran i1 max i(vout) from=0 to=1u"),
+        ("t0", ".meas tran t0 when v(a)=0.5 rise=1"),
+        ("self", ".meas tran self find v(a) at='1u+2n'"),
+        ("selfref", ".meas tran selfref find v(a) at=selfref"),  # own name only
+    )
+    sim._validate_no_dependent_meas_cards(specs)  # must not raise
+
+
+def test_dependent_meas_scan_ignores_expr_entries():
+    specs = [
+        {"name": "ta", "spice": ".meas tran ta when v(o)=0.8 rise=3"},
+        {"name": "t", "expr": "ta/8"},
+    ]
+    sim._validate_no_dependent_meas_cards(specs)  # `expr` has its own rule
+
+
+def test_run_sim_refuses_dependent_meas_card(tmp_path):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 10u"},
+            "measurements": _spice_specs(
+                ("t_flip", ".meas tran t_flip when v(dn)=0.5 rise=1 td=8u"),
+                ("vos", ".meas tran vos find v(rmp) at=t_flip"),
+            ),
+        },
+    )
+    with pytest.raises(sim.SimError, match="cannot read another .meas result"):
+        sim.run_sim(str(request))
+
+
+def test_dependent_check_not_applied_to_analysis_steps_path():
+    # `analysis_steps[]` resolves through `sim_steps`, which never reaches the
+    # file-scope dependent-card check (control-scope `meas` differs).
+    request = {
+        "netlist": "x",
+        "analysis_steps": [
+            {
+                "name": "s1",
+                "analysis": {"kind": "tran", "args": "1n 10u"},
+                "measurements": _spice_specs(
+                    ("t_flip", ".meas tran t_flip when v(dn)=0.5 rise=1"),
+                    ("vos", ".meas tran vos find v(rmp) at=t_flip"),
+                ),
+            }
+        ],
+    }
+    sim._resolve_analysis_and_measurements(request)  # must not raise
+
+
+# --------------------------------------------------------------------------- #
 # `measurements[].expr` form validation (issue #2533)
 # --------------------------------------------------------------------------- #
 
