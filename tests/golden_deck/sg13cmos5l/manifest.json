@@ -991,6 +991,112 @@
       ]
     }
   },
+  "nwell.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            31,
+            0
+          ]
+        },
+        {
+          "box": [
+            2720,
+            0,
+            4720,
+            4000
+          ],
+          "layer": [
+            31,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      31,
+      0
+    ],
+    "threshold_dbu": 620,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            31,
+            0
+          ]
+        },
+        {
+          "box": [
+            2520,
+            0,
+            4520,
+            4000
+          ],
+          "layer": [
+            31,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "nwell.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            720,
+            4000
+          ],
+          "layer": [
+            31,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      31,
+      0
+    ],
+    "threshold_dbu": 620,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            520,
+            4000
+          ],
+          "layer": [
+            31,
+            0
+          ]
+        }
+      ]
+    }
+  },
   "topmetal1.enclosing.topvia1.1": {
     "check": "enclosing",
     "clean": {

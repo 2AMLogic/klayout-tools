@@ -84,7 +84,7 @@ import pytest
 
 from helpers.subprocess_fakes import fake_completed
 from klayout_tools import _paths as paths_module
-from klayout_tools import equiv
+from klayout_tools import equiv, pdk_cells
 from klayout_tools import pdk as pdk_module
 from klayout_tools import synthesize as synthesize_module
 from klayout_tools.cli import main
@@ -3056,17 +3056,14 @@ def _find_any_cell_library() -> tuple[str, str, str, str] | None:
     which is always the bare corner suffix (e.g. ``"tt_025C_1v80"``, never
     ``"<cell_library>__tt_025C_1v80"``) regardless of what a library's `.lib`
     file's `default_operating_conditions` attribute reports (issue #820)."""
-    try:
-        result = pdk_module.list_pdks()
-    except Exception:
-        return None
+    result = pdk_module.list_pdks()
     for install in result["installs"]:
         for variant in install["variants"]:
             try:
-                libraries = pdk_module.list_cell_libraries(
+                libraries = pdk_cells.list_cell_libraries(
                     variant=variant["name"], root=install["root"]
                 )
-            except Exception:
+            except pdk_module.PdkNotFoundError:
                 continue
             for library in libraries["libraries"]:
                 return (

@@ -174,12 +174,48 @@ class DerivedLayer:
     ``base`` geometry at all) is still fully checked against
     ``intersect_with`` alone, and vice versa. ``intersect_with`` is
     required for this mode.
+
+    **``"gate_endcap"`` mode (issue #2936).** A rule on how far one layer
+    must *extend past* another's edge where the two cross -- sky130's
+    ``poly.8`` ("min. poly extention gate (endcap)", 0.13 um), the poly
+    beyond a diffusion edge at a transistor. No enclosing/space primitive
+    expresses it: measuring the gate (``poly & diff``) against poly also
+    reports the gate's long sides, which are coincident with poly's own
+    edges. ``"gate_endcap"`` derives, instead, the *probe zones*: each
+    ``base`` (diffusion) edge segment lying under or flush with
+    ``intersect_with`` (poly) is a gate end edge, and the zone is that edge
+    pushed outward by ``sized_by_um`` (the required extension). Pair it
+    with ``check="enclosed"``, ``other_layer=<the poly layer>`` and
+    ``threshold_dbu=0``: the engine's outside-region term then reports
+    exactly the part of each zone poly fails to cover, including a flush
+    (zero-extension) end. Orientation-free (a rotated gate works the same),
+    and poly that merely abuts a diffusion from outside is not a gate.
+
+    **Well-context partition (issue #3484).** Any mode above can be followed
+    by a second, optional stage that keeps only the part of the derived
+    region that is ``"near"`` or ``"far"`` from a *context* region:
+    ``context_layers`` are joined (boolean OR) and oversized by
+    ``context_sized_by_um``, then the derived region is split by whole
+    polygon with ``interacting`` (``context="near"``) or ``not_interacting``
+    (``context="far"``). This is how a rule pair expresses gf180mcu's
+    ``NP.3``/``PP.5`` well-distance splits -- e.g. a ``PCOMP`` (``Comp`` AND
+    ``Pplus``) is held to the strict 0.16 um when it comes within 0.429 um
+    of an ``Nwell``/``Dnwell`` and to the relaxed value otherwise -- without
+    a third chained derivation. The two halves are an exact complement of
+    each other, so a polygon is never checked against neither or both.
+    Context layers absent from the stream contribute an empty region (every
+    polygon is then ``"far"``) and never cause the rule to be skipped.
+    Whole-polygon selection errs strict: a polygon that is only partly
+    within reach of the context is entirely ``"near"``.
     """
 
     base: tuple[int, int]
     sized_by_um: float
     intersect_with: tuple[int, int] | None = None
     mode: str = "sized_intersection"
+    context_layers: tuple[tuple[int, int], ...] = ()
+    context_sized_by_um: float = 0.0
+    context: str | None = None
 
 
 @dataclass(frozen=True)
@@ -615,6 +651,14 @@ class DrcRule:
     pre-existing rule) reads ``other_layer``'s full drawn shapes exactly as
     before this field existed. Any other value is a deck-authoring mistake
     :func:`~klayout_tools.drc.run_drc` rejects loudly with the rule id.
+
+    ``layer_selection`` (issues #2943, #3139) is the same ``"squares"``
+    selector applied to the rule's own primary ``layer`` (``cont_sq`` for
+    sg13g2's ``Cnt.a``/``Cnt.b``): contact bars, and rows of abutting
+    contacts that merge into a strip, are left to the ``CntB.*`` family
+    rather than measured as one oversized contact. ``None`` (the default)
+    checks the full drawn layer as before; it cannot be combined with
+    ``derived_layer``.
     """
 
     id: str
@@ -639,6 +683,7 @@ class DrcRule:
     requires_any_layer: tuple[tuple[int, int], ...] | None = None
     require_containment: bool = False
     other_layer_selection: str | None = None
+    layer_selection: str | None = None
 
 
 class UnknownDeckError(Exception):

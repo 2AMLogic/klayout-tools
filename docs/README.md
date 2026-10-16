@@ -62,6 +62,7 @@ docs/
     precheck.md
     render.md
     report.md
+    reset-coverage.md
     ring-check.md
     signoff.md
     sim.md
@@ -77,6 +78,7 @@ docs/
     yield-campaign.md
     yield-samples.md
     yield-sensitivity.md
+    yield-threshold.md
     yield.md
   design/                # design notes, spikes, and upstream surveys
     analog-resource-survey.md
