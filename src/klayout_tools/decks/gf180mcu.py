@@ -75,11 +75,15 @@ whose values were re-derived from *executable* rule-deck code rather than
 from the DRM tables alone. A current PDK build ships them -- unlike the
 ``999a6ff`` DRC-only snapshot the provenance note below describes -- so each
 cites both its DRM rule id and the statement it was re-derived from in
-``libs.tech/klayout/drc/rule_decks/{contact,via1,via2,via3,via4}.drc`` of a
-real fetched install (``volare enable gf180mcu
-c6d73a35f524070e85faff4a6a9eef49553ebc2b``, the same open_pdks build the
-``EXTRACTION_DECK`` MiM notes below already cite, and the same one the
-issue's own reproducer was cross-checked against). Every one of those
+``libs.tech/klayout/tech/drc/rule_decks/{contact,via}.rb`` of a real fetched
+install (``ciel enable --pdk gf180mcu
+f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7``; re-verified 2026-10-16 against that
+tree, where the older ``c6d73a3`` build kept the same statements in
+``libs.tech/klayout/drc/rule_decks/{contact,via1,via2,via3,via4}.drc`` -- the
+thresholds and boolean forms are identical, only the file layout and the Ruby
+registry wrapper changed). The hash is the ``open_pdks`` build that vendors
+the ``google/globalfoundries-pdk-libs-gf180mcu_fd_pv`` decks, not a commit of
+that repo. Every one of those
 statements has the form ``cut.enclosed(conductor, d, euclidian) OR
 cut.not(conductor)`` -- exactly the pair of conditions our ``"enclosing"``
 check reports (marginal facing-edge enclosure plus ``_run_check``'s
@@ -315,6 +319,13 @@ are always the real, unmodified DRM values:
   *checked region* is the real ``PCOMP``/``NCOMP`` boolean via
   :class:`~klayout_tools.decks.DerivedLayer`, not raw ``Comp`` -- see the
   rules' own comments for why an unscoped version would be actively wrong.
+  **Well-distance split (issue #3484):** the ``PCOMP`` side of ``NP.3`` is no
+  longer collapsed -- ``nplus.space.pcomp.1`` is the near-well half (a
+  ``PCOMP`` within 0.429um of an ``Nwell``, or touching a ``Dnwell``, at
+  0.16um) and ``nplus.space.pcomp.far.1`` (``NP.3cii``, 0.08um) the exact
+  complement, selected with ``DerivedLayer.context``. The ``Dnwell``/
+  ``LVPWELL`` relaxation ``NP.3bii`` is still not expressed (strict). The
+  mirrored ``pplus.space.ncomp.1`` keeps the flat 0.16um.
 - ``nplus.enclosing.poly2.1``/``pplus.enclosing.poly2.1``: the official
   ``NP.5a``/``PP.5a`` scope to ``ngate``/``pgate``, which the PDK deck's own
   ``main.drc`` derives from four drawn layers plus two well/marker
@@ -333,7 +344,12 @@ are always the real, unmodified DRM values:
   ``NP.5c``/``NP.5d`` (``PP.5c``/``PP.5d``) well-context splits for a tap
   further than 0.43um from an ``LVPWELL``/``Nwell`` edge; neither
   sub-threshold split is expressible here, so the strict 0.16um is applied
-  to every NCOMP/PCOMP edge this rule actually checks. They also measure
+  to every NCOMP/PCOMP edge this rule actually checks -- **except** (issue
+  #3484) for ``pplus.enclosing.comp.1``'s PCOMP, which is now split by
+  ``DerivedLayer.context``: PCOMP within 0.429um of an ``Nwell`` or touching a
+  ``Dnwell`` stays on the strict 0.16um, the rest moves to
+  ``pplus.enclosing.comp.far.1`` (``PP.5di``, 0.02um). ``NP.5c``/``NP.5d`` and
+  ``PP.5ci`` remain unexpressed (strict). They also measure
   with KLayout's default ``euclidian`` metric where the official rules use
   ``projection`` -- again the conservative direction (a corner distance the
   official rule ignores can be reported, never the reverse). **Unlike
@@ -566,27 +582,27 @@ def _gf180mcu_provenance(scope: str, rule_id: str) -> RuleProvenance:
 # companion KLayout-runnable DRC deck the module docstring's own top-of-file
 # "Provenance note" paragraph already names
 # (`google/globalfoundries-pdk-libs-gf180mcu_fd_pv`); `commit` is the
-# specific `volare enable gf180mcu` pin the re-derivation note itself cites
+# specific `ciel enable --pdk gf180mcu` pin the re-derivation note itself cites
 # for these nine rules -- *not* the `999a6ff` DRC-only snapshot the
 # top-of-file note describes for the bulk of this deck's width/space/
 # enclosure transcription (that snapshot predates these nine rules, per the
 # re-derivation note's own "unlike the 999a6ff DRC-only snapshot" wording).
 _GF180MCU_KLAYOUT_DRC_DECK_REPO = "google/globalfoundries-pdk-libs-gf180mcu_fd_pv"
-_GF180MCU_KLAYOUT_DRC_DECK_COMMIT = "c6d73a35f524070e85faff4a6a9eef49553ebc2b"
+_GF180MCU_KLAYOUT_DRC_DECK_COMMIT = "f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7"
 
 
 def _gf180mcu_klayout_deck_provenance(source_file: str, rule_id: str) -> RuleProvenance:
     """Build a :class:`RuleProvenance` for a rule re-derived from the real,
-    executable `libs.tech/klayout/drc/rule_decks/*.drc` rather than a DRM
+    executable `libs.tech/klayout/tech/drc/rule_decks/*.rb` rather than a DRM
     table: the nine `CO.*`/`Vn.*` conductor-over-cut enclosure rules
-    (issue #551's re-derivation note, `{contact,via1,via2,via3,via4}.drc`)
-    and the four `Comp` voltage-split rules (issue #1110, `comp.drc` -- the
+    (issue #551's re-derivation note, `{contact,via}.rb`) and the four `Comp`
+    voltage-split rules (issue #1110, `comp.rb` -- the
     only published statement of *how* the DRM's `_LV`/`_MV` threshold
     columns are selected). `source_file` is the bare file stem (e.g.
-    `"contact"`, `"via1"`, `"comp"`)."""
+    `"contact"`, `"via"`, `"comp"`)."""
     return RuleProvenance(
         source_repo=_GF180MCU_KLAYOUT_DRC_DECK_REPO,
-        source_path=f"libs.tech/klayout/drc/rule_decks/{source_file}.drc",
+        source_path=f"libs.tech/klayout/tech/drc/rule_decks/{source_file}.rb",
         rule_id=rule_id,
         commit=_GF180MCU_KLAYOUT_DRC_DECK_COMMIT,
     )
@@ -844,7 +860,7 @@ DECK: list[DrcRule] = [
         # `outside_region` escape term, see `drc.py`). Via1 is the one via
         # level whose *lower* conductor carries a 0.0um requirement; Via2-
         # Via4 use 0.01um ("Vn.3b"), below.
-        provenance=_gf180mcu_klayout_deck_provenance("via1", "V1.3a"),
+        provenance=_gf180mcu_klayout_deck_provenance("via", "V1.3a"),
     ),
     DrcRule(
         id="metal2.enclosing.via1.1",
@@ -859,7 +875,7 @@ DECK: list[DrcRule] = [
         # exactly the pair of conditions our "enclosing" check reports.
         # The end-of-line companions "V1.4b"/"V1.4c" are not modeled (see
         # the module docstring's end-of-line coverage note).
-        provenance=_gf180mcu_klayout_deck_provenance("via1", "V1.4a"),
+        provenance=_gf180mcu_klayout_deck_provenance("via", "V1.4a"),
     ),
     DrcRule(
         id="via2.width.1",
@@ -897,7 +913,7 @@ DECK: list[DrcRule] = [
         # -> 0.01um. Re-derived from `rule_decks/via2.drc`, whose V2.3b is
         # `via2.not(metal2) OR via2.enclosed(metal2, 0.01.um, euclidian)` --
         # exactly the pair of conditions our "enclosing" check reports.
-        provenance=_gf180mcu_klayout_deck_provenance("via2", "V2.3b"),
+        provenance=_gf180mcu_klayout_deck_provenance("via", "V2.3b"),
     ),
     DrcRule(
         id="metal3.enclosing.via2.1",
@@ -909,7 +925,7 @@ DECK: list[DrcRule] = [
         # DRM 7.14 Vian (n = 1 to 5), rule "V2.4a": "metal3 overlap of via2"
         # -> 0.01um. Re-derived from `rule_decks/via2.drc` (same
         # `enclosed(...) OR not(...)` form as V2.3b above).
-        provenance=_gf180mcu_klayout_deck_provenance("via2", "V2.4a"),
+        provenance=_gf180mcu_klayout_deck_provenance("via", "V2.4a"),
     ),
     DrcRule(
         id="via3.width.1",
@@ -946,7 +962,7 @@ DECK: list[DrcRule] = [
         # DRM 7.14 Vian (n = 1 to 5), rule "V3.3b": "metal3 overlap of via3"
         # -> 0.01um. Re-derived from `rule_decks/via3.drc` (same
         # `not(...) OR enclosed(...)` form as V2.3b above).
-        provenance=_gf180mcu_klayout_deck_provenance("via3", "V3.3b"),
+        provenance=_gf180mcu_klayout_deck_provenance("via", "V3.3b"),
     ),
     DrcRule(
         id="metal4.enclosing.via3.1",
@@ -957,7 +973,7 @@ DECK: list[DrcRule] = [
         threshold_dbu=10,  # 0.01 um
         # DRM 7.14 Vian (n = 1 to 5), rule "V3.4a": "metal4 overlap of via3"
         # -> 0.01um. Re-derived from `rule_decks/via3.drc`.
-        provenance=_gf180mcu_klayout_deck_provenance("via3", "V3.4a"),
+        provenance=_gf180mcu_klayout_deck_provenance("via", "V3.4a"),
     ),
     DrcRule(
         id="via4.width.1",
@@ -1006,7 +1022,7 @@ DECK: list[DrcRule] = [
         # MiM or routing -- must also satisfy (a genuine MiM bottom plate
         # clears 0.01um by two orders of magnitude, so the two never
         # conflict).
-        provenance=_gf180mcu_klayout_deck_provenance("via4", "V4.3b"),
+        provenance=_gf180mcu_klayout_deck_provenance("via", "V4.3b"),
     ),
     DrcRule(
         id="metal5.enclosing.via4.1",
@@ -1019,7 +1035,7 @@ DECK: list[DrcRule] = [
         # -> 0.01um. Re-derived from `rule_decks/via4.drc`. Scoped, like
         # `pad.enclosing.metal5.1`, to the 5LM variant this deck models
         # (Metal5 as the conductor above Via4).
-        provenance=_gf180mcu_klayout_deck_provenance("via4", "V4.4a"),
+        provenance=_gf180mcu_klayout_deck_provenance("via", "V4.4a"),
     ),
     DrcRule(
         id="metal1.width.1",
@@ -1344,6 +1360,9 @@ DECK: list[DrcRule] = [
             base=(31, 0),  # Pplus, unsized -- `pcomp = comp AND pplus`
             sized_by_um=0.0,
             intersect_with=(22, 0),  # Comp
+            context_layers=((21, 0), (12, 0)),  # Nwell, Dnwell
+            context_sized_by_um=0.429,  # the PDK deck's own `sized(0.429.um)`
+            context="near",
         ),
         scope="7.8 Nplus",  # DRM section this rule is transcribed from (#566)
         # Cited from the executable rule deck rather than the DRM's own CSV
@@ -1354,6 +1373,43 @@ DECK: list[DrcRule] = [
         # The 7.8 Nplus/7.9 Pplus tables publish a single column (no
         # 3.3V/5V split), so this rule can never have read the wrong
         # voltage column -- see `DrcRule.voltage_independent`.
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="nplus.space.pcomp.far.1",
+        description=(
+            "minimum Nplus implant space to PCOMP (p-type diffusion) at least "
+            "0.429um from any Nwell/Dnwell"
+        ),
+        layer=(32, 0),  # Nplus -- reporting identity, shared with the rules above
+        other_layer=(32, 0),  # Nplus -- the "other" side of the separation check
+        check="separation",
+        threshold_dbu=80,  # 0.08 um
+        # DRM 7.8 Nplus, rule "NP.3cii": "Space to PCOMP: For Outside DNWELL:
+        # (ii) For PCOMP space to Nwell >= 0.43um" -> 0.08 (issue #3484), i.e.
+        # `np3_nplus.not(dnwell).separation(pcomp.not(dnwell).not(
+        # nwell_n_dn.sized(0.429.um)), 0.08.um, euclidian)` in
+        # `rule_decks/nplus.drc`. The far half of the split whose near half is
+        # `nplus.space.pcomp.1` above (`DerivedLayer.context`): a PCOMP shape
+        # (`Comp` AND `Pplus`) touching no `Nwell`/`Dnwell` grown by 0.429um is
+        # held to 0.08 instead of 0.16 -- the substrate tap of an unmodified
+        # PDK endcap/filltie cell sits ~0.48um from its Nwell and is Pplus-
+        # enclosed with an Nplus 0.08um away, which the flat 0.16 mis-flagged.
+        # Errs strict: the DNWELL branches (`NP.3bii`, inside LVPWELL) are not
+        # relaxed (any PCOMP within reach of a `Dnwell` stays on the 0.16
+        # near rule), and selection is whole-polygon, so a PCOMP only partly
+        # within reach stays on the near rule. Same butting approximation as
+        # the near rule.
+        derived_layer=DerivedLayer(
+            base=(31, 0),  # Pplus, unsized -- `pcomp = comp AND pplus`
+            sized_by_um=0.0,
+            intersect_with=(22, 0),  # Comp
+            context_layers=((21, 0), (12, 0)),  # Nwell, Dnwell
+            context_sized_by_um=0.429,
+            context="far",
+        ),
+        scope="7.8 Nplus",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_klayout_deck_provenance("nplus", "NP.3cii"),
         voltage_independent=True,
     ),
     DrcRule(
@@ -1580,12 +1636,48 @@ DECK: list[DrcRule] = [
             base=(31, 0),  # Pplus, unsized -- `pcomp = comp AND pplus`
             sized_by_um=0.0,
             intersect_with=(22, 0),  # Comp
+            context_layers=((21, 0), (12, 0)),  # Nwell, Dnwell
+            context_sized_by_um=0.429,  # the PDK deck's own `sized(0.429.um)`
+            context="near",
         ),
         scope="7.9 Pplus",  # DRM section this rule is transcribed from (#566)
         provenance=_gf180mcu_klayout_deck_provenance("pplus", "PP.5b"),
         # The 7.8 Nplus/7.9 Pplus tables publish a single column (no
         # 3.3V/5V split), so this rule can never have read the wrong
         # voltage column -- see `DrcRule.voltage_independent`.
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="pplus.enclosing.comp.far.1",
+        description=(
+            "minimum Pplus implant extension beyond PCOMP (p-type diffusion) "
+            "at least 0.429um from any Nwell/Dnwell"
+        ),
+        layer=(31, 0),  # Pplus -- reporting identity, shared with the rules above
+        other_layer=(31, 0),  # Pplus -- the enclosing side of the `enclosed` check
+        check="enclosed",
+        threshold_dbu=20,  # 0.02 um
+        # DRM 7.9 Pplus, rule "PP.5di": "Extension beyond COMP: For Outside
+        # DNWELL (i) For Pplus to NWELL space >= 0.43um for Pfield or LVPWELL
+        # tap" -> 0.02 (issue #3484), i.e. `pcomp.outside(dnwell).edges.not(
+        # nplus_edges).not(nwell_n_dn.sized(0.429.um))` enclosed by Pplus
+        # edges at 0.02 in `rule_decks/pplus.drc`. The far half of the split
+        # whose near half is `pplus.enclosing.comp.1` above
+        # (`DerivedLayer.context`; the strict `PP.5dii`/`PP.5b` 0.16 stays
+        # there). Errs strict exactly like `nplus.space.pcomp.far.1`: PCOMP
+        # within reach of any `Dnwell` (the `PP.5ci`/`PP.5cii` branches) is
+        # not relaxed, and selection is whole-polygon. Euclidian metric where
+        # the official rule is `projection`, as for the near rule.
+        derived_layer=DerivedLayer(
+            base=(31, 0),  # Pplus, unsized -- `pcomp = comp AND pplus`
+            sized_by_um=0.0,
+            intersect_with=(22, 0),  # Comp
+            context_layers=((21, 0), (12, 0)),  # Nwell, Dnwell
+            context_sized_by_um=0.429,
+            context="far",
+        ),
+        scope="7.9 Pplus",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_klayout_deck_provenance("pplus", "PP.5di"),
         voltage_independent=True,
     ),
     DrcRule(
@@ -2161,9 +2253,23 @@ UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {
 # volare enable gf180mcu c6d73a35f524070e85faff4a6a9eef49553ebc2b") --
 # distinct from `_GF180MCU_PDK_COMMIT` (`de3240d`), which pins the *DRM*
 # repo the DRC-side rules above transcribe from, and from
-# `_GF180MCU_KLAYOUT_DRC_DECK_COMMIT` (same hash, different repo: the
-# DRC-side re-derivation cites this same commit against the *DRC* rule
-# decks, `klayout/drc/...`, not the LVS ones below).
+# `_GF180MCU_KLAYOUT_DRC_DECK_COMMIT` (different repo *and*, since issue
+# #3429, a different pin: the DRC-side re-derivation cites `f6eeac7` against
+# the *DRC* rule decks, `klayout/tech/drc/...`, not the LVS ones below).
+#
+# **Deliberately still `c6d73a3`, not `f6eeac7` (issue #3429, 2026-10-16).**
+# Unlike the DRC-side constant above, the LVS rule decks this table
+# transcribes did not survive the `c6d73a3` -> `f6eeac7` re-pin unchanged:
+# `libs.tech/klayout/lvs/rule_decks/` moved to `libs.tech/klayout/tech/lvs/
+# rule_decks/` and `res_derivations.lvs` now splits every poly resistor into
+# `*_sub`/`*_nwell` body variants (e.g. `npolyf_u_layer` became
+# `npolyf_u_sub_layer`/`npolyf_u_nwell_layer`), `mimcap_derivations.lvs`
+# gates the virtual bottom plate on `MIM_OPTION`, and the `metal1`/`metaltop`
+# terminals became `metal1_con`/`metaltop_con` in the diode/general
+# derivations. None of that has been re-checked against this table's device
+# entries, so the pin keeps naming the tree they were actually verified
+# against. Retire this note (and bump the constant) once the follow-up
+# re-verification lands.
 _GF180MCU_LVS_REPO = "google/globalfoundries-pdk-libs-gf180mcu_fd_pv"
 _GF180MCU_LVS_COMMIT = "c6d73a35f524070e85faff4a6a9eef49553ebc2b"
 
@@ -2674,7 +2780,11 @@ PARASITICS = ParasiticsDeck(
         # the generic templated `gf180mcu.tech` (40 milliohm/sq), which a
         # prior curation (#571) mistakenly used by manually resolving that
         # file's unresolved macros instead of reading the shipped,
-        # pre-resolved file for this exact pinned commit. area/perim from
+        # pre-resolved file for this exact pinned commit. **As of the
+        # open_pdks `f6eeac7` re-pin (#3429, 2026-10-16) that same file's
+        # nominal block reads 40 milliohm/sq here (49/31 for the other two
+        # corner blocks, was 70/50)**; this value is deliberately left at
+        # the verified `c6d73a3` figure until #3540 decides it. area/perim from
         # `defaultareacap`/`defaultperimeter` allm5 metal5 (5.798 aF/um^2,
         # 30.386 aF/um) -- unconditional across every THICKMET option.
         LayerRC(

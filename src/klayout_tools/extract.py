@@ -45,7 +45,9 @@ family/deck pairing has no curated table entry is an :class:`ExtractError`
 naming what was tried -- never a silent fallback to the bare ``M``-card
 form. When ``--pdk``/``--pdk-root`` are omitted, the written SPICE is
 unchanged from before #209 (the bare ``M``-card form, byte-identical to the
-existing golden tests).
+existing golden tests). That bare form is not mismatch-capable: it skips any
+statistical-mismatch expressions a PDK keeps in the subcircuit wrapper, so
+extract with ``--pdk`` before running Monte Carlo.
 
 Device recognition: each deck's ``active``/``poly``/``nwell`` layers extract
 NMOS (``active - nwell``) and PMOS (``active & nwell``) via KLayout's native
@@ -132,6 +134,9 @@ exercised by ``tests/test_extract.py``.
 
 from __future__ import annotations
 
+import functools
+import hashlib
+import json
 import os
 import re
 import shutil
@@ -213,6 +218,7 @@ from .extract_parasitics import (
     _compute_parasitics,
     _detect_dead_metal,
     _inject_parasitics,
+    parse_parasitic_variants,
 )
 from .extract_parasitics import spice_safe_net_name as spice_safe_net_name
 
@@ -252,6 +258,7 @@ from .extract_passive_regions import (
     mom_capacitor_device_class as mom_capacitor_device_class,
 )
 from .extract_passive_regions import mom_capacitor_has_feed as mom_capacitor_has_feed
+from .extract_progress import StageTimer, active_timer, stage
 
 # The netlist-report-description subsystem lives in its own module (issue
 # #2070, the fourth split of this one after `extract_abstract.py`,
@@ -511,6 +518,43 @@ def _parasitic_model_header_comment() -> str:
     for key, value in PARASITIC_MODEL_SCOPE.items():
         lines.append(f"* - {key}: {value}")
     return "\n".join(lines)
+
+
+def _fixed_value_capacitor_classes(
+    deck: Any,
+    device_counts: Mapping[str, int],
+    model_bindings: Mapping[str, Any] | None,
+) -> list[tuple[str, int]]:
+    """``(class, count)`` for every extracted MiM capacitor class that is
+    written as a fixed-value ``C`` card rather than a ``--pdk`` subcircuit
+    call (issue #3090): no ``--pdk`` at all, or a class with no curated
+    ``_CAPACITOR_MODEL_TABLE`` binding."""
+    bound = model_bindings or {}
+    return [
+        (capacitor.name, device_counts[capacitor.name])
+        for capacitor in deck.capacitors
+        if device_counts.get(capacitor.name, 0) > 0 and capacitor.name not in bound
+    ]
+
+
+def _fixed_value_capacitor_note(classes: Sequence[tuple[str, int]]) -> list[str]:
+    """The one-line statement (``warnings[]`` entry / ``--parasitics`` header
+    comment) that these capacitors are fixed values PDK corners cannot move,
+    as a zero- or one-element list (empty when ``classes`` is empty)."""
+    if not classes:
+        return []
+    total = sum(count for _, count in classes)
+    names = ", ".join(f"'{name}'" for name, _ in classes)
+    device_word = "capacitor" if total == 1 else "capacitors"
+    return [
+        f"{total} drawn {device_word} ({names}) written as a fixed-value "
+        "'C' card (the deck's nominal area+perimeter value) -- PDK process "
+        "corners (e.g. mimcap_ff/mimcap_ss) do not apply to it, so "
+        "schematic-vs-extracted deltas at non-typical corners include a "
+        "capacitor-corner term; pass --pdk to bind the PDK capacitor "
+        "subcircuit instead. See docs/cli/extract.md's 'SPICE model binding' "
+        "section."
+    ]
 
 
 #: Relative permittivity assumed for the `klt mom` cross-check
@@ -1091,6 +1135,71 @@ def _label_layers_from_report(
     return overrides or None
 
 
+def _spef_warnings(
+    def_net_connections: Any,
+    def_pins: Any,
+    declared_pins: Any,
+    skipped_nets: Sequence[str],
+) -> list[str]:
+    """Warnings for the ``--spef`` writer (issue #3257 gaps A and C)."""
+    out: list[str] = []
+    # Gap A: DEF connectivity without a declared-port set leaves every
+    # labelled net a bare-name port, which OpenSTA cannot attach
+    # (`STA-1656`). A warning only -- the SPEF bytes are unchanged.
+    if def_net_connections and def_pins is None and declared_pins is None:
+        out.append(
+            "--def-net-connections without --def-pins/--pins: every "
+            "labelled net is written as a top-level port, so OpenSTA "
+            "read_spef cannot attach the nets (bare-name port hubs, "
+            "STA-1656) and timing stays identical to an unannotated "
+            "run. Pass --def-pins <routed.def> (or --pins) to declare "
+            "only the real ports."
+        )
+    # Gap C: same-named floating nets omitted from the SPEF.
+    if skipped_nets:
+        shown = ", ".join(skipped_nets[:5])
+        more = len(skipped_nets) - 5
+        out.append(
+            f"--spef: omitted *D_NET blocks for {len(skipped_nets)} "
+            "duplicate-named net(s) with no DEF net (floating cell "
+            f"outputs / unrouted supplies): {shown}"
+            + (f", ... (+{more} more)" if more > 0 else "")
+            + ". Same-named *D_NET blocks are rejected by OpenSTA "
+            "(STA-1650) and attach to no driver."
+        )
+    return out
+
+
+def _staged(name: str, func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+    """Call ``func`` as timed stage ``name`` (issue #3181)."""
+    with stage(name):
+        return func(*args, **kwargs)
+
+
+def _timed(func: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]:
+    """Wrap :func:`run_extract` with the issue #3181 stage timer.
+
+    Adds the additive ``timing`` object to the report and, when the caller
+    passes ``progress=True``, narrates stage starts/finishes and a heartbeat
+    to stderr (never stdout); ``progress="heartbeat"`` emits the heartbeat
+    alone. ``progress`` is consumed here, so the wrapped function's own
+    signature is unchanged.
+    """
+
+    @functools.wraps(func)
+    def wrapper(
+        *args: Any, progress: bool | str = False, **kwargs: Any
+    ) -> dict[str, Any]:
+        timer = StageTimer(progress=progress)
+        with active_timer(timer):
+            result = func(*args, **kwargs)
+        result["timing"] = timer.report()
+        return result
+
+    return wrapper
+
+
+@_timed
 def run_extract(
     path: str,
     deck_name: str,
@@ -1122,6 +1231,7 @@ def run_extract(
     mom_rlc_resistance_ohm: float | None = None,
     mom_rlc_capacitance_ff: float | None = None,
     mom_rlc_inductance_nh: float | None = None,
+    parasitic_variants: Sequence[str] | None = None,
     matched_device_groups: Mapping[str, Sequence[str]] | None = None,
     def_pins: frozenset[str] | None = None,
     pin_source_cells: frozenset[str] | None = None,
@@ -1133,6 +1243,13 @@ def run_extract(
     no_netlist: bool = False,
 ) -> dict[str, Any]:
     """Extract a schematic-equivalent netlist from the layout at ``path``.
+
+    The report carries an additive ``timing`` object (issue #3181):
+    ``stages`` (wall seconds per named stage), ``total_seconds`` and
+    ``unattributed_seconds``. The ``progress`` keyword (added by the
+    ``_timed`` wrapper, not part of the signature below) narrates stages to
+    stderr when ``True`` and emits only the 30 s heartbeat for
+    ``"heartbeat"``; the default writes nothing.
 
     ``no_netlist`` (issue #2850, ``klt extract --no-netlist``) is the opt-in
     census-only mode: nothing is written beside the input (or anywhere
@@ -1502,6 +1619,18 @@ def run_extract(
     several blocks/runs. ``None``/empty (the default) skips this entirely --
     byte-identical to before this feature existed.
 
+    ``parasitic_variants`` (``klt extract --parasitic-variant <variant>``,
+    repeatable, issue #3056) drops parasitic elements at injection time so a
+    failing ``klt pex`` delta row can be attributed to R or C: ``drop-r:NET|*``
+    shorts a net's star legs into its hub, ``drop-c-ground:NET|*`` omits its
+    ground capacitor, ``drop-c-coupling`` omits every ``Ccc_*`` card. Anything
+    else raises :class:`ExtractError`, as does use without ``parasitics``; a
+    ``NET`` matching no net goes to ``warnings``, as does one that names a
+    ``--distributed-rc`` net (left unchanged). ``None``/empty (the default)
+    emits the network and report byte-identically to before this feature
+    existed; otherwise the report's ``parasitics`` block carries
+    ``parasitic_variant`` (the request, verbatim).
+
     ``parasitics_nets`` (``klt extract --parasitics-net <net>``, repeatable,
     issue #1700) scopes the *ground* R/C pass itself -- the base per-net
     ``(R, C)`` measurement every other parasitics flag layers onto -- down to
@@ -1683,6 +1812,8 @@ def run_extract(
             "dbu_um": <database unit in micrometres, float>,
             "netlist_path": <resolved output path>,
             "netlist_sha256": <hex digest of the written netlist file>,
+            "netlist_normalized_sha256": <hex digest of the devices[]/nets[]
+                connectivity with anonymous-net numbering normalized away>,
             "status": "extracted",
             "device_count": <int>,
             "net_count": <int>,
@@ -2073,21 +2204,23 @@ def run_extract(
     to the parent deck instead, so nothing is dropped silently.
 
     ``hierarchical_cells`` (``klt extract --hierarchical-cells CELL[,CELL...]``,
-    issue #2722, increment 1) opts into **hierarchical SPICE emission**: one
-    ``.SUBCKT <cell>`` per named (non-nested) cell definition, holding that
-    cell's own devices, plus the top ``.SUBCKT`` carrying the remaining
-    devices and one ``X`` card per *placement* of each named cell. It exists
+    issue #2722) opts into **hierarchical SPICE emission**: one
+    ``.SUBCKT <cell>`` per named cell definition, holding that
+    cell's own devices (and ``X`` cards for named cells nested in it), plus
+    the top ``.SUBCKT`` carrying the remaining devices and one ``X`` card per
+    *placement* of each named cell. It exists
     so per-circuit ``klt lvs`` options (``options.combine_devices_per_circuit``)
     have layout-side circuits to key on. Unlike ``subcircuit_cell`` this is
     the primary deck, not a second artifact; ``devices[]``/``nets[]``/
     ``device_count`` keep describing the *flat* extraction (so they are
     unchanged by the option) and a ``hierarchy`` block is added to the
     response *only* when the option was given. Omitted/empty (the default),
-    the flat bytes and JSON are unchanged. Errors (all before any output is
-    written): an absent, top, or unreachable cell; a selection where one
-    cell contains another; placements of one cell that are not electrically
-    identical; and any combination with ``parasitics``, ``subcircuit_cell``
-    or ``abstract_cell_patterns`` (deferred to issue #2916). See
+    the flat bytes and JSON are unchanged. A selected cell containing another
+    selected cell yields a nested ``.SUBCKT`` tree (issue #2916). Errors (all
+    before any output is written): an absent, top, or unreachable cell;
+    placements of one cell that are not electrically identical; and any
+    combination with ``parasitics``, ``subcircuit_cell`` or
+    ``abstract_cell_patterns`` (rejected by design, issue #2916). See
     :mod:`klayout_tools.extract_hierarchy` and ``docs/cli/extract.md``'s
     "Hierarchical output" section.
 
@@ -2421,6 +2554,12 @@ def run_extract(
     if parasitics_nets_set is not None and not parasitics:
         raise ExtractError("--parasitics-net requires --parasitics")
 
+    # `--parasitic-variant` (issue #3056) requires `--parasitics`: it edits
+    # the injected network, which only exists with that pass.
+    variants = parse_parasitic_variants(parasitic_variants, ExtractError)
+    if variants is not None and not parasitics:
+        raise ExtractError("--parasitic-variant requires --parasitics")
+
     # `--parasitics-top-cell-only` (issue #1704) requires `--parasitics`:
     # it splits the same lumped-RC ground pass this flag piggybacks on into
     # a top-cell-drawn/instance-drawn share -- same reasoning as
@@ -2717,6 +2856,15 @@ def run_extract(
             "docs/cli/extract.md's 'Parasitic (RC) extraction' section."
         )
 
+    # Drawn MiM capacitors written as a fixed-value `C` card (issue #3090): the
+    # value is the deck's nominal area+perimeter law, so PDK process-corner
+    # sections cannot move it (a `--pdk`-bound `X` subckt call can). One
+    # aggregate line, plus the same fact in the `--parasitics` header below.
+    fixed_value_capacitor_note = _fixed_value_capacitor_note(
+        _fixed_value_capacitor_classes(deck, device_counts, model_bindings)
+    )
+    warnings.extend(fixed_value_capacitor_note)
+
     # `--pdk`-bound device classes whose target subcircuit has no parameter
     # for something the extractor measured (issue #695): today, only a
     # sky130 `pnp` bipolar binding, whose fixed-geometry `pnp_05v5_*` cells
@@ -2981,6 +3129,7 @@ def run_extract(
                 # can attribute every parasitic element to one electrical net.
                 # `False` (every other run) writes no property at all.
                 record_slice_topology=subcircuit_cell is not None,
+                variants=variants,
             )
         else:
             parasitics_report = {
@@ -3059,6 +3208,40 @@ def run_extract(
         parasitics_report["parasitics_nets"] = (
             list(parasitics_nets) if parasitics_nets else []
         )
+        if variants is not None:
+            # Additive field (issue #3056): present only when
+            # `--parasitic-variant` was given, so every other report is
+            # byte-identical to before the flag existed.
+            parasitics_report["parasitic_variant"] = list(variants.raw)
+            matched_variant_nets = {
+                spice_safe_net_name(entry["net"]) for entry in ground_nets
+            }
+            unmatched_variant = sorted(variants.named_nets() - matched_variant_nets)
+            if unmatched_variant:
+                warnings.append(
+                    "--parasitic-variant net name(s) "
+                    f"{', '.join(repr(name) for name in unmatched_variant)} "
+                    "match no net with ground-eligible parasitics geometry "
+                    "in this layout -- nothing was dropped for them. See "
+                    "docs/cli/extract.md's '--parasitic-variant' section."
+                )
+            distributed_variant = sorted(
+                {
+                    n["net"]
+                    for n in parasitics_report.get("nets", [])
+                    if n.get("rc_model") == "distributed"
+                    and (
+                        variants.drops_r(n["net"]) or variants.drops_c_ground(n["net"])
+                    )
+                }
+            )
+            if distributed_variant:
+                warnings.append(
+                    "--parasitic-variant drop-r/drop-c-ground does not apply "
+                    "to --distributed-rc net(s) "
+                    f"{', '.join(repr(name) for name in distributed_variant)} "
+                    "-- their ladder is left unchanged."
+                )
         if parasitics_nets_set:
             # Same escaped-spelling comparison `critical_nets` makes below
             # (issue #1162): `ground_nets[].net` is the unescaped identity
@@ -3211,7 +3394,7 @@ def run_extract(
             raise ExtractError(
                 f"cannot create output directory {spef_out_dir}: {exc}"
             ) from exc
-        _write_spef(
+        spef_skipped_nets = _write_spef(
             spef_path,
             design_name=top_cell_name,
             klt_version=_klt_version(),
@@ -3221,6 +3404,11 @@ def run_extract(
             # the routed DEF's own `NETS` section -- `None` (the default)
             # falls back to the pre-#961 port-only behavior.
             net_instance_pins=def_net_connections,
+        )
+        warnings.extend(
+            _spef_warnings(
+                def_net_connections, def_pins, declared_pins, spef_skipped_nets
+            )
         )
 
     # Issue #1503: every synthesized substrate identity `_tie_substrate_nets_
@@ -3265,16 +3453,21 @@ def run_extract(
     netlist_description = f"extracted by klt extract --deck {deck_name}"
     if parasitics_report is not None:
         netlist_description += "\n" + _parasitic_model_header_comment()
+        netlist_description += "".join(
+            "\n* " + note for note in fixed_value_capacitor_note
+        )
     try:
-        netlist.write(netlist_path, writer, netlist_description)
+        with stage("netlist_write"):
+            netlist.write(netlist_path, writer, netlist_description)
     except Exception as exc:
         if scratch_dir is not None:
             shutil.rmtree(scratch_dir, ignore_errors=True)
         raise ExtractError(f"could not write netlist '{netlist_path}': {exc}") from exc
 
-    reported_netlist_path, netlist_sha256 = _finish_netlist_write(
-        netlist_path, scratch_dir
-    )
+    with stage("netlist_hash"):
+        reported_netlist_path, netlist_sha256 = _finish_netlist_write(
+            netlist_path, scratch_dir
+        )
 
     # `--subcircuit` (issue #2245): a *second*, independent deck carrying one
     # named `.SUBCKT <cell>` for the sub-cell's own extracted devices. Run
@@ -3309,6 +3502,15 @@ def run_extract(
         "dbu_um": dbu_um,
         "netlist_path": reported_netlist_path,
         "netlist_sha256": netlist_sha256,
+        # Additive field (issue #3407): `null` exactly when `netlist_sha256`
+        # is (`--no-netlist`); otherwise a numbering-independent digest of
+        # the flat `devices[]`/`nets[]` connectivity -- see
+        # `_normalized_netlist_sha256`.
+        "netlist_normalized_sha256": (
+            None
+            if netlist_sha256 is None
+            else _normalized_netlist_sha256(devices, nets)
+        ),
         "status": "extracted",
         "device_count": len(devices),
         "net_count": len(nets),
@@ -3490,8 +3692,8 @@ def _normalize_hierarchical_cells(
     abstract_cell_lef_paths: tuple[str, ...],
 ) -> tuple[str, ...]:
     """Normalize ``--hierarchical-cells`` (issue #2722) to a sorted, de-duped
-    tuple (``()`` when omitted) and reject the option combinations increment 1
-    does not support -- before the extraction engine runs."""
+    tuple (``()`` when omitted) and reject the option combinations it does
+    not support -- before the extraction engine runs."""
     names = tuple(sorted({name.strip() for name in hierarchical_cells}))
     if not hierarchical_cells:
         return ()
@@ -3515,7 +3717,7 @@ def _validate_hierarchical_selection(
     layout: Any, top_cell: Any, names: tuple[str, ...]
 ) -> None:
     """Validate ``--hierarchical-cells`` against the live hierarchy (absent /
-    top / unreachable / nested) before any extraction work (issue #2722).
+    top / unreachable) before any extraction work (issue #2722).
     No-op when the option was omitted."""
     if not names:
         return
@@ -4070,6 +4272,25 @@ def _canonicalize_extract_report_for_rerun_diff(
     return normalized
 
 
+def _normalized_netlist_sha256(devices: list[Any], nets: list[Any]) -> str:
+    """Issue #3407: SHA-256 hex digest of this run's flat ``devices[]`` /
+    ``nets[]`` connectivity with KLayout's anonymous-net numbering
+    normalized away -- the same ``net_id`` strip, ``\\$<n>`` structural
+    rewrite and ``(name, attachment key)`` re-sort
+    :func:`_canonicalize_extract_report_for_rerun_diff` applies, serialized
+    as sorted-key compact JSON. Unlike ``netlist_sha256`` (the written
+    ``.spice`` bytes, which embed the ``$N`` counter) it is stable across
+    ``klayout`` builds that only renumber anonymous nets; any real
+    connectivity, device-parameter or net-name change alters it. Covers the
+    flat netlist only (not ``--subcircuit`` decks or parasitics output).
+    """
+    canonical = _canonicalize_extract_report_for_rerun_diff(
+        {"devices": devices, "nets": nets}
+    )
+    payload = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _parasitics_net_attachment_key(entry: Mapping[str, Any]) -> str:
     """The sorted ``<device>.<terminal>`` attachment list a single
     ``parasitics.nets[]`` entry's own ``terminals[]`` already names --
@@ -4557,7 +4778,8 @@ def extract_netlist_from_layout(
 
     layout = kdb.Layout()
     try:
-        layout.read(path)
+        with stage("read_layout"):
+            layout.read(path)
     except Exception as exc:  # klayout raises RuntimeError for bad/unknown streams
         raise ExtractError(f"could not read layout '{path}': {exc}") from exc
 
@@ -4592,7 +4814,7 @@ def extract_netlist_from_layout(
     )
 
     # `--hierarchical-cells` (issue #2722): selection validated against the
-    # live hierarchy (absent / top / unreachable / nested) before any
+    # live hierarchy (absent / top / unreachable) before any
     # extraction work or output.
     _validate_hierarchical_selection(layout, top_cell, hierarchical_cells)
 
@@ -4729,7 +4951,9 @@ def extract_netlist_from_layout(
         def_pin_promotion,
         substrate_taps,
         pin_renames,
-    ) = _netlist_extractor(deck)(
+    ) = _staged(
+        "device_extraction",
+        _netlist_extractor(deck),
         layout,
         top_cell,
         deck,
@@ -4774,7 +4998,9 @@ def extract_netlist_from_layout(
     (
         voltage_domain_prose_warnings,
         voltage_domain_warnings,
-    ) = _detect_voltage_domain_overlap(layout, top_cell, deck, deck_name)
+    ) = _staged(
+        "diagnostics", _detect_voltage_domain_overlap, layout, top_cell, deck, deck_name
+    )
     warnings = warnings + voltage_domain_prose_warnings
 
     # Missing flavour markers (issue #2417): additive diagnostic, reported
@@ -6052,6 +6278,25 @@ def _purge_preserving_named_nets(netlist: kdb.Netlist) -> None:
         if net.pin_count() == 0:
             pin = circuit.create_pin(net_name)
             circuit.connect_pin(pin, net)
+
+
+def _recognised_capacitor_top_regions(
+    layout: kdb.Layout, top_cell: kdb.Cell, deck: ExtractionDeck
+) -> dict[str, kdb.Region]:
+    """Each drawn ``CapacitorDevice``'s top-plate marker region, keyed by
+    device name (issue #3021) -- what ``_compute_parasitics`` masks out of the
+    vertical-overlap pass for that capacitor's own plate nets. Capacitors with
+    no marker drawn are omitted, so a capacitor-free layout yields ``{}``.
+    """
+    regions: dict[str, kdb.Region] = {}
+    for capacitor in deck.capacitors:
+        top_region, bottom_region = _capacitor_plate_regions(
+            layout, top_cell, capacitor
+        )
+        if top_region.is_empty() or bottom_region.is_empty():
+            continue
+        regions[capacitor.name] = top_region
+    return regions
 
 
 def _purge_truly_floating_nets(netlist: kdb.Netlist) -> None:
@@ -9630,6 +9875,12 @@ def _extract_netlist(
             # geometry (resistor bodies, gates) cut out of them and so no
             # longer show where a conductor abuts a device at all.
             via_index=via_index,
+            # Issue #3021: recognised MiM top-plate footprints, so the
+            # vertical-overlap pass does not charge coupling on top of the
+            # device's own capacitance inside them.
+            capacitor_top_regions=_recognised_capacitor_top_regions(
+                layout, top_cell, deck
+            ),
         )
         # `klt extract --mom-net <net>` (issue #798): computed here, not in
         # `run_extract`, for the same "`l2n` must still be alive" reason as
