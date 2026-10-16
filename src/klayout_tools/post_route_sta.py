@@ -319,6 +319,24 @@ _DELAY_POST_END = "===KLT_STA_DELAY_POST_END==="
 #: :func:`_parasitic_annotation_lines` / :func:`_parse_parasitic_annotation`.
 _PARASITIC_ANNOTATION_BEGIN = "===KLT_STA_PARASITIC_ANNOTATION_BEGIN==="
 _PARASITIC_ANNOTATION_END = "===KLT_STA_PARASITIC_ANNOTATION_END==="
+#: Marker pairs and sentinels for the per-corner ``electrical_checks`` block
+#: (issue #3005): one ``report_check_types -violators`` region per limit class.
+#: See :func:`_electrical_check_lines` / :func:`_parse_electrical_check`.
+_MAX_SLEW_BEGIN = "===KLT_STA_MAX_SLEW_BEGIN==="
+_MAX_SLEW_END = "===KLT_STA_MAX_SLEW_END==="
+_MAX_CAP_BEGIN = "===KLT_STA_MAX_CAP_BEGIN==="
+_MAX_CAP_END = "===KLT_STA_MAX_CAP_END==="
+_ELECTRICAL_OK = "KLT_ELECTRICAL_OK"
+_ELECTRICAL_UNSUPPORTED = "KLT_ELECTRICAL_UNSUPPORTED"
+_ELECTRICAL_NET_PREFIX = "KLT_ELECTRICAL_NET"
+#: One violator row of ``report_check_types``: ``<pin> <limit> <value> <slack>
+#: (VIOLATED)``. Anchored from the right so a pin name is taken verbatim.
+_ELECTRICAL_ROW_RE = re.compile(
+    r"^(?P<pin>\S.*?)\s+(?P<limit>-?[\d.]+(?:e[-+]?\d+)?)\s+"
+    r"(?P<value>-?[\d.]+(?:e[-+]?\d+)?)\s+(?P<slack>-?[\d.]+(?:e[-+]?\d+)?)"
+    r"\s+\(VIOLATED\)\s*$",
+    re.IGNORECASE,
+)
 #: Any OpenSTA-tagged warning. Only ever matched *inside* the
 #: :data:`_SPEF_READ_BEGIN`/:data:`_SPEF_READ_END` stdout region, where the
 #: SPEF reader is the only thing running.
@@ -621,6 +639,7 @@ def run_sta(
         request["constraints"], clock_port
     )
     report_ports = _validate_report_ports(request["constraints"], clock_port)
+    false_path_from = _validate_false_path_from(request["constraints"], clock_port)
     wire_load_model, wire_load_mode = _validate_wire_load_estimate(
         request["constraints"], has_verilog
     )
@@ -699,6 +718,7 @@ def run_sta(
             input_transition_ns=input_transition_ns,
             input_transitions=input_transitions,
             report_ports=report_ports,
+            false_path_from=false_path_from,
             spef_path=spef_path,
             spef_map=spef_map,
             wire_load_model=wire_load_model,
@@ -849,6 +869,7 @@ def _dispatch_sta(
     input_transition_ns: float | None,
     input_transitions: dict[str, float] | None,
     report_ports: list[str] | None,
+    false_path_from: list[str] | None,
     spef_path: str | None,
     spef_map: dict[str, str] | None,
     wire_load_model: str | None,
@@ -888,6 +909,7 @@ def _dispatch_sta(
             input_transition_ns=input_transition_ns,
             input_transitions=input_transitions,
             report_ports=report_ports,
+            false_path_from=false_path_from,
             spef_path=spef_path,
             spef_map=spef_map,
             wire_load_model=wire_load_model,
@@ -917,6 +939,7 @@ def _dispatch_sta(
         input_transition_ns=input_transition_ns,
         input_transitions=input_transitions,
         report_ports=report_ports,
+        false_path_from=false_path_from,
         spef_path=spef_path,
         wire_load_model=wire_load_model,
         wire_load_mode=wire_load_mode,
@@ -1008,11 +1031,17 @@ def _dispatch_sta(
 
     if "port_paths" in corner_fields:
         response["port_paths"] = corner_fields["port_paths"]
+    # Additive field (issue #2968): the applied exclusion list, present only
+    # when the request named `constraints.false_path_from`.
+    if false_path_from:
+        response["false_path_from"] = list(false_path_from)
     response["spef_annotation"] = corner_fields["spef_annotation"]
     # Additive field (issue #2739): the propagated-clock evidence block --
     # what propagation actually reached -- `null` unless the request asked
     # for propagated-clock timing (see `_parse_clock_latency`).
     response["clock_propagation"] = corner_fields["clock_propagation"]
+    # Additive field (issue #3005): see `_electrical_checks_block`.
+    response["electrical_checks"] = corner_fields["electrical_checks"]
     response["engine_log"] = corner_fields["engine_log"]
 
     return response
@@ -1037,6 +1066,7 @@ def _run_corner_session(
     input_transition_ns: float | None,
     input_transitions: dict[str, float] | None,
     report_ports: list[str] | None,
+    false_path_from: list[str] | None,
     spef_path: str | None,
     wire_load_model: str | None,
     wire_load_mode: str | None,
@@ -1109,6 +1139,7 @@ def _run_corner_session(
             input_transition_ns=input_transition_ns,
             input_transitions=input_transitions,
             report_ports=report_ports,
+            false_path_from=false_path_from,
             propagated_clock=propagated_clock,
         )
     else:
@@ -1131,6 +1162,7 @@ def _run_corner_session(
             input_transition_ns=input_transition_ns,
             input_transitions=input_transitions,
             report_ports=report_ports,
+            false_path_from=false_path_from,
         )
     _write_script(script_path, lines)
 
@@ -1213,6 +1245,14 @@ def _run_corner_session(
     # Issue #2739: the propagated-clock evidence block -- what propagation
     # actually reached -- parsed from this session's `report_clock_latency`
     # dump; `null` unless the request asked for propagated-clock timing.
+    # Additive field (issue #3005): max-transition / max-capacitance checks
+    # against this session's parasitics; `null` in netlist mode (no routed
+    # geometry to check).
+    corner_fields["electrical_checks"] = (
+        _electrical_checks_block(completed.stdout or "", spef_path is not None)
+        if has_def
+        else None
+    )
     if propagated_clock and has_def:
         corner_fields["clock_propagation"] = _parse_clock_latency(
             completed.stdout or "", clock_port
@@ -1244,6 +1284,7 @@ def _run_multi_corner(
     input_transition_ns: float | None,
     input_transitions: dict[str, float] | None,
     report_ports: list[str] | None,
+    false_path_from: list[str] | None,
     spef_path: str | None,
     spef_map: dict[str, str] | None,
     wire_load_model: str | None,
@@ -1323,6 +1364,7 @@ def _run_multi_corner(
             input_transition_ns=input_transition_ns,
             input_transitions=input_transitions,
             report_ports=report_ports,
+            false_path_from=false_path_from,
             spef_path=pair_spef,
             wire_load_model=wire_load_model,
             wire_load_mode=wire_load_mode,
@@ -1374,7 +1416,7 @@ def _run_multi_corner(
         input_role=INPUT_ROLE_LAYOUT if has_def else INPUT_ROLE_NETLIST,
     )
 
-    return {
+    response: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "engine": "openroad",
         "engine_version": engine_version,
@@ -1399,6 +1441,11 @@ def _run_multi_corner(
         # them -- see this function's own docstring for the exact shape.
         "corners": corner_entries,
     }
+    # Additive field (issue #2968): corner-invariant request echo, present only
+    # when the request named `constraints.false_path_from`.
+    if false_path_from:
+        response["false_path_from"] = list(false_path_from)
+    return response
 
 
 def _spef_annotation_block(
@@ -1862,6 +1909,45 @@ def _validate_report_ports(
     return list(value) or None
 
 
+def _validate_false_path_from(
+    constraints: dict[str, Any], clock_port: str
+) -> list[str] | None:
+    """``constraints.false_path_from`` (issue #2968): optional list of unique
+    literal input-port names (one scalar port or one bus bit, e.g.
+    ``cfg[3]`` -- the same key rules as :func:`_validate_report_ports`) whose
+    paths are excluded from timing with ``set_false_path -from``. Returns the
+    list, or ``None`` when the field is omitted *or* empty (nothing is
+    emitted, so the generated Tcl is byte-identical to a request without
+    it). Existence and direction are verified inside the engine session
+    (:func:`_port_check_lines`); the clock port is rejected here."""
+    field = "request.constraints.false_path_from"
+    value = constraints.get("false_path_from")
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise PostRouteStaError(f"{field} must be a list of input port names")
+    seen: set[str] = set()
+    for port in value:
+        if not isinstance(port, str) or not port or port != port.strip():
+            raise PostRouteStaError(
+                f"{field} entries must be non-empty port-name strings without "
+                f"leading/trailing whitespace (got {port!r})"
+            )
+        if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in port):
+            raise PostRouteStaError(
+                f"{field} entry {port!r} contains a control character"
+            )
+        if port == clock_port:
+            raise PostRouteStaError(
+                f"{field} must not name the clock port {port!r} -- "
+                "a false path from the clock would untime every register"
+            )
+        if port in seen:
+            raise PostRouteStaError(f"{field} must not repeat a port ({port!r})")
+        seen.add(port)
+    return list(value) or None
+
+
 def _validate_corners(value: Any) -> list[str] | None:
     """Optional ``request.pdk.corners`` (issue #1871) -- the additive,
     multi-corner alternative to the scalar ``request.pdk.corner``: a list of
@@ -2179,31 +2265,56 @@ def _request_io_delay_lines(
     input_transition_ns: float | None = None,
     input_transitions: dict[str, float] | None = None,
     report_ports: list[str] | None = None,
+    false_path_from: list[str] | None = None,
 ) -> list[str]:
     """All I/O-timing Tcl for one session. With no per-port map, no
-    ``input_transitions`` and no ``report_ports`` this is exactly
-    :func:`_io_delay_lines` (the scalar-only contract, byte-for-byte the same
-    Tcl as before issue #2740); otherwise :func:`_port_check_lines` (once,
-    covering the delay maps, the issue #3227 ``input_transitions`` map and
-    the issue #3042 ``report_ports`` names) followed by the delay Tcl --
+    ``input_transitions``, no ``report_ports`` and no ``false_path_from`` this
+    is exactly :func:`_io_delay_lines` (the scalar-only contract,
+    byte-for-byte the same Tcl as before issue #2740); otherwise
+    :func:`_port_check_lines` (once, covering the delay maps, the issue #3227
+    ``input_transitions`` map, the issue #3042 ``report_ports`` names and the
+    issue #2968 ``false_path_from`` names) followed by the delay Tcl --
     :func:`_port_io_delay_lines` when a delay map is present, else
-    :func:`_io_delay_lines`. :func:`_input_transition_lines` is then
-    appended, and adds nothing when no transition field was given."""
+    :func:`_io_delay_lines` -- then :func:`_input_transition_lines` (nothing
+    when no transition field was given) and, last, the
+    :func:`_false_path_lines` exceptions."""
     if input_delays or output_delays:
-        lines = _port_check_lines(
-            input_delays, output_delays, input_transitions, report_ports
-        ) + _port_io_delay_lines(
+        delay_lines = _port_io_delay_lines(
             clock_port, input_delay_ns, output_delay_ns, input_delays, output_delays
         )
     else:
-        lines = _io_delay_lines(clock_port, input_delay_ns, output_delay_ns)
-        if input_transitions or report_ports:
-            lines = (
-                _port_check_lines(None, None, input_transitions, report_ports) + lines
+        delay_lines = _io_delay_lines(clock_port, input_delay_ns, output_delay_ns)
+    if (
+        input_delays
+        or output_delays
+        or input_transitions
+        or report_ports
+        or false_path_from
+    ):
+        delay_lines = (
+            _port_check_lines(
+                input_delays,
+                output_delays,
+                input_transitions,
+                report_ports,
+                false_path_from,
             )
-    return lines + _input_transition_lines(
-        clock_port, input_transition_ns, input_transitions
+            + delay_lines
+        )
+    return (
+        delay_lines
+        + _input_transition_lines(clock_port, input_transition_ns, input_transitions)
+        + _false_path_lines(false_path_from)
     )
+
+
+def _false_path_lines(false_path_from: list[str] | None) -> list[str]:
+    """``set_false_path -from`` per ``constraints.false_path_from`` port
+    (issue #2968), emitted after the I/O-delay lines. Nothing when unset."""
+    return [
+        f"set_false_path -from [get_ports {_tcl_literal(port)}]"
+        for port in false_path_from or ()
+    ]
 
 
 def _port_check_lines(
@@ -2211,6 +2322,7 @@ def _port_check_lines(
     output_delays: dict[str, dict[str, float]] | None,
     input_transitions: dict[str, float] | None = None,
     report_ports: list[str] | None = None,
+    false_path_from: list[str] | None = None,
 ) -> list[str]:
     """Verify every per-port map key against the loaded design before any
     delay is applied (issue #2740): each must match **exactly one** port
@@ -2221,15 +2333,21 @@ def _port_check_lines(
     with :data:`_PORT_CHECK_EXIT_CODE`, so a bad key is an actionable error
     -- never a request that silently constrains nothing. The
     ``input_transitions`` map (issue #3227) is checked in the same block
-    under its own ``input_transition`` side tag, and ``report_ports``
+    under its own ``input_transition`` side tag, ``report_ports``
     (issue #3042) on a ``report`` side that accepts a port of any
-    direction."""
+    direction, and ``false_path_from`` (issue #2968) on a ``false_path``
+    side that accepts an input or inout port."""
     entries: list[str] = []
     for side, mapping, allowed in (
         ("input", input_delays, _INPUT_PORT_DIRECTIONS),
         ("output", output_delays, _OUTPUT_PORT_DIRECTIONS),
         ("input_transition", input_transitions, _INPUT_PORT_DIRECTIONS),
         ("report", dict.fromkeys(report_ports or ()), _ANY_PORT_DIRECTIONS),
+        (
+            "false_path",
+            dict.fromkeys(false_path_from or ()),
+            _INPUT_PORT_DIRECTIONS,
+        ),
     ):
         for port in mapping or {}:
             entries.append(f"{side} {_tcl_literal(port)} {{{' '.join(allowed)}}}")
@@ -2620,6 +2738,59 @@ def _violation_count_lines() -> list[str]:
     )
 
 
+def _electrical_check_lines() -> list[str]:
+    """Marker-delimited max-transition / max-capacitance violator reports
+    (issue #3005), run in the same session that already did ``read_spef`` so
+    the numbers are against the extracted parasitics when a ``spef`` was
+    given.
+
+    Units are pinned with ``set_cmd_units`` (``ns`` / ``pF``) so the report
+    is in the units the response states regardless of the Liberty's own.
+    Each report runs through ``sta::redirect_string_begin``/``_end`` inside a
+    ``catch``: a clean design prints nothing from ``report_check_types``, so
+    the explicit ``KLT_ELECTRICAL_OK`` sentinel is what distinguishes
+    "checked, zero violations" from a command that never ran
+    (``KLT_ELECTRICAL_UNSUPPORTED`` when the ``catch`` fired; a missing
+    block is ``not_run``). For every violating pin a ``KLT_ELECTRICAL_NET``
+    row maps it to its net (ports are their own net) so distinct nets can be
+    counted."""
+    lines = ["set_cmd_units -time ns -capacitance pF"]
+    for flag, begin, end in (
+        ("-max_slew", _MAX_SLEW_BEGIN, _MAX_SLEW_END),
+        ("-max_capacitance", _MAX_CAP_BEGIN, _MAX_CAP_END),
+    ):
+        lines += [
+            f'puts "{begin}"',
+            "set klt_elec_rep {}",
+            "if {[catch {",
+            "  sta::redirect_string_begin",
+            f"  report_check_types {flag} -violators -digits 5",
+            "  set klt_elec_rep [sta::redirect_string_end]",
+            "} klt_elec_msg]} {",
+            f'  puts "{_ELECTRICAL_UNSUPPORTED}"',
+            "} else {",
+            "  puts $klt_elec_rep",
+            '  foreach klt_elec_line [split $klt_elec_rep "\\n"] {',
+            '    if {[string match "*(VIOLATED)*" $klt_elec_line]} {',
+            "      set klt_elec_pin [lindex $klt_elec_line 0]",
+            "      set klt_elec_obj [get_pins -quiet $klt_elec_pin]",
+            "      if {[llength $klt_elec_obj]} {",
+            "        set klt_elec_net [get_nets -quiet -of_objects $klt_elec_obj]",
+            "        set klt_elec_net_name [expr {[llength $klt_elec_net] ? "
+            "[get_full_name $klt_elec_net] : $klt_elec_pin}]",
+            "      } else {",
+            "        set klt_elec_net_name $klt_elec_pin",
+            "      }",
+            f'      puts "{_ELECTRICAL_NET_PREFIX} $klt_elec_pin $klt_elec_net_name"',
+            "    }",
+            "  }",
+            f'  puts "{_ELECTRICAL_OK}"',
+            "}",
+            f'puts "{end}"',
+        ]
+    return lines
+
+
 def _sta_script_lines(
     *,
     tech_lef: str,
@@ -2637,6 +2808,7 @@ def _sta_script_lines(
     input_transition_ns: float | None = None,
     input_transitions: dict[str, float] | None = None,
     report_ports: list[str] | None = None,
+    false_path_from: list[str] | None = None,
     propagated_clock: bool = False,
 ) -> list[str]:
     """Build the Tcl script for the single, from-scratch OpenSTA session
@@ -2684,6 +2856,7 @@ def _sta_script_lines(
         input_transition_ns,
         input_transitions,
         report_ports,
+        false_path_from,
     )
     if spef_path is not None:
         lines += _spef_net_check_lines(spef_net_names or [])
@@ -2707,6 +2880,9 @@ def _sta_script_lines(
     lines += _violation_count_lines()
     lines += _worst_path_lines()
     lines += _port_path_lines(report_ports)
+    # Before the completeness query, which must stay the script's last
+    # statements (issue #2780): it can take the session down.
+    lines += _electrical_check_lines()
     lines += _constraint_completeness_lines()
     return lines
 
@@ -2729,6 +2905,7 @@ def _sta_netlist_script_lines(
     input_transition_ns: float | None = None,
     input_transitions: dict[str, float] | None = None,
     report_ports: list[str] | None = None,
+    false_path_from: list[str] | None = None,
 ) -> list[str]:
     """Build the Tcl script for a from-scratch, netlist-input OpenSTA
     session (issue #1825): no DEF, no placement, no routing. Links a
@@ -2781,6 +2958,7 @@ def _sta_netlist_script_lines(
         input_transition_ns,
         input_transitions,
         report_ports,
+        false_path_from,
     )
     if wire_load_mode is not None:
         lines.append(f"set_wire_load_mode {wire_load_mode}")
@@ -3125,6 +3303,69 @@ def _parse_parasitic_annotation(stdout: str) -> tuple[int | None, int | None]:
     )
 
 
+def _electrical_class(
+    coverage: str, unit: str, rows: list[tuple[str, float, float]], nets: set[str]
+) -> dict[str, Any]:
+    """One limit class of the ``electrical_checks`` block. Counts, excess and
+    pin are ``null`` unless ``coverage == "checked"``."""
+    checked = coverage == "checked"
+    worst = max(rows, key=lambda row: row[2], default=None) if checked else None
+    return {
+        "coverage": coverage,
+        "limit_source": "liberty",
+        "unit": unit,
+        "violation_count": len(rows) if checked else None,
+        "net_count": len(nets) if checked else None,
+        "worst_excess": round(worst[2], 5) if worst is not None else None,
+        "worst_pin": worst[0] if worst is not None else None,
+    }
+
+
+def _parse_electrical_check(
+    stdout: str, begin: str, end: str, unit: str
+) -> dict[str, Any]:
+    """Parse one ``report_check_types -violators`` block (issue #3005).
+
+    ``coverage`` is ``"not_run"`` when the markers are absent (the session
+    never reached the block), ``"unsupported"`` when the Tcl ``catch`` fired,
+    and ``"checked"`` only when the ``KLT_ELECTRICAL_OK`` sentinel closed the
+    block -- so zero violations is only ever reported for a check that ran.
+    ``worst_excess`` is ``value - limit`` of the worst violator (positive)."""
+    block = _extract_block(stdout, begin, end)
+    if block is None:
+        return _electrical_class("not_run", unit, [], set())
+    if _ELECTRICAL_UNSUPPORTED in block or _ELECTRICAL_OK not in block:
+        return _electrical_class("unsupported", unit, [], set())
+    rows: list[tuple[str, float, float]] = []
+    nets: set[str] = set()
+    for line in block.splitlines():
+        if line.startswith(_ELECTRICAL_NET_PREFIX + " "):
+            parts = line.split(None, 2)
+            if len(parts) == 3:
+                nets.add(parts[2].strip())
+            continue
+        match = _ELECTRICAL_ROW_RE.match(line)
+        if match:
+            excess = float(match.group("value")) - float(match.group("limit"))
+            rows.append((match.group("pin"), float(match.group("limit")), excess))
+    return _electrical_class("checked", unit, rows, nets)
+
+
+def _electrical_checks_block(stdout: str, has_spef: bool) -> dict[str, Any]:
+    """The per-corner ``electrical_checks`` response block (issue #3005).
+    ``parasitics_source`` says whether the numbers are against the
+    caller-supplied extracted SPEF or LEF/DEF-only wire models."""
+    return {
+        "parasitics_source": "spef" if has_spef else "none",
+        "max_transition": _parse_electrical_check(
+            stdout, _MAX_SLEW_BEGIN, _MAX_SLEW_END, "ns"
+        ),
+        "max_capacitance": _parse_electrical_check(
+            stdout, _MAX_CAP_BEGIN, _MAX_CAP_END, "pF"
+        ),
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Per-port I/O-delay check + worst-path identity parsing (issue #2740)
 # --------------------------------------------------------------------------- #
@@ -3144,6 +3385,13 @@ def _parse_port_check_errors(stdout: str) -> list[tuple[str, str, str]]:
     return rows
 
 
+_PORT_CHECK_PREFIXES: dict[str | None, str] = {
+    "report": "constraints.report_ports rejected",
+    "false_path": "constraints.false_path_from rejected",
+    "input_transition": "constraints.input_transitions rejected",
+}
+
+
 def _port_check_error_message(rows: list[tuple[str, str, str]]) -> str:
     details = []
     for side, port, problem in rows:
@@ -3152,6 +3400,8 @@ def _port_check_error_message(rows: list[tuple[str, str, str]]) -> str:
             side = "input"
         elif side == "report":
             field = f"constraints.report_ports[{port!r}]"
+        elif side == "false_path":
+            field = f"constraints.false_path_from[{port!r}]"
         else:
             field = f"constraints.{side}_delays[{port!r}]"
         if problem == "not_found":
@@ -3166,18 +3416,17 @@ def _port_check_error_message(rows: list[tuple[str, str, str]]) -> str:
         elif problem.startswith("direction_"):
             direction = problem[len("direction_") :]
             details.append(
-                f"{field}: port direction is '{direction}', not an {side} "
+                f"{field}: port direction is '{direction}', not an "
+                f"{'input' if side == 'false_path' else side} "
                 "-- move it to the other map or drop it"
             )
         else:
             details.append(f"{field}: {problem}")
     sides = {side for side, _, _ in rows}
-    if sides == {"report"}:
-        prefix = "constraints.report_ports rejected"
-    elif sides == {"input_transition"}:
-        prefix = "constraints.input_transitions rejected"
-    else:
-        prefix = "per-port I/O delay constraint(s) rejected"
+    only_side = next(iter(sides)) if len(sides) == 1 else None
+    prefix = _PORT_CHECK_PREFIXES.get(
+        only_side, "per-port I/O delay constraint(s) rejected"
+    )
     return f"{prefix}: " + "; ".join(details)
 
 

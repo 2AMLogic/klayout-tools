@@ -283,6 +283,20 @@ _PDK_RING_IMPLANT_MARGIN_UM: dict[str, float] = {
 }
 
 
+def _bjt_unit_implant_margin_um(family: str) -> float:
+    """``bjt_array``'s per-unit emitter (Pplus) / base-tie (Nplus) implant
+    margin (issue #3587), or ``0.0`` for a family without both implant roles
+    -- byte-for-byte unchanged geometry there. Uses the ring's minimal
+    NP.5b/PP.5b margin, not the wider S/D one, which would put each implant
+    within NP.3/PP.3 range of the facing opposite-type pad."""
+    if (
+        _role_layer_info(family, "pplus") is None
+        or _role_layer_info(family, "nplus") is None
+    ):
+        return 0.0
+    return _ring_implant_margin_um(family)
+
+
 def _ring_implant_margin_um(family: str) -> float:
     """Return ``family``'s tap/collector-ring implant margin (see
     :data:`_PDK_RING_IMPLANT_MARGIN_UM`), or ``0.0`` for a family that
@@ -3349,13 +3363,12 @@ def _bjt_layer_params(
     it always ties the p-type substrate directly -- the real, physical
     collector terminal of a vertical PNP (P+ emitter / N+ base tie inside an
     Nwell / P+ collector = substrate, per ``docs/design/gen-bjt-array-spike.md``),
-    never a well tie. This intentionally does **not** extend implant coverage
-    to the emitter/base-tie unit body itself, a separate, pre-existing,
-    documented limitation (that same design doc: "curated decks check no
-    implant layer ... a process-exact device would distinguish P+ emitter, N+
-    base tie, and P+ collector by implant") predating both #1577 and this
-    issue -- out of #1580's own scope, which is the tap/collector *ring*
-    only.
+    never a well tie. The emitter/base-tie unit body is covered separately
+    (issue #3587, once ``comp.coverage.1`` / ``DF.12`` started flagging bare
+    ``Comp``): a P+ implant over each emitter pad and an N+ implant over each
+    base-tie pad, resolved as ``unit_emitter_implant_layer``,
+    ``unit_base_implant_layer`` and ``unit_implant_margin_um`` (``0.0`` = none
+    drawn).
     """
     import klayout.db as kdb
 
@@ -3365,6 +3378,9 @@ def _bjt_layer_params(
     mark = _role_layer_info(family, "bjt_mark")
     dummy = _role_layer_info(family, "dummy")
     ring_implant = _ring_tap_implant_layer(family, well_tie=False)
+    emitter_implant = _role_layer_info(family, "pplus")
+    base_implant = _role_layer_info(family, "nplus")
+    unit_implant_margin = _bjt_unit_implant_margin_um(family)
     return {
         "active_layer": _role_layer_info(family, "active"),
         "contact_layer": _role_layer_info(family, "contact"),
@@ -3376,6 +3392,18 @@ def _bjt_layer_params(
         "tap_layer": _role_layer_info(family, "tap"),
         "well_layer": well if well is not None else kdb.LayerInfo(0, 0),
         "well_present": well is not None,
+        # Per-unit emitter (P+) / base-tie (N+) implants -- the unit-body
+        # counterpart of the ring implant below, closing `DF.12` for the
+        # unit's own `Comp` (issue #3587). Uses the ring's minimal NP.5b/PP.5b
+        # margin, not `sd_implant_margin_um`: the wider S/D margin would push
+        # each implant within NP.3/PP.3 range of the facing opposite-type pad.
+        "unit_emitter_implant_layer": (
+            emitter_implant if emitter_implant is not None else kdb.LayerInfo(0, 0)
+        ),
+        "unit_base_implant_layer": (
+            base_implant if base_implant is not None else kdb.LayerInfo(0, 0)
+        ),
+        "unit_implant_margin_um": unit_implant_margin,
         "bjt_mark_layer": mark if mark is not None else kdb.LayerInfo(0, 0),
         "bjt_mark_present": mark is not None,
         "ring_implant_layer": (
