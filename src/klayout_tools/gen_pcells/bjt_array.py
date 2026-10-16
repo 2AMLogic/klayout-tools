@@ -32,6 +32,7 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
     from klayout_tools.gen import (
         _bjt_array_layout,
         _clamp_cut_boxes,
+        _insert_bjt_unit_implants,
         _insert_boxes,
         _insert_implant_ring,
         _insert_ring,
@@ -194,6 +195,27 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default=False,
             )
             self.param(
+                "unit_emitter_implant_layer",
+                self.TypeLayer,  # type: ignore[attr-defined]
+                "Implant drawn over each unit's emitter pad (P+; only used "
+                "when unit_implant_margin_um > 0)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "unit_base_implant_layer",
+                self.TypeLayer,  # type: ignore[attr-defined]
+                "Implant drawn over each unit's base-tie pad (N+; only used "
+                "when unit_implant_margin_um > 0)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "unit_implant_margin_um",
+                self.TypeDouble,  # type: ignore[attr-defined]
+                "Harness-resolved margin each unit emitter/base-tie implant extends "
+                "beyond its pad (0.0 = no unit implants drawn)",
+                default=0.0,
+            )
+            self.param(
                 "dummy_layer",
                 self.TypeLayer,
                 "PDK dummy-device marker drawing layer, covering each dummy "
@@ -248,6 +270,7 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.ring_gap_side,
                 self.ring_gap_um,
                 self.ring_gap_offset_um,
+                self.unit_implant_margin_um,  # type: ignore[attr-defined]
             )
             unit_boxes = info["unit"]["boxes_um"]
             all_cells = info["cells"] + info["dummy_cells"]
@@ -261,6 +284,15 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     _insert_boxes(
                         self.cell, li, dbu, unit_boxes[role], c["x0_um"], c["y0_um"]
                     )
+
+            _insert_bjt_unit_implants(
+                self.cell,
+                self.layout,
+                info,
+                self.unit_emitter_implant_layer,  # type: ignore[attr-defined]
+                self.unit_base_implant_layer,  # type: ignore[attr-defined]
+                self.unit_implant_margin_um,  # type: ignore[attr-defined]
+            )
 
             if self.well_present:
                 li_well = self.layout.layer(self.well_layer)

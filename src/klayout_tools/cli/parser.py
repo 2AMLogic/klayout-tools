@@ -56,6 +56,7 @@ from . import (
     sta_cmd,
     stats_cmd,
     synthesize_cmd,
+    tap_distance_cmd,
     techmap_cmd,
     trajectory_cmd,
     version_cmd,
@@ -240,6 +241,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_lef_abstract_parser(subparsers)
 
     _add_ring_check_parser(subparsers)
+    _add_tap_distance_parser(subparsers)
 
     _add_layout_metrics_parser(subparsers)
 
@@ -633,6 +635,21 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
             "#3073). Read the job later with --job-status. One job only: "
             "refused with --hosts > 1, --resume, --plot, a deck request, or "
             "a non-batch backend. See docs/cli/sim.md 'Asynchronous submit'."
+        ),
+    )
+    sim_parser.add_argument(
+        "--wait-for-capacity",
+        dest="wait_for_capacity",
+        metavar="SECONDS",
+        type=float,
+        default=None,
+        help=(
+            "with --backend batch, wait up to SECONDS (>= 0) for fleet "
+            "capacity when the launch is refused (batch_no_capacity / "
+            "batch_concurrency_cap), re-launching the same job with jittered "
+            "backoff; overrides the request's `batch.capacity_wait_s`. 0 "
+            "means one attempt. Also applies with --submit-only (issue "
+            "#3564). See docs/cli/sim.md."
         ),
     )
     sim_parser.add_argument(
@@ -2242,6 +2259,21 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     extract_parser.add_argument(
+        "--resistance-graph",
+        dest="resistance_graph",
+        action="store_true",
+        help=(
+            "additionally attach a terminal-aware resistor-graph result to "
+            "each `parasitics.nets[]` entry as `resistance_graph` (issue "
+            "#2982): the terminal-pair effective-resistance matrix, graph "
+            "node/edge counts, the legacy scalar and diagnostics. Additive "
+            "only -- `resistance_ohm` and every other field keep their "
+            "legacy value. Requires --parasitics. Off by default -- "
+            "byte-identical to today's behavior. See docs/cli/extract.md's "
+            "'--resistance-graph' section."
+        ),
+    )
+    extract_parser.add_argument(
         "--distributed-rc",
         dest="distributed_rc",
         action="store_true",
@@ -2274,7 +2306,7 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
             "(written as a 1 mohm resistor -- SPICE has no zero-ohm "
             "resistor). Must be >= 0. Reported as "
             "`parasitics.substrate_dc_tie.resistance_ohm`/`mode`. Requires "
-            "--parasitics. See docs/cli/extract.md's 'Substrate DC tie' "
+            "--parasitics. See docs/cli/extract.md's 'Substrate tie value' "
             "section."
         ),
     )
@@ -3372,7 +3404,7 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "resistance of the substrate DC-reference tie (default 1e12, "
             "substrate floating in transient; 0 = hard tie), passed "
             "through to `klt extract --substrate-tie-ohms` (issue #3089). "
-            "Must be >= 0. See docs/cli/extract.md's 'Substrate DC tie' "
+            "Must be >= 0. See docs/cli/extract.md's 'Substrate tie value' "
             "section."
         ),
     )
@@ -5829,6 +5861,87 @@ def _add_socket_check_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(socket_check_parser)
     socket_check_parser.set_defaults(func=socket_check_cmd.run)
+
+
+def _add_tap_distance_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``tap-distance`` verb: latch-up / tie-spacing distance bound."""
+    tap_parser = subparsers.add_parser(
+        "tap-distance",
+        help="assert every subject point is within a Euclidean distance of a tap",
+        description=(
+            "Assert that every point of a subject region (e.g. diffusion) lies "
+            "within --max-distance-um (Euclidean) of a qualifying tap "
+            "(e.g. a well/substrate tie), optionally per island (e.g. per well) "
+            "and optionally counting only taps wired to named nets. The "
+            "distance is measured with an inscribed-polygon Minkowski sum, so "
+            "it errs on the safe side and reports an explicit error bound. A "
+            "rule that cannot be evaluated reports status 'unsupported' "
+            "(exit 4), never a pass. Runs fully headless via KLayout's native "
+            "batch database API. See docs/cli/tap-distance.md."
+        ),
+    )
+    tap_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
+    tap_parser.add_argument(
+        "--subject",
+        required=True,
+        help=(
+            "subject layer expression: '<layer>/<datatype>' terms joined by "
+            "'+' (union), '&' (intersection), '-' (difference), left to right "
+            "(e.g. '65/20 & 125/44')"
+        ),
+    )
+    tap_parser.add_argument(
+        "--taps", required=True, help="tap layer expression (same syntax as --subject)"
+    )
+    tap_parser.add_argument(
+        "--max-distance-um",
+        required=True,
+        type=float,
+        help="maximum allowed Euclidean subject-to-tap distance in micrometres",
+    )
+    tap_parser.add_argument(
+        "--island",
+        default=None,
+        help=(
+            "optional island-partition layer expression (e.g. a well layer): "
+            "each merged polygon is checked on its own, counting only taps "
+            "that touch it; an island with subject but no tap fails"
+        ),
+    )
+    tap_parser.add_argument(
+        "--tap-net",
+        action="append",
+        default=None,
+        metavar="NET",
+        help=(
+            "repeatable net name; count only taps wired to one of these nets "
+            "(needs --net-spec)"
+        ),
+    )
+    tap_parser.add_argument(
+        "--net-spec",
+        default=None,
+        help=(
+            "path to a JSON connectivity spec for --tap-net: {'stackup': "
+            "[{'name', 'layer', 'label_layer'}], 'vias': [{'name', 'layer', "
+            "'between': [a, b]}], 'tap_connect_to': <stackup name>}"
+        ),
+    )
+    tap_parser.add_argument(
+        "--region",
+        default=None,
+        help=(
+            "optional subject clip window as an inline JSON array of four "
+            "micrometre coordinates [left, bottom, right, top]"
+        ),
+    )
+    tap_parser.add_argument(
+        "--top",
+        default=None,
+        help="top cell to check when the stream has more than one",
+    )
+    _add_format_arg(tap_parser)
+    tap_parser.set_defaults(func=tap_distance_cmd.run)
 
 
 def _add_ring_check_parser(subparsers: argparse._SubParsersAction) -> None:
