@@ -3483,6 +3483,18 @@ def _run_sim_corners(
             models_lib_sha256=environment["models_lib_sha256"],
         )
     )
+    # Additive/optional (issue #2985): ngspice generates no device or
+    # resistor noise in `.tran`, so a transient that relies on declared
+    # `trnoise`/`trrandom` sources says so. Absent when it does not apply.
+    environment.update(
+        _transient_noise_environment(
+            netlist_path,
+            request=request,
+            analysis=analysis,
+            engine=engine,
+            repo_root=repo_root,
+        )
+    )
     if remote_environment is not None:
         # Additive/optional: only present for the `remote` backend -- see
         # `_run_remote` and docs/cli/sim.md's "Remote backend" section.
@@ -6385,12 +6397,12 @@ def _noise_sources_in_text(netlist_text: str) -> list[tuple[str, str]]:
     return found
 
 
-def _unseeded_noise_report(
+def _scan_noise_sources(
     netlist_path: str, *, request: dict[str, Any], repo_root: str | None
-) -> dict[str, Any] | None:
-    """Additive ``environment.monte_carlo`` fields for transient-noise
-    sources the ``monte_carlo.seed`` contract does not govern (issue #2963),
-    or ``None`` when no scanned file declares one (shape unchanged)."""
+) -> tuple[set[tuple[str, str]], list[dict[str, str]]]:
+    """``(sources, not_scanned)``: every ``trnoise``/``trrandom`` source
+    declared in the netlist's scanned ``.include`` closure (issues #2963,
+    #2985), and what part of the closure could not be scanned."""
     files, not_scanned = _mismatch_scan_closure(request, netlist_path, repo_root)
     sources: set[tuple[str, str]] = set()
     for _label, path in files:
@@ -6399,6 +6411,18 @@ def _unseeded_noise_report(
                 sources.update(_noise_sources_in_text(handle.read()))
         except (OSError, UnicodeDecodeError):
             not_scanned.append({"target": _label, "reason": "unreadable"})
+    return sources, not_scanned
+
+
+def _unseeded_noise_report(
+    netlist_path: str, *, request: dict[str, Any], repo_root: str | None
+) -> dict[str, Any] | None:
+    """Additive ``environment.monte_carlo`` fields for transient-noise
+    sources the ``monte_carlo.seed`` contract does not govern (issue #2963),
+    or ``None`` when no scanned file declares one (shape unchanged)."""
+    sources, not_scanned = _scan_noise_sources(
+        netlist_path, request=request, repo_root=repo_root
+    )
     if not sources:
         return None
     report: dict[str, Any] = {
@@ -6410,6 +6434,50 @@ def _unseeded_noise_report(
     if not_scanned:
         report["unseeded_sources_not_scanned"] = not_scanned
     return report
+
+
+def _analysis_runs_tran(analysis: dict[str, Any]) -> bool:
+    """Does the resolved analysis run a transient (scalar ``tran`` or an
+    ``analysis_steps[]`` tran step)?"""
+    if sim_steps.is_steps_analysis(analysis):
+        return any(
+            str(step.get("kind", "")).lower() == "tran"
+            for step in analysis.get("steps", [])
+        )
+    return str(analysis.get("kind", "")).lower() == "tran"
+
+
+def _transient_noise_environment(
+    netlist_path: str,
+    *,
+    request: dict[str, Any],
+    analysis: dict[str, Any],
+    engine: str,
+    repo_root: str | None,
+) -> dict[str, Any]:
+    """Additive ``environment.transient_noise`` (issue #2985): what noise an
+    ngspice transient contains -- only the declared ``trnoise``/``trrandom``
+    sources, no intrinsic device or resistor noise. ``{}`` (field absent)
+    unless the engine is ngspice, a transient runs and a scanned file
+    declares such a source."""
+    if engine != "ngspice" or not _analysis_runs_tran(analysis):
+        return {}
+    sources, not_scanned = _scan_noise_sources(
+        netlist_path, request=request, repo_root=repo_root
+    )
+    if not sources:
+        return {}
+    report: dict[str, Any] = {
+        "engine": engine,
+        "sources": [
+            {"name": name, "kind": keyword} for name, keyword in sorted(sources)
+        ],
+        "intrinsic_device_noise": False,
+        "intrinsic_resistor_noise": False,
+    }
+    if not_scanned:
+        report["sources_not_scanned"] = not_scanned
+    return {"transient_noise": report}
 
 
 def _with_unseeded_noise(

@@ -5021,6 +5021,60 @@ def test_run_sim_monte_carlo_discloses_unseeded_noise_sources(
     assert capsys.readouterr().err.count("not governed by monte_carlo.seed") == 1
 
 
+def test_run_sim_tran_discloses_transient_noise_coverage(tmp_path, monkeypatch):
+    request = _noise_mc_request(
+        tmp_path,
+        "VN a 0 TRNOISE(1m 1n 0 0)\nIr b 0 trrandom(2 1n 1m)\n"
+        ".subckt s p\nVq p 0 trnoise(1m 1n 0 0)\n.ends\nR1 a b 1k\n",
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    env = sim.run_sim(str(request))["environment"]
+
+    assert env["transient_noise"] == {
+        "engine": "ngspice",
+        "sources": [
+            {"name": "ir", "kind": "trrandom"},
+            {"name": "vn", "kind": "trnoise"},
+            {"name": "vq", "kind": "trnoise"},
+        ],
+        "intrinsic_device_noise": False,
+        "intrinsic_resistor_noise": False,
+    }
+
+
+def test_run_sim_transient_noise_absent_without_sources(tmp_path, monkeypatch):
+    request = _noise_mc_request(tmp_path, "V1 a 0 1\nR1 a 0 1k\n")
+    _stub_subprocess_run(monkeypatch)
+
+    assert "transient_noise" not in sim.run_sim(str(request))["environment"]
+
+
+def test_run_sim_transient_noise_absent_for_op_only(tmp_path, monkeypatch):
+    (tmp_path / "body.spice").write_text("Vn a 0 trnoise(1m 1n 0 0)\nR1 a 0 1k\n")
+    request = _write_request(
+        tmp_path, {"netlist": "body.spice", "analysis": {"kind": "op", "args": ""}}
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    assert "transient_noise" not in sim.run_sim(str(request))["environment"]
+
+
+def test_run_sim_transient_noise_unresolvable_include_does_not_raise(
+    tmp_path, monkeypatch
+):
+    request = _noise_mc_request(
+        tmp_path,
+        ".include missing.sp\nVn a 0 trnoise(1m 1n 0 0)\nR1 a 0 1k\n",
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    tn = sim.run_sim(str(request))["environment"]["transient_noise"]
+
+    assert tn["sources"] == [{"name": "vn", "kind": "trnoise"}]
+    assert tn["sources_not_scanned"]
+
+
 def test_run_sim_monte_carlo_without_noise_sources_shape_unchanged(
     tmp_path, monkeypatch
 ):
