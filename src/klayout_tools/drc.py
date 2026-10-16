@@ -488,7 +488,7 @@ def _derived_region(
     (``"near"``) or ``not_interacting`` with it (``"far"``)."""
     region = _derived_region_unscoped(rule, base_region, intersect_region, dbu)
     derived = rule.derived_layer
-    if derived.context is None or context_region is None:
+    if derived is None or derived.context is None or context_region is None:
         return region
     size_dbu = round(derived.context_sized_by_um / dbu)
     ctx = context_region.sized(size_dbu) if size_dbu else context_region
