@@ -166,6 +166,7 @@
       "modules": [
         "klayout_tools.cli.functional_verification_cmd",
         "klayout_tools.functional_verification",
+        "klayout_tools.functional_verification_initial_state",
         "klayout_tools.functional_verification_sdf"
       ]
     },
@@ -422,6 +423,7 @@
         "klayout_tools.sim",
         "klayout_tools.sim_batch",
         "klayout_tools.sim_crossings",
+        "klayout_tools.sim_cycle_mean",
         "klayout_tools.sim_decks",
         "klayout_tools.sim_plot",
         "klayout_tools.sim_remote",
@@ -706,6 +708,11 @@
       "consumer": "extract",
       "exporter": "place_and_route",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "functional_verification",
+      "exporter": "reset_coverage",
+      "reason": "options.initial_state derives the gate-level flop list from reset_coverage's netlist/cell-model classification instead of re-parsing (issue #2998)."
     },
     {
       "consumer": "functional_verification",
