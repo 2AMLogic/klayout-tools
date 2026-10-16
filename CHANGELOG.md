@@ -568,6 +568,17 @@ not `klt --version`, if you need to detect this kind of drift. See
   `terminals[]` entries gain a `relation` key (`null`, or
   `{source, op, extents}`); no existing field changes.
 
+- **`klt signoff` T1 item 6 `not_applicable` outcome** (issue #2865): a
+  digital partition whose ratified spec has no statistical row can cite
+  `{"not_applicable": {"spec": ..., "statement": ...}}` (both bound by
+  `content_hash`) and grade `status: "not_applicable"`, which counts toward
+  `tier: "T1"` but never toward `t1_met_count`. New optional
+  `t1_not_applicable_count` (tier report and fleet rows, absent when zero),
+  new `reason` values `not_applicable_wrong_partition`,
+  `not_applicable_spec_unratified`, `not_applicable_statistical_row` and
+  `not_applicable_statement_incomplete`, and `not_applicable_items` in
+  `--describe-grader`. Additive: no `schema_version` bump.
+
 - **ASAP7 FinFET extraction assigns source/drain deterministically**
   (issue #3154): a channel's two S/D neighbours used to be taken in a
   merged KLayout region's iteration order, which differs between the macOS
