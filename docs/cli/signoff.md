@@ -697,6 +697,15 @@ real, mechanically-detected defect, not a coverage gap, so it is checked
 "check_failed"` (with the offending metrics named in
 `detail.critical_metric_blockers`), not `partial_coverage`.
 
+**`generic` envelopes are cross-checked (issue #2906).** A `kind: generic`
+envelope has no producer adapter, so a wrapper may emit `status: "pass"` next
+to a `coverage` block that lists skipped requested work. `klt signoff` does not
+count that as a passing check: `checks[].passed` is `false` and a numbered item
+renders `unmet` with `reason: "partial_coverage"`, with `coverage_qualification`
+still present. An envelope with no `coverage` block is unaffected, and the
+explicit `pass_partial` token behaves as above. First-party kinds are not
+cross-checked; their status remains producer-owned.
+
 **Partial is not refused outright, unlike `nothing_checked`.** A partial run
 *did* check something; discarding it would throw away a real result rather
 than qualify it. What it may never do is read as complete: nothing in this

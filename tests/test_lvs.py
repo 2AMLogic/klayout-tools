@@ -3297,6 +3297,100 @@ def test_body_verification_verified_when_every_body_resolves(tmp_path):
     }
 
 
+def _lvs_inv_via_written_netlist(tmp_path, rewrite=None):
+    """`klt lvs` on the sky130 `inv_1` cell in the two-step shape (issue #3177):
+    `klt extract -o` writes the layout netlist, which is then handed back as
+    `layout.netlist` + `layout.deck`. Returns `(two_step, inline)` reports."""
+    from klayout_tools.extract import run_extract
+
+    written = tmp_path / "layout.spice"
+    extracted = run_extract(str(SKY130_INV), "sky130", output=str(written))
+    if rewrite is not None:
+        written.write_text(rewrite(written.read_text()))
+    top = extracted["top"]
+    two_step = run_lvs(
+        _write_request(
+            tmp_path / "two_step.json",
+            {
+                "layout": {"netlist": str(written), "top": top, "deck": "sky130"},
+                "reference": {"netlist": str(written), "top": top},
+            },
+        )
+    )
+    inline = run_lvs(
+        _write_request(
+            tmp_path / "inline.json",
+            {
+                "layout": {"file": str(SKY130_INV), "deck": "sky130"},
+                "reference": {"netlist": str(written), "top": top},
+            },
+        )
+    )
+    return two_step, inline
+
+
+def test_body_verification_unverified_for_written_netlist_with_deck(tmp_path):
+    """Issue #3177: an untapped NMOS in a `klt extract -o` netlist, given as
+    `layout.netlist` + `layout.deck`, must not report `"verified"` -- the
+    read-back names are upper-cased (`NFET`/`VSUBS`), so the compare against
+    the deck's lower-case spelling has to be case-insensitive."""
+    two_step, inline = _lvs_inv_via_written_netlist(tmp_path)
+
+    body_verification = two_step["body_verification"]
+    assert body_verification["status"] == lvs.BODY_STATUS_UNVERIFIED
+    assert body_verification["device_classes"] == ["nfet"]
+    assert body_verification == inline["body_verification"]
+    assert any(
+        m["category"] == lvs.CATEGORY_DEVICE_BODY_UNVERIFIED
+        for m in two_step["mismatches"]
+    )
+
+
+def test_body_verification_unverified_for_written_netlist_anonymous_pmos_body(
+    tmp_path,
+):
+    """Issue #3177, PMOS arm: a PMOS body on an anonymous net, spelled the way
+    a written netlist round-trips it (`\\$<n>`), counts as unverified."""
+
+    def anonymous_pmos_body(text):
+        return text.replace(" VPB ", " \\$7 ").replace(" vpb ", " \\$7 ")
+
+    two_step, _ = _lvs_inv_via_written_netlist(tmp_path, anonymous_pmos_body)
+    body_verification = two_step["body_verification"]
+    assert body_verification["status"] == lvs.BODY_STATUS_UNVERIFIED
+    assert "pfet" in body_verification["device_classes"]
+
+
+def test_body_verification_verified_for_written_netlist_with_deck_no_false_positive(
+    tmp_path,
+):
+    """Issue #3177 negative control: the case-insensitive compare must not
+    flag bodies that resolve to a real net -- a hand-written netlist whose
+    NMOS body is on a named, non-substrate net stays `"verified"`."""
+    from klayout_tools.extract import run_extract
+
+    written = tmp_path / "layout.spice"
+    extracted = run_extract(str(SKY130_INV), "sky130", output=str(written))
+    text = written.read_text()
+    assert " vsubs " in text.lower()
+    tapped = re.sub(r"(?i)\bvsubs\b", "VNB", text)
+    written.write_text(tapped)
+    report = run_lvs(
+        _write_request(
+            tmp_path / "request.json",
+            {
+                "layout": {
+                    "netlist": str(written),
+                    "top": extracted["top"],
+                    "deck": "sky130",
+                },
+                "reference": {"netlist": str(written), "top": extracted["top"]},
+            },
+        )
+    )
+    assert report["body_verification"]["status"] == lvs.BODY_STATUS_VERIFIED
+
+
 def test_body_verification_unchecked_for_pre_extracted_layout_netlist(tmp_path):
     """Issue #1983: the pre-extracted `layout.netlist` form verifies nothing
     about the device bodies, and now says so -- `"unchecked"` with a reason,
@@ -8202,6 +8296,29 @@ def test_build_mismatches_circuit_and_subcircuit_and_device_class_topology():
     assert subcircuit_entry["subcircuit"] == {"layout": None, "reference": None}
 
 
+def test_build_mismatches_device_class_topology_names_each_class():
+    """Issue #2945: each class-level topology entry names its class in
+    `device.class` and `description`; a nameless stand-in degrades to null."""
+
+    class _Cls:
+        def __init__(self, name):
+            self.name = name
+
+    logger = _FakeLogger()
+    logger.device_class_mismatches.append((None, _Cls("res_a")))
+    logger.device_class_mismatches.append((None, _Cls("res_b")))
+    logger.device_class_mismatches.append((None, object()))
+
+    e_a, e_b, e_none = lvs._build_mismatches(logger)
+    assert e_a["device"] == {"layout": None, "reference": None, "class": "res_a"}
+    assert e_b["device"] == {"layout": None, "reference": None, "class": "res_b"}
+    assert e_a["description"].startswith("device class could not be mapped")
+    assert "'res_a'" in e_a["description"] and "'res_b'" in e_b["description"]
+    assert e_a["description"] != e_b["description"]
+    assert e_none["device"]["class"] is None
+    assert e_none["description"] == "device class could not be mapped to a counterpart"
+
+
 def test_build_mismatches_subcircuit_mismatch_names_circuit_instance_and_type():
     """Issue #1132: given a real `kdb.SubCircuit`-shaped object (stood in by
     `_FakeSubCircuit`, exposing `circuit()`/`circuit_ref()` in addition to
@@ -11956,6 +12073,9 @@ def test_build_device_binding_map_derived_fallback_shape():
         "tm9k",
         "tm11k",
         "tm30k",
+        # MiM densities (issue #3090) -- curated in `_CAPACITOR_MODEL_TABLE`.
+        "cap_mim_1f0_m4m5_noshield",
+        "cap_mim_1f5_m4m5_noshield",
         "cap_mim_2f0_m4m5_noshield",
     }
     assert set(build_device_binding_map("sky130")) == {
