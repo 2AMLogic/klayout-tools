@@ -2878,6 +2878,9 @@ def test_directory_deck_records_tree_identity_that_tracks_includes(tmp_path):
 def test_directory_deck_provenance_and_check_detect_helper_drift(
     tmp_path, monkeypatch, capsys
 ):
+    # In-repo position (issue #2659): outside a repo `file` is `path: null`,
+    # which `--check` cannot re-hash and so reports as drift.
+    (tmp_path / ".git").mkdir(exist_ok=True)
     gds = _write_gds(tmp_path / "test.gds")
     deck = _tree_deck(tmp_path)
     real_run = subprocess.run
