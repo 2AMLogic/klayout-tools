@@ -1,0 +1,33 @@
+{
+  "netlist": "testbench-mc-injected.spice",
+  "engine": "ngspice",
+  "monte_carlo": {
+    "n": 20,
+    "seed": 20260801,
+    "vary": "mismatch",
+    "injected": [
+      {
+        "pattern": "r?",
+        "parameter": "r",
+        "relative_sigma": 0.02,
+        "distribution": "gaussian"
+      }
+    ],
+    "injected_scale": 1
+  },
+  "analysis": {
+    "kind": "tran",
+    "args": "1n 5u"
+  },
+  "measurements": [
+    {
+      "name": "vout",
+      "spice": ".meas tran vout FIND v(out) AT=5u",
+      "unit": "V"
+    }
+  ],
+  "options": {
+    "timeout_s": 30,
+    "keep_artifacts": false
+  }
+}

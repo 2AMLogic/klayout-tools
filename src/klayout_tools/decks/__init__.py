@@ -25,7 +25,8 @@ provenance fields:
   :class:`ExtractionDeck`, :class:`BipolarDevice`, :class:`TerminalRelation`,
   :class:`CapacitorDevice`,
   :class:`CapacitorFlavour`, :class:`MomCapacitorDevice`,
-  :class:`DiodeDevice`, :class:`LayerExpr`, :class:`InvalidLabelLayerError`).
+  :class:`DiodeDevice`, :class:`LayerExpr`, :class:`SizeFilter`,
+  :class:`InvalidLabelLayerError`).
 - :mod:`klayout_tools.decks.parasitics` -- the parasitics domain
   (:class:`LayerRC`, :class:`ParasiticsDeck`,
   :class:`UnknownExtractionDeckError`, :class:`InvalidDeckOptionError`).
@@ -54,6 +55,7 @@ from .extraction import (
     MOSFlavour,
     ResistorDevice,
     ResistorFlavour,
+    SizeFilter,
     TerminalRelation,
 )
 from .finfet import FinFETExtractionDeck, FinFETFlavour
@@ -87,6 +89,7 @@ __all__ = [
     "ResistorFlavour",
     "RuleProvenance",
     "TerminalRelation",
+    "SizeFilter",
     "UnknownDeckError",
     "UnknownExtractionDeckError",
     "deck_names",
@@ -96,6 +99,7 @@ __all__ = [
     "get_layer_names",
     "get_nominal_dbu",
     "get_parasitics_deck",
+    "get_unchecked_rules",
     "get_unmodeled_voltage_markers",
     "known_extraction_deck_names",
     "resolve_deck_option_values",
@@ -244,6 +248,19 @@ def get_unmodeled_voltage_markers(name: str) -> dict[tuple[int, int], str]:
     an unregistered deck name returns an empty map rather than raising.
     """
     return _unmodeled_voltage_marker_registry().get(name, {})
+
+
+def get_unchecked_rules(name: str) -> dict[str, tuple[tuple[int, int], str]]:
+    """Return ``{rule id: ((layer, datatype), description)}`` for foundry
+    rules ``name``'s deck knows about but cannot evaluate (issue #3012).
+
+    ``drc.py`` surfaces each as ``coverage.unchecked_rules`` when its layer is
+    in the stream, so a ``clean`` verdict is not misread as covering it.
+    Decks that declare none (and unregistered names) return an empty map.
+    """
+    from . import sg13cmos5l
+
+    return {"sg13cmos5l": sg13cmos5l.UNCHECKED_RULES}.get(name, {})
 
 
 def _nominal_dbu_registry() -> dict[str, float]:

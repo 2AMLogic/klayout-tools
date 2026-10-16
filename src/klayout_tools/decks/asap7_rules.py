@@ -233,7 +233,7 @@ RULES: tuple[Asap7Rule, ...] = (
         "GEOMETRY.NONORTHOGONAL",
         "Table 3.1.1",
         "applied to every drawing layer the deck reads (FEOL, MOL, M1-M9, "
-        "V0-V9); the PAD layer is not read",
+        "V0-V9); the PAD layer is read only by V9.PAD.EN.2 and V9.AUX.1",
     ),
     # WELL
     Asap7Rule("WELL.W.1", "Table 3.2.1"),
@@ -451,7 +451,9 @@ RULES: tuple[Asap7Rule, ...] = (
     Asap7Rule("V8.M8.EN.1", "Table 3.19.1"),
     Asap7Rule("V8.M9.EN.2", "Table 3.19.1"),
     Asap7Rule("V9.M9.EN.1", "Table 3.19.1"),
+    Asap7Rule("V9.PAD.EN.2", "Table 3.19.1"),
     Asap7Rule("V8.AUX.1", "Table 3.19.1"),
+    Asap7Rule("V9.AUX.1", "Table 3.19.1"),
 )
 
 RULE_IDS: tuple[str, ...] = tuple(r.id for r in RULES)
@@ -512,16 +514,15 @@ _M8_DIRECTION = (
 _WIDE_SPACING = (
     "read literally (edge length) they override M8.S.1-S.3: every edge of "
     "80 nm or more would need 80-1000 nm, so S.1's 40 nm could never apply; "
-    "the intended width-class reading is not stated"
+    "Fig. 3.18.1 labels S.1-S.8 by W1 / W2 width ranges, and as a width class "
+    "S.5 (80-120 nm wide needs 80 nm) still contradicts S.1 (two shapes "
+    "of 80 nm or more need 40 nm), so the DRM supports no consistent reading"
 )
 _WIDE_SPACING_S4 = (
     "read literally (edge length) it overrides M8.S.2-S.3: an edge of 60-80 "
     "nm would need 60 nm, so S.2's 43 nm and S.3's 46 nm could never apply "
-    "to it; the intended width-class reading is not stated"
-)
-_PAD = (
-    "PAD (DRM mask 96) is not a layer of the pinned asap7.lyp, so the deck "
-    "does not read it"
+    "to it; the DRM's own Fig. 3.18.1 labels S.1-S.8 by W1 / W2 width ranges "
+    "and gives no reading under which S.4 and S.2-S.3 can both hold"
 )
 
 
@@ -611,8 +612,6 @@ NOT_IMPLEMENTED: tuple[Asap7RuleGap, ...] = (
     # M8-M9 / V8-V9 (Tables 3.18-3.19)
     *_top_metal_gaps("M8"),
     *_top_metal_gaps("M9"),
-    Asap7RuleGap("V9.PAD.EN.2", "Table 3.19.1", _PAD, "#3156"),
-    Asap7RuleGap("V9.AUX.1", "Table 3.19.1", _PAD, "#3156"),
 )
 
 #: Density disposition (#2811). The pinned DRM states no density rule: its

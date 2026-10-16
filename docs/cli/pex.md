@@ -8,7 +8,7 @@ Phase 1a of [Epic #709](https://github.com/2AMLogic/klayout-tools/issues/709)
 ("PEX-aware post-layout sim flow for klt").
 
 ```
-klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--outdir <dir>] [--backend <backend>] [--deck-option <key>=<value>]... [--pins <a,b,...>] [--rename-declared-pins] [--label-layer <role>=<layer>/<datatype>]... [--critical-net <net>]... [--critical-net-pattern <glob>]... [--critical-net-all] [--critical-net-exclude <glob>]... [--distributed-rc] [--parasitic-variant <variant>]... [--mom-rlc-net <net>] [--mom-rlc-resistance-ohm <r>] [--mom-rlc-capacitance-ff <c>] [--mom-rlc-inductance-nh <l>] [--flatten-schematic] [--device-only-leg] [--format text|json]
+klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--outdir <dir>] [--backend <backend>] [--deck-option <key>=<value>]... [--pins <a,b,...>] [--rename-declared-pins] [--label-layer <role>=<layer>/<datatype>]... [--critical-net <net>]... [--critical-net-pattern <glob>]... [--critical-net-all] [--critical-net-exclude <glob>]... [--distributed-rc] [--parasitic-variant <variant>]... [--substrate-tie-ohms <ohms>] [--mom-rlc-net <net>] [--mom-rlc-resistance-ohm <r>] [--mom-rlc-capacitance-ff <c>] [--mom-rlc-inductance-nh <l>] [--flatten-schematic] [--device-only-leg] [--format text|json]
 klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <schematic.spice> [--measure-timeout-s <seconds>] [<every flag above>]
 ```
 
@@ -155,6 +155,10 @@ klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <
   failing delta row. Echoed as `extraction.parasitic_variant` (present only
   when given). See [`extract.md`](extract.md)'s `--parasitic-variant`
   section.
+- `--substrate-tie-ohms` — passed through to `klt extract
+  --substrate-tie-ohms` (issue #3089): the substrate DC-tie resistance (default
+  `1e12`, substrate capacitively floating in transient; `0` = hard tie). See
+  [`extract.md`](extract.md)'s "Substrate tie value" section.
 - `--mom-rlc-net` / `--mom-rlc-resistance-ohm` / `--mom-rlc-capacitance-ff` /
   `--mom-rlc-inductance-nh` — passed through to `klt extract --mom-rlc-net`
   (issue #988, Epic #709 Phase 3a). Substitutes a caller-supplied,

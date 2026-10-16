@@ -59,6 +59,11 @@ from typing import TYPE_CHECKING, Any
 
 from ._layout import write_layout
 from ._provenance import build_provenance
+from .gen_cap_vpp import (
+    _cap_vpp_array_describe,
+    _cap_vpp_array_layer_params,
+    _cap_vpp_array_validate,
+)
 
 # Issue #2347 moved every family's `validate`/`describe` pair (plus the
 # helpers used only by them, and `_well_island_layer_params`, which #1875 had
@@ -241,6 +246,9 @@ from .gen_layer_params import (
     _gate_pad_clearance_um as _gate_pad_clearance_um,
 )
 from .gen_layer_params import (
+    _gate_top_endcap_um as _gate_top_endcap_um,
+)
+from .gen_layer_params import (
     _metal_res_geometry_min_um as _metal_res_geometry_min_um,
 )
 from .gen_layer_params import (
@@ -292,6 +300,7 @@ from .gen_pcells import (
     _build_bjt_array_pcell,
     _build_bond_pad_pcell,
     _build_cap_array_pcell,
+    _build_cap_vpp_array_pcell,
     _build_diff_pair_pcell,
     _build_esd_device_pcell,
     _build_guard_ring_pcell,
@@ -330,6 +339,7 @@ _PCELL_LIBRARY_NAME = "klt_gen_reference"
 #: ``cap_top_requires_<i>_*`` slots are appended the same way below
 #: :data:`_PDK_CAP_TOP_PLATE_REQUIRES` (issue #1555).
 _HIDDEN_PARAMS = {
+    "vpp_gds_path",
     "layer",
     "active_layer",
     "poly_layer",
@@ -351,6 +361,7 @@ _HIDDEN_PARAMS = {
     "voltage_flavor_mark_margin_um",
     "contact_gate_offset_um",
     "bottom_endcap_um",
+    "top_endcap_um",
     "sd_implant_layer",
     "sd_implant_present",
     "sd_implant_margin_um",
@@ -687,6 +698,21 @@ def _mos_cap_tie(
     return gate_ext_um + contact_region_um, sd_cap_xy
 
 
+def _top_endcap_neck(
+    px0: float, px1: float, w_um: float, top_endcap_um: float
+) -> list[tuple[float, float, float, float]]:
+    """The gate stripe's top-edge endcap neck (issue #2936), or ``[]`` when
+    ``top_endcap_um`` is not positive.
+
+    A stripe-width poly box so the poly clears the diffusion's top edge
+    (``y == w_um``) by ``top_endcap_um`` across the *full* gate length. The
+    landing pad alone does not -- it is only ``contact_region_um`` wide,
+    narrower than the gate once ``l_um`` exceeds that."""
+    if top_endcap_um <= 0:
+        return []
+    return [(px0, w_um, px1, w_um + top_endcap_um)]
+
+
 def _mos_unit_layout(
     w_um: float,
     l_um: float,
@@ -698,6 +724,7 @@ def _mos_unit_layout(
     bottom_endcap_um: float = 0.0,
     sd_implant_margin_um: float = 0.0,
     mos_cap: bool = False,
+    top_endcap_um: float = 0.0,
 ) -> dict[str, Any]:
     """One MOS-like unit device: a diffusion strip crossed by ``fingers``
     poly gates, with a contact + local-metal pad in each source/drain
@@ -788,6 +815,10 @@ def _mos_unit_layout(
     ``bottom_endcap_um`` (:func:`_gate_bottom_endcap_um`) extends every gate
     stripe's *bottom* edge (``y == 0``) down past the diffusion, mirroring
     the endcap the *top* edge's own #461 landing pad already provides there;
+    ``top_endcap_um`` (:func:`_gate_top_endcap_um`, issue #2936) is the
+    top-edge counterpart: a stripe-width poly neck that many um past the
+    diffusion's top edge (``0.0`` -- no neck -- on every family but sky130;
+    the parallel/strapped shape already runs its stripes up into the comb);
     ``sd_implant_margin_um`` (:func:`_sd_implant_margin_um`) draws a
     ``"sd_implant"`` box -- present only when this margin is positive --
     covering the unit's own ``active`` box grown by that margin on every
@@ -906,6 +937,7 @@ def _mos_unit_layout(
         g_cy = pad_y0 + stem_um + contact_region_um / 2.0
         for px0, px1 in poly_positions:
             g_cx = (px0 + px1) / 2.0
+            boxes["poly"].extend(_top_endcap_neck(px0, px1, w_um, top_endcap_um))
             if clearance_um:
                 boxes["poly"].append((px0, w_um, px1, pad_y0))
             boxes["poly"].append(
@@ -1268,6 +1300,7 @@ def _mos_array_layout(
     mos_cap: bool = False,
     pitch_x_um: float = 0.0,
     pitch_y_um: float = 0.0,
+    top_endcap_um: float = 0.0,
 ) -> dict[str, Any]:
     """A ``rows`` x ``cols`` grid of :func:`_mos_unit_layout` unit devices,
     with ``dummy`` extra unit-device columns flanking each side.
@@ -1362,6 +1395,7 @@ def _mos_array_layout(
         bottom_endcap_um,
         sd_implant_margin_um,
         mos_cap,
+        top_endcap_um=top_endcap_um,
     )
     min_col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
     min_row_pitch = unit["bbox_height_um"] + MIN_SAME_LAYER_SPACING_UM
@@ -2397,6 +2431,7 @@ def _diff_pair_layout(
     contact_gate_offset_um: float = 0.0,
     bottom_endcap_um: float = 0.0,
     sd_implant_margin_um: float = 0.0,
+    top_endcap_um: float = 0.0,
 ) -> dict[str, Any]:
     """Two matched devices (``"A"``/``"B"``), each split into ``splits``
     unit sub-instances, interleaved in a true common-centroid cross-quad
@@ -2443,6 +2478,7 @@ def _diff_pair_layout(
         contact_gate_offset_um=contact_gate_offset_um,
         bottom_endcap_um=bottom_endcap_um,
         sd_implant_margin_um=sd_implant_margin_um,
+        top_endcap_um=top_endcap_um,
     )
     col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
     row_pitch = unit["bbox_height_um"] + row_spacing_um
@@ -2709,6 +2745,7 @@ def _esd_device_layout(
     contact_gate_offset_um: float = 0.0,
     bottom_endcap_um: float = 0.0,
     sd_implant_margin_um: float = 0.0,
+    top_endcap_um: float = 0.0,
 ) -> dict[str, Any]:
     """Grounded-gate multi-finger ESD MOS clamp (issue #569): a single
     :func:`_mos_unit_layout` unit device with ``fingers`` gate stripes across
@@ -2735,6 +2772,7 @@ def _esd_device_layout(
         contact_gate_offset_um=contact_gate_offset_um,
         bottom_endcap_um=bottom_endcap_um,
         sd_implant_margin_um=sd_implant_margin_um,
+        top_endcap_um=top_endcap_um,
     )
 
     ring = None
@@ -3559,6 +3597,7 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
     pcell_classes.update(_build_mos_array_pcell())
     pcell_classes.update(_build_res_array_pcell())
     pcell_classes.update(_build_cap_array_pcell())
+    pcell_classes.update(_build_cap_vpp_array_pcell())
     pcell_classes.update(_build_guard_ring_pcell())
     pcell_classes.update(_build_well_island_pcell())
     pcell_classes.update(_build_diff_pair_pcell())
@@ -3671,6 +3710,19 @@ _GENERATOR_SPECS: dict[str, _GeneratorSpec] = {
         validate=_cap_array_validate,
         describe=_cap_array_describe,
         layer_params=_cap_array_layer_params,
+    ),
+    "cap_vpp_array": _GeneratorSpec(
+        name="cap_vpp_array",
+        summary=(
+            "Row of a PDK's fixed-layout vertical-parallel-plate capacitor "
+            "cell (sky130's sky130_fd_pr__cap_vpp_*), instantiated as-drawn "
+            "from the PDK GDS on params.pitch_um; ports are read from the "
+            "cell's own pin labels (issue #3100)."
+        ),
+        dbu=0.001,
+        validate=_cap_vpp_array_validate,
+        describe=_cap_vpp_array_describe,
+        layer_params=_cap_vpp_array_layer_params,
     ),
     "guard_ring": _GeneratorSpec(
         name="guard_ring",
