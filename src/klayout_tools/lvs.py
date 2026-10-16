@@ -1014,6 +1014,11 @@ def run_lvs(request: str) -> dict[str, Any]:
     # -- see `_parse_layout_label_layers` for the shape and the
     # extraction-only rule. `None` when omitted/`null`.
     label_layers = _parse_layout_label_layers(layout_spec)
+    # Issue #2853: `layout.abstract_cells`/`abstract_cell_lef` mirror `klt
+    # extract --abstract-cells`/`--abstract-cell-lef` for inline extraction
+    # only -- see `_parse_layout_abstract_cells` for the shape and the
+    # extraction-only rule.
+    layout_abstraction = _parse_layout_abstract_cells(layout_spec, request_dir)
 
     options = request.get("options") or {}
     # Issue #2813: a FinFET extraction deck's devices are only correct with
@@ -1119,6 +1124,7 @@ def run_lvs(request: str) -> dict[str, Any]:
         extracted_netlist_path,
         layout_net_label_positions,
         layout_pin_renames,
+        layout_abstracted_cells,
     ) = _resolve_layout(
         layout_spec,
         request_dir,
@@ -1127,6 +1133,7 @@ def run_lvs(request: str) -> dict[str, Any]:
         deck_options,
         label_layers,
         reference_spec.get("deck"),
+        layout_abstraction,
     )
     # Inspect original scoped nets before any transform can discard a power
     # island or flatten independent child definitions into a shared scope.
@@ -1504,6 +1511,13 @@ def run_lvs(request: str) -> dict[str, Any]:
     # NFIN compared exactly on both sides.
     finfet_bulk_records = prepare_finfet_comparison(
         finfet_layout, layout_netlist, layout_circuit, reference_netlist, finfet_bulk
+    )
+
+    # Issue #2853 (option (b)): resolved here, after both sides' optional
+    # flatten, because a flattened side no longer carries the stub instances
+    # the reason talks about -- see `_with_stub_power_connectivity_reason`.
+    power_connectivity = _with_stub_power_connectivity_reason(
+        power_connectivity, reference_form, layout_circuit
     )
 
     # What the layout-side deck can structurally recognise
@@ -2528,6 +2542,11 @@ def run_lvs(request: str) -> dict[str, Any]:
         # see `_label_layers_echo`. Absent when no override was applied, so
         # those reports stay byte-identical to before.
         **_label_layers_echo(label_layers),
+        # Issue #2853: the applied `layout.abstract_cells`/
+        # `abstract_cell_lef` black-box abstraction and its per-cell report
+        # -- see `_layout_abstraction_echo`. Absent when no abstraction was
+        # requested, so those reports stay byte-identical to before.
+        **_layout_abstraction_echo(layout_abstraction, layout_abstracted_cells),
         "reference": reference_echo,
         "top": layout_circuit.name,
         # Issue #1205: the *reference* side's resolved top circuit name,
@@ -2921,6 +2940,8 @@ def _reconstruct_lvs_request(committed: dict[str, Any]) -> dict[str, Any]:
         # Issue #2686: replay the applied label-purpose override, `null`
         # roles included; a report without the echo replays without one.
         layout_spec.update(_label_layers_replay(committed))
+        # Issue #2853: replay the cell-level black-box abstraction too.
+        layout_spec.update(_layout_abstraction_replay(committed))
     else:
         layout_spec["netlist"] = committed.get("layout")
 
@@ -3351,6 +3372,136 @@ def _parse_layout_label_layers(
     return overrides
 
 
+class _LayoutAbstraction(NamedTuple):
+    """``request.layout.abstract_cells``/``abstract_cell_lef`` (issue #2853),
+    parsed by :func:`_parse_layout_abstract_cells`.
+
+    ``patterns``/``lef_paths`` are what
+    :func:`~klayout_tools.extract.extract_netlist_from_layout` takes
+    (``abstract_cell_patterns``/``abstract_cell_lef_paths``; the LEF paths
+    resolved against the request document's directory). ``echo`` is the
+    response-side echo of the fields *as given* (paths unresolved, the
+    convention ``layout``/``reference`` are echoed under), ``{}`` when
+    neither field was given -- see :func:`_layout_abstraction_echo`.
+    """
+
+    patterns: tuple[str, ...]
+    lef_paths: tuple[str, ...]
+    echo: dict[str, list[str]]
+
+
+def _layout_str_list(layout_spec: dict[str, Any], key: str) -> list[str]:
+    """``request.layout.<key>`` as a list of strings, ``[]`` when absent or
+    ``null``. A bare string is accepted as a one-element list, exactly as
+    ``klt extract``'s request document accepts it for the same field
+    (:func:`klayout_tools.cli._request_document.get_str_list`) -- the flags
+    these fields mirror are repeatable and one value is the common case."""
+    value = layout_spec.get(key)
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if not isinstance(value, list) or not all(
+        isinstance(entry, str) for entry in value
+    ):
+        raise LvsError(
+            f"request.layout.{key} must be a string or an array of strings "
+            f"(got {type(value).__name__}: {value!r})"
+        )
+    return list(value)
+
+
+def _parse_layout_abstract_cells(
+    layout_spec: dict[str, Any], request_dir: str
+) -> _LayoutAbstraction:
+    """``request.layout.abstract_cells``/``abstract_cell_lef`` (issue #2853):
+    the request-document counterparts of ``klt extract --abstract-cells`` /
+    ``--abstract-cell-lef`` (issue #620), forwarded to inline extraction so a
+    mixed-level compare -- a transistor-level region next to placed cells
+    extracted as pin-only black boxes -- runs as **one** ``klt lvs`` request
+    and keeps the deck-aware checks (``body_verification``) that need the
+    inline-extraction shape.
+
+    Same shape and validation as ``klt extract``'s request fields of the same
+    names (``cli/extract_cmd.py``): each is a string or an array of strings
+    (``fnmatch`` cell-name globs / LEF file paths, the latter resolved
+    against the request document's directory). An empty array is a no-op,
+    as it is for ``klt extract``. ``abstract_cell_lef`` without a non-empty
+    ``abstract_cells`` is rejected, mirroring ``run_extract``'s own check (the
+    LEF is only ever a pin-resolution *fallback* for a matched cell type).
+
+    **Extraction-only**, like ``layout.label_layers``: a non-empty value on
+    the pre-extracted ``layout.netlist`` shape is a clean :class:`LvsError`
+    -- that netlist's cells were already abstracted (or not) when it was
+    extracted, and silently accepting the field would read as "the
+    abstraction was applied".
+    """
+    patterns = _layout_str_list(layout_spec, "abstract_cells")
+    lef_given = _layout_str_list(layout_spec, "abstract_cell_lef")
+    if (patterns or lef_given) and "netlist" in layout_spec:
+        given = "abstract_cells" if patterns else "abstract_cell_lef"
+        raise LvsError(
+            f"request.layout.{given} applies only to inline extraction "
+            "(request.layout.file + request.layout.deck): a pre-extracted "
+            "request.layout.netlist was already abstracted (or not) when it "
+            "was extracted -- re-extract it with `klt extract "
+            "--abstract-cells ...`, or give request.layout.file instead"
+        )
+    if lef_given and not patterns:
+        raise LvsError(
+            "request.layout.abstract_cell_lef was given but "
+            "request.layout.abstract_cells is empty -- abstract_cell_lef only "
+            "has an effect as a pin-resolution fallback for a cell type "
+            "abstract_cells actually matches"
+        )
+    echo: dict[str, list[str]] = {}
+    if patterns:
+        echo["abstract_cells"] = list(patterns)
+    if lef_given:
+        echo["abstract_cell_lef"] = list(lef_given)
+    return _LayoutAbstraction(
+        patterns=tuple(patterns),
+        lef_paths=tuple(_resolve_relative(path, request_dir) for path in lef_given),
+        echo=echo,
+    )
+
+
+def _layout_abstraction_echo(
+    abstraction: _LayoutAbstraction, abstracted_cells: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """The response's ``abstract_cells``/``abstract_cell_lef``/
+    ``abstracted_cells`` fields (issue #2853), or ``{}`` when the request
+    abstracted nothing.
+
+    ``abstract_cells``/``abstract_cell_lef`` echo the request fields as given
+    (and are replayed by ``--check --rerun``); ``abstracted_cells`` is the
+    per-matched-cell-type report ``klt extract`` emits under the same name
+    (``{"cell", "instance_count", "pin_count", "resolution_source",
+    "lef_path"}``) -- an empty list when the patterns matched no instantiated
+    cell, so "the glob matched nothing" is visible rather than silently
+    indistinguishable from a full abstraction. All three are omitted
+    entirely (not ``null``) when ``layout.abstract_cells`` was not given, so
+    every report from a request without it -- and every report committed
+    before it existed -- stays byte-identical.
+    """
+    if not abstraction.patterns:
+        return {}
+    return {**abstraction.echo, "abstracted_cells": list(abstracted_cells)}
+
+
+def _layout_abstraction_replay(committed: dict[str, Any]) -> dict[str, Any]:
+    """The ``request.layout`` keys that rebuild a committed report's
+    ``abstract_cells``/``abstract_cell_lef`` echo (issue #2853), or ``{}`` for
+    a report without one. Passed through verbatim, so a malformed recorded
+    value is rejected by :func:`_parse_layout_abstract_cells` on replay rather
+    than silently becoming a different, valid request."""
+    replay: dict[str, Any] = {}
+    for key in ("abstract_cells", "abstract_cell_lef"):
+        if committed.get(key) is not None:
+            replay[key] = committed[key]
+    return replay
+
+
 def _label_layers_echo(
     label_layers: Mapping[str, tuple[int, int] | None] | None,
 ) -> dict[str, Any]:
@@ -3489,6 +3640,7 @@ def _resolve_layout(
     deck_options: Mapping[str, str] | None = None,
     label_layers: Mapping[str, tuple[int, int] | None] | None = None,
     reference_deck_name: str | None = None,
+    abstraction: _LayoutAbstraction | None = None,
 ) -> tuple[
     kdb.Netlist,
     str,
@@ -3496,9 +3648,11 @@ def _resolve_layout(
     str | None,
     dict[int, list[dict[str, Any]]],
     dict[str, Any] | None,
+    list[dict[str, Any]],
 ]:
     """Resolve ``request.layout`` to ``(netlist, echo, hash_source_path,
-    extracted_netlist_path_or_none, net_label_positions, pin_renames)``.
+    extracted_netlist_path_or_none, net_label_positions, pin_renames,
+    abstracted_cells)``.
     Original drawn labels are keyed by layout cluster for the
     supply-fragmentation check; pre-extracted SPICE has no such label map
     and returns an empty mapping. ``pin_renames`` (issue #2854) is `klt
@@ -3508,6 +3662,9 @@ def _resolve_layout(
     ``error``-severity findings become ``pin.declared_short``
     ``mismatches[]`` entries (see :func:`_declared_pin_short_mismatches`),
     the rename/collision disclosures stay extract-report-only.
+    ``abstracted_cells`` (issue #2853) is inline extraction's
+    ``--abstract-cells`` report (always ``[]`` for the ``layout.netlist``
+    shape, and whenever ``abstraction`` carries no patterns).
 
     Two supported shapes (spike section 2b): ``{"file", "deck", "top"}`` runs
     inline extraction (composing ``extract.py``'s core function); ``{"netlist",
@@ -3537,6 +3694,18 @@ def _resolve_layout(
     shape, so it never reaches that branch); an unknown role raises
     :class:`~klayout_tools.extract.ExtractError`, re-raised as
     :class:`LvsError` below.
+
+    ``abstraction`` (issue #2853, ``request.layout.abstract_cells``/
+    ``abstract_cell_lef``): forwarded to
+    :func:`~klayout_tools.extract.extract_netlist_from_layout` for the
+    ``layout.file`` shape -- every instantiated cell matching one of the
+    patterns is extracted as a pin-only black box, exactly like ``klt extract
+    --abstract-cells``. Already validated by
+    :func:`_parse_layout_abstract_cells` (which rejects it on the
+    ``layout.netlist`` shape, so it never reaches that branch). No PDK is
+    resolved here (``klt lvs`` has no ``layout.pdk``), so an
+    ``abstract_cell_lef`` port is probed the way ``klt extract
+    --abstract-cell-lef`` probes it without ``--pdk``.
 
     ``combine_devices`` (issue #559): when ``True`` (``options.combine_devices``
     in the caller's request), inline extraction defers each opted-in
@@ -3663,8 +3832,10 @@ def _resolve_layout(
             # in `klt lvs`'s response -- the compare itself is unaffected by
             # which voltage-domain model a MOS device happens to bind to.
             # The 10th return (abstracted_cells, #620) is `klt extract
-            # --abstract-cells`'s own report; `klt lvs` never passes that
-            # flag, so it is always an empty list here. The 11th return
+            # --abstract-cells`'s own report; `klt lvs` forwards
+            # `request.layout.abstract_cells` (issue #2853) and echoes this
+            # report as the response's `abstracted_cells` (an empty list
+            # when no abstraction was requested). The 11th return
             # (dead_metal, #676) is likewise a report-only structured view of
             # `klt extract`'s own warnings -- routing geometry on no net
             # cannot change which devices/nets the compare below sees. The
@@ -3737,6 +3908,17 @@ def _resolve_layout(
                 # extract --label-layer`. `None` when the field was never
                 # given, unchanged from every request that predates it.
                 label_layers=label_layers,
+                # Issue #2853: `request.layout.abstract_cells`/
+                # `abstract_cell_lef` -- mirrors `klt extract
+                # --abstract-cells`/`--abstract-cell-lef`. `()` when the
+                # fields were never given, unchanged from every request that
+                # predates them.
+                abstract_cell_patterns=(
+                    abstraction.patterns if abstraction is not None else ()
+                ),
+                abstract_cell_lef_paths=(
+                    abstraction.lef_paths if abstraction is not None else ()
+                ),
             )
         except ExtractError as exc:
             raise LvsError(str(exc)) from exc
@@ -3768,6 +3950,7 @@ def _resolve_layout(
             extracted_netlist_path,
             _net_label_positions,
             _pin_renames,
+            _abstracted_cells,
         )
 
     layout_netlist_path = _require_path(layout_spec, "netlist", "layout", request_dir)
@@ -3834,8 +4017,9 @@ def _resolve_layout(
         ) from exc
 
     # Issue #2854: no inline extraction ran for the pre-extracted
-    # `layout.netlist` shape, so there is no `pin_renames` block to report.
-    return netlist, layout_spec["netlist"], layout_netlist_path, None, {}, None
+    # `layout.netlist` shape, so there is no `pin_renames` block to report
+    # and (issue #2853) nothing was abstracted.
+    return netlist, layout_spec["netlist"], layout_netlist_path, None, {}, None, []
 
 
 def _read_reference_netlist(
@@ -9365,6 +9549,81 @@ def _power_connectivity_unchecked(
         "findings": [],
         "finding_count": 0,
     }
+
+
+def _pin_only_stub_cells(circuit: Any) -> list[str]:
+    """Sorted names of the pin-only (black-box) circuits ``circuit``
+    instantiates directly -- a circuit with no devices and no subcircuit
+    instances of its own, the shape ``klt extract --abstract-cells`` (and
+    ``request.layout.abstract_cells``, issue #2853) writes for every
+    abstracted cell type. Empty when ``circuit`` instantiates none."""
+    names: set[str] = set()
+    for subcircuit in circuit.each_subcircuit():
+        ref = subcircuit.circuit_ref()
+        if ref is None:
+            continue
+        if any(True for _ in ref.each_device()) or any(
+            True for _ in ref.each_subcircuit()
+        ):
+            continue
+        names.add(ref.name)
+    return sorted(names)
+
+
+def _stub_power_connectivity_reason(reference_form: str, stub_cells: list[str]) -> str:
+    """``power_connectivity.reason`` for a non-``gate-level-verilog`` compare
+    whose layout instantiates pin-only black-box cells (issue #2853).
+
+    Option (b) of that issue, chosen deliberately over a per-instance audit:
+    the audit :func:`_power_connectivity_report` runs for the gate-level form
+    needs a *power-pin universe* -- which pin names are power/ground -- and
+    that form derives it from the PDK library's own pin-order data. A
+    ``plain-element``/``subckt-call`` reference has no such source: its stub
+    circuits are arbitrary hand-written ``.SUBCKT`` declarations, and naming
+    any of their pins "power" would be a guess. It also does not need one:
+    the reference *does* carry the stubs' power/ground connections, and the
+    comparer pairs a pin-only circuit's pins by name (stub pin order is
+    irrelevant), so a power pin wired to the wrong net is already a compare
+    mismatch. The report says exactly that, rather than the generic reason
+    implying there is nothing cell-level to say.
+    """
+    shown = ", ".join(stub_cells[:5]) + (
+        f", ... ({len(stub_cells)} total)" if len(stub_cells) > 5 else ""
+    )
+    return (
+        f"reference.form is {reference_form!r}, whose reference netlist "
+        "carries its own power/ground pins and nets -- they take part in "
+        "the ordinary compare. That includes the pin-only black-box cell(s) "
+        f"this layout instantiates ({shown}): every stub pin, power/ground "
+        "pins included, was compared as ordinary subcircuit-pin "
+        "connectivity, paired by pin name (stub pin order does not matter), "
+        "so a power pin wired to the wrong net is a compare mismatch, not a "
+        "silent pass. No separate per-instance power-pin audit ran: that "
+        "audit needs a library-derived power/ground pin universe, which only "
+        "the 'gate-level-verilog' form has"
+    )
+
+
+def _with_stub_power_connectivity_reason(
+    power_connectivity: dict[str, Any],
+    reference_form: str,
+    layout_circuit: Any,
+) -> dict[str, Any]:
+    """``power_connectivity`` with its ``unchecked`` reason replaced by
+    :func:`_stub_power_connectivity_reason` when a non-``gate-level-verilog``
+    compare's layout instantiates pin-only black-box cells (issue #2853
+    option (b): a transistor-level region next to abstracted cells, against a
+    reference carrying pin-only stubs for them). Unchanged for the
+    ``gate-level-verilog`` form (it runs the real audit) and when the layout
+    instantiates no such cell."""
+    if reference_form == "gate-level-verilog":
+        return power_connectivity
+    stub_cells = _pin_only_stub_cells(layout_circuit)
+    if not stub_cells:
+        return power_connectivity
+    return _power_connectivity_unchecked(
+        _stub_power_connectivity_reason(reference_form, stub_cells)
+    )
 
 
 def _power_connectivity_report(

@@ -1212,6 +1212,82 @@ marker (241/0).
 - `klt drc rules` lists the covering and marker layers in the rule's
   `layers`.
 
+### `"tap_distance"` check kind (issue #3607)
+
+A second region rule, declared with `DrcRule(check="tap_distance",
+region_spec=TapDistanceSpec(...))`. It reports every *whole* active polygon
+that does not lie within `max_distance_um` of a tap. gf180mcu's
+`comp.tap_distance.nwell.lv.1` (DRM `DF.13_LV`: PCOMP inside a well, taps are
+NCOMP inside the well) and `comp.tap_distance.psub.lv.1` (DRM `DF.14_LV`:
+NCOMP outside any well, taps are PCOMP outside the well) are the first users,
+both at 20 µm for the 3.3 V column. The `_MV` variants are not declared.
+
+The descriptor carries `well_domain` (`"inside"` / `"outside"`), `voltage`
+(`"lv"` / `"mv"`), `max_distance_um`, `step_um` (default 0.5) and the
+`nwell`/`dnwell`/`lvpwell`/`nplus`/`pplus`/`res_mk`/`dualgate`/`v5_xtor` layers
+it reads. A malformed descriptor (unknown domain/voltage, non-positive
+distance or step, distance not a multiple of the step) raises `ValueError`
+when the deck module is imported.
+
+- **Semantics** follow the pinned upstream deck, not a per-point reading of the
+  DRM text: selection is of whole polygons that do not interact with the tap
+  reach region, so a long active with one end near a tap is legal. `inside`
+  grows the tap in `step_um` octagon steps, clipping every step with the raw
+  `nwell` layer; `outside` uses a diamond candidate filter refined by a
+  Euclidean separation check. The two do not share one boundary metric. See
+  `docs/design/gf180mcu-comp-checks-spike.md` and the gf180mcu deck's "Known
+  approximations" (D1–D3, D7).
+- **Reporting**: one violation per selected polygon (`check: "tap_distance"`,
+  real `bbox` and `polygon`). Evaluated flat, per top cell, on merged regions.
+- **Empty tap layers never skip the rule**: with active present and no tap
+  drawn (or every tap under a `res_mk` marker), the active is reported.
+- **Voltage markers**: `dualgate` / `v5_xtor` are marker reads. `lv` selects
+  active touching neither; `mv` selects active overlapping `dualgate`. A rule
+  that reads the marker is not part of `coverage.voltage_domain_warnings`.
+- **Coverage**: `comp` absent → `inapplicable` (`no_applicable_geometry`).
+  `comp` drawn but the voltage-selected active region empty →
+  `inapplicable` (`inapplicable_empty_checked_region`), not counted in
+  `rules_checked`. A `max_distance_um` or `step_um` that is not a whole number
+  of database units on the layout's `dbu` is *skipped* with reason
+  `grid_not_representable` rather than rounded.
+- `klt drc rules` reports `value_um: null` for these rules and exposes
+  `well_domain`, `voltage`, `max_distance_um` and `step_um` under `limits`.
+
+- **Generator output is not tap-clean on gf180mcu.** DF.13_LV/DF.14_LV are in
+  the default deck and are not suppressed or relaxed (the 20 µm limit is the
+  published rule). `klt gen` does not emit well/substrate taps yet (tracked
+  separately), so tapless generator and `gen-compose` output on gf180mcu
+  reports `comp.tap_distance.*` violations. That is a real missing-tap finding,
+  not a deck bug; tests and `examples/dogbone-terminal` assert exactly that
+  rather than a whole-deck `clean`.
+
+### `"net_space"` check kind (issue #3572)
+
+A net-aware spacing check: it measures `layer` against itself at
+`threshold_dbu` like `"space"`, but reports only facing edges of polygons on
+**different nets**. Declared with `DrcRule(check="net_space",
+net_spec=NetSpaceSpec(tap_and=..., chain=...))`. sg13cmos5l's `nwell.space.2`
+(`NW.b1`, 1.80 um between NWells of different nets) is the first user, so
+`NW.b1` is no longer listed in `coverage.unchecked_rules`.
+
+- **Connectivity model** (`NetSpaceSpec`): KLayout `LayoutToNetlist` over a
+  straight chain. The *tap* is `layer` intersected with every `tap_and` layer
+  (sg13cmos5l: `Activ` & `nSD`, an n+ well tie); it joins the well it sits in,
+  then `chain[0]`, `chain[1]`, ... in order (sg13cmos5l: `Cont`, then
+  `Metal1`). Touching shapes on one layer join. A well with no tap is its own
+  net.
+- **What is not modelled** (never silently treated as connected, so such wells
+  may be *over*-flagged, not passed): connections through layers outside the
+  chain (Metal2+/Via*, TopMetal*, poly/Activ jumpers), `NWell.pin` labels and
+  substrate connectivity. Each deck states its own list next to the rule.
+- **Reporting**: ordinary edge-pair violations (`check: "net_space"`, real
+  `bbox` and `polygon`, rule id, provenance), identical in shape to `"space"`.
+  Evaluated flat per top cell. Corner-to-corner gaps use Euclidean distance;
+  wells that touch or overlap merge into one polygon and are never flagged.
+- **Contract**: additive only -- a new `check` string and no new JSON field.
+  `nwell.space.1` (geometric, same- and different-net) is unchanged and still
+  over-flags same-net pairs between 0.62 um and its threshold.
+
 ### `"ongrid"` / `"angle"` check kinds (issue #2642)
 
 Two single-layer **vertex** check kinds, as opposed to the distance checks
@@ -2957,7 +3033,7 @@ zero-violation case (where `drc__error__count` is `0`).
 | ------------- | ------------------- | ----------------------------------------------------------------------------- |
 | `rule`        | string               | Stable rule id (e.g. `"poly.width.1"`) — never renumbered once shipped.       |
 | `description` | string               | Human-readable rule description.                                              |
-| `check`       | string               | The check kind (`"width"`, `"space"`, `"enclosing"`, etc.). For `"enclosing"`/`"enclosed"`, `check` does not distinguish a marginal-distance violation from a zero-overlap escape violation — both are reported under the same `check` string; see "`\"enclosing\"`/`\"enclosed\"` also catch zero-overlap escapes" above. |
+| `check`       | string               | The check kind (`"width"`, `"space"`, `"enclosing"`, `"net_space"`, etc.). For `"enclosing"`/`"enclosed"`, `check` does not distinguish a marginal-distance violation from a zero-overlap escape violation — both are reported under the same `check` string; see "`\"enclosing\"`/`\"enclosed\"` also catch zero-overlap escapes" above. |
 | `layer`       | string               | The deck's own layer name (e.g. sky130's `"poly.drawing"` or gf180mcu's `"Poly2"`) if the deck names the layer, else `"<layer>/<datatype>"`. |
 | `cell`        | string               | Name of the top cell the violation was found under. (The check is flattened per top cell — see "Limitation: whole-layout, flattened" — so this is always a top cell, never a sub-instance.) |
 | `source_cell` | string \| null       | Cell-definition name of the *innermost placed instance* whose bounding box fully contains this violation's `bbox` — the originating standard cell for a hierarchical, machine-generated layout. `null` when the violation is contained in no single instance: top-level geometry, or a `bbox` that straddles an instance boundary (a violation *between* two placements belongs to neither). See "Per-instance attribution" below. |
@@ -2991,7 +3067,7 @@ for which skipped rules make a run partial and which do not.
 | `layers_in_stream_without_rules`   | array\<string\> | `"<layer>/<datatype>"` pairs present in the input stream that no active rule in the selected deck references at all — the load-bearing field: turns `"clean"` into "clean, and here is exactly what was not looked at." Sorted ascending by `(layer, datatype)`. |
 | `rules_skipped`                    | array\<string\> | Rule ids silently skipped because a layer they read was absent from this stream — `layer`/`other_layer`, or a `derived_layer` input (with one documented exception: a `"not_interacting"` derived rule still runs when its marker layer is absent, see "Voltage-domain rule pairs" above). Sorted alphabetically. |
 | `voltage_domain_warnings`          | array\<object\> | `{"marker": "<layer>/<datatype>", "description": string}` — see below. Sorted by marker `(layer, datatype)`. |
-| `unchecked_rules`                  | array\<object\> | `{"rule": string, "layer": "<layer>/<datatype>", "description": string}` — foundry rules the deck knows about but cannot evaluate (issue #3012; e.g. `sg13cmos5l`'s net-aware `NW.b1`), listed only when the rule's layer is in the stream, so a `clean` is not read as covering them. Purely informational: does not change `status`. Sorted by rule id. Additive; `[]` for decks that declare none. |
+| `unchecked_rules`                  | array\<object\> | `{"rule": string, "layer": "<layer>/<datatype>", "description": string}` — foundry rules the deck knows about but cannot evaluate (issue #3012; `sg13cmos5l`'s net-aware `NW.b1` was the first, now checked by `net_space`, #3572, so the map is currently empty), listed only when the rule's layer is in the stream, so a `clean` is not read as covering them. Purely informational: does not change `status`. Sorted by rule id. Additive; `[]` for decks that declare none. |
 | `deck_scope`                       | array\<string\> | Every distinct DRM section / official rule-id prefix the selected deck's rules claim to implement — a static property of the deck, independent of the input stream (issue #566). Sorted alphabetically. |
 | `unmodeled_rules`                  | array\<string\> | Curated engine only: official foundry-runset rule ids the selected deck knowingly does **not** transcribe (issue #3031) — a static property of the deck. sky130: `m1.5`, `m2.5`, `via.5a`, `via2.5`, `via3.5`. See below. Sorted alphabetically; empty for a deck that declares none. |
 | `rule_categories`                  | array\<string\> | KLayout engine only: declared RDB categories, never execution proof. |
