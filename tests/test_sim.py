@@ -12691,3 +12691,60 @@ def test_noise_representation(plotname, vtype, expected):
         "points": [[1.0]],
     }
     assert sim.noise_representation(waveform) == expected
+
+
+# --- `--report FILE` (issue #3057) -------------------------------------------
+
+
+def _stub_report(monkeypatch, report):
+    from klayout_tools.cli import sim_cmd
+
+    monkeypatch.setattr(sim_cmd, "run_sim", lambda *a, **k: report)
+
+
+def test_report_flag_writes_stdout_bytes_and_creates_parents(
+    tmp_path, monkeypatch, capsys
+):
+    report = {
+        "schema_version": "1",
+        "status": "pass",
+        "environment": {"remote": {"job_id": "job-1"}},
+    }
+    _stub_report(monkeypatch, report)
+    target = tmp_path / "nested" / "dir" / "report.json"
+    assert main(["sim", "req.json", "--report", str(target), "--format", "json"]) == 0
+    assert target.read_text() == capsys.readouterr().out
+    assert json.loads(target.read_text())["environment"]["remote"]["job_id"] == "job-1"
+
+
+def test_report_flag_is_json_even_with_text_format(tmp_path, monkeypatch, capsys):
+    from klayout_tools.cli import sim_cmd
+
+    _stub_report(monkeypatch, {"status": "pass", "corners": []})
+    monkeypatch.setattr(sim_cmd, "_print_text", lambda report: print("text"))
+    target = tmp_path / "r.json"
+    main(["sim", "req.json", "--report", str(target), "--format", "text"])
+    capsys.readouterr()
+    assert json.loads(target.read_text())["status"] == "pass"
+
+
+def test_report_flag_not_written_on_error(tmp_path, monkeypatch):
+    from klayout_tools.cli import sim_cmd
+
+    def boom(*a, **k):
+        raise sim.SimError("bad request")
+
+    monkeypatch.setattr(sim_cmd, "run_sim", boom)
+    target = tmp_path / "r.json"
+    assert main(["sim", "req.json", "--report", str(target), "--format", "json"]) == 1
+    assert not target.exists()
+
+
+def test_report_flag_leaves_outdir_semantics_and_rejects_batch_set(tmp_path, capsys):
+    target = tmp_path / "r.json"
+    code = main(
+        ["sim", "--batch-set", "a.json", "--report", str(target), "--format", "json"]
+    )
+    assert code != 0
+    assert not target.exists()
+    assert "--report" in capsys.readouterr().err

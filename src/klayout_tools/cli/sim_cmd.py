@@ -40,7 +40,9 @@ see ``docs/cli/sim.md``'s "Operating-point lint" section.
 """
 
 import argparse
+import json
 import sys
+from pathlib import Path
 
 from ..env_provenance import render_path_field
 from ..op_sanity import OpSanityError, run_op_sanity
@@ -94,8 +96,15 @@ def run(args: argparse.Namespace) -> int:
         return emit_error("sim", str(exc), args.format, code=exc.code)
 
     deck_mode = report.get("mode") == "decks"
+    write_error = _write_report(report, args)
+    if write_error is not None:
+        return write_error
     emit_success(report, args.format, _print_deck_text if deck_mode else _print_text)
+    return _exit_code_for(report, deck_mode)
 
+
+def _exit_code_for(report: dict, deck_mode: bool) -> int:
+    """Exit code derived from the payload's own authoritative `status`."""
     if deck_mode:
         # Issue #2804: deck-list requests carry no graded measurements, so
         # the 3 ("ran, a limit missed") outcome cannot arise -- the deck
@@ -114,6 +123,25 @@ def run(args: argparse.Namespace) -> int:
     return EXIT_PASS
 
 
+def _write_report(report: dict, args: argparse.Namespace) -> int | None:
+    """Issue #3057: write the `--report FILE` copy of the JSON payload.
+
+    Returns an error exit code if the file could not be written, else ``None``.
+    """
+    report_path = getattr(args, "report", None)
+    if report_path is None:
+        return None
+    try:
+        path = Path(report_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(report, indent=2) + "\n")
+    except OSError as exc:
+        return emit_error(
+            "sim", f"could not write --report {report_path}: {exc}", args.format
+        )
+    return None
+
+
 def _run_batch_set(args: argparse.Namespace) -> int:
     """``klt sim --batch-set``: submit a set of requests (issue #2869).
 
@@ -130,6 +158,7 @@ def _run_batch_set(args: argparse.Namespace) -> int:
             ("--resume", args.resume),
             ("--plot", args.plot),
             ("--op-lint", getattr(args, "op_lint", False)),
+            ("--report", getattr(args, "report", None)),
         )
         if value
     ]
@@ -191,6 +220,13 @@ def _run_op_lint(args: argparse.Namespace) -> int:
     Same request document, same exit-code vocabulary, different question --
     see this module's docstring.
     """
+    if getattr(args, "report", None) is not None:
+        return emit_error(
+            "sim",
+            "--report cannot be combined with --op-lint",
+            args.format,
+            exit_code=EXIT_USAGE_ERROR,
+        )
     try:
         report = run_op_sanity(args.request, corner=args.op_lint_corner)
     except OpSanityError as exc:
