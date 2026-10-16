@@ -5077,7 +5077,8 @@ def check_erc_report(report_path: str) -> dict[str, Any]:
 def rerun_erc_report(report_path: str) -> dict[str, Any]:
     """``klt erc --check <report> --rerun`` (full mode, issue #3060): verify a
     previously committed ``klt erc --format json`` report by re-running ERC
-    from the ``file``/``spec``/``pdk``/``findings_only`` it echoes (and the
+    from the ``file``/``spec``/``pdk``/``findings_only``/``antenna_tables_omitted``
+    it echoes (and the
     ``--deck`` named by ``provenance.deck``, when there is one) and diffing
     the fresh report against the committed one.
 
@@ -5106,5 +5107,6 @@ def rerun_erc_report(report_path: str) -> dict[str, Any]:
         pdk=committed.get("pdk"),
         deck=deck.get("name") if isinstance(deck, dict) else None,
         findings_only=bool(committed.get("findings_only")),
+        omit_antenna_tables=bool(committed.get("antenna_tables_omitted")),
     )
     return build_rerun_result(report_path=report_path, committed=committed, fresh=fresh)

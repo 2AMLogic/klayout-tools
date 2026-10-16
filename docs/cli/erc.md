@@ -2842,8 +2842,8 @@ differences between the report and the running build. It is informational: it
 never affects `status` or the exit code.
 
 **Full mode (`--rerun`)** re-runs ERC from the report's echoed
-`file`/`spec`/`pdk`/`findings_only` (and `provenance.deck.name`, when there is
-one) and diffs the fresh report against the committed one, excluding
+`file`/`spec`/`pdk`/`findings_only`/`antenna_tables_omitted` (and
+`provenance.deck.name`, when there is one) and diffs the fresh report against the committed one, excluding
 `provenance.klt_version`, `provenance.klayout_version` and
 `provenance.pdk.version`. The payload is `{"mode": "rerun", "status", "drift":
 [{"field", "committed", "fresh"}, …], "fresh": {…}}`; every drifted field is

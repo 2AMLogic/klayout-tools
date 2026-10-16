@@ -8398,6 +8398,17 @@ def test_rerun_erc_report_replays_findings_only_and_pdk(tmp_path):
     assert erc.rerun_erc_report(str(with_pdk))["status"] == "match"
 
 
+def test_rerun_erc_report_replays_omit_antenna_tables(tmp_path):
+    _, _, report = _committed_erc_report(
+        tmp_path, findings_only=True, omit_antenna_tables=True
+    )
+
+    result = erc.rerun_erc_report(str(report))
+
+    assert result["status"] == "match"
+    assert result["drift"] == []
+
+
 def test_rerun_erc_report_names_verdict_drift(tmp_path):
     _, _, report_path = _committed_erc_report(tmp_path)
     report = json.loads(report_path.read_text())
