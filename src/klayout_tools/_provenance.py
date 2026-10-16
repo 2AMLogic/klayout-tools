@@ -445,6 +445,11 @@ def _pdk_block(pdk: dict[str, Any] | None) -> dict[str, Any] | None:
     home directory (see the ``{path, scope}`` discipline in
     ``docs/json-contract.md``). The absolute roots are named in the
     stderr warning instead (:func:`klayout_tools.pdk.ambiguity_warning`).
+
+    ``compatibility`` (issue #3427) is likewise added **only** on a
+    ``mismatch`` -- the resolved tree's ``SOURCES`` stamp differs from the
+    declared open_pdks pin (:mod:`klayout_tools.pdk_compat`); ``version``
+    already carries the installed stamp.
     """
     if not pdk:
         return None
@@ -456,6 +461,15 @@ def _pdk_block(pdk: dict[str, Any] | None) -> dict[str, Any] | None:
     ambiguous = pdk.get("ambiguous_roots") or []
     if ambiguous:
         block["ambiguous_sources"] = [entry["resolved_via"] for entry in ambiguous]
+    compat = pdk.get("compatibility") or {}
+    if compat.get("status") == "mismatch":
+        # Issue #3427: only in the abnormal case, so a matching run's
+        # provenance stays byte-identical to what it was before this key.
+        block["compatibility"] = {
+            "status": "mismatch",
+            "package": compat.get("package"),
+            "expected": (compat.get("expected") or {}).get("value"),
+        }
     return block
 
 

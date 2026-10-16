@@ -312,11 +312,47 @@ in [#2729](https://github.com/2AMLogic/klayout-tools/issues/2729):
 `discretize_bars` routes a non-bundle conductor that classifies as an
 `OrientedPath` to the series-path PEEC model (see `docs/cli/mom.md`, "Series
 windings"). A winding that is not a valid path keeps the mixed-axis
-rejection, and any winding with `frequencies_hz` still fails
-`classify_bars` ("same current-flow axis") until retarded coupling and
-frequency/port acceptance land in
-[#2730](https://github.com/2AMLogic/klayout-tools/issues/2730).
-Capacitance-only solves of the same winding are unchanged.
+rejection. Capacitance-only solves of the same winding are unchanged.
+
+**Retarded coupling and the frequency-sweep contract
+([#2730](https://github.com/2AMLogic/klayout-tools/issues/2730)).**
+`classify_full_wave_bars` routes each conductor through
+`classify_conductor_topology` exactly as `discretize_bars` does and keeps a
+winding as its `OrientedPath` (`FullWaveBarLayout::windings`). `fullwave.rs`
+meshes each electrical leg into cells carrying that leg's signed unit
+direction, cell length and equal-area radius, and sums the retarded double
+integral over cell pairs with `u_p . u_q` and both lengths taken per pair.
+This replaces the single conductor-pair dot product that was applied outside
+the segment loops. For a straight bar every cell shares one direction, so the
+pre-#2730 fill is reproduced (all prior bar sweep tests are unchanged).
+
+- *Terminal impedance.* `Z[w][w]` is the winding's terminal-to-terminal
+  partial self impedance for one unit current entering the canonical start
+  terminal and flowing through every leg in series; `Z[w][k]` is its partial
+  mutual impedance to conductor `k`, signed by the canonical traversal. As
+  `omega -> 0`, `Z/(j*omega)` tends to the static series-path inductance of
+  #2729 up to the documented thin-wire self-term convention
+  (`mu0/(2*pi) * l * ln(a/GMD)` per leg).
+- *Capacitance coupling.* Not part of `Z`. The capacitance matrix stays the
+  static Maxwell matrix of the drawn boxes, reported beside the impedance;
+  there is no inter-turn shunt capacitance in the series impedance, so the
+  result is valid below the winding's first self-resonance and for
+  `k * length` of order one at most.
+- *Regularisation.* The thin-wire reduced kernel applies only to cell pairs
+  inside one leg; cells of different legs of one winding use the true
+  centre-to-centre distance, like the static inter-leg mutuals. Perpendicular
+  cells (including the two at a turn) contribute exactly zero.
+- *Discretisation regime.* Cell size comparable to or below the equivalent
+  radius; coarser cells overestimate the self term by about `cell / a`.
+- *Line quantities and ports.* A winding is not a uniform line
+  (`shared_axial_span` is `None`), so `Z0`, `gamma` and S-parameters are not
+  produced, and a request combining a winding with `ports` is rejected: a
+  port position is an offset along one straight span and no path-port
+  contract (reference planes on a bent path, feed/return pairing) has been
+  validated. A future increment would define that contract first.
+- *External evidence.* NEC2++ bent-path driving-point comparison (#3037's
+  adapter), recorded in `mom-cross-validation.md`; PyPEEC remains a static
+  oracle only.
 
 **Validation.** Native tests in `oriented_path.rs` cover:
 
@@ -330,9 +366,11 @@ Capacitance-only solves of the same winding are unchanged.
 - every rejection above, with tolerance-boundary gap cases on both sides of
   `CONTACT_TOL_UM`.
 
-`tests/test_mom.py` covers the public static/full-wave rejection and the
+`tests/test_mom.py` covers the public static and full-wave acceptance, the
+winding-with-ports rejection, the branched-winding rejection and the
 unchanged capacitance solve for a tiled U winding, drawn out of electrical
-order.
+order. The retarded-coupling checks (`fullwave.rs`,
+`tests/test_mom_fullwave_validation.py`) are listed in `mom-validation.md`.
 
 ## Out of scope
 

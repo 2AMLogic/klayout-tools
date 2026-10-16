@@ -81,7 +81,7 @@
     {
       "file": "src/klayout_tools/cli/extract_cmd.py",
       "function": "_print_text",
-      "complexity": 24
+      "complexity": 25
     },
     {
       "file": "src/klayout_tools/cli/functional_verification_cmd.py",
@@ -216,7 +216,7 @@
     {
       "file": "src/klayout_tools/extract.py",
       "function": "run_extract",
-      "complexity": 63
+      "complexity": 67
     },
     {
       "file": "src/klayout_tools/extract.py",
@@ -246,7 +246,7 @@
     {
       "file": "src/klayout_tools/extract_parasitics.py",
       "function": "_inject_parasitics",
-      "complexity": 17
+      "complexity": 20
     },
     {
       "file": "src/klayout_tools/extract_passive_regions.py",
@@ -645,6 +645,11 @@
     },
     {
       "file": "src/klayout_tools/place_and_route.py",
+      "function": "_run_single_corner",
+      "complexity": 19
+    },
+    {
+      "file": "src/klayout_tools/place_and_route.py",
       "function": "_stage_script_lines",
       "complexity": 15
     },
@@ -662,11 +667,6 @@
       "file": "src/klayout_tools/place_and_route.py",
       "function": "_validate_power",
       "complexity": 28
-    },
-    {
-      "file": "src/klayout_tools/place_and_route.py",
-      "function": "run_place_and_route",
-      "complexity": 27
     },
     {
       "file": "src/klayout_tools/place_and_route_gds_merge.py",
@@ -766,7 +766,7 @@
     {
       "file": "src/klayout_tools/sim.py",
       "function": "_run_sim_corners",
-      "complexity": 54
+      "complexity": 55
     },
     {
       "file": "src/klayout_tools/sim.py",

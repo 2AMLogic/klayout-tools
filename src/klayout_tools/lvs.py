@@ -399,6 +399,20 @@ CATEGORY_HINTS_SHORT_NETS_APPLIED = "hints.short_nets_applied"
 #: `_declared_pin_short_mismatches`.
 CATEGORY_PIN_DECLARED_SHORT = "pin.declared_short"
 
+#: Issue #2952: a reference-side ``X`` card calls a subcircuit that is
+#: defined nowhere the reader could see (no ``.subckt`` in the file or its
+#: includes), that no reference conversion turned into a device, and that has
+#: no same-named circuit on the layout side to be compared against by name.
+#: ``NetlistSpiceReader`` does not raise on such a call -- it synthesises an
+#: empty, pin-only placeholder circuit -- so the instance carries no devices
+#: and, once flattened (``options.flatten_reference``), vanishes without
+#: trace: a zero-device layout then reported ``status: "match"`` against a
+#: reference whose only device was discarded. One ``severity: "error"`` entry
+#: per offending instance (reachable from the compared reference top), and
+#: ``status`` is forced to ``"mismatch"``. See
+#: ``_unresolved_reference_subckt_calls``.
+CATEGORY_REFERENCE_UNRESOLVED_SUBCKT_CALL = "reference.unresolved_subckt_call"
+
 #: Issue #1952: ``power_connectivity.status`` values. Deliberately a
 #: *separate* verdict from the report's top-level ``status``, which stays
 #: exactly what it has always been -- ``NetlistComparer.compare()``'s own
@@ -1096,6 +1110,7 @@ def run_lvs(request: str) -> dict[str, Any]:
         combine_devices_enabled,
         deck_options,
         label_layers,
+        reference_spec.get("deck"),
     )
     # Inspect original scoped nets before any transform can discard a power
     # island or flatten independent child definitions into a shared scope.
@@ -1197,6 +1212,14 @@ def run_lvs(request: str) -> dict[str, Any]:
             if layout_parameter_correction is not None:
                 combine_per_circuit_warnings.append(layout_parameter_correction)
 
+    # Issue #2952: the layout's circuit names are snapshotted before
+    # `flatten_layout` removes the per-macro circuits, so the
+    # `reference.unresolved_subckt_call` scan's same-named-layout-circuit
+    # exemption (a black-box/`--abstract-cells` macro paired by name) holds
+    # whether or not the layout is flattened.
+    layout_circuit_names = {
+        circuit.name.upper() for circuit in layout_netlist.each_circuit()
+    }
     if flatten_layout:
         layout_flatten_warning = _flatten_netlist_safely(layout_netlist, "layout")
         if layout_flatten_warning is not None:
@@ -1313,6 +1336,16 @@ def run_lvs(request: str) -> dict[str, Any]:
         gate_level_port_aliases=reference_gate_level_port_aliases,
         finfet=finfet_layout,
         finfet_top=reference_spec.get("top"),
+    )
+    # Issue #2952: scanned now, before any flatten/prune below erases the
+    # hierarchy that names each offending instance. Appended to
+    # `mismatches[]` and applied to `status` at the end of the compare.
+    unresolved_subckt_call_findings = _unresolved_reference_subckt_calls(
+        reference_netlist,
+        layout_circuit_names,
+        form=reference_form,
+        top=reference_spec.get("top"),
+        reference_path=reference_netlist_path,
     )
 
     if reference_form == "gate-level-verilog":
@@ -2307,6 +2340,12 @@ def run_lvs(request: str) -> dict[str, Any]:
     mismatches.extend(_declared_pin_short_mismatches(layout_pin_renames))
 
     mismatches.extend(supply_findings)
+    # Issue #2952: an unresolved reference subcircuit call is a pre-compare
+    # determination (see `_unresolved_reference_subckt_calls`); unlike the
+    # diagnostic-only errors above it *does* move `status` -- below, after
+    # the combine downgrade, so it can never be hidden behind
+    # `"inconclusive"` either.
+    mismatches.extend(unresolved_subckt_call_findings)
     mismatches.sort(key=_sort_key)
 
     # Issue #2845: a strict `pin.count` error is exempt from the downgrade
@@ -2334,6 +2373,7 @@ def run_lvs(request: str) -> dict[str, Any]:
         # warning either way, so a caller can always see that combining did
         # not apply.
         status = STATUS_INCONCLUSIVE
+    status = _force_mismatch_on(status, unresolved_subckt_call_findings)
 
     category_counts: dict[str, int] = {}
     # Issue #1132: `category_counts` alone collapses `error`/`warning`
@@ -3316,6 +3356,75 @@ def _label_layers_replay(committed: dict[str, Any]) -> dict[str, Any]:
     return {"label_layers": dict(echoed)}
 
 
+def _logical_spice_cards(netlist_text: str) -> list[str]:
+    """Split ``netlist_text`` into lines, joining ``+`` continuations so a
+    wrapped card is one logical card."""
+    logical: list[str] = []
+    for raw in netlist_text.splitlines():
+        if raw.lstrip().startswith("+") and logical:
+            logical[-1] += " " + raw.lstrip()[1:]
+        else:
+            logical.append(raw)
+    return logical
+
+
+def _bare_resistor_x_card_name(
+    tokens: list[str], classes: Mapping[str, str]
+) -> str | None:
+    """``"<name> (<class>)"`` when ``tokens`` is a ``klt extract`` resistor
+    ``X`` card (``X<name> <net> <net> <net> <model> r=...``) naming one of
+    ``classes``; otherwise ``None``."""
+    if not tokens or tokens[0][0] not in "xX":
+        return None
+    # The model is the last token before the first `k=v` parameter.
+    first_param = next((i for i, tok in enumerate(tokens) if "=" in tok), len(tokens))
+    if first_param != 5:
+        return None
+    model = tokens[first_param - 1].upper()
+    if model not in classes:
+        return None
+    if not any(tok.lower().startswith("r=") for tok in tokens[first_param:]):
+        return None
+    return f"{tokens[0]} ({classes[model]})"
+
+
+def _reject_bare_resistor_x_cards(
+    netlist_text: str,
+    netlist_path: str,
+    reference_deck_name: str | None,
+    layout_deck_name: str | None,
+) -> None:
+    """Issue #3078: refuse a bare pre-extracted ``layout.netlist`` (no
+    ``layout.deck``) carrying a ``klt extract`` resistor ``X`` card -- one
+    naming a resistor class of ``reference.deck`` with the writer's 3-net
+    shape and an ``r=`` parameter (the test ``netlist_capacitor_recovery``
+    applies). Without ``layout.deck`` the card is read as an undefined
+    subcircuit, the layout side has no resistor devices, and the compare
+    reports a spurious ``mismatch``. Best-effort: an unresolvable
+    ``reference.deck`` is left to the reference-side validation."""
+    if layout_deck_name or not reference_deck_name:
+        return
+    try:
+        classes = resistor_classes_for_deck(get_extraction_deck(reference_deck_name))
+    except (UnknownExtractionDeckError, InvalidDeckOptionError):
+        return
+    if not classes:
+        return
+    offending = [
+        name
+        for line in _logical_spice_cards(netlist_text)
+        if (name := _bare_resistor_x_card_name(line.split(), classes))
+    ]
+    if offending:
+        raise LvsError(
+            f"layout netlist '{netlist_path}' contains resistor X card(s) "
+            f"{', '.join(offending)} that need `layout.deck` to be read as "
+            "resistor devices; without it they are read as undefined "
+            "subcircuits and the compare reports a spurious mismatch. Add "
+            f'`layout.deck` (e.g. "deck": "{reference_deck_name}").'
+        )
+
+
 def _resolve_layout(
     layout_spec: dict[str, Any],
     request_dir: str,
@@ -3323,6 +3432,7 @@ def _resolve_layout(
     combine_devices: bool = False,
     deck_options: Mapping[str, str] | None = None,
     label_layers: Mapping[str, tuple[int, int] | None] | None = None,
+    reference_deck_name: str | None = None,
 ) -> tuple[
     kdb.Netlist,
     str,
@@ -3618,6 +3728,12 @@ def _resolve_layout(
             f"could not parse layout netlist '{layout_netlist_path}': {exc}"
         ) from exc
     recovered_capacitor_classes = parse_capacitor_class_comments(layout_netlist_text)
+    _reject_bare_resistor_x_cards(
+        layout_netlist_text,
+        layout_netlist_path,
+        reference_deck_name,
+        layout_spec.get("deck"),
+    )
     # Issue #1942: recognise a round-tripped `X ... PARAMS:` card naming one
     # of `layout.deck`'s own custom (`GenericDeviceExtractor`-shaped) device
     # classes -- e.g. a MoM capacitor -- as a device of that class instead
@@ -4702,6 +4818,160 @@ def _device_classes_declaring_terminal(
     return sorted(names)
 
 
+def _device_class_net_signatures(
+    netlist: kdb.Netlist,
+) -> dict[tuple[Any, ...], set[str]]:
+    """Which device classes sit on each (circuit, connected-nets) signature.
+
+    Only classes that share their terminal-name tuple with at least one other
+    class are tracked -- a class with a terminal set of its own can never be
+    folded into another class's devices, so it cannot be a victim of the
+    cross-class fold :func:`_cross_class_folds` looks for. Nets are identified
+    by ``Net.expanded_name()`` (see :func:`_combine_group_key` for why) and the
+    signature sorts them, so a combine's terminal swap (a symmetric device
+    survivor connected the other way round) does not change it.
+    """
+    by_terminals: dict[tuple[str, ...], list[str]] = {}
+    for device_class in netlist.each_device_class():
+        terminal_names = tuple(t.name for t in device_class.terminal_definitions())
+        by_terminals.setdefault(terminal_names, []).append(device_class.name)
+    tracked = {
+        name for names in by_terminals.values() if len(names) > 1 for name in names
+    }
+    signatures: dict[tuple[Any, ...], set[str]] = {}
+    if not tracked:
+        return signatures
+    for circuit in netlist.each_circuit():
+        for device in circuit.each_device():
+            device_class = device.device_class()
+            if device_class.name not in tracked:
+                continue
+            nets = []
+            for terminal in device_class.terminal_definitions():
+                net = _net_for_terminal_or_none(device, terminal.name)
+                nets.append(net.expanded_name() if net is not None else "")
+            key = (circuit.name, tuple(sorted(nets)))
+            signatures.setdefault(key, set()).add(device_class.name)
+    return signatures
+
+
+def _cross_class_folds(
+    pre_combine: Mapping[tuple[Any, ...], set[str]],
+    post_combine: Mapping[tuple[Any, ...], set[str]],
+) -> list[tuple[str, tuple[str, ...], list[str]]]:
+    """Every signature where a device class present before combining is gone
+    afterwards while another class's device still sits on the same nets, as
+    ``(circuit, nets, lost class names)``.
+
+    A parallel fold always leaves one survivor of the *same* class on the
+    group's nets, and a series fold only removes a class from a signature whose
+    interior net carried nothing else -- so a class that vanishes from a
+    signature that is still occupied can only have been absorbed by a device of
+    a different class. KLayout's ``Netlist.combine_devices()`` does exactly
+    that, intermittently, on the netlist the device extractors built in place
+    (two capacitor classes in parallel, ``tl::id_of`` of the classes
+    apparently colliding): the lost class's devices are summed into the other
+    class's survivor. See :func:`_combine_devices_safely`.
+    """
+    found: list[tuple[str, tuple[str, ...], list[str]]] = []
+    for key, classes in pre_combine.items():
+        remaining = post_combine.get(key)
+        if not remaining:
+            continue
+        lost = sorted(classes - remaining)
+        if lost:
+            found.append((key[0], key[1], lost))
+    return found
+
+
+def _move_devices_to_class(
+    netlist: kdb.Netlist, from_class_name: str, to_class: Any
+) -> None:
+    """Re-create every device of the class named ``from_class_name`` on
+    ``to_class`` -- same circuit, name, parameters and terminal nets -- and
+    drop the original (see :func:`_renew_conflicting_device_classes`)."""
+    for circuit in netlist.each_circuit():
+        for device in list(circuit.each_device()):
+            old_class = device.device_class()
+            if old_class.name != from_class_name:
+                continue
+            replacement = circuit.create_device(to_class, device.name)
+            for terminal in old_class.terminal_definitions():
+                net = _net_for_terminal_or_none(device, terminal.name)
+                if net is not None:
+                    replacement.connect_terminal(terminal.name, net)
+            for parameter in old_class.parameter_definitions():
+                replacement.set_parameter(
+                    parameter.name, device.parameter(parameter.name)
+                )
+            circuit.remove_device(device)
+
+
+def _renew_conflicting_device_classes(
+    netlist: kdb.Netlist, signatures: Mapping[tuple[Any, ...], set[str]]
+) -> int:
+    """Rebuild, in place, all but one of the device classes that have devices
+    on the very same nets (the multi-class entries of ``signatures``), on
+    freshly constructed device classes. Returns how many were rebuilt.
+
+    ``Netlist.combine_devices()`` tells device classes apart by an internal
+    ``tl::UniqueId`` that a *copied* class (the device extractors' classes,
+    and every ``Netlist.dup()`` clone) carries uninitialised, so two such
+    classes can compare equal and one class's devices get folded into the
+    other's survivor (issue #3019, see :func:`_cross_class_folds`). That is
+    heap-state dependent -- resampling on further copies does not reliably
+    cure it -- whereas a class built by its Python constructor always gets a
+    properly initialised, unique id. With at most one original class left per
+    conflicting set, every pair has a fresh member and cannot be confused.
+
+    Each rebuilt class takes over its devices (same circuit, name, parameters
+    and terminal nets) under the original name; the emptied original is
+    renamed out of the way rather than removed (``Netlist.remove`` refuses
+    classes of a copied netlist), and the comparer reports it like any other
+    device class that has no devices. Only KLayout's built-in class types can
+    be rebuilt; any other class is left alone and
+    :func:`_cross_class_folds` still guards the result.
+    """
+    import klayout.db as kdb_module
+
+    renewable = (
+        kdb_module.DeviceClassBJT3Transistor,
+        kdb_module.DeviceClassBJT4Transistor,
+        kdb_module.DeviceClassCapacitor,
+        kdb_module.DeviceClassCapacitorWithBulk,
+        kdb_module.DeviceClassDiode,
+        kdb_module.DeviceClassInductor,
+        kdb_module.DeviceClassMOS3Transistor,
+        kdb_module.DeviceClassMOS4Transistor,
+        kdb_module.DeviceClassResistor,
+        kdb_module.DeviceClassResistorWithBulk,
+    )
+    conflicting = sorted(
+        {name for names in signatures.values() if len(names) > 1 for name in names}
+    )
+    taken = {device_class.name for device_class in netlist.each_device_class()}
+    renewed = 0
+    for old_class in list(netlist.each_device_class()):
+        # The first conflicting class stays as it is (see above).
+        if old_class.name not in conflicting[1:]:
+            continue
+        if type(old_class) not in renewable:
+            continue
+        name = old_class.name
+        retired_name = f"{name}__renewed"
+        while retired_name in taken:
+            retired_name += "_"
+        taken.add(retired_name)
+        old_class.name = retired_name
+        new_class = type(old_class)()
+        new_class.name = name
+        new_class.description = old_class.description
+        netlist.add(new_class)
+        _move_devices_to_class(netlist, retired_name, new_class)
+        renewed += 1
+    return renewed
+
+
 def _combine_devices_safely(
     netlist: kdb.Netlist,
     side: str,
@@ -4815,8 +5085,14 @@ def _combine_devices_safely(
     # retry budget to spend (`max_attempts == 1`), which keeps the
     # single-attempt path allocation-for-allocation identical to the
     # pre-#1185 behaviour.
+    pre_combine_signatures = _device_class_net_signatures(netlist)
+    # Issue #3019: classes with devices on the same nets must not be copies of
+    # each other's identity -- rebuild all but one (before the snapshot, so the
+    # retries below start from the rebuilt classes too).
+    _renew_conflicting_device_classes(netlist, pre_combine_signatures)
     snapshot = netlist.dup() if max_attempts > 1 else None
     last_error = ""
+    cross_class_fold = False
     for attempt in range(max_attempts):
         # Attempt 0 runs directly against `netlist` -- the ordering KLayout
         # produces for a netlist walked in the order it was built, which is
@@ -4827,6 +5103,12 @@ def _combine_devices_safely(
         # `max_attempts > 1`, which is exactly the condition it was taken
         # under.
         candidate = netlist if attempt == 0 or snapshot is None else snapshot.dup()
+        if candidate is not netlist:
+            # A `Netlist.dup()` clone carries copied (uninitialised) class
+            # identities again -- see `_renew_conflicting_device_classes`.
+            _renew_conflicting_device_classes(
+                candidate, _device_class_net_signatures(candidate)
+            )
         if device_classes is not None:
             _restrict_device_combination(candidate, device_classes)
         try:
@@ -4835,11 +5117,27 @@ def _combine_devices_safely(
             if _COMBINE_DEVICES_ERROR_MARKER not in str(exc):
                 raise
             last_error = str(exc)
+            cross_class_fold = False
             continue
-        else:
-            if candidate is not netlist:
-                netlist.assign(candidate)
-            return None
+        folds = _cross_class_folds(
+            pre_combine_signatures, _device_class_net_signatures(candidate)
+        )
+        if folds:
+            # Issue #3019: no exception, but devices of one class were
+            # absorbed into another class's survivor -- a wrong combined
+            # netlist that would be compared as if it were right. Treated
+            # like the partial-match error: resample on a fresh copy.
+            circuit_name, _nets, lost = folds[0]
+            last_error = (
+                f"device class(es) {', '.join(lost)} were folded into a "
+                f"different device class in circuit {circuit_name!r} "
+                f"({len(folds)} net group(s) affected)"
+            )
+            cross_class_fold = True
+            continue
+        if candidate is not netlist:
+            netlist.assign(candidate)
+        return None
 
     # Every attempt hit KLayout's partial-match error. `netlist` still
     # carries attempt 0's own in-place partial merge (issue #466's shape);
@@ -4856,18 +5154,25 @@ def _combine_devices_safely(
         if device_classes is not None
         else ""
     )
+    failure_description = (
+        "KLayout's Netlist.combine_devices() folded devices of one class into a "
+        "different device class sitting on the same nets (a wrong combined "
+        "netlist, not an error KLayout raised), so the combined result was "
+        f"discarded ({last_error})"
+        if cross_class_fold
+        else "KLayout's Netlist.combine_devices() hit an internal-consistency error "
+        "on a partial-match device group (instances sharing only "
+        "some, not all, of their matching terminals) and stopped -- "
+        "devices it had already combined before the error remain "
+        "combined, but the rest of this netlist's devices were left "
+        f"uncombined ({last_error})"
+    )
     return _mismatch(
         CATEGORY_DEVICE_COMBINE_INCOMPLETE,
         "warning",
         "options.combine_devices could not fully combine devices on "
         f"the {side} netlist{restriction_disclosure}"
-        f"{attempts_disclosure}: KLayout's "
-        "Netlist.combine_devices() hit an internal-consistency error "
-        "on a partial-match device group (instances sharing only "
-        "some, not all, of their matching terminals) and stopped -- "
-        "devices it had already combined before the error remain "
-        "combined, but the rest of this netlist's devices were left "
-        f"uncombined ({last_error})",
+        f"{attempts_disclosure}: {failure_description}",
         side,
         # Issue #1370: machine-readable identifiers for the failure, resolved
         # against the netlist the caller keeps rather than left `None`.
@@ -5840,6 +6145,139 @@ def _declared_pin_short_mismatches(
             )
         )
     return entries
+
+
+def _is_reader_placeholder_circuit(circuit: Any) -> bool:
+    """Whether ``circuit`` has the shape ``NetlistSpiceReader`` synthesises
+    for an ``X`` card naming an undefined subcircuit (issue #2952): no
+    devices, no subcircuit instances, and pins named positionally ``1`` ..
+    ``N`` (the reader has no ``.subckt`` header to take pin names from).
+
+    The positional-pin-name test is what keeps an included library's real,
+    defined subcircuit (whose header names its own pins) from ever being
+    mistaken for a placeholder, even though this module cannot see the text
+    of a ``.include``-d file."""
+    if any(True for _ in circuit.each_device()):
+        return False
+    if any(True for _ in circuit.each_subcircuit()):
+        return False
+    names = [pin.name() for pin in circuit.each_pin()]
+    return names == [str(index) for index in range(1, len(names) + 1)]
+
+
+def _reachable_reference_circuits(netlist: Any, top: str | None) -> list[Any]:
+    """The reference circuits reachable from the compared top (``top`` by
+    name, else the netlist's sole top circuit), each once, in visit order.
+
+    ``[]`` when the top cannot be resolved -- :func:`_select_circuit`'s own
+    later call raises the authoritative error for that, so this
+    pre-compare scan never pre-empts it with a different one."""
+    try:
+        root = _select_circuit(netlist, top, "reference")
+    except LvsError:
+        return []
+    seen: set[int] = set()
+    ordered: list[Any] = []
+    stack = [root]
+    while stack:
+        circuit = stack.pop()
+        if id(circuit) in seen:
+            continue
+        seen.add(id(circuit))
+        ordered.append(circuit)
+        stack.extend(sub.circuit_ref() for sub in circuit.each_subcircuit())
+    return ordered
+
+
+def _unresolved_reference_subckt_calls(
+    reference_netlist: Any,
+    layout_names: AbstractSet[str],
+    *,
+    form: str,
+    top: str | None,
+    reference_path: str,
+) -> list[dict[str, Any]]:
+    """Issue #2952: one :data:`CATEGORY_REFERENCE_UNRESOLVED_SUBCKT_CALL`
+    ``severity: "error"`` entry per reference subcircuit instance (reachable
+    from the compared top) whose callee the reader could only satisfy with a
+    synthesised placeholder circuit -- see
+    :func:`_is_reader_placeholder_circuit` -- or ``[]``.
+
+    Runs right after the reference is read, before any flatten/prune, so the
+    hierarchy that names each offending instance still exists. A callee is
+    **not** reported when:
+
+    * a ``.subckt`` of that name (case-insensitive) is defined in the
+      reference file itself -- a genuinely empty, positionally-pinned
+      definition is the author's own choice (files pulled in by
+      ``.include`` are not followed, so such a definition in an included
+      file is reported);
+    * ``layout_names`` (the layout's upper-cased circuit names, snapshotted
+      *before* ``options.flatten_layout`` runs so a flattened layout keeps
+      this exemption) has a circuit of the same name -- the comparer then
+      pairs the two by name (a black-box/``--abstract-cells`` macro, or a
+      custom device class written as an ``X ... PARAMS:`` card on both sides
+      with no ``deck`` given; see docs/cli/lvs.md), so the instance is
+      compared, not dropped;
+    * ``form`` is ``"gate-level-verilog"``, whose library-cell instances are
+      pin-only by design and carry their own pin-order contract.
+
+    A curated or deck-custom device class never reaches here as a
+    placeholder: the ``subckt-call`` conversion and the reader's custom-class
+    / resistor recovery turn those cards into real devices first.
+    """
+    if form == "gate-level-verilog":
+        return []
+    from .netlist_normalize import defined_subckt_names
+
+    try:
+        with open(reference_path, encoding="utf-8", errors="replace") as handle:
+            defined = defined_subckt_names(handle.read())
+    except OSError:
+        defined = set()
+    findings: list[dict[str, Any]] = []
+    for parent in _reachable_reference_circuits(reference_netlist, top):
+        for sub in parent.each_subcircuit():
+            callee = sub.circuit_ref()
+            mangled = callee.name.upper()
+            base = mangled.split("(", 1)[0]
+            if not _is_reader_placeholder_circuit(callee):
+                continue
+            if base in defined or mangled in layout_names or base in layout_names:
+                continue
+            findings.append(
+                _mismatch(
+                    CATEGORY_REFERENCE_UNRESOLVED_SUBCKT_CALL,
+                    "error",
+                    f"reference instance '{sub.name}' in circuit "
+                    f"'{parent.name}' calls subcircuit '{base}', which is "
+                    "not defined in the reference netlist, was not converted "
+                    "to a device, and has no same-named layout circuit -- "
+                    "the reader substitutes an empty placeholder, so "
+                    "whatever device(s) it stands for are never compared. "
+                    "Define the subcircuit, map it to a device class "
+                    '(reference.form "subckt-call" + reference.device_map), '
+                    "or write it as a plain-element card (see "
+                    'docs/cli/lvs.md, "reference.unresolved_subckt_call")',
+                    "reference",
+                    circuit={"layout": None, "reference": parent.name},
+                    instance={"layout": None, "reference": sub.name},
+                    subcircuit={"layout": None, "reference": base},
+                    details={
+                        "callee": base,
+                        "reader_circuit": callee.name,
+                        "pin_count": callee.pin_count(),
+                    },
+                )
+            )
+    return findings
+
+
+def _force_mismatch_on(status: str, findings: list[dict[str, Any]]) -> str:
+    """``"mismatch"`` when ``findings`` is non-empty, else ``status``
+    unchanged (issue #2952's verdict override, factored out so the caller
+    adds no branch)."""
+    return "mismatch" if findings else status
 
 
 # --------------------------------------------------------------------------- #

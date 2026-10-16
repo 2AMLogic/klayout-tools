@@ -451,6 +451,16 @@ def _print_input_verified(citation: dict) -> None:
         print(f"        pex input {pex_input['role']}: {pex_input['status']}")
 
 
+def _print_binding_members(members: list[dict] | None) -> None:
+    """Print each member of a set-bound generic citation (issue #3044) with
+    its verification status, so a drifted member is named on the row."""
+    for member in members or []:
+        path = member.get("path")
+        if isinstance(path, dict):
+            path = path.get("path")
+        print(f"        member {path}: {member.get('status')}")
+
+
 def _print_artifact_binding(item: dict, citation: dict) -> None:
     """Print what a met item 1/2/9/10 citation is actually bound to (issue
     #2718), or nothing for every other item.
@@ -466,13 +476,17 @@ def _print_artifact_binding(item: dict, citation: dict) -> None:
         return
     binding = citation.get("artifact_binding")
     if binding:
+        members = binding.get("members")
         path = binding.get("path")
         if isinstance(path, dict):
             path = path.get("path")
+        if members:
+            path = f"{len(members)} members"
         print(
             f"        bound: T1 item #{binding.get('t1_item')} -> {path} "
             f"(content_hash={binding.get('content_hash')})"
         )
+        _print_binding_members(members)
         if item.get("id") in _ITEMS_ACCEPTING_REGENERATION_CLAIMS:
             _print_regeneration(binding.get("regeneration"))
         return
@@ -768,6 +782,9 @@ def _print_tier_report_text(result: dict, palette: Palette) -> None:
             # from "a check ran and did not pass" (e.g. check_failed) even
             # in the terminal-first text rendering, not just the JSON.
             print(f"        {palette.red}reason: {item['reason']}{palette.reset}")
+            _print_binding_members(
+                (item.get("detail") or {}).get("artifact_binding", {}).get("members")
+            )
 
     print()
     print(

@@ -1661,6 +1661,163 @@ def _drop_sdf_unsupported_edge_modpath_iopaths(
 
 
 # --------------------------------------------------------------------------- #
+# Issue #2958: a bit-selected `IOPATH` onto a bus output of a hard macro.
+#
+# OpenSTA's `write_sdf` emits one `IOPATH` per bit of a macro's bus output
+# (`IOPATH A_CLK A_DOUT[0] ...`), but a vendor macro model usually declares a
+# single whole-vector module path (`(A_CLK *> A_DOUT)`). Icarus resolves an
+# SDF `IOPATH` destination by exact terminal name against the modpaths it
+# elaborated, and a whole-vector path registers no per-bit modpath: the
+# unescaped spelling is an `SDF ERROR ... Invalid/malformed IOPATH` syntax
+# error, the escaped one (`A_DOUT\[0\]`) `Unable to match ModPath` (both
+# reproduced live against Icarus 13.0). No caller input can make those entries
+# annotate, so -- like #2885's `ifnone` arcs -- they are dropped, counted, and
+# the affected `{celltype, from, to}` arcs named.
+#
+# Rewriting the entry to the whole-vector spelling is rejected: it would
+# attribute one bit's delay to the whole bus. Fail-safe: the drop only fires
+# when the model declares the destination as a bus *and* every path onto it is
+# whole-vector and parseable, and the entry's own arc is one of those paths.
+# --------------------------------------------------------------------------- #
+
+#: A bus ``output``/``inout`` declaration (ANSI or not): the keyword, optional
+#: net/signedness keywords, a ``[msb:lsb]`` range, then the declared name(s).
+_VERILOG_BUS_OUTPUT_RE = re.compile(
+    r"\b(?:output|inout)\s+(?:(?:reg|wire|logic|signed)\s+)*\[[^\]]*\]\s*"
+    r"([A-Za-z_][A-Za-z0-9_$]*(?:\s*,\s*[A-Za-z_][A-Za-z0-9_$]*)*)"
+)
+
+#: Words that can follow a comma in an ANSI port list without being a name.
+_VERILOG_DECL_KEYWORDS = frozenset(
+    {"input", "output", "inout", "reg", "wire", "logic", "signed"}
+)
+
+#: A bit-select suffix on an SDF port, plain (``[0]``) or escaped (``\\[0\\]``).
+_SDF_BIT_SELECT_RE = re.compile(r"\\?\[")
+
+
+def _verilog_bus_output_names(chunk: str) -> set[str]:
+    """Names declared as bus ``output``/``inout`` ports in a module chunk."""
+    names: set[str] = set()
+    for match in _VERILOG_BUS_OUTPUT_RE.finditer(chunk):
+        for name in re.split(r"\s*,\s*", match.group(1)):
+            if name not in _VERILOG_DECL_KEYWORDS:
+                names.add(name)
+    return names
+
+
+def _verilog_cell_whole_vector_arcs(
+    cell: str, source_texts: list[str]
+) -> set[tuple[str, str]]:
+    """Every ``(input, output)`` arc of Verilog module ``cell`` whose output
+    is a declared bus and whose module paths onto it are all whole-vector
+    (no bit-select on the destination terminal) -- the arcs a per-bit SDF
+    ``IOPATH`` can never match (issue #2958).
+
+    Empty -- so nothing is dropped -- when no definition of ``cell`` is found,
+    when any path statement cannot be parsed, or for an output that has any
+    bit-indexed module path (its per-bit entries may then match).
+    """
+    pattern = re.compile(
+        _VERILOG_MODULE_CHUNK_TEMPLATE.format(name=re.escape(cell)), re.DOTALL
+    )
+    buses: set[str] = set()
+    whole: set[tuple[str, str]] = set()
+    indexed: set[str] = set()
+    for text in source_texts:
+        for chunk_match in pattern.finditer(text):
+            chunk = _VERILOG_COMMENT_RE.sub(" ", chunk_match.group(0))
+            chunk = _VERILOG_DIRECTIVE_RE.sub(" ", chunk)
+            buses |= _verilog_bus_output_names(chunk)
+            for block in _VERILOG_SPECIFY_BLOCK_RE.findall(chunk):
+                for statement in block.split(";"):
+                    path = _parse_specify_path(statement)
+                    if path == _UNPARSEABLE_PATH:
+                        return set()
+                    if path is None:
+                        continue
+                    _, _, sources, destinations = path  # type: ignore[misc, str-unpack]
+                    raw = _strip_specify_condition(statement.strip())
+                    if raw is not None and re.search(r"(?:=>|\*>)[^;]*\[", raw[1]):
+                        indexed.update(destinations)
+                    whole.update((s, d) for s in sources for d in destinations)
+    return {(s, d) for s, d in whole if d in buses and d not in indexed}
+
+
+def _sdf_bit_selected_iopath_arc(entry_text: str) -> tuple[str, str] | None:
+    """``(input port, output bus)`` of a bare ``IOPATH`` entry whose output
+    carries a bit-select (plain or escaped), or ``None`` for any other entry."""
+    head = _SDF_IOPATH_HEAD_RE.match(entry_text.lstrip())
+    if head is None:
+        return None
+    destination = head.group("dst")
+    base = _SDF_BIT_SELECT_RE.split(destination, maxsplit=1)[0]
+    if base == destination:
+        return None
+    return head.group("edge_src") or head.group("src"), base
+
+
+def _drop_sdf_bit_selected_bus_iopaths(
+    sdf_path: str, source_paths: list[str]
+) -> tuple[str, int, list[dict[str, str]]] | None:
+    """Remove every bare ``IOPATH`` entry in ``sdf_path`` whose bit-selected
+    output is a bus the cell model reaches only through a whole-vector module
+    path (issue #2958), returning ``(text with those entries removed, how many
+    were removed, the distinct dropped arcs)`` -- or ``None`` when there is
+    nothing to remove. Each arc is ``{"celltype", "from", "to"}`` (``to`` is
+    the bus name, bit-select dropped), sorted.
+
+    Returns ``None`` immediately -- without reading the SDF -- when no source
+    declares a bus output next to a ``specify`` block.
+    """
+    source_texts = [
+        text
+        for text in _read_verilog_source_texts(source_paths)
+        if "specify" in text and _VERILOG_BUS_OUTPUT_RE.search(text)
+    ]
+    if not source_texts:
+        return None
+    text = _read_sdf_text(sdf_path)
+    if text is None or "IOPATH" not in text or "[" not in text:
+        return None
+
+    arcs_by_cell: dict[str, set[tuple[str, str]]] = {}
+    arcs: set[tuple[str, str, str]] = set()
+    removed_spans: list[tuple[int, int]] = []
+    dropped = 0
+    for cell_match in re.finditer(r"\(CELL\b", text):
+        celltype = _sdf_cell_celltype(text, cell_match.start())
+        if celltype is None:
+            continue
+        if celltype not in arcs_by_cell:
+            arcs_by_cell[celltype] = _verilog_cell_whole_vector_arcs(
+                celltype, source_texts
+            )
+        whole = arcs_by_cell[celltype]
+        if not whole:
+            continue
+
+        def _droppable(entry_text: str, _whole=whole, _cell=celltype) -> bool:
+            arc = _sdf_bit_selected_iopath_arc(entry_text)
+            if arc is None or arc not in _whole:
+                return False
+            arcs.add((_cell, *arc))
+            return True
+
+        spans, count = _sdf_cell_entry_removals(text, cell_match.start(), _droppable)
+        removed_spans.extend(spans)
+        dropped += count
+
+    if not dropped:
+        return None
+    return (
+        _cut_sdf_spans(text, removed_spans),
+        dropped,
+        [{"celltype": c, "from": s, "to": d} for c, s, d in sorted(arcs)],
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Issue #1890: an `INTERCONNECT` entry whose endpoint is an escaped Verilog
 # identifier containing a literal occurrence of the SDF file's own `DIVIDER`
 # character (e.g. `g\[0\]\.sub\/x.a` with `DIVIDER .` -- exactly what a
@@ -1869,6 +2026,14 @@ def _scan_sdf_diagnostics(*log_paths: str) -> tuple[list[str], dict[str, int]]:
     line an interleaved flush lands in, leaving every sibling intact and the
     gate firing on those.
 
+    The same applies to a line that matches the shape but also contains an
+    embedded cocotb log-line header (:data:`SDF_SPLICED_LOG_HEADER_RE`,
+    issue #2996): the splice landed after the locator -- inside the message,
+    or inside the path with the spliced-in line's own locator -- so the
+    message is cut (``TIM`` rather than ``TIMINGCHECK``) and equally
+    untrustworthy. Its orphaned tail (``INGCHECK not supported.``) carries no
+    marker and is already ignored.
+
     Every supplied transcript must be successfully read. Missing, unreadable,
     or incompletely read logs raise ``FunctionalVerificationError``: this scan
     gates affirmative annotation credit, so unavailable observation cannot be
@@ -1881,6 +2046,7 @@ def _scan_sdf_diagnostics(*log_paths: str) -> tuple[list[str], dict[str, int]]:
         SDF_DIAGNOSTIC_LINE_RE,
         SDF_DIAGNOSTIC_MARKERS,
         SDF_OMITTED_ANNOTATION_MARKER,
+        SDF_SPLICED_LOG_HEADER_RE,
         FunctionalVerificationError,
     )
 
@@ -1907,6 +2073,11 @@ def _scan_sdf_diagnostics(*log_paths: str) -> tuple[list[str], dict[str, int]]:
                 # Marker present, Icarus's own shape absent: a stdout splice,
                 # not a diagnostic (issue #1136). Untrustworthy in both
                 # directions, so it is counted in neither.
+                continue
+            if SDF_SPLICED_LOG_HEADER_RE.search(stripped):
+                # Well-formed head, but a cocotb log header is embedded in
+                # it: the same splice landing after the locator (issue
+                # #2996). Dropped from both buckets, as above.
                 continue
             benign_class = next(
                 (

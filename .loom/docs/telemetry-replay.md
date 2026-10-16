@@ -5,6 +5,13 @@ slices 1 and R3/R4), the `fleet.state` record (slice R1),
 `loom-daemon telemetry-replay --as-of <t>` (slice R6) and its `--check`
 against the forge with the daily agreement report (slice R7, #11128).
 
+> **The `fleet.state` producer was removed (#11301).** The daemon no longer
+> sends `fleet.state`, so the replay reads only the records already in a
+> store, and a host with none in the window is reported `unknown`, never
+> empty. Fleet state is now a consumer's computation from the facts the daemon
+> still exports. This contract and its SQL stay as the reference for that
+> history; retiring them is a follow-up.
+
 The question this contract answers: **what did the fleet look like at instant
 `t`, as a daemon running at `t` could have known it?** Backtesting
 (#10193) and any retroactive analysis depend on it.
@@ -385,7 +392,7 @@ the past (the default ends 10 minutes ago).
 | `review_wait` | `review_wait` | PR: `loom:review-requested`, the only review label |
 | `doctor` | `doctor` | PR: `loom:changes-requested`, the only review label; or no review label and `loom:treating` |
 | `merge_wait` | `merge_wait` | PR: `loom:pr`, the only review label, no hold label |
-| `merge_hold` | `merge_hold` | PR: `loom:pr`, the only review label, and a hold label (the label registry's `merge_hold` set: `loom:operator`, `loom:operator-decision`, `loom:operator-only`) |
+| `merge_hold` | `merge_hold` | PR: `loom:pr`, the only review label, and a hold label (the label registry's `merge_hold` set: `loom:blocked`, `loom:operator`, `loom:operator-decision`, `loom:operator-only`; since #11907 a Champion-held `loom:pr` + `loom:blocked` PR is `merge_hold`, and `merge_hold` is no longer human-only) |
 
 A PR stage is compared on the row's `pr`; a row without one is `no_pr`. A
 stage outside the table is `unmapped`. `no_pr`, `no_forge_record` and

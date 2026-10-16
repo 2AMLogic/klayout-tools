@@ -1208,6 +1208,7 @@ separately if it turns out to matter for evidence-record committing.
 | `engine` | string | `"yosys"` (default; only value implemented). |
 | `sources` | array\<string\> | RTL source file paths (`read_verilog` inputs), resolved relative to the request file's own directory. Required, non-empty. |
 | `hdl_toplevel` | string | The design's top module name. Required; must not contain path separators. |
+| `parameters` | object \| omitted | Top-level Verilog `parameter` overrides, `name -> value` (issue #3466), applied with Yosys `chparam -set` after the `read_verilog` lines and before `hierarchy`, so one committed RTL file can be synthesised at several parameterisations without per-point source rewrites. Keys must be Verilog identifiers; values must be integers or plain strings (booleans, floats, and strings containing quotes, backslashes, `;`, `#` or control characters are rejected — values land in a generated `.ys` script). A name the top module does not declare fails the run (`yosys synthesis failed: … Can't find object for defparam`). Only parameters of `hdl_toplevel` itself are reachable; a sub-module's parameter cannot be overridden this way. The same override is applied to every pass that re-elaborates the sources (arithmetic probe and trial runs, the memory-mapping evidence pass, and the `--verify-equivalence` gold side), so all reported numbers describe one elaboration. Echoed as the response's `parameters` and `provenance.parameters`. |
 | `run_id` | string \| omitted | Optional safe identifier for an exclusively created invocation directory; see "Artifacts". Omit to allocate a new ID automatically. Reusing an existing ID fails. |
 | `pdk.cell_library` | string | Standard-cell library name. Required. |
 | `pdk.corner` | string \| omitted | Liberty corner selector; defaults to the nominal corner when omitted. |
@@ -1233,6 +1234,17 @@ note below on build-platform sensitivity): untargeted maps to 3238.11 µm² at
 2485.93 ps; `clock_period_ns: 10` maps to 3001.63 µm² at 3072.40 ps — a
 relaxed target buys area back at the cost of delay, so the value is a real
 caller decision rather than something this command should pick.
+
+### Unknown request keys are errors (issue #3466)
+
+An unrecognised **top-level** request key is rejected with an error naming it
+(`unknown field 'paramters'`), instead of being dropped in silence — a misspelt
+or unsupported field can no longer produce a plausible default-configuration
+result. Recognised keys: `schema`, `engine`, `sources`, `hdl_toplevel`, `pdk`,
+`constraints`, `structural`, `baseline`, `arithmetic`, `run_id`, `parameters`;
+the `_comment` annotation is also accepted (its contents are never read). The
+same check applies to `--check` and `--rerun`. Nested objects (`pdk`,
+`constraints`, …) are not yet checked for unknown keys.
 
 ## Response
 
@@ -1324,6 +1336,7 @@ caller decision rather than something this command should pick.
 | `schema_version` | integer | Per-command version, per `docs/json-contract.md`. |
 | `engine` / `engine_version` | string | Echo of the request's engine, plus the resolved Yosys build string (`yosys -V`'s own version token). `engine_version` is `null` if unresolvable. |
 | `hdl_toplevel` | string | Echo of the request. |
+| `parameters` | object | The top-level parameter overrides this run elaborated with (`{}` when none; issue #3466). Additive; no `schema_version` bump. Also recorded as `provenance.parameters`. |
 | `run_id` | string | Identifier of this invocation's retained directory, relative to `<request_dir>/.klt/synthesize/`. Additive; includes failed-run collision protection when supplied in a request. |
 | `status` | string | Always `"ok"` — synthesis has no pass/fail concept of its own from *this field's* point of view; a failed run never emits this envelope at all. The response-level pass/fail signal issue #1588 adds is `structural.has_critical`/exit code `3` below — `status` itself is unaffected and stays `"ok"` either way. |
 | `instance_count` | integer | Total standard-cell instances after liberty mapping, rolled up over the **whole design hierarchy** — `stat -json`'s per-module `num_cells` aggregated recursively across every sub-module Yosys left un-flattened, each level scaled by its instance count (issue #821; the top module's own `num_cells` alone is `0` for a design whose top is a pure wrapper). Matches `stat -json`'s own `design.num_cells` rollup. **Deliberately not named `cell_count`**: `klt layout-metrics`'s existing `cell_count` field counts *distinct cell definitions* in a GDS hierarchy, a different concept. |
@@ -1603,6 +1616,11 @@ never disagree about what gets hashed — re-hashes both, and compares against
 (`schema_version`, `mode: "check"`, `report`, `status`, `checks[]`) documented
 under [`klt drc`](drc.md#cheap-mode-default).
 
+A third check, `parameters`, compares the request's `parameters` override
+against the report's recorded `parameters` (a report predating the field counts
+as `{}`), so the same sources elaborated with different overrides report
+`drifted` rather than `match`.
+
 `status` is `"match"` only when every `checks[]` entry matches. A recorded
 hash that is itself `null` (a report predating the field) always renders
 `match: false` — a missing baseline is never a pass.
@@ -1857,6 +1875,27 @@ same request against its own just-produced response instead (`baseline.json
 == <this run's own output>`) produces `delta_pct: {instance_count: 0.0,
 area_um2: 0.0, critical_path_ns: 0.0}` — see
 `tests/test_synthesize.py::test_run_synthesize_baseline_response_path_zero_delta`.
+
+## Pinned golden: gf180 operator probe (issue #3069)
+
+`tests/test_synth_gf180_operator_probe.py` pins a `klt synthesize` area /
+cell / `dffq_1` regression on the vendored gf180-dx7 operator probe
+(`tests/corpus/synth_gf180_operator_probe/`, Apache-2.0, pinned to upstream
+commit `eb74e94f`). The fixture hashes are checked offline; the synthesis test
+needs `yosys` plus the gf180mcu `gf180mcu_fd_sc_mcu7t5v0` / `tt_025C_5v00`
+liberty (e.g. `volare enable --pdk gf180mcu`, `PDK_ROOT`/`PDK=gf180mcuD`) and
+**skips with that reason otherwise** -- default CI does not provision it.
+
+Reading the baseline: the historical reference (46,939.96 um2, 2,407 cells, 99
+`dffq_1`) is *not* the assert target. The golden is today's `klt synthesize`
+result (50,968.15 um2, 2,686 cells, 99 `dffq_1`). It is ~9% above the upstream
+script's plain `abc -liberty` result (46,766.54 um2, 2,381 cells) because klt
+adds the ABC driving-cell/load constraints for this library and the post-ABC
+`clean`/`setundef -zero`/`hilomap` passes; the flop count is unchanged. The
+step-by-step measurements, tolerance rationale and the unexplained residual
+against the historical number are in that directory's `README.md`. Note that
+the RTL `$readmemh`s its ROM tables relative to the synthesis cwd, which
+`klt synthesize` sets to the request's repo root.
 
 ## Out of scope
 
