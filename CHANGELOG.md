@@ -144,6 +144,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   `intrinsic_device_noise: false`, `intrinsic_resistor_noise: false`); absent
   otherwise and for `engine: "xyce"`, so existing reports are unchanged. No
   `schema_version` bump. Documented in `docs/cli/sim.md`.
+- **`klt sim --op-lint` follows user subcircuits and counts `B` sources**
+  (issue #3101): `.subckt` blocks in the netlist (and its `.include`s) are
+  expanded at their `X` instances, so a wrapped DUT's MOS devices are linted
+  under hierarchical names (`Xdut.M1`) instead of `device_count: 0`; an
+  unresolvable `X` instance emits an `unsupported_hierarchy` diagnostic and
+  an empty device list no longer reports `clean`. `B` sources (and the
+  `v(<node>)` they read) now count as element terminals, ending false
+  `floating_node` warnings on behaviourally driven nodes. Additive; no
+  `schema_version` bump.
 - **ASAP7 DRC deck checks `ACTIVE.W.2` and `SDT.W.3`** (issue #3085): the
   vertical-width-is-an-integer-multiple-of-27-nm rules (DRM Tables 3.5.1 /
   3.8.1) are now measured per local vertical width of each merged rectilinear

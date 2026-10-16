@@ -297,6 +297,101 @@ def test_parse_netlist_ignores_devices_inside_a_subckt_definition():
     assert [device.name for device in parsed.devices] == ["XTOP"]
 
 
+def test_parse_netlist_expands_an_instantiated_subckt_with_hierarchical_names():
+    parsed = op_sanity.parse_netlist(
+        ".model nch nmos level=1\n"
+        ".subckt dut in out vdd\n"
+        "M1 out in 0 0 nch w=10u l=1u\n"
+        "Rl vdd out 10k\n"
+        ".ends dut\n"
+        "Vdd vdd 0 DC 1.8\n"
+        "Vin in 0 DC 1\n"
+        "Xdut in out vdd dut\n",
+        {},
+    )
+
+    assert [device.name for device in parsed.devices] == ["Xdut.M1"]
+    device = parsed.devices[0]
+    assert device.kind == "nmos"
+    assert device.nodes["drain"] == "out"
+    assert device.nodes["gate"] == "in"
+    assert device.op_candidates == ["m.xdut.m1"]
+    # `out` has the Rl and M1 terminals plus nothing floating.
+    assert parsed.node_degree["out"] == 2
+    assert not parsed.unexpanded
+
+
+def test_parse_netlist_maps_internal_nodes_and_nested_subckts():
+    parsed = op_sanity.parse_netlist(
+        ".model nch nmos level=1\n"
+        ".subckt inner a b\n"
+        "M1 a b 0 0 nch\n"
+        ".ends\n"
+        ".subckt outer p\n"
+        "Xi p mid inner\n"
+        "R1 mid 0 1k\n"
+        ".ends\n"
+        "Xo top outer\n",
+        {},
+    )
+
+    assert [device.name for device in parsed.devices] == ["Xo.Xi.M1"]
+    assert parsed.devices[0].nodes["drain"] == "top"
+    assert parsed.devices[0].nodes["gate"] == "xo.mid"
+    assert parsed.devices[0].op_candidates == ["m.xo.xi.m1"]
+
+
+def test_parse_netlist_follows_includes_inside_a_subckt(tmp_path):
+    (tmp_path / "flat.spice").write_text(
+        ".model nch nmos level=1\nM1 out in 0 0 nch w=10u l=1u\nRl vdd out 10k\n"
+    )
+    parsed = op_sanity.parse_netlist(
+        '.subckt dut in out vdd\n.include "flat.spice"\n.ends dut\n'
+        "Xdut in out vdd dut\n",
+        {},
+        str(tmp_path),
+    )
+
+    assert [device.name for device in parsed.devices] == ["Xdut.M1"]
+    assert parsed.devices[0].kind == "nmos"
+
+
+def test_parse_netlist_flags_an_unresolvable_subckt_instance():
+    parsed = op_sanity.parse_netlist(
+        '.include "missing.spice"\nXdut in out vdd dut\nR1 in out 1k\n',
+        {},
+        "/nonexistent",
+    )
+
+    assert parsed.devices == []
+    assert parsed.unexpanded == ["Xdut"]
+
+
+def test_parse_netlist_survives_a_recursive_subckt():
+    parsed = op_sanity.parse_netlist(
+        ".subckt loop a\nXl a loop\n.ends\nX1 n loop\n",
+        {},
+    )
+
+    assert parsed.devices == []
+    assert parsed.unexpanded == ["X1.Xl"]
+
+
+def test_behavioural_source_terminals_count_for_the_floating_node_check():
+    parsed = op_sanity.parse_netlist(
+        "Vs vs 0 DC 1\n"
+        "Bdrv n1 0 V = v(vs) * 2\n"
+        "Brd n2 0 V = v(n1) + 1\n"
+        "Bdangling n3 0 V = 1\n",
+        {},
+    )
+
+    findings = op_sanity._hygiene_findings(parsed, [], {"0"}, set())
+    assert [finding["node"] for finding in findings] == ["n2", "n3"]
+    # n1 is driven by one B and read by another -> two terminals, not floating.
+    assert parsed.node_degree["n1"] == 2
+
+
 def test_parse_netlist_joins_continuation_lines_and_strips_params():
     parsed = op_sanity.parse_netlist(
         "XM1 out in 0 0 sky130_fd_pr__pfet_01v8\n+ L = 0.15 W={2*wu} nf=1\n", {}
