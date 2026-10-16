@@ -98,6 +98,11 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         ``pitch_x_um``/``pitch_y_um`` (issue #3299, Phase 1) override the
         column/row pitch, clamped up to the legal minimum -- see
         :func:`_mos_array_layout`'s own docstring. ``0.0`` (the default)
+        draws byte-for-byte unchanged geometry.
+
+        ``share_sd`` (issue #3551, Phase 2 of #3299) abuts adjacent unit
+        devices in a row so they share one contacted S/D segment -- see
+        :func:`_mos_array_layout`'s own docstring. ``False`` (the default)
         draws byte-for-byte unchanged geometry."""
 
         # Declared via ``self.param("mfg_grid_um", ...)`` below; the
@@ -437,6 +442,17 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "(default) = no override",
                 default=0.0,
             )
+            self.param(
+                "share_sd",
+                self.TypeBoolean,
+                "Abut horizontally adjacent unit devices so each pair shares "
+                "one contacted S/D segment (U<i>_D and U<i+1>_S are the same "
+                "node); changes electrical topology (issue #3551). Requires "
+                "topology='array' and fingers=1; exclusive with pitch_x_um/"
+                "interior_channel_um. False (default) = isolated units, "
+                "byte-for-byte unchanged",
+                default=False,
+            )
             # Fixed drawn side of every cut on contact_layer (issue #2585) --
             # harness-computed by `_cut_fixed_size_um` from the resolved PDK
             # family and layer. `0.0` (no upper size bound) leaves the cuts
@@ -506,8 +522,13 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.pitch_x_um,
                 self.pitch_y_um,
                 top_endcap_um=self.top_endcap_um,
+                share_sd=self.share_sd,
             )
             unit_boxes = info["unit"]["boxes_um"]
+            # Issue #3551: under `share_sd` adjacent units draw the shared S/D
+            # segment's active/contact/metal at identical coordinates; insert
+            # each distinct shape once rather than as stacked duplicates.
+            drawn: set[tuple[str, int, int, int, int]] = set()
             for c in info["cells"] + info["dummy_cells"]:
                 for role, li in (
                     ("active", li_active),
@@ -515,9 +536,22 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     ("contact", li_contact),
                     ("metal", li_metal),
                 ):
-                    _insert_boxes(
-                        self.cell, li, dbu, unit_boxes[role], c["x0_um"], c["y0_um"]
-                    )
+                    if not info["share_sd"]:
+                        _insert_boxes(
+                            self.cell, li, dbu, unit_boxes[role], c["x0_um"], c["y0_um"]
+                        )
+                        continue
+                    for box in unit_boxes[role]:
+                        shifted = (
+                            box[0] + c["x0_um"],
+                            box[1] + c["y0_um"],
+                            box[2] + c["x0_um"],
+                            box[3] + c["y0_um"],
+                        )
+                        key = (role, *(int(round(v / dbu)) for v in shifted))
+                        if key not in drawn:
+                            drawn.add(key)
+                            _insert_boxes(self.cell, li, dbu, [shifted])
 
             # Source/drain implant (issue #1577): drawn over every real *and*
             # dummy unit device's own active body -- DF.12-style coverage

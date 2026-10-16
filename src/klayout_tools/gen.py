@@ -1301,6 +1301,7 @@ def _mos_array_layout(
     pitch_x_um: float = 0.0,
     pitch_y_um: float = 0.0,
     top_endcap_um: float = 0.0,
+    share_sd: bool = False,
 ) -> dict[str, Any]:
     """A ``rows`` x ``cols`` grid of :func:`_mos_unit_layout` unit devices,
     with ``dummy`` extra unit-device columns flanking each side.
@@ -1383,7 +1384,20 @@ def _mos_array_layout(
     ``min_col_pitch_um``/``min_row_pitch_um`` give the legal minimum. ``0.0``
     (the default) means "no override" and is a strict no-op. The override
     replaces the base pitch, and ``interior_channel_um`` is then added on top
-    of the effective base pitch."""
+    of the effective base pitch.
+
+    ``share_sd`` (issue #3551, Phase 2 of #3299) abuts horizontally adjacent
+    unit devices so each pair shares one contacted S/D segment: the real
+    columns' pitch drops from ``total_len_um + MIN_SAME_LAYER_SPACING_UM`` to
+    ``total_len_um - contact_region_um``, i.e. unit ``c``'s last (drain)
+    segment *is* unit ``c + 1``'s first (source) segment, drawn at identical
+    coordinates. This changes electrical topology -- each row becomes a
+    series chain whose ``U<i>_D`` and ``U<i+1>_S`` ports name the same node.
+    Only ``topology='array'`` with ``fingers == 1`` is supported, and it is
+    exclusive with ``pitch_x_um``/``interior_channel_um`` (both would pull
+    the units apart again); :func:`gen_describe._validate_share_sd` rejects
+    the rest with ``GenError``. ``dummy`` columns stay isolated at the normal
+    pitch. ``False`` (the default) is a strict no-op."""
     unit = _mos_unit_layout(
         w_um,
         l_um,
@@ -1398,6 +1412,12 @@ def _mos_array_layout(
         top_endcap_um=top_endcap_um,
     )
     min_col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
+    # Issue #3551: dummy columns keep the isolated-unit pitch under `share_sd`.
+    isolated_col_pitch = min_col_pitch
+    if share_sd:
+        min_col_pitch = unit["total_len_um"] - (
+            CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM
+        )
     min_row_pitch = unit["bbox_height_um"] + MIN_SAME_LAYER_SPACING_UM
     # Issue #3299 (Phase 1): an explicit pitch override, clamped up to the
     # legal minimum. `0.0` (the default) leaves the pitch untouched.
@@ -1425,14 +1445,19 @@ def _mos_array_layout(
     dummy_cells = []
     for r in range(rows):
         for dc in range(1, dummy + 1):
+            left_x0 = -dc * col_pitch
+            right_x0 = (cols - 1 + dc) * col_pitch
+            if share_sd:
+                left_x0 = -dc * isolated_col_pitch
+                right_x0 = (cols - 1) * col_pitch + dc * isolated_col_pitch
             dummy_cells.append(
-                {"row": r, "col": -dc, "x0_um": -dc * col_pitch, "y0_um": r * row_pitch}
+                {"row": r, "col": -dc, "x0_um": left_x0, "y0_um": r * row_pitch}
             )
             dummy_cells.append(
                 {
                     "row": r,
                     "col": cols - 1 + dc,
-                    "x0_um": (cols - 1 + dc) * col_pitch,
+                    "x0_um": right_x0,
                     "y0_um": r * row_pitch,
                 }
             )
@@ -1530,6 +1555,7 @@ def _mos_array_layout(
         "min_row_pitch_um": min_row_pitch,
         "pitch_x_clamped": pitch_x_clamped,
         "pitch_y_clamped": pitch_y_clamped,
+        "share_sd": share_sd,
         "cells": cells,
         "dummy_cells": dummy_cells,
         "well_box_um": well_box,
