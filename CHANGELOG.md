@@ -24,7 +24,6 @@ not `klt --version`, if you need to detect this kind of drift. See
   disclosed as `citation.artifact_binding.regeneration` with
   `executed_by_klt: false`, and text output adds a `regeneration:` line.
   **Additive contract change**; `schema_version` is unchanged.
-
 - **`klt lvs`: new `mismatches[].category` `device.series_fold_offset_absorbed`**
   (issue #3017): when `options.combine_devices` folds N>1 series primitives of
   a resistor class with a nonzero head term (`fixed_offset_ohm` +
