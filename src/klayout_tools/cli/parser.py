@@ -6186,5 +6186,19 @@ def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
             "Requires --findings-only -- passing it alone exits 1."
         ),
     )
+    erc_parser.add_argument(
+        "--compact",
+        action="store_true",
+        help=(
+            "with --findings-only, replace the per-gate gates[] rows, the "
+            "per-(gate, level) coverage.skipped 'findings_only' records and "
+            "the per-gate erc.floating_gate checked ids with one aggregate "
+            "record each plus a top-level 'compact' counts block "
+            "(issue #2965). gates stays a list (empty); nets, erc_findings, "
+            "erc_status and the tie entries of erc_coverage are unchanged. "
+            "Requires --findings-only -- passing it alone exits 1. Omitted, "
+            "output is byte-identical."
+        ),
+    )
     _add_format_arg(erc_parser)
     erc_parser.set_defaults(func=erc_cmd.run)
