@@ -5713,8 +5713,20 @@ escaped. Names with no DEF origin (and port names) keep the uniform
 escape-everything rule, `/` included. Whether a given OpenSTA netlist
 resolves the bare form is a property of that netlist (hierarchical vs.
 flattened with escaped names); the writer follows the DEF rather than
-guessing. Not yet measured against a live OpenSTA session — `sta` is not
-installed on the host this change was built on.
+guessing.
+
+Measured against a real OpenSTA session (issue #3448, OpenROAD
+`26Q3-1510-g6cb3f2b704`, sky130_fd_sc_hd `tt_025C_1v80`, `klt sta` in `def`
+mode with `spef`): a two-inverter DEF whose instances are named
+`g_slice\[0\].u/_08_` (bare divider) and, separately,
+`g_slice\[0\].u\/_08_` (escaped divider, the #1623 shape), each paired with
+the SPEF this writer emits for it, reports `annotation_complete: true`,
+`design_nets_annotated == design_nets_total == 4`,
+`reader_warning_count: 0`, `unannotated_driver_count: 0` and
+`delay_changed: true` for **both** spellings, with no `/` -> `__` rewrite.
+Scope of that measurement: the DEF-loaded design only (`klt sta` rejects
+`spef` together with `verilog`), on a two-cell fixture; a flattened
+Verilog netlist linked separately is not covered.
 
 **Every two-terminal `*RES`/coupling `*CAP` endpoint is a colon-scoped
 internal node, a `*CONN`-declared instance-pin identifier, or (for an
