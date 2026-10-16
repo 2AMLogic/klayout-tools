@@ -1717,6 +1717,7 @@ def run_sim(
     plot_dir: str | None = None,
     fail_fast_probe: bool | None = None,
     fail_on_diagnostic: list[str] | tuple[str, ...] | None = None,
+    max_units_per_job: int | None = None,
     dry_run: bool = False,
     submit_only: bool = False,
     attach_job_id: str | None = None,
@@ -1814,6 +1815,11 @@ def run_sim(
     submits one independent fleet *job* per shard (:func:`_run_batch_fleet`)
     -- the same per-shard slice contract, with the provisioning half owned
     by 2am's fleet rather than by this process.
+
+    ``max_units_per_job`` (the ``--max-units-per-job`` CLI flag) overrides
+    ``request.batch.max_units_per_job``: for backend ``batch`` with
+    ``hosts == 1`` it opts the request into splitting its units into jobs of
+    at most that many (issue #3446). Ignored by the other backends.
 
     ``budget_s`` bounds the **whole sweep's** wall-clock time, overriding the
     request's own ``options.wall_clock_budget_s`` when given (the
@@ -2002,6 +2008,7 @@ def run_sim(
         plot_dir=plot_dir,
         fail_fast_probe=fail_fast_probe,
         fail_on_diagnostic=fail_on_diagnostic,
+        max_units_per_job=max_units_per_job,
         dry_run=dry_run,
         submit_only=submit_only,
         attach_job_id=attach_job_id,
@@ -2169,6 +2176,22 @@ def _with_forwarded_budget(
     return {**request, "options": {**options, "wall_clock_budget_s": budget_s}}
 
 
+def _with_max_units_override(
+    request: dict[str, Any], max_units_per_job: int | None
+) -> dict[str, Any]:
+    """Fold the ``--max-units-per-job`` CLI override into ``request.batch``
+    (issue #3446), leaving the loaded request untouched."""
+    if max_units_per_job is None:
+        return request
+    return {
+        **request,
+        "batch": {
+            **(request.get("batch") or {}),
+            "max_units_per_job": max_units_per_job,
+        },
+    }
+
+
 def _check_expected_netlist_identity(
     expect_identity: Any,
     netlist_identity: str | None,
@@ -2241,6 +2264,7 @@ def _run_sim_corners(
     plot_dir: str | None = None,
     fail_fast_probe: bool | None = None,
     fail_on_diagnostic: list[str] | tuple[str, ...] | None = None,
+    max_units_per_job: int | None = None,
     dry_run: bool = False,
     submit_only: bool = False,
     attach_job_id: str | None = None,
@@ -2250,7 +2274,7 @@ def _run_sim_corners(
     request/response contract, and the deck-list dispatch alternative
     are documented there. Kept as its own function so the deck dispatch
     in ``run_sim`` adds nothing to this sweep's own complexity budget."""
-    request = load_request(request_path)
+    request = _with_max_units_override(load_request(request_path), max_units_per_job)
     request_dir = os.path.dirname(os.path.abspath(request_path))
     # Issue #1261 (and #1274 for `environment.models_lib`): every input-path
     # field this run's own JSON response echoes (`netlist`,

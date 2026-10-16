@@ -14,6 +14,15 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sim` batch: opt-in auto-split of a request that cannot fit the fleet's
+  whole-job ceiling** (issue #3446): `batch.job_ceiling_check: "split"`,
+  `batch.max_units_per_job` and `--max-units-per-job N` reroute a
+  `remote.hosts: 1` request through the one-job-per-shard path as
+  `ceil(units / cap)` balanced jobs; `environment.remote.job_ceiling` gains
+  `split` and `effective_hosts` (only when a split mode is active). A cap the
+  ceiling cannot honor fails before any S3 write with
+  `error.code: "batch_max_units_per_job_invalid"`. Default (`"warn"`) behavior
+  is unchanged. Additive; no `schema_version` bump.
 - **ASAP7 DRC deck checks the four net-aware spacings `ACTIVE.S.2A`,
   `LIG.LISD.S.6`, `LIG.LISD.S.7` and `LIG.SDT.S.8`** (issue #3084): DRM Tables
   3.5.1 and 3.10.1 apply these only to shapes on different nets, so the deck

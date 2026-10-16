@@ -5080,6 +5080,252 @@ def test_prelaunch_feature_check_warn_mode_does_not_raise(tmp_path, monkeypatch)
     sb._enforce_published_runner_features(request, assessment)
 
 
+# --------------------------------------------------------------------------- #
+# Whole-job ceiling: opt-in auto-split (issue #3446)
+# --------------------------------------------------------------------------- #
+
+
+def _split_runner(monkeypatch):
+    """A fake transport that answers each uploaded shard request with a
+    report naming exactly the units that shard was sent."""
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    shard_sizes: list[int] = []
+
+    def _capture(argv, timeout_s):
+        if "inputs/request.json" in " ".join(argv):
+            source, destination = argv[argv.index("cp") + 1 : argv.index("cp") + 3]
+            points = json.loads(Path(source).read_text())["_explicit_points"]
+            shard_sizes.append(len(points))
+            runner.outputs_by_job[job_id_of(destination)] = {
+                "report.json": _sim_report(
+                    corner_ids=tuple(
+                        f"tt_1.800_{int(p['temperature_c'])}" for p in points
+                    )
+                )
+            }
+        return runner(argv, timeout_s)
+
+    monkeypatch.setattr(sb, "_run_subprocess", _capture)
+    return runner, shard_sizes
+
+
+def test_split_mode_runs_63_units_as_three_jobs_in_unit_order(
+    tmp_path, monkeypatch, capsys
+):
+    runner, shard_sizes = _split_runner(monkeypatch)
+    monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
+
+    corners, _, environment = sb._run_batch(
+        corner_points=_corner_points(63),
+        netlist_path=str(_write_body(tmp_path)),
+        models_lib=None,
+        analysis={"kind": "tran", "args": "1n 1u"},
+        measurements_spec=_measurements_spec(),
+        timeout_s=120.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        artifacts_dir=str(tmp_path / "artifacts"),
+        max_workers=None,
+        request=_ceiling_request(tmp_path, job_ceiling_check="split"),
+    )
+
+    assert len(runner.argvs_matching("launch", "--apply")) == 3
+    assert sorted(shard_sizes) == [21, 21, 21]
+    assert [c["corner_id"] for c in corners] == [f"tt_1.800_{i}" for i in range(63)]
+    assert len(environment["fleet"]) == 3
+    ceiling = environment["job_ceiling"]
+    assert ceiling["split"] is True
+    assert ceiling["effective_hosts"] == 3
+    assert ceiling["check"] == "split"
+    assert "splitting 63 units into 3 batch jobs" in capsys.readouterr().err
+
+
+def test_max_units_per_job_caps_the_shard_size(tmp_path, monkeypatch):
+    runner, shard_sizes = _split_runner(monkeypatch)
+    monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
+
+    # 10 units fit one job, but the caller asked for jobs of at most 4.
+    corners, _, environment = sb._run_batch(
+        corner_points=_corner_points(10),
+        netlist_path=str(_write_body(tmp_path)),
+        models_lib=None,
+        analysis={"kind": "tran", "args": "1n 1u"},
+        measurements_spec=_measurements_spec(),
+        timeout_s=120.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        artifacts_dir=str(tmp_path / "artifacts"),
+        max_workers=None,
+        request=_ceiling_request(tmp_path, max_units_per_job=4),
+    )
+
+    assert sorted(shard_sizes) == [3, 3, 4]
+    assert len(corners) == 10
+    assert environment["job_ceiling"]["effective_hosts"] == 3
+
+
+def test_split_with_a_fitting_request_stays_one_job(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {"report.json": _sim_report()}
+
+    _, _, environment = _run_one_batch(
+        tmp_path,
+        monkeypatch,
+        runner,
+        units=29,  # bound == ceiling: not exceeded
+        timeout_s=120.0,
+        job_ceiling_check="split",
+    )
+
+    assert len(runner.argvs_matching("launch", "--apply")) == 1
+    assert environment["job_ceiling"]["split"] is False
+    assert environment["job_ceiling"]["effective_hosts"] == 1
+
+
+def test_max_units_per_job_larger_than_unit_count_is_one_job(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {"report.json": _sim_report()}
+
+    _, _, environment = _run_one_batch(
+        tmp_path, monkeypatch, runner, units=5, timeout_s=120.0, max_units_per_job=99
+    )
+
+    assert len(runner.argvs_matching("launch", "--apply")) == 1
+    assert environment["job_ceiling"]["split"] is False
+
+
+@pytest.mark.parametrize("cap", [29, 28])
+def test_max_units_per_job_at_or_under_the_ceiling_limit_is_accepted(
+    tmp_path, monkeypatch, cap
+):
+    runner, shard_sizes = _split_runner(monkeypatch)
+    monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
+
+    sb._run_batch(
+        corner_points=_corner_points(58),
+        netlist_path=str(_write_body(tmp_path)),
+        models_lib=None,
+        analysis={"kind": "tran", "args": "1n 1u"},
+        measurements_spec=_measurements_spec(),
+        timeout_s=120.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        artifacts_dir=str(tmp_path / "artifacts"),
+        max_workers=None,
+        request=_ceiling_request(tmp_path, max_units_per_job=cap),
+    )
+
+    assert max(shard_sizes) <= cap
+
+
+def test_max_units_per_job_over_the_ceiling_limit_is_rejected_before_s3(
+    tmp_path, monkeypatch
+):
+    runner = _FakeRunner()
+    with pytest.raises(sim.SimError) as excinfo:
+        _run_one_batch(
+            tmp_path,
+            monkeypatch,
+            runner,
+            units=63,
+            timeout_s=120.0,
+            max_units_per_job=40,  # 120 x 40 + 120 > 3600
+        )
+
+    assert runner.calls == []
+    assert excinfo.value.code == sb.BATCH_MAX_UNITS_CODE
+    assert "at most 29" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("bad", [0, -3, 2.5, "8", True])
+def test_max_units_per_job_bad_type_is_rejected_before_s3(tmp_path, monkeypatch, bad):
+    runner = _FakeRunner()
+    with pytest.raises(sim.SimError) as excinfo:
+        _run_one_batch(
+            tmp_path,
+            monkeypatch,
+            runner,
+            units=3,
+            timeout_s=30.0,
+            max_units_per_job=bad,
+        )
+
+    assert runner.calls == []
+    assert excinfo.value.code == sb.BATCH_MAX_UNITS_CODE
+
+
+def test_max_units_per_job_conflicts_with_enforce(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    with pytest.raises(sim.SimError) as excinfo:
+        _run_one_batch(
+            tmp_path,
+            monkeypatch,
+            runner,
+            units=3,
+            timeout_s=30.0,
+            max_units_per_job=2,
+            job_ceiling_check="enforce",
+        )
+
+    assert runner.calls == []
+    assert excinfo.value.code == sb.BATCH_MAX_UNITS_CODE
+
+
+def test_split_keeps_the_single_unit_refusal(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    with pytest.raises(sim.SimError) as excinfo:
+        _run_one_batch(
+            tmp_path,
+            monkeypatch,
+            runner,
+            units=4,
+            timeout_s=4000.0,  # one unit alone exceeds the 3600 s ceiling
+            job_ceiling_check="split",
+        )
+
+    assert runner.calls == []
+    assert excinfo.value.code == sb.BATCH_JOB_CEILING_CODE
+    assert "No remote.hosts value fits" in str(excinfo.value)
+
+
+def test_default_still_warns_and_submits_one_job(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {"report.json": _sim_report()}
+
+    _, _, environment = _run_one_batch(
+        tmp_path, monkeypatch, runner, units=63, timeout_s=120.0
+    )
+
+    assert len(runner.argvs_matching("launch", "--apply")) == 1
+    assert "split" not in environment["job_ceiling"]
+    assert "effective_hosts" not in environment["job_ceiling"]
+
+
+def test_cli_max_units_per_job_flag_overrides_the_request(tmp_path, monkeypatch):
+    from klayout_tools.cli import main
+
+    seen: list[dict] = []
+
+    def _capture(**kwargs):
+        seen.append(kwargs["request"])
+        raise sim.SimError("stop here")
+
+    monkeypatch.setitem(sim._BACKENDS, "batch", _capture)
+    _write_body(tmp_path)
+    request = _ceiling_request(tmp_path, max_units_per_job=5)
+    path = _write_request(tmp_path, request)
+
+    main(["sim", str(path), "--max-units-per-job", "7", "--format", "json"])
+
+    assert seen[0]["batch"]["max_units_per_job"] == 7  # the flag beats the request
+    assert seen[0]["batch"]["bucket"] == FAKE_BUCKET  # other batch keys survive
+
+
 @pytest.mark.parametrize(
     "codes", [("batch_job_failed", "batch_poll_timeout"), ("batch_job_timeout",) * 2]
 )
