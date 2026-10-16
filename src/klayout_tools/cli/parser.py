@@ -604,6 +604,18 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
         help="with --batch-set, how many requests are in flight at once (default: 4)",
     )
     sim_parser.add_argument(
+        "--capacity-retries",
+        dest="capacity_retries",
+        type=int,
+        default=None,
+        help=(
+            "with --batch-set, re-submit a request refused for fleet capacity "
+            "(batch_no_capacity / batch_concurrency_cap) up to N more times "
+            "with doubling backoff (default: 0, off); other failures are "
+            "never retried (issue #3520)"
+        ),
+    )
+    sim_parser.add_argument(
         "--submit-only",
         dest="submit_only",
         action="store_true",

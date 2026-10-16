@@ -793,10 +793,22 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
 - **Bounded in flight.** At most `--max-in-flight` requests (default **4**)
   run at once -- submit, launch, and poll; the rest queue and start as slots
   free. The bound is a client-side politeness knob, not the fleet's cap.
-- **One retry loop.** Each request runs the ordinary batch path, so
-  capacity-refusal waiting is exactly `batch.capacity_wait_s` (above) via
-  `sim_batch.launch_job`; set mode adds no retry of its own. Set
-  `capacity_wait_s` in the requests if you want refusals waited out.
+- **Capacity refusals.** Each request runs the ordinary batch path, so
+  in-request waiting is `batch.capacity_wait_s` (above) via
+  `sim_batch.launch_job`. A refusal that still reaches the set carries its
+  `error.code` (`batch_no_capacity` / `batch_concurrency_cap`) and appears in
+  `refused_codes`. `--capacity-retries N` (default `0`, off;
+  [#3520](https://github.com/2AMLogic/klayout-tools/issues/3520)) additionally
+  re-submits such a request up to `N` more times with doubling backoff
+  (5s, 10s, ...). Only those two codes are retried -- never another failure,
+  and never on local ngspice.
+- **Incremental manifest.** `<outdir>/set-manifest.json` (without `-o`: the
+  `.klt/sim/` directory next to the first request) is written when the set
+  starts and atomically rewritten on every transition. It lists, per request,
+  `index`, `request`, `dir`, `status` (`pending`/`running`/final), `attempts`,
+  and `job_id`/`job_ids` once the request finished, so a client interrupted
+  mid-set can re-associate the surviving directories. The aggregate envelope is
+  unchanged.
 - **Batch only, never local.** The backend is forced to `batch` (`--backend`
   other than `batch` is a usage error, exit `2`); a refused or failed request is
   reported, never re-run on local ngspice. `--resume`, `--plot` and
