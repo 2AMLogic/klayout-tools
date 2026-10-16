@@ -86,7 +86,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import IO, Any, NamedTuple
 
@@ -96,6 +96,7 @@ from . import (
     sim_crossings,
     sim_cycle_mean,
     sim_decks,
+    sim_energy,
     sim_mismatch_gate,
     sim_steps,
     sim_transfer_meas,
@@ -1137,6 +1138,8 @@ def _resolve_analysis_and_measurements(
     _validate_no_dependent_meas_cards(measurements_spec)
     # Issue #2868: a crossings series is a transient-time quantity.
     sim_crossings.validate_crossings_context(measurements_spec, analysis)
+    # Issue #3033: an energy window is a transient-time quantity too.
+    sim_energy.validate_energy_context(measurements_spec, analysis)
     # Issue #2947: so is a cycle-aligned mean.
     sim_cycle_mean.validate_cycle_mean_context(measurements_spec, analysis)
     # Issue #2923: and a transfer metric is an AC-sweep quantity.
@@ -1300,6 +1303,32 @@ def _validate_measurement_forms(measurements_spec: list[dict[str, Any]]) -> None
     _validate_expr_names_unique(measurements_spec)
 
 
+def _validate_rawfile_form(
+    name: Any, spec: dict[str, Any], present: dict[str, bool]
+) -> bool:
+    """Issues #2947, #3033: ``cycle_mean`` and ``energy`` are mutually
+    exclusive with every other form. Validates the one declared (``present``
+    maps each form name to whether ``spec`` declares it) and returns True, or
+    returns False when neither is declared."""
+    for form in ("cycle_mean", "energy"):
+        if not present[form]:
+            continue
+        others = [other for other, on in present.items() if on and other != form]
+        if others:
+            raise SimError(
+                f"measurement '{name}' declares '{form}' together with "
+                f"'{others[0]}': they are alternative forms of a measurement "
+                "-- declare exactly one (use a separate measurements[] entry "
+                "for the other)"
+            )
+        if form == "cycle_mean":
+            sim_cycle_mean.validate_cycle_mean_spec(name, spec["cycle_mean"])
+        else:
+            sim_energy.validate_energy_spec(name, spec["energy"])
+        return True
+    return False
+
+
 def _validate_measurement_form(spec: dict[str, Any]) -> None:
     """One ``request.measurements[]`` entry's form: a ``name`` plus exactly
     one of ``spice``/``expr``, and -- for an ``expr`` -- a name that survives
@@ -1313,34 +1342,30 @@ def _validate_measurement_form(spec: dict[str, Any]) -> None:
     has_expr = spec.get("expr") is not None
     has_crossings = sim_crossings.is_crossings(spec)
     has_cycle_mean = sim_cycle_mean.is_cycle_mean(spec)
-    if name is None or not (has_spice or has_expr or has_crossings or has_cycle_mean):
+    has_energy = sim_energy.is_energy(spec)
+    if name is None or not (
+        has_spice or has_expr or has_crossings or has_cycle_mean or has_energy
+    ):
         raise SimError(
             "each request.measurements[] entry requires 'name' and "
             "exactly one of 'spice' (a verbatim .meas card), 'expr' "
             "(an ngspice expression evaluated after the analysis) or "
             "'crossings' (a threshold-crossing time series) or "
             "'cycle_mean' (a mean over whole reference cycles) or "
+            "'energy' (a source's energy over a transient window) or "
             "'transfer' (an AC return-ratio metric)"
         )
-    if has_cycle_mean:
-        # Issue #2947: a fourth, mutually exclusive form.
-        others = [
-            form
-            for form, present in (
-                ("spice", has_spice),
-                ("expr", has_expr),
-                ("crossings", has_crossings),
-            )
-            if present
-        ]
-        if others:
-            raise SimError(
-                f"measurement '{name}' declares 'cycle_mean' together with "
-                f"'{others[0]}': they are alternative forms of a measurement "
-                "-- declare exactly one (use a separate measurements[] entry "
-                "for the other)"
-            )
-        sim_cycle_mean.validate_cycle_mean_spec(name, spec["cycle_mean"])
+    if _validate_rawfile_form(
+        name,
+        spec,
+        {
+            "spice": has_spice,
+            "expr": has_expr,
+            "crossings": has_crossings,
+            "cycle_mean": has_cycle_mean,
+            "energy": has_energy,
+        },
+    ):
         return
     if has_crossings:
         # Issue #2868: a third, mutually exclusive form.
@@ -2538,6 +2563,7 @@ def _run_sim_corners(
         crossings_declared=bool(
             sim_crossings.crossings_measurements(measurements_spec)
         ),
+        energy_declared=bool(sim_energy.energy_measurements(measurements_spec)),
         cycle_mean_declared=bool(
             sim_cycle_mean.cycle_mean_measurements(measurements_spec)
         ),
@@ -4903,11 +4929,12 @@ def _refuse_xyce_control_block_measurements(
     expr_declared: bool,
     crossings_declared: bool,
     cycle_mean_declared: bool,
+    energy_declared: bool,
     transfer_declared: bool = False,
 ) -> None:
     """The ``engine: "xyce"`` refusals for measurement forms that exist only
     as commands in klt's generated ngspice ``.control`` block (``expr``,
-    issue #2533; ``crossings``, issue #2868). Split out of
+    issue #2533; ``crossings``, issue #2868; ``energy``, issue #3033). Split out of
     :func:`_enforce_xyce_support_boundary` to keep that gate under the
     complexity limit."""
     if expr_declared:
@@ -4943,6 +4970,16 @@ def _refuse_xyce_control_block_measurements(
             "a `.control` block, and the Xyce deck has none; use engine "
             "'ngspice'"
         )
+    if energy_declared:
+        # Issue #3033: the source current/voltage are dumped by ngspice
+        # `let`/`write` commands in the generated `.control` block -- same
+        # boundary as `crossings`.
+        raise SimError(
+            "measurements[].energy is not supported for engine 'xyce': the "
+            "source current and voltage are dumped by ngspice `let`/`write` "
+            "commands inside a `.control` block, and the Xyce deck has none; "
+            "use engine 'ngspice'"
+        )
     if transfer_declared:
         # Issue #2923: same `.control` let/write boundary as `cycle_mean`.
         raise SimError(
@@ -4967,6 +5004,7 @@ def _enforce_xyce_support_boundary(
     analysis_steps_declared: bool = False,
     crossings_declared: bool = False,
     cycle_mean_declared: bool = False,
+    energy_declared: bool = False,
     transfer_declared: bool = False,
 ) -> None:
     """Refuse the ``engine: "xyce"`` combinations the v1 path does not
@@ -5040,6 +5078,7 @@ def _enforce_xyce_support_boundary(
         expr_declared=expr_measurements_declared,
         crossings_declared=crossings_declared,
         cycle_mean_declared=cycle_mean_declared,
+        energy_declared=energy_declared,
         transfer_declared=transfer_declared,
     )
     if save_mode_declared:
@@ -6354,6 +6393,8 @@ def _run_corner(
     # directory now, before it is cleaned up below -- so the reduced array is
     # what leaves the corner, on every backend, whatever `keep_artifacts` is.
     crossings = sim_crossings.extract_corner_crossings(measurements_spec, corner_dir)
+    # Issue #3033: same for the energy reduction.
+    energy = sim_energy.extract_corner_energy(measurements_spec, corner_dir)
     cycle_means = sim_cycle_mean.extract_corner_cycle_means(
         measurements_spec, corner_dir
     )
@@ -6369,6 +6410,7 @@ def _run_corner(
             is_xyce=is_xyce,
             save_mode=save_mode,
             crossings=crossings,
+            energy=energy,
             cycle_means=cycle_means,
             transfers=transfers,
         )
@@ -6614,6 +6656,7 @@ def _corner_measurement_results(
     is_xyce: bool,
     save_mode: str,
     crossings: dict[int, sim_crossings.CrossingsOutcome] | None = None,
+    energy: dict[int, sim_energy.EnergyOutcome] | None = None,
     cycle_means: dict[int, sim_cycle_mean.CycleMeanOutcome] | None = None,
     transfers: dict[int, sim_transfer_meas.TransferOutcome] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
@@ -6624,7 +6667,8 @@ def _corner_measurement_results(
     ``crossings`` entry's extracted series (see
     :func:`klayout_tools.sim_crossings.extract_corner_crossings`); such an
     entry is graded by :func:`_crossings_measurement_result` instead of being
-    looked up in the log.
+    looked up in the log. ``energy`` (issue #3033) does the same for ``energy``
+    entries, graded by :func:`_energy_measurement_result`.
 
     An ``analysis_steps[]`` corner (issue #2482) is graded by
     :func:`klayout_tools.sim_steps.grade_step_measurements`, which adds the
@@ -6645,24 +6689,34 @@ def _corner_measurement_results(
     diagnostics: list[dict[str, Any]] = []
     meas_errors = {} if is_xyce else _parse_meas_errors(log_text)
     attributed: set[str] = set()
+    # Forms whose value comes from a rawfile reduction rather than the log:
+    # (spec predicate, response-entry builder, position -> outcome map).
+    sidecar_forms: tuple[
+        tuple[
+            Callable[[dict[str, Any]], bool],
+            Callable[..., tuple[dict[str, Any], list[dict[str, Any]]]],
+            dict[int, Any] | None,
+        ],
+        ...,
+    ] = (
+        (sim_crossings.is_crossings, _crossings_measurement_result, crossings),
+        (sim_energy.is_energy, _energy_measurement_result, energy),
+        (sim_cycle_mean.is_cycle_mean, _cycle_mean_measurement_result, cycle_means),
+        (sim_transfer_meas.is_transfer, _transfer_measurement_result, transfers),
+    )
     for position, spec in enumerate(measurements_spec):
-        if sim_crossings.is_crossings(spec):
-            result, extra = _crossings_measurement_result(
-                spec, (crossings or {}).get(position), save_mode=save_mode
-            )
-            measurement_results.append(result)
-            diagnostics.extend(extra)
-            continue
-        if sim_cycle_mean.is_cycle_mean(spec):
-            result, extra = _cycle_mean_measurement_result(
-                spec, (cycle_means or {}).get(position), save_mode=save_mode
-            )
-            measurement_results.append(result)
-            diagnostics.extend(extra)
-            continue
-        if sim_transfer_meas.is_transfer(spec):
-            result, extra = _transfer_measurement_result(
-                spec, (transfers or {}).get(position), save_mode=save_mode
+        sidecar = next(
+            (
+                (render, outcomes)
+                for is_form, render, outcomes in sidecar_forms
+                if is_form(spec)
+            ),
+            None,
+        )
+        if sidecar is not None:
+            render, outcomes = sidecar
+            result, extra = render(
+                spec, (outcomes or {}).get(position), save_mode=save_mode
             )
             measurement_results.append(result)
             diagnostics.extend(extra)
@@ -6880,6 +6934,52 @@ def _transfer_measurement_result(
         "status": m_status,
         "margin": margin,
         "transfer": outcome.report(spec),
+    }
+    return result, grading_diagnostics
+
+
+def _energy_measurement_result(
+    spec: dict[str, Any],
+    outcome: sim_energy.EnergyOutcome | None,
+    *,
+    save_mode: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """One ``energy`` measurement's response entry (issue #3033).
+
+    ``value`` is the net energy in joules -- a plain number, graded through
+    :func:`_grade_measurement_value` like any scalar -- and the
+    net/gross/recovered/charge breakdown rides the additive ``energy``
+    sibling. A source or voltage that did not resolve is an ordinary
+    ``status: "error"`` entry with a ``code: "measurement"`` diagnostic and
+    no ``energy`` member."""
+    name = spec["name"]
+    unit = spec.get("unit")
+    if outcome is None or outcome.error is not None:
+        message = (
+            outcome.error
+            if outcome is not None and outcome.error is not None
+            else f"measurement '{name}' produced no energy"
+        )
+        if save_mode == "netlist":
+            message += SAVE_MODE_NETLIST_NO_VALUE_HINT
+        result = {
+            "name": name,
+            "value": None,
+            "unit": unit,
+            "status": "error",
+            "margin": None,
+        }
+        return result, [
+            {"severity": "error", "code": "measurement", "message": message}
+        ]
+    m_status, margin, grading_diagnostics = _grade_measurement_value(spec, outcome.net)
+    result = {
+        "name": name,
+        "value": outcome.net,
+        "unit": unit,
+        "status": m_status,
+        "margin": margin,
+        "energy": outcome.report(),
     }
     return result, grading_diagnostics
 
@@ -7221,12 +7321,18 @@ def _corner_deck_control_lines(
        vector. ``set filetype=ascii`` is emitted before the analysis when
        any are declared (the rawfile reader is ASCII-only). None of this
        appears without a crossings entry.
-    6. Per ``measurements[].cycle_mean`` entry (issue #2947), two ``let``
+    6. Per ``measurements[].energy`` entry (issue #3033), a ``let`` of the
+       voltage vector, a ``let`` of ``i(<source>)`` and one ``write
+       <corner_dir>/energy_<k>.raw`` of both
+       (:func:`klayout_tools.sim_energy.control_lines`), after the crossings
+       lines; same ``set filetype=ascii`` rule. None of this appears without
+       an energy entry.
+    7. Per ``measurements[].cycle_mean`` entry (issue #2947), two ``let``
        lines and one ``write`` of both vectors
        (:func:`klayout_tools.sim_cycle_mean.control_lines`), after the
-       crossings lines; same ``set filetype=ascii`` rule. None of this
+       energy lines; same ``set filetype=ascii`` rule. None of this
        appears without a cycle_mean entry.
-    7. Per unique ``measurements[].transfer`` ``num``/``den`` pair (issue
+    8. Per unique ``measurements[].transfer`` ``num``/``den`` pair (issue
        #2923), two ``let`` lines and one ``write`` of both complex vectors
        (:func:`klayout_tools.sim_transfer_meas.control_lines`), after the
        cycle_mean lines; same ``set filetype=ascii`` rule. None of this
@@ -7258,9 +7364,16 @@ def _corner_deck_control_lines(
         lines.extend(["quit", ".endc"])
         return lines
     crossings_lines = sim_crossings.control_lines(measurements_spec, corner_dir)
+    energy_lines = sim_energy.control_lines(measurements_spec, corner_dir)
     cycle_mean_lines = sim_cycle_mean.control_lines(measurements_spec, corner_dir)
     transfer_lines = sim_transfer_meas.control_lines(measurements_spec, corner_dir)
-    if raw_path is not None or crossings_lines or cycle_mean_lines or transfer_lines:
+    if (
+        raw_path is not None
+        or crossings_lines
+        or energy_lines
+        or cycle_mean_lines
+        or transfer_lines
+    ):
         lines.append("set filetype=ascii")
     lines.append(f"{analysis['kind']} {analysis['args']}")
     if raw_path is not None:
@@ -7276,6 +7389,7 @@ def _corner_deck_control_lines(
         lines.append(f"let {spec['name']} = {spec['expr']}")
         lines.append(f"print {spec['name']}")
     lines.extend(crossings_lines)
+    lines.extend(energy_lines)
     lines.extend(cycle_mean_lines)
     lines.extend(transfer_lines)
     lines.append("quit")
