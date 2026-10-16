@@ -136,6 +136,7 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Callable, Collection, Mapping
+from dataclasses import replace
 from typing import Any, NamedTuple
 
 from ._paths import _fold_spice_continuations
@@ -146,8 +147,10 @@ from .pdk_models import (
     _format_um,
     _format_um2,
     build_device_binding_map,
+    flavoured_mos_class_name,
     geometry_style_for_family,
     known_device_subckt_names,
+    mos_flavour_for_subckt,
 )
 
 #: Subcircuit-call parameters carried onto the plain-element ``M`` card
@@ -618,6 +621,7 @@ def _convert_x_card(
     param_scopes: ParamScopes | None = None,
     subckt_scope: str = "",
     resistor_values: Mapping[str, Callable[[float, float], float]] | None = None,
+    mos_flavour_classes: bool = False,
 ) -> str:
     """Convert one ``X`` subcircuit-call line to a plain-element ``M``/``R``/
     ``C``/``Q`` line, or return it unchanged if it is not a recognised device
@@ -702,6 +706,7 @@ def _convert_x_card(
     instance = _instance_name(name_token, lookup.kind)
 
     if lookup.kind == "mos":
+        lookup = _flavoured_mos_lookup(lookup, subckt_name, mos_flavour_classes)
         return _convert_mos_card(
             instance,
             nodes,
@@ -732,6 +737,21 @@ def _convert_x_card(
             placeholder_value_classes[lookup.device_class] = "capacitor"
         return card
     return _convert_bipolar_card(instance, nodes, subckt_name, lookup, params)
+
+
+def _flavoured_mos_lookup(
+    lookup: DeviceLookup, subckt_name: str, enabled: bool
+) -> DeviceLookup:
+    """Issue #3650: with ``enabled``, a flavoured MOS model (``nvt``, ``hvi``,
+    ...) gets its own device class so the compare can tell it from the default
+    one -- the layout side is split the same way. Otherwise ``lookup`` as-is."""
+    flavour = mos_flavour_for_subckt(subckt_name) if enabled else None
+    if flavour is None:
+        return lookup
+    return replace(
+        lookup,
+        device_class=flavoured_mos_class_name(lookup.device_class, flavour),
+    )
 
 
 def _convert_mos_card(
@@ -1710,6 +1730,7 @@ def convert_reference_netlist(
     device_map: dict[str, object] | None = None,
     resistor_value_classes: Collection[str] | None = None,
     deck_options: Mapping[str, str] | None = None,
+    mos_flavour_classes: bool = False,
 ) -> ReferenceConversion:
     """Convert subckt-call-form SPICE ``text`` to the plain-element form,
     returning the converted text *plus* the conversion metadata
@@ -1765,6 +1786,12 @@ def convert_reference_netlist(
     ~1e6x-mis-scaled netlist with no diagnostic pointing at units). An
     explicit unit suffix or exponent is unaffected either way -- see
     :func:`_parse_um`.
+
+    ``mos_flavour_classes`` (issue #3650) emits a MOS call of a flavoured
+    model (e.g. sky130's ``nfet_05v0_nvt``) under its own device class
+    (``nfet__nvt``) instead of the base ``nfet``, so a flavour-aware compare
+    can tell it from a default-flavour device. ``False`` (the default) leaves
+    the output byte-identical.
     """
     subckt_to_binding, device_map_names = _build_subckt_map(deck, device_map)
     geometry_style = geometry_style_for_family(deck) if deck is not None else None
@@ -1800,6 +1827,7 @@ def convert_reference_netlist(
                     param_scopes,
                     subckt_scope,
                     resistor_values,
+                    mos_flavour_classes,
                 )
             )
         else:

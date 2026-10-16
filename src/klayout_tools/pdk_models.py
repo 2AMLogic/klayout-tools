@@ -789,6 +789,32 @@ def build_subckt_to_class_map(deck_name: str) -> dict[str, str]:
     return result
 
 
+def mos_flavour_for_subckt(subckt_name: str) -> str | None:
+    """The ``_MOS_MODEL_FLAVOURS`` flavour key (e.g. ``"nvt"``, ``"hvi"``,
+    ``"06v0"``) a MOS subcircuit name belongs to, or ``None`` for a
+    default-flavour model or an unknown name (issue #3650).
+
+    The inverse of the flavour tables :func:`build_subckt_to_class_map`
+    deliberately collapses: it is what ``options.compare_mos_flavour`` uses to
+    tell a reference ``X`` call of a flavoured model apart from a default one.
+    A name shared by several decks (``sg13_hv_nmos`` in sg13g2 and
+    sg13cmos5l) resolves to the same key in each.
+    """
+    for flavours in _MOS_MODEL_FLAVOURS.values():
+        for flavour, table in flavours.items():
+            if subckt_name in table.values():
+                return flavour
+    return None
+
+
+def flavoured_mos_class_name(device_class: str, flavour: str) -> str:
+    """The device-class name a flavoured MOS device is compared under when
+    ``options.compare_mos_flavour`` is on (issue #3650), e.g. ``nfet`` +
+    ``nvt`` -> ``nfet__nvt``. Both the reference conversion and the layout-side
+    split derive the name here, so the two sides cannot disagree."""
+    return f"{device_class}__{flavour}"
+
+
 def known_mos_subckt_names() -> dict[str, tuple[str, str]]:
     """Every curated MOS device subcircuit name across *all* decks, mapped to
     the ``(deck_name, device_class)`` it resolves to (e.g.
