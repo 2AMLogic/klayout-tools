@@ -23045,6 +23045,8 @@ def test_combine_devices_layout_file_and_netlist_agree_for_stacked_mim(
         assert from_file["counts"]["devices"] == from_netlist["counts"]["devices"]
         assert from_file["counts"]["devices"]["layout"] == 2 * net_pairs
         assert not [m for m in from_file["mismatches"] if m["severity"] == "error"]
+
+
 # reference.unresolved_subckt_call (issue #2952): a reference `X` card calling
 # a subcircuit the reader cannot resolve (no `.subckt`, no device conversion,
 # no same-named layout circuit) used to be satisfied by an empty placeholder
