@@ -136,6 +136,16 @@ refused before simulating (exit 1, usual error envelope) with both stamps in
 the message. No `schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s
 "`environment.netlist_identity`".
 
+`measurements[].on_unreached` (issue #3108) is the same shape: an optional
+request field (`"error"` default, `"null"` opt-in) whose default reproduces
+today's response byte-for-byte. Opting in adds a new measurement `status`
+member, `"not_reached"` (with `value: null`), an `info` diagnostic
+`measurement_not_reached`, and a top-level `not_reached` count present only
+for a request that declared the field. Consumers that switch on measurement
+`status` already must tolerate unknown members per the rule above. No
+`schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s "Unreached
+`.meas` targets (`measurements[].on_unreached`)".
+
 `stimulus` (issue #2977) is a new optional **request** block (declarative
 timed edges, expanded by `klt sim` into PWL sources) with two new optional
 **response** members under `environment`: `environment.stimulus` (the schedule

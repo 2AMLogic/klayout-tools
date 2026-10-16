@@ -181,6 +181,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   unchanged. `klt pex` forwards the `--critical-net-*` forms. Documented
   that the request document already accepts a list for exact names. See
   `docs/cli/extract.md`.
+- **`klt sim` `measurements[].on_unreached`** (issue #3108): opt-in
+  `"null"` grades a `.meas` card whose `WHEN`/`AT` target the completed
+  analysis never reached (ngspice `out of interval`) as the new measurement
+  status `not_reached` (`value: null`, `info` diagnostic
+  `measurement_not_reached`) instead of `error`/exit 4; such results are not
+  graded against `limits`, and a top-level `not_reached` count appears only
+  for requests that declare the field. Default (`"error"`) output is
+  byte-identical. Additive; no `schema_version` bump.
 - **`klt drc --deck sky130`: `nwell.9` and `coverage.unmodeled_rules`**
   (issue #3031): new rule `nwell.enclosed.hvi.1` (runset `nwell.9`, HVnwell
   must be enclosed by `hvi` 75/20; only `hvi` of the runset's
