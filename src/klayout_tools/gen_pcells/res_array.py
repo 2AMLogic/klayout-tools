@@ -193,6 +193,15 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     f"res_flavor_{i}_layer -- 0.0 covers the body segment only",
                     default=0.0,
                 )
+                # Issue #3000: > 0.0 grows this mask across the body axis,
+                # beyond the poly body (gf180mcu SAB, SB.9/SB.10).
+                self.param(
+                    f"res_flavor_{i}_side_extension_um",
+                    self.TypeDouble,
+                    f"Extension (um) of res_flavor_{i}_layer past the body "
+                    "edges across the current-flow axis -- 0.0 matches the body",
+                    default=0.0,
+                )
             self.param(
                 "dummy_layer",
                 self.TypeLayer,
@@ -266,6 +275,15 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "axis -- 0.0 draws the ordinary square cut",
                 default=0.0,
             )
+            # Issue #3000: gf180mcu salicide block (SAB) clearance from the
+            # end contacts (SB.4); 0.0 = the generic enclosure margin.
+            self.param(
+                "res_contact_space_um",
+                self.TypeDouble,
+                "Minimum space (um) from the body-segment marker / salicide "
+                "block to the end contact -- 0.0 keeps the generic margin",
+                default=0.0,
+            )
             self.param(
                 "mfg_grid_um",
                 self.TypeDouble,
@@ -299,6 +317,7 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.metal_res_via_space_min_um,
                 self.end_contact_w_um,
                 self.end_contact_h_um,
+                self.res_contact_space_um,
             )
             unit_boxes = info["unit"]["boxes_um"]
             all_cells = info["cells"] + info["dummy_cells"]
@@ -335,13 +354,14 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             # :func:`_res_unit_layout` for why the marker box excludes the
             # contacted end pads.
             marker_boxes = unit_boxes["marker"]
-            for present, layer_param, head_enc in [
-                (self.res_mark_present, self.res_mark_layer, 0.0),
+            for present, layer_param, head_enc, side_ext in [
+                (self.res_mark_present, self.res_mark_layer, 0.0, 0.0),
             ] + [
                 (
                     getattr(self, f"res_flavor_{i}_present"),
                     getattr(self, f"res_flavor_{i}_layer"),
                     getattr(self, f"res_flavor_{i}_head_enclosure_um"),
+                    getattr(self, f"res_flavor_{i}_side_extension_um"),
                 )
                 for i in range(_MAX_RES_FLAVOR_LAYERS)
             ]:
@@ -356,6 +376,12 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     if head_enc > 0.0
                     else marker_boxes
                 )
+                # Issue #3000: gf180mcu's SAB runs past the body edges.
+                if side_ext > 0.0:
+                    boxes = [
+                        (x0, y0 - side_ext, x1, y1 + side_ext)
+                        for x0, y0, x1, y1 in boxes
+                    ]
                 for c in all_cells:
                     _insert_boxes(
                         self.cell, li_mark, dbu, boxes, c["x0_um"], c["y0_um"]

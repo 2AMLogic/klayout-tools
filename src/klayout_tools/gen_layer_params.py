@@ -1710,6 +1710,44 @@ _PDK_RES_FLAVOR_MASK_ENCLOSURE_UM: dict[str, dict[tuple[int, int], float]] = {
 }
 
 
+#: gf180mcu salicide-block (SAB) geometry for ``res_array``'s poly body (issue
+#: #3000), keyed by family. The runset's ``sab.drc`` constrains an unsalicided
+#: poly resistor in two directions the body-only marker box violated:
+#:
+#: - ``contact_space_um``: ``SB.4``, SAB-to-contact space >= 0.15um. The SAB is
+#:   drawn on the body segment, so the end head is lengthened until the
+#:   contact edge sits this far from the body (the generic enclosure margin
+#:   left 0.10um). Body length, and so the extracted ``L``, is unchanged.
+#: - ``side_extension_um``: ``SB.9``/``SB.10`` -- the SAB must run >= 0.22um
+#:   past the poly body's long edges (a SAB edge flush with the poly edge is
+#:   what ``SB.10`` flagged). Folded rows are 0.4um apart, so the extended
+#:   SABs of adjacent rows overlap and merge instead of tripping ``SB.2``.
+#:
+#: Values are from the open GF180MCU DRM / ``sab.drc`` (SB.4: 0.15um,
+#: SB.9/SB.10: 0.22um). A family absent here draws the body-only SAB.
+_PDK_RES_SAB_UM: dict[str, dict[str, Any]] = {
+    "gf180mcu": {
+        "layer": (49, 0),
+        "contact_space_um": 0.15,
+        "side_extension_um": 0.22,
+    },
+}
+
+
+def _res_sab_geometry_um(
+    family: str, flavor: str, metal_level: int = 0
+) -> tuple[float, float]:
+    """``(contact_space_um, side_extension_um)`` of the poly-body salicide
+    block for ``family`` (see :data:`_PDK_RES_SAB_UM`), or ``(0.0, 0.0)`` for
+    a family without one or a ``metal_level`` (metal-body) request."""
+    entry = _PDK_RES_SAB_UM.get(family)
+    if entry is None or metal_level:
+        return (0.0, 0.0)
+    if entry["layer"] not in _PDK_RES_FLAVOR_LAYERS[family].get(flavor, ()):
+        return (0.0, 0.0)
+    return (entry["contact_space_um"], entry["side_extension_um"])
+
+
 def _res_end_contact_um(
     family: str, flavor: str, metal_level: int = 0
 ) -> tuple[float, float]:
@@ -2795,6 +2833,7 @@ def _resistor_layer_params(
             resolved[f"res_flavor_{i}_layer"] = kdb.LayerInfo(0, 0)
             resolved[f"res_flavor_{i}_present"] = False
             resolved[f"res_flavor_{i}_head_enclosure_um"] = 0.0
+            resolved[f"res_flavor_{i}_side_extension_um"] = 0.0
         floors = _metal_res_geometry_min_um(family, metal_level)
         resolved["metal_res_via_min_w_um"] = floors["via_min_w_um"]
         resolved["metal_res_via_enclosure_min_um"] = floors["via_enclosure_min_um"]
@@ -2815,6 +2854,7 @@ def _resistor_layer_params(
     # Issue #2449: a precision-poly flavour draws its own rectangular cut, so
     # the layer-keyed ordinary fixed-size clamp (0.17um) must not shrink it.
     end_w_um, end_h_um = _res_end_contact_um(family, flavor)
+    sab_contact_space_um, sab_side_ext_um = _res_sab_geometry_um(family, flavor)
     resolved = {
         "poly_layer": _role_layer_info(family, "poly"),
         "contact_layer": _role_layer_info(family, "contact"),
@@ -2843,6 +2883,13 @@ def _resistor_layer_params(
             if pair is not None and end_w_um > 0.0
             else 0.0
         )
+        # Issue #3000: the SAB runs past the poly body's long edges.
+        resolved[f"res_flavor_{i}_side_extension_um"] = (
+            sab_side_ext_um
+            if pair is not None and pair == _PDK_RES_SAB_UM.get(family, {}).get("layer")
+            else 0.0
+        )
+    resolved["res_contact_space_um"] = sab_contact_space_um
     return resolved
 
 

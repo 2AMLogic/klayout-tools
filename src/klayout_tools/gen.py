@@ -421,6 +421,9 @@ _HIDDEN_PARAMS = {
     # per (family, flavor) by `_res_end_contact_um`; never request-facing.
     "end_contact_w_um",
     "end_contact_h_um",
+    # gf180mcu salicide-block clearance from the end contacts (issue #3000),
+    # resolved per family by `_res_sab_geometry_um`; never request-facing.
+    "res_contact_space_um",
 }
 
 #: ``res_array``'s flavour mask slots are generated from
@@ -432,7 +435,7 @@ _HIDDEN_PARAMS = {
 _HIDDEN_PARAMS |= {
     f"res_flavor_{i}_{suffix}"
     for i in range(_MAX_RES_FLAVOR_LAYERS)
-    for suffix in ("layer", "present", "head_enclosure_um")
+    for suffix in ("layer", "present", "head_enclosure_um", "side_extension_um")
 }
 
 #: ``cap_array``'s top-plate requires-mask slots are generated from
@@ -1417,6 +1420,7 @@ def _res_unit_layout(
     via_enclosure_min_um: float = 0.0,
     end_contact_w_um: float = 0.0,
     end_contact_h_um: float = 0.0,
+    marker_contact_space_um: float = 0.0,
 ) -> dict[str, Any]:
     """One unit resistor (or unit MoM/MiM cap cell footprint): a poly body
     of ``length_um`` between two contact+local-metal end pads.
@@ -1455,13 +1459,20 @@ def _res_unit_layout(
     resistor body, ``end_contact_h_um + 2 * enclosure`` tall, centred on the
     body (a "dogbone" head). The resistor-ID marker still spans only the
     body segment. With both ``0.0`` every existing caller is unchanged.
+
+    ``marker_contact_space_um`` (issue #3000, ``0.0`` by default) is the
+    minimum space from the body-segment marker -- and so from the salicide
+    block drawn over it -- to the end contact's edge: the head is lengthened
+    until ``contact_region_um`` leaves that much poly between the contact and
+    the marker. gf180mcu's ``SB.4`` needs 0.15um where the generic enclosure
+    margin leaves 0.10um.
     """
     rect_contact = end_contact_w_um > 0.0 and end_contact_h_um > 0.0
     contact_side_um = max(CONTACT_SIZE_UM, via_min_w_um)
     enclosure_um = max(ENCLOSURE_MARGIN_UM, via_enclosure_min_um)
     contact_w_um = end_contact_w_um if rect_contact else contact_side_um
     contact_h_um = end_contact_h_um if rect_contact else contact_side_um
-    contact_region_um = contact_w_um + 2 * enclosure_um
+    contact_region_um = contact_w_um + 2 * max(enclosure_um, marker_contact_space_um)
     # Pad extent across the body axis: the body width, grown to enclose a
     # taller-than-body rectangular contact (dogbone head).
     pad_h_um = (
@@ -1528,6 +1539,7 @@ def _res_array_layout(
     min_spacing_um: float = 0.0,
     end_contact_w_um: float = 0.0,
     end_contact_h_um: float = 0.0,
+    marker_contact_space_um: float = 0.0,
 ) -> dict[str, Any]:
     """``num`` matched unit resistors (see :func:`_res_unit_layout`), folded
     into ``rows`` parallel rows in boustrophedon ("snake") order once
@@ -1574,6 +1586,7 @@ def _res_array_layout(
     ``end_contact_w_um``/``end_contact_h_um`` (issue #2449) forward to
     :func:`_res_unit_layout`'s rectangular precision-poly end contact; a
     dogbone head taller than the body also widens the row-to-row pitch.
+    ``marker_contact_space_um`` (issue #3000) forwards likewise.
     """
     unit = _res_unit_layout(
         length_um,
@@ -1582,6 +1595,7 @@ def _res_array_layout(
         via_enclosure_min_um,
         end_contact_w_um,
         end_contact_h_um,
+        marker_contact_space_um,
     )
     effective_spacing_um = max(spacing_um, min_spacing_um)
     pitch = unit["total_len_um"] + effective_spacing_um

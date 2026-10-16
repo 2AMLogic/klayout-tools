@@ -75,6 +75,7 @@ from .gen_layer_params import (
     _reject_deferred_family,
     _res_end_contact_um,
     _res_flavor_min_width_um_floor,
+    _res_sab_geometry_um,
     _ring_implant_margin_um,
     _role_layer_info,
     _sd_implant_margin_um,
@@ -742,6 +743,9 @@ def _res_array_describe(
         floors["via_enclosure_min_um"],
         floors["via_space_min_um"],
         *end_contact,
+        _res_sab_geometry_um(
+            family, params.get("flavor", _DEFAULT_RES_FLAVOR), metal_level
+        )[0],
     )
     unit = info["unit"]
     # A metal-level resistor's own body layer (metN) is already a routing
