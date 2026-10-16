@@ -5241,6 +5241,29 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     drc_parser.add_argument(
+        "--negative-control",
+        dest="negative_control",
+        metavar="LAYOUT",
+        default=None,
+        help=(
+            "known-bad fixture layout the same native deck must flag "
+            "(--engine klayout only): run first with identical options; "
+            "zero violations fails the run (error.code "
+            "negative_control_failed), proving the deck executed. "
+            "See docs/cli/drc.md, 'Engine' -> 'klayout'."
+        ),
+    )
+    drc_parser.add_argument(
+        "--negative-control-categories",
+        dest="negative_control_categories",
+        metavar="NAMES",
+        default=None,
+        help=(
+            "comma-separated rule categories the --negative-control "
+            "fixture must additionally produce (requires --negative-control)."
+        ),
+    )
+    drc_parser.add_argument(
         "--expect-rule-categories",
         dest="expect_rule_categories",
         type=int,
