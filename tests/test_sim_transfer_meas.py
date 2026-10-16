@@ -738,14 +738,15 @@ def test_ambiguity_does_not_downgrade_a_report_only_margin(tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize("backend", ["batch", "remote"])
-def test_margin_tokens_are_refused_off_host_like_the_others(
-    tmp_path, monkeypatch, backend
-):
-    request = _request(tmp_path, [{"name": "pm", "transfer": _PM_MIN}], backend=backend)
+def test_margin_tokens_reach_the_offhost_backends(tmp_path, monkeypatch, backend):
+    """Issue #3626: like plain transfer (#2924), a margin request is no longer
+    refused locally; it reaches the backend, whose worker gate decides."""
+    reached: list[str] = []
+    _stub_offhost_backends(monkeypatch, reached)
     monkeypatch.setattr(
         sim.subprocess, "run", lambda *a, **k: pytest.fail("must not launch")
     )
-    with pytest.raises(
-        sim.SimError, match=f"not yet supported for backend '{backend}'"
-    ):
+    request = _request(tmp_path, [{"name": "pm", "transfer": _PM_MIN}], backend=backend)
+    with pytest.raises(sim.SimError, match="reached backend"):
         sim.run_sim(str(request))
+    assert reached == [backend]
