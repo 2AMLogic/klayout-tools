@@ -444,6 +444,14 @@ quietly wrong, which is what this feature exists to prevent, so it is rejected
 at request-validation time rather than run. Drop `FUNCTIONAL` to re-simulate
 with real delays, or drop `options.sdf` to keep the zero-delay run.
 
+**Scoping `FUNCTIONAL` to a hard macro.** A vendor hard-macro model (e.g. an
+SRAM) often needs `FUNCTIONAL` to simulate at all, while the std-cell sources
+must keep their `specify` blocks. `options.source_defines` applies defines to
+named `request.sources` entries only (see the options table); a scoped
+`FUNCTIONAL` does not trip the rejection above, while a global
+`options.defines.FUNCTIONAL` still does. Std-cell sources not named are built
+unchanged.
+
 **How the annotation is wired.** `$sdf_annotate` is a Verilog system task and
 must be called from an `initial` block inside some elaborated module — and a
 cocotb regression has no such module, since `hdl_toplevel` *is* the DUT. So
@@ -1307,6 +1315,7 @@ exactly.
 | `options.timescale` | `[string, string]` | `[unit, precision]`, defaulting to `["1ns", "1ps"]`. Passed to **both** the build and test steps — Icarus elaboration otherwise fails the moment a testbench's `Clock(..., unit="ns")` meets an unset (default 1 s) simulator precision. |
 | `options.random_seed` | integer \| null | Optional. Pinned to `Runner.test()`'s own `seed` parameter (`COCOTB_RANDOM_SEED`) when given; omitted/`null` lets cocotb generate its own. Either way the seed actually used is echoed in `environment.random_seed` (see "Reproducibility: `random_seed`"). |
 | `options.defines` | object | Optional. String key -> string \| null value, forwarded unchanged to `Runner.build(defines=...)`. A `null` value defines the macro with no value (e.g. `` `define USE_POWER_PINS ``); it is passed to the simulator as a `-DNAME` build arg, because cocotb 2.x cannot serialise a `null` define value itself (issue #2884). Defaults to `{}` (see "Compile-time defines, build args, and includes"). |
+| `options.source_defines` | object | Optional (issue #3290). Key = an entry of `request.sources` (matched after the same path resolution; an unknown key is exit 1), value = a defines object with the same `string -> string \| null` rules as `options.defines`. For each named source a wrapper is generated under the output directory (`` `define K [V] `` / `` `include "<abs path>" `` / `` `undef K ``) and substituted for that source in the same list position, so the defines reach that one file and cannot leak into later sources; the source's own directory is added to the include path for nested relative `` `include ``s. If a name is also in `options.defines`, the scoped value wins inside that source. Echoed as `environment.source_defines` (keyed by absolute source path; `{}` when absent). Works with `--mutations`. Defaults to `{}`. |
 | `options.build_args` | array\<string\> | Optional. Extra Icarus/Verilator build args, appended **after** the fixed `--coverage --trace` args a coverage run already adds and after any SDF back-annotation args (composed, not replaced — see "Coverage" and "SDF back-annotation"). Defaults to `[]`. |
 | `options.includes` | array\<string\> | Optional. `-I` include directories, resolved relative to the request (same convention as `sources`). Forwarded to `Runner.build(includes=...)`. Defaults to `[]`. |
 | `options.sdf.file` | string | Optional. Path to an IEEE-1497 SDF file, resolved relative to the request like every other path field, and back-annotated onto the design through Icarus's `$sdf_annotate` (see "SDF back-annotation"). Requires `engine: "icarus"` at version 13.0 or newer — `options.sdf` with `engine: "verilator"`, against a pre-13.0 `iverilog` (no `-ginterconnect`), or alongside a `FUNCTIONAL` entry in `options.defines`, is exit 1, never a silent no-op. A missing/unreadable file is exit 1 (issue #1002). |

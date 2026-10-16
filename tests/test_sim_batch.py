@@ -1364,6 +1364,70 @@ def test_run_sim_batch_backend_end_to_end(tmp_path, monkeypatch):
     assert launches[0][3] == remote_block["job_id"]
 
 
+def test_run_sim_batch_returns_per_corner_waveform_artifacts(tmp_path, monkeypatch):
+    """`options.waveforms` + `options.keep_artifacts` on a multi-corner `tran`
+    request: the batch job's per-corner waveform artifacts come home under the
+    caller's artifacts dir and every corner's `artifacts.*` path is rewritten
+    to them, as with `--backend local` (issue #3488)."""
+    corner_ids = ("tt_1.800_-40", "tt_1.800_125")
+    remote_root = "/var/tmp/eda-x/outputs/artifacts"
+    document = json.loads(_sim_report(corner_ids=corner_ids))
+    outputs = {"report.json": json.dumps(document)}
+    for corner in document["corners"]:
+        cid = corner["corner_id"]
+        corner["artifacts"] = {
+            "log": f"{remote_root}/{cid}.log",
+            "raw": f"{remote_root}/{cid}.raw",
+            "waveform": f"{remote_root}/{cid}.waveform.json",
+            "deck": f"{remote_root}/{cid}.cir",
+        }
+        outputs[f"artifacts/{cid}.waveform.json"] = json.dumps(
+            {"corner_id": cid, "vectors": {"time": [0.0, 1e-9], "v(out)": [0.0, 1.0]}}
+        )
+        outputs[f"artifacts/{cid}.raw"] = "raw"
+        outputs[f"artifacts/{cid}.log"] = "log"
+        outputs[f"artifacts/{cid}.cir"] = "* deck"
+    outputs["report.json"] = json.dumps(document)
+
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = outputs
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+
+    uploaded: dict[str, str] = {}
+    real_open = open
+
+    def _capture(argv, timeout_s):
+        if "inputs/request.json" in " ".join(argv):
+            with real_open(argv[-3], encoding="utf-8") as handle:
+                uploaded["request"] = handle.read()
+        return runner(argv, timeout_s)
+
+    monkeypatch.setattr(sb, "_run_subprocess", _capture)
+
+    _write_body(tmp_path)
+    request = _batch_request(
+        tmp_path,
+        corners={"temperature_c": [-40, 125]},
+        options={"waveforms": True, "keep_artifacts": True},
+    )
+    artifacts_dir = tmp_path / "out-artifacts"
+    report = sim.run_sim(
+        str(_write_request(tmp_path, request)), artifacts_dir=str(artifacts_dir)
+    )
+
+    # Both options reach the job's own `klt sim` verbatim.
+    options = json.loads(uploaded["request"])["options"]
+    assert options["waveforms"] is True and options["keep_artifacts"] is True
+    assert [c["corner_id"] for c in report["corners"]] == list(corner_ids)
+    for corner in report["corners"]:
+        waveform = Path(corner["artifacts"]["waveform"])
+        assert waveform.parent == artifacts_dir
+        assert json.loads(waveform.read_text())["corner_id"] == corner["corner_id"]
+        assert Path(corner["artifacts"]["raw"]).is_file()
+        assert not [d for d in corner["diagnostics"] if d.get("severity") == "error"]
+
+
 def test_run_sim_batch_uploads_a_local_parallel_request_document(tmp_path, monkeypatch):
     runner = _FakeRunner()
     runner.default = fake_completed(_status("done"))
@@ -1503,11 +1567,158 @@ def test_run_sim_batch_report_is_structurally_identical_to_remote(
     assert set(batch_report["environment"]) == set(remote_result["environment"])
 
 
-def test_run_sim_batch_resume_raises(tmp_path):
+def test_run_sim_remote_resume_still_raises(tmp_path):
     _write_body(tmp_path)
     request = _batch_request(tmp_path, options={"resume": True})
+    request["backend"] = "remote"
+    request.pop("batch")
+    request["remote"] = {"region": "us-east-1"}
     with pytest.raises(sim.SimError, match="resume"):
         sim.run_sim(str(_write_request(tmp_path, request)))
+
+
+def _checkpoint_file(tmp_path: Path) -> Path:
+    return tmp_path / "artifacts" / "checkpoint.json"
+
+
+def _run(path: Path, tmp_path: Path, **kwargs) -> dict:
+    return sim.run_sim(str(path), artifacts_dir=str(tmp_path / "artifacts"), **kwargs)
+
+
+def _resume_request(tmp_path: Path, **batch_overrides) -> Path:
+    _write_body(tmp_path)
+    request = _batch_request(
+        tmp_path,
+        options={"resume": True},
+        corners={"supply_v": {"vdd": [1.6, 1.8, 2.0]}, "temperature_c": [27]},
+    )
+    request["batch"].update(batch_overrides)
+    return _write_request(tmp_path, request)
+
+
+def _fake_corner(
+    point, *, lost: bool = False, errored: bool = False, code: str | None = None
+) -> dict:
+    report = {
+        "corner_id": point.corner_id,
+        "status": "pass",
+        "measurements": [],
+        "diagnostics": [],
+    }
+    if lost or code:
+        report["status"] = "error"
+        report["diagnostics"] = [
+            {
+                "severity": "error",
+                "code": code or "lost_shard",
+                "message": "no capacity",
+            }
+        ]
+    elif errored:
+        report["status"] = "error"
+        report["diagnostics"] = [
+            {"severity": "error", "code": "sim_failed", "message": "boom"}
+        ]
+    return report
+
+
+def _install_fake_batch(
+    monkeypatch, *, lost_ids=(), errored_ids=(), codes=None, fleet=False
+):
+    """Replace the batch dispatch with a fake that records which corners it
+    was asked to run and loses `lost_ids` (a Spot-capacity loss)."""
+    dispatched: list[list[str]] = []
+
+    def fake(*, corner_points, **kwargs):
+        dispatched.append([point.corner_id for point in corner_points])
+        corners = [
+            _fake_corner(
+                point,
+                lost=point.corner_id in lost_ids,
+                errored=point.corner_id in errored_ids,
+                code=(codes or {}).get(point.corner_id),
+            )
+            for point in corner_points
+        ]
+        return corners, "46", {"provider": "aws-batch-fleet"}
+
+    if fleet:
+        monkeypatch.setattr(sim, "_run_batch_fleet", fake)
+    else:
+        monkeypatch.setitem(sim._BACKENDS, "batch", fake)
+    return dispatched
+
+
+@pytest.mark.parametrize("fleet", [False, True])
+def test_run_sim_batch_resume_reruns_only_lost_corners(tmp_path, monkeypatch, fleet):
+    path = _resume_request(tmp_path)
+    kwargs = {"hosts": 2} if fleet else {}
+    first_dispatch = _install_fake_batch(monkeypatch, fleet=fleet)
+    first = _run(path, tmp_path, **kwargs)
+    ids = [corner["corner_id"] for corner in first["corners"]]
+    assert len(ids) == 3
+    assert not _checkpoint_file(tmp_path).exists()
+    assert len(first_dispatch[0]) == 3
+
+    # Second sweep: the middle corner's shard is lost.
+    # (Fresh run: nothing checkpointed because the first run completed.)
+    dispatched = _install_fake_batch(monkeypatch, lost_ids={ids[1]}, fleet=fleet)
+    second = _run(path, tmp_path, **kwargs)
+    assert [c["corner_id"] for c in second["corners"]] == ids
+    assert second["environment"]["resume"]["checkpoint_retained"] is True
+    assert second["environment"]["resume"]["resumed_corners"] == 0
+
+    # Resume: only the lost corner is submitted; order is the request's.
+    dispatched = _install_fake_batch(monkeypatch, fleet=fleet)
+    third = _run(path, tmp_path, **kwargs)
+    assert dispatched == [[ids[1]]]
+    assert [c["corner_id"] for c in third["corners"]] == ids
+    assert all(c["status"] == "pass" for c in third["corners"])
+    assert third["environment"]["resume"]["resumed_corners"] == 2
+    assert third["environment"]["resume"]["checkpoint_retained"] is False
+    assert not _checkpoint_file(tmp_path).exists()
+
+
+def test_run_sim_batch_resume_checkpoints_errored_but_not_lost(tmp_path, monkeypatch):
+    path = _resume_request(tmp_path)
+    probe = _install_fake_batch(monkeypatch)
+    ids = [c["corner_id"] for c in _run(path, tmp_path)["corners"]]
+    assert probe
+
+    _install_fake_batch(monkeypatch, lost_ids={ids[0]}, errored_ids={ids[2]})
+    _run(path, tmp_path)
+    checkpoint = json.loads(_checkpoint_file(tmp_path).read_text())
+    assert set(checkpoint["completed"]) == {ids[1], ids[2]}
+
+
+def test_run_sim_batch_resume_all_corners_lost(tmp_path, monkeypatch):
+    path = _resume_request(tmp_path)
+    _install_fake_batch(monkeypatch)
+    ids = [c["corner_id"] for c in _run(path, tmp_path)["corners"]]
+    _install_fake_batch(monkeypatch, lost_ids=set(ids))
+    report = _run(path, tmp_path)
+    assert report["environment"]["resume"]["checkpoint_retained"] is True
+    dispatched = _install_fake_batch(monkeypatch)
+    _run(path, tmp_path)
+    assert dispatched == [ids]
+
+
+def test_run_sim_batch_resume_discards_checkpoint_when_request_changes(
+    tmp_path, monkeypatch
+):
+    path = _resume_request(tmp_path)
+    _install_fake_batch(monkeypatch)
+    ids = [c["corner_id"] for c in _run(path, tmp_path)["corners"]]
+    _install_fake_batch(monkeypatch, lost_ids={ids[1]})
+    _run(path, tmp_path)
+
+    request = json.loads(path.read_text())
+    request["analysis"] = {"kind": "tran", "args": "2n 2u"}
+    path.write_text(json.dumps(request))
+    dispatched = _install_fake_batch(monkeypatch)
+    report = _run(path, tmp_path)
+    assert dispatched == [ids]
+    assert report["environment"]["resume"]["resumed_corners"] == 0
 
 
 def test_run_sim_batch_skips_the_fail_fast_probe(tmp_path, monkeypatch):
@@ -4060,6 +4271,72 @@ def test_sim_set_partial_refusal_is_one_summary(tmp_path):
     jsonschema.validate(report, json.loads(SET_SCHEMA_PATH.read_text()))
 
 
+def test_sim_set_manifest_written_before_completion(tmp_path):
+    from klayout_tools import sim_set
+
+    paths = _write_set(tmp_path, 2)
+    out = tmp_path / "out"
+    seen = {}
+
+    def fake_run(path, **kwargs):
+        manifest = json.loads((out / "set-manifest.json").read_text())
+        seen[path] = [e["status"] for e in manifest["requests"]]
+        return _fake_report(job_id="job-" + os.path.basename(path))
+
+    sim_set.run_sim_set(paths, outdir=str(out), max_in_flight=1, run=fake_run)
+
+    assert seen[paths[0]] == ["running", "pending"]
+    assert seen[paths[1]] == ["pass", "running"] or seen[paths[1]] == [
+        "not_checked",
+        "running",
+    ]
+    final = json.loads((out / "set-manifest.json").read_text())["requests"]
+    assert [e["dir"] for e in final] == [str(out / "req0"), str(out / "req1")]
+    assert final[0]["job_id"] == "job-req0.json"
+
+
+def test_sim_set_capacity_retry_bounded_and_capacity_only(tmp_path):
+    from klayout_tools import sim_set
+
+    paths = _write_set(tmp_path, 2)
+    calls: dict[str, int] = {}
+    sleeps: list[float] = []
+
+    def fake_run(path, **kwargs):
+        calls[path] = calls.get(path, 0) + 1
+        if path.endswith("req0.json"):
+            if calls[path] < 3:
+                raise sim.SimError("full", code="batch_concurrency_cap")
+            return _fake_report()
+        raise sim.SimError("bad request", code="batch_bad")
+
+    report = sim_set.run_sim_set(
+        paths, run=fake_run, capacity_retries=2, sleep=sleeps.append
+    )
+    assert calls[paths[0]] == 3 and report["requests"][0]["error"] is None
+    assert calls[paths[1]] == 1  # non-capacity error is never retried
+    assert sleeps == [5.0, 10.0]
+
+    calls.clear()
+
+    def always_full(path, **kwargs):
+        calls[path] = calls.get(path, 0) + 1
+        raise sim.SimError("full", code="batch_no_capacity")
+
+    report = sim_set.run_sim_set(
+        paths[:1], run=always_full, capacity_retries=1, sleep=lambda s: None
+    )
+    assert calls[paths[0]] == 2
+    assert report["refused_codes"] == ["batch_no_capacity"]
+
+    calls.clear()
+    sim_set.run_sim_set(paths[:1], run=always_full, sleep=lambda s: None)
+    assert calls[paths[0]] == 1  # off by default
+
+    with pytest.raises(sim.SimError):
+        sim_set.run_sim_set(paths, capacity_retries=-1)
+
+
 def test_sim_set_rejects_empty_and_bad_bound():
     from klayout_tools import sim_set
 
@@ -4818,3 +5095,26 @@ def test_request_feature_registry_matches_docs_table():
         assert row in doc, feature
         line = next(ln for ln in doc.splitlines() if ln.startswith(row))
         assert line.rstrip().endswith(f"| {shown} |"), (feature, line)
+
+
+@pytest.mark.parametrize(
+    "codes", [("batch_job_failed", "batch_poll_timeout"), ("batch_job_timeout",) * 2]
+)
+def test_run_sim_batch_resume_resubmits_job_failure_and_poll_timeout(
+    tmp_path, monkeypatch, codes
+):
+    path = _resume_request(tmp_path)
+    _install_fake_batch(monkeypatch)
+    ids = [c["corner_id"] for c in _run(path, tmp_path)["corners"]]
+
+    _install_fake_batch(monkeypatch, codes=dict(zip(ids[:2], codes, strict=True)))
+    report = _run(path, tmp_path)
+    assert report["environment"]["resume"]["checkpoint_retained"] is True
+    checkpoint = json.loads(_checkpoint_file(tmp_path).read_text())
+    assert set(checkpoint["completed"]) == {ids[2]}
+
+    dispatched = _install_fake_batch(monkeypatch)
+    third = _run(path, tmp_path)
+    assert dispatched == [ids[:2]]
+    assert all(c["status"] == "pass" for c in third["corners"])
+    assert third["environment"]["resume"]["checkpoint_retained"] is False
