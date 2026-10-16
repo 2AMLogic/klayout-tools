@@ -436,6 +436,7 @@ def _probe_root(root_path: str) -> list[dict[str, Any]]:
             {
                 "name": name,
                 "version": read_version(variant_dir),
+                "_sources": read_sources(variant_dir),
                 "_dir": variant_dir,
                 "_layout": layout,
             }
@@ -475,6 +476,7 @@ def _probe_flat_variant(root_path: str) -> list[dict[str, Any]]:
         {
             "name": name,
             "version": read_version(root_path),
+            "_sources": read_sources(root_path),
             "_dir": root_path,
             "_layout": layout,
         }
@@ -510,10 +512,30 @@ def _is_asap7_tree(directory: str) -> bool:
 
 def _compatibility_for(entry: dict[str, Any]) -> dict[str, Any]:
     """Compatibility result (:mod:`klayout_tools.pdk_compat`) for a probed
-    variant entry."""
+    variant entry.
+
+    Fed the real open_pdks ``SOURCES`` stamp only (``_sources``), never the
+    display ``version``: its ``git:``/``fetched:`` fallbacks are not SOURCES
+    stamps and would read as a spurious ``mismatch`` (issue #3070).
+    """
     return check_compatibility(
-        entry["name"], entry["_dir"], entry["_layout"], entry["version"]
+        entry["name"], entry["_dir"], entry["_layout"], entry["_sources"]
     )
+
+
+def read_sources(variant_dir: str) -> str | None:
+    """open_pdks' ``SOURCES`` file -- non-empty lines whitespace-normalised
+    and joined with ``"; "`` -- or ``None`` when absent/unreadable/empty."""
+    sources = os.path.join(variant_dir, "SOURCES")
+    if os.path.isfile(sources):
+        try:
+            with open(sources, encoding="utf-8") as handle:
+                lines = [line.strip() for line in handle if line.strip()]
+        except OSError:
+            lines = []
+        if lines:
+            return "; ".join(lines)
+    return None
 
 
 def read_version(variant_dir: str) -> str | None:
@@ -527,15 +549,9 @@ def read_version(variant_dir: str) -> str | None:
     HEAD>`` with a ``-dirty`` suffix for uncommitted changes (issue #3070).
     Absent/unreadable/empty → ``None`` (never guessed).
     """
-    sources = os.path.join(variant_dir, "SOURCES")
-    if os.path.isfile(sources):
-        try:
-            with open(sources, encoding="utf-8") as handle:
-                lines = [line.strip() for line in handle if line.strip()]
-        except OSError:
-            lines = []
-        if lines:
-            return "; ".join(lines)
+    sources = read_sources(variant_dir)
+    if sources:
+        return sources
     marker = read_fetched_marker(variant_dir)
     if marker:
         return f"fetched:{marker}"

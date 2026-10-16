@@ -91,3 +91,21 @@ def test_provenance_omits_compatibility_when_matching(tmp_path):
     _install(root, sources=f"open_pdks {PIN}\n")
     block = _provenance._pdk_block(pdk.find_pdk(variant="sky130A", root=str(root)))
     assert "compatibility" not in block
+
+
+@pytest.mark.parametrize("marker", ["fetched", "git"])
+def test_non_sources_version_stamp_stays_unknown(tmp_path, monkeypatch, marker):
+    """Issue #3070: ``git:``/``fetched:`` display stamps are not SOURCES
+    stamps -- they must not turn ``unknown`` into a spurious ``mismatch``."""
+    root = tmp_path / "root"
+    variant_dir = _install(root)
+    if marker == "fetched":
+        (variant_dir / ".fetched-version").write_text("0.2.17", encoding="utf-8")
+        stamp = "fetched:0.2.17"
+    else:
+        stamp = "git:" + "a" * 40
+        monkeypatch.setattr(pdk, "_git_version", lambda _dir: stamp)
+    report = pdk.find_pdk(variant="sky130A", root=str(root))
+    assert report["version"] == stamp
+    assert report["compatibility"]["status"] == "unknown"
+    assert "compatibility" not in _provenance._pdk_block(report)
