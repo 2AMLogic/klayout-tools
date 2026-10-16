@@ -2481,6 +2481,16 @@ def _run_net_space_check(
         raise DrcError(f"rule '{rule.id}': check '{rule.check}' requires net_spec")
     d = round(rule.threshold_dbu * dbu_scale)
 
+    # Extract on a flattened copy: `LayoutToNetlist` is hierarchical, so a
+    # well whose net lives wholly inside a subcell circuit would never be
+    # visited through the top circuit's nets (a silent miss -- the opposite
+    # of this check's over-flag policy). Flat, every shape is a top-circuit
+    # shape in top coordinates and nets are unique by construction.
+    flat_layout = kdb.Layout()
+    flat_layout.assign(layout)
+    cell = flat_layout.cell(cell.name)
+    cell.flatten(True)
+    layout = flat_layout
     l2n = kdb.LayoutToNetlist(kdb.RecursiveShapeIterator(layout, cell, []))
 
     def layer_region(pair: tuple[int, int]) -> Any:

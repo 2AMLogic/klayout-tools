@@ -267,6 +267,36 @@ def test_run_drc_sg13cmos5l_nw_b1_far_apart_and_touching_clean(tmp_path: Path):
     assert run_drc(touching, "sg13cmos5l")["rule_counts"].get("nwell.space.2", 0) == 0
 
 
+def _hier_wells_layout(tmp_path: Path, name: str, strap: bool) -> str:
+    """Two 3x3 um wells 1.5 um apart, each (with its n+ tap) in its own
+    subcell of TOP; ``strap`` adds a TOP-level Metal1 bar over both taps."""
+    layout = kdb.Layout()
+    layout.dbu = _DBU_UM
+    top = layout.create_cell("TOP")
+    for index, x in enumerate((0, 4.5)):
+        sub = layout.create_cell(f"SUB{index}")
+        sub.shapes(layout.layer(31, 0)).insert(_box_um(0, 0, 3, 3))
+        sub.shapes(layout.layer(1, 0)).insert(_box_um(0.5, 0.5, 1.0, 1.0))
+        sub.shapes(layout.layer(7, 0)).insert(_box_um(0.4, 0.4, 1.1, 1.1))
+        sub.shapes(layout.layer(6, 0)).insert(_box_um(0.6, 0.6, 0.8, 0.8))
+        top.insert(
+            kdb.CellInstArray(sub.cell_index(), kdb.Trans(round(x / _DBU_UM), 0))
+        )
+    if strap:
+        top.shapes(layout.layer(8, 0)).insert(_box_um(0.5, 0.5, 5.5, 1.0))
+    return _write_gds(layout, tmp_path / name)
+
+
+def test_run_drc_sg13cmos5l_nw_b1_wells_in_subcells(tmp_path: Path):
+    """Regression: wells whose nets live inside subcells are still checked
+    (no hierarchical false negative). Separate nets are flagged; the same
+    wells strapped together by a TOP-level Metal1 bar are one net, clean."""
+    bad = _hier_wells_layout(tmp_path, "nw_b1_hier_bad.gds", strap=False)
+    assert run_drc(bad, "sg13cmos5l")["rule_counts"].get("nwell.space.2", 0) >= 1
+    ok = _hier_wells_layout(tmp_path, "nw_b1_hier_ok.gds", strap=True)
+    assert run_drc(ok, "sg13cmos5l")["rule_counts"].get("nwell.space.2", 0) == 0
+
+
 def test_run_drc_sg13cmos5l_nw_b1_corner_to_corner(tmp_path: Path):
     """Diagonal gap: corners 1.5 um apart in x and y (Euclidean ~2.12 um)
     pass; 1.0 x 1.0 um (~1.41 um) is flagged."""
