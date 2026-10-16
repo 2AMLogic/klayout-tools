@@ -253,6 +253,7 @@ def test_klayout_engine_clean_report(tmp_path, monkeypatch):
         "layers_in_stream_without_rules": [],
         "rules_skipped": [],
         "voltage_domain_warnings": [],
+        "unchecked_rules": [],
         "deck_scope": [],
         "nothing_checked": False,
         "schema_version": 1,

@@ -684,6 +684,7 @@ def test_json_contract(tmp_path, capsys):
         "rules_checked",
         "rules_skipped",
         "voltage_domain_warnings",
+        "unchecked_rules",
         "deck_scope",
         # Issue #1996: the shared vacuous-verdict convention
         # (`klayout_tools.coverage`), emitted alongside the pre-existing
@@ -709,6 +710,10 @@ def test_json_contract(tmp_path, capsys):
                 assert set(entry.keys()) == {"marker", "description"}
                 assert isinstance(entry["marker"], str)
                 assert isinstance(entry["description"], str)
+        elif key == "unchecked_rules":
+            for entry in field:
+                assert set(entry.keys()) == {"rule", "layer", "description"}
+                assert all(isinstance(v, str) for v in entry.values())
         else:
             assert all(isinstance(v, str) for v in field)
     # A run that produced violations plainly checked something.

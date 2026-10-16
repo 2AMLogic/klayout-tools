@@ -68,6 +68,7 @@ from .decks import (
     get_deck,
     get_layer_names,
     get_nominal_dbu,
+    get_unchecked_rules,
     get_unmodeled_voltage_markers,
 )
 from .layers import layers_report
@@ -1103,6 +1104,10 @@ def run_drc(
                 "voltage_domain_warnings": [
                     {"marker": "<layer>/<datatype>", "description": str}, ...
                 ],
+                "unchecked_rules": [
+                    {"rule": str, "layer": "<layer>/<datatype>",
+                     "description": str}, ...
+                ],
                 "deck_scope": [<scope identifier>, ...],
                 "nothing_checked": bool,
                 "nothing_checked_reasons": [<reason code>, ...],
@@ -1855,6 +1860,17 @@ def run_drc(
                 {"marker": _fmt(marker), "description": description}
             )
 
+    # Issue #3012: foundry rules the deck knows but cannot evaluate, named so
+    # a `clean` cannot be read as covering them. Only when the rule's layer
+    # is actually in the stream.
+    unchecked_rules = [
+        {"rule": rule_id, "layer": _fmt(layer), "description": description}
+        for rule_id, (layer, description) in sorted(
+            get_unchecked_rules(deck_name).items()
+        )
+        if layer in stream_layer_tuples
+    ]
+
     # Issue #2110: the two common-coverage categories this engine's single
     # "a layer it reads is absent" skip splits into -- see
     # `_classify_skipped_rules` for why an empty assessment domain is
@@ -1879,6 +1895,7 @@ def run_drc(
         "rules_checked": sorted(rules_checked),
         "rules_skipped": sorted(rules_skipped),
         "voltage_domain_warnings": voltage_domain_warnings,
+        "unchecked_rules": unchecked_rules,
         "deck_scope": deck_scope,
         # Issue #1996: the shared roll-up, so a reader (`klt signoff`) can
         # refuse a "clean" verdict measured over nothing without re-deriving
@@ -3630,6 +3647,7 @@ def _klayout_engine_coverage(
         "layers_in_stream_without_rules": [],
         "rules_skipped": [],
         "voltage_domain_warnings": [],
+        "unchecked_rules": [],
         "deck_scope": [],
         **build_check_coverage(checked=checked, unknown=unknown),
     }
