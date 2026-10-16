@@ -88,7 +88,7 @@ import threading
 import time
 from collections.abc import Iterator
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from typing import Any, NamedTuple
+from typing import IO, Any, NamedTuple
 
 from . import env_provenance, output_lock, sim_crossings, sim_decks, sim_steps
 
@@ -7898,6 +7898,98 @@ def parse_ascii_rawfile(raw_path: str) -> dict[str, Any]:
         return {"plotname": plotname, "variables": variables, "points": list(points)}
 
 
+def _note_rawfile_header_field(meta: dict[str, Any], line: str) -> None:
+    """Record the first ``Plotname:`` / ``Flags:`` / ``No. Variables:`` header
+    line seen into ``meta`` (later duplicates are ignored)."""
+    if meta["plotname"] is None and line.startswith("Plotname:"):
+        meta["plotname"] = line[len("Plotname:") :].strip()
+    elif meta["is_complex"] is None and line.startswith("Flags:"):
+        meta["is_complex"] = "complex" in line.lower()
+    elif meta["var_count"] is None:
+        count_match = re.match(r"No\. Variables:\s*(\d+)$", line)
+        if count_match is not None:
+            meta["var_count"] = int(count_match.group(1))
+
+
+def _scan_rawfile_header(
+    handle: IO[str],
+) -> tuple[dict[str, Any], bool, bool, list[str]]:
+    """Read ``handle`` up to the ``Values:`` marker.
+
+    Returns ``(meta, in_variables, saw_values, variable_lines)``.
+    """
+    meta: dict[str, Any] = {"plotname": None, "is_complex": None, "var_count": None}
+    in_variables = False
+    saw_values = False
+    variable_lines: list[str] = []
+    try:
+        for raw_line in handle:
+            line = raw_line.rstrip("\r\n")
+            if line == "Values:":
+                saw_values = True
+                break
+            if in_variables:
+                variable_lines.append(line)
+            elif line == "Variables:":
+                in_variables = True
+            else:
+                _note_rawfile_header_field(meta, line)
+    except OSError as exc:
+        raise SimError(f"could not read rawfile: {exc}") from exc
+    return meta, in_variables, saw_values, variable_lines
+
+
+def _parse_rawfile_variables(
+    variable_lines: list[str], var_count: int
+) -> list[dict[str, Any]]:
+    """Parse the ``Variables:`` table lines, checking the declared count."""
+    variables: list[dict[str, Any]] = []
+    for line in variable_lines:
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        variables.append({"index": int(parts[0]), "name": parts[1], "type": parts[2]})
+    if len(variables) != var_count:
+        raise SimError(
+            f"malformed rawfile: declared {var_count} variables, "
+            f"parsed {len(variables)}"
+        )
+    return variables
+
+
+def _parse_rawfile_value(token: str, complex_values: bool) -> float:
+    if not complex_values:
+        return float(token)
+    # "real,imag" -- reduce to a single real-valued magnitude, applied
+    # uniformly to every column (including the sweep variable, whose
+    # imaginary part is always 0 so its magnitude equals its real part).
+    real_str, _, imag_str = token.partition(",")
+    real = float(real_str)
+    imag = float(imag_str) if imag_str else 0.0
+    return math.hypot(real, imag)
+
+
+def _iter_rawfile_points(
+    handle: IO[str], var_count: int, complex_values: bool
+) -> Iterator[list[float]]:
+    """Lazily yield one ``list[float]`` per point from the ``Values:`` body."""
+    current: list[float] = []
+    for raw_line in handle:
+        tokens = raw_line.split()
+        if not tokens:
+            continue
+        if len(tokens) == 2 and current == []:
+            # "<point_index> <value0>" -- start of a new point.
+            current = [_parse_rawfile_value(tokens[1], complex_values)]
+        elif len(tokens) == 1:
+            current.append(_parse_rawfile_value(tokens[0], complex_values))
+        else:
+            continue
+        if len(current) == var_count:
+            yield current
+            current = []
+
+
 @contextlib.contextmanager
 def _open_ascii_rawfile(
     raw_path: str,
@@ -7916,33 +8008,9 @@ def _open_ascii_rawfile(
     except OSError as exc:
         raise SimError(f"could not read rawfile: {exc}") from exc
     with handle:
-        plotname: str | None = None
-        is_complex: bool | None = None
-        var_count: int | None = None
-        in_variables = False
-        saw_values = False
-        variable_lines: list[str] = []
-        try:
-            for raw_line in handle:
-                line = raw_line.rstrip("\r\n")
-                if line == "Values:":
-                    saw_values = True
-                    break
-                if in_variables:
-                    variable_lines.append(line)
-                elif line == "Variables:":
-                    in_variables = True
-                elif plotname is None and line.startswith("Plotname:"):
-                    plotname = line[len("Plotname:") :].strip()
-                elif is_complex is None and line.startswith("Flags:"):
-                    is_complex = "complex" in line.lower()
-                elif var_count is None:
-                    count_match = re.match(r"No\. Variables:\s*(\d+)$", line)
-                    if count_match is not None:
-                        var_count = int(count_match.group(1))
-        except OSError as exc:
-            raise SimError(f"could not read rawfile: {exc}") from exc
-
+        meta, in_variables, saw_values, variable_lines = _scan_rawfile_header(handle)
+        plotname = meta["plotname"]
+        var_count = meta["var_count"]
         if plotname is None:
             raise SimError(f"not a recognisable ngspice rawfile: {raw_path}")
         if var_count is None:
@@ -7951,51 +8019,9 @@ def _open_ascii_rawfile(
             raise SimError(
                 f"malformed rawfile (no Variables/Values section): {raw_path}"
             )
-        variables: list[dict[str, Any]] = []
-        for line in variable_lines:
-            parts = line.split()
-            if len(parts) < 3:
-                continue
-            variables.append(
-                {"index": int(parts[0]), "name": parts[1], "type": parts[2]}
-            )
-        if len(variables) != var_count:
-            raise SimError(
-                f"malformed rawfile: declared {var_count} variables, "
-                f"parsed {len(variables)}"
-            )
-
-        complex_values = bool(is_complex)
-
-        def _parse_value(token: str) -> float:
-            if not complex_values:
-                return float(token)
-            # "real,imag" -- reduce to a single real-valued magnitude, applied
-            # uniformly to every column (including the sweep variable, whose
-            # imaginary part is always 0 so its magnitude equals its real part).
-            real_str, _, imag_str = token.partition(",")
-            real = float(real_str)
-            imag = float(imag_str) if imag_str else 0.0
-            return math.hypot(real, imag)
-
-        def _points() -> Iterator[list[float]]:
-            current: list[float] = []
-            for raw_line in handle:
-                tokens = raw_line.split()
-                if not tokens:
-                    continue
-                if len(tokens) == 2 and current == []:
-                    # "<point_index> <value0>" -- start of a new point.
-                    current = [_parse_value(tokens[1])]
-                elif len(tokens) == 1:
-                    current.append(_parse_value(tokens[0]))
-                else:
-                    continue
-                if len(current) == var_count:
-                    yield current
-                    current = []
-
-        yield plotname, variables, _points()
+        variables = _parse_rawfile_variables(variable_lines, var_count)
+        points = _iter_rawfile_points(handle, var_count, bool(meta["is_complex"]))
+        yield plotname, variables, points
 
 
 def noise_representation(waveform: dict[str, Any]) -> str:
