@@ -1539,7 +1539,7 @@ def _verify_synthesis_equivalence(
         synthesize_output_dir,
         request_filename or f"equiv_request_{hdl_toplevel}.json",
     )
-    equiv_request = {
+    equiv_request: dict[str, Any] = {
         "gold": {"sources": resolved_sources, "top": hdl_toplevel},
         "gate": {
             "sources": [netlist_path],

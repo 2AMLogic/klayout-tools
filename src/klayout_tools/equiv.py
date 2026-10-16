@@ -615,7 +615,7 @@ def _stage_fingerprint(
     ``resume_stage_record_discarded`` diagnostic, never silently), exactly
     like ``sim._load_checkpoint``'s mismatched checkpoint.
     """
-    payload = {
+    payload: dict[str, Any] = {
         "engine": engine,
         "gold": {
             "top": gold["top"],
