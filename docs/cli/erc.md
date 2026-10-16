@@ -13,6 +13,7 @@ the antenna + ERC signoff epic
 klt erc <file> <spec> [--top <cell>] [--pdk <name>] [--deck <name>]
                       [--findings-only [--omit-antenna-tables]]
                       [--format text|json]
+klt erc --check <report> [--rerun] [--format text|json]
 ```
 
 - `<file>` — path to a routed GDSII (`.gds`) or OASIS (`.oas`) layout, e.g.
@@ -56,6 +57,11 @@ klt erc <file> <spec> [--top <cell>] [--pdk <name>] [--deck <name>]
   [#2965](https://github.com/2AMLogic/klayout-tools/issues/2965)). Requires
   `--findings-only` (exit 1 otherwise). See "Compact findings-only
   reports" below.
+- `--check <report>` / `--rerun` (issue
+  [#3060](https://github.com/2AMLogic/klayout-tools/issues/3060)) — verify a
+  previously committed `--format json` report still reproduces, instead of
+  running a fresh check. Mutually exclusive with `<file>`/`<spec>`. See
+  "`--check` / `--rerun`" below.
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
 The command is headless (`klayout.db` batch API only, no GUI) and safe to
@@ -2791,6 +2797,67 @@ graded, and nothing could be) alongside a real `erc_status: "clean"` /
 
 Completed refusal/failure reports remain on stdout; actual invocation errors
 retain exit 1 and the stderr error envelope.
+
+## `--check` / `--rerun`
+
+Same contract as [`klt drc --check`](drc.md) / [`klt lvs --check`](lvs.md)
+(shared core: `klayout_tools/_report_verify.py`): verify that a committed
+`klt erc --format json` report still corresponds to the committed inputs,
+without hand-rolling a hash comparison.
+
+```
+klt erc --check erc-report.json            # cheap: re-hash the recorded inputs
+klt erc --check erc-report.json --rerun    # full: re-run ERC and diff
+```
+
+`--check` is mutually exclusive with the positional `<file>`/`<spec>` (the
+inputs are read from the report's own `file`/`spec` echo; combining them is an
+argparse usage error, exit 2). `--rerun` without `--check`, a missing report,
+or one that is not valid JSON is a clean exit-1 error, never a traceback.
+
+**Cheap mode (default)** re-hashes the report's echoed `file` and `spec` and
+compares them with `provenance.input.content_hash` and
+`provenance.spec.content_hash` (plus `provenance.deck.content_hash` when the
+run used `--deck`), with no ERC engine run. A report that recorded no hash is
+`drifted`, never a false pass. Relative echoed paths resolve against the
+current working directory; an echoed path that names no file carries an
+`input_not_found` block on its `checks[]` entry, as in `klt lvs --check`.
+
+```json
+{
+  "schema_version": 1,
+  "mode": "check",
+  "report": "erc-report.json",
+  "status": "match",
+  "checks": [
+    {"field": "provenance.input.content_hash", "expected": "sha256:…", "actual": "sha256:…", "match": true},
+    {"field": "provenance.spec.content_hash", "expected": "sha256:…", "actual": "sha256:…", "match": true}
+  ],
+  "advisories": []
+}
+```
+
+`advisories` lists `provenance.klt_version` / `provenance.klayout_version`
+differences between the report and the running build. It is informational: it
+never affects `status` or the exit code.
+
+**Full mode (`--rerun`)** re-runs ERC from the report's echoed
+`file`/`spec`/`pdk`/`findings_only`/`antenna_tables_omitted` (and
+`provenance.deck.name`, when there is one) and diffs the fresh report against the committed one, excluding
+`provenance.klt_version`, `provenance.klayout_version` and
+`provenance.pdk.version`. The payload is `{"mode": "rerun", "status", "drift":
+[{"field", "committed", "fresh"}, …], "fresh": {…}}`; every drifted field is
+named.
+
+**Known limitation:** `--top` is not echoed in the ERC report, so `--rerun`
+cannot replay it and always runs with no top selected. A layout with more than
+one top cell then fails with the ordinary ambiguous-top-cell error (exit 1).
+Use cheap `--check` for such a report.
+
+**Exit codes:** `0` — `status: "match"`; `3` — `status: "drifted"`; `1` —
+failed to verify (missing/invalid report, or the rerun itself errored); `2` —
+usage error. These are the `--check` meanings only; a normal run keeps the
+table in "Exit codes" below.
 
 ## Exit codes
 

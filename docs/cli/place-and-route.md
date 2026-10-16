@@ -1763,6 +1763,12 @@ model.
   triplet. Icarus selects a triplet member at compile time (`iverilog -T
   min|typ|max`, defaulting to `typ`), so a triplet with an empty typ member —
   OpenSTA's default — would leave the default corner selecting nothing.
+- **Another corner, same layout:** `sdf_path` is written at the flow's own
+  `request.pdk.corner` only. To get an SDF at a different liberty corner for
+  an already-routed DEF without re-running (and so re-placing/re-routing) the
+  flow, run [`klt sta`](sta.md#post-route-sdf-per-corner-sdf-issue-2886) on
+  that DEF and its SPEF with `sdf: true` and `pdk.corners` — one SDF per
+  corner, written by the same `write_sdf` command and flags (issue #2886).
 - **A reported-but-missing file is an error**, not a silent success: a
   `sdf_path` a downstream run cannot open surfaces there as a *silent*
   zero-delay simulation, since Icarus treats an unopenable SDF as a non-fatal

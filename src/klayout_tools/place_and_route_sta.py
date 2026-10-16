@@ -51,7 +51,12 @@ import os
 import re
 from typing import Any
 
-from ._openroad_engine import _count_violations, _run_openroad, _timing_status
+from ._openroad_engine import (
+    _count_violations,
+    _run_openroad,
+    _timing_status,
+    write_sdf_line,
+)
 from ._paths import _count_spef_nets_annotated, _tcl_net_list
 
 
@@ -343,7 +348,7 @@ def _spef_sta_script_lines(
         f"read_spef {spef_path}",
     ]
     if sdf_path is not None:
-        lines.append(f"write_sdf -divider . -include_typ {sdf_path}")
+        lines.append(write_sdf_line(sdf_path))
     lines += _metrics_report_lines(include_fmax=False, include_power=False)
     lines += _violation_count_lines()
     return lines

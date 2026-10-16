@@ -121,7 +121,7 @@ import fnmatch
 import json
 import os
 import re
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -133,11 +133,10 @@ from ._provenance import (
     INPUT_ROLE_LAYOUT,
     INPUT_ROLE_NETLIST,
     _content_hash,
-    _klayout_version,
-    _klt_version,
     build_provenance,
     explicit_deck_options,
     sha256_file,
+    version_drift_advisories,
 )
 from ._report_verify import (
     VOLATILE_PROVENANCE_PATHS,
@@ -200,6 +199,7 @@ from .netlist_capacitor_recovery import (
     resistor_classes_for_deck,
 )
 from .pdk import PdkNotFoundError, find_pdk
+from .socket_check import classify_pin_by_name
 from .verilog_netlist import (
     VerilogNetlistError,
     collect_gate_level_port_aliases,
@@ -1425,6 +1425,12 @@ def run_lvs(request: str) -> dict[str, Any]:
         pdk_root=reference_spec.get("pdk_root"),
         pin_orders=reference_pin_orders,
         placeholder_value_classes=reference_placeholder_classes,
+        resistor_value_classes=_resistor_value_classes(compare_parameters),
+        deck_options=(
+            deck_options
+            if layout_spec.get("deck") == reference_spec.get("deck")
+            else None
+        ),
         gate_level_port_aliases=reference_gate_level_port_aliases,
         finfet=finfet_layout,
         finfet_top=reference_spec.get("top"),
@@ -2776,51 +2782,6 @@ def run_lvs(request: str) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 
-#: `provenance` fields `check_lvs_report()` treats as a non-fatal *advisory*
-#: rather than a hash-integrity failure (issue #1373). `klt_version` and
-#: `klayout_version` are included because they answer the question `--check`
-#: was previously silent on: "did the engine itself change between the
-#: committed run and now". `provenance.pdk.version` is deliberately left out
-#: -- unlike the tool build, a PDK release routinely differs by design
-#: between machines/CI runners without implying anything about *this*
-#: report's reproducibility, so folding it in here would make the advisory
-#: noisy rather than informative. This mirrors -- but is a distinct read
-#: path from -- `_report_verify.VOLATILE_PROVENANCE_PATHS`, which excludes
-#: all three fields from `--rerun`'s drift diff (#1106); that exclusion is
-#: unchanged by this constant.
-_VERSION_ADVISORY_FIELDS: tuple[tuple[str, Callable[[], str | None]], ...] = (
-    ("klt_version", _klt_version),
-    ("klayout_version", _klayout_version),
-)
-
-
-def _version_drift_advisories(committed: dict[str, Any]) -> list[dict[str, Any]]:
-    """Non-fatal advisories (issue #1373) naming any `provenance.<field>` in
-    `_VERSION_ADVISORY_FIELDS` that differs between `committed` and the
-    engine currently running `--check`. A missing value on either side (an
-    older report predating these fields, or an unresolvable current
-    version) is "unknown", not "drift" -- it is silently skipped rather than
-    reported, so `--check` never crashes or false-positives on a report
-    format gap.
-    """
-    advisories = []
-    for field, current_getter in _VERSION_ADVISORY_FIELDS:
-        report_value = get_path(committed, ("provenance", field))
-        current_value = current_getter()
-        if report_value is None or current_value is None:
-            continue
-        if report_value == current_value:
-            continue
-        advisories.append(
-            {
-                "field": f"provenance.{field}",
-                "report": report_value,
-                "current": current_value,
-            }
-        )
-    return advisories
-
-
 def _input_hash_check(
     field: str, expected: str | None, echoed: Any, report_path: str
 ) -> dict[str, Any]:
@@ -2933,7 +2894,7 @@ def check_lvs_report(report_path: str) -> dict[str, Any]:
     The result additionally carries an ``advisories`` list (issue #1373):
     entries naming a ``provenance.klt_version``/``provenance.klayout_version``
     that differs between the committed report and the engine currently
-    running ``--check`` -- see :func:`_version_drift_advisories`. This is
+    running ``--check`` -- see :func:`version_drift_advisories`. This is
     purely informational: it never affects ``status`` (still driven only by
     the hash ``checks`` above) or the caller's exit code, and is never folded
     into ``checks``' ``[OK]``/``[DRIFTED]`` list, so a scripted gate grepping
@@ -2964,7 +2925,7 @@ def check_lvs_report(report_path: str) -> dict[str, Any]:
             )
         )
     result = build_check_result(report_path=report_path, checks=checks)
-    result["advisories"] = _version_drift_advisories(committed)
+    result["advisories"] = version_drift_advisories(committed)
     return result
 
 
@@ -3552,6 +3513,27 @@ def _label_layers_replay(committed: dict[str, Any]) -> dict[str, Any]:
     return {"label_layers": dict(echoed)}
 
 
+def _reject_subckt_call_layout_netlist(path: str, text: str) -> None:
+    """Issue #2972: the layout-side twin of `_read_reference_netlist`'s
+    simulation-form guard. `klt extract --pdk` writes PDK-bound MOS `X` cards;
+    read back unguarded they are undefined-subcircuit instances (zero layout
+    devices, a topology cascade) rather than a form-mismatch error."""
+    from .netlist_normalize import detect_subckt_call_devices
+
+    offending = detect_subckt_call_devices(text)
+    if offending:
+        raise LvsError(
+            f"layout netlist '{path}' is in the simulation "
+            f"(subcircuit-call) form: it instantiates curated PDK device "
+            f"subcircuit(s) {', '.join(offending)} via undefined 'X' cards, "
+            "which 'klt lvs' cannot compare as extracted plain-element "
+            "devices (it would silently read as zero layout devices and "
+            "report a topology mismatch). Re-extract the layout without "
+            "'--pdk' (plain-element M-cards) -- see docs/cli/lvs.md, "
+            '"Netlist form".'
+        )
+
+
 def _logical_spice_cards(netlist_text: str) -> list[str]:
     """Split ``netlist_text`` into lines, joining ``+`` continuations so a
     wrapped card is one logical card."""
@@ -3923,6 +3905,7 @@ def _resolve_layout(
         raise LvsError(
             f"could not parse layout netlist '{layout_netlist_path}': {exc}"
         ) from exc
+    _reject_subckt_call_layout_netlist(layout_netlist_path, layout_netlist_text)
     recovered_capacitor_classes = parse_capacitor_class_comments(layout_netlist_text)
     _reject_bare_resistor_x_cards(
         layout_netlist_text,
@@ -3992,6 +3975,8 @@ def _read_reference_netlist(
     gate_level_port_aliases: dict[str, dict[str, str]] | None = None,
     finfet: bool = False,
     finfet_top: str | None = None,
+    resistor_value_classes: Sequence[str] | None = None,
+    deck_options: Mapping[str, str] | None = None,
 ) -> kdb.Netlist:
     """Parse ``path`` via ``NetlistSpiceReader``, in the reference netlist's
     declared ``form`` (issue #280, extended by issue #1336).
@@ -4020,6 +4005,13 @@ def _read_reference_netlist(
     :func:`_apply_reference_placeholder_values`; every other caller can
     ignore it (``None``, the default, records nothing and leaves behaviour
     byte-identical).
+
+    ``resistor_value_classes`` (issue #2905), ``form="subckt-call"`` only,
+    names resistor classes whose ``R`` the converter fills from the deck's
+    sheet resistance (the ``klt extract`` ``r_ohm`` code path) and the call's
+    ``L``/``W`` rather than the ``0`` placeholder; ``deck_options`` selects
+    the deck's flavours as for extraction. See
+    :func:`_resistor_value_classes`.
 
     ``gate_level_port_aliases`` (issue #2021) is the same kind of optional
     *output* collector, populated only for ``form="gate-level-verilog"``:
@@ -4096,7 +4088,11 @@ def _read_reference_netlist(
     if form == "subckt-call":
         try:
             conversion = convert_reference_netlist(
-                text, deck=deck, device_map=device_map
+                text,
+                deck=deck,
+                device_map=device_map,
+                resistor_value_classes=resistor_value_classes,
+                deck_options=deck_options,
             )
         except NormalizeError as exc:
             raise LvsError(
@@ -7254,6 +7250,26 @@ def _short_nets_disclosure(
 _PLACEHOLDER_VALUE_PARAMETER = {"resistor": "R", "capacitor": "C"}
 
 
+def _resistor_value_classes(
+    compare_parameters: Mapping[str, Sequence[str]] | None,
+) -> list[str]:
+    """Device-class names ``options.compare_parameters`` asks to compare ``R``
+    on (issue #2905) -- the opt-in for a ``form: "subckt-call"`` reference to
+    carry a deck-derived ``R`` instead of the ``0`` placeholder.
+
+    Opt-in on purpose: filling ``R`` for every deck-modelled resistor would
+    silently turn existing ``match`` results into value comparisons against
+    the deck's sheet resistance. Naming ``R`` is the caller asking for it.
+    """
+    if not compare_parameters:
+        return []
+    return [
+        name
+        for name, params in compare_parameters.items()
+        if any(param.lower() == "r" for param in params)
+    ]
+
+
 def _apply_reference_placeholder_values(
     spec: dict[str, str],
     layout_netlist: Any,
@@ -9122,6 +9138,27 @@ def _describe_power_net_groups(groups: list[dict[str, Any]]) -> str:
     return "; ".join(parts)
 
 
+#: Appended to a ground-class pin's ``power.inconsistent_pin_net`` /
+#: ``power.unexpected_pin_net`` ``description`` (issue #2971). Abstract-cell
+#: extraction black-boxes each cell, erasing the substrate taps that join
+#: separate ground rails in a transistor-level extraction of the same GDS, so
+#: a ground finding here can be a modelling artifact rather than a defect.
+_GROUND_SUBSTRATE_CAVEAT = (
+    ". Caveat for this ground pin: substrate continuity through the cells' "
+    "own taps is not modelled in abstract-cell extraction, so separate "
+    "Metal1 ground rails that a transistor-level extraction joins through "
+    "the substrate are reported here as distinct nets -- this finding may "
+    "be an artifact. To classify it, re-run klt extract without "
+    "--abstract-cells and compare the pin's net count"
+)
+
+
+def _ground_pin_caveat(pin: str) -> str:
+    """:data:`_GROUND_SUBSTRATE_CAVEAT` for a ground-class ``pin`` (by the
+    repo's shared name heuristic), ``""`` for a power or signal pin."""
+    return _GROUND_SUBSTRATE_CAVEAT if classify_pin_by_name(pin)[1] == "GROUND" else ""
+
+
 def _power_connectivity_findings(
     rows: list[dict[str, Any]], expected_nets: dict[str, str] | None
 ) -> list[dict[str, Any]]:
@@ -9203,6 +9240,7 @@ def _power_connectivity_findings(
                             "routed at all, the more likely fix is "
                             "request.power in klt place-and-route rather "
                             "than this option"
+                            f"{_ground_pin_caveat(pin)}"
                         ),
                         "instance_count": len(entries),
                         "nets": groups,
@@ -9235,6 +9273,7 @@ def _power_connectivity_findings(
                         "the same signature as no PDN having been added -- "
                         "the more likely fix is request.power in klt "
                         "place-and-route rather than either option above"
+                        f"{_ground_pin_caveat(pin)}"
                     ),
                     "instance_count": len(entries),
                     "nets": groups,

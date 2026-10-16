@@ -165,6 +165,7 @@
       "nsm.angle.1",
       "nsm.ongrid.1",
       "nwell.angle.1",
+      "nwell.enclosed.hvi.1",
       "nwell.ongrid.1",
       "nwell.space.1",
       "nwell.width.1",
@@ -234,6 +235,13 @@
       "via3",
       "via4",
       "x"
+    ],
+    "unmodeled_rules": [
+      "m1.5",
+      "m2.5",
+      "via.5a",
+      "via2.5",
+      "via3.5"
     ],
     "schema_version": 1,
     "known": true,
@@ -580,6 +588,10 @@
       },
       {
         "id": "nwell.angle.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "nwell.enclosed.hvi.1",
         "reason": "no_applicable_geometry"
       },
       {
