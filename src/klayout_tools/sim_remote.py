@@ -463,6 +463,7 @@ def _run_remote(
         )
     ssh_user = remote_spec.get("ssh_user") or remote_transport.DEFAULT_SSH_USER
     _preflight_include_closure(request, netlist_path, request_dir)
+    _assess_remote_runner_features(request, pdk, remote_spec)
 
     job_id = f"klt-sim-{uuid.uuid4().hex[:12]}"
     launcher = RemoteLauncher(
@@ -815,6 +816,7 @@ def _run_remote_fleet(
         )
     ssh_user = remote_spec.get("ssh_user") or remote_transport.DEFAULT_SSH_USER
     _preflight_include_closure(request, netlist_path, request_dir)
+    _assess_remote_runner_features(request, pdk, remote_spec)
 
     shards = _shard_corner_points(corner_points, hosts)
     job_id_prefix = f"klt-sim-fleet-{uuid.uuid4().hex[:8]}"
@@ -1008,11 +1010,33 @@ def _build_remote_job_description(
             ),
         ),
         command=(
-            f"klt sim {remote_transport.REMOTE_REQUEST_FILENAME} "
+            _remote_feature_preflight(remote_request)
+            + f"klt sim {remote_transport.REMOTE_REQUEST_FILENAME} "
             "--backend local-parallel --format json"
         ),
         success_exit_codes=_REMOTE_SIM_SUCCESS_EXIT_CODES,
         artifacts_relative_dir=remote_transport.DEFAULT_ARTIFACTS_RELATIVE_DIR,
+    )
+
+
+def _remote_feature_preflight(remote_request: dict[str, Any]) -> str:
+    """Host-side refusal prefix for a request using a mandatory runner feature
+    (issue #2924); ``sim_batch`` owns the registry and imports this module,
+    hence the function-local import."""
+    from . import sim_batch
+
+    return sim_batch.remote_feature_preflight(remote_request)
+
+
+def _assess_remote_runner_features(
+    request: dict[str, Any], pdk: str | None, remote_spec: dict[str, Any]
+) -> None:
+    """Pre-launch half of the same gate; see
+    :func:`sim_batch.assess_remote_runner_features`."""
+    from . import sim_batch
+
+    sim_batch.assess_remote_runner_features(
+        request, pdk, remote_spec.get("region"), remote_spec.get("ami_manifest")
     )
 
 

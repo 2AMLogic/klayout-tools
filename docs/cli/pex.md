@@ -891,6 +891,7 @@ klt pex 06-layout.gds --deck sky130 \
   | `KLT_PEX_NETLIST` | the same path passed as the final argument |
   | `KLT_PEX_ARTIFACTS_DIR` | a per-side directory under this run's `--outdir` (`<outdir>/measure/<side>/`), created before the command runs — for whatever decks/logs/raw files the harness wants to keep |
   | `KLT_PEX_BACKEND` | the `--backend` value (`local`/`batch`/…), set **only** when `klt pex` was given `--backend`; the same value is also exported as `KLT_SIM_BACKEND` so a child `klt sim` obeys it. Absent otherwise — the host's inherited `$KLT_SIM_BACKEND` default applies unchanged |
+  | `KLT_OUTDIR_LOCK_INHERIT` | the canonical path of `$KLT_PEX_ARTIFACTS_DIR`; a nested `klt` (e.g. `klt sim` on a request under that directory, default `-o`) treats that directory and its descendants as already owned by this run instead of failing with `outdir_locked` (additive, #3291) |
 
 - **A non-zero exit, an unrunnable command, a timeout, or stdout that is not
   valid JSON is a hard error** (exit `1`), with a bounded tail of the
@@ -1313,7 +1314,15 @@ per-testbench `klt sim` runs on `<outdir>/<testbench>/schematic|extracted`
 inherit that ownership, and an independent `klt sim`/`klt pex` aimed at one
 of those child directories is refused while the run is active. A killed or
 crashed run releases ownership automatically; a leftover owner record never
-blocks the next run. `outdir_lock_unavailable` (same exit/streams) means
+blocks the next run. A `--measure-command` harness is the one child process
+that inherits ownership: `klt pex` exports `KLT_OUTDIR_LOCK_INHERIT` (the
+canonical `$KLT_PEX_ARTIFACTS_DIR`), so a nested `klt sim` whose output
+directory is that directory or a descendant -- including the default
+`.klt/sim/` beside a request written there -- runs without `outdir_locked`.
+Only descendants are covered: an ancestor or sibling of it is still refused,
+and a harness that fans out parallel `klt sim`s into the same directory loses
+the guard among themselves. Pass `klt sim -o <dir>` to a distinct directory
+per parallel run. `outdir_lock_unavailable` (same exit/streams) means
 locking itself is not possible here. Full policy, library exceptions and
 platform scope: [json-contract.md](../json-contract.md) "Output-directory
 ownership".

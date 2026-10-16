@@ -2881,3 +2881,5 @@ ingestion harness exists is a natural follow-on.
   geometric, whole-cell (not net-aware) approximation of an antenna check
   that predates this connectivity model; `klt erc` is the net-aware
   successor this document's "Coverage" section anticipates.
+
+See also [`klt tap-distance`](tap-distance.md) for a Euclidean distance bound from subject geometry to qualifying taps (latch-up / tie spacing), which `ties[]` does not express.

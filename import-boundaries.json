@@ -375,6 +375,14 @@
         "klayout_tools.ring_check"
       ]
     },
+    "tap_distance": {
+      "kind": "verb",
+      "description": "`klt tap_distance` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.tap_distance_cmd",
+        "klayout_tools.tap_distance"
+      ]
+    },
     "shared-core": {
       "kind": "shared",
       "description": "Cross-verb helper modules (underscore-prefixed internals, provenance, build identity, shared layout/report helpers). Public API is importable by every group.",
@@ -571,6 +579,16 @@
     }
   },
   "allowed_group_edges": [
+    {
+      "consumer": "tap_distance",
+      "exporter": "cli-infra",
+      "reason": "CLI adapter uses the shared output envelope and --region parser, as every verb does."
+    },
+    {
+      "consumer": "tap_distance",
+      "exporter": "erc",
+      "reason": "Issue #3009: the optional tap net filter reuses ERC's connectivity extraction helpers instead of a second extraction."
+    },
     {
       "consumer": "arith_gen",
       "exporter": "cli-infra",
@@ -1143,6 +1161,18 @@
     }
   ],
   "shared_private_permissions": [
+    {
+      "consumer": "klayout_tools.tap_distance",
+      "exporter": "klayout_tools.erc",
+      "symbol": "_match_net_clusters",
+      "reason": "Issue #3009: reuse ERC net-label matching for the tap net filter rather than duplicating it."
+    },
+    {
+      "consumer": "klayout_tools.tap_distance",
+      "exporter": "klayout_tools.erc",
+      "symbol": "_register_label_layer",
+      "reason": "Issue #3009: reuse ERC label-layer registration for the tap net filter rather than duplicating it."
+    },
     {
       "consumer": "klayout_tools.drc",
       "exporter": "klayout_tools._provenance",
