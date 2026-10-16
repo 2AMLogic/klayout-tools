@@ -5627,6 +5627,8 @@ def test_build_delta_rows_without_flag_carries_no_device_only_keys():
         "extracted_value",
         "delta_pct",
         "status",
+        "schematic_status",
+        "extracted_status",
     }
 
 
