@@ -59,7 +59,7 @@
 #   scripts/aws/build-remote-sim-ami.sh --pdk sky130A --region us-east-1 \
 #       [--instance-type c7i.xlarge] [--root-gb 60] \
 #       [--copy-to-region us-west-2 ...] \
-#       [--klt-ref <git-ref>] [--manifest <path>] [--yes]
+#       [--klt-ref <git-ref>] [--pdk-variants <v1,v2>] [--manifest <path>] [--yes]
 #   scripts/aws/build-remote-sim-ami.sh --pdk sky130A --region us-east-1 \
 #       [--klt-ref <git-ref>] --emit-manifest-entry <ami_id> <klt_version>
 #
@@ -68,6 +68,11 @@
 #   pinned checkout of THIS repo rather than volare (see the PDK_FETCH_CMDS
 #   case below) -- IHP-Open-PDK is not on volare's feed, and the
 #   compiled-OSDI step has no volare equivalent at all.
+#
+#   --pdk-variants <v1,v2>: record the PDK variant directories this image
+#   ships (e.g. gf180mcuD) as the manifest entry's optional `pdk_variants`
+#   (issue #3251), so the batch backend can refuse an unshipped variant
+#   before any S3 write. Omit it and the entry stays variant-unknown.
 #
 #   --emit-manifest-entry <ami_id> <klt_version>: print, as JSON, the
 #   manifest entry this build would publish for <ami_id> in --region, from
@@ -173,6 +178,7 @@ SG13G2_PDK_SNAPSHOT_PREFIX="sg13g2-klt"
 #: version parsing). Overridable so tests can run the offline paths without
 #: a `uv` project sync.
 read -r -a PYTHON_CMD <<< "${KLT_AMI_BUILD_PYTHON:-uv run python3}"
+PDK_VARIANTS=""
 EMIT_ENTRY=false
 EMIT_AMI=""
 EMIT_KLT_VERSION=""
@@ -181,7 +187,7 @@ log() { echo "[build-remote-sim-ami] $*" >&2; }
 die() { local code="$1"; shift; log "error: $*"; exit "$code"; }
 
 usage() {
-  sed -n '2,88p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,92p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -193,6 +199,7 @@ while [[ $# -gt 0 ]]; do
     --copy-to-region) COPY_TO_REGIONS+=("$2"); shift 2 ;;
     --klt-ref) KLT_REF="$2"; shift 2 ;;
     --pdk-version) PDK_VERSION="$2"; shift 2 ;;
+    --pdk-variants) PDK_VARIANTS="$2"; shift 2 ;;
     --manifest) MANIFEST="$2"; shift 2 ;;
     --yes) YES=true; shift ;;
     --emit-manifest-entry)
@@ -248,12 +255,13 @@ import json, sys
 from klayout_tools.remote_launcher import RemoteLaunchError, ami_manifest_entry
 keys = ("pdk", "region", "ami_id", "pdk_snapshot", "ngspice_version",
         "built_at", "klt_version", "klt_ref")
+variants = [v for v in sys.argv[9].split(",") if v] if len(sys.argv) > 9 and sys.argv[9] else None
 try:
-    entry = ami_manifest_entry(**dict(zip(keys, sys.argv[1:])))
+    entry = ami_manifest_entry(**dict(zip(keys, sys.argv[1:9])), pdk_variants=variants)
 except RemoteLaunchError as exc:
     sys.exit(f"manifest entry refused: {exc}")
 print(json.dumps(entry))
-' "$PDK" "$2" "$1" "$PDK_SNAPSHOT" "$NGSPICE_VERSION_HINT" "$BUILT_AT" "$3" "$KLT_REF")
+' "$PDK" "$2" "$1" "$PDK_SNAPSHOT" "$NGSPICE_VERSION_HINT" "$BUILT_AT" "$3" "$KLT_REF" "$PDK_VARIANTS")
 }
 
 if [[ "$EMIT_ENTRY" == true ]]; then

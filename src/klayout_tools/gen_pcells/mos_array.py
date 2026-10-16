@@ -10,10 +10,31 @@ submodule only imports it, never the reverse).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import klayout.db as kdb
+
+
+def _mos_cap_enabled(pcell: Any) -> bool:
+    """``pcell.mos_cap`` (the PCell params are dynamic attributes)."""
+    return bool(pcell.mos_cap)
+
+
+def _insert_mos_cap_mark(pcell: Any, info: dict[str, Any], dbu: float) -> None:
+    """Draw the MOS-capacitor marker (issue #3283) when ``pcell.mos_cap`` is
+    set: the same enclosing box as the voltage-flavor marker, so it covers
+    every unit device."""
+    if not _mos_cap_enabled(pcell):
+        return
+    from klayout_tools.gen import _insert_boxes
+
+    _insert_boxes(
+        pcell.cell,
+        pcell.layout.layer(pcell.mos_cap_mark_layer),
+        dbu,
+        [info["voltage_flavor_mark_box_um"]],
+    )
 
 
 def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
@@ -140,6 +161,22 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default="",
             )
             self.param(
+                "mos_cap",
+                self.TypeBoolean,  # type: ignore[attr-defined]
+                "Draw a MOS capacitor instead of a transistor: every "
+                "source/drain segment is strapped into one terminal and the "
+                "PDK's MOS-capacitor marker is drawn over the array (needs "
+                "add_guard_ring for the body tie; finger_topology is "
+                "ignored; gate_contact is unsupported)",
+                default=False,
+            )
+            self.param(
+                "mos_cap_mark_layer",
+                self.TypeLayer,  # type: ignore[attr-defined]
+                "PDK MOS-capacitor marker drawing layer (only used when mos_cap)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
                 "gate_contact",
                 self.TypeBoolean,
                 "Finish the gate stack: draw a contact and a local-metal pad "
@@ -249,6 +286,13 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Harness-resolved margin the voltage_flavor marker box grows "
                 "beyond the array's own shared active footprint (see "
                 "_PDK_VOLTAGE_FLAVOR_MARK_MARGIN_UM)",
+                default=WELL_ENCLOSURE_MARGIN_UM,
+            )
+            self.param(
+                "ring_well_margin_um",
+                self.TypeDouble,
+                "Harness-resolved nwell enclosure of the n-tap guard ring "
+                "(see _PDK_RING_WELL_MARGIN_UM)",
                 default=WELL_ENCLOSURE_MARGIN_UM,
             )
             self.param(
@@ -451,6 +495,7 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.sd_implant_margin_um if self.sd_implant_present else 0.0,
                 self.voltage_flavor_mark_margin_um,
                 self.interior_channel_um,
+                _mos_cap_enabled(self),
                 self.pitch_x_um,
                 self.pitch_y_um,
             )
@@ -563,7 +608,7 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 # against.
                 if self.well_present and self.flavor == "pfet":
                     li_well = self.layout.layer(self.well_layer)
-                    margin = WELL_ENCLOSURE_MARGIN_UM
+                    margin = self.ring_well_margin_um
                     ring_well_box = (
                         -margin,
                         -margin,
@@ -611,6 +656,8 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     dbu,
                     [info["voltage_flavor_mark_box_um"]],
                 )
+
+            _insert_mos_cap_mark(self, info, dbu)
 
             # Dummy-device marker (issue #491): drawn only over
             # dummy_cells' gate footprint (unit_boxes["poly"], the exact

@@ -50,6 +50,7 @@ from . import (
     ring_check_cmd,
     signoff_cmd,
     sim_cmd,
+    sim_merge_cmd,
     size_cmd,
     socket_check_cmd,
     sta_cmd,
@@ -63,6 +64,7 @@ from . import (
     yield_cmd,
     yield_samples_cmd,
     yield_sensitivity_cmd,
+    yield_threshold_cmd,
 )
 from .color import add_color_args
 
@@ -281,6 +283,8 @@ def create_parser() -> argparse.ArgumentParser:
 
     _add_sim_parser(subparsers)
 
+    _add_sim_merge_parser(subparsers)
+
     _add_pex_parser(subparsers)
 
     _add_size_parser(subparsers)
@@ -304,6 +308,8 @@ def create_parser() -> argparse.ArgumentParser:
     _add_yield_campaign_parser(subparsers)
 
     _add_yield_sensitivity_parser(subparsers)
+
+    _add_yield_threshold_parser(subparsers)
 
     _add_design_centering_parser(subparsers)
 
@@ -855,6 +861,37 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
     sim_parser.set_defaults(func=sim_cmd.run)
 
 
+def _add_sim_merge_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``sim-merge`` verb (issue #3045).
+
+    Recombines the per-request reports of one corner grid that had to be
+    split across several ``klt sim`` requests. A separate verb rather than
+    ``klt sim merge``: ``klt sim`` takes a positional request path, so a
+    ``merge`` subcommand would collide with a request file of that name. See
+    docs/cli/sim.md "Merging per-request reports".
+    """
+    merge_parser = subparsers.add_parser(
+        "sim-merge",
+        help="merge per-request klt sim reports of one split corner grid",
+        description=(
+            "Merge the reports of N per-request `klt sim` runs (one corner grid "
+            "split across requests) into the report a single request over the "
+            "whole grid would have produced. Rollups, coverage and counters are "
+            "recomputed over the union; a missing, duplicate, unexpected or "
+            "mismatching report is refused with a distinct exit code. See "
+            "docs/cli/sim.md 'Merging per-request reports'."
+        ),
+    )
+    merge_parser.add_argument(
+        "manifest", help="shard manifest JSON (planned requests and expected corners)"
+    )
+    merge_parser.add_argument(
+        "reports", nargs="+", metavar="report", help="per-request klt sim report JSON"
+    )
+    _add_format_arg(merge_parser)
+    merge_parser.set_defaults(func=sim_merge_cmd.run)
+
+
 def _add_size_parser(subparsers: argparse._SubParsersAction) -> None:
     """Register the ``size`` verb for single-device gm/Id operating-point sizing.
 
@@ -1267,6 +1304,79 @@ def _add_yield_samples_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(parser)
     parser.set_defaults(func=yield_samples_cmd.run)
+
+
+def _add_yield_threshold_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``yield-threshold`` verb (issue #2976).
+
+    Probit fit of a binary outcome against a swept stimulus: the threshold
+    distribution of a comparator/latch/trip point. Pure Python; needs no
+    native extension.
+    """
+    parser = subparsers.add_parser(
+        "yield-threshold",
+        help=(
+            "per-sample (stimulus, binary outcome) records -> probit threshold "
+            "mean/sigma with profile-likelihood CIs, per corner"
+        ),
+        description=(
+            "Fit P(decided high | stimulus) = Phi((stimulus - mu) / sigma) to "
+            "per-sample binary outcomes, per corner (issue #2976): the "
+            "input-referred offset of a comparator, latch or trip point is never "
+            "observed directly, only through which way each sample decided. "
+            "Reports mu/sigma with profile-likelihood confidence intervals, "
+            "per-stimulus proportions with Clopper-Pearson intervals, a "
+            "chi-square goodness of fit and, with --target-error-rate, the "
+            "stimulus at that error rate (flagged extrapolated beyond what the "
+            "sample count resolves). Degenerate data (one outcome, separation, "
+            "fewer than 2 stimulus levels) yields null estimates and a "
+            "fit.status, never a fabricated sigma. See docs/cli/yield-threshold.md."
+        ),
+    )
+    parser.add_argument(
+        "records",
+        help=(
+            'path to the records JSON document: {"corners": [{"name", '
+            '"records": [{"stimulus", "outcome"}]}]} or a flat '
+            '{"records": [...]} with an optional per-record "corner"'
+        ),
+    )
+    parser.add_argument(
+        "--confidence",
+        type=float,
+        default=0.95,
+        help="two-sided confidence level for every interval (default: 0.95)",
+    )
+    parser.add_argument(
+        "--target-error-rate",
+        dest="target_error_rate",
+        type=float,
+        default=None,
+        metavar="RATE",
+        help=(
+            "also report the stimulus at which the wrong-decision rate reaches "
+            "RATE (0 < RATE < 0.5), flagged extrapolated when RATE is below "
+            "what the sample count resolves"
+        ),
+    )
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=None,
+        help=(
+            "derive each record's outcome from its numeric `value` against "
+            "this threshold instead of reading a given `outcome`"
+        ),
+    )
+    parser.add_argument(
+        "--outcome-when",
+        dest="outcome_when",
+        choices=["above", "below"],
+        default="above",
+        help="with --threshold: decided high when value is above (default) or below it",
+    )
+    _add_format_arg(parser)
+    parser.set_defaults(func=yield_threshold_cmd.run)
 
 
 def _add_yield_campaign_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -2937,7 +3047,9 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "once with the netlist this run extracted -- never through a "
             "shell. Each invocation gets the netlist path as its final "
             "argument plus $KLT_PEX_SIDE/$KLT_PEX_NETLIST/"
-            "$KLT_PEX_ARTIFACTS_DIR in its environment, and must print a "
+            "$KLT_PEX_ARTIFACTS_DIR in its environment (plus "
+            "$KLT_PEX_BACKEND and $KLT_SIM_BACKEND when --backend is given), "
+            "and must print a "
             'measurement document on stdout: {"corners": [{"corner_id": '
             '..., "measurements": [{"name": ..., "value": ..., "status": '
             "...}]}]}. Use it for a spec row no single `.meas` card can "
@@ -3085,7 +3197,9 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "recognised keys are gf180mcu's `poly_res` (values `1k` "
             "(default), `2k`, `3k`) and `mim_cap` (values "
             "`cap_mim_1f0_m4m5_noshield`, `cap_mim_1f5_m4m5_noshield`, "
-            "`cap_mim_2f0_m4m5_noshield` (default)). Without this flag `klt "
+            "`cap_mim_2f0_m4m5_noshield` (default)) and `mim_option` (`B` "
+            "(default), `A`; MIM option A is the Metal2/Metal3 stack). "
+            "Without this flag `klt "
             "pex` extracts against whatever the deck's own default flavour "
             "is, which is not necessarily the one the design uses -- and "
             "reports a delta computed from the wrong parasitics. An "

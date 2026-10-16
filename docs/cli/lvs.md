@@ -603,6 +603,15 @@ name differs from the deck's device-class label and has no curated entry yet
 "not a known device for the requested deck" error lists the full resolved
 set so the gap is visible from the failure itself.
 
+**Native-Vt NMOS is not supported on sky130 (issue #2912).** A `form:
+"subckt-call"` card naming `sky130_fd_pr__nfet_05v0_nvt` is rejected as "not a
+known device for the requested deck": the sky130 deck has no native-NMOS device
+class (upstream derives it from `hvi` AND `lvtn`, not a single marker layer),
+and `klt gen mos_array` cannot draw it (see `gen.md`, `voltage_flavor`).
+Mapping it with `reference.device_map` onto the plain `nfet` class would
+compare a device of the wrong type and is not an honest workaround — exclude
+the native device from the comparison explicitly instead.
+
 **`sg13g2`'s `rfcmim` was the one live case of that gap** (issue #1470, now
 closed). Derivation binds the *declared class* name as its own subcircuit
 name, so it never reached `rfcmim`: IHP ships the device as `.subckt
@@ -747,6 +756,14 @@ that circuit-name string, never as a device — invisible in `counts.devices`,
 unreachable by `options.parameter_tolerance`, and any real mismatch degrades
 to a generic `topology`/`circuit could not be matched to a counterpart`
 finding with no device/parameter/net name.
+
+**Resistor `X` cards need `layout.deck` (issue #3078).** `klt extract` writes a
+bulk-bearing drawn resistor as `X$n a b vsubs <class> r=… L=… W=…`. A bare
+pre-extracted `layout.netlist` (no `layout.deck`) containing such a card whose
+class belongs to `reference.deck` is refused with an error (exit 1) naming
+`layout.deck`, rather than being compared as an undefined subcircuit and
+reported as a spurious `mismatch`. Add `layout.deck` to read it as a resistor
+device.
 
 **`layout.deck`/`reference.deck` fixes this.** When a pre-extracted
 `layout.netlist` gives `layout.deck`, or `reference.netlist` gives

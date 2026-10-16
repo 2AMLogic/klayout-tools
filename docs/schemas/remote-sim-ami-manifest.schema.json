@@ -61,6 +61,13 @@
             "pattern": "^\\S+$",
             "description": "The git ref (the build script's `--klt-ref`, by default the commit it ran from) klayout-tools was pip-installed from on this image (issue #2851). Audit provenance only; never compared. Optional: absent on historical entries."
           },
+          "pdk_variants": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {"type": "string", "minLength": 1, "pattern": "^\\S+$"},
+            "description": "The PDK variant directory names this image ships (e.g. ['gf180mcuD']) (issue #3251). The `batch` backend refuses a request whose `models.pdk` variant is not listed, before any S3 write, when every candidate image publishes this field. Optional: absent on historical entries, which means unknown."
+          },
           "notes": {
             "type": ["string", "null"],
             "description": "Free-form build notes (e.g. base AMI id, packer/build-tool version). Optional."
