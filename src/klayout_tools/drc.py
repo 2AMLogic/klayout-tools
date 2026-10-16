@@ -148,9 +148,12 @@ _ANGLE_CHECKS = {"angle"}
 # both kinds (`_run_vertex_check`), so adding a third vertex check kind does
 # not add another branch to `run_drc` itself.
 _VERTEX_CHECKS = _GRID_CHECKS | _ANGLE_CHECKS
-# Region rules (issue #3587): a typed `DrcRule.region_spec` descriptor
-# evaluated by `_run_comp_coverage_check`, not a distance primitive.
+# Region rules (issues #3587, #3607): a typed `DrcRule.region_spec` descriptor
+# evaluated by `_run_comp_coverage_check` / `_run_tap_distance_check`, not a
+# distance primitive.
 _COMP_COVERAGE_CHECKS = {"comp_coverage"}
+_TAP_DISTANCE_CHECKS = {"tap_distance"}
+_REGION_CHECKS = _COMP_COVERAGE_CHECKS | _TAP_DISTANCE_CHECKS
 
 # Every `DerivedLayer.mode` `run_drc()` knows how to derive a region for --
 # see that class's docstring for each one's derivation. Validated per rule
@@ -329,10 +332,20 @@ def _grid_is_representable(rule: DrcRule, dbu: float) -> bool:
     and records :data:`SKIP_REASON_GRID_NOT_REPRESENTABLE`, which makes the
     run partial rather than an unqualified ``clean``.
 
-    ``True`` for every non-``"ongrid"`` rule and for an ``"ongrid"`` rule with
-    no ``grid_um`` at all -- neither is this predicate's question (the latter
-    is a deck-authoring error :func:`_run_grid_check` raises on).
+    A ``"tap_distance"`` rule (issue #3607) has the same problem with its
+    ``max_distance_um`` and ``step_um``: both must be a whole, positive number
+    of database units, or the boundary distance would be silently rounded.
+
+    ``True`` for every other non-``"ongrid"`` rule and for an ``"ongrid"`` rule
+    with no ``grid_um`` at all -- neither is this predicate's question (the
+    latter is a deck-authoring error :func:`_run_grid_check` raises on).
     """
+    if rule.check in _TAP_DISTANCE_CHECKS and rule.region_spec is not None:
+        spec = rule.region_spec
+        return all(
+            round(um / dbu) >= 1 and abs(um / dbu - round(um / dbu)) <= 1e-9
+            for um in (spec.max_distance_um, spec.step_um)
+        )
     if rule.check not in _GRID_CHECKS or rule.grid_um is None:
         return True
     units_per_grid = rule.grid_um / dbu
@@ -664,6 +677,9 @@ def _rule_outside_voltage_gate(
     - its ``derived_layer`` **reads the marker itself** (gf180mcu's
       ``DF.1a``/``DF.3a`` ``_LV``/``_MV`` pairs, issue #1110) -- its checked
       region is already scoped by the marker, so it applied the right column;
+    - its ``region_spec`` **reads the marker itself** (``dualgate`` / ``v5_xtor``
+      in a ``"tap_distance"`` rule, issue #3607) -- the rule is scoped by the
+      marker, so it applied the right column;
     - it is flagged :attr:`~klayout_tools.decks.DrcRule.voltage_independent`
       (issue #2369) -- its source DRM section publishes a single value
       column, so no second column exists for it to have misread. Opt-in per
@@ -674,6 +690,9 @@ def _rule_outside_voltage_gate(
         return True
     if rule.voltage_independent:
         return True
+    if rule.check in _TAP_DISTANCE_CHECKS and rule.region_spec is not None:
+        if marker in rule.region_spec.layers():
+            return True
     # A `"union"` derivation (issue #2688) *adds* its inputs to the checked
     # region rather than scoping it, so reading the marker as one of them
     # does not mean the rule applied the marker's column.
@@ -2946,7 +2965,7 @@ def _dispatch_region_rule(
     rules_skipped: list[str],
     empty_checked_region_ids: set[str],
 ) -> bool:
-    """Run a :data:`_COMP_COVERAGE_CHECKS` rule (issue #3587), recording its
+    """Run a :data:`_REGION_CHECKS` rule (issues #3587, #3607), recording its
     outcome in the caller's accumulators; ``False`` when ``rule`` is not one.
 
     A region rule resolves its own layers (named layers other than the
@@ -2955,12 +2974,17 @@ def _dispatch_region_rule(
     an empty checked region lands the rule in ``rules_skipped`` (the latter
     also in ``empty_checked_region_ids``).
     """
-    if rule.check not in _COMP_COVERAGE_CHECKS:
+    if rule.check not in _REGION_CHECKS:
         return False
     if layout.find_layer(*rule.layer) is None:
         rules_skipped.append(rule.id)  # absent checked layer
         return True
-    found = _run_comp_coverage_check(rule, layout, top_cells, layer_names)
+    runner = (
+        _run_tap_distance_check
+        if rule.check in _TAP_DISTANCE_CHECKS
+        else _run_comp_coverage_check
+    )
+    found = runner(rule, layout, top_cells, layer_names)
     if found is None:
         rules_skipped.append(rule.id)
         empty_checked_region_ids.add(rule.id)
@@ -3012,27 +3036,110 @@ def _run_comp_coverage_check(
         any_checked = True
         for covering in spec.covered_by_any:
             region = region - merged(cell, covering)
-        for polygon in region.merged().each():
-            bbox = polygon.bbox()
-            source_cell, source_path = _attribute_to_instance(cell, bbox)
-            found.append(
-                {
-                    "rule": rule.id,
-                    "description": rule.description,
-                    "check": rule.check,
-                    "layer": layer_label,
-                    "cell": cell.name,
-                    "source_cell": source_cell,
-                    "source_path": source_path,
-                    "bbox": {
-                        "left": bbox.left,
-                        "bottom": bbox.bottom,
-                        "right": bbox.right,
-                        "top": bbox.top,
-                    },
-                    "polygon": [[pt.x, pt.y] for pt in polygon.each_point_hull()],
-                }
-            )
+        found.extend(_polygon_violations(rule, cell, region.merged(), layer_label))
+    return found if any_checked else None
+
+
+def _polygon_violations(
+    rule: DrcRule, cell: Any, region: Any, layer_label: str
+) -> list[dict[str, Any]]:
+    """One violation record per polygon of ``region`` (bbox + polygon), the
+    reporting shape shared by every :data:`_REGION_CHECKS` rule."""
+    records: list[dict[str, Any]] = []
+    for polygon in region.each():
+        bbox = polygon.bbox()
+        source_cell, source_path = _attribute_to_instance(cell, bbox)
+        records.append(
+            {
+                "rule": rule.id,
+                "description": rule.description,
+                "check": rule.check,
+                "layer": layer_label,
+                "cell": cell.name,
+                "source_cell": source_cell,
+                "source_path": source_path,
+                "bbox": {
+                    "left": bbox.left,
+                    "bottom": bbox.bottom,
+                    "right": bbox.right,
+                    "top": bbox.top,
+                },
+                "polygon": [[pt.x, pt.y] for pt in polygon.each_point_hull()],
+            }
+        )
+    return records
+
+
+def _run_tap_distance_check(
+    rule: DrcRule,
+    layout: Any,
+    top_cells: list[Any],
+    layer_names: dict[tuple[int, int], str],
+) -> list[dict[str, Any]] | None:
+    """``check="tap_distance"`` (issue #3607): gf180mcu ``DF.13`` / ``DF.14``,
+    a ``klayout.db.Region`` translation of the upstream operation sequence
+    (``docs/design/gf180mcu-comp-checks-spike.md`` sections 3 and 7; ported
+    from ``tests/helpers/gf180mcu_comp_spike.py``'s
+    ``evaluate_port_upstream_clip``).
+
+    Evaluated flat per top cell on merged regions. Every layer other than the
+    checked ``comp`` is read as an *empty* region when absent, so zero taps
+    with active present is a violation, never a skip. One violation per
+    selected (whole) active polygon.
+
+    Returns ``None`` when the voltage-selected active region is empty in every
+    top cell -- the rule constrains nothing here (inapplicable,
+    :data:`INAPPLICABLE_REASON_EMPTY_CHECKED_REGION`).
+    """
+    spec = rule.region_spec
+    if spec is None or rule.check not in _TAP_DISTANCE_CHECKS:
+        raise DrcError(f"rule '{rule.id}': check '{rule.check}' requires region_spec")
+    layer_label = layer_names.get(rule.layer, f"{rule.layer[0]}/{rule.layer[1]}")
+    dbu = layout.dbu
+    distance = round(spec.max_distance_um / dbu)
+    step = round(spec.step_um / dbu)
+    steps = round(spec.max_distance_um / spec.step_um)
+
+    def merged(cell: Any, layer: tuple[int, int]) -> Any:
+        return _cell_region_or_empty(cell, layout.find_layer(*layer)).merged()
+
+    any_checked = False
+    found: list[dict[str, Any]] = []
+    for cell in top_cells:
+        comp = merged(cell, rule.layer)
+        nwell = merged(cell, spec.nwell)
+        all_nwell = (merged(cell, spec.dnwell) - merged(cell, spec.lvpwell)) + nwell
+        all_nwell = all_nwell.merged()
+        ncomp = comp & merged(cell, spec.nplus)
+        pcomp = comp & merged(cell, spec.pplus)
+        res_mk = merged(cell, spec.res_mk)
+        dualgate = merged(cell, spec.dualgate)
+        if spec.well_domain == "inside":
+            active = pcomp & all_nwell
+            tap = (ncomp & all_nwell) - res_mk
+        else:
+            active = ncomp - all_nwell
+            tap = (pcomp - all_nwell) - res_mk
+        if spec.voltage == "lv":
+            active = active.not_interacting(merged(cell, spec.v5_xtor))
+            active = active.not_interacting(dualgate)
+        else:
+            active = active.overlapping(dualgate)
+        if active.is_empty():
+            continue
+        any_checked = True
+        if spec.well_domain == "inside":
+            # Upstream clips every growth step with the *raw* `nwell`, not
+            # `all_nwell` (spike discrepancy D2); reproduced faithfully.
+            reach = tap
+            for _ in range(steps):
+                reach = reach.sized(step, 1).merged() & nwell
+            violating = active.not_interacting(reach)
+        else:
+            candidates = active.not_interacting(tap.sized(distance, 0))
+            good = candidates.separation_check(tap, distance).polygons()
+            violating = candidates.not_interacting(good)
+        found.extend(_polygon_violations(rule, cell, violating, layer_label))
     return found if any_checked else None
 
 
