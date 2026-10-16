@@ -47,6 +47,9 @@ def _print_text(report: dict) -> None:
     if "corners" in report:
         for entry in report["corners"]:
             print(f"corner: {entry['corner']}")
+            if "interconnect_corner" in entry:
+                print(f"interconnect_corner: {entry['interconnect_corner']}")
+                print(f"spef_path: {_render_input_path(entry['spef_path'])}")
             _print_slack_fields(entry, indent="  ")
             _print_spef_annotation(entry.get("spef_annotation"), indent="  ")
             print()

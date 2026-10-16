@@ -4825,6 +4825,80 @@ def test_yield_undersized_sample_outranks_an_undetected_negative_control(tmp_pat
     assert item_6["reason"] == "undersized_sample"
 
 
+def _pinned_campaign_item(tmp_path, measurement, pin, *, samples_exists=True):
+    """Item 6 for a campaign refused on ``measurement``, cited with ``pin``
+    (``"live"`` pins the samples document's real hash; issue #3063)."""
+    samples_path = tmp_path / "mc-samples.json"
+    if samples_exists:
+        samples_path.write_text(json.dumps({"measurements": []}))
+    envelope = {**_yield_envelope(measurement), "samples": str(samples_path)}
+    yield_path = _write(tmp_path, "yield.json", envelope)
+    if pin == "live":
+        pin = "sha256:" + hashlib.sha256(samples_path.read_bytes()).hexdigest()
+    evidence = yield_path if pin is None else {"file": yield_path, "content_hash": pin}
+    result = build_tier_report(_manifest(evidence={"6": evidence}))
+    return next(item for item in result["items"] if item["id"] == 6)
+
+
+def test_yield_undersized_sample_discloses_stale_content_hash_pin(tmp_path):
+    """Issue #3063: a stale pin is visible beside `undersized_sample`, and the
+    verdict is unchanged."""
+    item = _pinned_campaign_item(
+        tmp_path, _yield_measurement(sample_size_verdict="insufficient"), "sha256:bad"
+    )
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "undersized_sample"
+    assert item["detail"]["content_hash_pin"] == "stale"
+    assert "yield_campaign" in item["detail"]
+
+
+def test_yield_undersized_sample_discloses_verified_content_hash_pin(tmp_path):
+    item = _pinned_campaign_item(
+        tmp_path, _yield_measurement(sample_size_verdict="insufficient"), "live"
+    )
+
+    assert item["reason"] == "undersized_sample"
+    assert item["detail"]["content_hash_pin"] == "verified"
+
+
+def test_yield_undersized_sample_without_pin_has_no_content_hash_pin(tmp_path):
+    item = _pinned_campaign_item(
+        tmp_path, _yield_measurement(sample_size_verdict="insufficient"), None
+    )
+
+    assert item["reason"] == "undersized_sample"
+    assert "content_hash_pin" not in item["detail"]
+
+
+def test_yield_undersized_sample_missing_samples_pin_is_unverifiable(tmp_path):
+    item = _pinned_campaign_item(
+        tmp_path,
+        _yield_measurement(sample_size_verdict="insufficient"),
+        "sha256:pinned",
+        samples_exists=False,
+    )
+
+    assert item["reason"] == "undersized_sample"
+    assert item["detail"]["content_hash_pin"] == "unverifiable"
+
+
+def test_yield_negative_control_not_detected_discloses_stale_pin(tmp_path):
+    item = _pinned_campaign_item(
+        tmp_path, _yield_measurement(negative_control="not_detected"), "sha256:bad"
+    )
+
+    assert item["reason"] == "negative_control_not_detected"
+    assert item["detail"]["content_hash_pin"] == "stale"
+
+
+def test_yield_met_item_has_no_content_hash_pin_detail(tmp_path):
+    item = _pinned_campaign_item(tmp_path, _yield_measurement(), "live")
+
+    assert item["status"] == "met"
+    assert "content_hash_pin" not in item.get("detail", {})
+
+
 def test_yield_no_negative_control_declared_renders_met_with_disclosure(tmp_path):
     """Issue #2467: `klt yield` itself treats an undeclared negative control
     as a run-level *warning*, not a failing status (docs/cli/yield.md: "there

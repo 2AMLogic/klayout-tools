@@ -2044,10 +2044,48 @@ def test_recovered_from_stepping_true_when_measurements_all_resolved():
 
 
 def test_recovered_from_stepping_false_with_no_measurements_declared():
-    # No measurements[] at all -- nothing independently confirms the run
-    # actually succeeded, so a singular-matrix classification stays fatal.
+    # No measurements[] and no completed waveform -- nothing independently
+    # confirms the run actually succeeded, so a singular-matrix
+    # classification stays fatal.
     log = "Warning: singular matrix:  check node b\n"
     assert sim._recovered_from_stepping([], [], log) is False
+    assert sim._recovered_from_stepping([], [], log, waveform_complete=False) is False
+
+
+def test_recovered_from_stepping_true_for_complete_waveform_without_measurements():
+    # Issue #3246: a waveform-capture-only request recovers on the waveform.
+    log = "Warning: Dynamic gmin stepping failed\n"
+    assert sim._recovered_from_stepping([], [], log, waveform_complete=True) is True
+
+
+def test_recovered_from_stepping_false_for_complete_waveform_with_abort_trailer():
+    log = "Warning: Dynamic gmin stepping failed\ntran simulation(s) aborted\n"
+    assert sim._recovered_from_stepping([], [], log, waveform_complete=True) is False
+
+
+def _wf(last_time, name="time"):
+    return {
+        "plotname": "Transient Analysis",
+        "variables": [{"index": 0, "name": name, "type": "time"}],
+        "points": [[0.0], [last_time]],
+    }
+
+
+@pytest.mark.parametrize(
+    ("waveform", "analysis", "expected"),
+    [
+        (_wf(1e-6), {"kind": "tran", "args": "1n 1u"}, True),
+        (_wf(1e-6), {"kind": "tran", "args": "1n 1u 0 uic"}, True),
+        (_wf(0.9e-6), {"kind": "tran", "args": "1n 1u"}, False),  # truncated
+        (_wf(1e-6), {"kind": "tran", "args": "garbage"}, False),
+        (_wf(1e-6), {"kind": "ac", "args": "dec 10 1 1meg"}, False),
+        (_wf(1e-6, name="frequency"), {"kind": "tran", "args": "1n 1u"}, False),
+        ({**_wf(1e-6), "points": []}, {"kind": "tran", "args": "1n 1u"}, False),
+        (None, {"kind": "tran", "args": "1n 1u"}, False),
+    ],
+)
+def test_waveform_reached_tran_window(waveform, analysis, expected):
+    assert sim._waveform_reached_tran_window(waveform, analysis) is expected
 
 
 def test_recovered_from_stepping_false_when_a_measurement_errored():
@@ -13006,7 +13044,7 @@ def test_expand_netlist_includes_keeps_relative_meaning_beside_env_include(
 def _control_for(kind, args):
     from types import SimpleNamespace
 
-    point = SimpleNamespace(supply_v={})
+    point = SimpleNamespace(supply_v={}, params={})
     return sim._corner_deck_control_lines(
         point=point,
         analysis={"kind": kind, "args": args},
@@ -13486,3 +13524,99 @@ def test_expect_netlist_identity_match_runs_and_mismatch_refuses(tmp_path, monke
         )
     assert stamp in str(err.value)
     assert "mismatch" in str(err.value)
+
+
+# --------------------------------------------------------------------------- #
+# Waveform-only recovered stepping (#3246)
+# --------------------------------------------------------------------------- #
+
+_GMIN_STEPPING_LOG = (
+    "Note: Starting dynamic gmin stepping\n"
+    "Warning: Dynamic gmin stepping failed\n"
+    "Note: Starting true gmin stepping\n"
+    "Note: True gmin stepping completed\n"
+    "Note: Transient op finished successfully\n"
+)
+
+
+def _capture_only_corner(
+    tmp_path, monkeypatch, *, points, log_text, analysis=None, options=None
+):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": analysis or {"kind": "tran", "args": "1n 1u"},
+            "measurements": [],
+            "options": {"waveforms": True, **(options or {})},
+        },
+    )
+    _stub_subprocess_run_with_waveform(monkeypatch, points=points, log_text=log_text)
+    report = sim.run_sim(str(request))
+    (corner,) = report["corners"]
+    return corner
+
+
+def test_capture_only_tran_recovers_when_waveform_reaches_stop_time(
+    tmp_path, monkeypatch
+):
+    corner = _capture_only_corner(
+        tmp_path,
+        monkeypatch,
+        points=[(0.0, 0.0), (5e-7, 0.5), (1e-6, 1.0)],
+        log_text=_GMIN_STEPPING_LOG,
+        options={"keep_artifacts": True},
+    )
+    assert corner["status"] == "pass"
+    stepping = [
+        d
+        for d in corner["diagnostics"]
+        if d["code"] in ("nonconvergence", "singular_matrix")
+    ]
+    assert stepping
+    assert all(d["severity"] == "warning" for d in stepping)
+    assert all("captured waveform" in d["message"] for d in stepping)
+    assert corner["artifacts"]["waveform"] is not None
+
+
+def test_capture_only_tran_stays_error_when_waveform_truncated(tmp_path, monkeypatch):
+    corner = _capture_only_corner(
+        tmp_path,
+        monkeypatch,
+        points=[(0.0, 0.0), (5e-7, 0.5)],
+        log_text=_GMIN_STEPPING_LOG,
+    )
+    assert corner["status"] == "error"
+
+
+def test_capture_only_tran_stays_error_with_abort_trailer(tmp_path, monkeypatch):
+    corner = _capture_only_corner(
+        tmp_path,
+        monkeypatch,
+        points=[(0.0, 0.0), (1e-6, 1.0)],
+        log_text=_GMIN_STEPPING_LOG + "tran simulation(s) aborted\n",
+    )
+    assert corner["status"] == "error"
+
+
+def test_capture_only_tran_fail_on_diagnostic_still_disqualifies(tmp_path, monkeypatch):
+    corner = _capture_only_corner(
+        tmp_path,
+        monkeypatch,
+        points=[(0.0, 0.0), (1e-6, 1.0)],
+        log_text=_GMIN_STEPPING_LOG,
+        options={"fail_on_diagnostic": ["nonconvergence"]},
+    )
+    assert corner["status"] == "inconclusive"
+
+
+def test_capture_only_non_tran_stays_error(tmp_path, monkeypatch):
+    corner = _capture_only_corner(
+        tmp_path,
+        monkeypatch,
+        points=[(0.0, 0.0), (1e6, 1.0)],
+        log_text=_GMIN_STEPPING_LOG,
+        analysis={"kind": "ac", "args": "dec 10 1 1meg"},
+    )
+    assert corner["status"] == "error"
