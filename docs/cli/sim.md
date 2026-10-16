@@ -134,7 +134,11 @@ that cannot be determined or parsed also fails (closed). On `local` and
 `local-parallel` the engine is probed (`ngspice --version` / `Xyce -v`) up
 front. `remote` and `batch` have no pre-submit probe, so the pin is checked
 against the version in the runner's report once the run returns; the job has
-already run by then. Unset, behaviour is unchanged.
+already run by then. Unset, behaviour is unchanged. The pin applies to
+deck-list requests (see "Pre-composed decks") the same way — decks always run
+on `ngspice`, and an off-host runner that reports no `engine_version` fails
+closed — but `unsupported_analysis` does not, as decks have no `analysis`
+block.
 
 **Supported analyses (issue #3041).** `analysis.kind` (and each
 `analysis_steps[]` step) is a control-block analysis such as `op`, `dc`, `ac`,
