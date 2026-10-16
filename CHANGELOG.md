@@ -67,6 +67,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   Docs now state `--def-net-names` is required alongside
   `--def-net-connections --def-pins`. SPEF output without
   `--def-net-connections` is unchanged. Additive; no `schema_version` bump.
+- **`klt sim` initial-guess hints: `options.nodeset`** (issue #3036): rules
+  `{match, values}` select per-point `{node: volts}` maps (after corner
+  expansion/`exclude`, before Monte Carlo cloning) that are rendered as
+  file-scope `.nodeset` cards, echoed as `nodeset` on each hinted corner
+  report and keyed into the `options.resume` fingerprint. Overlapping or unused
+  rules, unsupported node spellings, an unknown node (an `error` diagnostic) and
+  `engine: "xyce"` fail visibly; an off-host worker that does not echo the maps
+  fails with `nodeset_unsupported_worker`. Omitting the option changes nothing.
+  Additive; no `schema_version` bump.
 - **`klt sim` batch: opt-in auto-split of a request that cannot fit the fleet's
   whole-job ceiling** (issue #3446): `batch.job_ceiling_check: "split"`,
   `batch.max_units_per_job` and `--max-units-per-job N` reroute a
