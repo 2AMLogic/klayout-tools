@@ -167,7 +167,12 @@ the reviewer-side check.
   optional extra and is deliberately *not* a base `klt` dependency: it is a
   compiled package with a simulator toolchain behind it, and most `klt`
   installs never verify anything. A missing install is a clear, actionable
-  error (exit 1), never a traceback — the same posture `klt synthesize`
+  error (exit 1, `error.code` `missing_optional_dependency`) that names the
+  failing interpreter (`sys.executable`). For a tool install (`uv tool
+  install` / `pipx install` / `uvx --from`), `pip install cocotb` does not
+  reach the isolated venv: reinstall with the extra on the spec, e.g.
+  `uvx --from "klayout-tools[functional-verification] @ <url-or-version>"
+  klt functional-verification ...`. It is never a traceback — the same posture `klt synthesize`
   takes toward a missing `yosys` binary. The extra installs on every Python
   this project supports, 3.10 through 3.14; its old `python_version <
   "3.14"` marker was dropped in issue #2593 once cocotb 2.1.0 added 3.14
@@ -234,6 +239,7 @@ location.
 | Artifact | What it is |
 | --- | --- |
 | `results_<engine>.xml` | The raw cocotb results file every count in the response is derived from (echoed as `environment.results_xml`). |
+| `test_<engine>.log` / `build_<engine>.log` | The simulator and cocotb console transcript (the bench's `dut._log.info(...)` lines) and the build transcript, echoed as `environment.test_log` / `environment.build_log`. Overwritten by the next run; copy out to keep as evidence. |
 | `sim_build_<engine>/` | cocotb's build directory (the compiled model / `.vvp`). |
 | `build_<engine>.log` / `test_<engine>.log` | The engine's own transcripts. These are captured to files rather than inherited, so simulator chatter can never corrupt `--format json`'s stdout. |
 | `coverage.info` | lcov-format coverage, on coverage runs only (see below). |
@@ -443,6 +449,14 @@ flop samples `x`, no error raised — issue #1004). Either way the verdict is
 quietly wrong, which is what this feature exists to prevent, so it is rejected
 at request-validation time rather than run. Drop `FUNCTIONAL` to re-simulate
 with real delays, or drop `options.sdf` to keep the zero-delay run.
+
+**Scoping `FUNCTIONAL` to a hard macro.** A vendor hard-macro model (e.g. an
+SRAM) often needs `FUNCTIONAL` to simulate at all, while the std-cell sources
+must keep their `specify` blocks. `options.source_defines` applies defines to
+named `request.sources` entries only (see the options table); a scoped
+`FUNCTIONAL` does not trip the rejection above, while a global
+`options.defines.FUNCTIONAL` still does. Std-cell sources not named are built
+unchanged.
 
 **How the annotation is wired.** `$sdf_annotate` is a Verilog system task and
 must be called from an `initial` block inside some elaborated module — and a
@@ -1228,6 +1242,7 @@ tests: 2  passed: 2  failed: 0  skipped: 0
 [passed] test_modexp_random  180480.0 ns
 
 results_xml: .../.klt/functional-verification/results_icarus.xml
+test_log: .../.klt/functional-verification/test_icarus.log
 random_seed: 1
 
 mutations: 2 proposed  2 valid  1 killed  1 survived  0 rejected  score: 0.50
@@ -1307,6 +1322,7 @@ exactly.
 | `options.timescale` | `[string, string]` | `[unit, precision]`, defaulting to `["1ns", "1ps"]`. Passed to **both** the build and test steps — Icarus elaboration otherwise fails the moment a testbench's `Clock(..., unit="ns")` meets an unset (default 1 s) simulator precision. |
 | `options.random_seed` | integer \| null | Optional. Pinned to `Runner.test()`'s own `seed` parameter (`COCOTB_RANDOM_SEED`) when given; omitted/`null` lets cocotb generate its own. Either way the seed actually used is echoed in `environment.random_seed` (see "Reproducibility: `random_seed`"). |
 | `options.defines` | object | Optional. String key -> string \| null value, forwarded unchanged to `Runner.build(defines=...)`. A `null` value defines the macro with no value (e.g. `` `define USE_POWER_PINS ``); it is passed to the simulator as a `-DNAME` build arg, because cocotb 2.x cannot serialise a `null` define value itself (issue #2884). Defaults to `{}` (see "Compile-time defines, build args, and includes"). |
+| `options.source_defines` | object | Optional (issue #3290). Key = an entry of `request.sources` (matched after the same path resolution; an unknown key is exit 1), value = a defines object with the same `string -> string \| null` rules as `options.defines`. For each named source a wrapper is generated under the output directory (`` `define K [V] `` / `` `include "<abs path>" `` / `` `undef K ``) and substituted for that source in the same list position, so the defines reach that one file and cannot leak into later sources; the source's own directory is added to the include path for nested relative `` `include ``s. If a name is also in `options.defines`, the scoped value wins inside that source. Echoed as `environment.source_defines` (keyed by absolute source path; `{}` when absent). Works with `--mutations`. Defaults to `{}`. |
 | `options.build_args` | array\<string\> | Optional. Extra Icarus/Verilator build args, appended **after** the fixed `--coverage --trace` args a coverage run already adds and after any SDF back-annotation args (composed, not replaced — see "Coverage" and "SDF back-annotation"). Defaults to `[]`. |
 | `options.includes` | array\<string\> | Optional. `-I` include directories, resolved relative to the request (same convention as `sources`). Forwarded to `Runner.build(includes=...)`. Defaults to `[]`. |
 | `options.sdf.file` | string | Optional. Path to an IEEE-1497 SDF file, resolved relative to the request like every other path field, and back-annotated onto the design through Icarus's `$sdf_annotate` (see "SDF back-annotation"). Requires `engine: "icarus"` at version 13.0 or newer — `options.sdf` with `engine: "verilator"`, against a pre-13.0 `iverilog` (no `-ginterconnect`), or alongside a `FUNCTIONAL` entry in `options.defines`, is exit 1, never a silent no-op. A missing/unreadable file is exit 1 (issue #1002). |
@@ -1348,6 +1364,8 @@ exactly.
     "engine_version": "13.0",
     "cocotb_version": "2.1.0",
     "results_xml": "/abs/path/.klt/functional-verification/results_icarus.xml",
+    "test_log": "/abs/path/.klt/functional-verification/test_icarus.log",
+    "build_log": "/abs/path/.klt/functional-verification/build_icarus.log",
     "random_seed": 1785780800,
     "sdf": null,
     "initial_state": null
@@ -1379,7 +1397,7 @@ set `options.trace: true`; on such a run it looks like this — the identical
 | `tests` | array\<object\> | One entry per `@cocotb.test()`, in the order cocotb ran them. `status` is `"passed"`/`"failed"`/`"skipped"`; `sim_time_ns`/`real_time_s` are `null` when the simulator did not report them. `sim_time_ns` is read from whichever shape the installed cocotb writes into `results.xml` — the `<testcase sim_time_ns="...">` attribute cocotb 2.0.x emitted, or the `<properties>` block (`sim_time_duration` scaled by the reported `sim_time_unit`, never assumed to be `ns`) cocotb 2.1.0 replaced it with (issue #2592) — so the field carries the same nanosecond value either way. `error_type`/`error_message` are present **only** on `"failed"` entries, taken verbatim from the `<failure>` element's attributes. |
 | `coverage` | object \| null | `null` unless `options.coverage: true`; otherwise `line_pct`/`toggle_pct`/`branch_pct`/`expr_pct` (numbers, or `null` for a category `verilator_coverage` did not report) plus `info_path`, an absolute path to the lcov `.info` artifact. |
 | `trace` | object \| null | `null` unless `options.trace: true` (Epic #1585 Phase 3, issue #1845); otherwise `path` (absolute), `format` (`"vcd"` or `"fst"` — resolved from which engine ran, never a request choice), and `size_bytes` — the same shape [`klt wave build`](wave.md)'s own `trace` field uses. `options.trace: true` with no waveform file produced by the run is exit 1, not a silent `null` (indistinguishable from "not requested" otherwise). |
-| `environment` | object | Reproducibility block: `engine`, `engine_version` (the simulator's own version token, `null` if unresolvable), `cocotb_version`, `results_xml` — the absolute path to the raw evidence this report was derived from, so a stored verdict can be re-checked against it — and `random_seed` (the effective seed cocotb used, `null` only if `results.xml` lacked the property; see "Reproducibility: `random_seed`"), plus `initial_state` (issue #2998; additive) — `null` unless `options.initial_state` was requested, else the echo described in "Gate-level power-up state" (`mode`, effective `seeds`, `netlist`, `clock`, `state_elements`, `d_nets`, per-seed `runs`) — plus `sdf` (issue #1002) — `null` on an ordinary run, an object on an SDF-annotated one, so an annotated verdict is never mistakable for a zero-delay one from the JSON alone: `file`, `corner`, `annotated: true`, plus `partial` and `dropped` (issue #1102) — `partial` is `true` when anything was dropped, either a benign diagnostic class filtered out of the transcript scan (`timingcheck`) or an `INTERCONNECT` entry normalized away before annotation (`zero_delay_alias_port_interconnect`, issue #2285; `zero_delay_physical_only_interconnect`, issue #2363) or an `IOPATH` entry onto an arc whose only modpaths Icarus discards (`iopath_ifnone_edge_modpath`, issue #2885, whose entry additionally lists the affected `arcs`), and `dropped` names each such class with `{count, reason}`. See "SDF back-annotation" for the full shape. |
+| `environment` | object | Reproducibility block: `engine`, `engine_version` (the simulator's own version token, `null` if unresolvable), `cocotb_version`, `results_xml` — the absolute path to the raw evidence this report was derived from, so a stored verdict can be re-checked against it — `test_log` and `build_log` (issue #3013), the absolute paths of the simulator/cocotb console transcript and the build transcript the run wrote (paths only, never inlined; `--format text` prints `test_log:` and, on a failed run, its tail) — and `random_seed` (the effective seed cocotb used, `null` only if `results.xml` lacked the property; see "Reproducibility: `random_seed`"), plus `initial_state` (issue #2998; additive) — `null` unless `options.initial_state` was requested, else the echo described in "Gate-level power-up state" (`mode`, effective `seeds`, `netlist`, `clock`, `state_elements`, `d_nets`, per-seed `runs`) — plus `sdf` (issue #1002) — `null` on an ordinary run, an object on an SDF-annotated one, so an annotated verdict is never mistakable for a zero-delay one from the JSON alone: `file`, `corner`, `annotated: true`, plus `partial` and `dropped` (issue #1102) — `partial` is `true` when anything was dropped, either a benign diagnostic class filtered out of the transcript scan (`timingcheck`) or an `INTERCONNECT` entry normalized away before annotation (`zero_delay_alias_port_interconnect`, issue #2285; `zero_delay_physical_only_interconnect`, issue #2363) or an `IOPATH` entry onto an arc whose only modpaths Icarus discards (`iopath_ifnone_edge_modpath`, issue #2885, whose entry additionally lists the affected `arcs`), and `dropped` names each such class with `{count, reason}`. See "SDF back-annotation" for the full shape. |
 
 There is no shared `provenance` block: this verb's verdict depends on no PDK
 and no rule deck (see `docs/json-contract.md` → "Shared `provenance`
@@ -1455,6 +1473,7 @@ tests: 3  passed: 2  failed: 1  skipped: 0
     AssertionError: gcd(48, 18): got 6, want 999 (deliberate failure)
 
 results_xml: .../.klt/functional-verification/results_icarus.xml
+test_log: .../.klt/functional-verification/test_icarus.log
 random_seed: 1785780800
 $ echo $?
 3

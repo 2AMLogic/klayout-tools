@@ -785,6 +785,22 @@ def test_deck_devices_marks_markerless_classes_as_such():
     ]
 
 
+def test_deck_devices_reports_resistor_topology():
+    """Issue #2679: each resistor class reports how its `body` layer relates
+    to its `marker` -- sg13g2's poly resistors are `abutting_heads` (the
+    marker *is* the body, GatPoly only the two heads); every other resistor
+    keeps the default `overlap`. Non-resistor classes carry no such key."""
+    for name in ("rsil", "rppd", "rhigh"):
+        assert _device_class("sg13g2", name)["topology"] == "abutting_heads"
+    assert _device_class("sg13g2", "res_metal1")["topology"] == "overlap"
+    assert _device_class("gf180mcu", "ppolyf_u")["topology"] == "overlap"
+    for entry in history.deck_devices("sky130")["device_classes"]:
+        if entry["kind"] == "resistor":
+            assert entry["topology"] == "overlap"
+        else:
+            assert "topology" not in entry
+
+
 def test_deck_devices_narrows_to_a_single_class():
     report = history.deck_devices("gf180mcu", device_class="bjt")
 

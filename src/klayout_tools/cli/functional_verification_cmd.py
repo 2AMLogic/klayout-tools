@@ -41,6 +41,7 @@ import argparse
 
 from ..functional_verification import (
     FunctionalVerificationError,
+    _log_tail,
     run_functional_verification,
     run_functional_verification_with_mutations,
 )
@@ -61,7 +62,12 @@ def run(args: argparse.Namespace) -> int:
         else:
             report = run_functional_verification(args.request, output_dir=outdir)
     except FunctionalVerificationError as exc:
-        return emit_error("functional-verification", str(exc), args.format)
+        return emit_error(
+            "functional-verification",
+            str(exc),
+            args.format,
+            code=getattr(exc, "code", None),
+        )
 
     emit_success(report, args.format, _print_text)
 
@@ -89,6 +95,15 @@ def _print_initial_state(initial_state: dict | None) -> None:
         f"state_elements: {initial_state['state_elements']}  "
         f"clock: {initial_state['clock']}"
     )
+
+
+def _print_log_lines(environment: dict, status: str) -> None:
+    test_log = environment.get("test_log")
+    if test_log is None:
+        return
+    print(f"test_log: {test_log}")
+    if status == "fail":
+        print(f"test_log tail: {_log_tail(test_log, lines=40)}")
 
 
 def _print_text(report: dict) -> None:
@@ -135,6 +150,7 @@ def _print_text(report: dict) -> None:
 
     print()
     print(f"results_xml: {environment['results_xml']}")
+    _print_log_lines(environment, report["status"])
     random_seed = environment.get("random_seed")
     if random_seed is not None:
         print(f"random_seed: {random_seed}")

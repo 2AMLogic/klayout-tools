@@ -68,6 +68,7 @@ from .gen_layer_params import (
     _cut_fixed_size_um,
     _gate_bottom_endcap_um,
     _gate_pad_clearance_um,
+    _gate_top_endcap_um,
     _metal_res_geometry_min_um,
     _metal_res_layers,
     _mos_array_well_tap_role_layer,
@@ -75,6 +76,7 @@ from .gen_layer_params import (
     _reject_deferred_family,
     _res_end_contact_um,
     _res_flavor_min_width_um_floor,
+    _res_sab_geometry_um,
     _ring_implant_margin_um,
     _role_layer_info,
     _sd_implant_margin_um,
@@ -197,6 +199,36 @@ def _pitch_hints_and_warnings(
     return hints, warnings
 
 
+def _validate_mos_array_width(params: dict[str, Any]) -> None:
+    from .gen import GenError
+
+    if params["mos_cap"]:
+        # The width floor of a MOS capacitor is the deck's own COMP min-width
+        # rule for the selected oxide, resolved once the PDK is known (see
+        # `_device_layer_params`); the flat generator-side floor below applies
+        # to plain transistors only.
+        if params["w_um"] <= 0:
+            raise GenError("generator 'mos_array': params.w_um must be > 0")
+        if not params["add_guard_ring"]:
+            raise GenError(
+                "generator 'mos_array': params.mos_cap requires "
+                "params.add_guard_ring (the guard ring is the capacitor's "
+                "body tie)"
+            )
+        if params["gate_contact"]:
+            raise GenError(
+                "generator 'mos_array': params.mos_cap does not support "
+                "params.gate_contact"
+            )
+    elif params["w_um"] < UNIT_MIN_W_UM:
+        raise GenError(
+            f"generator 'mos_array': params.w_um must be >= {UNIT_MIN_W_UM} "
+            "(the smallest width that fits an enclosed contact with margin -- "
+            "a generator-side structural floor, not the target PDK's own "
+            "diffusion-width rule)"
+        )
+
+
 def _mos_array_validate(params: dict[str, Any]) -> None:
     from .gen import (
         GenError,
@@ -204,13 +236,7 @@ def _mos_array_validate(params: dict[str, Any]) -> None:
         _mos_array_layout,
     )
 
-    if params["w_um"] < UNIT_MIN_W_UM:
-        raise GenError(
-            f"generator 'mos_array': params.w_um must be >= {UNIT_MIN_W_UM} "
-            "(the smallest width that fits an enclosed contact with margin -- "
-            "a generator-side structural floor, not the target PDK's own "
-            "diffusion-width rule)"
-        )
+    _validate_mos_array_width(params)
     if params["l_um"] <= 0:
         raise GenError("generator 'mos_array': params.l_um must be > 0")
     if params["fingers"] < 1:
@@ -259,6 +285,7 @@ def _mos_array_validate(params: dict[str, Any]) -> None:
             add_guard_ring=True,
             ring_padding_um=params["ring_padding_um"],
             interior_channel_um=params["interior_channel_um"],
+            mos_cap=params["mos_cap"],
             pitch_x_um=params["pitch_x_um"],
             pitch_y_um=params["pitch_y_um"],
         )
@@ -271,6 +298,10 @@ def _mos_array_validate(params: dict[str, Any]) -> None:
         inner_w_um,
         inner_h_um,
     )
+
+
+# Spellings callers use for sky130's native (zero-threshold) NMOS (issue #2912).
+_SKY130_NATIVE_VT_NAMES = frozenset({"native", "nvt"})
 
 
 def _voltage_flavor_hints(
@@ -287,7 +318,21 @@ def _voltage_flavor_hints(
     mark_present = False
     if voltage_flavor:
         mark_present = _voltage_flavor_mark_layer(family, voltage_flavor) is not None
-        if not mark_present:
+        if (
+            not mark_present
+            and family == "sky130"
+            and voltage_flavor in _SKY130_NATIVE_VT_NAMES
+        ):
+            notes.append(
+                f"params.voltage_flavor '{voltage_flavor}': the sky130 native-Vt "
+                "NMOS (sky130_fd_pr__nfet_05v0_nvt) is unsupported -- no marker "
+                "was drawn, so the device extracts as a plain nfet. Upstream "
+                "derives it from hvi AND lvtn (not a single marker layer), which "
+                "the single-marker voltage_flavor model cannot express; see "
+                "docs/cli/gen.md (voltage_flavor) and docs/cli/lvs.md "
+                "(native-Vt NMOS) for the exclusion workflow (issue #2912)"
+            )
+        elif not mark_present:
             notes.append(
                 f"params.voltage_flavor '{voltage_flavor}' has no marker layer "
                 f"resolved for the resolved PDK family ('{family}') -- no marker "
@@ -328,6 +373,90 @@ def _sd_implant_hints(
             sd_implant is not None and _sd_implant_margin_um(family) > 0
         ),
     }
+
+
+def _mos_cap_ports(
+    info: dict[str, Any],
+    unit: dict[str, Any],
+    metal_layer: dict[str, Any],
+    gate_layer: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """``U<i>_SD``/``U<i>_G`` ports of a ``mos_cap`` array (issue #3283): S and
+    D are one tied terminal (the strap's centre) and every gate finger is one
+    poly terminal; the body tie is the guard ring's ``TAP_*`` ports."""
+    ports: list[dict[str, Any]] = []
+    cap_x, cap_y = unit["sd_cap_xy"]
+    gx, gy = unit["g_xy"]
+    for c in info["cells"]:
+        idx = c["idx"]
+        for suffix, layer, (px, py) in (
+            ("SD", metal_layer, (cap_x, cap_y)),
+            ("G", gate_layer, (gx, gy)),
+        ):
+            ports.append(
+                {
+                    "name": f"U{idx}_{suffix}",
+                    "net": None,
+                    "layer": layer,
+                    "x_um": c["x0_um"] + px,
+                    "y_um": c["y0_um"] + py,
+                    "width_um": unit["g_width_um"],
+                    "direction_deg": 90,
+                }
+            )
+    return ports
+
+
+def _mos_series_ports(
+    info: dict[str, Any],
+    unit: dict[str, Any],
+    metal_layer: dict[str, Any],
+    gate_layer: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Per-finger ``U<i>_S<j>``/``U<i>_D<j>``/``U<i>_G<j>`` ports of a
+    ``finger_topology == "series"`` array (issue #781)."""
+    ports: list[dict[str, Any]] = []
+    seg_xy = unit["seg_xy"]
+    gate_xy = unit["gate_xy"]
+    last_seg = len(seg_xy) - 1
+    for c in info["cells"]:
+        idx = c["idx"]
+        for seg_idx, (sx, sy) in enumerate(seg_xy):
+            letter = "S" if seg_idx % 2 == 0 else "D"
+            if seg_idx == 0:
+                direction_deg, width_um = 180, unit["sd_width_um"]
+            elif seg_idx == last_seg:
+                direction_deg, width_um = 0, unit["sd_width_um"]
+            else:
+                # Interior segments are boxed in by a gate on either
+                # side, so their only free approach is from below (the
+                # gate pads sit above); their reported width is the
+                # pad's own x-width, not `w_um`.
+                direction_deg, width_um = 270, unit["g_width_um"]
+            ports.append(
+                {
+                    "name": f"U{idx}_{letter}{seg_idx // 2}",
+                    "net": None,
+                    "layer": metal_layer,
+                    "x_um": c["x0_um"] + sx,
+                    "y_um": c["y0_um"] + sy,
+                    "width_um": width_um,
+                    "direction_deg": direction_deg,
+                }
+            )
+        for gate_idx, (gx, gy) in enumerate(gate_xy):
+            ports.append(
+                {
+                    "name": f"U{idx}_G{gate_idx}",
+                    "net": None,
+                    "layer": gate_layer,
+                    "x_um": c["x0_um"] + gx,
+                    "y_um": c["y0_um"] + gy,
+                    "width_um": unit["g_width_um"],
+                    "direction_deg": 90,
+                }
+            )
+    return ports
 
 
 def _mos_array_describe(
@@ -375,8 +504,10 @@ def _mos_array_describe(
         _contact_gate_extra_offset_um(family),
         _gate_bottom_endcap_um(family),
         interior_channel_um=params["interior_channel_um"],
+        mos_cap=params["mos_cap"],
         pitch_x_um=params["pitch_x_um"],
         pitch_y_um=params["pitch_y_um"],
+        top_endcap_um=_gate_top_endcap_um(family),
     )
     unit = info["unit"]
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
@@ -395,50 +526,17 @@ def _mos_array_describe(
     # gate. `fingers == 1` has no interior segment either way, so it keeps
     # reporting the plain `U<i>_S`/`U<i>_D`/`U<i>_G` triple, byte-for-byte
     # unchanged under both topologies (#777/#780 pinned this).
-    series_fingers = params["finger_topology"] == "series" and params["fingers"] > 1
+    series_fingers = (
+        params["finger_topology"] == "series"
+        and params["fingers"] > 1
+        and not params["mos_cap"]
+    )
 
-    ports = []
-    if series_fingers:
-        seg_xy = unit["seg_xy"]
-        gate_xy = unit["gate_xy"]
-        last_seg = len(seg_xy) - 1
-        for c in info["cells"]:
-            idx = c["idx"]
-            for seg_idx, (sx, sy) in enumerate(seg_xy):
-                letter = "S" if seg_idx % 2 == 0 else "D"
-                if seg_idx == 0:
-                    direction_deg, width_um = 180, unit["sd_width_um"]
-                elif seg_idx == last_seg:
-                    direction_deg, width_um = 0, unit["sd_width_um"]
-                else:
-                    # Interior segments are boxed in by a gate on either
-                    # side, so their only free approach is from below (the
-                    # gate pads sit above); their reported width is the
-                    # pad's own x-width, not `w_um`.
-                    direction_deg, width_um = 270, unit["g_width_um"]
-                ports.append(
-                    {
-                        "name": f"U{idx}_{letter}{seg_idx // 2}",
-                        "net": None,
-                        "layer": metal_layer,
-                        "x_um": c["x0_um"] + sx,
-                        "y_um": c["y0_um"] + sy,
-                        "width_um": width_um,
-                        "direction_deg": direction_deg,
-                    }
-                )
-            for gate_idx, (gx, gy) in enumerate(gate_xy):
-                ports.append(
-                    {
-                        "name": f"U{idx}_G{gate_idx}",
-                        "net": None,
-                        "layer": gate_layer,
-                        "x_um": c["x0_um"] + gx,
-                        "y_um": c["y0_um"] + gy,
-                        "width_um": unit["g_width_um"],
-                        "direction_deg": 90,
-                    }
-                )
+    ports: list[dict[str, Any]] = []
+    if params["mos_cap"]:
+        ports = _mos_cap_ports(info, unit, metal_layer, gate_layer)
+    elif series_fingers:
+        ports = _mos_series_ports(info, unit, metal_layer, gate_layer)
     else:
         sx, sy = unit["s_xy"]
         dx, dy = unit["d_xy"]
@@ -544,6 +642,14 @@ def _mos_array_describe(
             f"{params['fingers']} transistors chained source-to-drain, not one "
             f"parallel device of width {params['fingers']} x {params['w_um']}um "
             f"(reported as U<i>_S<j>/U<i>_D<j>/U<i>_G<j> ports, one per finger)"
+        )
+
+    if params["mos_cap"]:
+        notes.append(
+            "params.mos_cap: each unit is a MOS capacitor (gate over diffusion, "
+            "all source/drain segments tied into U<i>_SD, body tied by the "
+            "guard ring's TAP_* ports) with the PDK's MOS-capacitor marker "
+            "drawn over the array; params.finger_topology is ignored"
         )
 
     voltage_flavor_hints = _voltage_flavor_hints(family, params, notes)
@@ -742,6 +848,9 @@ def _res_array_describe(
         floors["via_enclosure_min_um"],
         floors["via_space_min_um"],
         *end_contact,
+        _res_sab_geometry_um(
+            family, params.get("flavor", _DEFAULT_RES_FLAVOR), metal_level
+        )[0],
     )
     unit = info["unit"]
     # A metal-level resistor's own body layer (metN) is already a routing
@@ -1897,6 +2006,7 @@ def _diff_pair_describe(
         # See the equivalent note in `_mos_array_describe` (issue #1577).
         _contact_gate_extra_offset_um(family),
         _gate_bottom_endcap_um(family),
+        top_endcap_um=_gate_top_endcap_um(family),
     )
     unit = info["unit"]
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
@@ -2356,6 +2466,7 @@ def _esd_device_describe(
         # See the equivalent note in `_mos_array_describe` (issue #1577).
         _contact_gate_extra_offset_um(family),
         _gate_bottom_endcap_um(family),
+        top_endcap_um=_gate_top_endcap_um(family),
     )
     unit = info["unit"]
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]

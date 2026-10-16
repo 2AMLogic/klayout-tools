@@ -17,7 +17,7 @@ Curated vs. derived: why this is not a pure live parse
 parse of the install's tech LEFs, and deliberately owns no table — the
 install's own files are the only place its data is stated. That is **not**
 true here. Verified against a real ``volare``-fetched ``sky130A``
-(``open_pdks c6d73a3``): the tech LEFs
+(``open_pdks f6eeac7``): the tech LEFs
 (``libs.ref/*/techlef/*__{min,nom,max}.tlef``) carry ``THICKNESS``,
 ``RESISTANCE RPERSQ`` (routing layers), and ``RESISTANCE`` (per-cut, via
 layers) — but carry **no elevation and no dielectric constant at all**. The
@@ -119,7 +119,7 @@ _THICKNESS_ABS_TOL = 1e-9
 #:
 #: **Elevation/thickness source** — ``libs.tech/magic/sky130A.tech``, the
 #: ``height <types> <z0> <thickness>`` stanza of the ``cifoutput``-adjacent 3D
-#: section (lines 5048-5077 of the ``open_pdks c6d73a3`` build; the same
+#: section (lines 5043-5072 of the ``open_pdks f6eeac7`` build; the same
 #: stanza is present in every open_pdks sky130A/sky130B build). open_pdks is
 #: efabless's own published, Apache-2.0, non-NDA sky130 distribution, and this
 #: is the elevation table magic itself uses for 3D extraction, so it is the
@@ -213,7 +213,7 @@ _SKY130_STACKUP: dict[str, Any] = {
             " the origin open_pdks' magic tech file uses for its BEOL"
             " `height` entries. resistivity_ohm_cm: no open sky130 source"
             " states a doping or resistivity figure -- this repo's cached"
-            " open_pdks c6d73a3 `libs.tech` tree (SPICE models, the magic"
+            " open_pdks f6eeac7 `libs.tech` tree (SPICE models, the magic"
             " tech file, the KLayout XSection script) was searched"
             " exhaustively and states none; the `*psubjunction*` SPICE"
             " parameters near the substrate-diode models are"
@@ -295,8 +295,8 @@ _SKY130_STACKUP: dict[str, Any] = {
 #: distribution -- the same open_pdks tree ``_SKY130_STACKUP`` cites -- and
 #: this is the elevation table magic itself uses for 3D extraction, so it is
 #: the authoritative open statement of the gf180mcu z axis. Transcribed
-#: verbatim (lines 2982-2990 of the ``open_pdks`` build volare fetched
-#: 2026-09-09):
+#: verbatim (lines 3279-3287 of the ``open_pdks f6eeac7`` build; re-verified
+#: 2026-10-16, identical ``height`` stanzas to the prior ``c6d73a3`` build):
 #:
 #:     height allm1  1.23  0.55      height allm4  4.68  0.55
 #:     height via    1.78  0.60      height via4   5.23  0.60

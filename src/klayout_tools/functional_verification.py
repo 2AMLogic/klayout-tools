@@ -602,7 +602,17 @@ class FunctionalVerificationError(Exception):
     traceback. A run that *did* complete and reported failing tests is not
     an error -- it is ``status: "fail"`` + exit code 3 (see this module's
     docstring and ``docs/cli/functional-verification.md``).
+
+    ``code`` is an optional stable machine-readable classification the CLI
+    passes through as ``error.code`` (``None`` for every error without one).
     """
+
+    code: str | None = None
+
+    def __init__(self, message: str = "", *, code: str | None = None) -> None:
+        super().__init__(message)
+        if code is not None:
+            self.code = code
 
 
 # ---------------------------------------------------------------------------
@@ -1199,6 +1209,117 @@ def _resolve_defines(defines: Any) -> dict[str, str | None]:
                 f"-- got a {type(value).__name__}"
             )
     return defines
+
+
+def _resolve_source_defines(
+    options: Any, sources: list[str], request_dir: str
+) -> dict[str, dict[str, str | None]]:
+    """Validate ``request.options.source_defines`` (issue #3290) and return it
+    keyed by the **resolved absolute path** of the ``request.sources`` entry
+    it names (``{}`` when omitted).
+
+    Each key must name an entry of ``request.sources`` (matched after the same
+    path resolution :func:`_resolve_sources` applies); each value is validated
+    like ``options.defines``. The defines apply to that one source only, via a
+    generated wrapper (:func:`_write_scoped_define_wrappers`), so a vendor
+    hard-macro model can take ``FUNCTIONAL`` while the PDK std-cell sources --
+    and the ``options.sdf`` + global ``FUNCTIONAL`` rejection that protects
+    them -- are untouched.
+    """
+    raw = (options or {}).get("source_defines") if isinstance(options, dict) else None
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise FunctionalVerificationError(
+            "request.options.source_defines must be a JSON object of "
+            "source path -> defines object"
+        )
+    resolved: dict[str, dict[str, str | None]] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or not key:
+            raise FunctionalVerificationError(
+                "request.options.source_defines keys must be non-empty strings"
+            )
+        path = os.path.abspath(
+            key if os.path.isabs(key) else os.path.join(request_dir, key)
+        )
+        if path not in sources:
+            raise FunctionalVerificationError(
+                f"request.options.source_defines names '{key}', which is not "
+                f"an entry of request.sources"
+            )
+        if not isinstance(value, dict):
+            raise FunctionalVerificationError(
+                f"request.options.source_defines[{key!r}] must be a JSON "
+                f"object of string -> string|null"
+            )
+        for name, define_value in value.items():
+            if not isinstance(name, str) or not name:
+                raise FunctionalVerificationError(
+                    f"request.options.source_defines[{key!r}] keys must be "
+                    f"non-empty strings"
+                )
+            if define_value is not None and not isinstance(define_value, str):
+                raise FunctionalVerificationError(
+                    f"request.options.source_defines[{key!r}][{name!r}] must "
+                    f"be a string or null -- got a {type(define_value).__name__}"
+                )
+        resolved[path] = value
+    return resolved
+
+
+def _write_scoped_define_wrappers(
+    sources: list[str],
+    source_defines: dict[str, dict[str, str | None]],
+    wrapper_dir: str,
+) -> tuple[list[str], list[str]]:
+    """Substitute a generated one-file wrapper for each source named in
+    ``source_defines``, **in the same list position** (issue #3290).
+
+    The wrapper is ``` `define K [V] ``` / ``` `include "<abs path>" ``` /
+    ``` `undef K ```, so the defines are visible to that one file and cannot
+    leak into later sources. Returns ``(build_sources, include_dirs)``;
+    ``include_dirs`` holds the directory of each wrapped source so a nested
+    relative `` `include `` inside the vendor model still resolves. Sources not
+    named are returned untouched (byte-identical build to a run without
+    ``source_defines``).
+    """
+    if not source_defines:
+        return list(sources), []
+    try:
+        os.makedirs(wrapper_dir, exist_ok=True)
+    except OSError as exc:
+        raise FunctionalVerificationError(
+            f"could not create output directory '{wrapper_dir}': {exc}"
+        ) from exc
+    build_sources: list[str] = []
+    include_dirs: list[str] = []
+    for index, source in enumerate(sources):
+        defines = source_defines.get(source)
+        if defines is None:
+            build_sources.append(source)
+            continue
+        lines = [
+            f"`define {name}" if value is None else f"`define {name} {value}"
+            for name, value in defines.items()
+        ]
+        lines.append(f'`include "{source}"')
+        lines.extend(f"`undef {name}" for name in defines)
+        wrapper_path = os.path.join(
+            wrapper_dir, f"scoped_defines_{index}_{os.path.basename(source)}"
+        )
+        try:
+            with open(wrapper_path, "w", encoding="utf-8") as handle:
+                handle.write("\n".join(lines) + "\n")
+        except OSError as exc:
+            raise FunctionalVerificationError(
+                f"could not write scoped-defines wrapper '{wrapper_path}': {exc}"
+            ) from exc
+        build_sources.append(wrapper_path)
+        source_dir = os.path.dirname(source)
+        if source_dir not in include_dirs:
+            include_dirs.append(source_dir)
+    return build_sources, include_dirs
 
 
 def _resolve_build_args(build_args: Any) -> list[str]:
@@ -1988,9 +2109,14 @@ def _import_runner():
         from cocotb_tools import runner
     except ImportError as exc:  # pragma: no cover - exercised via monkeypatch
         raise FunctionalVerificationError(
-            f"cocotb is not installed (import failed: {exc}) -- install it with "
-            "`pip install cocotb`, or `uv sync --extra functional-verification` "
-            "for this repo's pinned version"
+            f"cocotb is not installed (import failed: {exc}; interpreter: "
+            f"{sys.executable}) -- for a tool install (`uv tool install` / "
+            "`pipx install` / `uvx --from`) reinstall with the extra on the "
+            "install spec: `klayout-tools[functional-verification] @ "
+            "<url-or-version>`; for a source checkout run `uv sync --extra "
+            "functional-verification`; `pip install cocotb` only works if "
+            "that `pip` belongs to the interpreter above",
+            code="missing_optional_dependency",
         ) from exc
     return runner
 
@@ -2694,6 +2820,9 @@ def run_functional_verification(
             "generated wrapper as the root and scans a single transcript)"
         )
     parameters = _resolve_parameters(request_doc.get("parameters"))
+    source_defines = _resolve_source_defines(
+        request_doc.get("options"), sources, request_dir
+    )
 
     build_dir = os.path.join(output_dir, f"sim_build_{engine}")
     try:
@@ -2926,6 +3055,12 @@ def run_functional_verification(
         sources = [*sources, shim_path]
         build_args += ["-s", INITIAL_STATE_MODULE]
     build_args += user_build_args
+    # Issue #3290: scoped defines are applied last, to the build source list
+    # only -- the port parse and source-text scans above read the real files.
+    sources, scoped_include_dirs = _write_scoped_define_wrappers(
+        sources, source_defines, output_dir
+    )
+    includes = [*includes, *scoped_include_dirs]
 
     runner_module = _import_runner()
     _check_cocotb_abi_compatibility()
@@ -3039,7 +3174,16 @@ def run_functional_verification(
             "engine_version": _engine_version(engine),
             "cocotb_version": _cocotb_version(),
             "results_xml": results_xml,
+            # Additive (issue #3013): the simulator/cocotb console transcript
+            # and the build transcript the run wrote, named by path (never
+            # inlined) like `results_xml`.
+            "test_log": test_log,
+            "build_log": build_log,
             "random_seed": _extract_random_seed_property(results_xml),
+            # Additive (issue #3290): `options.source_defines` keyed by the
+            # request.sources entry as resolved to an absolute path; `{}`
+            # when absent.
+            "source_defines": source_defines,
             # Additive (issue #2998): `null` unless the request set
             # `options.initial_state`. `seeds` echoes the effective seeds
             # (empty for mode "x"); `runs` has one entry per seed.
@@ -3260,6 +3404,9 @@ def run_functional_verification_with_mutations(
     )
     parameters = _resolve_parameters(request_doc.get("parameters"))
     build_args = list(user_build_args)
+    source_defines = _resolve_source_defines(
+        request_doc.get("options"), sources, request_dir
+    )
 
     output_dir = _resolve_output_dir(request_dir, output_dir)
     mutants_dir = os.path.join(output_dir, "mutants")
@@ -3336,16 +3483,22 @@ def run_functional_verification_with_mutations(
         test_log = os.path.join(mutant_dir, f"test_{engine}.log")
         combined_log = os.path.join(mutants_dir, f"mutant_{index}.log")
 
+        # Issue #3290: the wrappers `include the (mutated-in-place) source by
+        # absolute path, so they are generated per mutant directory.
+        variant_sources, scoped_include_dirs = _write_scoped_define_wrappers(
+            sources, source_defines, mutant_dir
+        )
+
         with plan.applied(index):
             timed_out, (status_kind, detail) = _run_isolated_variant(
                 timeout_s=DEFAULT_MUTATION_TIMEOUT_S,
                 engine=engine,
-                sources=sources,
+                sources=variant_sources,
                 hdl_toplevel=hdl_toplevel,
                 build_dir=build_dir,
                 build_args=build_args,
                 defines=defines,
-                includes=includes,
+                includes=[*includes, *scoped_include_dirs],
                 timescale=timescale,
                 parameters=parameters,
                 build_log=build_log,

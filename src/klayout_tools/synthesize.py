@@ -209,7 +209,7 @@ import uuid
 from typing import Any
 
 from . import env_provenance
-from ._paths import _load_request_json, validate_request_shape
+from ._paths import _load_request_json, _reject_unknown_keys, validate_request_shape
 from ._provenance import (
     INPUT_ROLE_SOURCE,
     _combined_content_hash,
@@ -228,6 +228,7 @@ from ._report_verify import (
     load_committed_report,
     strip_keys,
 )
+from ._verilog_params import chparam_lines, validate_parameters
 from .equiv import EquivError, run_equiv
 from .pdk_cells import resolve_liberty_for_cell_library
 from .restructure import RestructureError, restructure_for_timing
@@ -922,6 +923,25 @@ def _baseline_ref_fallback(resolved_path: str, *, repo_root: str | None) -> str:
     )
 
 
+#: Top-level request keys ``klt synthesize`` reads (issue #3466). ``schema``
+#: is an inert, unvalidated tag user-authored requests commonly carry.
+_ALLOWED_REQUEST_KEYS = frozenset(
+    {
+        "schema",
+        "engine",
+        "sources",
+        "hdl_toplevel",
+        "pdk",
+        "constraints",
+        "structural",
+        "baseline",
+        "arithmetic",
+        "run_id",
+        "parameters",
+    }
+)
+
+
 def load_request(request_path: str) -> dict[str, Any]:
     """Read and minimally validate a ``klt synthesize`` request JSON file.
 
@@ -932,12 +952,19 @@ def load_request(request_path: str) -> dict[str, Any]:
     input, never emitted by this tool).
     """
     request = _load_request_json(request_path, SynthesizeError)
-    return validate_request_shape(
+    request = validate_request_shape(
         request,
         "request file",
         error_cls=SynthesizeError,
         required_fields=("sources", "hdl_toplevel", "pdk"),
     )
+    # Issue #3466: an unrecognised top-level key used to be dropped in
+    # silence, so a misspelt or unsupported field produced a plausible
+    # default-configuration result. Reject it instead (`_comment` exempt).
+    _reject_unknown_keys(
+        request, _ALLOWED_REQUEST_KEYS, request_path, "", SynthesizeError
+    )
+    return request
 
 
 def run_synthesize(
@@ -1047,6 +1074,9 @@ def run_synthesize(
         raise SynthesizeError("request.hdl_toplevel must be a non-empty string")
     if re.search(r"[/\\\x00]", hdl_toplevel):
         raise SynthesizeError("request.hdl_toplevel must not contain path separators")
+    parameters = validate_parameters(
+        request.get("parameters"), SynthesizeError, "request.parameters"
+    )
 
     pdk_spec = request["pdk"]
     if not isinstance(pdk_spec, dict):
@@ -1102,6 +1132,9 @@ def run_synthesize(
             "content_hash": _combined_content_hash(resolved_sources),
             "role": INPUT_ROLE_SOURCE,
         }
+    # Issue #3466: record which elaboration this is, so two parameterisations
+    # of the same sources are distinguishable in provenance.
+    provenance["parameters"] = dict(parameters)
     output_dir = _create_run_directory(request_dir, request)
 
     script_path = os.path.join(output_dir, f"synth_{hdl_toplevel}.ys")
@@ -1145,6 +1178,7 @@ def run_synthesize(
             engine_options=engine_options,
             equiv_timeout_s=equiv_timeout_s,
             repo_root=repo_root,
+            parameters=parameters,
         )
 
     # Issue #1844: `repo_root` is threaded into this run's own script so
@@ -1186,6 +1220,7 @@ def run_synthesize(
         adder_techmap_path=adder_techmap_path,
         repo_root=repo_root,
         pdk_root=pdk_info["root"],
+        parameters=parameters,
     )
 
     # `cwd=repo_root` is what makes the relative paths `_write_script` just
@@ -1242,6 +1277,7 @@ def run_synthesize(
         adder_sources=adder_sources,
         adder_techmap_path=adder_techmap_path,
         repo_root=repo_root,
+        parameters=parameters,
     )
 
     equivalence = None
@@ -1253,6 +1289,7 @@ def run_synthesize(
             netlist_path=netlist_path,
             liberty_path=liberty_path,
             timeout_s=equiv_timeout_s,
+            parameters=parameters,
         )
 
     sta, sta_unavailable_reason = _read_sta_timing(
@@ -1272,6 +1309,7 @@ def run_synthesize(
             max_iterations=restructure_max_iterations,
             equiv_timeout_s=equiv_timeout_s,
             repo_root=repo_root,
+            parameters=parameters,
         )
 
     response: dict[str, Any] = {
@@ -1279,6 +1317,10 @@ def run_synthesize(
         "engine": engine,
         "engine_version": engine_version,
         "hdl_toplevel": hdl_toplevel,
+        # Issue #3466: the top-level parameter overrides this run elaborated
+        # with (`{}` when none). Additive field, no `schema_version` bump
+        # (docs/json-contract.md).
+        "parameters": dict(parameters),
         "run_id": os.path.basename(output_dir),
         "status": "ok",
         "instance_count": module_stats["num_cells"],
@@ -1460,6 +1502,7 @@ def _verify_synthesis_equivalence(
     liberty_path: str,
     timeout_s: float | None,
     request_filename: str | None = None,
+    parameters: dict[str, int | str] | None = None,
 ) -> dict[str, Any]:
     """The ``verify_equivalence`` gate :func:`run_synthesize` calls after a
     successful synthesis: reuses :func:`klayout_tools.equiv.run_equiv`'s
@@ -1496,7 +1539,7 @@ def _verify_synthesis_equivalence(
         synthesize_output_dir,
         request_filename or f"equiv_request_{hdl_toplevel}.json",
     )
-    equiv_request = {
+    equiv_request: dict[str, Any] = {
         "gold": {"sources": resolved_sources, "top": hdl_toplevel},
         "gate": {
             "sources": [netlist_path],
@@ -1504,6 +1547,9 @@ def _verify_synthesis_equivalence(
             "liberty": liberty_path,
         },
     }
+    if parameters:
+        # Issue #3466: the gold RTL must be elaborated like the synthesis was.
+        equiv_request["gold"]["parameters"] = dict(parameters)
     try:
         with open(equiv_request_path, "w", encoding="utf-8") as handle:
             json.dump(equiv_request, handle, indent=2)
@@ -1577,6 +1623,7 @@ def _run_timing_restructuring(
     max_iterations: int | None,
     equiv_timeout_s: float | None,
     repo_root: str | None = None,
+    parameters: dict[str, int | str] | None = None,
 ) -> dict[str, Any]:
     """The ``restructure_timing`` gate :func:`run_synthesize` calls after the
     ``sta`` stage: runs
@@ -1658,6 +1705,7 @@ def _run_timing_restructuring(
             liberty_path=liberty_path,
             timeout_s=equiv_timeout_s,
             request_filename=f"equiv_request_{hdl_toplevel}_restructured.json",
+            parameters=parameters,
         )
 
     # Issue #1844: `restructured_netlist_path` is `restructure_for_timing`'s
@@ -2115,6 +2163,7 @@ def _write_script(
     adder_techmap_path: str | None = None,
     repo_root: str | None = None,
     pdk_root: str | None = None,
+    parameters: dict[str, int | str] | None = None,
 ) -> str:
     """Generate the ``.ys`` synthesis script (Yosys survey section 1's exact
     pass sequence: ``read_verilog`` -> ``hierarchy`` -> ``synth`` ->
@@ -2273,6 +2322,9 @@ def _write_script(
         f"read_verilog {_script_path_text(path, repo_root=repo_root)}"
         for path in sources
     ]
+    # Issue #3466: top-level parameter overrides apply between the reads and
+    # `hierarchy`, so elaboration sees the overridden value.
+    lines += chparam_lines(parameters or {}, hdl_toplevel)
     lines.append(f"hierarchy -check -top {hdl_toplevel}")
     if adder_techmap_path is not None:
         lines += ["proc", "opt_expr", "opt_clean"]
@@ -3462,6 +3514,30 @@ def _synthesize_provenance_hashes(
     return input_hash, _content_hash(liberty_path)
 
 
+def _synthesize_request_parameters(request_path: str) -> dict[str, int | str]:
+    """The validated ``parameters`` override of the request at
+    ``request_path`` (``{}`` when absent) -- what ``--check`` compares against
+    the committed report's recorded ``parameters`` (issue #3466)."""
+    return validate_parameters(
+        load_request(request_path).get("parameters"),
+        SynthesizeError,
+        "request.parameters",
+    )
+
+
+def _parameters_check(recorded: Any, current: dict[str, int | str]) -> dict[str, Any]:
+    """Cheap-mode comparison entry for the ``parameters`` override (issue
+    #3466). A report that predates the field recorded no override, so an
+    absent ``parameters`` counts as ``{}``."""
+    expected = {} if recorded is None else recorded
+    return {
+        "field": "parameters",
+        "expected": expected,
+        "actual": current,
+        "match": expected == current,
+    }
+
+
 def check_synthesize_report(
     report_path: str,
     request_path: str,
@@ -3509,6 +3585,10 @@ def check_synthesize_report(
             "provenance.deck.content_hash",
             get_path(committed, ("provenance", "deck", "content_hash")),
             deck_hash,
+        ),
+        _parameters_check(
+            get_path(committed, ("parameters",)),
+            _synthesize_request_parameters(request_path),
         ),
     ]
     return build_check_result(report_path=report_path, checks=checks)

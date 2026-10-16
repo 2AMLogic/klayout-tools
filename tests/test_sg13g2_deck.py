@@ -1026,6 +1026,231 @@ def test_sg13g2_unmarked_poly_bar_is_not_a_resistor(tmp_path: Path):
 
 
 # --------------------------------------------------------------------------- #
+# PDK-PCell-shaped poly resistors: `polyres` body + abutting GatPoly heads
+# (issue #2679)
+# --------------------------------------------------------------------------- #
+
+_FLAVOUR_MASKS: dict[str, tuple[tuple[int, int], ...]] = {
+    "rsil": ((111, 0), (24, 0)),
+    "rppd": ((111, 0), (14, 0), (28, 0)),
+    "rhigh": ((111, 0), (14, 0), (7, 0), (28, 0)),
+}
+
+
+def _make_pcell_poly_resistor_layout(
+    masks: tuple[tuple[int, int], ...],
+    *,
+    head_a: bool = True,
+    head_b: bool = True,
+    gap_um: float = 0.0,
+    head_masks: bool = False,
+    continuous_bar: bool = False,
+) -> kdb.Layout:
+    """IHP `SG13_dev/rppd`-shaped geometry: one `polyres` (128/0) body
+    (`L=6um`/`W=1um`) with a 0.43um-long `GatPoly` head abutting each end
+    (zero overlap), flavour masks over the body, and a contacted, labelled
+    Metal1 pad on each head. `gap_um` pulls head B away from the body.
+
+    The flavour masks span exactly the body's length (wider than it), as
+    the pinned v0.3.0 straight (`b=0`) PCells draw them (`rsil_code.py`
+    lines 235-240, `rppd_code.py` 339-341, `rhigh_code.py` 359-363).
+    `head_masks` additionally draws the same masks over each head, as those
+    PCells also do around their contact regions. `continuous_bar` instead
+    draws one GatPoly bar spanning both heads *and* the body (the pre-#2679
+    generator shape)."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer: int, datatype: int, box: kdb.Box) -> None:
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(text: str, x: float, y: float) -> None:
+        top.shapes(layout.layer(8, 25)).insert(
+            kdb.Text(text, kdb.Trans(round(x / _DBU_UM), round(y / _DBU_UM)))
+        )
+
+    draw(128, 0, _box_um(0.43, 0, 6.43, 1))
+    for layer, datatype in masks:
+        draw(layer, datatype, _box_um(0.43, -0.2, 6.43, 1.2))
+    bx = 6.43 + gap_um
+    if head_masks:
+        for layer, datatype in masks:
+            draw(layer, datatype, _box_um(-0.2, -0.2, 0.43, 1.2))
+            draw(layer, datatype, _box_um(bx, -0.2, bx + 0.63, 1.2))
+    if continuous_bar:
+        draw(5, 0, _box_um(0.43, 0, 6.43, 1))
+    if head_a:
+        draw(5, 0, _box_um(0, 0, 0.43, 1))
+        draw(6, 0, _box_um(0.1, 0.3, 0.3, 0.7))
+        draw(8, 0, _box_um(0, 0.2, 0.4, 0.8))
+        label("RA", 0.2, 0.5)
+    if head_b:
+        draw(5, 0, _box_um(bx, 0, bx + 0.43, 1))
+        draw(6, 0, _box_um(bx + 0.13, 0.3, bx + 0.33, 0.7))
+        draw(8, 0, _box_um(bx + 0.03, 0.2, bx + 0.43, 0.8))
+        label("RB", bx + 0.23, 0.5)
+    return layout
+
+
+@pytest.mark.parametrize("shape", ["pcell", "head_masks", "continuous_bar"])
+@pytest.mark.parametrize("name", ["rsil", "rppd", "rhigh"])
+def test_pcell_shaped_poly_resistor_is_recognised(
+    tmp_path: Path, name: str, shape: str
+):
+    """A `polyres` body with two abutting GatPoly heads extracts as exactly
+    one `name` device whose terminals are the two separately-labelled head
+    nets (the body does not short them) and whose `L`/`W`/`r_ohm` are
+    measured from the 128/0 body with the #2652 corrections applied.
+
+    `head_masks` adds the flavour masks the PCells also draw over the
+    heads; `continuous_bar` is the legacy coincident GatPoly+polyres shape,
+    which must keep extracting identically."""
+    resistor = next(r for r in EXTRACTION_DECK.resistors if r.name == name)
+    assert resistor.topology == "abutting_heads"
+    kwargs = {"head_masks": shape == "head_masks"}
+    kwargs["continuous_bar"] = shape == "continuous_bar"
+    path = _write_gds(
+        _make_pcell_poly_resistor_layout(_FLAVOUR_MASKS[name], **kwargs),
+        tmp_path / "r.gds",
+    )
+    report = run_extract(path, "sg13g2", output=str(tmp_path / "r.spice"))
+
+    assert report["device_counts"] == {name: 1}
+    (device,) = report["devices"]
+    assert device["class"] == name
+    assert device["params"]["l_um"] == pytest.approx(6.0)
+    assert device["params"]["w_um"] == pytest.approx(1.0)
+    expected = (
+        6.0 / (1.0 + resistor.width_offset_um) * resistor.sheet_rho_ohm_sq
+        + resistor.end_term_ohm_um / 1.0
+    )
+    assert device["params"]["r_ohm"] == pytest.approx(expected)
+    assert {device["nets"]["a"], device["nets"]["b"]} == {"RA", "RB"}
+
+
+@pytest.mark.parametrize("name", ["rsil", "rppd", "rhigh"])
+@pytest.mark.parametrize(
+    "variant",
+    ["missing_head_b", "missing_head_a", "gap", "no_masks", "wrong_masks"],
+)
+def test_pcell_shaped_poly_resistor_negative_topology(
+    tmp_path: Path, name: str, variant: str
+):
+    """No false resistor from a missing head, a gap between body and head,
+    or flavour masks that do not select this device."""
+    masks = _FLAVOUR_MASKS[name]
+    kwargs: dict = {}
+    if variant == "missing_head_b":
+        kwargs["head_b"] = False
+    elif variant == "missing_head_a":
+        kwargs["head_a"] = False
+    elif variant == "gap":
+        kwargs["gap_um"] = 0.1
+    elif variant == "no_masks":
+        masks = ()
+    elif variant == "wrong_masks":
+        # Only the shared EXTBlock mask: selects no flavour.
+        masks = ((111, 0),)
+    path = _write_gds(
+        _make_pcell_poly_resistor_layout(masks, **kwargs), tmp_path / "n.gds"
+    )
+    report = run_extract(path, "sg13g2", output=str(tmp_path / "n.spice"))
+    assert report["device_counts"] == {}
+
+
+@pytest.mark.parametrize(
+    ("name", "dropped"),
+    [(name, mask) for name, masks in _FLAVOUR_MASKS.items() for mask in masks],
+)
+def test_pcell_shaped_poly_resistor_missing_one_required_mask(
+    tmp_path: Path, name: str, dropped: tuple[int, int]
+):
+    """Dropping any single required mask from a flavour's set never yields
+    that flavour. (rhigh minus nSD is exactly rppd's mask set, so it may
+    legitimately extract as rppd -- but never as rhigh.)"""
+    masks = tuple(m for m in _FLAVOUR_MASKS[name] if m != dropped)
+    path = _write_gds(_make_pcell_poly_resistor_layout(masks), tmp_path / "m.gds")
+    report = run_extract(path, "sg13g2", output=str(tmp_path / "m.spice"))
+    assert name not in report["device_counts"]
+    if (name, dropped) == ("rhigh", (7, 0)):
+        assert report["device_counts"] == {"rppd": 1}
+    else:
+        assert report["device_counts"] == {}
+
+
+def test_pcell_shaped_poly_resistor_conflicting_flavour_masks(tmp_path: Path):
+    """rppd's masks plus nSD_block (7/21) is neither rppd nor rhigh."""
+    masks = _FLAVOUR_MASKS["rppd"] + ((7, 21),)
+    path = _write_gds(_make_pcell_poly_resistor_layout(masks), tmp_path / "c.gds")
+    report = run_extract(path, "sg13g2", output=str(tmp_path / "c.spice"))
+    assert report["device_counts"] == {}
+
+
+def test_generator_heads_only_families_match_deck_topology():
+    """`gen_layer_params._PDK_RES_POLY_HEADS_ONLY` (res_array's PDK-PCell
+    poly layout) stays in step with the deck's `abutting_heads` entries."""
+    from klayout_tools.gen_layer_params import _PDK_RES_POLY_HEADS_ONLY
+
+    poly_res = [r for r in EXTRACTION_DECK.resistors if r.marker == (128, 0)]
+    assert poly_res
+    assert all(r.topology == "abutting_heads" for r in poly_res)
+    assert "sg13g2" in _PDK_RES_POLY_HEADS_ONLY
+
+
+def test_resistor_body_region_shared_with_erc_agrees_with_extraction(
+    tmp_path: Path,
+):
+    """`_resistor_body_region` (the ERC caller's entry point, no `base`)
+    returns the 128/0 body for a PCell-shaped resistor and nothing for a
+    head-less one -- the same decision extraction makes."""
+    from klayout_tools.extract import _resistor_body_region
+
+    rppd = next(r for r in EXTRACTION_DECK.resistors if r.name == "rppd")
+    for kwargs, expect_area in (({}, 6.0), ({"head_b": False}, 0.0)):
+        layout = _make_pcell_poly_resistor_layout(_FLAVOUR_MASKS["rppd"], **kwargs)
+        top = layout.top_cell()
+        body = _resistor_body_region(layout, top, rppd)
+        assert body.area() * layout.dbu * layout.dbu == pytest.approx(expect_area)
+
+
+@pytest.mark.parametrize("name", ["rsil", "rppd", "rhigh"])
+@pytest.mark.parametrize(
+    "kwargs", [{}, {"continuous_bar": True}, {"head_b": False}, {"gap_um": 0.1}]
+)
+def test_erc_deck_device_cuts_agree_with_extraction(
+    tmp_path: Path, name: str, kwargs: dict
+):
+    """`klt erc --deck sg13g2`'s auto-detected device cuts
+    (`erc._deck_device_cuts`, the shared `_resistor_body_region` caller)
+    recognise exactly the PCell-shaped resistors `klt extract` does, and
+    the cut never removes the abutting GatPoly heads -- only GatPoly the
+    body actually covers (a continuous bar's resistive span)."""
+    from klayout_tools.erc import _deck_device_cuts
+
+    layout = _make_pcell_poly_resistor_layout(_FLAVOUR_MASKS[name], **kwargs)
+    top = layout.top_cell()
+    cuts, applied = _deck_device_cuts(
+        layout, top, EXTRACTION_DECK, {"poly": (5, 0)}, {}
+    )
+    path = _write_gds(layout, tmp_path / "e.gds")
+    report = run_extract(path, "sg13g2", output=str(tmp_path / "e.spice"))
+
+    recognised = report["device_counts"] == {name: 1}
+    assert [a["name"] for a in applied] == ([name] if recognised else [])
+    if not recognised:
+        assert "poly" not in cuts
+        return
+    (entry,) = applied
+    assert entry["on"] == "poly"
+    assert entry["body_area_um2"] == pytest.approx(6.0)
+    gatpoly = kdb.Region(top.begin_shapes_rec(layout.layer(5, 0)))
+    heads = gatpoly - kdb.Region(top.begin_shapes_rec(layout.layer(128, 0)))
+    assert (cuts["poly"] & heads).is_empty()
+    # Cutting the body leaves the two heads as separate poly islands.
+    assert (gatpoly - cuts["poly"]).merged().count() == 2
+
+
+# --------------------------------------------------------------------------- #
 # Drawn metal resistors (issue #1235)
 # --------------------------------------------------------------------------- #
 

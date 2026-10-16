@@ -333,14 +333,40 @@ up against this family's curated deck (`klayout_tools.decks.sg13g2`) today;
   poly-to-unrelated-active spacing rule in this repo's curated deck, so the
   overhang had never tripped a DRC check before. **Issue #1450 fixed the
   geometry**: on a family that declares a gate-pad clearance
-  (`gen.py`'s `_PDK_GATE_PAD_ACTIVE_CLEARANCE_UM` — `sg13g2`: 0.1µm, the
-  only entry today), the landing pad is lifted that far clear of the
-  diffusion edge and the gap is bridged by a poly stem of exactly the gate
-  length, so no poly edge faces `Activ` at zero distance. On `sky130` and
-  `gf180mcu` the clearance is `0`, so their drawn geometry and their
-  `U<i>_G` port position/width are byte-for-byte unchanged. On `sg13g2` the
-  reported `U<i>_G` port sits 0.1µm higher than the equivalent sky130 device
-  (its *width* is still the landing pad's, unchanged).
+  (`gen.py`'s `_PDK_GATE_PAD_ACTIVE_CLEARANCE_UM` — `sg13g2`: 0.1µm,
+  `gf180mcu`: 0.35µm, `sky130`: 0.15µm), the landing pad is lifted that far
+  clear of the diffusion edge and the gap is bridged by a poly stem of
+  exactly the gate length, so no poly edge faces `Activ` at zero distance.
+  The reported `U<i>_G` port moves up by the family's clearance (its
+  *width* is still the landing pad's, unchanged).
+
+  > **sky130 note (issue #3115):** sky130 was `0` until this issue, so its
+  > pad abutted the diffusion; for any gate length below the 0.42µm pad
+  > width the PDK's own Magic `poly.4` (poly to unrelated diffusion,
+  > 0.075µm — not in the curated deck, so `klt drc` never saw it) failed.
+  > The landing pad, the `gate_contact` stack and the reported `U<i>_G`
+  > ports now sit 0.15µm higher (which also satisfies `poly.8`'s 0.13µm
+  > endcap on the top edge), and `core_h_um` grows by the same amount.
+  > Likewise the nwell drawn around the n-tap guard ring of a
+  > `flavor="pfet"` `mos_array`/`diff_pair`/`guard_ring` now extends 0.2µm
+  > (was 0.15µm) past the ring on sky130, clearing `diff/tap.10` (0.18µm);
+  > other families keep 0.15µm. The two rules remain unchecked by
+  > `klt drc --deck sky130`.
+
+**sky130 gate-poly endcap (issue #2936).** The sky130 unit device used to end
+the gate poly flush with the diffusion: the bottom edge exactly at `y == 0`,
+and the top edge only through the landing-pad neck (narrower than the gate
+once `l_um` exceeds the 0.42µm pad). The PDK's `poly.8` ("min. poly extention
+gate (endcap)", 0.13µm) rejects both, and the curated deck could not see it.
+The deck now carries `poly.endcap.diff.1` ([`klt drc`](drc.md)), and
+`mos_array`/`diff_pair`/`esd_device` draw a 0.15µm endcap on sky130 at both
+ends along the full gate width: `gen.py`'s `_PDK_GATE_BOTTOM_ENDCAP_UM`
+gained a `sky130` entry, and the new `_PDK_GATE_TOP_ENDCAP_UM` adds a
+stripe-width neck above the diffusion before the landing pad widens (the
+parallel-finger shape already runs its stripes up into the comb). The unit
+device is therefore 0.15µm taller (`bbox` grows at the bottom; row pitch
+follows), and the S/D ports are unchanged. Other families' geometry is
+unchanged.
 
 `esd_device`/`bond_pad`/`well_island` were simply not attempted for
 `sg13g2` by issue #1448 (no citable curated passivation-opening layer for
@@ -737,6 +763,26 @@ flags it as anonymous/unbiased the way it does a floating PMOS body — there
 is no equivalent `unbiased_nmos_body_nets[]` check for `flavor="nfet"` to
 satisfy.
 
+`mos_cap` (issue #3283) draws each unit as a **MOS capacitor** instead of a
+transistor: gate over diffusion with every source/drain segment tied into a
+single local-metal strap, plus the PDK's MOS-capacitor marker layer drawn
+over the array (`gf180mcu`: `MOS_CAP_MK`, `166/5`, matching the official
+gf180mcu DRC deck's `mos_cap_mk = get_polygons(166, 5)`). Ports are `U<i>_SD` (the tied S/D strap, metal) and `U<i>_G` (gate
+poly; with `fingers > 1` the gate pads are tied by a poly bar), and the body
+tie is the guard ring's `TAP_*` ports, so `mos_cap` **requires
+`add_guard_ring: true`** and does not support `gate_contact`.
+`finger_topology` is ignored. The width floor is **not** the flat `0.42`
+µm of a plain transistor: it is the deck's own COMP min-width rule for the
+selected oxide (`comp.width.1` = 0.22 µm thin oxide, `comp.width.mv.1` = 0.30
+µm with `voltage_flavor: "medium_voltage"` on `gf180mcu`), and a `w_um` below
+it is rejected with an error naming the rule. Below the contact-plus-
+enclosure width each S/D segment grows a diffusion landing bump above the
+channel (channel width stays `w_um`) and the gate landing pad is lifted
+clear of it. A PDK family with no MOS-capacitor marker (everything but
+`gf180mcu` today) is rejected with a `GenError`. Plain `mos_array`
+(`mos_cap: false`, the default) is unchanged. `klt extract` does not yet
+recognise the marker as a capacitor device class (#2919).
+
 `voltage_flavor` (issue #1054) is a separate, orthogonal opt-in for a PDK's
 **medium-voltage/thick-oxide transistor variant** — a common multi-voltage-
 domain process feature distinct from `flavor`'s NMOS-vs-PMOS selection. The
@@ -765,6 +811,17 @@ still draws nothing and is reported via a `drc_hints.notes` entry, never
 silently dropped. `voltage_flavor` is independent of `flavor`: requesting
 both `flavor="pfet"` and `voltage_flavor="medium_voltage"`/`"hv"`/`"hvi"`
 draws both the well and the marker with no conflict.
+
+**sky130's native-Vt NMOS (`sky130_fd_pr__nfet_05v0_nvt`) is unsupported
+(issue #2912).** `voltage_flavor="native"`/`"nvt"` on `sky130` draws no marker
+and the device extracts as a plain `nfet`; `drc_hints.notes` names the flavour
+as unsupported. The upstream `sky130.lvs` does not key it on one marker layer:
+`ngate_nvt = ngate_high_voltage.and(lvtn).not(areaid_ed).not(areaid_ce)`
+(`hvi` 75/20 AND `lvtn` 125/44), then `ngate_5p0v_nvt = ngate_nvt.not(areaid_le)
+.not_interacting(vpp)` → `nfet_05v0_nvt` (the `areaid_le` 3v3 variant is
+`nfet_03v3_nvt`), whereas `voltage_flavor` and the deck's `mos_flavours`
+express a single marker. Plan an explicit exclusion of such a device from the
+LVS comparison (see `lvs.md`, "Native-Vt NMOS is not supported on sky130").
 
 **Source/drain implant (issue #2580).** Only `gf180mcu`'s role-layer table
 declares the S/D implant roles (`"nplus"` 32/0 / `"pplus"` 31/0, issue
@@ -932,7 +989,11 @@ device additionally requires; sg13g2's `PolyRes.drawing` `(128, 0)`, plus
 the `EXTBlock`/`Res` layers its own `rsil` device additionally requires — see
 below), so `klt gen res_array`'s output is directly recognised as a resistor
 device by `klt extract --deck <pdk>` rather than being absorbed into ordinary
-poly interconnect as a short (issue #369). Neither curated *DRC* deck checks
+poly interconnect as a short (issue #369). On sg13g2 (issue #2679) the
+poly layer (`GatPoly`) is drawn as only the two end heads, abutting the
+`PolyRes` body with zero overlap, matching IHP's own `rsil`/`rppd`/`rhigh`
+PCells (where `PolyRes` is the resistive body itself) rather than one
+continuous poly bar under the marker. Neither curated *DRC* deck checks
 any of these layers, so drawing them never affects `klt drc` status. On
 sky130 (issue #491), gf180mcu (issue #2599), sg13g2 (issue #2590) and
 sg13cmos5l (issue #2602), each *dummy* unit's body segment is additionally
@@ -994,6 +1055,19 @@ must be paired with the matching `--deck-option poly_res=` value to extract
 as that class rather than the default. sg13g2 exposes all three of its
 recognised poly-resistor classes (issue #1451), each drawing that class's own
 `requires` set from `klayout_tools.decks.sg13g2.EXTRACTION_DECK.resistors`:
+
+On gf180mcu the `SAB` salicide block is not the body-only marker box (issue
+#3000). The PDK runset's `sab.drc` needs it `0.15` µm from every contact
+(`SB.4`) and running `0.22` µm past the poly body's long edges (`SB.9`/
+`SB.10`), so the end heads are lengthened to `0.52` µm (contact edge to body
+`0.15` µm) and the `SAB` is drawn `0.22` µm wider than the body on each side.
+The body, `Pplus` and `RES_MK` marker keep the requested `length_um`, so
+`klt extract` still reads the same `L`. Folded rows are `0.4` µm apart, so
+neighbouring rows' `SAB` overlap and merge. A gf180mcu `res_array` cell is
+therefore `0.22` µm taller on each side and `0.20` µm longer than before; with
+`flavor` `1k`/`2k`/`3k` it reports no `SB.*` violation from the PDK's
+`run_drc.py`. (`generic` still reports `PRES.5`/`PRES.6`/`PP.9`, which are not
+salicide-block rules.) sky130 and sg13g2 output is unchanged.
 
 | `flavor` | sg13g2 device class | Sheet ρ | Masks drawn over each body |
 | -------- | ------------------- | ------- | -------------------------- |
@@ -1680,6 +1754,40 @@ fidelity limits that choice carries.
 | `ring_gap_side`      | string | `""`               | Cut one routing opening through the collector ring on this side (`""`/`"N"`/`"S"`/`"E"`/`"W"`) — see `guard_ring`'s "Ring routing openings" above. |
 | `ring_gap_um`        | double | `0.0`              | Length of that opening along its side (µm). Required (`>= 0.4`) with `ring_gap_side`, `0` otherwise. |
 | `ring_gap_offset_um` | double | `0.0`              | Slide the opening off its side's midpoint (µm) — e.g. onto the column of emitter ports a route needs to reach. |
+
+### `cap_vpp_array` (PDK fixed-cell capacitor array, issue #3100)
+
+A row of `num` instances of one of the PDK's **fixed, pre-drawn**
+vertical-parallel-plate (interdigitated metal) capacitor cells — sky130's
+`sky130_fd_pr__cap_vpp_*` (70 cells in `libs.ref/sky130_fd_pr/gds/sky130_fd_pr.gds`).
+Unlike every other generator it draws no geometry of its own: the named cell
+is copied from the resolved PDK's GDS at request time (never vendored) and
+placed as drawn, with the first instance's bounding box at the origin.
+sky130 only.
+
+| Param      | Type   | Default | Meaning |
+|------------|--------|---------|---------|
+| `pdk_cell` | string | `sky130_fd_pr__cap_vpp_02p4x04p6_m1m2_noshield` | PDK cell to array. Named `pdk_cell`, not `cell`, because `cell` collides with the PCell helper's own target-cell attribute. An unknown name fails with the standard error envelope listing every available `cap_vpp_*` name. |
+| `num`      | int    | `4`     | Instances in the row; must be `>= 1`. |
+| `pitch_um` | double | `0.0`   | Centre-to-centre pitch. `0` abuts at the cell's bounding-box width; a non-zero pitch smaller than the cell width (with `num > 1`) is rejected rather than silently overlapping. |
+
+**Ports** are derived from the cell's own pin labels (e.g. `C0`, `C1`, `SUB`),
+reported per instance as `U<i>_<label>` with the label's layer/datatype, its
+position, and an additive `bbox_um` — the smallest drawing-datatype shape
+under the label, or `null` when none is found. A cell with no pin labels
+(13 of sky130's 70, mostly the `pol1…` and `o2subcell` variants) reports no
+ports and says so in `drc_hints.notes`; ports are never invented.
+
+Terminals are **not** strapped between instances, and no matched/common-
+centroid placement is done. The output passes `klt drc --deck sky130` without
+a generator-introduced crash; whether `klt lvs` recognises `cap_vpp` as a
+device depends on the sky130 deck and is not claimed here.
+
+```bash
+klt gen cap_vpp_array --pdk sky130A \
+  --params '{"pdk_cell":"sky130_fd_pr__cap_vpp_02p4x04p6_m1m2_noshield","num":4,"pitch_um":3}' \
+  -o caps.gds --format json
+```
 
 ### `bond_pad` (chip-boundary bond pad, issue #568)
 
