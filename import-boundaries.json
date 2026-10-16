@@ -433,6 +433,7 @@
         "klayout_tools.sim_cycle_mean",
         "klayout_tools.sim_decks",
         "klayout_tools.sim_energy",
+        "klayout_tools.sim_injected",
         "klayout_tools.sim_merge",
         "klayout_tools.sim_mismatch_gate",
         "klayout_tools.sim_plot",

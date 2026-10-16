@@ -198,6 +198,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   dispatched `params` fails the request with `params_unsupported_worker`
   instead of passing at the netlist defaults. `engine: "xyce"` and
   `--op-lint` refuse the axis. See `docs/cli/sim.md` "Corner axes".
+- **`klt signoff` opt-in `require_annotation_complete` for `sta` evidence**
+  (issue #3258): an evidence entry citing a `klt sta` envelope may set
+  `"require_annotation_complete": true`; every corner carrying a
+  `spef_annotation` block must then report `annotation_complete: true`, else
+  the item is `unmet`/`check_failed` with `detail.sta_annotation_incomplete`
+  (per-corner `annotation_warning`). Additive: absent/`false` grades exactly
+  as before, no `schema_version` bump. `design_nets_annotated`/
+  `design_nets_total` are now documented as a name-match count, not evidence
+  of applied parasitics.
 - **`klt sim` surfaces ngspice's `Timestep too small` transient abort**
   (issue #2918): a new `timestep_too_small` diagnostic code (accepted by
   `options.fail_on_diagnostic`) with structured `time_s`/`timestep_s`/`node`

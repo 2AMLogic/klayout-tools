@@ -1999,6 +1999,27 @@ instead. Every corner the run reported must satisfy both of:
 An empty `corners` list never passes — a characterization of zero corners
 proves nothing.
 
+**Opt-in: `require_annotation_complete` (issue #3258).** Slack alone does not
+say whether a SPEF was actually applied to the timing. An evidence entry
+citing a `klt sta` envelope may add `"require_annotation_complete": true`
+(e.g. `{"file": "sta.json", "require_annotation_complete": true}`; file- or
+command-backed). Then, for **every** reported corner (or the flat envelope)
+that carries a `spef_annotation` block, `annotation_complete` must be
+literal `true`; otherwise the item is `unmet` with reason `check_failed` and
+`detail.sta_annotation_incomplete` lists each offending corner as
+`{corner, annotation_complete, annotation_warning}`. Semantics:
+
+- Absent or `false` → grading is unchanged (the default).
+- `spef_annotation` absent or `null` (no SPEF supplied) → no effect; the
+  option cannot turn a no-SPEF run into a parasitics claim.
+- `annotation_complete` missing, `null` or non-boolean on a present block →
+  unmet (fail-closed).
+- A non-boolean `require_annotation_complete` value makes the entry
+  malformed (`invalid_evidence`) rather than silently reading as off.
+
+The key is an additive manifest input and an additive `detail` field; no
+existing field changes meaning, so `schema_version` is unchanged.
+
 **Corner scoping is the cited run's own declared corner set.** Which corners
 must close is decided by the request that produced the envelope (`klt sta`'s
 `pdk.corners`), so `klt signoff` never widens a claim to corners the
