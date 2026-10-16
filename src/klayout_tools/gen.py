@@ -291,6 +291,9 @@ from .gen_layer_params import (
     _sd_implant_margin_um as _sd_implant_margin_um,
 )
 from .gen_layer_params import (
+    _sd_implant_min_space_um as _sd_implant_min_space_um,
+)
+from .gen_layer_params import (
     _voltage_flavor_mark_layer as _voltage_flavor_mark_layer,
 )
 from .gen_layer_params import (
@@ -369,6 +372,7 @@ _HIDDEN_PARAMS = {
     "sd_implant_present",
     "sd_implant_margin_um",
     "mos_cap_mark_layer",
+    "sd_implant_min_space_um",
     "bjt_mark_layer",
     "bjt_mark_present",
     "res_mark_layer",
@@ -2959,6 +2963,24 @@ def _insert_boxes(
                 int(round((y1 + oy_um) / dbu)),
             )
         )
+
+
+def _close_implant_gaps(
+    cell: Any, layer_index: int, dbu: float, min_space_um: float
+) -> None:
+    """Merge implant shapes on ``layer_index`` that sit closer than
+    ``min_space_um`` (issue #2934), so the layer never carries a sub-minimum
+    same-layer gap. No-op when ``min_space_um`` is not positive."""
+    import klayout.db as kdb
+
+    if min_space_um <= 0:
+        return
+    shapes = cell.shapes(layer_index)
+    region = kdb.Region(shapes)
+    half = int(round(min_space_um / dbu / 2)) + 1
+    closed = region.sized(half).sized(-half)
+    shapes.clear()
+    shapes.insert(closed)
 
 
 def _fixed_cut_side_um(side_um: float, fixed_size_um: float) -> float:

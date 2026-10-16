@@ -231,13 +231,32 @@ def _gate_top_endcap_um(family: str) -> float:
 #: A family absent from this table gets ``0.0`` (see
 #: :func:`_sd_implant_margin_um`), and :func:`_device_layer_params` never
 #: resolves a ``sd_implant_layer`` for one either (no family besides
-#: gf180mcu declares the ``"nplus"``/``"pplus"`` roles) -- sky130's/
-#: sg13g2's/sg13cmos5l's curated decks all recognise a MOS device from
+#: gf180mcu and, since issue #2934, sky130 declare the ``"nplus"``/``"pplus"``
+#: roles) -- sg13g2's/sg13cmos5l's curated decks recognise a MOS device from
 #: ``active``/``well`` alone, with no implant mask at all, so every existing
 #: caller there keeps byte-for-byte identical geometry (no implant drawn).
 _PDK_SD_IMPLANT_MARGIN_UM: dict[str, float] = {
     "gf180mcu": 0.25,  # NP.5a/PP.5a (gate overlap) are 0.23um
+    # sky130 (issue #2934): n/psdm.5a, "min. n/psdm enclosure diff except
+    # butting edge", 0.125um (sky130A.lydrc, PDK c6d73a35).
+    "sky130": 0.125,
 }
+
+
+#: Minimum same-layer spacing (um) between two separate source/drain implant
+#: shapes, for a family whose implant boxes can land closer than that
+#: between adjacent unit devices (issue #2934): sky130's ``nsdm.2``/``psdm.2``
+#: is 0.38um, while the per-unit boxes (diff + 0.125um margin) sit only
+#: ~0.15um apart in a ``mos_array``/``diff_pair`` row. Gaps below this are
+#: closed (the shapes merge) in :func:`~klayout_tools.gen._close_implant_gaps`.
+#: A family absent from this table is left untouched (``0.0``).
+_PDK_SD_IMPLANT_MIN_SPACE_UM: dict[str, float] = {
+    "sky130": 0.38,  # nsdm.2/psdm.2 (sky130A_mr.drc)
+}
+
+
+def _sd_implant_min_space_um(family: str) -> float:
+    return _PDK_SD_IMPLANT_MIN_SPACE_UM.get(family, 0.0)
 
 
 def _sd_implant_margin_um(family: str) -> float:
@@ -555,6 +574,9 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         "poly": (66, 20),  # poly.drawing
         "contact": (66, 44),  # licon1.drawing
         "metal": (67, 20),  # li1.drawing
+        "nplus": (93, 44),  # nsdm.drawing -- n+ S/D implant (nfet flavor),
+        # issue #2934; margin in :data:`_PDK_SD_IMPLANT_MARGIN_UM`.
+        "pplus": (94, 20),  # psdm.drawing -- p+ S/D implant (pfet flavor)
         "well": (64, 20),  # nwell.drawing -- matches
         # `klayout_tools.decks.sky130.EXTRACTION_DECK.nwell`; no curated DRC
         # rule checks this layer, but it is real and extraction already
@@ -2964,6 +2986,7 @@ def _device_layer_params(
         ),
         "sd_implant_present": sd_implant is not None and sd_implant_margin > 0,
         "sd_implant_margin_um": sd_implant_margin if sd_implant is not None else 0.0,
+        "sd_implant_min_space_um": _sd_implant_min_space_um(family),
     }
     if mos_cap_mark is not None:
         # Only `mos_array` declares these PCell params (`diff_pair` shares this

@@ -50,6 +50,7 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         MIN_SAME_LAYER_SPACING_UM,
         WELL_ENCLOSURE_MARGIN_UM,
         _clamp_cut_boxes,
+        _close_implant_gaps,
         _diff_pair_layout,
         _insert_boxes,
         _insert_implant_ring,
@@ -104,6 +105,16 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "for why this is inherent to the common-centroid interleave, "
                 "and for the routing styles that do work",
                 default=2,
+            )
+            # getattr: keeps this new hidden param out of the mypy type
+            # baseline (PCellDeclarationHelper's dynamic attrs are untyped).
+            self.param(
+                "sd_implant_min_space_um",
+                getattr(self, "TypeDouble"),  # noqa: B009
+                "Harness-resolved minimum spacing between separate source/"
+                "drain implant shapes; closer ones are merged (only used "
+                "when sd_implant_present)",
+                default=0.0,
             )
             self.param(
                 "add_guard_ring",
@@ -413,6 +424,12 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                         c["x0_um"],
                         c["y0_um"],
                     )
+                _close_implant_gaps(
+                    self.cell,
+                    li_sd_implant,
+                    dbu,
+                    getattr(self, "sd_implant_min_space_um"),  # noqa: B009
+                )
 
             # Shared device-pair-footprint box (well margin), used by the
             # `flavor="pfet"` well shape below -- computed once, independent
