@@ -6654,6 +6654,8 @@ Each `nets[]` entry:
 | `resistance_ohm_top_cell` | number \| `null` | Additive field (issue #1704). This net's series resistance attributable to geometry drawn directly in the top cell (as opposed to inside an instantiated sub-block) — `null` unless `--parasitics-top-cell-only` was given. See "Top-cell-only hierarchy split" below. |
 | `capacitance_ff_top_cell` | number \| `null` | Additive field (issue #1704). This net's ground capacitance attributable to geometry drawn directly in the top cell — `null` unless `--parasitics-top-cell-only` was given. See "Top-cell-only hierarchy split" below. |
 
+**Recognised MiM capacitors are not double-counted (issue #3021).** For the two plate nets of a recognised `CapacitorDevice`, the plate overlap lying under that capacitor's top-plate marker is excluded from `coupled[]`: the device's own `C` already is the capacitance there, and the excluded area stays on both nets' ground term (no charge is dropped). Only overlap outside the marker (unit gaps, plate margins) remains as parallel parasitic coupling. Layouts without a recognised capacitor are unchanged; no JSON field is added.
+
 Two device terminals on the same net now sit in series through their two
 `terminals[]` legs (`leg_a --Ra--> hub_net <--Rb-- leg_b`) — the
 terminal-to-terminal resistance is `Ra + Rb`, strictly positive whenever

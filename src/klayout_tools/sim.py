@@ -98,6 +98,7 @@ from . import (
     sim_decks,
     sim_mismatch_gate,
     sim_steps,
+    sim_transfer_meas,
 )
 
 #: `remote_fleet`/`remote_transport`/`RemoteLauncher`/`RemoteLaunchError` are
@@ -1132,6 +1133,8 @@ def _resolve_analysis_and_measurements(
     sim_crossings.validate_crossings_context(measurements_spec, analysis)
     # Issue #2947: so is a cycle-aligned mean.
     sim_cycle_mean.validate_cycle_mean_context(measurements_spec, analysis)
+    # Issue #2923: and a transfer metric is an AC-sweep quantity.
+    sim_transfer_meas.validate_transfer_context(measurements_spec, analysis)
     return analysis, measurements_spec
 
 
@@ -1252,6 +1255,9 @@ def _validate_measurement_form(spec: dict[str, Any]) -> None:
     one of ``spice``/``expr``, and -- for an ``expr`` -- a name that survives
     the round trip through the deck and back out of the log. See
     :func:`_validate_measurement_forms` for why each rule exists."""
+    if sim_transfer_meas.validate_form_exclusive(spec):
+        # Issue #2923: a fifth, mutually exclusive form.
+        return
     name = spec.get("name")
     has_spice = spec.get("spice") is not None
     has_expr = spec.get("expr") is not None
@@ -1263,7 +1269,8 @@ def _validate_measurement_form(spec: dict[str, Any]) -> None:
             "exactly one of 'spice' (a verbatim .meas card), 'expr' "
             "(an ngspice expression evaluated after the analysis) or "
             "'crossings' (a threshold-crossing time series) or "
-            "'cycle_mean' (a mean over whole reference cycles)"
+            "'cycle_mean' (a mean over whole reference cycles) or "
+            "'transfer' (an AC return-ratio metric)"
         )
     if has_cycle_mean:
         # Issue #2947: a fourth, mutually exclusive form.
@@ -2131,6 +2138,42 @@ def _with_max_units_override(
     }
 
 
+def _check_expected_netlist_identity(
+    expect_identity: Any,
+    netlist_identity: str | None,
+    netlist_identity_error: str | None,
+    netlist_ref: str,
+) -> None:
+    """Issue #3074: refuse to simulate when the request's
+    ``expect_netlist_identity`` does not match the netlist's stamp."""
+    if expect_identity is None:
+        return
+    if not isinstance(expect_identity, str) or not expect_identity:
+        raise SimError("expect_netlist_identity must be a non-empty string")
+    if netlist_identity is None:
+        raise SimError(
+            "expect_netlist_identity was given but the netlist identity "
+            f"could not be computed: {netlist_identity_error}"
+        )
+    if expect_identity != netlist_identity:
+        raise SimError(
+            "netlist identity mismatch: request expects "
+            f"{expect_identity} but '{netlist_ref}' has {netlist_identity} "
+            "(the referenced record was produced from a different netlist)"
+        )
+
+
+def _stamp_netlist_identity(
+    environment: dict[str, Any],
+    netlist_identity: str | None,
+    netlist_identity_error: str | None,
+) -> None:
+    """Issue #3074: record the netlist identity (or why it is unavailable)."""
+    environment["netlist_identity"] = netlist_identity
+    if netlist_identity_error is not None:
+        environment["netlist_identity_error"] = netlist_identity_error
+
+
 def _run_sim_corners(
     request_path: str,
     *,
@@ -2198,6 +2241,19 @@ def _run_sim_corners(
             f"unsupported netlist_source '{netlist_source}' "
             f"(supported: {', '.join(SUPPORTED_NETLIST_SOURCES)})"
         )
+
+    # Issue #3074: normalised netlist identity, stamped on the report and
+    # (when the caller hands the stamp of the record it compares against)
+    # checked before anything is simulated.
+    netlist_identity, netlist_identity_error = sim_staging.netlist_identity(
+        request, netlist_path
+    )
+    _check_expected_netlist_identity(
+        request.get("expect_netlist_identity"),
+        netlist_identity,
+        netlist_identity_error,
+        netlist_ref,
+    )
 
     corners_spec = request.get("corners") or {}
     models = request.get("models") or {}
@@ -2406,6 +2462,9 @@ def _run_sim_corners(
         cycle_mean_declared=bool(
             sim_cycle_mean.cycle_mean_measurements(measurements_spec)
         ),
+        transfer_declared=bool(
+            sim_transfer_meas.transfer_measurements(measurements_spec)
+        ),
     )
     monte_carlo_info: dict[str, Any] | None = None
     monte_carlo_stats: dict[str, Any] | None = None
@@ -2572,6 +2631,9 @@ def _run_sim_corners(
     backend = _yield_host_default_backend(
         backend, backend_from_host_default, reason_ok=len(dispatch_points) > 1
     )
+    # Issue #2923: transfer metrics need the corner-local AC rawfile, which
+    # off-host workers do not return yet -- refused before anything is staged.
+    sim_transfer_meas.refuse_offhost_backend(measurements_spec, backend)
 
     # Two-pass fail-fast probe (issue #1694, opt-in via `fail_fast_probe`/
     # `options.fail_fast_probe`): run once per grid, before any real corner
@@ -3030,6 +3092,7 @@ def _run_sim_corners(
     # Additive/optional (issue #3111): the declared solver options, verbatim,
     # so the setting is part of the report's evidence.
     environment.update({"ngspice_options": ngspice_options} if ngspice_options else {})
+    _stamp_netlist_identity(environment, netlist_identity, netlist_identity_error)
     if netlist_source is not None:
         # Additive/optional: only present when the request declares it, so
         # existing consumers of a request that omits netlist_source see an
@@ -4743,7 +4806,11 @@ class _Checkpoint:
 
 
 def _refuse_xyce_control_block_measurements(
-    *, expr_declared: bool, crossings_declared: bool, cycle_mean_declared: bool
+    *,
+    expr_declared: bool,
+    crossings_declared: bool,
+    cycle_mean_declared: bool,
+    transfer_declared: bool = False,
 ) -> None:
     """The ``engine: "xyce"`` refusals for measurement forms that exist only
     as commands in klt's generated ngspice ``.control`` block (``expr``,
@@ -4783,6 +4850,14 @@ def _refuse_xyce_control_block_measurements(
             "a `.control` block, and the Xyce deck has none; use engine "
             "'ngspice'"
         )
+    if transfer_declared:
+        # Issue #2923: same `.control` let/write boundary as `cycle_mean`.
+        raise SimError(
+            "measurements[].transfer is not supported for engine 'xyce': the "
+            "AC vectors are dumped by ngspice `let`/`write` commands inside a "
+            "`.control` block, and the Xyce deck has none; use engine "
+            "'ngspice'"
+        )
 
 
 def _enforce_xyce_support_boundary(
@@ -4799,6 +4874,7 @@ def _enforce_xyce_support_boundary(
     analysis_steps_declared: bool = False,
     crossings_declared: bool = False,
     cycle_mean_declared: bool = False,
+    transfer_declared: bool = False,
 ) -> None:
     """Refuse the ``engine: "xyce"`` combinations the v1 path does not
     implement (issue #2016) -- up front, with the same clean
@@ -4871,6 +4947,7 @@ def _enforce_xyce_support_boundary(
         expr_declared=expr_measurements_declared,
         crossings_declared=crossings_declared,
         cycle_mean_declared=cycle_mean_declared,
+        transfer_declared=transfer_declared,
     )
     if save_mode_declared:
         # Issue #2732: `save_mode` selects whether klt's generated ngspice
@@ -6187,6 +6264,9 @@ def _run_corner(
     cycle_means = sim_cycle_mean.extract_corner_cycle_means(
         measurements_spec, corner_dir
     )
+    transfers = sim_transfer_meas.extract_corner_transfers(
+        measurements_spec, corner_dir
+    )
     measurement_results, measurement_diagnostics, step_fields = (
         _corner_measurement_results(
             measurement_values,
@@ -6197,6 +6277,7 @@ def _run_corner(
             save_mode=save_mode,
             crossings=crossings,
             cycle_means=cycle_means,
+            transfers=transfers,
         )
     )
     measurement_diagnostics = _demote_abort_cascade(
@@ -6441,6 +6522,7 @@ def _corner_measurement_results(
     save_mode: str,
     crossings: dict[int, sim_crossings.CrossingsOutcome] | None = None,
     cycle_means: dict[int, sim_cycle_mean.CycleMeanOutcome] | None = None,
+    transfers: dict[int, sim_transfer_meas.TransferOutcome] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     """One corner's ``(measurement_results, diagnostics, extra_corner_fields)``
     from its harvested log values.
@@ -6481,6 +6563,13 @@ def _corner_measurement_results(
         if sim_cycle_mean.is_cycle_mean(spec):
             result, extra = _cycle_mean_measurement_result(
                 spec, (cycle_means or {}).get(position), save_mode=save_mode
+            )
+            measurement_results.append(result)
+            diagnostics.extend(extra)
+            continue
+        if sim_transfer_meas.is_transfer(spec):
+            result, extra = _transfer_measurement_result(
+                spec, (transfers or {}).get(position), save_mode=save_mode
             )
             measurement_results.append(result)
             diagnostics.extend(extra)
@@ -6641,6 +6730,63 @@ def _cycle_mean_measurement_result(
         "status": m_status,
         "margin": margin,
         "cycle_mean": outcome.report(),
+    }
+    return result, grading_diagnostics
+
+
+def _transfer_measurement_result(
+    spec: dict[str, Any],
+    outcome: sim_transfer_meas.TransferOutcome | None,
+    *,
+    save_mode: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """One ``transfer`` measurement's response entry (issue #2923).
+
+    ``value`` is the metric, graded through :func:`_grade_measurement_value`
+    like any scalar; the request echo rides the additive ``transfer`` sibling.
+    A failure is ``status: "error"``, ``value: null`` (so it can never pass a
+    limit) with a ``code: "measurement"`` diagnostic whose message starts with
+    a ``[<reason>]`` token from
+    :data:`klayout_tools.sim_transfer_meas.ERROR_CODES`."""
+    name = spec["name"]
+    unit = spec.get("unit")
+    if outcome is None or outcome.value is None:
+        message = (
+            outcome.error
+            if outcome is not None and outcome.error is not None
+            else f"measurement '{name}' produced no transfer value"
+        )
+        reason = (
+            outcome.code
+            if outcome is not None and outcome.code is not None
+            else "transfer_vector_missing"
+        )
+        if save_mode == "netlist" and reason == "transfer_vector_missing":
+            message += SAVE_MODE_NETLIST_NO_VALUE_HINT
+        result = {
+            "name": name,
+            "value": None,
+            "unit": unit,
+            "status": "error",
+            "margin": None,
+        }
+        return result, [
+            {
+                "severity": "error",
+                "code": "measurement",
+                "message": f"[{reason}] {message}",
+            }
+        ]
+    m_status, margin, grading_diagnostics = _grade_measurement_value(
+        spec, outcome.value
+    )
+    result = {
+        "name": name,
+        "value": outcome.value,
+        "unit": unit,
+        "status": m_status,
+        "margin": margin,
+        "transfer": outcome.report(spec),
     }
     return result, grading_diagnostics
 
@@ -6987,6 +7133,11 @@ def _corner_deck_control_lines(
        (:func:`klayout_tools.sim_cycle_mean.control_lines`), after the
        crossings lines; same ``set filetype=ascii`` rule. None of this
        appears without a cycle_mean entry.
+    7. Per unique ``measurements[].transfer`` ``num``/``den`` pair (issue
+       #2923), two ``let`` lines and one ``write`` of both complex vectors
+       (:func:`klayout_tools.sim_transfer_meas.control_lines`), after the
+       cycle_mean lines; same ``set filetype=ascii`` rule. None of this
+       appears without a transfer entry.
 
     An ``analysis_steps[]`` request (issue #2482) replaces step 3's analysis
     and 4's ``expr`` lines with the ordered step sequence
@@ -7015,7 +7166,8 @@ def _corner_deck_control_lines(
         return lines
     crossings_lines = sim_crossings.control_lines(measurements_spec, corner_dir)
     cycle_mean_lines = sim_cycle_mean.control_lines(measurements_spec, corner_dir)
-    if raw_path is not None or crossings_lines or cycle_mean_lines:
+    transfer_lines = sim_transfer_meas.control_lines(measurements_spec, corner_dir)
+    if raw_path is not None or crossings_lines or cycle_mean_lines or transfer_lines:
         lines.append("set filetype=ascii")
     lines.append(f"{analysis['kind']} {analysis['args']}")
     if raw_path is not None:
@@ -7032,6 +7184,7 @@ def _corner_deck_control_lines(
         lines.append(f"print {spec['name']}")
     lines.extend(crossings_lines)
     lines.extend(cycle_mean_lines)
+    lines.extend(transfer_lines)
     lines.append("quit")
     lines.append(".endc")
     return lines

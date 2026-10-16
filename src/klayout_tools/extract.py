@@ -6280,6 +6280,25 @@ def _purge_preserving_named_nets(netlist: kdb.Netlist) -> None:
             circuit.connect_pin(pin, net)
 
 
+def _recognised_capacitor_top_regions(
+    layout: kdb.Layout, top_cell: kdb.Cell, deck: ExtractionDeck
+) -> dict[str, kdb.Region]:
+    """Each drawn ``CapacitorDevice``'s top-plate marker region, keyed by
+    device name (issue #3021) -- what ``_compute_parasitics`` masks out of the
+    vertical-overlap pass for that capacitor's own plate nets. Capacitors with
+    no marker drawn are omitted, so a capacitor-free layout yields ``{}``.
+    """
+    regions: dict[str, kdb.Region] = {}
+    for capacitor in deck.capacitors:
+        top_region, bottom_region = _capacitor_plate_regions(
+            layout, top_cell, capacitor
+        )
+        if top_region.is_empty() or bottom_region.is_empty():
+            continue
+        regions[capacitor.name] = top_region
+    return regions
+
+
 def _purge_truly_floating_nets(netlist: kdb.Netlist) -> None:
     """Remove every net, on every circuit, that has **no** pin, **no**
     device terminal, and **no** subcircuit pin -- and nothing else (issue
@@ -9856,6 +9875,12 @@ def _extract_netlist(
             # geometry (resistor bodies, gates) cut out of them and so no
             # longer show where a conductor abuts a device at all.
             via_index=via_index,
+            # Issue #3021: recognised MiM top-plate footprints, so the
+            # vertical-overlap pass does not charge coupling on top of the
+            # device's own capacitance inside them.
+            capacitor_top_regions=_recognised_capacitor_top_regions(
+                layout, top_cell, deck
+            ),
         )
         # `klt extract --mom-net <net>` (issue #798): computed here, not in
         # `run_extract`, for the same "`l2n` must still be alive" reason as

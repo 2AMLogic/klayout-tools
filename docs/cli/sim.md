@@ -665,6 +665,22 @@ in its `batch_job_failed` message, or carries the tail of the retrieved
 [2AMLogic/2am](https://github.com/2AMLogic/2am) (see also
 [#2851](https://github.com/2AMLogic/klayout-tools/issues/2851)).
 
+**A runner older than a request feature fails the job, not the submit.**
+The client has no per-feature runner capability signal: the AMI manifest
+publishes only the runner's `klt_version`/`klt_ref`, which
+`runner_version_check` compares by major.minor release. A request that uses
+a newer feature — e.g. a `corners.process[].sections[]` `{"lib","section"}`
+object (#2522) — is therefore not refused up front when the version check is
+`warn`, or the manifest has no entry to compare (`batch_runner_version_unknown`).
+The job then fails in seconds with `batch job <id> finished 'failed' without a
+usable report: job command exited 1`, followed by the engine-log tail or
+`engine log unavailable` (a submit-only credential cannot read `harness.log`).
+When that is the only evidence, suspect a runner that predates a feature the
+request uses, and keep `runner_version_check` at `enforce` (the default). A
+real pre-submit feature check needs a machine-readable runner capability
+field and is tracked with the `analysis_steps[]` equivalent in
+[#3249](https://github.com/2AMLogic/klayout-tools/issues/3249).
+
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `batch.provision_script_path` | string, required (or `$KLT_BATCH_PROVISION_SCRIPT`) | Path to 2am's `infra/aws/batch-fleet-provision.sh` on *this* host. Resolution order: this field, then `$KLT_BATCH_PROVISION_SCRIPT`, then an error naming both — never a guessed path into a sibling checkout. An unresolvable script is an error raised **before any S3 write**, mirroring `remote.ssh_key_path`'s own early check. |
@@ -2379,6 +2395,31 @@ card. Either pick a step that lands exactly on the end point (a power-of-two
 fraction), or read the last sample from `options.waveforms` instead of using
 `AT=`.
 
+### Operating-point values via `spice` cards
+
+For a runner without `expr`, read an operating-point quantity with a `spice`
+`.meas dc` card. A **one-point** `dc` sweep (`dc args "V1 0 0 1"`) fails:
+`measure <name> find(AT) : out of interval`, because `AT=` needs two samples
+to interpolate between. Sweep a dummy source over **two points** and read at
+the first one:
+
+```
+V1 in 0 1
+Vdummy dmy 0 0
+Rdmy dmy 0 1k
+R1 in out 1k
+R2 out 0 1k
+dc args "Vdummy 0 1 1"
+.meas dc vout_op find v(out) at=0
+```
+
+A source that nothing else uses is a harmless sweep axis, so every point
+carries the same operating-point value. (The one-point failure is as
+reported against ngspice-46 on the fleet; this recipe was not re-run
+through `klt sim` when written.) Declare the card's name in lower
+case (see above), and expect the error text on a one-point sweep to be
+attached to the measurement's `measurement` diagnostic.
+
 ### The expression must reduce to a single real scalar
 
 This is the one contract rule the tool cannot check up front. ngspice's
@@ -2428,6 +2469,13 @@ Worked `op` example — the case that had no expression at all before:
   ([#2546](https://github.com/2AMLogic/klayout-tools/issues/2546)) — ngspice
   lower-cases that one in its report too, so an upper/mixed-case `spice` name
   now harvests exactly as a matching-case one always has.
+  **Runners older than that fix** (the pinned 0.5.0 fleet image) match
+  case-sensitively: a `.meas` named with upper-case letters (`ibus_B`,
+  `d_P_3`) runs and ngspice prints `ibus_b = ...`, but the job reports
+  `measurement ... produced no value` — while the same request graded locally
+  by a current client returns the value. A client/runner skew therefore hides
+  the failure until the job returns. Workaround: lower-case every
+  measurement name when targeting `KLT_SIM_BACKEND=batch` on such a runner.
 - **An `expr` name must be unique** across the whole `measurements[]` list
   (compared case-insensitively, per the previous bullet): a second `let
   <name>` overwrites the first, so both response entries would report the same
@@ -2680,6 +2728,63 @@ runs inside the corner run, so a `remote`/`batch` worker reports the scalar
 inline with `options.keep_artifacts: false` and no waveform artifact. As with
 `crossings`, the off-host runner must carry this implementation (see
 "Runner/client `klt` version skew").
+
+## AC return-ratio metrics (`measurements[].transfer`)
+
+The public waveform JSON stores `ac` samples as magnitudes, so phase cannot be
+recovered from it. `transfer` grades one stability metric of the complex ratio
+`num / den` of an `ac` analysis, computed from the complex samples
+([#2923](https://github.com/2AMLogic/klayout-tools/issues/2923), numerics from
+[#2922](https://github.com/2AMLogic/klayout-tools/issues/2922)):
+
+```json
+{
+  "netlist": "loop.spice",
+  "analysis": {"kind": "ac", "args": "dec 50 1 1e9"},
+  "measurements": [
+    {"name": "pm", "transfer": {"num": "v(out)", "den": "v(in)", "metric": "phase_margin_deg"},
+     "unit": "deg", "limits": {"min": 45}},
+    {"name": "ugf", "transfer": {"num": "v(out)", "den": "v(in)", "metric": "unity_crossing_hz"}}
+  ]
+}
+```
+
+- `transfer` is a fifth measurement form, mutually exclusive with `spice`,
+  `expr`, `crossings` and `cycle_mean`. It has exactly `num`, `den`, `metric`.
+- `num` / `den` are single-ended `v(node)` selectors: one non-empty node token
+  with no whitespace, control character, comma or parenthesis. Matching is
+  case-insensitive. Arbitrary expressions and differential selectors are not
+  supported.
+- `metric` is one of: `low_frequency_magnitude` (linear `|T|` of the first
+  valid sample), `unity_crossing_hz` (Hz), `phase_at_unity_deg` (degrees,
+  unwrapped), `phase_margin_deg` (`180 + phase_at_unity_deg`, degrees),
+  `gain_margin_db` (dB), `unity_crossing_count` (number). `T = num / den` uses
+  the **negative-feedback convention**: negate the numerator in the bench if
+  yours is the opposite. Interpolation, unwrapping and invalid-sample rules are
+  those of `klayout_tools.sim_transfer`.
+- Requires `analysis.kind: "ac"`. Malformed bodies, conflicting forms,
+  duplicate measurement names and non-AC use fail before the engine launches.
+- `value` is graded by the usual `limits`/`plausible_range`. An unavailable
+  metric is `status: "error"`, `value: null` (it can never pass a limit) with a
+  `code: "measurement"` diagnostic starting `[<reason>]`:
+
+| Token | Meaning |
+|---|---|
+| `transfer_vector_missing` | `num` or `den` did not resolve (unknown node, or omitted by `options.save_mode: "netlist"`, which is never overridden). |
+| `transfer_raw_invalid` | The AC rawfile was unreadable, malformed or had an invalid frequency axis. |
+| `transfer_metric_unavailable` | The metric has no value (e.g. no falling 0 dB crossing, zero denominator); the message names the `sim_transfer` reason. |
+
+The entry also carries an additive `transfer` object `{num, den, metric}`.
+One rawfile and one ratio computation are used per unique `num`/`den` pair, and
+the capture does not depend on `options.waveforms`.
+
+**Local only.** `backend: "remote"` / `"batch"` requests (explicit or via
+`KLT_SIM_BACKEND`) that declare `transfer` are refused before provisioning with
+an unsupported-backend error; worker support is tracked in
+[#2924](https://github.com/2AMLogic/klayout-tools/issues/2924). `engine:
+"xyce"` is refused too. After the analysis, each unique pair adds
+`let __klt_xfer_<k>_num = <num>`, `let __klt_xfer_<k>_den = <den>` and
+`write <corner_dir>/transfer_<k>.raw ...` to the generated `.control` block.
 
 ## Several solves per corner (`analysis_steps[]`)
 
@@ -2985,6 +3090,16 @@ netlist's resolved include closure**, not just the netlist file
   channel, which `models`/`models.pdk` resolve on the executing host by
   default (see "Model library resolution" below) — or, with
   `options.stage_model_inputs: true`, ship with the job (next section).
+
+  Because `klt sim` leaves a netlist-body `.lib` card **verbatim** (only
+  `.include`/`.inc` lines are rewritten or `$VAR`-expanded there), the card
+  reaches ngspice exactly as written. ngspice 46 does not expand an
+  unquoted `$PDK_ROOT` inside a `.lib` card: `.lib $PDK_ROOT/<file> <section>`
+  silently never loads the section and the failure surfaces much later as
+  `unknown subckt`, whereas `.lib "$PDK_ROOT/<file>" <section>` (quoted)
+  works. `.include $PDK_ROOT/...` is unaffected because klt expands it
+  itself. Quote the path in `.lib` cards of a netlist that leaves
+  `$PDK_ROOT` for the executing host to resolve.
 
 A closure larger than 64 files or 32 MiB is refused with the same named
 error rather than silently pushed — a closure that big is a host-resident
@@ -4718,7 +4833,7 @@ the *response* echoes back.
 | `monte_carlo.k_sigma`    | number            | Run-wide sigma multiple `k` for the `mean ± k*stddev` limit-window check. Omit for no window check. Must be a non-negative number.                                      |
 | `analysis`               | object            | `kind` (e.g. `"op"`, `"dc"`, `"ac"`, `"tran"`) and `args`, the engine-syntax analysis-card arguments. One analysis per corner. `"op"` is a valid `kind`, but see `measurements[]` below — it cannot be paired with a `.meas op` card; measure an operating-point quantity with `measurements[].expr` instead. Required unless the request declares `analysis_steps` instead; declaring both is an application error (exit 1). |
 | `analysis_steps[]`       | array\<object\>   | Issue #2482. Additive alternative to `analysis`: an ordered, non-empty sequence of named solves run inside each corner's one deck — each step `{name, analysis: {kind, args}, alter?, reset?, measurements?}`. With it, the top-level `measurements[]` are **derived** `expr`s over `<step>.<measurement>` results. ngspice only (refused for `engine: "xyce"`); refuses `options.waveforms`/`--plot`. See "Several solves per corner (`analysis_steps[]`)" above for the full rules. |
-| `measurements[]`         | array\<object\>   | `name` (stable response key) plus **exactly one** of `spice` (a verbatim `.meas` card), `expr` (issue #2533 — a single-line ngspice expression evaluated after the analysis inside `klt sim`'s own `.control` block; see "Measurements that are not `.meas` cards" above), `crossings` (issue #2868 — `{signal, level, edge?, from?, to?, max?}`, a threshold-crossing time series, `tran` only; see "Threshold-crossing time series" above), or `cycle_mean` (issue #2947 — `{signal, align, level, cycles, edge?, from?}`, a time-weighted mean over whole reference cycles, `tran` only; see "Cycle-aligned mean" above), plus optional `unit`, `limits` (`min`/`max`, either optional), `k_sigma` (per-measurement override of `monte_carlo.k_sigma`), and `plausible_range` (issue #2493 — `min`/`max`, either optional but at least one required; per-measurement plausibility bound, unscoped by `unit`; overrides `options.node_voltage_bounds` when both apply). No `limits` -> reported, never fails; no `plausible_range` (and no applicable `options.node_voltage_bounds`) -> plausibility check never runs, exactly as before this issue. Declaring both `spice` and `expr`, or neither, is an application error (exit 1). `spice`'s declared analysis type must be one ngspice's own `.MEASURE` implements (`dc`/`ac`/`tran`/`sp`) — there is no `.MEASURE OP`; a `.meas op` card is rejected up front (`SimError`), regardless of the request's own `analysis.kind`. `expr` must reduce to a single real scalar, must be one line, must have a name matching `[A-Za-z_][A-Za-z0-9_]*` unique across `measurements[]`, and is refused for `engine: "xyce"`. |
+| `measurements[]`         | array\<object\>   | `name` (stable response key) plus **exactly one** of `spice` (a verbatim `.meas` card), `expr` (issue #2533 — a single-line ngspice expression evaluated after the analysis inside `klt sim`'s own `.control` block; see "Measurements that are not `.meas` cards" above), `crossings` (issue #2868 — `{signal, level, edge?, from?, to?, max?}`, a threshold-crossing time series, `tran` only; see "Threshold-crossing time series" above), `cycle_mean` (issue #2947 — `{signal, align, level, cycles, edge?, from?}`, a time-weighted mean over whole reference cycles, `tran` only; see "Cycle-aligned mean" above), or `transfer` (issue #2923 — `{num, den, metric}`, an AC return-ratio metric, `ac` and local backends only; see "AC return-ratio metrics" above), plus optional `unit`, `limits` (`min`/`max`, either optional), `k_sigma` (per-measurement override of `monte_carlo.k_sigma`), and `plausible_range` (issue #2493 — `min`/`max`, either optional but at least one required; per-measurement plausibility bound, unscoped by `unit`; overrides `options.node_voltage_bounds` when both apply). No `limits` -> reported, never fails; no `plausible_range` (and no applicable `options.node_voltage_bounds`) -> plausibility check never runs, exactly as before this issue. Declaring both `spice` and `expr`, or neither, is an application error (exit 1). `spice`'s declared analysis type must be one ngspice's own `.MEASURE` implements (`dc`/`ac`/`tran`/`sp`) — there is no `.MEASURE OP`; a `.meas op` card is rejected up front (`SimError`), regardless of the request's own `analysis.kind`. `expr` must reduce to a single real scalar, must be one line, must have a name matching `[A-Za-z_][A-Za-z0-9_]*` unique across `measurements[]`, and is refused for `engine: "xyce"`. |
 | `options.node_voltage_bounds` | object       | Issue #2493. Run-wide plausibility default (`min`/`max`, either optional but at least one required) — see "Plausibility bounds" above. **Voltage-scoped**: only auto-applies to a measurement declaring `unit: "V"` that has no own `plausible_range`. Omit for no default (today's behaviour, unchanged). |
 | `options.timeout_s`      | number            | Per-corner wall-clock budget. Defaults to `120`. Exceeding it kills the process and yields an `error`-status corner.                                                    |
 | `options.keep_artifacts` | boolean           | Retain per-corner logs/rawfiles on disk under `--outdir` (or its default) and reference them from the response. Defaults to `false`.                                   |
@@ -4735,6 +4850,7 @@ the *response* echoes back.
 | `options.ngspice_options` | object | Issue #3111. Solver/convergence `.options` (`gmin`, `gminsteps`, `srcsteps`, `itl1`, `itl2`, `itl4`, `noopiter`, `method`, `reltol`, `abstol`, `vntol`, `pivtol`) rendered as one `.options` card after `.temp` in every corner deck and echoed verbatim as `environment.ngspice_options`. Values are numbers, booleans or bare-token strings; an unknown key or other value is an application error (exit 1) naming it; refused for `engine: "xyce"`. Unset: no card, no echo. See "Solver options: `options.ngspice_options`" above. |
 | `options.ngspice_init`   | array\<string\>   | Issue #2520. Lines materialized as a `.spiceinit` file inside each corner's own artifact directory (`cwd=` for that corner's `ngspice` invocation), most commonly `["set ngbehavior=hsa"]` to select a compatibility mode for vendor decks written in HSPICE style. Defaults to unset — no `.spiceinit` is written (no behavior change). `engine: "ngspice"` only; accepted-and-ignored for `"xyce"`. See "ngspice's working directory, and `.spiceinit` compatibility mode" above. |
 | *(CLI-only)* `--plot <dir>` | string         | No request-document equivalent (like `trajectory --plot`) — writes one waveform SVG per non-sweep signal per corner to `<dir>`, forcing `options.waveforms`/`keep_artifacts` on for this run. See "Waveform plots" above. |
+| `expect_netlist_identity` | string           | Optional (issue #3074). The `environment.netlist_identity` stamp of the record this run is compared against. When present and different from the identity computed for this request, `klt sim` refuses before simulating (application error, exit 1) with a message naming both stamps. Absent or matching changes nothing. Also refused if the identity cannot be computed (see `netlist_identity_error`). |
 | `netlist_source`         | string            | Optional caller-declared provenance of `netlist`: `"schematic"` (pre-layout, e.g. an S6 sizing netlist) or `"extracted"` (post-layout, from `klt extract`). Omit for unchanged behavior — the field is purely additive. An unrecognized value is an application error (exit 1). See "Post-layout verification" below. |
 | `decks[]`                | array\<object\>   | Issue #2804. **Deck-list request**: declares pre-composed caller-owned ngspice decks to transport, instead of the corner matrix above. When present, `netlist`/`corners`/`analysis`/`measurements` and friends must be absent, and the report takes the deck shape (`mode: "decks"`). Per-unit fields (`id`, `deck`, `inputs`, `outputs`, `timeout_s`) and the preservation/isolation contract are documented in "Pre-composed decks" above. |
 
@@ -5131,3 +5247,22 @@ of the file's on-disk bytes). A directive left to the executing host is
 `pdk_root`. If the closure cannot be resolved (e.g. a missing include),
 `environment.netlist_closure_error` carries the message instead and the report
 is otherwise unchanged.
+
+### `environment.netlist_identity` (issue #3074)
+
+`environment.netlist_sha256` and `netlist_closure` hash raw bytes, so a comment
+edit or a moved include changes them. `environment.netlist_identity` is the
+comparable stamp: `sha256:<hex>` over the netlist and its resolved
+`.include`/`.inc` closure (resolution order, as in `netlist_closure`) after
+dropping `*` comment lines and trailing `;`/`$` comments and blank lines,
+folding `+` continuations, collapsing whitespace, folding case, and omitting
+the *target text* of `.include`/`.inc` directives (content, not location).
+Line order is **not** normalised (`.param`/`.model` order can matter), so a
+reorder is a mismatch: a false mismatch is safe, a false match is not.
+
+The identity is `null`, with `environment.netlist_identity_error`, when the
+closure cannot be fully read (an unresolvable include, or an env-var/PDK-rooted
+include left to the executing host). It is computed client-side, so `local`,
+`remote` and `batch` report the same value for one request. `klt sim` stays
+stateless: to guard a comparison, copy the earlier report's stamp into the new
+request's `expect_netlist_identity`.
