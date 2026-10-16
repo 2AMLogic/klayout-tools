@@ -1261,6 +1261,29 @@ def _validate_optional_flag(name: Any, spec: dict[str, Any]) -> None:
         )
 
 
+def _validate_crossings_form(
+    name: Any, spec: dict[str, Any], scalar_form: bool
+) -> None:
+    """Issue #2868: ``crossings`` is a third, mutually exclusive measurement
+    form (``scalar_form`` = the entry also declares ``spice``/``expr``), and
+    issue #2925: it cannot be ``optional`` -- a signal with no crossings
+    reports a count of 0; a missing series is a read failure, not absent data."""
+    if scalar_form:
+        raise SimError(
+            f"measurement '{name}' declares 'crossings' together with "
+            f"'{'spice' if spec.get('spice') is not None else 'expr'}': they are "
+            "alternative forms of a measurement -- declare exactly one (use a "
+            "separate measurements[] entry for the scalar)"
+        )
+    if spec.get("optional") is True:
+        raise SimError(
+            f"measurement '{name}': 'optional' is not supported on "
+            "'crossings' (a signal with no crossings reports a count of "
+            "0; a missing series is a read failure, not absent data)"
+        )
+    sim_crossings.validate_crossings_spec(name, spec["crossings"])
+
+
 def _validate_measurement_form(spec: dict[str, Any]) -> None:
     """One ``request.measurements[]`` entry's form: a ``name`` plus exactly
     one of ``spice``/``expr``, and -- for an ``expr`` -- a name that survives
@@ -1305,21 +1328,7 @@ def _validate_measurement_form(spec: dict[str, Any]) -> None:
         sim_cycle_mean.validate_cycle_mean_spec(name, spec["cycle_mean"])
         return
     if has_crossings:
-        # Issue #2868: a third, mutually exclusive form.
-        if has_spice or has_expr:
-            raise SimError(
-                f"measurement '{name}' declares 'crossings' together with "
-                f"'{'spice' if has_spice else 'expr'}': they are alternative "
-                "forms of a measurement -- declare exactly one (use a "
-                "separate measurements[] entry for the scalar)"
-            )
-        if spec.get("optional") is True:
-            raise SimError(
-                f"measurement '{name}': 'optional' is not supported on "
-                "'crossings' (a signal with no crossings reports a count of "
-                "0; a missing series is a read failure, not absent data)"
-            )
-        sim_crossings.validate_crossings_spec(name, spec["crossings"])
+        _validate_crossings_form(name, spec, has_spice or has_expr)
         return
     if has_spice and has_expr:
         raise SimError(
