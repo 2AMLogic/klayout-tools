@@ -839,13 +839,14 @@ neither is a findings-list/key-metrics report in its sense).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
 import shlex
 import subprocess
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from functools import cache
 from pathlib import Path
 from typing import (
@@ -2729,6 +2730,73 @@ def _sta_timing_passed(envelope: dict[str, Any]) -> bool:
             for corner in corners
         )
     return _sta_corner_timing_passed(envelope)
+
+
+def _sta_annotation_shortfalls(envelope: dict[str, Any]) -> list[dict[str, Any]]:
+    """The corners of a `klt sta` envelope whose ``spef_annotation`` block is
+    present but does not report ``annotation_complete`` as literal ``True``
+    (issue #3258), as ``{"corner", "annotation_complete",
+    "annotation_warning"}`` entries.
+
+    Graded over the same corner set as :func:`_sta_timing_passed` (every
+    corner of a multi-corner response, or the flat envelope itself). A corner
+    whose ``spef_annotation`` is absent or ``null`` (no SPEF supplied) is not
+    a shortfall: the requirement cannot turn a no-SPEF run into a parasitics
+    claim. A present block whose ``annotation_complete`` is missing, ``null``
+    or non-boolean *is* one (fail-closed).
+    """
+    corners = envelope.get("corners")
+    scopes = (
+        [c for c in corners if isinstance(c, dict)]
+        if isinstance(corners, list)
+        else [envelope]
+    )
+    shortfalls: list[dict[str, Any]] = []
+    for scope in scopes:
+        block = scope.get("spef_annotation")
+        if block is None:
+            continue
+        if not isinstance(block, dict):
+            shortfalls.append(
+                {
+                    "corner": scope.get("corner"),
+                    "annotation_complete": None,
+                    "annotation_warning": None,
+                }
+            )
+            continue
+        if block.get("annotation_complete") is True:
+            continue
+        shortfalls.append(
+            {
+                "corner": scope.get("corner"),
+                "annotation_complete": block.get("annotation_complete"),
+                "annotation_warning": block.get("annotation_warning"),
+            }
+        )
+    return shortfalls
+
+
+def _sta_annotation_refusal(
+    check_kind: str, spec: dict[str, Any], envelope: dict[str, Any]
+) -> tuple[str, str, None, dict[str, Any]] | None:
+    """Issue #3258: the ``unmet`` grade for a cited `sta` envelope whose SPEF
+    annotation was not fully applied, when the evidence entry opted in with
+    ``require_annotation_complete``; ``None`` when the requirement is off, the
+    kind is not ``sta``, or every annotated corner is complete. The offending
+    corner(s)' ``annotation_warning`` ride along as the item's detail.
+    """
+    if check_kind != "sta" or spec.get("require_annotation_complete") is not True:
+        return None
+    shortfalls = _sta_annotation_shortfalls(envelope)
+    if not shortfalls:
+        return None
+    return (
+        "unmet",
+        _REASON_CHECK_FAILED,
+        None,
+        {"sta_annotation_incomplete": shortfalls},
+    )
 
 
 def _sta_worst_corner(envelope: dict[str, Any]) -> dict[str, Any]:
@@ -4995,6 +5063,11 @@ def _normalize_evidence_entry(raw: Any) -> dict[str, Any] | None:
       both keys (which the schema does not ask for, but a caller might
       send) is treated as command-backed.
 
+    ``"require_annotation_complete"`` (issue #3258) is an optional boolean on
+    **both** shapes, always present in the returned spec (``False`` when
+    absent); a non-boolean value makes the entry malformed. It only has an
+    effect on a ``sta`` citation -- see :func:`_sta_annotation_shortfalls`.
+
     ``"pointer"`` (issue #2342) is accepted on **both** shapes, and is always
     present in the returned spec (``None`` when the entry named none). It
     says *where inside* the cited document the `klt` envelope lives, so an
@@ -5015,6 +5088,13 @@ def _normalize_evidence_entry(raw: Any) -> dict[str, Any] | None:
     if not pointer_ok:
         return None
 
+    # Issue #3258: opt-in, additive. A non-boolean value is a malformed entry
+    # (degrades this one item to `invalid_evidence`) rather than silently
+    # reading as "off" -- an opt-in requirement must never fail open.
+    require_annotation = raw.get("require_annotation_complete", False)
+    if not isinstance(require_annotation, bool):
+        return None
+
     command = raw.get("command")
     if (
         isinstance(command, list)
@@ -5033,6 +5113,7 @@ def _normalize_evidence_entry(raw: Any) -> dict[str, Any] | None:
             "cwd": cwd,
             "content_hash": expected_hash,
             "pointer": pointer,
+            "require_annotation_complete": require_annotation,
         }
 
     file = raw.get("file")
@@ -5046,6 +5127,7 @@ def _normalize_evidence_entry(raw: Any) -> dict[str, Any] | None:
         "file": file,
         "content_hash": expected_hash,
         "pointer": pointer,
+        "require_annotation_complete": require_annotation,
     }
 
 
@@ -5708,6 +5790,10 @@ def _grade_evidence(
             _critical_metric_detail(envelope),
         )
 
+    annotation_refusal = _sta_annotation_refusal(check_kind, spec, envelope)
+    if annotation_refusal is not None:
+        return annotation_refusal
+
     # The two refusals that apply only to a kind this item actually accepts --
     # `nothing_checked` (issue #1996) and `not_post_layout` -- resolved
     # together, in that order. See `_kind_gated_refusal`.
@@ -5718,21 +5804,14 @@ def _grade_evidence(
         require_post_layout=require_post_layout,
     )
     if kind_gated is not None:
-        # Issue #2467: the two `yield` refusals name a state the reader
-        # cannot see from the reason alone -- *which* measurements are
-        # undersized, or whose negative control did not detect -- so the
-        # same disclosure the `"met"` path carries on the citation is
-        # carried here as the item's `detail` instead. `{}` (no `detail`
-        # key at all) for every other refusal, exactly as before.
-        campaign = _yield_campaign_disclosure(check_kind, envelope)
-        failure_detail = (
-            {"yield_campaign": campaign}
-            if campaign is not None
-            and kind_gated
-            in (_REASON_UNDERSIZED_SAMPLE, _REASON_NEGATIVE_CONTROL_NOT_DETECTED)
-            else {}
+        return (
+            "unmet",
+            kind_gated,
+            None,
+            _kind_gated_failure_detail(
+                kind_gated, check_kind, envelope, spec, resolution
+            ),
         )
-        return "unmet", kind_gated, None, failure_detail
 
     # Issue #2718: a generic citation's declared item identity and, for the
     # artifact-anchored items, its artifact binding -- checked only for an
@@ -5742,10 +5821,12 @@ def _grade_evidence(
     if binding_refusal is not None:
         return "unmet", binding_refusal, None, {}
 
-    expected_hash = spec.get("content_hash")
-    if expected_hash is not None and resolution["content_hash"] != expected_hash:
-        if resolution["content_hash"] is None:
-            return "unmet", _REASON_UNVERIFIABLE_PROVENANCE, None, {}
+    pin_state = _content_hash_pin_state(
+        spec.get("content_hash"), resolution["content_hash"]
+    )
+    if pin_state == _PIN_UNVERIFIABLE:
+        return "unmet", _REASON_UNVERIFIABLE_PROVENANCE, None, {}
+    if pin_state == _PIN_STALE:
         return "unmet", _REASON_STALE_EVIDENCE, None, {}
 
     citation = _citation(resolution)
@@ -5753,8 +5834,64 @@ def _grade_evidence(
         check_kind, item_id, resolution, citation
     )
     if anchored_refusal is not None:
-        return "unmet", anchored_refusal, None, {}
+        return "unmet", anchored_refusal, None, _input_members_detail(resolution)
     return "met", None, citation, {}
+
+
+def _kind_gated_failure_detail(
+    kind_gated: str,
+    check_kind: str,
+    envelope: dict[str, Any],
+    spec: Mapping[str, Any],
+    resolution: Mapping[str, Any],
+) -> dict[str, Any]:
+    """The ``detail`` for a :func:`_kind_gated_refusal` verdict.
+
+    Issue #2467: the two ``yield`` refusals name a state the reader cannot
+    see from the reason alone -- *which* measurements are undersized, or
+    whose negative control did not detect -- so the same disclosure the
+    ``"met"`` path carries on the citation is carried here instead. ``{}``
+    (no ``detail`` key at all) for every other refusal.
+
+    Issue #3063: the early return would otherwise hide a stale
+    ``content_hash`` pin behind the campaign refusal until the sample is
+    raised. Disclosed beside the verdict, never changing it.
+    """
+    campaign = _yield_campaign_disclosure(check_kind, envelope)
+    if campaign is None or kind_gated not in (
+        _REASON_UNDERSIZED_SAMPLE,
+        _REASON_NEGATIVE_CONTROL_NOT_DETECTED,
+    ):
+        return {}
+    detail: dict[str, Any] = {"yield_campaign": campaign}
+    pin_state = _content_hash_pin_state(
+        spec.get("content_hash"), resolution["content_hash"]
+    )
+    if pin_state is not None:
+        detail["content_hash_pin"] = pin_state
+    return detail
+
+
+_PIN_VERIFIED = "verified"
+_PIN_STALE = "stale"
+_PIN_UNVERIFIABLE = "unverifiable"
+
+
+def _content_hash_pin_state(
+    expected_hash: str | None, live_hash: str | None
+) -> str | None:
+    """Compare a manifest-pinned ``content_hash`` to the resolved live one.
+
+    ``None`` when the entry pins nothing; otherwise ``"verified"`` (equal),
+    ``"unverifiable"`` (no live hash to compare) or ``"stale"`` (differs).
+    Shared by the staleness gate and the issue #3063 disclosure on the
+    ``yield`` refusals so the two cannot drift.
+    """
+    if expected_hash is None:
+        return None
+    if live_hash is None:
+        return _PIN_UNVERIFIABLE
+    return _PIN_VERIFIED if live_hash == expected_hash else _PIN_STALE
 
 
 def _bind_anchored_citation(
@@ -5805,6 +5942,161 @@ def _generic_binding_path(envelope: Mapping[str, Any]) -> Any:
     return None
 
 
+def _binding_member_name(path: Any) -> str | None:
+    """The path string of one ``provenance.input.paths`` member's ``path``
+    (a non-empty string, or a ``{path, scope: "repo"}`` object), or ``None``
+    when it is neither."""
+    if isinstance(path, str) and path:
+        return path
+    if isinstance(path, Mapping) and path.get("scope") == "repo":
+        name = path.get("path")
+        if isinstance(name, str) and name:
+            return name
+    return None
+
+
+def _generic_input_set(
+    envelope: Mapping[str, Any],
+) -> tuple[bool, list[tuple[Any, str]] | None]:
+    """``(declared, members)`` for a generic envelope's opt-in
+    ``provenance.input.paths`` (issue #3044): a non-empty list of ``{path,
+    content_hash}`` members, ``path`` being as for ``input.path``.
+
+    ``declared`` is whether the key is present at all; ``members`` is the
+    ``(path value, recorded hash)`` pairs, or ``None`` when it is present
+    but malformed (not a list, empty, a member of the wrong shape, a
+    non-string or empty ``content_hash``, or two members naming the same
+    path). A malformed set never falls back to ``input.path``."""
+    provenance = envelope.get("provenance")
+    input_block = provenance.get("input") if isinstance(provenance, Mapping) else None
+    if not isinstance(input_block, Mapping) or "paths" not in input_block:
+        return False, None
+    raw = input_block["paths"]
+    if not isinstance(raw, list) or not raw:
+        return True, None
+    members: list[tuple[Any, str]] = []
+    names: set[str] = set()
+    for entry in raw:
+        if not isinstance(entry, Mapping):
+            return True, None
+        name = _binding_member_name(entry.get("path"))
+        recorded = entry.get("content_hash")
+        if name is None or not isinstance(recorded, str) or not recorded:
+            return True, None
+        if name in names:
+            return True, None
+        names.add(name)
+        members.append((entry["path"], recorded))
+    return True, members
+
+
+def _generic_binding_present(envelope: Mapping[str, Any]) -> bool:
+    """Whether a generic envelope names something to bind: a valid
+    ``provenance.input.paths`` set (issue #3044) when it declares one, else a
+    usable ``provenance.input.path`` (issue #2718)."""
+    declared, members = _generic_input_set(envelope)
+    if declared:
+        return members is not None
+    return _generic_binding_path(envelope) is not None
+
+
+def input_set_digest(members: Iterable[tuple[str, str]]) -> str:
+    """The combined ``provenance.input.content_hash`` for a set binding (issue
+    #3044): ``sha256:`` over the lines ``"<hex>  <path>\\n"`` -- ``<hex>`` the
+    member's hash without its ``sha256:`` prefix, ``<path>`` the member path
+    as the envelope names it -- sorted bytewise by path, so member order does
+    not matter. Equivalent to ``sha256sum`` over the members in ``LC_ALL=C``
+    sorted order, piped into ``sha256sum``."""
+    ordered = sorted(members, key=lambda pair: pair[0].encode("utf-8"))
+    body = "".join(
+        f"{content_hash.removeprefix('sha256:')}  {path}\n"
+        for path, content_hash in ordered
+    )
+    return f"sha256:{hashlib.sha256(body.encode('utf-8')).hexdigest()}"
+
+
+def _verify_generic_input_set(
+    members: list[tuple[Any, str]],
+    spec: Mapping[str, Any],
+    evidence_file: str | None,
+    repo_root: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    """Re-hash each member of a generic envelope's ``provenance.input.paths``
+    (issue #3044) through :func:`_resolve_input_artifact_value`, as
+    :func:`_verify_pex_schematic_inputs` does for ``pex``. One ``{path,
+    content_hash, status}`` per member, ``status`` being ``"verified"``,
+    ``"stale"`` or ``"unverifiable"`` with the same meanings."""
+    evidence_dir = (
+        os.path.dirname(os.path.abspath(evidence_file)) if evidence_file else None
+    )
+    results: list[dict[str, Any]] = []
+    for path_value, recorded in members:
+        read_any = False
+        matched = False
+        for candidate in _resolve_input_artifact_value(
+            path_value, spec, evidence_dir, repo_root
+        ):
+            digest = sha256_file(candidate)
+            if digest is None:
+                continue
+            read_any = True
+            if f"sha256:{digest}" == recorded:
+                matched = True
+                break
+        results.append(
+            {
+                "path": path_value,
+                "content_hash": recorded,
+                "status": "verified"
+                if matched
+                else ("stale" if read_any else "unverifiable"),
+            }
+        )
+    return results
+
+
+def _fold_generic_input_set(
+    envelope: Mapping[str, Any],
+    spec: Mapping[str, Any],
+    file_label: str | None,
+    recorded_hash: Any,
+    input_verified: bool | None,
+    repo_root: str | Path | None = None,
+) -> tuple[list[dict[str, Any]] | None, bool | None]:
+    """Verify a generic envelope's ``provenance.input.paths`` (issue #3044)
+    and fold it into ``input_verified``, replacing whatever the single-path
+    check said -- a set envelope's ``input.content_hash`` is the combined
+    digest, not any one file's.
+
+    Returns ``(members, input_verified)``; ``members`` is ``None`` (and
+    ``input_verified`` unchanged) for an envelope with no set, and a
+    malformed set yields ``(None, None)``. ``False`` when any member is
+    stale or the recorded combined digest is not the one its own members
+    produce (member hashes rewritten without the digest); ``True`` only when
+    every member re-hashes and the digest is consistent; else ``None``."""
+    declared, parsed = _generic_input_set(envelope)
+    if not declared:
+        return None, input_verified
+    if parsed is None:
+        return None, None
+    members = _verify_generic_input_set(parsed, spec, file_label, repo_root)
+    combined = input_set_digest(
+        (_binding_member_name(path) or "", recorded) for path, recorded in parsed
+    )
+    statuses = {member["status"] for member in members}
+    if "stale" in statuses or recorded_hash != combined:
+        return members, False
+    return members, True if statuses == {"verified"} else None
+
+
+def _input_members_detail(resolution: Mapping[str, Any]) -> dict[str, Any]:
+    """The ``detail`` an unmet anchored set citation carries (issue #3044):
+    every member with its ``status``, so the drifted one is named. ``{}``
+    for a single-path or non-generic citation."""
+    members = resolution.get("input_members")
+    return {"artifact_binding": {"members": members}} if members else {}
+
+
 def _generic_item_binding_refusal(
     check_kind: str,
     item_id: int | None,
@@ -5844,7 +6136,7 @@ def _generic_item_binding_refusal(
     elif declared != item_id:
         return _REASON_WRONG_ITEM
     if anchored and (
-        _generic_binding_path(envelope) is None
+        not _generic_binding_present(envelope)
         or not isinstance(spec.get("content_hash"), str)
     ):
         return _REASON_UNANCHORED_EVIDENCE
@@ -5870,6 +6162,8 @@ def _generic_artifact_binding(
         "content_hash": resolution["content_hash"],
         "input_verified": resolution.get("input_verified"),
     }
+    if resolution.get("input_members"):
+        binding["members"] = resolution["input_members"]
     for field in ("summary", "source"):
         value = envelope.get(field)
         if isinstance(value, str):
@@ -5899,6 +6193,38 @@ def _fold_pex_schematic_inputs(
     if input_verified is True and statuses == {"verified"}:
         return checked_inputs, True
     return checked_inputs, None
+
+
+def _fold_kind_inputs(
+    check_kind: str,
+    envelope: dict[str, Any],
+    spec: dict[str, Any],
+    file_label: str | None,
+    actual_hash: Any,
+    input_verified: bool | None,
+    repo_root: str | Path | None = None,
+) -> tuple[list[dict[str, Any]] | None, list[dict[str, Any]] | None, bool | None]:
+    """Fold the kind-specific multi-input verifications into ``input_verified``.
+
+    Returns ``(pex_inputs, input_members, input_verified)``.
+
+    Issue #2875: a ``pex`` envelope also pins the schematic side of its
+    comparison, verified per role so a changed resolvable input can never keep
+    a fully verified citation. Issue #3044: a ``generic`` envelope may bind a
+    *set* of artifacts (``provenance.input.paths``) instead of one; its members
+    are verified the same way.
+    """
+    pex_inputs: list[dict[str, Any]] | None = None
+    input_members: list[dict[str, Any]] | None = None
+    if check_kind == "pex":
+        pex_inputs, input_verified = _fold_pex_schematic_inputs(
+            envelope, spec, file_label, input_verified, repo_root
+        )
+    elif check_kind == "generic":
+        input_members, input_verified = _fold_generic_input_set(
+            envelope, spec, file_label, actual_hash, input_verified, repo_root
+        )
+    return pex_inputs, input_members, input_verified
 
 
 def _resolve_evidence(
@@ -6044,14 +6370,9 @@ def _resolve_evidence(
             check_kind, envelope, spec, actual_hash, file_label, repo_root
         )
 
-    # Issue #2875: a `pex` envelope also pins the schematic side of its
-    # comparison. Verified per role and folded into `input_verified` so a
-    # changed resolvable input can never keep a fully verified citation.
-    pex_inputs: list[dict[str, Any]] | None = None
-    if check_kind == "pex":
-        pex_inputs, input_verified = _fold_pex_schematic_inputs(
-            envelope, spec, file_label, input_verified, repo_root
-        )
+    pex_inputs, input_members, input_verified = _fold_kind_inputs(
+        check_kind, envelope, spec, file_label, actual_hash, input_verified, repo_root
+    )
 
     return (
         {
@@ -6065,6 +6386,7 @@ def _resolve_evidence(
             "content_hash_unresolved": content_hash_unresolved,
             "input_verified": input_verified,
             "pex_inputs": pex_inputs,
+            "input_members": input_members,
         },
         None,
     )

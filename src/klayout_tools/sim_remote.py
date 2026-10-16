@@ -207,6 +207,8 @@ def _unrun_corner_report(
             "process_seed": point.mc_seed["process_seed"],
             "mismatch_seed": point.mc_seed["mismatch_seed"],
         }
+        if "seed_scope" in point.mc_seed:
+            monte_carlo["seed_scope"] = point.mc_seed["seed_scope"]
     diagnostic: dict[str, Any] = {
         "severity": "error",
         "code": code,
@@ -553,6 +555,30 @@ def _run_remote(
     return corners, engine_version, remote_environment
 
 
+def _points_to_push(
+    request: dict[str, Any],
+    corner_points: list[CornerPoint],
+    explicit_points: list[CornerPoint] | None,
+) -> list[CornerPoint] | None:
+    """The explicit point list to push to the job box, or ``None`` to forward
+    ``corners``/``monte_carlo`` for the box to re-expand.
+
+    A non-default ``monte_carlo.seed_scope`` (issue #2899) is resolved
+    client-side: a runner older than the field would silently drop it and
+    re-derive ``per_corner`` seeds, so the already-derived seeds are shipped
+    instead (the same wire a fleet shard uses). The default forwards the
+    request unchanged.
+    """
+    if explicit_points is not None:
+        return explicit_points
+    mc_spec = request.get("monte_carlo")
+    if isinstance(mc_spec, dict) and mc_spec.get("seed_scope", "per_corner") != (
+        "per_corner"
+    ):
+        return corner_points
+    return None
+
+
 def _run_remote_dispatch(
     *,
     launcher: RemoteLauncher,
@@ -597,7 +623,7 @@ def _run_remote_dispatch(
         timeout_s=timeout_s,
         keep_artifacts=keep_artifacts,
         want_waveforms=want_waveforms,
-        explicit_points=explicit_points,
+        explicit_points=_points_to_push(request, corner_points, explicit_points),
         max_workers=max_workers,
     )
     job = _build_remote_job_description(

@@ -7687,6 +7687,105 @@ def test_cli_findings_only_with_pdk_exits_1(tmp_path, capsys):
     assert "--findings-only" in capsys.readouterr().err
 
 
+# --- --compact: summarise the findings-only scaffolding (issue #2965) --------
+
+
+def test_compact_keeps_connectivity_half_and_summarises_scaffolding(tmp_path):
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    full = run_erc(str(gds), str(spec), findings_only=True)
+    compact = run_erc(str(gds), str(spec), findings_only=True, compact=True)
+
+    for key in ("nets", "erc_findings", "erc_finding_count", "erc_status", "status"):
+        assert json.dumps(compact[key], sort_keys=True) == json.dumps(
+            full[key], sort_keys=True
+        )
+    assert compact["provenance"] == full["provenance"]
+    assert compact["gate_count"] == full["gate_count"] > 0
+
+    # `gates` stays a list (klt signoff's classifier) but carries no rows.
+    assert compact["gates"] == []
+    levels = sum(len(g["levels"]) - 1 for g in full["gates"])
+    assert compact["compact"] == {
+        "gate_count": len(full["gates"]),
+        "antenna_levels_skipped": levels,
+        "antenna_reference_levels": len(full["gates"]),
+        "floating_gate_checked": len(full["gates"]),
+        "skipped_reason": "findings_only",
+    }
+
+    # Declined antenna work is still disclosed, never silently empty.
+    assert [r["reason"] for r in compact["coverage"]["skipped"]] == ["findings_only"]
+    assert compact["coverage"]["checked"] == []
+    assert len(compact["coverage"]["skipped"]) < len(full["coverage"]["skipped"])
+
+    # Only the per-gate floating_gate ids collapse; the roll-up is unchanged.
+    def non_gate(block):
+        return [c for c in block["checked"] if not c.startswith("erc.floating_gate")]
+
+    assert non_gate(compact["erc_coverage"]) == non_gate(full["erc_coverage"])
+    assert compact["erc_coverage"]["checked"].count("erc.floating_gate:[]") == 1
+    for key in ("inapplicable", "skipped", "checked_by_assertion"):
+        assert compact["erc_coverage"][key] == full["erc_coverage"][key]
+    assert len(json.dumps(compact)) < len(json.dumps(full))
+
+
+def test_compact_absent_by_default(tmp_path):
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    report = run_erc(str(gds), str(spec), findings_only=True)
+
+    assert "compact" not in report
+    assert report["gates"]
+
+
+def test_compact_without_findings_only_raises(tmp_path):
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    with pytest.raises(ErcError, match="--compact"):
+        run_erc(str(gds), str(spec), compact=True)
+    with pytest.raises(ErcError, match="--findings-only"):
+        run_erc(str(gds), str(spec), pdk="sky130", compact=True)
+
+
+def test_cli_compact_json_and_signoff_classifier(tmp_path, capsys):
+    from klayout_tools.signoff import _is_erc_shape  # noqa: F401
+
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    exit_code = main(
+        ["erc", str(gds), str(spec), "--findings-only", "--compact", "--format", "json"]
+    )
+    data = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 3
+    assert data["gates"] == []
+    assert data["compact"]["gate_count"] == data["gate_count"]
+    assert _is_erc_shape(data)
+
+
+def test_cli_compact_alone_exits_1(tmp_path, capsys):
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    assert main(["erc", str(gds), str(spec), "--compact"]) == 1
+    assert "--compact" in capsys.readouterr().err
+
+
 # --- `erc_coverage.well_assertion_coverage` (issue #2427) -------------------
 #
 # A `well_boxes` assertion is re-measured against the drawn tap geometry so a
