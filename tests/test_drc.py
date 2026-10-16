@@ -7744,8 +7744,22 @@ def _fixed_size_cut_boundary_cases(size_dbu):
     ]
 
 
+# `cont.width.1` measures square contacts only (`cont_sq`, issues #2943/
+# #3139): an elongated Cont shape is a contact bar -- `CntB.*`'s, not
+# `Cnt.a`'s -- so the bar case is clean there, unlike the via/TopVia rules.
+_SG13G2_SQUARE_ONLY_RULES = {"cont.width.1"}
+
 _SG13G2_FIXED_SIZE_CUT_BOUNDARY_CASES = [
-    (rule_id, layer, layer_name, case_id, box, expected)
+    (
+        rule_id,
+        layer,
+        layer_name,
+        case_id,
+        box,
+        0
+        if (rule_id in _SG13G2_SQUARE_ONLY_RULES and case_id == "above_max_bar")
+        else expected,
+    )
     for rule_id, layer, layer_name, size_dbu in _SG13G2_FIXED_SIZE_CUT_RULES
     for case_id, box, expected in _fixed_size_cut_boundary_cases(size_dbu)
 ]
@@ -7781,6 +7795,79 @@ def test_run_drc_sg13g2_fixed_size_cut_boundaries(
     for violation in reported:
         assert violation["check"] == "width"
         assert violation["layer"] == layer_name
+
+
+def _cont_layout(tmp_path, name, boxes):
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    cont = layout.layer(6, 0)
+    layout.set_info(cont, kdb.LayerInfo(6, 0, "Cont.drawing"))
+    for box in boxes:
+        top.shapes(cont).insert(box)
+    path = tmp_path / f"{name}.gds"
+    layout.write(str(path))
+    return str(path)
+
+
+@pytest.mark.parametrize(
+    "name,boxes,expected",
+    [
+        # Abutting legal 0.16 um contacts merge into one 0.64 x 0.16 strip --
+        # a contact row, not an oversized contact (issue #3139).
+        ("row_of_four", [kdb.Box(i * 160, 0, (i + 1) * 160, 160) for i in range(4)], 0),
+        ("row_of_two", [kdb.Box(0, 0, 160, 160), kdb.Box(160, 0, 320, 160)], 0),
+        # Contacts that touch only at a corner stay separate legal squares.
+        ("corner_touch", [kdb.Box(0, 0, 160, 160), kdb.Box(160, 160, 320, 320)], 0),
+        # Isolated squares are still measured on both bounds.
+        ("oversized_square", [kdb.Box(0, 0, 200, 200)], 1),
+        ("undersized_square", [kdb.Box(0, 0, 120, 120)], 2),
+    ],
+)
+def test_run_drc_sg13g2_cont_width_ignores_contact_rows(
+    name, boxes, expected, tmp_path
+):
+    """`cont.width.1` is evaluated on square merged Cont polygons only, so a
+    row of abutting legal contacts (as drawn inside the PDK's own npn13G2/
+    rsil cells) is clean while an isolated off-size square is still flagged."""
+    report = run_drc(_cont_layout(tmp_path, name, boxes), "sg13g2")
+    assert report["rule_counts"].get("cont.width.1", 0) == expected
+
+
+def test_run_drc_rejects_bad_layer_selection(tmp_path, monkeypatch):
+    """An unknown `layer_selection`, or one combined with `derived_layer`,
+    is a deck-authoring mistake reported with the rule id."""
+    from klayout_tools.decks import DerivedLayer, DrcRule
+
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(1, 0)).insert(kdb.Box(0, 0, 1000, 1000))
+    path = tmp_path / "any.gds"
+    layout.write(str(path))
+
+    bad_rules = [
+        DrcRule(
+            id="bad.layer_selection",
+            description="synthetic",
+            layer=(1, 0),
+            check="width",
+            threshold_dbu=70,
+            layer_selection="circles",
+        ),
+        DrcRule(
+            id="bad.layer_selection.derived",
+            description="synthetic",
+            layer=(1, 0),
+            check="width",
+            threshold_dbu=70,
+            layer_selection="squares",
+            derived_layer=DerivedLayer(base=(1, 0), sized_by_um=0.0, mode="union"),
+        ),
+    ]
+    for rule in bad_rules:
+        _patch_synthetic_deck(monkeypatch, [rule])
+        with pytest.raises(DrcError, match=rule.id):
+            run_drc(str(path), "synthetic")
 
 
 def test_run_drc_sg13g2_fixed_size_cut_rules_declare_both_bounds():

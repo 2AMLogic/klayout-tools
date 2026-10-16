@@ -631,6 +631,14 @@ class DrcRule:
     pre-existing rule) reads ``other_layer``'s full drawn shapes exactly as
     before this field existed. Any other value is a deck-authoring mistake
     :func:`~klayout_tools.drc.run_drc` rejects loudly with the rule id.
+
+    ``layer_selection`` (issues #2943, #3139) is the same ``"squares"``
+    selector applied to the rule's own primary ``layer`` (``cont_sq`` for
+    sg13g2's ``Cnt.a``/``Cnt.b``): contact bars, and rows of abutting
+    contacts that merge into a strip, are left to the ``CntB.*`` family
+    rather than measured as one oversized contact. ``None`` (the default)
+    checks the full drawn layer as before; it cannot be combined with
+    ``derived_layer``.
     """
 
     id: str
@@ -655,6 +663,7 @@ class DrcRule:
     requires_any_layer: tuple[tuple[int, int], ...] | None = None
     require_containment: bool = False
     other_layer_selection: str | None = None
+    layer_selection: str | None = None
 
 
 class UnknownDeckError(Exception):

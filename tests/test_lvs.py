@@ -1641,6 +1641,68 @@ def test_parameter_tolerance_absorbs_the_minimal_cell_degraded_pairing(tmp_path)
     assert "net.unmatched" not in report["category_counts"]
 
 
+# Issue #2946: a layout that declares a device-less pin (`x`, ports that lead
+# to circuitry not drawn yet) against a flat pin-less reference. The capacitor's
+# own net `d` is a pin on the layout side and not on the reference side, which
+# used to veto the degraded-pair recovery.
+_PINNED_CAP_LAYOUT_SPICE = """
+.SUBCKT top a b c d x
+M1 a b c c pfet L=1U W=512U
+C1 d a {cap} cap_cmim
+.ENDS top
+"""
+
+_FLAT_CAP_REFERENCE_SPICE = """
+M1 a b c c pfet L=1U W=512U
+C1 a d {cap} cap_cmim
+.END
+"""
+
+
+def _pinned_cap_report(tmp_path, layout_cap, reference_cap, reference=None):
+    layout_path = _write(
+        tmp_path / "lay.spice", _PINNED_CAP_LAYOUT_SPICE.format(cap=layout_cap)
+    )
+    reference_path = _write(
+        tmp_path / "ref.spice",
+        reference or _FLAT_CAP_REFERENCE_SPICE.format(cap=reference_cap),
+    )
+    request = {
+        "layout": {"netlist": layout_path, "top": "top"},
+        "reference": {"netlist": reference_path},
+        "options": {"parameter_tolerance": 0.001},
+    }
+    return run_lvs(_write_request(tmp_path / "request.json", request))
+
+
+def test_parameter_tolerance_applies_with_a_device_less_pin_and_flat_reference(
+    tmp_path,
+):
+    report = _pinned_cap_report(tmp_path, "100.011P", "100P")
+
+    assert report["status"] == "match"
+    assert report["category_counts"][lvs.CATEGORY_DEVICE_PARAMETER_TOLERATED] == 1
+    assert "device.unmatched" not in report["category_counts"]
+    assert "net.unmatched" not in report["category_counts"]
+
+
+def test_parameter_tolerance_device_less_pin_out_of_tolerance_still_mismatches(
+    tmp_path,
+):
+    report = _pinned_cap_report(tmp_path, "150P", "100P")
+
+    assert report["status"] == "mismatch"
+    assert lvs.CATEGORY_DEVICE_PARAMETER_TOLERATED not in report["category_counts"]
+
+
+def test_parameter_tolerance_device_less_pin_never_masks_a_rewired_device(tmp_path):
+    rewired = _FLAT_CAP_REFERENCE_SPICE.format(cap="100P").replace("C1 a d", "C1 b d")
+    report = _pinned_cap_report(tmp_path, "100.011P", None, reference=rewired)
+
+    assert report["status"] == "mismatch"
+    assert lvs.CATEGORY_DEVICE_PARAMETER_TOLERATED not in report["category_counts"]
+
+
 def test_parameter_tolerance_minimal_cell_out_of_tolerance_still_mismatches(tmp_path):
     """Negative control for the degraded path: a 100% delta is untouched, and
     the issue #282 recovery still reports it the way it does today."""
@@ -5342,6 +5404,31 @@ XM2 Y A VPWR VPWR sky130_fd_pr__pfet_01v8 L=0.15u W=1.0u
     assert report["status"] == "match"
     assert report["mismatch_count"] == 0
     assert report["counts"]["devices"]["layout"] == 2
+    assert report["counts"]["devices"]["reference"] == 2
+
+
+def test_subckt_call_m_expansion_matches_multifinger_layout(tmp_path):
+    """Issue #3123: a schematic-flow sky130 `m=2 mult=2` MOS subckt call
+    (the reporter's card shape) converts to two parallel plain `M` cards
+    (`mult` is mismatch-only), which -- with `options.combine_devices` --
+    reconcile against a drawn 2-unit layout."""
+    layout_path = _write(tmp_path / "layout.spice", _MULTIFINGER_LAYOUT_SPICE)
+    reference_subckt_call = """
+.subckt inv A Y VPWR VGND
+XM1 Y A VGND VGND sky130_fd_pr__nfet_01v8 L=0.15u W=0.325u nf=1 mult=2 m=2
+XM2 Y A VPWR VPWR sky130_fd_pr__pfet_01v8 L=0.15u W=1.0u
+.ends
+"""
+    reference_path = _write(tmp_path / "ref.spice", reference_subckt_call)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv", "form": "subckt-call"},
+        "options": {"combine_devices": True},
+    }
+    report = run_lvs(json.dumps(request))
+
+    assert report["status"] == "match"
+    assert report["mismatch_count"] == 0
     assert report["counts"]["devices"]["reference"] == 2
 
 
@@ -10998,13 +11085,72 @@ def test_run_lvs_reference_device_map_malformed_object_entry_is_lvs_error(tmp_pa
 
 
 @pytest.mark.parametrize("param,value", [("m", "4"), ("mult", "2")])
-def test_normalize_multiplicity_gt_one_rejected(param, value):
-    # `nf` is no longer rejected on a MOS call (issue #1487 expands it
-    # instead -- see the `nf` expansion tests below); `m`/`mult` (a
-    # whole-device replication count) are still rejected.
+def test_normalize_resistor_multiplicity_gt_one_rejected_param(param, value):
+    # MOS `m` is expanded (issue #3123) and MOS `mult` ignored; the
+    # resistor/capacitor families still reject both.
     with pytest.raises(NormalizeError, match="multi-finger/multiplied"):
         normalize_reference_netlist(
-            f"XM1 d g s b nfet_03v3 L=0.5u W=1u {param}={value}\n", deck="gf180mcu"
+            f"XR1 r0 r1 sky130_fd_pr__res_generic_po l=1u w=1u {param}={value}\n",
+            deck="sky130",
+        )
+
+
+# --- MOS `m` native expansion (issue #3123) --------------------------------- #
+
+
+def test_normalize_mos_m_expands_to_parallel_cards():
+    out = normalize_reference_netlist(
+        "XM1 d g s b nfet_03v3 L=0.5u W=1u m=3\n", deck="gf180mcu"
+    )
+    assert out.strip().splitlines() == [
+        "M1_m0 d g s b nfet L=0.5U W=1U",
+        "M1_m1 d g s b nfet L=0.5U W=1U",
+        "M1_m2 d g s b nfet L=0.5U W=1U",
+    ]
+
+
+def test_normalize_mos_sky130_m_and_mult_ignores_mult():
+    # The reporter's card: `mult` is mismatch-only in the sky130 model
+    # subckt, so m=2 mult=2 is two devices, not four.
+    out = normalize_reference_netlist(
+        "X1 d g s b sky130_fd_pr__nfet_01v8 L=1.2 W=7.82 nf=1 mult=2 m=2\n",
+        deck="sky130",
+    )
+    lines = out.strip().splitlines()
+    assert len(lines) == 2
+    assert lines[0].startswith("X1_m0 ") or lines[0].startswith("M1_m0 ")
+    assert all("W=7.82U" in line for line in lines)
+
+
+def test_normalize_mos_nf_and_m_combine():
+    out = normalize_reference_netlist(
+        "XM1 d g s b nfet_03v3 L=0.5u W=3u nf=3 m=2\n", deck="gf180mcu"
+    )
+    lines = out.strip().splitlines()
+    assert [ln.split()[0] for ln in lines] == [
+        "M1_m0_f0",
+        "M1_m0_f1",
+        "M1_m0_f2",
+        "M1_m1_f0",
+        "M1_m1_f1",
+        "M1_m1_f2",
+    ]
+    # total width m*W = 6u over 6 cards
+    assert all("W=1U" in ln for ln in lines)
+
+
+@pytest.mark.parametrize("value", ["2.5", "0", "-1", "abc"])
+def test_normalize_mos_m_invalid_is_error(value):
+    with pytest.raises(NormalizeError, match="parameter 'm'|m="):
+        normalize_reference_netlist(
+            f"XM1 d g s b nfet_03v3 L=0.5u W=1u m={value}\n", deck="gf180mcu"
+        )
+
+
+def test_normalize_mos_mult_non_numeric_is_error():
+    with pytest.raises(NormalizeError, match="'mult' value 'abc' is not numeric"):
+        normalize_reference_netlist(
+            "XM1 d g s b nfet_03v3 L=0.5u W=1u mult=abc\n", deck="gf180mcu"
         )
 
 
@@ -11080,13 +11226,13 @@ def test_normalize_mos_nf_non_numeric_rejected():
         )
 
 
-def test_normalize_mos_nf_expands_but_mult_still_rejected():
-    # `nf` (finger folding) expands; `mult` (whole-device replication) is a
-    # different real-world knob and is still rejected on the same call.
-    with pytest.raises(NormalizeError, match="multi-finger/multiplied"):
-        normalize_reference_netlist(
-            "XM1 d g s b nfet_03v3 L=0.5u W=1u nf=2 mult=2\n", deck="gf180mcu"
-        )
+def test_normalize_mos_nf_expands_and_mult_is_ignored():
+    # `nf` (finger folding) expands; `mult` is mismatch-only (issue #3123)
+    # and does not change the device count.
+    out = normalize_reference_netlist(
+        "XM1 d g s b nfet_03v3 L=0.5u W=1u nf=2 mult=2\n", deck="gf180mcu"
+    )
+    assert len(out.strip().splitlines()) == 2
 
 
 def test_normalize_resistor_nf_still_rejected():

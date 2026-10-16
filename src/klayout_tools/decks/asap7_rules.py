@@ -495,7 +495,9 @@ NOT_IMPLEMENTED: tuple[Asap7RuleGap, ...] = (
     Asap7RuleGap(
         "ACTIVE.LUP.1",
         "Table 3.5.2",
-        "latch-up distance (30 um) needs tap/device classification",
+        "DRM-confirmed 30 um maximum, but the DRM defines no tap layer, "
+        "distance metric or connectivity test; no sound predicate yet "
+        "(evidence: docs/cli/drc.md)",
         "#2812",
     ),
     Asap7RuleGap("SRAM.NSELECT.ACTIVE.EN.3", "Table 3.7.1", _SRAM, "#2812"),

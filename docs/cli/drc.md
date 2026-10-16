@@ -1019,6 +1019,13 @@ sizes, not ranges.
 | `sg13g2` | `cont.width.1`, `via1.width.1`–`via4.width.1`, `topvia1.width.1`, `topvia2.width.1` | `cont_sq.without_bbox_width(0.16um)` / `<layer>_nseal.without_bbox_min/max(...)` |
 | `sky130` | `via.width.1`, `via2.width.1`, `via3.width.1`, `via4.width.1` | `via_not_mt.drc(length > 0.15)` (`via.1a_b`) / the `via2.1a_b`, `via3.1_b`, `via4.1_b` max-length halves (0.2 / 0.2 / 0.8 um) |
 
+sg13g2's `cont.width.1` (and `cont.space.1`) set `layer_selection="squares"`
+(issues #2943, #3139), mirroring upstream's `cont_sq`: only square merged Cont
+polygons are measured, so contact bars and rows of abutting 0.16 µm contacts
+(drawn inside the PDK's own `npn13G2`/`rsil` cells) are not reported as one
+oversized contact. They belong to the PDK's separate `CntB.*` family, which
+this deck does not yet transcribe.
+
 sg13g2's `cont.width.1`/`via1.width.1`–`via4.width.1` and sky130's
 `via.width.1` were first deferred behind issue #2585: `klt gen` and
 `klt gen compose` drew every cut at a PDK-generic `gen.CONTACT_SIZE_UM`
@@ -1297,6 +1304,20 @@ official well rules — `nwell`'s enclosure of opposite-type diffusion/tap
 boolean expression no `klt gen` generator draws today) — are deliberately
 **not** transcribed; see the "nwell (well-layer) rule coverage" note in
 `sky130.py`'s own module docstring for the full reasoning.
+
+**Precision-poly-resistor head rules are not checked (issue #3077).** The
+deck has no rule for the contacts on a precision poly resistor's heads:
+`licon.1b` (0.19 µm contact width) and `licon.1c` (2.0 µm contact length,
+and the 2.16 µm poly-contact-extension that `sky130A.tech`'s DRC reports as
+"poly contact extends poly resistor by < 2.16um"), nor `rpm.1`'s minimum
+mask width. `licon.1`'s own 0.17 µm minimum is merely exempted for these
+licons by an approximation (see the `licon1.width.1` note below), not
+replaced by `licon.1b/c`. A `klt gen res_array` `high`/`xhigh` cell therefore
+reads `clean` here while the PDK's own Magic `drc(full)` still reports those
+head rules; a `klt drc --deck sky130` pass is not evidence the heads meet
+them. `klt drc --engine klayout` (the PDK's own `sky130A_mr.drc`) is the
+independent check. This gap is documentation-only: no field of the JSON
+`coverage` object changes.
 
 Nine of these rules approximate official rules our engine cannot transcribe
 literally. `diff.width.1` and `tap.width.1` (issue #2321) are the two
@@ -2211,7 +2232,7 @@ Nothing in Tables 3.14-3.19 is left out for want of mask colouring.
 | `SRAM.ACTIVE.WELL.S.5`, `SRAM.ACTIVE.WELL.EN.2` | Table 3.5.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
 | `SRAM.ACTIVE.A.2A`, `SRAM.ACTIVE.A.2B`, `SRAM.ACTIVE.AUX.2` | Table 3.5.2 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
 | `ACTIVE.AUX.3` | Table 3.5.2 | the DRM gives no distance bound to check against | #2812 |
-| `ACTIVE.LUP.1` | Table 3.5.2 | latch-up distance (30 um) needs tap/device classification | #2812 |
+| `ACTIVE.LUP.1` | Table 3.5.2 | DRM-confirmed 30 um maximum, but the DRM defines no tap layer, distance metric or connectivity test; no sound predicate yet (evidence: [ACTIVE.LUP.1 evidence](#activelup1-evidence)) | #2812 |
 | `SRAM.NSELECT.ACTIVE.EN.3`, `SRAM.NSELECT.ACTIVE.EN.4` | Table 3.7.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
 | `SRAM.SDT.W.4`, `SRAM.SDT.ACTIVE.OV.3`, `SRAM.SDT.LISD.OV.4` | Table 3.8.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
 | `SRAM.LISD.S.4`, `SRAM.LISD.AUX.1` | Table 3.9.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
@@ -2252,6 +2273,55 @@ Nothing in Tables 3.14-3.19 is left out for want of mask colouring.
 | `M9.S.4` | Table 3.18.1 | read literally (edge length) it overrides M8.S.2-S.3: an edge of 60-80 nm would need 60 nm, so S.2's 43 nm and S.3's 46 nm could never apply to it; the intended width-class reading is not stated | #3156 |
 | `M9.S.5`, `M9.S.6`, `M9.S.7`, `M9.S.8` | Table 3.18.2 | read literally (edge length) they override M8.S.1-S.3: every edge of 80 nm or more would need 80-1000 nm, so S.1's 40 nm could never apply; the intended width-class reading is not stated | #3156 |
 | `V9.PAD.EN.2`, `V9.AUX.1` | Table 3.19.1 | PAD (DRM mask 96) is not a layer of the pinned asap7.lyp, so the deck does not read it | #3156 |
+
+### ACTIVE.LUP.1 evidence
+
+`ACTIVE.LUP.1` stays in the not-implemented list; this section records why,
+from the pinned `asap7_drm_201207a.pdf` (page 32, Table 3.5.2): "Maximum
+distance, to prevent latch-up, between ACTIVE forming a MOS device and ACTIVE
+forming a bulk/substrate contact within the same WELL/substrate", operator
+`<=`, value `30 um`. The 30 um inherited from the manifest is confirmed.
+Nothing here changes the deck, the rule categories or the
+`--expect-rule-categories` count.
+
+What the DRM states, and what a predicate would need that it does not:
+
+| Needed for a predicate | DRM says | Verdict |
+| --- | --- | --- |
+| MOS ACTIVE | "ACTIVE forming a MOS device" | no layer; ACTIVE crossed by GATE is the natural reading |
+| Tap ACTIVE | "ACTIVE forming a bulk/substrate contact" | no tap layer or marker; the class has to be inferred from select polarity vs. well type |
+| Well / substrate | WELL is the N-well (Table 2.1.1, page 11); "substrate" is everything outside it | usable: inside one WELL polygon, or outside every WELL |
+| Distance metric | `<= 30 um` only | **information deficit**: edge-to-edge Euclidean, Manhattan, Chebyshev or centre-to-centre all fit the text and disagree on diagonal pairs |
+| Connectivity | none stated | **information deficit**: whether the tap must be wired to a supply (net connectivity, as `ACTIVE.S.2A`) or only drawn is not said |
+
+`tests/helpers/asap7_drc_fixtures.py` generates one isolated layout per
+experiment (`latchup_experiments()`), so no other case can supply a tap, and
+`tests/test_drc_asap7_deck.py` classifies the *written* layout with a
+reference predicate (`latchup_reference()`) under each candidate metric:
+
+- eligible MOS-to-tap pairs for an NMOS (`PSELECT` tap outside WELL) and a
+  PMOS (`NSELECT` tap in the same WELL), at 5 um and exactly at 30 um;
+- ineligible controls: a tap 1 dbu (0.25 nm) past 30 um, an ordinary
+  active-to-active neighbour (another MOS), a same-polarity (wrong-class)
+  tap, a tap of the right class in the wrong well, and a PMOS whose tap sits
+  in a different WELL;
+- diagonal pairs at 21 um / 22 um in both axes (edge-to-edge 29.7 um / 31.1
+  um Euclidean, 42 um / 44 um Manhattan, 21 um / 22 um Chebyshev): the
+  verdict flips with the metric, which is the information deficit above made
+  concrete.
+
+Follow-up acceptance criteria if the missing definitions are established
+(a separately reviewed change; none is met today):
+
+1. A source (DRM erratum, foundry confirmation or the pinned cells'
+   behaviour) fixes the metric and whether the tap needs net connectivity.
+2. The deck classifies MOS ACTIVE (GATE-crossed) and tap ACTIVE (select
+   polarity vs. WELL) with the bounded 30 um predicate, and `ACTIVE.LUP.1`
+   moves from the gap list to `RULES` with a fail and a boundary pass fixture.
+3. The pinned shipped-cell regression stays clean, or any new deviation is
+   added to `SHIPPED_CELL_DEVIATIONS` with explicit cell/rule/DRM evidence;
+   single standard cells carry no tap, so the check needs the placed-row
+   context (`TAPCELL_WITH_FILLER`) rather than a per-cell run.
 
 ### Shipped standard cells
 

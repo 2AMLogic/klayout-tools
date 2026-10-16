@@ -2013,6 +2013,55 @@ A citation of any other kind renders `"unmet"` with `reason: "wrong_kind"`,
 exactly as it already did for items 3, 4 and 7 — the cited check did not
 fail on its own terms, it simply does not prove what the item requires.
 
+#### Item 5 with several citations and declared spec rows (issue #2959)
+
+One `klt sim` request is one netlist and one analysis, so a spec needing
+several testbenches has several envelopes. Item 5's `evidence` entry may
+therefore be a **list** of ordinary file/command citations, each optionally
+carrying `rows` (the spec-row ids it covers); the manifest may declare the
+row set under a top-level `spec_rows`, keyed by item id:
+
+```json
+{
+  "evidence": {
+    "5": [
+      {"file": "sim/decision_time.json", "rows": ["t_dec"]},
+      {"file": "sim/source_impedance.json", "rows": ["z_in"]}
+    ]
+  },
+  "spec_rows": {
+    "5": [
+      {"id": "t_dec"},
+      {"id": "z_in"},
+      {"id": "noise_mc", "gap": "statistical reduction a klt sim request cannot express"}
+    ]
+  }
+}
+```
+
+Each citation is graded independently through the usual path (kind
+restriction, `content_hash` staleness, `input_verified`); only aggregation is
+new. Outcomes:
+
+- any citation fails -> `unmet` with that citation's `reason` (e.g.
+  `check_failed`); `detail.failed_citations` names the failing envelopes and,
+  when `spec_rows` is declared, `detail.failed_rows` lists their rows;
+- all pass but a declared row is uncovered or a `gap` -> `unmet` /
+  `partial_coverage`, with `detail.uncovered_rows`, `detail.failed_rows` and
+  `detail.declared_gaps` (`[{id, gap}]`) reported separately -- a gap is never
+  covered;
+- otherwise `met`; `citation` is the first citation, `citations` lists all,
+  and `row_coverage` is present when `spec_rows` was declared;
+- a malformed list, an empty list, malformed `spec_rows`, duplicate row ids,
+  or a citation naming an undeclared or `gap` row -> `unmet` /
+  `invalid_evidence` for item 5 only.
+
+Every list-form item also carries `citations_graded` (per-citation status).
+Without `spec_rows`, several passing citations grade `met` as the union of
+their verdicts. A single string/dict entry with no `spec_rows` renders
+exactly as before. The list form is item 5 only; the same `spec_rows`
+schema is meant to be reused by item 6 (#2908).
+
 #### Item 6's evidence needs a from-source toolchain (issue #2466)
 
 Item 6 accepts only a `yield` envelope, and `klt yield` requires the

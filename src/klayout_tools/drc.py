@@ -158,6 +158,10 @@ _DERIVED_LAYER_MODES = {
 # silently check a different population" reason as `_DERIVED_LAYER_MODES`.
 _OTHER_LAYER_SELECTIONS = {"squares"}
 
+# Every `DrcRule.layer_selection` value (the primary-layer counterpart of
+# `_OTHER_LAYER_SELECTIONS`, issues #2943/#3139).
+_LAYER_SELECTIONS = {"squares"}
+
 # `run_drc()`'s own field name -> its declared METRICS2.1-style name in
 # `metrics.py`'s registry (issue #1847, adopting the #247 registry beyond its
 # `layout-metrics` pilot). Additive: the `metrics` block this backs is a
@@ -550,6 +554,21 @@ def _select_other_region(rule: DrcRule, other_region: Any) -> Any:
     if rule.other_layer_selection == "squares":
         return other_region.merged().squares()
     return other_region
+
+
+def _select_primary_region(rule: DrcRule, region: Any) -> Any:
+    """Apply ``rule.layer_selection`` to the rule's own ``layer`` region;
+    returned unchanged when no selection is set.
+
+    ``"squares"`` mirrors :func:`_select_other_region`: the *merged* layer
+    filtered by ``Region.squares()``, so a contact bar -- or a row of
+    abutting legal contacts that merges into one strip -- is dropped
+    (``cont_sq = cont.not(cont.non_squares)`` in the IHP runset) rather than
+    measured as a single oversized contact.
+    """
+    if rule.layer_selection == "squares":
+        return region.merged().squares()
+    return region
 
 
 def _rule_outside_voltage_gate(
@@ -1246,6 +1265,7 @@ def run_drc(
         _validate_threshold_max(rule)
         _validate_require_containment(rule)
         _validate_other_layer_selection(rule)
+        _validate_layer_selection(rule)
 
         # Gates that skip a rule before any layer resolution below -- see
         # `_rule_skipped_before_evaluation` for each one and why. Like a
@@ -1329,10 +1349,11 @@ def run_drc(
                     layout.dbu,
                 )
             else:
-                region = (
+                region = _select_primary_region(
+                    rule,
                     kdb.Region(cell.begin_shapes_rec(layer_index))
                     if layer_index is not None
-                    else kdb.Region()  # absent conductor (#2726)
+                    else kdb.Region(),  # absent conductor (#2726)
                 )
             other_region = (
                 _select_other_region(
@@ -2209,6 +2230,26 @@ def _validate_other_layer_selection(rule: DrcRule) -> None:
             raise DrcError(
                 f"rule '{rule.id}': other_layer_selection requires other_layer"
             )
+
+
+def _validate_layer_selection(rule: DrcRule) -> None:
+    """Reject a ``layer_selection`` this engine cannot apply (issues
+    #2943/#3139): an unknown value, or one on a ``derived_layer`` rule (whose
+    checked region is not the rule's own drawn ``layer``). Same "fail loudly
+    with the rule id" contract as :func:`_validate_other_layer_selection`.
+    """
+    selection = rule.layer_selection
+    if selection is None:
+        return
+    if selection not in _LAYER_SELECTIONS:
+        raise DrcError(
+            f"rule '{rule.id}': unknown layer_selection "
+            f"'{selection}' (known: {', '.join(sorted(_LAYER_SELECTIONS))})"
+        )
+    if rule.derived_layer is not None:
+        raise DrcError(
+            f"rule '{rule.id}': layer_selection cannot be combined with derived_layer"
+        )
 
 
 def _validate_threshold_max(rule: DrcRule) -> None:
