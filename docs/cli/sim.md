@@ -3317,6 +3317,72 @@ recovered from it. `transfer` grades one stability metric of the complex ratio
 | `transfer_metric_unavailable` | The metric has no value (e.g. no falling 0 dB crossing, zero denominator); the message names the `sim_transfer` reason. |
 
 The entry also carries an additive `transfer` object `{num, den, metric}`.
+
+### Margins at every crossing (`phase_margin_min_deg`, `gain_margin_min_db`, `encirclement_count`)
+
+Three more `metric` tokens run [`analyze_margins`](#stability-margins-at-every-crossing-analyze_margins-issue-3088)
+on the same complex `num / den` columns (same rawfile, same local-only rule;
+the six tokens above are unchanged):
+
+| `metric` | `value` | Limit |
+|---|---|---|
+| `phase_margin_min_deg` | minimum phase margin over **every** 0 dB crossing, modulo 360 | `limits.min` |
+| `gain_margin_min_db` | minimum gain margin over **every** -180 degree crossing | `limits.min` |
+| `encirclement_count` | clockwise encirclements of -1 (`2 x` net ray crossings); open-loop-stable loop: `0` is stable | `limits.max: 0` |
+
+A complete request (a conditionally stable loop whose first crossing has good
+phase margin but whose minimum does not):
+
+```json
+{
+  "netlist": "loop.spice",
+  "analysis": {"kind": "ac", "args": "dec 50 1 1e9"},
+  "measurements": [
+    {"name": "pm_first", "unit": "deg", "limits": {"min": 45},
+     "transfer": {"num": "v(out)", "den": "v(in)", "metric": "phase_margin_deg"}},
+    {"name": "pm_min", "unit": "deg", "limits": {"min": 45},
+     "transfer": {"num": "v(out)", "den": "v(in)", "metric": "phase_margin_min_deg"}},
+    {"name": "gm_min", "unit": "dB", "limits": {"min": 6},
+     "transfer": {"num": "v(out)", "den": "v(in)", "metric": "gain_margin_min_db"}},
+    {"name": "nyquist", "limits": {"max": 0},
+     "transfer": {"num": "v(out)", "den": "v(in)", "metric": "encirclement_count"}}
+  ]
+}
+```
+
+Here `pm_first` can `pass` while `pm_min` is a `fail`. A margin entry's
+`transfer` sibling also carries `margins` (the full report: every crossing in
+`phase_margins[]` / `gain_margins[]`, `band`, `reasons`, `ambiguity[]`;
+`encirclement` is `"indeterminate"` when the band cannot decide it) and
+`verdict` (`pass`, `fail` or `ambiguous`, from `grade_margins` for this
+entry's own limit).
+
+Grading, in order:
+
+- A violation among the crossings actually found is a sound **`fail`**, even on
+  a shaky band (a hidden crossing can only lower a minimum).
+- A limit that is met on a band that cannot support a pass (`ambiguity[]`
+  non-empty: `top_not_below_unity`, `crossing_not_bracketed`, plateaus, invalid
+  samples, ...) is **`status: "inconclusive"`** -- never `pass`, never `fail` --
+  with a `severity: "warning"`, `code: "margin_ambiguous"` diagnostic listing
+  the reasons. The corner rolls up `inconclusive`, the top-level `inconclusive`
+  count includes it and the exit code is `4`. It is the same one-status,
+  many-reason-codes shape as `implausible_solution` (the marker is emitted,
+  never selectable in `options.fail_on_diagnostic`). Coverage records the
+  unapplied bound as skipped with reason `margin_ambiguous`.
+- A metric with no crossing (`no_zero_db_crossing` / `no_phase_crossing`) on a
+  clean band is vacuously satisfied: `value: null`, `status: "pass"` -- but
+  nothing was compared, so a run with no other checked bound reports
+  `not_checked`. Without `limits` (report-only) the entry is `status: "error"`
+  with `[transfer_metric_unavailable]`, like the first-crossing tokens, and an
+  ambiguous band never downgrades it.
+- `encirclement_count` is `null` (never `0`) when `encirclement` is
+  indeterminate, so with `limits` it grades `inconclusive`.
+
+Off-host: the new tokens are `transfer` entries, so `backend: "remote"` /
+`"batch"` requests are refused exactly as above (a single corner may use
+`--backend local`).
+
 One rawfile and one ratio computation are used per unique `num`/`den` pair, and
 the capture does not depend on `options.waveforms`.
 
@@ -5186,6 +5252,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `convergence_retry` | The record of an opt-in retry (`options.retry_on_convergence_error`, issue #2973): the unit's first attempt ended in a `nonconvergence` error, so it was re-run with tighter solver options. The message names the `.options` card used and whether the retry recovered. `severity: "warning"`; informational, it never changes the unit's status. See "Retrying a non-converged unit" below. |
 | `inconclusive` | **Emitted, never selectable.** The marker this command attaches to a corner it graded `status: "inconclusive"` because `options.fail_on_diagnostic` named a code the corner emitted (issue #2492) — the message names those code(s), so the report says *why* a corner whose numbers look fine is not being reported as a pass. `severity: "warning"`. See "Grading a recovered diagnostic as inconclusive" below. |
 | `implausible_solution` | **Emitted, never selectable.** The marker for the *other* route to `status: "inconclusive"`: a measurement's value fell outside its declared `options.node_voltage_bounds`/`measurements[].plausible_range` (issue #2493); see "Plausibility bounds" above. `severity: "warning"`, never `"error"`. |
+| `margin_ambiguous` | **Emitted, never selectable.** A third route to `status: "inconclusive"` (issue #3088): a `measurements[].transfer` margin metric met its limit but the AC band cannot support a pass (`ambiguity[]` in the entry's `transfer.margins`); see "Margins at every crossing". `severity: "warning"`, never `"error"`. |
 
 **The `measurement` code's lookup is case-insensitive** (issue #2546): a
 `.meas`/`.measure` card's own name is folded to lower-case by both engines
@@ -5542,10 +5609,11 @@ exactly which picture to open next, without re-deriving which signal a
 ## Stability margins at every crossing (`analyze_margins`, issue #3088)
 
 `klayout_tools.sim_transfer.analyze_margins` reduces a complex loop gain
-`T = numerator / denominator` to margins at **every** crossing. It is a pure
-helper (no simulator, no request/response schema change); the `klt sim`
-limit wiring lands once the `transfer` measurement form (#2923/#2724) is on
-`main`. Existing first-crossing metrics from `analyze_transfer` are unchanged.
+`T = numerator / denominator` to margins at **every** crossing. The reducer is
+a pure helper; `klt sim` exposes it through the `phase_margin_min_deg`,
+`gain_margin_min_db` and `encirclement_count` tokens of `measurements[].transfer`
+(see "AC return-ratio metrics" for the request, grading and exit codes).
+Existing first-crossing metrics from `analyze_transfer` are unchanged.
 
 | Field | Meaning |
 |---|---|

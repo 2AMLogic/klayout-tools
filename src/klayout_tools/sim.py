@@ -293,15 +293,26 @@ WAVEFORM_TOO_LARGE_CODE = "waveform_too_large"
 #: :data:`_INCONCLUSIVE_STATUS`, and how a consumer tells the two apart.
 IMPLAUSIBLE_DIAGNOSTIC_CODE = "implausible_solution"
 
+#: The marker diagnostic :func:`_margin_measurement_result` attaches to a
+#: ``transfer`` margin measurement (issue #3088) whose limit was met but whose
+#: AC band cannot support a pass -- so the corner grades
+#: :data:`_INCONCLUSIVE_STATUS` and the message lists the
+#: ``MarginReport.ambiguity`` reasons.
+MARGIN_AMBIGUOUS_DIAGNOSTIC_CODE = "margin_ambiguous"
+
 #: The codes above: emitted by the **grading** step rather than by a log
 #: classifier or an unrun-corner path, and therefore deliberately **not**
-#: members of :data:`DIAGNOSTIC_CODES`. Both are produced downstream of
+#: members of :data:`DIAGNOSTIC_CODES`. All are produced downstream of
 #: ``options.fail_on_diagnostic``'s code match on an already-inconclusive
 #: corner, so listing either there could not change any verdict; accepting
 #: them would only invite the misreading that it could. ``test_sim.py``'s
 #: drift guard derives this distinction rather than restating it.
 _GRADING_MARKER_CODES: frozenset[str] = frozenset(
-    {INCONCLUSIVE_DIAGNOSTIC_CODE, IMPLAUSIBLE_DIAGNOSTIC_CODE}
+    {
+        INCONCLUSIVE_DIAGNOSTIC_CODE,
+        IMPLAUSIBLE_DIAGNOSTIC_CODE,
+        MARGIN_AMBIGUOUS_DIAGNOSTIC_CODE,
+    }
 )
 
 #: The corner/measurement/report status token issues #2492 and #2493 add
@@ -8628,9 +8639,14 @@ def _transfer_measurement_result(
     A failure is ``status: "error"``, ``value: null`` (so it can never pass a
     limit) with a ``code: "measurement"`` diagnostic whose message starts with
     a ``[<reason>]`` token from
-    :data:`klayout_tools.sim_transfer_meas.ERROR_CODES`."""
+    :data:`klayout_tools.sim_transfer_meas.ERROR_CODES`.
+
+    The all-crossing margin tokens (issue #3088) are graded by
+    :func:`_margin_measurement_result`."""
     name = spec["name"]
     unit = spec.get("unit")
+    if outcome is not None and outcome.margins is not None:
+        return _margin_measurement_result(spec, outcome)
     if outcome is None or outcome.value is None:
         message = (
             outcome.error
@@ -8670,6 +8686,91 @@ def _transfer_measurement_result(
         "transfer": outcome.report(spec),
     }
     return result, grading_diagnostics
+
+
+def _margin_measurement_result(
+    spec: dict[str, Any], outcome: sim_transfer_meas.TransferOutcome
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """A ``transfer`` margin-metric entry (issue #3088).
+
+    ``value`` is graded through :func:`_grade_measurement_value` like any
+    scalar, then the AC band's verdict is applied: a limit that is *met* on a
+    band that cannot support a pass is :data:`_INCONCLUSIVE_STATUS` with a
+    :data:`MARGIN_AMBIGUOUS_DIAGNOSTIC_CODE` warning -- never ``pass`` -- and a
+    violation is a sound ``fail`` only when ``grade_margins`` found it among
+    the crossings actually seen (a hidden crossing can only lower a minimum).
+    A metric with no crossing at all is vacuously ``pass`` on a clean band.
+    Without ``limits`` the entry is report-only and the band never downgrades
+    it; a valueless metric is then an ordinary ``transfer_metric_unavailable``
+    error."""
+    assert outcome.margins is not None
+    name = spec["name"]
+    metric = spec["transfer"]["metric"]
+    limits = spec.get("limits") or {}
+    has_limits = limits.get("min") is not None or limits.get("max") is not None
+    ambiguity = outcome.margins.ambiguity
+    diagnostics: list[dict[str, Any]] = []
+    status: str
+    margin: float | None = None
+    downgrade = False
+    if outcome.value is None:
+        if has_limits and sim_transfer_meas.is_vacuous(outcome, spec):
+            status = "pass"
+        elif has_limits and ambiguity:
+            status, downgrade = _INCONCLUSIVE_STATUS, True
+        else:
+            reason = sim_transfer_meas.unavailable_reason(outcome, metric)
+            return (
+                {
+                    "name": name,
+                    "value": None,
+                    "unit": spec.get("unit"),
+                    "status": "error",
+                    "margin": None,
+                    "transfer": outcome.report(spec),
+                },
+                [
+                    {
+                        "severity": "error",
+                        "code": "measurement",
+                        "message": (
+                            f"[transfer_metric_unavailable] measurement "
+                            f"'{name}': {metric} is unavailable ({reason})"
+                        ),
+                    }
+                ],
+            )
+    else:
+        status, margin, diagnostics = _grade_measurement_value(spec, outcome.value)
+        if (
+            has_limits
+            and ambiguity
+            and (status == "pass" or (status == "fail" and outcome.verdict != "fail"))
+        ):
+            status, margin, downgrade = _INCONCLUSIVE_STATUS, None, True
+    if downgrade:
+        diagnostics.append(
+            {
+                "severity": "warning",
+                "code": MARGIN_AMBIGUOUS_DIAGNOSTIC_CODE,
+                "message": (
+                    f"measurement {name!r}: {metric} cannot be graded -- the AC "
+                    f"band is ambiguous ({', '.join(ambiguity)}) -- graded "
+                    f"{_INCONCLUSIVE_STATUS} rather than pass/fail"
+                ),
+            }
+        )
+    return (
+        {
+            "name": name,
+            "value": outcome.value,
+            "unit": spec.get("unit"),
+            "status": status,
+            "margin": margin,
+            "transfer": outcome.report(spec),
+        },
+        diagnostics,
+    )
 
 
 def _energy_measurement_result(
@@ -10320,7 +10421,14 @@ def _measurement_coverage(
             # specifically (not the merged `inconclusive` status), because
             # that is the question a coverage reader is asking: which bound
             # was never applied, and why.
-            skipped.append({"id": bound_id, "reason": IMPLAUSIBLE_DIAGNOSTIC_CODE})
+            # Issue #3088: an ambiguous AC band (not a plausibility bound) is
+            # the other route here, and its skip names the real cause.
+            reason = (
+                MARGIN_AMBIGUOUS_DIAGNOSTIC_CODE
+                if (measurement.get("transfer") or {}).get("verdict") == "ambiguous"
+                else IMPLAUSIBLE_DIAGNOSTIC_CODE
+            )
+            skipped.append({"id": bound_id, "reason": reason})
         elif not measured:
             skipped.append({"id": bound_id, "reason": "unavailable_measurement"})
         else:

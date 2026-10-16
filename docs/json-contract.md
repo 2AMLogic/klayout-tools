@@ -110,6 +110,21 @@ one) — the "new optional member, absent when not applicable" rule above.
 No `schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s
 "Threshold-crossing time series (`measurements[].crossings`)".
 
+`measurements[].transfer` (issues #2923, #3088) gains three `metric` tokens —
+`phase_margin_min_deg`, `gain_margin_min_db`, `encirclement_count` — that reduce
+the AC ratio at **every** crossing. Additive only: the six earlier tokens and
+their entries are byte-identical, a margin entry's `transfer` sibling gains
+optional `margins` (the full per-crossing report: `phase_margins[]`,
+`gain_margins[]`, `band`, `reasons`, `ambiguity[]`) and `verdict`
+(`pass`/`fail`/`ambiguous`) members, and an ambiguous AC band grades the entry
+(and its corner) with the **existing** `status: "inconclusive"` (exit `4`)
+plus a new `severity: "warning"` marker diagnostic `code: "margin_ambiguous"` —
+the same one-status-many-reasons shape as `implausible_solution`, so the
+`passed + failed + errored + inconclusive == corner_count` invariant holds. No
+`schema_version` bump, and `docs/schemas/sim-set-report.schema.json` (the
+`--batch-set` aggregate, which only references per-request reports by path) is
+unchanged. See [`docs/cli/sim.md`](cli/sim.md)'s "AC return-ratio metrics".
+
 `klt sim` also gains an additive `environment.netlist_identity` (normalised,
 comment/whitespace/path-insensitive netlist-closure hash; `null` plus
 `netlist_identity_error` when not computable) and an optional request field
