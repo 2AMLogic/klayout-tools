@@ -1627,6 +1627,15 @@ def test_corner_slug_bounded_multibyte_keys():
     assert len(point.slug.encode()) < 255 - len("__probe")
 
 
+def test_corner_slug_params_axis_bounds_pvt_prefix():
+    pvt = sim.CornerPoint("typical", _long_supply(), 27).corner_id
+    corner_id = f"{pvt}/params:w=1.5,l=0.15"
+    slug = sim._slugify_corner_id(corner_id)
+    assert len(slug.encode()) < 255 - len("__probe")
+    assert slug.endswith("_params_" + hashlib.sha256(corner_id.encode()).hexdigest())
+    assert slug != sim._slugify_corner_id(f"{pvt}/params:w=1.6,l=0.15")
+
+
 def test_run_sim_keep_artifacts_many_supply_keys(tmp_path, monkeypatch):
     supply = _long_supply()
     (tmp_path / "body.spice").write_text(

@@ -7820,6 +7820,19 @@ def _effective_threads_per_worker(
     return None
 
 
+def _write_corner_manifest(corner_dir: str, point: CornerPoint) -> None:
+    """Record the full ``corner_id`` in ``corner.json`` when the directory
+    slug is not the readable form (bounded or parameter-axis slugs)."""
+    if point.slug == point.readable_slug:
+        return
+    with open(os.path.join(corner_dir, "corner.json"), "w", encoding="utf-8") as handle:
+        json.dump(
+            {"corner_id": point.corner_id, "readable_slug": point.readable_slug},
+            handle,
+            indent=2,
+        )
+
+
 def _run_corner(
     *,
     extra_options_card: str | None = None,
@@ -7893,18 +7906,7 @@ def _run_corner(
     if keep_artifacts:
         corner_dir = os.path.join(artifacts_dir, point.slug)
         os.makedirs(corner_dir, exist_ok=True)
-        if point.slug != point.readable_slug:
-            with open(
-                os.path.join(corner_dir, "corner.json"), "w", encoding="utf-8"
-            ) as handle:
-                json.dump(
-                    {
-                        "corner_id": point.corner_id,
-                        "readable_slug": point.readable_slug,
-                    },
-                    handle,
-                    indent=2,
-                )
+        _write_corner_manifest(corner_dir, point)
     else:
         corner_dir = _tmp_work_dir()
 
@@ -11294,13 +11296,23 @@ _SLUG_PREFIX_BYTES = 80
 _SLUG_HASH_CHARS = 12
 
 
+def _bound_slug(readable: str) -> str:
+    """Cut ``readable`` to ``_SLUG_PREFIX_BYTES`` UTF-8 bytes when it exceeds
+    ``_SLUG_MAX_BYTES``; shorter slugs are returned unchanged."""
+    encoded = readable.encode("utf-8")
+    if len(encoded) <= _SLUG_MAX_BYTES:
+        return readable
+    return encoded[:_SLUG_PREFIX_BYTES].decode("utf-8", errors="ignore")
+
+
 def _slugify_corner_id(corner_id: str) -> str:
     """Filesystem-safe, bounded transform of a corner's own ``corner_id``
     (e.g. ``ss/1.620V/125C`` -> ``ss_1p620V_125C``). Shared by
     :attr:`CornerPoint.slug` and the plot writer (which only has the report
     dict's ``corner_id``) so the two cannot drift.
 
-    A parameter point (issue #3035) keeps its PVT slug and appends the full
+    A parameter point (issue #3035) keeps its PVT slug (bounded like the
+    readable form below) and appends the full
     SHA-256 of the whole ID (MC suffix included) -- parameter values never
     reach the filesystem, so close values cannot collide and no value can
     inject a path character.
@@ -11313,13 +11325,11 @@ def _slugify_corner_id(corner_id: str) -> str:
     match = _PARAMS_ID_RE.fullmatch(corner_id)
     digest = hashlib.sha256(corner_id.encode("utf-8")).hexdigest()
     if match is not None:
-        return f"{_slugify_label(match.group('pvt'))}_params_{digest}"
+        return f"{_bound_slug(_slugify_label(match.group('pvt')))}_params_{digest}"
     readable = _readable_slug(corner_id)
-    if len(readable.encode("utf-8")) <= _SLUG_MAX_BYTES:
+    prefix = _bound_slug(readable)
+    if prefix == readable:
         return readable
-    prefix = readable.encode("utf-8")[:_SLUG_PREFIX_BYTES].decode(
-        "utf-8", errors="ignore"
-    )
     return f"{prefix}_{digest[:_SLUG_HASH_CHARS]}"
 
 
