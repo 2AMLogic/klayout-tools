@@ -62,7 +62,7 @@ def _stub(monkeypatch, *, fail_first: dict[int, str], decks: list[str]):
         attempts[index] = attempts.get(index, 0) + 1
         log = Path(cmd[cmd.index("-o") + 1])
         message = fail_first.get(index)
-        retried = ".options reltol=" in deck
+        retried = ".options reltol=0.003" in deck
         if message is not None and (attempts[index] == 1 or "always" in message):
             log.write_text(f"{message.replace('always:', '')}\n")
         else:
@@ -188,3 +188,40 @@ def test_xyce_refuses_the_option(tmp_path):
     path.write_text(json.dumps(doc))
     with pytest.raises(sim.SimError, match="retry_on_convergence_error"):
         sim.run_sim(str(path))
+
+
+def test_retry_card_is_emitted_after_body_and_ngspice_options(tmp_path, monkeypatch):
+    """The retry policy must win when two `.options` cards set the same key,
+    so its card follows `.include`, `.temp` and `options.ngspice_options`."""
+    decks: list[str] = []
+    _stub(monkeypatch, fail_first={1: "Error: time step too small"}, decks=decks)
+    sim.run_sim(
+        str(
+            _request(
+                tmp_path,
+                {
+                    "retry_on_convergence_error": True,
+                    "ngspice_options": {"reltol": 0.01, "method": "trap"},
+                },
+            )
+        )
+    )
+    retried = [
+        d for d in decks if "mc_sample_index=1" in d and ".options reltol=0.003" in d
+    ]
+    assert retried
+    for deck in retried:
+        lines = deck.splitlines()
+        retry_idx = next(
+            i
+            for i, line in enumerate(lines)
+            if line.startswith(".options reltol=0.003")
+        )
+        include_idx = next(
+            i for i, line in enumerate(lines) if line.startswith(".include")
+        )
+        temp_idx = next(i for i, line in enumerate(lines) if line.startswith(".temp"))
+        user_idx = next(
+            i for i, line in enumerate(lines) if line.startswith(".options reltol=0.01")
+        )
+        assert retry_idx > max(include_idx, temp_idx, user_idx)

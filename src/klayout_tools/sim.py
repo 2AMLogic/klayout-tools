@@ -7198,10 +7198,6 @@ def _write_corner_deck(
     byte-identical deck to before that issue.
     """
     lines = ["* klt sim -- generated corner deck, do not edit"]
-    if extra_options_card is not None:
-        # Issue #2973: the solver options of a convergence retry. `.options`
-        # is global, so its position relative to `.lib` is immaterial.
-        lines.append(extra_options_card)
     if point.mc_seed is not None:
         # `.options seed=` is ngspice's documented mechanism for seeding the
         # AGAUSS/GAUSS/random() functions a mismatch-aware model library's
@@ -7229,6 +7225,13 @@ def _write_corner_deck(
         # Issue #3111: `options.ngspice_options`, after `.temp`; omitted
         # entirely when unset so existing decks stay byte-identical.
         lines.append(options_card)
+    if extra_options_card is not None:
+        # Issue #2973: the solver options of a convergence retry. Emitted
+        # last of the `.options` cards (after the netlist body's `.include`
+        # and `options.ngspice_options`) so that, when two cards set the
+        # same key, the retry policy wins and the second attempt actually
+        # differs from the first.
+        lines.append(extra_options_card)
 
     for spec in measurements_spec:
         if spec.get("spice") is not None:
