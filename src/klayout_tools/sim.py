@@ -6359,22 +6359,9 @@ def _run_corner(
         {d["code"] for d in diagnostics if d["code"] in fail_on_diagnostic}
     )
 
-    # Issue #3246: a waveform-capture-only `tran` request (no `measurements[]`)
-    # has no measurement to confirm completion, so the captured waveform
-    # itself is the independent signal -- parsed here, ahead of the downgrade,
-    # and handed on to the artifact step below so the rawfile is read once.
-    waveform: dict[str, Any] | None = None
-    if (
-        not measurements_spec
-        and raw_path is not None
-        and any(d["code"] in ("singular_matrix", "nonconvergence") for d in diagnostics)
-        and os.path.isfile(raw_path)
-    ):
-        try:
-            waveform = parse_ascii_rawfile(raw_path)
-        except (SimError, ValueError):
-            waveform = None  # truncated/unparseable: stays fatal; see below
-    waveform_complete = _waveform_reached_tran_window(waveform, analysis)
+    waveform_complete = _capture_only_waveform_complete(
+        measurements_spec, raw_path, diagnostics, analysis
+    )
 
     if _recovered_from_stepping(
         measurements_spec,
@@ -6383,14 +6370,7 @@ def _run_corner(
         aborted_re=(_XYCE_SIMULATION_ABORTED_RE if is_xyce else _SIMULATION_ABORTED_RE),
         waveform_complete=waveform_complete,
     ):
-        for diagnostic in diagnostics:
-            if diagnostic["code"] in ("singular_matrix", "nonconvergence"):
-                diagnostic["severity"] = "warning"
-                if not measurements_spec:
-                    diagnostic["message"] += (
-                        " (treated as recovered: the captured waveform "
-                        "reached the transient stop time)"
-                    )
+        _downgrade_stepping_diagnostics(diagnostics, bool(measurements_spec))
 
     status = _grade_corner(diagnostics, measurement_results, disqualifying)
 
@@ -8230,6 +8210,50 @@ def _recovered_from_stepping(
     if aborted_re.search(log_text):
         return False
     return True
+
+
+def _capture_only_waveform_complete(
+    measurements_spec: list[dict[str, Any]],
+    raw_path: str | None,
+    diagnostics: list[dict[str, Any]],
+    analysis: dict[str, Any],
+) -> bool:
+    """Issue #3246: for a waveform-capture-only ``tran`` request (no
+    ``measurements[]``) the captured waveform is the independent completion
+    signal. Parse the rawfile -- only when a ``singular_matrix`` /
+    ``nonconvergence`` diagnostic makes it matter -- and report whether it
+    reached the transient stop time. A truncated/unparseable rawfile stays
+    fatal (``False``).
+    """
+    if (
+        measurements_spec
+        or raw_path is None
+        or not any(
+            d["code"] in ("singular_matrix", "nonconvergence") for d in diagnostics
+        )
+        or not os.path.isfile(raw_path)
+    ):
+        return False
+    try:
+        waveform = parse_ascii_rawfile(raw_path)
+    except (SimError, ValueError):
+        return False
+    return _waveform_reached_tran_window(waveform, analysis)
+
+
+def _downgrade_stepping_diagnostics(
+    diagnostics: list[dict[str, Any]], has_measurements: bool
+) -> None:
+    """Downgrade recovered ``singular_matrix``/``nonconvergence`` diagnostics
+    to warnings; a capture-only corner also gets the reason appended."""
+    for diagnostic in diagnostics:
+        if diagnostic["code"] in ("singular_matrix", "nonconvergence"):
+            diagnostic["severity"] = "warning"
+            if not has_measurements:
+                diagnostic["message"] += (
+                    " (treated as recovered: the captured waveform "
+                    "reached the transient stop time)"
+                )
 
 
 def _waveform_reached_tran_window(
