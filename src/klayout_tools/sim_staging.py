@@ -237,7 +237,8 @@ class StagedModelAsset:
     ``options.osdi_preload`` binary) or ``"dependency"`` (reached through a
     library's ``.include``/``.lib``). ``sha256`` hashes the bytes the worker
     actually receives -- the rewritten text when ``rewritten`` is true, the
-    source file's own bytes otherwise.
+    source file's own bytes otherwise; ``source_sha256`` always hashes the
+    original source bytes (equal to ``sha256`` when ``rewritten`` is false).
     """
 
     name: str
@@ -246,6 +247,7 @@ class StagedModelAsset:
     source_path: str
     sha256: str
     rewritten: bool
+    source_sha256: str = ""
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -254,6 +256,7 @@ class StagedModelAsset:
             "kind": self.kind,
             "sha256": self.sha256,
             "rewritten": self.rewritten,
+            "source_sha256": self.source_sha256 or self.sha256,
         }
 
 
@@ -594,6 +597,7 @@ def _stage_model_closure(
                 source_path=item.local_path,
                 sha256=_staged_sha256(staged),
                 rewritten=staged.content is not None,
+                source_sha256=_file_sha256(item.local_path),
             )
         )
 
@@ -759,12 +763,15 @@ def _rewrite_worker_request(
 
 
 def _staged_sha256(staged: StagedFile) -> str:
-    digest = hashlib.sha256()
     if staged.content is not None:
-        digest.update(staged.content.encode("utf-8"))
-        return digest.hexdigest()
+        return hashlib.sha256(staged.content.encode("utf-8")).hexdigest()
     assert staged.local_path is not None
-    with open(staged.local_path, "rb") as handle:
+    return _file_sha256(staged.local_path)
+
+
+def _file_sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
         for chunk in iter(lambda: handle.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest()

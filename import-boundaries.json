@@ -149,6 +149,7 @@
         "klayout_tools.extract_finfet",
         "klayout_tools.extract_hierarchy",
         "klayout_tools.extract_parasitics",
+        "klayout_tools.extract_netselect",
         "klayout_tools.extract_passive_regions",
         "klayout_tools.extract_progress",
         "klayout_tools.extract_report",
@@ -428,6 +429,7 @@
         "klayout_tools.sim_crossings",
         "klayout_tools.sim_cycle_mean",
         "klayout_tools.sim_decks",
+        "klayout_tools.sim_energy",
         "klayout_tools.sim_merge",
         "klayout_tools.sim_mismatch_gate",
         "klayout_tools.sim_plot",
@@ -715,6 +717,11 @@
       "consumer": "extract",
       "exporter": "place_and_route",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "extract",
+      "exporter": "power",
+      "reason": "Issue #2981: the terminal-pair effective-resistance adapter in extract_resistance_graph is deliberately built on the public ir_solver.solve_ir_drop, so extraction and klt power share one resistor-network solver."
     },
     {
       "consumer": "functional_verification",

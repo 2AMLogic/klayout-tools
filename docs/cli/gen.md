@@ -737,6 +737,26 @@ flags it as anonymous/unbiased the way it does a floating PMOS body — there
 is no equivalent `unbiased_nmos_body_nets[]` check for `flavor="nfet"` to
 satisfy.
 
+`mos_cap` (issue #3283) draws each unit as a **MOS capacitor** instead of a
+transistor: gate over diffusion with every source/drain segment tied into a
+single local-metal strap, plus the PDK's MOS-capacitor marker layer drawn
+over the array (`gf180mcu`: `MOS_CAP_MK`, `166/5`, matching the official
+gf180mcu DRC deck's `mos_cap_mk = get_polygons(166, 5)`). Ports are `U<i>_SD` (the tied S/D strap, metal) and `U<i>_G` (gate
+poly; with `fingers > 1` the gate pads are tied by a poly bar), and the body
+tie is the guard ring's `TAP_*` ports, so `mos_cap` **requires
+`add_guard_ring: true`** and does not support `gate_contact`.
+`finger_topology` is ignored. The width floor is **not** the flat `0.42`
+µm of a plain transistor: it is the deck's own COMP min-width rule for the
+selected oxide (`comp.width.1` = 0.22 µm thin oxide, `comp.width.mv.1` = 0.30
+µm with `voltage_flavor: "medium_voltage"` on `gf180mcu`), and a `w_um` below
+it is rejected with an error naming the rule. Below the contact-plus-
+enclosure width each S/D segment grows a diffusion landing bump above the
+channel (channel width stays `w_um`) and the gate landing pad is lifted
+clear of it. A PDK family with no MOS-capacitor marker (everything but
+`gf180mcu` today) is rejected with a `GenError`. Plain `mos_array`
+(`mos_cap: false`, the default) is unchanged. `klt extract` does not yet
+recognise the marker as a capacitor device class (#2919).
+
 `voltage_flavor` (issue #1054) is a separate, orthogonal opt-in for a PDK's
 **medium-voltage/thick-oxide transistor variant** — a common multi-voltage-
 domain process feature distinct from `flavor`'s NMOS-vs-PMOS selection. The
@@ -765,6 +785,17 @@ still draws nothing and is reported via a `drc_hints.notes` entry, never
 silently dropped. `voltage_flavor` is independent of `flavor`: requesting
 both `flavor="pfet"` and `voltage_flavor="medium_voltage"`/`"hv"`/`"hvi"`
 draws both the well and the marker with no conflict.
+
+**sky130's native-Vt NMOS (`sky130_fd_pr__nfet_05v0_nvt`) is unsupported
+(issue #2912).** `voltage_flavor="native"`/`"nvt"` on `sky130` draws no marker
+and the device extracts as a plain `nfet`; `drc_hints.notes` names the flavour
+as unsupported. The upstream `sky130.lvs` does not key it on one marker layer:
+`ngate_nvt = ngate_high_voltage.and(lvtn).not(areaid_ed).not(areaid_ce)`
+(`hvi` 75/20 AND `lvtn` 125/44), then `ngate_5p0v_nvt = ngate_nvt.not(areaid_le)
+.not_interacting(vpp)` → `nfet_05v0_nvt` (the `areaid_le` 3v3 variant is
+`nfet_03v3_nvt`), whereas `voltage_flavor` and the deck's `mos_flavours`
+express a single marker. Plan an explicit exclusion of such a device from the
+LVS comparison (see `lvs.md`, "Native-Vt NMOS is not supported on sky130").
 
 **Source/drain implant (issue #2580).** Only `gf180mcu`'s role-layer table
 declares the S/D implant roles (`"nplus"` 32/0 / `"pplus"` 31/0, issue
@@ -932,7 +963,11 @@ device additionally requires; sg13g2's `PolyRes.drawing` `(128, 0)`, plus
 the `EXTBlock`/`Res` layers its own `rsil` device additionally requires — see
 below), so `klt gen res_array`'s output is directly recognised as a resistor
 device by `klt extract --deck <pdk>` rather than being absorbed into ordinary
-poly interconnect as a short (issue #369). Neither curated *DRC* deck checks
+poly interconnect as a short (issue #369). On sg13g2 (issue #2679) the
+poly layer (`GatPoly`) is drawn as only the two end heads, abutting the
+`PolyRes` body with zero overlap, matching IHP's own `rsil`/`rppd`/`rhigh`
+PCells (where `PolyRes` is the resistive body itself) rather than one
+continuous poly bar under the marker. Neither curated *DRC* deck checks
 any of these layers, so drawing them never affects `klt drc` status. On
 sky130 (issue #491), gf180mcu (issue #2599), sg13g2 (issue #2590) and
 sg13cmos5l (issue #2602), each *dummy* unit's body segment is additionally
