@@ -425,7 +425,7 @@ def _resolve_step_measurements(
     known: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """One step's measurements, flattened and named ``<step>.<name>``."""
-    from .sim import _validate_measurement_form
+    from .sim_validate import _validate_measurement_form
 
     specs = raw.get("measurements")
     if specs is None:
@@ -503,7 +503,7 @@ def _meas_command(card: str, local: str, step: dict[str, Any]) -> str:
     ``run_sim``'s own ``.meas``-type check never sees it -- it is applied
     here instead, before the kind-match check, so a ``.meas op`` card on an
     ``op`` step is refused up front exactly like a top-level one."""
-    from .sim import _validate_meas_card
+    from .sim_validate import _validate_meas_card
 
     if "\n" in card or "\r" in card:
         raise _error(
@@ -620,7 +620,7 @@ def _resolve_derived_measurements(
 ) -> list[dict[str, Any]]:
     """The top-level ``measurements[]`` of a step request: derived ``expr``
     entries evaluated after every step, in declared order."""
-    from .sim import _validate_measurement_forms
+    from .sim_validate import _validate_measurement_forms
 
     specs = request.get("measurements") or []
     _validate_measurement_forms(specs)
