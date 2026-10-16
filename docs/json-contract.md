@@ -37,6 +37,8 @@ contract.
 - All other top-level fields are defined by the individual command's own
   documentation (e.g. `docs/cli/layers.md`).
 - Written to **stdout only**, as indented JSON with a trailing newline.
+  (`klt sim --report-out PATH` additionally writes the same bytes to a file,
+  gzip-compressed for a `.gz` path; stdout is unchanged.)
 
 ### Pre-1.0 caveat: value sets within an unchanged shape can grow
 
@@ -263,6 +265,13 @@ names this explicitly for `extract`'s own schema — a **content**/
 **bookkeeping**/**tool metadata** partition every `drc`/`lvs`/`extract`
 consumer of the `--check`/`--rerun` machinery below should apply, not just
 `extract`'s.
+
+**A run-measurement object is additive and not evidence.** `klt extract`'s
+top-level `timing` object (issue #3181: per-stage wall seconds, `total_seconds`,
+`unattributed_seconds`) is new and optional-to-read; no existing field changed,
+so no `schema_version` bump. It varies run to run by nature, so `--check
+--rerun` excludes it (`VOLATILE_PROVENANCE_PATHS`). Progress lines for the same
+run go to stderr only; stdout stays the envelope.
 
 ## Requested-but-unperformed analysis
 
@@ -1170,6 +1179,7 @@ any list index.
 | `extract` | `subcircuit.path` | written sub-circuit netlist (`--subcircuit`) |
 | `extract` | `abstracted_cells.*.lef_path` | LEF file an abstracted cell's pins came from |
 | `extract` | `pdk.root` | `{path, scope}` of the PDK install (never absolute, but host-dependent) |
+| `extract` | `timing` | run-scoped, not a path (issue #3181): wall-clock seconds for this run, differs on every run |
 
 Separately, `provenance.klt_version`, `provenance.klayout_version`, and
 `provenance.pdk.version` (`VOLATILE_PROVENANCE_PATHS`) differ across tool
