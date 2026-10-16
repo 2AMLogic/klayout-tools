@@ -26314,6 +26314,7 @@ def test_cli_resistance_graph_json(tmp_path, capsys):
     code = main(["extract", path, "--deck", "sky130", "--resistance-graph"])
     assert code != 0
 
+
 def test_def_net_connections_dotted_net_gets_conn_block(tmp_path):
     """Regression (issue #2903): a DEF net whose name carries `.` is renamed by
     the extractor (#2145) before the SPEF is written, so its `--def-net-
