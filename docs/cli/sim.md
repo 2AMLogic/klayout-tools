@@ -3623,6 +3623,45 @@ are outside this repository. `engine: "xyce"` is refused. After the analysis, ea
 `let __klt_xfer_<k>_num = <num>`, `let __klt_xfer_<k>_den = <den>` and
 `write <corner_dir>/transfer_<k>.raw ...` to the generated `.control` block.
 
+## Multi-pass AC acquisition (`analysis.passes`)
+
+Issue [#3159](https://github.com/2AMLogic/klayout-tools/issues/3159), increment
+1 of the dual-injection AC bench ([#2847](https://github.com/2AMLogic/klayout-tools/issues/2847)).
+A Tian bench needs two AC executions at the *same* corner with a different
+injection source active in each, and both complex result sets kept. An `ac`
+`analysis` may carry `passes`; the base `kind`/`args` are shared:
+
+```json
+{"kind": "ac", "args": "dec 20 1 1e8",
+ "passes": [
+   {"name": "inj_v", "alter": [{"target": "VINJ", "value": 1}, {"target": "IINJ", "value": 0}]},
+   {"name": "inj_i", "alter": [{"target": "VINJ", "value": 0}, {"target": "IINJ", "value": 1}]}]}
+```
+
+- Each pass has a unique `name` (`[A-Za-z_][A-Za-z0-9_]*`, case-insensitive) and
+  a non-empty `alter` array of `{target, value, field?}`. `target`/`value` obey
+  the `analysis_steps[].alter` rules (top-level `V`/`I`/`R`/`C`/`L` name, finite
+  number; no `.param`, `corners.supply_v` or waveform-source targets).
+  `field` is `"ac"` (default — the source's AC magnitude, `alter VINJ ac = 1`;
+  `V`/`I` only) or `"dc"` (`alter R3 = 2k`).
+- **Every pass must alter the same targets.** `alter` persists, so a pass that
+  omitted one would inherit its predecessor's value and depend on pass order;
+  such a request is refused. Passes run serially, in declaration order, inside
+  one corner job, each in a fresh plot (`setplot new`). No operating-point
+  reuse between passes is promised.
+- Refused before any engine launch: duplicate/malformed passes, a non-`ac`
+  analysis, `measurements[]` (scalar metrics are #3160), `options.waveforms`
+  / `--plot`, `engine: "xyce"`, and `backend: "remote"` / `"batch"` (transport
+  is #3161). Requests without `passes` are unchanged.
+
+Each pass's complex result is written to `<corner_dir>/ac_pass_<k>.raw` and
+decoded privately by `klayout_tools.sim_raw`; the public waveform JSON stays
+magnitude-only. The corner gains an additive `passes` list of
+`{name, status, points, raw}` (`raw` is the rawfile path only when
+`options.keep_artifacts` is set, else `null`). A pass whose analysis did not
+produce an AC plot is `status: "error"` with a `pass_failed` diagnostic, and
+the corner grades `error`.
+
 ## Source energy over a transient window (`measurements[].energy`)
 
 Issue [#3033](https://github.com/2AMLogic/klayout-tools/issues/3033). Energy
@@ -5660,6 +5699,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `step_failed`      | An `analysis_steps[]` step's analysis produced no plot of its own (it failed, or the run ended before it) — read from `klt`'s own step markers in the log, never inferred from measurements. The step's own measurements are reported `value: null`/`status: "error"` under this one diagnostic (issue #2482). See "Several solves per corner" above. |
 | `derived_input_unavailable` | A measurement computed from other results (a derived measurement, or a step `expr` reading an earlier step) was **not graded** because at least one of its inputs produced no value in this corner (issue #2482). Distinguishes "an input was missing" from a derived expression that itself failed, which is an ordinary `measurement` diagnostic. |
 | `waveform_too_large` | `waveform.raw` exceeded `options.waveform_max_bytes`, so the `waveform.raw.json` conversion was skipped (issue #3211). Always `severity: "warning"`; measurements and `status` are unaffected. See "Waveform size guard" above. |
+| `pass_failed` | An `analysis.passes` pass left no AC-analysis rawfile (the solve failed or never ran); the corner grades `error` (issue #3159). See "Multi-pass AC acquisition" above. |
 | `unknown`          | Anything else that prevented a trustworthy result (e.g. ngspice not installed/spawnable). |
 | `budget_exceeded`  | The corner never started: the sweep's own `options.wall_clock_budget_s` was exceeded first. See "Wall-clock budget, orphan safety, and resume" above. |
 | `orphaned`         | The corner never started: the launching process exited before its turn. See "Wall-clock budget, orphan safety, and resume" above. |
