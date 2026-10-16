@@ -233,6 +233,23 @@ sensitivity = max(job_ratio x median,  median + job_mad_multiplier x MAD,  job_f
   on the day it lands, and covering every job when no history could be
   fetched at all.
 
+**Cancelled-run starvation (#3575).** Merge bursts cancel most `main` runs, and a
+cancelled run's jobs are cut short, so they are never used as baselines. A
+plain "latest `baseline_runs + 5` completed runs" listing therefore can hold
+fewer than `min_samples` usable runs (on 2026-10-16, 15 of the latest 20 were
+cancelled), the model never goes active and the check silently falls back to the
+fixed ceilings below ("no usable run history supplied"). The fetcher now also
+lists `main` runs with `status=success` and `status=failure` directly, merges
+them newest-first, and applies the same recency bounds, so the window is filled
+from usable runs however many cancelled ones sit between them. A failed extra
+listing only costs those samples. If a red run still reports `committed fixed
+ceilings`, there genuinely are fewer than `min_samples` usable runs inside
+`max_age_days` / `history_not_before`.
+
+The fixed ceilings were not re-derived in that change: no post-2026-09-30
+hosted-runner re-measure was taken, and the file's own comment forbids
+hand-tuning them to turn a run green.
+
 ### 2. A pool-contention factor
 
 Runs whose window **overlapped this one's** by at least

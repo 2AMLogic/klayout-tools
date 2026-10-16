@@ -6043,20 +6043,22 @@ def test_sky130_deck_check_kind_breakdown():
     cut rules `licon.1`/`ct.1`; #2642 adds the source deck's whole `OFFGRID`
     group -- 38 `ongrid` + 37 `angle`, see `tests/test_drc_offgrid.py` for why
     the angle count is one short of the grid count; #3030 adds
-    `rpm.width.1`/`urpm.width.1`): 138 rules total -- 20
-    `width`, 13 `space`, 1 `isolated`, 17 `enclosing`, 2 `separation`,
+    `rpm.width.1`/`urpm.width.1`; #3316 adds the 4 `enclosing_adjacent`
+    rules): 142 rules total -- 20 `width`, 13 `space`,
+    1 `isolated`, 17 `enclosing`, 4 `enclosing_adjacent`, 2 `separation`,
     10 `area`, 38 `ongrid`, 37 `angle`. Fails loudly (at the exact number that
     changed) if a future rule addition/removal drifts from that table without
     updating it."""
     deck = get_deck("sky130")
 
-    assert len(deck) == 138
+    assert len(deck) == 142
     counts = Counter(rule.check for rule in deck)
     assert counts == {
         "width": 20,
         "space": 13,
         "isolated": 1,
         "enclosing": 17,
+        "enclosing_adjacent": 4,
         "separation": 2,
         "area": 10,
         "ongrid": 38,
@@ -10432,3 +10434,75 @@ def test_waived_report_check_and_rerun_replay_waivers(tmp_path):
     checked = check_drc_report(str(report_path))
     assert checked["status"] == "drifted"
     assert rerun_drc_report(str(report_path))["status"] == "drifted"
+
+
+# --- sky130 two-adjacent-edges enclosure (`enclosing_adjacent`, #3316) -------
+#
+# `sky130A_mr.drc` flags a cut when two *adjacent* edges are both enclosed by
+# less than the threshold (a corner of short edges); one short side, or two
+# opposite short sides, is legal. Verified against the official runset on the
+# same geometry, so these pin its semantics, not the wording of the issue.
+_ADJACENT_RULES = [
+    # (rule id, metal layer, cut layer, threshold dbu)
+    ("met1.enclosing_adjacent.via.1", (68, 20), (68, 44), 85),
+    ("met2.enclosing_adjacent.via.1", (69, 20), (68, 44), 85),
+    ("met2.enclosing_adjacent.via2.1", (69, 20), (69, 44), 85),
+    ("met3.enclosing_adjacent.via3.1", (70, 20), (70, 44), 90),
+]
+
+
+def _adjacent_layout(metal, cut, margins) -> kdb.Layout:
+    """A 150 dbu cut at the origin; ``margins`` = (left, bottom, right, top)."""
+    left, bottom, right, top_m = margins
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(*cut)).insert(kdb.Box(0, 0, 150, 150))
+    top.shapes(layout.layer(*metal)).insert(
+        kdb.Box(-left, -bottom, 150 + right, 150 + top_m)
+    )
+    return layout
+
+
+@pytest.mark.parametrize(("rule_id", "metal", "cut", "thr"), _ADJACENT_RULES)
+@pytest.mark.parametrize(
+    ("label", "margins", "violations"),
+    [
+        ("two adjacent sides long, others short", ("L", "L", "S", "S"), 1),
+        ("two opposite sides long, others short", ("L", "S", "L", "S"), 0),
+        ("all sides short", ("S", "S", "S", "S"), 1),
+        ("all sides long", ("L", "L", "L", "L"), 0),
+        ("one side short", ("L", "L", "L", "S"), 0),
+    ],
+)
+def test_enclosing_adjacent_sky130(
+    tmp_path, rule_id, metal, cut, thr, label, margins, violations
+):
+    values = {"L": thr, "S": thr - 30}
+    layout = _adjacent_layout(metal, cut, tuple(values[m] for m in margins))
+    path = tmp_path / "adj.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130", rules=[rule_id])
+
+    assert report["violation_count"] == violations, label
+    assert report["rule_counts"] == ({rule_id: 1} if violations else {})
+
+
+def test_enclosing_adjacent_one_violation_per_cut(tmp_path):
+    """Three short sides meet at two corners; the cut is reported once."""
+    layout = _adjacent_layout((68, 20), (68, 44), (85, 55, 55, 55))
+    path = tmp_path / "adj3.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130", rules=["met1.enclosing_adjacent.via.1"])
+
+    assert report["violation_count"] == 1
+
+
+def test_enclosing_adjacent_requires_other_layer():
+    rule = next(
+        r for r in get_deck("sky130") if r.id == "met1.enclosing_adjacent.via.1"
+    )
+    assert rule.check == "enclosing_adjacent"
+    assert rule.other_layer is not None
