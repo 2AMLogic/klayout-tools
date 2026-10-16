@@ -2339,7 +2339,8 @@ dbu. The shipped-cell regression needed no new deviation.
 DRM rules in Tables 3.1-3.19 that the deck does not check yet. Rows group
 ids that share a table, reason and tracking issue. Section 3.13 extends the
 V1 rules to V2 and V3 (and note 2 adds `V3.M3.EN.1`); sections 3.14-3.19 do
-the same for M5, V5, M7, V7, M9 and V9, whose V9 enclosure is by PAD (mask 96, read by number: the pinned asap7.lyp has no PAD entry).
+the same for M5, V5, M7, V7, M9 and V9, whose V9 enclosure is by PAD (mask 96,
+read by number: the pinned asap7.lyp has no PAD entry).
 Nothing in Tables 3.14-3.19 is left out for want of mask colouring.
 
 | Rule ids | DRM table | Reason | Tracked by |

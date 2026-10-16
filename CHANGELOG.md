@@ -18,7 +18,7 @@ not `klt --version`, if you need to detect this kind of drift. See
   V8 enclosure-by-M9 and inside-M8-and-M9 rules carry over to V9 with PAD
   (DRM section 3.19 preamble), reading PAD (mask 96, GDS 96/0) by layer
   number since the pinned `asap7.lyp` has no entry for it. The deck grows
-  from 238 to 240 rule categories (`--expect-rule-categories 240`).
+  from 246 to 248 rule categories (`--expect-rule-categories 248`).
   `M8.S.4`-`M8.S.8` / `M9.S.4`-`M9.S.8` stay under "Not implemented", now
   with the reason that Fig. 3.18.1's width-class reading still contradicts
   `S.1`. Additive; no `schema_version` bump.
