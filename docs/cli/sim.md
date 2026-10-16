@@ -4355,6 +4355,30 @@ so an agent (or a skill, e.g. `design-sizing`'s Loop A) reading a miss knows
 exactly which picture to open next, without re-deriving which signal a
 `.meas` card was even about.
 
+## Stability margins at every crossing (`analyze_margins`, issue #3088)
+
+`klayout_tools.sim_transfer.analyze_margins` reduces a complex loop gain
+`T = numerator / denominator` to margins at **every** crossing. It is a pure
+helper (no simulator, no request/response schema change); the `klt sim`
+limit wiring lands once the `transfer` measurement form (#2923/#2724) is on
+`main`. Existing first-crossing metrics from `analyze_transfer` are unchanged.
+
+| Field | Meaning |
+|---|---|
+| `phase_margins[]` | `{freq_hz, direction, phase_margin_deg}` per 0 dB crossing (rise and fall). PM is `wrap(phase + 180)` into (-180, 180]: distance to the nearest -180 line, modulo 360, never from unwrapped phase. |
+| `gain_margins[]` | `{freq_hz, direction, gain_margin_db}` per -180 deg crossing (mod 360); `-dB(|T|)`, so negative when `|T| > 1`. |
+| `phase_margin_min_deg`, `gain_margin_min_db` | The scored values: the minimum over the lists. `null` plus a `reasons` entry (`no_zero_db_crossing`, `no_phase_crossing`, plateau) when absent -- no -180 crossing is neither a failure nor infinite margin. |
+| `encirclement` | Clockwise encirclements of -1 (`2 x` net signed crossings of the ray left of -1), or `"indeterminate"`. 0 means stable for an open-loop-stable loop. |
+| `band` | `f_min_hz`, `f_max_hz`, `mag_below_unity_at_top`, `low_freq_mag_db`, `min_samples_per_decade_near_crossing`, `crossings_bracketed`. |
+| `ambiguity[]` | Why the band cannot support a pass: `top_not_below_unity`, `crossing_not_bracketed` (under 10 samples/decade or over 90 deg phase step at a crossing; tunable), `invalid_samples`, plateaus, `low_frequency_on_negative_real_axis`. |
+
+`grade_margins(report, min_phase_margin_deg=, min_gain_margin_db=,
+require_no_encirclement=)` returns `pass`, `fail` or `ambiguous`. A violation
+among crossings actually found is a sound `fail`; `pass` needs an empty
+`ambiguity`; otherwise `ambiguous`, which is never `pass` and never `fail`.
+Corner status, rollup, exit code and schema treatment of `ambiguous` are part
+of the follow-up wiring (tracked on #3088).
+
 ## Post-layout verification (`netlist_source`)
 
 `request.netlist_source` (optional, `"schematic"` | `"extracted"`) lets a
