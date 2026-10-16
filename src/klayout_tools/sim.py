@@ -93,6 +93,7 @@ from typing import IO, Any, NamedTuple
 from . import (
     env_provenance,
     output_lock,
+    sim_batch,
     sim_crossings,
     sim_cycle_mean,
     sim_decks,
@@ -260,6 +261,9 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "batch_job_failed",
         "batch_job_timeout",
         "batch_poll_timeout",
+        # `options.require_pdk_match` gate (issue #3462).
+        "pdk_stamp_mismatch",
+        "pdk_stamp_not_comparable",
     }
 )
 
@@ -1745,6 +1749,7 @@ def run_sim(
     max_units_per_job: int | None = None,
     dry_run: bool = False,
     submit_only: bool = False,
+    require_pdk_match: bool | None = None,
     attach_job_id: str | None = None,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
@@ -2020,6 +2025,7 @@ def run_sim(
             plot_dir=plot_dir,
             fail_fast_probe=fail_fast_probe,
             fail_on_diagnostic=fail_on_diagnostic,
+            require_pdk_match=require_pdk_match,
             _ownership=_ownership,
         )
     return _run_sim_corners(
@@ -2036,6 +2042,7 @@ def run_sim(
         max_units_per_job=max_units_per_job,
         dry_run=dry_run,
         submit_only=submit_only,
+        require_pdk_match=require_pdk_match,
         attach_job_id=attach_job_id,
         _ownership=_ownership,
     )
@@ -2054,6 +2061,7 @@ def _dispatch_deck_request(
     plot_dir: str | None,
     fail_fast_probe: bool | None,
     fail_on_diagnostic: list[str] | tuple[str, ...] | None,
+    require_pdk_match: bool | None = None,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """Route a deck-list request to :mod:`klayout_tools.sim_decks`,
@@ -2103,6 +2111,11 @@ def _dispatch_deck_request(
         raise SimError(
             "--fail-on-diagnostic grades corner diagnostics, which "
             "deck-list requests do not produce"
+        )
+    if require_pdk_match or (request.get("options") or {}).get("require_pdk_match"):
+        raise SimError(
+            "--require-pdk-match/options.require_pdk_match gates corner "
+            "requests, which deck-list requests are not"
         )
     request_dir = os.path.dirname(os.path.abspath(request_path))
     # Issue #3168: a deck run always writes (and a remote/batch pull replaces)
@@ -2201,6 +2214,35 @@ def _with_forwarded_budget(
     return {**request, "options": {**options, "wall_clock_budget_s": budget_s}}
 
 
+def _apply_pdk_match_gate(
+    request: dict[str, Any], backend: str, require_pdk_match: bool | None
+) -> tuple[dict[str, Any], bool]:
+    """Resolve the PDK-revision gate (issue #3462): the ``--require-pdk-match``
+    flag overrides ``options.require_pdk_match``. Validates the
+    ``models.pdk_expect`` pin and the option up front, and refuses the gate
+    on a backend that captures no worker PDK stamp rather than let the run
+    pass ungated. Returns the request with the resolved option folded in, and
+    whether the gate is on."""
+    if require_pdk_match is not None:
+        options = request.get("options")
+        request = {
+            **request,
+            "options": {
+                **(options if isinstance(options, dict) else {}),
+                "require_pdk_match": require_pdk_match,
+            },
+        }
+    sim_batch.pdk_expectation(request)
+    gated = sim_batch.require_pdk_match_requested(request)
+    if gated and backend != "batch":
+        raise SimError(
+            f"--require-pdk-match/options.require_pdk_match needs the worker's "
+            f"PDK stamp, which only the 'batch' backend captures (got backend "
+            f"{backend!r})"
+        )
+    return request, gated
+
+
 def _with_max_units_override(
     request: dict[str, Any], max_units_per_job: int | None
 ) -> dict[str, Any]:
@@ -2292,6 +2334,7 @@ def _run_sim_corners(
     max_units_per_job: int | None = None,
     dry_run: bool = False,
     submit_only: bool = False,
+    require_pdk_match: bool | None = None,
     attach_job_id: str | None = None,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
@@ -2327,6 +2370,13 @@ def _run_sim_corners(
     backend = _yield_host_default_backend(
         backend, backend_from_host_default, reason_ok=engine == "ngspice"
     )
+    request, gated = _apply_pdk_match_gate(request, backend, require_pdk_match)
+    # The gate was only checked against the backend as it stands now. Treat a
+    # gated run's backend as explicit from here on, so a later
+    # `_yield_host_default_backend` (single-unit run, resume, OSDI) can no
+    # longer step it back to `local`, where it would pass ungated: those
+    # cases refuse by name or run on batch, gated.
+    backend_from_host_default = backend_from_host_default and not gated
 
     hosts = (
         hosts if hosts is not None else (request.get("remote") or {}).get("hosts", 1)

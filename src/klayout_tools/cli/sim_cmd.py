@@ -129,6 +129,7 @@ def _run_sweep(args: argparse.Namespace) -> int:
             max_units_per_job=args.max_units_per_job,
             dry_run=getattr(args, "dry_run", False),
             submit_only=getattr(args, "submit_only", False),
+            require_pdk_match=getattr(args, "require_pdk_match", None),
             attach_job_id=getattr(args, "attach_job_id", None),
         )
     except SimError as exc:
@@ -261,6 +262,7 @@ def _run_batch_set(args: argparse.Namespace) -> int:
             ("--op-lint", getattr(args, "op_lint", False)),
             ("--submit-only", getattr(args, "submit_only", False)),
             ("--job-status", getattr(args, "job_status", None)),
+            ("--require-pdk-match", getattr(args, "require_pdk_match", None)),
         )
         if value
     ]

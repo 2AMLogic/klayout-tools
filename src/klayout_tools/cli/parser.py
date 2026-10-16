@@ -811,6 +811,23 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     sim_parser.add_argument(
+        "--require-pdk-match",
+        dest="require_pdk_match",
+        action="store_const",
+        const=True,
+        default=None,
+        help=(
+            "fail the run unless the fleet worker's PDK revision stamp is "
+            "proven equal to the expected one: `models.pdk_expect."
+            "stamp_sha256` if the request states it, else the local "
+            "`models.pdk_root`/$PDK_ROOT tree (issue #3462). Fails closed -- "
+            "a `mismatch` and a `not_comparable` stamp both error "
+            "(`pdk_stamp_mismatch` / `pdk_stamp_not_comparable`). Overrides "
+            "the request's `options.require_pdk_match`; `batch` backend "
+            "only (refused for any other). See docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
         "--plot",
         dest="plot",
         default=None,

@@ -60,6 +60,16 @@ not `klt --version`, if you need to detect this kind of drift. See
   failures are `status: "error"` with a `measurement` diagnostic led by a
   `[cycle_mean_*]` reason token. `.meas AVG ... TRIG/TARG` and `FROM=<meas>`
   remain unsupported. See `docs/cli/sim.md`.
+
+- **`klt sim --require-pdk-match` / `options.require_pdk_match`** (issue
+  #3462): on the `batch` backend, fail the run when the fleet worker's PDK
+  stamp is not proven equal to the expected revision, instead of reporting a
+  warning-only `pdk_stamp_comparison` and `pass`. The expected value is the
+  new `models.pdk_expect.stamp_sha256` (no local PDK tree needed) or the local
+  tree's stamp. Fails closed: `mismatch` and `not_comparable` both error, as
+  per-corner `pdk_stamp_mismatch` / `pdk_stamp_not_comparable` diagnostics.
+  Additive; default behaviour unchanged; no `schema_version` bump.
+
 - **`klt sim` `analysis_steps[].reset`** (issue #3103): `reset: true` starts a
   step from a freshly parsed circuit (ngspice `reset`), so independent
   configurations of one analysis share a request instead of one job each. The

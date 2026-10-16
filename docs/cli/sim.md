@@ -4,7 +4,7 @@ Run a SPICE process/voltage/temperature (PVT) corner matrix headlessly and
 report per-corner measurement pass/fail as structured data.
 
 ```
-klt sim <request.json> [-o|--outdir <dir>] [--report-out <path>] [--backend <name>] [--max-workers <n>] [--hosts <n>] [--max-units-per-job <n>] [--budget-s <seconds>] [--resume] [--fail-fast-probe] [--fail-on-diagnostic <code>] [--dry-run] [--plot <dir>] [--op-lint [--op-lint-corner <corner_id>]] [--format text|json]
+klt sim <request.json> [-o|--outdir <dir>] [--report-out <path>] [--backend <name>] [--max-workers <n>] [--hosts <n>] [--max-units-per-job <n>] [--budget-s <seconds>] [--resume] [--fail-fast-probe] [--fail-on-diagnostic <code>] [--dry-run] [--require-pdk-match] [--plot <dir>] [--op-lint [--op-lint-corner <corner_id>]] [--format text|json]
 ```
 
 This is the build carried by the accepted spike,
@@ -86,6 +86,11 @@ this document (and the code) win.
   to commit unmodified as evidence. Stdout and exit codes (0/3/4) are
   unaffected; an unwritable path exits 1 with the error envelope. `klt
   yield` accepts the `.json.gz` file directly.
+- `--require-pdk-match` — fail the run unless the `batch` fleet worker's PDK
+  revision stamp is proven equal to the expected one (issue #3462), overriding
+  the request's own `options.require_pdk_match`. `batch` backend only; any
+  other backend is an application error. See "Requiring a PDK revision match"
+  below.
 - `--plot` — write one self-contained, dependency-free waveform SVG per
   non-sweep signal per corner to this directory, forcing
   `options.waveforms`/`keep_artifacts` on for this run. See "Waveform
@@ -1395,6 +1400,40 @@ artifacts are included). The `remote` (SSH) backend does not write this
 capture yet and reports no `worker_environment`. Workers that predate the
 capture, or lack `python3`, report `capture: "absent"`.
 
+### Requiring a PDK revision match (`options.require_pdk_match`, [#3462](https://github.com/2AMLogic/klayout-tools/issues/3462))
+
+By default `pdk_stamp_comparison` is advisory: a `mismatch` is a warning, a
+`not_comparable` stamp is silent, and the run still reports `pass`. A caller
+that records results with a PDK-revision provenance stamp can make the stamp
+a gate:
+
+| Where | Field | Meaning |
+| --- | --- | --- |
+| request | `models.pdk_expect` | `{"stamp_sha256": "<64 hex>"}`: the `pdk.stamp_sha256` (scheme `sources-sha256`, a hash of the PDK's `SOURCES` text) the worker must report. Needs no local PDK tree and no `$PDK_ROOT`. When present it replaces the local-tree stamp as the expected value. Unknown keys and a malformed hash are application errors (exit 1). `stamp_sha256` is the only supported form: the stamp is a hash of `SOURCES`, so an open_pdks commit cannot be compared to it directly. Read the value off a known-good run's `environment.remote.worker_environment.pdk.stamp_sha256`. |
+| request | `options.require_pdk_match` | boolean, default `false`. Enforce the comparison. |
+| CLI | `--require-pdk-match` | Same, overriding `options.require_pdk_match`. |
+
+Enforcement fails closed. Only a proven `match` passes. A `mismatch`, and a
+`not_comparable` result (worker capture `absent`/`malformed`, a different
+variant or an unlike stamp scheme, or no expectation available from either
+`models.pdk_expect` or a local tree), both turn every unit of that job into an
+`error` corner carrying a `pdk_stamp_mismatch` / `pdk_stamp_not_comparable`
+diagnostic. Its `message` names the worker's `stamp_sha256` and the expected
+one. The sweep then exits with the usual errored-corner code (see "Exit
+codes"). The comparison block gains `required: true`, and `expected` (the
+pin) whenever `models.pdk_expect` was given. Sharded runs check every member.
+Without the gate, behaviour and the report shape are unchanged.
+
+The gate is client-side: it reads the capture the worker already wrote, and
+is not forwarded to the job. It needs the `batch` backend (the only one that
+captures the worker's stamp), so `--backend local`/`local-parallel`/`remote`
+with the gate on is refused, as is a deck-list request.
+
+A matching stamp is not model-closure equality: it says the worker's PDK
+`SOURCES` text matches, not that the models actually executed are identical
+(see #3071, and `pdk.models_staged`). It is evidence of the revision, not a
+proof of the bytes simulated.
+
 ### Failed jobs: output recovery and the diagnostic you get
 
 When a job reaches a terminal `failed`/`timeout` state with an exit code
@@ -1559,6 +1598,7 @@ in the deck path), exactly as corner jobs do.
 | `models.pdk` / `models.pdk_root` | string | Image selection for `remote`/`batch` — the same field, semantics, and validation as corner requests (`remote` refuses to provision without `models.pdk`; `batch` validates it against the published fleet images). Independent of any corner axis; PDK model files stay on the image. |
 | `options.timeout_s` | number | Default per-unit timeout (see `decks[].timeout_s`). |
 | `options.max_workers` | integer | Worker-pool size for `local-parallel`; overridable with `--max-workers`, capped by `$KLT_SIM_MAX_WORKERS`, same as corners. |
+| `options.require_pdk_match` | boolean | Issue #3462. `batch` backend only: fail the run (`pdk_stamp_mismatch` / `pdk_stamp_not_comparable` corner diagnostics) unless the worker's PDK stamp matches `models.pdk_expect.stamp_sha256` (or the local `models.pdk_root`/`$PDK_ROOT` tree). Defaults to `false` (advisory). A non-boolean, or any other backend, is an application error (exit 1). `--require-pdk-match` overrides it. See "Requiring a PDK revision match" above. |
 | `options.ngspice_binary` | string | Same resolution rules as corners (issue #2423). Interpreted on the *executing* host. |
 | `remote.*` / `batch.*` | object | The same backend blocks corner requests carry; only read for the matching backend. `remote.hosts` sharding is refused for deck requests — one off-host job runs the whole list across its own worker pool. |
 
@@ -4517,6 +4557,8 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `batch_job_failed` | The corner never started, or its report was never written: the `batch` backend's fleet job reached a terminal `failed` state with an exit code outside `klt sim`'s own `0`/`3`/`4` (see "Batch backend" above). |
 | `batch_job_timeout` | The corner never completed: the `batch` job exceeded its own `timeout_seconds` on the fleet instance and was killed by 2am's harness. |
 | `batch_poll_timeout` | The corner's result was never observed: `batch.poll_timeout_s` elapsed with the job still non-terminal. The job may still be running on the fleet — this is what the client knows, not a claim the run failed. |
+| `pdk_stamp_mismatch` | `options.require_pdk_match` was on and the batch worker's PDK stamp differs from the required revision. The corner's results were collected but are not reported. `message` names both stamps. Not retryable without the right PDK image or a corrected pin. |
+| `pdk_stamp_not_comparable` | `options.require_pdk_match` was on and the worker's stamp could not be compared (no capture, different variant/scheme, or no expected revision). Fails closed. |
 | `timeout_budget_unreachable` | The corner never started: `options.fail_fast_probe`'s calibration probe measured a rate implying `options.timeout_s` cannot plausibly cover the full analysis window, so the whole grid was aborted before dispatch (issue #1694). Carries additional `reached_s`/`fraction` fields — an *estimate* of how far this corner would have gotten, derived from the measured rate, not a real per-corner recovery. See "Timeout-budget preflight" above. |
 | `inconclusive` | **Emitted, never selectable.** The marker this command attaches to a corner it graded `status: "inconclusive"` because `options.fail_on_diagnostic` named a code the corner emitted (issue #2492) — the message names those code(s), so the report says *why* a corner whose numbers look fine is not being reported as a pass. `severity: "warning"`. See "Grading a recovered diagnostic as inconclusive" below. |
 | `implausible_solution` | **Emitted, never selectable.** The marker for the *other* route to `status: "inconclusive"`: a measurement's value fell outside its declared `options.node_voltage_bounds`/`measurements[].plausible_range` (issue #2493); see "Plausibility bounds" above. `severity: "warning"`, never `"error"`. |
