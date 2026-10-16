@@ -559,6 +559,13 @@
         "klayout_tools.yield_campaign"
       ]
     },
+    "yield_csv": {
+      "kind": "verb",
+      "description": "`klt yield_csv` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.yield_csv_cmd"
+      ]
+    },
     "yield_samples": {
       "kind": "verb",
       "description": "`klt yield_samples` implementation: core modules plus CLI adapter.",
@@ -1133,6 +1140,16 @@
       "consumer": "yield_campaign",
       "exporter": "yield",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "yield_csv",
+      "exporter": "cli-infra",
+      "reason": "Mirrors yield_samples: CLI adapter over the yield core and shared output envelope (issue #2931)."
+    },
+    {
+      "consumer": "yield_csv",
+      "exporter": "yield",
+      "reason": "Mirrors yield_samples: CLI adapter over the yield core and shared output envelope (issue #2931)."
     },
     {
       "consumer": "yield_samples",
