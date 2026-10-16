@@ -364,6 +364,7 @@ not `klt --version`, if you need to detect this kind of drift. See
   `ResistorDevice` (empty body) now adds one `warnings[]` string per marker
   layer instead of extracting silently device-less. Additive; no schema,
   exit-code or `status` change.
+
 - **Bipolar markers can be derived layer expressions** (issue #2860):
   `BipolarDevice.marker` now accepts a `LayerExpr`, a frozen AND/NOT tree
   of drawn layers that can nest, as well as a bare `(layer, datatype)`
