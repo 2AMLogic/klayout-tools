@@ -3005,9 +3005,10 @@ def _run_sim_corners(
     backend = _yield_host_default_backend(
         backend, backend_from_host_default, reason_ok=len(dispatch_points) > 1
     )
-    # Issue #2923: transfer metrics need the corner-local AC rawfile, which
-    # off-host workers do not return yet -- refused before anything is staged.
-    sim_transfer_meas.refuse_offhost_backend(measurements_spec, backend)
+    # Issue #2924: off-host workers run the whole `klt sim` request and return
+    # only the scalar results (the AC rawfile never leaves the worker), so the
+    # `transfer` form is gated by the mandatory runner-feature check in
+    # `sim_batch`/`sim_remote` rather than refused here.
 
     # Two-pass fail-fast probe (issue #1694, opt-in via `fail_fast_probe`/
     # `options.fail_fast_probe`): run once per grid, before any real corner

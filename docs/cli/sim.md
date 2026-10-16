@@ -1400,6 +1400,7 @@ release segment:
 | Feature | Detected when | First runner release |
 |---|---|---|
 | `analysis_steps` ([#2482](https://github.com/2AMLogic/klayout-tools/issues/2482)) | `analysis_steps` is present | `0.7.1` |
+| `transfer` ([#2924](https://github.com/2AMLogic/klayout-tools/issues/2924)) | any `measurements[]` entry declares `transfer` | `0.7.1` (**mandatory**, see below) |
 
 `decks[]` ([#3303](https://github.com/2AMLogic/klayout-tools/issues/3303)) is
 the next registry entry.
@@ -1422,6 +1423,25 @@ the next registry entry.
   `runner_version_check: "warn"` reports without refusing.
 - Limit: a `0.7.1.devN` runner built before a feature landed looks the same as
   one built after, so it counts as supporting it.
+
+**Mandatory features (`transfer`, [#2924](https://github.com/2AMLogic/klayout-tools/issues/2924)).**
+A runner that predates `measurements[].transfer` would drop the metric, so
+this entry is not relaxed by `runner_version_check: "warn"` and "unknown" is
+not tolerated on the runner side:
+
+- **Before launch**: if every image the AMI manifest publishes predates
+  `transfer`, the request is refused with `batch_runner_feature_unsupported`
+  even under `warn`; nothing is uploaded or launched. A manifest with no
+  `klt_version` for the image (or no manifest) defers to the runner.
+- **On the runner**: the preflight exits `87` with
+  `batch_runner_feature_unsupported` when the runner's `klt --version` is
+  older than `0.7.1` **or cannot be read**, before `klt sim` runs and
+  whatever `runner_version_check` says. This check runs on the job instance,
+  so it launches the instance (a Spot boot) but never a simulation.
+- The worker runs the whole `klt sim` request itself and extracts `transfer`
+  from its own corner-local AC rawfile; only the reduced scalar results,
+  units, limits and diagnostics come back, so the rawfile never needs to be
+  returned and the values, errors and rollups match local execution.
 
 #### Pre-launch check from the AMI manifest ([#2851](https://github.com/2AMLogic/klayout-tools/issues/2851))
 
@@ -3137,11 +3157,18 @@ The entry also carries an additive `transfer` object `{num, den, metric}`.
 One rawfile and one ratio computation are used per unique `num`/`den` pair, and
 the capture does not depend on `options.waveforms`.
 
-**Local only.** `backend: "remote"` / `"batch"` requests (explicit or via
-`KLT_SIM_BACKEND`) that declare `transfer` are refused before provisioning with
-an unsupported-backend error; worker support is tracked in
-[#2924](https://github.com/2AMLogic/klayout-tools/issues/2924). `engine:
-"xyce"` is refused too. After the analysis, each unique pair adds
+**Backends.** `local`, `local-parallel`, `remote` and `batch` all run
+`transfer`. On `remote`/`batch` the worker computes it (see "Mandatory features"
+under "Runner/client `klt` version skew"; for `remote` the same minimum `klt`
+`0.7.1` is checked against the AMI manifest before launch and with
+`klt --version` on the provisioned host before the simulation, exit `87`).
+A worker that is older than `0.7.1` or whose version cannot be read returns
+`batch_runner_feature_unsupported` / refuses the request; it never omits the
+metric. **Operator rollout:** publish a `klt` release containing `transfer`
+(first `0.7.1`), rebake the batch runner image and the remote-sim AMI from it
+(`scripts/aws/build-remote-sim-ami.sh` records `klt_version` in the manifest),
+and update any pinned image reference; fleet publication and paid cloud runs
+are outside this repository. `engine: "xyce"` is refused. After the analysis, each unique pair adds
 `let __klt_xfer_<k>_num = <num>`, `let __klt_xfer_<k>_den = <den>` and
 `write <corner_dir>/transfer_<k>.raw ...` to the generated `.control` block.
 
