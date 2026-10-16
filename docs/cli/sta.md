@@ -140,6 +140,7 @@ A request naming both, or neither, is a request error.
 | `constraints.input_delay_ns` | number \| omitted | Additive field (issue #1865) → `set_input_delay <ns> -clock <clock_port>` on every **non-clock** input port. Non-negative number when given (`0` is valid and meaningful). Omitted (the default) emits no `set_input_delay` line, leaving this command's generated Tcl byte-identical to before this field existed. Validated and emitted **here**, independently of `klt place-and-route` — this command can run standalone against an externally-produced DEF/netlist with no place-and-route request anywhere upstream, so nothing is inherited. See "I/O timing constraints" below. |
 | `constraints.output_delay_ns` | number \| omitted | Additive field (issue #1865) → `set_output_delay <ns> -clock <clock_port> [all_outputs]`. Same validation and omitted-default behavior as `input_delay_ns`; the two are independently optional. |
 | `constraints.input_delays` / `.output_delays` | object \| omitted | Additive fields (issue #2740). Per-port maps `{"<port>": {"min_ns": n, "max_ns": n}}` → `set_input_delay -min/-max` / `set_output_delay -min/-max` on exactly that port. Each bound is independently optional (at least one per entry); a missing bound is left **unconstrained**, never copied from the other. Values are finite numbers and may be negative; `min_ns <= max_ns` when both are given. Keys are literal names of one scalar port or one bus bit (`data[3]`) — no wildcards, no whole buses, no Tcl. The scalar `input_delay_ns`/`output_delay_ns` above become the **default for ports absent from the map**. Missing, ambiguous and wrong-direction keys, and the clock port, are request errors. See "Per-port I/O delays and worst-path identity" below. |
+| `constraints.report_ports` | list of strings \| omitted | Additive field (issue #3042). Literal port names (one scalar port or one bus bit such as `data[3]`) whose **own** worst setup and hold path is reported as `port_paths`, alongside the global `worst_*_path`. Same key rules as the per-port delay maps: no wildcards, whole buses or Tcl. Entries must be unique non-empty strings; the clock port, unknown and ambiguous names are request errors. Any direction is allowed. Omitted or `[]` emits nothing. See "Per-port path queries" below. |
 | `constraints.wire_load_model` / `.wire_load_mode` | string \| omitted | (Issue #1825.) **Only valid in `verilog` mode** — a request error otherwise. Drives OpenSTA's own `set_wire_load_model`/`set_wire_load_mode`, the parasitics-estimate mechanism for a from-scratch netlist session that has no placement or routing to estimate from. See "From-scratch netlist input" below. |
 | `constraints.propagated_clock` | boolean \| omitted | Additive field (issue #2739). **`def` mode only.** `true` marks the request's created clock propagated (`set_propagated_clock`) in every analyzed corner, so hold/removal checks include the DEF's clock-tree insertion delay and skew (and, with a caller-supplied `spef`, its clock-net RC) — the timing a routed post-CTS design actually meets. Omitted or `false` (the default) keeps the **ideal** SDC-only clock this command has always timed — byte-for-byte the pre-#2739 behavior — so existing requests' numbers never change. Any non-boolean value is a request error; `true` together with `verilog` is a request error (a linked netlist has no placed clock tree to propagate through). Meaningful only for a **post-CTS** DEF: a pre-CTS DEF propagates through plain wires and reports ~zero insertion delay — the response's `clock_propagation` evidence block is what says what propagation actually reached (see "Propagated-clock timing" below). |
 | `spef` | string \| omitted | A caller-supplied SPEF (e.g. from `klt extract --parasitics`) to annotate real parasitics via `read_spef`, in place of OpenSTA's own default (unannotated, LEF-capacitance-only) timing. **Only valid in `def` mode** — rejected together with `verilog` (no routed/placement geometry in that mode for a SPEF to annotate onto). Resolved relative to the request file's own directory. Omitted (the default) times the design with whatever parasitics OpenSTA derives from the loaded LEF/DEF alone. |
@@ -254,6 +255,7 @@ the path itself, an external one as `<outside repo>`, and an unused input as
 | `fmax_mhz` | number \| null | `report_fmax_metric`'s own `1/(T-WNS)` extrapolation — see "What this is not" above for the not-yet-bisected caveat. |
 | `setup_violation_count` / `hold_violation_count` | integer | Number of **violating endpoints** (one `report_check_types -violators -format end` row per failing endpoint per path group — not every enumerated timing path), counted over the **same timing-check families** the WNS/TNS fields above measure: setup side = data setup (`-max_delay`, incl. output-delay checks) + asynchronous **recovery** + inferred **clock-gating setup**; hold side = data hold (`-min_delay`) + asynchronous **removal** + inferred **clock-gating hold** (issue #2741). See "Violation counts: check families" below. |
 | `worst_setup_path` / `worst_hold_path` | object | Additive fields (issue #2740), present on every response and every `corners[]` entry. Identity of the worst setup-side / hold-side path end in this session: `{status, check_type, engine_check_role, startpoint, endpoint, slack_ns, consistent_with_aggregate, reason}`. `check_type` is one of `setup`, `hold`, `recovery`, `removal`, `clock_gating_setup`, `clock_gating_hold`, `output_setup`, `output_hold`, `latch_setup`, `latch_hold`, or `unknown`, so async recovery/removal is never reported as data setup/hold. `status` is `"ok"`, `"no_paths"`, `"unavailable"` or `"inconsistent"`. Identity fields are `null` unless a path was found. See "Per-port I/O delays and worst-path identity" below. |
+| `port_paths` | object \| omitted | Additive field (issue #3042), present only when `constraints.report_ports` is given — on the single-corner response and on every `corners[]` entry. `{"<port>": {"direction", "setup", "hold"}}` in request order; `setup`/`hold` are path records of the `worst_*_path` shape. See "Per-port path queries" below. |
 | `clock_skew_ns` | number \| null | Worst setup-side clock skew (`report_clock_skew_metric -setup`) across the clock tree the loaded DEF already contains. `null` if the DEF has no clock tree (`report_clock_skew_metric` reports nothing to measure). |
 | `estimated_power_mw` | number \| null | From `report_power_metric`, against whatever parasitics (SPEF-annotated or LEF-capacitance-only) this run used. |
 | `spef_annotation` | object \| null | `null` unless `request.spef` was given. See "Annotation evidence" below for the field shapes — and read it before quoting a SPEF-annotated timing number as a real-parasitics measurement. |
@@ -992,14 +994,57 @@ as plain SDC. Those queries show `a_in` hold `+0.33` ns and `b_in` hold
 setup path at all from `bus[1]` (min-only) and no hold check on `q_a`
 (max-only).
 
+### Per-port path queries: `constraints.report_ports` (issue #3042)
+
+`worst_*_path` is the *global* worst path end, so when an unrelated check is
+worse (the `rst_n` removal check above) a boundary port's own margin is not in
+the response. Name the ports to ask about:
+
+```json
+"constraints": { "...": "...", "report_ports": ["a_in", "b_in"] }
+```
+
+Each corner then carries `port_paths`, in request order. For the boundary
+example at `tt_025C_1v80` (`a_in` values as measured by the direct engine
+query; `engine_check_role` is also present in each record, omitted here):
+
+```json
+"port_paths": {
+  "a_in": {
+    "direction": "input",
+    "setup": { "status": "ok", "check_type": "setup", "startpoint": "a_in", "endpoint": "ff_a/D", "slack_ns": 1.29511, "consistent_with_aggregate": null, "reason": null },
+    "hold":  { "status": "ok", "check_type": "hold",  "startpoint": "a_in", "endpoint": "ff_a/D", "slack_ns": 0.33143, "consistent_with_aggregate": null, "reason": null }
+  }
+}
+```
+
+The global `worst_hold_path` is still `rst_n → ff_a/RESET_B`.
+
+- **What is queried.** For each port, `find_timing_paths -from [get_ports X]`
+  for an `input` port and `-to [get_ports X]` for an `output` port. An `inout`
+  port is queried both ways and the minimum slack wins. Each query uses
+  `-path_delay max|min -group_path_count 1 -endpoint_path_count 1`, so the
+  output grows with the number of requested ports and path groups, never with
+  design size. For an output port the record's `endpoint` is the port.
+  `direction` is `input`, `output` or `inout`.
+- **Records.** Each `setup`/`hold` record has the shape documented above.
+  There is no per-port aggregate to compare with, so
+  `consistent_with_aggregate` is always `null` and `status` is never
+  `"inconsistent"`. A side with no constrained path (for example the setup side
+  of a `min_ns`-only input) is `"no_paths"` with null identity fields, never
+  omitted. If the engine query fails, both records are `"unavailable"` with a
+  `reason`; no path is fabricated.
+- **Errors.** Names are verified in the engine session exactly like the delay
+  maps, before any timing is reported. A missing or ambiguous name (wildcard,
+  whole bus) stops the run with `constraints.report_ports rejected: ...`.
+- **Omitted means unchanged.** Without `report_ports` the generated Tcl and the
+  response are byte-identical to before; there is no `port_paths` key.
+
 ### What this is not
 
-- **Not a selected-port query.** The records give the identity of the
-  *global* worst setup and hold path end. They explain which check sets the
-  aggregate, but they do not answer "what is the hold slack from port X".
-  When an unrelated check is worse, as in the example, the boundary port's
-  own margin is not in the response. Per-port slack queries are tracked
-  separately in #3042.
+- **Not a general path query.** `report_ports` returns one worst setup and one
+  worst hold record per port. Wildcards, whole buses, non-port pins/nets,
+  top-N paths per port and full path reports are not supported.
 - **Not a completeness proof.** A port left out of a map with no scalar
   default stays unconstrained, and a `min_ns`-only entry leaves the setup
   side unconstrained. Neither produces a path record, so a clean

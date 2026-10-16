@@ -111,7 +111,10 @@ implemented deliberately rather than rediscovered:
    therefore classifies a line only once it matches
    :data:`SDF_DIAGNOSTIC_LINE_RE` (the marker *plus* Icarus's own
    ``<file>:<line>:`` locator); a marker-bearing line without that shape is
-   a splice, not evidence, and counts as neither actionable nor benign.
+   a splice, not evidence, and counts as neither actionable nor benign. A
+   line that has the shape but embeds a cocotb log header
+   (:data:`SDF_SPLICED_LOG_HEADER_RE`, issue #2996) is the same splice
+   landing after the locator and is dropped likewise.
 
 9. **A bit-selected top-level-port ``INTERCONNECT`` entry can poison a
    sibling entry on the same net** (issue #1619, live on Icarus 13.0) --
@@ -343,6 +346,19 @@ SDF_BENIGN_DIAGNOSTIC_SUBSTRINGS = ("TIMINGCHECK",)
 #: (issue #1136 -- see :func:`_scan_sdf_diagnostics`), so the classification
 #: below is applied only to lines that match.
 SDF_DIAGNOSTIC_LINE_RE = re.compile(r"^SDF (?:WARNING|ERROR): .+?:\d+: .+$")
+
+#: cocotb's log-line header (``<sim-time><unit> <LEVEL> <logger>``), e.g.
+#: ``590.00ns INFO     cocotb.klt_sdf_dut_wrapper``. A marker-bearing line that
+#: *contains* one is a stdout splice even when it still matches
+#: :data:`SDF_DIAGNOSTIC_LINE_RE` (issue #2996, extending #1136's rule past
+#: the locator): the cut landed inside the message, or inside the path with
+#: the spliced-in line's own ``<file>:<line>:`` satisfying the locator. Keying
+#: on the interleaved writer's signature rather than on a second locator
+#: makes the result independent of path length and of which log line lands.
+SDF_SPLICED_LOG_HEADER_RE = re.compile(
+    r"\s\d+(?:\.\d+)?\s?(?:fs|ps|ns|us|ms|s)\s+"
+    r"(?:DEBUG|INFO|WARNING|ERROR|CRITICAL)\s+\S+"
+)
 
 #: The ``environment.sdf.dropped`` class counting the zero-delay
 #: ``INTERCONNECT`` entries removed before annotation because their
@@ -2293,7 +2309,19 @@ def _apply_sdf_physical_only_drop(
 # ---------------------------------------------------------------------------
 
 
-def run_functional_verification(request: str) -> dict[str, Any]:
+def _resolve_output_dir(request_dir: str, output_dir: str | None) -> str:
+    """Directory run artifacts are written to: ``output_dir`` (relative paths
+    resolve against the cwd, not the request directory) or, by default,
+    ``<request_dir>/.klt/functional-verification``.
+    """
+    if output_dir:
+        return os.path.abspath(output_dir)
+    return os.path.join(request_dir, ".klt", "functional-verification")
+
+
+def run_functional_verification(
+    request: str, output_dir: str | None = None
+) -> dict[str, Any]:
     """Run the cocotb regression declared by ``request``.
 
     ``request`` accepts the same three forms every other ``klt`` request
@@ -2315,6 +2343,7 @@ def run_functional_verification(request: str) -> dict[str, Any]:
     and kept, never deleted.
     """
     request_doc, request_dir = load_request_arg(request)
+    output_dir = _resolve_output_dir(request_dir, output_dir)
 
     engine = request_doc.get("engine", DEFAULT_ENGINE)
     if engine not in SUPPORTED_ENGINES:
@@ -2345,7 +2374,6 @@ def run_functional_verification(request: str) -> dict[str, Any]:
     ) = _resolve_options(request_doc.get("options"), engine, request_dir)
     parameters = _resolve_parameters(request_doc.get("parameters"))
 
-    output_dir = os.path.join(request_dir, ".klt", "functional-verification")
     build_dir = os.path.join(output_dir, f"sim_build_{engine}")
     try:
         os.makedirs(output_dir, exist_ok=True)
@@ -2792,7 +2820,7 @@ def _write_mutant_combined_log(
 
 
 def run_functional_verification_with_mutations(
-    request: str, proposals_path: str
+    request: str, proposals_path: str, output_dir: str | None = None
 ) -> dict[str, Any]:
     """Run ``klt functional-verification --mutations`` end to end (issue
     #1592, spike section 3): the unmodified baseline run from
@@ -2900,7 +2928,7 @@ def run_functional_verification_with_mutations(
     parameters = _resolve_parameters(request_doc.get("parameters"))
     build_args = list(user_build_args)
 
-    output_dir = os.path.join(request_dir, ".klt", "functional-verification")
+    output_dir = _resolve_output_dir(request_dir, output_dir)
     mutants_dir = os.path.join(output_dir, "mutants")
     try:
         os.makedirs(mutants_dir, exist_ok=True)
@@ -2912,7 +2940,7 @@ def run_functional_verification_with_mutations(
     # The baseline-must-pass gate (spike §3d): the exact same request the
     # caller already used for an ordinary (non-mutation) run, reused
     # unchanged -- see `docs/design/mutation-testing-spike.md` §3a.
-    baseline = run_functional_verification(request)
+    baseline = run_functional_verification(request, output_dir)
     if baseline["status"] != "pass":
         failing_names = ", ".join(
             test["name"] for test in baseline["tests"] if test["status"] == "failed"

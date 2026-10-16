@@ -112,8 +112,8 @@ BATCH_JOB_TOOL = "xschem"
 PDK_ROOT_PREFIXES = ("$PDK_ROOT/", "${PDK_ROOT}/")
 
 #: ``error.code`` values this backend sets itself (the transport's own
-#: ``batch_no_capacity`` and the runner's ``batch_runner_version_*`` codes
-#: pass through unchanged).
+#: ``batch_no_capacity`` / ``batch_concurrency_cap`` and the runner's
+#: ``batch_runner_version_*`` codes pass through unchanged).
 BATCH_POLL_TIMEOUT_CODE = "batch_poll_timeout"
 BATCH_JOB_FAILED_CODE = "batch_job_failed"
 BATCH_JOB_TIMEOUT_CODE = "batch_job_timeout"
