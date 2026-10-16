@@ -327,6 +327,7 @@ from . import (
     LayerRC,
     MomCapacitorDevice,
     MOSFlavour,
+    NetSpaceSpec,
     ParasiticsDeck,
     ResistorDevice,
     RuleProvenance,
@@ -891,7 +892,7 @@ DECK: list[DrcRule] = [
     # reported under `coverage.layers_in_stream_without_rules` and a
     # multi-well layout got a vacuous `clean`. Only the two geometry-only
     # rules are transcribed; NW.b1 (different-net spacing) is net-aware and
-    # is surfaced via `UNCHECKED_RULES` below instead. Values are
+    # is `nwell.space.2` (check="net_space", #3572). Values are
     # sg13cmos5l_tech_default.json's NW_a / NW_b. -------------------------
     DrcRule(
         id="nwell.width.1",
@@ -922,11 +923,38 @@ DECK: list[DrcRule] = [
         # has no net identity, so it flags any two wells closer than 0.62 um
         # (stricter than the foundry deck for same-net pairs; for
         # different-net pairs it is implied by the stricter NW.b1, 1.80 um,
-        # so it adds no false positive there).
+        # so it adds no false positive there). Same-net pairs are still
+        # over-flagged: nwell.space.2 (net-aware, #3572) covers NW.b1 only.
         scope="5.1 NWell",
         provenance=_cmos5l_provenance(
             "libs.tech/klayout/tech/drc/rule_decks/feol/5_1_nwell.drc",
             "NW.b",
+        ),
+    ),
+    DrcRule(
+        id="nwell.space.2",
+        description="minimum NWell space between different nets",
+        layer=(31, 0),  # NWell.drawing
+        check="net_space",
+        threshold_dbu=1800,  # 1.80 um
+        # 5_1_nwell.drc rule "NW.b1": "Min. PWell width between NWell
+        # regions of different nets" (drc_rules['NW_b1'] == 1.80), issue
+        # #3572. Net identity comes from `net_spec`, the minimum conductor
+        # model for NWell nets: an NWell is tied by an n+ tap (Activ & nSD
+        # inside it) -> Cont -> Metal1, and two wells touching the same
+        # Metal1 net share a net. NOT modelled (so wells joined only
+        # through them read as different nets, i.e. may be over-flagged,
+        # never silently passed): Metal2+/Via*, TopMetal*, GatPoly/Activ
+        # jumpers, NWell.pin labels and substrate (PWell) connectivity.
+        # A well with no tap is its own net.
+        scope="5.1 NWell",
+        provenance=_cmos5l_provenance(
+            "libs.tech/klayout/tech/drc/rule_decks/feol/5_1_nwell.drc",
+            "NW.b1",
+        ),
+        net_spec=NetSpaceSpec(
+            tap_and=((1, 0), (7, 0)),  # Activ.drawing & nSD.drawing
+            chain=((6, 0), (8, 0)),  # Cont.drawing -> Metal1.drawing
         ),
     ),
 ]
@@ -935,15 +963,7 @@ DECK: list[DrcRule] = [
 # #3012): `{rule id: (layer, description)}`. `drc.py` reports each one under
 # `coverage.unchecked_rules` whenever its layer is present in the stream, so
 # a `clean` verdict cannot be read as "this rule was checked".
-UNCHECKED_RULES: dict[str, tuple[tuple[int, int], str]] = {
-    "NW.b1": (
-        (31, 0),
-        "NW.b1 (min. PWell width between NWell regions of different nets, "
-        "1.80 um) is net-aware and this engine has no net-aware spacing "
-        "check; wells on different nets closer than 1.80 um are not "
-        "flagged. Only the geometric nwell.space.1 (0.62 um) ran.",
-    ),
-}
+UNCHECKED_RULES: dict[str, tuple[tuple[int, int], str]] = {}
 
 # `(layer, datatype) -> "name.purpose"` display names for every layer this
 # deck's DECK/EXTRACTION_DECK reads, cross-checked against

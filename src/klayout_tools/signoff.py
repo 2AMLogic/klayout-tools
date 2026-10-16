@@ -463,6 +463,21 @@ envelope, graded here with no special path. With a real producer in place,
 ``{"generic"}`` (:func:`_allowed_kinds_for`), so an unrelated native pass
 no longer turns them green. Item 2 is unchanged.
 
+### Regeneration claims on items 1 and 2 (issue #2887)
+
+An anchored item-1/2 attestation may also carry an optional
+``provenance.regeneration`` object, ``{"generator": <str>,
+"regenerated_hash": "sha256:<hex>"}``: the attester's statement that running
+``generator`` reproduced bytes hashing to ``regenerated_hash``. ``klt
+signoff`` **never executes** ``generator`` -- it is echoed only. What is
+graded is hash equality: ``regenerated_hash`` must equal the hash the bound
+artifact re-hashed to, or the row renders :data:`_REASON_STALE_ARTIFACT`; a
+malformed block renders :data:`_REASON_UNANCHORED_EVIDENCE`. A matching
+claim is disclosed as ``artifact_binding.regeneration`` with
+``executed_by_klt: false``. Absent (or ``null``), the row grades exactly as
+before. Items 9 and 10 neither grade nor echo the block. See
+:func:`_regeneration_claim`.
+
 ## Power delivery (structural): item 11 <- `klt erc` + `klt lvs` (+ P&R) (issue #2025)
 
 Every item above is proved by **one** artifact. T1 item 11 ("Power delivery
@@ -1770,6 +1785,33 @@ _REASON_UNANCHORED_EVIDENCE = "unanchored_evidence"
 #: including item 8); an item-8 envelope that declares no ``t1_item`` is
 #: unaffected, exactly as before.
 _REASON_WRONG_ITEM = "wrong_item"
+
+#: Issue #2887: an artifact-anchored ``"generic"`` citation for T1 item 1 or
+#: 2 (:data:`_ITEMS_ACCEPTING_REGENERATION_CLAIMS`) whose
+#: ``provenance.regeneration.regenerated_hash`` -- the hash the attester's
+#: own CI recorded after re-running the generator -- differs from the hash
+#: the bound artifact re-hashes to here. The committed artifact is not what
+#: its generator produces: the netlist/stream is out of date with its
+#: sources (or the generator is nondeterministic, which this cannot tell
+#: apart). Distinct from :data:`_REASON_STALE_EVIDENCE`, which says the
+#: artifact changed *after* it was attested; here the attested bytes are
+#: intact but were never fresh. Grouped with the "a check ran and did not
+#: pass" reasons: the remedy is to regenerate and commit the artifact, then
+#: re-attest. ``klt signoff`` never runs the generator itself.
+_REASON_STALE_ARTIFACT = "stale_artifact"
+
+#: T1 item ids whose artifact-anchored ``"generic"`` citation may carry a
+#: ``provenance.regeneration`` claim (issue #2887): items 1 (Design sources:
+#: the netlist is derived from the schematic) and 2 (Layout: the stream may
+#: be generated). Items 9 and 10 bind inventories/records that have no
+#: generator, so the block is neither graded nor echoed for them.
+_ITEMS_ACCEPTING_REGENERATION_CLAIMS: frozenset[int] = frozenset({1, 2})
+
+#: The only ``regenerated_hash`` shape accepted: the ``sha256:<64 lowercase
+#: hex>`` form every `klt` re-hash produces (``_provenance.sha256_file``),
+#: so a placeholder or differently-encoded digest is refused as malformed
+#: instead of reading as a stale artifact.
+_REGENERATED_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 #: Issue #2342: the evidence entry carried a ``"pointer"`` (an RFC 6901 JSON
 #: Pointer naming where inside the cited document the envelope lives -- see
@@ -6289,10 +6331,64 @@ def _bind_anchored_citation(
         return _REASON_STALE_EVIDENCE
     if input_verified is not True:
         return _REASON_UNVERIFIABLE_PROVENANCE
-    citation["artifact_binding"] = _generic_artifact_binding(
-        resolution["envelope"], resolution
-    )
+    binding = _generic_artifact_binding(resolution["envelope"], resolution)
+    if item_id in _ITEMS_ACCEPTING_REGENERATION_CLAIMS:
+        regeneration, refusal = _regeneration_claim(
+            resolution["envelope"], resolution["content_hash"]
+        )
+        if refusal is not None:
+            return refusal
+        if regeneration is not None:
+            binding["regeneration"] = regeneration
+    citation["artifact_binding"] = binding
     return None
+
+
+def _regeneration_claim(
+    envelope: Mapping[str, Any], bound_hash: Any
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Grade an item-1/2 attestation's optional ``provenance.regeneration``
+    claim (issue #2887) against ``bound_hash`` -- the hash the bound
+    artifact has just re-hashed to (``input_verified is True`` by now).
+
+    Returns ``(disclosure, None)`` for a matching claim, ``(None, None)``
+    when no claim is made (the key is absent or ``null``: grading unchanged
+    from issue #2718), or ``(None, reason)`` to refuse:
+
+    - :data:`_REASON_UNANCHORED_EVIDENCE` for a malformed block -- not an
+      object, ``generator`` not a non-empty string, or ``regenerated_hash``
+      not a ``sha256:<hex>`` digest. A claim that cannot be read is not
+      silently dropped, or a typo would read as "not claimed".
+    - :data:`_REASON_STALE_ARTIFACT` when ``regenerated_hash`` differs from
+      ``bound_hash``.
+
+    ``generator`` is **never executed** -- it is the attester's description
+    of how they regenerated the artifact, echoed verbatim so a reader can
+    reproduce it. ``executed_by_klt: false`` says so in the JSON itself.
+    """
+    provenance = envelope.get("provenance")
+    if not isinstance(provenance, Mapping):
+        return None, None
+    claim = provenance.get("regeneration")
+    if claim is None:
+        return None, None
+    if not isinstance(claim, Mapping):
+        return None, _REASON_UNANCHORED_EVIDENCE
+    generator = claim.get("generator")
+    regenerated_hash = claim.get("regenerated_hash")
+    if not isinstance(generator, str) or not generator.strip():
+        return None, _REASON_UNANCHORED_EVIDENCE
+    if not isinstance(regenerated_hash, str) or not _REGENERATED_HASH_RE.match(
+        regenerated_hash
+    ):
+        return None, _REASON_UNANCHORED_EVIDENCE
+    if regenerated_hash != bound_hash:
+        return None, _REASON_STALE_ARTIFACT
+    return {
+        "generator": generator,
+        "regenerated_hash": regenerated_hash,
+        "executed_by_klt": False,
+    }, None
 
 
 def _generic_binding_path(envelope: Mapping[str, Any]) -> Any:
@@ -6520,7 +6616,9 @@ def _generic_artifact_binding(
     the envelope names it -- a string or a ``{path, scope}`` object), and the
     hash that artifact re-hashed to. ``summary``/``source`` are echoed when
     the envelope carries them, so a reader sees what was audited without
-    opening the envelope; they are never graded.
+    opening the envelope; they are never graded. A graded, matching
+    regeneration claim (items 1/2, issue #2887) is added by
+    :func:`_bind_anchored_citation`, not here.
     """
     provenance = envelope.get("provenance") or {}
     input_block = provenance.get("input") or {}

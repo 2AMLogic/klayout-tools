@@ -373,7 +373,7 @@ def deck_info(name: str | None = None) -> dict[str, Any]:
 #: in micrometres and a minimum interior corner angle in degrees, neither of
 #: them a ``threshold_dbu`` distance either.
 _NON_DISTANCE_CHECKS = frozenset(
-    {"area", "density", "antenna", "ongrid", "angle", "comp_coverage"}
+    {"area", "density", "antenna", "ongrid", "angle", "comp_coverage", "tap_distance"}
 )
 
 
@@ -1018,6 +1018,8 @@ def _rule_pairs(rule: DrcRule) -> list[tuple[int, int]]:
         pairs.append(rule.other_layer)
     if rule.region_spec is not None:
         pairs.extend(rule.region_spec.layers())
+    if rule.net_spec is not None:
+        pairs.extend(rule.net_spec.layers())
     return pairs
 
 
@@ -1086,6 +1088,15 @@ def _rule_limits(rule: DrcRule, nominal_dbu: float) -> dict[str, Any]:
         return {"grid_um": rule.grid_um}
     if rule.check == "angle":
         return {"angle_limit_deg": rule.angle_limit_deg}
+    if rule.check == "tap_distance" and rule.region_spec is not None:
+        spec: Any = rule.region_spec
+        # Physical micrometres already, like `grid_um` -- no dbu conversion.
+        return {
+            "well_domain": spec.well_domain,
+            "voltage": spec.voltage,
+            "max_distance_um": spec.max_distance_um,
+            "step_um": spec.step_um,
+        }
     return {}
 
 

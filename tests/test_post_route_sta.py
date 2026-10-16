@@ -624,7 +624,8 @@ def test_sta_script_lines_wrap_read_spef_in_annotation_evidence():
     # `report_parasitic_annotation` is wrapped in `catch` so an OpenSTA
     # build without the command degrades the derived fields to null rather
     # than aborting the run.
-    assert any(ln.startswith("catch {report_parasitic_annotation}") for ln in lines)
+    assert any("catch {report_parasitic_annotation" in ln for ln in lines)
+    assert any("report_parasitic_annotation -report_unannotated" in ln for ln in lines)
 
 
 def test_sta_script_lines_no_spef_has_no_annotation_evidence():
@@ -1011,6 +1012,113 @@ def test_parse_parasitic_annotation_partial_line_is_not_the_total():
 
 def test_parse_parasitic_annotation_missing_block_is_unknown():
     assert post_route_sta._parse_parasitic_annotation("nothing here") == (None, None)
+
+
+def _listed_stdout(unannotated, partial, floating):
+    parts = [
+        _parasitic_block(
+            "\n".join(
+                [
+                    f"Found {len(unannotated)} unannotated drivers.",
+                    *[f" {pin}" for pin in unannotated],
+                    f"Found {len(partial)} partially unannotated drivers.",
+                    *[f" {pin}" for pin in partial],
+                ]
+            )
+        )
+    ]
+    if floating is not None:
+        parts.append(
+            "\n".join(
+                [
+                    post_route_sta._FLOATING_DRIVERS_BEGIN,
+                    *[f"KLT_FLOATING_DRIVER {pin}" for pin in floating],
+                    post_route_sta._FLOATING_DRIVERS_END,
+                ]
+            )
+        )
+    return "\n".join(parts)
+
+
+def test_parse_parasitic_driver_pins_lists_both_groups():
+    stdout = _listed_stdout(["clkload1/Z", "u2/X"], ["u3/Y"], None)
+
+    assert post_route_sta._parse_parasitic_driver_pins(stdout) == (
+        ["clkload1/Z", "u2/X"],
+        ["u3/Y"],
+    )
+    assert post_route_sta._parse_parasitic_driver_pins("nothing") == (None, None)
+
+
+def test_parse_floating_drivers_absent_block_is_none():
+    assert post_route_sta._parse_floating_drivers("nothing") is None
+    stdout = _listed_stdout([], [], ["clkload1/Z"])
+    assert post_route_sta._parse_floating_drivers(stdout) == ["clkload1/Z"]
+
+
+def _annotation_from(stdout_tail):
+    completed = post_route_sta._OpenRoadResult(
+        returncode=0,
+        stdout="\n".join(
+            [
+                post_route_sta._SPEF_NET_CHECK_BEGIN,
+                "1 1",
+                "1 1",
+                post_route_sta._SPEF_NET_CHECK_END,
+                post_route_sta._DELAY_PRE_BEGIN,
+                _UNANNOTATED_PATH,
+                post_route_sta._DELAY_PRE_END,
+                post_route_sta._DELAY_POST_BEGIN,
+                _ANNOTATED_PATH,
+                post_route_sta._DELAY_POST_END,
+                stdout_tail,
+            ]
+        ),
+        stderr="",
+        engine_log=None,
+    )
+    return post_route_sta._spef_annotation_block(completed, ["n"])
+
+
+def test_floating_no_net_drivers_do_not_gate_annotation_complete():
+    """Issue #3662: unannotated drivers that sit on no net are reported
+    separately and excluded from the completeness predicate; partial drivers
+    stay non-gating but are listed."""
+    block = _annotation_from(
+        _listed_stdout(
+            ["clkload1/Z", "clkload1/ZN"], ["u3/Y"], ["clkload1/Z", "clkload1/ZN"]
+        )
+    )
+
+    assert block["annotation_complete"] is True
+    assert block["unannotated_driver_count"] == 2
+    assert block["floating_driver_count"] == 2
+    assert block["floating_driver_sample"] == ["clkload1/Z", "clkload1/ZN"]
+    assert block["unannotated_driver_sample"] == []
+    assert block["partially_unannotated_driver_sample"] == ["u3/Y"]
+
+
+def test_timed_unannotated_driver_still_gates():
+    block = _annotation_from(_listed_stdout(["clkload1/Z", "u2/X"], [], ["clkload1/Z"]))
+
+    assert block["annotation_complete"] is False
+    assert block["floating_driver_count"] == 1
+    assert block["unannotated_driver_sample"] == ["u2/X"]
+    assert "1 driver(s)" in block["annotation_warning"]
+
+
+def test_unlisted_unannotated_drivers_keep_gating_without_pin_listing():
+    """A build without `-report_unannotated` prints only the counts: the raw
+    count keeps gating and the new fields degrade to null / empty."""
+    block = _annotation_from(
+        _parasitic_block(
+            "Found 2 unannotated drivers.\nFound 0 partially unannotated drivers."
+        )
+    )
+
+    assert block["annotation_complete"] is False
+    assert block["floating_driver_count"] is None
+    assert block["floating_driver_sample"] is None
 
 
 def test_parse_parasitic_annotation_unsupported_command_is_unknown():

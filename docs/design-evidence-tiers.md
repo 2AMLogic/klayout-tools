@@ -98,6 +98,16 @@ netlist; item 9's or 10's several files), the envelope may bind the set with
 `provenance.input.paths` (issue #3044) so that editing any member turns the
 row stale; see [`docs/cli/signoff.md`](cli/signoff.md).
 
+For items 1 and 2, whose artifacts are usually *generated* (a netlist from
+its schematic, a stream from its generator), the attestation may also carry
+a regeneration claim (issue #2887): the generator command and the hash the
+attester's CI got by re-running it. The tool never runs the generator. It
+checks only that the claimed hash equals the bound artifact's, and renders
+`stale_artifact` when they differ, which means the committed artifact is not
+what its generator produces. This states freshness in the manifest instead
+of in a separate CI gate, but the regeneration itself remains the
+attester's word.
+
 ### What a T1 claim is scoped to
 
 **T1 is block-scoped.** Every item is evidence about *this block*, at its

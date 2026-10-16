@@ -58,7 +58,8 @@
       "65/20",
       "66/20",
       "66/44",
-      "67/20"
+      "67/20",
+      "93/44"
     ],
     "layers_in_stream_without_rules": [],
     "rules_checked": [
@@ -74,6 +75,8 @@
       "licon1.angle.1",
       "licon1.ongrid.1",
       "licon1.width.1",
+      "nsdm.angle.1",
+      "nsdm.ongrid.1",
       "poly.angle.1",
       "poly.enclosing.licon.1",
       "poly.endcap.diff.1",
@@ -157,8 +160,6 @@
       "ncm.ongrid.1",
       "npc.angle.1",
       "npc.ongrid.1",
-      "nsdm.angle.1",
-      "nsdm.ongrid.1",
       "nsm.angle.1",
       "nsm.ongrid.1",
       "nwell.angle.1",
@@ -255,6 +256,8 @@
       "licon1.angle.1",
       "licon1.ongrid.1",
       "licon1.width.1",
+      "nsdm.angle.1",
+      "nsdm.ongrid.1",
       "poly.angle.1",
       "poly.enclosing.licon.1",
       "poly.endcap.diff.1",
@@ -565,14 +568,6 @@
       },
       {
         "id": "npc.ongrid.1",
-        "reason": "no_applicable_geometry"
-      },
-      {
-        "id": "nsdm.angle.1",
-        "reason": "no_applicable_geometry"
-      },
-      {
-        "id": "nsdm.ongrid.1",
         "reason": "no_applicable_geometry"
       },
       {

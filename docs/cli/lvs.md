@@ -17,6 +17,9 @@ the accepted spike,
 the contract shape below. This document is the shipped contract; where the
 two disagree, this document (and the code) win.
 
+The success payload has a machine-readable JSON Schema:
+[`lvs-response.schema.json`](../schemas/lvs-response.schema.json).
+
 Unlike `klt extract`/`klt drc`, `klt lvs` takes a **request document** (like
 `klt sim`/`klt gen`), not positional netlist file args — it binds two
 netlist inputs plus optional matching hints, richer than a flag line carries
@@ -623,14 +626,15 @@ name differs from the deck's device-class label and has no curated entry yet
 "not a known device for the requested deck" error lists the full resolved
 set so the gap is visible from the failure itself.
 
-**Native-Vt NMOS is not supported on sky130 (issue #2912).** A `form:
-"subckt-call"` card naming `sky130_fd_pr__nfet_05v0_nvt` is rejected as "not a
-known device for the requested deck": the sky130 deck has no native-NMOS device
-class (upstream derives it from `hvi` AND `lvtn`, not a single marker layer),
-and `klt gen mos_array` cannot draw it (see `gen.md`, `voltage_flavor`).
-Mapping it with `reference.device_map` onto the plain `nfet` class would
-compare a device of the wrong type and is not an honest workaround — exclude
-the native device from the comparison explicitly instead.
+**Native-Vt NMOS on sky130 (issue #3600).** A `form: "subckt-call"` card naming
+`sky130_fd_pr__nfet_05v0_nvt` is accepted, and `klt gen mos_array
+--params '{"voltage_flavor": "nvt"}'` draws the `hvi` + `lvtn` markers the deck
+extracts it from (see `gen.md`, `voltage_flavor`), so gen -> extract -> lvs
+reaches `match`. Like every MOS flavour subcircuit, it is compared as the base
+`nfet` class: `klt lvs` does not distinguish flavour models, so a reference
+naming a different `nfet` model of matching topology also matches. The model
+binding itself is verified at the extract layer (`klt extract` emits
+`nfet_05v0_nvt`).
 
 **`sg13g2`'s `rfcmim` was the one live case of that gap** (issue #1470, now
 closed). Derivation binds the *declared class* name as its own subcircuit
@@ -1451,7 +1455,7 @@ would silently exempt them.
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `status` | `"match"` \| `"mismatch"` \| `"unchecked"` | The power/ground verdict, **independent of the report's top-level `status`** (which stays exactly `NetlistComparer.compare()`'s own signal-connectivity result). `"match"` when the check ran and found nothing; `"mismatch"` when it produced findings; `"unchecked"` when it did not run — never a clean verdict on absent evidence. |
-| `reason` | string \| `null` | Why the check did not run, for `status: "unchecked"`; `null` otherwise. One of: a `reference.form` other than `"gate-level-verilog"` (that form's reference carries its own power pins and nets, which the ordinary compare already checks); `options.power_connectivity: false`; no power-pin universe derivable from the reference library's pin-order data; or a layout netlist whose instances declare none of those pins (e.g. an `--abstract-cell-lef` that never declared PG pins). |
+| `reason` | string \| `null` | Why the check did not run, for `status: "unchecked"`; `null` otherwise. One of: a `reference.form` other than `"gate-level-verilog"` (that form's reference carries its own power pins and nets, which the ordinary compare already checks; when the layout instantiates pin-only black-box cells (issue #2853), the reason also names them and says their pins, power/ground included, were compared by name as ordinary subcircuit-pin connectivity); `options.power_connectivity: false`; no power-pin universe derivable from the reference library's pin-order data; or a layout netlist whose instances declare none of those pins (e.g. an `--abstract-cell-lef` that never declared PG pins). |
 | `power_pins` | array\<string\> | The power/ground pin names actually found on layout-side instances, upper-cased and sorted — what was checked, not what the library declares. `[]` when `status` is `"unchecked"`. |
 | `power_pins_derivation` | object \| `null` | Issue #2076. Where `power_pins` came from: `rule` (a stable identifier for the derivation — `"declared-by-every-instantiated-master"` for a single-library reference, or — issue #2707 — `"declared-by-every-instantiated-master-per-library"` when the masters span several pin-order libraries; a future rule would be a new value, never a silent change of meaning for an existing one), `masters` (the library cells the reference instantiates, upper-cased and sorted — the evidence the rule was applied to), `master_count`, `corroborated` (`true` only when the instantiated masters include at least two genuinely distinct declared-pin shapes — not merely more than one master *name*; two drive-strength variants of one logical cell declare the same shape and corroborate nothing), and `reason` (`null` when corroborated; otherwise what the evidence could not establish, including a same-shape-only multi-master case). Populated — never `null` — whenever `reference.form` is `"gate-level-verilog"` and `power_connectivity` was not disabled, even when the reference instantiates no cell of the resolved library at all (`masters: []`, `reason` naming that). `null` only when the check never attempted a derivation: a non-gate-level `reference.form`, or the `power_connectivity: false` opt-out. Under the per-library rule the object additionally carries `libraries` (additive; absent under the original rule): one `{library, masters, master_count, corroborated, power_pins}` record per library, `library` being `null` for cells from `reference.pin_order_files`. **Read `corroborated` before quoting `power_pins` as a coverage claim**: a `false` means this design gave the derivation nothing to cross-check against (see "How the power-pin universe is derived" above). |
 | `instance_count` | integer | How many distinct layout-side instances carried at least one of those pins. `0` when `status` is `"unchecked"`. |
@@ -1789,6 +1793,8 @@ each resolves relative paths inside the document.
 | `layout.deck_options` | object\<string, string\> | Optional `{"<key>": "<value>"}` pairs, the JSON-request-document counterpart of `klt extract --deck-option <key>=<value>` (issue #600/#595) — selects a caller-visible sheet-rho flavour of a shared-geometry resistor family (e.g. gf180mcu's `poly_res`, one of `1k`/`2k`/`3k`). Honored for both `layout` shapes wherever `layout.deck` is given — inline extraction (`layout.file`) and the pre-extracted `layout.netlist` shape (issue #585). Omitting it (or giving `{}`) resolves every deck exactly as before this field existed. An unrecognised key or value is an application error (exit 1), not a silent no-op or a silently-kept default; giving it without `layout.deck` is likewise an application error (there is no deck to apply it to). The fully resolved mapping — every option key the deck declares, including those it applied by default because `deck_options` did not name them (issue #2394) — is recorded under `provenance.deck.options`, alongside `provenance.deck.options_explicit`/`options_hash`; see "`layout` shapes" below and the `provenance` row further down. |
 | `layout.label_layers` | object\<string, [int, int] \| null\> | Optional, issue #2686. The request-document counterpart of `klt extract --label-layer <role>=<layer>/<datatype>` — the same `{"<role>": [layer, datatype] \| null}` shape as `klt extract`'s own `label_layers` request field (issue #2656). Re-points each named label role (`well`, `poly`, `metal<i>` — 0-based, index-aligned with the deck's metal stack) at the GDS purpose this layout actually wrote its net/pin name text on, *replacing* the deck's own pair for that role; `null` reads no label layer for that role. **Inline extraction only**: a non-empty value requires `layout.file` + `layout.deck` and is an application error (exit 1) on the pre-extracted `layout.netlist` shape, whose net names were fixed when it was extracted (unlike `layout.deck_options`, which that shape does honor). Omitting it, `null`, or `{}` extracts exactly as before this field existed. A value that is not an object, a role value that is neither `null` nor a `[layer, datatype]` pair of non-negative integers (no coercion — `true`, `8.0`, `"8/25"` are all rejected), and a role the deck has no slot for are all application errors. An applied override is echoed as the response's top-level `label_layers` field and replayed by `--check --rerun` — see "Reading names off a different label purpose" below. |
 | `layout.rename_declared_pins` | boolean | Optional, issue #2854, default `false`. The request-document counterpart of `klt extract --rename-declared-pins`: renames each surviving promoted pin net whose comma-joined component labels contain **exactly one** `layout.declared_pins` name to that name, so the layout side's pin names are the canonical interface names — which is what lets `options.anchor_top_level_pins` pair a boundary pin with a same-named reference pin even when the boundary conductor carries extra drawn labels (a macro's internal node label plus the parent's boundary label, extracted as one joined `Y\|dout`-style name). A net matching 2+ declared names is reported as a `pin.declared_short` `mismatches[]` entry (a short between interface pins — reported, never repaired); a rename colliding with an existing net name is skipped and stays extract-report-only. **Inline extraction only** — like `top_cell_pins`/`declared_pins` it has no effect on a pre-extracted `layout.netlist`, whose pins are already fixed. A non-boolean value, and `true` without `layout.declared_pins`, are request errors (exit 1). `false` (the default) is byte-identical to before this field existed. See `klt extract`'s "Renaming promoted pins to their declared name" section ([`docs/cli/extract.md`](extract.md)) for the full mechanism. |
+| `layout.abstract_cells` | string \| array\<string\> | Optional, issue #2853. The request-document counterpart of `klt extract --abstract-cells <glob>` (issue #620): the same shape `klt extract`'s own `abstract_cells` request field takes (a bare string is a one-element list). Every instantiated cell whose name matches one of these `fnmatch` globs is extracted as a pin-only black box: its devices are erased, and its pins are resolved from in-cell labels or `layout.abstract_cell_lef`. It does not contribute devices to the flat top circuit. One request can then compare a transistor-level region next to placed cells against a reference carrying pin-only stubs for those cells (see "Mixed-level LVS" below). **Inline extraction only**: a non-empty value on the pre-extracted `layout.netlist` shape is an application error (exit 1). Abstract with `klt extract --abstract-cells` instead, or give `layout.file`. Omitting it, or giving `null` or `[]`, extracts exactly as before this field existed. A value that is neither a string nor an array of strings is an application error. Echoed as the response's top-level `abstract_cells`, with the per-cell report as `abstracted_cells`, and replayed by `--check --rerun`. |
+| `layout.abstract_cell_lef` | string \| array\<string\> | Optional, issue #2853. The counterpart of `klt extract --abstract-cell-lef <path>`: LEF files whose `MACRO`/`PIN`/`PORT` data is the *fallback* pin source for a `layout.abstract_cells`-matched cell type that draws no in-cell pin label. Paths resolve against the request document's directory (the same rule as `layout.file`) and are echoed as given. Requires a non-empty `layout.abstract_cells` (an application error otherwise, mirroring `klt extract`). Inline extraction only, like `abstract_cells`. An unreadable LEF, or a matched cell type that resolves no pins from either source, is an application error. `klt lvs` has no `layout.pdk`, so a LEF `PORT` is probed the way `klt extract --abstract-cell-lef` probes it without `--pdk`: bottom-up across the deck's metals, with no PDK `.map`-file layer lookup. |
 | `reference.netlist` | string, required | Path to the reference (schematic/golden) SPICE netlist, parsed via `NetlistSpiceReader`. Relative paths resolve against the request file's directory (or the current working directory for the `-`/inline-JSON request forms — see the `<request>` bullet above). |
 | `reference.top` | string | The subcircuit in the reference netlist to compare. Omit when the reference file has exactly one top-level circuit (auto-selected, same convention as `layout.top`/`klt extract`'s `--top`). |
 | `reference.form` | string | `"plain-element"` (default), `"subckt-call"`, or `"gate-level-verilog"` (issue #1336). `"plain-element"` reads the reference as the schematic-equivalent form `klt lvs` requires, and detects/errors on a misfiled simulation-form netlist. `"subckt-call"` converts a PDK schematic flow's simulation-form netlist to the plain-element form first — see "Netlist form" above. `"gate-level-verilog"` reads `reference.netlist` as a `klt place-and-route` `verilog_path` gate-level Verilog netlist instead of SPICE and converts it to plain-element-shaped SPICE first — see "Digital gate-level LVS" above. |
@@ -1822,8 +1828,8 @@ each resolves relative paths inside the document.
 
 Extraction and compare are separable steps that also compose in one call:
 
-- **Inline extraction** — `{"file": "design.gds", "deck": "sky130", "top": "ota_5t"}`. Runs `klt extract`'s core extraction (the same `extract_netlist_from_layout` function `klt extract` itself calls) against the named curated deck (`sky130`/`gf180mcu`/`sg13g2`/`sg13cmos5l`), then compares the resulting in-memory netlist directly — no SPICE round-trip is required unless `options.keep_extracted` is set. `top` is optional (defaults to the layout's sole top cell, same as `klt extract --top`); `deck` is required in this shape. An optional boolean `top_cell_pins` (default `false`) mirrors `klt extract --top-cell-pins`: when `true`, only labels drawn directly in the top cell are promoted to top-level pins, so a net named only by a label inside an instanced sub-cell stays internal instead of demanding a matching port in `reference.netlist` (issue #291). An optional array of strings `declared_pins` (default unset) mirrors `klt extract --pins` (issue #514): when given, every promoted pin not named in this set is demoted back to an internal net, so naming an internal node of a lumped schematic device (e.g. one tap of a metal-option ladder) for documentation no longer promotes it to a pin `options.combine_devices` cannot fold through. Applied after `top_cell_pins`'s own reconciliation — it can only further restrict the promoted set. An empty `declared_pins` array is a request error (omit the field entirely to keep every named net promoted). An optional array of strings `pin_source_cells` (default unset, issue #1513) mirrors `klt extract --pin-source-cells`: a *positional* counterpart to `declared_pins`, for a `klt gen-compose`d assembly of several pre-labelled macros with no governing top-level DEF of its own — every drawn pin-name label physically located inside an instance of one of these named cells (anywhere in the hierarchy, at any depth) is resolved to its real net by probing that label's own position, not by matching its text; every currently-promoted pin not reached this way is demoted, exactly as `declared_pins` demotes on a miss. Applied after `declared_pins`'s own reconciliation (when both are given) — it can only further restrict. An empty `pin_source_cells` array is likewise a request error. `top_cell_pins`, `declared_pins`, and `pin_source_cells` are all only meaningful in this inline-extraction shape — they have no effect on a pre-extracted `layout.netlist`, whose pins are already fixed. An optional boolean `rename_declared_pins` (default `false`, issue #2854) mirrors `klt extract --rename-declared-pins`: renames each surviving promoted pin net whose component labels contain exactly one `declared_pins` name to that name, so `options.anchor_top_level_pins` can pair it with a same-named reference pin — see the `layout.rename_declared_pins` field-table row above for the full contract. An optional object `deck_options` (issue #600) mirrors `klt extract --deck-option`: selects a caller-visible sheet-rho flavour of a shared-geometry resistor family for this extraction — see the `layout.deck_options` field-table row above. An optional object `label_layers` (issue #2686) mirrors `klt extract --label-layer`: re-points a label role at the GDS purpose this layout wrote its names on — see the `layout.label_layers` field-table row above.
-- **Pre-extracted netlist** — `{"netlist": "design.spice", "top": "ota_5t"}`. Reads an existing extracted (or hand-written) SPICE netlist directly via `NetlistSpiceReader`, skipping extraction entirely. `top` is optional (defaults to the sole top circuit). `deck_options` is also honored here when `deck` is supplied alongside `netlist` (issue #585's pre-extracted-plus-deck shape): no extraction runs in this shape, so `deck_options` only affects `device_classes` and the deferred resistor `fixed_offset_ohm` correction (`options.combine_devices`) — it has no effect on the SPICE `R` values already baked into the supplied netlist. **`body_verification` with a deck (issue #3177):** when `deck` accompanies `netlist`, the `body_verification` / `device.body_unverified` determination runs against the netlist read back from disk, comparing class and net names case-insensitively and recognizing the escaped `\\$<n>` anonymous-net spelling, so it agrees with the inline-extraction verdict for the same layout. `label_layers` is **not** accepted here (a non-empty value is an application error): it only changes where extraction reads name text from, and this shape runs no extraction — re-extract with `klt extract --label-layer ...` instead. **Capacitor device-class recovery (issue #1876):** `klt extract -o` writes an unbound capacitor's `C` card bare and value-only, with no trailing device-class token (issue #1558 — see `klt extract`'s own docs for why). This shape (and `reference.netlist`, below) recovers that capacitor's real device-class name from the writer's own preceding `* device instance … <class>` comment instead of falling back to KLayout's generic `CAP` class, so a two-step `klt extract -o netlist.spice && klt lvs` pipeline against a reference that names the capacitor's class explicitly still reaches `status: "match"`. A missing or malformed comment (e.g. a hand-edited SPICE file) degrades gracefully to the generic class, exactly as before this recovery existed — it never raises. This is unrelated to `options.combine_devices_per_circuit` immediately below except that both are only meaningful against this pre-extracted shape; recovery runs regardless of whether per-circuit combining is used.
+- **Inline extraction** — `{"file": "design.gds", "deck": "sky130", "top": "ota_5t"}`. Runs `klt extract`'s core extraction (the same `extract_netlist_from_layout` function `klt extract` itself calls) against the named curated deck (`sky130`/`gf180mcu`/`sg13g2`/`sg13cmos5l`), then compares the resulting in-memory netlist directly — no SPICE round-trip is required unless `options.keep_extracted` is set. `top` is optional (defaults to the layout's sole top cell, same as `klt extract --top`); `deck` is required in this shape. An optional boolean `top_cell_pins` (default `false`) mirrors `klt extract --top-cell-pins`: when `true`, only labels drawn directly in the top cell are promoted to top-level pins, so a net named only by a label inside an instanced sub-cell stays internal instead of demanding a matching port in `reference.netlist` (issue #291). An optional array of strings `declared_pins` (default unset) mirrors `klt extract --pins` (issue #514): when given, every promoted pin not named in this set is demoted back to an internal net, so naming an internal node of a lumped schematic device (e.g. one tap of a metal-option ladder) for documentation no longer promotes it to a pin `options.combine_devices` cannot fold through. Applied after `top_cell_pins`'s own reconciliation — it can only further restrict the promoted set. An empty `declared_pins` array is a request error (omit the field entirely to keep every named net promoted). An optional array of strings `pin_source_cells` (default unset, issue #1513) mirrors `klt extract --pin-source-cells`: a *positional* counterpart to `declared_pins`, for a `klt gen-compose`d assembly of several pre-labelled macros with no governing top-level DEF of its own — every drawn pin-name label physically located inside an instance of one of these named cells (anywhere in the hierarchy, at any depth) is resolved to its real net by probing that label's own position, not by matching its text; every currently-promoted pin not reached this way is demoted, exactly as `declared_pins` demotes on a miss. Applied after `declared_pins`'s own reconciliation (when both are given) — it can only further restrict. An empty `pin_source_cells` array is likewise a request error. `top_cell_pins`, `declared_pins`, and `pin_source_cells` are all only meaningful in this inline-extraction shape — they have no effect on a pre-extracted `layout.netlist`, whose pins are already fixed. An optional boolean `rename_declared_pins` (default `false`, issue #2854) mirrors `klt extract --rename-declared-pins`: renames each surviving promoted pin net whose component labels contain exactly one `declared_pins` name to that name, so `options.anchor_top_level_pins` can pair it with a same-named reference pin — see the `layout.rename_declared_pins` field-table row above for the full contract. An optional object `deck_options` (issue #600) mirrors `klt extract --deck-option`: selects a caller-visible sheet-rho flavour of a shared-geometry resistor family for this extraction — see the `layout.deck_options` field-table row above. An optional object `label_layers` (issue #2686) mirrors `klt extract --label-layer`: re-points a label role at the GDS purpose this layout wrote its names on — see the `layout.label_layers` field-table row above. Optional `abstract_cells`/`abstract_cell_lef` (issue #2853) mirror `klt extract --abstract-cells`/`--abstract-cell-lef`: matched cells become pin-only black boxes. See the field-table rows above and "Mixed-level LVS" below.
+- **Pre-extracted netlist** — `{"netlist": "design.spice", "top": "ota_5t"}`. Reads an existing extracted (or hand-written) SPICE netlist directly via `NetlistSpiceReader`, skipping extraction entirely. `top` is optional (defaults to the sole top circuit). `deck_options` is also honored here when `deck` is supplied alongside `netlist` (issue #585's pre-extracted-plus-deck shape): no extraction runs in this shape, so `deck_options` only affects `device_classes` and the deferred resistor `fixed_offset_ohm` correction (`options.combine_devices`) — it has no effect on the SPICE `R` values already baked into the supplied netlist. **`body_verification` with a deck (issue #3177):** when `deck` accompanies `netlist`, the `body_verification` / `device.body_unverified` determination runs against the netlist read back from disk, comparing class and net names case-insensitively and recognizing the escaped `\\$<n>` anonymous-net spelling, so it agrees with the inline-extraction verdict for the same layout. `label_layers` is **not** accepted here (a non-empty value is an application error): it only changes where extraction reads name text from, and this shape runs no extraction — re-extract with `klt extract --label-layer ...` instead. `abstract_cells`/`abstract_cell_lef` are likewise **not** accepted here (issue #2853): this netlist was already abstracted, or not, when it was extracted. **Capacitor device-class recovery (issue #1876):** `klt extract -o` writes an unbound capacitor's `C` card bare and value-only, with no trailing device-class token (issue #1558 — see `klt extract`'s own docs for why). This shape (and `reference.netlist`, below) recovers that capacitor's real device-class name from the writer's own preceding `* device instance … <class>` comment instead of falling back to KLayout's generic `CAP` class, so a two-step `klt extract -o netlist.spice && klt lvs` pipeline against a reference that names the capacitor's class explicitly still reaches `status: "match"`. A missing or malformed comment (e.g. a hand-edited SPICE file) degrades gracefully to the generic class, exactly as before this recovery existed — it never raises. This is unrelated to `options.combine_devices_per_circuit` immediately below except that both are only meaningful against this pre-extracted shape; recovery runs regardless of whether per-circuit combining is used.
 
 `layout.top`/`reference.top` are always compared as a declared pair, even
 when their names differ — the two selected circuits are pinned together
@@ -1870,6 +1876,81 @@ under `sg13cmos5l`, whose default is `.pin` (datatype 2):
   --rerun` replays it. The field is omitted when no override was applied, so
   existing reports, and reruns of reports committed before the field existed,
   are unchanged.
+
+### Mixed-level LVS: a transistor-level region plus black-box cells (`layout.abstract_cells`, issue #2853)
+
+A layout can hold a transistor-level region, such as an analog block or a
+custom cell, next to placed standard cells that you want compared as opaque,
+pin-only black boxes rather than device by device. `layout.abstract_cells`
+runs that compare in **one** request. Inline extraction abstracts every
+matching cell exactly as `klt extract --abstract-cells` does, and extracts
+everything else at transistor level.
+
+```json
+{
+  "layout": {
+    "file": "mixed.gds",
+    "deck": "sky130",
+    "abstract_cells": ["sky130_fd_sc_hd__*"],
+    "abstract_cell_lef": ["sky130_fd_sc_hd.lef"]
+  },
+  "reference": { "netlist": "mixed.ref.spice", "top": "mixed" }
+}
+```
+
+The reference is the transistor-level netlist of the region, flattened into
+the top circuit, plus one **pin-only stub** per abstracted cell type, power
+pins included:
+
+```spice
+.subckt mixed A STUB_A VGND VPB VPWR VSUBRING Y
+M1 Y A VGND VSUBRING nfet W=0.65U L=0.15U
+M2 Y A VPWR VPB pfet W=1.0U L=0.15U
+X1 VGND STUB_A SC_STUB
+.ends
+.subckt SC_STUB VGND A
+.ends
+```
+
+`reference.form: "subckt-call"` works the same way. Its converter turns the
+curated PDK device calls (`XM1 ... sky130_fd_pr__nfet_01v8 ...`) into
+devices and passes the stub calls through as ordinary subcircuit instances.
+
+- **Stub pin order does not matter.** The extract side writes an abstracted
+  cell's pins in alphabetical order (`.SUBCKT SC_STUB A VGND`), and a PDK
+  library or hand-written stub usually declares a different order. A pin-only
+  circuit has no internal topology to pair its pins by, so the comparer pairs
+  its pins **by name**. The pin *names* must agree, but the pin *order* does
+  not matter.
+- **`body_verification` is real for the transistor region.** The run is
+  inline extraction with a deck, so the `device.body_unverified` check and
+  the `body_verification` block evaluate every MOS device the region draws.
+  The abstracted cells contribute no devices. For example, an NMOS whose
+  body falls back to the deck's synthesized `vsubs` is reported as
+  `"unverified"`.
+- **Power pins of the black boxes are compared as ordinary connectivity.**
+  The reference carries every stub's power/ground connections, so a power
+  pin wired to the wrong net is a compare mismatch. `power_connectivity`
+  stays `"unchecked"` for every form except `"gate-level-verilog"`. When the
+  layout instantiates pin-only cells, the `reason` names those cells and
+  says that their pins were compared this way. No separate per-instance
+  power-pin audit runs, because that audit needs a library-derived
+  power/ground pin universe and only the gate-level form has one (see
+  "Power/ground connectivity" above).
+- **What was abstracted is recorded.** The response echoes
+  `abstract_cells`/`abstract_cell_lef` as given and adds `abstracted_cells`,
+  which is `klt extract`'s per-cell-type report (`cell`, `instance_count`,
+  `pin_count`, `resolution_source`, `lef_path`). An empty list means the
+  globs matched no instantiated cell. `--check --rerun` replays both
+  request fields.
+- **Prefer this over the two-step form.** The two-step alternative is `klt
+  extract --abstract-cells -o mixed.spice`, then `layout.netlist` plus
+  `layout.deck`. That form does run the `body_verification` determination,
+  but it runs against the SPICE read back from disk. On issue #2853's
+  fixture it reported `"verified"` for an untapped NMOS whose body sits on
+  `vsubs`. The one-request form above reports `"unverified"` for the same
+  layout. Until #3177 is fixed, do not rely on a `body_verification` verdict
+  from the two-step form.
 
 ## Response
 
@@ -1978,6 +2059,9 @@ section this engine buckets rather than fully structures:
 | `engine` | string | Echo of the request's `engine` (or the default, `"klayout"`). |
 | `layout` | string | Echo of `layout.file` or `layout.netlist`, exactly as provided. |
 | `label_layers` | object | Issue #2686. Present **only** when the request applied a non-empty `layout.label_layers` override (omitted otherwise, so every report from a request without it — and every report committed before the field existed — is unchanged): `{"<role>": [layer, datatype] \| null}`, sorted by role, `null` kept for a cleared role. Records which GDS purpose inline extraction read net/pin names from, which `provenance.deck` alone cannot say. `--check --rerun` replays it as `layout.label_layers`. |
+| `abstract_cells` | array\<string\> | Issue #2853. Present **only** when the request gave a non-empty `layout.abstract_cells`, and omitted otherwise, so every other report is unchanged. The cell-name globs, as given. `--check --rerun` replays it. |
+| `abstract_cell_lef` | array\<string\> | Issue #2853. Present **only** when the request gave a non-empty `layout.abstract_cell_lef`: the LEF paths, as given (unresolved). `--check --rerun` replays it. |
+| `abstracted_cells` | array\<object\> | Issue #2853. Present **only** alongside `abstract_cells`. Inline extraction's per-matched-cell-type report, the same entries `klt extract` emits under this name (`{"cell", "instance_count", "pin_count", "resolution_source", "lef_path"}`). `[]` when the globs matched no instantiated cell. |
 | `reference` | string | Echo of `reference.netlist`, exactly as provided. |
 | `top` | string | The compared top circuit's name (the layout side's resolved top cell/circuit name). |
 | `reference_top` | string | The **reference** side's resolved top circuit name (issue #1205). Equal to `top` for the ordinary compare, but different by construction for an LVS negative control — a deliberately-broken `<cell>_shorted` layout compared against the *intact* `<cell>`'s reference netlist. Recording only one top made such a report unreconstructable by `--check --rerun` (it applied the single `top` to both sides and failed with "top cell/subcircuit not found in reference netlist"). |
@@ -4276,6 +4360,9 @@ A `layout.label_layers` override **is** replayed (issue #2686) from the
 report's top-level `label_layers` echo, `null` roles included; a report
 without that field (no override, or committed before it existed) replays
 with none, so it cannot acquire drift from the echo alone.
+`layout.abstract_cells`/`abstract_cell_lef` **are** replayed (issue #2853)
+from the report's top-level `abstract_cells`/`abstract_cell_lef` echo, under
+the same rule.
 A `"gate-level-verilog"` `reference.form`,
 `reference.device_bulk`, and
 `layout.top_cell_pins`/`declared_pins`/`pin_source_cells`/`rename_declared_pins`
