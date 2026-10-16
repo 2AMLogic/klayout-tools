@@ -314,6 +314,9 @@ def _resolve_step_analysis(analysis: Any, step: str) -> tuple[str, str]:
         raise _error(f"step {step!r}: analysis requires 'kind' and 'args'")
     kind = analysis["kind"]
     args = analysis["args"]
+    from .sim import reject_unsupported_analysis
+
+    reject_unsupported_analysis(kind)
     if not isinstance(kind, str) or kind.lower() not in STEP_ANALYSIS_KINDS:
         raise _error(
             f"step {step!r}: analysis.kind {kind!r} is not a supported step "
