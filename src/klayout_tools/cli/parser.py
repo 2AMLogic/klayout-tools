@@ -2937,7 +2937,9 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "once with the netlist this run extracted -- never through a "
             "shell. Each invocation gets the netlist path as its final "
             "argument plus $KLT_PEX_SIDE/$KLT_PEX_NETLIST/"
-            "$KLT_PEX_ARTIFACTS_DIR in its environment, and must print a "
+            "$KLT_PEX_ARTIFACTS_DIR in its environment (plus "
+            "$KLT_PEX_BACKEND and $KLT_SIM_BACKEND when --backend is given), "
+            "and must print a "
             'measurement document on stdout: {"corners": [{"corner_id": '
             '..., "measurements": [{"name": ..., "value": ..., "status": '
             "...}]}]}. Use it for a spec row no single `.meas` card can "
