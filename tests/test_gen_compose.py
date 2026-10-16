@@ -16940,3 +16940,177 @@ def test_compose_half_grid_mos_array_port_is_drc_clean(tmp_path, pdk_root):
     notes = report["drc_hints"]["notes"]
     assert any("snapped" in n and "port 'U0_S'" in n for n in notes)
     assert run_drc(str(output), "sky130")["violation_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# #3079: the router's derived jog coordinate is snapped onto the grid
+# ---------------------------------------------------------------------------
+
+
+def _on_grid(value, grid=0.005):
+    return abs(value / grid - round(value / grid)) < 1e-6
+
+
+def test_backbone_half_grid_midpoint_vertical_jog_snaps_on_grid():
+    from klayout_tools.gen_compose_routing import manhattan_backbone
+
+    # Stub ends at x=0.1 and x=1.105 -> raw midpoint 0.6025 (half grid off).
+    raw = manhattan_backbone((0.0, 0.0), 0, (1.205, 1.0), 180, 0.1)
+    assert not _on_grid(raw[2][0])
+    pts = manhattan_backbone((0.0, 0.0), 0, (1.205, 1.0), 180, 0.1, grid_um=0.005)
+    assert all(_on_grid(x) and _on_grid(y) for x, y in pts)
+    assert abs(pts[2][0] - 0.6025) <= 0.0025 + 1e-9
+
+
+def test_backbone_half_grid_midpoint_horizontal_jog_snaps_on_grid():
+    from klayout_tools.gen_compose_routing import manhattan_backbone
+
+    pts = manhattan_backbone((0.0, 0.0), 90, (1.0, 1.205), 270, 0.1, grid_um=0.005)
+    assert all(_on_grid(x) and _on_grid(y) for x, y in pts)
+
+
+def test_backbone_on_grid_midpoint_is_bit_identical():
+    from klayout_tools.gen_compose_routing import manhattan_backbone
+
+    args = ((0.0, 0.0), 0, (1.2, 1.0), 180, 0.1)
+    assert manhattan_backbone(*args, grid_um=0.005) == manhattan_backbone(*args)
+    # grid 0.0 (no ongrid rule in the family) never snaps.
+    off = ((0.0, 0.0), 0, (1.205, 1.0), 180, 0.1)
+    assert manhattan_backbone(*off, grid_um=0.0) == manhattan_backbone(*off)
+
+
+def test_backbone_snaps_channel_offset_track():
+    from klayout_tools.gen_compose_routing import manhattan_backbone
+
+    pts = manhattan_backbone(
+        (0.0, 0.0), 0, (1.2, 1.0), 180, 0.1, channel_offset_um=0.6025, grid_um=0.005
+    )
+    assert all(_on_grid(x) and _on_grid(y) for x, y in pts)
+
+
+def test_backbone_snap_never_crosses_a_stub_end():
+    from klayout_tools.gen_compose_routing import manhattan_backbone
+
+    # Stub ends 0.003 apart: no grid line lies between them, so the jog is
+    # left unsnapped rather than pushed past a stub end.
+    raw = manhattan_backbone((0.001, 0.0), 0, (0.204, 1.0), 180, 0.1)
+    pts = manhattan_backbone((0.001, 0.0), 0, (0.204, 1.0), 180, 0.1, grid_um=0.005)
+    assert pts == raw
+
+
+def test_backbone_waypoints_are_never_snapped():
+    from klayout_tools.gen_compose_routing import manhattan_backbone
+
+    wp = [(0.5025, 2.0)]
+    raw = manhattan_backbone((0.0, 0.0), 0, (1.0, 1.0), 180, 0.1, waypoints=wp)
+    pts = manhattan_backbone(
+        (0.0, 0.0), 0, (1.0, 1.0), 180, 0.1, waypoints=wp, grid_um=0.005
+    )
+    assert pts == raw
+
+
+def test_offgrid_leg_notes_name_net_and_leg():
+    leg = {
+        "routed": True,
+        "pins": [{"block": "a", "port": "X"}, {"block": "b", "port": "Y"}],
+        "points_um": [(0.0, 0.0), (0.5025, 0.0), (0.5025, 1.0)],
+    }
+    notes = gen_compose._offgrid_leg_notes("N1", [leg], 0.005)
+    assert len(notes) == 1
+    assert "net 'N1'" in notes[0] and "a.X -> b.Y" in notes[0]
+    assert gen_compose._offgrid_leg_notes("N1", [leg], 0.0) == []
+    leg["points_um"] = [(0.0, 0.0), (0.5, 0.0)]
+    assert gen_compose._offgrid_leg_notes("N1", [leg], 0.005) == []
+
+
+@pytest.mark.parametrize("origin_x_um", [8.0, 8.005])
+def test_compose_half_grid_backbone_midpoint_is_drc_clean(
+    tmp_path, pdk_root, origin_x_um
+):
+    # Block b at x=8.005 puts the two stub ends' sum at an odd multiple of the
+    # grid, so the jog would land half a grid step off-grid (4 `*.ongrid.1`
+    # violations before #3079); x=8.0 is the already-on-grid control.
+    blocks = [
+        {
+            "id": name,
+            "generator_report": _gen_block(
+                tmp_path,
+                pdk_root,
+                "mos_array",
+                name,
+                w_um=3.0,
+                l_um=0.5,
+                rows=1,
+                cols=1,
+                dummy=0,
+                topology="array",
+            ),
+        }
+        for name in ("a", "b")
+    ]
+    output = tmp_path / f"jog_{origin_x_um}.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": blocks,
+            "placement": {
+                "strategy": "explicit",
+                "order": ["a", "b"],
+                "origins_um": {
+                    "a": {"x": 0.0, "y": 0.0},
+                    "b": {"x": origin_x_um, "y": 5.0},
+                },
+            },
+            "connectivity": [
+                {
+                    "net": "S",
+                    "pins": [
+                        {"block": "a", "port": "U0_S"},
+                        {"block": "b", "port": "U0_S"},
+                    ],
+                }
+            ],
+            "routing": {"layer_role": "metal2", "width_um": 0.3},
+            "options": {"cell_name": "jog_top", "output": str(output)},
+        }
+    )
+    assert report["nets"][0]["routed"] is True
+    assert not any("manufacturing grid" in n for n in report["drc_hints"]["notes"])
+    assert run_drc(str(output), "sky130")["violation_count"] == 0
+
+
+def test_compose_source_path_echoes_relative_spelling_without_host_prefix(
+    tmp_path, pdk_root
+):
+    # #2935: a relative `cell.gds_path` resolves against the request's
+    # directory for reading, but the response echoes it as spelled -- no
+    # checkout/temp prefix -- while `source_digest` still pins the content.
+    blocks = []
+    for name in ("a", "b"):
+        req_dir = tmp_path / name
+        req_dir.mkdir()
+        _write_boxed_gds(req_dir / "stub.gds", "lib_inv", [(0.0, 0.0, 2.0, 1.2)])
+        report = compose(
+            {
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "blocks": [
+                    {
+                        "id": "s",
+                        "cell": {"gds_path": "stub.gds", "cell_name": "lib_inv"},
+                    }
+                ],
+                "placement": {"strategy": "row", "order": ["s"], "spacing_um": 1.0},
+                "options": {
+                    "cell_name": "rel_0",
+                    "output": str(req_dir / "out.gds"),
+                },
+            },
+            request_dir=str(req_dir),
+        )
+        blocks.append(report["blocks"][0])
+
+    assert blocks[0]["source_path"] == "stub.gds"
+    assert str(tmp_path) not in blocks[0]["source_path"]
+    assert blocks[0]["source_path"] == blocks[1]["source_path"]
+    assert blocks[0]["source_digest"] == blocks[1]["source_digest"]
+    assert blocks[0]["source_digest"].startswith("sha256:")

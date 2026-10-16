@@ -718,6 +718,22 @@ def test_run_sim_analysis_kind_op_with_meas_op_card_raises_clear_error(tmp_path)
         sim.run_sim(str(request))
 
 
+def test_run_sim_analysis_kind_op_with_supported_meas_card_raises_clear_error(tmp_path):
+    # Issue #3109: a supported-type `.meas` card is still unsearchable under a
+    # scalar `op` analysis -- refuse it up front, pointing at `expr`.
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "op", "args": ""},
+            "measurements": [{"name": "x", "spice": ".meas dc x find v(out) at=0"}],
+        },
+    )
+    with pytest.raises(sim.SimError, match=r"analysis\.kind is \"op\".*expr"):
+        sim.run_sim(str(request))
+
+
 def test_run_sim_meas_op_card_rejected_even_with_non_op_analysis_kind(tmp_path):
     # A `.meas op` card is invalid on ngspice's own terms regardless of the
     # request's `analysis.kind` -- not just when the two literally match.
@@ -804,6 +820,26 @@ def test_validate_measurement_forms_rejects_multiline_expr():
     inside the generated `.control` block."""
     with pytest.raises(sim.SimError, match="multi-line 'expr'"):
         sim._validate_measurement_forms([{"name": "vout", "expr": "v(out)\nquit"}])
+
+
+@pytest.mark.parametrize(
+    "expr",
+    [
+        "vecmax((v(a) < v(b))*v(a))",
+        "vecmax((v(a) > v(b))*v(a))",
+        "vecmax((v(a) < v(b)) + (v(a) > v(c)))",
+    ],
+)
+def test_validate_measurement_forms_rejects_redirection_operators_in_expr(expr):
+    """`<` / `>` are ngspice I/O redirection, not comparisons (issue #2940)."""
+    with pytest.raises(sim.SimError, match=r"gt / lt / ge / le / eq / ne"):
+        sim._validate_measurement_forms([{"name": "m", "expr": expr}])
+
+
+def test_validate_measurement_forms_accepts_word_comparisons_in_expr():
+    sim._validate_measurement_forms(
+        [{"name": "m", "expr": "vecmax((v(a) lt v(b))*v(a))"}]
+    )
 
 
 @pytest.mark.parametrize("name", ["v.out", "1vout", "v out", "v(out)", "v-out"])
@@ -1957,6 +1993,157 @@ def test_recovered_from_stepping_false_on_simulation_aborted_trailer():
 
 
 # --------------------------------------------------------------------------- #
+# `timestep_too_small`: ngspice's transient abort (issue #2918)
+# --------------------------------------------------------------------------- #
+
+_TIMESTEP_ABORT_LOG = (
+    "doAnalyses: TRAN:  Timestep too small; time = 1.0001e-09, "
+    'timestep = 5e-23: trouble with node "vctl#branch"\n'
+    "\n"
+    "tran simulation(s) aborted\n"
+)
+
+
+def test_nonconvergence_pattern_alone_misses_ngspice_timestep_text():
+    # The pre-#2918 gap, pinned: ngspice spells it `Timestep` (no space), so
+    # the generic `nonconvergence` entry never matched this abort at all.
+    patterns = dict(sim._DIAGNOSTIC_PATTERNS)
+    assert patterns["nonconvergence"].search(_TIMESTEP_ABORT_LOG) is None
+
+
+def test_classify_diagnostics_timestep_too_small_structured_fields():
+    (diagnostic,) = sim._classify_diagnostics(_TIMESTEP_ABORT_LOG)
+    assert diagnostic["code"] == "timestep_too_small"
+    assert diagnostic["severity"] == "error"
+    assert diagnostic["time_s"] == pytest.approx(1.0001e-09)
+    assert diagnostic["timestep_s"] == pytest.approx(5e-23)
+    assert diagnostic["node"] == "vctl#branch"
+    # Repeated in the message so a reader of the report alone sees it.
+    assert "1.0001e-09" in diagnostic["message"]
+    assert "vctl#branch" in diagnostic["message"]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "Timestep too small",
+        "doAnalyses: TRAN:  Timestep too small; initial timepoint: cause unrecorded.",
+    ],
+)
+def test_classify_diagnostics_timestep_too_small_without_detail(line):
+    (diagnostic,) = sim._classify_diagnostics(line + "\n")
+    assert diagnostic["code"] == "timestep_too_small"
+    assert diagnostic["time_s"] is None
+    assert diagnostic["timestep_s"] is None
+    assert diagnostic["node"] is None
+
+
+def test_classify_diagnostics_timestep_trnoise_hint_only_when_netlist_uses_it(
+    tmp_path,
+):
+    noisy = tmp_path / "noisy.spice"
+    noisy.write_text("Vn n 0 trnoise(1m 1n 0 0)\nVctl ctl 0 PWL(0 0 1n 1)\n")
+    quiet = tmp_path / "quiet.spice"
+    quiet.write_text("Vctl ctl 0 PWL(0 0 1n 1)\n")
+    (with_hint,) = sim._classify_diagnostics(_TIMESTEP_ABORT_LOG, str(noisy))
+    (without_hint,) = sim._classify_diagnostics(_TIMESTEP_ABORT_LOG, str(quiet))
+    assert "trnoise()" in with_hint["message"]
+    assert "trnoise" not in without_hint["message"]
+
+
+def test_classify_diagnostics_timestep_beside_recovered_stepping_narration():
+    # Edge case: gmin-stepping narration earlier in the log (recoverable
+    # noise on its own) plus the terminal transient abort -- both classify,
+    # each under its own code.
+    log = "Warning: Dynamic gmin stepping failed\n" + _TIMESTEP_ABORT_LOG
+    codes = [d["code"] for d in sim._classify_diagnostics(log)]
+    assert codes == ["timestep_too_small", "nonconvergence"]
+
+
+def test_classify_xyce_diagnostics_time_step_unchanged():
+    # Xyce's own `Time step too small` wording stays `nonconvergence`.
+    codes = [
+        d["code"]
+        for d in sim._classify_xyce_diagnostics("Time step too small at 1e-9\n")
+    ]
+    assert codes == ["nonconvergence"]
+
+
+def test_timestep_too_small_is_a_selectable_diagnostic_code():
+    assert "timestep_too_small" in sim.DIAGNOSTIC_CODES
+    assert sim._validate_fail_on_diagnostic(["timestep_too_small"]) == (
+        "timestep_too_small",
+    )
+
+
+def test_run_sim_stubbed_timestep_abort_surfaces_without_keep_artifacts(
+    tmp_path, monkeypatch
+):
+    # The whole point of #2918: every `.meas` comes back empty, and the
+    # report itself -- not a kept `ngspice.log` -- says why.
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1p 10n"},
+            "measurements": [
+                {"name": "m1", "spice": ".meas tran m1 find v(out) at=5n"},
+                {"name": "m2", "spice": ".meas tran m2 find v(out) at=9n"},
+            ],
+        },
+    )
+    # Even a stale-looking parsed value must not let the stepping downgrade
+    # forgive a run whose log carries the abort trailer.
+    log = "Warning: Dynamic gmin stepping failed\n" + _TIMESTEP_ABORT_LOG
+    _stub_subprocess_run(monkeypatch, log_text=log)
+
+    report = sim.run_sim(str(request))
+
+    assert report["status"] == "error"
+    (corner,) = report["corners"]
+    assert corner["status"] == "error"
+    assert corner["artifacts"]["log"] is None  # keep_artifacts not set
+    by_code = {d["code"]: d for d in corner["diagnostics"]}
+    abort = by_code["timestep_too_small"]
+    assert abort["severity"] == "error"
+    assert abort["time_s"] == pytest.approx(1.0001e-09)
+    assert abort["node"] == "vctl#branch"
+    assert by_code["nonconvergence"]["severity"] == "error"
+    assert report["diagnostic_counts"]["by_code"]["timestep_too_small"] == 1
+
+
+def test_run_sim_stubbed_timestep_abort_never_downgraded(tmp_path, monkeypatch):
+    # Every measurement parsed (e.g. all fell before the abort time) and no
+    # trailer: the recovered-stepping downgrade still must not touch this
+    # code -- it is a terminal abort, not stepping narration.
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1p 10n"},
+            "measurements": [
+                {"name": "m1", "spice": ".meas tran m1 find v(out) at=0.5n"},
+            ],
+        },
+    )
+    log = (
+        "doAnalyses: TRAN:  Timestep too small; time = 1e-09, timestep = 5e-23: "
+        'trouble with node "v1#branch"\n'
+        "m1                  =  1.00000e+00\n"
+    )
+    _stub_subprocess_run(monkeypatch, log_text=log)
+
+    report = sim.run_sim(str(request))
+
+    (corner,) = report["corners"]
+    by_code = {d["code"]: d for d in corner["diagnostics"]}
+    assert by_code["timestep_too_small"]["severity"] == "error"
+    assert corner["status"] == "error"
+
+
+# --------------------------------------------------------------------------- #
 # Limit evaluation (margin sign convention)
 # --------------------------------------------------------------------------- #
 
@@ -2815,6 +3002,89 @@ def test_corner_records_engine_exit_code(tmp_path, monkeypatch, returncode):
     assert corner["engine_exit_code"] == returncode
     assert corner["engine_killed_by_signal"] is None
     assert "engine_killed" not in [d["code"] for d in corner["diagnostics"]]
+
+
+def _silent_engine_corner(
+    tmp_path, monkeypatch, *, returncode=0, stderr="", stdout="", write_log=None
+):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [
+                {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"}
+            ],
+        },
+    )
+
+    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+        if write_log is not None:
+            with open(cmd[cmd.index("-o") + 1], "w", encoding="utf-8") as handle:
+                handle.write(write_log)
+        return fake_completed(stdout, returncode=returncode, stderr=stderr)
+
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+    (corner,) = sim.run_sim(str(request))["corners"]
+    return corner
+
+
+def _unknown_messages(corner):
+    return [d["message"] for d in corner["diagnostics"] if d["code"] == "unknown"]
+
+
+def test_silent_exit_zero_without_log_surfaces_stderr(tmp_path, monkeypatch):
+    """Issue #3016: exit 0, no log, no measurements -> the diagnostic names
+    the exit status and carries the engine's stderr."""
+    corner = _silent_engine_corner(tmp_path, monkeypatch, stderr="boom")
+    assert corner["status"] == "error"
+    (message,) = _unknown_messages(corner)
+    assert "exited with code 0" in message
+    assert "stderr tail: boom" in message
+
+
+def test_silent_exit_zero_with_empty_log_surfaces_stdout(tmp_path, monkeypatch):
+    corner = _silent_engine_corner(
+        tmp_path, monkeypatch, stdout="** ngspice-99\nbye\n", write_log=""
+    )
+    (message,) = _unknown_messages(corner)
+    assert "exited with code 0" in message
+    assert "stdout tail:" in message and "bye" in message
+
+
+def test_nonzero_exit_without_log_extends_existing_message(tmp_path, monkeypatch):
+    corner = _silent_engine_corner(
+        tmp_path, monkeypatch, returncode=2, stderr="cannot open deck"
+    )
+    (message,) = _unknown_messages(corner)  # exactly one: no double report
+    assert "exited with code 2 without writing its log" in message
+    assert "cannot open deck" in message
+
+
+def test_silent_engine_output_tail_is_bounded(tmp_path, monkeypatch):
+    corner = _silent_engine_corner(
+        tmp_path, monkeypatch, stderr="head-marker" + "x" * 10_000 + "tail-marker"
+    )
+    (message,) = _unknown_messages(corner)
+    assert "tail-marker" in message
+    assert "head-marker" not in message
+    assert len(message) < 3000
+
+
+def test_engine_output_tail_tolerates_undecodable_text():
+    assert sim._engine_output_tail("", "bad \udcff byte") != ""
+    assert sim._engine_output_tail("", "") == ""
+
+
+def test_log_present_run_gets_no_silent_engine_diagnostic(tmp_path, monkeypatch):
+    corner = _silent_engine_corner(
+        tmp_path,
+        monkeypatch,
+        stderr="noise",
+        write_log="vout = 1.2\n",
+    )
+    assert "exited with code" not in " ".join(_unknown_messages(corner))
 
 
 def test_corner_killed_by_signal_gets_distinct_diagnostic(tmp_path, monkeypatch):
@@ -4263,6 +4533,79 @@ def test_mismatch_family_report_single_file_has_no_scan_block(tmp_path):
     report = sim._mismatch_family_report(str(body), "gf180mcuC", scan=scan)
     assert [e["family"] for e in report] == ["mosfet"]
     assert len(scan["scanned"]) == 1 and scan["not_scanned"] == []
+
+
+def test_noise_sources_in_text_covers_v_i_subckt_continuation_case():
+    text = (
+        "* Vc c 0 trnoise(1 1 1 1)\n"
+        "VN1 a 0 DC 0 TRNOISE(1m 1n 0 0)\n"
+        "Iq b 0 trrandom(2 1n 1m)\n"
+        ".subckt blk p n\n"
+        "Vin p n dc 0\n"
+        "+ trnoise(1m 1n 0 0)\n"
+        ".ends\n"
+        "Vplain d 0 DC 1 ; trnoise(1 1 1 1)\n"
+        "R1 a b 1k\n"
+    )
+    assert sim._noise_sources_in_text(text) == [
+        ("vn1", "trnoise"),
+        ("iq", "trrandom"),
+        ("vin", "trnoise"),
+    ]
+
+
+def _noise_mc_request(tmp_path, body: str, mc: dict | None = None):
+    (tmp_path / "body.spice").write_text(body)
+    req = {
+        "netlist": "body.spice",
+        "analysis": {"kind": "tran", "args": "1n 1u"},
+    }
+    if mc is not None:
+        req["monte_carlo"] = mc
+    return _write_request(tmp_path, req)
+
+
+def test_run_sim_monte_carlo_discloses_unseeded_noise_sources(
+    tmp_path, monkeypatch, capsys
+):
+    request = _noise_mc_request(
+        tmp_path,
+        "Vn a 0 trnoise(1m 1n 0 0)\nIr b 0 trrandom(2 1n 1m)\nR1 a b 1k\n",
+        {"n": 2, "seed": 1, "vary": "process"},
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    mc_env = sim.run_sim(str(request))["environment"]["monte_carlo"]
+
+    assert mc_env["unseeded_sources"] == [
+        {"name": "ir", "keyword": "trrandom"},
+        {"name": "vn", "keyword": "trnoise"},
+    ]
+    assert "redraws" in mc_env["unseeded_sources_note"]
+    assert "unseeded_sources_not_scanned" not in mc_env
+    assert capsys.readouterr().err.count("not governed by monte_carlo.seed") == 1
+
+
+def test_run_sim_monte_carlo_without_noise_sources_shape_unchanged(
+    tmp_path, monkeypatch
+):
+    request = _noise_mc_request(
+        tmp_path,
+        "Vd a 0 DC 1\nR1 a 0 1k\n",
+        {"n": 2, "seed": 1, "vary": "process"},
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    mc_env = sim.run_sim(str(request))["environment"]["monte_carlo"]
+
+    assert set(mc_env) == {"n", "seed", "vary"}
+
+
+def test_run_sim_without_monte_carlo_has_no_noise_field(tmp_path, monkeypatch):
+    request = _noise_mc_request(tmp_path, "Vn a 0 trnoise(1m 1n 0 0)\nR1 a 0 1k\n")
+    _stub_subprocess_run(monkeypatch)
+
+    assert "monte_carlo" not in sim.run_sim(str(request))["environment"]
 
 
 # --------------------------------------------------------------------------- #
@@ -7538,6 +7881,35 @@ def test_run_sim_remote_backend_pushes_local_parallel_request(tmp_path, monkeypa
     assert state["local_netlist_path"].endswith("body.spice")
     assert state["push_job_calls"] == 1
     assert state["cleanup_calls"] == 1
+
+
+def test_run_sim_remote_backend_forwards_cli_budget_s_to_worker(tmp_path, monkeypatch):
+    """Issue #3167: `--budget-s` reaches the worker; CLI wins over the request."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        _base_remote_request(
+            corners={"temperature_c": [10, 40]},
+            options={"wall_clock_budget_s": 3600},
+        ),
+    )
+    state = _install_fake_remote_transport(monkeypatch)
+
+    sim.run_sim(str(request), budget_s=90)
+    assert state["remote_request"]["options"]["wall_clock_budget_s"] == 90
+
+    sim.run_sim(str(request))
+    assert state["remote_request"]["options"]["wall_clock_budget_s"] == 3600
+
+
+def test_run_sim_remote_backend_adds_no_budget_key_when_unset(tmp_path, monkeypatch):
+    _write_body(tmp_path)
+    request = _write_request(tmp_path, _base_remote_request())
+    state = _install_fake_remote_transport(monkeypatch)
+
+    sim.run_sim(str(request))
+
+    assert "wall_clock_budget_s" not in state["remote_request"]["options"]
 
 
 def test_run_sim_remote_backend_stages_the_netlists_include_closure(
@@ -12366,6 +12738,24 @@ def test_gf180_pdk_native_passives_report_inactive():
         assert sim._MISMATCH_ACTIVITY[("gf180mcu", fam)]["active"] is False
 
 
+def test_sky130_resistor_reports_mismatch_active(tmp_path):
+    """#3032: sky130 poly resistors carry a per-instance AGAUSS hook gated by
+    MC_MM_SWITCH, so the report is a curated `active: True`, not `None`."""
+    netlist = tmp_path / "r.spice"
+    netlist.write_text(
+        "XR1 a b 0 sky130_fd_pr__res_high_po_1p41 L=10\n"
+        "XR2 a c 0 sky130_fd_pr__res_high_po_1p41 L=10\n"
+    )
+    report = sim._mismatch_family_report(str(netlist), "sky130A")
+    assert [f["family"] for f in report] == ["resistor"]
+    assert report[0]["active"] is True
+    assert "MC_MM_SWITCH" in report[0]["note"]
+    # gf180 and unknown-PDK behaviour unchanged.
+    assert sim._MISMATCH_ACTIVITY[("gf180mcu", "resistor")]["active"] is False
+    unknown = sim._mismatch_family_report(str(netlist), "mystery")
+    assert unknown[0]["active"] is None
+
+
 # --- #2894: unknown supply_v key, timeout-budget hint ----------------------- #
 
 
@@ -12408,3 +12798,92 @@ def test_timeout_budget_hint_near_budget_and_timeout():
 
 def test_timeout_budget_hint_absent_when_well_inside_budget():
     assert sim._timeout_budget_hint([_hint_corner(100.0)], 600) is None
+
+
+# --------------------------------------------------------------------------- #
+# noise_representation (issue #3006)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("plotname", "vtype", "expected"),
+    [
+        ("Integrated Noise", "voltage", "amplitude"),
+        ("Integrated Noise - V^2 or A^2", "voltage^2", "power"),
+        ("Integrated Noise", "current^2", "power"),
+        ("Integrated Noise - V^2 or A^2", "voltage", "power"),
+    ],
+)
+def test_noise_representation(plotname, vtype, expected):
+    waveform = {
+        "plotname": plotname,
+        "variables": [{"index": 0, "name": "onoise_total", "type": vtype}],
+        "points": [[1.0]],
+    }
+    assert sim.noise_representation(waveform) == expected
+
+
+# --------------------------------------------------------------------------- #
+# environment.engine_host (issue #3110)
+# --------------------------------------------------------------------------- #
+
+
+def _worker_block(capture, path=None):
+    simulator = {"selected_path": path} if capture == "ok" else None
+    return {"worker_environment": {"capture": capture, "simulator": simulator}}
+
+
+def test_apply_engine_host_local_run_is_otherwise_unchanged():
+    env = {"ngspice_binary": "/usr/bin/ngspice"}
+    sim.apply_engine_host(
+        env, backend="local", client_ngspice_binary="/usr/bin/ngspice"
+    )
+    assert env == {"ngspice_binary": "/usr/bin/ngspice", "engine_host": "local"}
+
+
+def test_apply_engine_host_batch_swaps_in_the_worker_path():
+    env = {
+        "ngspice_binary": "/home/me/.local/bin/ngspice",
+        "remote": _worker_block("ok", "/usr/bin/ngspice"),
+    }
+    sim.apply_engine_host(
+        env, backend="batch", client_ngspice_binary="/home/me/.local/bin/ngspice"
+    )
+    assert env["engine_host"] == "worker"
+    assert env["ngspice_binary"] == "/usr/bin/ngspice"
+    assert env["client_ngspice_binary"] == "/home/me/.local/bin/ngspice"
+
+
+@pytest.mark.parametrize(
+    "remote", [_worker_block("absent"), _worker_block("malformed"), {}, None]
+)
+def test_apply_engine_host_without_worker_capture_is_null(remote):
+    env = {"ngspice_binary": "/home/me/ngspice", "remote": remote}
+    sim.apply_engine_host(
+        env, backend="remote", client_ngspice_binary="/home/me/ngspice"
+    )
+    assert env["engine_host"] == "worker"
+    assert env["ngspice_binary"] is None
+    assert env["client_ngspice_binary"] == "/home/me/ngspice"
+
+
+def test_apply_engine_host_sharded_fleet_agreement_and_disagreement():
+    same = {"fleet": [_worker_block("ok", "/a"), _worker_block("ok", "/a")]}
+    mixed = {"fleet": [_worker_block("ok", "/a"), _worker_block("ok", "/b")]}
+    partial = {"fleet": [_worker_block("ok", "/a"), _worker_block("absent")]}
+    for remote, expected in ((same, "/a"), (mixed, None), (partial, None)):
+        env = {"remote": remote}
+        sim.apply_engine_host(env, backend="batch", client_ngspice_binary="/c")
+        assert env["ngspice_binary"] == expected
+
+
+def test_apply_engine_host_xyce_stays_null_and_client_null():
+    env = {"ngspice_binary": None, "remote": _worker_block("absent")}
+    sim.apply_engine_host(env, backend="batch", client_ngspice_binary=None)
+    assert env["ngspice_binary"] is None and env["client_ngspice_binary"] is None
+
+
+def test_pex_side_environment_carries_engine_host():
+    from klayout_tools import pex
+
+    assert {"engine_host", "client_ngspice_binary"} <= set(pex._SIDE_ENVIRONMENT_KEYS)

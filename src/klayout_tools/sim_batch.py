@@ -160,6 +160,7 @@ BATCH_RUNNER_IDENTITY_FILENAME = "runner_identity.json"
 #: diagnostic.
 BATCH_RUNNER_MISMATCH_CODE = "batch_runner_version_mismatch"
 BATCH_RUNNER_UNKNOWN_CODE = "batch_runner_version_unknown"
+BATCH_RUNNER_FEATURE_CODE = "batch_runner_feature_unsupported"
 
 #: Exit code the preflight rejects with. Deliberately outside
 #: :data:`_BATCH_SIM_SUCCESS_EXIT_CODES` so the job is never mistaken for a
@@ -277,6 +278,14 @@ _BATCH_LAUNCH_TIMEOUT_S = 900.0
 #: distinct from a request error a caller must not retry.
 BATCH_NO_CAPACITY_CODE = "batch_no_capacity"
 
+#: ``error.code`` for a launch refused by the shared fleet's concurrency cap
+#: (``N instance(s) already running + 1 requested exceeds
+#: BATCH_MAX_CONCURRENT_INSTANCES=M``, issue #2917): retryable like
+#: :data:`BATCH_NO_CAPACITY_CODE` and waited out under the same
+#: ``request.batch.capacity_wait_s`` budget, but a distinct code so a caller
+#: can tell slot contention from a Spot shortage.
+BATCH_CONCURRENCY_CAP_CODE = "batch_concurrency_cap"
+
 #: Capacity-wait backoff (``request.batch.capacity_wait_s``, issue #2721):
 #: the first re-launch waits ~:data:`_CAPACITY_BACKOFF_BASE_S`, each further
 #: one doubles, capped at :data:`_CAPACITY_BACKOFF_CAP_S`. Every delay is
@@ -333,7 +342,8 @@ class BatchError(Exception):
     ``code`` is an optional machine-readable classification (issue #2721),
     carried through to that ``SimError`` and from there to the error
     envelope's ``error.code``. ``None`` -- the common case -- means
-    "unclassified"; today only :data:`BATCH_NO_CAPACITY_CODE` is set.
+    "unclassified"; today :data:`BATCH_NO_CAPACITY_CODE` and
+    :data:`BATCH_CONCURRENCY_CAP_CODE` are set.
     """
 
     def __init__(self, message: str, *, code: str | None = None) -> None:
@@ -485,6 +495,62 @@ def _runner_gate_release(version: str) -> str | None:
     return ".".join(parts[:2]) if len(parts) >= 2 else None
 
 
+#: Request features a client can send that a runner built before the feature
+#: landed cannot parse (issue #3249): ``name -> (first runner release that
+#: supports it, detector)``. The major.minor gate (:func:`_runner_gate_release`)
+#: deliberately lets a post-tag client talk to a patch-level older runner, so
+#: it cannot see these; this registry compares the *full* release segment
+#: instead. ``analysis_steps[]`` (#2482) landed after ``v0.7.0``, so the first
+#: release segment that can carry it is ``0.7.1`` (post-tag builds render as
+#: ``0.7.1.devN``). A ``0.7.1.devN`` runner built before the feature landed is
+#: indistinguishable from one built after, so it counts as supporting it.
+#: Next candidate entry: ``decks[]`` (#3303).
+_RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
+    "analysis_steps": (
+        (0, 7, 1),
+        lambda request: request.get("analysis_steps") is not None,
+    ),
+}
+
+
+def _release_key(release: str) -> int | None:
+    """A sortable integer for the first three components of a
+    :func:`_release_segment` (missing ones are 0), or ``None``. The runner
+    preflight computes the same number in shell."""
+    if not re.fullmatch(r"\d+(?:\.\d+)*", release):
+        return None
+    parts = [int(part) for part in release.split(".")[:3]]
+    parts += [0] * (3 - len(parts))
+    return (parts[0] * 10**6 + parts[1]) * 10**6 + parts[2]
+
+
+def _request_features(request: dict[str, Any]) -> list[str]:
+    """The :data:`_RUNNER_REQUEST_FEATURES` names ``request`` uses."""
+    return [
+        name for name, (_, uses) in _RUNNER_REQUEST_FEATURES.items() if uses(request)
+    ]
+
+
+def _feature_release_key(name: str) -> int:
+    """Comparable key of the runner release that introduced registry feature
+    ``name``. Registry versions are literal tuples, so they always parse."""
+    key = _release_key(".".join(map(str, _RUNNER_REQUEST_FEATURES[name][0])))
+    assert key is not None, name
+    return key
+
+
+def _missing_runner_features(
+    features: list[str], runner_version: str | None
+) -> list[str] | None:
+    """The ``features`` a runner of ``runner_version`` predates, or ``None``
+    when its version is unknown (unknown is never "missing")."""
+    release = _release_segment(runner_version) if runner_version else None
+    key = _release_key(release) if release else None
+    if key is None:
+        return None
+    return [name for name in features if key < _feature_release_key(name)]
+
+
 #: Filename the worker capture writes under ``$EDA_OUTPUT_DIR`` (issue #2834):
 #: what the *job instance* actually resolved -- simulator binary and banner,
 #: PDK variant revision stamp, CPU model, ``OMP_NUM_THREADS``, a worker-local
@@ -628,7 +694,11 @@ def _worker_capture_command(remote_request: dict[str, Any]) -> str:
 
 
 def _runner_preflight_script(
-    client_version: str, *, enforce: bool, capture: str = ""
+    client_version: str,
+    *,
+    enforce: bool,
+    capture: str = "",
+    required_features: tuple[str, ...] = (),
 ) -> str:
     """The shell prefix of the job command that pins the runner's ``klt``
     identity (issue #2719).
@@ -654,6 +724,13 @@ def _runner_preflight_script(
     Redirects here deliberately have no space before ``>`` so the
     ``> "$EDA_OUTPUT_DIR/report.json"`` marker of the main command stays the
     first such occurrence.
+
+    ``required_features`` (names from :data:`_RUNNER_REQUEST_FEATURES`, issue
+    #3249) adds a second check once the version gate passes: a runner whose
+    full release segment predates a feature the request uses exits
+    :data:`_BATCH_PREFLIGHT_REJECT_EXIT` with
+    :data:`BATCH_RUNNER_FEATURE_CODE` naming it, instead of letting ``klt
+    sim`` fail every corner. An unreadable runner version never trips it.
 
     A client version string outside ``[A-Za-z0-9._+-]``, or one with no
     major.minor release segment, cannot be pinned and raises
@@ -687,6 +764,7 @@ def _runner_preflight_script(
         # the first two (major.minor).
         "rr=${rv%%+*}; rr=${rr%%[!0-9.]*}; rr=${rr%.}",
         'case "$rr" in ""|.*|*.|*..*) rr= ;; *.*) ;; *) rr= ;; esac',
+        "rfull=$rr",
         'if [ -n "$rr" ]; then rmn=${rr#*.}; rr=${rr%%.*}.${rmn%%.*}; fi',
         'if [ -z "$rv" ]; then rj=null; rcode=' + BATCH_RUNNER_UNKNOWN_CODE + "; "
         'rmsg="the fleet runner klt version could not be established"; '
@@ -704,6 +782,8 @@ def _runner_preflight_script(
         + '"}\\n\' "$rj" >'
         + identity_path,
     ]
+    if required_features:
+        lines.append(_feature_gate_shell(required_features, client_version))
     if capture:
         # Issue #2834: the worker capture rides the same preflight, *before*
         # the enforce gate so a rejected job still leaves it collectable.
@@ -720,6 +800,31 @@ def _runner_preflight_script(
             "exit " + str(_BATCH_PREFLIGHT_REJECT_EXIT) + "; fi"
         )
     return "; ".join(lines) + "; "
+
+
+def _feature_gate_shell(features: tuple[str, ...], client_version: str) -> str:
+    """The shell that sets ``rcode``/``rmsg`` for a runner predating a request
+    feature (issue #3249). Runs after the version gate, so it never overrides
+    a version rejection; ``$rfull`` is the runner's full release segment.
+    Only registry names and integers are embedded."""
+    checks = []
+    for name in features:
+        key = _feature_release_key(name)
+        checks.append(
+            f'if [ "$rk" -lt {key} ]; then fmiss="${{fmiss}}${{fmiss:+, }}{name}"; fi'
+        )
+    return (
+        'fmiss=; if [ -n "$rfull" ]; then '
+        'IFS=. read -r f1 f2 f3 _ <<<"$rfull"; '
+        "rk=$(( (10#${f1:-0} * 1000000 + 10#${f2:-0}) * 1000000 "
+        "+ 10#${f3:-0} )); " + " ".join(checks) + " fi; "
+        'if [ -z "$rcode" ] && [ -n "$fmiss" ]; then '
+        "rcode=" + BATCH_RUNNER_FEATURE_CODE + "; "
+        'rmsg="the fleet runner runs klt $rv, which predates the request '
+        "feature(s) $fmiss the submitting client sent (client "
+        + client_version
+        + ')"; fi'
+    )
 
 
 def _build_batch_job_spec(
@@ -785,6 +890,7 @@ def _build_batch_job_spec(
         client_version if client_version is not None else _provenance._klt_version(),
         enforce=version_check == "enforce",
         capture=_worker_capture_command(remote_request),
+        required_features=tuple(_request_features(remote_request)),
     ) + (
         f'klt sim "$EDA_INPUT_DIR/{BATCH_REQUEST_FILENAME}" '
         "--backend local-parallel --format json"
@@ -892,7 +998,8 @@ class BatchConfig:
     poll_timeout_s: float
     aws_binary: str = "aws"
     #: Wall-clock budget :func:`launch_job` keeps re-launching through a
-    #: ``batch_no_capacity`` refusal (``request.batch.capacity_wait_s``,
+    #: ``batch_no_capacity`` / ``batch_concurrency_cap`` refusal
+    #: (``request.batch.capacity_wait_s``,
     #: issue #2721). ``0`` -- the default -- is one launch attempt.
     capacity_wait_s: float = 0.0
     #: ``request.batch.runner_version_check`` (issue #2719).
@@ -1090,7 +1197,9 @@ def _resolve_batch_config(
     # Issue #2851: compare the runner klt the AMI manifest publishes with
     # this client, once per request (so once for every shard of a
     # `hosts > 1` run), before any S3 write or launch.
-    _enforce_published_runner_version(_assess_published_runner(request, config))
+    assessment = _assess_published_runner(request, config)
+    _enforce_published_runner_version(assessment)
+    _enforce_published_runner_features(request, assessment)
     return config
 
 
@@ -1184,6 +1293,43 @@ def _enforce_published_runner_version(assessment: dict[str, Any]) -> None:
             code=BATCH_RUNNER_MISMATCH_CODE,
         )
     print(f"klt sim: warning: {message}; submitting anyway", file=sys.stderr)
+
+
+def _enforce_published_runner_features(
+    request: dict[str, Any], assessment: dict[str, Any]
+) -> None:
+    """Refuse before any S3 write or launch when *every* image the AMI
+    manifest publishes predates a request feature (issue #3249). An unknown
+    runner version, a legacy entry, or one image that has the feature leaves
+    the decision to the runner-side preflight. ``warn`` only reports."""
+    from .sim import SimError
+
+    features = _request_features(request)
+    images = assessment["images"]
+    if not features or not images:
+        return
+    gaps = [
+        _missing_runner_features(features, image["klt_version"]) for image in images
+    ]
+    if any(not gap for gap in gaps):  # unknown (None) or complete (empty)
+        return
+    missing = sorted({name for gap in gaps for name in gap or ()})
+    versions = ", ".join(sorted({str(image["klt_version"]) for image in images}))
+    message = (
+        f"the request uses {', '.join(missing)}, which the fleet runner image "
+        f"(klt {versions}) predates; the submitting client is klt "
+        f"{assessment['client_klt_version']}"
+    )
+    if assessment["check"] != "enforce":
+        print(f"klt sim: warning: {message}; submitting anyway", file=sys.stderr)
+        return
+    raise SimError(
+        f"backend 'batch' refused before submission: {message} -- the request "
+        "was not submitted and no instance was launched (rebuild the runner "
+        "image from a release that has the feature, or set "
+        'request.batch.runner_version_check to "warn"; see docs/cli/sim.md)',
+        code=BATCH_RUNNER_FEATURE_CODE,
+    )
 
 
 def _resolve_max_job_seconds(
@@ -1453,10 +1599,23 @@ def _run_checked(
 #: the capacity-refusal case, ..."``) that identifies a Spot capacity refusal.
 _CAPACITY_REFUSAL_MARKER = "no capacity in any of the"
 
+#: The fragment of the same script's concurrency-cap refusal (``fail "N
+#: instance(s) already running + K requested exceeds
+#: BATCH_MAX_CONCURRENT_INSTANCES=M"``), checked before any launch record is
+#: opened (issue #2917).
+_CONCURRENCY_CAP_MARKER = "exceeds BATCH_MAX_CONCURRENT_INSTANCES"
+
+#: The refusal codes :func:`submit_launch` waits out under ``capacity_wait_s``.
+_RETRYABLE_LAUNCH_CODES = frozenset(
+    {BATCH_NO_CAPACITY_CODE, BATCH_CONCURRENCY_CAP_CODE}
+)
+
 
 def _classify_launch_failure(stderr: str) -> str | None:
     """:data:`BATCH_NO_CAPACITY_CODE` when a failed ``launch``'s stderr is
-    the provisioner's capacity refusal, else ``None``.
+    the provisioner's Spot capacity refusal,
+    :data:`BATCH_CONCURRENCY_CAP_CODE` when it is the shared-fleet
+    concurrency-cap refusal, else ``None``.
 
     **Coupling:** this is a text match against 2am's
     ``infra/aws/batch-fleet-provision.sh`` (``cmd_launch``'s final
@@ -1467,7 +1626,11 @@ def _classify_launch_failure(stderr: str) -> str | None:
     the 2am side is a one-line fix here. Every other launch failure stays
     unclassified, so it is never mistaken for something worth retrying.
     """
-    return BATCH_NO_CAPACITY_CODE if _CAPACITY_REFUSAL_MARKER in stderr else None
+    if _CAPACITY_REFUSAL_MARKER in stderr:
+        return BATCH_NO_CAPACITY_CODE
+    if _CONCURRENCY_CAP_MARKER in stderr:
+        return BATCH_CONCURRENCY_CAP_CODE
+    return None
 
 
 def _capacity_backoff_s(retry_index: int, jitter: Callable[[], float]) -> float:
@@ -1559,9 +1722,11 @@ def launch_job(
     duplicate already-tested logic, and skipping it would be a safety
     regression.
 
-    **Capacity wait (issue #2721).** A launch the provisioner refuses for
-    lack of Spot capacity raises :class:`BatchError` with
-    ``code == "batch_no_capacity"`` (:func:`_classify_launch_failure`). With
+    **Capacity wait (issues #2721, #2917).** A launch the provisioner refuses
+    for lack of Spot capacity, or because the shared fleet is at
+    ``BATCH_MAX_CONCURRENT_INSTANCES``, raises :class:`BatchError` with
+    ``code == "batch_no_capacity"`` / ``"batch_concurrency_cap"``
+    (:func:`_classify_launch_failure`). With
     ``config.capacity_wait_s > 0`` such a refusal is instead retried -- the
     same ``launch`` invocation for the same job id, after a jittered, capped
     exponential backoff (:func:`_capacity_backoff_s`) -- until that budget
@@ -1569,8 +1734,9 @@ def launch_job(
     raised at once, never retried. Re-invoking is safe because a refused
     launch creates no instance and closes the launch record it opened (2am's
     ``cmd_launch`` writes a ``start`` record and its matching ``end`` on that
-    path), and 2am's own Spot-interruption ``reconcile`` already re-launches
-    under an existing job id. The wait is measured on its own clock and is
+    path; the concurrency-cap check runs before any record is opened), and
+    2am's own Spot-interruption ``reconcile`` already re-launches under an
+    existing job id. The wait is measured on its own clock and is
     **not** charged to ``poll_timeout_s``, whose clock starts in
     :func:`poll_status` once a launch succeeds. ``sleep``/``monotonic``/
     ``jitter`` are injectable for tests; ``None`` resolves to
@@ -1606,14 +1772,14 @@ def launch_job(
             )
             return
         except BatchError as exc:
-            if exc.code != BATCH_NO_CAPACITY_CODE or config.capacity_wait_s <= 0:
+            if exc.code not in _RETRYABLE_LAUNCH_CODES or config.capacity_wait_s <= 0:
                 raise
             remaining = config.capacity_wait_s - (monotonic() - started)
             if remaining <= 0:
                 raise BatchError(
                     f"{exc} (capacity wait budget of {config.capacity_wait_s:g}s "
                     f"exhausted after {attempts} launch attempt(s))",
-                    code=BATCH_NO_CAPACITY_CODE,
+                    code=exc.code,
                 ) from exc
             sleep(min(_capacity_backoff_s(attempts - 1, jitter), remaining))
 
@@ -1966,7 +2132,9 @@ def _read_worker_environment(
         return {**unknown, "capture": "malformed"}
 
 
-def _read_runner_identity(local_dir: str | None) -> dict[str, Any]:
+def _read_runner_identity(
+    local_dir: str | None, request: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """The ``environment.remote`` runner-identity fields (issue #2719).
 
     ``runner_klt_version`` is what the fleet image's own ``klt --version``
@@ -1980,7 +2148,11 @@ def _read_runner_identity(local_dir: str | None) -> dict[str, Any]:
     giving ``"match"`` / ``"mismatch"``; both fields keep the full build
     strings. The comparison is done here, not trusted from the file. A
     non-match carries ``runner_compatibility_warning``. A match does not
-    prove identical code (every build of one minor matches); see
+    prove identical code (every build of one minor matches), so when
+    ``request`` uses a :data:`_RUNNER_REQUEST_FEATURES` entry the fields also
+    carry ``runner_request_features`` (issue #3249): ``required`` names,
+    ``missing`` names (``null`` when the runner version is unknown) and a
+    ``status`` of ``supported`` / ``unsupported`` / ``unknown``; see
     docs/cli/sim.md.
     """
     client = _provenance._klt_version()
@@ -2019,6 +2191,26 @@ def _read_runner_identity(local_dir: str | None) -> dict[str, Any]:
         "client_klt_version": client,
         "runner_compatibility": status,
     }
+    features = _request_features(request) if request else []
+    if features:
+        missing = _missing_runner_features(features, runner)
+        fields["runner_request_features"] = {
+            "required": features,
+            "missing": missing,
+            "status": (
+                "unknown"
+                if missing is None
+                else "unsupported"
+                if missing
+                else "supported"
+            ),
+        }
+        if missing and warning is None:
+            warning = (
+                f"the fleet runner ran klt {runner}, which predates the request "
+                f"feature(s) {', '.join(missing)}; the job may have failed to "
+                "parse them -- update the runner image"
+            )
     if warning is not None:
         fields["runner_compatibility_warning"] = warning
     return fields
@@ -2030,7 +2222,7 @@ def _read_job_identity(
     """Runner identity plus the worker-observed environment capture, merged
     into ``environment.remote``. Neither reader can raise."""
     return {
-        **_read_runner_identity(local_dir),
+        **_read_runner_identity(local_dir, request),
         "worker_environment": _read_worker_environment(local_dir, request),
     }
 
@@ -2347,6 +2539,7 @@ def _annotate_preflight_rejection(
     if runner_error is None or runner_error.get("code") not in (
         BATCH_RUNNER_MISMATCH_CODE,
         BATCH_RUNNER_UNKNOWN_CODE,
+        BATCH_RUNNER_FEATURE_CODE,
     ):
         return
     for corner in corners:
@@ -2465,7 +2658,10 @@ def _run_batch_job(
 
     with tempfile.TemporaryDirectory(prefix="klt-batch-outputs-") as collected:
         collect_outputs(config, job_id, collected, runner=runner)
+        from .sim import check_ngspice_options_echo
+
         report = read_collected_report(collected)
+        check_ngspice_options_echo(request, report)
         environment = {**environment, **_read_job_identity(collected, request)}
         corners = report.get("corners") or []
         _surface_missing_include(corners, collected)
@@ -2670,10 +2866,12 @@ __all__ = [
     "BATCH_ARTIFACTS_DIRNAME",
     "BATCH_JOB_CEILING_CODE",
     "BATCH_JOB_TOOL",
+    "BATCH_CONCURRENCY_CAP_CODE",
     "BATCH_NO_CAPACITY_CODE",
     "BATCH_NETLIST_FILENAME",
     "BATCH_REPORT_FILENAME",
     "BATCH_RUNNER_IDENTITY_FILENAME",
+    "BATCH_RUNNER_FEATURE_CODE",
     "BATCH_RUNNER_MISMATCH_CODE",
     "BATCH_RUNNER_UNKNOWN_CODE",
     "BATCH_STDERR_FILENAME",
