@@ -13,6 +13,7 @@ import json
 from collections import Counter
 from pathlib import Path
 
+import jsonschema
 import klayout.db as kdb
 import pytest
 
@@ -10068,6 +10069,195 @@ def test_rerun_rejects_a_malformed_recorded_selection(selection, tmp_path, monke
 
     with pytest.raises(DrcError, match="rule_selection.selectors"):
         rerun_drc_report(str(report_path))
+
+
+# --------------------------------------------------------------------------- #
+# Response schema conformance (issue #3003): docs/schemas/drc-response.schema.json
+# --------------------------------------------------------------------------- #
+
+_SCHEMA_DIR = REPO_ROOT / "docs" / "schemas"
+_KLAYOUT_STUB_RDB = """<?xml version="1.0" encoding="utf-8"?>
+<report-database>
+ <description>stub</description>
+ <categories>
+  <category><name>W.1</name><description>min width</description></category>
+ </categories>
+ <cells><cell><name>TOP</name></cell></cells>
+ <items>
+  <item>
+   <category>'W.1'</category>
+   <cell>TOP</cell>
+   <values><value>edge-pair: (0,0;0,1)|(0.2,1;0.2,0)</value></values>
+  </item>
+ </items>
+</report-database>
+"""
+
+
+def _drc_response_validator() -> jsonschema.Draft202012Validator:
+    from referencing import Registry, Resource
+
+    schema = json.loads((_SCHEMA_DIR / "drc-response.schema.json").read_text())
+    coverage = json.loads((_SCHEMA_DIR / "coverage.schema.json").read_text())
+    registry = Registry().with_resource(
+        coverage["$id"], Resource.from_contents(coverage)
+    )
+    return jsonschema.Draft202012Validator(schema, registry=registry)
+
+
+def _klayout_engine_report(tmp_path, monkeypatch, **kwargs):
+    """A real `--engine klayout` report, with only the `klayout` launch
+    stubbed (other subprocess calls, e.g. `git`, run for real)."""
+    import subprocess
+
+    import klayout_tools.drc as drc_module
+    from helpers.subprocess_fakes import fake_completed
+    from klayout_tools.drc import run_drc_klayout_engine
+
+    real_run = subprocess.run
+
+    def fake_run(cmd, *args, **kw):
+        report_args = [a for a in cmd if isinstance(a, str) and a.startswith("report=")]
+        if not report_args:
+            return real_run(cmd, *args, **kw)
+        Path(report_args[0].split("=", 1)[1]).write_text(
+            _KLAYOUT_STUB_RDB, encoding="utf-8"
+        )
+        return fake_completed()
+
+    monkeypatch.setattr(drc_module.subprocess, "run", fake_run)
+    gds = tmp_path / "k.gds"
+    _make_clean_layout().write(str(gds))
+    deck = tmp_path / "deck.lydrc"
+    deck.write_text("# stub deck\n", encoding="utf-8")
+    return run_drc_klayout_engine(str(gds), str(deck), **kwargs)
+
+
+def test_drc_response_schema_is_valid_and_pins_version():
+    validator = _drc_response_validator()
+    jsonschema.Draft202012Validator.check_schema(validator.schema)
+    assert validator.schema["properties"]["schema_version"]["const"] == 2
+
+
+def test_drc_response_schema_validates_curated_reports(tmp_path):
+    validator = _drc_response_validator()
+    violation = tmp_path / "violation.gds"
+    clean = tmp_path / "clean.gds"
+    _make_violation_layout().write(str(violation))
+    _make_clean_layout().write(str(clean))
+
+    reports = {
+        "violations": run_drc(str(violation), "sky130"),
+        "clean": run_drc(str(clean), "sky130"),
+        "clean_partial": run_drc(str(clean), "sky130", rules=["poly.*"]),
+    }
+    for status, report in reports.items():
+        assert report["status"] == status
+        validator.validate(report)
+    assert "rule_selection" in reports["clean_partial"]
+    assert reports["violations"]["violations"]
+
+
+def test_drc_response_schema_validates_not_checked_report(tmp_path):
+    validator = _drc_response_validator()
+    path = tmp_path / "empty.gds"
+    layout = kdb.Layout()
+    layout.create_cell("TOP")
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "not_checked"
+    validator.validate(report)
+
+
+def test_drc_response_schema_validates_klayout_engine_report(tmp_path, monkeypatch):
+    validator = _drc_response_validator()
+
+    report = _klayout_engine_report(tmp_path, monkeypatch, expected_rule_categories=1)
+
+    assert report["engine"] == "klayout"
+    assert report["status"] == "violations"
+    assert report["coverage_assertion"]["kind"] == "expected_rule_categories"
+    validator.validate(report)
+
+    named = _klayout_engine_report(
+        tmp_path, monkeypatch, expected_rule_category_names=["W.1"]
+    )
+    assert named["coverage_assertion"]["kind"] == "expected_rule_category_names"
+    validator.validate(named)
+
+    unasserted = _klayout_engine_report(tmp_path, monkeypatch)
+    assert "coverage_assertion" not in unasserted
+    validator.validate(unasserted)
+
+
+def test_drc_response_schema_validates_list_rules_listing():
+    from klayout_tools.drc import list_deck_rules
+
+    validator = _drc_response_validator()
+    listing = list_deck_rules("sky130")
+
+    assert "status" not in listing
+    validator.validate(listing)
+    # The listing is its own branch: without `mode` it is neither shape.
+    with pytest.raises(jsonschema.ValidationError):
+        validator.validate({k: v for k, v in listing.items() if k != "mode"})
+
+
+def test_drc_response_schema_rejects_missing_required_field(tmp_path):
+    validator = _drc_response_validator()
+    path = tmp_path / "violation.gds"
+    _make_violation_layout().write(str(path))
+    report = run_drc(str(path), "sky130")
+
+    for field in (
+        "schema_version",
+        "file",
+        "deck",
+        "dbu_um",
+        "status",
+        "violation_count",
+        "rule_counts",
+        "metrics",
+        "violations",
+        "coverage",
+        "provenance",
+    ):
+        broken = {k: v for k, v in report.items() if k != field}
+        with pytest.raises(jsonschema.ValidationError):
+            validator.validate(broken)
+
+
+def test_drc_response_schema_rejects_bad_values(tmp_path):
+    validator = _drc_response_validator()
+    path = tmp_path / "violation.gds"
+    _make_violation_layout().write(str(path))
+    report = run_drc(str(path), "sky130")
+
+    for bad in (
+        {**report, "schema_version": 1},
+        {**report, "status": "pass"},
+        {**report, "violations": [{**report["violations"][0], "bbox": {"left": 0}}]},
+    ):
+        with pytest.raises(jsonschema.ValidationError):
+            validator.validate(bad)
+
+
+def test_drc_response_schema_accepts_additive_unknown_fields(tmp_path):
+    validator = _drc_response_validator()
+    path = tmp_path / "violation.gds"
+    _make_violation_layout().write(str(path))
+    report = run_drc(str(path), "sky130")
+
+    extended = {
+        **report,
+        "future_field": {"anything": [1, 2]},
+        "coverage": {**report["coverage"], "future_coverage_field": True},
+        "provenance": {**report["provenance"], "future_provenance_field": "x"},
+        "violations": [{**report["violations"][0], "future_violation_field": 1}],
+    }
+    validator.validate(extended)
 
 
 # ---------------------------------------------------------------------------
