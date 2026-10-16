@@ -230,6 +230,7 @@ from .functional_verification_sdf import (
     _drop_sdf_non_interconnect_entries,
     _drop_sdf_unsupported_edge_modpath_iopaths,
     _drop_sdf_zero_delay_alias_port_interconnects,
+    _drop_sdf_zero_delay_bus_port_source_interconnects,
     _drop_sdf_zero_delay_physical_only_interconnects,
     _normalize_sdf_header_triples,
     _parse_toplevel_ports,
@@ -398,6 +399,17 @@ SDF_ALIAS_PORT_DROPPED_CLASS = "zero_delay_alias_port_interconnect"
 #: never emits a diagnostic for them at all.
 SDF_PHYSICAL_ONLY_DROPPED_CLASS = "zero_delay_physical_only_interconnect"
 
+#: ``INTERCONNECT`` entries removed before annotation because they run from a
+#: bit-selected top-level input port (any destination not already claimed by
+#: :data:`SDF_PHYSICAL_ONLY_DROPPED_CLASS`) and carry zero delay at every
+#: corner. Icarus can fail to insert an intermodpath for such a source
+#: (``Could not find intermodpath!``); an all-zero entry models no delay, so
+#: dropping it cannot change simulated timing. Issue #2984's counted
+#: exemption; a non-zero entry of the same shape is left in place and still
+#: fails loudly. Pre-dropped from the SDF text, not derived from a
+#: diagnostic substring.
+SDF_BUS_PORT_SOURCE_DROPPED_CLASS = "zero_delay_bus_port_source_interconnect"
+
 #: The ``environment.sdf.dropped`` class counting the non-``INTERCONNECT``
 #: delay entries -- on a real ``write_sdf`` output, the ``IOPATH`` population
 #: -- removed before annotation because the request selected
@@ -477,6 +489,15 @@ SDF_BENIGN_DIAGNOSTIC_REASONS: dict[str, str] = {
         "zero are therefore removed before annotation and counted here "
         "instead of failing the run -- a non-zero-delay entry on the same "
         "destination is left in place and still fails loudly"
+    ),
+    SDF_BUS_PORT_SOURCE_DROPPED_CLASS: (
+        "Icarus Verilog can fail to insert an intermodpath for an "
+        "INTERCONNECT entry whose source is a bit-selected top-level input "
+        "port -- such an entry fails with 'Could not find intermodpath!'. "
+        "Entries whose every min:typ:max delay value is zero model no delay "
+        "at any corner, so they are removed before annotation and counted "
+        "here instead of failing the run -- a non-zero-delay entry on the "
+        "same source is left in place and still fails loudly"
     ),
     SDF_IOPATH_DROPPED_CLASS: (
         "The request selected options.sdf.entries: 'interconnect' "
@@ -2746,6 +2767,36 @@ def _apply_sdf_physical_only_drop(
     return new_path
 
 
+def _apply_sdf_bus_port_source_drop(
+    annotate_source_path: str,
+    output_dir: str,
+    ports: list[tuple[str, str, str]],
+    sdf_pre_dropped_counts: dict[str, int],
+) -> str:
+    """Issue #2984's zero-delay bit-selected-input-source SDF-text drop, the
+    sibling of :func:`_apply_sdf_physical_only_drop` and kept as its own
+    function for the same reason (no new branch in
+    :func:`run_functional_verification`). Runs after the physical-only pass,
+    so entries that pass claimed keep their class and are not double counted.
+    Counts under :data:`SDF_BUS_PORT_SOURCE_DROPPED_CLASS`.
+
+    Returns ``annotate_source_path`` unchanged when nothing was dropped, or
+    a new normalized-copy path otherwise.
+    """
+    drop = _drop_sdf_zero_delay_bus_port_source_interconnects(
+        annotate_source_path,
+        {name for direction, width, name in ports if width and direction == "input"},
+    )
+    if drop is None:
+        return annotate_source_path
+    text, count = drop
+    new_path = os.path.join(output_dir, "klt_sdf_bus_port_source_dropped.sdf")
+    with open(new_path, "w", encoding="utf-8") as handle:
+        handle.write(text)
+    sdf_pre_dropped_counts[SDF_BUS_PORT_SOURCE_DROPPED_CLASS] = count
+    return new_path
+
+
 # ---------------------------------------------------------------------------
 # entry point
 # ---------------------------------------------------------------------------
@@ -3041,6 +3092,14 @@ def run_functional_verification(
             hdl_toplevel,
             ports,
             sdf_pre_dropped_counts,
+        )
+
+        # Issue #2984: the remaining zero-delay sub-shape of shape (b) -- the
+        # same bit-selected-input-port source with a destination that is not
+        # physical-only. Zero-delay entries model no delay at any corner, so
+        # dropping them is timing-neutral; non-zero ones stay and still fail.
+        annotate_source_path = _apply_sdf_bus_port_source_drop(
+            annotate_source_path, output_dir, ports, sdf_pre_dropped_counts
         )
 
         split = _split_sdf_bus_port_interconnects(annotate_source_path, vector_ports)

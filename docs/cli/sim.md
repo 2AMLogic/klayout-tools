@@ -125,6 +125,24 @@ as `environment.ngspice_binary` (alongside `engine_version`), `null` for
 `environment.netgen_binary` (issue #2373). `klt sim` has no `--check`/
 `--rerun` mode, so there is no drift-diff exclusion to add for this field.
 
+**Pinning the simulator version (`engine_version`, issue #3041).** A request
+may carry an optional `engine_version` string, `"MAJOR"` (e.g. `"44"`) or
+`"MAJOR.MINOR"`, naming the build it requires. When set, `klt sim` compares it
+with the engine it resolved and, on a mismatch, exits 1 *before simulating*
+with `error.code: "engine_version_unmet"` naming required vs found. A version
+that cannot be determined or parsed also fails (closed). On `local` and
+`local-parallel` the engine is probed (`ngspice --version` / `Xyce -v`) up
+front. `remote` and `batch` have no pre-submit probe, so the pin is checked
+against the version in the runner's report once the run returns; the job has
+already run by then. Unset, behaviour is unchanged.
+
+**Supported analyses (issue #3041).** `analysis.kind` (and each
+`analysis_steps[]` step) is a control-block analysis such as `op`, `dc`, `ac`,
+`tran`, `noise`. Periodic small-signal/noise analyses — `pss`, `pnoise`,
+`pac` — are **not implemented**; naming one exits 1 with
+`error.code: "unsupported_analysis"` before anything runs. That code means the
+capability is absent; `engine_version_unmet` means the tool is unavailable.
+
 **Which machine ran it: `environment.engine_host` (issue #3110).** Every
 report (corner and deck mode) carries `environment.engine_host`: `"local"`
 or `"worker"` (`--backend remote`/`batch`). It says which machine every

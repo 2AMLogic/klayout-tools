@@ -1073,7 +1073,10 @@ def _drop_sdf_zero_delay_alias_port_interconnects(
     source feeding a *physical-only*, modpath-free destination instance --
     and handles it in its own separate pass,
     :func:`_drop_sdf_zero_delay_physical_only_interconnects`, precisely so
-    the general shape (b) case here stays untouched and still fails loudly.)
+    the general shape (b) case here stays untouched and still fails loudly.
+    Issue #2984 later added the zero-delay remainder of shape (b) in
+    :func:`_drop_sdf_zero_delay_bus_port_source_interconnects`; non-zero
+    shape (b) entries are still left alone.)
     """
     if not alias_port_bits:
         return None
@@ -1124,12 +1127,14 @@ def _drop_sdf_zero_delay_alias_port_interconnects(
 # could ever annotate, and no logic anywhere that observes the annotated
 # pin. The general shape (b) case -- a bit-selected-port source feeding an
 # ordinary `specify`-bearing standard cell -- is emphatically *not* covered
-# here: that destination has real modpaths, dropping its entry would change
-# simulated timing, and it must keep failing loudly exactly as
+# here: that destination has real modpaths, so dropping a NON-zero entry
+# would change simulated timing and it must keep failing loudly exactly as
 # `test_integration_real_icarus_sdf_bus_port_input_fanout_stays_
 # unresolvable` documents. Verified live, not merely asserted: on a net
 # carrying both a diode entry and a `specify`-bearing entry, dropping the
 # diode entry leaves the ordinary entry behind and the run still raises.
+# (That holds for non-zero entries; issue #2984 below drops the zero-delay
+# ones, which cannot change timing.)
 #
 # The exemption carries #2285's own bound verbatim, and for the same reason:
 # an entry is dropped only when *every* delay member it carries (all three
@@ -1368,6 +1373,77 @@ def _drop_sdf_zero_delay_physical_only_interconnects(
         text,
         lambda entry_text: _sdf_interconnect_is_physical_only_droppable(
             entry_text, bus_input_ports, physical_only_instances, divider
+        ),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Issue #2984: the remaining zero-delay sub-shape of #1619 shape (b) -- a
+# bit-selected top-level **input** port as the entry's source, with a
+# destination that is *not* physical-only (an ordinary `specify`-bearing
+# cell, so #2363's pass leaves it alone):
+#
+#     (INTERCONNECT ui_in[3] u1.A (0.000:0.000:0.000))
+#
+# A real post-route SDF can carry such entries and Icarus fails the run with
+# `SDF ERROR: ... Could not find intermodpath!` on some of them (the
+# order/race behaviour characterised above for shape (b)). The failure
+# mechanism is not what this pass depends on: it removes only entries whose
+# every `min:typ:max` member is zero, which model no delay at any corner, so
+# dropping one cannot change simulated timing -- the same bound #2285 and
+# #2363 use. The "dropping its entry would change simulated timing" argument
+# for leaving shape (b) failing therefore holds only for NON-zero entries,
+# and those are still left in place (and still raise), as
+# `test_integration_real_icarus_sdf_bus_port_input_fanout_stays_unresolvable`
+# pins with its non-zero delays.
+# --------------------------------------------------------------------------- #
+
+
+def _sdf_interconnect_is_zero_delay_bus_port_source(
+    entry_text: str, bus_input_ports: set[str]
+) -> bool:
+    """``True`` when ``entry_text`` is an ``INTERCONNECT`` entry whose
+    *source* is a bit-selected top-level input port in ``bus_input_ports``
+    and whose every delay member is zero -- the condition
+    :func:`_drop_sdf_zero_delay_bus_port_source_interconnects` removes an
+    entry on (issue #2984). The destination is unconstrained: it is the
+    #2363 predicate minus its physical-only destination test."""
+    head = _SDF_INTERCONNECT_HEAD_RE.match(entry_text)
+    if head is None:
+        return False
+    source_match = _SDF_BUS_PORT_TOKEN_RE.match(head.group(1))
+    if source_match is None or source_match.group(1) not in bus_input_ports:
+        return False
+    return _sdf_interconnect_is_zero_delay(entry_text)
+
+
+def _drop_sdf_zero_delay_bus_port_source_interconnects(
+    sdf_path: str, bus_input_ports: set[str]
+) -> tuple[str, int] | None:
+    """Remove every zero-delay ``INTERCONNECT`` entry in ``sdf_path`` whose
+    source is a bit-selected top-level input port in ``bus_input_ports``,
+    returning ``(text with those entries removed, how many were removed)``
+    -- or ``None`` when there is nothing to remove, in which case the caller
+    keeps handing ``sdf_path`` itself to ``$sdf_annotate`` unchanged.
+
+    Meant to run *after* :func:`_drop_sdf_zero_delay_physical_only_
+    interconnects`, so entries that pass already claimed keep their own
+    class and are not double counted. See the comment block above for why
+    the zero-delay bound makes this safe while the non-zero shape (b) case
+    keeps failing loudly.
+
+    An empty ``bus_input_ports`` makes this a no-op that returns ``None``
+    without reading the file.
+    """
+    if not bus_input_ports:
+        return None
+    text = _read_sdf_text(sdf_path)
+    if text is None:
+        return None
+    return _drop_sdf_interconnect_entries(
+        text,
+        lambda entry_text: _sdf_interconnect_is_zero_delay_bus_port_source(
+            entry_text, bus_input_ports
         ),
     )
 

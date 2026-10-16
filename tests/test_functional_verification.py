@@ -5262,6 +5262,134 @@ def test_integration_real_icarus_sdf_bus_port_input_fanout_stays_unresolvable(tm
         run_functional_verification(annotated)
 
 
+def _bus_port_source_sdf_text(
+    u1_delay: str = "0.000:0.000:0.000", scalar_delay: str = "0.000:0.000:0.000"
+) -> str:
+    """Issue #2984's shape: a zero-delay entry from bit-selected input port
+    `a[0]` onto an ordinary (`specify`-bearing) cell pin, plus a scalar-port
+    entry and a non-port-source entry that must never be touched."""
+    return f"""\
+(DELAYFILE
+  (SDFVERSION "3.0")
+  (DESIGN "bus_fanout_in")
+  (DIVIDER .)
+  (TIMESCALE 1ns)
+  (CELL
+    (CELLTYPE "bus_fanout_in")
+    (INSTANCE)
+    (DELAY (ABSOLUTE
+      (INTERCONNECT a[0] u1.in ({u1_delay}) ({u1_delay}))
+      (INTERCONNECT s u2.in ({scalar_delay}) ({scalar_delay}))
+      (INTERCONNECT u1.out u2.in (0.000:0.000:0.000) (0.000:0.000:0.000))
+    ))
+  )
+)
+"""
+
+
+def test_drop_sdf_zero_delay_bus_port_source_interconnects_drops_only_that_entry(
+    tmp_path,
+):
+    sdf_path = _write(tmp_path / "route.sdf", _bus_port_source_sdf_text())
+
+    result = fv._drop_sdf_zero_delay_bus_port_source_interconnects(sdf_path, {"a"})
+
+    assert result is not None
+    text, dropped = result
+    assert dropped == 1
+    assert "a[0]" not in text
+    assert "(INTERCONNECT s u2.in (0.000:0.000:0.000)" in text
+    assert "(INTERCONNECT u1.out u2.in (0.000:0.000:0.000)" in text
+
+
+def test_drop_sdf_zero_delay_bus_port_source_interconnects_keeps_a_nonzero_entry(
+    tmp_path,
+):
+    sdf_path = _write(
+        tmp_path / "route.sdf", _bus_port_source_sdf_text(u1_delay="0.000:0.000:1.000")
+    )
+
+    assert (
+        fv._drop_sdf_zero_delay_bus_port_source_interconnects(sdf_path, {"a"}) is None
+    )
+
+
+def test_drop_sdf_zero_delay_bus_port_source_interconnects_keeps_scalar_and_non_input(
+    tmp_path,
+):
+    """A scalar-port source, and a bus that is not a top-level input port,
+    are untouched even at zero delay."""
+    sdf_path = _write(tmp_path / "route.sdf", _bus_port_source_sdf_text())
+
+    # `s` is scalar (not in the bus-input set); `u1.out` is not a bus bit.
+    result = fv._drop_sdf_zero_delay_bus_port_source_interconnects(sdf_path, {"s"})
+    assert result is None
+    # `a` is not an input bus here, so its entry stays.
+    assert (
+        fv._drop_sdf_zero_delay_bus_port_source_interconnects(sdf_path, {"b"}) is None
+    )
+
+
+def test_drop_sdf_zero_delay_bus_port_source_interconnects_noop_without_bus_inputs(
+    tmp_path,
+):
+    """No bus input ports: returns None without even reading the file."""
+    missing = str(tmp_path / "does-not-exist.sdf")
+    assert fv._drop_sdf_zero_delay_bus_port_source_interconnects(missing, set()) is None
+
+
+def test_bus_port_source_class_has_a_reason():
+    assert fv.SDF_BUS_PORT_SOURCE_DROPPED_CLASS in fv.SDF_BENIGN_DIAGNOSTIC_REASONS
+
+
+def test_physical_only_pass_runs_first_so_classes_do_not_double_count(tmp_path):
+    """Entries the #2363 pass already removed are absent when the #2984 pass
+    runs on its output, so each entry is counted under exactly one class."""
+    sdf_path = _write(tmp_path / "route.sdf", _physical_only_diode_sdf_text())
+    first = fv._drop_sdf_zero_delay_physical_only_interconnects(
+        sdf_path, {"ui_in"}, _PHYSICAL_ONLY_DIODE_INSTANCES
+    )
+    assert first is not None
+    after = _write(tmp_path / "after.sdf", first[0])
+    assert (
+        fv._drop_sdf_zero_delay_bus_port_source_interconnects(after, {"ui_in"}) is None
+    )
+
+
+@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
+@pytest.mark.skipif(
+    not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
+)
+def test_integration_real_icarus_sdf_zero_delay_bus_port_input_fanout_is_dropped(
+    tmp_path,
+):
+    """Issue #2984: the #1619 shape (b) fixture with the `a[0]` entries
+    zero-delay completes and reports the new class; the sibling non-zero
+    fixture above still raises."""
+    tmp_path.joinpath("bus_fanout_in.v").write_text(
+        _BUS_PORT_FANOUT_INPUT_DUT_V, encoding="utf-8"
+    )
+    _write(tmp_path / "test_bus_fanout_in.py", _BUS_PORT_FANOUT_INPUT_TESTBENCH_PY)
+    zero = "(0.000:0.000:0.000) (0.000:0.000:0.000)"
+    _write(
+        tmp_path / "route_bus_in.sdf",
+        _bus_port_fanout_input_sdf_text().replace(
+            "(1.000:5.000:9.000) (1.000:5.000:9.000)", zero
+        ),
+    )
+    request = {
+        "sources": ["bus_fanout_in.v"],
+        "hdl_toplevel": "bus_fanout_in",
+        "testbench": {"module": "test_bus_fanout_in"},
+        "options": {"sdf": {"file": "route_bus_in.sdf", "corner": "typ"}},
+    }
+    report = run_functional_verification(_write_request(tmp_path / "r.json", request))
+
+    sdf = report["environment"]["sdf"]
+    assert sdf["partial"] is True
+    assert sdf["dropped"][fv.SDF_BUS_PORT_SOURCE_DROPPED_CLASS]["count"] == 2
+
+
 # --------------------------------------------------------------------------- #
 # Integration: the "constant-zero result on every test case" shape (issue
 # #1854), pinned as a *timing* outcome rather than an annotation failure --
