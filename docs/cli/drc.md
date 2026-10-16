@@ -7,6 +7,7 @@ report violations as structured data.
 klt drc <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l [--top <cell>] [--rules '<id|glob>,...'] [--pdk <variant> [--pdk-root <path>]] [--format text|json]
 klt drc --deck sky130|gf180mcu|sg13g2|sg13cmos5l --list-rules [--format text|json]
 klt drc <file> --engine klayout [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--timeout-s <seconds>] [--allow-deck-errors] [--allow-missing-host-tools] [--min-klayout-version <X.Y.Z>] [--expect-rule-categories <N> | --expect-rule-categories-file <path>] [--format text|json]
+klt drc <file> --deck <name> --waivers <waivers.json> [--format text|json]
 klt drc <request.json>|-|'{...}' [--format text|json]
 klt drc --check <report.json> [--rerun] [--format text|json]
 ```
@@ -143,6 +144,7 @@ A `--engine klayout` run, with the native deck's own script globals:
 | `pdk` | string | `--pdk` |
 | `pdk_root` | string | `--pdk-root` |
 | `rules` | string \| array\<string\> | `--rules` — one comma-separated string (the argv spelling) or a list of selector strings, each comma-split the same way. Any other type (a number, an object, a list holding a non-string) is rejected; empty and unmatched tokens are rejected exactly as for the flag. Curated engine only. |
+| `waivers_file` | string | `--waivers` (issue #3483; a path, resolved relative to the request document's own directory like `deck_file`. The waivers are not inlined — point at the reviewed file.) Curated engine only — see "Waivers". |
 
 An unknown top-level field is an application error (exit `1`), not a silently
 ignored one — a typo'd field would otherwise drop an input the caller
@@ -1019,6 +1021,13 @@ sizes, not ranges.
 | `sg13g2` | `cont.width.1`, `via1.width.1`–`via4.width.1`, `topvia1.width.1`, `topvia2.width.1` | `cont_sq.without_bbox_width(0.16um)` / `<layer>_nseal.without_bbox_min/max(...)` |
 | `sky130` | `via.width.1`, `via2.width.1`, `via3.width.1`, `via4.width.1` | `via_not_mt.drc(length > 0.15)` (`via.1a_b`) / the `via2.1a_b`, `via3.1_b`, `via4.1_b` max-length halves (0.2 / 0.2 / 0.8 um) |
 
+sg13g2's `cont.width.1` (and `cont.space.1`) set `layer_selection="squares"`
+(issues #2943, #3139), mirroring upstream's `cont_sq`: only square merged Cont
+polygons are measured, so contact bars and rows of abutting 0.16 µm contacts
+(drawn inside the PDK's own `npn13G2`/`rsil` cells) are not reported as one
+oversized contact. They belong to the PDK's separate `CntB.*` family, which
+this deck does not yet transcribe.
+
 sg13g2's `cont.width.1`/`via1.width.1`–`via4.width.1` and sky130's
 `via.width.1` were first deferred behind issue #2585: `klt gen` and
 `klt gen compose` drew every cut at a PDK-generic `gen.CONTACT_SIZE_UM`
@@ -1284,6 +1293,20 @@ official well rules — `nwell`'s enclosure of opposite-type diffusion/tap
 boolean expression no `klt gen` generator draws today) — are deliberately
 **not** transcribed; see the "nwell (well-layer) rule coverage" note in
 `sky130.py`'s own module docstring for the full reasoning.
+
+**Precision-poly-resistor head rules are not checked (issue #3077).** The
+deck has no rule for the contacts on a precision poly resistor's heads:
+`licon.1b` (0.19 µm contact width) and `licon.1c` (2.0 µm contact length,
+and the 2.16 µm poly-contact-extension that `sky130A.tech`'s DRC reports as
+"poly contact extends poly resistor by < 2.16um"), nor `rpm.1`'s minimum
+mask width. `licon.1`'s own 0.17 µm minimum is merely exempted for these
+licons by an approximation (see the `licon1.width.1` note below), not
+replaced by `licon.1b/c`. A `klt gen res_array` `high`/`xhigh` cell therefore
+reads `clean` here while the PDK's own Magic `drc(full)` still reports those
+head rules; a `klt drc --deck sky130` pass is not evidence the heads meet
+them. `klt drc --engine klayout` (the PDK's own `sky130A_mr.drc`) is the
+independent check. This gap is documentation-only: no field of the JSON
+`coverage` object changes.
 
 Nine of these rules approximate official rules our engine cannot transcribe
 literally. `diff.width.1` and `tap.width.1` (issue #2321) are the two
@@ -1639,6 +1662,24 @@ to the butting-edge/`euclidian`-metric approximations above). Its mirror,
 sub-cases -- "(1) inside LVPWELL (2) outside Nwell and DNWELL" -- both
 resolve to the same 0.16 µm regardless of well context, verified the same
 way.
+
+**Well-distance split of the `PCOMP` rules (issue #3484).** The flat 0.16 µm
+used to flag the substrate tap of every unmodified gf180mcu PDK
+`endcap`/`filltie` cell (`Pplus` 0.08 µm beyond the tap, `Nplus` 0.08 µm
+away, ~0.48 µm from the cell's `Nwell`), so a placed-and-routed digital macro
+could never reach a clean DRC. `nplus.space.pcomp.1` and
+`pplus.enclosing.comp.1` now cover only the *near-well* half of the official
+split -- a `PCOMP` (`Comp` AND `Pplus`) that comes within 0.429 µm of an
+`Nwell` or interacts with a `Dnwell` (guard band grown with
+`DerivedLayer.context`), at the strict 0.16 µm -- and two new rules,
+`nplus.space.pcomp.far.1` (`NP.3cii`, 0.08 µm) and
+`pplus.enclosing.comp.far.1` (`PP.5di`, 0.02 µm), cover the exact complement
+(including layouts that draw no well at all). The relaxation is applied only
+where the context is positively identified: selection is whole-polygon (a
+`PCOMP` only partly within reach stays strict), and the `DNWELL`/`LVPWELL`
+branches (`NP.3bii`, `PP.5ci`) are **not** relaxed -- anything within reach of
+a `Dnwell` stays on the strict near rule. The mirrored `pplus.space.ncomp.1`
+and `nplus.enclosing.comp.1` keep the flat strict value.
 
 The DRM's two MiM capacitor rules scoped to the "virtual bottom plate" —
 `MIMTM.1` (minimum bottom-plate spacing to other bottom-plate-or-routing
@@ -2198,7 +2239,7 @@ Nothing in Tables 3.14-3.19 is left out for want of mask colouring.
 | `SRAM.ACTIVE.WELL.S.5`, `SRAM.ACTIVE.WELL.EN.2` | Table 3.5.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
 | `SRAM.ACTIVE.A.2A`, `SRAM.ACTIVE.A.2B`, `SRAM.ACTIVE.AUX.2` | Table 3.5.2 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
 | `ACTIVE.AUX.3` | Table 3.5.2 | the DRM gives no distance bound to check against | #2812 |
-| `ACTIVE.LUP.1` | Table 3.5.2 | latch-up distance (30 um) needs tap/device classification | #2812 |
+| `ACTIVE.LUP.1` | Table 3.5.2 | DRM-confirmed 30 um maximum, but the DRM defines no tap layer, distance metric or connectivity test; no sound predicate yet (evidence: [ACTIVE.LUP.1 evidence](#activelup1-evidence)) | #2812 |
 | `SRAM.NSELECT.ACTIVE.EN.3`, `SRAM.NSELECT.ACTIVE.EN.4` | Table 3.7.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
 | `SRAM.SDT.W.4`, `SRAM.SDT.ACTIVE.OV.3`, `SRAM.SDT.LISD.OV.4` | Table 3.8.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
 | `SRAM.LISD.S.4`, `SRAM.LISD.AUX.1` | Table 3.9.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
@@ -2239,6 +2280,55 @@ Nothing in Tables 3.14-3.19 is left out for want of mask colouring.
 | `M9.S.4` | Table 3.18.1 | read literally (edge length) it overrides M8.S.2-S.3: an edge of 60-80 nm would need 60 nm, so S.2's 43 nm and S.3's 46 nm could never apply to it; the intended width-class reading is not stated | #3156 |
 | `M9.S.5`, `M9.S.6`, `M9.S.7`, `M9.S.8` | Table 3.18.2 | read literally (edge length) they override M8.S.1-S.3: every edge of 80 nm or more would need 80-1000 nm, so S.1's 40 nm could never apply; the intended width-class reading is not stated | #3156 |
 | `V9.PAD.EN.2`, `V9.AUX.1` | Table 3.19.1 | PAD (DRM mask 96) is not a layer of the pinned asap7.lyp, so the deck does not read it | #3156 |
+
+### ACTIVE.LUP.1 evidence
+
+`ACTIVE.LUP.1` stays in the not-implemented list; this section records why,
+from the pinned `asap7_drm_201207a.pdf` (page 32, Table 3.5.2): "Maximum
+distance, to prevent latch-up, between ACTIVE forming a MOS device and ACTIVE
+forming a bulk/substrate contact within the same WELL/substrate", operator
+`<=`, value `30 um`. The 30 um inherited from the manifest is confirmed.
+Nothing here changes the deck, the rule categories or the
+`--expect-rule-categories` count.
+
+What the DRM states, and what a predicate would need that it does not:
+
+| Needed for a predicate | DRM says | Verdict |
+| --- | --- | --- |
+| MOS ACTIVE | "ACTIVE forming a MOS device" | no layer; ACTIVE crossed by GATE is the natural reading |
+| Tap ACTIVE | "ACTIVE forming a bulk/substrate contact" | no tap layer or marker; the class has to be inferred from select polarity vs. well type |
+| Well / substrate | WELL is the N-well (Table 2.1.1, page 11); "substrate" is everything outside it | usable: inside one WELL polygon, or outside every WELL |
+| Distance metric | `<= 30 um` only | **information deficit**: edge-to-edge Euclidean, Manhattan, Chebyshev or centre-to-centre all fit the text and disagree on diagonal pairs |
+| Connectivity | none stated | **information deficit**: whether the tap must be wired to a supply (net connectivity, as `ACTIVE.S.2A`) or only drawn is not said |
+
+`tests/helpers/asap7_drc_fixtures.py` generates one isolated layout per
+experiment (`latchup_experiments()`), so no other case can supply a tap, and
+`tests/test_drc_asap7_deck.py` classifies the *written* layout with a
+reference predicate (`latchup_reference()`) under each candidate metric:
+
+- eligible MOS-to-tap pairs for an NMOS (`PSELECT` tap outside WELL) and a
+  PMOS (`NSELECT` tap in the same WELL), at 5 um and exactly at 30 um;
+- ineligible controls: a tap 1 dbu (0.25 nm) past 30 um, an ordinary
+  active-to-active neighbour (another MOS), a same-polarity (wrong-class)
+  tap, a tap of the right class in the wrong well, and a PMOS whose tap sits
+  in a different WELL;
+- diagonal pairs at 21 um / 22 um in both axes (edge-to-edge 29.7 um / 31.1
+  um Euclidean, 42 um / 44 um Manhattan, 21 um / 22 um Chebyshev): the
+  verdict flips with the metric, which is the information deficit above made
+  concrete.
+
+Follow-up acceptance criteria if the missing definitions are established
+(a separately reviewed change; none is met today):
+
+1. A source (DRM erratum, foundry confirmation or the pinned cells'
+   behaviour) fixes the metric and whether the tap needs net connectivity.
+2. The deck classifies MOS ACTIVE (GATE-crossed) and tap ACTIVE (select
+   polarity vs. WELL) with the bounded 30 um predicate, and `ACTIVE.LUP.1`
+   moves from the gap list to `RULES` with a fail and a boundary pass fixture.
+3. The pinned shipped-cell regression stays clean, or any new deviation is
+   added to `SHIPPED_CELL_DEVIATIONS` with explicit cell/rule/DRM evidence;
+   single standard cells carry no tap, so the check needs the placed-row
+   context (`TAPCELL_WITH_FILLER`) rather than a per-cell run.
 
 ### Shipped standard cells
 
@@ -2331,6 +2421,68 @@ These two fields are **purely additive** to the JSON contract — the existing
 `cell` field keeps its meaning (the top cell) and the sort key is unchanged
 — so this did not bump `drc`'s `schema_version` (see
 [`docs/json-contract.md`](../json-contract.md)).
+
+## Waivers
+
+`--waivers <file>` (request field `waivers_file`, issue #3483; curated engine
+only — `--engine klayout` with `--waivers` is an application error, exit `1`)
+records "these markers are accepted, and why" without hiding them. It exists
+for macros assembled from a PDK standard-cell library, which inherit whatever
+the library cells themselves report under the curated deck.
+
+The file is reviewed data, not an inline flag:
+
+```json
+{"waivers": [
+  {"cell": "gf180mcu_fd_sc_mcu7t5v0__endcap",
+   "rule": "nplus.space.pcomp.1",
+   "justification": "library tap geometry; foundry-clean (see #3484)"}
+]}
+```
+
+- `cell` is matched exactly against a violation's `source_cell` (see
+  "Per-instance attribution"); a marker with `source_cell: null` is never
+  waived.
+- `rule` is an exact rule id or a case-sensitive shell-style glob, the same
+  matcher as `--rules`.
+- `justification` is required. All three keys are required and non-blank,
+  unknown keys are rejected, and there is deliberately **no cell-wide blanket
+  waiver** — it would hide real violations in that cell.
+
+A violation is waived iff its `source_cell` equals a waiver's `cell` **and**
+its `rule` matches. Waived markers leave `violations`, `violation_count`,
+`rule_counts`, `metrics.drc__error__count` and `status` (all waived →
+`clean`, exit `0`) and appear in full under the top-level `waived` array —
+the `violations[]` entry shape plus `waiver_justification` — alongside:
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `waived_count` | integer | `len(waived)`. |
+| `waived_rule_counts` | object\<string, int\> | Per-rule-id waived counts, keys sorted. |
+| `waived` | array\<object\> | The waived markers. |
+| `unused_waivers` | array\<object\> | Waivers that matched no marker (informational, not an error), so stale waivers are visible. |
+
+All four fields, and `provenance.waivers` (`{"file", "content_hash"}`), are
+absent without `--waivers`, so a default report is unchanged and
+`schema_version` is not bumped. `--check` re-hashes the waiver file along
+with the input and deck; `--check --rerun` replays the waiver file the
+committed report recorded (`--waivers` itself cannot be combined with
+`--check`, like `--rules`).
+
+**Known limit — straddling markers.** A marker whose bbox spans two instances
+(a filler abutting a tap cell, say) carries the *container's* `source_cell`,
+so it is waived under that cell, which is why waivers are rule-scoped.
+Telling a cell's own geometry from its neighbour's per marker is not
+implemented.
+
+**Are library cells expected to be DRC-clean under the curated deck?** Not
+necessarily. The curated deck is a transcription of the open rule manual, not
+the foundry signoff deck, and in places it is more conservative. The known
+case is gf180mcu `endcap`/`filltie` cells, which report
+`nplus.space.pcomp.1` and `pplus.enclosing.comp.1` on their own p-tap COMP;
+that is tracked as a deck over-approximation in #3484. Until a deck fix lands,
+waive such residual library markers with a justified, rule-scoped waiver
+rather than post-processing the JSON.
 
 ## Database units (dbu)
 
@@ -2477,8 +2629,9 @@ On a run with findings:
 | `metrics`         | object                   | Declared-namespace re-keying of `violation_count` (issue #1847). See below. |
 | `violations`      | array\<object\>          | One entry per violating geometry, see below.                             |
 | `coverage`        | object                   | What was actually checked vs. what's present in the input stream, see below. |
+| `waived_count`, `waived_rule_counts`, `waived`, `unused_waivers` | integer, object\<string, int\>, array\<object\>, array\<object\> | Present only on a `--waivers` run (issue #3483): the markers a reviewed waiver file moved out of `violations`, with their justification; see "Waivers". Absent otherwise, so a default run's report is byte-identical. |
 | `rule_selection`  | object                   | Present only on a `--rules` run (issue #2768): `{"selectors", "selected", "omitted", "deck_rule_count", "subset"}`, relative to the full registered deck — see "Rule listing and selection" above. Absent otherwise, so a default run's report is unchanged. |
-| `provenance`      | object                   | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` (issue #1901) is `{"name": ..., "source": ..., "version": ...}` when `--pdk` and/or `--pdk-root` was given (resolved via the same lookup `klt pdk find`/`klt sta`/`klt extract` use — this holds for both `--engine curated` and `--engine klayout`, in addition to `--engine klayout`'s own separate use of `--pdk`/`--pdk-root` to resolve the native deck script when `--deck-file` is omitted), else `null`; an unresolvable `--pdk`/`--pdk-root` fails the run the same as any other application error (exit 1), it does not silently fall back to `null`. `deck` pins the selected rule deck by name and `sha256:` content hash, plus a `released` tri-state signal (issue #1193) for whether that exact hash ships in any released `klayout-tools` version — `false` (non-fatal) flags a report generated against an unreleased/dev-edited deck, `null` when the answer can't be determined (e.g. the generated deck history table is missing); `input` pins the input layout file (`path`) by `sha256:` content hash. When `--engine klayout` was run with one or more `--deck-var NAME=VALUE` flags (issue #1302), `deck` additionally carries an `options` key (issue #1306) recording that mapping (e.g. `{"feol": "true"}`), so a committed report records which `--deck-var` configuration produced it — omitted entirely when no `--deck-var` was given. `klt drc` additionally carries `klayout_version_mismatch` (issue #1490, `true`\|`false`): whether the resolved `klayout_version` differs from the version this `klayout-tools` build/commit was tested against (`klt version --format json`'s `klayout_version_expected`) — see [`../json-contract.md`](../json-contract.md)'s "Pinning the KLayout engine version". |
+| `provenance`      | object                   | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` (issue #1901) is `{"name": ..., "source": ..., "version": ...}` when `--pdk` and/or `--pdk-root` was given (resolved via the same lookup `klt pdk find`/`klt sta`/`klt extract` use — this holds for both `--engine curated` and `--engine klayout`, in addition to `--engine klayout`'s own separate use of `--pdk`/`--pdk-root` to resolve the native deck script when `--deck-file` is omitted), else `null`; an unresolvable `--pdk`/`--pdk-root` fails the run the same as any other application error (exit 1), it does not silently fall back to `null`. `deck` pins the selected rule deck by name and `sha256:` content hash, plus a `released` tri-state signal (issue #1193) for whether that exact hash ships in any released `klayout-tools` version — `false` (non-fatal) flags a report generated against an unreleased/dev-edited deck, `null` when the answer can't be determined (e.g. the generated deck history table is missing); `input` pins the input layout file (`path`) by `sha256:` content hash. A `--waivers` run additionally carries `waivers` (issue #3483): `{"file", "content_hash"}` pinning the waiver file by `sha256:` hash. When `--engine klayout` was run with one or more `--deck-var NAME=VALUE` flags (issue #1302), `deck` additionally carries an `options` key (issue #1306) recording that mapping (e.g. `{"feol": "true"}`), so a committed report records which `--deck-var` configuration produced it — omitted entirely when no `--deck-var` was given. `klt drc` additionally carries `klayout_version_mismatch` (issue #1490, `true`\|`false`): whether the resolved `klayout_version` differs from the version this `klayout-tools` build/commit was tested against (`klt version --format json`'s `klayout_version_expected`) — see [`../json-contract.md`](../json-contract.md)'s "Pinning the KLayout engine version". |
 
 ### `metrics` object
 

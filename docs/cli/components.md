@@ -16,7 +16,9 @@ klt components <file> --conductors <json> [--vias <json>] [--label-layers <json>
   "m2", "layer": [69, 20]}]'`. `name` must be unique. Same-layer touching
   shapes on one conductor always merge into one component, regardless of
   `--vias`. Not validated by argparse -- an empty/malformed value exits `1`
-  with a clean error rather than argparse's usage-error exit `2`.
+  with a clean error rather than argparse's usage-error exit `2`. Each entry
+  (and each `--vias` entry) may also carry the boolean qualifiers described
+  under ["Boolean qualifiers"](#boolean-qualifiers-and--not).
 - `--vias` -- optional. A via mapping that electrically joins two named
   conductor levels, as a path to a JSON file or an inline JSON array of
   `{"name": str, "layer": [layer, datatype], "between": [conductor_name_a,
@@ -48,6 +50,44 @@ klt components <file> --conductors <json> [--vias <json>] [--label-layers <json>
   than one; omit to report every top cell. A named cell that is absent exits
   `1`.
 - `--format` -- `text` (default, a human-readable summary) or `json`.
+
+## Boolean qualifiers (`and` / `not`)
+
+A raw layer cannot say "this via only inside marker X" or "poly minus the
+resistor-body marker". Every `--conductors` and `--vias` entry therefore
+accepts two optional keys, each a non-empty list of `[layer, datatype]` pairs:
+
+- `"and": [[l, d], ...]` -- keep only the part of the entry's layer that
+  overlaps the merged union of the listed layers.
+- `"not": [[l, d], ...]` -- remove the merged union of the listed layers from it.
+
+With both present, `and` is applied first, then `not`. The boolean runs before
+the `--region` clip and before connectivity is computed, so components,
+`shape_count` and `area_um2` all report the qualified geometry. A qualifier
+layer absent from the layout is empty: `and` then empties the entry, `not` is
+a no-op. Malformed qualifiers (non-list, empty, bad pair, boolean entries)
+exit `1`.
+
+Example -- a MIM capacitor whose top-plate vias (marker `75/0`) must not
+short the bottom plate:
+
+```json
+[
+  {"name": "via2_routing",  "layer": [38, 0], "not": [[75, 0]], "between": ["m2", "m3"]},
+  {"name": "via2_topplate", "layer": [38, 0], "and": [[75, 0]], "between": ["fusetop", "m3"]}
+]
+```
+
+Resistor body: `{"name": "poly", "layer": [66, 20], "not": [[110, 0]]}` splits a
+marked body into its two terminal ends.
+
+**Sliver caveat:** these are plain booleans, not "interacting" selections. A
+shape straddling a qualifier layer's edge is cut at that edge, leaving
+slivers on each side; only fully-inside or fully-outside shapes behave as
+whole shapes.
+
+The `conductors[]`/`vias[]` echo includes `and`/`not` only for entries that set
+them; requests without qualifiers produce byte-identical output.
 
 ## Why this exists
 
@@ -135,8 +175,8 @@ exit codes).
 | ----------------- | ------------------------ | ------------------------------------------------------------------------------------------------ |
 | `schema_version`  | integer                  | Version of this command's JSON shape (starts at `1`).                                            |
 | `file`            | string                   | The input layout path exactly as provided on the command line.                                  |
-| `conductors`      | array\<object\>          | The `--conductors` set echoed back, as `{name, layer}`.                                          |
-| `vias`            | array\<object\>          | The `--vias` set echoed back, as `{name, layer, between}`; `[]` when `--vias` was omitted.       |
+| `conductors`      | array\<object\>          | The `--conductors` set echoed back, as `{name, layer}` (plus `and`/`not` when set).                                          |
+| `vias`            | array\<object\>          | The `--vias` set echoed back, as `{name, layer, between}` (plus `and`/`not` when set); `[]` when `--vias` was omitted.       |
 | `label_layers`    | array\<object\>          | The `--label-layers` set echoed back, as `{name, layer, conductor}` (`conductor` is `null` when that entry didn't declare one); `[]` when omitted.  |
 | `region_um`       | array\<number\> \| null  | The `--region` crop window `[left, bottom, right, top]` in micrometres, or `null` when omitted.  |
 | `top`             | string \| null           | The `--top` cell name, or `null` when every top cell was reported.                               |

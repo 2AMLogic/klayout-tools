@@ -14,6 +14,26 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sim` `measurements[].cycle_mean`: a mean over whole reference
+  cycles** (issue #2947): a fourth measurement form
+  `{signal, align, level, cycles, edge?, from?}` (`tran` only) returns the
+  time-weighted (trapezoidal) mean of `signal` between the first and
+  `cycles`-th-after reference edge at or after `from`, edges linearly
+  interpolated. `value` stays a scalar (so `limits`/`plausible_range`/Monte
+  Carlo/coverage apply); the window rides an additive `cycle_mean`
+  `{t_start, t_end, cycles_used}` sibling -- no `schema_version` bump. Reduced
+  inside the corner run, so `remote`/`batch` work with
+  `keep_artifacts: false`. Refused for `engine: "xyce"` and `analysis_steps[]`;
+  failures are `status: "error"` with a `measurement` diagnostic led by a
+  `[cycle_mean_*]` reason token. `.meas AVG ... TRIG/TARG` and `FROM=<meas>`
+  remain unsupported. See `docs/cli/sim.md`.
+- **`klt sim` `analysis_steps[].reset`** (issue #3103): `reset: true` starts a
+  step from a freshly parsed circuit (ngspice `reset`), so independent
+  configurations of one analysis share a request instead of one job each. The
+  deck re-emits `save all` and the corner's `supply_v` `alter`s after `reset`.
+  Decks without `reset` are byte-identical; a non-boolean value is refused by
+  name. `docs/cli/sim.md` now also states that steps otherwise share circuit
+  and solver state. Additive; no `schema_version` bump.
 - **ASAP7 DRC deck checks `ACTIVE.W.2` and `SDT.W.3`** (issue #3085): the
   vertical-width-is-an-integer-multiple-of-27-nm rules (DRM Tables 3.5.1 /
   3.8.1) are now measured per local vertical width of each merged rectilinear
@@ -31,6 +51,16 @@ not `klt --version`, if you need to detect this kind of drift. See
   of a false verdict). Additive; no `schema_version` bump. See
   `docs/cli/lvs.md`'s `device.combine_incomplete` section.
 
+- **`klt pex` `model_mismatch.kind`** (issue #3054): the `model_mismatch`
+  block gains an additive `kind` field, `"model_set"` when `reference_only`
+  or `extracted_only` is non-empty and `"count_only"` when the model sets are
+  identical and only instance counts differ (typically a multi-finger layout
+  against a one-instance-per-device schematic). A `count_only` `detail` is
+  now neutral and names finger/multiplier decomposition as the usual cause
+  instead of claiming the sides "instantiate different device models". The
+  block is still non-`null` in both cases; `model_set` output is unchanged.
+  Additive; no `schema_version` bump.
+
 - **`klt sim` surfaces ngspice's `Timestep too small` transient abort**
   (issue #2918): a new `timestep_too_small` diagnostic code (accepted by
   `options.fail_on_diagnostic`) with structured `time_s`/`timestep_s`/`node`
@@ -43,11 +73,61 @@ not `klt --version`, if you need to detect this kind of drift. See
   source engine limitation that commonly triggers it. Additive; no
   `schema_version` bump.
 
+- **`klt place-and-route` reports routability** (issue #2994): the route
+  stage entry (and top level) gains an additive `congestion` object —
+  global-route overflow and per-layer usage, detailed-route violation series,
+  unrouted-net count and routability-driven placement congestion. Figures the
+  engine cannot produce are `null` and named in `congestion.null_reasons`.
+  The generated route script now runs `global_route -verbose` (routing is
+  unchanged) so the engine prints its congestion table.
+  `schema_version` is unchanged.
+
 - **`klt reset-coverage`** (issue #2998, part 1 of 2): a read-only verb that
   classifies every sequential cell and hard macro of a flat gate-level
   Verilog netlist as reset-covered or unreset (machine-readable reason code),
   with a waiver file (fail on an unwaived element and on a stale waiver).
   `options.initial_state` for `functional-verification` follows separately.
+
+- **`openroad` Docker wrapper no longer runs as root** (issue #3151):
+  `scripts/install-openroad-docker.sh` now writes a wrapper that passes
+  `--user "$(id -u):$(id -g)"` and `-e HOME="${TMPDIR:-/tmp}"` to `docker
+  run`, so files OpenROAD creates under `$PWD`/`$TMPDIR` are owned by the
+  caller instead of root on Linux. Hosts with an older wrapper should re-run
+  `scripts/install-openroad-docker.sh` to upgrade it in place.
+- **Docs: `monte_carlo.vary: "process"` negative control is scoped**
+  (issue #2937): the sigma=0 guarantee holds for the reported
+  `mismatch_seed` and for decks consuming `mc_mismatch_seed` directly, not
+  for decks that draw mismatch from ngspice's own RNG (`agauss`/`gauss`),
+  where the combined `.options seed` still varies per sample. Docs and the
+  `_expand_monte_carlo` docstring now say so and name the working control
+  (switch the deck's mismatch off). No seed derivation or JSON change.
+
+- **`klt netlist --backend batch` file selection and failure diagnostics**
+  (issue #3282): repeatable `--batch-include <glob>` / `--batch-exclude
+  <glob>` narrow the uploaded git-tracked set without narrowing
+  `--batch-root`. A failed job whose `stderr.log` holds no klt envelope now
+  adds `error.remote_stderr_tail`, `remote_exit_code`, `remote_state` and
+  `harness_log` to the error envelope (additive; `schema_version` unchanged).
+
+- **`options.initial_state` for `klt functional-verification`** (issue #2998,
+  part 2 of 2): a gate-level Icarus run can start every flop at `x`, or at a
+  seeded-random bit with one regression per seed
+  (`{"mode": "x" | "random", "seeds": [...], "netlist": "..."}`). The flop
+  list is derived from the netlist and cell models; effective seeds and the
+  per-seed runs are echoed in the new `environment.initial_state` field
+  (`null` otherwise) and each seeded test carries `initial_state_seed`.
+  Additive; no `schema_version` bump. Also fixes `klt reset-coverage` on the
+  real sky130 cell models, whose `input wire CLK` declarations hid every
+  asynchronous pin (every flop classified `no_async_pin`).
+
+- **`klt lvs` `body_verification` no longer reports a false `"verified"`
+  for `layout.netlist` + `layout.deck`** (issue #3177): the body
+  determination compared device-class and substrate-net names
+  case-sensitively and matched only the raw `$<n>` anonymous-net spelling,
+  but a netlist read back from disk presents `NFET`/`VSUBS` and `\\$<n>`.
+  An untapped NMOS or an anonymous-body PMOS in a `klt extract -o` netlist
+  now reports `unverified` (and emits `device.body_unverified`), matching the
+  inline-extraction verdict. Inline-extraction results are unchanged.
 
 - **Bipolar markers can be derived layer expressions** (issue #2860):
   `BipolarDevice.marker` now accepts a `LayerExpr`, a frozen AND/NOT tree
