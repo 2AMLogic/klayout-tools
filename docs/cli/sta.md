@@ -600,8 +600,10 @@ measurement.
 **What a `klt extract --spef` SPEF models (issue #3257).** By default it is
 lumped capacitance per net with no wire resistance between DEF-level pins
 (zero-ohm legs), so `read_spef` adds wire load but not pin-to-pin wire delay.
-Build it with `--def-net-connections` **and** `--def-pins`; without the
-latter, most nets cannot attach (`STA-1656`) and `delay_changed` stays false.
+Build it with `--def-net-connections`, `--def-pins` **and** `--def-net-names`;
+without `--def-pins`, most nets cannot attach (`STA-1656`) and `delay_changed`
+stays false, and without `--def-net-names` the extracted names are `$N` so
+almost nothing correlates (52 / 537 `gcd` nets annotated).
 See `docs/cli/extract.md`, "SPEF export".
 
 `klt sta` answers that with **four independent pieces of evidence**, three

@@ -46,6 +46,13 @@ not `klt --version`, if you need to detect this kind of drift. See
   The aggregated report gains `environment.{backend,remote.fleet[]}` and
   `corner_runs[].job_id`/`error_code` (batch runs only). Additive; no
   `schema_version` bump.
+- **`klt extract --spef --def-net-connections` omits unlabelled `$N` nets absent
+  from the DEF** (issue #3580): generalises the #3257 gap C omission from
+  duplicate-named nets to unique-named `$<digits>` nets (and coupling to them),
+  which OpenSTA rejects with `STA-1650`; they are listed in `warnings[]`.
+  Docs now state `--def-net-names` is required alongside
+  `--def-net-connections --def-pins`. SPEF output without
+  `--def-net-connections` is unchanged. Additive; no `schema_version` bump.
 - **`klt sim` batch: opt-in auto-split of a request that cannot fit the fleet's
   whole-job ceiling** (issue #3446): `batch.job_ceiling_check: "split"`,
   `batch.max_units_per_job` and `--max-units-per-job N` reroute a

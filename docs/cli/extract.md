@@ -5771,14 +5771,18 @@ corner), `klt extract --abstract-cells 'sky130_fd_sc_hd__*' --parasitics
 | above, no `--def-net-names` | 52 / 537 | 520 | 486 | `true` |
 | above plus `--def-net-names` | 537 / 537 | 35 | 3 | `true` |
 | plus `--def-net-names`, no `--def-pins` | 537 / 537 | 1036 | 3 | `true` |
+| plus `--def-net-names`, after issue #3580 | 494 / 494 | 0 | 3 | `true` |
 
-So `--def-pins` is necessary but not sufficient: without `--def-net-names`
-the extracted net names are `$N` and almost nothing correlates, and even with
-both, `annotation_complete` stays `false` (35 `STA-1650`). Those 35 are
-`*D_NET \$N` blocks for unlabelled layout nets, not PIN-name or
-floating-duplicate cases; they are tracked in #3580. The pre-PR-#3512
-baseline was not re-measured, so these numbers show the current state, not
-the delta from #3512.
+So `--def-pins` and `--def-net-names` are both required: without
+`--def-net-names` the extracted net names are `$N` and almost nothing
+correlates. Before issue #3580, even with both, `annotation_complete` stayed
+`false` because 35 `*D_NET \$N` blocks for unlabelled layout nets were
+rejected (`STA-1650`); these are now omitted (see below), which is the last
+table row (35 blocks omitted, `reader_warning_count` 0). The remaining 3
+unannotated drivers are `clkload0/Y`, `clkload1/Y` and `clkload2/Y`: the
+unconnected outputs of CTS dummy-load cells. They drive no DEF net, so there is
+no wire for the SPEF to annotate; this is an inherent limit, not an extraction
+defect, and `annotation_complete` stays `false` for it.
 
 **Port PIN name ≠ NET name (issue #3257).** For a DEF `- PortA + NET netA`
 record, the `*PORTS` list and the net's `*P` entry use the PIN name
@@ -5795,6 +5799,13 @@ same-named `*D_NET` blocks are rejected by OpenSTA (`STA-1650`) and attach to
 no driver. `warnings[]` lists the omitted names. This also drops duplicate
 supply nets (`VGND`/`VPWR` islands) that the DEF only declares in
 `SPECIALNETS`.
+
+**Unlabelled `$N` nets (issue #3580).** The same omission applies to a
+unique-named, non-port net spelled `$<digits>` (an unlabelled layout net) that
+is absent from the DEF `NETS` section; OpenSTA rejects its `*D_NET` block
+(`STA-1650`) just the same. Labelled nets that are not in the DEF are kept.
+`warnings[]` lists the omitted names. Nothing changes without
+`--def-net-connections`.
 
 **Parasitic model (default, non-`--distributed-rc`).** The SPEF carries a
 single lumped capacitance per net, hung on the net's hub node, and no wire
