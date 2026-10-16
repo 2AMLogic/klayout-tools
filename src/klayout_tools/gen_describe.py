@@ -362,10 +362,6 @@ def _mos_array_validate(params: dict[str, Any]) -> None:
     )
 
 
-# Spellings callers use for sky130's native (zero-threshold) NMOS (issue #2912).
-_SKY130_NATIVE_VT_NAMES = frozenset({"native", "nvt"})
-
-
 def _voltage_flavor_hints(
     family: str, params: dict[str, Any], notes: list[str]
 ) -> dict[str, Any]:
@@ -380,21 +376,7 @@ def _voltage_flavor_hints(
     mark_present = False
     if voltage_flavor:
         mark_present = _voltage_flavor_mark_layer(family, voltage_flavor) is not None
-        if (
-            not mark_present
-            and family == "sky130"
-            and voltage_flavor in _SKY130_NATIVE_VT_NAMES
-        ):
-            notes.append(
-                f"params.voltage_flavor '{voltage_flavor}': the sky130 native-Vt "
-                "NMOS (sky130_fd_pr__nfet_05v0_nvt) is unsupported -- no marker "
-                "was drawn, so the device extracts as a plain nfet. Upstream "
-                "derives it from hvi AND lvtn (not a single marker layer), which "
-                "the single-marker voltage_flavor model cannot express; see "
-                "docs/cli/gen.md (voltage_flavor) and docs/cli/lvs.md "
-                "(native-Vt NMOS) for the exclusion workflow (issue #2912)"
-            )
-        elif not mark_present:
+        if not mark_present:
             notes.append(
                 f"params.voltage_flavor '{voltage_flavor}' has no marker layer "
                 f"resolved for the resolved PDK family ('{family}') -- no marker "

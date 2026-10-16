@@ -383,6 +383,8 @@ _HIDDEN_PARAMS = {
     "salicide_block_present",
     "voltage_flavor_mark_layer",
     "voltage_flavor_mark_present",
+    "voltage_flavor_extra_mark_layer",
+    "voltage_flavor_extra_mark_present",
     "cap_top_plate_layer",
     "cap_bottom_plate_layer",
     "cap_top_via_layer",

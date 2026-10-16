@@ -247,6 +247,21 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default=False,
             )
             self.param(
+                "voltage_flavor_extra_mark_layer",
+                self.TypeLayer,
+                "Second voltage_flavor marker layer drawn over the same box "
+                "(sky130 native-Vt: lvtn alongside hvi; only used when "
+                "voltage_flavor_extra_mark_present)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "voltage_flavor_extra_mark_present",
+                self.TypeBoolean,
+                "Whether voltage_flavor_extra_mark_layer is a real layer "
+                "resolved for params.voltage_flavor on this PDK family",
+                default=False,
+            )
+            self.param(
                 "voltage_flavor_mark_margin_um",
                 self.TypeDouble,
                 "Harness-resolved margin the voltage_flavor marker box grows "
@@ -422,6 +437,13 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     info["core_h_um"] + mark_margin,
                 )
                 _insert_boxes(self.cell, li_voltage_flavor_mark, dbu, [mark_box])
+                if self.voltage_flavor_extra_mark_present:
+                    _insert_boxes(
+                        self.cell,
+                        self.layout.layer(self.voltage_flavor_extra_mark_layer),
+                        dbu,
+                        [mark_box],
+                    )
 
             if info["ring"] is not None and self.add_guard_ring:
                 li_tap = self.layout.layer(self.tap_layer)
