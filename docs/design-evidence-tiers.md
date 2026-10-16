@@ -339,6 +339,17 @@ written to every block.
    partition only; an analog partition (including the analog half of a
    mixed-signal block) always requires Monte Carlo evidence. `klt signoff`
    reports it as `not_applicable`, never as `met`.
+   **Several statistical rows, only some evidenced** (issue #2908): item 6
+   is a claim about *every* statistical row, so a manifest may declare the
+   row set under `spec_rows."6"` and cite one `klt yield` report per row set
+   (`rows` on each citation). Item 6 grades `met` only when every declared
+   row is covered by a passing citation against a ratified target. A row with
+   no citation (`uncovered_rows`), a row declared a `gap` because no evidence
+   can exist yet (`declared_gaps`), or a row declared `ratified: false`
+   (`unratified_rows`, evidence against a proposed limit is provisional)
+   grades `unmet` / `partial_coverage`, never `met`. Without a declaration
+   the item grades as before; a `not_applicable` entry contradicts a declared
+   row set and is `invalid_evidence`.
 7. **Post-layout verification**
    - *Analog* — the spec suite re-run against the netlist extracted from
      the layout, not only the drawn schematic (#252). Parasitic extraction

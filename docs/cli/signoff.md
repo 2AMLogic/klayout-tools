@@ -2542,8 +2542,47 @@ new. Outcomes:
 Every list-form item also carries `citations_graded` (per-citation status).
 Without `spec_rows`, several passing citations grade `met` as the union of
 their verdicts. A single string/dict entry with no `spec_rows` renders
-exactly as before. The list form is item 5 only; the same `spec_rows`
-schema is meant to be reused by item 6 (#2908).
+exactly as before. The list form applies to items 5 and 6 (item 6:
+#2908, below).
+
+#### Item 6 with several statistical rows (issue #2908)
+
+Item 6 reuses the item-5 list form and `spec_rows` schema above, with
+`klt yield` citations and an optional per-row `ratified` flag (default
+`true`):
+
+```json
+{
+  "evidence": {
+    "6": [{"file": "mc/offset.json", "rows": ["offset"]}]
+  },
+  "spec_rows": {
+    "6": [
+      {"id": "offset"},
+      {"id": "gain_err", "gap": "function not implemented yet"},
+      {"id": "inl", "ratified": false}
+    ]
+  }
+}
+```
+
+- every declared row covered by a passing citation and all rows ratified ->
+  `met` (`row_coverage` present);
+- otherwise, with no failing citation -> `unmet` / `partial_coverage`; the
+  `detail` lists `uncovered_rows`, `declared_gaps` (`[{id, gap}]`) and
+  `unratified_rows` (every `ratified: false` row, covered or not -- evidence
+  against a proposed limit is provisional) separately;
+- a failing citation keeps its own `reason` (e.g. `check_failed`) with
+  `detail.failed_citations` / `detail.failed_rows`, as for item 5; the #2467
+  campaign-discipline gate applies per citation, unchanged;
+- a malformed declaration, an undeclared or `gap` row named by a citation, a
+  non-boolean `ratified`, or a `not_applicable` entry alongside a declared
+  row set (zero rows vs. some rows -- they contradict) -> `invalid_evidence`.
+
+A manifest with no `spec_rows."6"` grades exactly as before. `ratified` is
+additive and also parsed for item 5 rows, where it likewise blocks `met`.
+`schema_version`: no bump; `detail.unratified_rows` is a new optional field
+and `partial_coverage` is an existing reason.
 
 #### Item 6's evidence needs a from-source toolchain (issue #2466)
 
