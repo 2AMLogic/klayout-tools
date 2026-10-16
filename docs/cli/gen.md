@@ -353,6 +353,21 @@ up against this family's curated deck (`klayout_tools.decks.sg13g2`) today;
   > other families keep 0.15µm. The two rules remain unchecked by
   > `klt drc --deck sky130`.
 
+**sky130 gate-poly endcap (issue #2936).** The sky130 unit device used to end
+the gate poly flush with the diffusion: the bottom edge exactly at `y == 0`,
+and the top edge only through the landing-pad neck (narrower than the gate
+once `l_um` exceeds the 0.42µm pad). The PDK's `poly.8` ("min. poly extention
+gate (endcap)", 0.13µm) rejects both, and the curated deck could not see it.
+The deck now carries `poly.endcap.diff.1` ([`klt drc`](drc.md)), and
+`mos_array`/`diff_pair`/`esd_device` draw a 0.15µm endcap on sky130 at both
+ends along the full gate width: `gen.py`'s `_PDK_GATE_BOTTOM_ENDCAP_UM`
+gained a `sky130` entry, and the new `_PDK_GATE_TOP_ENDCAP_UM` adds a
+stripe-width neck above the diffusion before the landing pad widens (the
+parallel-finger shape already runs its stripes up into the comb). The unit
+device is therefore 0.15µm taller (`bbox` grows at the bottom; row pitch
+follows), and the S/D ports are unchanged. Other families' geometry is
+unchanged.
+
 `esd_device`/`bond_pad`/`well_island` were simply not attempted for
 `sg13g2` by issue #1448 (no citable curated passivation-opening layer for
 `bond_pad`; no verification effort spent on the other two) — a documented

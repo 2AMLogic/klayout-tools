@@ -246,6 +246,9 @@ from .gen_layer_params import (
     _gate_pad_clearance_um as _gate_pad_clearance_um,
 )
 from .gen_layer_params import (
+    _gate_top_endcap_um as _gate_top_endcap_um,
+)
+from .gen_layer_params import (
     _metal_res_geometry_min_um as _metal_res_geometry_min_um,
 )
 from .gen_layer_params import (
@@ -358,6 +361,7 @@ _HIDDEN_PARAMS = {
     "voltage_flavor_mark_margin_um",
     "contact_gate_offset_um",
     "bottom_endcap_um",
+    "top_endcap_um",
     "sd_implant_layer",
     "sd_implant_present",
     "sd_implant_margin_um",
@@ -694,6 +698,21 @@ def _mos_cap_tie(
     return gate_ext_um + contact_region_um, sd_cap_xy
 
 
+def _top_endcap_neck(
+    px0: float, px1: float, w_um: float, top_endcap_um: float
+) -> list[tuple[float, float, float, float]]:
+    """The gate stripe's top-edge endcap neck (issue #2936), or ``[]`` when
+    ``top_endcap_um`` is not positive.
+
+    A stripe-width poly box so the poly clears the diffusion's top edge
+    (``y == w_um``) by ``top_endcap_um`` across the *full* gate length. The
+    landing pad alone does not -- it is only ``contact_region_um`` wide,
+    narrower than the gate once ``l_um`` exceeds that."""
+    if top_endcap_um <= 0:
+        return []
+    return [(px0, w_um, px1, w_um + top_endcap_um)]
+
+
 def _mos_unit_layout(
     w_um: float,
     l_um: float,
@@ -705,6 +724,7 @@ def _mos_unit_layout(
     bottom_endcap_um: float = 0.0,
     sd_implant_margin_um: float = 0.0,
     mos_cap: bool = False,
+    top_endcap_um: float = 0.0,
 ) -> dict[str, Any]:
     """One MOS-like unit device: a diffusion strip crossed by ``fingers``
     poly gates, with a contact + local-metal pad in each source/drain
@@ -795,6 +815,10 @@ def _mos_unit_layout(
     ``bottom_endcap_um`` (:func:`_gate_bottom_endcap_um`) extends every gate
     stripe's *bottom* edge (``y == 0``) down past the diffusion, mirroring
     the endcap the *top* edge's own #461 landing pad already provides there;
+    ``top_endcap_um`` (:func:`_gate_top_endcap_um`, issue #2936) is the
+    top-edge counterpart: a stripe-width poly neck that many um past the
+    diffusion's top edge (``0.0`` -- no neck -- on every family but sky130;
+    the parallel/strapped shape already runs its stripes up into the comb);
     ``sd_implant_margin_um`` (:func:`_sd_implant_margin_um`) draws a
     ``"sd_implant"`` box -- present only when this margin is positive --
     covering the unit's own ``active`` box grown by that margin on every
@@ -913,6 +937,7 @@ def _mos_unit_layout(
         g_cy = pad_y0 + stem_um + contact_region_um / 2.0
         for px0, px1 in poly_positions:
             g_cx = (px0 + px1) / 2.0
+            boxes["poly"].extend(_top_endcap_neck(px0, px1, w_um, top_endcap_um))
             if clearance_um:
                 boxes["poly"].append((px0, w_um, px1, pad_y0))
             boxes["poly"].append(
@@ -1275,6 +1300,7 @@ def _mos_array_layout(
     mos_cap: bool = False,
     pitch_x_um: float = 0.0,
     pitch_y_um: float = 0.0,
+    top_endcap_um: float = 0.0,
 ) -> dict[str, Any]:
     """A ``rows`` x ``cols`` grid of :func:`_mos_unit_layout` unit devices,
     with ``dummy`` extra unit-device columns flanking each side.
@@ -1369,6 +1395,7 @@ def _mos_array_layout(
         bottom_endcap_um,
         sd_implant_margin_um,
         mos_cap,
+        top_endcap_um=top_endcap_um,
     )
     min_col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
     min_row_pitch = unit["bbox_height_um"] + MIN_SAME_LAYER_SPACING_UM
@@ -2404,6 +2431,7 @@ def _diff_pair_layout(
     contact_gate_offset_um: float = 0.0,
     bottom_endcap_um: float = 0.0,
     sd_implant_margin_um: float = 0.0,
+    top_endcap_um: float = 0.0,
 ) -> dict[str, Any]:
     """Two matched devices (``"A"``/``"B"``), each split into ``splits``
     unit sub-instances, interleaved in a true common-centroid cross-quad
@@ -2450,6 +2478,7 @@ def _diff_pair_layout(
         contact_gate_offset_um=contact_gate_offset_um,
         bottom_endcap_um=bottom_endcap_um,
         sd_implant_margin_um=sd_implant_margin_um,
+        top_endcap_um=top_endcap_um,
     )
     col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
     row_pitch = unit["bbox_height_um"] + row_spacing_um
@@ -2716,6 +2745,7 @@ def _esd_device_layout(
     contact_gate_offset_um: float = 0.0,
     bottom_endcap_um: float = 0.0,
     sd_implant_margin_um: float = 0.0,
+    top_endcap_um: float = 0.0,
 ) -> dict[str, Any]:
     """Grounded-gate multi-finger ESD MOS clamp (issue #569): a single
     :func:`_mos_unit_layout` unit device with ``fingers`` gate stripes across
@@ -2742,6 +2772,7 @@ def _esd_device_layout(
         contact_gate_offset_um=contact_gate_offset_um,
         bottom_endcap_um=bottom_endcap_um,
         sd_implant_margin_um=sd_implant_margin_um,
+        top_endcap_um=top_endcap_um,
     )
 
     ring = None
