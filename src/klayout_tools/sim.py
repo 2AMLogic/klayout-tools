@@ -76,6 +76,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import itertools
 import json
 import math
 import os
@@ -5283,21 +5284,22 @@ def _expand_corners(
             for variant_name, variant_sources in variants:
                 point_supply = {**supply_v, **variant_sources}
                 for temperature_c in temperatures:
-                    for param_row in param_rows:
-                        for option_row in option_rows:
-                            point = CornerPoint(
-                                process,
-                                point_supply,
-                                temperature_c,
-                                process_sections=process_sections,
-                                process_section_libs=process_section_libs,
-                                params=param_row,
-                                variant=variant_name,
-                                supply_waveforms=supply_waveforms,
-                                options=option_row,
-                            )
-                            if not _is_excluded(point, exclude_spec):
-                                points.append(point)
+                    for param_row, option_row in itertools.product(
+                        param_rows, option_rows
+                    ):
+                        point = CornerPoint(
+                            process,
+                            point_supply,
+                            temperature_c,
+                            process_sections=process_sections,
+                            process_section_libs=process_section_libs,
+                            params=param_row,
+                            options=option_row,
+                            variant=variant_name,
+                            supply_waveforms=supply_waveforms,
+                        )
+                        if not _is_excluded(point, exclude_spec):
+                            points.append(point)
     return points
 
 
@@ -6940,6 +6942,7 @@ def _refuse_xyce_nodeset(declared: bool) -> None:
             "options.nodeset is not supported for engine 'xyce': initial "
             "guesses are applied as ngspice `.nodeset` cards; use engine "
             "'ngspice' or omit options.nodeset"
+        )
 
 
 def _refuse_xyce_options_axis(corners_spec: dict[str, Any]) -> None:
