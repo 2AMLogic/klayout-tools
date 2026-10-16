@@ -1252,6 +1252,84 @@ def _validate_batch_pdk(request: dict[str, Any]) -> None:
         raise SimError(str(exc)) from exc
 
 
+#: ``SimError.code`` for an absolute host-path model library on the batch
+#: backend (issue #3296).
+BATCH_MODELS_LIB_HOST_PATH_CODE = "models_lib_host_path"
+
+
+def _host_path_lib_refs(request: dict[str, Any]) -> list[tuple[str, str]]:
+    """Every ``(where, ref)`` model-library ref in ``request`` that is an
+    absolute host path: ``models.lib`` and each ``corners.process[].sections[]``
+    object's ``lib``. A ref that names an environment variable (``$PDK_ROOT/...``)
+    is left alone -- the runner expands it against its own environment -- but a
+    ``~`` is expanded on *this* host, so ``~/...`` is a host path too."""
+    refs: list[tuple[str, str]] = []
+
+    def check(where: str, ref: Any) -> None:
+        if not isinstance(ref, str) or "$" in ref:
+            return
+        if os.path.isabs(os.path.expanduser(ref)):
+            refs.append((where, ref))
+
+    models = request.get("models")
+    if isinstance(models, dict):
+        check("models.lib", models.get("lib"))
+    corners = request.get("corners")
+    process = corners.get("process") if isinstance(corners, dict) else None
+    for i, entry in enumerate(process if isinstance(process, list) else []):
+        sections = entry.get("sections") if isinstance(entry, dict) else None
+        for j, section in enumerate(sections if isinstance(sections, list) else []):
+            if isinstance(section, dict):
+                check(f"corners.process[{i}].sections[{j}].lib", section.get("lib"))
+    return refs
+
+
+def _pdk_relative_form(ref: str) -> str | None:
+    """The ``{"pdk", "lib"}`` spelling of an absolute path laid out as
+    ``<root>/<variant>/libs.tech/...``, or ``None`` when the path does not sit
+    in a PDK variant directory."""
+    parts = os.path.expanduser(ref).split(os.sep)
+    if "libs.tech" not in parts:
+        return None
+    index = parts.index("libs.tech")
+    if index < 2 or not parts[index - 1]:
+        return None
+    return json.dumps({"pdk": parts[index - 1], "lib": "/".join(parts[index:])})
+
+
+def _validate_batch_models_lib(request: dict[str, Any]) -> None:
+    """Refuse an absolute host-path model library **before** any S3 write
+    (issue #3296).
+
+    The runner resolves ``models.lib`` on its own box, where this host's
+    ``/home/<user>/.volare/...`` does not exist, so the job would pay for an
+    instance launch and then fail with ``model library not found``. Not
+    refused: PDK-relative libs, ``$VAR`` forms (the runner expands them), and
+    any request with ``options.stage_model_inputs: true`` (the library ships
+    with the job).
+    """
+    from . import sim_staging
+    from .sim import SimError
+
+    if sim_staging.stage_model_inputs_requested(request):
+        return
+    refs = _host_path_lib_refs(request)
+    if not refs:
+        return
+    details = []
+    for where, ref in refs:
+        relative = _pdk_relative_form(ref)
+        hint = f" -- use {relative}" if relative else ""
+        details.append(f"{where}={ref!r}{hint}")
+    raise SimError(
+        "backend 'batch': an absolute host-path model library does not exist "
+        "on the runner (" + "; ".join(details) + "). Name the library PDK-relative "
+        '({"pdk": "<variant>", "lib": "<path under the variant dir>"}) or set '
+        "options.stage_model_inputs: true to ship it with the job",
+        code=BATCH_MODELS_LIB_HOST_PATH_CODE,
+    )
+
+
 def _resolve_batch_config(
     request: dict[str, Any],
     *,
@@ -1286,6 +1364,7 @@ def _resolve_batch_config(
     from .sim import SimError
 
     _validate_batch_pdk(request)
+    _validate_batch_models_lib(request)
     batch_spec = request.get("batch") or {}
     provision_script = _resolve_provision_script(batch_spec)
     fleet = _read_fleet_config(provision_script)
