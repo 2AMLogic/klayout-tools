@@ -3274,7 +3274,9 @@ def _add_components_parser(subparsers: argparse._SubParsersAction) -> None:
         help=(
             "conductor layer set as a path to a JSON file, or an inline JSON "
             'array of {"name": str, "layer": [layer, datatype]} objects '
-            '(e.g. \'[{"name": "m1", "layer": [68, 20]}]\'). Not '
+            '(e.g. \'[{"name": "m1", "layer": [68, 20]}]\'); an entry may '
+            'add "and"/"not": lists of [layer, datatype] pairs that keep only '
+            "the part of its layer overlapping / outside those layers. Not "
             "validated by argparse -- an empty/malformed value exits 1 with "
             "a clean error, per docs/cli/components.md's exit-code contract, "
             "rather than argparse's usage-error exit 2."
@@ -3289,7 +3291,8 @@ def _add_components_parser(subparsers: argparse._SubParsersAction) -> None:
             '"between": [conductor_name_a, conductor_name_b]} objects '
             '(e.g. \'[{"name": "mcon", "layer": [67, 44], "between": '
             '["li", "m1"]}]\'); each via joins the two named --conductors '
-            "entries only where its own shapes actually land on both. Omit "
+            "entries only where its own shapes actually land on both. Takes "
+            'the same optional "and"/"not" qualifiers as --conductors. Omit '
             "for a purely same-layer connectivity report."
         ),
     )
@@ -3654,6 +3657,19 @@ def _add_functional_verification_parser(
             "isolated build+test of the same <request>. Aborts with exit 1 "
             "if the request's own baseline run fails first -- see "
             "docs/cli/functional-verification.md, '--mutations'"
+        ),
+    )
+    functional_verification_parser.add_argument(
+        "-o",
+        "--outdir",
+        default=None,
+        help=(
+            "write run artifacts (results XML, logs, simulator build "
+            "directory, coverage, trace, mutants/) here instead of "
+            "`.klt/functional-verification/` next to the request file; "
+            "created if missing, relative paths resolve against the cwd. "
+            "Request-relative source paths still resolve against the "
+            "request's own directory"
         ),
     )
     _add_format_arg(functional_verification_parser)
@@ -4694,7 +4710,9 @@ def _add_stats_parser(subparsers: argparse._SubParsersAction) -> None:
             "(not instance-resolved); flattened_polygon_count/"
             "flattened_vertex_count are the instance-resolved counterparts, "
             "weighted by CellInstArray multiplicity like area_um2, matching "
-            "'klt layers --flattened'."
+            "'klt layers --flattened'. area_um2 is the raw sum of shape "
+            "areas (overlaps double-counted); merged_area_um2 is the "
+            "unioned area."
         ),
     )
     stats_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
@@ -4709,6 +4727,27 @@ def _add_stats_parser(subparsers: argparse._SubParsersAction) -> None:
         help=(
             "top cell to report on when the stream has more than one "
             "(required in that case; optional otherwise)"
+        ),
+    )
+    stats_parser.add_argument(
+        "--density-window",
+        type=float,
+        default=None,
+        metavar="UM",
+        help=(
+            "also report per-layer drawn-area fraction (merged geometry) over "
+            "square windows of this size in um tiled over the top-cell bbox; "
+            "edge windows are clipped and judged against their clipped area"
+        ),
+    )
+    stats_parser.add_argument(
+        "--window-layer",
+        action="append",
+        default=None,
+        metavar="L/D",
+        help=(
+            "restrict --density-window to this layer/datatype (repeatable); "
+            "default: every non-annotation layer with geometry"
         ),
     )
     _add_format_arg(stats_parser)

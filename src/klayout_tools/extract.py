@@ -516,6 +516,43 @@ def _parasitic_model_header_comment() -> str:
     return "\n".join(lines)
 
 
+def _fixed_value_capacitor_classes(
+    deck: Any,
+    device_counts: Mapping[str, int],
+    model_bindings: Mapping[str, Any] | None,
+) -> list[tuple[str, int]]:
+    """``(class, count)`` for every extracted MiM capacitor class that is
+    written as a fixed-value ``C`` card rather than a ``--pdk`` subcircuit
+    call (issue #3090): no ``--pdk`` at all, or a class with no curated
+    ``_CAPACITOR_MODEL_TABLE`` binding."""
+    bound = model_bindings or {}
+    return [
+        (capacitor.name, device_counts[capacitor.name])
+        for capacitor in deck.capacitors
+        if device_counts.get(capacitor.name, 0) > 0 and capacitor.name not in bound
+    ]
+
+
+def _fixed_value_capacitor_note(classes: Sequence[tuple[str, int]]) -> list[str]:
+    """The one-line statement (``warnings[]`` entry / ``--parasitics`` header
+    comment) that these capacitors are fixed values PDK corners cannot move,
+    as a zero- or one-element list (empty when ``classes`` is empty)."""
+    if not classes:
+        return []
+    total = sum(count for _, count in classes)
+    names = ", ".join(f"'{name}'" for name, _ in classes)
+    device_word = "capacitor" if total == 1 else "capacitors"
+    return [
+        f"{total} drawn {device_word} ({names}) written as a fixed-value "
+        "'C' card (the deck's nominal area+perimeter value) -- PDK process "
+        "corners (e.g. mimcap_ff/mimcap_ss) do not apply to it, so "
+        "schematic-vs-extracted deltas at non-typical corners include a "
+        "capacitor-corner term; pass --pdk to bind the PDK capacitor "
+        "subcircuit instead. See docs/cli/extract.md's 'SPICE model binding' "
+        "section."
+    ]
+
+
 #: Relative permittivity assumed for the `klt mom` cross-check
 #: (`--mom-net`, issue #798): SiO2's textbook value, the same
 #: ``background_permittivity`` `docs/cli/mom.md`'s own worked examples use.
@@ -2741,6 +2778,15 @@ def run_extract(
             "docs/cli/extract.md's 'Parasitic (RC) extraction' section."
         )
 
+    # Drawn MiM capacitors written as a fixed-value `C` card (issue #3090): the
+    # value is the deck's nominal area+perimeter law, so PDK process-corner
+    # sections cannot move it (a `--pdk`-bound `X` subckt call can). One
+    # aggregate line, plus the same fact in the `--parasitics` header below.
+    fixed_value_capacitor_note = _fixed_value_capacitor_note(
+        _fixed_value_capacitor_classes(deck, device_counts, model_bindings)
+    )
+    warnings.extend(fixed_value_capacitor_note)
+
     # `--pdk`-bound device classes whose target subcircuit has no parameter
     # for something the extractor measured (issue #695): today, only a
     # sky130 `pnp` bipolar binding, whose fixed-geometry `pnp_05v5_*` cells
@@ -3324,6 +3370,9 @@ def run_extract(
     netlist_description = f"extracted by klt extract --deck {deck_name}"
     if parasitics_report is not None:
         netlist_description += "\n" + _parasitic_model_header_comment()
+        netlist_description += "".join(
+            "\n* " + note for note in fixed_value_capacitor_note
+        )
     try:
         netlist.write(netlist_path, writer, netlist_description)
     except Exception as exc:
