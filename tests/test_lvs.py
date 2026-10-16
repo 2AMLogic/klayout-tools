@@ -41,6 +41,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import jsonschema
 import pytest
 
 from helpers.subprocess_fakes import fake_completed
@@ -24510,3 +24511,188 @@ def test_abstract_cells_reconstructed_request_and_rerun(tmp_path):
     assert result["status"] == "match", result["drift"]
     assert result["drift"] == []
     assert result["fresh"]["abstracted_cells"] == report["abstracted_cells"]
+
+
+# --------------------------------------------------------------------------- #
+# Shipped response schema (docs/schemas/lvs-response.schema.json)
+# --------------------------------------------------------------------------- #
+
+_LVS_SCHEMA = json.loads(
+    (
+        Path(__file__).resolve().parents[1]
+        / "docs"
+        / "schemas"
+        / "lvs-response.schema.json"
+    ).read_text()
+)
+
+#: Fields present in every non-error report, whatever the variant.
+_LVS_ALWAYS_REQUIRED = [
+    "schema_version",
+    "engine",
+    "layout",
+    "reference",
+    "top",
+    "reference_top",
+    "parameter_tolerance",
+    "options",
+    "hints_applied",
+    "status",
+    "power_connectivity",
+    "body_verification",
+    "device_parameter_coverage",
+    "mismatch_count",
+    "error_count",
+    "category_counts",
+    "category_error_counts",
+    "counts",
+    "device_classes",
+    "environment",
+    "provenance",
+    "mismatches",
+    "net_correspondence",
+]
+
+
+def _assert_lvs_report_conforms(report: dict) -> None:
+    jsonschema.validate(report, _LVS_SCHEMA, cls=jsonschema.Draft202012Validator)
+
+
+def _lvs_schema_request(tmp_path, ref_spice, engine=None, options=None):
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", ref_spice)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv"},
+    }
+    if engine:
+        request["engine"] = engine
+    if options:
+        request["options"] = options
+    return _write_request(tmp_path / "request.json", request)
+
+
+def test_lvs_response_schema_is_valid_and_pins_version():
+    jsonschema.Draft202012Validator.check_schema(_LVS_SCHEMA)
+    assert _LVS_SCHEMA["properties"]["schema_version"]["const"] == lvs.SCHEMA_VERSION
+    assert sorted(_LVS_SCHEMA["required"]) == sorted(_LVS_ALWAYS_REQUIRED)
+
+
+def test_lvs_response_schema_match_report(tmp_path):
+    report = run_lvs(_lvs_schema_request(tmp_path, _INVERTER_SPICE))
+    assert report["status"] == "match"
+    _assert_lvs_report_conforms(report)
+
+
+def test_lvs_response_schema_mismatch_report(tmp_path):
+    report = run_lvs(
+        _lvs_schema_request(tmp_path, _INVERTER_SPICE.replace("W=0.65U", "W=0.70U"))
+    )
+    assert report["status"] == "mismatch"
+    assert report["mismatches"]
+    _assert_lvs_report_conforms(report)
+
+
+def test_lvs_response_schema_inconclusive_report(tmp_path, monkeypatch):
+    import klayout.db as kdb
+
+    def _raise(self):
+        raise RuntimeError(_COMBINE_DEVICES_PARTIAL_MATCH_ERROR)
+
+    monkeypatch.setattr(kdb.Netlist, "combine_devices", _raise)
+    layout_path = _write(tmp_path / "layout.spice", _MULTIFINGER_LAYOUT_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+            "options": {"combine_devices": True},
+        },
+    )
+    report = run_lvs(path)
+    assert report["status"] == lvs.STATUS_INCONCLUSIVE
+    _assert_lvs_report_conforms(report)
+
+
+def test_lvs_response_schema_option_echo_variants(tmp_path):
+    """List-shaped `combine_devices` and object-shaped `power_connectivity`
+    echoes are covered by the options definition."""
+    path = _lvs_schema_request(
+        tmp_path,
+        _INVERTER_SPICE,
+        options={
+            "combine_devices": ["nfet"],
+            "parameter_tolerance": 0.01,
+            "power_connectivity": False,
+        },
+    )
+    report = run_lvs(path)
+    assert report["options"]["combine_devices"] == ["nfet"]
+    _assert_lvs_report_conforms(report)
+
+
+def test_lvs_response_schema_inline_extraction_report(tmp_path):
+    """`layout.file` + deck: populated `device_classes`, `deck` provenance and
+    `device_parameter_coverage`/`body_verification` from a real extraction."""
+    from klayout_tools.extract import run_extract
+
+    extracted_path = str(tmp_path / "extracted.spice")
+    run_extract(str(SKY130_INV), "sky130", output=extracted_path)
+    report = run_lvs(
+        _write_request(
+            tmp_path / "request.json",
+            {
+                "layout": {"file": str(SKY130_INV), "deck": "sky130"},
+                "reference": {
+                    "netlist": extracted_path,
+                    "top": "sky130_fd_sc_hd__inv_1",
+                },
+            },
+        )
+    )
+    assert report["device_classes"]
+    assert report["provenance"]["deck"]["name"] == "sky130"
+    assert report["provenance"]["input"]["role"] == "layout"
+    _assert_lvs_report_conforms(report)
+
+
+@_SKIP_NO_NETGEN
+def test_lvs_response_schema_netgen_reports(tmp_path):
+    for ref_spice in (_INVERTER_SPICE, _INVERTER_SPICE.replace("W=0.65U", "W=0.70U")):
+        report = run_lvs(_lvs_schema_request(tmp_path, ref_spice, engine="netgen"))
+        assert report["engine"] == "netgen"
+        _assert_lvs_report_conforms(report)
+
+
+def test_lvs_response_schema_accepts_additive_fields(tmp_path):
+    report = run_lvs(_lvs_schema_request(tmp_path, _INVERTER_SPICE))
+    extended = json.loads(json.dumps(report))
+    extended["future_top_level_field"] = {"anything": 1}
+    extended["options"]["future_option"] = True
+    extended["counts"]["nets"]["future"] = 0
+    _assert_lvs_report_conforms(extended)
+
+
+@pytest.mark.parametrize("field", _LVS_ALWAYS_REQUIRED)
+def test_lvs_response_schema_rejects_missing_required_field(tmp_path, field):
+    report = run_lvs(_lvs_schema_request(tmp_path, _INVERTER_SPICE))
+    broken = json.loads(json.dumps(report))
+    del broken[field]
+    with pytest.raises(jsonschema.ValidationError):
+        _assert_lvs_report_conforms(broken)
+
+
+def test_lvs_response_schema_rejects_wrong_schema_version_and_mismatch_entry(tmp_path):
+    report = run_lvs(
+        _lvs_schema_request(tmp_path, _INVERTER_SPICE.replace("W=0.65U", "W=0.70U"))
+    )
+    bad_version = json.loads(json.dumps(report))
+    bad_version["schema_version"] = 2
+    with pytest.raises(jsonschema.ValidationError):
+        _assert_lvs_report_conforms(bad_version)
+
+    bad_entry = json.loads(json.dumps(report))
+    del bad_entry["mismatches"][0]["category"]
+    with pytest.raises(jsonschema.ValidationError):
+        _assert_lvs_report_conforms(bad_entry)

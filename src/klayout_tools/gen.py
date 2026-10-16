@@ -1340,6 +1340,7 @@ def _mos_array_layout(
     pitch_y_um: float = 0.0,
     top_endcap_um: float = 0.0,
     share_sd: bool = False,
+    mirror: bool = False,
 ) -> dict[str, Any]:
     """A ``rows`` x ``cols`` grid of :func:`_mos_unit_layout` unit devices,
     with ``dummy`` extra unit-device columns flanking each side.
@@ -1435,7 +1436,14 @@ def _mos_array_layout(
     exclusive with ``pitch_x_um``/``interior_channel_um`` (both would pull
     the units apart again); :func:`gen_describe._validate_share_sd` rejects
     the rest with ``GenError``. ``dummy`` columns stay isolated at the normal
-    pitch. ``False`` (the default) is a strict no-op."""
+    pitch. ``False`` (the default) is a strict no-op.
+
+    ``mirror`` (issue #3552, Phase 3 of #3299) flips every odd real column
+    about its vertical axis. It moves no unit, so the pitch is unchanged, but
+    each such cell carries ``mirrored=True`` (S on the right, D on the left);
+    dummy columns stay unmirrored. Under ``share_sd`` the abutted pairs then
+    alternate D|D / S|S down the row. ``False`` (the default) is a strict
+    no-op."""
     unit = _mos_unit_layout(
         w_um,
         l_um,
@@ -1473,7 +1481,14 @@ def _mos_array_layout(
         else [(r, c) for r in range(rows) for c in range(cols)]
     )
     cells = [
-        {"idx": idx, "row": r, "col": c, "x0_um": c * col_pitch, "y0_um": r * row_pitch}
+        {
+            "idx": idx,
+            "row": r,
+            "col": c,
+            "x0_um": c * col_pitch,
+            "y0_um": r * row_pitch,
+            "mirrored": mirror and c % 2 == 1,
+        }
         for idx, (r, c) in enumerate(order)
     ]
 
@@ -1589,6 +1604,7 @@ def _mos_array_layout(
         "pitch_x_clamped": pitch_x_clamped,
         "pitch_y_clamped": pitch_y_clamped,
         "share_sd": share_sd,
+        "mirror": mirror,
         "cells": cells,
         "dummy_cells": dummy_cells,
         "well_box_um": well_box,

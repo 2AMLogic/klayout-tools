@@ -14,6 +14,16 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt signoff` regeneration claims for T1 items 1 and 2** (issue #2887):
+  an artifact-anchored `generic` attestation for item 1 or 2 may carry
+  `provenance.regeneration: {generator, regenerated_hash}`, the hash the
+  consumer's CI got by re-running the generator. `klt signoff` never runs
+  the generator. It checks that the hash equals the bound artifact's
+  re-hash. A mismatch renders the new reason `stale_artifact`, and a
+  malformed block renders `unanchored_evidence`. A matching claim is
+  disclosed as `citation.artifact_binding.regeneration` with
+  `executed_by_klt: false`, and text output adds a `regeneration:` line.
+  **Additive contract change**; `schema_version` is unchanged.
 - **`klt sim` declarative timed stimulus and resolved-backend provenance**
   (issue #2977): a request may declare `stimulus.signals[]` (per-signal
   event lists with level, optional transition time and skew). `klt sim`
@@ -31,6 +41,12 @@ not `klt --version`, if you need to detect this kind of drift. See
   fan-out-8 hierarchy previously expanded to ~2M devices and took ~29 s) and
   emits one `unsupported_hierarchy` warning naming the cap; devices reached
   before it are still linted. Additive; no `schema_version` bump.
+- **`klt drc`: new `violations[].check` kind `net_space`** (issue #3572): a
+  net-aware spacing check (`DrcRule.net_spec`, `NetSpaceSpec`) reporting only
+  facing edges of polygons on different nets. `sg13cmos5l` gains
+  `nwell.space.2` (`NW.b1`, 1.80 um between NWells of different nets) and
+  `NW.b1` leaves `coverage.unchecked_rules`. Additive; no `schema_version`
+  change. See `docs/cli/drc.md`.
 - **`klt lvs`: new `mismatches[].category` `device.series_fold_offset_absorbed`**
   (issue #3017): when `options.combine_devices` folds N>1 series primitives of
   a resistor class with a nonzero head term (`fixed_offset_ohm` +
@@ -181,6 +197,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   unchanged. `klt pex` forwards the `--critical-net-*` forms. Documented
   that the request document already accepts a list for exact names. See
   `docs/cli/extract.md`.
+- **`klt sim` `measurements[].on_unreached`** (issue #3108): opt-in
+  `"null"` grades a `.meas` card whose `WHEN`/`AT` target the completed
+  analysis never reached (ngspice `out of interval`) as the new measurement
+  status `not_reached` (`value: null`, `info` diagnostic
+  `measurement_not_reached`) instead of `error`/exit 4; such results are not
+  graded against `limits`, and a top-level `not_reached` count appears only
+  for requests that declare the field. Default (`"error"`) output is
+  byte-identical. Additive; no `schema_version` bump.
 - **`klt drc --deck sky130`: `nwell.9` and `coverage.unmodeled_rules`**
   (issue #3031): new rule `nwell.enclosed.hvi.1` (runset `nwell.9`, HVnwell
   must be enclosed by `hvi` 75/20; only `hvi` of the runset's

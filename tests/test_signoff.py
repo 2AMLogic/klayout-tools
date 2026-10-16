@@ -6347,6 +6347,252 @@ def test_anchored_binding_is_shown_in_text_output(tmp_path, capsys):
 
 
 # --------------------------------------------------------------------------- #
+# Regeneration claims on items 1 and 2 (issue #2887)
+# --------------------------------------------------------------------------- #
+
+_GENERATOR = "klt netlist schematic/ota.sch -o netlist/ota.spice"
+
+
+def _with_regeneration(envelope_path: str, block: object) -> str:
+    """Rewrite an anchored envelope with ``provenance.regeneration = block``."""
+    envelope = json.loads(Path(envelope_path).read_text())
+    envelope["provenance"]["regeneration"] = block
+    Path(envelope_path).write_text(json.dumps(envelope))
+    return envelope_path
+
+
+def _anchored_manifest(item_id: int, envelope_path: str, digest: str) -> dict:
+    return _manifest(
+        evidence={str(item_id): {"file": envelope_path, "content_hash": digest}}
+    )
+
+
+@pytest.mark.parametrize("item_id", [1, 2])
+def test_matching_regeneration_claim_is_met_and_disclosed(tmp_path, item_id):
+    envelope_path, digest = _anchored_generic(tmp_path, item_id)
+    _with_regeneration(
+        envelope_path, {"generator": _GENERATOR, "regenerated_hash": digest}
+    )
+
+    item = _item(
+        build_tier_report(_anchored_manifest(item_id, envelope_path, digest)), item_id
+    )
+
+    assert item["status"] == "met"
+    binding = item["citation"]["artifact_binding"]
+    assert binding["regeneration"] == {
+        "generator": _GENERATOR,
+        "regenerated_hash": digest,
+        "executed_by_klt": False,
+    }
+    assert binding["content_hash"] == digest
+
+
+@pytest.mark.parametrize("item_id", [1, 2])
+def test_mismatched_regeneration_claim_renders_stale_artifact(tmp_path, item_id):
+    """The attested bytes are intact (the pin and re-hash agree), but the
+    attester's own regeneration produced different bytes: the committed
+    artifact is out of date with its generator."""
+    envelope_path, digest = _anchored_generic(tmp_path, item_id)
+    _with_regeneration(
+        envelope_path,
+        {"generator": _GENERATOR, "regenerated_hash": "sha256:" + "0" * 64},
+    )
+
+    item = _item(
+        build_tier_report(_anchored_manifest(item_id, envelope_path, digest)), item_id
+    )
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "stale_artifact"
+    assert item["citation"] is None
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        "make netlist",
+        [],
+        {},
+        {"regenerated_hash": "sha256:" + "0" * 64},
+        {"generator": "", "regenerated_hash": "sha256:" + "0" * 64},
+        {"generator": 7, "regenerated_hash": "sha256:" + "0" * 64},
+        {"generator": _GENERATOR},
+        {"generator": _GENERATOR, "regenerated_hash": 12},
+        {"generator": _GENERATOR, "regenerated_hash": "sha256:3f1c..."},
+        {"generator": _GENERATOR, "regenerated_hash": "0" * 64},
+    ],
+    ids=[
+        "string-block",
+        "list-block",
+        "empty-block",
+        "no-generator",
+        "empty-generator",
+        "int-generator",
+        "no-hash",
+        "int-hash",
+        "placeholder-hash",
+        "unprefixed-hash",
+    ],
+)
+def test_malformed_regeneration_claim_renders_unanchored(tmp_path, block):
+    envelope_path, digest = _anchored_generic(tmp_path, 1)
+    _with_regeneration(envelope_path, block)
+
+    item = _item(build_tier_report(_anchored_manifest(1, envelope_path, digest)), 1)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "unanchored_evidence"
+
+
+@pytest.mark.parametrize("block", ["absent", None])
+def test_absent_regeneration_claim_is_unchanged(tmp_path, block):
+    envelope_path, digest = _anchored_generic(tmp_path, 2)
+    if block != "absent":
+        _with_regeneration(envelope_path, block)
+
+    item = _item(build_tier_report(_anchored_manifest(2, envelope_path, digest)), 2)
+
+    assert item["status"] == "met"
+    assert "regeneration" not in item["citation"]["artifact_binding"]
+
+
+@pytest.mark.parametrize("item_id", [9, 10])
+def test_regeneration_claim_is_not_graded_for_items_9_and_10(tmp_path, item_id):
+    """Items 9/10 bind inventories with no generator: the block is ignored,
+    neither refusing the row nor appearing in the disclosure."""
+    envelope_path, digest = _anchored_generic(tmp_path, item_id)
+    _with_regeneration(
+        envelope_path,
+        {"generator": _GENERATOR, "regenerated_hash": "sha256:" + "0" * 64},
+    )
+
+    item = _item(
+        build_tier_report(_anchored_manifest(item_id, envelope_path, digest)), item_id
+    )
+
+    assert item["status"] == "met"
+    assert "regeneration" not in item["citation"]["artifact_binding"]
+
+
+def test_regenerated_item_1_attestation_cited_elsewhere_is_unchanged(tmp_path):
+    """A regeneration claim unlocks nothing: cited for item 3 it is still
+    `wrong_kind`, for item 9 still `wrong_item`."""
+    envelope_path, digest = _anchored_generic(tmp_path, 1)
+    _with_regeneration(
+        envelope_path, {"generator": _GENERATOR, "regenerated_hash": digest}
+    )
+    evidence = {
+        key: {"file": envelope_path, "content_hash": digest} for key in ("3", "9")
+    }
+
+    result = build_tier_report(_manifest(evidence=evidence))
+
+    assert _item(result, 3)["reason"] == "wrong_kind"
+    assert _item(result, 9)["reason"] == "wrong_item"
+
+
+def test_bound_file_drift_wins_over_a_matching_regeneration_claim(tmp_path):
+    """Editing the committed artifact after attesting is `stale_evidence`
+    (#2718), checked before the regeneration claim."""
+    envelope_path, digest = _anchored_generic(tmp_path, 1)
+    _with_regeneration(
+        envelope_path, {"generator": _GENERATOR, "regenerated_hash": digest}
+    )
+    (tmp_path / "design-sources.txt").write_text("schematic/other.sch\n")
+
+    item = _item(build_tier_report(_anchored_manifest(1, envelope_path, digest)), 1)
+
+    assert item["reason"] == "stale_evidence"
+
+
+def test_regeneration_claim_on_a_repo_scoped_path(tmp_path):
+    """The `{path, scope: "repo"}` input form and `repo_root` grade the claim
+    exactly like a plain path; the disclosure echoes the path object."""
+    envelope_path, digest = _repo_scoped_anchored_generic(tmp_path, 1)
+    _with_regeneration(
+        envelope_path, {"generator": _GENERATOR, "regenerated_hash": digest}
+    )
+
+    item = _item(
+        build_tier_report(
+            _anchored_manifest(1, envelope_path, digest), repo_root=str(tmp_path)
+        ),
+        1,
+    )
+
+    assert item["status"] == "met"
+    binding = item["citation"]["artifact_binding"]
+    assert binding["path"] == {"path": "audited/design-sources.txt", "scope": "repo"}
+    assert binding["regeneration"]["executed_by_klt"] is False
+
+
+def test_check_reports_a_changed_regeneration_claim_as_drift(tmp_path):
+    envelope_path, digest = _anchored_generic(tmp_path, 1)
+    _with_regeneration(
+        envelope_path, {"generator": _GENERATOR, "regenerated_hash": digest}
+    )
+    manifest = _anchored_manifest(1, envelope_path, digest)
+    committed_path = _write(tmp_path, "committed.json", build_tier_report(manifest))
+    assert check_tier_report(committed_path, manifest)["status"] == "match"
+
+    _with_regeneration(
+        envelope_path,
+        {"generator": _GENERATOR, "regenerated_hash": "sha256:" + "1" * 64},
+    )
+    result = check_tier_report(committed_path, manifest)
+
+    assert result["status"] == "drifted"
+    assert any(entry["field"].endswith("reason") for entry in result["drift"])
+
+
+def test_generator_is_never_executed(tmp_path, monkeypatch):
+    """The generator string is echoed, never run: no subprocess is spawned
+    for a file-backed attestation that carries one."""
+    envelope_path, digest = _anchored_generic(tmp_path, 1)
+    _with_regeneration(
+        envelope_path, {"generator": "touch PWNED", "regenerated_hash": digest}
+    )
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("klt signoff must not execute the generator")
+
+    monkeypatch.setattr(signoff_module.subprocess, "run", refuse)
+    monkeypatch.setattr(signoff_module.subprocess, "Popen", refuse)
+
+    item = _item(build_tier_report(_anchored_manifest(1, envelope_path, digest)), 1)
+
+    assert item["status"] == "met"
+    assert not (tmp_path / "PWNED").exists()
+
+
+def test_regeneration_line_is_shown_in_text_output(tmp_path, capsys):
+    claimed_path, claimed_digest = _anchored_generic(tmp_path, 1)
+    _with_regeneration(
+        claimed_path, {"generator": _GENERATOR, "regenerated_hash": claimed_digest}
+    )
+    plain_path, plain_digest = _anchored_generic(tmp_path, 2)
+    manifest_path = _write(
+        tmp_path,
+        "manifest.json",
+        _manifest(
+            evidence={
+                "1": {"file": claimed_path, "content_hash": claimed_digest},
+                "2": {"file": plain_path, "content_hash": plain_digest},
+            }
+        ),
+    )
+
+    exit_code = main(["signoff", "--manifest", manifest_path, "--format", "text"])
+
+    out = capsys.readouterr().out
+    assert exit_code in (0, 3)
+    assert f"regeneration: {claimed_digest} matches the bound artifact" in out
+    assert "not run by klt" in out
+    assert "regeneration: not claimed" in out
+
+
+# --------------------------------------------------------------------------- #
 # Set-bound generic evidence: provenance.input.paths (issue #3044)
 # --------------------------------------------------------------------------- #
 
@@ -16234,3 +16480,39 @@ def test_require_annotation_complete_non_boolean_entry_is_invalid_evidence(tmp_p
     item = _grade_sta_item_5(tmp_path, envelope, require_annotation_complete="true")
     assert item["status"] == "unmet"
     assert item["reason"] == "invalid_evidence"
+
+
+# --------------------------------------------------------------------------- #
+# Regeneration claims on a set binding (issues #2887 and #3044)
+# --------------------------------------------------------------------------- #
+
+
+def _set_with_regeneration(tmp_path, regenerated_hash):
+    envelope_path, digest = _set_generic(tmp_path, 1)
+    _with_regeneration(
+        envelope_path, {"generator": _GENERATOR, "regenerated_hash": regenerated_hash}
+    )
+    return envelope_path, digest
+
+
+def test_regeneration_claim_on_a_set_binding_compares_the_combined_digest(tmp_path):
+    envelope_path, digest = _set_generic(tmp_path, 1)
+    _with_regeneration(
+        envelope_path, {"generator": _GENERATOR, "regenerated_hash": digest}
+    )
+
+    item = _grade_set(envelope_path, digest)
+
+    assert item["status"] == "met"
+    binding = item["citation"]["artifact_binding"]
+    assert binding["members"]
+    assert binding["regeneration"]["regenerated_hash"] == digest
+
+
+def test_mismatched_regeneration_claim_on_a_set_binding_is_stale_artifact(tmp_path):
+    envelope_path, digest = _set_with_regeneration(tmp_path, "sha256:" + "0" * 64)
+
+    item = _grade_set(envelope_path, digest)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "stale_artifact"

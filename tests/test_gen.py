@@ -2782,6 +2782,110 @@ def test_mos_array_share_sd_incompatible_combinations_rejected(
         )
 
 
+# `mirror` (issue #3552, Phase 3 of #3299): flip odd columns so facing
+# terminals alternate S|S / D|D. Named `mirror` as filed: `diff_pair`'s own
+# `params.mirror` lives in a different generator's param table, and the
+# docs/PCell param text distinguish the two.
+
+
+def test_mos_array_mirror_false_output_unchanged(tmp_path, pdk_root):
+    implicit = generate(_mos_array_share_request(tmp_path, pdk_root, "implicit"))
+    explicit = generate(
+        _mos_array_share_request(tmp_path, pdk_root, "explicit", mirror=False)
+    )
+    _assert_gds_geometry_equal(tmp_path / "implicit.gds", tmp_path / "explicit.gds")
+    assert implicit["ports"] == explicit["ports"]
+    assert "mirror" not in explicit["drc_hints"]
+
+
+def test_mos_array_mirror_flips_odd_column_ports(tmp_path, pdk_root):
+    base = generate(_mos_array_share_request(tmp_path, pdk_root, "base", dummy=0))
+    mirrored = generate(
+        _mos_array_share_request(tmp_path, pdk_root, "mirrored", mirror=True, dummy=0)
+    )
+    b = {p["name"]: p for p in base["ports"]}
+    m = {p["name"]: p for p in mirrored["ports"]}
+    for idx in (0, 2):
+        assert m[f"U{idx}_S"] == b[f"U{idx}_S"]
+        assert m[f"U{idx}_D"] == b[f"U{idx}_D"]
+    for idx in (1, 3):
+        assert m[f"U{idx}_S"]["x_um"] == pytest.approx(b[f"U{idx}_D"]["x_um"])
+        assert m[f"U{idx}_D"]["x_um"] == pytest.approx(b[f"U{idx}_S"]["x_um"])
+        assert m[f"U{idx}_S"]["direction_deg"] == 0
+        assert m[f"U{idx}_D"]["direction_deg"] == 180
+    sides = mirrored["drc_hints"]["mirror"]
+    assert sides["mirrored_columns"] == [1, 3]
+    assert sides["terminal_sides"]["U1"] == {"S": "right", "D": "left"}
+    assert sides["terminal_sides"]["U0"] == {"S": "left", "D": "right"}
+    assert mirrored["device_count"] == base["device_count"] == 4
+
+
+def test_mos_array_mirror_share_sd_nodes_and_extract(tmp_path, pdk_root):
+    output = tmp_path / "mirrored.gds"
+    report = generate(
+        _mos_array_share_request(
+            tmp_path, pdk_root, "mirrored", share_sd=True, mirror=True
+        )
+    )
+    nodes = report["drc_hints"]["shared_sd_nodes"]
+    assert [n["ports"] for n in nodes] == [
+        ["U0_D", "U1_D"],
+        ["U1_S", "U2_S"],
+        ["U2_D", "U3_D"],
+    ]
+    ports = {p["name"]: p for p in report["ports"]}
+    for node in nodes:
+        for name in node["ports"]:
+            assert ports[name]["x_um"] == pytest.approx(node["x_um"])
+    devices = run_extract(str(output), "sky130")["devices"]
+    assert len(devices) == 4
+    # Facing like terminals (D|D, S|S) still merge into one node each: 3 shared
+    # nodes (two terminals apiece) plus the 2 outer terminals.
+    uses = {}
+    for d in devices:
+        for n in (d["nets"]["s"], d["nets"]["d"]):
+            uses[n] = uses.get(n, 0) + 1
+    assert sorted(uses.values()) == [1, 1, 2, 2, 2]
+
+
+@pytest.mark.parametrize("share_sd", [False, True])
+@pytest.mark.parametrize("dummy", [0, 1])
+def test_mos_array_mirror_is_drc_clean(tmp_path, pdk_root, share_sd, dummy):
+    output = tmp_path / "mirrored.gds"
+    generate(
+        _mos_array_share_request(
+            tmp_path,
+            pdk_root,
+            "mirrored",
+            mirror=True,
+            share_sd=share_sd,
+            dummy=dummy,
+            rows=2,
+        )
+    )
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"topology": "common_centroid"},
+        {"fingers": 2},
+        {"mos_cap": True, "add_guard_ring": True},
+    ],
+)
+def test_mos_array_mirror_incompatible_combinations_rejected(
+    tmp_path, pdk_root, overrides
+):
+    with pytest.raises(GenError, match="mirror"):
+        generate(
+            _mos_array_share_request(
+                tmp_path, pdk_root, "bad", mirror=True, **overrides
+            )
+        )
+
+
 # --- res_array --------------------------------------------------------------- #
 
 
