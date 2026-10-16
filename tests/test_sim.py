@@ -13696,7 +13696,6 @@ def test_capture_only_non_tran_stays_error(tmp_path, monkeypatch):
     assert corner["status"] == "error"
 
 
-
 # --------------------------------------------------------------------------- #
 # environment.engine_build (issue #3095)
 # --------------------------------------------------------------------------- #
