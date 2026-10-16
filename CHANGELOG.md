@@ -47,6 +47,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   unchanged. `klt pex` forwards the `--critical-net-*` forms. Documented
   that the request document already accepts a list for exact names. See
   `docs/cli/extract.md`.
+- **`klt sim` `measurements[].on_unreached`** (issue #3108): opt-in
+  `"null"` grades a `.meas` card whose `WHEN`/`AT` target the completed
+  analysis never reached (ngspice `out of interval`) as the new measurement
+  status `not_reached` (`value: null`, `info` diagnostic
+  `measurement_not_reached`) instead of `error`/exit 4; such results are not
+  graded against `limits`, and a top-level `not_reached` count appears only
+  for requests that declare the field. Default (`"error"`) output is
+  byte-identical. Additive; no `schema_version` bump.
 - **`klt sim` `measurements[].cycle_mean`: a mean over whole reference
   cycles** (issue #2947): a fourth measurement form
   `{signal, align, level, cycles, edge?, from?}` (`tran` only) returns the
