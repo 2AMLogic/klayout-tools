@@ -3927,6 +3927,70 @@ def test_res_array_gf180_higher_sheet_rho_flavor_extracts_as_matching_class(
     assert report["device_counts"].get("ppolyf_u", 0) == 0
 
 
+@pytest.mark.parametrize("flavor", ("generic", "1k", "2k", "3k"))
+@pytest.mark.parametrize(
+    "extra", [{}, {"num": 4, "dummy": 1, "rows": 2}], ids=["single", "folded"]
+)
+def test_res_array_gf180_sab_clears_runset_sb_rules(
+    tmp_path, both_pdk_root, flavor, extra
+):
+    """Issue #3000: the PDK runset's `SB.4` (SAB to contact >= 0.15um) and
+    `SB.9`/`SB.10` (SAB runs >= 0.22um past the poly body's long edges while
+    poly runs past its ends) failed because the SAB reused the body-only
+    marker box. Checked on the drawn geometry, no runset needed."""
+    import klayout.db as kdb
+
+    output = tmp_path / f"res_array_gf180_sab_{flavor}.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {"flavor": flavor, **extra},
+            "options": {"output": str(output)},
+        }
+    )
+    sab = _layer_region(output, _GF180_RES_BLOCK_LAYER).merged()
+    contact = _layer_region(output, _GF180_CONTACT_LAYER)
+    poly = _layer_region(output, (30, 0)).merged()  # Poly2
+    dbu = _gds_dbu(output)
+    far = round(0.22 / dbu)
+    # SB.4 / SB.8: no contact within 0.15um of (or inside) the SAB.
+    assert sab.separation_check(contact, round(0.15 / dbu)).is_empty()
+    assert (sab & contact).is_empty()
+    # SB.9: the SAB runs >= 0.22um past the poly body's long edges.
+    for sab_poly in sab.each():
+        box = sab_poly.bbox()
+        body = poly & kdb.Region(kdb.Box(box.left, -(10**9), box.right, 10**9))
+        assert (body.sized(0, far) - sab).is_empty()
+    # SB.10: poly runs >= 0.22um past the SAB ends along the current flow.
+    leftover = (sab & poly).sized(far, 0, 2) - poly
+    assert leftover.is_empty(), leftover
+
+
+def test_res_array_gf180_sab_keeps_body_length_for_extraction(tmp_path, both_pdk_root):
+    """The lengthened end heads must not change the recognised body: SAB spans
+    the full `length_um` body, so the extracted resistor keeps its length."""
+    output = tmp_path / "res_array_gf180_sab_len.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {
+                "flavor": "1k",
+                "length_um": 4.0,
+                "width_um": 2.0,
+                "num": 1,
+                "dummy": 0,
+            },
+            "options": {"output": str(output)},
+        }
+    )
+    sab = _layer_region(output, _GF180_RES_BLOCK_LAYER)
+    assert sab.bbox().width() * _gds_dbu(output) == pytest.approx(4.0)
+    report = run_extract(str(output), "gf180mcu", deck_options={"poly_res": "1k"})
+    assert report["device_counts"].get("ppolyf_u_1k", 0) == 1
+
+
 @pytest.mark.parametrize(
     ("flavor", "device_class"),
     [("high", "res_high_po"), ("xhigh", "res_xhigh_po")],
@@ -10595,6 +10659,14 @@ def test_sky130_precision_res_rows_do_not_overlap(tmp_path, pdk_root):
     for p in pads:
         region.insert(p)
     assert region.merged().count() == len(pads)  # no pad merged into another
+
+
+def _gds_dbu(path):
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(path))
+    return layout.dbu
 
 
 def _layer_region(path, layer_pair):

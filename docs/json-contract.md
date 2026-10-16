@@ -1660,6 +1660,13 @@ so the "a report was emitted" rule below holds. See
 [`docs/cli/sim.md`](cli/sim.md) "Submitting a set of requests" and
 `docs/schemas/sim-set-report.schema.json`.
 
+`klt sim-merge` (issue #3045) emits a single `klt sim` report over the union of
+several per-request reports, plus an additive `merge` block; it defines the
+refusal exit codes `5`-`10` (a set that is not exactly the planned one; stdout carries a
+`status: "refused"` payload whose `refusal.code` names the class) alongside `klt sim`'s
+`3`/`4` verdicts. See [`docs/cli/sim.md`](cli/sim.md) "Merging per-request
+reports" and `docs/schemas/sim-merge-report.schema.json`.
+
 ## Exit codes
 
 | Exit code | Meaning                                                                                     |
