@@ -1190,6 +1190,8 @@ def test_stubbed_run_reports_the_full_contract_shape(tmp_path, monkeypatch):
         "engine_version": "13.0",
         "cocotb_version": "2.0.1",
         "results_xml": report["environment"]["results_xml"],
+        "test_log": report["environment"]["test_log"],
+        "build_log": report["environment"]["build_log"],
         # `_RESULTS_XML_WITH_FAILURE` carries the exact `random_seed` value
         # the spike captured live (section 4) -- this is the authoritative
         # echo, read back from `results.xml` itself.
@@ -1916,6 +1918,9 @@ def test_cli_pass_exits_zero_json(tmp_path, monkeypatch, capsys):
     out = json.loads(capsys.readouterr().out)
     assert out["status"] == "pass"
     assert out["skipped_count"] == 1
+    env = out["environment"]
+    assert os.path.basename(env["test_log"]) == "test_icarus.log"
+    assert os.path.basename(env["build_log"]) == "build_icarus.log"
 
 
 def test_cli_test_failure_exits_three(tmp_path, monkeypatch, capsys):
@@ -1946,6 +1951,8 @@ def test_cli_text_format(tmp_path, monkeypatch, capsys):
     assert "status: fail" in out
     assert "[failed] test_gcd_deliberately_wrong_expectation" in out
     assert "AssertionError" in out
+    assert "test_log: " in out
+    assert "test_log tail: " in out
     with pytest.raises(json.JSONDecodeError):
         json.loads(out)
 

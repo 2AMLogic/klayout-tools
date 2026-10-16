@@ -14,6 +14,14 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt lvs` refuses a bare pre-extracted `layout.netlist` carrying a
+  resistor `X` card** (issue #3078): a `klt extract` `X$n a b vsubs
+  <class> r=… L=… W=…` card naming a resistor class of `reference.deck`,
+  with no `layout.deck`, was read as an undefined subcircuit, so the layout
+  side had no resistor devices and a correct layout reported a plausible
+  `mismatch`. It now exits 1 with an error naming `layout.deck` as the fix;
+  the same request with `layout.deck` still matches, and netlists without
+  such cards (or without `reference.deck`) behave as before.
 - **`klt sim` batch: opt-in auto-split of a request that cannot fit the fleet's
   whole-job ceiling** (issue #3446): `batch.job_ceiling_check: "split"`,
   `batch.max_units_per_job` and `--max-units-per-job N` reroute a
@@ -23,6 +31,20 @@ not `klt --version`, if you need to detect this kind of drift. See
   ceiling cannot honor fails before any S3 write with
   `error.code: "batch_max_units_per_job_invalid"`. Default (`"warn"`) behavior
   is unchanged. Additive; no `schema_version` bump.
+- **`klt sim-merge` recombines per-request sim reports** (issue #3045): a
+  corner grid split across several `klt sim` requests (one per process
+  corner, say) is merged against a manifest of the planned requests. The
+  per-measurement rollup (`status`, `worst_case`), `coverage` (with
+  re-based `checked` ids), the `corner_count`/`passed`/`failed`/`errored`/
+  `inconclusive` counters, `metrics` and `status` are recomputed over the
+  union with `klt sim`'s own helpers, and per-report fields
+  (`environment.netlist_sha256`, `environment.remote`,
+  `provenance.input.content_hash`) become per-shard arrays. A missing,
+  duplicate, unexpected or mismatching report, or a changed request, is
+  refused with its own exit code (`5`-`10`, `status: "refused"` payload).
+  Additive: new verb, new `merge` block, no `schema_version` bump. See
+  `docs/cli/sim.md` "Merging per-request reports". Shard planning is not
+  included.
 - **ASAP7 DRC deck checks the four net-aware spacings `ACTIVE.S.2A`,
   `LIG.LISD.S.6`, `LIG.LISD.S.7` and `LIG.SDT.S.8`** (issue #3084): DRM Tables
   3.5.1 and 3.10.1 apply these only to shapes on different nets, so the deck
@@ -78,7 +100,13 @@ not `klt --version`, if you need to detect this kind of drift. See
   Decks without `reset` are byte-identical; a non-boolean value is refused by
   name. `docs/cli/sim.md` now also states that steps otherwise share circuit
   and solver state. Additive; no `schema_version` bump.
-
+- **sky130 `mos_array`/`diff_pair` gate pad and guard-ring well clear the
+  PDK's Magic `poly.4` / `diff/tap.10`** (issue #3115): the gate landing pad
+  is now stood 0.15µm off the diffusion (stem of exactly the gate length) and
+  the n-tap ring's nwell extends 0.2µm past the ring. Reported `U<i>_G` ports
+  (and `core_h_um`) on sky130 move up by 0.15µm; other families' geometry is
+  unchanged, though PCell property metadata changes the committed example
+  GDS bytes. See `docs/cli/gen.md`.
 - **`klt pex` no longer discards the schematic side on an extracted-side
   backend failure** (issue #2990): an extracted-side `klt sim` failure other
   than the pin-count mismatch (e.g. a batch-fleet capacity refusal) now
@@ -93,6 +121,13 @@ not `klt --version`, if you need to detect this kind of drift. See
   polygon, in integer database units. The deck grows from 232 to 234 rule
   categories (`--expect-rule-categories 234`); both ids leave the "Not
   implemented" list. Additive; no `schema_version` bump.
+- **ASAP7 deck: eight SRAMDRC-scoped MOL rules** (issue #3083): `klt drc
+  --engine klayout --deck-file asap7.drc` now checks `SRAM.SDT.W.4`,
+  `SRAM.SDT.ACTIVE.OV.3`, `SRAM.SDT.LISD.OV.4`, `SRAM.LISD.S.4`,
+  `SRAM.LISD.AUX.1`, `SRAM.LIG.GATE.A.4`, `SRAM.LIG.AUX.2` and
+  `SRAM.LIG.GATE.OV.2`, moving them out of the documented gaps. The deck
+  declares 246 rule categories (was 238); pass `--expect-rule-categories 246`.
+  Additive; no `schema_version` bump.
 - **`klt lvs` no longer folds one device class into another under
   `options.combine_devices`** (issue #3019): with two MiM classes stacked in
   parallel on one net pair, `layout.file` could report a wrong combined layout
@@ -209,6 +244,28 @@ not `klt --version`, if you need to detect this kind of drift. See
   An untapped NMOS or an anonymous-body PMOS in a `klt extract -o` netlist
   now reports `unverified` (and emits `device.body_unverified`), matching the
   inline-extraction verdict. Inline-extraction results are unchanged.
+
+- **sky130 two-adjacent-edges enclosure rules** (issue #3316): new
+  `DrcRule.check` kind `"enclosing_adjacent"` (a cut is flagged once when two
+  adjacent edges are both enclosed by less than the threshold, as in
+  `sky130A_mr.drc`) and four sky130 rules using it: `met1.enclosing_adjacent.via.1`
+  (`via.5a`), `met2.enclosing_adjacent.via.1` (`m2.5`),
+  `met2.enclosing_adjacent.via2.1` (`via2.5`), `met3.enclosing_adjacent.via3.1`
+  (`via3.5`). The sky130 deck grows from 136 to 140 rules (additive; the
+  deck hash changes).
+
+- **`klt yield-threshold`** (issue #2976): a new verb that fits the threshold
+  distribution of a binary-outcome decision circuit (comparator, latch, trip
+  point). From per-sample `(stimulus, outcome)` records it reports, per corner,
+  per-stimulus proportions with Clopper-Pearson intervals, the probit
+  maximum-likelihood threshold `mu`/`sigma` with profile-likelihood confidence
+  intervals, a chi-square goodness of fit, and (with `--target-error-rate`) the
+  stimulus at that error rate flagged `extrapolated` when the sample count
+  cannot resolve it. Degenerate data (one outcome, separation, fewer than two
+  stimulus levels) yields `null` estimates and a `fit.status`, never a faked
+  sigma. Pure Python, no native extension; log-space CDF is stable past 38
+  sigma. **Additive:** no existing payload changes.
+  See [`docs/cli/yield-threshold.md`](docs/cli/yield-threshold.md).
 
 - **Bipolar markers can be derived layer expressions** (issue #2860):
   `BipolarDevice.marker` now accepts a `LayerExpr`, a frozen AND/NOT tree

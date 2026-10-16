@@ -3870,6 +3870,67 @@ def test_run_pex_measure_command_produces_delta_rows(
     assert report["errored"] == 0
 
 
+_ENV_RECORDING_HARNESS = _MEASURE_HARNESS.replace(
+    "import json, os, sys\n",
+    "import json, os, sys\n"
+    "open(os.path.join(os.environ['KLT_PEX_ARTIFACTS_DIR'], 'env.json'), 'w')"
+    ".write(json.dumps({k: os.environ.get(k) for k in "
+    "('KLT_PEX_BACKEND', 'KLT_SIM_BACKEND')}))",
+    1,
+)
+
+
+def _recorded_backend_env(tmp_path, side: str) -> dict:
+    return json.loads((tmp_path / "art" / "measure" / side / "env.json").read_text())
+
+
+@pytest.mark.parametrize("inherited", [None, "local"])
+def test_run_pex_measure_command_exports_backend_flag(
+    tmp_path, resistor_layout, measure_reference, monkeypatch, inherited
+):
+    """Issue #2962: `--backend` reaches the child, and beats a pre-set
+    `$KLT_SIM_BACKEND`, so a child `klt sim` obeys it."""
+    if inherited is None:
+        monkeypatch.delenv("KLT_SIM_BACKEND", raising=False)
+    else:
+        monkeypatch.setenv("KLT_SIM_BACKEND", inherited)
+    run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        output=str(tmp_path / "res.spice"),
+        artifacts_dir=str(tmp_path / "art"),
+        measure_command=_write_harness(tmp_path, _ENV_RECORDING_HARNESS),
+        reference_netlist=measure_reference,
+        backend="batch",
+    )
+    for side in ("schematic", "extracted"):
+        assert _recorded_backend_env(tmp_path, side) == {
+            "KLT_PEX_BACKEND": "batch",
+            "KLT_SIM_BACKEND": "batch",
+        }
+
+
+def test_run_pex_measure_command_leaves_backend_env_alone_without_flag(
+    tmp_path, resistor_layout, measure_reference, monkeypatch
+):
+    monkeypatch.setenv("KLT_SIM_BACKEND", "batch")
+    monkeypatch.delenv("KLT_PEX_BACKEND", raising=False)
+    run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        output=str(tmp_path / "res.spice"),
+        artifacts_dir=str(tmp_path / "art"),
+        measure_command=_write_harness(tmp_path, _ENV_RECORDING_HARNESS),
+        reference_netlist=measure_reference,
+    )
+    assert _recorded_backend_env(tmp_path, "schematic") == {
+        "KLT_PEX_BACKEND": None,
+        "KLT_SIM_BACKEND": "batch",
+    }
+
+
 def test_run_pex_measure_command_keeps_extraction_disclosures(
     tmp_path, resistor_layout, measure_reference
 ):
