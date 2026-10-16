@@ -1041,6 +1041,9 @@ def test_stubbed_run_reports_the_full_contract_shape(tmp_path, monkeypatch):
         # Additive (issue #1002): `null` on any run without `options.sdf`,
         # so an unannotated verdict is never mistakable for an annotated one.
         "sdf": None,
+        # Additive (issue #2998): `null` on any run without
+        # `options.initial_state`.
+        "initial_state": None,
     }
     results_xml = report["environment"]["results_xml"]
     assert os.path.isabs(results_xml)
@@ -1151,6 +1154,93 @@ def test_stubbed_run_default_engine_and_timescale(tmp_path, monkeypatch):
     assert report["engine"] == "icarus"
     assert runner.build_kwargs["timescale"] == ("1ns", "1ps")
     assert runner.test_kwargs["timescale"] == ("1ns", "1ps")
+
+
+def test_stubbed_run_outdir_redirects_artifacts(tmp_path, monkeypatch):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+    outdir = tmp_path / "nested" / "run_a"
+
+    report = run_functional_verification(request_path, output_dir=str(outdir))
+
+    results_xml = Path(report["environment"]["results_xml"])
+    assert results_xml.parent == outdir.resolve()
+    assert results_xml.is_file()
+    assert not (tmp_path / ".klt").exists()
+
+
+def test_stubbed_run_two_outdirs_keep_both_result_sets(tmp_path, monkeypatch):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    first = run_functional_verification(request_path, output_dir=str(tmp_path / "a"))
+    second = run_functional_verification(request_path, output_dir=str(tmp_path / "b"))
+
+    assert first["environment"]["results_xml"] != second["environment"]["results_xml"]
+    assert os.path.isfile(first["environment"]["results_xml"])
+    assert os.path.isfile(second["environment"]["results_xml"])
+
+
+def test_stubbed_run_default_output_dir_unchanged(tmp_path, monkeypatch):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    report = run_functional_verification(request_path)
+
+    expected = tmp_path / ".klt" / "functional-verification" / "results_icarus.xml"
+    assert Path(report["environment"]["results_xml"]) == expected.resolve()
+
+
+def test_stubbed_run_relative_outdir_resolves_against_cwd(tmp_path, monkeypatch):
+    req_dir = tmp_path / "req"
+    req_dir.mkdir()
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    _setup_inputs(req_dir)
+    request_path = _write_request(req_dir / "request.json", _base_request())
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+    monkeypatch.chdir(cwd)
+
+    report = run_functional_verification(request_path, output_dir="out")
+
+    assert Path(report["environment"]["results_xml"]).parent == (cwd / "out").resolve()
+    assert not (req_dir / ".klt").exists()
+
+
+def test_stubbed_run_unwritable_outdir_is_a_clean_error(tmp_path, monkeypatch):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+    blocker = tmp_path / "blocker"
+    blocker.write_text("a file, not a directory", encoding="utf-8")
+
+    with pytest.raises(FunctionalVerificationError, match="could not create output"):
+        run_functional_verification(request_path, output_dir=str(blocker / "sub"))
+
+
+def test_cli_outdir_flag_is_threaded_through(tmp_path, monkeypatch, capsys):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+    outdir = tmp_path / "cli_out"
+
+    main(
+        [
+            "functional-verification",
+            request_path,
+            "--outdir",
+            str(outdir),
+            "--format",
+            "json",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    data = payload.get("data", payload)
+    assert Path(data["environment"]["results_xml"]).parent == outdir.resolve()
 
 
 def test_stubbed_run_passes_testcase_filter_through(tmp_path, monkeypatch):
