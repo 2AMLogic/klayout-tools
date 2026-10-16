@@ -299,6 +299,14 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "block to the end contact -- 0.0 keeps the generic margin",
             )
             self.param(
+                "res_poly_heads_only",
+                self.TypeBoolean,  # type: ignore[attr-defined]
+                "Draw poly_layer as only the two end heads (the resistive "
+                "body is the res_mark_layer segment alone, abutting them) -- "
+                "the IHP sg13g2 PCell convention (issue #2679)",
+                default=False,
+            )
+            self.param(
                 "mfg_grid_um",
                 self.TypeDouble,
                 "Manufacturing grid (um) every cut on contact_layer is "
@@ -332,6 +340,7 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.end_contact_w_um,
                 self.end_contact_h_um,
                 getattr(self, "res_contact_space_um"),  # noqa: B009
+                self.res_poly_heads_only,  # type: ignore[attr-defined]
             )
             unit_boxes = info["unit"]["boxes_um"]
             all_cells = info["cells"] + info["dummy_cells"]

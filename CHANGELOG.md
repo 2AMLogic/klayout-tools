@@ -14,12 +14,81 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sim` batch: opt-in auto-split of a request that cannot fit the fleet's
+  whole-job ceiling** (issue #3446): `batch.job_ceiling_check: "split"`,
+  `batch.max_units_per_job` and `--max-units-per-job N` reroute a
+  `remote.hosts: 1` request through the one-job-per-shard path as
+  `ceil(units / cap)` balanced jobs; `environment.remote.job_ceiling` gains
+  `split` and `effective_hosts` (only when a split mode is active). A cap the
+  ceiling cannot honor fails before any S3 write with
+  `error.code: "batch_max_units_per_job_invalid"`. Default (`"warn"`) behavior
+  is unchanged. Additive; no `schema_version` bump.
+- **ASAP7 DRC deck checks the four net-aware spacings `ACTIVE.S.2A`,
+  `LIG.LISD.S.6`, `LIG.LISD.S.7` and `LIG.SDT.S.8`** (issue #3084): DRM Tables
+  3.5.1 and 3.10.1 apply these only to shapes on different nets, so the deck
+  now builds a minimal conductor-connectivity model (transistor source/drain
+  ACTIVE split at the GATE, SDT, LISD, LIG, GATE, V0, M1-M9 and V1-V9) and
+  judges spacing on it; the substrate and WELL are not modelled. The deck
+  grows from 234 to 238 rule categories (`--expect-rule-categories 238`); the
+  four ids leave the "Not implemented" list. The pinned shipped-cell
+  regression needed no new deviation. Additive; no `schema_version` bump.
+- **`klt extract` / `klt pex`: glob and all-nets selectors for
+  `--critical-net` / `--parasitics-net`** (issue #2974): new repeatable
+  `--critical-net-pattern GLOB` and `--parasitics-net-pattern GLOB`
+  (request fields `critical_net_patterns` / `parasitics_net_patterns`),
+  `--critical-net-all` with `--critical-net-exclude GLOB`, and
+  `--strict-net-patterns`. Globs resolve against the extracted nets and
+  merge with exact names; a zero-match pattern is a distinct `warnings`
+  entry (an error under `--strict-net-patterns`). Additive fields
+  `parasitics.critical_net_patterns` / `critical_net_all` /
+  `critical_net_excludes` / `parasitics_net_patterns` appear only when
+  requested; `parasitics.critical_nets` / `parasitics_nets` then echo the
+  resolved names. No `schema_version` bump; output without the new flags is
+  unchanged. `klt pex` forwards the `--critical-net-*` forms. Documented
+  that the request document already accepts a list for exact names. See
+  `docs/cli/extract.md`.
+- **`klt sim` `measurements[].cycle_mean`: a mean over whole reference
+  cycles** (issue #2947): a fourth measurement form
+  `{signal, align, level, cycles, edge?, from?}` (`tran` only) returns the
+  time-weighted (trapezoidal) mean of `signal` between the first and
+  `cycles`-th-after reference edge at or after `from`, edges linearly
+  interpolated. `value` stays a scalar (so `limits`/`plausible_range`/Monte
+  Carlo/coverage apply); the window rides an additive `cycle_mean`
+  `{t_start, t_end, cycles_used}` sibling -- no `schema_version` bump. Reduced
+  inside the corner run, so `remote`/`batch` work with
+  `keep_artifacts: false`. Refused for `engine: "xyce"` and `analysis_steps[]`;
+  failures are `status: "error"` with a `measurement` diagnostic led by a
+  `[cycle_mean_*]` reason token. `.meas AVG ... TRIG/TARG` and `FROM=<meas>`
+  remain unsupported. See `docs/cli/sim.md`.
+- **`klt sim` `analysis_steps[].reset`** (issue #3103): `reset: true` starts a
+  step from a freshly parsed circuit (ngspice `reset`), so independent
+  configurations of one analysis share a request instead of one job each. The
+  deck re-emits `save all` and the corner's `supply_v` `alter`s after `reset`.
+  Decks without `reset` are byte-identical; a non-boolean value is refused by
+  name. `docs/cli/sim.md` now also states that steps otherwise share circuit
+  and solver state. Additive; no `schema_version` bump.
+
+- **`klt pex` no longer discards the schematic side on an extracted-side
+  backend failure** (issue #2990): an extracted-side `klt sim` failure other
+  than the pin-count mismatch (e.g. a batch-fleet capacity refusal) now
+  returns a normal response -- every `delta[]` row of that testbench is an
+  `error` row with the schematic value intact -- and names the failure in the
+  new additive top-level `backend_failure` field (`{testbench, side, message,
+  code}`, `null` otherwise). A schematic-side failure still aborts, but its
+  error envelope now carries `error.code` (e.g. `batch_no_capacity`).
 - **ASAP7 DRC deck checks `ACTIVE.W.2` and `SDT.W.3`** (issue #3085): the
   vertical-width-is-an-integer-multiple-of-27-nm rules (DRM Tables 3.5.1 /
   3.8.1) are now measured per local vertical width of each merged rectilinear
   polygon, in integer database units. The deck grows from 232 to 234 rule
   categories (`--expect-rule-categories 234`); both ids leave the "Not
   implemented" list. Additive; no `schema_version` bump.
+- **ASAP7 deck: eight SRAMDRC-scoped MOL rules** (issue #3083): `klt drc
+  --engine klayout --deck-file asap7.drc` now checks `SRAM.SDT.W.4`,
+  `SRAM.SDT.ACTIVE.OV.3`, `SRAM.SDT.LISD.OV.4`, `SRAM.LISD.S.4`,
+  `SRAM.LISD.AUX.1`, `SRAM.LIG.GATE.A.4`, `SRAM.LIG.AUX.2` and
+  `SRAM.LIG.GATE.OV.2`, moving them out of the documented gaps. The deck
+  declares 246 rule categories (was 238); pass `--expect-rule-categories 246`.
+  Additive; no `schema_version` bump.
 - **`klt lvs` no longer folds one device class into another under
   `options.combine_devices`** (issue #3019): with two MiM classes stacked in
   parallel on one net pair, `layout.file` could report a wrong combined layout
@@ -41,6 +110,17 @@ not `klt --version`, if you need to detect this kind of drift. See
   block is still non-`null` in both cases; `model_set` output is unchanged.
   Additive; no `schema_version` bump.
 
+- **`klt sim` gains a numeric design-parameter axis, `corners.params`**
+  (issue #3035): SPICE parameter names mapped to equal-length arrays of
+  numbers, zipped by index and expanded innermost (after temperature),
+  applied with `alterparam` + one `reset`. Additive: each parameter point's
+  corner report carries `params`, its `corner_id` gains `/params:<pairs>`
+  before any `/mc<N>` suffix, and `exclude[].params` selects rows; requests
+  without the axis keep byte-identical IDs, slugs and wire payloads.
+  `remote`/`batch` workers must be updated: a worker that does not echo the
+  dispatched `params` fails the request with `params_unsupported_worker`
+  instead of passing at the netlist defaults. `engine: "xyce"` and
+  `--op-lint` refuse the axis. See `docs/cli/sim.md` "Corner axes".
 - **`klt sim` surfaces ngspice's `Timestep too small` transient abort**
   (issue #2918): a new `timestep_too_small` diagnostic code (accepted by
   `options.fail_on_diagnostic`) with structured `time_s`/`timestep_s`/`node`
@@ -67,7 +147,22 @@ not `klt --version`, if you need to detect this kind of drift. See
   Verilog netlist as reset-covered or unreset (machine-readable reason code),
   with a waiver file (fail on an unwaived element and on a stale waiver).
   `options.initial_state` for `functional-verification` follows separately.
+- **sg13g2 poly resistors from PDK PCells** (issue #2679): `klt extract
+  --deck sg13g2` now recognises `rsil`/`rppd`/`rhigh` drawn the way IHP's own
+  PCells draw them (`polyres` 128/0 as the body, two abutting `GatPoly` 5/0
+  heads) via a new `ResistorDevice.topology="abutting_heads"` mode (default
+  `"overlap"` is unchanged). A body missing a head, or separated from one by
+  a gap, is not recognised. `klt gen res_array` on sg13g2 now draws the same
+  convention, and `klt erc --deck sg13g2`'s auto-detected device cuts agree
+  with extraction. `klt deck devices` gains an additive `topology` field on
+  `resistor` entries.
 
+- **`openroad` Docker wrapper no longer runs as root** (issue #3151):
+  `scripts/install-openroad-docker.sh` now writes a wrapper that passes
+  `--user "$(id -u):$(id -g)"` and `-e HOME="${TMPDIR:-/tmp}"` to `docker
+  run`, so files OpenROAD creates under `$PWD`/`$TMPDIR` are owned by the
+  caller instead of root on Linux. Hosts with an older wrapper should re-run
+  `scripts/install-openroad-docker.sh` to upgrade it in place.
 - **Docs: `monte_carlo.vary: "process"` negative control is scoped**
   (issue #2937): the sigma=0 guarantee holds for the reported
   `mismatch_seed` and for decks consuming `mc_mismatch_seed` directly, not
@@ -75,6 +170,50 @@ not `klt --version`, if you need to detect this kind of drift. See
   where the combined `.options seed` still varies per sample. Docs and the
   `_expand_monte_carlo` docstring now say so and name the working control
   (switch the deck's mismatch off). No seed derivation or JSON change.
+
+- **`klt netlist --backend batch` file selection and failure diagnostics**
+  (issue #3282): repeatable `--batch-include <glob>` / `--batch-exclude
+  <glob>` narrow the uploaded git-tracked set without narrowing
+  `--batch-root`. A failed job whose `stderr.log` holds no klt envelope now
+  adds `error.remote_stderr_tail`, `remote_exit_code`, `remote_state` and
+  `harness_log` to the error envelope (additive; `schema_version` unchanged).
+
+- **`options.initial_state` for `klt functional-verification`** (issue #2998,
+  part 2 of 2): a gate-level Icarus run can start every flop at `x`, or at a
+  seeded-random bit with one regression per seed
+  (`{"mode": "x" | "random", "seeds": [...], "netlist": "..."}`). The flop
+  list is derived from the netlist and cell models; effective seeds and the
+  per-seed runs are echoed in the new `environment.initial_state` field
+  (`null` otherwise) and each seeded test carries `initial_state_seed`.
+  Additive; no `schema_version` bump. Also fixes `klt reset-coverage` on the
+  real sky130 cell models, whose `input wire CLK` declarations hid every
+  asynchronous pin (every flop classified `no_async_pin`).
+
+- **`klt functional-verification` missing-cocotb error names the real
+  remedy** (issue #3102): the message now includes the failing interpreter
+  (`sys.executable`) and the tool-install route (`klayout-tools[functional-verification] @ <url>`
+  on the `uv tool install` / `pipx install` / `uvx --from` spec), and
+  qualifies `pip install cocotb`. **Additive contract change:** that error
+  carries `error.code == "missing_optional_dependency"`; no `schema_version`
+  bump.
+
+- **`klt lvs` `body_verification` no longer reports a false `"verified"`
+  for `layout.netlist` + `layout.deck`** (issue #3177): the body
+  determination compared device-class and substrate-net names
+  case-sensitively and matched only the raw `$<n>` anonymous-net spelling,
+  but a netlist read back from disk presents `NFET`/`VSUBS` and `\\$<n>`.
+  An untapped NMOS or an anonymous-body PMOS in a `klt extract -o` netlist
+  now reports `unverified` (and emits `device.body_unverified`), matching the
+  inline-extraction verdict. Inline-extraction results are unchanged.
+
+- **sky130 two-adjacent-edges enclosure rules** (issue #3316): new
+  `DrcRule.check` kind `"enclosing_adjacent"` (a cut is flagged once when two
+  adjacent edges are both enclosed by less than the threshold, as in
+  `sky130A_mr.drc`) and four sky130 rules using it: `met1.enclosing_adjacent.via.1`
+  (`via.5a`), `met2.enclosing_adjacent.via.1` (`m2.5`),
+  `met2.enclosing_adjacent.via2.1` (`via2.5`), `met3.enclosing_adjacent.via3.1`
+  (`via3.5`). The sky130 deck grows from 136 to 140 rules (additive; the
+  deck hash changes).
 - **Bipolar markers can be derived layer expressions** (issue #2860):
   `BipolarDevice.marker` now accepts a `LayerExpr`, a frozen AND/NOT tree
   of drawn layers that can nest, as well as a bare `(layer, datatype)`
