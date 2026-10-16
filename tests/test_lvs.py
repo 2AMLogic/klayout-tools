@@ -3297,6 +3297,100 @@ def test_body_verification_verified_when_every_body_resolves(tmp_path):
     }
 
 
+def _lvs_inv_via_written_netlist(tmp_path, rewrite=None):
+    """`klt lvs` on the sky130 `inv_1` cell in the two-step shape (issue #3177):
+    `klt extract -o` writes the layout netlist, which is then handed back as
+    `layout.netlist` + `layout.deck`. Returns `(two_step, inline)` reports."""
+    from klayout_tools.extract import run_extract
+
+    written = tmp_path / "layout.spice"
+    extracted = run_extract(str(SKY130_INV), "sky130", output=str(written))
+    if rewrite is not None:
+        written.write_text(rewrite(written.read_text()))
+    top = extracted["top"]
+    two_step = run_lvs(
+        _write_request(
+            tmp_path / "two_step.json",
+            {
+                "layout": {"netlist": str(written), "top": top, "deck": "sky130"},
+                "reference": {"netlist": str(written), "top": top},
+            },
+        )
+    )
+    inline = run_lvs(
+        _write_request(
+            tmp_path / "inline.json",
+            {
+                "layout": {"file": str(SKY130_INV), "deck": "sky130"},
+                "reference": {"netlist": str(written), "top": top},
+            },
+        )
+    )
+    return two_step, inline
+
+
+def test_body_verification_unverified_for_written_netlist_with_deck(tmp_path):
+    """Issue #3177: an untapped NMOS in a `klt extract -o` netlist, given as
+    `layout.netlist` + `layout.deck`, must not report `"verified"` -- the
+    read-back names are upper-cased (`NFET`/`VSUBS`), so the compare against
+    the deck's lower-case spelling has to be case-insensitive."""
+    two_step, inline = _lvs_inv_via_written_netlist(tmp_path)
+
+    body_verification = two_step["body_verification"]
+    assert body_verification["status"] == lvs.BODY_STATUS_UNVERIFIED
+    assert body_verification["device_classes"] == ["nfet"]
+    assert body_verification == inline["body_verification"]
+    assert any(
+        m["category"] == lvs.CATEGORY_DEVICE_BODY_UNVERIFIED
+        for m in two_step["mismatches"]
+    )
+
+
+def test_body_verification_unverified_for_written_netlist_anonymous_pmos_body(
+    tmp_path,
+):
+    """Issue #3177, PMOS arm: a PMOS body on an anonymous net, spelled the way
+    a written netlist round-trips it (`\\$<n>`), counts as unverified."""
+
+    def anonymous_pmos_body(text):
+        return text.replace(" VPB ", " \\$7 ").replace(" vpb ", " \\$7 ")
+
+    two_step, _ = _lvs_inv_via_written_netlist(tmp_path, anonymous_pmos_body)
+    body_verification = two_step["body_verification"]
+    assert body_verification["status"] == lvs.BODY_STATUS_UNVERIFIED
+    assert "pfet" in body_verification["device_classes"]
+
+
+def test_body_verification_verified_for_written_netlist_with_deck_no_false_positive(
+    tmp_path,
+):
+    """Issue #3177 negative control: the case-insensitive compare must not
+    flag bodies that resolve to a real net -- a hand-written netlist whose
+    NMOS body is on a named, non-substrate net stays `"verified"`."""
+    from klayout_tools.extract import run_extract
+
+    written = tmp_path / "layout.spice"
+    extracted = run_extract(str(SKY130_INV), "sky130", output=str(written))
+    text = written.read_text()
+    assert " vsubs " in text.lower()
+    tapped = re.sub(r"(?i)\bvsubs\b", "VNB", text)
+    written.write_text(tapped)
+    report = run_lvs(
+        _write_request(
+            tmp_path / "request.json",
+            {
+                "layout": {
+                    "netlist": str(written),
+                    "top": extracted["top"],
+                    "deck": "sky130",
+                },
+                "reference": {"netlist": str(written), "top": extracted["top"]},
+            },
+        )
+    )
+    assert report["body_verification"]["status"] == lvs.BODY_STATUS_VERIFIED
+
+
 def test_body_verification_unchecked_for_pre_extracted_layout_netlist(tmp_path):
     """Issue #1983: the pre-extracted `layout.netlist` form verifies nothing
     about the device bodies, and now says so -- `"unchecked"` with a reason,
@@ -5404,6 +5498,31 @@ XM2 Y A VPWR VPWR sky130_fd_pr__pfet_01v8 L=0.15u W=1.0u
     assert report["status"] == "match"
     assert report["mismatch_count"] == 0
     assert report["counts"]["devices"]["layout"] == 2
+    assert report["counts"]["devices"]["reference"] == 2
+
+
+def test_subckt_call_m_expansion_matches_multifinger_layout(tmp_path):
+    """Issue #3123: a schematic-flow sky130 `m=2 mult=2` MOS subckt call
+    (the reporter's card shape) converts to two parallel plain `M` cards
+    (`mult` is mismatch-only), which -- with `options.combine_devices` --
+    reconcile against a drawn 2-unit layout."""
+    layout_path = _write(tmp_path / "layout.spice", _MULTIFINGER_LAYOUT_SPICE)
+    reference_subckt_call = """
+.subckt inv A Y VPWR VGND
+XM1 Y A VGND VGND sky130_fd_pr__nfet_01v8 L=0.15u W=0.325u nf=1 mult=2 m=2
+XM2 Y A VPWR VPWR sky130_fd_pr__pfet_01v8 L=0.15u W=1.0u
+.ends
+"""
+    reference_path = _write(tmp_path / "ref.spice", reference_subckt_call)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv", "form": "subckt-call"},
+        "options": {"combine_devices": True},
+    }
+    report = run_lvs(json.dumps(request))
+
+    assert report["status"] == "match"
+    assert report["mismatch_count"] == 0
     assert report["counts"]["devices"]["reference"] == 2
 
 
@@ -8175,6 +8294,29 @@ def test_build_mismatches_circuit_and_subcircuit_and_device_class_topology():
     assert subcircuit_entry["instance"] == {"layout": None, "reference": "X1"}
     assert subcircuit_entry["circuit"] == {"layout": None, "reference": None}
     assert subcircuit_entry["subcircuit"] == {"layout": None, "reference": None}
+
+
+def test_build_mismatches_device_class_topology_names_each_class():
+    """Issue #2945: each class-level topology entry names its class in
+    `device.class` and `description`; a nameless stand-in degrades to null."""
+
+    class _Cls:
+        def __init__(self, name):
+            self.name = name
+
+    logger = _FakeLogger()
+    logger.device_class_mismatches.append((None, _Cls("res_a")))
+    logger.device_class_mismatches.append((None, _Cls("res_b")))
+    logger.device_class_mismatches.append((None, object()))
+
+    e_a, e_b, e_none = lvs._build_mismatches(logger)
+    assert e_a["device"] == {"layout": None, "reference": None, "class": "res_a"}
+    assert e_b["device"] == {"layout": None, "reference": None, "class": "res_b"}
+    assert e_a["description"].startswith("device class could not be mapped")
+    assert "'res_a'" in e_a["description"] and "'res_b'" in e_b["description"]
+    assert e_a["description"] != e_b["description"]
+    assert e_none["device"]["class"] is None
+    assert e_none["description"] == "device class could not be mapped to a counterpart"
 
 
 def test_build_mismatches_subcircuit_mismatch_names_circuit_instance_and_type():
@@ -11060,13 +11202,72 @@ def test_run_lvs_reference_device_map_malformed_object_entry_is_lvs_error(tmp_pa
 
 
 @pytest.mark.parametrize("param,value", [("m", "4"), ("mult", "2")])
-def test_normalize_multiplicity_gt_one_rejected(param, value):
-    # `nf` is no longer rejected on a MOS call (issue #1487 expands it
-    # instead -- see the `nf` expansion tests below); `m`/`mult` (a
-    # whole-device replication count) are still rejected.
+def test_normalize_resistor_multiplicity_gt_one_rejected_param(param, value):
+    # MOS `m` is expanded (issue #3123) and MOS `mult` ignored; the
+    # resistor/capacitor families still reject both.
     with pytest.raises(NormalizeError, match="multi-finger/multiplied"):
         normalize_reference_netlist(
-            f"XM1 d g s b nfet_03v3 L=0.5u W=1u {param}={value}\n", deck="gf180mcu"
+            f"XR1 r0 r1 sky130_fd_pr__res_generic_po l=1u w=1u {param}={value}\n",
+            deck="sky130",
+        )
+
+
+# --- MOS `m` native expansion (issue #3123) --------------------------------- #
+
+
+def test_normalize_mos_m_expands_to_parallel_cards():
+    out = normalize_reference_netlist(
+        "XM1 d g s b nfet_03v3 L=0.5u W=1u m=3\n", deck="gf180mcu"
+    )
+    assert out.strip().splitlines() == [
+        "M1_m0 d g s b nfet L=0.5U W=1U",
+        "M1_m1 d g s b nfet L=0.5U W=1U",
+        "M1_m2 d g s b nfet L=0.5U W=1U",
+    ]
+
+
+def test_normalize_mos_sky130_m_and_mult_ignores_mult():
+    # The reporter's card: `mult` is mismatch-only in the sky130 model
+    # subckt, so m=2 mult=2 is two devices, not four.
+    out = normalize_reference_netlist(
+        "X1 d g s b sky130_fd_pr__nfet_01v8 L=1.2 W=7.82 nf=1 mult=2 m=2\n",
+        deck="sky130",
+    )
+    lines = out.strip().splitlines()
+    assert len(lines) == 2
+    assert lines[0].startswith("X1_m0 ") or lines[0].startswith("M1_m0 ")
+    assert all("W=7.82U" in line for line in lines)
+
+
+def test_normalize_mos_nf_and_m_combine():
+    out = normalize_reference_netlist(
+        "XM1 d g s b nfet_03v3 L=0.5u W=3u nf=3 m=2\n", deck="gf180mcu"
+    )
+    lines = out.strip().splitlines()
+    assert [ln.split()[0] for ln in lines] == [
+        "M1_m0_f0",
+        "M1_m0_f1",
+        "M1_m0_f2",
+        "M1_m1_f0",
+        "M1_m1_f1",
+        "M1_m1_f2",
+    ]
+    # total width m*W = 6u over 6 cards
+    assert all("W=1U" in ln for ln in lines)
+
+
+@pytest.mark.parametrize("value", ["2.5", "0", "-1", "abc"])
+def test_normalize_mos_m_invalid_is_error(value):
+    with pytest.raises(NormalizeError, match="parameter 'm'|m="):
+        normalize_reference_netlist(
+            f"XM1 d g s b nfet_03v3 L=0.5u W=1u m={value}\n", deck="gf180mcu"
+        )
+
+
+def test_normalize_mos_mult_non_numeric_is_error():
+    with pytest.raises(NormalizeError, match="'mult' value 'abc' is not numeric"):
+        normalize_reference_netlist(
+            "XM1 d g s b nfet_03v3 L=0.5u W=1u mult=abc\n", deck="gf180mcu"
         )
 
 
@@ -11142,13 +11343,13 @@ def test_normalize_mos_nf_non_numeric_rejected():
         )
 
 
-def test_normalize_mos_nf_expands_but_mult_still_rejected():
-    # `nf` (finger folding) expands; `mult` (whole-device replication) is a
-    # different real-world knob and is still rejected on the same call.
-    with pytest.raises(NormalizeError, match="multi-finger/multiplied"):
-        normalize_reference_netlist(
-            "XM1 d g s b nfet_03v3 L=0.5u W=1u nf=2 mult=2\n", deck="gf180mcu"
-        )
+def test_normalize_mos_nf_expands_and_mult_is_ignored():
+    # `nf` (finger folding) expands; `mult` is mismatch-only (issue #3123)
+    # and does not change the device count.
+    out = normalize_reference_netlist(
+        "XM1 d g s b nfet_03v3 L=0.5u W=1u nf=2 mult=2\n", deck="gf180mcu"
+    )
+    assert len(out.strip().splitlines()) == 2
 
 
 def test_normalize_resistor_nf_still_rejected():
@@ -11872,6 +12073,9 @@ def test_build_device_binding_map_derived_fallback_shape():
         "tm9k",
         "tm11k",
         "tm30k",
+        # MiM densities (issue #3090) -- curated in `_CAPACITOR_MODEL_TABLE`.
+        "cap_mim_1f0_m4m5_noshield",
+        "cap_mim_1f5_m4m5_noshield",
         "cap_mim_2f0_m4m5_noshield",
     }
     assert set(build_device_binding_map("sky130")) == {

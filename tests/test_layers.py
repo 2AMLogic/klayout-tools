@@ -588,3 +588,54 @@ def test_cli_include_text_without_flattened_exits_one(tmp_path, capsys):
     assert main(["layers", str(path), "--include-text"]) == 1
     err = capsys.readouterr().err
     assert "--include-text requires --flattened" in err
+
+
+# --- --deck (issue #3092) ---------------------------------------------------
+
+
+def _deck_layer_gds(tmp_path):
+    from klayout_tools.decks import get_layer_names
+
+    (layer, datatype), name = next(iter(sorted(get_layer_names("sky130").items())))
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(layer, datatype)).insert(kdb.Box(0, 0, 10, 10))
+    top.shapes(layout.layer(999, 7)).insert(kdb.Box(0, 0, 10, 10))
+    path = tmp_path / "deck.gds"
+    layout.write(str(path))
+    return path, (layer, datatype), name
+
+
+def test_layers_deck_fills_names_and_pins_content_hash(tmp_path):
+    from klayout_tools.decks.history import deck_rules
+
+    path, pair, name = _deck_layer_gds(tmp_path)
+    report = layers_report(str(path), deck="sky130")
+
+    by_pair = {(e["layer"], e["datatype"]): e["name"] for e in report["layers"]}
+    assert by_pair[pair] == name
+    assert by_pair[(999, 7)] is None
+    assert report["deck"] == {
+        "name": "sky130",
+        "content_hash": deck_rules("sky130")["content_hash"],
+    }
+
+
+def test_layers_without_deck_is_unchanged(tmp_path):
+    path, pair, _ = _deck_layer_gds(tmp_path)
+    report = layers_report(str(path))
+    assert "deck" not in report
+    assert all(e["name"] is None for e in report["layers"])
+
+
+def test_cli_layers_deck_json_and_unknown_deck(tmp_path, capsys):
+    path, pair, name = _deck_layer_gds(tmp_path)
+    assert main(["layers", str(path), "--deck", "sky130", "--format", "json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["deck"]["name"] == "sky130"
+    assert name in [e["name"] for e in payload["layers"]]
+
+    assert main(["layers", str(path), "--deck", "nope", "--format", "json"]) == 1
+    err = json.loads(capsys.readouterr().err)
+    assert err["error"]["command"] == "layers"
+    assert "unknown deck 'nope'" in err["error"]["message"]
