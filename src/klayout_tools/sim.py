@@ -100,6 +100,7 @@ from . import (
     sim_injected,
     sim_mismatch_gate,
     sim_portable,
+    sim_passes,
     sim_steps,
     sim_transfer_meas,
 )
@@ -257,6 +258,9 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         # produced no plot, and a result whose inputs produced no value.
         "step_failed",
         "derived_input_unavailable",
+        # Multi-pass AC acquisition (`analysis.passes`, issue #3159): a pass
+        # whose AC analysis left no decodable rawfile.
+        "pass_failed",
         # Units that never ran (`_unrun_corner_report` and friends).
         "budget_exceeded",
         "orphaned",
@@ -1184,6 +1188,9 @@ def _resolve_analysis_and_measurements(
     analysis = request.get("analysis") or {}
     if "kind" not in analysis or "args" not in analysis:
         raise SimError("request.analysis requires 'kind' and 'args'")
+    # Issue #3159: `analysis.passes` (AC only) is validated and normalised
+    # here, before any engine launch; absent `passes` returns `analysis` as is.
+    analysis = sim_passes.resolve_analysis(analysis)
     measurements_spec = request.get("measurements", [])
     # Issue #2533: `spice` (a verbatim top-level `.meas` card) and `expr` (an
     # expression evaluated after the analysis, inside the generated
@@ -2724,6 +2731,13 @@ def _run_sim_corners(
     sim_steps.refuse_unsupported_options(
         analysis, want_waveforms=want_waveforms, plot_requested=plot_dir is not None
     )
+    sim_passes.refuse_unsupported(
+        analysis,
+        measurements_spec,
+        want_waveforms=want_waveforms,
+        plot_requested=plot_dir is not None,
+    )
+    sim_passes.refuse_xyce(analysis, engine)
 
     max_workers = max_workers if max_workers is not None else options.get("max_workers")
     if max_workers is not None:
@@ -2911,6 +2925,7 @@ def _run_sim_corners(
     # Issue #2482: the same pre-dispatch check for a step's own `alter`
     # overrides (plus a clash with the corner's own supply axis).
     sim_steps.validate_alter_targets(analysis, netlist_path, corner_points)
+    sim_passes.validate_alter_targets(analysis, netlist_path, corner_points)
 
     # Issue #2522: a `corners.process` bundle may name its own model library
     # per section. Resolved (and existence-checked) per host, from the refs
@@ -3008,6 +3023,8 @@ def _run_sim_corners(
     # Issue #2923: transfer metrics need the corner-local AC rawfile, which
     # off-host workers do not return yet -- refused before anything is staged.
     sim_transfer_meas.refuse_offhost_backend(measurements_spec, backend)
+    # Issue #3159: per-pass complex rawfiles are corner-local too.
+    sim_passes.refuse_offhost_backend(analysis, backend)
 
     # Two-pass fail-fast probe (issue #1694, opt-in via `fail_fast_probe`/
     # `options.fail_fast_probe`): run once per grid, before any real corner
@@ -7360,6 +7377,11 @@ def _run_corner(
     transfers = sim_transfer_meas.extract_corner_transfers(
         measurements_spec, corner_dir
     )
+    pass_results = (
+        sim_passes.extract_corner_passes(analysis, corner_dir)
+        if sim_passes.is_passes_analysis(analysis)
+        else None
+    )
     measurement_results, measurement_diagnostics, step_fields = (
         _corner_measurement_results(
             measurement_values,
@@ -7378,6 +7400,13 @@ def _run_corner(
         measurement_diagnostics, engine_aborted
     )
     diagnostics.extend(measurement_diagnostics)
+    pass_fields: dict[str, Any] = {}
+    if pass_results is not None:
+        pass_field, pass_diagnostics = sim_passes.corner_report(
+            pass_results, keep_artifacts=keep_artifacts
+        )
+        diagnostics.extend(pass_diagnostics)
+        pass_fields["passes"] = pass_field
 
     # Issue #3016: the engine ran (any exit status, including 0) yet left no
     # log text and not a single requested measurement has a value -- the
@@ -7541,6 +7570,9 @@ def _run_corner(
         # Additive/optional (issue #2482): `steps` -- per-step outcomes --
         # only for an `analysis_steps[]` request; empty for every other one.
         **step_fields,
+        # Additive/optional (issue #3159): per-pass status for an
+        # `analysis.passes` request; absent for every other one.
+        **pass_fields,
     }
     return corner, engine_version
 
@@ -8374,6 +8406,12 @@ def _corner_deck_control_lines(
         lines.extend(
             sim_steps.control_lines(analysis, measurements_spec, reset_prefix=prefix)
         )
+        lines.extend(["quit", ".endc"])
+        return lines
+    if sim_passes.is_passes_analysis(analysis):
+        # Issue #3159: one `alter`/`setplot new`/`ac`/`write` group per
+        # pass; the corner prefix above already set the corner up.
+        lines.extend(sim_passes.control_lines(analysis, corner_dir))
         lines.extend(["quit", ".endc"])
         return lines
     crossings_lines = sim_crossings.control_lines(measurements_spec, corner_dir)

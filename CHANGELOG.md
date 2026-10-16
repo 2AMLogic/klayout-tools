@@ -39,6 +39,13 @@ not `klt --version`, if you need to detect this kind of drift. See
   The aggregated report gains `environment.{backend,remote.fleet[]}` and
   `corner_runs[].job_id`/`error_code` (batch runs only). Additive; no
   `schema_version` bump.
+- **`klt sim` multi-pass AC acquisition** (issue #3159): an `ac` analysis may
+  declare `analysis.passes` (named passes, each stating its complete `alter`
+  set) to run several AC solves per corner and retain each pass's complex
+  result privately; corners gain an additive `passes` list and the
+  `pass_failed` diagnostic code. Local/local-parallel ngspice only; Xyce,
+  `remote`/`batch`, `measurements[]` and `options.waveforms` are refused.
+  Additive; no `schema_version` bump.
 - **`klt sim` batch: opt-in auto-split of a request that cannot fit the fleet's
   whole-job ceiling** (issue #3446): `batch.job_ceiling_check: "split"`,
   `batch.max_units_per_job` and `--max-units-per-job N` reroute a
