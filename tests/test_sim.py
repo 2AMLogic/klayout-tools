@@ -5960,6 +5960,10 @@ def _stripped_report(report: dict) -> dict:
     byte-exact-fixture caveat)."""
     clone = json.loads(json.dumps(report))
     clone["environment"].pop("engine_version", None)
+    # `environment.backend.source` (issue #2977) records how the backend was
+    # chosen (flag/request/default), which differs by design between runs
+    # that otherwise execute identically.
+    clone["environment"].pop("backend", None)
     # Issue #2970: legitimately differs between `local` and `local-parallel`.
     clone["environment"].pop("threads_per_worker", None)
     for corner in clone["corners"]:
@@ -13641,6 +13645,101 @@ def test_timeout_budget_hint_absent_when_well_inside_budget():
 
 
 # --------------------------------------------------------------------------- #
+# Issue #3041: engine_version pin / unsupported_analysis
+# --------------------------------------------------------------------------- #
+
+
+def _pin_request(tmp_path: Path, **extra) -> Path:
+    _write_body(tmp_path)
+    request = {
+        "netlist": "body.spice",
+        "analysis": {"kind": "tran", "args": "1n 1u"},
+        "measurements": [
+            {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"}
+        ],
+    }
+    request.update(extra)
+    return _write_request(tmp_path, request)
+
+
+def _fake_engine_probe(monkeypatch, banner: str) -> list[list[str]]:
+    """Stub subprocess.run: ``--version`` answers ``banner``; any simulation
+    call is recorded (and fails the test via the returned list)."""
+    sims: list[list[str]] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        if "--version" in cmd:
+            return fake_completed(banner)
+        sims.append(list(cmd))
+        raise AssertionError("no simulation may run")
+
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+    return sims
+
+
+def test_engine_version_unmet_fails_before_simulating(tmp_path, monkeypatch):
+    sims = _fake_engine_probe(monkeypatch, "** ngspice-42 : Circuit level\n")
+    request = _pin_request(tmp_path, engine_version="44")
+    with pytest.raises(
+        sim.SimError, match="requires ngspice 44; .*found ngspice 42"
+    ) as exc:
+        sim.run_sim(str(request), backend="local")
+    assert exc.value.code == "engine_version_unmet"
+    assert sims == []
+
+
+def test_engine_version_pin_unparseable_probe_fails_closed(tmp_path, monkeypatch):
+    _fake_engine_probe(monkeypatch, "no banner here\n")
+    request = _pin_request(tmp_path, engine_version="42")
+    with pytest.raises(sim.SimError, match="no ngspice version") as exc:
+        sim.run_sim(str(request), backend="local")
+    assert exc.value.code == "engine_version_unmet"
+
+
+def test_engine_version_pin_must_be_major_or_major_minor(tmp_path):
+    request = _pin_request(tmp_path, engine_version="v42")
+    with pytest.raises(sim.SimError, match="MAJOR") as exc:
+        sim.run_sim(str(request), backend="local")
+    assert exc.value.code is None
+
+
+def test_engine_version_pin_satisfied_by_major_and_by_major_minor():
+    sim._check_engine_version_pin((42,), "42", "ngspice", where="t")
+    sim._check_engine_version_pin((44, 2), "44.2", "ngspice", where="t")
+    sim._check_engine_version_pin((7,), "7.10.0", "xyce", where="t")
+    with pytest.raises(sim.SimError):
+        sim._check_engine_version_pin((44, 2), "44.1", "ngspice", where="t")
+
+
+def test_engine_version_unset_does_not_probe(tmp_path, monkeypatch):
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        calls.append(list(cmd))
+        if "-b" in cmd:
+            log_path = cmd[cmd.index("-o") + 1]
+            with open(log_path, "w", encoding="utf-8") as handle:
+                handle.write(_HOST_DEFAULT_LOG)
+        return fake_completed("** ngspice-42\n")
+
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+    sim.run_sim(str(_pin_request(tmp_path)), backend="local")
+    assert not any("--version" in c for c in calls)
+
+
+@pytest.mark.parametrize("kind", ["pss", "pnoise", "PAC"])
+def test_periodic_analysis_is_unsupported_analysis(tmp_path, monkeypatch, kind):
+    def must_not_run(*args, **kwargs):
+        raise AssertionError("no engine may run")
+
+    monkeypatch.setattr(sim.subprocess, "run", must_not_run)
+    request = _pin_request(tmp_path, analysis={"kind": kind, "args": "1e6"})
+    with pytest.raises(sim.SimError, match="not supported") as exc:
+        sim.run_sim(str(request), backend="local")
+    assert exc.value.code == "unsupported_analysis"
+
+
+# --------------------------------------------------------------------------- #
 # measurements[].optional / status "absent" (issue #2925)
 # --------------------------------------------------------------------------- #
 
@@ -14468,6 +14567,152 @@ def test_capture_only_non_tran_stays_error(tmp_path, monkeypatch):
         analysis={"kind": "ac", "args": "dec 10 1 1meg"},
     )
     assert corner["status"] == "error"
+
+
+# --- measurements[].on_unreached (issue #3108) -------------------------------
+
+_UNREACHED_LOG = (
+    "Error: measure  far  when(WHEN) : out of interval\n"
+    " .meas dc far when v(o)=5 failed!\n"
+    "Error: measure  also_far  find(AT) : out of interval\n"
+    " .meas dc also_far find v(o) at=9 failed!\n"
+    "good                =   1.5e-01\n"
+)
+
+
+def _unreached_report(tmp_path, monkeypatch, log_text, extra=None, names=("far",)):
+    _write_body(tmp_path)
+    measurements = [
+        {
+            "name": n,
+            "spice": f".meas dc {n} when v(o)=5",
+            **(extra if extra is not None else {}),
+        }
+        for n in names
+    ]
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "dc", "args": "V1 0 1 0.1"},
+            "measurements": measurements,
+        },
+    )
+    _stub_subprocess_run(monkeypatch, log_text=log_text)
+    return sim.run_sim(str(request))
+
+
+def test_on_unreached_null_grades_not_reached_not_error(tmp_path, monkeypatch):
+    report = _unreached_report(
+        tmp_path,
+        monkeypatch,
+        _UNREACHED_LOG,
+        extra={"on_unreached": "null"},
+        names=("far", "also_far", "good"),
+    )
+    (corner,) = report["corners"]
+    by_name = {m["name"]: m for m in corner["measurements"]}
+    assert by_name["far"]["status"] == "not_reached"
+    assert by_name["far"]["value"] is None and by_name["far"]["margin"] is None
+    assert by_name["also_far"]["status"] == "not_reached"
+    assert by_name["good"]["status"] == "pass"
+    assert corner["status"] == "pass"
+    codes = [(d["severity"], d["code"]) for d in corner["diagnostics"]]
+    assert ("info", "measurement_not_reached") in codes
+    assert not any(c == "measurement" for _, c in codes)
+    assert report["not_reached"] == 2
+    assert report["errored"] == 0
+    assert report["status"] != "error"
+
+
+def test_on_unreached_absent_is_unchanged_error(tmp_path, monkeypatch):
+    report = _unreached_report(tmp_path, monkeypatch, _UNREACHED_LOG)
+    (corner,) = report["corners"]
+    assert corner["measurements"][0]["status"] == "error"
+    assert corner["status"] == "error"
+    assert "not_reached" not in report
+    assert any(
+        d["message"].startswith("measurement 'far' produced no value")
+        for d in corner["diagnostics"]
+    )
+
+
+def test_on_unreached_error_value_is_unchanged_error(tmp_path, monkeypatch):
+    report = _unreached_report(
+        tmp_path, monkeypatch, _UNREACHED_LOG, extra={"on_unreached": "error"}
+    )
+    assert report["corners"][0]["measurements"][0]["status"] == "error"
+    assert report["status"] == "error"
+
+
+def test_on_unreached_null_still_errors_on_other_meas_reason(tmp_path, monkeypatch):
+    log = (
+        "Error: measure  far  when(WHEN) : Expressions like 0.5*1.62 are not "
+        "supported.\n .meas dc far when v(o)=5 failed!\n"
+    )
+    report = _unreached_report(
+        tmp_path, monkeypatch, log, extra={"on_unreached": "null"}
+    )
+    assert report["corners"][0]["measurements"][0]["status"] == "error"
+    assert report["status"] == "error"
+
+
+def test_on_unreached_null_still_errors_on_solver_error(tmp_path, monkeypatch):
+    log = (
+        "Error: Timestep too small; run aborted\n"
+        "doAnalyses: iteration limit reached\n" + _UNREACHED_LOG
+    )
+    report = _unreached_report(
+        tmp_path, monkeypatch, log, extra={"on_unreached": "null"}
+    )
+    corner = report["corners"][0]
+    assert any(d["severity"] == "error" for d in corner["diagnostics"])
+    assert corner["measurements"][0]["status"] == "error"
+    assert corner["status"] == "error"
+
+
+def test_on_unreached_limits_not_evaluated_and_not_claimed(tmp_path, monkeypatch):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "dc", "args": "V1 0 1 0.1"},
+            "measurements": [
+                {
+                    "name": "far",
+                    "spice": ".meas dc far when v(o)=5",
+                    "on_unreached": "null",
+                    "limits": {"min": 1.0},
+                },
+                {"name": "good", "spice": ".meas dc good max v(o)"},
+            ],
+        },
+    )
+    _stub_subprocess_run(monkeypatch, log_text=_UNREACHED_LOG)
+    report = sim.run_sim(str(request))
+    by_name = {m["name"]: m for m in report["measurements"]}
+    assert by_name["far"]["status"] == "not_reached"
+    assert by_name["good"]["status"] == "pass"
+    assert report["corners"][0]["status"] == "pass"
+    skipped = report["coverage"]["skipped"]
+    assert any(item["reason"] == "not_reached" for item in skipped)
+    assert report["status"] == "pass_partial"  # no full pass for an unmeasured bound
+
+
+@pytest.mark.parametrize(
+    "spec, fragment",
+    [
+        (
+            {"name": "a", "spice": ".meas dc a when v(o)=1", "on_unreached": "x"},
+            "must be one of",
+        ),
+        ({"name": "a", "expr": "v(o)", "on_unreached": "null"}, "without 'spice'"),
+    ],
+)
+def test_on_unreached_validation(tmp_path, spec, fragment):
+    with pytest.raises(sim.SimError, match=fragment):
+        sim._validate_measurement_forms([spec])
 
 
 # Issue #3520: pre-submit lint for a literal `AT=` that cannot resolve.

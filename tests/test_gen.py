@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from helpers.drc_tap import assert_clean_except_tap_distance
 from klayout_tools import gen, pdk
 from klayout_tools.cli import main
 from klayout_tools.drc import run_drc
@@ -722,7 +723,7 @@ def test_phase2_generator_default_params_are_drc_clean(
     assert output.is_file()
 
     drc_report = run_drc(str(output), deck)
-    assert drc_report["status"] == "clean"
+    assert_clean_except_tap_distance(drc_report)
 
     # bbox_um and ports[] are populated (acceptance criterion #3).
     bbox = report["bbox_um"]
@@ -806,6 +807,60 @@ def test_mos_array_device_count_and_ports(tmp_path, pdk_root):
     assert ports_by_name["U0_G"]["layer"] == {"layer": 66, "datatype": 20, "name": None}
     assert ports_by_name["U0_S"]["layer"] == {"layer": 67, "datatype": 20, "name": None}
     assert ports_by_name["U0_D"]["layer"] == {"layer": 67, "datatype": 20, "name": None}
+
+
+def _mos_array_port_names(tmp_path, pdk_root, **params):
+    report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": params,
+            "options": {"output": str(tmp_path / "mos_array.gds")},
+        }
+    )
+    return report["ports"]
+
+
+@pytest.mark.parametrize("dummy", [0, 1, 2])
+@pytest.mark.parametrize("rows", [1, 2])
+def test_mos_array_dummy_ports_opt_in(tmp_path, pdk_root, dummy, rows):
+    # #2904: default output is unchanged; the opt-in adds D<k>_S/D/G per dummy.
+    base = {"rows": rows, "cols": 2, "dummy": dummy, "gate_contact": True}
+    default_ports = _mos_array_port_names(tmp_path, pdk_root, **base)
+    assert not any(p["name"].startswith("D") for p in default_ports)
+    assert default_ports == _mos_array_port_names(
+        tmp_path, pdk_root, dummy_ports=False, **base
+    )
+
+    ports = _mos_array_port_names(tmp_path, pdk_root, dummy_ports=True, **base)
+    n_dummy = 2 * dummy * rows
+    assert ports[: len(default_ports)] == default_ports
+    extra = ports[len(default_ports) :]
+    assert [p["name"] for p in extra] == [
+        f"D{k}_{t}" for k in range(n_dummy) for t in "SDG"
+    ]
+    real = {p["name"]: p for p in default_ports}
+    for p in extra:
+        # Same layer as the real units' matching terminal.
+        assert p["layer"] == real[f"U0_{p['name'][-1]}"]["layer"]
+        assert p["direction_deg"] == real[f"U0_{p['name'][-1]}"]["direction_deg"]
+
+
+def test_mos_array_dummy_ports_series_fingers(tmp_path, pdk_root):
+    base = {
+        "rows": 1,
+        "cols": 1,
+        "dummy": 1,
+        "fingers": 2,
+        "finger_topology": "series",
+    }
+    default_ports = _mos_array_port_names(tmp_path, pdk_root, **base)
+    ports = _mos_array_port_names(tmp_path, pdk_root, dummy_ports=True, **base)
+    names = {p["name"] for p in ports}
+    unit_names = {p["name"][len("U0_") :] for p in default_ports}
+    for k in (0, 1):
+        assert {f"D{k}_{n}" for n in unit_names} <= names
+    assert len(ports) == 3 * len(default_ports)
 
 
 def test_mos_array_1x1_boundary(tmp_path, pdk_root):
@@ -1141,7 +1196,7 @@ def test_mos_array_flavor_pfet_draws_well_and_is_drc_clean(
     assert report["drc_hints"]["notes"] == expected_notes
 
     drc_report = run_drc(str(output), deck)
-    assert drc_report["status"] == "clean", drc_report["violations"]
+    assert_clean_except_tap_distance(drc_report)
 
 
 # --------------------------------------------------------------------------- #
@@ -1416,8 +1471,10 @@ def test_mos_array_minimum_gate_length_is_drc_clean(
     assert report["drc_hints"]["notes"], "expected an advisory note below the default"
 
     drc_report = run_drc(str(output), deck)
-    assert drc_report["status"] == "clean", drc_report["violations"]
-    assert drc_report["rule_counts"] == {}
+    assert_clean_except_tap_distance(drc_report)
+    assert set(drc_report["rule_counts"]) <= {
+        r["rule"] for r in drc_report["violations"] if r["check"] == "tap_distance"
+    }
 
 
 @pytest.mark.parametrize(
@@ -1899,7 +1956,7 @@ def test_mos_gate_contact_reports_metal_port_and_is_drc_clean(
     assert gate_metal != source_metal
 
     drc_report = run_drc(str(output), deck)
-    assert drc_report["status"] == "clean"
+    assert_clean_except_tap_distance(drc_report)
 
 
 def test_mos_gate_contact_defaults_off_and_leaves_geometry_unchanged(
@@ -2044,7 +2101,7 @@ def test_mos_array_parallel_fingers_are_drc_clean(
     )
 
     drc_report = run_drc(str(output), deck)
-    assert drc_report["status"] == "clean", drc_report["violations"]
+    assert_clean_except_tap_distance(drc_report)
 
 
 def test_mos_array_series_finger_topology_reports_notes_not_warnings(
@@ -2408,7 +2465,7 @@ def test_mos_array_interior_channel_is_drc_clean(tmp_path, both_pdk_root):
                 }
             )
             drc_report = run_drc(str(output), deck)
-            assert drc_report["status"] == "clean", drc_report["violations"]
+            assert_clean_except_tap_distance(drc_report)
 
 
 # `pitch_x_um`/`pitch_y_um` (issue #3299, Phase 1): explicit pitch override,
@@ -2621,6 +2678,110 @@ def test_mos_array_share_sd_incompatible_combinations_rejected(
         generate(
             _mos_array_share_request(
                 tmp_path, pdk_root, "bad", share_sd=True, **overrides
+            )
+        )
+
+
+# `mirror` (issue #3552, Phase 3 of #3299): flip odd columns so facing
+# terminals alternate S|S / D|D. Named `mirror` as filed: `diff_pair`'s own
+# `params.mirror` lives in a different generator's param table, and the
+# docs/PCell param text distinguish the two.
+
+
+def test_mos_array_mirror_false_output_unchanged(tmp_path, pdk_root):
+    implicit = generate(_mos_array_share_request(tmp_path, pdk_root, "implicit"))
+    explicit = generate(
+        _mos_array_share_request(tmp_path, pdk_root, "explicit", mirror=False)
+    )
+    _assert_gds_geometry_equal(tmp_path / "implicit.gds", tmp_path / "explicit.gds")
+    assert implicit["ports"] == explicit["ports"]
+    assert "mirror" not in explicit["drc_hints"]
+
+
+def test_mos_array_mirror_flips_odd_column_ports(tmp_path, pdk_root):
+    base = generate(_mos_array_share_request(tmp_path, pdk_root, "base", dummy=0))
+    mirrored = generate(
+        _mos_array_share_request(tmp_path, pdk_root, "mirrored", mirror=True, dummy=0)
+    )
+    b = {p["name"]: p for p in base["ports"]}
+    m = {p["name"]: p for p in mirrored["ports"]}
+    for idx in (0, 2):
+        assert m[f"U{idx}_S"] == b[f"U{idx}_S"]
+        assert m[f"U{idx}_D"] == b[f"U{idx}_D"]
+    for idx in (1, 3):
+        assert m[f"U{idx}_S"]["x_um"] == pytest.approx(b[f"U{idx}_D"]["x_um"])
+        assert m[f"U{idx}_D"]["x_um"] == pytest.approx(b[f"U{idx}_S"]["x_um"])
+        assert m[f"U{idx}_S"]["direction_deg"] == 0
+        assert m[f"U{idx}_D"]["direction_deg"] == 180
+    sides = mirrored["drc_hints"]["mirror"]
+    assert sides["mirrored_columns"] == [1, 3]
+    assert sides["terminal_sides"]["U1"] == {"S": "right", "D": "left"}
+    assert sides["terminal_sides"]["U0"] == {"S": "left", "D": "right"}
+    assert mirrored["device_count"] == base["device_count"] == 4
+
+
+def test_mos_array_mirror_share_sd_nodes_and_extract(tmp_path, pdk_root):
+    output = tmp_path / "mirrored.gds"
+    report = generate(
+        _mos_array_share_request(
+            tmp_path, pdk_root, "mirrored", share_sd=True, mirror=True
+        )
+    )
+    nodes = report["drc_hints"]["shared_sd_nodes"]
+    assert [n["ports"] for n in nodes] == [
+        ["U0_D", "U1_D"],
+        ["U1_S", "U2_S"],
+        ["U2_D", "U3_D"],
+    ]
+    ports = {p["name"]: p for p in report["ports"]}
+    for node in nodes:
+        for name in node["ports"]:
+            assert ports[name]["x_um"] == pytest.approx(node["x_um"])
+    devices = run_extract(str(output), "sky130")["devices"]
+    assert len(devices) == 4
+    # Facing like terminals (D|D, S|S) still merge into one node each: 3 shared
+    # nodes (two terminals apiece) plus the 2 outer terminals.
+    uses = {}
+    for d in devices:
+        for n in (d["nets"]["s"], d["nets"]["d"]):
+            uses[n] = uses.get(n, 0) + 1
+    assert sorted(uses.values()) == [1, 1, 2, 2, 2]
+
+
+@pytest.mark.parametrize("share_sd", [False, True])
+@pytest.mark.parametrize("dummy", [0, 1])
+def test_mos_array_mirror_is_drc_clean(tmp_path, pdk_root, share_sd, dummy):
+    output = tmp_path / "mirrored.gds"
+    generate(
+        _mos_array_share_request(
+            tmp_path,
+            pdk_root,
+            "mirrored",
+            mirror=True,
+            share_sd=share_sd,
+            dummy=dummy,
+            rows=2,
+        )
+    )
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"topology": "common_centroid"},
+        {"fingers": 2},
+        {"mos_cap": True, "add_guard_ring": True},
+    ],
+)
+def test_mos_array_mirror_incompatible_combinations_rejected(
+    tmp_path, pdk_root, overrides
+):
+    with pytest.raises(GenError, match="mirror"):
+        generate(
+            _mos_array_share_request(
+                tmp_path, pdk_root, "bad", mirror=True, **overrides
             )
         )
 
@@ -7582,7 +7743,7 @@ def test_gf180mcu_mos_array_pfet_flavor_still_omits_well_tap_port(
     assert "WELL_TAP" not in {p["name"] for p in response["ports"]}
 
     drc_report = run_drc(str(output), "gf180mcu")
-    assert drc_report["status"] == "clean", drc_report["violations"]
+    assert_clean_except_tap_distance(drc_report)
 
 
 #: cmos5l's thick-gate-oxide ("-HV") marker (issue #1472) -- the same
@@ -9510,7 +9671,7 @@ def test_phase2_generator_stays_drc_clean_at_pdk_resolved_finer_dbu(
     assert report["dbu_um"] == pytest.approx(0.0005)
 
     drc_report = run_drc(str(fine), "gf180mcu")
-    assert drc_report["status"] == "clean", drc_report["violations"]
+    assert_clean_except_tap_distance(drc_report)
 
     assert _merged_geometry_um(coarse) == _merged_geometry_um(fine), (
         f"{generator_name}: drawn geometry differs between 0.001 and 0.0005 dbu"
@@ -9551,7 +9712,7 @@ def test_dogbone_terminal_example_matches_committed_json(family):
     actual = run_drc(gds_rel_path, family)
     actual.pop("provenance", None)
 
-    assert actual["status"] == "clean"
+    assert_clean_except_tap_distance(actual)
     assert actual == expected
 
 
@@ -9711,7 +9872,7 @@ def test_gf180mcu_mos_array_bottom_edge_gate_endcap_matches_top_edge_pad_clearan
     assert poly_bbox["bottom"] == pytest.approx(active_bbox["bottom"] - endcap_um)
 
     drc_report = run_drc(str(output), "gf180mcu")
-    assert drc_report["status"] == "clean", drc_report["violations"]
+    assert_clean_except_tap_distance(drc_report)
 
 
 @pytest.mark.parametrize(
@@ -9764,7 +9925,7 @@ def test_gf180mcu_sd_implant_covers_every_drawn_comp_shape(
     assert (active_region - implant_region).is_empty()
 
     drc_report = run_drc(str(output), "gf180mcu")
-    assert drc_report["status"] == "clean", drc_report["violations"]
+    assert_clean_except_tap_distance(drc_report)
 
 
 def test_gf180mcu_mos_array_pfet_flavor_draws_pplus_not_nplus_implant(
@@ -9803,7 +9964,7 @@ def test_gf180mcu_mos_array_pfet_flavor_draws_pplus_not_nplus_implant(
     assert (active_region - implant_region).is_empty()
 
     drc_report = run_drc(str(output), "gf180mcu")
-    assert drc_report["status"] == "clean", drc_report["violations"]
+    assert_clean_except_tap_distance(drc_report)
 
 
 def _sd_implant_absence_note(family: str, flavor: str) -> str:

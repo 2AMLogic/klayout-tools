@@ -5856,7 +5856,9 @@ table row (35 blocks omitted, `reader_warning_count` 0). The remaining 3
 unannotated drivers are `clkload0/Y`, `clkload1/Y` and `clkload2/Y`: the
 unconnected outputs of CTS dummy-load cells. They drive no DEF net, so there is
 no wire for the SPEF to annotate; this is an inherent limit, not an extraction
-defect, and `annotation_complete` stays `false` for it.
+defect. Since issue #3662 `klt sta` reports such no-net drivers separately
+(`floating_driver_count`/`floating_driver_sample`) and no longer counts them
+against `annotation_complete` (see `docs/cli/sta.md`).
 
 **Port PIN name ≠ NET name (issue #3257).** For a DEF `- PortA + NET netA`
 record, the `*PORTS` list and the net's `*P` entry use the PIN name
@@ -5877,9 +5879,15 @@ supply nets (`VGND`/`VPWR` islands) that the DEF only declares in
 **Unlabelled `$N` nets (issue #3580).** The same omission applies to a
 unique-named, non-port net spelled `$<digits>` (an unlabelled layout net) that
 is absent from the DEF `NETS` section; OpenSTA rejects its `*D_NET` block
-(`STA-1650`) just the same. Labelled nets that are not in the DEF are kept.
-`warnings[]` lists the omitted names. Nothing changes without
-`--def-net-connections`.
+(`STA-1650`) just the same. `warnings[]` lists the omitted names. Nothing
+changes without `--def-net-connections`.
+
+**Sub-cell label nets (issue #3662).** With `--def-net-connections` the DEF is
+the authority on which nets the design has, so the omission is no longer
+limited to duplicate-named or `$N` nets: *every* net that is neither a declared
+port nor in the DEF `NETS` section is omitted. This covers labels found only
+below the top cell (`Z`, `ZN`, internal nodes of instanced standard cells),
+which OpenSTA otherwise discards with `STA-1650`.
 
 **Parasitic model (default, non-`--distributed-rc`).** The SPEF carries a
 single lumped capacitance per net, hung on the net's hub node, and no wire

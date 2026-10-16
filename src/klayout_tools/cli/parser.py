@@ -51,6 +51,7 @@ from . import (
     signoff_cmd,
     sim_cmd,
     sim_merge_cmd,
+    sim_plan_cmd,
     size_cmd,
     socket_check_cmd,
     sta_cmd,
@@ -63,6 +64,7 @@ from . import (
     wave_cmd,
     yield_campaign_cmd,
     yield_cmd,
+    yield_csv_cmd,
     yield_samples_cmd,
     yield_sensitivity_cmd,
     yield_threshold_cmd,
@@ -286,6 +288,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_sim_parser(subparsers)
 
     _add_sim_merge_parser(subparsers)
+    _add_sim_plan_parser(subparsers)
 
     _add_pex_parser(subparsers)
 
@@ -306,6 +309,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_yield_parser(subparsers)
 
     _add_yield_samples_parser(subparsers)
+    _add_yield_csv_parser(subparsers)
 
     _add_yield_campaign_parser(subparsers)
 
@@ -909,6 +913,35 @@ def _add_sim_merge_parser(subparsers: argparse._SubParsersAction) -> None:
     merge_parser.set_defaults(func=sim_merge_cmd.run)
 
 
+def _add_sim_plan_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``sim-plan`` verb (issue #3423).
+
+    The producer side of ``sim-merge``: splits one request by process corner
+    into shard requests plus the manifest ``sim-merge`` consumes. See
+    docs/cli/sim.md "Planning shards".
+    """
+    plan_parser = subparsers.add_parser(
+        "sim-plan",
+        help="split a klt sim request into per-process shards and a sim-merge manifest",
+        description=(
+            "Write one request per corners.process entry plus the shard "
+            "manifest for `klt sim-merge`, next to the source request. The "
+            "manifest's corner ids come from the same expansion `klt sim` "
+            "runs. Monte Carlo and deck-list requests are refused. See "
+            "docs/cli/sim.md 'Planning shards'."
+        ),
+    )
+    plan_parser.add_argument("request", help="klt sim request JSON to split")
+    plan_parser.add_argument(
+        "--axis",
+        choices=["process"],
+        default="process",
+        help="axis to shard by (default: process)",
+    )
+    _add_format_arg(plan_parser)
+    plan_parser.set_defaults(func=sim_plan_cmd.run)
+
+
 def _add_size_parser(subparsers: argparse._SubParsersAction) -> None:
     """Register the ``size`` verb for single-device gm/Id operating-point sizing.
 
@@ -1394,6 +1427,79 @@ def _add_yield_threshold_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(parser)
     parser.set_defaults(func=yield_threshold_cmd.run)
+
+
+def _add_yield_csv_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``yield-csv`` verb (issue #2931).
+
+    Derives a `klt yield` sample-set document from a long-format per-draw
+    Monte Carlo CSV (one row per draw) so a non-`klt sim` harness needs no
+    bespoke converter. Pure transformation; needs no native extension.
+    """
+    parser = subparsers.add_parser(
+        "yield-csv",
+        help="per-draw Monte Carlo CSV -> a `klt yield` sample-set document",
+        description=(
+            "Derive a `klt yield` sample-set document from a long-format "
+            "per-draw Monte Carlo CSV: one measurement per --group-by value, "
+            "samples from --value. Rows whose --status-col is not --pass-value, "
+            "and passing rows with an empty/non-numeric/non-finite value, count "
+            "as errored. The --format json output is the sample-set document "
+            "(plus a `derivation` block with the CSV path and SHA-256 hash); "
+            "redirect it to a file and pass that to `klt yield`. See "
+            "docs/cli/yield.md's 'Deriving a sample set from a per-draw CSV'."
+        ),
+    )
+    parser.add_argument("csv", help="path to the per-draw CSV (UTF-8, header row)")
+    parser.add_argument(
+        "--group-by",
+        dest="group_by",
+        required=True,
+        metavar="COL",
+        help="column whose distinct values each become one measurement",
+    )
+    parser.add_argument(
+        "--value", required=True, metavar="COL", help="column holding the draw's value"
+    )
+    parser.add_argument(
+        "--status-col",
+        dest="status_col",
+        default=None,
+        metavar="COL",
+        help="column holding the draw's status (requires --pass-value)",
+    )
+    parser.add_argument(
+        "--pass-value",
+        dest="pass_value",
+        default=None,
+        metavar="V",
+        help="status value marking a good draw; any other value counts errored",
+    )
+    parser.add_argument(
+        "--draw-col",
+        dest="draw_col",
+        default=None,
+        metavar="COL",
+        help="draw-index column; a repeated (group, draw) pair is rejected",
+    )
+    parser.add_argument(
+        "--unit", default=None, help="unit recorded on each measurement"
+    )
+    parser.add_argument(
+        "--min", type=float, default=None, help="limits.min per measurement"
+    )
+    parser.add_argument(
+        "--max", type=float, default=None, help="limits.max per measurement"
+    )
+    parser.add_argument(
+        "--target-yield",
+        dest="target_yield",
+        type=float,
+        default=None,
+        help="limits.target_yield per measurement",
+    )
+    _add_format_arg(parser)
+    parser.set_defaults(func=yield_csv_cmd.run)
 
 
 def _add_yield_campaign_parser(subparsers: argparse._SubParsersAction) -> None:

@@ -1298,8 +1298,9 @@ def _spef_warnings(
         more = len(skipped_nets) - 5
         out.append(
             f"--spef: omitted *D_NET blocks for {len(skipped_nets)} "
-            "duplicate-named or unlabelled ($N) net(s) with no DEF net "
-            f"(floating cell outputs / unrouted supplies): {shown}"
+            "net(s) the DEF does not know (duplicate-named, unlabelled ($N), "
+            "sub-cell label nets, floating cell outputs / unrouted supplies): "
+            f"{shown}"
             + (f", ... (+{more} more)" if more > 0 else "")
             + ". Such *D_NET blocks are rejected by OpenSTA "
             "(STA-1650) and attach to no driver."
