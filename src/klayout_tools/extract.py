@@ -204,6 +204,7 @@ from .extract_abstract import (
     lef_layer_probe_roles,
 )
 from .extract_abstract import _sanitize_instance_name as _sanitize_instance_name
+from .extract_netselect import NetSelectors
 
 # The RC-parasitics subsystem lives in its own module (issue #1572, following
 # the same split as `extract_abstract.py`/`extract_spef.py` above). This
@@ -972,6 +973,76 @@ def _substrate_spreading_block(
     return block
 
 
+def _build_net_selectors(
+    critical_net_patterns: Sequence[str] | None,
+    critical_net_all: bool,
+    critical_net_excludes: Sequence[str] | None,
+    parasitics_net_patterns: Sequence[str] | None,
+    strict_net_patterns: bool,
+    *,
+    parasitics: bool,
+) -> NetSelectors | None:
+    """Validate the pattern/all-nets selector flags (issue #2974); ``None``
+    when none was given, so every report stays byte-identical to before."""
+    if critical_net_excludes and not critical_net_all:
+        raise ExtractError("--critical-net-exclude requires --critical-net-all")
+    selecting = critical_net_patterns or critical_net_all or parasitics_net_patterns
+    if not selecting and not strict_net_patterns:
+        return None
+    if not selecting:
+        raise ExtractError(
+            "--strict-net-patterns requires --critical-net-pattern, "
+            "--critical-net-all or --parasitics-net-pattern"
+        )
+    if not parasitics:
+        raise ExtractError(
+            "--critical-net-pattern/--critical-net-all/--parasitics-net-pattern "
+            "require --parasitics"
+        )
+    return NetSelectors(
+        critical_patterns=tuple(critical_net_patterns or ()),
+        critical_all=critical_net_all,
+        critical_excludes=tuple(critical_net_excludes or ()),
+        parasitics_patterns=tuple(parasitics_net_patterns or ()),
+        strict=strict_net_patterns,
+        error=ExtractError,
+    )
+
+
+def _selects_critical(net_selectors: NetSelectors | None) -> bool:
+    return net_selectors is not None and net_selectors.has_critical
+
+
+def _adopt_resolved_net_selectors(
+    net_selectors: NetSelectors | None,
+    critical_nets_set: frozenset[str] | None,
+    parasitics_nets_set: frozenset[str] | None,
+    distributed_rc: bool,
+) -> tuple[frozenset[str] | None, frozenset[str] | None]:
+    """Take the net sets :class:`NetSelectors` resolved during extraction
+    (issue #2974); ``--distributed-rc`` needs the resolved set non-empty."""
+    if net_selectors is None:
+        return critical_nets_set, parasitics_nets_set
+    critical_nets_set = net_selectors.critical_nets or critical_nets_set
+    parasitics_nets_set = net_selectors.parasitics_nets or parasitics_nets_set
+    if distributed_rc and not critical_nets_set:
+        raise ExtractError(
+            "--distributed-rc requires --critical-net: the requested "
+            "--critical-net-pattern/--critical-net-all resolved to no net"
+        )
+    return critical_nets_set, parasitics_nets_set
+
+
+def _report_net_selectors(
+    net_selectors: NetSelectors | None,
+    parasitics_report: dict[str, Any],
+    warnings: list[str],
+) -> None:
+    if net_selectors is not None:
+        parasitics_report.update(net_selectors.echo())
+        warnings.extend(net_selectors.warnings)
+
+
 def _require_parasitics(flag: str, value: Any, parasitics: bool) -> None:
     """Reject ``flag`` when it was given without ``--parasitics``.
 
@@ -1221,6 +1292,11 @@ def run_extract(
     def_net_names: bool = False,
     critical_nets: Sequence[str] | None = None,
     parasitics_nets: Sequence[str] | None = None,
+    critical_net_patterns: Sequence[str] | None = None,
+    critical_net_all: bool = False,
+    critical_net_excludes: Sequence[str] | None = None,
+    parasitics_net_patterns: Sequence[str] | None = None,
+    strict_net_patterns: bool = False,
     parasitics_top_cell_only: bool = False,
     distributed_rc: bool = False,
     resistance_paths: Sequence[tuple[int, str, str]] | None = None,
@@ -1241,6 +1317,7 @@ def run_extract(
     substrate_spreading_net: str | None = None,
     hierarchical_cells: Sequence[str] = (),
     no_netlist: bool = False,
+    probes: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """Extract a schematic-equivalent netlist from the layout at ``path``.
 
@@ -1584,6 +1661,13 @@ def run_extract(
     ``mom_net`` above follows. ``None`` (the default) skips this entirely --
     byte-identical to before this feature existed, and the block is then
     ``null``.
+
+    ``probes`` (``klt extract --probe``, issue #2986) is a sequence of
+    ``{"name", "layer", "x", "y"}`` point queries (``x``/``y`` in um, the top
+    cell's frame; ``layer`` one of the deck's label roles ``well``/``poly``/
+    ``metal<i>``) answered on this run's own extraction -- no second pass --
+    into the response's ``probes`` array. An unknown role is an
+    :class:`ExtractError`; a point on no extracted net is ``found: false``.
 
     ``def_net_names`` (``klt extract --def-net-names``, issue #951, Epic #700
     Phase 3) names each routed net from the **DEF net name** KLayout's LEF/DEF
@@ -1953,6 +2037,17 @@ def run_extract(
             # caller's own role -> [layer, datatype] (or `null`) mapping
             # otherwise -- issue #2656.
             "label_layers": {<role>: [int, int] | None, ...} | None,
+            # `--probe` point-to-net results, request order, `[]` when none
+            # was given -- issue #2986.
+            "probes": [
+                {
+                    "name": str, "layer": str, "x_um": float, "y_um": float,
+                    "found": bool,
+                    "net": str | None,  # a `nets[].name`
+                    "cluster_id": int | None,  # that net's `nets[].net_id`
+                },
+                ...
+            ],
             "pdk": {
                 "variant": str,
                 # {path, scope} (issue #1376), never a raw path -- see
@@ -2571,7 +2666,19 @@ def run_extract(
     # that flag's own net set as the "which nets get the ladder" scope
     # rather than inventing a second net classification mechanism -- with
     # nothing named there is nothing to scope this onto.
-    if distributed_rc and not critical_nets_set:
+    net_selectors = _build_net_selectors(
+        critical_net_patterns,
+        critical_net_all,
+        critical_net_excludes,
+        parasitics_net_patterns,
+        strict_net_patterns,
+        parasitics=parasitics,
+    )
+    if (
+        distributed_rc
+        and not critical_nets_set
+        and not _selects_critical(net_selectors)
+    ):
         raise ExtractError("--distributed-rc requires --critical-net")
 
     # `--resistance-path` (issue #2765): validated up front, in a helper so
@@ -2660,6 +2767,7 @@ def run_extract(
     hierarchy_placements: dict[int, Any] = {}
     subcircuit_info: dict[str, Any] = {}
     missing_flavour_markers: list[dict[str, Any]] = []
+    probe_results: list[dict[str, Any]] = []
 
     (
         netlist,
@@ -2696,6 +2804,7 @@ def run_extract(
         def_net_names=def_net_names,
         critical_nets=critical_nets_set,
         parasitics_nets=parasitics_nets_set,
+        net_selectors=net_selectors,
         parasitics_top_cell_only=parasitics_top_cell_only,
         def_pins=def_pins,
         pin_source_cells=pin_source_cells,
@@ -2713,6 +2822,14 @@ def run_extract(
         # `--pdk-root` resolved one above.
         pdk_info=pdk_info,
         missing_flavour_markers=missing_flavour_markers,
+        probes=probes,
+        probe_results=probe_results,
+    )
+
+    # `--critical-net-pattern`/`--parasitics-net-pattern` (issue #2974): the
+    # selectors were resolved against the extracted nets inside the call above.
+    critical_nets_set, parasitics_nets_set = _adopt_resolved_net_selectors(
+        net_selectors, critical_nets_set, parasitics_nets_set, distributed_rc
     )
 
     # `--subcircuit` (issue #2245), layout-dependent half: both rejections
@@ -3198,7 +3315,9 @@ def run_extract(
         # `warnings` instead, mirroring `--pins`' "declared name matched no
         # promoted net" convention.
         parasitics_report["critical_nets"] = (
-            list(critical_nets) if critical_nets else []
+            sorted(critical_nets_set or ())
+            if _selects_critical(net_selectors)
+            else (list(critical_nets) if critical_nets else [])
         )
         # Additive field (issue #1700): echoes the `--parasitics-net` request
         # back verbatim (as given, not sorted/deduplicated) -- `[]` when the
@@ -3206,8 +3325,13 @@ def run_extract(
         # `parasitics.nets[]` would be indistinguishable from a layout whose
         # other nets genuinely had no ground-eligible geometry.
         parasitics_report["parasitics_nets"] = (
-            list(parasitics_nets) if parasitics_nets else []
+            sorted(parasitics_nets_set or ())
+            if net_selectors is not None and net_selectors.parasitics_patterns
+            else (list(parasitics_nets) if parasitics_nets else [])
         )
+        # Additive fields (issue #2974): the requested selectors, present
+        # only when one was given, plus their zero-match warnings.
+        _report_net_selectors(net_selectors, parasitics_report, warnings)
         if variants is not None:
             # Additive field (issue #3056): present only when
             # `--parasitic-variant` was given, so every other report is
@@ -3604,6 +3728,11 @@ def run_extract(
         # report replays the same purposes instead of drifting on every net
         # name at once. See run_extract's `label_layers` docstring paragraph.
         "label_layers": _describe_label_layers(label_layers),
+        # Additive field (issue #2986): one entry per `--probe`, in request
+        # order; always present, `[]` when none was given. `net`/`cluster_id`
+        # are the final `nets[].name`/`nets[].net_id` of the net under the
+        # point, both `null` when `found` is false. See `_evaluate_probes`.
+        "probes": probe_results,
     }
     if pdk_info is not None:
         result["pdk"] = {
@@ -4110,9 +4239,35 @@ def check_extract_report(report_path: str) -> dict[str, Any]:
 # etc.) -- the bookkeeping spelling issue #1559's field-class table
 # (`docs/cli/extract.md`) documents as not a stable contract across builds.
 _ANONYMOUS_NET_NAME_RE = re.compile(r"^\\\$\d+$")
+# The unanchored-at-the-end form of the above: the longest `\$<digits>` prefix
+# of a string leaf, which is the only prefix :func:`_rewrite_net_name` can
+# possibly rename (issue #3568).
+_ANONYMOUS_NET_PREFIX_RE = re.compile(r"^\\\$\d+")
 
 
-def _net_attachment_key(net_name: str, devices: list[Any]) -> str:
+def _net_attachment_index(devices: list[Any]) -> dict[str, list[str]]:
+    """``{net name: [<device>.<terminal>, ...]}`` for every string-named net a
+    ``devices[]`` terminal touches, built in one pass so
+    :func:`_net_attachment_key` is a dict lookup instead of a rescan of every
+    device per net (issue #3568). Duplicates are kept: one device with two
+    terminals on the same net contributes two entries."""
+    index: dict[str, list[str]] = {}
+    for device in devices:
+        if not isinstance(device, dict):
+            continue
+        for terminal, terminal_net in (device.get("nets") or {}).items():
+            if isinstance(terminal_net, str):
+                index.setdefault(terminal_net, []).append(
+                    f"{device.get('name')}.{terminal}"
+                )
+    return index
+
+
+def _net_attachment_key(
+    net_name: str,
+    devices: list[Any],
+    index: Mapping[str, list[str]] | None = None,
+) -> str:
     """The sorted ``<device>.<terminal>`` attachment list for ``net_name``,
     read from this same report's already-built ``devices[]`` array -- the
     structural identity issue #1559 normalizes an anonymous net's unstable
@@ -4125,7 +4280,12 @@ def _net_attachment_key(net_name: str, devices: list[Any]) -> str:
     ground/substrate net) -- nothing to disambiguate by, so the caller
     leaves that net's original spelling untouched rather than fabricate a
     key that cannot be trusted to be unique.
+
+    ``index`` (from :func:`_net_attachment_index` over the same ``devices``)
+    makes the call O(attachments of this net) rather than O(all terminals).
     """
+    if index is not None and isinstance(net_name, str):
+        return ",".join(sorted(index.get(net_name, ())))
     attachments = sorted(
         f"{device.get('name')}.{terminal}"
         for device in devices
@@ -4149,13 +4309,14 @@ def _anonymous_net_name_map(report: Mapping[str, Any]) -> dict[str, str]:
     if not isinstance(nets, list) or not isinstance(devices, list):
         return {}
     name_map: dict[str, str] = {}
+    index = _net_attachment_index(devices)
     for entry in nets:
         if not isinstance(entry, dict):
             continue
         name = entry.get("name")
         if not isinstance(name, str) or not _ANONYMOUS_NET_NAME_RE.match(name):
             continue
-        attachment_key = _net_attachment_key(name, devices)
+        attachment_key = _net_attachment_key(name, devices, index)
         if attachment_key:
             name_map[name] = f"$anon<{attachment_key}>"
     return name_map
@@ -4177,14 +4338,23 @@ def _rewrite_net_name(value: Any, name_map: Mapping[str, str]) -> Any:
     canonical = name_map.get(value)
     if canonical is not None:
         return canonical
-    for raw_name, canonical_name in name_map.items():
-        if not value.startswith(raw_name):
-            continue
-        boundary = value[len(raw_name) : len(raw_name) + 1]
-        if boundary and boundary.isalnum():
-            continue
-        return canonical_name + value[len(raw_name) :]
-    return value
+    # Every ``name_map`` key is ``\\$<digits>``, so the only key a leaf can
+    # start with (past the boundary rule) is its longest ``\\$<digits>``
+    # prefix: any shorter digit prefix is followed by a digit, i.e. an
+    # alphanumeric, and would be rejected below (issue #3568).
+    if not name_map or not value.startswith("\\$"):
+        return value
+    match = _ANONYMOUS_NET_PREFIX_RE.match(value)
+    if match is None:
+        return value
+    raw_name = match.group()
+    canonical_name = name_map.get(raw_name)
+    if canonical_name is None:
+        return value
+    boundary = value[len(raw_name) : len(raw_name) + 1]
+    if boundary and boundary.isalnum():
+        return value
+    return canonical_name + value[len(raw_name) :]
 
 
 def _canonicalize_extract_report_for_rerun_diff(
@@ -4241,12 +4411,13 @@ def _canonicalize_extract_report_for_rerun_diff(
     nets = normalized.get("nets")
     devices = normalized.get("devices")
     if isinstance(nets, list) and isinstance(devices, list):
+        index = _net_attachment_index(devices)
         normalized["nets"] = sorted(
             nets,
             key=lambda entry: (
                 (
                     entry.get("name", ""),
-                    _net_attachment_key(entry.get("name", ""), devices),
+                    _net_attachment_key(entry.get("name", ""), devices, index),
                 )
                 if isinstance(entry, dict)
                 else ("", "")
@@ -4532,8 +4703,11 @@ def extract_netlist_from_layout(
     mom_net: str | None = None,
     mom_background_permittivity: float = MOM_CROSSCHECK_BACKGROUND_PERMITTIVITY,
     def_net_names: bool = False,
+    probes: Sequence[Mapping[str, Any]] = (),
+    probe_results: list[dict[str, Any]] | None = None,
     critical_nets: frozenset[str] | None = None,
     parasitics_nets: frozenset[str] | None = None,
+    net_selectors: NetSelectors | None = None,
     parasitics_top_cell_only: bool = False,
     def_pins: frozenset[str] | None = None,
     pin_source_cells: frozenset[str] | None = None,
@@ -4801,8 +4975,11 @@ def extract_netlist_from_layout(
             "--abstract-cell-lef": bool(abstract_cell_lef_paths),
             "--mom-net": mom_net is not None,
             "--def-net-names": def_net_names,
-            "--critical-net": bool(critical_nets),
-            "--parasitics-net": bool(parasitics_nets),
+            "--probe": bool(probes),
+            "--critical-net": bool(critical_nets)
+            or (net_selectors is not None and net_selectors.has_critical),
+            "--parasitics-net": bool(parasitics_nets)
+            or (net_selectors is not None and bool(net_selectors.parasitics_patterns)),
             "--def-pins": bool(def_pins),
             "--pin-source-cells": bool(pin_source_cells),
             "--rename-declared-pins": rename_declared_pins,
@@ -4812,6 +4989,8 @@ def extract_netlist_from_layout(
             "--pdk": pdk_info is not None,
         },
     )
+
+    _validate_probes(deck, probes)
 
     # `--hierarchical-cells` (issue #2722): selection validated against the
     # live hierarchy (absent / top / unreachable) before any
@@ -4975,11 +5154,14 @@ def extract_netlist_from_layout(
         def_net_names=def_net_names,
         critical_nets=critical_nets,
         parasitics_nets=parasitics_nets,
+        net_selectors=net_selectors,
         parasitics_top_cell_only=parasitics_top_cell_only,
         def_pins=def_pins,
         pin_source_cells=pin_source_cells,
         rename_declared_pins=rename_declared_pins,
         substrate_spreading_net=substrate_spreading_net,
+        probes=probes,
+        probe_results=probe_results,
     )
 
     # `klt extract --substrate-spreading <net>` (issue #2561): the closed-form
@@ -5853,6 +6035,89 @@ def _probe_named_net(
     return False
 
 
+def _probe_regions(
+    role: str,
+    poly: kdb.Region,
+    nwell: kdb.Region,
+    tap: kdb.Region,
+    metals: list[kdb.Region],
+) -> list[kdb.Region]:
+    """The conductor region(s) a ``--probe`` ``layer`` ``role`` addresses --
+    the same role -> region pairing :func:`_label_probe_targets` uses for
+    labels (``well`` -> ``nwell``/``tap``, ``poly``, ``metal<i>``)."""
+    if role == "well":
+        return [nwell, tap]
+    if role == "poly":
+        return [poly]
+    return [metals[int(role[len("metal") :])]]
+
+
+def _validate_probes(deck: ExtractionDeck, probes: Sequence[Mapping[str, Any]]) -> None:
+    """Refuse a ``--probe`` whose ``layer`` is not one of ``deck``'s roles
+    (issue #2986), quoting the available ones the way ``--label-layer`` does."""
+    roles = deck.label_layer_roles
+    for probe in probes:
+        if probe["layer"] not in roles:
+            raise ExtractError(
+                f"--probe {probe['name']!r}: deck has no layer role "
+                f"{probe['layer']!r} (available: {', '.join(roles)})"
+            )
+
+
+def _evaluate_probes(
+    l2n: kdb.LayoutToNetlist,
+    final_circuit: kdb.Circuit | None,
+    probes: Sequence[Mapping[str, Any]],
+    dbu: float,
+    poly: kdb.Region,
+    nwell: kdb.Region,
+    tap: kdb.Region,
+    metals: list[kdb.Region],
+) -> list[dict[str, Any]]:
+    """``--probe`` point-to-net results (issue #2986), in request order.
+
+    Runs on the live ``l2n`` after every rename/purge pass, so ``net`` is the
+    final ``nets[].name`` and ``cluster_id`` the final ``nets[].net_id``. A
+    probe is ``found`` only when the net under the point is one of
+    ``final_circuit``'s nets -- empty space, a masked black-box region and a
+    floating wire the purge removed all report ``found: false``.
+    """
+    import klayout.db as kdb
+
+    final_ids = (
+        {net.cluster_id for net in final_circuit.each_net()}
+        if final_circuit is not None
+        else set()
+    )
+    results: list[dict[str, Any]] = []
+    for probe in probes:
+        point = kdb.Point(round(probe["x"] / dbu), round(probe["y"] / dbu))
+        net = next(
+            (
+                hit
+                for region in _probe_regions(probe["layer"], poly, nwell, tap, metals)
+                if (hit := l2n.probe_net(region, point)) is not None
+            ),
+            None,
+        )
+        if net is not None and net.cluster_id not in final_ids:
+            net = None
+        results.append(
+            {
+                "name": probe["name"],
+                "layer": probe["layer"],
+                "x_um": probe["x"],
+                "y_um": probe["y"],
+                "found": net is not None,
+                "net": None
+                if net is None
+                else spice_safe_net_name(net.expanded_name()),
+                "cluster_id": None if net is None else net.cluster_id,
+            }
+        )
+    return results
+
+
 def _unnamed_label_positions(
     l2n: kdb.LayoutToNetlist,
     layout: kdb.Layout,
@@ -6278,6 +6543,25 @@ def _purge_preserving_named_nets(netlist: kdb.Netlist) -> None:
         if net.pin_count() == 0:
             pin = circuit.create_pin(net_name)
             circuit.connect_pin(pin, net)
+
+
+def _recognised_capacitor_top_regions(
+    layout: kdb.Layout, top_cell: kdb.Cell, deck: ExtractionDeck
+) -> dict[str, kdb.Region]:
+    """Each drawn ``CapacitorDevice``'s top-plate marker region, keyed by
+    device name (issue #3021) -- what ``_compute_parasitics`` masks out of the
+    vertical-overlap pass for that capacitor's own plate nets. Capacitors with
+    no marker drawn are omitted, so a capacitor-free layout yields ``{}``.
+    """
+    regions: dict[str, kdb.Region] = {}
+    for capacitor in deck.capacitors:
+        top_region, bottom_region = _capacitor_plate_regions(
+            layout, top_cell, capacitor
+        )
+        if top_region.is_empty() or bottom_region.is_empty():
+            continue
+        regions[capacitor.name] = top_region
+    return regions
 
 
 def _purge_truly_floating_nets(netlist: kdb.Netlist) -> None:
@@ -7732,8 +8016,11 @@ def _extract_netlist(
     mom_net: str | None = None,
     mom_background_permittivity: float = MOM_CROSSCHECK_BACKGROUND_PERMITTIVITY,
     def_net_names: bool = False,
+    probes: Sequence[Mapping[str, Any]] = (),
+    probe_results: list[dict[str, Any]] | None = None,
     critical_nets: frozenset[str] | None = None,
     parasitics_nets: frozenset[str] | None = None,
+    net_selectors: NetSelectors | None = None,
     parasitics_top_cell_only: bool = False,
     def_pins: frozenset[str] | None = None,
     pin_source_cells: frozenset[str] | None = None,
@@ -9832,6 +10119,11 @@ def _extract_netlist(
     substrate_taps: dict[str, Any] | None = None
     if parasitics_deck is not None:
         circuit = netlist.circuit_by_name(top_cell.name)
+        if net_selectors is not None:
+            # Issue #2974: patterns can only resolve once the nets exist.
+            critical_nets, parasitics_nets = net_selectors.resolve(
+                circuit, deck, critical_nets, parasitics_nets
+            )
         parasitic_nets = _compute_parasitics(
             l2n,
             circuit,
@@ -9856,6 +10148,12 @@ def _extract_netlist(
             # geometry (resistor bodies, gates) cut out of them and so no
             # longer show where a conductor abuts a device at all.
             via_index=via_index,
+            # Issue #3021: recognised MiM top-plate footprints, so the
+            # vertical-overlap pass does not charge coupling on top of the
+            # device's own capacitance inside them.
+            capacitor_top_regions=_recognised_capacitor_top_regions(
+                layout, top_cell, deck
+            ),
         )
         # `klt extract --mom-net <net>` (issue #798): computed here, not in
         # `run_extract`, for the same "`l2n` must still be alive" reason as
@@ -9937,6 +10235,24 @@ def _extract_netlist(
         if final_circuit_for_labels is not None
         else {}
     )
+
+    # `--probe` (issue #2986): point-to-net queries against this same live
+    # `l2n`, after every rename/purge pass, reported through the
+    # `probe_results` out-parameter so this function's return tuple stays
+    # unchanged.
+    if probes and probe_results is not None:
+        probe_results.extend(
+            _evaluate_probes(
+                l2n,
+                final_circuit_for_labels,
+                probes,
+                layout.dbu,
+                poly,
+                nwell,
+                tap,
+                metals,
+            )
+        )
 
     # Issue #1666: per-device GDS-level instance attribution, keyed by
     # `Device.id()` -- unlike `net_label_positions` this needs no live `l2n`

@@ -61,6 +61,25 @@ def test_bad_expressions_rejected_naming_offender(sources, fragment):
     assert "'v'" in str(err.value)
 
 
+def test_slug_collisions_rejected():
+    with pytest.raises(sim.SimError, match="artifact slug"):
+        sim._parse_variants(
+            [{"name": "a.b", "sources": {"a": 1}}, {"name": "apb", "sources": {"a": 2}}]
+        )
+    with pytest.raises(sim.SimError, match="artifact slug"):
+        sim._parse_variants(
+            [{"name": "a-b", "sources": {"a": 1}}, {"name": "anb", "sources": {"a": 2}}]
+        )
+
+
+def test_variants_cannot_combine_with_units():
+    spec = {"units": [{"temperature_c": 27}], "variants": _variants()}
+    with pytest.raises(
+        sim.SimError, match="corners.units cannot be combined with corners.variants"
+    ):
+        sim._expand_corners(spec, [])
+
+
 def test_duplicate_and_empty_rejected():
     with pytest.raises(sim.SimError, match="duplicate name 'v'"):
         sim._parse_variants(

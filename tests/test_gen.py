@@ -3367,6 +3367,71 @@ def test_gf180mcu_sibling_guard_ring_generators_off_grid_padding_drc_clean(
     assert drc_report["rule_counts"] == {}
 
 
+@pytest.mark.parametrize("ring_padding_um", (0.5015, 1.2345, 3.1415))
+@pytest.mark.parametrize(
+    ("generator", "params"),
+    [
+        ("diff_pair", {"splits": 1}),
+        ("mos_array", {"rows": 1, "cols": 2, "dummy": 0}),
+        ("esd_device", {"fingers": 2}),
+    ],
+)
+def test_gf180mcu_off_grid_ring_padding_ring_vertices_on_mfg_grid(
+    tmp_path, both_pdk_root, generator, params, ring_padding_um
+):
+    """Issue #3364: the guard ring's Comp / Pplus / Nplus / Metal1 boxes must
+    land on gf180mcu's 0.005um manufacturing grid at an off-grid
+    `ring_padding_um`, asserted on the drawn vertices themselves (independent
+    of the deck's `*.ongrid.1` rules). The exact implant extension is covered
+    by the `*_implant_extension_is_exact` tests."""
+    import klayout.db as kdb
+
+    if not gen.mfg_grid_um("gf180mcu", _GF180_CONTACT_LAYER):
+        pytest.skip("gf180mcu deck declares no `ongrid` rules yet (PR #3365)")
+    output = tmp_path / f"{generator}_ring_grid_{ring_padding_um}.gds"
+    generate(
+        {
+            "generator": generator,
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {
+                **params,
+                "add_guard_ring": True,
+                "ring_padding_um": ring_padding_um,
+            },
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    grid_dbu = int(round(0.005 / layout.dbu))
+    for layer in ((22, 0), (31, 0), (32, 0), (34, 0)):
+        region = kdb.Region(layout.top_cell().begin_shapes_rec(layout.layer(*layer)))
+        for poly in region.each():
+            for pt in poly.each_point_hull():
+                assert pt.x % grid_dbu == 0 and pt.y % grid_dbu == 0, (layer, pt)
+
+    drc_report = run_drc(str(output), "gf180mcu")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+def test_snap_ring_box_um_grows_outer_and_shrinks_inner_onto_grid():
+    """Issue #3364: `_snap_ring_box_um` moves every edge onto the grid in the
+    direction that only grows the ring band, and is inert on-grid / without a
+    grid."""
+    dbu = gen._GRID_DBU_UM
+    box = (-0.9221, -0.9219, 3.0036, 3.0034)
+    assert gen._snap_ring_box_um(box, 0.0, dbu) == box
+    assert gen._snap_ring_box_um(box, 0.005, dbu) == pytest.approx(
+        (-0.925, -0.925, 3.005, 3.005)
+    )
+    assert gen._snap_ring_box_um(box, 0.005, dbu, inward=True) == pytest.approx(
+        (-0.92, -0.92, 3.0, 3.0)
+    )
+    on_grid = (-0.92, 0.0, 3.0, 1.5)
+    assert gen._snap_ring_box_um(on_grid, 0.005, dbu) == on_grid
+    assert gen._snap_ring_box_um(on_grid, 0.005, dbu, inward=True) == on_grid
+
+
 def test_snap_offset_um_is_inert_on_grid_exact_inputs():
     """The #2442 fix must be inert for on-grid offsets (e.g. the historical
     default padding 0.5 + grid-exact ring width): `_snap_offset_um` returns
@@ -3667,6 +3732,45 @@ def test_res_array_sky130_flavor_high_draws_psdm_and_rpm(tmp_path, pdk_root):
     assert _SKY130_RPM_LAYER in present
     assert _SKY130_URPM_LAYER not in present
     assert _SKY130_NPC_LAYER in present  # issue #3077
+
+
+@pytest.mark.parametrize(
+    ("flavor", "marker_layer", "rule_id"),
+    [
+        ("high", _SKY130_RPM_LAYER, "rpm.width.1"),
+        ("xhigh", _SKY130_URPM_LAYER, "urpm.width.1"),
+    ],
+)
+def test_res_array_sky130_min_width_marker_meets_pdk_minimum(
+    tmp_path, pdk_root, flavor, marker_layer, rule_id
+):
+    """A minimum-width (0.42 um) `res_array` keeps its rpm/urpm marker at or
+    above the PDK's 1.27 um floor (`rpm.1a`/`urpm.1a`): the marker covers the
+    contacted heads, not just the narrow body (#2449). The curated deck's
+    `rpm.width.1`/`urpm.width.1` (#3030) guard that, so a regression to a
+    body-width marker is visible to `klt drc --deck sky130`."""
+    import klayout.db as kdb
+
+    output = tmp_path / f"res_array_min_{flavor}.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"flavor": flavor, "width_um": 0.42, "length_um": 52},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.top_cell()
+    marker = kdb.Region(top.begin_shapes_rec(layout.layer(*marker_layer))).merged()
+    assert not marker.is_empty()
+    for polygon in marker.each():
+        bbox = polygon.bbox()
+        assert min(bbox.width(), bbox.height()) * layout.dbu >= 1.27
+
+    drc_report = run_drc(str(output), "sky130")
+    assert rule_id not in drc_report["rule_counts"]
 
 
 def test_res_array_sky130_flavor_xhigh_draws_psdm_and_urpm(tmp_path, pdk_root):
@@ -6026,6 +6130,43 @@ def test_sg13g2_res_array_default_params_recognised_as_rsil(tmp_path, sg13g2_pdk
     # literal keeps this tied to `res_array`'s documented default `num`.
     assert report["device_counts"] == {"rsil": gen_report["device_count"]}
     assert report["dummy_devices_dropped"] == 2
+
+
+@pytest.mark.parametrize(
+    ("flavor", "device"), [("generic", "rsil"), ("rppd", "rppd"), ("rhigh", "rhigh")]
+)
+def test_sg13g2_res_array_uses_pdk_pcell_polyres_body_abutting_gatpoly_heads(
+    tmp_path, sg13g2_pdk_root, flavor, device
+):
+    """Issue #2679: `res_array` on sg13g2 draws the IHP PCell convention --
+    `polyres` is the resistive body and `GatPoly` only the two abutting
+    heads (zero overlap) -- and every flavour round-trips through `klt
+    extract --deck sg13g2` to exactly `num` devices, each with two distinct
+    terminal nets (the body does not short its heads)."""
+    import klayout.db as kdb
+
+    output = tmp_path / f"res_array_sg13g2_{flavor}.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+            "params": {"flavor": flavor, "num": 3, "dummy": 0},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.top_cell()
+    gatpoly = kdb.Region(top.begin_shapes_rec(layout.layer(5, 0)))
+    polyres = kdb.Region(top.begin_shapes_rec(layout.layer(*_SG13G2_RES_MARK_LAYER)))
+    assert not polyres.is_empty()
+    assert (gatpoly & polyres).is_empty()
+    assert not (gatpoly.sized(1) & polyres).is_empty()
+
+    report = run_extract(str(output), "sg13g2")
+    assert report["device_counts"] == {device: 3}
+    for dev in report["devices"]:
+        assert dev["nets"]["a"] != dev["nets"]["b"]
 
 
 def test_sg13g2_res_array_explicit_generic_matches_default(tmp_path, sg13g2_pdk_root):
