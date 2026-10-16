@@ -121,6 +121,7 @@
       "7.9 Pplus",
       "9.1 Bond Pad"
     ],
+    "unmodeled_rules": [],
     "schema_version": 1,
     "known": true,
     "checked": [

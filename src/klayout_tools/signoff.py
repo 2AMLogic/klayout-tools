@@ -419,7 +419,8 @@ its device/net-count reporting -- exactly as issue #1987 left them. What
 changes is only whether an `extract` citation (or any other wrong-kind one)
 can satisfy a *numbered tier item*.
 
-**Items 1, 2, 9 and 10 are deliberately left unrestricted.** Unlike items
+**Items 1, 2, 9 and 10 were deliberately left unrestricted** (issue #2844
+later restricted 1, 9 and 10 -- see "Attested evidence" below). Unlike items
 3-8 they name no `klt` verb at all, and ``docs/cli/signoff.md``'s "Items
 1, 2, 9, and 10" section states the grading consequence plainly: any
 recognised, passing native kind satisfies them, topical relevance
@@ -441,13 +442,26 @@ documents the four conditions; :func:`_generic_item_binding_refusal` and
 :func:`_grade_evidence` enforce them, and the ``"met"`` citation carries an
 ``artifact_binding`` block disclosing the bound artifact.
 
-Strictly additive: a native citation for these items grades exactly as it
-did before (and carries no ``artifact_binding``, which is how a reader tells
-"a passing envelope was cited" apart from "the item is bound to an audited
-artifact"); items 3-7 and 11 still reject ``"generic"``; item 8 accepts a
-generic envelope with no ``t1_item`` exactly as before, and refuses one that
-declares a different item (:data:`_REASON_WRONG_ITEM`), so an anchored
-attestation for item 9 cannot be replayed onto item 8 either.
+As shipped by issue #2718 this was strictly additive: a native citation for
+these items graded exactly as before (and carried no ``artifact_binding``,
+which is how a reader tells "a passing envelope was cited" apart from "the
+item is bound to an audited artifact"); items 3-7 and 11 still reject
+``"generic"``; item 8 accepts a generic envelope with no ``t1_item`` exactly
+as before, and refuses one that declares a different item
+(:data:`_REASON_WRONG_ITEM`), so an anchored attestation for item 9 cannot
+be replayed onto item 8 either.
+
+## Attested evidence for items 1, 9 and 10 (issue #2844)
+
+Issue #2718 gave these items something to bind to, but no producer: the
+inventory, its hash, the envelope and its ``status: "pass"`` were all
+hand-written. :mod:`.signoff_attest` (``klt signoff --attest {1,9,10}
+--inventory FILE``) is that producer -- it runs item-specific mechanical
+checks over a versioned inventory and emits the same anchored generic
+envelope, graded here with no special path. With a real producer in place,
+:data:`_ITEMS_REQUIRING_ATTESTED_EVIDENCE` restricts items 1, 9 and 10 to
+``{"generic"}`` (:func:`_allowed_kinds_for`), so an unrelated native pass
+no longer turns them green. Item 2 is unchanged.
 
 ### Regeneration claims on items 1 and 2 (issue #2887)
 
@@ -1065,7 +1079,10 @@ _MIXED_SIGNAL_PARTITIONS = ("analog", "digital")
 #: and passed as :func:`_build_tier_item`'s ``allowed_kinds`` parameter. An
 #: item id absent from this map (items 1, 2, 9 and 10, today) is
 #: unrestricted (``None``), preserving the original Phase 0/1 behaviour where
-#: any recognised, passing envelope kind satisfies any item.
+#: any recognised, passing envelope kind satisfies any item -- except that
+#: :func:`_allowed_kinds_for` restricts items 1, 9 and 10 to ``"generic"``
+#: through the separate :data:`_ITEMS_REQUIRING_ATTESTED_EVIDENCE` (issue
+#: #2844; see that constant for why it is not an entry here).
 #:
 #: **Every T1 item that names evidence is restricted here** (issue #2044):
 #: items 3-8. The four absent ids are exactly the four
@@ -1190,15 +1207,35 @@ _ITEMS_ACCEPTING_GENERIC_EVIDENCE: frozenset[int] = frozenset({1, 2, 8, 9, 10})
 #: :data:`_REASON_UNANCHORED_EVIDENCE`. The met citation then carries an
 #: ``artifact_binding`` block disclosing what was bound.
 #:
-#: Deliberately **not** in :data:`_ITEM_ALLOWED_KINDS`: these four still
-#: accept any passing native envelope exactly as before (no verdict any
-#: existing manifest renders changes), and so stay "structurally
-#: ungradeable" for the fleet roll-up's blocker reduction
-#: (:func:`_is_structurally_ungradeable_item`). The absence of
-#: ``artifact_binding`` on such a citation is what tells a reader the row
-#: was satisfied by a passing envelope the grader could not judge for
-#: relevance, rather than by an item-bound artifact.
+#: Deliberately **not** in :data:`_ITEM_ALLOWED_KINDS`, and so still
+#: "structurally ungradeable" for the fleet roll-up's blocker reduction
+#: (:func:`_is_structurally_ungradeable_item`). Item 2 still accepts any
+#: passing native envelope exactly as before; items 1, 9 and 10 no longer do
+#: (issue #2844, :data:`_ITEMS_REQUIRING_ATTESTED_EVIDENCE`). The absence of
+#: ``artifact_binding`` on an item-2 native citation is what tells a reader
+#: the row was satisfied by a passing envelope the grader could not judge
+#: for relevance, rather than by an item-bound artifact.
 _ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE: frozenset[int] = frozenset({1, 2, 9, 10})
+
+#: T1 item ids whose **only** accepted evidence is an artifact-anchored
+#: ``"generic"`` envelope (issue #2844) -- items 1 (Design sources), 9
+#: (Testbenches shipped) and 10 (Repo hygiene). Before that issue a passing
+#: native envelope of any recognised kind satisfied them, topical relevance
+#: notwithstanding (a clean `klt drc` report "proved" repo hygiene). Now that
+#: ``klt signoff --attest`` (:mod:`.signoff_attest`) produces a mechanically
+#: derived envelope for exactly these three, :func:`_allowed_kinds_for`
+#: restricts them to ``{"generic"}``, so a native citation renders
+#: ``"unmet"``/:data:`_REASON_WRONG_KIND`.
+#:
+#: Item 2 (Layout) is deliberately absent: it is outside issue #2844's scope
+#: and keeps accepting any passing native envelope as before.
+#:
+#: Kept separate from :data:`_ITEM_ALLOWED_KINDS` on purpose: that table also
+#: decides :func:`_is_structurally_ungradeable_item` and
+#: :func:`_is_graded_by_build`, and moving these ids into it would silently
+#: re-rank the fleet roll-up's ``blocking_item`` (issue #2178) -- a separate
+#: behaviour change this tightening does not make.
+_ITEMS_REQUIRING_ATTESTED_EVIDENCE: frozenset[int] = frozenset({1, 9, 10})
 
 #: T1 item ids a ``"power"``-kind citation (issue #1321, see this module's
 #: "`klt power` (IR-drop/EM) evidence ingestion" docstring section) may
@@ -1631,6 +1668,11 @@ def describe_grader() -> dict[str, Any]:
         # Additive (issue #2655): derived from the grader's own table.
         "opt_in_evidence_kinds": opt_in_kind_scopes(),
         "opt_in_kinds_by_item": opt_in_kinds_by_item(),
+        # Additive (issue #2865): the items that accept a recorded
+        # `not_applicable` outcome, and on which partitions.
+        "not_applicable_items": {
+            str(_STATISTICAL_CLAIMS_ITEM_ID): [_NOT_APPLICABLE_PARTITION]
+        },
     }
 
 
@@ -1945,6 +1987,318 @@ _REASON_NEGATIVE_CONTROL_NOT_DETECTED = "negative_control_not_detected"
 #: refusals differ because they apply to an envelope that *passed*, where
 #: "cite a different artifact" really is the more actionable answer.
 _REASON_PARTIAL_COVERAGE = "partial_coverage"
+
+# --- Item 6 ``not_applicable`` outcome (issue #2865) ----------------------- #
+#: The T1 item whose "statistical claims" requirement a block with no
+#: statistical spec row can discharge by a recorded "not applicable".
+_STATISTICAL_CLAIMS_ITEM_ID = 6
+#: The only partition that may use the outcome. An analog partition's spec
+#: rows are statistical by definition (accuracy/offset/matching/yield), so it
+#: always requires `klt yield` evidence.
+_NOT_APPLICABLE_PARTITION = "digital"
+#: A ``not_applicable`` item's ``status`` -- distinct from ``"met"``, never
+#: rendered as it, but counted toward T1 completion when the guard passes.
+STATUS_NOT_APPLICABLE = "not_applicable"
+#: Statuses that satisfy a T1 item for the ``tier`` roll-up.
+_T1_SATISFIED_STATUSES = frozenset({"met", STATUS_NOT_APPLICABLE})
+#: The ``not_applicable`` form was used on a partition that may not use it
+#: (analog, or the analog half of a mixed-signal block).
+_REASON_NOT_APPLICABLE_WRONG_PARTITION = "not_applicable_wrong_partition"
+#: The cited spec's ``status`` is not ``"ratified"``.
+_REASON_NOT_APPLICABLE_SPEC_UNRATIFIED = "not_applicable_spec_unratified"
+#: The cited spec (or the statement) contains a row that is, or looks,
+#: statistical; ``detail.row`` names it. The statement file is the primary
+#: claim; this scan is a conservative backstop.
+_REASON_NOT_APPLICABLE_STATISTICAL_ROW = "not_applicable_statistical_row"
+#: The statement does not account for exactly the spec's rows (a spec row
+#: with no statement row, a statement row naming no spec row, a row without
+#: a ``class``/``reason``, or a spec with no rows at all).
+_REASON_NOT_APPLICABLE_STATEMENT_INCOMPLETE = "not_applicable_statement_incomplete"
+
+_NA_STATISTICAL_KEY_RE = re.compile(
+    r"sigma|σ|yield|cpk|ppk|offset|mismatch|monte[_ -]?carlo|std[_ -]?dev",
+    re.IGNORECASE,
+)
+_NA_STATISTICAL_TEXT_RE = re.compile(
+    r"σ|\bsigma\b|\bcpk\b|\bppk\b|\byield\b|\bmonte[ _-]?carlo\b"
+    r"|\bmismatch\b|\bmatching\b|\boffset\b|\baccuracy\b",
+    re.IGNORECASE,
+)
+
+
+def _na_scan_dict(value: dict[str, Any], path: str) -> str | None:
+    """:func:`_na_scan_statistical` for a JSON object."""
+    for key, child in value.items():
+        key_path = f"{path}.{key}" if path else str(key)
+        if str(key).lower() == "statistical":
+            if child not in (None, False, 0, "", "false", "no"):
+                return key_path
+            continue
+        keyed = _NA_STATISTICAL_KEY_RE.search(str(key)) and child not in (
+            None,
+            False,
+            "",
+            [],
+            {},
+        )
+        if keyed:
+            return key_path
+        hit = _na_scan_statistical(child, key_path)
+        if hit is not None:
+            return hit
+    return None
+
+
+def _na_scan_statistical(value: Any, path: str) -> str | None:
+    """Conservative scan of one spec/statement row for anything statistical.
+
+    Returns a ``path`` description of the first hit, or ``None``. A key named
+    ``statistical`` hits only when truthy (``statistical: false`` is the
+    honest declaration); a key naming sigma/yield/Cpk/offset/mismatch/Monte
+    Carlo hits on any non-empty value; any string value mentioning one of
+    those (or ``3σ``, accuracy, matching) hits. False positives refuse, which
+    is the safe direction -- the author fixes the row's wording or cites real
+    ``klt yield`` evidence.
+    """
+    if isinstance(value, dict):
+        return _na_scan_dict(value, path)
+    if isinstance(value, list):
+        for index, child in enumerate(value):
+            hit = _na_scan_statistical(child, f"{path}[{index}]")
+            if hit is not None:
+                return hit
+        return None
+    if isinstance(value, str) and _NA_STATISTICAL_TEXT_RE.search(value):
+        return path
+    return None
+
+
+def _na_document(
+    raw: Any, label: str
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Normalize one ``{"file", "content_hash"}`` reference of the
+    ``not_applicable`` form; ``(ref, None)`` or ``(None, detail)``."""
+    if (
+        not isinstance(raw, dict)
+        or not isinstance(raw.get("file"), str)
+        or not raw["file"]
+        or not isinstance(raw.get("content_hash"), str)
+        or not raw["content_hash"]
+    ):
+        return None, {
+            "document": label,
+            "problem": "needs a string 'file' and a string 'content_hash'",
+        }
+    return {"file": raw["file"], "content_hash": raw["content_hash"]}, None
+
+
+def _na_load(
+    ref: dict[str, Any], label: str
+) -> tuple[dict[str, Any] | None, str | None, dict[str, Any]]:
+    """Hash-check and parse one referenced document -> ``(doc, reason,
+    detail)``; ``doc`` is a JSON object on success."""
+    digest = sha256_file(ref["file"])
+    if digest is None:
+        return None, _REASON_UNREADABLE_EVIDENCE, {"document": label}
+    actual = f"sha256:{digest}"
+    if actual != ref["content_hash"]:
+        return (
+            None,
+            _REASON_STALE_EVIDENCE,
+            {
+                "document": label,
+                "expected_content_hash": ref["content_hash"],
+                "actual_content_hash": actual,
+            },
+        )
+    try:
+        with open(ref["file"], encoding="utf-8") as handle:
+            doc = json.load(handle)
+    except (OSError, ValueError):
+        return None, _REASON_UNREADABLE_EVIDENCE, {"document": label}
+    if not isinstance(doc, dict):
+        return (
+            None,
+            _REASON_INVALID_EVIDENCE,
+            {"document": label, "problem": "must be a JSON object"},
+        )
+    return doc, None, {}
+
+
+_NaRefusal = tuple[str, str | None, None, dict[str, Any]]
+
+
+def _na_refusal(reason: str | None, detail: dict[str, Any]) -> _NaRefusal:
+    """An ``unmet`` :func:`_grade_not_applicable` result."""
+    return "unmet", reason, None, detail
+
+
+def _na_load_documents(
+    form: Any,
+) -> tuple[tuple[dict, dict, dict, dict] | None, _NaRefusal | None]:
+    """Validate the form and load both documents -> ``((spec_ref,
+    statement_ref, spec_doc, statement_doc), None)`` or ``(None, refusal)``."""
+    if not isinstance(form, dict):
+        return None, _na_refusal(
+            _REASON_INVALID_EVIDENCE, {"problem": "'not_applicable' must be an object"}
+        )
+    refs = []
+    for label in ("spec", "statement"):
+        ref, bad = _na_document(form.get(label), label)
+        if ref is None:
+            return None, _na_refusal(_REASON_INVALID_EVIDENCE, bad or {})
+        refs.append(ref)
+    docs = []
+    for ref, label in zip(refs, ("spec", "statement"), strict=True):
+        doc, reason, detail = _na_load(ref, label)
+        if doc is None:
+            return None, _na_refusal(reason, detail)
+        docs.append(doc)
+    return (refs[0], refs[1], docs[0], docs[1]), None
+
+
+def _na_spec_shape_refusal(spec_rows: Any) -> _NaRefusal | None:
+    """Refuse a spec whose ``rows`` are malformed, duplicated or empty."""
+    if not isinstance(spec_rows, list) or not all(
+        isinstance(row, dict) and isinstance(row.get("id"), str) and row["id"]
+        for row in spec_rows
+    ):
+        return _na_refusal(
+            _REASON_INVALID_EVIDENCE,
+            {
+                "document": "spec",
+                "problem": "'rows' must be a list of objects each with a string 'id'",
+            },
+        )
+    spec_ids = [row["id"] for row in spec_rows]
+    if len(set(spec_ids)) != len(spec_ids):
+        return _na_refusal(
+            _REASON_INVALID_EVIDENCE,
+            {"document": "spec", "problem": "duplicate row ids"},
+        )
+    if not spec_rows:
+        return _na_refusal(
+            _REASON_NOT_APPLICABLE_STATEMENT_INCOMPLETE,
+            {"problem": "the cited spec has no rows"},
+        )
+    return None
+
+
+def _na_spec_refusal(spec_doc: dict[str, Any]) -> _NaRefusal | None:
+    """Ratification, row shape and the statistical scan of the spec."""
+    status_value = spec_doc.get("status")
+    if not (
+        isinstance(status_value, str) and status_value.strip().lower() == "ratified"
+    ):
+        return _na_refusal(
+            _REASON_NOT_APPLICABLE_SPEC_UNRATIFIED, {"spec_status": status_value}
+        )
+    spec_rows = spec_doc.get("rows")
+    shape = _na_spec_shape_refusal(spec_rows)
+    if shape is not None:
+        return shape
+    for row in cast("list[dict[str, Any]]", spec_rows):
+        hit = _na_scan_statistical(row, "")
+        if hit is not None:
+            return _na_refusal(
+                _REASON_NOT_APPLICABLE_STATISTICAL_ROW,
+                {"row": row["id"], "field": hit or "id", "document": "spec"},
+            )
+    return None
+
+
+def _na_statement_refusal(
+    statement_rows: Any, spec_ids: list[str]
+) -> _NaRefusal | None:
+    """Shape, statistical-class and coverage checks of the statement."""
+    if not isinstance(statement_rows, list) or not all(
+        isinstance(row, dict)
+        and all(
+            isinstance(row.get(key), str) and row[key].strip()
+            for key in ("id", "class", "reason")
+        )
+        for row in statement_rows
+    ):
+        return _na_refusal(
+            _REASON_NOT_APPLICABLE_STATEMENT_INCOMPLETE,
+            {"problem": "statement 'rows' needs string id, class and reason per row"},
+        )
+    for row in statement_rows:
+        # The statement's own class must not concede a statistical row.
+        if _na_scan_statistical({"class": row["class"]}, "") is not None:
+            return _na_refusal(
+                _REASON_NOT_APPLICABLE_STATISTICAL_ROW,
+                {"row": row["id"], "field": "class", "document": "statement"},
+            )
+    statement_ids = [row["id"] for row in statement_rows]
+    uncovered = [rid for rid in spec_ids if rid not in statement_ids]
+    unknown = [rid for rid in statement_ids if rid not in spec_ids]
+    if uncovered or unknown or len(set(statement_ids)) != len(statement_ids):
+        return _na_refusal(
+            _REASON_NOT_APPLICABLE_STATEMENT_INCOMPLETE,
+            {"uncovered_row_ids": uncovered, "unknown_row_ids": unknown},
+        )
+    return None
+
+
+def _grade_not_applicable(
+    form: Any, partition_kind: str
+) -> tuple[str, str | None, dict[str, Any] | None, dict[str, Any]]:
+    """Grade item 6's ``not_applicable`` form (issue #2865) ->
+    ``(status, reason, not_applicable_block, detail)``.
+
+    Manifest form (``"6"`` / ``"6.digital"``)::
+
+        {"not_applicable": {
+            "spec":      {"file": "spec.json", "content_hash": "sha256:..."},
+            "statement": {"file": "na.json",   "content_hash": "sha256:..."}}}
+
+    ``spec`` is the block's ratified target spec (``{"status": "ratified",
+    "rows": [{"id": ...}, ...]}``); ``statement`` is the committed claim that
+    no row is statistical (``{"rows": [{"id", "class", "reason"}, ...]}``,
+    one entry per spec row). Both are bound by content hash exactly like
+    other evidence. Rows are keyed by ``id`` so a later partial-coverage
+    outcome (issue #2908) can extend the same block. Order of refusal:
+    partition, form, readability/staleness, ratification, statistical scan,
+    statement completeness.
+    """
+    if partition_kind != _NOT_APPLICABLE_PARTITION:
+        return _na_refusal(
+            _REASON_NOT_APPLICABLE_WRONG_PARTITION, {"partition": partition_kind}
+        )
+    loaded, refusal = _na_load_documents(form)
+    if loaded is None:
+        return cast(_NaRefusal, refusal)
+    spec_ref, statement_ref, spec_doc, statement_doc = loaded
+
+    refusal = _na_spec_refusal(spec_doc)
+    if refusal is not None:
+        return refusal
+    spec_rows = spec_doc["rows"]
+    raw_statement_rows = statement_doc.get("rows")
+    refusal = _na_statement_refusal(raw_statement_rows, [r["id"] for r in spec_rows])
+    if refusal is not None:
+        return refusal
+    statement_rows = cast("list[dict[str, Any]]", raw_statement_rows)
+
+    block = {
+        "spec": {
+            "file": spec_ref["file"],
+            "content_hash": spec_ref["content_hash"],
+            "status": "ratified",
+            "row_count": len(spec_rows),
+        },
+        "statement": {
+            "file": statement_ref["file"],
+            "content_hash": statement_ref["content_hash"],
+            "rows": [
+                {"id": r["id"], "class": r["class"], "reason": r["reason"]}
+                for r in statement_rows
+            ],
+        },
+    }
+    return STATUS_NOT_APPLICABLE, None, block, {}
+
 
 #: The status token each kind reports for a partial result (issue #2109):
 #: the kind's own success token from :func:`_check_passed`, suffixed
@@ -4801,6 +5155,7 @@ def build_tier_report(
 
     items: list[dict[str, Any]] = []
     met_count = 0
+    not_applicable_count = 0
     total = 0
     for t1_item in doc["t1_items"]:
         graded_by_build = _is_graded_by_build(t1_item["id"], build_item_ids)
@@ -4848,8 +5203,8 @@ def build_tier_report(
                     ),
                 )
             total += 1
-            if entry["status"] == "met":
-                met_count += 1
+            met_count += entry["status"] == "met"
+            not_applicable_count += entry["status"] == STATUS_NOT_APPLICABLE
             items.append(entry)
 
     for ladder_row in doc["ladder"]:
@@ -4869,7 +5224,7 @@ def build_tier_report(
             }
         )
 
-    tier = "T1" if total > 0 and met_count == total else None
+    tier = "T1" if total > 0 and met_count + not_applicable_count == total else None
 
     return {
         "schema_version": TIER_REPORT_SCHEMA_VERSION,
@@ -4890,6 +5245,15 @@ def build_tier_report(
         # t1_item_count`. `None` when the shipped doc is unreadable.
         "build_t1_item_count": _build_t1_row_count(build_item_ids, len(partitions)),
         "t1_met_count": met_count,
+        # Issue #2865: items satisfied by a recorded "not applicable", never
+        # folded into `t1_met_count`. Omitted when zero so a report with none
+        # is byte-identical to what this build rendered before the field
+        # existed (absent means 0).
+        **(
+            {"t1_not_applicable_count": not_applicable_count}
+            if not_applicable_count
+            else {}
+        ),
         "source_doc": doc_source_label(tiers_doc),
         "source_doc_content_hash": doc["content_hash"],
         "build": _build_identity(),
@@ -4996,14 +5360,17 @@ def _allowed_kinds_for(item_id: int, partition_kind: str) -> set[str] | None:
     mixed-signal block's digital partition as to a pure ``"digital"`` block,
     with no separate wiring.
 
-    ``None`` means unrestricted (items 1, 2, 9 and 10 today -- every item
-    that names no evidence at all, issue #2044). An item
+    ``None`` means unrestricted (item 2 today -- issue #2044 left items 1,
+    2, 9 and 10 unrestricted; issue #2844 restricted 1, 9 and 10 to
+    ``{"generic"}`` via :data:`_ITEMS_REQUIRING_ATTESTED_EVIDENCE`). An item
     present in
     :data:`_ITEM_ALLOWED_KINDS` but with no entry for this partition kind
     falls back to the ``"analog"`` (strictest) set rather than becoming
     silently unrestricted -- an unrecognised partition kind must never
     *loosen* an item's evidence requirement.
     """
+    if item_id in _ITEMS_REQUIRING_ATTESTED_EVIDENCE:
+        return {"generic"}
     by_partition_kind = _ITEM_ALLOWED_KINDS.get(item_id)
     if by_partition_kind is None:
         return None
@@ -6267,6 +6634,21 @@ def _generic_artifact_binding(
         value = envelope.get(field)
         if isinstance(value, str):
             binding[field] = value
+    # Issue #2844: an envelope produced by `klt signoff --attest` names the
+    # producer and how many item-specific checks backed its status, so a
+    # reader (or a fleet roll-up) can tell a derived pass from a hand-written
+    # one. Disclosure only -- never graded, and absent for any envelope that
+    # carries no `attestation` block.
+    attestation = envelope.get("attestation")
+    if isinstance(attestation, Mapping) and isinstance(
+        attestation.get("producer"), str
+    ):
+        binding["attestation"] = {
+            "producer": attestation["producer"],
+            "inventory_schema_version": attestation.get("inventory_schema_version"),
+            "check_count": attestation.get("check_count"),
+            "passed_count": attestation.get("passed_count"),
+        }
     return binding
 
 
@@ -6624,7 +7006,9 @@ def _build_tier_item(
     restriction, preserving Phase 0/1's original behaviour where any
     recognised, passing envelope kind satisfies any item -- since issue
     #2044 only T1 items 1, 2, 9 and 10 (the four naming no evidence at all)
-    still pass ``None`` (see :data:`_ITEM_ALLOWED_KINDS` and
+    passed ``None``, and since issue #2844 only item 2 does -- items 1, 9
+    and 10 get ``{"generic"}`` (see :data:`_ITEM_ALLOWED_KINDS`,
+    :data:`_ITEMS_REQUIRING_ATTESTED_EVIDENCE` and
     :func:`_allowed_kinds_for`).
 
     ``partition_kind`` (issue #2362) is the partition this row grades --
@@ -6692,6 +7076,8 @@ def _build_tier_item(
     status = "unmet"
     reason: str | None = _REASON_NO_EVIDENCE
 
+    not_applicable: dict[str, Any] | None = None
+
     def grade_spec(
         spec: dict[str, Any],
     ) -> tuple[str, str | None, dict[str, Any] | None, dict[str, Any]]:
@@ -6720,6 +7106,15 @@ def _build_tier_item(
     raw_entry = _lookup_evidence(evidence, item_id, partition_kind)
     if raw_entry is not None and not graded_by_build:
         reason = _REASON_UNGRADEABLE_BY_BUILD
+    elif (
+        item_id == _STATISTICAL_CLAIMS_ITEM_ID
+        and isinstance(raw_entry, dict)
+        and "not_applicable" in raw_entry
+    ):
+        # Issue #2865: item 6's recorded "not applicable" outcome.
+        status, reason, not_applicable, failure_detail = _grade_not_applicable(
+            raw_entry["not_applicable"], partition_kind
+        )
     elif (
         raw_entry is not None
         and item_id in _ITEMS_ACCEPTING_MULTI_CITATION
@@ -6756,6 +7151,7 @@ def _build_tier_item(
         "reason": reason,
         "graded_by_build": graded_by_build,
         "citation": citation,
+        **({"not_applicable": not_applicable} if not_applicable is not None else {}),
         **extra,
         **({"detail": failure_detail} if failure_detail else {}),
     }
@@ -7210,6 +7606,11 @@ def build_fleet_report(
                 # of that count, so the two must never be rendered apart.
                 "build_t1_item_count": tier_report["build_t1_item_count"],
                 "t1_met_count": tier_report["t1_met_count"],
+                **(
+                    {"t1_not_applicable_count": tier_report["t1_not_applicable_count"]}
+                    if tier_report.get("t1_not_applicable_count")
+                    else {}
+                ),
                 "source_doc_content_hash": tier_report["source_doc_content_hash"],
                 "blocking_item": blocking_item,
                 "ungraded_items": _ungraded_t1_items(tier_report["items"]),
@@ -7628,7 +8029,7 @@ def _blocking_t1_item(items: list[dict[str, Any]]) -> dict[str, Any] | None:
     structural: dict[str, Any] | None = None
 
     for item in items:
-        if item["tier"] != "T1" or item["status"] == "met":
+        if item["tier"] != "T1" or item["status"] in _T1_SATISFIED_STATUSES:
             continue
         # Order matters: today every ungradeable-by-build id is *also*
         # structurally ungradeable, so this branch has to be asked first for
@@ -7686,7 +8087,7 @@ def _ungraded_t1_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         _blocking_item_view(item)
         for item in items
         if item["tier"] == "T1"
-        and item["status"] != "met"
+        and item["status"] not in _T1_SATISFIED_STATUSES
         and (
             _is_structurally_ungradeable_item(item["id"])
             or _is_ungradeable_by_build(item)

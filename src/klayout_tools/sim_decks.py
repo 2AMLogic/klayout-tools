@@ -1655,7 +1655,11 @@ def _run_decks_batch(
             _install_unit_trees(units, outdir=outdir, source_root=None)
             return _synthesized_deck_report(
                 worker_request,
-                code="batch_poll_timeout",
+                code=(
+                    "batch_job_interrupted"
+                    if isinstance(exc, sim_batch.BatchJobInterrupted)
+                    else "batch_poll_timeout"
+                ),
                 message=str(exc),
                 outdir=outdir,
                 environment={
@@ -1664,6 +1668,11 @@ def _run_decks_batch(
                     "bucket": config.bucket,
                     "region": config.region,
                     "state": exc.last_state,
+                    **(
+                        {"interrupted_s": round(exc.interrupted_s, 1)}
+                        if isinstance(exc, sim_batch.BatchJobInterrupted)
+                        else {}
+                    ),
                 },
             )
         environment = {

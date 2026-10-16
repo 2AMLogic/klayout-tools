@@ -169,6 +169,66 @@ def _validate_pitch_overrides(params: dict[str, Any]) -> None:
             raise GenError(f"generator 'mos_array': params.{pitch_name} must be >= 0")
 
 
+def _validate_share_sd(params: dict[str, Any]) -> None:
+    """Issue #3551 (Phase 2 of #3299): ``share_sd`` abuts adjacent units into
+    a series chain, which only the plain single-finger ``array`` topology
+    supports. Everything else is rejected rather than emitted wrong."""
+    from .gen import GenError
+
+    if not params["share_sd"]:
+        return
+    if params["topology"] != "array":
+        raise GenError(
+            "generator 'mos_array': params.share_sd requires params.topology="
+            "'array' (the common_centroid pairing order is not a row chain)"
+        )
+    if params["fingers"] != 1:
+        raise GenError(
+            "generator 'mos_array': params.share_sd requires params.fingers=1 "
+            "(multi-finger units are not supported)"
+        )
+    for name in ("pitch_x_um", "interior_channel_um"):
+        if params[name] > 0:
+            raise GenError(
+                f"generator 'mos_array': params.share_sd is incompatible with "
+                f"params.{name} (it would pull the abutted units apart)"
+            )
+
+
+def _shared_sd_nodes(info: dict[str, Any], cols: int) -> list[dict[str, Any]]:
+    """Issue #3551: one entry per abutted pair -- ``U<i>_D`` and ``U<j>_S``
+    are the same electrical node (and the same drawn segment)."""
+    idx_by_pos = {(c["row"], c["col"]): c["idx"] for c in info["cells"]}
+    dx, dy = info["unit"]["d_xy"]
+    return [
+        {
+            "ports": [f"U{idx_by_pos[(r, c)]}_D", f"U{idx_by_pos[(r, c + 1)]}_S"],
+            "x_um": info["cells"][idx_by_pos[(r, c)]]["x0_um"] + dx,
+            "y_um": info["cells"][idx_by_pos[(r, c)]]["y0_um"] + dy,
+        }
+        for r in sorted({k[0] for k in idx_by_pos})
+        for c in range(cols - 1)
+    ]
+
+
+def _share_sd_hints(
+    params: dict[str, Any], info: dict[str, Any], notes: list[str]
+) -> dict[str, Any]:
+    """Issue #3551: ``drc_hints`` entries for ``share_sd`` (empty when off);
+    appends the explanatory note to ``notes`` when any pair is abutted."""
+    if not params["share_sd"]:
+        return {}
+    shared_nodes = _shared_sd_nodes(info, params["cols"])
+    if shared_nodes:
+        notes.append(
+            "params.share_sd abuts adjacent units: each U<i>_D / U<i+1>_S "
+            "pair in drc_hints.shared_sd_nodes is one shared S/D node "
+            "(reported at the same position), so each row extracts as a "
+            "series chain"
+        )
+    return {"share_sd": True, "shared_sd_nodes": shared_nodes}
+
+
 def _pitch_hints_and_warnings(
     params: dict[str, Any], info: dict[str, Any]
 ) -> tuple[dict[str, Any], list[str]]:
@@ -264,6 +324,7 @@ def _mos_array_validate(params: dict[str, Any]) -> None:
     if params["interior_channel_um"] < 0:
         raise GenError("generator 'mos_array': params.interior_channel_um must be >= 0")
     _validate_pitch_overrides(params)
+    _validate_share_sd(params)
 
     # `ring_gap_side`/`ring_gap_um`/`ring_gap_offset_um` are validated against
     # a hypothetical ring (`add_guard_ring=True`) regardless of the request's
@@ -288,6 +349,7 @@ def _mos_array_validate(params: dict[str, Any]) -> None:
             mos_cap=params["mos_cap"],
             pitch_x_um=params["pitch_x_um"],
             pitch_y_um=params["pitch_y_um"],
+            share_sd=params["share_sd"],
         )
     )
     _validate_ring_gap(
@@ -508,6 +570,7 @@ def _mos_array_describe(
         pitch_x_um=params["pitch_x_um"],
         pitch_y_um=params["pitch_y_um"],
         top_endcap_um=_gate_top_endcap_um(family),
+        share_sd=params["share_sd"],
     )
     unit = info["unit"]
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
@@ -683,6 +746,8 @@ def _mos_array_describe(
 
     pitch_hints, pitch_warnings = _pitch_hints_and_warnings(params, info)
 
+    share_sd_hints = _share_sd_hints(params, info, notes)
+
     return {
         "device_count": device_count,
         "ports": ports,
@@ -695,6 +760,7 @@ def _mos_array_describe(
             **voltage_flavor_hints,
             **sd_implant_hints,
             **pitch_hints,
+            **share_sd_hints,
         },
         "warnings": (
             ["one or more dimensions were rounded to the technology grid"]
