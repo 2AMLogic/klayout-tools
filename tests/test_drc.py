@@ -13,6 +13,7 @@ import json
 from collections import Counter
 from pathlib import Path
 
+import jsonschema
 import klayout.db as kdb
 import pytest
 
@@ -684,6 +685,7 @@ def test_json_contract(tmp_path, capsys):
         "rules_checked",
         "rules_skipped",
         "voltage_domain_warnings",
+        "unchecked_rules",
         "deck_scope",
         # Issue #1996: the shared vacuous-verdict convention
         # (`klayout_tools.coverage`), emitted alongside the pre-existing
@@ -709,6 +711,10 @@ def test_json_contract(tmp_path, capsys):
                 assert set(entry.keys()) == {"marker", "description"}
                 assert isinstance(entry["marker"], str)
                 assert isinstance(entry["description"], str)
+        elif key == "unchecked_rules":
+            for entry in field:
+                assert set(entry.keys()) == {"rule", "layer", "description"}
+                assert all(isinstance(v, str) for v in entry.values())
         else:
             assert all(isinstance(v, str) for v in field)
     # A run that produced violations plainly checked something.
@@ -6041,20 +6047,25 @@ def test_sky130_deck_check_kind_breakdown():
     `licon1.width.1`/`mcon.width.1`, the minimum halves of the two fixed-size
     cut rules `licon.1`/`ct.1`; #2642 adds the source deck's whole `OFFGRID`
     group -- 38 `ongrid` + 37 `angle`, see `tests/test_drc_offgrid.py` for why
-    the angle count is one short of the grid count): 136 rules total -- 18
-    `width`, 13 `space`, 1 `isolated`, 17 `enclosing`, 2 `separation`,
-    10 `area`, 38 `ongrid`, 37 `angle`. Fails loudly (at the exact number that
-    changed) if a future rule addition/removal drifts from that table without
-    updating it."""
+    the angle count is one short of the grid count; #3030 adds
+    `rpm.width.1`/`urpm.width.1`; #2936 adds `poly.endcap.diff.1`, the first
+    `enclosed` rule; #3316 adds the 4 `enclosing_adjacent` rules): 143 rules
+    total -- 20 `width`, 13 `space`, 1 `isolated`, 17 `enclosing`,
+    1 `enclosed`, 4 `enclosing_adjacent`, 2 `separation`, 10 `area`,
+    38 `ongrid`, 37 `angle`. Fails loudly (at the exact number that changed)
+    if a future rule addition/removal drifts from that table without updating
+    it."""
     deck = get_deck("sky130")
 
-    assert len(deck) == 136
+    assert len(deck) == 143
     counts = Counter(rule.check for rule in deck)
     assert counts == {
-        "width": 18,
+        "width": 20,
         "space": 13,
         "isolated": 1,
         "enclosing": 17,
+        "enclosed": 1,
+        "enclosing_adjacent": 4,
         "separation": 2,
         "area": 10,
         "ongrid": 38,
@@ -10069,6 +10080,263 @@ def test_rerun_rejects_a_malformed_recorded_selection(selection, tmp_path, monke
         rerun_drc_report(str(report_path))
 
 
+def _sky130_gate_layout(tmp_path, *, bottom_dbu, top_dbu, rotated=False, name="g"):
+    """A 1.34 x 1.0 um diff crossed by one 0.5 um poly gate whose ends extend
+    `bottom_dbu`/`top_dbu` past the diffusion (`rotated` swaps the axes)."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    diff, poly = layout.layer(65, 20), layout.layer(66, 20)
+    if rotated:
+        top.shapes(diff).insert(kdb.Box(0, 0, 1000, 1340))
+        top.shapes(poly).insert(kdb.Box(-bottom_dbu, 420, 1000 + top_dbu, 920))
+    else:
+        top.shapes(diff).insert(kdb.Box(0, 0, 1340, 1000))
+        top.shapes(poly).insert(kdb.Box(420, -bottom_dbu, 920, 1000 + top_dbu))
+    path = tmp_path / f"{name}.gds"
+    layout.write(str(path))
+    return str(path)
+
+
+def _endcap_count(report):
+    return report["rule_counts"].get("poly.endcap.diff.1", 0)
+
+
+@pytest.mark.parametrize("rotated", [False, True])
+def test_run_drc_sky130_poly_endcap_flush_gate_is_flagged(tmp_path, rotated):
+    """The reported defect (#2936): poly ending flush with the diffusion at
+    both ends is no longer `clean` -- one violation per gate end."""
+    path = _sky130_gate_layout(tmp_path, bottom_dbu=0, top_dbu=0, rotated=rotated)
+    report = run_drc(path, "sky130")
+    assert report["status"] == "violations"
+    assert _endcap_count(report) == 2
+    assert {v["rule"] for v in report["violations"]} == {"poly.endcap.diff.1"}
+
+
+@pytest.mark.parametrize("rotated", [False, True])
+def test_run_drc_sky130_poly_endcap_minimum_is_clean(tmp_path, rotated):
+    """Exactly the 0.13 um minimum on both ends passes (the rule is a
+    minimum, `poly.8`'s `>= 0.13`), including a rotated gate."""
+    path = _sky130_gate_layout(tmp_path, bottom_dbu=130, top_dbu=130, rotated=rotated)
+    assert _endcap_count(run_drc(path, "sky130")) == 0
+
+
+def test_run_drc_sky130_poly_endcap_one_dbu_short_or_one_side_only(tmp_path):
+    """129 dbu on one end and a flush other end each flag exactly that end."""
+    short = run_drc(
+        _sky130_gate_layout(tmp_path, bottom_dbu=129, top_dbu=130, name="s"),
+        "sky130",
+    )
+    assert _endcap_count(short) == 1
+    flush_top = run_drc(
+        _sky130_gate_layout(tmp_path, bottom_dbu=130, top_dbu=0, name="f"),
+        "sky130",
+    )
+    assert _endcap_count(flush_top) == 1
+
+
+def test_run_drc_sky130_poly_endcap_ignores_poly_that_only_abuts_diff(tmp_path):
+    """Poly merely touching a diffusion edge from outside is not a gate: no
+    endcap violation (it is another rule's business)."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(65, 20)).insert(kdb.Box(0, 0, 1340, 1000))
+    top.shapes(layout.layer(66, 20)).insert(kdb.Box(420, 1000, 920, 1500))
+    path = tmp_path / "abut.gds"
+    layout.write(str(path))
+    assert _endcap_count(run_drc(str(path), "sky130")) == 0
+
+
+# --------------------------------------------------------------------------- #
+# Response schema conformance (issue #3003): docs/schemas/drc-response.schema.json
+# --------------------------------------------------------------------------- #
+
+_SCHEMA_DIR = REPO_ROOT / "docs" / "schemas"
+_KLAYOUT_STUB_RDB = """<?xml version="1.0" encoding="utf-8"?>
+<report-database>
+ <description>stub</description>
+ <categories>
+  <category><name>W.1</name><description>min width</description></category>
+ </categories>
+ <cells><cell><name>TOP</name></cell></cells>
+ <items>
+  <item>
+   <category>'W.1'</category>
+   <cell>TOP</cell>
+   <values><value>edge-pair: (0,0;0,1)|(0.2,1;0.2,0)</value></values>
+  </item>
+ </items>
+</report-database>
+"""
+
+
+def _drc_response_validator() -> jsonschema.Draft202012Validator:
+    from referencing import Registry, Resource
+
+    schema = json.loads((_SCHEMA_DIR / "drc-response.schema.json").read_text())
+    coverage = json.loads((_SCHEMA_DIR / "coverage.schema.json").read_text())
+    registry = Registry().with_resource(
+        coverage["$id"], Resource.from_contents(coverage)
+    )
+    return jsonschema.Draft202012Validator(schema, registry=registry)
+
+
+def _klayout_engine_report(tmp_path, monkeypatch, **kwargs):
+    """A real `--engine klayout` report, with only the `klayout` launch
+    stubbed (other subprocess calls, e.g. `git`, run for real)."""
+    import subprocess
+
+    import klayout_tools.drc as drc_module
+    from helpers.subprocess_fakes import fake_completed
+    from klayout_tools.drc import run_drc_klayout_engine
+
+    real_run = subprocess.run
+
+    def fake_run(cmd, *args, **kw):
+        report_args = [a for a in cmd if isinstance(a, str) and a.startswith("report=")]
+        if not report_args:
+            return real_run(cmd, *args, **kw)
+        Path(report_args[0].split("=", 1)[1]).write_text(
+            _KLAYOUT_STUB_RDB, encoding="utf-8"
+        )
+        return fake_completed()
+
+    monkeypatch.setattr(drc_module.subprocess, "run", fake_run)
+    gds = tmp_path / "k.gds"
+    _make_clean_layout().write(str(gds))
+    deck = tmp_path / "deck.lydrc"
+    deck.write_text("# stub deck\n", encoding="utf-8")
+    return run_drc_klayout_engine(str(gds), str(deck), **kwargs)
+
+
+def test_drc_response_schema_is_valid_and_pins_version():
+    validator = _drc_response_validator()
+    jsonschema.Draft202012Validator.check_schema(validator.schema)
+    assert validator.schema["properties"]["schema_version"]["const"] == 2
+
+
+def test_drc_response_schema_validates_curated_reports(tmp_path):
+    validator = _drc_response_validator()
+    violation = tmp_path / "violation.gds"
+    clean = tmp_path / "clean.gds"
+    _make_violation_layout().write(str(violation))
+    _make_clean_layout().write(str(clean))
+
+    reports = {
+        "violations": run_drc(str(violation), "sky130"),
+        "clean": run_drc(str(clean), "sky130"),
+        "clean_partial": run_drc(str(clean), "sky130", rules=["poly.*"]),
+    }
+    for status, report in reports.items():
+        assert report["status"] == status
+        validator.validate(report)
+    assert "rule_selection" in reports["clean_partial"]
+    assert reports["violations"]["violations"]
+
+
+def test_drc_response_schema_validates_not_checked_report(tmp_path):
+    validator = _drc_response_validator()
+    path = tmp_path / "empty.gds"
+    layout = kdb.Layout()
+    layout.create_cell("TOP")
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "not_checked"
+    validator.validate(report)
+
+
+def test_drc_response_schema_validates_klayout_engine_report(tmp_path, monkeypatch):
+    validator = _drc_response_validator()
+
+    report = _klayout_engine_report(tmp_path, monkeypatch, expected_rule_categories=1)
+
+    assert report["engine"] == "klayout"
+    assert report["status"] == "violations"
+    assert report["coverage_assertion"]["kind"] == "expected_rule_categories"
+    validator.validate(report)
+
+    named = _klayout_engine_report(
+        tmp_path, monkeypatch, expected_rule_category_names=["W.1"]
+    )
+    assert named["coverage_assertion"]["kind"] == "expected_rule_category_names"
+    validator.validate(named)
+
+    unasserted = _klayout_engine_report(tmp_path, monkeypatch)
+    assert "coverage_assertion" not in unasserted
+    validator.validate(unasserted)
+
+
+def test_drc_response_schema_validates_list_rules_listing():
+    from klayout_tools.drc import list_deck_rules
+
+    validator = _drc_response_validator()
+    listing = list_deck_rules("sky130")
+
+    assert "status" not in listing
+    validator.validate(listing)
+    # The listing is its own branch: without `mode` it is neither shape.
+    with pytest.raises(jsonschema.ValidationError):
+        validator.validate({k: v for k, v in listing.items() if k != "mode"})
+
+
+def test_drc_response_schema_rejects_missing_required_field(tmp_path):
+    validator = _drc_response_validator()
+    path = tmp_path / "violation.gds"
+    _make_violation_layout().write(str(path))
+    report = run_drc(str(path), "sky130")
+
+    for field in (
+        "schema_version",
+        "file",
+        "deck",
+        "dbu_um",
+        "status",
+        "violation_count",
+        "rule_counts",
+        "metrics",
+        "violations",
+        "coverage",
+        "provenance",
+    ):
+        broken = {k: v for k, v in report.items() if k != field}
+        with pytest.raises(jsonschema.ValidationError):
+            validator.validate(broken)
+
+
+def test_drc_response_schema_rejects_bad_values(tmp_path):
+    validator = _drc_response_validator()
+    path = tmp_path / "violation.gds"
+    _make_violation_layout().write(str(path))
+    report = run_drc(str(path), "sky130")
+
+    for bad in (
+        {**report, "schema_version": 1},
+        {**report, "status": "pass"},
+        {**report, "violations": [{**report["violations"][0], "bbox": {"left": 0}}]},
+    ):
+        with pytest.raises(jsonschema.ValidationError):
+            validator.validate(bad)
+
+
+def test_drc_response_schema_accepts_additive_unknown_fields(tmp_path):
+    validator = _drc_response_validator()
+    path = tmp_path / "violation.gds"
+    _make_violation_layout().write(str(path))
+    report = run_drc(str(path), "sky130")
+
+    extended = {
+        **report,
+        "future_field": {"anything": [1, 2]},
+        "coverage": {**report["coverage"], "future_coverage_field": True},
+        "provenance": {**report["provenance"], "future_provenance_field": "x"},
+        "violations": [{**report["violations"][0], "future_violation_field": 1}],
+    }
+    validator.validate(extended)
+
+
 # ---------------------------------------------------------------------------
 # rule-scoped cell waivers: --waivers / waivers_file (#3483)
 # ---------------------------------------------------------------------------
@@ -10241,3 +10509,75 @@ def test_waived_report_check_and_rerun_replay_waivers(tmp_path):
     checked = check_drc_report(str(report_path))
     assert checked["status"] == "drifted"
     assert rerun_drc_report(str(report_path))["status"] == "drifted"
+
+
+# --- sky130 two-adjacent-edges enclosure (`enclosing_adjacent`, #3316) -------
+#
+# `sky130A_mr.drc` flags a cut when two *adjacent* edges are both enclosed by
+# less than the threshold (a corner of short edges); one short side, or two
+# opposite short sides, is legal. Verified against the official runset on the
+# same geometry, so these pin its semantics, not the wording of the issue.
+_ADJACENT_RULES = [
+    # (rule id, metal layer, cut layer, threshold dbu)
+    ("met1.enclosing_adjacent.via.1", (68, 20), (68, 44), 85),
+    ("met2.enclosing_adjacent.via.1", (69, 20), (68, 44), 85),
+    ("met2.enclosing_adjacent.via2.1", (69, 20), (69, 44), 85),
+    ("met3.enclosing_adjacent.via3.1", (70, 20), (70, 44), 90),
+]
+
+
+def _adjacent_layout(metal, cut, margins) -> kdb.Layout:
+    """A 150 dbu cut at the origin; ``margins`` = (left, bottom, right, top)."""
+    left, bottom, right, top_m = margins
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(*cut)).insert(kdb.Box(0, 0, 150, 150))
+    top.shapes(layout.layer(*metal)).insert(
+        kdb.Box(-left, -bottom, 150 + right, 150 + top_m)
+    )
+    return layout
+
+
+@pytest.mark.parametrize(("rule_id", "metal", "cut", "thr"), _ADJACENT_RULES)
+@pytest.mark.parametrize(
+    ("label", "margins", "violations"),
+    [
+        ("two adjacent sides long, others short", ("L", "L", "S", "S"), 1),
+        ("two opposite sides long, others short", ("L", "S", "L", "S"), 0),
+        ("all sides short", ("S", "S", "S", "S"), 1),
+        ("all sides long", ("L", "L", "L", "L"), 0),
+        ("one side short", ("L", "L", "L", "S"), 0),
+    ],
+)
+def test_enclosing_adjacent_sky130(
+    tmp_path, rule_id, metal, cut, thr, label, margins, violations
+):
+    values = {"L": thr, "S": thr - 30}
+    layout = _adjacent_layout(metal, cut, tuple(values[m] for m in margins))
+    path = tmp_path / "adj.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130", rules=[rule_id])
+
+    assert report["violation_count"] == violations, label
+    assert report["rule_counts"] == ({rule_id: 1} if violations else {})
+
+
+def test_enclosing_adjacent_one_violation_per_cut(tmp_path):
+    """Three short sides meet at two corners; the cut is reported once."""
+    layout = _adjacent_layout((68, 20), (68, 44), (85, 55, 55, 55))
+    path = tmp_path / "adj3.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130", rules=["met1.enclosing_adjacent.via.1"])
+
+    assert report["violation_count"] == 1
+
+
+def test_enclosing_adjacent_requires_other_layer():
+    rule = next(
+        r for r in get_deck("sky130") if r.id == "met1.enclosing_adjacent.via.1"
+    )
+    assert rule.check == "enclosing_adjacent"
+    assert rule.other_layer is not None

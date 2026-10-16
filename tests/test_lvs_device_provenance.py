@@ -182,20 +182,19 @@ def test_gf180mcu_mos_provenance_cites_lvs_deck():
     (`gf180mcu_fd_pr__nfet_03v3`/`...pfet_03v3`) -- issue #904, the
     gf180mcu counterpart of #868's sky130 backfill.
 
-    The gf180mcu LVS pin is deliberately still open_pdks ``c6d73a3`` (not the
-    ``f6eeac7`` the sky130 and gf180mcu-DRC pins moved to in #3429): the LVS
-    rule decks changed in that re-pin and are re-verified in #3540."""
+    The gf180mcu LVS pin is open_pdks ``f6eeac7`` (re-verified in #3540 after
+    the LVS rule decks moved in the #3429 re-pin)."""
     assert GF180MCU_DECK.nfet_provenance == RuleProvenance(
         source_repo="google/globalfoundries-pdk-libs-gf180mcu_fd_pv",
-        source_path="libs.tech/klayout/lvs/rule_decks/mos_extraction.lvs",
+        source_path="libs.tech/klayout/tech/lvs/rule_decks/mos_extraction.lvs",
         rule_id="gf180mcu_fd_pr__nfet_03v3",
-        commit="c6d73a35f524070e85faff4a6a9eef49553ebc2b",
+        commit="f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7",
     )
     assert GF180MCU_DECK.pfet_provenance == RuleProvenance(
         source_repo="google/globalfoundries-pdk-libs-gf180mcu_fd_pv",
-        source_path="libs.tech/klayout/lvs/rule_decks/mos_extraction.lvs",
+        source_path="libs.tech/klayout/tech/lvs/rule_decks/mos_extraction.lvs",
         rule_id="gf180mcu_fd_pr__pfet_03v3",
-        commit="c6d73a35f524070e85faff4a6a9eef49553ebc2b",
+        commit="f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7",
     )
 
 
@@ -223,7 +222,7 @@ def test_gf180mcu_resistor_provenance_cites_lvs_deck():
         )
         assert (
             resistor.provenance.source_path
-            == "libs.tech/klayout/lvs/rule_decks/res_extraction.lvs"
+            == "libs.tech/klayout/tech/lvs/rule_decks/res_extraction.lvs"
         )
 
     assert by_name["ppolyf_u"].provenance.rule_id == "gf180mcu_fd_pr__ppolyf_u"
@@ -241,14 +240,14 @@ def test_gf180mcu_capacitor_provenance_cites_lvs_deck():
     #904)."""
     (capacitor,) = GF180MCU_DECK.capacitors
     assert capacitor.provenance is not None
-    assert capacitor.provenance.rule_id == "cap_mim_2f0_m4m5_noshield"
+    assert capacitor.provenance.rule_id == "cap_mim_2f0fF"
     assert (
         capacitor.provenance.source_repo
         == "google/globalfoundries-pdk-libs-gf180mcu_fd_pv"
     )
     assert (
         capacitor.provenance.source_path
-        == "libs.tech/klayout/lvs/rule_decks/mimcap_extraction.lvs"
+        == "libs.tech/klayout/tech/lvs/rule_decks/mimcap_extraction.lvs"
     )
 
 
@@ -282,7 +281,7 @@ def test_gf180mcu_diode_provenance_cites_lvs_deck():
         )
         assert (
             diode.provenance.source_path
-            == "libs.tech/klayout/lvs/rule_decks/diode_extraction.lvs"
+            == "libs.tech/klayout/tech/lvs/rule_decks/diode_extraction.lvs"
         )
 
 
@@ -1051,7 +1050,7 @@ def test_golden_pair_gf180mcu_capacitor_c_f_matches_provenance_coefficients(
     + perimeter * perim_cap_f_um`, computed directly from the deck's own
     provenance-cited `cap_mim_2f0_m4m5_noshield` entry (issue #904)."""
     (capacitor,) = GF180MCU_DECK.capacitors
-    assert capacitor.provenance.rule_id == "cap_mim_2f0_m4m5_noshield"
+    assert capacitor.provenance.rule_id == "cap_mim_2f0fF"
 
     layout = kdb.Layout()
     top = layout.create_cell("TOP")
@@ -1282,7 +1281,7 @@ _GOLDEN_PAIR_TESTED_RULE_IDS: dict[str, frozenset[str]] = {
             "gf180mcu_fd_pr__rm2",
             "gf180mcu_fd_pr__rm3",
             "gf180mcu_fd_pr__tm9k",
-            "cap_mim_2f0_m4m5_noshield",
+            "cap_mim_2f0fF",
             "BJT.3",
             "gf180mcu_fd_pr__diode_nd2ps_06v0",
             "gf180mcu_fd_pr__diode_pd2nw_06v0",

@@ -645,6 +645,11 @@
     },
     {
       "file": "src/klayout_tools/place_and_route.py",
+      "function": "_run_single_corner",
+      "complexity": 19
+    },
+    {
+      "file": "src/klayout_tools/place_and_route.py",
       "function": "_stage_script_lines",
       "complexity": 15
     },
@@ -662,11 +667,6 @@
       "file": "src/klayout_tools/place_and_route.py",
       "function": "_validate_power",
       "complexity": 28
-    },
-    {
-      "file": "src/klayout_tools/place_and_route.py",
-      "function": "run_place_and_route",
-      "complexity": 27
     },
     {
       "file": "src/klayout_tools/place_and_route_gds_merge.py",

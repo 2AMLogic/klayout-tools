@@ -1838,7 +1838,24 @@ class PlaceAndRouteError(Exception):
     stopped short of a *later* stage the request never asked for -- this
     exception is raised only when a run fails to reach the stage it was
     actually asked to reach.
+
+    ``code``, ``job_id`` and ``details`` are optional and set only by the
+    ``batch`` backend (issue #3518, mirroring ``NetlistError``): a
+    machine-readable ``error.code`` for the CLI's error envelope, the batch
+    job id, and extra structured envelope fields.
     """
+
+    def __init__(
+        self,
+        *args: object,
+        code: str | None = None,
+        job_id: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(*args)
+        self.code = code
+        self.job_id = job_id
+        self.details = details
 
 
 def load_request(request_path: str) -> dict[str, Any]:
@@ -1958,6 +1975,7 @@ def run_place_and_route(
     *,
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
+    backend: str | None = None,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """Run the OpenROAD place-and-route flow declared by the request at
@@ -1992,109 +2010,66 @@ def run_place_and_route(
     :class:`~klayout_tools.output_lock.OutputDirLockedError` instead of
     interleaving stage artifacts. ``_ownership`` is internal: the exit stack
     that releases the lock when the run ends.
+
+    **Physical rebuild per corner (issue #3507).** A request carrying
+    ``pdk.rebuild_corners`` runs the whole flow once per named corner, each
+    into its own ``.klt/place-and-route/<corner>/`` directory, and returns
+    one aggregated report (:func:`_run_rebuild_corners`). Without the field
+    the request takes the single-run path, byte-for-byte unchanged.
+
+    **Batch dispatch (issue #3518).** ``backend`` (the CLI's ``--backend``) >
+    ``request.backend`` > ``$KLT_SIM_BACKEND`` > ``local`` selects where the
+    ``pdk.rebuild_corners`` units run; ``batch`` submits one job per corner
+    to the Spot batch fleet (:mod:`klayout_tools.place_and_route_batch`) and
+    never falls back to running a unit on this host. A single-unit request
+    stays local under a host-default ``batch``.
     """
     _own_stage_root(_ownership, request_path)
     request = load_request(request_path)
-    request_dir = os.path.dirname(os.path.abspath(request_path))
+    rebuild_corners = _validate_rebuild_corners(request)
 
-    engine = request.get("engine", "openroad")
-    if engine not in SUPPORTED_ENGINES:
-        raise PlaceAndRouteError(
-            f"unsupported engine '{engine}' (supported: {', '.join(SUPPORTED_ENGINES)})"
+    from . import place_and_route_batch
+
+    selected = place_and_route_batch.resolve_backend(
+        backend, request, units=len(rebuild_corners) if rebuild_corners else 1
+    )
+    if selected == "batch":
+        assert rebuild_corners is not None and _ownership is not None
+        return place_and_route_batch.run_rebuild_corners_batch(
+            request_path,
+            request,
+            rebuild_corners,
+            pdk_variant=pdk_variant,
+            ownership=_ownership,
         )
-
-    netlist_path = _resolve_netlist(request["netlist"], request_dir)
-    # Issue #1973: fail here, naming the construct and its line, rather than
-    # letting a `signed` qualifier surface as OpenSTA's raw `STA-0171` syntax
-    # error at the floorplan stage or a bare `x` constant as TritonRoute's
-    # `DRT-0305` a full route attempt later. See this module's docstring
-    # "Netlist pre-flight" section.
-    _reject_unsupported_netlist_constructs(netlist_path)
-
-    hdl_toplevel = request["hdl_toplevel"]
-    if not isinstance(hdl_toplevel, str) or not hdl_toplevel:
-        raise PlaceAndRouteError("request.hdl_toplevel must be a non-empty string")
-
-    pdk_spec = request["pdk"]
-    if not isinstance(pdk_spec, dict):
-        raise PlaceAndRouteError("request.pdk must be a JSON object")
-    cell_library = pdk_spec.get("cell_library")
-    if not isinstance(cell_library, str) or not cell_library:
-        raise PlaceAndRouteError("request.pdk.cell_library is required")
-    requested_corner = pdk_spec.get("corner")
-    if requested_corner is not None and not (
-        isinstance(requested_corner, str) and requested_corner
-    ):
-        raise PlaceAndRouteError(
-            "request.pdk.corner must be a non-empty string when given"
+    if rebuild_corners is not None:
+        assert _ownership is not None  # supplied by `owns_run`
+        return _run_rebuild_corners(
+            request_path,
+            request,
+            rebuild_corners,
+            pdk_variant=pdk_variant,
+            pdk_root=pdk_root,
+            ownership=_ownership,
         )
-    # `request.pdk.interconnect_corner` (issue #1100): the tech LEF's own
-    # parasitic-extraction corner -- open_pdks stages exactly three
-    # (`"min"`/`"nom"`/`"max"`, `lef_files`'s own docstring in `pdk.py`), a
-    # fixed convention unlike the dynamic, per-installed-file liberty
-    # corner set `_resolve_liberty` resolves below, so this is a plain
-    # enum-check rather than file-existence-driven resolution. `None`
-    # (the default, field omitted) preserves this module's original
-    # behaviour byte-for-byte: `_resolve_lef` resolves the same `"nom"`
-    # tech LEF it always has.
-    interconnect_corner = pdk_spec.get("interconnect_corner", "nom")
-    if interconnect_corner not in _TECH_LEF_CORNERS:
-        raise PlaceAndRouteError(
-            "request.pdk.interconnect_corner must be one of: "
-            + ", ".join(sorted(_TECH_LEF_CORNERS))
-        )
-    # Issue #1092: scopes the post-route multi-corner sweep to a named
-    # subset of the shipped corners -- shape-validated here, membership-
-    # validated once `cell_library`'s corner set is resolved below (the
-    # "route" stage branch).
-    sweep_corners = _validate_sweep_corners(pdk_spec.get("sweep_corners"))
-
-    floorplan = _validate_floorplan(request["floorplan"])
-    io_spec = _validate_io(request.get("io"), cell_library)
-    macros = _validate_macros(request.get("macros"), request_dir, netlist_path)
-    power = _validate_power(request.get("power"), cell_library)
-    (
-        clock_port,
-        clock_period_ns,
-        max_transition_ns,
-        max_capacitance_pf,
-        max_fanout,
-        input_delay_ns,
-        output_delay_ns,
-    ) = _validate_constraints(request.get("constraints"))
-    seed = _validate_seed(request["seed"])
-    target_stage = _validate_target_stage(request.get("target_stage", "route"))
-    route_critical_nets_percentage = _validate_route_critical_nets_percentage(
-        request.get("route_critical_nets_percentage")
-    )
-    max_antenna_repair_iterations = _validate_max_antenna_repair_iterations(
-        request.get("max_antenna_repair_iterations")
-    )
-    post_route_spef = _validate_post_route_spef(request.get("post_route_spef"))
-    post_route_sdf = _validate_post_route_sdf(
-        request.get("post_route_sdf"), post_route_spef=post_route_spef
+    return _run_single_corner(
+        request_path, request, pdk_variant=pdk_variant, pdk_root=pdk_root
     )
 
-    liberty_path, corner, pdk_info = _resolve_liberty(
-        cell_library, requested_corner, variant=pdk_variant, root=pdk_root
-    )
-    tech_lef, cell_lef = _resolve_lef(cell_library, pdk_info, interconnect_corner)
 
-    # Issue #2170: the joint floorplan/PDN pre-flight -- see
-    # `_validate_pdn_core_fit`'s own docstring for why it lives outside this
-    # function and why it runs here, after `_resolve_lef`.
-    _validate_pdn_core_fit(
-        floorplan=floorplan,
-        power=power,
-        tech_lef=tech_lef,
-        cell_lefs=[cell_lef, *(macro["lef"] for macro in macros)],
-        netlist_path=netlist_path,
-        hdl_toplevel=hdl_toplevel,
-    )
-
-    stage_index = STAGE_ORDER.index(target_stage)
-    stages_to_run = STAGE_ORDER[: stage_index + 1]
-
+def _validate_stage_prerequisites(
+    *,
+    stage_index: int,
+    target_stage: str,
+    cell_library: str,
+    clock_port: str | None,
+    io_spec: dict[str, Any] | None,
+    power: dict[str, Any] | None,
+) -> None:
+    """Fail with a clear request error when ``target_stage`` (or
+    ``request.power``) needs inputs or per-library tables this request lacks
+    (extracted from :func:`_run_single_corner`, issue #3507, to keep its
+    cyclomatic complexity from growing)."""
     # Stages beyond "floorplan" need a clock -- P&R signoff (CTS, routing,
     # timing-driven repair) has no meaning without one, and STA/`-metrics`
     # would otherwise report an unconstrained-design sentinel instead of a
@@ -2196,7 +2171,141 @@ def run_place_and_route(
             f"(issue #1442) at target_stage '{target_stage}'"
         )
 
+
+def _run_single_corner(
+    request_path: str,
+    request: dict[str, Any],
+    *,
+    pdk_variant: str | None,
+    pdk_root: str | None,
+    corner_override: str | None = None,
+    output_subdir: str | None = None,
+) -> dict[str, Any]:
+    """One full floorplan-through-``target_stage`` flow for an already-loaded
+    ``request`` (issue #3507: the unit :func:`run_place_and_route` runs once,
+    or once per ``pdk.rebuild_corners`` entry).
+
+    ``corner_override`` stands in for ``request.pdk.corner`` and
+    ``output_subdir`` names a directory under ``.klt/place-and-route/`` to
+    write into instead of the stage root itself. Both default to ``None``,
+    which is the original single-run behaviour. The caller owns the output
+    directory lock; this function is pure of CLI and transport so a remote
+    dispatcher can call it per corner too.
+    """
+    request_dir = os.path.dirname(os.path.abspath(request_path))
+
+    engine = request.get("engine", "openroad")
+    if engine not in SUPPORTED_ENGINES:
+        raise PlaceAndRouteError(
+            f"unsupported engine '{engine}' (supported: {', '.join(SUPPORTED_ENGINES)})"
+        )
+
+    netlist_path = _resolve_netlist(request["netlist"], request_dir)
+    # Issue #1973: fail here, naming the construct and its line, rather than
+    # letting a `signed` qualifier surface as OpenSTA's raw `STA-0171` syntax
+    # error at the floorplan stage or a bare `x` constant as TritonRoute's
+    # `DRT-0305` a full route attempt later. See this module's docstring
+    # "Netlist pre-flight" section.
+    _reject_unsupported_netlist_constructs(netlist_path)
+
+    hdl_toplevel = request["hdl_toplevel"]
+    if not isinstance(hdl_toplevel, str) or not hdl_toplevel:
+        raise PlaceAndRouteError("request.hdl_toplevel must be a non-empty string")
+
+    pdk_spec = request["pdk"]
+    if not isinstance(pdk_spec, dict):
+        raise PlaceAndRouteError("request.pdk must be a JSON object")
+    cell_library = pdk_spec.get("cell_library")
+    if not isinstance(cell_library, str) or not cell_library:
+        raise PlaceAndRouteError("request.pdk.cell_library is required")
+    requested_corner = (
+        corner_override if corner_override is not None else pdk_spec.get("corner")
+    )
+    if requested_corner is not None and not (
+        isinstance(requested_corner, str) and requested_corner
+    ):
+        raise PlaceAndRouteError(
+            "request.pdk.corner must be a non-empty string when given"
+        )
+    # `request.pdk.interconnect_corner` (issue #1100): the tech LEF's own
+    # parasitic-extraction corner -- open_pdks stages exactly three
+    # (`"min"`/`"nom"`/`"max"`, `lef_files`'s own docstring in `pdk.py`), a
+    # fixed convention unlike the dynamic, per-installed-file liberty
+    # corner set `_resolve_liberty` resolves below, so this is a plain
+    # enum-check rather than file-existence-driven resolution. `None`
+    # (the default, field omitted) preserves this module's original
+    # behaviour byte-for-byte: `_resolve_lef` resolves the same `"nom"`
+    # tech LEF it always has.
+    interconnect_corner = pdk_spec.get("interconnect_corner", "nom")
+    if interconnect_corner not in _TECH_LEF_CORNERS:
+        raise PlaceAndRouteError(
+            "request.pdk.interconnect_corner must be one of: "
+            + ", ".join(sorted(_TECH_LEF_CORNERS))
+        )
+    # Issue #1092: scopes the post-route multi-corner sweep to a named
+    # subset of the shipped corners -- shape-validated here, membership-
+    # validated once `cell_library`'s corner set is resolved below (the
+    # "route" stage branch).
+    sweep_corners = _validate_sweep_corners(pdk_spec.get("sweep_corners"))
+
+    floorplan = _validate_floorplan(request["floorplan"])
+    io_spec = _validate_io(request.get("io"), cell_library)
+    macros = _validate_macros(request.get("macros"), request_dir, netlist_path)
+    power = _validate_power(request.get("power"), cell_library)
+    (
+        clock_port,
+        clock_period_ns,
+        max_transition_ns,
+        max_capacitance_pf,
+        max_fanout,
+        input_delay_ns,
+        output_delay_ns,
+    ) = _validate_constraints(request.get("constraints"))
+    seed = _validate_seed(request["seed"])
+    target_stage = _validate_target_stage(request.get("target_stage", "route"))
+    route_critical_nets_percentage = _validate_route_critical_nets_percentage(
+        request.get("route_critical_nets_percentage")
+    )
+    max_antenna_repair_iterations = _validate_max_antenna_repair_iterations(
+        request.get("max_antenna_repair_iterations")
+    )
+    post_route_spef = _validate_post_route_spef(request.get("post_route_spef"))
+    post_route_sdf = _validate_post_route_sdf(
+        request.get("post_route_sdf"), post_route_spef=post_route_spef
+    )
+
+    liberty_path, corner, pdk_info = _resolve_liberty(
+        cell_library, requested_corner, variant=pdk_variant, root=pdk_root
+    )
+    tech_lef, cell_lef = _resolve_lef(cell_library, pdk_info, interconnect_corner)
+
+    # Issue #2170: the joint floorplan/PDN pre-flight -- see
+    # `_validate_pdn_core_fit`'s own docstring for why it lives outside this
+    # function and why it runs here, after `_resolve_lef`.
+    _validate_pdn_core_fit(
+        floorplan=floorplan,
+        power=power,
+        tech_lef=tech_lef,
+        cell_lefs=[cell_lef, *(macro["lef"] for macro in macros)],
+        netlist_path=netlist_path,
+        hdl_toplevel=hdl_toplevel,
+    )
+
+    stage_index = STAGE_ORDER.index(target_stage)
+    stages_to_run = STAGE_ORDER[: stage_index + 1]
+
+    _validate_stage_prerequisites(
+        stage_index=stage_index,
+        target_stage=target_stage,
+        cell_library=cell_library,
+        clock_port=clock_port,
+        io_spec=io_spec,
+        power=power,
+    )
+
     output_dir = os.path.join(request_dir, ".klt", "place-and-route")
+    if output_subdir is not None:
+        output_dir = os.path.join(output_dir, output_subdir)
     try:
         os.makedirs(output_dir, exist_ok=True)
     except OSError as exc:
@@ -2767,6 +2876,118 @@ def run_place_and_route(
         # PDN), so `status`/exit codes are unchanged.
         "warnings": warnings,
         "provenance": provenance,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Physical rebuild per corner (issue #3507)
+# --------------------------------------------------------------------------- #
+
+
+def _validate_rebuild_corners(request: dict[str, Any]) -> list[str] | None:
+    """Optional ``request.pdk.rebuild_corners`` (issue #3507) -- shape and
+    exclusivity only; each name is resolved against the cell library's
+    shipped corners by :func:`_run_rebuild_corners`.
+
+    Unlike ``pdk.sweep_corners`` (a post-route STA scope), this re-runs the
+    whole flow per corner, so it is mutually exclusive with the single
+    ``pdk.corner`` selector, must be non-empty, and must not repeat a name
+    (two units would share one output directory). ``None`` when omitted.
+    """
+    pdk_spec = request.get("pdk")
+    if not isinstance(pdk_spec, dict) or "rebuild_corners" not in pdk_spec:
+        return None
+    value = pdk_spec["rebuild_corners"]
+    if (
+        not isinstance(value, list)
+        or not value
+        or not all(isinstance(item, str) and item for item in value)
+    ):
+        raise PlaceAndRouteError(
+            "request.pdk.rebuild_corners must be a non-empty list of non-empty strings"
+        )
+    if pdk_spec.get("corner") is not None:
+        raise PlaceAndRouteError(
+            "request.pdk.rebuild_corners and request.pdk.corner are mutually exclusive"
+        )
+    duplicates = sorted({name for name in value if value.count(name) > 1})
+    if duplicates:
+        raise PlaceAndRouteError(
+            "request.pdk.rebuild_corners names corner(s) more than once: "
+            + ", ".join(duplicates)
+        )
+    return value
+
+
+def _run_rebuild_corners(
+    request_path: str,
+    request: dict[str, Any],
+    corners: list[str],
+    *,
+    pdk_variant: str | None,
+    pdk_root: str | None,
+    ownership: contextlib.ExitStack,
+) -> dict[str, Any]:
+    """Run :func:`_run_single_corner` serially once per ``corners`` entry and
+    aggregate the results into one ``corner_runs`` report (issue #3507).
+
+    Request-level problems (an unreadable netlist, an unknown corner name)
+    raise before any unit starts. A unit that then fails is recorded in its
+    own entry and does not stop the others; the top-level ``status`` is
+    ``"failed"`` if any did.
+    """
+    request_dir = os.path.dirname(os.path.abspath(request_path))
+    netlist_path = _resolve_netlist(request["netlist"], request_dir)
+    input_hash = _content_hash(netlist_path)
+    cell_library = request["pdk"].get("cell_library")
+    if not isinstance(cell_library, str) or not cell_library:
+        raise PlaceAndRouteError("request.pdk.cell_library is required")
+
+    deck_hashes: dict[str, str | None] = {}
+    for name in corners:
+        liberty_path, _corner, _info = _resolve_liberty(
+            cell_library, name, variant=pdk_variant, root=pdk_root
+        )
+        deck_hashes[name] = _content_hash(liberty_path)
+
+    stage_root = os.path.join(request_dir, ".klt", "place-and-route")
+    corner_runs: list[dict[str, Any]] = []
+    for name in corners:
+        unit_dir = os.path.join(stage_root, name)
+        ownership.enter_context(output_lock.hold_output_dir(unit_dir))
+        entry: dict[str, Any] = {
+            "corner": name,
+            "output_dir": unit_dir,
+            "input_content_hash": input_hash,
+            "deck_content_hash": deck_hashes[name],
+        }
+        try:
+            report = _run_single_corner(
+                request_path,
+                request,
+                pdk_variant=pdk_variant,
+                pdk_root=pdk_root,
+                corner_override=name,
+                output_subdir=name,
+            )
+        except PlaceAndRouteError as exc:
+            entry.update({"status": "failed", "error": str(exc)})
+        else:
+            entry.update(report)
+        corner_runs.append(entry)
+
+    failed = [run["corner"] for run in corner_runs if run["status"] != "ok"]
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "engine": request.get("engine", "openroad"),
+        "engine_version": _openroad_version(),
+        "hdl_toplevel": request.get("hdl_toplevel"),
+        "status": "failed" if failed else "ok",
+        "target_stage": request.get("target_stage", "route"),
+        "seed": request.get("seed"),
+        "rebuild_corners": list(corners),
+        "failed_corners": failed,
+        "corner_runs": corner_runs,
     }
 
 
@@ -5537,6 +5758,7 @@ def _place_and_route_provenance_hashes(
     *,
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
+    corner: str | None = None,
 ) -> tuple[str | None, str | None]:
     """Re-derive ``(input_content_hash, deck_content_hash)`` for the request
     at ``request_path`` **without invoking OpenROAD** -- the cheap half of
@@ -5561,7 +5783,7 @@ def _place_and_route_provenance_hashes(
         raise PlaceAndRouteError("request.pdk.cell_library is required")
     liberty_path, _corner, _pdk_info = _resolve_liberty(
         cell_library,
-        pdk_spec.get("corner"),
+        corner if corner is not None else pdk_spec.get("corner"),
         variant=pdk_variant,
         root=pdk_root,
     )
@@ -5594,6 +5816,36 @@ def check_place_and_route_report(
     report or an unresolvable request -- never a traceback.
     """
     committed = load_committed_report(report_path, PlaceAndRouteError)
+    rebuild_corners = _validate_rebuild_corners(load_request(request_path))
+    if rebuild_corners is not None:
+        # Issue #3507: a multi-corner request is verified per unit -- each
+        # corner's recorded input/deck digests against a fresh re-hash.
+        by_corner = {
+            run.get("corner"): run
+            for run in committed.get("corner_runs") or []
+            if isinstance(run, dict)
+        }
+        unit_checks = []
+        for name in rebuild_corners:
+            input_hash, deck_hash = _place_and_route_provenance_hashes(
+                request_path, pdk_variant=pdk_variant, pdk_root=pdk_root, corner=name
+            )
+            recorded = by_corner.get(name, {})
+            unit_checks.append(
+                hash_check(
+                    f"corner_runs[{name}].input_content_hash",
+                    recorded.get("input_content_hash"),
+                    input_hash,
+                )
+            )
+            unit_checks.append(
+                hash_check(
+                    f"corner_runs[{name}].deck_content_hash",
+                    recorded.get("deck_content_hash"),
+                    deck_hash,
+                )
+            )
+        return build_check_result(report_path=report_path, checks=unit_checks)
     input_hash, deck_hash = _place_and_route_provenance_hashes(
         request_path, pdk_variant=pdk_variant, pdk_root=pdk_root
     )
@@ -5618,6 +5870,7 @@ def rerun_place_and_route_report(
     *,
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
+    backend: str | None = None,
 ) -> dict[str, Any]:
     """``klt place-and-route <request> --check <report> --rerun`` (full mode,
     issue #2224): verify a committed report by actually re-running the
@@ -5645,7 +5898,7 @@ def rerun_place_and_route_report(
     """
     committed = load_committed_report(report_path, PlaceAndRouteError)
     fresh = run_place_and_route(
-        request_path, pdk_variant=pdk_variant, pdk_root=pdk_root
+        request_path, pdk_variant=pdk_variant, pdk_root=pdk_root, backend=backend
     )
     return build_rerun_result(
         report_path=report_path,

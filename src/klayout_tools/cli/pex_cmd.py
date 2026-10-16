@@ -99,11 +99,17 @@ def run(args: argparse.Namespace) -> int:
             # flag was never given, unchanged from every call site that
             # predates it.
             critical_nets=args.critical_nets,
+            # Issue #2974: glob / all-nets forms of --critical-net.
+            critical_net_patterns=args.critical_net_patterns,
+            critical_net_all=args.critical_net_all,
+            critical_net_excludes=args.critical_net_excludes,
             # `--distributed-rc` (issue #977, Epic #709 Phase 2b): replaces
             # the star/Gamma-shunt R/C model with a distributed ladder for
             # every `--critical-net`-named net. `False` when the flag was
             # never given, unchanged from every call site that predates it.
             distributed_rc=args.distributed_rc,
+            # `--substrate-tie-ohms` (issue #3089): `None` when never given.
+            substrate_tie_ohms=args.substrate_tie_ohms,
             # `--mom-rlc-net`/`--mom-rlc-resistance-ohm`/
             # `--mom-rlc-capacitance-ff`/`--mom-rlc-inductance-nh` (issue
             # #988, Epic #709 Phase 3a): substitutes a caller-supplied R/L/C
@@ -130,6 +136,10 @@ def run(args: argparse.Namespace) -> int:
             # when the flag was never given, unchanged from every call site
             # that predates it.
             flatten_schematic=args.flatten_schematic,
+            # `--device-only-leg` (issue #3298): a parasitic-free third leg
+            # splitting `delta[]` into representation and parasitic parts.
+            # `False` when the flag was never given.
+            device_only_leg=args.device_only_leg,
         )
     except PexError as exc:
         # Issue #2889: a classified error (today: `schematic_flatten_*`)
@@ -222,6 +232,34 @@ def _print_schematic_flatten(block: dict | None) -> None:
     )
 
 
+def _print_device_only_leg(report: dict) -> None:
+    """One ``device_only_netlist:`` line (issue #3298), or nothing when
+    ``--device-only-leg`` was not given."""
+    if "device_only_netlist" not in report:
+        return
+    print(
+        f"device_only_netlist: {render_path_field(report['device_only_netlist'])}  "
+        f"device_cards={report['device_card_count']}  "
+        f"match={report['device_cards_match']}"
+    )
+
+
+def _device_only_desc(row: dict) -> str:
+    """The ``--device-only-leg`` split of one delta row (issue #3298), or
+    nothing for a row that carries none."""
+    if "device_only_value" not in row:
+        return ""
+
+    def pct(value: float | None) -> str:
+        return f"{value:+.3f}%" if value is not None else "-"
+
+    return (
+        f"  device_only={row['device_only_value']!r}  "
+        f"representation={pct(row['representation_delta_pct'])}  "
+        f"parasitic={pct(row['parasitic_delta_pct'])}"
+    )
+
+
 def _print_text(report: dict) -> None:
     # Issue #1261: `layout`/`netlist`/`reference_netlist` are the
     # `{path, scope}` shape `env_provenance.repo_relative_path` defines --
@@ -233,6 +271,8 @@ def _print_text(report: dict) -> None:
     print(f"reference_netlist: {render_path_field(report['reference_netlist'])}")
     # Additive (issue #2889): only printed when --flatten-schematic was given.
     _print_schematic_flatten(report.get("schematic_flatten"))
+    # Additive (issue #3298): only printed when --device-only-leg was given.
+    _print_device_only_leg(report)
     print(f"status: {report['status']}")
     print(
         f"corners: {report['corner_count']}  "
@@ -310,4 +350,5 @@ def _print_text(report: dict) -> None:
             f"  {row['spec_row']} @ {row['corner_id']}  [{row['status']}]  "
             f"schematic={row['schematic_value']!r}  "
             f"extracted={row['extracted_value']!r}  delta={delta_desc}"
+            + _device_only_desc(row)
         )

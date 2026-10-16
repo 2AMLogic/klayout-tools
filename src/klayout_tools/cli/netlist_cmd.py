@@ -107,7 +107,8 @@ def _print_text(report: dict) -> None:
     # who sees "exit_status: 1" next to "status: generated" and no explanation
     # reasonably concludes something went wrong (issue #55, edge #1).
     print(
-        f"xschem: {xschem['binary']}  exit_status={xschem['exit_status']} "
+        f"xschem: {xschem['binary']}  version={xschem.get('version') or 'unknown'}"
+        f"  exit_status={xschem['exit_status']} "
         "(not the verdict -- xschem exits non-zero on a successful batch "
         f"netlist)  duration={xschem['duration_s']}s"
     )

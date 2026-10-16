@@ -36,6 +36,7 @@ instance rather than only the top cell.
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import itertools
 import json
 import os
@@ -50,7 +51,7 @@ from ._layout import select_top_cells as _select_top_cells
 from ._paths import _load_request_json
 from ._paths import load_request_arg as _shared_load_request_arg
 from ._paths import validate_request_shape as _shared_validate_request_shape
-from ._provenance import _content_hash, build_provenance
+from ._provenance import _content_hash, build_provenance, sha256_file
 from ._report_verify import build_check_result, build_rerun_result, get_path, hash_check
 from ._report_verify import load_committed_report as _load_committed_report
 from .coverage import (
@@ -68,6 +69,7 @@ from .decks import (
     get_deck,
     get_layer_names,
     get_nominal_dbu,
+    get_unchecked_rules,
     get_unmodeled_voltage_markers,
 )
 from .layers import layers_report
@@ -96,7 +98,13 @@ _SINGLE_LAYER_CHECKS = {"width", "space", "notch", "isolated"}
 # `_validate_threshold_max`/`_run_width_max_check` below.
 _MAX_BOUND_CHECKS = {"width"}
 # Check kinds that compare a region against another region (other_layer required).
-_TWO_LAYER_CHECKS = {"separation", "enclosing", "enclosed", "overlap"}
+_TWO_LAYER_CHECKS = {
+    "separation",
+    "enclosing",
+    "enclosed",
+    "overlap",
+    "enclosing_adjacent",
+}
 # Two-layer check kinds where the "enclosed" layer can lie entirely outside
 # the "enclosing" layer -- a case `Region.enclosing_check`/`enclosed_check`
 # never reports (they only measure *facing edges*, so zero spatial overlap
@@ -150,6 +158,7 @@ _DERIVED_LAYER_MODES = {
     "not_interacting",
     "holes",
     "union",
+    "gate_endcap",
 }
 
 # Every `DerivedLayer.context` value (issue #3484); `None` = no partition.
@@ -181,7 +190,23 @@ class DrcError(Exception):
 
     The CLI turns this into a clean stderr message + exit code 1, never a
     traceback.
+
+    ``code`` (issue #3076) is an optional stable machine-readable
+    classification, surfaced as ``error.code`` in the JSON error envelope
+    (``docs/json-contract.md``); ``None`` for every error that has none.
     """
+
+    def __init__(self, message: str = "", code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+#: Error codes for a ``--engine klayout`` second opinion that could not run
+#: (issue #3076): distinguishes "unavailable" from bad input without parsing
+#: ``error.message``. Exit code stays ``1``.
+CODE_KLAYOUT_UNAVAILABLE = "klayout_unavailable"
+CODE_KLAYOUT_VERSION_TOO_OLD = "klayout_version_too_old"
+CODE_NEGATIVE_CONTROL_FAILED = "negative_control_failed"
 
 
 #: The one top-level field a ``klt drc`` request document must carry (issue
@@ -402,7 +427,8 @@ def _vacuity_layers(rule: DrcRule) -> set[tuple[int, int]]:
     elif rule.derived_layer is not None:
         layers = {rule.derived_layer.base}
         if rule.derived_layer.intersect_with is not None and (
-            rule.derived_layer.mode in ("sized_intersection", "overlapping")
+            rule.derived_layer.mode
+            in ("sized_intersection", "overlapping", "gate_endcap")
         ):
             layers.add(rule.derived_layer.intersect_with)
     else:
@@ -525,6 +551,7 @@ def _derived_region_unscoped(
     Region; neither input (nor the source layout) is modified.
     """
     derived = rule.derived_layer
+    assert derived is not None, "_derived_region requires a derived_layer rule"
     size_dbu = round(derived.sized_by_um / dbu)
     if derived.mode == "holes":
         # Interior voids of the merged `base` region (#1976) --
@@ -536,6 +563,23 @@ def _derived_region_unscoped(
         # with no holes at all derives an empty region, which is simply
         # nothing to report -- not an error.
         return base_region.merged().holes()
+    if derived.mode == "gate_endcap":
+        # Endcap probe zones (#2936), e.g. sky130's `poly.8`: the part of
+        # each `base` (diffusion) edge that lies under or flush with an
+        # `intersect_with` (poly) shape is a gate end edge; extend it
+        # outward by `sized_by_um`. Only the *outer* side is probed, so poly
+        # that merely abuts the diffusion from outside never reads as a
+        # gate. The rule pairs this region with `check="enclosed"`,
+        # `other_layer=<poly>` and a zero threshold: whatever part of a probe
+        # zone is not covered by poly is the missing endcap. A flush poly
+        # edge is collinear with the diffusion edge, which `inside_part`
+        # alone excludes, hence the explicit edge AND.
+        base_edges = base_region.merged().edges()
+        poly_region = intersect_region.merged()
+        gate_end_edges = (
+            base_edges.inside_part(poly_region) + (base_edges & poly_region.edges())
+        ).merged()
+        return gate_end_edges.extended(0, 0, size_dbu, 0, False)
     if derived.mode == "union":
         # Boolean join of both inputs (#2688), e.g. sg13g2's `Cnt.c`
         # enclosing region `activ.join(activ_mask)`. `_run_check` merges it
@@ -1102,6 +1146,10 @@ def run_drc(
                 "rules_skipped": [<rule id>, ...],
                 "voltage_domain_warnings": [
                     {"marker": "<layer>/<datatype>", "description": str}, ...
+                ],
+                "unchecked_rules": [
+                    {"rule": str, "layer": "<layer>/<datatype>",
+                     "description": str}, ...
                 ],
                 "deck_scope": [<scope identifier>, ...],
                 "nothing_checked": bool,
@@ -1855,6 +1903,17 @@ def run_drc(
                 {"marker": _fmt(marker), "description": description}
             )
 
+    # Issue #3012: foundry rules the deck knows but cannot evaluate, named so
+    # a `clean` cannot be read as covering them. Only when the rule's layer
+    # is actually in the stream.
+    unchecked_rules = [
+        {"rule": rule_id, "layer": _fmt(layer), "description": description}
+        for rule_id, (layer, description) in sorted(
+            get_unchecked_rules(deck_name).items()
+        )
+        if layer in stream_layer_tuples
+    ]
+
     # Issue #2110: the two common-coverage categories this engine's single
     # "a layer it reads is absent" skip splits into -- see
     # `_classify_skipped_rules` for why an empty assessment domain is
@@ -1879,6 +1938,7 @@ def run_drc(
         "rules_checked": sorted(rules_checked),
         "rules_skipped": sorted(rules_skipped),
         "voltage_domain_warnings": voltage_domain_warnings,
+        "unchecked_rules": unchecked_rules,
         "deck_scope": deck_scope,
         # Issue #1996: the shared roll-up, so a reader (`klt signoff`) can
         # refuse a "clean" verdict measured over nothing without re-deriving
@@ -2022,6 +2082,17 @@ def check_drc_report(report_path: str) -> dict[str, Any]:
                 "provenance.waivers.content_hash",
                 get_path(committed, ("provenance", "waivers", "content_hash")),
                 _content_hash(waivers_file),
+            )
+        )
+    recorded_tree = get_path(committed, ("provenance", "deck", "tree", "content_hash"))
+    if recorded_tree is not None:
+        deck_path = _deck_path_for_report(committed)
+        current_tree = _deck_tree_identity(deck_path) if deck_path else None
+        checks.append(
+            hash_check(
+                "provenance.deck.tree.content_hash",
+                recorded_tree,
+                current_tree["content_hash"] if current_tree else None,
             )
         )
     return build_check_result(report_path=report_path, checks=checks)
@@ -2272,6 +2343,8 @@ def _run_check(
     if check in _TWO_LAYER_CHECKS:
         if other_region is None:
             raise DrcError(f"rule '{rule.id}': check '{check}' requires other_layer")
+        if check == "enclosing_adjacent":
+            return _run_enclosing_adjacent_check(region, other_region, d)
         edge_pairs = getattr(region, f"{check}_check")(other_region, d)
 
         outside_region = None
@@ -2299,6 +2372,37 @@ def _run_check(
         return edge_pairs, outside_region
 
     raise DrcError(f"rule '{rule.id}': unsupported check kind '{check}'")
+
+
+def _run_enclosing_adjacent_check(
+    region: Any, other_region: Any, d: int
+) -> tuple[Any, Any]:
+    """``check="enclosing_adjacent"``: sky130's two-adjacent-edges enclosure
+    rules (``via.5a``, ``m2.5``, ``via2.5``, ``via3.5``, #3316).
+
+    Mirrors ``sky130A_mr.drc``: the cut edges whose enclosure is below ``d``
+    (``enclosing_check(...).second_edges``) are tested for a *corner* --
+    two short edges meeting at an angle under 100 degrees -- and every cut
+    touching such a corner is a violation. So a cut passes when its short
+    sides (< ``d``) are at most one side or two opposite sides; it fails
+    when two adjacent sides are both short. A cut with no facing edge at
+    all yields no edge pair and is not reported here (the sibling
+    ``enclosing`` rule already reports an escape).
+
+    Returns ``(empty EdgePairs, cuts)``: one polygon per offending cut
+    (reported through ``run_drc``'s polygon-term path), not one entry per
+    corner, which is the official deck's per-cut counting.
+    """
+    import klayout.db as kdb
+
+    short_edges = region.enclosing_check(
+        other_region, d, metrics=kdb.Metrics.Projection
+    ).second_edges()
+    corners = short_edges.width_check(
+        1, metrics=kdb.Metrics.Euclidian, ignore_angle=100
+    )
+    bad_cuts = other_region.interacting(corners.polygons(1))
+    return kdb.EdgePairs(), bad_cuts
 
 
 def _rule_input_layers(rule: DrcRule) -> set[tuple[int, int]]:
@@ -3428,7 +3532,8 @@ def _preflight_klayout_version(executable: str, min_version: str | None) -> None
             f"cannot verify the minimum KLayout version ({required_text}): "
             f"{executable!r} binary not found on PATH. Install KLayout "
             f">= {required_text} (https://www.klayout.de/build.html) or omit "
-            f"the minimum version. ({exc})"
+            f"the minimum version. ({exc})",
+            code=CODE_KLAYOUT_UNAVAILABLE,
         ) from exc
     except subprocess.TimeoutExpired as exc:
         raise DrcError(
@@ -3440,7 +3545,8 @@ def _preflight_klayout_version(executable: str, min_version: str | None) -> None
         raise DrcError(
             f"cannot verify the minimum KLayout version ({required_text}): "
             f"could not launch '{executable} -v' ({exc}). Check that the "
-            f"binary is executable and install KLayout >= {required_text}."
+            f"binary is executable and install KLayout >= {required_text}.",
+            code=CODE_KLAYOUT_UNAVAILABLE,
         ) from exc
     output = ((probe.stdout or "") + "\n" + (probe.stderr or "")).strip()
     if probe.returncode != 0:
@@ -3464,8 +3570,92 @@ def _preflight_klayout_version(executable: str, min_version: str | None) -> None
             f"Install or update the KLayout application to {required_text} "
             "or newer (https://www.klayout.de/build.html); the pip `klayout` "
             "package is a separate install and is not used by --engine "
-            "klayout. See docs/cli/drc.md, 'Engine' -> 'klayout'."
+            "klayout. See docs/cli/drc.md, 'Engine' -> 'klayout'.",
+            code=CODE_KLAYOUT_VERSION_TOO_OLD,
         )
+
+
+def _deck_tree_identity(deck_file: str) -> dict[str, Any] | None:
+    """Additive identity for a deck that is a *tree* of files (issue #3076).
+
+    ``provenance.deck.content_hash`` pins only the entry script; a vendor
+    deck that pulls in sibling files via literal ``require``/``load`` is not
+    pinned by it. Returns ``None`` for a single-file deck (its identity is
+    unchanged), else ``{"file_count", "content_hash", "release"}`` where
+    ``content_hash`` is a sha256 over the sorted ``(relative path, file
+    hash)`` pairs of the entry script plus every literal include reachable
+    from it, and ``release`` is ``git describe --tags --always --dirty`` of
+    the deck's checkout (``None`` when it is not a git checkout or git is
+    unavailable). Computed-path includes are not followed (see
+    :func:`_deck_script_files`).
+    """
+    files = _deck_script_files(deck_file)
+    if len(files) < 2:
+        return None
+    root = os.path.commonpath([os.path.dirname(f) for f in files])
+    digest = hashlib.sha256()
+    for rel, path in sorted((os.path.relpath(f, root), f) for f in files):
+        digest.update(f"{rel}\0{sha256_file(path)}\n".encode())
+    release: str | None = None
+    try:
+        described = subprocess.run(
+            [
+                "git",
+                "-C",
+                os.path.dirname(os.path.abspath(deck_file)),
+                "describe",
+                "--tags",
+                "--always",
+                "--dirty",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if described.returncode == 0:
+            release = described.stdout.strip() or None
+    except (OSError, subprocess.SubprocessError):
+        release = None
+    return {
+        "file_count": len(files),
+        "content_hash": f"sha256:{digest.hexdigest()}",
+        "release": release,
+    }
+
+
+def _run_negative_control(
+    control_path: str,
+    deck_file: str,
+    categories: list[str] | None,
+    **engine_kwargs: Any,
+) -> dict[str, Any]:
+    """Run the same deck against a known-bad fixture and require findings
+    (issue #3076): proof the supplemental deck actually executed, so a
+    vacuously clean verdict cannot pass for a real one. Raises
+    :class:`DrcError` (code ``negative_control_failed``) when the fixture
+    yields no violation, or misses an expected rule category."""
+    control = run_drc_klayout_engine(control_path, deck_file, **engine_kwargs)
+    found = sorted({v["rule"] for v in control["violations"]})
+    missing = sorted(set(categories or []) - set(found))
+    if control["violation_count"] < 1 or missing:
+        detail = (
+            f"missing expected categories {missing}"
+            if control["violation_count"] and missing
+            else "no violations reported"
+        )
+        raise DrcError(
+            f"negative control {control_path!r} failed on the same deck: "
+            f"{detail} -- the deck may not have executed its rules, so a "
+            "clean verdict on the real layout cannot be trusted",
+            code=CODE_NEGATIVE_CONTROL_FAILED,
+        )
+    return {
+        "file": control_path,
+        "status": "passed",
+        "violation_count": control["violation_count"],
+        "rules_found": found,
+        "expected_categories": sorted(categories or []),
+    }
 
 
 def _preflight_deck_host_tools(deck_file: str, allow_missing_host_tools: bool) -> None:
@@ -3630,6 +3820,7 @@ def _klayout_engine_coverage(
         "layers_in_stream_without_rules": [],
         "rules_skipped": [],
         "voltage_domain_warnings": [],
+        "unchecked_rules": [],
         "deck_scope": [],
         **build_check_coverage(checked=checked, unknown=unknown),
     }
@@ -3773,6 +3964,20 @@ def _rerun_assertion_kwargs(committed: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _resolve_provenance_pdk(
+    pdk_variant: str | None, pdk_root: str | None
+) -> dict[str, Any] | None:
+    """The :func:`klayout_tools.pdk.find_pdk` record for ``provenance.pdk``
+    when ``--pdk``/``--pdk-root`` was given, else ``None``. A missing PDK
+    raises :class:`DrcError`."""
+    if pdk_variant is None and pdk_root is None:
+        return None
+    try:
+        return find_pdk(variant=pdk_variant, root=pdk_root)
+    except PdkNotFoundError as exc:
+        raise DrcError(str(exc)) from exc
+
+
 def run_drc_klayout_engine(
     path: str,
     deck_file: str,
@@ -3786,6 +3991,8 @@ def run_drc_klayout_engine(
     expected_rule_categories: int | None = None,
     min_klayout_version: str | None = None,
     expected_rule_category_names: list[str] | None = None,
+    negative_control: str | None = None,
+    negative_control_categories: list[str] | None = None,
 ) -> dict[str, Any]:
     """Run a PDK-native KLayout DRC-DSL rule-deck script (``deck_file``,
     typically resolved via :func:`klayout_tools.pdk.drc_deck_file` or an
@@ -3819,6 +4026,13 @@ def run_drc_klayout_engine(
     is empty/``None`` by default, so the existing zero-config contract for a
     self-contained deck (e.g. sky130A's ``sky130A.lydrc``, which needs only
     ``input``/``report``) is unchanged.
+
+    ``negative_control`` (issue #3076, CLI ``--negative-control``) names a
+    known-bad fixture layout that the same deck must flag: it is run first
+    with identical options, and zero violations (or a missing
+    ``negative_control_categories`` entry) raises :class:`DrcError` with
+    code ``negative_control_failed`` rather than reporting the real layout's
+    verdict. The outcome is recorded under ``negative_control``.
 
     Mirrors ``lvs.py``'s ``_run_netgen_lvs`` in every structural way that
     module's docstring calls out:
@@ -4011,12 +4225,7 @@ def run_drc_klayout_engine(
     # layer up in `cli/drc_cmd.py`'s `drc_deck_file` call). Mirrors
     # `run_drc`'s identical guard so an omitted `--pdk` still yields
     # `provenance.pdk: null`.
-    pdk_info: dict[str, Any] | None = None
-    if pdk_variant is not None or pdk_root is not None:
-        try:
-            pdk_info = find_pdk(variant=pdk_variant, root=pdk_root)
-        except PdkNotFoundError as exc:
-            raise DrcError(str(exc)) from exc
+    pdk_info = _resolve_provenance_pdk(pdk_variant, pdk_root)
 
     if not os.path.isfile(deck_file):
         raise DrcError(f"deck file not found: {deck_file}")
@@ -4029,6 +4238,21 @@ def run_drc_klayout_engine(
     # Issue #2689: opt-in application-version floor, probed on the very
     # executable launched below, before any deck work.
     _preflight_klayout_version(_KLAYOUT_EXECUTABLE, min_klayout_version)
+
+    negative_control_result = None
+    if negative_control is not None:
+        negative_control_result = _run_negative_control(
+            negative_control,
+            deck_file,
+            negative_control_categories,
+            top=top,
+            timeout_s=timeout_s,
+            deck_vars=deck_vars,
+            pdk_variant=pdk_variant,
+            pdk_root=pdk_root,
+            allow_deck_errors=allow_deck_errors,
+            allow_missing_host_tools=allow_missing_host_tools,
+        )
 
     # Validates `path` (missing/directory/unreadable) before the subprocess
     # is launched, the same fail-fast order `run_drc` uses -- and gives this
@@ -4062,7 +4286,8 @@ def run_drc_klayout_engine(
                 "could not launch klayout: binary not found on PATH. "
                 "Install KLayout (https://www.klayout.de/build.html) or "
                 "omit --engine klayout to use the curated deck instead. "
-                f"({exc})"
+                f"({exc})",
+                code=CODE_KLAYOUT_UNAVAILABLE,
             ) from exc
         except subprocess.TimeoutExpired as exc:
             raise DrcError(
@@ -4161,12 +4386,29 @@ def run_drc_klayout_engine(
             if coverage_assertion is not None
             else {}
         ),
-        "provenance": build_provenance(
-            deck_name=os.path.basename(deck_file),
-            deck_path=deck_file,
-            pdk=pdk_info,
-            input_path=path,
-            deck_options=deck_vars,
-            include_klayout_version_mismatch=True,
+        **(
+            {"negative_control": negative_control_result}
+            if negative_control_result is not None
+            else {}
+        ),
+        "provenance": _with_deck_tree(
+            build_provenance(
+                deck_name=os.path.basename(deck_file),
+                deck_path=deck_file,
+                pdk=pdk_info,
+                input_path=path,
+                deck_options=deck_vars,
+                include_klayout_version_mismatch=True,
+            ),
+            deck_file,
         ),
     }
+
+
+def _with_deck_tree(provenance: dict[str, Any], deck_file: str) -> dict[str, Any]:
+    """Add ``provenance.deck.tree`` (issue #3076) for a multi-file deck."""
+    tree = _deck_tree_identity(deck_file)
+    deck = provenance.get("deck")
+    if tree is not None and isinstance(deck, dict):
+        deck["tree"] = tree
+    return provenance

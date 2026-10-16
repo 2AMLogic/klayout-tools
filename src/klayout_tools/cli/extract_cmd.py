@@ -358,9 +358,15 @@ _REQUEST_FIELD_DESTS = {
         "spef",
         "critical_nets",
         "parasitics_nets",
+        "critical_net_patterns",
+        "critical_net_all",
+        "critical_net_excludes",
+        "parasitics_net_patterns",
+        "strict_net_patterns",
         "parasitic_variants",
         "parasitics_top_cell_only",
         "distributed_rc",
+        "substrate_tie_ohms",
         "resistance_paths",
         "resistance_path_max_nodes",
         "resistance_path_max_resistors",
@@ -463,9 +469,15 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             "spef": _path("spef"),
             "critical_nets": _str_list("critical_nets"),
             "parasitics_nets": _str_list("parasitics_nets"),
+            "critical_net_patterns": _str_list("critical_net_patterns"),
+            "critical_net_all": _bool("critical_net_all"),
+            "critical_net_excludes": _str_list("critical_net_excludes"),
+            "parasitics_net_patterns": _str_list("parasitics_net_patterns"),
+            "strict_net_patterns": _bool("strict_net_patterns"),
             "parasitic_variants": _str_list("parasitic_variants"),
             "parasitics_top_cell_only": _bool("parasitics_top_cell_only"),
             "distributed_rc": _bool("distributed_rc"),
+            "substrate_tie_ohms": _number("substrate_tie_ohms"),
             "resistance_paths": _request_resistance_paths(request),
             "resistance_path_max_nodes": _request_int(
                 request, "resistance_path_max_nodes"
@@ -630,6 +642,13 @@ def run(args: argparse.Namespace) -> int:
             # every net in the design. `None` when the flag was never given,
             # unchanged from every call site that predates it.
             parasitics_nets=args.parasitics_nets,
+            # Issue #2974: glob / all-nets selectors resolved against the
+            # extracted nets. Defaults leave every earlier call unchanged.
+            critical_net_patterns=args.critical_net_patterns,
+            critical_net_all=args.critical_net_all,
+            critical_net_excludes=args.critical_net_excludes,
+            parasitics_net_patterns=args.parasitics_net_patterns,
+            strict_net_patterns=args.strict_net_patterns,
             # `--parasitic-variant` (issue #3056): drops R/C elements at
             # injection time. `None` when the flag was never given,
             # unchanged from every call site that predates it.
@@ -644,6 +663,9 @@ def run(args: argparse.Namespace) -> int:
             # every `--critical-net`-named net. `False` when the flag was
             # never given, unchanged from every call site that predates it.
             distributed_rc=args.distributed_rc,
+            # `--substrate-tie-ohms` (issue #3089): `None` when the flag was
+            # never given -- the default 1e12 tie.
+            substrate_tie_ohms=args.substrate_tie_ohms,
             # `--resistance-path` (issue #2765): shortest series path
             # resistance queries over --distributed-rc ladders. `None` when
             # the flags were never given, unchanged from every call site

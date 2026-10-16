@@ -144,7 +144,7 @@ A request naming both, or neither, is a request error.
 | `constraints.report_ports` | list of strings \| omitted | Additive field (issue #3042). Literal port names (one scalar port or one bus bit such as `data[3]`) whose **own** worst setup and hold path is reported as `port_paths`, alongside the global `worst_*_path`. Same key rules as the per-port delay maps: no wildcards, whole buses or Tcl. Entries must be unique non-empty strings; the clock port, unknown and ambiguous names are request errors. Any direction is allowed. Omitted or `[]` emits nothing. See "Per-port path queries" below. |
 | `constraints.wire_load_model` / `.wire_load_mode` | string \| omitted | (Issue #1825.) **Only valid in `verilog` mode** — a request error otherwise. Drives OpenSTA's own `set_wire_load_model`/`set_wire_load_mode`, the parasitics-estimate mechanism for a from-scratch netlist session that has no placement or routing to estimate from. See "From-scratch netlist input" below. |
 | `constraints.propagated_clock` | boolean \| omitted | Additive field (issue #2739). **`def` mode only.** `true` marks the request's created clock propagated (`set_propagated_clock`) in every analyzed corner, so hold/removal checks include the DEF's clock-tree insertion delay and skew (and, with a caller-supplied `spef`, its clock-net RC) — the timing a routed post-CTS design actually meets. Omitted or `false` (the default) keeps the **ideal** SDC-only clock this command has always timed — byte-for-byte the pre-#2739 behavior — so existing requests' numbers never change. Any non-boolean value is a request error; `true` together with `verilog` is a request error (a linked netlist has no placed clock tree to propagate through). Meaningful only for a **post-CTS** DEF: a pre-CTS DEF propagates through plain wires and reports ~zero insertion delay — the response's `clock_propagation` evidence block is what says what propagation actually reached (see "Propagated-clock timing" below). |
-| `spef` | string \| omitted | A caller-supplied SPEF (e.g. from `klt extract --parasitics`) to annotate real parasitics via `read_spef`, in place of OpenSTA's own default (unannotated, LEF-capacitance-only) timing. **Only valid in `def` mode** — rejected together with `verilog` (no routed/placement geometry in that mode for a SPEF to annotate onto). Resolved relative to the request file's own directory. Omitted (the default) times the design with whatever parasitics OpenSTA derives from the loaded LEF/DEF alone. |
+| `spef` | string \| object \| omitted | A caller-supplied SPEF (e.g. from `klt extract --parasitics`) to annotate real parasitics via `read_spef`, in place of OpenSTA's own default (unannotated, LEF-capacitance-only) timing. **Only valid in `def` mode** — rejected together with `verilog` (no routed/placement geometry in that mode for a SPEF to annotate onto). Resolved relative to the request file's own directory. Omitted (the default) times the design with whatever parasitics OpenSTA derives from the loaded LEF/DEF alone. An **object** mapping a non-empty subset of `min`/`nom`/`max` to SPEF paths (same resolution rule) requests the liberty × interconnect matrix — see "Liberty × interconnect matrix" below (issue #3228). An unknown key, an empty object, or a missing/invalid path is a request error naming the offending key; the object form together with `verilog` is a request error. |
 | `geometry_source` | string \| omitted | In `def` mode (issue #1826): `"routed"` (the default, when omitted) declares `def` a fully-implemented, detailed-SPEF-eligible signoff geometry — this command's original and only behaviour. `"placement_estimate"` declares `def` a pre-route DEF from `klt place-and-route`'s `"place"`/`"cts"` stages (its own `unrouted_def_path` output) — nothing about this command's OpenSTA session construction actually changes (it is a plain `read_def` either way), but a placement-/CTS-stage DEF's parasitics come from `estimate_parasitics -placement` (a placement/bounding-box estimate, not routing-derived RC), so the resulting slack numbers are real but less accurate than the same fields on a routed DEF. Purely a caller-supplied label — a bare DEF file carries no stage provenance, so this command cannot infer it — echoed back verbatim as the response's own `geometry_source` field (see "Pre-route DEFs" below). Any other value is a request error in `def` mode. In `verilog` mode (issue #1825): this field is forced to `"netlist_estimate"` regardless of whether the request supplies it — omit it, or set it explicitly to `"netlist_estimate"`; any other explicit value is a request error. |
 
 ## Response
@@ -248,7 +248,7 @@ the path itself, an external one as `<outside repo>`, and an unused input as
 | `wire_load_model` / `wire_load_mode` | string \| null | Additive fields (issue #1825). Echo of `request.constraints.wire_load_model`/`.wire_load_mode` — the parasitics-estimate knob actually used, for provenance. Always `null`/`null` on a `def`-mode response (that mode's parasitics never come from a liberty wire-load model); on a `verilog`-mode response, `null`/`null` means no `set_wire_load*` command was issued at all (the resolved liberty's own default wire load, if any, was left in effect). See "From-scratch netlist input" below. |
 | `clock_mode` | string | Additive field (issue #2739). Exactly `"ideal"` or `"propagated"` — which clock mode **every analyzed corner** was timed with. `"ideal"` (the default) is the pre-#2739 behavior; `"propagated"` when the request set `constraints.propagated_clock: true`. Present on both response shapes (hoisted to the top level on a `corners` response) and identical across every per-corner session. **Never infer it from `clock_skew_ns`** — that is a measured skew metric the clock tree carries under ideal timing too. See "Propagated-clock timing" below. |
 | `clock_propagation` | object \| null | Additive field (issue #2739). `null` unless the request asked for propagated-clock timing. On a `corners` response the field is not hoisted — one block per `corners[]` entry instead (the latencies it reports *do* vary per corner). See "Propagated-clock timing" below for the field shapes. |
-| `spef_path` | object \| null | `{path, scope}` identity of the caller-supplied SPEF (issue #2879; a plain absolute string in schema 1); `null` unless `request.spef` was given (never given together with `request.verilog`). |
+| `spef_path` | object \| null | `{path, scope}` identity of the caller-supplied SPEF (issue #2879; a plain absolute string in schema 1); `null` unless a string `request.spef` was given (never given together with `request.verilog`); also `null` in map form, where each `corners[]` entry carries its own. |
 | `worst_slack_ns` / `total_negative_slack_ns` | number \| null | Setup WNS/TNS from `report_worst_slack_metric -setup`/`report_tns_metric -setup`. Negative values are expected, not an error. A design with **no constrained path at all** reports OpenSTA's own unconstrained sentinel (`1e+39`/`0`) here rather than a real number — check `timing_status` below before treating this as a measurement. |
 | `worst_hold_slack_ns` / `total_negative_hold_slack_ns` | number \| null | Hold WNS/TNS from `report_worst_slack_metric -hold`/`report_tns_metric -hold` — the same field name/pairing convention `klt place-and-route`'s own `worst_hold_slack_ns` uses, so a caller correlating the two commands' output does not hit a naming mismatch on the one field they share. A hold-clean design still reports a real (positive) margin here, not `null` — `null` only when OpenSTA has no hold path to measure at all (e.g. a purely combinational design with no register-to-register path). |
 | `timing_status` | string \| null | Additive field (issue #1865). `"constrained"` \| `"unconstrained"` \| `null` — whether the four slack fields above are measurements at all, or OpenSTA's unconstrained-design sentinel (`1e+39`) restated. `"unconstrained"` whenever either setup or hold WNS carries the sentinel; `null` when the run reported no slack metric at all. **Require `timing_status == "constrained"` before reading any slack number**: `1e+39` is a positive value, so a `worst_slack_ns >= 0` gate otherwise reports "timing closed" on a design that was never timed. The slack fields themselves are unchanged and still report exactly what OpenSTA reported — this field is additive and retypes nothing. Computed identically to `klt place-and-route`'s field of the same name, so the two commands' responses can be correlated directly. See "I/O timing constraints" below. |
@@ -538,6 +538,48 @@ liberty deck differs per invocation) is tracked as follow-up work, not
 required for this field's initial scope — see the issue tracker for the
 follow-up.
 
+## Liberty × interconnect matrix (map-form `spef`, issue #3228)
+
+A caller already holding routing-derived SPEFs for one DEF can characterize
+them against the liberty corner(s) in a single request, instead of one request
+per interconnect corner. In `def` mode, give `spef` as an object:
+
+```json
+{
+  "def": "gcd.def",
+  "pdk": { "cell_library": "sky130_fd_sc_hd", "corners": ["ss_100C_1v60", "tt_025C_1v80"] },
+  "constraints": { "clock_port": "clk", "clock_period_ns": 1.1 },
+  "spef": { "min": "gcd_min.spef", "max": "gcd_max.spef" }
+}
+```
+
+- **Always `corners[]`.** One entry per requested liberty corner × supplied
+  interconnect key, each its own fresh OpenSTA session over the same DEF. The
+  liberty axis is `pdk.corners` in request order, or the single scalar
+  `pdk.corner` (or the nominal corner when neither is given). The interconnect
+  axis is always canonical `min`, `nom`, `max` order regardless of the order
+  of the keys in the request. Pairs are liberty-major: for the request above,
+  `(ss, min), (ss, max), (tt, min), (tt, max)`. A single key yields one entry
+  per liberty corner.
+- **Entry shape.** Each entry keeps its existing `corner` field (the liberty
+  corner) and adds `interconnect_corner` (`"min"` \| `"nom"` \| `"max"`) and
+  its own `spef_path` (`{path, scope}` envelope), alongside the usual timing
+  fields and its own `spef_annotation` evidence block (so a SPEF that
+  annotated nothing shows up on its own entry).
+- **Top level.** `spef_path` is `null` in map form — each entry carries its
+  own. There is **no** top-level worst-result aggregate; reduce `corners[]`.
+  `provenance.input` is shared, and the before/after input-hash invariant of
+  `pdk.corners` applies to the whole matrix.
+- **Artifacts.** Generated scripts are named
+  `.klt/sta/sta_<def>__<corner>__<interconnect>.tcl` (`<corner>` is `nominal`
+  when no corner was requested).
+- **Provenance caveat.** `min`/`nom`/`max` are the *caller's* labels for the
+  SPEFs they supplied. `klt sta` does not verify that a "max" SPEF was
+  extracted at a max-RC PDK corner; it proves only which file was read for
+  each entry.
+
+The string form of `spef` (and omitting it) is unchanged.
+
 ## Annotation evidence (`spef_annotation`)
 
 A caller-supplied `spef` has the same name-mismatch risk `klt
@@ -586,8 +628,10 @@ accepted anything:
   name). Flat extraction also emits intra-standard-cell nodes the
   gate-level design never has, so this ratio is expected to sit below 1
   even on a perfectly-correlated run.
-- `design_nets_annotated`/`design_nets_total` — design-side: how many of
-  the nets OpenSTA times are actually named by the SPEF.
+- `design_nets_annotated`/`design_nets_total` — design-side **name-match
+  count**: how many of the nets OpenSTA times are named by the SPEF. It is
+  not evidence that parasitics were applied to the timing; the
+  machine-checkable signal for that is `annotation_complete` (below).
 - `design_nets_missing_sample` — a capped sample (at most 20) of the
   design's own net names (`get_full_name`'s spelling — never SPEF's
   backslash-escaped one) that did **not** correlate against the SPEF's
@@ -598,7 +642,10 @@ accepted anything:
   nets — a non-empty list here is a symptom to investigate, not a full
   accounting.
 
-**This pair alone is not proof of annotation.** It is measured *before*
+**This pair alone is not proof of annotation, and is a name-match count
+only.** Read `annotation_complete` (the four-check verdict below) instead; it
+is what `klt signoff`'s opt-in `require_annotation_complete` evidence key
+gates on ([`signoff.md`](signoff.md)). The pair is measured *before*
 `read_spef`, using `get_nets` — a different name resolver than the SPEF
 reader's own. It answers "does the SPEF name the nets this design has", not
 "did `read_spef` accept them". The three checks below answer the latter.

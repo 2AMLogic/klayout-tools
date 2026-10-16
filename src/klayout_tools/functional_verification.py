@@ -602,7 +602,17 @@ class FunctionalVerificationError(Exception):
     traceback. A run that *did* complete and reported failing tests is not
     an error -- it is ``status: "fail"`` + exit code 3 (see this module's
     docstring and ``docs/cli/functional-verification.md``).
+
+    ``code`` is an optional stable machine-readable classification the CLI
+    passes through as ``error.code`` (``None`` for every error without one).
     """
+
+    code: str | None = None
+
+    def __init__(self, message: str = "", *, code: str | None = None) -> None:
+        super().__init__(message)
+        if code is not None:
+            self.code = code
 
 
 # ---------------------------------------------------------------------------
@@ -2099,9 +2109,14 @@ def _import_runner():
         from cocotb_tools import runner
     except ImportError as exc:  # pragma: no cover - exercised via monkeypatch
         raise FunctionalVerificationError(
-            f"cocotb is not installed (import failed: {exc}) -- install it with "
-            "`pip install cocotb`, or `uv sync --extra functional-verification` "
-            "for this repo's pinned version"
+            f"cocotb is not installed (import failed: {exc}; interpreter: "
+            f"{sys.executable}) -- for a tool install (`uv tool install` / "
+            "`pipx install` / `uvx --from`) reinstall with the extra on the "
+            "install spec: `klayout-tools[functional-verification] @ "
+            "<url-or-version>`; for a source checkout run `uv sync --extra "
+            "functional-verification`; `pip install cocotb` only works if "
+            "that `pip` belongs to the interpreter above",
+            code="missing_optional_dependency",
         ) from exc
     return runner
 
@@ -3159,6 +3174,11 @@ def run_functional_verification(
             "engine_version": _engine_version(engine),
             "cocotb_version": _cocotb_version(),
             "results_xml": results_xml,
+            # Additive (issue #3013): the simulator/cocotb console transcript
+            # and the build transcript the run wrote, named by path (never
+            # inlined) like `results_xml`.
+            "test_log": test_log,
+            "build_log": build_log,
             "random_seed": _extract_random_seed_property(results_xml),
             # Additive (issue #3290): `options.source_defines` keyed by the
             # request.sources entry as resolved to an absolute path; `{}`

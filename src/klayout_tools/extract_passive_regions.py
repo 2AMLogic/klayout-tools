@@ -40,6 +40,7 @@ def _resistor_body_region(
     top_cell: kdb.Cell,
     resistor: ResistorDevice,
     base: kdb.Region | None = None,
+    heads: kdb.Region | None = None,
 ) -> kdb.Region:
     """The recognised device-body region for one :class:`ResistorDevice`
     entry against this layout: ``body & marker``, narrowed by ``requires``
@@ -61,18 +62,59 @@ def _resistor_body_region(
     :func:`_region` -- there is no black-box masking to inherit outside
     ``run_extract``'s own pipeline.
 
+    For a ``topology="abutting_heads"`` entry (issue #2679) the region is
+    instead ``marker & requires - excludes`` restricted to components that
+    touch the head conductor (``heads``, defaulting to the entry's
+    ``terminal``/``body`` layer) in two or more
+    separate regions; ``extract`` and ``erc`` share this one definition.
+
     Empty when the resistor's ``marker`` (or any ``requires`` layer) is not
     drawn anywhere on this layout -- matching :func:`_capacitor_plate_regions`'s
     own "no PDK marker drawn" convention.
     """
-    if base is None:
-        base = _region(layout, top_cell, resistor.body)
-    body = base & _region(layout, top_cell, resistor.marker)
+    if resistor.topology == "abutting_heads":
+        # Issue #2679: the marker *is* the resistive body (sg13g2 polyres);
+        # `base` is only the head conductor it abuts.
+        body = _region(layout, top_cell, resistor.marker)
+    else:
+        if base is None:
+            base = _region(layout, top_cell, resistor.body)
+        body = base & _region(layout, top_cell, resistor.marker)
     for layer in resistor.requires:
         body = body & _region(layout, top_cell, layer)
     for layer in resistor.excludes:
         body = body - _region(layout, top_cell, layer)
+    if resistor.topology == "abutting_heads":
+        if heads is None:
+            heads = _region(
+                layout,
+                top_cell,
+                resistor.terminal if resistor.terminal is not None else resistor.body,
+            )
+        body = _bodies_with_two_heads(body, heads)
     return body
+
+
+def _bodies_with_two_heads(body: kdb.Region, heads: kdb.Region) -> kdb.Region:
+    """Keep only the connected components of ``body`` that touch ``heads``
+    (abutting or overlapping) in at least two separate head regions.
+
+    The head regions are first reduced to ``heads - body`` so a head that
+    merely overlaps the body (a continuous bar) is judged by the pieces left
+    on either side of it, then merged; each surviving component needs two
+    distinct such pieces touching it. A missing head, or a head separated by
+    a gap, leaves fewer than two and the component is not a resistor.
+    """
+    import klayout.db as kdb
+
+    merged = body.merged()
+    outer = (heads - merged).merged()
+    kept = kdb.Region()
+    for component in merged.each():
+        comp = kdb.Region(component)
+        if outer.interacting(comp).count() >= 2:
+            kept += comp
+    return kept
 
 
 def _resolve_resistors(
@@ -102,9 +144,12 @@ def _resolve_resistors(
     ordinary conductor and the resistive segment as a hole, instead of one
     continuous short (see :class:`~klayout_tools.decks.ResistorDevice`).
 
-    A resistor body is ``body_layer & marker & all(requires) - any(excludes)``.
-    A spec whose body region comes out empty on this layout (the common case
-    -- no PDK resistor marker drawn anywhere) is dropped entirely and
+    A resistor body is ``body_layer & marker & all(requires) - any(excludes)``
+    (or, for a ``topology="abutting_heads"`` spec, issue #2679, ``marker &
+    all(requires) - any(excludes)`` kept only where it touches two separate
+    terminal-layer heads -- see :func:`_resistor_body_region`). A spec
+    whose body region comes out empty on this layout (the common case -- no
+    PDK resistor marker drawn anywhere) is dropped entirely and
     subtracts nothing, so extraction of a resistor-free layout is bit-for-bit
     what it was before this feature existed.
 
@@ -164,7 +209,9 @@ def _resolve_resistors(
         terminal_layer = spec.terminal if spec.terminal is not None else spec.body
         _conductor(terminal_layer, "terminal", spec.name)
 
-        body = _resistor_body_region(layout, top_cell, spec, base=base)
+        body = _resistor_body_region(
+            layout, top_cell, spec, base=base, heads=bases[terminal_layer]
+        )
         if body.is_empty():
             continue
         if spec.body == deck.poly:
@@ -239,6 +286,57 @@ def _capacitor_plate_regions(
         bottom_region = bottom_conductor
 
     return top_region, bottom_region
+
+
+def _unselected_capacitor_variant_warnings(
+    layout: kdb.Layout, top_cell: kdb.Cell, deck: ExtractionDeck
+) -> list[str]:
+    """Warn when the layout draws a capacitor the deck's *unselected*
+    :attr:`ExtractionDeck.capacitor_variants` would recognise but no active
+    entry does (issue #2920) -- e.g. a gf180mcu MIM option-A cap
+    (``Metal2``/``FuseTop``) extracted under the default ``mim_option=B``,
+    where nothing claims the cap and its top-plate vias would otherwise
+    silently join the two plates into one net.
+
+    Geometry an active entry already recognises is never reported, so a
+    layout of the selected option stays warning-free even if it happens to
+    have the other option's bottom metal under the top plate. One warning per
+    (unselected option, device); empty for a deck with no variants.
+    """
+    unselected = deck.unselected_capacitors
+    if not unselected:
+        return []
+    recognised = None
+    for capacitor in deck.capacitors:
+        top_region, bottom_region = _capacitor_plate_regions(
+            layout, top_cell, capacitor
+        )
+        if not bottom_region.is_empty():
+            recognised = top_region if recognised is None else recognised + top_region
+    option = deck.capacitor_variants[0].option
+    selected = deck.capacitor_variant_selected or deck.capacitor_variants[0].value
+    warnings: list[str] = []
+    for value, capacitor in unselected:
+        top_region, bottom_region = _capacitor_plate_regions(
+            layout, top_cell, capacitor
+        )
+        if bottom_region.is_empty():
+            continue
+        unclaimed = top_region.merged()
+        if recognised is not None:
+            unclaimed = unclaimed.not_interacting(recognised)
+        if unclaimed.is_empty():
+            continue
+        count = unclaimed.count()
+        warnings.append(
+            f"{count} capacitor top-plate shape(s) on layer "
+            f"{capacitor.top_plate[0]}/{capacitor.top_plate[1]} match "
+            f"'{capacitor.name}' (deck option {option}={value}) but this run "
+            f"uses {option}={selected}, so no capacitor was extracted for "
+            "them and their top-plate vias join the plates into one net; "
+            f"re-run with --deck-option {option}={value}."
+        )
+    return warnings
 
 
 def _diode_terminal_region(

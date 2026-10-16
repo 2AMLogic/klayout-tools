@@ -1567,12 +1567,24 @@ def test_run_pex_relative_output_bakes_absolute_include_line(tmp_path, monkeypat
     assert report["netlist"]["scope"] == "repo"
 
 
-def test_run_pex_unrelated_sim_error_still_aborts(
+def _two_corner_schematic_report():
+    return {
+        "corners": [
+            {"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.4)]},
+            {"corner_id": "ss/1.620V/-40C", "measurements": [_measurement(1.3)]},
+        ],
+        "corner_count": 2,
+        "measurements": [{"name": "vout"}],
+    }
+
+
+def test_run_pex_extracted_side_backend_failure_keeps_schematic_results(
     tmp_path, resistor_layout, monkeypatch
 ):
-    """The new diagnostic is scoped to the pin-count-mismatch text only --
-    every other extracted-side `SimError` aborts with a `PexError`, exactly
-    as before."""
+    """Issue #2990: a non-pin-count extracted-side `SimError` (here a batch
+    capacity refusal) no longer aborts the run and discards the completed
+    schematic side -- every row is an error row with the schematic value
+    intact, and the failure is named in `backend_failure`."""
     import klayout_tools.pex as pex_module
     from klayout_tools.sim import SimError
 
@@ -1581,14 +1593,11 @@ def test_run_pex_unrelated_sim_error_still_aborts(
     def _fake_run_sim(*_args, **_kwargs):
         calls["n"] += 1
         if calls["n"] == 1:
-            return {
-                "corners": [
-                    {"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.4)]}
-                ],
-                "corner_count": 1,
-                "measurements": [{"name": "vout"}],
-            }
-        raise SimError("model library not found: /nope/sky130.lib.spice")
+            return _two_corner_schematic_report()
+        raise SimError(
+            "batch backend failed: no capacity in any of the 30 pools",
+            code="batch_no_capacity",
+        )
 
     monkeypatch.setattr(pex_module, "run_sim", _fake_run_sim)
 
@@ -1596,8 +1605,82 @@ def test_run_pex_unrelated_sim_error_still_aborts(
     tb = _write_testbench(tmp_path / "testbench.spice", dut)
     request = _write_request(tmp_path / "request.json", tb)
 
-    with pytest.raises(PexError, match="extracted-side simulation failed"):
+    report = run_pex(resistor_layout, [str(request)], "sky130")
+
+    assert report["status"] == "error"
+    assert report["errored"] == 2
+    assert [row["status"] for row in report["delta"]] == ["error", "error"]
+    assert [row["schematic_value"] for row in report["delta"]] == [1.4, 1.3]
+    assert all(row["extracted_value"] is None for row in report["delta"])
+    failure = report["backend_failure"]
+    assert failure["side"] == "extracted"
+    assert failure["code"] == "batch_no_capacity"
+    assert "no capacity" in failure["message"]
+    assert failure["testbench"] == str(request)
+    assert report["pin_count_mismatch"] is None
+
+
+def test_run_pex_backend_failure_only_second_testbench_keeps_first_graded(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """Issue #2990: with two testbenches, a failure on the second one's
+    extracted side leaves the first one's rows graded normally."""
+    import klayout_tools.pex as pex_module
+    from klayout_tools.sim import SimError
+
+    one_corner = {
+        "corners": [
+            {"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.4)]}
+        ],
+        "corner_count": 1,
+        "measurements": [{"name": "vout"}],
+    }
+    calls = {"n": 0}
+
+    def _fake_run_sim(*_args, **_kwargs):
+        calls["n"] += 1
+        if calls["n"] == 4:
+            raise SimError("batch backend failed: boom", code="batch_no_capacity")
+        return one_corner
+
+    monkeypatch.setattr(pex_module, "run_sim", _fake_run_sim)
+
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    requests = []
+    for name in ("a", "b"):
+        tb = _write_testbench(tmp_path / f"{name}.spice", dut)
+        requests.append(str(_write_request(tmp_path / f"{name}.json", tb)))
+
+    report = run_pex(resistor_layout, requests, "sky130")
+
+    assert calls["n"] == 4
+    statuses = [row["status"] for row in report["delta"]]
+    assert len(statuses) == 2
+    assert statuses[0] != "error"
+    assert statuses[1] == "error"
+    assert report["backend_failure"]["testbench"] == requests[1]
+
+
+def test_run_pex_schematic_side_sim_error_keeps_code(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """Issue #2990: a schematic-side `SimError` still aborts, but its
+    machine-readable `code` survives on the `PexError`."""
+    import klayout_tools.pex as pex_module
+    from klayout_tools.sim import SimError
+
+    def _fake_run_sim(*_args, **_kwargs):
+        raise SimError("batch backend failed: no capacity", code="batch_no_capacity")
+
+    monkeypatch.setattr(pex_module, "run_sim", _fake_run_sim)
+
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    with pytest.raises(PexError, match="schematic-side simulation failed") as info:
         run_pex(resistor_layout, [str(request)], "sky130")
+    assert info.value.code == "batch_no_capacity"
 
 
 def test_run_pex_flat_dut_mismatch_skips_extracted_side_entirely(
@@ -2471,6 +2554,24 @@ def test_run_pex_critical_nets_threaded_through_to_extraction(
 
 
 @_SKIP_NO_NGSPICE
+def test_run_pex_critical_net_pattern_threaded_through_to_extraction(
+    tmp_path, resistor_layout
+):
+    """`--critical-net-pattern` (issue #2974) is forwarded to `run_extract`;
+    `extraction.critical_nets` echoes the resolved concrete names."""
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    report = run_pex(
+        resistor_layout, [str(request)], "sky130", critical_net_patterns=["R*"]
+    )
+
+    assert report["extraction"]["critical_nets"] == ["RA", "RB"]
+    assert report["status"] == "pass"
+
+
+@_SKIP_NO_NGSPICE
 def test_run_pex_parasitic_variant_threaded_through_to_extraction(
     tmp_path, resistor_layout
 ):
@@ -2664,6 +2765,32 @@ def test_run_pex_distributed_rc_requires_critical_net(tmp_path, resistor_layout)
 
     with pytest.raises(PexError, match="--distributed-rc requires --critical-net"):
         run_pex(resistor_layout, [str(request)], "sky130", distributed_rc=True)
+
+
+@_SKIP_NO_NGSPICE
+def test_run_pex_substrate_tie_ohms_forwarded_to_extraction(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """`--substrate-tie-ohms` (issue #3089) reaches `run_extract` unchanged
+    (and `None` -- the default tie -- when the flag is not given)."""
+    import klayout_tools.pex as pex_module
+
+    seen: list[object] = []
+    real_run_extract = pex_module.run_extract
+
+    def _spy(*args, **kwargs):
+        seen.append(kwargs.get("substrate_tie_ohms", "missing"))
+        return real_run_extract(*args, **kwargs)
+
+    monkeypatch.setattr(pex_module, "run_extract", _spy)
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    run_pex(resistor_layout, [str(request)], "sky130", substrate_tie_ohms=1e-3)
+    run_pex(resistor_layout, [str(request)], "sky130")
+
+    assert seen == [1e-3, None]
 
 
 @_SKIP_NO_NGSPICE
@@ -3767,6 +3894,67 @@ def test_run_pex_measure_command_produces_delta_rows(
     assert report["passed"] == 2
     assert report["failed"] == 0
     assert report["errored"] == 0
+
+
+_ENV_RECORDING_HARNESS = _MEASURE_HARNESS.replace(
+    "import json, os, sys\n",
+    "import json, os, sys\n"
+    "open(os.path.join(os.environ['KLT_PEX_ARTIFACTS_DIR'], 'env.json'), 'w')"
+    ".write(json.dumps({k: os.environ.get(k) for k in "
+    "('KLT_PEX_BACKEND', 'KLT_SIM_BACKEND')}))",
+    1,
+)
+
+
+def _recorded_backend_env(tmp_path, side: str) -> dict:
+    return json.loads((tmp_path / "art" / "measure" / side / "env.json").read_text())
+
+
+@pytest.mark.parametrize("inherited", [None, "local"])
+def test_run_pex_measure_command_exports_backend_flag(
+    tmp_path, resistor_layout, measure_reference, monkeypatch, inherited
+):
+    """Issue #2962: `--backend` reaches the child, and beats a pre-set
+    `$KLT_SIM_BACKEND`, so a child `klt sim` obeys it."""
+    if inherited is None:
+        monkeypatch.delenv("KLT_SIM_BACKEND", raising=False)
+    else:
+        monkeypatch.setenv("KLT_SIM_BACKEND", inherited)
+    run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        output=str(tmp_path / "res.spice"),
+        artifacts_dir=str(tmp_path / "art"),
+        measure_command=_write_harness(tmp_path, _ENV_RECORDING_HARNESS),
+        reference_netlist=measure_reference,
+        backend="batch",
+    )
+    for side in ("schematic", "extracted"):
+        assert _recorded_backend_env(tmp_path, side) == {
+            "KLT_PEX_BACKEND": "batch",
+            "KLT_SIM_BACKEND": "batch",
+        }
+
+
+def test_run_pex_measure_command_leaves_backend_env_alone_without_flag(
+    tmp_path, resistor_layout, measure_reference, monkeypatch
+):
+    monkeypatch.setenv("KLT_SIM_BACKEND", "batch")
+    monkeypatch.delenv("KLT_PEX_BACKEND", raising=False)
+    run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        output=str(tmp_path / "res.spice"),
+        artifacts_dir=str(tmp_path / "art"),
+        measure_command=_write_harness(tmp_path, _ENV_RECORDING_HARNESS),
+        reference_netlist=measure_reference,
+    )
+    assert _recorded_backend_env(tmp_path, "schematic") == {
+        "KLT_PEX_BACKEND": None,
+        "KLT_SIM_BACKEND": "batch",
+    }
 
 
 def test_run_pex_measure_command_keeps_extraction_disclosures(
@@ -5504,3 +5692,238 @@ def test_errored_rows_summary_one_line():
     assert line.startswith("klt pex: 1 of 2 delta rows errored")
     assert "stage execute" in line and "batch_job_failed" in line
     assert _errored_rows_summary({"delta": [{"status": "pass"}]}) is None
+
+
+# `--device-only-leg` (issue #3298): a parasitic-free third leg
+# --------------------------------------------------------------------------- #
+
+
+def _leg_report(value, corner_id="tt/1.800V/27C"):
+    return {
+        "corners": [{"corner_id": corner_id, "measurements": [_measurement(value)]}],
+        "corner_count": 1,
+        "measurements": [{"name": "vout"}],
+    }
+
+
+def _fake_three_leg_sim(monkeypatch, *, device_only_value=1.5, device_only_error=False):
+    """`run_sim` stub that tells the legs apart by the request path `run_pex`
+    hands it: schematic 1.0, extracted 2.0, device-only ``device_only_value``."""
+    import klayout_tools.pex as pex_module
+    from klayout_tools.sim import SimError
+
+    seen: list[str] = []
+
+    def _fake_run_sim(request_path, **_kwargs):
+        seen.append(os.path.basename(request_path))
+        if "device-only" in request_path:
+            if device_only_error:
+                raise SimError("device-only leg failed")
+            return _leg_report(device_only_value)
+        if "extracted" in request_path:
+            return _leg_report(2.0)
+        return _leg_report(1.0)
+
+    monkeypatch.setattr(pex_module, "run_sim", _fake_run_sim)
+    return seen
+
+
+def _device_only_inputs(tmp_path):
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    return str(_write_request(tmp_path / "request.json", tb))
+
+
+def test_build_delta_rows_device_only_split_reconciles():
+    corner = "tt/1.800V/27C"
+    rows = _build_delta_rows(
+        spec_row_prefix=None,
+        schematic_report=_sim_report(
+            [{"corner_id": corner, "measurements": [_measurement(1.0)]}]
+        ),
+        extracted_report=_sim_report(
+            [{"corner_id": corner, "measurements": [_measurement(2.0)]}]
+        ),
+        device_only_report=_sim_report(
+            [{"corner_id": corner, "measurements": [_measurement(1.25)]}]
+        ),
+        device_only_leg=True,
+    )
+    (row,) = rows
+    assert row["device_only_value"] == 1.25
+    assert row["representation_delta_pct"] == 25.0
+    assert row["parasitic_delta_pct"] == 60.0
+    assert row["delta_pct"] == 100.0
+    assert row["device_only_status"] == "pass"
+    reconciled = (1 + row["representation_delta_pct"] / 100) * (
+        1 + row["parasitic_delta_pct"] / 100
+    ) - 1
+    assert reconciled == pytest.approx(row["delta_pct"] / 100, abs=1e-3)
+
+
+def test_build_delta_rows_device_only_nulls_on_missing_or_zero():
+    corner = "tt/1.800V/27C"
+
+    def rows_for(schematic, device_only):
+        return _build_delta_rows(
+            spec_row_prefix=None,
+            schematic_report=_sim_report(
+                [{"corner_id": corner, "measurements": [_measurement(schematic)]}]
+            ),
+            extracted_report=_sim_report(
+                [{"corner_id": corner, "measurements": [_measurement(2.0)]}]
+            ),
+            device_only_report=(
+                None
+                if device_only is None
+                else _sim_report(
+                    [{"corner_id": corner, "measurements": [_measurement(device_only)]}]
+                )
+            ),
+            device_only_leg=True,
+        )[0]
+
+    zero_schematic = rows_for(0.0, 1.0)
+    assert zero_schematic["representation_delta_pct"] is None
+    assert zero_schematic["parasitic_delta_pct"] == 100.0
+
+    no_leg = rows_for(1.0, None)
+    assert no_leg["device_only_value"] is None
+    assert no_leg["representation_delta_pct"] is None
+    assert no_leg["parasitic_delta_pct"] is None
+    assert no_leg["device_only_status"] == "error"
+    # The graded fields are untouched by the missing leg.
+    assert no_leg["delta_pct"] == 100.0
+    assert no_leg["status"] == "pass"
+
+
+def test_build_delta_rows_without_flag_carries_no_device_only_keys():
+    corner = "tt/1.800V/27C"
+    (row,) = _build_delta_rows(
+        spec_row_prefix=None,
+        schematic_report=_sim_report(
+            [{"corner_id": corner, "measurements": [_measurement(1.0)]}]
+        ),
+        extracted_report=_sim_report(
+            [{"corner_id": corner, "measurements": [_measurement(2.0)]}]
+        ),
+    )
+    assert set(row) == {
+        "spec_row",
+        "corner_id",
+        "schematic_value",
+        "extracted_value",
+        "delta_pct",
+        "status",
+        "schematic_status",
+        "extracted_status",
+    }
+
+
+def test_run_pex_device_only_leg_adds_third_leg(tmp_path, resistor_layout, monkeypatch):
+    seen = _fake_three_leg_sim(monkeypatch, device_only_value=1.25)
+    request = _device_only_inputs(tmp_path)
+
+    report = run_pex(resistor_layout, [request], "sky130", device_only_leg=True)
+
+    assert any("device-only" in name for name in seen)
+    (row,) = report["delta"]
+    assert row["schematic_value"] == 1.0
+    assert row["extracted_value"] == 2.0
+    assert row["device_only_value"] == 1.25
+    assert row["representation_delta_pct"] == 25.0
+    assert row["parasitic_delta_pct"] == 60.0
+
+    # The path itself is redacted (`scope: external`) outside the repo, so
+    # find the file where `run_pex` wrote it: beside the extracted netlist.
+    assert report["device_only_netlist"]["scope"] == "external"
+    (netlist,) = tmp_path.rglob("*.device-only.*")
+    text = netlist.read_text()
+    assert "__t" not in text
+    cards = [
+        ln for ln in text.splitlines() if ln and not ln.startswith(("*", "+", "."))
+    ]
+    assert not any(ln[0] in "Cc" for ln in cards)
+    assert report["device_only_netlist_sha256"].startswith("sha256:")
+    assert report["device_cards_match"] is True
+    assert report["device_card_count"] >= 1
+
+
+def test_run_pex_without_device_only_leg_is_unchanged(
+    tmp_path, resistor_layout, monkeypatch
+):
+    seen = _fake_three_leg_sim(monkeypatch)
+    request = _device_only_inputs(tmp_path)
+
+    report = run_pex(resistor_layout, [request], "sky130")
+
+    assert not any("device-only" in name for name in seen)
+    for key in (
+        "device_only_netlist",
+        "device_only_netlist_sha256",
+        "device_card_count",
+        "device_cards_match",
+    ):
+        assert key not in report
+    assert "device_only_value" not in report["delta"][0]
+
+
+def test_run_pex_device_only_leg_failure_nulls_only_its_fields(
+    tmp_path, resistor_layout, monkeypatch
+):
+    _fake_three_leg_sim(monkeypatch, device_only_error=True)
+    request = _device_only_inputs(tmp_path)
+
+    report = run_pex(resistor_layout, [request], "sky130", device_only_leg=True)
+
+    (row,) = report["delta"]
+    assert row["device_only_value"] is None
+    assert row["representation_delta_pct"] is None
+    assert row["parasitic_delta_pct"] is None
+    assert row["device_only_status"] == "error"
+    assert row["delta_pct"] == 100.0
+    assert row["status"] == "pass"
+    assert report["status"] == "pass"
+
+
+def test_run_pex_device_only_leg_rejects_measure_command(tmp_path, resistor_layout):
+    reference = tmp_path / "ref.spice"
+    reference.write_text(".SUBCKT RES RA RB\nR1 RA RB 289.2\n.ENDS RES\n")
+    with pytest.raises(PexError, match="--device-only-leg is not supported"):
+        run_pex(
+            resistor_layout,
+            [],
+            "sky130",
+            measure_command=[sys.executable, "-c", "pass"],
+            reference_netlist=str(reference),
+            device_only_leg=True,
+        )
+
+
+def test_cli_device_only_leg_with_measure_command_is_a_json_error(
+    tmp_path, resistor_layout, capsys
+):
+    reference = tmp_path / "ref.spice"
+    reference.write_text(".SUBCKT RES RA RB\nR1 RA RB 289.2\n.ENDS RES\n")
+    exit_code = main(
+        [
+            "pex",
+            resistor_layout,
+            "--deck",
+            "sky130",
+            "--measure-command",
+            f"{sys.executable} -c pass",
+            "--reference-netlist",
+            str(reference),
+            "--device-only-leg",
+            "--format",
+            "json",
+        ]
+    )
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert (
+        "--device-only-leg is not supported"
+        in json.loads(captured.err)["error"]["message"]
+    )
