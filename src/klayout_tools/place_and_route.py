@@ -539,6 +539,14 @@ echoes exactly what was applied (``power.straps[].spacing_um``,
 caller's ``connects[]`` tuned (see :func:`_pdn_connect_spec`/
 :func:`_pdn_connects_applied`).
 
+``tapcell.distance_um`` (issue #3051, optional) overrides the per-library
+``tapcell -distance`` pitch in :data:`_TAPCELL_CELLS`; omitted, the Tcl is
+byte-identical to before. It is a placement input, **not** evidence of any
+diffusion-to-tap boundary distance -- measure the resulting stream. The
+effective pitch is echoed as ``power.tapcell_distance_um``. A
+:data:`_NO_TAPCELL_LIBRARIES` library emits no ``tapcell`` call, so an
+override there is rejected rather than silently ignored.
+
 ``preset`` (issue #2123) closes the gap those two fields left open from the
 other side. Being *able* to express a platform's PDN config is not the same
 as not having to transcribe it: the working blocks callers arrived at were
@@ -592,6 +600,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import re
 import subprocess  # noqa: F401 -- tests patch place_and_route.subprocess.run
@@ -678,12 +687,18 @@ from .place_and_route_power_audit import (
     row_rail_fallback_warning as row_rail_fallback_warning,
 )
 from .place_and_route_reports import (
-    count_route_drc_violations as _count_route_drc_violations,
+    build_congestion,
+    detailed_route_convergence,
+    detailed_route_lines,
+    parse_global_route_congestion,
+    parse_placement_routability,
+    parse_routing_completeness,
+    route_metrics_object,
+    routing_completeness_lines,
+    write_route_metrics,
 )
 from .place_and_route_reports import (
-    detailed_route_lines,
-    route_metrics_object,
-    write_route_metrics,
+    count_route_drc_violations as _count_route_drc_violations,
 )
 
 # The post-route multi-corner sweep + SPEF-annotated STA subsystem (issues
@@ -1777,6 +1792,12 @@ _TOP_LEVEL_METRIC_KEYS = (
     # `[]`) on any stage before `"route"`, matching `worst_setup_slack_ns`'s
     # own convention.
     "corners",
+    # Additive (issue #2994): routability/congestion figures -- global-route
+    # overflow and layer usage, detailed-route convergence, unrouted-net
+    # count and routability-driven placement congestion. `null` on any stage
+    # before `"route"`; fields the engine cannot produce are `null` inside
+    # the block, named in its `null_reasons`.
+    "congestion",
     # Additive (issue #1709): the design-rule-check verdict measured at the
     # same swept corners as `worst_setup_slack_ns`/`worst_hold_slack_ns`
     # above, and `null` on the same pre-`"route"` stages for the same reason
@@ -2183,6 +2204,7 @@ def run_place_and_route(
             f"could not create output directory '{output_dir}': {exc}"
         ) from exc
 
+    placement_routability: dict[str, Any] = {}
     stages: list[dict[str, Any]] = []
     engine_logs: list[dict[str, Any]] = []
     checkpoint_path: str | None = None
@@ -2241,6 +2263,10 @@ def run_place_and_route(
             hold_count = _count_violations(
                 completed.stdout, _HOLD_VIOLATIONS_BEGIN, _HOLD_VIOLATIONS_END
             )
+        placement_routability = _placement_routability_after(
+            stage, completed.stdout, placement_routability
+        )
+        congestion: dict[str, Any] | None = None
         antenna_count = None
         route_drc_count = None
         worst_setup_slack_ns = None
@@ -2263,6 +2289,12 @@ def run_place_and_route(
             route_drc_count = _count_route_drc_violations(drc_report_path)
             write_route_metrics(
                 metrics_path, metrics, route_drc_count, error_cls=PlaceAndRouteError
+            )
+            congestion = build_congestion(
+                global_route=parse_global_route_congestion(completed.stdout),
+                completeness=parse_routing_completeness(completed.stdout),
+                placement=placement_routability,
+                detailed=detailed_route_convergence(metrics),
             )
 
             # Issue #949: sweep every corner `cell_library` ships for
@@ -2342,6 +2374,7 @@ def run_place_and_route(
                 max_capacitance_violation_count_vs_library=(
                     max_capacitance_violation_count_vs_library
                 ),
+                congestion=congestion,
             )
         )
         checkpoint_path = next_checkpoint
@@ -2521,13 +2554,15 @@ def run_place_and_route(
             "ground_net": None,
             "tapcell_master": None,
             "endcap_master": None,
+            "tapcell_distance_um": None,
             "filler_masters": [],
             "straps": [],
             "connects": [],
             "row_rail": row_rail_info,
         }
     else:
-        tap_master, endcap_master, _distance_um = _tapcell_masters(cell_library)
+        tap_master, endcap_master, table_distance_um = _tapcell_masters(cell_library)
+        tapcell_distance_um = _effective_tapcell_distance(power, table_distance_um)
         power_info = {
             "preset": power["preset"],
             "pdn": True,
@@ -2536,6 +2571,7 @@ def run_place_and_route(
             "ground_net": power["ground_net"],
             "tapcell_master": tap_master,
             "endcap_master": endcap_master,
+            "tapcell_distance_um": tapcell_distance_um,
             "filler_masters": (
                 list(_FILLER_CELLS[cell_library]) if target_stage == "route" else []
             ),
@@ -3194,13 +3230,68 @@ def _validate_power(
                 }
             )
 
+    # `tapcell.distance_um` (issue #3051) -> `tapcell -distance` -- overrides
+    # the per-library pitch in `_TAPCELL_CELLS`. Optional; omitted (the
+    # default, `None`) falls back to the table value, so the emitted Tcl is
+    # byte-for-byte unchanged. It is a placement input, not evidence of any
+    # diffusion-to-tap distance. A `_NO_TAPCELL_LIBRARIES` library emits no
+    # `tapcell` line, so an override there is rejected rather than silently
+    # ignored.
+    tapcell_distance_um = _validate_tapcell(power.get("tapcell"), cell_library)
+
     return {
         "preset": preset_name,
         "power_net": power_net,
         "ground_net": ground_net,
+        "tapcell_distance_um": tapcell_distance_um,
         "straps": validated_straps,
         "connects": validated_connects,
     }
+
+
+def _validate_tapcell(tapcell: Any, cell_library: str | None) -> int | float | None:
+    """Validate ``request.power.tapcell`` (issue #3051); return its
+    ``distance_um`` override, or ``None`` when ``tapcell`` is omitted."""
+    if tapcell is None:
+        return None
+    if not isinstance(tapcell, dict):
+        raise PlaceAndRouteError(
+            "request.power.tapcell must be a JSON object when given "
+            "(request.power.tapcell.distance_um is its only field)"
+        )
+    unknown = sorted(set(tapcell) - {"distance_um"})
+    if unknown:
+        raise PlaceAndRouteError(
+            f"request.power.tapcell has unknown key(s) {unknown}; "
+            "only distance_um is supported"
+        )
+    distance_um = tapcell.get("distance_um")
+    if (
+        not isinstance(distance_um, (int, float))
+        or isinstance(distance_um, bool)
+        or not math.isfinite(distance_um)
+        or distance_um <= 0
+    ):
+        raise PlaceAndRouteError(
+            "request.power.tapcell.distance_um is required and must be a "
+            "positive number"
+        )
+    if cell_library in _NO_TAPCELL_LIBRARIES:
+        raise PlaceAndRouteError(
+            f"request.power.tapcell.distance_um cannot be honored: "
+            f"standard-cell library '{cell_library}' has no tap/endcap "
+            "cells, so no tapcell call is emitted"
+        )
+    return distance_um
+
+
+def _effective_tapcell_distance(
+    power: dict[str, Any], table_distance_um: int | None
+) -> int | float | None:
+    """The ``tapcell -distance`` pitch: the validated override, else the
+    per-library table value."""
+    override = power.get("tapcell_distance_um")
+    return table_distance_um if override is None else override
 
 
 def _validate_macros(
@@ -4312,16 +4403,21 @@ def _tapcell_masters(cell_library: str) -> tuple[str | None, str | None, int | N
     return _TAPCELL_CELLS[cell_library]
 
 
-def _tapcell_lines(cell_library: str) -> list[str]:
+def _tapcell_lines(
+    cell_library: str, distance_um: int | float | None = None
+) -> list[str]:
     """The ``request.power`` ``tapcell`` Tcl for ``cell_library`` -- one
     line, or **none at all** for a library in
     :data:`_NO_TAPCELL_LIBRARIES` (issue #2441), which has no tap/endcap
     masters to place. ``-endcap_master`` is appended only for a library
-    whose :data:`_TAPCELL_CELLS` entry names one.
+    whose :data:`_TAPCELL_CELLS` entry names one. ``distance_um`` (issue
+    #3051) overrides the table pitch; ``None`` keeps the table value.
     """
-    tap_master, endcap_master, distance_um = _tapcell_masters(cell_library)
+    tap_master, endcap_master, table_distance_um = _tapcell_masters(cell_library)
     if tap_master is None:
         return []
+    if distance_um is None:
+        distance_um = table_distance_um
     call = f"tapcell -distance {distance_um} -tapcell_master {tap_master}"
     if endcap_master is not None:
         call += f" -endcap_master {endcap_master}"
@@ -4380,7 +4476,7 @@ def _power_delivery_lines(power: dict[str, Any], cell_library: str) -> list[str]
     # No `tapcell` line at all on a library that ships no tap/endcap cells
     # (issue #2441) -- everything below is unchanged for it, since nothing
     # in the global-connect/PDN sequence depends on `tapcell` having run.
-    lines: list[str] = _tapcell_lines(cell_library)
+    lines: list[str] = _tapcell_lines(cell_library, power.get("tapcell_distance_um"))
 
     for net_role, pin_pattern, is_primary in _POWER_PIN_PATTERNS[cell_library]:
         net = power_net if net_role == "power" else ground_net
@@ -4742,14 +4838,15 @@ def _stage_script_lines(
         # antenna-repair iteration" -- that weights the given percentage of
         # worst-slack nets as timing-critical during congestion-removal
         # iterations. `0` (unset, `request.route_critical_nets_percentage`
-        # omitted) reproduces `global_route`'s own default and this
-        # module's prior generated Tcl byte-for-byte -- the explicit A/B
-        # disable path.
-        global_route_call = "global_route"
+        # omitted) reproduces `global_route`'s own default -- the explicit
+        # A/B disable path.
+        # `-verbose` (issue #2994) makes the global router print its
+        # per-layer "Final congestion report" table, which the response's
+        # `congestion` block scrapes; routing results are unchanged.
+        global_route_call = "global_route -verbose"
         if route_critical_nets_percentage:
-            global_route_call = (
-                "global_route "
-                f"-critical_nets_percentage {route_critical_nets_percentage}"
+            global_route_call += (
+                f" -critical_nets_percentage {route_critical_nets_percentage}"
             )
         # Row-rail fallback (issue #1442): only when `request.power` was
         # *not* given -- a `request.power`-bearing run already got a real
@@ -4801,6 +4898,9 @@ def _stage_script_lines(
                 max_antenna_repair_iterations,
             )
         lines += _antenna_check_lines()
+        # Issue #2994: unrouted-net count, over the routing the antenna
+        # check above just reported on.
+        lines += routing_completeness_lines()
         # `request.power` (issue #1091): gap-filler cell insertion, right
         # after the antenna-repair loop above (mirroring ORFS's own
         # `flow/scripts/fillcell.tcl`, which likewise runs immediately
@@ -5228,6 +5328,21 @@ def _read_metrics(metrics_path: str, stage: str) -> dict[str, Any]:
     return data
 
 
+def _placement_routability_after(
+    stage: str, stdout: str, previous: dict[str, Any]
+) -> dict[str, Any]:
+    """Issue #2994: the routability-driven placement figures to carry forward
+    once ``stage`` has run -- parsed fresh from the ``place`` stage's log,
+    unchanged for every other stage."""
+    return parse_placement_routability(stdout) if stage == "place" else previous
+
+
+def _congestion_entry(congestion: dict[str, Any] | None) -> dict[str, Any]:
+    """Issue #2994: the route-stage-only ``congestion`` key for a stage entry
+    (empty when the stage produced no congestion block)."""
+    return {} if congestion is None else {"congestion": congestion}
+
+
 def _extract_stage_metrics(
     stage: str,
     metrics: dict[str, Any],
@@ -5242,6 +5357,7 @@ def _extract_stage_metrics(
     max_capacitance_violation_count: int | None = None,
     max_transition_violation_count_vs_library: int | None = None,
     max_capacitance_violation_count_vs_library: int | None = None,
+    congestion: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Map one stage's raw OpenROAD ``-metrics`` JSON dump onto this
     contract's field names -- see this module's docstring
@@ -5352,6 +5468,8 @@ def _extract_stage_metrics(
             entry["max_capacitance_violation_count_vs_library"] = (
                 max_capacitance_violation_count_vs_library
             )
+        # Issue #2994: route-stage-only, absent elsewhere like the fields above.
+        entry.update(_congestion_entry(congestion))
 
     # Issue #1865: whether the slack fields above are measurements at all.
     # OpenSTA reports the worst slack of a design with no constrained

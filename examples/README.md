@@ -30,7 +30,9 @@ directory has its own README, start there.
   interconnect coupling, patch antenna, and spiral inductor fixtures.
 - [`functional-verification/`](functional-verification/) — `klt
   functional-verification` request files plus the RTL (`gcd.v`) and cocotb
-  test (`test_gcd.py`) they run, including a Verilator coverage variant.
+  test (`test_gcd.py`) they run, including a Verilator coverage variant and an
+  [`initial-state/`](functional-verification/initial-state/) gate-level
+  power-up-state example (`options.initial_state`).
 - [`kb/`](kb/) — knowledge-base worked examples (bandgap, LDO, oscillator,
   spiral inductor). See its README.
 - [`signoff/`](signoff/) — a minimal, runnable block manifest for `klt

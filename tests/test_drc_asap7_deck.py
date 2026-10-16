@@ -167,6 +167,31 @@ def test_every_rule_has_a_fail_and_a_boundary_pass_fixture():
             assert case.rule not in case.expect, case.name
 
 
+_NET_RULES = ("ACTIVE.S.2A", "LIG.LISD.S.6", "LIG.LISD.S.7", "LIG.SDT.S.8")
+
+
+def test_net_aware_rules_are_checked_not_gaps():
+    gaps = {g.id for g in NOT_IMPLEMENTED}
+    for rule_id in _NET_RULES:
+        assert rule_id in RULE_IDS
+        assert rule_id not in gaps
+    assert "### Net-aware spacing" in _docs_asap7_section()
+
+
+@pytest.mark.parametrize("rule_id", _NET_RULES)
+def test_net_aware_rules_draw_the_same_pair_joined_and_unjoined(rule_id):
+    """Each net-aware rule is exercised with a conductor chain (V0 and
+    metal) that makes a too-close pair one net, and with chains that stop
+    short of it: a pass and a fail case each carry that wiring."""
+
+    def wired(case):
+        layers = {shape[0] for shape in case.shapes}
+        return "V0" in layers or "M1" in layers
+
+    cases = [c for c in _CASES if c.rule == rule_id and wired(c)]
+    assert {c.kind for c in cases} == {"fail", "pass"}, rule_id
+
+
 def test_docs_list_every_rule_and_gap():
     section = _docs_asap7_section()
     for rule_id in RULE_IDS:
@@ -366,3 +391,49 @@ def test_shipped_cells_clean_apart_from_documented_deviations(tmp_path, lib, suf
     expected = {cell: set(rules) for cell, rules in SHIPPED_CELL_DEVIATIONS.items()}
     assert dict(found) == expected
     assert len(set(report["coverage"]["rule_categories"])) == len(RULE_IDS)
+
+
+# --------------------------------------------------------------------------- #
+# ACTIVE.LUP.1 evidence (#3087): a gap, not a deck rule
+# --------------------------------------------------------------------------- #
+
+_LUP = fx.latchup_experiments()
+
+
+def test_active_lup_1_stays_a_documented_gap():
+    gap = next(g for g in NOT_IMPLEMENTED if g.id == "ACTIVE.LUP.1")
+    assert gap.table == "Table 3.5.2"
+    assert "30 um" in gap.reason
+    assert "ACTIVE.LUP.1" not in RULE_IDS
+    assert "ACTIVE.LUP.1" not in _deck_text()
+    section = _docs_asap7_section()
+    assert "### ACTIVE.LUP.1 evidence" in section
+    assert "`<=`, value `30 um`" in section
+
+
+def test_lup_experiments_are_isolated_and_cover_the_controls():
+    names = {e.name for e in _LUP}
+    assert len(names) == len(_LUP)
+    assert {
+        "nmos-ptap-at-30um",
+        "nmos-ptap-1dbu-past-30um",
+        "nmos-ordinary-active-neighbour",
+        "nmos-wrong-class-ntap",
+        "nmos-ptap-in-well",
+        "pmos-ntap-same-well-at-30um",
+        "pmos-ntap-other-well",
+    } <= names
+    # The metric-dependent verdicts are the information deficit.
+    metric_dependent = {e.name for e in _LUP if len(set(e.expect.values())) > 1}
+    assert metric_dependent == {
+        "nmos-ptap-diagonal-21um",
+        "nmos-ptap-diagonal-22um",
+    }
+
+
+@pytest.mark.parametrize("exp", _LUP, ids=[e.name for e in _LUP])
+@pytest.mark.parametrize("metric", fx.LATCHUP_METRICS)
+def test_lup_reference_predicate_on_written_layout(tmp_path, exp, metric):
+    gds = tmp_path / f"{exp.name}.gds"
+    fx.write_latchup_experiment(str(gds), exp)
+    assert fx.latchup_reference(str(gds), metric) is exp.expect[metric]
