@@ -3443,15 +3443,15 @@ def _run_sim_corners(
     # Additive/optional (issue #2985): ngspice generates no device or
     # resistor noise in `.tran`, so a transient that relies on declared
     # `trnoise`/`trrandom` sources says so. Absent when it does not apply.
-    transient_noise = _transient_noise_report(
-        netlist_path,
-        request=request,
-        analysis=analysis,
-        engine=engine,
-        repo_root=repo_root,
+    environment.update(
+        _transient_noise_environment(
+            netlist_path,
+            request=request,
+            analysis=analysis,
+            engine=engine,
+            repo_root=repo_root,
+        )
     )
-    if transient_noise is not None:
-        environment["transient_noise"] = transient_noise
     if remote_environment is not None:
         # Additive/optional: only present for the `remote` backend -- see
         # `_run_remote` and docs/cli/sim.md's "Remote backend" section.
@@ -6404,26 +6404,26 @@ def _analysis_runs_tran(analysis: dict[str, Any]) -> bool:
     return str(analysis.get("kind", "")).lower() == "tran"
 
 
-def _transient_noise_report(
+def _transient_noise_environment(
     netlist_path: str,
     *,
     request: dict[str, Any],
     analysis: dict[str, Any],
     engine: str,
     repo_root: str | None,
-) -> dict[str, Any] | None:
+) -> dict[str, Any]:
     """Additive ``environment.transient_noise`` (issue #2985): what noise an
     ngspice transient contains -- only the declared ``trnoise``/``trrandom``
-    sources, no intrinsic device or resistor noise. ``None`` (field absent)
+    sources, no intrinsic device or resistor noise. ``{}`` (field absent)
     unless the engine is ngspice, a transient runs and a scanned file
     declares such a source."""
     if engine != "ngspice" or not _analysis_runs_tran(analysis):
-        return None
+        return {}
     sources, not_scanned = _scan_noise_sources(
         netlist_path, request=request, repo_root=repo_root
     )
     if not sources:
-        return None
+        return {}
     report: dict[str, Any] = {
         "engine": engine,
         "sources": [
@@ -6434,7 +6434,7 @@ def _transient_noise_report(
     }
     if not_scanned:
         report["sources_not_scanned"] = not_scanned
-    return report
+    return {"transient_noise": report}
 
 
 def _with_unseeded_noise(
