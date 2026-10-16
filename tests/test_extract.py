@@ -9188,10 +9188,15 @@ def test_sky130_precision_implant_mask_is_not_extracted_as_generic_poly_res(tmp_
         # heads (`RA`/`RB`) merge onto one continuous, device-less net that
         # survives extraction instead of purging away -- see
         # `test_unmarked_poly_bar_is_not_a_resistor`.
-        assert len(report["warnings"]) == 2
+        # A third (issue #3138): the declared `poly.res` marker is claimed by
+        # no resistor class, so the unclaimed-marker warning fires too.
+        assert len(report["warnings"]) == 3
         assert "deck-coverage gap" in report["warnings"][0]
         assert "carry no resistor-marker layer at all" not in report["warnings"][0]
-        assert "merges 2 distinct labels (RA, RB)" in report["warnings"][1]
+        assert any(
+            "claimed by no declared resistor class" in w for w in report["warnings"]
+        )
+        assert any("merges 2 distinct labels (RA, RB)" in w for w in report["warnings"])
 
 
 def test_gf180mcu_salicided_poly_is_not_extracted_as_unsalicided_resistor(tmp_path):
@@ -9211,10 +9216,13 @@ def test_gf180mcu_salicided_poly_is_not_extracted_as_unsalicided_resistor(tmp_pa
     # A second warning (issue #539's `net 'RA,RB' merges ...` collision note)
     # now also fires -- see the matching comment in
     # `test_sky130_precision_implant_mask_is_not_extracted_as_generic_poly_res`.
-    assert len(report["warnings"]) == 2
+    # A third (issue #3138): the declared `RES_MK` marker is claimed by no
+    # resistor class, so the unclaimed-marker warning fires too.
+    assert len(report["warnings"]) == 3
     assert "deck-coverage gap" in report["warnings"][0]
     assert "carry no resistor-marker layer at all" not in report["warnings"][0]
-    assert "merges 2 distinct labels (RA, RB)" in report["warnings"][1]
+    assert any("claimed by no declared resistor class" in w for w in report["warnings"])
+    assert any("merges 2 distinct labels (RA, RB)" in w for w in report["warnings"])
 
 
 def test_marked_gate_poly_over_diffusion_stays_a_transistor(tmp_path):
@@ -9396,7 +9404,8 @@ def test_unmodelled_poly_warning_distinguishes_marked_from_unmarked(tmp_path):
     # device-less net that survives extraction instead of purging away --
     # see the matching comment in
     # `test_sky130_precision_implant_mask_is_not_extracted_as_generic_poly_res`.
-    assert len(report["warnings"]) == 4
+    # Plus one unclaimed-marker warning (issue #3138) for the marked bar.
+    assert len(report["warnings"]) == 5
     unmarked = [
         w for w in report["warnings"] if "carry no resistor-marker layer at all" in w
     ]
@@ -26584,3 +26593,43 @@ def test_spef_missing_conn_warning_names_unmatched_and_duplicate_nets():
         _spef_missing_conn_warnings({"nets": [{"net": "ok"}]}, original, original) == []
     )
     assert _spef_missing_conn_warnings(report, None, None) == []
+
+
+# --- Unclaimed resistor-marker warning (issue #3138) -----------------------
+
+
+def _unclaimed_marker_warnings(report):
+    return [w for w in report["warnings"] if "claimed by no declared resistor" in w]
+
+
+def test_resistor_marker_beside_body_warns_unclaimed(tmp_path):
+    """A declared marker drawn *beside* (not over) the poly body yields no
+    device and, previously, no diagnostic (issue #3138)."""
+    layout = _make_poly_resistor_layout("sky130")
+    marker = layout.layer(66, 13)
+    layout.clear_layer(marker)
+    # Marker far above the bar: poly & marker is empty.
+    layout.top_cell().shapes(marker).insert(kdb.Box(3000, 5000, 4000, 6000))
+    path = _write_gds(layout, tmp_path / "beside.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "beside.spice"))
+
+    assert report["device_counts"] == {}
+    found = _unclaimed_marker_warnings(report)
+    assert len(found) == 1
+    assert "1 resistor-marker shape on layer 66/13" in found[0]
+    assert "res_generic_po" in found[0]
+
+
+def test_claimed_resistor_marker_is_quiet(tmp_path):
+    path = _write_gds(_make_poly_resistor_layout("sky130"), tmp_path / "ok.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "ok.spice"))
+    assert report["device_counts"] != {}
+    assert _unclaimed_marker_warnings(report) == []
+
+
+def test_resistor_free_layout_has_no_unclaimed_marker_warning(tmp_path):
+    path = _write_gds(
+        _make_poly_resistor_layout("sky130", marked=False), tmp_path / "nomark.gds"
+    )
+    report = run_extract(path, "sky130", output=str(tmp_path / "nomark.spice"))
+    assert _unclaimed_marker_warnings(report) == []

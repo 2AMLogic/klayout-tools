@@ -241,6 +241,7 @@ from .extract_passive_regions import (
     _build_mom_capacitor_extractor,
     _capacitor_plate_regions,
     _capacitor_top_via_exclusions,
+    _detect_unclaimed_resistor_markers,
     _diode_terminal_region,
     _exclude_capacitor_top_via_overlap,
     _resolve_resistors,
@@ -9818,6 +9819,8 @@ def _extract_netlist(
     warnings = (
         [str(entry.message) for entry in l2n.each_log_entry()]
         + unmodelled_device_warnings
+        # Declared resistor marker no spec claims (issue #3138).
+        + _detect_unclaimed_resistor_markers(layout, top_cell, deck)
         # Junction-diode near misses (issue #2365) -- collected in the diode
         # recognition block above, where the per-entry terminal regions and
         # the MOS/tap geometry the filter needs are both still in scope.

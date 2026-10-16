@@ -394,6 +394,11 @@ not `klt --version`, if you need to detect this kind of drift. See
   deck custom-device-class `X ... PARAMS:` cards, callees paired by name with
   a layout circuit, and `gate-level-verilog` references are unaffected.
   **Additive contract change**; `schema_version` is unchanged.
+- **`klt extract` warns on an unclaimed resistor marker** (issue #3138): a
+  deck-declared resistor marker drawn on the layout but claimed by no
+  `ResistorDevice` (empty body) now adds one `warnings[]` string per marker
+  layer instead of extracting silently device-less. Additive; no schema,
+  exit-code or `status` change.
 
 - **New verb `klt tap-distance`** (issue #3009): asserts every point of a
   subject region is within a Euclidean distance of a qualifying tap (latch-up /
