@@ -52,6 +52,7 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         _clamp_cut_boxes,
         _close_implant_gaps,
         _diff_pair_layout,
+        _draw_pcell_npc,
         _insert_boxes,
         _insert_implant_ring,
         _insert_ring,
@@ -114,6 +115,35 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Harness-resolved minimum spacing between separate source/"
                 "drain implant shapes; closer ones are merged (only used "
                 "when sd_implant_present)",
+                default=0.0,
+            )
+            # getattr: keeps these new hidden params out of the mypy type
+            # baseline (PCellDeclarationHelper's dynamic attrs are untyped).
+            self.param(
+                "npc_layer",
+                getattr(self, "TypeLayer"),  # noqa: B009
+                "npc drawing layer (only used when npc_present)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "npc_present",
+                getattr(self, "TypeBoolean"),  # noqa: B009
+                "Whether npc_layer is a real layer this PDK family needs "
+                "over each poly-contact licon",
+                default=False,
+            )
+            self.param(
+                "npc_margin_um",
+                getattr(self, "TypeDouble"),  # noqa: B009
+                "Harness-resolved margin npc grows beyond each poly-contact "
+                "licon (only used when npc_present)",
+                default=0.0,
+            )
+            self.param(
+                "npc_min_space_um",
+                getattr(self, "TypeDouble"),  # noqa: B009
+                "Harness-resolved minimum npc spacing; closer shapes merge "
+                "(only used when npc_present)",
                 default=0.0,
             )
             self.param(
@@ -537,5 +567,7 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.contact_fixed_size_um,
                 self.mfg_grid_um,
             )
+
+            _draw_pcell_npc(self, li_contact, li_poly, dbu)
 
     return {"diff_pair": _DiffPairPCell}

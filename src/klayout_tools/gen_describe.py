@@ -485,20 +485,6 @@ def _sd_implant_hints(
             f"('{sd_implant_role}') for flavor '{flavor}' -- no implant "
             "mask was drawn"
         )
-    if family == "sky130":
-        # Phase A of issue #2934 draws the unit devices' nsdm/psdm only;
-        # report the masks still omitted (never silently) until the tap/
-        # guard-ring implant and npc phases land.
-        if params.get("add_guard_ring"):
-            notes.append(
-                "sky130 guard/tap ring draws no nsdm/psdm tap implant -- "
-                "the ring's tap implant mask was not drawn"
-            )
-        if params.get("gate_contact"):
-            notes.append(
-                "sky130 draws no npc (95/20) over the poly-contact licons -- "
-                "no npc mask was drawn"
-            )
     return {
         "sd_implant_present": (
             sd_implant is not None and _sd_implant_margin_um(family) > 0
