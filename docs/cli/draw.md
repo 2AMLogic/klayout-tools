@@ -54,8 +54,13 @@ in CI.
   Every coordinate below is given in microns and converted to integer database
   units by rounding to the nearest `dbu_um`.
 - `shapes` (array, **required, non-empty**) — an empty or missing `shapes` is an
-  error; `klt draw` will not write an empty layout.
+  error; `klt draw` will not write an empty layout. Exception: with `base_gds`
+  set, `shapes` may be empty if `erase_um` is non-empty (see
+  ["Refining an existing layout"](#refining-an-existing-layout)).
 - `labels` (array, optional) — text labels.
+- `base_gds`, `base_cell`, `erase_um` (optional) — start from an existing stream
+  and erase windows from it; see
+  ["Refining an existing layout"](#refining-an-existing-layout).
 
 Unrecognised keys are **rejected**, with one reserved escape hatch for
 annotations — see ["Unrecognised keys"](#unrecognised-keys) below.
@@ -106,6 +111,61 @@ annotations — see ["Unrecognised keys"](#unrecognised-keys) below.
 - `text` (string, **required**) — the label string.
 - `at_um` (**required**) — an `[x, y]` anchor point in microns.
 
+## Refining an existing layout
+
+By default `klt draw` builds a layout from nothing. Three optional `params` keys
+let it start from an existing stream instead — a trim/shift refinement of a
+`klt gen`/`klt gen-compose` seed, rather than only an additive patch:
+
+```json
+{
+  "base_gds": "seed.gds",
+  "base_cell": "TOP",
+  "erase_um": [
+    { "rect_um": [1.0, -1.0, 3.0, 2.0], "layer": [66, 20] }
+  ],
+  "shapes": [
+    { "layer": [66, 20], "rect_um": [1.0, 0.0, 3.0, 0.15] }
+  ]
+}
+```
+
+- `base_gds` (string) — path to the GDS/OASIS to start from. A missing or
+  unreadable file is an application error (exit 1).
+- `base_cell` (string, optional) — the cell of the base to use. Default: the
+  base's sole top cell (an error if there are several). It is the *input* cell;
+  `--cell-name` still names the *output* top cell.
+- `erase_um` (array, optional) — windows removed from the base **before**
+  `shapes`/`labels` are added. Each entry takes only `rect_um` (`[x0, y0, x1,
+  y1]` in microns, corners normalised like a shape's `rect_um`) and an optional
+  `layer` (`[layer, datatype]`); without `layer` the window applies to every
+  layer. Unknown keys inside an entry are rejected like everywhere else.
+
+Semantics:
+
+- **Hierarchy is flattened.** The base cell's whole tree is flattened into the
+  output cell, so geometry in child cells is erased too; the output has no
+  sub-cells.
+- **Polygons are clipped, not dropped.** A shape only partly inside a window is
+  replaced by its boolean difference with the window; a shape that merely
+  touches the window edge is left untouched. Shapes outside every window are
+  copied unchanged.
+- **Labels** whose anchor lies inside (or on the edge of) a window on an erased
+  layer are removed.
+- **dbu.** The base's database unit is used. `dbu_um`, if also given, must
+  equal it, otherwise it is an error.
+- **Empty `shapes`.** Erase-only is valid when `base_gds` is set and `erase_um`
+  is non-empty; with neither `shapes` nor `erase_um`, or without `base_gds`,
+  an empty request is still an error.
+- `base_cell` and `erase_um` without `base_gds` are errors.
+- Omitting all three keys leaves the output (and response) exactly as before.
+- A stream stores no layer names, so layers read from the base report
+  `"name": null` unless a later `shapes[]` entry names them.
+
+When `base_gds` is set, the response gains four additive fields (see
+"Response"); the `layers` and `shape_count` figures describe the final output,
+base shapes included.
+
 ## Unrecognised keys
 
 **A key that is not documented above is an application error (exit 1) naming the
@@ -114,7 +174,7 @@ reserved for caller annotations and is always accepted and ignored.**
 
 This is a promise in both directions, at *every* level of the request — the
 top-level request object, `params`, `options`, each `shapes[]` entry, each
-`labels[]` entry, and a shape's `array` object all enforce their own key list:
+`labels[]` entry, each `erase_um[]` entry, and a shape's `array` object all enforce their own key list:
 
 | Key | Behavior |
 | --- | -------- |
@@ -201,6 +261,10 @@ this one.
   on it, likewise expanded per-instance (labels are not counted here).
 - `bbox_um` — the top cell's bounding box in microns, or `null` if nothing was
   drawn (impossible in practice, since `shapes` must be non-empty).
+- `base_gds`, `base_cell`, `erased_shape_count`, `erased_label_count` — present
+  **only** when `params.base_gds` was given: the base path, the base cell
+  actually used, and how many shapes were clipped/removed and labels removed
+  by `erase_um` windows. Additive; `schema_version` is unchanged.
 - `warnings` — always carries the loud not-design-legal marker, so a caller can
   never mistake a `draw` output for a rule-checked, PDK-legal cell.
 
@@ -209,7 +273,7 @@ this one.
 | Code | Meaning |
 | ---- | ------- |
 | `0`  | The stream was written; the success payload is on stdout. |
-| `1`  | Application error: invalid/missing `--params`, a malformed shape/label, an [unrecognised key](#unrecognised-keys), empty `shapes`, a nonexistent output directory, or a write failure. Documented error envelope on stderr. |
+| `1`  | Application error: invalid/missing `--params`, a malformed shape/label, an [unrecognised key](#unrecognised-keys), empty `shapes`, an unreadable `base_gds`, a nonexistent output directory, or a write failure. Documented error envelope on stderr. |
 | `2`  | Usage error (bad `--format` value) — from argparse. |
 
 Per [`docs/json-contract.md`](../json-contract.md#exit-codes)'s additive
@@ -243,3 +307,12 @@ klt draw --params '{"shapes": [{"layer": [41, 0], "rect_um": [7.0, 1.5, 7.26, 1.
 See [issue #553](https://github.com/2AMLogic/klayout-tools/issues/553) for the
 motivating real-world fixture (17134 shape entries / 1.4 MB of JSON for a small
 cell of via/contact arrays) that `array` was added to compress.
+
+## Example: erase a window, then add a patch
+
+Trim poly out of a window of a generated cell and bridge it with a thin bar:
+
+```bash
+klt draw --params '{"base_gds": "seed.gds", "erase_um": [{"rect_um": [1, -1, 3, 2], "layer": [66, 20]}], "shapes": [{"layer": [66, 20], "rect_um": [1, 0, 3, 0.15]}]}' -o refined.gds --format json
+# -> "erased_shape_count": <shapes clipped or removed in the window>
+```

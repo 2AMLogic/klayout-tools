@@ -718,6 +718,22 @@ def test_run_sim_analysis_kind_op_with_meas_op_card_raises_clear_error(tmp_path)
         sim.run_sim(str(request))
 
 
+def test_run_sim_analysis_kind_op_with_supported_meas_card_raises_clear_error(tmp_path):
+    # Issue #3109: a supported-type `.meas` card is still unsearchable under a
+    # scalar `op` analysis -- refuse it up front, pointing at `expr`.
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "op", "args": ""},
+            "measurements": [{"name": "x", "spice": ".meas dc x find v(out) at=0"}],
+        },
+    )
+    with pytest.raises(sim.SimError, match=r"analysis\.kind is \"op\".*expr"):
+        sim.run_sim(str(request))
+
+
 def test_run_sim_meas_op_card_rejected_even_with_non_op_analysis_kind(tmp_path):
     # A `.meas op` card is invalid on ngspice's own terms regardless of the
     # request's `analysis.kind` -- not just when the two literally match.
@@ -804,6 +820,26 @@ def test_validate_measurement_forms_rejects_multiline_expr():
     inside the generated `.control` block."""
     with pytest.raises(sim.SimError, match="multi-line 'expr'"):
         sim._validate_measurement_forms([{"name": "vout", "expr": "v(out)\nquit"}])
+
+
+@pytest.mark.parametrize(
+    "expr",
+    [
+        "vecmax((v(a) < v(b))*v(a))",
+        "vecmax((v(a) > v(b))*v(a))",
+        "vecmax((v(a) < v(b)) + (v(a) > v(c)))",
+    ],
+)
+def test_validate_measurement_forms_rejects_redirection_operators_in_expr(expr):
+    """`<` / `>` are ngspice I/O redirection, not comparisons (issue #2940)."""
+    with pytest.raises(sim.SimError, match=r"gt / lt / ge / le / eq / ne"):
+        sim._validate_measurement_forms([{"name": "m", "expr": expr}])
+
+
+def test_validate_measurement_forms_accepts_word_comparisons_in_expr():
+    sim._validate_measurement_forms(
+        [{"name": "m", "expr": "vecmax((v(a) lt v(b))*v(a))"}]
+    )
 
 
 @pytest.mark.parametrize("name", ["v.out", "1vout", "v out", "v(out)", "v-out"])
@@ -2966,6 +3002,89 @@ def test_corner_records_engine_exit_code(tmp_path, monkeypatch, returncode):
     assert corner["engine_exit_code"] == returncode
     assert corner["engine_killed_by_signal"] is None
     assert "engine_killed" not in [d["code"] for d in corner["diagnostics"]]
+
+
+def _silent_engine_corner(
+    tmp_path, monkeypatch, *, returncode=0, stderr="", stdout="", write_log=None
+):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [
+                {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"}
+            ],
+        },
+    )
+
+    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+        if write_log is not None:
+            with open(cmd[cmd.index("-o") + 1], "w", encoding="utf-8") as handle:
+                handle.write(write_log)
+        return fake_completed(stdout, returncode=returncode, stderr=stderr)
+
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+    (corner,) = sim.run_sim(str(request))["corners"]
+    return corner
+
+
+def _unknown_messages(corner):
+    return [d["message"] for d in corner["diagnostics"] if d["code"] == "unknown"]
+
+
+def test_silent_exit_zero_without_log_surfaces_stderr(tmp_path, monkeypatch):
+    """Issue #3016: exit 0, no log, no measurements -> the diagnostic names
+    the exit status and carries the engine's stderr."""
+    corner = _silent_engine_corner(tmp_path, monkeypatch, stderr="boom")
+    assert corner["status"] == "error"
+    (message,) = _unknown_messages(corner)
+    assert "exited with code 0" in message
+    assert "stderr tail: boom" in message
+
+
+def test_silent_exit_zero_with_empty_log_surfaces_stdout(tmp_path, monkeypatch):
+    corner = _silent_engine_corner(
+        tmp_path, monkeypatch, stdout="** ngspice-99\nbye\n", write_log=""
+    )
+    (message,) = _unknown_messages(corner)
+    assert "exited with code 0" in message
+    assert "stdout tail:" in message and "bye" in message
+
+
+def test_nonzero_exit_without_log_extends_existing_message(tmp_path, monkeypatch):
+    corner = _silent_engine_corner(
+        tmp_path, monkeypatch, returncode=2, stderr="cannot open deck"
+    )
+    (message,) = _unknown_messages(corner)  # exactly one: no double report
+    assert "exited with code 2 without writing its log" in message
+    assert "cannot open deck" in message
+
+
+def test_silent_engine_output_tail_is_bounded(tmp_path, monkeypatch):
+    corner = _silent_engine_corner(
+        tmp_path, monkeypatch, stderr="head-marker" + "x" * 10_000 + "tail-marker"
+    )
+    (message,) = _unknown_messages(corner)
+    assert "tail-marker" in message
+    assert "head-marker" not in message
+    assert len(message) < 3000
+
+
+def test_engine_output_tail_tolerates_undecodable_text():
+    assert sim._engine_output_tail("", "bad \udcff byte") != ""
+    assert sim._engine_output_tail("", "") == ""
+
+
+def test_log_present_run_gets_no_silent_engine_diagnostic(tmp_path, monkeypatch):
+    corner = _silent_engine_corner(
+        tmp_path,
+        monkeypatch,
+        stderr="noise",
+        write_log="vout = 1.2\n",
+    )
+    assert "exited with code" not in " ".join(_unknown_messages(corner))
 
 
 def test_corner_killed_by_signal_gets_distinct_diagnostic(tmp_path, monkeypatch):
@@ -7762,6 +7881,35 @@ def test_run_sim_remote_backend_pushes_local_parallel_request(tmp_path, monkeypa
     assert state["local_netlist_path"].endswith("body.spice")
     assert state["push_job_calls"] == 1
     assert state["cleanup_calls"] == 1
+
+
+def test_run_sim_remote_backend_forwards_cli_budget_s_to_worker(tmp_path, monkeypatch):
+    """Issue #3167: `--budget-s` reaches the worker; CLI wins over the request."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        _base_remote_request(
+            corners={"temperature_c": [10, 40]},
+            options={"wall_clock_budget_s": 3600},
+        ),
+    )
+    state = _install_fake_remote_transport(monkeypatch)
+
+    sim.run_sim(str(request), budget_s=90)
+    assert state["remote_request"]["options"]["wall_clock_budget_s"] == 90
+
+    sim.run_sim(str(request))
+    assert state["remote_request"]["options"]["wall_clock_budget_s"] == 3600
+
+
+def test_run_sim_remote_backend_adds_no_budget_key_when_unset(tmp_path, monkeypatch):
+    _write_body(tmp_path)
+    request = _write_request(tmp_path, _base_remote_request())
+    state = _install_fake_remote_transport(monkeypatch)
+
+    sim.run_sim(str(request))
+
+    assert "wall_clock_budget_s" not in state["remote_request"]["options"]
 
 
 def test_run_sim_remote_backend_stages_the_netlists_include_closure(
@@ -12590,6 +12738,24 @@ def test_gf180_pdk_native_passives_report_inactive():
         assert sim._MISMATCH_ACTIVITY[("gf180mcu", fam)]["active"] is False
 
 
+def test_sky130_resistor_reports_mismatch_active(tmp_path):
+    """#3032: sky130 poly resistors carry a per-instance AGAUSS hook gated by
+    MC_MM_SWITCH, so the report is a curated `active: True`, not `None`."""
+    netlist = tmp_path / "r.spice"
+    netlist.write_text(
+        "XR1 a b 0 sky130_fd_pr__res_high_po_1p41 L=10\n"
+        "XR2 a c 0 sky130_fd_pr__res_high_po_1p41 L=10\n"
+    )
+    report = sim._mismatch_family_report(str(netlist), "sky130A")
+    assert [f["family"] for f in report] == ["resistor"]
+    assert report[0]["active"] is True
+    assert "MC_MM_SWITCH" in report[0]["note"]
+    # gf180 and unknown-PDK behaviour unchanged.
+    assert sim._MISMATCH_ACTIVITY[("gf180mcu", "resistor")]["active"] is False
+    unknown = sim._mismatch_family_report(str(netlist), "mystery")
+    assert unknown[0]["active"] is None
+
+
 # --- #2894: unknown supply_v key, timeout-budget hint ----------------------- #
 
 
@@ -12632,3 +12798,92 @@ def test_timeout_budget_hint_near_budget_and_timeout():
 
 def test_timeout_budget_hint_absent_when_well_inside_budget():
     assert sim._timeout_budget_hint([_hint_corner(100.0)], 600) is None
+
+
+# --------------------------------------------------------------------------- #
+# noise_representation (issue #3006)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("plotname", "vtype", "expected"),
+    [
+        ("Integrated Noise", "voltage", "amplitude"),
+        ("Integrated Noise - V^2 or A^2", "voltage^2", "power"),
+        ("Integrated Noise", "current^2", "power"),
+        ("Integrated Noise - V^2 or A^2", "voltage", "power"),
+    ],
+)
+def test_noise_representation(plotname, vtype, expected):
+    waveform = {
+        "plotname": plotname,
+        "variables": [{"index": 0, "name": "onoise_total", "type": vtype}],
+        "points": [[1.0]],
+    }
+    assert sim.noise_representation(waveform) == expected
+
+
+# --------------------------------------------------------------------------- #
+# environment.engine_host (issue #3110)
+# --------------------------------------------------------------------------- #
+
+
+def _worker_block(capture, path=None):
+    simulator = {"selected_path": path} if capture == "ok" else None
+    return {"worker_environment": {"capture": capture, "simulator": simulator}}
+
+
+def test_apply_engine_host_local_run_is_otherwise_unchanged():
+    env = {"ngspice_binary": "/usr/bin/ngspice"}
+    sim.apply_engine_host(
+        env, backend="local", client_ngspice_binary="/usr/bin/ngspice"
+    )
+    assert env == {"ngspice_binary": "/usr/bin/ngspice", "engine_host": "local"}
+
+
+def test_apply_engine_host_batch_swaps_in_the_worker_path():
+    env = {
+        "ngspice_binary": "/home/me/.local/bin/ngspice",
+        "remote": _worker_block("ok", "/usr/bin/ngspice"),
+    }
+    sim.apply_engine_host(
+        env, backend="batch", client_ngspice_binary="/home/me/.local/bin/ngspice"
+    )
+    assert env["engine_host"] == "worker"
+    assert env["ngspice_binary"] == "/usr/bin/ngspice"
+    assert env["client_ngspice_binary"] == "/home/me/.local/bin/ngspice"
+
+
+@pytest.mark.parametrize(
+    "remote", [_worker_block("absent"), _worker_block("malformed"), {}, None]
+)
+def test_apply_engine_host_without_worker_capture_is_null(remote):
+    env = {"ngspice_binary": "/home/me/ngspice", "remote": remote}
+    sim.apply_engine_host(
+        env, backend="remote", client_ngspice_binary="/home/me/ngspice"
+    )
+    assert env["engine_host"] == "worker"
+    assert env["ngspice_binary"] is None
+    assert env["client_ngspice_binary"] == "/home/me/ngspice"
+
+
+def test_apply_engine_host_sharded_fleet_agreement_and_disagreement():
+    same = {"fleet": [_worker_block("ok", "/a"), _worker_block("ok", "/a")]}
+    mixed = {"fleet": [_worker_block("ok", "/a"), _worker_block("ok", "/b")]}
+    partial = {"fleet": [_worker_block("ok", "/a"), _worker_block("absent")]}
+    for remote, expected in ((same, "/a"), (mixed, None), (partial, None)):
+        env = {"remote": remote}
+        sim.apply_engine_host(env, backend="batch", client_ngspice_binary="/c")
+        assert env["ngspice_binary"] == expected
+
+
+def test_apply_engine_host_xyce_stays_null_and_client_null():
+    env = {"ngspice_binary": None, "remote": _worker_block("absent")}
+    sim.apply_engine_host(env, backend="batch", client_ngspice_binary=None)
+    assert env["ngspice_binary"] is None and env["client_ngspice_binary"] is None
+
+
+def test_pex_side_environment_carries_engine_host():
+    from klayout_tools import pex
+
+    assert {"engine_host", "client_ngspice_binary"} <= set(pex._SIDE_ENVIRONMENT_KEYS)

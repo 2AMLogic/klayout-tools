@@ -560,16 +560,19 @@ parameter/unit mapping into a sign-off tool must never pass silently):
   base/collector geometry the fixed-geometry cell name does not encode, and
   they are *secondary* parameters — once the primary `AE`/`NE` agree the
   devices pair and the comparer never reports them.
-- `nf`/`m`/`mult` > 1 on a resistor/capacitor call, and `m`/`mult` > 1 on a
-  MOS call (a multiplied device the curated plain-element form cannot
-  represent) is **rejected** with a specific error naming the device —
+- `nf`/`m`/`mult` > 1 on a resistor/capacitor call (a multiplied device the
+  curated plain-element form cannot represent) is **rejected** with a specific error naming the device —
   never silently dropped or misinterpreted. Flatten it (one device per
   drawn gate) in the schematic netlist first. Two exceptions: bipolar's
   `mult` is carried onto `NE`, not rejected, since
   `DeviceClassBJT3Transistor` can represent multiple parallel emitters that
-  way; and MOS's own `nf` is *expanded*, not rejected (see above) — `m`/
-  `mult` on a MOS call is a different, whole-device replication count (not
-  finger-folding) and is still rejected exactly like resistor/capacitor's.
+  way; and MOS's own `nf` and `m` are *expanded*, not rejected (see above).
+  MOS `m=N` (positive integer) becomes `N` parallel plain `M` cards named
+  `<instance>_m0` ... (`nf*m` cards named `<instance>_m0_f0` ... when
+  combined with `nf`), total width `m*W`; pair with `options.combine_devices`
+  to match an N-unit layout. MOS `mult` is ignored (it must still be
+  numeric): in the sky130 model subckt it only feeds the mismatch-sigma
+  expressions (`sqrt(l*w*mult)`), never the device card.
 
 A reference netlist that *mixes* plain-element (`M`/`R`/`C`/`Q`) cards and
 subckt-call `X` device cards converts correctly under `form:
@@ -3452,9 +3455,13 @@ despite a name/identity conflict. Six classification sites inside
   the instance itself (`instance`), and the circuit it instantiates
   (`subcircuit`) (issue #1132), so a macro-scale report attributes *which*
   instance failed to pair without a side-channel netlist diff.
-- **Device-class mismatch** (`lvs.py:3770-3808`, from
+- **Device-class mismatch** (`lvs_mismatch.py`, from
   `logger.device_class_mismatches`) — a device class (e.g. `nfet`)
   registered on one side has no counterpart class on the other side.
+  The class is named in `device.class` (`device.layout`/`device.reference`
+  stay `null`, as for `device.unmatched`) and appended to `description`
+  (`... counterpart: 'nfet'`), so several unmapped classes are
+  distinguishable; `device.class` is `null` if the class has no name.
   Downgraded to `"warning"` when that side's netlist has zero actual
   instances of the class (`klt extract` always registers both
   `nfet`/`pfet` device classes even when a layout only instantiates one
