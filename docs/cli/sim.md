@@ -2089,9 +2089,25 @@ resolve by **bare name** (e.g. `onoise_spectrum[10]`, `onoise_total`); the
 so `options.waveforms` output is unchanged, and decks for other analysis kinds
 are byte-identical.
 
-Limitation: this applies to the single-analysis path only. Inside
-`analysis_steps` a `noise` step's spectrum plot is not captured, so spectrum
-vectors are not reachable there (tracked in [#3284](https://github.com/2AMLogic/klayout-tools/issues/3284)).
+Inside `analysis_steps`, `$curplot` after a `noise` step is likewise the
+totals plot, so a step-scoped `expr` sees `onoise_total`/`inoise_total` only.
+A derived (top-level) or later-step `expr` reaches a `noise` step's spectra
+with the `<step>.spectrum.<vector>` reference, where `<vector>` is
+`inoise_spectrum` or `onoise_spectrum`:
+
+```json
+{ "name": "a_spot", "expr": "a.spectrum.onoise_spectrum[10]", "unit": "V/sqrt(Hz)" }
+```
+
+The spectrum plot name is captured per step (it is not a fixed `noise1`), so two
+`noise` steps resolve to their own distinct plots. The capture is emitted only
+for `noise` steps that a `.spectrum.` reference names, so every other deck is
+byte-identical. `<step>.spectrum.<vector>` on a non-`noise` step, an unknown
+vector, or a forward/unknown step fails validation naming the measurement and
+step. If the `noise` step fails, its dependents are reported
+`derived_input_unavailable` (alongside the step's `step_failed`), never a stale
+value. A step-scoped measurement that is literally named `spectrum` is still
+referenced as `<step>.spectrum`; only the three-part form is the qualifier.
 
 ### Noise units and `sqrnoise`
 
