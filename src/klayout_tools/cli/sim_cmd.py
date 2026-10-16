@@ -130,6 +130,7 @@ def _run_sweep(args: argparse.Namespace) -> int:
             dry_run=getattr(args, "dry_run", False),
             submit_only=getattr(args, "submit_only", False),
             attach_job_id=getattr(args, "attach_job_id", None),
+            capacity_wait_s=getattr(args, "wait_for_capacity", None),
         )
     except SimError as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)
@@ -209,6 +210,14 @@ def _run_job_status(args: argparse.Namespace) -> int:
             args.format,
             exit_code=EXIT_USAGE_ERROR,
         )
+    if getattr(args, "wait_for_capacity", None) is not None:
+        return emit_error(
+            "sim",
+            "--job-status cannot be combined with --wait-for-capacity: it "
+            "launches nothing",
+            args.format,
+            exit_code=EXIT_USAGE_ERROR,
+        )
     if args.backend not in (None, "batch"):
         return emit_error(
             "sim",
@@ -261,8 +270,9 @@ def _run_batch_set(args: argparse.Namespace) -> int:
             ("--op-lint", getattr(args, "op_lint", False)),
             ("--submit-only", getattr(args, "submit_only", False)),
             ("--job-status", getattr(args, "job_status", None)),
+            ("--wait-for-capacity", getattr(args, "wait_for_capacity", None)),
         )
-        if value
+        if value is not None and value is not False and value != ""
     ]
     if conflicts:
         return emit_error(

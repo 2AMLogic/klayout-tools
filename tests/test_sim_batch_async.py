@@ -209,3 +209,177 @@ def test_cli_submit_only_non_batch_backend_envelope(tmp_path, monkeypatch, capsy
     error = _stderr_json(capsys)["error"]
     assert error["code"] == sba.SUBMIT_ONLY_UNSUPPORTED_CODE
     assert runner.calls == []
+
+
+# --------------------------------------------------------------------------- #
+# `--wait-for-capacity` (issue #3564)
+# --------------------------------------------------------------------------- #
+
+
+class _Stop(Exception):
+    """Raised by the config spy so a blocking run stops once it has read the
+    effective config -- before any S3 write."""
+
+
+def _spy_capacity_wait(monkeypatch):
+    """Record every ``capacity_wait_s`` a batch config resolves to."""
+    seen: list[float] = []
+
+    def wrap(real):
+        def spy(*args, **kwargs):
+            config = real(*args, **kwargs)
+            seen.append(config.capacity_wait_s)
+            return config
+
+        return spy
+
+    monkeypatch.setattr(sba, "_resolve_batch_config", wrap(sba._resolve_batch_config))
+    real_blocking = sb._resolve_batch_config
+
+    def blocking_spy(*args, **kwargs):
+        config = real_blocking(*args, **kwargs)
+        seen.append(config.capacity_wait_s)
+        raise _Stop
+
+    monkeypatch.setattr(sb, "_resolve_batch_config", blocking_spy)
+    return seen
+
+
+def test_wait_for_capacity_reaches_the_submit_only_config(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    path = _setup(tmp_path, monkeypatch, runner)
+    seen = _spy_capacity_wait(monkeypatch)
+
+    sim.run_sim(str(path), submit_only=True, capacity_wait_s=90)
+
+    assert seen == [90.0]
+
+
+def test_wait_for_capacity_reaches_the_blocking_config(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    path = _setup(tmp_path, monkeypatch, runner)
+    seen = _spy_capacity_wait(monkeypatch)
+
+    with pytest.raises(_Stop):
+        sim.run_sim(str(path), capacity_wait_s=45.5)
+
+    assert seen == [45.5]
+
+
+def test_wait_for_capacity_overrides_the_request_field_including_zero(
+    tmp_path, monkeypatch
+):
+    runner = _FakeRunner()
+    request = _batch_request(tmp_path)
+    request["batch"]["capacity_wait_s"] = 600
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    _write_body(tmp_path)
+    path = _write_request(tmp_path, request)
+    seen = _spy_capacity_wait(monkeypatch)
+
+    sim.run_sim(str(path), submit_only=True)
+    sim.run_sim(str(path), submit_only=True, capacity_wait_s=0)
+    sim.run_sim(str(path), submit_only=True, capacity_wait_s=30)
+
+    assert seen == [600.0, 0.0, 30.0]
+
+
+@pytest.mark.parametrize("value", [-1, float("nan"), float("inf")])
+def test_wait_for_capacity_invalid_value_is_refused_before_any_s3_write(
+    tmp_path, monkeypatch, value
+):
+    runner = _FakeRunner()
+    path = _setup(tmp_path, monkeypatch, runner)
+
+    with pytest.raises(sim.SimError, match="capacity_wait_s"):
+        sim.run_sim(str(path), submit_only=True, capacity_wait_s=value)
+
+    assert runner.calls == []
+
+
+def test_wait_for_capacity_refused_on_a_non_batch_backend(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    path = _setup(tmp_path, monkeypatch, runner, backend="local")
+
+    with pytest.raises(sim.SimError, match="--wait-for-capacity requires"):
+        sim.run_sim(str(path), capacity_wait_s=10)
+
+    assert runner.calls == []
+
+
+def test_wait_for_capacity_refused_with_attach(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    path = _setup(tmp_path, monkeypatch, runner)
+
+    with pytest.raises(sim.SimError, match="--attach"):
+        sim.run_sim(str(path), attach_job_id="klt-sim-x", capacity_wait_s=10)
+
+    assert runner.calls == []
+
+
+def test_cli_wait_for_capacity_with_job_status_is_a_usage_error(
+    tmp_path, monkeypatch, capsys
+):
+    runner = _FakeRunner()
+    path = _setup(tmp_path, monkeypatch, runner)
+
+    code = main(
+        [
+            "sim",
+            str(path),
+            "--job-status",
+            "klt-sim-x",
+            "--wait-for-capacity",
+            "5",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert code == 2
+    assert "--wait-for-capacity" in _stderr_json(capsys)["error"]["message"]
+    assert runner.calls == []
+
+
+def test_cli_wait_for_capacity_with_batch_set_is_a_usage_error(
+    tmp_path, monkeypatch, capsys
+):
+    runner = _FakeRunner()
+    path = _setup(tmp_path, monkeypatch, runner)
+
+    code = main(
+        [
+            "sim",
+            "--batch-set",
+            str(path),
+            "--wait-for-capacity",
+            "0",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert code == 2
+    assert "--wait-for-capacity" in _stderr_json(capsys)["error"]["message"]
+    assert runner.calls == []
+
+
+def test_cli_wait_for_capacity_flows_to_submit_only(tmp_path, monkeypatch, capsys):
+    runner = _FakeRunner()
+    path = _setup(tmp_path, monkeypatch, runner)
+    seen = _spy_capacity_wait(monkeypatch)
+
+    code = main(
+        [
+            "sim",
+            str(path),
+            "--submit-only",
+            "--wait-for-capacity",
+            "12",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert code == 0
+    assert seen == [12.0]
