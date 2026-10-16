@@ -1853,7 +1853,10 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
         pdk_help=(
             "PDK variant to resolve (e.g. sky130A); overrides $PDK. "
             "Optional -- extraction runs from --deck alone when omitted; "
-            "when given, an unresolvable PDK is an application error."
+            "when given, an unresolvable PDK is an application error. "
+            "Omitted, MOS devices are written as bare M cards that are not "
+            "mismatch-capable under Monte Carlo; pass --pdk for the "
+            "subckt-wrapper X call."
         ),
     )
     extract_parser.add_argument(
