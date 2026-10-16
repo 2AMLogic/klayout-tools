@@ -4442,6 +4442,69 @@ example: `examples/sim/request-monte-carlo-instances.json`. Key names and entry
 shape are intended to stay consistent with the injected-mismatch proposal in
 #2911.
 
+**Design-owned (injected) mismatch — `monte_carlo.injected`.** When a PDK's
+resistor/capacitor model has no per-instance mismatch hook (the
+`active: false`/`null` families above), declare the mismatch the design
+injects itself and let `klt sim` own the draws and report them:
+
+```json
+{
+  "monte_carlo": {
+    "n": 300, "seed": 20260801, "vary": "mismatch",
+    "injected": [
+      { "pattern": "xr*", "parameter": "m", "relative_sigma": 0.02,
+        "distribution": "gaussian" }
+    ],
+    "injected_scale": 1
+  }
+}
+```
+
+- **`injected[]`** — each entry has exactly one of `instance` (exact element
+  name) or `pattern` (`fnmatch` glob over the netlist closure's element
+  names, including those inside `.subckt` bodies; matching is
+  case-insensitive and hierarchy is flat), plus `parameter` (a label that
+  names the param), `relative_sigma` (a number in `(0, 1)`), and an optional
+  `distribution` (`"gaussian"` default, or `"uniform"` with the same
+  standard deviation).
+- **`injected_scale`** (number ≥ 0, default `1`) — global factor on every
+  sigma: `0` turns the injection off (a negative control: every draw is
+  applied as exactly `1.0`), `3` inflates it (a positive control).
+- **How it is applied.** `klt` does not rewrite your netlist. Per sample it
+  writes `.param mc_inj_<instance>_<parameter>` (the multiplier
+  `1 + relative_delta`) and `..._delta` (`relative_delta`) into the deck —
+  names lower-cased, runs of non-alphanumerics as `_`, e.g. `xr1` + `m` →
+  `mc_inj_xr1_m` — and the netlist body consumes them
+  (`XR1 a b rh m='mc_inj_xr1_m'`). A declaration whose selector matches no
+  instance, or whose param the netlist closure never references, is
+  rejected before any corner runs, so an injection is never reported live
+  while nothing consumes it. Other validation errors: unknown keys, a
+  non-positive or `≥ 1` sigma, an unsupported distribution, a duplicated
+  `(instance, parameter)`.
+- **Draws.** Each draw is a SHA-256 function of the sample's
+  `mismatch_seed`, the instance and the parameter — klt-recorded values, not
+  ngspice's `agauss` stream — so the same request reproduces the same draws
+  and changing `n` (or other axes) never shifts another sample's draws.
+  `vary: "process"` pins `mismatch_seed`, so injected draws are identical
+  across samples (the same deterministic negative control as above).
+- **Per-sample record.** Each `corners[].monte_carlo` gains an additive
+  `injected[]` of `{instance, parameter, draw, relative_delta, value}`
+  (`draw` is the unit-variance draw; `relative_delta = injected_scale *
+  relative_sigma * draw`; `value = 1 + relative_delta`).
+- **`family_mismatch`.** Injected families are appended (PDK-table entries
+  are unchanged) as `{family, active, source: "injected", parameter,
+  relative_sigma, distribution, instances, note}`; `active` is `true` only
+  when `injected_scale > 0` and `vary` includes mismatch. The block appears
+  for an injected request even when `vary` is `"process"`. The environment
+  also echoes `injected_scale`. If the PDK's own mismatch for the same
+  family is active too, the entry's `note` says the two compose.
+- **Backends.** The draws ride the existing per-point seed wire, so the
+  `batch`/`remote` fleets carry them unchanged; validation against the
+  netlist closure happens on the orchestrating host.
+
+Worked example: `examples/sim/request-monte-carlo-injected.json` (with
+`testbench-mc-injected.spice`).
+
 ## Monte Carlo statistics
 
 A `monte_carlo` request additionally reduces its samples to a **statistical

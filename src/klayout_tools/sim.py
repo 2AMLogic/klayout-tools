@@ -97,6 +97,7 @@ from . import (
     sim_cycle_mean,
     sim_decks,
     sim_energy,
+    sim_injected,
     sim_mismatch_gate,
     sim_portable,
     sim_steps,
@@ -2856,38 +2857,19 @@ def _run_sim_corners(
         # `_corner_points_to_wire`/`_corner_points_from_wire`.
         corner_points = _corner_points_from_wire(explicit_points_wire)
     elif monte_carlo_spec is not None:
+        injected = _resolve_injected(monte_carlo_spec, netlist_path, request, repo_root)
         corner_points, monte_carlo_info = _expand_monte_carlo(
-            corner_points, monte_carlo_spec
+            corner_points, monte_carlo_spec, injected
         )
-        if monte_carlo_info["vary"] in ("mismatch", "both"):
-            # Additive: per-device-family mismatch-activity report (#355) --
-            # only meaningful when this run's sample sequence actually
-            # varies mismatch. Never claims a hard-zero-mismatch family
-            # (e.g. gf180mcu's poly resistor) was sampled just because the
-            # request's global mismatch switch/section was engaged.
-            family_scan: dict[str, Any] = {}
-            family_report = _mismatch_family_report(
-                netlist_path,
-                models.get("pdk"),
-                request=request,
-                process_sections=[
-                    name
-                    for point in corner_points
-                    for name in (
-                        point.process_sections
-                        if point.process_sections is not None
-                        else ([point.process] if point.process else [])
-                    )
-                ],
-                repo_root=repo_root,
-                scan=family_scan,
-            )
-            monte_carlo_info = {**monte_carlo_info, "family_mismatch": family_report}
-            # Issue #2928: additive disclosure of what was scanned, only
-            # when the closure is more than the lone top-level file or some
-            # part of it could not be scanned (simple requests unchanged).
-            if len(family_scan["scanned"]) > 1 or family_scan["not_scanned"]:
-                monte_carlo_info["family_mismatch_scan"] = family_scan
+        monte_carlo_info = _with_family_mismatch(
+            monte_carlo_info,
+            injected,
+            netlist_path,
+            models,
+            request,
+            repo_root,
+            corner_points,
+        )
         # Issue #2963: disclose transient-noise sources the seed contract
         # does not cover, whatever `vary` asks for.
         monte_carlo_info = _with_unseeded_noise(
@@ -4177,6 +4159,7 @@ class CornerPoint:
         "params",
         "sample_index",
         "mc_seed",
+        "mc_injected",
     )
 
     def __init__(
@@ -4191,6 +4174,7 @@ class CornerPoint:
         params: dict[str, int | float] | None = None,
         sample_index: int | None = None,
         mc_seed: dict[str, Any] | None = None,
+        mc_injected: list[dict[str, Any]] | None = None,
     ) -> None:
         self.process = process
         self.params: dict[str, int | float] = params or {}
@@ -4201,6 +4185,9 @@ class CornerPoint:
         self.temperature_c = temperature_c
         self.sample_index = sample_index
         self.mc_seed = mc_seed
+        # Issue #2911: this sample's recorded design-owned mismatch draws
+        # (`sim_injected.draw`); ``None`` unless `monte_carlo.injected`.
+        self.mc_injected = mc_injected
 
     def section_lib(self, index: int, models_lib: str | None) -> str | None:
         """The library path the ``.lib`` card for ``process_sections[index]``
@@ -4543,6 +4530,7 @@ def _corner_points_to_wire(points: list[CornerPoint]) -> list[dict[str, Any]]:
             "temperature_c": point.temperature_c,
             "sample_index": point.sample_index,
             "mc_seed": point.mc_seed,
+            "mc_injected": point.mc_injected,
         }
         if point.params:
             # Issue #3035: only a parameter point carries the field, so every
@@ -4601,6 +4589,7 @@ def _corner_points_from_wire(data: Any) -> list[CornerPoint]:
                 params=params,
                 sample_index=entry.get("sample_index"),
                 mc_seed=entry.get("mc_seed"),
+                mc_injected=entry.get("mc_injected"),
             )
         )
     return points
@@ -5224,8 +5213,137 @@ def _derive_mc_seed(base_seed: int, *parts: object) -> int:
     return int.from_bytes(digest[:4], "big") % _MC_SEED_MODULUS
 
 
+def _corner_process_sections(corner_points: list[Any]) -> list[str]:
+    """Every process section the run's corner points exercise, in order."""
+    return [
+        name
+        for point in corner_points
+        for name in (
+            point.process_sections
+            if point.process_sections is not None
+            else ([point.process] if point.process else [])
+        )
+    ]
+
+
+def _with_family_mismatch(
+    monte_carlo_info: dict[str, Any],
+    injected: tuple[list[dict[str, Any]], float] | None,
+    netlist_path: str,
+    models: dict[str, Any],
+    request: dict[str, Any],
+    repo_root: str | None,
+    corner_points: list[Any],
+) -> dict[str, Any]:
+    """``monte_carlo_info`` plus the additive ``family_mismatch`` report: the
+    per-device-family activity report (#355) when ``vary`` includes mismatch
+    -- never claiming a hard-zero-mismatch family (e.g. gf180mcu's poly
+    resistor) was sampled just because the global mismatch switch/section was
+    engaged -- plus any design-owned ``injected`` families (#2911)."""
+    mismatch_varies = monte_carlo_info["vary"] in ("mismatch", "both")
+    if not (mismatch_varies or injected):
+        return monte_carlo_info
+    family_scan: dict[str, Any] = {}
+    family_report: list[dict[str, Any]] = []
+    if mismatch_varies:
+        family_report = _mismatch_family_report(
+            netlist_path,
+            models.get("pdk"),
+            request=request,
+            process_sections=_corner_process_sections(corner_points),
+            repo_root=repo_root,
+            scan=family_scan,
+        )
+    if injected:
+        family_report = family_report + _injected_family_report(
+            injected, mismatch_varies=mismatch_varies, pdk_entries=family_report
+        )
+    result = {**monte_carlo_info, "family_mismatch": family_report}
+    # Issue #2928: additive disclosure of what was scanned, only when the
+    # closure is more than the lone top-level file or some part of it could
+    # not be scanned (simple requests unchanged).
+    if family_scan and (len(family_scan["scanned"]) > 1 or family_scan["not_scanned"]):
+        result["family_mismatch_scan"] = family_scan
+    return result
+
+
+def _resolve_injected(
+    mc_spec: dict[str, Any],
+    netlist_path: str,
+    request: dict[str, Any],
+    repo_root: str | None,
+) -> tuple[list[dict[str, Any]], float] | None:
+    """Validate ``monte_carlo.injected`` and resolve it against the netlist's
+    ``.include`` closure (issue #2911); ``None`` when not declared. Raises
+    :class:`SimError` before any corner runs."""
+    try:
+        specs, scale = sim_injected.validate(mc_spec)
+        if not specs:
+            return None
+        files, _ = _mismatch_scan_closure(request, netlist_path, repo_root)
+        texts = []
+        for _label, path in files:
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    texts.append(handle.read())
+            except (OSError, UnicodeDecodeError):
+                continue
+        return sim_injected.resolve(specs, texts), scale
+    except sim_injected.InjectedError as exc:
+        raise SimError(str(exc)) from exc
+
+
+def _injected_family_report(
+    injected: tuple[list[dict[str, Any]], float],
+    *,
+    mismatch_varies: bool,
+    pdk_entries: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """``family_mismatch`` entries for design-owned mismatch (issue #2911):
+    one per (family, parameter, sigma, distribution), ``source: "injected"``.
+    ``active`` is true only when the injection can actually vary: scale > 0 and
+    ``vary`` includes mismatch (otherwise every sample draws the same value)."""
+    resolved, scale = injected
+    active = scale > 0 and mismatch_varies
+    pdk_active = {e["family"] for e in pdk_entries if e.get("active")}
+    groups: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for item in resolved:
+        families = _detect_device_families(item["card"])
+        family = families[0] if families else "other"
+        key = (family, item["parameter"], item["relative_sigma"], item["distribution"])
+        if key not in groups:
+            note = (
+                f"design-owned mismatch injected by klt on '{item['parameter']}' "
+                f"({item['distribution']}, relative sigma "
+                f"{item['relative_sigma']:g} x injected_scale {scale:g})"
+            )
+            if not mismatch_varies:
+                note += (
+                    "; monte_carlo.vary does not include mismatch, so draws are pinned"
+                )
+            if family in pdk_active:
+                note += (
+                    f"; the PDK's own '{family}' mismatch is also active, so the "
+                    f"two compose rather than replace each other"
+                )
+            groups[key] = {
+                "family": family,
+                "active": active,
+                "source": "injected",
+                "parameter": item["parameter"],
+                "relative_sigma": item["relative_sigma"],
+                "distribution": item["distribution"],
+                "instances": [],
+                "note": note,
+            }
+        groups[key]["instances"].append(item["instance"])
+    return list(groups.values())
+
+
 def _expand_monte_carlo(
-    corner_points: list[CornerPoint], mc_spec: dict[str, Any]
+    corner_points: list[CornerPoint],
+    mc_spec: dict[str, Any],
+    injected: tuple[list[dict[str, Any]], float] | None = None,
 ) -> tuple[list[CornerPoint], dict[str, Any]]:
     """Expand each point in ``corner_points`` into ``mc_spec["n"]`` sample
     points, returning ``(sampled_points, monte_carlo_info)``.
@@ -5257,6 +5375,11 @@ def _expand_monte_carlo(
     get a sigma=0 control. Requesting the *same* ``mc_spec["seed"]`` again
     (same process, different process, doesn't matter) reproduces the exact same sequence
     of derived seeds -- see :func:`_derive_mc_seed`.
+
+    ``injected`` (issue #2911) is ``(resolved, scale)`` from
+    :func:`_resolve_injected`: each sample then also records its design-owned
+    mismatch draws, a pure function of that sample's ``mismatch_seed`` (see
+    :mod:`klayout_tools.sim_injected`).
     """
     n, seed, vary = _validate_monte_carlo_spec(mc_spec)
     seed_scope = _validate_mc_seed_scope(mc_spec)
@@ -5308,9 +5431,16 @@ def _expand_monte_carlo(
                     params=base.params,
                     sample_index=sample_index,
                     mc_seed=mc_seed,
+                    mc_injected=(
+                        sim_injected.draw(injected[0], mismatch_seed, injected[1])
+                        if injected
+                        else None
+                    ),
                 )
             )
     info: dict[str, Any] = {"n": n, "seed": seed, "vary": vary}
+    if injected:
+        info["injected_scale"] = injected[1]
     if "seed_scope" in mc_spec:
         info["seed_scope"] = seed_scope
     return sampled, info
@@ -7384,6 +7514,11 @@ def _run_corner(
         }
         if "seed_scope" in point.mc_seed:
             monte_carlo["seed_scope"] = point.mc_seed["seed_scope"]
+        if point.mc_injected is not None:
+            monte_carlo["injected"] = [
+                {k: v for k, v in item.items() if k not in ("param", "scale")}
+                for item in point.mc_injected
+            ]
 
     corner = {
         "corner_id": point.corner_id,
@@ -8054,6 +8189,8 @@ def _write_corner_deck(
         lines.append(f".param mc_sample_index={point.sample_index}")
         lines.append(f".param mc_process_seed={point.mc_seed['process_seed']}")
         lines.append(f".param mc_mismatch_seed={point.mc_seed['mismatch_seed']}")
+        if point.mc_injected is not None:
+            lines.extend(sim_injected.deck_lines(point.mc_injected))
     # The corner's `.lib` cards: one per section for a multi-section bundle
     # (e.g. gf180mcu's per-device-family cards, each optionally against its
     # own library file -- issue #2522), a single card for a bare-string
