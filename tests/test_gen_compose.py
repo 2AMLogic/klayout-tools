@@ -10382,9 +10382,15 @@ _DIFF_PAIR_GAP_E = {
     "ring_gap_um": 1.0,
     # Re-centre the E/W opening on the lower device row (the source/drain
     # ports' y) rather than the ring's own mid-height. core_h grew with the
-    # gate landing pad's row-pitch bump (issue #461), so the centring offset
-    # (ring mid-height minus the device-row y) grew with it.
-    "ring_gap_offset_um": -0.83,
+    # gate landing pad's row-pitch bump (issue #461), the sky130 pad
+    # stand-off (issue #3115) and the sky130 gate-stripe top endcap
+    # (0.15, issue #2936), so the centring offset (ring mid-height minus
+    # the device-row y) grew with them. The ring's lower straight-run end
+    # would now sit only 0.41um below the device row, short of the 0.485um a
+    # 0.17um route needs inside the opening, so the ring padding is widened
+    # by 0.1um to give the opening that room.
+    "ring_padding_um": 0.6,
+    "ring_gap_offset_um": -1.13,
 }
 _DIFF_PAIR_GAP_W = dict(_DIFF_PAIR_GAP_E, ring_gap_side="W")
 
@@ -16940,3 +16946,364 @@ def test_compose_half_grid_mos_array_port_is_drc_clean(tmp_path, pdk_root):
     notes = report["drc_hints"]["notes"]
     assert any("snapped" in n and "port 'U0_S'" in n for n in notes)
     assert run_drc(str(output), "sky130")["violation_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# #3079: the router's derived jog coordinate is snapped onto the grid
+# ---------------------------------------------------------------------------
+
+
+def _on_grid(value, grid=0.005):
+    return abs(value / grid - round(value / grid)) < 1e-6
+
+
+def test_backbone_half_grid_midpoint_vertical_jog_snaps_on_grid():
+    from klayout_tools.gen_compose_routing import manhattan_backbone
+
+    # Stub ends at x=0.1 and x=1.105 -> raw midpoint 0.6025 (half grid off).
+    raw = manhattan_backbone((0.0, 0.0), 0, (1.205, 1.0), 180, 0.1)
+    assert not _on_grid(raw[2][0])
+    pts = manhattan_backbone((0.0, 0.0), 0, (1.205, 1.0), 180, 0.1, grid_um=0.005)
+    assert all(_on_grid(x) and _on_grid(y) for x, y in pts)
+    assert abs(pts[2][0] - 0.6025) <= 0.0025 + 1e-9
+
+
+def test_backbone_half_grid_midpoint_horizontal_jog_snaps_on_grid():
+    from klayout_tools.gen_compose_routing import manhattan_backbone
+
+    pts = manhattan_backbone((0.0, 0.0), 90, (1.0, 1.205), 270, 0.1, grid_um=0.005)
+    assert all(_on_grid(x) and _on_grid(y) for x, y in pts)
+
+
+def test_backbone_on_grid_midpoint_is_bit_identical():
+    from klayout_tools.gen_compose_routing import manhattan_backbone
+
+    args = ((0.0, 0.0), 0, (1.2, 1.0), 180, 0.1)
+    assert manhattan_backbone(*args, grid_um=0.005) == manhattan_backbone(*args)
+    # grid 0.0 (no ongrid rule in the family) never snaps.
+    off = ((0.0, 0.0), 0, (1.205, 1.0), 180, 0.1)
+    assert manhattan_backbone(*off, grid_um=0.0) == manhattan_backbone(*off)
+
+
+def test_backbone_snaps_channel_offset_track():
+    from klayout_tools.gen_compose_routing import manhattan_backbone
+
+    pts = manhattan_backbone(
+        (0.0, 0.0), 0, (1.2, 1.0), 180, 0.1, channel_offset_um=0.6025, grid_um=0.005
+    )
+    assert all(_on_grid(x) and _on_grid(y) for x, y in pts)
+
+
+def test_backbone_snap_never_crosses_a_stub_end():
+    from klayout_tools.gen_compose_routing import manhattan_backbone
+
+    # Stub ends 0.003 apart: no grid line lies between them, so the jog is
+    # left unsnapped rather than pushed past a stub end.
+    raw = manhattan_backbone((0.001, 0.0), 0, (0.204, 1.0), 180, 0.1)
+    pts = manhattan_backbone((0.001, 0.0), 0, (0.204, 1.0), 180, 0.1, grid_um=0.005)
+    assert pts == raw
+
+
+def test_backbone_waypoints_are_never_snapped():
+    from klayout_tools.gen_compose_routing import manhattan_backbone
+
+    wp = [(0.5025, 2.0)]
+    raw = manhattan_backbone((0.0, 0.0), 0, (1.0, 1.0), 180, 0.1, waypoints=wp)
+    pts = manhattan_backbone(
+        (0.0, 0.0), 0, (1.0, 1.0), 180, 0.1, waypoints=wp, grid_um=0.005
+    )
+    assert pts == raw
+
+
+def test_offgrid_leg_notes_name_net_and_leg():
+    leg = {
+        "routed": True,
+        "pins": [{"block": "a", "port": "X"}, {"block": "b", "port": "Y"}],
+        "points_um": [(0.0, 0.0), (0.5025, 0.0), (0.5025, 1.0)],
+    }
+    notes = gen_compose._offgrid_leg_notes("N1", [leg], 0.005)
+    assert len(notes) == 1
+    assert "net 'N1'" in notes[0] and "a.X -> b.Y" in notes[0]
+    assert gen_compose._offgrid_leg_notes("N1", [leg], 0.0) == []
+    leg["points_um"] = [(0.0, 0.0), (0.5, 0.0)]
+    assert gen_compose._offgrid_leg_notes("N1", [leg], 0.005) == []
+
+
+@pytest.mark.parametrize("origin_x_um", [8.0, 8.005])
+def test_compose_half_grid_backbone_midpoint_is_drc_clean(
+    tmp_path, pdk_root, origin_x_um
+):
+    # Block b at x=8.005 puts the two stub ends' sum at an odd multiple of the
+    # grid, so the jog would land half a grid step off-grid (4 `*.ongrid.1`
+    # violations before #3079); x=8.0 is the already-on-grid control.
+    blocks = [
+        {
+            "id": name,
+            "generator_report": _gen_block(
+                tmp_path,
+                pdk_root,
+                "mos_array",
+                name,
+                w_um=3.0,
+                l_um=0.5,
+                rows=1,
+                cols=1,
+                dummy=0,
+                topology="array",
+            ),
+        }
+        for name in ("a", "b")
+    ]
+    output = tmp_path / f"jog_{origin_x_um}.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": blocks,
+            "placement": {
+                "strategy": "explicit",
+                "order": ["a", "b"],
+                "origins_um": {
+                    "a": {"x": 0.0, "y": 0.0},
+                    "b": {"x": origin_x_um, "y": 5.0},
+                },
+            },
+            "connectivity": [
+                {
+                    "net": "S",
+                    "pins": [
+                        {"block": "a", "port": "U0_S"},
+                        {"block": "b", "port": "U0_S"},
+                    ],
+                }
+            ],
+            "routing": {"layer_role": "metal2", "width_um": 0.3},
+            "options": {"cell_name": "jog_top", "output": str(output)},
+        }
+    )
+    assert report["nets"][0]["routed"] is True
+    assert not any("manufacturing grid" in n for n in report["drc_hints"]["notes"])
+    assert run_drc(str(output), "sky130")["violation_count"] == 0
+
+
+def test_compose_source_path_echoes_relative_spelling_without_host_prefix(
+    tmp_path, pdk_root
+):
+    # #2935: a relative `cell.gds_path` resolves against the request's
+    # directory for reading, but the response echoes it as spelled -- no
+    # checkout/temp prefix -- while `source_digest` still pins the content.
+    blocks = []
+    for name in ("a", "b"):
+        req_dir = tmp_path / name
+        req_dir.mkdir()
+        _write_boxed_gds(req_dir / "stub.gds", "lib_inv", [(0.0, 0.0, 2.0, 1.2)])
+        report = compose(
+            {
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "blocks": [
+                    {
+                        "id": "s",
+                        "cell": {"gds_path": "stub.gds", "cell_name": "lib_inv"},
+                    }
+                ],
+                "placement": {"strategy": "row", "order": ["s"], "spacing_um": 1.0},
+                "options": {
+                    "cell_name": "rel_0",
+                    "output": str(req_dir / "out.gds"),
+                },
+            },
+            request_dir=str(req_dir),
+        )
+        blocks.append(report["blocks"][0])
+
+    assert blocks[0]["source_path"] == "stub.gds"
+    assert str(tmp_path) not in blocks[0]["source_path"]
+    assert blocks[0]["source_path"] == blocks[1]["source_path"]
+    assert blocks[0]["source_digest"] == blocks[1]["source_digest"]
+    assert blocks[0]["source_digest"].startswith("sha256:")
+
+
+# --- Plane-bearing waypoints (#2930) ---------------------------------------
+
+
+def _plane_change_request(tmp_path, pdk_root, output, cell_name, waypoints):
+    """The drain-bus fixture with its u1->u2 leg steered through ``waypoints``.
+
+    The u0->u1 leg is pinned to met1 (`metal2`), the u1->u2 leg starts on met1
+    too and may change plane at a ``[x, y, "layer_role"]`` waypoint.
+    """
+    request = _drain_bus_request(tmp_path, pdk_root, output, cell_name)
+    request["connectivity"][0]["legs"] = [
+        {
+            "from_pin": {"block": "u0", "port": "U0_D"},
+            "to_pin": {"block": "u1", "port": "U0_D"},
+            "layer_role": "metal2",
+        },
+        {
+            "from_pin": {"block": "u1", "port": "U0_D"},
+            "to_pin": {"block": "u2", "port": "U0_D"},
+            "layer_role": "metal2",
+            "waypoints_um": waypoints,
+        },
+    ]
+    return request
+
+
+def test_compose_plane_bearing_waypoint_changes_plane_mid_leg(tmp_path, pdk_root):
+    # One leg, two planes, no caller-built junction GDS: the leg runs on met1
+    # up and over u1, changes to met2 at (7.0, 2.5), and comes back down to
+    # u2's li1 pad on met2. The plane change is a via1 ladder at the waypoint.
+    output = tmp_path / "plane_change.gds"
+    request = _plane_change_request(
+        tmp_path,
+        pdk_root,
+        output,
+        "plane_change",
+        [[5.6, 2.5], [7.0, 2.5, "metal3"], [9.8, 2.5], [9.8, 0.21]],
+    )
+    report = compose(request)
+
+    assert report["unrouted_nets"] == []
+    net = report["nets"][0]
+    assert net["routed"] is True and net["status"] == "routed"
+    # Still one leg per named leg: the plane split is not a response leg.
+    assert len(net["legs"]) == 2
+    assert all(
+        pin["block"] in {"u0", "u1", "u2"} for leg in net["legs"] for pin in leg["pins"]
+    )
+
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.cell("plane_change")
+    met1_paths = [s for s in top.shapes(layout.layer(68, 20)).each() if s.is_path()]
+    met2_paths = [s for s in top.shapes(layout.layer(69, 20)).each() if s.is_path()]
+    # u0->u1 leg + the first segment of u1->u2 on met1; the second on met2.
+    assert len(met1_paths) == 2
+    assert len(met2_paths) == 1
+    # via1 at the plane change itself, plus the via1 of u2's own drop.
+    via1 = [s.bbox().center() for s in top.shapes(layout.layer(68, 44)).each()]
+    assert kdb.Point(7000, 2500) in via1
+
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+    result = extract.run_extract(str(output), "sky130", top="plane_change")
+    drain_nets = {d["nets"]["d"] for d in result["devices"] if d["class"] == "nfet"}
+    assert drain_nets == {"DBUS"}
+
+
+def _gate_net_crossing_plane_change(layer_role):
+    """A u1.G -> u2.G net whose descent at x=8.8 crosses the met2 segment of
+    the plane-changing DBUS leg (y=2.5, x=7.0..9.8) in the fixture above."""
+    entry = {
+        "net": "GLINK",
+        "pins": [
+            {"block": "u1", "port": "U0_G"},
+            {"block": "u2", "port": "U0_G"},
+        ],
+        "waypoints_um": [[4.68, 3.5], [8.8, 3.5]],
+    }
+    if layer_role is not None:
+        entry["layer_role"] = layer_role
+    return entry
+
+
+@pytest.mark.parametrize(
+    ("layer_role", "routed"),
+    [
+        # li1 (the net's own plane): crosses the leg's met2 segment, but not
+        # on the same plane -- a plane-aware check must not call it a short.
+        (None, True),
+        # met2: the same crossing is a genuine same-plane short.
+        ("metal3", False),
+    ],
+)
+def test_compose_plane_bearing_waypoint_checks_each_segment_on_its_own_plane(
+    tmp_path, pdk_root, layer_role, routed
+):
+    output = tmp_path / "plane_change_cross.gds"
+    request = _plane_change_request(
+        tmp_path,
+        pdk_root,
+        output,
+        "plane_change_cross",
+        [[5.6, 2.5], [7.0, 2.5, "metal3"], [9.8, 2.5], [9.8, 0.21]],
+    )
+    request["connectivity"].append(_gate_net_crossing_plane_change(layer_role))
+    report = compose(request)
+
+    assert report["nets"][0]["routed"] is True
+    glink = report["nets"][1]
+    assert glink["net"] == "GLINK"
+    assert glink["routed"] is routed, glink
+    if not routed:
+        assert "crosses already-routed net 'DBUS'" in glink["legs"][0]["reason"]
+
+
+def test_compose_plane_bearing_waypoint_on_a_two_pin_net(tmp_path, pdk_root):
+    # The net-level `waypoints_um` of a 2-pin net takes the same triple: the
+    # net starts on its own plane (li1), climbs to met2 at the waypoint.
+    output = tmp_path / "plane_change_net.gds"
+    request = _drain_bus_request(tmp_path, pdk_root, output, "plane_change_net")
+    request["connectivity"] = [
+        {
+            "net": "DLINK",
+            "pins": [
+                {"block": "u1", "port": "U0_D"},
+                {"block": "u2", "port": "U0_D"},
+            ],
+            "waypoints_um": [[5.6, 2.5, "metal3"], [9.8, 2.5], [9.8, 0.21]],
+        }
+    ]
+    report = compose(request)
+
+    assert report["unrouted_nets"] == []
+    assert report["nets"][0]["routed"] is True
+    assert run_drc(str(output), "sky130")["status"] == "clean"
+    result = extract.run_extract(str(output), "sky130", top="plane_change_net")
+    d_nets = sorted(d["nets"]["d"] for d in result["devices"] if d["class"] == "nfet")
+    assert d_nets.count("DLINK") == 2
+
+
+def test_compose_plane_bearing_waypoint_unknown_role_is_an_application_error(
+    tmp_path, pdk_root
+):
+    request = _plane_change_request(
+        tmp_path,
+        pdk_root,
+        tmp_path / "bad_role.gds",
+        "bad_role",
+        [[5.6, 2.5], [7.0, 2.5, "metal99"], [9.8, 2.5], [9.8, 0.21]],
+    )
+    with pytest.raises(GenComposeError, match=r"legs\[1\]\.waypoints_um\[1\]"):
+        compose(request)
+
+
+@pytest.mark.parametrize("bad_role", ["", 3, None])
+def test_compose_plane_bearing_waypoint_rejects_a_malformed_role(
+    tmp_path, pdk_root, bad_role
+):
+    request = _plane_change_request(
+        tmp_path,
+        pdk_root,
+        tmp_path / "bad_triple.gds",
+        "bad_triple",
+        [[5.6, 2.5], [7.0, 2.5, bad_role], [9.8, 2.5], [9.8, 0.21]],
+    )
+    with pytest.raises(GenComposeError, match=r"waypoints_um\[1\]\[2\]"):
+        compose(request)
+
+
+def test_compose_plane_bearing_waypoint_rejects_a_four_element_waypoint(
+    tmp_path, pdk_root
+):
+    request = _plane_change_request(
+        tmp_path,
+        pdk_root,
+        tmp_path / "bad_len.gds",
+        "bad_len",
+        [[5.6, 2.5], [7.0, 2.5, "metal3", 1], [9.8, 2.5], [9.8, 0.21]],
+    )
+    with pytest.raises(GenComposeError, match=r"waypoints_um\[1\] must be"):
+        compose(request)

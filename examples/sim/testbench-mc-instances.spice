@@ -1,0 +1,10 @@
+* klt sim worked example: per-instance mismatch selection (sky130A)
+.param vdd=1.8
+Vdd vdd 0 DC {vdd}
+Vb bias 0 DC 0.7
+Vin g 0 DC 0.9
+XM1 d1 g tail 0 sky130_fd_pr__nfet_01v8 L=0.5 W=2 m=2
+XM2 d2 g tail 0 sky130_fd_pr__nfet_01v8 L=0.5 W=2 m=2
+XM3 tail bias 0 0 sky130_fd_pr__nfet_01v8 L=1 W=4 m=2
+R1 vdd d1 10k
+R2 vdd d2 10k

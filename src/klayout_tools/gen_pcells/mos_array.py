@@ -10,10 +10,31 @@ submodule only imports it, never the reverse).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import klayout.db as kdb
+
+
+def _mos_cap_enabled(pcell: Any) -> bool:
+    """``pcell.mos_cap`` (the PCell params are dynamic attributes)."""
+    return bool(pcell.mos_cap)
+
+
+def _insert_mos_cap_mark(pcell: Any, info: dict[str, Any], dbu: float) -> None:
+    """Draw the MOS-capacitor marker (issue #3283) when ``pcell.mos_cap`` is
+    set: the same enclosing box as the voltage-flavor marker, so it covers
+    every unit device."""
+    if not _mos_cap_enabled(pcell):
+        return
+    from klayout_tools.gen import _insert_boxes
+
+    _insert_boxes(
+        pcell.cell,
+        pcell.layout.layer(pcell.mos_cap_mark_layer),
+        dbu,
+        [info["voltage_flavor_mark_box_um"]],
+    )
 
 
 def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
@@ -72,7 +93,16 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         pitch to reserve a navigable routing channel between interior
         rows/columns, reported back as ``navigable_regions_um`` -- see
         :func:`_mos_array_layout`'s own docstring. ``0.0`` (the default)
+        draws byte-for-byte unchanged geometry.
+
+        ``pitch_x_um``/``pitch_y_um`` (issue #3299, Phase 1) override the
+        column/row pitch, clamped up to the legal minimum -- see
+        :func:`_mos_array_layout`'s own docstring. ``0.0`` (the default)
         draws byte-for-byte unchanged geometry."""
+
+        # Declared via ``self.param("mfg_grid_um", ...)`` below; the
+        # PCellDeclarationHelper stubs cannot see it, so annotate for mypy.
+        mfg_grid_um: float
 
         def __init__(self) -> None:
             super().__init__()
@@ -129,6 +159,22 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "doesn't recognise draws nothing and is reported via "
                 "drc_hints.notes, never silently dropped",
                 default="",
+            )
+            self.param(
+                "mos_cap",
+                self.TypeBoolean,  # type: ignore[attr-defined]
+                "Draw a MOS capacitor instead of a transistor: every "
+                "source/drain segment is strapped into one terminal and the "
+                "PDK's MOS-capacitor marker is drawn over the array (needs "
+                "add_guard_ring for the body tie; finger_topology is "
+                "ignored; gate_contact is unsupported)",
+                default=False,
+            )
+            self.param(
+                "mos_cap_mark_layer",
+                self.TypeLayer,  # type: ignore[attr-defined]
+                "PDK MOS-capacitor marker drawing layer (only used when mos_cap)",
+                default=kdb.LayerInfo(0, 0),
             )
             self.param(
                 "gate_contact",
@@ -243,6 +289,13 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default=WELL_ENCLOSURE_MARGIN_UM,
             )
             self.param(
+                "ring_well_margin_um",
+                self.TypeDouble,
+                "Harness-resolved nwell enclosure of the n-tap guard ring "
+                "(see _PDK_RING_WELL_MARGIN_UM)",
+                default=WELL_ENCLOSURE_MARGIN_UM,
+            )
+            self.param(
                 "gate_pad_clearance_um",
                 self.TypeDouble,
                 "Harness-resolved clearance the gate-poly landing pad keeps "
@@ -261,6 +314,13 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.TypeDouble,
                 "Harness-resolved gate-stripe bottom-edge endcap extension "
                 "(see _PDK_GATE_BOTTOM_ENDCAP_UM)",
+                default=0.0,
+            )
+            self.param(
+                "top_endcap_um",
+                self.TypeDouble,
+                "Harness-resolved gate-stripe top-edge endcap neck "
+                "(see _PDK_GATE_TOP_ENDCAP_UM)",
                 default=0.0,
             )
             self.param(
@@ -361,6 +421,22 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "geometry to every existing caller",
                 default=0.0,
             )
+            self.param(
+                "pitch_x_um",
+                self.TypeDouble,
+                "Column pitch override (um), clamped up to the legal minimum "
+                "(unit extent + min same-layer spacing); interior_channel_um "
+                "is added on top (issue #3299). 0.0 (default) = no override",
+                default=0.0,
+            )
+            self.param(
+                "pitch_y_um",
+                self.TypeDouble,
+                "Row pitch override (um), clamped up to the legal minimum; "
+                "interior_channel_um is added on top (issue #3299). 0.0 "
+                "(default) = no override",
+                default=0.0,
+            )
             # Fixed drawn side of every cut on contact_layer (issue #2585) --
             # harness-computed by `_cut_fixed_size_um` from the resolved PDK
             # family and layer. `0.0` (no upper size bound) leaves the cuts
@@ -426,6 +502,10 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.sd_implant_margin_um if self.sd_implant_present else 0.0,
                 self.voltage_flavor_mark_margin_um,
                 self.interior_channel_um,
+                _mos_cap_enabled(self),
+                self.pitch_x_um,
+                self.pitch_y_um,
+                top_endcap_um=self.top_endcap_um,
             )
             unit_boxes = info["unit"]["boxes_um"]
             for c in info["cells"] + info["dummy_cells"]:
@@ -512,6 +592,7 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     _shift_box(ring["outer_box_um"], ox, oy),
                     _shift_box(ring["inner_box_um"], ox, oy),
                     gap_box,
+                    self.mfg_grid_um,
                 )
                 _insert_ring(
                     self.cell,
@@ -520,6 +601,7 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     _shift_box(ring["outer_box_um"], ox, oy),
                     _shift_box(ring["inner_box_um"], ox, oy),
                     gap_box,
+                    self.mfg_grid_um,
                 )
                 _insert_boxes(
                     self.cell, li_contact, dbu, ring["contact_boxes_um"], ox, oy
@@ -534,7 +616,7 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 # against.
                 if self.well_present and self.flavor == "pfet":
                     li_well = self.layout.layer(self.well_layer)
-                    margin = WELL_ENCLOSURE_MARGIN_UM
+                    margin = self.ring_well_margin_um
                     ring_well_box = (
                         -margin,
                         -margin,
@@ -560,6 +642,7 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                         gap_box,
                         ring["gap"]["side"] if ring["gap"] is not None else None,
                         self.ring_implant_margin_um,
+                        self.mfg_grid_um,
                     )
 
             # Medium-voltage/thick-oxide device-class marker (issue #1054):
@@ -581,6 +664,8 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     dbu,
                     [info["voltage_flavor_mark_box_um"]],
                 )
+
+            _insert_mos_cap_mark(self, info, dbu)
 
             # Dummy-device marker (issue #491): drawn only over
             # dummy_cells' gate footprint (unit_boxes["poly"], the exact

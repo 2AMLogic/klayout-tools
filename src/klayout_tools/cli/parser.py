@@ -10,6 +10,7 @@ import sys
 
 from .. import arith_gen, netlist, netlist_batch, pdk_stackup, pex
 from ..equiv import SUPPORTED_SIM_BACKENDS
+from ..extract_parasitics import parse_parasitic_variants
 from ..render import DEFAULT_HEIGHT, DEFAULT_WIDTH
 from . import (
     arith_gen_cmd,
@@ -45,9 +46,11 @@ from . import (
     precheck_cmd,
     render_cmd,
     report_cmd,
+    reset_coverage_cmd,
     ring_check_cmd,
     signoff_cmd,
     sim_cmd,
+    sim_merge_cmd,
     size_cmd,
     socket_check_cmd,
     sta_cmd,
@@ -61,6 +64,7 @@ from . import (
     yield_cmd,
     yield_samples_cmd,
     yield_sensitivity_cmd,
+    yield_threshold_cmd,
 )
 from .color import add_color_args
 
@@ -77,6 +81,13 @@ def _add_format_arg(
     to override for the few subcommands with non-standard format options.
     """
     parser.add_argument("--format", choices=list(choices), default="text", help=help)
+
+
+def _parasitic_variant_arg(value: str) -> str:
+    """argparse ``type=`` for ``--parasitic-variant`` (issue #3056): a value
+    outside the closed grammar is a usage error (exit 2)."""
+    parse_parasitic_variants([value], argparse.ArgumentTypeError)
+    return value
 
 
 def _deck_names_str() -> str:
@@ -224,6 +235,8 @@ def create_parser() -> argparse.ArgumentParser:
 
     _add_socket_check_parser(subparsers)
 
+    _add_reset_coverage_parser(subparsers)
+
     _add_lef_abstract_parser(subparsers)
 
     _add_ring_check_parser(subparsers)
@@ -270,6 +283,8 @@ def create_parser() -> argparse.ArgumentParser:
 
     _add_sim_parser(subparsers)
 
+    _add_sim_merge_parser(subparsers)
+
     _add_pex_parser(subparsers)
 
     _add_size_parser(subparsers)
@@ -293,6 +308,8 @@ def create_parser() -> argparse.ArgumentParser:
     _add_yield_campaign_parser(subparsers)
 
     _add_yield_sensitivity_parser(subparsers)
+
+    _add_yield_threshold_parser(subparsers)
 
     _add_design_centering_parser(subparsers)
 
@@ -593,6 +610,45 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
         help="with --batch-set, how many requests are in flight at once (default: 4)",
     )
     sim_parser.add_argument(
+        "--capacity-retries",
+        dest="capacity_retries",
+        type=int,
+        default=None,
+        help=(
+            "with --batch-set, re-submit a request refused for fleet capacity "
+            "(batch_no_capacity / batch_concurrency_cap) up to N more times "
+            "with doubling backoff (default: 0, off); other failures are "
+            "never retried (issue #3520)"
+        ),
+    )
+    sim_parser.add_argument(
+        "--submit-only",
+        dest="submit_only",
+        action="store_true",
+        default=False,
+        help=(
+            "with --backend batch, upload and launch the job, print its "
+            "identity (job_id, bucket, region, launched_at, request_sha256) "
+            "and exit 0 immediately -- no polling, no collection (issue "
+            "#3073). Read the job later with --job-status. One job only: "
+            "refused with --hosts > 1, --resume, --plot, a deck request, or "
+            "a non-batch backend. See docs/cli/sim.md 'Asynchronous submit'."
+        ),
+    )
+    sim_parser.add_argument(
+        "--job-status",
+        dest="job_status",
+        metavar="JOB_ID",
+        default=None,
+        help=(
+            "read one batch job's state by id (one status.json read; "
+            "state `pending` before the instance writes one) and exit. The "
+            "positional request supplies the bucket/region/profile. Submits "
+            "and launches nothing. Unit counts are not published by the "
+            "fleet and are not reported. See docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
         "-o",
         "--outdir",
         default=None,
@@ -611,6 +667,20 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
             "`local-parallel`, `remote` (provisions an EC2 instance), and "
             "`batch` (submits an S3 job contract to 2am's EDA batch fleet) "
             "are implemented -- see docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
+        "--attach",
+        dest="attach_job_id",
+        metavar="JOB_ID",
+        default=None,
+        help=(
+            "re-attach to an already-submitted batch job (the id `klt sim` "
+            "prints on stderr at launch) instead of submitting a new one: "
+            "waits for it (bounded by the request's `batch.poll_timeout_s`) "
+            "and reports it, never re-launching. Pass the same request the "
+            "job was submitted from, with --backend batch. See "
+            "docs/cli/sim.md."
         ),
     )
     sim_parser.add_argument(
@@ -640,6 +710,20 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
             "the request's `remote.hosts` field); overrides the request "
             "field when given. Currently implemented for `local`/"
             "`local-parallel` only -- see docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
+        "--max-units-per-job",
+        dest="max_units_per_job",
+        type=int,
+        default=None,
+        help=(
+            "backend `batch`, `hosts` 1: split the expanded corner/Monte-Carlo "
+            "unit list into batch jobs of at most this many units, so no job "
+            "outruns the fleet's whole-job ceiling (default: the request's "
+            "`batch.max_units_per_job`, else no split); overrides the request "
+            "field when given. Rejected before any submit when a job of that "
+            "size would still exceed the ceiling. See docs/cli/sim.md."
         ),
     )
     sim_parser.add_argument(
@@ -683,6 +767,18 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     sim_parser.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        help=(
+            "validate the request and print its expansion (resolved "
+            "backend/engine, corner ids, per-sample Monte Carlo seeds, "
+            "staged model files, unknown-key warnings) without running "
+            "ngspice or touching SSH/S3/EC2; exits 1 on any validation "
+            "failure. Corner/Monte Carlo requests only. See docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
         "--fail-fast-probe",
         dest="fail_fast_probe",
         action="store_true",
@@ -719,6 +815,19 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
             "error. Applies to the `local`/`local-parallel` backends -- an "
             "off-host shard reads the request's own option instead. See "
             "docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
+        "--report-out",
+        dest="report_out",
+        default=None,
+        metavar="PATH",
+        help=(
+            "also write the report envelope to PATH, byte-identical to "
+            "`--format json` stdout; gzip-compressed (deterministic) when "
+            "PATH ends `.gz`, plain indented JSON otherwise. Stdout is "
+            "unchanged (issue #2975). `klt yield` reads `.json.gz` "
+            "directly. See docs/cli/sim.md."
         ),
     )
     sim_parser.add_argument(
@@ -764,6 +873,37 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(sim_parser)
     sim_parser.set_defaults(func=sim_cmd.run)
+
+
+def _add_sim_merge_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``sim-merge`` verb (issue #3045).
+
+    Recombines the per-request reports of one corner grid that had to be
+    split across several ``klt sim`` requests. A separate verb rather than
+    ``klt sim merge``: ``klt sim`` takes a positional request path, so a
+    ``merge`` subcommand would collide with a request file of that name. See
+    docs/cli/sim.md "Merging per-request reports".
+    """
+    merge_parser = subparsers.add_parser(
+        "sim-merge",
+        help="merge per-request klt sim reports of one split corner grid",
+        description=(
+            "Merge the reports of N per-request `klt sim` runs (one corner grid "
+            "split across requests) into the report a single request over the "
+            "whole grid would have produced. Rollups, coverage and counters are "
+            "recomputed over the union; a missing, duplicate, unexpected or "
+            "mismatching report is refused with a distinct exit code. See "
+            "docs/cli/sim.md 'Merging per-request reports'."
+        ),
+    )
+    merge_parser.add_argument(
+        "manifest", help="shard manifest JSON (planned requests and expected corners)"
+    )
+    merge_parser.add_argument(
+        "reports", nargs="+", metavar="report", help="per-request klt sim report JSON"
+    )
+    _add_format_arg(merge_parser)
+    merge_parser.set_defaults(func=sim_merge_cmd.run)
 
 
 def _add_size_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -1178,6 +1318,79 @@ def _add_yield_samples_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(parser)
     parser.set_defaults(func=yield_samples_cmd.run)
+
+
+def _add_yield_threshold_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``yield-threshold`` verb (issue #2976).
+
+    Probit fit of a binary outcome against a swept stimulus: the threshold
+    distribution of a comparator/latch/trip point. Pure Python; needs no
+    native extension.
+    """
+    parser = subparsers.add_parser(
+        "yield-threshold",
+        help=(
+            "per-sample (stimulus, binary outcome) records -> probit threshold "
+            "mean/sigma with profile-likelihood CIs, per corner"
+        ),
+        description=(
+            "Fit P(decided high | stimulus) = Phi((stimulus - mu) / sigma) to "
+            "per-sample binary outcomes, per corner (issue #2976): the "
+            "input-referred offset of a comparator, latch or trip point is never "
+            "observed directly, only through which way each sample decided. "
+            "Reports mu/sigma with profile-likelihood confidence intervals, "
+            "per-stimulus proportions with Clopper-Pearson intervals, a "
+            "chi-square goodness of fit and, with --target-error-rate, the "
+            "stimulus at that error rate (flagged extrapolated beyond what the "
+            "sample count resolves). Degenerate data (one outcome, separation, "
+            "fewer than 2 stimulus levels) yields null estimates and a "
+            "fit.status, never a fabricated sigma. See docs/cli/yield-threshold.md."
+        ),
+    )
+    parser.add_argument(
+        "records",
+        help=(
+            'path to the records JSON document: {"corners": [{"name", '
+            '"records": [{"stimulus", "outcome"}]}]} or a flat '
+            '{"records": [...]} with an optional per-record "corner"'
+        ),
+    )
+    parser.add_argument(
+        "--confidence",
+        type=float,
+        default=0.95,
+        help="two-sided confidence level for every interval (default: 0.95)",
+    )
+    parser.add_argument(
+        "--target-error-rate",
+        dest="target_error_rate",
+        type=float,
+        default=None,
+        metavar="RATE",
+        help=(
+            "also report the stimulus at which the wrong-decision rate reaches "
+            "RATE (0 < RATE < 0.5), flagged extrapolated when RATE is below "
+            "what the sample count resolves"
+        ),
+    )
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=None,
+        help=(
+            "derive each record's outcome from its numeric `value` against "
+            "this threshold instead of reading a given `outcome`"
+        ),
+    )
+    parser.add_argument(
+        "--outcome-when",
+        dest="outcome_when",
+        choices=["above", "below"],
+        default="above",
+        help="with --threshold: decided high when value is above (default) or below it",
+    )
+    _add_format_arg(parser)
+    parser.set_defaults(func=yield_threshold_cmd.run)
 
 
 def _add_yield_campaign_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -1820,6 +2033,17 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     extract_parser.add_argument(
+        "--progress",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "write stage start/finish lines and a periodic heartbeat to "
+            "stderr (stdout stays the pure response). Default: heartbeat "
+            "lines only (every 30s of a long stage) when stderr is not a "
+            "TTY, nothing on a TTY; --no-progress forces off"
+        ),
+    )
+    extract_parser.add_argument(
         "--top",
         default=None,
         help=(
@@ -1832,7 +2056,10 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
         pdk_help=(
             "PDK variant to resolve (e.g. sky130A); overrides $PDK. "
             "Optional -- extraction runs from --deck alone when omitted; "
-            "when given, an unresolvable PDK is an application error."
+            "when given, an unresolvable PDK is an application error. "
+            "Omitted, MOS devices are written as bare M cards that are not "
+            "mismatch-capable under Monte Carlo; pass --pdk for the "
+            "subckt-wrapper X call."
         ),
     )
     extract_parser.add_argument(
@@ -1949,6 +2176,68 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     extract_parser.add_argument(
+        "--critical-net-pattern",
+        dest="critical_net_patterns",
+        action="append",
+        default=None,
+        metavar="GLOB",
+        help=(
+            "like --critical-net, but a shell-style glob (e.g. 'bl_*') "
+            "resolved against the extracted nets' escaped spelling; "
+            "repeatable, merged with any exact --critical-net names (issue "
+            "#2974). Anonymous `\\$N` nets match only a glob that itself "
+            "starts with `\\$`. A pattern matching no net is reported in "
+            "`warnings` (an error under --strict-net-patterns). Requires "
+            "--parasitics. See docs/cli/extract.md's '--critical-net' "
+            "section."
+        ),
+    )
+    extract_parser.add_argument(
+        "--critical-net-all",
+        dest="critical_net_all",
+        action="store_true",
+        help=(
+            "treat every labelled (non-anonymous) net as --critical-net, "
+            "minus any --critical-net-exclude glob (issue #2974). Requires "
+            "--parasitics."
+        ),
+    )
+    extract_parser.add_argument(
+        "--critical-net-exclude",
+        dest="critical_net_excludes",
+        action="append",
+        default=None,
+        metavar="GLOB",
+        help=(
+            "glob of nets to leave out of --critical-net-all / "
+            "--critical-net-pattern (e.g. 'VSS', 'sub*'); repeatable. "
+            "Requires --critical-net-all (issue #2974)."
+        ),
+    )
+    extract_parser.add_argument(
+        "--parasitics-net-pattern",
+        dest="parasitics_net_patterns",
+        action="append",
+        default=None,
+        metavar="GLOB",
+        help=(
+            "like --parasitics-net, but a shell-style glob resolved against "
+            "the extracted nets; repeatable, merged with any exact "
+            "--parasitics-net names (issue #2974). Requires --parasitics. "
+            "See docs/cli/extract.md's '--parasitics-net' section."
+        ),
+    )
+    extract_parser.add_argument(
+        "--strict-net-patterns",
+        dest="strict_net_patterns",
+        action="store_true",
+        help=(
+            "exit 1 when a --critical-net-pattern / --parasitics-net-pattern "
+            "matches no net, or --critical-net-all selects none, instead of "
+            "reporting it in `warnings` (issue #2974)."
+        ),
+    )
+    extract_parser.add_argument(
         "--parasitics-top-cell-only",
         dest="parasitics_top_cell_only",
         action="store_true",
@@ -1983,6 +2272,24 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
             "model (nothing to chain) -- reported in `warnings`, not an "
             "error. Off by default -- byte-identical to today's behavior. "
             "See docs/cli/extract.md's '--distributed-rc' section."
+        ),
+    )
+    extract_parser.add_argument(
+        "--substrate-tie-ohms",
+        dest="substrate_tie_ohms",
+        type=float,
+        default=None,
+        metavar="OHM",
+        help=(
+            "resistance of the DC-reference tie each synthesized substrate "
+            "net gets to ground under --parasitics (issue #3089). Default "
+            "1e12: the substrate is only capacitively held, i.e. floating "
+            "in transient analysis. A small value pins it; 0 is a hard tie "
+            "(written as a 1 mohm resistor -- SPICE has no zero-ohm "
+            "resistor). Must be >= 0. Reported as "
+            "`parasitics.substrate_dc_tie.resistance_ohm`/`mode`. Requires "
+            "--parasitics. See docs/cli/extract.md's 'Substrate DC tie' "
+            "section."
         ),
     )
     extract_parser.add_argument(
@@ -2028,6 +2335,25 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
             "--resistance-path resistor cap (positive integer, default "
             "10000): a selected net with more ladder segments is answered "
             "`limit_exceeded` before any search. Requires --resistance-path."
+        ),
+    )
+    extract_parser.add_argument(
+        "--parasitic-variant",
+        dest="parasitic_variants",
+        type=_parasitic_variant_arg,
+        action="append",
+        default=None,
+        metavar="VARIANT",
+        help=(
+            "drop parasitic elements at injection time (issue #3056); "
+            "repeatable and composable. One of drop-r:NET|* (short the "
+            "net's star legs into its hub -- no series R), "
+            "drop-c-ground:NET|* (omit the net's ground C), or "
+            "drop-c-coupling (omit every Ccc_* card). Requires "
+            "--parasitics. Anything else is a usage error; a NET matching "
+            "no net is reported in `warnings`. Off by default -- "
+            "byte-identical to today's behavior. See docs/cli/extract.md's "
+            "'--parasitic-variant' section."
         ),
     )
     extract_parser.add_argument(
@@ -2298,6 +2624,27 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     extract_parser.add_argument(
+        "--probe",
+        dest="probes",
+        action="append",
+        default=None,
+        metavar="name=ID,layer=ROLE,x=UM,y=UM",
+        help=(
+            "ask which extracted net lies under one point (issue #2986), as "
+            "'name=<id>,layer=<role>,x=<um>,y=<um>'; repeatable. x/y are "
+            "micrometres in the top cell's frame (the frame label positions "
+            "use). ROLE is the same vocabulary as --label-layer: `well`, "
+            "`poly`, or `metal<i>` (0-based, index-aligned with the deck's "
+            "metal stack). Answered on the extraction this command already "
+            "runs, so the net is the same one `nets[]` reports under "
+            "--def-net-names / --abstract-cells / --pins. The JSON "
+            "`probes[]` carries {name, layer, x_um, y_um, found, net, "
+            "cluster_id}; two probes on one net share `cluster_id`. A point "
+            "on empty space or inside a black-box region is `found: false`, "
+            "not an error. See docs/cli/extract.md's 'Point-to-net probes'."
+        ),
+    )
+    extract_parser.add_argument(
         "--defer-resistor-fixed-offset",
         dest="defer_resistor_fixed_offset",
         action="store_true",
@@ -2403,11 +2750,12 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
             "circuit (issue #2722): one definition per named cell, one X "
             "instance per placement, so per-circuit klt lvs options such as "
             "options.combine_devices_per_circuit can scope the layout side. "
-            "Increment 1: the cells must be non-nested, reachable, "
-            "non-top cells, and every placement of one cell must be "
-            "electrically identical; nesting, absent/top/unreachable names "
-            "and combination with --parasitics, --subcircuit or "
-            "--abstract-cells are errors (deferred to #2916). devices[]/"
+            "The cells must be reachable non-top cells, and every placement "
+            "of one cell must be electrically identical; a named cell "
+            "containing another named cell yields a nested '.SUBCKT' tree "
+            "(#2916). Absent/top/unreachable names and combination with "
+            "--parasitics, --subcircuit or --abstract-cells are errors "
+            "(rejected by design, #2916). devices[]/"
             "nets[] keep describing the flat extraction and a 'hierarchy' "
             "block is added to the JSON response. Off by default -- the "
             "flat bytes and JSON are unchanged. See docs/cli/extract.md's "
@@ -2731,7 +3079,9 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "once with the netlist this run extracted -- never through a "
             "shell. Each invocation gets the netlist path as its final "
             "argument plus $KLT_PEX_SIDE/$KLT_PEX_NETLIST/"
-            "$KLT_PEX_ARTIFACTS_DIR in its environment, and must print a "
+            "$KLT_PEX_ARTIFACTS_DIR in its environment (plus "
+            "$KLT_PEX_BACKEND and $KLT_SIM_BACKEND when --backend is given), "
+            "and must print a "
             'measurement document on stdout: {"corners": [{"corner_id": '
             '..., "measurements": [{"name": ..., "value": ..., "status": '
             "...}]}]}. Use it for a spec row no single `.meas` card can "
@@ -2770,6 +3120,47 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             f"{pex.MEASURE_COMMAND_TIMEOUT_S:g}s, the same cap `klt signoff` "
             "puts on a command-backed evidence entry. Requires "
             "--measure-command."
+        ),
+    )
+    pex_parser.add_argument(
+        "--flatten-schematic",
+        dest="flatten_schematic",
+        action="store_true",
+        default=False,
+        help=(
+            "flatten the schematic DUT to PDK leaf devices before the "
+            "schematic-side run (issue #2889): every subcircuit the DUT "
+            "netlist defines is inlined (instance-path-prefixed device/node "
+            "names, parameter and m= overrides propagated, .global nets "
+            "kept), written to <outdir>/schematic-dut.flat.spice, and each "
+            "testbench's DUT .include is re-pointed at it -- so a "
+            "hierarchical schematic compares like with like against the "
+            "always-flat extraction and model_mismatch stops firing on "
+            "hierarchy alone. A cycle, an X-call pin-count mismatch or a "
+            "card the flattener cannot rename safely is an error "
+            "(error.code schematic_flatten_*), never a partial flatten. Off "
+            "by default -- byte-identical to today's behavior. Reported as "
+            "`flatten_schematic` plus the `schematic_flatten` block (path, "
+            "sha256, inlining summary). The klt pex counterpart of klt "
+            "lvs's options.flatten_reference."
+        ),
+    )
+    pex_parser.add_argument(
+        "--device-only-leg",
+        dest="device_only_leg",
+        action="store_true",
+        default=False,
+        help=(
+            "also measure a parasitic-free third leg (issue #3298): the same "
+            "layout extracted again without parasitics (same devices and "
+            "AS/AD/PS/PD, no R/C cards or star nodes), written beside the "
+            "extracted netlist as <name>.device-only<ext>, and every "
+            "testbench re-run against it. Each delta[] row then also carries "
+            "device_only_value, representation_delta_pct (device-only vs "
+            "schematic) and parasitic_delta_pct (extracted vs device-only), "
+            "splitting device-representation effects from parasitics. Not "
+            "supported with --measure-command. Off by default -- "
+            "byte-identical to today's behavior."
         ),
     )
     pex_parser.add_argument(
@@ -2838,7 +3229,9 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "recognised keys are gf180mcu's `poly_res` (values `1k` "
             "(default), `2k`, `3k`) and `mim_cap` (values "
             "`cap_mim_1f0_m4m5_noshield`, `cap_mim_1f5_m4m5_noshield`, "
-            "`cap_mim_2f0_m4m5_noshield` (default)). Without this flag `klt "
+            "`cap_mim_2f0_m4m5_noshield` (default)) and `mim_option` (`B` "
+            "(default), `A`; MIM option A is the Metal2/Metal3 stack). "
+            "Without this flag `klt "
             "pex` extracts against whatever the deck's own default flavour "
             "is, which is not necessarily the one the design uses -- and "
             "reports a delta computed from the wrong parasitics. An "
@@ -2920,6 +3313,38 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     pex_parser.add_argument(
+        "--critical-net-pattern",
+        dest="critical_net_patterns",
+        action="append",
+        default=None,
+        metavar="GLOB",
+        help=(
+            "glob form of --critical-net (issue #2974), passed through to "
+            "`klt extract --critical-net-pattern`; repeatable."
+        ),
+    )
+    pex_parser.add_argument(
+        "--critical-net-all",
+        dest="critical_net_all",
+        action="store_true",
+        help=(
+            "every labelled net is --critical-net (issue #2974), passed "
+            "through to `klt extract --critical-net-all`."
+        ),
+    )
+    pex_parser.add_argument(
+        "--critical-net-exclude",
+        dest="critical_net_excludes",
+        action="append",
+        default=None,
+        metavar="GLOB",
+        help=(
+            "glob of nets left out of --critical-net-all (issue #2974), "
+            "passed through to `klt extract --critical-net-exclude`; "
+            "repeatable."
+        ),
+    )
+    pex_parser.add_argument(
         "--distributed-rc",
         dest="distributed_rc",
         action="store_true",
@@ -2930,6 +3355,39 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "extract --distributed-rc`; requires --critical-net. Off by "
             "default -- byte-identical to today's behavior. See "
             "docs/cli/extract.md's '--distributed-rc' section."
+        ),
+    )
+    pex_parser.add_argument(
+        "--parasitic-variant",
+        dest="parasitic_variants",
+        type=_parasitic_variant_arg,
+        action="append",
+        default=None,
+        metavar="VARIANT",
+        help=(
+            "drop parasitic elements at injection time (issue #3056); "
+            "repeatable and composable. One of drop-r:NET|* (short the "
+            "net's star legs into its hub -- no series R), "
+            "drop-c-ground:NET|* (omit the net's ground C), or "
+            "drop-c-coupling (omit every Ccc_* card). Requires "
+            "--parasitics. Anything else is a usage error; a NET matching "
+            "no net is reported in `warnings`. Off by default -- "
+            "byte-identical to today's behavior. See docs/cli/extract.md's "
+            "'--parasitic-variant' section."
+        ),
+    )
+    pex_parser.add_argument(
+        "--substrate-tie-ohms",
+        dest="substrate_tie_ohms",
+        type=float,
+        default=None,
+        metavar="OHM",
+        help=(
+            "resistance of the substrate DC-reference tie (default 1e12, "
+            "substrate floating in transient; 0 = hard tie), passed "
+            "through to `klt extract --substrate-tie-ohms` (issue #3089). "
+            "Must be >= 0. See docs/cli/extract.md's 'Substrate DC tie' "
+            "section."
         ),
     )
     pex_parser.add_argument(
@@ -3216,7 +3674,9 @@ def _add_components_parser(subparsers: argparse._SubParsersAction) -> None:
         help=(
             "conductor layer set as a path to a JSON file, or an inline JSON "
             'array of {"name": str, "layer": [layer, datatype]} objects '
-            '(e.g. \'[{"name": "m1", "layer": [68, 20]}]\'). Not '
+            '(e.g. \'[{"name": "m1", "layer": [68, 20]}]\'); an entry may '
+            'add "and"/"not": lists of [layer, datatype] pairs that keep only '
+            "the part of its layer overlapping / outside those layers. Not "
             "validated by argparse -- an empty/malformed value exits 1 with "
             "a clean error, per docs/cli/components.md's exit-code contract, "
             "rather than argparse's usage-error exit 2."
@@ -3231,7 +3691,8 @@ def _add_components_parser(subparsers: argparse._SubParsersAction) -> None:
             '"between": [conductor_name_a, conductor_name_b]} objects '
             '(e.g. \'[{"name": "mcon", "layer": [67, 44], "between": '
             '["li", "m1"]}]\'); each via joins the two named --conductors '
-            "entries only where its own shapes actually land on both. Omit "
+            "entries only where its own shapes actually land on both. Takes "
+            'the same optional "and"/"not" qualifiers as --conductors. Omit '
             "for a purely same-layer connectivity report."
         ),
     )
@@ -3598,6 +4059,19 @@ def _add_functional_verification_parser(
             "docs/cli/functional-verification.md, '--mutations'"
         ),
     )
+    functional_verification_parser.add_argument(
+        "-o",
+        "--outdir",
+        default=None,
+        help=(
+            "write run artifacts (results XML, logs, simulator build "
+            "directory, coverage, trace, mutants/) here instead of "
+            "`.klt/functional-verification/` next to the request file; "
+            "created if missing, relative paths resolve against the cwd. "
+            "Request-relative source paths still resolve against the "
+            "request's own directory"
+        ),
+    )
     _add_format_arg(functional_verification_parser)
     functional_verification_parser.set_defaults(func=functional_verification_cmd.run)
 
@@ -3646,6 +4120,19 @@ def _add_place_and_route_parser(subparsers: argparse._SubParsersAction) -> None:
         "request", help="path to a klt place-and-route request JSON file"
     )
     _add_pdk_args(place_and_route_parser)
+    place_and_route_parser.add_argument(
+        "--backend",
+        choices=("local", "batch"),
+        default=None,
+        help=(
+            "where the units of a `pdk.rebuild_corners` request run (default: "
+            "the request's `backend` field, then $KLT_SIM_BACKEND, then "
+            "local). `batch` submits one job per corner to the Spot batch "
+            "fleet and never falls back to running OpenROAD on this host; a "
+            "single-unit request stays local under a host-default batch. See "
+            "docs/cli/place-and-route.md, 'Physical rebuild per corner'"
+        ),
+    )
     _add_flow_verify_args(
         place_and_route_parser,
         verb="place-and-route",
@@ -4611,6 +5098,15 @@ def _add_layers_parser(subparsers: argparse._SubParsersAction) -> None:
             "unique text strings (requires --flattened)"
         ),
     )
+    layers_parser.add_argument(
+        "--deck",
+        default=None,
+        help=(
+            "built-in deck whose layer-name table fills each entry's name "
+            "when the stream carries none; the report also records the "
+            "deck's content_hash"
+        ),
+    )
     _add_format_arg(layers_parser)
     layers_parser.set_defaults(func=layers_cmd.run)
 
@@ -4627,7 +5123,9 @@ def _add_stats_parser(subparsers: argparse._SubParsersAction) -> None:
             "(not instance-resolved); flattened_polygon_count/"
             "flattened_vertex_count are the instance-resolved counterparts, "
             "weighted by CellInstArray multiplicity like area_um2, matching "
-            "'klt layers --flattened'."
+            "'klt layers --flattened'. area_um2 is the raw sum of shape "
+            "areas (overlaps double-counted); merged_area_um2 is the "
+            "unioned area."
         ),
     )
     stats_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
@@ -4642,6 +5140,27 @@ def _add_stats_parser(subparsers: argparse._SubParsersAction) -> None:
         help=(
             "top cell to report on when the stream has more than one "
             "(required in that case; optional otherwise)"
+        ),
+    )
+    stats_parser.add_argument(
+        "--density-window",
+        type=float,
+        default=None,
+        metavar="UM",
+        help=(
+            "also report per-layer drawn-area fraction (merged geometry) over "
+            "square windows of this size in um tiled over the top-cell bbox; "
+            "edge windows are clipped and judged against their clipped area"
+        ),
+    )
+    stats_parser.add_argument(
+        "--window-layer",
+        action="append",
+        default=None,
+        metavar="L/D",
+        help=(
+            "restrict --density-window to this layer/datatype (repeatable); "
+            "default: every non-annotation layer with geometry"
         ),
     )
     _add_format_arg(stats_parser)
@@ -4989,6 +5508,29 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     drc_parser.add_argument(
+        "--negative-control",
+        dest="negative_control",
+        metavar="LAYOUT",
+        default=None,
+        help=(
+            "known-bad fixture layout the same native deck must flag "
+            "(--engine klayout only): run first with identical options; "
+            "zero violations fails the run (error.code "
+            "negative_control_failed), proving the deck executed. "
+            "See docs/cli/drc.md, 'Engine' -> 'klayout'."
+        ),
+    )
+    drc_parser.add_argument(
+        "--negative-control-categories",
+        dest="negative_control_categories",
+        metavar="NAMES",
+        default=None,
+        help=(
+            "comma-separated rule categories the --negative-control "
+            "fixture must additionally produce (requires --negative-control)."
+        ),
+    )
+    drc_parser.add_argument(
         "--expect-rule-categories",
         dest="expect_rule_categories",
         type=int,
@@ -5105,6 +5647,21 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
             "replays a report's recorded selection)"
         ),
     )
+    drc_parser.add_argument(
+        "--waivers",
+        dest="waivers",
+        metavar="PATH",
+        default=None,
+        help=(
+            "rule-scoped cell waivers (issue #3483, --engine curated only): "
+            'a JSON file {"waivers": [{"cell": ..., "rule": <id|glob>, '
+            '"justification": ...}]}. Markers whose source_cell and rule '
+            "match move out of violations/violation_count/status into a "
+            "separate waived array (with waiver_justification), never "
+            "dropped silently; the file is pinned in provenance.waivers. "
+            "See docs/cli/drc.md, 'Waivers'"
+        ),
+    )
     _add_format_arg(drc_parser)
     _record_request_argv_flags(
         drc_parser, exclude=(*_REQUEST_ARGV_FLAG_EXCLUDE, "list_rules")
@@ -5169,6 +5726,55 @@ def _add_precheck_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(precheck_parser)
     precheck_parser.set_defaults(func=precheck_cmd.run)
+
+
+def _add_reset_coverage_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``reset-coverage`` verb: unreset state elements of a netlist."""
+    reset_parser = subparsers.add_parser(
+        "reset-coverage",
+        help="list state elements of a gate-level netlist an async reset misses",
+        description=(
+            "Classify every sequential cell and hard macro of a flat "
+            "gate-level Verilog netlist: reset/set from the named reset port "
+            "through only buffers/inverters with the right polarity, or "
+            "unreset with a machine-readable reason. A --waivers file "
+            "justifies unreset elements; an unwaived element or a waiver "
+            "naming no unreset element fails (exit 3). Read-only, headless. "
+            "See docs/cli/reset-coverage.md."
+        ),
+    )
+    reset_parser.add_argument(
+        "netlist", help="path to a flat gate-level Verilog netlist"
+    )
+    reset_parser.add_argument(
+        "--cell-models",
+        required=True,
+        action="append",
+        metavar="FILE",
+        help="PDK functional Verilog cell-model file (repeatable)",
+    )
+    reset_parser.add_argument(
+        "--reset-port", required=True, help="name of the reset port of the top module"
+    )
+    reset_parser.add_argument(
+        "--reset-polarity",
+        choices=("low", "high"),
+        default="low",
+        help="level at which the reset port is asserted (default: low)",
+    )
+    reset_parser.add_argument(
+        "--top", default=None, help="top module (required when the netlist has several)"
+    )
+    reset_parser.add_argument(
+        "--waivers",
+        default=None,
+        metavar="FILE",
+        help=(
+            'JSON waiver file: {"waivers": [{"instance", "justification", "reason"?}]}'
+        ),
+    )
+    _add_format_arg(reset_parser)
+    reset_parser.set_defaults(func=reset_coverage_cmd.run)
 
 
 def _add_socket_check_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -5442,6 +6048,33 @@ def _add_netlist_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     netlist_parser.add_argument(
+        "--batch-include",
+        dest="batch_include",
+        action="append",
+        default=None,
+        metavar="GLOB",
+        help=(
+            "--backend batch only, repeatable: upload only the git-tracked "
+            "files under the batch root matching this root-relative glob "
+            "(a bare directory name selects everything under it; '*' also "
+            "crosses '/'). The schematic and a project --rcfile must match, "
+            "or the run is refused"
+        ),
+    )
+    netlist_parser.add_argument(
+        "--batch-exclude",
+        dest="batch_exclude",
+        action="append",
+        default=None,
+        metavar="GLOB",
+        help=(
+            "--backend batch only, repeatable: leave the files matching this "
+            "root-relative glob out of the upload (applied after "
+            "--batch-include). The schematic and a project --rcfile cannot "
+            "be excluded"
+        ),
+    )
+    netlist_parser.add_argument(
         "--xschem-binary",
         dest="xschem_binary",
         default=netlist.DEFAULT_XSCHEM_BINARY,
@@ -5551,6 +6184,34 @@ def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
             "'findings_only'. Gate on erc_status, as any --pdk-less run "
             "already must. Mutually exclusive with --pdk (a limit table "
             "with nothing to grade) -- passing both exits 1."
+        ),
+    )
+    erc_parser.add_argument(
+        "--omit-antenna-tables",
+        action="store_true",
+        help=(
+            "with --findings-only, drop the all-'unchecked' gates[] array "
+            "(gate_count keeps the real count) and collapse the antenna "
+            "coverage's per-gate skipped/gate_reference_level entries to "
+            "one aggregate entry each, so a dense layout's report is small "
+            "enough to commit verbatim (issue #3011). Sets "
+            "antenna_tables_omitted: true; every verdict, erc_findings and "
+            "the exit code are identical to the same run without it. "
+            "Requires --findings-only -- passing it alone exits 1."
+        ),
+    )
+    erc_parser.add_argument(
+        "--compact",
+        action="store_true",
+        help=(
+            "with --findings-only, replace the per-gate gates[] rows, the "
+            "per-(gate, level) coverage.skipped 'findings_only' records and "
+            "the per-gate erc.floating_gate checked ids with one aggregate "
+            "record each plus a top-level 'compact' counts block "
+            "(issue #2965). gates stays a list (empty); nets, erc_findings, "
+            "erc_status and the tie entries of erc_coverage are unchanged. "
+            "Requires --findings-only -- passing it alone exits 1. Omitted, "
+            "output is byte-identical."
         ),
     )
     _add_format_arg(erc_parser)

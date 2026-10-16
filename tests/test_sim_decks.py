@@ -31,6 +31,7 @@ import pytest
 from klayout_tools import sim
 from klayout_tools import sim_batch as sb
 from klayout_tools import sim_decks as sd
+from klayout_tools.sim import SimError
 
 # --------------------------------------------------------------------------- #
 # Deterministic stub engine
@@ -1415,7 +1416,164 @@ def argparse_namespace(request: str):
         plot=None,
         fail_fast_probe=None,
         fail_on_diagnostic=None,
+        max_units_per_job=None,
         op_lint=False,
         op_lint_corner=None,
         format="text",
     )
+
+
+# --------------------------------------------------------------------------- #
+# Runner decks[] capability gate (issue #3303)
+# --------------------------------------------------------------------------- #
+
+
+_DECK_VERSIONS = [
+    ("0.7.0", False),
+    ("0.7.0.dev12+gabc", False),
+    ("0.6.9", False),
+    ("0.7.1.dev306+gabc", False),
+    ("0.7.1.dev307+gabc", True),
+    ("0.7.1.dev500+g247e3c89b14b.dirty", True),
+    ("0.7.1", True),
+    ("0.7.2", True),
+    ("0.8.0", True),
+    ("0.8.0.dev3+gabc", True),
+    ("1.0.0", True),
+    ("7", None),
+    ("", None),
+]
+
+
+@pytest.mark.parametrize(("version", "expected"), _DECK_VERSIONS)
+def test_runner_supports_decks_rule(version, expected):
+    assert sb._runner_supports_decks(version) is expected
+
+
+def _run_deck_preflight(tmp_path: Path, version: str):
+    import subprocess
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    klt = bin_dir / "klt"
+    klt.write_text(f"#!/bin/sh\necho 'klt {version}'\n", encoding="utf-8")
+    klt.chmod(0o755)
+    outdir = tmp_path / "eda-out"
+    outdir.mkdir(exist_ok=True)
+    script = sb._runner_preflight_script("0.7.1.dev500", enforce=False)
+    script += sb._deck_preflight_lines() + "echo reached-klt-sim\n"
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={
+            "PATH": f"{bin_dir}:/usr/bin:/bin",
+            "EDA_OUTPUT_DIR": str(outdir),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result, outdir
+
+
+@pytest.mark.parametrize(("version", "expected"), _DECK_VERSIONS)
+def test_runner_shell_probe_matches_python_rule(tmp_path, version, expected):
+    result, outdir = _run_deck_preflight(tmp_path, version)
+    if expected:
+        assert result.returncode == 0, result.stderr
+        assert "reached-klt-sim" in result.stdout
+    else:
+        assert result.returncode == sb._BATCH_PREFLIGHT_REJECT_EXIT
+        assert "reached-klt-sim" not in result.stdout
+        envelope = json.loads((outdir / "report.json").read_text(encoding="utf-8"))
+        assert envelope["error"]["code"] == "batch_runner_lacks_decks"
+
+
+def _publish_runner(monkeypatch, *versions):
+    images = [
+        {
+            "pdk": "sky130A",
+            "region": "us-east-1",
+            "ami_id": f"ami-{index}",
+            "klt_version": version,
+            "klt_ref": None,
+        }
+        for index, version in enumerate(versions)
+    ]
+    monkeypatch.setattr(sb, "published_runner_identities", lambda pdk, region: images)
+
+
+class TestRunnerDecksGate:
+    def test_known_old_runner_is_refused_before_any_submit(self, tmp_path, monkeypatch):
+        write_stub_engine(tmp_path)
+        _publish_runner(monkeypatch, "0.7.0")
+        monkeypatch.setattr(sb._provenance, "_klt_version", lambda: "0.7.1.dev500")
+        fleet = install_fake_batch(
+            monkeypatch, _FakeFleet({"state": "done", "exit_code": "0"})
+        )
+        with pytest.raises(SimError) as raised:
+            run_local(tmp_path, batch_deck_request(tmp_path), outdir="out")
+        assert raised.value.code == "batch_runner_lacks_decks"
+        assert fleet.spec is None
+
+    def test_refused_even_under_warn(self, tmp_path, monkeypatch):
+        write_stub_engine(tmp_path)
+        _publish_runner(monkeypatch, "0.7.0")
+        monkeypatch.setattr(sb._provenance, "_klt_version", lambda: "0.7.1.dev500")
+        fleet = install_fake_batch(
+            monkeypatch, _FakeFleet({"state": "done", "exit_code": "0"})
+        )
+        request = batch_deck_request(tmp_path)
+        request["batch"]["runner_version_check"] = "warn"
+        with pytest.raises(SimError) as raised:
+            run_local(tmp_path, request, outdir="out")
+        assert raised.value.code == "batch_runner_lacks_decks"
+        assert fleet.spec is None
+
+    def test_matching_runner_passes_and_probe_rides_the_command(
+        self, tmp_path, monkeypatch
+    ):
+        write_stub_engine(tmp_path)
+        _publish_runner(monkeypatch, "0.7.1.dev500+gabc")
+        monkeypatch.setattr(sb._provenance, "_klt_version", lambda: "0.7.1.dev500")
+        fleet = install_fake_batch(
+            monkeypatch, _FakeFleet({"state": "done", "exit_code": "0"})
+        )
+        report = run_local(tmp_path, batch_deck_request(tmp_path), outdir="out")
+        assert report["status"] == "pass"
+        assert "batch_runner_lacks_decks" in fleet.spec.cmd
+
+    def test_unknown_identity_defers_to_the_runner_probe(self, tmp_path, monkeypatch):
+        write_stub_engine(tmp_path)
+        _publish_runner(monkeypatch, None)
+        fleet = install_fake_batch(
+            monkeypatch, _FakeFleet({"state": "done", "exit_code": "0"})
+        )
+        run_local(tmp_path, batch_deck_request(tmp_path), outdir="out")
+        assert fleet.spec is not None
+        assert "batch_runner_lacks_decks" in fleet.spec.cmd
+
+    def test_corner_style_envelope_gets_a_decks_diagnostic(self, tmp_path, monkeypatch):
+        write_stub_engine(tmp_path)
+        fleet = _FakeFleet({"state": "failed", "exit_code": "1"})
+
+        def collect(config, job_id, local_dir, **kwargs):
+            Path(local_dir, sb.BATCH_STDERR_FILENAME).write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "error": {
+                            "command": "sim",
+                            "code": "invalid_request",
+                            "message": "request is missing required field: netlist",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+        fleet.collect = collect
+        install_fake_batch(monkeypatch, fleet)
+        report = run_local(tmp_path, batch_deck_request(tmp_path), outdir="out")
+        message = report["units"][0]["diagnostics"][0]["message"]
+        assert "missing required field: netlist" in message
+        assert "predates decks[] support" in message
