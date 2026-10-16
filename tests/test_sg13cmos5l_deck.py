@@ -118,7 +118,7 @@ def test_sg13cmos5l_deck_registered_with_six_width_space_rules():
     assert {rule.check for rule in mos_only_rules} == {"width", "space"}
 
 
-def test_sg13cmos5l_deck_has_33_rules_after_nwell_rules():
+def test_sg13cmos5l_deck_has_37_rules_after_nwell_enclosure_rules():
     """Issue #1417 extends the curated deck past its #1400 Activ/GatPoly/
     Metal1-only starter to cover the full Metal1-TopMetal1 stack and its
     Via1/Via2/Via3/TopVia1 vias -- 30 rules total (27 + 3 upper-landing containment
@@ -126,14 +126,17 @@ def test_sg13cmos5l_deck_has_33_rules_after_nwell_rules():
     an `"enclosing"` check kind (the via/metal enclosure rules) alongside
     `"width"`/`"space"`. Issue #3012 adds `nwell.width.1`/`nwell.space.1`
     on NWell (31/0): 32 rules across 12 layers; #3572 adds the net-aware
-    `nwell.space.2` (NW.b1): 33."""
+    `nwell.space.2` (NW.b1): 33. Issue #3573 adds the four derived-region
+    `"enclosed"` NWell-enclosure rules (NW.c/c1/e/e1), which report on
+    Activ (1/0): 37 rules, same 12 layers."""
     deck = get_deck("sg13cmos5l")
-    assert len(deck) == 33
+    assert len(deck) == 37
     assert {rule.check for rule in deck} == {
         "width",
         "space",
         "enclosing",
         "net_space",
+        "enclosed",
     }
     assert {rule.layer for rule in deck} == {
         (1, 0),  # Activ.drawing
@@ -221,7 +224,7 @@ def test_run_drc_sg13cmos5l_nw_b1_different_nets_flagged(tmp_path: Path):
     report = run_drc(path, "sg13cmos5l")
     assert report["rule_counts"].get("nwell.space.2", 0) >= 1
     assert "nwell.space.2" in report["coverage"]["rules_checked"]
-    assert report["coverage"]["unchecked_rules"] == []
+    assert "NW.b1" not in {u["rule"] for u in report["coverage"]["unchecked_rules"]}
     flagged = [v for v in report["violations"] if v["rule"] == "nwell.space.2"]
     assert flagged[0]["layer"] == "NWell.drawing"
     assert flagged[0]["bbox"] is not None
@@ -304,6 +307,132 @@ def test_run_drc_sg13cmos5l_nw_b1_corner_to_corner(tmp_path: Path):
     assert run_drc(ok, "sg13cmos5l")["rule_counts"].get("nwell.space.2", 0) == 0
     bad = _nwell_layout(tmp_path, "nw_b1_c_bad.gds", [(0, 0, 3, 3), (4, 4, 7, 7)])
     assert run_drc(bad, "sg13cmos5l")["rule_counts"].get("nwell.space.2", 0) >= 1
+
+
+def test_run_drc_sg13cmos5l_nwell_reports_remaining_unchecked(tmp_path: Path):
+    """NW.b1 is now checked (#3572); the NWell rules still unmodelled after
+    #3573 are named in `coverage.unchecked_rules` so `clean` is not read as
+    covering them."""
+    path = _nwell_layout(tmp_path, "nw_unchecked.gds", [(0, 0, 3, 3)])
+    report = run_drc(path, "sg13cmos5l")
+    assert report["status"] == "clean"
+    unchecked = report["coverage"]["unchecked_rules"]
+    assert {u["rule"] for u in unchecked} == {
+        "NW.d",
+        "NW.d1",
+        "NW.f",
+        "NW.f1",
+        "NW.c1.dig",
+        "NW.d1.dig",
+        "NW.e1.dig",
+        "NW.f1.dig",
+    }
+    assert {u["layer"] for u in unchecked} == {"31/0"}
+
+
+def _nwell_activ_layout(
+    tmp_path: Path,
+    name: str,
+    *,
+    implant: tuple[int, int],
+    activ,
+    nwell=(0, 0, 4, 4),
+    thick_gate_ox=None,
+) -> str:
+    """NWell + one implanted Activ box (+ optional ThickGateOx box), all in um."""
+    layout = kdb.Layout()
+    layout.dbu = _DBU_UM
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(31, 0)).insert(_box_um(*nwell))
+    top.shapes(layout.layer(1, 0)).insert(_box_um(*activ))
+    top.shapes(layout.layer(*implant)).insert(_box_um(*activ))
+    if thick_gate_ox is not None:
+        top.shapes(layout.layer(44, 0)).insert(_box_um(*thick_gate_ox))
+    return _write_gds(layout, tmp_path / name)
+
+
+_NW_ENCLOSURE_RULES = {
+    # (implant layer, thick gate ox) -> (rule id, threshold um)
+    ((14, 0), False): ("nwell.enclosing.pactiv.1", 0.31),
+    ((14, 0), True): ("nwell.enclosing.pactiv.hv.1", 0.62),
+    ((7, 0), False): ("nwell.enclosing.nactiv.1", 0.24),
+    ((7, 0), True): ("nwell.enclosing.nactiv.hv.1", 0.62),
+}
+
+
+@pytest.mark.parametrize(("implant", "hv"), list(_NW_ENCLOSURE_RULES))
+def test_run_drc_sg13cmos5l_nwell_enclosure_threshold_edges(
+    tmp_path: Path, implant, hv
+):
+    """NW.c/c1/e/e1: Activ 0.01 um short of the rule's enclosure trips only the
+    rule for its implant and ThickGateOx column; exactly at the threshold is
+    clean. The other three rules of the family never fire on it."""
+    rule_id, enclosure = _NW_ENCLOSURE_RULES[(implant, hv)]
+    well = (0, 0, 4, 4)
+
+    def run(margin: float) -> dict:
+        activ = (margin, margin, 4 - margin, 4 - margin)
+        gox = (-1, -1, 5, 5) if hv else None
+        path = _nwell_activ_layout(
+            tmp_path,
+            f"nw_{rule_id}_{margin}.gds",
+            implant=implant,
+            activ=activ,
+            nwell=well,
+            thick_gate_ox=gox,
+        )
+        return run_drc(path, "sg13cmos5l")
+
+    bad = run(round(enclosure - 0.01, 3))
+    assert bad["status"] == "violations"
+    fired = {k for k in bad["rule_counts"] if k.startswith("nwell.enclosing.")}
+    assert fired == {rule_id}
+
+    ok = run(enclosure)
+    assert ok["status"] == "clean", ok["rule_counts"]
+    assert rule_id in ok["coverage"]["rules_checked"]
+
+
+def test_run_drc_sg13cmos5l_pactiv_under_enclosed_by_0_20_um(tmp_path: Path):
+    """Issue #3573 AC: P+ Activ under-enclosed by 0.20 um reports NW.c; at
+    0.31 um it is clean."""
+    bad = _nwell_activ_layout(
+        tmp_path, "pa_bad.gds", implant=(14, 0), activ=(0.2, 0.2, 3.8, 3.8)
+    )
+    assert run_drc(bad, "sg13cmos5l")["rule_counts"].get("nwell.enclosing.pactiv.1", 0)
+    ok = _nwell_activ_layout(
+        tmp_path, "pa_ok.gds", implant=(14, 0), activ=(0.31, 0.31, 3.69, 3.69)
+    )
+    assert run_drc(ok, "sg13cmos5l")["status"] == "clean"
+
+
+def test_run_drc_sg13cmos5l_pactiv_straddling_well_edge_and_outside(tmp_path: Path):
+    """A P+ Activ crossing the well edge is an escape (flagged); a substrate
+    tap wholly outside NWell, and N+ Activ outside NWell, are not."""
+    straddle = _nwell_activ_layout(
+        tmp_path, "pa_straddle.gds", implant=(14, 0), activ=(3, 1, 5, 3)
+    )
+    assert run_drc(straddle, "sg13cmos5l")["rule_counts"].get(
+        "nwell.enclosing.pactiv.1", 0
+    )
+    for implant in ((14, 0), (7, 0)):
+        outside = _nwell_activ_layout(
+            tmp_path, f"outside_{implant[0]}.gds", implant=implant, activ=(6, 1, 7, 2)
+        )
+        assert run_drc(outside, "sg13cmos5l")["status"] == "clean"
+
+
+def test_run_drc_sg13cmos5l_nwell_enclosure_unmarked_thickgateox_absent_is_lv(
+    tmp_path: Path,
+):
+    """ThickGateOx absent from the stream selects the LV column (0.31), not a
+    skipped rule: 0.40 um enclosure is clean at 0.31 and would fail at 0.62."""
+    path = _nwell_activ_layout(
+        tmp_path, "lv_default.gds", implant=(14, 0), activ=(0.4, 0.4, 3.6, 3.6)
+    )
+    report = run_drc(path, "sg13cmos5l")
+    assert report["status"] == "clean"
+    assert "nwell.enclosing.pactiv.1" in report["coverage"]["rules_checked"]
 
 
 def test_run_drc_sg13cmos5l_no_nwell_no_unchecked_marker(tmp_path: Path):

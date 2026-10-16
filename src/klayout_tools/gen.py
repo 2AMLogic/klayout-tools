@@ -387,6 +387,8 @@ _HIDDEN_PARAMS = {
     "salicide_block_present",
     "voltage_flavor_mark_layer",
     "voltage_flavor_mark_present",
+    "voltage_flavor_extra_mark_layer",
+    "voltage_flavor_extra_mark_present",
     "cap_top_plate_layer",
     "cap_bottom_plate_layer",
     "cap_top_via_layer",
@@ -538,6 +540,12 @@ MIN_SAME_LAYER_SPACING_UM = 0.4
 #: curated deck has no well-layer rule, so this only ever matters on
 #: gf180mcu (see :data:`_PDK_ROLE_LAYERS`'s ``"well"`` entries).
 WELL_ENCLOSURE_MARGIN_UM = 0.15
+
+#: Margin (um) the well keeps around a ``mos_array`` well-tie tap pad
+#: (:func:`_mos_array_well_tap_layout`) -- exceeds sg13cmos5l's
+#: ``nwell.enclosing.nactiv.1`` (NW.e, 0.24um), which the generic
+#: :data:`WELL_ENCLOSURE_MARGIN_UM` does not clear (issue #3573).
+WELL_TAP_ENCLOSURE_MARGIN_UM = 0.25
 
 #: Minimum spacing (um) between two well regions held at **different**
 #: potentials -- the rule ``well_island`` (issue #1421) enforces between its
@@ -1570,11 +1578,12 @@ def _mos_array_layout(
     if draw_well_tap:
         well_tap = _mos_array_well_tap_layout(min_x0, min_y0, max_x1, max_y1)
         tap_box = well_tap["active"]
+        tap_margin = max(margin, WELL_TAP_ENCLOSURE_MARGIN_UM)
         well_box = (
-            min(well_box[0], tap_box[0] - margin),
-            min(well_box[1], tap_box[1] - margin),
-            max(well_box[2], tap_box[2] + margin),
-            max(well_box[3], tap_box[3] + margin),
+            min(well_box[0], tap_box[0] - tap_margin),
+            min(well_box[1], tap_box[1] - tap_margin),
+            max(well_box[2], tap_box[2] + tap_margin),
+            max(well_box[3], tap_box[3] + tap_margin),
         )
 
     ring = None
