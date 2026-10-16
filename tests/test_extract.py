@@ -23,6 +23,7 @@ import json
 import os
 import re
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -21715,6 +21716,101 @@ def test_rerun_extract_report_clean_pass(tmp_path):
     assert result["status"] == "match"
     assert result["drift"] == []
     assert result["fresh"]["status"] == "extracted"
+
+
+def test_extract_report_echoes_pins_and_def_pins_sets(tmp_path):
+    """Issue #3061: `declared_pins`/`def_pins` are always present -- a sorted
+    list, or `null` for "flag not given" (`[]` stays distinct)."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "echo.gds")
+    plain = run_extract(path, "sky130", output=str(tmp_path / "a.spice"))
+    assert plain["declared_pins"] is None
+    assert plain["def_pins"] is None
+    given = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "b.spice"),
+        declared_pins=frozenset({"VPWR", "A"}),
+        def_pins=frozenset(),
+    )
+    assert given["declared_pins"] == ["A", "VPWR"]
+    assert given["def_pins"] == []
+
+
+def test_rerun_extract_report_replays_plain_pins_without_rename(tmp_path):
+    """Issue #3061: a plain `--pins`/`--def-pins` run (no
+    `--rename-declared-pins`) replays from the top-level echoes and matches."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "plain_pins.gds")
+    report_path = tmp_path / "plain_pins.extract.json"
+    committed = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "plain_pins.spice"),
+        declared_pins=frozenset({"A", "VGND", "VPWR", "VPB", "Y"}),
+        def_pins=frozenset({"A", "VGND", "VPWR", "VPB"}),
+    )
+    _write_report(report_path, committed)
+    assert committed["pin_renames"] is None
+
+    result = rerun_extract_report(str(report_path))
+
+    assert result["status"] == "match"
+    assert result["drift"] == []
+    assert result["fresh"]["declared_pins"] == committed["declared_pins"]
+    assert result["fresh"]["def_pins"] == committed["def_pins"]
+    assert result["fresh"]["def_pin_promotion"] is not None
+
+
+def test_rerun_extract_report_legacy_report_without_pin_echoes(tmp_path):
+    """Issue #3061: a report predating the top-level echoes still replays via
+    the `pin_renames` fallback."""
+    path = _write_gds(
+        _make_inverter_layout(extra_y_label="clk"), tmp_path / "legacy.gds"
+    )
+    report_path = tmp_path / "legacy.extract.json"
+    committed = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "legacy.spice"),
+        declared_pins=frozenset({"clk", "VGND", "VPWR", "VPB", "A"}),
+        rename_declared_pins=True,
+    )
+    del committed["declared_pins"]
+    del committed["def_pins"]
+    _write_report(report_path, committed)
+
+    result = rerun_extract_report(str(report_path))
+
+    # The only drift is the additive fields the legacy report lacks; the pin
+    # fields themselves reproduce through the `pin_renames` fallback.
+    assert {d["field"] for d in result["drift"]} <= {"declared_pins", "def_pins"}
+    assert result["fresh"]["pin_renames"]["renamed"] == [{"from": "Y|clk", "to": "clk"}]
+
+
+def test_rerun_extract_report_never_modifies_committed_netlist(tmp_path):
+    """Issue #3061: `--rerun` leaves the committed netlist bytes alone, even
+    when it reports drift (here a tampered netlist -> `netlist_sha256`
+    drift), leaves no stray temp netlist, and reports the committed path."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "keep.gds")
+    report_path = tmp_path / "keep.extract.json"
+    netlist_path = tmp_path / "keep.spice"
+    committed = run_extract(path, "sky130", output=str(netlist_path))
+    _write_report(report_path, committed)
+    netlist_path.write_text(netlist_path.read_text() + "* tampered\n")
+    tampered = netlist_path.read_bytes()
+    before = set(os.listdir(tempfile.gettempdir()))
+
+    result = rerun_extract_report(str(report_path))
+
+    assert netlist_path.read_bytes() == tampered
+    assert result["fresh"]["netlist_path"] == str(netlist_path)
+    assert not [
+        n
+        for n in set(os.listdir(tempfile.gettempdir())) - before
+        if n.startswith("klt-extract-rerun-")
+    ]
+    # The hash compared is the freshly regenerated netlist's, not the file on
+    # disk's, so the tampered file is neither read as truth nor overwritten.
+    assert result["status"] == "match"
 
 
 def test_rerun_extract_report_detects_device_recognition_change(tmp_path):

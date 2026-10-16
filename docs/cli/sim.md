@@ -4340,6 +4340,20 @@ Both shapes apply verbatim to a `corners.process` bundle's per-section
 above) — a per-section library resolves exactly as the `models.lib` it
 stands in for would, and is reported in `environment.corner_section_libs`.
 
+**Only the PDK-relative form is portable to `remote`/`batch`.** The runner
+resolves `models.lib` on its own box against its own PDK root, so an absolute
+host path (`/home/<user>/.volare/...`, or a `~/...` path) names a file that
+does not exist there. On the `batch` backend such a request is refused before
+any S3 write or instance launch
+([#3296](https://github.com/2AMLogic/klayout-tools/issues/3296)): exit `1`,
+`error.code` `models_lib_host_path`, naming each offending ref (`models.lib`
+or a per-section `corners.process[].sections[].lib`) and, when the path sits
+in a `<variant>/libs.tech/...` tree, the replacement
+`{"pdk": "<variant>", "lib": "libs.tech/..."}`. Not refused: a PDK-relative
+`lib`, a `$PDK_ROOT/...` form (the runner expands it), and any request with
+`options.stage_model_inputs: true` (the library ships with the job).
+`local`/`local-parallel` accept absolute paths unchanged.
+
 Either way, the resolved library is reported in the response's
 `environment.models_lib` as the `{path, scope}` shape (`schema_version` `3`,
 issue [#1274](https://github.com/2AMLogic/klayout-tools/issues/1274)) — never
@@ -4561,9 +4575,20 @@ successfully — that narration alone is not evidence the analysis failed
 (issue #205). The downgrade only applies when every one of the request's
 `measurements[]` actually came back with a value for this corner *and*
 ngspice's own `simulation(s) aborted` trailer is absent from the log; a
-corner with no `measurements[]` declared, a measurement that produced no
-value, or that trailer keeps `singular_matrix`/`nonconvergence` at
-`severity: "error"` and the corner at `status: "error"`, exactly as before.
+measurement that produced no value, or that trailer, keeps
+`singular_matrix`/`nonconvergence` at `severity: "error"` and the corner at
+`status: "error"`, exactly as before.
+
+A waveform-capture-only request (no `measurements[]`, issue #3246) has no
+measurement to confirm completion, so the captured waveform is the recovery
+basis instead: for a `tran` analysis with `options.waveforms: true`, the
+downgrade applies when the trailer is absent *and* the parsed waveform's last
+time point reaches the `tran` stop time (the second `analysis.args` token). A
+missing or truncated waveform, an unparseable `args`, or any non-`tran`
+analysis keeps the diagnostic at `severity: "error"`. When the waveform was
+the basis, the downgraded diagnostic's `message` says so. Declaring a dummy
+completion measurement is no longer needed to get this behavior.
+`options.fail_on_diagnostic` is unaffected (it matches on `code`).
 `netlist`/`timeout`/`measurement`/`unknown`/`timestep_too_small` are never
 downgraded.
 
