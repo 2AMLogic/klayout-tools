@@ -2142,6 +2142,59 @@ def _build_net_islands(
     return islands, extents
 
 
+def _resolve_resistance_corner(deck: str | None, resistance_corner: str | None) -> str:
+    """Validate ``--resistance-corner`` against ``--deck`` (issue #3400) and
+    return the corner in force (``nominal`` unless one was given)."""
+    if deck is None and resistance_corner is not None:
+        raise PowerError(
+            "--resistance-corner needs --deck: the corner selects which of "
+            "a deck's published via resistances to use"
+        )
+    corner = resistance_corner if resistance_corner is not None else "nominal"
+    if deck is not None:
+        from .decks import RESISTANCE_CORNERS
+
+        if corner not in RESISTANCE_CORNERS:
+            raise PowerError(
+                f"unknown resistance corner '{corner}' "
+                f"(available: {', '.join(RESISTANCE_CORNERS)})"
+            )
+    return corner
+
+
+def _power_provenance(file: str, deck: str | None) -> dict[str, Any]:
+    """The shared ``provenance`` block; with ``--deck`` (issue #3400) the deck
+    that defaulted the via resistances is recorded, else ``deck`` stays
+    ``null``."""
+    if deck is None:
+        return build_provenance(input_path=file, input_role=INPUT_ROLE_LAYOUT)
+    from .decks import deck_source_path
+
+    return build_provenance(
+        deck_name=deck,
+        deck_path=deck_source_path(deck),
+        input_path=file,
+        input_role=INPUT_ROLE_LAYOUT,
+    )
+
+
+def _deck_via_report(vias: list[dict[str, Any]], corner: str) -> dict[str, Any]:
+    """The ``--deck``-only report keys (issue #3400): the corner in force and
+    each via's resolved resistance and where it came from."""
+    return {
+        "resistance_corner": corner,
+        "vias": [
+            {
+                "name": via["name"],
+                "layer": f"{via['layer'][0]}/{via['layer'][1]}",
+                "resistance_ohm": via["resistance_ohm"],
+                "resistance_source": via["resistance_source"],
+            }
+            for via in vias
+        ],
+    }
+
+
 def run_power(
     file: str,
     spec_path: str,
@@ -2243,20 +2296,7 @@ def run_power(
     ``warnings`` rather than raised, as long as at least one net resolved
     to at least one island).
     """
-    if deck is None and resistance_corner is not None:
-        raise PowerError(
-            "--resistance-corner needs --deck: the corner selects which of "
-            "a deck's published via resistances to use"
-        )
-    corner = resistance_corner if resistance_corner is not None else "nominal"
-    if deck is not None:
-        from .decks import RESISTANCE_CORNERS
-
-        if corner not in RESISTANCE_CORNERS:
-            raise PowerError(
-                f"unknown resistance corner '{corner}' "
-                f"(available: {', '.join(RESISTANCE_CORNERS)})"
-            )
+    corner = _resolve_resistance_corner(deck, resistance_corner)
     spec = _load_spec_json(spec_path, PowerError)
     _reject_unknown_keys(spec, _SPEC_KEYS, spec_path, "", PowerError)
     power_net_entries = _validate_power_nets(spec, spec_path)
@@ -2455,17 +2495,7 @@ def run_power(
     # block, for the same reason `klt erc` records it).
     # Issue #3400: with `--deck`, the deck that defaulted the via
     # resistances is recorded; without it `deck` stays `null`.
-    if deck is not None:
-        from .decks import deck_source_path
-
-        provenance = build_provenance(
-            deck_name=deck,
-            deck_path=deck_source_path(deck),
-            input_path=file,
-            input_role=INPUT_ROLE_LAYOUT,
-        )
-    else:
-        provenance = build_provenance(input_path=file, input_role=INPUT_ROLE_LAYOUT)
+    provenance = _power_provenance(file, deck)
     provenance["spec"] = {"content_hash": _content_hash(spec_path)}
     provenance["top_cell"] = top_cell.name
 
@@ -2489,14 +2519,5 @@ def run_power(
         "provenance": provenance,
     }
     if deck is not None:
-        report["resistance_corner"] = corner
-        report["vias"] = [
-            {
-                "name": via["name"],
-                "layer": f"{via['layer'][0]}/{via['layer'][1]}",
-                "resistance_ohm": via["resistance_ohm"],
-                "resistance_source": via["resistance_source"],
-            }
-            for via in vias
-        ]
+        report.update(_deck_via_report(vias, corner))
     return report
