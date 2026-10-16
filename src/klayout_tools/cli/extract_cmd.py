@@ -767,6 +767,7 @@ def _print_text(report: dict) -> None:
     # Both are None under `--no-netlist` (issue #2850).
     print(f"netlist_path: {report['netlist_path']}")
     print(f"netlist_sha256: {report['netlist_sha256']}")
+    print(f"netlist_normalized_sha256: {report['netlist_normalized_sha256']}")
     print(
         f"devices: {report['device_count']}  "
         f"nets: {report['net_count']}  "

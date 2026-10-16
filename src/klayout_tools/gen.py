@@ -1148,6 +1148,17 @@ def _mos_array_well_tap_layout(
     }
 
 
+def _clamp_pitch_override(override_um: float, minimum_um: float) -> tuple[float, bool]:
+    """Resolve a pitch override against its legal minimum (issue #3299).
+
+    Returns ``(effective_pitch_um, clamped)``: ``0.0`` means "no override"
+    (the minimum, not clamped); a positive value below ``minimum_um`` is
+    clamped up to it and reported as clamped."""
+    if override_um <= 0.0:
+        return minimum_um, False
+    return max(override_um, minimum_um), override_um < minimum_um
+
+
 def _mos_array_layout(
     w_um: float,
     l_um: float,
@@ -1170,6 +1181,8 @@ def _mos_array_layout(
     sd_implant_margin_um: float = 0.0,
     voltage_flavor_mark_margin_um: float = WELL_ENCLOSURE_MARGIN_UM,
     interior_channel_um: float = 0.0,
+    pitch_x_um: float = 0.0,
+    pitch_y_um: float = 0.0,
 ) -> dict[str, Any]:
     """A ``rows`` x ``cols`` grid of :func:`_mos_unit_layout` unit devices,
     with ``dummy`` extra unit-device columns flanking each side.
@@ -1238,7 +1251,17 @@ def _mos_array_layout(
     opaque block) keeps the generator responsible for its own routability
     the same way it is already responsible for its own DRC cleanliness;
     ``res_array``/``diff_pair`` are expected to grow the same parameter in a
-    later phase, not this one."""
+    later phase, not this one.
+
+    ``pitch_x_um``/``pitch_y_um`` (issue #3299, Phase 1) override the base
+    column/row pitch (otherwise unit extent plus
+    :data:`MIN_SAME_LAYER_SPACING_UM`). A value below that legal minimum is
+    *clamped up* to it -- never emitted as DRC-violating geometry -- and the
+    clamp is reported via ``pitch_x_clamped``/``pitch_y_clamped``;
+    ``min_col_pitch_um``/``min_row_pitch_um`` give the legal minimum. ``0.0``
+    (the default) means "no override" and is a strict no-op. The override
+    replaces the base pitch, and ``interior_channel_um`` is then added on top
+    of the effective base pitch."""
     unit = _mos_unit_layout(
         w_um,
         l_um,
@@ -1250,8 +1273,12 @@ def _mos_array_layout(
         bottom_endcap_um,
         sd_implant_margin_um,
     )
-    col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
-    row_pitch = unit["bbox_height_um"] + MIN_SAME_LAYER_SPACING_UM
+    min_col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
+    min_row_pitch = unit["bbox_height_um"] + MIN_SAME_LAYER_SPACING_UM
+    # Issue #3299 (Phase 1): an explicit pitch override, clamped up to the
+    # legal minimum. `0.0` (the default) leaves the pitch untouched.
+    col_pitch, pitch_x_clamped = _clamp_pitch_override(pitch_x_um, min_col_pitch)
+    row_pitch, pitch_y_clamped = _clamp_pitch_override(pitch_y_um, min_row_pitch)
     # Issue #1531 (Phase 1): a positive `interior_channel_um` widens both
     # pitches by exactly that amount -- `0.0` (the default) is a strict no-op
     # on both, so every existing caller's `col_pitch`/`row_pitch` (and thus
@@ -1375,6 +1402,10 @@ def _mos_array_layout(
         "unit": unit,
         "col_pitch_um": col_pitch,
         "row_pitch_um": row_pitch,
+        "min_col_pitch_um": min_col_pitch,
+        "min_row_pitch_um": min_row_pitch,
+        "pitch_x_clamped": pitch_x_clamped,
+        "pitch_y_clamped": pitch_y_clamped,
         "cells": cells,
         "dummy_cells": dummy_cells,
         "well_box_um": well_box,
@@ -1610,6 +1641,57 @@ def _res_array_layout(
                 "y0_um": last_row * row_pitch,
             }
         )
+    # Issue #2997: the `series=true` joint jumpers -- one box (absolute um)
+    # per `R<i>_B` -> `R<i + 1>_A` pair, bridging the gap between the two
+    # physically-adjacent end pads. Computed unconditionally (cheap, pure
+    # geometry); only drawn when the caller asks for `series`.
+    left_pad, right_pad = unit["boxes_um"]["metal"]
+    pad_y0 = unit["pad_y0_um"]
+    pad_y1 = pad_y0 + unit["pad_height_um"]
+    jumpers = []
+    for i in range(num - 1):
+        cur, nxt = cells[i], cells[i + 1]
+        if cur["y0_um"] == nxt["y0_um"]:
+            # Same row: bridge the `effective_spacing_um` gap between cur's
+            # exit pad and nxt's entry pad.
+            if cur["direction"] > 0:
+                x0, x1 = cur["x0_um"] + right_pad[2], nxt["x0_um"] + left_pad[0]
+            else:
+                x0, x1 = nxt["x0_um"] + right_pad[2], cur["x0_um"] + left_pad[0]
+            jumpers.append(
+                {
+                    "kind": "row",
+                    "box_um": (x0, cur["y0_um"] + pad_y0, x1, cur["y0_um"] + pad_y1),
+                    "length_um": x1 - x0,
+                }
+            )
+        else:
+            # Fold: the boustrophedon puts the last unit of one row and the
+            # first of the next in the same column, with the exit and entry
+            # pads on the same physical side.
+            # The bridge is grown inward to at least the body width so a
+            # narrow end pad does not leave a sub-minimum-width strip on a
+            # metal-body (`metal_level`) layer.
+            grow = max(
+                0.0,
+                min(unit["height_um"], unit["total_len_um"])
+                - (left_pad[2] - left_pad[0]),
+            )
+            if cur["direction"] > 0:
+                jx0, jx1 = (
+                    cur["x0_um"] + right_pad[0] - grow,
+                    cur["x0_um"] + right_pad[2],
+                )
+            else:
+                jx0, jx1 = cur["x0_um"] + left_pad[0], cur["x0_um"] + left_pad[2] + grow
+            y0, y1 = cur["y0_um"] + pad_y1, nxt["y0_um"] + pad_y0
+            jumpers.append(
+                {
+                    "kind": "fold",
+                    "box_um": (jx0, y0, jx1, y1),
+                    "length_um": y1 - y0,
+                }
+            )
     return {
         "unit": unit,
         "pitch_um": pitch,
@@ -1617,6 +1699,7 @@ def _res_array_layout(
         "cols_per_row": cols_per_row,
         "cells": cells,
         "dummy_cells": dummy_cells,
+        "jumpers": jumpers,
         "spacing_um": effective_spacing_um,
     }
 

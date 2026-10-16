@@ -568,6 +568,10 @@ follow-up.
 
 ### Anonymous net numbering (`$N`) is NOT a stable cross-platform contract (issue #1063)
 
+> **Evidence pins:** `netlist_sha256` hashes the written `.spice` bytes and so
+> embeds this numbering; use `netlist_normalized_sha256` (issue #3407), which is
+> numbering-independent, for a pin that must survive a `klayout` build change.
+
 A net with no drawn label writes as `Net.expanded_name()`'s own
 placeholder, `"$" + cluster_id` (e.g. `$171`) — a *device instance* name
 built off it (e.g. `M$171`, or an unlabelled net's synthesized `Device`
@@ -1987,14 +1991,11 @@ Rules of thumb:
   matched MiM overlap is reported as — never *whether* it is recognised, and
   never how many devices a drawn overlap produces (still exactly one,
   whichever flavour is selected).
-- **Unlike `poly_res`, combining `--deck-option mim_cap=...` with `--pdk`
-  does not yet bind a curated simulation subcircuit for the two
-  non-default flavours** (`cap_mim_1f0_m4m5_noshield`/
-  `cap_mim_1f5_m4m5_noshield` have no `_CAPACITOR_MODEL_TABLE` entry as of
-  this option's introduction) — the extracted `C` card is written unbound
-  (the same documented carve-out an unbound device class anywhere else in
-  this deck gets, e.g. gf180mcu's `bjt`), not a wrong subcircuit call. See
-  "SPICE model binding" below.
+- Combining `--deck-option mim_cap=...` with `--pdk` binds the selected
+  density to its PDK subcircuit (`cap_mim_1f0_m4m5_noshield`/
+  `cap_mim_1f5_m4m5_noshield` as well as the default, issue #3090); without
+  `--pdk` the capacitor is a fixed-value `C` card. See "SPICE model binding"
+  below.
 
 ### Junction diodes (issue #542)
 
@@ -4282,6 +4283,23 @@ same fetched IHP-Open-PDK v0.3.0 install's
 / `.subckt cap_rfcmim PLUS MINUS bn`), both taking plain `l`/`w` in raw
 metres, the same convention as this family's MOS/resistor bindings.
 
+gf180mcu capacitor note (issue #3090): all three `--deck-option mim_cap=`
+densities bind to their identically-named PDK subcircuit, taking
+`c_length`/`c_width` — confirmed in the installed PDK's
+`libs.tech/ngspice/sm141064_mim.ngspice`:
+
+| `mim_cap` class | Bound subcircuit |
+|---|---|
+| `cap_mim_1f0_m4m5_noshield` | `cap_mim_1f0_m4m5_noshield` |
+| `cap_mim_1f5_m4m5_noshield` | `cap_mim_1f5_m4m5_noshield` |
+| `cap_mim_2f0_m4m5_noshield` (default) | `cap_mim_2f0_m4m5_noshield` |
+
+Binding matters for corners: the PDK's `mimcap_ff`/`mimcap_ss` sections scale
+the subcircuit via `mim_corner_*`, which a bare `C` card cannot follow. A
+capacitor written as a fixed-value `C` card instead (no `--pdk`, or a class
+with no curated row) earns one aggregate `warnings[]` line saying so, and under
+`--parasitics` the same line in the netlist header comment.
+
 Bipolar note: sky130's `pnp_05v5` ships as discrete geometry-named cells
 (`…_W0p68L0p68`, `…_W3p40L3p40`), not one parameterized cell, so the writer
 selects the variant whose nominal emitter area is nearest the device's
@@ -4404,11 +4422,10 @@ future epic):
   *subcircuit* names, which a `C` card cannot reference either. The card was
   therefore unsimulatable as written (`unknown parameter (…)` / `could not
   find a valid modelname`), breaking the extracted-netlist → simulation leg
-  of the flow outright. Reachable both **with** `--pdk` (a recognised
-  flavour with no curated table row — e.g. gf180mcu's non-default
-  `cap_mim_1f0_m4m5_noshield`/`cap_mim_1f5_m4m5_noshield` densities, which
-  `--deck-option mim_cap=` selects) and **without** it (no bindings at all,
-  so every deck's capacitor class is unbound). Nothing is lost: the flavour
+  of the flow outright. Reachable **without** `--pdk` (no bindings at all,
+  so every deck's capacitor class is unbound) and, in principle, with
+  `--pdk` for a recognised flavour with no curated table row (none today:
+  gf180mcu's `1f0`/`1f5` densities were bound by issue #3090). Nothing is lost: the flavour
   identity is still on the writer's own preceding
   `* device instance … <class>` comment line and in `devices[].class`.
   `--parasitics`' own ground/coupling capacitors are unaffected — their
@@ -5500,6 +5517,19 @@ mirroring `klt sta`'s SPEF correlation check, which un-escapes SPEF
 identifiers the same way (issue #1623). Without this, an escaped DEF
 identifier never matches its unescaped extraction-side counterpart, and
 the affected net silently gets no `*CONN` block at all.
+
+**Hierarchy divider (issue #2969).** The SPEF written here declares
+`*DIVIDER /`, so SPEF distinguishes `sub/_001_` (a hierarchical path) from
+`sub\/_001_` (a flat name containing a literal slash). Matching un-escapes
+both spellings to the same string, so the writer keeps the DEF's own
+spelling for every DEF-sourced name: a bare `/` in the DEF is written bare
+in `*D_NET`, `*I` and `*RES`/`*CAP` nodes, and an escaped `\/` stays
+escaped. Names with no DEF origin (and port names) keep the uniform
+escape-everything rule, `/` included. Whether a given OpenSTA netlist
+resolves the bare form is a property of that netlist (hierarchical vs.
+flattened with escaped names); the writer follows the DEF rather than
+guessing. Not yet measured against a live OpenSTA session — `sta` is not
+installed on the host this change was built on.
 
 **Every two-terminal `*RES`/coupling `*CAP` endpoint is a colon-scoped
 internal node, a `*CONN`-declared instance-pin identifier, or (for an
@@ -7082,6 +7112,7 @@ exit codes).
   "dbu_um": 0.001,
   "netlist_path": "design.spice",
   "netlist_sha256": "4f1c...",
+  "netlist_normalized_sha256": "9a0e...",
   "status": "extracted",
   "device_count": 2,
   "net_count": 6,
@@ -7153,6 +7184,7 @@ exit codes).
 | `dbu_um`           | number (float)             | Database unit in micrometres, same semantics as `klt layers`/`klt drc`.                                |
 | `netlist_path`     | string \| null             | Resolved path of the written SPICE netlist (echoes `--output` or the computed default). `null` only when `--no-netlist` was passed. |
 | `netlist_sha256`   | string \| null             | SHA-256 hex digest of the written netlist file. `null` only when `--no-netlist` was passed.            |
+| `netlist_normalized_sha256` | string \| null | Additive (issue #3407). SHA-256 hex digest of the flat `devices[]`/`nets[]` connectivity with anonymous-net numbering normalized away (`net_id` dropped, each `\$N` net rewritten to its sorted `<device>.<terminal>` attachment list, `nets[]` re-sorted — the same canonicalization `--check --rerun` uses), serialized as sorted-key compact JSON. Pin this, not `netlist_sha256`, as cross-build evidence: it is unchanged when only the `$N` numbering differs, and changes on any real connectivity, device-parameter or net-name change. Covers the flat netlist only (not `--subcircuit` decks or `--parasitics` R/C elements). `null` only when `--no-netlist` was passed. Existing `netlist_sha256` values are unchanged. |
 | `status`           | `"extracted"`              | Never `"error"` — a failed run does not emit this envelope at all (see Exit codes).                    |
 | `device_count`     | integer                    | `len(devices)`.                                                                                        |
 | `net_count`        | integer                    | `len(nets)`.                                                                                           |
@@ -7276,7 +7308,7 @@ Every field in this report falls into exactly one of three classes:
 
 | Class | Meaning | Examples |
 | ----- | ------- | -------- |
-| **content** | Reproduces from the same input on any build; safe to compare strictly. This is what "did this extraction reproduce?" actually means. | `device_count`, `net_count`, `device_counts`, `metrics` (issue #1848 — a deterministic re-keying of already-content fields, so it reproduces exactly whenever they do), `devices[].class`/`.params`/`.instance_path` (cell names and array element keys come from the input layout's own instance tree, not from any extractor-assigned counter), `nets[].pin`/`.device_count`, `parasitics.nets[].resistance_ohm`/`.capacitance_ff`/`.by_layer[]` (issue #1701), `parasitics.nets[].resistance_ohm_top_cell`/`.capacitance_ff_top_cell` (issue #1704, `null` unless `--parasitics-top-cell-only` was given), `parasitics.r_count`/`.c_count`/`.total_*`, `parasitics.integrity` and `parasitics.nets[].integrity` (issue #2764 — derived deterministically from the same emitted model the rest of the block reports; detail strings naming anonymous nets inherit those spellings' bookkeeping class), `warnings[]`, `netlist_sha256` (a hash *of* content). |
+| **content** | Reproduces from the same input on any build; safe to compare strictly. This is what "did this extraction reproduce?" actually means. | `device_count`, `net_count`, `device_counts`, `metrics` (issue #1848 — a deterministic re-keying of already-content fields, so it reproduces exactly whenever they do), `devices[].class`/`.params`/`.instance_path` (cell names and array element keys come from the input layout's own instance tree, not from any extractor-assigned counter), `nets[].pin`/`.device_count`, `parasitics.nets[].resistance_ohm`/`.capacitance_ff`/`.by_layer[]` (issue #1701), `parasitics.nets[].resistance_ohm_top_cell`/`.capacitance_ff_top_cell` (issue #1704, `null` unless `--parasitics-top-cell-only` was given), `parasitics.r_count`/`.c_count`/`.total_*`, `parasitics.integrity` and `parasitics.nets[].integrity` (issue #2764 — derived deterministically from the same emitted model the rest of the block reports; detail strings naming anonymous nets inherit those spellings' bookkeeping class), `warnings[]`, `netlist_normalized_sha256` (a hash *of* content, numbering normalized), `netlist_sha256` (a hash of the written bytes, which embed the bookkeeping `$N` spellings — stable only within one `klayout` build; prefer `netlist_normalized_sha256` for cross-build pins). |
 | **bookkeeping** | Extractor-internal identifiers with no meaning outside the one run that produced them — assigned inside the opaque native `l2n.extract_netlist()` call this repo does not control (see "Anonymous net numbering (`$N`) is NOT a stable cross-platform contract" above). **Explicitly not a contract**: must be normalized (not compared by raw value) before a committed/fresh pair is judged to have reproduced. | `nets[].net_id`, `parasitics.nets[].net_id` (KLayout's `cluster_id` counter — issue #765/#1540); an anonymous net's `$N`/`\$N` name spelling wherever it appears (`nets[].name`, `devices[].nets[...]`, `parasitics.nets[].net`/`.hub_net`/`.terminals[].leg_net`/`.segments[].net_a`/`.net_b`/`.coupled[].net` — issue #1063/#1162); `parasitics.nets[]`'s own list *order* (its extraction-time sort key is `(net, net_id)`, itself derived from the unstable spelling above, so two builds can legitimately produce the identical net set in a different order). |
 | **tool metadata** | Legitimately varies with the build/toolchain, independent of the input's content. | `provenance.klt_version`, `provenance.klayout_version`, `provenance.pdk.version` (`_report_verify.VOLATILE_PROVENANCE_PATHS`, issue #1106). |
 
