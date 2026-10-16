@@ -13,6 +13,7 @@ def run(args: argparse.Namespace) -> int:
             top=args.top,
             flattened=args.flattened,
             include_text=args.include_text,
+            deck=args.deck,
         )
     except LayersError as exc:
         return emit_error("layers", str(exc), args.format)
@@ -31,6 +32,8 @@ def _print_text(report: dict) -> None:
     print(f"file: {report['file']}")
     print(f"dbu_um: {report['dbu_um']}")
     print(f"layers: {report['layer_count']}")
+    if "deck" in report:
+        print(f"deck: {report['deck']['name']} ({report['deck']['content_hash']})")
 
     layers = report["layers"]
     if not layers:

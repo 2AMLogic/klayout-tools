@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://2amlogic.com/klayout-tools/schemas/stats-response.schema.json",
+  "title": "klt stats --format json success response, version 1",
+  "description": "Success payload of `klt stats`. `layers` is null unless --per-layer was given. See docs/cli/stats.md.",
+  "type": "object",
+  "required": ["schema_version", "file", "dbu_um", "top_cell", "bbox_um", "total", "layers"],
+  "properties": {
+    "schema_version": {"type": "integer", "const": 1},
+    "file": {"type": "string"},
+    "dbu_um": {"type": "number"},
+    "top_cell": {"type": ["string", "null"]},
+    "bbox_um": {
+      "type": "object",
+      "required": ["left", "bottom", "right", "top", "width", "height"],
+      "properties": {
+        "left": {"type": "number"},
+        "bottom": {"type": "number"},
+        "right": {"type": "number"},
+        "top": {"type": "number"},
+        "width": {"type": "number"},
+        "height": {"type": "number"}
+      },
+      "additionalProperties": true
+    },
+    "total": {"$ref": "#/$defs/figures"},
+    "layers": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "array", "items": {"$ref": "#/$defs/layer"}}
+      ]
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "figures": {
+      "type": "object",
+      "required": ["area_um2", "density", "polygon_count", "vertex_count", "flattened_polygon_count", "flattened_vertex_count"],
+      "properties": {
+        "area_um2": {"type": "number"},
+        "density": {"type": "number"},
+        "polygon_count": {"type": "integer", "minimum": 0},
+        "vertex_count": {"type": "integer", "minimum": 0},
+        "flattened_polygon_count": {"type": "integer", "minimum": 0},
+        "flattened_vertex_count": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": true
+    },
+    "layer": {
+      "allOf": [
+        {"$ref": "#/$defs/figures"},
+        {
+          "type": "object",
+          "required": ["layer", "datatype", "name", "annotation"],
+          "properties": {
+            "layer": {"type": "integer"},
+            "datatype": {"type": "integer"},
+            "name": {"type": ["string", "null"]},
+            "annotation": {"type": "boolean"}
+          }
+        }
+      ]
+    }
+  }
+}

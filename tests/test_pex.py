@@ -363,8 +363,46 @@ def test_build_delta_rows_single_testbench_bare_spec_row():
             "extracted_value": 1.1,
             "delta_pct": 10.0,
             "status": "pass",
+            "schematic_status": "pass",
+            "extracted_status": "pass",
         }
     ]
+
+
+def test_build_delta_rows_carry_per_side_status():
+    # Issue #2989: schematic fail / extracted pass keeps `status: "pass"` but
+    # names the schematic-side violation.
+    schematic = _sim_report(
+        [{"corner_id": "tt", "measurements": [_measurement(1.0, "fail")]}]
+    )
+    extracted = _sim_report(
+        [{"corner_id": "tt", "measurements": [_measurement(1.1, "pass")]}]
+    )
+    (row,) = _build_delta_rows(
+        spec_row_prefix=None, schematic_report=schematic, extracted_report=extracted
+    )
+    assert row["status"] == "pass"
+    assert row["schematic_status"] == "fail"
+    assert row["extracted_status"] == "pass"
+
+
+def test_build_delta_rows_missing_schematic_measurement_is_error_side():
+    schematic = _sim_report([{"corner_id": "tt", "measurements": []}])
+    extracted = _sim_report([{"corner_id": "tt", "measurements": [_measurement(1.1)]}])
+    (row,) = _build_delta_rows(
+        spec_row_prefix=None, schematic_report=schematic, extracted_report=extracted
+    )
+    assert row["schematic_status"] == "error"
+    assert row["extracted_status"] == "pass"
+
+
+def test_unextracted_delta_rows_carry_per_side_status():
+    schematic = _sim_report(
+        [{"corner_id": "tt", "measurements": [_measurement(1.0, "fail")]}]
+    )
+    (row,) = _unextracted_delta_rows(spec_row_prefix=None, schematic_report=schematic)
+    assert row["schematic_status"] == "fail"
+    assert row["extracted_status"] == "error"
 
 
 def test_build_delta_rows_multi_testbench_prefixes_spec_row():
@@ -835,8 +873,10 @@ def test_model_mismatch_reports_divergent_flavours(tmp_path):
     mismatch = _model_mismatch(reference_netlist=reference, extracted_netlist=extracted)
 
     assert mismatch is not None
+    assert mismatch["kind"] == "model_set"
     assert mismatch["reference_only"] == ["sky130_fd_pr__nfet_g5v0"]
     assert mismatch["extracted_only"] == ["sky130_fd_pr__nfet_01v8"]
+    assert "different device models" in mismatch["detail"]
     assert mismatch["counts"]["reference"] == {"sky130_fd_pr__nfet_g5v0": 2}
     assert mismatch["counts"]["extracted"] == {"sky130_fd_pr__nfet_01v8": 2}
     assert "sky130_fd_pr__nfet_g5v0" in mismatch["detail"]
@@ -953,10 +993,41 @@ def test_model_mismatch_detects_instance_count_only_divergence(tmp_path):
         reference_netlist=str(reference), extracted_netlist=str(extracted)
     )
     assert mismatch is not None
+    assert mismatch["kind"] == "count_only"
     assert mismatch["reference_only"] == []
     assert mismatch["extracted_only"] == []
     assert mismatch["counts"]["reference"] == {"nfet_01v8": 2}
     assert mismatch["counts"]["extracted"] == {"nfet_01v8": 1}
+    # Issue #3054: the detail must not claim a model divergence.
+    detail = mismatch["detail"]
+    assert "different device models" not in detail
+    assert "electrically unrelated" not in detail
+    assert "A common cause" not in detail
+    assert "finger/multiplier" in detail
+
+
+def test_model_mismatch_hierarchical_reference_keeps_hierarchy_text(tmp_path):
+    """Issue #3054: a hierarchical reference keeps the hierarchy-artifact
+    wording alongside the new `kind` field."""
+    reference = tmp_path / "schematic_dut.spice"
+    reference.write_text(
+        ".SUBCKT CELL A Y VSS\n"
+        "Xn1 Y A VSS VSS nfet_01v8\n"
+        "Xn2 Y A VSS VSS nfet_01v8\n"
+        ".ENDS CELL\n"
+        ".SUBCKT TOP A Y VSS\n"
+        "Xi1 A Y VSS CELL\n"
+        ".ENDS TOP\n"
+    )
+    extracted = tmp_path / "extracted.spice"
+    extracted.write_text(".SUBCKT TOP A Y VSS\nXn1 Y A VSS VSS nfet_01v8\n.ENDS TOP\n")
+    mismatch = _model_mismatch(
+        reference_netlist=str(reference), extracted_netlist=str(extracted)
+    )
+    assert mismatch is not None
+    assert mismatch["reference_only"] == ["CELL"]
+    assert mismatch["kind"] == "model_set"
+    assert "#1085" in mismatch["detail"]
 
 
 def test_reference_is_hierarchical_detects_local_subckt_call(tmp_path):
@@ -1022,6 +1093,7 @@ def test_model_mismatch_names_hierarchy_not_electrically_unrelated(tmp_path):
     assert mismatch is not None
     # Same circuit: the only divergence is hierarchy depth, not device
     # identity -- `reference_only` names the leaf `.subckt` call itself.
+    assert mismatch["kind"] == "model_set"
     assert mismatch["reference_only"] == ["INV"]
     assert mismatch["extracted_only"] == []
     assert "electrically unrelated" not in mismatch["detail"]
@@ -2399,6 +2471,29 @@ def test_run_pex_critical_nets_threaded_through_to_extraction(
 
 
 @_SKIP_NO_NGSPICE
+def test_run_pex_parasitic_variant_threaded_through_to_extraction(
+    tmp_path, resistor_layout
+):
+    """`--parasitic-variant` (issue #3056) is forwarded from `run_pex` to
+    `run_extract` and echoed in `extraction.parasitic_variant`; absent
+    otherwise."""
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    report = run_pex(
+        resistor_layout,
+        [str(request)],
+        "sky130",
+        parasitic_variants=["drop-c-ground:*"],
+    )
+
+    assert report["extraction"]["parasitic_variant"] == ["drop-c-ground:*"]
+    baseline = run_pex(resistor_layout, [str(request)], "sky130")
+    assert "parasitic_variant" not in baseline["extraction"]
+
+
+@_SKIP_NO_NGSPICE
 def test_run_pex_distributed_rc_threaded_through_to_extraction(
     tmp_path, resistor_layout
 ):
@@ -3657,6 +3752,16 @@ def test_run_pex_measure_command_produces_delta_rows(
     ]
     assert [row["schematic_value"] for row in report["delta"]] == [1.0, 2.0]
     assert [row["extracted_value"] for row in report["delta"]] == [1.1, 2.2]
+    # Issue #2989: per-side limit status rides on command-mode rows too, and
+    # `schematic_failed` is reported (here 0) without touching `status`.
+    assert all(
+        row["schematic_status"] in {"pass", "fail", "error"}
+        and row["extracted_status"] in {"pass", "fail", "error"}
+        for row in report["delta"]
+    )
+    assert report["schematic_failed"] == sum(
+        row["schematic_status"] == "fail" for row in report["delta"]
+    )
     # The delta is computed by `klt pex`, not supplied by the caller.
     assert [row["delta_pct"] for row in report["delta"]] == [10.0, 10.0]
     assert report["passed"] == 2
@@ -4877,3 +4982,394 @@ def test_pex_side_evidence_stays_with_its_testbench_and_corner(
     assert second["sides"]["schematic"]["corners"][0]["diagnostics"] == [_BATCH_DIAG]
     assert second["sides"]["extracted"]["environment"]["remote"]["job_id"] == "e1"
     assert second["sides"]["schematic"]["environment"].get("remote") is None
+
+
+# --------------------------------------------------------------------------- #
+# Issue #2889: `--flatten-schematic` -- flatten a hierarchical schematic DUT
+# to PDK leaf devices before the schematic-side run.
+# --------------------------------------------------------------------------- #
+
+
+def _write_hierarchical_dut(path: Path) -> Path:
+    """The same 289.2-ohm `RES` the flat fixture models, written as two
+    instances of a locally defined `HALF` subcircuit (each itself two
+    resistors) -- `model_mismatch` reports `HALF` on hierarchy alone."""
+    path.write_text(
+        ".SUBCKT HALF A B R=1\n"
+        "R1 A MID {R/2}\n"
+        "R2 MID B {R/2}\n"
+        ".ENDS HALF\n"
+        ".SUBCKT RES RA RB\n"
+        "X1 RA M HALF R=144.6\n"
+        "X2 M RB HALF R=144.6\n"
+        ".ENDS RES\n"
+    )
+    return path
+
+
+def _sha256_hex(path: Path) -> str:
+    import hashlib
+
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _install_recording_fake_run_sim(monkeypatch):
+    """Like `_install_two_call_fake_run_sim`, but records every request path."""
+    import klayout_tools.pex as pex_module
+
+    requests: list[str] = []
+
+    def _fake_run_sim(request_path, *_args, **_kwargs):
+        requests.append(str(request_path))
+        return {
+            "corners": [
+                {"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.4)]}
+            ],
+            "corner_count": 1,
+            "measurements": [{"name": "vout"}],
+        }
+
+    monkeypatch.setattr(pex_module, "run_sim", _fake_run_sim)
+    return requests
+
+
+def test_run_pex_without_flatten_schematic_is_unchanged(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """Default off: the schematic leg runs the testbench itself, and the
+    hierarchical DUT still reports the hierarchy-caused `model_mismatch`,
+    whose `detail` now names the new flag."""
+    dut = _write_hierarchical_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+    requests = _install_recording_fake_run_sim(monkeypatch)
+
+    report = run_pex(
+        resistor_layout, [str(request)], "sky130", artifacts_dir=str(tmp_path / "pex")
+    )
+
+    assert requests[0] == str(request)
+    assert report["flatten_schematic"] is False
+    assert report["schematic_flatten"] is None
+    assert not (tmp_path / "pex" / "schematic-dut.flat.spice").exists()
+    mismatch = report["model_mismatch"]
+    assert mismatch is not None
+    assert mismatch["reference_only"] == ["HALF"]
+    assert "--flatten-schematic" in mismatch["detail"]
+
+
+def test_run_pex_flatten_schematic_runs_the_flattened_dut(
+    tmp_path, resistor_layout, monkeypatch
+):
+    dut = _write_hierarchical_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+    requests = _install_recording_fake_run_sim(monkeypatch)
+    outdir = tmp_path / "pex"
+
+    report = run_pex(
+        resistor_layout,
+        [str(request)],
+        "sky130",
+        artifacts_dir=str(outdir),
+        flatten_schematic=True,
+    )
+
+    flat_path = outdir / "schematic-dut.flat.spice"
+    flat_text = flat_path.read_text()
+    assert ".SUBCKT HALF" not in flat_text
+    assert "R.X1.R1 RA X1.MID {144.6/2}" in flat_text
+
+    # The schematic leg ran a DUT-swapped copy of the testbench, not the
+    # testbench itself; the copy keeps the request's own netlist_source.
+    schematic_request = json.loads(Path(requests[0]).read_text())
+    assert requests[0] != str(request)
+    assert "netlist_source" not in schematic_request
+    body = Path(schematic_request["netlist"]).read_text()
+    assert f'.include "{flat_path}"' in body
+    assert "Xres RA RB RES" in body
+
+    assert report["flatten_schematic"] is True
+    block = report["schematic_flatten"]
+    assert block == {
+        "netlist": {"path": None, "scope": "external"},
+        "netlist_sha256": "sha256:" + _sha256_hex(flat_path),
+        "subckts": ["RES"],
+        "inlined_instances": 2,
+        "inlined_subckts": ["HALF"],
+        "external_subckts": [],
+        "already_flat": False,
+    }
+    # No hierarchy-caused model_mismatch any more.
+    assert report["model_mismatch"] is None
+    assert report["pin_count_mismatch"] is None
+    assert report["flat_dut_mismatch"] is None
+    # `reference_netlist` still names (and hashes) the caller's own file.
+    assert report["reference_netlist_sha256"] == "sha256:" + _sha256_hex(dut)
+    assert report["testbenches"][0]["schematic_netlist_sha256"] == (
+        "sha256:" + _sha256_hex(dut)
+    )
+
+
+def test_run_pex_flatten_schematic_already_flat_dut_is_reported(
+    tmp_path, resistor_layout, monkeypatch
+):
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+    _install_recording_fake_run_sim(monkeypatch)
+
+    report = run_pex(
+        resistor_layout,
+        [str(request)],
+        "sky130",
+        artifacts_dir=str(tmp_path / "pex"),
+        flatten_schematic=True,
+    )
+
+    block = report["schematic_flatten"]
+    assert block["already_flat"] is True
+    assert block["inlined_instances"] == 0
+    assert block["subckts"] == ["RES"]
+    assert report["model_mismatch"] is None
+
+
+def test_run_pex_flatten_schematic_shared_by_multiple_testbenches(
+    tmp_path, resistor_layout, monkeypatch
+):
+    dut = _write_hierarchical_dut(tmp_path / "schematic_dut.spice")
+    requests_in = []
+    for name in ("a", "b"):
+        tb = _write_testbench(tmp_path / f"tb_{name}.spice", dut)
+        requests_in.append(str(_write_request(tmp_path / f"req_{name}.json", tb)))
+    requests = _install_recording_fake_run_sim(monkeypatch)
+    outdir = tmp_path / "pex"
+
+    report = run_pex(
+        resistor_layout,
+        requests_in,
+        "sky130",
+        artifacts_dir=str(outdir),
+        flatten_schematic=True,
+    )
+
+    flat_path = outdir / "schematic-dut.flat.spice"
+    # Call order: schematic, extracted per testbench.
+    schematic_requests = requests[0::2]
+    assert len(schematic_requests) == 2
+    for path in schematic_requests:
+        assert path not in requests_in
+        body = Path(json.loads(Path(path).read_text())["netlist"]).read_text()
+        assert f'.include "{flat_path}"' in body
+    assert len(report["testbenches"]) == 2
+    assert report["model_mismatch"] is None
+
+
+@pytest.mark.parametrize(
+    ("dut_text", "code"),
+    [
+        (
+            ".SUBCKT A P\nX1 P B\n.ENDS A\n.SUBCKT B P\nX1 P A\n.ENDS B\n"
+            ".SUBCKT RES RA RB\nX1 RA A\nR1 RA RB 1\n.ENDS RES\n",
+            "schematic_flatten_cycle",
+        ),
+        (
+            ".SUBCKT HALF A B\nR1 A B 1\n.ENDS HALF\n"
+            ".SUBCKT RES RA RB\nX1 RA HALF\n.ENDS RES\n",
+            "schematic_flatten_pin_count_mismatch",
+        ),
+        (
+            ".SUBCKT HALF A B\nB1 A B V=v(A)\n.ENDS HALF\n"
+            ".SUBCKT RES RA RB\nX1 RA RB HALF\n.ENDS RES\n",
+            "schematic_flatten_unsupported_card",
+        ),
+    ],
+)
+def test_run_pex_flatten_schematic_errors_are_coded_and_simulate_nothing(
+    tmp_path, resistor_layout, monkeypatch, dut_text, code
+):
+    import klayout_tools.pex as pex_module
+
+    def _unreachable_run_sim(*_args, **_kwargs):
+        raise AssertionError("run_sim must not be called when flattening fails")
+
+    monkeypatch.setattr(pex_module, "run_sim", _unreachable_run_sim)
+    dut = tmp_path / "schematic_dut.spice"
+    dut.write_text(dut_text)
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+    outdir = tmp_path / "pex"
+
+    with pytest.raises(PexError, match="--flatten-schematic") as excinfo:
+        run_pex(
+            resistor_layout,
+            [str(request)],
+            "sky130",
+            artifacts_dir=str(outdir),
+            flatten_schematic=True,
+        )
+    assert excinfo.value.code == code
+    # Never a partial flatten on disk.
+    assert not (outdir / "schematic-dut.flat.spice").exists()
+
+
+def test_cli_pex_flatten_schematic_error_carries_error_code(
+    tmp_path, resistor_layout, capsys
+):
+    dut = tmp_path / "schematic_dut.spice"
+    dut.write_text(
+        ".SUBCKT HALF A B\nR1 A B 1\n.ENDS HALF\n"
+        ".SUBCKT RES RA RB\nX1 RA HALF\n.ENDS RES\n"
+    )
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    exit_code = main(
+        [
+            "pex",
+            str(resistor_layout),
+            str(request),
+            "--deck",
+            "sky130",
+            "--outdir",
+            str(tmp_path / "pex"),
+            "--flatten-schematic",
+            "--format",
+            "json",
+        ]
+    )
+    assert exit_code == 1
+    err = json.loads(capsys.readouterr().err)
+    assert err["error"]["command"] == "pex"
+    assert err["error"]["code"] == "schematic_flatten_pin_count_mismatch"
+
+
+def test_cli_pex_flatten_schematic_reaches_run_pex(tmp_path, monkeypatch):
+    import klayout_tools.cli.pex_cmd as pex_cmd
+
+    captured: dict = {}
+
+    def _fake_run_pex(*args, **kwargs):
+        captured.update(kwargs)
+        return {
+            "status": "pass",
+            "layout": {"path": "mim.gds", "scope": "repo"},
+            "netlist": {"path": "mim.spice", "scope": "repo"},
+            "reference_netlist": {"path": "dut.spice", "scope": "repo"},
+            "corner_count": 0,
+            "delta": [],
+            "passed": 0,
+            "failed": 0,
+            "errored": 0,
+            "extraction": {"deck": "gf180mcu", "device_count": 1, "net_count": 2},
+            "testbenches": [],
+        }
+
+    monkeypatch.setattr(pex_cmd, "run_pex", _fake_run_pex)
+    layout, request = _mim_pex_inputs(tmp_path)
+
+    assert main(["pex", str(layout), str(request), "--deck", "gf180mcu"]) == 0
+    assert captured["flatten_schematic"] is False
+    assert (
+        main(
+            [
+                "pex",
+                str(layout),
+                str(request),
+                "--deck",
+                "gf180mcu",
+                "--flatten-schematic",
+            ]
+        )
+        == 0
+    )
+    assert captured["flatten_schematic"] is True
+
+
+@_SKIP_NO_NGSPICE
+def test_integration_run_pex_flatten_schematic_end_to_end(tmp_path, resistor_layout):
+    """Issue #2889, end to end against real `ngspice`: the hierarchical DUT,
+    flattened, simulates to the same ideal 289.2-ohm divider the flat DUT
+    does, and the comparison carries no hierarchy-caused `model_mismatch`."""
+    dut = _write_hierarchical_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    report = run_pex(
+        resistor_layout,
+        [str(request)],
+        "sky130",
+        artifacts_dir=str(tmp_path / "pex"),
+        flatten_schematic=True,
+    )
+
+    assert report["status"] == "pass"
+    assert report["model_mismatch"] is None
+    assert report["schematic_flatten"]["inlined_instances"] == 2
+    (row,) = report["delta"]
+    assert row["schematic_value"] == pytest.approx(1.8 * 1000 / 1289.2, rel=1e-3)
+    assert row["extracted_value"] < row["schematic_value"]
+
+
+def test_run_pex_flatten_schematic_keeps_relative_includes_resolvable(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """The flattened copy lives under the artifact root, so a relative
+    `.include` inside the DUT file is rewritten to an absolute path against
+    the DUT's own directory (the #2891 shape); absolute ones are untouched."""
+    (tmp_path / "params.spice").write_text(".param rhalf=144.6\n")
+    dut = tmp_path / "schematic_dut.spice"
+    dut.write_text(
+        '.include "params.spice"\n'
+        ".include /abs/models.spice\n"
+        ".SUBCKT HALF A B\nR1 A B {rhalf}\n.ENDS HALF\n"
+        ".SUBCKT RES RA RB\nX1 RA M HALF\nX2 M RB HALF\n.ENDS RES\n"
+    )
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+    _install_recording_fake_run_sim(monkeypatch)
+    outdir = tmp_path / "pex"
+
+    run_pex(
+        resistor_layout,
+        [str(request)],
+        "sky130",
+        artifacts_dir=str(outdir),
+        flatten_schematic=True,
+    )
+
+    flat_text = (outdir / "schematic-dut.flat.spice").read_text()
+    assert f'.include "{tmp_path / "params.spice"}"' in flat_text
+    assert ".include /abs/models.spice" in flat_text
+
+
+def test_run_pex_flatten_schematic_keeps_dollar_prefixed_targets(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """`$`-prefixed `.include`/`.lib` targets are environment-variable paths
+    (`$PDK_ROOT/...`): the flattener must not read the `$` as an inline
+    comment, and `_absolutize_includes` must leave them exactly as written."""
+    dut = tmp_path / "schematic_dut.spice"
+    include = ".include $PDK_ROOT/sky130A/libs.ref/sky130_fd_pr/spice/models.spice"
+    lib = ".lib $SKY130/libs.tech/combined/sky130.lib.spice tt"
+    dut.write_text(
+        f"{include}\n{lib}\n"
+        ".SUBCKT HALF A B\nR1 A B 144.6\n.ENDS HALF\n"
+        ".SUBCKT RES RA RB\nX1 RA M HALF\nX2 M RB HALF\n.ENDS RES\n"
+    )
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+    _install_recording_fake_run_sim(monkeypatch)
+    outdir = tmp_path / "pex"
+
+    run_pex(
+        resistor_layout,
+        [str(request)],
+        "sky130",
+        artifacts_dir=str(outdir),
+        flatten_schematic=True,
+    )
+
+    flat_lines = (outdir / "schematic-dut.flat.spice").read_text().splitlines()
+    assert include in flat_lines
+    assert lib in flat_lines

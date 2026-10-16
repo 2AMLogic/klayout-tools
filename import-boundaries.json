@@ -151,6 +151,7 @@
         "klayout_tools.extract_parasitics",
         "klayout_tools.extract_passive_regions",
         "klayout_tools.extract_report",
+        "klayout_tools.extract_resistance_graph",
         "klayout_tools.extract_spef",
         "klayout_tools.extract_subcircuit",
         "klayout_tools.parasitic_integrity",
@@ -306,10 +307,11 @@
     },
     "pex": {
       "kind": "verb",
-      "description": "`klt pex` implementation: core modules plus CLI adapter.",
+      "description": "`klt pex` implementation: core modules (including the SPICE-text subckt flattener behind --flatten-schematic) plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.pex_cmd",
-        "klayout_tools.pex"
+        "klayout_tools.pex",
+        "klayout_tools.spice_flatten"
       ]
     },
     "place_and_route": {
@@ -392,6 +394,7 @@
         "klayout_tools.metrics",
         "klayout_tools.op_sanity",
         "klayout_tools.output_lock",
+        "klayout_tools.resistor_mesh",
         "klayout_tools.verilog_netlist"
       ]
     },
@@ -423,7 +426,8 @@
         "klayout_tools.sim_remote",
         "klayout_tools.sim_set",
         "klayout_tools.sim_staging",
-        "klayout_tools.sim_steps"
+        "klayout_tools.sim_steps",
+        "klayout_tools.sim_transfer"
       ]
     },
     "size": {
@@ -432,6 +436,14 @@
       "modules": [
         "klayout_tools.cli.size_cmd",
         "klayout_tools.size"
+      ]
+    },
+    "reset_coverage": {
+      "kind": "verb",
+      "description": "`klt reset_coverage` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.reset_coverage_cmd",
+        "klayout_tools.reset_coverage"
       ]
     },
     "socket_check": {
@@ -900,6 +912,11 @@
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
     },
     {
+      "consumer": "reset_coverage",
+      "exporter": "cli-infra",
+      "reason": "Verb CLI adapter uses the shared output envelope helpers, as every other verb does."
+    },
+    {
       "consumer": "ring_check",
       "exporter": "cli-infra",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
@@ -1208,6 +1225,30 @@
       "exporter": "klayout_tools._provenance",
       "symbol": "_deck_block",
       "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.extract_resistance_graph",
+      "exporter": "klayout_tools.resistor_mesh",
+      "symbol": "_decompose_manhattan_polygon",
+      "reason": "Issue #2980: the Manhattan mesh-decomposition helpers moved unchanged from power.py into the shared resistor_mesh module (keeping their names) so klt power and the extraction resistance-graph builder reuse one implementation."
+    },
+    {
+      "consumer": "klayout_tools.extract_resistance_graph",
+      "exporter": "klayout_tools.resistor_mesh",
+      "symbol": "_rails_under_via",
+      "reason": "Issue #2980: the Manhattan mesh-decomposition helpers moved unchanged from power.py into the shared resistor_mesh module (keeping their names) so klt power and the extraction resistance-graph builder reuse one implementation."
+    },
+    {
+      "consumer": "klayout_tools.power",
+      "exporter": "klayout_tools.resistor_mesh",
+      "symbol": "_decompose_manhattan_polygon",
+      "reason": "Issue #2980: the Manhattan mesh-decomposition helpers moved unchanged from power.py into the shared resistor_mesh module (keeping their names) so klt power and the extraction resistance-graph builder reuse one implementation."
+    },
+    {
+      "consumer": "klayout_tools.power",
+      "exporter": "klayout_tools.resistor_mesh",
+      "symbol": "_rails_under_via",
+      "reason": "Issue #2980: the Manhattan mesh-decomposition helpers moved unchanged from power.py into the shared resistor_mesh module (keeping their names) so klt power and the extraction resistance-graph builder reuse one implementation."
     },
     {
       "consumer": "klayout_tools.power",

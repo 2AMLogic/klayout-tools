@@ -2552,6 +2552,60 @@ def _pdk_mfg_grid_um(pdk_info: dict[str, Any], layer: tuple[int, int] | None) ->
         return 0.0
 
 
+def _net_backbone_grid_um(
+    pins: list[dict[str, Any]],
+    blocks: dict[str, dict[str, Any]],
+    route_layer: tuple[int, int] | None,
+    grid_for_layer: Callable[[tuple[int, int] | None], float],
+) -> float:
+    """The manufacturing grid a net's backbone jog snaps to (issue #3079): the
+    coarsest of the route layer's and every pin's port layer's grid, the same
+    max :func:`_snap_routed_ports_to_grid` takes. ``0.0`` (no snap) when the
+    route layer is unknown or the PDK family has no grid rule."""
+    if route_layer is None:
+        return 0.0
+    grid = grid_for_layer(route_layer)
+    for pin in pins:
+        port = blocks.get(pin["block"], {}).get("ports", {}).get(pin["port"])
+        layer_info = (port or {}).get("layer")
+        if isinstance(layer_info, dict):
+            grid = max(
+                grid, grid_for_layer((layer_info["layer"], layer_info["datatype"]))
+            )
+    return grid
+
+
+def _offgrid_leg_notes(
+    net_label: str, legs: list[dict[str, Any]], grid_um: float
+) -> list[str]:
+    """Compose-time notes naming each routed leg of ``net_label`` that still has
+    a backbone vertex off ``grid_um`` (issue #3079): a jog that could not be
+    snapped without crossing a stub end, or a user-supplied ``waypoints_um``
+    point (used verbatim). Surfaces what ``klt drc`` would otherwise report as
+    ``*.ongrid.1``. Empty when ``grid_um <= 0``."""
+    if grid_um <= 0.0:
+        return []
+    notes: list[str] = []
+    for leg in legs:
+        if not leg.get("routed") or not leg.get("points_um"):
+            continue
+        bad = [
+            (x, y)
+            for x, y in leg["points_um"]
+            if any(abs(v / grid_um - round(v / grid_um)) > 1e-6 for v in (x, y))
+        ]
+        if bad:
+            a, b = leg["pins"]
+            notes.append(
+                f"net '{net_label}' leg {a['block']}.{a['port']} -> "
+                f"{b['block']}.{b['port']} has {len(bad)} backbone vertex(es) "
+                f"off the {grid_um:g}um manufacturing grid (first at "
+                f"({bad[0][0]:.4f}, {bad[0][1]:.4f})); klt drc will report "
+                "ongrid violations -- adjust waypoints_um or the block origins"
+            )
+    return notes
+
+
 def _snap_port_to_grid(
     port: dict[str, Any],
     pin: dict[str, Any],
@@ -3805,6 +3859,9 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         # declare-only request (#1188: routing absent/{}), in which case no
         # metal is drawn for any net and _declare_only_bundle_result() reports
         # every net "unrouted"/"routing not requested" instead.
+        net_grid_um = _net_backbone_grid_um(
+            pins, blocks, net_route_layer, lambda lyr: _pdk_mfg_grid_um(pdk_info, lyr)
+        )
         if declare_only:
             result = _declare_only_bundle_result(pins)
         else:
@@ -3824,7 +3881,9 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                 cross_block_width_um=net_cross_width_um,
                 explicit_legs=resolved_legs,
                 geometry_for_layer=_geometry_for_layer,
+                grid_um=net_grid_um,
             )
+            notes.extend(_offgrid_leg_notes(net_label, result["legs"], net_grid_um))
         # landed_on_block (issue #2210): computed once per leg, outside the
         # dict comprehension below, so the net-level aggregate and each leg's
         # own reported value come from the identical call. See

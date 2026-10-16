@@ -1153,6 +1153,93 @@ def test_stubbed_run_default_engine_and_timescale(tmp_path, monkeypatch):
     assert runner.test_kwargs["timescale"] == ("1ns", "1ps")
 
 
+def test_stubbed_run_outdir_redirects_artifacts(tmp_path, monkeypatch):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+    outdir = tmp_path / "nested" / "run_a"
+
+    report = run_functional_verification(request_path, output_dir=str(outdir))
+
+    results_xml = Path(report["environment"]["results_xml"])
+    assert results_xml.parent == outdir.resolve()
+    assert results_xml.is_file()
+    assert not (tmp_path / ".klt").exists()
+
+
+def test_stubbed_run_two_outdirs_keep_both_result_sets(tmp_path, monkeypatch):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    first = run_functional_verification(request_path, output_dir=str(tmp_path / "a"))
+    second = run_functional_verification(request_path, output_dir=str(tmp_path / "b"))
+
+    assert first["environment"]["results_xml"] != second["environment"]["results_xml"]
+    assert os.path.isfile(first["environment"]["results_xml"])
+    assert os.path.isfile(second["environment"]["results_xml"])
+
+
+def test_stubbed_run_default_output_dir_unchanged(tmp_path, monkeypatch):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    report = run_functional_verification(request_path)
+
+    expected = tmp_path / ".klt" / "functional-verification" / "results_icarus.xml"
+    assert Path(report["environment"]["results_xml"]) == expected.resolve()
+
+
+def test_stubbed_run_relative_outdir_resolves_against_cwd(tmp_path, monkeypatch):
+    req_dir = tmp_path / "req"
+    req_dir.mkdir()
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    _setup_inputs(req_dir)
+    request_path = _write_request(req_dir / "request.json", _base_request())
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+    monkeypatch.chdir(cwd)
+
+    report = run_functional_verification(request_path, output_dir="out")
+
+    assert Path(report["environment"]["results_xml"]).parent == (cwd / "out").resolve()
+    assert not (req_dir / ".klt").exists()
+
+
+def test_stubbed_run_unwritable_outdir_is_a_clean_error(tmp_path, monkeypatch):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+    blocker = tmp_path / "blocker"
+    blocker.write_text("a file, not a directory", encoding="utf-8")
+
+    with pytest.raises(FunctionalVerificationError, match="could not create output"):
+        run_functional_verification(request_path, output_dir=str(blocker / "sub"))
+
+
+def test_cli_outdir_flag_is_threaded_through(tmp_path, monkeypatch, capsys):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+    outdir = tmp_path / "cli_out"
+
+    main(
+        [
+            "functional-verification",
+            request_path,
+            "--outdir",
+            str(outdir),
+            "--format",
+            "json",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    data = payload.get("data", payload)
+    assert Path(data["environment"]["results_xml"]).parent == outdir.resolve()
+
+
 def test_stubbed_run_passes_testcase_filter_through(tmp_path, monkeypatch):
     _setup_inputs(tmp_path)
     request_path = _write_request(
@@ -2443,6 +2530,93 @@ def test_stubbed_sdf_still_fails_on_a_wellformed_error_beside_a_splice(
             _RESULTS_XML_WITH_SKIP,
             extra_test_log=(
                 _SPLICED_TIMINGCHECK_TRANSCRIPT
+                + "SDF ERROR: route.sdf:2976: Unable to match ModPath D -> Q "
+                "in gcd._647_\n"
+            ),
+        ),
+    )
+
+    with pytest.raises(
+        FunctionalVerificationError,
+        match="did not fully apply: 1 diagnostic.*Unable to match ModPath",
+    ):
+        run_functional_verification(request_path)
+
+
+#: Issue #2996: the splice lands *after* an intact locator, inside the
+#: message, with the orphaned tail on a later line of its own.
+_MESSAGE_SPLICED_TRANSCRIPT = (
+    "SDF WARNING: /abs/path/klt_sdf_safe.sdf:21217: TIM   590.00ns INFO     "
+    "cocotb.klt_sdf_dut_wrapper         watching uo_out against 4 edge checks\n"
+    "INGCHECK not supported.\n"
+)
+
+#: Issue #2996: cut inside the path; the spliced-in Python warning line
+#: carries its own ``<file>:<line>:`` which satisfies the locator regex.
+_PYWARNINGS_SPLICED_TRANSCRIPT = (
+    "SDF WARNING: /abs/flow/post-layout- 48164.00ns WARNING  py.warnings  "
+    "/abs/tb.py:251: DeprecationWarning: `task.kill()` is deprecated in "
+    "favor of `task.cancel()`.\n"
+)
+
+
+@pytest.mark.parametrize(
+    "transcript",
+    [
+        _MESSAGE_SPLICED_TRANSCRIPT,
+        _PYWARNINGS_SPLICED_TRANSCRIPT,
+        "SDF WARNING: /a/x.sdf:1: TIM 12.50ps DEBUG cocotb.x y\n",
+        "SDF WARNING: /a/x.sdf:1: TIM 3us CRITICAL cocotb.x y\n",
+    ],
+)
+def test_scan_sdf_diagnostics_drops_a_message_spliced_line(tmp_path, transcript):
+    """Issue #2996: a splice after the locator is dropped from both buckets."""
+    log = _write(tmp_path / "test_icarus.log", transcript)
+
+    assert fv._scan_sdf_diagnostics(log) == ([], {})
+
+
+def test_scan_sdf_diagnostics_message_splice_keeps_intact_siblings(tmp_path):
+    log = _write(
+        tmp_path / "test_icarus.log",
+        "SDF WARNING: /a/x.sdf:1: TIMINGCHECK not supported.\n"
+        + _MESSAGE_SPLICED_TRANSCRIPT,
+    )
+
+    actionable, dropped = fv._scan_sdf_diagnostics(log)
+
+    assert actionable == []
+    assert dropped == {"timingcheck": 1}
+
+
+def test_stubbed_sdf_tolerates_a_message_spliced_transcript(tmp_path, monkeypatch):
+    """End-to-end regression for issue #2996."""
+    request_path = _sdf_request(tmp_path)
+    _stub_runner(
+        monkeypatch,
+        _FakeRunner(
+            _RESULTS_XML_WITH_SKIP,
+            extra_test_log=_MESSAGE_SPLICED_TRANSCRIPT + _PYWARNINGS_SPLICED_TRANSCRIPT,
+        ),
+    )
+
+    report = run_functional_verification(request_path)
+
+    assert report["status"] == "pass"
+    sdf = report["environment"]["sdf"]
+    assert sdf["annotated"] is True
+
+
+def test_stubbed_sdf_still_fails_on_a_wellformed_error_beside_a_message_splice(
+    tmp_path, monkeypatch
+):
+    request_path = _sdf_request(tmp_path)
+    _stub_runner(
+        monkeypatch,
+        _FakeRunner(
+            _RESULTS_XML_WITH_SKIP,
+            extra_test_log=(
+                _MESSAGE_SPLICED_TRANSCRIPT
                 + "SDF ERROR: route.sdf:2976: Unable to match ModPath D -> Q "
                 "in gcd._647_\n"
             ),

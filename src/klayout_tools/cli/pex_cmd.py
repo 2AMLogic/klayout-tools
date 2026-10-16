@@ -109,6 +109,9 @@ def run(args: argparse.Namespace) -> int:
             # for one named net's Phase 1/2 lumped-RC/coupling-C value.
             # `None` for all four when the flags were never given,
             # unchanged from every call site that predates them.
+            # `--parasitic-variant` (issue #3056): `None` when the flag was
+            # never given, unchanged from every call site that predates it.
+            parasitic_variants=args.parasitic_variants,
             mom_rlc_net=args.mom_rlc_net,
             mom_rlc_resistance_ohm=args.mom_rlc_resistance_ohm,
             mom_rlc_capacitance_ff=args.mom_rlc_capacitance_ff,
@@ -121,9 +124,17 @@ def run(args: argparse.Namespace) -> int:
             measure_command=measure_command,
             reference_netlist=args.reference_netlist,
             measure_timeout_s=args.measure_timeout_s,
+            # `--flatten-schematic` (issue #2889): flatten the schematic DUT
+            # to PDK leaf devices before the schematic-side run. `False`
+            # when the flag was never given, unchanged from every call site
+            # that predates it.
+            flatten_schematic=args.flatten_schematic,
         )
     except PexError as exc:
-        return emit_error("pex", str(exc), args.format)
+        # Issue #2889: a classified error (today: `schematic_flatten_*`)
+        # carries `error.code`; every other PexError has `code=None`, so
+        # its envelope is byte-identical to before.
+        return emit_error("pex", str(exc), args.format, code=exc.code)
     except OutputLockError as exc:
         return emit_error("pex", str(exc), args.format, code=exc.code)
 
@@ -179,6 +190,17 @@ def _print_mismatch(mismatch: dict | None, name: str) -> None:
     print(f"  {mismatch['detail']}")
 
 
+def _print_schematic_flatten(block: dict | None) -> None:
+    """One ``schematic_flatten:`` line (issue #2889), or nothing when
+    ``--flatten-schematic`` was not given."""
+    if block is None:
+        return
+    print(
+        f"schematic_flatten: {render_path_field(block['netlist'])}  "
+        f"inlined={block['inlined_instances']}  {block['netlist_sha256']}"
+    )
+
+
 def _print_text(report: dict) -> None:
     # Issue #1261: `layout`/`netlist`/`reference_netlist` are the
     # `{path, scope}` shape `env_provenance.repo_relative_path` defines --
@@ -188,6 +210,8 @@ def _print_text(report: dict) -> None:
     print(f"layout: {render_path_field(report['layout'])}")
     print(f"netlist: {render_path_field(report['netlist'])}")
     print(f"reference_netlist: {render_path_field(report['reference_netlist'])}")
+    # Additive (issue #2889): only printed when --flatten-schematic was given.
+    _print_schematic_flatten(report.get("schematic_flatten"))
     print(f"status: {report['status']}")
     print(
         f"corners: {report['corner_count']}  "

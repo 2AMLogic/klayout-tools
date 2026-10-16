@@ -718,6 +718,22 @@ def test_run_sim_analysis_kind_op_with_meas_op_card_raises_clear_error(tmp_path)
         sim.run_sim(str(request))
 
 
+def test_run_sim_analysis_kind_op_with_supported_meas_card_raises_clear_error(tmp_path):
+    # Issue #3109: a supported-type `.meas` card is still unsearchable under a
+    # scalar `op` analysis -- refuse it up front, pointing at `expr`.
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "op", "args": ""},
+            "measurements": [{"name": "x", "spice": ".meas dc x find v(out) at=0"}],
+        },
+    )
+    with pytest.raises(sim.SimError, match=r"analysis\.kind is \"op\".*expr"):
+        sim.run_sim(str(request))
+
+
 def test_run_sim_meas_op_card_rejected_even_with_non_op_analysis_kind(tmp_path):
     # A `.meas op` card is invalid on ngspice's own terms regardless of the
     # request's `analysis.kind` -- not just when the two literally match.
@@ -804,6 +820,26 @@ def test_validate_measurement_forms_rejects_multiline_expr():
     inside the generated `.control` block."""
     with pytest.raises(sim.SimError, match="multi-line 'expr'"):
         sim._validate_measurement_forms([{"name": "vout", "expr": "v(out)\nquit"}])
+
+
+@pytest.mark.parametrize(
+    "expr",
+    [
+        "vecmax((v(a) < v(b))*v(a))",
+        "vecmax((v(a) > v(b))*v(a))",
+        "vecmax((v(a) < v(b)) + (v(a) > v(c)))",
+    ],
+)
+def test_validate_measurement_forms_rejects_redirection_operators_in_expr(expr):
+    """`<` / `>` are ngspice I/O redirection, not comparisons (issue #2940)."""
+    with pytest.raises(sim.SimError, match=r"gt / lt / ge / le / eq / ne"):
+        sim._validate_measurement_forms([{"name": "m", "expr": expr}])
+
+
+def test_validate_measurement_forms_accepts_word_comparisons_in_expr():
+    sim._validate_measurement_forms(
+        [{"name": "m", "expr": "vecmax((v(a) lt v(b))*v(a))"}]
+    )
 
 
 @pytest.mark.parametrize("name", ["v.out", "1vout", "v out", "v(out)", "v-out"])
@@ -1954,6 +1990,157 @@ def test_recovered_from_stepping_false_on_simulation_aborted_trailer():
         sim._recovered_from_stepping(measurements_spec, measurement_results, log)
         is False
     )
+
+
+# --------------------------------------------------------------------------- #
+# `timestep_too_small`: ngspice's transient abort (issue #2918)
+# --------------------------------------------------------------------------- #
+
+_TIMESTEP_ABORT_LOG = (
+    "doAnalyses: TRAN:  Timestep too small; time = 1.0001e-09, "
+    'timestep = 5e-23: trouble with node "vctl#branch"\n'
+    "\n"
+    "tran simulation(s) aborted\n"
+)
+
+
+def test_nonconvergence_pattern_alone_misses_ngspice_timestep_text():
+    # The pre-#2918 gap, pinned: ngspice spells it `Timestep` (no space), so
+    # the generic `nonconvergence` entry never matched this abort at all.
+    patterns = dict(sim._DIAGNOSTIC_PATTERNS)
+    assert patterns["nonconvergence"].search(_TIMESTEP_ABORT_LOG) is None
+
+
+def test_classify_diagnostics_timestep_too_small_structured_fields():
+    (diagnostic,) = sim._classify_diagnostics(_TIMESTEP_ABORT_LOG)
+    assert diagnostic["code"] == "timestep_too_small"
+    assert diagnostic["severity"] == "error"
+    assert diagnostic["time_s"] == pytest.approx(1.0001e-09)
+    assert diagnostic["timestep_s"] == pytest.approx(5e-23)
+    assert diagnostic["node"] == "vctl#branch"
+    # Repeated in the message so a reader of the report alone sees it.
+    assert "1.0001e-09" in diagnostic["message"]
+    assert "vctl#branch" in diagnostic["message"]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "Timestep too small",
+        "doAnalyses: TRAN:  Timestep too small; initial timepoint: cause unrecorded.",
+    ],
+)
+def test_classify_diagnostics_timestep_too_small_without_detail(line):
+    (diagnostic,) = sim._classify_diagnostics(line + "\n")
+    assert diagnostic["code"] == "timestep_too_small"
+    assert diagnostic["time_s"] is None
+    assert diagnostic["timestep_s"] is None
+    assert diagnostic["node"] is None
+
+
+def test_classify_diagnostics_timestep_trnoise_hint_only_when_netlist_uses_it(
+    tmp_path,
+):
+    noisy = tmp_path / "noisy.spice"
+    noisy.write_text("Vn n 0 trnoise(1m 1n 0 0)\nVctl ctl 0 PWL(0 0 1n 1)\n")
+    quiet = tmp_path / "quiet.spice"
+    quiet.write_text("Vctl ctl 0 PWL(0 0 1n 1)\n")
+    (with_hint,) = sim._classify_diagnostics(_TIMESTEP_ABORT_LOG, str(noisy))
+    (without_hint,) = sim._classify_diagnostics(_TIMESTEP_ABORT_LOG, str(quiet))
+    assert "trnoise()" in with_hint["message"]
+    assert "trnoise" not in without_hint["message"]
+
+
+def test_classify_diagnostics_timestep_beside_recovered_stepping_narration():
+    # Edge case: gmin-stepping narration earlier in the log (recoverable
+    # noise on its own) plus the terminal transient abort -- both classify,
+    # each under its own code.
+    log = "Warning: Dynamic gmin stepping failed\n" + _TIMESTEP_ABORT_LOG
+    codes = [d["code"] for d in sim._classify_diagnostics(log)]
+    assert codes == ["timestep_too_small", "nonconvergence"]
+
+
+def test_classify_xyce_diagnostics_time_step_unchanged():
+    # Xyce's own `Time step too small` wording stays `nonconvergence`.
+    codes = [
+        d["code"]
+        for d in sim._classify_xyce_diagnostics("Time step too small at 1e-9\n")
+    ]
+    assert codes == ["nonconvergence"]
+
+
+def test_timestep_too_small_is_a_selectable_diagnostic_code():
+    assert "timestep_too_small" in sim.DIAGNOSTIC_CODES
+    assert sim._validate_fail_on_diagnostic(["timestep_too_small"]) == (
+        "timestep_too_small",
+    )
+
+
+def test_run_sim_stubbed_timestep_abort_surfaces_without_keep_artifacts(
+    tmp_path, monkeypatch
+):
+    # The whole point of #2918: every `.meas` comes back empty, and the
+    # report itself -- not a kept `ngspice.log` -- says why.
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1p 10n"},
+            "measurements": [
+                {"name": "m1", "spice": ".meas tran m1 find v(out) at=5n"},
+                {"name": "m2", "spice": ".meas tran m2 find v(out) at=9n"},
+            ],
+        },
+    )
+    # Even a stale-looking parsed value must not let the stepping downgrade
+    # forgive a run whose log carries the abort trailer.
+    log = "Warning: Dynamic gmin stepping failed\n" + _TIMESTEP_ABORT_LOG
+    _stub_subprocess_run(monkeypatch, log_text=log)
+
+    report = sim.run_sim(str(request))
+
+    assert report["status"] == "error"
+    (corner,) = report["corners"]
+    assert corner["status"] == "error"
+    assert corner["artifacts"]["log"] is None  # keep_artifacts not set
+    by_code = {d["code"]: d for d in corner["diagnostics"]}
+    abort = by_code["timestep_too_small"]
+    assert abort["severity"] == "error"
+    assert abort["time_s"] == pytest.approx(1.0001e-09)
+    assert abort["node"] == "vctl#branch"
+    assert by_code["nonconvergence"]["severity"] == "error"
+    assert report["diagnostic_counts"]["by_code"]["timestep_too_small"] == 1
+
+
+def test_run_sim_stubbed_timestep_abort_never_downgraded(tmp_path, monkeypatch):
+    # Every measurement parsed (e.g. all fell before the abort time) and no
+    # trailer: the recovered-stepping downgrade still must not touch this
+    # code -- it is a terminal abort, not stepping narration.
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1p 10n"},
+            "measurements": [
+                {"name": "m1", "spice": ".meas tran m1 find v(out) at=0.5n"},
+            ],
+        },
+    )
+    log = (
+        "doAnalyses: TRAN:  Timestep too small; time = 1e-09, timestep = 5e-23: "
+        'trouble with node "v1#branch"\n'
+        "m1                  =  1.00000e+00\n"
+    )
+    _stub_subprocess_run(monkeypatch, log_text=log)
+
+    report = sim.run_sim(str(request))
+
+    (corner,) = report["corners"]
+    by_code = {d["code"]: d for d in corner["diagnostics"]}
+    assert by_code["timestep_too_small"]["severity"] == "error"
+    assert corner["status"] == "error"
 
 
 # --------------------------------------------------------------------------- #
@@ -4263,6 +4450,79 @@ def test_mismatch_family_report_single_file_has_no_scan_block(tmp_path):
     report = sim._mismatch_family_report(str(body), "gf180mcuC", scan=scan)
     assert [e["family"] for e in report] == ["mosfet"]
     assert len(scan["scanned"]) == 1 and scan["not_scanned"] == []
+
+
+def test_noise_sources_in_text_covers_v_i_subckt_continuation_case():
+    text = (
+        "* Vc c 0 trnoise(1 1 1 1)\n"
+        "VN1 a 0 DC 0 TRNOISE(1m 1n 0 0)\n"
+        "Iq b 0 trrandom(2 1n 1m)\n"
+        ".subckt blk p n\n"
+        "Vin p n dc 0\n"
+        "+ trnoise(1m 1n 0 0)\n"
+        ".ends\n"
+        "Vplain d 0 DC 1 ; trnoise(1 1 1 1)\n"
+        "R1 a b 1k\n"
+    )
+    assert sim._noise_sources_in_text(text) == [
+        ("vn1", "trnoise"),
+        ("iq", "trrandom"),
+        ("vin", "trnoise"),
+    ]
+
+
+def _noise_mc_request(tmp_path, body: str, mc: dict | None = None):
+    (tmp_path / "body.spice").write_text(body)
+    req = {
+        "netlist": "body.spice",
+        "analysis": {"kind": "tran", "args": "1n 1u"},
+    }
+    if mc is not None:
+        req["monte_carlo"] = mc
+    return _write_request(tmp_path, req)
+
+
+def test_run_sim_monte_carlo_discloses_unseeded_noise_sources(
+    tmp_path, monkeypatch, capsys
+):
+    request = _noise_mc_request(
+        tmp_path,
+        "Vn a 0 trnoise(1m 1n 0 0)\nIr b 0 trrandom(2 1n 1m)\nR1 a b 1k\n",
+        {"n": 2, "seed": 1, "vary": "process"},
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    mc_env = sim.run_sim(str(request))["environment"]["monte_carlo"]
+
+    assert mc_env["unseeded_sources"] == [
+        {"name": "ir", "keyword": "trrandom"},
+        {"name": "vn", "keyword": "trnoise"},
+    ]
+    assert "redraws" in mc_env["unseeded_sources_note"]
+    assert "unseeded_sources_not_scanned" not in mc_env
+    assert capsys.readouterr().err.count("not governed by monte_carlo.seed") == 1
+
+
+def test_run_sim_monte_carlo_without_noise_sources_shape_unchanged(
+    tmp_path, monkeypatch
+):
+    request = _noise_mc_request(
+        tmp_path,
+        "Vd a 0 DC 1\nR1 a 0 1k\n",
+        {"n": 2, "seed": 1, "vary": "process"},
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    mc_env = sim.run_sim(str(request))["environment"]["monte_carlo"]
+
+    assert set(mc_env) == {"n", "seed", "vary"}
+
+
+def test_run_sim_without_monte_carlo_has_no_noise_field(tmp_path, monkeypatch):
+    request = _noise_mc_request(tmp_path, "Vn a 0 trnoise(1m 1n 0 0)\nR1 a 0 1k\n")
+    _stub_subprocess_run(monkeypatch)
+
+    assert "monte_carlo" not in sim.run_sim(str(request))["environment"]
 
 
 # --------------------------------------------------------------------------- #
@@ -11616,7 +11876,7 @@ def test_supply_override_scalar_sources_and_lexical_non_matches(tmp_path):
         "Vdc dc 0 DC 1.2\n"
     )
     (tmp_path / "n.spice").write_text(body)
-    points = [sim.CornerPoint(None, {"vdd": 1.0, "vdc": 1.1, "sig": 2.0}, 27)]
+    points = [sim.CornerPoint(None, {"vdd": 1.0, "vdc": 1.1, "vsig": 2.0}, 27)]
     sim._validate_supply_override_targets(str(tmp_path / "n.spice"), points)
     # Waveform source without an override remains usable.
     sim._validate_supply_override_targets(
@@ -12364,3 +12624,70 @@ def test_gf180_pdk_native_passives_report_inactive():
     ) == ["resistor", "capacitor"]
     for fam in ("resistor", "capacitor"):
         assert sim._MISMATCH_ACTIVITY[("gf180mcu", fam)]["active"] is False
+
+
+# --- #2894: unknown supply_v key, timeout-budget hint ----------------------- #
+
+
+def test_supply_override_unknown_key_is_rejected(tmp_path):
+    with pytest.raises(sim.SimError, match="'vddd'"):
+        _validate_supply(tmp_path, "Vdd vdd 0 DC 1\nR1 vdd 0 1k\n", {"vddd": 1.0})
+
+
+def test_supply_override_known_keys_case_and_hierarchy_not_rejected(tmp_path):
+    _validate_supply(
+        tmp_path,
+        "Vdd vdd 0 DC 1\nX1 vdd 0 blk\n.subckt blk a b\nVin a b DC 1\n.ends\n",
+        {"VDD": 1.0, "x1.vin": 1.1},
+    )
+
+
+def test_supply_override_unknown_key_with_unresolved_include_not_rejected(tmp_path):
+    _validate_supply(tmp_path, ".include missing.spice\nR1 a 0 1k\n", {"vsupply": 1.0})
+
+
+def test_supply_override_key_in_resolved_include_not_rejected(tmp_path):
+    (tmp_path / "inc.spice").write_text("Vsupply s 0 DC 1\n")
+    _validate_supply(tmp_path, ".include inc.spice\nR1 s 0 1k\n", {"VSupply": 1.0})
+
+
+def _hint_corner(runtime_s, timeout=False):
+    diags = [{"code": "timeout"}] if timeout else []
+    return {"corner_id": "c", "runtime_s": runtime_s, "diagnostics": diags}
+
+
+def test_timeout_budget_hint_near_budget_and_timeout():
+    hint = sim._timeout_budget_hint([_hint_corner(490.0), _hint_corner(10.0)], 600)
+    assert hint["max_unit_runtime_s"] == 490.0
+    assert hint["timeout_s"] == 600
+    assert hint["suggested_timeout_s"] > 600
+    assert "not a netlist problem" in hint["message"]
+    timed = sim._timeout_budget_hint([_hint_corner(600.0, timeout=True)], 600)
+    assert timed["units_timed_out"] == 1
+
+
+def test_timeout_budget_hint_absent_when_well_inside_budget():
+    assert sim._timeout_budget_hint([_hint_corner(100.0)], 600) is None
+
+
+# --------------------------------------------------------------------------- #
+# noise_representation (issue #3006)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("plotname", "vtype", "expected"),
+    [
+        ("Integrated Noise", "voltage", "amplitude"),
+        ("Integrated Noise - V^2 or A^2", "voltage^2", "power"),
+        ("Integrated Noise", "current^2", "power"),
+        ("Integrated Noise - V^2 or A^2", "voltage", "power"),
+    ],
+)
+def test_noise_representation(plotname, vtype, expected):
+    waveform = {
+        "plotname": plotname,
+        "variables": [{"index": 0, "name": "onoise_total", "type": vtype}],
+        "points": [[1.0]],
+    }
+    assert sim.noise_representation(waveform) == expected
