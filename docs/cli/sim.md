@@ -2536,6 +2536,63 @@ inline with `options.keep_artifacts: false` and no waveform artifact. As with
 `crossings`, the off-host runner must carry this implementation (see
 "Runner/client `klt` version skew").
 
+## AC return-ratio metrics (`measurements[].transfer`)
+
+The public waveform JSON stores `ac` samples as magnitudes, so phase cannot be
+recovered from it. `transfer` grades one stability metric of the complex ratio
+`num / den` of an `ac` analysis, computed from the complex samples
+([#2923](https://github.com/2AMLogic/klayout-tools/issues/2923), numerics from
+[#2922](https://github.com/2AMLogic/klayout-tools/issues/2922)):
+
+```json
+{
+  "netlist": "loop.spice",
+  "analysis": {"kind": "ac", "args": "dec 50 1 1e9"},
+  "measurements": [
+    {"name": "pm", "transfer": {"num": "v(out)", "den": "v(in)", "metric": "phase_margin_deg"},
+     "unit": "deg", "limits": {"min": 45}},
+    {"name": "ugf", "transfer": {"num": "v(out)", "den": "v(in)", "metric": "unity_crossing_hz"}}
+  ]
+}
+```
+
+- `transfer` is a fifth measurement form, mutually exclusive with `spice`,
+  `expr`, `crossings` and `cycle_mean`. It has exactly `num`, `den`, `metric`.
+- `num` / `den` are single-ended `v(node)` selectors: one non-empty node token
+  with no whitespace, control character, comma or parenthesis. Matching is
+  case-insensitive. Arbitrary expressions and differential selectors are not
+  supported.
+- `metric` is one of: `low_frequency_magnitude` (linear `|T|` of the first
+  valid sample), `unity_crossing_hz` (Hz), `phase_at_unity_deg` (degrees,
+  unwrapped), `phase_margin_deg` (`180 + phase_at_unity_deg`, degrees),
+  `gain_margin_db` (dB), `unity_crossing_count` (number). `T = num / den` uses
+  the **negative-feedback convention**: negate the numerator in the bench if
+  yours is the opposite. Interpolation, unwrapping and invalid-sample rules are
+  those of `klayout_tools.sim_transfer`.
+- Requires `analysis.kind: "ac"`. Malformed bodies, conflicting forms,
+  duplicate measurement names and non-AC use fail before the engine launches.
+- `value` is graded by the usual `limits`/`plausible_range`. An unavailable
+  metric is `status: "error"`, `value: null` (it can never pass a limit) with a
+  `code: "measurement"` diagnostic starting `[<reason>]`:
+
+| Token | Meaning |
+|---|---|
+| `transfer_vector_missing` | `num` or `den` did not resolve (unknown node, or omitted by `options.save_mode: "netlist"`, which is never overridden). |
+| `transfer_raw_invalid` | The AC rawfile was unreadable, malformed or had an invalid frequency axis. |
+| `transfer_metric_unavailable` | The metric has no value (e.g. no falling 0 dB crossing, zero denominator); the message names the `sim_transfer` reason. |
+
+The entry also carries an additive `transfer` object `{num, den, metric}`.
+One rawfile and one ratio computation are used per unique `num`/`den` pair, and
+the capture does not depend on `options.waveforms`.
+
+**Local only.** `backend: "remote"` / `"batch"` requests (explicit or via
+`KLT_SIM_BACKEND`) that declare `transfer` are refused before provisioning with
+an unsupported-backend error; worker support is tracked in
+[#2924](https://github.com/2AMLogic/klayout-tools/issues/2924). `engine:
+"xyce"` is refused too. After the analysis, each unique pair adds
+`let __klt_xfer_<k>_num = <num>`, `let __klt_xfer_<k>_den = <den>` and
+`write <corner_dir>/transfer_<k>.raw ...` to the generated `.control` block.
+
 ## Several solves per corner (`analysis_steps[]`)
 
 The scalar `analysis` runs **one** analysis per corner. Many analog figures of
@@ -4432,7 +4489,7 @@ the *response* echoes back.
 | `monte_carlo.k_sigma`    | number            | Run-wide sigma multiple `k` for the `mean ± k*stddev` limit-window check. Omit for no window check. Must be a non-negative number.                                      |
 | `analysis`               | object            | `kind` (e.g. `"op"`, `"dc"`, `"ac"`, `"tran"`) and `args`, the engine-syntax analysis-card arguments. One analysis per corner. `"op"` is a valid `kind`, but see `measurements[]` below — it cannot be paired with a `.meas op` card; measure an operating-point quantity with `measurements[].expr` instead. Required unless the request declares `analysis_steps` instead; declaring both is an application error (exit 1). |
 | `analysis_steps[]`       | array\<object\>   | Issue #2482. Additive alternative to `analysis`: an ordered, non-empty sequence of named solves run inside each corner's one deck — each step `{name, analysis: {kind, args}, alter?, measurements?}`. With it, the top-level `measurements[]` are **derived** `expr`s over `<step>.<measurement>` results. ngspice only (refused for `engine: "xyce"`); refuses `options.waveforms`/`--plot`. See "Several solves per corner (`analysis_steps[]`)" above for the full rules. |
-| `measurements[]`         | array\<object\>   | `name` (stable response key) plus **exactly one** of `spice` (a verbatim `.meas` card), `expr` (issue #2533 — a single-line ngspice expression evaluated after the analysis inside `klt sim`'s own `.control` block; see "Measurements that are not `.meas` cards" above), `crossings` (issue #2868 — `{signal, level, edge?, from?, to?, max?}`, a threshold-crossing time series, `tran` only; see "Threshold-crossing time series" above), or `cycle_mean` (issue #2947 — `{signal, align, level, cycles, edge?, from?}`, a time-weighted mean over whole reference cycles, `tran` only; see "Cycle-aligned mean" above), plus optional `unit`, `limits` (`min`/`max`, either optional), `k_sigma` (per-measurement override of `monte_carlo.k_sigma`), and `plausible_range` (issue #2493 — `min`/`max`, either optional but at least one required; per-measurement plausibility bound, unscoped by `unit`; overrides `options.node_voltage_bounds` when both apply). No `limits` -> reported, never fails; no `plausible_range` (and no applicable `options.node_voltage_bounds`) -> plausibility check never runs, exactly as before this issue. Declaring both `spice` and `expr`, or neither, is an application error (exit 1). `spice`'s declared analysis type must be one ngspice's own `.MEASURE` implements (`dc`/`ac`/`tran`/`sp`) — there is no `.MEASURE OP`; a `.meas op` card is rejected up front (`SimError`), regardless of the request's own `analysis.kind`. `expr` must reduce to a single real scalar, must be one line, must have a name matching `[A-Za-z_][A-Za-z0-9_]*` unique across `measurements[]`, and is refused for `engine: "xyce"`. |
+| `measurements[]`         | array\<object\>   | `name` (stable response key) plus **exactly one** of `spice` (a verbatim `.meas` card), `expr` (issue #2533 — a single-line ngspice expression evaluated after the analysis inside `klt sim`'s own `.control` block; see "Measurements that are not `.meas` cards" above), `crossings` (issue #2868 — `{signal, level, edge?, from?, to?, max?}`, a threshold-crossing time series, `tran` only; see "Threshold-crossing time series" above), `cycle_mean` (issue #2947 — `{signal, align, level, cycles, edge?, from?}`, a time-weighted mean over whole reference cycles, `tran` only; see "Cycle-aligned mean" above), or `transfer` (issue #2923 — `{num, den, metric}`, an AC return-ratio metric, `ac` and local backends only; see "AC return-ratio metrics" above), plus optional `unit`, `limits` (`min`/`max`, either optional), `k_sigma` (per-measurement override of `monte_carlo.k_sigma`), and `plausible_range` (issue #2493 — `min`/`max`, either optional but at least one required; per-measurement plausibility bound, unscoped by `unit`; overrides `options.node_voltage_bounds` when both apply). No `limits` -> reported, never fails; no `plausible_range` (and no applicable `options.node_voltage_bounds`) -> plausibility check never runs, exactly as before this issue. Declaring both `spice` and `expr`, or neither, is an application error (exit 1). `spice`'s declared analysis type must be one ngspice's own `.MEASURE` implements (`dc`/`ac`/`tran`/`sp`) — there is no `.MEASURE OP`; a `.meas op` card is rejected up front (`SimError`), regardless of the request's own `analysis.kind`. `expr` must reduce to a single real scalar, must be one line, must have a name matching `[A-Za-z_][A-Za-z0-9_]*` unique across `measurements[]`, and is refused for `engine: "xyce"`. |
 | `options.node_voltage_bounds` | object       | Issue #2493. Run-wide plausibility default (`min`/`max`, either optional but at least one required) — see "Plausibility bounds" above. **Voltage-scoped**: only auto-applies to a measurement declaring `unit: "V"` that has no own `plausible_range`. Omit for no default (today's behaviour, unchanged). |
 | `options.timeout_s`      | number            | Per-corner wall-clock budget. Defaults to `120`. Exceeding it kills the process and yields an `error`-status corner.                                                    |
 | `options.keep_artifacts` | boolean           | Retain per-corner logs/rawfiles on disk under `--outdir` (or its default) and reference them from the response. Defaults to `false`.                                   |
