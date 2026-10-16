@@ -372,8 +372,8 @@ are always the real, unmodified DRM values:
   polygon that touches or overlaps a Schottky-diode marker (241/0) anywhere
   is exempted whole, exactly as upstream; an absent implant or marker layer
   is an empty region, so unimplanted COMP is reported rather than skipped.
-  The well/voltage partitions of ``DF.13``/``DF.14`` are not involved. The rule is not voltage-split in the DRM, hence
-  ``voltage_independent``.
+  The well/voltage partitions of ``DF.13``/``DF.14`` are not involved. The rule
+  is not voltage-split in the DRM, hence ``voltage_independent``.
 - ``comp.tap_distance.nwell.lv.1`` / ``comp.tap_distance.psub.lv.1`` (DRM
   ``DF.13_LV`` / ``DF.14_LV``, ``check="tap_distance"``, issue #3607): the
   3.3 V columns only (``DF.13_MV`` / ``DF.14_MV`` are not declared), evaluated
@@ -1349,7 +1349,8 @@ DECK: list[DrcRule] = [
     DrcRule(
         id="comp.tap_distance.nwell.lv.1",
         description=(
-            "Max distance of an Nwell tap (NCOMP inside Nwell) from PCOMP inside Nwell: 20um (3.3V)"
+            "Max distance of an Nwell tap (NCOMP inside Nwell) from PCOMP inside "
+            "Nwell: 20um (3.3V)"
         ),
         layer=(22, 0),  # Comp -- the checked layer
         check="tap_distance",
@@ -1367,9 +1368,10 @@ DECK: list[DrcRule] = [
             dualgate=(55, 0),
             v5_xtor=(112, 1),
         ),
-        # DRM 7.5 Comp, rule "DF.13": "Max distance of Nwell tap (NCOMP inside Nwell) from (PCOMP inside Nwell)"
-        # (3.3V column, 20 um). Re-derived from the PDK's executable
-        # `comp.rb` (pactive not interacting v5_xtor/dualgate/the 20um tap reach); see the module docstring's "Known
+        # DRM 7.5 Comp, rule "DF.13": "Max distance of Nwell tap (NCOMP inside
+        # Nwell) from (PCOMP inside Nwell)" (3.3V column, 20 um). Re-derived from
+        # the PDK's executable `comp.rb` (pactive not interacting
+        # v5_xtor/dualgate/the 20um tap reach); see the module docstring's "Known
         # approximations" note on `comp.tap_distance.nwell.lv.1`.
         scope="7.5 Comp",  # DRM section this rule is transcribed from (#566)
         provenance=_gf180mcu_klayout_deck_provenance("comp", "DF.13_LV"),
@@ -1377,7 +1379,8 @@ DECK: list[DrcRule] = [
     DrcRule(
         id="comp.tap_distance.psub.lv.1",
         description=(
-            "Max distance of a substrate tap (PCOMP outside Nwell) from NCOMP outside Nwell: 20um (3.3V)"
+            "Max distance of a substrate tap (PCOMP outside Nwell) from NCOMP "
+            "outside Nwell: 20um (3.3V)"
         ),
         layer=(22, 0),  # Comp -- the checked layer
         check="tap_distance",
@@ -1395,10 +1398,11 @@ DECK: list[DrcRule] = [
             dualgate=(55, 0),
             v5_xtor=(112, 1),
         ),
-        # DRM 7.5 Comp, rule "DF.14": "Max distance of substrate tap (PCOMP outside Nwell) from (NCOMP outside Nwell)"
-        # (3.3V column, 20 um). Re-derived from the PDK's executable
-        # `comp.rb` (nactive minus a diamond 20um ptap filter, refined by sep(ptap, 20um)); see the module docstring's "Known
-        # approximations" note on `comp.tap_distance.psub.lv.1`.
+        # DRM 7.5 Comp, rule "DF.14": "Max distance of substrate tap (PCOMP
+        # outside Nwell) from (NCOMP outside Nwell)" (3.3V column, 20 um).
+        # Re-derived from the PDK's executable `comp.rb` (nactive minus a diamond
+        # 20um ptap filter, refined by sep(ptap, 20um)); see the module
+        # docstring's "Known approximations" note on `comp.tap_distance.psub.lv.1`.
         scope="7.5 Comp",  # DRM section this rule is transcribed from (#566)
         provenance=_gf180mcu_klayout_deck_provenance("comp", "DF.14_LV"),
     ),

@@ -879,7 +879,13 @@ _V5_XTOR_MARKER_LAYER = (112, 1)
 _IMPLANT_LAYERS = ((32, 0), (31, 0))
 
 
-def _exempt_comp_from_tap_distance(*fixtures: dict[str, Any]) -> None:
+def _exempt_comp_from_tap_distance(
+    rule: DrcRule, deck_rules: list[DrcRule], *fixtures: dict[str, Any]
+) -> None:
+    if rule.check == "tap_distance" or not any(
+        r.check == "tap_distance" for r in deck_rules
+    ):
+        return
     for fixture in fixtures:
         layers = [tuple(shape["layer"]) for shape in fixture["shapes"]]
         if _V5_XTOR_MARKER_LAYER in layers or not any(
@@ -966,10 +972,7 @@ def build_manifest(
             r.id == _COMP_COVERAGE_RULE_ID for r in deck_rules
         ):
             _exempt_comp_from_df12(violate, clean)
-        if rule.check != "tap_distance" and any(
-            r.check == "tap_distance" for r in deck_rules
-        ):
-            _exempt_comp_from_tap_distance(violate, clean)
+        _exempt_comp_from_tap_distance(rule, deck_rules, violate, clean)
         prior = existing.get(rule.id, {})
         manifest[rule.id] = {
             "check": rule.check,

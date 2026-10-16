@@ -63,7 +63,9 @@ from .coverage import (
     work_id,
 )
 from .decks import (
+    CompCoverageSpec,
     DrcRule,
+    TapDistanceSpec,
     UnknownDeckError,
     deck_source_path,
     get_deck,
@@ -340,7 +342,9 @@ def _grid_is_representable(rule: DrcRule, dbu: float) -> bool:
     with no ``grid_um`` at all -- neither is this predicate's question (the
     latter is a deck-authoring error :func:`_run_grid_check` raises on).
     """
-    if rule.check in _TAP_DISTANCE_CHECKS and rule.region_spec is not None:
+    if rule.check in _TAP_DISTANCE_CHECKS and isinstance(
+        rule.region_spec, TapDistanceSpec
+    ):
         spec = rule.region_spec
         return all(
             round(um / dbu) >= 1 and abs(um / dbu - round(um / dbu)) <= 1e-9
@@ -3018,7 +3022,7 @@ def _run_comp_coverage_check(
     (:data:`INAPPLICABLE_REASON_EMPTY_CHECKED_REGION`), not as checked.
     """
     spec = rule.region_spec
-    if spec is None:
+    if not isinstance(spec, CompCoverageSpec):
         raise DrcError(f"rule '{rule.id}': check '{rule.check}' requires region_spec")
     layer_label = layer_names.get(rule.layer, f"{rule.layer[0]}/{rule.layer[1]}")
 
@@ -3092,7 +3096,7 @@ def _run_tap_distance_check(
     :data:`INAPPLICABLE_REASON_EMPTY_CHECKED_REGION`).
     """
     spec = rule.region_spec
-    if spec is None or rule.check not in _TAP_DISTANCE_CHECKS:
+    if not isinstance(spec, TapDistanceSpec) or rule.check not in _TAP_DISTANCE_CHECKS:
         raise DrcError(f"rule '{rule.id}': check '{rule.check}' requires region_spec")
     layer_label = layer_names.get(rule.layer, f"{rule.layer[0]}/{rule.layer[1]}")
     dbu = layout.dbu
