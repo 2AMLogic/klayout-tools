@@ -867,6 +867,7 @@ from ._report_verify import (
 )
 from .build_identity import version_report
 from .coverage import (
+    RESULT_PARTIAL,
     coverage_nothing_checked,
     coverage_nothing_checked_reasons,
     coverage_refusal_reason,
@@ -3155,9 +3156,31 @@ def _check_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
     else:
         passed = False  # kind == "error"
 
+    if passed and _generic_overstates_coverage(kind, envelope):
+        return False
     if passed and _critical_metric_blockers(envelope):
         return False
     return passed
+
+
+def _generic_overstates_coverage(kind: str, envelope: dict[str, Any]) -> bool:
+    """Whether a ``generic`` envelope's success status contradicts its own
+    versioned ``coverage`` block (issue #2906).
+
+    A ``generic`` envelope is user-authored and has no producer adapter to
+    derive its status from :func:`~klayout_tools.coverage.coverage_rollup`,
+    so nothing forces a wrapper that skipped requested work to say
+    ``pass_partial``. When its ``status`` is the kind's success token yet
+    its coverage block declares skipped requested work, the common rollup
+    says ``partial``; that is graded as non-passing here rather than only
+    disclosed. A legacy (absent) coverage block makes no claim and never
+    trips this, and first-party kinds keep their producer-owned status.
+    """
+    return (
+        kind == "generic"
+        and envelope.get("status") == _PASSING_STATUS_BY_KIND["generic"]
+        and coverage_state(envelope) == RESULT_PARTIAL
+    )
 
 
 def _drc_coverage_disclosure(
@@ -3265,8 +3288,11 @@ def _partial_coverage_disclosure(envelope: dict[str, Any]) -> dict[str, Any] | N
     "missing legacy coverage is not evidence either way" rule
     :mod:`klayout_tools.coverage` exists to apply identically everywhere.
 
-    Quoted, never graded on: a `klt signoff` verdict still rests on the
-    producer's own status token (see :func:`_non_passing_reason`). Until a
+    Quoted, not graded on, for every first-party kind: a `klt signoff`
+    verdict still rests on the producer's own status token (see
+    :func:`_non_passing_reason`). The one exception is ``generic``, which
+    has no adapter and is cross-checked against this block by
+    :func:`_generic_overstates_coverage` (issue #2906). Until a
     verb's Phase 2 adapter lands, that token can still be the kind's
     unconditional success word on a run whose common coverage says
     ``partial`` -- and when it is, this key is what makes the gap visible in
@@ -3328,6 +3354,8 @@ def _non_passing_reason(kind: str, envelope: dict[str, Any]) -> str:
     if kind == "yield" and envelope.get("status") == "insufficient_evidence":
         return _REASON_UNDERSIZED_SAMPLE
     if _reports_partial_status(kind, envelope):
+        return _REASON_PARTIAL_COVERAGE
+    if _generic_overstates_coverage(kind, envelope):
         return _REASON_PARTIAL_COVERAGE
     # Issue #2768: a `klt drc --rules` subset whose only shortfall is the
     # rules it deliberately omitted is a coverage gap, not a defect.
