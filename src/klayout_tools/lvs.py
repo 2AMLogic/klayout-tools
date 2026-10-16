@@ -399,6 +399,20 @@ CATEGORY_HINTS_SHORT_NETS_APPLIED = "hints.short_nets_applied"
 #: `_declared_pin_short_mismatches`.
 CATEGORY_PIN_DECLARED_SHORT = "pin.declared_short"
 
+#: Issue #2952: a reference-side ``X`` card calls a subcircuit that is
+#: defined nowhere the reader could see (no ``.subckt`` in the file or its
+#: includes), that no reference conversion turned into a device, and that has
+#: no same-named circuit on the layout side to be compared against by name.
+#: ``NetlistSpiceReader`` does not raise on such a call -- it synthesises an
+#: empty, pin-only placeholder circuit -- so the instance carries no devices
+#: and, once flattened (``options.flatten_reference``), vanishes without
+#: trace: a zero-device layout then reported ``status: "match"`` against a
+#: reference whose only device was discarded. One ``severity: "error"`` entry
+#: per offending instance (reachable from the compared reference top), and
+#: ``status`` is forced to ``"mismatch"``. See
+#: ``_unresolved_reference_subckt_calls``.
+CATEGORY_REFERENCE_UNRESOLVED_SUBCKT_CALL = "reference.unresolved_subckt_call"
+
 #: Issue #1952: ``power_connectivity.status`` values. Deliberately a
 #: *separate* verdict from the report's top-level ``status``, which stays
 #: exactly what it has always been -- ``NetlistComparer.compare()``'s own
@@ -1198,6 +1212,14 @@ def run_lvs(request: str) -> dict[str, Any]:
             if layout_parameter_correction is not None:
                 combine_per_circuit_warnings.append(layout_parameter_correction)
 
+    # Issue #2952: the layout's circuit names are snapshotted before
+    # `flatten_layout` removes the per-macro circuits, so the
+    # `reference.unresolved_subckt_call` scan's same-named-layout-circuit
+    # exemption (a black-box/`--abstract-cells` macro paired by name) holds
+    # whether or not the layout is flattened.
+    layout_circuit_names = {
+        circuit.name.upper() for circuit in layout_netlist.each_circuit()
+    }
     if flatten_layout:
         layout_flatten_warning = _flatten_netlist_safely(layout_netlist, "layout")
         if layout_flatten_warning is not None:
@@ -1314,6 +1336,16 @@ def run_lvs(request: str) -> dict[str, Any]:
         gate_level_port_aliases=reference_gate_level_port_aliases,
         finfet=finfet_layout,
         finfet_top=reference_spec.get("top"),
+    )
+    # Issue #2952: scanned now, before any flatten/prune below erases the
+    # hierarchy that names each offending instance. Appended to
+    # `mismatches[]` and applied to `status` at the end of the compare.
+    unresolved_subckt_call_findings = _unresolved_reference_subckt_calls(
+        reference_netlist,
+        layout_circuit_names,
+        form=reference_form,
+        top=reference_spec.get("top"),
+        reference_path=reference_netlist_path,
     )
 
     if reference_form == "gate-level-verilog":
@@ -2308,6 +2340,12 @@ def run_lvs(request: str) -> dict[str, Any]:
     mismatches.extend(_declared_pin_short_mismatches(layout_pin_renames))
 
     mismatches.extend(supply_findings)
+    # Issue #2952: an unresolved reference subcircuit call is a pre-compare
+    # determination (see `_unresolved_reference_subckt_calls`); unlike the
+    # diagnostic-only errors above it *does* move `status` -- below, after
+    # the combine downgrade, so it can never be hidden behind
+    # `"inconclusive"` either.
+    mismatches.extend(unresolved_subckt_call_findings)
     mismatches.sort(key=_sort_key)
 
     # Issue #2845: a strict `pin.count` error is exempt from the downgrade
@@ -2335,6 +2373,7 @@ def run_lvs(request: str) -> dict[str, Any]:
         # warning either way, so a caller can always see that combining did
         # not apply.
         status = STATUS_INCONCLUSIVE
+    status = _force_mismatch_on(status, unresolved_subckt_call_findings)
 
     category_counts: dict[str, int] = {}
     # Issue #1132: `category_counts` alone collapses `error`/`warning`
@@ -6106,6 +6145,139 @@ def _declared_pin_short_mismatches(
             )
         )
     return entries
+
+
+def _is_reader_placeholder_circuit(circuit: Any) -> bool:
+    """Whether ``circuit`` has the shape ``NetlistSpiceReader`` synthesises
+    for an ``X`` card naming an undefined subcircuit (issue #2952): no
+    devices, no subcircuit instances, and pins named positionally ``1`` ..
+    ``N`` (the reader has no ``.subckt`` header to take pin names from).
+
+    The positional-pin-name test is what keeps an included library's real,
+    defined subcircuit (whose header names its own pins) from ever being
+    mistaken for a placeholder, even though this module cannot see the text
+    of a ``.include``-d file."""
+    if any(True for _ in circuit.each_device()):
+        return False
+    if any(True for _ in circuit.each_subcircuit()):
+        return False
+    names = [pin.name() for pin in circuit.each_pin()]
+    return names == [str(index) for index in range(1, len(names) + 1)]
+
+
+def _reachable_reference_circuits(netlist: Any, top: str | None) -> list[Any]:
+    """The reference circuits reachable from the compared top (``top`` by
+    name, else the netlist's sole top circuit), each once, in visit order.
+
+    ``[]`` when the top cannot be resolved -- :func:`_select_circuit`'s own
+    later call raises the authoritative error for that, so this
+    pre-compare scan never pre-empts it with a different one."""
+    try:
+        root = _select_circuit(netlist, top, "reference")
+    except LvsError:
+        return []
+    seen: set[int] = set()
+    ordered: list[Any] = []
+    stack = [root]
+    while stack:
+        circuit = stack.pop()
+        if id(circuit) in seen:
+            continue
+        seen.add(id(circuit))
+        ordered.append(circuit)
+        stack.extend(sub.circuit_ref() for sub in circuit.each_subcircuit())
+    return ordered
+
+
+def _unresolved_reference_subckt_calls(
+    reference_netlist: Any,
+    layout_names: AbstractSet[str],
+    *,
+    form: str,
+    top: str | None,
+    reference_path: str,
+) -> list[dict[str, Any]]:
+    """Issue #2952: one :data:`CATEGORY_REFERENCE_UNRESOLVED_SUBCKT_CALL`
+    ``severity: "error"`` entry per reference subcircuit instance (reachable
+    from the compared top) whose callee the reader could only satisfy with a
+    synthesised placeholder circuit -- see
+    :func:`_is_reader_placeholder_circuit` -- or ``[]``.
+
+    Runs right after the reference is read, before any flatten/prune, so the
+    hierarchy that names each offending instance still exists. A callee is
+    **not** reported when:
+
+    * a ``.subckt`` of that name (case-insensitive) is defined in the
+      reference file itself -- a genuinely empty, positionally-pinned
+      definition is the author's own choice (files pulled in by
+      ``.include`` are not followed, so such a definition in an included
+      file is reported);
+    * ``layout_names`` (the layout's upper-cased circuit names, snapshotted
+      *before* ``options.flatten_layout`` runs so a flattened layout keeps
+      this exemption) has a circuit of the same name -- the comparer then
+      pairs the two by name (a black-box/``--abstract-cells`` macro, or a
+      custom device class written as an ``X ... PARAMS:`` card on both sides
+      with no ``deck`` given; see docs/cli/lvs.md), so the instance is
+      compared, not dropped;
+    * ``form`` is ``"gate-level-verilog"``, whose library-cell instances are
+      pin-only by design and carry their own pin-order contract.
+
+    A curated or deck-custom device class never reaches here as a
+    placeholder: the ``subckt-call`` conversion and the reader's custom-class
+    / resistor recovery turn those cards into real devices first.
+    """
+    if form == "gate-level-verilog":
+        return []
+    from .netlist_normalize import defined_subckt_names
+
+    try:
+        with open(reference_path, encoding="utf-8", errors="replace") as handle:
+            defined = defined_subckt_names(handle.read())
+    except OSError:
+        defined = set()
+    findings: list[dict[str, Any]] = []
+    for parent in _reachable_reference_circuits(reference_netlist, top):
+        for sub in parent.each_subcircuit():
+            callee = sub.circuit_ref()
+            mangled = callee.name.upper()
+            base = mangled.split("(", 1)[0]
+            if not _is_reader_placeholder_circuit(callee):
+                continue
+            if base in defined or mangled in layout_names or base in layout_names:
+                continue
+            findings.append(
+                _mismatch(
+                    CATEGORY_REFERENCE_UNRESOLVED_SUBCKT_CALL,
+                    "error",
+                    f"reference instance '{sub.name}' in circuit "
+                    f"'{parent.name}' calls subcircuit '{base}', which is "
+                    "not defined in the reference netlist, was not converted "
+                    "to a device, and has no same-named layout circuit -- "
+                    "the reader substitutes an empty placeholder, so "
+                    "whatever device(s) it stands for are never compared. "
+                    "Define the subcircuit, map it to a device class "
+                    '(reference.form "subckt-call" + reference.device_map), '
+                    "or write it as a plain-element card (see "
+                    'docs/cli/lvs.md, "reference.unresolved_subckt_call")',
+                    "reference",
+                    circuit={"layout": None, "reference": parent.name},
+                    instance={"layout": None, "reference": sub.name},
+                    subcircuit={"layout": None, "reference": base},
+                    details={
+                        "callee": base,
+                        "reader_circuit": callee.name,
+                        "pin_count": callee.pin_count(),
+                    },
+                )
+            )
+    return findings
+
+
+def _force_mismatch_on(status: str, findings: list[dict[str, Any]]) -> str:
+    """``"mismatch"`` when ``findings`` is non-empty, else ``status``
+    unchanged (issue #2952's verdict override, factored out so the caller
+    adds no branch)."""
+    return "mismatch" if findings else status
 
 
 # --------------------------------------------------------------------------- #

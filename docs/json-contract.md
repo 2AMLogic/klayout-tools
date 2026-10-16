@@ -250,6 +250,13 @@ a `deck: {name, content_hash}` block; without it the output is byte-identical.
 No `schema_version` bump on either command. See `docs/cli/deck.md` and
 `docs/cli/layers.md`.
 
+Issue #2952's `klt lvs` category `reference.unresolved_subckt_call` is
+likewise additive (no `schema_version` bump), but unlike the diagnostic-only
+`pin.declared_short` it **forces** `status: "mismatch"`, so a request whose
+inputs are unchanged can flip from `"match"` to `"mismatch"` on upgrade —
+callers gating on `status` should expect that (see `docs/cli/lvs.md`,
+"`reference.unresolved_subckt_call`").
+
 **A new key in a documented open map, and a new member on one class of that
 map's entries, are additive.** `klt functional-verification`'s
 `environment.sdf.dropped` is documented as an open map keyed by class name,

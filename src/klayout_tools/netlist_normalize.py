@@ -1501,6 +1501,19 @@ def normalize_reference_netlist(
     return convert_reference_netlist(text, deck=deck, device_map=device_map).text
 
 
+def defined_subckt_names(text: str) -> set[str]:
+    """The upper-cased name of every ``.subckt`` defined in SPICE ``text``
+    (issue #2952) -- upper-cased because ``NetlistSpiceReader`` reads circuit
+    names back that way, so a caller can compare against
+    ``kdb.Circuit.name`` directly. ``.include``-d files are not followed."""
+    defined: set[str] = set()
+    for line in _merge_continuations(text.splitlines()):
+        parts = line.split()
+        if len(parts) >= 2 and parts[0].lower() == ".subckt":
+            defined.add(parts[1].upper())
+    return defined
+
+
 def detect_subckt_call_devices(text: str) -> list[str]:
     """Return the curated PDK device subcircuit names an ``X`` card in ``text``
     instantiates *without* a matching ``.subckt`` definition in the same file.
