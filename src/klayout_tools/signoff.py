@@ -3163,7 +3163,7 @@ def _check_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
     return passed
 
 
-def _generic_overstates_coverage(kind: str, envelope: dict[str, Any]) -> bool:
+def _generic_overstates_coverage(kind: str, envelope: _EvidenceEnvelope) -> bool:
     """Whether a ``generic`` envelope's success status contradicts its own
     versioned ``coverage`` block (issue #2906).
 
@@ -3179,7 +3179,7 @@ def _generic_overstates_coverage(kind: str, envelope: dict[str, Any]) -> bool:
     return (
         kind == "generic"
         and envelope.get("status") == _PASSING_STATUS_BY_KIND["generic"]
-        and coverage_state(envelope) == RESULT_PARTIAL
+        and coverage_state(cast(dict[str, Any], envelope)) == RESULT_PARTIAL
     )
 
 
@@ -3355,7 +3355,7 @@ def _non_passing_reason(kind: str, envelope: dict[str, Any]) -> str:
         return _REASON_UNDERSIZED_SAMPLE
     if _reports_partial_status(kind, envelope):
         return _REASON_PARTIAL_COVERAGE
-    if _generic_overstates_coverage(kind, envelope):
+    if _generic_overstates_coverage(kind, cast(_EvidenceEnvelope, envelope)):
         return _REASON_PARTIAL_COVERAGE
     # Issue #2768: a `klt drc --rules` subset whose only shortfall is the
     # rules it deliberately omitted is a coverage gap, not a defect.
