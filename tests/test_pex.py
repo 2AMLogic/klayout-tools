@@ -2692,6 +2692,7 @@ def test_run_pex_substrate_tie_ohms_forwarded_to_extraction(
     assert seen == [1e-3, None]
 
 
+@_SKIP_NO_NGSPICE
 def test_run_pex_mom_rlc_net_threaded_through_to_extraction(tmp_path, resistor_layout):
     """`--mom-rlc-net`/`--mom-rlc-resistance-ohm`/`--mom-rlc-capacitance-ff`
     (issue #988, Epic #709 Phase 3a) are forwarded from `run_pex` to
