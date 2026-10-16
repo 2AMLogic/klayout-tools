@@ -1237,9 +1237,31 @@ A `batch` run's response fills the same additive `environment.remote` slot
   "elapsed_seconds": 412,
   "runner_klt_version": "0.9.0",
   "client_klt_version": "0.9.0",
-  "runner_compatibility": "match"
+  "runner_compatibility": "match",
+  "client_submitted_at": "2026-10-15T17:00:00.120000Z",
+  "client_launched_at": "2026-10-15T17:00:02.480000Z",
+  "client_status_terminal_at": "2026-10-15T17:08:31.050000Z",
+  "client_collected_at": "2026-10-15T17:08:33.910000Z"
 }
 ```
+
+The four `client_*_at` fields are **client-observed wall-clock times**
+(RFC3339 UTC), read on the submitting host, so they are subject to its clock
+skew. Unlike `elapsed_seconds` (the runner's view, from `status.json`) they
+show where the wait went:
+
+| Field | Measured |
+|---|---|
+| `client_submitted_at` | immediately before the job contract is uploaded |
+| `client_launched_at` | just after the launch call returns |
+| `client_status_terminal_at` | when polling saw a terminal `status.json` state |
+| `client_collected_at` | after the job's outputs were collected (`null` when nothing was collected) |
+
+A phase that was not reached is `null`, never fabricated: a poll-timeout run
+reports only the first two, a failed job the first three. Under sharding every
+`fleet[]` entry carries its own set. Queue/provisioning time is approximately
+`client_status_terminal_at - client_submitted_at - elapsed_seconds`; it is an
+approximation, since it also includes upload, launch and polling latency.
 
 ### Runner/client `klt` version skew ([#2719](https://github.com/2AMLogic/klayout-tools/issues/2719))
 
