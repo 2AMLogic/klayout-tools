@@ -711,12 +711,6 @@ def test_list_generators_phase2_params_have_no_hidden_layer_fields(name):
     ("generator", "params", "expected_rule", "tracking_issue"),
     [
         ("res_array", {}, "poly2.enclosing.sab.1", "#3000"),
-        (
-            "diff_pair",
-            {"splits": 1, "add_guard_ring": True, "ring_padding_um": 0.5015},
-            "comp.ongrid.1",
-            "#3364",
-        ),
     ],
 )
 def test_known_gf180mcu_generator_findings_are_still_present(
@@ -726,7 +720,7 @@ def test_known_gf180mcu_generator_findings_are_still_present(
     generator output (`helpers/drc_known_findings.py`).
 
     Issue #3001 added the PDK runset's `OFFGRID` and `SB.*` rules to the
-    gf180mcu deck, which surfaced two generator defects. When
+    gf180mcu deck, which surfaced generator defects. When
     `tracking_issue` lands this test fails -- which is the point: delete it
     and the matching allowance, restoring the plain clean assertions.
     """
@@ -3518,10 +3512,7 @@ def test_gf180mcu_diff_pair_off_grid_ring_padding_is_drc_clean(
         assert (x1 - x0, y1 - y0) == (expected_dbu, expected_dbu)
 
     drc_report = run_drc(str(output), "gf180mcu")
-    # The ring cuts stay clean (the point of #2442); the ring body still has
-    # off-grid vertices at these paddings (#3364), so only the grid rules are
-    # tolerated -- see `helpers/drc_known_findings.py`.
-    assert_drc_clean_except(drc_report, GF180MCU_OFFGRID_RULES - {"contact.ongrid.1"})
+    assert drc_report["status"] == "clean", drc_report["violations"]
     assert not any(rule.startswith("contact.") for rule in drc_report["rule_counts"])
 
 
@@ -3565,9 +3556,7 @@ def test_gf180mcu_sibling_guard_ring_generators_off_grid_padding_drc_clean(
         }
     )
     drc_report = run_drc(str(output), "gf180mcu")
-    # Ring cuts stay clean; ring body vertices are off-grid at this padding
-    # (#3364) -- see `helpers/drc_known_findings.py`.
-    assert_drc_clean_except(drc_report, GF180MCU_OFFGRID_RULES - {"contact.ongrid.1"})
+    assert drc_report["status"] == "clean", drc_report["violations"]
     assert not any(rule.startswith("contact.") for rule in drc_report["rule_counts"])
 
 
@@ -10429,9 +10418,7 @@ def test_gf180mcu_guard_ring_off_grid_implant_still_extends_exactly_margin(
     _assert_ring_implant_tracks_comp(active_region, nplus_region, layout.dbu)
 
     drc_report = run_drc(str(output), "gf180mcu")
-    # `inner_um` is itself off the 0.005um grid, so the ring body carries grid
-    # findings (#3364); nothing else may fire.
-    assert_drc_clean_except(drc_report, GF180MCU_OFFGRID_RULES - {"contact.ongrid.1"})
+    assert drc_report["status"] == "clean", drc_report["violations"]
 
 
 #: `diff_pair` paddings that put the automatically-sized ring's own box edges on
