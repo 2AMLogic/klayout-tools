@@ -103,6 +103,28 @@ def _open_pdks_equal(expected: str, installed: str) -> bool:
     return len(short) >= _MIN_SHORT_HASH and long_.startswith(short)
 
 
+def read_fetched_marker(variant_dir: str) -> str | None:
+    """Return the stripped contents of the nearest :data:`LAMBDAPDK_MARKER`
+    at ``variant_dir`` or up to :data:`_MARKER_SEARCH_DEPTH` parents, or
+    ``None`` when absent/unreadable/empty. The nearest marker wins: an
+    unreadable or empty one is not skipped in favour of a farther one."""
+    current = os.path.abspath(variant_dir)
+    for _ in range(_MARKER_SEARCH_DEPTH + 1):
+        marker = os.path.join(current, LAMBDAPDK_MARKER)
+        if os.path.isfile(marker):
+            try:
+                with open(marker, encoding="utf-8") as handle:
+                    value = handle.read().strip()
+            except OSError:
+                return None
+            return value or None
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    return None
+
+
 def read_installed_identity(
     variant_dir: str, namespace: str, sources_version: str | None = None
 ) -> tuple[dict[str, str] | None, str | None]:
@@ -114,26 +136,13 @@ def read_installed_identity(
     ``docs/json-contract.md``).
     """
     if namespace == NS_LAMBDAPDK_RELEASE:
-        current = os.path.abspath(variant_dir)
-        for _ in range(_MARKER_SEARCH_DEPTH + 1):
-            marker = os.path.join(current, LAMBDAPDK_MARKER)
-            if os.path.isfile(marker):
-                try:
-                    with open(marker, encoding="utf-8") as handle:
-                        value = handle.read().strip()
-                except OSError:
-                    return None, None
-                if not value:
-                    return None, None
-                return (
-                    {"namespace": namespace, "value": value},
-                    LAMBDAPDK_MARKER,
-                )
-            parent = os.path.dirname(current)
-            if parent == current:
-                break
-            current = parent
-        return None, None
+        value = read_fetched_marker(variant_dir)
+        if value is None:
+            return None, None
+        return (
+            {"namespace": namespace, "value": value},
+            LAMBDAPDK_MARKER,
+        )
     if namespace == NS_OPEN_PDKS_SOURCES and sources_version:
         return (
             {"namespace": namespace, "value": sources_version},
