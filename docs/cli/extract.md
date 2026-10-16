@@ -291,6 +291,7 @@ Every field name is the flag's own `dest`, so the mapping is one-for-one:
 | `hierarchical_cells` | array\<string\> \| string | `--hierarchical-cells` (same comma-joining rule as `pins`) |
 | `deck_options` | object\<string, string\|number\|bool\> | repeatable `--deck-option KEY=VALUE`. A key containing `=` is rejected. |
 | `label_layers` | object\<string, [int, int] \| null\> | repeatable `--label-layer ROLE=LAYER/DATATYPE` (issue #2656), e.g. `{"metal0": [8, 25], "poly": null}`. `null` is the flag's `none` spelling. A role name containing `=`, or a value that is neither `null` nor a `[layer, datatype]` pair of non-negative integers, is rejected. |
+| `probes` | array\<object\|string\> | repeatable `--probe` (issue #2986): each entry is `{"name", "layer", "x", "y"}` or the flag's own `name=…,layer=…,x=…,y=…` string. Validated exactly like the flag. |
 | `defer_resistor_fixed_offset` | bool | `--defer-resistor-fixed-offset` |
 | `abstract_cells` | array\<string\> \| string | repeatable `--abstract-cells` |
 | `abstract_cell_lef` | array\<string\> \| string | repeatable `--abstract-cell-lef` |
@@ -3088,6 +3089,74 @@ the deck does not read, fix the deck — see
 note for why that deck kept `.pin` (neither purpose is wrong there, so moving
 the default would only relocate the same failure onto the layouts it was
 confirmed against).
+
+## Point-to-net probes (`--probe`, issue #2986)
+
+Ask which extracted net lies under a point, answered on the extraction the
+command already performs:
+
+```bash
+klt extract routed.gds --deck gf180mcu --def-net-names \
+  --probe 'name=east_end,layer=metal3,x=12.4,y=-4.0' \
+  --probe 'name=macro_pin,layer=metal3,x=40.0,y=-4.0'
+```
+
+`--probe` is repeatable; every key (`name`, `layer`, `x`, `y`) is required. `x`
+and `y` are micrometres in the top cell's frame — the frame `nets[].
+label_positions_um` already uses — and negative coordinates are fine. A
+request document carries the same thing as a `probes` array of
+`{"name", "layer", "x", "y"}` objects (or the flag's own spec strings).
+
+**Why not compare net names.** Under `--def-net-names` the DEF name replaces
+the text labels, so a label check passes on a broken layout and fails on a
+good one, and an unlabelled conductor has no name to compare at all. A probe
+returns the net the extractor itself resolved, so two probes prove two places
+are one net when they share `cluster_id` — which also separates distinct nets
+that happen to share a name (see "Net-name collisions from internally-repeated
+sub-cells").
+
+**`layer` roles.** The same vocabulary as `--label-layer`: `well`, `poly`, or
+`metal<i>`. `i` is 0-based and index-aligned with the deck's metal stack, so
+`metal0` is the level `contact` lands on. The mapping to PDK names is therefore
+deck-specific, not the PDK's own numbering:
+
+| deck | `metal0` | `metal1` | `metal2` | `metal3` | `metal4` | `metal5` |
+|------|----------|----------|----------|----------|----------|----------|
+| `sky130` | `li1` | `met1` | `met2` | `met3` | `met4` | `met5` |
+| `gf180mcu` | `Metal1` | `Metal2` | `Metal3` | `Metal4` | `Metal5` | — |
+
+(`klt extract` quotes the deck's own role list when it rejects an unknown one.)
+`well` is tried against `nwell` then the tap region, as for labels.
+
+**JSON.**
+
+```json
+"probes": [
+  {"name": "east_end", "layer": "metal3", "x_um": 12.4, "y_um": -4.0,
+   "found": true, "net": "_019_", "cluster_id": 17},
+  {"name": "macro_pin", "layer": "metal3", "x_um": 40.0, "y_um": -4.0,
+   "found": false, "net": null, "cluster_id": null}
+]
+```
+
+- `net` is exactly the `nets[].name` of that net and `cluster_id` its
+  `nets[].net_id`, both read after every rename (`--def-net-names`, `--pins`,
+  `--rename-declared-pins`) and purge pass, so they always match `nets[]`.
+- `cluster_id` is stable within one run only; do not store it across runs.
+- Output is in request order. A malformed spec, a missing key or a duplicate
+  `name` is an application error (exit 1, the standard error envelope), as is a
+  `layer` the deck has no role for. FinFET decks refuse `--probe` by name.
+
+**`found: false` is never an error and never a guess.** It is reported for a
+point on empty space, inside a masked black-box region, or on a wire the
+extractor purged as floating (no pin, device terminal or label, so it has no
+entry in `nets[]` to name). A point exactly on a polygon edge counts as on it.
+Probing inside `--abstract-cells` bodies is not a supported query: the body is
+a black box, and what comes back there is whatever the preserved cover and the
+parent's wiring resolve to.
+
+The field is additive, so `schema_version` does not move
+(`docs/json-contract.md`: only a non-additive change bumps it).
 
 ## Top-cell-only pin promotion (`--top-cell-pins`, #291)
 
@@ -7329,6 +7398,7 @@ exit codes).
 | `matched_device_groups` | array\<object\>       | One entry per `--matched-group` declaration, in the order given (issue #1018 — see "Matched-device geometry check" above), each `{ "name": string, "instances": [string, ...], "unresolved_instances": [string, ...], "mismatched_fields": [{"field": string, "values": {"<instance name>": number, ...}}, ...] }`. `instances` echoes the declared member list verbatim; `unresolved_instances` (sorted) is the subset matching no extracted device; `mismatched_fields` lists every parameter that diverges across the group's resolved members (post-rounding equality — no numeric tolerance). A matching prose entry is also appended to `warnings[]` for a group with unresolved members and/or mismatched fields. Always present, empty (`[]`) when `--matched-group` was never given. |
 | `pin_renames` | object \| `null`           | Additive field (issue #2854). `null` unless `--rename-declared-pins` was given, otherwise the declared-name rename report: `{ "declared": [string, ...], "declared_pins": [string, ...] \| null, "def_pins": [string, ...] \| null, "renamed": [{"from": string, "to": string}, ...], "findings": [{"severity", "code", "net", "message", ...}, ...] }`. `declared_pins`/`def_pins` echo each original argument separately (`null` for "flag not given", a list — `[]` included — for "flag given"; the echoes `--check --rerun` replays both demotion passes from, since the two sets are not interchangeable); `declared` is the union of `--pins`/`--def-pins` the renames resolved against — the rename pass's own matching set, retained for readers; `renamed` lists every `'joined name' -> 'declared name'` rename performed (sorted by `from`, names in the same `\|`-joined spelling `nets[].name` uses); `findings` carries the `error`-severity `declared_pin_short` (a net matching 2+ declared names — a short between interface pins, reported and never repaired) and the `warning`-severity `declared_pin_rename_collision` (a rename skipped because another net already carries the target name) entries, each mirrored into `warnings[]`. See "Renaming promoted pins to their declared name" above. |
 | `rename_declared_pins` | boolean                | Additive field (issue #2854). The effective `--rename-declared-pins` value — always present (`false` when the flag was not given), unlike `pin_renames`' null-unless-given convention, so `--check --rerun` replays the rename from it plus the `pin_renames.declared_pins`/`pin_renames.def_pins` echoes. |
+| `probes` | array\<object\> | Additive field (issue #2986). One entry per `--probe`, in request order; always present, `[]` when none was given. Each entry is `{"name", "layer", "x_um", "y_um", "found", "net", "cluster_id"}`: `net` is the name as it appears in `nets[].name` and `cluster_id` is that net's `nets[].net_id`; both are `null` when `found` is `false`. See "Point-to-net probes" above. |
 | `pdk`              | object \| `null`           | `{"variant", "root", "version"}` when `--pdk`/`--pdk-root` were given and resolved; `null` otherwise. `root` is `{"path", "scope"}` (issue #1376, schema_version 3) -- not the raw `--pdk-root` argument -- via the same `{path, scope}` shape `klt env-provenance` and `klt pex`/`klt sim`/`klt size` use: `scope: "repo"` with a repo-relative `path` when the PDK install lives inside the invoking repo, `scope: "external"` with `path: null` otherwise (a PDK install almost always is). Committing this response as evidence (the normal use of `--format json`) no longer bakes the resolving machine's absolute PDK install path (and possibly a username) into the record; `provenance.pdk` below already carries the same PDK's reproducible identity (name/source/version) without a path. |
 | `parasitics`       | object \| `null`           | Lumped RC summary when `--parasitics` was given; `null` otherwise. See "Parasitic (RC) extraction".     |
 | `label_layers`     | object \| `null`           | Additive field (issue #2656). The `--label-layer` override this run read net/pin names through — `{"<role>": [layer, datatype] \| null, ...}`, keys sorted — or `null` when the flag was never given. The record of *which GDS purpose a run read names from*, which the `deck` name alone no longer answers once it can be overridden; `klt extract --check <report> --rerun` reads it back and replays the same purposes. See "Overriding a deck's label layers". |
