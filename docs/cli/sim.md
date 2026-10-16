@@ -4193,6 +4193,28 @@ a corner grid. A stock ngspice without the module still produces the
   parser: `.include`d/`.lib` files and hierarchical targets are not resolved,
   so a waveform declared there is not detected, and an unresolved declaration
   is never assumed to be DC. Rewriting waveform sources is out of scope.
+- **`corners.variants`** (`array<{"name": string, "sources": {<source>: number | string}}>`,
+  optional, issue #3252) — named, *correlated* bias arrangements crossed with
+  the other axes (outer to inner: process, `supply_v`, variants, temperature).
+  Each variant is its own corner unit, so a variant that fails to converge
+  yields `status: "error"` for that unit only; sibling variants at the same
+  PVT point still report. Not combinable with `corners.units` (units are
+  executed as given, not crossed; the request is refused). `name` (letters, digits, `_`, `.`, `-`; unique) is
+  appended to `corner_id` as `/@<name>` (so ids and artifact paths never
+  collide) and reported as an additive `corners[].variant` field (absent when
+  the axis is unused). Each `sources` value is a number or an arithmetic
+  expression (`+ - * /`, parentheses, numbers, and *other source names of the
+  same variant*, e.g. `"vb": "va*0.5"`), resolved host-side to a number
+  before `alter <source>=<value>`; cycles, unknown names and malformed
+  expressions are rejected before any corner runs, naming the offender. A
+  variant source overrides a same-named `corners.supply_v` key; the resolved
+  values appear in `corners[].supply_v`. The `supply_v` rules apply to variant
+  source keys (no waveform sources, no `.param`s). `exclude[]` entries may
+  match `{"variant": "<name>"}`. Works with `monte_carlo`, `--resume`,
+  `local-parallel`, and `remote`/`batch` (the variant crosses the corner wire
+  as an additive field; payloads without it still parse). **Refused for
+  `engine: "xyce"`** (no `alter` equivalent). Additive: no `schema_version`
+  bump.
 - **`corners.temperature_c`** (`array<number>`, optional) — degrees Celsius,
   one `.temp <value>` card per point. Defaults to `[27]` when omitted.
 - **`corners.params`** (`object`, optional, [#3035](https://github.com/2AMLogic/klayout-tools/issues/3035))
@@ -5768,6 +5790,7 @@ the *response* echoes back.
 | `models.pdk`/`pdk_root`  | string            | Resolve `models.lib` — and any per-section `lib` — through `klt pdk find` instead of a literal path.                                                                    |
 | `corners.process`        | array\<string \| {name, sections: array\<string \| {lib, section}\>}\> | Process-corner axis. Each entry is either a bare `.lib` section name (single `.lib` card) or a bundle object `{"name": str, "sections": [...]}` (one `.lib` card per section, in order). Each `sections[]` entry is a bare section name (read from `models.lib`) or `{"lib": str, "section": str}` naming its own model library for that section (issue #2522 — `$VAR`/`~` expand, relative refs resolve like `models.lib`; each must exist, checked before any corner runs, exit 1 otherwise). See "Corner axes" above. |
 | `corners.supply_v`       | object            | Supply axis, keyed by voltage-source name (not a `.param`); arrays sweep together by index.                                                                            |
+| `corners.variants`       | array\<object\> | Issue #3252. Named correlated source arrangements `{name, sources: {src: number \| expr}}`; each is its own corner unit (`corner_id` suffix `/@<name>`, report field `variant`). See "Corner axes" above. |
 | `corners.temperature_c`  | array\<number\>   | Temperature axis, degrees Celsius. Defaults to `[27]`.                                                                                                                 |
 | `corners.params`         | object            | Issue #3035. Numeric design-parameter axis: SPICE parameter name → equal-length nonempty array of finite numbers, zipped by index and expanded innermost (after temperature). Applied with `alterparam` + `reset`; each corner echoes `params` and its `corner_id` gains `/params:<pairs>`. See "Corner axes" above. |
 | `exclude`                | array\<object\>   | Partial corner specs (`process`, `temperature_c`, `supply_v`, `params`) dropped from the expansion.                                                                      |

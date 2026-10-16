@@ -232,6 +232,7 @@ def _unrun_corner_report(
         "diagnostics": [diagnostic],
         "artifacts": {"log": None, "raw": None, "waveform": None, "deck": None},
         "monte_carlo": monte_carlo,
+        **({"variant": point.variant} if point.variant is not None else {}),
     }
 
 
