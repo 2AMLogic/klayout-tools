@@ -212,7 +212,9 @@ split" section for the full derivation.
 per-entry shape, absent unless asked for.** Issue #2982's `klt extract
 --resistance-graph` adds `resistance_graph` (`status`, `terminals`,
 `pair_resistance_ohm`, `legacy_resistance_ohm`, `nodes`, `edges`,
-`diagnostics`) to each `parasitics.nets[]` entry. Without the flag the key does
+`diagnostics`, and the additive scalar-selection provenance
+`selected_resistance_ohm`, `resistance_source`, `resistance_source_reason`;
+issue #2983) to each `parasitics.nets[]` entry. Without the flag the key does
 not exist and the output is byte-identical to before; with it, every existing
 field (`resistance_ohm`, `terminals[]`, `by_layer`, the ladder) keeps its
 meaning and value. A consumer must treat the key as optional. No field is
