@@ -1309,6 +1309,25 @@ does not exhibit the merge. A four-terminal entry may combine with
 drawn): the empty `C` input keeps the three-terminal collector semantics,
 staying tied to `substrate_net`.
 
+**Emitter size filter (`BipolarDevice.emitter_size`, issue #2861).** An
+optional `SizeFilter` (`klayout_tools.decks.SizeFilter`) tells bipolar
+flavours apart by drawn emitter-window size, as SG13G2 does for `npn13G2` /
+`npn13G2l` / `npn13G2v`. It holds inclusive `(lo, hi)` ranges in microns for
+`bbox_min_um` (shorter bounding-box side), `bbox_max_um` (longer side) and
+`area_um2` (µm²); an exact value is `(v, v)`, an unset dimension is
+unconstrained, and a window must satisfy every set one. An all-`None`
+filter and `lo > hi` or negative bounds are rejected at construction.
+
+- Applied to the **merged** emitter region, after `emitter_requires` /
+  `emitter_excludes`, so a window split by the base edge is measured whole.
+- Rounding: bounds convert to the layout dbu by rounding to the nearest
+  integer (area: nearest dbu²), then compare inclusively at both ends; a
+  window one dbu outside a bound does not match. Works at any dbu.
+- Entries sharing `base`/`marker`/`emitter` (and narrowing) with overlapping
+  size ranges raise `ExtractError`; a window matching none of a group's
+  entries yields no device and one `warnings[]` line giving its bbox, size
+  and area. Default `None` leaves extraction and deck hashes unchanged.
+
 `devices[].nets` for a bipolar device uses `"c"`/`"b"`/`"e"` terminal keys
 (collector/base/emitter) instead of MOS's `"s"`/`"g"`/`"d"`/`"b"` — plus
 `"s"` (substrate) for a deck entry that declares the optional `substrate`
@@ -5820,6 +5839,17 @@ the SPEF this writer emits for it, reports `annotation_complete: true`,
 Scope of that measurement: the DEF-loaded design only (`klt sta` rejects
 `spef` together with `verilog`), on a two-cell fixture; a flattened
 Verilog netlist linked separately is not covered.
+
+A DEF net whose name contains `.` (a flattened hierarchical name such as
+`top.sub/_n1_`) is renamed by the extractor to its dot-free spelling
+(`top_sub/_n1_`, or a collision-suffixed `_1`, `_2`, ... — see
+"Hierarchical net names are dot-free"). `--def-net-connections` keys follow
+that same rename, so the net keeps its `*CONN` block under the rewritten
+`*D_NET` name (issue #2903). When a written `*D_NET` that corresponds to a
+DEF net still ends up without instance `*CONN` pins (a duplicated net name
+stays port-only, or a dotted DEF name could not be matched), one
+`warnings[]` entry names the affected nets. The warning is additive; the
+JSON envelope is otherwise unchanged.
 
 **Every two-terminal `*RES`/coupling `*CAP` endpoint is a colon-scoped
 internal node, a `*CONN`-declared instance-pin identifier, or (for an

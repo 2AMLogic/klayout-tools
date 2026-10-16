@@ -317,6 +317,13 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default=0.0,
             )
             self.param(
+                "top_endcap_um",
+                self.TypeDouble,
+                "Harness-resolved gate-stripe top-edge endcap neck "
+                "(see _PDK_GATE_TOP_ENDCAP_UM)",
+                default=0.0,
+            )
+            self.param(
                 "sd_implant_layer",
                 self.TypeLayer,
                 "Source/drain implant drawing layer (only used when "
@@ -498,6 +505,7 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 _mos_cap_enabled(self),
                 self.pitch_x_um,
                 self.pitch_y_um,
+                top_endcap_um=self.top_endcap_um,
             )
             unit_boxes = info["unit"]["boxes_um"]
             for c in info["cells"] + info["dummy_cells"]:
