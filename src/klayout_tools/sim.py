@@ -1517,6 +1517,21 @@ def _validate_rawfile_form(
     return False
 
 
+def _require_measurement_form(name: Any, has_form: bool) -> None:
+    """A ``measurements[]`` entry needs a ``name`` and one declared form."""
+    if name is None or not has_form:
+        raise SimError(
+            "each request.measurements[] entry requires 'name' and "
+            "exactly one of 'spice' (a verbatim .meas card), 'expr' "
+            "(an ngspice expression evaluated after the analysis), "
+            "'crossings' (a threshold-crossing time series), "
+            "'cycle_mean' (a mean over whole reference cycles), "
+            "'energy' (a source's energy over a transient window), "
+            "'noise' (a spot/band-integrated noise-spectrum value) or "
+            "'transfer' (an AC return-ratio metric)"
+        )
+
+
 def _validate_measurement_form(spec: dict[str, Any]) -> None:
     """One ``request.measurements[]`` entry's form: a ``name`` plus exactly
     one of ``spice``/``expr``, and -- for an ``expr`` -- a name that survives
@@ -1537,19 +1552,9 @@ def _validate_measurement_form(spec: dict[str, Any]) -> None:
         )
         _validate_noise_measurement(name, spec, has_other)
         return
-    if name is None or not (
-        has_spice or has_expr or has_crossings or has_cycle_mean or has_energy
-    ):
-        raise SimError(
-            "each request.measurements[] entry requires 'name' and "
-            "exactly one of 'spice' (a verbatim .meas card), 'expr' "
-            "(an ngspice expression evaluated after the analysis) or "
-            "'crossings' (a threshold-crossing time series) or "
-            "'cycle_mean' (a mean over whole reference cycles) or "
-            "'energy' (a source's energy over a transient window) or "
-            "'transfer' (an AC return-ratio metric) or "
-            "'noise' (a spot/band-integrated noise-spectrum value)"
-        )
+    _require_measurement_form(
+        name, has_spice or has_expr or has_crossings or has_cycle_mean or has_energy
+    )
     if _validate_rawfile_form(
         name,
         spec,
