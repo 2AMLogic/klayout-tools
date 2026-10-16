@@ -147,6 +147,9 @@ _ANGLE_CHECKS = {"angle"}
 # both kinds (`_run_vertex_check`), so adding a third vertex check kind does
 # not add another branch to `run_drc` itself.
 _VERTEX_CHECKS = _GRID_CHECKS | _ANGLE_CHECKS
+# Region rules (issue #3587): a typed `DrcRule.region_spec` descriptor
+# evaluated by `_run_comp_coverage_check`, not a distance primitive.
+_COMP_COVERAGE_CHECKS = {"comp_coverage"}
 
 # Every `DerivedLayer.mode` `run_drc()` knows how to derive a region for --
 # see that class's docstring for each one's derivation. Validated per rule
@@ -292,6 +295,14 @@ INAPPLICABLE_REASON_NO_APPLICABLE_GEOMETRY = "no_applicable_geometry"
 #: :func:`_grid_is_representable` for why rounding the grid to something
 #: expressible would be worse than reporting the gap.
 SKIP_REASON_GRID_NOT_REPRESENTABLE = "grid_not_representable"
+
+#: The curated engine's second ``coverage.inapplicable[].reason`` (issue
+#: #3587): a ``"comp_coverage"`` rule whose checked layer *is* drawn but whose
+#: checked region is empty once the rule's marker exemption is applied (every
+#: COMP polygon is under an exempting marker), so there was nothing for it to
+#: constrain. Distinct from
+#: :data:`INAPPLICABLE_REASON_NO_APPLICABLE_GEOMETRY` (checked layer absent).
+INAPPLICABLE_REASON_EMPTY_CHECKED_REGION = "inapplicable_empty_checked_region"
 
 
 def _grid_is_representable(rule: DrcRule, dbu: float) -> bool:
@@ -674,7 +685,10 @@ def _rule_outside_voltage_gate(
 
 
 def _classify_skipped_rules(
-    deck: list[DrcRule], rules_skipped: list[str], layout: Any
+    deck: list[DrcRule],
+    rules_skipped: list[str],
+    layout: Any,
+    empty_checked_region_ids: frozenset[str] = frozenset(),
 ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
     """Split ``rules_skipped`` into common-coverage *skipped* and
     *inapplicable* records (issue #2110).
@@ -732,6 +746,11 @@ def _classify_skipped_rules(
     categories, unchanged: it is the pre-contract spelling of "did not run",
     and this classification is additive to it.
 
+    ``empty_checked_region_ids`` (issue #3587) names the ``"comp_coverage"``
+    rules whose checked layer is drawn but whose checked region came out empty
+    (:data:`INAPPLICABLE_REASON_EMPTY_CHECKED_REGION`): a rule constraining
+    nothing in this stream, so inapplicable rather than skipped.
+
     Returns ``(skipped, inapplicable)``, each a list of ``{"id", "reason"}``
     records sorted by rule id.
     """
@@ -740,6 +759,11 @@ def _classify_skipped_rules(
     inapplicable: list[dict[str, str]] = []
     for rule in deck:
         if rule.id not in skipped_ids:
+            continue
+        if rule.id in empty_checked_region_ids:
+            inapplicable.append(
+                {"id": rule.id, "reason": INAPPLICABLE_REASON_EMPTY_CHECKED_REGION}
+            )
             continue
         vacuous = (
             any(layout.find_layer(*layer) is None for layer in _vacuity_layers(rule))
@@ -1422,6 +1446,8 @@ def run_drc(
         deck_layer_tuples.add(rule.layer)
         if rule.other_layer is not None:
             deck_layer_tuples.add(rule.other_layer)
+        if rule.region_spec is not None:
+            deck_layer_tuples.update(rule.region_spec.layers())
         if rule.derived_layer is not None:
             # `rule.layer` is only the derived rule's *reporting* identity
             # (see DerivedLayer's docstring) -- the layer(s) actually read
@@ -1447,6 +1473,7 @@ def run_drc(
     rule_counts: dict[str, int] = {}
     rules_skipped: list[str] = []
     rules_checked: list[str] = []
+    empty_checked_region_ids: set[str] = set()
 
     # Issue #2768: a rule left out of a `--rules` subset is never dispatched
     # -- not run-and-filtered (see `_dispatched_rules`). It is recorded
@@ -1478,6 +1505,19 @@ def run_drc(
         # `DerivedLayer`'s docstring. `rule.layer` itself is resolved only for
         # `coverage`/`layer_label` reporting below, never used to build the
         # checked region in this branch.
+        if _dispatch_region_rule(
+            rule,
+            layout,
+            top_cells,
+            layer_names,
+            violations,
+            rule_counts,
+            rules_checked,
+            rules_skipped,
+            empty_checked_region_ids,
+        ):
+            continue
+
         base_index: int | None = None
         intersect_index: int | None = None
         layer_index: int | None = None
@@ -1920,7 +1960,7 @@ def run_drc(
     # inapplicable work rather than a skipped request, and why anything else
     # stays a disclosed skip.
     skipped_records, inapplicable_records = _classify_skipped_rules(
-        deck, rules_skipped, layout
+        deck, rules_skipped, layout, frozenset(empty_checked_region_ids)
     )
     # Issue #2768: every deliberately omitted rule is requested work that did
     # not run -- a skip, never inapplicable, even when its layers are absent
@@ -2888,6 +2928,107 @@ def _run_density_check(region: Any, rule: DrcRule, dbu: float) -> list[Any]:
         y += window_dbu
 
     return violations
+
+
+def _dispatch_region_rule(
+    rule: DrcRule,
+    layout: Any,
+    top_cells: list[Any],
+    layer_names: dict[tuple[int, int], str],
+    violations: list[dict[str, Any]],
+    rule_counts: dict[str, int],
+    rules_checked: list[str],
+    rules_skipped: list[str],
+    empty_checked_region_ids: set[str],
+) -> bool:
+    """Run a :data:`_COMP_COVERAGE_CHECKS` rule (issue #3587), recording its
+    outcome in the caller's accumulators; ``False`` when ``rule`` is not one.
+
+    A region rule resolves its own layers (named layers other than the
+    checked one may be absent) and decides checked-vs-inapplicable itself --
+    see :func:`_run_comp_coverage_check`. Only an absent *checked* layer or
+    an empty checked region lands the rule in ``rules_skipped`` (the latter
+    also in ``empty_checked_region_ids``).
+    """
+    if rule.check not in _COMP_COVERAGE_CHECKS:
+        return False
+    if layout.find_layer(*rule.layer) is None:
+        rules_skipped.append(rule.id)  # absent checked layer
+        return True
+    found = _run_comp_coverage_check(rule, layout, top_cells, layer_names)
+    if found is None:
+        rules_skipped.append(rule.id)
+        empty_checked_region_ids.add(rule.id)
+        return True
+    rules_checked.append(rule.id)
+    violations.extend(found)
+    if found:
+        rule_counts[rule.id] = rule_counts.get(rule.id, 0) + len(found)
+    return True
+
+
+def _run_comp_coverage_check(
+    rule: DrcRule,
+    layout: Any,
+    top_cells: list[Any],
+    layer_names: dict[tuple[int, int], str],
+) -> list[dict[str, Any]] | None:
+    """``check="comp_coverage"`` (issue #3587): the rule's checked layer minus
+    every ``region_spec.covered_by_any`` layer, with whole checked polygons
+    exempted when they interact with an ``exempt_markers`` polygon -- gf180mcu
+    ``DF.12`` (``comp.not_interacting(schottky_diode).not(nplus).not(pplus)``).
+
+    Evaluated flat per top cell on merged regions. Every named layer other
+    than the checked one is read as an *empty* region when absent from the
+    stream and is never a reason to skip: an unimplanted COMP is the
+    violation. One violation per residual polygon.
+
+    Returns ``None`` when the checked region (the checked layer after the
+    marker exemption) is empty in every top cell -- the rule constrains
+    nothing here, so the caller records it as inapplicable
+    (:data:`INAPPLICABLE_REASON_EMPTY_CHECKED_REGION`), not as checked.
+    """
+    spec = rule.region_spec
+    if spec is None:
+        raise DrcError(f"rule '{rule.id}': check '{rule.check}' requires region_spec")
+    layer_label = layer_names.get(rule.layer, f"{rule.layer[0]}/{rule.layer[1]}")
+
+    def merged(cell: Any, layer: tuple[int, int]) -> Any:
+        return _cell_region_or_empty(cell, layout.find_layer(*layer)).merged()
+
+    any_checked = False
+    found: list[dict[str, Any]] = []
+    for cell in top_cells:
+        region = merged(cell, rule.layer)
+        for marker in spec.exempt_markers:
+            region = region.not_interacting(merged(cell, marker))
+        if region.is_empty():
+            continue
+        any_checked = True
+        for covering in spec.covered_by_any:
+            region = region - merged(cell, covering)
+        for polygon in region.merged().each():
+            bbox = polygon.bbox()
+            source_cell, source_path = _attribute_to_instance(cell, bbox)
+            found.append(
+                {
+                    "rule": rule.id,
+                    "description": rule.description,
+                    "check": rule.check,
+                    "layer": layer_label,
+                    "cell": cell.name,
+                    "source_cell": source_cell,
+                    "source_path": source_path,
+                    "bbox": {
+                        "left": bbox.left,
+                        "bottom": bbox.bottom,
+                        "right": bbox.right,
+                        "top": bbox.top,
+                    },
+                    "polygon": [[pt.x, pt.y] for pt in polygon.each_point_hull()],
+                }
+            )
+    return found if any_checked else None
 
 
 def _run_antenna_check(region: Any, other_region: Any | None, rule: DrcRule) -> Any:

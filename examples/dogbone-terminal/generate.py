@@ -54,6 +54,7 @@ from klayout_tools.gen import (
     CONTACT_SIZE_UM,
     ENCLOSURE_MARGIN_UM,
     UNIT_MIN_W_UM,
+    _sd_implant_margin_um,
     generate,
 )
 
@@ -112,6 +113,11 @@ _ROLE_LAYERS = {
         "poly": (30, 0),  # Poly2
         "contact": (33, 0),  # Contact
         "metal": (34, 0),  # Metal1
+        # gf180mcu's DF.12 (`comp.coverage.1`) forbids Comp not covered by
+        # Nplus/Pplus, so the device needs its n+ source/drain implant --
+        # the same layer `mos_array` draws for an NMOS unit. sky130 has no
+        # such rule (and no implant in its curated deck), so it omits this.
+        "implant": (32, 0),  # Nplus
     },
 }
 
@@ -225,6 +231,11 @@ def _draw_dogbone(layout: kdb.Layout, cell: kdb.Cell, family: str) -> float:
         layer_index = layout.layer(*layers[role])
         for x0_um, y0_um, x1_um, y1_um in box_list:
             cell.shapes(layer_index).insert(_box(x0_um, y0_um, x1_um, y1_um))
+    if "implant" in layers:
+        m = _sd_implant_margin_um(family)
+        cell.shapes(layout.layer(*layers["implant"])).insert(
+            _box(-m, -m, total_len_um + m, CONTACT_REGION_UM + m)
+        )
     return total_len_um
 
 
