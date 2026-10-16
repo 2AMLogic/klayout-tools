@@ -91,9 +91,11 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "and for the routing styles that do work",
                 default=2,
             )
+            # getattr: keeps this new hidden param out of the mypy type
+            # baseline (PCellDeclarationHelper's dynamic attrs are untyped).
             self.param(
                 "sd_implant_min_space_um",
-                self.TypeDouble,
+                getattr(self, "TypeDouble"),  # noqa: B009
                 "Harness-resolved minimum spacing between separate source/"
                 "drain implant shapes; closer ones are merged (only used "
                 "when sd_implant_present)",
@@ -393,7 +395,10 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                         c["y0_um"],
                     )
                 _close_implant_gaps(
-                    self.cell, li_sd_implant, dbu, self.sd_implant_min_space_um
+                    self.cell,
+                    li_sd_implant,
+                    dbu,
+                    getattr(self, "sd_implant_min_space_um"),  # noqa: B009
                 )
 
             # Shared device-pair-footprint box (well margin), used by the
