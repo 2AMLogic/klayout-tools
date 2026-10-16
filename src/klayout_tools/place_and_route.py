@@ -2017,6 +2017,121 @@ def run_place_and_route(
     )
 
 
+def _validate_stage_prerequisites(
+    *,
+    stage_index: int,
+    target_stage: str,
+    cell_library: str,
+    clock_port: str | None,
+    io_spec: dict[str, Any] | None,
+    power: dict[str, Any] | None,
+) -> None:
+    """Fail with a clear request error when ``target_stage`` (or
+    ``request.power``) needs inputs or per-library tables this request lacks
+    (extracted from :func:`_run_single_corner`, issue #3507, to keep its
+    cyclomatic complexity from growing)."""
+    # Stages beyond "floorplan" need a clock -- P&R signoff (CTS, routing,
+    # timing-driven repair) has no meaning without one, and STA/`-metrics`
+    # would otherwise report an unconstrained-design sentinel instead of a
+    # real number. `_validate_constraints` already enforced clock_port and
+    # clock_period_ns are given together; this additionally requires them
+    # once a caller actually asks for a stage that needs them.
+    if stage_index >= STAGE_ORDER.index("place") and clock_port is None:
+        raise PlaceAndRouteError(
+            "request.constraints.clock_port/clock_period_ns are required to "
+            f"reach target_stage '{target_stage}'"
+        )
+    if stage_index >= STAGE_ORDER.index("place") and io_spec is None:
+        raise PlaceAndRouteError(
+            f"request.io.layer_h/layer_v are required to reach target_stage "
+            f"'{target_stage}'"
+        )
+    if (
+        stage_index >= STAGE_ORDER.index("cts")
+        and cell_library not in _CTS_BUFFER_CELLS
+    ):
+        raise PlaceAndRouteError(
+            f"no clock-tree buffer cell known for standard-cell library "
+            f"'{cell_library}' (supported: {', '.join(sorted(_CTS_BUFFER_CELLS))}) "
+            f"-- cannot reach target_stage '{target_stage}'"
+        )
+    if (
+        stage_index >= STAGE_ORDER.index("route")
+        and cell_library not in _ROUTING_LAYER_RANGE
+    ):
+        raise PlaceAndRouteError(
+            f"no routing-layer range known for standard-cell library "
+            f"'{cell_library}' (supported: {', '.join(sorted(_ROUTING_LAYER_RANGE))}) "
+            f"-- cannot reach target_stage '{target_stage}'"
+        )
+    if (
+        stage_index >= STAGE_ORDER.index("route")
+        and cell_library not in _ANTENNA_DIODE_CELLS
+    ):
+        raise PlaceAndRouteError(
+            f"no antenna-diode cell known for standard-cell library "
+            f"'{cell_library}' (supported: {', '.join(sorted(_ANTENNA_DIODE_CELLS))}) "
+            f"-- cannot reach target_stage '{target_stage}'"
+        )
+    # `request.power` (issue #1091): its own PDN/tapcell Tcl always runs at
+    # the end of the "floorplan" stage (the first stage every run reaches),
+    # so these table lookups are unconditional on `stage_index` -- unlike
+    # the CTS/routing-layer/antenna-diode checks above, which only apply
+    # once a run actually reaches the stage that needs them.
+    if power is not None and cell_library not in _POWER_PIN_PATTERNS:
+        raise PlaceAndRouteError(
+            f"no power pin-pattern table known for standard-cell library "
+            f"'{cell_library}' (supported: {', '.join(sorted(_POWER_PIN_PATTERNS))}) "
+            "-- cannot honor request.power"
+        )
+    # A library in `_NO_TAPCELL_LIBRARIES` (issue #2441) is the one
+    # deliberate exception: its PDK states it ships no tap/endcap cells at
+    # all, so `request.power` skips the `tapcell` line and runs every other
+    # power-delivery step. A library in *neither* table still raises -- the
+    # absence there means "unverified", not "none exist".
+    if (
+        power is not None
+        and cell_library not in _TAPCELL_CELLS
+        and cell_library not in _NO_TAPCELL_LIBRARIES
+    ):
+        raise PlaceAndRouteError(
+            f"no tapcell master known for standard-cell library "
+            f"'{cell_library}' (supported: {', '.join(sorted(_TAPCELL_CELLS))}; "
+            f"libraries with no tap/endcap cells at all: "
+            f"{', '.join(sorted(_NO_TAPCELL_LIBRARIES))}) "
+            "-- cannot honor request.power"
+        )
+    if (
+        power is not None
+        and stage_index >= STAGE_ORDER.index("route")
+        and cell_library not in _FILLER_CELLS
+    ):
+        raise PlaceAndRouteError(
+            f"no filler-cell masters known for standard-cell library "
+            f"'{cell_library}' (supported: {', '.join(sorted(_FILLER_CELLS))}) "
+            f"-- cannot honor request.power at target_stage '{target_stage}'"
+        )
+    # Row-rail fallback (issue #1442): once `stage_index` reaches `"route"`
+    # on a `cell_library` with a verified `_ROW_RAIL_STRAP` entry (`power`
+    # omitted), the fallback also drives `filler_placement` -- see
+    # `_stage_script_lines`'s own `"route"` branch. A defensive check, not a
+    # reachable one today: every `_ROW_RAIL_STRAP` entry currently has a
+    # matching `_FILLER_CELLS` entry, but this guards a future
+    # `_ROW_RAIL_STRAP` addition that doesn't, with a clear error instead of
+    # a `KeyError`.
+    if (
+        power is None
+        and stage_index >= STAGE_ORDER.index("route")
+        and cell_library in _ROW_RAIL_STRAP
+        and cell_library not in _FILLER_CELLS
+    ):
+        raise PlaceAndRouteError(
+            f"no filler-cell masters known for standard-cell library "
+            f"'{cell_library}' -- cannot honor the row-rail fallback "
+            f"(issue #1442) at target_stage '{target_stage}'"
+        )
+
+
 def _run_single_corner(
     request_path: str,
     request: dict[str, Any],
@@ -2139,106 +2254,14 @@ def _run_single_corner(
     stage_index = STAGE_ORDER.index(target_stage)
     stages_to_run = STAGE_ORDER[: stage_index + 1]
 
-    # Stages beyond "floorplan" need a clock -- P&R signoff (CTS, routing,
-    # timing-driven repair) has no meaning without one, and STA/`-metrics`
-    # would otherwise report an unconstrained-design sentinel instead of a
-    # real number. `_validate_constraints` already enforced clock_port and
-    # clock_period_ns are given together; this additionally requires them
-    # once a caller actually asks for a stage that needs them.
-    if stage_index >= STAGE_ORDER.index("place") and clock_port is None:
-        raise PlaceAndRouteError(
-            "request.constraints.clock_port/clock_period_ns are required to "
-            f"reach target_stage '{target_stage}'"
-        )
-    if stage_index >= STAGE_ORDER.index("place") and io_spec is None:
-        raise PlaceAndRouteError(
-            f"request.io.layer_h/layer_v are required to reach target_stage "
-            f"'{target_stage}'"
-        )
-    if (
-        stage_index >= STAGE_ORDER.index("cts")
-        and cell_library not in _CTS_BUFFER_CELLS
-    ):
-        raise PlaceAndRouteError(
-            f"no clock-tree buffer cell known for standard-cell library "
-            f"'{cell_library}' (supported: {', '.join(sorted(_CTS_BUFFER_CELLS))}) "
-            f"-- cannot reach target_stage '{target_stage}'"
-        )
-    if (
-        stage_index >= STAGE_ORDER.index("route")
-        and cell_library not in _ROUTING_LAYER_RANGE
-    ):
-        raise PlaceAndRouteError(
-            f"no routing-layer range known for standard-cell library "
-            f"'{cell_library}' (supported: {', '.join(sorted(_ROUTING_LAYER_RANGE))}) "
-            f"-- cannot reach target_stage '{target_stage}'"
-        )
-    if (
-        stage_index >= STAGE_ORDER.index("route")
-        and cell_library not in _ANTENNA_DIODE_CELLS
-    ):
-        raise PlaceAndRouteError(
-            f"no antenna-diode cell known for standard-cell library "
-            f"'{cell_library}' (supported: {', '.join(sorted(_ANTENNA_DIODE_CELLS))}) "
-            f"-- cannot reach target_stage '{target_stage}'"
-        )
-    # `request.power` (issue #1091): its own PDN/tapcell Tcl always runs at
-    # the end of the "floorplan" stage (the first stage every run reaches),
-    # so these table lookups are unconditional on `stage_index` -- unlike
-    # the CTS/routing-layer/antenna-diode checks above, which only apply
-    # once a run actually reaches the stage that needs them.
-    if power is not None and cell_library not in _POWER_PIN_PATTERNS:
-        raise PlaceAndRouteError(
-            f"no power pin-pattern table known for standard-cell library "
-            f"'{cell_library}' (supported: {', '.join(sorted(_POWER_PIN_PATTERNS))}) "
-            "-- cannot honor request.power"
-        )
-    # A library in `_NO_TAPCELL_LIBRARIES` (issue #2441) is the one
-    # deliberate exception: its PDK states it ships no tap/endcap cells at
-    # all, so `request.power` skips the `tapcell` line and runs every other
-    # power-delivery step. A library in *neither* table still raises -- the
-    # absence there means "unverified", not "none exist".
-    if (
-        power is not None
-        and cell_library not in _TAPCELL_CELLS
-        and cell_library not in _NO_TAPCELL_LIBRARIES
-    ):
-        raise PlaceAndRouteError(
-            f"no tapcell master known for standard-cell library "
-            f"'{cell_library}' (supported: {', '.join(sorted(_TAPCELL_CELLS))}; "
-            f"libraries with no tap/endcap cells at all: "
-            f"{', '.join(sorted(_NO_TAPCELL_LIBRARIES))}) "
-            "-- cannot honor request.power"
-        )
-    if (
-        power is not None
-        and stage_index >= STAGE_ORDER.index("route")
-        and cell_library not in _FILLER_CELLS
-    ):
-        raise PlaceAndRouteError(
-            f"no filler-cell masters known for standard-cell library "
-            f"'{cell_library}' (supported: {', '.join(sorted(_FILLER_CELLS))}) "
-            f"-- cannot honor request.power at target_stage '{target_stage}'"
-        )
-    # Row-rail fallback (issue #1442): once `stage_index` reaches `"route"`
-    # on a `cell_library` with a verified `_ROW_RAIL_STRAP` entry (`power`
-    # omitted), the fallback also drives `filler_placement` -- see
-    # `_stage_script_lines`'s own `"route"` branch. A defensive check, not a
-    # reachable one today: every `_ROW_RAIL_STRAP` entry currently has a
-    # matching `_FILLER_CELLS` entry, but this guards a future
-    # `_ROW_RAIL_STRAP` addition that doesn't, with a clear error instead of
-    # a `KeyError`.
-    if (
-        power is None
-        and stage_index >= STAGE_ORDER.index("route")
-        and cell_library in _ROW_RAIL_STRAP
-        and cell_library not in _FILLER_CELLS
-    ):
-        raise PlaceAndRouteError(
-            f"no filler-cell masters known for standard-cell library "
-            f"'{cell_library}' -- cannot honor the row-rail fallback "
-            f"(issue #1442) at target_stage '{target_stage}'"
-        )
+    _validate_stage_prerequisites(
+        stage_index=stage_index,
+        target_stage=target_stage,
+        cell_library=cell_library,
+        clock_port=clock_port,
+        io_spec=io_spec,
+        power=power,
+    )
 
     output_dir = os.path.join(request_dir, ".klt", "place-and-route")
     if output_subdir is not None:
