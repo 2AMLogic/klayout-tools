@@ -5,7 +5,7 @@
 #
 #   klt drc <layout.gds> --engine klayout \
 #       --deck-file src/klayout_tools/decks/asap7.drc \
-#       --expect-rule-categories 240 --format json
+#       --expect-rule-categories 248 --format json
 #
 # or directly:
 #
@@ -50,6 +50,10 @@
 # S.2), mask colouring or the PAD layer are not checked. DRM rules not implemented here, and rules only
 # approximated, are listed with reasons in asap7_rules.py and
 # docs/cli/drc.md.
+#
+# DENSITY. The DRM states no density rule (no density rule type in Table
+# 1.2.1, no density threshold in sections 3.1-3.19), so none is checked and
+# no threshold is invented (#2811; asap7_rules.DENSITY_DISPOSITION).
 #
 # GRID ORIGIN. The M4-M7 grid and track rules (M4.AUX.1 / AUX.2 and their
 # M5-M7 counterparts) use the DRM's default metal-grid offset of 0 nm
@@ -332,6 +336,17 @@ horz(sdt_ns & active).width(27.nm, projection)
   .output("SDT.ACTIVE.OV.1", "Table 3.8.1: min vertical overlap SDT and ACTIVE 27 nm")
 horz(sdt_ns & lisd).width(27.nm, projection)
   .output("SDT.LISD.OV.2", "Table 3.8.1: min vertical overlap SDT and LISD 27 nm")
+# SRAMDRC variants (DRM Table 3.8.1): the same vertical widths and overlaps
+# with the relaxed 17 nm minimum, for SDT that touches or overlaps SRAMDRC
+# ("interacting"; a polygon abutting the marker edge is in scope). They are
+# the exact complement of SDT.W.2 / SDT.ACTIVE.OV.1 / SDT.LISD.OV.2, which
+# take only SDT not interacting with SRAMDRC.
+sdt_s = sdt.interacting(sramdrc)
+vwidth(sdt_s, 17.nm).output("SRAM.SDT.W.4", "Table 3.8.1: min vertical SDT width (interacting with SRAMDRC) 17 nm")
+horz(sdt_s & active).width(17.nm, projection)
+  .output("SRAM.SDT.ACTIVE.OV.3", "Table 3.8.1: min vertical overlap SDT (interacting with SRAMDRC) and ACTIVE 17 nm")
+horz(sdt_s & lisd).width(17.nm, projection)
+  .output("SRAM.SDT.LISD.OV.4", "Table 3.8.1: min vertical overlap SDT (interacting with SRAMDRC) and LISD 17 nm")
 sdt.interacting(gate).output("SDT.GATE.AUX.1", "Table 3.8.1: SDT and GATE may not overlap or touch")
 # "Coincide" is read as "lies on, and overlaps, an ACTIVE horizontal edge":
 # the shipped cells draw SDT 4 nm past ACTIVE's vertical edge (SDT x 42..66
@@ -358,6 +373,16 @@ lisd_short.separation(lisd_long, 25.nm, projection)
   .output("LISD.S.2", "Table 3.9.1: min tip-to-side LISD spacing (one edge <= 36 nm, other > 36 nm) 25 nm")
 lisd_tip.space(27.nm, projection)
   .output("LISD.S.3", "Table 3.9.1: min tip-to-tip LISD spacing (outside SRAMDRC, both edges 24..36 nm) 27 nm")
+# SRAM.LISD.S.4: tip-to-tip spacing for LISD interacting with SRAMDRC, edges
+# of any length up to 36 nm. Both polygons must interact with SRAMDRC (the DRM
+# says "two LISD polygons (interacting with SRAMDRC)"); a pair with only one
+# of them in scope is covered by neither this rule nor LISD.S.3.
+lisd_sram_short = lisd.interacting(sramdrc).edges.with_length(nil, 36.25.nm)
+lisd_sram_short.space(27.nm, projection)
+  .output("SRAM.LISD.S.4", "Table 3.9.1: min tip-to-tip LISD spacing (both polygons interacting with SRAMDRC, both edges <= 36 nm) 27 nm")
+# SRAM.LISD.AUX.1: a LISD that does not overlap SRAMDRC may not touch it.
+lisd.not_overlapping(sramdrc).interacting(sramdrc)
+  .output("SRAM.LISD.AUX.1", "Table 3.9.1: LISD not overlapping SRAMDRC may not touch SRAMDRC")
 lisd.with_area(nil, nm2(648)).output("LISD.A.1", "Table 3.9.1: min LISD area 648 nm^2")
 
 # --------------------------------------------------------------------------
@@ -392,6 +417,17 @@ lig.with_area(nil, nm2(324)).output("LIG.A.1", "Table 3.10.2: min LIG area 324 n
   .output("LIG.LISD.A.2", "Table 3.10.2: min area of overlap LIG and LISD 128 nm^2")
 (lig_ns & gate_nc).with_area(nil, nm2(320))
   .output("LIG.GATE.A.3", "Table 3.10.2: min area of overlap LIG (outside SRAMDRC) and GATE (not cut by GCUT) 320 nm^2")
+# SRAMDRC variants (DRM Tables 3.10.2 / 3.10.3) for LIG interacting with
+# SRAMDRC, the complement of LIG.GATE.A.3. SRAM.LIG.GATE.OV.2 is the
+# horizontal overlap across the gate (Fig. 3.10.2(c) draws its arrow across
+# the gate width), measured on the LIG/GATE intersection.
+lig_s = lig.interacting(sramdrc)
+(lig_s & gate_nc).with_area(nil, nm2(240))
+  .output("SRAM.LIG.GATE.A.4", "Table 3.10.2: min area of overlap LIG (interacting with SRAMDRC) and GATE (not cut by GCUT) 240 nm^2")
+hwidth(lig_s & gate_nc, 15.nm)
+  .output("SRAM.LIG.GATE.OV.2", "Table 3.10.3: min horizontal overlap LIG (interacting with SRAMDRC) and GATE (not cut by GCUT) 15 nm")
+lig.not_overlapping(sramdrc).interacting(sramdrc)
+  .output("SRAM.LIG.AUX.2", "Table 3.10.3: LIG not overlapping SRAMDRC may not touch SRAMDRC")
 # LIG.LISD.OV.1 is stated for LIG and LISD "connected together"; any overlap
 # connects them, so the overlap region itself is measured.
 (lig & lisd).width(8.nm)

@@ -3734,6 +3734,45 @@ def test_res_array_sky130_flavor_high_draws_psdm_and_rpm(tmp_path, pdk_root):
     assert _SKY130_NPC_LAYER in present  # issue #3077
 
 
+@pytest.mark.parametrize(
+    ("flavor", "marker_layer", "rule_id"),
+    [
+        ("high", _SKY130_RPM_LAYER, "rpm.width.1"),
+        ("xhigh", _SKY130_URPM_LAYER, "urpm.width.1"),
+    ],
+)
+def test_res_array_sky130_min_width_marker_meets_pdk_minimum(
+    tmp_path, pdk_root, flavor, marker_layer, rule_id
+):
+    """A minimum-width (0.42 um) `res_array` keeps its rpm/urpm marker at or
+    above the PDK's 1.27 um floor (`rpm.1a`/`urpm.1a`): the marker covers the
+    contacted heads, not just the narrow body (#2449). The curated deck's
+    `rpm.width.1`/`urpm.width.1` (#3030) guard that, so a regression to a
+    body-width marker is visible to `klt drc --deck sky130`."""
+    import klayout.db as kdb
+
+    output = tmp_path / f"res_array_min_{flavor}.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"flavor": flavor, "width_um": 0.42, "length_um": 52},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.top_cell()
+    marker = kdb.Region(top.begin_shapes_rec(layout.layer(*marker_layer))).merged()
+    assert not marker.is_empty()
+    for polygon in marker.each():
+        bbox = polygon.bbox()
+        assert min(bbox.width(), bbox.height()) * layout.dbu >= 1.27
+
+    drc_report = run_drc(str(output), "sky130")
+    assert rule_id not in drc_report["rule_counts"]
+
+
 def test_res_array_sky130_flavor_xhigh_draws_psdm_and_urpm(tmp_path, pdk_root):
     """`flavor='xhigh'` (`res_xhigh_po`) draws the psdm P+ implant and the urpm
     precision-resistor mask over each unit body -- and *not* rpm."""
@@ -6091,6 +6130,43 @@ def test_sg13g2_res_array_default_params_recognised_as_rsil(tmp_path, sg13g2_pdk
     # literal keeps this tied to `res_array`'s documented default `num`.
     assert report["device_counts"] == {"rsil": gen_report["device_count"]}
     assert report["dummy_devices_dropped"] == 2
+
+
+@pytest.mark.parametrize(
+    ("flavor", "device"), [("generic", "rsil"), ("rppd", "rppd"), ("rhigh", "rhigh")]
+)
+def test_sg13g2_res_array_uses_pdk_pcell_polyres_body_abutting_gatpoly_heads(
+    tmp_path, sg13g2_pdk_root, flavor, device
+):
+    """Issue #2679: `res_array` on sg13g2 draws the IHP PCell convention --
+    `polyres` is the resistive body and `GatPoly` only the two abutting
+    heads (zero overlap) -- and every flavour round-trips through `klt
+    extract --deck sg13g2` to exactly `num` devices, each with two distinct
+    terminal nets (the body does not short its heads)."""
+    import klayout.db as kdb
+
+    output = tmp_path / f"res_array_sg13g2_{flavor}.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+            "params": {"flavor": flavor, "num": 3, "dummy": 0},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.top_cell()
+    gatpoly = kdb.Region(top.begin_shapes_rec(layout.layer(5, 0)))
+    polyres = kdb.Region(top.begin_shapes_rec(layout.layer(*_SG13G2_RES_MARK_LAYER)))
+    assert not polyres.is_empty()
+    assert (gatpoly & polyres).is_empty()
+    assert not (gatpoly.sized(1) & polyres).is_empty()
+
+    report = run_extract(str(output), "sg13g2")
+    assert report["device_counts"] == {device: 3}
+    for dev in report["devices"]:
+        assert dev["nets"]["a"] != dev["nets"]["b"]
 
 
 def test_sg13g2_res_array_explicit_generic_matches_default(tmp_path, sg13g2_pdk_root):

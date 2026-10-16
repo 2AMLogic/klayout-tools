@@ -6,7 +6,7 @@ report violations as structured data.
 ```
 klt drc <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l [--top <cell>] [--rules '<id|glob>,...'] [--pdk <variant> [--pdk-root <path>]] [--format text|json]
 klt drc --deck sky130|gf180mcu|sg13g2|sg13cmos5l --list-rules [--format text|json]
-klt drc <file> --engine klayout [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--timeout-s <seconds>] [--allow-deck-errors] [--allow-missing-host-tools] [--min-klayout-version <X.Y.Z>] [--expect-rule-categories <N> | --expect-rule-categories-file <path>] [--format text|json]
+klt drc <file> --engine klayout [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--timeout-s <seconds>] [--allow-deck-errors] [--allow-missing-host-tools] [--min-klayout-version <X.Y.Z>] [--negative-control <layout> [--negative-control-categories <A,B>]] [--expect-rule-categories <N> | --expect-rule-categories-file <path>] [--format text|json]
 klt drc <file> --deck <name> --waivers <waivers.json> [--format text|json]
 klt drc <request.json>|-|'{...}' [--format text|json]
 klt drc --check <report.json> [--rerun] [--format text|json]
@@ -63,6 +63,11 @@ klt drc --check <report.json> [--rerun] [--format text|json]
   issue #2689; ignored for `--engine curated`). Omitted (the default), no
   version check runs. See "Engine" → `"klayout"` → "Declaring a minimum
   application version".
+- `--negative-control LAYOUT` — run the same native deck first against a
+  known-bad fixture and require findings (`--engine klayout` only, issue
+  #3076). See "Engine" → `"klayout"` → "Negative control".
+- `--negative-control-categories A,B` — rule categories the fixture must
+  also produce (requires `--negative-control`).
 - `--expect-rule-categories N` — opt-in coverage assertion (`--engine
   klayout` only, issue #2697; ignored for `--engine curated`). `N` must be a
   positive integer; `0`, negatives and non-integers are rejected before
@@ -139,6 +144,8 @@ A `--engine klayout` run, with the native deck's own script globals:
 | `allow_deck_errors` | boolean | `--allow-deck-errors` |
 | `allow_missing_host_tools` | boolean | `--allow-missing-host-tools` |
 | `min_klayout_version` | string | `--min-klayout-version` (dotted decimal, e.g. `"0.30.12"`) |
+| `negative_control` | string | `--negative-control` (a path, resolved relative to the request document's directory) |
+| `negative_control_categories` | string | `--negative-control-categories` (comma-separated) |
 | `expect_rule_categories` | positive integer | `--expect-rule-categories` (booleans, floats, strings, `0` and negatives are rejected) |
 | `expect_rule_categories_file` | string | `--expect-rule-categories-file` (a path, resolved relative to the request document's own directory like `deck_file`; mutually exclusive with `expect_rule_categories`. The *names* are not inlined in the request — point at the reviewed manifest.) |
 | `pdk` | string | `--pdk` |
@@ -230,7 +237,7 @@ also the order a `--rules` subset executes in.
   "mode": "list_rules",
   "deck": "sky130",
   "engine": "curated",
-  "rule_count": 136,
+  "rule_count": 138,
   "groups": {
     "check": { "angle": 37, "area": 10, "enclosing": 17, "...": 0 },
     "scope": { "m1": 5, "poly": 1, "...": 0 }
@@ -312,7 +319,7 @@ A `--rules` run adds one top-level block, `rule_selection`, relative to the
   "selectors": ["met1.*"],
   "selected": ["met1.width.1", "met1.space.1", "met1.enclosing.mcon.1", "..."],
   "omitted": ["poly.width.1", "diff.width.1", "..."],
-  "deck_rule_count": 136,
+  "deck_rule_count": 138,
   "subset": true
 }
 ```
@@ -1237,9 +1244,9 @@ single-layer kind.
 ## Coverage
 
 The `sky130` deck is a **curated starter subset**, not the full sky130
-design rule manual (which spans hundreds of rules). It currently covers 136
+design rule manual (which spans hundreds of rules). It currently covers 138
 rules — width, spacing, area, and enclosure checks across the `poly`, `diff`,
-`tap` (issue #2321),
+`tap` (issue #2321), `rpm`/`urpm` marker width (issue #3030),
 `li1`, `met1`, `licon1`, `mcon`, `met2`, `via` (met1&lt;-&gt;met2 via1),
 `met3`-`met5`, `via2`-`via4`, `capm`/`capm2` (MiM-cap top plates), and
 `nwell` (issue #1420) layers, plus the source deck's entire
@@ -1261,7 +1268,7 @@ Broken down by check kind:
 
 | kind         | count |
 | ------------ | ----: |
-| `width`      |    18 |
+| `width`      |    20 |
 | `space`      |    13 |
 | `isolated`   |     1 |
 | `enclosing`  |    17 |
@@ -1269,7 +1276,7 @@ Broken down by check kind:
 | `area`       |    10 |
 | `ongrid`     |    38 |
 | `angle`      |    37 |
-| **total**    |**136**|
+| **total**    |**138**|
 
 (`isolated` is `nwell.space.1`, issue #1654 — see below. `area` is the
 five `met{1..5}.area.1` minimum-area rules, issue #1955, plus the five
@@ -2009,7 +2016,7 @@ in the 990-999 range — see [`docs/cli/layers.md`](layers.md) → "Semantics
 and guarantees" and [`docs/cli/stats.md`](stats.md) → "Semantics and
 guarantees".
 
-## ASAP7 deck (`--engine klayout`, issues #2760, #2810)
+## ASAP7 deck (`--engine klayout`, issues #2760, #2810, #2811)
 
 klt ships its own KLayout DRC-DSL deck for the open ASAP7 7 nm predictive
 FinFET PDK, because the pinned lambdapdk (v0.2.17) ships the ASAP7 Design
@@ -2022,7 +2029,7 @@ it is installed with the package, next to its declared rule-id list
 ```bash
 klt drc layout.gds --engine klayout \
     --deck-file src/klayout_tools/decks/asap7.drc \
-    --expect-rule-categories 240 --format json
+    --expect-rule-categories 248 --format json
 ```
 
 `--pdk asap7` does not resolve this deck: `klt pdk` finds an ASAP7 process
@@ -2039,8 +2046,11 @@ Tables 3.11.1-2. Phase 2 (#2810) adds the BEOL stack: `V0.LIG.A.1`, M1-M3
 Tables 3.1-3.19 is listed under "Not implemented" below with its reason and
 tracking issue: the track- and enclosure-relative V0-V3 rules are #3147,
 the track-, net- and M8-direction-dependent M4-M7 / V4-V7 rules are #3155,
-the ambiguous M8-M9 wide-metal spacings are #3156, and the FEOL/MOL gaps are #2812. Density checks and the full
-shipped-cell clean-run gate are #2811.
+the ambiguous M8-M9 wide-metal spacings are
+#3156, and the FEOL/MOL gaps are #2812. The DRM states no density rule,
+so the deck checks none (see "Density" below), and the pinned shipped cells
+are the acceptance gate for every implemented rule (#2811, see "Shipped
+standard cells" below).
 
 **Source.** Every rule is transcribed from the ASAP7 PDK Design Rule Manual,
 PDK Release 1p7 (`asap7_drm_201207a.pdf`, under
@@ -2067,10 +2077,10 @@ Each RDB category is the DRM rule name verbatim (DRM section 1.2.3). Where the
 DRM says a rule "applies to the layers PSELECT, SLVT, LVT, and SRAMVT as
 well" (section 3.7), or that the M1 / V1 / M4 / V4 / M6 / V6 / M8 / V8
 rules apply to the layers above them (sections 3.12-3.19), the mirrored rule
-substitutes the layer name. These 240 ids are declared once, in
+substitutes the layer name. These 248 ids are declared once, in
 `asap7_rules.RULES`; renaming or dropping one is a breaking change, and a
 test fails if the deck, that list, the fixtures or this table drift apart.
-Pass `--expect-rule-categories 240` so that a deck
+Pass `--expect-rule-categories 248` so that a deck
 which silently drops a category fails the run (exit 1) instead of reporting
 `clean`.
 
@@ -2084,11 +2094,11 @@ which silently drops a category fails the run (exit 1) instead of reporting
 | Table 3.5.2 | `ACTIVE.A.1A`, `ACTIVE.A.1B`, `ACTIVE.AUX.1` |
 | Table 3.6.1 | `GCUT.W.1`, `GCUT.ACTIVE.S.1`, `GCUT.GATE.EX.1`, `GCUT.GATE.S.2`, `GCUT.S.3`, `GCUT.AUX.1`, `GCUT.AUX.2`, `GCUT.AUX.3` |
 | Table 3.7.1 | `NSELECT.W.1`, `NSELECT.W.2`, `NSELECT.ACTIVE.EN.1`, `NSELECT.ACTIVE.EN.2`, `NSELECT.GATE.EX.1`, `NSELECT.GATE.EX.2`, `PSELECT.W.1`, `PSELECT.W.2`, `PSELECT.ACTIVE.EN.1`, `PSELECT.ACTIVE.EN.2`, `PSELECT.GATE.EX.1`, `PSELECT.GATE.EX.2`, `SLVT.W.1`, `SLVT.W.2`, `SLVT.ACTIVE.EN.1`, `SLVT.ACTIVE.EN.2`, `SLVT.GATE.EX.1`, `SLVT.GATE.EX.2`, `LVT.W.1`, `LVT.W.2`, `LVT.ACTIVE.EN.1`, `LVT.ACTIVE.EN.2`, `LVT.GATE.EX.1`, `LVT.GATE.EX.2`, `SRAMVT.W.1`, `SRAMVT.W.2`, `SRAMVT.ACTIVE.EN.1`, `SRAMVT.ACTIVE.EN.2`, `SRAMVT.GATE.EX.1`, `SRAMVT.GATE.EX.2`, `NSELECT.PSELECT.AUX.1`, `VT.AUX.2` |
-| Table 3.8.1 | `SDT.W.1`, `SDT.W.2`, `SDT.W.3`, `SDT.S.1`, `SDT.GATE.S.2`, `SDT.ACTIVE.OV.1`, `SDT.LISD.OV.2`, `SDT.GATE.AUX.1`, `SDT.ACTIVE.AUX.2`, `SDT.ACTIVE.AUX.3`, `SDT.LISD.AUX.4` |
-| Table 3.9.1 | `LISD.W.1`, `LISD.S.1`, `LISD.S.2`, `LISD.S.3`, `LISD.A.1` |
+| Table 3.8.1 | `SDT.W.1`, `SDT.W.2`, `SDT.W.3`, `SDT.S.1`, `SDT.GATE.S.2`, `SDT.ACTIVE.OV.1`, `SDT.LISD.OV.2`, `SDT.GATE.AUX.1`, `SDT.ACTIVE.AUX.2`, `SDT.ACTIVE.AUX.3`, `SDT.LISD.AUX.4`, `SRAM.SDT.W.4`, `SRAM.SDT.ACTIVE.OV.3`, `SRAM.SDT.LISD.OV.4` |
+| Table 3.9.1 | `LISD.W.1`, `LISD.S.1`, `LISD.S.2`, `LISD.S.3`, `LISD.A.1`, `SRAM.LISD.S.4`, `SRAM.LISD.AUX.1` |
 | Table 3.10.1 | `LIG.W.1`, `LIG.S.1`, `LIG.S.2`, `LIG.S.3`, `LIG.S.4`, `LIG.S.5`, `LIG.LISD.S.6`, `LIG.LISD.S.7`, `LIG.SDT.S.8` |
-| Table 3.10.2 | `LIG.GATE.S.9A`, `LIG.GATE.S.9B`, `LIG.GATE.S.10`, `LIG.GCUT.S.11`, `LIG.A.1`, `LIG.LISD.A.2`, `LIG.GATE.A.3`, `LIG.GATE.AUX.1` |
-| Table 3.10.3 | `LIG.LISD.OV.1`, `LIG.GATE.EX.1` |
+| Table 3.10.2 | `LIG.GATE.S.9A`, `LIG.GATE.S.9B`, `LIG.GATE.S.10`, `LIG.GCUT.S.11`, `LIG.A.1`, `LIG.LISD.A.2`, `LIG.GATE.A.3`, `SRAM.LIG.GATE.A.4`, `LIG.GATE.AUX.1` |
+| Table 3.10.3 | `LIG.LISD.OV.1`, `LIG.GATE.EX.1`, `SRAM.LIG.AUX.2`, `SRAM.LIG.GATE.OV.2` |
 | Table 3.11.1 | `V0.W.1` |
 | Table 3.11.2 | `V0.AUX.1`, `V0.LIG.A.1` |
 | Table 3.12.1 | `M1.W.1`, `M1.S.1`, `M1.S.2`, `M1.S.3`, `M1.S.4`, `M1.S.5`, `M1.S.6`, `M1.A.1`, `M2.W.1`, `M2.S.1`, `M2.S.2`, `M2.S.3`, `M2.S.4`, `M2.S.5`, `M2.S.6`, `M2.A.1`, `M3.W.1`, `M3.S.1`, `M3.S.2`, `M3.S.3`, `M3.S.4`, `M3.S.5`, `M3.S.6`, `M3.A.1` |
@@ -2117,6 +2127,8 @@ which silently drops a category fails the run (exit 1) instead of reporting
 | `LIG.LISD.S.7` | Table 3.10.1 | 'same net' is conductor connectivity through transistor source/drain ACTIVE, SDT, LISD, LIG, GATE (not cut), V0, M1-M9 and V1-V9 only: ACTIVE is split at the GATE, the substrate and WELL are not modelled, and a shape that reaches no other conductor is a net of its own; corner-to-corner read as Euclidean spacing between edges whose projections onto each other overlap by less than one database unit |
 | `LIG.SDT.S.8` | Table 3.10.1 | 'same net' is conductor connectivity through transistor source/drain ACTIVE, SDT, LISD, LIG, GATE (not cut), V0, M1-M9 and V1-V9 only: ACTIVE is split at the GATE, the substrate and WELL are not modelled, and a shape that reaches no other conductor is a net of its own; spacing is Euclidean, in any direction |
 | `LIG.LISD.OV.1` | Table 3.10.3 | any LIG/LISD overlap is treated as 'connected together' |
+| `SRAM.LISD.S.4` | Table 3.9.1 | both polygons must interact with SRAMDRC, as the DRM words it; a pair with only one of them in scope is covered by neither this rule nor `LISD.S.3` (which takes polygons lying completely outside SRAMDRC) |
+| `SRAM.LIG.GATE.OV.2` | Table 3.10.3 | the DRM gives no direction; read as the horizontal overlap across the gate width, as Fig. 3.10.2(c) draws it, measured on the LIG/GATE intersection |
 | `V0.W.1` | Table 3.11.1 | stated along the M1 length; checked in both directions (V0 is as wide as M1 across the track per V0.M1.AUX.3) |
 | `M1.S.6` | Table 3.12.1 | corner-to-corner read as Euclidean spacing between edges whose projections onto each other overlap by less than one database unit |
 | `M2.S.6` | Table 3.12.1 | corner-to-corner read as Euclidean spacing between edges whose projections onto each other overlap by less than one database unit |
@@ -2214,6 +2226,38 @@ Related notes:
   BEOL rule here. They draw nothing on M3-M9 or V2-V9, so those rules are
   exercised by the generated fixtures only.
 
+### Density
+
+**The pinned DRM states no density rule, so the deck checks no density.**
+Reviewed source: ASAP7 PDK Design Rule Manual, PDK Release 1p7,
+`asap7_drm_201207a.pdf` as shipped by lambdapdk v0.2.17 (79 PDF pages,
+SHA-256 `0091ea9ecc54f1331428821e1a7356ec4a7a13d49c2924a60305c11587c478e9`),
+reviewed for #2811:
+
+- Table 1.2.1 (rule types, p. 9) lists `A`, `EN`, `EX`, `GEOMETRY`, `L`,
+  `LUP`, `OV`, `R`, `S`, `SRAM`, `W` and `AUX`. There is no density type.
+- Chapter 3 has sections 3.1 (Geometry Check) to 3.19 (V8-V9), one per layer
+  group. None of them has a density section, and no table gives a minimum or
+  maximum layer density, a density window or step, or a fill requirement.
+  The DRM never uses the words "density" or "fill" for a rule.
+- Outside the DRM, lambdapdk v0.2.17 carries density numbers only in router
+  and flow setup files, and the deck does not take rules from them. The APR
+  tech LEF (`base/apr/asap7_tech.lef`) gives `MINIMUMDENSITY` /
+  `MAXIMUMDENSITY` on two layers only: `M5` (15 % / 90 %, 20 um window,
+  10 um step) and `Pad` (20 % / 80 %, 100 um window, 50 um step). It gives
+  none for M1-M4 or M6-M9. The DRM has no matching rule, the deck does not
+  read PAD (`V9.PAD.EN.2` above), and a limit on M5 alone does not describe
+  the metal stack, so these LEF numbers are not used as DRM rules. The
+  density values in lambdapdk's Python setup are a yield defect density and
+  an OpenROAD placement-utilisation target, not layout density rules.
+  `asap7.lyp` and `asap7.lyt` have no density rule.
+
+No threshold is taken from shipped-cell geometry, the tech LEF or another
+PDK, and no `*.DEN.*` id is declared, so `--expect-rule-categories` does not
+change. If a later DRM revision adds density rules, they need a pin bump and
+their own fixtures. `asap7_rules.DENSITY_DISPOSITION` records this decision
+in code.
+
 ### Integer-multiple vertical widths (`ACTIVE.W.2`, `SDT.W.3`)
 
 DRM Tables 3.5.1 and 3.8.1 (Figs. 3.5.1 and 3.8.1: `= N x ACTIVE.W.1` /
@@ -2300,16 +2344,12 @@ Nothing in Tables 3.14-3.19 is left out for want of mask colouring.
 
 | Rule ids | DRM table | Reason | Tracked by |
 | --- | --- | --- | --- |
-| `GATE.AUX.2` | Table 3.4.1 | the DRM gives no distance bound to check against | #2812 |
+| `GATE.AUX.2` | Table 3.4.1 | no distance bound, but a topological condition (a GATE column split into separate polygons, Fig. 3.4.2(a)); the DRM does not say how far two GATE polygons may overlap sideways to share a column, so the predicate needs that reading ratified before it is enforced | #2812 |
 | `SRAM.ACTIVE.WELL.S.5`, `SRAM.ACTIVE.WELL.EN.2` | Table 3.5.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
 | `SRAM.ACTIVE.A.2A`, `SRAM.ACTIVE.A.2B`, `SRAM.ACTIVE.AUX.2` | Table 3.5.2 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
-| `ACTIVE.AUX.3` | Table 3.5.2 | the DRM gives no distance bound to check against | #2812 |
+| `ACTIVE.AUX.3` | Table 3.5.2 | no distance bound, but a topological condition (a slot cut into a vertical ACTIVE edge, Fig. 3.5.4(b)); the DRM defines neither 'notch' nor its size, so the predicate needs that reading ratified before it is enforced | #2812 |
 | `ACTIVE.LUP.1` | Table 3.5.2 | DRM-confirmed 30 um maximum, but the DRM defines no tap layer, distance metric or connectivity test; no sound predicate yet (evidence: [ACTIVE.LUP.1 evidence](#activelup1-evidence)) | #2812 |
 | `SRAM.NSELECT.ACTIVE.EN.3`, `SRAM.NSELECT.ACTIVE.EN.4` | Table 3.7.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
-| `SRAM.SDT.W.4`, `SRAM.SDT.ACTIVE.OV.3`, `SRAM.SDT.LISD.OV.4` | Table 3.8.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
-| `SRAM.LISD.S.4`, `SRAM.LISD.AUX.1` | Table 3.9.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
-| `SRAM.LIG.GATE.A.4` | Table 3.10.2 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
-| `SRAM.LIG.AUX.2`, `SRAM.LIG.GATE.OV.2` | Table 3.10.3 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
 | `V0.S.1` | Table 3.11.1 | classified by routing track (same / parallel / aligned tracks); the deck has no routing-direction or track assignment | #3147 |
 | `V0.S.2`, `V0.S.3`, `V0.S.4` | Table 3.11.1 | corner-to-corner spacing conditioned on a 5 nm metal end-cap; needs per-via end-cap classification against the upper metal | #3147 |
 | `V0.M1.EN.1` | Table 3.11.1 | exact (==) or per-side paired enclosure ('5 & 2', '(5 & 5) | (5 & 0)') needs routing direction and a per-side enclosure predicate | #3147 |
@@ -2343,6 +2383,70 @@ Nothing in Tables 3.14-3.19 is left out for want of mask colouring.
 | `M8.S.5`, `M8.S.6`, `M8.S.7`, `M8.S.8` | Table 3.18.2 | read literally (edge length) they override M8.S.1-S.3: every edge of 80 nm or more would need 80-1000 nm, so S.1's 40 nm could never apply; the intended width-class reading is not stated | #3156 |
 | `M9.S.4` | Table 3.18.1 | read literally (edge length) it overrides M8.S.2-S.3: an edge of 60-80 nm would need 60 nm, so S.2's 43 nm and S.3's 46 nm could never apply to it; the intended width-class reading is not stated | #3156 |
 | `M9.S.5`, `M9.S.6`, `M9.S.7`, `M9.S.8` | Table 3.18.2 | read literally (edge length) they override M8.S.1-S.3: every edge of 80 nm or more would need 80-1000 nm, so S.1's 40 nm could never apply; the intended width-class reading is not stated | #3156 |
+
+### Topology gaps: `GATE.AUX.2` and `ACTIVE.AUX.3`
+
+Both rules are auxiliary rules with no numeric value, which is why they were
+first filed as having "no distance bound". Reading the pinned DRM (Table
+3.4.1 with notes 2-3 and Fig. 3.4.2(a)/(d); Table 3.5.2 and Fig. 3.5.4(b))
+and running the deck on generated drawings shows each is a topological
+condition, not an unbounded distance. **Both stay declared gaps** and the
+deck's rule categories are unchanged; this section records the evidence and
+the predicate a separately reviewed implementation would start from.
+`tests/test_drc_asap7_deck.py::test_topology_gap_probes_stay_silent` pins the
+measurements below.
+
+**`GATE.AUX.2`** -- "GATE may not be discontinuous along the vertical axis".
+Fig. 3.4.2(a) marks two same-column GATE polygons separated by empty space
+illegal; Fig. 3.4.2(d) and note 2 say a cut is drawn as one GATE polygon with
+GCUT over it. Measured: stacked 20 nm GATE polygons in one column with a gap
+of 1, 20, 50, 100, 500 and 2000 nm trip no existing rule, and neither does the
+same pair with GCUT drawn over the gap (note 2 still forbids that drawing).
+Abutting polygons merge into one and are legal.
+
+Candidate predicate, checked in a scratch deck against the same drawings: on
+the merged GATE region, shrink each polygon 1 nm sideways, extend it vertically
+across the layout height, and report a column holding two or more GATE
+polygons. It reports every gap above, reports the GCUT-over-gap pair, and does
+not report the abutting pair, the single cut GATE or a neighbouring column. It
+reports nothing on any of the 212 cells of each pinned library (zero
+vertically stacked GATE pairs, measured with the Python API). What is
+**not** decided by the DRM: a polygon offset sideways by less than its own
+width still shares part of a column, so whether that is "the same column" is
+a reading to ratify (`GATE.W.1` and `GATE.S.1` already flag such offsets).
+
+**`ACTIVE.AUX.3`** -- "A notch in ACTIVE along vertical axis is not allowed".
+Fig. 3.5.4(b) draws the illegal notch as a rectangular slot cut into a
+vertical ACTIVE edge, so the slot opens sideways and its end wall is a
+vertical edge. The text alone is ambiguous about orientation, and the
+pinned cells settle it: of the 212 cells per library, 33 ACTIVE polygons
+(identical in all three libraries) have a slot whose end wall is a
+*horizontal* edge (a notch cut into a horizontal edge), while none has a
+slot whose end wall is a vertical edge. Reading the rule as forbidding the
+horizontal-edge slot would make shipped DRM-clean cells fail it.
+Measured on generated drawings: a slot cut into a vertical edge of a 100 x 162
+nm ACTIVE (20 nm deep, 54 nm up from the bottom) trips `ACTIVE.S.1` when it is
+26 nm tall or less, and `ACTIVE.W.2` for every height except 27 nm (the strip
+left above the slot is then not a multiple of 27 nm, so that rule reports the
+strip, not the notch); a 27 nm slot trips nothing at all. A 30 nm slot trips
+only `ACTIVE.W.2` at depths of 5, 20 and 60 nm. L- and vertical-finger
+U-shapes whose steps are multiples of 27 nm trip nothing.
+
+Candidate predicate: a merged ACTIVE polygon with two consecutive reflex
+corners joined by a vertical edge. On the generated drawings it flags exactly
+the slots cut into a vertical edge, including those `ACTIVE.S.1` already
+reports, and not the L, T or vertical-finger U shapes. **Not decided by the
+DRM:** how deep or wide a slot must be to count as a "notch" rather than the
+gap between two horizontal fingers. The predicate above flags any size, so a
+wide C-shaped ACTIVE would be reported; whether that is intended needs
+ratifying.
+
+**Follow-up acceptance criteria for an implementation** (not done here): add
+`GATE.AUX.2` and `ACTIVE.AUX.3` to the deck and `RULES`, with a failing and a
+boundary-passing fixture each, covering the cases above; keep the 212-cell
+shipped-library regression clean without extending
+`SHIPPED_CELL_DEVIATIONS`; update `--expect-rule-categories` and the counts
+in this document in the same change.
 
 ### ACTIVE.LUP.1 evidence
 
@@ -2395,23 +2499,69 @@ Follow-up acceptance criteria if the missing definitions are established
 
 ### Shipped standard cells
 
+The pinned shipped cells are the acceptance gate for every rule the deck
+implements (FEOL/MOL and BEOL). The gate does not mean every DRM rule is
+implemented: the rules under "Not implemented" above stay with their own
+issues, and the gate follows `RULE_IDS` as they are at each commit.
+
 `tests/test_drc_asap7_deck.py` runs the deck on all 212 cells of each pinned
 library (`asap7sc7p5t_28_R`, `_L` and `_SL`), each cell abutted between two
 `INVx1` cells as in a placed row. Row-only cells such as `FILLERxp5` and
 `TAPCELL_WITH_FILLER` carry 54 nm WELL/select slivers that are legal only
 abutted, so checking cells in isolation would report width violations that a
-placed row does not have. The test skips with a reason when `pdks/lambdapdk`
-is not fetched or the `klayout` binary is missing.
+placed row does not have. Every layout is written to a temporary directory;
+the pinned `.gds.gz` files are only read. The PDK tests skip with a reason
+when `pdks/lambdapdk` is not fetched (`scripts/fetch-pdks.sh`) or a pinned
+library GDS is missing, and the deck tests skip when the `klayout` binary is
+missing. CI's `asap7-drc-deck` job does not fetch the PDK, so there these
+tests skip and run only where the PDK is fetched.
 
-Every cell is clean except these ten (same in all three libraries), which
-violate `SDT.ACTIVE.AUX.2` as the DRM states it. Each draws SDT 81 nm tall
-over a 54 nm ACTIVE, so the SDT's top edge is not on an ACTIVE edge, which
-Fig. 3.8.1(d) marks illegal. The rule is not loosened; the deviation is
-recorded in `asap7_rules.SHIPPED_CELL_DEVIATIONS` and the test fails if the
-set changes:
+The gate has two parts, run for each library:
 
-`AO33x2`, `BUFx2`, `BUFx4`, `BUFx4f`, `CKINVDCx9p33`, `ICGx2p67DC`,
-`ICGx4DC`, `ICGx5p33DC`, `ICGx6p67DC`, `OAI22xp33` (each `_ASAP7_75t_<VT>`).
+1. **Full corpus, exact deviations.** Every cell is placed. The set of
+   `(cell, rule)` pairs that violate must equal
+   `asap7_rules.SHIPPED_CELL_DEVIATIONS` (derived from
+   `SHIPPED_CELL_DEVIATION_RECORDS`). A new violation, a different rule on a
+   listed cell, or a listed deviation that goes away all fail the test. The
+   report's `coverage.rule_categories` must equal `RULE_IDS` as a set, so a
+   rule that is added, renamed or dropped cannot be missed.
+2. **Clean run through the CLI.** A temporary layout holds every cell except
+   the documented deviating cells below, and nothing else is left out. The
+   test runs
+
+   ```bash
+   klt drc <cells.gds> --engine klayout \
+       --deck-file src/klayout_tools/decks/asap7.drc \
+       --expect-rule-categories 232 --format json
+   ```
+
+   and requires exit 0, `status: "clean"`, no violations, a satisfied
+   coverage assertion, and `coverage.rule_categories` equal to `RULE_IDS`.
+   The count passed to `--expect-rule-categories` comes from `len(RULE_IDS)`.
+
+**Retained deviations.** These ten cells violate `SDT.ACTIVE.AUX.2` as the
+DRM states it. They are the same in all three libraries (names drop the
+`_ASAP7_75t_<VT>` suffix). Table 3.8.1 says SDT horizontal edges (SDT not
+interacting with SRAMDRC) must coincide with ACTIVE horizontal edges, and
+Fig. 3.8.1(d) marks an SDT edge that is not on an ACTIVE edge as illegal.
+The rule is not loosened and the deck does not waive anything. Each deviation
+is an exact `(cell, rule)` entry, never a rule-wide or cell-wide waiver.
+Leaving a cell out of the clean run does not hide its other rules, because
+the full-corpus run still requires that cell to violate only the listed
+rule:
+
+| Cell | Rule | DRM citation | Libraries | Rationale | Handling |
+| --- | --- | --- | --- | --- | --- |
+| `AO33x2` | `SDT.ACTIVE.AUX.2` | Table 3.8.1, Fig. 3.8.1(d) | R, L, SL | SDT drawn 81 nm tall over a 54 nm ACTIVE: the SDT top edge is not on an ACTIVE horizontal edge | kept as stated; expected exactly; left out of the clean run |
+| `BUFx2` | `SDT.ACTIVE.AUX.2` | Table 3.8.1, Fig. 3.8.1(d) | R, L, SL | SDT drawn 81 nm tall over a 54 nm ACTIVE: the SDT top edge is not on an ACTIVE horizontal edge | kept as stated; expected exactly; left out of the clean run |
+| `BUFx4` | `SDT.ACTIVE.AUX.2` | Table 3.8.1, Fig. 3.8.1(d) | R, L, SL | SDT drawn 81 nm tall over a 54 nm ACTIVE: the SDT top edge is not on an ACTIVE horizontal edge | kept as stated; expected exactly; left out of the clean run |
+| `BUFx4f` | `SDT.ACTIVE.AUX.2` | Table 3.8.1, Fig. 3.8.1(d) | R, L, SL | SDT drawn 81 nm tall over a 54 nm ACTIVE: the SDT top edge is not on an ACTIVE horizontal edge | kept as stated; expected exactly; left out of the clean run |
+| `CKINVDCx9p33` | `SDT.ACTIVE.AUX.2` | Table 3.8.1, Fig. 3.8.1(d) | R, L, SL | SDT drawn 81 nm tall over a 54 nm ACTIVE: the SDT top edge is not on an ACTIVE horizontal edge | kept as stated; expected exactly; left out of the clean run |
+| `ICGx2p67DC` | `SDT.ACTIVE.AUX.2` | Table 3.8.1, Fig. 3.8.1(d) | R, L, SL | SDT drawn 81 nm tall over a 54 nm ACTIVE: the SDT top edge is not on an ACTIVE horizontal edge | kept as stated; expected exactly; left out of the clean run |
+| `ICGx4DC` | `SDT.ACTIVE.AUX.2` | Table 3.8.1, Fig. 3.8.1(d) | R, L, SL | SDT drawn 81 nm tall over a 54 nm ACTIVE: the SDT top edge is not on an ACTIVE horizontal edge | kept as stated; expected exactly; left out of the clean run |
+| `ICGx5p33DC` | `SDT.ACTIVE.AUX.2` | Table 3.8.1, Fig. 3.8.1(d) | R, L, SL | SDT drawn 81 nm tall over a 54 nm ACTIVE: the SDT top edge is not on an ACTIVE horizontal edge | kept as stated; expected exactly; left out of the clean run |
+| `ICGx6p67DC` | `SDT.ACTIVE.AUX.2` | Table 3.8.1, Fig. 3.8.1(d) | R, L, SL | SDT drawn 81 nm tall over a 54 nm ACTIVE: the SDT top edge is not on an ACTIVE horizontal edge | kept as stated; expected exactly; left out of the clean run |
+| `OAI22xp33` | `SDT.ACTIVE.AUX.2` | Table 3.8.1, Fig. 3.8.1(d) | R, L, SL | SDT drawn 81 nm tall over a 54 nm ACTIVE: the SDT top edge is not on an ACTIVE horizontal edge | kept as stated; expected exactly; left out of the clean run |
 
 ### Per-rule fixtures
 
@@ -3230,3 +3380,43 @@ suppressed) and `example.drc.json` with `provenance` stripped, so a
 regeneration on an unchanged tree leaves `git status` clean —
 `tests/test_drc.py::test_example_generator_reproduces_committed_fixtures`
 guards exactly that.
+
+#### Machine-readable failure codes
+
+A second opinion that *could not run* is distinguishable from bad input
+without parsing prose (issue #3076). With `--format json` the error envelope
+carries `error.code` (exit stays `1`, so no contract break):
+
+| `error.code` | Meaning |
+| ------------ | ------- |
+| `klayout_unavailable` | the standalone `klayout` binary is missing or could not be launched |
+| `klayout_version_too_old` | the detected version is below `--min-klayout-version` |
+| `negative_control_failed` | see "Negative control" |
+
+Any other failure carries no code. Exit `1` is deliberate: an exit-0 "could
+not run" is what a CI script could mistake for clean.
+
+#### Deck tree identity
+
+`provenance.deck.content_hash` pins the entry script. When that script pulls
+in other files through literal `require`/`require_relative`/`load`, the
+report also carries an additive `provenance.deck.tree`:
+`{"file_count", "content_hash", "release"}` — a sha256 over the sorted
+(relative path, file hash) pairs of the entry script plus every reachable
+literal include, and `git describe --tags --always --dirty` of the deck's
+checkout (`null` if not a git checkout). Single-file decks omit the field.
+Computed include paths are not followed. `klt drc --check` re-hashes the tree
+and reports `provenance.deck.tree.content_hash` drift. Additive, so
+`schema_version` is unchanged (`docs/json-contract.md`: optional fields are
+additive).
+
+#### Negative control
+
+`--negative-control LAYOUT` (request field `negative_control`) runs the same
+deck, with the same options, against a layout you know violates it, before
+the real run. Zero violations — or a missing `--negative-control-categories`
+entry — fails the run with `error.code` `negative_control_failed` (exit `1`),
+because a deck that flags nothing on known-bad input may not have executed.
+On success the report carries `negative_control`:
+`{"file", "status": "passed", "violation_count", "rules_found",
+"expected_categories"}`.
