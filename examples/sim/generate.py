@@ -167,8 +167,9 @@ def write_monte_carlo_instances_example() -> None:
     """A per-instance mismatch-selection example (issue #2995): only the
     differential pair's devices (`xm1`, `xm2`) keep sky130's local mismatch
     on, so the spread is attributable to them alone. Needs the sky130A PDK
-    installed (unlike the synthetic examples above), so it is illustrative
-    and not run by the test suite -- the gating itself is covered offline in
+    installed (unlike the synthetic examples above), so the suite does not run
+    it; tests/test_sim_examples.py validates the request offline against a stub
+    model library, and the gating itself is covered in
     tests/test_sim_mismatch_gate.py."""
     path = os.path.join(_DIR, "testbench-mc-instances.spice")
     with open(path, "w", encoding="utf-8") as handle:
@@ -187,7 +188,7 @@ def write_monte_carlo_instances_example() -> None:
     request = {
         "netlist": "testbench-mc-instances.spice",
         "engine": "ngspice",
-        "models": {"pdk": "sky130A"},
+        "models": {"pdk": "sky130A", "lib": "libs.tech/ngspice/sky130.lib.spice"},
         "corners": {"process": ["tt_mm"]},
         "monte_carlo": {
             "n": 50,
@@ -195,15 +196,15 @@ def write_monte_carlo_instances_example() -> None:
             "vary": "mismatch",
             "instances": {"include": ["xm1", "xm2"]},
         },
-        "analysis": {"kind": "op"},
+        "analysis": {"kind": "op", "args": ""},
         "measurements": [
             {
                 "name": "vdiff",
-                "spice": ".meas op vdiff PARAM='v(d1)-v(d2)'",
+                "expr": "v(d1)-v(d2)",
                 "unit": "V",
             }
         ],
-        "options": {"timeout_s": 60, "keep_artifacts": False},
+        "options": {"timeout_s": 180, "keep_artifacts": False},
     }
     req_path = os.path.join(_DIR, "request-monte-carlo-instances.json")
     with open(req_path, "w", encoding="utf-8") as handle:

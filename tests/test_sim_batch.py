@@ -963,6 +963,55 @@ def test_poll_timeout_raises_batch_poll_timeout_with_last_state(tmp_path):
     assert excinfo.value.last_state == "running"
 
 
+def test_poll_reports_each_state_change_once(tmp_path):
+    runner = _FakeRunner()
+    runner.queue("status.json", fake_completed(returncode=1, stderr="404"))
+    for state in ("running", "running", "interrupted", "running", "done"):
+        runner.queue("status.json", fake_completed(_status(state)))
+    seen: list[str] = []
+
+    sb.poll_status(
+        _config(tmp_path),
+        "job-1",
+        runner=runner,
+        sleep=runner.sleep,
+        on_state=seen.append,
+    )
+    assert seen == ["running", "interrupted", "running", "done"]
+
+
+def test_poll_never_started_job_raises_before_the_serial_budget(tmp_path):
+    runner = _FakeRunner()
+    runner.default = fake_completed(returncode=1, stderr="404")
+    clock = iter([0.0, 0.0, 900.0, 1800.0, 1800.0])
+
+    with pytest.raises(sb.BatchPollTimeout, match="never started") as excinfo:
+        sb.poll_status(
+            _config(tmp_path, poll_timeout_s=36000.0),
+            "job-1",
+            runner=runner,
+            sleep=runner.sleep,
+            monotonic=lambda: next(clock),
+        )
+    assert excinfo.value.last_state is None
+
+
+def test_poll_started_job_keeps_the_serial_budget(tmp_path):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("running"))
+    clock = iter([0.0, 0.0, 1900.0, 5000.0, 9000.0])
+
+    with pytest.raises(sb.BatchPollTimeout, match="did not reach") as excinfo:
+        sb.poll_status(
+            _config(tmp_path, poll_timeout_s=6000.0),
+            "job-1",
+            runner=runner,
+            sleep=runner.sleep,
+            monotonic=lambda: next(clock),
+        )
+    assert excinfo.value.last_state == "running"
+
+
 def test_poll_rejects_an_undocumented_state(tmp_path):
     runner = _FakeRunner()
     runner.default = fake_completed(_status("confused"))
@@ -2185,6 +2234,70 @@ def test_timed_out_job_recovers_an_envelope_but_keeps_its_code(tmp_path, monkeyp
     assert environment["state"] == "timeout"
 
 
+def _fake_clock():
+    ticks = iter(range(100))
+    return lambda: f"2026-10-15T17:00:{next(ticks):02d}.000000Z"
+
+
+def test_failed_job_reports_client_timestamps_up_to_terminal(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("failed", exit_code="1"))
+
+    _, _, environment = _run_failed_job(
+        tmp_path, monkeypatch, runner, points=1, now=_fake_clock()
+    )
+
+    assert environment["client_submitted_at"] == "2026-10-15T17:00:00.000000Z"
+    assert environment["client_launched_at"] == "2026-10-15T17:00:01.000000Z"
+    assert environment["client_status_terminal_at"] == "2026-10-15T17:00:02.000000Z"
+    assert environment["client_collected_at"] is None
+
+
+def test_poll_timeout_reports_submitted_and_launched_only(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("running"))
+
+    _, _, environment = _run_failed_job(
+        tmp_path,
+        monkeypatch,
+        runner,
+        points=1,
+        config=_config(tmp_path, poll_timeout_s=0.0),
+        now=_fake_clock(),
+    )
+
+    assert environment["client_submitted_at"] == "2026-10-15T17:00:00.000000Z"
+    assert environment["client_launched_at"] == "2026-10-15T17:00:01.000000Z"
+    assert environment["client_status_terminal_at"] is None
+    assert environment["client_collected_at"] is None
+
+
+def test_successful_job_reports_ordered_client_timestamps(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {"report.json": _sim_report()}
+
+    _, _, environment = _run_failed_job(
+        tmp_path, monkeypatch, runner, points=1, now=_fake_clock()
+    )
+
+    stamps = [
+        environment[key]
+        for key in (
+            "client_submitted_at",
+            "client_launched_at",
+            "client_status_terminal_at",
+            "client_collected_at",
+        )
+    ]
+    assert all(re.fullmatch(r"\d{4}-\d\d-\d\dT[\d:.]+Z", stamp) for stamp in stamps)
+    assert stamps == sorted(stamps)
+
+
+def test_default_clock_is_rfc3339_utc():
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}Z", sb._utc_now())
+
+
 def test_poll_timeout_does_not_attempt_recovery(tmp_path, monkeypatch):
     runner = _FakeRunner()
     runner.default = fake_completed(_status("running"))
@@ -2536,6 +2649,8 @@ def test_hosts_greater_than_one_submits_one_job_per_shard(tmp_path, monkeypatch)
     ]
     assert engine_version == "46"
     assert len(environment["fleet"]) == 2
+    for entry in environment["fleet"]:
+        assert entry["client_submitted_at"] <= entry["client_collected_at"]
 
 
 def test_every_shard_request_preserves_options_save_mode(tmp_path, monkeypatch):
@@ -5645,3 +5760,67 @@ def test_attach_refused_with_submit_only(tmp_path):
     path = _write_request(tmp_path, _batch_request(tmp_path))
     with pytest.raises(sim.SimError, match="mutually exclusive"):
         sim.run_sim(str(path), attach_job_id="klt-sim-abc123", submit_only=True)
+
+
+# --------------------------------------------------------------------------- #
+# PDK variant vs. the image's published variants (issue #3251)
+# --------------------------------------------------------------------------- #
+
+
+def _variant_run(tmp_path, monkeypatch, images, pdk="gf180mcuC"):
+    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
+    _publish_manifest(tmp_path, monkeypatch, images)
+    runner = _FakeRunner()
+    monkeypatch.setattr(sb, "_run_subprocess", runner)
+    _write_body(tmp_path)
+    request = _batch_request(tmp_path)
+    request["models"] = {"pdk": pdk}
+    path = _write_request(tmp_path, request)
+    return runner, path
+
+
+def test_unshipped_pdk_variant_refused_before_any_s3_write(tmp_path, monkeypatch):
+    runner, path = _variant_run(
+        tmp_path,
+        monkeypatch,
+        [_image(pdk="gf180mcu", klt_version="0.7.0", pdk_variants=["gf180mcuD"])],
+    )
+    with pytest.raises(sim.SimError) as excinfo:
+        sim.run_sim(str(path))
+    assert "gf180mcuC" in str(excinfo.value)
+    assert "gf180mcuD" in str(excinfo.value)
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize(
+    "image",
+    [
+        {"pdk_variants": ["gf180mcuC", "gf180mcuD"]},  # listed
+        {},  # legacy entry: unknown
+    ],
+)
+def test_pdk_variant_check_passes_when_listed_or_unknown(tmp_path, monkeypatch, image):
+    _, path = _variant_run(
+        tmp_path, monkeypatch, [_image(pdk="gf180mcu", klt_version="0.7.0", **image)]
+    )
+    request = json.loads(path.read_text())
+    sb._validate_batch_pdk_variant(request, "us-east-1")  # does not raise
+
+
+def test_pdk_variant_check_absent_manifest_and_any_candidate_match(
+    tmp_path, monkeypatch
+):
+    request = {"models": {"pdk": "gf180mcuC"}}
+    monkeypatch.setenv(rl.AMI_MANIFEST_ENV_VAR, str(tmp_path / "missing.json"))
+    sb._validate_batch_pdk_variant(request, None)
+    _publish_manifest(
+        tmp_path,
+        monkeypatch,
+        [
+            _image(region="us-east-1", pdk="gf180mcu", pdk_variants=["gf180mcuD"]),
+            _image(region="us-west-2", pdk="gf180mcu", pdk_variants=["gf180mcuC"]),
+        ],
+    )
+    sb._validate_batch_pdk_variant(request, None)  # any candidate lists it
+    with pytest.raises(sim.SimError):
+        sb._validate_batch_pdk_variant(request, "us-east-1")

@@ -757,6 +757,14 @@ unreachable by `options.parameter_tolerance`, and any real mismatch degrades
 to a generic `topology`/`circuit could not be matched to a counterpart`
 finding with no device/parameter/net name.
 
+**Resistor `X` cards need `layout.deck` (issue #3078).** `klt extract` writes a
+bulk-bearing drawn resistor as `X$n a b vsubs <class> r=… L=… W=…`. A bare
+pre-extracted `layout.netlist` (no `layout.deck`) containing such a card whose
+class belongs to `reference.deck` is refused with an error (exit 1) naming
+`layout.deck`, rather than being compared as an undefined subcircuit and
+reported as a spurious `mismatch`. Add `layout.deck` to read it as a resistor
+device.
+
 **`layout.deck`/`reference.deck` fixes this.** When a pre-extracted
 `layout.netlist` gives `layout.deck`, or `reference.netlist` gives
 `reference.deck` (any `reference.form`), `klt lvs` recognises an `X` card

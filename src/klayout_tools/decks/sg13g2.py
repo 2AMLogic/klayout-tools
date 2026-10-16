@@ -428,6 +428,13 @@ this engine grows a size-filtered/dynamic-relationship device-recognition
 primitive general enough for SG13G2's own custom extractor, or a future
 issue revisits this with a narrower, explicitly-approximate scope.
 
+Operator ruling 2026-10-08 (#2864): the PDK's own KLayout LVS runset (#2849) is
+the accepted route for SG13G2 bipolars -- runset-backed LVS recognises them,
+the curated deck does not declare bipolars yet. Of the four native gaps above
+(#2860-#2863), #2860, #2862 and #2863 have landed and only #2861 remains open,
+as a general improvement. The evidence acceptance conditions for runset-backed
+results live in #2870.
+
 ## No #524 cross-check
 
 Epic #711's Phase 1 (sky130, #747) and the sky130 LVS phases (#867-#869)

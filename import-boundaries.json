@@ -418,6 +418,7 @@
       "modules": [
         "klayout_tools.asap7_bsimcmg",
         "klayout_tools.cli.sim_cmd",
+        "klayout_tools.cli.sim_merge_cmd",
         "klayout_tools.digital_fleet",
         "klayout_tools.remote_fleet",
         "klayout_tools.remote_launcher",
@@ -430,6 +431,7 @@
         "klayout_tools.sim_decks",
         "klayout_tools.sim_energy",
         "klayout_tools.sim_injected",
+        "klayout_tools.sim_merge",
         "klayout_tools.sim_mismatch_gate",
         "klayout_tools.sim_plot",
         "klayout_tools.sim_raw",
@@ -553,6 +555,14 @@
       "modules": [
         "klayout_tools.cli.yield_sensitivity_cmd",
         "klayout_tools.yield_sensitivity"
+      ]
+    },
+    "yield_threshold": {
+      "kind": "verb",
+      "description": "`klt yield-threshold` implementation: probit threshold fit plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.yield_threshold_cmd",
+        "klayout_tools.probit"
       ]
     }
   },
@@ -1101,6 +1111,11 @@
       "consumer": "yield_samples",
       "exporter": "yield",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "yield_threshold",
+      "exporter": "cli-infra",
+      "reason": "CLI adapter emits through the shared envelope in cli/output.py (issue #2976), as every verb does."
     },
     {
       "consumer": "yield_sensitivity",

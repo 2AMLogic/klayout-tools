@@ -289,6 +289,13 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default=WELL_ENCLOSURE_MARGIN_UM,
             )
             self.param(
+                "ring_well_margin_um",
+                self.TypeDouble,
+                "Harness-resolved nwell enclosure of the n-tap guard ring "
+                "(see _PDK_RING_WELL_MARGIN_UM)",
+                default=WELL_ENCLOSURE_MARGIN_UM,
+            )
+            self.param(
                 "gate_pad_clearance_um",
                 self.TypeDouble,
                 "Harness-resolved clearance the gate-poly landing pad keeps "
@@ -601,7 +608,7 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 # against.
                 if self.well_present and self.flavor == "pfet":
                     li_well = self.layout.layer(self.well_layer)
-                    margin = WELL_ENCLOSURE_MARGIN_UM
+                    margin = self.ring_well_margin_um
                     ring_well_box = (
                         -margin,
                         -margin,

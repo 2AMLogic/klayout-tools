@@ -455,9 +455,11 @@ variant -- confirmed by ``globalfoundries-pdk-libs-gf180mcu_fd_pv``'s
 ``top_via = via4`` when ``top_metal = metal5``) matches Option B's bottom
 plate landing on ``Metal4`` for that stack, the same stack the issue's own
 reproducer layout uses (``Metal4``/``FuseTop``/``Via4``/``Metal5``) -- so
-only Option B (``MIMTM.*``) is transcribed above; Option A's ``MIM.*`` rule
-set targets a different (3-metal-layer) process variant this deck does not
-model and is not duplicated here.
+only Option B (``MIMTM.*``) is transcribed above, and is the default for
+``klt extract``. Option A's ``MIM.*`` DRC rule set is not duplicated here, but
+its *extraction* is selectable (issue #2920): ``--deck-option mim_option=A``
+recognises the ``Metal2``/``FuseTop``/``Via2``/``Metal3`` stack and the
+``cap_mim_*_m2m3_noshield`` device names (see ``_MIM_OPTION_A_CAPACITORS``).
 
 Layer numbers (verified against ``google/globalfoundries-pdk-libs-gf180mcu_fd_pv``'s
 ``klayout/drc/rule_decks/main.drc`` layer derivations, e.g. ``comp =
@@ -498,10 +500,13 @@ alongside the already-transcribed ``via4 = get_polygons(41, 0)``):
 
 from __future__ import annotations
 
+import dataclasses
+
 from . import (
     BipolarDevice,
     CapacitorDevice,
     CapacitorFlavour,
+    CapacitorVariant,
     DerivedLayer,
     DiodeDevice,
     DrcRule,
@@ -2722,6 +2727,73 @@ EXTRACTION_DECK = ExtractionDeck(
             flavour="06v0",
             description="gf180mcu 5V/6V thick-oxide domain (Dualgate 55/0)",
         ),
+    ),
+)
+
+
+# MIM option A (issue #2920): bottom plate Metal2, top plate FuseTop under
+# Metal3, joined to Metal3 by Via2 *inside* FuseTop. Selected with
+# `--deck-option mim_option=A`; the deck's own `capacitors` above are option B
+# (the default, byte-for-byte unchanged). Recognition mirrors the PDK's
+# `mimcap_derivations.lvs` (`mim_virtual = fusetop.sized(1.06um) &
+# metal2.interacting(fusetop) - (efuse_mk | plfuse)`, `fuse_cap = fusetop
+# interacting cap_mk, mim_l_mk, - (efuse_mk | plfuse)`) and the device names
+# and densities come from `mimcap_extraction.lvs`'s `MIM_OPTION 'A'` branch
+# (`cap_mim_{1f0,1f5,2f0}_m2m3_noshield`); the area/perimeter coefficients are
+# the same `sm141064.ngspice` cards as option B's. The top-plate Via2 is cut
+# from the generic Via2 layer where it overlaps Metal2 by the existing
+# `top_plate_via` machinery, the equivalent of the runset's `via2_n_cap`.
+_MIM_OPTION_A_CAPACITORS = (
+    CapacitorDevice(
+        name="cap_mim_2f0_m2m3_noshield",
+        top_plate=(75, 0),  # FuseTop
+        top_plate_requires=(
+            (117, 5),  # CAP_MK
+            (117, 10),  # MIM_L_MK
+        ),
+        top_plate_excludes=(
+            (80, 5),  # efuse_mk
+            (125, 5),  # plfuse
+        ),
+        bottom_plate=(36, 0),  # Metal2
+        bottom_plate_oversize_um=1.06,
+        area_cap_f_um2=1.99e-15,
+        perim_cap_f_um=2.383e-16,
+        top_plate_via=(38, 0),  # Via2
+        top_plate_via_metal=(42, 0),  # Metal3
+        flavour_option="mim_cap",
+        flavours=(
+            CapacitorFlavour(
+                value="cap_mim_1f0_m2m3_noshield",
+                name="cap_mim_1f0_m2m3_noshield",
+                area_cap_f_um2=9.87e-16,
+                perim_cap_f_um=3.3e-16,
+            ),
+            CapacitorFlavour(
+                value="cap_mim_1f5_m2m3_noshield",
+                name="cap_mim_1f5_m2m3_noshield",
+                area_cap_f_um2=1.47e-15,
+                perim_cap_f_um=3.79e-16,
+            ),
+            CapacitorFlavour(
+                value="cap_mim_2f0_m2m3_noshield",
+                name="cap_mim_2f0_m2m3_noshield",
+                area_cap_f_um2=1.99e-15,
+                perim_cap_f_um=2.383e-16,
+            ),
+        ),
+        provenance=_gf180mcu_lvs_provenance(
+            "libs.tech/klayout/lvs/rule_decks/mimcap_extraction.lvs",
+            "cap_mim_2f0_m2m3_noshield",
+        ),
+    ),
+)
+
+EXTRACTION_DECK = dataclasses.replace(
+    EXTRACTION_DECK,
+    capacitor_variants=(
+        CapacitorVariant("mim_option", "B", EXTRACTION_DECK.capacitors),
+        CapacitorVariant("mim_option", "A", _MIM_OPTION_A_CAPACITORS),
     ),
 )
 
