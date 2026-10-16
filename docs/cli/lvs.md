@@ -3447,9 +3447,13 @@ despite a name/identity conflict. Six classification sites inside
   the instance itself (`instance`), and the circuit it instantiates
   (`subcircuit`) (issue #1132), so a macro-scale report attributes *which*
   instance failed to pair without a side-channel netlist diff.
-- **Device-class mismatch** (`lvs.py:3770-3808`, from
+- **Device-class mismatch** (`lvs_mismatch.py`, from
   `logger.device_class_mismatches`) — a device class (e.g. `nfet`)
   registered on one side has no counterpart class on the other side.
+  The class is named in `device.class` (`device.layout`/`device.reference`
+  stay `null`, as for `device.unmatched`) and appended to `description`
+  (`... counterpart: 'nfet'`), so several unmapped classes are
+  distinguishable; `device.class` is `null` if the class has no name.
   Downgraded to `"warning"` when that side's netlist has zero actual
   instances of the class (`klt extract` always registers both
   `nfet`/`pfet` device classes even when a layout only instantiates one

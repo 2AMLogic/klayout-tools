@@ -8202,6 +8202,29 @@ def test_build_mismatches_circuit_and_subcircuit_and_device_class_topology():
     assert subcircuit_entry["subcircuit"] == {"layout": None, "reference": None}
 
 
+def test_build_mismatches_device_class_topology_names_each_class():
+    """Issue #2945: each class-level topology entry names its class in
+    `device.class` and `description`; a nameless stand-in degrades to null."""
+
+    class _Cls:
+        def __init__(self, name):
+            self.name = name
+
+    logger = _FakeLogger()
+    logger.device_class_mismatches.append((None, _Cls("res_a")))
+    logger.device_class_mismatches.append((None, _Cls("res_b")))
+    logger.device_class_mismatches.append((None, object()))
+
+    e_a, e_b, e_none = lvs._build_mismatches(logger)
+    assert e_a["device"] == {"layout": None, "reference": None, "class": "res_a"}
+    assert e_b["device"] == {"layout": None, "reference": None, "class": "res_b"}
+    assert e_a["description"].startswith("device class could not be mapped")
+    assert "'res_a'" in e_a["description"] and "'res_b'" in e_b["description"]
+    assert e_a["description"] != e_b["description"]
+    assert e_none["device"]["class"] is None
+    assert e_none["description"] == "device class could not be mapped to a counterpart"
+
+
 def test_build_mismatches_subcircuit_mismatch_names_circuit_instance_and_type():
     """Issue #1132: given a real `kdb.SubCircuit`-shaped object (stood in by
     `_FakeSubCircuit`, exposing `circuit()`/`circuit_ref()` in addition to
