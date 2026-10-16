@@ -161,6 +161,15 @@ BATCH_RUNNER_IDENTITY_FILENAME = "runner_identity.json"
 BATCH_RUNNER_MISMATCH_CODE = "batch_runner_version_mismatch"
 BATCH_RUNNER_UNKNOWN_CODE = "batch_runner_version_unknown"
 BATCH_RUNNER_FEATURE_CODE = "batch_runner_feature_unsupported"
+#: A deck-list (``decks[]``, #2804) request needs a runner ``klt`` that knows
+#: the deck-list contract; the major.minor gate cannot see that (issue #3303).
+BATCH_RUNNER_LACKS_DECKS_CODE = "batch_runner_lacks_decks"
+
+#: ``decks[]`` landed in ``f44df5ad`` (#2804), 307 commits after ``v0.7.0``
+#: (``git describe``: ``v0.7.0-307-gf44df5ad``). A runner whose version is
+#: ``0.7.0`` or earlier, or ``0.7.1.devN`` with ``N`` below this, predates it.
+_DECKS_BASE_RELEASE = (0, 7)
+_DECKS_FIRST_DEV = 307
 
 #: Exit code the preflight rejects with. Deliberately outside
 #: :data:`_BATCH_SIM_SUCCESS_EXIT_CODES` so the job is never mistaken for a
@@ -690,6 +699,108 @@ def _worker_capture_command(remote_request: dict[str, Any]) -> str:
         "{ command -v python3 >/dev/null 2>&1 && "
         f"$wt python3 -I -c {shlex.quote(_WORKER_CAPTURE_PROGRAM)} "
         f"{target} {' '.join(args)} 2>/dev/null; true; }}"
+    )
+
+
+def _runner_supports_decks(version: str) -> bool | None:
+    """Whether a runner ``klt --version`` build string knows ``decks[]``
+    (issue #3303): ``None`` when it cannot be established.
+
+    Unlike the major.minor gate (:func:`_runner_gate_release`) this reads the
+    full release segment and the ``.devN`` distance, because the capability
+    arrived mid-``0.7`` line: after ``0.7.1`` is released, or on a
+    ``0.7.1.dev<N>`` build with ``N`` at/after :data:`_DECKS_FIRST_DEV`, or in
+    any later minor. :func:`_deck_preflight_lines` repeats this in shell.
+    """
+    release = _release_segment(version)
+    if release is None:
+        return None
+    parts = [int(part) for part in release.split(".")]
+    if len(parts) < 2:
+        return None
+    parts += [0] * (3 - len(parts))
+    if tuple(parts[:2]) != _DECKS_BASE_RELEASE:
+        return tuple(parts[:2]) > _DECKS_BASE_RELEASE
+    if parts[2] >= 2:
+        return True
+    if parts[2] == 0:
+        return False
+    dev = re.search(r"\.dev(\d+)", version.split("+", 1)[0])
+    return dev is None or int(dev.group(1)) >= _DECKS_FIRST_DEV
+
+
+def _deck_preflight_lines() -> str:
+    """Shell appended to the runner preflight of a deck-list job (issue
+    #3303; needs ``$rv`` from :func:`_runner_preflight_script`). Unlike the
+    version gate this is not relaxed by ``runner_version_check: warn``: a
+    runner that cannot read ``decks[]`` fails the job for certain, so the
+    job exits :data:`_BATCH_PREFLIGHT_REJECT_EXIT` with a klt error envelope
+    naming :data:`BATCH_RUNNER_LACKS_DECKS_CODE` before ``klt sim`` runs."""
+    report_path = f'"$EDA_OUTPUT_DIR/{BATCH_REPORT_FILENAME}"'
+    base_major, base_minor = _DECKS_BASE_RELEASE
+    return (
+        "dk=; rb=${rv%%+*}; dn=; "
+        'case "$rb" in *.dev[0-9]*) dn=${rb##*.dev}; dn=${dn%%[!0-9]*}; '
+        "rb=${rb%%.dev*} ;; esac; "
+        "rb=${rb%%[!0-9.]*}; rb=${rb%.}; "
+        'case "$rb" in ""|.*|*..*) ;; *.*) '
+        "dma=${rb%%.*}; drest=${rb#*.}; dmi=${drest%%.*}; dpa=0; "
+        'case "$drest" in *.*) dpa=${drest#*.}; dpa=${dpa%%.*} ;; esac; '
+        f'if [ "$dma" -gt {base_major} ] || '
+        f'{{ [ "$dma" -eq {base_major} ] && [ "$dmi" -gt {base_minor} ]; }}; '
+        "then dk=yes; "
+        f'elif [ "$dma" -eq {base_major} ] && [ "$dmi" -eq {base_minor} ]; then '
+        'if [ "$dpa" -ge 2 ]; then dk=yes; '
+        'elif [ "$dpa" -eq 1 ] && { [ -z "$dn" ] || '
+        f'[ "$dn" -ge {_DECKS_FIRST_DEV} ]; }}; then dk=yes; fi; fi ;; esac; '
+        'if [ -z "$dk" ]; then '
+        'dmsg="the fleet runner runs klt ${rv:-<unknown>}, which does not know '
+        "deck-list (decks[]) requests -- the request was not run (rebuild the "
+        'runner image from a klt that includes decks[])"; '
+        'printf \'{"schema_version": 1, "error": {"command": "sim", '
+        f'"code": "{BATCH_RUNNER_LACKS_DECKS_CODE}", "message": "%s"}}}}\\n\' '
+        '"$dmsg" >' + report_path + "; "
+        'echo "$dmsg" >&2; '
+        "exit " + str(_BATCH_PREFLIGHT_REJECT_EXIT) + "; fi; "
+    )
+
+
+def _assess_deck_support(request: dict[str, Any], config: BatchConfig) -> None:
+    """Refuse a deck-list batch submit before any S3 write or launch when
+    every image the AMI manifest could boot is known to predate ``decks[]``
+    (issue #3303). Same candidate selection as
+    :func:`_assess_published_runner`; anything less certain (no manifest,
+    a legacy entry without ``klt_version``, a mix) proceeds to the
+    runner-side probe in :func:`_deck_preflight_lines`. Raises regardless of
+    ``runner_version_check``: the job could not run on any such image."""
+    from .sim import SimError
+
+    pdk = (request.get("models") or {}).get("pdk")
+    try:
+        images = published_runner_identities(str(pdk) if pdk else None, config.region)
+    except (RemoteLaunchError, OSError, TypeError, ValueError, AttributeError):
+        return
+    if not images:
+        return
+    support = [
+        _runner_supports_decks(image["klt_version"]) if image["klt_version"] else None
+        for image in images
+    ]
+    if any(item is not False for item in support):
+        return
+    published = "; ".join(
+        f"{image['ami_id']} (pdk {image['pdk']}, region {image['region']}) "
+        f"runs klt {image['klt_version']}"
+        + (f" from ref {image['klt_ref']}" if image["klt_ref"] else "")
+        for image in images
+    )
+    raise SimError(
+        f"backend 'batch' refused before submission: the AMI manifest "
+        f"publishes the fleet runner image as {published}, which predates "
+        "deck-list (decks[]) support -- the request was not submitted and no "
+        "instance was launched (rebuild the runner image from a klt that "
+        "includes decks[]; see docs/cli/sim.md)",
+        code=BATCH_RUNNER_LACKS_DECKS_CODE,
     )
 
 

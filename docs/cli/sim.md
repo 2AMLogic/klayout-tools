@@ -1638,6 +1638,35 @@ directory of the request is left alone.
 | `outdir` | Absolute path of the artifacts directory on the reporting host. |
 | `environment` | `engine`, `engine_version`, `ngspice_binary`, `engine_host` (`"local"`/`"worker"`; off-host runs also `client_ngspice_binary`, and `ngspice_binary` is then the worker's, see "Which machine ran it"), `klt_version`, `max_workers`; off-host runs add `remote` — the same block corner reports carry (`provider`, `instance_id`/`instance_type`, `job_id`/`bucket` for batch, `runner_klt_version` identity, ...). |
 
+### Runner support for `decks[]` on the batch backend (issue #3303)
+
+A fleet runner image baked from a `klt` that predates `decks[]` reads a
+deck-list request as a corner request and fails with `request is missing
+required field: netlist`. The major.minor version gate cannot see this (the
+capability arrived mid-`0.7` line), so a deck-list batch submit has its own
+check, which `runner_version_check: "warn"` does **not** relax (the job could
+not run either way):
+
+- **Before submit** — if the AMI manifest publishes a `klt_version` for every
+  image the request could boot and none of them knows `decks[]` (`0.7.0` or
+  earlier, or `0.7.1.devN` with `N` < 307; `0.7.1` and later releases do),
+  the request is refused with `error.code` `batch_runner_lacks_decks`: no S3
+  write, no launch. Corner requests are unaffected.
+- **On the runner** — when the manifest cannot say (no manifest, a legacy
+  entry without `klt_version`, a mix of images), the job's preflight applies
+  the same rule to the runner's own `klt --version` and, if it lacks `decks[]`
+  (or the version is unreadable), exits 87 before `klt sim` with a klt error
+  envelope carrying `batch_runner_lacks_decks`. The job is still launched, but
+  fails in seconds with the named cause instead of a corner-request message.
+  Chosen over refusing outright so a legacy manifest does not block a capable
+  runner.
+- **Recovery** — a failed deck job whose envelope is the corner-style
+  `missing required field: netlist` gets a note on every unit's diagnostic
+  that the runner's `klt` predates `decks[]`.
+
+Rebuilding the fleet runner image from a `klt` that includes `decks[]` is a
+worker/fleet-spec change outside this repository.
+
 ### Exit codes (deck mode)
 
 | Code | Meaning |
