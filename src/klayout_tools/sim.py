@@ -98,6 +98,7 @@ from . import (
     sim_decks,
     sim_mismatch_gate,
     sim_steps,
+    sim_transfer_meas,
 )
 
 #: `remote_fleet`/`remote_transport`/`RemoteLauncher`/`RemoteLaunchError` are
@@ -785,6 +786,11 @@ _MEAS_VALUE_RE = re.compile(
 #: ``.meas``/``.measure``), e.g. ``tran`` in ``.meas tran vout find v(out)``.
 _MEAS_CARD_TYPE_RE = re.compile(r"^\s*\.meas(?:ure)?\s+(\S+)", re.IGNORECASE)
 
+#: A value position in a `.meas` card: an identifier right after ``=`` that is
+#: not a function call (``v(x)``/``i(x)`` never match -- the negative
+#: lookahead rejects a following ``(``). Issue #3038.
+_MEAS_VALUE_REF_RE = re.compile(r"=\s*([A-Za-z_]\w*)\b(?!\s*\()")
+
 #: ngspice's own ``.MEASURE`` statement only implements these analysis types
 #: (verified empirically against ngspice 46 -- see issue #205). Notably,
 #: there is no ``.MEASURE OP``: an operating-point analysis has no sweep
@@ -1128,10 +1134,13 @@ def _resolve_analysis_and_measurements(
                 f'(measurements[].expr, e.g. {{"name": "{spec["name"]}", '
                 '"expr": "v(out)"})'
             )
+    _validate_no_dependent_meas_cards(measurements_spec)
     # Issue #2868: a crossings series is a transient-time quantity.
     sim_crossings.validate_crossings_context(measurements_spec, analysis)
     # Issue #2947: so is a cycle-aligned mean.
     sim_cycle_mean.validate_cycle_mean_context(measurements_spec, analysis)
+    # Issue #2923: and a transfer metric is an AC-sweep quantity.
+    sim_transfer_meas.validate_transfer_context(measurements_spec, analysis)
     return analysis, measurements_spec
 
 
@@ -1185,6 +1194,50 @@ def _validate_meas_card(name: str, spice: str) -> None:
             'its own `.control` block -- or use analysis.kind: "tran" with '
             "a short single-step transient and `.meas tran ... at=<t>`"
         )
+
+
+def _validate_no_dependent_meas_cards(measurements_spec: list[dict[str, Any]]) -> None:
+    """Refuse a ``spice`` card whose value field names another measurement.
+
+    A file-scope ``.meas`` card resolves the right-hand side of ``at=``,
+    ``from=``, ``to=``, ``td=``, ``val=`` ... as a netlist ``.param``, never as
+    an earlier ``.meas`` result, so ``.meas tran vos find v(rmp) at=t_flip``
+    kills the whole deck at parse time (``Undefined parameter [t_flip]``) and
+    every measurement in the unit reads ``produced no value`` (issue #3038).
+    This names the dependent card up front instead.
+
+    Deliberately narrow: only an identifier directly after ``=`` (not a
+    function call such as ``v(vout)``) that case-insensitively equals the
+    ``name`` of a *different* ``measurements[]`` entry. A card referencing a
+    real netlist ``.param`` that happens to share a measurement name is
+    refused too -- that is ambiguous in ngspice anyway. Only ``spice`` cards
+    are scanned (``expr`` has its own rule, see ``docs/cli/sim.md``);
+    ``analysis_steps[]`` never reaches here (control-scope ``meas`` has
+    different semantics).
+    """
+    names = {
+        str(spec["name"]).lower(): spec["name"]
+        for spec in measurements_spec
+        if spec.get("name") is not None
+    }
+    for spec in measurements_spec:
+        spice = spec.get("spice")
+        if not isinstance(spice, str):
+            continue
+        own = str(spec["name"]).lower()
+        for ref in _MEAS_VALUE_REF_RE.findall(spice):
+            key = ref.lower()
+            if key in names and key != own:
+                raise SimError(
+                    f"measurement '{spec['name']}' references measurement "
+                    f"'{names[key]}' in its .meas card: a file-scope .meas "
+                    "card cannot read another .meas result (ngspice resolves "
+                    f"'{ref}' as a netlist .param and fails with 'Undefined "
+                    "parameter'). Fold both into one self-contained card "
+                    "(e.g. `.meas tran vos find v(rmp) when v(dn)=0.5 "
+                    "rise=1`), measure the interval with trig/targ, or "
+                    "compute it with measurements[].expr over saved vectors"
+                )
 
 
 def _validate_measurement_forms(measurements_spec: list[dict[str, Any]]) -> None:
@@ -1252,6 +1305,9 @@ def _validate_measurement_form(spec: dict[str, Any]) -> None:
     one of ``spice``/``expr``, and -- for an ``expr`` -- a name that survives
     the round trip through the deck and back out of the log. See
     :func:`_validate_measurement_forms` for why each rule exists."""
+    if sim_transfer_meas.validate_form_exclusive(spec):
+        # Issue #2923: a fifth, mutually exclusive form.
+        return
     name = spec.get("name")
     has_spice = spec.get("spice") is not None
     has_expr = spec.get("expr") is not None
@@ -1263,7 +1319,8 @@ def _validate_measurement_form(spec: dict[str, Any]) -> None:
             "exactly one of 'spice' (a verbatim .meas card), 'expr' "
             "(an ngspice expression evaluated after the analysis) or "
             "'crossings' (a threshold-crossing time series) or "
-            "'cycle_mean' (a mean over whole reference cycles)"
+            "'cycle_mean' (a mean over whole reference cycles) or "
+            "'transfer' (an AC return-ratio metric)"
         )
     if has_cycle_mean:
         # Issue #2947: a fourth, mutually exclusive form.
@@ -1628,13 +1685,18 @@ def _own_persistent_roots(
     plot_dir: str | None,
     *,
     persistent: bool,
+    dry_run: bool = False,
 ) -> None:
     """Enter the output-directory lock for each persistent root (#2770).
+
+    A dry run (#3064) writes nothing, so it owns nothing.
 
     Roots are taken outermost first (shortest canonical path), so a
     ``plot_dir`` that contains ``artifacts_dir`` (or vice versa) is owned
     once and the inner one re-enters for free instead of self-contending.
     """
+    if dry_run:
+        return
     roots = ([artifacts_dir] if persistent else []) + (
         [plot_dir] if plot_dir is not None else []
     )
@@ -1655,6 +1717,7 @@ def run_sim(
     plot_dir: str | None = None,
     fail_fast_probe: bool | None = None,
     fail_on_diagnostic: list[str] | tuple[str, ...] | None = None,
+    dry_run: bool = False,
     submit_only: bool = False,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
@@ -1886,6 +1949,13 @@ def run_sim(
     owns its outdir (#3168). Ownership of an ancestor
     (``run_pex``'s) is inherited, never re-acquired. ``_ownership`` is
     internal: the exit stack that releases the lock when the run ends.
+
+    **Dry run (issue #3064).** ``dry_run=True`` runs every pre-dispatch
+    check of a corner request (shape, Monte Carlo spec, measurement forms,
+    model/OSDI resolution, staging closure, off-host PDK check) and returns
+    :func:`_build_dry_run_report` -- the expanded unit list with its derived
+    seeds -- without running the fail-fast probe, taking an output-directory
+    lock, or invoking any backend (no ngspice, SSH, S3 or EC2).
     """
     request = load_request(request_path)
     # Issue #2892: the engine runs with ``cwd=<corner dir>``, so a relative
@@ -1894,6 +1964,11 @@ def run_sim(
     if artifacts_dir is not None:
         artifacts_dir = os.path.abspath(artifacts_dir)
     if sim_decks.DECKS_FIELD in request:
+        if dry_run:
+            raise SimError(
+                "--dry-run does not apply to deck-list requests (`decks`); "
+                "it validates corner/Monte Carlo requests only"
+            )
         if submit_only:
             raise SimError(
                 "--submit-only is not supported for deck-list requests",
@@ -1924,6 +1999,7 @@ def run_sim(
         plot_dir=plot_dir,
         fail_fast_probe=fail_fast_probe,
         fail_on_diagnostic=fail_on_diagnostic,
+        dry_run=dry_run,
         submit_only=submit_only,
         _ownership=_ownership,
     )
@@ -2012,6 +2088,42 @@ def _dispatch_deck_request(
     )
 
 
+#: Diagnostic codes of a ``batch`` corner that never ran: a lost Spot shard,
+#: a job that failed or was stopped by the harness, or a poll that gave up
+#: while the job may still be running (``sim_batch._unrun_corner_report``).
+_UNRUN_BATCH_CODES = frozenset(
+    {"lost_shard", "batch_job_failed", "batch_job_timeout", "batch_poll_timeout"}
+)
+
+
+def _is_unrun_batch_corner(corner: dict[str, Any]) -> bool:
+    """True when a corner report is a synthesized batch one (never ran)."""
+    return any(diag["code"] in _UNRUN_BATCH_CODES for diag in corner["diagnostics"])
+
+
+def _record_batch_checkpoint(
+    checkpoint: Any,
+    backend: str,
+    corners_new: list[dict[str, Any]],
+    engine_version: Any,
+) -> None:
+    """Record a ``batch`` run's returned corner reports into the checkpoint.
+
+    Issue #3367: `_run_batch` collects a shard's reports in one
+    ``report.json``, so there is nothing to record incrementally; record the
+    returned set after dispatch. A corner that never ran (``lost_shard``,
+    ``batch_job_failed``, ``batch_job_timeout``, ``batch_poll_timeout``) is
+    left out and stays outstanding for the next ``--resume``; a corner that
+    ran and genuinely errored is recorded exactly as the local backends do.
+    A no-op without a checkpoint or off ``batch``.
+    """
+    if checkpoint is None or backend != "batch":
+        return
+    for corner in corners_new:
+        if not _is_unrun_batch_corner(corner):
+            checkpoint.record(corner["corner_id"], corner, engine_version)
+
+
 def _refuse_unsupported_submit_only(
     backend: str, hosts: int, resume: bool | None, plot_dir: str | None
 ) -> None:
@@ -2053,6 +2165,42 @@ def _with_forwarded_budget(
     return {**request, "options": {**options, "wall_clock_budget_s": budget_s}}
 
 
+def _check_expected_netlist_identity(
+    expect_identity: Any,
+    netlist_identity: str | None,
+    netlist_identity_error: str | None,
+    netlist_ref: str,
+) -> None:
+    """Issue #3074: refuse to simulate when the request's
+    ``expect_netlist_identity`` does not match the netlist's stamp."""
+    if expect_identity is None:
+        return
+    if not isinstance(expect_identity, str) or not expect_identity:
+        raise SimError("expect_netlist_identity must be a non-empty string")
+    if netlist_identity is None:
+        raise SimError(
+            "expect_netlist_identity was given but the netlist identity "
+            f"could not be computed: {netlist_identity_error}"
+        )
+    if expect_identity != netlist_identity:
+        raise SimError(
+            "netlist identity mismatch: request expects "
+            f"{expect_identity} but '{netlist_ref}' has {netlist_identity} "
+            "(the referenced record was produced from a different netlist)"
+        )
+
+
+def _stamp_netlist_identity(
+    environment: dict[str, Any],
+    netlist_identity: str | None,
+    netlist_identity_error: str | None,
+) -> None:
+    """Issue #3074: record the netlist identity (or why it is unavailable)."""
+    environment["netlist_identity"] = netlist_identity
+    if netlist_identity_error is not None:
+        environment["netlist_identity_error"] = netlist_identity_error
+
+
 def _run_sim_corners(
     request_path: str,
     *,
@@ -2065,6 +2213,7 @@ def _run_sim_corners(
     plot_dir: str | None = None,
     fail_fast_probe: bool | None = None,
     fail_on_diagnostic: list[str] | tuple[str, ...] | None = None,
+    dry_run: bool = False,
     submit_only: bool = False,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
@@ -2118,6 +2267,19 @@ def _run_sim_corners(
             f"unsupported netlist_source '{netlist_source}' "
             f"(supported: {', '.join(SUPPORTED_NETLIST_SOURCES)})"
         )
+
+    # Issue #3074: normalised netlist identity, stamped on the report and
+    # (when the caller hands the stamp of the record it compares against)
+    # checked before anything is simulated.
+    netlist_identity, netlist_identity_error = sim_staging.netlist_identity(
+        request, netlist_path
+    )
+    _check_expected_netlist_identity(
+        request.get("expect_netlist_identity"),
+        netlist_identity,
+        netlist_identity_error,
+        netlist_ref,
+    )
 
     corners_spec = request.get("corners") or {}
     models = request.get("models") or {}
@@ -2326,6 +2488,9 @@ def _run_sim_corners(
         cycle_mean_declared=bool(
             sim_cycle_mean.cycle_mean_measurements(measurements_spec)
         ),
+        transfer_declared=bool(
+            sim_transfer_meas.transfer_measurements(measurements_spec)
+        ),
     )
     monte_carlo_info: dict[str, Any] | None = None
     monte_carlo_stats: dict[str, Any] | None = None
@@ -2427,23 +2592,24 @@ def _run_sim_corners(
         # docstring and the spike's "Native PVT sweeping" survey row).
         models_lib = _resolve_models_lib(resolution_models, request_dir)
 
-    # Resumability (issue #473): only active when the caller opts in, and
-    # only for the backends whose corner reports this process itself
-    # produces (`local`/`local-parallel`, including any `hosts > 1` shard
-    # built on them -- see `_run_sharded`). `remote`'s and `batch`'s corners
-    # come back from an independently-run box via a JSON report this process
-    # does not construct, so there is no local `CornerPoint.corner_id` to
-    # reconcile a checkpoint against yet; mirrors the existing `hosts > 1` +
-    # `remote` restriction above rather than inventing a new error shape.
+    # Resumability (issue #473): only active when the caller opts in. The
+    # `local`/`local-parallel` backends (including any `hosts > 1` shard
+    # built on them -- see `_run_sharded`) record each corner into the
+    # checkpoint as it completes; `batch` (issue #3367) records its returned
+    # reports after dispatch, keyed by `corner_id` (lost shards excluded --
+    # see below). `remote`'s corners come back from an independently-run box
+    # this process does not reconcile against a local `CornerPoint.corner_id`,
+    # so it stays rejected, mirroring the existing `hosts > 1` + `remote`
+    # restriction above rather than inventing a new error shape.
     backend = _yield_host_default_backend(
         backend, backend_from_host_default, reason_ok=not resume
     )
-    if resume and backend in _OFFHOST_BACKENDS:
+    if resume and backend == "remote":
         raise SimError(
             f"options.resume is not yet supported for backend {backend!r} -- "
             f"wiring the {backend} backend into the same checkpoint machinery "
-            "as 'local'/'local-parallel' is tracked follow-up work; use "
-            "resume with backend 'local' or 'local-parallel'"
+            "as 'local'/'local-parallel'/'batch' is tracked follow-up work; "
+            "use resume with backend 'local', 'local-parallel' or 'batch'"
         )
 
     # `pre_completed` holds corner reports already recorded by a prior,
@@ -2461,31 +2627,24 @@ def _run_sim_corners(
         artifacts_dir,
         plot_dir,
         persistent=bool(keep_artifacts or resume or backend in _OFFHOST_BACKENDS),
+        dry_run=dry_run,
     )
     checkpoint_path = _checkpoint_path(artifacts_dir)
-    pre_completed: dict[str, dict[str, Any]] = {}
-    loaded_engine_version: str | None = None
-    checkpoint: _Checkpoint | None = None
-    if resume:
-        fingerprint = _checkpoint_fingerprint(
-            netlist_path=dispatch_netlist_path,
-            models_lib=models_lib,
-            analysis=analysis,
-            measurements_spec=measurements_spec,
-            corner_points=corner_points,
-            timeout_s=timeout_s,
-            engine=engine,
-            osdi_preload=osdi_preload,
-            corner_section_libs=corner_section_libs,
-            save_mode=save_mode,
-            ngspice_options=ngspice_options,
-        )
-        pre_completed, loaded_engine_version = _load_checkpoint(
-            checkpoint_path, fingerprint
-        )
-        checkpoint = _Checkpoint(checkpoint_path, fingerprint)
-        checkpoint.completed = dict(pre_completed)
-        checkpoint.engine_version = loaded_engine_version
+    pre_completed, loaded_engine_version, checkpoint = _open_resume_checkpoint(
+        checkpoint_path,
+        resume=bool(resume),
+        netlist_path=dispatch_netlist_path,
+        models_lib=models_lib,
+        analysis=analysis,
+        measurements_spec=measurements_spec,
+        corner_points=corner_points,
+        timeout_s=timeout_s,
+        engine=engine,
+        osdi_preload=osdi_preload,
+        corner_section_libs=corner_section_libs,
+        save_mode=save_mode,
+        ngspice_options=ngspice_options,
+    )
 
     dispatch_points = (
         [point for point in corner_points if point.corner_id not in pre_completed]
@@ -2498,6 +2657,9 @@ def _run_sim_corners(
     backend = _yield_host_default_backend(
         backend, backend_from_host_default, reason_ok=len(dispatch_points) > 1
     )
+    # Issue #2923: transfer metrics need the corner-local AC rawfile, which
+    # off-host workers do not return yet -- refused before anything is staged.
+    sim_transfer_meas.refuse_offhost_backend(measurements_spec, backend)
 
     # Two-pass fail-fast probe (issue #1694, opt-in via `fail_fast_probe`/
     # `options.fail_fast_probe`): run once per grid, before any real corner
@@ -2508,7 +2670,12 @@ def _run_sim_corners(
     # did not run at all (opted out, wrong analysis kind, empty grid) or
     # came back inconclusive -- see `_run_fail_fast_probe`.
     probe_result: dict[str, Any] | None = None
-    if fail_fast_probe and backend not in _OFFHOST_BACKENDS and dispatch_points:
+    if (
+        fail_fast_probe
+        and not dry_run
+        and backend not in _OFFHOST_BACKENDS
+        and dispatch_points
+    ):
         probe_result = _run_fail_fast_probe(
             corner_points=dispatch_points,
             netlist_path=dispatch_netlist_path,
@@ -2605,6 +2772,19 @@ def _run_sim_corners(
         enabled=stage_model_inputs,
     )
 
+    if dry_run:
+        return _build_dry_run_report(
+            request,
+            engine=engine,
+            backend=backend,
+            hosts=hosts,
+            netlist_path=netlist_path,
+            models_lib=models_lib,
+            corner_points=corner_points,
+            monte_carlo_info=monte_carlo_info,
+            staged_model_environment=staged_model_environment,
+        )
+
     if submit_only:
         _refuse_unsupported_submit_only(backend, hosts, resume, plot_dir)
         return _submit_batch_only(
@@ -2696,6 +2876,8 @@ def _run_sim_corners(
             measurements_spec=measurements_spec,
         )
 
+    _record_batch_checkpoint(checkpoint, backend, corners_new, backend_engine_version)
+
     if resume:
         # Reassemble the full corner list in the request's own order: a
         # corner is either freshly run just now (`corners_new`) or reused
@@ -2704,7 +2886,8 @@ def _run_sim_corners(
         # `dispatch_points` above). Only done under `resume`: every backend
         # that reaches here is `local`/`local-parallel` (see the `remote`
         # guard above), which always return exactly one report per
-        # dispatched point, keyed by that point's own `corner_id`.
+        # dispatched point, keyed by that point's own `corner_id`. `batch`
+        # does too: lost shards are synthesized per point (`_lost_shard_corner`).
         new_by_id = {corner["corner_id"]: corner for corner in corners_new}
         corners = [
             new_by_id[point.corner_id]
@@ -2742,6 +2925,13 @@ def _run_sim_corners(
             for diag in corner["diagnostics"]
         )
     )
+    # Issue #3367: a corner that never ran on `batch` (`lost_shard`,
+    # `batch_job_failed`, `batch_job_timeout`, `batch_poll_timeout`) is
+    # outstanding too, so a checkpoint holding the rest must outlive this
+    # run. Kept out of `corners_skipped`
+    # (the reported `environment.budget.corners_skipped`) to leave that
+    # field's meaning unchanged.
+    corners_lost = sum(1 for corner in corners if _is_unrun_batch_corner(corner))
 
     # Issue #2491: a top-level rollup of every `corners[].diagnostics[]`
     # entry -- including one downgraded to `severity: "warning"` by
@@ -2774,7 +2964,7 @@ def _run_sim_corners(
     }
 
     if checkpoint is not None:
-        if corners_skipped == 0:
+        if corners_skipped == 0 and corners_lost == 0:
             # Nothing left to resume -- remove the checkpoint rather than
             # leave a stale file a future --resume could misread (its
             # fingerprint guard makes that safe even if left behind, but a
@@ -2928,6 +3118,7 @@ def _run_sim_corners(
     # Additive/optional (issue #3111): the declared solver options, verbatim,
     # so the setting is part of the report's evidence.
     environment.update({"ngspice_options": ngspice_options} if ngspice_options else {})
+    _stamp_netlist_identity(environment, netlist_identity, netlist_identity_error)
     if netlist_source is not None:
         # Additive/optional: only present when the request declares it, so
         # existing consumers of a request that omits netlist_source see an
@@ -3149,6 +3340,83 @@ def _warn_pdk_ambiguity(resolution: dict[str, Any] | None) -> None:
     warning = pdk_ambiguity_warning(resolution) if resolution else None
     if warning is not None:
         print(warning, file=sys.stderr)
+
+
+#: Top-level request keys ``klt sim`` reads (or documents). A dry run
+#: reports anything else as a warning (issue #3064) -- never an error, so no
+#: existing request starts failing.
+_KNOWN_REQUEST_KEYS = frozenset(
+    {
+        "analysis",
+        "analysis_steps",
+        "backend",
+        "batch",
+        "confidence",
+        "corners",
+        "decks",
+        "engine",
+        "exclude",
+        "measurements",
+        "models",
+        "monte_carlo",
+        "netlist",
+        "netlist_source",
+        "options",
+        "remote",
+        "schema",
+        "schema_version",
+        "target_ci_halfwidth",
+        "_explicit_points",
+        sim_staging.STAGED_MODEL_INPUTS_FIELD,
+    }
+)
+
+
+def _build_dry_run_report(
+    request: dict[str, Any],
+    *,
+    engine: str,
+    backend: str,
+    hosts: int,
+    netlist_path: str,
+    models_lib: str | None,
+    corner_points: list[CornerPoint],
+    monte_carlo_info: dict[str, Any] | None,
+    staged_model_environment: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    """The ``klt sim --dry-run`` response (issue #3064): the request as
+    :func:`_run_sim_corners` expanded it, with nothing simulated or submitted.
+
+    Built from the same ``corner_points`` / ``monte_carlo_info`` the real run
+    dispatches, so the per-sample seeds are exactly the ones a real run uses.
+    """
+    units: list[dict[str, Any]] = []
+    for point in corner_points:
+        unit: dict[str, Any] = {"corner_id": point.corner_id}
+        if point.sample_index is not None:
+            unit["sample_index"] = point.sample_index
+        if point.mc_seed is not None:
+            for key in ("rndseed", "process_seed", "mismatch_seed"):
+                unit[key] = point.mc_seed[key]
+        units.append(unit)
+    warnings = [
+        f"unknown top-level request key '{key}' (ignored by klt sim)"
+        for key in sorted(set(request) - _KNOWN_REQUEST_KEYS)
+    ]
+    return {
+        "dry_run": True,
+        "status": "valid",
+        "engine": engine,
+        "backend": backend,
+        "hosts": hosts,
+        "netlist": netlist_path,
+        "models_lib": models_lib,
+        "unit_count": len(units),
+        "units": units,
+        "monte_carlo": monte_carlo_info,
+        "staged_files": staged_model_environment.get("staged_model_inputs", []),
+        "warnings": warnings,
+    }
 
 
 def _preflight_staged_model_inputs(
@@ -3770,7 +4038,13 @@ def _expand_corners(
 
     ``corners.supply_v``'s keys sweep together by index (same-length arrays;
     rails move as a set), matching the spike's documented semantics.
+
+    ``corners.units`` (issue #2993) is the alternative, non-crossing form: an
+    explicit list of points executed exactly as given -- see
+    :func:`_expand_corner_units`.
     """
+    if "units" in corners_spec:
+        return _expand_corner_units(corners_spec, exclude_spec)
     raw_processes: list[Any] = corners_spec.get("process") or [None]
     processes: list[tuple[str | None, list[str] | None, list[str | None] | None]] = [
         (None, None, None) if raw is None else _parse_process_entry(raw)
@@ -3806,6 +4080,100 @@ def _expand_corners(
                 if not _is_excluded(point, exclude_spec):
                     points.append(point)
     return points
+
+
+_CORNER_UNIT_KEYS = ("process", "temperature_c", "supply_v")
+_CORNER_UNIT_CROSSED_KEYS = ("process", "supply_v", "temperature_c")
+
+
+def _is_plain_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _expand_corner_units(
+    corners_spec: dict[str, Any], exclude_spec: list[dict[str, Any]]
+) -> list[CornerPoint]:
+    """Expand ``corners.units`` -- an explicit, non-crossed point list.
+
+    Each record is ``{process?, temperature_c?, supply_v?: {key: number}}``
+    and becomes exactly one :class:`CornerPoint`, in record order. Omitted
+    axes collapse to the same defaults as the crossed form (``process=None``,
+    ``supply_v={}``, ``temperature_c=27``) and ``process`` accepts the same
+    string-or-bundle forms (:func:`_parse_process_entry`), so a unit that
+    names the same coordinates as a crossed point yields an identical
+    ``corner_id`` and checkpoint/``--resume`` reuse works across both forms.
+
+    Mutually exclusive with the crossed axes and with ``exclude`` (a unit
+    list is already the exact set wanted). Duplicates are judged on
+    ``corner_id``, so two records that differ only below its 3-decimal supply
+    formatting are refused rather than silently merged.
+    """
+    for key in _CORNER_UNIT_CROSSED_KEYS:
+        if key in corners_spec:
+            raise SimError(
+                f"corners.units cannot be combined with corners.{key}: units "
+                "are executed as given, not crossed"
+            )
+    if exclude_spec:
+        raise SimError(
+            "corners.units cannot be combined with exclude: list only the units to run"
+        )
+    units = corners_spec["units"]
+    if not isinstance(units, list) or not units:
+        raise SimError("corners.units must be a non-empty array of objects")
+
+    points: list[CornerPoint] = []
+    seen: dict[str, int] = {}
+    for index, record in enumerate(units):
+        point = _parse_corner_unit(record, f"corners.units[{index}]")
+        corner_id = point.corner_id
+        if corner_id in seen:
+            raise SimError(
+                f"corners.units[{index}] duplicates corners.units[{seen[corner_id]}] "
+                f"(both resolve to corner_id '{corner_id}')"
+            )
+        seen[corner_id] = index
+        points.append(point)
+    return points
+
+
+def _parse_corner_unit(record: Any, where: str) -> CornerPoint:
+    """Validate one ``corners.units`` record and build its :class:`CornerPoint`."""
+    if not isinstance(record, dict):
+        raise SimError(f"{where} must be an object")
+    unknown = sorted(set(record) - set(_CORNER_UNIT_KEYS))
+    if unknown:
+        raise SimError(
+            f"{where} has unknown key(s) {', '.join(unknown)} "
+            f"(supported: {', '.join(_CORNER_UNIT_KEYS)})"
+        )
+    raw_process = record.get("process")
+    process, sections, section_libs = (
+        (None, None, None) if raw_process is None else _parse_process_entry(raw_process)
+    )
+    temperature_c = record.get("temperature_c", 27)
+    if not _is_plain_number(temperature_c):
+        raise SimError(f"{where}.temperature_c must be a number")
+    return CornerPoint(
+        process,
+        _parse_unit_supply_v(record.get("supply_v") or {}, where),
+        temperature_c,
+        process_sections=sections,
+        process_section_libs=section_libs,
+    )
+
+
+def _parse_unit_supply_v(supply_v: Any, where: str) -> dict[str, Any]:
+    """Require a ``corners.units`` ``supply_v`` to be rail -> scalar number."""
+    if not isinstance(supply_v, dict):
+        raise SimError(f"{where}.supply_v must be an object of scalar numbers")
+    for rail, value in supply_v.items():
+        if not _is_plain_number(value):
+            raise SimError(
+                f"{where}.supply_v.{rail} must be a scalar number "
+                "(arrays are only valid in the crossed corners.supply_v form)"
+            )
+    return dict(supply_v)
 
 
 def _is_excluded(point: CornerPoint, exclude_spec: list[dict[str, Any]]) -> bool:
@@ -4282,6 +4650,29 @@ def _checkpoint_path(artifacts_dir: str) -> str:
     return os.path.join(artifacts_dir, "checkpoint.json")
 
 
+def _open_resume_checkpoint(
+    checkpoint_path: str,
+    *,
+    resume: bool,
+    **fingerprint_inputs: Any,
+) -> tuple[dict[str, dict[str, Any]], str | None, _Checkpoint | None]:
+    """The ``resume`` state of :func:`_run_sim_corners`: the corner reports a
+    prior run of this same request already recorded, the engine version that
+    run saw, and the checkpoint this run keeps extending. Without ``resume``
+    there is nothing to load and no checkpoint is kept.
+    """
+    if not resume:
+        return {}, None, None
+    fingerprint = _checkpoint_fingerprint(**fingerprint_inputs)
+    pre_completed, loaded_engine_version = _load_checkpoint(
+        checkpoint_path, fingerprint
+    )
+    checkpoint = _Checkpoint(checkpoint_path, fingerprint)
+    checkpoint.completed = dict(pre_completed)
+    checkpoint.engine_version = loaded_engine_version
+    return pre_completed, loaded_engine_version, checkpoint
+
+
 def _checkpoint_fingerprint(
     *,
     netlist_path: str,
@@ -4441,7 +4832,11 @@ class _Checkpoint:
 
 
 def _refuse_xyce_control_block_measurements(
-    *, expr_declared: bool, crossings_declared: bool, cycle_mean_declared: bool
+    *,
+    expr_declared: bool,
+    crossings_declared: bool,
+    cycle_mean_declared: bool,
+    transfer_declared: bool = False,
 ) -> None:
     """The ``engine: "xyce"`` refusals for measurement forms that exist only
     as commands in klt's generated ngspice ``.control`` block (``expr``,
@@ -4481,6 +4876,14 @@ def _refuse_xyce_control_block_measurements(
             "a `.control` block, and the Xyce deck has none; use engine "
             "'ngspice'"
         )
+    if transfer_declared:
+        # Issue #2923: same `.control` let/write boundary as `cycle_mean`.
+        raise SimError(
+            "measurements[].transfer is not supported for engine 'xyce': the "
+            "AC vectors are dumped by ngspice `let`/`write` commands inside a "
+            "`.control` block, and the Xyce deck has none; use engine "
+            "'ngspice'"
+        )
 
 
 def _enforce_xyce_support_boundary(
@@ -4497,6 +4900,7 @@ def _enforce_xyce_support_boundary(
     analysis_steps_declared: bool = False,
     crossings_declared: bool = False,
     cycle_mean_declared: bool = False,
+    transfer_declared: bool = False,
 ) -> None:
     """Refuse the ``engine: "xyce"`` combinations the v1 path does not
     implement (issue #2016) -- up front, with the same clean
@@ -4529,7 +4933,10 @@ def _enforce_xyce_support_boundary(
             f"local-parallel), not '{backend}' -- the remote/batch "
             "provisioning path pins the ngspice toolchain"
         )
-    if corners_spec.get("supply_v"):
+    if corners_spec.get("supply_v") or any(
+        isinstance(unit, dict) and unit.get("supply_v")
+        for unit in corners_spec.get("units") or []
+    ):
         raise SimError(
             "engine 'xyce' does not support corners.supply_v: Xyce has "
             "no netlist equivalent of ngspice's `alter` control command, "
@@ -4566,6 +4973,7 @@ def _enforce_xyce_support_boundary(
         expr_declared=expr_measurements_declared,
         crossings_declared=crossings_declared,
         cycle_mean_declared=cycle_mean_declared,
+        transfer_declared=transfer_declared,
     )
     if save_mode_declared:
         # Issue #2732: `save_mode` selects whether klt's generated ngspice
@@ -5882,6 +6290,9 @@ def _run_corner(
     cycle_means = sim_cycle_mean.extract_corner_cycle_means(
         measurements_spec, corner_dir
     )
+    transfers = sim_transfer_meas.extract_corner_transfers(
+        measurements_spec, corner_dir
+    )
     measurement_results, measurement_diagnostics, step_fields = (
         _corner_measurement_results(
             measurement_values,
@@ -5892,6 +6303,7 @@ def _run_corner(
             save_mode=save_mode,
             crossings=crossings,
             cycle_means=cycle_means,
+            transfers=transfers,
         )
     )
     measurement_diagnostics = _demote_abort_cascade(
@@ -6136,6 +6548,7 @@ def _corner_measurement_results(
     save_mode: str,
     crossings: dict[int, sim_crossings.CrossingsOutcome] | None = None,
     cycle_means: dict[int, sim_cycle_mean.CycleMeanOutcome] | None = None,
+    transfers: dict[int, sim_transfer_meas.TransferOutcome] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     """One corner's ``(measurement_results, diagnostics, extra_corner_fields)``
     from its harvested log values.
@@ -6176,6 +6589,13 @@ def _corner_measurement_results(
         if sim_cycle_mean.is_cycle_mean(spec):
             result, extra = _cycle_mean_measurement_result(
                 spec, (cycle_means or {}).get(position), save_mode=save_mode
+            )
+            measurement_results.append(result)
+            diagnostics.extend(extra)
+            continue
+        if sim_transfer_meas.is_transfer(spec):
+            result, extra = _transfer_measurement_result(
+                spec, (transfers or {}).get(position), save_mode=save_mode
             )
             measurement_results.append(result)
             diagnostics.extend(extra)
@@ -6336,6 +6756,63 @@ def _cycle_mean_measurement_result(
         "status": m_status,
         "margin": margin,
         "cycle_mean": outcome.report(),
+    }
+    return result, grading_diagnostics
+
+
+def _transfer_measurement_result(
+    spec: dict[str, Any],
+    outcome: sim_transfer_meas.TransferOutcome | None,
+    *,
+    save_mode: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """One ``transfer`` measurement's response entry (issue #2923).
+
+    ``value`` is the metric, graded through :func:`_grade_measurement_value`
+    like any scalar; the request echo rides the additive ``transfer`` sibling.
+    A failure is ``status: "error"``, ``value: null`` (so it can never pass a
+    limit) with a ``code: "measurement"`` diagnostic whose message starts with
+    a ``[<reason>]`` token from
+    :data:`klayout_tools.sim_transfer_meas.ERROR_CODES`."""
+    name = spec["name"]
+    unit = spec.get("unit")
+    if outcome is None or outcome.value is None:
+        message = (
+            outcome.error
+            if outcome is not None and outcome.error is not None
+            else f"measurement '{name}' produced no transfer value"
+        )
+        reason = (
+            outcome.code
+            if outcome is not None and outcome.code is not None
+            else "transfer_vector_missing"
+        )
+        if save_mode == "netlist" and reason == "transfer_vector_missing":
+            message += SAVE_MODE_NETLIST_NO_VALUE_HINT
+        result = {
+            "name": name,
+            "value": None,
+            "unit": unit,
+            "status": "error",
+            "margin": None,
+        }
+        return result, [
+            {
+                "severity": "error",
+                "code": "measurement",
+                "message": f"[{reason}] {message}",
+            }
+        ]
+    m_status, margin, grading_diagnostics = _grade_measurement_value(
+        spec, outcome.value
+    )
+    result = {
+        "name": name,
+        "value": outcome.value,
+        "unit": unit,
+        "status": m_status,
+        "margin": margin,
+        "transfer": outcome.report(spec),
     }
     return result, grading_diagnostics
 
@@ -6682,6 +7159,11 @@ def _corner_deck_control_lines(
        (:func:`klayout_tools.sim_cycle_mean.control_lines`), after the
        crossings lines; same ``set filetype=ascii`` rule. None of this
        appears without a cycle_mean entry.
+    7. Per unique ``measurements[].transfer`` ``num``/``den`` pair (issue
+       #2923), two ``let`` lines and one ``write`` of both complex vectors
+       (:func:`klayout_tools.sim_transfer_meas.control_lines`), after the
+       cycle_mean lines; same ``set filetype=ascii`` rule. None of this
+       appears without a transfer entry.
 
     An ``analysis_steps[]`` request (issue #2482) replaces step 3's analysis
     and 4's ``expr`` lines with the ordered step sequence
@@ -6710,7 +7192,8 @@ def _corner_deck_control_lines(
         return lines
     crossings_lines = sim_crossings.control_lines(measurements_spec, corner_dir)
     cycle_mean_lines = sim_cycle_mean.control_lines(measurements_spec, corner_dir)
-    if raw_path is not None or crossings_lines or cycle_mean_lines:
+    transfer_lines = sim_transfer_meas.control_lines(measurements_spec, corner_dir)
+    if raw_path is not None or crossings_lines or cycle_mean_lines or transfer_lines:
         lines.append("set filetype=ascii")
     lines.append(f"{analysis['kind']} {analysis['args']}")
     if raw_path is not None:
@@ -6727,6 +7210,7 @@ def _corner_deck_control_lines(
         lines.append(f"print {spec['name']}")
     lines.extend(crossings_lines)
     lines.extend(cycle_mean_lines)
+    lines.extend(transfer_lines)
     lines.append("quit")
     lines.append(".endc")
     return lines

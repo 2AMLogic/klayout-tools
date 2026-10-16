@@ -137,7 +137,7 @@ deck's own rounded ``2e-15`` F/um² above to sky130's own **simulation**
 model's two-term law, ``czero = carea + cperim`` with ``carea =
 camimc*w*l`` / ``cperim = cpmimc*(w+l)*2``, transcribed from the same
 ``efabless/sky130_klayout_pdk``-adjacent, official ``sky130_fd_pr`` install
-(``volare enable sky130 c6d73a35f524070e85faff4a6a9eef49553ebc2b``):
+(``ciel enable --pdk sky130 f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7``):
 ``libs.ref/sky130_fd_pr/spice/sky130_fd_pr__cap_mim_m3_1.model.spice`` (met3,
 ``sky130_fd_pr__model__cap_mim``) and ``..._cap_mim_m3_2.model.spice`` (met4,
 ``sky130_fd_pr__model__cap_mim_m4``) share this same formula; both defer the
@@ -387,12 +387,12 @@ from . import (
 # `RuleProvenance.source_repo`/`.commit` shared by every sky130 width/space
 # rule's provenance below (issue #747, piloted on this deck's 11 width/space
 # rules only -- see the module docstring's own citation of this repo/commit
-# for the resistor/capacitor coefficients above, the same `volare enable
-# sky130 c6d73a35f524070e85faff4a6a9eef49553ebc2b` fetch this deck's DRC
+# for the resistor/capacitor coefficients above, the same `ciel enable
+# --pdk sky130 f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7` fetch this deck's DRC
 # rule values were themselves verified against, per the "met2/via rule
 # coverage" note above).
 _OPEN_PDKS_REPO = "fossi-foundation/open-pdks"
-_OPEN_PDKS_COMMIT = "c6d73a35f524070e85faff4a6a9eef49553ebc2b"
+_OPEN_PDKS_COMMIT = "f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7"
 
 
 def _sky130_provenance(source_path: str, rule_id: str) -> RuleProvenance:
@@ -417,7 +417,7 @@ def _sky130_provenance(source_path: str, rule_id: str) -> RuleProvenance:
 # `source_path` below is that repo's own path to the file
 # (`libs.tech/klayout/lvs/sky130.lvs`, confirmed against the same real
 # sky130A install -- volare -- this module's other provenance notes cite).
-# `commit` reuses `_OPEN_PDKS_COMMIT`: that hash is the `volare enable sky130
+# `commit` reuses `_OPEN_PDKS_COMMIT`: that hash is the `ciel enable --pdk sky130
 # <hash>` fetch pinning the *whole* PDK install (including `sky130.lvs`,
 # vendored in by `open_pdks`' own build), the same reproducible pin this
 # module's resistor/capacitor coefficients (§ "MiM capacitors"/"Drawn poly
@@ -1778,14 +1778,14 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
 # models from the default 1.8V core ones.
 #
 # `(75, 20)` is confirmed against three independent sources in the same real
-# fetched sky130A install (volare, `c6d73a35f524070e85faff4a6a9eef49553ebc2b`,
+# fetched sky130A install (volare, `f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7`,
 # the `SOURCES` line `open_pdks c6d73a35...`) this module's other provenance
 # notes cite:
 #   - `libs.tech/klayout/tech/sky130A.lyp:3127` (KLayout layer properties):
 #     `<name>hvi.drawing - 75/20</name>`
 #   - `libs.tech/klayout/lvs/sky130.lvs:941` (the official KLayout LVS deck):
 #     `hvi         = polygons(75 , 20 )`
-#   - `libs.tech/magic/sky130A.tech:3980` (magic technology file):
+#   - `libs.tech/magic/sky130A.tech:3975` (magic technology file):
 #     `calma HVI 75 20`  (under the comment `# HVI (THKOX)`)
 #
 # What issue #1369 closed: `EXTRACTION_DECK` below now declares one
@@ -1806,7 +1806,7 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
 # DRM publishes a second, medium-voltage threshold column selected by `hvi`
 # that this deck transcribes none of. The concrete residue behind the
 # threshold quoted below, from the same install's
-# `libs.tech/magic/sky130A.tech:4220-4224`: general diffusion width is
+# `libs.tech/magic/sky130A.tech:4215-4219`: general diffusion width is
 # `width *ndiff,... 150 "Diffusion width < %d (diff/tap.1)"` -- the 0.15um
 # `diff.width.1` rule above -- while `hvi`-marked (`mv*`) diffusion is
 # `width *mvndiff,... 290 "MV Diffusion width < %d (diff/tap.14)"`, i.e.
@@ -1985,8 +1985,8 @@ UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {
 # resistance term `R = L / W * sheet_rho_ohm_sq` alone cannot express. Both
 # `sheet_rho_ohm_sq` and `fixed_offset_ohm` below are *measured* (not
 # transcribed), the same way this issue's own filing measured the gap --
-# via ngspice against the real PDK install (the same `volare enable sky130
-# c6d73a35f524070e85faff4a6a9eef49553ebc2b` fetch cited in the MiM
+# via ngspice against the real PDK install (the same `ciel enable --pdk
+# sky130 f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7` fetch cited in the MiM
 # capacitor provenance note above), at the nominal `tt` corner
 # (`libs.tech/combined/sky130.lib.spice`'s `.lib tt` section), `w=1um`,
 # sweeping `l` across {1, 5, 10, 35}um: total two-terminal resistance

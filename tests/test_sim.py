@@ -761,6 +761,90 @@ def test_validate_meas_card_op_error_points_at_expr(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# Dependent `spice` cards (issue #3038)
+# --------------------------------------------------------------------------- #
+
+
+def _spice_specs(*cards):
+    return [{"name": n, "spice": c} for n, c in cards]
+
+
+@pytest.mark.parametrize(
+    "dependent",
+    [
+        ".meas tran vos find v(rmp) at=t_flip",
+        ".meas tran vos find v(rmp) at = T_FLIP",  # case-insensitive
+        ".meas tran vos find v(rmp) when v(x)=t_flip",
+        ".meas tran vos avg v(rmp) from=t_flip to=2u",
+        ".meas tran vos avg v(rmp) from=1u to=t_flip",
+        ".meas tran vos find v(rmp) when v(dn)=0.5 rise=1 td=t_flip",
+    ],
+)
+def test_dependent_meas_card_refused(dependent):
+    specs = _spice_specs(
+        ("t_flip", ".meas tran t_flip when v(dn)=0.5 rise=1 td=8u"),
+        ("vos", dependent),
+    )
+    with pytest.raises(sim.SimError, match=r"'vos' references measurement 't_flip'"):
+        sim._validate_no_dependent_meas_cards(specs)
+
+
+def test_independent_meas_cards_accepted():
+    specs = _spice_specs(
+        ("vout", ".meas tran vout find v(vout) at=1u"),  # v(<name>) is a signal
+        ("i1", ".meas tran i1 max i(vout) from=0 to=1u"),
+        ("t0", ".meas tran t0 when v(a)=0.5 rise=1"),
+        ("self", ".meas tran self find v(a) at='1u+2n'"),
+        ("selfref", ".meas tran selfref find v(a) at=selfref"),  # own name only
+    )
+    sim._validate_no_dependent_meas_cards(specs)  # must not raise
+
+
+def test_dependent_meas_scan_ignores_expr_entries():
+    specs = [
+        {"name": "ta", "spice": ".meas tran ta when v(o)=0.8 rise=3"},
+        {"name": "t", "expr": "ta/8"},
+    ]
+    sim._validate_no_dependent_meas_cards(specs)  # `expr` has its own rule
+
+
+def test_run_sim_refuses_dependent_meas_card(tmp_path):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 10u"},
+            "measurements": _spice_specs(
+                ("t_flip", ".meas tran t_flip when v(dn)=0.5 rise=1 td=8u"),
+                ("vos", ".meas tran vos find v(rmp) at=t_flip"),
+            ),
+        },
+    )
+    with pytest.raises(sim.SimError, match="cannot read another .meas result"):
+        sim.run_sim(str(request))
+
+
+def test_dependent_check_not_applied_to_analysis_steps_path():
+    # `analysis_steps[]` resolves through `sim_steps`, which never reaches the
+    # file-scope dependent-card check (control-scope `meas` differs).
+    request = {
+        "netlist": "x",
+        "analysis_steps": [
+            {
+                "name": "s1",
+                "analysis": {"kind": "tran", "args": "1n 10u"},
+                "measurements": _spice_specs(
+                    ("t_flip", ".meas tran t_flip when v(dn)=0.5 rise=1"),
+                    ("vos", ".meas tran vos find v(rmp) at=t_flip"),
+                ),
+            }
+        ],
+    }
+    sim._resolve_analysis_and_measurements(request)  # must not raise
+
+
+# --------------------------------------------------------------------------- #
 # `measurements[].expr` form validation (issue #2533)
 # --------------------------------------------------------------------------- #
 
@@ -8848,7 +8932,10 @@ def test_cli_json_omits_ambiguous_sources_for_a_single_install(
     main(["sim", str(_pdk_request(tmp_path)), "--format", "json"])
 
     block = json.loads(capsys.readouterr().out)["provenance"]["pdk"]
-    assert set(block) == {"name", "source", "version"}
+    # The fixture stamp is not the declared open_pdks pin, so `compatibility`
+    # (issue #3427) is legitimately present; the point here is the absence of
+    # `ambiguous_sources`.
+    assert set(block) == {"name", "source", "version", "compatibility"}
 
 
 def test_cli_pinned_models_pdk_root_is_never_ambiguous(tmp_path, monkeypatch, capsys):
@@ -12926,6 +13013,103 @@ def test_timeout_budget_hint_absent_when_well_inside_budget():
 
 
 # --------------------------------------------------------------------------- #
+# corners.units -- explicit, non-crossed unit list (issue #2993)
+# --------------------------------------------------------------------------- #
+
+
+def test_expand_corners_units_match_crossed_ids_in_record_order():
+    crossed = sim._expand_corners(
+        {
+            "process": ["tt", "ss"],
+            "supply_v": {"vdd": [1.62, 1.98]},
+            "temperature_c": [-40, 125],
+        },
+        [],
+    )
+    wanted = [crossed[5], crossed[0]]
+    units = [
+        {
+            "process": p.process,
+            "temperature_c": p.temperature_c,
+            "supply_v": dict(p.supply_v),
+        }
+        for p in wanted
+    ]
+
+    points = sim._expand_corners({"units": units}, [])
+
+    assert [p.corner_id for p in points] == [p.corner_id for p in wanted]
+
+
+def test_expand_corners_units_sparse_set_is_not_crossed():
+    units = [
+        {"process": "tt", "supply_v": {"vdd": 1.8, "vin": 0.001 * i}}
+        for i in range(810)
+    ]
+    assert len(sim._expand_corners({"units": units}, [])) == 810
+
+
+def test_expand_corners_units_defaults_and_bundle():
+    bundle = {"name": "b", "sections": ["s1", "s2"]}
+    points = sim._expand_corners(
+        {"units": [{"temperature_c": 85}, {"process": bundle}]}, []
+    )
+
+    assert points[0].corner_id == "default/novdd/85C"
+    assert points[1].corner_id == "b/novdd/27C"
+    assert points[1].process_sections == ["s1", "s2"]
+
+
+@pytest.mark.parametrize(
+    ("corners", "exclude", "match"),
+    [
+        ({"units": [{}], "process": ["tt"]}, [], "corners.process"),
+        ({"units": [{}], "supply_v": {"vdd": [1]}}, [], "corners.supply_v"),
+        ({"units": [{}], "temperature_c": [27]}, [], "corners.temperature_c"),
+        ({"units": [{}]}, [{"process": "tt"}], "exclude"),
+        ({"units": []}, [], "non-empty"),
+        ({"units": {"a": 1}}, [], "non-empty"),
+        ({"units": ["tt"]}, [], "must be an object"),
+        ({"units": [{"supply_v": {"vdd": [1.0, 2.0]}}]}, [], "scalar"),
+        ({"units": [{"supply_v": {"vdd": True}}]}, [], "scalar"),
+        ({"units": [{"temperature_c": "hot"}]}, [], "temperature_c"),
+        ({"units": [{"bogus": 1}]}, [], "unknown key"),
+        ({"units": [{"process": "tt"}, {"process": "tt"}]}, [], "duplicates"),
+        (
+            {"units": [{"supply_v": {"vdd": 0.1004}}, {"supply_v": {"vdd": 0.1001}}]},
+            [],
+            "duplicates",
+        ),
+    ],
+)
+def test_expand_corners_units_validation(corners, exclude, match):
+    with pytest.raises(sim.SimError, match=match):
+        sim._expand_corners(corners, exclude)
+
+
+def test_expand_corners_units_compose_with_monte_carlo():
+    points = sim._expand_corners({"units": [{"process": "tt"}, {"process": "ss"}]}, [])
+    expanded, info = sim._expand_monte_carlo(
+        points, {"n": 3, "seed": 7, "vary": "mismatch"}
+    )
+
+    assert len(expanded) == 6
+    assert [p.sample_index for p in expanded] == [0, 1, 2, 0, 1, 2]
+    assert info["n"] == 3
+
+
+def test_xyce_boundary_refuses_supply_in_units():
+    with pytest.raises(sim.SimError, match="corners.supply_v"):
+        sim._enforce_xyce_support_boundary(
+            engine="xyce",
+            backend="local",
+            corners_spec={"units": [{"supply_v": {"vdd": 1.8}}]},
+            monte_carlo_declared=False,
+            fail_fast_probe=False,
+        )
+
+
+# --------------------------------------------------------------------------- #
 # noise_representation (issue #3006)
 # --------------------------------------------------------------------------- #
 
@@ -12946,6 +13130,114 @@ def test_noise_representation(plotname, vtype, expected):
         "points": [[1.0]],
     }
     assert sim.noise_representation(waveform) == expected
+
+
+# --------------------------------------------------------------------------- #
+# klt sim --dry-run (issue #3064)
+# --------------------------------------------------------------------------- #
+
+
+def _dry_run_mc_request(tmp_path, **extra):
+    _write_body(tmp_path)
+    return _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "monte_carlo": {"n": 3, "seed": 7, "vary": "both"},
+            **extra,
+        },
+    )
+
+
+def test_run_sim_dry_run_seeds_match_real_run_and_invoke_no_engine(
+    tmp_path, monkeypatch
+):
+    request = _dry_run_mc_request(tmp_path)
+
+    monkeypatch.delenv(sim.BACKEND_ENV, raising=False)
+    _stub_subprocess_run(monkeypatch)
+    real = sim.run_sim(str(request))
+
+    def boom(*args, **kwargs):
+        raise AssertionError("dry run must not invoke the engine")
+
+    monkeypatch.setattr(sim.subprocess, "run", boom)
+    for name in list(sim._BACKENDS):
+        monkeypatch.setitem(sim._BACKENDS, name, boom)
+    dry = sim.run_sim(str(request), dry_run=True)
+
+    assert dry["dry_run"] is True
+    assert dry["status"] == "valid"
+    assert dry["unit_count"] == len(dry["units"]) == 3
+    assert dry["warnings"] == []
+
+    real_seeds = [
+        (
+            c["monte_carlo"]["seed"],
+            c["monte_carlo"]["process_seed"],
+            c["monte_carlo"]["mismatch_seed"],
+        )
+        for c in real["corners"]
+    ]
+    dry_seeds = [
+        (u["rndseed"], u["process_seed"], u["mismatch_seed"]) for u in dry["units"]
+    ]
+    assert dry_seeds == real_seeds
+    assert [u["corner_id"] for u in dry["units"]] == [
+        c["corner_id"] for c in real["corners"]
+    ]
+
+
+def test_run_sim_dry_run_warns_on_unknown_key(tmp_path):
+    request = _dry_run_mc_request(tmp_path, monte_carol_typo=1)
+    report = sim.run_sim(str(request), dry_run=True)
+    assert len(report["warnings"]) == 1
+    assert "monte_carol_typo" in report["warnings"][0]
+
+
+def test_run_sim_dry_run_reports_same_error_as_real_run(tmp_path):
+    request = _dry_run_mc_request(tmp_path)
+    bad = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "monte_carlo": {"n": 0, "seed": 1},
+        },
+    )
+    with pytest.raises(sim.SimError) as real_exc:
+        sim.run_sim(str(bad))
+    with pytest.raises(sim.SimError) as dry_exc:
+        sim.run_sim(str(bad), dry_run=True)
+    assert str(dry_exc.value) == str(real_exc.value)
+    assert request.exists()
+
+
+def test_run_sim_dry_run_missing_netlist_raises(tmp_path):
+    request = _write_request(
+        tmp_path,
+        {"netlist": "nope.spice", "analysis": {"kind": "tran", "args": "1n 1u"}},
+    )
+    with pytest.raises(sim.SimError, match="netlist not found"):
+        sim.run_sim(str(request), dry_run=True)
+
+
+def test_run_sim_dry_run_refuses_deck_requests(tmp_path):
+    request = _write_request(tmp_path, {"decks": [{"name": "a", "deck": "x"}]})
+    with pytest.raises(sim.SimError, match="--dry-run"):
+        sim.run_sim(str(request), dry_run=True)
+
+
+def test_cli_sim_dry_run_json_envelope(tmp_path, capsys, monkeypatch):
+
+    monkeypatch.delenv(sim.BACKEND_ENV, raising=False)
+    request = _dry_run_mc_request(tmp_path)
+    assert main(["sim", str(request), "--dry-run", "--format", "json"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["dry_run"] is True
+    assert len(out["units"]) == 3
+    assert out["backend"] == "local"
 
 
 # --------------------------------------------------------------------------- #
@@ -13012,3 +13304,92 @@ def test_pex_side_environment_carries_engine_host():
     from klayout_tools import pex
 
     assert {"engine_host", "client_ngspice_binary"} <= set(pex._SIDE_ENVIRONMENT_KEYS)
+
+
+# --- issue #3074: normalised netlist identity --------------------------------
+
+
+def _identity_for(tmp_path, monkeypatch, top_text, shared_text="R1 a b 1k\n", **extra):
+    _write_body(tmp_path)
+    (tmp_path / "shared.spice").write_text(shared_text)
+    (tmp_path / "top.spice").write_text(top_text)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "top.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            **extra,
+        },
+    )
+    _stub_subprocess_run(monkeypatch)
+    return sim.run_sim(str(request))["environment"]
+
+
+def test_netlist_identity_stable_under_comment_whitespace_case_edits(
+    tmp_path, monkeypatch
+):
+    (tmp_path / "a").mkdir()
+    base = _identity_for(
+        tmp_path / "a",
+        monkeypatch,
+        ".include shared.spice\nR2 a 0 2k\n.param x=1\n",
+    )
+    (tmp_path / "b").mkdir()
+    noisy = _identity_for(
+        tmp_path / "b",
+        monkeypatch,
+        "* a comment\n.INCLUDE   ./shared.spice\n\nr2  a  0\n+ 2K $ note\n.PARAM x=1\n",
+    )
+    assert base["netlist_identity"].startswith("sha256:")
+    assert base["netlist_identity"] == noisy["netlist_identity"]
+    # raw-byte hash still differs: the new field is the comparable one
+    assert base["netlist_sha256"] != noisy["netlist_sha256"]
+
+
+def test_netlist_identity_changes_on_value_or_include_edit(tmp_path, monkeypatch):
+    for name in ("a", "b", "c"):
+        (tmp_path / name).mkdir()
+    top = ".include shared.spice\nR2 a 0 2k\n"
+    base = _identity_for(tmp_path / "a", monkeypatch, top)
+    value = _identity_for(tmp_path / "b", monkeypatch, top.replace("2k", "3k"))
+    included = _identity_for(
+        tmp_path / "c", monkeypatch, top, shared_text="R1 a b 2k\n"
+    )
+    assert (
+        len(
+            {
+                base["netlist_identity"],
+                value["netlist_identity"],
+                included["netlist_identity"],
+            }
+        )
+        == 3
+    )
+
+
+def test_netlist_identity_null_with_error_when_include_unresolved(
+    tmp_path, monkeypatch
+):
+    env = _identity_for(tmp_path, monkeypatch, ".include missing.spice\n")
+    assert env["netlist_identity"] is None
+    assert env["netlist_identity_error"]
+
+
+def test_expect_netlist_identity_match_runs_and_mismatch_refuses(tmp_path, monkeypatch):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    top = ".include shared.spice\nR2 a 0 2k\n"
+    stamp = _identity_for(tmp_path / "a", monkeypatch, top)["netlist_identity"]
+    ok = _identity_for(tmp_path / "b", monkeypatch, top, expect_netlist_identity=stamp)
+    assert ok["netlist_identity"] == stamp
+
+    (tmp_path / "c").mkdir()
+    with pytest.raises(sim.SimError) as err:
+        _identity_for(
+            tmp_path / "c",
+            monkeypatch,
+            top.replace("2k", "9k"),
+            expect_netlist_identity=stamp,
+        )
+    assert stamp in str(err.value)
+    assert "mismatch" in str(err.value)
