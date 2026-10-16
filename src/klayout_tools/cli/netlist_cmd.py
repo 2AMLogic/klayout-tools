@@ -57,6 +57,8 @@ def run(args: argparse.Namespace) -> int:
                 pdk_root=args.pdk_root,
                 block=args.block,
                 batch_root=getattr(args, "batch_root", None),
+                batch_include=getattr(args, "batch_include", None) or (),
+                batch_exclude=getattr(args, "batch_exclude", None) or (),
                 xschem_binary=args.xschem_binary,
                 warn=_warn,
             )
@@ -73,7 +75,9 @@ def run(args: argparse.Namespace) -> int:
                 block=args.block,
             )
     except NetlistError as exc:
-        return emit_error("netlist", str(exc), args.format, code=exc.code)
+        return emit_error(
+            "netlist", str(exc), args.format, code=exc.code, details=exc.details
+        )
 
     emit_success(report, args.format, _print_text)
     return EXIT_DRIFTED if report["status"] == "drifted" else EXIT_OK

@@ -140,6 +140,7 @@ A request naming both, or neither, is a request error.
 | `constraints.input_delay_ns` | number \| omitted | Additive field (issue #1865) → `set_input_delay <ns> -clock <clock_port>` on every **non-clock** input port. Non-negative number when given (`0` is valid and meaningful). Omitted (the default) emits no `set_input_delay` line, leaving this command's generated Tcl byte-identical to before this field existed. Validated and emitted **here**, independently of `klt place-and-route` — this command can run standalone against an externally-produced DEF/netlist with no place-and-route request anywhere upstream, so nothing is inherited. See "I/O timing constraints" below. |
 | `constraints.output_delay_ns` | number \| omitted | Additive field (issue #1865) → `set_output_delay <ns> -clock <clock_port> [all_outputs]`. Same validation and omitted-default behavior as `input_delay_ns`; the two are independently optional. |
 | `constraints.input_delays` / `.output_delays` | object \| omitted | Additive fields (issue #2740). Per-port maps `{"<port>": {"min_ns": n, "max_ns": n}}` → `set_input_delay -min/-max` / `set_output_delay -min/-max` on exactly that port. Each bound is independently optional (at least one per entry); a missing bound is left **unconstrained**, never copied from the other. Values are finite numbers and may be negative; `min_ns <= max_ns` when both are given. Keys are literal names of one scalar port or one bus bit (`data[3]`) — no wildcards, no whole buses, no Tcl. The scalar `input_delay_ns`/`output_delay_ns` above become the **default for ports absent from the map**. Missing, ambiguous and wrong-direction keys, and the clock port, are request errors. See "Per-port I/O delays and worst-path identity" below. |
+| `constraints.input_transition_ns` / `.input_transitions` | number / object \| omitted | Additive fields (issue #3227). `input_transition_ns` is the default input slew (ns) → `set_input_transition` on every **non-clock** input not named in `input_transitions`; `input_transitions` is a literal `{"<port>": ns}` map (one scalar port or one bus bit, e.g. `data[3]`) whose values **override** the scalar for that port. Every value is a finite, non-boolean number `>= 0` (`0` is valid). Keys follow the per-port delay rules: no wildcards, no whole buses, no Tcl; the clock port, a missing/ambiguous port or an output-only port is a request error. Omitted fields (and an empty map) emit no Tcl — the generated script stays byte-identical. See "Input transitions" below. |
 | `constraints.report_ports` | list of strings \| omitted | Additive field (issue #3042). Literal port names (one scalar port or one bus bit such as `data[3]`) whose **own** worst setup and hold path is reported as `port_paths`, alongside the global `worst_*_path`. Same key rules as the per-port delay maps: no wildcards, whole buses or Tcl. Entries must be unique non-empty strings; the clock port, unknown and ambiguous names are request errors. Any direction is allowed. Omitted or `[]` emits nothing. See "Per-port path queries" below. |
 | `constraints.wire_load_model` / `.wire_load_mode` | string \| omitted | (Issue #1825.) **Only valid in `verilog` mode** — a request error otherwise. Drives OpenSTA's own `set_wire_load_model`/`set_wire_load_mode`, the parasitics-estimate mechanism for a from-scratch netlist session that has no placement or routing to estimate from. See "From-scratch netlist input" below. |
 | `constraints.propagated_clock` | boolean \| omitted | Additive field (issue #2739). **`def` mode only.** `true` marks the request's created clock propagated (`set_propagated_clock`) in every analyzed corner, so hold/removal checks include the DEF's clock-tree insertion delay and skew (and, with a caller-supplied `spef`, its clock-net RC) — the timing a routed post-CTS design actually meets. Omitted or `false` (the default) keeps the **ideal** SDC-only clock this command has always timed — byte-for-byte the pre-#2739 behavior — so existing requests' numbers never change. Any non-boolean value is a request error; `true` together with `verilog` is a request error (a linked netlist has no placed clock tree to propagate through). Meaningful only for a **post-CTS** DEF: a pre-CTS DEF propagates through plain wires and reports ~zero insertion delay — the response's `clock_propagation` evidence block is what says what propagation actually reached (see "Propagated-clock timing" below). |
@@ -1052,6 +1053,40 @@ The global `worst_hold_path` is still `rst_n → ff_a/RESET_B`.
 - **Not SDC.** Only one clock and only `set_input_delay`/`set_output_delay`
   are supported: there are no false or multicycle paths, no clock
   uncertainty, and no `read_sdc`.
+
+## Input transitions (issue #3227)
+
+`constraints.input_transition_ns` and `constraints.input_transitions` give
+the input edge rate (slew, in **ns**) that an equivalent OpenSTA session would
+set with `set_input_transition`:
+
+```json
+"constraints": {
+  "clock_port": "clk",
+  "clock_period_ns": 2.0,
+  "input_transition_ns": 0.05,
+  "input_transitions": {"din[0]": 0.3, "rst_n": 0}
+}
+```
+
+- **Scope is transition-only.** Nothing else about input drive changes: there
+  is no driving-cell model and no max-transition/max-capacitance limit check.
+- **Override semantics.** The scalar is the default for every non-clock input
+  that is not a key of `input_transitions`; a mapped port gets exactly its own
+  value. Bus bits are matched individually, so mapping `din[0]` leaves
+  `din[1]` on the scalar default.
+- **Validation.** Values must be finite, non-boolean numbers `>= 0`. The clock
+  port is rejected (clock inputs are excluded from the default too). Keys are
+  checked against the loaded design in the same engine-session port check as
+  the per-port delay maps, before any timing is reported; a failure is a
+  request error naming `constraints.input_transitions[...]`.
+- **Placement.** The commands are emitted before the timing reports in both
+  `def` and `verilog` modes, and in every liberty-corner session of a
+  `pdk.corners` request.
+- **Contract.** The response schema is unchanged (additive request fields only).
+  Omitting both fields, or giving an empty map, leaves the generated Tcl
+  byte-for-byte as before.
+
 
 ## Pre-route DEFs (`geometry_source`, issue #1826)
 
