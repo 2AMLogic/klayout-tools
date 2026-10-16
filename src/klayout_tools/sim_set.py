@@ -107,7 +107,7 @@ class _Manifest:
     def __init__(self, path: str, paths: list[str], dirs: list[str]) -> None:
         self.path = path
         self._lock = threading.Lock()
-        self._entries = [
+        self._entries: list[dict[str, Any]] = [
             {
                 "index": i,
                 "request": request,
