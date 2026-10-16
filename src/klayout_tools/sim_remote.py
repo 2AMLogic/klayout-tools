@@ -225,6 +225,7 @@ def _unrun_corner_report(
         "temperature_c": point.temperature_c,
         **({"params": dict(point.params)} if point.params else {}),
         **({"nodeset": dict(point.nodeset)} if point.nodeset else {}),
+        **({"options": dict(point.options)} if point.options else {}),
         "status": "error",
         "runtime_s": 0.0,
         "engine_exit_code": None,

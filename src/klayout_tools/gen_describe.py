@@ -195,20 +195,90 @@ def _validate_share_sd(params: dict[str, Any]) -> None:
             )
 
 
+def _validate_mirror(params: dict[str, Any]) -> None:
+    """Issue #3552 (Phase 3 of #3299): ``mirror`` flips odd columns of the
+    plain single-finger ``array`` topology. ``common_centroid`` already owns
+    the pairing order, so it is rejected rather than given invented semantics."""
+    from .gen import GenError
+
+    if not params["mirror"]:
+        return
+    if params["topology"] != "array":
+        raise GenError(
+            "generator 'mos_array': params.mirror requires params.topology="
+            "'array' (it does not compose with the common_centroid ordering)"
+        )
+    if params["fingers"] != 1:
+        raise GenError(
+            "generator 'mos_array': params.mirror requires params.fingers=1 "
+            "(multi-finger units are not supported)"
+        )
+    if params["mos_cap"]:
+        raise GenError(
+            "generator 'mos_array': params.mirror is incompatible with params.mos_cap"
+        )
+
+
+def _terminal_xy(unit: dict[str, Any], key: str, mirrored: bool) -> tuple[float, float]:
+    """A unit-local terminal position (``s_xy``/``d_xy``/``g_xy``), flipped
+    about the unit's vertical axis when ``mirrored`` (issue #3552)."""
+    x, y = unit[key]
+    return (unit["total_len_um"] - x, y) if mirrored else (x, y)
+
+
 def _shared_sd_nodes(info: dict[str, Any], cols: int) -> list[dict[str, Any]]:
-    """Issue #3551: one entry per abutted pair -- ``U<i>_D`` and ``U<j>_S``
-    are the same electrical node (and the same drawn segment)."""
+    """Issue #3551: one entry per abutted pair -- the facing terminals are the
+    same electrical node (and the same drawn segment). Unmirrored that is
+    ``U<i>_D`` / ``U<j>_S``; under ``mirror`` (issue #3552) a pair whose left
+    unit is flipped faces S|S, and one whose right unit is flipped faces D|D."""
     idx_by_pos = {(c["row"], c["col"]): c["idx"] for c in info["cells"]}
-    dx, dy = info["unit"]["d_xy"]
-    return [
-        {
-            "ports": [f"U{idx_by_pos[(r, c)]}_D", f"U{idx_by_pos[(r, c + 1)]}_S"],
-            "x_um": info["cells"][idx_by_pos[(r, c)]]["x0_um"] + dx,
-            "y_um": info["cells"][idx_by_pos[(r, c)]]["y0_um"] + dy,
+    unit = info["unit"]
+    nodes = []
+    for r in sorted({k[0] for k in idx_by_pos}):
+        for c in range(cols - 1):
+            left = info["cells"][idx_by_pos[(r, c)]]
+            right = info["cells"][idx_by_pos[(r, c + 1)]]
+            left_t = "S" if left["mirrored"] else "D"
+            right_t = "D" if right["mirrored"] else "S"
+            x, y = _terminal_xy(unit, f"{left_t.lower()}_xy", left["mirrored"])
+            nodes.append(
+                {
+                    "ports": [f"U{left['idx']}_{left_t}", f"U{right['idx']}_{right_t}"],
+                    "x_um": left["x0_um"] + x,
+                    "y_um": left["y0_um"] + y,
+                }
+            )
+    return nodes
+
+
+def _mirror_hints(
+    params: dict[str, Any], info: dict[str, Any], notes: list[str]
+) -> dict[str, Any]:
+    """Issue #3552: ``drc_hints.mirror`` (empty when off) -- which columns are
+    flipped and which physical side (``left``/``right``) each unit's S and D
+    terminals now sit on."""
+    if not params["mirror"]:
+        return {}
+    notes.append(
+        "params.mirror flips odd columns about their vertical axis: a flipped "
+        "unit has D on its left and S on its right (see drc_hints.mirror."
+        "terminal_sides); U<i>_S/U<i>_D ports follow the flipped geometry"
+    )
+    return {
+        "mirror": {
+            "mirrored_columns": sorted(
+                {c["col"] for c in info["cells"] if c["mirrored"]}
+            ),
+            "terminal_sides": {
+                f"U{c['idx']}": (
+                    {"S": "right", "D": "left"}
+                    if c["mirrored"]
+                    else {"S": "left", "D": "right"}
+                )
+                for c in info["cells"]
+            },
         }
-        for r in sorted({k[0] for k in idx_by_pos})
-        for c in range(cols - 1)
-    ]
+    }
 
 
 def _share_sd_hints(
@@ -221,8 +291,9 @@ def _share_sd_hints(
     shared_nodes = _shared_sd_nodes(info, params["cols"])
     if shared_nodes:
         notes.append(
-            "params.share_sd abuts adjacent units: each U<i>_D / U<i+1>_S "
-            "pair in drc_hints.shared_sd_nodes is one shared S/D node "
+            "params.share_sd abuts adjacent units: each facing-terminal pair "
+            "(U<i>_D / U<i+1>_S, or S|S / D|D under params.mirror) in "
+            "drc_hints.shared_sd_nodes is one shared S/D node "
             "(reported at the same position), so each row extracts as a "
             "series chain"
         )
@@ -325,6 +396,7 @@ def _mos_array_validate(params: dict[str, Any]) -> None:
         raise GenError("generator 'mos_array': params.interior_channel_um must be >= 0")
     _validate_pitch_overrides(params)
     _validate_share_sd(params)
+    _validate_mirror(params)
 
     # `ring_gap_side`/`ring_gap_um`/`ring_gap_offset_um` are validated against
     # a hypothetical ring (`add_guard_ring=True`) regardless of the request's
@@ -350,6 +422,7 @@ def _mos_array_validate(params: dict[str, Any]) -> None:
             pitch_x_um=params["pitch_x_um"],
             pitch_y_um=params["pitch_y_um"],
             share_sd=params["share_sd"],
+            mirror=params["mirror"],
         )
     )
     _validate_ring_gap(
@@ -360,10 +433,6 @@ def _mos_array_validate(params: dict[str, Any]) -> None:
         inner_w_um,
         inner_h_um,
     )
-
-
-# Spellings callers use for sky130's native (zero-threshold) NMOS (issue #2912).
-_SKY130_NATIVE_VT_NAMES = frozenset({"native", "nvt"})
 
 
 def _voltage_flavor_hints(
@@ -380,21 +449,7 @@ def _voltage_flavor_hints(
     mark_present = False
     if voltage_flavor:
         mark_present = _voltage_flavor_mark_layer(family, voltage_flavor) is not None
-        if (
-            not mark_present
-            and family == "sky130"
-            and voltage_flavor in _SKY130_NATIVE_VT_NAMES
-        ):
-            notes.append(
-                f"params.voltage_flavor '{voltage_flavor}': the sky130 native-Vt "
-                "NMOS (sky130_fd_pr__nfet_05v0_nvt) is unsupported -- no marker "
-                "was drawn, so the device extracts as a plain nfet. Upstream "
-                "derives it from hvi AND lvtn (not a single marker layer), which "
-                "the single-marker voltage_flavor model cannot express; see "
-                "docs/cli/gen.md (voltage_flavor) and docs/cli/lvs.md "
-                "(native-Vt NMOS) for the exclusion workflow (issue #2912)"
-            )
-        elif not mark_present:
+        if not mark_present:
             notes.append(
                 f"params.voltage_flavor '{voltage_flavor}' has no marker layer "
                 f"resolved for the resolved PDK family ('{family}') -- no marker "
@@ -430,6 +485,20 @@ def _sd_implant_hints(
             f"('{sd_implant_role}') for flavor '{flavor}' -- no implant "
             "mask was drawn"
         )
+    if family == "sky130":
+        # Phase A of issue #2934 draws the unit devices' nsdm/psdm only;
+        # report the masks still omitted (never silently) until the tap/
+        # guard-ring implant and npc phases land.
+        if params.get("add_guard_ring"):
+            notes.append(
+                "sky130 guard/tap ring draws no nsdm/psdm tap implant -- "
+                "the ring's tap implant mask was not drawn"
+            )
+        if params.get("gate_contact"):
+            notes.append(
+                "sky130 draws no npc (95/20) over the poly-contact licons -- "
+                "no npc mask was drawn"
+            )
     return {
         "sd_implant_present": (
             sd_implant is not None and _sd_implant_margin_um(family) > 0
@@ -438,7 +507,7 @@ def _sd_implant_hints(
 
 
 def _mos_cap_ports(
-    info: dict[str, Any],
+    port_cells: list[tuple[str, dict[str, Any]]],
     unit: dict[str, Any],
     metal_layer: dict[str, Any],
     gate_layer: dict[str, Any],
@@ -449,15 +518,14 @@ def _mos_cap_ports(
     ports: list[dict[str, Any]] = []
     cap_x, cap_y = unit["sd_cap_xy"]
     gx, gy = unit["g_xy"]
-    for c in info["cells"]:
-        idx = c["idx"]
+    for prefix, c in port_cells:
         for suffix, layer, (px, py) in (
             ("SD", metal_layer, (cap_x, cap_y)),
             ("G", gate_layer, (gx, gy)),
         ):
             ports.append(
                 {
-                    "name": f"U{idx}_{suffix}",
+                    "name": f"{prefix}_{suffix}",
                     "net": None,
                     "layer": layer,
                     "x_um": c["x0_um"] + px,
@@ -470,7 +538,7 @@ def _mos_cap_ports(
 
 
 def _mos_series_ports(
-    info: dict[str, Any],
+    port_cells: list[tuple[str, dict[str, Any]]],
     unit: dict[str, Any],
     metal_layer: dict[str, Any],
     gate_layer: dict[str, Any],
@@ -481,8 +549,7 @@ def _mos_series_ports(
     seg_xy = unit["seg_xy"]
     gate_xy = unit["gate_xy"]
     last_seg = len(seg_xy) - 1
-    for c in info["cells"]:
-        idx = c["idx"]
+    for prefix, c in port_cells:
         for seg_idx, (sx, sy) in enumerate(seg_xy):
             letter = "S" if seg_idx % 2 == 0 else "D"
             if seg_idx == 0:
@@ -497,7 +564,7 @@ def _mos_series_ports(
                 direction_deg, width_um = 270, unit["g_width_um"]
             ports.append(
                 {
-                    "name": f"U{idx}_{letter}{seg_idx // 2}",
+                    "name": f"{prefix}_{letter}{seg_idx // 2}",
                     "net": None,
                     "layer": metal_layer,
                     "x_um": c["x0_um"] + sx,
@@ -509,7 +576,7 @@ def _mos_series_ports(
         for gate_idx, (gx, gy) in enumerate(gate_xy):
             ports.append(
                 {
-                    "name": f"U{idx}_G{gate_idx}",
+                    "name": f"{prefix}_G{gate_idx}",
                     "net": None,
                     "layer": gate_layer,
                     "x_um": c["x0_um"] + gx,
@@ -519,6 +586,21 @@ def _mos_series_ports(
                 }
             )
     return ports
+
+
+def _mos_array_port_cells(info: dict, dummy_ports: bool) -> list[tuple[str, dict]]:
+    """``(port-name prefix, cell)`` pairs for a mos_array's reported units.
+
+    #2904: opt-in ``dummy_ports`` also reports the dummy units' S/D/G as
+    ``D<k>_*`` (k = row-major, left-to-right order), so ``gen-compose``
+    connectivity can tie them off. Off by default -- ``dummy`` defaults to 1,
+    so reporting them unconditionally would change every default array.
+    """
+    port_cells = [(f"U{c['idx']}", c) for c in info["cells"]]
+    if dummy_ports:
+        ordered = sorted(info["dummy_cells"], key=lambda c: (c["row"], c["col"]))
+        port_cells += [(f"D{k}", c) for k, c in enumerate(ordered)]
+    return port_cells
 
 
 def _mos_array_describe(
@@ -571,6 +653,7 @@ def _mos_array_describe(
         pitch_y_um=params["pitch_y_um"],
         top_endcap_um=_gate_top_endcap_um(family),
         share_sd=params["share_sd"],
+        mirror=params["mirror"],
     )
     unit = info["unit"]
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
@@ -595,42 +678,44 @@ def _mos_array_describe(
         and not params["mos_cap"]
     )
 
+    port_cells = _mos_array_port_cells(info, bool(params.get("dummy_ports")))
+
     ports: list[dict[str, Any]] = []
     if params["mos_cap"]:
-        ports = _mos_cap_ports(info, unit, metal_layer, gate_layer)
+        ports = _mos_cap_ports(port_cells, unit, metal_layer, gate_layer)
     elif series_fingers:
-        ports = _mos_series_ports(info, unit, metal_layer, gate_layer)
+        ports = _mos_series_ports(port_cells, unit, metal_layer, gate_layer)
     else:
-        sx, sy = unit["s_xy"]
-        dx, dy = unit["d_xy"]
-        gx, gy = unit["g_xy"]
-        for c in info["cells"]:
-            idx = c["idx"]
+        for prefix, c in port_cells:
+            mirrored = c.get("mirrored", False)
+            sx, sy = _terminal_xy(unit, "s_xy", mirrored)
+            dx, dy = _terminal_xy(unit, "d_xy", mirrored)
+            gx, gy = _terminal_xy(unit, "g_xy", mirrored)
             ports.append(
                 {
-                    "name": f"U{idx}_S",
+                    "name": f"{prefix}_S",
                     "net": None,
                     "layer": metal_layer,
                     "x_um": c["x0_um"] + sx,
                     "y_um": c["y0_um"] + sy,
                     "width_um": unit["sd_width_um"],
-                    "direction_deg": 180,
+                    "direction_deg": 0 if mirrored else 180,
                 }
             )
             ports.append(
                 {
-                    "name": f"U{idx}_D",
+                    "name": f"{prefix}_D",
                     "net": None,
                     "layer": metal_layer,
                     "x_um": c["x0_um"] + dx,
                     "y_um": c["y0_um"] + dy,
                     "width_um": unit["sd_width_um"],
-                    "direction_deg": 0,
+                    "direction_deg": 180 if mirrored else 0,
                 }
             )
             ports.append(
                 {
-                    "name": f"U{idx}_G",
+                    "name": f"{prefix}_G",
                     "net": None,
                     "layer": gate_layer,
                     "x_um": c["x0_um"] + gx,
@@ -747,6 +832,7 @@ def _mos_array_describe(
     pitch_hints, pitch_warnings = _pitch_hints_and_warnings(params, info)
 
     share_sd_hints = _share_sd_hints(params, info, notes)
+    mirror_hints = _mirror_hints(params, info, notes)
 
     return {
         "device_count": device_count,
@@ -761,6 +847,7 @@ def _mos_array_describe(
             **sd_implant_hints,
             **pitch_hints,
             **share_sd_hints,
+            **mirror_hints,
         },
         "warnings": (
             ["one or more dimensions were rounded to the technology grid"]
@@ -2152,6 +2239,7 @@ def _diff_pair_describe(
         )
 
     voltage_flavor_hints = _voltage_flavor_hints(family, params, notes)
+    sd_implant_hints = _sd_implant_hints(family, params, notes)
 
     snapped = _grid_snapped(dbu, params["w_um"], params["l_um"])
     kind = "mirror" if params["mirror"] else "pair"
@@ -2168,6 +2256,7 @@ def _diff_pair_describe(
             "snapped_to_grid": snapped,
             "notes": notes,
             **voltage_flavor_hints,
+            **sd_implant_hints,
         },
         "warnings": (
             ["one or more dimensions were rounded to the technology grid"]

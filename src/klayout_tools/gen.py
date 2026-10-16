@@ -291,6 +291,9 @@ from .gen_layer_params import (
     _sd_implant_margin_um as _sd_implant_margin_um,
 )
 from .gen_layer_params import (
+    _sd_implant_min_space_um as _sd_implant_min_space_um,
+)
+from .gen_layer_params import (
     _voltage_flavor_mark_layer as _voltage_flavor_mark_layer,
 )
 from .gen_layer_params import (
@@ -369,6 +372,7 @@ _HIDDEN_PARAMS = {
     "sd_implant_present",
     "sd_implant_margin_um",
     "mos_cap_mark_layer",
+    "sd_implant_min_space_um",
     "bjt_mark_layer",
     "bjt_mark_present",
     "res_mark_layer",
@@ -383,6 +387,8 @@ _HIDDEN_PARAMS = {
     "salicide_block_present",
     "voltage_flavor_mark_layer",
     "voltage_flavor_mark_present",
+    "voltage_flavor_extra_mark_layer",
+    "voltage_flavor_extra_mark_present",
     "cap_top_plate_layer",
     "cap_bottom_plate_layer",
     "cap_top_via_layer",
@@ -1338,6 +1344,7 @@ def _mos_array_layout(
     pitch_y_um: float = 0.0,
     top_endcap_um: float = 0.0,
     share_sd: bool = False,
+    mirror: bool = False,
 ) -> dict[str, Any]:
     """A ``rows`` x ``cols`` grid of :func:`_mos_unit_layout` unit devices,
     with ``dummy`` extra unit-device columns flanking each side.
@@ -1433,7 +1440,14 @@ def _mos_array_layout(
     exclusive with ``pitch_x_um``/``interior_channel_um`` (both would pull
     the units apart again); :func:`gen_describe._validate_share_sd` rejects
     the rest with ``GenError``. ``dummy`` columns stay isolated at the normal
-    pitch. ``False`` (the default) is a strict no-op."""
+    pitch. ``False`` (the default) is a strict no-op.
+
+    ``mirror`` (issue #3552, Phase 3 of #3299) flips every odd real column
+    about its vertical axis. It moves no unit, so the pitch is unchanged, but
+    each such cell carries ``mirrored=True`` (S on the right, D on the left);
+    dummy columns stay unmirrored. Under ``share_sd`` the abutted pairs then
+    alternate D|D / S|S down the row. ``False`` (the default) is a strict
+    no-op."""
     unit = _mos_unit_layout(
         w_um,
         l_um,
@@ -1471,7 +1485,14 @@ def _mos_array_layout(
         else [(r, c) for r in range(rows) for c in range(cols)]
     )
     cells = [
-        {"idx": idx, "row": r, "col": c, "x0_um": c * col_pitch, "y0_um": r * row_pitch}
+        {
+            "idx": idx,
+            "row": r,
+            "col": c,
+            "x0_um": c * col_pitch,
+            "y0_um": r * row_pitch,
+            "mirrored": mirror and c % 2 == 1,
+        }
         for idx, (r, c) in enumerate(order)
     ]
 
@@ -1587,6 +1608,7 @@ def _mos_array_layout(
         "pitch_x_clamped": pitch_x_clamped,
         "pitch_y_clamped": pitch_y_clamped,
         "share_sd": share_sd,
+        "mirror": mirror,
         "cells": cells,
         "dummy_cells": dummy_cells,
         "well_box_um": well_box,
@@ -2941,6 +2963,24 @@ def _insert_boxes(
                 int(round((y1 + oy_um) / dbu)),
             )
         )
+
+
+def _close_implant_gaps(
+    cell: Any, layer_index: int, dbu: float, min_space_um: float
+) -> None:
+    """Merge implant shapes on ``layer_index`` that sit closer than
+    ``min_space_um`` (issue #2934), so the layer never carries a sub-minimum
+    same-layer gap. No-op when ``min_space_um`` is not positive."""
+    import klayout.db as kdb
+
+    if min_space_um <= 0:
+        return
+    shapes = cell.shapes(layer_index)
+    region = kdb.Region(shapes)
+    half = int(round(min_space_um / dbu / 2)) + 1
+    closed = region.sized(half).sized(-half)
+    shapes.clear()
+    shapes.insert(closed)
 
 
 def _fixed_cut_side_um(side_um: float, fixed_size_um: float) -> float:

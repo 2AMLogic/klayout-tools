@@ -78,6 +78,7 @@ docs/
     version.md
     wave.md
     yield-campaign.md
+    yield-csv.md
     yield-samples.md
     yield-sensitivity.md
     yield-threshold.md
