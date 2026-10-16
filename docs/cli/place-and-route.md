@@ -1898,6 +1898,7 @@ live re-measurement above.
 | `pdk.cell_library` | string | Standard-cell library name. Required. |
 | `pdk.corner` | string \| omitted | Liberty (device) corner selector; defaults to the nominal corner when omitted. This single deck is the **only** liberty the `place`/`cts`/`route` stages' `repair_design`/`repair_timing`/`repair_timing -hold`/`repair_antennas` passes see; the other corners in the post-route sweep (`pdk.sweep_corners`) are analysed afterwards and never feed back into repair. To aim repair at a low-voltage deck, name it here. A tight `constraints.max_transition_ns`/`.max_capacitance_pf` is one absolute value for every corner and, at a slow corner, can grow the design sharply without meeting it (see `docs/design/place-and-route-improvements-survey.md` section 3.7); check `corners[]` and the `..._vs_library` counts afterwards. |
 | `pdk.interconnect_corner` | string \| omitted | `"min"` \| `"nom"` \| `"max"` — tech-LEF *parasitic-extraction* corner selector, independent of `pdk.corner` (issue #1100). Default `"nom"`, byte-identical to this command's behavior before this field existed. An install that doesn't stage the requested corner's tech LEF is a clear application error (exit 1), never a silent fallback. Echoed back as the response's own `interconnect_corner` field — see "PDK / LEF / liberty resolution" above. |
+| `pdk.rebuild_corners` | array\<string\> \| omitted | Additive field (issue #3507). Re-runs the **whole** flow (`floorplan` through `target_stage`) once per named corner, serially, into one aggregated report — see "Physical rebuild per corner" below. Non-empty, no duplicates, mutually exclusive with `pdk.corner`; every name must be one of `cell_library`'s shipped liberty corners (an unknown name is a `PlaceAndRouteError` raised before any unit starts). Not the same as `pdk.sweep_corners`, which only re-times an already-routed design. |
 | `pdk.sweep_corners` | array\<string\> \| omitted | Additive field (issue #1092). Scopes the "Multi-corner setup/hold sweep" below to the named subset of `cell_library`'s shipped `.lib` corners. Omitted (the default) sweeps every shipped corner, reproducing today's behaviour exactly. An explicit `[]` sweeps zero corners (`worst_setup_slack_ns`/`worst_hold_slack_ns`/`corners` all degrade to `null`/`[]`). Every named corner must actually be one of `cell_library`'s own shipped corners (`corners[].name` in the unfiltered sweep) — an unresolvable name raises a `PlaceAndRouteError` naming the corner(s) it could not find and every corner that *is* valid. |
 | `floorplan.method` | string | `"utilization"` \| `"explicit"` \| `"def"` — see "Floorplan methods" above. Required. |
 | `io.layer_h` / `.layer_v` | string | Horizontal/vertical I/O routing layers for `place_pins`. Required once `target_stage` reaches `"place"` or later. |
@@ -2829,6 +2830,47 @@ controls, chosen by what is under test: this design's supplies resolve to
 section for the full provenance and the four checks `regenerate.sh` gates
 that fixture on.
 
+## Physical rebuild per corner (`pdk.rebuild_corners`, issue #3507)
+
+`pdk.corner` selects the one liberty deck the repair passes see, so a caller
+that needs a *physically rebuilt* result at several corners used to issue N
+independent runs. `pdk.rebuild_corners` makes that one request:
+
+```json
+"pdk": {"cell_library": "sky130_fd_sc_hd",
+        "rebuild_corners": ["tt_025C_1v80", "ss_100C_1v60"]}
+```
+
+Each corner is an independent unit — the full flow with that corner as
+`pdk.corner` — written to its own `.klt/place-and-route/<corner>/` directory
+(held under the same output-directory ownership as a single run). Units run
+serially in-process; there is no `--backend` yet. A request without the field
+behaves, and reports, exactly as before.
+
+The report is a different shape from a single run's. `schema_version` stays
+`1`: the field and the report it selects are additive, and nothing an
+existing request returns changes.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `status` | `"ok"` \| `"failed"` | `"failed"` if any unit failed. |
+| `rebuild_corners` | array\<string\> | The request's list, in order. |
+| `failed_corners` | array\<string\> | Corners whose unit failed (`[]` when `status` is `"ok"`). |
+| `corner_runs[]` | array\<object\> | One entry per corner, in request order. |
+| `corner_runs[].corner` / `.output_dir` | string | The unit's corner and absolute output directory. |
+| `corner_runs[].status` | `"ok"` \| `"failed"` | |
+| `corner_runs[].input_content_hash` / `.deck_content_hash` | string | `sha256:` digests of the netlist and that corner's liberty deck — the per-unit provenance. Present on failed units too. |
+| `corner_runs[].error` | string | Failed units only. |
+| *(other fields)* | | An `ok` unit carries every field of the single-run report (see "Response") flattened into its entry. |
+
+One failing unit does not stop the others. The command exits `1` when
+`status` is `"failed"` — the aggregated report is still printed on stdout.
+
+`--check <report>` on a multi-corner request verifies each unit: the recorded
+`corner_runs[<corner>].input_content_hash`/`.deck_content_hash` against a fresh
+re-hash, and `drifted` names which unit moved. `--rerun` re-runs every unit and
+diffs the aggregated report.
+
 ## Partial completion (`target_stage`)
 
 A request with `target_stage: "place"` asks only for floorplan through
@@ -2986,7 +3028,7 @@ possible here. Full policy, library exceptions and platform scope:
 | Code | Meaning |
 | --- | --- |
 | `0` | Place-and-route reached (at least) the requested `target_stage`. |
-| `1` | Failed to run — bad request, unresolvable netlist/PDK/LEF, a floorplan spec with more than one method set, or an OpenROAD engine error that stops the run before reaching the requested `target_stage`. |
+| `1` | Failed to run — bad request, unresolvable netlist/PDK/LEF, a floorplan spec with more than one method set, or an OpenROAD engine error that stops the run before reaching the requested `target_stage`. For a `pdk.rebuild_corners` request, also any corner's unit failing (the aggregated report is still emitted). |
 | `2` | Usage error (missing argument, bad `--format` value) — from argparse. |
 | `3` | `--check` only: the committed report no longer reproduces (`status: "drifted"`). |
 

@@ -1145,6 +1145,18 @@ def _pin_count_mismatch_from_message(
     )
 
 
+def _backend_failure(testbench_path: str, exc: SimError) -> dict[str, Any]:
+    """The ``backend_failure`` record for an extracted-side
+    :class:`~klayout_tools.sim.SimError` that is not a pin-count mismatch
+    (issue #2990)."""
+    return {
+        "testbench": testbench_path,
+        "side": "extracted",
+        "message": str(exc),
+        "code": exc.code,
+    }
+
+
 def _pin_count_mismatch_from_report(
     sim_report: dict[str, Any],
     *,
@@ -2460,6 +2472,9 @@ def run_pex(
     rename_declared_pins: bool = False,
     label_layers: Mapping[str, tuple[int, int] | None] | None = None,
     critical_nets: Sequence[str] | None = None,
+    critical_net_patterns: Sequence[str] | None = None,
+    critical_net_all: bool = False,
+    critical_net_excludes: Sequence[str] | None = None,
     distributed_rc: bool = False,
     parasitic_variants: Sequence[str] | None = None,
     mom_rlc_net: str | None = None,
@@ -2524,7 +2539,12 @@ def run_pex(
     always-on vertical-overlap coupling (issue #760), so the re-simulated
     extracted-side testbench (and the resulting `delta[]` rows) reflect it.
     ``None``/empty (the default) skips it entirely -- byte-identical to
-    before this feature existed. ``distributed_rc`` (``klt pex
+    before this feature existed. ``critical_net_patterns``/
+    ``critical_net_all``/``critical_net_excludes`` (``klt pex
+    --critical-net-pattern``/``--critical-net-all``/``--critical-net-exclude``,
+    issue #2974) are the glob / all-nets forms of ``critical_nets``, passed
+    straight through; ``extraction.critical_nets`` then echoes the resolved
+    concrete names. ``distributed_rc`` (``klt pex
     --distributed-rc``, issue #977, Epic #709 Phase 2b) is also passed
     straight through to :func:`~klayout_tools.extract.run_extract` --
     replaces the single-lumped-element star model with a distributed,
@@ -2725,6 +2745,9 @@ def run_pex(
             # was never given -- the exact `run_extract` call made before it.
             label_layers=label_layers,
             critical_nets=critical_nets,
+            critical_net_patterns=critical_net_patterns,
+            critical_net_all=critical_net_all,
+            critical_net_excludes=critical_net_excludes,
             distributed_rc=distributed_rc,
             parasitic_variants=parasitic_variants,
             mom_rlc_net=mom_rlc_net,
@@ -2971,6 +2994,9 @@ def run_pex(
     # that makes a pin-count difference fatal is exactly what that mode does
     # not do.
     pin_count_mismatch: dict[str, Any] | None = None
+    # Issue #2990: the first extracted-side `SimError` that is not a pin-count
+    # mismatch (e.g. a batch-fleet capacity refusal), `None` otherwise.
+    backend_failure: dict[str, Any] | None = None
     if not command_mode and flat_dut_mismatch is None:
         pin_count_mismatch = _pin_count_mismatch(
             reference_netlist=schematic_netlist_path,
@@ -3019,6 +3045,8 @@ def run_pex(
                 backend=backend,
             )
         except SimError as exc:
+            # Issue #2990: keep `SimError.code` (e.g. `batch_no_capacity`)
+            # so the CLI's error envelope lets a caller retry mechanically.
             raise PexError(
                 f"testbench '{testbench_path}': schematic-side simulation "
                 f"failed: {exc}",
@@ -3061,19 +3089,21 @@ def run_pex(
                 # not an unexplained one -- report it as a named field plus
                 # per-corner error rows and keep going, instead of aborting
                 # the whole run with only a stderr message. Any other
-                # SimError still aborts, unchanged.
+                # SimError is recorded as `backend_failure` (issue #2990)
+                # and handled like the pin-count case: the schematic side's
+                # completed results are kept and every delta row is an
+                # error row, instead of discarding them by aborting.
                 mismatch = _pin_count_mismatch_from_message(
                     str(exc),
                     reference_netlist=schematic_netlist_path,
                     extracted_netlist=extracted_netlist_path,
                 )
                 if mismatch is None:
-                    raise PexError(
-                        f"testbench '{testbench_path}': extracted-side simulation "
-                        f"failed: {exc}",
-                        code=exc.code,
-                    ) from exc
-                pin_count_mismatch = pin_count_mismatch or mismatch
+                    backend_failure = backend_failure or _backend_failure(
+                        testbench_path, exc
+                    )
+                else:
+                    pin_count_mismatch = pin_count_mismatch or mismatch
                 extracted_failure = (str(exc), exc.code)
 
         spec_row_prefix = (
@@ -3275,6 +3305,13 @@ def run_pex(
         # mismatch that made the extracted-side deck unrunnable, with both
         # sides' pin lists (see `_pin_count_mismatch`).
         "pin_count_mismatch": pin_count_mismatch,
+        # Additive field (issue #2990): `None` on every run whose extracted
+        # side(s) did not raise -- byte-identical information to before.
+        # Non-`None` is `{testbench, side, message, code}` for the first
+        # extracted-side backend failure (`code` is `SimError.code`, e.g.
+        # `batch_no_capacity`, or `None`); that testbench's `delta[]` rows
+        # are `error` rows with the schematic value intact.
+        "backend_failure": backend_failure,
         # Additive field (issue #1255, Gap 2): `None` on every run whose
         # schematic DUT is `.SUBCKT`-wrapped (the normal case) --
         # byte-identical to before this feature existed. Non-`None` names

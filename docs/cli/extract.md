@@ -274,6 +274,9 @@ Every field name is the flag's own `dest`, so the mapping is one-for-one:
 | `spef` | string | `--spef` |
 | `critical_nets` | array\<string\> \| string | repeatable `--critical-net` |
 | `parasitics_nets` | array\<string\> \| string | repeatable `--parasitics-net` |
+| `critical_net_patterns` / `parasitics_net_patterns` | array\<string\> \| string | repeatable `--critical-net-pattern` / `--parasitics-net-pattern` (issue #2974) |
+| `critical_net_all` / `strict_net_patterns` | bool | `--critical-net-all` / `--strict-net-patterns` |
+| `critical_net_excludes` | array\<string\> \| string | repeatable `--critical-net-exclude` |
 | `parasitic_variants` | array\<string\> \| string | repeatable `--parasitic-variant` |
 | `parasitics_top_cell_only` | bool | `--parasitics-top-cell-only` |
 | `distributed_rc` | bool | `--distributed-rc` |
@@ -1751,6 +1754,26 @@ passes LVS silently.
 | `gf180mcu` | `rm2` | `gf180mcu_fd_pr__rm2` | `Metal2` 36/0 | `metal2_res` 110/12 | — | **0.09 Ω/□** | — |
 | `gf180mcu` | `rm3` | `gf180mcu_fd_pr__rm3` | `Metal3` 42/0 | `metal3_res` 110/13 | — | **0.09 Ω/□** | — |
 | `gf180mcu` | `tm6k`/`tm9k`/`tm11k`/`tm30k` | `gf180mcu_fd_pr__tm{6k,9k,11k,30k}` (top-metal thickness flavour, `METAL_TOP` default `9K`, caller-selectable via `--deck-option metal_top=`) | `Metal5` 81/0 (this curated deck's own top-of-stack — see `decks/gf180mcu.py`'s module docstring for the 6LM/`MetalTop` approximation this makes) | `metal5_res` 110/15 | — | **0.06/0.04/0.04/0.0095 Ω/□** | — |
+
+sg13g2's poly resistors `rsil`/`rppd`/`rhigh` are not
+drawn as a marked segment of a poly bar: IHP's own `SG13_dev` PCells draw
+`PolyRes` (128/0) as the **whole resistive body** and `GatPoly` (5/0) only
+as the two contact heads, which *abut* the body with zero overlap area
+(issue #2679). Their deck entries therefore declare
+`ResistorDevice.topology="abutting_heads"`: the recognised segment is the
+`PolyRes` region narrowed by each flavour's `requires`/`excludes` masks
+(upstream `res_derivations.lvs`'s `polyres_mk` core), kept only where it
+touches `GatPoly` in **two separate head regions**. `L`/`W` (and so
+`r_ohm`, including each flavour's end-term and width corrections) are
+measured from that `PolyRes` body, and the two heads are the device's
+terminals — KLayout's native resistor extractor attaches each directly
+across its shared edge with the body, so no upstream-style 5 nm port
+growth is applied. A body with one head missing, or separated from a head
+by any gap, is not a resistor (no device, rather than a guessed one); a
+continuous `GatPoly` bar with `PolyRes` over its middle still extracts the
+same device. Every other resistor class keeps the default
+`topology="overlap"` (`body & marker`) unchanged; `klt deck devices`
+reports each resistor class's `topology`.
 
 sky130's `res_generic_m1`..`res_generic_m5` (issue #1621) have no `.subckt`
 in the real sky130 device library — only a bare `.model
@@ -5012,6 +5035,10 @@ klt extract cell.gds --deck sky130 --parasitics --parasitics-net VOUT --parasiti
   convention as `--critical-net` (and unlike `--mom-net`): a caller may
   legitimately name several candidate nets across several blocks/runs, so an
   unmatched name is reported in `warnings` rather than raised.
+- **Many nets.** A request document's `parasitics_nets` already accepts an
+  array, and `--parasitics-net-pattern GLOB` (issue #2974) selects by glob —
+  see the `--critical-net` section's "Many nets" paragraph for the matching
+  rules.
 - **Naming an anonymous net.** Matches against the same spelling
   `parasitics.nets[].net` reports (see "Anonymous nets are backslash-escaped"
   below) — an unlabelled net's placeholder must be given backslash-escaped
@@ -5123,11 +5150,39 @@ klt extract cell.gds --deck sky130 --parasitics --critical-net VOUT --critical-n
   `--critical-net '\$2'`), not bare (`--critical-net '$2'` matches no net,
   issue #1162).
 
+**Many nets: lists, globs, all-nets (issue #2974).** For a regular generated
+array (`bl_0 .. bl_N`) do not expand one flag per net:
+
+- In a request document, `critical_nets` / `parasitics_nets` already accept
+  a JSON array of exact names (or a bare string), so argv length is not a
+  limit there.
+- `--critical-net-pattern GLOB` / `--parasitics-net-pattern GLOB` (repeatable;
+  request fields `critical_net_patterns` / `parasitics_net_patterns`) take a
+  shell-style glob (`fnmatch`: `*`, `?`, `[seq]`), resolved against the
+  extracted nets once they exist, and merged with any exact names. They are
+  separate flags because a net name may itself contain `*`/`[`/`?`, which
+  would make an exact `--critical-net` ambiguous. Matching uses the escaped
+  spelling `parasitics.nets[].net` reports; an anonymous `\$N` net matches
+  only a glob that itself starts with `\$`.
+- `--critical-net-all` marks every labelled (non-anonymous, non-substrate)
+  net critical; `--critical-net-exclude GLOB` (repeatable, requires
+  `--critical-net-all`; also applied to `--critical-net-pattern` matches)
+  removes supply/substrate nets, e.g. `--critical-net-exclude VSS
+  --critical-net-exclude 'sub*'`.
+- A pattern matching no net, or `--critical-net-all` selecting none, is a
+  `warnings` entry naming the pattern (distinct from the exact-name
+  "match no net with ground-eligible parasitics geometry" text). With
+  `--strict-net-patterns` it is an error (exit 1) instead.
+- `--distributed-rc` accepts a pattern-resolved set; if it resolves empty,
+  the run errors.
+- Omitted, none of this changes anything: the report is byte-identical.
+
 Output, additive:
 
 | Field | Meaning |
 |---|---|
-| `parasitics.critical_nets` | The `--critical-net` request, echoed back verbatim. `[]` when the flag was never given. |
+| `parasitics.critical_nets` | The `--critical-net` request, echoed back verbatim. `[]` when the flag was never given. When a pattern / `--critical-net-all` was given: the resolved concrete names, sorted (exact names included). |
+| `parasitics.critical_net_patterns` / `.critical_net_all` / `.critical_net_excludes` / `.parasitics_net_patterns` | The requested selectors, present only when given. (`parasitics.parasitics_nets` likewise echoes the resolved sorted names when `--parasitics-net-pattern` was given.) |
 | `parasitics.nets[].coupled[].lateral_levels` | Per coupling counterpart, the sorted list of same-`metal_index` levels that contributed lateral coupling to that pair — `[]` unless one side was named `--critical-net`. |
 
 Both `sky130`'s deck curates `metal_sidewalls`/its lookback distance for
@@ -5666,6 +5721,25 @@ port hub through the design's *pin* names, so most nets fail to attach
 Pass `--def-pins <routed.def>` (or `--pins`) too. Without either, the
 response's `warnings[]` carries a `--def-net-connections without
 --def-pins/--pins` entry; the SPEF bytes are unchanged by the warning.
+
+**Live OpenSTA check (issue #3560).** Measured on the `gcd` corpus design
+(`klt place-and-route` to `route`, OpenROAD `26Q3-1510-g6cb3f2b704`, tt
+corner), `klt extract --abstract-cells 'sky130_fd_sc_hd__*' --parasitics
+--spef … --def-net-connections gcd.def --def-pins gcd.def`, then `klt sta`:
+
+| `klt extract` flags | `design_nets_annotated` | `STA-1650` | unannotated drivers | `delay_changed` |
+| --- | --- | --- | --- | --- |
+| above, no `--def-net-names` | 52 / 537 | 520 | 486 | `true` |
+| above plus `--def-net-names` | 537 / 537 | 35 | 3 | `true` |
+| plus `--def-net-names`, no `--def-pins` | 537 / 537 | 1036 | 3 | `true` |
+
+So `--def-pins` is necessary but not sufficient: without `--def-net-names`
+the extracted net names are `$N` and almost nothing correlates, and even with
+both, `annotation_complete` stays `false` (35 `STA-1650`). Those 35 are
+`*D_NET \$N` blocks for unlabelled layout nets, not PIN-name or
+floating-duplicate cases; they are tracked in #3580. The pre-PR-#3512
+baseline was not re-measured, so these numbers show the current state, not
+the delta from #3512.
 
 **Port PIN name ≠ NET name (issue #3257).** For a DEF `- PortA + NET netA`
 record, the `*PORTS` list and the net's `*P` entry use the PIN name

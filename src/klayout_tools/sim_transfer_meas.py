@@ -55,7 +55,7 @@ _SELECTOR_RE = re.compile(r"^[vV]\(([^\s\x00-\x1f\x7f,()]+)\)$")
 
 _VECTOR_PREFIX = "__klt_xfer_"
 
-_FORMS = ("spice", "expr", "crossings", "cycle_mean")
+_FORMS = ("spice", "expr", "crossings", "cycle_mean", "energy")
 
 
 def _error(message: str) -> Exception:
