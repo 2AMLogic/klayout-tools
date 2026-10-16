@@ -292,7 +292,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   `met2.enclosing_adjacent.via2.1` (`via2.5`), `met3.enclosing_adjacent.via3.1`
   (`via3.5`). The sky130 deck grows from 136 to 140 rules (additive; the
   deck hash changes).
-
+- **`klt lvs` gate-level-verilog accepts more `assign` shapes** (issue
+  #2941): a part-select on either side (`assign imm = word[7:0];`,
+  `assign bus[15:8] = hi;`), a sized constant of any base on the right-hand
+  side (`assign flags = 8'h00;`, `assign unused = 1'h0;`), and a
+  left-hand-side concatenation of bit-selects (`assign { w[7], w[4] } =
+  2'h0;`) are expanded bit by bit, MSB first, with an equal-width check.
+  An unsupported `assign` operand no longer reports "instance port
+  connection". Previously rejected input now converts; no JSON field changes.
 - **`klt yield-threshold`** (issue #2976): a new verb that fits the threshold
   distribution of a binary-outcome decision circuit (comparator, latch, trip
   point). From per-sample `(stimulus, outcome)` records it reports, per corner,

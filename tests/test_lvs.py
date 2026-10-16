@@ -16869,6 +16869,89 @@ def test_parse_gate_level_verilog_unsupported_assign_still_rejected(assign, reas
     assert re.search(reason, str(exc.value))
 
 
+def _assign_aliases(decls: str, assign: str) -> dict[str, str]:
+    """Raw per-bit alias map of one module's `assign` statements (issue
+    #2941). Goes through the module parser directly: the public result
+    only exposes aliases a port or instance connection resolves through."""
+    from klayout_tools.verilog_netlist import _parse_module_chunk
+
+    text = f"module m(o);\n  output o;\n{decls}\n  {assign}\n"
+    return _parse_module_chunk(text).aliases
+
+
+def test_parse_gate_level_verilog_assign_part_select_rhs():
+    aliases = _assign_aliases(
+        "  wire [15:0] word;\n  wire [7:0] imm;\n  wire [1:0] sel;",
+        "assign imm = word[7:0]; assign sel = word[9:8];",
+    )
+    assert aliases["imm[7]"] == "word[7]"
+    assert aliases["imm[0]"] == "word[0]"
+    assert aliases["sel[1]"] == "word[9]"
+    assert aliases["sel[0]"] == "word[8]"
+
+
+def test_parse_gate_level_verilog_assign_part_select_lhs():
+    aliases = _assign_aliases(
+        "  wire [15:0] bus;\n  wire [7:0] hi;", "assign bus[15:8] = hi;"
+    )
+    assert aliases["bus[15]"] == "hi[7]"
+    assert aliases["bus[8]"] == "hi[0]"
+
+
+def test_parse_gate_level_verilog_assign_part_select_escaped_and_reversed():
+    aliases = _assign_aliases(
+        "  wire [0:7] lo;\n  wire [0:7] src;", "assign lo[0:3] = src[4:7];"
+    )
+    assert aliases["lo[0]"] == "src[4]"
+    assert aliases["lo[3]"] == "src[7]"
+    aliases = _assign_aliases(
+        "  wire [7:0] \\q ;\n  wire [3:0] d;", "assign d = \\q [3:0];"
+    )
+    assert aliases["d[3]"] == "q[3]"
+
+
+def test_parse_gate_level_verilog_assign_sized_constant():
+    aliases = _assign_aliases("  wire [7:0] flags;", "assign flags = 8'h05;")
+    assert aliases["flags[7]"] == "__CONST0__"
+    assert aliases["flags[2]"] == "__CONST1__"
+    assert aliases["flags[1]"] == "__CONST0__"
+    assert aliases["flags[0]"] == "__CONST1__"
+
+
+@pytest.mark.parametrize(
+    ("const", "net"), [("1'h0", "__CONST0__"), ("1'h1", "__CONST1__")]
+)
+def test_parse_gate_level_verilog_assign_one_bit_hex_constant(const, net):
+    aliases = _assign_aliases("  wire unused;", f"assign unused = {const};")
+    assert aliases["unused"] == net
+
+
+def test_parse_gate_level_verilog_assign_lhs_concatenation_constant():
+    aliases = _assign_aliases(
+        "  wire [7:0] word;", "assign { word[7], word[4] } = 2'h1;"
+    )
+    assert aliases == {"word[7]": "__CONST0__", "word[4]": "__CONST1__"}
+
+
+@pytest.mark.parametrize(
+    ("decls", "assign", "reason"),
+    [
+        ("wire [7:0] a; wire [3:0] b;", "assign b = a[7:0];", "bit\\(s\\) wide"),
+        ("wire [7:0] a;", "assign a = 4'h0;", "bit\\(s\\) wide"),
+        ("wire [3:0] a;", "assign a = 4'bxx01;", "unknown"),
+        ("wire [3:0] a;", "assign a = 4'hff;", "does not fit"),
+        ("wire [7:0] a; wire [3:0] b;", "assign b = a[0:3];", "declared direction"),
+        ("wire [7:0] a;", "assign { a[7], a[4] } = 3'h0;", "bit\\(s\\) wide"),
+        ("wire a;", "assign 1'h0 = a;", "constant"),
+    ],
+)
+def test_parse_gate_level_verilog_assign_new_shapes_negative(decls, assign, reason):
+    with pytest.raises(VerilogNetlistError, match="only a plain 'assign") as exc:
+        _assign_aliases(decls, assign)
+    assert re.search(reason, str(exc.value))
+    assert "instance port connection" not in str(exc.value)
+
+
 def test_parse_gate_level_verilog_unconnected_pin_is_dropped():
     text = (
         "module m(a, y);\n  input a;\n  output y;\n"
