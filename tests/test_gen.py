@@ -1656,7 +1656,7 @@ def test_voltage_flavor_native_rejects_pfet(tmp_path, pdk_root, generator):
         )
 
 
-def _native_nfet_lvs(tmp_path, pdk_root, model):
+def _native_nfet_lvs(tmp_path, pdk_root, model, options=None):
     import json
 
     from klayout_tools.lvs import run_lvs
@@ -1693,6 +1693,7 @@ def _native_nfet_lvs(tmp_path, pdk_root, model):
                     "form": "subckt-call",
                     "deck": "sky130",
                 },
+                **({"options": options} if options is not None else {}),
             }
         )
     )
@@ -1709,10 +1710,11 @@ def test_native_nfet_extracts_as_nvt_not_g5v0d10v5_or_thin_oxide(tmp_path, pdk_r
     """The extracted model is `nfet_05v0_nvt` -- never the hvi-only
     `nfet_g5v0d10v5` nor the thin-oxide `nfet_01v8` (issue #3600).
 
-    `klt lvs` itself does not compare MOS flavour subckts (they all collapse to
-    the base `nfet` class, see `build_subckt_to_class_map`), so a wrong-model
-    *reference* still matches there; the model binding is asserted at the
-    extract layer instead."""
+    `klt lvs` by default does not compare MOS flavour subckts (they all
+    collapse to the base `nfet` class, see `build_subckt_to_class_map`), so a
+    wrong-model *reference* still matches there; the model binding is asserted
+    at the extract layer here, and the opt-in `options.compare_mos_flavour`
+    negative test is `test_native_nfet_lvs_compare_mos_flavour_*` below."""
     output = tmp_path / "nvt_extract.gds"
     generate(
         {
@@ -1733,6 +1735,58 @@ def test_native_nfet_extracts_as_nvt_not_g5v0d10v5_or_thin_oxide(tmp_path, pdk_r
     assert any(" sky130_fd_pr__nfet_05v0_nvt " in line for line in cards)
     assert not any(" sky130_fd_pr__nfet_g5v0d10v5 " in line for line in cards)
     assert not any(" sky130_fd_pr__nfet_01v8 " in line for line in cards)
+
+
+@pytest.mark.parametrize("options", [None, {}, {"compare_mos_flavour": False}])
+def test_native_nfet_lvs_wrong_model_still_matches_by_default(
+    tmp_path, pdk_root, options
+):
+    """Option omitted or `false`: the documented flavour collapse is unchanged,
+    a wrong-model reference still reaches `match` (issue #3650)."""
+    report = _native_nfet_lvs(
+        tmp_path, pdk_root, "sky130_fd_pr__nfet_g5v0d10v5", options
+    )
+    assert report["status"] == "match", report
+    assert report["options"]["compare_mos_flavour"] is False
+
+
+def test_native_nfet_lvs_compare_mos_flavour_rejects_wrong_model(tmp_path, pdk_root):
+    """`compare_mos_flavour: true`: a native-Vt layout against an
+    `nfet_g5v0d10v5` reference is a mismatch with a device finding (issue
+    #3650)."""
+    report = _native_nfet_lvs(
+        tmp_path,
+        pdk_root,
+        "sky130_fd_pr__nfet_g5v0d10v5",
+        {"compare_mos_flavour": True},
+    )
+    assert report["status"] == "mismatch", report
+    assert report["options"]["compare_mos_flavour"] is True
+    assert any(m["category"].startswith("device.") for m in report["mismatches"])
+
+
+def test_native_nfet_lvs_compare_mos_flavour_matches_right_model(tmp_path, pdk_root):
+    """...and the matching `nfet_05v0_nvt` reference still matches (#3650)."""
+    report = _native_nfet_lvs(
+        tmp_path,
+        pdk_root,
+        "sky130_fd_pr__nfet_05v0_nvt",
+        {"compare_mos_flavour": True},
+    )
+    assert report["status"] == "match", report
+
+
+@pytest.mark.parametrize(
+    "options",
+    [{"compare_mos_flavour": "yes"}, {"compare_mos_flavour": 1}],
+)
+def test_native_nfet_lvs_compare_mos_flavour_non_boolean_is_request_error(
+    tmp_path, pdk_root, options
+):
+    from klayout_tools.lvs import LvsError
+
+    with pytest.raises(LvsError, match="compare_mos_flavour must be a boolean"):
+        _native_nfet_lvs(tmp_path, pdk_root, "sky130_fd_pr__nfet_05v0_nvt", options)
 
 
 def test_mos_array_voltage_flavor_unrecognised_name_notes_not_drawn(

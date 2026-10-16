@@ -22,6 +22,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   `8`/`10a`/`10b`, `difftap.8`-`difftap.11`, `npc.4`) are listed in
   `coverage.unmodeled_rules`. Deck content hash changes; `rule_count` is now 150.
 
+- **`klt lvs` opt-in `options.compare_mos_flavour`** (issue #3650): `true`
+  compares a MOS device's flavour (sky130 `nvt`/`hvi`, gf180mcu `06v0`, ...)
+  as well as its base `nfet`/`pfet` class, so a native-Vt layout device
+  against an `nfet_g5v0d10v5` reference is a `device.unmatched` mismatch
+  instead of a `match`. Default (`false`) unchanged, no `devices[].class`
+  change on that path. `true` needs `engine: "klayout"`, an inline
+  `layout.file` and `reference.form: "subckt-call"`; any other combination is
+  a request error (exit 1). Additive `options` echo key, replayed by `--check
+  --rerun`, no `schema_version` bump.
 - **`klt signoff` regeneration claims for T1 items 1 and 2** (issue #2887):
   an artifact-anchored `generic` attestation for item 1 or 2 may carry
   `provenance.regeneration: {generator, regenerated_hash}`, the hash the
@@ -592,7 +601,10 @@ not `klt --version`, if you need to detect this kind of drift. See
   rule-legal via-stack landing (clearance to other nets, via spacing,
   keep-out layers). Opt-in and additive: the response gains
   `blocks[].derived_ports[]` only when used; `schema_version` is unchanged.
-  `via_array` other than `[1, 1]` is rejected for now.
+  `access.via_array` (`[rows, cols]`, up to 16 per side) lands a cut array at
+  the chosen point: the router draws every hop as that array at the deck's via
+  pitch, pads grow to enclose it, and the landing search checks the larger
+  footprint. `landing` gains `via_array`, and `via_count` counts all cuts.
 - **Bipolar markers can be derived layer expressions** (issue #2860):
   `BipolarDevice.marker` now accepts a `LayerExpr`, a frozen AND/NOT tree
   of drawn layers that can nest, as well as a bare `(layer, datatype)`

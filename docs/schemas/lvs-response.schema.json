@@ -155,6 +155,7 @@
         },
         "anchor_top_level_pins": {"type": ["boolean", "null"]},
         "strict_top_level_pin_count": {"type": "boolean"},
+        "compare_mos_flavour": {"type": "boolean"},
         "supply_nets": {"type": "array", "items": {"type": "string"}},
         "finfet_bulk": {"type": ["object", "null"]}
       },

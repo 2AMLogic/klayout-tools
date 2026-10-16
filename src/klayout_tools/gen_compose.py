@@ -216,6 +216,7 @@ from .gen_compose_routing import (
     _declare_only_bundle_result,
     _drawn_leg_footprint_region,
     _drawn_leg_intermediate_pad_regions,
+    _drop_array_extra_um,
     _leg_block_spacing_violation_um,
     _min_width_um_for_layer,
     _pad_self_notch_violation_um,
@@ -3910,11 +3911,13 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             pad_boxes: list[
                 tuple[tuple[int, int], str, tuple[float, float, float, float]]
             ] = []
-            landing_half_um = _VIA_LANDING_SIZE_UM / 2.0
             for drop in via_drops:
                 block_id = drop.get("block_id")
                 if block_id is None:
                     continue  # pre-#1520 caller-built via_drops -- skip, not an error
+                landing_half_um = (
+                    _VIA_LANDING_SIZE_UM + _drop_array_extra_um(drop)
+                ) / 2.0
                 cx, cy = drop["x_um"], drop["y_um"]
                 box = (
                     cx - landing_half_um,
@@ -4519,6 +4522,29 @@ def _integer_dbu_ratio(coarse_dbu: float, fine_dbu: float) -> int | None:
     return int(nearest)
 
 
+def _insert_via_cuts(
+    shapes: Any, drop: dict[str, Any], cx: int, cy: int, half: int, dbu: float
+) -> None:
+    """Draw a via-drop's cut(s) centred on ``(cx, cy)`` (dbu): one square, or
+    -- when ``drop["array"]`` is set by a label-derived port's
+    ``access.via_array`` (#2927) -- the rows x cols array at its deck pitch."""
+    import klayout.db as kdb
+
+    array = drop.get("array")
+    if not array:
+        shapes.insert(kdb.Box(cx - half, cy - half, cx + half, cy + half))
+        return
+    pitch = int(round(array["pitch_um"] / dbu))
+
+    def axis(count: int) -> list[int]:
+        return [int(round((i - (count - 1) / 2.0) * pitch)) for i in range(count)]
+
+    for dy in axis(array["rows"]):
+        for dx in axis(array["cols"]):
+            x, y = cx + dx, cy + dy
+            shapes.insert(kdb.Box(x - half, y - half, x + half, y + half))
+
+
 def _write_composed_gds(
     blocks: dict[str, dict[str, Any]],
     order: list[str],
@@ -4859,18 +4885,17 @@ def _write_composed_gds(
                 cy = int(round(drop["y_um"] / dbu))
                 via_size_um = (via_drop_size_um or {}).get(via_pair, _VIA_DROP_SIZE_UM)
                 via_half_dbu = int(round((via_size_um / 2.0) / dbu))
-                top.shapes(via_layer_index).insert(
-                    kdb.Box(
-                        cx - via_half_dbu,
-                        cy - via_half_dbu,
-                        cx + via_half_dbu,
-                        cy + via_half_dbu,
-                    )
+                # #2927: a label-derived port's `access.via_array` draws a
+                # rows x cols cut array centred on the pin; pads below grow
+                # to enclose it.
+                _insert_via_cuts(
+                    top.shapes(via_layer_index), drop, cx, cy, via_half_dbu, dbu
                 )
+                array_extra_um = _drop_array_extra_um(drop)
                 for landing_pair in drop.get("landing_layers", ()):
                     landing_size_um = (landing_pad_size_um or {}).get(
                         (landing_pair, via_pair), _VIA_LANDING_SIZE_UM
-                    )
+                    ) + array_extra_um
                     # Round minimum sizes outward, preserving the margin
                     # against the *rounded* via too. The epsilon only removes
                     # floating-point noise at an integer grid coordinate.

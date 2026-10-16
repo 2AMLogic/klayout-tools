@@ -8264,6 +8264,108 @@ def test_rerun_reconstructs_compare_parameters(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# options.compare_mos_flavour (issue #3650) -- end-to-end gen -> lvs coverage
+# lives in tests/test_gen.py (`test_native_nfet_lvs_compare_mos_flavour_*`)
+# --------------------------------------------------------------------------- #
+
+
+def test_rerun_reconstructs_compare_mos_flavour():
+    """`true` is replayed by `--check --rerun`; the default is not injected."""
+    committed = {
+        "options": {"compare_mos_flavour": True},
+        "layout": "layout.spice",
+        "reference": "ref.spice",
+        "top": "inv",
+    }
+    request = lvs._reconstruct_lvs_request(committed)
+    assert request["options"]["compare_mos_flavour"] is True
+
+    committed["options"]["compare_mos_flavour"] = False
+    request = lvs._reconstruct_lvs_request(committed)
+    assert "compare_mos_flavour" not in request.get("options", {})
+
+
+@pytest.mark.parametrize(
+    ("layout_key", "reference_form", "engine", "match"),
+    [
+        ("netlist", "subckt-call", "klayout", "inline-extracted"),
+        ("file", "plain-element", "klayout", 'form "subckt-call"'),
+        ("file", "subckt-call", "netgen", "engine 'klayout'"),
+    ],
+)
+def test_compare_mos_flavour_true_unsupported_combination_is_request_error(
+    layout_key, reference_form, engine, match
+):
+    layout_spec = {layout_key: "x", "top": "top"}
+    reference_spec = {"form": reference_form}
+    with pytest.raises(LvsError, match=match):
+        lvs._parse_compare_mos_flavour(
+            {"compare_mos_flavour": True}, engine, layout_spec, reference_spec
+        )
+
+
+def test_compare_mos_flavour_false_never_errors_on_unsupported_combination():
+    assert (
+        lvs._parse_compare_mos_flavour(
+            {"compare_mos_flavour": False},
+            "netgen",
+            {"netlist": "x"},
+            {"form": "plain-element"},
+        )
+        is False
+    )
+
+
+_FLAVOUR_REF = (
+    ".subckt top d g s b\n"
+    "X1 d g s b sky130_fd_pr__nfet_05v0_nvt L=1u W=1u\n"
+    "X2 d g s b sky130_fd_pr__nfet_01v8 L=1u W=1u\n"
+    "X3 d g s b sky130_fd_pr__nfet_g5v0d10v5 L=1u W=2u nf=2\n"
+    ".ends\n"
+)
+
+
+def test_subckt_call_conversion_default_is_flavour_blind():
+    from klayout_tools.netlist_normalize import convert_reference_netlist
+
+    text = convert_reference_netlist(_FLAVOUR_REF, deck="sky130").text
+    assert "__" not in text
+    assert text.count(" nfet ") >= 3
+
+
+def test_subckt_call_conversion_flavour_classes_split_only_flavoured_models():
+    from klayout_tools.netlist_normalize import convert_reference_netlist
+
+    text = convert_reference_netlist(
+        _FLAVOUR_REF, deck="sky130", mos_flavour_classes=True
+    ).text
+    lines = [line for line in text.splitlines() if line[:1] in ("M", "m")]
+    # the default-flavour device keeps the base class; nvt/hvi get their own,
+    # the folded (`nf=2`) hvi call expanding into two fingers of that class
+    assert sum(" nfet__nvt " in f"{line} " for line in lines) == 1
+    assert sum(" nfet__hvi " in f"{line} " for line in lines) == 2
+    assert sum(" nfet " in f"{line} " for line in lines) == 1
+
+
+def test_subckt_call_conversion_flavour_classes_gf180mcu_pair():
+    from klayout_tools.netlist_normalize import convert_reference_netlist
+
+    ref = (
+        ".subckt top d g s b\n"
+        "X1 d g s b nfet_06v0 L=0.7u W=1u\n"
+        "X2 d g s b pfet_06v0 L=0.5u W=1u\n"
+        "X3 d g s b nfet_03v3 L=0.28u W=1u\n"
+        ".ends\n"
+    )
+    text = convert_reference_netlist(
+        ref, deck="gf180mcu", mos_flavour_classes=True
+    ).text
+    assert " nfet__06v0 " in text
+    assert " pfet__06v0 " in text
+    assert " nfet " in text
+
+
+# --------------------------------------------------------------------------- #
 # Direct classification unit tests (fake logger, no real NetlistComparer run)
 # --------------------------------------------------------------------------- #
 
@@ -15881,6 +15983,7 @@ def test_run_lvs_echoes_reference_top_and_options(tmp_path):
         # reference, on for `gate-level-verilog`).
         "anchor_top_level_pins": None,
         "strict_top_level_pin_count": False,
+        "compare_mos_flavour": False,
         "supply_nets": ["GND", "VCC", "VDD", "VGND", "VPWR", "VSS"],
         "finfet_bulk": None,
     }
