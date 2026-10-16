@@ -615,6 +615,120 @@ def test_repeated_analysis_kinds_and_negative_zero_overrides(tmp_path):
     assert "setplot new" in lines
 
 
+def _reset_request(**overrides) -> dict:
+    """Step 1 loads the divider; step 2 is `reset` and does not re-alter."""
+    request = {
+        "netlist": "body.spice",
+        "analysis_steps": [
+            {
+                "name": "loaded",
+                "analysis": {"kind": "op", "args": ""},
+                "alter": {"ILOAD": 1e-3},
+                "measurements": [{"name": "vout", "expr": "v(out)"}],
+            },
+            {
+                "name": "fresh",
+                "reset": True,
+                "analysis": {"kind": "op", "args": ""},
+                "measurements": [{"name": "vout", "expr": "v(out)"}],
+            },
+        ],
+        "measurements": [{"name": "drop", "expr": "fresh.vout - loaded.vout"}],
+    }
+    request.update(overrides)
+    return request
+
+
+@pytest.mark.parametrize("bad", ["yes", 1, 0, [], {}])
+def test_non_boolean_reset_is_refused_by_name(bad):
+    request = _reset_request()
+    request["analysis_steps"][1]["reset"] = bad
+    with pytest.raises(sim.SimError, match=r"step 'fresh': reset must be a boolean"):
+        _resolve(request)
+
+
+def test_reset_false_resolves_identically_to_no_reset():
+    plain = _reset_request()
+    del plain["analysis_steps"][1]["reset"]
+    explicit = _reset_request()
+    explicit["analysis_steps"][1]["reset"] = False
+    assert _resolve(explicit) == _resolve(plain)
+
+
+def test_reset_is_part_of_the_resolved_step_definition():
+    analysis, _ = _resolve(_reset_request())
+    assert "reset" not in analysis["steps"][0]
+    assert analysis["steps"][1]["reset"] is True
+
+
+def test_reset_step_deck_reemits_save_and_supply_alters(tmp_path):
+    _write_body(tmp_path)
+    analysis, specs = _resolve(_reset_request())
+    deck = tmp_path / "corner.cir"
+    sim._write_corner_deck(
+        deck_path=str(deck),
+        netlist_path=str(tmp_path / "body.spice"),
+        models_lib=None,
+        point=sim.CornerPoint(None, {"VIN": 3.3}, 27),
+        analysis=analysis,
+        measurements_spec=specs,
+        raw_path=None,
+    )
+    lines = deck.read_text().splitlines()
+    control = lines[lines.index(".control") : lines.index(".endc") + 1]
+    assert control == [
+        ".control",
+        "save all",
+        "alter VIN=3.3",
+        "alter ILOAD=0.001",
+        "setplot new",
+        "echo klt_step_begin 0 $curplot",
+        "op",
+        "echo klt_step_end 0 $curplot",
+        "set klt_plot_0 = $curplot",
+        "let vout = v(out)",
+        "let loaded__vout = vout",
+        "print loaded__vout",
+        "reset",
+        "save all",
+        "alter VIN=3.3",
+        "setplot new",
+        "echo klt_step_begin 1 $curplot",
+        "op",
+        "echo klt_step_end 1 $curplot",
+        "set klt_plot_1 = $curplot",
+        "let vout = v(out)",
+        "let fresh__vout = vout",
+        "print fresh__vout",
+        "setplot new",
+        "let drop = {$klt_plot_1}.vout - {$klt_plot_0}.vout",
+        "print drop",
+        "quit",
+        ".endc",
+    ]
+
+
+def test_reset_prefix_omits_save_all_in_netlist_save_mode():
+    analysis, specs = _resolve(_reset_request())
+    lines = sim._corner_deck_control_lines(
+        point=sim.CornerPoint(None, {}, 27),
+        analysis=analysis,
+        measurements_spec=specs,
+        raw_path=None,
+        osdi_preload=(),
+        save_mode="netlist",
+    )
+    assert "save all" not in lines
+    assert lines[lines.index("reset") + 1] == "setplot new"
+
+
+def test_deck_without_reset_has_no_reset_command():
+    analysis, specs = _resolve(_two_point_request())
+    lines = sim_steps.control_lines(analysis, specs, reset_prefix=["save all"])
+    assert "reset" not in lines
+    assert lines == sim_steps.control_lines(analysis, specs)
+
+
 # --------------------------------------------------------------------------- #
 # Step outcomes, grading and failure propagation
 # --------------------------------------------------------------------------- #
@@ -1164,3 +1278,22 @@ def test_real_ngspice_two_noise_steps_read_their_own_spectrum(tmp_path):
         r_par = 1000.0 * r2 / (1000.0 + r2)
         expected = (4 * 1.380649e-23 * 300.15 * r_par) ** 0.5
         assert values[f"{step}_spot"] == pytest.approx(expected, rel=1e-3)
+
+
+@_SKIP_NO_NGSPICE
+def test_real_ngspice_reset_step_drops_earlier_alter_keeps_supply(tmp_path):
+    """Single corner, run locally: the `ILOAD` alter of step 1 must not leak
+    into the `reset` step 2, while the corner's `supply_v` still applies and
+    the derived expression still reads both steps' plots."""
+    _write_body(tmp_path)
+    request = _reset_request(corners={"supply_v": {"VIN": [3.3]}})
+    report = sim.run_sim(str(_write_request(tmp_path, request)))
+    corner = report["corners"][0]
+    assert report["status"] == "pass", corner["diagnostics"]
+    values = {m["name"]: m["value"] for m in corner["measurements"]}
+    # 3.3 V divider, no load: 2.2 V. With 1 mA drawn from `out`: 3.3 * 2/3 -
+    # 1e-3 * (1k || 2k) = 2.2 - 0.6667.
+    assert values["loaded.vout"] == pytest.approx(2.2 - 2 / 3, rel=1e-6)
+    assert values["fresh.vout"] == pytest.approx(2.2, rel=1e-6)
+    assert values["drop"] == pytest.approx(2 / 3, rel=1e-6)
+    assert [s["status"] for s in corner["steps"]] == ["ok", "ok"]

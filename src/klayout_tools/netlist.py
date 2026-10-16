@@ -139,15 +139,22 @@ class NetlistError(Exception):
     ``None`` for every local failure; the ``batch`` backend sets it so a
     caller can tell a retryable capacity refusal or a runner-version mismatch
     from a bad schematic (see :mod:`klayout_tools.netlist_batch`).
-    ``job_id`` names the batch job, when one was allocated.
+    ``job_id`` names the batch job, when one was allocated. ``details`` holds
+    extra structured fields the CLI merges into the error envelope's
+    ``error`` object (e.g. a failed batch job's ``remote_stderr_tail``).
     """
 
     def __init__(
-        self, *args: object, code: str | None = None, job_id: str | None = None
+        self,
+        *args: object,
+        code: str | None = None,
+        job_id: str | None = None,
+        details: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(*args)
         self.code = code
         self.job_id = job_id
+        self.details = details
 
 
 def _sha256_file_hash(data: bytes) -> str:

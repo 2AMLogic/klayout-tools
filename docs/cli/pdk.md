@@ -409,12 +409,27 @@ missing/empty/unreadable, or lives in a different namespace than the pin) and
 compared; an open_pdks `SOURCES` stamp is never compared with a lambdapdk
 release tag. Paths are not embedded; `source`/`installed_source` are labels.
 
-The only declared pin today is `lambdapdk-asap7`, expecting lambdapdk release
-`0.2.17` (the tag `scripts/fetch-pdks.sh` fetches), read from a
-`.fetched-version` file in the variant directory or up to two parent
-directories. **That is a wrapper-release identity, not an upstream ASAP7
-revision.** sky130, gf180mcu and IHP decks have no verified pin and report
-`not_declared`; no pins are invented.
+Declared pins today:
+
+- `lambdapdk-asap7`, expecting lambdapdk release `0.2.17` (the tag
+  `scripts/fetch-pdks.sh` fetches), read from a `.fetched-version` file in the
+  variant directory or up to two parent directories. **That is a
+  wrapper-release identity, not an upstream ASAP7 revision.**
+- `open_pdks-sky130` (`sky130A`) and `open_pdks-gf180mcu` (`gf180mcuD`)
+  (issue #3427, epic #3420), expecting the `SOURCES` stamp
+  `open_pdks f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7` — the single line a
+  `ciel`-installed tree carries. A `volare` tree at the older `c6d73a3` build
+  reports `mismatch`; a variant with no `SOURCES` file reports `unknown`. A
+  short commit hash (7+ hex) in the stamp matches by prefix, and the
+  `open_pdks <hash>` segment is found inside a multi-line stamp.
+
+The pin's single source of truth is `pdks.families.*.open_pdks_commit` in
+`docker/eda-sim/pdk-versions.json`. That manifest is not shipped in the wheel,
+so `klayout_tools.pdk_compat.OPEN_PDKS_PIN` mirrors it and
+`tests/test_pdk_compat_open_pdks.py` fails if the two diverge. A `mismatch` is
+also recorded in the `provenance.pdk` block (`compatibility`, see
+`docs/json-contract.md`). IHP has no verified pin and reports `not_declared`;
+no pins are invented.
 
 **Warning policy: warning-only.** `mismatch` and `unknown` appear in the JSON
 and as a `compatibility:` line plus a stderr warning in `find`/`check` text

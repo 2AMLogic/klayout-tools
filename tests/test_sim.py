@@ -2898,6 +2898,55 @@ def test_parse_ascii_rawfile_complex(tmp_path):
             assert isinstance(value, float)
 
 
+@pytest.mark.parametrize("text", [_ASCII_RAWFILE, _ASCII_RAWFILE_COMPLEX])
+def test_parse_and_persist_waveform_matches_parse_ascii_rawfile(tmp_path, text):
+    path = tmp_path / "waveform.raw"
+    path.write_text(text)
+
+    json_path = sim._parse_and_persist_waveform(str(path))
+
+    expected = sim.parse_ascii_rawfile(str(path))
+    with open(json_path, encoding="utf-8") as fh:
+        content = fh.read()
+    assert json.loads(content) == expected
+    # Streamed output is byte-identical to a plain json.dump (issue #3360).
+    assert content == json.dumps(expected)
+
+
+def test_parse_and_persist_waveform_zero_points_and_single_variable(tmp_path):
+    path = tmp_path / "empty.raw"
+    path.write_text(
+        "Plotname: DC\nFlags: real\nNo. Variables: 1\nNo. Points: 0\n"
+        "Variables:\n\t0\tv-sweep\tvoltage\nValues:\n\n"
+    )
+    json_path = sim._parse_and_persist_waveform(str(path))
+    with open(json_path, encoding="utf-8") as fh:
+        assert json.load(fh) == {
+            "plotname": "DC",
+            "variables": [{"index": 0, "name": "v-sweep", "type": "voltage"}],
+            "points": [],
+        }
+
+    path.write_text(
+        "Plotname: DC\nNo. Variables: 1\nVariables:\n\t0\tv-sweep\tvoltage\n"
+        "Values:\n 0\t1.5\n 1\t2.5\n"
+    )
+    json_path = sim._parse_and_persist_waveform(str(path))
+    with open(json_path, encoding="utf-8") as fh:
+        assert json.load(fh)["points"] == [[1.5], [2.5]]
+
+
+def test_parse_and_persist_waveform_failure_leaves_no_artifact(tmp_path):
+    path = tmp_path / "bad.raw"
+    path.write_text(_ASCII_RAWFILE.replace("1.000000000000000e-11", "oops", 1))
+    with pytest.raises(ValueError):
+        sim._parse_and_persist_waveform(str(path))
+    assert not (tmp_path / "bad.raw.json").exists()
+    with pytest.raises(sim.SimError):
+        sim._parse_and_persist_waveform(str(tmp_path / "nope.raw"))
+    assert not (tmp_path / "nope.raw.json").exists()
+
+
 def test_parse_ascii_rawfile_not_a_rawfile_raises(tmp_path):
     path = tmp_path / "notraw.txt"
     path.write_text("hello world\n")
@@ -3004,6 +3053,89 @@ def test_corner_records_engine_exit_code(tmp_path, monkeypatch, returncode):
     assert "engine_killed" not in [d["code"] for d in corner["diagnostics"]]
 
 
+def _silent_engine_corner(
+    tmp_path, monkeypatch, *, returncode=0, stderr="", stdout="", write_log=None
+):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [
+                {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"}
+            ],
+        },
+    )
+
+    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+        if write_log is not None:
+            with open(cmd[cmd.index("-o") + 1], "w", encoding="utf-8") as handle:
+                handle.write(write_log)
+        return fake_completed(stdout, returncode=returncode, stderr=stderr)
+
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+    (corner,) = sim.run_sim(str(request))["corners"]
+    return corner
+
+
+def _unknown_messages(corner):
+    return [d["message"] for d in corner["diagnostics"] if d["code"] == "unknown"]
+
+
+def test_silent_exit_zero_without_log_surfaces_stderr(tmp_path, monkeypatch):
+    """Issue #3016: exit 0, no log, no measurements -> the diagnostic names
+    the exit status and carries the engine's stderr."""
+    corner = _silent_engine_corner(tmp_path, monkeypatch, stderr="boom")
+    assert corner["status"] == "error"
+    (message,) = _unknown_messages(corner)
+    assert "exited with code 0" in message
+    assert "stderr tail: boom" in message
+
+
+def test_silent_exit_zero_with_empty_log_surfaces_stdout(tmp_path, monkeypatch):
+    corner = _silent_engine_corner(
+        tmp_path, monkeypatch, stdout="** ngspice-99\nbye\n", write_log=""
+    )
+    (message,) = _unknown_messages(corner)
+    assert "exited with code 0" in message
+    assert "stdout tail:" in message and "bye" in message
+
+
+def test_nonzero_exit_without_log_extends_existing_message(tmp_path, monkeypatch):
+    corner = _silent_engine_corner(
+        tmp_path, monkeypatch, returncode=2, stderr="cannot open deck"
+    )
+    (message,) = _unknown_messages(corner)  # exactly one: no double report
+    assert "exited with code 2 without writing its log" in message
+    assert "cannot open deck" in message
+
+
+def test_silent_engine_output_tail_is_bounded(tmp_path, monkeypatch):
+    corner = _silent_engine_corner(
+        tmp_path, monkeypatch, stderr="head-marker" + "x" * 10_000 + "tail-marker"
+    )
+    (message,) = _unknown_messages(corner)
+    assert "tail-marker" in message
+    assert "head-marker" not in message
+    assert len(message) < 3000
+
+
+def test_engine_output_tail_tolerates_undecodable_text():
+    assert sim._engine_output_tail("", "bad \udcff byte") != ""
+    assert sim._engine_output_tail("", "") == ""
+
+
+def test_log_present_run_gets_no_silent_engine_diagnostic(tmp_path, monkeypatch):
+    corner = _silent_engine_corner(
+        tmp_path,
+        monkeypatch,
+        stderr="noise",
+        write_log="vout = 1.2\n",
+    )
+    assert "exited with code" not in " ".join(_unknown_messages(corner))
+
+
 def test_corner_killed_by_signal_gets_distinct_diagnostic(tmp_path, monkeypatch):
     corner = _engine_outcome_corner(tmp_path, monkeypatch, returncode=-9)
     assert corner["engine_exit_code"] is None
@@ -3030,6 +3162,82 @@ def test_corner_timeout_and_launch_failure_leave_both_fields_null(
     )
     assert corner["engine_exit_code"] is None
     assert corner["engine_killed_by_signal"] is None
+
+
+def _abort_corner(tmp_path, monkeypatch, *, keep_artifacts, log_text="", **stub):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [
+                {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"}
+            ],
+            "options": {"timeout_s": 5, "keep_artifacts": keep_artifacts},
+        },
+    )
+
+    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+        log_path = cmd[cmd.index("-o") + 1]
+        with open(log_path, "w", encoding="utf-8") as handle:
+            handle.write(log_text)
+        return fake_completed(
+            "** ngspice-99\n",
+            returncode=stub.get("returncode", 0),
+            stderr=stub.get("stderr", ""),
+        )
+
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+    (corner,) = sim.run_sim(str(request))["corners"]
+    return corner
+
+
+@pytest.mark.parametrize("keep_artifacts", [True, False])
+def test_corner_nonzero_exit_gets_engine_aborted_with_tail(
+    tmp_path, monkeypatch, keep_artifacts
+):
+    """Issue #3067: abnormal exit is the corner's primary diagnostic, with the
+    exit status and engine output tail; the measurement cascade is demoted."""
+    corner = _abort_corner(
+        tmp_path,
+        monkeypatch,
+        keep_artifacts=keep_artifacts,
+        returncode=3,
+        stderr="warn\nfatal: out of memory\n",
+    )
+    first = corner["diagnostics"][0]
+    assert first["code"] == "engine_aborted"
+    assert first["severity"] == "error"
+    assert "code 3" in first["message"]
+    assert "fatal: out of memory" in first["message"]
+    assert "measurement" not in [d["code"] for d in corner["diagnostics"]]
+    assert corner["engine_exit_code"] == 3
+    assert corner["status"] == "error"
+    assert "engine_aborted" in sim.DIAGNOSTIC_CODES
+
+
+def test_corner_killed_demotes_measurement_cascade(tmp_path, monkeypatch):
+    corner = _abort_corner(
+        tmp_path, monkeypatch, keep_artifacts=False, returncode=-9, stderr="Killed\n"
+    )
+    codes = [d["code"] for d in corner["diagnostics"]]
+    assert codes == ["engine_killed"]
+    assert "Killed" in corner["diagnostics"][0]["message"]
+
+
+def test_corner_genuine_measurement_failure_is_not_engine_aborted(
+    tmp_path, monkeypatch
+):
+    corner = _abort_corner(
+        tmp_path,
+        monkeypatch,
+        keep_artifacts=False,
+        log_text="Circuit: x\nNo. of Data Rows : 10\n",
+    )
+    codes = [d["code"] for d in corner["diagnostics"]]
+    assert "engine_aborted" not in codes
+    assert "measurement" in codes
 
 
 def test_split_returncode_unnamed_signal_falls_back():
@@ -7800,6 +8008,35 @@ def test_run_sim_remote_backend_pushes_local_parallel_request(tmp_path, monkeypa
     assert state["cleanup_calls"] == 1
 
 
+def test_run_sim_remote_backend_forwards_cli_budget_s_to_worker(tmp_path, monkeypatch):
+    """Issue #3167: `--budget-s` reaches the worker; CLI wins over the request."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        _base_remote_request(
+            corners={"temperature_c": [10, 40]},
+            options={"wall_clock_budget_s": 3600},
+        ),
+    )
+    state = _install_fake_remote_transport(monkeypatch)
+
+    sim.run_sim(str(request), budget_s=90)
+    assert state["remote_request"]["options"]["wall_clock_budget_s"] == 90
+
+    sim.run_sim(str(request))
+    assert state["remote_request"]["options"]["wall_clock_budget_s"] == 3600
+
+
+def test_run_sim_remote_backend_adds_no_budget_key_when_unset(tmp_path, monkeypatch):
+    _write_body(tmp_path)
+    request = _write_request(tmp_path, _base_remote_request())
+    state = _install_fake_remote_transport(monkeypatch)
+
+    sim.run_sim(str(request))
+
+    assert "wall_clock_budget_s" not in state["remote_request"]["options"]
+
+
 def test_run_sim_remote_backend_stages_the_netlists_include_closure(
     tmp_path, monkeypatch
 ):
@@ -8611,7 +8848,10 @@ def test_cli_json_omits_ambiguous_sources_for_a_single_install(
     main(["sim", str(_pdk_request(tmp_path)), "--format", "json"])
 
     block = json.loads(capsys.readouterr().out)["provenance"]["pdk"]
-    assert set(block) == {"name", "source", "version"}
+    # The fixture stamp is not the declared open_pdks pin, so `compatibility`
+    # (issue #3427) is legitimately present; the point here is the absence of
+    # `ambiguous_sources`.
+    assert set(block) == {"name", "source", "version", "compatibility"}
 
 
 def test_cli_pinned_models_pdk_root_is_never_ambiguous(tmp_path, monkeypatch, capsys):
@@ -12626,6 +12866,24 @@ def test_gf180_pdk_native_passives_report_inactive():
         assert sim._MISMATCH_ACTIVITY[("gf180mcu", fam)]["active"] is False
 
 
+def test_sky130_resistor_reports_mismatch_active(tmp_path):
+    """#3032: sky130 poly resistors carry a per-instance AGAUSS hook gated by
+    MC_MM_SWITCH, so the report is a curated `active: True`, not `None`."""
+    netlist = tmp_path / "r.spice"
+    netlist.write_text(
+        "XR1 a b 0 sky130_fd_pr__res_high_po_1p41 L=10\n"
+        "XR2 a c 0 sky130_fd_pr__res_high_po_1p41 L=10\n"
+    )
+    report = sim._mismatch_family_report(str(netlist), "sky130A")
+    assert [f["family"] for f in report] == ["resistor"]
+    assert report[0]["active"] is True
+    assert "MC_MM_SWITCH" in report[0]["note"]
+    # gf180 and unknown-PDK behaviour unchanged.
+    assert sim._MISMATCH_ACTIVITY[("gf180mcu", "resistor")]["active"] is False
+    unknown = sim._mismatch_family_report(str(netlist), "mystery")
+    assert unknown[0]["active"] is None
+
+
 # --- #2894: unknown supply_v key, timeout-budget hint ----------------------- #
 
 
@@ -12951,3 +13209,177 @@ def test_noise_representation(plotname, vtype, expected):
         "points": [[1.0]],
     }
     assert sim.noise_representation(waveform) == expected
+
+
+# --------------------------------------------------------------------------- #
+# klt sim --dry-run (issue #3064)
+# --------------------------------------------------------------------------- #
+
+
+def _dry_run_mc_request(tmp_path, **extra):
+    _write_body(tmp_path)
+    return _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "monte_carlo": {"n": 3, "seed": 7, "vary": "both"},
+            **extra,
+        },
+    )
+
+
+def test_run_sim_dry_run_seeds_match_real_run_and_invoke_no_engine(
+    tmp_path, monkeypatch
+):
+    request = _dry_run_mc_request(tmp_path)
+
+    monkeypatch.delenv(sim.BACKEND_ENV, raising=False)
+    _stub_subprocess_run(monkeypatch)
+    real = sim.run_sim(str(request))
+
+    def boom(*args, **kwargs):
+        raise AssertionError("dry run must not invoke the engine")
+
+    monkeypatch.setattr(sim.subprocess, "run", boom)
+    for name in list(sim._BACKENDS):
+        monkeypatch.setitem(sim._BACKENDS, name, boom)
+    dry = sim.run_sim(str(request), dry_run=True)
+
+    assert dry["dry_run"] is True
+    assert dry["status"] == "valid"
+    assert dry["unit_count"] == len(dry["units"]) == 3
+    assert dry["warnings"] == []
+
+    real_seeds = [
+        (
+            c["monte_carlo"]["seed"],
+            c["monte_carlo"]["process_seed"],
+            c["monte_carlo"]["mismatch_seed"],
+        )
+        for c in real["corners"]
+    ]
+    dry_seeds = [
+        (u["rndseed"], u["process_seed"], u["mismatch_seed"]) for u in dry["units"]
+    ]
+    assert dry_seeds == real_seeds
+    assert [u["corner_id"] for u in dry["units"]] == [
+        c["corner_id"] for c in real["corners"]
+    ]
+
+
+def test_run_sim_dry_run_warns_on_unknown_key(tmp_path):
+    request = _dry_run_mc_request(tmp_path, monte_carol_typo=1)
+    report = sim.run_sim(str(request), dry_run=True)
+    assert len(report["warnings"]) == 1
+    assert "monte_carol_typo" in report["warnings"][0]
+
+
+def test_run_sim_dry_run_reports_same_error_as_real_run(tmp_path):
+    request = _dry_run_mc_request(tmp_path)
+    bad = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "monte_carlo": {"n": 0, "seed": 1},
+        },
+    )
+    with pytest.raises(sim.SimError) as real_exc:
+        sim.run_sim(str(bad))
+    with pytest.raises(sim.SimError) as dry_exc:
+        sim.run_sim(str(bad), dry_run=True)
+    assert str(dry_exc.value) == str(real_exc.value)
+    assert request.exists()
+
+
+def test_run_sim_dry_run_missing_netlist_raises(tmp_path):
+    request = _write_request(
+        tmp_path,
+        {"netlist": "nope.spice", "analysis": {"kind": "tran", "args": "1n 1u"}},
+    )
+    with pytest.raises(sim.SimError, match="netlist not found"):
+        sim.run_sim(str(request), dry_run=True)
+
+
+def test_run_sim_dry_run_refuses_deck_requests(tmp_path):
+    request = _write_request(tmp_path, {"decks": [{"name": "a", "deck": "x"}]})
+    with pytest.raises(sim.SimError, match="--dry-run"):
+        sim.run_sim(str(request), dry_run=True)
+
+
+def test_cli_sim_dry_run_json_envelope(tmp_path, capsys, monkeypatch):
+
+    monkeypatch.delenv(sim.BACKEND_ENV, raising=False)
+    request = _dry_run_mc_request(tmp_path)
+    assert main(["sim", str(request), "--dry-run", "--format", "json"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["dry_run"] is True
+    assert len(out["units"]) == 3
+    assert out["backend"] == "local"
+
+
+# --------------------------------------------------------------------------- #
+# environment.engine_host (issue #3110)
+# --------------------------------------------------------------------------- #
+
+
+def _worker_block(capture, path=None):
+    simulator = {"selected_path": path} if capture == "ok" else None
+    return {"worker_environment": {"capture": capture, "simulator": simulator}}
+
+
+def test_apply_engine_host_local_run_is_otherwise_unchanged():
+    env = {"ngspice_binary": "/usr/bin/ngspice"}
+    sim.apply_engine_host(
+        env, backend="local", client_ngspice_binary="/usr/bin/ngspice"
+    )
+    assert env == {"ngspice_binary": "/usr/bin/ngspice", "engine_host": "local"}
+
+
+def test_apply_engine_host_batch_swaps_in_the_worker_path():
+    env = {
+        "ngspice_binary": "/home/me/.local/bin/ngspice",
+        "remote": _worker_block("ok", "/usr/bin/ngspice"),
+    }
+    sim.apply_engine_host(
+        env, backend="batch", client_ngspice_binary="/home/me/.local/bin/ngspice"
+    )
+    assert env["engine_host"] == "worker"
+    assert env["ngspice_binary"] == "/usr/bin/ngspice"
+    assert env["client_ngspice_binary"] == "/home/me/.local/bin/ngspice"
+
+
+@pytest.mark.parametrize(
+    "remote", [_worker_block("absent"), _worker_block("malformed"), {}, None]
+)
+def test_apply_engine_host_without_worker_capture_is_null(remote):
+    env = {"ngspice_binary": "/home/me/ngspice", "remote": remote}
+    sim.apply_engine_host(
+        env, backend="remote", client_ngspice_binary="/home/me/ngspice"
+    )
+    assert env["engine_host"] == "worker"
+    assert env["ngspice_binary"] is None
+    assert env["client_ngspice_binary"] == "/home/me/ngspice"
+
+
+def test_apply_engine_host_sharded_fleet_agreement_and_disagreement():
+    same = {"fleet": [_worker_block("ok", "/a"), _worker_block("ok", "/a")]}
+    mixed = {"fleet": [_worker_block("ok", "/a"), _worker_block("ok", "/b")]}
+    partial = {"fleet": [_worker_block("ok", "/a"), _worker_block("absent")]}
+    for remote, expected in ((same, "/a"), (mixed, None), (partial, None)):
+        env = {"remote": remote}
+        sim.apply_engine_host(env, backend="batch", client_ngspice_binary="/c")
+        assert env["ngspice_binary"] == expected
+
+
+def test_apply_engine_host_xyce_stays_null_and_client_null():
+    env = {"ngspice_binary": None, "remote": _worker_block("absent")}
+    sim.apply_engine_host(env, backend="batch", client_ngspice_binary=None)
+    assert env["ngspice_binary"] is None and env["client_ngspice_binary"] is None
+
+
+def test_pex_side_environment_carries_engine_host():
+    from klayout_tools import pex
+
+    assert {"engine_host", "client_ngspice_binary"} <= set(pex._SIDE_ENVIRONMENT_KEYS)

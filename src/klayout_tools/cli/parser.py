@@ -604,6 +604,33 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
         help="with --batch-set, how many requests are in flight at once (default: 4)",
     )
     sim_parser.add_argument(
+        "--submit-only",
+        dest="submit_only",
+        action="store_true",
+        default=False,
+        help=(
+            "with --backend batch, upload and launch the job, print its "
+            "identity (job_id, bucket, region, launched_at, request_sha256) "
+            "and exit 0 immediately -- no polling, no collection (issue "
+            "#3073). Read the job later with --job-status. One job only: "
+            "refused with --hosts > 1, --resume, --plot, a deck request, or "
+            "a non-batch backend. See docs/cli/sim.md 'Asynchronous submit'."
+        ),
+    )
+    sim_parser.add_argument(
+        "--job-status",
+        dest="job_status",
+        metavar="JOB_ID",
+        default=None,
+        help=(
+            "read one batch job's state by id (one status.json read; "
+            "state `pending` before the instance writes one) and exit. The "
+            "positional request supplies the bucket/region/profile. Submits "
+            "and launches nothing. Unit counts are not published by the "
+            "fleet and are not reported. See docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
         "-o",
         "--outdir",
         default=None,
@@ -680,6 +707,18 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     sim_parser.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        help=(
+            "validate the request and print its expansion (resolved "
+            "backend/engine, corner ids, per-sample Monte Carlo seeds, "
+            "staged model files, unknown-key warnings) without running "
+            "ngspice or touching SSH/S3/EC2; exits 1 on any validation "
+            "failure. Corner/Monte Carlo requests only. See docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
         "--fail-fast-probe",
         dest="fail_fast_probe",
         action="store_true",
@@ -716,6 +755,19 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
             "error. Applies to the `local`/`local-parallel` backends -- an "
             "off-host shard reads the request's own option instead. See "
             "docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
+        "--report-out",
+        dest="report_out",
+        default=None,
+        metavar="PATH",
+        help=(
+            "also write the report envelope to PATH, byte-identical to "
+            "`--format json` stdout; gzip-compressed (deterministic) when "
+            "PATH ends `.gz`, plain indented JSON otherwise. Stdout is "
+            "unchanged (issue #2975). `klt yield` reads `.json.gz` "
+            "directly. See docs/cli/sim.md."
         ),
     )
     sim_parser.add_argument(
@@ -1817,6 +1869,17 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     extract_parser.add_argument(
+        "--progress",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "write stage start/finish lines and a periodic heartbeat to "
+            "stderr (stdout stays the pure response). Default: heartbeat "
+            "lines only (every 30s of a long stage) when stderr is not a "
+            "TTY, nothing on a TTY; --no-progress forces off"
+        ),
+    )
+    extract_parser.add_argument(
         "--top",
         default=None,
         help=(
@@ -1829,7 +1892,10 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
         pdk_help=(
             "PDK variant to resolve (e.g. sky130A); overrides $PDK. "
             "Optional -- extraction runs from --deck alone when omitted; "
-            "when given, an unresolvable PDK is an application error."
+            "when given, an unresolvable PDK is an application error. "
+            "Omitted, MOS devices are written as bare M cards that are not "
+            "mismatch-capable under Monte Carlo; pass --pdk for the "
+            "subckt-wrapper X call."
         ),
     )
     extract_parser.add_argument(
@@ -2419,11 +2485,12 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
             "circuit (issue #2722): one definition per named cell, one X "
             "instance per placement, so per-circuit klt lvs options such as "
             "options.combine_devices_per_circuit can scope the layout side. "
-            "Increment 1: the cells must be non-nested, reachable, "
-            "non-top cells, and every placement of one cell must be "
-            "electrically identical; nesting, absent/top/unreachable names "
-            "and combination with --parasitics, --subcircuit or "
-            "--abstract-cells are errors (deferred to #2916). devices[]/"
+            "The cells must be reachable non-top cells, and every placement "
+            "of one cell must be electrically identical; a named cell "
+            "containing another named cell yields a nested '.SUBCKT' tree "
+            "(#2916). Absent/top/unreachable names and combination with "
+            "--parasitics, --subcircuit or --abstract-cells are errors "
+            "(rejected by design, #2916). devices[]/"
             "nets[] keep describing the flat extraction and a 'hierarchy' "
             "block is added to the JSON response. Off by default -- the "
             "flat bytes and JSON are unchanged. See docs/cli/extract.md's "
@@ -5211,6 +5278,21 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
             "replays a report's recorded selection)"
         ),
     )
+    drc_parser.add_argument(
+        "--waivers",
+        dest="waivers",
+        metavar="PATH",
+        default=None,
+        help=(
+            "rule-scoped cell waivers (issue #3483, --engine curated only): "
+            'a JSON file {"waivers": [{"cell": ..., "rule": <id|glob>, '
+            '"justification": ...}]}. Markers whose source_cell and rule '
+            "match move out of violations/violation_count/status into a "
+            "separate waived array (with waiver_justification), never "
+            "dropped silently; the file is pinned in provenance.waivers. "
+            "See docs/cli/drc.md, 'Waivers'"
+        ),
+    )
     _add_format_arg(drc_parser)
     _record_request_argv_flags(
         drc_parser, exclude=(*_REQUEST_ARGV_FLAG_EXCLUDE, "list_rules")
@@ -5597,6 +5679,33 @@ def _add_netlist_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     netlist_parser.add_argument(
+        "--batch-include",
+        dest="batch_include",
+        action="append",
+        default=None,
+        metavar="GLOB",
+        help=(
+            "--backend batch only, repeatable: upload only the git-tracked "
+            "files under the batch root matching this root-relative glob "
+            "(a bare directory name selects everything under it; '*' also "
+            "crosses '/'). The schematic and a project --rcfile must match, "
+            "or the run is refused"
+        ),
+    )
+    netlist_parser.add_argument(
+        "--batch-exclude",
+        dest="batch_exclude",
+        action="append",
+        default=None,
+        metavar="GLOB",
+        help=(
+            "--backend batch only, repeatable: leave the files matching this "
+            "root-relative glob out of the upload (applied after "
+            "--batch-include). The schematic and a project --rcfile cannot "
+            "be excluded"
+        ),
+    )
+    netlist_parser.add_argument(
         "--xschem-binary",
         dest="xschem_binary",
         default=netlist.DEFAULT_XSCHEM_BINARY,
@@ -5706,6 +5815,20 @@ def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
             "'findings_only'. Gate on erc_status, as any --pdk-less run "
             "already must. Mutually exclusive with --pdk (a limit table "
             "with nothing to grade) -- passing both exits 1."
+        ),
+    )
+    erc_parser.add_argument(
+        "--omit-antenna-tables",
+        action="store_true",
+        help=(
+            "with --findings-only, drop the all-'unchecked' gates[] array "
+            "(gate_count keeps the real count) and collapse the antenna "
+            "coverage's per-gate skipped/gate_reference_level entries to "
+            "one aggregate entry each, so a dense layout's report is small "
+            "enough to commit verbatim (issue #3011). Sets "
+            "antenna_tables_omitted: true; every verdict, erc_findings and "
+            "the exit code are identical to the same run without it. "
+            "Requires --findings-only -- passing it alone exits 1."
         ),
     )
     _add_format_arg(erc_parser)

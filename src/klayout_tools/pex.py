@@ -1198,6 +1198,8 @@ _SIDE_ENVIRONMENT_KEYS = (
     "engine",
     "engine_version",
     "ngspice_binary",
+    "engine_host",
+    "client_ngspice_binary",
     "remote",
 )
 
@@ -1315,6 +1317,81 @@ def _side_status(measurement: dict[str, Any] | None) -> str:
     return measurement["status"] if measurement is not None else "error"
 
 
+#: Issue #3062: the failing stage of an errored ``delta[]`` row, keyed by the
+#: diagnostic / ``SimError`` code that names it. One table so the mapping is
+#: testable; anything absent is ``"unknown"`` (never guessed).
+_ERROR_STAGE_BY_CODE = {
+    "batch_no_capacity": "submit",
+    "batch_concurrency_cap": "submit",
+    "batch_job_failed": "execute",
+    "batch_job_timeout": "execute",
+    "batch_poll_timeout": "execute",
+    "missing_include": "execute",
+    "timeout_budget_unreachable": "execute",
+    "budget_exceeded": "execute",
+    "pin_count_mismatch": "execute",
+    "lost_shard": "collect",
+    "orphaned": "collect",
+}
+
+
+def _error_stage(code: str | None, message: str = "") -> str:
+    """``submit`` / ``execute`` / ``collect`` / ``parse`` / ``unknown`` for
+    one failure (issue #3062). The code table wins; a message that says its
+    output could not be recovered/parsed is ``collect``/``parse``."""
+    if code in _ERROR_STAGE_BY_CODE:
+        return _ERROR_STAGE_BY_CODE[code]
+    lowered = message.lower()
+    if "output recovery" in lowered or "collect" in lowered:
+        return "collect"
+    if "unparseable" in lowered or "could not parse" in lowered:
+        return "parse"
+    return "unknown"
+
+
+def _side_error(
+    side: str,
+    sim_report: Mapping[str, Any] | None,
+    corner_id: str,
+    *,
+    message: str | None = None,
+    code: str | None = None,
+) -> dict[str, Any]:
+    """The additive ``error`` object of an errored ``delta[]`` row (issue
+    #3062): ``side``, ``stage``, ``message`` and, when the source has one,
+    ``code`` -- taken from that side's corner ``diagnostics[]`` (first
+    error-severity entry), else from the caller-supplied ``message``/``code``
+    (a ``SimError``), never invented. ``remote`` carries the side's
+    ``environment.remote`` (the batch job id) when present."""
+    remote = None
+    if sim_report is not None:
+        remote = (sim_report.get("environment") or {}).get("remote")
+        if message is None:
+            for corner in sim_report.get("corners", []):
+                if corner.get("corner_id") != corner_id:
+                    continue
+                diagnostics = corner.get("diagnostics") or []
+                chosen = next(
+                    (d for d in diagnostics if d.get("severity") == "error"),
+                    diagnostics[0] if diagnostics else None,
+                )
+                if chosen is not None:
+                    message = chosen.get("message") or chosen.get("code")
+                    code = chosen.get("code")
+                break
+    text = message or "no diagnostic was recorded for this errored row"
+    error: dict[str, Any] = {
+        "side": side,
+        "stage": _error_stage(code, text),
+        "message": text,
+    }
+    if code:
+        error["code"] = code
+    if remote is not None:
+        error["remote"] = copy.deepcopy(remote)
+    return error
+
+
 def _build_delta_rows(
     *,
     spec_row_prefix: str | None,
@@ -1330,34 +1407,58 @@ def _build_delta_rows(
             name = extracted_measurement["name"]
             spec_row = name if spec_row_prefix is None else f"{spec_row_prefix}.{name}"
             schematic_measurement = schematic_measurements.get(name)
-            rows.append(
-                {
-                    "spec_row": spec_row,
-                    "corner_id": corner_id,
-                    "schematic_value": (
-                        schematic_measurement["value"]
-                        if schematic_measurement is not None
-                        else None
-                    ),
-                    "extracted_value": extracted_measurement["value"],
-                    "delta_pct": _delta_pct(
-                        schematic_measurement["value"]
-                        if schematic_measurement is not None
-                        else None,
-                        extracted_measurement["value"],
-                    ),
-                    "status": _row_status(schematic_measurement, extracted_measurement),
-                    "schematic_status": _side_status(schematic_measurement),
-                    "extracted_status": _side_status(extracted_measurement),
-                }
-            )
+            row = {
+                "spec_row": spec_row,
+                "corner_id": corner_id,
+                "schematic_value": (
+                    schematic_measurement["value"]
+                    if schematic_measurement is not None
+                    else None
+                ),
+                "extracted_value": extracted_measurement["value"],
+                "delta_pct": _delta_pct(
+                    schematic_measurement["value"]
+                    if schematic_measurement is not None
+                    else None,
+                    extracted_measurement["value"],
+                ),
+                "status": _row_status(schematic_measurement, extracted_measurement),
+                "schematic_status": _side_status(schematic_measurement),
+                "extracted_status": _side_status(extracted_measurement),
+            }
+            if row["status"] == "error":
+                # Issue #3062: blame the schematic side when it is the one
+                # with no trustworthy value, else the extracted side.
+                schematic_bad = (
+                    schematic_measurement is None
+                    or schematic_measurement["status"] == "error"
+                )
+                row["error"] = (
+                    _side_error("schematic", schematic_report, corner_id)
+                    if schematic_bad
+                    else _side_error("extracted", extracted_report, corner_id)
+                )
+            rows.append(row)
     return rows
+
+
+def _static_extracted_failure(
+    pin_count_mismatch: dict[str, Any] | None,
+    flat_dut_mismatch: dict[str, Any] | None,
+) -> tuple[str, str | None] | None:
+    """``(message, code)`` for a statically detected extracted-side mismatch."""
+    static = pin_count_mismatch or flat_dut_mismatch
+    if static is None or not static.get("detail"):
+        return None
+    return str(static["detail"]), "pin_count_mismatch" if pin_count_mismatch else None
 
 
 def _unextracted_delta_rows(
     *,
     spec_row_prefix: str | None,
     schematic_report: dict[str, Any],
+    failure_message: str | None = None,
+    failure_code: str | None = None,
 ) -> list[dict[str, Any]]:
     """Delta rows for a testbench whose *extracted* side never produced a
     response at all (issue #1030's pin-count mismatch, surfaced as a
@@ -1386,6 +1487,15 @@ def _unextracted_delta_rows(
                     "status": "error",
                     "schematic_status": _side_status(measurement),
                     "extracted_status": "error",
+                    # Issue #3062: the extracted side has no report, so the
+                    # cause is the failure the caller recorded, if any.
+                    "error": _side_error(
+                        "extracted",
+                        None,
+                        corner["corner_id"],
+                        message=failure_message,
+                        code=failure_code,
+                    ),
                 }
             )
     return rows
@@ -2478,7 +2588,9 @@ def run_pex(
         try:
             request = load_request(testbench_path)
         except SimError as exc:
-            raise PexError(f"testbench '{testbench_path}': {exc}") from exc
+            raise PexError(
+                f"testbench '{testbench_path}': {exc}", code=exc.code
+            ) from exc
 
         request_dir = os.path.dirname(os.path.abspath(testbench_path))
         schematic_body_path = _resolve_relative(request["netlist"], request_dir)
@@ -2671,10 +2783,15 @@ def run_pex(
             )
         except SimError as exc:
             raise PexError(
-                f"testbench '{testbench_path}': schematic-side simulation failed: {exc}"
+                f"testbench '{testbench_path}': schematic-side simulation "
+                f"failed: {exc}",
+                code=exc.code,
             ) from exc
 
         extracted_report: dict[str, Any] | None = None
+        # Issue #3062: why the extracted side has no report, for the rows'
+        # ``error`` objects: ``(message, code)``.
+        extracted_failure: tuple[str, str | None] | None = None
         # Gap 2 (issue #1255) / issue #1041: already know (statically, from
         # both netlists' own `.SUBCKT` headers, via `flat_dut_mismatch` or
         # the pre-flight `pin_count_mismatch` check above) that the
@@ -2716,9 +2833,11 @@ def run_pex(
                 if mismatch is None:
                     raise PexError(
                         f"testbench '{testbench_path}': extracted-side simulation "
-                        f"failed: {exc}"
+                        f"failed: {exc}",
+                        code=exc.code,
                     ) from exc
                 pin_count_mismatch = pin_count_mismatch or mismatch
+                extracted_failure = (str(exc), exc.code)
 
         spec_row_prefix = (
             None
@@ -2726,10 +2845,16 @@ def run_pex(
             else os.path.splitext(os.path.basename(testbench_path))[0]
         )
         if extracted_report is None:
+            if extracted_failure is None:
+                extracted_failure = _static_extracted_failure(
+                    pin_count_mismatch, flat_dut_mismatch
+                )
             delta.extend(
                 _unextracted_delta_rows(
                     spec_row_prefix=spec_row_prefix,
                     schematic_report=schematic_report,
+                    failure_message=extracted_failure[0] if extracted_failure else None,
+                    failure_code=extracted_failure[1] if extracted_failure else None,
                 )
             )
             testbenches_summary.append(
