@@ -1737,9 +1737,11 @@ extracted netlist. On `sky130` this moves the ring from `diff.drawing`
 **This generator draws from base layers, not from a vendor library cell.** The
 result is a DRC-clean, matching-faithful *floorplan* of the device (layer
 stack + common-centroid/dummy arrangement), **not** a SPICE-model-exact
-replacement for the PDK's characterized vertical PNP — the curated decks check
-no implant layer, so emitter/base/collector all draw on the one diffusion
-role. See [`docs/design/gen-bjt-array-spike.md`](../design/gen-bjt-array-spike.md)
+replacement for the PDK's characterized vertical PNP — emitter/base/collector
+all draw on the one diffusion role. On gf180mcu, whose deck forbids Comp not
+covered by an implant (`DF.12`), each emitter pad gets a Pplus implant and each
+base-tie pad an Nplus implant (0.16 µm extension), and the collector ring sits
+further out to keep implant spacing. See [`docs/design/gen-bjt-array-spike.md`](../design/gen-bjt-array-spike.md)
 for why draw-from-scratch was chosen over vendor-cell instantiation, and the
 fidelity limits that choice carries.
 

@@ -8569,7 +8569,7 @@ def test_bjt_array_collector_ring_gap_reports_gap_port_and_stays_drc_clean(
             "params": {
                 "ring_gap_side": "N",
                 "ring_gap_um": 1.0,
-                "ring_gap_offset_um": -0.41,
+                "ring_gap_offset_um": -0.2,
             },
             "options": {"output": str(output)},
         }
@@ -10503,17 +10503,11 @@ def test_gf180mcu_bjt_array_collector_ring_covered_by_pplus_implant(
     `docs/design/gen-bjt-array-spike.md`) -- and must be covered by Pplus
     (31/0), never Nplus.
 
-    This deliberately does **not** assert full-`Comp` coverage the way the
-    parametrized test above does: `bjt_array`'s own emitter/base-tie unit
-    body has no implant at all, a separate, pre-existing, documented
-    limitation (`docs/design/gen-bjt-array-spike.md`: "curated decks check
-    no implant layer ... a process-exact device would distinguish P+
-    emitter, N+ base tie, and P+ collector by implant") predating both
-    #1577 and this issue -- out of #1580's own scope, which is the
-    collector *ring* only. This test isolates the ring's own contribution
-    to the drawn `Comp` region (by diffing against the same request with
-    `add_collector_ring=False`) so it verifies only that shape, not the
-    unit body's own pre-existing gap."""
+    This test isolates the ring's own contribution to the drawn `Comp`
+    region (by diffing against the same request with
+    `add_collector_ring=False`) so it verifies only that shape; the unit
+    body's own P+ emitter / N+ base-tie implants (issue #3587) are covered by
+    the whole-layout DRC-clean assertion at the end."""
     import klayout.db as kdb
 
     def _active_region(add_ring):
@@ -10552,7 +10546,9 @@ def test_gf180mcu_bjt_array_collector_ring_covered_by_pplus_implant(
         layout.top_cell().begin_shapes_rec(layout.layer(32, 0))
     ).merged()
     assert (ring_region - pplus_region).is_empty()
-    assert nplus_region.is_empty()  # never the well-tie doping for this ring
+    # Never the well-tie doping for this ring. (The unit bodies' base-tie pads
+    # carry their own Nplus -- issue #3587 -- so only the ring is checked.)
+    assert (nplus_region & ring_region).is_empty()
 
     drc_report = run_drc(str(with_ring_output), "gf180mcu")
     assert drc_report["status"] == "clean", drc_report["violations"]
