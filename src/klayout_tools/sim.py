@@ -4510,8 +4510,13 @@ class CornerPoint:
     def slug(self) -> str:
         """Filesystem-safe artifact-directory name for this corner, derived
         from :attr:`corner_id` (e.g. ``ss/1.620V/125C`` -> ``ss_1p620V_125C``).
-        See :func:`_slugify_corner_id` for the parameter-axis form."""
+        See :func:`_slugify_corner_id` for the parameter-axis and bounded forms."""
         return _slugify_corner_id(self.corner_id)
+
+    @property
+    def readable_slug(self) -> str:
+        """The unbounded :attr:`slug` (before the long-name hash fallback)."""
+        return _readable_slug(self.corner_id)
 
 
 def _params_report_field(point: CornerPoint) -> dict[str, Any]:
@@ -7888,6 +7893,18 @@ def _run_corner(
     if keep_artifacts:
         corner_dir = os.path.join(artifacts_dir, point.slug)
         os.makedirs(corner_dir, exist_ok=True)
+        if point.slug != point.readable_slug:
+            with open(
+                os.path.join(corner_dir, "corner.json"), "w", encoding="utf-8"
+            ) as handle:
+                json.dump(
+                    {
+                        "corner_id": point.corner_id,
+                        "readable_slug": point.readable_slug,
+                    },
+                    handle,
+                    indent=2,
+                )
     else:
         corner_dir = _tmp_work_dir()
 
@@ -11256,30 +11273,54 @@ def _measurement_diagnostic_hints(spice: str) -> dict[str, Any]:
     return {"signal": signal, "window": window, "target": target}
 
 
-def _slugify_corner_id(corner_id: str) -> str:
-    """Filesystem-safe transform of a corner's own ``corner_id`` (e.g.
-    ``ss/1.620V/125C`` -> ``ss_1p620V_125C``), mirroring
-    :attr:`CornerPoint.slug`'s transform exactly (that property is not
-    reachable from a plain corner report dict, only from the pre-run
-    :class:`CornerPoint` this same corner was produced from)."""
-    match = _PARAMS_ID_RE.fullmatch(corner_id)
-    if match is None:
-        return _slugify_label(corner_id)
-    # Issue #3035: a parameter point keeps its PVT slug and appends the full
-    # SHA-256 of the whole ID (MC suffix included) -- parameter values never
-    # reach the filesystem, so close values cannot collide and no value can
-    # inject a path character.
-    digest = hashlib.sha256(corner_id.encode("utf-8")).hexdigest()
-    return f"{_slugify_label(match.group('pvt'))}_params_{digest}"
-
-
 def _slugify_label(label: str) -> str:
     label = label.replace("/", "_")
     return label.replace(".", "p").replace("=", "").replace("-", "n").replace("@", "v_")
 
 
+def _readable_slug(corner_id: str) -> str:
+    return _slugify_label(corner_id)
+
+
 #: ``<pvt>/params:<pairs>[/mc<n>]`` -- the shape of a parameter-axis ID.
 _PARAMS_ID_RE = re.compile(r"(?P<pvt>.*?)/params:[^/]*(?:/mc\d+)?")
+
+#: A readable slug longer than this many UTF-8 bytes is replaced by a bounded
+#: form (readable prefix + hash of the full corner id) so the artifact
+#: directory name stays well under the filesystem's ``NAME_MAX`` (255 bytes)
+#: even with the ``__probe`` suffix or a ``__<signal>.svg`` plot filename.
+_SLUG_MAX_BYTES = 100
+_SLUG_PREFIX_BYTES = 80
+_SLUG_HASH_CHARS = 12
+
+
+def _slugify_corner_id(corner_id: str) -> str:
+    """Filesystem-safe, bounded transform of a corner's own ``corner_id``
+    (e.g. ``ss/1.620V/125C`` -> ``ss_1p620V_125C``). Shared by
+    :attr:`CornerPoint.slug` and the plot writer (which only has the report
+    dict's ``corner_id``) so the two cannot drift.
+
+    A parameter point (issue #3035) keeps its PVT slug and appends the full
+    SHA-256 of the whole ID (MC suffix included) -- parameter values never
+    reach the filesystem, so close values cannot collide and no value can
+    inject a path character.
+
+    Otherwise short ids keep their readable form. When that exceeds
+    ``_SLUG_MAX_BYTES`` bytes (many swept ``supply_v`` keys), it becomes a
+    readable prefix plus a deterministic SHA-256 digest of the full
+    ``corner_id`` (so ``mc<N>`` samples stay distinct); the full id is
+    recoverable from the directory's ``corner.json``."""
+    match = _PARAMS_ID_RE.fullmatch(corner_id)
+    digest = hashlib.sha256(corner_id.encode("utf-8")).hexdigest()
+    if match is not None:
+        return f"{_slugify_label(match.group('pvt'))}_params_{digest}"
+    readable = _readable_slug(corner_id)
+    if len(readable.encode("utf-8")) <= _SLUG_MAX_BYTES:
+        return readable
+    prefix = readable.encode("utf-8")[:_SLUG_PREFIX_BYTES].decode(
+        "utf-8", errors="ignore"
+    )
+    return f"{prefix}_{digest[:_SLUG_HASH_CHARS]}"
 
 
 #: Any run of characters that is not alphanumeric/underscore, collapsed to a
