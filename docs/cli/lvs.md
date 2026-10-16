@@ -709,6 +709,18 @@ micrometres, matching that vendor deck's own `.option scale=1.0u`). `klt
 lvs`'s layout netlist is the unbound `M`-card form, which still carries
 explicit suffixes.
 
+**`form: "subckt-call"` resolves parametrised geometry (issue #2953).** An
+exported schematic netlist often writes `L=lacc W=wparam` or `W='w*2'` /
+`{a+b}` against `.subckt X ... lacc=0.5u` header defaults or `.param` lines.
+`klt lvs` resolves such a value against the enclosing `.subckt`'s header
+defaults, then the top-level `.param` lines, before the bare-literal rule
+below applies. Supported: identifiers, `+ - * /`, parentheses, unary sign and
+SPICE suffixes (`u`, `n`, `meg`, ...); no function calls, and a sibling
+parameter on the same `X` card is not a symbol. A value that cannot be
+resolved still fails with an error naming the parameter and the unresolved
+symbol — never a silent fallback. Already-literal values are untouched, and
+`ad`/`as`/`pd`/`ps` (never carried) can use any expression.
+
 **`form: "subckt-call"` resolves a bare literal per `reference.deck`
 (issue #1492).** A real xschem/ngspice schematic-flow netlist for a deck
 whose model library sets an ambient `.option scale=1.0u` (confirmed for
@@ -1150,7 +1162,14 @@ one bit (`8'h00`, `16'hffff`, `4'b1010` — each bit tied to the
 named plainly (`.D(data)`). Each expands MSB-first to one net per bit, using
 the module's own declared widths. A plain `assign` between two declared
 buses (`assign dout = _05_;`, Yosys's routine bus output) aliases bit for
-bit and needs equal widths, so a whole-bus connection resolves through it. The bits are then bound to the cell's
+bit and needs equal widths, so a whole-bus connection resolves through it.
+The same per-bit expansion covers the other `assign` shapes Yosys emits
+(issue #2941): a part-select on either side (`assign imm = word[7:0];`,
+`assign bus[15:8] = hi;`), a sized constant on the right-hand side in any
+base (`assign flags = 8'h00;`, `assign unused = 1'h0;` — each bit tied to
+`__CONST0__`/`__CONST1__`, `x`/`z` digits rejected), and a left-hand-side
+concatenation of plain nets/bit-selects (`assign { w[7], w[4] } = 2'h0;`).
+Both sides must be the same width. The bits are then bound to the cell's
 real `<PORT>[<index>]` pins from the library's `.subckt` header, **ordered
 by bit index, highest first**: the highest index is the MSB, matching the
 `[N-1:0]` port declarations of the real vector-ported macros checked

@@ -214,6 +214,63 @@ def write_monte_carlo_instances_example() -> None:
     print(f"wrote {req_path}")
 
 
+def write_injected_testbench() -> None:
+    """Testbench body for the `monte_carlo.injected` example (issue #2911):
+    ``R1``/``R2`` have no model-owned mismatch, so the body consumes the
+    per-sample multipliers klt emits as ``.param mc_inj_<instance>_<parameter>``
+    (declared by ``request-monte-carlo-injected.json``)."""
+    path = os.path.join(_DIR, "testbench-mc-injected.spice")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(
+            "* klt sim worked example: design-owned (injected) mismatch\n"
+            "* klt emits `.param mc_inj_r1_r` / `mc_inj_r2_r` per sample.\n"
+            ".param vdd=1.8\n"
+            "Vdd vdd 0 DC {vdd}\n"
+            "R1 vdd out {1k*mc_inj_r1_r}\n"
+            "R2 out 0 {1k*mc_inj_r2_r}\n"
+            "C1 out 0 1n\n"
+        )
+    print(f"wrote {path}")
+
+
+def write_injected_request() -> None:
+    """`request-monte-carlo-injected.json`: declares 2% relative mismatch on
+    both divider resistors via `monte_carlo.injected`; set `injected_scale`
+    to 0 (off) or 3 (inflated) for the negative/positive controls."""
+    request = {
+        "netlist": "testbench-mc-injected.spice",
+        "engine": "ngspice",
+        "monte_carlo": {
+            "n": 20,
+            "seed": 20260801,
+            "vary": "mismatch",
+            "injected": [
+                {
+                    "pattern": "r?",
+                    "parameter": "r",
+                    "relative_sigma": 0.02,
+                    "distribution": "gaussian",
+                }
+            ],
+            "injected_scale": 1,
+        },
+        "analysis": {"kind": "tran", "args": "1n 5u"},
+        "measurements": [
+            {
+                "name": "vout",
+                "spice": ".meas tran vout FIND v(out) AT=5u",
+                "unit": "V",
+            }
+        ],
+        "options": {"timeout_s": 30, "keep_artifacts": False},
+    }
+    path = os.path.join(_DIR, "request-monte-carlo-injected.json")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(request, handle, indent=2)
+        handle.write("\n")
+    print(f"wrote {path}")
+
+
 def main() -> None:
     write_testbench()
     write_corner_lib()
@@ -221,6 +278,8 @@ def main() -> None:
     write_monte_carlo_testbench()
     write_monte_carlo_request()
     write_monte_carlo_instances_example()
+    write_injected_testbench()
+    write_injected_request()
 
 
 if __name__ == "__main__":

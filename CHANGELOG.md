@@ -14,6 +14,14 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **ASAP7 DRC deck checks `V9.PAD.EN.2` and `V9.AUX.1`** (issue #3156): the
+  V8 enclosure-by-M9 and inside-M8-and-M9 rules carry over to V9 with PAD
+  (DRM section 3.19 preamble), reading PAD (mask 96, GDS 96/0) by layer
+  number since the pinned `asap7.lyp` has no entry for it. The deck grows
+  from 261 to 263 rule categories (`--expect-rule-categories 263`).
+  `M8.S.4`-`M8.S.8` / `M9.S.4`-`M9.S.8` stay under "Not implemented", now
+  with the reason that Fig. 3.18.1's width-class reading still contradicts
+  `S.1`. Additive; no `schema_version` bump.
 - **`klt lvs` refuses a bare pre-extracted `layout.netlist` carrying a
   resistor `X` card** (issue #3078): a `klt extract` `X$n a b vsubs
   <class> r=… L=… W=…` card naming a resistor class of `reference.deck`,
@@ -181,6 +189,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   dispatched `params` fails the request with `params_unsupported_worker`
   instead of passing at the netlist defaults. `engine: "xyce"` and
   `--op-lint` refuse the axis. See `docs/cli/sim.md` "Corner axes".
+- **`klt signoff` opt-in `require_annotation_complete` for `sta` evidence**
+  (issue #3258): an evidence entry citing a `klt sta` envelope may set
+  `"require_annotation_complete": true`; every corner carrying a
+  `spef_annotation` block must then report `annotation_complete: true`, else
+  the item is `unmet`/`check_failed` with `detail.sta_annotation_incomplete`
+  (per-corner `annotation_warning`). Additive: absent/`false` grades exactly
+  as before, no `schema_version` bump. `design_nets_annotated`/
+  `design_nets_total` are now documented as a name-match count, not evidence
+  of applied parasitics.
 - **`klt sim` surfaces ngspice's `Timestep too small` transient abort**
   (issue #2918): a new `timestep_too_small` diagnostic code (accepted by
   `options.fail_on_diagnostic`) with structured `time_s`/`timestep_s`/`node`
@@ -292,7 +309,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   `met2.enclosing_adjacent.via2.1` (`via2.5`), `met3.enclosing_adjacent.via3.1`
   (`via3.5`). The sky130 deck grows from 136 to 140 rules (additive; the
   deck hash changes).
-
+- **`klt lvs` gate-level-verilog accepts more `assign` shapes** (issue
+  #2941): a part-select on either side (`assign imm = word[7:0];`,
+  `assign bus[15:8] = hi;`), a sized constant of any base on the right-hand
+  side (`assign flags = 8'h00;`, `assign unused = 1'h0;`), and a
+  left-hand-side concatenation of bit-selects (`assign { w[7], w[4] } =
+  2'h0;`) are expanded bit by bit, MSB first, with an equal-width check.
+  An unsupported `assign` operand no longer reports "instance port
+  connection". Previously rejected input now converts; no JSON field changes.
 - **`klt yield-threshold`** (issue #2976): a new verb that fits the threshold
   distribution of a binary-outcome decision circuit (comparator, latch, trip
   point). From per-sample `(stimulus, outcome)` records it reports, per corner,
