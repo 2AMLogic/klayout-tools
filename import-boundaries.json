@@ -389,6 +389,7 @@
         "klayout_tools._vendor",
         "klayout_tools._vendor.mutation_variants",
         "klayout_tools._version_scheme",
+        "klayout_tools._verilog_params",
         "klayout_tools.build_identity",
         "klayout_tools.coverage",
         "klayout_tools.design_evidence_tiers",
@@ -426,12 +427,15 @@
         "klayout_tools.sim_crossings",
         "klayout_tools.sim_cycle_mean",
         "klayout_tools.sim_decks",
+        "klayout_tools.sim_mismatch_gate",
         "klayout_tools.sim_plot",
+        "klayout_tools.sim_raw",
         "klayout_tools.sim_remote",
         "klayout_tools.sim_set",
         "klayout_tools.sim_staging",
         "klayout_tools.sim_steps",
-        "klayout_tools.sim_transfer"
+        "klayout_tools.sim_transfer",
+        "klayout_tools.sim_transfer_meas"
       ]
     },
     "size": {
@@ -1288,6 +1292,12 @@
       "exporter": "klayout_tools._provenance",
       "symbol": "_content_hash",
       "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.synthesize",
+      "exporter": "klayout_tools._paths",
+      "symbol": "_reject_unknown_keys",
+      "reason": "Request-shape validation helper shared with _devices (issue #3466); promote to a public name when _paths is next reworked."
     },
     {
       "consumer": "klayout_tools.synthesize",

@@ -41,6 +41,7 @@ and diff verdict-bearing fields. Both reuse ``status: "match"`` /
 
 import argparse
 import sys
+from typing import Any
 
 from .._paths import looks_like_request_document
 from ..extract import (
@@ -53,7 +54,12 @@ from ..extract import (
     run_extract,
 )
 from . import _request_document as reqdoc
-from ._parsing import parse_deck_options, parse_declared_pins, parse_label_layers
+from ._parsing import (
+    parse_deck_options,
+    parse_declared_pins,
+    parse_label_layers,
+    parse_probes,
+)
 from .output import EXIT_USAGE_ERROR, emit_error, emit_success, render_rerun_drift
 
 EXIT_OK = 0
@@ -193,6 +199,21 @@ def _parse_resistance_paths(
             ) from None
         queries.append((net_id, source, target))
     return queries
+
+
+def _request_probes(request: dict) -> list[Any] | None:
+    """The request document's ``probes`` -- an array of ``--probe`` spec
+    strings and/or ``{"name", "layer", "x", "y"}`` objects (issue #2986),
+    handed to the shared :func:`.._parsing.parse_probes` unchanged."""
+    value = request.get("probes")
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise ExtractError(
+            "`klt extract` request field 'probes' must be an array of probe "
+            f"objects or spec strings (got {type(value).__name__})"
+        )
+    return value
 
 
 def _request_resistance_paths(request: dict) -> list[list[str]] | None:
@@ -356,6 +377,7 @@ _REQUEST_FIELD_DESTS = {
         "pin_source_cells",
         "deck_options",
         "label_layers",
+        "probes",
         "defer_resistor_fixed_offset",
         "abstract_cells",
         "abstract_cell_lef",
@@ -476,6 +498,7 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
                 flag="--label-layer",
                 error_cls=ExtractError,
             ),
+            "probes": _request_probes(request),
             "defer_resistor_fixed_offset": _bool("defer_resistor_fixed_offset"),
             "abstract_cells": _str_list("abstract_cells"),
             "abstract_cell_lef": _str_list("abstract_cell_lef", paths=True),
@@ -527,6 +550,7 @@ def run(args: argparse.Namespace) -> int:
         hierarchical_cells = _parse_hierarchical_cells(args.hierarchical_cells)
         deck_options = _parse_deck_options(args.deck_options)
         label_layers = _parse_label_layers(args.label_layers)
+        probes = parse_probes(args.probes, ExtractError)
         def_net_connections = _parse_def_net_connections(
             args.def_net_connections, spef_output=args.spef
         )
@@ -569,6 +593,9 @@ def run(args: argparse.Namespace) -> int:
             # curated default. `None` when the flag was never given,
             # unchanged from every call site that predates it.
             label_layers=label_layers,
+            # `--probe` (issue #2986): point-to-net queries answered on this
+            # run's own extraction. `[]` when the flag was never given.
+            probes=probes,
             # `--abstract-cells`/`--abstract-cell-lef` (issue #620): cell-
             # level black-box abstraction. `()` when the flag(s) were never
             # given, unchanged from every call site that predates them.
@@ -724,6 +751,17 @@ def _print_label_layers(label_layers: dict | None) -> None:
     print(f"label_layers: {rendered}")
 
 
+def _print_probes(probes: list | None) -> None:
+    """One human-readable line per ``--probe`` result (issue #2986), or
+    nothing when none was given."""
+    for probe in probes or []:
+        where = f"{probe['layer']} ({probe['x_um']}, {probe['y_um']})"
+        if probe["found"]:
+            print(f"probe {probe['name']}: {where} -> {probe['net']}")
+        else:
+            print(f"probe {probe['name']}: {where} -> not found")
+
+
 def _print_substrate_spreading(block: dict | None) -> None:
     """One human-readable line for ``parasitics.substrate_spreading``
     (issue #2561), or nothing when ``--substrate-spreading`` was not given.
@@ -776,6 +814,7 @@ def _print_text(report: dict) -> None:
     # this line adds no branch to an already long function -- the same shape
     # `_print_substrate_spreading` below already uses.
     _print_label_layers(report.get("label_layers"))
+    _print_probes(report.get("probes"))
     print(f"top: {report['top']}")
     print(f"dbu_um: {report['dbu_um']}")
     print(f"status: {report['status']}")
