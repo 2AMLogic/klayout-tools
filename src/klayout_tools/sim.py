@@ -422,6 +422,16 @@ def _yield_host_default_backend(
 #: docs/cli/sim.md's "Monte Carlo" section for the request/response shape.
 SUPPORTED_MC_VARY = ("mismatch", "process", "both")
 
+#: Recognised values for ``request.monte_carlo.seed_scope`` -- what, besides
+#: ``seed`` and ``sample_index``, enters each sample's seed derivation (issue
+#: #2899). ``per_corner`` (the default) keys on the point's position in this
+#: request's expanded corner list and is bit-identical to the pre-#2899
+#: behaviour; ``shared`` drops the corner entirely (sample *k* is the same
+#: die at every corner); ``point`` keys on the point's own identity, so any
+#: partition or reordering of a grid yields the same samples.
+SUPPORTED_MC_SEED_SCOPES = ("per_corner", "shared", "point")
+DEFAULT_MC_SEED_SCOPE = "per_corner"
+
 #: Per-``(pdk_family, device_family)`` mismatch-activity table consulted by
 #: :func:`_mismatch_family_report` (issue #355). A vendor model deck's global
 #: mismatch switch/section does not necessarily enable *every* device
@@ -4180,7 +4190,7 @@ class CornerPoint:
         process_section_libs_resolved: list[str | None] | None = None,
         params: dict[str, int | float] | None = None,
         sample_index: int | None = None,
-        mc_seed: dict[str, int] | None = None,
+        mc_seed: dict[str, Any] | None = None,
     ) -> None:
         self.process = process
         self.params: dict[str, int | float] = params or {}
@@ -4967,7 +4977,37 @@ def _validate_monte_carlo_spec(mc_spec: dict[str, Any]) -> tuple[int, int, str]:
             f"{', '.join(SUPPORTED_MC_VARY)} (got {vary!r})"
         )
 
+    _validate_mc_seed_scope(mc_spec)
+
     return n, seed, vary
+
+
+def _validate_mc_seed_scope(mc_spec: dict[str, Any]) -> str:
+    """Validate the optional ``request.monte_carlo.seed_scope`` (issue #2899)
+    and return it, defaulting to ``"per_corner"`` when absent."""
+    scope = mc_spec.get("seed_scope", DEFAULT_MC_SEED_SCOPE)
+    if scope not in SUPPORTED_MC_SEED_SCOPES:
+        raise SimError(
+            "request.monte_carlo.seed_scope must be one of "
+            f"{', '.join(SUPPORTED_MC_SEED_SCOPES)} (got {scope!r})"
+        )
+    return scope
+
+
+def _mc_point_identity(point: CornerPoint) -> str:
+    """A stable string naming ``point`` independent of its position in the
+    request (``seed_scope: "point"``): process name, process sections,
+    supply rails and temperature."""
+    return json.dumps(
+        {
+            "process": point.process,
+            "process_sections": point.process_sections,
+            "supply_v": point.supply_v,
+            "temperature_c": point.temperature_c,
+        },
+        sort_keys=True,
+        default=str,
+    )
 
 
 def _validate_k_sigma(value: Any, field: str) -> float:
@@ -5219,25 +5259,45 @@ def _expand_monte_carlo(
     of derived seeds -- see :func:`_derive_mc_seed`.
     """
     n, seed, vary = _validate_monte_carlo_spec(mc_spec)
+    seed_scope = _validate_mc_seed_scope(mc_spec)
     vary_process = vary in ("process", "both")
     vary_mismatch = vary in ("mismatch", "both")
 
     sampled: list[CornerPoint] = []
     for corner_index, base in enumerate(corner_points):
+        # What keys the derivation besides seed/axis/sample (issue #2899).
+        # `per_corner` passes the bare positional index so every derived
+        # integer stays bit-identical to the pre-#2899 contract.
+        if seed_scope == "shared":
+            scope_key: object = "shared"
+        elif seed_scope == "point":
+            scope_key = f"point:{_mc_point_identity(base)}"
+        else:
+            scope_key = corner_index
         for sample_index in range(n):
             process_seed = _derive_mc_seed(
                 seed,
                 "process",
-                corner_index,
+                scope_key,
                 sample_index if vary_process else "fixed",
             )
             mismatch_seed = _derive_mc_seed(
                 seed,
                 "mismatch",
-                corner_index,
+                scope_key,
                 sample_index if vary_mismatch else "fixed",
             )
             rndseed = _derive_mc_seed(seed, "rndseed", process_seed, mismatch_seed)
+            mc_seed: dict[str, Any] = {
+                "process_seed": process_seed,
+                "mismatch_seed": mismatch_seed,
+                "rndseed": rndseed,
+            }
+            if "seed_scope" in mc_spec:
+                # Echoed only when the request declared it, like
+                # `quantiles`/`k_sigma`, so a request that omits the field
+                # keeps its pre-#2899 response shape.
+                mc_seed["seed_scope"] = seed_scope
             sampled.append(
                 CornerPoint(
                     base.process,
@@ -5247,14 +5307,13 @@ def _expand_monte_carlo(
                     process_section_libs=base.process_section_libs,
                     params=base.params,
                     sample_index=sample_index,
-                    mc_seed={
-                        "process_seed": process_seed,
-                        "mismatch_seed": mismatch_seed,
-                        "rndseed": rndseed,
-                    },
+                    mc_seed=mc_seed,
                 )
             )
-    return sampled, {"n": n, "seed": seed, "vary": vary}
+    info: dict[str, Any] = {"n": n, "seed": seed, "vary": vary}
+    if "seed_scope" in mc_spec:
+        info["seed_scope"] = seed_scope
+    return sampled, info
 
 
 # --------------------------------------------------------------------------- #
@@ -5355,6 +5414,17 @@ def _checkpoint_fingerprint(
         # checkpoint written under other options never applies. Only keyed
         # in when declared, leaving existing fingerprints untouched.
         payload["ngspice_options"] = ngspice_options
+    mc_scopes = {
+        point.mc_seed["seed_scope"]
+        for point in corner_points
+        if point.mc_seed and "seed_scope" in point.mc_seed
+    } - {DEFAULT_MC_SEED_SCOPE}
+    if mc_scopes:
+        # Issue #2899: corner IDs do not carry seeds, so a resume under a
+        # different `monte_carlo.seed_scope` would otherwise reuse samples
+        # drawn from other seeds. Only keyed in off the default, so an
+        # existing checkpoint stays valid for a request that omits the field.
+        payload["mc_seed_scope"] = sorted(mc_scopes)
     if corner_section_libs:
         # Issue #2522: a corner's per-section libraries determine its device
         # models exactly as `models.lib` does, so editing one must invalidate
@@ -7312,6 +7382,8 @@ def _run_corner(
             "process_seed": point.mc_seed["process_seed"],
             "mismatch_seed": point.mc_seed["mismatch_seed"],
         }
+        if "seed_scope" in point.mc_seed:
+            monte_carlo["seed_scope"] = point.mc_seed["seed_scope"]
 
     corner = {
         "corner_id": point.corner_id,
