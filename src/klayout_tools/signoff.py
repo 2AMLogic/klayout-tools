@@ -2777,6 +2777,28 @@ def _sta_annotation_shortfalls(envelope: dict[str, Any]) -> list[dict[str, Any]]
     return shortfalls
 
 
+def _sta_annotation_refusal(
+    check_kind: str, spec: dict[str, Any], envelope: dict[str, Any]
+) -> tuple[str, str, None, dict[str, Any]] | None:
+    """Issue #3258: the ``unmet`` grade for a cited `sta` envelope whose SPEF
+    annotation was not fully applied, when the evidence entry opted in with
+    ``require_annotation_complete``; ``None`` when the requirement is off, the
+    kind is not ``sta``, or every annotated corner is complete. The offending
+    corner(s)' ``annotation_warning`` ride along as the item's detail.
+    """
+    if check_kind != "sta" or spec.get("require_annotation_complete") is not True:
+        return None
+    shortfalls = _sta_annotation_shortfalls(envelope)
+    if not shortfalls:
+        return None
+    return (
+        "unmet",
+        _REASON_CHECK_FAILED,
+        None,
+        {"sta_annotation_incomplete": shortfalls},
+    )
+
+
 def _sta_worst_corner(envelope: dict[str, Any]) -> dict[str, Any]:
     """The `klt sta` corner whose reported timing decides the verdict --
     the entry with the lowest ``worst_slack_ns`` on a multi-corner
@@ -5768,18 +5790,9 @@ def _grade_evidence(
             _critical_metric_detail(envelope),
         )
 
-    # Issue #3258: opt-in per-entry requirement that a cited `sta` envelope's
-    # SPEF annotation was actually applied. Failure is a failed check, with
-    # the offending corner(s)' `annotation_warning` as the item's detail.
-    if check_kind == "sta" and spec.get("require_annotation_complete") is True:
-        shortfalls = _sta_annotation_shortfalls(envelope)
-        if shortfalls:
-            return (
-                "unmet",
-                _REASON_CHECK_FAILED,
-                None,
-                {"sta_annotation_incomplete": shortfalls},
-            )
+    annotation_refusal = _sta_annotation_refusal(check_kind, spec, envelope)
+    if annotation_refusal is not None:
+        return annotation_refusal
 
     # The two refusals that apply only to a kind this item actually accepts --
     # `nothing_checked` (issue #1996) and `not_post_layout` -- resolved
