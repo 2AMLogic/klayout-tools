@@ -98,6 +98,16 @@ _NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 #: (``@m1[w]``) targets are out of scope.
 _ALTER_TARGET_RE = re.compile(r"^[VIRCLvircl][A-Za-z0-9_]*$")
 
+#: The suffix that retargets an ``alter`` key from a source's DC value to its
+#: AC magnitude (``"VDM.ac": 1`` -> ``alter VDM ac = 1``).
+_AC_SUFFIX = ".ac"
+
+
+def is_ac_alter_target(target: str) -> bool:
+    """True for an ``alter`` key of the ``"<SRC>.ac"`` (AC magnitude) form."""
+    return target.lower().endswith(_AC_SUFFIX)
+
+
 #: The ``<step>.spectrum.<vec>`` qualifier: addresses the spectrum plot of a
 #: ``noise`` step (``inoise_spectrum`` / ``onoise_spectrum``), not its totals.
 _SPECTRUM_QUALIFIER = "spectrum"
@@ -362,16 +372,33 @@ def _resolve_alter(alter: Any, step: str) -> list[list[Any]]:
     pairs: list[list[Any]] = []
     seen: set[str] = set()
     for target, value in alter.items():
-        if not _ALTER_TARGET_RE.match(target):
+        base = target[: -len(_AC_SUFFIX)] if is_ac_alter_target(target) else target
+        if is_ac_alter_target(target) and base[:1].lower() in tuple("rcl"):
+            raise _error(
+                f"step {step!r}: alter target {target!r}: the .ac form sets a "
+                "source's AC magnitude, so it takes a V or I source name "
+                "(R/C/L elements have no AC magnitude)"
+            )
+        if "." in base or not _ALTER_TARGET_RE.match(base):
+            suffix_hint = (
+                f' (the only supported key suffix is {_AC_SUFFIX!r}, e.g. "VDM.ac")'
+                if "." in target
+                else ""
+            )
             raise _error(
                 f"step {step!r}: alter target {target!r} is not a top-level "
                 "independent source or passive element name (V/I/R/C/L "
                 "followed by [A-Za-z0-9_]); hierarchical and device-parameter "
-                "targets are not supported"
+                f"targets are not supported{suffix_hint}"
             )
         if target.lower() in seen:
             raise _error(f"step {step!r}: alter target {target!r} is repeated")
         seen.add(target.lower())
+        if isinstance(value, dict) and is_ac_alter_target(target):
+            raise _error(
+                f"step {step!r}: alter target {target!r}: the .ac form takes a "
+                "finite number (an AC magnitude), not a pwl object"
+            )
         if isinstance(value, dict):
             value = _resolve_pwl_alter(value, target, step)
         elif (
@@ -732,11 +759,20 @@ def validate_alter_targets(
         waveforms = {}
     for step in analysis["steps"]:
         for target, value in step["alter"]:
-            _check_alter_target(step["name"], target, supply_targets, waveforms, value)
+            if not is_ac_alter_target(target):
+                _check_alter_target(
+                    step["name"], target, supply_targets, waveforms, value
+                )
     step_targets = sorted(
-        {target for step in analysis["steps"] for target, _value in step["alter"]}
+        {
+            target
+            for step in analysis["steps"]
+            for target, _value in step["alter"]
+            if not is_ac_alter_target(target)
+        }
     )
     params = _param_only_targets(netlist_path, step_targets) if step_targets else {}
+    _check_ac_alter_targets_exist(analysis, netlist_path)
     for step in analysis["steps"]:
         for target, _value in step["alter"]:
             if target in params:
@@ -747,6 +783,41 @@ def validate_alter_targets(
                     "the deck was parsed, so the step would silently solve at "
                     "the nominal value) -- alter the source or element itself"
                 )
+
+
+def _check_ac_alter_targets_exist(analysis: dict[str, Any], netlist_path: str) -> None:
+    """Refuse an ``"<SRC>.ac"`` key naming no element of the netlist: ngspice
+    would log ``no such device`` and the step would solve at the nominal
+    excitation. Same conclusiveness rule as ``_param_only_targets`` -- an
+    unreadable file or unresolvable ``.include``/``.lib`` reports nothing."""
+    pairs = [
+        (step["name"], target)
+        for step in analysis["steps"]
+        for target, _value in step["alter"]
+        if is_ac_alter_target(target)
+    ]
+    if not pairs:
+        return
+    from .sim import _included_elements, _netlist_declarations
+
+    try:
+        with open(netlist_path, encoding="utf-8") as handle:
+            decl = _netlist_declarations(handle.read())
+    except (OSError, UnicodeDecodeError):
+        return
+    known = set(decl.elements)
+    if decl.includes:
+        included = _included_elements(netlist_path, decl.includes)
+        if included is None:
+            return
+        known |= included
+    for step, target in pairs:
+        if target[: -len(_AC_SUFFIX)].strip().lower() not in known:
+            raise _error(
+                f"step {step!r}: alter target {target!r} names no element in "
+                "the netlist -- ngspice would ignore it and solve at the "
+                "nominal AC magnitude"
+            )
 
 
 def _check_alter_target(
@@ -799,6 +870,15 @@ def _format_value(value: float) -> str:
     return repr(float(value))
 
 
+def _alter_line(target: str, value: Any) -> str:
+    if is_ac_alter_target(target):
+        return f"alter {target[: -len(_AC_SUFFIX)]} ac = {_format_value(value)}"
+    if isinstance(value, dict):
+        vector = " ".join(_format_value(v) for v in value["pwl"])
+        return f"alter @{target}[pwl] = [ {vector} ]"
+    return f"alter {target}={_format_value(value)}"
+
+
 def control_lines(
     analysis: dict[str, Any],
     measurements_spec: list[dict[str, Any]],
@@ -820,11 +900,7 @@ def control_lines(
             lines.append("reset")
             lines.extend(reset_prefix or [])
         for target, value in step["alter"]:
-            if isinstance(value, dict):
-                vector = " ".join(_format_value(v) for v in value["pwl"])
-                lines.append(f"alter @{target}[pwl] = [ {vector} ]")
-            else:
-                lines.append(f"alter {target}={_format_value(value)}")
+            lines.append(_alter_line(target, value))
         lines.append("setplot new")
         lines.append(f"echo klt_step_begin {index} $curplot")
         lines.append(f"{step['kind']} {step['args']}".rstrip())
