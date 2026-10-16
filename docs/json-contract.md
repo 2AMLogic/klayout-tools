@@ -623,6 +623,17 @@ envelope and, on its citation, an additive `artifact_binding.members` list
 when unmet). Single-path citations are byte-identical to before. No
 `schema_version` bump.
 
+Issue #2887 adds an optional `provenance.regeneration` object
+(`{generator, regenerated_hash}`) to an item-1/2 artifact-anchored
+`generic` envelope. `klt signoff` never executes `generator`. On a matching
+claim the citation's `artifact_binding` gains a `regeneration` object
+(`{generator, regenerated_hash, executed_by_klt: false}`). A mismatched
+claim renders the new `reason` value `stale_artifact`, and a malformed one
+renders the existing `unanchored_evidence`. An envelope that makes no
+claim grades and renders exactly as before. No `schema_version` bump. See
+[`docs/cli/signoff.md`](cli/signoff.md)'s "Items 1 and 2: attesting that
+the artifact was regenerated".
+
 `klt erc` since issue #2183 also carries a second verb-local key,
 `provenance.devices`: one entry per `devices[]` spec declaration (`{name,
 body_layer, on, body_area_um2}`), `[]` when none were declared. A
