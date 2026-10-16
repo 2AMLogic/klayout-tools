@@ -707,6 +707,20 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     sim_parser.add_argument(
+        "--max-units-per-job",
+        dest="max_units_per_job",
+        type=int,
+        default=None,
+        help=(
+            "backend `batch`, `hosts` 1: split the expanded corner/Monte-Carlo "
+            "unit list into batch jobs of at most this many units, so no job "
+            "outruns the fleet's whole-job ceiling (default: the request's "
+            "`batch.max_units_per_job`, else no split); overrides the request "
+            "field when given. Rejected before any submit when a job of that "
+            "size would still exceed the ceiling. See docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
         "--budget-s",
         dest="budget_s",
         type=float,
