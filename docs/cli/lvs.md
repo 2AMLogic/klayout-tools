@@ -560,16 +560,19 @@ parameter/unit mapping into a sign-off tool must never pass silently):
   base/collector geometry the fixed-geometry cell name does not encode, and
   they are *secondary* parameters — once the primary `AE`/`NE` agree the
   devices pair and the comparer never reports them.
-- `nf`/`m`/`mult` > 1 on a resistor/capacitor call, and `m`/`mult` > 1 on a
-  MOS call (a multiplied device the curated plain-element form cannot
-  represent) is **rejected** with a specific error naming the device —
+- `nf`/`m`/`mult` > 1 on a resistor/capacitor call (a multiplied device the
+  curated plain-element form cannot represent) is **rejected** with a specific error naming the device —
   never silently dropped or misinterpreted. Flatten it (one device per
   drawn gate) in the schematic netlist first. Two exceptions: bipolar's
   `mult` is carried onto `NE`, not rejected, since
   `DeviceClassBJT3Transistor` can represent multiple parallel emitters that
-  way; and MOS's own `nf` is *expanded*, not rejected (see above) — `m`/
-  `mult` on a MOS call is a different, whole-device replication count (not
-  finger-folding) and is still rejected exactly like resistor/capacitor's.
+  way; and MOS's own `nf` and `m` are *expanded*, not rejected (see above).
+  MOS `m=N` (positive integer) becomes `N` parallel plain `M` cards named
+  `<instance>_m0` ... (`nf*m` cards named `<instance>_m0_f0` ... when
+  combined with `nf`), total width `m*W`; pair with `options.combine_devices`
+  to match an N-unit layout. MOS `mult` is ignored (it must still be
+  numeric): in the sky130 model subckt it only feeds the mismatch-sigma
+  expressions (`sqrt(l*w*mult)`), never the device card.
 
 A reference netlist that *mixes* plain-element (`M`/`R`/`C`/`Q`) cards and
 subckt-call `X` device cards converts correctly under `form:
@@ -599,6 +602,15 @@ name differs from the deck's device-class label and has no curated entry yet
 — still needs an explicit `reference.device_map` entry, and the
 "not a known device for the requested deck" error lists the full resolved
 set so the gap is visible from the failure itself.
+
+**Native-Vt NMOS is not supported on sky130 (issue #2912).** A `form:
+"subckt-call"` card naming `sky130_fd_pr__nfet_05v0_nvt` is rejected as "not a
+known device for the requested deck": the sky130 deck has no native-NMOS device
+class (upstream derives it from `hvi` AND `lvtn`, not a single marker layer),
+and `klt gen mos_array` cannot draw it (see `gen.md`, `voltage_flavor`).
+Mapping it with `reference.device_map` onto the plain `nfet` class would
+compare a device of the wrong type and is not an honest workaround — exclude
+the native device from the comparison explicitly instead.
 
 **`sg13g2`'s `rfcmim` was the one live case of that gap** (issue #1470, now
 closed). Derivation binds the *declared class* name as its own subcircuit
@@ -744,6 +756,14 @@ that circuit-name string, never as a device — invisible in `counts.devices`,
 unreachable by `options.parameter_tolerance`, and any real mismatch degrades
 to a generic `topology`/`circuit could not be matched to a counterpart`
 finding with no device/parameter/net name.
+
+**Resistor `X` cards need `layout.deck` (issue #3078).** `klt extract` writes a
+bulk-bearing drawn resistor as `X$n a b vsubs <class> r=… L=… W=…`. A bare
+pre-extracted `layout.netlist` (no `layout.deck`) containing such a card whose
+class belongs to `reference.deck` is refused with an error (exit 1) naming
+`layout.deck`, rather than being compared as an undefined subcircuit and
+reported as a spurious `mismatch`. Add `layout.deck` to read it as a resistor
+device.
 
 **`layout.deck`/`reference.deck` fixes this.** When a pre-extracted
 `layout.netlist` gives `layout.deck`, or `reference.netlist` gives
@@ -1751,7 +1771,7 @@ each resolves relative paths inside the document.
 Extraction and compare are separable steps that also compose in one call:
 
 - **Inline extraction** — `{"file": "design.gds", "deck": "sky130", "top": "ota_5t"}`. Runs `klt extract`'s core extraction (the same `extract_netlist_from_layout` function `klt extract` itself calls) against the named curated deck (`sky130`/`gf180mcu`/`sg13g2`/`sg13cmos5l`), then compares the resulting in-memory netlist directly — no SPICE round-trip is required unless `options.keep_extracted` is set. `top` is optional (defaults to the layout's sole top cell, same as `klt extract --top`); `deck` is required in this shape. An optional boolean `top_cell_pins` (default `false`) mirrors `klt extract --top-cell-pins`: when `true`, only labels drawn directly in the top cell are promoted to top-level pins, so a net named only by a label inside an instanced sub-cell stays internal instead of demanding a matching port in `reference.netlist` (issue #291). An optional array of strings `declared_pins` (default unset) mirrors `klt extract --pins` (issue #514): when given, every promoted pin not named in this set is demoted back to an internal net, so naming an internal node of a lumped schematic device (e.g. one tap of a metal-option ladder) for documentation no longer promotes it to a pin `options.combine_devices` cannot fold through. Applied after `top_cell_pins`'s own reconciliation — it can only further restrict the promoted set. An empty `declared_pins` array is a request error (omit the field entirely to keep every named net promoted). An optional array of strings `pin_source_cells` (default unset, issue #1513) mirrors `klt extract --pin-source-cells`: a *positional* counterpart to `declared_pins`, for a `klt gen-compose`d assembly of several pre-labelled macros with no governing top-level DEF of its own — every drawn pin-name label physically located inside an instance of one of these named cells (anywhere in the hierarchy, at any depth) is resolved to its real net by probing that label's own position, not by matching its text; every currently-promoted pin not reached this way is demoted, exactly as `declared_pins` demotes on a miss. Applied after `declared_pins`'s own reconciliation (when both are given) — it can only further restrict. An empty `pin_source_cells` array is likewise a request error. `top_cell_pins`, `declared_pins`, and `pin_source_cells` are all only meaningful in this inline-extraction shape — they have no effect on a pre-extracted `layout.netlist`, whose pins are already fixed. An optional boolean `rename_declared_pins` (default `false`, issue #2854) mirrors `klt extract --rename-declared-pins`: renames each surviving promoted pin net whose component labels contain exactly one `declared_pins` name to that name, so `options.anchor_top_level_pins` can pair it with a same-named reference pin — see the `layout.rename_declared_pins` field-table row above for the full contract. An optional object `deck_options` (issue #600) mirrors `klt extract --deck-option`: selects a caller-visible sheet-rho flavour of a shared-geometry resistor family for this extraction — see the `layout.deck_options` field-table row above. An optional object `label_layers` (issue #2686) mirrors `klt extract --label-layer`: re-points a label role at the GDS purpose this layout wrote its names on — see the `layout.label_layers` field-table row above.
-- **Pre-extracted netlist** — `{"netlist": "design.spice", "top": "ota_5t"}`. Reads an existing extracted (or hand-written) SPICE netlist directly via `NetlistSpiceReader`, skipping extraction entirely. `top` is optional (defaults to the sole top circuit). `deck_options` is also honored here when `deck` is supplied alongside `netlist` (issue #585's pre-extracted-plus-deck shape): no extraction runs in this shape, so `deck_options` only affects `device_classes` and the deferred resistor `fixed_offset_ohm` correction (`options.combine_devices`) — it has no effect on the SPICE `R` values already baked into the supplied netlist. `label_layers` is **not** accepted here (a non-empty value is an application error): it only changes where extraction reads name text from, and this shape runs no extraction — re-extract with `klt extract --label-layer ...` instead. **Capacitor device-class recovery (issue #1876):** `klt extract -o` writes an unbound capacitor's `C` card bare and value-only, with no trailing device-class token (issue #1558 — see `klt extract`'s own docs for why). This shape (and `reference.netlist`, below) recovers that capacitor's real device-class name from the writer's own preceding `* device instance … <class>` comment instead of falling back to KLayout's generic `CAP` class, so a two-step `klt extract -o netlist.spice && klt lvs` pipeline against a reference that names the capacitor's class explicitly still reaches `status: "match"`. A missing or malformed comment (e.g. a hand-edited SPICE file) degrades gracefully to the generic class, exactly as before this recovery existed — it never raises. This is unrelated to `options.combine_devices_per_circuit` immediately below except that both are only meaningful against this pre-extracted shape; recovery runs regardless of whether per-circuit combining is used.
+- **Pre-extracted netlist** — `{"netlist": "design.spice", "top": "ota_5t"}`. Reads an existing extracted (or hand-written) SPICE netlist directly via `NetlistSpiceReader`, skipping extraction entirely. `top` is optional (defaults to the sole top circuit). `deck_options` is also honored here when `deck` is supplied alongside `netlist` (issue #585's pre-extracted-plus-deck shape): no extraction runs in this shape, so `deck_options` only affects `device_classes` and the deferred resistor `fixed_offset_ohm` correction (`options.combine_devices`) — it has no effect on the SPICE `R` values already baked into the supplied netlist. **`body_verification` with a deck (issue #3177):** when `deck` accompanies `netlist`, the `body_verification` / `device.body_unverified` determination runs against the netlist read back from disk, comparing class and net names case-insensitively and recognizing the escaped `\\$<n>` anonymous-net spelling, so it agrees with the inline-extraction verdict for the same layout. `label_layers` is **not** accepted here (a non-empty value is an application error): it only changes where extraction reads name text from, and this shape runs no extraction — re-extract with `klt extract --label-layer ...` instead. **Capacitor device-class recovery (issue #1876):** `klt extract -o` writes an unbound capacitor's `C` card bare and value-only, with no trailing device-class token (issue #1558 — see `klt extract`'s own docs for why). This shape (and `reference.netlist`, below) recovers that capacitor's real device-class name from the writer's own preceding `* device instance … <class>` comment instead of falling back to KLayout's generic `CAP` class, so a two-step `klt extract -o netlist.spice && klt lvs` pipeline against a reference that names the capacitor's class explicitly still reaches `status: "match"`. A missing or malformed comment (e.g. a hand-edited SPICE file) degrades gracefully to the generic class, exactly as before this recovery existed — it never raises. This is unrelated to `options.combine_devices_per_circuit` immediately below except that both are only meaningful against this pre-extracted shape; recovery runs regardless of whether per-circuit combining is used.
 
 `layout.top`/`reference.top` are always compared as a declared pair, even
 when their names differ — the two selected circuits are pinned together
@@ -2959,6 +2979,23 @@ again a practical signoff artifact. A `device.combine_incomplete` entry's
 (`"...after 5 attempts against independent netlist copies (issue #1185)..."`)
 when more than one was tried.
 
+**Cross-class folds (issue #3019).** The same entry is also emitted when
+`Netlist.combine_devices()` returns *normally* but has folded the devices of
+one device class into another class's survivor — seen with two capacitor
+classes in parallel on one net pair (sky130's stacked `sky130_fd_pr__model__cap_mim`
+over `..._cap_mim_m4`), where one class showed `layout_devices: 0` after
+combining under `layout.file` while `layout.netlist` of the same extraction
+matched. KLayout tells classes apart by an internal id that copied classes
+(the extractor's, and every `Netlist.dup()` clone) can carry uninitialised, so
+the fold depends on heap state. `klt lvs` therefore rebuilds all but one of the
+device classes that have devices on the very same nets on freshly constructed
+classes before combining (the emptied original is renamed
+`<class>__renewed`, so the comparer may add one `topology` warning for a class
+with no devices), and checks the combined result for a class that vanished
+from nets another class still occupies. If every attempt still folds, the side
+is reported here (the `description` names the folded class) rather than
+compared. No JSON field changes.
+
 **Exhaustion rate scales with netlist size and shape — the default budget's
 derivation does not generalize (issue #1412).** The ~1-in-30,000 figure above
 was derived from a single fixture: one multi-finger NMOS device (~200 gate
@@ -3427,9 +3464,13 @@ despite a name/identity conflict. Six classification sites inside
   the instance itself (`instance`), and the circuit it instantiates
   (`subcircuit`) (issue #1132), so a macro-scale report attributes *which*
   instance failed to pair without a side-channel netlist diff.
-- **Device-class mismatch** (`lvs.py:3770-3808`, from
+- **Device-class mismatch** (`lvs_mismatch.py`, from
   `logger.device_class_mismatches`) — a device class (e.g. `nfet`)
   registered on one side has no counterpart class on the other side.
+  The class is named in `device.class` (`device.layout`/`device.reference`
+  stay `null`, as for `device.unmatched`) and appended to `description`
+  (`... counterpart: 'nfet'`), so several unmapped classes are
+  distinguishable; `device.class` is `null` if the class has no name.
   Downgraded to `"warning"` when that side's netlist has zero actual
   instances of the class (`klt extract` always registers both
   `nfet`/`pfet` device classes even when a layout only instantiates one

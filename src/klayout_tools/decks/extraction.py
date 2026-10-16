@@ -30,6 +30,7 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from .rules import RuleProvenance
 
@@ -170,6 +171,28 @@ class ResistorDevice:
     entry that does not set them extracts ``R`` bit-for-bit as before this
     field existed.
 
+    ``topology`` (issue #2679) selects how ``body``/``marker`` relate:
+
+    - ``"overlap"`` (the default, every deck entry before this field
+      existed) -- the marker lies *on* the body conductor and the segment is
+      ``body & marker``, as described above.
+    - ``"abutting_heads"`` -- the PDK draws the resistive body on the
+      ``marker`` layer itself and the ``body`` layer is only the two contact
+      heads, which *abut* (zero overlap) the marker. IHP sg13g2's
+      ``rsil``/``rppd``/``rhigh`` PCells draw ``polyres`` (128/0) as the whole
+      resistive body and ``GatPoly`` (5/0) only as the two head pads at either
+      end, so ``body & marker`` is empty there. The segment is then
+      ``marker & requires - excludes`` (mirroring upstream
+      ``res_derivations.lvs``'s ``polyres & extblock ...``), kept only
+      where it touches the ``terminal`` (default ``body``) conductor in **two
+      or more** separate head regions -- a body with a missing head, or one
+      separated from its heads by a gap, is not a resistor. The terminals
+      are the touching heads (``terminal`` minus the segment), which
+      KLayout's native extractor attaches directly to the abutting body
+      edge; the segment is still cut out of the ``body`` conductor, so a
+      layout that *does* overlap (a continuous bar marked by ``polyres``)
+      keeps extracting as before.
+
     ``name`` is the extracted device-class name (``devices[].class`` in the
     JSON response, and the model token on the written ``R`` card -- a
     consumer simulating the netlist supplies a matching ``.model``, exactly
@@ -246,6 +269,18 @@ class ResistorDevice:
     flavour_option: str | None = None
     flavours: tuple[ResistorFlavour, ...] = ()
     provenance: RuleProvenance | None = None
+    topology: str = "overlap"
+
+    def __post_init__(self) -> None:
+        if self.topology not in RESISTOR_TOPOLOGIES:
+            raise ValueError(
+                f"ResistorDevice '{self.name}': unknown topology "
+                f"{self.topology!r} (expected one of {RESISTOR_TOPOLOGIES})"
+            )
+
+
+#: Valid :attr:`ResistorDevice.topology` values.
+RESISTOR_TOPOLOGIES: tuple[str, ...] = ("overlap", "abutting_heads")
 
 
 @dataclass(frozen=True)
@@ -360,6 +395,28 @@ class MOSFlavour:
     description: str = ""
     nfet_provenance: RuleProvenance | None = None
     pfet_provenance: RuleProvenance | None = None
+
+
+@dataclass(frozen=True)
+class CapacitorVariant:
+    """One caller-selectable alternative **capacitor set** for an
+    :class:`ExtractionDeck` (issue #2920) -- for a PDK whose capacitor family
+    exists in several mutually-exclusive process options that draw
+    *different geometry* (gf180mcu's MIM option A: ``Metal2`` bottom plate
+    under ``Metal3``; option B: ``Metal(n-1)`` under the top metal), which
+    :class:`CapacitorDevice`'s ``flavours`` (identical geometry, different
+    coefficients) cannot express.
+
+    ``option`` is the deck-option key (``--deck-option <option>=<value>``),
+    ``value`` the string selecting this variant, ``capacitors`` the entries
+    that replace the deck's ``capacitors`` when it is selected. The deck's
+    own ``capacitors`` are the *default* variant, and must also be listed
+    here (as the first variant) so that every variant's geometry is known.
+    """
+
+    option: str
+    value: str
+    capacitors: tuple[CapacitorDevice, ...]
 
 
 @dataclass(frozen=True)
@@ -641,6 +698,26 @@ class ExtractionDeck:
     mos_flavours: tuple[MOSFlavour, ...] = ()
     nfet_provenance: RuleProvenance | None = None
     pfet_provenance: RuleProvenance | None = None
+    capacitor_variants: tuple[CapacitorVariant, ...] = ()
+    capacitor_variant_selected: str | None = None
+
+    @property
+    def unselected_capacitors(self) -> tuple[tuple[str, CapacitorDevice], ...]:
+        """``(option value, entry)`` for every :attr:`capacitor_variants`
+        capacitor that is *not* currently wired into :attr:`capacitors`
+        (issue #2920) -- what ``extract.py`` checks to warn that a layout
+        draws a capacitor option the active selection does not recognise.
+        Empty for a deck that declares no variants.
+        """
+        if not self.capacitor_variants:
+            return ()
+        selected = self.capacitor_variant_selected or self.capacitor_variants[0].value
+        return tuple(
+            (variant.value, capacitor)
+            for variant in self.capacitor_variants
+            if variant.value != selected
+            for capacitor in variant.capacitors
+        )
 
     @property
     def device_classes(self) -> tuple[str, ...]:
@@ -730,6 +807,12 @@ class ExtractionDeck:
             wired = next((f for f in device.flavours if f.name == device.name), None)
             if wired is not None:
                 values[key] = wired.value
+        if self.capacitor_variant_selected is not None:
+            # Issue #2920: the variant selector (`mim_option`) is echoed only
+            # when a variant was actually selected, so a run that takes the
+            # default keeps exactly the provenance/options hash it had before
+            # the key existed.
+            values[self.capacitor_variants[0].option] = self.capacitor_variant_selected
         return dict(sorted(values.items()))
 
     @property
@@ -1028,7 +1111,7 @@ class ExtractionDeck:
                     f"{where} label-layer role {role!r} override must be a "
                     f"(layer, datatype) pair of integers or None, got {layer!r}"
                 )
-        replacements: dict[str, object] = {}
+        replacements: dict[str, Any] = {}
         if "well" in overrides:
             replacements["well_label"] = overrides["well"]
         if "poly" in overrides:

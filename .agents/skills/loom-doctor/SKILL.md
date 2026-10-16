@@ -74,9 +74,11 @@ outside, so the only defense is your own discipline:
 - **Emit progress as you go.** Print a short line at each step. Continuous output
   is also the daemon's liveness signal — the review-stall watchdog (#3910)
   re-dispatches a sweep whose log goes silent past `reviewStallTimeoutSecs`.
-- **Bound the whole fix.** Make the smallest change that satisfies the feedback,
-  then hand back. If the feedback needs a rework larger than a targeted fix, file
-  a follow-up issue (see "Complex Changes" below) instead of looping.
+- **Bound the whole fix.** Limit *scope*, not completeness: no unrelated
+  refactors, and no rework beyond a targeted fix — file a follow-up issue (see
+  "Complex Changes" below) instead of looping. Within that scope the fix includes
+  every instance of a cited defect class in the PR's changed files (see "Fix the
+  Whole Class, Not Just the Cited Lines" below), then hand back.
 
 ## CRITICAL: PR Branch Isolation (Always Use a Worktree)
 
@@ -805,7 +807,7 @@ CLAIM_HEAD_SHA=$(gh pr view $N --json headRefOid --jq '.headRefOid')
 ```
 
 **Env vars**: `LOOM_STALE_TREATING_MINUTES` (default **60**) — deliberately
-longer than the Judge's `LOOM_STALE_REVIEWING_MINUTES` (30): a Doctor's fix
+longer than the Judge's `LOOM_STALE_REVIEWING_MINUTES` (45): a Doctor's fix
 cycle (assess all CI failures → fix → verify locally → push → re-verify
 remotely) legitimately runs longer than a single review pass. The script picks
 the **treating** default from the `--label` you pass; do not borrow the Judge's
@@ -837,7 +839,10 @@ comment id, and renews yours while your session lives
 - **claim** exit **0** = held: add `loom:treating` (**2** = an older
   `loom-daemon` without `lease pr`: label alone, as before). **4** = a peer's
   live lease wins (a lost race posts your yield record), **5** = unreadable,
-  any other code (**1** = `loom-daemon` failed to start) = unknown: never
+  **7** = another actor is working the PR (a live lease of another kind on it
+  or its closing issue, or a push by another login inside
+  `LOOM_DOCTOR_PUSH_WINDOW_MINUTES`, default 15; #12105), any other code
+  (**1** = `loom-daemon` failed to start) = unknown: never
   "label-only" — stand down **before** any worktree, snapshot or label action.
   Never touch a worktree a peer's lease holds, or its `loom:treating`.
 - **fence** before every push and the completion write (step 11):
@@ -1149,6 +1154,22 @@ something you control from inside a Doctor session; this note is for a human
 choosing a Doctor model in manual mode — don't reach for a stronger model on a
 purely mechanical format fix (#4882).
 
+### Fix the Whole Class, Not Just the Cited Lines
+
+For each finding, name the underlying pattern (the same mistake in a value,
+field, call or schema entry), then search the **PR's changed files** (and code
+directly affected by them) for every instance — `grep`, or a structured query of
+a data file — and fix them all. A fix that stops at the cited lines turns one
+class-level defect into extra Judge/Doctor rounds.
+
+- **Class language means examples.** When the Judge writes "the same … occurs
+  in", "and other …" or "everywhere that …", the cited instances are examples,
+  not the full list.
+- **Bounded.** Only the PR's changed files and directly affected code; no
+  repository-wide cleanup, and the time budget above is unchanged.
+- **Report it.** The fix summary comment lists the extra instances fixed beyond
+  those the Judge cited (path and line), or says "no other instances found".
+
 ### Medium Complexity (Usually Handle)
 - Refactoring to improve clarity
 - Adding edge case handling
@@ -1223,10 +1244,6 @@ Comment on the PR when pushing fixes ("Addressed: formatting, added tests for ed
 ### Quality Checks
 ```bash
 # Targeted only (CI is the test gate, #11690); Rust lint = each CI `cargo clippy` line verbatim, apart from tests; no clippy = unvalidated.
-# Production shell changed + CI runs shell-budget --check? After the final commit, before re-review:
-# `loom-daemon shell-budget --check --base <PR base, default origin/main>`; nonzero = this branch's
-# growth (never pre-existing): cut counted shell or move it to the daemon, rerun to exit 0.
-# Comments, follow-up issues or arbitrary trailers are not permission.
 
 # If review mentioned tests / style / types (scope to what you touched):
 pnpm test -- <touched specs>

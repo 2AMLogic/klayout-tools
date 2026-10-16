@@ -1641,6 +1641,68 @@ def test_parameter_tolerance_absorbs_the_minimal_cell_degraded_pairing(tmp_path)
     assert "net.unmatched" not in report["category_counts"]
 
 
+# Issue #2946: a layout that declares a device-less pin (`x`, ports that lead
+# to circuitry not drawn yet) against a flat pin-less reference. The capacitor's
+# own net `d` is a pin on the layout side and not on the reference side, which
+# used to veto the degraded-pair recovery.
+_PINNED_CAP_LAYOUT_SPICE = """
+.SUBCKT top a b c d x
+M1 a b c c pfet L=1U W=512U
+C1 d a {cap} cap_cmim
+.ENDS top
+"""
+
+_FLAT_CAP_REFERENCE_SPICE = """
+M1 a b c c pfet L=1U W=512U
+C1 a d {cap} cap_cmim
+.END
+"""
+
+
+def _pinned_cap_report(tmp_path, layout_cap, reference_cap, reference=None):
+    layout_path = _write(
+        tmp_path / "lay.spice", _PINNED_CAP_LAYOUT_SPICE.format(cap=layout_cap)
+    )
+    reference_path = _write(
+        tmp_path / "ref.spice",
+        reference or _FLAT_CAP_REFERENCE_SPICE.format(cap=reference_cap),
+    )
+    request = {
+        "layout": {"netlist": layout_path, "top": "top"},
+        "reference": {"netlist": reference_path},
+        "options": {"parameter_tolerance": 0.001},
+    }
+    return run_lvs(_write_request(tmp_path / "request.json", request))
+
+
+def test_parameter_tolerance_applies_with_a_device_less_pin_and_flat_reference(
+    tmp_path,
+):
+    report = _pinned_cap_report(tmp_path, "100.011P", "100P")
+
+    assert report["status"] == "match"
+    assert report["category_counts"][lvs.CATEGORY_DEVICE_PARAMETER_TOLERATED] == 1
+    assert "device.unmatched" not in report["category_counts"]
+    assert "net.unmatched" not in report["category_counts"]
+
+
+def test_parameter_tolerance_device_less_pin_out_of_tolerance_still_mismatches(
+    tmp_path,
+):
+    report = _pinned_cap_report(tmp_path, "150P", "100P")
+
+    assert report["status"] == "mismatch"
+    assert lvs.CATEGORY_DEVICE_PARAMETER_TOLERATED not in report["category_counts"]
+
+
+def test_parameter_tolerance_device_less_pin_never_masks_a_rewired_device(tmp_path):
+    rewired = _FLAT_CAP_REFERENCE_SPICE.format(cap="100P").replace("C1 a d", "C1 b d")
+    report = _pinned_cap_report(tmp_path, "100.011P", None, reference=rewired)
+
+    assert report["status"] == "mismatch"
+    assert lvs.CATEGORY_DEVICE_PARAMETER_TOLERATED not in report["category_counts"]
+
+
 def test_parameter_tolerance_minimal_cell_out_of_tolerance_still_mismatches(tmp_path):
     """Negative control for the degraded path: a 100% delta is untouched, and
     the issue #282 recovery still reports it the way it does today."""
@@ -3233,6 +3295,100 @@ def test_body_verification_verified_when_every_body_resolves(tmp_path):
         "findings": [],
         "finding_count": 0,
     }
+
+
+def _lvs_inv_via_written_netlist(tmp_path, rewrite=None):
+    """`klt lvs` on the sky130 `inv_1` cell in the two-step shape (issue #3177):
+    `klt extract -o` writes the layout netlist, which is then handed back as
+    `layout.netlist` + `layout.deck`. Returns `(two_step, inline)` reports."""
+    from klayout_tools.extract import run_extract
+
+    written = tmp_path / "layout.spice"
+    extracted = run_extract(str(SKY130_INV), "sky130", output=str(written))
+    if rewrite is not None:
+        written.write_text(rewrite(written.read_text()))
+    top = extracted["top"]
+    two_step = run_lvs(
+        _write_request(
+            tmp_path / "two_step.json",
+            {
+                "layout": {"netlist": str(written), "top": top, "deck": "sky130"},
+                "reference": {"netlist": str(written), "top": top},
+            },
+        )
+    )
+    inline = run_lvs(
+        _write_request(
+            tmp_path / "inline.json",
+            {
+                "layout": {"file": str(SKY130_INV), "deck": "sky130"},
+                "reference": {"netlist": str(written), "top": top},
+            },
+        )
+    )
+    return two_step, inline
+
+
+def test_body_verification_unverified_for_written_netlist_with_deck(tmp_path):
+    """Issue #3177: an untapped NMOS in a `klt extract -o` netlist, given as
+    `layout.netlist` + `layout.deck`, must not report `"verified"` -- the
+    read-back names are upper-cased (`NFET`/`VSUBS`), so the compare against
+    the deck's lower-case spelling has to be case-insensitive."""
+    two_step, inline = _lvs_inv_via_written_netlist(tmp_path)
+
+    body_verification = two_step["body_verification"]
+    assert body_verification["status"] == lvs.BODY_STATUS_UNVERIFIED
+    assert body_verification["device_classes"] == ["nfet"]
+    assert body_verification == inline["body_verification"]
+    assert any(
+        m["category"] == lvs.CATEGORY_DEVICE_BODY_UNVERIFIED
+        for m in two_step["mismatches"]
+    )
+
+
+def test_body_verification_unverified_for_written_netlist_anonymous_pmos_body(
+    tmp_path,
+):
+    """Issue #3177, PMOS arm: a PMOS body on an anonymous net, spelled the way
+    a written netlist round-trips it (`\\$<n>`), counts as unverified."""
+
+    def anonymous_pmos_body(text):
+        return text.replace(" VPB ", " \\$7 ").replace(" vpb ", " \\$7 ")
+
+    two_step, _ = _lvs_inv_via_written_netlist(tmp_path, anonymous_pmos_body)
+    body_verification = two_step["body_verification"]
+    assert body_verification["status"] == lvs.BODY_STATUS_UNVERIFIED
+    assert "pfet" in body_verification["device_classes"]
+
+
+def test_body_verification_verified_for_written_netlist_with_deck_no_false_positive(
+    tmp_path,
+):
+    """Issue #3177 negative control: the case-insensitive compare must not
+    flag bodies that resolve to a real net -- a hand-written netlist whose
+    NMOS body is on a named, non-substrate net stays `"verified"`."""
+    from klayout_tools.extract import run_extract
+
+    written = tmp_path / "layout.spice"
+    extracted = run_extract(str(SKY130_INV), "sky130", output=str(written))
+    text = written.read_text()
+    assert " vsubs " in text.lower()
+    tapped = re.sub(r"(?i)\bvsubs\b", "VNB", text)
+    written.write_text(tapped)
+    report = run_lvs(
+        _write_request(
+            tmp_path / "request.json",
+            {
+                "layout": {
+                    "netlist": str(written),
+                    "top": extracted["top"],
+                    "deck": "sky130",
+                },
+                "reference": {"netlist": str(written), "top": extracted["top"]},
+            },
+        )
+    )
+    assert report["body_verification"]["status"] == lvs.BODY_STATUS_VERIFIED
 
 
 def test_body_verification_unchecked_for_pre_extracted_layout_netlist(tmp_path):
@@ -5345,6 +5501,31 @@ XM2 Y A VPWR VPWR sky130_fd_pr__pfet_01v8 L=0.15u W=1.0u
     assert report["counts"]["devices"]["reference"] == 2
 
 
+def test_subckt_call_m_expansion_matches_multifinger_layout(tmp_path):
+    """Issue #3123: a schematic-flow sky130 `m=2 mult=2` MOS subckt call
+    (the reporter's card shape) converts to two parallel plain `M` cards
+    (`mult` is mismatch-only), which -- with `options.combine_devices` --
+    reconcile against a drawn 2-unit layout."""
+    layout_path = _write(tmp_path / "layout.spice", _MULTIFINGER_LAYOUT_SPICE)
+    reference_subckt_call = """
+.subckt inv A Y VPWR VGND
+XM1 Y A VGND VGND sky130_fd_pr__nfet_01v8 L=0.15u W=0.325u nf=1 mult=2 m=2
+XM2 Y A VPWR VPWR sky130_fd_pr__pfet_01v8 L=0.15u W=1.0u
+.ends
+"""
+    reference_path = _write(tmp_path / "ref.spice", reference_subckt_call)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv", "form": "subckt-call"},
+        "options": {"combine_devices": True},
+    }
+    report = run_lvs(json.dumps(request))
+
+    assert report["status"] == "match"
+    assert report["mismatch_count"] == 0
+    assert report["counts"]["devices"]["reference"] == 2
+
+
 def test_combine_devices_purges_emptied_series_string_nets(tmp_path):
     """Issue #500: with `options.combine_devices: true`, the interior nodes a
     series string collapses into a single device (0 terminals, 0 pins after
@@ -5954,11 +6135,11 @@ def test_combine_devices_per_circuit_applies_resistor_fixed_offset_once(tmp_path
 
     layout_spice = f"""
 .subckt resmacro RA RB VSUBS
-R1 RA N1 VSUBS {resmacro_raw_r_ohm:.5f} res_high_po
-R2 N1 RB VSUBS {resmacro_raw_r_ohm:.5f} res_high_po
+R1 RA N1 VSUBS {resmacro_raw_r_ohm:.5f} res_high_po W=1U
+R2 N1 RB VSUBS {resmacro_raw_r_ohm:.5f} res_high_po W=1U
 .ends
 .subckt resmacro2 RA RB VSUBS
-R1 RA RB VSUBS {resmacro2_raw_r_ohm:.5f} res_high_po
+R1 RA RB VSUBS {resmacro2_raw_r_ohm:.5f} res_high_po W=1U
 .ends
 .subckt macrob A Y VPWR VGND
 M1 Y A VGND VGND nfet W=0.325U L=0.15U
@@ -8113,6 +8294,29 @@ def test_build_mismatches_circuit_and_subcircuit_and_device_class_topology():
     assert subcircuit_entry["instance"] == {"layout": None, "reference": "X1"}
     assert subcircuit_entry["circuit"] == {"layout": None, "reference": None}
     assert subcircuit_entry["subcircuit"] == {"layout": None, "reference": None}
+
+
+def test_build_mismatches_device_class_topology_names_each_class():
+    """Issue #2945: each class-level topology entry names its class in
+    `device.class` and `description`; a nameless stand-in degrades to null."""
+
+    class _Cls:
+        def __init__(self, name):
+            self.name = name
+
+    logger = _FakeLogger()
+    logger.device_class_mismatches.append((None, _Cls("res_a")))
+    logger.device_class_mismatches.append((None, _Cls("res_b")))
+    logger.device_class_mismatches.append((None, object()))
+
+    e_a, e_b, e_none = lvs._build_mismatches(logger)
+    assert e_a["device"] == {"layout": None, "reference": None, "class": "res_a"}
+    assert e_b["device"] == {"layout": None, "reference": None, "class": "res_b"}
+    assert e_a["description"].startswith("device class could not be mapped")
+    assert "'res_a'" in e_a["description"] and "'res_b'" in e_b["description"]
+    assert e_a["description"] != e_b["description"]
+    assert e_none["device"]["class"] is None
+    assert e_none["description"] == "device class could not be mapped to a counterpart"
 
 
 def test_build_mismatches_subcircuit_mismatch_names_circuit_instance_and_type():
@@ -10998,13 +11202,72 @@ def test_run_lvs_reference_device_map_malformed_object_entry_is_lvs_error(tmp_pa
 
 
 @pytest.mark.parametrize("param,value", [("m", "4"), ("mult", "2")])
-def test_normalize_multiplicity_gt_one_rejected(param, value):
-    # `nf` is no longer rejected on a MOS call (issue #1487 expands it
-    # instead -- see the `nf` expansion tests below); `m`/`mult` (a
-    # whole-device replication count) are still rejected.
+def test_normalize_resistor_multiplicity_gt_one_rejected_param(param, value):
+    # MOS `m` is expanded (issue #3123) and MOS `mult` ignored; the
+    # resistor/capacitor families still reject both.
     with pytest.raises(NormalizeError, match="multi-finger/multiplied"):
         normalize_reference_netlist(
-            f"XM1 d g s b nfet_03v3 L=0.5u W=1u {param}={value}\n", deck="gf180mcu"
+            f"XR1 r0 r1 sky130_fd_pr__res_generic_po l=1u w=1u {param}={value}\n",
+            deck="sky130",
+        )
+
+
+# --- MOS `m` native expansion (issue #3123) --------------------------------- #
+
+
+def test_normalize_mos_m_expands_to_parallel_cards():
+    out = normalize_reference_netlist(
+        "XM1 d g s b nfet_03v3 L=0.5u W=1u m=3\n", deck="gf180mcu"
+    )
+    assert out.strip().splitlines() == [
+        "M1_m0 d g s b nfet L=0.5U W=1U",
+        "M1_m1 d g s b nfet L=0.5U W=1U",
+        "M1_m2 d g s b nfet L=0.5U W=1U",
+    ]
+
+
+def test_normalize_mos_sky130_m_and_mult_ignores_mult():
+    # The reporter's card: `mult` is mismatch-only in the sky130 model
+    # subckt, so m=2 mult=2 is two devices, not four.
+    out = normalize_reference_netlist(
+        "X1 d g s b sky130_fd_pr__nfet_01v8 L=1.2 W=7.82 nf=1 mult=2 m=2\n",
+        deck="sky130",
+    )
+    lines = out.strip().splitlines()
+    assert len(lines) == 2
+    assert lines[0].startswith("X1_m0 ") or lines[0].startswith("M1_m0 ")
+    assert all("W=7.82U" in line for line in lines)
+
+
+def test_normalize_mos_nf_and_m_combine():
+    out = normalize_reference_netlist(
+        "XM1 d g s b nfet_03v3 L=0.5u W=3u nf=3 m=2\n", deck="gf180mcu"
+    )
+    lines = out.strip().splitlines()
+    assert [ln.split()[0] for ln in lines] == [
+        "M1_m0_f0",
+        "M1_m0_f1",
+        "M1_m0_f2",
+        "M1_m1_f0",
+        "M1_m1_f1",
+        "M1_m1_f2",
+    ]
+    # total width m*W = 6u over 6 cards
+    assert all("W=1U" in ln for ln in lines)
+
+
+@pytest.mark.parametrize("value", ["2.5", "0", "-1", "abc"])
+def test_normalize_mos_m_invalid_is_error(value):
+    with pytest.raises(NormalizeError, match="parameter 'm'|m="):
+        normalize_reference_netlist(
+            f"XM1 d g s b nfet_03v3 L=0.5u W=1u m={value}\n", deck="gf180mcu"
+        )
+
+
+def test_normalize_mos_mult_non_numeric_is_error():
+    with pytest.raises(NormalizeError, match="'mult' value 'abc' is not numeric"):
+        normalize_reference_netlist(
+            "XM1 d g s b nfet_03v3 L=0.5u W=1u mult=abc\n", deck="gf180mcu"
         )
 
 
@@ -11080,13 +11343,13 @@ def test_normalize_mos_nf_non_numeric_rejected():
         )
 
 
-def test_normalize_mos_nf_expands_but_mult_still_rejected():
-    # `nf` (finger folding) expands; `mult` (whole-device replication) is a
-    # different real-world knob and is still rejected on the same call.
-    with pytest.raises(NormalizeError, match="multi-finger/multiplied"):
-        normalize_reference_netlist(
-            "XM1 d g s b nfet_03v3 L=0.5u W=1u nf=2 mult=2\n", deck="gf180mcu"
-        )
+def test_normalize_mos_nf_expands_and_mult_is_ignored():
+    # `nf` (finger folding) expands; `mult` is mismatch-only (issue #3123)
+    # and does not change the device count.
+    out = normalize_reference_netlist(
+        "XM1 d g s b nfet_03v3 L=0.5u W=1u nf=2 mult=2\n", deck="gf180mcu"
+    )
+    assert len(out.strip().splitlines()) == 2
 
 
 def test_normalize_resistor_nf_still_rejected():
@@ -11810,6 +12073,9 @@ def test_build_device_binding_map_derived_fallback_shape():
         "tm9k",
         "tm11k",
         "tm30k",
+        # MiM densities (issue #3090) -- curated in `_CAPACITOR_MODEL_TABLE`.
+        "cap_mim_1f0_m4m5_noshield",
+        "cap_mim_1f5_m4m5_noshield",
         "cap_mim_2f0_m4m5_noshield",
     }
     assert set(build_device_binding_map("sky130")) == {
@@ -22522,3 +22788,260 @@ def test_strict_pin_count_netgen_engine_real_binary(tmp_path):
     assert report["status"] == "mismatch"
     (finding,) = _pin_count_findings(report)
     assert finding["details"] == {"layout_pin_count": 3, "reference_pin_count": 2}
+
+
+# ---------------------------------------------------------------------------
+# Issue #3078: bare pre-extracted layout.netlist with a resistor `X` card
+# ---------------------------------------------------------------------------
+
+_BARE_RES_LAYOUT = """\
+.SUBCKT top a b vsubs
+X$1 a b vsubs res_high_po r=3627.97760 L=9.765U W=1U
+.ENDS top
+"""
+_BARE_RES_REFERENCE = """\
+.SUBCKT top a b vsubs
+R1 a b vsubs 3627.97760 res_high_po
+.ENDS top
+"""
+
+
+def _bare_res_request(tmp_path, layout_text, *, layout_deck=None, ref_deck="sky130"):
+    layout = {"netlist": _write(tmp_path / "lay.spice", layout_text), "top": "top"}
+    if layout_deck:
+        layout["deck"] = layout_deck
+    reference = {
+        "netlist": _write(tmp_path / "ref.spice", _BARE_RES_REFERENCE),
+        "top": "top",
+    }
+    if ref_deck:
+        reference["deck"] = ref_deck
+    return _write_request(
+        tmp_path / "req.json", {"layout": layout, "reference": reference}
+    )
+
+
+def test_bare_layout_netlist_resistor_x_card_requires_layout_deck(tmp_path):
+    """#3078: a bare pre-extracted netlist's resistor `X` card is refused
+    with an error naming `layout.deck`, not reported as a `mismatch`."""
+    with pytest.raises(
+        LvsError, match=r"layout\.deck.*X\$1 \(res_high_po\)|X\$1.*layout\.deck"
+    ):
+        run_lvs(_bare_res_request(tmp_path, _BARE_RES_LAYOUT))
+
+
+def test_bare_layout_netlist_resistor_x_card_class_is_case_insensitive(tmp_path):
+    with pytest.raises(LvsError, match=r"layout\.deck"):
+        run_lvs(
+            _bare_res_request(
+                tmp_path, _BARE_RES_LAYOUT.replace("res_high_po", "RES_HIGH_PO")
+            )
+        )
+
+
+def test_bare_layout_netlist_resistor_x_card_with_layout_deck_still_matches(tmp_path):
+    report = run_lvs(
+        _bare_res_request(tmp_path, _BARE_RES_LAYOUT, layout_deck="sky130")
+    )
+    assert report["status"] == "match"
+
+
+def test_bare_layout_netlist_resistor_x_card_without_reference_deck_unchanged(tmp_path):
+    report = run_lvs(_bare_res_request(tmp_path, _BARE_RES_LAYOUT, ref_deck=None))
+    assert report["status"] == "mismatch"
+
+
+def test_bare_layout_netlist_two_terminal_r_card_unaffected(tmp_path):
+    report = run_lvs(_bare_res_request(tmp_path, _BARE_RES_REFERENCE))
+    assert report["status"] == "match"
+
+
+# --------------------------------------------------------------------------- #
+# Issue #3019: combine_devices folding one capacitor class into another
+# --------------------------------------------------------------------------- #
+
+
+def _two_parallel_capacitor_classes_netlist():
+    """Two `DeviceClassCapacitor` classes, four devices each, all between the
+    same two nets -- the netlist shape of sky130's stacked MiM pair."""
+    import klayout.db as kdb
+
+    netlist = kdb.Netlist()
+    circuit = kdb.Circuit()
+    circuit.name = "TOP"
+    netlist.add(circuit)
+    net_a = circuit.create_net("a")
+    net_b = circuit.create_net("b")
+    for class_name in ("cap_one", "cap_two"):
+        device_class = kdb.DeviceClassCapacitor()
+        device_class.name = class_name
+        netlist.add(device_class)
+        for _ in range(4):
+            device = circuit.create_device(device_class)
+            device.connect_terminal("A", net_a)
+            device.connect_terminal("B", net_b)
+            device.set_parameter("C", 1e-12)
+    return netlist
+
+
+def _device_class_names(netlist):
+    return sorted(
+        device.device_class().name
+        for circuit in netlist.each_circuit()
+        for device in circuit.each_device()
+    )
+
+
+def _fold_cap_two_into_cap_one(self):
+    """What KLayout's in-place `Netlist.combine_devices()` was seen to do:
+    the second class vanishes and the first class's survivor absorbs it."""
+    for circuit in self.each_circuit():
+        devices = list(circuit.each_device())
+        for device in devices[1:]:
+            circuit.remove_device(device)
+
+
+def test_combine_devices_safely_retries_a_cross_class_fold(monkeypatch):
+    """Issue #3019: a combine that returns normally but folded one device
+    class into another is a wrong result, not a clean one -- it is retried on
+    a fresh copy, and the adopted result keeps both classes."""
+    import klayout.db as kdb
+
+    real_combine_devices = kdb.Netlist.combine_devices
+    call_count = 0
+
+    def _fold_once(self):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return _fold_cap_two_into_cap_one(self)
+        return real_combine_devices(self)
+
+    monkeypatch.setattr(kdb.Netlist, "combine_devices", _fold_once)
+
+    netlist = _two_parallel_capacitor_classes_netlist()
+    assert lvs._combine_devices_safely(netlist, "layout") is None
+
+    assert call_count == 2
+    assert _device_class_names(netlist) == ["cap_one", "cap_two"]
+
+
+def test_combine_devices_safely_reports_a_persistent_cross_class_fold(monkeypatch):
+    """Issue #3019: when every attempt folds across classes the side is
+    reported as `device.combine_incomplete` (so `run_lvs` degrades to
+    `inconclusive`) instead of comparing the wrongly folded netlist."""
+    import klayout.db as kdb
+
+    monkeypatch.setattr(kdb.Netlist, "combine_devices", _fold_cap_two_into_cap_one)
+
+    warning = lvs._combine_devices_safely(
+        _two_parallel_capacitor_classes_netlist(), "layout"
+    )
+
+    assert warning is not None
+    assert warning["category"] == lvs.CATEGORY_DEVICE_COMBINE_INCOMPLETE
+    assert "different device class" in warning["description"]
+    assert "cap_two" in warning["description"]
+
+
+def test_cross_class_folds_ignores_a_same_class_parallel_fold():
+    """A genuine parallel fold keeps one survivor of each class on the
+    group's nets, so it is not mistaken for a cross-class fold."""
+    netlist = _two_parallel_capacitor_classes_netlist()
+    before = lvs._device_class_net_signatures(netlist)
+    netlist.combine_devices()
+
+    assert _device_class_names(netlist) == ["cap_one", "cap_two"]
+    assert (
+        lvs._cross_class_folds(before, lvs._device_class_net_signatures(netlist)) == []
+    )
+
+
+def _build_stacked_mim_layout(path, *, net_pairs, units_per_pair=2):
+    """sky130 `capm`-over-met3 and `capm2`-over-met4 MiM units stacked with
+    the same footprint and wired so that both classes sit between the same
+    two nets, `net_pairs` times over (the issue's repro shape).
+
+    Net A is a met2 spine (reaching the `capm2` top plates through met3/met4/
+    met5 landing pads kept clear of the plates, so the capacitor top-via
+    exclusion does not cut them); net B is the met4 plate chain."""
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+
+    def draw(layer, datatype, x0, y0, x1, y1):
+        top.shapes(layout.layer(layer, datatype)).insert(_box_um(x0, y0, x1, y1))
+
+    rows = 2
+    for pair in range(net_pairs):
+        oy = pair * 200
+        draw(69, 20, -8, oy - 1, -4, oy + rows * 40)  # met2 spine (net A)
+        for row in range(rows):
+            y = oy + row * 40
+            draw(71, 20, -8, y + 14, -4, y + 18)  # met4 landing pad
+            draw(70, 20, -8, y + 14, -4, y + 18)  # met3 landing pad
+            draw(69, 44, -7, y + 15, -5, y + 17)  # via2
+            draw(70, 44, -7, y + 15, -5, y + 17)  # via3
+            draw(71, 44, -7, y + 15, -5, y + 17)  # via4
+            draw(72, 20, -8, y + 9, -4, y + 18)  # met5 riser
+            for unit in range(units_per_pair):
+                x = unit * 40
+                draw(70, 20, x, y, x + 20, y + 20)  # met3 plate
+                draw(69, 44, x + 9, y + 4, x + 11, y + 6)
+                draw(69, 20, -4, y + 4, x + 11, y + 6)  # met2 link to spine
+                draw(89, 44, x + 2, y + 2, x + 18, y + 18)  # capm
+                draw(71, 20, x + 1, y + 1, x + 19, y + 19)  # met4 plate
+                draw(70, 44, x + 9, y + 9, x + 11, y + 11)  # cap top via
+                draw(97, 44, x + 3, y + 3, x + 17, y + 17)  # capm2
+                draw(71, 44, x + 13, y + 13, x + 15, y + 15)  # capm2 top via
+                draw(72, 20, -4, y + 9, x + 16, y + 11)  # met5 strap
+                draw(72, 20, x + 12, y + 9, x + 16, y + 15)
+                if unit < units_per_pair - 1:
+                    draw(71, 20, x + 19, y + 8, x + 41, y + 12)  # met4 chain
+            if row < rows - 1:
+                draw(71, 20, 8, y + 19, 12, y + 41)
+    layout.write(str(path))
+    return str(path)
+
+
+@pytest.mark.parametrize("net_pairs", [1, 4])
+def test_combine_devices_layout_file_and_netlist_agree_for_stacked_mim(
+    tmp_path, net_pairs
+):
+    """Issue #3019: `layout.file` and `layout.netlist` give the same combined
+    layout netlist for two MiM classes stacked in parallel on `net_pairs`
+    net pairs -- two classes per pair, neither folded into the other.
+
+    KLayout's in-place `combine_devices()` on the extractor-built netlist
+    folded the classes together on a heap-dependent share of runs, so the
+    `layout.file` request is repeated to make the check bite."""
+    from klayout_tools.extract import run_extract
+
+    gds = _build_stacked_mim_layout(tmp_path / "mim.gds", net_pairs=net_pairs)
+    spice = str(tmp_path / "mim.spice")
+    extracted = run_extract(gds, "sky130", output=spice)
+    assert extracted["device_counts"] == {
+        "sky130_fd_pr__model__cap_mim": 4 * net_pairs,
+        "sky130_fd_pr__model__cap_mim_m4": 4 * net_pairs,
+    }
+    assert extracted["net_count"] == 2 * net_pairs
+
+    def verdict(layout):
+        request = {
+            "layout": layout,
+            "reference": {"netlist": spice, "top": extracted["top"]},
+            "options": {"combine_devices": True},
+        }
+        return run_lvs(_write_request(tmp_path / "request.json", request))
+
+    from_netlist = verdict({"netlist": spice, "deck": "sky130"})
+    assert from_netlist["status"] == "match"
+
+    for _ in range(6):
+        from_file = verdict({"file": gds, "deck": "sky130"})
+        assert from_file["status"] == "match"
+        assert from_file["counts"]["devices"] == from_netlist["counts"]["devices"]
+        assert from_file["counts"]["devices"]["layout"] == 2 * net_pairs
+        assert not [m for m in from_file["mismatches"] if m["severity"] == "error"]

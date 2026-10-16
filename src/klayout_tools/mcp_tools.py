@@ -360,13 +360,38 @@ def _check_safety(
         )
 
 
+def _check_shape(tool: Tool, dest: str, value: Any) -> None:
+    """Reject values whose JSON shape the schema does not allow.
+
+    The MCP server hands raw arguments to :func:`build_argv`, so a list in a
+    scalar slot would otherwise splice extra tokens (``--backend batch``) into
+    the argv, and a ``-``-prefixed string would be parsed as an option.
+    """
+    schema = tool.input_schema["properties"].get(dest, {})
+    is_array = schema.get("type") == "array"
+    if isinstance(value, dict) or (isinstance(value, list) and not is_array):
+        raise ToolCallRefused(
+            f"argument {dest!r}: expected a single "
+            f"{schema.get('type', 'scalar')} value, got {type(value).__name__}"
+        )
+    for item in value if isinstance(value, list) else [value]:
+        if isinstance(item, (list, dict)):
+            raise ToolCallRefused(f"argument {dest!r}: nested values are not allowed")
+        if isinstance(item, str) and item.startswith("-"):
+            raise ToolCallRefused(
+                f"argument {dest!r}: value {item!r} looks like a command-line option"
+            )
+
+
 def build_argv(
     tool: Tool, arguments: dict[str, Any], policy: BridgePolicy
 ) -> list[str]:
     """Translate a tool call's JSON arguments into the ``klt`` argv.
 
     Raises :class:`ToolCallRefused` for unknown arguments, missing required
-    arguments, fleet-dispatching ``--backend`` values, and path escapes.
+    arguments, fleet-dispatching ``--backend`` values, malformed argument
+    shapes, and path escapes. Without ``allow_fleet``, ``--backend local`` is
+    forced on every verb that has a backend option.
     """
     actions = {a.dest: a for a in _derivable_actions(tool.parser)}
     unknown = sorted(set(arguments) - set(actions))
@@ -382,12 +407,23 @@ def build_argv(
         if value is None:
             continue
         action = actions[dest]
+        _check_shape(tool, dest, value)
         items = value if isinstance(value, list) else [value]
         _check_safety(tool, dest, items, policy)
         if action.option_strings:
             optional.extend(_option_tokens(action, value))
         else:
             positional.extend(str(i) for i in items)
+    # A request file or $KLT_*_BACKEND can select a fleet backend the checks
+    # above never see; an explicit flag outranks both, so pin it to local.
+    backend = actions.get("backend")
+    if (
+        backend is not None
+        and backend.option_strings
+        and not policy.allow_fleet
+        and arguments.get("backend") is None
+    ):
+        optional.extend([max(backend.option_strings, key=len), "local"])
     argv = list(tool.verb_path) + positional + optional
     if tool.json_supported:
         argv += ["--format", "json"]

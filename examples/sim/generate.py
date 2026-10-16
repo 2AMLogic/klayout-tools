@@ -163,12 +163,64 @@ def write_monte_carlo_request() -> None:
     print(f"wrote {path}")
 
 
+def write_monte_carlo_instances_example() -> None:
+    """A per-instance mismatch-selection example (issue #2995): only the
+    differential pair's devices (`xm1`, `xm2`) keep sky130's local mismatch
+    on, so the spread is attributable to them alone. Needs the sky130A PDK
+    installed (unlike the synthetic examples above), so the suite does not run
+    it; tests/test_sim_examples.py validates the request offline against a stub
+    model library, and the gating itself is covered in
+    tests/test_sim_mismatch_gate.py."""
+    path = os.path.join(_DIR, "testbench-mc-instances.spice")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(
+            "* klt sim worked example: per-instance mismatch selection (sky130A)\n"
+            ".param vdd=1.8\n"
+            "Vdd vdd 0 DC {vdd}\n"
+            "Vb bias 0 DC 0.7\n"
+            "Vin g 0 DC 0.9\n"
+            "XM1 d1 g tail 0 sky130_fd_pr__nfet_01v8 L=0.5 W=2 m=2\n"
+            "XM2 d2 g tail 0 sky130_fd_pr__nfet_01v8 L=0.5 W=2 m=2\n"
+            "XM3 tail bias 0 0 sky130_fd_pr__nfet_01v8 L=1 W=4 m=2\n"
+            "R1 vdd d1 10k\n"
+            "R2 vdd d2 10k\n"
+        )
+    request = {
+        "netlist": "testbench-mc-instances.spice",
+        "engine": "ngspice",
+        "models": {"pdk": "sky130A", "lib": "libs.tech/ngspice/sky130.lib.spice"},
+        "corners": {"process": ["tt_mm"]},
+        "monte_carlo": {
+            "n": 50,
+            "seed": 20261015,
+            "vary": "mismatch",
+            "instances": {"include": ["xm1", "xm2"]},
+        },
+        "analysis": {"kind": "op", "args": ""},
+        "measurements": [
+            {
+                "name": "vdiff",
+                "expr": "v(d1)-v(d2)",
+                "unit": "V",
+            }
+        ],
+        "options": {"timeout_s": 180, "keep_artifacts": False},
+    }
+    req_path = os.path.join(_DIR, "request-monte-carlo-instances.json")
+    with open(req_path, "w", encoding="utf-8") as handle:
+        json.dump(request, handle, indent=2)
+        handle.write("\n")
+    print(f"wrote {path}")
+    print(f"wrote {req_path}")
+
+
 def main() -> None:
     write_testbench()
     write_corner_lib()
     write_request()
     write_monte_carlo_testbench()
     write_monte_carlo_request()
+    write_monte_carlo_instances_example()
 
 
 if __name__ == "__main__":

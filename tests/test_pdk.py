@@ -2730,7 +2730,7 @@ def test_mixed_open_pdks_and_asap7_shared_root(shared_home):
     _make_asap7(shared_home)
     names = [v["name"] for v in pdk.list_pdks()["installs"][0]["variants"]]
     assert names == ["asap7", "sky130A"]
-    assert pdk.find_pdk(variant="sky130A")["compatibility"]["status"] == "not_declared"
+    assert pdk.find_pdk(variant="sky130A")["compatibility"]["status"] == "mismatch"
 
 
 def test_shared_root_precedence(tmp_path, monkeypatch, shared_home):
@@ -2813,7 +2813,7 @@ def test_compatibility_not_declared_and_namespace_isolation(tmp_path):
     from klayout_tools import pdk_compat
 
     root = tmp_path / "r"
-    _make_install(root, "sky130A", sources="open_pdks 0.2.17")
+    _make_install(root, "sky130B", sources="open_pdks 0.2.17")
     compat = pdk.find_pdk(root=str(root))["compatibility"]
     assert compat["status"] == "not_declared"
     assert compat["package"] is None and compat["expected"] is None

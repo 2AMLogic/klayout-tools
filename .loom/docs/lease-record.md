@@ -728,7 +728,31 @@ the same lease semantics, **keyed by role**:
   `loom:pr-lease-yield` record and exits 4. A winner starts the renewer and
   exits 0, and only then does the role add its label. The label is a
   projection of the lease, never the evidence. After its own lease is posted,
-  an unverifiable ordering proceeds, as on the issue path.
+  an unverifiable ordering proceeds, as on the issue path, for a stepless
+  claim (a role prompt's own, which fences before every push and verdict). A
+  `--step` claim (the step engine's pre-claim, which spawns a session on exit
+  0) instead reads back twice more after 2 s and 5 s; if the order is still
+  unverifiable it marks its own lease released (one PATCH, no read) and exits
+  5, which the engine records as `claim_unverified` and cools down for that
+  item alone (#12252).
+- **Doctor activity guard (#12105).** The role key means a Doctor's `claim`
+  sees only other Doctors. So before it posts, a Doctor also stands down
+  (exit 7, nothing written) when another actor is working the PR: a live
+  `loom:pr-lease` of another role on the PR; a live `loom:lease host=` record
+  on the PR or on its single closing issue that is not its own `(host,
+  sweep)` (an attended builder's lease lives there); or a push to the head
+  branch by a login other than the workspace's writer identity within
+  `LOOM_DOCTOR_PUSH_WINDOW_MINUTES` (default 15, `0` off), read from the
+  repository activity API. A push here is a `push`, `force_push` or
+  `branch_creation` activity record, so a rebase or amend counts. An attended
+  Doctor that pushes under a person's login (not the writer App) sees its own
+  pushes as foreign; it runs with `LOOM_DOCTOR_PUSH_WINDOW_MINUTES=0`.
+  These are evidence beyond the PR's own lease list,
+  so an unreadable closing-issue list or activity read proceeds. A fork head
+  is not checked. A re-attach to the claimant's own live lease skips the
+  guard. On the step path exit 7 is the refusal `peer_active`, which the
+  outcome ledger cools down like `claimed`. Code:
+  `loom-daemon/src/cli/pr_lease/activity.rs`.
 - **Renewal** is a detached `lease pr renew-loop`, one per
   `(repo, host, sweep#pr-<role>, pr)` through the issue renewer's ownership
   store (#10229). Every 300 s (`SWEEP_LEASE_RENEW_INTERVAL_SECS`) it makes one
@@ -767,7 +791,17 @@ the same lease semantics, **keyed by role**:
   to the released marker (the digest is the sorted `loom:*` label set, claim
   labels left out). It skips the record while the head has a check run in
   progress that started under 6 h ago; a run stuck longer no longer exempts
-  the pass. Those records, from trusted authors and at the PR's current head
+  the pass. A Judge that stood down because the head's CI was still running
+  says so with `release --skip-reason ci-pending` (#12008; any other or absent
+  reason is the default). `release` reads the head's CI as one of three states:
+  **Young** (something pending started under 6 h ago: exempt, as above),
+  **Settled** (nothing pending: a `ci-pending` pass is exempt, because CI
+  finished after the pass looked; any other pass is recorded) or **Stuck**
+  (something pending, but every pending run or status is past 6 h or has no
+  start stamp: never exempt, `ci-pending` or not). Stuck CI is not exempted
+  because `forge wait-checks` has no age cap and the PR planner serves exactly
+  such PRs ([`pr-planning.md`](pr-planning.md)); recording them keeps the loop
+  bounded. Those records, from trusted authors and at the PR's current head
   and digest, hold the PR out of `pr-queue --role judge`, the role runner's
   Judge gate and a Judge `claim` (exit 6, nothing written): one hour after
   the first, four after the second, and after the third until the oldest of

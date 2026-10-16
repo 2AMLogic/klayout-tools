@@ -10,10 +10,37 @@ submodule only imports it, never the reverse).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import klayout.db as kdb
+
+
+def _pcell_params(pcell: object, *names: str) -> list:
+    """Read declared PCell parameters by name (they are attached dynamically,
+    so a plain ``self.<name>`` is an untyped-attribute diagnostic under mypy)."""
+    return [getattr(pcell, name) for name in names]
+
+
+def _series_joint_boxes(info: dict, series: bool) -> list:
+    """Absolute-um boxes of the ``series=true`` joint jumpers (none otherwise)."""
+    return [j["box_um"] for j in info["jumpers"]] if series else []
+
+
+def _declare_double_param(helper: Any, name: str, description: str) -> None:
+    """Declare a ``0.0``-default ``TypeDouble`` PCell parameter.
+
+    Takes the helper as ``Any`` so a new parameter does not grow the type
+    baseline with another untyped ``PCellDeclarationHelper`` attribute access.
+    """
+    helper.param(name, helper.TypeDouble, description, default=0.0)
+
+
+def _grow_boxes_across_axis(
+    boxes: list[tuple[float, float, float, float]], extension_um: float
+) -> list[tuple[float, float, float, float]]:
+    """Grow each box by ``extension_um`` on both y sides (0.0 = unchanged)."""
+    return [(x0, y0 - extension_um, x1, y1 + extension_um) for x0, y0, x1, y1 in boxes]
 
 
 def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
@@ -78,6 +105,15 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "be >= 1; default 1 reproduces the original single-row "
                 "layout.",
                 default=1,
+            )
+            self.param(
+                "series",
+                kdb.PCellParameterDeclaration.TypeBoolean,
+                "Join the num unit resistors end to end (R<i>_B to "
+                "R<i + 1>_A) with short local-metal jumpers so the array is "
+                "one logical series resistor; default False draws "
+                "independent units (issue #2997)",
+                default=False,
             )
             self.param(
                 "flavor",
@@ -173,6 +209,14 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     f"res_flavor_{i}_layer -- 0.0 covers the body segment only",
                     default=0.0,
                 )
+                # Issue #3000: > 0.0 grows this mask across the body axis,
+                # beyond the poly body (gf180mcu SAB, SB.9/SB.10).
+                _declare_double_param(
+                    self,
+                    f"res_flavor_{i}_side_extension_um",
+                    f"Extension (um) of res_flavor_{i}_layer past the body "
+                    "edges across the current-flow axis -- 0.0 matches the body",
+                )
             self.param(
                 "dummy_layer",
                 self.TypeLayer,
@@ -246,6 +290,22 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "axis -- 0.0 draws the ordinary square cut",
                 default=0.0,
             )
+            # Issue #3000: gf180mcu salicide block (SAB) clearance from the
+            # end contacts (SB.4); 0.0 = the generic enclosure margin.
+            _declare_double_param(
+                self,
+                "res_contact_space_um",
+                "Minimum space (um) from the body-segment marker / salicide "
+                "block to the end contact -- 0.0 keeps the generic margin",
+            )
+            self.param(
+                "res_poly_heads_only",
+                self.TypeBoolean,  # type: ignore[attr-defined]
+                "Draw poly_layer as only the two end heads (the resistive "
+                "body is the res_mark_layer segment alone, abutting them) -- "
+                "the IHP sg13g2 PCell convention (issue #2679)",
+                default=False,
+            )
             self.param(
                 "mfg_grid_um",
                 self.TypeDouble,
@@ -279,6 +339,8 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.metal_res_via_space_min_um,
                 self.end_contact_w_um,
                 self.end_contact_h_um,
+                getattr(self, "res_contact_space_um"),  # noqa: B009
+                self.res_poly_heads_only,  # type: ignore[attr-defined]
             )
             unit_boxes = info["unit"]["boxes_um"]
             all_cells = info["cells"] + info["dummy_cells"]
@@ -292,6 +354,19 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                         self.cell, li, dbu, unit_boxes[role], c["x0_um"], c["y0_um"]
                     )
 
+            # Issue #2997: series joints, on the unit end pads' layer (the
+            # body layer for a metal_level resistor, whose end pad is the
+            # body itself).
+            series, metal_level = _pcell_params(self, "series", "metal_level")
+            _insert_boxes(
+                self.cell,
+                li_poly if metal_level else li_metal,
+                dbu,
+                _series_joint_boxes(info, series),
+                0.0,
+                0.0,
+            )
+
             # Draw the PDK resistor-ID marker, plus every requires-mask the
             # requested flavour needs (none on sky130's `res_generic_po`, two
             # on gf180mcu's `ppolyf_u` and sg13g2's `rsil`, three on sg13g2's
@@ -302,13 +377,14 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             # :func:`_res_unit_layout` for why the marker box excludes the
             # contacted end pads.
             marker_boxes = unit_boxes["marker"]
-            for present, layer_param, head_enc in [
-                (self.res_mark_present, self.res_mark_layer, 0.0),
+            for present, layer_param, head_enc, side_ext in [
+                (self.res_mark_present, self.res_mark_layer, 0.0, 0.0),
             ] + [
                 (
                     getattr(self, f"res_flavor_{i}_present"),
                     getattr(self, f"res_flavor_{i}_layer"),
                     getattr(self, f"res_flavor_{i}_head_enclosure_um"),
+                    getattr(self, f"res_flavor_{i}_side_extension_um"),
                 )
                 for i in range(_MAX_RES_FLAVOR_LAYERS)
             ]:
@@ -323,6 +399,8 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     if head_enc > 0.0
                     else marker_boxes
                 )
+                # Issue #3000: gf180mcu's SAB runs past the body edges.
+                boxes = _grow_boxes_across_axis(boxes, side_ext)
                 for c in all_cells:
                     _insert_boxes(
                         self.cell, li_mark, dbu, boxes, c["x0_um"], c["y0_um"]
