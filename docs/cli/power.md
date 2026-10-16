@@ -199,9 +199,20 @@ The spec file is a JSON object:
     geometry.
   - `between` (array of exactly two distinct `stackup` names, required) —
     which two metal roles this via connects.
-  - `resistance_ohm` (number, required unless `--deck` is given, `>= 0`) — this via's resistance,
-    used verbatim for every via shape matched (see "Scope and limitations"
-    — a via array drawn as one merged shape is not split per cut).
+  - `resistance_ohm` (number, required unless `--deck` is given, `>= 0`) — this via's
+    **per-cut** resistance. Each merged via shape is priced at
+    `resistance_ohm / n_cuts` (see `cut_size_um`/`cut_space_um` below and
+    "Scope and limitations"); without those keys `n_cuts` is 1, so the value
+    is used verbatim per shape.
+  - `cut_size_um` / `cut_space_um` (numbers `> 0`, optional, both or neither,
+    issue #3401) — the cut layer's drawn cut size and cut-to-cut spacing in
+    µm. With them a merged via polygon holds
+    `n_cuts = max(1, floor((W+s)/(c+s)) * floor((H+s)/(c+s)))` cuts, where
+    `W×H` is its bounding box, `c = cut_size_um` and `s = cut_space_um`; a
+    non-rectangular polygon falls back to `max(1, floor(area / (c+s)²))` and
+    adds a `warnings` entry. The edge's resistance is `resistance_ohm /
+    n_cuts`. The parasitics deck does not supply cut geometry (its per-cut
+    rows carry resistance only), so this comes from the spec.
   - `current_limit_a` (number, optional, `>= 0`) — this via role's own EM
     limit. Unlike a metal role's `current_limit_a_per_um`, a real PDK's
     `DCCURRENTDENSITY` for a via/cut layer is already a flat per-shape
@@ -854,7 +865,9 @@ the shared envelope (`schema_version`, error shape, exit codes).
               "cross_um": 1.0,
               "area_um2": null,
               "current_limit_a": 0.0028,
-              "current_limit_source": "sky130_fd_sc_hd__nom.tlef met1 DCCURRENTDENSITY AVERAGE 2.8 mA/um"
+              "current_limit_source": "sky130_fd_sc_hd__nom.tlef met1 DCCURRENTDENSITY AVERAGE 2.8 mA/um",
+              "n_cuts": null,
+              "n_cuts_source": null
             }
           ]
         }
@@ -990,7 +1003,7 @@ the shared envelope (`schema_version`, error shape, exit codes).
 | `islands[].node_count`/`edge_count` | integer | This island's own totals (both `0` when `unsolved_reason` is set).                                 |
 | `islands[].unsolved_reason` | string \| null | `null` on a modelled island. A non-null string means this island's geometry could not be modelled exactly (not axis-aligned, or over the decomposition cap) and **no** resistor network was emitted for it — see "Non-rectangular segments" above. Never accompanied by an approximate network. |
 | `islands[].nodes[]`  | array\<object\>    | `{"id", "layer", "x_um", "y_um"}` — `id` is scoped to this island (see "Resistor-network model" above). |
-| `islands[].edges[]`  | array\<object\>    | `{"id", "kind", "layer", "from", "to", "resistance_ohm", "length_um", "cross_um", "area_um2", "current_limit_a", "current_limit_source"}` — `kind` is `"metal"` or `"via"`; `from`/`to` reference sibling `nodes[].id` values; `layer` names the contributing `stackup`/`vias` entry. `length_um`/`cross_um` (issue #2345) are the geometry a **metal** edge's resistance — and per-width EM limit — were computed from (`resistance_ohm = sheet_resistance_ohm_per_sq * length_um / cross_um`; for a decomposed polygon's sub-segment, the half-cell extent and its conducting width). `area_um2` (issue #2345) is a **via** edge's merged polygon area — the flat per-shape resistance/limit model applies to the merged shape as a whole, so that is what is reported. The geometry an edge's kind does not have is `null`. `current_limit_a`/`current_limit_source` (issue #846, Phase 1c) are this edge's own EM current-density limit and its citation, `null` when that role declared none. |
+| `islands[].edges[]`  | array\<object\>    | `{"id", "kind", "layer", "from", "to", "resistance_ohm", "length_um", "cross_um", "area_um2", "current_limit_a", "current_limit_source", "n_cuts", "n_cuts_source"}` — `kind` is `"metal"` or `"via"`; `from`/`to` reference sibling `nodes[].id` values; `layer` names the contributing `stackup`/`vias` entry. `length_um`/`cross_um` (issue #2345) are the geometry a **metal** edge's resistance — and per-width EM limit — were computed from (`resistance_ohm = sheet_resistance_ohm_per_sq * length_um / cross_um`; for a decomposed polygon's sub-segment, the half-cell extent and its conducting width). `area_um2` (issue #2345) is a **via** edge's merged polygon area — the flat per-shape resistance/limit model applies to the merged shape as a whole, so that is what is reported. The geometry an edge's kind does not have is `null`. `current_limit_a`/`current_limit_source` (issue #846, Phase 1c) are this edge's own EM current-density limit and its citation, `null` when that role declared none. `n_cuts` / `n_cuts_source` (issue #3401) are a **via** edge's cut count and its provenance: `"spec"` when the via's `cut_size_um`/`cut_space_um` derived it, `"assumed"` (count 1) when they are absent; both `null` on a metal edge. A via edge's `resistance_ohm` is already divided by `n_cuts`. |
 | `node_count`/`edge_count`/`island_count` | integer | Totals across every requested net.                                                    |
 | `ir_drop_map`        | object \| null     | The static IR-drop solve, or `null` when the spec declared neither `pads` nor `current_model` — see below. |
 | `worst_case_droop_mv` | number \| null    | The largest \|voltage − island reference voltage\| anywhere solved, in millivolts (`null` when there was no solve; `0.0` when there was a solve but nothing drooped). Equal to `ir_drop_map.worst_case.droop_mv`. |
@@ -1273,12 +1286,16 @@ criterion 4):**
   missing role. That normally means the spec's `vias[].between` does not
   name the roles the shape really joins; wiring it to the nearest rail it
   does *not* touch would invent connectivity the layout has not got.
-- **One via shape = one resistor, at the spec's given `resistance_ohm`.** A
-  via drawn as a single merged shape covering what a real design would cut
-  as an array of several via cuts is not split into a parallel-resistor
-  combination — the spec's `resistance_ohm` is used verbatim per merged
-  via polygon. Model a via array's true (lower) parallel resistance by
-  passing that already-combined value in the spec. Each via edge reports
+- **One merged via shape = one resistor, `resistance_ohm / n_cuts`.** A
+  via array drawn as a single merged shape has lost its individual cut
+  outlines, so the cut count is *derived*, not read: from the via's
+  `cut_size_um`/`cut_space_um` and the shape's bounding box (area for a
+  non-rectangular shape, with a warning). Without those keys `n_cuts` is 1
+  (`n_cuts_source: "assumed"`) and the spec's `resistance_ohm` is used
+  verbatim per merged polygon, which overstates a multi-cut array by roughly
+  its cut count — give the cut geometry, or pass the already-combined value.
+  An irregular array (missing cuts, mixed pitches) is counted as if full.
+  EM `current_limit_a` is not scaled by `n_cuts`. Each via edge reports
   its merged polygon's `area_um2` (issue #2345), so a run whose via edges
   all carry many-array-sized areas is distinguishable in data from one
   solved per individual cut.
