@@ -7075,6 +7075,8 @@ def _persist_waveform_artifact(
         with open(waveform_path, encoding="utf-8") as fh:
             noise_fields["noise_representation"] = noise_representation(json.load(fh))
     return waveform_path
+
+
 def _worker_env_kwargs(threads_per_worker: int | None) -> dict[str, Any]:
     """``subprocess.run`` kwargs for one ngspice worker (issue #2970): an
     ``env`` with ``OMP_NUM_THREADS`` pinned when a thread count was resolved,
