@@ -2068,12 +2068,13 @@ def _with_forwarded_budget(
 
 def _apply_pdk_match_gate(
     request: dict[str, Any], backend: str, require_pdk_match: bool | None
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], bool]:
     """Resolve the PDK-revision gate (issue #3462): the ``--require-pdk-match``
     flag overrides ``options.require_pdk_match``. Validates the
     ``models.pdk_expect`` pin and the option up front, and refuses the gate
     on a backend that captures no worker PDK stamp rather than let the run
-    pass ungated. Returns the request with the resolved option folded in."""
+    pass ungated. Returns the request with the resolved option folded in, and
+    whether the gate is on."""
     if require_pdk_match is not None:
         options = request.get("options")
         request = {
@@ -2084,13 +2085,14 @@ def _apply_pdk_match_gate(
             },
         }
     sim_batch.pdk_expectation(request)
-    if sim_batch.require_pdk_match_requested(request) and backend != "batch":
+    gated = sim_batch.require_pdk_match_requested(request)
+    if gated and backend != "batch":
         raise SimError(
             f"--require-pdk-match/options.require_pdk_match needs the worker's "
             f"PDK stamp, which only the 'batch' backend captures (got backend "
             f"{backend!r})"
         )
-    return request
+    return request, gated
 
 
 def _run_sim_corners(
@@ -2141,14 +2143,13 @@ def _run_sim_corners(
     backend = _yield_host_default_backend(
         backend, backend_from_host_default, reason_ok=engine == "ngspice"
     )
-    request = _apply_pdk_match_gate(request, backend, require_pdk_match)
-    if sim_batch.require_pdk_match_requested(request):
-        # The gate is only checked above, against the backend as it stands
-        # now. Treat it as an explicit choice from here on so a later
-        # `_yield_host_default_backend` (single-unit run, resume, OSDI) can
-        # no longer step a gated run back to `local`, where it would pass
-        # ungated: those cases refuse by name or run on batch, gated.
-        backend_from_host_default = False
+    request, gated = _apply_pdk_match_gate(request, backend, require_pdk_match)
+    # The gate was only checked against the backend as it stands now. Treat a
+    # gated run's backend as explicit from here on, so a later
+    # `_yield_host_default_backend` (single-unit run, resume, OSDI) can no
+    # longer step it back to `local`, where it would pass ungated: those
+    # cases refuse by name or run on batch, gated.
+    backend_from_host_default = backend_from_host_default and not gated
 
     hosts = (
         hosts if hosts is not None else (request.get("remote") or {}).get("hosts", 1)
