@@ -659,6 +659,65 @@ in its `batch_job_failed` message, or carries the tail of the retrieved
 | `batch.max_job_seconds` | number > 0 | The fleet's **whole-job ceiling** the one-job pre-submit check compares against ([#2833](https://github.com/2AMLogic/klayout-tools/issues/2833)). Resolution order: this field, then `$KLT_BATCH_MAX_JOB_SECONDS`, then `BATCH_MAX_JOB_SECONDS` in the `batch-fleet.env` beside the provision script, else `3600` (the harness's own fallback when its `MaxJobSeconds` tag is absent). The value used and its source are reported; see "Three budgets, and the fleet's whole-job ceiling" below. A present but non-positive, non-finite, or non-numeric value from any source is rejected before any S3 write. |
 | `batch.job_ceiling_check` | `"warn"` \| `"enforce"` | What the one-job pre-submit check does when the job's conservative bound exceeds `max_job_seconds`: `"warn"` (default) submits and warns, `"enforce"` refuses before any S3 write with `error.code: "batch_job_ceiling_exceeded"`. Any other value is rejected before any S3 write. |
 
+### Asynchronous submit and status (`--submit-only`, `--job-status`, [#3073](https://github.com/2AMLogic/klayout-tools/issues/3073))
+
+A blocking `klt sim --backend batch` run prints nothing until the fleet job
+ends. To hand a long run off instead:
+
+```bash
+klt sim request.json --backend batch --submit-only --format json
+klt sim request.json --job-status klt-sim-0123456789ab --format json
+```
+
+`--submit-only` runs the same pre-submit gates as the blocking path (bucket
+and runner-version resolution, the whole-job ceiling), uploads the job,
+launches it, and exits `0` with the job's identity — it never polls and never
+collects:
+
+| Field | Description |
+| ----- | ----------- |
+| `schema_version` | `1` |
+| `status` | `"submitted"` (this is not a sim report; there is no verdict to grade) |
+| `job_id`, `bucket`, `region`, `jobs_prefix`, `job_uri` | Where the job lives |
+| `launched_at` | UTC time the launch returned |
+| `request_sha256` | Digest of the request document, to tie a later read back to it |
+| `unit_count` | Corners × Monte Carlo samples in the job |
+| `job_ceiling` | The pre-submit whole-job-ceiling assessment (same object as `environment.remote.job_ceiling`) |
+
+It is one job only. Anything it cannot represent as one job fails **before any
+S3 write** with `error.code: "submit_only_unsupported"`: a non-`batch`
+backend, `--hosts`/`remote.hosts` > 1 (a sharded run would need one job id per
+shard), `--plot`, or a deck-list request. `--resume` is already refused on the
+batch backend.
+
+`--job-status JOB_ID` makes one `status.json` read (the positional request only
+supplies the bucket/region/profile) and exits `0` whatever the *job's* state —
+the exit code describes the read, `state` describes the job:
+
+| Field | Description |
+| ----- | ----------- |
+| `state` | `pending` (no `status.json` yet — the instance has not booted; not an error), `running`, `interrupted`, `done`, `failed` or `timeout` |
+| `terminal` | `true` for `done`/`failed`/`timeout` |
+| `detail`, `started_at`, `updated_at`, `elapsed_seconds`, `exit_code`, `tool` | As written by the fleet harness; absent ones are omitted |
+| `instance` | `instance_id`, `instance_type`, `availability_zone`, `lifecycle`, `spot`, ... when published |
+
+An unknown job id (no `job.json` under the prefix) is an error envelope with
+`error.code: "batch_job_not_found"`; a malformed id is
+`"batch_job_id_invalid"`. Reading an `interrupted` job re-launches nothing —
+2am's own `reconcile` does that.
+
+**No unit counts.** The fleet's `status.json` is written at state transitions
+only (`fetching inputs`, `executing`, the terminal state) and carries no
+completed/total unit count; `outputs/` is uploaded only after the job ends. A
+status read therefore cannot say how far through the grid a running job is, and
+`klt` does not estimate one from elapsed time. That needs the fleet to publish
+progress first (tracked against 2AMLogic/2am).
+
+Collecting a finished job's report is `--attach`
+([#2978](https://github.com/2AMLogic/klayout-tools/issues/2978)); until that
+lands, `--submit-only` jobs can be read with `--job-status` but not yet fetched
+by `klt`.
+
 ### Capacity refusal and `batch_no_capacity`
 
 When 2am's `batch-fleet-provision.sh launch` finds no Spot capacity in any
@@ -792,7 +851,7 @@ the fleet's own, and that one is the limit that loses results when it is hit
 | Limit | Set by | Bounds | What happens when it is hit |
 | --- | --- | --- | --- |
 | `options.timeout_s` (default `120`) | The request | **One unit** (one corner or Monte Carlo sample) on the job instance | That unit is killed and reported with its own timeout diagnostic. The other units still run. |
-| `options.wall_clock_budget_s` | The request | The **in-worker dispatch loop**: the job's own `klt sim --backend local-parallel` stops starting units once the budget is spent, and writes a complete report with the rest marked `budget_exceeded` | Only applies if the worker reaches that point. It does **not** save a report when the fleet kills the enclosing job first. `--budget-s` overrides it on the submitting client only. The client's dispatch loop does not run on `batch`, so the flag is not forwarded to the job. To bound the worker, put the budget in the request. |
+| `options.wall_clock_budget_s` | The request | The **in-worker dispatch loop**: the job's own `klt sim --backend local-parallel` stops starting units once the budget is spent, and writes a complete report with the rest marked `budget_exceeded` | Only applies if the worker reaches that point. It does **not** save a report when the fleet kills the enclosing job first. `--budget-s` overrides it and is written into the request the job receives ([#3167](https://github.com/2AMLogic/klayout-tools/issues/3167)). |
 | Fleet whole-job ceiling (`batch.max_job_seconds`) | 2am's fleet (`BATCH_MAX_JOB_SECONDS`, default `3600`) | The **whole job**. The harness kills the job command at this age, and the instance powers off soon after. | `status.json` reports `state: "timeout"`, `exit_code: 124`. The interrupted `report.json` is not a complete report, so **every** unit of the job comes back `batch_job_timeout`. Units that had finished are not recovered (see "Failed jobs" below). |
 
 **Pre-submit check (one-job requests).** Before the first S3 write, a
@@ -1272,6 +1331,27 @@ case the diagnostic and `environment.remote` give `job_id` and `bucket`;
 the remaining evidence (`status.json`, `harness.log`, `outputs/`) lives at
 `s3://<bucket>/<jobs prefix>/<job_id>/`.
 
+### Post-processing waveforms from a batch run locally
+
+Per-corner waveforms come back from `batch` the same way as from `local`, as
+long as **both** `options.waveforms: true` and `options.keep_artifacts: true`
+are set (`waveforms` alone captures the rawfile on the job instance, but
+nothing is brought home without `keep_artifacts`). Both options are forwarded
+verbatim to the job's own `klt sim`; `batch` adds no trace-related refusal.
+Pass `--outdir DIR` to choose where the artifacts land:
+
+```json
+{ "backend": "batch", "analysis": {"kind": "tran", "args": "1n 1u"},
+  "options": {"waveforms": true, "keep_artifacts": true} }
+```
+
+Each corner's `artifacts.waveform` / `artifacts.raw` / `artifacts.log` /
+`artifacts.deck` then point at local copies under `DIR` (under
+`DIR/<job_id>/` per shard when `hosts > 1`), so a local script can read the
+per-corner waveform JSON exactly as it would after `--backend local`.
+`options.waveforms` is refused for `analysis_steps[]` sequences on every
+backend. Regression: `test_run_sim_batch_returns_per_corner_waveform_artifacts`.
+
 ### gf180 local-versus-batch troubleshooting checklist
 
 A gf180mcuD netlist was reported to simulate locally but fail on the fleet
@@ -1666,6 +1746,14 @@ three gaps directly, as an extension of `local`/`local-parallel` (and any
   time, passes) the first corner — the check happens once per dispatch slot,
   not as a pre-flight gate that could report zero corners for a legitimately
   tiny budget.
+
+  On `remote` and `batch`, `--budget-s` is forwarded to the worker by writing
+  it into the pushed request's `options.wall_clock_budget_s` (the CLI value
+  wins over the request's own), so the job's `local-parallel` loop enforces
+  it ([#3167](https://github.com/2AMLogic/klayout-tools/issues/3167)). On a
+  `hosts > 1` sharded run every shard's worker applies the full budget from
+  its own start, so the whole-run bound is approximately, not exactly, the
+  budget.
 
 - **Orphan safety is always on, no configuration required.** `klt sim`
   captures its own parent PID once, at the start of the sweep, and the
@@ -3583,6 +3671,61 @@ leave ambiguous. It exists so a caller (or a human) reading the response
 can tell a genuinely-sampled family from a structurally-excluded one without
 reading the vendored model deck line by line.
 
+### Per-instance mismatch selection
+
+`monte_carlo.instances` (optional, issue #2995) turns local mismatch on for a
+subset of instances, so a spread can be attributed to a device group without a
+hand-written netlist wrapper:
+
+```json
+"monte_carlo": {
+  "n": 200, "seed": 7, "vary": "mismatch",
+  "instances": { "include": ["xm1*", "xm2*"], "exclude": ["xm1_tail"] }
+}
+```
+
+`include` and `exclude` are case-insensitive globs over **top-level `X`
+(subcircuit) instance names** of the request netlist. An instance is
+randomised when it matches `include` (or `include` is empty) and does not match
+`exclude`. At least one list must be non-empty. klt wraps every other `X`
+instance in a generated one-instance subcircuit that sets the PDK's mismatch
+switch to `0` locally (`mc_mm_switch` for sky130, `sw_stat_mismatch` for
+gf180mcu); the instance line, including `m` and every other parameter, moves
+*inside* the wrapper verbatim, so nothing is forwarded across the extra
+hierarchy level. The netlist you wrote is not modified; a gated copy runs.
+Hierarchical probes of a wrapped instance gain one level
+(`xm1.xm1_klt`).
+
+Refused up front with a `SimError`: a glob that matches no `X` instance (or
+only non-subcircuit elements), a hierarchical glob (`.`/`/`), `vary:
+"process"`, a `models.pdk` without a known switch, and the `remote`/`batch`
+backends. Instances inside user `.subckt` bodies and in `.include`d files are
+not gated individually.
+
+The response adds `environment.monte_carlo.instance_mismatch`:
+
+```json
+{
+  "switch": "mc_mm_switch",
+  "include": [], "exclude": ["xm1"],
+  "instances": [
+    { "instance": "XM1", "model": "sky130_fd_pr__nfet_01v8", "randomised": false },
+    { "instance": "XM2", "model": "sky130_fd_pr__nfet_01v8", "randomised": true }
+  ],
+  "negative_control": false
+}
+```
+
+`negative_control: true` means every `X` instance was excluded: that run should
+reproduce the mismatch-off run under the same seed, so diff it against one to
+catch a wrapper that drops a parameter. The report states which instances were
+gated, not that the PDK model responded to the switch. Whether the remaining
+instances draw the same values as an ungated run under the same seed depends on
+the engine's random-stream ordering and is not guaranteed by klt. Worked
+example: `examples/sim/request-monte-carlo-instances.json`. Key names and entry
+shape are intended to stay consistent with the injected-mismatch proposal in
+#2911.
+
 ## Monte Carlo statistics
 
 A `monte_carlo` request additionally reduces its samples to a **statistical
@@ -3911,7 +4054,8 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `osdi_abi_mismatch` | `NGSPICE only supports OSDI v0.N but ...` — ngspice too old for the compiled module's OSDI ABI. |
 | `osdi_load_failed` | `Error: Library <x>.osdi couldn't be loaded!` — the module is unreadable or not loadable by this ngspice. |
 | `timeout`          | The per-corner `options.timeout_s` budget was exceeded; the process is killed. |
-| `engine_killed`    | The engine process died from a signal the harness did not send (OOM killer, host reaper, reclaimed worker). `corners[].engine_killed_by_signal` names it (issue #2848). Always `error`; accepted by `options.fail_on_diagnostic`. A harness `timeout` is never reported this way. |
+| `engine_killed`    | The engine process died from a signal the harness did not send (OOM killer, host reaper, reclaimed worker). `corners[].engine_killed_by_signal` names it (issue #2848). Always `error`; accepted by `options.fail_on_diagnostic`. A harness `timeout` is never reported this way. The message quotes the last ~20 lines of engine output (issue #3067). |
+| `engine_aborted`   | The engine exited with a non-zero code (`corners[].engine_exit_code`) without a classifiable cause in its log. (A clean exit that wrote no log, or a non-zero exit with no log file at all, is reported as `unknown` with the exit status and output tail, issue #3016.) Always `error`; accepted by `options.fail_on_diagnostic`. The message carries the exit code and the last ~20 lines of engine stderr/stdout/log, also with `keep_artifacts: false` and on the batch backend. When a corner carries `engine_aborted` or `engine_killed`, its per-measurement `measurement ... produced no value` diagnostics are omitted (the measurement results stay `error`), so `diagnostics[0]` names the cause (issue #3067). |
 | `measurement`      | A declared `.meas` produced no value (missing, not a `"fail"` — see below). |
 | `no_such_vector`   | ngspice's own `Error: no such vector as ...` — emitted *alongside* `measurement` when the missing signal's name never resolved to a vector at all (issue #2521). See "Saved signal set (`save all`)" below for what this can and cannot tell you. |
 | `step_failed`      | An `analysis_steps[]` step's analysis produced no plot of its own (it failed, or the run ended before it) — read from `klt`'s own step markers in the log, never inferred from measurements. The step's own measurements are reported `value: null`/`status: "error"` under this one diagnostic (issue #2482). See "Several solves per corner" above. |
@@ -4174,6 +4318,12 @@ for `.ac`, the swept source for `.dc`); each `points[]` entry has one value
 per declared variable, in `variables[].index` order. Waveform data is never
 inlined into the response — only `artifacts.raw` (the rawfile itself) and
 `artifacts.waveform` (its parsed JSON) paths are.
+
+The rawfile stays ASCII (`set filetype=ascii`) and the waveform JSON shape is
+unchanged (issue #3360): the rawfile is stream-parsed and the JSON written one
+point at a time, so `klt sim`'s peak memory converting it does not scale with
+rawfile size. A binary rawfile reader was considered and rejected because it
+would change the `artifacts.raw` format.
 
 ### Complex-valued (`ac`/`sp`) rawfiles
 

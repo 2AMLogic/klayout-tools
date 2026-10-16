@@ -5442,6 +5442,36 @@ def test_sky130_capacitor_drm_legal_top_via_does_not_short_plates(
     assert device["nets"]["a"] != device["nets"]["b"]
 
 
+def test_sky130_via_on_bottom_plate_outside_top_plate_stays_connected(tmp_path):
+    """Issue #3020: `bottom_region.interacting(top_region)` keeps the *whole*
+    bottom-plate polygon, so an ordinary via3 landing on that met3 polygon
+    well outside the `capm` footprint used to be cut from connectivity too,
+    leaving the met4 pad above it a floating anonymous net. Only the via
+    that lands on the top plate may be excluded."""
+    layout = _make_sky130_mim_layout_with_drm_legal_top_via()
+    top = layout.top_cell()
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    # Ordinary via3 + met4 pad on the bottom plate, far from capm.
+    draw(70, 44, _box_um(-12, -12, -10, -10))  # via3.drawing
+    draw(71, 20, _box_um(-13, -13, -9, -9))  # met4.drawing pad
+    label = top.shapes(layout.layer(71, 5))
+    label.insert(kdb.Text("BOT", kdb.Trans(kdb.Vector(-11000, -11000))))
+
+    path = _write_gds(layout, tmp_path / "mim_outside_via.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "mim_outside_via.spice"))
+
+    assert report["device_counts"] == {"sky130_fd_pr__model__cap_mim": 1}
+    # Bottom plate (+ the routed pad) and the top plate: two nets, no
+    # floating anonymous net for the pad.
+    assert report["net_count"] == 2
+    (device,) = report["devices"]
+    bot_net = next(n for n in report["nets"] if n["name"] == "BOT")
+    assert bot_net["name"] in device["nets"].values()
+
+
 def _make_gf180mcu_mim_square_layout(side_um: float) -> kdb.Layout:
     """A `side_um`x`side_um` `FuseTop`-over-`Metal4` MiM cap, marked with
     `CAP_MK`/`MIM_L_MK` and drawn well clear of `Metal4`'s own edges so the

@@ -92,6 +92,12 @@ not `klt --version`, if you need to detect this kind of drift. See
   with a waiver file (fail on an unwaived element and on a stale waiver).
   `options.initial_state` for `functional-verification` follows separately.
 
+- **`openroad` Docker wrapper no longer runs as root** (issue #3151):
+  `scripts/install-openroad-docker.sh` now writes a wrapper that passes
+  `--user "$(id -u):$(id -g)"` and `-e HOME="${TMPDIR:-/tmp}"` to `docker
+  run`, so files OpenROAD creates under `$PWD`/`$TMPDIR` are owned by the
+  caller instead of root on Linux. Hosts with an older wrapper should re-run
+  `scripts/install-openroad-docker.sh` to upgrade it in place.
 - **Docs: `monte_carlo.vary: "process"` negative control is scoped**
   (issue #2937): the sigma=0 guarantee holds for the reported
   `mismatch_seed` and for decks consuming `mc_mismatch_seed` directly, not
@@ -99,6 +105,13 @@ not `klt --version`, if you need to detect this kind of drift. See
   where the combined `.options seed` still varies per sample. Docs and the
   `_expand_monte_carlo` docstring now say so and name the working control
   (switch the deck's mismatch off). No seed derivation or JSON change.
+
+- **`klt netlist --backend batch` file selection and failure diagnostics**
+  (issue #3282): repeatable `--batch-include <glob>` / `--batch-exclude
+  <glob>` narrow the uploaded git-tracked set without narrowing
+  `--batch-root`. A failed job whose `stderr.log` holds no klt envelope now
+  adds `error.remote_stderr_tail`, `remote_exit_code`, `remote_state` and
+  `harness_log` to the error envelope (additive; `schema_version` unchanged).
 
 - **`options.initial_state` for `klt functional-verification`** (issue #2998,
   part 2 of 2): a gate-level Icarus run can start every flop at `x`, or at a
@@ -110,6 +123,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   Additive; no `schema_version` bump. Also fixes `klt reset-coverage` on the
   real sky130 cell models, whose `input wire CLK` declarations hid every
   asynchronous pin (every flop classified `no_async_pin`).
+
+- **`klt lvs` `body_verification` no longer reports a false `"verified"`
+  for `layout.netlist` + `layout.deck`** (issue #3177): the body
+  determination compared device-class and substrate-net names
+  case-sensitively and matched only the raw `$<n>` anonymous-net spelling,
+  but a netlist read back from disk presents `NFET`/`VSUBS` and `\\$<n>`.
+  An untapped NMOS or an anonymous-body PMOS in a `klt extract -o` netlist
+  now reports `unverified` (and emits `device.body_unverified`), matching the
+  inline-extraction verdict. Inline-extraction results are unchanged.
 
 - **Bipolar markers can be derived layer expressions** (issue #2860):
   `BipolarDevice.marker` now accepts a `LayerExpr`, a frozen AND/NOT tree

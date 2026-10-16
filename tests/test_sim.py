@@ -2898,6 +2898,55 @@ def test_parse_ascii_rawfile_complex(tmp_path):
             assert isinstance(value, float)
 
 
+@pytest.mark.parametrize("text", [_ASCII_RAWFILE, _ASCII_RAWFILE_COMPLEX])
+def test_parse_and_persist_waveform_matches_parse_ascii_rawfile(tmp_path, text):
+    path = tmp_path / "waveform.raw"
+    path.write_text(text)
+
+    json_path = sim._parse_and_persist_waveform(str(path))
+
+    expected = sim.parse_ascii_rawfile(str(path))
+    with open(json_path, encoding="utf-8") as fh:
+        content = fh.read()
+    assert json.loads(content) == expected
+    # Streamed output is byte-identical to a plain json.dump (issue #3360).
+    assert content == json.dumps(expected)
+
+
+def test_parse_and_persist_waveform_zero_points_and_single_variable(tmp_path):
+    path = tmp_path / "empty.raw"
+    path.write_text(
+        "Plotname: DC\nFlags: real\nNo. Variables: 1\nNo. Points: 0\n"
+        "Variables:\n\t0\tv-sweep\tvoltage\nValues:\n\n"
+    )
+    json_path = sim._parse_and_persist_waveform(str(path))
+    with open(json_path, encoding="utf-8") as fh:
+        assert json.load(fh) == {
+            "plotname": "DC",
+            "variables": [{"index": 0, "name": "v-sweep", "type": "voltage"}],
+            "points": [],
+        }
+
+    path.write_text(
+        "Plotname: DC\nNo. Variables: 1\nVariables:\n\t0\tv-sweep\tvoltage\n"
+        "Values:\n 0\t1.5\n 1\t2.5\n"
+    )
+    json_path = sim._parse_and_persist_waveform(str(path))
+    with open(json_path, encoding="utf-8") as fh:
+        assert json.load(fh)["points"] == [[1.5], [2.5]]
+
+
+def test_parse_and_persist_waveform_failure_leaves_no_artifact(tmp_path):
+    path = tmp_path / "bad.raw"
+    path.write_text(_ASCII_RAWFILE.replace("1.000000000000000e-11", "oops", 1))
+    with pytest.raises(ValueError):
+        sim._parse_and_persist_waveform(str(path))
+    assert not (tmp_path / "bad.raw.json").exists()
+    with pytest.raises(sim.SimError):
+        sim._parse_and_persist_waveform(str(tmp_path / "nope.raw"))
+    assert not (tmp_path / "nope.raw.json").exists()
+
+
 def test_parse_ascii_rawfile_not_a_rawfile_raises(tmp_path):
     path = tmp_path / "notraw.txt"
     path.write_text("hello world\n")
@@ -3113,6 +3162,82 @@ def test_corner_timeout_and_launch_failure_leave_both_fields_null(
     )
     assert corner["engine_exit_code"] is None
     assert corner["engine_killed_by_signal"] is None
+
+
+def _abort_corner(tmp_path, monkeypatch, *, keep_artifacts, log_text="", **stub):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [
+                {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"}
+            ],
+            "options": {"timeout_s": 5, "keep_artifacts": keep_artifacts},
+        },
+    )
+
+    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+        log_path = cmd[cmd.index("-o") + 1]
+        with open(log_path, "w", encoding="utf-8") as handle:
+            handle.write(log_text)
+        return fake_completed(
+            "** ngspice-99\n",
+            returncode=stub.get("returncode", 0),
+            stderr=stub.get("stderr", ""),
+        )
+
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+    (corner,) = sim.run_sim(str(request))["corners"]
+    return corner
+
+
+@pytest.mark.parametrize("keep_artifacts", [True, False])
+def test_corner_nonzero_exit_gets_engine_aborted_with_tail(
+    tmp_path, monkeypatch, keep_artifacts
+):
+    """Issue #3067: abnormal exit is the corner's primary diagnostic, with the
+    exit status and engine output tail; the measurement cascade is demoted."""
+    corner = _abort_corner(
+        tmp_path,
+        monkeypatch,
+        keep_artifacts=keep_artifacts,
+        returncode=3,
+        stderr="warn\nfatal: out of memory\n",
+    )
+    first = corner["diagnostics"][0]
+    assert first["code"] == "engine_aborted"
+    assert first["severity"] == "error"
+    assert "code 3" in first["message"]
+    assert "fatal: out of memory" in first["message"]
+    assert "measurement" not in [d["code"] for d in corner["diagnostics"]]
+    assert corner["engine_exit_code"] == 3
+    assert corner["status"] == "error"
+    assert "engine_aborted" in sim.DIAGNOSTIC_CODES
+
+
+def test_corner_killed_demotes_measurement_cascade(tmp_path, monkeypatch):
+    corner = _abort_corner(
+        tmp_path, monkeypatch, keep_artifacts=False, returncode=-9, stderr="Killed\n"
+    )
+    codes = [d["code"] for d in corner["diagnostics"]]
+    assert codes == ["engine_killed"]
+    assert "Killed" in corner["diagnostics"][0]["message"]
+
+
+def test_corner_genuine_measurement_failure_is_not_engine_aborted(
+    tmp_path, monkeypatch
+):
+    corner = _abort_corner(
+        tmp_path,
+        monkeypatch,
+        keep_artifacts=False,
+        log_text="Circuit: x\nNo. of Data Rows : 10\n",
+    )
+    codes = [d["code"] for d in corner["diagnostics"]]
+    assert "engine_aborted" not in codes
+    assert "measurement" in codes
 
 
 def test_split_returncode_unnamed_signal_falls_back():
@@ -7881,6 +8006,35 @@ def test_run_sim_remote_backend_pushes_local_parallel_request(tmp_path, monkeypa
     assert state["local_netlist_path"].endswith("body.spice")
     assert state["push_job_calls"] == 1
     assert state["cleanup_calls"] == 1
+
+
+def test_run_sim_remote_backend_forwards_cli_budget_s_to_worker(tmp_path, monkeypatch):
+    """Issue #3167: `--budget-s` reaches the worker; CLI wins over the request."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        _base_remote_request(
+            corners={"temperature_c": [10, 40]},
+            options={"wall_clock_budget_s": 3600},
+        ),
+    )
+    state = _install_fake_remote_transport(monkeypatch)
+
+    sim.run_sim(str(request), budget_s=90)
+    assert state["remote_request"]["options"]["wall_clock_budget_s"] == 90
+
+    sim.run_sim(str(request))
+    assert state["remote_request"]["options"]["wall_clock_budget_s"] == 3600
+
+
+def test_run_sim_remote_backend_adds_no_budget_key_when_unset(tmp_path, monkeypatch):
+    _write_body(tmp_path)
+    request = _write_request(tmp_path, _base_remote_request())
+    state = _install_fake_remote_transport(monkeypatch)
+
+    sim.run_sim(str(request))
+
+    assert "wall_clock_budget_s" not in state["remote_request"]["options"]
 
 
 def test_run_sim_remote_backend_stages_the_netlists_include_closure(

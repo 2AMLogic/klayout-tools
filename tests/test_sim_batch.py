@@ -1364,6 +1364,70 @@ def test_run_sim_batch_backend_end_to_end(tmp_path, monkeypatch):
     assert launches[0][3] == remote_block["job_id"]
 
 
+def test_run_sim_batch_returns_per_corner_waveform_artifacts(tmp_path, monkeypatch):
+    """`options.waveforms` + `options.keep_artifacts` on a multi-corner `tran`
+    request: the batch job's per-corner waveform artifacts come home under the
+    caller's artifacts dir and every corner's `artifacts.*` path is rewritten
+    to them, as with `--backend local` (issue #3488)."""
+    corner_ids = ("tt_1.800_-40", "tt_1.800_125")
+    remote_root = "/var/tmp/eda-x/outputs/artifacts"
+    document = json.loads(_sim_report(corner_ids=corner_ids))
+    outputs = {"report.json": json.dumps(document)}
+    for corner in document["corners"]:
+        cid = corner["corner_id"]
+        corner["artifacts"] = {
+            "log": f"{remote_root}/{cid}.log",
+            "raw": f"{remote_root}/{cid}.raw",
+            "waveform": f"{remote_root}/{cid}.waveform.json",
+            "deck": f"{remote_root}/{cid}.cir",
+        }
+        outputs[f"artifacts/{cid}.waveform.json"] = json.dumps(
+            {"corner_id": cid, "vectors": {"time": [0.0, 1e-9], "v(out)": [0.0, 1.0]}}
+        )
+        outputs[f"artifacts/{cid}.raw"] = "raw"
+        outputs[f"artifacts/{cid}.log"] = "log"
+        outputs[f"artifacts/{cid}.cir"] = "* deck"
+    outputs["report.json"] = json.dumps(document)
+
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = outputs
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+
+    uploaded: dict[str, str] = {}
+    real_open = open
+
+    def _capture(argv, timeout_s):
+        if "inputs/request.json" in " ".join(argv):
+            with real_open(argv[-3], encoding="utf-8") as handle:
+                uploaded["request"] = handle.read()
+        return runner(argv, timeout_s)
+
+    monkeypatch.setattr(sb, "_run_subprocess", _capture)
+
+    _write_body(tmp_path)
+    request = _batch_request(
+        tmp_path,
+        corners={"temperature_c": [-40, 125]},
+        options={"waveforms": True, "keep_artifacts": True},
+    )
+    artifacts_dir = tmp_path / "out-artifacts"
+    report = sim.run_sim(
+        str(_write_request(tmp_path, request)), artifacts_dir=str(artifacts_dir)
+    )
+
+    # Both options reach the job's own `klt sim` verbatim.
+    options = json.loads(uploaded["request"])["options"]
+    assert options["waveforms"] is True and options["keep_artifacts"] is True
+    assert [c["corner_id"] for c in report["corners"]] == list(corner_ids)
+    for corner in report["corners"]:
+        waveform = Path(corner["artifacts"]["waveform"])
+        assert waveform.parent == artifacts_dir
+        assert json.loads(waveform.read_text())["corner_id"] == corner["corner_id"]
+        assert Path(corner["artifacts"]["raw"]).is_file()
+        assert not [d for d in corner["diagnostics"] if d.get("severity") == "error"]
+
+
 def test_run_sim_batch_uploads_a_local_parallel_request_document(tmp_path, monkeypatch):
     runner = _FakeRunner()
     runner.default = fake_completed(_status("done"))
@@ -1390,6 +1454,38 @@ def test_run_sim_batch_uploads_a_local_parallel_request_document(tmp_path, monke
     assert document["netlist"] == "netlist.cir"
     assert "batch" not in document  # submit-side config, never shipped
     assert "remote" not in document
+
+
+def test_run_sim_batch_forwards_cli_budget_s_to_the_uploaded_request(
+    tmp_path, monkeypatch
+):
+    """Issue #3167: `--budget-s` reaches the job's request; CLI wins."""
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {"report.json": _sim_report()}
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+
+    uploaded: dict[str, str] = {}
+    real_open = open
+
+    def _capture(argv, timeout_s):
+        if "inputs/request.json" in " ".join(argv):
+            with real_open(argv[-3], encoding="utf-8") as handle:
+                uploaded["request"] = handle.read()
+        return runner(argv, timeout_s)
+
+    monkeypatch.setattr(sb, "_run_subprocess", _capture)
+
+    _write_body(tmp_path)
+    body = _batch_request(tmp_path)
+    body["options"] = {**body.get("options", {}), "wall_clock_budget_s": 3600}
+    path = _write_request(tmp_path, body)
+
+    sim.run_sim(str(path), budget_s=90)
+    assert json.loads(uploaded["request"])["options"]["wall_clock_budget_s"] == 90
+
+    sim.run_sim(str(path))
+    assert json.loads(uploaded["request"])["options"]["wall_clock_budget_s"] == 3600
 
 
 def test_run_sim_batch_accepts_an_analysis_steps_request(tmp_path, monkeypatch):
