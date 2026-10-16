@@ -14,6 +14,15 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt lvs` opt-in `options.compare_mos_flavour`** (issue #3650): `true`
+  compares a MOS device's flavour (sky130 `nvt`/`hvi`, gf180mcu `06v0`, ...)
+  as well as its base `nfet`/`pfet` class, so a native-Vt layout device
+  against an `nfet_g5v0d10v5` reference is a `device.unmatched` mismatch
+  instead of a `match`. Default (`false`) unchanged, no `devices[].class`
+  change on that path. `true` needs `engine: "klayout"`, an inline
+  `layout.file` and `reference.form: "subckt-call"`; any other combination is
+  a request error (exit 1). Additive `options` echo key, replayed by `--check
+  --rerun`, no `schema_version` bump.
 - **`klt signoff` regeneration claims for T1 items 1 and 2** (issue #2887):
   an artifact-anchored `generic` attestation for item 1 or 2 may carry
   `provenance.regeneration: {generator, regenerated_hash}`, the hash the
