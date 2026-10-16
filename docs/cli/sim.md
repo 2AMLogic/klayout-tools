@@ -925,6 +925,92 @@ failed, `4` at least one request errored or was refused (**a partial set exits
 (e.g. an empty or invalid `--max-in-flight`) and no report was written; the
 error envelope goes to stderr as usual.
 
+### Merging per-request reports (`klt sim-merge`, [#3045](https://github.com/2AMLogic/klayout-tools/issues/3045))
+
+```
+klt sim-merge <manifest.json> <report.json>... [--format text|json]
+```
+
+When one corner grid cannot be a single request (for example the executing
+runner is older than the client and cannot carry per-section libraries,
+preloaded model binaries or the full model-library set), submit one request per
+process corner and recombine the reports with `klt sim-merge` instead of a
+per-repo script. It is a separate verb, not `klt sim merge`: `klt sim` takes a
+positional request path, so a `merge` subcommand would be ambiguous with a
+request file of that name.
+
+The **manifest** is the plan, written by whoever split the grid
+([`docs/schemas/sim-merge-manifest.schema.json`](../schemas/sim-merge-manifest.schema.json)):
+
+```json
+{
+  "schema_version": 1,
+  "shards": [
+    {"id": "tt", "request": "req-tt.json", "request_sha256": "<hex>",
+     "corners": ["tt/1.800V/-40C", "tt/1.800V/125C"]},
+    {"id": "ss", "request": "req-ss.json", "request_sha256": "<hex>",
+     "corners": ["ss/1.800V/-40C", "ss/1.800V/125C"]}
+  ]
+}
+```
+
+`corners` is the ordered `corners[].corner_id` list the shard's report must
+carry (that is how a report is matched to its shard -- reports carry no shard
+id, so two shards planning the identical list is an invalid manifest).
+`request`/`request_sha256` are optional; when given, `request` (relative to the
+manifest) is hashed and must equal the pin. Shard order in the manifest is the
+merged `corners[]` order, so the output does not depend on the order the report
+paths are given.
+
+**What is recomputed over the union** (with the same code `klt sim` uses, never
+copied from one shard): `corner_count`, `passed`/`failed`/`errored`/
+`inconclusive`, `status`, `metrics`, `diagnostic_counts`, the per-measurement
+rollup (`measurements[].status` and `worst_case`: minimum margin, an absent
+margin worst, ties to the first corner in merged order) and `coverage`
+(`corners_simulated`, `checked`/`inapplicable`/`skipped`, `nothing_checked`),
+whose ids carry corner indices local to each report and are re-based to the
+merged corner order. Merging N per-process reports therefore yields the report
+one request over the same grid would.
+
+**Per-report fields become arrays**, aligned with `merge.shards[]`:
+`environment.netlist_sha256`, `environment.remote` (job ids; `null` for a shard
+run locally) and `provenance.input.content_hash` always; any other
+`environment`/`provenance` field whose value differs between shards becomes an
+array too, and fields all shards agree on stay scalar. The output adds one
+additive block, `merge` (`schema_version: 1`, `shard_count`, `shards[]` with
+`id`, `request`, `request_sha256`, `corner_count`); the report's own
+`schema_version` is unchanged
+([`docs/schemas/sim-merge-report.schema.json`](../schemas/sim-merge-report.schema.json)).
+`measurements[].plot` is not carried over (it names one shard's artifact).
+
+**Refusals.** Nothing is merged from a set that is not exactly the plan. A
+refusal is a verdict, so (per the "a report was emitted" rule for exits `>= 3`)
+stdout carries `{"schema_version": 1, "status": "refused", "refusal": {"code",
+"message"}}`:
+
+| Exit | `refusal.code` | Meaning |
+| ---- | ------------ | ------- |
+| `5` | `missing_shard` | a planned shard has no report |
+| `6` | `duplicate_shard` | two reports carry the same planned shard's corners |
+| `7` | `unexpected_shard` | a report shares no corner with the plan |
+| `8` | `corner_mismatch` | a report overlaps the plan but is not exactly one shard's corners |
+| `9` | `request_mismatch` | a planned request file is unreadable or not the one the plan pinned |
+| `10` | `inconsistent_shards` | shards disagree on measurement names/units/limits, the simulated netlist or `schema_version` |
+
+When several classes apply the exit code is the first in the order `9, 8, 7, 6,
+5, 10`; the message lists every problem. Other exits: `1` could not run, with the usual error envelope on stderr
+(unreadable or invalid manifest/report; a Monte Carlo or deck-list report,
+which cannot be merged because sample seeds and statistics depend on the whole
+sample sequence), `2` usage. A merge that succeeds exits like `klt sim` for the
+merged `status`: `0` pass, `3` a measurement failed, `4` errored, inconclusive
+or nothing checked.
+
+`request_sha256` pins the *planned request file*; a report does not embed the
+request that produced it, so the report-to-request binding is the corner list
+plus the cross-shard consistency checks above. A deterministic shard planner
+(split by a corner axis, emit requests and the manifest) is not part of this
+verb.
+
 ### Three budgets, and the fleet's whole-job ceiling
 
 A batch request is bounded by three separate time limits. Only one of them is
@@ -2247,6 +2333,49 @@ older worker that predates the field does not know it and keeps emitting
 `save all`; worker-version compatibility diagnostics are tracked by
 #2733/#2719. Under `resume`, a checkpoint written under one mode is never
 reused for the other.
+
+### Restricting the saved set: `options.save_vectors` (issue #3211)
+
+`options.save_vectors` is a non-empty array of ngspice vector names (e.g.
+`["v(out)", "i(vdd)"]`; no whitespace inside an entry, names are folded to
+lower case). When set, the generated `save all` is replaced by a single
+`save <vectors>` card, emitted in the same position and under the same
+conditions, so a large transient keeps only the signals you named resident
+(and in the rawfile/waveform artifact) without editing the netlist.
+
+klt always adds every `v(x)`/`i(x)` (and derivative forms such as `vdb(x)`,
+`vm(a,b)`) referenced by a declared `measurements[].spice`, `measurements[].expr`
+or `crossings.signal`, so measurements stay correct. A measurement that names
+a vector *bare* (`out` rather than `v(out)`) is not detected — list it in
+`save_vectors` yourself. `save_vectors` and `save_mode: "netlist"` are mutually
+exclusive (an application error: the latter already suppresses the card the
+former rewrites), and `engine: "xyce"` refuses it like `save_mode`. Omitting it
+leaves the deck byte-identical. A changed `save_vectors` invalidates a
+`--resume` checkpoint. It rides the forwarded request document to
+`remote`/`batch` workers, so the worker image must include this implementation.
+
+### Waveform size guard: `options.waveform_max_bytes` (issue #3211)
+
+Waveforms are written as an ASCII rawfile (`waveform.raw`) and then converted,
+fully in memory, to `waveform.raw.json`. A long, finely-stepped transient can
+produce a multi-gigabyte rawfile whose conversion is OOM-killed. When
+`waveform.raw` is larger than `options.waveform_max_bytes` (a positive integer
+byte count; default `1073741824`, 1 GiB; `null` disables the guard), the
+conversion is skipped and the corner carries a `severity: "warning"`,
+`code: "waveform_too_large"` diagnostic naming the size, the limit and the
+remedies. The raw file stays at `artifacts.raw`, `artifacts.waveform` is
+`null`, and every measurement is graded as usual — the warning does not change
+`status`. Ways to shrink a waveform: `options.save_vectors`, a larger `tstep` /
+`tmax`, a shorter `tstop`. Validated before any corner launches; honored by
+every backend (remote/batch workers re-read it from the request document).
+
+### `tran` timing arguments (`tstep tstop tstart tmax`)
+
+`analysis.args` is passed to ngspice verbatim, so the full four-token form
+`"args": "100p 4u 0 25p"` (`.tran tstep tstop tstart tmax`) is supported:
+`tstart` delays data recording and `tmax` caps the internal timestep (a
+smaller `tmax` makes the rawfile larger; a larger `tstep` makes it smaller).
+There is no separate `analysis.tmax` field.
 
 **Diagnosing a still-missing measurement.** When a `.meas`/rawfile signal
 still comes back empty after this fix, ngspice's log gives the same `Error:
@@ -3644,6 +3773,14 @@ a corner grid. A stock ngspice without the module still produces the
     on the volare sky130A build `c6d73a35…`; note the term is upper-case, so a
     case-sensitive `grep agauss` misses it). The corner-level `var_mult` is a
     separate term shared by all instances.
+  - **ihp-sg13g2**: Section-based like sky130. `cornerMOSlv.lib` /
+    `cornerMOShv.lib` define plain `mos_<corner>` sections plus
+    `mos_<corner>_mismatch` sections; only the `_mismatch` ones include the
+    per-instance `agauss()` mismatch subcircuits (`sg13_lv_nmos`/`sg13_lv_pmos`,
+    `sg13_hv_nmos`/`sg13_hv_pmos`). `mos_tt_stat` is process-statistical, not
+    mismatch. `family_mismatch` reports `mosfet` `active: true` only when every
+    selected `corners.process` section ends in `_mismatch`, `false` when none
+    does, and `null` when the section is unknown or mixed.
   - **gf180mcu**: Mismatch works differently — there is **no** corner-suffixed
     `_mm` section to select. `sm141064.ngspice` (`libs.tech/ngspice/`) exposes
     only plain corner sections (`typical`, `ss`, `ff`, `sf`, `fs`, plus
@@ -4524,6 +4661,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `no_such_vector`   | ngspice's own `Error: no such vector as ...` — emitted *alongside* `measurement` when the missing signal's name never resolved to a vector at all (issue #2521). See "Saved signal set (`save all`)" below for what this can and cannot tell you. |
 | `step_failed`      | An `analysis_steps[]` step's analysis produced no plot of its own (it failed, or the run ended before it) — read from `klt`'s own step markers in the log, never inferred from measurements. The step's own measurements are reported `value: null`/`status: "error"` under this one diagnostic (issue #2482). See "Several solves per corner" above. |
 | `derived_input_unavailable` | A measurement computed from other results (a derived measurement, or a step `expr` reading an earlier step) was **not graded** because at least one of its inputs produced no value in this corner (issue #2482). Distinguishes "an input was missing" from a derived expression that itself failed, which is an ordinary `measurement` diagnostic. |
+| `waveform_too_large` | `waveform.raw` exceeded `options.waveform_max_bytes`, so the `waveform.raw.json` conversion was skipped (issue #3211). Always `severity: "warning"`; measurements and `status` are unaffected. See "Waveform size guard" above. |
 | `unknown`          | Anything else that prevented a trustworthy result (e.g. ngspice not installed/spawnable). |
 | `budget_exceeded`  | The corner never started: the sweep's own `options.wall_clock_budget_s` was exceeded first. See "Wall-clock budget, orphan safety, and resume" above. |
 | `orphaned`         | The corner never started: the launching process exited before its turn. See "Wall-clock budget, orphan safety, and resume" above. |
@@ -5348,7 +5486,7 @@ corner-sweep rollup fields above are declared.
 | `engine_killed_by_signal` | string \| null | Additive (issue #2848): the signal name (e.g. `"SIGKILL"`) when the engine process was killed by a signal the harness did not send; such a corner also carries an `engine_killed` error diagnostic. `null` otherwise, including on a harness `timeout`. |
 | `measurements[]` | array\<object\>  | `name`, `value` (number, or `null` when unextractable), `unit`, `status` (`"pass"`/`"fail"`/`"error"`, plus `"inconclusive"` when this value fell outside its declared plausibility bound — issue #2493), `margin` (`null` on that `"inconclusive"` path — `limits` never ran). An `options.fail_on_diagnostic` disqualification (issue #2492) leaves each measurement's own `status` alone — it applies to the whole corner — so a `pass` measurement inside an `inconclusive` corner is expected, and is exactly what the corner's marker diagnostic explains. Additive/optional (issue #2482, `analysis_steps[]` requests only): a step-scoped entry also carries `step` (its source step's name; its `name` is `<step>.<measurement>`), and any entry computed from other results carries `derived_from` (the `name`s of its inputs, in first-reference order). Absent for every scalar-`analysis` request. Additive/optional (issue #2868): an entry declared with `crossings` carries `value` = the crossing count and a `crossings` object `{times, edges, truncated}` (see "Threshold-crossing time series" above); absent on every other entry and when no series was extracted. Additive/optional (issue #2947): an entry declared with `cycle_mean` carries `value` = the cycle-aligned mean and a `cycle_mean` object `{t_start, t_end, cycles_used}` (see "Cycle-aligned mean" above); absent on every other entry and when no mean was computed. Additive/optional (issue #3033): an entry declared with `energy` carries `value` = the net energy (J) and an `energy` object `{net, gross, recovered, charge, from, to}` (see "Source energy over a transient window" above); absent on every other entry and when nothing was extracted. |
 | `steps`          | array\<object\>  | Additive/optional (issue #2482): present only on a corner of an `analysis_steps[]` request that was dispatched to the engine — one `{name, kind, status}` per declared step, in declaration order, `status` `"ok"` when that step's analysis produced its own plot and `"error"` otherwise (it failed, or the run was killed before reaching it). Absent for scalar-`analysis` requests and for corners that never started (`budget_exceeded`, `orphaned`, …). |
-| `diagnostics`    | array\<object\>  | `{ "severity": "error"\|"warning", "code": "...", "message": "..." }` — see the classification table above. `"warning"` occurs for a recovered `singular_matrix`/`nonconvergence` (does not affect `status`) and for the two grading markers, `inconclusive` and `implausible_solution` (issues #2492/#2493) — neither marker *causes* the status by itself; each records which of the two reasons graded this corner `inconclusive`. Every other code is always `"error"`. A few codes carry additional code-specific fields beside these three (additive, no `schema_version` bump): `timeout_budget_unreachable`'s `reached_s`/`fraction`, `timestep_too_small`'s `time_s`/`timestep_s`/`node` (issue #2918). Empty for a clean run. |
+| `diagnostics`    | array\<object\>  | `{ "severity": "error"\|"warning", "code": "...", "message": "..." }` — see the classification table above. `"warning"` occurs for a recovered `singular_matrix`/`nonconvergence` (does not affect `status`) and for the two grading markers, `inconclusive` and `implausible_solution` (issues #2492/#2493) — neither marker *causes* the status by itself; each records which of the two reasons graded this corner `inconclusive`. `waveform_too_large` (issue #3211) is also always a warning. Every other code is always `"error"`. A few codes carry additional code-specific fields beside these three (additive, no `schema_version` bump): `timeout_budget_unreachable`'s `reached_s`/`fraction`, `timestep_too_small`'s `time_s`/`timestep_s`/`node` (issue #2918). Empty for a clean run. |
 | `artifacts`      | object           | `{"log": ..., "raw": ..., "waveform": ..., "deck": ...}`, each an absolute path or `null`. All `null` unless `options.keep_artifacts` is true; `raw`/`waveform` additionally require `options.waveforms`. `deck` is the exact per-corner ngspice deck synthesized for this corner (`.lib`/`.temp`/`alter` lines included) -- the file ngspice actually consumed, not a hash of the unexpanded source netlist (see `environment.netlist_sha256` for that). Raw log text is **never** inlined into the JSON. Additive/optional (issue #1723): also carries `plots` (array of `{signal, path}`) when `--plot` was used and this corner's waveform rendered at least one signal. |
 | `monte_carlo`    | object \| null   | `null` unless this corner is a Monte Carlo sample, else `{sample_index, seed, process_seed, mismatch_seed}` — this sample's index and its derived seed components (`seed` is the combined value written as `.options seed=` in the generated deck). See "Monte Carlo sampling" above for the seed contract and the scope of the negative control (it does not cover decks that draw mismatch from ngspice's own RNG). |
 

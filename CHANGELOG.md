@@ -23,6 +23,20 @@ not `klt --version`, if you need to detect this kind of drift. See
   ceiling cannot honor fails before any S3 write with
   `error.code: "batch_max_units_per_job_invalid"`. Default (`"warn"`) behavior
   is unchanged. Additive; no `schema_version` bump.
+- **`klt sim-merge` recombines per-request sim reports** (issue #3045): a
+  corner grid split across several `klt sim` requests (one per process
+  corner, say) is merged against a manifest of the planned requests. The
+  per-measurement rollup (`status`, `worst_case`), `coverage` (with
+  re-based `checked` ids), the `corner_count`/`passed`/`failed`/`errored`/
+  `inconclusive` counters, `metrics` and `status` are recomputed over the
+  union with `klt sim`'s own helpers, and per-report fields
+  (`environment.netlist_sha256`, `environment.remote`,
+  `provenance.input.content_hash`) become per-shard arrays. A missing,
+  duplicate, unexpected or mismatching report, or a changed request, is
+  refused with its own exit code (`5`-`10`, `status: "refused"` payload).
+  Additive: new verb, new `merge` block, no `schema_version` bump. See
+  `docs/cli/sim.md` "Merging per-request reports". Shard planning is not
+  included.
 - **ASAP7 DRC deck checks the four net-aware spacings `ACTIVE.S.2A`,
   `LIG.LISD.S.6`, `LIG.LISD.S.7` and `LIG.SDT.S.8`** (issue #3084): DRM Tables
   3.5.1 and 3.10.1 apply these only to shapes on different nets, so the deck
@@ -67,7 +81,13 @@ not `klt --version`, if you need to detect this kind of drift. See
   Decks without `reset` are byte-identical; a non-boolean value is refused by
   name. `docs/cli/sim.md` now also states that steps otherwise share circuit
   and solver state. Additive; no `schema_version` bump.
-
+- **sky130 `mos_array`/`diff_pair` gate pad and guard-ring well clear the
+  PDK's Magic `poly.4` / `diff/tap.10`** (issue #3115): the gate landing pad
+  is now stood 0.15µm off the diffusion (stem of exactly the gate length) and
+  the n-tap ring's nwell extends 0.2µm past the ring. Reported `U<i>_G` ports
+  (and `core_h_um`) on sky130 move up by 0.15µm; other families' geometry is
+  unchanged, though PCell property metadata changes the committed example
+  GDS bytes. See `docs/cli/gen.md`.
 - **`klt pex` no longer discards the schematic side on an extracted-side
   backend failure** (issue #2990): an extracted-side `klt sim` failure other
   than the pin-count mismatch (e.g. a batch-fleet capacity refusal) now

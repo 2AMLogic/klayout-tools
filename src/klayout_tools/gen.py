@@ -347,6 +347,7 @@ _HIDDEN_PARAMS = {
     "well_tap_implant_present",
     "well_margin_resolved_um",
     "gate_pad_clearance_um",
+    "ring_well_margin_um",
     # `mos_array`/`diff_pair`/`esd_device`'s issue #1577 harness-computed
     # knobs -- resolved per PDK family exactly like `gate_pad_clearance_um`
     # above, never part of the request schema.
@@ -687,6 +688,21 @@ def _mos_cap_tie(
     return gate_ext_um + contact_region_um, sd_cap_xy
 
 
+def _top_endcap_neck(
+    px0: float, px1: float, w_um: float, top_endcap_um: float
+) -> list[tuple[float, float, float, float]]:
+    """The gate stripe's top-edge endcap neck (issue #2936), or ``[]`` when
+    ``top_endcap_um`` is not positive.
+
+    A stripe-width poly box so the poly clears the diffusion's top edge
+    (``y == w_um``) by ``top_endcap_um`` across the *full* gate length. The
+    landing pad alone does not -- it is only ``contact_region_um`` wide,
+    narrower than the gate once ``l_um`` exceeds that."""
+    if top_endcap_um <= 0:
+        return []
+    return [(px0, w_um, px1, w_um + top_endcap_um)]
+
+
 def _mos_unit_layout(
     w_um: float,
     l_um: float,
@@ -911,13 +927,7 @@ def _mos_unit_layout(
         g_cy = pad_y0 + stem_um + contact_region_um / 2.0
         for px0, px1 in poly_positions:
             g_cx = (px0 + px1) / 2.0
-            if top_endcap_um > 0:
-                # Top-edge endcap (issue #2936): a stripe-width neck so the
-                # poly clears the diffusion's top edge by `top_endcap_um`
-                # across the *full* gate length. The landing pad alone does
-                # not -- it is only `contact_region_um` wide, narrower than
-                # the gate once `l_um` exceeds that.
-                boxes["poly"].append((px0, w_um, px1, w_um + top_endcap_um))
+            boxes["poly"].extend(_top_endcap_neck(px0, px1, w_um, top_endcap_um))
             if clearance_um:
                 boxes["poly"].append((px0, w_um, px1, pad_y0))
             boxes["poly"].append(

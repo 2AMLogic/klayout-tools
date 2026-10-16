@@ -53,7 +53,7 @@
     },
     "gen_compose.bbox_um.y0": -0.15,
     "gen_compose.bbox_um.y1": {
-      "value": 2.23,
+      "value": 2.5300000000000002,
       "tol_pct": 2
     },
     "gen_compose.blocks_count": 3,

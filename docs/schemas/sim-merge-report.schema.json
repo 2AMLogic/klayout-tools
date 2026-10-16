@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "klt sim-merge merged report",
+  "description": "A klt sim report (docs/cli/sim.md) over the union of the shards' corners, plus the additive `merge` block. Fields not listed here keep their klt sim meaning.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "status",
+    "corner_count",
+    "passed",
+    "failed",
+    "errored",
+    "inconclusive",
+    "diagnostic_counts",
+    "metrics",
+    "environment",
+    "coverage",
+    "measurements",
+    "corners",
+    "merge"
+  ],
+  "properties": {
+    "status": { "type": "string" },
+    "corner_count": { "type": "integer", "minimum": 0 },
+    "corners": { "type": "array", "items": { "type": "object" } },
+    "measurements": { "type": "array", "items": { "type": "object" } },
+    "environment": {
+      "type": "object",
+      "properties": {
+        "netlist_sha256": { "type": "array", "items": { "type": ["string", "null"] } },
+        "remote": { "type": "array" }
+      }
+    },
+    "merge": {
+      "type": "object",
+      "required": ["schema_version", "shard_count", "shards"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "shard_count": { "type": "integer", "minimum": 1 },
+        "shards": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["id", "request", "request_sha256", "corner_count"],
+            "properties": {
+              "id": { "type": "string" },
+              "request": { "type": ["string", "null"] },
+              "request_sha256": { "type": ["string", "null"] },
+              "corner_count": { "type": "integer", "minimum": 1 }
+            }
+          }
+        }
+      }
+    }
+  }
+}
