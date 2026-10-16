@@ -1042,6 +1042,52 @@ def test_identical_netlist_does_not_flag_path_comments(tmp_path, argv_log):
     assert report["drift"]["path_comments_differ"] is False
 
 
+def test_check_ignores_continuation_layout(tmp_path, argv_log, monkeypatch):
+    """Issue #3324: re-wrapped ``+`` continuations and whitespace runs match."""
+    monkeypatch.setenv(
+        "NETLIST_BODY", "M1 d g s b nfet  w=1 l=2\n* a + b\nR1 a b 1k\n.end"
+    )
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "block.spice"
+    output.write_bytes(
+        b"M1 d g s b nfet\r\n+ w=1\r\n+   l=2   \r\n* a + b\r\nR1 a b 1k\r\n.end\r\n"
+    )
+
+    report = run_netlist(schematic, str(output), check=True, xschem_binary=binary)
+
+    assert report["status"] == "match"
+    assert report["drift"]["layout_differs"] is True
+    assert report["drift"]["diff"] == []
+
+
+def test_check_still_reports_drift_beside_layout_difference(
+    tmp_path, argv_log, monkeypatch
+):
+    monkeypatch.setenv("NETLIST_BODY", "M1 d g s b nfet w=1 l=2\n.end")
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "block.spice"
+    output.write_text("M1 d g s b nfet\n+ w=1 l=3\n.end\n", encoding="utf-8")
+
+    report = run_netlist(schematic, str(output), check=True, xschem_binary=binary)
+
+    assert report["status"] == "drifted"
+    assert report["drift"]["layout_differs"] is False
+    assert report["drift"]["diff"]
+
+
+def test_identical_netlist_does_not_flag_layout(tmp_path, argv_log):
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "block.spice"
+    output.write_text(_NETLIST_BODY + "\n", encoding="utf-8")
+
+    report = run_netlist(schematic, str(output), check=True, xschem_binary=binary)
+
+    assert report["drift"]["layout_differs"] is False
+
+
 def test_path_normalization_keeps_the_file_name():
     """Only the directory is ignored: a subcircuit taken from a different
     schematic file still compares unequal."""

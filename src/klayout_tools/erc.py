@@ -419,6 +419,10 @@ from .extract import (
 #: thing `antenna_ratio_max: null` has always meant for the limit), which
 #: is why it is an opt-in flag rather than a default: no existing caller's
 #: report can acquire a null it did not ask for.
+#: Issue #3011 adds the opt-in ``--omit-antenna-tables`` (``--findings-only``
+#: only) and the top-level boolean ``antenna_tables_omitted`` -- additive:
+#: ``false`` on every run that does not pass the flag, with every other field
+#: of such a run byte-identical to before.
 #: Issue #2234 adds two more optional spec keys, both additive and inert
 #: unless used: ``ties[].tap_boxes`` (a caller-asserted list of tap-geometry
 #: boxes, an alternative to ``tap_requires``/``tap_is_dedicated`` -- see
@@ -566,9 +570,18 @@ def _antenna_skip_reason(pdk: str | None, findings_only: bool) -> str:
 
 
 def _antenna_coverage(
-    gates: list[dict[str, Any]], pdk: str | None, findings_only: bool = False
+    gates: list[dict[str, Any]],
+    pdk: str | None,
+    findings_only: bool = False,
+    omit_tables: bool = False,
 ) -> dict[str, Any]:
-    """Grade coverage against actual non-gate antenna levels, not gate count."""
+    """Grade coverage against actual non-gate antenna levels, not gate count.
+
+    ``omit_tables`` (issue #3011) collapses the per-gate/per-level
+    ``skipped`` and ``gate_reference_level`` ``inapplicable`` entries to one
+    aggregate entry each (same reason, distinct ids so the common validator's
+    one-category-per-identity rule holds). ``checked`` is left verbatim.
+    """
     checked = []
     skipped = []
     inapplicable = []
@@ -586,6 +599,18 @@ def _antenna_coverage(
                 checked.append(identity)
             else:
                 skipped.append({"id": identity, "reason": reason})
+    if omit_tables:
+        if skipped:
+            skipped = [{"id": work_id("antenna"), "reason": reason}]
+        if any(r["reason"] == "gate_reference_level" for r in inapplicable):
+            inapplicable = [
+                r for r in inapplicable if r["reason"] != "gate_reference_level"
+            ] + [
+                {
+                    "id": work_id("antenna", "gate_reference_level"),
+                    "reason": "gate_reference_level",
+                }
+            ]
     return {
         "scope": "antenna",
         **build_check_coverage(
@@ -2243,6 +2268,13 @@ def _deck_device_cuts(
     - :class:`~klayout_tools.decks.ResistorDevice` -- conducting-body layer
       is ``body``; region is ``body & marker`` narrowed by ``requires``/
       ``excludes`` (:func:`~klayout_tools.extract._resistor_body_region`).
+      For a ``topology="abutting_heads"`` entry (sg13g2's poly resistors,
+      issue #2679) the region is instead the narrowed ``marker`` body that
+      touches two separate ``body``-layer heads -- the same region ``klt
+      extract`` recognises. Cutting it from the matching ``body`` role then
+      removes only whatever ``body`` geometry the marker actually covers (a
+      continuous bar's resistive span), never the abutting heads, so a
+      PDK-PCell-drawn resistor's two head nets stay distinct here too.
     - :class:`~klayout_tools.decks.CapacitorDevice` -- two independent
       conducting-body layers, each checked separately:
 
@@ -4166,6 +4198,7 @@ def run_erc(
     pdk: str | None = None,
     deck: str | None = None,
     findings_only: bool = False,
+    omit_antenna_tables: bool = False,
 ) -> dict[str, Any]:
     """Run ``klt erc``'s connectivity-model extraction, antenna-ratio
     check, and core ERC finding checks end to end.
@@ -4302,6 +4335,14 @@ def run_erc(
     :class:`ErcError` rather than silently returning an ungraded antenna
     half to a caller who asked for one.
 
+    ``omit_antenna_tables`` (optional, default ``False``, issue #3011) is
+    valid only with ``findings_only`` (otherwise :class:`ErcError`). It
+    projects the finished report, after every verdict is rolled up: ``gates``
+    becomes ``[]`` (``gate_count`` keeps the real count) and the antenna
+    ``coverage`` collapses to one aggregate entry per category, so the output
+    of a dense layout is small enough to commit verbatim. The top-level
+    ``antenna_tables_omitted`` echoes the flag.
+
     Returns a dict matching the documented ``klt erc`` JSON schema (see
     ``docs/cli/erc.md``), including ``schema_version``, (issue #861)
     ``erc_findings``/``erc_finding_count``, (issue #908) each violating
@@ -4331,6 +4372,11 @@ def run_erc(
     unresolvable layout/top cell, or a layout in which no net carries any
     geometry on the declared gate role at all.
     """
+    if omit_antenna_tables and not findings_only:
+        raise ErcError(
+            "--omit-antenna-tables drops tables that only a --findings-only "
+            "run leaves empty, so it requires --findings-only"
+        )
     if findings_only and pdk is not None:
         raise ErcError(
             "--findings-only skips the per-gate antenna accumulation "
@@ -4647,7 +4693,7 @@ def run_erc(
     any_antenna_violation = any(
         level["verdict"] == "violate" for gate in gates for level in gate["levels"]
     )
-    coverage = _antenna_coverage(gates, pdk, findings_only)
+    coverage = _antenna_coverage(gates, pdk, findings_only, omit_antenna_tables)
 
     # The common rollup rule (issue #2109, this adapter's own #2115) decides
     # `status` from `coverage` plus the two violation signals above, rather
@@ -4830,7 +4876,11 @@ def run_erc(
         "findings_only": findings_only,
         "gate_role": gate_role,
         "gate_count": len(gates),
-        "gates": gates,
+        # (issue #3011) `--omit-antenna-tables`: the all-`unchecked` per-gate
+        # table is dropped from a `--findings-only` report; `gate_count`
+        # above and every verdict were computed from the full list.
+        "antenna_tables_omitted": omit_antenna_tables,
+        "gates": [] if omit_antenna_tables else gates,
         # (issue #2497) One entry per declared `nets[]` entry, in spec
         # order: the island count `erc.unconnected_net` graded it on, even
         # when that count passed. `[]` when the spec declares no `nets`.

@@ -2385,6 +2385,110 @@ def test_mos_array_interior_channel_is_drc_clean(tmp_path, both_pdk_root):
             assert drc_report["status"] == "clean", drc_report["violations"]
 
 
+# `pitch_x_um`/`pitch_y_um` (issue #3299, Phase 1): explicit pitch override,
+# clamped up to the legal minimum.
+
+
+def _mos_array_pitch_request(tmp_path, pdk_root, name, **params):
+    return {
+        "generator": "mos_array",
+        "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+        "params": {"rows": 2, "cols": 3, "dummy": 0, **params},
+        "options": {"output": str(tmp_path / f"{name}.gds")},
+    }
+
+
+def test_mos_array_default_pitch_override_output_unchanged(tmp_path, pdk_root):
+    implicit = generate(_mos_array_pitch_request(tmp_path, pdk_root, "implicit"))
+    explicit = generate(
+        _mos_array_pitch_request(
+            tmp_path, pdk_root, "explicit", pitch_x_um=0.0, pitch_y_um=0.0
+        )
+    )
+    _assert_gds_geometry_equal(tmp_path / "implicit.gds", tmp_path / "explicit.gds")
+    assert "pitch" not in implicit["drc_hints"]
+    assert "pitch" not in explicit["drc_hints"]
+    assert implicit["warnings"] == explicit["warnings"]
+
+
+def test_mos_array_pitch_override_widens_and_reports_effective_pitch(
+    tmp_path, pdk_root
+):
+    base = generate(_mos_array_pitch_request(tmp_path, pdk_root, "base"))
+    wide = generate(
+        _mos_array_pitch_request(
+            tmp_path, pdk_root, "wide", pitch_x_um=50.0, pitch_y_um=60.0
+        )
+    )
+    base_w = base["bbox_um"]["x1"] - base["bbox_um"]["x0"]
+    wide_w = wide["bbox_um"]["x1"] - wide["bbox_um"]["x0"]
+    base_h = base["bbox_um"]["y1"] - base["bbox_um"]["y0"]
+    wide_h = wide["bbox_um"]["y1"] - wide["bbox_um"]["y0"]
+    pitch = wide["drc_hints"]["pitch"]
+    assert pitch["col_pitch_um"] == pytest.approx(50.0)
+    assert pitch["row_pitch_um"] == pytest.approx(60.0)
+    assert pitch["pitch_x_clamped"] is False
+    assert pitch["pitch_y_clamped"] is False
+    # cols=3 -> 2 column gaps; rows=2 -> 1 row gap.
+    assert wide_w == pytest.approx(base_w + 2 * (50.0 - pitch["min_col_pitch_um"]))
+    assert wide_h == pytest.approx(base_h + (60.0 - pitch["min_row_pitch_um"]))
+
+
+def test_mos_array_sub_minimum_pitch_is_clamped_and_reported(tmp_path, pdk_root):
+    base = generate(_mos_array_pitch_request(tmp_path, pdk_root, "base"))
+    clamped = generate(
+        _mos_array_pitch_request(
+            tmp_path, pdk_root, "clamped", pitch_x_um=0.1, pitch_y_um=0.1
+        )
+    )
+    pitch = clamped["drc_hints"]["pitch"]
+    assert pitch["pitch_x_clamped"] is True
+    assert pitch["pitch_y_clamped"] is True
+    assert pitch["col_pitch_um"] == pytest.approx(pitch["min_col_pitch_um"])
+    assert pitch["row_pitch_um"] == pytest.approx(pitch["min_row_pitch_um"])
+    assert len(clamped["warnings"]) == 2
+    # Clamped to the minimum == the default geometry.
+    _assert_gds_geometry_equal(tmp_path / "base.gds", tmp_path / "clamped.gds")
+    assert base["bbox_um"] == clamped["bbox_um"]
+
+
+def test_mos_array_pitch_override_composes_with_interior_channel(tmp_path, pdk_root):
+    report = generate(
+        _mos_array_pitch_request(
+            tmp_path,
+            pdk_root,
+            "both",
+            pitch_x_um=40.0,
+            pitch_y_um=40.0,
+            interior_channel_um=2.0,
+        )
+    )
+    pitch = report["drc_hints"]["pitch"]
+    # The channel is added on top of the effective (overridden) base pitch.
+    assert pitch["col_pitch_um"] == pytest.approx(42.0)
+    assert pitch["row_pitch_um"] == pytest.approx(42.0)
+    assert len(report["navigable_regions"]) == 3  # 1 row gap + 2 column gaps
+
+
+@pytest.mark.parametrize("name", ["pitch_x_um", "pitch_y_um"])
+def test_mos_array_negative_pitch_rejected(tmp_path, pdk_root, name):
+    with pytest.raises(GenError):
+        generate(_mos_array_pitch_request(tmp_path, pdk_root, "neg", **{name: -1.0}))
+
+
+def test_mos_array_pitch_at_clamp_boundary_is_drc_clean(tmp_path, pdk_root):
+    """A sub-minimum request is clamped to the dense boundary pitch, which
+    must itself be DRC-clean."""
+    output = tmp_path / "dense.gds"
+    request = _mos_array_pitch_request(
+        tmp_path, pdk_root, "dense", pitch_x_um=0.1, pitch_y_um=0.1
+    )
+    request["params"]["dummy"] = 1
+    generate(request)
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
 # --- res_array --------------------------------------------------------------- #
 
 
@@ -2402,6 +2506,75 @@ def test_res_array_device_count_and_ports(tmp_path, pdk_root):
     assert report["device_count"] == 3
     assert len(report["ports"]) == 6
     assert report["drc_hints"]["matched_group_id"] == "res_array:3"
+
+
+def _series_report(tmp_path, pdk_root, name, **params):
+    output = tmp_path / f"{name}.gds"
+    report = generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": params,
+            "options": {"output": str(output)},
+        }
+    )
+    return output, report
+
+
+def test_res_array_series_false_matches_default(tmp_path, pdk_root):
+    _, default = _series_report(tmp_path, pdk_root, "d", num=4, rows=2)
+    _, off = _series_report(tmp_path, pdk_root, "o", num=4, rows=2, series=False)
+    assert default["ports"] == off["ports"]
+    assert default["drc_hints"] == off["drc_hints"]
+    assert len(off["ports"]) == 8
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"rows": 1},
+        {"rows": 2},
+        {"rows": 3, "num": 7},
+        {"rows": 2, "flavor": "high", "width_um": 0.35},
+        {"rows": 2, "flavor": "xhigh", "width_um": 0.35},
+        {"rows": 2, "metal_level": 1, "width_um": 0.5},
+        {"rows": 2, "metal_level": 5, "width_um": 2.0, "length_um": 4.0},
+    ],
+)
+def test_res_array_series_ports_note_and_drc_clean(tmp_path, pdk_root, extra):
+    params = {"num": 6, "dummy": 1, **extra}
+    output, report = _series_report(tmp_path, pdk_root, "s", series=True, **params)
+    num = params["num"]
+    assert [p["name"] for p in report["ports"]] == ["R0_A", f"R{num - 1}_B"]
+    assert report["device_count"] == num
+    assert report["drc_hints"]["matched_group_id"] == f"res_array:{num}"
+    notes = " ".join(report["drc_hints"]["notes"])
+    assert f"{num - 1} joint jumper" in notes
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+def test_res_array_series_num_1_has_no_jumpers(tmp_path, pdk_root):
+    _, report = _series_report(tmp_path, pdk_root, "s1", num=1, series=True)
+    assert [p["name"] for p in report["ports"]] == ["R0_A", "R0_B"]
+    assert "0 joint jumper" in " ".join(report["drc_hints"]["notes"])
+
+
+def test_res_array_series_extracts_as_connected_chain(tmp_path, pdk_root):
+    output, _ = _series_report(
+        tmp_path, pdk_root, "chain", num=4, rows=2, dummy=0, series=True
+    )
+    extract_report = run_extract(str(output), "sky130")
+    assert extract_report["device_counts"] == {"res_generic_po": 4}
+    cards = Path(extract_report["netlist_path"]).read_text().splitlines()
+    ends = [line.split()[1:3] for line in cards if line.startswith("R")]
+    degree: dict[str, int] = {}
+    for a, b in ends:
+        degree[a] = degree.get(a, 0) + 1
+        degree[b] = degree.get(b, 0) + 1
+    # A 4-resistor series chain: 5 nets, two terminals (degree 1), three
+    # interior joints (degree 2). Unjoined units would give 8 degree-1 nets.
+    assert sorted(degree.values()) == [1, 1, 2, 2, 2], degree
 
 
 def test_res_array_num_1_boundary_and_zero_dummy(tmp_path, pdk_root):
@@ -3194,6 +3367,71 @@ def test_gf180mcu_sibling_guard_ring_generators_off_grid_padding_drc_clean(
     assert drc_report["rule_counts"] == {}
 
 
+@pytest.mark.parametrize("ring_padding_um", (0.5015, 1.2345, 3.1415))
+@pytest.mark.parametrize(
+    ("generator", "params"),
+    [
+        ("diff_pair", {"splits": 1}),
+        ("mos_array", {"rows": 1, "cols": 2, "dummy": 0}),
+        ("esd_device", {"fingers": 2}),
+    ],
+)
+def test_gf180mcu_off_grid_ring_padding_ring_vertices_on_mfg_grid(
+    tmp_path, both_pdk_root, generator, params, ring_padding_um
+):
+    """Issue #3364: the guard ring's Comp / Pplus / Nplus / Metal1 boxes must
+    land on gf180mcu's 0.005um manufacturing grid at an off-grid
+    `ring_padding_um`, asserted on the drawn vertices themselves (independent
+    of the deck's `*.ongrid.1` rules). The exact implant extension is covered
+    by the `*_implant_extension_is_exact` tests."""
+    import klayout.db as kdb
+
+    if not gen.mfg_grid_um("gf180mcu", _GF180_CONTACT_LAYER):
+        pytest.skip("gf180mcu deck declares no `ongrid` rules yet (PR #3365)")
+    output = tmp_path / f"{generator}_ring_grid_{ring_padding_um}.gds"
+    generate(
+        {
+            "generator": generator,
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {
+                **params,
+                "add_guard_ring": True,
+                "ring_padding_um": ring_padding_um,
+            },
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    grid_dbu = int(round(0.005 / layout.dbu))
+    for layer in ((22, 0), (31, 0), (32, 0), (34, 0)):
+        region = kdb.Region(layout.top_cell().begin_shapes_rec(layout.layer(*layer)))
+        for poly in region.each():
+            for pt in poly.each_point_hull():
+                assert pt.x % grid_dbu == 0 and pt.y % grid_dbu == 0, (layer, pt)
+
+    drc_report = run_drc(str(output), "gf180mcu")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+def test_snap_ring_box_um_grows_outer_and_shrinks_inner_onto_grid():
+    """Issue #3364: `_snap_ring_box_um` moves every edge onto the grid in the
+    direction that only grows the ring band, and is inert on-grid / without a
+    grid."""
+    dbu = gen._GRID_DBU_UM
+    box = (-0.9221, -0.9219, 3.0036, 3.0034)
+    assert gen._snap_ring_box_um(box, 0.0, dbu) == box
+    assert gen._snap_ring_box_um(box, 0.005, dbu) == pytest.approx(
+        (-0.925, -0.925, 3.005, 3.005)
+    )
+    assert gen._snap_ring_box_um(box, 0.005, dbu, inward=True) == pytest.approx(
+        (-0.92, -0.92, 3.0, 3.0)
+    )
+    on_grid = (-0.92, 0.0, 3.0, 1.5)
+    assert gen._snap_ring_box_um(on_grid, 0.005, dbu) == on_grid
+    assert gen._snap_ring_box_um(on_grid, 0.005, dbu, inward=True) == on_grid
+
+
 def test_snap_offset_um_is_inert_on_grid_exact_inputs():
     """The #2442 fix must be inert for on-grid offsets (e.g. the historical
     default padding 0.5 + grid-exact ring width): `_snap_offset_um` returns
@@ -3494,6 +3732,45 @@ def test_res_array_sky130_flavor_high_draws_psdm_and_rpm(tmp_path, pdk_root):
     assert _SKY130_RPM_LAYER in present
     assert _SKY130_URPM_LAYER not in present
     assert _SKY130_NPC_LAYER in present  # issue #3077
+
+
+@pytest.mark.parametrize(
+    ("flavor", "marker_layer", "rule_id"),
+    [
+        ("high", _SKY130_RPM_LAYER, "rpm.width.1"),
+        ("xhigh", _SKY130_URPM_LAYER, "urpm.width.1"),
+    ],
+)
+def test_res_array_sky130_min_width_marker_meets_pdk_minimum(
+    tmp_path, pdk_root, flavor, marker_layer, rule_id
+):
+    """A minimum-width (0.42 um) `res_array` keeps its rpm/urpm marker at or
+    above the PDK's 1.27 um floor (`rpm.1a`/`urpm.1a`): the marker covers the
+    contacted heads, not just the narrow body (#2449). The curated deck's
+    `rpm.width.1`/`urpm.width.1` (#3030) guard that, so a regression to a
+    body-width marker is visible to `klt drc --deck sky130`."""
+    import klayout.db as kdb
+
+    output = tmp_path / f"res_array_min_{flavor}.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"flavor": flavor, "width_um": 0.42, "length_um": 52},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.top_cell()
+    marker = kdb.Region(top.begin_shapes_rec(layout.layer(*marker_layer))).merged()
+    assert not marker.is_empty()
+    for polygon in marker.each():
+        bbox = polygon.bbox()
+        assert min(bbox.width(), bbox.height()) * layout.dbu >= 1.27
+
+    drc_report = run_drc(str(output), "sky130")
+    assert rule_id not in drc_report["rule_counts"]
 
 
 def test_res_array_sky130_flavor_xhigh_draws_psdm_and_urpm(tmp_path, pdk_root):
@@ -5853,6 +6130,43 @@ def test_sg13g2_res_array_default_params_recognised_as_rsil(tmp_path, sg13g2_pdk
     # literal keeps this tied to `res_array`'s documented default `num`.
     assert report["device_counts"] == {"rsil": gen_report["device_count"]}
     assert report["dummy_devices_dropped"] == 2
+
+
+@pytest.mark.parametrize(
+    ("flavor", "device"), [("generic", "rsil"), ("rppd", "rppd"), ("rhigh", "rhigh")]
+)
+def test_sg13g2_res_array_uses_pdk_pcell_polyres_body_abutting_gatpoly_heads(
+    tmp_path, sg13g2_pdk_root, flavor, device
+):
+    """Issue #2679: `res_array` on sg13g2 draws the IHP PCell convention --
+    `polyres` is the resistive body and `GatPoly` only the two abutting
+    heads (zero overlap) -- and every flavour round-trips through `klt
+    extract --deck sg13g2` to exactly `num` devices, each with two distinct
+    terminal nets (the body does not short its heads)."""
+    import klayout.db as kdb
+
+    output = tmp_path / f"res_array_sg13g2_{flavor}.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+            "params": {"flavor": flavor, "num": 3, "dummy": 0},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.top_cell()
+    gatpoly = kdb.Region(top.begin_shapes_rec(layout.layer(5, 0)))
+    polyres = kdb.Region(top.begin_shapes_rec(layout.layer(*_SG13G2_RES_MARK_LAYER)))
+    assert not polyres.is_empty()
+    assert (gatpoly & polyres).is_empty()
+    assert not (gatpoly.sized(1) & polyres).is_empty()
+
+    report = run_extract(str(output), "sg13g2")
+    assert report["device_counts"] == {device: 3}
+    for dev in report["devices"]:
+        assert dev["nets"]["a"] != dev["nets"]["b"]
 
 
 def test_sg13g2_res_array_explicit_generic_matches_default(tmp_path, sg13g2_pdk_root):

@@ -601,10 +601,10 @@ partial self inductance; the output shape is unchanged.
   own canonical direction.
 - **Still rejected:** branches (T junctions), disconnected or overlapping
   boxes, closed loops, and ambiguous corner geometry (messages name the
-  failing condition, after the mixed-axis diagnostic above), and **any
-  winding together with `frequencies_hz`** — the retarded sweep has no
-  series-path model yet
-  ([#2730](https://github.com/2AMLogic/klayout-tools/issues/2730)).
+  failing condition, after the mixed-axis diagnostic above). A winding
+  together with `frequencies_hz` is accepted since
+  [#2730](https://github.com/2AMLogic/klayout-tools/issues/2730) — see
+  "Series windings in the frequency sweep" below.
 
 ### Reading the inductance matrix
 
@@ -638,6 +638,9 @@ and why. This applies independent of whether `compute_inductance` is also
 set in the same request. A multi-box conductor's several boxes are combined
 into one equivalent thin wire (summed cross-sectional area, area-weighted
 transverse centroid) before the retarded-kernel solve below.
+
+A conductor that is a connected, non-branching mixed-axis winding is also
+accepted — see "Series windings in the frequency sweep" below.
 
 Since [issue #1842](https://github.com/2AMLogic/klayout-tools/issues/1842),
 conductors no longer need to share a current-flow axis or axial extent for
@@ -723,6 +726,63 @@ fraction of that self-capacitance's field lines terminate "at infinity"
 rather than on the other conductor, so it alone over-counts the capacitance
 the telegrapher-equation model needs. See
 `native/mom/src/fullwave.rs`'s module docs for the full derivation.
+
+### Series windings in the frequency sweep
+
+A conductor that classifies as a series winding (see "Series windings
+(static solve)" above) is accepted together with `frequencies_hz`
+([issue #2730](https://github.com/2AMLogic/klayout-tools/issues/2730)). It
+is **not** collapsed to one straight wire: each electrical leg
+(centreline vertex to vertex) is meshed on its own, every cell carrying its
+leg's signed unit direction, length and equal-area radius, and the double
+integral above is summed over cell pairs with `u_p . u_q` and both lengths
+evaluated per cell pair. Perpendicular legs — including the two meeting at
+a turn — therefore couple by exactly zero, antiparallel legs subtract, and
+the same unit terminal current flows through every leg (legs are in
+series). `impedance_matrix_*_ohm[j][j]` is the winding's
+terminal-to-terminal **partial self impedance**, and `[j][k]` its partial
+mutual impedance to conductor `k`, both signed by the winding's canonical
+traversal direction (the lexicographically smaller terminal first; reversing
+a conductor flips the sign of its mutual terms, not of its self term). The
+output shape is unchanged.
+
+The terminal-impedance contract, in full:
+
+- **Series impedance only.** `Z` is the retarded series impedance of the
+  path. The shunt capacitance matrix (`capacitance_matrix_ff`) is the static
+  Maxwell matrix of the drawn boxes and is reported next to it, but it is
+  **not** folded into `Z`: no inter-turn or substrate capacitance, hence no
+  self-resonance. Read a winding's `Z` only well below its first
+  self-resonance.
+- **Supported regime.** Electrically small to moderate structures: the
+  path's total length should stay well under a wavelength in the background
+  medium (`k * length` of order one at most; retardation is modelled, shunt
+  coupling is not). The cell size must resolve the wire: the
+  point-collocation self term converges only when `segment_size_um` is
+  comparable to or below the equivalent radius (measured: 4 µm cells on a
+  1.13 µm-radius wire are 9% off the converged value, 1 µm cells 0.03%).
+  The converged answer is the thin-wire kernel's, which sits
+  `mu0/(2*pi) * length * ln(a / GMD)` below the static PEEC series
+  inductance (the retarded fill is a surface-current wire of radius `a`,
+  PEEC a uniform-current square bar): 5.5% on the validation U, and it
+  shrinks as the legs get longer relative to their width.
+- **Corners** follow the static solver's volume-conserving centreline
+  convention. Different legs of one winding use their true centre-to-centre
+  distance; the thin-wire regularisation applies only inside a leg.
+- **No line quantities, no ports.** A winding is not a uniform line, so no
+  `characteristic_impedance_*`, `attenuation_np_per_m` or `phase_rad_per_m`
+  are reported. A request that combines a winding with `ports`
+  (S-parameters, de-embedding, Touchstone export) is **rejected** with an
+  explicit error: a port position is an offset along one straight axial
+  span, and no path-port contract has been validated.
+
+Validation: `native/mom/src/fullwave.rs` (L = sum of perpendicular legs;
+U = signed-leg reduction; mutual-sign agreement; port rejection),
+`tests/test_mom_fullwave_validation.py` (low-frequency limit against the
+static series inductance of #2729, refinement convergence) and
+`tests/test_mom_cross_validation.py` (bent-path driving-point impedance
+against NEC2++); numbers in `docs/design/mom-validation.md` and
+`docs/design/mom-cross-validation.md`.
 
 ### Worked example: two-wire transmission line
 
