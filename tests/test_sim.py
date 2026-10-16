@@ -4772,6 +4772,13 @@ def test_run_sim_monte_carlo_family_mismatch_sg13g2_mosfet_is_section_dependent(
         (tmp_path / "corner.lib").write_text(f".lib {section}\n.endl {section}\n")
     request = _write_request(tmp_path, spec)
     _stub_subprocess_run(monkeypatch)
+    # No ihp-sg13g2 install on CI: stub PDK resolution (the section libs
+    # above are absolute paths, so only the resolution call itself matters).
+    monkeypatch.setattr(
+        sim,
+        "find_pdk",
+        lambda **_kw: {"root": str(tmp_path), "variant": "ihp-sg13g2"},
+    )
 
     report = sim.run_sim(str(request))
 
