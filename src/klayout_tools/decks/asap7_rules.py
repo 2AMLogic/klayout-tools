@@ -1,4 +1,4 @@
-"""Declared rule-id contract for the ASAP7 KLayout DRC deck (#2760, #2810).
+"""Declared rule-id contract for the ASAP7 KLayout DRC deck (#2760, #2810, #2811).
 
 The deck itself is a KLayout DRC-DSL script, :data:`DECK_PATH`
 (``asap7.drc`` next to this module), run headless through
@@ -419,7 +419,18 @@ _SRAM = (
     "SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM "
     "says SRAM rules may be waived for other cells"
 )
-_NO_BOUND = "the DRM gives no distance bound to check against"
+_GATE_DISCONTINUOUS = (
+    "no distance bound, but a topological condition (a GATE column split into "
+    "separate polygons, Fig. 3.4.2(a)); the DRM does not say how far two GATE "
+    "polygons may overlap sideways to share a column, so the predicate needs "
+    "that reading ratified before it is enforced"
+)
+_ACTIVE_NOTCH = (
+    "no distance bound, but a topological condition (a slot cut into a "
+    "vertical ACTIVE edge, Fig. 3.5.4(b)); the DRM defines neither 'notch' "
+    "nor its size, so the predicate needs that reading ratified before it is "
+    "enforced"
+)
 _TRACK = (
     "classified by routing track (same / parallel / aligned tracks); the deck "
     "has no routing-direction or track assignment"
@@ -515,13 +526,13 @@ _ONE_SIDE = (
 
 #: DRM rules from the covered tables (3.1-3.19) the deck does not check yet.
 NOT_IMPLEMENTED: tuple[Asap7RuleGap, ...] = (
-    Asap7RuleGap("GATE.AUX.2", "Table 3.4.1", _NO_BOUND, "#2812"),
+    Asap7RuleGap("GATE.AUX.2", "Table 3.4.1", _GATE_DISCONTINUOUS, "#2812"),
     Asap7RuleGap("SRAM.ACTIVE.WELL.S.5", "Table 3.5.1", _SRAM, "#2812"),
     Asap7RuleGap("SRAM.ACTIVE.WELL.EN.2", "Table 3.5.1", _SRAM, "#2812"),
     Asap7RuleGap("SRAM.ACTIVE.A.2A", "Table 3.5.2", _SRAM, "#2812"),
     Asap7RuleGap("SRAM.ACTIVE.A.2B", "Table 3.5.2", _SRAM, "#2812"),
     Asap7RuleGap("SRAM.ACTIVE.AUX.2", "Table 3.5.2", _SRAM, "#2812"),
-    Asap7RuleGap("ACTIVE.AUX.3", "Table 3.5.2", _NO_BOUND, "#2812"),
+    Asap7RuleGap("ACTIVE.AUX.3", "Table 3.5.2", _ACTIVE_NOTCH, "#2812"),
     Asap7RuleGap(
         "ACTIVE.LUP.1",
         "Table 3.5.2",
@@ -578,14 +589,63 @@ NOT_IMPLEMENTED: tuple[Asap7RuleGap, ...] = (
     Asap7RuleGap("V9.AUX.1", "Table 3.19.1", _PAD, "#3156"),
 )
 
-#: Shipped standard cells (lambdapdk v0.2.17, asap7sc7p5t_28_{R,L,SL}) that
-#: violate a deck rule as the DRM states it. In each, SDT is drawn 81 nm
-#: tall over a 54 nm ACTIVE, so its top edge does not lie on ACTIVE's
-#: (Table 3.8.1, Fig. 3.8.1(d)). The rule is not loosened; the deviation is
-#: listed here and in docs/cli/drc.md. Names are given without the
-#: ``_ASAP7_75t_<VT>`` suffix.
-SHIPPED_CELL_DEVIATIONS: dict[str, tuple[str, ...]] = {
-    cell: ("SDT.ACTIVE.AUX.2",)
+#: Density disposition (#2811). The pinned DRM states no density rule: its
+#: rule-type list (Table 1.2.1: A, EN, EX, GEOMETRY, L, LUP, OV, R, S, SRAM,
+#: W, AUX) has no density type, and no section of chapter 3 (3.1 Geometry
+#: Check through 3.19 V8-V9) or table in it gives a minimum / maximum layer
+#: density, a density window or fill requirement. The deck therefore checks
+#: no density, and no threshold is invented from shipped geometry. The APR
+#: tech LEF's MINIMUMDENSITY / MAXIMUMDENSITY on M5 and Pad only are router
+#: settings outside the DRM and are not taken as rules (docs/cli/drc.md,
+#: "Density").
+DENSITY_DISPOSITION = (
+    "the ASAP7 DRM (" + DRM_SOURCE + ") states no density rule: Table 1.2.1 "
+    "has no density rule type and no table in sections 3.1-3.19 gives a "
+    "density threshold, window or fill requirement, so the deck checks none"
+)
+
+
+@dataclass(frozen=True)
+class Asap7CellDeviation:
+    """One shipped standard cell that violates one implemented rule as the
+    DRM states it, kept as an explicit, exact exception of the corpus gate.
+
+    ``cell`` omits the ``_ASAP7_75t_<VT>`` suffix; ``citation`` is the DRM
+    table / figure the rule is read from; ``libraries`` names the pinned
+    ``asap7sc7p5t_28_<suffix>`` libraries the deviation occurs in.
+    ``handling`` says what the deck and the gate do about it: the rule is
+    kept as the DRM states it (not loosened, not waived in the deck), the
+    full-corpus test expects exactly this ``(cell, rule)`` pair, and the
+    clean-run CLI gate leaves only this cell out of its temporary layout.
+    """
+
+    cell: str
+    rule: str
+    citation: str
+    rationale: str
+    handling: str
+    libraries: tuple[str, ...] = ("R", "L", "SL")
+
+
+#: Table 3.8.1: SDT horizontal edges must coincide with ACTIVE horizontal
+#: edges; Fig. 3.8.1(d) marks an SDT edge off ACTIVE's as illegal.
+_SDT_TALL = (
+    "SDT drawn 81 nm tall over a 54 nm ACTIVE: the SDT top edge is not on an "
+    "ACTIVE horizontal edge"
+)
+_SDT_HANDLING = "kept as stated; expected exactly; left out of the clean run"
+
+#: Every retained deviation of the pinned shipped cells (lambdapdk v0.2.17,
+#: asap7sc7p5t_28_{R,L,SL}) from the implemented rules. docs/cli/drc.md
+#: lists the same records.
+SHIPPED_CELL_DEVIATION_RECORDS: tuple[Asap7CellDeviation, ...] = tuple(
+    Asap7CellDeviation(
+        cell,
+        "SDT.ACTIVE.AUX.2",
+        "Table 3.8.1, Fig. 3.8.1(d)",
+        _SDT_TALL,
+        _SDT_HANDLING,
+    )
     for cell in (
         "AO33x2",
         "BUFx2",
@@ -598,4 +658,21 @@ SHIPPED_CELL_DEVIATIONS: dict[str, tuple[str, ...]] = {
         "ICGx6p67DC",
         "OAI22xp33",
     )
-}
+)
+
+
+def _deviation_map(
+    records: tuple[Asap7CellDeviation, ...],
+) -> dict[str, tuple[str, ...]]:
+    out: dict[str, tuple[str, ...]] = {}
+    for record in records:
+        out[record.cell] = (*out.get(record.cell, ()), record.rule)
+    return out
+
+
+#: ``cell -> rule ids`` view of :data:`SHIPPED_CELL_DEVIATION_RECORDS`: the
+#: exact deviation set the shipped-cell regression compares against. Names
+#: are given without the ``_ASAP7_75t_<VT>`` suffix.
+SHIPPED_CELL_DEVIATIONS: dict[str, tuple[str, ...]] = _deviation_map(
+    SHIPPED_CELL_DEVIATION_RECORDS
+)

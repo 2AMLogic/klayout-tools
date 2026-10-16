@@ -6041,18 +6041,18 @@ def test_sky130_deck_check_kind_breakdown():
     `licon1.width.1`/`mcon.width.1`, the minimum halves of the two fixed-size
     cut rules `licon.1`/`ct.1`; #2642 adds the source deck's whole `OFFGRID`
     group -- 38 `ongrid` + 37 `angle`, see `tests/test_drc_offgrid.py` for why
-    the angle count is one short of the grid count; #2936 adds
-    `poly.endcap.diff.1`, the first `enclosed` rule): 137 rules total -- 18
-    `width`, 13 `space`, 1 `isolated`, 17 `enclosing`, 1 `enclosed`,
-    2 `separation`, 10 `area`, 38 `ongrid`, 37 `angle`. Fails loudly (at the
-    exact number that changed) if a future rule addition/removal drifts from
-    that table without updating it."""
+    the angle count is one short of the grid count; #3030 adds
+    `rpm.width.1`/`urpm.width.1`; #2936 adds `poly.endcap.diff.1`, the first
+    `enclosed` rule): 139 rules total -- 20 `width`, 13 `space`, 1 `isolated`,
+    17 `enclosing`, 1 `enclosed`, 2 `separation`, 10 `area`, 38 `ongrid`,
+    37 `angle`. Fails loudly (at the exact number that changed) if a future
+    rule addition/removal drifts from that table without updating it."""
     deck = get_deck("sky130")
 
-    assert len(deck) == 137
+    assert len(deck) == 139
     counts = Counter(rule.check for rule in deck)
     assert counts == {
-        "width": 18,
+        "width": 20,
         "space": 13,
         "isolated": 1,
         "enclosing": 17,

@@ -208,6 +208,7 @@
       "76/20",
       "76/44",
       "78/44",
+      "79/20",
       "80/20",
       "81/125",
       "82/64",
@@ -341,6 +342,7 @@
       "pwell_rs.ongrid.1",
       "rpm.angle.1",
       "rpm.ongrid.1",
+      "rpm.width.1",
       "tap.angle.1",
       "tap.enclosing.licon.1",
       "tap.ongrid.1",
@@ -349,6 +351,7 @@
       "tunm.ongrid.1",
       "uhvi.angle.1",
       "uhvi.ongrid.1",
+      "urpm.width.1",
       "vhvi.angle.1",
       "vhvi.ongrid.1",
       "via.angle.1",
@@ -385,6 +388,8 @@
       "m5",
       "nwell",
       "poly",
+      "rpm",
+      "urpm",
       "via",
       "via2",
       "via3",
@@ -780,6 +785,10 @@
         "reason": "no_applicable_geometry"
       },
       {
+        "id": "rpm.width.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
         "id": "tap.angle.1",
         "reason": "no_applicable_geometry"
       },
@@ -809,6 +818,10 @@
       },
       {
         "id": "uhvi.ongrid.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "urpm.width.1",
         "reason": "no_applicable_geometry"
       },
       {

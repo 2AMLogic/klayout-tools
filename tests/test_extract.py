@@ -14333,13 +14333,11 @@ def test_gf180mcu_parasitics_metals_covers_full_stack():
     assert m2.cap_perim_ff_um == pytest.approx(0.033298)
 
     # Metal5 (index 4, top metal of this 5-level stack): sheet from the
-    # resolved, pre-built gf180mcuD.tech for the pinned PDK commit
-    # (`resist (allm5)/metal5    60`, 60 milliohm/sq), the non-thick-metal
-    # `else` branch -- not the generic templated gf180mcu.tech's
-    # THICKMET1P1 row (40 milliohm/sq), which a prior curation (#571)
-    # mistakenly used (corrected by #572).
+    # resolved, pre-built gf180mcuD.tech for the pinned PDK commit f6eeac7
+    # (`resist (allm5)/metal5    40`, 40 milliohm/sq; it read 60 at the
+    # earlier c6d73a3 pin -- issue #3540).
     m5 = gf180mcu.PARASITICS.metals[4]
-    assert m5.sheet_res_ohm_sq == pytest.approx(0.06)
+    assert m5.sheet_res_ohm_sq == pytest.approx(0.04)
     assert m5.cap_area_ff_um2 == pytest.approx(0.005798)
     assert m5.cap_perim_ff_um == pytest.approx(0.030386)
 
@@ -14846,6 +14844,105 @@ def test_critical_net_unmatched_name_is_a_warning_not_an_error(tmp_path):
 def test_critical_net_requires_parasitics():
     with pytest.raises(ExtractError, match="--critical-net requires --parasitics"):
         run_extract("/nonexistent.gds", "sky130", critical_nets=["VIC"])
+
+
+# ---------------------------------------------------------------------------
+# Glob / all-nets selectors for --critical-net / --parasitics-net (issue #2974)
+# ---------------------------------------------------------------------------
+
+
+def _lateral_run(tmp_path, **kwargs):
+    path = _write_gds(_make_lateral_coupling_layout(), tmp_path / "lateral.gds")
+    return run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "lateral.spice"),
+        parasitics=True,
+        **kwargs,
+    )
+
+
+def test_critical_net_pattern_matches_explicit_names(tmp_path):
+    explicit = _lateral_run(tmp_path, critical_nets=["VIC"])["parasitics"]
+    pattern = _lateral_run(tmp_path, critical_net_patterns=["V*"])["parasitics"]
+    assert pattern["critical_nets"] == ["VIC"]
+    assert pattern["critical_net_patterns"] == ["V*"]
+    assert pattern["cc_count"] == explicit["cc_count"] == 1
+    assert pattern["total_coupling_capacitance_ff"] == pytest.approx(
+        explicit["total_coupling_capacitance_ff"]
+    )
+
+
+def test_critical_net_pattern_merges_with_exact_names(tmp_path):
+    para = _lateral_run(tmp_path, critical_nets=["FAR"], critical_net_patterns=["V*"])[
+        "parasitics"
+    ]
+    assert para["critical_nets"] == ["FAR", "VIC"]
+
+
+def test_no_selector_leaves_report_fields_absent(tmp_path):
+    para = _lateral_run(tmp_path, critical_nets=["VIC"])["parasitics"]
+    assert "critical_net_patterns" not in para
+    assert "critical_net_all" not in para
+    assert "parasitics_net_patterns" not in para
+
+
+def test_critical_net_pattern_zero_match_warns_distinctly(tmp_path):
+    report = _lateral_run(tmp_path, critical_net_patterns=["bl_*"])
+    assert any(
+        "--critical-net-pattern pattern(s) 'bl_*' match no net" in w
+        for w in report["warnings"]
+    )
+    assert report["parasitics"]["critical_nets"] == []
+
+
+def test_critical_net_pattern_zero_match_is_error_when_strict(tmp_path):
+    with pytest.raises(ExtractError, match="'bl_\\*' match no net.*strict-net"):
+        _lateral_run(tmp_path, critical_net_patterns=["bl_*"], strict_net_patterns=True)
+
+
+def test_critical_net_all_with_exclude(tmp_path):
+    para = _lateral_run(tmp_path, critical_net_all=True, critical_net_excludes=["FAR"])[
+        "parasitics"
+    ]
+    assert para["critical_nets"] == ["AGR", "VIC"]
+    assert para["critical_net_all"] is True
+    assert para["critical_net_excludes"] == ["FAR"]
+
+
+def test_parasitics_net_pattern_scopes_ground_pass(tmp_path):
+    para = _lateral_run(tmp_path, parasitics_net_patterns=["[AV]*"])["parasitics"]
+    assert para["parasitics_nets"] == ["AGR", "VIC"]
+    assert {entry["net"] for entry in para["nets"]} == {"AGR", "VIC"}
+
+
+def test_net_selector_flag_validation(tmp_path):
+    with pytest.raises(ExtractError, match="require --parasitics"):
+        run_extract("/nonexistent.gds", "sky130", critical_net_patterns=["V*"])
+    with pytest.raises(ExtractError, match="requires --critical-net-all"):
+        run_extract(
+            "/nonexistent.gds", "sky130", parasitics=True, critical_net_excludes=["x"]
+        )
+    with pytest.raises(ExtractError, match="--strict-net-patterns requires"):
+        run_extract(
+            "/nonexistent.gds", "sky130", parasitics=True, strict_net_patterns=True
+        )
+
+
+def test_distributed_rc_with_empty_resolving_pattern_errors(tmp_path):
+    with pytest.raises(ExtractError, match="resolved to no net"):
+        _lateral_run(tmp_path, critical_net_patterns=["bl_*"], distributed_rc=True)
+
+
+def test_net_selector_anonymous_nets_only_match_explicit_dollar_glob():
+    from klayout_tools.extract_netselect import NetSelectors
+
+    selectors = NetSelectors(error=ExtractError)
+    named = ["bl_0", "bl_1", "VSS"]
+    anonymous = ["\\$3"]
+    assert selectors._select("f", ["*"], named, anonymous) == set(named)
+    assert selectors._select("f", ["\\$*"], named, anonymous) == {"\\$3"}
+    assert selectors._select("f", [], named, anonymous, select_all=True) == set(named)
 
 
 # ---------------------------------------------------------------------------
@@ -24950,6 +25047,204 @@ def test_normalized_netlist_hash_is_stable_across_reruns(tmp_path):
     other = _write_gds(_make_series_resistor_chain_layout(), tmp_path / "chain.gds")
     c = run_extract(other, "sky130", output=str(tmp_path / "c.spice"))
     assert c["netlist_normalized_sha256"] != a["netlist_normalized_sha256"]
+
+
+# Issue #3568: the digest path was quadratic in net count. These pin the digest
+# value and check the linear implementation against the old simple scans.
+
+
+def _digest_fixture(n_devices: int = 300) -> tuple[list[Any], list[Any]]:
+    """Deterministic multi-hundred-device / multi-hundred-anonymous-net
+    connectivity (issue #3568): suffix-style and prefix-colliding names, a
+    device with two terminals on one net, a floating anonymous net, and
+    non-dict entries."""
+    devices: list[Any] = []
+    nets: list[Any] = [{"name": "VDD", "net_id": 1}, {"name": "VSS", "net_id": 2}]
+    for i in range(n_devices):
+        # Anonymous numbers are deliberately not in device order, and span
+        # one, two and three digits so `\$3` / `\$31` / `\$310` all occur.
+        a = f"\\${(i * 7919) % 1009}"
+        b = f"\\${(i * 104729 + 5) % 1009}"
+        devices.append(
+            {
+                "name": f"M{i}",
+                "type": "nmos",
+                "params": {"w": 1 + i % 5, "label": f"{a}__t0"},
+                "nets": {"D": a, "G": b, "S": "VSS", "B": "VSS" if i % 2 else a},
+            }
+        )
+        nets.append({"name": a, "net_id": 10 + i})
+    nets.append({"name": "\\$3", "net_id": 5000})
+    nets.append({"name": "\\$31", "net_id": 5001})
+    nets.append({"name": "\\$9999", "net_id": 5002})  # floating: no attachments
+    devices.append({"name": "Mx", "nets": {"D": "\\$3", "S": "\\$31"}})
+    devices.append("not-a-device")
+    devices.append({"name": "Mnone", "nets": None})
+    nets.append("not-a-net")
+    nets.append({"net_id": 5003})
+    return devices, nets
+
+
+# Digest computed with the pre-#3568 (quadratic) implementation.
+_DIGEST_FIXTURE_SHA256 = (
+    "942a05bcdac16c10cebaecdb5b9b68ebe275556f6bf603f87667c6deae38affc"
+)
+
+
+def _ref_net_attachment_key(net_name, devices):
+    return ",".join(
+        sorted(
+            f"{device.get('name')}.{terminal}"
+            for device in devices
+            if isinstance(device, dict)
+            for terminal, terminal_net in (device.get("nets") or {}).items()
+            if terminal_net == net_name
+        )
+    )
+
+
+def _ref_anonymous_net_name_map(report):
+    nets = report.get("nets")
+    devices = report.get("devices")
+    if not isinstance(nets, list) or not isinstance(devices, list):
+        return {}
+    name_map = {}
+    for entry in nets:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        if not isinstance(name, str) or not re.match(r"^\\\$\d+$", name):
+            continue
+        key = _ref_net_attachment_key(name, devices)
+        if key:
+            name_map[name] = f"$anon<{key}>"
+    return name_map
+
+
+def _ref_rewrite_net_name(value, name_map):
+    if not isinstance(value, str):
+        return value
+    canonical = name_map.get(value)
+    if canonical is not None:
+        return canonical
+    for raw_name, canonical_name in name_map.items():
+        if not value.startswith(raw_name):
+            continue
+        boundary = value[len(raw_name) : len(raw_name) + 1]
+        if boundary and boundary.isalnum():
+            continue
+        return canonical_name + value[len(raw_name) :]
+    return value
+
+
+def test_normalized_netlist_hash_golden_digest_unchanged():
+    from klayout_tools.extract import _normalized_netlist_sha256
+
+    devices, nets = _digest_fixture()
+    assert _normalized_netlist_sha256(devices, nets) == _DIGEST_FIXTURE_SHA256
+
+
+def test_anonymous_net_name_map_matches_reference():
+    from klayout_tools.extract import _anonymous_net_name_map
+
+    devices, nets = _digest_fixture()
+    report = {"devices": devices, "nets": nets}
+    got = _anonymous_net_name_map(report)
+    assert got == _ref_anonymous_net_name_map(report)
+    assert "\\$9999" not in got  # floating anonymous net stays unmapped
+    assert len(got) > 300
+
+
+def test_rewrite_net_name_matches_reference_on_probe_strings():
+    from klayout_tools.extract import _rewrite_net_name
+
+    devices, nets = _digest_fixture()
+    name_map = _ref_anonymous_net_name_map({"devices": devices, "nets": nets})
+    probes = [
+        "\\$3",
+        "\\$3__t0",
+        "\\$31",
+        "\\$31__t0",
+        "\\$310",
+        "\\$3x",
+        "\\$3 ",
+        "\\$3_",
+        "\\$",
+        "\\$x",
+        "\\$99999",
+        "\\$9999__t1",
+        "$3",
+        "\\\\$3",
+        " \\$3",
+        "M1",
+        "",
+        "\\$\u0663",
+        "\\$3\u0663",
+        "\\$3\u00e9",
+        7,
+        None,
+        ["\\$3"],
+    ]
+    probes += list(name_map)[:50] + [k + "__seg0" for k in list(name_map)[:50]]
+    probes += [k + "9" for k in list(name_map)[:50]]
+    for probe in probes:
+        assert _rewrite_net_name(probe, name_map) == _ref_rewrite_net_name(
+            probe, name_map
+        ), probe
+    assert _rewrite_net_name("\\$3__t0", name_map) == name_map["\\$3"] + "__t0"
+
+
+def test_canonicalize_matches_reference_for_shuffled_reports():
+    import random
+
+    from klayout_tools.extract import (
+        _canonicalize_extract_report_for_rerun_diff,
+        _strip_net_id_and_rewrite_names,
+    )
+
+    rng = random.Random(3568)
+    for _ in range(5):
+        devices, nets = _digest_fixture(60)
+        rng.shuffle(devices)
+        rng.shuffle(nets)
+        report = {"devices": devices, "nets": nets}
+        got = _canonicalize_extract_report_for_rerun_diff(report)
+
+        ref_map = _ref_anonymous_net_name_map(report)
+        expected = _strip_net_id_and_rewrite_names(report, ref_map)
+        expected["nets"] = sorted(
+            expected["nets"],
+            key=lambda entry: (
+                (
+                    entry.get("name", ""),
+                    _ref_net_attachment_key(entry.get("name", ""), expected["devices"]),
+                )
+                if isinstance(entry, dict)
+                else ("", "")
+            ),
+        )
+        assert got == expected
+
+
+def test_normalized_netlist_hash_scales_roughly_linearly():
+    import time
+
+    from klayout_tools.extract import _normalized_netlist_sha256
+
+    def timed(n_nets: int) -> float:
+        devices = [
+            {"name": f"M{i}", "nets": {"D": f"\\${i}", "G": f"\\${(i + 1) % n_nets}"}}
+            for i in range(n_nets)
+        ]
+        nets = [{"name": f"\\${i}", "net_id": i} for i in range(n_nets)]
+        start = time.perf_counter()
+        _normalized_netlist_sha256(devices, nets)
+        return time.perf_counter() - start
+
+    small = min(timed(3000) for _ in range(2))
+    large = min(timed(12000) for _ in range(2))
+    # 4x the nets: ~4x when linear, ~16x when quadratic.
+    assert large < small * 9, (small, large)
 
 
 # --progress / `timing` (issue #3181) ----------------------------------------

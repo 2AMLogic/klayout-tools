@@ -95,7 +95,7 @@ import sys
 import tempfile
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -161,6 +161,15 @@ BATCH_RUNNER_IDENTITY_FILENAME = "runner_identity.json"
 BATCH_RUNNER_MISMATCH_CODE = "batch_runner_version_mismatch"
 BATCH_RUNNER_UNKNOWN_CODE = "batch_runner_version_unknown"
 BATCH_RUNNER_FEATURE_CODE = "batch_runner_feature_unsupported"
+#: A deck-list (``decks[]``, #2804) request needs a runner ``klt`` that knows
+#: the deck-list contract; the major.minor gate cannot see that (issue #3303).
+BATCH_RUNNER_LACKS_DECKS_CODE = "batch_runner_lacks_decks"
+
+#: ``decks[]`` landed in ``f44df5ad`` (#2804), 307 commits after ``v0.7.0``
+#: (``git describe``: ``v0.7.0-307-gf44df5ad``). A runner whose version is
+#: ``0.7.0`` or earlier, or ``0.7.1.devN`` with ``N`` below this, predates it.
+_DECKS_BASE_RELEASE = (0, 7)
+_DECKS_FIRST_DEV = 307
 
 #: Exit code the preflight rejects with. Deliberately outside
 #: :data:`_BATCH_SIM_SUCCESS_EXIT_CODES` so the job is never mistaken for a
@@ -255,11 +264,16 @@ FLEET_MAX_JOB_SECONDS_KEY = "BATCH_MAX_JOB_SECONDS"
 
 #: ``request.batch.job_ceiling_check`` values (issue #2833): ``"warn"``
 #: (default) submits and reports a structured warning; ``"enforce"`` refuses
-#: before any S3 write.
-JOB_CEILING_CHECK_MODES = ("warn", "enforce")
+#: before any S3 write; ``"split"`` (issue #3446) reroutes an over-ceiling
+#: ``hosts == 1`` request through the one-job-per-shard path instead.
+JOB_CEILING_CHECK_MODES = ("warn", "enforce", "split")
 
 #: Machine-readable ``error.code`` of an ``"enforce"`` refusal.
 BATCH_JOB_CEILING_CODE = "batch_job_ceiling_exceeded"
+
+#: Machine-readable ``error.code`` of a ``max_units_per_job`` the fleet's
+#: ceiling cannot honor (issue #3446).
+BATCH_MAX_UNITS_CODE = "batch_max_units_per_job_invalid"
 
 #: The ``environment.remote.job_ceiling.basis`` value: the assessment is the
 #: request-derived fully-serial upper bound, never a measured runtime.
@@ -563,6 +577,8 @@ WORKER_CAPTURE_BANNER_MAX = 2000
 WORKER_CAPTURE_STR_MAX = 300
 WORKER_CAPTURE_FILE_MAX = 65536
 WORKER_CAPTURE_PROBE_TIMEOUT_S = 10
+#: Most staged model files the worker capture digests / the client re-reads.
+WORKER_CAPTURE_MODEL_INPUTS_MAX = 64
 
 #: The worker-side capture program. It is passed to ``python3 -I -c`` as one
 #: shell-quoted argument (never interpolated with untrusted text); request
@@ -575,6 +591,7 @@ import hashlib, json, os, shutil, sys
 import subprocess as sp
 BAN, STR, T = @BAN@, @STR@, @TIMEOUT@
 out, req_bin, variant, staged = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+model_names = sys.argv[5:5 + @MODELS@]
 diag = []
 def clip(v, n=STR):
     if not isinstance(v, str):
@@ -656,6 +673,19 @@ def manifest():
         return m
     return None
 doc["image_manifest"] = guard("image manifest", manifest)
+def model_inputs():
+    if staged != "1":
+        return None
+    base = os.environ.get("EDA_INPUT_DIR") or "."
+    found = []
+    for name in model_names:
+        h = hashlib.sha256()
+        with open(os.path.join(base, name), "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        found.append({"name": clip(name), "sha256": h.hexdigest()})
+    return found
+doc["model_inputs"] = guard("model inputs", model_inputs)
 doc["diagnostics"] = diag[:20]
 body = json.dumps(doc, ensure_ascii=True)
 tmp = out + ".tmp"
@@ -667,10 +697,13 @@ _WORKER_CAPTURE_PROGRAM = (
     _WORKER_CAPTURE_PROGRAM.replace("@BAN@", str(WORKER_CAPTURE_BANNER_MAX))
     .replace("@STR@", str(WORKER_CAPTURE_STR_MAX))
     .replace("@TIMEOUT@", str(WORKER_CAPTURE_PROBE_TIMEOUT_S))
+    .replace("@MODELS@", str(WORKER_CAPTURE_MODEL_INPUTS_MAX))
 )
 
 
-def _worker_capture_command(remote_request: dict[str, Any]) -> str:
+def _worker_capture_command(
+    remote_request: dict[str, Any], model_names: Sequence[str] = ()
+) -> str:
     """The best-effort worker capture invocation (issue #2834), run from the
     runner preflight. Bounded by ``timeout`` when present, stderr discarded,
     ``|| true`` so it can never fail or alter the job."""
@@ -683,6 +716,7 @@ def _worker_capture_command(remote_request: dict[str, Any]) -> str:
         shlex.quote(str(binary) if isinstance(binary, str) else ""),
         shlex.quote(str(variant) if isinstance(variant, str) else ""),
         staged,
+        *(shlex.quote(name) for name in model_names[:WORKER_CAPTURE_MODEL_INPUTS_MAX]),
     ]
     target = f'"$EDA_OUTPUT_DIR/{BATCH_WORKER_ENVIRONMENT_FILENAME}"'
     return (
@@ -690,6 +724,108 @@ def _worker_capture_command(remote_request: dict[str, Any]) -> str:
         "{ command -v python3 >/dev/null 2>&1 && "
         f"$wt python3 -I -c {shlex.quote(_WORKER_CAPTURE_PROGRAM)} "
         f"{target} {' '.join(args)} 2>/dev/null; true; }}"
+    )
+
+
+def _runner_supports_decks(version: str) -> bool | None:
+    """Whether a runner ``klt --version`` build string knows ``decks[]``
+    (issue #3303): ``None`` when it cannot be established.
+
+    Unlike the major.minor gate (:func:`_runner_gate_release`) this reads the
+    full release segment and the ``.devN`` distance, because the capability
+    arrived mid-``0.7`` line: after ``0.7.1`` is released, or on a
+    ``0.7.1.dev<N>`` build with ``N`` at/after :data:`_DECKS_FIRST_DEV`, or in
+    any later minor. :func:`_deck_preflight_lines` repeats this in shell.
+    """
+    release = _release_segment(version)
+    if release is None:
+        return None
+    parts = [int(part) for part in release.split(".")]
+    if len(parts) < 2:
+        return None
+    parts += [0] * (3 - len(parts))
+    if tuple(parts[:2]) != _DECKS_BASE_RELEASE:
+        return tuple(parts[:2]) > _DECKS_BASE_RELEASE
+    if parts[2] >= 2:
+        return True
+    if parts[2] == 0:
+        return False
+    dev = re.search(r"\.dev(\d+)", version.split("+", 1)[0])
+    return dev is None or int(dev.group(1)) >= _DECKS_FIRST_DEV
+
+
+def _deck_preflight_lines() -> str:
+    """Shell appended to the runner preflight of a deck-list job (issue
+    #3303; needs ``$rv`` from :func:`_runner_preflight_script`). Unlike the
+    version gate this is not relaxed by ``runner_version_check: warn``: a
+    runner that cannot read ``decks[]`` fails the job for certain, so the
+    job exits :data:`_BATCH_PREFLIGHT_REJECT_EXIT` with a klt error envelope
+    naming :data:`BATCH_RUNNER_LACKS_DECKS_CODE` before ``klt sim`` runs."""
+    report_path = f'"$EDA_OUTPUT_DIR/{BATCH_REPORT_FILENAME}"'
+    base_major, base_minor = _DECKS_BASE_RELEASE
+    return (
+        "dk=; rb=${rv%%+*}; dn=; "
+        'case "$rb" in *.dev[0-9]*) dn=${rb##*.dev}; dn=${dn%%[!0-9]*}; '
+        "rb=${rb%%.dev*} ;; esac; "
+        "rb=${rb%%[!0-9.]*}; rb=${rb%.}; "
+        'case "$rb" in ""|.*|*..*) ;; *.*) '
+        "dma=${rb%%.*}; drest=${rb#*.}; dmi=${drest%%.*}; dpa=0; "
+        'case "$drest" in *.*) dpa=${drest#*.}; dpa=${dpa%%.*} ;; esac; '
+        f'if [ "$dma" -gt {base_major} ] || '
+        f'{{ [ "$dma" -eq {base_major} ] && [ "$dmi" -gt {base_minor} ]; }}; '
+        "then dk=yes; "
+        f'elif [ "$dma" -eq {base_major} ] && [ "$dmi" -eq {base_minor} ]; then '
+        'if [ "$dpa" -ge 2 ]; then dk=yes; '
+        'elif [ "$dpa" -eq 1 ] && { [ -z "$dn" ] || '
+        f'[ "$dn" -ge {_DECKS_FIRST_DEV} ]; }}; then dk=yes; fi; fi ;; esac; '
+        'if [ -z "$dk" ]; then '
+        'dmsg="the fleet runner runs klt ${rv:-<unknown>}, which does not know '
+        "deck-list (decks[]) requests -- the request was not run (rebuild the "
+        'runner image from a klt that includes decks[])"; '
+        'printf \'{"schema_version": 1, "error": {"command": "sim", '
+        f'"code": "{BATCH_RUNNER_LACKS_DECKS_CODE}", "message": "%s"}}}}\\n\' '
+        '"$dmsg" >' + report_path + "; "
+        'echo "$dmsg" >&2; '
+        "exit " + str(_BATCH_PREFLIGHT_REJECT_EXIT) + "; fi; "
+    )
+
+
+def _assess_deck_support(request: dict[str, Any], config: BatchConfig) -> None:
+    """Refuse a deck-list batch submit before any S3 write or launch when
+    every image the AMI manifest could boot is known to predate ``decks[]``
+    (issue #3303). Same candidate selection as
+    :func:`_assess_published_runner`; anything less certain (no manifest,
+    a legacy entry without ``klt_version``, a mix) proceeds to the
+    runner-side probe in :func:`_deck_preflight_lines`. Raises regardless of
+    ``runner_version_check``: the job could not run on any such image."""
+    from .sim import SimError
+
+    pdk = (request.get("models") or {}).get("pdk")
+    try:
+        images = published_runner_identities(str(pdk) if pdk else None, config.region)
+    except (RemoteLaunchError, OSError, TypeError, ValueError, AttributeError):
+        return
+    if not images:
+        return
+    support = [
+        _runner_supports_decks(image["klt_version"]) if image["klt_version"] else None
+        for image in images
+    ]
+    if any(item is not False for item in support):
+        return
+    published = "; ".join(
+        f"{image['ami_id']} (pdk {image['pdk']}, region {image['region']}) "
+        f"runs klt {image['klt_version']}"
+        + (f" from ref {image['klt_ref']}" if image["klt_ref"] else "")
+        for image in images
+    )
+    raise SimError(
+        f"backend 'batch' refused before submission: the AMI manifest "
+        f"publishes the fleet runner image as {published}, which predates "
+        "deck-list (decks[]) support -- the request was not submitted and no "
+        "instance was launched (rebuild the runner image from a klt that "
+        "includes decks[]; see docs/cli/sim.md)",
+        code=BATCH_RUNNER_LACKS_DECKS_CODE,
     )
 
 
@@ -889,7 +1025,9 @@ def _build_batch_job_spec(
     command = _runner_preflight_script(
         client_version if client_version is not None else _provenance._klt_version(),
         enforce=version_check == "enforce",
-        capture=_worker_capture_command(remote_request),
+        capture=_worker_capture_command(
+            remote_request, [asset.name for asset in staged.model_assets]
+        ),
         required_features=tuple(_request_features(remote_request)),
     ) + (
         f'klt sim "$EDA_INPUT_DIR/{BATCH_REQUEST_FILENAME}" '
@@ -1011,6 +1149,10 @@ class BatchConfig:
     max_job_seconds_source: str = "default"
     #: ``request.batch.job_ceiling_check`` (issue #2833).
     job_ceiling_check: str = "warn"
+    #: ``request.batch.max_units_per_job`` (issue #3446): opt-in cap on the
+    #: units of one job; ``None`` -- the default -- leaves the split to
+    #: ``job_ceiling_check: "split"`` (or to no split at all).
+    max_units_per_job: int | None = None
 
 
 def _read_fleet_config(provision_script: str) -> dict[str, str]:
@@ -1110,6 +1252,84 @@ def _validate_batch_pdk(request: dict[str, Any]) -> None:
         raise SimError(str(exc)) from exc
 
 
+#: ``SimError.code`` for an absolute host-path model library on the batch
+#: backend (issue #3296).
+BATCH_MODELS_LIB_HOST_PATH_CODE = "models_lib_host_path"
+
+
+def _host_path_lib_refs(request: dict[str, Any]) -> list[tuple[str, str]]:
+    """Every ``(where, ref)`` model-library ref in ``request`` that is an
+    absolute host path: ``models.lib`` and each ``corners.process[].sections[]``
+    object's ``lib``. A ref that names an environment variable (``$PDK_ROOT/...``)
+    is left alone -- the runner expands it against its own environment -- but a
+    ``~`` is expanded on *this* host, so ``~/...`` is a host path too."""
+    refs: list[tuple[str, str]] = []
+
+    def check(where: str, ref: Any) -> None:
+        if not isinstance(ref, str) or "$" in ref:
+            return
+        if os.path.isabs(os.path.expanduser(ref)):
+            refs.append((where, ref))
+
+    models = request.get("models")
+    if isinstance(models, dict):
+        check("models.lib", models.get("lib"))
+    corners = request.get("corners")
+    process = corners.get("process") if isinstance(corners, dict) else None
+    for i, entry in enumerate(process if isinstance(process, list) else []):
+        sections = entry.get("sections") if isinstance(entry, dict) else None
+        for j, section in enumerate(sections if isinstance(sections, list) else []):
+            if isinstance(section, dict):
+                check(f"corners.process[{i}].sections[{j}].lib", section.get("lib"))
+    return refs
+
+
+def _pdk_relative_form(ref: str) -> str | None:
+    """The ``{"pdk", "lib"}`` spelling of an absolute path laid out as
+    ``<root>/<variant>/libs.tech/...``, or ``None`` when the path does not sit
+    in a PDK variant directory."""
+    parts = os.path.expanduser(ref).split(os.sep)
+    if "libs.tech" not in parts:
+        return None
+    index = parts.index("libs.tech")
+    if index < 2 or not parts[index - 1]:
+        return None
+    return json.dumps({"pdk": parts[index - 1], "lib": "/".join(parts[index:])})
+
+
+def _validate_batch_models_lib(request: dict[str, Any]) -> None:
+    """Refuse an absolute host-path model library **before** any S3 write
+    (issue #3296).
+
+    The runner resolves ``models.lib`` on its own box, where this host's
+    ``/home/<user>/.volare/...`` does not exist, so the job would pay for an
+    instance launch and then fail with ``model library not found``. Not
+    refused: PDK-relative libs, ``$VAR`` forms (the runner expands them), and
+    any request with ``options.stage_model_inputs: true`` (the library ships
+    with the job).
+    """
+    from . import sim_staging
+    from .sim import SimError
+
+    if sim_staging.stage_model_inputs_requested(request):
+        return
+    refs = _host_path_lib_refs(request)
+    if not refs:
+        return
+    details = []
+    for where, ref in refs:
+        relative = _pdk_relative_form(ref)
+        hint = f" -- use {relative}" if relative else ""
+        details.append(f"{where}={ref!r}{hint}")
+    raise SimError(
+        "backend 'batch': an absolute host-path model library does not exist "
+        "on the runner (" + "; ".join(details) + "). Name the library PDK-relative "
+        '({"pdk": "<variant>", "lib": "<path under the variant dir>"}) or set '
+        "options.stage_model_inputs: true to ship it with the job",
+        code=BATCH_MODELS_LIB_HOST_PATH_CODE,
+    )
+
+
 def _resolve_batch_config(
     request: dict[str, Any],
     *,
@@ -1144,6 +1364,7 @@ def _resolve_batch_config(
     from .sim import SimError
 
     _validate_batch_pdk(request)
+    _validate_batch_models_lib(request)
     batch_spec = request.get("batch") or {}
     provision_script = _resolve_provision_script(batch_spec)
     fleet = _read_fleet_config(provision_script)
@@ -1165,6 +1386,7 @@ def _resolve_batch_config(
         batch_spec, fleet
     )
     job_ceiling_check = _resolve_job_ceiling_check(batch_spec)
+    max_units_per_job = _resolve_max_units_per_job(batch_spec, job_ceiling_check)
     config = BatchConfig(
         provision_script=provision_script,
         bucket=bucket,
@@ -1199,6 +1421,7 @@ def _resolve_batch_config(
         max_job_seconds=max_job_seconds,
         max_job_seconds_source=max_job_seconds_source,
         job_ceiling_check=job_ceiling_check,
+        max_units_per_job=max_units_per_job,
     )
     # Issue #2851: compare the runner klt the AMI manifest publishes with
     # this client, once per request (so once for every shard of a
@@ -1388,9 +1611,9 @@ def _resolve_max_job_seconds(
 
 
 def _resolve_job_ceiling_check(batch_spec: dict[str, Any]) -> str:
-    """``request.batch.job_ceiling_check``: ``"warn"`` (default) or
-    ``"enforce"``, else :class:`~klayout_tools.sim.SimError` before any S3
-    write (issue #2833)."""
+    """``request.batch.job_ceiling_check``: ``"warn"`` (default),
+    ``"enforce"`` or ``"split"`` (issue #3446), else
+    :class:`~klayout_tools.sim.SimError` before any S3 write (issue #2833)."""
     from .sim import SimError
 
     value = batch_spec.get("job_ceiling_check", "warn")
@@ -1401,6 +1624,75 @@ def _resolve_job_ceiling_check(batch_spec: dict[str, Any]) -> str:
             f"(got {value!r})"
         )
     return value
+
+
+def _resolve_max_units_per_job(
+    batch_spec: dict[str, Any], job_ceiling_check: str
+) -> int | None:
+    """``request.batch.max_units_per_job`` (issue #3446): a positive integer
+    cap on the units of one job, which opts the request into splitting; else
+    :class:`~klayout_tools.sim.SimError` before any S3 write. Combining it
+    with ``job_ceiling_check: "enforce"`` is contradictory (one refuses an
+    over-ceiling request, the other splits it) and is refused."""
+    from .sim import SimError
+
+    value = batch_spec.get("max_units_per_job")
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise SimError(
+            "request.batch.max_units_per_job must be a positive integer "
+            f"(got {value!r})",
+            code=BATCH_MAX_UNITS_CODE,
+        )
+    if job_ceiling_check == "enforce":
+        raise SimError(
+            "request.batch.max_units_per_job splits an over-ceiling request "
+            'and cannot be combined with job_ceiling_check "enforce", which '
+            'refuses it; use "warn" or "split"',
+            code=BATCH_MAX_UNITS_CODE,
+        )
+    return value
+
+
+def _plan_job_split(assessment: dict[str, Any], config: BatchConfig) -> int:
+    """The effective ``remote.hosts`` for an opted-in split (issue #3446).
+
+    The shard cap is ``config.max_units_per_job`` when given, else the
+    largest shard the ceiling allows (``assessment["max_units_per_job"]``),
+    and the answer is the fewest balanced shards that respect it. Returns
+    ``1`` when nothing needs splitting. Raises
+    :class:`~klayout_tools.sim.SimError` before any S3 write when no split
+    can keep every job inside the ceiling: code
+    :data:`BATCH_JOB_CEILING_CODE` when even one unit exceeds it (lower
+    ``options.timeout_s``), :data:`BATCH_MAX_UNITS_CODE` when the requested
+    cap leaves a shard over it.
+    """
+    from .sim import SimError
+
+    units = assessment["unit_count"]
+    per_job = assessment["max_units_per_job"]
+    requested = config.max_units_per_job
+    if requested is None and not assessment["exceeds_ceiling"]:
+        return 1
+    if per_job == 0:
+        raise SimError(
+            f"backend 'batch' refused before submission: {assessment['warning']}",
+            code=BATCH_JOB_CEILING_CODE,
+        )
+    cap = requested if requested is not None else per_job
+    hosts = math.ceil(units / cap)
+    largest = math.ceil(units / hosts)
+    if largest > per_job:
+        raise SimError(
+            f"request.batch.max_units_per_job {requested} leaves a job of "
+            f"{largest} units, over the {per_job}-unit limit the fleet's "
+            f"{assessment['max_job_seconds']:g}s whole-job ceiling allows at "
+            f"options.timeout_s {assessment['per_unit_timeout_s']:g}s; use at "
+            f"most {per_job}",
+            code=BATCH_MAX_UNITS_CODE,
+        )
+    return hosts
 
 
 def _assess_job_ceiling(
@@ -1817,6 +2109,42 @@ def _read_status(
     return status if isinstance(status, dict) else None
 
 
+#: Coarse cadence of the stderr heartbeat :func:`poll_status` prints while a
+#: job's state is unchanged (issue #2978). A state change prints at once.
+BATCH_HEARTBEAT_INTERVAL_S = 300.0
+
+#: ``BatchError.code`` for ``--attach`` to a job id with no ``job.json`` in
+#: the bucket (never submitted, wrong bucket/profile, or already expired).
+BATCH_UNKNOWN_JOB_CODE = "batch_unknown_job"
+
+
+def _heartbeat(job_id: str, state: str | None, elapsed_s: float) -> None:
+    """One progress line on stderr (never stdout: ``--format json`` stdout
+    must stay byte-identical, issue #2978)."""
+    sys.stderr.write(
+        f"klt sim: batch job {job_id} state={state or 'no status.json yet'} "
+        f"elapsed={elapsed_s:.0f}s\n"
+    )
+    sys.stderr.flush()
+
+
+def job_exists(
+    config: BatchConfig,
+    job_id: str,
+    *,
+    runner: remote_transport.CommandRunner | None = None,
+) -> bool:
+    """Whether ``<prefix>/job.json`` exists, i.e. the job was really
+    submitted (issue #2978)."""
+    run = runner if runner is not None else _run_subprocess
+    argv = _aws_argv(config, "s3", "cp", f"{job_uri(config, job_id)}/job.json", "-")
+    try:
+        result = run(argv, _BATCH_AWS_TIMEOUT_S)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise BatchError(f"job.json lookup could not complete: {exc}") from exc
+    return result.returncode == 0
+
+
 def poll_status(
     config: BatchConfig,
     job_id: str,
@@ -1824,6 +2152,7 @@ def poll_status(
     runner: remote_transport.CommandRunner | None = None,
     sleep: Any = time.sleep,
     monotonic: Any = time.monotonic,
+    heartbeat: bool = False,
 ) -> dict[str, Any]:
     """Poll ``status.json`` until the job reaches a terminal state
     (:data:`BATCH_TERMINAL_STATES`) and return that status document.
@@ -1838,10 +2167,18 @@ def poll_status(
     (the caller reports unrun corners rather than a failed sweep), and
     :class:`BatchError` on a state outside the documented set -- a contract
     violation, surfaced loudly rather than waited on forever.
+
+    With ``heartbeat=True`` (opt-in; ``klt sim`` sets it, ``klt netlist``
+    does not, so its stderr stays a bare JSON envelope), a heartbeat line
+    (job id, last observed state, elapsed) goes to **stderr** on every state
+    change and otherwise every :data:`BATCH_HEARTBEAT_INTERVAL_S`
+    (issue #2978).
     """
     run = runner if runner is not None else _run_subprocess
     started = monotonic()
     last_state: str | None = None
+    beat_state: str | None = None
+    beat_at: float | None = None
     while True:
         status = _read_status(config, job_id, run)
         if status is not None:
@@ -1862,6 +2199,13 @@ def poll_status(
                 f"{last_state or 'no status.json yet'})",
                 last_state=last_state,
             )
+        if heartbeat and (
+            beat_at is None
+            or last_state != beat_state
+            or elapsed - beat_at >= BATCH_HEARTBEAT_INTERVAL_S
+        ):
+            _heartbeat(job_id, last_state, elapsed)
+            beat_state, beat_at = last_state, elapsed
         sleep(config.poll_interval_s)
 
 
@@ -2053,6 +2397,22 @@ def _compare_pdk_stamps(
     }
 
 
+def _bounded_model_inputs(doc: dict[str, Any]) -> list[dict[str, str | None]] | None:
+    """The worker-reported ``model_inputs`` list, re-validated and bounded.
+    ``None`` (not ``[]``) when the capture carries no list at all."""
+    models_in = doc.get("model_inputs")
+    if not isinstance(models_in, list):
+        return None
+    return [
+        {
+            "name": _bounded_str(entry.get("name")),
+            "sha256": _bounded_str(entry.get("sha256"), 64),
+        }
+        for entry in models_in[:WORKER_CAPTURE_MODEL_INPUTS_MAX]
+        if isinstance(entry, dict)
+    ]
+
+
 def _read_worker_environment(
     local_dir: str | None, request: dict[str, Any] | None = None
 ) -> dict[str, Any]:
@@ -2071,6 +2431,7 @@ def _read_worker_environment(
         "cpu_model": None,
         "omp_num_threads": None,
         "image_manifest": None,
+        "model_inputs": None,
         "diagnostics": [],
         "pdk_stamp_comparison": {"status": "not_comparable"},
     }
@@ -2130,6 +2491,7 @@ def _read_worker_environment(
             "cpu_model": _bounded_str(doc.get("cpu_model")),
             "omp_num_threads": _bounded_str(doc.get("omp_num_threads"), 40),
             "image_manifest": manifest,
+            "model_inputs": _bounded_model_inputs(doc),
             "diagnostics": diagnostics,
             "pdk_stamp_comparison": _compare_pdk_stamps(
                 pdk, _client_pdk_stamp(request)
@@ -2228,9 +2590,13 @@ def _read_job_identity(
 ) -> dict[str, Any]:
     """Runner identity plus the worker-observed environment capture, merged
     into ``environment.remote``. Neither reader can raise."""
+    worker_environment = _read_worker_environment(local_dir, request)
     return {
         **_read_runner_identity(local_dir, request),
-        "worker_environment": _read_worker_environment(local_dir, request),
+        "worker_environment": worker_environment,
+        # ``None`` (not ``[]``) when the runner did not report it, so "none
+        # staged" and "unknown / older runner" stay distinguishable.
+        "runner_model_inputs": worker_environment.get("model_inputs"),
     }
 
 
@@ -2629,6 +2995,7 @@ def _run_batch_job(
     runner: remote_transport.CommandRunner | None = None,
     sleep: Any = time.sleep,
     request_dir: str | None = None,
+    attach: bool = False,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """Submit, wait for, and collect **one** batch job's worth of corners --
     the shared body of the single-job ``batch`` backend (:func:`_run_batch`)
@@ -2646,7 +3013,32 @@ def _run_batch_job(
     overrun returns *unrun corner reports* rather than raising; only a
     transport failure (a failed upload/launch/collect, an unreadable report,
     an undocumented status state) raises :class:`BatchError`.
+
+    ``attach=True`` (issue #2978) resumes an *existing* ``job_id``: nothing
+    is staged, submitted or launched -- the job must already have a
+    ``job.json`` (else :data:`BATCH_UNKNOWN_JOB_CODE`) and the call goes
+    straight to polling and collecting. A job Spot-reclaimed mid-run is
+    still waited on, never re-launched (see :func:`poll_status`).
     """
+    if attach:
+        if not job_exists(config, job_id, runner=runner):
+            raise BatchError(
+                f"no batch job {job_id!r} in bucket {config.bucket!r} under "
+                f"prefix {config.jobs_prefix!r} (never submitted, wrong "
+                "bucket/profile/region, or expired)",
+                code=BATCH_UNKNOWN_JOB_CODE,
+            )
+        return _poll_and_collect(
+            config=config,
+            job_id=job_id,
+            corner_points=corner_points,
+            keep_artifacts=keep_artifacts,
+            artifacts_dir=artifacts_dir,
+            request=request,
+            measurements_spec=measurements_spec,
+            runner=runner,
+            sleep=sleep,
+        )
     spec = _prepare_batch_job_spec(
         request,
         netlist_path,
@@ -2660,8 +3052,41 @@ def _run_batch_job(
     )
     submit_job(config, job_id, spec, runner=runner)
     launch_job(config, job_id, runner=runner)
+    # Issue #2978: name the job on stderr the moment it exists, so a caller
+    # killed by an outer wall-clock limit knows what it orphaned.
+    sys.stderr.write(
+        f"klt sim: batch job {job_id} launched; "
+        f"re-attach with `klt sim <request> --backend batch --attach {job_id}`\n"
+    )
+    sys.stderr.flush()
+    return _poll_and_collect(
+        config=config,
+        job_id=job_id,
+        corner_points=corner_points,
+        keep_artifacts=keep_artifacts,
+        artifacts_dir=artifacts_dir,
+        request=request,
+        measurements_spec=measurements_spec,
+        runner=runner,
+        sleep=sleep,
+    )
+
+
+def _poll_and_collect(
+    *,
+    config: BatchConfig,
+    job_id: str,
+    corner_points: list[CornerPoint],
+    keep_artifacts: bool,
+    artifacts_dir: str,
+    request: dict[str, Any],
+    measurements_spec: list[dict[str, Any]],
+    runner: remote_transport.CommandRunner | None,
+    sleep: Any,
+) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
+    """The wait-and-collect tail shared by a fresh submit and ``--attach``."""
     try:
-        status = poll_status(config, job_id, runner=runner, sleep=sleep)
+        status = poll_status(config, job_id, runner=runner, sleep=sleep, heartbeat=True)
     except BatchPollTimeout as exc:
         return (
             _poll_timeout_corners(corner_points, measurements_spec, exc),
@@ -2731,6 +3156,7 @@ def _run_batch(
     checkpoint: _Checkpoint | None = None,
     probe_abort: dict[str, Any] | None = None,
     request_dir: str | None = None,
+    attach_job_id: str | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``batch`` backend: submit the whole corner matrix to 2am's EDA
     batch fleet as one job and collect its report back out of S3.
@@ -2767,6 +3193,11 @@ def _run_batch(
     the default ``"warn"`` submits it with a stderr warning, and either way
     the assessment is reported as ``environment.remote.job_ceiling``. The
     ``hosts > 1`` path (:func:`_run_batch_fleet`) is unchanged.
+
+    ``attach_job_id`` (issue #2978) re-attaches to that already-submitted job
+    instead of submitting a new one: no job-ceiling assessment, no upload, no
+    launch. The request supplies the corner list and measurement grading, so
+    it must be the request the job was submitted from.
     """
     from .sim import SimError
 
@@ -2776,13 +3207,68 @@ def _run_batch(
     config = _resolve_batch_config(
         request, corner_count=len(corner_points), timeout_s=timeout_s
     )
+    if attach_job_id is not None:
+        try:
+            return _run_batch_job(
+                config=config,
+                job_id=attach_job_id,
+                corner_points=corner_points,
+                netlist_path=netlist_path,
+                timeout_s=timeout_s,
+                keep_artifacts=keep_artifacts,
+                want_waveforms=want_waveforms,
+                artifacts_dir=artifacts_dir,
+                request=request,
+                measurements_spec=measurements_spec,
+                request_dir=request_dir,
+                attach=True,
+            )
+        except BatchError as exc:
+            raise SimError(f"batch backend failed: {exc}", code=exc.code) from exc
     # Issue #2833: assess the one job against the fleet's whole-job ceiling
     # before `submit_job`'s first S3 write, so an "enforce" refusal can never
     # leave a partial contract or launch a billable job.
     job_ceiling = _assess_job_ceiling(
         unit_count=len(corner_points), per_unit_timeout_s=timeout_s, config=config
     )
-    _enforce_job_ceiling(job_ceiling)
+    effective_hosts = 1
+    if config.job_ceiling_check == "split" or config.max_units_per_job is not None:
+        effective_hosts = _plan_job_split(job_ceiling, config)
+        job_ceiling = {
+            **job_ceiling,
+            "split": effective_hosts > 1,
+            "effective_hosts": effective_hosts,
+        }
+        if effective_hosts > 1:
+            print(
+                f"klt sim: notice: splitting {job_ceiling['unit_count']} units "
+                f"into {effective_hosts} batch jobs of at most "
+                f"{math.ceil(job_ceiling['unit_count'] / effective_hosts)} units "
+                "each (request.batch.job_ceiling_check / max_units_per_job)",
+                file=sys.stderr,
+            )
+    else:
+        _enforce_job_ceiling(job_ceiling)
+    if effective_hosts > 1:
+        try:
+            corners, engine_version, environment = _run_batch_fleet(
+                corner_points=corner_points,
+                netlist_path=netlist_path,
+                timeout_s=timeout_s,
+                keep_artifacts=keep_artifacts,
+                want_waveforms=want_waveforms,
+                artifacts_dir=artifacts_dir,
+                request=request,
+                hosts=effective_hosts,
+                measurements_spec=measurements_spec,
+                request_dir=request_dir,
+                config=config,
+            )
+        except BatchError as exc:
+            raise SimError(f"batch backend failed: {exc}", code=exc.code) from exc
+        if environment is not None:
+            environment = {**environment, "job_ceiling": job_ceiling}
+        return corners, engine_version, environment
     try:
         corners, engine_version, environment = _run_batch_job(
             config=config,
@@ -2818,6 +3304,7 @@ def _run_batch_fleet(
     hosts: int,
     measurements_spec: list[dict[str, Any]],
     request_dir: str | None = None,
+    config: BatchConfig | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``batch`` backend's ``hosts > 1`` dispatch: one **job** per shard.
 
@@ -2836,6 +3323,10 @@ def _run_batch_fleet(
     ``hosts`` exceeding the unit count is rejected up front, mirroring
     ``_run_remote_fleet``: every shard is a real billed instance, so there
     is no benign reading of "more hosts than units".
+
+    ``config`` is for :func:`_run_batch`'s split reroute (issue #3446), which
+    has already resolved it (and run the once-per-request runner check); a
+    direct caller leaves it ``None``.
     """
     from .sim import SimError
 
@@ -2846,9 +3337,10 @@ def _run_batch_fleet(
             "still be billed; use hosts <= corner/sample count"
         )
 
-    config = _resolve_batch_config(
-        request, corner_count=len(corner_points), timeout_s=timeout_s
-    )
+    if config is None:
+        config = _resolve_batch_config(
+            request, corner_count=len(corner_points), timeout_s=timeout_s
+        )
     # Stage (and discard) the whole job closure once, before any shard's
     # first S3 write: an unstageable include or model input (issue #2668)
     # must refuse the submit, not surface as K lost shards after some of
@@ -2901,9 +3393,11 @@ def _run_batch_fleet(
 __all__ = [
     "BATCH_ARTIFACTS_DIRNAME",
     "BATCH_JOB_CEILING_CODE",
+    "BATCH_MAX_UNITS_CODE",
     "BATCH_JOB_TOOL",
     "BATCH_CONCURRENCY_CAP_CODE",
     "BATCH_NO_CAPACITY_CODE",
+    "BATCH_UNKNOWN_JOB_CODE",
     "BATCH_NETLIST_FILENAME",
     "BATCH_REPORT_FILENAME",
     "BATCH_RUNNER_IDENTITY_FILENAME",
@@ -2920,6 +3414,7 @@ __all__ = [
     "BatchJobSpec",
     "BatchPollTimeout",
     "collect_outputs",
+    "job_exists",
     "job_uri",
     "launch_job",
     "new_job_id",
