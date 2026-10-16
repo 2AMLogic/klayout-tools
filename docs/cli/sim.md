@@ -1019,10 +1019,17 @@ is added when `options.keep_artifacts` is set so per-corner logs/rawfiles
 land inside the one tree the harness collects. The generated document's
 schema is [`docs/schemas/batch-job-spec.schema.json`](../schemas/batch-job-spec.schema.json).
 
-**`options.resume` is rejected for `batch`**, exactly as for `remote`: the
-corners come back from an independently-run job via a report this process
-did not construct, so there is no local `corner_id` to reconcile a
-checkpoint against. The dispatch-time fail-fast probe is likewise skipped —
+**`options.resume` is supported for `batch`** (unlike `remote`). The job's
+reports are recorded into the checkpoint after the job returns, keyed by
+`corner_id`, except corners that never ran: those carrying a `lost_shard`
+(Spot capacity lost), `batch_job_failed`, `batch_job_timeout` or
+`batch_poll_timeout` diagnostic. A re-run with `--resume` submits only those
+corners and merges them with the checkpointed reports in the request's
+corner order; the checkpoint is retained while any of them remains. Corners
+that ran and errored are checkpointed like on `local`.
+Works for `hosts == 1` and `hosts > 1`.
+
+The dispatch-time fail-fast probe is skipped for `batch` —
 probing *this* host's ngspice says nothing about the fleet instance's
 hardware.
 
@@ -1787,9 +1794,11 @@ three gaps directly, as an extension of `local`/`local-parallel` (and any
   expanded corner-ID list; a checkpoint whose fingerprint no longer matches
   (netlist edited, corner matrix changed) is treated as if it did not exist
   — never silently reused against a since-modified request. The checkpoint
-  file is removed once a sweep finishes with nothing skipped. Currently
-  implemented for `local`/`local-parallel` only (including any `hosts > 1`
-  shard on them) — pairing `options.resume` with `backend: "remote"` is a
+  file is removed once a sweep finishes with nothing skipped. Implemented for
+  `local`/`local-parallel` (including any `hosts > 1` shard on them) and
+  `batch` (recorded after the job returns; corners that never ran --
+  `lost_shard`, `batch_job_failed`, `batch_job_timeout`, `batch_poll_timeout` --
+  are not checkpointed, so only they are re-submitted) — pairing `options.resume` with `backend: "remote"` is a
   clear application error today (exit 1): a `remote` shard's dispatch loop
   runs on the provisioned box(es), outside this process, so there is no
   local checkpoint to write against.

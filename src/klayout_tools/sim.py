@@ -2031,6 +2031,42 @@ def _dispatch_deck_request(
     )
 
 
+#: Diagnostic codes of a ``batch`` corner that never ran: a lost Spot shard,
+#: a job that failed or was stopped by the harness, or a poll that gave up
+#: while the job may still be running (``sim_batch._unrun_corner_report``).
+_UNRUN_BATCH_CODES = frozenset(
+    {"lost_shard", "batch_job_failed", "batch_job_timeout", "batch_poll_timeout"}
+)
+
+
+def _is_unrun_batch_corner(corner: dict[str, Any]) -> bool:
+    """True when a corner report is a synthesized batch one (never ran)."""
+    return any(diag["code"] in _UNRUN_BATCH_CODES for diag in corner["diagnostics"])
+
+
+def _record_batch_checkpoint(
+    checkpoint: Any,
+    backend: str,
+    corners_new: list[dict[str, Any]],
+    engine_version: Any,
+) -> None:
+    """Record a ``batch`` run's returned corner reports into the checkpoint.
+
+    Issue #3367: `_run_batch` collects a shard's reports in one
+    ``report.json``, so there is nothing to record incrementally; record the
+    returned set after dispatch. A corner that never ran (``lost_shard``,
+    ``batch_job_failed``, ``batch_job_timeout``, ``batch_poll_timeout``) is
+    left out and stays outstanding for the next ``--resume``; a corner that
+    ran and genuinely errored is recorded exactly as the local backends do.
+    A no-op without a checkpoint or off ``batch``.
+    """
+    if checkpoint is None or backend != "batch":
+        return
+    for corner in corners_new:
+        if not _is_unrun_batch_corner(corner):
+            checkpoint.record(corner["corner_id"], corner, engine_version)
+
+
 def _refuse_unsupported_submit_only(
     backend: str, hosts: int, resume: bool | None, plot_dir: str | None
 ) -> None:
@@ -2447,23 +2483,24 @@ def _run_sim_corners(
         # docstring and the spike's "Native PVT sweeping" survey row).
         models_lib = _resolve_models_lib(resolution_models, request_dir)
 
-    # Resumability (issue #473): only active when the caller opts in, and
-    # only for the backends whose corner reports this process itself
-    # produces (`local`/`local-parallel`, including any `hosts > 1` shard
-    # built on them -- see `_run_sharded`). `remote`'s and `batch`'s corners
-    # come back from an independently-run box via a JSON report this process
-    # does not construct, so there is no local `CornerPoint.corner_id` to
-    # reconcile a checkpoint against yet; mirrors the existing `hosts > 1` +
-    # `remote` restriction above rather than inventing a new error shape.
+    # Resumability (issue #473): only active when the caller opts in. The
+    # `local`/`local-parallel` backends (including any `hosts > 1` shard
+    # built on them -- see `_run_sharded`) record each corner into the
+    # checkpoint as it completes; `batch` (issue #3367) records its returned
+    # reports after dispatch, keyed by `corner_id` (lost shards excluded --
+    # see below). `remote`'s corners come back from an independently-run box
+    # this process does not reconcile against a local `CornerPoint.corner_id`,
+    # so it stays rejected, mirroring the existing `hosts > 1` + `remote`
+    # restriction above rather than inventing a new error shape.
     backend = _yield_host_default_backend(
         backend, backend_from_host_default, reason_ok=not resume
     )
-    if resume and backend in _OFFHOST_BACKENDS:
+    if resume and backend == "remote":
         raise SimError(
             f"options.resume is not yet supported for backend {backend!r} -- "
             f"wiring the {backend} backend into the same checkpoint machinery "
-            "as 'local'/'local-parallel' is tracked follow-up work; use "
-            "resume with backend 'local' or 'local-parallel'"
+            "as 'local'/'local-parallel'/'batch' is tracked follow-up work; "
+            "use resume with backend 'local', 'local-parallel' or 'batch'"
         )
 
     # `pre_completed` holds corner reports already recorded by a prior,
@@ -2727,6 +2764,8 @@ def _run_sim_corners(
             measurements_spec=measurements_spec,
         )
 
+    _record_batch_checkpoint(checkpoint, backend, corners_new, backend_engine_version)
+
     if resume:
         # Reassemble the full corner list in the request's own order: a
         # corner is either freshly run just now (`corners_new`) or reused
@@ -2735,7 +2774,8 @@ def _run_sim_corners(
         # `dispatch_points` above). Only done under `resume`: every backend
         # that reaches here is `local`/`local-parallel` (see the `remote`
         # guard above), which always return exactly one report per
-        # dispatched point, keyed by that point's own `corner_id`.
+        # dispatched point, keyed by that point's own `corner_id`. `batch`
+        # does too: lost shards are synthesized per point (`_lost_shard_corner`).
         new_by_id = {corner["corner_id"]: corner for corner in corners_new}
         corners = [
             new_by_id[point.corner_id]
@@ -2773,6 +2813,13 @@ def _run_sim_corners(
             for diag in corner["diagnostics"]
         )
     )
+    # Issue #3367: a corner that never ran on `batch` (`lost_shard`,
+    # `batch_job_failed`, `batch_job_timeout`, `batch_poll_timeout`) is
+    # outstanding too, so a checkpoint holding the rest must outlive this
+    # run. Kept out of `corners_skipped`
+    # (the reported `environment.budget.corners_skipped`) to leave that
+    # field's meaning unchanged.
+    corners_lost = sum(1 for corner in corners if _is_unrun_batch_corner(corner))
 
     # Issue #2491: a top-level rollup of every `corners[].diagnostics[]`
     # entry -- including one downgraded to `severity: "warning"` by
@@ -2805,7 +2852,7 @@ def _run_sim_corners(
     }
 
     if checkpoint is not None:
-        if corners_skipped == 0:
+        if corners_skipped == 0 and corners_lost == 0:
             # Nothing left to resume -- remove the checkpoint rather than
             # leave a stale file a future --resume could misread (its
             # fingerprint guard makes that safe even if left behind, but a
