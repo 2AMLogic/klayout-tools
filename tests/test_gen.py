@@ -3367,6 +3367,71 @@ def test_gf180mcu_sibling_guard_ring_generators_off_grid_padding_drc_clean(
     assert drc_report["rule_counts"] == {}
 
 
+@pytest.mark.parametrize("ring_padding_um", (0.5015, 1.2345, 3.1415))
+@pytest.mark.parametrize(
+    ("generator", "params"),
+    [
+        ("diff_pair", {"splits": 1}),
+        ("mos_array", {"rows": 1, "cols": 2, "dummy": 0}),
+        ("esd_device", {"fingers": 2}),
+    ],
+)
+def test_gf180mcu_off_grid_ring_padding_ring_vertices_on_mfg_grid(
+    tmp_path, both_pdk_root, generator, params, ring_padding_um
+):
+    """Issue #3364: the guard ring's Comp / Pplus / Nplus / Metal1 boxes must
+    land on gf180mcu's 0.005um manufacturing grid at an off-grid
+    `ring_padding_um`, asserted on the drawn vertices themselves (independent
+    of the deck's `*.ongrid.1` rules). The exact implant extension is covered
+    by the `*_implant_extension_is_exact` tests."""
+    import klayout.db as kdb
+
+    if not gen.mfg_grid_um("gf180mcu", _GF180_CONTACT_LAYER):
+        pytest.skip("gf180mcu deck declares no `ongrid` rules yet (PR #3365)")
+    output = tmp_path / f"{generator}_ring_grid_{ring_padding_um}.gds"
+    generate(
+        {
+            "generator": generator,
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {
+                **params,
+                "add_guard_ring": True,
+                "ring_padding_um": ring_padding_um,
+            },
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    grid_dbu = int(round(0.005 / layout.dbu))
+    for layer in ((22, 0), (31, 0), (32, 0), (34, 0)):
+        region = kdb.Region(layout.top_cell().begin_shapes_rec(layout.layer(*layer)))
+        for poly in region.each():
+            for pt in poly.each_point_hull():
+                assert pt.x % grid_dbu == 0 and pt.y % grid_dbu == 0, (layer, pt)
+
+    drc_report = run_drc(str(output), "gf180mcu")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+def test_snap_ring_box_um_grows_outer_and_shrinks_inner_onto_grid():
+    """Issue #3364: `_snap_ring_box_um` moves every edge onto the grid in the
+    direction that only grows the ring band, and is inert on-grid / without a
+    grid."""
+    dbu = gen._GRID_DBU_UM
+    box = (-0.9221, -0.9219, 3.0036, 3.0034)
+    assert gen._snap_ring_box_um(box, 0.0, dbu) == box
+    assert gen._snap_ring_box_um(box, 0.005, dbu) == pytest.approx(
+        (-0.925, -0.925, 3.005, 3.005)
+    )
+    assert gen._snap_ring_box_um(box, 0.005, dbu, inward=True) == pytest.approx(
+        (-0.92, -0.92, 3.0, 3.0)
+    )
+    on_grid = (-0.92, 0.0, 3.0, 1.5)
+    assert gen._snap_ring_box_um(on_grid, 0.005, dbu) == on_grid
+    assert gen._snap_ring_box_um(on_grid, 0.005, dbu, inward=True) == on_grid
+
+
 def test_snap_offset_um_is_inert_on_grid_exact_inputs():
     """The #2442 fix must be inert for on-grid offsets (e.g. the historical
     default padding 0.5 + grid-exact ring width): `_snap_offset_um` returns
