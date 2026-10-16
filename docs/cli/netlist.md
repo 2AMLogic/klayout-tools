@@ -127,6 +127,21 @@ was left running. A batch netlist normally takes well under a second, so this is
 a hang rather than slow work: ...
 ```
 
+## Unevaluated `expr()` is a failure, not a netlist
+
+Older xschem releases do not evaluate a symbol's `expr(...)` attributes, so
+they write a perfectly "fresh" `.spice` that still contains the literal
+`expr(...)` — which ngspice cannot load. After the export (and after `--block`
+post-processing) the netlist is scanned, outside `*` comment lines, for an
+`expr` token followed by `(` (whitespace allowed; longer identifiers such as
+`myexpr(` do not match). A hit is an error (exit `1`) with
+`error.code: "unevaluated_expr"`; the message names the first offending line,
+the detected `xschem.version` (or `unknown`), and the minimum release reported
+to evaluate `expr()` (3.4.5 — taken from issue #3482, not verified against
+xschem's release notes). It applies to `--check` too, which fails with this
+cause instead of reporting `drifted`, and nothing is written. Under
+`--backend batch` the same code is returned.
+
 ## Success is the output file, not the exit status
 
 `xschem -n -s -q -x` returns a **non-zero** status after a *successful* batch
@@ -242,6 +257,7 @@ envelope's `error.code` classifies it:
 | `batch_poll_timeout` | The job did not finish within the poll budget. It may still finish on the runner; nothing was collected. |
 | `batch_job_timeout` | The harness stopped the job at its `timeout_seconds`. |
 | `batch_job_failed` | The job failed, or left no usable report or netlist. When the runner's own `klt netlist` reported an error, its message is quoted (and its `error.code` used, when it has one). |
+| `unevaluated_expr` | The netlist still contains a literal `expr(...)` (see above). Also returned by the local backend. |
 | `batch_input_too_large` | The input tree is above the size cap (below). Raised before any upload. |
 
 **What is uploaded.** The job instance holds no forge credential and cannot
@@ -429,6 +445,7 @@ error: the netlist is still produced and the exit code is unchanged.
 | Field | Type | Description |
 | --- | --- | --- |
 | `binary` | string | The executable that was run (`--xschem-binary`). |
+| `version` | string \| null | xschem's version (e.g. `"3.4.7"`), from a bounded `<binary> --version` probe run after the export. `null` — never an error — when the probe fails, times out, or prints nothing parseable. Always `null` for a `--backend batch` runner whose `klt` predates this field. |
 | `argv` | array\<string\> | The complete command line, so a consumer can verify `-x` was there. |
 | `forced_flags` | array\<string\> | The flags this verb always passes, in a fixed order. |
 | `exit_status` | integer | xschem's own exit status. **Not the verdict** — non-zero on success. |

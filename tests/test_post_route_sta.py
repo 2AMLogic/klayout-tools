@@ -3198,6 +3198,19 @@ def test_port_check_error_message_names_input_transitions_field():
         "constraints.input_transitions['q']: port direction is 'output', not an input"
         in message
     )
+    assert message.startswith("constraints.input_transitions rejected: ")
+
+
+def test_port_check_error_message_mixed_rows_keep_delay_prefix():
+    message = post_route_sta._port_check_error_message(
+        [
+            ("input_transition", "nope", "not_found"),
+            ("input", "bus", "matches_2_ports"),
+        ]
+    )
+    assert message.startswith("per-port I/O delay constraint(s) rejected: ")
+    assert "constraints.input_transitions['nope']" in message
+    assert "constraints.input_delays['bus']" in message
 
 
 # -- engine port check ------------------------------------------------------ #
@@ -4434,6 +4447,89 @@ def test_live_engine_report_ports(tmp_path):
     assert report["worst_hold_path"]["startpoint"] == "rst_n"
 
 
+_LIVE_ONLY = pytest.mark.skipif(
+    _live_sky130_env() is None,
+    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
+    "KLT_SKIP_OPENROAD_TESTS unset",
+)
+
+
+def _live_verilog_request(tmp_path, **constraint_overrides) -> str:
+    _write(tmp_path / "boundary.v", _WORST_PATH_CAPTURES["netlist"])
+    return _write_request(
+        tmp_path / "request.json",
+        {
+            "verilog": "boundary.v",
+            "hdl_toplevel": "top",
+            "pdk": {"cell_library": "sky130_fd_sc_hd", "corner": "tt_025C_1v80"},
+            "constraints": _boundary_constraints(**constraint_overrides),
+        },
+    )
+
+
+@_LIVE_ONLY
+def test_live_engine_input_transitions_verilog(tmp_path):
+    """Engine integration (issue #3555): valid transitions are accepted in
+    verilog mode and a slower slew on the setup-critical input moves the
+    measured setup result."""
+    fast = run_sta(
+        _live_verilog_request(tmp_path, input_transitions={"b_in": 0.01}),
+        pdk_variant="sky130A",
+    )
+    slow = run_sta(
+        _live_verilog_request(
+            tmp_path, input_transition_ns=0.05, input_transitions={"b_in": 1.5}
+        ),
+        pdk_variant="sky130A",
+    )
+    assert fast["worst_slack_ns"] != slow["worst_slack_ns"]
+    assert slow["worst_slack_ns"] < fast["worst_slack_ns"]
+
+
+@_LIVE_ONLY
+def test_live_engine_input_transitions_def(tmp_path):
+    """Engine integration (issue #3555): the same options are accepted in
+    DEF mode and a different transition changes the measured result."""
+    paths = _write_clock_fixtures(tmp_path)
+
+    def run(constraints: dict) -> dict:
+        return run_sta(
+            _write_request(
+                tmp_path / "request.json",
+                {
+                    "def": paths["buffered.def"],
+                    "pdk": {
+                        "cell_library": "sky130_fd_sc_hd",
+                        "corner": "tt_025C_1v80",
+                    },
+                    "constraints": constraints,
+                },
+            ),
+            pdk_variant="sky130A",
+        )
+
+    fast = run(_propagated_constraints(input_transitions={"d1": 0.01, "d2": 0.01}))
+    slow = run(
+        _propagated_constraints(
+            input_transition_ns=0.05, input_transitions={"d1": 1.5, "d2": 1.5}
+        )
+    )
+    assert slow["worst_slack_ns"] < fast["worst_slack_ns"]
+
+
+@_LIVE_ONLY
+def test_live_engine_input_transitions_bad_port_rejected(tmp_path):
+    request_path = _live_verilog_request(
+        tmp_path, input_transitions={"nope": 0.1, "q_a": 0.1}
+    )
+    with pytest.raises(PostRouteStaError) as exc_info:
+        run_sta(request_path, pdk_variant="sky130A")
+    message = str(exc_info.value)
+    assert message.startswith("constraints.input_transitions rejected")
+    assert "constraints.input_transitions['nope']" in message
+    assert "constraints.input_transitions['q_a']" in message
+
+
 def _write_clock_fixtures(tmp_path) -> dict[str, str]:
     """Materialize the captured design files for a live engine run."""
     paths = {
@@ -5339,3 +5435,245 @@ def test_run_sta_evidence_input_verified_from_second_checkout(
     citation_b = grade(checkout_b / "flows" / "sta.json")
     assert citation_b is not None
     assert citation_b["input_verified"] is True
+
+
+# --------------------------------------------------------------------------- #
+# Liberty x interconnect matrix: map-form `request.spef` (issue #3228).
+# --------------------------------------------------------------------------- #
+
+
+def _spef_text(net: str = "clk") -> str:
+    return f"*D_NET {net} 0.01\n*END\n"
+
+
+def _setup_matrix_env(
+    tmp_path, monkeypatch, spef, corners=("tt_025C_1v80", "ss_100C_1v60")
+) -> str:
+    request_path = _setup_multi_corner_env(
+        tmp_path, monkeypatch, corners=corners, spef=spef
+    )
+    for name in ("min", "nom", "max"):
+        _write(tmp_path / f"{name}.spef", _spef_text())
+    return request_path
+
+
+def _stub_openroad_matrix(
+    monkeypatch, *, slack_by_spef: dict[str, float] | None = None, zero_annotation=()
+) -> list[str]:
+    """Stub keyed on the `read_spef` path in each generated script; returns
+    the list of scripts seen, in session order."""
+    scripts: list[str] = []
+    slack_by_spef = slack_by_spef or {}
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["openroad", "-version"]:
+            return fake_completed(stdout="26Q3-771-gdeadbeef\n")
+        metrics_path, script_path = cmd[4], cmd[5]
+        scripts.append(script_path)
+        text = Path(script_path).read_text(encoding="utf-8")
+        spef_name = Path(
+            next(
+                line.split()[1]
+                for line in text.splitlines()
+                if line.startswith("read_spef ")
+            )
+        ).stem
+        corner = next(name for name in _MULTI_CORNER_METRICS if f"__{name}.lib" in text)
+        metrics = dict(_MULTI_CORNER_METRICS[corner])
+        metrics["timing__setup__ws"] += slack_by_spef.get(spef_name, 0.0)
+        with open(metrics_path, "w", encoding="utf-8") as handle:
+            json.dump(metrics, handle)
+        annotated = 0 if spef_name in zero_annotation else 1
+        stdout_lines = [
+            post_route_sta._SPEF_NET_CHECK_BEGIN,
+            f"{annotated} 1",
+            f"{annotated} 1",
+            post_route_sta._SPEF_NET_CHECK_END,
+            post_route_sta._SPEF_MISSING_NETS_BEGIN,
+            post_route_sta._SPEF_MISSING_NETS_END,
+            post_route_sta._SETUP_VIOLATIONS_BEGIN,
+            post_route_sta._SETUP_VIOLATIONS_END,
+            post_route_sta._HOLD_VIOLATIONS_BEGIN,
+            post_route_sta._HOLD_VIOLATIONS_END,
+        ]
+        return fake_completed(returncode=0, stdout="\n".join(stdout_lines))
+
+    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    return scripts
+
+
+@pytest.mark.parametrize(
+    ("spef", "match"),
+    [
+        ({}, "non-empty object"),
+        ({"typ": "nom.spef"}, "unknown interconnect corner 'typ'"),
+        ({"nom": ""}, r"request.spef.nom must be a non-empty string"),
+        ({"max": 3}, r"request.spef.max must be a non-empty string"),
+        (
+            {"min": "nom.spef", "max": "gone.spef"},
+            "spef not found for request.spef.max",
+        ),
+    ],
+)
+def test_run_sta_spef_map_rejects_invalid(tmp_path, monkeypatch, spef, match):
+    request_path = _setup_matrix_env(tmp_path, monkeypatch, spef)
+    with pytest.raises(PostRouteStaError, match=match):
+        run_sta(request_path)
+
+
+def test_run_sta_spef_map_rejected_in_verilog_mode(tmp_path):
+    _write(tmp_path / "top.v", "module top; endmodule\n")
+    _write(tmp_path / "nom.spef", _spef_text())
+    request_path = _write_request(
+        tmp_path / "request.json", _verilog_base_request(spef={"nom": "nom.spef"})
+    )
+    with pytest.raises(PostRouteStaError, match="not supported together with"):
+        run_sta(request_path)
+
+
+def test_run_sta_spef_string_keeps_legacy_shape(tmp_path, monkeypatch):
+    _write(tmp_path / "top.spef", _spef_text())
+    request_path = _setup_success_env(tmp_path, monkeypatch, spef="top.spef")
+    _stub_openroad_success(monkeypatch, spef_check=(1, 1, 1, 1))
+
+    report = run_sta(request_path)
+
+    assert "corners" not in report
+    assert report["spef_path"] == _EXTERNAL
+    assert report["spef_annotation"]["annotation_complete"] is True
+
+
+def test_run_sta_spef_map_one_liberty_three_spefs_canonical_order(
+    tmp_path, monkeypatch
+):
+    # Keys given out of order; scalar pdk.corner still yields `corners[]`.
+    request_path = _setup_matrix_env(
+        tmp_path,
+        monkeypatch,
+        {"max": "max.spef", "min": "min.spef", "nom": "nom.spef"},
+        corners=("tt_025C_1v80",),
+    )
+    request = json.loads(Path(request_path).read_text(encoding="utf-8"))
+    request["pdk"] = {"cell_library": "sky130_fd_sc_hd", "corner": "tt_025C_1v80"}
+    Path(request_path).write_text(json.dumps(request), encoding="utf-8")
+    scripts = _stub_openroad_matrix(
+        monkeypatch, slack_by_spef={"min": 0.1, "nom": 0.0, "max": -0.1}
+    )
+
+    report = run_sta(request_path)
+
+    assert report["spef_path"] is None
+    assert "worst_slack_ns" not in report
+    entries = report["corners"]
+    assert [e["interconnect_corner"] for e in entries] == ["min", "nom", "max"]
+    assert {e["corner"] for e in entries} == {"tt_025C_1v80"}
+    assert [e["worst_slack_ns"] for e in entries] == [-0.05, -0.15, -0.25]
+    for entry in entries:
+        assert entry["spef_path"] == _EXTERNAL
+        assert entry["spef_annotation"]["annotation_complete"] is not None
+    assert len(scripts) == 3
+    assert len({Path(s).name for s in scripts}) == 3
+    assert [Path(s).name for s in scripts] == [
+        f"sta_top__tt_025C_1v80__{k}.tcl" for k in ("min", "nom", "max")
+    ]
+    for script, key in zip(scripts, ("min", "nom", "max"), strict=True):
+        text = Path(script).read_text(encoding="utf-8")
+        assert f"read_spef {tmp_path}/{key}.spef" in text
+    assert report["provenance"]["input"]["content_hash"] is not None
+
+
+def test_run_sta_spef_map_multiple_liberties_subset(tmp_path, monkeypatch):
+    request_path = _setup_matrix_env(
+        tmp_path, monkeypatch, {"max": "max.spef", "min": "min.spef"}
+    )
+    scripts = _stub_openroad_matrix(monkeypatch)
+
+    report = run_sta(request_path)
+
+    pairs = [(e["corner"], e["interconnect_corner"]) for e in report["corners"]]
+    assert pairs == [
+        ("tt_025C_1v80", "min"),
+        ("tt_025C_1v80", "max"),
+        ("ss_100C_1v60", "min"),
+        ("ss_100C_1v60", "max"),
+    ]
+    assert len(scripts) == 4
+    assert report["spef_path"] is None
+
+
+def test_run_sta_spef_map_zero_annotation_reported_per_pair(tmp_path, monkeypatch):
+    request_path = _setup_matrix_env(
+        tmp_path, monkeypatch, {"nom": "nom.spef", "max": "max.spef"}
+    )
+    _stub_openroad_matrix(monkeypatch, zero_annotation=("max",))
+
+    report = run_sta(request_path)
+
+    by_pair = {
+        (e["corner"], e["interconnect_corner"]): e["spef_annotation"]
+        for e in report["corners"]
+    }
+    assert by_pair[("tt_025C_1v80", "nom")]["nets_annotated"] == 1
+    assert by_pair[("tt_025C_1v80", "max")]["nets_annotated"] == 0
+    assert by_pair[("tt_025C_1v80", "max")]["annotation_complete"] is False
+
+
+def test_run_sta_spef_map_detects_concurrent_def_mutation(tmp_path, monkeypatch):
+    request_path = _setup_matrix_env(tmp_path, monkeypatch, {"nom": "nom.spef"})
+    def_path = tmp_path / "top.def"
+    _stub_openroad_matrix(monkeypatch)
+    stub = post_route_sta.subprocess.run
+
+    def mutating_run(cmd, **kwargs):
+        result = stub(cmd, **kwargs)
+        if cmd[0] == "openroad" and "-version" not in cmd:
+            with open(def_path, "a", encoding="utf-8") as handle:
+                handle.write("# mutated mid-run\n")
+        return result
+
+    monkeypatch.setattr(post_route_sta.subprocess, "run", mutating_run)
+
+    with pytest.raises(PostRouteStaError, match="geometry backing this multi-corner"):
+        run_sta(request_path)
+
+
+@pytest.mark.skipif(
+    _live_sky130_env() is None,
+    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
+    "KLT_SKIP_OPENROAD_TESTS unset",
+)
+def test_live_engine_spef_map_distinguishes_interconnect_corners(tmp_path):
+    """Engine integration (issue #3228 test plan): two SPEFs of different
+    wire RC on the same DEF and liberty corner give different slack, with
+    one shared input digest."""
+    paths = _write_clock_fixtures(tmp_path)
+    heavy = (
+        _CLOCK_CAPTURES["spef"]
+        .replace("10.000000", "40.000000")
+        .replace("20.000000", "80.000000")
+        .replace("60000.000000", "240000.000000")
+    )
+    _write(tmp_path / "heavy.spef", heavy)
+    request = {
+        "def": paths["buffered.def"],
+        "pdk": {"cell_library": "sky130_fd_sc_hd", "corner": "tt_025C_1v80"},
+        "constraints": {
+            "clock_port": "clk",
+            "clock_period_ns": 2.0,
+            "input_delay_ns": 0.0,
+            "propagated_clock": True,
+        },
+        "spef": {"nom": paths["buffered.spef"], "max": "heavy.spef"},
+    }
+    report = run_sta(
+        _write_request(tmp_path / "request.json", request), pdk_variant="sky130A"
+    )
+
+    nom, heavy_entry = report["corners"]
+    assert (nom["interconnect_corner"], heavy_entry["interconnect_corner"]) == (
+        "nom",
+        "max",
+    )
+    assert nom["corner"] == heavy_entry["corner"] == "tt_025C_1v80"
+    assert nom["worst_hold_slack_ns"] != heavy_entry["worst_hold_slack_ns"]
+    assert report["provenance"]["input"]["content_hash"] is not None

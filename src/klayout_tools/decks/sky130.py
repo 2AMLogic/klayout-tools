@@ -875,11 +875,25 @@ DECK: list[DrcRule] = [
         threshold_dbu=55,  # 0.055 um
         # sky130A_mr.drc rule "via.4a": m1.edges.enclosing(via, 0.055,
         # euclidian) -> "via.4a : min. m1 enclosure of 0.15um via : 0.055um"
-        # (a second, 2-adjacent-edges-relaxed refinement, "via.5a" (0.085um),
-        # is not modelled here -- the same "primary rule only" approximation
-        # met1.enclosing.mcon.1 above already makes for its own sibling
-        # refinement, "m1.5".)
+        # (the 2-adjacent-edges-relaxed refinement, "via.5a" (0.085um), is
+        # modelled by met1.enclosing_adjacent.via.1 below; "m1.5", the
+        # mcon sibling, is still not modelled.)
         scope="via",  # sky130A_mr.drc "via.*" rule-id family (#566)
+    ),
+    DrcRule(
+        id="met1.enclosing_adjacent.via.1",
+        description="minimum met1 enclosure of via1 on two adjacent edges (0.085 um)",
+        layer=(68, 20),  # met1.drawing
+        other_layer=(68, 44),  # via.drawing
+        check="enclosing_adjacent",
+        threshold_dbu=85,  # 0.085 um
+        # sky130A_mr.drc rule "via.5a": flags every cut that has two
+        # *adjacent* edges both enclosed by less than 0.085 um ->
+        # "via.5a : min. m1 enclosure of 0.15um via of 2 adjacent edges : 0.085um"
+        # (a corner of short edges; two opposite short edges are legal --
+        # see drc.py `_run_enclosing_adjacent_check`, #3316).
+        scope="via",  # sky130A_mr.drc "via.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via.5a"),
     ),
     DrcRule(
         id="met2.enclosing.via.1",
@@ -891,11 +905,26 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "m2.4": m2.enclosing(via_outside_periphery,
         # 0.055, euclidian) -> "m2.4 : min. m2 enclosure of via : 0.055um"
         # (the official rule's periphery-scoped variant, "m2.4_b" (0.045um,
-        # areaid:core-only), and its 2-adjacent-edges-relaxed refinement,
-        # "m2.5" (0.085um), are not modelled -- this curated deck does not
-        # model areaid.* layers elsewhere either; same "primary rule only"
-        # approximation as met1.enclosing.via.1 above.)
+        # areaid:core-only), is not modelled -- this curated deck does not
+        # model areaid.* layers elsewhere either; its
+        # 2-adjacent-edges-relaxed refinement, "m2.5" (0.085um), is
+        # met2.enclosing_adjacent.via.1.)
         scope="m2",  # sky130A_mr.drc "m2.*" rule-id family (#566)
+    ),
+    DrcRule(
+        id="met2.enclosing_adjacent.via.1",
+        description="minimum met2 enclosure of via1 on two adjacent edges (0.085 um)",
+        layer=(69, 20),  # met2.drawing
+        other_layer=(68, 44),  # via.drawing
+        check="enclosing_adjacent",
+        threshold_dbu=85,  # 0.085 um
+        # sky130A_mr.drc rule "m2.5": flags every cut that has two
+        # *adjacent* edges both enclosed by less than 0.085 um ->
+        # "m2.5 : min. m2 enclosure of via of 2 adjacent edges : 0.085um"
+        # (a corner of short edges; two opposite short edges are legal --
+        # see drc.py `_run_enclosing_adjacent_check`, #3316).
+        scope="m2",  # sky130A_mr.drc "m2.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m2.5"),
     ),
     DrcRule(
         id="met2.area.1",
@@ -1016,11 +1045,26 @@ DECK: list[DrcRule] = [
         threshold_dbu=65,  # 0.065 um
         # sky130A_mr.drc rule "m3.4": m3.enclosing(via2, 0.065, euclidian)
         # -> "m3.4 : min. m3 enclosure of via2 : 0.065um"
-        # (the 2-adjacent-edges-relaxed refinement, "via2.5" (0.085um), is
-        # not modelled here -- the same "primary rule only" approximation
-        # met1.enclosing.via.1/met2.enclosing.via.1 above already make for
-        # their own sibling refinements.)
+        # (the 2-adjacent-edges-relaxed "via2.5" (0.085um) reads m2, not
+        # m3, in the official code: met2.enclosing_adjacent.via2.1.)
         scope="m3",  # sky130A_mr.drc "m3.*" rule-id family (#566)
+    ),
+    DrcRule(
+        id="met2.enclosing_adjacent.via2.1",
+        description="minimum met2 enclosure of via2 on two adjacent edges (0.085 um)",
+        layer=(69, 20),  # met2.drawing
+        other_layer=(69, 44),  # via2.drawing
+        check="enclosing_adjacent",
+        threshold_dbu=85,  # 0.085 um
+        # sky130A_mr.drc rule "via2.5": flags every cut that has two
+        # *adjacent* edges both enclosed by less than 0.085 um ->
+        # "via2.5 : min. m3 enclosure of via2 of 2 adjacent edges : 0.085um"
+        # (the message says "m3" but the code reads `m2.enclosing(via2, ...)`,
+        # like via2.4 -- this follows the code. A corner of short edges is
+        # the violation; two opposite short edges are legal -- see drc.py
+        # `_run_enclosing_adjacent_check`, #3316).
+        scope="via2",  # sky130A_mr.drc "via2.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via2.5"),
     ),
     DrcRule(
         id="met3.area.1",
@@ -1126,10 +1170,23 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "via3.4": m3.enclosing(via3, 0.06, euclidian)
         # -> "via3.4 : min. m3 enclosure of via3 : 0.06um"
         # (the 2-adjacent-edges-relaxed refinement, "via3.5" (0.09um), is
-        # not modelled here -- the same "primary rule only" approximation
-        # met3.enclosing.via2.1 above already makes for its own sibling
-        # refinement.)
+        # met3.enclosing_adjacent.via3.1.)
         scope="via3",  # sky130A_mr.drc "via3.*" rule-id family (#566)
+    ),
+    DrcRule(
+        id="met3.enclosing_adjacent.via3.1",
+        description="minimum met3 enclosure of via3 on two adjacent edges (0.09 um)",
+        layer=(70, 20),  # met3.drawing
+        other_layer=(70, 44),  # via3.drawing
+        check="enclosing_adjacent",
+        threshold_dbu=90,  # 0.090 um
+        # sky130A_mr.drc rule "via3.5": flags every cut that has two
+        # *adjacent* edges both enclosed by less than 0.090 um ->
+        # "via3.5 : min. m3 enclosure of via3 of 2 adjacent edges : 0.09um"
+        # (a corner of short edges; two opposite short edges are legal --
+        # see drc.py `_run_enclosing_adjacent_check`, #3316).
+        scope="via3",  # sky130A_mr.drc "via3.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via3.5"),
     ),
     DrcRule(
         id="met4.enclosing.via3.1",
@@ -1454,6 +1511,28 @@ DECK: list[DrcRule] = [
         scope="nwell",  # sky130.lydrc "nwell.*" rule-id family (#566)
         provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "nwell.2a"),
     ),
+    DrcRule(
+        id="rpm.width.1",
+        description="minimum rpm (poly-resistor implant marker) width",
+        layer=(86, 20),  # rpm.drawing
+        check="width",
+        threshold_dbu=1270,  # 1.27 um
+        # sky130A_mr.drc rule "rpm.1a": rpm.width(1.27, euclidian)
+        # -> "rpm.1a : min. rpm width : 1.27um"
+        scope="rpm",  # sky130A_mr.drc "rpm.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "rpm.1a"),
+    ),
+    DrcRule(
+        id="urpm.width.1",
+        description="minimum urpm (ultra-high-rho poly-resistor implant marker) width",
+        layer=(79, 20),  # urpm.drawing
+        check="width",
+        threshold_dbu=1270,  # 1.27 um
+        # sky130A_mr.drc rule "urpm.1a": urpm.width(1.27, euclidian)
+        # -> "urpm.1a : min. rpm width : 1.27um"
+        scope="urpm",  # sky130A_mr.drc "urpm.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "urpm.1a"),
+    ),
 ]
 
 # ---------------------------------------------------------------------------
@@ -1623,6 +1702,7 @@ OFFGRID_UNCHECKED_LAYERS: dict[tuple[int, int], str] = {
     (89, 44): "capm.drawing -- no ongrid/with_angle call in the OFFGRID block",
     (97, 44): "capm2.drawing (source deck `cap2m`) -- likewise unchecked",
     (82, 44): "pnp.drawing -- device-recognition mark, not a patterned layer",
+    (79, 20): "urpm.drawing -- no ongrid/with_angle call in the OFFGRID block",
 }
 
 

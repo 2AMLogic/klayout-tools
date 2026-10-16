@@ -561,6 +561,61 @@ def _check_result(output: str, fresh_data: bytes) -> tuple[str, dict[str, Any]]:
     }
 
 
+#: Seconds the ``xschem --version`` probe may take. Short on purpose: the probe
+#: is a courtesy, and a version that cannot be read quickly is reported as
+#: ``null`` rather than waited for.
+VERSION_PROBE_TIMEOUT_S = 10.0
+
+#: ``error.code`` of the content gate (:func:`_check_no_unevaluated_expr`).
+UNEVALUATED_EXPR_CODE = "unevaluated_expr"
+
+#: Oldest xschem reported (issue #3482; not verified against xschem's release
+#: notes) to evaluate a symbol's ``expr()`` attributes while netlisting.
+MIN_EXPR_XSCHEM_VERSION = "3.4.5"
+
+_UNEVALUATED_EXPR_RE = re.compile(rb"\bexpr\s*\(")
+_XSCHEM_VERSION_RE = re.compile(r"\d+\.\d+\.\d+")
+
+
+def _probe_xschem_version(xschem_binary: str) -> str | None:
+    """xschem's version (``"3.4.7"``), or ``None`` when it cannot be read.
+
+    Runs through :func:`_launch_xschem` (own process group, bounded, SIGKILL
+    escalation) because xschem can hang. Any failure -- missing binary,
+    timeout, unparseable output -- is ``None``, never an error.
+    """
+    try:
+        _, stdout, stderr, _ = _launch_xschem(
+            [xschem_binary, "--version"], VERSION_PROBE_TIMEOUT_S
+        )
+    except NetlistError:
+        return None
+    match = _XSCHEM_VERSION_RE.search(stdout or stderr)
+    return match.group(0) if match else None
+
+
+def _check_no_unevaluated_expr(data: bytes, version: str | None) -> None:
+    """Fail when the netlist still holds a literal ``expr(...)`` (issue #3482).
+
+    xschem releases that do not evaluate a symbol's ``expr()`` attributes
+    still write a "fresh" ``.spice`` file, which ngspice then cannot load.
+    Comment lines (``*``) are ignored, and ``\b`` keeps longer identifiers such
+    as ``myexpr(`` from matching.
+    """
+    for number, line in enumerate(data.split(b"\n"), start=1):
+        if line.lstrip().startswith(b"*") or not _UNEVALUATED_EXPR_RE.search(line):
+            continue
+        snippet = line.decode("utf-8", errors="replace").strip()
+        raise NetlistError(
+            f"the netlist has an unevaluated expr(...) at line {number}: "
+            f"{snippet!r}. xschem version: {version or 'unknown'}; releases "
+            f"older than {MIN_EXPR_XSCHEM_VERSION} are reported not to "
+            "evaluate expr() (unverified). ngspice cannot load this netlist, "
+            "so none was written; use a newer xschem.",
+            code=UNEVALUATED_EXPR_CODE,
+        )
+
+
 def _write_output(output: str, data: bytes) -> None:
     parent = os.path.dirname(os.path.abspath(output))
     try:
@@ -808,6 +863,9 @@ def run_netlist(
         if block:
             fresh_data, block_info = _apply_block_mode(fresh_data)
 
+        version = _probe_xschem_version(xschem_binary)
+        _check_no_unevaluated_expr(fresh_data, version)
+
         payload: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
             "schematic": schematic,
@@ -815,6 +873,7 @@ def run_netlist(
             "mode": "check" if check else "generate",
             "xschem": {
                 "binary": xschem_binary,
+                "version": version,
                 "argv": argv,
                 "forced_flags": list(FORCED_XSCHEM_FLAGS),
                 "exit_status": exit_status,

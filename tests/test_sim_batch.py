@@ -1135,6 +1135,71 @@ def test_a_variant_reducible_to_a_published_family_is_accepted(
     assert config.bucket == FAKE_BUCKET
 
 
+_HOST_LIB = "/home/u/.volare/gf180mcuD/libs.tech/ngspice/sm141064.ngspice"
+
+
+def _lib_request(tmp_path, **fields):
+    script = _provision_script(tmp_path)
+    return {
+        "batch": {"provision_script_path": str(script), "bucket": FAKE_BUCKET},
+        **fields,
+    }
+
+
+def test_absolute_models_lib_is_refused_with_the_pdk_relative_form(tmp_path):
+    request = _lib_request(tmp_path, models={"lib": _HOST_LIB})
+    with pytest.raises(sim.SimError) as excinfo:
+        sb._resolve_batch_config(request, corner_count=1, timeout_s=30.0)
+    assert excinfo.value.code == "models_lib_host_path"
+    message = str(excinfo.value)
+    assert _HOST_LIB in message
+    assert '"pdk": "gf180mcuD"' in message
+    assert '"lib": "libs.tech/ngspice/sm141064.ngspice"' in message
+
+
+def test_absolute_models_lib_outside_a_pdk_has_no_rewrite_hint(tmp_path):
+    request = _lib_request(tmp_path, models={"lib": "/opt/custom/models.lib"})
+    with pytest.raises(sim.SimError) as excinfo:
+        sb._resolve_batch_config(request, corner_count=1, timeout_s=30.0)
+    assert excinfo.value.code == "models_lib_host_path"
+    assert "use {" not in str(excinfo.value)
+
+
+def test_tilde_models_lib_is_a_host_path(tmp_path):
+    request = _lib_request(tmp_path, models={"lib": "~/models.lib"})
+    with pytest.raises(sim.SimError, match="host-path model library"):
+        sb._resolve_batch_config(request, corner_count=1, timeout_s=30.0)
+
+
+def test_absolute_per_section_lib_is_refused(tmp_path):
+    request = _lib_request(
+        tmp_path,
+        models={"pdk": "gf180mcuD"},
+        corners={
+            "process": [
+                {"name": "tt", "sections": [{"lib": _HOST_LIB, "section": "typical"}]}
+            ]
+        },
+    )
+    with pytest.raises(sim.SimError) as excinfo:
+        sb._resolve_batch_config(request, corner_count=1, timeout_s=30.0)
+    assert excinfo.value.code == "models_lib_host_path"
+    assert "corners.process[0].sections[0].lib" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"models": {"pdk": "gf180mcuD", "lib": "libs.tech/ngspice/sm141064.ngspice"}},
+        {"models": {"lib": "$PDK_ROOT/gf180mcuD/libs.tech/ngspice/sm141064.ngspice"}},
+        {"models": {"lib": _HOST_LIB}, "options": {"stage_model_inputs": True}},
+    ],
+)
+def test_portable_or_staged_models_lib_is_not_refused(tmp_path, extra):
+    request = _lib_request(tmp_path, **extra)
+    assert sb._resolve_batch_config(request, corner_count=1, timeout_s=30.0).bucket
+
+
 def test_a_request_naming_no_pdk_at_all_is_not_refused(tmp_path, monkeypatch):
     """Edge case that must not regress: a process-less request has no model
     library to resolve, so there is no PDK to validate and nothing to refuse."""
@@ -2767,6 +2832,37 @@ def test_run_sim_batch_uploads_the_staged_model_closure(tmp_path, monkeypatch):
     assert names == ["top.lib", "psp103.osdi", "shared.spice"]
 
 
+def test_staged_assets_carry_source_sha256_of_original_bytes(tmp_path, monkeypatch):
+    import hashlib
+
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {"report.json": _sim_report()}
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    _write_body(tmp_path)
+    _write_staged_models(tmp_path)
+    # A path-bearing include is rewritten to its flat staged name.
+    (tmp_path / "models" / "top.lib").write_text(
+        '.lib tt\n.include "../models/shared.spice"\n.endl tt\n'
+        '.lib ss\n.include "../models/shared.spice"\n.endl ss\n'
+    )
+
+    report = sim.run_sim(str(_write_request(tmp_path, _staged_batch_request(tmp_path))))
+
+    entries = {e["name"]: e for e in report["environment"]["staged_model_inputs"]}
+    top = entries["top.lib"]
+    assert top["rewritten"] is True
+    assert (
+        top["source_sha256"]
+        == hashlib.sha256((tmp_path / "models" / "top.lib").read_bytes()).hexdigest()
+    )
+    assert top["source_sha256"] != top["sha256"]
+    for name in ("shared.spice", "psp103.osdi"):
+        assert entries[name]["rewritten"] is False
+        assert entries[name]["source_sha256"] == entries[name]["sha256"]
+    assert report["environment"]["models_lib_sha256_scope"] == "client"
+
+
 def test_run_sim_batch_keeps_pdk_variant_when_staging(tmp_path, monkeypatch):
     runner = _FakeRunner()
     runner.default = fake_completed(_status("done"))
@@ -4125,6 +4221,54 @@ def test_capture_program_records_selected_binary_banner_and_pdk_stamp(tmp_path):
     assert doc["pdk"]["stamp_scheme"] == "sources-sha256"
     assert doc["pdk"]["stamp_sha256"]
     assert doc["omp_num_threads"] == "3"
+
+
+def test_capture_program_digests_staged_model_inputs(tmp_path):
+    import hashlib
+
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    (inputs / "top.lib").write_bytes(b"lib bytes")
+    doc = _run_capture_program(
+        tmp_path,
+        ngspice_script=None,
+        args=("", "", "1", "top.lib"),
+        env={"EDA_INPUT_DIR": str(inputs)},
+    )
+    assert doc["model_inputs"] == [
+        {"name": "top.lib", "sha256": hashlib.sha256(b"lib bytes").hexdigest()}
+    ]
+    unstaged = _run_capture_program(tmp_path, ngspice_script=None, args=("", "", "0"))
+    assert unstaged["model_inputs"] is None
+
+
+def test_runner_model_inputs_populated_or_null(tmp_path, monkeypatch):
+    models = [{"name": "top.lib", "sha256": "a" * 64}]
+    present = _worker_env(
+        tmp_path,
+        monkeypatch,
+        {"worker_environment.json": _capture(model_inputs=models)},
+    )
+    assert present["runner_model_inputs"] == models
+    assert present["worker_environment"]["model_inputs"] == models
+    # Older runner: the capture lacks the field -> null, not [].
+    older = _worker_env(tmp_path, monkeypatch, {"worker_environment.json": _capture()})
+    assert older["runner_model_inputs"] is None
+    absent = _worker_env(tmp_path, monkeypatch, {})
+    assert absent["runner_model_inputs"] is None
+
+
+def test_hostile_runner_model_inputs_are_bounded(tmp_path, monkeypatch):
+    hostile = [{"name": "n" * 400, "sha256": "f" * 100}] * 80 + ["junk"]
+    env = _worker_env(
+        tmp_path,
+        monkeypatch,
+        {"worker_environment.json": _capture(model_inputs=hostile)},
+    )
+    got = env["runner_model_inputs"]
+    assert len(got) == sb.WORKER_CAPTURE_MODEL_INPUTS_MAX
+    assert len(got[0]["name"]) <= sb.WORKER_CAPTURE_STR_MAX
+    assert len(got[0]["sha256"]) == 64
 
 
 def test_capture_program_honors_requested_binary_override(tmp_path):

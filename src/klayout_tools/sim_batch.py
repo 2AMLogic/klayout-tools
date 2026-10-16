@@ -95,7 +95,7 @@ import sys
 import tempfile
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -577,6 +577,8 @@ WORKER_CAPTURE_BANNER_MAX = 2000
 WORKER_CAPTURE_STR_MAX = 300
 WORKER_CAPTURE_FILE_MAX = 65536
 WORKER_CAPTURE_PROBE_TIMEOUT_S = 10
+#: Most staged model files the worker capture digests / the client re-reads.
+WORKER_CAPTURE_MODEL_INPUTS_MAX = 64
 
 #: The worker-side capture program. It is passed to ``python3 -I -c`` as one
 #: shell-quoted argument (never interpolated with untrusted text); request
@@ -589,6 +591,7 @@ import hashlib, json, os, shutil, sys
 import subprocess as sp
 BAN, STR, T = @BAN@, @STR@, @TIMEOUT@
 out, req_bin, variant, staged = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+model_names = sys.argv[5:5 + @MODELS@]
 diag = []
 def clip(v, n=STR):
     if not isinstance(v, str):
@@ -670,6 +673,19 @@ def manifest():
         return m
     return None
 doc["image_manifest"] = guard("image manifest", manifest)
+def model_inputs():
+    if staged != "1":
+        return None
+    base = os.environ.get("EDA_INPUT_DIR") or "."
+    found = []
+    for name in model_names:
+        h = hashlib.sha256()
+        with open(os.path.join(base, name), "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        found.append({"name": clip(name), "sha256": h.hexdigest()})
+    return found
+doc["model_inputs"] = guard("model inputs", model_inputs)
 doc["diagnostics"] = diag[:20]
 body = json.dumps(doc, ensure_ascii=True)
 tmp = out + ".tmp"
@@ -681,10 +697,13 @@ _WORKER_CAPTURE_PROGRAM = (
     _WORKER_CAPTURE_PROGRAM.replace("@BAN@", str(WORKER_CAPTURE_BANNER_MAX))
     .replace("@STR@", str(WORKER_CAPTURE_STR_MAX))
     .replace("@TIMEOUT@", str(WORKER_CAPTURE_PROBE_TIMEOUT_S))
+    .replace("@MODELS@", str(WORKER_CAPTURE_MODEL_INPUTS_MAX))
 )
 
 
-def _worker_capture_command(remote_request: dict[str, Any]) -> str:
+def _worker_capture_command(
+    remote_request: dict[str, Any], model_names: Sequence[str] = ()
+) -> str:
     """The best-effort worker capture invocation (issue #2834), run from the
     runner preflight. Bounded by ``timeout`` when present, stderr discarded,
     ``|| true`` so it can never fail or alter the job."""
@@ -697,6 +716,7 @@ def _worker_capture_command(remote_request: dict[str, Any]) -> str:
         shlex.quote(str(binary) if isinstance(binary, str) else ""),
         shlex.quote(str(variant) if isinstance(variant, str) else ""),
         staged,
+        *(shlex.quote(name) for name in model_names[:WORKER_CAPTURE_MODEL_INPUTS_MAX]),
     ]
     target = f'"$EDA_OUTPUT_DIR/{BATCH_WORKER_ENVIRONMENT_FILENAME}"'
     return (
@@ -1005,7 +1025,9 @@ def _build_batch_job_spec(
     command = _runner_preflight_script(
         client_version if client_version is not None else _provenance._klt_version(),
         enforce=version_check == "enforce",
-        capture=_worker_capture_command(remote_request),
+        capture=_worker_capture_command(
+            remote_request, [asset.name for asset in staged.model_assets]
+        ),
         required_features=tuple(_request_features(remote_request)),
     ) + (
         f'klt sim "$EDA_INPUT_DIR/{BATCH_REQUEST_FILENAME}" '
@@ -1230,6 +1252,84 @@ def _validate_batch_pdk(request: dict[str, Any]) -> None:
         raise SimError(str(exc)) from exc
 
 
+#: ``SimError.code`` for an absolute host-path model library on the batch
+#: backend (issue #3296).
+BATCH_MODELS_LIB_HOST_PATH_CODE = "models_lib_host_path"
+
+
+def _host_path_lib_refs(request: dict[str, Any]) -> list[tuple[str, str]]:
+    """Every ``(where, ref)`` model-library ref in ``request`` that is an
+    absolute host path: ``models.lib`` and each ``corners.process[].sections[]``
+    object's ``lib``. A ref that names an environment variable (``$PDK_ROOT/...``)
+    is left alone -- the runner expands it against its own environment -- but a
+    ``~`` is expanded on *this* host, so ``~/...`` is a host path too."""
+    refs: list[tuple[str, str]] = []
+
+    def check(where: str, ref: Any) -> None:
+        if not isinstance(ref, str) or "$" in ref:
+            return
+        if os.path.isabs(os.path.expanduser(ref)):
+            refs.append((where, ref))
+
+    models = request.get("models")
+    if isinstance(models, dict):
+        check("models.lib", models.get("lib"))
+    corners = request.get("corners")
+    process = corners.get("process") if isinstance(corners, dict) else None
+    for i, entry in enumerate(process if isinstance(process, list) else []):
+        sections = entry.get("sections") if isinstance(entry, dict) else None
+        for j, section in enumerate(sections if isinstance(sections, list) else []):
+            if isinstance(section, dict):
+                check(f"corners.process[{i}].sections[{j}].lib", section.get("lib"))
+    return refs
+
+
+def _pdk_relative_form(ref: str) -> str | None:
+    """The ``{"pdk", "lib"}`` spelling of an absolute path laid out as
+    ``<root>/<variant>/libs.tech/...``, or ``None`` when the path does not sit
+    in a PDK variant directory."""
+    parts = os.path.expanduser(ref).split(os.sep)
+    if "libs.tech" not in parts:
+        return None
+    index = parts.index("libs.tech")
+    if index < 2 or not parts[index - 1]:
+        return None
+    return json.dumps({"pdk": parts[index - 1], "lib": "/".join(parts[index:])})
+
+
+def _validate_batch_models_lib(request: dict[str, Any]) -> None:
+    """Refuse an absolute host-path model library **before** any S3 write
+    (issue #3296).
+
+    The runner resolves ``models.lib`` on its own box, where this host's
+    ``/home/<user>/.volare/...`` does not exist, so the job would pay for an
+    instance launch and then fail with ``model library not found``. Not
+    refused: PDK-relative libs, ``$VAR`` forms (the runner expands them), and
+    any request with ``options.stage_model_inputs: true`` (the library ships
+    with the job).
+    """
+    from . import sim_staging
+    from .sim import SimError
+
+    if sim_staging.stage_model_inputs_requested(request):
+        return
+    refs = _host_path_lib_refs(request)
+    if not refs:
+        return
+    details = []
+    for where, ref in refs:
+        relative = _pdk_relative_form(ref)
+        hint = f" -- use {relative}" if relative else ""
+        details.append(f"{where}={ref!r}{hint}")
+    raise SimError(
+        "backend 'batch': an absolute host-path model library does not exist "
+        "on the runner (" + "; ".join(details) + "). Name the library PDK-relative "
+        '({"pdk": "<variant>", "lib": "<path under the variant dir>"}) or set '
+        "options.stage_model_inputs: true to ship it with the job",
+        code=BATCH_MODELS_LIB_HOST_PATH_CODE,
+    )
+
+
 def _resolve_batch_config(
     request: dict[str, Any],
     *,
@@ -1264,6 +1364,7 @@ def _resolve_batch_config(
     from .sim import SimError
 
     _validate_batch_pdk(request)
+    _validate_batch_models_lib(request)
     batch_spec = request.get("batch") or {}
     provision_script = _resolve_provision_script(batch_spec)
     fleet = _read_fleet_config(provision_script)
@@ -2296,6 +2397,22 @@ def _compare_pdk_stamps(
     }
 
 
+def _bounded_model_inputs(doc: dict[str, Any]) -> list[dict[str, str | None]] | None:
+    """The worker-reported ``model_inputs`` list, re-validated and bounded.
+    ``None`` (not ``[]``) when the capture carries no list at all."""
+    models_in = doc.get("model_inputs")
+    if not isinstance(models_in, list):
+        return None
+    return [
+        {
+            "name": _bounded_str(entry.get("name")),
+            "sha256": _bounded_str(entry.get("sha256"), 64),
+        }
+        for entry in models_in[:WORKER_CAPTURE_MODEL_INPUTS_MAX]
+        if isinstance(entry, dict)
+    ]
+
+
 def _read_worker_environment(
     local_dir: str | None, request: dict[str, Any] | None = None
 ) -> dict[str, Any]:
@@ -2314,6 +2431,7 @@ def _read_worker_environment(
         "cpu_model": None,
         "omp_num_threads": None,
         "image_manifest": None,
+        "model_inputs": None,
         "diagnostics": [],
         "pdk_stamp_comparison": {"status": "not_comparable"},
     }
@@ -2373,6 +2491,7 @@ def _read_worker_environment(
             "cpu_model": _bounded_str(doc.get("cpu_model")),
             "omp_num_threads": _bounded_str(doc.get("omp_num_threads"), 40),
             "image_manifest": manifest,
+            "model_inputs": _bounded_model_inputs(doc),
             "diagnostics": diagnostics,
             "pdk_stamp_comparison": _compare_pdk_stamps(
                 pdk, _client_pdk_stamp(request)
@@ -2471,9 +2590,13 @@ def _read_job_identity(
 ) -> dict[str, Any]:
     """Runner identity plus the worker-observed environment capture, merged
     into ``environment.remote``. Neither reader can raise."""
+    worker_environment = _read_worker_environment(local_dir, request)
     return {
         **_read_runner_identity(local_dir, request),
-        "worker_environment": _read_worker_environment(local_dir, request),
+        "worker_environment": worker_environment,
+        # ``None`` (not ``[]``) when the runner did not report it, so "none
+        # staged" and "unknown / older runner" stay distinguishable.
+        "runner_model_inputs": worker_environment.get("model_inputs"),
     }
 
 
