@@ -135,7 +135,7 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import NamedTuple
 
 from ._paths import _fold_spice_continuations
@@ -346,9 +346,17 @@ def _parse_um(
     """
     match = _NUMBER_RE.match(raw_value.strip())
     if match is None:
+        symbols = sorted(set(_IDENT_RE.findall(raw_value)) - {"e", "E"})
+        hint = (
+            f" (unresolved symbol(s) {', '.join(repr(n) for n in symbols)}: not "
+            "defined by a .subckt header default or .param line in this "
+            "netlist, or the expression uses unsupported syntax)"
+            if symbols
+            else ""
+        )
         raise NormalizeError(
             f"device '{device}': parameter '{param.upper()}' value "
-            f"'{raw_value}' is not a plain numeric literal -- the "
+            f"'{raw_value}' is not a plain numeric literal{hint} -- the "
             "plain-element form cannot carry an expression; write an explicit "
             "geometric value (e.g. L=0.5u)"
         )
@@ -384,6 +392,192 @@ def _parse_um(
     return metres * 1e6
 
 
+_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_NUM_TOKEN_RE = re.compile(r"(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?[a-zA-Z]*")
+
+#: ``{<subckt-name or "">: {<param>: <raw value>}}`` -- the ``.param`` lines
+#: (scope ``""``) and ``.subckt`` header defaults found in one netlist.
+ParamScopes = dict[str, dict[str, str]]
+
+
+class _Unresolved(Exception):
+    """An expression names a symbol it cannot resolve, or uses syntax outside
+    the restricted evaluator; ``symbol`` is the offending name/token."""
+
+    def __init__(self, symbol: str) -> None:
+        super().__init__(symbol)
+        self.symbol = symbol
+
+
+def _collect_param_scopes(lines: list[str]) -> ParamScopes:
+    """Gather ``.param`` assignments and ``.subckt`` header ``key=value``
+    defaults, keyed by the enclosing subcircuit name (``""`` = top level)."""
+    scopes: ParamScopes = {"": {}}
+    current = ""
+    for line in lines:
+        stripped = line.strip()
+        lowered = stripped.lower()
+        if lowered.startswith(".subckt"):
+            tokens = _tokenize(stripped)
+            if len(tokens) >= 2:
+                current = tokens[1].lower()
+                scopes.setdefault(current, {}).update(_split_params(tokens[2:])[1])
+        elif lowered.startswith(".ends"):
+            current = ""
+        elif lowered.startswith(".param"):
+            tokens = _tokenize(stripped)
+            scopes.setdefault(current, {}).update(_split_params(tokens[1:])[1])
+    return scopes
+
+
+class _ExprEvaluator:
+    """Restricted SPICE arithmetic: ``+ - * /``, parentheses, unary sign,
+    engineering suffixes and identifiers looked up through ``lookup``. No
+    function calls. ``scaled`` records whether any literal carried a
+    suffix/exponent, so the caller can keep the result unambiguous."""
+
+    def __init__(self, text: str, lookup: Callable[[str], tuple[float, bool]]) -> None:
+        self.text = text
+        self.pos = 0
+        self.lookup = lookup
+        self.scaled = False
+
+    def parse(self) -> float:
+        value = self._sum()
+        self._skip()
+        if self.pos != len(self.text):
+            raise _Unresolved(self.text[self.pos :])
+        return value
+
+    def _skip(self) -> None:
+        while self.pos < len(self.text) and self.text[self.pos].isspace():
+            self.pos += 1
+
+    def _peek(self) -> str:
+        self._skip()
+        return self.text[self.pos] if self.pos < len(self.text) else ""
+
+    def _sum(self) -> float:
+        value = self._product()
+        while self._peek() in ("+", "-"):
+            op = self.text[self.pos]
+            self.pos += 1
+            rhs = self._product()
+            value = value + rhs if op == "+" else value - rhs
+        return value
+
+    def _product(self) -> float:
+        value = self._unary()
+        while self._peek() in ("*", "/"):
+            op = self.text[self.pos]
+            self.pos += 1
+            rhs = self._unary()
+            if op == "/" and rhs == 0:
+                raise _Unresolved("/0")
+            value = value * rhs if op == "*" else value / rhs
+        return value
+
+    def _unary(self) -> float:
+        if self._peek() in ("+", "-"):
+            sign = self.text[self.pos]
+            self.pos += 1
+            value = self._unary()
+            return -value if sign == "-" else value
+        return self._atom()
+
+    def _atom(self) -> float:
+        char = self._peek()
+        if char == "(":
+            self.pos += 1
+            value = self._sum()
+            if self._peek() != ")":
+                raise _Unresolved("(")
+            self.pos += 1
+            return value
+        number = _NUM_TOKEN_RE.match(self.text, self.pos)
+        if number is not None:
+            self.pos = number.end()
+            match = _NUMBER_RE.match(number.group(0))
+            if match is None:
+                raise _Unresolved(number.group(0))
+            suffix = match.group(2).lower()
+            multiplier = 1.0
+            for name, factor in _SPICE_SUFFIXES:
+                if suffix.startswith(name):
+                    multiplier = factor
+                    break
+            if suffix or "e" in match.group(1).lower():
+                self.scaled = True
+            return float(match.group(1)) * multiplier
+        ident = _IDENT_RE.match(self.text, self.pos)
+        if ident is None:
+            raise _Unresolved(self.text[self.pos : self.pos + 1] or "<end>")
+        self.pos = ident.end()
+        if self._peek() == "(":
+            raise _Unresolved(f"{ident.group(0)}(...)")
+        value, scaled = self.lookup(ident.group(0))
+        self.scaled = self.scaled or scaled
+        return value
+
+
+def _resolve_value(
+    raw: str,
+    chain: list[dict[str, str]],
+    active: tuple[str, ...] = (),
+) -> tuple[float, bool]:
+    """Evaluate ``raw`` (``'a*b'``, ``{a+b}``, ``lacc``) looking each name up
+    in ``chain`` (first dict that defines it wins). Returns
+    ``(value, scaled)``; raises :class:`_Unresolved`."""
+    text = raw.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"":
+        text = text[1:-1]
+    elif len(text) >= 2 and text[0] == "{" and text[-1] == "}":
+        text = text[1:-1]
+
+    def lookup(name: str) -> tuple[float, bool]:
+        key = name.lower()
+        if key in active:
+            raise _Unresolved(name)
+        for candidate in chain:
+            if key in candidate:
+                return _resolve_value(candidate[key], chain, (*active, key))
+        raise _Unresolved(name)
+
+    evaluator = _ExprEvaluator(text, lookup)
+    return evaluator.parse(), evaluator.scaled
+
+
+def _resolve_params(
+    params: dict[str, str], subckt_scope: str, scopes: ParamScopes
+) -> dict[str, str]:
+    """Replace each non-literal ``params`` value with the plain literal it
+    resolves to, looking names up in the enclosing ``.subckt``'s header
+    defaults / ``.param`` lines, then the top-level ``.param`` lines (a
+    sibling call parameter is not a symbol, as in SPICE). A value that is
+    already a plain number, or that cannot be resolved (a function call, an
+    unknown name), is left as written so the consumer that actually reads
+    that parameter reports it by name (see :func:`_parse_um`); parameters
+    nobody reads (``ad``/``as``/...) therefore never fail the conversion."""
+    chain = [scopes.get(subckt_scope, {}), scopes[""]]
+    out: dict[str, str] = {}
+    for key, raw in params.items():
+        if _NUMBER_RE.match(raw.strip()):
+            out[key] = raw
+            continue
+        try:
+            value, scaled = _resolve_value(raw, chain)
+        except _Unresolved:
+            out[key] = raw
+            continue
+        if scaled:
+            out[key] = f"{value:.12e}"
+        elif value == int(value):
+            out[key] = str(int(value))
+        else:
+            out[key] = repr(value)
+    return out
+
+
 def _split_params(tokens: list[str]) -> tuple[list[str], dict[str, str]]:
     """Split an ``X`` card's tokens (after the instance name) into its
     leading positional tokens (nodes + subcircuit name) and its
@@ -417,11 +611,19 @@ def _convert_x_card(
     geometry_style: str | None = None,
     placeholder_value_classes: dict[str, str] | None = None,
     custom_device_classes: Mapping[str, str] | None = None,
+    param_scopes: ParamScopes | None = None,
+    subckt_scope: str = "",
 ) -> str:
     """Convert one ``X`` subcircuit-call line to a plain-element ``M``/``R``/
     ``C``/``Q`` line, or return it unchanged if it is not a recognised device
     call (issue #1130 extends the original #280 MOS-only conversion to
     resistor, capacitor, and bipolar).
+
+    ``param_scopes``/``subckt_scope`` (issue #2953) carry the netlist's
+    ``.param``/``.subckt``-default symbols and the enclosing ``.subckt``'s
+    name: a call-site value that is an identifier or simple expression
+    (``L=lacc``, ``W='w*2'``) is resolved to a literal before any geometry is
+    parsed (see :func:`_resolve_params`).
 
     ``subckt_to_binding`` maps a device subcircuit name to its curated
     :class:`~klayout_tools.pdk_models.DeviceLookup`. When ``None`` (no deck /
@@ -475,6 +677,8 @@ def _convert_x_card(
     positional, params = _split_params(rest)
     if not positional:
         return line
+    if param_scopes is not None:
+        params = _resolve_params(params, subckt_scope, param_scopes)
 
     subckt_name = positional[-1]
     nodes = positional[:-1]
@@ -1462,6 +1666,8 @@ def convert_reference_netlist(
     geometry_style = geometry_style_for_family(deck) if deck is not None else None
     custom_device_classes = _resolve_custom_device_classes(deck)
     logical_lines = _merge_continuations(text.splitlines())
+    param_scopes = _collect_param_scopes(logical_lines)
+    subckt_scope = ""
 
     placeholder_value_classes: dict[str, str] = {}
     out: list[str] = []
@@ -1470,6 +1676,12 @@ def convert_reference_netlist(
         if not stripped or stripped.startswith("*"):
             out.append(line)
             continue
+        lowered = stripped.lower()
+        if lowered.startswith(".subckt"):
+            tokens = _tokenize(stripped)
+            subckt_scope = tokens[1].lower() if len(tokens) >= 2 else ""
+        elif lowered.startswith(".ends"):
+            subckt_scope = ""
         first = stripped.split(None, 1)[0]
         if first and first[0] in "Xx":
             out.append(
@@ -1480,6 +1692,8 @@ def convert_reference_netlist(
                     geometry_style,
                     placeholder_value_classes,
                     custom_device_classes,
+                    param_scopes,
+                    subckt_scope,
                 )
             )
         else:
