@@ -3647,6 +3647,7 @@ def _run_sim_corners(
             keep_artifacts=keep_artifacts,
             want_waveforms=want_waveforms,
             request_dir=request_dir,
+            artifacts_dir=artifacts_dir,
         )
 
     if hosts == 1:
