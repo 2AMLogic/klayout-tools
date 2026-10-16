@@ -1719,6 +1719,7 @@ def run_sim(
     fail_on_diagnostic: list[str] | tuple[str, ...] | None = None,
     dry_run: bool = False,
     submit_only: bool = False,
+    attach_job_id: str | None = None,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """Run the request at ``request_path`` and return its report.
@@ -1963,6 +1964,8 @@ def run_sim(
     # corner dir and ngspice would never find its deck. Absolutise once here.
     if artifacts_dir is not None:
         artifacts_dir = os.path.abspath(artifacts_dir)
+    if attach_job_id is not None and sim_decks.DECKS_FIELD in request:
+        raise SimError("--attach does not apply to deck-list requests")
     if sim_decks.DECKS_FIELD in request:
         if dry_run:
             raise SimError(
@@ -2001,6 +2004,7 @@ def run_sim(
         fail_on_diagnostic=fail_on_diagnostic,
         dry_run=dry_run,
         submit_only=submit_only,
+        attach_job_id=attach_job_id,
         _ownership=_ownership,
     )
 
@@ -2201,6 +2205,30 @@ def _stamp_netlist_identity(
         environment["netlist_identity_error"] = netlist_identity_error
 
 
+def _apply_attach(
+    engine_kwargs: dict[str, Any],
+    attach_job_id: str | None,
+    backend: str,
+    hosts: int,
+    submit_only: bool = False,
+) -> None:
+    """Issue #2978: route ``--attach <job_id>`` to the batch backend. Only the
+    single-job batch path has a job id to re-attach to."""
+    if attach_job_id is None:
+        return
+    if backend != "batch" or hosts != 1:
+        raise SimError(
+            "--attach requires backend 'batch' with a single job "
+            "(hosts = 1); a sharded run has one job id per shard"
+        )
+    if submit_only:
+        raise SimError(
+            "--attach and --submit-only are mutually exclusive: attach "
+            "resumes an already-submitted job, submit-only launches a new one"
+        )
+    engine_kwargs["attach_job_id"] = attach_job_id
+
+
 def _run_sim_corners(
     request_path: str,
     *,
@@ -2215,6 +2243,7 @@ def _run_sim_corners(
     fail_on_diagnostic: list[str] | tuple[str, ...] | None = None,
     dry_run: bool = False,
     submit_only: bool = False,
+    attach_job_id: str | None = None,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """The corner-sweep body of :func:`run_sim` -- every parameter, the
@@ -2757,6 +2786,7 @@ def _run_sim_corners(
         if backend not in _OFFHOST_BACKENDS
         else {"request_dir": request_dir}
     )
+    _apply_attach(local_engine_kwargs, attach_job_id, backend, hosts, submit_only)
 
     # Issue #2668: stage the complete job closure once, here, before any
     # backend runs -- so a missing model input, unresolvable dependency or

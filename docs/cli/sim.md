@@ -38,6 +38,11 @@ this document (and the code) win.
   prior interrupted run of this same request already completed, overriding
   the request's own `options.resume` when given. See "Wall-clock budget,
   orphan safety, and resume" below.
+- `--attach JOB_ID` — re-attach to an already-submitted `batch` job (the id
+  `klt sim` prints on stderr at launch) instead of submitting a new one.
+  Waits for it, bounded by `batch.poll_timeout_s`, and reports it without
+  uploading or launching anything. See "Waiting, job id, and re-attaching"
+  below.
 - `--fail-fast-probe` — before dispatching any real corner, run a short
   bounded `tran` calibration slice on the grid's first corner and abort the
   whole grid up front if the measured rate implies `options.timeout_s`
@@ -745,10 +750,39 @@ status read therefore cannot say how far through the grid a running job is, and
 `klt` does not estimate one from elapsed time. That needs the fleet to publish
 progress first (tracked against 2AMLogic/2am).
 
-Collecting a finished job's report is `--attach`
-([#2978](https://github.com/2AMLogic/klayout-tools/issues/2978)); until that
-lands, `--submit-only` jobs can be read with `--job-status` but not yet fetched
-by `klt`.
+Collecting a finished `--submit-only` job's report is `--attach`, below.
+
+### Waiting, job id, and re-attaching ([#2978](https://github.com/2AMLogic/klayout-tools/issues/2978))
+
+The wait for a batch job is bounded by **`batch.poll_timeout_s`** (table
+above). Its default is the fully-serial worst case, so a many-unit request
+with a large `options.timeout_s` can wait hours; set `batch.poll_timeout_s`
+explicitly when you want a tighter bound. On overrun every unit is reported
+with a `batch_poll_timeout` diagnostic and `environment.remote.job_id`
+names the job, which may still be running on the fleet.
+
+While it waits, `klt sim` writes progress to **stderr only** (so
+`--format json` stdout is unchanged):
+
+```
+klt sim: batch job klt-sim-1a2b3c4d5e6f launched; re-attach with `klt sim <request> --backend batch --attach klt-sim-1a2b3c4d5e6f`
+klt sim: batch job klt-sim-1a2b3c4d5e6f state=running elapsed=0s
+```
+
+The first line appears as soon as the launch succeeds, so a caller killed by
+an outer wall-clock limit still knows which job it left behind. The state line
+repeats on every `status.json` state change and otherwise every 5 minutes.
+
+`klt sim <request> --backend batch --attach <job_id>` resumes such a job:
+it does not stage, upload, or launch anything, polls until the job is
+terminal (or `batch.poll_timeout_s` elapses), and collects and grades it
+exactly as the original invocation would have. Pass the **same request** the
+job was submitted from — the request supplies the unit list and the
+measurement limits; it is not re-uploaded. A job id with no `job.json` in the
+bucket fails with exit `1` and `error.code: "batch_unknown_job"`. `--attach`
+applies to a single-job `batch` run only: it is refused for other backends,
+for sharded (`hosts > 1`) runs, for deck-list requests, and with
+`--batch-set` or `--submit-only`.
 
 ### Capacity refusal and `batch_no_capacity`
 
