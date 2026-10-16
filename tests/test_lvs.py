@@ -12150,6 +12150,8 @@ def test_build_device_binding_map_derived_fallback_shape():
         "sky130_fd_pr__pfet_01v8",
         "sky130_fd_pr__nfet_g5v0d10v5",
         "sky130_fd_pr__pfet_g5v0d10v5",
+        # Native-Vt 5V NMOS via marker combination (issue #3599).
+        "sky130_fd_pr__nfet_05v0_nvt",
         "sky130_fd_pr__res_generic_po",
         "sky130_fd_pr__res_high_po",
         "sky130_fd_pr__res_xhigh_po",

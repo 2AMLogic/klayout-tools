@@ -249,6 +249,9 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "engine_aborted",
         "measurement",
         "unknown",
+        # Opt-in convergence retry record (`options.retry_on_convergence_error`,
+        # issue #2973), attached by `_run_corner_with_retry` after the retry ran.
+        "convergence_retry",
         # Waveform JSON conversion skipped over options.waveform_max_bytes
         # (issue #3211); always a warning.
         "waveform_too_large",
@@ -1684,6 +1687,112 @@ def _validate_fail_on_diagnostic(value: Any) -> tuple[str, ...]:
     return tuple(codes)
 
 
+#: ``options.retry_on_convergence_error`` (issue #2973): the solver options a
+#: retried unit runs with when the object form leaves a key out. ``gear``
+#: integration and a looser ``reltol`` are the standard first remedies for
+#: ngspice's "time step too small".
+DEFAULT_CONVERGENCE_RETRY: dict[str, Any] = {
+    "max_attempts": 1,
+    "reltol": 0.003,
+    "method": "gear",
+}
+_CONVERGENCE_RETRY_METHODS = ("trap", "gear")
+
+
+def _validate_convergence_retry(value: Any) -> dict[str, Any] | None:
+    """Validate and normalise ``options.retry_on_convergence_error`` (issue
+    #2973).
+
+    ``None``/absent/``false`` -> ``None``: no retry, today's behaviour
+    exactly. ``true`` -> :data:`DEFAULT_CONVERGENCE_RETRY`. An object may set
+    ``max_attempts`` (integer >= 1), ``reltol`` (number in ``(0, 1)``) and
+    ``method`` (``"trap"``/``"gear"``); omitted keys take the default and an
+    unknown key is an application error (``SimError``) rather than a silent
+    no-op, like :func:`_validate_fail_on_diagnostic`.
+    """
+    if value is None or value is False:
+        return None
+    if value is True:
+        return dict(DEFAULT_CONVERGENCE_RETRY)
+    if not isinstance(value, dict):
+        raise SimError(
+            "options.retry_on_convergence_error must be a boolean or an object "
+            'like {"max_attempts": 1, "reltol": 0.003, "method": "gear"}'
+        )
+    unknown = sorted(set(value) - set(DEFAULT_CONVERGENCE_RETRY))
+    if unknown:
+        raise SimError(
+            "options.retry_on_convergence_error has unknown key(s): "
+            f"{', '.join(unknown)} (known: {', '.join(DEFAULT_CONVERGENCE_RETRY)})"
+        )
+    resolved = {**DEFAULT_CONVERGENCE_RETRY, **value}
+    attempts = resolved["max_attempts"]
+    if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 1:
+        raise SimError(
+            "options.retry_on_convergence_error.max_attempts must be an integer >= 1"
+        )
+    reltol = resolved["reltol"]
+    if (
+        isinstance(reltol, bool)
+        or not isinstance(reltol, (int, float))
+        or not 0 < reltol < 1
+    ):
+        raise SimError(
+            "options.retry_on_convergence_error.reltol must be a number "
+            "between 0 and 1 (exclusive)"
+        )
+    if resolved["method"] not in _CONVERGENCE_RETRY_METHODS:
+        raise SimError(
+            "options.retry_on_convergence_error.method must be one of: "
+            + ", ".join(_CONVERGENCE_RETRY_METHODS)
+        )
+    return resolved
+
+
+def _resolve_convergence_retry(
+    options: dict[str, Any], engine: str
+) -> dict[str, Any] | None:
+    """Validate ``options.retry_on_convergence_error`` for ``engine`` (issue
+    #2973); the retry emits an ngspice ``.options`` card, so Xyce is refused."""
+    retry = _validate_convergence_retry(options.get("retry_on_convergence_error"))
+    if retry is not None and engine == "xyce":
+        raise SimError(
+            "options.retry_on_convergence_error is not supported for engine "
+            "'xyce': the retry emits an ngspice `.options` card"
+        )
+    return retry
+
+
+def _convergence_retry_environment(
+    retry: dict[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    """The ``environment`` fragment recording a resolved retry policy (empty
+    when the request did not opt in)."""
+    return {} if retry is None else {"retry_on_convergence_error": retry}
+
+
+def _convergence_retry_deck_options(retry: dict[str, Any]) -> str:
+    """The ``.options`` card a retried unit's deck carries."""
+    return f".options reltol={retry['reltol']} method={retry['method']}"
+
+
+#: Error-severity diagnostic codes that can accompany a ``nonconvergence``
+#: failure without making it something other than one (the measurements and
+#: vectors a failed solve never produced). Any *other* error-severity code
+#: -- ``singular_matrix``, ``netlist``, ``timeout``, ``engine_killed``, ... --
+#: means a different failure class, which is never retried (issue #2973).
+_CONVERGENCE_CONSEQUENCE_CODES = frozenset(
+    {"nonconvergence", "measurement", "no_such_vector"}
+)
+
+
+def _is_retryable_convergence_failure(corner: dict[str, Any]) -> bool:
+    if corner["status"] != "error":
+        return False
+    codes = {d["code"] for d in corner["diagnostics"] if d["severity"] == "error"}
+    return "nonconvergence" in codes and codes <= _CONVERGENCE_CONSEQUENCE_CODES
+
+
 def _validate_ngspice_init(value: Any) -> tuple[str, ...]:
     """Validate and normalise ``options.ngspice_init`` (issue #2520).
 
@@ -2010,6 +2119,7 @@ def run_sim(
     dry_run: bool = False,
     submit_only: bool = False,
     attach_job_id: str | None = None,
+    capacity_wait_s: float | None = None,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """Run the request at ``request_path`` and return its report.
@@ -2261,6 +2371,8 @@ def run_sim(
         artifacts_dir = os.path.abspath(artifacts_dir)
     if attach_job_id is not None and sim_decks.DECKS_FIELD in request:
         raise SimError("--attach does not apply to deck-list requests")
+    if capacity_wait_s is not None and sim_decks.DECKS_FIELD in request:
+        raise SimError("--wait-for-capacity does not apply to deck-list requests")
     if sim_decks.DECKS_FIELD in request:
         if dry_run:
             raise SimError(
@@ -2301,6 +2413,7 @@ def run_sim(
         dry_run=dry_run,
         submit_only=submit_only,
         attach_job_id=attach_job_id,
+        capacity_wait_s=capacity_wait_s,
         _ownership=_ownership,
     )
 
@@ -2481,6 +2594,25 @@ def _with_max_units_override(
     }
 
 
+def _with_capacity_wait_override(
+    request: dict[str, Any], capacity_wait_s: float | None
+) -> dict[str, Any]:
+    """Fold the ``--wait-for-capacity`` CLI override into
+    ``request.batch.capacity_wait_s`` (issue #3564), leaving the loaded request
+    untouched. The flag wins over the request field, and the value is validated
+    by the one resolver the field uses, so a bad value is refused before any
+    S3 write."""
+    if capacity_wait_s is None:
+        return request
+    from .sim_batch import _resolve_capacity_wait_s
+
+    value = _resolve_capacity_wait_s({"capacity_wait_s": capacity_wait_s})
+    return {
+        **request,
+        "batch": {**(request.get("batch") or {}), "capacity_wait_s": value},
+    }
+
+
 def _check_expected_netlist_identity(
     expect_identity: Any,
     netlist_identity: str | None,
@@ -2515,6 +2647,23 @@ def _stamp_netlist_identity(
     environment["netlist_identity"] = netlist_identity
     if netlist_identity_error is not None:
         environment["netlist_identity_error"] = netlist_identity_error
+
+
+def _check_capacity_wait_applies(
+    capacity_wait_s: Any, backend: str, attach_job_id: Any
+) -> None:
+    """Refuse ``--wait-for-capacity`` where it has nothing to wait for."""
+    if capacity_wait_s is None:
+        return
+    if backend != "batch":
+        raise SimError(
+            f"--wait-for-capacity requires backend 'batch' (got '{backend}')"
+        )
+    if attach_job_id is not None:
+        raise SimError(
+            "--wait-for-capacity cannot be combined with --attach: attach "
+            "launches nothing, so there is no capacity to wait for"
+        )
 
 
 def _apply_attach(
@@ -2557,6 +2706,7 @@ def _run_sim_corners(
     dry_run: bool = False,
     submit_only: bool = False,
     attach_job_id: str | None = None,
+    capacity_wait_s: float | None = None,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """The corner-sweep body of :func:`run_sim` -- every parameter, the
@@ -2564,6 +2714,7 @@ def _run_sim_corners(
     are documented there. Kept as its own function so the deck dispatch
     in ``run_sim`` adds nothing to this sweep's own complexity budget."""
     request = _with_max_units_override(load_request(request_path), max_units_per_job)
+    request = _with_capacity_wait_override(request, capacity_wait_s)
     request_dir = os.path.dirname(os.path.abspath(request_path))
     # Issue #1261 (and #1274 for `environment.models_lib`): every input-path
     # field this run's own JSON response echoes (`netlist`,
@@ -2773,6 +2924,11 @@ def _run_sim_corners(
     # this is a per-request compatibility-mode declaration, not a runtime
     # dial an operator would reach for per invocation.
     ngspice_init_lines = _validate_ngspice_init(options.get("ngspice_init"))
+    # Issue #2973: opt-in per-unit retry on a `nonconvergence` failure.
+    # Validated up front like every option; an off-host worker re-reads it
+    # from the forwarded request document, so only the local backends
+    # receive the resolved value below.
+    convergence_retry = _resolve_convergence_retry(options, engine)
     # Issue #2732: validated up front, before any corner, probe or off-host
     # job is launched. An off-host worker re-reads it from the forwarded
     # request document (see `_build_remote_request`), so only the local
@@ -3116,11 +3272,13 @@ def _run_sim_corners(
             "save_vectors": save_vectors,
             "waveform_max_bytes": waveform_max_bytes,
             "ngspice_options": ngspice_options,
+            "convergence_retry": convergence_retry,
         }
         if backend not in _OFFHOST_BACKENDS
         else {"request_dir": request_dir}
     )
     _apply_attach(local_engine_kwargs, attach_job_id, backend, hosts, submit_only)
+    _check_capacity_wait_applies(capacity_wait_s, backend, attach_job_id)
 
     # Issue #2668: stage the complete job closure once, here, before any
     # backend runs -- so a missing model input, unresolvable dependency or
@@ -3440,6 +3598,18 @@ def _run_sim_corners(
             models_lib_sha256=environment["models_lib_sha256"],
         )
     )
+    # Additive/optional (issue #2985): ngspice generates no device or
+    # resistor noise in `.tran`, so a transient that relies on declared
+    # `trnoise`/`trrandom` sources says so. Absent when it does not apply.
+    environment.update(
+        _transient_noise_environment(
+            netlist_path,
+            request=request,
+            analysis=analysis,
+            engine=engine,
+            repo_root=repo_root,
+        )
+    )
     if remote_environment is not None:
         # Additive/optional: only present for the `remote` backend -- see
         # `_run_remote` and docs/cli/sim.md's "Remote backend" section.
@@ -3453,6 +3623,9 @@ def _run_sim_corners(
         # docs/cli/sim.md's "Monte Carlo" section. Per-sample seed values
         # live on each corner (`corners[].monte_carlo`), not here.
         environment["monte_carlo"] = monte_carlo_info
+    # Additive/optional (issue #2973): the resolved retry policy, only when
+    # `options.retry_on_convergence_error` opted in.
+    environment.update(_convergence_retry_environment(convergence_retry))
     if budget_s is not None:
         # Additive/optional: only present when the request declares
         # `options.wall_clock_budget_s` (or `--budget-s` overrides it) --
@@ -5889,6 +6062,7 @@ def _run_local(
     save_vectors: tuple[str, ...] = (),
     waveform_max_bytes: int | None = DEFAULT_WAVEFORM_MAX_BYTES,
     ngspice_options: dict[str, Any] | None = None,
+    convergence_retry: dict[str, Any] | None = None,
     portable_roots: sim_portable.Roots | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``local`` backend: run each expanded corner sequentially in-process.
@@ -5955,7 +6129,7 @@ def _run_local(
                 )
             )
             continue
-        result, version = _run_corner(
+        result, version = _run_corner_with_retry(
             point=point,
             netlist_path=netlist_path,
             models_lib=models_lib,
@@ -5974,6 +6148,7 @@ def _run_local(
             save_vectors=save_vectors,
             waveform_max_bytes=waveform_max_bytes,
             ngspice_options=ngspice_options,
+            convergence_retry=convergence_retry,
             portable_roots=portable_roots,
         )
         corners.append(result)
@@ -6121,6 +6296,7 @@ def _run_local_parallel(
     save_vectors: tuple[str, ...] = (),
     waveform_max_bytes: int | None = DEFAULT_WAVEFORM_MAX_BYTES,
     ngspice_options: dict[str, Any] | None = None,
+    convergence_retry: dict[str, Any] | None = None,
     portable_roots: sim_portable.Roots | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``local-parallel`` backend: fan the expanded corner list across a
@@ -6216,7 +6392,7 @@ def _run_local_parallel(
             ):
                 point = corner_points[next_index]
                 future = pool.submit(
-                    _run_corner,
+                    _run_corner_with_retry,
                     point=point,
                     netlist_path=netlist_path,
                     models_lib=models_lib,
@@ -6235,6 +6411,7 @@ def _run_local_parallel(
                     save_vectors=save_vectors,
                     waveform_max_bytes=waveform_max_bytes,
                     ngspice_options=ngspice_options,
+                    convergence_retry=convergence_retry,
                     portable_roots=portable_roots,
                 )
                 in_flight[future] = next_index
@@ -6342,12 +6519,12 @@ def _noise_sources_in_text(netlist_text: str) -> list[tuple[str, str]]:
     return found
 
 
-def _unseeded_noise_report(
+def _scan_noise_sources(
     netlist_path: str, *, request: dict[str, Any], repo_root: str | None
-) -> dict[str, Any] | None:
-    """Additive ``environment.monte_carlo`` fields for transient-noise
-    sources the ``monte_carlo.seed`` contract does not govern (issue #2963),
-    or ``None`` when no scanned file declares one (shape unchanged)."""
+) -> tuple[set[tuple[str, str]], list[dict[str, str]]]:
+    """``(sources, not_scanned)``: every ``trnoise``/``trrandom`` source
+    declared in the netlist's scanned ``.include`` closure (issues #2963,
+    #2985), and what part of the closure could not be scanned."""
     files, not_scanned = _mismatch_scan_closure(request, netlist_path, repo_root)
     sources: set[tuple[str, str]] = set()
     for _label, path in files:
@@ -6356,6 +6533,18 @@ def _unseeded_noise_report(
                 sources.update(_noise_sources_in_text(handle.read()))
         except (OSError, UnicodeDecodeError):
             not_scanned.append({"target": _label, "reason": "unreadable"})
+    return sources, not_scanned
+
+
+def _unseeded_noise_report(
+    netlist_path: str, *, request: dict[str, Any], repo_root: str | None
+) -> dict[str, Any] | None:
+    """Additive ``environment.monte_carlo`` fields for transient-noise
+    sources the ``monte_carlo.seed`` contract does not govern (issue #2963),
+    or ``None`` when no scanned file declares one (shape unchanged)."""
+    sources, not_scanned = _scan_noise_sources(
+        netlist_path, request=request, repo_root=repo_root
+    )
     if not sources:
         return None
     report: dict[str, Any] = {
@@ -6367,6 +6556,50 @@ def _unseeded_noise_report(
     if not_scanned:
         report["unseeded_sources_not_scanned"] = not_scanned
     return report
+
+
+def _analysis_runs_tran(analysis: dict[str, Any]) -> bool:
+    """Does the resolved analysis run a transient (scalar ``tran`` or an
+    ``analysis_steps[]`` tran step)?"""
+    if sim_steps.is_steps_analysis(analysis):
+        return any(
+            str(step.get("kind", "")).lower() == "tran"
+            for step in analysis.get("steps", [])
+        )
+    return str(analysis.get("kind", "")).lower() == "tran"
+
+
+def _transient_noise_environment(
+    netlist_path: str,
+    *,
+    request: dict[str, Any],
+    analysis: dict[str, Any],
+    engine: str,
+    repo_root: str | None,
+) -> dict[str, Any]:
+    """Additive ``environment.transient_noise`` (issue #2985): what noise an
+    ngspice transient contains -- only the declared ``trnoise``/``trrandom``
+    sources, no intrinsic device or resistor noise. ``{}`` (field absent)
+    unless the engine is ngspice, a transient runs and a scanned file
+    declares such a source."""
+    if engine != "ngspice" or not _analysis_runs_tran(analysis):
+        return {}
+    sources, not_scanned = _scan_noise_sources(
+        netlist_path, request=request, repo_root=repo_root
+    )
+    if not sources:
+        return {}
+    report: dict[str, Any] = {
+        "engine": engine,
+        "sources": [
+            {"name": name, "kind": keyword} for name, keyword in sorted(sources)
+        ],
+        "intrinsic_device_noise": False,
+        "intrinsic_resistor_noise": False,
+    }
+    if not_scanned:
+        report["sources_not_scanned"] = not_scanned
+    return {"transient_noise": report}
 
 
 def _with_unseeded_noise(
@@ -6875,6 +7108,7 @@ def _prepare_corner_run(
     save_mode: str = DEFAULT_SAVE_MODE,
     save_vectors: tuple[str, ...] = (),
     ngspice_options: dict[str, Any] | None = None,
+    extra_options_card: str | None = None,
 ) -> tuple[list[str], str, str | None, str]:
     """Write the engine's per-corner deck and build its command line.
 
@@ -6930,6 +7164,7 @@ def _prepare_corner_run(
             save_mode=save_mode,
             save_vectors=save_vectors,
             ngspice_options=ngspice_options,
+            extra_options_card=extra_options_card,
         )
         _write_spiceinit(corner_dir, ngspice_init)
         command = [ngspice_binary or "ngspice", "-b", deck_path, "-o", log_path]
@@ -7101,6 +7336,52 @@ def _grade_corner(
     return "pass"
 
 
+def _run_corner_with_retry(
+    *,
+    convergence_retry: dict[str, Any] | None = None,
+    **kwargs: Any,
+) -> tuple[dict[str, Any], str | None]:
+    """Run one corner point (see :func:`_run_corner`), optionally
+    retrying a ``nonconvergence`` failure (issue #2973).
+
+    With ``convergence_retry`` (the validated
+    ``options.retry_on_convergence_error`` policy) a unit that ends
+    ``status: "error"`` purely from a ``nonconvergence`` failure is re-run
+    on the *same* :class:`CornerPoint` -- so ``sample_index`` and the Monte
+    Carlo seeds are unchanged by construction -- with the policy's tighter
+    solver options on an extra ``.options`` card, up to ``max_attempts``
+    times. The outcome is recorded as a ``convergence_retry`` diagnostic on
+    the unit. Any other failure class is never retried. ``None`` (the
+    default) is exactly the single-attempt behaviour.
+    """
+    corner, version = _run_corner(**kwargs)
+    if convergence_retry is None or not _is_retryable_convergence_failure(corner):
+        return corner, version
+    card = _convergence_retry_deck_options(convergence_retry)
+    max_attempts = convergence_retry["max_attempts"]
+    total_runtime = corner["runtime_s"]
+    for attempt in range(1, max_attempts + 1):
+        retried, retried_version = _run_corner(**kwargs, extra_options_card=card)
+        total_runtime += retried["runtime_s"]
+        recovered = retried["status"] != "error"
+        retried["diagnostics"].append(
+            {
+                "severity": "warning",
+                "code": "convergence_retry",
+                "message": (
+                    f"nonconvergence on the first attempt; retry {attempt}/"
+                    f"{max_attempts} with `{card}` "
+                    + ("recovered" if recovered else "still failed")
+                ),
+            }
+        )
+        corner, version = retried, retried_version or version
+        if recovered or not _is_retryable_convergence_failure(retried):
+            break
+    corner["runtime_s"] = round(total_runtime, 3)
+    return corner, version
+
+
 def _persist_waveform_artifact(
     raw_path: str,
     raw_size: int,
@@ -7145,6 +7426,7 @@ def _persist_waveform_artifact(
 
 def _run_corner(
     *,
+    extra_options_card: str | None = None,
     point: CornerPoint,
     netlist_path: str,
     models_lib: str | None,
@@ -7235,6 +7517,7 @@ def _run_corner(
         save_mode=save_mode,
         save_vectors=save_vectors,
         ngspice_options=ngspice_options,
+        extra_options_card=extra_options_card,
     )
 
     diagnostics: list[dict[str, str]] = list(include_diagnostics)
@@ -8154,6 +8437,7 @@ def _write_corner_deck(
     save_mode: str = DEFAULT_SAVE_MODE,
     save_vectors: tuple[str, ...] = (),
     ngspice_options: dict[str, Any] | None = None,
+    extra_options_card: str | None = None,
 ) -> None:
     """Generate the corner-specific ngspice deck: an optional Monte Carlo
     seed card, ``.lib``/``.include``/``.temp``, the request's verbatim
@@ -8203,6 +8487,13 @@ def _write_corner_deck(
         # Issue #3111: `options.ngspice_options`, after `.temp`; omitted
         # entirely when unset so existing decks stay byte-identical.
         lines.append(options_card)
+    if extra_options_card is not None:
+        # Issue #2973: the solver options of a convergence retry. Emitted
+        # last of the `.options` cards (after the netlist body's `.include`
+        # and `options.ngspice_options`) so that, when two cards set the
+        # same key, the retry policy wins and the second attempt actually
+        # differs from the first.
+        lines.append(extra_options_card)
 
     for spec in measurements_spec:
         if spec.get("spice") is not None:

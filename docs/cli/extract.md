@@ -279,6 +279,7 @@ Every field name is the flag's own `dest`, so the mapping is one-for-one:
 | `critical_net_excludes` | array\<string\> \| string | repeatable `--critical-net-exclude` |
 | `parasitic_variants` | array\<string\> \| string | repeatable `--parasitic-variant` |
 | `parasitics_top_cell_only` | bool | `--parasitics-top-cell-only` |
+| `resistance_graph` | bool | `--resistance-graph` (issue #2982) |
 | `distributed_rc` | bool | `--distributed-rc` |
 | `substrate_tie_ohms` | number | `--substrate-tie-ohms` (issue #3089) |
 | `resistance_paths` | array\<object\> | repeatable `--resistance-path NET_ID FROM TO` (issue #2765). Each entry is exactly `{"net_id": <int>, "from": <string>, "to": <string>}`; any other shape (a missing/extra key, a non-integer `net_id`, a bare array) is rejected. |
@@ -7006,6 +7007,69 @@ klt extract top.gds --deck sky130 --parasitics --parasitics-top-cell-only --form
 | Field | Meaning |
 |---|---|
 | `parasitics.top_cell_only` | `true` only when `--parasitics-top-cell-only` was given (`false` otherwise) — distinguishes a run whose `nets[].resistance_ohm_top_cell`/`.capacitance_ff_top_cell` are real computed splits from one where they are `null` because the flag was never asked for. |
+
+### Terminal-aware resistance graph (`--resistance-graph`, issue #2982)
+
+`resistance_ohm` is a series sum over a net's fragments (see "Squares are
+counted per connected fragment"); it cannot express parallel structure or
+the resistance *between two named terminals*. `--resistance-graph` (requires
+`--parasitics`) additionally builds the geometry-derived resistor graph of
+`docs/design/extract-fidelity-roadmap.md` Stage 3.D (graph builder
+`extract_resistance_graph.build_resistance_graph`, DC solve
+`terminal_resistance_matrix`) for each net and reports the result next to the
+legacy scalar. It is **diagnostic and opt-in**: it never changes
+`resistance_ohm`, `terminals[]`, `by_layer`, the `--distributed-rc` ladder or
+the written SPICE.
+
+```
+klt extract top.gds --deck sky130 --parasitics --resistance-graph --format json
+```
+
+Each `parasitics.nets[]` entry gains one key, `resistance_graph` (absent
+without the flag — output is byte-identical to a run that never had it):
+
+```json
+{
+  "status": "ok",
+  "terminals": ["via@0.0850,0.0850", "via@4.9150,0.0850"],
+  "pair_resistance_ohm": [[0.0, 376.47], [376.47, 0.0]],
+  "legacy_resistance_ohm": 376.47,
+  "nodes": 3,
+  "edges": 2,
+  "diagnostics": []
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `status` | `ok`; `skipped` (fewer than two terminals, `too_few_terminals`); or `unsupported` (no graph — see `diagnostics`). `skipped`/`unsupported` nets keep the legacy scalar exactly. |
+| `terminals` | Terminal names, sorted. `via@x,y` is a contact/via where current leaves the modelled conductor (µm, centre of the cut); `device@x,y` is a device-body cut edge (a fragment edge strictly inside the role's drawn layer). `[]` when `unsupported`. |
+| `pair_resistance_ohm` | `T x T` symmetric effective resistance between terminals, ohms, `0.0` diagonal, `null` for two terminals in different connected components (with `terminals_disconnected`). `[]` unless `ok`. |
+| `legacy_resistance_ohm` | The unchanged series-sum `resistance_ohm` of the same net, as a cross-check. |
+| `nodes` / `edges` | Counts only; full node/edge lists are not part of this output. |
+| `diagnostics` | `{code, message, detail}` as produced by the builder/solver: `sheet_resistance_unknown`, `via_resistance_unknown`, `unsupported_geometry`, `graph_too_large`, `singular_system`, `terminals_disconnected`, `floating_component`, `too_few_terminals`, `unattached_port`. |
+
+**Boundary conditions and limits.**
+
+- The graph builder attaches a port to every piece it touches, so a port in
+  the *interior* of a conductor would sit in parallel with the in-plane edge
+  it cuts. Contacts and vias are therefore only attached along a side that
+  lies on the conductor's outline (Stage 3.D4's end-edge ports); a contact
+  or via wholly inside a conductor makes the net `unsupported` with
+  `unsupported_geometry` (`detail.interior_landings`).
+- The shipped decks curate **no per-cut resistance**, so a net with a
+  contact/via landing joining two *modelled* roles reports
+  `via_resistance_unknown` rather than an assumed ideal via. Diffusion has no
+  coefficient in the shipped decks, so a contact onto diffusion is a terminal,
+  not a landing.
+- Terminals come from geometry (landings onto an unmodelled role and
+  device-body cut edges), not from `terminals[]` device pins, which carry only
+  a per-device position.
+- Both the builder's size caps (nodes, edges, 64 terminals) and non-Manhattan
+  geometry yield `unsupported`, never an exception.
+
+Replacing `resistance_ohm` with a graph-derived value is a separate change
+(issue #2458), not a side effect of this flag.
 
 ### Curated-coefficient gaps: `metals_without_coefficient` (issue #547)
 

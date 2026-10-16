@@ -388,6 +388,28 @@ class MOSFlavour:
     same default every other ``provenance`` field in this module carries, so a
     deck that leaves them unset (e.g. gf180mcu's ``Dualgate`` entry, whose
     prose comment remains the record) is unaffected.
+
+    ``and_markers``/``not_markers``/``nfet_only`` (issue #3599) express a
+    marker *combination*, for a flavour upstream derives as
+    ``<base>.and(A).not(B)`` rather than from a single layer -- e.g. sky130's
+    native-Vt NMOS (``hvi`` AND ``lvtn``, NOT ``areaid_ed``/``areaid_le``/
+    ``vpp``). All three default to empty/``False``, in which case
+    classification is exactly the single-``marker`` behaviour above:
+
+    - ``and_markers``: the island must also ``interacting``-overlap *every*
+      one of these layers to be claimed.
+    - ``not_markers``: an island that ``interacting``-overlaps *any* of these
+      layers is not claimed (it stays available to later flavours / the
+      default split). Like ``marker``, this is island-level, not a geometric
+      subtraction -- the same documented straddling policy.
+    - ``nfet_only``: the flavour has no PMOS counterpart; an island
+      ``interacting`` the deck's ``nwell`` is never claimed (no PMOS is
+      extracted or bound for it).
+
+    ``extract.py`` processes ``mos_flavours`` in declaration order and each
+    flavour removes what it claims before the next runs, so a combination
+    flavour must be declared *before* any flavour whose ``marker`` it
+    refines (or that flavour must list the refining layer in ``not_markers``).
     """
 
     marker: tuple[int, int]
@@ -395,6 +417,9 @@ class MOSFlavour:
     description: str = ""
     nfet_provenance: RuleProvenance | None = None
     pfet_provenance: RuleProvenance | None = None
+    and_markers: tuple[tuple[int, int], ...] = ()
+    not_markers: tuple[tuple[int, int], ...] = ()
+    nfet_only: bool = False
 
 
 @dataclass(frozen=True)

@@ -14,6 +14,13 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt extract --resistance-graph`: opt-in terminal-aware resistance graph**
+  (issue #2982, Stage 3.D5 increment 3): adds `parasitics.nets[].resistance_graph`
+  (`status`, `terminals`, `pair_resistance_ohm`, `legacy_resistance_ohm`,
+  `nodes`, `edges`, `diagnostics`) from the Stage 3.D graph builder and DC
+  solve. Request field `resistance_graph`; requires `--parasitics`. Without the
+  flag no key is added and output is byte-identical; `resistance_ohm` and the
+  ladder are unchanged. Additive; no `schema_version` bump.
 - **ASAP7 DRC deck checks `V9.PAD.EN.2` and `V9.AUX.1`** (issue #3156): the
   V8 enclosure-by-M9 and inside-M8-and-M9 rules carry over to V9 with PAD
   (DRM section 3.19 preamble), reading PAD (mask 96, GDS 96/0) by layer
@@ -129,6 +136,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   `erc_status` and tie coverage are unchanged. Requires `--findings-only`
   (exit 1 otherwise). Additive; default output is byte-identical; no
   `schema_version` bump.
+- **`klt sim` discloses transient-noise coverage** (issue #2985): ngspice
+  generates no device or resistor noise in `.tran`, only explicit
+  `trnoise`/`trrandom` source noise. A transient request (scalar `tran` or an
+  `analysis_steps[]` tran step) whose netlist declares such a source now gets
+  an additive `environment.transient_noise` field (`engine`, sorted `sources`,
+  `intrinsic_device_noise: false`, `intrinsic_resistor_noise: false`); absent
+  otherwise and for `engine: "xyce"`, so existing reports are unchanged. No
+  `schema_version` bump. Documented in `docs/cli/sim.md`.
 - **ASAP7 DRC deck checks `ACTIVE.W.2` and `SDT.W.3`** (issue #3085): the
   vertical-width-is-an-integer-multiple-of-27-nm rules (DRM Tables 3.5.1 /
   3.8.1) are now measured per local vertical width of each merged rectilinear
@@ -394,6 +409,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   `netlist_sha256`, inlining summary); flattener failures carry
   `error.code` `schematic_flatten_*`. Default runs are unchanged apart from
   the two new fields (`false` / `null`); no `schema_version` bump.
+
+- **`klt synthesize` accepts `constraints.clocks` and echoes `clock_targets`**
+  (issue #2883): optional `[{port, period_ns}]` for multi-clock designs
+  (`clock_period_ns` stays the single-clock shorthand and wins if both are
+  given). ABC still takes one global `-D`, so the tightest listed period is
+  used when only `clocks` is given. The new additive `clock_targets` response
+  object reports the clocks, the delay target, its basis, and
+  `per_clock_enforced: false`. No `schema_version` bump.
 
 - **ASAP7 BSIM-CMG real-run evidence recorded** (issue #2814, part of #2761):
   extracted `INVx1` / `NAND2xp5` simulate at TT/FF/SS through `klt sim` in

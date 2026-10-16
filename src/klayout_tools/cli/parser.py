@@ -636,6 +636,21 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     sim_parser.add_argument(
+        "--wait-for-capacity",
+        dest="wait_for_capacity",
+        metavar="SECONDS",
+        type=float,
+        default=None,
+        help=(
+            "with --backend batch, wait up to SECONDS (>= 0) for fleet "
+            "capacity when the launch is refused (batch_no_capacity / "
+            "batch_concurrency_cap), re-launching the same job with jittered "
+            "backoff; overrides the request's `batch.capacity_wait_s`. 0 "
+            "means one attempt. Also applies with --submit-only (issue "
+            "#3564). See docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
         "--job-status",
         dest="job_status",
         metavar="JOB_ID",
@@ -2242,6 +2257,21 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     extract_parser.add_argument(
+        "--resistance-graph",
+        dest="resistance_graph",
+        action="store_true",
+        help=(
+            "additionally attach a terminal-aware resistor-graph result to "
+            "each `parasitics.nets[]` entry as `resistance_graph` (issue "
+            "#2982): the terminal-pair effective-resistance matrix, graph "
+            "node/edge counts, the legacy scalar and diagnostics. Additive "
+            "only -- `resistance_ohm` and every other field keep their "
+            "legacy value. Requires --parasitics. Off by default -- "
+            "byte-identical to today's behavior. See docs/cli/extract.md's "
+            "'--resistance-graph' section."
+        ),
+    )
+    extract_parser.add_argument(
         "--distributed-rc",
         dest="distributed_rc",
         action="store_true",
@@ -2274,7 +2304,7 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
             "(written as a 1 mohm resistor -- SPICE has no zero-ohm "
             "resistor). Must be >= 0. Reported as "
             "`parasitics.substrate_dc_tie.resistance_ohm`/`mode`. Requires "
-            "--parasitics. See docs/cli/extract.md's 'Substrate DC tie' "
+            "--parasitics. See docs/cli/extract.md's 'Substrate tie value' "
             "section."
         ),
     )
@@ -3372,7 +3402,7 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "resistance of the substrate DC-reference tie (default 1e12, "
             "substrate floating in transient; 0 = hard tie), passed "
             "through to `klt extract --substrate-tie-ohms` (issue #3089). "
-            "Must be >= 0. See docs/cli/extract.md's 'Substrate DC tie' "
+            "Must be >= 0. See docs/cli/extract.md's 'Substrate tie value' "
             "section."
         ),
     )
