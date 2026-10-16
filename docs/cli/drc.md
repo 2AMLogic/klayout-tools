@@ -7,6 +7,7 @@ report violations as structured data.
 klt drc <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l [--top <cell>] [--rules '<id|glob>,...'] [--pdk <variant> [--pdk-root <path>]] [--format text|json]
 klt drc --deck sky130|gf180mcu|sg13g2|sg13cmos5l --list-rules [--format text|json]
 klt drc <file> --engine klayout [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--timeout-s <seconds>] [--allow-deck-errors] [--allow-missing-host-tools] [--min-klayout-version <X.Y.Z>] [--expect-rule-categories <N> | --expect-rule-categories-file <path>] [--format text|json]
+klt drc <file> --deck <name> --waivers <waivers.json> [--format text|json]
 klt drc <request.json>|-|'{...}' [--format text|json]
 klt drc --check <report.json> [--rerun] [--format text|json]
 ```
@@ -143,6 +144,7 @@ A `--engine klayout` run, with the native deck's own script globals:
 | `pdk` | string | `--pdk` |
 | `pdk_root` | string | `--pdk-root` |
 | `rules` | string \| array\<string\> | `--rules` — one comma-separated string (the argv spelling) or a list of selector strings, each comma-split the same way. Any other type (a number, an object, a list holding a non-string) is rejected; empty and unmatched tokens are rejected exactly as for the flag. Curated engine only. |
+| `waivers_file` | string | `--waivers` (issue #3483; a path, resolved relative to the request document's own directory like `deck_file`. The waivers are not inlined — point at the reviewed file.) Curated engine only — see "Waivers". |
 
 An unknown top-level field is an application error (exit `1`), not a silently
 ignored one — a typo'd field would otherwise drop an input the caller
@@ -975,7 +977,7 @@ reports a `comp.width.mv.1` violation, while the identical stripe drawn
 
 Two properties of the selection are load-bearing, and both are transcribed
 verbatim from the PDK's own executable deck
-(`libs.tech/klayout/drc/rule_decks/comp.drc`: `comp_56v =
+(`libs.tech/klayout/tech/drc/rule_decks/comp.rb`, formerly `drc/rule_decks/comp.drc`: `comp_56v =
 comp.overlapping(dualgate)`, `comp_3p3v =
 comp.not_interacting(v5_xtor).not_interacting(dualgate)`):
 
@@ -1361,8 +1363,9 @@ planned until the precondition at the end of this note is met. The reasoning
 comes from reading what the open PDKs' own density decks actually do, in the
 same pinned install this deck's rule values are verified against
 (`fossi-foundation/open-pdks` at
-`c6d73a35f524070e85faff4a6a9eef49553ebc2b`, i.e. `volare enable sky130
-c6d73a35f524070e85faff4a6a9eef49553ebc2b`):
+`f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7`, i.e. `ciel enable --pdk sky130
+f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7`; the density decks are byte-identical to
+the earlier `c6d73a3` build's):
 
 - **`sky130A_mr.drc` — the deck this repo transcribes from — contains no
   density rules at all.** The only density-shaped rules anywhere in its
@@ -1560,10 +1563,11 @@ enclosure checks as executable rule-deck code. That is no longer true of a
 current PDK build: the conductor-over-cut enclosure rules added in issue
 #551 (`CO.6`, `V1.3a`, `Vn.3b`/`Vn.4a` — see the next paragraph) are
 re-derived from a real fetched install's own
-`libs.tech/klayout/drc/rule_decks/{contact,via1,via2,via3,via4}.drc`
-(`volare enable gf180mcu c6d73a35f524070e85faff4a6a9eef49553ebc2b`, the same
-open_pdks build this repo already cites for gf180mcu's LVS-derived
-extraction deck), and each cites both its DRM rule id and the executable
+`libs.tech/klayout/tech/drc/rule_decks/{contact,via}.rb`
+(`ciel enable --pdk gf180mcu f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7`;
+re-verified against that tree 2026-10-16, thresholds unchanged from the
+earlier `c6d73a3` build's `drc/rule_decks/{contact,via1,via2,via3,via4}.drc`.
+gf180mcu's LVS-derived extraction deck still cites `c6d73a3` until #3540), and each cites both its DRM rule id and the executable
 statement it was re-derived from. The same install's `comp.drc` (issue
 #1110's `_LV`/`_MV` voltage-split rules) and `{nplus,pplus}.drc` (issue
 #2369's `NP.3a`/`NP.5a`/`NP.5b` and `PP.*` mirrors, whose `PCOMP`/`NCOMP`/
@@ -1660,6 +1664,24 @@ to the butting-edge/`euclidian`-metric approximations above). Its mirror,
 sub-cases -- "(1) inside LVPWELL (2) outside Nwell and DNWELL" -- both
 resolve to the same 0.16 µm regardless of well context, verified the same
 way.
+
+**Well-distance split of the `PCOMP` rules (issue #3484).** The flat 0.16 µm
+used to flag the substrate tap of every unmodified gf180mcu PDK
+`endcap`/`filltie` cell (`Pplus` 0.08 µm beyond the tap, `Nplus` 0.08 µm
+away, ~0.48 µm from the cell's `Nwell`), so a placed-and-routed digital macro
+could never reach a clean DRC. `nplus.space.pcomp.1` and
+`pplus.enclosing.comp.1` now cover only the *near-well* half of the official
+split -- a `PCOMP` (`Comp` AND `Pplus`) that comes within 0.429 µm of an
+`Nwell` or interacts with a `Dnwell` (guard band grown with
+`DerivedLayer.context`), at the strict 0.16 µm -- and two new rules,
+`nplus.space.pcomp.far.1` (`NP.3cii`, 0.08 µm) and
+`pplus.enclosing.comp.far.1` (`PP.5di`, 0.02 µm), cover the exact complement
+(including layouts that draw no well at all). The relaxation is applied only
+where the context is positively identified: selection is whole-polygon (a
+`PCOMP` only partly within reach stays strict), and the `DNWELL`/`LVPWELL`
+branches (`NP.3bii`, `PP.5ci`) are **not** relaxed -- anything within reach of
+a `Dnwell` stays on the strict near rule. The mirrored `pplus.space.ncomp.1`
+and `nplus.enclosing.comp.1` keep the flat strict value.
 
 The DRM's two MiM capacitor rules scoped to the "virtual bottom plate" —
 `MIMTM.1` (minimum bottom-plate spacing to other bottom-plate-or-routing
@@ -2402,6 +2424,68 @@ These two fields are **purely additive** to the JSON contract — the existing
 — so this did not bump `drc`'s `schema_version` (see
 [`docs/json-contract.md`](../json-contract.md)).
 
+## Waivers
+
+`--waivers <file>` (request field `waivers_file`, issue #3483; curated engine
+only — `--engine klayout` with `--waivers` is an application error, exit `1`)
+records "these markers are accepted, and why" without hiding them. It exists
+for macros assembled from a PDK standard-cell library, which inherit whatever
+the library cells themselves report under the curated deck.
+
+The file is reviewed data, not an inline flag:
+
+```json
+{"waivers": [
+  {"cell": "gf180mcu_fd_sc_mcu7t5v0__endcap",
+   "rule": "nplus.space.pcomp.1",
+   "justification": "library tap geometry; foundry-clean (see #3484)"}
+]}
+```
+
+- `cell` is matched exactly against a violation's `source_cell` (see
+  "Per-instance attribution"); a marker with `source_cell: null` is never
+  waived.
+- `rule` is an exact rule id or a case-sensitive shell-style glob, the same
+  matcher as `--rules`.
+- `justification` is required. All three keys are required and non-blank,
+  unknown keys are rejected, and there is deliberately **no cell-wide blanket
+  waiver** — it would hide real violations in that cell.
+
+A violation is waived iff its `source_cell` equals a waiver's `cell` **and**
+its `rule` matches. Waived markers leave `violations`, `violation_count`,
+`rule_counts`, `metrics.drc__error__count` and `status` (all waived →
+`clean`, exit `0`) and appear in full under the top-level `waived` array —
+the `violations[]` entry shape plus `waiver_justification` — alongside:
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `waived_count` | integer | `len(waived)`. |
+| `waived_rule_counts` | object\<string, int\> | Per-rule-id waived counts, keys sorted. |
+| `waived` | array\<object\> | The waived markers. |
+| `unused_waivers` | array\<object\> | Waivers that matched no marker (informational, not an error), so stale waivers are visible. |
+
+All four fields, and `provenance.waivers` (`{"file", "content_hash"}`), are
+absent without `--waivers`, so a default report is unchanged and
+`schema_version` is not bumped. `--check` re-hashes the waiver file along
+with the input and deck; `--check --rerun` replays the waiver file the
+committed report recorded (`--waivers` itself cannot be combined with
+`--check`, like `--rules`).
+
+**Known limit — straddling markers.** A marker whose bbox spans two instances
+(a filler abutting a tap cell, say) carries the *container's* `source_cell`,
+so it is waived under that cell, which is why waivers are rule-scoped.
+Telling a cell's own geometry from its neighbour's per marker is not
+implemented.
+
+**Are library cells expected to be DRC-clean under the curated deck?** Not
+necessarily. The curated deck is a transcription of the open rule manual, not
+the foundry signoff deck, and in places it is more conservative. The known
+case is gf180mcu `endcap`/`filltie` cells, which report
+`nplus.space.pcomp.1` and `pplus.enclosing.comp.1` on their own p-tap COMP;
+that is tracked as a deck over-approximation in #3484. Until a deck fix lands,
+waive such residual library markers with a justified, rule-scoped waiver
+rather than post-processing the JSON.
+
 ## Database units (dbu)
 
 Each deck's `DrcRule` thresholds are authored in database units against a
@@ -2547,8 +2631,9 @@ On a run with findings:
 | `metrics`         | object                   | Declared-namespace re-keying of `violation_count` (issue #1847). See below. |
 | `violations`      | array\<object\>          | One entry per violating geometry, see below.                             |
 | `coverage`        | object                   | What was actually checked vs. what's present in the input stream, see below. |
+| `waived_count`, `waived_rule_counts`, `waived`, `unused_waivers` | integer, object\<string, int\>, array\<object\>, array\<object\> | Present only on a `--waivers` run (issue #3483): the markers a reviewed waiver file moved out of `violations`, with their justification; see "Waivers". Absent otherwise, so a default run's report is byte-identical. |
 | `rule_selection`  | object                   | Present only on a `--rules` run (issue #2768): `{"selectors", "selected", "omitted", "deck_rule_count", "subset"}`, relative to the full registered deck — see "Rule listing and selection" above. Absent otherwise, so a default run's report is unchanged. |
-| `provenance`      | object                   | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` (issue #1901) is `{"name": ..., "source": ..., "version": ...}` when `--pdk` and/or `--pdk-root` was given (resolved via the same lookup `klt pdk find`/`klt sta`/`klt extract` use — this holds for both `--engine curated` and `--engine klayout`, in addition to `--engine klayout`'s own separate use of `--pdk`/`--pdk-root` to resolve the native deck script when `--deck-file` is omitted), else `null`; an unresolvable `--pdk`/`--pdk-root` fails the run the same as any other application error (exit 1), it does not silently fall back to `null`. `deck` pins the selected rule deck by name and `sha256:` content hash, plus a `released` tri-state signal (issue #1193) for whether that exact hash ships in any released `klayout-tools` version — `false` (non-fatal) flags a report generated against an unreleased/dev-edited deck, `null` when the answer can't be determined (e.g. the generated deck history table is missing); `input` pins the input layout file (`path`) by `sha256:` content hash. When `--engine klayout` was run with one or more `--deck-var NAME=VALUE` flags (issue #1302), `deck` additionally carries an `options` key (issue #1306) recording that mapping (e.g. `{"feol": "true"}`), so a committed report records which `--deck-var` configuration produced it — omitted entirely when no `--deck-var` was given. `klt drc` additionally carries `klayout_version_mismatch` (issue #1490, `true`\|`false`): whether the resolved `klayout_version` differs from the version this `klayout-tools` build/commit was tested against (`klt version --format json`'s `klayout_version_expected`) — see [`../json-contract.md`](../json-contract.md)'s "Pinning the KLayout engine version". |
+| `provenance`      | object                   | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` (issue #1901) is `{"name": ..., "source": ..., "version": ...}` when `--pdk` and/or `--pdk-root` was given (resolved via the same lookup `klt pdk find`/`klt sta`/`klt extract` use — this holds for both `--engine curated` and `--engine klayout`, in addition to `--engine klayout`'s own separate use of `--pdk`/`--pdk-root` to resolve the native deck script when `--deck-file` is omitted), else `null`; an unresolvable `--pdk`/`--pdk-root` fails the run the same as any other application error (exit 1), it does not silently fall back to `null`. `deck` pins the selected rule deck by name and `sha256:` content hash, plus a `released` tri-state signal (issue #1193) for whether that exact hash ships in any released `klayout-tools` version — `false` (non-fatal) flags a report generated against an unreleased/dev-edited deck, `null` when the answer can't be determined (e.g. the generated deck history table is missing); `input` pins the input layout file (`path`) by `sha256:` content hash. A `--waivers` run additionally carries `waivers` (issue #3483): `{"file", "content_hash"}` pinning the waiver file by `sha256:` hash. When `--engine klayout` was run with one or more `--deck-var NAME=VALUE` flags (issue #1302), `deck` additionally carries an `options` key (issue #1306) recording that mapping (e.g. `{"feol": "true"}`), so a committed report records which `--deck-var` configuration produced it — omitted entirely when no `--deck-var` was given. `klt drc` additionally carries `klayout_version_mismatch` (issue #1490, `true`\|`false`): whether the resolved `klayout_version` differs from the version this `klayout-tools` build/commit was tested against (`klt version --format json`'s `klayout_version_expected`) — see [`../json-contract.md`](../json-contract.md)'s "Pinning the KLayout engine version". |
 
 ### `metrics` object
 

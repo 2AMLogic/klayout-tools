@@ -20349,6 +20349,120 @@ def test_spef_conn_skips_duplicate_named_nets(tmp_path):
     assert "*I u2:A B" in text  # the unambiguous `sig` net is unaffected
 
 
+def _plain_net(net, *, coupled=()):
+    return {
+        "net": net,
+        "hub_net": net,
+        "capacitance_ff": 1.0,
+        "resistance_ohm": 0.0,
+        "terminals": [{"leg_net": f"{net}_leg", "resistance_ohm": 2.0}],
+        "coupled": list(coupled),
+    }
+
+
+def test_spef_port_pin_name_differs_from_net_name(tmp_path):
+    """Issue #3257 gap B: `- PortA + NET netA` -- `*PORTS`/`*P` carry the PIN
+    name and the net's RC hub is `<net>:1`, never the bare net name. A port
+    whose pin and net names agree keeps the bare-name hub."""
+    from klayout_tools.extract_spef import _write_spef
+
+    def_path = tmp_path / "pins.def"
+    def_path.write_text(
+        "PINS 2 ;\n"
+        "- PortA + NET netA + DIRECTION INPUT ;\n"
+        "- clk + NET clk + DIRECTION INPUT ;\n"
+        "END PINS\n"
+        "NETS 2 ;\n"
+        "- netA ( PIN PortA ) ( u1 A ) ;\n"
+        "- clk ( PIN clk ) ( u1 CLK ) ;\n"
+        "END NETS\n"
+    )
+    pins = def_net_instance_pins(str(def_path))
+    assert pins.port_pins == {"netA": ("PortA",), "clk": ("clk",)}
+    out = tmp_path / "pins.spef"
+    _write_spef(
+        str(out),
+        design_name="top",
+        klt_version="0.0.0",
+        parasitics_report={"nets": [_plain_net("netA"), _plain_net("clk")]},
+        port_names=["netA", "clk"],
+        net_instance_pins=pins,
+    )
+    text = out.read_text()
+    lines = text.splitlines()
+    assert "PortA B" in lines  # *PORTS
+    assert "netA B" not in lines
+    block = text[text.index("*D_NET netA ") : text.index("*END")]
+    assert "*P PortA B" in block
+    assert "*P netA B" not in block
+    assert "1 netA:1 " in block  # hub is the internal node, not bare `netA`
+    assert "1 netA " not in block
+    # Pin == net: unchanged bare-name port hub.
+    clk_block = text[text.index("*D_NET clk ") :]
+    assert "*P clk B" in clk_block
+    assert "1 clk clk:" in clk_block or "1 clk " in clk_block
+
+
+def test_spef_floating_duplicate_named_outputs_are_skipped(tmp_path):
+    """Issue #3257 gap C: two floating cell outputs sharing a pin label and
+    absent from the DEF produce no same-named `*D_NET` blocks (STA-1650); a
+    coupling to them is dropped, and the skipped names are returned."""
+    from klayout_tools.extract_spef import _write_spef
+
+    report = {
+        "nets": [
+            _plain_net(
+                "sig",
+                coupled=[{"net": "X", "capacitance_ff": 0.3}],
+            ),
+            _plain_net("X", coupled=[{"net": "sig", "capacitance_ff": 0.3}]),
+            _plain_net("X"),
+        ]
+    }
+    out = tmp_path / "float.spef"
+    skipped = _write_spef(
+        str(out),
+        design_name="top",
+        klt_version="0.0.0",
+        parasitics_report=report,
+        port_names=[],
+        net_instance_pins={"sig": (("u1", "A"),)},
+    )
+    text = out.read_text()
+    assert skipped == ["X"]
+    assert "*D_NET X " not in text
+    assert text.count("*D_NET ") == 1
+    assert "*D_NET sig 1.000000" in text  # coupling cap not folded in
+    assert "X:" not in text
+
+
+def test_spef_def_net_connections_without_def_pins_warns(tmp_path):
+    """Issue #3257 gap A: structured warning, SPEF bytes unchanged by it."""
+    layout_path = str(CORPUS_DIR / "sky130" / "sky130_fd_sc_hd__inv_1.gds")
+    def_path = tmp_path / "top.def"
+    def_path.write_text("NETS 1 ;\n    - Y ( u1 X ) + USE SIGNAL ;\nEND NETS\n")
+    pins_def = tmp_path / "pins.def"
+    pins_def.write_text("PINS 1 ;\n- Y + NET Y ;\nEND PINS\n")
+
+    def run(name, **kwargs):
+        return run_extract(
+            layout_path,
+            "sky130",
+            parasitics=True,
+            output=str(tmp_path / f"{name}.spice"),
+            spef_output=str(tmp_path / f"{name}.spef"),
+            def_net_connections=def_net_instance_pins(str(def_path)),
+            **kwargs,
+        )
+
+    warned = run("a")
+    assert any(
+        "--def-net-connections without --def-pins" in w for w in warned["warnings"]
+    )
+    quiet = run("b", def_pins=frozenset({"Y"}))
+    assert not any("without --def-pins" in w for w in quiet["warnings"])
+
+
 def test_spef_coupling_cap_references_coupled_net_hub_not_bare_name(tmp_path):
     """Issue #961 defect 2: a Gamma-shunt-fallback coupling partner's actual
     self-capacitance node is its synthesized `hub_net`, not its bare `net`

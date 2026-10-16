@@ -652,6 +652,12 @@ stability statement, concrete precedents, and drift-detection guidance, and
     stderr warning instead. Absent in the ordinary single-install case, so
     an unambiguous run's `provenance` is byte-identical to what it was
     before this field existed and a stored-report diff cannot drift on it.
+  - `compatibility` (issue #3427) — present **only** when the resolved
+    variant's `SOURCES` stamp differs from the declared open_pdks pin
+    (`klt pdk`'s `compatibility.status == "mismatch"`):
+    `{status: "mismatch", package, expected}`. Absent when the status is
+    `match`/`unknown`/`not_declared`, so a matching run's `provenance` is
+    byte-identical to before.
     Populated by `klt sim` today; the underlying detection lives in
     `klayout_tools.pdk.find_pdk` (`ambiguous_roots`) and is available to
     every verb that resolves a PDK — see `docs/cli/pdk.md`.

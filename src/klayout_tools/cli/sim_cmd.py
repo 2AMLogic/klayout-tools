@@ -41,6 +41,7 @@ see ``docs/cli/sim.md``'s "Operating-point lint" section.
 
 import argparse
 import sys
+from typing import Any
 
 from ..env_provenance import render_path_field
 from ..op_sanity import OpSanityError, run_op_sanity
@@ -55,9 +56,27 @@ EXIT_MEASUREMENT_FAILED = 3
 EXIT_CORNER_ERRORED = 4
 
 
-def run(args: argparse.Namespace) -> int:
-    if getattr(args, "batch_set", None) is not None:
-        return _run_batch_set(args)
+def _print_dry_run_text(report: dict[str, Any]) -> None:
+    print(
+        f"klt sim --dry-run: valid ({report['unit_count']} unit(s), "
+        f"engine={report['engine']}, backend={report['backend']})"
+    )
+    for unit in report["units"]:
+        seeds = "".join(
+            f" {key}={unit[key]}"
+            for key in ("rndseed", "process_seed", "mismatch_seed")
+            if key in unit
+        )
+        print(f"  {unit['corner_id']}{seeds}")
+    for staged in report["staged_files"]:
+        print(f"  stage: {staged['name']} ({staged['kind']})")
+    for warning in report["warnings"]:
+        print(f"  warning: {warning}")
+
+
+def _reject_single_request_misuse(args: argparse.Namespace) -> int | None:
+    """Usage failures of the single-request form of ``klt sim`` (``None`` =
+    the arguments are fine)."""
     if args.request is None:
         # Keep the pre---batch-set contract: a bare ``klt sim`` is an
         # argparse-style usage failure (stderr message, SystemExit(2)).
@@ -66,13 +85,27 @@ def run(args: argparse.Namespace) -> int:
             "request (or --batch-set REQUEST...)\n"
         )
         raise SystemExit(2)
-    if getattr(args, "max_in_flight", None) is not None:
+    for flag, name in (
+        ("max_in_flight", "--max-in-flight"),
+        ("capacity_retries", "--capacity-retries"),
+    ):
+        if getattr(args, flag, None) is None:
+            continue
         return emit_error(
             "sim",
-            "--max-in-flight only applies with --batch-set",
+            f"{name} only applies with --batch-set",
             args.format,
             exit_code=EXIT_USAGE_ERROR,
         )
+    return None
+
+
+def run(args: argparse.Namespace) -> int:
+    if getattr(args, "batch_set", None) is not None:
+        return _run_batch_set(args)
+    misuse = _reject_single_request_misuse(args)
+    if misuse is not None:
+        return misuse
     if getattr(args, "op_lint", False):
         return _run_op_lint(args)
     if getattr(args, "job_status", None) is not None:
@@ -94,6 +127,7 @@ def _run_sweep(args: argparse.Namespace) -> int:
             fail_fast_probe=args.fail_fast_probe,
             fail_on_diagnostic=args.fail_on_diagnostic,
             max_units_per_job=args.max_units_per_job,
+            dry_run=getattr(args, "dry_run", False),
             submit_only=getattr(args, "submit_only", False),
         )
     except SimError as exc:
@@ -107,6 +141,12 @@ def _run_sweep(args: argparse.Namespace) -> int:
     if report.get("status") == "submitted" and getattr(args, "submit_only", False):
         # Issue #3073: submitted, not run -- there is no verdict to grade.
         emit_success(report, args.format, _print_submitted_text)
+        return EXIT_PASS
+
+    if report.get("dry_run"):
+        # Issue #3064: a dry run reaching here passed every pre-dispatch
+        # check (a failure raised SimError above -> exit 1).
+        emit_success(report, args.format, _print_dry_run_text)
         return EXIT_PASS
 
     deck_mode = report.get("mode") == "decks"
@@ -245,6 +285,7 @@ def _run_batch_set(args: argparse.Namespace) -> int:
                 if args.max_in_flight is not None
                 else DEFAULT_MAX_IN_FLIGHT
             ),
+            capacity_retries=args.capacity_retries or 0,
             max_workers=args.max_workers,
             hosts=args.hosts,
             budget_s=args.budget_s,

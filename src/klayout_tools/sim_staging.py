@@ -573,12 +573,25 @@ def _declared_lib_refs(request: dict[str, Any]) -> Iterator[tuple[str, str, Any]
     models = request.get("models") or {}
     if models.get("lib") is not None:
         yield "models.lib", "model library", models.get("lib")
-    for index, entry in enumerate((request.get("corners") or {}).get("process") or []):
+    corners = request.get("corners") or {}
+    declared = [
+        ("process", index, entry)
+        for index, entry in enumerate(corners.get("process") or [])
+    ] + [
+        ("units", index, unit.get("process") if isinstance(unit, dict) else None)
+        for index, unit in enumerate(corners.get("units") or [])
+    ]
+    for axis, index, entry in declared:
         sections = entry.get("sections") if isinstance(entry, dict) else None
+        prefix = (
+            f"corners.process[{index}]"
+            if axis == "process"
+            else (f"corners.units[{index}].process")
+        )
         for sec_index, section in enumerate(sections or []):
             if isinstance(section, dict) and "lib" in section:
                 yield (
-                    f"corners.process[{index}].sections[{sec_index}].lib",
+                    f"{prefix}.sections[{sec_index}].lib",
                     "corner section library",
                     section.get("lib"),
                 )
@@ -660,7 +673,13 @@ def _rewrite_worker_request(
     models = worker.get("models")
     if isinstance(models, dict) and models.get("lib") in lib_names:
         models["lib"] = lib_names[models["lib"]]
-    for entry in (worker.get("corners") or {}).get("process") or []:
+    worker_corners = worker.get("corners") or {}
+    process_entries = list(worker_corners.get("process") or []) + [
+        unit.get("process")
+        for unit in worker_corners.get("units") or []
+        if isinstance(unit, dict)
+    ]
+    for entry in process_entries:
         if not isinstance(entry, dict):
             continue
         for section in entry.get("sections") or []:

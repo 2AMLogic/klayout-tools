@@ -548,6 +548,13 @@ case `read_spef` silently annotates nothing for those nets while
 `worst_slack_ns`/etc. still report a number that looks like a real
 measurement.
 
+**What a `klt extract --spef` SPEF models (issue #3257).** By default it is
+lumped capacitance per net with no wire resistance between DEF-level pins
+(zero-ohm legs), so `read_spef` adds wire load but not pin-to-pin wire delay.
+Build it with `--def-net-connections` **and** `--def-pins`; without the
+latter, most nets cannot attach (`STA-1656`) and `delay_changed` stays false.
+See `docs/cli/extract.md`, "SPEF export".
+
 `klt sta` answers that with **four independent pieces of evidence**, three
 of which gate `annotation_complete`. One of them — the name-correlation
 pair — is the two-directional check `place-and-route`'s in-flow pass also
