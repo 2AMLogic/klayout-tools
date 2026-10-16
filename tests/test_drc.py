@@ -1139,6 +1139,19 @@ def test_run_drc_gf180mcu_dualgate_marker_no_warning_without_overlap(tmp_path):
     assert report["coverage"]["voltage_domain_warnings"] == []
 
 
+def _exempt_gf180mcu_comp_from_df12(layout: kdb.Layout) -> None:
+    """Draw a Schottky-diode marker (241/0) over every `Comp` shape so the
+    deck's `comp.coverage.1` (`DF.12`, issue #3587: Comp without Nplus/Pplus
+    is forbidden) exempts it whole. For fixtures that exercise *other* rules
+    on bare `Comp`; no other rule reads the marker."""
+    top = layout.top_cell()
+    comp = layout.find_layer(22, 0)
+    box = kdb.Region(top.begin_shapes_rec(comp)).bbox().enlarged(100, 100)
+    marker = layout.layer(241, 0)
+    layout.set_info(marker, kdb.LayerInfo(241, 0))
+    top.shapes(marker).insert(box)
+
+
 def _make_gf180mcu_comp_layout(
     *, width_dbu: int, gap_dbu: int | None = None, dualgate: bool
 ) -> kdb.Layout:
@@ -1165,6 +1178,7 @@ def _make_gf180mcu_comp_layout(
         draw(22, 0, kdb.Box(width_dbu + gap_dbu, 0, right, 4000))
     if dualgate:
         draw(55, 0, kdb.Box(-1000, -1000, right + 1000, 5000))
+    _exempt_gf180mcu_comp_from_df12(layout)
     return layout
 
 
@@ -1515,6 +1529,7 @@ def _make_gf180mcu_four_layer_clean_layout() -> kdb.Layout:
     layout.set_info(metal1, kdb.LayerInfo(34, 0, "Metal1"))
     top.shapes(metal1).insert(kdb.Box(3000, 0, 3300, 2000))
 
+    _exempt_gf180mcu_comp_from_df12(layout)
     return layout
 
 
@@ -1594,6 +1609,7 @@ def test_run_drc_gf180mcu_nwell_enclosing_comp_violation(tmp_path):
     top.shapes(nwell).insert(kdb.Box(0, 0, 2000, 2000))
     # 300 dbu margin on 3 sides, only 50 dbu (< 120) margin on the right.
     top.shapes(comp).insert(kdb.Box(300, 300, 1950, 1700))
+    _exempt_gf180mcu_comp_from_df12(layout)
     path = tmp_path / "nwell_enclosing_violation.gds"
     layout.write(str(path))
 
@@ -1618,6 +1634,7 @@ def test_run_drc_gf180mcu_nwell_enclosing_comp_clean(tmp_path):
     layout.set_info(comp, kdb.LayerInfo(22, 0, "Comp"))
     top.shapes(nwell).insert(kdb.Box(0, 0, 2000, 2000))
     top.shapes(comp).insert(kdb.Box(300, 300, 1700, 1700))  # 300 dbu margin >= 120
+    _exempt_gf180mcu_comp_from_df12(layout)
     path = tmp_path / "nwell_enclosing_clean.gds"
     layout.write(str(path))
 
@@ -1642,6 +1659,7 @@ def test_run_drc_gf180mcu_bjt_separation_violation(tmp_path):
     layout.set_info(comp, kdb.LayerInfo(22, 0, "Comp"))
     top.shapes(bjt).insert(kdb.Box(0, 0, 500, 500))
     top.shapes(comp).insert(kdb.Box(550, 0, 1000, 500))  # 50 dbu gap < 100
+    _exempt_gf180mcu_comp_from_df12(layout)
     path = tmp_path / "bjt_separation_violation.gds"
     layout.write(str(path))
 
@@ -1666,6 +1684,7 @@ def test_run_drc_gf180mcu_bjt_separation_clean(tmp_path):
     layout.set_info(comp, kdb.LayerInfo(22, 0, "Comp"))
     top.shapes(bjt).insert(kdb.Box(0, 0, 500, 500))
     top.shapes(comp).insert(kdb.Box(600, 0, 1000, 500))  # 100 dbu gap == threshold
+    _exempt_gf180mcu_comp_from_df12(layout)
     path = tmp_path / "bjt_separation_clean.gds"
     layout.write(str(path))
 
@@ -4664,11 +4683,12 @@ def test_run_drc_gf180mcu_far_tap_below_relaxed_value_still_flagged(tmp_path):
         assert rule_id not in report["rule_counts"]
 
 
-def test_run_drc_gf180mcu_no_implant_geometry_stays_clean(tmp_path):
-    """The issue's own false-positive guard: a layout that draws no implant
-    at all (`Comp` + `Poly2` only) still reports `status: clean`, and every
-    one of the ten implant rules is recorded in `coverage.rules_skipped`
-    rather than silently evaluated against an empty region."""
+def test_run_drc_gf180mcu_no_implant_geometry_skips_implant_rules(tmp_path):
+    """A layout that draws no implant at all (`Comp` + `Poly2` only) does not
+    evaluate the implant rules against empty regions: every one of the ten
+    implant rules is recorded in `coverage.rules_skipped`. Since #3587 the
+    only finding is `DF.12` (`comp.coverage.1`) itself -- unimplanted `Comp`
+    is exactly what that rule forbids."""
     path = tmp_path / "no_implant.gds"
     _gf180mcu_implant_layout(
         [
@@ -4679,7 +4699,7 @@ def test_run_drc_gf180mcu_no_implant_geometry_stays_clean(tmp_path):
 
     report = run_drc(str(path), "gf180mcu")
 
-    assert report["status"] == "clean", report["rule_counts"]
+    assert report["rule_counts"] == {"comp.coverage.1": 1}, report["rule_counts"]
     skipped = set(report["coverage"]["rules_skipped"])
     for implant in ("nplus", "pplus"):
         for suffix in ("width.1", "space.1", "enclosing.poly2.1", "enclosing.comp.1"):

@@ -222,6 +222,9 @@ from .gen_layer_params import (
     UNIT_MIN_W_UM as UNIT_MIN_W_UM,
 )
 from .gen_layer_params import (
+    _bjt_unit_implant_margin_um as _bjt_unit_implant_margin_um,
+)
+from .gen_layer_params import (
     _cap_family_layers as _cap_family_layers,
 )
 from .gen_layer_params import (
@@ -411,6 +414,11 @@ _HIDDEN_PARAMS = {
     # Shared verbatim by `well_island`'s own `well_tap_implant_*` ring
     # (issue #1421), which draws the same implant over the same `Comp` mask.
     "ring_implant_margin_um",
+    # `bjt_array`'s per-unit emitter (Pplus) / base-tie (Nplus) implants
+    # (issue #3587) -- harness-computed like `sd_implant_*` above.
+    "unit_emitter_implant_layer",
+    "unit_base_implant_layer",
+    "unit_implant_margin_um",
     # `res_array`'s own metal-layer-resistor geometry floors (issue #1639),
     # harness-computed from the resolved PDK family/`params.metal_level`
     # exactly like `cap_bottom_plate_margin_min_um`/friends above -- see
@@ -2636,6 +2644,47 @@ def _bjt_unit_layout(emitter_um: float) -> dict[str, Any]:
     }
 
 
+def _bjt_unit_implant_overhang_um(
+    margin_um: float, row_pitch_um: float, unit_height_um: float
+) -> float:
+    """How far a unit's emitter/base-tie implant extends above and below its
+    pad: at least ``margin_um``, grown to half the row gap so the same-type
+    implants of adjacent rows abut and merge (NP.2/PP.2 spacing is wider than
+    the row gap)."""
+    return max(margin_um, (row_pitch_um - unit_height_um) / 2.0)
+
+
+def _insert_bjt_unit_implants(
+    cell: Any,
+    layout: Any,
+    info: dict[str, Any],
+    emitter_layer: Any,
+    base_layer: Any,
+    margin_um: float,
+) -> None:
+    """Draw each unit's P+ emitter / N+ base-tie implant (issue #3587): the
+    pad grown by ``margin_um`` (NP.5b/PP.5b) sideways and by
+    :func:`_bjt_unit_implant_overhang_um` above and below. A no-op when
+    ``margin_um`` is not positive (families without both implant roles)."""
+    if margin_um <= 0:
+        return
+    unit = info["unit"]
+    overhang = _bjt_unit_implant_overhang_um(
+        margin_um, info["row_pitch_um"], unit["height_um"]
+    )
+    emitter_box, base_box = unit["boxes_um"]["active"][:2]
+    for layer, box in ((emitter_layer, emitter_box), (base_layer, base_box)):
+        grown = (
+            box[0] - margin_um,
+            box[1] - overhang,
+            box[2] + margin_um,
+            box[3] + overhang,
+        )
+        li = layout.layer(layer)
+        for c in info["cells"] + info["dummy_cells"]:
+            _insert_boxes(cell, li, layout.dbu, [grown], c["x0_um"], c["y0_um"])
+
+
 def _bjt_array_layout(
     emitter_um: float,
     rows: int,
@@ -2646,6 +2695,7 @@ def _bjt_array_layout(
     ring_gap_side: str = "",
     ring_gap_um: float = 0.0,
     ring_gap_offset_um: float = 0.0,
+    unit_implant_margin_um: float = 0.0,
 ) -> dict[str, Any]:
     """A ``rows`` x ``cols`` common-centroid (or plain-array) grid of
     :func:`_bjt_unit_layout` unit devices, with ``dummy`` flanking columns
@@ -2660,10 +2710,27 @@ def _bjt_array_layout(
     base-tie pads included, look like a second emitter). The collector ring
     is still held :data:`BJT_COLLECTOR_GAP_UM` outside the well, well beyond
     gf180mcu's ``bjt.separation.comp.1`` 0.1um limit.
+
+    ``unit_implant_margin_um`` (issue #3587) is the extension of each unit's
+    emitter/base-tie implant beyond its pad (``0.0`` = no unit implants, the
+    layout is unchanged). When set, the ring is pushed out further so its own
+    implant keeps the same-type implant spacing (NP.2/PP.2) from the units'.
     """
     unit = _bjt_unit_layout(emitter_um)
     col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
     row_pitch = unit["height_um"] + MIN_SAME_LAYER_SPACING_UM
+    collector_gap = BJT_COLLECTOR_GAP_UM
+    if unit_implant_margin_um > 0:
+        overhang = _bjt_unit_implant_overhang_um(
+            unit_implant_margin_um, row_pitch, unit["height_um"]
+        )
+        needed = (
+            MIN_SAME_LAYER_SPACING_UM
+            + unit_implant_margin_um
+            + overhang
+            - WELL_ENCLOSURE_MARGIN_UM
+        )
+        collector_gap = max(collector_gap, math.ceil(needed * 100) / 100)
 
     order = (
         _centroid_order(rows, cols)
@@ -2702,7 +2769,7 @@ def _bjt_array_layout(
     ring = None
     ring_offset = (0.0, 0.0)
     if add_collector_ring:
-        gap = BJT_COLLECTOR_GAP_UM
+        gap = collector_gap
         ring_w = CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM
         inner_x0 = well_box[0] - gap
         inner_y0 = well_box[1] - gap
