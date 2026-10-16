@@ -1339,6 +1339,27 @@ case the diagnostic and `environment.remote` give `job_id` and `bucket`;
 the remaining evidence (`status.json`, `harness.log`, `outputs/`) lives at
 `s3://<bucket>/<jobs prefix>/<job_id>/`.
 
+### Post-processing waveforms from a batch run locally
+
+Per-corner waveforms come back from `batch` the same way as from `local`, as
+long as **both** `options.waveforms: true` and `options.keep_artifacts: true`
+are set (`waveforms` alone captures the rawfile on the job instance, but
+nothing is brought home without `keep_artifacts`). Both options are forwarded
+verbatim to the job's own `klt sim`; `batch` adds no trace-related refusal.
+Pass `--outdir DIR` to choose where the artifacts land:
+
+```json
+{ "backend": "batch", "analysis": {"kind": "tran", "args": "1n 1u"},
+  "options": {"waveforms": true, "keep_artifacts": true} }
+```
+
+Each corner's `artifacts.waveform` / `artifacts.raw` / `artifacts.log` /
+`artifacts.deck` then point at local copies under `DIR` (under
+`DIR/<job_id>/` per shard when `hosts > 1`), so a local script can read the
+per-corner waveform JSON exactly as it would after `--backend local`.
+`options.waveforms` is refused for `analysis_steps[]` sequences on every
+backend. Regression: `test_run_sim_batch_returns_per_corner_waveform_artifacts`.
+
 ### gf180 local-versus-batch troubleshooting checklist
 
 A gf180mcuD netlist was reported to simulate locally but fail on the fleet
@@ -3587,6 +3608,61 @@ leave ambiguous. It exists so a caller (or a human) reading the response
 can tell a genuinely-sampled family from a structurally-excluded one without
 reading the vendored model deck line by line.
 
+### Per-instance mismatch selection
+
+`monte_carlo.instances` (optional, issue #2995) turns local mismatch on for a
+subset of instances, so a spread can be attributed to a device group without a
+hand-written netlist wrapper:
+
+```json
+"monte_carlo": {
+  "n": 200, "seed": 7, "vary": "mismatch",
+  "instances": { "include": ["xm1*", "xm2*"], "exclude": ["xm1_tail"] }
+}
+```
+
+`include` and `exclude` are case-insensitive globs over **top-level `X`
+(subcircuit) instance names** of the request netlist. An instance is
+randomised when it matches `include` (or `include` is empty) and does not match
+`exclude`. At least one list must be non-empty. klt wraps every other `X`
+instance in a generated one-instance subcircuit that sets the PDK's mismatch
+switch to `0` locally (`mc_mm_switch` for sky130, `sw_stat_mismatch` for
+gf180mcu); the instance line, including `m` and every other parameter, moves
+*inside* the wrapper verbatim, so nothing is forwarded across the extra
+hierarchy level. The netlist you wrote is not modified; a gated copy runs.
+Hierarchical probes of a wrapped instance gain one level
+(`xm1.xm1_klt`).
+
+Refused up front with a `SimError`: a glob that matches no `X` instance (or
+only non-subcircuit elements), a hierarchical glob (`.`/`/`), `vary:
+"process"`, a `models.pdk` without a known switch, and the `remote`/`batch`
+backends. Instances inside user `.subckt` bodies and in `.include`d files are
+not gated individually.
+
+The response adds `environment.monte_carlo.instance_mismatch`:
+
+```json
+{
+  "switch": "mc_mm_switch",
+  "include": [], "exclude": ["xm1"],
+  "instances": [
+    { "instance": "XM1", "model": "sky130_fd_pr__nfet_01v8", "randomised": false },
+    { "instance": "XM2", "model": "sky130_fd_pr__nfet_01v8", "randomised": true }
+  ],
+  "negative_control": false
+}
+```
+
+`negative_control: true` means every `X` instance was excluded: that run should
+reproduce the mismatch-off run under the same seed, so diff it against one to
+catch a wrapper that drops a parameter. The report states which instances were
+gated, not that the PDK model responded to the switch. Whether the remaining
+instances draw the same values as an ungated run under the same seed depends on
+the engine's random-stream ordering and is not guaranteed by klt. Worked
+example: `examples/sim/request-monte-carlo-instances.json`. Key names and entry
+shape are intended to stay consistent with the injected-mismatch proposal in
+#2911.
+
 ## Monte Carlo statistics
 
 A `monte_carlo` request additionally reduces its samples to a **statistical
@@ -3915,7 +3991,8 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `osdi_abi_mismatch` | `NGSPICE only supports OSDI v0.N but ...` — ngspice too old for the compiled module's OSDI ABI. |
 | `osdi_load_failed` | `Error: Library <x>.osdi couldn't be loaded!` — the module is unreadable or not loadable by this ngspice. |
 | `timeout`          | The per-corner `options.timeout_s` budget was exceeded; the process is killed. |
-| `engine_killed`    | The engine process died from a signal the harness did not send (OOM killer, host reaper, reclaimed worker). `corners[].engine_killed_by_signal` names it (issue #2848). Always `error`; accepted by `options.fail_on_diagnostic`. A harness `timeout` is never reported this way. |
+| `engine_killed`    | The engine process died from a signal the harness did not send (OOM killer, host reaper, reclaimed worker). `corners[].engine_killed_by_signal` names it (issue #2848). Always `error`; accepted by `options.fail_on_diagnostic`. A harness `timeout` is never reported this way. The message quotes the last ~20 lines of engine output (issue #3067). |
+| `engine_aborted`   | The engine exited with a non-zero code (`corners[].engine_exit_code`) without a classifiable cause in its log. (A clean exit that wrote no log, or a non-zero exit with no log file at all, is reported as `unknown` with the exit status and output tail, issue #3016.) Always `error`; accepted by `options.fail_on_diagnostic`. The message carries the exit code and the last ~20 lines of engine stderr/stdout/log, also with `keep_artifacts: false` and on the batch backend. When a corner carries `engine_aborted` or `engine_killed`, its per-measurement `measurement ... produced no value` diagnostics are omitted (the measurement results stay `error`), so `diagnostics[0]` names the cause (issue #3067). |
 | `measurement`      | A declared `.meas` produced no value (missing, not a `"fail"` — see below). |
 | `no_such_vector`   | ngspice's own `Error: no such vector as ...` — emitted *alongside* `measurement` when the missing signal's name never resolved to a vector at all (issue #2521). See "Saved signal set (`save all`)" below for what this can and cannot tell you. |
 | `step_failed`      | An `analysis_steps[]` step's analysis produced no plot of its own (it failed, or the run ended before it) — read from `klt`'s own step markers in the log, never inferred from measurements. The step's own measurements are reported `value: null`/`status: "error"` under this one diagnostic (issue #2482). See "Several solves per corner" above. |
@@ -4178,6 +4255,12 @@ for `.ac`, the swept source for `.dc`); each `points[]` entry has one value
 per declared variable, in `variables[].index` order. Waveform data is never
 inlined into the response — only `artifacts.raw` (the rawfile itself) and
 `artifacts.waveform` (its parsed JSON) paths are.
+
+The rawfile stays ASCII (`set filetype=ascii`) and the waveform JSON shape is
+unchanged (issue #3360): the rawfile is stream-parsed and the JSON written one
+point at a time, so `klt sim`'s peak memory converting it does not scale with
+rawfile size. A binary rawfile reader was considered and rejected because it
+would change the `artifacts.raw` format.
 
 ### Complex-valued (`ac`/`sp`) rawfiles
 
