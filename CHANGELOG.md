@@ -274,6 +274,16 @@ not `klt --version`, if you need to detect this kind of drift. See
   `v(<node>)` they read) now count as element terminals, ending false
   `floating_node` warnings on behaviourally driven nodes. Additive; no
   `schema_version` bump.
+- **sky130 `mos_array`/`diff_pair` draw the S/D implant** (issue #2934, phase
+  A): `nsdm` (93/44) over n-type and `psdm` (94/20) over p-type unit devices,
+  0.125 µm beyond the diffusion (`n/psdm.5a`, `sky130A.lydrc`), merged where
+  adjacent units sit closer than `nsdm.2`/`psdm.2`'s 0.38 µm. Block bounding
+  boxes grow by that margin, so `gen-compose` placements shift accordingly;
+  `klt extract` device lists are unchanged and `sky130A_mr.drc` reports no new
+  violations. `diff_pair` now reports `drc_hints.sd_implant_present`, and both
+  generators list the sky130 masks still omitted (ring tap implant, `npc`) in
+  `drc_hints.notes` (additive). Tap-ring implants, `npc` and the deck rules
+  remain open on #2934.
 - **ASAP7 DRC deck checks `ACTIVE.W.2` and `SDT.W.3`** (issue #3085): the
   vertical-width-is-an-integer-multiple-of-27-nm rules (DRM Tables 3.5.1 /
   3.8.1) are now measured per local vertical width of each merged rectilinear
