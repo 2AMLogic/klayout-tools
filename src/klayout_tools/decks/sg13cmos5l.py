@@ -89,6 +89,12 @@ recognition; it has since grown three follow-on increments the way
 - **Added by #2113**: nominal first-order metal parasitics for all five
   levels and four adjacent vertical-overlap pairs. See ``PARASITICS`` for
   SG13CMOS5L-specific source values and the uncalibrated model's limits.
+- **Added by #3573**: NW.c/NW.c1/NW.e/NW.e1 (NWell enclosure of P+/N+
+  Activ, LV/HV split by ThickGateOx) as ``nwell.enclosing.{pactiv,nactiv}
+  [.hv].1``; approximations are listed at the rules. Not yet modelled, and
+  reported via ``UNCHECKED_RULES``: NW.d/d1/f/f1 (NWell space to Activ) and
+  the DigiBnd variants NW.c1/d1/e1/f1.dig (DigiBnd 16/0 is not read yet, so
+  the HV enclosure rules hold digital blocks to the stricter analog value).
 - **Still out of scope**, left for follow-on issues: the
   ``res_metal1``..``res_topmetal1`` metal-resistor family (now reachable
   in principle now that #1417 lands the metal stack those bodies sit on,
@@ -322,6 +328,7 @@ device classes below carry golden layout->netlist pair tests in
 from __future__ import annotations
 
 from . import (
+    DerivedLayer,
     DrcRule,
     ExtractionDeck,
     LayerRC,
@@ -957,13 +964,188 @@ DECK: list[DrcRule] = [
             chain=((6, 0), (8, 0)),  # Cont.drawing -> Metal1.drawing
         ),
     ),
+    # --- NWell enclosure of P+/N+ Activ (issue #3573, NW.c/NW.c1/NW.e/NW.e1),
+    # sg13cmos5l_maximal.drc. Each is an `"enclosed"` check of a *derived*
+    # implanted-Activ region by NWell: Activ shapes lying wholly outside NWell
+    # (substrate taps, NMOS source/drain) are not flagged, but one that
+    # straddles or sits too close to a well edge is. The LV/HV pair is split
+    # by the ThickGateOx marker (44/0) through the near/far well-context
+    # partition (#3484), the same whole-polygon selection the other voltage-
+    # paired decks use. Shared approximations versus the upstream operand
+    # derivations (each documented, none silently dropped):
+    #   * P+/N+ Activ is `Activ & pSD` / `Activ & nSD` (drawn implants); the
+    #     upstream operand is `Activ - nSD_drv` for P+ (any Activ not N+).
+    #     Activ with neither implant drawn is not checked here.
+    #   * ThickGateOx scoping selects whole Activ polygons (a polygon
+    #     touching the marker is HV); upstream clips with a boolean NOT. Only
+    #     an Activ polygon straddling the marker edge can differ.
+    #   * Upstream excludes SVaricap, schottky_nbl1/nw1 and scr1 regions
+    #     (text-marker derived) and NWell inside SRAM (`NWell_Nsram`); none
+    #     of these are modelled, so varicap/schottky Activ is held to the
+    #     ordinary threshold (stricter) and SRAM-marked NWell is not removed.
+    #   * The HV rules apply upstream's analog 0.62 / 0.62 um everywhere;
+    #     inside DigiBnd upstream relaxes them to 0.31 / 0.24 um (NW.c1.dig /
+    #     NW.e1.dig, listed in UNCHECKED_RULES), so a digital HV block is
+    #     held to the stricter analog value here (never under-checked). ----
+    DrcRule(
+        id="nwell.enclosing.pactiv.1",
+        description="minimum NWell enclosure of P+ Activ outside ThickGateOx",
+        layer=(1, 0),  # Activ.drawing (reporting identity; region is derived)
+        other_layer=(31, 0),  # NWell.drawing
+        check="enclosed",
+        threshold_dbu=310,  # 0.31 um
+        # sg13cmos5l_maximal.drc rule "NW.c": lNw_c.ext_enclosed(NWell_Nsram,
+        # 0.31.um, consider_overlaps_as_errors: true) -> "Min. NWell
+        # enclosure of P+Activ not inside ThickGateOx = 0.31"
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ
+            sized_by_um=0.0,
+            intersect_with=(14, 0),  # pSD -> P+ Activ
+            context_layers=((44, 0),),  # ThickGateOx
+            context="far",
+        ),
+        scope="5.1 NWell",
+        provenance=_cmos5l_provenance(
+            "libs.tech/klayout/tech/drc/rule_decks/sg13cmos5l_maximal.drc",
+            "NW.c",
+        ),
+    ),
+    DrcRule(
+        id="nwell.enclosing.pactiv.hv.1",
+        description="minimum NWell enclosure of P+ Activ inside ThickGateOx",
+        layer=(1, 0),  # Activ.drawing (reporting identity; region is derived)
+        other_layer=(31, 0),  # NWell.drawing
+        check="enclosed",
+        threshold_dbu=620,  # 0.62 um
+        # sg13cmos5l_maximal.drc rule "NW.c1": PActHV_ana.ext_outside(
+        # SVaricap_or_schottky_nbl1).ext_enclosed(NWell, 0.62.um, ...) ->
+        # "Min. NWell enclosure of P+Activ inside ThickGateOx = 0.62"
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ
+            sized_by_um=0.0,
+            intersect_with=(14, 0),  # pSD -> P+ Activ
+            context_layers=((44, 0),),  # ThickGateOx
+            context="near",
+        ),
+        scope="5.1 NWell",
+        provenance=_cmos5l_provenance(
+            "libs.tech/klayout/tech/drc/rule_decks/sg13cmos5l_maximal.drc",
+            "NW.c1",
+        ),
+    ),
+    DrcRule(
+        id="nwell.enclosing.nactiv.1",
+        description=(
+            "minimum NWell enclosure of N+ Activ (well tie) outside ThickGateOx"
+        ),
+        layer=(1, 0),  # Activ.drawing (reporting identity; region is derived)
+        other_layer=(31, 0),  # NWell.drawing
+        check="enclosed",
+        threshold_dbu=240,  # 0.24 um
+        # sg13cmos5l_maximal.drc rule "NW.e": NAct_NWellLV.ext_not(nw_outDev)
+        # .ext_enclosed(NWell, 0.24.um, ...) -> "Min. NWell enclosure of
+        # NWell tie surrounded entirely by NWell in N+Activ not inside
+        # ThickGateOx = 0.24". `nw_outDev` is an HV-only subtraction, so it
+        # is empty for this LV operand. An N+ Activ shape wholly outside
+        # NWell (an NMOS source/drain) is not an NWell tie and is not
+        # flagged; one straddling a well edge is.
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ
+            sized_by_um=0.0,
+            intersect_with=(7, 0),  # nSD -> N+ Activ
+            context_layers=((44, 0),),  # ThickGateOx
+            context="far",
+        ),
+        scope="5.1 NWell",
+        provenance=_cmos5l_provenance(
+            "libs.tech/klayout/tech/drc/rule_decks/sg13cmos5l_maximal.drc",
+            "NW.e",
+        ),
+    ),
+    DrcRule(
+        id="nwell.enclosing.nactiv.hv.1",
+        description=(
+            "minimum NWell enclosure of N+ Activ (well tie) inside ThickGateOx"
+        ),
+        layer=(1, 0),  # Activ.drawing (reporting identity; region is derived)
+        other_layer=(31, 0),  # NWell.drawing
+        check="enclosed",
+        threshold_dbu=620,  # 0.62 um
+        # sg13cmos5l_maximal.drc rule "NW.e1": NAct_NWellHV_ana.ext_outside(
+        # SVaricap.ext_or(schottky_nbl1, schottky_nw1, scr1)).ext_enclosed(
+        # NWell, 0.62.um, ...) -> "Min. NWell enclosure of NWell tie
+        # surrounded entirely by NWell in N+Activ inside ThickGateOx = 0.62"
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ
+            sized_by_um=0.0,
+            intersect_with=(7, 0),  # nSD -> N+ Activ
+            context_layers=((44, 0),),  # ThickGateOx
+            context="near",
+        ),
+        scope="5.1 NWell",
+        provenance=_cmos5l_provenance(
+            "libs.tech/klayout/tech/drc/rule_decks/sg13cmos5l_maximal.drc",
+            "NW.e1",
+        ),
+    ),
 ]
 
 # Foundry rules this curated deck knows about but cannot evaluate (issue
 # #3012): `{rule id: (layer, description)}`. `drc.py` reports each one under
 # `coverage.unchecked_rules` whenever its layer is present in the stream, so
 # a `clean` verdict cannot be read as "this rule was checked".
-UNCHECKED_RULES: dict[str, tuple[tuple[int, int], str]] = {}
+UNCHECKED_RULES: dict[str, tuple[tuple[int, int], str]] = {
+    "NW.d": (
+        (31, 0),
+        "NW.d (NWell space to external N+ Activ outside ThickGateOx, 0.31 "
+        "um) is not modelled yet (issue #3573 follow-up); a violation of "
+        "it is not flagged.",
+    ),
+    "NW.d1": (
+        (31, 0),
+        "NW.d1 (NWell space to external N+ Activ inside ThickGateOx, 0.62 "
+        "um) is not modelled yet (issue #3573 follow-up); a violation of "
+        "it is not flagged.",
+    ),
+    "NW.f": (
+        (31, 0),
+        "NW.f (NWell space to substrate-tie P+ Activ outside ThickGateOx, "
+        "0.24 um) is not modelled yet (issue #3573 follow-up); a "
+        "violation of it is not flagged.",
+    ),
+    "NW.f1": (
+        (31, 0),
+        "NW.f1 (NWell space to substrate-tie P+ Activ inside ThickGateOx, "
+        "0.62 um) is not modelled yet (issue #3573 follow-up); a "
+        "violation of it is not flagged.",
+    ),
+    "NW.c1.dig": (
+        (31, 0),
+        "NW.c1.dig (NWell enclosure of P+ Activ inside ThickGateOx and "
+        "DigiBnd, 0.31 um; nwell.enclosing.pactiv.hv.1 applies 0.62 um "
+        "there) is not modelled yet (issue #3573 follow-up); a violation "
+        "of it is not flagged.",
+    ),
+    "NW.d1.dig": (
+        (31, 0),
+        "NW.d1.dig (NWell space to external N+ Activ inside ThickGateOx "
+        "and DigiBnd, 0.31 um) is not modelled yet (issue #3573 follow- "
+        "up); a violation of it is not flagged.",
+    ),
+    "NW.e1.dig": (
+        (31, 0),
+        "NW.e1.dig (NWell enclosure of N+ Activ tie inside ThickGateOx "
+        "and DigiBnd, 0.24 um; nwell.enclosing.nactiv.hv.1 applies 0.62 "
+        "um there) is not modelled yet (issue #3573 follow-up); a "
+        "violation of it is not flagged.",
+    ),
+    "NW.f1.dig": (
+        (31, 0),
+        "NW.f1.dig (NWell space to substrate-tie P+ Activ inside "
+        "ThickGateOx and DigiBnd, 0.24 um) is not modelled yet (issue "
+        "#3573 follow-up); a violation of it is not flagged.",
+    ),
+}
 
 # `(layer, datatype) -> "name.purpose"` display names for every layer this
 # deck's DECK/EXTRACTION_DECK reads, cross-checked against
