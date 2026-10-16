@@ -5953,7 +5953,10 @@ _ALTERPARAM_FAILURE_RE = re.compile(
 
 def _alterparam_failures(point: CornerPoint, log_text: str) -> list[dict[str, Any]]:
     """An error diagnostic when the engine refused an ``alterparam`` target,
-    so a corner that simulated the nominal value can never grade ``pass``."""
+    so a corner that simulated the nominal value can never grade ``pass``.
+    A no-op for a corner with no ``params`` axis."""
+    if not point.params:
+        return []
     match = _ALTERPARAM_FAILURE_RE.search(log_text)
     if match is None:
         return []
@@ -6198,10 +6201,9 @@ def _run_corner(
         classified = _classify_engine_diagnostics(log_text, netlist_path, engine)
         diagnostics.extend(classified)
         no_log_reported = False
-        if point.params:
-            diagnostics.extend(
-                _alterparam_failures(point, log_text + "\n" + stdout_text)
-            )
+        diagnostics.extend(
+            _alterparam_failures(point, log_text + "\n" + stdout_text)
+        )
         if engine_exit_code and not log_text and not os.path.exists(log_path):
             diagnostics.append(
                 {
