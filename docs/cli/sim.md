@@ -4931,6 +4931,14 @@ substitution is **reported rather than discarded**:
   **absent** when resolution was unambiguous, so an ordinary run's
   `provenance` is unchanged.
 
+- **PDK revision stamps** (issue #3070): `provenance.pdk.version` is
+  `SOURCES` text for open_pdks installs, `fetched:<marker>` for a
+  `scripts/fetch-*.sh` tarball, `git:<40-hex>[-dirty]` for a git checkout, else
+  `null`. When the resolved model library lives in a *different* variant tree
+  (a cross-variant symlink), `provenance.pdk.linked_trees` lists
+  `[{name, version}]` for it; the key is absent otherwise. See
+  [`docs/json-contract.md`](../json-contract.md).
+
 - **`--format text`** echoes the resolved PDK on its own line beside
   `models_lib`, plus a `WARNING` line when the variant was installed more
   than once:
