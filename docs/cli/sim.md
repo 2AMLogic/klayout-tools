@@ -4202,11 +4202,13 @@ a corner grid. A stock ngspice without the module still produces the
   against a per-corner copy of the netlist (`netlist.supply_waveforms.cir`
   in the corner directory; relative `.include` targets are made absolute) in
   which the source's voltage levels are multiplied by `supply / peak`, where
-  `peak` is the largest-magnitude nominal level: **the rail's peak equals the
+  `peak` is the signed nominal level of largest magnitude: **the rail's peak equals the
   swept supply value** and every other level moves proportionally (a
   `PWL(0 0 1u 0.9 2u 1.8)` ramp swept to `1.2` becomes
   `PWL(0 0 1u 0.6 2u 1.2)`; `PULSE` scales `V1`/`V2`; times and trailing
-  options such as `r=` are untouched). A negative supply flips the waveform;
+  options such as `r=` are untouched). A negative-going source is swept with negative `supply_v`
+  values (`PWL(0 0 1n -1.8)` at `-1.62` scales by `0.9`); a `supply_v` whose
+  sign disagrees with the source's peak is rejected rather than mirrored, and
   a zero supply flattens it. The rewrite is fail-closed: only plain numeric
   levels in a parenthesised list of a top-level source are rewritten, and a
   `{param}`/expression level, `SIN`/`EXP`/behavioural source, a source with

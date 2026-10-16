@@ -188,12 +188,21 @@ def scale_netlist(
             text, name, option="corners.supply_waveforms", error_cls=error_cls
         )
         target = float(supply_v[name])
-        peak = max(abs(v) for v in parsed["values"])
+        # Signed: the level of largest magnitude keeps its sign, so a negative
+        # rail swept to a negative value scales by a positive factor.
+        peak = max(parsed["values"], key=abs)
         if peak == 0.0:
             raise error_cls(
                 f"corners.supply_waveforms source {name!r}: every "
                 f"{parsed['kind'].upper()} level is zero, so there is no peak "
                 "to scale to the supply value"
+            )
+        if target != 0.0 and (target < 0.0) != (peak < 0.0):
+            raise error_cls(
+                f"corners.supply_waveforms source {name!r}: supply_v value "
+                f"{target:g} V has the opposite sign of the {parsed['kind'].upper()} "
+                f"peak level {peak:g} V; scaling would mirror the waveform. "
+                "Use a supply_v value with the same polarity as the source"
             )
         args = list(parsed["args"])
         effective = []

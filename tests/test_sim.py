@@ -12671,6 +12671,48 @@ def test_scale_netlist_zero_peak_fails_closed():
         )
 
 
+def test_scale_netlist_negative_rail_keeps_polarity():
+    from klayout_tools import sim_supply_waveform as sw
+
+    out, info = sw.scale_netlist(
+        "V1 vdd 0 PWL(0 0 1n -1.8)\n", {"V1": -1.62}, ("V1",), error_cls=sim.SimError
+    )
+    assert out.strip() == "V1 vdd 0 PWL(0 0 1n -1.62)"
+    assert info["V1"]["nominal_peak_v"] == -1.8
+    assert info["V1"]["scale"] == pytest.approx(0.9)
+    assert info["V1"]["effective_levels_v"] == pytest.approx([0.0, -1.62])
+
+    out, info = sw.scale_netlist(
+        "V1 vdd 0 PWL(0 0 1n -1.8)\n", {"V1": -1.8}, ("V1",), error_cls=sim.SimError
+    )
+    assert info["V1"]["scale"] == pytest.approx(1.0)
+    assert "-1.8" in out
+
+    out, info = sw.scale_netlist(
+        "V2 vss 0 PULSE(0 -1.8 0 1n 1n 1u 2u)\n",
+        {"V2": -0.9},
+        ("V2",),
+        error_cls=sim.SimError,
+    )
+    assert out.strip() == "V2 vss 0 PULSE(0 -0.9 0 1n 1n 1u 2u)"
+    assert info["V2"]["nominal_peak_v"] == -1.8
+
+
+@pytest.mark.parametrize(
+    "card,target",
+    [
+        ("V1 vdd 0 PWL(0 0 1n -1.8)", 1.8),
+        ("V1 vdd 0 PWL(0 0 1n 1.8)", -1.8),
+        ("V1 vdd 0 PULSE(0 -1.8 0 1n 1n 1u 2u)", 1.62),
+    ],
+)
+def test_scale_netlist_sign_mismatch_fails_closed(card, target):
+    from klayout_tools import sim_supply_waveform as sw
+
+    with pytest.raises(sim.SimError, match="opposite sign"):
+        sw.scale_netlist(card + "\n", {"V1": target}, ("V1",), error_cls=sim.SimError)
+
+
 def test_supply_waveforms_key_must_be_a_supply_v_key(tmp_path, monkeypatch):
     monkeypatch.setattr(sim.subprocess, "run", _boom)
     doc = _scaled_request_doc(
