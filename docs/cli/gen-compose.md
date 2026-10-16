@@ -2793,18 +2793,28 @@ and the rules come from the active deck:
 The port is reported on the net's own layer at the chosen point, so the
 router's existing via-drop draws the stack there. Candidates are ranked by
 distance to the label (ties by `x`, then `y`), so the result is deterministic.
-`access` keys: `up_to` (required), `via_array` (`[1, 1]` only -- the router
-draws one cut per hop, so larger arrays are rejected rather than found but not
-drawable), `keepout_layers`, `grid_um` (default a quarter of the pad side,
+`access` keys: `up_to` (required), `via_array` (`[rows, cols]`, default
+`[1, 1]`, each side at most 16), `keepout_layers`, `grid_um` (default a quarter of the pad side,
 snapped to the manufacturing grid) and `max_candidates` (default 20000; a hit
 cap adds a `warnings[]` entry and `truncated: true`). When no point is legal
 the request fails (exit 1) with the per-category rejection counts and example
 candidates.
 
+**Cut arrays (`via_array`).** `[rows, cols]` makes every hop of the ladder a
+rows x cols cut array centred on the landing point, at a pitch of the cut side
+plus the via layer's `space` rule (rounded up to twice the manufacturing grid so
+the cuts stay on grid). Every pad grows by `(max(rows, cols) - 1) * pitch` so it
+still encloses the outer cuts, and the search checks that larger, square-bounded
+footprint, so a tight spot that fits one cut can be rejected for an array. The
+pitch is carried on the port (`ports[].via_array = {rows, cols, pitch_um}`, keyed
+by via layer `"layer/datatype"`) and the router draws the same array.
+
 **Response (additive).** Blocks that used the option carry
 `blocks[].derived_ports[]`:
 `{name, label_um: {x, y}, layer, landing: null | {x_um, y_um, layer, up_to,
-via_count, candidates_evaluated, truncated}}`. `schema_version` is unchanged.
+via_count, via_array, candidates_evaluated, truncated}}` (`via_count` is the
+total number of cuts: hops x rows x cols; `via_array` is `[rows, cols]`).
+`schema_version` is unchanged.
 
 ## Worked example
 

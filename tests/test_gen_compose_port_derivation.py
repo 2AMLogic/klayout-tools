@@ -232,7 +232,8 @@ def test_per_name_access_overrides_shared(tmp_path):
     "access,match",
     [
         ({}, "up_to is required"),
-        ({"up_to": "metal3", "via_array": [2, 2]}, "not supported yet"),
+        ({"up_to": "metal3", "via_array": [17, 1]}, "sides must be <= 16"),
+        ({"up_to": "metal3", "via_array": [2]}, "integers >= 1"),
         ({"up_to": "metal3", "via_array": [0, 1]}, "integers >= 1"),
         ({"up_to": "metal3", "bogus": 1}, "unknown field"),
         ({"up_to": "metal3", "keepout_layers": [{"layer": 1}]}, "datatype"),
@@ -266,3 +267,122 @@ def test_compose_reports_derived_ports(tmp_path, pdk_root):
     derived = response["blocks"][0]["derived_ports"]
     assert derived[0]["name"] == "A"
     assert derived[0]["landing"]["via_count"] == 1
+
+
+def _array_macro(tmp_path, name="macro.gds"):
+    """Strip A with foreign nets hugging both sides of its right half."""
+    return _make_macro(
+        tmp_path,
+        [
+            (MET1, (0.0, 0.0, 10.0, 0.6)),
+            (MET1, (4.0, 0.9, 10.0, 2.0)),
+            (MET1, (4.0, -2.0, 10.0, -0.3)),
+        ],
+        [(MET1_PIN, "A", 8.0, 0.3), (MET1_PIN, "B", 8.0, 1.0)],
+    )
+
+
+def test_via_array_reported_and_widens_footprint(tmp_path):
+    gds = _array_macro(tmp_path)
+    single = _blocks(gds, _spec(["A"], ACCESS))["m"]["derived_ports"][0]["landing"]
+    arr_access = {**ACCESS, "via_array": [3, 3]}
+    blocks = _blocks(gds, _spec(["A"], arr_access))
+    landing = blocks["m"]["derived_ports"][0]["landing"]
+    assert single["via_count"] == 1
+    assert landing["via_array"] == [3, 3]
+    assert landing["via_count"] == 9
+    # The 3x3 pad is wider than the gap under B, so the landing must move
+    # left of B's shadow; the single cut fits right at the label.
+    assert single["x_um"] > 7.0
+    assert landing["x_um"] < 4.5
+    port = blocks["m"]["ports"]["A"]
+    assert port["via_array"]["rows"] == port["via_array"]["cols"] == 3
+    assert port["via_array"]["pitch_um"]["68/44"] > 0.15
+
+
+def test_via_array_one_by_one_adds_no_port_array(tmp_path):
+    gds = _array_macro(tmp_path)
+    blocks = _blocks(gds, _spec(["A"], {**ACCESS, "via_array": [1, 1]}))
+    assert "via_array" not in blocks["m"]["ports"]["A"]
+
+
+def test_via_array_cuts_are_drawn_on_the_landing(tmp_path, pdk_root):
+    a_dir = tmp_path / "a"
+    b_dir = tmp_path / "b"
+    a_dir.mkdir()
+    b_dir.mkdir()
+    gds_a = _array_macro(a_dir)
+    gds_b = _make_macro(
+        b_dir,
+        [(MET1, (0.0, 0.0, 10.0, 0.6))],
+        [],
+    )
+
+    def run(array, output):
+        access = {**ACCESS, "via_array": array}
+        return compose(
+            {
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "blocks": [
+                    {
+                        "id": "m",
+                        "cell": {
+                            "gds_path": gds_a,
+                            "cell_name": "macro",
+                            "ports_from_labels": _spec(["A"], access),
+                        },
+                    },
+                    {
+                        "id": "n",
+                        "cell": {
+                            "gds_path": gds_b,
+                            "cell_name": "macro",
+                            "bbox_um": {"x0": 0.0, "y0": -0.5, "x1": 10.0, "y1": 1.0},
+                            "ports": [
+                                {
+                                    "name": "C",
+                                    "x_um": 0.3,
+                                    "y_um": 0.3,
+                                    "layer": {"layer": 68, "datatype": 20},
+                                    "direction_deg": 180,
+                                }
+                            ],
+                        },
+                    },
+                ],
+                "placement": {
+                    "strategy": "row",
+                    "order": ["m", "n"],
+                    "spacing_um": 3.0,
+                },
+                "connectivity": [
+                    {
+                        "net": "N",
+                        "pins": [
+                            {"block": "m", "port": "A"},
+                            {"block": "n", "port": "C"},
+                        ],
+                    }
+                ],
+                "routing": {"layer_role": "metal3", "width_um": 0.28},
+                "options": {"output": str(output)},
+            }
+        )
+
+    def cuts(output):
+        layout = kdb.Layout()
+        layout.read(str(output))
+        region = kdb.Region(layout.top_cell().begin_shapes_rec(layout.layer(*VIA1)))
+        return [polygon.bbox() for polygon in region.each()]
+
+    out1 = tmp_path / "one.gds"
+    out2 = tmp_path / "two.gds"
+    assert run([1, 1], out1)["nets"][0]["routed"] is True
+    assert run([2, 2], out2)["nets"][0]["routed"] is True
+    one = cuts(out1)
+    two = cuts(out2)
+    assert len(two) == len(one) + 3
+    # Same-size cuts, none overlapping, none closer than the deck spacing.
+    assert len({(c.width(), c.height()) for c in two}) == 1
+    # Merged-region count equals the cut count: no two cuts touch.
+    assert kdb.Region([kdb.Polygon(c) for c in two]).merged().count() == len(two)

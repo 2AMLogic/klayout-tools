@@ -571,7 +571,10 @@ not `klt --version`, if you need to detect this kind of drift. See
   rule-legal via-stack landing (clearance to other nets, via spacing,
   keep-out layers). Opt-in and additive: the response gains
   `blocks[].derived_ports[]` only when used; `schema_version` is unchanged.
-  `via_array` other than `[1, 1]` is rejected for now.
+  `access.via_array` (`[rows, cols]`, up to 16 per side) lands a cut array at
+  the chosen point: the router draws every hop as that array at the deck's via
+  pitch, pads grow to enclose it, and the landing search checks the larger
+  footprint. `landing` gains `via_array`, and `via_count` counts all cuts.
 - **Bipolar markers can be derived layer expressions** (issue #2860):
   `BipolarDevice.marker` now accepts a `LayerExpr`, a frozen AND/NOT tree
   of drawn layers that can nest, as well as a bare `(layer, datatype)`
