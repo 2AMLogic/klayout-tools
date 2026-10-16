@@ -48,15 +48,17 @@ unit, so that rule would make the setting a no-op.
 
 from __future__ import annotations
 
+import fnmatch
 import math
 import os
+import re
 import shlex
 import subprocess
 import tarfile
 import tempfile
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -67,6 +69,7 @@ from .netlist import (
     SCHEMA_VERSION,
     STATUS_GENERATED,
     NetlistError,
+    _check_no_unevaluated_expr,
     _check_result,
     _netlist_block,
     _sha256_file_hash,
@@ -235,6 +238,14 @@ def _relative_tracked(
     return rel
 
 
+def _require_selected(rel: str, selected: set[str], *, what: str) -> None:
+    if rel not in selected:
+        raise NetlistError(
+            f"{what} {rel} is left out of the upload by --batch-include / "
+            f"--batch-exclude; the {what} must be in the selected file set"
+        )
+
+
 def _pdk_relative_rcfile(rcfile: str, pdk: str) -> str | None:
     """The runner-side ``--rcfile`` fragment for a PDK-relative rcfile, or
     ``None`` when ``rcfile`` is not in that form.
@@ -265,29 +276,64 @@ def _pdk_relative_rcfile(rcfile: str, pdk: str) -> str | None:
     return '"$PDK_ROOT"/' + shlex.quote(rest)
 
 
+_GLOB_CHARS = frozenset("*?[")
+
+
+def _matches_glob(rel: str, pattern: str) -> bool:
+    """``rel`` (a root-relative POSIX path) against one ``--batch-include`` /
+    ``--batch-exclude`` pattern. ``fnmatch`` semantics, so ``*`` also crosses
+    ``/``; a pattern with no glob character names a file or a directory and
+    matches that file or everything under that directory."""
+    while pattern.startswith("./"):
+        pattern = pattern[2:]
+    if not any(char in _GLOB_CHARS for char in pattern):
+        bare = pattern.rstrip("/")
+        return rel == bare or rel.startswith(bare + "/")
+    return fnmatch.fnmatchcase(rel, pattern)
+
+
+def _select_files(
+    files: list[str], include: Sequence[str], exclude: Sequence[str]
+) -> list[str]:
+    """``files`` kept by ``include`` (every file when empty) and not dropped
+    by ``exclude``."""
+    return [
+        rel
+        for rel in files
+        if (not include or any(_matches_glob(rel, pat) for pat in include))
+        and not any(_matches_glob(rel, pat) for pat in exclude)
+    ]
+
+
 def package_tree(
     schematic: str,
     *,
     rcfile: str | None,
     pdk: str,
     batch_root: str | None,
+    include: Sequence[str] = (),
+    exclude: Sequence[str] = (),
     max_bytes: int | None = None,
 ) -> BatchTree:
     """Select and validate the input tree, **without** building the archive.
 
     Raises :class:`NetlistError` -- before any archive is built or any S3
     write -- for a root outside git, a schematic or project rcfile outside
-    the root or untracked, or an uncompressed total above ``max_bytes``
-    (default :data:`MAX_BATCH_TREE_BYTES`).
+    the root or untracked, a schematic or project rcfile that ``include`` /
+    ``exclude`` leaves out of the selected set, or an uncompressed total of
+    the selected set above ``max_bytes`` (default
+    :data:`MAX_BATCH_TREE_BYTES`).
     """
     if max_bytes is None:
         max_bytes = MAX_BATCH_TREE_BYTES
     root = _resolve_root(schematic, batch_root)
     files = _tracked_files(root)
     tracked = set(files)
+    selected = set(_select_files(files, include, exclude))
     rel_schematic = _relative_tracked(
         schematic, root, tracked, what="schematic", flag=""
     )
+    _require_selected(rel_schematic, selected, what="schematic")
 
     rcfile_arg: str | None = None
     pdk_relative = False
@@ -298,22 +344,24 @@ def package_tree(
         else:
             if not os.path.isfile(rcfile):
                 raise NetlistError(f"xschemrc file not found: {rcfile}")
-            rcfile_arg = shlex.quote(
-                _relative_tracked(
-                    rcfile,
-                    root,
-                    tracked,
-                    what="--rcfile",
-                    flag=(
-                        ", or give a PDK rcfile in its PDK-relative form "
-                        "'$PDK_ROOT/$PDK/libs.tech/xschem/xschemrc'"
-                    ),
-                )
+            rel_rcfile = _relative_tracked(
+                rcfile,
+                root,
+                tracked,
+                what="--rcfile",
+                flag=(
+                    ", or give a PDK rcfile in its PDK-relative form "
+                    "'$PDK_ROOT/$PDK/libs.tech/xschem/xschemrc'"
+                ),
             )
+            _require_selected(rel_rcfile, selected, what="--rcfile")
+            rcfile_arg = shlex.quote(rel_rcfile)
 
     present: list[str] = []
     total = 0
     for rel in files:
+        if rel not in selected:
+            continue
         path = os.path.join(root, rel)
         try:
             info = os.lstat(path)
@@ -328,7 +376,9 @@ def package_tree(
             f"--backend batch input tree under {root} is {total} bytes "
             f"uncompressed across {len(present)} git-tracked files, above the "
             f"{max_bytes}-byte cap; pass a narrower --batch-root (e.g. the "
-            "directory holding the schematics, symbols and xschemrc)",
+            "directory holding the schematics, symbols and xschemrc), or "
+            "select just the files the schematic needs with --batch-include "
+            "<glob> / --batch-exclude <glob>",
             code=BATCH_INPUT_TOO_LARGE_CODE,
         )
     return BatchTree(
@@ -496,12 +546,38 @@ def _runner_error(collected: str) -> tuple[dict[str, Any] | None, str]:
     return None, "; ".join(item for item in (note, stderr_note) if item)
 
 
+#: Bytes of ``stderr.log`` quoted back when the job left no klt envelope.
+REMOTE_STDERR_TAIL_BYTES = 2048
+
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+
+def _remote_stderr_tail(collected: str) -> str:
+    """The last :data:`REMOTE_STDERR_TAIL_BYTES` of the collected
+    ``stderr.log`` as sanitized text: invalid UTF-8 replaced, ANSI escapes and
+    control characters (other than newline and tab) dropped. ``""`` when the
+    file is missing or empty. Only used when no klt envelope was recovered."""
+    path = os.path.join(collected, sim_batch.BATCH_STDERR_FILENAME)
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, handle.tell() - REMOTE_STDERR_TAIL_BYTES))
+            raw = handle.read()
+    except OSError:
+        return ""
+    text = raw.decode("utf-8", errors="replace").replace("\r\n", "\n")
+    return _CONTROL_CHARS.sub("", _ANSI_ESCAPE.sub("", text)).strip()
+
+
 def _job_failure(
     *,
     job_id: str,
     status: dict[str, Any],
     runner_error: dict[str, Any] | None,
     note: str,
+    stderr_tail: str = "",
+    harness_log: str | None = None,
 ) -> NetlistError:
     state = str(status.get("state") or "")
     exit_code = sim_batch._status_exit_code(status)
@@ -518,12 +594,26 @@ def _job_failure(
         message = f"{head} without a usable report"
         if note:
             message += f" [output recovery: {note}]"
-        message += " -- see harness.log under the job's S3 prefix"
+        message += (
+            f" -- full log: {harness_log}"
+            if harness_log
+            else " -- see harness.log under the job's S3 prefix"
+        )
+        if stderr_tail:
+            message += f"\nlast of the runner's stderr.log:\n{stderr_tail}"
         code = None
     if code is None:
         code = BATCH_JOB_TIMEOUT_CODE if state == "timeout" else BATCH_JOB_FAILED_CODE
     message += f" {_NO_FALLBACK}"
-    return NetlistError(message, code=code, job_id=job_id)
+    details: dict[str, Any] = {}
+    if runner_error is None:
+        details["remote_exit_code"] = exit_code
+        details["remote_state"] = state
+        if harness_log:
+            details["harness_log"] = harness_log
+        if stderr_tail:
+            details["remote_stderr_tail"] = stderr_tail
+    return NetlistError(message, code=code, job_id=job_id, details=details or None)
 
 
 # --------------------------------------------------------------------------- #
@@ -660,7 +750,7 @@ def _transport_error(job_id: str, exc: sim_batch.BatchError) -> NetlistError:
         return NetlistError(
             f"batch job {job_id}: {exc} -- it may still finish on the fleet, but "
             f"no netlist was collected {_NO_FALLBACK}",
-            code=BATCH_POLL_TIMEOUT_CODE,
+            code=exc.code or BATCH_POLL_TIMEOUT_CODE,
             job_id=job_id,
         )
     return NetlistError(
@@ -677,11 +767,14 @@ def _submit_and_wait(
     sleep: Callable[[float], None],
 ) -> dict[str, Any]:
     """Upload, launch and poll to a terminal ``status.json``. Every transport
-    failure, the poll timeout included, becomes a :class:`NetlistError`."""
+    failure, the poll timeout included, becomes a :class:`NetlistError`.
+    No progress lines: `klt netlist` carries its error envelope on stderr."""
     try:
-        sim_batch.submit_job(config, job_id, spec, runner=runner)
+        sim_batch.submit_job(config, job_id, spec, runner=runner, progress=False)
         sim_batch.launch_job(config, job_id, runner=runner, sleep=sleep)
-        return sim_batch.poll_status(config, job_id, runner=runner, sleep=sleep)
+        return sim_batch.poll_status(
+            config, job_id, runner=runner, sleep=sleep, progress=False
+        )
     except sim_batch.BatchError as exc:
         raise _transport_error(job_id, exc) from exc
 
@@ -707,13 +800,21 @@ def _collect(
             raise _transport_error(job_id, exc) from exc
         return
     runner_error: dict[str, Any] | None = None
+    stderr_tail = ""
     try:
         sim_batch.collect_outputs(config, job_id, collected, runner=runner)
         runner_error, note = _runner_error(collected)
+        if runner_error is None:
+            stderr_tail = _remote_stderr_tail(collected)
     except sim_batch.BatchError as exc:
         note = str(exc)
     raise _job_failure(
-        job_id=job_id, status=status, runner_error=runner_error, note=note
+        job_id=job_id,
+        status=status,
+        runner_error=runner_error,
+        note=note,
+        stderr_tail=stderr_tail,
+        harness_log=sim_batch.job_uri(config, job_id).rstrip("/") + "/harness.log",
     )
 
 
@@ -765,6 +866,8 @@ def run_netlist_batch(
     pdk_root: str | None = None,
     block: bool = False,
     batch_root: str | None = None,
+    batch_include: Sequence[str] = (),
+    batch_exclude: Sequence[str] = (),
     xschem_binary: str = DEFAULT_XSCHEM_BINARY,
     runner: remote_transport.CommandRunner | None = None,
     sleep: Callable[[float], None] = time.sleep,
@@ -787,7 +890,14 @@ def run_netlist_batch(
             "batch runner, which resolves its own PDK"
         )
 
-    tree = package_tree(schematic, rcfile=rcfile, pdk=variant, batch_root=batch_root)
+    tree = package_tree(
+        schematic,
+        rcfile=rcfile,
+        pdk=variant,
+        batch_root=batch_root,
+        include=batch_include,
+        exclude=batch_exclude,
+    )
     config = _resolve_config(variant, timeout_s)
     job_id = new_job_id()
 
@@ -808,6 +918,8 @@ def run_netlist_batch(
         report = _read_runner_report(collected, job_id)
         data = _read_collected_netlist(collected, report, job_id)
         data = _rewrite_runner_paths(data, _read_tree_roots(collected), tree.root)
+        # The runner's klt gates too; this keeps the guarantee client-side.
+        _check_no_unevaluated_expr(data, report["xschem"].get("version"))
         remote = {
             **sim_batch._batch_environment(config, job_id, status),
             **sim_batch._read_runner_identity(collected),

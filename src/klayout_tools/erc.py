@@ -344,6 +344,7 @@ See ``docs/cli/erc.md`` for the full spec-file schema and JSON contract.
 
 from __future__ import annotations
 
+import os
 import sys
 from typing import Any
 
@@ -363,6 +364,13 @@ from ._paths import (
     _validate_via_entries,
 )
 from ._provenance import _content_hash, build_provenance
+from ._report_verify import (
+    build_check_result,
+    build_rerun_result,
+    get_path,
+    hash_check,
+)
+from ._report_verify import load_committed_report as _load_committed_report
 from .coverage import build_check_coverage, coverage_rollup, rollup_status, work_id
 from .decks import ExtractionDeck, UnknownExtractionDeckError, deck_source_path
 from .decks import get_extraction_deck as _get_extraction_deck
@@ -419,6 +427,10 @@ from .extract import (
 #: thing `antenna_ratio_max: null` has always meant for the limit), which
 #: is why it is an opt-in flag rather than a default: no existing caller's
 #: report can acquire a null it did not ask for.
+#: Issue #3011 adds the opt-in ``--omit-antenna-tables`` (``--findings-only``
+#: only) and the top-level boolean ``antenna_tables_omitted`` -- additive:
+#: ``false`` on every run that does not pass the flag, with every other field
+#: of such a run byte-identical to before.
 #: Issue #2234 adds two more optional spec keys, both additive and inert
 #: unless used: ``ties[].tap_boxes`` (a caller-asserted list of tap-geometry
 #: boxes, an alternative to ``tap_requires``/``tap_is_dedicated`` -- see
@@ -565,19 +577,55 @@ def _antenna_skip_reason(pdk: str | None, findings_only: bool) -> str:
     return REASON_MISSING_ANTENNA_PDK if pdk is None else "missing_antenna_limit"
 
 
+def _compact_antenna_records(
+    gates: list[dict[str, Any]], reason: str
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """The aggregate ``(skipped, inapplicable)`` antenna records ``--compact``
+    emits in place of the per-(gate, level) and per-gate-reference ones."""
+    skipped = []
+    if sum(len(gate["levels"]) - 1 for gate in gates):
+        skipped.append({"id": work_id("antenna", "levels"), "reason": reason})
+    inapplicable = [
+        {
+            "id": work_id("antenna", "gate_reference_levels"),
+            "reason": "gate_reference_level",
+        }
+    ]
+    return skipped, inapplicable
+
+
 def _antenna_coverage(
-    gates: list[dict[str, Any]], pdk: str | None, findings_only: bool = False
+    gates: list[dict[str, Any]],
+    pdk: str | None,
+    findings_only: bool = False,
+    omit_tables: bool = False,
+    compact: bool = False,
 ) -> dict[str, Any]:
-    """Grade coverage against actual non-gate antenna levels, not gate count."""
+    """Grade coverage against actual non-gate antenna levels, not gate count.
+
+    ``omit_tables`` (issue #3011) collapses the per-gate/per-level
+    ``skipped`` and ``gate_reference_level`` ``inapplicable`` entries to one
+    aggregate entry each (same reason, distinct ids so the common validator's
+    one-category-per-identity rule holds). ``checked`` is left verbatim.
+
+    ``compact`` (issue #2965) collapses the per-(gate, level) ``skipped``
+    records and per-gate ``gate_reference_level`` ``inapplicable`` records
+    into one aggregate record each (counts live in the top-level
+    ``compact`` block), so the declined antenna work is still disclosed.
+    """
     checked = []
     skipped = []
     inapplicable = []
     reason = _antenna_skip_reason(pdk, findings_only)
+    if compact and gates:
+        compact_skipped, compact_inapplicable = _compact_antenna_records(gates, reason)
+        skipped += compact_skipped
+        inapplicable += compact_inapplicable
     if not gates:
         # (issue #2896) Nothing to accumulate against: inapplicable, not
         # skipped -- no antenna work was requested that failed to run.
         inapplicable.append({"id": work_id("antenna"), "reason": REASON_NO_GATES})
-    for gate in gates:
+    for gate in [] if compact else gates:
         for index, level in enumerate(gate["levels"]):
             identity = work_id("antenna", gate["gate_id"], level["layer"])
             if index == 0:
@@ -586,6 +634,18 @@ def _antenna_coverage(
                 checked.append(identity)
             else:
                 skipped.append({"id": identity, "reason": reason})
+    if omit_tables:
+        if skipped:
+            skipped = [{"id": work_id("antenna"), "reason": reason}]
+        if any(r["reason"] == "gate_reference_level" for r in inapplicable):
+            inapplicable = [
+                r for r in inapplicable if r["reason"] != "gate_reference_level"
+            ] + [
+                {
+                    "id": work_id("antenna", "gate_reference_level"),
+                    "reason": "gate_reference_level",
+                }
+            ]
     return {
         "scope": "antenna",
         **build_check_coverage(
@@ -895,6 +955,7 @@ def _connectivity_coverage(
     well_asserted_ties: set[str] | None = None,
     undeclared_stream_layers: list[str] | None = None,
     well_assertion_coverage: list[dict[str, Any]] | None = None,
+    compact: bool = False,
 ) -> dict[str, Any]:
     """The *second* checked-work scope this envelope carries (issue #2179):
     the connectivity/geometry rules behind ``erc_findings``.
@@ -1035,7 +1096,13 @@ def _connectivity_coverage(
     degenerate = degenerate_ties or {}
     asserted = asserted_ties or set()
     well_asserted = well_asserted_ties or set()
-    checked = [work_id("erc.floating_gate", gate["gate_id"]) for gate in gates]
+    if compact:
+        # (issue #2965) One aggregate id in place of one per gate; the count
+        # is `compact.floating_gate_checked`. Kept non-empty when any gate
+        # exists so the roll-up never sees a spurious "nothing checked".
+        checked = [work_id("erc.floating_gate")] if gates else []
+    else:
+        checked = [work_id("erc.floating_gate", gate["gate_id"]) for gate in gates]
     inapplicable: list[dict[str, str]] = []
     skipped: list[dict[str, str]] = []
     checked_by_assertion: list[str] = []
@@ -2243,6 +2310,13 @@ def _deck_device_cuts(
     - :class:`~klayout_tools.decks.ResistorDevice` -- conducting-body layer
       is ``body``; region is ``body & marker`` narrowed by ``requires``/
       ``excludes`` (:func:`~klayout_tools.extract._resistor_body_region`).
+      For a ``topology="abutting_heads"`` entry (sg13g2's poly resistors,
+      issue #2679) the region is instead the narrowed ``marker`` body that
+      touches two separate ``body``-layer heads -- the same region ``klt
+      extract`` recognises. Cutting it from the matching ``body`` role then
+      removes only whatever ``body`` geometry the marker actually covers (a
+      continuous bar's resistive span), never the abutting heads, so a
+      PDK-PCell-drawn resistor's two head nets stay distinct here too.
     - :class:`~klayout_tools.decks.CapacitorDevice` -- two independent
       conducting-body layers, each checked separately:
 
@@ -4166,6 +4240,8 @@ def run_erc(
     pdk: str | None = None,
     deck: str | None = None,
     findings_only: bool = False,
+    omit_antenna_tables: bool = False,
+    compact: bool = False,
 ) -> dict[str, Any]:
     """Run ``klt erc``'s connectivity-model extraction, antenna-ratio
     check, and core ERC finding checks end to end.
@@ -4302,6 +4378,14 @@ def run_erc(
     :class:`ErcError` rather than silently returning an ungraded antenna
     half to a caller who asked for one.
 
+    ``omit_antenna_tables`` (optional, default ``False``, issue #3011) is
+    valid only with ``findings_only`` (otherwise :class:`ErcError`). It
+    projects the finished report, after every verdict is rolled up: ``gates``
+    becomes ``[]`` (``gate_count`` keeps the real count) and the antenna
+    ``coverage`` collapses to one aggregate entry per category, so the output
+    of a dense layout is small enough to commit verbatim. The top-level
+    ``antenna_tables_omitted`` echoes the flag.
+
     Returns a dict matching the documented ``klt erc`` JSON schema (see
     ``docs/cli/erc.md``), including ``schema_version``, (issue #861)
     ``erc_findings``/``erc_finding_count``, (issue #908) each violating
@@ -4331,6 +4415,18 @@ def run_erc(
     unresolvable layout/top cell, or a layout in which no net carries any
     geometry on the declared gate role at all.
     """
+    if omit_antenna_tables and not findings_only:
+        raise ErcError(
+            "--omit-antenna-tables drops tables that only a --findings-only "
+            "run leaves empty, so it requires --findings-only"
+        )
+    if compact and not findings_only:
+        raise ErcError(
+            "--compact summarises the per-gate antenna scaffolding a "
+            "--findings-only run leaves null; without --findings-only that "
+            "scaffolding carries real verdicts, so pass --compact together "
+            "with --findings-only"
+        )
     if findings_only and pdk is not None:
         raise ErcError(
             "--findings-only skips the per-gate antenna accumulation "
@@ -4647,7 +4743,9 @@ def run_erc(
     any_antenna_violation = any(
         level["verdict"] == "violate" for gate in gates for level in gate["levels"]
     )
-    coverage = _antenna_coverage(gates, pdk, findings_only)
+    coverage = _antenna_coverage(
+        gates, pdk, findings_only, omit_antenna_tables, compact
+    )
 
     # The common rollup rule (issue #2109, this adapter's own #2115) decides
     # `status` from `coverage` plus the two violation signals above, rather
@@ -4719,6 +4817,7 @@ def run_erc(
             deck_obj,
         ),
         well_assertion_coverage,
+        compact,
     )
     erc_rollup = coverage_rollup(
         {"coverage": erc_coverage}, failed=bool(erc_finding_count)
@@ -4818,7 +4917,20 @@ def run_erc(
     # present; `[]` when no stackup role declares a `label_layer`.
     provenance["label_layers"] = label_layers
 
-    return {
+    # (issue #2965) Opt-in `--compact` summary of the per-gate scaffolding
+    # this run omitted. Built before `gates` is emptied below.
+    compact_block = (
+        {
+            "gate_count": len(gates),
+            "antenna_levels_skipped": sum(len(g["levels"]) - 1 for g in gates),
+            "antenna_reference_levels": len(gates),
+            "floating_gate_checked": len(gates),
+            "skipped_reason": REASON_FINDINGS_ONLY,
+        }
+        if compact
+        else None
+    )
+    report = {
         "schema_version": SCHEMA_VERSION,
         "file": file,
         "spec": spec_path,
@@ -4830,7 +4942,11 @@ def run_erc(
         "findings_only": findings_only,
         "gate_role": gate_role,
         "gate_count": len(gates),
-        "gates": gates,
+        # (issue #3011) `--omit-antenna-tables`: the all-`unchecked` per-gate
+        # table is dropped from a `--findings-only` report; `gate_count`
+        # above and every verdict were computed from the full list.
+        "antenna_tables_omitted": omit_antenna_tables,
+        "gates": [] if omit_antenna_tables else gates,
         # (issue #2497) One entry per declared `nets[]` entry, in spec
         # order: the island count `erc.unconnected_net` graded it on, even
         # when that count passed. `[]` when the spec declares no `nets`.
@@ -4856,3 +4972,140 @@ def run_erc(
         "ties_disclosure": ties_disclosure,
         "provenance": provenance,
     }
+    if compact_block is not None:
+        # Additive and conditional: absent unless asked for, so a default
+        # run stays byte-identical. `gates` stays a list (empty) so
+        # `klt signoff`'s envelope classifier still recognises the report.
+        report["gates"] = []
+        report["compact"] = compact_block
+    return report
+
+
+# --------------------------------------------------------------------------- #
+# --check / --rerun: verify a previously committed report (issue #3060)
+# --------------------------------------------------------------------------- #
+
+
+def _input_hash_check(
+    field: str, expected: str | None, echoed: Any, report_path: str
+) -> dict[str, Any]:
+    """One :func:`~klayout_tools._report_verify.hash_check` entry for an input
+    path the committed report echoes back (``file``/``spec``).
+
+    Hashes via :func:`~klayout_tools._provenance._content_hash` because the
+    recorded ``provenance.*.content_hash`` values are ``sha256:``-prefixed
+    (``klt lvs``'s ``environment.*_sha256`` are bare, which is why its
+    ``_input_hash_check`` cannot be reused). An echoed path naming no existing
+    file gets the same ``input_not_found`` block ``klt lvs --check`` attaches
+    (issue #2595), so ``actual: null`` is not mistaken for a moved hash.
+    """
+    path = echoed if isinstance(echoed, str) and echoed else None
+    check = hash_check(field, expected, _content_hash(path))
+    if path is None or os.path.isfile(path):
+        return check
+    found_relative_to_report: str | None = None
+    if not os.path.isabs(path):
+        candidate = os.path.join(os.path.dirname(os.path.abspath(report_path)), path)
+        if os.path.isfile(candidate):
+            found_relative_to_report = os.path.abspath(candidate)
+    check["input_not_found"] = {
+        "path": path,
+        "resolved": os.path.abspath(path),
+        "found_relative_to_report": found_relative_to_report,
+    }
+    return check
+
+
+def check_erc_report(report_path: str) -> dict[str, Any]:
+    """``klt erc --check`` (cheap mode, issue #3060): verify a previously
+    committed ``klt erc --format json`` report at ``report_path`` still
+    reproduces, without re-running the ERC engine at all.
+
+    Re-hashes the layout (``committed["file"]``) and the spec
+    (``committed["spec"]``) exactly as echoed back by the original run and
+    compares each against ``provenance.input.content_hash`` /
+    ``provenance.spec.content_hash``; when the report used ``--deck``, also
+    re-hashes that deck's source against ``provenance.deck.content_hash``.
+    Each mismatch names which input moved. A report with no recorded hash
+    never counts as a match
+    (:func:`klayout_tools._report_verify.hash_check`).
+
+    Relative echoed paths are re-hashed relative to the current working
+    directory -- the same convention (and the same ``input_not_found``
+    diagnostic) ``klt lvs --check`` uses.
+
+    The result additionally carries the informational ``advisories`` list
+    (klt/klayout version drift) ``klt lvs --check`` emits; it never affects
+    ``status`` or the exit code.
+
+    Raises :class:`ErcError` for a missing/unparseable committed report --
+    never a traceback.
+    """
+    from ._provenance import version_drift_advisories
+
+    committed = _load_committed_report(report_path, ErcError)
+    checks = [
+        _input_hash_check(
+            "provenance.input.content_hash",
+            get_path(committed, ("provenance", "input", "content_hash")),
+            committed.get("file"),
+            report_path,
+        ),
+        _input_hash_check(
+            "provenance.spec.content_hash",
+            get_path(committed, ("provenance", "spec", "content_hash")),
+            committed.get("spec"),
+            report_path,
+        ),
+    ]
+    deck = get_path(committed, ("provenance", "deck"))
+    if isinstance(deck, dict) and deck.get("name") is not None:
+        checks.append(
+            hash_check(
+                "provenance.deck.content_hash",
+                deck.get("content_hash"),
+                _content_hash(deck_source_path(deck["name"])),
+            )
+        )
+    result = build_check_result(report_path=report_path, checks=checks)
+    result["advisories"] = version_drift_advisories(committed)
+    return result
+
+
+def rerun_erc_report(report_path: str) -> dict[str, Any]:
+    """``klt erc --check <report> --rerun`` (full mode, issue #3060): verify a
+    previously committed ``klt erc --format json`` report by re-running ERC
+    from the ``file``/``spec``/``pdk``/``findings_only``/``antenna_tables_omitted``
+    it echoes (and the
+    ``--deck`` named by ``provenance.deck``, when there is one) and diffing
+    the fresh report against the committed one.
+
+    Diffs via :func:`klayout_tools._report_verify.diff_verdict_fields`,
+    excluding :data:`klayout_tools._report_verify.VOLATILE_PROVENANCE_PATHS`.
+
+    **Known limitation**: ``--top`` is not echoed in the report, so ``--rerun``
+    always runs with ``top=None``; a report from a multi-top-cell stream then
+    fails with the ordinary ambiguous-top-cell :class:`ErcError`. Use
+    ``--check`` (cheap mode) in that case.
+
+    Raises :class:`ErcError` for a missing/unparseable committed report, one
+    missing ``file``/``spec`` to rerun, or any error the rerun itself raises.
+    """
+    committed = _load_committed_report(report_path, ErcError)
+    for key in ("file", "spec"):
+        if not committed.get(key):
+            raise ErcError(
+                f"committed report has no '{key}' field to rerun: {report_path}"
+            )
+    deck = get_path(committed, ("provenance", "deck"))
+    fresh = run_erc(
+        committed["file"],
+        committed["spec"],
+        top=None,
+        pdk=committed.get("pdk"),
+        deck=deck.get("name") if isinstance(deck, dict) else None,
+        findings_only=bool(committed.get("findings_only")),
+        omit_antenna_tables=bool(committed.get("antenna_tables_omitted")),
+        compact="compact" in committed,
+    )
+    return build_rerun_result(report_path=report_path, committed=committed, fresh=fresh)

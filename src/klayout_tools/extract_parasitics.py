@@ -616,6 +616,281 @@ def _net_port_regions(
     return contacts, vias
 
 
+def _cut_edge_boxes(region: kdb.Region, drawn: kdb.Region | None) -> list[kdb.Box]:
+    """Axis-aligned boxes (zero width or height) for the merged runs of
+    ``region``'s edges lying strictly inside ``drawn`` -- the device-body cut
+    edges :func:`_fragment_port_points_um` reads as points, kept here as the
+    edge runs a graph port attaches along (issue #2982). Non-axis-aligned runs
+    are skipped: the graph builder rejects non-Manhattan geometry anyway."""
+    if drawn is None or drawn.is_empty():
+        return []
+    import klayout.db as kdb
+
+    boxes: list[kdb.Box] = []
+    for edge in region.merged().edges().inside_part(drawn).merged().each():
+        if edge.p1.x == edge.p2.x or edge.p1.y == edge.p2.y:
+            boxes.append(kdb.Box(edge.p1, edge.p2))
+    return boxes
+
+
+def _boundary_sides(box: kdb.Box, region: kdb.Region) -> list[kdb.Box]:
+    """The sides of ``box`` (as zero-width boxes, longest first, ties
+    left/right/bottom/top) that lie entirely on ``region``'s outline.
+
+    The graph builder attaches a port to every piece its patch touches, so a
+    port in the *interior* of a conductor would sit in parallel with the
+    in-plane edge it cuts and double the conductance there. It is specified
+    for ports on the conductor's boundary (Stage 3.D4's end-edge ports), so
+    the adapter only ever attaches a contact/via there (issue #2982)."""
+    import klayout.db as kdb
+
+    outline = region.merged().edges()
+    sides = [
+        kdb.Box(box.left, box.bottom, box.left, box.top),
+        kdb.Box(box.right, box.bottom, box.right, box.top),
+        kdb.Box(box.left, box.bottom, box.right, box.bottom),
+        kdb.Box(box.left, box.top, box.right, box.top),
+    ]
+    on_outline = [
+        side
+        for side in sides
+        if (side.width() or side.height())
+        and (kdb.Edges(kdb.Edge(side.p1, side.p2)) & outline).length()
+        == max(side.width(), side.height())
+    ]
+    return sorted(on_outline, key=lambda side: -max(side.width(), side.height()))
+
+
+def _graph_port_name(kind: str, box: kdb.Box, dbu: float) -> str:
+    return f"{kind}@{box.center().x * dbu:.4f},{box.center().y * dbu:.4f}"
+
+
+def _graph_landings_and_ports(
+    roles: list[tuple[str, float | None, kdb.Region, kdb.Region | None]],
+    contacts: kdb.Region | None,
+    vias: list[kdb.Region],
+    dbu: float,
+    r_cut_ohm: float | None,
+) -> tuple[list[Any], list[Any], list[dict[str, Any]]]:
+    """The ``LandingInput`` / terminal ``PortInput`` lists for one net, plus
+    the contacts/vias that could not be placed on a conductor boundary.
+
+    A contact/via polygon whose two sides are both modelled roles becomes a
+    landing; one with a single modelled side is where current leaves the
+    modelled conductor (into a device diffusion, or a level the deck has no
+    coefficient for), so it becomes a terminal on that side. Device-body cut
+    edges (drawn-layer interfaces) are terminals too. Every ordering is by
+    integer geometry, so repeated equivalent requests are byte-identical."""
+    import klayout.db as kdb
+
+    from .extract_resistance_graph import LandingInput, PortInput
+
+    region_of = {name: region for name, _rs, region, _drawn in roles}
+    joins: list[tuple[kdb.Region, list[str], str]] = []
+    if contacts is not None:
+        joins.append((contacts, ["diffusion", "poly"], "metal0"))
+    joins.extend((via, [f"metal{i}"], f"metal{i + 1}") for i, via in enumerate(vias))
+
+    landings: list[Any] = []
+    terminals: dict[str, tuple[str, kdb.Box]] = {}
+    interior: list[dict[str, Any]] = []
+    for cut_region, lower_names, upper_name in joins:
+        for polygon in cut_region.merged().each():
+            probe = kdb.Region(polygon)
+            lower = next(
+                (
+                    n
+                    for n in lower_names
+                    if n in region_of and not (probe & region_of[n]).is_empty()
+                ),
+                None,
+            )
+            upper = (
+                upper_name
+                if upper_name in region_of
+                and not (probe & region_of[upper_name]).is_empty()
+                else None
+            )
+            box = polygon.bbox()
+            attached = [r for r in (lower, upper) if r is not None]
+            if not attached:
+                continue
+            sides = [_boundary_sides(box, region_of[r]) for r in attached]
+            shared = [side for side in sides[0] if all(side in s for s in sides)]
+            if not shared:
+                interior.append(
+                    {
+                        "roles": attached,
+                        "x_um": box.center().x * dbu,
+                        "y_um": box.center().y * dbu,
+                    }
+                )
+            elif lower is not None and upper is not None:
+                landings.append(
+                    LandingInput(
+                        lower,
+                        upper,
+                        shared[0],
+                        max(polygon.area() * dbu * dbu, 1e-12),
+                        r_cut_ohm,
+                    )
+                )
+            else:
+                terminals.setdefault(
+                    _graph_port_name("via", box, dbu), (attached[0], shared[0])
+                )
+    for name, _rs, region, drawn in roles:
+        for box in _cut_edge_boxes(region, drawn):
+            terminals.setdefault(_graph_port_name("device", box, dbu), (name, box))
+
+    ports = [
+        PortInput(port_name, ((role, box),), True)
+        for port_name, (role, box) in sorted(
+            terminals.items(),
+            key=lambda item: (item[1][0], item[1][1].bottom, item[1][1].left, item[0]),
+        )
+    ]
+    landings.sort(
+        key=lambda lnd: (
+            lnd.lower_role,
+            lnd.upper_role,
+            lnd.box.bottom,
+            lnd.box.left,
+            lnd.box.top,
+            lnd.box.right,
+        )
+    )
+    return landings, ports, interior
+
+
+class _ResistanceGraphCollector:
+    """Per-net geometry kept for ``--resistance-graph`` (issue #2982). Every
+    method is a no-op when ``enabled`` is false, so the caller stays
+    branch-free and the default path does no graph work and adds no key."""
+
+    def __init__(self, enabled: bool) -> None:
+        self._enabled = enabled
+        self._roles: dict[
+            Any, list[tuple[str, float | None, kdb.Region, kdb.Region | None]]
+        ] = {}
+        self._landings: dict[Any, tuple[kdb.Region | None, list[kdb.Region]]] = {}
+
+    def begin_net(
+        self, net: Any, contacts: kdb.Region | None, vias: list[kdb.Region]
+    ) -> None:
+        if self._enabled:
+            self._roles[net] = []
+            self._landings[net] = (contacts, vias)
+
+    def add_role(
+        self,
+        net: Any,
+        name: str,
+        sheet_res: float | None,
+        region: kdb.Region,
+        drawn: kdb.Region | None,
+    ) -> None:
+        if self._enabled:
+            self._roles[net].append((name, sheet_res, region, drawn))
+
+    def attach(self, entry: dict[str, Any], net: Any, dbu: float) -> None:
+        """Add the additive ``resistance_graph`` key to a finished ground entry."""
+        if self._enabled:
+            entry["resistance_graph"] = _resistance_graph_report(
+                self._roles[net],
+                *self._landings[net],
+                dbu,
+                entry["resistance_ohm"],
+            )
+
+
+def _copy_resistance_graph(entry: dict[str, Any], report_net: dict[str, Any]) -> None:
+    """Carry the opt-in ``resistance_graph`` key onto a report net, if present."""
+    if "resistance_graph" in entry:
+        report_net["resistance_graph"] = entry["resistance_graph"]
+
+
+def _resistance_graph_report(
+    roles: list[tuple[str, float | None, kdb.Region, kdb.Region | None]],
+    contacts: kdb.Region | None,
+    vias: list[kdb.Region],
+    dbu: float,
+    legacy_resistance_ohm: float,
+    r_cut_ohm: float | None = None,
+) -> dict[str, Any]:
+    """The additive ``parasitics.nets[].resistance_graph`` object for one net
+    (issue #2982, Stage 3.D5 increment 3).
+
+    ``roles`` is ``(role name, sheet resistance, net region, drawn region)``
+    per conductor role the net has geometry on. This only converts the
+    per-net geometry :func:`_compute_parasitics` already holds into the graph
+    builder's inputs and renders the builder's and solver's results; it adds
+    no geometry or solving logic. ``status``, ``terminals``,
+    ``pair_resistance_ohm`` and the diagnostics are taken from
+    :class:`~klayout_tools.extract_resistance_graph.TerminalResistanceMatrix`
+    as-is; ``legacy_resistance_ohm`` is the unchanged series-sum scalar.
+
+    ``r_cut_ohm`` is the per-cut via/contact resistance; the shipped decks
+    curate none, so ``_compute_parasitics`` passes ``None`` and a net whose
+    graph contains a landing reports ``via_resistance_unknown``
+    (``status: "unsupported"``) instead of an assumed ideal via."""
+    from .extract_resistance_graph import (
+        RoleInput,
+        build_resistance_graph,
+        terminal_resistance_matrix,
+    )
+
+    landings, ports, interior = _graph_landings_and_ports(
+        roles, contacts, vias, dbu, r_cut_ohm
+    )
+    if interior:
+        # Coverage gap, reported rather than solved with a wrong attachment.
+        return {
+            "status": "unsupported",
+            "terminals": [],
+            "pair_resistance_ohm": [],
+            "legacy_resistance_ohm": legacy_resistance_ohm,
+            "nodes": 0,
+            "edges": 0,
+            "diagnostics": [
+                {
+                    "code": "unsupported_geometry",
+                    "message": (
+                        f"{len(interior)} contact/via landing(s) lie in the "
+                        "interior of a conductor; ports are only attached at "
+                        "conductor edges"
+                    ),
+                    "detail": {"interior_landings": interior},
+                }
+            ],
+        }
+    role_inputs = [
+        RoleInput(name, sheet_res, tuple(region.merged().each()))
+        for name, sheet_res, region, _drawn in roles
+    ]
+    graph = build_resistance_graph(role_inputs, ports, landings, dbu)
+    matrix = terminal_resistance_matrix(graph, dbu=dbu)
+    # An unsupported graph's matrix just repeats the graph's diagnostics.
+    reported = (
+        graph.diagnostics
+        if graph.status != "ok"
+        else (*graph.diagnostics, *matrix.diagnostics)
+    )
+    diagnostics = [
+        {"code": d.code, "message": d.message, "detail": d.detail} for d in reported
+    ]
+    diagnostics.sort(key=lambda d: (d["code"], d["message"]))
+    return {
+        "status": matrix.status,
+        "terminals": list(matrix.terminals),
+        "pair_resistance_ohm": [list(row) for row in matrix.pair_resistance_ohm],
+        "legacy_resistance_ohm": legacy_resistance_ohm,
+        "nodes": len(graph.nodes),
+        "edges": len(graph.edges),
+        "diagnostics": diagnostics,
+    }
+
+
 def _instance_drawn_mask(
     layout: kdb.Layout, top_cell: kdb.Cell, drawn_layer: tuple[int, int] | None
 ) -> kdb.Region:
@@ -745,6 +1020,43 @@ def _net_pair_key(name_a: str, name_b: str) -> tuple[str, str]:
     return (name_a, name_b) if name_a <= name_b else (name_b, name_a)
 
 
+def _capacitor_plate_masks(
+    circuit: kdb.Circuit,
+    capacitor_top_regions: dict[str, kdb.Region] | None,
+) -> dict[frozenset[int], kdb.Region]:
+    """``masks[frozenset({id_a, id_b})]`` (net cluster ids) is the union of the
+    top-plate marker regions of every recognised capacitor device in
+    ``circuit`` whose two plate terminals are exactly those two nets (issue
+    #3021). ``None``/empty ``capacitor_top_regions`` yields ``{}``.
+    """
+    import klayout.db as kdb
+
+    masks: dict[frozenset[int], kdb.Region] = {}
+    if not capacitor_top_regions:
+        return masks
+    for cap_device in circuit.each_device():
+        marker = capacitor_top_regions.get(cap_device.device_class().name)
+        if marker is None or marker.is_empty():
+            continue
+        # Keyed by `cluster_id`, not by `Net` wrapper: `net_for_terminal` is
+        # not guaranteed to hand back the same Python object
+        # `circuit.each_net()` did.
+        plate_ids = {
+            net.cluster_id
+            for net in (cap_device.net_for_terminal(t) for t in (0, 1))
+            if net is not None
+        }
+        if len(plate_ids) == 2:
+            masks.setdefault(frozenset(plate_ids), kdb.Region()).insert(marker)
+    return masks
+
+
+def _minus_capacitor_mask(overlap: kdb.Region, mask: kdb.Region | None) -> kdb.Region:
+    """``overlap`` with a capacitor's top-plate ``mask`` cut out (issue #3021);
+    ``overlap`` unchanged when the pair has no mask."""
+    return overlap if mask is None else overlap - mask
+
+
 def _compute_parasitics(
     l2n: kdb.LayoutToNetlist,
     circuit: kdb.Circuit | None,
@@ -759,6 +1071,8 @@ def _compute_parasitics(
     parasitics_nets: frozenset[str] | None = None,
     parasitics_top_cell_only: bool = False,
     via_index: list[int] | None = None,
+    capacitor_top_regions: dict[str, kdb.Region] | None = None,
+    resistance_graph: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Compute one first-order lumped ``(R, C)`` per net, plus net-to-net
     vertical-overlap coupling capacitance, from the extracted per-net/
@@ -828,6 +1142,20 @@ def _compute_parasitics(
     ever computed between two *distinct* nets, so a net's own via stack
     contributes nothing
     here (it is ordinary connectivity, already merged into one net upstream).
+
+    **Recognised capacitors are not double-counted (issue #3021):**
+    ``capacitor_top_regions`` maps each recognised ``CapacitorDevice``'s name
+    to its top-plate marker region. For a pair of nets that are the two plate
+    nets of a device of that class (read off ``circuit``'s devices), the part
+    of the plate overlap lying under that marker is cut from ``overlap``
+    *before* it becomes coupling or a ground deduction: the device's own
+    ``area_cap_f_um2`` already is the capacitance there. The masked area is
+    simply never claimed by a partner, so it stays on both nets' ground term
+    exactly as if no coupling existed there (charge is not destroyed); only
+    the overlap outside the marker (unit gaps, plate margins) remains as
+    parallel parasitic coupling. A pair that is not a capacitor's plate pair
+    is never masked, even under the marker. ``None`` (the default) masks
+    nothing, byte-identical to the pre-#3021 behaviour.
     **Lateral (same-layer, sidewall) coupling, for critical nets only (issue
     #976, Epic #709 Phase 2a):** unlike vertical-overlap coupling above,
     which is unconditional across the whole layout, this pass only ever
@@ -911,6 +1239,14 @@ def _compute_parasitics(
     lying wholly on one side of the boundary (fully top-cell-drawn, or fully
     inside one instance) stays exactly additive; only a genuinely spanning
     net's split needs a tolerance rather than exact equality.
+
+    **Terminal-aware resistance graph (issue #2982, opt-in):**
+    ``resistance_graph=True`` (``klt extract --resistance-graph``) attaches a
+    ``resistance_graph`` object to every ground entry, built by
+    :func:`_resistance_graph_report` from the per-net geometry Pass 1 already
+    holds. It is purely additive: ``resistance_ohm`` and every other field
+    keep their legacy value, and with ``False`` (the default) no key is added
+    and no graph work runs.
 
     For each metal level ``i`` with a curated
     ``parasitics_deck.metal_sidewalls[i]`` coefficient and
@@ -1177,6 +1513,9 @@ def _compute_parasitics(
         num_metals,
     )
     contact_layer_index = layer_index.get("contact")
+    # `resistance_graph` (issue #2982): each net's per-role geometry and
+    # landings, kept only when the opt-in flag is on.
+    graph_collector = _ResistanceGraphCollector(resistance_graph)
 
     for net in nets:
         r_ohm = 0.0
@@ -1190,6 +1529,7 @@ def _compute_parasitics(
         net_contacts, net_vias = _net_port_regions(
             l2n, net, contact_layer_index, via_index
         )
+        graph_collector.begin_net(net, net_contacts, net_vias)
 
         for role_name, layer_rc, indices, subtract in non_metal_roles:
             (
@@ -1218,6 +1558,9 @@ def _compute_parasitics(
             role_drawn = drawn.get(role_name)
             role_r_ohm = layer_rc.sheet_res_ohm_sq * _region_n_squares(
                 role_region, dbu, port_region=net_contacts, drawn_region=role_drawn
+            )
+            graph_collector.add_role(
+                net, role_name, layer_rc.sheet_res_ohm_sq, role_region, role_drawn
             )
             c_ff += role_c_ff
             r_ohm += role_r_ohm
@@ -1257,6 +1600,9 @@ def _compute_parasitics(
                 region, dbu, port_region=metal_ports, drawn_region=metal_drawn
             )
             net_metal_r_ohm[(net, i)] = metal_r_ohm
+            graph_collector.add_role(
+                net, f"metal{i}", layer_rc.sheet_res_ohm_sq, region, metal_drawn
+            )
             base_r_ohm[net] += metal_r_ohm
             metal_regions[i][net] = region
             # `--parasitics-top-cell-only` (issue #1704): the metal role's
@@ -1300,6 +1646,8 @@ def _compute_parasitics(
     # it. The coupling capacitors themselves are unaffected: each *pair* still
     # gets the full mutual-overlap area, which is what the plate model wants.
     deduction_regions: dict[tuple[kdb.Net, int], kdb.Region] = {}
+    # Issue #3021: recognised capacitors' top-plate markers, per plate-net pair.
+    capacitor_masks = _capacitor_plate_masks(circuit, capacitor_top_regions)
     # `coupling_ff[pair_key]` / `coupling_levels[pair_key]`: the accumulated
     # coupling capacitance and contributing `[lower, upper]` level-index
     # pairs for one unordered net pair.
@@ -1356,6 +1704,14 @@ def _compute_parasitics(
                 overlap = region_a & region_b
                 if overlap.is_empty():
                     continue
+                # A fully masked overlap is empty, so the area check below
+                # skips it.
+                overlap = _minus_capacitor_mask(
+                    overlap,
+                    capacitor_masks.get(
+                        frozenset((net_a.cluster_id, net_b.cluster_id))
+                    ),
+                )
                 overlap_area_um2 = overlap.area() * dbu * dbu
                 if overlap_area_um2 <= 0.0:
                     continue
@@ -1579,6 +1935,7 @@ def _compute_parasitics(
                 ),
             }
         )
+        graph_collector.attach(results[-1], net, dbu)
 
     results.sort(key=lambda entry: (entry["net"], entry["net_id"]))
 
@@ -1919,7 +2276,7 @@ def _record_substrate_ties(
     """Mirror the substrate DC-reference shunts (issue #1263) into the
     integrity record (issue #2764) as **intentional** DC ties.
 
-    Each tie is a large (``1e12`` ohm) resistor from a synthesized substrate
+    Each tie is a large (``1e12`` ohm by default) resistor from a synthesized substrate
     identity to SPICE's global ground node ``0`` -- a deliberate cross-net
     (net-to-ground) element, so it is flagged ``intentional_dc_tie`` and
     excluded from the suspicious-resistor and short-candidate checks
@@ -1984,6 +2341,7 @@ def _inject_parasitics(
     mom_rlc_inductor: tuple[str, float] | None = None,
     record_slice_topology: bool = False,
     variants: ParasiticVariants | None = None,
+    substrate_tie_ohms: float | None = None,
 ) -> dict[str, Any]:
     """Inject a star-topology parasitic RC per net (or a distributed
     multi-segment ladder for a caller-declared subset, see below), plus one
@@ -2620,6 +2978,7 @@ def _inject_parasitics(
                 ],
             }
         )
+        _copy_resistance_graph(entry, report_nets[-1])
 
     # One two-terminal `C` card per coupled net pair, between the two nets'
     # **hub** nodes -- built only after every entry above has established its
@@ -2660,7 +3019,7 @@ def _inject_parasitics(
     # #1263) -- last, so it sees every net this function created and cannot
     # collide with one of them.
     substrate_dc_tie = _tie_substrate_nets_to_ground(
-        circuit, res_class, ground_net_name
+        circuit, res_class, ground_net_name, substrate_tie_ohms
     )
 
     # Issue #2764: check the emitted network and attach the results -- the
@@ -2697,10 +3056,14 @@ def _tie_substrate_nets_to_ground(
     circuit: kdb.Circuit,
     res_class: kdb.DeviceClass,
     substrate_net: str,
+    substrate_tie_ohms: float | None = None,
 ) -> dict[str, Any]:
     """Give every *synthesized* substrate identity in ``circuit`` a DC path
     to SPICE's global ground node ``0``, via one large shunt resistor per net
-    (``R<net>_dctie <net> 0 1e12``), and report what was written (issue
+    (``R<net>_dctie <net> 0 1e12`` by default; ``substrate_tie_ohms``, issue
+    #3089, overrides the value -- ``0`` is a hard tie, written as the 1 mohm
+    floor because SPICE has no zero-ohm resistor), and report what was
+    written (issue
     #1263). The tied net names are also declared SPICE-global by the caller
     (``run_extract``, via ``create_model_binding_delegate``'s ``global_nets``
     -- see issue #1503 below): this function only builds the *name list* and
@@ -2815,7 +3178,16 @@ def _tie_substrate_nets_to_ground(
         _SPICE_GLOBAL_GROUND_NODE,
         SUBSTRATE_DC_TIE_RESISTANCE_OHM,
         _is_synthesized_substrate_net_name,
+        substrate_tie_mode,
+        substrate_tie_written_ohms,
     )
+
+    requested_ohms = (
+        SUBSTRATE_DC_TIE_RESISTANCE_OHM
+        if substrate_tie_ohms is None
+        else substrate_tie_ohms
+    )
+    written_ohms = substrate_tie_written_ohms(requested_ohms)
 
     tied_nets = [
         net
@@ -2837,7 +3209,7 @@ def _tie_substrate_nets_to_ground(
             tie = circuit.create_device(res_class, instance_name)
             tie.connect_terminal("A", net)
             tie.connect_terminal("B", reference)
-            tie.set_parameter("R", SUBSTRATE_DC_TIE_RESISTANCE_OHM)
+            tie.set_parameter("R", written_ohms)
             entries.append(
                 {
                     # Report-boundary escape (issue #1162), so this JSON
@@ -2848,7 +3220,11 @@ def _tie_substrate_nets_to_ground(
                 }
             )
     return {
-        "resistance_ohm": SUBSTRATE_DC_TIE_RESISTANCE_OHM,
+        "resistance_ohm": written_ohms,
+        # Additive field (issue #3089): `"shunt"` (a positive resistance) or
+        # `"hard"` (`--substrate-tie-ohms 0`; `resistance_ohm` then holds the
+        # 1 mohm floor actually written).
+        "mode": substrate_tie_mode(requested_ohms),
         "nets": entries,
         # Additive field (issue #1503): constant `"global"` -- every
         # `nets[].net` identity above is also declared SPICE-global (see

@@ -372,7 +372,9 @@ def deck_info(name: str | None = None) -> dict[str, Any]:
 #: ``"ongrid"``/``"angle"`` (issue #2642) are the vertex check kinds: a grid
 #: in micrometres and a minimum interior corner angle in degrees, neither of
 #: them a ``threshold_dbu`` distance either.
-_NON_DISTANCE_CHECKS = frozenset({"area", "density", "antenna", "ongrid", "angle"})
+_NON_DISTANCE_CHECKS = frozenset(
+    {"area", "density", "antenna", "ongrid", "angle", "comp_coverage"}
+)
 
 
 def deck_rules(name: str, rule_id: str | None = None) -> dict[str, Any]:
@@ -435,6 +437,21 @@ def deck_rules(name: str, rule_id: str | None = None) -> dict[str, Any]:
       (:class:`~klayout_tools.decks.rules.RuleProvenance` as a dict), or
       ``None`` when the rule carries no structured provenance yet (its
       inline comment remains the only record).
+    - ``layer_refs`` -- parallel to ``layers`` (issue #3092): one
+      ``{"name": str | None, "layer": int, "datatype": int}`` per entry, so a
+      rule's layers map to stream layer/datatype pairs without importing the
+      deck module. ``name`` is ``None`` when the deck publishes none (the
+      matching ``layers`` entry is then the raw ``"L/D"`` string).
+
+    Top-level, pinned by ``content_hash`` like the rules:
+
+    - ``layer_table`` -- every ``{"name", "layer", "datatype"}`` the deck
+      names, sorted by ``(layer, datatype)``.
+    - ``ambiguous_names`` -- ``[{"name", "pairs": [{"layer", "datatype"}]}]``
+      for each name the deck gives to more than one pair (those pairs also
+      appear individually in ``layer_table``); sorted by name.
+    - ``unresolved`` -- ``[{"layer", "datatype", "rules": [id]}]`` for each
+      pair the (selected) rules read that has no deck name; sorted.
     """
     # Imported lazily for the same circular-import reason `deck_info` is --
     # see its own note.
@@ -472,6 +489,7 @@ def deck_rules(name: str, rule_id: str | None = None) -> dict[str, Any]:
         "content_hash": f"sha256:{digest}" if digest is not None else None,
         "nominal_dbu_um": nominal_dbu,
         "rules": [_project_rule(rule, nominal_dbu, layer_names) for rule in rules],
+        **_layer_table_fields(rules, layer_names),
     }
 
 
@@ -906,6 +924,11 @@ def _project_device_classes(
                 ],
                 layer_names=layer_names,
                 provenance=resistor.provenance,
+                # Issue #2679: how `body` relates to `marker`. Under
+                # "abutting_heads" the `requires`/`excludes` above narrow
+                # the *marker* region (the resistive body itself), and the
+                # `body` layer only has to abut it as two separate heads.
+                extra={"topology": resistor.topology},
             )
         )
 
@@ -953,6 +976,14 @@ def _project_rule(
         "description": rule.description,
         "check": rule.check,
         "layers": _rule_layers(rule, layer_names),
+        "layer_refs": [
+            {
+                "name": layer_names.get(pair) or None,
+                "layer": pair[0],
+                "datatype": pair[1],
+            }
+            for pair in _rule_pairs(rule)
+        ],
         "scope": rule.scope or None,
         "value_um": _scaled(rule.threshold_dbu, nominal_dbu) if is_distance else None,
         "value_dbu": rule.threshold_dbu if is_distance else None,
@@ -974,10 +1005,57 @@ def _rule_layers(rule: DrcRule, layer_names: dict[tuple[int, int], str]) -> list
     """The drawn layer name(s) a rule reads, in ``layer``/``other_layer``
     order -- the deck's published name when it has one, else the raw
     ``"<layer>/<datatype>"`` pair so the entry is never empty."""
+    return [
+        layer_names.get(pair) or f"{pair[0]}/{pair[1]}" for pair in _rule_pairs(rule)
+    ]
+
+
+def _rule_pairs(rule: DrcRule) -> list[tuple[int, int]]:
+    """The ``(layer, datatype)`` pair(s) a rule reads, in ``layer``/
+    ``other_layer`` order."""
     pairs = [rule.layer]
     if rule.other_layer is not None:
         pairs.append(rule.other_layer)
-    return [layer_names.get(pair) or f"{pair[0]}/{pair[1]}" for pair in pairs]
+    if rule.region_spec is not None:
+        pairs.extend(rule.region_spec.layers())
+    return pairs
+
+
+def _layer_table_fields(
+    rules: list[DrcRule], layer_names: dict[tuple[int, int], str]
+) -> dict[str, Any]:
+    """The ``layer_table`` / ``ambiguous_names`` / ``unresolved`` fields of
+    :func:`deck_rules` (issue #3092)."""
+    by_name: dict[str, list[tuple[int, int]]] = {}
+    for pair in sorted(layer_names):
+        by_name.setdefault(layer_names[pair], []).append(pair)
+
+    unresolved: dict[tuple[int, int], list[str]] = {}
+    for rule in rules:
+        for pair in _rule_pairs(rule):
+            if not layer_names.get(pair):
+                ids = unresolved.setdefault(pair, [])
+                if rule.id not in ids:
+                    ids.append(rule.id)
+
+    return {
+        "layer_table": [
+            {"name": layer_names[pair], "layer": pair[0], "datatype": pair[1]}
+            for pair in sorted(layer_names)
+        ],
+        "ambiguous_names": [
+            {
+                "name": layer_name,
+                "pairs": [{"layer": p[0], "datatype": p[1]} for p in pairs],
+            }
+            for layer_name, pairs in sorted(by_name.items())
+            if len(pairs) > 1
+        ],
+        "unresolved": [
+            {"layer": pair[0], "datatype": pair[1], "rules": ids}
+            for pair, ids in sorted(unresolved.items())
+        ],
+    }
 
 
 def _rule_limits(rule: DrcRule, nominal_dbu: float) -> dict[str, Any]:

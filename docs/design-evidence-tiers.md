@@ -64,24 +64,39 @@ evidence of nothing.
 
 **Not every item has a tool behind it.** Items 3-7 each name a `klt` verb
 that can mechanically grade them, and item 8 has a purpose-built generic
-evidence envelope — but items **1**, **2**, **9**, and **10** have no
-`klt` verb. For those four, the evidence the tool can read is an
-**artifact-anchored generic envelope** (issue #2718). The envelope declares
-the item it attests (`"t1_item": <id>`) and pins the audited artifact by
-path and content hash, and the manifest pins the same hash. The row is
-`met` only when the artifact still re-hashes to that value. The artifact
-per item:
+evidence envelope — but items **1**, **2**, **9**, and **10** are claims
+about what a repository contains. For those four, the evidence the tool can
+read is an **artifact-anchored generic envelope** (issue #2718). The
+envelope declares the item it attests (`"t1_item": <id>`) and pins the
+audited artifact by path and content hash, and the manifest pins the same
+hash. The row is `met` only when the artifact still re-hashes to that value.
+The artifact per item:
 
 - item 1: the design-source inventory;
 - item 2: the committed layout stream;
 - item 9: the testbench inventory;
-- item 10: the repo-hygiene audit record, for example the CI workflow
-  file or a checklist covering README, spec table and license.
+- item 10: the repo-hygiene inventory.
 
-A passing native envelope cited for one of these four is still accepted,
-for compatibility. Its citation carries no `artifact_binding`, which marks
-it as a cited pass the tool could not judge for relevance. See
-[`docs/cli/signoff.md`](cli/signoff.md)'s "Items 1, 2, 9, and 10".
+For items 1, 9 and 10 that envelope is **tool-produced**, not hand-rolled:
+`klt signoff --attest {1,9,10} --inventory <file>` (issue #2844) reads a
+versioned inventory and derives `status` from item-specific mechanical
+checks it records in the envelope — item 1, every source and derived
+netlist exists and each derived netlist passes its declared freshness check
+(e.g. `klt netlist --check`); item 9, every testbench exists, the declared
+cold-start invocation succeeds, and the PDK revision and tool versions are
+pinned; item 10, every hygiene artifact exists and every declared CI/audit
+command succeeds. `--check` re-attests and fails on any drift of the
+inventory, an inventoried file, or a check outcome. A passing native
+envelope (a clean DRC report, say) **no longer satisfies items 1, 9 or
+10**. Item 2 still accepts one, for compatibility; its citation carries no
+`artifact_binding`, which marks it as a cited pass the tool could not judge
+for relevance. See [`docs/cli/signoff.md`](cli/signoff.md)'s "Items 1, 2,
+9, and 10" and "Attesting items 1, 9 and 10".
+
+Where the claim is about a set of files (item 1's sources plus the derived
+netlist; item 9's or 10's several files), the envelope may bind the set with
+`provenance.input.paths` (issue #3044) so that editing any member turns the
+row stale; see [`docs/cli/signoff.md`](cli/signoff.md).
 
 ### What a T1 claim is scoped to
 
@@ -300,6 +315,20 @@ written to every block.
    platform, still needs a repo checkout with a Rust toolchain; see
    `docs/cli/yield.md`'s "What the extra does and does not reach" callout and
    `docs/releasing-native.md`.
+   **When "not applicable" is legitimate** (issue #2865): a block whose
+   ratified spec has *no* statistical row passes this item by a recorded
+   "not applicable", not by a waiver at grant time and not by inventing a
+   statistical claim. That holds only when the spec is ratified, a committed
+   statement accounts for every spec row with the reason its row class is
+   not statistical (for example "timing rows are corner-bounded by STA at the
+   PDK's characterised corners"), and both are bound by content hash so
+   editing either invalidates the claim. Any accuracy, offset, matching or
+   yield row is statistical by definition: a spec carrying one — or a sigma,
+   yield, Cpk or `3σ`-style bound — cannot use the outcome and needs `klt
+   yield` evidence for that row. The outcome is available to a digital
+   partition only; an analog partition (including the analog half of a
+   mixed-signal block) always requires Monte Carlo evidence. `klt signoff`
+   reports it as `not_applicable`, never as `met`.
 7. **Post-layout verification**
    - *Analog* — the spec suite re-run against the netlist extracted from
      the layout, not only the drawn schematic (#252). Parasitic extraction

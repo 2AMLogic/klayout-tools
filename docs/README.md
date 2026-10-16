@@ -71,6 +71,7 @@ docs/
     sta.md
     stats.md
     synthesize.md
+    tap-distance.md
     techmap.md
     trajectory.md
     version.md
@@ -78,6 +79,7 @@ docs/
     yield-campaign.md
     yield-samples.md
     yield-sensitivity.md
+    yield-threshold.md
     yield.md
   design/                # design notes, spikes, and upstream surveys
     analog-resource-survey.md

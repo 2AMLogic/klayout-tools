@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Callable
+from typing import Any
 
 ErrorFactory = Callable[[str], Exception]
 
@@ -261,6 +262,108 @@ def parse_label_layers(
             )
         overrides[role] = (int(layer_raw.strip()), int(datatype_raw.strip()))
     return overrides
+
+
+#: The keys a ``--probe`` spec (and a request document's ``probes[]`` object)
+#: must carry -- every one is required, none may repeat.
+PROBE_KEYS = ("name", "layer", "x", "y")
+
+
+def _probe_fields(entry: Any, error_cls: ErrorFactory, flag: str) -> dict[str, Any]:
+    """One probe entry (a spec string or a mapping) as raw ``{key: value}``
+    fields, checked for unknown/repeated/missing keys."""
+    if isinstance(entry, dict):
+        fields = dict(entry)
+        unknown = sorted(set(fields) - set(PROBE_KEYS))
+        if unknown:
+            raise error_cls(
+                f"{flag} entry has unknown key(s) {', '.join(unknown)} "
+                f"(expected {', '.join(PROBE_KEYS)})"
+            )
+    elif isinstance(entry, str):
+        fields = {}
+        for part in entry.split(","):
+            key, sep, value = part.partition("=")
+            key = key.strip()
+            if not sep or key not in PROBE_KEYS:
+                raise error_cls(
+                    f"{flag} entry {entry!r} is not "
+                    f"name=<id>,layer=<role>,x=<um>,y=<um> -- bad "
+                    f"segment {part!r}"
+                )
+            if key in fields:
+                raise error_cls(f"{flag} entry {entry!r} repeats key {key!r}")
+            fields[key] = value.strip()
+    else:
+        raise error_cls(f"{flag} entry must be a string or object, got {entry!r}")
+    missing = [key for key in PROBE_KEYS if key not in fields]
+    if missing:
+        raise error_cls(
+            f"{flag} entry {entry!r} is missing key(s) {', '.join(missing)} "
+            "(need name, layer, x and y)"
+        )
+    return fields
+
+
+def _probe_coordinate(
+    value: Any, axis: str, entry: Any, error_cls: ErrorFactory, flag: str
+) -> float:
+    """A probe's ``x``/``y`` as a finite float (micrometres)."""
+    try:
+        if isinstance(value, bool):
+            raise ValueError
+        number = float(value)
+    except (TypeError, ValueError):
+        raise error_cls(
+            f"{flag} entry {entry!r}: {axis}={value!r} is not a number (micrometres)"
+        ) from None
+    if number != number or number in (float("inf"), float("-inf")):
+        raise error_cls(f"{flag} entry {entry!r}: {axis}={value!r} is not finite")
+    return number
+
+
+def parse_probes(
+    raw: list[Any] | None,
+    error_cls: ErrorFactory,
+    flag: str = "--probe",
+) -> list[dict[str, Any]]:
+    """Parse the ``--probe`` flag's ``name=<id>,layer=<role>,x=<um>,y=<um>``
+    entries (issue #2986, repeatable) into the ``[{"name", "layer", "x",
+    "y"}, ...]`` list ``run_extract``'s own ``probes`` parameter takes,
+    in the order given. ``[]`` when the flag was never given.
+
+    An entry may also be an already-decoded mapping with those four keys --
+    the request document's ``probes`` array -- so both forms share one
+    validation path and cannot drift.
+
+    The ``layer`` role is deliberately **not** validated here: the set
+    depends on the deck (see :attr:`~klayout_tools.decks.ExtractionDeck.
+    label_layer_roles`), which the extractor resolves and quotes in its own
+    error. Raises ``error_cls`` for a malformed spec, a missing/unknown/
+    repeated key, non-numeric coordinates, or a duplicate probe ``name``.
+    """
+    probes: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for entry in raw or []:
+        fields = _probe_fields(entry, error_cls, flag)
+        name, layer = fields["name"], fields["layer"]
+        if not isinstance(name, str) or not name.strip():
+            raise error_cls(f"{flag} entry {entry!r} has an empty or non-string name")
+        if not isinstance(layer, str) or not layer.strip():
+            raise error_cls(f"{flag} entry {entry!r} has an empty or non-string layer")
+        name = name.strip()
+        if name in seen:
+            raise error_cls(f"{flag} name {name!r} is given more than once")
+        seen.add(name)
+        probes.append(
+            {
+                "name": name,
+                "layer": layer.strip(),
+                "x": _probe_coordinate(fields["x"], "x", entry, error_cls, flag),
+                "y": _probe_coordinate(fields["y"], "y", entry, error_cls, flag),
+            }
+        )
+    return probes
 
 
 def parse_declared_pins(

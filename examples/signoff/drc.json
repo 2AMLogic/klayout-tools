@@ -39,6 +39,7 @@
       "76/20",
       "76/44",
       "78/44",
+      "79/20",
       "80/20",
       "81/125",
       "82/64",
@@ -75,6 +76,7 @@
       "met1.space.1",
       "met1.width.1",
       "poly.angle.1",
+      "poly.endcap.diff.1",
       "poly.ongrid.1",
       "poly.width.1"
     ],
@@ -111,10 +113,13 @@
       "mcon.width.1",
       "met1.enclosing.mcon.1",
       "met1.enclosing.via.1",
+      "met1.enclosing_adjacent.via.1",
       "met2.angle.1",
       "met2.area.1",
       "met2.enclosing.via.1",
       "met2.enclosing.via2.1",
+      "met2.enclosing_adjacent.via.1",
+      "met2.enclosing_adjacent.via2.1",
       "met2.holes_area.1",
       "met2.ongrid.1",
       "met2.space.1",
@@ -124,6 +129,7 @@
       "met3.enclosing.capm.1",
       "met3.enclosing.via2.1",
       "met3.enclosing.via3.1",
+      "met3.enclosing_adjacent.via3.1",
       "met3.holes_area.1",
       "met3.ongrid.1",
       "met3.space.1",
@@ -155,6 +161,7 @@
       "nsm.angle.1",
       "nsm.ongrid.1",
       "nwell.angle.1",
+      "nwell.enclosed.hvi.1",
       "nwell.ongrid.1",
       "nwell.space.1",
       "nwell.width.1",
@@ -171,6 +178,7 @@
       "pwell_rs.ongrid.1",
       "rpm.angle.1",
       "rpm.ongrid.1",
+      "rpm.width.1",
       "tap.angle.1",
       "tap.enclosing.licon.1",
       "tap.ongrid.1",
@@ -179,6 +187,7 @@
       "tunm.ongrid.1",
       "uhvi.angle.1",
       "uhvi.ongrid.1",
+      "urpm.width.1",
       "vhvi.angle.1",
       "vhvi.ongrid.1",
       "via.angle.1",
@@ -201,6 +210,7 @@
       "vpp.ongrid.1"
     ],
     "voltage_domain_warnings": [],
+    "unchecked_rules": [],
     "deck_scope": [
       "cap2m",
       "capm",
@@ -215,11 +225,20 @@
       "m5",
       "nwell",
       "poly",
+      "rpm",
+      "urpm",
       "via",
       "via2",
       "via3",
       "via4",
       "x"
+    ],
+    "unmodeled_rules": [
+      "m1.5",
+      "m2.5",
+      "via.5a",
+      "via2.5",
+      "via3.5"
     ],
     "schema_version": 1,
     "known": true,
@@ -238,6 +257,7 @@
       "met1.space.1",
       "met1.width.1",
       "poly.angle.1",
+      "poly.endcap.diff.1",
       "poly.ongrid.1",
       "poly.width.1"
     ],
@@ -372,6 +392,10 @@
         "reason": "no_applicable_geometry"
       },
       {
+        "id": "met1.enclosing_adjacent.via.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
         "id": "met2.angle.1",
         "reason": "no_applicable_geometry"
       },
@@ -385,6 +409,14 @@
       },
       {
         "id": "met2.enclosing.via2.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "met2.enclosing_adjacent.via.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "met2.enclosing_adjacent.via2.1",
         "reason": "no_applicable_geometry"
       },
       {
@@ -421,6 +453,10 @@
       },
       {
         "id": "met3.enclosing.via3.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "met3.enclosing_adjacent.via3.1",
         "reason": "no_applicable_geometry"
       },
       {
@@ -548,6 +584,10 @@
         "reason": "no_applicable_geometry"
       },
       {
+        "id": "nwell.enclosed.hvi.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
         "id": "nwell.ongrid.1",
         "reason": "no_applicable_geometry"
       },
@@ -612,6 +652,10 @@
         "reason": "no_applicable_geometry"
       },
       {
+        "id": "rpm.width.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
         "id": "tap.angle.1",
         "reason": "no_applicable_geometry"
       },
@@ -641,6 +685,10 @@
       },
       {
         "id": "uhvi.ongrid.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "urpm.width.1",
         "reason": "no_applicable_geometry"
       },
       {
@@ -734,7 +782,7 @@
     "pdk": null,
     "deck": {
       "name": "sky130",
-      "content_hash": "sha256:2a1882936df91d37e1b0e3c897f1d9bd5347910e53b6f0572a07e6bd9413e92a",
+      "content_hash": "sha256:7fb78d4d52b0be3868ea1cea7431c66e05acb8f739a36412288a48db0be286d5",
       "released": null
     },
     "input": {

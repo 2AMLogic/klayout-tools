@@ -59,6 +59,11 @@ from typing import TYPE_CHECKING, Any
 
 from ._layout import write_layout
 from ._provenance import build_provenance
+from .gen_cap_vpp import (
+    _cap_vpp_array_describe,
+    _cap_vpp_array_layer_params,
+    _cap_vpp_array_validate,
+)
 
 # Issue #2347 moved every family's `validate`/`describe` pair (plus the
 # helpers used only by them, and `_well_island_layer_params`, which #1875 had
@@ -217,6 +222,9 @@ from .gen_layer_params import (
     UNIT_MIN_W_UM as UNIT_MIN_W_UM,
 )
 from .gen_layer_params import (
+    _bjt_unit_implant_margin_um as _bjt_unit_implant_margin_um,
+)
+from .gen_layer_params import (
     _cap_family_layers as _cap_family_layers,
 )
 from .gen_layer_params import (
@@ -239,6 +247,9 @@ from .gen_layer_params import (
 )
 from .gen_layer_params import (
     _gate_pad_clearance_um as _gate_pad_clearance_um,
+)
+from .gen_layer_params import (
+    _gate_top_endcap_um as _gate_top_endcap_um,
 )
 from .gen_layer_params import (
     _metal_res_geometry_min_um as _metal_res_geometry_min_um,
@@ -292,6 +303,7 @@ from .gen_pcells import (
     _build_bjt_array_pcell,
     _build_bond_pad_pcell,
     _build_cap_array_pcell,
+    _build_cap_vpp_array_pcell,
     _build_diff_pair_pcell,
     _build_esd_device_pcell,
     _build_guard_ring_pcell,
@@ -330,6 +342,7 @@ _PCELL_LIBRARY_NAME = "klt_gen_reference"
 #: ``cap_top_requires_<i>_*`` slots are appended the same way below
 #: :data:`_PDK_CAP_TOP_PLATE_REQUIRES` (issue #1555).
 _HIDDEN_PARAMS = {
+    "vpp_gds_path",
     "layer",
     "active_layer",
     "poly_layer",
@@ -344,15 +357,18 @@ _HIDDEN_PARAMS = {
     "well_tap_implant_present",
     "well_margin_resolved_um",
     "gate_pad_clearance_um",
+    "ring_well_margin_um",
     # `mos_array`/`diff_pair`/`esd_device`'s issue #1577 harness-computed
     # knobs -- resolved per PDK family exactly like `gate_pad_clearance_um`
     # above, never part of the request schema.
     "voltage_flavor_mark_margin_um",
     "contact_gate_offset_um",
     "bottom_endcap_um",
+    "top_endcap_um",
     "sd_implant_layer",
     "sd_implant_present",
     "sd_implant_margin_um",
+    "mos_cap_mark_layer",
     "bjt_mark_layer",
     "bjt_mark_present",
     "res_mark_layer",
@@ -398,6 +414,11 @@ _HIDDEN_PARAMS = {
     # Shared verbatim by `well_island`'s own `well_tap_implant_*` ring
     # (issue #1421), which draws the same implant over the same `Comp` mask.
     "ring_implant_margin_um",
+    # `bjt_array`'s per-unit emitter (Pplus) / base-tie (Nplus) implants
+    # (issue #3587) -- harness-computed like `sd_implant_*` above.
+    "unit_emitter_implant_layer",
+    "unit_base_implant_layer",
+    "unit_implant_margin_um",
     # `res_array`'s own metal-layer-resistor geometry floors (issue #1639),
     # harness-computed from the resolved PDK family/`params.metal_level`
     # exactly like `cap_bottom_plate_margin_min_um`/friends above -- see
@@ -421,6 +442,12 @@ _HIDDEN_PARAMS = {
     # per (family, flavor) by `_res_end_contact_um`; never request-facing.
     "end_contact_w_um",
     "end_contact_h_um",
+    # gf180mcu salicide-block clearance from the end contacts (issue #3000),
+    # resolved per family by `_res_sab_geometry_um`; never request-facing.
+    "res_contact_space_um",
+    # sg13g2 PDK-PCell poly-resistor convention (issue #2679): poly drawn as
+    # the two abutting heads only; resolved per family, never request-facing.
+    "res_poly_heads_only",
 }
 
 #: ``res_array``'s flavour mask slots are generated from
@@ -432,7 +459,7 @@ _HIDDEN_PARAMS = {
 _HIDDEN_PARAMS |= {
     f"res_flavor_{i}_{suffix}"
     for i in range(_MAX_RES_FLAVOR_LAYERS)
-    for suffix in ("layer", "present", "head_enclosure_um")
+    for suffix in ("layer", "present", "head_enclosure_um", "side_extension_um")
 }
 
 #: ``cap_array``'s top-plate requires-mask slots are generated from
@@ -635,6 +662,65 @@ def _mos_finger_positions(
     return seg_positions, poly_positions, x
 
 
+def _mos_cap_tie(
+    boxes: dict[str, list[tuple[float, float, float, float]]],
+    seg_positions: list[tuple[float, float]],
+    gate_xy: list[tuple[float, float]],
+    pad_half: float,
+    w_um: float,
+    seg_h_um: float,
+    contact_region_um: float,
+    gate_ext_um: float,
+) -> tuple[float, tuple[float, float]]:
+    """Tie a ``mos_cap`` unit's terminals (issue #3283); returns the grown
+    ``gate_ext_um`` and the S/D strap's centre.
+
+    Ties the gate fingers into one poly terminal (a bar abutting the top of
+    every landing pad), then every S/D segment into one local-metal strap
+    above it: stubs rise out of each segment pad (metal over poly with no
+    contact between them does not connect), and the strap spans the first to
+    the last segment. Appends to ``boxes`` in place.
+    """
+    if len(gate_xy) > 1:
+        bar_y0 = w_um + gate_ext_um
+        boxes["poly"].append(
+            (
+                gate_xy[0][0] - pad_half,
+                bar_y0,
+                gate_xy[-1][0] + pad_half,
+                bar_y0 + contact_region_um,
+            )
+        )
+        gate_ext_um += contact_region_um
+    strap_y0 = w_um + gate_ext_um
+    strap_y1 = strap_y0 + contact_region_um
+    for sx0, sx1 in seg_positions:
+        boxes["metal"].append((sx0, seg_h_um, sx1, strap_y0))
+    boxes["metal"].append(
+        (seg_positions[0][0], strap_y0, seg_positions[-1][1], strap_y1)
+    )
+    sd_cap_xy = (
+        (seg_positions[0][0] + seg_positions[-1][1]) / 2.0,
+        (strap_y0 + strap_y1) / 2.0,
+    )
+    return gate_ext_um + contact_region_um, sd_cap_xy
+
+
+def _top_endcap_neck(
+    px0: float, px1: float, w_um: float, top_endcap_um: float
+) -> list[tuple[float, float, float, float]]:
+    """The gate stripe's top-edge endcap neck (issue #2936), or ``[]`` when
+    ``top_endcap_um`` is not positive.
+
+    A stripe-width poly box so the poly clears the diffusion's top edge
+    (``y == w_um``) by ``top_endcap_um`` across the *full* gate length. The
+    landing pad alone does not -- it is only ``contact_region_um`` wide,
+    narrower than the gate once ``l_um`` exceeds that."""
+    if top_endcap_um <= 0:
+        return []
+    return [(px0, w_um, px1, w_um + top_endcap_um)]
+
+
 def _mos_unit_layout(
     w_um: float,
     l_um: float,
@@ -645,6 +731,8 @@ def _mos_unit_layout(
     contact_gate_offset_um: float = 0.0,
     bottom_endcap_um: float = 0.0,
     sd_implant_margin_um: float = 0.0,
+    mos_cap: bool = False,
+    top_endcap_um: float = 0.0,
 ) -> dict[str, Any]:
     """One MOS-like unit device: a diffusion strip crossed by ``fingers``
     poly gates, with a contact + local-metal pad in each source/drain
@@ -735,14 +823,29 @@ def _mos_unit_layout(
     ``bottom_endcap_um`` (:func:`_gate_bottom_endcap_um`) extends every gate
     stripe's *bottom* edge (``y == 0``) down past the diffusion, mirroring
     the endcap the *top* edge's own #461 landing pad already provides there;
+    ``top_endcap_um`` (:func:`_gate_top_endcap_um`, issue #2936) is the
+    top-edge counterpart: a stripe-width poly neck that many um past the
+    diffusion's top edge (``0.0`` -- no neck -- on every family but sky130;
+    the parallel/strapped shape already runs its stripes up into the comb);
     ``sd_implant_margin_um`` (:func:`_sd_implant_margin_um`) draws a
     ``"sd_implant"`` box -- present only when this margin is positive --
     covering the unit's own ``active`` box grown by that margin on every
     side, so `produce_impl` can lay a source/drain implant mask over the
     device body (see :func:`_device_layer_params`'s ``sd_implant_layer``/
     ``sd_implant_present``, resolved off ``params.flavor``).
+
+    ``mos_cap`` (issue #3283) turns the unit into a MOS capacitor: gate over
+    diffusion with every source/drain segment tied into one terminal. It
+    always uses this function's own "series" geometry (``finger_topology`` is
+    ignored); the S/D pads are tied by a local-metal stub up out of each
+    segment into one full-width strap above the gate landing pads (``fingers
+    > 1`` additionally ties the gate pads together with a poly bar, so the
+    gate is one terminal too), and the unit reports ``sd_cap_xy`` -- the
+    strap's centre -- as its single S/D terminal. ``gate_contact`` is not
+    supported (the strap would sit on the gate's local-metal pad). Left at
+    ``False`` the drawn geometry is byte-for-byte unchanged.
     """
-    if finger_topology == "parallel" and fingers > 1:
+    if finger_topology == "parallel" and fingers > 1 and not mos_cap:
         return _mos_unit_strapped_layout(
             w_um,
             l_um,
@@ -757,6 +860,17 @@ def _mos_unit_layout(
     seg_positions, poly_positions, total_len_um = _mos_finger_positions(
         l_um, fingers, contact_gate_offset_um
     )
+    # A MOS capacitor may be drawn at a width too narrow to fit an enclosed
+    # contact (the deck's COMP min width is below the contact + enclosure
+    # budget). Each S/D segment then grows a diffusion landing bump above the
+    # channel -- S/D only, so the channel width stays `w_um` -- and the gate
+    # landing pad is lifted clear of it.
+    bump_um = max(contact_region_um - w_um, 0.0) if mos_cap else 0.0
+    seg_h_um = w_um + bump_um
+    if bump_um > 0.0:
+        gate_pad_clearance_um = max(
+            gate_pad_clearance_um, bump_um + MIN_SAME_LAYER_SPACING_UM
+        )
 
     boxes: dict[str, list[tuple[float, float, float, float]]] = {
         "active": [(0.0, 0.0, total_len_um, w_um)],
@@ -769,7 +883,7 @@ def _mos_unit_layout(
                     -sd_implant_margin_um,
                     -sd_implant_margin_um,
                     total_len_um + sd_implant_margin_um,
-                    w_um + sd_implant_margin_um,
+                    seg_h_um + sd_implant_margin_um,
                 )
             ]
             if sd_implant_margin_um > 0
@@ -779,9 +893,11 @@ def _mos_unit_layout(
     contact_half = CONTACT_SIZE_UM / 2.0
     seg_xy: list[tuple[float, float]] = []
     for sx0, sx1 in seg_positions:
-        boxes["metal"].append((sx0, 0.0, sx1, w_um))
+        boxes["metal"].append((sx0, 0.0, sx1, seg_h_um))
+        if bump_um > 0.0:
+            boxes["active"].append((sx0, w_um, sx1, seg_h_um))
         cx = (sx0 + sx1) / 2.0
-        cy = w_um / 2.0
+        cy = seg_h_um / 2.0
         boxes["contact"].append(
             (cx - contact_half, cy - contact_half, cx + contact_half, cy + contact_half)
         )
@@ -829,6 +945,7 @@ def _mos_unit_layout(
         g_cy = pad_y0 + stem_um + contact_region_um / 2.0
         for px0, px1 in poly_positions:
             g_cx = (px0 + px1) / 2.0
+            boxes["poly"].extend(_top_endcap_neck(px0, px1, w_um, top_endcap_um))
             if clearance_um:
                 boxes["poly"].append((px0, w_um, px1, pad_y0))
             boxes["poly"].append(
@@ -854,7 +971,21 @@ def _mos_unit_layout(
         g_width_um = l_um
         gate_ext_um = 0.0
 
+    sd_cap_xy: tuple[float, float] | None = None
+    if mos_cap:
+        gate_ext_um, sd_cap_xy = _mos_cap_tie(
+            boxes,
+            seg_positions,
+            gate_xy,
+            pad_half,
+            w_um,
+            seg_h_um,
+            contact_region_um,
+            gate_ext_um,
+        )
+
     return {
+        "sd_cap_xy": sd_cap_xy,
         "total_len_um": total_len_um,
         "height_um": w_um,
         # Full drawn height including the gate landing pad *and* (issue
@@ -1141,6 +1272,45 @@ def _mos_array_well_tap_layout(
     }
 
 
+def _clamp_pitch_override(override_um: float, minimum_um: float) -> tuple[float, bool]:
+    """Resolve a pitch override against its legal minimum (issue #3299).
+
+    Returns ``(effective_pitch_um, clamped)``: ``0.0`` means "no override"
+    (the minimum, not clamped); a positive value below ``minimum_um`` is
+    clamped up to it and reported as clamped."""
+    if override_um <= 0.0:
+        return minimum_um, False
+    return max(override_um, minimum_um), override_um < minimum_um
+
+
+def _shared_sd_col_pitch(
+    unit: dict[str, Any], min_col_pitch: float, share_sd: bool
+) -> float:
+    """Issue #3551: under ``share_sd`` the real columns abut, overlapping by
+    one contacted S/D segment, so the legal minimum pitch drops to
+    ``total_len_um - contact_region_um``."""
+    if not share_sd:
+        return min_col_pitch
+    return unit["total_len_um"] - (CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM)
+
+
+def _dummy_col_x0s(
+    dc: int,
+    cols: int,
+    col_pitch: float,
+    isolated_col_pitch: float,
+    share_sd: bool,
+) -> tuple[float, float]:
+    """x0 of the ``dc``-th left/right dummy column. Under ``share_sd`` dummies
+    stay at the isolated-unit pitch, measured from the abutted real columns."""
+    if share_sd:
+        return (
+            -dc * isolated_col_pitch,
+            (cols - 1) * col_pitch + dc * isolated_col_pitch,
+        )
+    return -dc * col_pitch, (cols - 1 + dc) * col_pitch
+
+
 def _mos_array_layout(
     w_um: float,
     l_um: float,
@@ -1163,6 +1333,11 @@ def _mos_array_layout(
     sd_implant_margin_um: float = 0.0,
     voltage_flavor_mark_margin_um: float = WELL_ENCLOSURE_MARGIN_UM,
     interior_channel_um: float = 0.0,
+    mos_cap: bool = False,
+    pitch_x_um: float = 0.0,
+    pitch_y_um: float = 0.0,
+    top_endcap_um: float = 0.0,
+    share_sd: bool = False,
 ) -> dict[str, Any]:
     """A ``rows`` x ``cols`` grid of :func:`_mos_unit_layout` unit devices,
     with ``dummy`` extra unit-device columns flanking each side.
@@ -1211,6 +1386,10 @@ def _mos_array_layout(
     (issue #1577) are forwarded to :func:`_mos_unit_layout` unchanged -- see
     that function's own docstring.
 
+    ``mos_cap`` (issue #3283) is forwarded to :func:`_mos_unit_layout`; the
+    capacitor marker (:data:`_PDK_MOS_CAP_MARK_LAYERS`) is drawn over the
+    same ``voltage_flavor_mark_box_um`` box that encloses every unit device.
+
     ``interior_channel_um`` (issue #1531, Phase 1) reserves a navigable
     routing channel *inside* the array's own grid: when greater than zero it
     is added to both ``col_pitch``/``row_pitch`` on top of the fixed
@@ -1231,7 +1410,30 @@ def _mos_array_layout(
     opaque block) keeps the generator responsible for its own routability
     the same way it is already responsible for its own DRC cleanliness;
     ``res_array``/``diff_pair`` are expected to grow the same parameter in a
-    later phase, not this one."""
+    later phase, not this one.
+
+    ``pitch_x_um``/``pitch_y_um`` (issue #3299, Phase 1) override the base
+    column/row pitch (otherwise unit extent plus
+    :data:`MIN_SAME_LAYER_SPACING_UM`). A value below that legal minimum is
+    *clamped up* to it -- never emitted as DRC-violating geometry -- and the
+    clamp is reported via ``pitch_x_clamped``/``pitch_y_clamped``;
+    ``min_col_pitch_um``/``min_row_pitch_um`` give the legal minimum. ``0.0``
+    (the default) means "no override" and is a strict no-op. The override
+    replaces the base pitch, and ``interior_channel_um`` is then added on top
+    of the effective base pitch.
+
+    ``share_sd`` (issue #3551, Phase 2 of #3299) abuts horizontally adjacent
+    unit devices so each pair shares one contacted S/D segment: the real
+    columns' pitch drops from ``total_len_um + MIN_SAME_LAYER_SPACING_UM`` to
+    ``total_len_um - contact_region_um``, i.e. unit ``c``'s last (drain)
+    segment *is* unit ``c + 1``'s first (source) segment, drawn at identical
+    coordinates. This changes electrical topology -- each row becomes a
+    series chain whose ``U<i>_D`` and ``U<i+1>_S`` ports name the same node.
+    Only ``topology='array'`` with ``fingers == 1`` is supported, and it is
+    exclusive with ``pitch_x_um``/``interior_channel_um`` (both would pull
+    the units apart again); :func:`gen_describe._validate_share_sd` rejects
+    the rest with ``GenError``. ``dummy`` columns stay isolated at the normal
+    pitch. ``False`` (the default) is a strict no-op."""
     unit = _mos_unit_layout(
         w_um,
         l_um,
@@ -1242,9 +1444,18 @@ def _mos_array_layout(
         contact_gate_offset_um,
         bottom_endcap_um,
         sd_implant_margin_um,
+        mos_cap,
+        top_endcap_um=top_endcap_um,
     )
-    col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
-    row_pitch = unit["bbox_height_um"] + MIN_SAME_LAYER_SPACING_UM
+    min_col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
+    # Issue #3551: dummy columns keep the isolated-unit pitch under `share_sd`.
+    isolated_col_pitch = min_col_pitch
+    min_col_pitch = _shared_sd_col_pitch(unit, min_col_pitch, share_sd)
+    min_row_pitch = unit["bbox_height_um"] + MIN_SAME_LAYER_SPACING_UM
+    # Issue #3299 (Phase 1): an explicit pitch override, clamped up to the
+    # legal minimum. `0.0` (the default) leaves the pitch untouched.
+    col_pitch, pitch_x_clamped = _clamp_pitch_override(pitch_x_um, min_col_pitch)
+    row_pitch, pitch_y_clamped = _clamp_pitch_override(pitch_y_um, min_row_pitch)
     # Issue #1531 (Phase 1): a positive `interior_channel_um` widens both
     # pitches by exactly that amount -- `0.0` (the default) is a strict no-op
     # on both, so every existing caller's `col_pitch`/`row_pitch` (and thus
@@ -1267,14 +1478,17 @@ def _mos_array_layout(
     dummy_cells = []
     for r in range(rows):
         for dc in range(1, dummy + 1):
+            left_x0, right_x0 = _dummy_col_x0s(
+                dc, cols, col_pitch, isolated_col_pitch, share_sd
+            )
             dummy_cells.append(
-                {"row": r, "col": -dc, "x0_um": -dc * col_pitch, "y0_um": r * row_pitch}
+                {"row": r, "col": -dc, "x0_um": left_x0, "y0_um": r * row_pitch}
             )
             dummy_cells.append(
                 {
                     "row": r,
                     "col": cols - 1 + dc,
-                    "x0_um": (cols - 1 + dc) * col_pitch,
+                    "x0_um": right_x0,
                     "y0_um": r * row_pitch,
                 }
             )
@@ -1368,6 +1582,11 @@ def _mos_array_layout(
         "unit": unit,
         "col_pitch_um": col_pitch,
         "row_pitch_um": row_pitch,
+        "min_col_pitch_um": min_col_pitch,
+        "min_row_pitch_um": min_row_pitch,
+        "pitch_x_clamped": pitch_x_clamped,
+        "pitch_y_clamped": pitch_y_clamped,
+        "share_sd": share_sd,
         "cells": cells,
         "dummy_cells": dummy_cells,
         "well_box_um": well_box,
@@ -1386,6 +1605,8 @@ def _res_unit_layout(
     via_enclosure_min_um: float = 0.0,
     end_contact_w_um: float = 0.0,
     end_contact_h_um: float = 0.0,
+    marker_contact_space_um: float = 0.0,
+    poly_heads_only: bool = False,
 ) -> dict[str, Any]:
     """One unit resistor (or unit MoM/MiM cap cell footprint): a poly body
     of ``length_um`` between two contact+local-metal end pads.
@@ -1424,13 +1645,27 @@ def _res_unit_layout(
     resistor body, ``end_contact_h_um + 2 * enclosure`` tall, centred on the
     body (a "dogbone" head). The resistor-ID marker still spans only the
     body segment. With both ``0.0`` every existing caller is unchanged.
+
+    ``marker_contact_space_um`` (issue #3000, ``0.0`` by default) is the
+    minimum space from the body-segment marker -- and so from the salicide
+    block drawn over it -- to the end contact's edge: the head is lengthened
+    until ``contact_region_um`` leaves that much poly between the contact and
+    the marker. gf180mcu's ``SB.4`` needs 0.15um where the generic enclosure
+    margin leaves 0.10um.
+
+    ``poly_heads_only`` (issue #2679, ``False`` by default) draws the
+    ``"poly"`` role as just the two end heads, leaving the body span between
+    them undrawn on the poly layer -- the IHP sg13g2 PCell convention where
+    ``GatPoly`` is only the two abutting contact heads and the resistive body
+    is the ``"marker"`` box alone (``polyres``). Default ``False`` keeps the
+    continuous poly bar with the marker overlaid on its interior.
     """
     rect_contact = end_contact_w_um > 0.0 and end_contact_h_um > 0.0
     contact_side_um = max(CONTACT_SIZE_UM, via_min_w_um)
     enclosure_um = max(ENCLOSURE_MARGIN_UM, via_enclosure_min_um)
     contact_w_um = end_contact_w_um if rect_contact else contact_side_um
     contact_h_um = end_contact_h_um if rect_contact else contact_side_um
-    contact_region_um = contact_w_um + 2 * enclosure_um
+    contact_region_um = contact_w_um + 2 * max(enclosure_um, marker_contact_space_um)
     # Pad extent across the body axis: the body width, grown to enclose a
     # taller-than-body rectangular contact (dogbone head).
     pad_h_um = (
@@ -1445,7 +1680,11 @@ def _res_unit_layout(
     ]
 
     boxes: dict[str, list[tuple[float, float, float, float]]] = {
-        "poly": [(0.0, 0.0, total_len_um, width_um)],
+        "poly": (
+            [(a0, 0.0, a1, width_um) for a0, a1 in seg_positions]
+            if poly_heads_only
+            else [(0.0, 0.0, total_len_um, width_um)]
+        ),
         "contact": [],
         "metal": [],
         "marker": [(contact_region_um, 0.0, contact_region_um + length_um, width_um)],
@@ -1497,6 +1736,8 @@ def _res_array_layout(
     min_spacing_um: float = 0.0,
     end_contact_w_um: float = 0.0,
     end_contact_h_um: float = 0.0,
+    marker_contact_space_um: float = 0.0,
+    poly_heads_only: bool = False,
 ) -> dict[str, Any]:
     """``num`` matched unit resistors (see :func:`_res_unit_layout`), folded
     into ``rows`` parallel rows in boustrophedon ("snake") order once
@@ -1543,6 +1784,7 @@ def _res_array_layout(
     ``end_contact_w_um``/``end_contact_h_um`` (issue #2449) forward to
     :func:`_res_unit_layout`'s rectangular precision-poly end contact; a
     dogbone head taller than the body also widens the row-to-row pitch.
+    ``marker_contact_space_um`` (issue #3000) forwards likewise.
     """
     unit = _res_unit_layout(
         length_um,
@@ -1551,6 +1793,8 @@ def _res_array_layout(
         via_enclosure_min_um,
         end_contact_w_um,
         end_contact_h_um,
+        marker_contact_space_um,
+        poly_heads_only,
     )
     effective_spacing_um = max(spacing_um, min_spacing_um)
     pitch = unit["total_len_um"] + effective_spacing_um
@@ -1603,6 +1847,57 @@ def _res_array_layout(
                 "y0_um": last_row * row_pitch,
             }
         )
+    # Issue #2997: the `series=true` joint jumpers -- one box (absolute um)
+    # per `R<i>_B` -> `R<i + 1>_A` pair, bridging the gap between the two
+    # physically-adjacent end pads. Computed unconditionally (cheap, pure
+    # geometry); only drawn when the caller asks for `series`.
+    left_pad, right_pad = unit["boxes_um"]["metal"]
+    pad_y0 = unit["pad_y0_um"]
+    pad_y1 = pad_y0 + unit["pad_height_um"]
+    jumpers = []
+    for i in range(num - 1):
+        cur, nxt = cells[i], cells[i + 1]
+        if cur["y0_um"] == nxt["y0_um"]:
+            # Same row: bridge the `effective_spacing_um` gap between cur's
+            # exit pad and nxt's entry pad.
+            if cur["direction"] > 0:
+                x0, x1 = cur["x0_um"] + right_pad[2], nxt["x0_um"] + left_pad[0]
+            else:
+                x0, x1 = nxt["x0_um"] + right_pad[2], cur["x0_um"] + left_pad[0]
+            jumpers.append(
+                {
+                    "kind": "row",
+                    "box_um": (x0, cur["y0_um"] + pad_y0, x1, cur["y0_um"] + pad_y1),
+                    "length_um": x1 - x0,
+                }
+            )
+        else:
+            # Fold: the boustrophedon puts the last unit of one row and the
+            # first of the next in the same column, with the exit and entry
+            # pads on the same physical side.
+            # The bridge is grown inward to at least the body width so a
+            # narrow end pad does not leave a sub-minimum-width strip on a
+            # metal-body (`metal_level`) layer.
+            grow = max(
+                0.0,
+                min(unit["height_um"], unit["total_len_um"])
+                - (left_pad[2] - left_pad[0]),
+            )
+            if cur["direction"] > 0:
+                jx0, jx1 = (
+                    cur["x0_um"] + right_pad[0] - grow,
+                    cur["x0_um"] + right_pad[2],
+                )
+            else:
+                jx0, jx1 = cur["x0_um"] + left_pad[0], cur["x0_um"] + left_pad[2] + grow
+            y0, y1 = cur["y0_um"] + pad_y1, nxt["y0_um"] + pad_y0
+            jumpers.append(
+                {
+                    "kind": "fold",
+                    "box_um": (jx0, y0, jx1, y1),
+                    "length_um": y1 - y0,
+                }
+            )
     return {
         "unit": unit,
         "pitch_um": pitch,
@@ -1610,6 +1905,7 @@ def _res_array_layout(
         "cols_per_row": cols_per_row,
         "cells": cells,
         "dummy_cells": dummy_cells,
+        "jumpers": jumpers,
         "spacing_um": effective_spacing_um,
     }
 
@@ -2192,6 +2488,7 @@ def _diff_pair_layout(
     contact_gate_offset_um: float = 0.0,
     bottom_endcap_um: float = 0.0,
     sd_implant_margin_um: float = 0.0,
+    top_endcap_um: float = 0.0,
 ) -> dict[str, Any]:
     """Two matched devices (``"A"``/``"B"``), each split into ``splits``
     unit sub-instances, interleaved in a true common-centroid cross-quad
@@ -2238,6 +2535,7 @@ def _diff_pair_layout(
         contact_gate_offset_um=contact_gate_offset_um,
         bottom_endcap_um=bottom_endcap_um,
         sd_implant_margin_um=sd_implant_margin_um,
+        top_endcap_um=top_endcap_um,
     )
     col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
     row_pitch = unit["bbox_height_um"] + row_spacing_um
@@ -2395,6 +2693,47 @@ def _bjt_unit_layout(emitter_um: float) -> dict[str, Any]:
     }
 
 
+def _bjt_unit_implant_overhang_um(
+    margin_um: float, row_pitch_um: float, unit_height_um: float
+) -> float:
+    """How far a unit's emitter/base-tie implant extends above and below its
+    pad: at least ``margin_um``, grown to half the row gap so the same-type
+    implants of adjacent rows abut and merge (NP.2/PP.2 spacing is wider than
+    the row gap)."""
+    return max(margin_um, (row_pitch_um - unit_height_um) / 2.0)
+
+
+def _insert_bjt_unit_implants(
+    cell: Any,
+    layout: Any,
+    info: dict[str, Any],
+    emitter_layer: Any,
+    base_layer: Any,
+    margin_um: float,
+) -> None:
+    """Draw each unit's P+ emitter / N+ base-tie implant (issue #3587): the
+    pad grown by ``margin_um`` (NP.5b/PP.5b) sideways and by
+    :func:`_bjt_unit_implant_overhang_um` above and below. A no-op when
+    ``margin_um`` is not positive (families without both implant roles)."""
+    if margin_um <= 0:
+        return
+    unit = info["unit"]
+    overhang = _bjt_unit_implant_overhang_um(
+        margin_um, info["row_pitch_um"], unit["height_um"]
+    )
+    emitter_box, base_box = unit["boxes_um"]["active"][:2]
+    for layer, box in ((emitter_layer, emitter_box), (base_layer, base_box)):
+        grown = (
+            box[0] - margin_um,
+            box[1] - overhang,
+            box[2] + margin_um,
+            box[3] + overhang,
+        )
+        li = layout.layer(layer)
+        for c in info["cells"] + info["dummy_cells"]:
+            _insert_boxes(cell, li, layout.dbu, [grown], c["x0_um"], c["y0_um"])
+
+
 def _bjt_array_layout(
     emitter_um: float,
     rows: int,
@@ -2405,6 +2744,7 @@ def _bjt_array_layout(
     ring_gap_side: str = "",
     ring_gap_um: float = 0.0,
     ring_gap_offset_um: float = 0.0,
+    unit_implant_margin_um: float = 0.0,
 ) -> dict[str, Any]:
     """A ``rows`` x ``cols`` common-centroid (or plain-array) grid of
     :func:`_bjt_unit_layout` unit devices, with ``dummy`` flanking columns
@@ -2419,10 +2759,27 @@ def _bjt_array_layout(
     base-tie pads included, look like a second emitter). The collector ring
     is still held :data:`BJT_COLLECTOR_GAP_UM` outside the well, well beyond
     gf180mcu's ``bjt.separation.comp.1`` 0.1um limit.
+
+    ``unit_implant_margin_um`` (issue #3587) is the extension of each unit's
+    emitter/base-tie implant beyond its pad (``0.0`` = no unit implants, the
+    layout is unchanged). When set, the ring is pushed out further so its own
+    implant keeps the same-type implant spacing (NP.2/PP.2) from the units'.
     """
     unit = _bjt_unit_layout(emitter_um)
     col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
     row_pitch = unit["height_um"] + MIN_SAME_LAYER_SPACING_UM
+    collector_gap = BJT_COLLECTOR_GAP_UM
+    if unit_implant_margin_um > 0:
+        overhang = _bjt_unit_implant_overhang_um(
+            unit_implant_margin_um, row_pitch, unit["height_um"]
+        )
+        needed = (
+            MIN_SAME_LAYER_SPACING_UM
+            + unit_implant_margin_um
+            + overhang
+            - WELL_ENCLOSURE_MARGIN_UM
+        )
+        collector_gap = max(collector_gap, math.ceil(needed * 100) / 100)
 
     order = (
         _centroid_order(rows, cols)
@@ -2461,7 +2818,7 @@ def _bjt_array_layout(
     ring = None
     ring_offset = (0.0, 0.0)
     if add_collector_ring:
-        gap = BJT_COLLECTOR_GAP_UM
+        gap = collector_gap
         ring_w = CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM
         inner_x0 = well_box[0] - gap
         inner_y0 = well_box[1] - gap
@@ -2504,6 +2861,7 @@ def _esd_device_layout(
     contact_gate_offset_um: float = 0.0,
     bottom_endcap_um: float = 0.0,
     sd_implant_margin_um: float = 0.0,
+    top_endcap_um: float = 0.0,
 ) -> dict[str, Any]:
     """Grounded-gate multi-finger ESD MOS clamp (issue #569): a single
     :func:`_mos_unit_layout` unit device with ``fingers`` gate stripes across
@@ -2530,6 +2888,7 @@ def _esd_device_layout(
         contact_gate_offset_um=contact_gate_offset_um,
         bottom_endcap_um=bottom_endcap_um,
         sd_implant_margin_um=sd_implant_margin_um,
+        top_endcap_um=top_endcap_um,
     )
 
     ring = None
@@ -2688,6 +3047,48 @@ def _clamp_cut_boxes(
             shape.box = new_box
 
 
+def _ring_grid_dbu(mfg_grid_um: float, dbu: float) -> int:
+    """``mfg_grid_um`` as a whole number of dbu, or ``0`` (no snapping) for
+    ``mfg_grid_um <= 0`` or a grid that is not a whole number of dbu -- the
+    same gate :func:`_clamp_cut_boxes` applies."""
+    grid_dbu = int(round(mfg_grid_um / dbu)) if mfg_grid_um > 0.0 else 0
+    if grid_dbu < 2 or abs(grid_dbu * dbu - mfg_grid_um) > 1e-9:
+        return 0
+    return grid_dbu
+
+
+def _snap_ring_box_um(
+    box_um: tuple[float, float, float, float],
+    mfg_grid_um: float,
+    dbu: float,
+    inward: bool = False,
+) -> tuple[float, float, float, float]:
+    """``box_um`` with every edge moved onto the ``mfg_grid_um`` manufacturing
+    grid (issue #3364), for the ring boxes :func:`_insert_ring` subtracts.
+
+    An off-grid ``ring_padding_um`` puts the ring's outer/inner/gap box edges
+    at arbitrary dbu, so the ``Comp``/implant/``Metal1`` ring polygon gets
+    off-grid vertices (``*.ongrid.1``). The snap is directional so it can only
+    *grow* the drawn ring band: an outer (or gap) box moves outward by up to
+    one grid step (``inward=False``: low edges floor, high edges ceil -- a gap
+    opening only widens), the inner box moves inward (``inward=True``). A no-op
+    for an on-grid box, ``mfg_grid_um <= 0`` or a grid that is not a whole
+    number of dbu.
+    """
+    grid_dbu = _ring_grid_dbu(mfg_grid_um, dbu)
+    if not grid_dbu:
+        return box_um
+    x0, y0, x1, y1 = (int(round(v / dbu)) for v in box_um)
+
+    def _lo(v: int) -> int:
+        return (-(-v // grid_dbu) if inward else v // grid_dbu) * grid_dbu
+
+    def _hi(v: int) -> int:
+        return (v // grid_dbu if inward else -(-v // grid_dbu)) * grid_dbu
+
+    return (_lo(x0) * dbu, _lo(y0) * dbu, _hi(x1) * dbu, _hi(y1) * dbu)
+
+
 def _insert_ring(
     cell: Any,
     layer_index: int,
@@ -2695,6 +3096,7 @@ def _insert_ring(
     outer_box_um: tuple[float, float, float, float],
     inner_box_um: tuple[float, float, float, float],
     gap_box_um: tuple[float, float, float, float] | None = None,
+    mfg_grid_um: float = 0.0,
 ) -> None:
     """Insert an outer-box-minus-inner-box ring as one boolean ``Region`` --
     guarantees a single unbroken polygon (no same-layer internal-space
@@ -2703,8 +3105,17 @@ def _insert_ring(
     ``gap_box_um`` (#434), when given, is subtracted as well: it cuts one
     routing opening through the ring's band on a single side, leaving a
     C-shaped -- still connected, still one polygon -- conductor.
+
+    ``mfg_grid_um`` (> 0) snaps every box edge onto the manufacturing grid
+    first (:func:`_snap_ring_box_um`, issue #3364); the default ``0.0`` keeps
+    the historical dbu-only rounding.
     """
     import klayout.db as kdb
+
+    outer_box_um = _snap_ring_box_um(outer_box_um, mfg_grid_um, dbu)
+    inner_box_um = _snap_ring_box_um(inner_box_um, mfg_grid_um, dbu, inward=True)
+    if gap_box_um is not None:
+        gap_box_um = _snap_ring_box_um(gap_box_um, mfg_grid_um, dbu)
 
     def _to_box(box_um: tuple[float, float, float, float]) -> Any:
         x0, y0, x1, y1 = box_um
@@ -2812,6 +3223,7 @@ def _insert_implant_ring(
     gap_box_um: tuple[float, float, float, float] | None = None,
     gap_side: str | None = None,
     margin_um: float = 0.0,
+    mfg_grid_um: float = 0.0,
 ) -> None:
     """Insert the implant ring covering a tap/collector ring's own ``Comp``
     band (issue #1580), extended ``margin_um`` beyond every one of that band's
@@ -2844,8 +3256,18 @@ def _insert_implant_ring(
     family that resolves no margin keeps byte-for-byte identical geometry.
     """
     if margin_um <= 0:
-        _insert_ring(cell, layer_index, dbu, outer_box_um, inner_box_um, gap_box_um)
+        _insert_ring(
+            cell, layer_index, dbu, outer_box_um, inner_box_um, gap_box_um, mfg_grid_um
+        )
         return
+    # Snap the tap ring's boxes exactly as `_insert_ring` does for the Comp
+    # ring *before* growing them, so the implant keeps its exact margin past
+    # the (snapped) Comp edges (issue #3364). `margin_um` is a grid multiple
+    # on every family that resolves one, so the grown boxes stay on-grid.
+    outer_box_um = _snap_ring_box_um(outer_box_um, mfg_grid_um, dbu)
+    inner_box_um = _snap_ring_box_um(inner_box_um, mfg_grid_um, dbu, inward=True)
+    if gap_box_um is not None:
+        gap_box_um = _snap_ring_box_um(gap_box_um, mfg_grid_um, dbu)
     implant_gap_um = (
         _implant_gap_box_um(gap_box_um, gap_side or "E", margin_um, dbu)
         if gap_box_um is not None
@@ -2868,6 +3290,7 @@ def _insert_implant_ring(
         _grow_box_um(outer_box_um, margin_um, dbu),
         inner_um,
         implant_gap_um,
+        mfg_grid_um,
     )
 
 
@@ -3290,6 +3713,7 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
     pcell_classes.update(_build_mos_array_pcell())
     pcell_classes.update(_build_res_array_pcell())
     pcell_classes.update(_build_cap_array_pcell())
+    pcell_classes.update(_build_cap_vpp_array_pcell())
     pcell_classes.update(_build_guard_ring_pcell())
     pcell_classes.update(_build_well_island_pcell())
     pcell_classes.update(_build_diff_pair_pcell())
@@ -3402,6 +3826,19 @@ _GENERATOR_SPECS: dict[str, _GeneratorSpec] = {
         validate=_cap_array_validate,
         describe=_cap_array_describe,
         layer_params=_cap_array_layer_params,
+    ),
+    "cap_vpp_array": _GeneratorSpec(
+        name="cap_vpp_array",
+        summary=(
+            "Row of a PDK's fixed-layout vertical-parallel-plate capacitor "
+            "cell (sky130's sky130_fd_pr__cap_vpp_*), instantiated as-drawn "
+            "from the PDK GDS on params.pitch_um; ports are read from the "
+            "cell's own pin labels (issue #3100)."
+        ),
+        dbu=0.001,
+        validate=_cap_vpp_array_validate,
+        describe=_cap_vpp_array_describe,
+        layer_params=_cap_vpp_array_layer_params,
     ),
     "guard_ring": _GeneratorSpec(
         name="guard_ring",

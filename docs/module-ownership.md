@@ -50,6 +50,7 @@ The `extract` verb extracts SPICE-compatible netlists from layout. Its implement
 - **extract** (`extract.py`): Core netlist extraction engine; main public API (`run_extract()`) and data structures
 - **extract_abstract** (`extract_abstract.py`): Black-box cell abstraction subsystem (cell-level abstractions with pins, per `--abstract-cells`)
 - **extract_parasitics** (`extract_parasitics.py`): RC-parasitics measurement and critical-net analysis (geometry-based R/C computation)
+- **extract_progress** (`extract_progress.py`): Per-stage wall-clock timing (the response's additive `timing` object) and stderr progress/heartbeat for long runs
 - **extract_report** (`extract_report.py`): Netlist-report-description subsystem — shapes an already-resolved `kdb.Circuit`/`kdb.LayoutToNetlist` into the response's `devices[]`/`nets[]` arrays, `device_counts`, and the layer/net warning lists (`merged_net_labels`, `unbiased_pmos_body_nets`, `single_terminal_nets`, `ignored_layers`, `device_recognition_only_layers`, the `parasitics` deck-gap reports)
 - **extract_spef** (`extract_spef.py`): SPEF (Standard Parasitic Exchange Format) export subsystem (identifiers, netgen integration, RC-star node generation)
 - **decks.extraction** (`decks/extraction.py`): PDK-specific extraction deck management (deck selection, validation)
@@ -128,6 +129,7 @@ The `sim` verb runs SPICE simulations over generated netlists and produces struc
 - **sim** (`sim.py`): Core SPICE simulation engine wrapper, netlist execution, result collection
 - **sim_plot** (`sim_plot.py`): Result plotting and waveform display utilities (matplotlib/HTML output)
 - **sim_crossings** (`sim_crossings.py`): `measurements[].crossings` (issue #2868) — request validation, the per-measurement rawfile `.control` lines, and the linearly interpolated threshold-crossing extraction run inside each corner
+- **sim_injected** (`sim_injected.py`): `monte_carlo.injected` design-owned per-instance mismatch (issue #2911) — request validation, instance resolution against the netlist closure, the seeded per-sample draws, and the deck `.param` lines
 - **sim_remote** (`sim_remote.py`): Remote simulation orchestration (AMI/cloud runner invocation and result retrieval)
 
 ### sta
@@ -162,6 +164,7 @@ The `synthesize` verb maps RTL to a standard-cell netlist against a resolved lib
 
 - `yield-campaign` = `cli/yield_campaign_cmd.py` + `yield_campaign.py` (multi-run campaign orchestration; also borrows `yield_cmd.py`'s text-report printer for its own text output)
 - `yield-sensitivity` = `cli/yield_sensitivity_cmd.py` + `yield_sensitivity.py` (parameter sensitivity ranking for a completed campaign)
+- `yield-threshold` = `cli/yield_threshold_cmd.py` + `probit.py` (probit threshold fit for binary-outcome decision circuits; pure Python, no native extension, issue #2976)
 
 Both fit the single-implementation-module pattern (see "Single-File Verbs" below) once their own cmd/core pair is counted separately from `yield`'s.
 
@@ -169,7 +172,7 @@ Both fit the single-implementation-module pattern (see "Single-File Verbs" below
 
 The following verbs have all their implementation in a single module (`src/klayout_tools/<verb>.py`) with a corresponding CLI module (`src/klayout_tools/cli/<verb>_cmd.py`):
 
-arith_gen, cells, clip, components, design_centering, draw, drc, economy, env_provenance, equiv, erc, eval, kb, layers, layout_metrics, lef_abstract, mom, pex, power, precheck, render, report, reset_coverage, ring_check, size, socket_check, stats, techmap, trajectory, version, wave, yield_campaign, yield_sensitivity
+arith_gen, cells, clip, components, design_centering, draw, drc, economy, env_provenance, equiv, erc, eval, kb, layers, layout_metrics, lef_abstract, mom, pex, power, precheck, render, report, reset_coverage, ring_check, size, socket_check, stats, tap_distance, techmap, trajectory, version, wave, yield_campaign, yield_sensitivity
 
 These verbs follow the simpler pattern: a single implementation module (e.g., `extract.py`) paired with a CLI command module (e.g., `cli/extract_cmd.py`).
 

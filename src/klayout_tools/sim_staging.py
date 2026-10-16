@@ -237,7 +237,8 @@ class StagedModelAsset:
     ``options.osdi_preload`` binary) or ``"dependency"`` (reached through a
     library's ``.include``/``.lib``). ``sha256`` hashes the bytes the worker
     actually receives -- the rewritten text when ``rewritten`` is true, the
-    source file's own bytes otherwise.
+    source file's own bytes otherwise; ``source_sha256`` always hashes the
+    original source bytes (equal to ``sha256`` when ``rewritten`` is false).
     """
 
     name: str
@@ -246,6 +247,7 @@ class StagedModelAsset:
     source_path: str
     sha256: str
     rewritten: bool
+    source_sha256: str = ""
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -254,6 +256,7 @@ class StagedModelAsset:
             "kind": self.kind,
             "sha256": self.sha256,
             "rewritten": self.rewritten,
+            "source_sha256": self.source_sha256 or self.sha256,
         }
 
 
@@ -381,6 +384,67 @@ def netlist_closure(
     for target, reason in staged.host_resolved_detail:
         entries.append({"target": target, "sha256": None, "unhashed_reason": reason})
     return entries
+
+
+_INLINE_COMMENT_RE = re.compile(r"(?:^|\s)[;$].*$")
+
+
+def _normalized_netlist_text(text: str) -> str:
+    """One netlist file reduced to the lines that define the circuit
+    (issue #3074): ``*`` comment lines and trailing ``;``/``$`` comments
+    dropped, blank lines dropped, ``+`` continuations folded, whitespace
+    collapsed, case folded, and the target of an ``.include``/``.inc``
+    replaced by its directive name (location is not content; the included
+    file's own text is hashed in its place). Line order is left untouched:
+    ``.param``/``.model`` order can matter, so a reorder is a mismatch."""
+    from ._paths import fold_spice_continuations
+
+    lines: list[str] = []
+    for raw in text.splitlines():
+        line = _INLINE_COMMENT_RE.sub("", raw).strip()
+        if not line or line.startswith("*"):
+            continue
+        lines.append(line)
+    out: list[str] = []
+    for line in fold_spice_continuations(lines):
+        match = _INCLUDE_RE.match(line)
+        if match:
+            line = match.group("prefix")
+        out.append(" ".join(line.lower().split()))
+    return "\n".join(out)
+
+
+def netlist_identity(
+    request: dict[str, Any], netlist_path: str
+) -> tuple[str | None, str | None]:
+    """The normalised netlist identity (issue #3074) as ``(identity, error)``.
+
+    ``identity`` is ``"sha256:<hex>"`` over :func:`_normalized_netlist_text`
+    of the netlist and each file of its resolved include closure, in the
+    resolution order :func:`netlist_closure` reports. It is ``None`` -- with
+    ``error`` saying why -- when the closure cannot be fully read (an
+    unresolvable include, or a directive left to the executing host whose
+    content is not available here): a partial identity could falsely match.
+    """
+    try:
+        staged = stage_netlist(
+            netlist_path,
+            netlist_staged_name="netlist.cir",
+            roots=host_resolved_roots(request),
+        )
+        if staged.host_resolved_detail:
+            targets = ", ".join(t for t, _ in staged.host_resolved_detail)
+            return None, (
+                f"include(s) resolved by the executing host are not hashable: {targets}"
+            )
+        digest = hashlib.sha256()
+        for item in staged.files:
+            text, _ = _read_text(item.source_path or item.local_path or "")
+            digest.update(_normalized_netlist_text(text).encode("utf-8"))
+            digest.update(b"\0")
+    except IncludeStagingError as exc:
+        return None, str(exc)
+    return f"sha256:{digest.hexdigest()}", None
 
 
 def stage_sim_netlist(
@@ -533,6 +597,7 @@ def _stage_model_closure(
                 source_path=item.local_path,
                 sha256=_staged_sha256(staged),
                 rewritten=staged.content is not None,
+                source_sha256=_file_sha256(item.local_path),
             )
         )
 
@@ -573,12 +638,25 @@ def _declared_lib_refs(request: dict[str, Any]) -> Iterator[tuple[str, str, Any]
     models = request.get("models") or {}
     if models.get("lib") is not None:
         yield "models.lib", "model library", models.get("lib")
-    for index, entry in enumerate((request.get("corners") or {}).get("process") or []):
+    corners = request.get("corners") or {}
+    declared = [
+        ("process", index, entry)
+        for index, entry in enumerate(corners.get("process") or [])
+    ] + [
+        ("units", index, unit.get("process") if isinstance(unit, dict) else None)
+        for index, unit in enumerate(corners.get("units") or [])
+    ]
+    for axis, index, entry in declared:
         sections = entry.get("sections") if isinstance(entry, dict) else None
+        prefix = (
+            f"corners.process[{index}]"
+            if axis == "process"
+            else (f"corners.units[{index}].process")
+        )
         for sec_index, section in enumerate(sections or []):
             if isinstance(section, dict) and "lib" in section:
                 yield (
-                    f"corners.process[{index}].sections[{sec_index}].lib",
+                    f"{prefix}.sections[{sec_index}].lib",
                     "corner section library",
                     section.get("lib"),
                 )
@@ -660,7 +738,13 @@ def _rewrite_worker_request(
     models = worker.get("models")
     if isinstance(models, dict) and models.get("lib") in lib_names:
         models["lib"] = lib_names[models["lib"]]
-    for entry in (worker.get("corners") or {}).get("process") or []:
+    worker_corners = worker.get("corners") or {}
+    process_entries = list(worker_corners.get("process") or []) + [
+        unit.get("process")
+        for unit in worker_corners.get("units") or []
+        if isinstance(unit, dict)
+    ]
+    for entry in process_entries:
         if not isinstance(entry, dict):
             continue
         for section in entry.get("sections") or []:
@@ -679,12 +763,15 @@ def _rewrite_worker_request(
 
 
 def _staged_sha256(staged: StagedFile) -> str:
-    digest = hashlib.sha256()
     if staged.content is not None:
-        digest.update(staged.content.encode("utf-8"))
-        return digest.hexdigest()
+        return hashlib.sha256(staged.content.encode("utf-8")).hexdigest()
     assert staged.local_path is not None
-    with open(staged.local_path, "rb") as handle:
+    return _file_sha256(staged.local_path)
+
+
+def _file_sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
         for chunk in iter(lambda: handle.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest()

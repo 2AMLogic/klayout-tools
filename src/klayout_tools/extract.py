@@ -45,7 +45,9 @@ family/deck pairing has no curated table entry is an :class:`ExtractError`
 naming what was tried -- never a silent fallback to the bare ``M``-card
 form. When ``--pdk``/``--pdk-root`` are omitted, the written SPICE is
 unchanged from before #209 (the bare ``M``-card form, byte-identical to the
-existing golden tests).
+existing golden tests). That bare form is not mismatch-capable: it skips any
+statistical-mismatch expressions a PDK keeps in the subcircuit wrapper, so
+extract with ``--pdk`` before running Monte Carlo.
 
 Device recognition: each deck's ``active``/``poly``/``nwell`` layers extract
 NMOS (``active - nwell``) and PMOS (``active & nwell``) via KLayout's native
@@ -132,8 +134,10 @@ exercised by ``tests/test_extract.py``.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -168,6 +172,7 @@ from .decks import (
     InvalidDeckOptionError,
     InvalidLabelLayerError,
     ParasiticsDeck,
+    SizeFilter,
     UnknownExtractionDeckError,
     UnmodelledDeviceFamily,
     deck_source_path,
@@ -202,6 +207,7 @@ from .extract_abstract import (
     lef_layer_probe_roles,
 )
 from .extract_abstract import _sanitize_instance_name as _sanitize_instance_name
+from .extract_netselect import NetSelectors
 
 # The RC-parasitics subsystem lives in its own module (issue #1572, following
 # the same split as `extract_abstract.py`/`extract_spef.py` above). This
@@ -236,9 +242,11 @@ from .extract_passive_regions import (
     _build_mom_capacitor_extractor,
     _capacitor_plate_regions,
     _capacitor_top_via_exclusions,
+    _detect_unclaimed_resistor_markers,
     _diode_terminal_region,
     _exclude_capacitor_top_via_overlap,
     _resolve_resistors,
+    _unselected_capacitor_variant_warnings,
 )
 from .extract_passive_regions import (
     _capacitor_top_via_overlap_region as _capacitor_top_via_overlap_region,
@@ -256,6 +264,7 @@ from .extract_passive_regions import (
     mom_capacitor_device_class as mom_capacitor_device_class,
 )
 from .extract_passive_regions import mom_capacitor_has_feed as mom_capacitor_has_feed
+from .extract_progress import StageTimer, active_timer, stage
 
 # The netlist-report-description subsystem lives in its own module (issue
 # #2070, the fourth split of this one after `extract_abstract.py`,
@@ -292,7 +301,7 @@ from .extract_report import (
 # redundant `X as X` aliases mark them explicit re-exports, so neither reads as
 # an unused import in a module that never calls them itself.
 from .extract_spef import ExtractError as ExtractError
-from .extract_spef import _write_spef
+from .extract_spef import _unescape_spice_safe_net_name, _write_spef
 from .extract_spef import def_net_instance_pins as def_net_instance_pins
 from .metrics import is_registered
 from .parasitic_integrity import empty_integrity_summary
@@ -442,6 +451,43 @@ _SPICE_GLOBAL_GROUND_NODE = "0"
 #: numerical anchor for the DC solve, not a circuit element.
 SUBSTRATE_DC_TIE_RESISTANCE_OHM = 1e12
 
+
+def substrate_tie_written_ohms(requested_ohms: float) -> float:
+    """Resistance (ohms) the substrate tie card is actually written with.
+
+    ``--substrate-tie-ohms 0`` asks for a *hard* tie, but a zero-ohm ``R``
+    card is not legal SPICE (ngspice errors or clamps it). A hard tie is
+    therefore written as the :data:`_MIN_PARASITIC_R_OHM` floor (1 mohm --
+    the value the issue #3089 measurements used for a hard-grounded
+    substrate); every positive request is written verbatim.
+    """
+    return requested_ohms if requested_ohms > 0 else _MIN_PARASITIC_R_OHM
+
+
+def substrate_tie_mode(requested_ohms: float) -> str:
+    """``"hard"`` for a ``0`` request, ``"shunt"`` otherwise (issue #3089)."""
+    return "hard" if requested_ohms == 0 else "shunt"
+
+
+def _resolve_substrate_tie_ohms(value: float | None, parasitics: bool) -> float:
+    """Validate ``--substrate-tie-ohms`` (issue #3089) and return the
+    requested tie resistance, defaulting to
+    :data:`SUBSTRATE_DC_TIE_RESISTANCE_OHM` when the flag was not given.
+
+    Raises :class:`ExtractError` when given without ``--parasitics`` (the
+    tie only exists in a parasitic netlist) or when not a finite value
+    ``>= 0``.
+    """
+    _require_parasitics("--substrate-tie-ohms", value, parasitics)
+    if value is None:
+        return SUBSTRATE_DC_TIE_RESISTANCE_OHM
+    if not math.isfinite(value) or value < 0:
+        raise ExtractError(
+            f"--substrate-tie-ohms must be a finite value >= 0 (got {value!r})"
+        )
+    return float(value)
+
+
 #: Machine-readable declaration of what `--parasitics` does and does not
 #: model (issue #728, updated by #760). Most `C` cards `_inject_parasitics`
 #: emits hang off the deck's ground/substrate net; since issue #760 a net
@@ -498,7 +544,31 @@ PARASITIC_MODEL_SCOPE: dict[str, str] = {
 }
 
 
-def _parasitic_model_header_comment() -> str:
+def _substrate_tie_header_line(requested_ohms: float) -> str:
+    """The ``* - substrate tie: ...`` header line (issue #3089)."""
+    written = substrate_tie_written_ohms(requested_ohms)
+    if substrate_tie_mode(requested_ohms) == "hard":
+        return (
+            f"* - substrate tie: hard tie to ground ({written:g} ohm; "
+            "SPICE has no zero-ohm resistor) -- the substrate node is "
+            "DC-fixed at 0 V in transient analysis"
+        )
+    if requested_ohms >= SUBSTRATE_DC_TIE_RESISTANCE_OHM:
+        consequence = (
+            "the substrate is capacitively floating in transient analysis "
+            "(DC reference only); see --substrate-tie-ohms"
+        )
+    else:
+        consequence = (
+            "the substrate is held near 0 V in transient analysis through "
+            "this resistance"
+        )
+    return f"* - substrate tie: {written:g} ohm to ground -- {consequence}"
+
+
+def _parasitic_model_header_comment(
+    substrate_tie_ohms: float = SUBSTRATE_DC_TIE_RESISTANCE_OHM,
+) -> str:
     """Render :data:`PARASITIC_MODEL_SCOPE` as `*`-prefixed SPICE comment
     lines for the written netlist's header (issue #728).
 
@@ -514,7 +584,45 @@ def _parasitic_model_header_comment() -> str:
     lines = ["* parasitic model (--parasitics):"]
     for key, value in PARASITIC_MODEL_SCOPE.items():
         lines.append(f"* - {key}: {value}")
+    lines.append(_substrate_tie_header_line(substrate_tie_ohms))
     return "\n".join(lines)
+
+
+def _fixed_value_capacitor_classes(
+    deck: Any,
+    device_counts: Mapping[str, int],
+    model_bindings: Mapping[str, Any] | None,
+) -> list[tuple[str, int]]:
+    """``(class, count)`` for every extracted MiM capacitor class that is
+    written as a fixed-value ``C`` card rather than a ``--pdk`` subcircuit
+    call (issue #3090): no ``--pdk`` at all, or a class with no curated
+    ``_CAPACITOR_MODEL_TABLE`` binding."""
+    bound = model_bindings or {}
+    return [
+        (capacitor.name, device_counts[capacitor.name])
+        for capacitor in deck.capacitors
+        if device_counts.get(capacitor.name, 0) > 0 and capacitor.name not in bound
+    ]
+
+
+def _fixed_value_capacitor_note(classes: Sequence[tuple[str, int]]) -> list[str]:
+    """The one-line statement (``warnings[]`` entry / ``--parasitics`` header
+    comment) that these capacitors are fixed values PDK corners cannot move,
+    as a zero- or one-element list (empty when ``classes`` is empty)."""
+    if not classes:
+        return []
+    total = sum(count for _, count in classes)
+    names = ", ".join(f"'{name}'" for name, _ in classes)
+    device_word = "capacitor" if total == 1 else "capacitors"
+    return [
+        f"{total} drawn {device_word} ({names}) written as a fixed-value "
+        "'C' card (the deck's nominal area+perimeter value) -- PDK process "
+        "corners (e.g. mimcap_ff/mimcap_ss) do not apply to it, so "
+        "schematic-vs-extracted deltas at non-typical corners include a "
+        "capacitor-corner term; pass --pdk to bind the PDK capacitor "
+        "subcircuit instead. See docs/cli/extract.md's 'SPICE model binding' "
+        "section."
+    ]
 
 
 #: Relative permittivity assumed for the `klt mom` cross-check
@@ -932,6 +1040,76 @@ def _substrate_spreading_block(
     return block
 
 
+def _build_net_selectors(
+    critical_net_patterns: Sequence[str] | None,
+    critical_net_all: bool,
+    critical_net_excludes: Sequence[str] | None,
+    parasitics_net_patterns: Sequence[str] | None,
+    strict_net_patterns: bool,
+    *,
+    parasitics: bool,
+) -> NetSelectors | None:
+    """Validate the pattern/all-nets selector flags (issue #2974); ``None``
+    when none was given, so every report stays byte-identical to before."""
+    if critical_net_excludes and not critical_net_all:
+        raise ExtractError("--critical-net-exclude requires --critical-net-all")
+    selecting = critical_net_patterns or critical_net_all or parasitics_net_patterns
+    if not selecting and not strict_net_patterns:
+        return None
+    if not selecting:
+        raise ExtractError(
+            "--strict-net-patterns requires --critical-net-pattern, "
+            "--critical-net-all or --parasitics-net-pattern"
+        )
+    if not parasitics:
+        raise ExtractError(
+            "--critical-net-pattern/--critical-net-all/--parasitics-net-pattern "
+            "require --parasitics"
+        )
+    return NetSelectors(
+        critical_patterns=tuple(critical_net_patterns or ()),
+        critical_all=critical_net_all,
+        critical_excludes=tuple(critical_net_excludes or ()),
+        parasitics_patterns=tuple(parasitics_net_patterns or ()),
+        strict=strict_net_patterns,
+        error=ExtractError,
+    )
+
+
+def _selects_critical(net_selectors: NetSelectors | None) -> bool:
+    return net_selectors is not None and net_selectors.has_critical
+
+
+def _adopt_resolved_net_selectors(
+    net_selectors: NetSelectors | None,
+    critical_nets_set: frozenset[str] | None,
+    parasitics_nets_set: frozenset[str] | None,
+    distributed_rc: bool,
+) -> tuple[frozenset[str] | None, frozenset[str] | None]:
+    """Take the net sets :class:`NetSelectors` resolved during extraction
+    (issue #2974); ``--distributed-rc`` needs the resolved set non-empty."""
+    if net_selectors is None:
+        return critical_nets_set, parasitics_nets_set
+    critical_nets_set = net_selectors.critical_nets or critical_nets_set
+    parasitics_nets_set = net_selectors.parasitics_nets or parasitics_nets_set
+    if distributed_rc and not critical_nets_set:
+        raise ExtractError(
+            "--distributed-rc requires --critical-net: the requested "
+            "--critical-net-pattern/--critical-net-all resolved to no net"
+        )
+    return critical_nets_set, parasitics_nets_set
+
+
+def _report_net_selectors(
+    net_selectors: NetSelectors | None,
+    parasitics_report: dict[str, Any],
+    warnings: list[str],
+) -> None:
+    if net_selectors is not None:
+        parasitics_report.update(net_selectors.echo())
+        warnings.extend(net_selectors.warnings)
+
+
 def _require_parasitics(flag: str, value: Any, parasitics: bool) -> None:
     """Reject ``flag`` when it was given without ``--parasitics``.
 
@@ -1095,6 +1273,78 @@ def _label_layers_from_report(
     return overrides or None
 
 
+def _spef_warnings(
+    def_net_connections: Any,
+    def_pins: Any,
+    declared_pins: Any,
+    skipped_nets: Sequence[str],
+) -> list[str]:
+    """Warnings for the ``--spef`` writer (issue #3257 gaps A and C)."""
+    out: list[str] = []
+    # Gap A: DEF connectivity without a declared-port set leaves every
+    # labelled net a bare-name port, which OpenSTA cannot attach
+    # (`STA-1656`). A warning only -- the SPEF bytes are unchanged.
+    if def_net_connections and def_pins is None and declared_pins is None:
+        out.append(
+            "--def-net-connections without --def-pins/--pins: every "
+            "labelled net is written as a top-level port, so OpenSTA "
+            "read_spef cannot attach the nets (bare-name port hubs, "
+            "STA-1656) and timing stays identical to an unannotated "
+            "run. Pass --def-pins <routed.def> (or --pins) to declare "
+            "only the real ports."
+        )
+    # Gap C: same-named floating nets omitted from the SPEF.
+    if skipped_nets:
+        shown = ", ".join(skipped_nets[:5])
+        more = len(skipped_nets) - 5
+        out.append(
+            f"--spef: omitted *D_NET blocks for {len(skipped_nets)} "
+            "duplicate-named or unlabelled ($N) net(s) with no DEF net "
+            f"(floating cell outputs / unrouted supplies): {shown}"
+            + (f", ... (+{more} more)" if more > 0 else "")
+            + ". Such *D_NET blocks are rejected by OpenSTA "
+            "(STA-1650) and attach to no driver."
+        )
+    return out
+
+
+def _staged(name: str, func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+    """Call ``func`` as timed stage ``name`` (issue #3181)."""
+    with stage(name):
+        return func(*args, **kwargs)
+
+
+def _timed(func: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]:
+    """Wrap :func:`run_extract` with the issue #3181 stage timer.
+
+    Adds the additive ``timing`` object to the report and, when the caller
+    passes ``progress=True``, narrates stage starts/finishes and a heartbeat
+    to stderr (never stdout); ``progress="heartbeat"`` emits the heartbeat
+    alone. ``progress`` is consumed here, so the wrapped function's own
+    signature is unchanged.
+    """
+
+    @functools.wraps(func)
+    def wrapper(
+        *args: Any, progress: bool | str = False, **kwargs: Any
+    ) -> dict[str, Any]:
+        timer = StageTimer(progress=progress)
+        with active_timer(timer):
+            result = func(*args, **kwargs)
+        result["timing"] = timer.report()
+        return result
+
+    return wrapper
+
+
+def _require_parasitics_for_resistance_graph(
+    resistance_graph: bool, parasitics: bool
+) -> None:
+    if resistance_graph and not parasitics:
+        raise ExtractError("--resistance-graph requires --parasitics")
+
+
+@_timed
 def run_extract(
     path: str,
     deck_name: str,
@@ -1116,7 +1366,13 @@ def run_extract(
     def_net_names: bool = False,
     critical_nets: Sequence[str] | None = None,
     parasitics_nets: Sequence[str] | None = None,
+    critical_net_patterns: Sequence[str] | None = None,
+    critical_net_all: bool = False,
+    critical_net_excludes: Sequence[str] | None = None,
+    parasitics_net_patterns: Sequence[str] | None = None,
+    strict_net_patterns: bool = False,
     parasitics_top_cell_only: bool = False,
+    resistance_graph: bool = False,
     distributed_rc: bool = False,
     resistance_paths: Sequence[tuple[int, str, str]] | None = None,
     resistance_path_max_nodes: int | None = None,
@@ -1136,8 +1392,17 @@ def run_extract(
     substrate_spreading_net: str | None = None,
     hierarchical_cells: Sequence[str] = (),
     no_netlist: bool = False,
+    substrate_tie_ohms: float | None = None,
+    probes: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """Extract a schematic-equivalent netlist from the layout at ``path``.
+
+    The report carries an additive ``timing`` object (issue #3181):
+    ``stages`` (wall seconds per named stage), ``total_seconds`` and
+    ``unattributed_seconds``. The ``progress`` keyword (added by the
+    ``_timed`` wrapper, not part of the signature below) narrates stages to
+    stderr when ``True`` and emits only the 30 s heartbeat for
+    ``"heartbeat"``; the default writes nothing.
 
     ``no_netlist`` (issue #2850, ``klt extract --no-netlist``) is the opt-in
     census-only mode: nothing is written beside the input (or anywhere
@@ -1473,6 +1738,13 @@ def run_extract(
     byte-identical to before this feature existed, and the block is then
     ``null``.
 
+    ``probes`` (``klt extract --probe``, issue #2986) is a sequence of
+    ``{"name", "layer", "x", "y"}`` point queries (``x``/``y`` in um, the top
+    cell's frame; ``layer`` one of the deck's label roles ``well``/``poly``/
+    ``metal<i>``) answered on this run's own extraction -- no second pass --
+    into the response's ``probes`` array. An unknown role is an
+    :class:`ExtractError`; a point on no extracted net is ``found: false``.
+
     ``def_net_names`` (``klt extract --def-net-names``, issue #951, Epic #700
     Phase 3) names each routed net from the **DEF net name** KLayout's LEF/DEF
     reader stored on its geometry as GDS shape property
@@ -1558,6 +1830,14 @@ def run_extract(
     ``parasitics_nets`` above. ``False`` (the default) computes neither field
     and runs no extra ``Region`` work at all -- byte-identical to before this
     feature existed.
+
+    ``resistance_graph`` (``klt extract --resistance-graph``, issue #2982,
+    Stage 3.D5 increment 3) adds the opt-in ``resistance_graph`` object to each
+    ``parasitics.nets[]`` entry: the terminal-pair effective-resistance matrix
+    of the net's geometry-derived resistor graph, with coverage counts and
+    diagnostics. Purely additive -- ``resistance_ohm``, the ladder and every
+    other field are unchanged, and ``False`` (the default) adds no key.
+    Requires ``parasitics=True``. See :func:`_compute_parasitics`.
 
     ``distributed_rc`` (``klt extract --distributed-rc``, issue #977, Epic
     #709 Phase 2b) replaces the single-lumped-element star/Gamma-shunt R/C
@@ -1802,6 +2082,13 @@ def run_extract(
             "voltage_domain_warnings": [
                 {"marker": "<layer>/<datatype>", "description": str}, ...
             ],
+            "unsupported_devices": [
+                {
+                    "kind": str, "marker": "<layer>/<datatype>",
+                    "count": int, "bbox_um": {...}, "description": str,
+                },
+                ...
+            ],
             "merged_net_labels": [
                 {"net": str, "labels": [str, ...]}, ...
             ],
@@ -1841,6 +2128,17 @@ def run_extract(
             # caller's own role -> [layer, datatype] (or `null`) mapping
             # otherwise -- issue #2656.
             "label_layers": {<role>: [int, int] | None, ...} | None,
+            # `--probe` point-to-net results, request order, `[]` when none
+            # was given -- issue #2986.
+            "probes": [
+                {
+                    "name": str, "layer": str, "x_um": float, "y_um": float,
+                    "found": bool,
+                    "net": str | None,  # a `nets[].name`
+                    "cluster_id": int | None,  # that net's `nets[].net_id`
+                },
+                ...
+            ],
             "pdk": {
                 "variant": str,
                 # {path, scope} (issue #1376), never a raw path -- see
@@ -2092,21 +2390,23 @@ def run_extract(
     to the parent deck instead, so nothing is dropped silently.
 
     ``hierarchical_cells`` (``klt extract --hierarchical-cells CELL[,CELL...]``,
-    issue #2722, increment 1) opts into **hierarchical SPICE emission**: one
-    ``.SUBCKT <cell>`` per named (non-nested) cell definition, holding that
-    cell's own devices, plus the top ``.SUBCKT`` carrying the remaining
-    devices and one ``X`` card per *placement* of each named cell. It exists
+    issue #2722) opts into **hierarchical SPICE emission**: one
+    ``.SUBCKT <cell>`` per named cell definition, holding that
+    cell's own devices (and ``X`` cards for named cells nested in it), plus
+    the top ``.SUBCKT`` carrying the remaining devices and one ``X`` card per
+    *placement* of each named cell. It exists
     so per-circuit ``klt lvs`` options (``options.combine_devices_per_circuit``)
     have layout-side circuits to key on. Unlike ``subcircuit_cell`` this is
     the primary deck, not a second artifact; ``devices[]``/``nets[]``/
     ``device_count`` keep describing the *flat* extraction (so they are
     unchanged by the option) and a ``hierarchy`` block is added to the
     response *only* when the option was given. Omitted/empty (the default),
-    the flat bytes and JSON are unchanged. Errors (all before any output is
-    written): an absent, top, or unreachable cell; a selection where one
-    cell contains another; placements of one cell that are not electrically
-    identical; and any combination with ``parasitics``, ``subcircuit_cell``
-    or ``abstract_cell_patterns`` (deferred to issue #2916). See
+    the flat bytes and JSON are unchanged. A selected cell containing another
+    selected cell yields a nested ``.SUBCKT`` tree (issue #2916). Errors (all
+    before any output is written): an absent, top, or unreachable cell;
+    placements of one cell that are not electrically identical; and any
+    combination with ``parasitics``, ``subcircuit_cell`` or
+    ``abstract_cell_patterns`` (rejected by design, issue #2916). See
     :mod:`klayout_tools.extract_hierarchy` and ``docs/cli/extract.md``'s
     "Hierarchical output" section.
 
@@ -2426,6 +2726,13 @@ def run_extract(
     # no branch to an already heavily-branching function.
     _require_parasitics("--substrate-spreading", substrate_spreading_net, parasitics)
 
+    # `--substrate-tie-ohms` (issue #3089): validated up front, same helper
+    # route as above; `substrate_tie_requested` is the default (1e12) when
+    # the flag was not given.
+    substrate_tie_requested = _resolve_substrate_tie_ohms(
+        substrate_tie_ohms, parasitics
+    )
+
     # `--critical-net` (issue #976) requires `--parasitics`: it scopes the
     # lateral-coupling pass onto the same lumped-RC extraction this flag
     # piggybacks on, same reasoning as `--mom-net`/`--spef` above.
@@ -2453,11 +2760,27 @@ def run_extract(
     if parasitics_top_cell_only and not parasitics:
         raise ExtractError("--parasitics-top-cell-only requires --parasitics")
 
+    # `--resistance-graph` (issue #2982) attaches to the same per-net
+    # `parasitics.nets[]` entries, so it needs `--parasitics`.
+    _require_parasitics_for_resistance_graph(resistance_graph, parasitics)
+
     # `--distributed-rc` (issue #977) requires `--critical-net`: it reuses
     # that flag's own net set as the "which nets get the ladder" scope
     # rather than inventing a second net classification mechanism -- with
     # nothing named there is nothing to scope this onto.
-    if distributed_rc and not critical_nets_set:
+    net_selectors = _build_net_selectors(
+        critical_net_patterns,
+        critical_net_all,
+        critical_net_excludes,
+        parasitics_net_patterns,
+        strict_net_patterns,
+        parasitics=parasitics,
+    )
+    if (
+        distributed_rc
+        and not critical_nets_set
+        and not _selects_critical(net_selectors)
+    ):
         raise ExtractError("--distributed-rc requires --critical-net")
 
     # `--resistance-path` (issue #2765): validated up front, in a helper so
@@ -2546,6 +2869,9 @@ def run_extract(
     hierarchy_placements: dict[int, Any] = {}
     subcircuit_info: dict[str, Any] = {}
     missing_flavour_markers: list[dict[str, Any]] = []
+    unsupported_devices: list[dict[str, Any]] = []
+    probe_results: list[dict[str, Any]] = []
+    dotted_renames: list[tuple[str, str, str]] = []
 
     (
         netlist,
@@ -2582,7 +2908,9 @@ def run_extract(
         def_net_names=def_net_names,
         critical_nets=critical_nets_set,
         parasitics_nets=parasitics_nets_set,
+        net_selectors=net_selectors,
         parasitics_top_cell_only=parasitics_top_cell_only,
+        resistance_graph=resistance_graph,
         def_pins=def_pins,
         pin_source_cells=pin_source_cells,
         # Issue #2854: rename each surviving promoted pin net to its
@@ -2599,6 +2927,16 @@ def run_extract(
         # `--pdk-root` resolved one above.
         pdk_info=pdk_info,
         missing_flavour_markers=missing_flavour_markers,
+        unsupported_devices=unsupported_devices,
+        probes=probes,
+        probe_results=probe_results,
+        dotted_renames_out=dotted_renames,
+    )
+
+    # `--critical-net-pattern`/`--parasitics-net-pattern` (issue #2974): the
+    # selectors were resolved against the extracted nets inside the call above.
+    critical_nets_set, parasitics_nets_set = _adopt_resolved_net_selectors(
+        net_selectors, critical_nets_set, parasitics_nets_set, distributed_rc
     )
 
     # `--subcircuit` (issue #2245), layout-dependent half: both rejections
@@ -2741,6 +3079,15 @@ def run_extract(
             "unbiased_pmos_body_nets[] for the full list. See "
             "docs/cli/extract.md's 'Parasitic (RC) extraction' section."
         )
+
+    # Drawn MiM capacitors written as a fixed-value `C` card (issue #3090): the
+    # value is the deck's nominal area+perimeter law, so PDK process-corner
+    # sections cannot move it (a `--pdk`-bound `X` subckt call can). One
+    # aggregate line, plus the same fact in the `--parasitics` header below.
+    fixed_value_capacitor_note = _fixed_value_capacitor_note(
+        _fixed_value_capacitor_classes(deck, device_counts, model_bindings)
+    )
+    warnings.extend(fixed_value_capacitor_note)
 
     # `--pdk`-bound device classes whose target subcircuit has no parameter
     # for something the extractor measured (issue #695): today, only a
@@ -2996,6 +3343,7 @@ def run_extract(
                 coupled_pairs,
                 ground_net,
                 distributed_rc_nets=(critical_nets_set if distributed_rc else None),
+                substrate_tie_ohms=substrate_tie_requested,
                 mom_rlc_inductor=(
                     (mom_rlc_net, mom_rlc_inductance_nh)
                     if mom_rlc_net is not None and mom_rlc_inductance_nh is not None
@@ -3024,7 +3372,10 @@ def run_extract(
                 # a DC tie to anchor either -- the block is still present
                 # (schema stability), just empty.
                 "substrate_dc_tie": {
-                    "resistance_ohm": SUBSTRATE_DC_TIE_RESISTANCE_OHM,
+                    "resistance_ohm": substrate_tie_written_ohms(
+                        substrate_tie_requested
+                    ),
+                    "mode": substrate_tie_mode(substrate_tie_requested),
                     "nets": [],
                 },
                 # Additive field (issue #2764): no nets injected, so the
@@ -3075,7 +3426,9 @@ def run_extract(
         # `warnings` instead, mirroring `--pins`' "declared name matched no
         # promoted net" convention.
         parasitics_report["critical_nets"] = (
-            list(critical_nets) if critical_nets else []
+            sorted(critical_nets_set or ())
+            if _selects_critical(net_selectors)
+            else (list(critical_nets) if critical_nets else [])
         )
         # Additive field (issue #1700): echoes the `--parasitics-net` request
         # back verbatim (as given, not sorted/deduplicated) -- `[]` when the
@@ -3083,8 +3436,13 @@ def run_extract(
         # `parasitics.nets[]` would be indistinguishable from a layout whose
         # other nets genuinely had no ground-eligible geometry.
         parasitics_report["parasitics_nets"] = (
-            list(parasitics_nets) if parasitics_nets else []
+            sorted(parasitics_nets_set or ())
+            if net_selectors is not None and net_selectors.parasitics_patterns
+            else (list(parasitics_nets) if parasitics_nets else [])
         )
+        # Additive fields (issue #2974): the requested selectors, present
+        # only when one was given, plus their zero-match warnings.
+        _report_net_selectors(net_selectors, parasitics_report, warnings)
         if variants is not None:
             # Additive field (issue #3056): present only when
             # `--parasitic-variant` was given, so every other report is
@@ -3271,7 +3629,8 @@ def run_extract(
             raise ExtractError(
                 f"cannot create output directory {spef_out_dir}: {exc}"
             ) from exc
-        _write_spef(
+        spef_conn_map = _remap_def_net_connections(def_net_connections, dotted_renames)
+        spef_skipped_nets = _write_spef(
             spef_path,
             design_name=top_cell_name,
             klt_version=_klt_version(),
@@ -3280,7 +3639,17 @@ def run_extract(
             # Issue #961: real cell-instance `*CONN`/`*RES` correlation from
             # the routed DEF's own `NETS` section -- `None` (the default)
             # falls back to the pre-#961 port-only behavior.
-            net_instance_pins=def_net_connections,
+            net_instance_pins=spef_conn_map,
+        )
+        warnings.extend(
+            _spef_missing_conn_warnings(
+                parasitics_report, def_net_connections, spef_conn_map
+            )
+        )
+        warnings.extend(
+            _spef_warnings(
+                def_net_connections, def_pins, declared_pins, spef_skipped_nets
+            )
         )
 
     # Issue #1503: every synthesized substrate identity `_tie_substrate_nets_
@@ -3324,17 +3693,24 @@ def run_extract(
     writer.use_net_names = True
     netlist_description = f"extracted by klt extract --deck {deck_name}"
     if parasitics_report is not None:
-        netlist_description += "\n" + _parasitic_model_header_comment()
+        netlist_description += "\n" + _parasitic_model_header_comment(
+            substrate_tie_requested
+        )
+        netlist_description += "".join(
+            "\n* " + note for note in fixed_value_capacitor_note
+        )
     try:
-        netlist.write(netlist_path, writer, netlist_description)
+        with stage("netlist_write"):
+            netlist.write(netlist_path, writer, netlist_description)
     except Exception as exc:
         if scratch_dir is not None:
             shutil.rmtree(scratch_dir, ignore_errors=True)
         raise ExtractError(f"could not write netlist '{netlist_path}': {exc}") from exc
 
-    reported_netlist_path, netlist_sha256 = _finish_netlist_write(
-        netlist_path, scratch_dir
-    )
+    with stage("netlist_hash"):
+        reported_netlist_path, netlist_sha256 = _finish_netlist_write(
+            netlist_path, scratch_dir
+        )
 
     # `--subcircuit` (issue #2245): a *second*, independent deck carrying one
     # named `.SUBCKT <cell>` for the sub-cell's own extracted devices. Run
@@ -3356,6 +3732,7 @@ def run_extract(
         model_bindings=model_bindings,
         substrate_global_nets=substrate_global_nets,
         parasitics=parasitics_report is not None,
+        substrate_tie_ohms=substrate_tie_requested,
     )
     # The slice's own warnings are also surfaced in the top-level `warnings[]`,
     # so a caller reading only that (the documented contract) still sees them.
@@ -3376,7 +3753,9 @@ def run_extract(
         "netlist_normalized_sha256": (
             None
             if netlist_sha256 is None
-            else _normalized_netlist_sha256(devices, nets)
+            else _staged(
+                "netlist_normalized_hash", _normalized_netlist_sha256, devices, nets
+            )
         ),
         "status": "extracted",
         "device_count": len(devices),
@@ -3421,6 +3800,11 @@ def run_extract(
         # declares `mos_flavours` whose marker layer has zero shapes in the
         # whole layout -- see `_detect_missing_flavour_markers`.
         "missing_flavour_markers": missing_flavour_markers,
+        # Additive field (issue #2919): always a list, empty unless the
+        # layout draws shapes on a deck `unsupported_device_markers` layer
+        # (a device class the deck cannot extract yet, e.g. gf180mcu MOS
+        # capacitors) -- see `_detect_unsupported_devices`.
+        "unsupported_devices": unsupported_devices,
         # Additive field (issue #555): always a list, empty when no PMOS
         # device's body net is the anonymous, KLayout-synthesized kind -- see
         # run_extract's docstring and `_detect_unbiased_pmos_body_nets` for
@@ -3462,6 +3846,14 @@ def run_extract(
         # sets `pin_renames.declared_pins`/`pin_renames.def_pins` echo --
         # see `rerun_extract_report`.
         "rename_declared_pins": rename_declared_pins,
+        # Additive fields (issue #3061): the `--pins` / `--def-pins` sets as
+        # given -- a sorted list, or `null` when the flag was not given (`[]`
+        # stays distinct from `null`: the demotion passes treat an empty set
+        # differently from an absent one). Always present, independent of
+        # `--rename-declared-pins`, so `--check --rerun` can replay them; see
+        # `rerun_extract_report`.
+        "declared_pins": None if declared_pins is None else sorted(declared_pins),
+        "def_pins": None if def_pins is None else sorted(def_pins),
         # Additive field (issue #2656): `null` unless `label_layers`
         # (--label-layer) was given, otherwise the caller's own role ->
         # [layer, datatype] (or `null`) mapping echoed verbatim -- the record
@@ -3471,6 +3863,11 @@ def run_extract(
         # report replays the same purposes instead of drifting on every net
         # name at once. See run_extract's `label_layers` docstring paragraph.
         "label_layers": _describe_label_layers(label_layers),
+        # Additive field (issue #2986): one entry per `--probe`, in request
+        # order; always present, `[]` when none was given. `net`/`cluster_id`
+        # are the final `nets[].name`/`nets[].net_id` of the net under the
+        # point, both `null` when `found` is false. See `_evaluate_probes`.
+        "probes": probe_results,
     }
     if pdk_info is not None:
         result["pdk"] = {
@@ -3559,8 +3956,8 @@ def _normalize_hierarchical_cells(
     abstract_cell_lef_paths: tuple[str, ...],
 ) -> tuple[str, ...]:
     """Normalize ``--hierarchical-cells`` (issue #2722) to a sorted, de-duped
-    tuple (``()`` when omitted) and reject the option combinations increment 1
-    does not support -- before the extraction engine runs."""
+    tuple (``()`` when omitted) and reject the option combinations it does
+    not support -- before the extraction engine runs."""
     names = tuple(sorted({name.strip() for name in hierarchical_cells}))
     if not hierarchical_cells:
         return ()
@@ -3584,7 +3981,7 @@ def _validate_hierarchical_selection(
     layout: Any, top_cell: Any, names: tuple[str, ...]
 ) -> None:
     """Validate ``--hierarchical-cells`` against the live hierarchy (absent /
-    top / unreachable / nested) before any extraction work (issue #2722).
+    top / unreachable) before any extraction work (issue #2722).
     No-op when the option was omitted."""
     if not names:
         return
@@ -3816,6 +4213,7 @@ def _write_subcircuit_deck(
     model_bindings: Mapping[str, Any] | None,
     substrate_global_nets: list[str],
     parasitics: bool,
+    substrate_tie_ohms: float = SUBSTRATE_DC_TIE_RESISTANCE_OHM,
 ) -> dict[str, Any] | None:
     """Slice ``cell_name`` out of the already-written flat extraction and write
     it as its own ``.SUBCKT`` deck -- ``klt extract --subcircuit`` (issue
@@ -3899,7 +4297,7 @@ def _write_subcircuit_deck(
         "* see docs/cli/extract.md, section: Sub-circuit isolation"
     )
     if parasitics:
-        description += "\n" + _parasitic_model_header_comment()
+        description += "\n" + _parasitic_model_header_comment(substrate_tie_ohms)
     try:
         netlist.write(subcircuit_path, writer, description)
     except Exception as exc:
@@ -3977,9 +4375,35 @@ def check_extract_report(report_path: str) -> dict[str, Any]:
 # etc.) -- the bookkeeping spelling issue #1559's field-class table
 # (`docs/cli/extract.md`) documents as not a stable contract across builds.
 _ANONYMOUS_NET_NAME_RE = re.compile(r"^\\\$\d+$")
+# The unanchored-at-the-end form of the above: the longest `\$<digits>` prefix
+# of a string leaf, which is the only prefix :func:`_rewrite_net_name` can
+# possibly rename (issue #3568).
+_ANONYMOUS_NET_PREFIX_RE = re.compile(r"^\\\$\d+")
 
 
-def _net_attachment_key(net_name: str, devices: list[Any]) -> str:
+def _net_attachment_index(devices: list[Any]) -> dict[str, list[str]]:
+    """``{net name: [<device>.<terminal>, ...]}`` for every string-named net a
+    ``devices[]`` terminal touches, built in one pass so
+    :func:`_net_attachment_key` is a dict lookup instead of a rescan of every
+    device per net (issue #3568). Duplicates are kept: one device with two
+    terminals on the same net contributes two entries."""
+    index: dict[str, list[str]] = {}
+    for device in devices:
+        if not isinstance(device, dict):
+            continue
+        for terminal, terminal_net in (device.get("nets") or {}).items():
+            if isinstance(terminal_net, str):
+                index.setdefault(terminal_net, []).append(
+                    f"{device.get('name')}.{terminal}"
+                )
+    return index
+
+
+def _net_attachment_key(
+    net_name: str,
+    devices: list[Any],
+    index: Mapping[str, list[str]] | None = None,
+) -> str:
     """The sorted ``<device>.<terminal>`` attachment list for ``net_name``,
     read from this same report's already-built ``devices[]`` array -- the
     structural identity issue #1559 normalizes an anonymous net's unstable
@@ -3992,7 +4416,12 @@ def _net_attachment_key(net_name: str, devices: list[Any]) -> str:
     ground/substrate net) -- nothing to disambiguate by, so the caller
     leaves that net's original spelling untouched rather than fabricate a
     key that cannot be trusted to be unique.
+
+    ``index`` (from :func:`_net_attachment_index` over the same ``devices``)
+    makes the call O(attachments of this net) rather than O(all terminals).
     """
+    if index is not None and isinstance(net_name, str):
+        return ",".join(sorted(index.get(net_name, ())))
     attachments = sorted(
         f"{device.get('name')}.{terminal}"
         for device in devices
@@ -4016,13 +4445,14 @@ def _anonymous_net_name_map(report: Mapping[str, Any]) -> dict[str, str]:
     if not isinstance(nets, list) or not isinstance(devices, list):
         return {}
     name_map: dict[str, str] = {}
+    index = _net_attachment_index(devices)
     for entry in nets:
         if not isinstance(entry, dict):
             continue
         name = entry.get("name")
         if not isinstance(name, str) or not _ANONYMOUS_NET_NAME_RE.match(name):
             continue
-        attachment_key = _net_attachment_key(name, devices)
+        attachment_key = _net_attachment_key(name, devices, index)
         if attachment_key:
             name_map[name] = f"$anon<{attachment_key}>"
     return name_map
@@ -4044,14 +4474,23 @@ def _rewrite_net_name(value: Any, name_map: Mapping[str, str]) -> Any:
     canonical = name_map.get(value)
     if canonical is not None:
         return canonical
-    for raw_name, canonical_name in name_map.items():
-        if not value.startswith(raw_name):
-            continue
-        boundary = value[len(raw_name) : len(raw_name) + 1]
-        if boundary and boundary.isalnum():
-            continue
-        return canonical_name + value[len(raw_name) :]
-    return value
+    # Every ``name_map`` key is ``\\$<digits>``, so the only key a leaf can
+    # start with (past the boundary rule) is its longest ``\\$<digits>``
+    # prefix: any shorter digit prefix is followed by a digit, i.e. an
+    # alphanumeric, and would be rejected below (issue #3568).
+    if not name_map or not value.startswith("\\$"):
+        return value
+    match = _ANONYMOUS_NET_PREFIX_RE.match(value)
+    if match is None:
+        return value
+    raw_name = match.group()
+    canonical_name = name_map.get(raw_name)
+    if canonical_name is None:
+        return value
+    boundary = value[len(raw_name) : len(raw_name) + 1]
+    if boundary and boundary.isalnum():
+        return value
+    return canonical_name + value[len(raw_name) :]
 
 
 def _canonicalize_extract_report_for_rerun_diff(
@@ -4108,12 +4547,13 @@ def _canonicalize_extract_report_for_rerun_diff(
     nets = normalized.get("nets")
     devices = normalized.get("devices")
     if isinstance(nets, list) and isinstance(devices, list):
+        index = _net_attachment_index(devices)
         normalized["nets"] = sorted(
             nets,
             key=lambda entry: (
                 (
                     entry.get("name", ""),
-                    _net_attachment_key(entry.get("name", ""), devices),
+                    _net_attachment_key(entry.get("name", ""), devices, index),
                 )
                 if isinstance(entry, dict)
                 else ("", "")
@@ -4218,16 +4658,18 @@ def rerun_extract_report(report_path: str) -> dict[str, Any]:
     by an earlier build of this unreleased feature or hand-edited, replays
     its ``declared`` union as ``--pins`` alone) -- when the committed report
     carries a ``pin_renames`` block,
-    writing the fresh netlist back to the same ``netlist_path`` the
-    committed report recorded
-    (so that field, too, is a meaningful comparison rather than an
-    incidental path difference). **Known limitation**, mirroring ``klt lvs
+    writing the fresh netlist to a private temp directory deleted afterward
+    (issue #3061: the committed ``netlist_path`` file is never modified;
+    ``netlist_sha256`` is still computed, and ``fresh.netlist_path`` reports
+    the committed path so that field is not an incidental path difference).
+    The top-level ``declared_pins``/``def_pins`` echoes (issue #3061) replay
+    ``--pins``/``--def-pins`` independent of ``--rename-declared-pins``, and
+    win over the ``pin_renames`` echoes, which stay the fallback for an older
+    report. **Known limitation**, mirroring ``klt lvs
     --check``'s ``rerun_lvs_report()`` (``lvs.py``): every *other* optional
     ``klt extract`` flag (``--parasitics``, ``--mom-net``, ``--spef``,
     ``--critical-net``, ``--distributed-rc``, ``--def-net-names``,
     ``--def-net-connections``, ``--mom-rlc-*``, ``--top-cell-pins``,
-    ``--pins``/``--def-pins`` -- except through the ``pin_renames`` echoes
-    a run that also used ``--rename-declared-pins`` carries, see above --,
     ``--defer-resistor-fixed-offset``, ``--abstract-cells``,
     ``--abstract-cell-lef``, ``--matched-group``, ``--subcircuit``/
     ``--subcircuit-output``, ``--pdk``/``--pdk-root``)
@@ -4310,54 +4752,49 @@ def rerun_extract_report(report_path: str) -> dict[str, Any]:
     # block -- or one whose echoes lost their shape -- replays without the
     # flag and legitimately drifts on the pin fields, the same documented
     # limitation every other unechoed flag has.
-    rename_declared_pins = committed.get("rename_declared_pins") is True
-    pin_renames_echo = committed.get("pin_renames")
-    rerun_declared_pins: frozenset[str] | None = None
-    rerun_def_pins: frozenset[str] | None = None
-    if rename_declared_pins and isinstance(pin_renames_echo, dict):
-        if "declared_pins" in pin_renames_echo or "def_pins" in pin_renames_echo:
-            valid_pins, rerun_declared_pins = _parse_declared_set_echo(
-                pin_renames_echo.get("declared_pins")
-            )
-            valid_def, rerun_def_pins = _parse_declared_set_echo(
-                pin_renames_echo.get("def_pins")
-            )
-            if not (valid_pins and valid_def):
-                rename_declared_pins = False
-                rerun_declared_pins = None
-                rerun_def_pins = None
-        else:
-            # A block without the separate echoes (an earlier build of this
-            # unreleased feature, or a hand-edited report): the union
-            # `declared` is the only echo -- replay it as `--pins` alone
-            # (the previous behavior; imperfect when the original run's
-            # `--def-pins` further restricted the surviving set, but
-            # strictly better than discarding the rename the block does
-            # carry).
-            union_echo = pin_renames_echo.get("declared")
-            if isinstance(union_echo, list) and all(
-                isinstance(name, str) for name in union_echo
-            ):
-                rerun_declared_pins = frozenset(union_echo) if union_echo else None
-            else:
-                rename_declared_pins = False
-    else:
-        rename_declared_pins = False
-
-    fresh = run_extract(
-        file_path,
-        deck_name,
-        output=committed.get("netlist_path"),
-        # A report recorded by `--no-netlist` (issue #2850) has a null path:
-        # replay it as census-only rather than writing beside the input.
-        no_netlist="netlist_path" in committed and committed["netlist_path"] is None,
-        top=committed.get("top"),
-        deck_options=deck_options,
-        label_layers=label_layers,
-        declared_pins=rerun_declared_pins,
-        def_pins=rerun_def_pins,
-        rename_declared_pins=rename_declared_pins,
+    rename_declared_pins, rerun_declared_pins, rerun_def_pins = (
+        _replay_pin_renames_echo(committed)
     )
+
+    # Issue #3061: the top-level `declared_pins`/`def_pins` echoes (emitted
+    # whether or not `--rename-declared-pins` was on) win over the
+    # `pin_renames` echo above, which stays the fallback for a report that
+    # predates them. A malformed echo degrades to "not replayed".
+    top_echo = _replay_top_level_pin_echo(committed)
+    if top_echo is not None:
+        rerun_declared_pins, rerun_def_pins = top_echo
+
+    # Issue #3061: the rerun never writes over the committed netlist. A report
+    # recorded by `--no-netlist` (issue #2850) has a null path: replay it as
+    # census-only. Otherwise the fresh netlist goes to a private temp dir (so
+    # `netlist_sha256` is still computed) that is deleted afterward, and the
+    # embedded `fresh.netlist_path` reports the committed path -- the netlist
+    # text does not embed its own path, so the hash is unaffected.
+    committed_netlist_path = committed.get("netlist_path")
+    no_netlist = "netlist_path" in committed and committed_netlist_path is None
+    scratch_dir = None if no_netlist else tempfile.mkdtemp(prefix="klt-extract-rerun-")
+    try:
+        fresh = run_extract(
+            file_path,
+            deck_name,
+            output=(
+                None
+                if scratch_dir is None
+                else os.path.join(scratch_dir, "extracted.spice")
+            ),
+            no_netlist=no_netlist,
+            top=committed.get("top"),
+            deck_options=deck_options,
+            label_layers=label_layers,
+            declared_pins=rerun_declared_pins,
+            def_pins=rerun_def_pins,
+            rename_declared_pins=rename_declared_pins,
+        )
+    finally:
+        if scratch_dir is not None:
+            shutil.rmtree(scratch_dir, ignore_errors=True)
+    if scratch_dir is not None and fresh.get("netlist_path") is not None:
+        fresh["netlist_path"] = committed_netlist_path
     return build_rerun_result(
         report_path=report_path,
         committed=committed,
@@ -4365,6 +4802,65 @@ def rerun_extract_report(report_path: str) -> dict[str, Any]:
         committed_for_diff=_canonicalize_extract_report_for_rerun_diff(committed),
         fresh_for_diff=_canonicalize_extract_report_for_rerun_diff(fresh),
     )
+
+
+def _replay_pin_renames_echo(
+    committed: Mapping[str, Any],
+) -> tuple[bool, frozenset[str] | None, frozenset[str] | None]:
+    """The ``(rename_declared_pins, declared_pins, def_pins)`` replay
+    arguments :func:`rerun_extract_report` reconstructs from the committed
+    report's ``pin_renames`` block (issue #2854). A report without the block
+    -- or one whose echoes lost their shape -- replays without the flag and
+    legitimately drifts on the pin fields, the same documented limitation
+    every other unechoed flag has."""
+    pin_renames_echo = committed.get("pin_renames")
+    if committed.get("rename_declared_pins") is not True or not isinstance(
+        pin_renames_echo, dict
+    ):
+        return False, None, None
+    if "declared_pins" not in pin_renames_echo and "def_pins" not in pin_renames_echo:
+        return _replay_union_pin_echo(pin_renames_echo)
+    valid_pins, declared_pins = _parse_declared_set_echo(
+        pin_renames_echo.get("declared_pins")
+    )
+    valid_def, def_pins = _parse_declared_set_echo(pin_renames_echo.get("def_pins"))
+    if not (valid_pins and valid_def):
+        return False, None, None
+    return True, declared_pins, def_pins
+
+
+def _replay_union_pin_echo(
+    pin_renames_echo: Mapping[str, Any],
+) -> tuple[bool, frozenset[str] | None, frozenset[str] | None]:
+    """:func:`_replay_pin_renames_echo`'s fallback for a block without the
+    separate ``declared_pins``/``def_pins`` echoes (an earlier build of this
+    unreleased feature, or a hand-edited report): the union ``declared`` is
+    the only echo -- replay it as ``--pins`` alone (the previous behavior;
+    imperfect when the original run's ``--def-pins`` further restricted the
+    surviving set, but strictly better than discarding the rename the block
+    does carry)."""
+    union_echo = pin_renames_echo.get("declared")
+    if isinstance(union_echo, list) and all(
+        isinstance(name, str) for name in union_echo
+    ):
+        return True, (frozenset(union_echo) if union_echo else None), None
+    return False, None, None
+
+
+def _replay_top_level_pin_echo(
+    committed: Mapping[str, Any],
+) -> tuple[frozenset[str] | None, frozenset[str] | None] | None:
+    """The ``(declared_pins, def_pins)`` replay sets from the committed
+    report's top-level echoes (issue #3061), or ``None`` when neither echo is
+    present or either lost its shape (a malformed echo degrades to "not
+    replayed")."""
+    if "declared_pins" not in committed and "def_pins" not in committed:
+        return None
+    valid_pins, declared_pins = _parse_declared_set_echo(committed.get("declared_pins"))
+    valid_def, def_pins = _parse_declared_set_echo(committed.get("def_pins"))
+    if not (valid_pins and valid_def):
+        return None
+    return declared_pins, def_pins
 
 
 def _parse_declared_set_echo(value: Any) -> tuple[bool, frozenset[str] | None]:
@@ -4399,9 +4895,13 @@ def extract_netlist_from_layout(
     mom_net: str | None = None,
     mom_background_permittivity: float = MOM_CROSSCHECK_BACKGROUND_PERMITTIVITY,
     def_net_names: bool = False,
+    probes: Sequence[Mapping[str, Any]] = (),
+    probe_results: list[dict[str, Any]] | None = None,
     critical_nets: frozenset[str] | None = None,
     parasitics_nets: frozenset[str] | None = None,
+    net_selectors: NetSelectors | None = None,
     parasitics_top_cell_only: bool = False,
+    resistance_graph: bool = False,
     def_pins: frozenset[str] | None = None,
     pin_source_cells: frozenset[str] | None = None,
     rename_declared_pins: bool = False,
@@ -4412,6 +4912,8 @@ def extract_netlist_from_layout(
     substrate_spreading_net: str | None = None,
     pdk_info: dict[str, Any] | None = None,
     missing_flavour_markers: list[dict[str, Any]] | None = None,
+    unsupported_devices: list[dict[str, Any]] | None = None,
+    dotted_renames_out: list[tuple[str, str, str]] | None = None,
 ) -> tuple[
     kdb.Netlist,
     str,
@@ -4645,7 +5147,8 @@ def extract_netlist_from_layout(
 
     layout = kdb.Layout()
     try:
-        layout.read(path)
+        with stage("read_layout"):
+            layout.read(path)
     except Exception as exc:  # klayout raises RuntimeError for bad/unknown streams
         raise ExtractError(f"could not read layout '{path}': {exc}") from exc
 
@@ -4667,8 +5170,11 @@ def extract_netlist_from_layout(
             "--abstract-cell-lef": bool(abstract_cell_lef_paths),
             "--mom-net": mom_net is not None,
             "--def-net-names": def_net_names,
-            "--critical-net": bool(critical_nets),
-            "--parasitics-net": bool(parasitics_nets),
+            "--probe": bool(probes),
+            "--critical-net": bool(critical_nets)
+            or (net_selectors is not None and net_selectors.has_critical),
+            "--parasitics-net": bool(parasitics_nets)
+            or (net_selectors is not None and bool(net_selectors.parasitics_patterns)),
             "--def-pins": bool(def_pins),
             "--pin-source-cells": bool(pin_source_cells),
             "--rename-declared-pins": rename_declared_pins,
@@ -4679,8 +5185,10 @@ def extract_netlist_from_layout(
         },
     )
 
+    _validate_probes(deck, probes)
+
     # `--hierarchical-cells` (issue #2722): selection validated against the
-    # live hierarchy (absent / top / unreachable / nested) before any
+    # live hierarchy (absent / top / unreachable) before any
     # extraction work or output.
     _validate_hierarchical_selection(layout, top_cell, hierarchical_cells)
 
@@ -4817,7 +5325,9 @@ def extract_netlist_from_layout(
         def_pin_promotion,
         substrate_taps,
         pin_renames,
-    ) = _netlist_extractor(deck)(
+    ) = _staged(
+        "device_extraction",
+        _netlist_extractor(deck),
         layout,
         top_cell,
         deck,
@@ -4839,11 +5349,16 @@ def extract_netlist_from_layout(
         def_net_names=def_net_names,
         critical_nets=critical_nets,
         parasitics_nets=parasitics_nets,
+        net_selectors=net_selectors,
         parasitics_top_cell_only=parasitics_top_cell_only,
+        resistance_graph=resistance_graph,
         def_pins=def_pins,
         pin_source_cells=pin_source_cells,
         rename_declared_pins=rename_declared_pins,
         substrate_spreading_net=substrate_spreading_net,
+        probes=probes,
+        probe_results=probe_results,
+        dotted_renames_out=dotted_renames_out,
     )
 
     # `klt extract --substrate-spreading <net>` (issue #2561): the closed-form
@@ -4862,7 +5377,9 @@ def extract_netlist_from_layout(
     (
         voltage_domain_prose_warnings,
         voltage_domain_warnings,
-    ) = _detect_voltage_domain_overlap(layout, top_cell, deck, deck_name)
+    ) = _staged(
+        "diagnostics", _detect_voltage_domain_overlap, layout, top_cell, deck, deck_name
+    )
     warnings = warnings + voltage_domain_prose_warnings
 
     # Missing flavour markers (issue #2417): additive diagnostic, reported
@@ -4883,6 +5400,12 @@ def extract_netlist_from_layout(
     warnings = warnings + missing_marker_prose_warnings
     if missing_flavour_markers is not None:
         missing_flavour_markers.extend(missing_marker_entries)
+
+    # Unsupported devices (issue #2919): additive diagnostic through the
+    # optional `unsupported_devices` out-parameter, same idiom as above.
+    warnings = warnings + _detect_unsupported_devices(
+        layout, top_cell, deck, unsupported_devices
+    )
 
     # Issue #2722: per-device placement attribution for
     # `--hierarchical-cells`, keyed by `Device.id()`, filled into the
@@ -5715,6 +6238,89 @@ def _probe_named_net(
     return False
 
 
+def _probe_regions(
+    role: str,
+    poly: kdb.Region,
+    nwell: kdb.Region,
+    tap: kdb.Region,
+    metals: list[kdb.Region],
+) -> list[kdb.Region]:
+    """The conductor region(s) a ``--probe`` ``layer`` ``role`` addresses --
+    the same role -> region pairing :func:`_label_probe_targets` uses for
+    labels (``well`` -> ``nwell``/``tap``, ``poly``, ``metal<i>``)."""
+    if role == "well":
+        return [nwell, tap]
+    if role == "poly":
+        return [poly]
+    return [metals[int(role[len("metal") :])]]
+
+
+def _validate_probes(deck: ExtractionDeck, probes: Sequence[Mapping[str, Any]]) -> None:
+    """Refuse a ``--probe`` whose ``layer`` is not one of ``deck``'s roles
+    (issue #2986), quoting the available ones the way ``--label-layer`` does."""
+    roles = deck.label_layer_roles
+    for probe in probes:
+        if probe["layer"] not in roles:
+            raise ExtractError(
+                f"--probe {probe['name']!r}: deck has no layer role "
+                f"{probe['layer']!r} (available: {', '.join(roles)})"
+            )
+
+
+def _evaluate_probes(
+    l2n: kdb.LayoutToNetlist,
+    final_circuit: kdb.Circuit | None,
+    probes: Sequence[Mapping[str, Any]],
+    dbu: float,
+    poly: kdb.Region,
+    nwell: kdb.Region,
+    tap: kdb.Region,
+    metals: list[kdb.Region],
+) -> list[dict[str, Any]]:
+    """``--probe`` point-to-net results (issue #2986), in request order.
+
+    Runs on the live ``l2n`` after every rename/purge pass, so ``net`` is the
+    final ``nets[].name`` and ``cluster_id`` the final ``nets[].net_id``. A
+    probe is ``found`` only when the net under the point is one of
+    ``final_circuit``'s nets -- empty space, a masked black-box region and a
+    floating wire the purge removed all report ``found: false``.
+    """
+    import klayout.db as kdb
+
+    final_ids = (
+        {net.cluster_id for net in final_circuit.each_net()}
+        if final_circuit is not None
+        else set()
+    )
+    results: list[dict[str, Any]] = []
+    for probe in probes:
+        point = kdb.Point(round(probe["x"] / dbu), round(probe["y"] / dbu))
+        net = next(
+            (
+                hit
+                for region in _probe_regions(probe["layer"], poly, nwell, tap, metals)
+                if (hit := l2n.probe_net(region, point)) is not None
+            ),
+            None,
+        )
+        if net is not None and net.cluster_id not in final_ids:
+            net = None
+        results.append(
+            {
+                "name": probe["name"],
+                "layer": probe["layer"],
+                "x_um": probe["x"],
+                "y_um": probe["y"],
+                "found": net is not None,
+                "net": None
+                if net is None
+                else spice_safe_net_name(net.expanded_name()),
+                "cluster_id": None if net is None else net.cluster_id,
+            }
+        )
+    return results
+
+
 def _unnamed_label_positions(
     l2n: kdb.LayoutToNetlist,
     layout: kdb.Layout,
@@ -6142,6 +6748,25 @@ def _purge_preserving_named_nets(netlist: kdb.Netlist) -> None:
             circuit.connect_pin(pin, net)
 
 
+def _recognised_capacitor_top_regions(
+    layout: kdb.Layout, top_cell: kdb.Cell, deck: ExtractionDeck
+) -> dict[str, kdb.Region]:
+    """Each drawn ``CapacitorDevice``'s top-plate marker region, keyed by
+    device name (issue #3021) -- what ``_compute_parasitics`` masks out of the
+    vertical-overlap pass for that capacitor's own plate nets. Capacitors with
+    no marker drawn are omitted, so a capacitor-free layout yields ``{}``.
+    """
+    regions: dict[str, kdb.Region] = {}
+    for capacitor in deck.capacitors:
+        top_region, bottom_region = _capacitor_plate_regions(
+            layout, top_cell, capacitor
+        )
+        if top_region.is_empty() or bottom_region.is_empty():
+            continue
+        regions[capacitor.name] = top_region
+    return regions
+
+
 def _purge_truly_floating_nets(netlist: kdb.Netlist) -> None:
     """Remove every net, on every circuit, that has **no** pin, **no**
     device terminal, and **no** subcircuit pin -- and nothing else (issue
@@ -6232,6 +6857,82 @@ def _dotted_rename_warnings(renames: list[tuple[str, str, str]]) -> list[str]:
         + ") -- nets[], the written netlist, the SPEF and any `klt lvs` "
         "output all use the renamed spelling, and so must "
         "--critical-net/--distributed-rc/--mom-net/--mom-rlc-net"
+    ]
+
+
+def _remap_def_net_connections(
+    def_net_connections: Mapping[str, Sequence[tuple[str, str]]] | None,
+    renames: list[tuple[str, str, str]],
+) -> Mapping[str, Sequence[tuple[str, str]]] | None:
+    """Re-key ``def_net_connections`` through the extractor's own dotted-net
+    rename (issue #2903).
+
+    :func:`_rewrite_dotted_net_names` renames ``a.b`` to ``a_b`` (or a
+    collision-suffixed ``a_b_1``) on the live net, so the SPEF writer sees the
+    renamed spelling while the DEF's own keys stay dotted. Using the rename's
+    actual ``before -> after`` triples (not a context-free ``.`` -> ``_``)
+    keeps collision outcomes identical. ``None`` / no renames return the
+    input unchanged, so dot-free runs are byte-identical.
+    """
+    if not def_net_connections or not renames:
+        return def_net_connections
+    after_by_before: dict[str, str] = {}
+    for _circuit, before, after in renames:
+        after_by_before.setdefault(before, after)
+    remapped: dict[str, Sequence[tuple[str, str]]] = {}
+    renamed_items: dict[str, Sequence[tuple[str, str]]] = {}
+    for key, pins in def_net_connections.items():
+        target = after_by_before.get(key)
+        if target is None:
+            remapped[key] = pins
+        else:
+            renamed_items[target] = pins
+    # The renamed net is what actually exists, so it wins any key clash.
+    remapped.update(renamed_items)
+    return remapped
+
+
+def _spef_missing_conn_warnings(
+    parasitics_report: Mapping[str, Any],
+    original: Mapping[str, Sequence[tuple[str, str]]] | None,
+    remapped: Mapping[str, Sequence[tuple[str, str]]] | None,
+) -> list[str]:
+    """Zero or one ``warnings[]`` entry naming written ``*D_NET`` blocks that
+    correspond to a ``--def-net-connections`` net yet get no instance
+    ``*CONN`` pins (issue #2903): a duplicated net name (the writer keeps
+    those port-only), or a dotted DEF net whose rewritten spelling did not
+    reach the key lookup."""
+    if not remapped:
+        return []
+    names = [
+        _unescape_spice_safe_net_name(entry["net"])
+        for entry in parasitics_report["nets"]
+    ]
+    counts: dict[str, int] = {}
+    for name in names:
+        counts[name] = counts.get(name, 0) + 1
+    stale = {
+        key.replace(SPICE_HIERARCHY_SEPARATOR, SPICE_SAFE_HIERARCHY_JOIN)
+        for key in (original or {})
+        if SPICE_HIERARCHY_SEPARATOR in key and key in remapped
+    }
+    missing = sorted(
+        name
+        for name in counts
+        if (remapped.get(name) and counts[name] > 1)
+        or (name in stale and not remapped.get(name))
+    )
+    if not missing:
+        return []
+    shown = ", ".join(missing[:_DOTTED_RENAME_WARNING_EXAMPLES])
+    more = len(missing) - _DOTTED_RENAME_WARNING_EXAMPLES
+    return [
+        f"{len(missing)} *D_NET block(s) correspond to a --def-net-connections "
+        f"net but were written without instance *CONN pins ({shown}"
+        + (f", +{more} more" if more > 0 else "")
+        + ") -- duplicated net names stay port-only, and a DEF net name the "
+        "extractor did not rename cannot be matched; downstream `klt sta` "
+        "will report these nets as partially unannotated"
     ]
 
 
@@ -6717,6 +7418,158 @@ def _diode_near_miss_warning(
     )
 
 
+def _size_bounds_dbu(rng: tuple[float, float], unit: float) -> tuple[int, int]:
+    """Convert an inclusive ``(lo, hi)`` range in ``unit``-sized steps into
+    KLayout's half-open integer ``[lo, hi + 1)`` bounds (round to nearest)."""
+    return round(rng[0] / unit), round(rng[1] / unit) + 1
+
+
+def _apply_size_filter(region: kdb.Region, size: SizeFilter, dbu: float) -> kdb.Region:
+    """Keep the polygons of ``region`` satisfying every dimension of ``size``
+    (issue #2861). Bounds are rounded to the nearest dbu (area: dbu^2) and
+    are inclusive at both ends -- see :class:`SizeFilter`."""
+    out = region
+    if size.bbox_min_um is not None:
+        lo, hi = _size_bounds_dbu(size.bbox_min_um, dbu)
+        out = out.with_bbox_min(lo, hi, False)
+    if size.bbox_max_um is not None:
+        lo, hi = _size_bounds_dbu(size.bbox_max_um, dbu)
+        out = out.with_bbox_max(lo, hi, False)
+    if size.area_um2 is not None:
+        lo, hi = _size_bounds_dbu(size.area_um2, dbu * dbu)
+        out = out.with_area(lo, hi, False)
+    return out
+
+
+def _size_filters_overlap_dbu(a: SizeFilter, b: SizeFilter, dbu: float) -> bool:
+    """True when some whole-dbupolygon could satisfy both filters once
+    :func:`_apply_size_filter`'s rounding is applied: every dimension
+    constrained by *both* has intersecting **integer** ranges. Physical
+    disjointness is not enough -- at dbu=0.001 the distinct ranges 0.0701 um
+    and 0.0702 um both round to 70 dbu, so a 70-dbu-side window matches
+    either flavour (area compares in dbu^2)."""
+
+    for name, unit in (
+        ("bbox_min_um", dbu),
+        ("bbox_max_um", dbu),
+        ("area_um2", dbu * dbu),
+    ):
+        ra, rb = getattr(a, name), getattr(b, name)
+        if ra is None or rb is None:
+            continue
+        a_lo, a_hi = round(ra[0] / unit), round(ra[1] / unit)
+        b_lo, b_hi = round(rb[0] / unit), round(rb[1] / unit)
+        if a_hi < b_lo or b_hi < a_lo:
+            return False
+    return True
+
+
+def _validate_bipolar_size_filters(
+    bipolars: tuple[BipolarDevice, ...], dbu: float
+) -> None:
+    """Reject two ``BipolarDevice`` entries that share ``base``/``marker``/
+    ``emitter`` and narrowing but whose ``emitter_size`` windows overlap
+    *after dbu rounding*: a window matching both flavours would be ambiguous
+    (issue #2861). An ``emitter_size=None`` entry in the same flavour group
+    as a sized one is rejected too -- ``None`` matches every window, so it
+    claims whatever the sized entry claims and no unclaimed-window warning
+    can ever be right."""
+
+    def same_group(a: BipolarDevice, b: BipolarDevice) -> bool:
+        a_key = (a.base, a.marker, a.emitter, a.emitter_requires, a.emitter_excludes)
+        return a_key == (
+            b.base,
+            b.marker,
+            b.emitter,
+            b.emitter_requires,
+            b.emitter_excludes,
+        )
+
+    sized = [b for b in bipolars if b.emitter_size is not None]
+    for i, a in enumerate(sized):
+        for b in sized[i + 1 :]:
+            if not same_group(a, b):
+                continue
+            assert a.emitter_size is not None and b.emitter_size is not None
+            if _size_filters_overlap_dbu(a.emitter_size, b.emitter_size, dbu):
+                raise ExtractError(
+                    f"bipolar entries '{a.class_name}' and '{b.class_name}' "
+                    "share base/marker/emitter and have overlapping "
+                    "emitter_size ranges once rounded to the layout dbu "
+                    f"({dbu:g} um) -- a window matching both is ambiguous"
+                )
+    unsized = [b for b in bipolars if b.emitter_size is None]
+    for a in unsized:
+        for b in sized:
+            if not same_group(a, b):
+                continue
+            raise ExtractError(
+                f"bipolar entries '{a.class_name}' (no emitter_size) and "
+                f"'{b.class_name}' share base/marker/emitter -- the unsized "
+                "entry matches every window the sized one claims, so a "
+                "window would extract as both devices; give the fallback "
+                "an explicit disjoint emitter_size or a distinct marker"
+            )
+
+
+def _narrow_bipolar_emitter_by_size(
+    bipolar: BipolarDevice,
+    emitter: kdb.Region,
+    groups: dict[tuple, list[kdb.Region]],
+    matched: dict[tuple, list[kdb.Region]],
+    dbu: float,
+) -> kdb.Region:
+    """Apply ``bipolar.emitter_size`` to ``emitter`` (issue #2861), recording
+    the pre-filter emitter in ``groups`` and the size-matched emitter in
+    ``matched`` under the entry's flavour-group key so
+    :func:`_collect_bipolar_size_warnings` can report unclaimed windows.
+    Returns ``emitter`` unchanged when the entry declares no size filter."""
+    if bipolar.emitter_size is None:
+        return emitter
+    # Measure whole windows, not fragments split by the base edge.
+    emitter = emitter.merged()
+    group_key = (
+        bipolar.base,
+        bipolar.marker,
+        bipolar.emitter,
+        bipolar.emitter_requires,
+        bipolar.emitter_excludes,
+    )
+    groups.setdefault(group_key, []).append(emitter)
+    emitter = _apply_size_filter(emitter, bipolar.emitter_size, dbu)
+    matched.setdefault(group_key, []).append(emitter)
+    return emitter
+
+
+def _collect_bipolar_size_warnings(
+    groups: dict[tuple, list[kdb.Region]],
+    matched: dict[tuple, list[kdb.Region]],
+    dbu: float,
+) -> list[str]:
+    """One ``warnings[]`` line per marked emitter window that no
+    ``emitter_size``-bearing entry of its flavour group matched (issue
+    #2861). Such a window produced no device."""
+    import klayout.db as kdb
+
+    warnings: list[str] = []
+    for key, pre_regions in groups.items():
+        candidates = pre_regions[0]
+        claimed = kdb.Region()
+        for region in matched[key]:
+            claimed = claimed + region
+        for poly in candidates.not_interacting(claimed).each():
+            box = poly.bbox()
+            warnings.append(
+                "bipolar emitter window matches no emitter_size flavour "
+                f"(bbox {box.left * dbu:g},{box.bottom * dbu:g} "
+                f"{box.right * dbu:g},{box.top * dbu:g} um; "
+                f"{box.width() * dbu:g} x {box.height() * dbu:g} um, "
+                f"area {poly.area() * dbu * dbu:g} um^2) -- no device "
+                "extracted"
+            )
+    return warnings
+
+
 def _collect_diode_near_miss_warnings(
     layout: kdb.Layout,
     top_cell: kdb.Cell,
@@ -6979,6 +7832,11 @@ def _detect_missing_flavour_markers(
     warnings: list[str] = []
     entries: list[dict[str, Any]] = []
     for flavour in deck.mos_flavours:
+        if flavour.and_markers:
+            # A combination flavour (issue #3599) shares its base marker with
+            # a plain flavour that already reports it; a missing refining
+            # layer is a legitimate layout, not a gap.
+            continue
         if not _region(layout, top_cell, flavour.marker).is_empty():
             continue
         marker_label = f"{flavour.marker[0]}/{flavour.marker[1]}"
@@ -6996,6 +7854,53 @@ def _detect_missing_flavour_markers(
             }
         )
     return warnings, entries
+
+
+def _detect_unsupported_devices(
+    layout: kdb.Layout,
+    top_cell: kdb.Cell,
+    deck: ExtractionDeck,
+    entries_out: list[dict[str, Any]] | None = None,
+) -> list[str]:
+    """Flag each ``deck.unsupported_device_markers`` layer that carries shapes
+    in the extracted cell (issue #2919).
+
+    The deck cannot extract that device class, so the devices are missing
+    from the netlist even though the run reports ``status: extracted``.
+
+    Returns the prose warnings and extends ``entries_out`` (when given) with
+    one entry per flagged marker: ``{"kind": str, "marker":
+    "<layer>/<datatype>", "count": int, "bbox_um": {...}, "description":
+    str}`` where ``count`` is the number of connected marker components and
+    ``bbox_um`` bounds all of them. Nothing is returned or appended when the
+    deck declares no such marker or none has shapes.
+    """
+    warnings: list[str] = []
+    entries: list[dict[str, Any]] = []
+    for spec in deck.unsupported_device_markers:
+        region = _region(layout, top_cell, spec.marker).merged()
+        if region.is_empty():
+            continue
+        count = region.count()
+        marker_label = f"{spec.marker[0]}/{spec.marker[1]}"
+        warnings.append(
+            f"unsupported device class '{spec.kind}': marker layer "
+            f"{marker_label} carries {count} shape(s) ({spec.description}), "
+            "but this deck does not extract that device, so it is absent "
+            "from the netlist"
+        )
+        entries.append(
+            {
+                "kind": spec.kind,
+                "marker": marker_label,
+                "count": count,
+                "bbox_um": _bbox_um_rounded(region.bbox(), layout.dbu),
+                "description": spec.description,
+            }
+        )
+    if entries_out is not None:
+        entries_out.extend(entries)
+    return warnings
 
 
 def _detect_voltage_domain_overlap(
@@ -7525,6 +8430,8 @@ def _extract_bipolar_device(
     top_cell: kdb.Cell,
     bipolar: BipolarDevice,
     dummy: kdb.Region,
+    size_groups: dict[tuple, list[kdb.Region]],
+    size_matched: dict[tuple, list[kdb.Region]],
 ) -> tuple[
     tuple[kdb.Region, kdb.Region, kdb.Region, kdb.Region, kdb.Region | None],
     int,
@@ -7532,7 +8439,8 @@ def _extract_bipolar_device(
     """Resolve, register and extract one ``deck.bipolars`` entry; returns its
     ``(base, emitter, collector, substrate, substrate_layer)`` regions (for
     the connectivity wiring in :func:`_extract_netlist`) and its
-    dummy-dropped count.
+    dummy-dropped count. ``size_groups``/``size_matched`` are caller-owned
+    bookkeeping for ``emitter_size`` entries (issue #2861).
 
     An entry with no terminal relation takes :func:`_bipolar_legacy_regions`
     and is handed to ``DeviceExtractorBJT3Transistor`` exactly as before
@@ -7571,6 +8479,9 @@ def _extract_bipolar_device(
         base, emitter, collector, dropped = _bipolar_legacy_regions(
             layout, top_cell, bipolar, dummy
         )
+    emitter = _narrow_bipolar_emitter_by_size(
+        bipolar, emitter, size_groups, size_matched, layout.dbu
+    )
     l2n.register(base, f"{bipolar.class_name}_base")
     l2n.register(emitter, f"{bipolar.class_name}_emitter")
     l2n.register(collector, f"{bipolar.class_name}_collector")
@@ -7625,13 +8536,18 @@ def _extract_netlist(
     mom_net: str | None = None,
     mom_background_permittivity: float = MOM_CROSSCHECK_BACKGROUND_PERMITTIVITY,
     def_net_names: bool = False,
+    probes: Sequence[Mapping[str, Any]] = (),
+    probe_results: list[dict[str, Any]] | None = None,
     critical_nets: frozenset[str] | None = None,
     parasitics_nets: frozenset[str] | None = None,
+    net_selectors: NetSelectors | None = None,
     parasitics_top_cell_only: bool = False,
+    resistance_graph: bool = False,
     def_pins: frozenset[str] | None = None,
     pin_source_cells: frozenset[str] | None = None,
     rename_declared_pins: bool = False,
     substrate_spreading_net: str | None = None,
+    dotted_renames_out: list[tuple[str, str, str]] | None = None,
 ) -> tuple[
     kdb.Netlist,
     list[str],
@@ -8076,15 +8992,33 @@ def _extract_netlist(
     # geometry is removed from `active` before the default nfet/pfet split
     # further below, so the default split is unaffected outside every
     # flavour marker -- no regression for the common (unflavoured) case.
+    # A flavour may refine its `marker` with `and_markers`/`not_markers`/
+    # `nfet_only` (issue #3599, sky130 native-Vt); all empty/False for every
+    # other flavour, so the claim test below reduces to `interacting(marker)`.
     flavour_active: list[kdb.Region] = []
     for flavour in deck.mos_flavours:
         marker_region = _region(layout, top_cell, flavour.marker)
+        and_regions = [_region(layout, top_cell, m) for m in flavour.and_markers]
+        not_regions = [_region(layout, top_cell, m) for m in flavour.not_markers]
         claimed = kdb.Region()
         if not marker_region.is_empty() and not active.is_empty():
             remaining = kdb.Region()
             for component in active.merged().each():
                 component_region = kdb.Region(component)
-                if not component_region.interacting(marker_region).is_empty():
+                if (
+                    not component_region.interacting(marker_region).is_empty()
+                    and all(
+                        not component_region.interacting(r).is_empty()
+                        for r in and_regions
+                    )
+                    and all(
+                        component_region.interacting(r).is_empty() for r in not_regions
+                    )
+                    and not (
+                        flavour.nfet_only
+                        and not component_region.interacting(nwell).is_empty()
+                    )
+                ):
                     claimed += component_region
                 else:
                     remaining += component_region
@@ -8534,12 +9468,26 @@ def _extract_netlist(
             kdb.Region | None,
         ]
     ] = []
+    _validate_bipolar_size_filters(deck.bipolars, layout.dbu)
+    # Size-filter bookkeeping (issue #2861): per flavour group, the narrowed
+    # pre-filter emitter and each entry's size-matched emitter.
+    bipolar_size_groups: dict[tuple, list[kdb.Region]] = {}
+    bipolar_size_matched: dict[tuple, list[kdb.Region]] = {}
     for bipolar in deck.bipolars:
         regions, dropped = _extract_bipolar_device(
-            l2n, layout, top_cell, bipolar, dummy
+            l2n,
+            layout,
+            top_cell,
+            bipolar,
+            dummy,
+            bipolar_size_groups,
+            bipolar_size_matched,
         )
         dummy_devices_dropped += dropped
         bipolar_regions.append((bipolar, *regions))
+    bipolar_size_warnings = _collect_bipolar_size_warnings(
+        bipolar_size_groups, bipolar_size_matched, layout.dbu
+    )
 
     # Junction-diode device recognition (issue #542): each of the deck's
     # optional `diodes` entries (see `DiodeDevice` in `decks/__init__.py`)
@@ -8745,6 +9693,11 @@ def _extract_netlist(
             {"P1": bottom_region, "P2": top_region},
         )
 
+    # Issue #2920: a capacitor of an unselected deck option drawn on the layout.
+    capacitor_variant_warnings = _unselected_capacitor_variant_warnings(
+        layout, top_cell, deck
+    )
+
     # MoM (Metal-oxide-Metal) capacitor device recognition (issue #1466):
     # each of the deck's optional `mom_capacitors` entries (see
     # `MomCapacitorDevice` in `decks/__init__.py`) is recognised by a single
@@ -8898,10 +9851,14 @@ def _extract_netlist(
     warnings = (
         [str(entry.message) for entry in l2n.each_log_entry()]
         + unmodelled_device_warnings
+        # Declared resistor marker no spec claims (issue #3138).
+        + _detect_unclaimed_resistor_markers(layout, top_cell, deck)
         # Junction-diode near misses (issue #2365) -- collected in the diode
         # recognition block above, where the per-entry terminal regions and
         # the MOS/tap geometry the filter needs are both still in scope.
         + diode_near_miss_warnings
+        + bipolar_size_warnings
+        + capacitor_variant_warnings
     )
 
     # Connectivity. Deliberately does *not* connect `nwell`/`tap` to
@@ -9660,7 +10617,12 @@ def _extract_netlist(
     # all then see one spelling. Unlike the `,`/leading-`$` cases,
     # `NetlistSpiceWriter` applies no escape of its own for `.`, so this has
     # to change the real net's name -- see `_rewrite_dotted_net_names`.
-    warnings.extend(_dotted_rename_warnings(_rewrite_dotted_net_names(netlist)))
+    dotted_renames = _rewrite_dotted_net_names(netlist)
+    if dotted_renames_out is not None:
+        # Issue #2903: hand the `(circuit, before, after)` triples back so
+        # `--def-net-connections` keys can follow the rename.
+        dotted_renames_out.extend(dotted_renames)
+    warnings.extend(_dotted_rename_warnings(dotted_renames))
 
     # Post-extraction device-parameter corrections (issues #512, #518, #521):
     # applied to the live `kdb.Device` objects here -- *before* the netlist is
@@ -9725,6 +10687,11 @@ def _extract_netlist(
     substrate_taps: dict[str, Any] | None = None
     if parasitics_deck is not None:
         circuit = netlist.circuit_by_name(top_cell.name)
+        if net_selectors is not None:
+            # Issue #2974: patterns can only resolve once the nets exist.
+            critical_nets, parasitics_nets = net_selectors.resolve(
+                circuit, deck, critical_nets, parasitics_nets
+            )
         parasitic_nets = _compute_parasitics(
             l2n,
             circuit,
@@ -9738,6 +10705,7 @@ def _extract_netlist(
             critical_nets=critical_nets,
             parasitics_nets=parasitics_nets,
             parasitics_top_cell_only=parasitics_top_cell_only,
+            resistance_graph=resistance_graph,
             # Per-fragment square counting (issue #2359): `via_index` lets
             # the parasitics pass read each net's own via landings back
             # through `polygons_of_net`, so it can tell where current enters
@@ -9749,6 +10717,12 @@ def _extract_netlist(
             # geometry (resistor bodies, gates) cut out of them and so no
             # longer show where a conductor abuts a device at all.
             via_index=via_index,
+            # Issue #3021: recognised MiM top-plate footprints, so the
+            # vertical-overlap pass does not charge coupling on top of the
+            # device's own capacitance inside them.
+            capacitor_top_regions=_recognised_capacitor_top_regions(
+                layout, top_cell, deck
+            ),
         )
         # `klt extract --mom-net <net>` (issue #798): computed here, not in
         # `run_extract`, for the same "`l2n` must still be alive" reason as
@@ -9830,6 +10804,24 @@ def _extract_netlist(
         if final_circuit_for_labels is not None
         else {}
     )
+
+    # `--probe` (issue #2986): point-to-net queries against this same live
+    # `l2n`, after every rename/purge pass, reported through the
+    # `probe_results` out-parameter so this function's return tuple stays
+    # unchanged.
+    if probes and probe_results is not None:
+        probe_results.extend(
+            _evaluate_probes(
+                l2n,
+                final_circuit_for_labels,
+                probes,
+                layout.dbu,
+                poly,
+                nwell,
+                tap,
+                metals,
+            )
+        )
 
     # Issue #1666: per-device GDS-level instance attribution, keyed by
     # `Device.id()` -- unlike `net_label_positions` this needs no live `l2n`
@@ -9923,6 +10915,23 @@ def _corrected_resistor_r_ohm(
     if fixed_offset_ohm:
         r_ohm += fixed_offset_ohm
     return r_ohm
+
+
+def resistor_r_ohm_for_geometry(resistor: Any, l_um: float, w_um: float) -> float:
+    """The ``r_ohm`` ``klt extract`` reports for a ``resistor``
+    (:class:`~klayout_tools.decks.ResistorDevice`) of drawn ``l_um`` x
+    ``w_um`` micrometres: ``L / W * sheet_rho_ohm_sq`` run through
+    :func:`_corrected_resistor_r_ohm` with the deck's fixed offset, end term
+    and width offset (issue #2905). The one shared code path for the
+    ``klt lvs`` ``subckt-call`` reference side, so it cannot drift from the
+    layout side."""
+    return _corrected_resistor_r_ohm(
+        l_um / w_um * resistor.sheet_rho_ohm_sq,
+        w_um,
+        resistor.fixed_offset_ohm,
+        resistor.end_term_ohm_um,
+        resistor.width_offset_um,
+    )
 
 
 def apply_resistor_fixed_offset_corrections(

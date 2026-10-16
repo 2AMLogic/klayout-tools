@@ -1426,9 +1426,12 @@ def _deck_batch_command(version_check: str) -> str:
     (unit streams are the result, not an opt-in artifact) and the report
     redirected to ``report.json`` (stdout is not a clean channel back --
     see ``sim_batch._build_batch_job_spec``)."""
-    command = sim_batch._runner_preflight_script(
-        _provenance._klt_version(),
-        enforce=version_check == "enforce",
+    command = (
+        sim_batch._runner_preflight_script(
+            _provenance._klt_version(),
+            enforce=version_check == "enforce",
+        )
+        + sim_batch._deck_preflight_lines()
     ) + (
         f'klt sim "$EDA_INPUT_DIR/{remote_transport.REMOTE_REQUEST_FILENAME}" '
         "--backend local-parallel --format json"
@@ -1578,6 +1581,11 @@ def _recover_failed_deck_job(
     message = base_message
     if runner_error is not None:
         message += f": the job's klt reported: {runner_error['message']}"
+        if "missing required field: netlist" in str(runner_error["message"]):
+            message += (
+                " -- a deck-list request read as a corner request: the fleet "
+                "runner's klt predates decks[] support (rebuild the runner image)"
+            )
     elif note:
         message += (
             f" [output recovery: {note} -- see harness.log under the job's S3 prefix]"
@@ -1613,6 +1621,7 @@ def _run_decks_batch(
     config = sim_batch._resolve_batch_config(
         request, corner_count=1, timeout_s=serial_worst_s
     )
+    sim_batch._assess_deck_support(request, config)
     spec = sim_batch.BatchJobSpec(
         cmd=_deck_batch_command(config.runner_version_check),
         tool=sim_batch._batch_job_tool_label(worker_request),
@@ -1646,7 +1655,11 @@ def _run_decks_batch(
             _install_unit_trees(units, outdir=outdir, source_root=None)
             return _synthesized_deck_report(
                 worker_request,
-                code="batch_poll_timeout",
+                code=(
+                    "batch_job_interrupted"
+                    if isinstance(exc, sim_batch.BatchJobInterrupted)
+                    else "batch_poll_timeout"
+                ),
                 message=str(exc),
                 outdir=outdir,
                 environment={
@@ -1655,6 +1668,11 @@ def _run_decks_batch(
                     "bucket": config.bucket,
                     "region": config.region,
                     "state": exc.last_state,
+                    **(
+                        {"interrupted_s": round(exc.interrupted_s, 1)}
+                        if isinstance(exc, sim_batch.BatchJobInterrupted)
+                        else {}
+                    ),
                 },
             )
         environment = {
@@ -1725,7 +1743,12 @@ def run_deck_request(
     streams *are* the result. It defaults to a ``.klt/sim/`` directory next
     to the request file, the same convention as the corner backend.
     """
-    from .sim import SimError, _resolve_max_workers, _resolve_ngspice_binary
+    from .sim import (
+        SimError,
+        _resolve_max_workers,
+        _resolve_ngspice_binary,
+        apply_engine_host,
+    )
 
     if max_workers is not None and (
         not isinstance(max_workers, int)
@@ -1748,14 +1771,21 @@ def run_deck_request(
         # never a launched job that cannot run.
         files, worker_request = stage_deck_job(request, request_dir=request_dir)
         if backend == "remote":
-            return _run_decks_remote(request, files, worker_request, outdir=outdir)
-        return _run_decks_batch(request, files, worker_request, outdir=outdir)
+            report = _run_decks_remote(request, files, worker_request, outdir=outdir)
+        else:
+            report = _run_decks_batch(request, files, worker_request, outdir=outdir)
+        apply_engine_host(
+            report.setdefault("environment", {}),
+            backend=backend,
+            client_ngspice_binary=ngspice_binary,
+        )
+        return report
 
     if backend == "local":
         workers = 1
     else:
         workers = _resolve_max_workers(max_workers)
-    return _run_decks_local(
+    report = _run_decks_local(
         units,
         staging_root=request_dir,
         outdir=outdir,
@@ -1763,3 +1793,7 @@ def run_deck_request(
         max_workers=workers,
         backend=backend,
     )
+    apply_engine_host(
+        report["environment"], backend=backend, client_ngspice_binary=None
+    )
+    return report
