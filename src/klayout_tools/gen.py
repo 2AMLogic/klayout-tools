@@ -645,6 +645,7 @@ def _mos_unit_layout(
     contact_gate_offset_um: float = 0.0,
     bottom_endcap_um: float = 0.0,
     sd_implant_margin_um: float = 0.0,
+    mos_cap: bool = False,
 ) -> dict[str, Any]:
     """One MOS-like unit device: a diffusion strip crossed by ``fingers``
     poly gates, with a contact + local-metal pad in each source/drain
@@ -741,8 +742,19 @@ def _mos_unit_layout(
     side, so `produce_impl` can lay a source/drain implant mask over the
     device body (see :func:`_device_layer_params`'s ``sd_implant_layer``/
     ``sd_implant_present``, resolved off ``params.flavor``).
+
+    ``mos_cap`` (issue #3283) turns the unit into a MOS capacitor: gate over
+    diffusion with every source/drain segment tied into one terminal. It
+    always uses this function's own "series" geometry (``finger_topology`` is
+    ignored); the S/D pads are tied by a local-metal stub up out of each
+    segment into one full-width strap above the gate landing pads (``fingers
+    > 1`` additionally ties the gate pads together with a poly bar, so the
+    gate is one terminal too), and the unit reports ``sd_cap_xy`` -- the
+    strap's centre -- as its single S/D terminal. ``gate_contact`` is not
+    supported (the strap would sit on the gate's local-metal pad). Left at
+    ``False`` the drawn geometry is byte-for-byte unchanged.
     """
-    if finger_topology == "parallel" and fingers > 1:
+    if finger_topology == "parallel" and fingers > 1 and not mos_cap:
         return _mos_unit_strapped_layout(
             w_um,
             l_um,
@@ -757,6 +769,17 @@ def _mos_unit_layout(
     seg_positions, poly_positions, total_len_um = _mos_finger_positions(
         l_um, fingers, contact_gate_offset_um
     )
+    # A MOS capacitor may be drawn at a width too narrow to fit an enclosed
+    # contact (the deck's COMP min width is below the contact + enclosure
+    # budget). Each S/D segment then grows a diffusion landing bump above the
+    # channel -- S/D only, so the channel width stays `w_um` -- and the gate
+    # landing pad is lifted clear of it.
+    bump_um = max(contact_region_um - w_um, 0.0) if mos_cap else 0.0
+    seg_h_um = w_um + bump_um
+    if bump_um > 0.0:
+        gate_pad_clearance_um = max(
+            gate_pad_clearance_um, bump_um + MIN_SAME_LAYER_SPACING_UM
+        )
 
     boxes: dict[str, list[tuple[float, float, float, float]]] = {
         "active": [(0.0, 0.0, total_len_um, w_um)],
@@ -769,7 +792,7 @@ def _mos_unit_layout(
                     -sd_implant_margin_um,
                     -sd_implant_margin_um,
                     total_len_um + sd_implant_margin_um,
-                    w_um + sd_implant_margin_um,
+                    seg_h_um + sd_implant_margin_um,
                 )
             ]
             if sd_implant_margin_um > 0
@@ -779,9 +802,11 @@ def _mos_unit_layout(
     contact_half = CONTACT_SIZE_UM / 2.0
     seg_xy: list[tuple[float, float]] = []
     for sx0, sx1 in seg_positions:
-        boxes["metal"].append((sx0, 0.0, sx1, w_um))
+        boxes["metal"].append((sx0, 0.0, sx1, seg_h_um))
+        if bump_um > 0.0:
+            boxes["active"].append((sx0, w_um, sx1, seg_h_um))
         cx = (sx0 + sx1) / 2.0
-        cy = w_um / 2.0
+        cy = seg_h_um / 2.0
         boxes["contact"].append(
             (cx - contact_half, cy - contact_half, cx + contact_half, cy + contact_half)
         )
@@ -854,7 +879,39 @@ def _mos_unit_layout(
         g_width_um = l_um
         gate_ext_um = 0.0
 
+    sd_cap_xy: tuple[float, float] | None = None
+    if mos_cap:
+        # Tie the gate fingers into one poly terminal (a bar abutting the top
+        # of every landing pad), then tie every S/D segment into one local-
+        # metal strap above it: stubs rise out of each segment pad (metal
+        # over poly with no contact between them does not connect), and the
+        # strap spans the first to the last segment.
+        if len(gate_xy) > 1:
+            bar_y0 = w_um + gate_ext_um
+            boxes["poly"].append(
+                (
+                    gate_xy[0][0] - pad_half,
+                    bar_y0,
+                    gate_xy[-1][0] + pad_half,
+                    bar_y0 + contact_region_um,
+                )
+            )
+            gate_ext_um += contact_region_um
+        strap_y0 = w_um + gate_ext_um
+        strap_y1 = strap_y0 + contact_region_um
+        for sx0, sx1 in seg_positions:
+            boxes["metal"].append((sx0, seg_h_um, sx1, strap_y0))
+        boxes["metal"].append(
+            (seg_positions[0][0], strap_y0, seg_positions[-1][1], strap_y1)
+        )
+        gate_ext_um += contact_region_um
+        sd_cap_xy = (
+            (seg_positions[0][0] + seg_positions[-1][1]) / 2.0,
+            (strap_y0 + strap_y1) / 2.0,
+        )
+
     return {
+        "sd_cap_xy": sd_cap_xy,
         "total_len_um": total_len_um,
         "height_um": w_um,
         # Full drawn height including the gate landing pad *and* (issue
@@ -1163,6 +1220,7 @@ def _mos_array_layout(
     sd_implant_margin_um: float = 0.0,
     voltage_flavor_mark_margin_um: float = WELL_ENCLOSURE_MARGIN_UM,
     interior_channel_um: float = 0.0,
+    mos_cap: bool = False,
 ) -> dict[str, Any]:
     """A ``rows`` x ``cols`` grid of :func:`_mos_unit_layout` unit devices,
     with ``dummy`` extra unit-device columns flanking each side.
@@ -1211,6 +1269,10 @@ def _mos_array_layout(
     (issue #1577) are forwarded to :func:`_mos_unit_layout` unchanged -- see
     that function's own docstring.
 
+    ``mos_cap`` (issue #3283) is forwarded to :func:`_mos_unit_layout`; the
+    capacitor marker (:data:`_PDK_MOS_CAP_MARK_LAYERS`) is drawn over the
+    same ``voltage_flavor_mark_box_um`` box that encloses every unit device.
+
     ``interior_channel_um`` (issue #1531, Phase 1) reserves a navigable
     routing channel *inside* the array's own grid: when greater than zero it
     is added to both ``col_pitch``/``row_pitch`` on top of the fixed
@@ -1242,6 +1304,7 @@ def _mos_array_layout(
         contact_gate_offset_um,
         bottom_endcap_um,
         sd_implant_margin_um,
+        mos_cap,
     )
     col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
     row_pitch = unit["bbox_height_um"] + MIN_SAME_LAYER_SPACING_UM

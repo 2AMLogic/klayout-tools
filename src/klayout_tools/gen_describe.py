@@ -166,7 +166,25 @@ def _mos_array_validate(params: dict[str, Any]) -> None:
         _mos_array_layout,
     )
 
-    if params["w_um"] < UNIT_MIN_W_UM:
+    if params["mos_cap"]:
+        # The width floor of a MOS capacitor is the deck's own COMP min-width
+        # rule for the selected oxide, resolved once the PDK is known (see
+        # `_device_layer_params`); the flat generator-side floor below applies
+        # to plain transistors only.
+        if params["w_um"] <= 0:
+            raise GenError("generator 'mos_array': params.w_um must be > 0")
+        if not params["add_guard_ring"]:
+            raise GenError(
+                "generator 'mos_array': params.mos_cap requires "
+                "params.add_guard_ring (the guard ring is the capacitor's "
+                "body tie)"
+            )
+        if params["gate_contact"]:
+            raise GenError(
+                "generator 'mos_array': params.mos_cap does not support "
+                "params.gate_contact"
+            )
+    elif params["w_um"] < UNIT_MIN_W_UM:
         raise GenError(
             f"generator 'mos_array': params.w_um must be >= {UNIT_MIN_W_UM} "
             "(the smallest width that fits an enclosed contact with margin -- "
@@ -220,6 +238,7 @@ def _mos_array_validate(params: dict[str, Any]) -> None:
             add_guard_ring=True,
             ring_padding_um=params["ring_padding_um"],
             interior_channel_um=params["interior_channel_um"],
+            mos_cap=params["mos_cap"],
         )
     )
     _validate_ring_gap(
@@ -334,6 +353,7 @@ def _mos_array_describe(
         _contact_gate_extra_offset_um(family),
         _gate_bottom_endcap_um(family),
         interior_channel_um=params["interior_channel_um"],
+        mos_cap=params["mos_cap"],
     )
     unit = info["unit"]
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
@@ -352,10 +372,44 @@ def _mos_array_describe(
     # gate. `fingers == 1` has no interior segment either way, so it keeps
     # reporting the plain `U<i>_S`/`U<i>_D`/`U<i>_G` triple, byte-for-byte
     # unchanged under both topologies (#777/#780 pinned this).
-    series_fingers = params["finger_topology"] == "series" and params["fingers"] > 1
+    series_fingers = (
+        params["finger_topology"] == "series"
+        and params["fingers"] > 1
+        and not params["mos_cap"]
+    )
 
     ports = []
-    if series_fingers:
+    if params["mos_cap"]:
+        # Issue #3283: S and D are one tied terminal (`U<i>_SD`, the strap's
+        # centre) and every gate finger is one poly terminal (`U<i>_G`); the
+        # body tie is the guard ring's `TAP_*` ports, reported below.
+        cap_x, cap_y = unit["sd_cap_xy"]
+        gx, gy = unit["g_xy"]
+        for c in info["cells"]:
+            idx = c["idx"]
+            ports.append(
+                {
+                    "name": f"U{idx}_SD",
+                    "net": None,
+                    "layer": metal_layer,
+                    "x_um": c["x0_um"] + cap_x,
+                    "y_um": c["y0_um"] + cap_y,
+                    "width_um": unit["g_width_um"],
+                    "direction_deg": 90,
+                }
+            )
+            ports.append(
+                {
+                    "name": f"U{idx}_G",
+                    "net": None,
+                    "layer": gate_layer,
+                    "x_um": c["x0_um"] + gx,
+                    "y_um": c["y0_um"] + gy,
+                    "width_um": unit["g_width_um"],
+                    "direction_deg": 90,
+                }
+            )
+    elif series_fingers:
         seg_xy = unit["seg_xy"]
         gate_xy = unit["gate_xy"]
         last_seg = len(seg_xy) - 1
@@ -501,6 +555,14 @@ def _mos_array_describe(
             f"{params['fingers']} transistors chained source-to-drain, not one "
             f"parallel device of width {params['fingers']} x {params['w_um']}um "
             f"(reported as U<i>_S<j>/U<i>_D<j>/U<i>_G<j> ports, one per finger)"
+        )
+
+    if params["mos_cap"]:
+        notes.append(
+            "params.mos_cap: each unit is a MOS capacitor (gate over diffusion, "
+            "all source/drain segments tied into U<i>_SD, body tied by the "
+            "guard ring's TAP_* ports) with the PDK's MOS-capacitor marker "
+            "drawn over the array; params.finger_topology is ignored"
         )
 
     voltage_flavor_hints = _voltage_flavor_hints(family, params, notes)

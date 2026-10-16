@@ -131,6 +131,22 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default="",
             )
             self.param(
+                "mos_cap",
+                self.TypeBoolean,
+                "Draw a MOS capacitor instead of a transistor: every "
+                "source/drain segment is strapped into one terminal and the "
+                "PDK's MOS-capacitor marker is drawn over the array (needs "
+                "add_guard_ring for the body tie; finger_topology is "
+                "ignored; gate_contact is unsupported)",
+                default=False,
+            )
+            self.param(
+                "mos_cap_mark_layer",
+                self.TypeLayer,
+                "PDK MOS-capacitor marker drawing layer (only used when mos_cap)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
                 "gate_contact",
                 self.TypeBoolean,
                 "Finish the gate stack: draw a contact and a local-metal pad "
@@ -426,6 +442,7 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.sd_implant_margin_um if self.sd_implant_present else 0.0,
                 self.voltage_flavor_mark_margin_um,
                 self.interior_channel_um,
+                self.mos_cap,
             )
             unit_boxes = info["unit"]["boxes_um"]
             for c in info["cells"] + info["dummy_cells"]:
@@ -578,6 +595,16 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 _insert_boxes(
                     self.cell,
                     li_voltage_flavor_mark,
+                    dbu,
+                    [info["voltage_flavor_mark_box_um"]],
+                )
+
+            # MOS-capacitor marker (issue #3283): same enclosing box as the
+            # voltage-flavor marker, so it covers every unit device.
+            if self.mos_cap:
+                _insert_boxes(
+                    self.cell,
+                    self.layout.layer(self.mos_cap_mark_layer),
                     dbu,
                     [info["voltage_flavor_mark_box_um"]],
                 )
