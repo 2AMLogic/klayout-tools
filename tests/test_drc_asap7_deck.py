@@ -96,6 +96,8 @@ _DECK_LAYERS = {
     *(f"m{i}" for i in range(1, 10)),
     *(f"v{i}" for i in range(1, 10)),
 }  # fmt: skip
+#: Read by number from DRM Table 2.3.1: the pinned asap7.lyp has no PAD entry.
+_DECK_LAYERS_NOT_IN_LYP = {"pad": (96, 0)}
 _CASES = fx.all_cases()
 #: The pinned shipped-cell libraries: (lambdapdk library, GDS / cell suffix).
 _LIBRARIES = (
@@ -422,9 +424,12 @@ def test_deck_layers_match_pinned_lyp():
         var: (int(layer), int(dt))
         for var, layer, dt in _DECK_LAYER_RE.findall(_deck_text())
     }
-    assert set(deck) == _DECK_LAYERS
+    assert set(deck) == _DECK_LAYERS | set(_DECK_LAYERS_NOT_IN_LYP)
     for var, source in deck.items():
-        assert lyp.get(var) == source, var
+        if var in _DECK_LAYERS_NOT_IN_LYP:
+            assert source == _DECK_LAYERS_NOT_IN_LYP[var] and var not in lyp, var
+        else:
+            assert lyp.get(var) == source, var
 
 
 def _shipped_gds(lib: str, suffix: str) -> Path:

@@ -462,6 +462,34 @@ DECK: list[DrcRule] = [
         provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "poly.1a"),
     ),
     DrcRule(
+        id="poly.endcap.diff.1",
+        description="minimum poly extension past diff at a gate (endcap)",
+        layer=(65, 20),  # diff.drawing -- the gate-end edges being probed
+        other_layer=(66, 20),  # poly.drawing -- must cover the probe zones
+        check="enclosed",
+        threshold_dbu=0,  # 0.0 um -- the 0.13 um lives in the derived zones
+        derived_layer=DerivedLayer(
+            base=(65, 20),
+            sized_by_um=0.13,
+            intersect_with=(66, 20),
+            mode="gate_endcap",
+        ),
+        # sky130.lydrc rule "poly.8":
+        #   poly.enclosing(gate, 0.13, projection).polygons.without_area(0)
+        # -> "poly.8 : min. poly extention gate (endcap) : 0.13um", with
+        # gate = diff & poly. Verified against the same open-pdks commit's
+        # sky130A.tech (`overhang *poly allfetsstd,allfetsspecial 130`).
+        # Not transcribed literally: that enclosing() also pairs the gate's
+        # long sides with poly's coincident edges and drops the zero-area
+        # pairs with `without_area(0)`, which would hide a *flush* endcap
+        # (the exact defect of issue #2936). `DerivedLayer(mode="gate_endcap")`
+        # probes 0.13 um outward from each diff edge under poly instead.
+        # The SRAM-core 0.11 um variant (`allfetscore`) and `poly.7`
+        # (diff extension past poly, 0.25 um) are not checked.
+        scope="poly",  # sky130.lydrc "poly.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "poly.8"),
+    ),
+    DrcRule(
         id="diff.width.1",
         description="minimum diff width (approximates the official difftap.1 rule)",
         layer=(65, 20),  # diff.drawing
