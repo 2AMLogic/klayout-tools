@@ -1500,17 +1500,23 @@ def _resume_request(tmp_path: Path, **batch_overrides) -> Path:
     return _write_request(tmp_path, request)
 
 
-def _fake_corner(point, *, lost: bool = False, errored: bool = False) -> dict:
+def _fake_corner(
+    point, *, lost: bool = False, errored: bool = False, code: str | None = None
+) -> dict:
     report = {
         "corner_id": point.corner_id,
         "status": "pass",
         "measurements": [],
         "diagnostics": [],
     }
-    if lost:
+    if lost or code:
         report["status"] = "error"
         report["diagnostics"] = [
-            {"severity": "error", "code": "lost_shard", "message": "no capacity"}
+            {
+                "severity": "error",
+                "code": code or "lost_shard",
+                "message": "no capacity",
+            }
         ]
     elif errored:
         report["status"] = "error"
@@ -1520,7 +1526,9 @@ def _fake_corner(point, *, lost: bool = False, errored: bool = False) -> dict:
     return report
 
 
-def _install_fake_batch(monkeypatch, *, lost_ids=(), errored_ids=(), fleet=False):
+def _install_fake_batch(
+    monkeypatch, *, lost_ids=(), errored_ids=(), codes=None, fleet=False
+):
     """Replace the batch dispatch with a fake that records which corners it
     was asked to run and loses `lost_ids` (a Spot-capacity loss)."""
     dispatched: list[list[str]] = []
@@ -1532,6 +1540,7 @@ def _install_fake_batch(monkeypatch, *, lost_ids=(), errored_ids=(), fleet=False
                 point,
                 lost=point.corner_id in lost_ids,
                 errored=point.corner_id in errored_ids,
+                code=(codes or {}).get(point.corner_id),
             )
             for point in corner_points
         ]
@@ -4907,3 +4916,26 @@ def test_prelaunch_feature_check_warn_mode_does_not_raise(tmp_path, monkeypatch)
         request, _config(tmp_path, runner_version_check="warn")
     )
     sb._enforce_published_runner_features(request, assessment)
+
+
+@pytest.mark.parametrize(
+    "codes", [("batch_job_failed", "batch_poll_timeout"), ("batch_job_timeout",) * 2]
+)
+def test_run_sim_batch_resume_resubmits_job_failure_and_poll_timeout(
+    tmp_path, monkeypatch, codes
+):
+    path = _resume_request(tmp_path)
+    _install_fake_batch(monkeypatch)
+    ids = [c["corner_id"] for c in _run(path, tmp_path)["corners"]]
+
+    _install_fake_batch(monkeypatch, codes=dict(zip(ids[:2], codes, strict=True)))
+    report = _run(path, tmp_path)
+    assert report["environment"]["resume"]["checkpoint_retained"] is True
+    checkpoint = json.loads(_checkpoint_file(tmp_path).read_text())
+    assert set(checkpoint["completed"]) == {ids[2]}
+
+    dispatched = _install_fake_batch(monkeypatch)
+    third = _run(path, tmp_path)
+    assert dispatched == [ids[:2]]
+    assert all(c["status"] == "pass" for c in third["corners"])
+    assert third["environment"]["resume"]["checkpoint_retained"] is False

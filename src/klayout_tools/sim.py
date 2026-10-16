@@ -1803,9 +1803,17 @@ def _dispatch_deck_request(
     )
 
 
-def _is_lost_shard_corner(corner: dict[str, Any]) -> bool:
-    """True when a corner report is a synthesized ``lost_shard`` (never ran)."""
-    return any(diag["code"] == "lost_shard" for diag in corner["diagnostics"])
+#: Diagnostic codes of a ``batch`` corner that never ran: a lost Spot shard,
+#: a job that failed or was stopped by the harness, or a poll that gave up
+#: while the job may still be running (``sim_batch._unrun_corner_report``).
+_UNRUN_BATCH_CODES = frozenset(
+    {"lost_shard", "batch_job_failed", "batch_job_timeout", "batch_poll_timeout"}
+)
+
+
+def _is_unrun_batch_corner(corner: dict[str, Any]) -> bool:
+    """True when a corner report is a synthesized batch one (never ran)."""
+    return any(diag["code"] in _UNRUN_BATCH_CODES for diag in corner["diagnostics"])
 
 
 def _record_batch_checkpoint(
@@ -1818,15 +1826,16 @@ def _record_batch_checkpoint(
 
     Issue #3367: `_run_batch` collects a shard's reports in one
     ``report.json``, so there is nothing to record incrementally; record the
-    returned set after dispatch. A ``lost_shard`` corner never ran (Spot
-    capacity loss), so it is left out and stays outstanding for the next
-    ``--resume``; a corner that ran and genuinely errored is recorded exactly
-    as the local backends do. A no-op without a checkpoint or off ``batch``.
+    returned set after dispatch. A corner that never ran (``lost_shard``,
+    ``batch_job_failed``, ``batch_job_timeout``, ``batch_poll_timeout``) is
+    left out and stays outstanding for the next ``--resume``; a corner that
+    ran and genuinely errored is recorded exactly as the local backends do.
+    A no-op without a checkpoint or off ``batch``.
     """
     if checkpoint is None or backend != "batch":
         return
     for corner in corners_new:
-        if not _is_lost_shard_corner(corner):
+        if not _is_unrun_batch_corner(corner):
             checkpoint.record(corner["corner_id"], corner, engine_version)
 
 
@@ -2488,11 +2497,13 @@ def _run_sim_corners(
             for diag in corner["diagnostics"]
         )
     )
-    # Issue #3367: a `lost_shard` corner never ran either, so a checkpoint
-    # holding the rest must outlive this run. Kept out of `corners_skipped`
+    # Issue #3367: a corner that never ran on `batch` (`lost_shard`,
+    # `batch_job_failed`, `batch_job_timeout`, `batch_poll_timeout`) is
+    # outstanding too, so a checkpoint holding the rest must outlive this
+    # run. Kept out of `corners_skipped`
     # (the reported `environment.budget.corners_skipped`) to leave that
     # field's meaning unchanged.
-    corners_lost = sum(1 for corner in corners if _is_lost_shard_corner(corner))
+    corners_lost = sum(1 for corner in corners if _is_unrun_batch_corner(corner))
 
     # Issue #2491: a top-level rollup of every `corners[].diagnostics[]`
     # entry -- including one downgraded to `severity: "warning"` by
