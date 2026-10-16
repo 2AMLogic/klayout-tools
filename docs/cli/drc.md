@@ -2016,7 +2016,7 @@ in the 990-999 range — see [`docs/cli/layers.md`](layers.md) → "Semantics
 and guarantees" and [`docs/cli/stats.md`](stats.md) → "Semantics and
 guarantees".
 
-## ASAP7 deck (`--engine klayout`, issues #2760, #2810)
+## ASAP7 deck (`--engine klayout`, issues #2760, #2810, #2811)
 
 klt ships its own KLayout DRC-DSL deck for the open ASAP7 7 nm predictive
 FinFET PDK, because the pinned lambdapdk (v0.2.17) ships the ASAP7 Design
@@ -2047,8 +2047,10 @@ Tables 3.1-3.19 is listed under "Not implemented" below with its reason and
 tracking issue: the track- and enclosure-relative V0-V3 rules are #3147,
 the track-, net- and M8-direction-dependent M4-M7 / V4-V7 rules are #3155,
 the ambiguous M8-M9 wide-metal spacings and the PAD-dependent V9 rules are
-#3156, and the FEOL/MOL gaps are #2812. Density checks and the full
-shipped-cell clean-run gate are #2811.
+#3156, and the FEOL/MOL gaps are #2812. The DRM states no density rule,
+so the deck checks none (see "Density" below), and the pinned shipped cells
+are the acceptance gate for every implemented rule (#2811, see "Shipped
+standard cells" below).
 
 **Source.** Every rule is transcribed from the ASAP7 PDK Design Rule Manual,
 PDK Release 1p7 (`asap7_drm_201207a.pdf`, under
@@ -2219,6 +2221,38 @@ Related notes:
   V0), so the M1/M2/V1 rules run against them; they are clean under every
   BEOL rule here. They draw nothing on M3-M9 or V2-V9, so those rules are
   exercised by the generated fixtures only.
+
+### Density
+
+**The pinned DRM states no density rule, so the deck checks no density.**
+Reviewed source: ASAP7 PDK Design Rule Manual, PDK Release 1p7,
+`asap7_drm_201207a.pdf` as shipped by lambdapdk v0.2.17 (79 PDF pages,
+SHA-256 `0091ea9ecc54f1331428821e1a7356ec4a7a13d49c2924a60305c11587c478e9`),
+reviewed for #2811:
+
+- Table 1.2.1 (rule types, p. 9) lists `A`, `EN`, `EX`, `GEOMETRY`, `L`,
+  `LUP`, `OV`, `R`, `S`, `SRAM`, `W` and `AUX`. There is no density type.
+- Chapter 3 has sections 3.1 (Geometry Check) to 3.19 (V8-V9), one per layer
+  group. None of them has a density section, and no table gives a minimum or
+  maximum layer density, a density window or step, or a fill requirement.
+  The DRM never uses the words "density" or "fill" for a rule.
+- Outside the DRM, lambdapdk v0.2.17 carries density numbers only in router
+  and flow setup files, and the deck does not take rules from them. The APR
+  tech LEF (`base/apr/asap7_tech.lef`) gives `MINIMUMDENSITY` /
+  `MAXIMUMDENSITY` on two layers only: `M5` (15 % / 90 %, 20 um window,
+  10 um step) and `Pad` (20 % / 80 %, 100 um window, 50 um step). It gives
+  none for M1-M4 or M6-M9. The DRM has no matching rule, the deck does not
+  read PAD (`V9.PAD.EN.2` above), and a limit on M5 alone does not describe
+  the metal stack, so these LEF numbers are not used as DRM rules. The
+  density values in lambdapdk's Python setup are a yield defect density and
+  an OpenROAD placement-utilisation target, not layout density rules.
+  `asap7.lyp` and `asap7.lyt` have no density rule.
+
+No threshold is taken from shipped-cell geometry, the tech LEF or another
+PDK, and no `*.DEN.*` id is declared, so `--expect-rule-categories` does not
+change. If a later DRM revision adds density rules, they need a pin bump and
+their own fixtures. `asap7_rules.DENSITY_DISPOSITION` records this decision
+in code.
 
 ### Integer-multiple vertical widths (`ACTIVE.W.2`, `SDT.W.3`)
 
@@ -2466,23 +2500,69 @@ Follow-up acceptance criteria if the missing definitions are established
 
 ### Shipped standard cells
 
+The pinned shipped cells are the acceptance gate for every rule the deck
+implements (FEOL/MOL and BEOL). The gate does not mean every DRM rule is
+implemented: the rules under "Not implemented" above stay with their own
+issues, and the gate follows `RULE_IDS` as they are at each commit.
+
 `tests/test_drc_asap7_deck.py` runs the deck on all 212 cells of each pinned
 library (`asap7sc7p5t_28_R`, `_L` and `_SL`), each cell abutted between two
 `INVx1` cells as in a placed row. Row-only cells such as `FILLERxp5` and
 `TAPCELL_WITH_FILLER` carry 54 nm WELL/select slivers that are legal only
 abutted, so checking cells in isolation would report width violations that a
-placed row does not have. The test skips with a reason when `pdks/lambdapdk`
-is not fetched or the `klayout` binary is missing.
+placed row does not have. Every layout is written to a temporary directory;
+the pinned `.gds.gz` files are only read. The PDK tests skip with a reason
+when `pdks/lambdapdk` is not fetched (`scripts/fetch-pdks.sh`) or a pinned
+library GDS is missing, and the deck tests skip when the `klayout` binary is
+missing. CI's `asap7-drc-deck` job does not fetch the PDK, so there these
+tests skip and run only where the PDK is fetched.
 
-Every cell is clean except these ten (same in all three libraries), which
-violate `SDT.ACTIVE.AUX.2` as the DRM states it. Each draws SDT 81 nm tall
-over a 54 nm ACTIVE, so the SDT's top edge is not on an ACTIVE edge, which
-Fig. 3.8.1(d) marks illegal. The rule is not loosened; the deviation is
-recorded in `asap7_rules.SHIPPED_CELL_DEVIATIONS` and the test fails if the
-set changes:
+The gate has two parts, run for each library:
 
-`AO33x2`, `BUFx2`, `BUFx4`, `BUFx4f`, `CKINVDCx9p33`, `ICGx2p67DC`,
-`ICGx4DC`, `ICGx5p33DC`, `ICGx6p67DC`, `OAI22xp33` (each `_ASAP7_75t_<VT>`).
+1. **Full corpus, exact deviations.** Every cell is placed. The set of
+   `(cell, rule)` pairs that violate must equal
+   `asap7_rules.SHIPPED_CELL_DEVIATIONS` (derived from
+   `SHIPPED_CELL_DEVIATION_RECORDS`). A new violation, a different rule on a
+   listed cell, or a listed deviation that goes away all fail the test. The
+   report's `coverage.rule_categories` must equal `RULE_IDS` as a set, so a
+   rule that is added, renamed or dropped cannot be missed.
+2. **Clean run through the CLI.** A temporary layout holds every cell except
+   the documented deviating cells below, and nothing else is left out. The
+   test runs
+
+   ```bash
+   klt drc <cells.gds> --engine klayout \
+       --deck-file src/klayout_tools/decks/asap7.drc \
+       --expect-rule-categories 232 --format json
+   ```
+
+   and requires exit 0, `status: "clean"`, no violations, a satisfied
+   coverage assertion, and `coverage.rule_categories` equal to `RULE_IDS`.
+   The count passed to `--expect-rule-categories` comes from `len(RULE_IDS)`.
+
+**Retained deviations.** These ten cells violate `SDT.ACTIVE.AUX.2` as the
+DRM states it. They are the same in all three libraries (names drop the
+`_ASAP7_75t_<VT>` suffix). Table 3.8.1 says SDT horizontal edges (SDT not
+interacting with SRAMDRC) must coincide with ACTIVE horizontal edges, and
+Fig. 3.8.1(d) marks an SDT edge that is not on an ACTIVE edge as illegal.
+The rule is not loosened and the deck does not waive anything. Each deviation
+is an exact `(cell, rule)` entry, never a rule-wide or cell-wide waiver.
+Leaving a cell out of the clean run does not hide its other rules, because
+the full-corpus run still requires that cell to violate only the listed
+rule:
+
+| Cell | Rule | DRM citation | Libraries | Rationale | Handling |
+| --- | --- | --- | --- | --- | --- |
+| `AO33x2` | `SDT.ACTIVE.AUX.2` | Table 3.8.1, Fig. 3.8.1(d) | R, L, SL | SDT drawn 81 nm tall over a 54 nm ACTIVE: the SDT top edge is not on an ACTIVE horizontal edge | kept as stated; expected exactly; left out of the clean run |
+| `BUFx2` | `SDT.ACTIVE.AUX.2` | Table 3.8.1, Fig. 3.8.1(d) | R, L, SL | SDT drawn 81 nm tall over a 54 nm ACTIVE: the SDT top edge is not on an ACTIVE horizontal edge | kept as stated; expected exactly; left out of the clean run |
+| `BUFx4` | `SDT.ACTIVE.AUX.2` | Table 3.8.1, Fig. 3.8.1(d) | R, L, SL | SDT drawn 81 nm tall over a 54 nm ACTIVE: the SDT top edge is not on an ACTIVE horizontal edge | kept as stated; expected exactly; left out of the clean run |
+| `BUFx4f` | `SDT.ACTIVE.AUX.2` | Table 3.8.1, Fig. 3.8.1(d) | R, L, SL | SDT drawn 81 nm tall over a 54 nm ACTIVE: the SDT top edge is not on an ACTIVE horizontal edge | kept as stated; expected exactly; left out of the clean run |
+| `CKINVDCx9p33` | `SDT.ACTIVE.AUX.2` | Table 3.8.1, Fig. 3.8.1(d) | R, L, SL | SDT drawn 81 nm tall over a 54 nm ACTIVE: the SDT top edge is not on an ACTIVE horizontal edge | kept as stated; expected exactly; left out of the clean run |
+| `ICGx2p67DC` | `SDT.ACTIVE.AUX.2` | Table 3.8.1, Fig. 3.8.1(d) | R, L, SL | SDT drawn 81 nm tall over a 54 nm ACTIVE: the SDT top edge is not on an ACTIVE horizontal edge | kept as stated; expected exactly; left out of the clean run |
+| `ICGx4DC` | `SDT.ACTIVE.AUX.2` | Table 3.8.1, Fig. 3.8.1(d) | R, L, SL | SDT drawn 81 nm tall over a 54 nm ACTIVE: the SDT top edge is not on an ACTIVE horizontal edge | kept as stated; expected exactly; left out of the clean run |
+| `ICGx5p33DC` | `SDT.ACTIVE.AUX.2` | Table 3.8.1, Fig. 3.8.1(d) | R, L, SL | SDT drawn 81 nm tall over a 54 nm ACTIVE: the SDT top edge is not on an ACTIVE horizontal edge | kept as stated; expected exactly; left out of the clean run |
+| `ICGx6p67DC` | `SDT.ACTIVE.AUX.2` | Table 3.8.1, Fig. 3.8.1(d) | R, L, SL | SDT drawn 81 nm tall over a 54 nm ACTIVE: the SDT top edge is not on an ACTIVE horizontal edge | kept as stated; expected exactly; left out of the clean run |
+| `OAI22xp33` | `SDT.ACTIVE.AUX.2` | Table 3.8.1, Fig. 3.8.1(d) | R, L, SL | SDT drawn 81 nm tall over a 54 nm ACTIVE: the SDT top edge is not on an ACTIVE horizontal edge | kept as stated; expected exactly; left out of the clean run |
 
 ### Per-rule fixtures
 
