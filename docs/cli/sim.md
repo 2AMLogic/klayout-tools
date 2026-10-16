@@ -1382,6 +1382,23 @@ corner order; the checkpoint is retained while any of them remains. Corners
 that ran and errored are checkpointed like on `local`.
 Works for `hosts == 1` and `hosts > 1`.
 
+**Sharded resume re-attaches to jobs that already ran** (`hosts > 1`, or a
+`max_units_per_job` split under `--resume`). Each shard's job id is recorded in
+`<artifacts-dir>/batch-shards.json` (schema_version 1: the request
+fingerprint, the shard count, and per shard its `index`, `job_id` and a digest
+of its corner ids) *before* the shard is submitted. A re-run with `--resume`
+and the same `--outdir` re-attaches to every recorded shard through the
+`--attach` path: a `done` job is collected, a live one is polled, and only a
+shard with no usable job (never submitted, outputs gone, or a terminally
+`failed` job) is submitted again under a new id, overwriting its entry. Each
+`environment.remote.fleet[]` entry carries `resumed: true|false`.
+
+The fingerprint is the resume checkpoint's own, so a changed request (units,
+seed, `hosts`, netlist) or an unreadable `batch-shards.json` is refused with
+exit 1 and error code `resume_fingerprint_mismatch` before any S3 write; delete
+the file or drop `--resume`. Without `--resume` an existing map is ignored and
+overwritten. The map is removed when the sweep finishes with no unrun corner.
+
 The dispatch-time fail-fast probe is skipped for `batch` —
 probing *this* host's ngspice says nothing about the fleet instance's
 hardware.

@@ -116,6 +116,7 @@ from .sim_remote import (
     _points_to_push,
     _rewrite_remote_artifact_paths,
     _run_sharded,
+    _shard_corner_points,
     _unrun_corner_report,
 )
 
@@ -2446,6 +2447,15 @@ BATCH_HEARTBEAT_INTERVAL_S = 300.0
 #: the bucket (never submitted, wrong bucket/profile, or already expired).
 BATCH_UNKNOWN_JOB_CODE = "batch_unknown_job"
 
+#: Filename of the shard map a sharded batch run keeps under its artifacts
+#: directory (issue #3300): which job id each shard was submitted as, so a
+#: ``--resume`` re-run re-attaches instead of paying for the shard again.
+BATCH_SHARDS_FILENAME = "batch-shards.json"
+
+#: ``SimError.code`` for ``--resume`` against a shard map that belongs to a
+#: different request (or is unreadable): refused before any S3 write.
+BATCH_SHARD_MANIFEST_CODE = "resume_fingerprint_mismatch"
+
 
 def _heartbeat(job_id: str, state: str | None, elapsed_s: float) -> None:
     """One progress line on stderr (never stdout: ``--format json`` stdout
@@ -3455,6 +3465,118 @@ def _write_batch_receipt(path: str, receipt: dict[str, Any]) -> None:
             pass
 
 
+class _ShardManifest:
+    """The persisted shard-to-job-id map of a sharded batch run (issue #3300).
+
+    ``<artifacts_dir>/batch-shards.json`` holds the request fingerprint (the
+    resume checkpoint's own, :func:`sim._checkpoint_fingerprint`), the shard
+    count, and one entry per shard: its index, the job id it was submitted
+    as, and a digest of the corner ids it carries. An entry is written
+    *before* the shard's ``submit_job``, so a client killed between minting
+    the id and submitting still leaves a mapping (the re-attach then finds no
+    ``job.json`` and falls back to a fresh submit). Writes are atomic
+    (temp + rename) and serialized: shard threads record concurrently.
+    """
+
+    def __init__(
+        self,
+        path: str,
+        fingerprint: str,
+        hosts: int,
+        prior: dict[str, dict[str, Any]] | None = None,
+    ) -> None:
+        self._path = path
+        self._fingerprint = fingerprint
+        self._hosts = hosts
+        self._lock = threading.Lock()
+        self.prior: dict[str, dict[str, Any]] = prior or {}
+        self._entries: dict[str, dict[str, Any]] = {}
+
+    @classmethod
+    def open(
+        cls, artifacts_dir: str, fingerprint: str, hosts: int, *, resume: bool
+    ) -> _ShardManifest:
+        """Open the manifest for this run. Without ``resume`` any existing
+        file is ignored (and overwritten by the first write). With ``resume``
+        a missing file means nothing to re-attach to; an unreadable one, or
+        one written for a different request or shard count, raises
+        :class:`SimError` -- never a silent restart that would re-bill every
+        shard."""
+        from .sim import SimError
+
+        path = os.path.join(artifacts_dir, BATCH_SHARDS_FILENAME)
+        manifest = cls(path, fingerprint, hosts)
+        if not resume or not os.path.isfile(path):
+            return manifest
+        try:
+            with open(path, encoding="utf-8") as handle:
+                data = json.load(handle)
+            shards = {str(entry["index"]): dict(entry) for entry in data["shards"]}
+            stored_fingerprint = data["fingerprint"]
+            stored_hosts = data["hosts"]
+            if data.get("schema_version") != 1:
+                raise ValueError("unsupported schema_version")
+            for entry in shards.values():
+                str(entry["job_id"])
+                str(entry["units_sha256"])
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise SimError(
+                f"--resume: shard map {path} is unreadable ({exc}); delete it "
+                "or drop --resume (resuming would otherwise re-submit shards "
+                "that may already have finished)",
+                code=BATCH_SHARD_MANIFEST_CODE,
+            ) from exc
+        if stored_fingerprint != fingerprint or stored_hosts != hosts:
+            raise SimError(
+                f"--resume: shard map {path} was written for a different "
+                "request (units, seed, hosts, netlist or settings changed); "
+                "delete it or drop --resume",
+                code=BATCH_SHARD_MANIFEST_CODE,
+            )
+        manifest.prior = shards
+        return manifest
+
+    def record(self, index: int, job_id: str, units_sha256: str) -> None:
+        with self._lock:
+            self._entries[str(index)] = {
+                "index": index,
+                "job_id": job_id,
+                "units_sha256": units_sha256,
+            }
+            self._flush_locked()
+
+    def flush(self) -> None:
+        with self._lock:
+            self._flush_locked()
+
+    def _flush_locked(self) -> None:
+        # Entries of shards this run has not reached yet stay as the prior
+        # run left them, so a second interruption keeps their mapping.
+        entries = {**self.prior, **self._entries}
+        document = {
+            "schema_version": 1,
+            "fingerprint": self._fingerprint,
+            "hosts": self._hosts,
+            "shards": [entries[key] for key in sorted(entries, key=int)],
+        }
+        _write_batch_receipt(self._path, document)
+
+
+def _remove_shard_manifest(artifacts_dir: str) -> None:
+    """Drop a finished sweep's shard map -- nothing is left to re-attach to."""
+    try:
+        os.remove(os.path.join(artifacts_dir, BATCH_SHARDS_FILENAME))
+    except OSError:
+        pass
+
+
+def _units_digest(points: Sequence[CornerPoint]) -> str:
+    """Digest of a shard's ordered corner ids: a manifest entry only applies
+    to a re-run that hands the shard the same units."""
+    blob = json.dumps([point.corner_id for point in points]).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
+
+
 def _poll_status_interruptibly(
     config: BatchConfig,
     job_id: str,
@@ -3792,13 +3914,14 @@ def _run_batch(
     report when a job fails); the rest are already embedded in ``request``
     or resolved by the job instance itself, exactly as for ``remote``.
 
-    ``deadline``/``initial_ppid``/``checkpoint``/``probe_abort`` are
+    ``deadline``/``initial_ppid``/``probe_abort`` are
     likewise accepted but not honored, for the same reason ``_run_remote``
-    does not honor them: the corner dispatch loop runs in a *different*
-    process on a machine this function only observes through ``status.json``
-    (``checkpoint`` is therefore unused here: ``run_sim`` records the
-    returned reports into the resume checkpoint after dispatch, skipping
-    ``lost_shard`` corners -- issue #3367). The batch path's own wall-clock
+    does not honor them (``checkpoint`` only supplies the resume fingerprint
+    for a split reroute's shard map, issue #3300): the corner dispatch loop
+    runs in a *different* process on a machine this function only observes
+    through ``status.json`` (``run_sim`` records the returned reports into
+    the resume checkpoint after dispatch, skipping ``lost_shard`` corners --
+    issue #3367). The batch path's own wall-clock
     bound is ``request.batch.poll_timeout_s``, whose overrun reports every
     unit through the same unrun-corner shape.
 
@@ -3817,7 +3940,7 @@ def _run_batch(
     from .sim import SimError
 
     del analysis, models_lib, max_workers  # see docstring
-    del deadline, initial_ppid, checkpoint, probe_abort  # not honored
+    del deadline, initial_ppid, probe_abort  # not honored
 
     config = _resolve_batch_config(
         request, corner_count=len(corner_points), timeout_s=timeout_s
@@ -3878,6 +4001,10 @@ def _run_batch(
                 measurements_spec=measurements_spec,
                 request_dir=request_dir,
                 config=config,
+                shard_fingerprint=None
+                if checkpoint is None
+                else checkpoint.fingerprint,
+                resume=checkpoint is not None,
             )
         except BatchError as exc:
             raise SimError(f"batch backend failed: {exc}", code=exc.code) from exc
@@ -3920,6 +4047,8 @@ def _run_batch_fleet(
     measurements_spec: list[dict[str, Any]],
     request_dir: str | None = None,
     config: BatchConfig | None = None,
+    shard_fingerprint: str | None = None,
+    resume: bool = False,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``batch`` backend's ``hosts > 1`` dispatch: one **job** per shard.
 
@@ -3942,6 +4071,17 @@ def _run_batch_fleet(
     ``config`` is for :func:`_run_batch`'s split reroute (issue #3446), which
     has already resolved it (and run the once-per-request runner check); a
     direct caller leaves it ``None``.
+
+    ``shard_fingerprint`` (issue #3300) is the request's resume fingerprint;
+    given, each shard's job id is recorded in ``batch-shards.json`` under
+    ``artifacts_dir`` *before* the shard is submitted. With ``resume`` a
+    shard the manifest already maps is re-attached
+    (``_run_batch_job(attach=True)``) -- ``done`` collected, live polled --
+    and only a shard with no usable job (never submitted, outputs gone, or
+    terminally failed) is submitted again under a fresh id. A manifest from a
+    different request is refused (:data:`BATCH_SHARD_MANIFEST_CODE`) before
+    any S3 write. Every ``environment.remote.fleet[]`` entry carries
+    ``resumed: true|false``.
     """
     from .sim import SimError
 
@@ -3951,6 +4091,17 @@ def _run_batch_fleet(
             f"dispatch ({len(corner_points)}) -- an idle fleet member would "
             "still be billed; use hosts <= corner/sample count"
         )
+
+    manifest = (
+        _ShardManifest.open(artifacts_dir, shard_fingerprint, hosts, resume=resume)
+        if shard_fingerprint is not None
+        else None
+    )
+    shard_indexes = {
+        _units_digest(points): index
+        for index, points in enumerate(_shard_corner_points(corner_points, hosts))
+        if points
+    }
 
     if config is None:
         config = _resolve_batch_config(
@@ -3969,13 +4120,12 @@ def _run_batch_fleet(
         backend="batch",
     )
 
-    def _shard_runner(
-        shard_points: list[CornerPoint],
+    def _run_shard(
+        shard_points: list[CornerPoint], job_id: str, *, attach: bool
     ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
         # The job id doubles as the shard's artifacts subdirectory, so
         # per-shard artifact trees never collide and each one is traceable
         # back to the S3 prefix it was collected from.
-        job_id = new_job_id()
         shard_artifacts_dir = (
             os.path.join(artifacts_dir, job_id) if keep_artifacts else artifacts_dir
         )
@@ -3993,7 +4143,26 @@ def _run_batch_fleet(
             explicit_points=shard_points,
             request_dir=request_dir,
             receipt_name=f"batch-receipt-{job_id}.json",
+            attach=attach,
         )
+
+    def _shard_runner(
+        shard_points: list[CornerPoint],
+    ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
+        digest = _units_digest(shard_points)
+        index = shard_indexes[digest]
+        prior = manifest.prior.get(str(index)) if manifest is not None else None
+        if prior is not None and prior["units_sha256"] == digest:
+            result = _try_reattach_shard(
+                lambda: _run_shard(shard_points, str(prior["job_id"]), attach=True),
+                job_id=str(prior["job_id"]),
+            )
+            if result is not None:
+                return _mark_resumed(result, True)
+        job_id = new_job_id()
+        if manifest is not None:
+            manifest.record(index, job_id, digest)
+        return _mark_resumed(_run_shard(shard_points, job_id, attach=False), False)
 
     return _run_sharded(
         shard_runner=_shard_runner,
@@ -4001,6 +4170,57 @@ def _run_batch_fleet(
         hosts=hosts,
         measurements_spec=measurements_spec,
     )
+
+
+def _try_reattach_shard(
+    attach: Callable[
+        [], tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]
+    ],
+    *,
+    job_id: str,
+) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None] | None:
+    """Re-attach to a shard's recorded job (issue #3300), or ``None`` when the
+    caller should submit it afresh: the job was never submitted, its outputs
+    cannot be collected, or it ended in a terminal failure. A client
+    interrupt is never swallowed, and a poll-budget overrun is returned as
+    is -- that job may still be running, so resubmitting would bill it twice.
+    """
+    try:
+        result = attach()
+    except BatchClientInterrupted:
+        raise
+    except BatchError as exc:
+        print(
+            f"klt sim: notice: cannot re-attach batch job {job_id} ({exc}); "
+            "submitting that shard again",
+            file=sys.stderr,
+        )
+        return None
+    corners = result[0]
+    if corners and all(
+        any(
+            d.get("code") == "batch_job_failed" for d in corner.get("diagnostics") or []
+        )
+        for corner in corners
+    ):
+        print(
+            f"klt sim: notice: batch job {job_id} had failed; submitting "
+            "that shard again",
+            file=sys.stderr,
+        )
+        return None
+    return result
+
+
+def _mark_resumed(
+    result: tuple[list[dict[str, Any]], str | None, dict[str, Any] | None],
+    resumed: bool,
+) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
+    """Stamp the additive ``resumed`` flag on a shard's ``fleet[]`` entry."""
+    corners, engine_version, environment = result
+    if environment is not None:
+        environment = {**environment, "resumed": resumed}
+    return corners, engine_version, environment
 
 
 #: Re-exported so ``sim.py``'s own module namespace keeps the same
@@ -4017,6 +4237,8 @@ __all__ = [
     "BATCH_UNKNOWN_JOB_CODE",
     "BATCH_NETLIST_FILENAME",
     "BATCH_RECEIPT_FILENAME",
+    "BATCH_SHARDS_FILENAME",
+    "BATCH_SHARD_MANIFEST_CODE",
     "BATCH_REPORT_FILENAME",
     "BATCH_RUNNER_IDENTITY_FILENAME",
     "BATCH_RUNNER_FEATURE_CODE",
