@@ -2741,8 +2741,7 @@ def _run_batch_job(
     # Issue #2978: name the job on stderr the moment it exists, so a caller
     # killed by an outer wall-clock limit knows what it orphaned.
     sys.stderr.write(
-        f"klt sim: batch job {job_id} launched "
-        f"(bucket={config.bucket}, region={config.region or 'default'}); "
+        f"klt sim: batch job {job_id} launched; "
         f"re-attach with `klt sim <request> --backend batch --attach {job_id}`\n"
     )
     sys.stderr.flush()

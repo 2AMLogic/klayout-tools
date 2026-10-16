@@ -765,7 +765,7 @@ While it waits, `klt sim` writes progress to **stderr only** (so
 `--format json` stdout is unchanged):
 
 ```
-klt sim: batch job klt-sim-1a2b3c4d5e6f launched (bucket=<your-batch-jobs-bucket>, region=us-east-1); re-attach with `klt sim <request> --backend batch --attach klt-sim-1a2b3c4d5e6f`
+klt sim: batch job klt-sim-1a2b3c4d5e6f launched; re-attach with `klt sim <request> --backend batch --attach klt-sim-1a2b3c4d5e6f`
 klt sim: batch job klt-sim-1a2b3c4d5e6f state=running elapsed=0s
 ```
 
