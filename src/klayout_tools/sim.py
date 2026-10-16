@@ -99,8 +99,8 @@ from . import (
     sim_energy,
     sim_injected,
     sim_mismatch_gate,
-    sim_portable,
     sim_passes,
+    sim_portable,
     sim_steps,
     sim_transfer_meas,
 )
