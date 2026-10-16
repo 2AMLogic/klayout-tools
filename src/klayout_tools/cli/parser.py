@@ -3659,6 +3659,19 @@ def _add_functional_verification_parser(
             "docs/cli/functional-verification.md, '--mutations'"
         ),
     )
+    functional_verification_parser.add_argument(
+        "-o",
+        "--outdir",
+        default=None,
+        help=(
+            "write run artifacts (results XML, logs, simulator build "
+            "directory, coverage, trace, mutants/) here instead of "
+            "`.klt/functional-verification/` next to the request file; "
+            "created if missing, relative paths resolve against the cwd. "
+            "Request-relative source paths still resolve against the "
+            "request's own directory"
+        ),
+    )
     _add_format_arg(functional_verification_parser)
     functional_verification_parser.set_defaults(func=functional_verification_cmd.run)
 

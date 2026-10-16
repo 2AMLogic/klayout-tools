@@ -220,7 +220,16 @@ including envelopes from older producers.
 
 Everything a run produces is written to `.klt/functional-verification/` next
 to the request file — the same "next to the input" default `klt sim`/`klt
-synthesize` already use — and kept, never deleted:
+synthesize` already use — and kept, never deleted.
+
+Pass `-o/--outdir DIR` to write them to `DIR` instead (created if missing; a
+relative `DIR` resolves against the current directory, not the request's).
+This keeps the evidence of two runs of the same request apart. Request-relative
+source and testbench paths still resolve against the request's own directory,
+and `--mutations` honours the flag too (`DIR/mutants/`). The run-identity
+digest does not fold in the output directory. The `environment.results_xml`,
+`trace.path`, coverage and mutation `log_path` fields report the chosen
+location.
 
 | Artifact | What it is |
 | --- | --- |
