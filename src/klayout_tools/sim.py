@@ -2069,8 +2069,7 @@ def _run_sim_corners(
             monte_carlo_info["quantiles"] = list(quantiles)
         if k_sigma is not None:
             monte_carlo_info["k_sigma"] = k_sigma
-        if monte_carlo_spec.get("window_scope") is not None:
-            monte_carlo_info["window_scope"] = window_scope
+        monte_carlo_info.update(_mc_window_scope_echo(monte_carlo_spec, window_scope))
 
     # Issue #2706: fail fast (before any probe or backend dispatch) when a
     # supply override targets a source with an explicit transient waveform.
@@ -7301,6 +7300,14 @@ def _validate_mc_window_scope(mc_spec: dict[str, Any]) -> str:
             f"{', '.join(repr(v) for v in MC_WINDOW_SCOPES)} (got {raw!r})"
         )
     return raw
+
+
+def _mc_window_scope_echo(mc_spec: dict[str, Any], window_scope: str) -> dict[str, str]:
+    """``environment.monte_carlo`` echo for ``window_scope``: only when the
+    request declared it, so a sampling-only request keeps its shape."""
+    if mc_spec.get("window_scope") is None:
+        return {}
+    return {"window_scope": window_scope}
 
 
 def _monte_carlo_rollup(
