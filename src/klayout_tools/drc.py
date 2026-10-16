@@ -161,6 +161,16 @@ _REGION_CHECKS = _COMP_COVERAGE_CHECKS | _TAP_DISTANCE_CHECKS
 # Returns `EdgePairs`, so it reuses the ordinary edge-pair reporting path.
 _NET_SPACE_CHECKS = {"net_space"}
 
+
+def _spec_layers(rule: DrcRule) -> set[tuple[int, int]]:
+    """Layers referenced by a rule's ``region_spec`` / ``net_spec``, if any."""
+    layers: set[tuple[int, int]] = set()
+    for spec in (rule.region_spec, rule.net_spec):
+        if spec is not None:
+            layers.update(spec.layers())
+    return layers
+
+
 # Every `DerivedLayer.mode` `run_drc()` knows how to derive a region for --
 # see that class's docstring for each one's derivation. Validated per rule
 # (rather than assumed) so a deck typo fails loudly with the rule id instead
@@ -1475,10 +1485,7 @@ def run_drc(
         deck_layer_tuples.add(rule.layer)
         if rule.other_layer is not None:
             deck_layer_tuples.add(rule.other_layer)
-        if rule.region_spec is not None:
-            deck_layer_tuples.update(rule.region_spec.layers())
-        if rule.net_spec is not None:
-            deck_layer_tuples.update(rule.net_spec.layers())
+        deck_layer_tuples.update(_spec_layers(rule))
         if rule.derived_layer is not None:
             # `rule.layer` is only the derived rule's *reporting* identity
             # (see DerivedLayer's docstring) -- the layer(s) actually read
