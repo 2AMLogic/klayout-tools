@@ -4232,54 +4232,17 @@ def rerun_extract_report(report_path: str) -> dict[str, Any]:
     # block -- or one whose echoes lost their shape -- replays without the
     # flag and legitimately drifts on the pin fields, the same documented
     # limitation every other unechoed flag has.
-    rename_declared_pins = committed.get("rename_declared_pins") is True
-    pin_renames_echo = committed.get("pin_renames")
-    rerun_declared_pins: frozenset[str] | None = None
-    rerun_def_pins: frozenset[str] | None = None
-    if rename_declared_pins and isinstance(pin_renames_echo, dict):
-        if "declared_pins" in pin_renames_echo or "def_pins" in pin_renames_echo:
-            valid_pins, rerun_declared_pins = _parse_declared_set_echo(
-                pin_renames_echo.get("declared_pins")
-            )
-            valid_def, rerun_def_pins = _parse_declared_set_echo(
-                pin_renames_echo.get("def_pins")
-            )
-            if not (valid_pins and valid_def):
-                rename_declared_pins = False
-                rerun_declared_pins = None
-                rerun_def_pins = None
-        else:
-            # A block without the separate echoes (an earlier build of this
-            # unreleased feature, or a hand-edited report): the union
-            # `declared` is the only echo -- replay it as `--pins` alone
-            # (the previous behavior; imperfect when the original run's
-            # `--def-pins` further restricted the surviving set, but
-            # strictly better than discarding the rename the block does
-            # carry).
-            union_echo = pin_renames_echo.get("declared")
-            if isinstance(union_echo, list) and all(
-                isinstance(name, str) for name in union_echo
-            ):
-                rerun_declared_pins = frozenset(union_echo) if union_echo else None
-            else:
-                rename_declared_pins = False
-    else:
-        rename_declared_pins = False
+    rename_declared_pins, rerun_declared_pins, rerun_def_pins = (
+        _replay_pin_renames_echo(committed)
+    )
 
     # Issue #3061: the top-level `declared_pins`/`def_pins` echoes (emitted
     # whether or not `--rename-declared-pins` was on) win over the
     # `pin_renames` echo above, which stays the fallback for a report that
     # predates them. A malformed echo degrades to "not replayed".
-    if "declared_pins" in committed or "def_pins" in committed:
-        valid_top_pins, top_declared_pins = _parse_declared_set_echo(
-            committed.get("declared_pins")
-        )
-        valid_top_def, top_def_pins = _parse_declared_set_echo(
-            committed.get("def_pins")
-        )
-        if valid_top_pins and valid_top_def:
-            rerun_declared_pins = top_declared_pins
-            rerun_def_pins = top_def_pins
+    top_echo = _replay_top_level_pin_echo(committed)
+    if top_echo is not None:
+        rerun_declared_pins, rerun_def_pins = top_echo
 
     # Issue #3061: the rerun never writes over the committed netlist. A report
     # recorded by `--no-netlist` (issue #2850) has a null path: replay it as
@@ -4319,6 +4282,65 @@ def rerun_extract_report(report_path: str) -> dict[str, Any]:
         committed_for_diff=_canonicalize_extract_report_for_rerun_diff(committed),
         fresh_for_diff=_canonicalize_extract_report_for_rerun_diff(fresh),
     )
+
+
+def _replay_pin_renames_echo(
+    committed: Mapping[str, Any],
+) -> tuple[bool, frozenset[str] | None, frozenset[str] | None]:
+    """The ``(rename_declared_pins, declared_pins, def_pins)`` replay
+    arguments :func:`rerun_extract_report` reconstructs from the committed
+    report's ``pin_renames`` block (issue #2854). A report without the block
+    -- or one whose echoes lost their shape -- replays without the flag and
+    legitimately drifts on the pin fields, the same documented limitation
+    every other unechoed flag has."""
+    pin_renames_echo = committed.get("pin_renames")
+    if committed.get("rename_declared_pins") is not True or not isinstance(
+        pin_renames_echo, dict
+    ):
+        return False, None, None
+    if "declared_pins" not in pin_renames_echo and "def_pins" not in pin_renames_echo:
+        return _replay_union_pin_echo(pin_renames_echo)
+    valid_pins, declared_pins = _parse_declared_set_echo(
+        pin_renames_echo.get("declared_pins")
+    )
+    valid_def, def_pins = _parse_declared_set_echo(pin_renames_echo.get("def_pins"))
+    if not (valid_pins and valid_def):
+        return False, None, None
+    return True, declared_pins, def_pins
+
+
+def _replay_union_pin_echo(
+    pin_renames_echo: Mapping[str, Any],
+) -> tuple[bool, frozenset[str] | None, frozenset[str] | None]:
+    """:func:`_replay_pin_renames_echo`'s fallback for a block without the
+    separate ``declared_pins``/``def_pins`` echoes (an earlier build of this
+    unreleased feature, or a hand-edited report): the union ``declared`` is
+    the only echo -- replay it as ``--pins`` alone (the previous behavior;
+    imperfect when the original run's ``--def-pins`` further restricted the
+    surviving set, but strictly better than discarding the rename the block
+    does carry)."""
+    union_echo = pin_renames_echo.get("declared")
+    if isinstance(union_echo, list) and all(
+        isinstance(name, str) for name in union_echo
+    ):
+        return True, (frozenset(union_echo) if union_echo else None), None
+    return False, None, None
+
+
+def _replay_top_level_pin_echo(
+    committed: Mapping[str, Any],
+) -> tuple[frozenset[str] | None, frozenset[str] | None] | None:
+    """The ``(declared_pins, def_pins)`` replay sets from the committed
+    report's top-level echoes (issue #3061), or ``None`` when neither echo is
+    present or either lost its shape (a malformed echo degrades to "not
+    replayed")."""
+    if "declared_pins" not in committed and "def_pins" not in committed:
+        return None
+    valid_pins, declared_pins = _parse_declared_set_echo(committed.get("declared_pins"))
+    valid_def, def_pins = _parse_declared_set_echo(committed.get("def_pins"))
+    if not (valid_pins and valid_def):
+        return None
+    return declared_pins, def_pins
 
 
 def _parse_declared_set_echo(value: Any) -> tuple[bool, frozenset[str] | None]:
