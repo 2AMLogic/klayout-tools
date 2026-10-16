@@ -4343,6 +4343,16 @@ def test_run_drc_gf180mcu_implant_space_to_opposite_comp(
     layer_num, datatype = _IMPLANT_LAYERS[implant]
     rule_id = f"{implant}.space.{rule_suffix}.1"
 
+    # `nplus.space.pcomp.1` is the near-well half of the NP.3 split (issue
+    # #3484): without an Nwell within 0.429um the PCOMP is held to the relaxed
+    # 0.08um (`nplus.space.pcomp.far.1`), so this fixture draws one 0.3um
+    # below the diffusion to keep exercising the strict 0.16um.
+    well = (
+        [(21, 0, "Nwell", kdb.Box(-500, -3000, 1500, -300))]
+        if implant == "nplus"
+        else []
+    )
+
     def build(gap):
         return _gf180mcu_implant_layout(
             [
@@ -4360,6 +4370,7 @@ def test_run_drc_gf180mcu_implant_space_to_opposite_comp(
                     kdb.Box(1000 + gap, 0, 2000 + gap, 4000),
                 ),
             ]
+            + well
         )
 
     violate_path = tmp_path / f"{rule_id}.violate.gds"
@@ -4538,26 +4549,113 @@ def test_run_drc_gf180mcu_pplus_enclosing_comp_still_fires_with_nwell_present(
 ):
     """Negative control for the #2634 fix: the exact same under-threshold
     PCOMP extension still trips `pplus.enclosing.comp.1` once an `Nwell`
-    shape is present *anywhere* in the layout -- `requires_any_layer` only
+    shape is present near the tap -- `requires_any_layer` only
     skips a layout with no well context at all; it does not blanket-disable
     the rule."""
     layout = _gf180mcu_implant_layout(
         [
             (22, 0, "Comp", kdb.Box(0, 0, 400, 1000)),
             (31, 0, "Pplus", kdb.Box(-20, -20, 420, 1020)),
-            # Elsewhere in the same layout, not touching this tap -- an
-            # ordinary Nwell shape (e.g. a PMOS well drawn elsewhere in the
-            # same cell/array).
-            (21, 0, "Nwell", kdb.Box(5000, 5000, 10000, 10000)),
+            # An ordinary Nwell shape (e.g. a PMOS well drawn in the same
+            # cell/array) within 0.429um of the tap, so the strict `PP.5dii`
+            # 0.16um applies (issue #3484: a tap further away is held to the
+            # relaxed `PP.5di` 0.02um on `pplus.enclosing.comp.far.1`).
+            (21, 0, "Nwell", kdb.Box(700, -2000, 5000, 3000)),
         ]
     )
-    path = tmp_path / "pplus_enclosing_comp_with_distant_nwell.gds"
+    path = tmp_path / "pplus_enclosing_comp_with_nearby_nwell.gds"
     layout.write(str(path))
 
     report = run_drc(str(path), "gf180mcu")
 
     assert report["status"] == "violations"
     assert report["rule_counts"]["pplus.enclosing.comp.1"] >= 1
+
+
+def _gf180mcu_tap_shapes(nwell_gap_dbu):
+    """A PDK endcap/filltie-style substrate tap (issue #3484): `Comp` enclosed
+    by `Pplus` by 0.08um, an `Nplus` 0.08um from the tap, and an `Nwell`
+    `nwell_gap_dbu` from the tap's right edge (`None` = no well drawn)."""
+    shapes = [
+        (22, 0, "Comp", kdb.Box(0, 0, 400, 1000)),
+        (31, 0, "Pplus", kdb.Box(-80, -80, 480, 1080)),
+        (32, 0, "Nplus", kdb.Box(-1500, -100, -80, 1100)),
+    ]
+    if nwell_gap_dbu is not None:
+        left = 400 + nwell_gap_dbu
+        shapes.append((21, 0, "Nwell", kdb.Box(left, -2000, left + 4000, 3000)))
+    return shapes
+
+
+_TAP_WELL_CONTEXT_RULES = ("nplus.space.pcomp.1", "pplus.enclosing.comp.1")
+
+
+@pytest.mark.parametrize("nwell_gap_dbu", [None, 480, 430])
+def test_run_drc_gf180mcu_far_from_well_tap_is_not_flagged(tmp_path, nwell_gap_dbu):
+    """Issue #3484: a tap more than 0.429um from any Nwell (or with no well
+    at all) is held to the relaxed NP.3cii 0.08um / PP.5di 0.02um values, so
+    the 0.08um margins of an unmodified PDK endcap/filltie tap are clean."""
+    path = tmp_path / "far_tap.gds"
+    _gf180mcu_implant_layout(_gf180mcu_tap_shapes(nwell_gap_dbu)).write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    for rule_id in _TAP_WELL_CONTEXT_RULES:
+        assert rule_id not in report["rule_counts"], report["rule_counts"]
+        assert f"{rule_id[:-2]}.far.1" not in report["rule_counts"]
+    far = {"nplus.space.pcomp.far.1", "pplus.enclosing.comp.far.1"}
+    assert far <= set(report["coverage"]["rules_checked"])
+
+
+@pytest.mark.parametrize("nwell_gap_dbu", [300, 429])
+def test_run_drc_gf180mcu_near_well_tap_still_flagged(tmp_path, nwell_gap_dbu):
+    """Strict side preserved (issue #3484): the same 0.08um margins on a tap
+    within 0.429um of an Nwell (429 = exactly touching the guard band) still
+    trip both strict rules, and the relaxed ones do not apply."""
+    path = tmp_path / "near_tap.gds"
+    _gf180mcu_implant_layout(_gf180mcu_tap_shapes(nwell_gap_dbu)).write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    for rule_id in _TAP_WELL_CONTEXT_RULES:
+        assert report["rule_counts"].get(rule_id, 0) >= 1, report["rule_counts"]
+    assert "nplus.space.pcomp.far.1" not in report["rule_counts"]
+    assert "pplus.enclosing.comp.far.1" not in report["rule_counts"]
+
+
+def test_run_drc_gf180mcu_tap_inside_dnwell_stays_strict(tmp_path):
+    """The DNWELL branches are not relaxed (issue #3484): a tap drawn inside
+    a Dnwell is held to the strict values even with no Nwell nearby."""
+    shapes = _gf180mcu_tap_shapes(None) + [
+        (12, 0, "Dnwell", kdb.Box(-3000, -3000, 3000, 4000))
+    ]
+    path = tmp_path / "dnwell_tap.gds"
+    _gf180mcu_implant_layout(shapes).write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    for rule_id in _TAP_WELL_CONTEXT_RULES:
+        assert report["rule_counts"].get(rule_id, 0) >= 1, report["rule_counts"]
+
+
+def test_run_drc_gf180mcu_far_tap_below_relaxed_value_still_flagged(tmp_path):
+    """The relaxed values are real thresholds, not waivers: a far tap whose
+    Pplus extends only 0.01um (< 0.02) and whose Nplus is 0.05um (< 0.08)
+    away trips the far rules."""
+    shapes = [
+        (22, 0, "Comp", kdb.Box(0, 0, 400, 1000)),
+        (31, 0, "Pplus", kdb.Box(-10, -10, 410, 1010)),
+        (32, 0, "Nplus", kdb.Box(-1500, -100, -50, 1100)),
+    ]
+    path = tmp_path / "far_tap_under.gds"
+    _gf180mcu_implant_layout(shapes).write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["rule_counts"].get("nplus.space.pcomp.far.1", 0) >= 1
+    assert report["rule_counts"].get("pplus.enclosing.comp.far.1", 0) >= 1
+    for rule_id in _TAP_WELL_CONTEXT_RULES:
+        assert rule_id not in report["rule_counts"]
 
 
 def test_run_drc_gf180mcu_no_implant_geometry_stays_clean(tmp_path):
