@@ -82,6 +82,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   `engine: "xyce"` fail visibly; an off-host worker that does not echo the maps
   fails with `nodeset_unsupported_worker`. Omitting the option changes nothing.
   Additive; no `schema_version` bump.
+- **`klt sim-plan` plans mergeable shards** (issue #3423): splits one `klt sim`
+  request by `corners.process` entry and writes the per-shard requests plus the
+  `klt sim-merge` manifest next to it. Manifest `corners` come from the same
+  `_expand_corners` expansion `klt sim` runs, output is byte-deterministic, and
+  Monte Carlo, deck-list and `corners.units` requests, a missing or
+  single-entry process axis, and a shard emptied by `exclude` are refused
+  (exit `1`). Additive: new verb, no `schema_version` bump. See
+  `docs/cli/sim.md` "Planning shards".
 - **`klt sim` batch: opt-in auto-split of a request that cannot fit the fleet's
   whole-job ceiling** (issue #3446): `batch.job_ceiling_check: "split"`,
   `batch.max_units_per_job` and `--max-units-per-job N` reroute a
@@ -103,8 +111,8 @@ not `klt --version`, if you need to detect this kind of drift. See
   duplicate, unexpected or mismatching report, or a changed request, is
   refused with its own exit code (`5`-`10`, `status: "refused"` payload).
   Additive: new verb, new `merge` block, no `schema_version` bump. See
-  `docs/cli/sim.md` "Merging per-request reports". Shard planning is not
-  included.
+  `docs/cli/sim.md` "Merging per-request reports". Shard planning is
+  `klt sim-plan`.
 - **ASAP7 DRC deck checks the four net-aware spacings `ACTIVE.S.2A`,
   `LIG.LISD.S.6`, `LIG.LISD.S.7` and `LIG.SDT.S.8`** (issue #3084): DRM Tables
   3.5.1 and 3.10.1 apply these only to shapes on different nets, so the deck
