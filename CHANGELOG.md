@@ -14,6 +14,14 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **sky130 deck checks the implant and npc masks `klt gen` now draws**
+  (issue #2934, phase C): `--deck sky130` gains `npc.width.1`/`npc.space.1`
+  (`npc.1`/`npc.2`, 0.27 µm) and `nsdm`/`psdm` `width.1`/`space.1`
+  (`nsdm.1`/`psdm.1`/`n/psdm.1`, 0.38 µm), all from `sky130.lydrc`. The
+  compound implant rules the engine cannot evaluate (`n/psdm.5a`/`5b`/`6`/`7`/
+  `8`/`10a`/`10b`, `difftap.8`-`difftap.11`, `npc.4`) are listed in
+  `coverage.unmodeled_rules`. Deck content hash changes; `rule_count` is now 150.
+
 - **`klt signoff` regeneration claims for T1 items 1 and 2** (issue #2887):
   an artifact-anchored `generic` attestation for item 1 or 2 may carry
   `provenance.regeneration: {generator, regenerated_hash}`, the hash the
