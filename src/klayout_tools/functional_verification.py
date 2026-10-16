@@ -216,6 +216,12 @@ from ._paths import _load_request_json
 from ._paths import load_request_arg as _shared_load_request_arg
 from ._paths import validate_request_shape as _shared_validate_request_shape
 from ._vendor import mutation_variants as _mutation_variants
+from .functional_verification_initial_state import (
+    INITIAL_STATE_MODULE,
+    SEED_PLUSARG,
+    build_initial_state_verilog,
+    count_d_nets,
+)
 from .functional_verification_sdf import (
     _check_sdf_engine_capability,
     _collect_sdf_alias_port_bits,
@@ -235,6 +241,7 @@ from .functional_verification_sdf import (
     _write_sdf_annotate_shim,
     _write_sdf_dut_wrapper,
 )
+from .reset_coverage import ResetCoverageError, sequential_elements
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
@@ -595,7 +602,17 @@ class FunctionalVerificationError(Exception):
     traceback. A run that *did* complete and reported failing tests is not
     an error -- it is ``status: "fail"`` + exit code 3 (see this module's
     docstring and ``docs/cli/functional-verification.md``).
+
+    ``code`` is an optional stable machine-readable classification the CLI
+    passes through as ``error.code`` (``None`` for every error without one).
     """
+
+    code: str | None = None
+
+    def __init__(self, message: str = "", *, code: str | None = None) -> None:
+        super().__init__(message)
+        if code is not None:
+            self.code = code
 
 
 # ---------------------------------------------------------------------------
@@ -863,6 +880,309 @@ def _resolve_options(
     )
 
 
+INITIAL_STATE_MODES = ("x", "random")
+
+
+def _resolve_initial_state_seeds(mode: str, seeds: Any) -> list[int]:
+    """``initial_state.seeds``: absent for ``x``, a non-empty duplicate-free
+    integer array for ``random``."""
+    if mode == "x":
+        if seeds is not None:
+            raise FunctionalVerificationError(
+                "request.options.initial_state.seeds is only valid with mode 'random'"
+            )
+        return []
+    if (
+        not isinstance(seeds, list)
+        or not seeds
+        or any(isinstance(s, bool) or not isinstance(s, int) for s in seeds)
+    ):
+        raise FunctionalVerificationError(
+            "request.options.initial_state.seeds must be a non-empty "
+            "array of integers when mode is 'random'"
+        )
+    if len(set(seeds)) != len(seeds):
+        raise FunctionalVerificationError(
+            "request.options.initial_state.seeds must not repeat a seed"
+        )
+    return list(seeds)
+
+
+def _resolve_initial_state(
+    options: Any, engine: str, request_dir: str
+) -> dict[str, Any] | None:
+    """Validate ``request.options.initial_state`` (issue #2998); ``None`` when
+    the key is absent. Shape: ``{"mode": "x" | "random", "seeds": [int, ...],
+    "netlist": "<gate-level Verilog netlist>", "clock": "<net>"}``.
+
+    ``clock`` (optional) names the net of ``hdl_toplevel`` whose first full
+    cycle captures the forced values; when absent it is the one net every
+    state element's clock/enable pin connects to, and a netlist with several
+    (or none) is a request error asking for it.
+    ``netlist`` (resolved against ``request_dir``) is the flat gate-level
+    netlist of ``hdl_toplevel`` the state elements are derived from;
+    ``request.sources`` supply the PDK cell models. ``seeds`` is required and
+    non-empty for ``random`` (one regression runs per seed) and rejected for
+    ``x`` (a single run). Icarus only: the drive relies on hierarchical
+    ``force`` of cell-model pins, which Verilator does not model -- a request
+    error, never a silently-ignored option, like ``options.sdf``.
+    """
+    if not isinstance(options, dict) or "initial_state" not in options:
+        return None
+    raw = options["initial_state"]
+    if not isinstance(raw, dict):
+        raise FunctionalVerificationError(
+            "request.options.initial_state must be a JSON object"
+        )
+    unknown = sorted(set(raw) - {"mode", "seeds", "netlist", "clock"})
+    if unknown:
+        raise FunctionalVerificationError(
+            f"request.options.initial_state has unknown key(s): {', '.join(unknown)}"
+        )
+    mode = raw.get("mode")
+    if mode not in INITIAL_STATE_MODES:
+        raise FunctionalVerificationError(
+            "request.options.initial_state.mode must be one of "
+            f"{', '.join(repr(m) for m in INITIAL_STATE_MODES)}"
+        )
+    seeds = _resolve_initial_state_seeds(mode, raw.get("seeds"))
+    netlist = raw.get("netlist")
+    if not isinstance(netlist, str) or not netlist:
+        raise FunctionalVerificationError(
+            "request.options.initial_state.netlist must be a non-empty path "
+            "to the gate-level Verilog netlist"
+        )
+    clock = raw.get("clock")
+    if clock is not None and (not isinstance(clock, str) or not clock):
+        raise FunctionalVerificationError(
+            "request.options.initial_state.clock must be a non-empty net name"
+        )
+    if engine != "icarus":
+        raise FunctionalVerificationError(
+            f"options.initial_state requires engine 'icarus' -- engine "
+            f"'{engine}' cannot force cell-model pins hierarchically"
+        )
+    netlist_path = (
+        netlist if os.path.isabs(netlist) else os.path.join(request_dir, netlist)
+    )
+    if not os.path.isfile(netlist_path):
+        raise FunctionalVerificationError(
+            f"request.options.initial_state.netlist '{netlist_path}' not found"
+        )
+    return {
+        "mode": mode,
+        "seeds": seeds,
+        "netlist": os.path.abspath(netlist_path),
+        "clock": clock,
+    }
+
+
+def _initial_state_run_specs(
+    initial_state: dict[str, Any] | None,
+    *,
+    engine: str,
+    output_dir: str,
+    results_xml: str,
+    test_log: str,
+) -> list[dict[str, Any]]:
+    """One regression normally; one per seed for ``initial_state.mode:
+    "random"`` -- same build, a different ``+klt_init_seed`` plusarg and its
+    own results/transcript files."""
+    if initial_state is None or initial_state["mode"] != "random":
+        return [
+            {
+                "seed": None,
+                "results_xml": results_xml,
+                "test_log": test_log,
+                "plusargs": [],
+            }
+        ]
+    return [
+        {
+            "seed": seed,
+            "results_xml": os.path.join(
+                output_dir, f"results_{engine}_init_seed{seed}.xml"
+            ),
+            "test_log": os.path.join(output_dir, f"test_{engine}_init_seed{seed}.log"),
+            "plusargs": [f"+{SEED_PLUSARG}={seed}"],
+        }
+        for seed in initial_state["seeds"]
+    ]
+
+
+def _parse_run_results(
+    spec: dict[str, Any], *, engine: str, build_log: str
+) -> list[dict[str, Any]]:
+    """``parse_results_xml`` for one run, with the ABI-mismatch augmentation
+    (issue #1103) on a missing results file."""
+    spec_xml = spec["results_xml"]
+    try:
+        return parse_results_xml(spec_xml)
+    except FunctionalVerificationError as exc:
+        # The pre-flight ABI check catches the common case up front; this
+        # is the fallback for whatever it doesn't -- only fires when
+        # `results.xml` is confirmed missing, so a genuinely unparseable or
+        # unreadable results file keeps its own unaugmented message.
+        diagnostic = None
+        if not os.path.isfile(spec_xml):
+            diagnostic = _scan_interpreter_mismatch_diagnostics(
+                build_log, spec["test_log"]
+            )
+        if diagnostic is None:
+            raise
+        raise FunctionalVerificationError(
+            f"{exc} -- probable cause: the {engine} transcript contains "
+            f"{diagnostic!r}, which usually means the installed cocotb was "
+            "built for a different CPython than the one running klt (an "
+            "ABI-mismatched wheel)"
+        ) from exc
+
+
+def _run_spec_test(engine_runner, spec: dict[str, Any], **kwargs: Any) -> None:
+    """One :func:`_run_test` for a run spec, after clearing its stale results
+    file (a leftover must never be mistaken for this run's evidence)."""
+    try:
+        os.remove(spec["results_xml"])
+    except OSError:
+        pass
+    _run_test(
+        engine_runner,
+        results_xml=spec["results_xml"],
+        log_path=spec["test_log"],
+        plusargs=spec["plusargs"],
+        **kwargs,
+    )
+
+
+def _collect_run_results(
+    run_specs: list[dict[str, Any]], *, engine: str, module: str, build_log: str
+) -> tuple[list[dict[str, Any]], tuple[int, int, int], list[dict[str, Any]]]:
+    """Parse every run's results: ``(tests, (passed, failed, skipped),
+    per-seed run reports)``. A seeded run's tests carry ``initial_state_seed``
+    (issue #2998)."""
+    tests: list[dict[str, Any]] = []
+    totals = [0, 0, 0]
+    run_reports: list[dict[str, Any]] = []
+    for spec in run_specs:
+        spec_tests = _parse_run_results(spec, engine=engine, build_log=build_log)
+        counts = _executed_result_counts(spec_tests, module)
+        totals = [total + count for total, count in zip(totals, counts, strict=True)]
+        if spec["seed"] is not None:
+            for test in spec_tests:
+                test["initial_state_seed"] = spec["seed"]
+            run_reports.append(
+                {
+                    "seed": spec["seed"],
+                    "status": "fail" if counts[1] else "pass",
+                    "results_xml": spec["results_xml"],
+                }
+            )
+        tests.extend(spec_tests)
+    return tests, (totals[0], totals[1], totals[2]), run_reports
+
+
+def _initial_state_echo(
+    initial_state: dict[str, Any] | None,
+    info: dict[str, Any],
+    runs: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """``environment.initial_state`` (additive, issue #2998): ``None`` unless
+    requested; ``seeds`` is the effective seed list (empty for mode "x") and
+    ``runs`` has one entry per seed."""
+    if initial_state is None:
+        return None
+    return {
+        "mode": initial_state["mode"],
+        "seeds": initial_state["seeds"],
+        "netlist": initial_state["netlist"],
+        "clock": info["clock"],
+        "state_elements": info["state_elements"],
+        "d_nets": info["d_nets"],
+        "runs": runs,
+    }
+
+
+def _reject_initial_state_with_mutations(
+    options: Any, engine: str, request_dir: str
+) -> None:
+    """The baseline would be driven from a chosen power-up state while each
+    isolated per-mutant build (which does not replicate the generated shim)
+    would not, so a killed/survived verdict would compare unlike runs."""
+    if _resolve_initial_state(options, engine, request_dir) is not None:
+        raise FunctionalVerificationError(
+            "options.initial_state cannot currently be combined with "
+            "--mutations -- not yet designed"
+        )
+
+
+def _choose_initial_state_clock(
+    elements: list[dict[str, Any]], requested: str | None
+) -> str:
+    """The net whose first full cycle captures the forced values: the
+    request's ``clock``, else the one net every state element's clock/enable
+    pin connects to."""
+    if requested is not None:
+        return requested
+    nets = {e["capture_net"] for e in elements}
+    if len(nets) == 1 and isinstance(next(iter(nets)), str):
+        return next(iter(nets))
+    raise FunctionalVerificationError(
+        "options.initial_state: the state elements' clock pins connect to "
+        f"{len(nets)} different nets -- name the capture clock net in "
+        "options.initial_state.clock"
+    )
+
+
+def _write_initial_state_shim(
+    initial_state: dict[str, Any],
+    *,
+    sources: list[str],
+    hdl_toplevel: str,
+    output_dir: str,
+) -> tuple[str, dict[str, Any]]:
+    """Derive the state elements of ``hdl_toplevel`` from the netlist and
+    write the generated ``klt_initial_state`` shim; returns ``(path, info)``
+    with ``info = {"state_elements", "d_nets", "clock"}``. A sequential cell
+    or hard macro the force-D drive cannot reach is a request error naming it
+    (the issue's "all flops" contract), never a silent skip."""
+    try:
+        elements, unsupported = sequential_elements(
+            initial_state["netlist"], sources, hdl_toplevel
+        )
+    except ResetCoverageError as exc:
+        raise FunctionalVerificationError(f"options.initial_state: {exc}") from exc
+    if unsupported:
+        shown = ", ".join(
+            f"{u['instance']} ({u['cell']}: {u['reason']})" for u in unsupported[:5]
+        )
+        raise FunctionalVerificationError(
+            f"options.initial_state cannot drive {len(unsupported)} state "
+            f"element(s): {shown}"
+        )
+    if not elements:
+        raise FunctionalVerificationError(
+            f"options.initial_state: netlist module '{hdl_toplevel}' has no "
+            "sequential cell (per request.sources' cell models)"
+        )
+    clock = _choose_initial_state_clock(elements, initial_state["clock"])
+    path = os.path.join(output_dir, f"{INITIAL_STATE_MODULE}.v")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(
+            build_initial_state_verilog(
+                mode=initial_state["mode"],
+                elements=elements,
+                scope=hdl_toplevel,
+                clock=clock,
+            )
+        )
+    info = {
+        "state_elements": len(elements),
+        "d_nets": count_d_nets(elements),
+        "clock": clock,
+    }
+    return path, info
+
+
 def _resolve_defines(defines: Any) -> dict[str, str | None]:
     """Validate the optional ``request.options.defines`` object and return it
     unchanged (or ``{}`` when omitted).
@@ -889,6 +1209,117 @@ def _resolve_defines(defines: Any) -> dict[str, str | None]:
                 f"-- got a {type(value).__name__}"
             )
     return defines
+
+
+def _resolve_source_defines(
+    options: Any, sources: list[str], request_dir: str
+) -> dict[str, dict[str, str | None]]:
+    """Validate ``request.options.source_defines`` (issue #3290) and return it
+    keyed by the **resolved absolute path** of the ``request.sources`` entry
+    it names (``{}`` when omitted).
+
+    Each key must name an entry of ``request.sources`` (matched after the same
+    path resolution :func:`_resolve_sources` applies); each value is validated
+    like ``options.defines``. The defines apply to that one source only, via a
+    generated wrapper (:func:`_write_scoped_define_wrappers`), so a vendor
+    hard-macro model can take ``FUNCTIONAL`` while the PDK std-cell sources --
+    and the ``options.sdf`` + global ``FUNCTIONAL`` rejection that protects
+    them -- are untouched.
+    """
+    raw = (options or {}).get("source_defines") if isinstance(options, dict) else None
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise FunctionalVerificationError(
+            "request.options.source_defines must be a JSON object of "
+            "source path -> defines object"
+        )
+    resolved: dict[str, dict[str, str | None]] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or not key:
+            raise FunctionalVerificationError(
+                "request.options.source_defines keys must be non-empty strings"
+            )
+        path = os.path.abspath(
+            key if os.path.isabs(key) else os.path.join(request_dir, key)
+        )
+        if path not in sources:
+            raise FunctionalVerificationError(
+                f"request.options.source_defines names '{key}', which is not "
+                f"an entry of request.sources"
+            )
+        if not isinstance(value, dict):
+            raise FunctionalVerificationError(
+                f"request.options.source_defines[{key!r}] must be a JSON "
+                f"object of string -> string|null"
+            )
+        for name, define_value in value.items():
+            if not isinstance(name, str) or not name:
+                raise FunctionalVerificationError(
+                    f"request.options.source_defines[{key!r}] keys must be "
+                    f"non-empty strings"
+                )
+            if define_value is not None and not isinstance(define_value, str):
+                raise FunctionalVerificationError(
+                    f"request.options.source_defines[{key!r}][{name!r}] must "
+                    f"be a string or null -- got a {type(define_value).__name__}"
+                )
+        resolved[path] = value
+    return resolved
+
+
+def _write_scoped_define_wrappers(
+    sources: list[str],
+    source_defines: dict[str, dict[str, str | None]],
+    wrapper_dir: str,
+) -> tuple[list[str], list[str]]:
+    """Substitute a generated one-file wrapper for each source named in
+    ``source_defines``, **in the same list position** (issue #3290).
+
+    The wrapper is ``` `define K [V] ``` / ``` `include "<abs path>" ``` /
+    ``` `undef K ```, so the defines are visible to that one file and cannot
+    leak into later sources. Returns ``(build_sources, include_dirs)``;
+    ``include_dirs`` holds the directory of each wrapped source so a nested
+    relative `` `include `` inside the vendor model still resolves. Sources not
+    named are returned untouched (byte-identical build to a run without
+    ``source_defines``).
+    """
+    if not source_defines:
+        return list(sources), []
+    try:
+        os.makedirs(wrapper_dir, exist_ok=True)
+    except OSError as exc:
+        raise FunctionalVerificationError(
+            f"could not create output directory '{wrapper_dir}': {exc}"
+        ) from exc
+    build_sources: list[str] = []
+    include_dirs: list[str] = []
+    for index, source in enumerate(sources):
+        defines = source_defines.get(source)
+        if defines is None:
+            build_sources.append(source)
+            continue
+        lines = [
+            f"`define {name}" if value is None else f"`define {name} {value}"
+            for name, value in defines.items()
+        ]
+        lines.append(f'`include "{source}"')
+        lines.extend(f"`undef {name}" for name in defines)
+        wrapper_path = os.path.join(
+            wrapper_dir, f"scoped_defines_{index}_{os.path.basename(source)}"
+        )
+        try:
+            with open(wrapper_path, "w", encoding="utf-8") as handle:
+                handle.write("\n".join(lines) + "\n")
+        except OSError as exc:
+            raise FunctionalVerificationError(
+                f"could not write scoped-defines wrapper '{wrapper_path}': {exc}"
+            ) from exc
+        build_sources.append(wrapper_path)
+        source_dir = os.path.dirname(source)
+        if source_dir not in include_dirs:
+            include_dirs.append(source_dir)
+    return build_sources, include_dirs
 
 
 def _resolve_build_args(build_args: Any) -> list[str]:
@@ -1678,9 +2109,14 @@ def _import_runner():
         from cocotb_tools import runner
     except ImportError as exc:  # pragma: no cover - exercised via monkeypatch
         raise FunctionalVerificationError(
-            f"cocotb is not installed (import failed: {exc}) -- install it with "
-            "`pip install cocotb`, or `uv sync --extra functional-verification` "
-            "for this repo's pinned version"
+            f"cocotb is not installed (import failed: {exc}; interpreter: "
+            f"{sys.executable}) -- for a tool install (`uv tool install` / "
+            "`pipx install` / `uvx --from`) reinstall with the extra on the "
+            "install spec: `klayout-tools[functional-verification] @ "
+            "<url-or-version>`; for a source checkout run `uv sync --extra "
+            "functional-verification`; `pip install cocotb` only works if "
+            "that `pip` belongs to the interpreter above",
+            code="missing_optional_dependency",
         ) from exc
     return runner
 
@@ -1851,6 +2287,7 @@ def _run_test(
     parameters: dict[str, Any],
     log_path: str,
     waves: bool = False,
+    plusargs: list[str] | None = None,
 ) -> None:
     """``Runner.test()``, with the simulator's own exit code deliberately
     discarded (spike section 4): a :class:`SystemExit` here means only "the
@@ -1902,6 +2339,7 @@ def _run_test(
             parameters=parameters,
             log_file=log_path,
             waves=waves,
+            plusargs=plusargs or [],
         )
     except (SystemExit, subprocess.CalledProcessError):
         # Expected on a failing regression -- the results file is the truth.
@@ -2309,7 +2747,19 @@ def _apply_sdf_physical_only_drop(
 # ---------------------------------------------------------------------------
 
 
-def run_functional_verification(request: str) -> dict[str, Any]:
+def _resolve_output_dir(request_dir: str, output_dir: str | None) -> str:
+    """Directory run artifacts are written to: ``output_dir`` (relative paths
+    resolve against the cwd, not the request directory) or, by default,
+    ``<request_dir>/.klt/functional-verification``.
+    """
+    if output_dir:
+        return os.path.abspath(output_dir)
+    return os.path.join(request_dir, ".klt", "functional-verification")
+
+
+def run_functional_verification(
+    request: str, output_dir: str | None = None
+) -> dict[str, Any]:
     """Run the cocotb regression declared by ``request``.
 
     ``request`` accepts the same three forms every other ``klt`` request
@@ -2331,6 +2781,7 @@ def run_functional_verification(request: str) -> dict[str, Any]:
     and kept, never deleted.
     """
     request_doc, request_dir = load_request_arg(request)
+    output_dir = _resolve_output_dir(request_dir, output_dir)
 
     engine = request_doc.get("engine", DEFAULT_ENGINE)
     if engine not in SUPPORTED_ENGINES:
@@ -2359,9 +2810,20 @@ def run_functional_verification(request: str) -> dict[str, Any]:
         sdf,
         trace_requested,
     ) = _resolve_options(request_doc.get("options"), engine, request_dir)
+    initial_state = _resolve_initial_state(
+        request_doc.get("options"), engine, request_dir
+    )
+    if initial_state is not None and sdf is not None:
+        raise FunctionalVerificationError(
+            "options.initial_state cannot currently be combined with "
+            "options.sdf -- not yet designed (the SDF build elaborates a "
+            "generated wrapper as the root and scans a single transcript)"
+        )
     parameters = _resolve_parameters(request_doc.get("parameters"))
+    source_defines = _resolve_source_defines(
+        request_doc.get("options"), sources, request_dir
+    )
 
-    output_dir = os.path.join(request_dir, ".klt", "functional-verification")
     build_dir = os.path.join(output_dir, f"sim_build_{engine}")
     try:
         os.makedirs(output_dir, exist_ok=True)
@@ -2582,7 +3044,23 @@ def run_functional_verification(request: str) -> dict[str, Any]:
         sources = [*sources, wrapper_path, shim_path]
         build_args += [*SDF_BUILD_ARGS, "-T", sdf["corner"]]
         build_hdl_toplevel = SDF_WRAPPER_MODULE
+    initial_state_info: dict[str, Any] = {}
+    if initial_state is not None:
+        shim_path, initial_state_info = _write_initial_state_shim(
+            initial_state,
+            sources=sources,
+            hdl_toplevel=hdl_toplevel,
+            output_dir=output_dir,
+        )
+        sources = [*sources, shim_path]
+        build_args += ["-s", INITIAL_STATE_MODULE]
     build_args += user_build_args
+    # Issue #3290: scoped defines are applied last, to the build source list
+    # only -- the port parse and source-text scans above read the real files.
+    sources, scoped_include_dirs = _write_scoped_define_wrappers(
+        sources, source_defines, output_dir
+    )
+    includes = [*includes, *scoped_include_dirs]
 
     runner_module = _import_runner()
     _check_cocotb_abi_compatibility()
@@ -2600,22 +3078,30 @@ def run_functional_verification(request: str) -> dict[str, Any]:
         log_path=build_log,
         waves=trace_requested,
     )
-    _run_test(
-        engine_runner,
+    run_specs = _initial_state_run_specs(
+        initial_state,
         engine=engine,
-        module=module,
-        module_dir=module_dir,
-        hdl_toplevel=build_hdl_toplevel,
-        testcase=testcase,
-        random_seed=random_seed,
-        build_dir=build_dir,
-        test_dir=output_dir,
+        output_dir=output_dir,
         results_xml=results_xml,
-        timescale=timescale,
-        parameters=parameters,
-        log_path=test_log,
-        waves=trace_requested,
+        test_log=test_log,
     )
+    for spec in run_specs:
+        _run_spec_test(
+            engine_runner,
+            spec,
+            engine=engine,
+            module=module,
+            module_dir=module_dir,
+            hdl_toplevel=build_hdl_toplevel,
+            testcase=testcase,
+            random_seed=random_seed,
+            build_dir=build_dir,
+            test_dir=output_dir,
+            timescale=timescale,
+            parameters=parameters,
+            waves=trace_requested,
+        )
+    results_xml = run_specs[0]["results_xml"]
 
     sdf_dropped_counts: dict[str, int] = {}
     if sdf is not None:
@@ -2644,26 +3130,11 @@ def run_functional_verification(request: str) -> dict[str, Any]:
                 "been a zero-delay one reported as if it were annotated."
             )
 
-    try:
-        tests = parse_results_xml(results_xml)
-    except FunctionalVerificationError as exc:
-        # The pre-flight ABI check catches the common case up front; this is
-        # the fallback for whatever it doesn't (issue #1103) -- only fires
-        # when `results.xml` is confirmed missing, so a genuinely unparseable
-        # or unreadable results file (a different failure mode entirely)
-        # keeps its own unaugmented message.
-        diagnostic = None
-        if not os.path.isfile(results_xml):
-            diagnostic = _scan_interpreter_mismatch_diagnostics(build_log, test_log)
-        if diagnostic is None:
-            raise
-        raise FunctionalVerificationError(
-            f"{exc} -- probable cause: the {engine} transcript contains "
-            f"{diagnostic!r}, which usually means the installed cocotb was "
-            "built for a different CPython than the one running klt (an "
-            "ABI-mismatched wheel)"
-        ) from exc
-    passed_count, failed_count, skipped_count = _executed_result_counts(tests, module)
+    tests, (passed_count, failed_count, skipped_count), run_reports = (
+        _collect_run_results(
+            run_specs, engine=engine, module=module, build_log=build_log
+        )
+    )
 
     coverage = None
     if coverage_requested:
@@ -2703,7 +3174,22 @@ def run_functional_verification(request: str) -> dict[str, Any]:
             "engine_version": _engine_version(engine),
             "cocotb_version": _cocotb_version(),
             "results_xml": results_xml,
+            # Additive (issue #3013): the simulator/cocotb console transcript
+            # and the build transcript the run wrote, named by path (never
+            # inlined) like `results_xml`.
+            "test_log": test_log,
+            "build_log": build_log,
             "random_seed": _extract_random_seed_property(results_xml),
+            # Additive (issue #3290): `options.source_defines` keyed by the
+            # request.sources entry as resolved to an absolute path; `{}`
+            # when absent.
+            "source_defines": source_defines,
+            # Additive (issue #2998): `null` unless the request set
+            # `options.initial_state`. `seeds` echoes the effective seeds
+            # (empty for mode "x"); `runs` has one entry per seed.
+            "initial_state": _initial_state_echo(
+                initial_state, initial_state_info, run_reports
+            ),
             # Additive (issue #1002, spike §4.2 item 5): `null` on an
             # ordinary run, an object on an SDF-annotated one -- so a caller
             # can tell an annotated run from an unannotated one *from the
@@ -2808,7 +3294,7 @@ def _write_mutant_combined_log(
 
 
 def run_functional_verification_with_mutations(
-    request: str, proposals_path: str
+    request: str, proposals_path: str, output_dir: str | None = None
 ) -> dict[str, Any]:
     """Run ``klt functional-verification --mutations`` end to end (issue
     #1592, spike section 3): the unmodified baseline run from
@@ -2889,6 +3375,9 @@ def run_functional_verification_with_mutations(
             "-- not yet designed (docs/design/mutation-testing-spike.md, "
             "'Open questions')"
         )
+    _reject_initial_state_with_mutations(
+        request_doc.get("options"), engine, request_dir
+    )
     if sdf is not None:
         # Also not designed (not explicitly listed in the issue's own "Out
         # of scope", but the same reasoning applies): options.sdf swaps in a
@@ -2915,8 +3404,11 @@ def run_functional_verification_with_mutations(
     )
     parameters = _resolve_parameters(request_doc.get("parameters"))
     build_args = list(user_build_args)
+    source_defines = _resolve_source_defines(
+        request_doc.get("options"), sources, request_dir
+    )
 
-    output_dir = os.path.join(request_dir, ".klt", "functional-verification")
+    output_dir = _resolve_output_dir(request_dir, output_dir)
     mutants_dir = os.path.join(output_dir, "mutants")
     try:
         os.makedirs(mutants_dir, exist_ok=True)
@@ -2928,7 +3420,7 @@ def run_functional_verification_with_mutations(
     # The baseline-must-pass gate (spike §3d): the exact same request the
     # caller already used for an ordinary (non-mutation) run, reused
     # unchanged -- see `docs/design/mutation-testing-spike.md` §3a.
-    baseline = run_functional_verification(request)
+    baseline = run_functional_verification(request, output_dir)
     if baseline["status"] != "pass":
         failing_names = ", ".join(
             test["name"] for test in baseline["tests"] if test["status"] == "failed"
@@ -2991,16 +3483,22 @@ def run_functional_verification_with_mutations(
         test_log = os.path.join(mutant_dir, f"test_{engine}.log")
         combined_log = os.path.join(mutants_dir, f"mutant_{index}.log")
 
+        # Issue #3290: the wrappers `include the (mutated-in-place) source by
+        # absolute path, so they are generated per mutant directory.
+        variant_sources, scoped_include_dirs = _write_scoped_define_wrappers(
+            sources, source_defines, mutant_dir
+        )
+
         with plan.applied(index):
             timed_out, (status_kind, detail) = _run_isolated_variant(
                 timeout_s=DEFAULT_MUTATION_TIMEOUT_S,
                 engine=engine,
-                sources=sources,
+                sources=variant_sources,
                 hdl_toplevel=hdl_toplevel,
                 build_dir=build_dir,
                 build_args=build_args,
                 defines=defines,
-                includes=includes,
+                includes=[*includes, *scoped_include_dirs],
                 timescale=timescale,
                 parameters=parameters,
                 build_log=build_log,

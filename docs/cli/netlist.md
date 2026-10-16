@@ -7,7 +7,7 @@ on the SPICE side: it produces the netlist `klt sim` simulates and (eventually)
 `klt lvs` compares a layout against.
 
 ```
-klt netlist <schematic> -o <netlist> [--check] [--block] [--timeout-s <s>] [--rcfile <path>] [--pdk <variant>] [--pdk-root <path>] [--xschem-binary <path>] [--backend local|batch] [--batch-root <dir>] [--format text|json]
+klt netlist <schematic> -o <netlist> [--check] [--block] [--timeout-s <s>] [--rcfile <path>] [--pdk <variant>] [--pdk-root <path>] [--xschem-binary <path>] [--backend local|batch] [--batch-root <dir>] [--batch-include <glob>]... [--batch-exclude <glob>]... [--format text|json]
 ```
 
 - `<schematic>` — path to the xschem schematic to netlist (`.sch`). Checked
@@ -42,6 +42,9 @@ klt netlist <schematic> -o <netlist> [--check] [--block] [--timeout-s <s>] [--rc
   [Batch backend](#batch-backend).
 - `--batch-root` — `--backend batch` only: the directory whose git-tracked
   files are uploaded (default: the schematic's git checkout).
+- `--batch-include <glob>` / `--batch-exclude <glob>` — `--backend batch`
+  only, repeatable: narrow the uploaded set to the files a schematic needs
+  while keeping a repo-level root (see "What is uploaded").
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
 ## Why this verb exists
@@ -124,6 +127,21 @@ was left running. A batch netlist normally takes well under a second, so this is
 a hang rather than slow work: ...
 ```
 
+## Unevaluated `expr()` is a failure, not a netlist
+
+Older xschem releases do not evaluate a symbol's `expr(...)` attributes, so
+they write a perfectly "fresh" `.spice` that still contains the literal
+`expr(...)` — which ngspice cannot load. After the export (and after `--block`
+post-processing) the netlist is scanned, outside `*` comment lines, for an
+`expr` token followed by `(` (whitespace allowed; longer identifiers such as
+`myexpr(` do not match). A hit is an error (exit `1`) with
+`error.code: "unevaluated_expr"`; the message names the first offending line,
+the detected `xschem.version` (or `unknown`), and the minimum release reported
+to evaluate `expr()` (3.4.5 — taken from issue #3482, not verified against
+xschem's release notes). It applies to `--check` too, which fails with this
+cause instead of reporting `drifted`, and nothing is written. Under
+`--backend batch` the same code is returned.
+
 ## Success is the output file, not the exit status
 
 `xschem -n -s -q -x` returns a **non-zero** status after a *successful* batch
@@ -180,6 +198,18 @@ reports `"drifted"`. When the two files differ *only* in those comment
 directories, `drift.path_comments_differ` is `true`. Generation is unchanged:
 the written netlist carries xschem's paths as xschem wrote them.
 
+**The comparison is also independent of `+` continuation layout** (issue
+#3324). Before comparing, each `+` continuation line is joined onto its
+predecessor and whitespace runs are collapsed (comment lines are left as
+lines; CRLF and trailing whitespace are ignored), so a netlist whose long
+cards a project post-processor re-wrapped still reports `"match"`. Only
+layout is normalized, never a token: a changed device card, parameter value,
+node or pin order still reports `"drifted"`. When the files match only
+because of this, `drift.layout_differs` is `true`. This does not hide the
+`.subckt`/`.ends` wrapper difference — for a committed netlist wrapped as a
+real `.subckt`, pass `--block`, which `--check` applies before comparing
+([Block mode](#block-mode-an-includable-subckt)).
+
 The `0`/`3` split is deliberately the same one `klt drc --check` and `klt lvs
 --check` use for `"match"`/`"drifted"`, so a CI gate treats a stale committed
 netlist exactly as it already treats a stale committed report. One
@@ -227,6 +257,7 @@ envelope's `error.code` classifies it:
 | `batch_poll_timeout` | The job did not finish within the poll budget. It may still finish on the runner; nothing was collected. |
 | `batch_job_timeout` | The harness stopped the job at its `timeout_seconds`. |
 | `batch_job_failed` | The job failed, or left no usable report or netlist. When the runner's own `klt netlist` reported an error, its message is quoted (and its `error.code` used, when it has one). |
+| `unevaluated_expr` | The netlist still contains a literal `expr(...)` (see above). Also returned by the local backend. |
 | `batch_input_too_large` | The input tree is above the size cap (below). Raised before any upload. |
 
 **What is uploaded.** The job instance holds no forge credential and cannot
@@ -237,7 +268,34 @@ a project `--rcfile` must be tracked files under the root (exit `1`
 otherwise, naming the file). The uncompressed total is capped at **64 MiB**
 (`netlist_batch.MAX_BATCH_TREE_BYTES`) and checked before the archive is
 built; above it, pass a narrower `--batch-root` (the directory holding the
-schematics, symbols and `xschemrc`). Member owner names are cleared.
+schematics, symbols and `xschemrc`) or select just what the schematic needs.
+
+**Selecting files.** `--batch-include <glob>` keeps only the tracked files
+matching a root-relative glob (repeatable; none given means every tracked
+file); `--batch-exclude <glob>` then drops matches. Matching is `fnmatch`
+over the POSIX path, so `*` also crosses `/`; a pattern without glob
+characters names a file or a directory (`design` selects everything under
+it). The schematic and a project `--rcfile` must stay in the selected set
+(exit `1` naming the file otherwise). The 64 MiB cap and
+`environment.remote.input_files` / `input_bytes` describe the *selected*
+set. Keep a repo-level root when the `xschemrc` uses root-relative paths:
+
+```bash
+klt netlist design/block.sch -o design/netlist/block.spice --backend batch \
+  --batch-include design --batch-include pdk-symbols --batch-exclude 'design/layout/*'
+```
+
+Member owner names are cleared.
+
+**Failure diagnostics.** When a job fails and the runner's `stderr.log` holds
+no klt error envelope (the job died in `tar`, the shell wrapper, or an xschem
+crash), the error carries the last 2 KiB of that file, sanitized (invalid
+UTF-8 replaced, ANSI escapes and control characters other than newline/tab
+dropped), in `error.remote_stderr_tail`, plus `error.remote_exit_code`,
+`error.remote_state` and `error.harness_log` (the `s3://` URI of the full
+`harness.log`). These fields are absent when the runner's own envelope was
+recovered. The tail is raw runner output and may contain paths from the
+runner; it is netlist-only (`klt sim` still never surfaces raw stderr).
 
 **PDK-relative `--rcfile`.** An `xschemrc` that ships with the PDK is given in
 its PDK-relative form, quoted so the shell does not expand it:
@@ -387,6 +445,7 @@ error: the netlist is still produced and the exit code is unchanged.
 | Field | Type | Description |
 | --- | --- | --- |
 | `binary` | string | The executable that was run (`--xschem-binary`). |
+| `version` | string \| null | xschem's version (e.g. `"3.4.7"`), from a bounded `<binary> --version` probe run after the export. `null` — never an error — when the probe fails, times out, or prints nothing parseable. Always `null` for a `--backend batch` runner whose `klt` predates this field. |
 | `argv` | array\<string\> | The complete command line, so a consumer can verify `-x` was there. |
 | `forced_flags` | array\<string\> | The flags this verb always passes, in a fixed order. |
 | `exit_status` | integer | xschem's own exit status. **Not the verdict** — non-zero on success. |
@@ -424,6 +483,7 @@ error: the netlist is still produced and the exit code is unchanged.
 | `committed_bytes` | integer \| null | Size of the committed netlist, or `null` when absent. |
 | `committed_content_hash` | string \| null | `sha256:<hex>` of the committed netlist, or `null` when absent. |
 | `path_comments_differ` | boolean | `true` when the files differ only in the directories of xschem's `** sch_path:` / `** sym_path:` comments, which `--check` ignores (status is then `"match"`). Additive (issue #3010). |
+| `layout_differs` | boolean | `true` when the files match only after `--check` ignored `+` continuation layout and whitespace runs. Additive (issue #3324). |
 | `diff` | array\<string\> | Unified diff lines, committed → regenerated. `[]` on `"match"`. Capped at 200 lines. |
 | `diff_truncated` | boolean | Whether `diff` was cut off at the cap. |
 | `reason` | string \| null | Human-readable explanation of the verdict; `null` on `"match"`. |

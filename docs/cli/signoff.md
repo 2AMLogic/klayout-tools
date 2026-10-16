@@ -697,6 +697,15 @@ real, mechanically-detected defect, not a coverage gap, so it is checked
 "check_failed"` (with the offending metrics named in
 `detail.critical_metric_blockers`), not `partial_coverage`.
 
+**`generic` envelopes are cross-checked (issue #2906).** A `kind: generic`
+envelope has no producer adapter, so a wrapper may emit `status: "pass"` next
+to a `coverage` block that lists skipped requested work. `klt signoff` does not
+count that as a passing check: `checks[].passed` is `false` and a numbered item
+renders `unmet` with `reason: "partial_coverage"`, with `coverage_qualification`
+still present. An envelope with no `coverage` block is unaffected, and the
+explicit `pass_partial` token behaves as above. First-party kinds are not
+cross-checked; their status remains producer-owned.
+
 **Partial is not refused outright, unlike `nothing_checked`.** A partial run
 *did* check something; discarding it would throw away a real result rather
 than qualify it. What it may never do is read as complete: nothing in this
@@ -1151,10 +1160,10 @@ What each item binds:
 
 | Item | Bind to (the artifact `provenance.input.path` names) |
 | ---- | ---------------------------------------------------- |
-| **1** Design sources | The design-source inventory: a committed list of the schematic/RTL sources and the derived netlist, or the netlist itself. |
+| **1** Design sources | The schematic/RTL sources **and** the derived netlist, as a [set](#binding-a-set-of-artifacts-provenanceinputpaths) — or, for a single file, the netlist itself or a committed inventory of the sources. |
 | **2** Layout | The committed GDS/OASIS stream. |
-| **9** Testbenches shipped | The testbench inventory: a committed list of every claimed measurement's testbench and its cold-start invocation. |
-| **10** Repo hygiene | The hygiene audit record: the CI workflow file, or a committed checklist covering README, spec table and license. |
+| **9** Testbenches shipped | The testbench files themselves as a [set](#binding-a-set-of-artifacts-provenanceinputpaths) — or, for a single file, a committed inventory of every claimed measurement's testbench and its cold-start invocation. |
+| **10** Repo hygiene | The hygiene files as a [set](#binding-a-set-of-artifacts-provenanceinputpaths) (CI workflow, README, spec table, license) — or, for a single file, the CI workflow or a committed checklist covering them. |
 
 The `status: "pass"` inside the envelope is still the author's own
 assertion; `klt signoff` does not re-audit a testbench list. What the
@@ -1206,6 +1215,63 @@ Rejected examples:
 Command-backed evidence follows the same rules. The binding is read from
 the command's stdout envelope, and a relative `provenance.input.path` is
 resolved against the entry's `cwd`.
+
+#### Binding a set of artifacts: `provenance.input.paths`
+
+Item 1's claim is about a *set* — the schematic sources and the netlist
+derived from them — and items 9/10 are about a set of testbench or hygiene
+files. Binding only the derived artifact leaves source edits undetected;
+binding an author-written inventory leaves member edits undetected. Issue
+#3044 adds an optional `provenance.input.paths` for these: a non-empty list
+of members, each `{"path": <string | {"path", "scope": "repo"}>,
+"content_hash": "sha256:..."}`, with `path` resolved exactly as
+`provenance.input.path` is (including `--repo-root`).
+
+```json
+"input": {
+  "content_hash": "sha256:9b2e...",
+  "paths": [
+    {"path": "schematic/ota.sch", "content_hash": "sha256:11aa..."},
+    {"path": "netlist/ota.spice", "content_hash": "sha256:22bb..."}
+  ]
+}
+```
+
+`provenance.input.content_hash` is then the **combined digest** of the set,
+so the manifest pin (unchanged — pin that value) covers every member: the
+sha256 of the lines `<hex>  <path>\n`, one per member, where `<hex>` is the
+member's hash without its `sha256:` prefix and `<path>` is the path string
+as written in the envelope (for a `{path, scope}` member, its `path`),
+sorted bytewise by path. Order in the envelope does not matter. With
+coreutils, from the directory the paths are relative to:
+
+```sh
+printf 'sha256:'; sha256sum $(printf '%s\n' schematic/ota.sch netlist/ota.spice | LC_ALL=C sort) | sha256sum | cut -d' ' -f1
+```
+
+(`input_set_digest` in `klayout_tools.signoff` computes the same value.)
+
+Grading re-hashes every member:
+
+- any member that no longer matches, **or** a recorded combined digest that
+  is not the one the recorded member hashes produce (member hashes rewritten
+  without the digest): `unmet`/`stale_evidence`;
+- otherwise any member that cannot be found or read from the grading context
+  (including a `scope: "repo"` path with no `.git` and no `--repo-root`):
+  `unmet`/`unverifiable_provenance`, never `met`;
+- every member verified: `met`. The citation's `artifact_binding` gains
+  `members: [{"path", "content_hash", "status"}]` (`status` is `verified`,
+  `stale` or `unverifiable`) and its `path` is `null`. An unmet row carries
+  the same list as `detail.artifact_binding.members`, which names the drifted
+  member; text output lists `member <path>: <status>` and `--check` re-runs
+  report the drift.
+
+An empty or non-list `paths`, a member that is not an object, has no usable
+`path` or a non-string/empty `content_hash`, or two members naming the same
+path, render `unanchored_evidence`. A present-but-malformed `paths` never
+falls back to `provenance.input.path`; when both are well-formed, `paths`
+is the binding. A single-path attestation is unaffected and its citation has
+no `members` key.
 
 **Native envelopes are still accepted for these four, for compatibility,
 and they carry no information about the item.** Any recognised, passing
@@ -1932,6 +1998,27 @@ instead. Every corner the run reported must satisfy both of:
 
 An empty `corners` list never passes — a characterization of zero corners
 proves nothing.
+
+**Opt-in: `require_annotation_complete` (issue #3258).** Slack alone does not
+say whether a SPEF was actually applied to the timing. An evidence entry
+citing a `klt sta` envelope may add `"require_annotation_complete": true`
+(e.g. `{"file": "sta.json", "require_annotation_complete": true}`; file- or
+command-backed). Then, for **every** reported corner (or the flat envelope)
+that carries a `spef_annotation` block, `annotation_complete` must be
+literal `true`; otherwise the item is `unmet` with reason `check_failed` and
+`detail.sta_annotation_incomplete` lists each offending corner as
+`{corner, annotation_complete, annotation_warning}`. Semantics:
+
+- Absent or `false` → grading is unchanged (the default).
+- `spef_annotation` absent or `null` (no SPEF supplied) → no effect; the
+  option cannot turn a no-SPEF run into a parasitics claim.
+- `annotation_complete` missing, `null` or non-boolean on a present block →
+  unmet (fail-closed).
+- A non-boolean `require_annotation_complete` value makes the entry
+  malformed (`invalid_evidence`) rather than silently reading as off.
+
+The key is an additive manifest input and an additive `detail` field; no
+existing field changes meaning, so `schema_version` is unchanged.
 
 **Corner scoping is the cited run's own declared corner set.** Which corners
 must close is decided by the request that produced the envelope (`klt sta`'s
@@ -2748,7 +2835,7 @@ distinguishable from "no samples document was ever named" (see
 | `power_delivery`| object          | **Item 11 citations only** (issue #2025): `{"partition_kind", "supply_nets", "pdn", "strap_layers", "tapcell_master", "power_connectivity_status", "ties_checked_by_assertion", "ties_checked_by_well_assertion", "supply_unlabelled_islands"}`, plus `disclosed_undeclared_tie_classes` when present, plus `power_ports` (issue #2839) only when the provisional port-accessibility half was graded (see "Item 11 port accessibility") — what the grading actually resolved, so a `met` verdict states which supplies were declared and which branch proved them. `pdn` is `false` (with `strap_layers: []`, `tapcell_master: null`) for an analog or full-custom block that cited no `place-and-route` response — "no PDN citation", not "a PDN was checked and found missing", which renders `unmet`/`no_pdn` instead. `ties_checked_by_assertion` (array\<string\>, issue #2234) quotes the cited ERC run's own `erc_coverage.checked_by_assertion`: the `erc.missing_tie` work identities whose tap region came from a caller assertion (`ties[].tap_boxes`) rather than PDK-marker narrowing — `[]` for a purely marker-derived run, and for ERC evidence produced before that field existed. It does not change the verdict (an asserted tie is graded `met` exactly as a marker-derived one, and a degenerate or unmatched assertion is rejected by `klt erc` itself); it states which taps rested on the caller's word, without re-opening the cited envelope. `ties_checked_by_well_assertion` (array\<string\>, issues #2255 and #2540) quotes that run's `erc_coverage.checked_by_well_assertion` the same way, for the **well** side: the work identities whose well side rested on caller-named coordinates, in either of two forms — the substrate region itself asserted (`ties[].well_layer: null` + `ties[].well_boxes`) because the block draws no well/tub layer at all (the native-substrate case), or a *drawn* well whose class selection was named in boxes (`ties[].well_requires_boxes` / `ties[].well_excludes_boxes`) because no drawn layer separates the tub's two bias classes. `[]` for a run using neither, and for ERC evidence produced before those fields existed. Kept as a separate list because it is a separate, weaker claim: one says which drawn geometry is the tap, the other says how the well side was named. It does not change the verdict either — `klt erc` rejects an assertion indistinguishable from the whole top-cell extent as `degenerate_well_assertion`, and a box selection that kept every shape of the drawn layer or none of them as `degenerate_well_selection`, both landing in `erc_coverage.skipped` where this item already refuses to read them as a clean missing-tie verdict. A purely marker-layer selection (`well_requires`/`well_excludes`) stays out of this list: the stream draws its own partition. `supply_unlabelled_islands` (object, issue #2524) is the **severed-rail negative** this item could not previously state: `{<declared supply name>: <nets[].unlabelled_islands>}` for each cited supply whose ERC spec declared the `stackup` roles it owns (`nets[].roles`, issue #2510), every value `0` for a met item. `erc.unconnected_net` counts islands *carrying the declared label*, so a single-label rail severed into a labelled piece and an unlabelled orphan grades clean — this key is what says the clean read was measured over the whole conductor on the owned roles, not only over what carried a label (its non-zero counterpart is `erc.unlabelled_conductor`, already an `unmet`/`supply_not_continuous` blocker in the table above). `{}` when no cited supply declared `roles`, and for every ERC envelope produced before those keys existed — the honest "not measured", never a fabricated zero, so a grader can tell "checked, and it is zero" from "nobody asked". Like the two assertion lists, it does not change the verdict; it states the negative the verdict rests on. `disclosed_undeclared_tie_classes` (array\<object\>, issue #2623) is the **partial-declaration** counterpart of `detail.ties_disclosure_reason` below: `[{"class", "reason"}, …]`, one entry per `erc.missing_tie:["<class>"]` the cited ERC run recorded in `erc_coverage.inapplicable` with a disclosed reason (`ties_disclosure.undeclared_classes`, issue #2541) — a well class the spec names as inexpressible or tool-limited *alongside* at least one other tie it did declare and get checked (the `tie_count > 0` path this item is already `met` on). It does not change the verdict — the declared, checked tie(s) already carry the item to `met` on their own merits, and a disclosure is never a substitute for a computed result — it only states, in the report of record, that a second class was considered and why it could not be checked. **Absent** (not an empty list) whenever the cited run disclosed no named class, so a run predating #2541 or naming none renders this citation exactly as it did before this key existed. |
 | `coverage`      | object          | **`drc` citations only**, and only when the cited envelope carries a `coverage` block (issue #2002): `{"layers_in_stream_without_rules", "rules_skipped", "deck_scope"}`, quoted verbatim from it — the three fields [`design-evidence-tiers.md`](../design-evidence-tiers.md) item 3 requires a DRC claim to disclose. **Absent** for any other kind, and for DRC evidence committed before `klt drc` reported coverage — an absent `coverage` means "this artifact reported no coverage", never "this deck has no gaps". See "DRC coverage is reported, not graded" above. |
 | `yield_campaign` | object | **`yield` citations only**, and only when the cited report carries at least one measurement (issue #2467): `{"sample_size", "undersized_measurements", "negative_control", "measurements_without_negative_control", "undetected_negative_controls"}` — the campaign's own sample-size and negative-control state, rolled up across `measurements[]`. `sample_size` is `"insufficient"` when any measurement says so, `"sufficient"` when at least one says so and none says otherwise, and `null` when none states a verdict; `negative_control` is `"not_detected"` when any declared control failed, `"detected"` when at least one was declared and every declared one detected, and `"not_declared"` when none was declared. The three name-lists are in the report's own measurement order. On a `"met"` citation the refusing values (`"insufficient"`, `"not_detected"`) can never appear — those render `unmet`/`undersized_sample` or `unmet`/`negative_control_not_detected` instead, carrying this same block as the item's `detail.yield_campaign`. **Absent** for any other kind, and for a report with no measurements — an absent key means "this artifact made no campaign statement", never "the campaign was disciplined". See "Campaign discipline on item 6" below. |
-| `artifact_binding` | object | **Items 1, 2, 9 and 10, `generic` citations only** (issue #2718): `{"t1_item", "path", "content_hash", "input_verified", "summary"?, "source"?}`. These are the item the attestation declared, the audited artifact exactly as its `provenance.input.path` names it (a string or a `{path, scope}` object), the hash that artifact re-hashed to, and `input_verified` (always `true` on a met row). `summary`/`source` are echoed when the envelope carries them as strings, and are never graded. **Absent** on every other citation, including a native-kind citation of items 1, 2, 9 or 10. On those four items an absent key means "a passing envelope was cited, but nothing ties it to the item's subject matter". See "Items 1, 2, 9, and 10: bind them to an audited artifact" above. |
+| `artifact_binding` | object | **Items 1, 2, 9 and 10, `generic` citations only** (issue #2718): `{"t1_item", "path", "content_hash", "input_verified", "members"?, "summary"?, "source"?}`. `members` (issue #3044) is present only for a set binding (`provenance.input.paths`) — `[{"path", "content_hash", "status"}]` with `status` of `verified`/`stale`/`unverifiable`, `content_hash` then being the set's combined digest and `path` `null`; an unmet set citation carries the same list as the item's `detail.artifact_binding.members`. These are the item the attestation declared, the audited artifact exactly as its `provenance.input.path` names it (a string or a `{path, scope}` object), the hash that artifact re-hashed to, and `input_verified` (always `true` on a met row). `summary`/`source` are echoed when the envelope carries them as strings, and are never graded. **Absent** on every other citation, including a native-kind citation of items 1, 2, 9 or 10. On those four items an absent key means "a passing envelope was cited, but nothing ties it to the item's subject matter". See "Items 1, 2, 9, and 10: bind them to an audited artifact" above. |
 | `coverage_qualification` | object | **Any kind**, and only when the cited envelope's versioned `coverage` block classifies as `partial` (issue #2109): `{"reason": "partial_coverage", "skipped": [{"id", "reason"}, …]}` — the requested work the cited run did not check. **Absent** for complete, zero, unknown, malformed and pre-contract coverage alike; an absent key means "this artifact made no partial-coverage claim", never "nothing was skipped". Legacy verb-specific gap fields (`coverage.rules_skipped`) are **not** re-read into it. Quoted, never graded on — see "Partial coverage is qualified, not inferred" above. |
 
 #### `reason` values
@@ -3451,6 +3538,17 @@ Three states, three treatments, decided by what the *report* itself claims:
 | Any measurement's `sample_size.verdict` is `"insufficient"` | `"unmet"`, `reason: "undersized_sample"`, no citation |
 | Any declared `negative_control` has `verdict: "not_detected"` | `"unmet"`, `reason: "negative_control_not_detected"`, no citation |
 | **No** measurement declared a `negative_control` | `"met"`, with `citation.yield_campaign.negative_control: "not_declared"` |
+
+**A stale pin is disclosed beside either refusal (issue #3063).** When the
+entry pins `content_hash`, the two refusals above also carry
+`detail.content_hash_pin` — `"verified"` (the live hash of the samples
+document the report names equals the pin), `"stale"` (it differs), or
+`"unverifiable"` (the samples document could not be found, so there is no
+live hash to compare). It is disclosure only: `status` and `reason` stay
+`unmet` / `undersized_sample` (or `negative_control_not_detected`), so a bad
+pin is visible now rather than only after the sample size is raised. The key
+is absent when the entry pins no `content_hash`, on every other refusal, and
+on `met` items.
 
 **Why the third is a disclosure rather than a refusal.** `klt yield` itself
 draws that line: an undeclared control is a run-level warning with "no

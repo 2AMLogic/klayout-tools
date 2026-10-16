@@ -9,8 +9,10 @@ matter on it. This document covers the read-only tooling that proves a
 repository's workflows are qualified, the prerequisites for enabling queue mode,
 and how to roll back.
 
-**Status:** this is preparation only. Nothing in Loom enqueues yet: Phases A
-and B, #10255 and #10256, provide the queue controls and the Champion handoff.
+**Status:** queue execution is compiled on (#12323) but opt-in via
+`champion.mergeMode=queue`. Phases A and B, #10255 and #10256, provide the queue
+controls and the Champion handoff; the `merge_group` check workflow is the
+optional template `defaults/optional/github-workflows/merge-group-check.yml`.
 `rjwalters/loom` is user-owned, and GitHub documents merge queues for
 organization-owned repositories, so this repository is **not eligible** for the
 live pilot. Its `ci.yml` carries a `merge_group` trigger anyway. The trigger is
@@ -116,9 +118,9 @@ A missing or `null` field means "unknown".
   exception on `push` (#10825, [ci-principles](ci-principles.md) rule 3).
   Their condition puts `github.event_name == 'merge_group' ||` first, so a
   merge group still runs them unconditionally, while a push runs them only
-  when the push-only `changes-push` job finds an image input or fails.
-  `changes-push` never runs on a PR or a merge group, so the audit does not
-  count it as a relied-on suite.
+  when the `changes` job finds an image input or fails. `changes` never runs
+  on a merge group (it carries the `pr-only` audit marker), so the audit does
+  not count it as a relied-on suite.
 - The concurrency group for a merge-group run is keyed on
   `merge_group.head_sha`, so it can never share a group with a PR run, with
   `main`, or with another merge group. `cancel-in-progress` stays true only
@@ -126,14 +128,15 @@ A missing or `null` field means "unknown".
   ([ci-principles](ci-principles.md) rule 2).
 - The PR-only steps that guard the merged tree also run on `merge_group`, over
   `merge_group.base_sha..head_sha`. These are the version-bearing-file check
-  in `Structural Checks` and the secret scan in `Daemon Checks`.
-- No checkout sets `ref:`, so every checkout lands on `github.sha`, which is
-  the merge-group head.
+  and the secret scan, both in `Lint`.
+- No checkout that runs on `merge_group` sets `ref:`, so every such checkout
+  lands on `github.sha`, which is the merge-group head. (`Detect Changes`
+  checks out the PR base, and does not run on `merge_group`.)
 - Regression tests in `loom-daemon/src/merge_group_ci/tests.rs` audit this
   repository's own workflows against `.loom/config.json`'s required checks.
   They also assert that every job still runs on `push` and may still run on a
-  PR. The exceptions are named explicitly: `changes-push` (push-only), and the
-  four image jobs, which must not be `Skipped` on push and must `Run` on
+  PR. The exceptions are named explicitly: `changes` (PR and push only), and
+  the four image jobs, which must not be `Skipped` on push and must `Run` on
   `merge_group`.
 
 ## Enablement prerequisites (all required, in order)

@@ -550,6 +550,10 @@ _DERIVED_LAYER_FIXTURES: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
                 {"layer": [22, 0], "box": [0, 0, 1000, 4000]},  # Comp (PCOMP)
                 {"layer": [31, 0], "box": [-200, -200, 1200, 4200]},  # Pplus
                 {"layer": [32, 0], "box": [1110, 0, 2110, 4000]},  # Nplus
+                {
+                    "layer": [21, 0],
+                    "box": [-500, -3000, 1500, -300],
+                },  # Nwell (<0.429um)
             ]
         },
         {  # clean: Nplus 210 dbu (> 160) away
@@ -557,6 +561,31 @@ _DERIVED_LAYER_FIXTURES: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
                 {"layer": [22, 0], "box": [0, 0, 1000, 4000]},  # Comp (PCOMP)
                 {"layer": [31, 0], "box": [-200, -200, 1200, 4200]},  # Pplus
                 {"layer": [32, 0], "box": [1210, 0, 2210, 4000]},  # Nplus
+                {
+                    "layer": [21, 0],
+                    "box": [-500, -3000, 1500, -300],
+                },  # Nwell (<0.429um)
+            ]
+        },
+    ),
+    # `nplus.space.pcomp.far.1` (NP.3cii, 80 dbu, issue #3484): the far-from-
+    # well half of the NP.3 split. Same island as above but no well is drawn,
+    # so the PCOMP is >= 0.429um from any Nwell/Dnwell and held to 0.08um:
+    # Nplus 50 dbu (violate) / 80 dbu (clean, exactly the threshold) away.
+    # The near-well sibling `nplus.space.pcomp.1` derives an empty region.
+    "nplus.space.pcomp.far.1": (
+        {  # violate: Nplus 50 dbu (< 80) from the PCOMP island's right edge
+            "shapes": [
+                {"layer": [22, 0], "box": [0, 0, 1000, 4000]},  # Comp (PCOMP)
+                {"layer": [31, 0], "box": [-200, -200, 1200, 4200]},  # Pplus
+                {"layer": [32, 0], "box": [1050, 0, 2050, 4000]},  # Nplus
+            ]
+        },
+        {  # clean: Nplus 80 dbu (>= 80) away
+            "shapes": [
+                {"layer": [22, 0], "box": [0, 0, 1000, 4000]},  # Comp (PCOMP)
+                {"layer": [31, 0], "box": [-200, -200, 1200, 4200]},  # Pplus
+                {"layer": [32, 0], "box": [1080, 0, 2080, 4000]},  # Nplus
             ]
         },
     ),
@@ -621,6 +650,24 @@ _DERIVED_LAYER_FIXTURES: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
             "shapes": [
                 {"layer": [22, 0], "box": [0, 0, 1000, 4000]},  # Comp
                 {"layer": [31, 0], "box": [-210, -210, 1210, 4210]},  # Pplus
+            ]
+        },
+    ),
+    # `pplus.enclosing.comp.far.1` (PP.5di, 20 dbu, issue #3484): the far-
+    # from-well half of the PP.5 split. No well is drawn, so the PCOMP is held
+    # to 0.02um instead of 0.16um: 10 dbu extension (violate) / 20 dbu (clean,
+    # exactly the threshold). `pplus.enclosing.comp.1` is skipped here.
+    "pplus.enclosing.comp.far.1": (
+        {  # violate: 10 dbu extension (< 20)
+            "shapes": [
+                {"layer": [22, 0], "box": [0, 0, 1000, 4000]},  # Comp
+                {"layer": [31, 0], "box": [-10, -10, 1010, 4010]},  # Pplus
+            ]
+        },
+        {  # clean: 20 dbu extension (>= 20)
+            "shapes": [
+                {"layer": [22, 0], "box": [0, 0, 1000, 4000]},  # Comp
+                {"layer": [31, 0], "box": [-20, -20, 1020, 4020]},  # Pplus
             ]
         },
     ),

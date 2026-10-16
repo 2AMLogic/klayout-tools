@@ -369,6 +369,54 @@ def select_runs(
     return selection.items()
 
 
+def _runs_of(payload: object) -> list:
+    if isinstance(payload, dict) and isinstance(payload.get("workflow_runs"), list):
+        return payload["workflow_runs"]
+    return []
+
+
+def _extend_with_usable_runs(
+    client: GhClient,
+    repo: str,
+    workflow: str,
+    branch: str,
+    created: str,
+    opts: dict,
+    baseline_runs: list,
+) -> list:
+    """Merge the usable-conclusion listings into ``baseline_runs``, newest first.
+
+    The `completed` listing is newest-first and mostly `cancelled` on a busy
+    `main` (merge bursts cancel superseded runs), so its fixed-size page can
+    hold fewer than `min_samples` usable runs (#3575). Ask the server for the
+    usable conclusions directly; a failed extra listing only costs the extra
+    samples, never the whole fetch.
+    """
+    seen = {r.get("id") for r in baseline_runs if isinstance(r, dict)}
+    for conclusion in sorted(_USABLE_RUN_CONCLUSIONS):
+        try:
+            extra = client.get(
+                f"repos/{repo}/actions/workflows/{workflow}/runs"
+                f"?branch={branch}&status={conclusion}"
+                f"&per_page={opts['baseline_runs'] + 5}{created}"
+            )
+        except FetchError:
+            continue
+        for run in _runs_of(extra):
+            if isinstance(run, dict) and run.get("id") not in seen:
+                seen.add(run.get("id"))
+                baseline_runs.append(run)
+    # Newest first, so the `baseline_runs` limit keeps the most recent usable ones.
+    baseline_runs.sort(
+        key=lambda r: (
+            (_created_at(r) if isinstance(r, dict) else None)
+            or datetime.min.replace(tzinfo=timezone.utc)
+        ),
+        reverse=True,
+    )
+    return baseline_runs
+
+
 def collect(client: GhClient, repo: str, run_id: str, opts: dict) -> dict:
     now = datetime.now(timezone.utc)
     current = client.get(f"repos/{repo}/actions/runs/{run_id}")
@@ -394,15 +442,14 @@ def collect(client: GhClient, repo: str, run_id: str, opts: dict) -> dict:
         f"?per_page={opts['peer_window_runs']}{created}"
     )
 
-    def runs_of(payload: object) -> list:
-        if isinstance(payload, dict) and isinstance(payload.get("workflow_runs"), list):
-            return payload["workflow_runs"]
-        return []
+    baseline_runs = _extend_with_usable_runs(
+        client, repo, workflow, branch, created, opts, _runs_of(baseline_payload)
+    )
 
     # Server-side `created` is the first filter, not the only one: the list is
     # re-checked here so a listing that ignores it cannot leak a stale pool in.
-    baseline_list, stale_baselines = drop_stale(runs_of(baseline_payload), cutoff)
-    peer_list, stale_peers = drop_stale(runs_of(peer_payload), cutoff)
+    baseline_list, stale_baselines = drop_stale(baseline_runs, cutoff)
+    peer_list, stale_peers = drop_stale(_runs_of(peer_payload), cutoff)
     selected = select_runs(current, baseline_list, peer_list, opts, now=now)
 
     entries = []

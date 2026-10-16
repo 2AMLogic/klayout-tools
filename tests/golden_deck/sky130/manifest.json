@@ -1117,6 +1117,47 @@
       ]
     }
   },
+  "rpm.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            1300,
+            4000
+          ],
+          "layer": [
+            86,
+            20
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": "sky130A_mr.drc's rpm/urpm rules (\"rpm.1a\"/\"urpm.1a\") live inside the script's top-level `if FEOL ... end` block, and `FEOL = false` is hard-coded at the top of the file with its own \"do not change\" comment and no `-rd`-settable override this engine's invocation can flip -- the same root cause already documented for capm.width.1/diff.width.1/poly.width.1 above. A violate fixture correctly trips the curated engine but is always reported \"clean\" by the real deck, since it never evaluates this rule at all regardless of the input layout. See docs/cli/drc.md's \"klayout\" engine limitations.",
+    "layer": [
+      86,
+      20
+    ],
+    "threshold_dbu": 1270,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            1000,
+            4000
+          ],
+          "layer": [
+            86,
+            20
+          ]
+        }
+      ]
+    }
+  },
   "tap.width.1": {
     "check": "width",
     "clean": {
@@ -1153,6 +1194,47 @@
           "layer": [
             65,
             44
+          ]
+        }
+      ]
+    }
+  },
+  "urpm.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            1300,
+            4000
+          ],
+          "layer": [
+            79,
+            20
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": "sky130A_mr.drc's rpm/urpm rules (\"rpm.1a\"/\"urpm.1a\") live inside the script's top-level `if FEOL ... end` block, and `FEOL = false` is hard-coded at the top of the file with its own \"do not change\" comment and no `-rd`-settable override this engine's invocation can flip -- the same root cause already documented for capm.width.1/diff.width.1/poly.width.1 above. A violate fixture correctly trips the curated engine but is always reported \"clean\" by the real deck, since it never evaluates this rule at all regardless of the input layout. See docs/cli/drc.md's \"klayout\" engine limitations.",
+    "layer": [
+      79,
+      20
+    ],
+    "threshold_dbu": 1270,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            1000,
+            4000
+          ],
+          "layer": [
+            79,
+            20
           ]
         }
       ]
