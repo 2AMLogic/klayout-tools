@@ -738,6 +738,19 @@ not `klt --version`, if you need to detect this kind of drift. See
   compare). New additive `drift.path_comments_differ` field. Generation is
   unchanged.
 
+- **`klt lvs` `layout.abstract_cells`/`layout.abstract_cell_lef`** (issue
+  #2853). Inline extraction now forwards `klt extract --abstract-cells`/
+  `--abstract-cell-lef`, so a mixed-level compare (a transistor-level region
+  plus pin-only black-box cells against a reference with pin-only stubs) runs
+  in one request, and `body_verification` is evaluated for the transistor
+  region. Given with `layout.netlist`, either field is an application error.
+  The response gains top-level `abstract_cells`, `abstract_cell_lef` and
+  `abstracted_cells`, present only when abstraction was requested; `--check
+  --rerun` replays them. For a non-`gate-level-verilog` reference whose
+  layout instantiates pin-only cells, `power_connectivity` stays
+  `"unchecked"`, and its `reason` now names those cells and says their pins
+  were compared by name as ordinary connectivity. This is an additive request
+  and response change, so there is no `schema_version` bump.
 - **`klt lvs` opt-in `options.strict_top_level_pin_count`** (issue #2845):
   unequal top-circuit pin counts yield `status: mismatch` with a new
   `pin.count` error finding (both counts in `details`). Default unchanged;
