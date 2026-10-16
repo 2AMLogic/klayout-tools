@@ -367,7 +367,7 @@ naming what *is* supported:
   `measurements[]` constraint as ngspice applies.
 - **Corners**: `process` (`.lib` sections — note Xyce requires a *named*
   `.endl <section>` in the library file where ngspice accepts a bare
-  `.endl`) and `temperature`. **`corners.supply_v` and `corners.params` are refused**: Xyce has
+  `.endl`) and `temperature`. **`corners.supply_v`, `corners.params` and `corners.options` are refused**: Xyce has
   no netlist equivalent of ngspice's `alter`/`alterparam`, so per-corner
   supply rails and parameter rows cannot be patched into the deck — keep
   them hardcoded in the netlist body.
@@ -417,6 +417,27 @@ for a single-unit run (one corner does not repay a Spot boot), an
 `engine: "xyce"` request (the off-host toolchain pins ngspice), and
 `options.resume`. An explicit flag or request field is never overridden —
 pass `--backend local` to keep a multi-corner run on the host on purpose.
+
+`$KLT_SIM_BACKEND` was introduced in `klt` **0.7.0** (the first tag that
+reads it). An older client never reads the variable, so `KLT_SIM_BACKEND=batch`
+with, say, `uvx --from klayout-tools==0.5.0 klt sim` silently runs every corner
+on the local host. No change in this repository can make an old client fail
+closed; the guard belongs in the worker spec (pin the `klt` version the host
+exposes). Audit a run with `environment.backend` (below): a `local` run whose
+`requested` is `batch` and `source` is `env` stepped aside by design; a report
+from an old client has no `environment.backend` at all.
+
+**Resolved backend (`environment.backend`, issue #2977).** Every report
+records which backend ran and where the choice came from:
+
+```json
+"backend": { "resolved": "local", "source": "env", "requested": "batch" }
+```
+
+`source` is `flag` (`--backend`), `request` (`request.backend`), `env`
+(`$KLT_SIM_BACKEND`) or `default`. `requested` is the value that source named;
+`resolved` is what ran, and differs from `requested` only when a host default
+stepped aside to `local` (see above). Additive; no `schema_version` bump.
 
 | `backend`        | Behaviour                                                                                                          |
 | ----------------- | ------------------------------------------------------------------------------------------------------------------- |
@@ -859,7 +880,11 @@ status read therefore cannot say how far through the grid a running job is, and
 `klt` does not estimate one from elapsed time. That needs the fleet to publish
 progress first (tracked against 2AMLogic/2am).
 
-Collecting a finished `--submit-only` job's report is `--attach`, below.
+`--submit-only` also writes the [submit receipt](#submit-receipt-and-client-termination-3065)
+(`batch-receipt.json`, `state: null`) into the artifacts directory, so the job
+id survives the caller. Collecting a finished `--submit-only` job's report is
+`--attach`, below: the full flow is `--submit-only` → `--job-status` (repeat) →
+`--attach <job_id>`, and an `interrupted` job is reported, never re-launched.
 
 ### Waiting, job id, and re-attaching ([#2978](https://github.com/2AMLogic/klayout-tools/issues/2978))
 
@@ -1140,9 +1165,40 @@ or nothing checked.
 
 `request_sha256` pins the *planned request file*; a report does not embed the
 request that produced it, so the report-to-request binding is the corner list
-plus the cross-shard consistency checks above. A deterministic shard planner
-(split by a corner axis, emit requests and the manifest) is not part of this
-verb.
+plus the cross-shard consistency checks above. Writing the shard requests and
+the manifest is `klt sim-plan`, below.
+
+#### Planning shards (`klt sim-plan`, [#3423](https://github.com/2AMLogic/klayout-tools/issues/3423))
+
+```
+klt sim-plan <request.json> [--axis process] [--format text|json]
+```
+
+Splits one `klt sim` request by `corners.process` entry (the only axis so far)
+and writes, **next to the source request**, one request per entry plus the
+manifest `klt sim-merge` takes: `<stem>.shard-<id>.json` and
+`<stem>.manifest.json`. They sit beside the source because `klt sim` resolves a
+request's relative paths (netlist, model libraries) against the request's own
+directory. A shard request is the input with `corners.process` narrowed to that
+entry (bare string or `{"name", "sections"}` bundle alike); the shard `id` is
+the entry's name.
+
+Each manifest shard's `corners` is the `corner_id` list `klt sim` computes for
+that shard request: the planner runs the same expansion (`exclude` rules, supply
+and temperature axes included), never a re-implementation. Shards follow the
+axis order, so concatenating their corner lists reproduces the single-request
+order, and planning, running the shards and `klt sim-merge` equals one request
+over the whole grid. Output is deterministic: sorted keys, no timestamps or host
+paths, and `request_sha256` is the SHA-256 of the written bytes, so re-planning
+the same input rewrites byte-identical files.
+
+The report (stdout) is `{"schema_version": 1, "axis", "manifest", "shard_count",
+"shards": [{"id", "request", "request_sha256", "corner_count"}]}`, with paths
+relative to the request's directory. Exit `0` planned, `1` refused with the
+usual error envelope: Monte Carlo requests (merge does not support them),
+deck-list requests, `corners.units` requests, a `corners.process` axis that is
+missing or has fewer than two entries, a repeated process name, or a shard that
+`exclude` empties. `2` is a usage error.
 
 ### Three budgets, and the fleet's whole-job ceiling
 
@@ -1521,6 +1577,7 @@ release segment:
 |---|---|---|
 | `analysis_steps` ([#2482](https://github.com/2AMLogic/klayout-tools/issues/2482)) | `analysis_steps` is present | `0.7.1` |
 | `transfer` ([#2924](https://github.com/2AMLogic/klayout-tools/issues/2924)) | any `measurements[]` entry declares `transfer` | `0.7.1` (**mandatory**, see below) |
+| `stimulus` ([#2977](https://github.com/2AMLogic/klayout-tools/issues/2977)) | `stimulus` is present | `0.7.1` (**mandatory**, see below) |
 
 `decks[]` ([#3303](https://github.com/2AMLogic/klayout-tools/issues/3303)) is
 the next registry entry.
@@ -1544,8 +1601,10 @@ the next registry entry.
 - Limit: a `0.7.1.devN` runner built before a feature landed looks the same as
   one built after, so it counts as supporting it.
 
-**Mandatory features (`transfer`, [#2924](https://github.com/2AMLogic/klayout-tools/issues/2924)).**
-A runner that predates `measurements[].transfer` would drop the metric, so
+**Mandatory features (`transfer`, [#2924](https://github.com/2AMLogic/klayout-tools/issues/2924); `stimulus`, [#2977](https://github.com/2AMLogic/klayout-tools/issues/2977)).**
+A runner that predates `measurements[].transfer` would drop the metric (and one
+that predates `stimulus` would simulate with the digital control lines
+undriven), so
 this entry is not relaxed by `runner_version_check: "warn"` and "unknown" is
 not tolerated on the runner side:
 
@@ -2763,6 +2822,47 @@ this name"), not the cause; treat it as "check the signal name against the
 netlist body, including any `.save` card it carries" rather than a
 self-diagnosing error.
 
+## Unreached `.meas` targets (`measurements[].on_unreached`)
+
+A `.meas ... FIND/WHEN/AT/TRIG/TARG` card whose target the completed analysis
+never reaches (e.g. `WHEN i(vs)=1m` on a device that never carries 1 mA within
+the swept range) is a *result*, but by default it grades exactly like a
+solver failure: measurement `status: "error"`, a `code: "measurement"`
+diagnostic (`measurement 'x' produced no value -- ngspice reported: out of
+interval`), corner `status: "error"`, exit `4`.
+
+Set `on_unreached: "null"` on a `spice` measurement to record that outcome as
+data instead:
+
+- the measurement is reported `status: "not_reached"`, `value: null`,
+  `margin: null`, with an `info` diagnostic `code: "measurement_not_reached"`;
+- it does not make the corner `error` and does not force exit `4`; the corner
+  grades from its *other* measurements (`pass`/`fail`);
+- its `limits` are **not evaluated** — no pass/fail is claimed. A declared
+  bound lands in `coverage.skipped` with `reason: "not_reached"`, so a run whose
+  only checks were unreached reports `not_checked`, and a mixed run
+  `pass_partial`, never an unqualified `pass`;
+- the per-measurement rollup `status` is `"not_reached"` only when every
+  corner that reported it did; otherwise `error > inconclusive > fail > pass`
+  as usual;
+- the report gains a top-level `not_reached` integer: the number of corner ×
+  measurement results graded `not_reached`, kept apart from `errored` (which
+  counts corners). The key is **absent** unless some measurement declared
+  `on_unreached`.
+
+The classification is deliberately narrow: it applies only when ngspice
+logged the reason `out of interval` together with `failed!` for that card
+**and** the corner carries no error-severity diagnostic (diverged solve,
+timeout, …). A malformed card (`Error: measure … : <other reason>`), a
+missing vector, or a failed solve still grades `error` even with
+`on_unreached: "null"`. Without the field, behavior and output are
+byte-identical to before.
+
+`on_unreached` is rejected (exit `1`) on an `expr` or `crossings` measurement
+and for any value other than `"error"`/`"null"`. It is not applied to
+`analysis_steps[]` corners or the Xyce engine (those keep today's `error`).
+`"measurement_not_reached"` is also accepted in `options.fail_on_diagnostic`.
+
 ## Measurements that are not `.meas` cards (`measurements[].expr`)
 
 A `measurements[]` entry declares **exactly one** of two forms (plus the
@@ -3564,8 +3664,8 @@ Grading, in order:
   indeterminate, so with `limits` it grades `inconclusive`.
 
 Off-host: the new tokens are `transfer` entries, so `backend: "remote"` /
-`"batch"` requests are refused exactly as above (a single corner may use
-`--backend local`).
+`"batch"` requests are handled exactly as above (not refused locally; the
+worker's mandatory `transfer` feature gate decides -- see "Backends" below).
 
 One rawfile and one ratio computation are used per unique `num`/`den` pair, and
 the capture does not depend on `options.waveforms`.
@@ -3584,6 +3684,45 @@ and update any pinned image reference; fleet publication and paid cloud runs
 are outside this repository. `engine: "xyce"` is refused. After the analysis, each unique pair adds
 `let __klt_xfer_<k>_num = <num>`, `let __klt_xfer_<k>_den = <den>` and
 `write <corner_dir>/transfer_<k>.raw ...` to the generated `.control` block.
+
+## Multi-pass AC acquisition (`analysis.passes`)
+
+Issue [#3159](https://github.com/2AMLogic/klayout-tools/issues/3159), increment
+1 of the dual-injection AC bench ([#2847](https://github.com/2AMLogic/klayout-tools/issues/2847)).
+A Tian bench needs two AC executions at the *same* corner with a different
+injection source active in each, and both complex result sets kept. An `ac`
+`analysis` may carry `passes`; the base `kind`/`args` are shared:
+
+```json
+{"kind": "ac", "args": "dec 20 1 1e8",
+ "passes": [
+   {"name": "inj_v", "alter": [{"target": "VINJ", "value": 1}, {"target": "IINJ", "value": 0}]},
+   {"name": "inj_i", "alter": [{"target": "VINJ", "value": 0}, {"target": "IINJ", "value": 1}]}]}
+```
+
+- Each pass has a unique `name` (`[A-Za-z_][A-Za-z0-9_]*`, case-insensitive) and
+  a non-empty `alter` array of `{target, value, field?}`. `target`/`value` obey
+  the `analysis_steps[].alter` rules (top-level `V`/`I`/`R`/`C`/`L` name, finite
+  number; no `.param`, `corners.supply_v` or waveform-source targets).
+  `field` is `"ac"` (default — the source's AC magnitude, `alter VINJ ac = 1`;
+  `V`/`I` only) or `"dc"` (`alter R3 = 2k`).
+- **Every pass must alter the same targets.** `alter` persists, so a pass that
+  omitted one would inherit its predecessor's value and depend on pass order;
+  such a request is refused. Passes run serially, in declaration order, inside
+  one corner job, each in a fresh plot (`setplot new`). No operating-point
+  reuse between passes is promised.
+- Refused before any engine launch: duplicate/malformed passes, a non-`ac`
+  analysis, `measurements[]` (scalar metrics are #3160), `options.waveforms`
+  / `--plot`, `engine: "xyce"`, and `backend: "remote"` / `"batch"` (transport
+  is #3161). Requests without `passes` are unchanged.
+
+Each pass's complex result is written to `<corner_dir>/ac_pass_<k>.raw` and
+decoded privately by `klayout_tools.sim_raw`; the public waveform JSON stays
+magnitude-only. The corner gains an additive `passes` list of
+`{name, status, points, raw}` (`raw` is the rawfile path only when
+`options.keep_artifacts` is set, else `null`). A pass whose analysis did not
+produce an AC plot is `status: "error"` with a `pass_failed` diagnostic, and
+the corner grades `error`.
 
 ## Source energy over a transient window (`measurements[].energy`)
 
@@ -4007,6 +4146,93 @@ into a step `expr` measurement. Write the cross-point arithmetic as a derived
 measurement over `<step>.<name>` references, with `limits` attached. Then
 remove the `.control` block from the netlist body (see "Netlist convention"
 above). The bench can then run on any backend.
+
+## Declarative timed stimulus (`stimulus`)
+
+A bench that drives digital control lines with timed edges used to expand each
+edge list into `PWL` sources inside the netlist and keep a side-car schedule in
+sync by convention. Declare the schedule in the request instead
+([#2977](https://github.com/2AMLogic/klayout-tools/issues/2977)):
+
+```json
+"stimulus": {
+  "signals": [
+    { "source": "vclk", "node": "clk", "ref": "0", "initial": 0.0,
+      "rise_s": 1e-10, "fall_s": 1e-10, "skew_s": 2e-10,
+      "events": [ { "t_s": 1e-9, "level": 1.8 },
+                  { "t_s": 5e-9, "level": 0.0, "transition_s": 5e-11 } ] }
+  ]
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `signals[].source` | SPICE voltage-source name to create (must start with `V`; unique within the block). |
+| `signals[].node` / `ref` | Positive node and reference node (`ref` defaults to `0`). |
+| `signals[].initial` | Level at `t=0` (default `0`). |
+| `signals[].rise_s` / `fall_s` | Default transition time of an increasing / decreasing edge (default `0`). |
+| `signals[].skew_s` | Shift applied to every event of this signal (default `0`; may be negative while `t_s + skew_s >= 0`). |
+| `signals[].events[]` | `t_s` (edge start, strictly increasing, `>= 0`), `level`, optional `transition_s` overriding the signal default for that edge. |
+
+An event at `t_s` (plus `skew_s`) is when the edge **starts**; the level is
+reached one transition later. A transition of `0` cannot be written as a PWL
+(time points must increase), so it is applied as 1 fs (`1e-15`); the report
+shows the value applied. An event whose level equals the current level is a
+`hold` and adds no points.
+
+`klt sim` appends one `<source> <node> <ref> PWL(...)` card per signal to every
+corner's deck, right after the netlist `.include`, so the caller no longer
+hand-writes PWL. Requirements:
+
+- `analysis.kind` is `tran` (or `analysis_steps[]`), engine `ngspice`.
+- The source name must not already be defined in the netlist or its resolvable
+  `.include`/`.lib` closure, and must not be a `corners.supply_v` target.
+
+Everything is validated before any corner runs; failures are `SimError`s whose
+`error.code` is one of `stimulus_invalid`, `stimulus_bad_time`
+(non-monotonic, negative, or skewed below zero), `stimulus_edge_overlap` (an
+edge starts before the previous one finishes), `stimulus_edge_after_stop` (an
+edge starts at or after the transient stop time), `stimulus_source_collision`,
+`stimulus_supply_conflict`, `stimulus_unsupported`.
+
+### Response: `environment.stimulus`
+
+The schedule **as applied** is echoed so analyzers read event times from the
+report, not from a side-car file:
+
+```json
+"stimulus": { "signals": [ {
+  "source": "vclk", "node": "clk", "ref": "0", "initial": 0.0, "skew_s": 2e-10,
+  "events": [ { "t_s": 1e-9, "t_applied_s": 1.2e-9, "level": 1.8,
+                "edge": "rise", "transition_s": 1e-10 } ],
+  "pwl": [ [0.0, 0.0], [1.2e-9, 0.0], [1.3e-9, 1.8] ] } ] }
+```
+
+`edge` is `rise`, `fall` or `hold`; `t_applied_s` is `t_s + skew_s`.
+Additive: absent when the request declares no `stimulus`. No `schema_version`
+bump (see `docs/json-contract.md`).
+
+### Backends, resume, and runner compatibility
+
+`local` and `local-parallel` write the cards into each corner deck. `remote`
+and `batch` forward the request, and the worker's own `klt sim` expands it the
+same way (the orchestrating report echoes the schedule too). The checkpoint
+fingerprint includes the expanded cards, so editing the schedule invalidates a
+`--resume` checkpoint. **A runner older than this feature ignores the
+`stimulus` key and would simulate with no drive, so `stimulus` is registered
+as a **mandatory** request feature (first runner release `0.7.1`; see
+"Request-feature capability check"): a `remote`/`batch` request that carries
+it is refused with `batch_runner_feature_unsupported` when the runner
+predates it or its version cannot be read, even under
+`runner_version_check: "warn"`.
+
+Not in scope here: stimulus *variants* as a Monte Carlo/corner axis
+([#3099](https://github.com/2AMLogic/klayout-tools/issues/3099)) and per-step
+retargeting of a PWL-declared source
+([#3117](https://github.com/2AMLogic/klayout-tools/issues/3117)). The block is
+an object (`signals` is one key of it) and each signal is addressed by its
+`source` name, so a future `variants` sibling or an `alter` that names a
+stimulus `source` can build on it without changing this shape.
 
 ## Off-host backends stage the netlist's `.include` closure
 
@@ -4632,15 +4858,49 @@ a corner grid. A stock ngspice without the module still produces the
     echo the dispatched `corner_id` and `params`, otherwise the request fails
     with error code `params_unsupported_worker` and reports no result. Update
     the runner image, or use a local backend.
+- **`corners.options`** (`object`, optional, [#3125](https://github.com/2AMLogic/klayout-tools/issues/3125))
+  — a solver-tolerance axis: ngspice `.options` names mapped to equal-length,
+  nonempty arrays of finite numbers, zipped by index and expanded innermost
+  (after `params`). `.options` cannot be altered from ngspice's control
+  language, so a tolerance ladder cannot be a `foreach` loop in the body; this
+  axis keeps it in one request instead of one body copy per rung.
+
+  ```json
+  {"corners": {"options": {"reltol": [1e-3, 1e-4, 1e-5]}}}
+  ```
+
+  - **Rules.** Same as `corners.params` (finite numbers only, nonempty,
+    equal lengths, no duplicate rows, names case-insensitive), with names
+    restricted to a numeric solver allow-list: `abstol`, `gmin`, `gminsteps`,
+    `itl1`, `itl2`, `itl3`, `itl4`, `pivtol`, `reltol`, `srcsteps`, `vntol`.
+    Anything else is a `SimError` before dispatch (ngspice would silently
+    ignore an unknown `.options` name). Flag and token options such as
+    `method` stay in the fixed `options.ngspice_options`.
+  - **Deck.** One `.options name=value ...` card per point, written *ahead of*
+    the `.include`d body. ngspice honors the **first** `.options` card that
+    sets a name (measured on ngspice-46), so the corner's value wins over a
+    body-level `.options reltol=` and over `options.ngspice_options`.
+  - **Identity.** Each corner report echoes `options` and its `corner_id`
+    gains `/options:<pairs>` after any `/params:` segment and before `/mc<N>`
+    (e.g. `default/novdd/27C/options:reltol=0.0001`); the artifact directory is
+    the PVT slug plus `_params_` plus the SHA-256 of the whole ID, as for
+    `corners.params`. A request without the field keeps its IDs, slugs and
+    decks byte-for-byte.
+  - **Support.** ngspice on every backend. `remote`/`batch` need an updated
+    worker image: every returned corner must echo the dispatched `corner_id`
+    and `options`, otherwise the request fails with error code
+    `options_unsupported_worker`. `engine: "xyce"` fails before execution, and
+    `--op-lint` refuses a corner that carries options.
 - **`exclude`** (`array<object>`, optional) — partial corner specs
-  (`process`, `temperature_c`, `supply_v`, and/or `params`) dropped from the
-  expansion, for sparse matrices. `exclude[].params` is an exact-match subset
-  of a point's `params` map (names case-insensitive, values compared
+  (`process`, `temperature_c`, `supply_v`, `params`, and/or `options`) dropped
+  from the expansion, for sparse matrices. `exclude[].params` is an exact-match
+  subset of a point's `params` map (names case-insensitive, values compared
   numerically), ANDed with the other selector keys; naming a parameter the
-  request does not sweep is a `SimError`.
+  request does not sweep is a `SimError`. `exclude[].options` works the same
+  way against `corners.options`.
 
 Expansion is deterministic and odometer-style: process outermost, supply
-next, temperature next, parameter row innermost — the same corner list, same
+next, temperature next, parameter row next, option row innermost — the same corner list, same
 order, every run against the same request.
 
 ### Explicit unit list: `corners.units`
@@ -5501,6 +5761,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `step_failed`      | An `analysis_steps[]` step's analysis produced no plot of its own (it failed, or the run ended before it) — read from `klt`'s own step markers in the log, never inferred from measurements. The step's own measurements are reported `value: null`/`status: "error"` under this one diagnostic (issue #2482). See "Several solves per corner" above. |
 | `derived_input_unavailable` | A measurement computed from other results (a derived measurement, or a step `expr` reading an earlier step) was **not graded** because at least one of its inputs produced no value in this corner (issue #2482). Distinguishes "an input was missing" from a derived expression that itself failed, which is an ordinary `measurement` diagnostic. |
 | `waveform_too_large` | `waveform.raw` exceeded `options.waveform_max_bytes`, so the `waveform.raw.json` conversion was skipped (issue #3211). Always `severity: "warning"`; measurements and `status` are unaffected. See "Waveform size guard" above. |
+| `pass_failed` | An `analysis.passes` pass left no AC-analysis rawfile (the solve failed or never ran); the corner grades `error` (issue #3159). See "Multi-pass AC acquisition" above. |
 | `unknown`          | Anything else that prevented a trustworthy result (e.g. ngspice not installed/spawnable). |
 | `budget_exceeded`  | The corner never started: the sweep's own `options.wall_clock_budget_s` was exceeded first. See "Wall-clock budget, orphan safety, and resume" above. |
 | `orphaned`         | The corner never started: the launching process exited before its turn. See "Wall-clock budget, orphan safety, and resume" above. |
@@ -5987,7 +6248,10 @@ sections and `params:` value propagation are not followed. An `X` instance that
 is neither a recognised MOS model nor a resolvable subcircuit gets a
 `unsupported_hierarchy` warning in `diagnostics[]` naming it, and a netlist
 with no enumerated device and such an instance reports `status: "findings"`,
-never `clean`.
+never `clean`. Expansion is bounded: nesting depth 16, 64 `.include`d files,
+and 20 000 expanded subcircuit instances in total. A hierarchy that would
+expand further stops at the cap and emits a single `unsupported_hierarchy`
+warning naming the cap; devices reached before it are still linted.
 
 Every threshold comparison is on **magnitudes**: BSIM4 reports a PMOS's
 `vgs`/`vds`/`vth`/`vdsat` as positive numbers while a bare SPICE level-1
@@ -6162,7 +6426,8 @@ the *response* echoes back.
 | `corners.variants`       | array\<object\> | Issue #3252. Named correlated source arrangements `{name, sources: {src: number \| expr}}`; each is its own corner unit (`corner_id` suffix `/@<name>`, report field `variant`). See "Corner axes" above. |
 | `corners.temperature_c`  | array\<number\>   | Temperature axis, degrees Celsius. Defaults to `[27]`.                                                                                                                 |
 | `corners.params`         | object            | Issue #3035. Numeric design-parameter axis: SPICE parameter name → equal-length nonempty array of finite numbers, zipped by index and expanded innermost (after temperature). Applied with `alterparam` + `reset`; each corner echoes `params` and its `corner_id` gains `/params:<pairs>`. See "Corner axes" above. |
-| `exclude`                | array\<object\>   | Partial corner specs (`process`, `temperature_c`, `supply_v`, `params`) dropped from the expansion.                                                                      |
+| `corners.options`        | object            | Issue #3125. Solver-tolerance axis: numeric `.options` name (`reltol`, `abstol`, `vntol`, `itl1`..`itl4`, `gmin`, ...) → equal-length nonempty array of finite numbers, zipped by index and expanded innermost (after `params`). Emitted as one `.options` card ahead of the body; each corner echoes `options` and its `corner_id` gains `/options:<pairs>`. See "Corner axes" above. |
+| `exclude`                | array\<object\>   | Partial corner specs (`process`, `temperature_c`, `supply_v`, `params`, `options`) dropped from the expansion.                                                                      |
 | `monte_carlo.n`          | integer           | Number of samples per expanded corner point. Positive integer, required when `monte_carlo` is present. See "Monte Carlo sampling" above.                              |
 | `monte_carlo.seed`       | integer           | Base seed the sample sequence derives from. Required when `monte_carlo` is present.                                                                                    |
 | `monte_carlo.vary`       | string            | `"mismatch"`, `"process"`, or `"both"` — which axis the sample sequence varies. Required when `monte_carlo` is present.                                                 |
@@ -6172,7 +6437,7 @@ the *response* echoes back.
 | `monte_carlo.window_scope` | string          | `"pooled"` (default) or `"per_corner"`: which `mean ± k*stddev` window gates status. `"per_corner"` fails a measurement if any `by_corner[]` window fails and adds `failing_corners` to its `monte_carlo` block; see "Pooled vs. per corner". |
 | `analysis`               | object            | `kind` (e.g. `"op"`, `"dc"`, `"ac"`, `"tran"`) and `args`, the engine-syntax analysis-card arguments. One analysis per corner. `"op"` is a valid `kind`, but see `measurements[]` below — it cannot be paired with a `.meas op` card; measure an operating-point quantity with `measurements[].expr` instead. Required unless the request declares `analysis_steps` instead; declaring both is an application error (exit 1). |
 | `analysis_steps[]`       | array\<object\>   | Issue #2482. Additive alternative to `analysis`: an ordered, non-empty sequence of named solves run inside each corner's one deck — each step `{name, analysis: {kind, args}, alter?, reset?, measurements?}` (`alter` values are a finite number, or `{"pwl": [t0, v0, ...]}` for a `pwl`-declared source). With it, the top-level `measurements[]` are **derived** `expr`s over `<step>.<measurement>` results. ngspice only (refused for `engine: "xyce"`); refuses `options.waveforms`/`--plot`. See "Several solves per corner (`analysis_steps[]`)" above for the full rules. |
-| `measurements[]`         | array\<object\>   | `name` (stable response key) plus **exactly one** of `spice` (a verbatim `.meas` card), `expr` (issue #2533 — a single-line ngspice expression evaluated after the analysis inside `klt sim`'s own `.control` block; see "Measurements that are not `.meas` cards" above), `crossings` (issue #2868 — `{signal, level, edge?, from?, to?, max?}`, a threshold-crossing time series, `tran` only; see "Threshold-crossing time series" above), `cycle_mean` (issue #2947 — `{signal, align, level, cycles, edge?, from?}`, a time-weighted mean over whole reference cycles, `tran` only; see "Cycle-aligned mean" above), `energy` (issue #3033 — `{source, voltage, from?, to?}`, a source's net/gross/recovered energy and charge over a transient window, `tran` only; see "Source energy over a transient window" above), or `transfer` (issue #2923 — `{num, den, metric}`, an AC return-ratio metric, `ac` and local backends only; see "AC return-ratio metrics" above), plus optional `unit`, `optional` (issue #2925 — boolean, default `false`; `true` grades a value-less result `status: "absent"` instead of `error`, `spice`/`expr` on the scalar `analysis` only — see "Optional measurements" above), `limits` (`min`/`max`, either optional), `k_sigma` (per-measurement override of `monte_carlo.k_sigma`), and `plausible_range` (issue #2493 — `min`/`max`, either optional but at least one required; per-measurement plausibility bound, unscoped by `unit`; overrides `options.node_voltage_bounds` when both apply). No `limits` -> reported, never fails; no `plausible_range` (and no applicable `options.node_voltage_bounds`) -> plausibility check never runs, exactly as before this issue. Declaring both `spice` and `expr`, or neither, is an application error (exit 1). `spice`'s declared analysis type must be one ngspice's own `.MEASURE` implements (`dc`/`ac`/`tran`/`sp`) — there is no `.MEASURE OP`; a `.meas op` card is rejected up front (`SimError`), regardless of the request's own `analysis.kind`. `expr` must reduce to a single real scalar, must be one line, must have a name matching `[A-Za-z_][A-Za-z0-9_]*` unique across `measurements[]`, and is refused for `engine: "xyce"`. |
+| `measurements[]`         | array\<object\>   | `name` (stable response key) plus **exactly one** of `spice` (a verbatim `.meas` card), `expr` (issue #2533 — a single-line ngspice expression evaluated after the analysis inside `klt sim`'s own `.control` block; see "Measurements that are not `.meas` cards" above), `crossings` (issue #2868 — `{signal, level, edge?, from?, to?, max?}`, a threshold-crossing time series, `tran` only; see "Threshold-crossing time series" above), `cycle_mean` (issue #2947 — `{signal, align, level, cycles, edge?, from?}`, a time-weighted mean over whole reference cycles, `tran` only; see "Cycle-aligned mean" above), `energy` (issue #3033 — `{source, voltage, from?, to?}`, a source's net/gross/recovered energy and charge over a transient window, `tran` only; see "Source energy over a transient window" above), or `transfer` (issue #2923 — `{num, den, metric}`, an AC return-ratio metric, `ac` and local backends only; see "AC return-ratio metrics" above), plus optional `unit`, `optional` (issue #2925 — boolean, default `false`; `true` grades a value-less result `status: "absent"` instead of `error`, `spice`/`expr` on the scalar `analysis` only — see "Optional measurements" above), `limits` (`min`/`max`, either optional), `k_sigma` (per-measurement override of `monte_carlo.k_sigma`), and `plausible_range` (issue #2493 — `min`/`max`, either optional but at least one required; per-measurement plausibility bound, unscoped by `unit`; overrides `options.node_voltage_bounds` when both apply). Optional `on_unreached` (issue #3108 — `"error"` (default) or `"null"`, `spice` only; see "Unreached `.meas` targets" below). No `limits` -> reported, never fails; no `plausible_range` (and no applicable `options.node_voltage_bounds`) -> plausibility check never runs, exactly as before this issue. Declaring both `spice` and `expr`, or neither, is an application error (exit 1). `spice`'s declared analysis type must be one ngspice's own `.MEASURE` implements (`dc`/`ac`/`tran`/`sp`) — there is no `.MEASURE OP`; a `.meas op` card is rejected up front (`SimError`), regardless of the request's own `analysis.kind`. `expr` must reduce to a single real scalar, must be one line, must have a name matching `[A-Za-z_][A-Za-z0-9_]*` unique across `measurements[]`, and is refused for `engine: "xyce"`. |
 | `options.node_voltage_bounds` | object       | Issue #2493. Run-wide plausibility default (`min`/`max`, either optional but at least one required) — see "Plausibility bounds" above. **Voltage-scoped**: only auto-applies to a measurement declaring `unit: "V"` that has no own `plausible_range`. Omit for no default (today's behaviour, unchanged). |
 | `options.timeout_s`      | number            | Per-corner wall-clock budget. Defaults to `120`. Exceeding it kills the process and yields an `error`-status corner.                                                    |
 | `options.keep_artifacts` | boolean           | Retain per-corner logs/rawfiles on disk under `--outdir` (or its default) and reference them from the response. Defaults to `false`.                                   |

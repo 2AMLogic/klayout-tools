@@ -626,6 +626,9 @@ extracted netlist instead of reporting it as a spurious unmatched device
 under `klt lvs`. Those are all three families `mos_array` runs on
 (sg13cmos5l is deferred — see "PDK-family support" above), so every
 `mos_array` dummy column is suppressed this way.
+Dummy units report no ports by default, so their pads float and `klt extract`
+lists them under `dead_metal`; set `dummy_ports: true` (issue #2904) to report
+them as `D<k>_S`/`D<k>_D`/`D<k>_G` and tie them off through `klt gen-compose`.
 For a single-finger unit device the (one) gate
 finger carries a **poly landing pad** that extends one
 `CONTACT_SIZE_UM + 2*ENCLOSURE_MARGIN_UM` (0.42 µm) square past the
@@ -905,6 +908,7 @@ with their `.drc.json` reports checked in alongside).
 | `rows`/`cols`  | int    | `2`/`2`            | Array shape. Must each be `>= 1`. |
 | `topology`     | string | `"common_centroid"`| `"array"` or `"common_centroid"` — see above. |
 | `dummy`        | int    | `1`                | Dummy unit-device columns added on each side. Must be `>= 0`. |
+| `dummy_ports`  | bool   | `false`            | Also report each dummy unit's terminals (issue #2904) as `D<k>_S`/`D<k>_D`/`D<k>_G` (`finger_topology: "series"` with `fingers > 1`: `D<k>_S<n>`/`D<k>_D<n>`/`D<k>_G<n>`, matching the real units' naming), appended after every real-unit port. `k` counts dummies row by row, left to right (`D0` is row 0's leftmost dummy). Same layers, positions and directions as a real unit's ports, so `klt gen-compose` `connectivity[]` can tie dummy gates and S/D to a rail instead of leaving them floating (which `klt extract` reports as `dead_metal`). `false` (the default) leaves `ports[]` byte-for-byte unchanged. |
 | `flavor`       | string | `"nfet"`           | Device flavor: `"nfet"` (no well drawn) or `"pfet"` (unit devices enclosed in a well on PDK families that check one, plus a `WELL_TAP` well-tie tap-pad port on `sg13cmos5l` — see above). Must be `"nfet"` or `"pfet"`. |
 | `voltage_flavor` | string | `""`             | Optional medium-voltage/thick-oxide device-class marker: `""` (default, no marker drawn) or a name the resolved PDK family's role-layer table recognises — `"medium_voltage"` on `gf180mcu` (its `Dualgate` layer), `"hv"` on `ihp-sg13g2`/`ihp-sg13cmos5l` (their shared `ThickGateOx` layer), or `"hvi"` on `sky130` (its `hvi.drawing` layer). Any other value on any family draws nothing and is flagged via `drc_hints.notes`, never rejected outright. |
 | `gate_contact` | bool   | `false`            | Draw a contact + local-metal pad on each gate landing pad and report `U<i>_G` on the `metal` role instead of `poly` — see above. Grows the unit device by `0.4` µm to keep the gate metal clear of the S/D pads. |
@@ -916,12 +920,13 @@ with their `.drc.json` reports checked in alongside).
 | `interior_channel_um` | double | `0.0`         | Extra gap (µm) reserved between adjacent rows/columns, on top of the fixed inter-device spacing, so an interior unit device's pin has a navigable path to the array's edge (issue #1531). Must be `>= 0`. `0.0` (the default) is a strict no-op — byte-for-byte identical geometry to every request that predates this param. A positive value widens `row_pitch`/`col_pitch` by that amount and reports the resulting inter-row/inter-column gap bands in the response's `navigable_regions` field (`{"x0_um", "y0_um", "x1_um", "y1_um"}` rectangles). `klt gen-compose` (issue #1835) subtracts a block's own declared `navigable_regions` from its obstacle bbox before its own overlap check runs, so a `waypoints_um` backbone that stays inside the declared channel is no longer rejected as crossing its own block. |
 | `pitch_x_um`/`pitch_y_um` | double | `0.0`      | Override the column/row pitch (µm) between adjacent unit devices (issue #3299). Must be `>= 0`. `0.0` (the default) means no override — byte-for-byte identical geometry to every request that predates these params. The default pitch is already the legal minimum (unit extent + the fixed `0.4` µm same-layer spacing), so an override can only *widen* it: a value below that minimum is **clamped up** to it, never emitted as DRC-violating geometry. When either is set, `drc_hints.pitch` reports `col_pitch_um`/`row_pitch_um` (effective), `min_col_pitch_um`/`min_row_pitch_um` and `pitch_x_clamped`/`pitch_y_clamped`, and a clamp adds a `warnings` entry. Composes with `interior_channel_um`: the channel is added on top of the effective pitch. |
 | `share_sd` | boolean | `false` | Abut horizontally adjacent unit devices so each pair shares one contacted S/D segment (issue #3551, Phase 2 of #3299): column pitch drops from `unit extent + 0.4` µm to `unit extent − one contact region`, and unit *c*'s drain segment **is** unit *c+1*'s source segment (identical drawn coordinates). **This changes electrical topology** — each row extracts as a series chain with `cols + 1` S/D nets instead of `2 × cols`. `U<i>_D`/`U<i+1>_S` stay reported, at the same position; `drc_hints.shared_sd_nodes` lists each shared pair. Dummy columns stay isolated at the normal pitch. Requires `topology: "array"` and `fingers: 1`, and is exclusive with `pitch_x_um`/`interior_channel_um`; any other combination is rejected with `GenError`. `false` (the default) is byte-for-byte identical to every request that predates it. |
+| `mirror` | boolean | `false` | Mirror every odd real column about its vertical axis (issue #3552, Phase 3 of #3299) so facing terminals alternate S\|S / D\|D; the pitch and device count are unchanged. `U<i>_S`/`U<i>_D` ports follow the flipped geometry (a mirrored unit has D on its left, S on its right, with `direction_deg` swapped), and `drc_hints.mirror` reports `mirrored_columns` and each unit's `terminal_sides`. With `share_sd`, `drc_hints.shared_sd_nodes` lists the abutted pairs as `U0_D`/`U1_D`, `U1_S`/`U2_S`, … instead of `D`/`S`. Dummy columns stay unmirrored; columns only (no row mirroring). **Unrelated to `diff_pair`'s `params.mirror`** (current-mirror device labels). Requires `topology: "array"`, `fingers: 1` and no `mos_cap`; `common_centroid` is rejected with `GenError`. `false` (the default) is byte-for-byte identical to every request that predates it. |
 
 #### Tighter than the generator allows: draw your own primitives
 
 `mos_array` places every unit device as a fully isolated cell, so its pitch
-cannot go below the legal minimum above (no shared source/drain abutment or
-mirroring yet — tracked separately from #3299). When a design needs a denser
+cannot go below the legal minimum above (no row mirroring yet — tracked
+separately from #3299). When a design needs a denser
 array than that, hand-draw the devices with `klayout.db` (the same Python API
 `klt` uses), then run the same headless gates on the result:
 
@@ -1961,8 +1966,9 @@ Notes and guarantees:
 - **Geometry is unchanged.** A finer dbu changes only the integer grid the
   shapes are stored on, not the shapes: `bbox_um`, `ports[].x_um`/`y_um`, and
   every drawn polygon are identical in micrometres, and every generator's
-  documented default `params` stay `klt drc --deck gf180mcu` clean at
-  `0.0005µm`. sky130 output is byte-identical to before.
+  documented default `params` raise no `klt drc --deck gf180mcu` violation other
+  than the tap-distance rules (DF.13_LV/DF.14_LV, which tapless output fails
+  by design) at `0.0005µm`. sky130 output is byte-identical to before.
 - **`dbu` is not a request parameter.** It is a property of the resolved PDK,
   not a caller knob — there is no `options.dbu`. To compose blocks at a given
   dbu, resolve them all against the same PDK.

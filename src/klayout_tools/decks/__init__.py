@@ -70,7 +70,9 @@ from .rules import (
     CompCoverageSpec,
     DerivedLayer,
     DrcRule,
+    NetSpaceSpec,
     RuleProvenance,
+    TapDistanceSpec,
     UnknownDeckError,
 )
 
@@ -80,6 +82,7 @@ __all__ = [
     "CapacitorFlavour",
     "CapacitorVariant",
     "CompCoverageSpec",
+    "NetSpaceSpec",
     "DerivedLayer",
     "DiodeDevice",
     "DrcRule",
@@ -98,6 +101,7 @@ __all__ = [
     "RuleProvenance",
     "TerminalRelation",
     "SizeFilter",
+    "TapDistanceSpec",
     "UnknownDeckError",
     "UnknownExtractionDeckError",
     "UnsupportedDeviceMarker",
