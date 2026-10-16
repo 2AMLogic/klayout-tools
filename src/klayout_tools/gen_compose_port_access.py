@@ -54,6 +54,9 @@ _MAX_ENUMERATED_POINTS = 4_000_000
 #: Sample rejected candidates kept per category in a no-legal-point error.
 _REJECTION_SAMPLES = 3
 
+#: Upper bound on either side of ``access.via_array``.
+_MAX_ARRAY_SIDE = 16
+
 _LayerPair = tuple[int, int]
 
 
@@ -90,7 +93,7 @@ def _parse_layer_list(raw: Any, where: str, *, required: bool) -> list[_LayerPai
 
 def _parse_access(raw: Any, where: str) -> dict[str, Any]:
     """Validate one ``access`` object: ``up_to`` (a routing layer role),
-    ``via_array`` (``[1, 1]`` only for now), ``keepout_layers``, and the
+    ``via_array`` (``[rows, cols]`` cuts per via hop), ``keepout_layers``, and the
     optional search knobs ``grid_um`` / ``max_candidates``."""
     if not isinstance(raw, dict):
         raise _err(f"{where} must be a JSON object")
@@ -116,12 +119,8 @@ def _parse_access(raw: Any, where: str) -> dict[str, Any]:
         or not all(_is_int(n) and n >= 1 for n in via_array)
     ):
         raise _err(f"{where}.via_array must be [rows, cols] of integers >= 1")
-    if via_array != [1, 1]:
-        raise _err(
-            f"{where}.via_array {via_array} is not supported yet -- the "
-            "router draws a single cut per via hop, so a landing found for a "
-            "larger array could not be drawn; use [1, 1]"
-        )
+    if max(via_array) > _MAX_ARRAY_SIDE:
+        raise _err(f"{where}.via_array sides must be <= {_MAX_ARRAY_SIDE}")
     grid_um = raw.get("grid_um")
     if grid_um is not None and (
         isinstance(grid_um, bool)
@@ -134,7 +133,7 @@ def _parse_access(raw: Any, where: str) -> dict[str, Any]:
         raise _err(f"{where}.max_candidates must be an integer >= 1")
     return {
         "up_to": up_to,
-        "via_array": (1, 1),
+        "via_array": (int(via_array[0]), int(via_array[1])),
         "keepout_layers": _parse_layer_list(
             raw.get("keepout_layers"), f"{where}.keepout_layers", required=False
         ),
@@ -384,6 +383,31 @@ def _stack_sizes(
     return pads, cuts
 
 
+def _array_pitches_um(
+    variant: str,
+    cuts_um: dict[_LayerPair, float],
+    array: tuple[int, int],
+    dbu_um: float,
+) -> dict[_LayerPair, float]:
+    """Centre-to-centre pitch (um) of each via layer's cut array: cut side +
+    the deck's via spacing, rounded up to a multiple of twice the
+    manufacturing grid so every cut of an even-sized array stays on grid
+    when the array is centred on the landing point. Empty for ``[1, 1]``."""
+    if array == (1, 1):
+        return {}
+    pitches: dict[_LayerPair, float] = {}
+    for via, side in cuts_um.items():
+        unit = 2 * (mfg_grid_um(_pdk_family(variant), via) or dbu_um)
+        raw = side + _min_spacing_um(variant, via)
+        pitches[via] = math.ceil(raw / unit - 1e-9) * unit
+    return pitches
+
+
+def _array_extra_um(array: tuple[int, int], pitch_um: float) -> float:
+    """How much wider than one cut the (square-bounded) array footprint is."""
+    return (max(array) - 1) * pitch_um
+
+
 def _box(x: int, y: int, half: int, grow: int = 0) -> Any:
     import klayout.db as kdb
 
@@ -500,6 +524,16 @@ def _search_landing(
     dbu = nets.dbu
     ladder = ladder or ()
     pads_um, cuts_um = _stack_sizes(variant, ladder)
+    array = access["via_array"]
+    pitches_um = _array_pitches_um(variant, cuts_um, array, dbu)
+    pad_extra_um: dict[_LayerPair, float] = {}
+    for via, lower, upper in ladder:
+        extra = _array_extra_um(array, pitches_um[via]) if pitches_um else 0.0
+        cuts_um[via] += extra
+        for metal in (lower, upper):
+            pad_extra_um[metal] = max(pad_extra_um.get(metal, 0.0), extra)
+    for metal, extra in pad_extra_um.items():
+        pads_um[metal] += extra
     if not ladder:
         pads_um = {net_layer: 0.0}
     to_half = lambda um: max(1, int(math.ceil(um / dbu / 2.0)))  # noqa: E731
@@ -536,7 +570,11 @@ def _search_landing(
                 "y_um": y * dbu,
                 "layer": {"layer": net_layer[0], "datatype": net_layer[1]},
                 "up_to": access["up_to"],
-                "via_count": len(ladder),
+                "via_count": len(ladder) * array[0] * array[1],
+                "via_array": list(array),
+                "via_pitch_um": {
+                    f"{via[0]}/{via[1]}": pitch for via, pitch in pitches_um.items()
+                },
                 "pad_side_um": pads_um.get(net_layer, 0.0),
                 "candidates_evaluated": candidates.index((x, y)) + 1,
                 "truncated": truncated,
@@ -607,6 +645,12 @@ def derive_label_ports(
         }
         if landing and landing["pad_side_um"] > 0:
             port["width_um"] = landing["pad_side_um"]
+        if landing and landing["via_pitch_um"]:
+            port["via_array"] = {
+                "rows": landing["via_array"][0],
+                "cols": landing["via_array"][1],
+                "pitch_um": landing["via_pitch_um"],
+            }
         ports.append(port)
         reports.append(
             {
@@ -621,6 +665,7 @@ def derive_label_ports(
                     "layer": landing["layer"],
                     "up_to": landing["up_to"],
                     "via_count": landing["via_count"],
+                    "via_array": landing["via_array"],
                     "candidates_evaluated": landing["candidates_evaluated"],
                     "truncated": landing["truncated"],
                 },
