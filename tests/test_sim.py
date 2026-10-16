@@ -12792,3 +12792,69 @@ def test_noise_representation(plotname, vtype, expected):
         "points": [[1.0]],
     }
     assert sim.noise_representation(waveform) == expected
+
+
+# --------------------------------------------------------------------------- #
+# environment.engine_host (issue #3110)
+# --------------------------------------------------------------------------- #
+
+
+def _worker_block(capture, path=None):
+    simulator = {"selected_path": path} if capture == "ok" else None
+    return {"worker_environment": {"capture": capture, "simulator": simulator}}
+
+
+def test_apply_engine_host_local_run_is_otherwise_unchanged():
+    env = {"ngspice_binary": "/usr/bin/ngspice"}
+    sim.apply_engine_host(
+        env, backend="local", client_ngspice_binary="/usr/bin/ngspice"
+    )
+    assert env == {"ngspice_binary": "/usr/bin/ngspice", "engine_host": "local"}
+
+
+def test_apply_engine_host_batch_swaps_in_the_worker_path():
+    env = {
+        "ngspice_binary": "/home/me/.local/bin/ngspice",
+        "remote": _worker_block("ok", "/usr/bin/ngspice"),
+    }
+    sim.apply_engine_host(
+        env, backend="batch", client_ngspice_binary="/home/me/.local/bin/ngspice"
+    )
+    assert env["engine_host"] == "worker"
+    assert env["ngspice_binary"] == "/usr/bin/ngspice"
+    assert env["client_ngspice_binary"] == "/home/me/.local/bin/ngspice"
+
+
+@pytest.mark.parametrize(
+    "remote", [_worker_block("absent"), _worker_block("malformed"), {}, None]
+)
+def test_apply_engine_host_without_worker_capture_is_null(remote):
+    env = {"ngspice_binary": "/home/me/ngspice", "remote": remote}
+    sim.apply_engine_host(
+        env, backend="remote", client_ngspice_binary="/home/me/ngspice"
+    )
+    assert env["engine_host"] == "worker"
+    assert env["ngspice_binary"] is None
+    assert env["client_ngspice_binary"] == "/home/me/ngspice"
+
+
+def test_apply_engine_host_sharded_fleet_agreement_and_disagreement():
+    same = {"fleet": [_worker_block("ok", "/a"), _worker_block("ok", "/a")]}
+    mixed = {"fleet": [_worker_block("ok", "/a"), _worker_block("ok", "/b")]}
+    partial = {"fleet": [_worker_block("ok", "/a"), _worker_block("absent")]}
+    for remote, expected in ((same, "/a"), (mixed, None), (partial, None)):
+        env = {"remote": remote}
+        sim.apply_engine_host(env, backend="batch", client_ngspice_binary="/c")
+        assert env["ngspice_binary"] == expected
+
+
+def test_apply_engine_host_xyce_stays_null_and_client_null():
+    env = {"ngspice_binary": None, "remote": _worker_block("absent")}
+    sim.apply_engine_host(env, backend="batch", client_ngspice_binary=None)
+    assert env["ngspice_binary"] is None and env["client_ngspice_binary"] is None
+
+
+def test_pex_side_environment_carries_engine_host():
+    from klayout_tools import pex
+
+    assert {"engine_host", "client_ngspice_binary"} <= set(pex._SIDE_ENVIRONMENT_KEYS)

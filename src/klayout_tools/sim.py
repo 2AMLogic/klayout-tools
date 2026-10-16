@@ -971,6 +971,47 @@ class SimError(Exception):
         self.code = code
 
 
+def _worker_ngspice_binary(remote: Any) -> str | None:
+    """The worker-observed ngspice path out of ``environment.remote`` (issue
+    #3110): ``worker_environment.simulator.selected_path`` when its capture is
+    ``"ok"``. A sharded run (``remote.fleet[]``) reports a value only when
+    every member captured the same path -- never silently picks one. ``None``
+    for a pre-#2834 runner, the SSH ``remote`` backend, or disagreement."""
+    if not isinstance(remote, dict):
+        return None
+    members = remote.get("fleet")
+    blocks = members if isinstance(members, list) and members else [remote]
+    paths: set[str | None] = set()
+    for block in blocks:
+        worker = block.get("worker_environment") if isinstance(block, dict) else None
+        simulator = worker.get("simulator") if isinstance(worker, dict) else None
+        ok = isinstance(worker, dict) and worker.get("capture") == "ok"
+        path = (
+            simulator.get("selected_path")
+            if ok and isinstance(simulator, dict)
+            else None
+        )
+        paths.add(path if isinstance(path, str) and path else None)
+    only = next(iter(paths)) if len(paths) == 1 else None
+    return only
+
+
+def apply_engine_host(
+    environment: dict[str, Any], *, backend: str, client_ngspice_binary: str | None
+) -> None:
+    """Stamp ``environment.engine_host`` and keep ``ngspice_binary`` honest
+    (issue #3110). Local runs: ``engine_host: "local"``, nothing else changes.
+    Off-host runs: ``"worker"``; ``ngspice_binary`` becomes the worker's
+    observed path (or ``null``) and the submitter's resolved path moves to
+    ``client_ngspice_binary``."""
+    if backend not in _OFFHOST_BACKENDS:
+        environment["engine_host"] = "local"
+        return
+    environment["engine_host"] = "worker"
+    environment["client_ngspice_binary"] = client_ngspice_binary
+    environment["ngspice_binary"] = _worker_ngspice_binary(environment.get("remote"))
+
+
 #: Environment-variable override for the ngspice binary (issue #2423), the
 #: ``sim.py`` port of ``lvs_netgen.py``'s ``$KLT_NETGEN_BINARY`` (issue
 #: #2373) -- checked after ``options.ngspice_binary`` and before the bare
@@ -2793,6 +2834,9 @@ def _run_sim_corners(
         # Additive/optional: only present for the `remote` backend -- see
         # `_run_remote` and docs/cli/sim.md's "Remote backend" section.
         environment["remote"] = remote_environment
+    apply_engine_host(
+        environment, backend=backend, client_ngspice_binary=ngspice_binary
+    )
     if monte_carlo_info is not None:
         # Additive/optional: only present when the request declares
         # `monte_carlo` -- the seed contract's request-level echo, per
