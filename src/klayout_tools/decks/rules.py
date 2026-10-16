@@ -797,6 +797,17 @@ class DrcRule:
     rather than measured as one oversized contact. ``None`` (the default)
     checks the full drawn layer as before; it cannot be combined with
     ``derived_layer``.
+
+    ``report_escapes`` (issue #3001) controls the #318 zero-overlap escape
+    term of an ``"enclosing"``/``"enclosed"`` rule. ``True`` (the default,
+    every pre-existing rule) also reports whatever part of the enclosed
+    layer lies outside the enclosing layer. ``False`` reports only the
+    marginal facing-edge shortfall -- exactly the DRC-DSL ``a.enclosed(b, d)``
+    statement, which has no escape term. Use it where the source rule
+    measures an *extension* and the enclosed layer is legitimately wider than
+    the enclosing one in other directions (gf180mcu's ``SB.10``: poly must
+    extend 0.22um past the SAB edge, while the SAB routinely overhangs the
+    poly sideways). Meaningless, and ignored, for every other check kind.
     """
 
     id: str
@@ -824,6 +835,7 @@ class DrcRule:
     layer_selection: str | None = None
     region_spec: CompCoverageSpec | TapDistanceSpec | None = None
     net_spec: NetSpaceSpec | None = None
+    report_escapes: bool = True
 
 
 class UnknownDeckError(Exception):
