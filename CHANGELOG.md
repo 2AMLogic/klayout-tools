@@ -82,6 +82,13 @@ not `klt --version`, if you need to detect this kind of drift. See
   polygon, in integer database units. The deck grows from 232 to 234 rule
   categories (`--expect-rule-categories 234`); both ids leave the "Not
   implemented" list. Additive; no `schema_version` bump.
+- **ASAP7 deck: eight SRAMDRC-scoped MOL rules** (issue #3083): `klt drc
+  --engine klayout --deck-file asap7.drc` now checks `SRAM.SDT.W.4`,
+  `SRAM.SDT.ACTIVE.OV.3`, `SRAM.SDT.LISD.OV.4`, `SRAM.LISD.S.4`,
+  `SRAM.LISD.AUX.1`, `SRAM.LIG.GATE.A.4`, `SRAM.LIG.AUX.2` and
+  `SRAM.LIG.GATE.OV.2`, moving them out of the documented gaps. The deck
+  declares 246 rule categories (was 238); pass `--expect-rule-categories 246`.
+  Additive; no `schema_version` bump.
 - **`klt lvs` no longer folds one device class into another under
   `options.combine_devices`** (issue #3019): with two MiM classes stacked in
   parallel on one net pair, `layout.file` could report a wrong combined layout

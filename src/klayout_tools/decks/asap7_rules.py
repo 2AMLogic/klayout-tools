@@ -309,12 +309,23 @@ RULES: tuple[Asap7Rule, ...] = (
     ),
     Asap7Rule("SDT.ACTIVE.AUX.3", "Table 3.8.1"),
     Asap7Rule("SDT.LISD.AUX.4", "Table 3.8.1"),
+    Asap7Rule("SRAM.SDT.W.4", "Table 3.8.1"),
+    Asap7Rule("SRAM.SDT.ACTIVE.OV.3", "Table 3.8.1"),
+    Asap7Rule("SRAM.SDT.LISD.OV.4", "Table 3.8.1"),
     # LISD
     Asap7Rule("LISD.W.1", "Table 3.9.1"),
     Asap7Rule("LISD.S.1", "Table 3.9.1"),
     Asap7Rule("LISD.S.2", "Table 3.9.1"),
     Asap7Rule("LISD.S.3", "Table 3.9.1"),
     Asap7Rule("LISD.A.1", "Table 3.9.1"),
+    Asap7Rule(
+        "SRAM.LISD.S.4",
+        "Table 3.9.1",
+        "both polygons must interact with SRAMDRC (as the DRM words it); a pair "
+        "with only one in scope is covered by neither this rule nor LISD.S.3, "
+        "which takes polygons lying completely outside SRAMDRC",
+    ),
+    Asap7Rule("SRAM.LISD.AUX.1", "Table 3.9.1"),
     # LIG
     Asap7Rule("LIG.W.1", "Table 3.10.1"),
     Asap7Rule("LIG.S.1", "Table 3.10.1"),
@@ -345,6 +356,7 @@ RULES: tuple[Asap7Rule, ...] = (
     Asap7Rule("LIG.A.1", "Table 3.10.2"),
     Asap7Rule("LIG.LISD.A.2", "Table 3.10.2"),
     Asap7Rule("LIG.GATE.A.3", "Table 3.10.2"),
+    Asap7Rule("SRAM.LIG.GATE.A.4", "Table 3.10.2"),
     Asap7Rule(
         "LIG.LISD.OV.1",
         "Table 3.10.3",
@@ -352,6 +364,14 @@ RULES: tuple[Asap7Rule, ...] = (
     ),
     Asap7Rule("LIG.GATE.AUX.1", "Table 3.10.2"),
     Asap7Rule("LIG.GATE.EX.1", "Table 3.10.3"),
+    Asap7Rule("SRAM.LIG.AUX.2", "Table 3.10.3"),
+    Asap7Rule(
+        "SRAM.LIG.GATE.OV.2",
+        "Table 3.10.3",
+        "the DRM gives no direction; read as the horizontal overlap across the "
+        "gate width, as Fig. 3.10.2(c) draws it, measured on the LIG/GATE "
+        "intersection",
+    ),
     # V0 (width, connectivity, LIG overlap area)
     Asap7Rule(
         "V0.W.1",
@@ -543,14 +563,6 @@ NOT_IMPLEMENTED: tuple[Asap7RuleGap, ...] = (
     ),
     Asap7RuleGap("SRAM.NSELECT.ACTIVE.EN.3", "Table 3.7.1", _SRAM, "#2812"),
     Asap7RuleGap("SRAM.NSELECT.ACTIVE.EN.4", "Table 3.7.1", _SRAM, "#2812"),
-    Asap7RuleGap("SRAM.SDT.W.4", "Table 3.8.1", _SRAM, "#2812"),
-    Asap7RuleGap("SRAM.SDT.ACTIVE.OV.3", "Table 3.8.1", _SRAM, "#2812"),
-    Asap7RuleGap("SRAM.SDT.LISD.OV.4", "Table 3.8.1", _SRAM, "#2812"),
-    Asap7RuleGap("SRAM.LISD.S.4", "Table 3.9.1", _SRAM, "#2812"),
-    Asap7RuleGap("SRAM.LISD.AUX.1", "Table 3.9.1", _SRAM, "#2812"),
-    Asap7RuleGap("SRAM.LIG.GATE.A.4", "Table 3.10.2", _SRAM, "#2812"),
-    Asap7RuleGap("SRAM.LIG.AUX.2", "Table 3.10.3", _SRAM, "#2812"),
-    Asap7RuleGap("SRAM.LIG.GATE.OV.2", "Table 3.10.3", _SRAM, "#2812"),
     # V0 (Tables 3.11.1 / 3.11.2)
     Asap7RuleGap("V0.S.1", "Table 3.11.1", _TRACK, "#3147"),
     *_gaps(("V0.S.2", "V0.S.3", "V0.S.4"), "Table 3.11.1", _END_CAP, "#3147"),
