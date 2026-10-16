@@ -11,7 +11,7 @@ activity-weighted current mode) of the power/IR-drop + EM signoff epic
 [#712](https://github.com/2AMLogic/klayout-tools/issues/712).
 
 ```
-klt power <file> <spec> [--top <cell>] [--format text|json]
+klt power <file> <spec> [--top <cell>] [--deck <name> [--resistance-corner nominal|high|low]] [--format text|json]
 ```
 
 - `<file>` — path to a routed GDSII (`.gds`) or OASIS (`.oas`) layout, e.g.
@@ -24,6 +24,17 @@ klt power <file> <spec> [--top <cell>] [--format text|json]
   (**required** in that case — like `klt mom`, `klt power` needs exactly
   one root to analyse, unlike `klt layers`, which defaults to summing
   across every top cell).
+- `--deck` — a built-in parasitics deck name (the `klt extract --deck`
+  name space, e.g. `gf180mcu`). With it, `vias[].resistance_ohm` becomes
+  **optional**: a via that omits it is defaulted from the deck's per-cut
+  resistance (issue [#3400](https://github.com/2AMLogic/klayout-tools/issues/3400);
+  data from #3053). An explicit spec `resistance_ohm` — including `0` —
+  always wins. Without `--deck`, `resistance_ohm` stays required and the
+  output is unchanged.
+- `--resistance-corner` — `nominal` (default), `high` or `low`: which of the
+  deck's published interconnect-resistance corners defaults a via. Not
+  `klt stackup --corner` (a tech-LEF min/nom/max corner). Requires `--deck`
+  (an error otherwise, never silently ignored).
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
 The command is headless (`klayout.db` batch API only, no GUI) and safe to
@@ -188,7 +199,7 @@ The spec file is a JSON object:
     geometry.
   - `between` (array of exactly two distinct `stackup` names, required) —
     which two metal roles this via connects.
-  - `resistance_ohm` (number, required, `>= 0`) — this via's resistance,
+  - `resistance_ohm` (number, required unless `--deck` is given, `>= 0`) — this via's resistance,
     used verbatim for every via shape matched (see "Scope and limitations"
     — a via array drawn as one merged shape is not split per cut).
   - `current_limit_a` (number, optional, `>= 0`) — this via role's own EM
@@ -726,6 +737,37 @@ IR-drop solve already produced are checked against those limits, per net.
   currents to compare, the same condition under which `ir_drop_map` itself
   is `null`.
 
+## Defaulting via resistance from a deck (`--deck`, issue #3400)
+
+With `--deck NAME`, a spec via that omits `resistance_ohm` takes the deck's
+resistance for the cut layer it lands on:
+
+1. The via's GDS `layer` is looked up in the deck's via stack (entry `i`
+   joins metal `i` to metal `i + 1`).
+2. The deck's per-cut resistance for that level is read at
+   `--resistance-corner`. For `gf180mcu`: `nominal` 4.5 Ω, `high` 15.0 Ω,
+   `low` 0.0 Ω per cut.
+
+Rules:
+
+- **An explicit spec `resistance_ohm` always wins**, including `0`; vias in
+  one spec may mix sources.
+- **Never a silent default.** A via layer the deck does not know, a cut
+  level the deck publishes no resistance for, or a corner the deck leaves
+  unpublished is an error (exit `1`) naming the via — set `resistance_ohm`
+  explicitly or pick another corner. An unpublished corner never falls back
+  to nominal.
+- **A published `0.0` (the `low` corner of `gf180mcu`) passes through as an
+  ideal short**, exactly like a spec-declared `resistance_ohm: 0` (see
+  "Static IR-drop solve").
+- The resistance is per **merged via polygon**, the model's existing unit;
+  scaling by cut count is out of scope.
+
+With `--deck` the report gains `resistance_corner` and a top-level `vias`
+array (`{"name", "layer", "resistance_ohm", "resistance_source"}`);
+`resistance_source` is `"spec"` or `"deck:<name>:<corner>"`. Without
+`--deck` neither key is present.
+
 ## Provenance (issue #2349)
 
 Every report carries the same shared `provenance` block `klt erc` emits
@@ -755,10 +797,12 @@ exact artifacts it was solved from:
   the layout alone leaves a committed report re-verifiable only halfway.
   This is the identical reasoning that put `provenance.spec` on `klt erc`
   (issue #2036), in the same `{content_hash}` shape.
-- **`pdk`/`deck` are always `null`.** `klt power` resolves no installed
-  PDK and applies no rule deck — the spec declares its sheet resistances
-  and EM limits directly. `null`, never fabricated, matching the shared
-  block's own convention.
+- **`pdk` is always `null`; `deck` is `null` unless `--deck` is given.**
+  `klt power` resolves no installed PDK, and the spec declares its sheet
+  resistances and EM limits directly. With `--deck`, `provenance.deck`
+  carries the deck's name and content hash (the same block `klt extract`
+  emits), since the defaulted via resistances are a function of it. `null`,
+  never fabricated, otherwise.
 - **`klayout_version` and `top_cell`.** The solved network *is*
   `LayoutToNetlist`'s output — which polygons merge, where a segment's
   endpoint nodes land — so the droop depends on the KLayout build and the
@@ -954,7 +998,9 @@ the shared envelope (`schema_version`, error shape, exit codes).
 | `devices`            | array\<object\>    | One entry per `devices[]` spec declaration, in declaration order: `{"name", "body_layer", "on", "body_area_um2"}`. `body_area_um2` is the area this declaration **actually** subtracted — the marker intersected with the `on` role's own drawn region, not the marker layer's own area — so `0.0` means the declaration changed nothing. `[]` when the spec declares no `devices`. See "Device bodies are not wires" below. |
 | `max_decomposition_cells` | integer      | The effective decomposition cap this run used: the spec's `max_decomposition_cells`, or the default `4096` when omitted. |
 | `warnings`           | array\<string\>    | Non-fatal diagnostics — an unmatched `power_nets` entry (listing the net names actually present), a count of non-rectangular segments decomposed into sub-segments, an island declared unsolved, a via that lands on no modelled segment of one of the roles it declares, an island whose emitted network is more than one connected component (some real connection is not modelled), a pad/instance on a net with no geometry, current stranded on a padless island, an aggregate count of quiet unloaded padless islands, or a count of edges over their declared EM limit. Empty on a clean run.            |
-| `provenance`         | object             | The shared reproducibility block (issue #2349) — see "Provenance" above and [`docs/json-contract.md`](../json-contract.md)'s "Shared `provenance` block": `klt_version`, `klayout_version`, `pdk`/`deck` (always `null` for this verb), `input.content_hash` (the layout) and the verb-local `spec.content_hash` (the spec's contents), plus `top_cell`. |
+| `resistance_corner`  | string             | **Only with `--deck`** (issue #3400): the corner used (`nominal`/`high`/`low`). Absent otherwise. |
+| `vias`               | array\<object\>    | **Only with `--deck`** (issue #3400): per spec via, `{"name", "layer", "resistance_ohm", "resistance_source"}`; `resistance_source` is `"spec"` or `"deck:<name>:<corner>"`. Absent otherwise. |
+| `provenance`         | object             | The shared reproducibility block (issue #2349) — see "Provenance" above and [`docs/json-contract.md`](../json-contract.md)'s "Shared `provenance` block": `klt_version`, `klayout_version`, `pdk` (always `null` for this verb), `deck` (`null` unless `--deck` is given), `input.content_hash` (the layout) and the verb-local `spec.content_hash` (the spec's contents), plus `top_cell`. |
 
 ### `ir_drop_map` (Phase 1b)
 
