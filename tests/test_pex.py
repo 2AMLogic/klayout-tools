@@ -5399,3 +5399,134 @@ def test_run_pex_flatten_schematic_keeps_dollar_prefixed_targets(
     flat_lines = (outdir / "schematic-dut.flat.spice").read_text().splitlines()
     assert include in flat_lines
     assert lib in flat_lines
+
+
+# --------------------------------------------------------------------------- #
+# Issue #3062: errored `delta[]` rows carry an `error` object
+# --------------------------------------------------------------------------- #
+
+
+def _errored_corner(corner_id, diagnostics):
+    return {
+        "corner_id": corner_id,
+        "status": "error",
+        "measurements": [_measurement(None, "error")],
+        "diagnostics": diagnostics,
+    }
+
+
+_BATCH_FAILED = {
+    "severity": "error",
+    "code": "batch_job_failed",
+    "message": "batch job job-7 finished 'failed' without a usable report",
+}
+
+
+def test_delta_row_error_names_extracted_side_stage_and_remote_job():
+    schematic = _sim_report(
+        [{"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.0)]}]
+    )
+    extracted = {
+        "environment": {"remote": {"job_id": "job-7"}},
+        "corners": [_errored_corner("tt/1.800V/27C", [_BATCH_FAILED])],
+    }
+    (row,) = _build_delta_rows(
+        spec_row_prefix=None, schematic_report=schematic, extracted_report=extracted
+    )
+    assert row["status"] == "error"
+    assert row["error"] == {
+        "side": "extracted",
+        "stage": "execute",
+        "message": _BATCH_FAILED["message"],
+        "code": "batch_job_failed",
+        "remote": {"job_id": "job-7"},
+    }
+
+
+def test_delta_row_error_blames_schematic_side_when_it_errored():
+    schematic = _sim_report([_errored_corner("tt/1.800V/27C", [_BATCH_FAILED])])
+    extracted = _sim_report(
+        [{"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.1)]}]
+    )
+    (row,) = _build_delta_rows(
+        spec_row_prefix=None, schematic_report=schematic, extracted_report=extracted
+    )
+    assert row["error"]["side"] == "schematic"
+
+
+def test_delta_row_error_with_empty_diagnostics_is_unknown_not_silent():
+    schematic = _sim_report(
+        [{"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.0)]}]
+    )
+    extracted = _sim_report([_errored_corner("tt/1.800V/27C", [])])
+    (row,) = _build_delta_rows(
+        spec_row_prefix=None, schematic_report=schematic, extracted_report=extracted
+    )
+    assert row["error"]["stage"] == "unknown"
+    assert row["error"]["message"]
+    assert "code" not in row["error"]
+
+
+def test_ok_rows_carry_no_error_field():
+    schematic = _sim_report(
+        [{"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.0)]}]
+    )
+    extracted = _sim_report(
+        [{"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.1)]}]
+    )
+    (row,) = _build_delta_rows(
+        spec_row_prefix=None, schematic_report=schematic, extracted_report=extracted
+    )
+    assert "error" not in row
+
+
+def test_unextracted_rows_carry_the_recorded_failure():
+    schematic = _sim_report(
+        [{"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.0)]}]
+    )
+    (row,) = _unextracted_delta_rows(
+        spec_row_prefix=None,
+        schematic_report=schematic,
+        failure_message="no capacity",
+        failure_code="batch_no_capacity",
+    )
+    assert row["error"] == {
+        "side": "extracted",
+        "stage": "submit",
+        "message": "no capacity",
+        "code": "batch_no_capacity",
+    }
+
+
+def test_run_pex_preserves_sim_error_code(tmp_path, resistor_layout, monkeypatch):
+    import klayout_tools.pex as pex_module
+    from klayout_tools.sim import SimError
+
+    def _fake_run_sim(*_args, **_kwargs):
+        raise SimError("batch fleet has no capacity", code="batch_no_capacity")
+
+    monkeypatch.setattr(pex_module, "run_sim", _fake_run_sim)
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    with pytest.raises(PexError) as excinfo:
+        run_pex(resistor_layout, [str(request)], "sky130")
+    assert excinfo.value.code == "batch_no_capacity"
+
+
+def test_errored_rows_summary_one_line():
+    from klayout_tools.cli.pex_cmd import _errored_rows_summary
+
+    error = {
+        "side": "extracted",
+        "stage": "execute",
+        "message": "boom\nsecond line",
+        "code": "batch_job_failed",
+    }
+    report = {"delta": [{"error": error}, {"status": "pass"}]}
+    line = _errored_rows_summary(report)
+    assert "\n" not in line
+    assert line.startswith("klt pex: 1 of 2 delta rows errored")
+    assert "stage execute" in line and "batch_job_failed" in line
+    assert _errored_rows_summary({"delta": [{"status": "pass"}]}) is None

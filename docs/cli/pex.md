@@ -1192,6 +1192,14 @@ full `repo`/`external`/`absent` scope meanings.
 | `status`          | string          | `"pass"`, `"fail"`, or `"error"` — mirrors the **extracted-side** measurement's own `klt sim` status (the side item 7 actually grades) against its declared `measurements[].limits`, except `"error"` also covers a missing/errored schematic-side value (no trustworthy delta to report). Never a delta-magnitude threshold of its own — the same measurement `limits` a caller already declared, not a second, undocumented tolerance. |
 | `schematic_status` | string         | Issue #2989 (additive). The schematic-side measurement's own `klt sim` limit status: `"pass"`, `"fail"`, or `"error"` (also when the schematic measurement is missing). Does not affect `status`. |
 | `extracted_status` | string         | Issue #2989 (additive). The extracted-side measurement's own `klt sim` limit status; `"error"` for rows whose extracted side never produced a response. |
+| `error`           | object          | Issue #3062 (additive). Present **only** on `status: "error"` rows (absent on `pass`/`fail`), naming why the row has no trustworthy value: `side` (`"schematic"` or `"extracted"`), `stage` (`"submit"`, `"execute"`, `"collect"`, `"parse"` or `"unknown"` — `"unknown"` when the source code maps to no stage, never guessed), `message`, and `code` when the source has one (e.g. `batch_job_failed`, `batch_no_capacity`). Taken from that side's corner `diagnostics[]` (first error-severity entry) or, when that side never returned a report, from the recorded failure; `remote` carries the side's `environment.remote` (the batch job id) when present. The side's full evidence stays under `testbenches[].sides.<side>.corners[]` for the same `corner_id`. |
+
+When the exit code is `4` because rows errored and at least one row carries an
+`error`, one line is also printed to **stderr** (both `--format json` and
+`--format text`; stdout is unchanged): the errored-row count, and the first
+cause's side, stage, code and message. A `SimError` that aborts the run
+(exit `1`) now keeps its `code` (e.g. `batch_no_capacity`) as the error
+envelope's `error.code`.
 
 ### `coverage`: an empty `delta[]` is not a pass
 

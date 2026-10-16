@@ -26,6 +26,7 @@ docs/cli/sim.md's "Exit codes" section.)
 
 import argparse
 import shlex
+import sys
 
 from ..env_provenance import render_path_field
 from ..output_lock import OutputLockError
@@ -143,10 +144,30 @@ def run(args: argparse.Namespace) -> int:
     emit_success(report, args.format, _print_text)
 
     if report["status"] in {"error", "not_checked"}:
+        summary = _errored_rows_summary(report)
+        if summary:
+            print(summary, file=sys.stderr)
         return EXIT_ROW_ERRORED
     if report["status"] == "fail":
         return EXIT_ROW_FAILED
     return EXIT_PASS
+
+
+def _errored_rows_summary(report: dict) -> str | None:
+    """One stderr line for a run that exited 4 on errored ``delta[]`` rows
+    (issue #3062): the count, the first distinct cause and its stage -- so
+    the cause is visible without opening the JSON. ``None`` when no row
+    carries an ``error`` object."""
+    errored = [row for row in report.get("delta", []) if row.get("error")]
+    if not errored:
+        return None
+    first = errored[0]["error"]
+    return (
+        f"klt pex: {len(errored)} of {len(report['delta'])} delta rows errored; "
+        f"first cause ({first['side']} side, stage {first['stage']}"
+        + (f", {first['code']}" if first.get("code") else "")
+        + f"): {' '.join(str(first['message']).split())}"
+    )
 
 
 def _parse_measure_command(raw: str | None) -> list[str] | None:
