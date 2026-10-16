@@ -59,6 +59,7 @@ def run(args: argparse.Namespace) -> int:
             deck=args.deck,
             findings_only=args.findings_only,
             omit_antenna_tables=args.omit_antenna_tables,
+            compact=args.compact,
         )
     except ErcError as exc:
         return emit_error("erc", str(exc), args.format)
@@ -141,6 +142,13 @@ def _print_text(report: dict) -> None:
     print(f"status: {report['status']}")
     print(f"gate_role: {report['gate_role']}")
     _print_gate_count(report)
+    compact = report.get("compact")
+    if compact is not None:
+        print(
+            f"  (--compact: per-gate rows omitted; "
+            f"{compact['antenna_levels_skipped']} antenna levels skipped "
+            f"for {compact['skipped_reason']})"
+        )
 
     for gate in report["gates"]:
         print()

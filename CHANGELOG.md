@@ -104,6 +104,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   new additive top-level `backend_failure` field (`{testbench, side, message,
   code}`, `null` otherwise). A schematic-side failure still aborts, but its
   error envelope now carries `error.code` (e.g. `batch_no_capacity`).
+- **`klt erc --findings-only --compact`** (issue #2965): opt-in flag that
+  replaces the per-gate `gates[]` rows, per-(gate, level) `findings_only`
+  skips and per-gate `erc.floating_gate` checked ids with aggregate coverage
+  records plus a top-level `compact` counts block, shrinking the envelope on
+  large macros. `gates` stays a list (empty); `nets`, `erc_findings`,
+  `erc_status` and tie coverage are unchanged. Requires `--findings-only`
+  (exit 1 otherwise). Additive; default output is byte-identical; no
+  `schema_version` bump.
 - **ASAP7 DRC deck checks `ACTIVE.W.2` and `SDT.W.3`** (issue #3085): the
   vertical-width-is-an-integer-multiple-of-27-nm rules (DRM Tables 3.5.1 /
   3.8.1) are now measured per local vertical width of each merged rectilinear
