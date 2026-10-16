@@ -97,7 +97,10 @@ additive value, `"absent"` (`value: null`, `margin: null`, info diagnostic
 no value; it never makes its corner `error`. A request that omits the field is
 byte-identical, so no `schema_version` bump -- but a consumer that switches
 exhaustively on measurement `status` must treat `"absent"` as "no value, not a
-failure". See [`docs/cli/sim.md`](cli/sim.md)'s "Optional measurements".
+failure". `klt pex` `delta[].schematic_status` / `extracted_status` echo it
+(issue #3620): `"absent"` on exactly one side makes the row `status: "error"`;
+on both sides, `"pass"` -- `delta[].status` stays `pass|fail|error`. See
+[`docs/cli/sim.md`](cli/sim.md)'s "Optional measurements".
 
 `measurements[].crossings` (issue #2868) is the third form and the first
 whose result is a **series**, not a scalar. It does *not* retype `value`:
@@ -109,6 +112,21 @@ when the series was extracted (absent on every other entry and on an errored
 one) — the "new optional member, absent when not applicable" rule above.
 No `schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s
 "Threshold-crossing time series (`measurements[].crossings`)".
+
+`measurements[].transfer` (issues #2923, #3088) gains three `metric` tokens —
+`phase_margin_min_deg`, `gain_margin_min_db`, `encirclement_count` — that reduce
+the AC ratio at **every** crossing. Additive only: the six earlier tokens and
+their entries are byte-identical, a margin entry's `transfer` sibling gains
+optional `margins` (the full per-crossing report: `phase_margins[]`,
+`gain_margins[]`, `band`, `reasons`, `ambiguity[]`) and `verdict`
+(`pass`/`fail`/`ambiguous`) members, and an ambiguous AC band grades the entry
+(and its corner) with the **existing** `status: "inconclusive"` (exit `4`)
+plus a new `severity: "warning"` marker diagnostic `code: "margin_ambiguous"` —
+the same one-status-many-reasons shape as `implausible_solution`, so the
+`passed + failed + errored + inconclusive == corner_count` invariant holds. No
+`schema_version` bump, and `docs/schemas/sim-set-report.schema.json` (the
+`--batch-set` aggregate, which only references per-request reports by path) is
+unchanged. See [`docs/cli/sim.md`](cli/sim.md)'s "AC return-ratio metrics".
 
 `klt sim` also gains an additive `environment.netlist_identity` (normalised,
 comment/whitespace/path-insensitive netlist-closure hash; `null` plus
@@ -567,6 +585,16 @@ them was already `unmet`, and its `reason` changes from `wrong_kind` to the
 more specific `unanchored_evidence`. No `schema_version` bump. See
 [`docs/cli/signoff.md`](cli/signoff.md)'s "Items 1, 2, 9, and 10: bind them
 to an audited artifact".
+
+Issue #2844 adds `klt signoff --attest {1,9,10}`, which produces that
+envelope, and restricts items 1, 9 and 10 to it. A native citation for those
+three now renders `unmet`/`wrong_kind`, an existing `reason` value; this is a
+**grading-rule change**, recorded in `CHANGELOG.md`, not a shape change, so
+no `schema_version` bump (the `build.grading_ruleset_id` hash moves, which
+is what it is for). `citation.artifact_binding` gains an optional
+`attestation` object when the cited envelope came from `--attest`. Item 2 is
+unchanged. The inventory `--attest` reads is its own versioned contract —
+see "A versioned *input* contract" below.
 
 Issue #3044 adds an optional `provenance.input.paths` set form to that
 envelope and, on its citation, an additive `artifact_binding.members` list
@@ -1165,6 +1193,7 @@ probing the value's Python type at runtime.
 | `place-and-route`, `sta` | New OpenROAD log fields `engine_logs[]` (P&R), `engine_log` / `corners[].engine_log` (STA): `script_path`, `metrics_path`, `directory`, `stdout_path`, `stderr_path`, `metadata_path` | 1 | #2124 |
 | `characterize` | `cell.netlist`, `cells[].cell.netlist` | 1 | #2502 (`cells[]` #2503) |
 | `sta` | `def_path`, `verilog_path`, `spef_path` (`null` when the request does not use that input) | 2 | #2879 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
+| `sta` | `sdf` / `corners[].sdf` — a written output: the envelope plus `content_hash` (`null` unless `request.sdf: true`; additive, no bump) | 2 | #2886 |
 
 **Plain-string fields** — intentionally unchanged by this issue:
 
@@ -1574,6 +1603,35 @@ the envelope is additive and flat:
   rules, and the signoff freshness consequence are in
   [`cli/yield.md`](cli/yield.md#deriving-a-sample-set-from-two-klt-sim-reports-klt-yield-samples).
 
+## A versioned *input* contract: the attestation inventory (`klt signoff --attest`, issue #2844)
+
+`klt signoff --attest {1,9,10} --inventory FILE` reads a document a block
+repo authors and commits: the **attestation inventory**
+(`"kind": "t1-attestation-inventory"`). Unlike a request document consumed
+once, it is a public, versioned contract in its own right, because the
+envelope `--attest` emits pins its raw-byte hash and a fleet of block repos
+depends on its meaning staying fixed:
+
+- The inventory carries its own `schema_version` (currently `1`),
+  independent of `klt signoff`'s output `schema_version`. A build refuses
+  (exit `1`) any version it does not read rather than guessing at its
+  semantics.
+- Within a version, the inventory is **closed**: unknown top-level fields
+  are refused, so a typo cannot silently drop a check. Adding a new optional
+  field or a new item therefore lands as a new inventory `schema_version`,
+  not as an additive change. A build that adds version `2` keeps reading
+  `1`.
+- The emitted envelope is an ordinary `generic` evidence envelope plus an
+  additive `attestation` block (`producer`, `inventory_schema_version`,
+  `hash_algorithm`, `check_count`, `passed_count`, `checks[]`). Its fields
+  follow this document's usual additive rules.
+- Hashes are `sha256:<hex>` of raw bytes (`hash_algorithm:
+  "sha256-raw-bytes"`). Introducing any normalisation would be a new named
+  algorithm recorded in the envelope, never a silent change to this one.
+
+Field-level schema, path rules, examples and exit codes:
+[`cli/signoff.md`](cli/signoff.md#attesting-items-1-9-and-10---attest-issue-2844).
+
 ## Error shape
 
 Under `--format json`, errors are also JSON — not a plain-text line — written
@@ -1615,6 +1673,8 @@ the exit code alone is authoritative.
   | `netlist` | `batch_runner_version_mismatch` | `--backend batch`: the runner's `klt` version differs from this client's; the job was refused before netlisting, or before submission when the AMI manifest already publishes the mismatch (issue #2851). Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
   | `netlist` | `batch_runner_version_unknown` | `--backend batch`: the runner's `klt` version could not be read; the job was refused before netlisting. Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
   | `netlist` | `batch_poll_timeout` | `--backend batch`: the job did not finish within the client's poll budget. It may still finish on the runner; nothing was collected. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
+  | `sim` | `batch_job_interrupted` | `--backend batch` (a per-unit diagnostic code, not an `error.code`): the job stayed `interrupted` (Spot-reclaimed, no re-launch seen) longer than `batch.interrupted_grace_s`, so polling stopped before `batch.poll_timeout_s`. See [docs/cli/sim.md](cli/sim.md) "Batch backend". |
+  | `netlist` | `batch_job_interrupted` | `--backend batch`: the job stayed `interrupted` past the default grace; nothing was collected. It may still be recoverable on the runner. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
   | `netlist` | `batch_job_failed` | `--backend batch`: the job failed, or left no usable report or netlist. When the runner's own `klt netlist` reported an error, its message is quoted and, if that error carried an `error.code`, the runner's code is passed through in place of `batch_job_failed`. Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). When the runner left no klt error envelope, `error` also carries `remote_stderr_tail` (last 2 KiB of the runner's `stderr.log`, sanitized), `remote_exit_code`, `remote_state` and `harness_log` (additive; absent otherwise). |
   | `netlist` | `batch_job_timeout` | `--backend batch`: the fleet harness stopped the job at its `timeout_seconds` (`--timeout-s` plus headroom). See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
   | `netlist` | `batch_input_too_large` | `--backend batch`: the input tree's uncompressed size is above the batch cap. Raised before any archive is built or anything is uploaded. Not retryable without shrinking the tree. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |

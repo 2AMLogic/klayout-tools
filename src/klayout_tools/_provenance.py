@@ -44,10 +44,11 @@ import re
 import subprocess
 import sys
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from . import build_identity
+from ._report_verify import get_path
 from .decks.history import is_deck_hash_released
 
 _YOSYS_VERSION_RE = re.compile(r"Yosys\s+(\S+)")
@@ -390,6 +391,51 @@ def _klayout_version() -> str | None:
     except Exception:
         return None
     return getattr(klayout, "__version__", None)
+
+
+#: `provenance` fields `--check` treats as a non-fatal *advisory*
+#: rather than a hash-integrity failure (issue #1373). `klt_version` and
+#: `klayout_version` are included because they answer the question `--check`
+#: was previously silent on: "did the engine itself change between the
+#: committed run and now". `provenance.pdk.version` is deliberately left out
+#: -- unlike the tool build, a PDK release routinely differs by design
+#: between machines/CI runners without implying anything about *this*
+#: report's reproducibility, so folding it in here would make the advisory
+#: noisy rather than informative. This mirrors -- but is a distinct read
+#: path from -- `_report_verify.VOLATILE_PROVENANCE_PATHS`, which excludes
+#: all three fields from `--rerun`'s drift diff (#1106); that exclusion is
+#: unchanged by this constant.
+VERSION_ADVISORY_FIELDS: tuple[tuple[str, Callable[[], str | None]], ...] = (
+    ("klt_version", _klt_version),
+    ("klayout_version", _klayout_version),
+)
+
+
+def version_drift_advisories(committed: dict[str, Any]) -> list[dict[str, Any]]:
+    """Non-fatal advisories (issue #1373) naming any `provenance.<field>` in
+    `VERSION_ADVISORY_FIELDS` that differs between `committed` and the
+    engine currently running `--check`. A missing value on either side (an
+    older report predating these fields, or an unresolvable current
+    version) is "unknown", not "drift" -- it is silently skipped rather than
+    reported, so `--check` never crashes or false-positives on a report
+    format gap.
+    """
+    advisories = []
+    for field, current_getter in VERSION_ADVISORY_FIELDS:
+        report_value = get_path(committed, ("provenance", field))
+        current_value = current_getter()
+        if report_value is None or current_value is None:
+            continue
+        if report_value == current_value:
+            continue
+        advisories.append(
+            {
+                "field": f"provenance.{field}",
+                "report": report_value,
+                "current": current_value,
+            }
+        )
+    return advisories
 
 
 def _klayout_version_mismatch(actual: str | None, expected: str | None) -> bool:
