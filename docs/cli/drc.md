@@ -2384,10 +2384,13 @@ pinned cells settle it: of the 212 cells per library, 33 ACTIVE polygons
 *horizontal* edge (a notch cut into a horizontal edge), while none has a
 slot whose end wall is a vertical edge. Reading the rule as forbidding the
 horizontal-edge slot would make shipped DRM-clean cells fail it.
-Measured on generated drawings: a slot cut into a vertical edge of a 100 x 150
-nm ACTIVE (20 nm deep) trips only `ACTIVE.S.1` when it is 26 nm tall or less
-and nothing at all at 27 nm or more; a 30 nm slot trips nothing at depths of
-5 and 60 nm either. L-, T- and vertical-finger U-shapes also trip nothing.
+Measured on generated drawings: a slot cut into a vertical edge of a 100 x 162
+nm ACTIVE (20 nm deep, 54 nm up from the bottom) trips `ACTIVE.S.1` when it is
+26 nm tall or less, and `ACTIVE.W.2` for every height except 27 nm (the strip
+left above the slot is then not a multiple of 27 nm, so that rule reports the
+strip, not the notch); a 27 nm slot trips nothing at all. A 30 nm slot trips
+only `ACTIVE.W.2` at depths of 5, 20 and 60 nm. L- and vertical-finger
+U-shapes whose steps are multiples of 27 nm trip nothing.
 
 Candidate predicate: a merged ACTIVE polygon with two consecutive reflex
 corners joined by a vertical edge. On the generated drawings it flags exactly

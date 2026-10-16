@@ -271,7 +271,8 @@ def probe_run(tmp_path_factory):
 @pytest.mark.parametrize("index", range(len(_PROBES)), ids=[c.name for c in _PROBES])
 def test_topology_gap_probes_stay_silent(probe_run, index):
     """The DRM's illegal drawings pass the deck (apart from the narrow slots
-    ACTIVE.S.1 already reports), which is why the gaps remain declared."""
+    ACTIVE.S.1 already reports and the strips ACTIVE.W.2 reports), which is
+    why the gaps remain declared."""
     assert probe_run.get(index, set()) == set(_PROBES[index].expect)
 
 

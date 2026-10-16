@@ -1855,8 +1855,11 @@ def topology_gap_probes() -> list[Case]:
     the cases pin that the gap is real (the DRM's illegal drawing passes the
     deck) and which existing rules already cover part of it. Gates sit between
     two neighbour columns as tall as the stack so ``GATE.S.3`` stays quiet;
-    ACTIVE is 150 nm tall so every strip left beside a slot meets
-    ``ACTIVE.W.1``."""
+    ACTIVE is 162 nm tall (6 x 27 nm) with the slot 54 nm up, so every strip
+    left beside a slot meets ``ACTIVE.W.1`` and the full-height and bottom
+    strips meet ``ACTIVE.W.2``; the strip above a slot is a multiple of 27 nm
+    only for a 27 nm slot, so the other slot heights also trip ``ACTIVE.W.2``
+    (an existing rule reporting the strip, not the notch)."""
 
     def column(x: float, y0: float, y1: float) -> Shape:
         return box("GATE", x, y0, x + 20, y1)
@@ -1867,15 +1870,21 @@ def topology_gap_probes() -> list[Case]:
 
     def slot(height: float, depth: float) -> list[Shape]:
         """A rectangular slot cut into the right (vertical) edge."""
-        y0 = (150 - height) / 2
+        y0 = 54
         hull = (
             (0, 0), (100, 0), (100, y0), (100 - depth, y0),
-            (100 - depth, y0 + height), (100, y0 + height), (100, 150), (0, 150),
+            (100 - depth, y0 + height), (100, y0 + height), (100, 162), (0, 162),
         )  # fmt: skip
-        return [poly("ACTIVE", *hull), box("NSELECT", -46, -27, 146, 177)]
+        return [poly("ACTIVE", *hull), box("NSELECT", -46, -27, 146, 189)]
 
     def active(*hull: Point) -> list[Shape]:
-        return [poly("ACTIVE", *hull), box("NSELECT", -46, -27, 146, 177)]
+        return [poly("ACTIVE", *hull), box("NSELECT", -46, -27, 146, 189)]
+
+    def slot_expect(height: float) -> frozenset[str]:
+        rules = {"ACTIVE.S.1"} if height < 27 else set()
+        if height != 27:
+            rules.add("ACTIVE.W.2")
+        return frozenset(rules)
 
     c = [
         # GATE.AUX.2: Fig. 3.4.2(a) drawn at several gaps, and (d) as one
@@ -1892,19 +1901,19 @@ def topology_gap_probes() -> list[Case]:
         Case("gate-stack-abut", "probe", tuple(gates(
             column(0, 0, 40), column(0, 40, 80)))),
         # ACTIVE.AUX.3: Fig. 3.5.4(b) slots in a vertical edge; ACTIVE.S.1
-        # (27 nm) already reports the narrow ones.
+        # (27 nm) already reports the narrow ones, ACTIVE.W.2 the strip above.
         *(
             Case(f"active-slot-h{h}", "probe", tuple(slot(h, 20)),
-                 frozenset({"ACTIVE.S.1"} if h < 27 else ()))
+                 slot_expect(h))
             for h in (8, 26, 27, 30, 40)
         ),
-        Case("active-slot-h30-d5", "probe", tuple(slot(30, 5))),
-        Case("active-slot-h30-d60", "probe", tuple(slot(30, 60))),
+        Case("active-slot-h30-d5", "probe", tuple(slot(30, 5)), slot_expect(30)),
+        Case("active-slot-h30-d60", "probe", tuple(slot(30, 60)), slot_expect(30)),
         Case("active-L", "probe", tuple(active(
-            (0, 0), (100, 0), (100, 60), (50, 60), (50, 150), (0, 150)))),
+            (0, 0), (100, 0), (100, 54), (50, 54), (50, 162), (0, 162)))),
         Case("active-U-vertical-fingers", "probe", tuple(active(
-            (0, 0), (100, 0), (100, 150), (70, 150), (70, 60), (30, 60),
-            (30, 150), (0, 150)))),
+            (0, 0), (100, 0), (100, 162), (70, 162), (70, 54), (30, 54),
+            (30, 162), (0, 162)))),
     ]  # fmt: skip
     return c
 
