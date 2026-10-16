@@ -10,10 +10,77 @@ submodule only imports it, never the reverse).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import klayout.db as kdb
+
+
+def _top_requires_layers(pcell: Any) -> list:
+    """Layer params of every present ``cap_top_requires_<i>`` mask."""
+    from klayout_tools.gen import _MAX_CAP_TOP_PLATE_REQUIRES
+
+    return [
+        getattr(pcell, f"cap_top_requires_{i}_layer")
+        for i in range(_MAX_CAP_TOP_PLATE_REQUIRES)
+        if getattr(pcell, f"cap_top_requires_{i}_present")
+    ]
+
+
+def _clamp_top_via(pcell: Any) -> None:
+    """Issue #2585: clamp every top-plate cut on a fixed-size cut/via layer
+    down to that size (no-op when the family has no such layer)."""
+    from klayout_tools.gen import _clamp_cut_boxes
+
+    if pcell.cap_top_via_present and pcell.cap_top_via_fixed_size_um > 0.0:
+        _clamp_cut_boxes(
+            pcell.cell,
+            pcell.layout.layer(pcell.cap_top_via_layer),
+            pcell.layout.dbu,
+            pcell.cap_top_via_fixed_size_um,
+        )
+
+
+def _produce_parallel(
+    pcell: Any, boxes: dict[str, list], top_requires_layers: list
+) -> None:
+    """``connect='parallel'`` (issue #3022): the shared bottom plate,
+    every unit's top plate (+ requires masks), the top-plate via
+    grids and the strap/escape metal, all in absolute coordinates.
+
+    Module-level (not a PCell method) so it stays out of
+    ``_build_cap_array_pcell``'s cyclomatic-complexity budget."""
+    from klayout_tools.gen import _insert_boxes
+
+    dbu = pcell.layout.dbu
+    cell = pcell.cell
+    _insert_boxes(
+        cell,
+        pcell.layout.layer(pcell.cap_bottom_plate_layer),
+        dbu,
+        boxes["bottom_plate"],
+        0.0,
+        0.0,
+    )
+    plate_layers = [
+        pcell.layout.layer(pcell.cap_top_plate_layer),
+        *(pcell.layout.layer(lp) for lp in top_requires_layers),
+    ]
+    for li in plate_layers:
+        _insert_boxes(cell, li, dbu, boxes["top_plate"], 0.0, 0.0)
+    if pcell.cap_top_via_present:
+        li_via = pcell.layout.layer(pcell.cap_top_via_layer)
+        _insert_boxes(cell, li_via, dbu, boxes["top_via"], 0.0, 0.0)
+        _clamp_top_via(pcell)
+    if pcell.cap_top_via_metal_present:
+        _insert_boxes(
+            cell,
+            pcell.layout.layer(pcell.cap_top_via_metal_layer),
+            dbu,
+            boxes["top_via_metal"],
+            0.0,
+            0.0,
+        )
 
 
 def _build_cap_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
@@ -31,7 +98,6 @@ def _build_cap_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
     from klayout_tools.gen import (
         _MAX_CAP_TOP_PLATE_REQUIRES,
         _cap_array_layout,
-        _clamp_cut_boxes,
         _insert_boxes,
     )
 
@@ -64,6 +130,22 @@ def _build_cap_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             )
             self.param(
                 "num", self.TypeInt, "Number of matched unit capacitors", default=4
+            )
+            p: Any = self
+            self.param(
+                "connect",
+                p.TypeString,
+                "'independent' draws num separate capacitors; 'parallel' "
+                "draws one shared bottom plate with the top plates strapped "
+                "into a single two-terminal capacitor of num x C_unit",
+                default="independent",
+            )
+            self.param(
+                "top_via_pitch_um",
+                p.TypeDouble,
+                "connect='parallel' only: pitch (um) of the top-plate via "
+                "grid over each unit (0 = twice the drawn via side)",
+                default=0.0,
             )
             self.param(
                 "cap_top_plate_layer",
@@ -178,6 +260,7 @@ def _build_cap_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             return f"cap_array(w={self.plate_w_um},h={self.plate_h_um},n={self.num})"
 
         def produce_impl(self) -> None:
+            p: Any = self  # new params aren't in the PCell stubs
             dbu = self.layout.dbu
             li_top = self.layout.layer(self.cap_top_plate_layer)
             li_bottom = self.layout.layer(self.cap_bottom_plate_layer)
@@ -190,6 +273,8 @@ def _build_cap_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.cap_top_via_min_w_um,
                 self.cap_bottom_plate_margin_min_um,
                 self.cap_min_spacing_um,
+                p.connect,
+                p.top_via_pitch_um,
             )
             unit_boxes = info["unit"]["boxes_um"]
             # Every extra mask this family's own MiM device class requires
@@ -198,11 +283,12 @@ def _build_cap_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             # (`_capacitor_plate_regions`) and any shortfall would narrow the
             # recognised plate. Empty on sky130/sg13g2, whose curated decks
             # set no `top_plate_requires`; `CAP_MK`/`MIM_L_MK` on gf180mcu.
-            top_requires_layers = [
-                getattr(self, f"cap_top_requires_{i}_layer")
-                for i in range(_MAX_CAP_TOP_PLATE_REQUIRES)
-                if getattr(self, f"cap_top_requires_{i}_present")
-            ]
+            top_requires_layers = _top_requires_layers(self)
+            if p.connect == "parallel":
+                _produce_parallel(
+                    self, info["parallel"]["boxes_um"], top_requires_layers
+                )
+                return
             for c in info["cells"]:
                 _insert_boxes(
                     self.cell,
@@ -252,12 +338,6 @@ def _build_cap_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
 
             # Issue #2585: clamp every cut on a fixed-size cut/via layer down
             # to that size, inside the unchanged generic-budget layout.
-            if self.cap_top_via_present and self.cap_top_via_fixed_size_um > 0.0:
-                _clamp_cut_boxes(
-                    self.cell,
-                    self.layout.layer(self.cap_top_via_layer),
-                    dbu,
-                    self.cap_top_via_fixed_size_um,
-                )
+            _clamp_top_via(self)
 
     return {"cap_array": _CapArrayPCell}
