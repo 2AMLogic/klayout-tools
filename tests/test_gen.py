@@ -1761,6 +1761,7 @@ def test_mos_gate_poly_extends_past_diff_and_contact_is_drc_clean(
     import klayout.db as kdb
 
     from klayout_tools.gen import CONTACT_SIZE_UM, ENCLOSURE_MARGIN_UM
+    from klayout_tools.gen_layer_params import _gate_pad_clearance_um
 
     output = tmp_path / f"{generator}_gate.gds"
     report = generate(
@@ -1775,8 +1776,10 @@ def test_mos_gate_poly_extends_past_diff_and_contact_is_drc_clean(
     pad_um = CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM
     poly_bbox = _layer_bbox(output, 66, 20)
     diff_bbox = _layer_bbox(output, 65, 20)
-    # Poly extends a full landing-pad height past the diffusion's top edge.
-    assert poly_bbox["top"] == pytest.approx(diff_bbox["top"] + pad_um)
+    # Poly extends the sky130 stand-off (issue #3115) plus a full
+    # landing-pad height past the diffusion's top edge.
+    clearance_um = _gate_pad_clearance_um("sky130")
+    assert poly_bbox["top"] == pytest.approx(diff_bbox["top"] + clearance_um + pad_um)
 
     gate = next(p for p in report["ports"] if p["name"] == gate_prefix)
     # The reported gate port reports the pad width (not the sub-contact-width
@@ -6975,18 +6978,18 @@ def test_sg13g2_gate_pad_clearance_lifts_pad_off_diffusion(tmp_path, sg13g2_pdk_
     assert gate["width_um"] == pytest.approx(pad_um)
 
 
-@pytest.mark.parametrize("family", ("sky130",))
+@pytest.mark.parametrize("family", ("sg13cmos5l",))
 def test_families_without_gate_pad_clearance_are_unchanged(family):
-    """#1450 must not move a single dbu on the family that shipped before it
-    (and never needed one): sky130 declares no gate-pad clearance, so
-    `_gate_pad_clearance_um` resolves to exactly `0.0` and the unit-device
-    layout is byte-for-byte identical to the no-clearance call.
+    """#1450 must not move a single dbu on a family that declares no
+    gate-pad clearance: `_gate_pad_clearance_um` resolves to exactly `0.0`
+    and the unit-device layout is byte-for-byte identical to the
+    no-clearance call.
 
-    ``gf180mcu`` is deliberately **not** parametrized here any more (issue
-    #1577): it now resolves a real, positive clearance too (see
-    :data:`gen._PDK_GATE_PAD_ACTIVE_CLEARANCE_UM`'s own gf180mcu entry) --
-    see ``test_gf180mcu_gate_pad_clearance_lifts_pad_off_diffusion`` for its
-    own, non-zero-clearance coverage."""
+    ``gf180mcu`` (issue #1577) and ``sky130`` (issue #3115) are deliberately
+    **not** parametrized here: they resolve a real, positive clearance (see
+    :data:`gen._PDK_GATE_PAD_ACTIVE_CLEARANCE_UM`) -- see
+    ``test_gf180mcu_gate_pad_clearance_lifts_pad_off_diffusion`` and
+    ``test_sky130_short_gate_pad_and_ring_well_clear_magic_rules``."""
     assert gen._gate_pad_clearance_um(family) == 0.0
     assert gen._mos_unit_layout(
         0.42, 0.28, 2, finger_topology="series"
@@ -8334,8 +8337,9 @@ def test_diff_pair_ring_gap_reports_gap_port_and_stays_drc_clean(tmp_path, pdk_r
                 # Offset re-centres the opening from the ring's mid-height
                 # (core_h / 2 == 1.04um) onto the lower device row (y==0.21um);
                 # core_h grew with the gate landing pad's row-pitch bump
-                # (issue #461), so the offset that lands there did too.
-                "ring_gap_offset_um": -0.83,
+                # (issue #461) and the sky130 pad stand-off (issue #3115),
+                # so the offset that lands there did too.
+                "ring_gap_offset_um": -0.98,
             },
             "options": {"output": str(output)},
         }
@@ -10673,6 +10677,50 @@ def test_no_supported_generator_path_draws_topvia1_and_compose_floor_holds():
         assert gen._fixed_cut_side_um(
             max(_VIA_DROP_SIZE_UM, floor[0]), fixed
         ) == pytest.approx(0.42)
+
+
+@pytest.mark.parametrize("gate_contact", (True, False))
+@pytest.mark.parametrize("l_um", (0.15, 0.28, 0.3, 0.41, 0.42, 0.5))
+def test_sky130_short_gate_pad_and_ring_well_clear_magic_rules(
+    tmp_path, pdk_root, l_um, gate_contact
+):
+    """Issue #3115: Magic's sky130 `poly.4` (poly to unrelated diffusion,
+    0.075um) and `diff/tap.10` (nwell overlap of n-tap, 0.18um) -- neither in
+    the curated deck -- are met for a `flavor="pfet"` diff_pair with a guard
+    ring, for gate lengths below and at/above the 0.42um landing-pad width."""
+    import klayout.db as kdb
+
+    output = tmp_path / "dp.gds"
+    generate(
+        {
+            "generator": "diff_pair",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {
+                "w_um": 1.545,
+                "l_um": l_um,
+                "splits": 3,
+                "add_guard_ring": True,
+                "gate_contact": gate_contact,
+                "flavor": "pfet",
+            },
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.top_cell()
+
+    def region(layer, datatype):
+        return kdb.Region(top.begin_shapes_rec(layout.layer(layer, datatype))).merged()
+
+    diff, tap, poly, nwell = (
+        region(65, 20),
+        region(65, 44),
+        region(66, 20),
+        region(64, 20),
+    )
+    assert poly.separation_check(diff, 75).count() == 0
+    assert nwell.enclosing_check(tap, 180).count() == 0
 
 
 # --------------------------------------------------------------------------- #
