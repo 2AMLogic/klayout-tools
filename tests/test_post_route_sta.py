@@ -6287,3 +6287,47 @@ def test_live_engine_spef_map_distinguishes_interconnect_corners(tmp_path):
     assert nom["corner"] == heavy_entry["corner"] == "tt_025C_1v80"
     assert nom["worst_hold_slack_ns"] != heavy_entry["worst_hold_slack_ns"]
     assert report["provenance"]["input"]["content_hash"] is not None
+
+
+def test_electrical_check_tcl_ends_redirect_on_error_path():
+    """Issue #3621: a throw after `sta::redirect_string_begin` leaves the
+    redirect active, swallowing every later `puts`; the failure branch must
+    end it (guarded) before the UNSUPPORTED marker is printed."""
+    lines = post_route_sta._electrical_check_lines()
+
+    unsupported = f'  puts "{post_route_sta._ELECTRICAL_UNSUPPORTED}"'
+    for i, line in enumerate(lines):
+        if line == unsupported:
+            assert lines[i - 1] == "  catch {sta::redirect_string_end}"
+            assert lines[i - 2] == "} klt_elec_msg]} {"
+    assert lines.count(unsupported) == 2
+
+
+_ELECTRICAL_FIXTURE = Path(__file__).parent / "fixtures" / "sta_electrical_checks"
+
+
+@pytest.mark.skipif(
+    _live_sky130_env() is None,
+    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
+    "KLT_SKIP_OPENROAD_TESTS unset",
+)
+def test_live_engine_electrical_checks_match_hand_run(tmp_path):
+    """Engine integration (issue #3005 AC4 / #3621): the fast-corner routed
+    DEF/SPEF fixture reports the violation counts recorded from a hand-run
+    `report_check_types -max_slew -max_capacitance -violators` (see the
+    fixture README for the script and output)."""
+    request = json.loads((_ELECTRICAL_FIXTURE / "request.json").read_text())
+    request["def"] = str(_ELECTRICAL_FIXTURE / request["def"])
+    request["spef"] = str(_ELECTRICAL_FIXTURE / request["spef"])
+    report = run_sta(
+        _write_request(tmp_path / "request.json", request), pdk_variant="sky130A"
+    )
+
+    checks = report["electrical_checks"]
+    assert checks["parasitics_source"] == "spef"
+    assert checks["max_transition"]["coverage"] == "checked"
+    assert checks["max_transition"]["violation_count"] == 1
+    assert checks["max_transition"]["worst_pin"] == "ff1/Q"
+    assert checks["max_capacitance"]["coverage"] == "checked"
+    assert checks["max_capacitance"]["violation_count"] == 1
+    assert checks["max_capacitance"]["worst_pin"] == "ff1/Q"
