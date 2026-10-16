@@ -2,7 +2,8 @@
   "netlist": "testbench-mc-instances.spice",
   "engine": "ngspice",
   "models": {
-    "pdk": "sky130A"
+    "pdk": "sky130A",
+    "lib": "libs.tech/ngspice/sky130.lib.spice"
   },
   "corners": {
     "process": [
@@ -21,17 +22,18 @@
     }
   },
   "analysis": {
-    "kind": "op"
+    "kind": "op",
+    "args": ""
   },
   "measurements": [
     {
       "name": "vdiff",
-      "spice": ".meas op vdiff PARAM='v(d1)-v(d2)'",
+      "expr": "v(d1)-v(d2)",
       "unit": "V"
     }
   ],
   "options": {
-    "timeout_s": 60,
+    "timeout_s": 180,
     "keep_artifacts": false
   }
 }

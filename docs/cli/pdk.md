@@ -233,9 +233,12 @@ engine's `BipolarDevice`/stock-`DeviceExtractorBJT3Transistor` model cannot
 faithfully express. See `src/klayout_tools/decks/sg13g2.py`'s "SiGe HBTs —
 investigated, declined" docstring section for the full finding. The marker
 gap alone is closed: `BipolarDevice.marker` accepts a derived `LayerExpr`
-(AND/NOT of drawn layers, nestable) since issue #2860. The pin size filters,
-the substrate terminal and the terminal-interaction terminals are still open
-(#2861–#2863), so this deck declares no bipolars yet.
+(AND/NOT of drawn layers, nestable) since issue #2860.
+Operator ruling 2026-10-08 (#2864): the PDK's own KLayout LVS runset (#2849)
+is the accepted route for SG13G2 bipolars — runset-backed LVS recognises
+them, the curated deck does not declare bipolars yet. Of the native gaps,
+#2860, #2862 and #2863 have landed and only #2861 remains open, as a general
+improvement; evidence acceptance conditions live in #2870.
 
 ² The remaining metal resistors (`res_metal3` and up) are a different kind
 of gap from the rest of this row: their own recognition (populating
@@ -266,7 +269,9 @@ it extracts upstream through the same stock `DeviceExtractorBJT3Transistor`
 extractor `BipolarDevice` wires up, but its emitter terminal is a fixed-size
 box synthesized from a bounding-box-size-filtered region and its collector
 terminal a dynamic per-instance `.covering(...)` derivation — neither
-expressible by `BipolarDevice`'s plain layer-intersection fields. See
+expressible by `BipolarDevice`'s plain layer-intersection fields. (A size
+filter now exists as `BipolarDevice.emitter_size`, #2861, but the
+collector-derivation and synthesized-emitter gaps remain.) See
 `src/klayout_tools/decks/sg13g2.py`'s "Schottky diode (schottky_nbl1) —
 investigated, declined" docstring section for the full finding.
 

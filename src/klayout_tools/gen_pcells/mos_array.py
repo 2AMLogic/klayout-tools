@@ -289,6 +289,13 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default=WELL_ENCLOSURE_MARGIN_UM,
             )
             self.param(
+                "ring_well_margin_um",
+                self.TypeDouble,
+                "Harness-resolved nwell enclosure of the n-tap guard ring "
+                "(see _PDK_RING_WELL_MARGIN_UM)",
+                default=WELL_ENCLOSURE_MARGIN_UM,
+            )
+            self.param(
                 "gate_pad_clearance_um",
                 self.TypeDouble,
                 "Harness-resolved clearance the gate-poly landing pad keeps "
@@ -307,6 +314,13 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.TypeDouble,
                 "Harness-resolved gate-stripe bottom-edge endcap extension "
                 "(see _PDK_GATE_BOTTOM_ENDCAP_UM)",
+                default=0.0,
+            )
+            self.param(
+                "top_endcap_um",
+                self.TypeDouble,
+                "Harness-resolved gate-stripe top-edge endcap neck "
+                "(see _PDK_GATE_TOP_ENDCAP_UM)",
                 default=0.0,
             )
             self.param(
@@ -491,6 +505,7 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 _mos_cap_enabled(self),
                 self.pitch_x_um,
                 self.pitch_y_um,
+                top_endcap_um=self.top_endcap_um,
             )
             unit_boxes = info["unit"]["boxes_um"]
             for c in info["cells"] + info["dummy_cells"]:
@@ -601,7 +616,7 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 # against.
                 if self.well_present and self.flavor == "pfet":
                     li_well = self.layout.layer(self.well_layer)
-                    margin = WELL_ENCLOSURE_MARGIN_UM
+                    margin = self.ring_well_margin_um
                     ring_well_box = (
                         -margin,
                         -margin,

@@ -129,6 +129,7 @@ The `sim` verb runs SPICE simulations over generated netlists and produces struc
 - **sim** (`sim.py`): Core SPICE simulation engine wrapper, netlist execution, result collection
 - **sim_plot** (`sim_plot.py`): Result plotting and waveform display utilities (matplotlib/HTML output)
 - **sim_crossings** (`sim_crossings.py`): `measurements[].crossings` (issue #2868) — request validation, the per-measurement rawfile `.control` lines, and the linearly interpolated threshold-crossing extraction run inside each corner
+- **sim_injected** (`sim_injected.py`): `monte_carlo.injected` design-owned per-instance mismatch (issue #2911) — request validation, instance resolution against the netlist closure, the seeded per-sample draws, and the deck `.param` lines
 - **sim_remote** (`sim_remote.py`): Remote simulation orchestration (AMI/cloud runner invocation and result retrieval)
 
 ### sta
@@ -163,6 +164,7 @@ The `synthesize` verb maps RTL to a standard-cell netlist against a resolved lib
 
 - `yield-campaign` = `cli/yield_campaign_cmd.py` + `yield_campaign.py` (multi-run campaign orchestration; also borrows `yield_cmd.py`'s text-report printer for its own text output)
 - `yield-sensitivity` = `cli/yield_sensitivity_cmd.py` + `yield_sensitivity.py` (parameter sensitivity ranking for a completed campaign)
+- `yield-threshold` = `cli/yield_threshold_cmd.py` + `probit.py` (probit threshold fit for binary-outcome decision circuits; pure Python, no native extension, issue #2976)
 
 Both fit the single-implementation-module pattern (see "Single-File Verbs" below) once their own cmd/core pair is counted separately from `yield`'s.
 

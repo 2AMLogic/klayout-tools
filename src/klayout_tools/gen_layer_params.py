@@ -51,8 +51,9 @@ from .pdk_families import pdk_variant_family
 #: this is deliberately *not* applied universally, because lifting the pad
 #: also lifts the reported ``U<i>_G`` port (its ``y``, and with
 #: ``gate_contact`` the drawn contact/local-metal stack too), which would move
-#: every existing sky130/gf180mcu caller's gate port for no DRC benefit on
-#: those families (issues #461/#492/#781 pin that contract).
+#: every existing caller's gate port for no DRC benefit on families whose real
+#: deck does not need it (issues #461/#492/#781 pinned that contract; sky130
+#: and gf180mcu have since been moved deliberately, see their entries below).
 #:
 #: - ``sg13g2``: 0.1um, comfortably above ``klayout_tools.decks.sg13g2``'s
 #:   ``gatpoly.separation.activ.1`` (`5_8_gatpoly.drc` rule ``Gat.d``,
@@ -63,6 +64,15 @@ from .pdk_families import pdk_variant_family
 #:   constants keep over theirs. Landing the pad this way is also closer to
 #:   how a real device is drawn: the gate poly extends past the channel
 #:   (an endcap) rather than stopping dead on the diffusion edge.
+#: - ``sky130`` (issue #3115): 0.15um, above the PDK's own ``poly.4`` (poly
+#:   space to unrelated diffusion, 0.075um -- which this repo's curated
+#:   ``sky130`` deck does not transcribe, so ``klt drc --deck sky130`` never
+#:   saw the zero-distance pad overhang that Magic ``drc(full)`` flags for
+#:   every gate length below the 0.42um pad width) and above ``poly.8``'s
+#:   0.13um gate endcap (the stem now supplies it on the top edge, see
+#:   #2936). A real, deliberate geometry change like gf180mcu's: the landing
+#:   pad and the reported ``U<i>_G`` port move up by this amount; see
+#:   ``docs/cli/gen.md``.
 #: - ``gf180mcu`` (issue #1577): 0.35um, above gf180mcu's own real signoff
 #:   deck's ``PL.5a_LV``/``PL.5b_LV`` ("Space from field Poly2 to
 #:   unrelated/related COMP", 0.1um each) *and* their ``_MV`` (``Dualgate``
@@ -92,6 +102,7 @@ from .pdk_families import pdk_variant_family
 #:   pinned; see ``docs/cli/gen.md``'s ``mos_array`` gf180mcu note for the
 #:   full before/after.
 _PDK_GATE_PAD_ACTIVE_CLEARANCE_UM: dict[str, float] = {
+    "sky130": 0.15,  # poly.4 (poly to unrelated diff) is 0.075um; poly.8 endcap 0.13um
     "sg13g2": 0.1,  # Gat.d (GatPoly space to Activ) is 0.07um
     "gf180mcu": 0.35,  # PL.5a_MV/PL.5b_MV (field Poly2 to COMP, MV) are 0.3um
 }
@@ -158,11 +169,15 @@ def _contact_gate_extra_offset_um(family: str) -> float:
 #:   thresholds.
 #:
 #: A family absent from this table gets ``0.0`` (see
-#: :func:`_gate_bottom_endcap_um`): sky130's/sg13g2's/sg13cmos5l's curated
-#: decks transcribe neither rule, so every existing caller there keeps
+#: :func:`_gate_bottom_endcap_um`): sg13g2's/sg13cmos5l's curated
+#: decks transcribe neither rule (sky130's gained its own endcap rule, so it
+#: has an entry above, issue #2936), so every existing caller there keeps
 #: byte-for-byte identical geometry.
 _PDK_GATE_BOTTOM_ENDCAP_UM: dict[str, float] = {
     "gf180mcu": 0.25,  # PL.4_LV (0.22um) / DF.6_LV (0.24um)
+    # poly.8 (0.13um, issue #2936), with margin; the curated deck's
+    # `poly.endcap.diff.1` checks it.
+    "sky130": 0.15,
 }
 
 
@@ -171,6 +186,24 @@ def _gate_bottom_endcap_um(family: str) -> float:
     :data:`_PDK_GATE_BOTTOM_ENDCAP_UM`), or ``0.0`` for a family that
     declares none -- byte-for-byte unchanged geometry there."""
     return _PDK_GATE_BOTTOM_ENDCAP_UM.get(family, 0.0)
+
+
+#: Gate-stripe *top*-edge endcap (um) the series ``_mos_unit_layout`` draws
+#: as a stripe-width poly neck before the landing pad (issue #2936). Distinct
+#: from :data:`_PDK_GATE_BOTTOM_ENDCAP_UM` because the top edge already has
+#: the #461 landing pad, which clears the diffusion for ``L`` up to the pad
+#: width only; a family whose pad already satisfies its deck (gf180mcu) is
+#: left out so its geometry stays byte-for-byte unchanged.
+_PDK_GATE_TOP_ENDCAP_UM: dict[str, float] = {
+    "sky130": 0.15,  # poly.8 (0.13um) with margin
+}
+
+
+def _gate_top_endcap_um(family: str) -> float:
+    """Return ``family``'s gate-stripe top-edge endcap neck length (see
+    :data:`_PDK_GATE_TOP_ENDCAP_UM`), or ``0.0`` for a family that declares
+    none -- byte-for-byte unchanged geometry there."""
+    return _PDK_GATE_TOP_ENDCAP_UM.get(family, 0.0)
 
 
 #: Margin (um) :func:`_mos_unit_layout`/:func:`_mos_unit_strapped_layout`
@@ -305,6 +338,25 @@ def _voltage_flavor_mark_margin_um(family: str) -> float:
     from .gen import WELL_ENCLOSURE_MARGIN_UM
 
     return _PDK_VOLTAGE_FLAVOR_MARK_MARGIN_UM.get(family, WELL_ENCLOSURE_MARGIN_UM)
+
+
+#: Per-family nwell enclosure margin (um) of the n-tap guard ring
+#: (:data:`WELL_ENCLOSURE_MARGIN_UM` for a family absent here, byte-for-byte).
+#:
+#: ``sky130`` only (issue #3115): the PDK's ``diff/tap.10`` (nwell overlap of
+#: n-tap) is 0.18um, which this repo's curated sky130 deck does not
+#: transcribe; 0.2um clears it with headroom.
+_PDK_RING_WELL_MARGIN_UM: dict[str, float] = {
+    "sky130": 0.2,  # diff/tap.10 (nwell overlap of n-tap) is 0.18um
+}
+
+
+def _ring_well_margin_um(family: str) -> float:
+    """Return ``family``'s n-tap ring nwell enclosure margin (see
+    :data:`_PDK_RING_WELL_MARGIN_UM`), or :data:`WELL_ENCLOSURE_MARGIN_UM`."""
+    from .gen import WELL_ENCLOSURE_MARGIN_UM
+
+    return _PDK_RING_WELL_MARGIN_UM.get(family, WELL_ENCLOSURE_MARGIN_UM)
 
 
 #: A contact-to-contact edge gap (um) below this is *legal* under sky130's
@@ -1710,6 +1762,44 @@ _PDK_RES_FLAVOR_MASK_ENCLOSURE_UM: dict[str, dict[tuple[int, int], float]] = {
 }
 
 
+#: gf180mcu salicide-block (SAB) geometry for ``res_array``'s poly body (issue
+#: #3000), keyed by family. The runset's ``sab.drc`` constrains an unsalicided
+#: poly resistor in two directions the body-only marker box violated:
+#:
+#: - ``contact_space_um``: ``SB.4``, SAB-to-contact space >= 0.15um. The SAB is
+#:   drawn on the body segment, so the end head is lengthened until the
+#:   contact edge sits this far from the body (the generic enclosure margin
+#:   left 0.10um). Body length, and so the extracted ``L``, is unchanged.
+#: - ``side_extension_um``: ``SB.9``/``SB.10`` -- the SAB must run >= 0.22um
+#:   past the poly body's long edges (a SAB edge flush with the poly edge is
+#:   what ``SB.10`` flagged). Folded rows are 0.4um apart, so the extended
+#:   SABs of adjacent rows overlap and merge instead of tripping ``SB.2``.
+#:
+#: Values are from the open GF180MCU DRM / ``sab.drc`` (SB.4: 0.15um,
+#: SB.9/SB.10: 0.22um). A family absent here draws the body-only SAB.
+_PDK_RES_SAB_UM: dict[str, dict[str, Any]] = {
+    "gf180mcu": {
+        "layer": (49, 0),
+        "contact_space_um": 0.15,
+        "side_extension_um": 0.22,
+    },
+}
+
+
+def _res_sab_geometry_um(
+    family: str, flavor: str, metal_level: int = 0
+) -> tuple[float, float]:
+    """``(contact_space_um, side_extension_um)`` of the poly-body salicide
+    block for ``family`` (see :data:`_PDK_RES_SAB_UM`), or ``(0.0, 0.0)`` for
+    a family without one or a ``metal_level`` (metal-body) request."""
+    entry = _PDK_RES_SAB_UM.get(family)
+    if entry is None or metal_level:
+        return (0.0, 0.0)
+    if entry["layer"] not in _PDK_RES_FLAVOR_LAYERS[family].get(flavor, ()):
+        return (0.0, 0.0)
+    return (entry["contact_space_um"], entry["side_extension_um"])
+
+
 #: PDK families whose poly resistors follow the ``abutting_heads`` topology
 #: (issue #2679): ``polyres`` is the whole resistive body and the poly layer
 #: is only the two abutting contact heads. Must match the families whose
@@ -2800,6 +2890,7 @@ def _device_layer_params(
         "gate_pad_clearance_um": _gate_pad_clearance_um(family),
         "contact_gate_offset_um": _contact_gate_extra_offset_um(family),
         "bottom_endcap_um": _gate_bottom_endcap_um(family),
+        "top_endcap_um": _gate_top_endcap_um(family),
         "sd_implant_layer": (
             sd_implant if sd_implant is not None else kdb.LayerInfo(0, 0)
         ),
@@ -2888,6 +2979,7 @@ def _resistor_layer_params(
             resolved[f"res_flavor_{i}_layer"] = kdb.LayerInfo(0, 0)
             resolved[f"res_flavor_{i}_present"] = False
             resolved[f"res_flavor_{i}_head_enclosure_um"] = 0.0
+            resolved[f"res_flavor_{i}_side_extension_um"] = 0.0
         floors = _metal_res_geometry_min_um(family, metal_level)
         resolved["metal_res_via_min_w_um"] = floors["via_min_w_um"]
         resolved["metal_res_via_enclosure_min_um"] = floors["via_enclosure_min_um"]
@@ -2908,6 +3000,7 @@ def _resistor_layer_params(
     # Issue #2449: a precision-poly flavour draws its own rectangular cut, so
     # the layer-keyed ordinary fixed-size clamp (0.17um) must not shrink it.
     end_w_um, end_h_um = _res_end_contact_um(family, flavor)
+    sab_contact_space_um, sab_side_ext_um = _res_sab_geometry_um(family, flavor)
     resolved = {
         "poly_layer": _role_layer_info(family, "poly"),
         "contact_layer": _role_layer_info(family, "contact"),
@@ -2937,6 +3030,13 @@ def _resistor_layer_params(
             if pair is not None and end_w_um > 0.0
             else 0.0
         )
+        # Issue #3000: the SAB runs past the poly body's long edges.
+        resolved[f"res_flavor_{i}_side_extension_um"] = (
+            sab_side_ext_um
+            if pair is not None and pair == _PDK_RES_SAB_UM.get(family, {}).get("layer")
+            else 0.0
+        )
+    resolved["res_contact_space_um"] = sab_contact_space_um
     return resolved
 
 
@@ -3149,6 +3249,7 @@ def _ring_layer_params(
         "metal_layer": _role_layer_info(family, "metal"),
         "well_layer": well if well is not None else kdb.LayerInfo(0, 0),
         "well_present": well is not None,
+        "ring_well_margin_um": _ring_well_margin_um(family),
         "ring_implant_layer": (
             ring_implant if ring_implant is not None else kdb.LayerInfo(0, 0)
         ),
@@ -3400,6 +3501,7 @@ def _esd_device_layer_params(
         "salicide_block_present": salicide_block is not None,
         "contact_gate_offset_um": _contact_gate_extra_offset_um(family),
         "bottom_endcap_um": _gate_bottom_endcap_um(family),
+        "top_endcap_um": _gate_top_endcap_um(family),
         "sd_implant_layer": (
             sd_implant if sd_implant is not None else kdb.LayerInfo(0, 0)
         ),
