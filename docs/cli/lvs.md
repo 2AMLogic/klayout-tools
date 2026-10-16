@@ -2400,6 +2400,28 @@ decks, deliberately not a dependency of the converter). Geometry is still
 carried (`L=`/`W=` for a resistor, a derived `A=`/`P=` for a capacitor); only
 the value is a placeholder.
 
+**Resistor `R` from the deck (issue #2905).** For a resistor class whose
+extraction deck declares a sheet resistance, the placeholder can be replaced
+by a real value: list `R` for that class in `options.compare_parameters`
+(e.g. `{"res_high_po": ["R", "L", "W"]}`, `"engine": "klayout"`). The
+conversion then fills each such card's `R` from the call's `L`/`W` through the
+very function `klt extract` uses for `devices[].params.r_ohm`
+(`L / W * sheet_rho_ohm_sq` plus the deck's `fixed_offset_ohm`,
+`end_term_ohm_um` and `width_offset_um`, so sky130's `res_high_po` offset is
+included), honouring `layout.deck_options` flavours. `layout.deck_options` is
+applied to the reference conversion only when `reference.deck` names the same
+deck as `layout.deck`; a request has no `reference.deck_options`, so a
+`reference.deck` that differs from `layout.deck` is resolved with that deck's
+default options (no flavour). For that class there is
+no `device.placeholder_value` warning, `R` is listed under `compared` in
+`device_parameter_coverage[]`, and a drawn `R` that differs from the
+reference's beyond `options.parameter_tolerance` is a `device.property`
+error (`status: "mismatch"`). It is opt-in by design: without `R` named in
+`compare_parameters`, behaviour is exactly as described below. Classes the
+deck has no sheet resistance for, a call stating no `L`/`W`, and every
+capacitor keep the placeholder and the disclosure; this additive behaviour
+changes no JSON field.
+
 That placeholder is not a cosmetic difference: `R` and `C` are the **primary**
 (compared) parameters of KLayout's `DeviceClassResistor` /
 `DeviceClassCapacitor`, and `NetlistComparer` uses primary-parameter equality
@@ -2471,6 +2493,13 @@ Notes on the semantics:
   genuinely cannot distinguish (e.g. three layout resistors against two
   reference ones on the same net pair) still reports `device.unmatched` and
   `status: "mismatch"`, with this disclosure alongside rather than instead.
+- **Deck-derived `R` and engine parity (issue #2905).** The deck-derived
+  `R` above is reached through `options.compare_parameters`, which is
+  `"engine": "klayout"` only (a `netgen` request carrying it is an
+  application error). The `netgen` engine therefore always keeps the
+  placeholder-and-`property delete` behaviour described in the next item for
+  `subckt-call` resistors; to verify a resistor's value on netgen, supply a
+  plain-element reference with explicit `R` values.
 - **Engine parity (issue #2673).** `"engine": "netgen"` applies the same
   proof (conversion provenance **and** every reference instance of the class
   reading `0`) and emits the same warning, so one request returns `match`
