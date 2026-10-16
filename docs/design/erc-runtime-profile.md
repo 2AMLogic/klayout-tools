@@ -345,16 +345,38 @@ had 2,470), on the shared 8-vCPU dispatch host with other sweeps running.
 - Timings are single runs on a loaded host, so only the order of magnitude
   is meaningful.
 
-**Pending.** The `WIDTH=128` re-measurement that the issue's acceptance
-asks for (baseline 3,890 s walk / 3,940 s wall) has **not** been done: it
-needs the regenerated `w128` routed GDS, which is about an hour of
-synth/P&R plus profile time and was not appropriate on a shared host.
-To close it, regenerate `w128` and run
-`profile_erc.py GDS sky130_stack_nets_ties.json --pdk sky130 --check-identical`
-(plus `--attribute-walk --attribute-walk-limit 500`) and add the `w128` row
-here. The expected result is a walk in the same order as the
-no-`active_layer` walk (a few seconds), by the `w16` ratio above; that is
-an expectation, not a measurement.
+**`w128` measurement (issue #3122).** The fixture was regenerated with
+`python scripts/research/regenerate_erc_profile_fixture.py 128 /tmp/erc-w128`
+(synth 4 s + P&R 1,639 s). The routed GDS differs slightly from the `w128`
+above: 19,979 candidate nets / 15,105 gate nets (was 20,053 / 15,200), as
+with `w16`, so the baseline column below is a different fixture. The "same
+GDS" column is a same-run control: `src/` with only `_ActiveIndex.intersect`
+reverted to the whole-layout `(poly & active).merged()`, run on the new GDS.
+Commit `0e8009f0` (`main`), the shared dispatch worker (16 visible CPUs,
+load average 2-4 from other sweeps, runs at `nice -n 10`), one run each, so
+only the order of magnitude is meaningful.
+
+| `w128`, `active_layer` + `ties[]`, full mode | baseline (#2229 fixture, before) | same GDS, whole-layout boolean | after (bounded lookup) |
+| --- | --- | --- | --- |
+| candidate walk (`profile_erc.py`) | 3,890.0 s wall / 2,156.4 s CPU | not profiled | 3.63 s wall / 3.63 s CPU |
+| `profile_erc.py` end to end | 3,940.4 s wall / 2,194.2 s CPU | not profiled | 22.6 s wall / 22.5 s CPU |
+| `klt erc` end to end (wall / user CPU) | not run | 1,058.1 s / 1,057.3 s | 22.5 s / 22.2 s |
+| `& active` per candidate (`--attribute-walk --attribute-walk-limit 500`) | 167.9 ms (table above) | not run | 0.462 ms (500 candidates, 375 gate nets, 20,179 active polygons) |
+
+- Output check: `profile_erc.py ... --check-identical` reports
+  `identical_to_uninstrumented: true`. Against the whole-layout control, the
+  two `klt erc --format json` reports are equal key by key apart from the
+  `spec` path as typed on the command line: `gates[]` (all 15,105, including
+  every `gate_area_um2` and the order), `erc_findings` (0), `status` and
+  `erc_status` (`clean_partial`).
+- The walk is 3.6 s, the same order as the no-`active_layer` walk (4.2-4.3 s
+  in the table above), so the expectation from the `w16` ratio holds. The
+  walk is no longer the dominant phase: primary extraction (8.6 s) and tie
+  extraction (9.7 s) are.
+- The control on the new GDS took about 1,058 s, not the 3,940 s baseline.
+  The baseline was measured on a different fixture and a more loaded host,
+  so do not read 3,940 s -> 22.5 s as the speed-up; the same-GDS ratio is
+  about 47x end to end.
 
 ## Comparison with #2219 and with #2229's synthetic table
 

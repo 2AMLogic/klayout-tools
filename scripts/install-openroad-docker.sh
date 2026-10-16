@@ -111,6 +111,12 @@ cat >"$WRAPPER" <<WRAPPER_EOF
 # even after upstream republishes \`:latest\` (issue #2465):
 #   $IMAGE
 #   openroad -version == 26Q3-1510-g6cb3f2b704
+#
+# Runs the container as the CALLER's uid:gid (\`--user\`), not the image's
+# default root, so files OpenROAD writes into the read-write \$PWD / \$TMPDIR
+# mounts are owned by the caller on Linux (a root-owned directory there blocks
+# worktree/scratch cleanup -- issue #3151). \$HOME is pointed at \$TMPDIR
+# because that uid usually has no passwd entry (hence no home) in the image.
 set -euo pipefail
 MOUNTS=(-v "\$PWD:\$PWD" -w "\$PWD")
 if [[ -n "\${PDK_ROOT:-}" ]]; then
@@ -128,6 +134,8 @@ fi
 MOUNTS+=(-v "\${TMPDIR:-/tmp}:\${TMPDIR:-/tmp}")
 exec docker run --rm -i \\
     --platform linux/amd64 \\
+    --user "\$(id -u):\$(id -g)" \\
+    -e HOME="\${TMPDIR:-/tmp}" \\
     "\${MOUNTS[@]}" \\
     $IMAGE \\
     $IN_IMAGE_BINARY "\$@"

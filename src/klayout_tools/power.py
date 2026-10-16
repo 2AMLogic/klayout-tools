@@ -113,7 +113,8 @@ Resistor-network model (MVP, stated plainly):
   while overstating the per-edge EM limit.
 - A merged polygon that cannot be decomposed exactly -- not axis-aligned
   (45-degree geometry), or so many-vertexed that its grid would exceed
-  :data:`MAX_DECOMPOSITION_CELLS` -- makes its island **unsolved**: the
+  the spec's ``max_decomposition_cells`` cap (default
+  :data:`MAX_DECOMPOSITION_CELLS`) -- makes its island **unsolved**: the
   island is reported with an ``unsolved_reason`` and no nodes/edges at all,
   plus a ``warnings`` entry. Refusing is honest; approximating would move
   the IR/EM verdict in the unsafe direction.
@@ -159,6 +160,7 @@ from ._paths import (
 from ._provenance import INPUT_ROLE_LAYOUT, _content_hash, build_provenance
 from .coverage import build_check_coverage, coverage_rollup, rollup_status, work_id
 from .ir_solver import solve_ir_drop, worst_deviation
+from .resistor_mesh import _decompose_manhattan_polygon, _rails_under_via
 
 if TYPE_CHECKING:
     import klayout.db as kdb
@@ -190,14 +192,24 @@ SCHEMA_VERSION = 1
 #: ``unsolved_reason`` instead, never with a bounding-box approximation:
 #: refusing is honest, approximating understates resistance and overstates
 #: EM headroom. Deliberately module-level so an operator (or a test) can
-#: raise it without a spec change.
+#: raise it without a spec change. It is the *default* for the spec's own
+#: optional ``max_decomposition_cells`` field (issue #3124), which is how a
+#: CLI user raises (or lowers) it for one run.
 MAX_DECOMPOSITION_CELLS = 4096
 
 
 #: The keys each part of the ``klt power`` spec file recognises (issue
 #: #2243). Any other key is rejected with its full path rather than ignored
 #: -- see ``docs/cli/power.md``'s "Unrecognised spec keys".
-_SPEC_KEYS = ("power_nets", "stackup", "vias", "devices", "pads", "current_model")
+_SPEC_KEYS = (
+    "power_nets",
+    "stackup",
+    "vias",
+    "devices",
+    "pads",
+    "current_model",
+    "max_decomposition_cells",
+)
 _POWER_NET_KEYS = ("name", "match")
 _STACKUP_KEYS = (
     "name",
@@ -464,6 +476,22 @@ def _require_number(
         raise PowerError(
             f"spec '{spec_path}': {field}.{key} must be a number (got {entry[key]!r})"
         ) from exc
+
+
+def _validate_max_decomposition_cells(spec: dict[str, Any], spec_path: str) -> int:
+    """Validate the (optional) ``max_decomposition_cells`` field (issue
+    #3124): the mesh-cell cap a non-rectangular merged polygon's
+    decomposition may need before its island is declared unsolved. Defaults
+    to the module's :data:`MAX_DECOMPOSITION_CELLS`, read at call time."""
+    raw = spec.get("max_decomposition_cells")
+    if raw is None:
+        return MAX_DECOMPOSITION_CELLS
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+        raise PowerError(
+            f"spec '{spec_path}': 'max_decomposition_cells' must be a positive "
+            f"integer, got {raw!r}"
+        )
+    return raw
 
 
 def _validate_pads(
@@ -743,37 +771,6 @@ def _nearest_endpoint(
     return best_id
 
 
-def _rails_under_via(
-    rails: list[dict[str, Any]], via_region: kdb.Region, via_box: kdb.Box
-) -> list[dict[str, Any]]:
-    """The rails (merged polygons of one metal role, as recorded by
-    :func:`_build_island_network`) that the via shape actually lands on --
-    the scope a via tap's nearest-endpoint search is restricted to (issue
-    #2259).
-
-    Searching the whole net's rails instead is not a positional
-    approximation, it is a connectivity error: on any trunk-and-stub rail (a
-    PDN strap with drop-downs, a long rail with per-row risers) a via tapping
-    the trunk partway along is nearer some unrelated short stub's endpoint
-    than either of the trunk's own ends, so the tap is wired to the stub --
-    severing the trunk from everything it feeds and shorting two unrelated
-    segments together. The island then fragments into disconnected
-    components, and the IR solve reports ``no_pad`` on the orphans while
-    ``worst_case_droop_mv`` reads 0.
-
-    Merged polygons on one layer are disjoint, so this is normally exactly
-    one rail; a via shape spanning two of them physically bridges both, and
-    both is still the correct scope. Touching counts as landing on: a via
-    abutting a rail edge-to-edge is what joined them into this net."""
-    hits: list[dict[str, Any]] = []
-    for rail in rails:
-        if not rail["bbox"].touches(via_box):
-            continue
-        if not rail["region"].interacting(via_region).is_empty():
-            hits.append(rail)
-    return hits
-
-
 def _connected_component_count(
     nodes: list[dict[str, Any]], edges: list[dict[str, Any]]
 ) -> int:
@@ -836,91 +833,6 @@ def _warn_if_network_fragmented(
         "joins). Nodes on components with no pad cannot be solved, so the "
         "reported droop understates the real one"
     )
-
-
-def _polygon_cut_coordinates(polygon: kdb.Polygon) -> tuple[list[int], list[int]]:
-    """The sorted, deduplicated x/y coordinates of every vertex of a merged
-    polygon (hull **and** holes) -- the cut lines of the rectangular grid
-    :func:`_decompose_manhattan_polygon` carves it into."""
-    xs: set[int] = set()
-    ys: set[int] = set()
-    for point in polygon.each_point_hull():
-        xs.add(point.x)
-        ys.add(point.y)
-    for hole in range(polygon.holes()):
-        for point in polygon.each_point_hole(hole):
-            xs.add(point.x)
-            ys.add(point.y)
-    return sorted(xs), sorted(ys)
-
-
-def _decomposition_grid(
-    polygon: kdb.Polygon, max_cells: int
-) -> tuple[list[int] | None, list[int] | None, str | None]:
-    """``(xs, ys, None)`` for a polygon worth decomposing, or ``(None, None,
-    reason)`` when it is degenerate or would need more mesh cells than
-    ``max_cells``."""
-    xs, ys = _polygon_cut_coordinates(polygon)
-    if len(xs) < 2 or len(ys) < 2:
-        return None, None, "it has no positive-area extent"
-    cells = (len(xs) - 1) * (len(ys) - 1)
-    if cells > max_cells:
-        return (
-            None,
-            None,
-            (
-                f"decomposing it needs up to {cells} mesh cells, over this build's "
-                f"{max_cells}-mesh-cell cap (MAX_DECOMPOSITION_CELLS)"
-            ),
-        )
-    return xs, ys, None
-
-
-def _decompose_manhattan_polygon(
-    polygon: kdb.Polygon, max_cells: int
-) -> tuple[list[tuple[int, int, kdb.Box]] | None, str | None]:
-    """Cut one merged, axis-aligned polygon into the grid of rectangles
-    formed by extending every vertex's x and y coordinate across it (issue
-    #2171).
-
-    Returns ``(cells, None)`` -- each cell a ``(column, row, box)`` triple
-    keyed to that grid, so two cells sharing a boundary always share the
-    *whole* side -- or ``(None, reason)`` when the polygon cannot be
-    decomposed exactly (not Manhattan, degenerate, or over the cell cap).
-    A caller must never fall back to the bounding box on a ``reason``: that
-    is the non-conservative approximation this function exists to replace.
-    """
-    import klayout.db as kdb
-
-    xs, ys, reason = _decomposition_grid(polygon, max_cells)
-    if xs is None or ys is None:
-        return None, reason
-    columns = {x: index for index, x in enumerate(xs)}
-    poly_region = kdb.Region(polygon)
-    cells: list[tuple[int, int, kdb.Box]] = []
-    for row in range(len(ys) - 1):
-        band = kdb.Region(kdb.Box(xs[0], ys[row], xs[-1], ys[row + 1])) & poly_region
-        for part in band.merged().each():
-            if not part.is_box():
-                return None, (
-                    "it is not axis-aligned (Manhattan), so it has no exact "
-                    "decomposition into rectangles"
-                )
-            box = part.bbox()
-            left, right = columns.get(box.left), columns.get(box.right)
-            if left is None or right is None:
-                return None, "its rectangles do not land on its own vertex grid"
-            for column in range(left, right):
-                cells.append(
-                    (
-                        column,
-                        row,
-                        kdb.Box(xs[column], ys[row], xs[column + 1], ys[row + 1]),
-                    )
-                )
-    if not cells:
-        return None, "it has no positive-area extent"
-    return cells, None
 
 
 def _cell_sides(
@@ -1137,6 +1049,7 @@ def _build_island_network(
     net_name: str,
     island_id: str,
     warnings: list[str],
+    max_decomposition_cells: int,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str | None]:
     """Build one electrically-connected island's node/edge lists -- see this
     module's docstring for the resistor-network model.
@@ -1227,7 +1140,7 @@ def _build_island_network(
                 )
             else:
                 cells, reason = _decompose_manhattan_polygon(
-                    polygon, MAX_DECOMPOSITION_CELLS
+                    polygon, max_decomposition_cells
                 )
                 if cells is None:
                     return (
@@ -2084,6 +1997,7 @@ def _build_net_islands(
     dbu: float,
     net_name: str,
     warnings: list[str],
+    max_decomposition_cells: int,
 ) -> tuple[list[dict[str, Any]], dict[str, tuple[float, float, float, float]]]:
     """One ``networks[].islands`` list: every matched net cluster turned
     into its own node/edge network, or reported with an
@@ -2108,6 +2022,7 @@ def _build_net_islands(
             net_name,
             island_id,
             warnings,
+            max_decomposition_cells,
         )
         if unsolved_reason is not None:
             warnings.append(
@@ -2202,6 +2117,11 @@ def run_power(
       current mode, additive to the static "current_a"),
       "supply_net"/"ground_net" (optional per-instance overrides)}]}``.
 
+    ``max_decomposition_cells`` (optional positive integer, default
+    :data:`MAX_DECOMPOSITION_CELLS`; issue #3124) is the mesh-cell cap a
+    non-rectangular merged polygon may need before its island is declared
+    unsolved. The effective value is echoed as a top-level key.
+
     ``top`` selects the top cell to analyse when the stream has more than
     one (required in that case, matching ``select_top_cells``'s convention
     -- see ``docs/cli/layers.md``'s ``--top``).
@@ -2252,6 +2172,7 @@ def run_power(
         stackup_names + [via["name"] for via in vias],
         PowerError,
     )
+    max_decomposition_cells = _validate_max_decomposition_cells(spec, spec_path)
     pads = _validate_pads(spec, spec_path, power_nets)
     instances = _validate_current_model(spec, spec_path, power_nets)
 
@@ -2360,6 +2281,7 @@ def run_power(
             dbu,
             net_name,
             warnings,
+            max_decomposition_cells,
         )
         net_extents[net_name] = extents
         total_islands += len(islands)
@@ -2447,6 +2369,7 @@ def run_power(
         "status": status,
         "coverage": coverage,
         "devices": devices_applied,
+        "max_decomposition_cells": max_decomposition_cells,
         "warnings": warnings,
         "provenance": provenance,
     }

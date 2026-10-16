@@ -5,11 +5,9 @@
 # check-promotion-landed.sh finds a single issue that carries a
 # "Champion Review: APPROVED" verdict comment but is missing `loom:issue`
 # (Step 3b's promotion write silently failing to land, as it did on issue
-# #6464 for 6 days), and with --apply completes the promotion by applying
-# loom:issue (verified by read-back). Since 2am#4345 there is no tier to
-# recover (tier labels are retired, rjwalters/loom#11103/#11512) and no
-# tier-unrecoverable escalation; a live `loom:operator` hold (the retired
-# `loom:operator-only`) still stops every write (#2193).
+# #6464 for 6 days), and with --apply either completes the promotion by
+# recovering the tier the original verdict named, or escalates to an
+# operator when the tier cannot be safely recovered.
 #
 # This is a black-box test: the script is a full CLI (no functions to
 # source), so `gh` is stubbed on PATH and the real script is invoked as a
@@ -33,53 +31,13 @@ SUT="$SCRIPTS_DIR/check-promotion-landed.sh"
 # than hard-coding one (mirrors test-champion-critical-file-check.sh, #6725).
 if [[ -d "$SCRIPTS_DIR/../../.claude/commands/loom" ]]; then
     PROMPT_DIR="$(cd "$SCRIPTS_DIR/../../.claude/commands/loom" && pwd)"
-    REPO_ROOT="$(cd "$SCRIPTS_DIR/../.." && pwd)"
 else
     PROMPT_DIR="$(cd "$SCRIPTS_DIR/../.claude/commands/loom" && pwd)"
-    REPO_ROOT="$(cd "$SCRIPTS_DIR/.." && pwd)"
 fi
 CHAMPION_MD="$PROMPT_DIR/champion-issue-promo.md"
-RESYNC_IGNORE="$REPO_ROOT/.loom/resync-ignore"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-NC='\033[0m'
-
-TESTS_RUN=0
-TESTS_PASSED=0
-TESTS_FAILED=0
-
-assert_eq() {
-    local expected="$1" actual="$2" msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if [[ "$expected" == "$actual" ]]; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Expected: '$expected'"
-        echo "    Actual:   '$actual'"
-    fi
-}
-
-# assert_contains/assert_not_contains use a pure-bash substring match (no
-# forked printf|grep pipeline) so a transient fork/exec failure under
-# run-ci-suites.sh's parallel suite pool can never masquerade as a genuine
-# content mismatch (#7819, #7874).
-assert_contains() {
-    local haystack="$1" needle="$2" msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if [[ "$haystack" == *"$needle"* ]]; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Expected substring: '$needle'"
-        echo "    In: '$haystack'"
-    fi
-}
+# shellcheck source=lib/assert.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
 assert_not_contains() {
     local haystack="$1" needle="$2" msg="$3"
@@ -91,7 +49,6 @@ assert_not_contains() {
         TESTS_FAILED=$((TESTS_FAILED + 1))
         echo -e "  ${RED}FAIL${NC}: $msg"
         echo "    Unexpected substring: '$needle'"
-        echo "    In: '$haystack'"
     fi
 }
 
@@ -160,8 +117,8 @@ case "$1" in
           canned="$STUB_DIR_FROM_ENV/verify-$num.json"
           # Every test that reaches the completing edit's read-back stages
           # its own verify-<N>.json (via stage_verify) -- the read-back is
-          # only ever reached on the --apply completing path, which this
-          # suite always pairs with an explicit fixture. Default to
+          # only ever reached on the --apply + tier-recovered path, which
+          # this suite always pairs with an explicit fixture. Default to
           # "still missing" (mirrors #6464's silent-drop) if one is somehow
           # absent, rather than guessing loom:issue landed.
           if [[ -f "$canned" ]]; then cat "$canned"; else echo '{"labels":[]}'; fi
@@ -204,6 +161,19 @@ case "$1" in
     ;;
   api)
     path="$2"
+    # #9548: the REST comment listing, taken from issue-<N>.json's
+    # `comments` (REST-shaped fixtures); fails if comments-fail-<N> exists.
+    if [[ "$path" == repos/*/issues/*/comments ]]; then
+      num="${path#repos/*/issues/}"
+      num="${num%/comments}"
+      if [[ -f "$STUB_DIR_FROM_ENV/comments-fail-$num" ]]; then
+        echo "stub gh: comments fetch failed" >&2
+        exit 1
+      fi
+      canned="$STUB_DIR_FROM_ENV/issue-$num.json"
+      if [[ -f "$canned" ]]; then jq -c '.comments // []' "$canned"; else echo "[]"; fi
+      exit 0
+    fi
     if [[ "$path" == repos/*/issues/*/timeline ]]; then
       num="${path#repos/*/issues/}"
       num="${num%/timeline}"
@@ -226,8 +196,34 @@ esac
 STUB
 chmod +x "$STUB_DIR/gh"
 
+# --- Stub loom-daemon on PATH (#9548) ---------------------------------------
+#   loom-daemon forge trusted-comments  -> stdin filtered to trusted authors,
+#       mirroring the real predicate for these fixtures' shapes (insider
+#       association, or the default fleet App family App-spelled);
+#       $STUB_DIR/trust-verb-missing simulates a binary predating the verb.
+cat > "$STUB_DIR/loom-daemon" <<'STUB'
+#!/usr/bin/env bash
+STUB_DIR_FROM_ENV="${LOOM_TEST_STUB_DIR:?stub loom-daemon: LOOM_TEST_STUB_DIR not set}"
+# $STUB_DIR/hold-labels: the registry's answer to `labels list --property hold
+# --with-retired` (#11795); absent, the query fails like an older binary.
+if [[ "$*" == "labels list --property hold --with-retired" && -f "$STUB_DIR_FROM_ENV/hold-labels" ]]; then
+  exec cat "$STUB_DIR_FROM_ENV/hold-labels"
+fi
+if [[ "$1" == "forge" && "$2" == "trusted-comments" && ! -f "$STUB_DIR_FROM_ENV/trust-verb-missing" ]]; then
+  exec jq -c '[.[] | select(
+      ((.author_association // "") | ascii_upcase | IN("OWNER","MEMBER","COLLABORATOR"))
+      or ((.user.login // "") | test("^loom-fleet-dispatch(-[0-9]+)?\\[bot\\]$")))]'
+fi
+echo "error: unrecognized subcommand '$2'" >&2
+exit 2
+STUB
+chmod +x "$STUB_DIR/loom-daemon"
+
 export LOOM_TEST_STUB_DIR="$STUB_DIR"
 export PATH="$STUB_DIR:$PATH"
+# A real daemon from the caller (CI exports LOOM_DAEMON_BIN) supplies (h3)'s registry answer.
+LOOM_TEST_REAL_DAEMON="${LOOM_TEST_REAL_DAEMON:-${LOOM_DAEMON_BIN:-}}"
+unset LOOM_DAEMON_BIN
 
 labels_json() {
     # labels_json [label ...] -> the `[{"name":...}, ...]` array body
@@ -239,13 +235,22 @@ labels_json() {
     printf '[%s]' "$labels"
 }
 
+# Fixture comments are REST-shaped and authored by the fleet App unless a test
+# says otherwise: the verdict counts only from a trusted author (#9548).
+FLEET_USER='"user":{"login":"loom-fleet-dispatch[bot]","type":"Bot"},"author_association":"NONE"'
+
 approved_comment() {
     # approved_comment <created_at> <goal-alignment-line>
-    printf '{"createdAt":"%s","body":"**Champion Review: APPROVED**\\n\\nAll criteria passed.\\n\\n%s\\n\\n**Ready for Builder to claim.**"}' "$1" "$2"
+    printf '{%s,"created_at":"%s","body":"**Champion Review: APPROVED**\\n\\nAll criteria passed.\\n\\n%s\\n\\n**Ready for Builder to claim.**"}' "$FLEET_USER" "$1" "$2"
+}
+
+# authored_approved_comment <created_at> <goal-line> <login> <association>
+authored_approved_comment() {
+    printf '{"user":{"login":"%s"},"author_association":"%s","created_at":"%s","body":"**Champion Review: APPROVED**\\n\\n%s"}' "$3" "$4" "$1" "$2"
 }
 
 plain_comment() {
-    printf '{"createdAt":"%s","body":"%s"}' "$1" "$2"
+    printf '{%s,"created_at":"%s","body":"%s"}' "$FLEET_USER" "$1" "$2"
 }
 
 # self_generated_comment <created_at> <marker> -- one of THIS SCRIPT's own
@@ -255,7 +260,7 @@ plain_comment() {
 # what let a prior run's own comment get mistaken for a fresh Champion
 # verdict on issue #7287 (#7299).
 self_generated_comment() {
-    printf '{"createdAt":"%s","body":"<!-- champion:promotion-landed-%s -->\\n**Champion: reconciliation note**\\n\\nThis issue carried a `Champion Review: APPROVED` verdict comment, but loom:issue was handled by a prior pass."}' "$1" "$2"
+    printf '{%s,"created_at":"%s","body":"<!-- champion:promotion-landed-%s -->\\n**Champion: reconciliation note**\\n\\nThis issue carried a `Champion Review: APPROVED` verdict comment, but loom:issue was handled by a prior pass."}' "$FLEET_USER" "$1" "$2"
 }
 
 issue_json() {
@@ -283,6 +288,7 @@ reset_state() {
     rm -f "$STUB_DIR"/issue-fail-* "$STUB_DIR"/verify-fail-* "$STUB_DIR"/timeline-fail-*
     rm -f "$STUB_DIR"/comment-fail-* "$STUB_DIR"/edit-fail-*
     rm -f "$STUB_DIR"/comment-writes.log "$STUB_DIR"/edit-writes.log
+    rm -f "$STUB_DIR"/comments-fail-* "$STUB_DIR"/trust-verb-missing
 }
 
 run_sut() {
@@ -310,7 +316,7 @@ assert_eq "" "$COMMENTS_POSTED" "(a) no comment posted"
 
 # (b) APPROVED comment present AND loom:issue already present -> OK, exit 0.
 reset_state
-issue_json "OPEN" "$(labels_json "loom:issue")" \
+issue_json "OPEN" "$(labels_json "loom:issue" "loom:important")" \
   "[$(approved_comment "2026-08-18T00:00:00Z" "**Goal Alignment**: Tier 3 (maintenance) - cleanup")]" \
   > "$STUB_DIR/issue-201.json"
 run_sut --issue 201
@@ -339,8 +345,9 @@ assert_eq "" "$EDITS" "(d) report-only: no label edit issued"
 assert_eq "" "$COMMENTS_POSTED" "(d) report-only: no comment posted"
 
 # (e) Same shape, WITH --apply, and the completing edit's read-back confirms
-#     loom:issue landed -> COMPLETED, exit 12, comment posted. The verdict's
-#     "Goal Alignment" prose no longer maps to a (retired) tier label.
+#     loom:issue landed -> COMPLETED, exit 12, comment posted. Since #11512
+#     the completing edit adds loom:issue only: an old verdict's "Goal
+#     Alignment: Tier N" line no longer maps to a (retired) tier label.
 reset_state
 issue_json "OPEN" "$(labels_json "loom:auditor")" \
   "[$(approved_comment "2026-08-18T00:00:00Z" "**Goal Alignment**: Tier 3 (maintenance) - cleanup")]" \
@@ -350,75 +357,74 @@ run_sut --issue 6464 --apply
 assert_eq "12" "$RC" "(e) --apply completes when the read-back confirms the label landed -> exit 12"
 assert_eq "COMPLETED" "$(get_field "$OUT" DECISION)" "(e) DECISION=COMPLETED"
 assert_contains "$EDITS" "loom:issue" "(e) the completing edit adds loom:issue"
-assert_not_contains "$EDITS" "tier:" "(e) the completing edit writes no retired tier label (2am#4345)"
-assert_not_contains "$OUT" "TIER=" "(e) no TIER output line (the tier contract is retired)"
+assert_not_contains "$EDITS" "tier:" "(e) the completing edit adds no retired tier label (#11512)"
 assert_contains "$COMMENTS_POSTED" "6464" "(e) a reconciliation comment is posted on the issue"
 
-# (f) A "Tier 1" Goal Alignment line in the verdict prose -> still just
-#     loom:issue; no retired tier label is written (2am#4345).
-reset_state
-issue_json "OPEN" "$(labels_json "loom:architect")" \
-  "[$(approved_comment "2026-08-18T00:00:00Z" "**Goal Alignment**: Tier 1 - directly implements the milestone")]" \
-  > "$STUB_DIR/issue-300.json"
-stage_verify 300 "$(labels_json "loom:issue")"
-run_sut --issue 300 --apply
-assert_eq "COMPLETED" "$(get_field "$OUT" DECISION)" "(f) DECISION=COMPLETED"
-assert_not_contains "$EDITS" "tier:goal-advancing" "(f) 'Tier 1' prose does not write tier:goal-advancing"
-
-# (g) Same for "Tier 2".
-reset_state
-issue_json "OPEN" "$(labels_json "loom:hermit")" \
-  "[$(approved_comment "2026-08-18T00:00:00Z" "**Goal Alignment**: Tier 2 - supports milestone infra")]" \
-  > "$STUB_DIR/issue-301.json"
-stage_verify 301 "$(labels_json "loom:issue")"
-run_sut --issue 301 --apply
-assert_eq "COMPLETED" "$(get_field "$OUT" DECISION)" "(g) DECISION=COMPLETED"
-assert_not_contains "$EDITS" "tier:goal-supporting" "(g) 'Tier 2' prose does not write tier:goal-supporting"
-
-# (h) --apply and the verdict names no tier at all (no "Goal Alignment" line)
-#     -> COMPLETED like any other mismatch. Before 2am#4345 this escalated to
-#     loom:operator-only,loom:operator-mechanical; with tiers retired there is
-#     nothing to recover, so nothing to escalate over (upstream #11512).
+# (f) A current verdict names no tier at all -> still COMPLETED, never an
+#     escalation (before #11512 an unrecoverable tier escalated to an operator).
 reset_state
 issue_json "OPEN" "$(labels_json "loom:curated")" \
-  "[$(approved_comment "2026-08-18T00:00:00Z" "no tier info here")]" \
+  "[$(approved_comment "2026-08-18T00:00:00Z" "**Goal Alignment**: advances the current milestone")]" \
   > "$STUB_DIR/issue-302.json"
-stage_verify 302 "$(labels_json "loom:curated" "loom:issue")"
+stage_verify 302 "$(labels_json "loom:issue" "loom:curated")"
 run_sut --issue 302 --apply
-assert_eq "12" "$RC" "(h) no tier info -> exit 12 (completed), not 13"
-assert_eq "COMPLETED" "$(get_field "$OUT" DECISION)" "(h) DECISION=COMPLETED"
-assert_contains "$EDITS" "loom:issue" "(h) the completing edit adds loom:issue"
-assert_not_contains "$EDITS" "loom:operator" "(h) no operator escalation label is written"
-assert_contains "$COMMENTS_POSTED" "302" "(h) a reconciliation comment is posted on the issue"
+assert_eq "12" "$RC" "(f) a verdict with no tier completes -> exit 12"
+assert_eq "COMPLETED" "$(get_field "$OUT" DECISION)" "(f) DECISION=COMPLETED"
+assert_not_contains "$EDITS" "loom:operator" "(f) no operator escalation"
 
-# (h2) #6942: re-invoking --apply against an issue a PRIOR (pre-2am#4345) run
-#     of this script escalated (the retired loom:operator-only, now migrated
-#     to loom:operator, is present) must NOT post a second escalation comment
-#     or run the label edit -- DECISION=ALREADY_ESCALATED, exit 0,
-#     distinguishable from a fresh ESCALATED (exit 13).
-#
-#     The fixture stages BOTH durable side effects that run left behind: the
-#     `loom:operator` label AND this script's own
-#     `<!-- champion:promotion-landed-mismatch -->` marker comment (posted
-#     BEFORE the label edit, so the label can never be ours without it). Since
-#     #2193 that marker is what distinguishes "this script escalated it"
-#     (ALREADY_ESCALATED) from "somebody else escalated it" (OK, case (w)
-#     below) -- staging the label alone would model a live external escalation,
-#     not a repeat of an earlier run's escalation.
+# (h2) #6942: an issue already carrying loom:operator (a pre-#11512 run
+#     escalated it, or an operator holds it) gets no label edit and no comment
+#     -- DECISION=ALREADY_ESCALATED, exit 0, distinguishable from ESCALATED (13).
 reset_state
 issue_json "OPEN" "$(labels_json "loom:curated" "loom:operator")" \
-  "[$(approved_comment "2026-08-18T00:00:00Z" "no tier info here"), $(self_generated_comment "2026-08-18T00:05:00Z" "mismatch")]" \
+  "[$(approved_comment "2026-08-18T00:00:00Z" "no tier info here")]" \
   > "$STUB_DIR/issue-302.json"
 run_sut --issue 302 --apply
 assert_eq "0" "$RC" "(h2) already loom:operator -> exit 0, not 13"
 assert_eq "ALREADY_ESCALATED" "$(get_field "$OUT" DECISION)" "(h2) DECISION=ALREADY_ESCALATED, distinguishable from fresh ESCALATED"
-assert_eq "" "$EDITS" "(h2) no duplicate label edit is issued"
-assert_eq "" "$COMMENTS_POSTED" "(h2) no duplicate escalation comment is posted"
+assert_eq "" "$EDITS" "(h2) no label edit is issued"
+assert_eq "" "$COMMENTS_POSTED" "(h2) no comment is posted"
 
-# (i) --apply, but the completing edit's OWN read-back still
-#     shows loom:issue missing (the exact #6464 failure mode recurring on the
-#     reconciliation attempt itself) -> ESCALATED, exit 13, never silently
-#     reports success it cannot verify.
+# (h3) #11795 transition: an issue carrying ONLY a retired hold name (not yet
+#     moved by `labels migrate`) is still held -- never promoted over, through
+#     the registry (--with-retired) and through the older-daemon fallback.
+REAL_DAEMON="${LOOM_TEST_REAL_DAEMON:-}"
+for retired in loom:operator-only loom:operator-blocked; do
+  for source in fallback registry; do
+    reset_state
+    rm -f "$STUB_DIR/hold-labels"
+    if [[ "$source" == "registry" ]]; then
+      if [[ -n "$REAL_DAEMON" && -x "$REAL_DAEMON" ]]; then
+        "$REAL_DAEMON" labels list --property hold --with-retired > "$STUB_DIR/hold-labels"
+      else
+        printf '%s\n' loom:blocked loom:operator loom:frozen loom:operator-only loom:operator-decision \
+          loom:operator-mechanical loom:operator-blocked loom:needs-capability > "$STUB_DIR/hold-labels"
+      fi
+    fi
+    issue_json "OPEN" "$(labels_json "loom:curated" "$retired")" \
+      "[$(approved_comment "2026-08-18T00:00:00Z" "no tier info here")]" \
+      > "$STUB_DIR/issue-302.json"
+    run_sut --issue 302 --apply
+    assert_eq "ALREADY_ESCALATED" "$(get_field "$OUT" DECISION)" "(h3) only $retired ($source) -> still held, ALREADY_ESCALATED"
+    assert_eq "" "$EDITS" "(h3) only $retired ($source) -> no loom:issue added"
+  done
+done
+rm -f "$STUB_DIR/hold-labels"
+
+# (h4) any hold, not only the operator's: an issue under loom:frozen is never
+#     promoted over either.
+reset_state
+issue_json "OPEN" "$(labels_json "loom:curated" "loom:frozen")" \
+  "[$(approved_comment "2026-08-18T00:00:00Z" "no tier info here")]" \
+  > "$STUB_DIR/issue-302.json"
+run_sut --issue 302 --apply
+assert_eq "ALREADY_ESCALATED" "$(get_field "$OUT" DECISION)" "(h4) loom:frozen -> held, ALREADY_ESCALATED"
+assert_eq "" "$EDITS" "(h4) loom:frozen -> no label edit"
+
+# (i) --apply, but the completing edit's OWN read-back still shows loom:issue
+#     missing (the exact #6464 failure mode recurring on the reconciliation
+#     attempt itself) -> ESCALATED, exit 13, never silently reports success it
+#     cannot verify.
 reset_state
 issue_json "OPEN" "$(labels_json "loom:auditor")" \
   "[$(approved_comment "2026-08-18T00:00:00Z" "**Goal Alignment**: Tier 3 (maintenance)")]" \
@@ -500,7 +506,7 @@ assert_eq "MISMATCH" "$(get_field "$OUT" DECISION)" "(o) DECISION=MISMATCH"
 # (p) Multiple APPROVED comments (re-evaluation): a `labeled loom:issue` event
 #     lands between the two APPROVED comments -- it postdates the OLDEST
 #     comment but predates the NEWEST one. The comparison must use the
-#     NEWEST comment (matching the existing `sort_by(.createdAt) | last`
+#     NEWEST comment (matching the existing `sort_by(.created_at) | last`
 #     selection for APPROVED_COMMENT), so this must still be MISMATCH, not OK.
 reset_state
 issue_json "OPEN" "$(labels_json "loom:auditor")" \
@@ -535,7 +541,7 @@ assert_eq "1" "$RC" "(r) gh api timeline failure -> exit 1"
 assert_contains "$ERR" "timeline" "(r) stderr names the failing gh api call"
 
 # --- #7299: issue #7287 incident regression. A single `gh issue edit
-# --add-label loom:issue --add-label <tier>` call (tiers since retired) landed cleanly (each label
+# --add-label loom:issue --add-label "$TIER"` call landed cleanly (each label
 # gets its own distinct timeline event, contrary to the issue's first
 # suspected-cause hypothesis -- see (t) below), but a SECOND run of this
 # script mis-selected its OWN prior completed-reconciliation comment (which
@@ -595,11 +601,11 @@ assert_eq "0" "$RC" "(u) loom:blocked present with no timeline evidence -> exit 
 assert_eq "OK" "$(get_field "$OUT" DECISION)" "(u) DECISION=OK"
 
 # (v) A single multi-label `gh issue edit --add-label loom:issue --add-label
-#     <other>` call DOES produce a distinct, matchable `labeled`/`loom:issue`
+#     "$TIER"` call DOES produce a distinct, matchable `labeled`/`loom:issue`
 #     timeline event of its own (confirmed against a real multi-label edit on
 #     this repo, #7299) -- so the Step 2 timeline match must not require the
 #     event to be the ONLY `labeled` event at that timestamp. Two `labeled`
-#     events share the same created_at (loom:issue and a second label from
+#     events share the same created_at (loom:issue and loom:important from
 #     one multi-label call); the loom:issue-specific one must still be found.
 reset_state
 issue_json "OPEN" "$(labels_json "loom:building")" \
@@ -607,78 +613,45 @@ issue_json "OPEN" "$(labels_json "loom:building")" \
   > "$STUB_DIR/issue-408.json"
 stage_timeline 408 "[$(labeled_event "2026-08-18T00:05:00Z"), {\"event\":\"labeled\",\"created_at\":\"2026-08-18T00:05:00Z\",\"label\":{\"name\":\"loom:important\"}}]"
 run_sut --issue 408
-assert_eq "0" "$RC" "(v) multi-label edit's loom:issue timeline event is found alongside a same-timestamp second label event -> exit 0"
+assert_eq "0" "$RC" "(v) multi-label edit's loom:issue timeline event is found alongside a same-timestamp loom:important event -> exit 0"
 assert_eq "OK" "$(get_field "$OUT" DECISION)" "(v) DECISION=OK"
 
-# --- #2193: a LIVE operator escalation must never be overwritten. (The
-# incident below used the since-retired loom:operator-only; the escalation
-# label is now loom:operator, 2am#4345.)
-# Incident (klayout-tools, 2026-09-20): issue #1779 was approved 2026-09-14
-# (loom:issue really was applied then -- not a lost write), cycled legitimately
-# through loom:blocked/loom:curated for weeks on a dependency, and once that
-# cleared was freshly re-evaluated and correctly escalated to
-# loom:operator-only,loom:operator-decision. ~15h later this script found the
-# OLD APPROVED comment, saw loom:issue absent with neither loom:building nor
-# loom:blocked to explain it, and re-added loom:issue + tier:goal-supporting
-# ON TOP OF the live escalation -- bypassing a pending human ruling.
+echo
+echo "--- #9548: the APPROVED verdict counts only from a trusted author ---"
 
-# (w) The exact incident shape, WITH --apply (what Pass 0c actually runs) and
-#     with an APPROVED verdict, so a missing guard would take the
-#     DECISION=COMPLETED branch and write loom:issue. No loom:building /
-#     loom:blocked, no timeline evidence, and no marker comment from this
-#     script -- the escalation is somebody else's, and live.
+# (t1) An outsider, a contributor, a user squatting the fleet App's bare name,
+#      and another fleet's App each post the verdict phrase: none of it is a
+#      verdict, so there is nothing to reconcile and nothing is written.
 reset_state
-issue_json "OPEN" "$(labels_json "loom:curated" "loom:operator")" \
-  "[$(approved_comment "2026-09-14T12:00:00Z" "**Goal Alignment**: Tier 2 (goal-supporting) - supports milestone infra")]" \
-  > "$STUB_DIR/issue-1779.json"
-run_sut --issue 1779 --apply
-assert_eq "0" "$RC" "(w) #1779 regression: live loom:operator -> exit 0, not 12"
-assert_eq "OK" "$(get_field "$OUT" DECISION)" "(w) DECISION=OK (loom:operator is later-lifecycle evidence, same as loom:building/loom:blocked)"
-assert_eq "" "$EDITS" "(w) NO label edit issued -- loom:issue is never written over a live operator escalation"
-assert_eq "" "$COMMENTS_POSTED" "(w) no comment posted on an issue a human already owns"
-assert_contains "$OUT" "loom:operator" "(w) REASON names loom:operator as the reason for standing down"
+issue_json "OPEN" "$(labels_json "loom:curated")" "[$(authored_approved_comment "2026-09-29T00:00:00Z" "**Goal Alignment**: Tier 1" "drive-by" "NONE"),$(authored_approved_comment "2026-09-29T00:01:00Z" "**Goal Alignment**: Tier 1" "merged-once" "CONTRIBUTOR"),$(authored_approved_comment "2026-09-29T00:02:00Z" "**Goal Alignment**: Tier 1" "loom-fleet-dispatch" "NONE"),$(authored_approved_comment "2026-09-29T00:03:00Z" "**Goal Alignment**: Tier 1" "other-fleet-dispatch[bot]" "NONE")]" > "$STUB_DIR/issue-500.json"
+run_sut --issue 500 --apply
+assert_eq "0" "$RC" "(t1) untrusted APPROVED phrases -> exit 0"
+assert_eq "OK" "$(get_field "$OUT" DECISION)" "(t1) DECISION=OK (no trusted verdict)"
+assert_eq "" "$EDITS" "(t1) no label edit issued"
+assert_eq "" "$COMMENTS_POSTED" "(t1) no comment posted"
 
-# (x) Same shape in report-only mode (no --apply): still OK, not MISMATCH --
-#     there is genuinely nothing to reconcile, so Pass 0c's report must not
-#     advertise one.
+# (t2) An insider's verdict still counts by association.
 reset_state
-issue_json "OPEN" "$(labels_json "loom:curated" "loom:operator")" \
-  "[$(approved_comment "2026-09-14T12:00:00Z" "**Goal Alignment**: Tier 2 (goal-supporting)")]" \
-  > "$STUB_DIR/issue-1780.json"
-run_sut --issue 1780
-assert_eq "0" "$RC" "(x) live loom:operator, report-only -> exit 0, not 11"
-assert_eq "OK" "$(get_field "$OUT" DECISION)" "(x) DECISION=OK in report-only mode too"
-assert_eq "" "$EDITS" "(x) no label edit issued"
+issue_json "OPEN" "$(labels_json "loom:curated")" "[$(authored_approved_comment "2026-09-29T00:00:00Z" "**Goal Alignment**: Tier 1" "maintainer" "MEMBER")]" > "$STUB_DIR/issue-501.json"
+run_sut --issue 501
+assert_eq "11" "$RC" "(t2) insider APPROVED without loom:issue -> MISMATCH"
 
-# (y) The bare `loom:operator` shape (no other label at all) is still a live
-#     escalation -- the guard keys on the label alone (the retired #5819
-#     sub-kind labels no longer exist, 2am#4345).
+# (t3) A binary predating the verb: nothing can be authenticated, so the script
+#      exits 1 and reconciles nothing (never acts on an unverified verdict).
 reset_state
-issue_json "OPEN" "$(labels_json "loom:operator")" \
-  "[$(approved_comment "2026-09-14T12:00:00Z" "**Goal Alignment**: Tier 1 - directly implements the milestone")]" \
-  > "$STUB_DIR/issue-1781.json"
-run_sut --issue 1781 --apply
-assert_eq "0" "$RC" "(y) bare loom:operator -> exit 0"
-assert_eq "OK" "$(get_field "$OUT" DECISION)" "(y) DECISION=OK"
-assert_eq "" "$EDITS" "(y) no label edit issued"
+issue_json "OPEN" "$(labels_json "loom:curated")" "[$(approved_comment "2026-09-29T00:00:00Z" "**Goal Alignment**: Tier 1")]" > "$STUB_DIR/issue-502.json"
+: > "$STUB_DIR/trust-verb-missing"
+run_sut --issue 502 --apply
+assert_eq "1" "$RC" "(t3) old loom-daemon -> exit 1"
+assert_contains "$ERR" "authenticate" "(t3) stderr names the authentication failure"
+assert_eq "" "$EDITS" "(t3) no label edit issued"
 
-# (z) The self-escalated counterpart of (w): loom:operator IS present and
-#     this script's own mismatch marker comment is on the issue (a prior run
-#     escalated it), and the genuine verdict comment is otherwise completable.
-#     The completing edit must STILL not run -- "never write loom:issue onto
-#     loom:operator" has no exception -- and the outcome stays reported as ALREADY_ESCALATED rather
-#     than collapsing into OK, so the two escalation origins remain
-#     distinguishable in Pass 0c's output (#6942).
+# (t4) A failed comment fetch is an environment error, not "no verdict".
 reset_state
-issue_json "OPEN" "$(labels_json "loom:curated" "loom:operator")" \
-  "[$(approved_comment "2026-08-18T00:00:00Z" "**Goal Alignment**: Tier 3 (maintenance) - cleanup"), $(self_generated_comment "2026-08-18T00:05:00Z" "mismatch")]" \
-  > "$STUB_DIR/issue-409.json"
-stage_verify 409 "$(labels_json "loom:issue")"
-run_sut --issue 409 --apply
-assert_eq "0" "$RC" "(z) self-escalated loom:operator -> exit 0, not 12"
-assert_eq "ALREADY_ESCALATED" "$(get_field "$OUT" DECISION)" "(z) DECISION=ALREADY_ESCALATED (own marker comment distinguishes it from a live external escalation)"
-assert_eq "" "$EDITS" "(z) the completing loom:issue edit is unreachable while loom:operator is present"
-assert_eq "" "$COMMENTS_POSTED" "(z) no duplicate escalation comment is posted"
+issue_json "OPEN" "$(labels_json "loom:curated")" "[]" > "$STUB_DIR/issue-503.json"
+: > "$STUB_DIR/comments-fail-503"
+run_sut --issue 503
+assert_eq "1" "$RC" "(t4) comment fetch failure -> exit 1"
 
 echo
 echo "--- Doc pins: champion-issue-promo.md ships the reordered write-then-verify Step 3b and the Pass 0c reconciliation loop (#6862) ---"
@@ -702,26 +675,6 @@ assert_doc_contains "$CHAMPION_MD" \
 assert_doc_contains "$CHAMPION_MD" \
     "#6862" \
     "champion-issue-promo.md documents the #6862 promotion-write-reliability fix"
-
-echo
-echo "--- Doc pins: resync-ignore pins the locally-fixed files (#2193) ---"
-
-# The #2193 fix lives in an INSTALLED Loom surface (.loom/scripts/), which the
-# routine `chore: resync installed Loom surfaces` commit overwrites from
-# upstream's template unless the path is pinned. Without these pins the guard
-# silently reverts and the #1779 incident recurs -- the same reversion pattern
-# already recorded for #606/#662/#1292/#1316/#1356/#1546/#1674/#1898/#2020.
-assert_doc_contains "$RESYNC_IGNORE" \
-    "scripts/check-promotion-landed.sh" \
-    "check-promotion-landed.sh is pinned in .loom/resync-ignore"
-
-assert_doc_contains "$RESYNC_IGNORE" \
-    "scripts/tests/test-check-promotion-landed.sh" \
-    "this test file is pinned in .loom/resync-ignore alongside its SUT"
-
-assert_doc_contains "$RESYNC_IGNORE" \
-    "#2193" \
-    ".loom/resync-ignore documents the #2193 rationale for these pins"
 
 echo
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed"

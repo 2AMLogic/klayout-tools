@@ -44,6 +44,7 @@ from klayout_tools.signoff import (
     build_tier_report,
     check_fleet_report,
     check_tier_report,
+    input_set_digest,
 )
 
 # Since issue #2176 a tier/fleet report carries the running build's identity
@@ -3127,6 +3128,59 @@ def test_generic_pass_check_passes(tmp_path):
     assert check["provenance"] is None
 
 
+GENERIC_PASS_PARTIAL_COVERAGE_ENVELOPE = {
+    **GENERIC_PASS_ENVELOPE,
+    "coverage": build_check_coverage(
+        checked=["row.1"],
+        skipped=[{"id": "row.2", "reason": "absent_input_layer"}],
+    ),
+}
+
+
+def test_generic_pass_with_skipped_work_is_partial_not_met(tmp_path):
+    """Issue #2906: a wrapper's `status: pass` cannot outvote its own
+    coverage block's skipped work; the qualification is still disclosed."""
+    path = _write(tmp_path, "gen.json", GENERIC_PASS_PARTIAL_COVERAGE_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"8": path}))
+    aggregate = build_signoff([path])
+
+    item_8 = next(item for item in result["items"] if item["id"] == 8)
+    assert item_8["status"] == "unmet"
+    assert item_8["reason"] == "partial_coverage"
+    check = aggregate["checks"][0]
+    assert check["passed"] is False
+    assert check["detail"]["coverage_qualification"]["reason"] == "partial_coverage"
+
+
+def test_generic_pass_with_complete_or_legacy_coverage_still_passes(tmp_path):
+    full = _write(
+        tmp_path,
+        "full.json",
+        {**GENERIC_PASS_ENVELOPE, "coverage": build_check_coverage(checked=["row.1"])},
+    )
+    legacy = _write(tmp_path, "legacy.json", GENERIC_PASS_ENVELOPE)
+
+    assert build_signoff([full])["checks"][0]["passed"] is True
+    assert build_signoff([legacy])["checks"][0]["passed"] is True
+
+
+def test_generic_inapplicable_work_does_not_downgrade(tmp_path):
+    path = _write(
+        tmp_path,
+        "inap.json",
+        {
+            **GENERIC_PASS_ENVELOPE,
+            "coverage": build_check_coverage(
+                checked=["row.1"],
+                inapplicable=[{"id": "row.2", "reason": "not_applicable"}],
+            ),
+        },
+    )
+
+    assert build_signoff([path])["checks"][0]["passed"] is True
+
+
 def test_generic_fail_check_fails(tmp_path):
     path = _write(tmp_path, "characterization.json", GENERIC_FAIL_ENVELOPE)
 
@@ -4772,6 +4826,80 @@ def test_yield_undersized_sample_outranks_an_undetected_negative_control(tmp_pat
     assert item_6["reason"] == "undersized_sample"
 
 
+def _pinned_campaign_item(tmp_path, measurement, pin, *, samples_exists=True):
+    """Item 6 for a campaign refused on ``measurement``, cited with ``pin``
+    (``"live"`` pins the samples document's real hash; issue #3063)."""
+    samples_path = tmp_path / "mc-samples.json"
+    if samples_exists:
+        samples_path.write_text(json.dumps({"measurements": []}))
+    envelope = {**_yield_envelope(measurement), "samples": str(samples_path)}
+    yield_path = _write(tmp_path, "yield.json", envelope)
+    if pin == "live":
+        pin = "sha256:" + hashlib.sha256(samples_path.read_bytes()).hexdigest()
+    evidence = yield_path if pin is None else {"file": yield_path, "content_hash": pin}
+    result = build_tier_report(_manifest(evidence={"6": evidence}))
+    return next(item for item in result["items"] if item["id"] == 6)
+
+
+def test_yield_undersized_sample_discloses_stale_content_hash_pin(tmp_path):
+    """Issue #3063: a stale pin is visible beside `undersized_sample`, and the
+    verdict is unchanged."""
+    item = _pinned_campaign_item(
+        tmp_path, _yield_measurement(sample_size_verdict="insufficient"), "sha256:bad"
+    )
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "undersized_sample"
+    assert item["detail"]["content_hash_pin"] == "stale"
+    assert "yield_campaign" in item["detail"]
+
+
+def test_yield_undersized_sample_discloses_verified_content_hash_pin(tmp_path):
+    item = _pinned_campaign_item(
+        tmp_path, _yield_measurement(sample_size_verdict="insufficient"), "live"
+    )
+
+    assert item["reason"] == "undersized_sample"
+    assert item["detail"]["content_hash_pin"] == "verified"
+
+
+def test_yield_undersized_sample_without_pin_has_no_content_hash_pin(tmp_path):
+    item = _pinned_campaign_item(
+        tmp_path, _yield_measurement(sample_size_verdict="insufficient"), None
+    )
+
+    assert item["reason"] == "undersized_sample"
+    assert "content_hash_pin" not in item["detail"]
+
+
+def test_yield_undersized_sample_missing_samples_pin_is_unverifiable(tmp_path):
+    item = _pinned_campaign_item(
+        tmp_path,
+        _yield_measurement(sample_size_verdict="insufficient"),
+        "sha256:pinned",
+        samples_exists=False,
+    )
+
+    assert item["reason"] == "undersized_sample"
+    assert item["detail"]["content_hash_pin"] == "unverifiable"
+
+
+def test_yield_negative_control_not_detected_discloses_stale_pin(tmp_path):
+    item = _pinned_campaign_item(
+        tmp_path, _yield_measurement(negative_control="not_detected"), "sha256:bad"
+    )
+
+    assert item["reason"] == "negative_control_not_detected"
+    assert item["detail"]["content_hash_pin"] == "stale"
+
+
+def test_yield_met_item_has_no_content_hash_pin_detail(tmp_path):
+    item = _pinned_campaign_item(tmp_path, _yield_measurement(), "live")
+
+    assert item["status"] == "met"
+    assert "content_hash_pin" not in item.get("detail", {})
+
+
 def test_yield_no_negative_control_declared_renders_met_with_disclosure(tmp_path):
     """Issue #2467: `klt yield` itself treats an undeclared negative control
     as a run-level *warning*, not a failing status (docs/cli/yield.md: "there
@@ -6145,6 +6273,229 @@ def test_anchored_binding_is_shown_in_text_output(tmp_path, capsys):
     assert exit_code in (0, 3)
     assert "bound: T1 item #9 -> testbenches.txt" in out
     assert "topic: not bound" in out
+
+
+# --------------------------------------------------------------------------- #
+# Set-bound generic evidence: provenance.input.paths (issue #3044)
+# --------------------------------------------------------------------------- #
+
+
+def _set_members(tmp_path, names=("a.sch", "b.sch", "ota.spice")):
+    for name in names:
+        (tmp_path / name).write_text(f"content of {name}\n")
+    return [{"path": name, "content_hash": _hash_of(tmp_path / name)} for name in names]
+
+
+def _set_generic(tmp_path, item_id=1, *, members=None, combined=None, extra=None):
+    """Write an item-``item_id`` generic envelope bound to a set. Returns
+    ``(envelope path, combined digest)``."""
+    members = _set_members(tmp_path) if members is None else members
+    digest = combined or input_set_digest(
+        (m["path"], m["content_hash"]) for m in members
+    )
+    envelope = {
+        "schema_version": 1,
+        "kind": "generic",
+        "status": "pass",
+        "t1_item": item_id,
+        "summary": "design sources attested",
+        "provenance": {
+            "klt_version": "0.5.0",
+            "klayout_version": "0.30.10",
+            "pdk": None,
+            "deck": None,
+            "input": {"content_hash": digest, "paths": members, **(extra or {})},
+        },
+    }
+    return _write(tmp_path, f"item{item_id}.json", envelope), digest
+
+
+def _grade_set(envelope_path, digest, item_id=1, **kwargs):
+    result = build_tier_report(
+        _manifest(
+            evidence={str(item_id): {"file": envelope_path, "content_hash": digest}}
+        ),
+        **kwargs,
+    )
+    return _item(result, item_id)
+
+
+@pytest.mark.parametrize("item_id", [1, 2, 9, 10])
+def test_fresh_set_binding_is_met_and_lists_members(tmp_path, item_id):
+    envelope_path, digest = _set_generic(tmp_path, item_id)
+
+    item = _grade_set(envelope_path, digest, item_id)
+
+    assert item["status"] == "met"
+    binding = item["citation"]["artifact_binding"]
+    assert item["citation"]["input_verified"] is True
+    assert binding["content_hash"] == digest
+    assert binding["path"] is None
+    assert [m["path"] for m in binding["members"]] == ["a.sch", "b.sch", "ota.spice"]
+    assert {m["status"] for m in binding["members"]} == {"verified"}
+
+
+def test_editing_one_member_renders_stale_and_names_it(tmp_path):
+    envelope_path, digest = _set_generic(tmp_path)
+    (tmp_path / "b.sch").write_text("edited after attestation\n")
+
+    item = _grade_set(envelope_path, digest)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "stale_evidence"
+    statuses = {
+        m["path"]: m["status"] for m in item["detail"]["artifact_binding"]["members"]
+    }
+    assert statuses == {"a.sch": "verified", "b.sch": "stale", "ota.spice": "verified"}
+
+
+def test_deleted_member_is_unverifiable_never_met(tmp_path):
+    envelope_path, digest = _set_generic(tmp_path)
+    (tmp_path / "ota.spice").unlink()
+
+    item = _grade_set(envelope_path, digest)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "unverifiable_provenance"
+    assert item["detail"]["artifact_binding"]["members"][2]["status"] == "unverifiable"
+
+
+def test_repo_scoped_members_need_a_root(tmp_path):
+    members = _set_members(tmp_path)
+    scoped = [
+        {
+            "path": {"path": m["path"], "scope": "repo"},
+            "content_hash": m["content_hash"],
+        }
+        for m in members
+    ]
+    digest = input_set_digest((m["path"], m["content_hash"]) for m in members)
+    envelope_path, _ = _set_generic(tmp_path, members=scoped, combined=digest)
+
+    outside = _grade_set(envelope_path, digest)
+    assert outside["status"] == "unmet"
+    assert outside["reason"] == "unverifiable_provenance"
+
+    inside = _grade_set(envelope_path, digest, repo_root=str(tmp_path))
+    assert inside["status"] == "met"
+
+
+def test_rewritten_member_hashes_without_updating_the_digest_are_stale(tmp_path):
+    """An attester who edits a member and re-records only its hash still
+    carries the old combined digest (matching the manifest pin): the digest
+    no longer follows from the members, so the row is stale."""
+    envelope_path, digest = _set_generic(tmp_path)
+    (tmp_path / "b.sch").write_text("edited after attestation\n")
+    envelope = json.loads(Path(envelope_path).read_text())
+    for member in envelope["provenance"]["input"]["paths"]:
+        member["content_hash"] = _hash_of(tmp_path / member["path"])
+    Path(envelope_path).write_text(json.dumps(envelope))
+
+    item = _grade_set(envelope_path, digest)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "stale_evidence"
+
+
+def test_rewritten_digest_without_updating_the_pin_is_stale(tmp_path):
+    envelope_path, old_digest = _set_generic(tmp_path)
+    (tmp_path / "b.sch").write_text("edited after attestation\n")
+    members = [
+        {"path": n, "content_hash": _hash_of(tmp_path / n)}
+        for n in ("a.sch", "b.sch", "ota.spice")
+    ]
+    envelope_path, _ = _set_generic(tmp_path, members=members)
+
+    item = _grade_set(envelope_path, old_digest)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "stale_evidence"
+
+
+def test_combined_digest_is_independent_of_member_order():
+    pairs = [("b", "sha256:" + "2" * 64), ("a", "sha256:" + "1" * 64)]
+    assert input_set_digest(pairs) == input_set_digest(reversed(pairs))
+    assert input_set_digest(pairs) != input_set_digest(
+        [("a", "sha256:" + "2" * 64), ("b", "sha256:" + "1" * 64)]
+    )
+
+
+def test_combined_digest_matches_the_documented_sha256sum_recipe(tmp_path):
+    members = _set_members(tmp_path)
+    body = "".join(
+        f"{m['content_hash'].removeprefix('sha256:')}  {m['path']}\n" for m in members
+    )
+    expected = "sha256:" + hashlib.sha256(body.encode()).hexdigest()
+    assert input_set_digest((m["path"], m["content_hash"]) for m in members) == expected
+
+
+@pytest.mark.parametrize(
+    "bad_paths",
+    [
+        [],
+        "a.sch",
+        ["a.sch"],
+        [{"path": "a.sch"}],
+        [{"path": "", "content_hash": "sha256:00"}],
+        [{"path": "a.sch", "content_hash": True}],
+        [{"path": "a.sch", "content_hash": 7}],
+        [{"path": "a.sch", "content_hash": ""}],
+        [{"path": {"path": "a.sch", "scope": "external"}, "content_hash": "sha256:00"}],
+        [
+            {"path": "a.sch", "content_hash": "sha256:00"},
+            {"path": "a.sch", "content_hash": "sha256:00"},
+        ],
+    ],
+)
+def test_malformed_set_renders_unanchored(tmp_path, bad_paths):
+    envelope_path, digest = _set_generic(
+        tmp_path, members=bad_paths, combined="sha256:00"
+    )
+
+    item = _grade_set(envelope_path, "sha256:00")
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "unanchored_evidence"
+
+
+def test_malformed_set_does_not_fall_back_to_the_single_path(tmp_path):
+    envelope_path, digest = _anchored_generic(tmp_path, 1)
+    envelope = json.loads(Path(envelope_path).read_text())
+    envelope["provenance"]["input"]["paths"] = []
+    Path(envelope_path).write_text(json.dumps(envelope))
+
+    item = _grade_set(envelope_path, digest)
+
+    assert item["reason"] == "unanchored_evidence"
+
+
+def test_single_path_binding_is_unchanged_by_the_set_form(tmp_path):
+    envelope_path, digest = _anchored_generic(tmp_path, 1)
+
+    item = _grade_set(envelope_path, digest)
+
+    assert item["status"] == "met"
+    assert "members" not in item["citation"]["artifact_binding"]
+    assert "detail" not in item
+
+
+def test_set_binding_is_shown_in_text_output(tmp_path, capsys):
+    envelope_path, digest = _set_generic(tmp_path)
+    manifest_path = _write(
+        tmp_path,
+        "manifest.json",
+        _manifest(evidence={"1": {"file": envelope_path, "content_hash": digest}}),
+    )
+    assert main(["signoff", "--manifest", manifest_path, "--format", "text"]) in (0, 3)
+    out = capsys.readouterr().out
+    assert "bound: T1 item #1 -> 3 members" in out
+    assert "member b.sch: verified" in out
+
+    (tmp_path / "b.sch").write_text("edited\n")
+    main(["signoff", "--manifest", manifest_path, "--format", "text"])
+    out = capsys.readouterr().out
+    assert "reason: stale_evidence" in out
+    assert "member b.sch: stale" in out
 
 
 def test_command_evidence_generic_wrong_kind_renders_unmet(monkeypatch):
@@ -9554,6 +9905,33 @@ def test_item_11_digital_met_with_pdn_erc_and_power_connectivity(tmp_path):
         # fabricated zero.
         "supply_unlabelled_islands": {},
     }
+
+
+def test_item_11_grades_a_compact_erc_envelope_like_the_full_one(tmp_path):
+    """Issue #2965: `klt erc --findings-only --compact` empties `gates` (still
+    a list) and adds a `compact` counts block; item 11 grades it identically."""
+    compact = {
+        **ERC_CLEAN_ENVELOPE,
+        "gates": [],
+        "compact": {"gate_count": 1, "skipped_reason": "findings_only"},
+    }
+    results = []
+    for envelope in (ERC_CLEAN_ENVELOPE, compact):
+        item = _item_11(
+            build_tier_report(
+                _manifest(
+                    kind="digital",
+                    evidence={
+                        "11": _power_delivery_evidence(
+                            tmp_path, kind="digital", erc_envelope=envelope
+                        )
+                    },
+                )
+            )
+        )
+        results.append((item["status"], item["reason"]))
+
+    assert results[0] == results[1] == ("met", None)
 
 
 def test_item_11_analog_met_with_supply_net_correspondence(tmp_path):
@@ -14809,3 +15187,239 @@ def test_item6_not_applicable_text_and_fleet_output(tmp_path, capsys):
     assert block["tier"] == "T1"
     assert block["t1_not_applicable_count"] == 1
     assert block["blocking_item"] is None
+
+
+# --------------------------------------------------------------------------- #
+# Item 5: several citations + declared spec rows (issue #2959)
+# --------------------------------------------------------------------------- #
+
+
+def _item5(evidence, spec_rows=None, **overrides) -> dict:
+    manifest = _manifest(evidence=evidence, **overrides)
+    if spec_rows is not None:
+        manifest["spec_rows"] = {"5": spec_rows}
+    return next(i for i in build_tier_report(manifest)["items"] if i["id"] == 5)
+
+
+def test_item5_one_passing_one_failing_citation_is_unmet_and_names_the_failure(
+    tmp_path,
+):
+    good = _write(tmp_path, "good.json", SIM_PASS_ENVELOPE)
+    bad = _write(tmp_path, "bad.json", SIM_FAIL_ENVELOPE)
+
+    item = _item5({"5": [good, bad]})
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "check_failed"
+    assert item["detail"]["failed_citations"] == [bad]
+    assert [c["status"] for c in item["citations_graded"]] == ["met", "unmet"]
+
+
+def test_item5_multiple_passing_citations_without_rows_is_met(tmp_path):
+    a = _write(tmp_path, "a.json", SIM_PASS_ENVELOPE)
+    b = _write(tmp_path, "b.json", SIM_PASS_ENVELOPE)
+
+    item = _item5({"5": [a, {"file": b}]})
+
+    assert item["status"] == "met"
+    assert item["citation"]["kind"] == "sim"
+    assert len(item["citations"]) == 2
+
+
+def test_item5_declared_rows_with_one_uncovered_is_partial_coverage(tmp_path):
+    a = _write(tmp_path, "a.json", SIM_PASS_ENVELOPE)
+    b = _write(tmp_path, "b.json", SIM_PASS_ENVELOPE)
+    rows = [{"id": "tdec"}, {"id": "zin"}, {"id": "mc"}]
+
+    item = _item5(
+        {"5": [{"file": a, "rows": ["tdec"]}, {"file": b, "rows": ["zin"]}]}, rows
+    )
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "partial_coverage"
+    assert item["detail"]["uncovered_rows"] == ["mc"]
+    assert item["detail"]["failed_rows"] == []
+    assert item["detail"]["declared_gaps"] == []
+
+
+def test_item5_declared_gap_row_is_reported_apart_and_never_met(tmp_path):
+    a = _write(tmp_path, "a.json", SIM_PASS_ENVELOPE)
+    rows = [{"id": "tdec"}, {"id": "zin", "gap": "multi-solve reduction"}]
+
+    item = _item5({"5": [{"file": a, "rows": ["tdec"]}]}, rows)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "partial_coverage"
+    assert item["detail"]["uncovered_rows"] == []
+    assert item["detail"]["declared_gaps"] == [
+        {"id": "zin", "gap": "multi-solve reduction"}
+    ]
+
+
+def test_item5_all_declared_rows_covered_is_met_with_row_coverage(tmp_path):
+    a = _write(tmp_path, "a.json", SIM_PASS_ENVELOPE)
+
+    item = _item5(
+        {"5": [{"file": a, "rows": ["tdec", "zin"]}]}, [{"id": "tdec"}, {"id": "zin"}]
+    )
+
+    assert item["status"] == "met"
+    assert item["row_coverage"]["uncovered_rows"] == []
+
+
+def test_item5_failing_citation_rows_are_listed_as_failed_rows(tmp_path):
+    a = _write(tmp_path, "a.json", SIM_PASS_ENVELOPE)
+    bad = _write(tmp_path, "bad.json", SIM_FAIL_ENVELOPE)
+
+    item = _item5(
+        {"5": [{"file": a, "rows": ["tdec"]}, {"file": bad, "rows": ["zin"]}]},
+        [{"id": "tdec"}, {"id": "zin"}],
+    )
+
+    assert item["status"] == "unmet"
+    assert item["detail"]["failed_rows"] == ["zin"]
+    assert item["detail"]["uncovered_rows"] == []
+
+
+@pytest.mark.parametrize(
+    "entry, rows",
+    [
+        ([], None),
+        (["a.json", 42], None),
+        ([{"file": "a.json", "rows": "tdec"}], None),
+        ([{"file": "a.json", "rows": ["undeclared"]}], [{"id": "tdec"}]),
+        ([{"file": "a.json", "rows": ["zin"]}], [{"id": "zin", "gap": "no bench"}]),
+        (["a.json"], [{"id": "x"}, {"id": "x"}]),
+    ],
+)
+def test_item5_malformed_list_degrades_only_item_5(tmp_path, entry, rows):
+    good = _write(tmp_path, "good.json", SIM_PASS_ENVELOPE)
+    manifest = _manifest(evidence={"5": entry, "8": good})
+    if rows is not None:
+        manifest["spec_rows"] = {"5": rows}
+
+    report = build_tier_report(manifest)
+
+    item = next(i for i in report["items"] if i["id"] == 5)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "invalid_evidence"
+    assert {i["id"] for i in report["items"] if i["tier"] == "T1"} >= {5, 8}
+
+
+def test_item5_stale_content_hash_on_one_member_is_unmet(tmp_path):
+    good = _write(tmp_path, "good.json", SIM_PASS_ENVELOPE)
+    other = _write(tmp_path, "other.json", SIM_PASS_ENVELOPE)
+
+    item = _item5({"5": [good, {"file": other, "content_hash": "sha256:stale"}]})
+
+    assert item["status"] == "unmet"
+    assert item["detail"]["failed_citations"] == [other]
+
+
+def test_item5_single_citation_report_is_unchanged(tmp_path):
+    sim = _write(tmp_path, "sim.json", SIM_PASS_ENVELOPE)
+
+    item = _item5({"5": sim})
+
+    assert item["status"] == "met"
+    assert "citations" not in item
+    assert "citations_graded" not in item
+    assert "row_coverage" not in item
+
+
+def test_item5_list_in_another_item_is_still_invalid(tmp_path):
+    sim = _write(tmp_path, "sim.json", SIM_PASS_ENVELOPE)
+    report = build_tier_report(_manifest(evidence={"8": [sim]}))
+    item_8 = next(i for i in report["items"] if i["id"] == 8)
+    assert item_8["reason"] == "invalid_evidence"
+
+
+# --- Issue #3258: opt-in `require_annotation_complete` on `sta` evidence ----
+
+
+def _sta_with_annotation(corner_blocks: list) -> dict:
+    """The clean multi-corner `klt sta` envelope with each corner's
+    ``spef_annotation`` replaced, in corner order."""
+    corners = [
+        {**corner, "spef_annotation": block}
+        for corner, block in zip(
+            STA_MULTI_CORNER_CLEAN_ENVELOPE["corners"], corner_blocks, strict=True
+        )
+    ]
+    return {**STA_MULTI_CORNER_CLEAN_ENVELOPE, "corners": corners}
+
+
+def _grade_sta_item_5(tmp_path, envelope: dict, **entry_extra):
+    path = _write(tmp_path, "sta.json", envelope)
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={"5.digital": {"file": path, **entry_extra}},
+        )
+    )
+    return next(item for item in result["items"] if item["id"] == 5)
+
+
+_ANNOTATED = {"annotation_complete": True, "annotation_warning": None}
+_UNANNOTATED = {
+    "annotation_complete": False,
+    "annotation_warning": "delay_changed was false: parasitics not applied",
+}
+
+
+def test_require_annotation_complete_passes_when_every_corner_complete(tmp_path):
+    envelope = _sta_with_annotation([_ANNOTATED, _ANNOTATED])
+    item = _grade_sta_item_5(tmp_path, envelope, require_annotation_complete=True)
+    assert item["status"] == "met"
+
+
+def test_require_annotation_complete_fails_with_warning_in_detail(tmp_path):
+    envelope = _sta_with_annotation([_ANNOTATED, _UNANNOTATED])
+    item = _grade_sta_item_5(tmp_path, envelope, require_annotation_complete=True)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "check_failed"
+    (shortfall,) = item["detail"]["sta_annotation_incomplete"]
+    assert shortfall["corner"] == "tt_025C_1v80"  # non-worst corner still counts
+    assert "parasitics not applied" in shortfall["annotation_warning"]
+
+
+def test_annotation_incomplete_unchanged_when_option_not_set(tmp_path):
+    envelope = _sta_with_annotation([_UNANNOTATED, _UNANNOTATED])
+    assert _grade_sta_item_5(tmp_path, envelope)["status"] == "met"
+    item = _grade_sta_item_5(tmp_path, envelope, require_annotation_complete=False)
+    assert item["status"] == "met"
+
+
+@pytest.mark.parametrize("block", [None, "absent"])
+def test_require_annotation_complete_no_effect_without_spef_annotation(tmp_path, block):
+    """Absent/null `spef_annotation` (no SPEF supplied): option is a no-op."""
+    envelope = _sta_with_annotation([None, None])
+    if block == "absent":
+        for corner in envelope["corners"]:
+            del corner["spef_annotation"]
+    item = _grade_sta_item_5(tmp_path, envelope, require_annotation_complete=True)
+    assert item["status"] == "met"
+
+
+@pytest.mark.parametrize(
+    "block", [{}, {"annotation_complete": None}, {"annotation_complete": "yes"}]
+)
+def test_require_annotation_complete_fails_closed_on_non_true(tmp_path, block):
+    envelope = _sta_with_annotation([_ANNOTATED, block])
+    item = _grade_sta_item_5(tmp_path, envelope, require_annotation_complete=True)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "check_failed"
+
+
+def test_require_annotation_complete_flat_single_corner_shape(tmp_path):
+    envelope = {**STA_SINGLE_CORNER_CLEAN_ENVELOPE, "spef_annotation": _UNANNOTATED}
+    item = _grade_sta_item_5(tmp_path, envelope, require_annotation_complete=True)
+    assert item["status"] == "unmet"
+    assert _grade_sta_item_5(tmp_path, envelope)["status"] == "met"
+
+
+def test_require_annotation_complete_non_boolean_entry_is_invalid_evidence(tmp_path):
+    envelope = _sta_with_annotation([_ANNOTATED, _ANNOTATED])
+    item = _grade_sta_item_5(tmp_path, envelope, require_annotation_complete="true")
+    assert item["status"] == "unmet"
+    assert item["reason"] == "invalid_evidence"

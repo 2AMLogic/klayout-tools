@@ -253,6 +253,7 @@ def test_klayout_engine_clean_report(tmp_path, monkeypatch):
         "layers_in_stream_without_rules": [],
         "rules_skipped": [],
         "voltage_domain_warnings": [],
+        "unchecked_rules": [],
         "deck_scope": [],
         "nothing_checked": False,
         "schema_version": 1,
@@ -2727,3 +2728,219 @@ def test_request_document_min_klayout_version(tmp_path, monkeypatch, capsys):
         encoding="utf-8",
     )
     assert main(["drc", str(request), "--format", "json"]) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Issue #3076: machine-readable "unavailable" codes, deck-tree identity,
+# negative control
+# --------------------------------------------------------------------------- #
+
+
+def test_missing_binary_carries_klayout_unavailable_code(tmp_path, monkeypatch):
+    _stub_klayout_drc_subprocess(monkeypatch, side_effect=FileNotFoundError("nope"))
+    gds = _write_gds(tmp_path / "test.gds")
+    deck = _write_deck_file(tmp_path / "deck.lydrc")
+
+    with pytest.raises(DrcError) as info:
+        run_drc_klayout_engine(gds, deck)
+    assert info.value.code == "klayout_unavailable"
+
+
+def test_missing_binary_json_envelope_has_code_and_exit_1(
+    tmp_path, monkeypatch, capsys
+):
+    _stub_klayout_drc_subprocess(monkeypatch, side_effect=FileNotFoundError("nope"))
+    gds = _write_gds(tmp_path / "test.gds")
+    deck = _write_deck_file(tmp_path / "deck.lydrc")
+
+    code = main(
+        ["drc", gds, "--engine", "klayout", "--deck-file", deck, "--format", "json"]
+    )
+
+    assert code == 1
+    error = json.loads(capsys.readouterr().err)["error"]
+    assert error["code"] == "klayout_unavailable"
+    assert "binary not found on PATH" in error["message"]
+
+
+def test_version_probe_missing_binary_and_too_old_codes(tmp_path, monkeypatch):
+    gds, deck = _inputs(tmp_path)
+
+    _stub_versioned_klayout(monkeypatch, probe_side_effect=FileNotFoundError("x"))
+    with pytest.raises(DrcError) as missing:
+        run_drc_klayout_engine(gds, deck, min_klayout_version="0.30.0")
+    assert missing.value.code == "klayout_unavailable"
+
+    _stub_versioned_klayout(monkeypatch, version_stdout="KLayout 0.28.16")
+    with pytest.raises(DrcError) as old:
+        run_drc_klayout_engine(gds, deck, min_klayout_version="0.30.0")
+    assert old.value.code == "klayout_version_too_old"
+
+
+def test_other_failures_carry_no_code(tmp_path):
+    with pytest.raises(DrcError) as info:
+        run_drc_klayout_engine(str(tmp_path / "x.gds"), str(tmp_path / "nodeck"))
+    assert info.value.code is None
+
+
+def _tree_deck(tmp_path: Path, helper_text: str = "# helper\n") -> str:
+    (tmp_path / "rules").mkdir(exist_ok=True)
+    (tmp_path / "rules" / "helper.rb").write_text(helper_text, encoding="utf-8")
+    return _write_deck_file(tmp_path / "deck.drc", 'require_relative "rules/helper"\n')
+
+
+def test_single_file_deck_has_no_tree_identity(tmp_path, monkeypatch):
+    _stub_klayout_drc_subprocess(monkeypatch)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck = _write_deck_file(tmp_path / "deck.lydrc")
+
+    report = run_drc_klayout_engine(gds, deck)
+
+    assert "tree" not in report["provenance"]["deck"]
+
+
+def test_directory_deck_records_tree_identity_that_tracks_includes(tmp_path):
+    deck = _tree_deck(tmp_path)
+
+    first = drc_module._deck_tree_identity(deck)
+    again = drc_module._deck_tree_identity(deck)
+    (tmp_path / "rules" / "helper.rb").write_text("# changed\n", encoding="utf-8")
+    changed = drc_module._deck_tree_identity(deck)
+
+    assert first == again
+    assert first["file_count"] == 2
+    assert first["content_hash"].startswith("sha256:")
+    assert changed["content_hash"] != first["content_hash"]
+
+
+def test_directory_deck_provenance_and_check_detect_helper_drift(
+    tmp_path, monkeypatch, capsys
+):
+    gds = _write_gds(tmp_path / "test.gds")
+    deck = _tree_deck(tmp_path)
+    real_run = subprocess.run
+
+    def fake_run(cmd, capture_output, text, timeout):
+        if cmd[0] == "git":
+            return real_run(
+                cmd, capture_output=capture_output, text=text, timeout=timeout
+            )
+        report_path = next(a for a in cmd if a.startswith("report=")).split("=", 1)[1]
+        Path(report_path).write_text(_CLEAN_WITH_CATEGORIES_RDB, encoding="utf-8")
+        return fake_completed()
+
+    monkeypatch.setattr(drc_module.subprocess, "run", fake_run)
+    report = run_drc_klayout_engine(gds, deck)
+    tree = report["provenance"]["deck"]["tree"]
+    assert tree["file_count"] == 2
+    assert "release" in tree
+
+    saved = tmp_path / "report.json"
+    saved.write_text(json.dumps(report), encoding="utf-8")
+    assert main(["drc", "--check", str(saved), "--format", "json"]) == 0
+    capsys.readouterr()
+
+    (tmp_path / "rules" / "helper.rb").write_text("# drifted\n", encoding="utf-8")
+    assert main(["drc", "--check", str(saved), "--format", "json"]) != 0
+    fields = [c["field"] for c in json.loads(capsys.readouterr().out)["checks"]]
+    assert "provenance.deck.tree.content_hash" in fields
+
+
+def _stub_by_input(monkeypatch, rdb_by_input_name: dict[str, str]):
+    """Stub klayout so the report depends on the ``input=`` layout name."""
+
+    def fake_run(cmd, capture_output, text, timeout):
+        input_path = next(a for a in cmd if a.startswith("input=")).split("=", 1)[1]
+        report_path = next(a for a in cmd if a.startswith("report=")).split("=", 1)[1]
+        Path(report_path).write_text(
+            rdb_by_input_name[Path(input_path).name], encoding="utf-8"
+        )
+        return fake_completed()
+
+    monkeypatch.setattr(drc_module.subprocess, "run", fake_run)
+
+
+def test_negative_control_passes_and_is_reported(tmp_path, monkeypatch):
+    _stub_by_input(monkeypatch, {"real.gds": _EMPTY_RDB, "bad.gds": _EDGE_PAIR_RDB})
+    gds = _write_gds(tmp_path / "real.gds")
+    bad = _write_gds(tmp_path / "bad.gds")
+    deck = _write_deck_file(tmp_path / "deck.lydrc")
+
+    report = run_drc_klayout_engine(
+        gds, deck, negative_control=bad, negative_control_categories=["W.1"]
+    )
+
+    assert report["negative_control"] == {
+        "file": bad,
+        "status": "passed",
+        "violation_count": 1,
+        "rules_found": ["W.1"],
+        "expected_categories": ["W.1"],
+    }
+    assert report["violation_count"] == 0
+
+
+def test_negative_control_without_findings_fails_run(tmp_path, monkeypatch):
+    _stub_by_input(monkeypatch, {"real.gds": _EMPTY_RDB, "bad.gds": _EMPTY_RDB})
+    gds = _write_gds(tmp_path / "real.gds")
+    bad = _write_gds(tmp_path / "bad.gds")
+    deck = _write_deck_file(tmp_path / "deck.lydrc")
+
+    with pytest.raises(DrcError, match="no violations reported") as info:
+        run_drc_klayout_engine(gds, deck, negative_control=bad)
+    assert info.value.code == "negative_control_failed"
+
+
+def test_negative_control_missing_expected_category_fails(tmp_path, monkeypatch):
+    _stub_by_input(monkeypatch, {"real.gds": _EMPTY_RDB, "bad.gds": _EDGE_PAIR_RDB})
+    gds = _write_gds(tmp_path / "real.gds")
+    bad = _write_gds(tmp_path / "bad.gds")
+    deck = _write_deck_file(tmp_path / "deck.lydrc")
+
+    with pytest.raises(DrcError, match=r"missing expected categories \['S.1'\]"):
+        run_drc_klayout_engine(
+            gds, deck, negative_control=bad, negative_control_categories=["S.1"]
+        )
+
+
+def test_cli_negative_control_json_error_code_and_flag_rules(
+    tmp_path, monkeypatch, capsys
+):
+    _stub_by_input(monkeypatch, {"real.gds": _EMPTY_RDB, "bad.gds": _EMPTY_RDB})
+    gds = _write_gds(tmp_path / "real.gds")
+    bad = _write_gds(tmp_path / "bad.gds")
+    deck = _write_deck_file(tmp_path / "deck.lydrc")
+    base = ["drc", gds, "--engine", "klayout", "--deck-file", deck, "--format", "json"]
+
+    assert main([*base, "--negative-control", bad]) == 1
+    assert (
+        json.loads(capsys.readouterr().err)["error"]["code"]
+        == "negative_control_failed"
+    )
+
+    assert main([*base, "--negative-control-categories", "W.1"]) == 1
+    assert "requires --negative-control" in capsys.readouterr().err
+
+
+def test_request_document_negative_control(tmp_path, monkeypatch, capsys):
+    _stub_by_input(monkeypatch, {"real.gds": _EMPTY_RDB, "bad.gds": _EDGE_PAIR_RDB})
+    _write_gds(tmp_path / "real.gds")
+    _write_gds(tmp_path / "bad.gds")
+    _write_deck_file(tmp_path / "deck.lydrc")
+    request = tmp_path / "req.json"
+    request.write_text(
+        json.dumps(
+            {
+                "file": "real.gds",
+                "engine": "klayout",
+                "deck_file": "deck.lydrc",
+                "negative_control": "bad.gds",
+                "negative_control_categories": "W.1",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert main(["drc", str(request), "--format", "json"]) != 1
+    data = json.loads(capsys.readouterr().out)
+    assert data["negative_control"]["status"] == "passed"

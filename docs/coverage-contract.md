@@ -173,6 +173,13 @@ read as complete, and is never *silent*:
   [design-evidence-tiers.md](design-evidence-tiers.md) item 3 specifies —
   changing which item text grades on what is that document's decision, not
   this contract's.
+- **`generic` is the exception.** A user-authored `kind: generic` envelope has
+  no adapter, so nothing forces its author to emit `pass_partial`. `klt
+  signoff` therefore cross-checks it: `status: pass` alongside a versioned
+  `coverage` block that lists skipped requested work does not pass, and is
+  named `partial_coverage`. `coverage_qualification` is still emitted. A
+  legacy envelope with no `coverage` block makes no claim and is unaffected;
+  a `generic` author should still derive `status` via `coverage_rollup()`.
 
 ### Migration contract for the per-path adapters
 

@@ -22,9 +22,11 @@ provenance fields:
   :class:`UnknownDeckError`).
 - :mod:`klayout_tools.decks.extraction` -- the extraction device domain
   (:class:`ResistorDevice`, :class:`ResistorFlavour`, :class:`MOSFlavour`,
-  :class:`ExtractionDeck`, :class:`BipolarDevice`, :class:`CapacitorDevice`,
+  :class:`ExtractionDeck`, :class:`BipolarDevice`, :class:`TerminalRelation`,
+  :class:`CapacitorDevice`,
   :class:`CapacitorFlavour`, :class:`MomCapacitorDevice`,
-  :class:`DiodeDevice`, :class:`InvalidLabelLayerError`).
+  :class:`DiodeDevice`, :class:`LayerExpr`, :class:`SizeFilter`,
+  :class:`InvalidLabelLayerError`).
 - :mod:`klayout_tools.decks.parasitics` -- the parasitics domain
   (:class:`LayerRC`, :class:`ParasiticsDeck`,
   :class:`UnknownExtractionDeckError`, :class:`InvalidDeckOptionError`).
@@ -44,13 +46,17 @@ from .extraction import (
     BipolarDevice,
     CapacitorDevice,
     CapacitorFlavour,
+    CapacitorVariant,
     DiodeDevice,
     ExtractionDeck,
     InvalidLabelLayerError,
+    LayerExpr,
     MomCapacitorDevice,
     MOSFlavour,
     ResistorDevice,
     ResistorFlavour,
+    SizeFilter,
+    TerminalRelation,
 )
 from .finfet import FinFETExtractionDeck, FinFETFlavour
 from .parasitics import (
@@ -65,6 +71,7 @@ __all__ = [
     "BipolarDevice",
     "CapacitorDevice",
     "CapacitorFlavour",
+    "CapacitorVariant",
     "DerivedLayer",
     "DiodeDevice",
     "DrcRule",
@@ -73,6 +80,7 @@ __all__ = [
     "FinFETFlavour",
     "InvalidDeckOptionError",
     "InvalidLabelLayerError",
+    "LayerExpr",
     "LayerRC",
     "MOSFlavour",
     "MomCapacitorDevice",
@@ -80,6 +88,8 @@ __all__ = [
     "ResistorDevice",
     "ResistorFlavour",
     "RuleProvenance",
+    "TerminalRelation",
+    "SizeFilter",
     "UnknownDeckError",
     "UnknownExtractionDeckError",
     "deck_names",
@@ -89,6 +99,7 @@ __all__ = [
     "get_layer_names",
     "get_nominal_dbu",
     "get_parasitics_deck",
+    "get_unchecked_rules",
     "get_unmodeled_voltage_markers",
     "known_extraction_deck_names",
     "resolve_deck_option_values",
@@ -239,6 +250,19 @@ def get_unmodeled_voltage_markers(name: str) -> dict[tuple[int, int], str]:
     return _unmodeled_voltage_marker_registry().get(name, {})
 
 
+def get_unchecked_rules(name: str) -> dict[str, tuple[tuple[int, int], str]]:
+    """Return ``{rule id: ((layer, datatype), description)}`` for foundry
+    rules ``name``'s deck knows about but cannot evaluate (issue #3012).
+
+    ``drc.py`` surfaces each as ``coverage.unchecked_rules`` when its layer is
+    in the stream, so a ``clean`` verdict is not misread as covering it.
+    Decks that declare none (and unregistered names) return an empty map.
+    """
+    from . import sg13cmos5l
+
+    return {"sg13cmos5l": sg13cmos5l.UNCHECKED_RULES}.get(name, {})
+
+
 def _nominal_dbu_registry() -> dict[str, float]:
     from . import gf180mcu, sg13cmos5l, sg13g2, sky130
 
@@ -352,6 +376,7 @@ def get_extraction_deck(
             f"unknown deck '{name}' (available: {available})"
         ) from None
     if deck_options:
+        deck = _resolve_capacitor_variant(name, deck, deck_options)
         deck = _resolve_device_flavours(name, deck, deck_options)
     return deck.with_label_layers(label_layers, deck_name=name)
 
@@ -378,6 +403,34 @@ def resolve_deck_option_values(
     return get_extraction_deck(name, deck_options).resolved_option_values
 
 
+def _resolve_capacitor_variant(
+    name: str, deck: ExtractionDeck, deck_options: Mapping[str, str]
+) -> ExtractionDeck:
+    """Apply the capacitor-variant selector (issue #2920, gf180mcu's
+    ``mim_option``) in ``deck_options`` to ``deck``: swap ``capacitors`` for
+    the selected :class:`CapacitorVariant`'s. Returns ``deck`` unchanged when
+    it declares no variants, the key is absent, or the default is selected.
+    Runs before :func:`_resolve_device_flavours`, so a flavour key is then
+    validated against the *selected* variant's entries.
+    """
+    if not deck.capacitor_variants:
+        return deck
+    option = deck.capacitor_variants[0].option
+    if option not in deck_options:
+        return deck
+    value = deck_options[option]
+    variant = next((v for v in deck.capacitor_variants if v.value == value), None)
+    if variant is None:
+        available = ", ".join(v.value for v in deck.capacitor_variants)
+        raise InvalidDeckOptionError(
+            f"deck '{name}' option '{option}={value}' is not one of this "
+            f"deck's declared values (available: {available})"
+        )
+    return dataclasses.replace(
+        deck, capacitors=variant.capacitors, capacitor_variant_selected=value
+    )
+
+
 def _resolve_device_flavours(
     name: str, deck: ExtractionDeck, deck_options: Mapping[str, str]
 ) -> ExtractionDeck:
@@ -399,6 +452,9 @@ def _resolve_device_flavours(
         for device in (*deck.resistors, *deck.capacitors)
         if device.flavour_option is not None
     }
+    # The capacitor-variant selector (issue #2920) was consumed by
+    # `_resolve_capacitor_variant` before this runs, but stays a valid key.
+    selectable_keys.update(variant.option for variant in deck.capacitor_variants)
     unknown_keys = sorted(set(deck_options) - selectable_keys)
     if unknown_keys:
         available = ", ".join(sorted(selectable_keys)) or "none"
