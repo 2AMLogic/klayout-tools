@@ -547,6 +547,133 @@ def test_defines_keys_must_be_nonempty_strings(tmp_path):
         run_functional_verification(request_path)
 
 
+def _source_defines_request(tmp_path, source_defines, **options):
+    _setup_inputs(tmp_path)
+    _write(tmp_path / "macro.v", "module macro; endmodule\n")
+    request = _base_request(options={"source_defines": source_defines, **options})
+    request["sources"] = ["gcd.v", "macro.v"]
+    return _write_request(tmp_path / "request.json", request)
+
+
+@pytest.mark.parametrize("value", ["FUNCTIONAL", ["FUNCTIONAL"], 7])
+def test_source_defines_must_be_object(tmp_path, value):
+    request_path = _source_defines_request(tmp_path, value)
+    with pytest.raises(
+        FunctionalVerificationError,
+        match="options.source_defines must be a JSON object",
+    ):
+        run_functional_verification(request_path)
+
+
+def test_source_defines_unknown_source_is_a_request_error(tmp_path):
+    request_path = _source_defines_request(tmp_path, {"nope.v": {"FUNCTIONAL": "1"}})
+    with pytest.raises(FunctionalVerificationError, match="'nope.v'.*request.sources"):
+        run_functional_verification(request_path)
+
+
+@pytest.mark.parametrize("value", [7, 1.5, True, []])
+def test_source_defines_values_must_be_string_or_null(tmp_path, value):
+    request_path = _source_defines_request(tmp_path, {"macro.v": {"FUNCTIONAL": value}})
+    with pytest.raises(
+        FunctionalVerificationError,
+        match=r"source_defines\['macro.v'\]\['FUNCTIONAL'\]",
+    ):
+        run_functional_verification(request_path)
+
+
+def test_source_defines_entry_must_be_a_defines_object(tmp_path):
+    request_path = _source_defines_request(tmp_path, {"macro.v": "FUNCTIONAL"})
+    with pytest.raises(
+        FunctionalVerificationError, match=r"source_defines\['macro.v'\] must be"
+    ):
+        run_functional_verification(request_path)
+
+
+def test_scoped_functional_with_sdf_is_not_rejected_but_global_still_is(
+    tmp_path, monkeypatch
+):
+    """Issue #3290: FUNCTIONAL scoped to a hard-macro source does not trip the
+    SDF rejection (std-cell sources stay unaffected); a global FUNCTIONAL does."""
+    _write(tmp_path / "route.sdf", _MINIMAL_SDF)
+    request_path = _source_defines_request(
+        tmp_path, {"macro.v": {"FUNCTIONAL": None}}, sdf={"file": "route.sdf"}
+    )
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+    try:
+        run_functional_verification(request_path)
+    except FunctionalVerificationError as exc:
+        assert "cannot be combined with a 'FUNCTIONAL' define" not in str(exc)
+
+    request_path = _source_defines_request(
+        tmp_path,
+        {"macro.v": {"FUNCTIONAL": None}},
+        sdf={"file": "route.sdf"},
+        defines={"FUNCTIONAL": None},
+    )
+    with pytest.raises(
+        FunctionalVerificationError,
+        match="options.sdf cannot be combined with a 'FUNCTIONAL' define",
+    ):
+        run_functional_verification(request_path)
+
+
+def test_scoped_defines_wrapper_content_and_position(tmp_path):
+    gcd = str(tmp_path / "gcd.v")
+    macro = str(tmp_path / "macro.v")
+    sources, include_dirs = fv._write_scoped_define_wrappers(
+        [gcd, macro, gcd],
+        {macro: {"FUNCTIONAL": None, "WIDTH": "8"}},
+        str(tmp_path / "out"),
+    )
+    assert sources[0] == gcd and sources[2] == gcd
+    assert sources[1] != macro
+    assert Path(sources[1]).read_text().splitlines() == [
+        "`define FUNCTIONAL",
+        "`define WIDTH 8",
+        f'`include "{macro}"',
+        "`undef FUNCTIONAL",
+        "`undef WIDTH",
+    ]
+    assert include_dirs == [str(tmp_path)]
+
+
+def test_scoped_defines_absent_leaves_sources_untouched(tmp_path):
+    assert fv._write_scoped_define_wrappers(["a.v", "b.v"], {}, str(tmp_path)) == (
+        ["a.v", "b.v"],
+        [],
+    )
+
+
+def test_stubbed_run_substitutes_wrapper_and_echoes_source_defines(
+    tmp_path, monkeypatch
+):
+    request_path = _source_defines_request(tmp_path, {"macro.v": {"FUNCTIONAL": "1"}})
+    runner = _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    report = run_functional_verification(request_path)
+
+    macro = str((tmp_path / "macro.v").resolve())
+    built = runner.build_kwargs["sources"]
+    assert built[0] == str((tmp_path / "gcd.v").resolve())
+    assert built[1] != macro and macro in Path(built[1]).read_text()
+    assert runner.build_kwargs["defines"] == {}
+    assert report["environment"]["source_defines"] == {macro: {"FUNCTIONAL": "1"}}
+
+
+def test_stubbed_run_without_source_defines_echoes_empty(tmp_path, monkeypatch):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    runner = _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    report = run_functional_verification(request_path)
+
+    assert report["environment"]["source_defines"] == {}
+    assert all(
+        not Path(s).name.startswith("scoped_defines_")
+        for s in runner.build_kwargs["sources"]
+    )
+
+
 @pytest.mark.parametrize("build_args", ["--foo", [7], [""], {"a": 1}])
 def test_build_args_shape_validation(tmp_path, build_args):
     _setup_inputs(tmp_path)
@@ -1067,6 +1194,8 @@ def test_stubbed_run_reports_the_full_contract_shape(tmp_path, monkeypatch):
         # the spike captured live (section 4) -- this is the authoritative
         # echo, read back from `results.xml` itself.
         "random_seed": 1785780800,
+        # Additive (issue #3290): `{}` without `options.source_defines`.
+        "source_defines": {},
         # Additive (issue #1002): `null` on any run without `options.sdf`,
         # so an unannotated verdict is never mistakable for an annotated one.
         "sdf": None,

@@ -652,6 +652,12 @@ stability statement, concrete precedents, and drift-detection guidance, and
     stderr warning instead. Absent in the ordinary single-install case, so
     an unambiguous run's `provenance` is byte-identical to what it was
     before this field existed and a stored-report diff cannot drift on it.
+  - `compatibility` (issue #3427) — present **only** when the resolved
+    variant's `SOURCES` stamp differs from the declared open_pdks pin
+    (`klt pdk`'s `compatibility.status == "mismatch"`):
+    `{status: "mismatch", package, expected}`. Absent when the status is
+    `match`/`unknown`/`not_declared`, so a matching run's `provenance` is
+    byte-identical to before.
     Populated by `klt sim` today; the underlying detection lives in
     `klayout_tools.pdk.find_pdk` (`ambiguous_roots`) and is available to
     every verb that resolves a PDK — see `docs/cli/pdk.md`.
@@ -1507,7 +1513,7 @@ the exit code alone is authoritative.
   | `netlist` | `batch_runner_version_mismatch` | `--backend batch`: the runner's `klt` version differs from this client's; the job was refused before netlisting, or before submission when the AMI manifest already publishes the mismatch (issue #2851). Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
   | `netlist` | `batch_runner_version_unknown` | `--backend batch`: the runner's `klt` version could not be read; the job was refused before netlisting. Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
   | `netlist` | `batch_poll_timeout` | `--backend batch`: the job did not finish within the client's poll budget. It may still finish on the runner; nothing was collected. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
-  | `netlist` | `batch_job_failed` | `--backend batch`: the job failed, or left no usable report or netlist. When the runner's own `klt netlist` reported an error, its message is quoted and, if that error carried an `error.code`, the runner's code is passed through in place of `batch_job_failed`. Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
+  | `netlist` | `batch_job_failed` | `--backend batch`: the job failed, or left no usable report or netlist. When the runner's own `klt netlist` reported an error, its message is quoted and, if that error carried an `error.code`, the runner's code is passed through in place of `batch_job_failed`. Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). When the runner left no klt error envelope, `error` also carries `remote_stderr_tail` (last 2 KiB of the runner's `stderr.log`, sanitized), `remote_exit_code`, `remote_state` and `harness_log` (additive; absent otherwise). |
   | `netlist` | `batch_job_timeout` | `--backend batch`: the fleet harness stopped the job at its `timeout_seconds` (`--timeout-s` plus headroom). See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
   | `netlist` | `batch_input_too_large` | `--backend batch`: the input tree's uncompressed size is above the batch cap. Raised before any archive is built or anything is uploaded. Not retryable without shrinking the tree. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
   | `functional-verification` | `missing_optional_dependency` | The `functional-verification` extra (cocotb) is not importable in the interpreter running `klt`. The message names that interpreter and the remedy per install route: put `klayout-tools[functional-verification]` on the install spec for `uv tool install` / `pipx install` / `uvx --from`, or `uv sync --extra functional-verification` for a source checkout. See [docs/cli/functional-verification.md](cli/functional-verification.md#requirements). |

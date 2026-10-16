@@ -38,6 +38,7 @@ import io
 import json
 import sys
 from collections.abc import Callable
+from typing import Any
 
 #: Application-level error exit code (as opposed to argparse's usage-error 2).
 ERROR_EXIT_CODE = 1
@@ -173,6 +174,7 @@ def emit_error(
     format: str,
     exit_code: int = ERROR_EXIT_CODE,
     code: str | None = None,
+    details: dict[str, Any] | None = None,
 ) -> int:
     """Emit an error envelope and return the exit code to use.
 
@@ -193,11 +195,17 @@ def emit_error(
     emitted as ``error.code`` **only when set** -- the envelope of every
     error without one is byte-for-byte unchanged. It does not appear in the
     ``--format text`` line, which stays the plain message.
+
+    ``details`` is an optional mapping of extra structured fields merged into
+    ``error`` (after the standard keys, which it cannot override); like
+    ``code`` it appears only in the JSON envelope and only when set.
     """
     if format == "json":
-        error: dict[str, str] = {"command": command, "message": message}
+        error: dict[str, Any] = {"command": command, "message": message}
         if code is not None:
             error["code"] = code
+        for key, value in (details or {}).items():
+            error.setdefault(key, value)
         error_payload = {"schema_version": 1, "error": error}
         json.dump(error_payload, sys.stderr, indent=2)
         print(file=sys.stderr)

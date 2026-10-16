@@ -2898,6 +2898,55 @@ def test_parse_ascii_rawfile_complex(tmp_path):
             assert isinstance(value, float)
 
 
+@pytest.mark.parametrize("text", [_ASCII_RAWFILE, _ASCII_RAWFILE_COMPLEX])
+def test_parse_and_persist_waveform_matches_parse_ascii_rawfile(tmp_path, text):
+    path = tmp_path / "waveform.raw"
+    path.write_text(text)
+
+    json_path = sim._parse_and_persist_waveform(str(path))
+
+    expected = sim.parse_ascii_rawfile(str(path))
+    with open(json_path, encoding="utf-8") as fh:
+        content = fh.read()
+    assert json.loads(content) == expected
+    # Streamed output is byte-identical to a plain json.dump (issue #3360).
+    assert content == json.dumps(expected)
+
+
+def test_parse_and_persist_waveform_zero_points_and_single_variable(tmp_path):
+    path = tmp_path / "empty.raw"
+    path.write_text(
+        "Plotname: DC\nFlags: real\nNo. Variables: 1\nNo. Points: 0\n"
+        "Variables:\n\t0\tv-sweep\tvoltage\nValues:\n\n"
+    )
+    json_path = sim._parse_and_persist_waveform(str(path))
+    with open(json_path, encoding="utf-8") as fh:
+        assert json.load(fh) == {
+            "plotname": "DC",
+            "variables": [{"index": 0, "name": "v-sweep", "type": "voltage"}],
+            "points": [],
+        }
+
+    path.write_text(
+        "Plotname: DC\nNo. Variables: 1\nVariables:\n\t0\tv-sweep\tvoltage\n"
+        "Values:\n 0\t1.5\n 1\t2.5\n"
+    )
+    json_path = sim._parse_and_persist_waveform(str(path))
+    with open(json_path, encoding="utf-8") as fh:
+        assert json.load(fh)["points"] == [[1.5], [2.5]]
+
+
+def test_parse_and_persist_waveform_failure_leaves_no_artifact(tmp_path):
+    path = tmp_path / "bad.raw"
+    path.write_text(_ASCII_RAWFILE.replace("1.000000000000000e-11", "oops", 1))
+    with pytest.raises(ValueError):
+        sim._parse_and_persist_waveform(str(path))
+    assert not (tmp_path / "bad.raw.json").exists()
+    with pytest.raises(sim.SimError):
+        sim._parse_and_persist_waveform(str(tmp_path / "nope.raw"))
+    assert not (tmp_path / "nope.raw.json").exists()
+
+
 def test_parse_ascii_rawfile_not_a_rawfile_raises(tmp_path):
     path = tmp_path / "notraw.txt"
     path.write_text("hello world\n")
@@ -3113,6 +3162,82 @@ def test_corner_timeout_and_launch_failure_leave_both_fields_null(
     )
     assert corner["engine_exit_code"] is None
     assert corner["engine_killed_by_signal"] is None
+
+
+def _abort_corner(tmp_path, monkeypatch, *, keep_artifacts, log_text="", **stub):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [
+                {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"}
+            ],
+            "options": {"timeout_s": 5, "keep_artifacts": keep_artifacts},
+        },
+    )
+
+    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+        log_path = cmd[cmd.index("-o") + 1]
+        with open(log_path, "w", encoding="utf-8") as handle:
+            handle.write(log_text)
+        return fake_completed(
+            "** ngspice-99\n",
+            returncode=stub.get("returncode", 0),
+            stderr=stub.get("stderr", ""),
+        )
+
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+    (corner,) = sim.run_sim(str(request))["corners"]
+    return corner
+
+
+@pytest.mark.parametrize("keep_artifacts", [True, False])
+def test_corner_nonzero_exit_gets_engine_aborted_with_tail(
+    tmp_path, monkeypatch, keep_artifacts
+):
+    """Issue #3067: abnormal exit is the corner's primary diagnostic, with the
+    exit status and engine output tail; the measurement cascade is demoted."""
+    corner = _abort_corner(
+        tmp_path,
+        monkeypatch,
+        keep_artifacts=keep_artifacts,
+        returncode=3,
+        stderr="warn\nfatal: out of memory\n",
+    )
+    first = corner["diagnostics"][0]
+    assert first["code"] == "engine_aborted"
+    assert first["severity"] == "error"
+    assert "code 3" in first["message"]
+    assert "fatal: out of memory" in first["message"]
+    assert "measurement" not in [d["code"] for d in corner["diagnostics"]]
+    assert corner["engine_exit_code"] == 3
+    assert corner["status"] == "error"
+    assert "engine_aborted" in sim.DIAGNOSTIC_CODES
+
+
+def test_corner_killed_demotes_measurement_cascade(tmp_path, monkeypatch):
+    corner = _abort_corner(
+        tmp_path, monkeypatch, keep_artifacts=False, returncode=-9, stderr="Killed\n"
+    )
+    codes = [d["code"] for d in corner["diagnostics"]]
+    assert codes == ["engine_killed"]
+    assert "Killed" in corner["diagnostics"][0]["message"]
+
+
+def test_corner_genuine_measurement_failure_is_not_engine_aborted(
+    tmp_path, monkeypatch
+):
+    corner = _abort_corner(
+        tmp_path,
+        monkeypatch,
+        keep_artifacts=False,
+        log_text="Circuit: x\nNo. of Data Rows : 10\n",
+    )
+    codes = [d["code"] for d in corner["diagnostics"]]
+    assert "engine_aborted" not in codes
+    assert "measurement" in codes
 
 
 def test_split_returncode_unnamed_signal_falls_back():
@@ -7883,6 +8008,35 @@ def test_run_sim_remote_backend_pushes_local_parallel_request(tmp_path, monkeypa
     assert state["cleanup_calls"] == 1
 
 
+def test_run_sim_remote_backend_forwards_cli_budget_s_to_worker(tmp_path, monkeypatch):
+    """Issue #3167: `--budget-s` reaches the worker; CLI wins over the request."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        _base_remote_request(
+            corners={"temperature_c": [10, 40]},
+            options={"wall_clock_budget_s": 3600},
+        ),
+    )
+    state = _install_fake_remote_transport(monkeypatch)
+
+    sim.run_sim(str(request), budget_s=90)
+    assert state["remote_request"]["options"]["wall_clock_budget_s"] == 90
+
+    sim.run_sim(str(request))
+    assert state["remote_request"]["options"]["wall_clock_budget_s"] == 3600
+
+
+def test_run_sim_remote_backend_adds_no_budget_key_when_unset(tmp_path, monkeypatch):
+    _write_body(tmp_path)
+    request = _write_request(tmp_path, _base_remote_request())
+    state = _install_fake_remote_transport(monkeypatch)
+
+    sim.run_sim(str(request))
+
+    assert "wall_clock_budget_s" not in state["remote_request"]["options"]
+
+
 def test_run_sim_remote_backend_stages_the_netlists_include_closure(
     tmp_path, monkeypatch
 ):
@@ -8694,7 +8848,10 @@ def test_cli_json_omits_ambiguous_sources_for_a_single_install(
     main(["sim", str(_pdk_request(tmp_path)), "--format", "json"])
 
     block = json.loads(capsys.readouterr().out)["provenance"]["pdk"]
-    assert set(block) == {"name", "source", "version"}
+    # The fixture stamp is not the declared open_pdks pin, so `compatibility`
+    # (issue #3427) is legitimately present; the point here is the absence of
+    # `ambiguous_sources`.
+    assert set(block) == {"name", "source", "version", "compatibility"}
 
 
 def test_cli_pinned_models_pdk_root_is_never_ambiguous(tmp_path, monkeypatch, capsys):
@@ -12772,6 +12929,103 @@ def test_timeout_budget_hint_absent_when_well_inside_budget():
 
 
 # --------------------------------------------------------------------------- #
+# corners.units -- explicit, non-crossed unit list (issue #2993)
+# --------------------------------------------------------------------------- #
+
+
+def test_expand_corners_units_match_crossed_ids_in_record_order():
+    crossed = sim._expand_corners(
+        {
+            "process": ["tt", "ss"],
+            "supply_v": {"vdd": [1.62, 1.98]},
+            "temperature_c": [-40, 125],
+        },
+        [],
+    )
+    wanted = [crossed[5], crossed[0]]
+    units = [
+        {
+            "process": p.process,
+            "temperature_c": p.temperature_c,
+            "supply_v": dict(p.supply_v),
+        }
+        for p in wanted
+    ]
+
+    points = sim._expand_corners({"units": units}, [])
+
+    assert [p.corner_id for p in points] == [p.corner_id for p in wanted]
+
+
+def test_expand_corners_units_sparse_set_is_not_crossed():
+    units = [
+        {"process": "tt", "supply_v": {"vdd": 1.8, "vin": 0.001 * i}}
+        for i in range(810)
+    ]
+    assert len(sim._expand_corners({"units": units}, [])) == 810
+
+
+def test_expand_corners_units_defaults_and_bundle():
+    bundle = {"name": "b", "sections": ["s1", "s2"]}
+    points = sim._expand_corners(
+        {"units": [{"temperature_c": 85}, {"process": bundle}]}, []
+    )
+
+    assert points[0].corner_id == "default/novdd/85C"
+    assert points[1].corner_id == "b/novdd/27C"
+    assert points[1].process_sections == ["s1", "s2"]
+
+
+@pytest.mark.parametrize(
+    ("corners", "exclude", "match"),
+    [
+        ({"units": [{}], "process": ["tt"]}, [], "corners.process"),
+        ({"units": [{}], "supply_v": {"vdd": [1]}}, [], "corners.supply_v"),
+        ({"units": [{}], "temperature_c": [27]}, [], "corners.temperature_c"),
+        ({"units": [{}]}, [{"process": "tt"}], "exclude"),
+        ({"units": []}, [], "non-empty"),
+        ({"units": {"a": 1}}, [], "non-empty"),
+        ({"units": ["tt"]}, [], "must be an object"),
+        ({"units": [{"supply_v": {"vdd": [1.0, 2.0]}}]}, [], "scalar"),
+        ({"units": [{"supply_v": {"vdd": True}}]}, [], "scalar"),
+        ({"units": [{"temperature_c": "hot"}]}, [], "temperature_c"),
+        ({"units": [{"bogus": 1}]}, [], "unknown key"),
+        ({"units": [{"process": "tt"}, {"process": "tt"}]}, [], "duplicates"),
+        (
+            {"units": [{"supply_v": {"vdd": 0.1004}}, {"supply_v": {"vdd": 0.1001}}]},
+            [],
+            "duplicates",
+        ),
+    ],
+)
+def test_expand_corners_units_validation(corners, exclude, match):
+    with pytest.raises(sim.SimError, match=match):
+        sim._expand_corners(corners, exclude)
+
+
+def test_expand_corners_units_compose_with_monte_carlo():
+    points = sim._expand_corners({"units": [{"process": "tt"}, {"process": "ss"}]}, [])
+    expanded, info = sim._expand_monte_carlo(
+        points, {"n": 3, "seed": 7, "vary": "mismatch"}
+    )
+
+    assert len(expanded) == 6
+    assert [p.sample_index for p in expanded] == [0, 1, 2, 0, 1, 2]
+    assert info["n"] == 3
+
+
+def test_xyce_boundary_refuses_supply_in_units():
+    with pytest.raises(sim.SimError, match="corners.supply_v"):
+        sim._enforce_xyce_support_boundary(
+            engine="xyce",
+            backend="local",
+            corners_spec={"units": [{"supply_v": {"vdd": 1.8}}]},
+            monte_carlo_declared=False,
+            fail_fast_probe=False,
+        )
+
+
+# --------------------------------------------------------------------------- #
 # noise_representation (issue #3006)
 # --------------------------------------------------------------------------- #
 
@@ -12792,6 +13046,114 @@ def test_noise_representation(plotname, vtype, expected):
         "points": [[1.0]],
     }
     assert sim.noise_representation(waveform) == expected
+
+
+# --------------------------------------------------------------------------- #
+# klt sim --dry-run (issue #3064)
+# --------------------------------------------------------------------------- #
+
+
+def _dry_run_mc_request(tmp_path, **extra):
+    _write_body(tmp_path)
+    return _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "monte_carlo": {"n": 3, "seed": 7, "vary": "both"},
+            **extra,
+        },
+    )
+
+
+def test_run_sim_dry_run_seeds_match_real_run_and_invoke_no_engine(
+    tmp_path, monkeypatch
+):
+    request = _dry_run_mc_request(tmp_path)
+
+    monkeypatch.delenv(sim.BACKEND_ENV, raising=False)
+    _stub_subprocess_run(monkeypatch)
+    real = sim.run_sim(str(request))
+
+    def boom(*args, **kwargs):
+        raise AssertionError("dry run must not invoke the engine")
+
+    monkeypatch.setattr(sim.subprocess, "run", boom)
+    for name in list(sim._BACKENDS):
+        monkeypatch.setitem(sim._BACKENDS, name, boom)
+    dry = sim.run_sim(str(request), dry_run=True)
+
+    assert dry["dry_run"] is True
+    assert dry["status"] == "valid"
+    assert dry["unit_count"] == len(dry["units"]) == 3
+    assert dry["warnings"] == []
+
+    real_seeds = [
+        (
+            c["monte_carlo"]["seed"],
+            c["monte_carlo"]["process_seed"],
+            c["monte_carlo"]["mismatch_seed"],
+        )
+        for c in real["corners"]
+    ]
+    dry_seeds = [
+        (u["rndseed"], u["process_seed"], u["mismatch_seed"]) for u in dry["units"]
+    ]
+    assert dry_seeds == real_seeds
+    assert [u["corner_id"] for u in dry["units"]] == [
+        c["corner_id"] for c in real["corners"]
+    ]
+
+
+def test_run_sim_dry_run_warns_on_unknown_key(tmp_path):
+    request = _dry_run_mc_request(tmp_path, monte_carol_typo=1)
+    report = sim.run_sim(str(request), dry_run=True)
+    assert len(report["warnings"]) == 1
+    assert "monte_carol_typo" in report["warnings"][0]
+
+
+def test_run_sim_dry_run_reports_same_error_as_real_run(tmp_path):
+    request = _dry_run_mc_request(tmp_path)
+    bad = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "monte_carlo": {"n": 0, "seed": 1},
+        },
+    )
+    with pytest.raises(sim.SimError) as real_exc:
+        sim.run_sim(str(bad))
+    with pytest.raises(sim.SimError) as dry_exc:
+        sim.run_sim(str(bad), dry_run=True)
+    assert str(dry_exc.value) == str(real_exc.value)
+    assert request.exists()
+
+
+def test_run_sim_dry_run_missing_netlist_raises(tmp_path):
+    request = _write_request(
+        tmp_path,
+        {"netlist": "nope.spice", "analysis": {"kind": "tran", "args": "1n 1u"}},
+    )
+    with pytest.raises(sim.SimError, match="netlist not found"):
+        sim.run_sim(str(request), dry_run=True)
+
+
+def test_run_sim_dry_run_refuses_deck_requests(tmp_path):
+    request = _write_request(tmp_path, {"decks": [{"name": "a", "deck": "x"}]})
+    with pytest.raises(sim.SimError, match="--dry-run"):
+        sim.run_sim(str(request), dry_run=True)
+
+
+def test_cli_sim_dry_run_json_envelope(tmp_path, capsys, monkeypatch):
+
+    monkeypatch.delenv(sim.BACKEND_ENV, raising=False)
+    request = _dry_run_mc_request(tmp_path)
+    assert main(["sim", str(request), "--dry-run", "--format", "json"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["dry_run"] is True
+    assert len(out["units"]) == 3
+    assert out["backend"] == "local"
 
 
 # --------------------------------------------------------------------------- #
