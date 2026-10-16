@@ -503,6 +503,17 @@ _MISMATCH_ACTIVITY: dict[tuple[str, str], dict[str, Any]] = {
             "shared term. See issue #3032."
         ),
     },
+    # Section-dependent: the static entry is only the "section unknown"
+    # fallback; `_sg13g2_mosfet_activity` refines it per selected section.
+    ("sg13g2", "mosfet"): {
+        "active": None,
+        "note": (
+            "MOS per-instance mismatch (sg13_lv_*/sg13_hv_* subcircuits) is "
+            "active only in a *_mismatch process-corner section (e.g. "
+            "mos_tt_mismatch); the selected section could not be determined "
+            "(set corners.process). See issue #2961."
+        ),
+    },
 }
 
 #: SPICE element-type letter (first character of the instance name) ->
@@ -535,6 +546,10 @@ _SUBCKT_FAMILY_KEYWORDS: tuple[tuple[str, str], ...] = (
     ("mimcap", "capacitor"),
     ("cap_", "capacitor"),
     ("capacitor", "capacitor"),
+    # sg13g2 MOS calls (``sg13_lv_nmos``/``sg13_hv_pmos``, issue #2961); after
+    # the capacitor keywords so a ``..._nmoscap`` name still wins as capacitor.
+    ("nmos", "mosfet"),
+    ("pmos", "mosfet"),
     ("res_", "resistor"),
     ("resistor", "resistor"),
     ("diode", "diode"),
@@ -661,11 +676,46 @@ def _scan_label(info: dict[str, Any], source: str = "") -> str:
     )
 
 
+def _sg13g2_mosfet_activity(sections: list[str] | None) -> dict[str, Any] | None:
+    """Section-dependent ``("sg13g2", "mosfet")`` activity (issue #2961), or
+    ``None`` to keep the static table entry. IHP's ``cornerMOSlv/hv.lib``
+    include the per-instance ``agauss()`` mismatch subcircuits only in
+    ``mos_<corner>_mismatch`` sections; plain ``mos_<corner>`` and
+    ``mos_tt_stat`` sections carry none."""
+    if not sections:
+        return None
+    flags = {name.lower().endswith("_mismatch") for name in sections}
+    if flags == {True}:
+        return {
+            "active": True,
+            "note": (
+                "MOS per-instance mismatch is active: every selected "
+                "process section is a *_mismatch section "
+                f"({', '.join(sorted(set(sections)))}), which includes the "
+                "agauss() mismatch subcircuits (see docs/cli/sim.md's "
+                "'Known-good mismatch mechanisms')."
+            ),
+        }
+    if flags == {False}:
+        return {
+            "active": False,
+            "note": (
+                "No selected process section "
+                f"({', '.join(sorted(set(sections)))}) is a *_mismatch "
+                "section; plain mos_<corner> and mos_tt_stat sections carry "
+                "no per-instance mismatch, so no MOS mismatch is sampled -- "
+                "select e.g. mos_tt_mismatch via corners.process."
+            ),
+        }
+    return None
+
+
 def _mismatch_family_report(
     netlist_path: str,
     pdk_variant: str | None,
     *,
     request: dict[str, Any] | None = None,
+    process_sections: list[str] | None = None,
     repo_root: str | None = None,
     scan: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
@@ -710,6 +760,8 @@ def _mismatch_family_report(
     report: list[dict[str, Any]] = []
     for family in families:
         entry = _MISMATCH_ACTIVITY.get((pdk_family, family)) if pdk_family else None
+        if (pdk_family, family) == ("sg13g2", "mosfet"):
+            entry = _sg13g2_mosfet_activity(process_sections) or entry
         if entry is not None:
             report.append(
                 {"family": family, "active": entry["active"], "note": entry["note"]}
@@ -2601,6 +2653,15 @@ def _run_sim_corners(
                 netlist_path,
                 models.get("pdk"),
                 request=request,
+                process_sections=[
+                    name
+                    for point in corner_points
+                    for name in (
+                        point.process_sections
+                        if point.process_sections is not None
+                        else ([point.process] if point.process else [])
+                    )
+                ],
                 repo_root=repo_root,
                 scan=family_scan,
             )

@@ -3644,6 +3644,14 @@ a corner grid. A stock ngspice without the module still produces the
     on the volare sky130A build `c6d73a35…`; note the term is upper-case, so a
     case-sensitive `grep agauss` misses it). The corner-level `var_mult` is a
     separate term shared by all instances.
+  - **ihp-sg13g2**: Section-based like sky130. `cornerMOSlv.lib` /
+    `cornerMOShv.lib` define plain `mos_<corner>` sections plus
+    `mos_<corner>_mismatch` sections; only the `_mismatch` ones include the
+    per-instance `agauss()` mismatch subcircuits (`sg13_lv_nmos`/`sg13_lv_pmos`,
+    `sg13_hv_nmos`/`sg13_hv_pmos`). `mos_tt_stat` is process-statistical, not
+    mismatch. `family_mismatch` reports `mosfet` `active: true` only when every
+    selected `corners.process` section ends in `_mismatch`, `false` when none
+    does, and `null` when the section is unknown or mixed.
   - **gf180mcu**: Mismatch works differently — there is **no** corner-suffixed
     `_mm` section to select. `sm141064.ngspice` (`libs.tech/ngspice/`) exposes
     only plain corner sections (`typical`, `ss`, `ff`, `sf`, `fs`, plus
