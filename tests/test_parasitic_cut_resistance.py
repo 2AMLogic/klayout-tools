@@ -27,7 +27,7 @@ from klayout_tools.decks import (
     get_parasitics_deck,
 )
 
-PDK_COMMIT = "c6d73a35f524070e85faff4a6a9eef49553ebc2b"
+PDK_COMMIT = "f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7"
 
 # deck -> cut name -> (lower_metal_index, nominal, high, low) in milliohm
 PUBLISHED_CUTS_MOHM = {
@@ -53,7 +53,7 @@ PUBLISHED_METALS_MOHM = {
         (90, 104, 76),
         (90, 104, 76),
         (90, 104, 76),
-        (60, 70, 50),
+        (40, 49, 31),
     ],
     "sky130": [
         (12800, 17000, 10500),
@@ -160,6 +160,7 @@ def test_gap_report_skips_covered_pairs():
 
 def _tech_file(deck_name: str) -> Path | None:
     for root in (
+        Path.home() / ".ciel" / "ciel",
         Path.home() / ".volare" / "volare",
         Path.home() / ".pdk-cache" / "volare",
     ):
