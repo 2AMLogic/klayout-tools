@@ -26,6 +26,11 @@ not `klt --version`, if you need to detect this kind of drift. See
   bump. A runner older than this change ignores the `stimulus` key (client
   capability check tracked in #2877). `docs/cli/sim.md` also names `klt
   0.7.0` as the first release that reads `$KLT_SIM_BACKEND`.
+- **`klt sim --op-lint` caps total subcircuit expansion** (issue #3595): the
+  hierarchy walk stops after 20 000 expanded subcircuit instances (a 7-level
+  fan-out-8 hierarchy previously expanded to ~2M devices and took ~29 s) and
+  emits one `unsupported_hierarchy` warning naming the cap; devices reached
+  before it are still linted. Additive; no `schema_version` bump.
 - **`klt lvs`: new `mismatches[].category` `device.series_fold_offset_absorbed`**
   (issue #3017): when `options.combine_devices` folds N>1 series primitives of
   a resistor class with a nonzero head term (`fixed_offset_ohm` +

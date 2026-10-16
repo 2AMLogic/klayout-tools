@@ -6186,7 +6186,10 @@ sections and `params:` value propagation are not followed. An `X` instance that
 is neither a recognised MOS model nor a resolvable subcircuit gets a
 `unsupported_hierarchy` warning in `diagnostics[]` naming it, and a netlist
 with no enumerated device and such an instance reports `status: "findings"`,
-never `clean`.
+never `clean`. Expansion is bounded: nesting depth 16, 64 `.include`d files,
+and 20 000 expanded subcircuit instances in total. A hierarchy that would
+expand further stops at the cap and emits a single `unsupported_hierarchy`
+warning naming the cap; devices reached before it are still linted.
 
 Every threshold comparison is on **magnitudes**: BSIM4 reports a PMOS's
 `vgs`/`vds`/`vth`/`vdsat` as positive numbers while a bare SPICE level-1
