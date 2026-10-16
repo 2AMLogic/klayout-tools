@@ -840,7 +840,11 @@ status read therefore cannot say how far through the grid a running job is, and
 `klt` does not estimate one from elapsed time. That needs the fleet to publish
 progress first (tracked against 2AMLogic/2am).
 
-Collecting a finished `--submit-only` job's report is `--attach`, below.
+`--submit-only` also writes the [submit receipt](#submit-receipt-and-client-termination-3065)
+(`batch-receipt.json`, `state: null`) into the artifacts directory, so the job
+id survives the caller. Collecting a finished `--submit-only` job's report is
+`--attach`, below: the full flow is `--submit-only` → `--job-status` (repeat) →
+`--attach <job_id>`, and an `interrupted` job is reported, never re-launched.
 
 ### Waiting, job id, and re-attaching ([#2978](https://github.com/2AMLogic/klayout-tools/issues/2978))
 
@@ -1121,9 +1125,40 @@ or nothing checked.
 
 `request_sha256` pins the *planned request file*; a report does not embed the
 request that produced it, so the report-to-request binding is the corner list
-plus the cross-shard consistency checks above. A deterministic shard planner
-(split by a corner axis, emit requests and the manifest) is not part of this
-verb.
+plus the cross-shard consistency checks above. Writing the shard requests and
+the manifest is `klt sim-plan`, below.
+
+#### Planning shards (`klt sim-plan`, [#3423](https://github.com/2AMLogic/klayout-tools/issues/3423))
+
+```
+klt sim-plan <request.json> [--axis process] [--format text|json]
+```
+
+Splits one `klt sim` request by `corners.process` entry (the only axis so far)
+and writes, **next to the source request**, one request per entry plus the
+manifest `klt sim-merge` takes: `<stem>.shard-<id>.json` and
+`<stem>.manifest.json`. They sit beside the source because `klt sim` resolves a
+request's relative paths (netlist, model libraries) against the request's own
+directory. A shard request is the input with `corners.process` narrowed to that
+entry (bare string or `{"name", "sections"}` bundle alike); the shard `id` is
+the entry's name.
+
+Each manifest shard's `corners` is the `corner_id` list `klt sim` computes for
+that shard request: the planner runs the same expansion (`exclude` rules, supply
+and temperature axes included), never a re-implementation. Shards follow the
+axis order, so concatenating their corner lists reproduces the single-request
+order, and planning, running the shards and `klt sim-merge` equals one request
+over the whole grid. Output is deterministic: sorted keys, no timestamps or host
+paths, and `request_sha256` is the SHA-256 of the written bytes, so re-planning
+the same input rewrites byte-identical files.
+
+The report (stdout) is `{"schema_version": 1, "axis", "manifest", "shard_count",
+"shards": [{"id", "request", "request_sha256", "corner_count"}]}`, with paths
+relative to the request's directory. Exit `0` planned, `1` refused with the
+usual error envelope: Monte Carlo requests (merge does not support them),
+deck-list requests, `corners.units` requests, a `corners.process` axis that is
+missing or has fewer than two entries, a repeated process name, or a shard that
+`exclude` empties. `2` is a usage error.
 
 ### Three budgets, and the fleet's whole-job ceiling
 
@@ -3543,8 +3578,8 @@ Grading, in order:
   indeterminate, so with `limits` it grades `inconclusive`.
 
 Off-host: the new tokens are `transfer` entries, so `backend: "remote"` /
-`"batch"` requests are refused exactly as above (a single corner may use
-`--backend local`).
+`"batch"` requests are handled exactly as above (not refused locally; the
+worker's mandatory `transfer` feature gate decides -- see "Backends" below).
 
 One rawfile and one ratio computation are used per unique `num`/`den` pair, and
 the capture does not depend on `options.waveforms`.
