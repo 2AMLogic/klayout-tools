@@ -47,6 +47,10 @@ def _print_text(report: dict) -> None:
     print(f"dbu_um: {report['dbu_um']}")
     print(f"shape_count: {report['shape_count']}")
     print(f"label_count: {report['label_count']}")
+    if "base_gds" in report:
+        print(f"base_gds: {report['base_gds']} (cell {report['base_cell']})")
+        print(f"erased_shape_count: {report['erased_shape_count']}")
+        print(f"erased_label_count: {report['erased_label_count']}")
 
     bbox = report["bbox_um"]
     if bbox is not None:

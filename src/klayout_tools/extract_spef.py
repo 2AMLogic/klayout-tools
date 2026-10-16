@@ -216,6 +216,43 @@ def _unescape_def_name(name: str) -> str:
     return _DEF_ESCAPED_CHAR_RE.sub(r"\1", name)
 
 
+class DefName(str):
+    """A DEF identifier's real (unescaped) spelling -- equal to, and hashing
+    as, the plain ``str`` every existing consumer compares against -- that
+    also remembers its SPEF spelling in :attr:`spef` (issue #2969).
+
+    Unescaping (:func:`_unescape_def_name`) collapses DEF's literal-slash
+    ``sub\\/_001_`` and hierarchy-divider ``sub/_001_`` onto the same string,
+    but SPEF (``*DIVIDER /``) keeps them distinct: the escaped form is a flat
+    name, the bare one a hierarchical path. :func:`_write_spef` reads
+    :attr:`spef` so it can re-emit the divider the DEF actually used."""
+
+    spef: str
+
+    def __new__(cls, raw: str) -> DefName:
+        obj = super().__new__(cls, _unescape_def_name(raw))
+        obj.spef = _def_name_to_spef(raw)
+        return obj
+
+
+def _def_name_to_spef(raw: str) -> str:
+    """``raw`` (a DEF identifier as spelled in the file) rendered as a SPEF
+    identifier: identical to ``_spef_name(_unescape_def_name(raw))`` except a
+    bare, unescaped ``/`` -- DEF's hierarchy divider -- stays ``/`` (SPEF
+    declares the same ``*DIVIDER /``). An escaped ``\\/`` stays escaped."""
+    out: list[str] = []
+    i = 0
+    while i < len(raw):
+        char = raw[i]
+        if char == "\\" and i + 1 < len(raw):
+            out.append(_spef_name(raw[i + 1]))
+            i += 2
+            continue
+        out.append("/" if char == "/" else _spef_name(char))
+        i += 1
+    return "".join(out)
+
+
 def def_net_instance_pins(def_path: str) -> dict[str, tuple[tuple[str, str], ...]]:
     """Parse ``def_path``'s own ``NETS`` section for each net's real
     ``(instance, pin)`` connectivity (issue #961's device-terminal
@@ -284,7 +321,7 @@ def def_net_instance_pins(def_path: str) -> dict[str, tuple[tuple[str, str], ...
             # points (see `_DEF_NET_CLAUSE_RE`).
             body = _DEF_NET_CLAUSE_RE.split(" ".join(current_body), maxsplit=1)[0]
             pairs = [
-                (_unescape_def_name(ref), _unescape_def_name(pin))
+                (DefName(ref), DefName(pin))
                 for ref, pin in _DEF_NET_CONN_RE.findall(body)
                 if ref != "PIN"
             ]
@@ -304,7 +341,7 @@ def def_net_instance_pins(def_path: str) -> dict[str, tuple[tuple[str, str], ...
         start_match = _DEF_NET_START_RE.match(line)
         if start_match:
             _flush()
-            current_net = _unescape_def_name(start_match.group(1))
+            current_net = DefName(start_match.group(1))
         if current_net is not None:
             current_body.append(line)
         if line.rstrip().endswith(";"):
@@ -392,6 +429,30 @@ def _unescape_spice_safe_net_name(name: str) -> str:
     if name.startswith("\\$"):
         return name[1:]
     return name
+
+
+def _def_spef(name: str) -> str:
+    """``name``'s SPEF spelling: a :class:`DefName` keeps the spelling its DEF
+    used; anything without DEF origin falls back to :func:`_spef_name`."""
+    return name.spef if isinstance(name, DefName) else _spef_name(name)
+
+
+def _def_net_spellings(
+    net_instance_pins: Mapping[str, Sequence[tuple[str, str]]] | None,
+    port_name_set: frozenset[str],
+) -> dict[str, str]:
+    """Issue #2969: net name -> the SPEF spelling its DEF used (bare ``/`` =
+    hierarchy divider vs escaped ``\\/`` = literal slash). Port nets are left
+    out so they keep :func:`_spef_name` and ``*PORTS``/``*P`` agree."""
+    return {
+        str(name): name.spef
+        for name in (net_instance_pins or {})
+        if isinstance(name, DefName) and name not in port_name_set
+    }
+
+
+def _net_spef(def_net_spellings: Mapping[str, str], name: str) -> str:
+    return def_net_spellings.get(name) or _spef_name(name)
 
 
 def _write_spef(
@@ -577,6 +638,8 @@ def _write_spef(
     port_names = [_unescape_spice_safe_net_name(name) for name in port_names]
 
     port_name_set = frozenset(port_names)
+    def_net_spellings = _def_net_spellings(net_instance_pins, port_name_set)
+
     net_instance_pins_map: Mapping[str, Sequence[tuple[str, str]]] = (
         net_instance_pins or {}
     )
@@ -614,7 +677,7 @@ def _write_spef(
         if this_net not in hub_by_net_name:
             is_unique_port = this_net in port_name_set and name_counts[this_net] == 1
             _, this_hub_node, _ = _spef_net_topology_nodes(
-                _spef_name(this_net),
+                _net_spef(def_net_spellings, this_net),
                 hub_differs=entry["hub_net"] != this_net,
                 port_node_name=(
                     _spef_port_node_name(this_net) if is_unique_port else None
@@ -668,7 +731,7 @@ def _write_spef(
         # grammar rejects the bare `$`/`|`/`[`/`]` characters KLayout's
         # extracted net names routinely carry (see that helper's docstring
         # for the live `read_spef` parse error this prevents).
-        spef_net = _spef_name(net)
+        spef_net = _net_spef(def_net_spellings, net)
         is_port = net in port_name_set
         hub_differs = hub != net
 
@@ -709,7 +772,7 @@ def _write_spef(
             # DEF `NETS` section alone does not carry it) -- declared `B`,
             # matching the same "never guessed" posture the `*PORTS`/`*P`
             # entries above already follow.
-            conn_lines.append(f"*I {_spef_name(inst)}:{_spef_name(pin)} B")
+            conn_lines.append(f"*I {_def_spef(inst)}:{_def_spef(pin)} B")
         if conn_lines:
             lines.append("*CONN")
             lines += conn_lines
@@ -721,7 +784,7 @@ def _write_spef(
             # this function's docstring, "Coupling `*CAP` entries"
             # paragraph.
             coupled_hub_node = hub_by_net_name.get(
-                coupled["net"], _spef_name(coupled["net"])
+                coupled["net"], _net_spef(def_net_spellings, coupled["net"])
             )
             cap_lines.append(
                 f"{i} {hub_node} {coupled_hub_node} {coupled['capacitance_ff']:.6f}"
@@ -759,7 +822,7 @@ def _write_spef(
             # "device-terminal `*CONN` correlation" paragraph, for why this
             # does not attempt to apportion resistance between DEF-level
             # pins.
-            conn_node = f"{_spef_name(inst)}:{_spef_name(pin)}"
+            conn_node = f"{_def_spef(inst)}:{_def_spef(pin)}"
             res_lines.append(f"{next_res_idx} {net_node} {conn_node} 0.000000")
             next_res_idx += 1
 
