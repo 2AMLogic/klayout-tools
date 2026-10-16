@@ -318,8 +318,8 @@ def _voltage_flavor_mark_margin_um(family: str) -> float:
     return _PDK_VOLTAGE_FLAVOR_MARK_MARGIN_UM.get(family, WELL_ENCLOSURE_MARGIN_UM)
 
 
-#: Per-family nwell enclosure margin (um) of the n-tap guard ring (:data:`WELL_ENCLOSURE_MARGIN_UM`
-#: for a family absent here, byte-for-byte).
+#: Per-family nwell enclosure margin (um) of the n-tap guard ring
+#: (:data:`WELL_ENCLOSURE_MARGIN_UM` for a family absent here, byte-for-byte).
 #:
 #: ``sky130`` only (issue #3115): the PDK's ``diff/tap.10`` (nwell overlap of
 #: n-tap) is 0.18um, which this repo's curated sky130 deck does not
