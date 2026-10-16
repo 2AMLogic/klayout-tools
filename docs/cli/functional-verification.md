@@ -167,7 +167,12 @@ the reviewer-side check.
   optional extra and is deliberately *not* a base `klt` dependency: it is a
   compiled package with a simulator toolchain behind it, and most `klt`
   installs never verify anything. A missing install is a clear, actionable
-  error (exit 1), never a traceback — the same posture `klt synthesize`
+  error (exit 1, `error.code` `missing_optional_dependency`) that names the
+  failing interpreter (`sys.executable`). For a tool install (`uv tool
+  install` / `pipx install` / `uvx --from`), `pip install cocotb` does not
+  reach the isolated venv: reinstall with the extra on the spec, e.g.
+  `uvx --from "klayout-tools[functional-verification] @ <url-or-version>"
+  klt functional-verification ...`. It is never a traceback — the same posture `klt synthesize`
   takes toward a missing `yosys` binary. The extra installs on every Python
   this project supports, 3.10 through 3.14; its old `python_version <
   "3.14"` marker was dropped in issue #2593 once cocotb 2.1.0 added 3.14
