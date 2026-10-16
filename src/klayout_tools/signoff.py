@@ -867,6 +867,7 @@ from ._report_verify import (
 )
 from .build_identity import version_report
 from .coverage import (
+    RESULT_PARTIAL,
     coverage_nothing_checked,
     coverage_nothing_checked_reasons,
     coverage_refusal_reason,
@@ -3155,9 +3156,31 @@ def _check_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
     else:
         passed = False  # kind == "error"
 
+    if passed and _generic_overstates_coverage(kind, envelope):
+        return False
     if passed and _critical_metric_blockers(envelope):
         return False
     return passed
+
+
+def _generic_overstates_coverage(kind: str, envelope: _EvidenceEnvelope) -> bool:
+    """Whether a ``generic`` envelope's success status contradicts its own
+    versioned ``coverage`` block (issue #2906).
+
+    A ``generic`` envelope is user-authored and has no producer adapter to
+    derive its status from :func:`~klayout_tools.coverage.coverage_rollup`,
+    so nothing forces a wrapper that skipped requested work to say
+    ``pass_partial``. When its ``status`` is the kind's success token yet
+    its coverage block declares skipped requested work, the common rollup
+    says ``partial``; that is graded as non-passing here rather than only
+    disclosed. A legacy (absent) coverage block makes no claim and never
+    trips this, and first-party kinds keep their producer-owned status.
+    """
+    return (
+        kind == "generic"
+        and envelope.get("status") == _PASSING_STATUS_BY_KIND["generic"]
+        and coverage_state(cast(dict[str, Any], envelope)) == RESULT_PARTIAL
+    )
 
 
 def _drc_coverage_disclosure(
@@ -3265,8 +3288,11 @@ def _partial_coverage_disclosure(envelope: dict[str, Any]) -> dict[str, Any] | N
     "missing legacy coverage is not evidence either way" rule
     :mod:`klayout_tools.coverage` exists to apply identically everywhere.
 
-    Quoted, never graded on: a `klt signoff` verdict still rests on the
-    producer's own status token (see :func:`_non_passing_reason`). Until a
+    Quoted, not graded on, for every first-party kind: a `klt signoff`
+    verdict still rests on the producer's own status token (see
+    :func:`_non_passing_reason`). The one exception is ``generic``, which
+    has no adapter and is cross-checked against this block by
+    :func:`_generic_overstates_coverage` (issue #2906). Until a
     verb's Phase 2 adapter lands, that token can still be the kind's
     unconditional success word on a run whose common coverage says
     ``partial`` -- and when it is, this key is what makes the gap visible in
@@ -3328,6 +3354,8 @@ def _non_passing_reason(kind: str, envelope: dict[str, Any]) -> str:
     if kind == "yield" and envelope.get("status") == "insufficient_evidence":
         return _REASON_UNDERSIZED_SAMPLE
     if _reports_partial_status(kind, envelope):
+        return _REASON_PARTIAL_COVERAGE
+    if _generic_overstates_coverage(kind, cast(_EvidenceEnvelope, envelope)):
         return _REASON_PARTIAL_COVERAGE
     # Issue #2768: a `klt drc --rules` subset whose only shortfall is the
     # rules it deliberately omitted is a coverage gap, not a defect.
@@ -4647,6 +4675,7 @@ def build_tier_report(
         )
 
     partition_boundary = _read_partition_boundary(manifest, kind)
+    spec_rows_by_item = _read_spec_rows(manifest)
     # Issue #2839: T1 item 11's port-accessibility policy (provisional).
     power_port_policy = _read_power_port_policy(manifest.get("power_ports"))
 
@@ -4701,6 +4730,11 @@ def build_tier_report(
                     ),
                     graded_by_build=graded_by_build,
                     repo_root=repo_root,
+                    spec_rows=spec_rows_by_item.get(t1_item["id"]),
+                    spec_rows_invalid=(
+                        t1_item["id"] in spec_rows_by_item
+                        and spec_rows_by_item[t1_item["id"]] is None
+                    ),
                 )
             total += 1
             if entry["status"] == "met":
@@ -6153,6 +6187,8 @@ def _build_tier_item(
     require_post_layout: bool = False,
     graded_by_build: bool = True,
     repo_root: str | Path | None = None,
+    spec_rows: list[dict[str, Any]] | None = None,
+    spec_rows_invalid: bool = False,
 ) -> dict[str, Any]:
     """Grade one T1 checklist item against ``evidence`` -- see
     :func:`build_tier_report`'s docstring for the full met/unmet rule and
@@ -6231,39 +6267,57 @@ def _build_tier_item(
     """
     citation = None
     failure_detail: dict[str, Any] = {}
+    extra: dict[str, Any] = {}
     status = "unmet"
     reason: str | None = _REASON_NO_EVIDENCE
+
+    def grade_spec(
+        spec: dict[str, Any],
+    ) -> tuple[str, str | None, dict[str, Any] | None, dict[str, Any]]:
+        spec_status, spec_reason, spec_citation, spec_detail = _grade_evidence(
+            spec,
+            require_post_layout=require_post_layout,
+            allowed_kinds=allowed_kinds,
+            item_id=item_id,
+            repo_root=repo_root,
+        )
+        opt_in_items = (
+            _OPT_IN_KIND_ITEMS.get(spec_citation["kind"])
+            if spec_status == "met"
+            else None
+        )
+        if opt_in_items is not None and item_id not in opt_in_items:
+            return "unmet", _REASON_WRONG_KIND, None, spec_detail
+        if (
+            spec_status == "met"
+            and allowed_kinds is not None
+            and spec_citation["kind"] not in allowed_kinds
+        ):
+            return "unmet", _REASON_WRONG_KIND, None, spec_detail
+        return spec_status, spec_reason, spec_citation, spec_detail
 
     raw_entry = _lookup_evidence(evidence, item_id, partition_kind)
     if raw_entry is not None and not graded_by_build:
         reason = _REASON_UNGRADEABLE_BY_BUILD
+    elif (
+        raw_entry is not None
+        and item_id in _ITEMS_ACCEPTING_MULTI_CITATION
+        and (isinstance(raw_entry, list) or spec_rows is not None or spec_rows_invalid)
+    ):
+        # Issue #2959: item 5 may cite several envelopes (and declare the
+        # spec rows they must cover) -- graded per citation, then aggregated.
+        status, reason, citation, failure_detail, extra = _grade_multi_citation(
+            raw_entry,
+            grade_spec,
+            spec_rows=spec_rows,
+            spec_rows_invalid=spec_rows_invalid,
+        )
     elif raw_entry is not None:
         spec = _normalize_evidence_entry(raw_entry)
         if spec is None:
             reason = _REASON_INVALID_EVIDENCE
         else:
-            status, reason, citation, failure_detail = _grade_evidence(
-                spec,
-                require_post_layout=require_post_layout,
-                allowed_kinds=allowed_kinds,
-                item_id=item_id,
-                repo_root=repo_root,
-            )
-            opt_in_items = (
-                _OPT_IN_KIND_ITEMS.get(citation["kind"]) if status == "met" else None
-            )
-            if opt_in_items is not None and item_id not in opt_in_items:
-                status = "unmet"
-                reason = _REASON_WRONG_KIND
-                citation = None
-            elif (
-                status == "met"
-                and allowed_kinds is not None
-                and citation["kind"] not in allowed_kinds
-            ):
-                status = "unmet"
-                reason = _REASON_WRONG_KIND
-                citation = None
+            status, reason, citation, failure_detail = grade_spec(spec)
 
     return {
         "tier": tier,
@@ -6281,7 +6335,200 @@ def _build_tier_item(
         "reason": reason,
         "graded_by_build": graded_by_build,
         "citation": citation,
+        **extra,
         **({"detail": failure_detail} if failure_detail else {}),
+    }
+
+
+#: T1 items whose manifest entry may be a **list** of citations with optional
+#: ``spec_rows`` coverage (issue #2959). Item 5 today; item 6 (#2908) reuses
+#: :func:`_grade_multi_citation` by joining this set.
+_ITEMS_ACCEPTING_MULTI_CITATION: frozenset[int] = frozenset({5})
+
+
+def _read_spec_rows(
+    manifest: dict[str, Any],
+) -> dict[int, list[dict[str, Any]] | None]:
+    """Read the manifest's optional ``spec_rows`` declaration (issue #2959):
+    ``{"<item id>": [{"id": "<row>", "gap": "<reason>"?}, ...]}``.
+
+    Returns ``item id -> rows``; a malformed declaration for an item maps to
+    ``None`` so only that item degrades to ``invalid_evidence``, never the
+    whole report. A ``gap`` row is one no producible envelope can cover; it
+    is reported as a declared gap and never counts as covered.
+    """
+    raw = manifest.get("spec_rows")
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        return {item_id: None for item_id in _ITEMS_ACCEPTING_MULTI_CITATION}
+    out: dict[int, list[dict[str, Any]] | None] = {}
+    for key, rows in raw.items():
+        try:
+            item_id = int(key)
+        except (TypeError, ValueError):
+            continue
+        parsed: list[dict[str, Any]] | None = []
+        if not isinstance(rows, list) or not rows:
+            parsed = None
+        else:
+            valid: list[dict[str, Any]] = []
+            seen: set[str] = set()
+            for row in rows:
+                row_id = row.get("id") if isinstance(row, dict) else None
+                gap = row.get("gap") if isinstance(row, dict) else None
+                if (
+                    not isinstance(row_id, str)
+                    or not row_id
+                    or row_id in seen
+                    or (gap is not None and (not isinstance(gap, str) or not gap))
+                ):
+                    valid = []
+                    break
+                seen.add(row_id)
+                valid.append({"id": row_id, "gap": gap})
+            parsed = valid or None
+        out[item_id] = parsed
+    return out
+
+
+def _citation_label(spec: dict[str, Any]) -> str:
+    if spec["kind"] == "command":
+        return " ".join(spec["command"])
+    return str(spec["file"])
+
+
+def _grade_multi_citation(
+    raw_entry: Any,
+    grade_spec: Any,
+    *,
+    spec_rows: list[dict[str, Any]] | None,
+    spec_rows_invalid: bool,
+) -> tuple[str, str | None, dict[str, Any] | None, dict[str, Any], dict[str, Any]]:
+    """Grade a list-form (or ``spec_rows``-bearing) evidence entry (issue
+    #2959). Each member goes through the ordinary per-envelope path
+    (``grade_spec``); this only aggregates:
+
+    - a malformed member, malformed ``spec_rows``, or a member naming an
+      undeclared (or declared-``gap``) row -> ``unmet``/``invalid_evidence``;
+    - any failing member -> ``unmet`` with that member's reason, the failing
+      envelopes named under ``detail.failed_citations``;
+    - all members pass but a declared row is uncovered or a declared gap ->
+      ``unmet``/``partial_coverage`` with ``failed_rows``, ``uncovered_rows``
+      and ``declared_gaps`` listed separately under ``detail``;
+    - otherwise ``met``; ``citation`` is the first member's and ``citations``
+      carries all of them.
+
+    Returns ``(status, reason, citation, failure_detail, extra_item_keys)``.
+    """
+    invalid: tuple[str, str | None, None, dict[str, Any], dict[str, Any]] = (
+        "unmet",
+        _REASON_INVALID_EVIDENCE,
+        None,
+        {},
+        {},
+    )
+    if spec_rows_invalid:
+        return invalid
+    members = _parse_multi_members(raw_entry)
+    if members is None or not _members_rows_declared(members, spec_rows):
+        return invalid
+
+    graded = [(spec, rows, grade_spec(spec)) for spec, rows in members]
+    failed = [g for g in graded if g[2][0] != "met"]
+    row_info = _multi_row_info(graded, failed, spec_rows)
+    extra: dict[str, Any] = {
+        "citations_graded": [
+            {
+                "citation": _citation_label(spec),
+                **({"rows": rows} if rows else {}),
+                "status": g[0],
+                "reason": g[1],
+            }
+            for spec, rows, g in graded
+        ]
+    }
+
+    if failed:
+        first = failed[0][2]
+        detail = {
+            **first[3],
+            "failed_citations": [_citation_label(spec) for spec, _, _ in failed],
+            **row_info,
+        }
+        return "unmet", first[1], None, detail, extra
+    if row_info and (row_info["uncovered_rows"] or row_info["declared_gaps"]):
+        return "unmet", _REASON_PARTIAL_COVERAGE, None, row_info, extra
+    if row_info:
+        extra["row_coverage"] = row_info
+    extra["citations"] = [g[2] for _, _, g in graded]
+    return "met", None, graded[0][2][2], {}, extra
+
+
+def _parse_multi_members(
+    raw_entry: Any,
+) -> list[tuple[dict[str, Any], list[str] | None]] | None:
+    """Normalize each member of a multi-citation entry to ``(spec, rows)``;
+    ``None`` when the entry or any member is malformed."""
+    raw_members = raw_entry if isinstance(raw_entry, list) else [raw_entry]
+    if not raw_members:
+        return None
+    members: list[tuple[dict[str, Any], list[str] | None]] = []
+    for raw in raw_members:
+        spec = _normalize_evidence_entry(raw)
+        if spec is None:
+            return None
+        rows: list[str] | None = None
+        if isinstance(raw, dict) and "rows" in raw:
+            rows = raw["rows"]
+            if (
+                not isinstance(rows, list)
+                or not rows
+                or not all(isinstance(r, str) and r for r in rows)
+            ):
+                return None
+        members.append((spec, rows))
+    return members
+
+
+def _members_rows_declared(
+    members: list[tuple[dict[str, Any], list[str] | None]],
+    spec_rows: list[dict[str, Any]] | None,
+) -> bool:
+    """True unless a member names an undeclared (or declared-``gap``) row."""
+    if spec_rows is None:
+        return True
+    declared = {row["id"]: row for row in spec_rows}
+    return all(
+        row_id in declared and declared[row_id]["gap"] is None
+        for _, rows in members
+        for row_id in rows or []
+    )
+
+
+def _multi_row_info(
+    graded: list[Any], failed: list[Any], spec_rows: list[dict[str, Any]] | None
+) -> dict[str, Any]:
+    """``failed_rows`` / ``uncovered_rows`` / ``declared_gaps`` for the
+    declared ``spec_rows`` (empty when none were declared)."""
+    if spec_rows is None:
+        return {}
+    covered = {r for _, rows, g in graded if g[0] == "met" for r in rows or []}
+    failed_rows = sorted({r for _, rows, _ in failed for r in rows or []} - covered)
+    return {
+        "failed_rows": failed_rows,
+        "uncovered_rows": [
+            row["id"]
+            for row in spec_rows
+            if row["gap"] is None
+            and row["id"] not in covered
+            and row["id"] not in failed_rows
+        ],
+        "declared_gaps": [
+            {"id": row["id"], "gap": row["gap"]}
+            for row in spec_rows
+            if row["gap"] is not None
+        ],
     }
 
 

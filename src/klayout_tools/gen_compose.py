@@ -1256,6 +1256,9 @@ def _parse_cell_block(
     gds_path = raw_cell.get("gds_path")
     if not isinstance(gds_path, str) or not gds_path:
         raise GenComposeError(f"{where}.gds_path is required")
+    # #2935: keep the spelling the request used for the response's
+    # `source_path` echo -- the resolved (absolute) value is internal only.
+    spelled_gds_path = gds_path
     gds_path = _resolve_relative(gds_path, request_dir or os.getcwd())
 
     ports = _parse_cell_ports(raw_cell.get("ports"), where)
@@ -1273,6 +1276,7 @@ def _parse_cell_block(
     return {
         "cell_name": cell_name,
         "gds_path": gds_path,
+        "spelled_gds_path": spelled_gds_path,
         "bbox_um": bbox_um,
         "ports": ports,
         "navigable_regions": navigable_regions,
@@ -1329,6 +1333,7 @@ def _parse_blocks(
             )
             cell_name = parsed_cell["cell_name"]
             gds_path = parsed_cell["gds_path"]
+            spelled_gds_path = parsed_cell["spelled_gds_path"]
             bbox_um = parsed_cell["bbox_um"]
             ports = parsed_cell["ports"]
             navigable_regions = parsed_cell["navigable_regions"]
@@ -1339,6 +1344,8 @@ def _parse_blocks(
             raw_generator = report.get("generator")
             cell_name = report.get("cell_name")
             gds_path = report.get("gds_path")
+            # A report's gds_path is never resolved, so it is already "as spelled".
+            spelled_gds_path = gds_path
             if not isinstance(raw_generator, str) or not raw_generator:
                 raise GenComposeError(
                     f"blocks[{index}] (id '{block_id}'): generator_report.generator "
@@ -1414,6 +1421,7 @@ def _parse_blocks(
             "generator": generator,
             "cell_name": cell_name,
             "gds_path": gds_path,
+            "spelled_gds_path": spelled_gds_path,
             "bbox_um": bbox_um,
             "port_names": set(ports_by_name),
             "ports": ports_by_name,
@@ -1844,7 +1852,12 @@ def _validate_block_port(
 
 
 def _parse_waypoints_um(
-    raw_waypoints: Any, *, net: str, index: int, field: str = "waypoints_um"
+    raw_waypoints: Any,
+    *,
+    net: str,
+    index: int,
+    field: str = "waypoints_um",
+    roles_out: list[str | None] | None = None,
 ) -> list[tuple[float, float]] | None:
     """Parse the optional ``connectivity[<index>].waypoints_um`` field (#634).
 
@@ -1853,6 +1866,14 @@ def _parse_waypoints_um(
     pairs, forced through in order by :func:`manhattan_backbone` between the
     two ports' own stubs. Malformed input is an application error (exit 1),
     the same treatment every other ``connectivity[]`` field gets.
+
+    A waypoint may also be the plane-bearing triple ``[x_um, y_um,
+    "layer_role"]`` (#2930): the leg changes routing plane at that point (the
+    role names the plane it continues on). The returned list is still bare
+    ``(x, y)`` pairs; the roles are appended -- one entry per waypoint,
+    ``None`` for a plain pair -- to ``roles_out`` when the caller supplies it.
+    A caller that does not pass ``roles_out`` cannot honour a plane change, so
+    a triple is then an application error rather than a silently ignored role.
 
     ``field`` (#1529) overrides the field name in error messages -- used by
     :func:`_parse_legs` so a malformed per-leg waypoint path is reported as
@@ -1868,18 +1889,38 @@ def _parse_waypoints_um(
         )
 
     parsed: list[tuple[float, float]] = []
+    roles: list[str | None] = []
     for wp_index, waypoint in enumerate(raw_waypoints):
         if (
             not isinstance(waypoint, list)
-            or len(waypoint) != 2
+            or len(waypoint) not in (2, 3)
             or any(
-                isinstance(v, bool) or not isinstance(v, (int, float)) for v in waypoint
+                isinstance(v, bool) or not isinstance(v, (int, float))
+                for v in waypoint[:2]
             )
         ):
             raise GenComposeError(
-                f"{where}[{wp_index}] must be a [x_um, y_um] pair of numbers"
+                f"{where}[{wp_index}] must be a [x_um, y_um] pair of numbers "
+                '(or [x_um, y_um, "layer_role"] to change routing plane there)'
             )
+        role: str | None = None
+        if len(waypoint) == 3:
+            role = waypoint[2]
+            if not isinstance(role, str) or not role:
+                raise GenComposeError(
+                    f"{where}[{wp_index}][2] must be a non-empty layer role "
+                    "string (such as 'metal3') naming the plane the route "
+                    "continues on after this point"
+                )
+            if roles_out is None:
+                raise GenComposeError(
+                    f"{where}[{wp_index}] changes routing plane, which is not "
+                    "supported here"
+                )
         parsed.append((float(waypoint[0]), float(waypoint[1])))
+        roles.append(role)
+    if roles_out is not None and any(role is not None for role in roles):
+        roles_out.extend(roles)
     return parsed
 
 
@@ -1975,7 +2016,9 @@ def _parse_legs(
       nearest-first search would otherwise have picked for them) while
       leaving the path itself to :func:`route_two_pin`'s default backbone;
       supplying it steers that leg's path exactly as the top-level
-      ``waypoints_um`` field steers a 2-pin net's only leg.
+      ``waypoints_um`` field steers a 2-pin net's only leg. A waypoint may be
+      the triple ``[x_um, y_um, "layer_role"]`` (#2930): the leg changes
+      routing plane there (see ``docs/design/gen-compose-plane-bearing-waypoints.md``).
     - ``layer_role``/``width_um`` are optional *per leg* (issue #1655): the
       leg-level tier of the per-net routing-plane override (see
       :func:`_parse_connectivity` for the net-level field and
@@ -2041,17 +2084,22 @@ def _parse_legs(
             raise GenComposeError(
                 f"{where}[{leg_index}].from_pin and .to_pin must name different pins"
             )
+        leg_waypoint_roles: list[str | None] = []
         leg_waypoints = _parse_waypoints_um(
             raw_leg.get("waypoints_um"),
             net=net,
             index=index,
             field=f"legs[{leg_index}].waypoints_um",
+            roles_out=leg_waypoint_roles,
         )
         legs.append(
             {
                 "from_pin": from_pin,
                 "to_pin": to_pin,
                 "waypoints_um": leg_waypoints,
+                # Plane-bearing waypoints (#2930): one role (or None) per
+                # waypoint, or None when no waypoint changes plane.
+                "waypoint_roles": leg_waypoint_roles or None,
                 "layer_role": _parse_layer_role_override(
                     raw_leg.get("layer_role"), f"{where}[{leg_index}].layer_role"
                 ),
@@ -2079,6 +2127,84 @@ _CONNECTIVITY_ENTRY_KEYS = {
     "layer_role",
     "width_um",
 }
+
+
+def _resolve_waypoint_layers(
+    resolved_leg: dict[str, Any],
+    leg: dict[str, Any],
+    leg_where: str,
+    net_width_um: float,
+    leg_layer_widths: dict[tuple[int, int], float],
+    *,
+    resolve_layer: Any,
+    effective_width: Any,
+    label_layer: Any,
+) -> None:
+    """Attach ``waypoint_layers`` to a resolved leg that changes plane (#2930).
+
+    Each waypoint role resolves through the same path a leg's own
+    ``layer_role`` does, and carries the width the route draws at on that
+    plane (the leg's own ``width_um``, else the net's, floored against *that
+    plane's* deck minimum). ``route_bundle()`` splits the leg at these points
+    into one segment per plane, joined by a via ladder. A no-op for a leg with
+    no plane-bearing waypoint. ``leg_layer_widths`` is updated in place.
+    """
+    if not leg.get("waypoint_roles"):
+        return
+    waypoint_layers: list[dict[str, Any] | None] = []
+    for wp_index, wp_role in enumerate(leg["waypoint_roles"]):
+        if wp_role is None:
+            waypoint_layers.append(None)
+            continue
+        wp_layer = resolve_layer(wp_role, f"{leg_where}.waypoints_um[{wp_index}]")
+        wp_width_um = effective_width(
+            wp_layer, leg.get("width_um"), net_width_um, f"{leg_where}.width_um"
+        )
+        label_layer(wp_layer, wp_role)
+        leg_layer_widths[wp_layer] = max(
+            leg_layer_widths.get(wp_layer, 0.0), wp_width_um
+        )
+        waypoint_layers.append({"layer": wp_layer, "width_um": wp_width_um})
+    resolved_leg["waypoint_layers"] = waypoint_layers
+
+
+def _drawn_leg_parts(legs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drawing payloads of a net's routed legs, one per plane drawn (#2930).
+
+    A leg that changes plane at a plane-bearing waypoint carries one payload
+    per plane in ``segments``; each is drawn, recorded for the route-vs-route
+    comparison and labelled exactly as an ordinary leg is.
+    """
+    return [
+        part for leg in legs if leg["routed"] for part in (leg.get("segments") or [leg])
+    ]
+
+
+def _fold_plane_waypoints_into_leg(
+    legs: list[dict[str, Any]] | None,
+    parsed_pins: list[dict[str, str]],
+    waypoints_um: list[tuple[float, float]] | None,
+    waypoint_roles: list[str | None],
+) -> tuple[list[dict[str, Any]] | None, list[tuple[float, float]] | None]:
+    """Express a plane-changing net-level ``waypoints_um`` as one named leg (#2930).
+
+    A 2-pin net whose waypoint path changes plane is its own single named leg:
+    the plane split is a per-leg construct (the leg is pinned to its planes,
+    never retried elsewhere), so the net-level path becomes exactly that one
+    leg. Returns ``(legs, waypoints_um)`` unchanged when no waypoint carries a
+    role.
+    """
+    if not waypoint_roles:
+        return legs, waypoints_um
+    leg = {
+        "from_pin": dict(parsed_pins[0]),
+        "to_pin": dict(parsed_pins[1]),
+        "waypoints_um": waypoints_um,
+        "waypoint_roles": waypoint_roles,
+        "layer_role": None,
+        "width_um": None,
+    }
+    return [leg], None
 
 
 def _parse_connectivity(
@@ -2136,8 +2262,12 @@ def _parse_connectivity(
             )
             parsed_pins.append({"block": block_id, "port": port})
 
+        net_waypoint_roles: list[str | None] = []
         waypoints_um = _parse_waypoints_um(
-            entry.get("waypoints_um"), net=net, index=index
+            entry.get("waypoints_um"),
+            net=net,
+            index=index,
+            roles_out=net_waypoint_roles,
         )
         # A bundle net (>2 pins, #1073) is routed as a spanning tree of legs
         # (see route_bundle) -- a single caller-supplied path has no
@@ -2167,6 +2297,10 @@ def _parse_connectivity(
                 "instead of 'waypoints_um' if a 2-pin net also needs a named "
                 "from_pin/to_pin leg"
             )
+
+        legs, waypoints_um = _fold_plane_waypoints_into_leg(
+            legs, parsed_pins, waypoints_um, net_waypoint_roles
+        )
 
         connectivity.append(
             {
@@ -2550,6 +2684,60 @@ def _pdk_mfg_grid_um(pdk_info: dict[str, Any], layer: tuple[int, int] | None) ->
         return mfg_grid_um(_pdk_family(pdk_info["variant"]), layer)
     except GenError:
         return 0.0
+
+
+def _net_backbone_grid_um(
+    pins: list[dict[str, Any]],
+    blocks: dict[str, dict[str, Any]],
+    route_layer: tuple[int, int] | None,
+    grid_for_layer: Callable[[tuple[int, int] | None], float],
+) -> float:
+    """The manufacturing grid a net's backbone jog snaps to (issue #3079): the
+    coarsest of the route layer's and every pin's port layer's grid, the same
+    max :func:`_snap_routed_ports_to_grid` takes. ``0.0`` (no snap) when the
+    route layer is unknown or the PDK family has no grid rule."""
+    if route_layer is None:
+        return 0.0
+    grid = grid_for_layer(route_layer)
+    for pin in pins:
+        port = blocks.get(pin["block"], {}).get("ports", {}).get(pin["port"])
+        layer_info = (port or {}).get("layer")
+        if isinstance(layer_info, dict):
+            grid = max(
+                grid, grid_for_layer((layer_info["layer"], layer_info["datatype"]))
+            )
+    return grid
+
+
+def _offgrid_leg_notes(
+    net_label: str, legs: list[dict[str, Any]], grid_um: float
+) -> list[str]:
+    """Compose-time notes naming each routed leg of ``net_label`` that still has
+    a backbone vertex off ``grid_um`` (issue #3079): a jog that could not be
+    snapped without crossing a stub end, or a user-supplied ``waypoints_um``
+    point (used verbatim). Surfaces what ``klt drc`` would otherwise report as
+    ``*.ongrid.1``. Empty when ``grid_um <= 0``."""
+    if grid_um <= 0.0:
+        return []
+    notes: list[str] = []
+    for leg in legs:
+        if not leg.get("routed") or not leg.get("points_um"):
+            continue
+        bad = [
+            (x, y)
+            for x, y in leg["points_um"]
+            if any(abs(v / grid_um - round(v / grid_um)) > 1e-6 for v in (x, y))
+        ]
+        if bad:
+            a, b = leg["pins"]
+            notes.append(
+                f"net '{net_label}' leg {a['block']}.{a['port']} -> "
+                f"{b['block']}.{b['port']} has {len(bad)} backbone vertex(es) "
+                f"off the {grid_um:g}um manufacturing grid (first at "
+                f"({bad[0][0]:.4f}, {bad[0][1]:.4f})); klt drc will report "
+                "ongrid violations -- adjust waypoints_um or the block origins"
+            )
+    return notes
 
 
 def _snap_port_to_grid(
@@ -3448,6 +3636,17 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                 else:
                     resolved_leg["route_layer"] = None
                     resolved_leg["width_um"] = None
+                # Plane-bearing waypoints (#2930), resolved per waypoint.
+                _resolve_waypoint_layers(
+                    resolved_leg,
+                    leg,
+                    leg_where,
+                    net_width_um,
+                    leg_layer_widths,
+                    resolve_layer=_resolve_override_layer,
+                    effective_width=_effective_width_um,
+                    label_layer=_override_label_layer,
+                )
                 resolved_legs.append(resolved_leg)
 
         # Effective drawn width per layer, for the route-vs-route footprint
@@ -3805,6 +4004,9 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         # declare-only request (#1188: routing absent/{}), in which case no
         # metal is drawn for any net and _declare_only_bundle_result() reports
         # every net "unrouted"/"routing not requested" instead.
+        net_grid_um = _net_backbone_grid_um(
+            pins, blocks, net_route_layer, lambda lyr: _pdk_mfg_grid_um(pdk_info, lyr)
+        )
         if declare_only:
             result = _declare_only_bundle_result(pins)
         else:
@@ -3824,7 +4026,9 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                 cross_block_width_um=net_cross_width_um,
                 explicit_legs=resolved_legs,
                 geometry_for_layer=_geometry_for_layer,
+                grid_um=net_grid_um,
             )
+            notes.extend(_offgrid_leg_notes(net_label, result["legs"], net_grid_um))
         # landed_on_block (issue #2210): computed once per leg, outside the
         # dict comprehension below, so the net-level aggregate and each leg's
         # own reported value come from the identical call. See
@@ -3893,7 +4097,11 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         # route-vs-route collision check #1057 already passed), so they must
         # also feed `accepted_route_regions` the same as a fully-routed net's
         # legs do, or a later net's own collision check would miss them.
-        drawn_legs = [leg for leg in result["legs"] if leg["routed"]]
+        # A leg that changes plane at a plane-bearing waypoint (#2930) carries
+        # one drawing payload per plane in `segments`; each is drawn,
+        # recorded for the route-vs-route comparison and labelled exactly as
+        # an ordinary leg is (the net's single label lands on the very first).
+        drawn_legs = _drawn_leg_parts(result["legs"])
         for leg_index, leg in enumerate(drawn_legs):
             # route_layer (#1168): the effective layer this leg actually
             # drew on -- route_layer (the primary) unless the leg fell
@@ -4115,7 +4323,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             "source": blocks[block_id]["source"],
             "generator": blocks[block_id]["generator"],
             "cell_name": blocks[block_id]["cell_name"],
-            "source_path": blocks[block_id]["gds_path"],
+            "source_path": blocks[block_id]["spelled_gds_path"],
             "source_digest": source_digests[blocks[block_id]["gds_path"]],
             "offset_um": offsets_um[block_id],
             "bbox_um": placed_bboxes_um[block_id],
