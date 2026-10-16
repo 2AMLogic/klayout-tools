@@ -2067,13 +2067,19 @@ def _port_check_lines(
         for port in mapping or {}:
             entries.append(f"{side} {_tcl_literal(port)} {{{' '.join(allowed)}}}")
     return [
+        # `get_ports` re-parses its argument as a Tcl list of glob patterns,
+        # so `{p`/`"p` raise list errors and `sp ace` splits in two (issue
+        # #3050, reproduced live). Enumerate the bit-level ports once and
+        # key them by exact full name; every later lookup is a dict key
+        # (never re-parsed), and `_port_io_delay_lines` reuses these objects.
+        "set klt_ports_by_name [dict create]",
+        "foreach klt_port [concat [all_inputs] [all_outputs]] {",
+        "    dict set klt_ports_by_name [get_full_name $klt_port] $klt_port",
+        "}",
         "proc klt_port_problem {klt_name klt_allowed} {",
-        "    set klt_ports [get_ports -quiet $klt_name]",
-        "    set klt_count [llength $klt_ports]",
-        "    if {$klt_count == 0} { return not_found }",
-        '    if {$klt_count != 1} { return "matches_${klt_count}_ports" }',
-        "    set klt_port [lindex $klt_ports 0]",
-        "    if {[get_full_name $klt_port] ne $klt_name} { return not_found }",
+        "    global klt_ports_by_name",
+        "    if {![dict exists $klt_ports_by_name $klt_name]} { return not_found }",
+        "    set klt_port [dict get $klt_ports_by_name $klt_name]",
         "    set klt_dir [get_property $klt_port direction]",
         "    if {[lsearch -exact $klt_allowed $klt_dir] < 0} {",
         '        return "direction_$klt_dir"',
@@ -2116,7 +2122,9 @@ def _port_io_delay_lines(
     exactly as in :func:`_io_delay_lines`. ``all_inputs``/``all_outputs``
     enumerate bit-level ports (verified live), so a mapped bus bit
     (``b[0]``) is excluded from the default individually while its sibling
-    bits keep it.
+    bits keep it. Mapped ports are fetched from ``$klt_ports_by_name``
+    (built by :func:`_port_check_lines`, always emitted first) -- never
+    re-looked-up by name through ``get_ports``.
     """
     lines: list[str] = []
     sides = (
@@ -2154,7 +2162,7 @@ def _port_io_delay_lines(
                 if bound in bounds:
                     lines.append(
                         f"{command} {flag} {bounds[bound]!r} -clock {clock_port} "
-                        f"[get_ports {_tcl_literal(port)}]"
+                        f"[dict get $klt_ports_by_name {_tcl_literal(port)}]"
                     )
     return lines
 

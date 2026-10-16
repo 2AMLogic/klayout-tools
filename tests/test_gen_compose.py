@@ -17077,3 +17077,40 @@ def test_compose_half_grid_backbone_midpoint_is_drc_clean(
     assert report["nets"][0]["routed"] is True
     assert not any("manufacturing grid" in n for n in report["drc_hints"]["notes"])
     assert run_drc(str(output), "sky130")["violation_count"] == 0
+
+
+def test_compose_source_path_echoes_relative_spelling_without_host_prefix(
+    tmp_path, pdk_root
+):
+    # #2935: a relative `cell.gds_path` resolves against the request's
+    # directory for reading, but the response echoes it as spelled -- no
+    # checkout/temp prefix -- while `source_digest` still pins the content.
+    blocks = []
+    for name in ("a", "b"):
+        req_dir = tmp_path / name
+        req_dir.mkdir()
+        _write_boxed_gds(req_dir / "stub.gds", "lib_inv", [(0.0, 0.0, 2.0, 1.2)])
+        report = compose(
+            {
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "blocks": [
+                    {
+                        "id": "s",
+                        "cell": {"gds_path": "stub.gds", "cell_name": "lib_inv"},
+                    }
+                ],
+                "placement": {"strategy": "row", "order": ["s"], "spacing_um": 1.0},
+                "options": {
+                    "cell_name": "rel_0",
+                    "output": str(req_dir / "out.gds"),
+                },
+            },
+            request_dir=str(req_dir),
+        )
+        blocks.append(report["blocks"][0])
+
+    assert blocks[0]["source_path"] == "stub.gds"
+    assert str(tmp_path) not in blocks[0]["source_path"]
+    assert blocks[0]["source_path"] == blocks[1]["source_path"]
+    assert blocks[0]["source_digest"] == blocks[1]["source_digest"]
+    assert blocks[0]["source_digest"].startswith("sha256:")

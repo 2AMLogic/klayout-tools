@@ -1256,6 +1256,9 @@ def _parse_cell_block(
     gds_path = raw_cell.get("gds_path")
     if not isinstance(gds_path, str) or not gds_path:
         raise GenComposeError(f"{where}.gds_path is required")
+    # #2935: keep the spelling the request used for the response's
+    # `source_path` echo -- the resolved (absolute) value is internal only.
+    spelled_gds_path = gds_path
     gds_path = _resolve_relative(gds_path, request_dir or os.getcwd())
 
     ports = _parse_cell_ports(raw_cell.get("ports"), where)
@@ -1273,6 +1276,7 @@ def _parse_cell_block(
     return {
         "cell_name": cell_name,
         "gds_path": gds_path,
+        "spelled_gds_path": spelled_gds_path,
         "bbox_um": bbox_um,
         "ports": ports,
         "navigable_regions": navigable_regions,
@@ -1329,6 +1333,7 @@ def _parse_blocks(
             )
             cell_name = parsed_cell["cell_name"]
             gds_path = parsed_cell["gds_path"]
+            spelled_gds_path = parsed_cell["spelled_gds_path"]
             bbox_um = parsed_cell["bbox_um"]
             ports = parsed_cell["ports"]
             navigable_regions = parsed_cell["navigable_regions"]
@@ -1339,6 +1344,8 @@ def _parse_blocks(
             raw_generator = report.get("generator")
             cell_name = report.get("cell_name")
             gds_path = report.get("gds_path")
+            # A report's gds_path is never resolved, so it is already "as spelled".
+            spelled_gds_path = gds_path
             if not isinstance(raw_generator, str) or not raw_generator:
                 raise GenComposeError(
                     f"blocks[{index}] (id '{block_id}'): generator_report.generator "
@@ -1414,6 +1421,7 @@ def _parse_blocks(
             "generator": generator,
             "cell_name": cell_name,
             "gds_path": gds_path,
+            "spelled_gds_path": spelled_gds_path,
             "bbox_um": bbox_um,
             "port_names": set(ports_by_name),
             "ports": ports_by_name,
@@ -4174,7 +4182,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             "source": blocks[block_id]["source"],
             "generator": blocks[block_id]["generator"],
             "cell_name": blocks[block_id]["cell_name"],
-            "source_path": blocks[block_id]["gds_path"],
+            "source_path": blocks[block_id]["spelled_gds_path"],
             "source_digest": source_digests[blocks[block_id]["gds_path"]],
             "offset_um": offsets_um[block_id],
             "bbox_um": placed_bboxes_um[block_id],
