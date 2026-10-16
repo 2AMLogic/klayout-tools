@@ -156,6 +156,7 @@
       "nsm.angle.1",
       "nsm.ongrid.1",
       "nwell.angle.1",
+      "nwell.enclosed.hvi.1",
       "nwell.ongrid.1",
       "nwell.space.1",
       "nwell.width.1",
@@ -225,6 +226,13 @@
       "via3",
       "via4",
       "x"
+    ],
+    "unmodeled_rules": [
+      "m1.5",
+      "m2.5",
+      "via.5a",
+      "via2.5",
+      "via3.5"
     ],
     "schema_version": 1,
     "known": true,
@@ -553,6 +561,10 @@
         "reason": "no_applicable_geometry"
       },
       {
+        "id": "nwell.enclosed.hvi.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
         "id": "nwell.ongrid.1",
         "reason": "no_applicable_geometry"
       },
@@ -747,7 +759,7 @@
     "pdk": null,
     "deck": {
       "name": "sky130",
-      "content_hash": "sha256:6ce40f0040dbd296578843ff3d0a251a161f81a69044aa509baf602b34bc4c16",
+      "content_hash": "sha256:f554b449be31f62efe5247b48d649c8e48c631a646c011fd6862244e939595bb",
       "released": null
     },
     "input": {
