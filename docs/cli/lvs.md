@@ -17,6 +17,9 @@ the accepted spike,
 the contract shape below. This document is the shipped contract; where the
 two disagree, this document (and the code) win.
 
+The success payload has a machine-readable JSON Schema:
+[`lvs-response.schema.json`](../schemas/lvs-response.schema.json).
+
 Unlike `klt extract`/`klt drc`, `klt lvs` takes a **request document** (like
 `klt sim`/`klt gen`), not positional netlist file args — it binds two
 netlist inputs plus optional matching hints, richer than a flag line carries
