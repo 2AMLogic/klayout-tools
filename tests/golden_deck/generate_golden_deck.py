@@ -97,7 +97,14 @@ ALLOWED_CHECKS: dict[str, tuple[str, ...]] = {
     # own `ngate.enclosed(nplus, ...)`/`ncomp.edges.enclosed(nplus, ...)`
     # statements are written in). All four are `DerivedLayer`-scoped, so all
     # four are hand-authored in `_DERIVED_LAYER_FIXTURES` below.
-    "gf180mcu": ("width", "space", "enclosing", "separation", "enclosed"),
+    "gf180mcu": (
+        "width",
+        "space",
+        "enclosing",
+        "separation",
+        "enclosed",
+        "comp_coverage",
+    ),
     # sg13g2 (issue #905/#911, Epic #711 Phase 3b): width/space rules go
     # through this manifest mechanism (14 entries); its 5 enclosing/
     # separation rules ship as hand-written violate/clean pairs directly in
@@ -607,6 +614,23 @@ _DERIVED_LAYER_FIXTURES: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
             ]
         },
     ),
+    # `comp.coverage.1` (DF.12, issue #3587): hand-authored -- a coverage rule
+    # has no threshold to straddle. Violate: bare `Comp`, no implant. Clean:
+    # the same `Comp` fully covered by `Nplus` extended 210 dbu (> NP.5b's
+    # 160) beyond it, so `nplus.enclosing.comp.1` stays quiet too.
+    "comp.coverage.1": (
+        {  # violate: Comp with no implant drawn
+            "shapes": [
+                {"layer": [22, 0], "box": [0, 0, 1000, 4000]},  # Comp
+            ]
+        },
+        {  # clean: Comp fully covered by Nplus
+            "shapes": [
+                {"layer": [22, 0], "box": [0, 0, 1000, 4000]},  # Comp
+                {"layer": [32, 0], "box": [-210, -210, 1210, 4210]},  # Nplus
+            ]
+        },
+    ),
     # `nplus.enclosing.comp.1` (NP.5b, 160 dbu): one `Comp` box fully covered
     # by `Nplus`, with the implant extending 110 dbu (violate) / 210 dbu
     # (clean) beyond it on every side. No `Pplus`/`Poly2` is drawn, so every
@@ -765,6 +789,44 @@ def _add_cut_landings(
             fixture["shapes"].append({"layer": list(conductor), "box": list(box)})
 
 
+#: gf180mcu's `comp.coverage.1` (DF.12, issue #3587) flags any `Comp` not under
+#: an implant, so every other rule's bare-`Comp` fixture would trip it and no
+#: longer be "clean for the whole deck". The Schottky-diode marker is DF.12's
+#: own whole-polygon exemption and is read by no other rule, so drawing it over
+#: such a fixture's `Comp` leaves that fixture's rule under test unaffected.
+_COMP_LAYER = (22, 0)
+_COMP_COVERAGE_RULE_ID = "comp.coverage.1"
+_SCHOTTKY_MARKER_LAYER = (241, 0)
+_SCHOTTKY_PAD_DBU = 100
+
+
+def _exempt_comp_from_df12(*fixtures: dict[str, Any]) -> None:
+    for fixture in fixtures:
+        comps = [
+            shape["box"]
+            for shape in fixture["shapes"]
+            if tuple(shape["layer"]) == _COMP_LAYER
+        ]
+        already = any(
+            tuple(shape["layer"]) == _SCHOTTKY_MARKER_LAYER
+            for shape in fixture["shapes"]
+        )
+        if not comps or already:  # idempotent: hand-authored fixtures are shared
+            continue
+        pad = _SCHOTTKY_PAD_DBU
+        fixture["shapes"].append(
+            {
+                "layer": list(_SCHOTTKY_MARKER_LAYER),
+                "box": [
+                    min(c[0] for c in comps) - pad,
+                    min(c[1] for c in comps) - pad,
+                    max(c[2] for c in comps) + pad,
+                    max(c[3] for c in comps) + pad,
+                ],
+            }
+        )
+
+
 def build_manifest(
     deck_name: str,
     deck_rules: list[DrcRule],
@@ -820,6 +882,10 @@ def build_manifest(
             )
         if rule.check in ("width", "space"):
             _add_cut_landings(rule, deck_rules, violate, clean)
+        if rule.id != _COMP_COVERAGE_RULE_ID and any(
+            r.id == _COMP_COVERAGE_RULE_ID for r in deck_rules
+        ):
+            _exempt_comp_from_df12(violate, clean)
         prior = existing.get(rule.id, {})
         manifest[rule.id] = {
             "check": rule.check,

@@ -62,12 +62,19 @@ from .parasitics import (
     ParasiticsDeck,
     UnknownExtractionDeckError,
 )
-from .rules import DerivedLayer, DrcRule, RuleProvenance, UnknownDeckError
+from .rules import (
+    CompCoverageSpec,
+    DerivedLayer,
+    DrcRule,
+    RuleProvenance,
+    UnknownDeckError,
+)
 
 __all__ = [
     "BipolarDevice",
     "CapacitorDevice",
     "CapacitorFlavour",
+    "CompCoverageSpec",
     "DerivedLayer",
     "DiodeDevice",
     "DrcRule",
