@@ -1617,25 +1617,125 @@ def test_mos_array_voltage_flavor_unsupported_on_sky130_notes_not_drawn(
 
 
 @pytest.mark.parametrize("name", ["native", "nvt"])
-def test_mos_array_voltage_flavor_native_on_sky130_names_unsupported_nvt(
-    tmp_path, both_pdk_root, name
+def test_mos_array_voltage_flavor_native_draws_hvi_and_lvtn_no_areaid_le(
+    tmp_path, pdk_root, name
 ):
-    """sky130's native-Vt NMOS (`nfet_05v0_nvt`) is derived upstream from
-    hvi AND lvtn, which a single-marker `voltage_flavor` cannot express: the
-    note must name that flavour as unsupported rather than only reporting a
-    generic "no marker layer resolved" (issue #2912)."""
+    """sky130's native-Vt NMOS (`nfet_05v0_nvt`) is hvi AND lvtn: both marker
+    boxes are drawn over the device, `areaid_le` (81/60) never is, and the
+    flavour is reported as resolved (issue #3600)."""
     output = tmp_path / f"mos_array_voltage_flavor_{name}.gds"
     report = generate(
         {
             "generator": "mos_array",
-            "pdk": {"variant": "sky130A", "root": str(both_pdk_root)},
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
             "params": {"voltage_flavor": name},
             "options": {"output": str(output)},
         }
     )
-    assert report["drc_hints"]["voltage_flavor_mark_present"] is False
-    notes = report["drc_hints"]["notes"]
-    assert any("nfet_05v0_nvt" in n and "unsupported" in n for n in notes)
+    assert report["drc_hints"]["voltage_flavor_mark_present"] is True
+    assert not any("nvt" in n for n in report["drc_hints"]["notes"])
+    hvi = _layer_bbox(output, 75, 20)
+    lvtn = _layer_bbox(output, 125, 44)
+    assert hvi == lvtn
+    assert hvi["right"] > hvi["left"]
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    assert layout.top_cell().bbox_per_layer(layout.layer(81, 60)).empty()
+
+
+@pytest.mark.parametrize("generator", ["mos_array", "diff_pair"])
+def test_voltage_flavor_native_rejects_pfet(tmp_path, pdk_root, generator):
+    """The native-Vt device has no PMOS counterpart (issue #3600)."""
+    with pytest.raises(GenError, match="NMOS-only"):
+        generate(
+            {
+                "generator": generator,
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "params": {"flavor": "pfet", "voltage_flavor": "nvt"},
+                "options": {"output": str(tmp_path / "x.gds")},
+            }
+        )
+
+
+def _native_nfet_lvs(tmp_path, pdk_root, model):
+    import json
+
+    from klayout_tools.lvs import run_lvs
+
+    gds = tmp_path / "nvt.gds"
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {
+                "flavor": "nfet",
+                "voltage_flavor": "nvt",
+                "w_um": 1.0,
+                "l_um": 25.0,
+                "rows": 1,
+                "cols": 1,
+                "dummy": 0,
+            },
+            "options": {"output": str(gds)},
+        }
+    )
+    ref = tmp_path / "ref.spice"
+    ref.write_text(f".subckt ref d g s b\nX1 d g s b {model} L=25u W=1u\n.ends\n")
+    return run_lvs(
+        json.dumps(
+            {
+                "layout": {
+                    "file": str(gds),
+                    "deck": "sky130",
+                },
+                "reference": {
+                    "netlist": str(ref),
+                    "top": "ref",
+                    "form": "subckt-call",
+                    "deck": "sky130",
+                },
+            }
+        )
+    )
+
+
+def test_native_nfet_gen_extract_lvs_round_trip_matches(tmp_path, pdk_root):
+    """gen -> extract -> lvs against a `nfet_05v0_nvt` subckt-call reference
+    reaches `match` (issue #3600)."""
+    report = _native_nfet_lvs(tmp_path, pdk_root, "sky130_fd_pr__nfet_05v0_nvt")
+    assert report["status"] == "match", report
+
+
+def test_native_nfet_extracts_as_nvt_not_g5v0d10v5_or_thin_oxide(tmp_path, pdk_root):
+    """The extracted model is `nfet_05v0_nvt` -- never the hvi-only
+    `nfet_g5v0d10v5` nor the thin-oxide `nfet_01v8` (issue #3600).
+
+    `klt lvs` itself does not compare MOS flavour subckts (they all collapse to
+    the base `nfet` class, see `build_subckt_to_class_map`), so a wrong-model
+    *reference* still matches there; the model binding is asserted at the
+    extract layer instead."""
+    output = tmp_path / "nvt_extract.gds"
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"flavor": "nfet", "voltage_flavor": "nvt"},
+            "options": {"output": str(output)},
+        }
+    )
+    report = run_extract(
+        str(output), "sky130", pdk_variant="sky130A", pdk_root=str(pdk_root)
+    )
+    cards = [
+        line
+        for line in Path(report["netlist_path"]).read_text().splitlines()
+        if line and line[0] in ("M", "X")
+    ]
+    assert any(" sky130_fd_pr__nfet_05v0_nvt " in line for line in cards)
+    assert not any(" sky130_fd_pr__nfet_g5v0d10v5 " in line for line in cards)
+    assert not any(" sky130_fd_pr__nfet_01v8 " in line for line in cards)
 
 
 def test_mos_array_voltage_flavor_unrecognised_name_notes_not_drawn(
