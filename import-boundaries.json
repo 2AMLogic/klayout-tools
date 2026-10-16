@@ -455,6 +455,7 @@
         "klayout_tools.sim_set",
         "klayout_tools.sim_staging",
         "klayout_tools.sim_steps",
+        "klayout_tools.sim_stimulus",
         "klayout_tools.sim_supply_waveform",
         "klayout_tools.sim_transfer",
         "klayout_tools.sim_transfer_meas"

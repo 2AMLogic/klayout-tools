@@ -14,6 +14,18 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sim` declarative timed stimulus and resolved-backend provenance**
+  (issue #2977): a request may declare `stimulus.signals[]` (per-signal
+  event lists with level, optional transition time and skew). `klt sim`
+  validates them up front (coded errors `stimulus_*`), expands them into
+  PWL sources in every corner deck, and echoes the schedule as applied in
+  `environment.stimulus`. Every corner-sweep report also gains
+  `environment.backend` (`resolved`, `source`, `requested`) so a `local`
+  run under `KLT_SIM_BACKEND=batch` is detectable. **Additive contract
+  change:** two new optional `environment` members, no `schema_version`
+  bump. A runner older than this change ignores the `stimulus` key (client
+  capability check tracked in #2877). `docs/cli/sim.md` also names `klt
+  0.7.0` as the first release that reads `$KLT_SIM_BACKEND`.
 - **`klt lvs`: new `mismatches[].category` `device.series_fold_offset_absorbed`**
   (issue #3017): when `options.combine_devices` folds N>1 series primitives of
   a resistor class with a nonzero head term (`fixed_offset_ohm` +

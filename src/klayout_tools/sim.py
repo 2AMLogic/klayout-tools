@@ -102,6 +102,7 @@ from . import (
     sim_noise,
     sim_portable,
     sim_steps,
+    sim_stimulus,
     sim_supply_waveform,
     sim_transfer_meas,
 )
@@ -421,6 +422,19 @@ def resolve_backend(backend: str | None, request: dict[str, Any]) -> tuple[str, 
     if env_value:
         return env_value, True
     return "local", False
+
+
+def _backend_source(backend: str | None, request: dict[str, Any]) -> str:
+    """Where :func:`resolve_backend`'s answer came from: ``"flag"``,
+    ``"request"``, ``"env"`` (``$KLT_SIM_BACKEND``) or ``"default"``
+    (issue #2977, reported as ``environment.backend.source``)."""
+    if backend is not None:
+        return "flag"
+    if request.get("backend") is not None:
+        return "request"
+    if os.environ.get(BACKEND_ENV, "").strip():
+        return "env"
+    return "default"
 
 
 def _yield_host_default_backend(
@@ -3033,7 +3047,9 @@ def _run_sim_corners(
             f"unsupported engine '{engine}' (supported: {', '.join(SUPPORTED_ENGINES)})"
         )
 
+    backend_source = _backend_source(backend, request)
     backend, backend_from_host_default = resolve_backend(backend, request)
+    requested_backend = backend
     if backend not in SUPPORTED_BACKENDS:
         source = f" (from ${BACKEND_ENV})" if backend_from_host_default else ""
         raise SimError(
@@ -3392,6 +3408,13 @@ def _run_sim_corners(
     # Issue #2482: the same pre-dispatch check for a step's own `alter`
     # overrides (plus a clash with the corner's own supply axis).
     sim_steps.validate_alter_targets(analysis, netlist_path, corner_points)
+    # Issue #2977: the declarative timed stimulus, validated and expanded
+    # before any corner is dispatched (an off-host worker re-expands it
+    # from the forwarded request).
+    stimulus_signals = _resolve_stimulus(
+        request, analysis, engine, netlist_path, corner_points
+    )
+    stimulus_lines = sim_stimulus.deck_lines(stimulus_signals)
 
     # Issue #2522: a `corners.process` bundle may name its own model library
     # per section. Resolved (and existence-checked) per host, from the refs
@@ -3473,6 +3496,7 @@ def _run_sim_corners(
         save_mode=save_mode,
         save_vectors=save_vectors,
         ngspice_options=ngspice_options,
+        stimulus_lines=stimulus_lines,
     )
 
     dispatch_points = (
@@ -3486,6 +3510,14 @@ def _run_sim_corners(
     backend = _yield_host_default_backend(
         backend, backend_from_host_default, reason_ok=len(dispatch_points) > 1
     )
+    # Issue #2977: which backend actually ran, and where the request for it
+    # came from -- so a host-policy audit can spot a `local` run although
+    # `$KLT_SIM_BACKEND=batch` asked otherwise.
+    backend_provenance = {
+        "resolved": backend,
+        "source": backend_source,
+        "requested": requested_backend,
+    }
     # Issue #2924: off-host workers run the whole `klt sim` request and return
     # only the scalar results (the AC rawfile never leaves the worker), so the
     # `transfer` form is gated by the mandatory runner-feature check in
@@ -3519,6 +3551,7 @@ def _run_sim_corners(
             osdi_preload=osdi_preload,
             save_mode=save_mode,
             ngspice_options=ngspice_options,
+            stimulus_lines=stimulus_lines,
         )
 
     probe_abort: dict[str, Any] | None = None
@@ -3602,6 +3635,7 @@ def _run_sim_corners(
             "save_vectors": save_vectors,
             "waveform_max_bytes": waveform_max_bytes,
             "ngspice_options": ngspice_options,
+            "stimulus_lines": stimulus_lines,
             "convergence_retry": convergence_retry,
         }
         if backend not in _OFFHOST_BACKENDS
@@ -3955,6 +3989,10 @@ def _run_sim_corners(
     apply_engine_host(
         environment, backend=backend, client_ngspice_binary=ngspice_binary
     )
+    environment["backend"] = backend_provenance
+    # Issue #2977: additive, only when declared; the schedule as applied (skew
+    # and transition times resolved, PWL points included) -- see docs/cli/sim.md.
+    environment.update(sim_stimulus.environment_entry(stimulus_signals))
     if monte_carlo_info is not None:
         # Additive/optional: only present when the request declares
         # `monte_carlo` -- the seed contract's request-level echo, per
@@ -6637,6 +6675,7 @@ def _checkpoint_fingerprint(
     save_mode: str = DEFAULT_SAVE_MODE,
     save_vectors: tuple[str, ...] = (),
     ngspice_options: dict[str, Any] | None = None,
+    stimulus_lines: tuple[str, ...] = (),
 ) -> str:
     """A SHA-256 fingerprint of everything that determines what a sweep's
     corners actually run -- the basis for deciding whether an on-disk
@@ -6694,6 +6733,11 @@ def _checkpoint_fingerprint(
         # drawn from other seeds. Only keyed in off the default, so an
         # existing checkpoint stays valid for a request that omits the field.
         payload["mc_seed_scope"] = sorted(mc_scopes)
+    if stimulus_lines:
+        # Issue #2977: the declared stimulus decides every corner's drive, so
+        # an edited schedule must invalidate the checkpoint. Only keyed in
+        # when declared, so existing checkpoints stay valid.
+        payload["stimulus"] = list(stimulus_lines)
     if any(point.nodeset for point in corner_points):
         # Issue #3036: an initial guess can change which solution a
         # multi-equilibrium circuit lands on, so a changed hint must not reuse
@@ -7066,6 +7110,7 @@ def _run_local(
     ngspice_options: dict[str, Any] | None = None,
     convergence_retry: dict[str, Any] | None = None,
     portable_roots: sim_portable.Roots | None = None,
+    stimulus_lines: tuple[str, ...] = (),
     threads_per_worker: int | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``local`` backend: run each expanded corner sequentially in-process.
@@ -7153,6 +7198,7 @@ def _run_local(
             ngspice_options=ngspice_options,
             convergence_retry=convergence_retry,
             portable_roots=portable_roots,
+            stimulus_lines=stimulus_lines,
             threads_per_worker=threads_per_worker,
         )
         corners.append(result)
@@ -7302,6 +7348,7 @@ def _run_local_parallel(
     ngspice_options: dict[str, Any] | None = None,
     convergence_retry: dict[str, Any] | None = None,
     portable_roots: sim_portable.Roots | None = None,
+    stimulus_lines: tuple[str, ...] = (),
     threads_per_worker: int | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``local-parallel`` backend: fan the expanded corner list across a
@@ -7418,6 +7465,7 @@ def _run_local_parallel(
                     ngspice_options=ngspice_options,
                     convergence_retry=convergence_retry,
                     portable_roots=portable_roots,
+                    stimulus_lines=stimulus_lines,
                     threads_per_worker=threads_per_worker,
                 )
                 in_flight[future] = next_index
@@ -7882,6 +7930,50 @@ def _param_target_hint(param: str, sources: list[str]) -> str:
     )
 
 
+def _resolve_stimulus(
+    request: dict[str, Any],
+    analysis: dict[str, Any],
+    engine: str,
+    netlist_path: str,
+    corner_points: list[CornerPoint],
+) -> list[dict[str, Any]]:
+    """The request's resolved ``stimulus`` signals (issue #2977), every
+    problem raised as a coded :class:`SimError` before any corner runs."""
+    try:
+        signals = sim_stimulus.resolve_stimulus(request, analysis)
+        if not signals:
+            return []
+        if engine != "ngspice":
+            raise sim_stimulus.StimulusError(
+                f"request.stimulus is not supported for engine {engine!r}; "
+                "it is expanded into the ngspice deck only",
+                sim_stimulus.CODE_UNSUPPORTED,
+            )
+        existing = _stimulus_existing_elements(netlist_path)
+        sim_stimulus.check_collisions(signals, existing)
+        sim_stimulus.check_supply_conflict(
+            signals,
+            {key.strip().lower() for point in corner_points for key in point.supply_v},
+        )
+    except sim_stimulus.StimulusError as exc:
+        raise SimError(str(exc), code=exc.code) from exc
+    return signals
+
+
+def _stimulus_existing_elements(netlist_path: str) -> set[str]:
+    """Lower-cased top-level element names of the netlist and every
+    ``.include``/``.lib`` file the lexical scan can resolve."""
+    try:
+        with open(netlist_path, encoding="utf-8", errors="replace") as handle:
+            decl = _netlist_declarations(handle.read())
+    except OSError:
+        return set()
+    elements = set(decl.elements)
+    if decl.includes:
+        elements |= _included_elements(netlist_path, decl.includes) or set()
+    return elements
+
+
 def _validate_supply_override_targets(
     netlist_path: str, corner_points: list[CornerPoint]
 ) -> None:
@@ -8150,6 +8242,7 @@ def _prepare_corner_run(
     save_mode: str = DEFAULT_SAVE_MODE,
     save_vectors: tuple[str, ...] = (),
     ngspice_options: dict[str, Any] | None = None,
+    stimulus_lines: tuple[str, ...] = (),
     extra_options_card: str | None = None,
 ) -> tuple[list[str], str, str | None, str]:
     """Write the engine's per-corner deck and build its command line.
@@ -8206,6 +8299,7 @@ def _prepare_corner_run(
             save_mode=save_mode,
             save_vectors=save_vectors,
             ngspice_options=ngspice_options,
+            stimulus_lines=stimulus_lines,
             extra_options_card=extra_options_card,
         )
         _write_spiceinit(corner_dir, ngspice_init)
@@ -8551,6 +8645,7 @@ def _run_corner(
     waveform_max_bytes: int | None = DEFAULT_WAVEFORM_MAX_BYTES,
     ngspice_options: dict[str, Any] | None = None,
     portable_roots: sim_portable.Roots | None = None,
+    stimulus_lines: tuple[str, ...] = (),
     threads_per_worker: int | None = None,
 ) -> tuple[dict[str, Any], str | None]:
     """Run one corner point through the selected engine's batch binary and
@@ -8627,6 +8722,7 @@ def _run_corner(
         save_mode=save_mode,
         save_vectors=save_vectors,
         ngspice_options=ngspice_options,
+        stimulus_lines=stimulus_lines,
         extra_options_card=extra_options_card,
     )
 
@@ -9715,6 +9811,7 @@ def _write_corner_deck(
     save_mode: str = DEFAULT_SAVE_MODE,
     save_vectors: tuple[str, ...] = (),
     ngspice_options: dict[str, Any] | None = None,
+    stimulus_lines: tuple[str, ...] = (),
     extra_options_card: str | None = None,
 ) -> None:
     """Generate the corner-specific ngspice deck: an optional Monte Carlo
@@ -9759,6 +9856,8 @@ def _write_corner_deck(
     # process corner, none without a process axis. See `_corner_lib_lines`.
     lines.extend(_corner_lib_lines(point, models_lib))
     lines.append(f".include {netlist_path}")
+    # Issue #2977: the request's declared `stimulus`, expanded to PWL sources.
+    lines.extend(stimulus_lines)
     lines.append(f".temp {point.temperature_c}")
     options_card = _ngspice_options_card(ngspice_options)
     if options_card is not None:
@@ -10455,6 +10554,7 @@ def _run_calibration_probe(
     osdi_preload: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
     ngspice_options: dict[str, Any] | None = None,
+    stimulus_lines: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Run one short, bounded ``tran`` slice -- the calibration half of the
     two-pass probe model -- and report how it went.
@@ -10518,6 +10618,7 @@ def _run_calibration_probe(
         osdi_preload=osdi_preload,
         save_mode=save_mode,
         ngspice_options=ngspice_options,
+        stimulus_lines=stimulus_lines,
     )
     _write_spiceinit(probe_dir, ngspice_init)
 
@@ -10567,6 +10668,7 @@ def _run_fail_fast_probe(
     osdi_preload: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
     ngspice_options: dict[str, Any] | None = None,
+    stimulus_lines: tuple[str, ...] = (),
 ) -> dict[str, Any] | None:
     """The two-pass probe model's dispatch-time entry point (issue #1694):
     run one short, bounded calibration ``tran`` slice on the grid's first
@@ -10613,6 +10715,7 @@ def _run_fail_fast_probe(
         osdi_preload=osdi_preload,
         save_mode=save_mode,
         ngspice_options=ngspice_options,
+        stimulus_lines=stimulus_lines,
     )
     if probe["error"] is not None:
         return None
