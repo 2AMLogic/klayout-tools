@@ -197,12 +197,8 @@ def _pitch_hints_and_warnings(
     return hints, warnings
 
 
-def _mos_array_validate(params: dict[str, Any]) -> None:
-    from .gen import (
-        GenError,
-        _auto_ring_inner_size_um,
-        _mos_array_layout,
-    )
+def _validate_mos_array_width(params: dict[str, Any]) -> None:
+    from .gen import GenError
 
     if params["mos_cap"]:
         # The width floor of a MOS capacitor is the deck's own COMP min-width
@@ -229,6 +225,16 @@ def _mos_array_validate(params: dict[str, Any]) -> None:
             "a generator-side structural floor, not the target PDK's own "
             "diffusion-width rule)"
         )
+
+
+def _mos_array_validate(params: dict[str, Any]) -> None:
+    from .gen import (
+        GenError,
+        _auto_ring_inner_size_um,
+        _mos_array_layout,
+    )
+
+    _validate_mos_array_width(params)
     if params["l_um"] <= 0:
         raise GenError("generator 'mos_array': params.l_um must be > 0")
     if params["fingers"] < 1:
@@ -349,6 +355,90 @@ def _sd_implant_hints(
     }
 
 
+def _mos_cap_ports(
+    info: dict[str, Any],
+    unit: dict[str, Any],
+    metal_layer: dict[str, Any],
+    gate_layer: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """``U<i>_SD``/``U<i>_G`` ports of a ``mos_cap`` array (issue #3283): S and
+    D are one tied terminal (the strap's centre) and every gate finger is one
+    poly terminal; the body tie is the guard ring's ``TAP_*`` ports."""
+    ports: list[dict[str, Any]] = []
+    cap_x, cap_y = unit["sd_cap_xy"]
+    gx, gy = unit["g_xy"]
+    for c in info["cells"]:
+        idx = c["idx"]
+        for suffix, layer, (px, py) in (
+            ("SD", metal_layer, (cap_x, cap_y)),
+            ("G", gate_layer, (gx, gy)),
+        ):
+            ports.append(
+                {
+                    "name": f"U{idx}_{suffix}",
+                    "net": None,
+                    "layer": layer,
+                    "x_um": c["x0_um"] + px,
+                    "y_um": c["y0_um"] + py,
+                    "width_um": unit["g_width_um"],
+                    "direction_deg": 90,
+                }
+            )
+    return ports
+
+
+def _mos_series_ports(
+    info: dict[str, Any],
+    unit: dict[str, Any],
+    metal_layer: dict[str, Any],
+    gate_layer: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Per-finger ``U<i>_S<j>``/``U<i>_D<j>``/``U<i>_G<j>`` ports of a
+    ``finger_topology == "series"`` array (issue #781)."""
+    ports: list[dict[str, Any]] = []
+    seg_xy = unit["seg_xy"]
+    gate_xy = unit["gate_xy"]
+    last_seg = len(seg_xy) - 1
+    for c in info["cells"]:
+        idx = c["idx"]
+        for seg_idx, (sx, sy) in enumerate(seg_xy):
+            letter = "S" if seg_idx % 2 == 0 else "D"
+            if seg_idx == 0:
+                direction_deg, width_um = 180, unit["sd_width_um"]
+            elif seg_idx == last_seg:
+                direction_deg, width_um = 0, unit["sd_width_um"]
+            else:
+                # Interior segments are boxed in by a gate on either
+                # side, so their only free approach is from below (the
+                # gate pads sit above); their reported width is the
+                # pad's own x-width, not `w_um`.
+                direction_deg, width_um = 270, unit["g_width_um"]
+            ports.append(
+                {
+                    "name": f"U{idx}_{letter}{seg_idx // 2}",
+                    "net": None,
+                    "layer": metal_layer,
+                    "x_um": c["x0_um"] + sx,
+                    "y_um": c["y0_um"] + sy,
+                    "width_um": width_um,
+                    "direction_deg": direction_deg,
+                }
+            )
+        for gate_idx, (gx, gy) in enumerate(gate_xy):
+            ports.append(
+                {
+                    "name": f"U{idx}_G{gate_idx}",
+                    "net": None,
+                    "layer": gate_layer,
+                    "x_um": c["x0_um"] + gx,
+                    "y_um": c["y0_um"] + gy,
+                    "width_um": unit["g_width_um"],
+                    "direction_deg": 90,
+                }
+            )
+    return ports
+
+
 def _mos_array_describe(
     params: dict[str, Any], dbu: float, pdk_info: dict[str, Any]
 ) -> dict[str, Any]:
@@ -421,78 +511,11 @@ def _mos_array_describe(
         and not params["mos_cap"]
     )
 
-    ports = []
+    ports: list[dict[str, Any]] = []
     if params["mos_cap"]:
-        # Issue #3283: S and D are one tied terminal (`U<i>_SD`, the strap's
-        # centre) and every gate finger is one poly terminal (`U<i>_G`); the
-        # body tie is the guard ring's `TAP_*` ports, reported below.
-        cap_x, cap_y = unit["sd_cap_xy"]
-        gx, gy = unit["g_xy"]
-        for c in info["cells"]:
-            idx = c["idx"]
-            ports.append(
-                {
-                    "name": f"U{idx}_SD",
-                    "net": None,
-                    "layer": metal_layer,
-                    "x_um": c["x0_um"] + cap_x,
-                    "y_um": c["y0_um"] + cap_y,
-                    "width_um": unit["g_width_um"],
-                    "direction_deg": 90,
-                }
-            )
-            ports.append(
-                {
-                    "name": f"U{idx}_G",
-                    "net": None,
-                    "layer": gate_layer,
-                    "x_um": c["x0_um"] + gx,
-                    "y_um": c["y0_um"] + gy,
-                    "width_um": unit["g_width_um"],
-                    "direction_deg": 90,
-                }
-            )
+        ports = _mos_cap_ports(info, unit, metal_layer, gate_layer)
     elif series_fingers:
-        seg_xy = unit["seg_xy"]
-        gate_xy = unit["gate_xy"]
-        last_seg = len(seg_xy) - 1
-        for c in info["cells"]:
-            idx = c["idx"]
-            for seg_idx, (sx, sy) in enumerate(seg_xy):
-                letter = "S" if seg_idx % 2 == 0 else "D"
-                if seg_idx == 0:
-                    direction_deg, width_um = 180, unit["sd_width_um"]
-                elif seg_idx == last_seg:
-                    direction_deg, width_um = 0, unit["sd_width_um"]
-                else:
-                    # Interior segments are boxed in by a gate on either
-                    # side, so their only free approach is from below (the
-                    # gate pads sit above); their reported width is the
-                    # pad's own x-width, not `w_um`.
-                    direction_deg, width_um = 270, unit["g_width_um"]
-                ports.append(
-                    {
-                        "name": f"U{idx}_{letter}{seg_idx // 2}",
-                        "net": None,
-                        "layer": metal_layer,
-                        "x_um": c["x0_um"] + sx,
-                        "y_um": c["y0_um"] + sy,
-                        "width_um": width_um,
-                        "direction_deg": direction_deg,
-                    }
-                )
-            for gate_idx, (gx, gy) in enumerate(gate_xy):
-                ports.append(
-                    {
-                        "name": f"U{idx}_G{gate_idx}",
-                        "net": None,
-                        "layer": gate_layer,
-                        "x_um": c["x0_um"] + gx,
-                        "y_um": c["y0_um"] + gy,
-                        "width_um": unit["g_width_um"],
-                        "direction_deg": 90,
-                    }
-                )
+        ports = _mos_series_ports(info, unit, metal_layer, gate_layer)
     else:
         sx, sy = unit["s_xy"]
         dx, dy = unit["d_xy"]

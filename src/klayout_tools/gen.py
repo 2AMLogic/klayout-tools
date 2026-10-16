@@ -353,6 +353,7 @@ _HIDDEN_PARAMS = {
     "sd_implant_layer",
     "sd_implant_present",
     "sd_implant_margin_um",
+    "mos_cap_mark_layer",
     "bjt_mark_layer",
     "bjt_mark_present",
     "res_mark_layer",
@@ -635,6 +636,50 @@ def _mos_finger_positions(
     return seg_positions, poly_positions, x
 
 
+def _mos_cap_tie(
+    boxes: dict[str, list[tuple[float, float, float, float]]],
+    seg_positions: list[tuple[float, float]],
+    gate_xy: list[tuple[float, float]],
+    pad_half: float,
+    w_um: float,
+    seg_h_um: float,
+    contact_region_um: float,
+    gate_ext_um: float,
+) -> tuple[float, tuple[float, float]]:
+    """Tie a ``mos_cap`` unit's terminals (issue #3283); returns the grown
+    ``gate_ext_um`` and the S/D strap's centre.
+
+    Ties the gate fingers into one poly terminal (a bar abutting the top of
+    every landing pad), then every S/D segment into one local-metal strap
+    above it: stubs rise out of each segment pad (metal over poly with no
+    contact between them does not connect), and the strap spans the first to
+    the last segment. Appends to ``boxes`` in place.
+    """
+    if len(gate_xy) > 1:
+        bar_y0 = w_um + gate_ext_um
+        boxes["poly"].append(
+            (
+                gate_xy[0][0] - pad_half,
+                bar_y0,
+                gate_xy[-1][0] + pad_half,
+                bar_y0 + contact_region_um,
+            )
+        )
+        gate_ext_um += contact_region_um
+    strap_y0 = w_um + gate_ext_um
+    strap_y1 = strap_y0 + contact_region_um
+    for sx0, sx1 in seg_positions:
+        boxes["metal"].append((sx0, seg_h_um, sx1, strap_y0))
+    boxes["metal"].append(
+        (seg_positions[0][0], strap_y0, seg_positions[-1][1], strap_y1)
+    )
+    sd_cap_xy = (
+        (seg_positions[0][0] + seg_positions[-1][1]) / 2.0,
+        (strap_y0 + strap_y1) / 2.0,
+    )
+    return gate_ext_um + contact_region_um, sd_cap_xy
+
+
 def _mos_unit_layout(
     w_um: float,
     l_um: float,
@@ -881,33 +926,15 @@ def _mos_unit_layout(
 
     sd_cap_xy: tuple[float, float] | None = None
     if mos_cap:
-        # Tie the gate fingers into one poly terminal (a bar abutting the top
-        # of every landing pad), then tie every S/D segment into one local-
-        # metal strap above it: stubs rise out of each segment pad (metal
-        # over poly with no contact between them does not connect), and the
-        # strap spans the first to the last segment.
-        if len(gate_xy) > 1:
-            bar_y0 = w_um + gate_ext_um
-            boxes["poly"].append(
-                (
-                    gate_xy[0][0] - pad_half,
-                    bar_y0,
-                    gate_xy[-1][0] + pad_half,
-                    bar_y0 + contact_region_um,
-                )
-            )
-            gate_ext_um += contact_region_um
-        strap_y0 = w_um + gate_ext_um
-        strap_y1 = strap_y0 + contact_region_um
-        for sx0, sx1 in seg_positions:
-            boxes["metal"].append((sx0, seg_h_um, sx1, strap_y0))
-        boxes["metal"].append(
-            (seg_positions[0][0], strap_y0, seg_positions[-1][1], strap_y1)
-        )
-        gate_ext_um += contact_region_um
-        sd_cap_xy = (
-            (seg_positions[0][0] + seg_positions[-1][1]) / 2.0,
-            (strap_y0 + strap_y1) / 2.0,
+        gate_ext_um, sd_cap_xy = _mos_cap_tie(
+            boxes,
+            seg_positions,
+            gate_xy,
+            pad_half,
+            w_um,
+            seg_h_um,
+            contact_region_um,
+            gate_ext_um,
         )
 
     return {
