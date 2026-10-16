@@ -165,6 +165,31 @@ def test_every_rule_has_a_fail_and_a_boundary_pass_fixture():
             assert case.rule not in case.expect, case.name
 
 
+_NET_RULES = ("ACTIVE.S.2A", "LIG.LISD.S.6", "LIG.LISD.S.7", "LIG.SDT.S.8")
+
+
+def test_net_aware_rules_are_checked_not_gaps():
+    gaps = {g.id for g in NOT_IMPLEMENTED}
+    for rule_id in _NET_RULES:
+        assert rule_id in RULE_IDS
+        assert rule_id not in gaps
+    assert "### Net-aware spacing" in _docs_asap7_section()
+
+
+@pytest.mark.parametrize("rule_id", _NET_RULES)
+def test_net_aware_rules_draw_the_same_pair_joined_and_unjoined(rule_id):
+    """Each net-aware rule is exercised with a conductor chain (V0 and
+    metal) that makes a too-close pair one net, and with chains that stop
+    short of it: a pass and a fail case each carry that wiring."""
+
+    def wired(case):
+        layers = {shape[0] for shape in case.shapes}
+        return "V0" in layers or "M1" in layers
+
+    cases = [c for c in _CASES if c.rule == rule_id and wired(c)]
+    assert {c.kind for c in cases} == {"fail", "pass"}, rule_id
+
+
 def test_docs_list_every_rule_and_gap():
     section = _docs_asap7_section()
     for rule_id in RULE_IDS:
