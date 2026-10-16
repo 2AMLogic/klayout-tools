@@ -3270,9 +3270,9 @@ def _run_sim_corners(
     inconclusive = graded["inconclusive"]
     status = graded["status"]
 
-    engine_build = _probe_engine_build(ngspice_binary)
-    if remote_environment is not None and backend == "batch":
-        attach_engine_build_comparison(remote_environment, engine_build)
+    engine_build = _engine_build_with_comparison(
+        ngspice_binary, remote_environment, backend
+    )
 
     environment: dict[str, Any] = {
         "engine": engine,
@@ -8157,6 +8157,19 @@ _ENGINE_BANNER_MAX = 2000
 _ENGINE_BANNER_TIMEOUT_S = 10
 
 
+def _engine_build_with_comparison(
+    ngspice_binary: str | None,
+    remote_environment: dict[str, Any] | None,
+    backend: str,
+) -> dict[str, Any] | None:
+    """Probe the local build and, for a batch sweep, compare it with each
+    worker's build in ``remote_environment`` (issue #3095)."""
+    engine_build = _probe_engine_build(ngspice_binary)
+    if remote_environment is not None and backend == "batch":
+        attach_engine_build_comparison(remote_environment, engine_build)
+    return engine_build
+
+
 def _probe_engine_build(ngspice_binary: str | None) -> dict[str, Any] | None:
     """``environment.engine_build`` (issue #3095): the local ngspice build
     identity -- ``--version`` banner plus binary sha256 -- probed once per
@@ -8192,10 +8205,10 @@ def _probe_engine_build(ngspice_binary: str | None) -> dict[str, Any] | None:
         build.update(probe="error", reason=f"could not run --version: {exc}"[:200])
         return build
     raw = proc.stdout or proc.stderr or b""
-    if isinstance(raw, bytes):
-        raw = raw[: _ENGINE_BANNER_MAX * 4].decode("utf-8", "replace")
-    raw = raw[: _ENGINE_BANNER_MAX * 4]
-    banner = "".join(ch if (ch >= " " or ch in "\n\t") else "?" for ch in raw).strip()[
+    text: str = (
+        raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
+    )[: _ENGINE_BANNER_MAX * 4]
+    banner = "".join(ch if (ch >= " " or ch in "\n\t") else "?" for ch in text).strip()[
         :_ENGINE_BANNER_MAX
     ]
     if proc.returncode != 0 or not banner:
