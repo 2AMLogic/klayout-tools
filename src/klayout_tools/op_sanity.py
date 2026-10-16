@@ -109,6 +109,7 @@ import os
 import re
 import subprocess
 import time
+from collections.abc import Callable
 from typing import Any
 
 from . import env_provenance
@@ -627,71 +628,108 @@ def _walk_lines(
             kind = model_kinds.get(model.lower()) or _mos_kind(model)
             _record_mos(parsed, name, kind, model, nodes, model_overrides)
         elif element == "X" and len(tokens) >= 3:
-            nodes = mapped(tokens[1:-1])
-            model = tokens[-1]
-            definition = defs.get(model.lower())
-            # The `op_lint.models.<model>.kind` override is consulted BEFORE
-            # the naming heuristics, mirroring `_record_mos`'s own precedence
-            # on the unconditional `M` path: it exists precisely to resolve a
-            # model name this tool cannot classify, so gating it behind those
-            # heuristics would make it unreachable for the PDK subcircuit
-            # calls (`X<name> d g s b <model>`) it is documented to fix -- and
-            # a model name that also fails `_looks_like_mos` would drop out of
-            # the report with no `device_kind_unknown` diagnostic at all.
-            kind = (
-                (model_overrides.get(model.lower()) or {}).get("kind")
-                or model_kinds.get(model.lower())
-                or _mos_kind(model)
+            _walk_instance(
+                parsed,
+                tokens,
+                name,
+                mapped(tokens[1:-1]),
+                defs,
+                model_kinds,
+                model_overrides,
+                stack,
             )
-            pdk_style = len(nodes) == 4 and kind is not None
-            # A subckt that came from an `.include` and reads as a 4-terminal
-            # MOS model is a PDK device cell, reported as one device (the
-            # behaviour before includes were followed); a body-defined one is
-            # the user's own hierarchy and is expanded.
-            if (
-                definition is not None
-                and not (pdk_style and definition.from_include)
-                and len(nodes) == len(definition.ports)
-                and model.lower() not in stack
-                and len(stack) < _MAX_SUBCKT_DEPTH
-            ):
-                _walk_lines(
-                    parsed,
-                    definition.lines,
-                    defs,
-                    model_kinds,
-                    model_overrides,
-                    prefix=f"{name}.",
-                    node_map=dict(zip(definition.ports, nodes, strict=True)),
-                    stack=(*stack, model.lower()),
-                )
-            elif pdk_style:
-                _record_mos(parsed, name, kind, model, nodes, model_overrides)
-            else:
-                if len(tokens) >= 6 and len(nodes) == 4 and _looks_like_mos(model):
-                    parsed.unresolved.append(name)
-                else:
-                    parsed.unexpanded.append(name)
-                _record_nodes(parsed, nodes)
         else:
-            count = _ELEMENT_TERMINALS.get(element)
-            if count is None:
-                continue
-            nodes = mapped(tokens[1 : 1 + count])
-            if element == "V" and len(nodes) == 2 and not prefix:
-                rest = " ".join(tokens[3:])
-                parsed.sources[leaf[1:].lower()] = (
-                    nodes[0],
-                    nodes[1],
-                    _source_value(rest, parsed.params),
-                )
-            _record_nodes(parsed, nodes)
-            if element == "B":
-                # A behavioural source's expression reads other nodes: each
-                # `v(<node>)` reference is a terminal on that node.
-                for match in _MEAS_NODE_RE.finditer(line):
-                    refs = [grp for grp in match.groups() if grp]
-                    _record_nodes(parsed, mapped(refs))
+            _walk_passive(parsed, line, tokens, mapped, prefix)
+
+
+def _walk_instance(
+    parsed: ParsedNetlist,
+    tokens: list[str],
+    name: str,
+    nodes: list[str],
+    defs: dict[str, _SubcktDef],
+    model_kinds: dict[str, str],
+    model_overrides: dict[str, Any],
+    stack: tuple[str, ...],
+) -> None:
+    """Handle one ``X`` card: expand a user subckt, report a PDK device cell
+    as one MOS, or record it as unresolved/unexpanded."""
+    model = tokens[-1]
+    definition = defs.get(model.lower())
+    # The `op_lint.models.<model>.kind` override is consulted BEFORE
+    # the naming heuristics, mirroring `_record_mos`'s own precedence
+    # on the unconditional `M` path: it exists precisely to resolve a
+    # model name this tool cannot classify, so gating it behind those
+    # heuristics would make it unreachable for the PDK subcircuit
+    # calls (`X<name> d g s b <model>`) it is documented to fix -- and
+    # a model name that also fails `_looks_like_mos` would drop out of
+    # the report with no `device_kind_unknown` diagnostic at all.
+    kind = (
+        (model_overrides.get(model.lower()) or {}).get("kind")
+        or model_kinds.get(model.lower())
+        or _mos_kind(model)
+    )
+    pdk_style = len(nodes) == 4 and kind is not None
+    # A subckt that came from an `.include` and reads as a 4-terminal
+    # MOS model is a PDK device cell, reported as one device (the
+    # behaviour before includes were followed); a body-defined one is
+    # the user's own hierarchy and is expanded.
+    if (
+        definition is not None
+        and not (pdk_style and definition.from_include)
+        and len(nodes) == len(definition.ports)
+        and model.lower() not in stack
+        and len(stack) < _MAX_SUBCKT_DEPTH
+    ):
+        _walk_lines(
+            parsed,
+            definition.lines,
+            defs,
+            model_kinds,
+            model_overrides,
+            prefix=f"{name}.",
+            node_map=dict(zip(definition.ports, nodes, strict=True)),
+            stack=(*stack, model.lower()),
+        )
+    elif pdk_style:
+        _record_mos(parsed, name, kind, model, nodes, model_overrides)
+    else:
+        if len(tokens) >= 6 and len(nodes) == 4 and _looks_like_mos(model):
+            parsed.unresolved.append(name)
+        else:
+            parsed.unexpanded.append(name)
+        _record_nodes(parsed, nodes)
+
+
+def _walk_passive(
+    parsed: ParsedNetlist,
+    line: str,
+    tokens: list[str],
+    mapped: Callable[[list[str]], list[str]],
+    prefix: str,
+) -> None:
+    """Handle every non-``M``/``X`` card: record its terminals, top-level
+    ``V`` source values, and ``B``-source node references."""
+    leaf = tokens[0]
+    element = leaf[0].upper()
+    count = _ELEMENT_TERMINALS.get(element)
+    if count is None:
+        return
+    nodes = mapped(tokens[1 : 1 + count])
+    if element == "V" and len(nodes) == 2 and not prefix:
+        rest = " ".join(tokens[3:])
+        parsed.sources[leaf[1:].lower()] = (
+            nodes[0],
+            nodes[1],
+            _source_value(rest, parsed.params),
+        )
+    _record_nodes(parsed, nodes)
+    if element == "B":
+        # A behavioural source's expression reads other nodes: each
+        # `v(<node>)` reference is a terminal on that node.
+        for match in _MEAS_NODE_RE.finditer(line):
+            refs = [grp for grp in match.groups() if grp]
+            _record_nodes(parsed, mapped(refs))
 
 
 def _looks_like_mos(model: str) -> bool:
@@ -1491,17 +1529,7 @@ def run_op_sanity(
     error_count = sum(1 for entry in findings if entry["severity"] == "error")
     warning_count = len(findings) - error_count
 
-    analysis_failed = any(
-        diagnostic["severity"] == "error" for diagnostic in diagnostics
-    ) or (parsed.devices and not produced_values)
-    if analysis_failed:
-        status = "error"
-    elif findings or (parsed.unexpanded and not parsed.devices):
-        # No device was enumerated and some `X` instance went unexpanded: an
-        # empty device list must never read as "every device is saturated".
-        status = "findings"
-    else:
-        status = "clean"
+    status = _op_status(diagnostics, parsed, produced_values, bool(findings))
 
     devices_payload = [
         {
@@ -1555,6 +1583,25 @@ def run_op_sanity(
             pdk=provenance_pdk,
         ),
     }
+
+
+def _op_status(
+    diagnostics: list[dict[str, str]],
+    parsed: ParsedNetlist,
+    produced_values: bool,
+    has_findings: bool,
+) -> str:
+    """Overall ``status`` of an op-lint run: error > findings > clean."""
+    analysis_failed = any(
+        diagnostic["severity"] == "error" for diagnostic in diagnostics
+    ) or (parsed.devices and not produced_values)
+    if analysis_failed:
+        return "error"
+    # No device was enumerated and some `X` instance went unexpanded: an
+    # empty device list must never read as "every device is saturated".
+    if has_findings or (parsed.unexpanded and not parsed.devices):
+        return "findings"
+    return "clean"
 
 
 def _run_op(

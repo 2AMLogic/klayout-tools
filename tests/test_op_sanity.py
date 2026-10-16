@@ -1032,6 +1032,33 @@ def test_unrecovered_singular_matrix_is_an_error_status(tmp_path, monkeypatch):
     assert report["status"] == "error"
 
 
+def test_unexpanded_instance_with_no_devices_is_not_clean(tmp_path, monkeypatch):
+    """An empty device list caused by an unexpandable `X` instance must
+    never read as `clean` (i.e. "every device is saturated")."""
+    netlist = "Xdut in out vdd missing_cell\nVdd vdd 0 1.8\nR1 in out 1k\n"
+    request = _write_request(tmp_path, netlist)
+    _install_fake_ngspice(monkeypatch, {})
+
+    report = op_sanity.run_op_sanity(str(request))
+
+    assert report["device_count"] == 0
+    assert report["status"] == "findings"
+    assert any(
+        entry["code"] == "unsupported_hierarchy" for entry in report["diagnostics"]
+    )
+
+
+def test_op_status_precedence():
+    parsed = op_sanity.ParsedNetlist()
+    error = [{"severity": "error", "code": "timeout", "message": "x"}]
+
+    assert op_sanity._op_status(error, parsed, False, True) == "error"
+    assert op_sanity._op_status([], parsed, False, True) == "findings"
+    assert op_sanity._op_status([], parsed, False, False) == "clean"
+    parsed.unexpanded.append("Xdut")
+    assert op_sanity._op_status([], parsed, False, False) == "findings"
+
+
 def test_unknown_corner_is_a_request_error(tmp_path, monkeypatch):
     request = _write_request(tmp_path, _GOOD_NETLIST)
     _install_fake_ngspice(monkeypatch, {})
