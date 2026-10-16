@@ -33,6 +33,8 @@ Design notes (additive envelope, not a wrapping one):
 
 from __future__ import annotations
 
+import gzip
+import io
 import json
 import sys
 from collections.abc import Callable
@@ -63,6 +65,27 @@ def emit_success(
         print()
     else:
         text_renderer(payload)
+
+
+def write_json_file(payload: dict, path: str) -> None:
+    """Write ``payload`` to ``path`` byte-identical to what
+    :func:`emit_success` puts on stdout under ``--format json``.
+
+    A ``.gz`` ``path`` is gzip-compressed with ``mtime=0`` and no embedded
+    filename, so identical payloads give byte-identical files. Streams via
+    ``json.dump`` rather than building a second in-memory copy. Raises
+    :class:`OSError` if ``path`` cannot be written.
+    """
+    if path.endswith(".gz"):
+        with open(path, "wb") as raw:
+            with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as gz:
+                with io.TextIOWrapper(gz, encoding="utf-8", newline="") as text:
+                    json.dump(payload, text, indent=2)
+                    text.write("\n")
+    else:
+        with open(path, "w", encoding="utf-8", newline="") as handle:
+            json.dump(payload, handle, indent=2)
+            handle.write("\n")
 
 
 def render_table(
