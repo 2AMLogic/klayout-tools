@@ -18331,6 +18331,11 @@ def test_run_lvs_macro_bus_anchoring_does_not_reach_internal_tie_nets(tmp_path):
     ]
     assert entry["details"]["pins"] == ["DIN[0]", "DIN[1]", "DOUT"]
 
+    # Issue #3014: the same swapped layout with the opt-in declaration is
+    # caught; the undeclared verdict above stays pinned as `match`.
+    declared = _constant_nets_report(tmp_path / "declared", swapped=True)
+    assert declared["status"] == "mismatch"
+
 
 # --------------------------------------------------------------------------- #
 # Issue #2704 design spike: can paired-instance pin anchoring be derived
@@ -18776,6 +18781,183 @@ def test_spike_2704_explicit_tie_net_declaration_catches_the_swap(tmp_path):
         ("LO", "__CONST0__"),
     ]
     assert all(m["details"] is None for m in rejected)
+
+
+_CONSTANT_NETS = {"__CONST0__": "LO", "__CONST1__": "HI"}
+
+
+def _constant_nets_report(tmp_path, *, swapped, constant_nets=None, hints=None):
+    """`run_lvs` over the #2692 tie fixture with `hints.constant_nets`."""
+    layout = _MACRO_TIE_LAYOUT_SPICE_SWAPPED if swapped else _MACRO_TIE_LAYOUT_SPICE
+    request = json.loads(
+        _macro_bus_request(tmp_path, layout, _MACRO_TIE_REFERENCE_VERILOG)
+    )
+    request["hints"] = {
+        **(hints or {}),
+        "constant_nets": _CONSTANT_NETS if constant_nets is None else constant_nets,
+    }
+    return run_lvs(json.dumps(request))
+
+
+def test_run_lvs_constant_nets_catches_swapped_tie_and_matches_clean(tmp_path):
+    """Issue #3014: `hints.constant_nets` binds each reference constant to the
+    layout node that carries it, so the swapped tie fixture reports
+    `mismatch` and its clean twin `match`. Refusals are attributed through
+    `details.declared_constant_net` (a hand-written `same_nets` refusal keeps
+    `details: null`), and the run discloses the bindings as a warning that
+    does not change `status`."""
+    clean = _constant_nets_report(tmp_path / "clean", swapped=False)
+    assert clean["status"] == "match"
+    assert clean["error_count"] == 0
+    (disclosure,) = [
+        m
+        for m in clean["mismatches"]
+        if m["category"] == "hints.constant_nets_declared"
+    ]
+    assert disclosure["severity"] == "warning"
+    assert disclosure["details"]["constant_nets"] == _CONSTANT_NETS
+    assert clean["constant_nets_applied"] == _CONSTANT_NETS
+
+    swapped = _constant_nets_report(tmp_path / "swapped", swapped=True)
+    assert swapped["status"] == "mismatch"
+    rejected = [m for m in swapped["mismatches"] if m["category"] == "hints.rejected"]
+    assert sorted(m["details"]["declared_constant_net"] for m in rejected) == [
+        "__CONST0__",
+        "__CONST1__",
+    ]
+    assert sorted((m["net"]["layout"], m["net"]["reference"]) for m in rejected) == [
+        ("HI", "__CONST1__"),
+        ("LO", "__CONST0__"),
+    ]
+
+
+def test_run_lvs_constant_nets_absent_emits_no_disclosure(tmp_path):
+    request = json.loads(
+        _macro_bus_request(
+            tmp_path, _MACRO_TIE_LAYOUT_SPICE, _MACRO_TIE_REFERENCE_VERILOG
+        )
+    )
+    report = run_lvs(json.dumps(request))
+    assert report["status"] == "match"
+    assert report["constant_nets_applied"] is None
+    assert not [
+        m
+        for m in report["mismatches"]
+        if m["category"] == "hints.constant_nets_declared"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("constant_nets", "hints", "message"),
+    [
+        ({"__CONST2__": "LO"}, None, "not a constant net the reference carries"),
+        ({"DIN[0]": "LO"}, None, "not a constant net the reference carries"),
+        ({"__CONST0__": "NOPE"}, None, "layout net 'NOPE' not found"),
+        (
+            {"__CONST0__": "LO", "__CONST1__": "LO"},
+            None,
+            "both bound to layout net 'LO'",
+        ),
+        (
+            _CONSTANT_NETS,
+            {"same_nets": [["LO", "__CONST0__"]]},
+            "ambiguous authority",
+        ),
+        (["__CONST0__"], None, "must be a JSON object"),
+    ],
+    ids=[
+        "unknown-constant",
+        "non-constant-net",
+        "missing-layout-net",
+        "two-constants-one-net",
+        "also-in-same-nets",
+        "wrong-shape",
+    ],
+)
+def test_run_lvs_constant_nets_validation_errors(
+    tmp_path, constant_nets, hints, message
+):
+    with pytest.raises(LvsError, match=message):
+        _constant_nets_report(
+            tmp_path, swapped=False, constant_nets=constant_nets, hints=hints
+        )
+
+
+def test_run_lvs_constant_nets_rejected_on_netgen_engine(tmp_path, monkeypatch):
+    _stub_netgen_subprocess(monkeypatch, log_text=_NETGEN_MATCH_LOG)
+    path = _netgen_request(tmp_path)
+    request = json.loads(Path(path).read_text())
+    request["hints"] = {"constant_nets": _CONSTANT_NETS}
+    Path(path).write_text(json.dumps(request))
+    with pytest.raises(LvsError, match="only supported for engine 'klayout'"):
+        run_lvs(path)
+
+
+def test_run_lvs_constant_nets_replayed_on_parameter_tolerance_retry(
+    tmp_path, monkeypatch
+):
+    """Issue #3014: the bindings are comparer state, re-applied on the fresh
+    comparer the `options.parameter_tolerance` second pass builds. The retry
+    is forced by stubbing the snap collection to offer one (no-op) snap, then
+    the verdict must still come from the bound compare -- a second pass that
+    dropped the bindings would flip the swapped fixture to `match`."""
+    from klayout_tools import lvs as lvs_module
+
+    applied = []
+    real = lvs_module._apply_constant_nets
+
+    def spy(*args, **kwargs):
+        result = real(*args, **kwargs)
+        applied.append(len(result[0]))
+        return result
+
+    offered = []
+
+    def one_snap(*_args, **_kwargs):
+        if offered:
+            return []
+        offered.append(True)
+        return ["snap"]
+
+    monkeypatch.setattr(lvs_module, "_apply_constant_nets", spy)
+    monkeypatch.setattr(lvs_module, "_collect_tolerance_snaps", one_snap)
+    monkeypatch.setattr(lvs_module, "_apply_tolerance_snaps", lambda *a, **k: None)
+    monkeypatch.setattr(
+        lvs_module,
+        "_tolerance_disclosure",
+        lambda *a, **k: lvs_module._mismatch("topology", "warning", "stub", "both"),
+    )
+
+    request = json.loads(
+        _macro_bus_request(
+            tmp_path, _MACRO_TIE_LAYOUT_SPICE_SWAPPED, _MACRO_TIE_REFERENCE_VERILOG
+        )
+    )
+    request["hints"] = {"constant_nets": _CONSTANT_NETS}
+    request.setdefault("options", {})["parameter_tolerance"] = 0.01
+    report = run_lvs(json.dumps(request))
+
+    assert applied == [2, 2]  # first pass + retry pass
+    assert report["status"] == "mismatch"
+
+
+def test_rerun_reconstructs_constant_nets_from_the_echo():
+    """Issue #3014: `--rerun` replays the applied bindings from the report's
+    `constant_nets_applied` echo."""
+    from klayout_tools.lvs import _reconstruct_lvs_request
+
+    request = _reconstruct_lvs_request(
+        {
+            "layout": "l.spice",
+            "reference": "r.spice",
+            "top": "top",
+            "constant_nets_applied": _CONSTANT_NETS,
+        }
+    )
+    assert request["hints"] == {"constant_nets": _CONSTANT_NETS}
+    assert "hints" not in _reconstruct_lvs_request(
+        {"layout": "l.spice", "reference": "r.spice", "constant_nets_applied": None}
+    )
 
 
 def test_run_lvs_anchor_top_level_pins_rejects_a_non_boolean(tmp_path):
