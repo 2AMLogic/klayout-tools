@@ -50,6 +50,7 @@ from . import (
     ring_check_cmd,
     signoff_cmd,
     sim_cmd,
+    sim_merge_cmd,
     size_cmd,
     socket_check_cmd,
     sta_cmd,
@@ -280,6 +281,8 @@ def create_parser() -> argparse.ArgumentParser:
     _add_draw_parser(subparsers)
 
     _add_sim_parser(subparsers)
+
+    _add_sim_merge_parser(subparsers)
 
     _add_pex_parser(subparsers)
 
@@ -853,6 +856,37 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(sim_parser)
     sim_parser.set_defaults(func=sim_cmd.run)
+
+
+def _add_sim_merge_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``sim-merge`` verb (issue #3045).
+
+    Recombines the per-request reports of one corner grid that had to be
+    split across several ``klt sim`` requests. A separate verb rather than
+    ``klt sim merge``: ``klt sim`` takes a positional request path, so a
+    ``merge`` subcommand would collide with a request file of that name. See
+    docs/cli/sim.md "Merging per-request reports".
+    """
+    merge_parser = subparsers.add_parser(
+        "sim-merge",
+        help="merge per-request klt sim reports of one split corner grid",
+        description=(
+            "Merge the reports of N per-request `klt sim` runs (one corner grid "
+            "split across requests) into the report a single request over the "
+            "whole grid would have produced. Rollups, coverage and counters are "
+            "recomputed over the union; a missing, duplicate, unexpected or "
+            "mismatching report is refused with a distinct exit code. See "
+            "docs/cli/sim.md 'Merging per-request reports'."
+        ),
+    )
+    merge_parser.add_argument(
+        "manifest", help="shard manifest JSON (planned requests and expected corners)"
+    )
+    merge_parser.add_argument(
+        "reports", nargs="+", metavar="report", help="per-request klt sim report JSON"
+    )
+    _add_format_arg(merge_parser)
+    merge_parser.set_defaults(func=sim_merge_cmd.run)
 
 
 def _add_size_parser(subparsers: argparse._SubParsersAction) -> None:

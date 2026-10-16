@@ -23,6 +23,20 @@ not `klt --version`, if you need to detect this kind of drift. See
   ceiling cannot honor fails before any S3 write with
   `error.code: "batch_max_units_per_job_invalid"`. Default (`"warn"`) behavior
   is unchanged. Additive; no `schema_version` bump.
+- **`klt sim-merge` recombines per-request sim reports** (issue #3045): a
+  corner grid split across several `klt sim` requests (one per process
+  corner, say) is merged against a manifest of the planned requests. The
+  per-measurement rollup (`status`, `worst_case`), `coverage` (with
+  re-based `checked` ids), the `corner_count`/`passed`/`failed`/`errored`/
+  `inconclusive` counters, `metrics` and `status` are recomputed over the
+  union with `klt sim`'s own helpers, and per-report fields
+  (`environment.netlist_sha256`, `environment.remote`,
+  `provenance.input.content_hash`) become per-shard arrays. A missing,
+  duplicate, unexpected or mismatching report, or a changed request, is
+  refused with its own exit code (`5`-`10`, `status: "refused"` payload).
+  Additive: new verb, new `merge` block, no `schema_version` bump. See
+  `docs/cli/sim.md` "Merging per-request reports". Shard planning is not
+  included.
 - **ASAP7 DRC deck checks the four net-aware spacings `ACTIVE.S.2A`,
   `LIG.LISD.S.6`, `LIG.LISD.S.7` and `LIG.SDT.S.8`** (issue #3084): DRM Tables
   3.5.1 and 3.10.1 apply these only to shapes on different nets, so the deck
