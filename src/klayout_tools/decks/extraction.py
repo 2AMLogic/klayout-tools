@@ -387,6 +387,15 @@ class MOSFlavour:
     same default every other ``provenance`` field in this module carries, so a
     deck that leaves them unset (e.g. gf180mcu's ``Dualgate`` entry, whose
     prose comment remains the record) is unaffected.
+
+    ``exclude_markers`` (issue #2912) are layers that *disqualify* an island
+    from this flavour even when it overlaps ``marker``: an island that also
+    interacts with any of them is left to the deck's default split instead of
+    being claimed. This mirrors an upstream derivation of the form
+    ``gate.and(marker).not(other)`` (sky130's ``ngate_5p0v_hv`` excludes
+    ``lvtn``). ``extract.py`` reports each excluded island in ``warnings`` so
+    the fall-through to the default flavour is never silent. Defaults to
+    ``()`` -- no exclusion, every existing entry unchanged.
     """
 
     marker: tuple[int, int]
@@ -394,6 +403,7 @@ class MOSFlavour:
     description: str = ""
     nfet_provenance: RuleProvenance | None = None
     pfet_provenance: RuleProvenance | None = None
+    exclude_markers: tuple[tuple[int, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -845,6 +855,7 @@ class ExtractionDeck:
                 layers.add(diode.cathode)
         for mos_flavour in self.mos_flavours:
             layers.add(mos_flavour.marker)
+            layers.update(mos_flavour.exclude_markers)
         return frozenset(layers)
 
     @property

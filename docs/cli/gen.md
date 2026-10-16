@@ -807,6 +807,11 @@ as unsupported. The upstream `sky130.lvs` does not key it on one marker layer:
 `nfet_03v3_nvt`), whereas `voltage_flavor` and the deck's `mos_flavours`
 express a single marker. Plan an explicit exclusion of such a device from the
 LVS comparison (see `lvs.md`, "Native-Vt NMOS is not supported on sky130").
+A native device drawn the upstream way (`hvi` AND `lvtn`) does **not** extract
+as the 5V-HV `sky130_fd_pr__nfet_g5v0d10v5`: the deck's `hvi` flavour excludes
+`lvtn`-overlapped islands, as upstream's `ngate_5p0v_hv` does `.not(lvtn)`. Such
+a device binds to the default `nfet` flavour and `klt extract` adds a `warnings`
+entry (`... which excludes them from that flavour ...`) naming the count.
 
 **Source/drain implant (issue #2580).** Only `gf180mcu`'s role-layer table
 declares the S/D implant roles (`"nplus"` 32/0 / `"pplus"` 31/0, issue

@@ -5248,6 +5248,9 @@ def extract_netlist_from_layout(
         "diagnostics", _detect_voltage_domain_overlap, layout, top_cell, deck, deck_name
     )
     warnings = warnings + voltage_domain_prose_warnings
+    warnings = warnings + _detect_excluded_flavour_islands(
+        layout, top_cell, deck, deck_name
+    )
 
     # Missing flavour markers (issue #2417): additive diagnostic, reported
     # through the optional `missing_flavour_markers` out-parameter (same
@@ -7413,6 +7416,54 @@ def _detect_unmodelled_poly_bodies(
     return warnings, unmodelled_poly
 
 
+def _detect_excluded_flavour_islands(
+    layout: kdb.Layout,
+    top_cell: kdb.Cell,
+    deck: ExtractionDeck,
+    deck_name: str,
+) -> list[str]:
+    """Warn for each ``deck.mos_flavours`` entry whose ``exclude_markers``
+    disqualified at least one active island that overlaps its ``marker``
+    (issue #2912), e.g. sky130 hvi+lvtn (the upstream native-Vt recipe).
+    Such an island binds to the deck's default flavour -- not the flavour its
+    marker alone would suggest -- so a caller must not read the bound model
+    as the intended device."""
+    import klayout.db as kdb
+
+    active = _region(layout, top_cell, deck.active)
+    if active.is_empty():
+        return []
+    warnings: list[str] = []
+    for flavour in deck.mos_flavours:
+        if not flavour.exclude_markers:
+            continue
+        marker_region = _region(layout, top_cell, flavour.marker)
+        if marker_region.is_empty():
+            continue
+        exclude_region = kdb.Region()
+        for exclude_marker in flavour.exclude_markers:
+            exclude_region += _region(layout, top_cell, exclude_marker)
+        count = 0
+        for component in active.merged().each():
+            component_region = kdb.Region(component)
+            if (
+                not component_region.interacting(marker_region).is_empty()
+                and not component_region.interacting(exclude_region).is_empty()
+            ):
+                count += 1
+        if count:
+            marker_label = f"{flavour.marker[0]}/{flavour.marker[1]}"
+            excluded = ", ".join(f"{m[0]}/{m[1]}" for m in flavour.exclude_markers)
+            warnings.append(
+                f"deck '{deck_name}': {count} MOS device(s) overlap the "
+                f"'{flavour.flavour}' marker {marker_label} and also "
+                f"{excluded}, which excludes them from that flavour; they bind "
+                "to the deck's default flavour, not a distinct model for the "
+                "combination"
+            )
+    return warnings
+
+
 def _detect_missing_flavour_markers(
     layout: kdb.Layout,
     top_cell: kdb.Cell,
@@ -8538,11 +8589,21 @@ def _extract_netlist(
     for flavour in deck.mos_flavours:
         marker_region = _region(layout, top_cell, flavour.marker)
         claimed = kdb.Region()
+        # Issue #2912: an island that also interacts with an
+        # `exclude_markers` layer is not this flavour's (upstream's
+        # `.not(lvtn)` on sky130's `ngate_5p0v_hv`); it stays in the default
+        # split, and `_detect_excluded_flavour_islands` warns about it.
+        exclude_region = kdb.Region()
+        for exclude_marker in flavour.exclude_markers:
+            exclude_region += _region(layout, top_cell, exclude_marker)
         if not marker_region.is_empty() and not active.is_empty():
             remaining = kdb.Region()
             for component in active.merged().each():
                 component_region = kdb.Region(component)
-                if not component_region.interacting(marker_region).is_empty():
+                if (
+                    not component_region.interacting(marker_region).is_empty()
+                    and component_region.interacting(exclude_region).is_empty()
+                ):
                     claimed += component_region
                 else:
                     remaining += component_region
