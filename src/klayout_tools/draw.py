@@ -21,7 +21,7 @@ import json
 import os
 from typing import Any
 
-from ._layout import write_layout
+from ._layout import load_layout, resolve_top_cell, write_layout
 
 #: Request-envelope schema identifier (see ``docs/cli/draw.md``).
 REQUEST_SCHEMA = "klt.draw.request/1"
@@ -59,11 +59,14 @@ ANNOTATION_KEY_PREFIX = "_"
 #: Allowed keys per request object, enforced by :func:`_reject_unknown_keys`.
 #: See ``docs/cli/draw.md`` -> "Unrecognised keys".
 _ALLOWED_REQUEST_KEYS = frozenset({"schema", "params", "options"})
-_ALLOWED_PARAMS_KEYS = frozenset({"dbu_um", "shapes", "labels"})
+_ALLOWED_PARAMS_KEYS = frozenset(
+    {"dbu_um", "shapes", "labels", "base_gds", "base_cell", "erase_um"}
+)
 _ALLOWED_OPTIONS_KEYS = frozenset({"cell_name", "output"})
 _ALLOWED_SHAPE_KEYS = frozenset({"layer", "name", "rect_um", "polygon_um", "array"})
 _ALLOWED_ARRAY_KEYS = frozenset({"pitch_um", "count"})
 _ALLOWED_LABEL_KEYS = frozenset({"layer", "text", "at_um"})
+_ALLOWED_ERASE_KEYS = frozenset({"rect_um", "layer"})
 
 #: Allow-list per ``_shape_layer``/``draw`` entry kind, so shapes and labels are
 #: each held to their own key set rather than a permissive union.
@@ -179,7 +182,15 @@ def draw(request: dict[str, Any]) -> dict[str, Any]:
         }
 
     ``params.dbu_um`` and ``options`` are optional; ``params.shapes`` is
-    required and must be non-empty. Returns a dict matching the documented
+    required and must be non-empty -- unless ``params.base_gds`` is given
+    (issue #3378), which seeds the output from an existing stream: the base
+    cell is flattened into the output cell, every ``params.erase_um`` window
+    (``{"rect_um": [x0, y0, x1, y1], "layer": [L, D]}``, ``layer`` optional =
+    all layers) is subtracted from it, and ``shapes``/``labels`` are then added
+    on top. ``params.base_cell`` selects the base cell (default: its sole top
+    cell). With ``base_gds`` set, ``shapes`` may be empty if ``erase_um`` is
+    not. Omitting ``base_gds``/``base_cell``/``erase_um`` leaves the original
+    behaviour untouched. Returns a dict matching the documented
     response schema (see ``docs/cli/draw.md``). Raises :class:`DrawError` for a
     malformed request or a write failure.
 
@@ -203,12 +214,33 @@ def draw(request: dict[str, Any]) -> dict[str, Any]:
         raise DrawError("request.options must be a JSON object")
     _reject_unknown_keys(options, _ALLOWED_OPTIONS_KEYS, "options")
 
+    base_gds = params.get("base_gds")
+    base_cell = params.get("base_cell")
+    erase_raw = params.get("erase_um")
+    if base_gds is None:
+        for key in ("base_cell", "erase_um"):
+            if params.get(key) is not None:
+                raise DrawError(f"params.{key} requires params.base_gds")
+    else:
+        if not isinstance(base_gds, str) or not base_gds:
+            raise DrawError("params.base_gds must be a non-empty string")
+        if base_cell is not None and (not isinstance(base_cell, str) or not base_cell):
+            raise DrawError("params.base_cell must be a non-empty string")
+    erase_windows = _parse_erase(erase_raw) if base_gds is not None else []
+
     dbu_um = _resolve_dbu(params.get("dbu_um"))
 
     shapes = params.get("shapes")
+    if base_gds is not None and shapes is None:
+        shapes = []
     if not isinstance(shapes, list):
         raise DrawError("params.shapes is required and must be a list")
-    if not shapes:
+    if not shapes and not (base_gds is not None and erase_windows):
+        if base_gds is not None:
+            raise DrawError(
+                "params.shapes and params.erase_um must not both be empty -- "
+                "`klt draw` will not write an unchanged copy of the base"
+            )
         raise DrawError(
             "params.shapes must not be empty -- `klt draw` will not write an "
             "empty layout (nothing to prove a DRC flow against)"
@@ -234,8 +266,22 @@ def draw(request: dict[str, Any]) -> dict[str, Any]:
     import klayout.db as kdb
 
     layout = kdb.Layout()
-    layout.dbu = dbu_um
-    top = layout.create_cell(cell_name)
+    if base_gds is None:
+        layout.dbu = dbu_um
+        top = layout.create_cell(cell_name)
+    else:
+        base = load_layout(base_gds, DrawError)
+        if params.get("dbu_um") is not None and abs(base.dbu - dbu_um) > 1e-12:
+            raise DrawError(
+                f"params.dbu_um ({dbu_um}) differs from the base layout's "
+                f"dbu ({base.dbu}) -- omit it to use the base's"
+            )
+        dbu_um = base.dbu
+        base_top = resolve_top_cell(base, base_cell, DrawError, path=base_gds)
+        layout.dbu = dbu_um
+        top = layout.create_cell(cell_name)
+        top.copy_tree(base_top)
+        top.flatten(True)
 
     # Track per-(layer, datatype) shape counts and names for the response, in
     # first-seen order, so the report reads back deterministically.
@@ -259,6 +305,22 @@ def draw(request: dict[str, Any]) -> dict[str, Any]:
 
     def _to_dbu(value_um: float) -> int:
         return int(round(value_um / dbu_um))
+
+    erased_shapes = 0
+    erased_labels = 0
+    if base_gds is not None:
+        for window, scope in erase_windows:
+            n_shapes, n_labels = _erase(top, layout, window, scope, _to_dbu, kdb)
+            erased_shapes += n_shapes
+            erased_labels += n_labels
+        for idx in layout.layer_indexes():
+            info = layout.get_info(idx)
+            count = sum(1 for sh in top.shapes(idx).each() if not sh.is_text())
+            if count:
+                pair = (info.layer, info.datatype)
+                layer_order.append(pair)
+                layer_counts[pair] = count
+                layer_names[pair] = info.name or None
 
     for i, shape in enumerate(shapes):
         pair, name = _shape_layer(shape, i)
@@ -306,7 +368,7 @@ def draw(request: dict[str, Any]) -> dict[str, Any]:
         for pair in layer_order
     ]
 
-    return {
+    report: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "generator": "draw",
         "gds_path": output_path,
@@ -318,6 +380,86 @@ def draw(request: dict[str, Any]) -> dict[str, Any]:
         "bbox_um": bbox_um,
         "warnings": [NOT_DESIGN_LEGAL_WARNING],
     }
+    if base_gds is not None:
+        # Additive fields, present only when a base was used, so the default
+        # response is unchanged.
+        report["base_gds"] = base_gds
+        report["base_cell"] = base_top.name
+        report["erased_shape_count"] = erased_shapes
+        report["erased_label_count"] = erased_labels
+    return report
+
+
+def _parse_erase(raw: Any) -> list[tuple[tuple[float, float, float, float], Any]]:
+    """Validate ``params.erase_um`` into ``[((x0, y0, x1, y1), layer_or_None)]``."""
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise DrawError("params.erase_um must be a list")
+    windows = []
+    for i, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            raise DrawError(f"erase_um[{i}] must be a JSON object")
+        _reject_unknown_keys(entry, _ALLOWED_ERASE_KEYS, f"erase_um[{i}]")
+        rect = entry.get("rect_um")
+        if (
+            not isinstance(rect, list)
+            or len(rect) != 4
+            or any(not _is_number(v) for v in rect)
+        ):
+            raise DrawError(
+                f"erase_um[{i}].rect_um must be [x0, y0, x1, y1] of numbers"
+            )
+        layer = entry.get("layer")
+        if layer is not None and (
+            not isinstance(layer, list)
+            or len(layer) != 2
+            or any(
+                isinstance(v, bool) or not isinstance(v, int) or v < 0 for v in layer
+            )
+        ):
+            raise DrawError(
+                f"erase_um[{i}].layer must be a [layer, datatype] pair of "
+                "non-negative integers when present"
+            )
+        x0, x1 = sorted((rect[0], rect[2]))
+        y0, y1 = sorted((rect[1], rect[3]))
+        windows.append(((x0, y0, x1, y1), None if layer is None else tuple(layer)))
+    return windows
+
+
+def _erase(top, layout, window, scope, to_dbu, kdb) -> tuple[int, int]:
+    """Subtract one ``window`` (microns) from ``top``; return (shapes, labels) hit.
+
+    Only shapes whose interior overlaps the window are touched: each is replaced
+    by its boolean difference with the window (a straddling polygon is clipped,
+    not dropped). Texts whose anchor lies inside the closed window are removed.
+    ``scope`` is a ``(layer, datatype)`` pair or ``None`` for all layers.
+    """
+    box = kdb.Box(*(to_dbu(v) for v in window))
+    win = kdb.Region(box)
+    erased_shapes = 0
+    erased_labels = 0
+    for idx in layout.layer_indexes():
+        info = layout.get_info(idx)
+        if scope is not None and (info.layer, info.datatype) != scope:
+            continue
+        shapes = top.shapes(idx)
+        for shape in list(shapes.each_touching(box)):
+            if shape.is_text():
+                if box.contains(shape.text_trans.disp.to_p()):
+                    shapes.erase(shape)
+                    erased_labels += 1
+                continue
+            region = kdb.Region()
+            region.insert(shape.polygon)
+            if (region & win).is_empty():
+                continue
+            shapes.erase(shape)
+            for poly in (region - win).each():
+                shapes.insert(poly)
+            erased_shapes += 1
+    return erased_shapes, erased_labels
 
 
 def _resolve_dbu(value: Any) -> float:
