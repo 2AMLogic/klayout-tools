@@ -1237,7 +1237,7 @@ single-layer kind.
 The `sky130` deck is a **curated starter subset**, not the full sky130
 design rule manual (which spans hundreds of rules). It currently covers 136
 rules — width, spacing, area, and enclosure checks across the `poly`, `diff`,
-`tap` (issue #2401),
+`tap` (issue #2321),
 `li1`, `met1`, `licon1`, `mcon`, `met2`, `via` (met1&lt;-&gt;met2 via1),
 `met3`-`met5`, `via2`-`via4`, `capm`/`capm2` (MiM-cap top plates), and
 `nwell` (issue #1420) layers, plus the source deck's entire
@@ -1307,14 +1307,14 @@ independent check. This gap is documentation-only: no field of the JSON
 `coverage` object changes.
 
 Nine of these rules approximate official rules our engine cannot transcribe
-literally. `diff.width.1` and `tap.width.1` (issue #2401) are the two
+literally. `diff.width.1` and `tap.width.1` (issue #2321) are the two
 curated halves of one rule defined on a *compound* layer expression (a
 boolean union of two mask layers — `difftap.1`'s `diff.or(tap)`), each
 checking one drawn layer of the union, because the native
 `Region` check primitives check one layer, or one layer against one other
 layer, at a time — they do not evaluate arbitrary layer expressions the way
 the DRC-DSL script runner does. `li1.enclosing.licon1.1` and
-`tap.enclosing.licon.1` (issue #2401) approximate `second_edges`-conditional
+`tap.enclosing.licon.1` (issue #2321) approximate `second_edges`-conditional
 enclosure rules (`li.5`, `licon.7`) at their unconditional zero-margin
 floor, the one positive-margin transcription that provably flags no
 correct-by-construction geometry. `licon1.width.1` and `mcon.width.1` (issue
@@ -2850,7 +2850,7 @@ field existed). sky130's five `met{1..5}.area.1` rules (issue #1955) each
 carry a populated `provenance` citing their own `sky130A_mr.drc` rule id
 (`m1.6`/`m2.6`/`m3.6`/`m4.4a`/`m5.4`), its five
 `met{1..5}.holes_area.1` rules (issue #1976) likewise cite `m1.7`/`m2.7`/
-`m3.7`/`m4.7`/`m5.7`, and issue #2401's `tap.width.1` cites the same
+`m3.7`/`m4.7`/`m5.7`, and issue #2321's `tap.width.1` cites the same
 `difftap.1` source id `diff.width.1` already carries (both halve the same
 compound rule), issue #2594's `licon1.width.1`/`mcon.width.1` cite
 `licon.1`/`ct.1`, and every one of issue #2642's 75 `OFFGRID`-group rules
