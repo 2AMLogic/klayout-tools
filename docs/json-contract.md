@@ -260,6 +260,13 @@ a `deck: {name, content_hash}` block; without it the output is byte-identical.
 No `schema_version` bump on either command. See `docs/cli/deck.md` and
 `docs/cli/layers.md`.
 
+Issue #2952's `klt lvs` category `reference.unresolved_subckt_call` is
+likewise additive (no `schema_version` bump), but unlike the diagnostic-only
+`pin.declared_short` it **forces** `status: "mismatch"`, so a request whose
+inputs are unchanged can flip from `"match"` to `"mismatch"` on upgrade —
+callers gating on `status` should expect that (see `docs/cli/lvs.md`,
+"`reference.unresolved_subckt_call`").
+
 **A new key in a documented open map, and a new member on one class of that
 map's entries, are additive.** `klt functional-verification`'s
 `environment.sdf.dropped` is documented as an open map keyed by class name,
@@ -1669,6 +1676,13 @@ per-request code** (a partial set exits `4` for `klt sim`), which is `>= 3`,
 so the "a report was emitted" rule below holds. See
 [`docs/cli/sim.md`](cli/sim.md) "Submitting a set of requests" and
 `docs/schemas/sim-set-report.schema.json`.
+
+`klt sim-merge` (issue #3045) emits a single `klt sim` report over the union of
+several per-request reports, plus an additive `merge` block; it defines the
+refusal exit codes `5`-`10` (a set that is not exactly the planned one; stdout carries a
+`status: "refused"` payload whose `refusal.code` names the class) alongside `klt sim`'s
+`3`/`4` verdicts. See [`docs/cli/sim.md`](cli/sim.md) "Merging per-request
+reports" and `docs/schemas/sim-merge-report.schema.json`.
 
 ## Exit codes
 

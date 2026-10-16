@@ -68,6 +68,7 @@ from .gen_layer_params import (
     _cut_fixed_size_um,
     _gate_bottom_endcap_um,
     _gate_pad_clearance_um,
+    _gate_top_endcap_um,
     _metal_res_geometry_min_um,
     _metal_res_layers,
     _mos_array_well_tap_role_layer,
@@ -75,6 +76,7 @@ from .gen_layer_params import (
     _reject_deferred_family,
     _res_end_contact_um,
     _res_flavor_min_width_um_floor,
+    _res_sab_geometry_um,
     _ring_implant_margin_um,
     _role_layer_info,
     _sd_implant_margin_um,
@@ -505,6 +507,7 @@ def _mos_array_describe(
         mos_cap=params["mos_cap"],
         pitch_x_um=params["pitch_x_um"],
         pitch_y_um=params["pitch_y_um"],
+        top_endcap_um=_gate_top_endcap_um(family),
     )
     unit = info["unit"]
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
@@ -845,6 +848,9 @@ def _res_array_describe(
         floors["via_enclosure_min_um"],
         floors["via_space_min_um"],
         *end_contact,
+        _res_sab_geometry_um(
+            family, params.get("flavor", _DEFAULT_RES_FLAVOR), metal_level
+        )[0],
     )
     unit = info["unit"]
     # A metal-level resistor's own body layer (metN) is already a routing
@@ -2000,6 +2006,7 @@ def _diff_pair_describe(
         # See the equivalent note in `_mos_array_describe` (issue #1577).
         _contact_gate_extra_offset_um(family),
         _gate_bottom_endcap_um(family),
+        top_endcap_um=_gate_top_endcap_um(family),
     )
     unit = info["unit"]
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
@@ -2459,6 +2466,7 @@ def _esd_device_describe(
         # See the equivalent note in `_mos_array_describe` (issue #1577).
         _contact_gate_extra_offset_um(family),
         _gate_bottom_endcap_um(family),
+        top_endcap_um=_gate_top_endcap_um(family),
     )
     unit = info["unit"]
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
