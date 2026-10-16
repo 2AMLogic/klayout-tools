@@ -2022,18 +2022,103 @@ def _client_pdk_stamp(request: dict[str, Any] | None) -> dict[str, Any] | None:
     }
 
 
+#: Request field naming the worker PDK revision the submitter requires
+#: (``models.pdk_expect``, issue #3462). ``stamp_sha256`` is the only form: it
+#: is the same ``sources-sha256`` scheme the worker capture already reports,
+#: so the comparison is exact and needs no local PDK tree.
+PDK_EXPECT_FIELD = "pdk_expect"
+PDK_EXPECT_KEYS = ("stamp_sha256",)
+PDK_MISMATCH_CODE = "pdk_stamp_mismatch"
+PDK_NOT_COMPARABLE_CODE = "pdk_stamp_not_comparable"
+_SHA256_HEX = re.compile(r"[0-9a-fA-F]{64}")
+
+
+def pdk_expectation(request: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The validated ``models.pdk_expect`` pin (``{"stamp_sha256": <hex>}``),
+    or ``None`` when the request states none. A malformed pin raises
+    :class:`~klayout_tools.sim.SimError` -- never silently ignored, since an
+    ignored pin would let a run pass that the caller meant to gate."""
+    from .sim import SimError
+
+    models = (request or {}).get("models")
+    pin = models.get(PDK_EXPECT_FIELD) if isinstance(models, dict) else None
+    if pin is None:
+        return None
+    if not isinstance(pin, dict):
+        raise SimError(
+            f"models.{PDK_EXPECT_FIELD} must be an object "
+            '({"stamp_sha256": "<64 hex characters>"})'
+        )
+    unknown = sorted(set(pin) - set(PDK_EXPECT_KEYS))
+    if unknown:
+        raise SimError(
+            f"models.{PDK_EXPECT_FIELD} has unknown key(s) {unknown} "
+            f"(supported: {', '.join(PDK_EXPECT_KEYS)})"
+        )
+    value = pin.get("stamp_sha256")
+    if not (isinstance(value, str) and _SHA256_HEX.fullmatch(value)):
+        raise SimError(
+            f"models.{PDK_EXPECT_FIELD}.stamp_sha256 must be a 64-character "
+            "hex sha256 (the worker's pdk.stamp_sha256)"
+        )
+    return {"stamp_sha256": value.lower()}
+
+
+def require_pdk_match_requested(request: dict[str, Any] | None) -> bool:
+    """``options.require_pdk_match`` (issue #3462), validated: a non-boolean
+    raises :class:`~klayout_tools.sim.SimError`."""
+    from .sim import SimError
+
+    options = (request or {}).get("options")
+    value = (
+        options.get("require_pdk_match", False) if isinstance(options, dict) else False
+    )
+    if not isinstance(value, bool):
+        raise SimError("options.require_pdk_match must be a boolean")
+    return value
+
+
 def _compare_pdk_stamps(
-    worker_pdk: dict[str, Any], client: dict[str, Any] | None
+    worker_pdk: dict[str, Any],
+    client: dict[str, Any] | None,
+    expected: dict[str, Any] | None = None,
+    expected_variant: str | None = None,
 ) -> dict[str, Any]:
     """Compare worker and client PDK stamps -- only when both provide the
     same variant under the same stamp scheme. Anything else is
     ``not_comparable``, never a proven mismatch. A match is not model-closure
-    equality (see docs/cli/sim.md)."""
+    equality (see docs/cli/sim.md).
+
+    ``expected`` (the ``models.pdk_expect`` pin, issue #3462) takes the
+    client's place when given: the worker's ``stamp_sha256`` is compared to
+    the pinned one, so no local tree is needed. The pin is echoed back as
+    ``expected``; ``expected_variant`` (``models.pdk``) must then be the
+    variant the worker resolved, or the pin says nothing about it."""
     worker_ok = (
         worker_pdk.get("variant")
         and worker_pdk.get("stamp_scheme")
         and worker_pdk.get("stamp_sha256")
     )
+    if expected is not None:
+        pinned = {"expected": dict(expected)}
+        if (
+            not worker_ok
+            or worker_pdk.get("stamp_scheme") != "sources-sha256"
+            or (expected_variant and worker_pdk.get("variant") != expected_variant)
+        ):
+            return {"status": "not_comparable", **pinned}
+        if worker_pdk["stamp_sha256"].lower() == expected["stamp_sha256"]:
+            return {"status": "match", **pinned}
+        return {
+            "status": "mismatch",
+            **pinned,
+            "warning": (
+                f"the worker's PDK revision stamp for {worker_pdk['variant']} "
+                f"differs from models.{PDK_EXPECT_FIELD}.stamp_sha256; results "
+                "may differ from the pinned revision (a matching stamp would "
+                "not prove identical models)"
+            ),
+        }
     if (
         not worker_ok
         or client is None
@@ -2051,6 +2136,37 @@ def _compare_pdk_stamps(
             "from a local run (a matching stamp would not prove identical models)"
         ),
     }
+
+
+def _pdk_match_failure(
+    worker_environment: dict[str, Any], request: dict[str, Any]
+) -> tuple[str, str] | None:
+    """``(code, message)`` when ``options.require_pdk_match`` is on and the
+    worker's PDK stamp is not a proven match (fail closed: ``not_comparable``
+    fails too); ``None`` otherwise. The message names both stamps."""
+    if not require_pdk_match_requested(request):
+        return None
+    comparison = worker_environment.get("pdk_stamp_comparison") or {}
+    status = comparison.get("status")
+    if status == "match":
+        return None
+    worker_pdk = worker_environment.get("pdk") or {}
+    worker_stamp = worker_pdk.get("stamp_sha256") or "absent"
+    expected = comparison.get("expected") or _client_pdk_stamp(request) or {}
+    expected_stamp = expected.get("stamp_sha256") or "none available"
+    code = PDK_MISMATCH_CODE if status == "mismatch" else PDK_NOT_COMPARABLE_CODE
+    verdict = (
+        "differs from the required revision"
+        if status == "mismatch"
+        else "could not be compared with the required revision"
+    )
+    return code, (
+        f"options.require_pdk_match: the worker's PDK stamp {verdict} "
+        f"(worker stamp_sha256: {worker_stamp}; expected stamp_sha256: "
+        f"{expected_stamp}; comparison: {status}). State the expected revision "
+        f"with models.{PDK_EXPECT_FIELD}.stamp_sha256 or point "
+        "models.pdk_root/$PDK_ROOT at a local tree"
+    )
 
 
 def _read_worker_environment(
@@ -2132,7 +2248,10 @@ def _read_worker_environment(
             "image_manifest": manifest,
             "diagnostics": diagnostics,
             "pdk_stamp_comparison": _compare_pdk_stamps(
-                pdk, _client_pdk_stamp(request)
+                pdk,
+                _client_pdk_stamp(request),
+                pdk_expectation(request),
+                ((request or {}).get("models") or {}).get("pdk"),
             ),
         }
     except (ValueError, TypeError, AttributeError, UnicodeDecodeError):
@@ -2228,9 +2347,14 @@ def _read_job_identity(
 ) -> dict[str, Any]:
     """Runner identity plus the worker-observed environment capture, merged
     into ``environment.remote``. Neither reader can raise."""
+    worker_environment = _read_worker_environment(local_dir, request)
+    if require_pdk_match_requested(request):
+        # Issue #3462: say in the report that this run gated on the stamp.
+        comparison = worker_environment["pdk_stamp_comparison"]
+        worker_environment["pdk_stamp_comparison"] = {**comparison, "required": True}
     return {
         **_read_runner_identity(local_dir, request),
-        "worker_environment": _read_worker_environment(local_dir, request),
+        "worker_environment": worker_environment,
     }
 
 
@@ -2705,6 +2829,26 @@ def _run_batch_job(
                 corners, collected_dir=collected, artifacts_dir=artifacts_dir
             )
     engine_version = (report.get("environment") or {}).get("engine_version")
+    failure = _pdk_match_failure(environment["worker_environment"], request)
+    if failure is not None:
+        # Issue #3462: fail closed -- the collected results are not reported
+        # as passing when the worker's PDK is not the required revision.
+        code, message = failure
+        return (
+            [
+                _unrun_corner_report(
+                    point,
+                    measurements_spec,
+                    "pdk_stamp_mismatch"
+                    if code == PDK_MISMATCH_CODE
+                    else "pdk_stamp_not_comparable",
+                    message=message,
+                )
+                for point in corner_points
+            ],
+            engine_version,
+            environment,
+        )
     return corners, engine_version, environment
 
 

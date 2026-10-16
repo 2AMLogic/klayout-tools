@@ -706,6 +706,9 @@ def _build_remote_request(
     options["keep_artifacts"] = keep_artifacts
     options["waveforms"] = want_waveforms
     options.pop("max_workers", None)
+    # Issue #3462: submit-side gate (the `batch` backend checks the collected
+    # worker stamp); the job instance runs `local-parallel`, which refuses it.
+    options.pop("require_pdk_match", None)
     if max_workers is not None:
         options["max_workers"] = max_workers
     remote_request["options"] = options

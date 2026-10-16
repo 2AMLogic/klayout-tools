@@ -94,6 +94,7 @@ def _run_sweep(args: argparse.Namespace) -> int:
             fail_fast_probe=args.fail_fast_probe,
             fail_on_diagnostic=args.fail_on_diagnostic,
             submit_only=getattr(args, "submit_only", False),
+            require_pdk_match=getattr(args, "require_pdk_match", None),
         )
     except SimError as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)
@@ -218,6 +219,7 @@ def _run_batch_set(args: argparse.Namespace) -> int:
             ("--op-lint", getattr(args, "op_lint", False)),
             ("--submit-only", getattr(args, "submit_only", False)),
             ("--job-status", getattr(args, "job_status", None)),
+            ("--require-pdk-match", getattr(args, "require_pdk_match", None)),
         )
         if value
     ]
