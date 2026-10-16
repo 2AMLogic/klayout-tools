@@ -602,9 +602,13 @@ not `klt --version`, if you need to detect this kind of drift. See
   `2`), bumped whenever R or C extraction semantics change. Additive;
   `schema_version` is unchanged. **Back-reference for 0.7.0:** #2392 changed
   how series R is counted, from squares per merged net to squares per
-  conductor fragment, so series R reported by `--parasitics` can rise by up
-  to roughly 2x per net versus 0.6.0 on identical input, while C is
-  unchanged. 0.6.0-style results are revision `1`, 0.7.0-style revision `2`.
+  conductor fragment, so series R reported by `--parasitics` differs from
+  0.6.0 on identical input while C is unchanged. Individual nets moved by up
+  to roughly 2x in the reporter's layout, and total series R there fell about
+  16% (17.52 to 14.696 kohm). The direction depends on net shape: disjoint
+  fragments no longer fuse into one long, thin rectangle, and short, wide
+  fragments no longer read as the reciprocal. 0.6.0-style results are
+  revision `1`, 0.7.0-style revision `2`.
 - **Bipolar markers can be derived layer expressions** (issue #2860):
   `BipolarDevice.marker` now accepts a `LayerExpr`, a frozen AND/NOT tree
   of drawn layers that can nest, as well as a bare `(layer, datatype)`
