@@ -284,6 +284,9 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "batch_job_interrupted",
         # Report-level (`environment.job_diagnostic`, issue #2970).
         "all_units_at_timeout",
+        # Report-level (top-level `diagnostics[]`, issue #2901): batch runner
+        # predates request fields, under `runner_version_check: "warn"`.
+        "batch_runner_request_feature_predated",
     }
 )
 
@@ -4111,6 +4114,11 @@ def _run_sim_corners(
 
     _attach_timeout_budget_hint(environment, corners, timeout_s)
 
+    # Issue #2901: lifted out of `environment.remote` to the top level.
+    request_feature_diagnostic = (environment.get("remote") or {}).pop(
+        "request_feature_diagnostic", None
+    )
+
     report = {
         "schema_version": SCHEMA_VERSION,
         "netlist": _report_path(netlist_path, repo_root=repo_root),
@@ -4156,6 +4164,10 @@ def _run_sim_corners(
         "measurements": measurements_rollup,
         "corners": corners,
     }
+    if request_feature_diagnostic is not None:
+        # Additive/optional (issue #2901): only present when a batch runner
+        # predates a request feature under `runner_version_check: "warn"`.
+        report["diagnostics"] = [request_feature_diagnostic]
     _attach_not_reached_count(report, measurements_spec, corners)
     if plot_dir is not None:
         # Additive/optional: only present when `--plot`/`plot_dir` was

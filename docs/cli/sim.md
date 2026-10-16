@@ -1576,6 +1576,16 @@ release segment:
 | `analysis_steps` ([#2482](https://github.com/2AMLogic/klayout-tools/issues/2482)) | `analysis_steps` is present | `0.7.1` |
 | `transfer` ([#2924](https://github.com/2AMLogic/klayout-tools/issues/2924)) | any `measurements[]` entry declares `transfer` | `0.7.1` (**mandatory**, see below) |
 | `stimulus` ([#2977](https://github.com/2AMLogic/klayout-tools/issues/2977)) | `stimulus` is present | `0.7.1` (**mandatory**, see below) |
+| `measurements[].expr` | any `measurements[]` entry has `expr` | `0.7.0` |
+| `corners.process[].sections[]` | a `corners.process[]` bundle has an object-form `sections[]` entry | `0.7.0` |
+| `options.ngspice_init` | `options.ngspice_init` is set and non-empty | `0.7.0` |
+| `options.osdi_preload` | `options.osdi_preload` is set and non-empty | `0.7.0` |
+
+The last four rows are the released entries of
+`REQUEST_FEATURE_MIN_RUNNER_VERSION` ([#2877](https://github.com/2AMLogic/klayout-tools/issues/2877)),
+the same table the checks below read ([#2901](https://github.com/2AMLogic/klayout-tools/issues/2901)).
+An entry whose minimum is `unreleased` has no detector and never counts as
+"every runner is too old".
 
 `decks[]` ([#3303](https://github.com/2AMLogic/klayout-tools/issues/3303)) is
 the next registry entry.
@@ -1593,6 +1603,14 @@ the next registry entry.
   version is unknown) and `status` (`supported` / `unsupported` / `unknown`).
   An `unsupported` status also sets `runner_compatibility_warning`, even when
   `runner_compatibility` is `match`.
+- **Under `runner_version_check: "warn"`** the same pre-launch finding does
+  not refuse: it is printed to stderr and the report carries one top-level
+  `diagnostics[]` entry with `code: "batch_runner_request_feature_predated"`,
+  `severity: "warning"`, `features[]` (every offending field), `runner_klt_version`,
+  `client_klt_version` and `source` (`"manifest"`: known before launch). When
+  only the post-run identity file names the runner version (no manifest), the
+  same entry is emitted after the run with `source: "runner"`. `enforce` is
+  unchanged: the request is refused with `batch_runner_feature_unsupported`.
 - **Unknown degrades to a warning**: an unreadable runner version, or a legacy
   manifest entry without `klt_version`, is never treated as missing.
   `runner_version_check: "warn"` reports without refusing.
@@ -5765,6 +5783,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `batch_job_failed` | The corner never started, or its report was never written: the `batch` backend's fleet job reached a terminal `failed` state with an exit code outside `klt sim`'s own `0`/`3`/`4` (see "Batch backend" above). |
 | `batch_job_timeout` | The corner never completed: the `batch` job exceeded its own `timeout_seconds` on the fleet instance and was killed by 2am's harness. |
 | `all_units_at_timeout` | Report-level only (`environment.job_diagnostic`, never on a corner): every unit of a ≥2-unit run hit the time budget — see "Timeout-budget hint". |
+| `batch_runner_request_feature_predated` | Report-level only (top-level `diagnostics[]`, never on a corner), `severity: "warning"`: under `batch.runner_version_check: "warn"` the request uses fields the fleet runner `klt` predates — see "Request-feature capability check". |
 | `batch_poll_timeout` | The corner's result was never observed: `batch.poll_timeout_s` elapsed with the job still non-terminal, or the job never published a `status.json` within 1800s (the message says it never started). The job may still be running on the fleet — this is what the client knows, not a claim the run failed. |
 | `batch_job_interrupted` | The corner's result was never observed: the job stayed `interrupted` (Spot-reclaimed, no re-launch seen) for longer than `batch.interrupted_grace_s`, so polling stopped before `poll_timeout_s`. Distinct from `batch_poll_timeout`; the job may still be recoverable on the fleet and the client does not re-launch it. |
 | `timeout_budget_unreachable` | The corner never started: `options.fail_fast_probe`'s calibration probe measured a rate implying `options.timeout_s` cannot plausibly cover the full analysis window, so the whole grid was aborted before dispatch (issue #1694). Carries additional `reached_s`/`fraction` fields — an *estimate* of how far this corner would have gotten, derived from the measured rate, not a real per-corner recovery. See "Timeout-budget preflight" above. |
