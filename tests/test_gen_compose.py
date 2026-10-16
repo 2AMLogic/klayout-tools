@@ -15448,10 +15448,11 @@ def test_compose_per_net_layer_role_wins_over_cross_block_layer_role(
 #: below: both `U0_D` ports face +x, so the fixed one-jog shape would have to
 #: reach u2's pin through u2's own body. The path lifts over the row instead
 #: and comes back down to the right of u2, approaching that pin from its own
-#: outward side. Derived from the fixture's own geometry: 1.12um-wide blocks
-#: on a 3.0um row spacing put u1 at x=[4.12, 5.24] and u2 at x=[8.24, 9.36],
-#: with both drain pads on the y=0.21 row.
-_DRAIN_BUS_LEG_WAYPOINTS_UM = [[5.6, 2.5], [9.8, 2.5], [9.8, 0.21]]
+#: outward side. Derived from the fixture's own geometry: 1.37um-wide blocks
+#: on a 3.0um row spacing put u1 at x=[4.245, 5.615] and u2 at
+#: x=[8.615, 9.985] (each block bbox includes the 0.125um sky130 S/D implant
+#: margin, issue #2934), with both drain pads on the y=0.21 row.
+_DRAIN_BUS_LEG_WAYPOINTS_UM = [[6.0, 2.5], [10.3, 2.5], [10.3, 0.21]]
 
 
 def _drain_bus_request(tmp_path, pdk_root, output, cell_name):

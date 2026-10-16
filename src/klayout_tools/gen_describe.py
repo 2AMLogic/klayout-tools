@@ -503,6 +503,20 @@ def _sd_implant_hints(
             f"('{sd_implant_role}') for flavor '{flavor}' -- no implant "
             "mask was drawn"
         )
+    if family == "sky130":
+        # Phase A of issue #2934 draws the unit devices' nsdm/psdm only;
+        # report the masks still omitted (never silently) until the tap/
+        # guard-ring implant and npc phases land.
+        if params.get("add_guard_ring"):
+            notes.append(
+                "sky130 guard/tap ring draws no nsdm/psdm tap implant -- "
+                "the ring's tap implant mask was not drawn"
+            )
+        if params.get("gate_contact"):
+            notes.append(
+                "sky130 draws no npc (95/20) over the poly-contact licons -- "
+                "no npc mask was drawn"
+            )
     return {
         "sd_implant_present": (
             sd_implant is not None and _sd_implant_margin_um(family) > 0
@@ -2243,6 +2257,7 @@ def _diff_pair_describe(
         )
 
     voltage_flavor_hints = _voltage_flavor_hints(family, params, notes)
+    sd_implant_hints = _sd_implant_hints(family, params, notes)
 
     snapped = _grid_snapped(dbu, params["w_um"], params["l_um"])
     kind = "mirror" if params["mirror"] else "pair"
@@ -2259,6 +2274,7 @@ def _diff_pair_describe(
             "snapped_to_grid": snapped,
             "notes": notes,
             **voltage_flavor_hints,
+            **sd_implant_hints,
         },
         "warnings": (
             ["one or more dimensions were rounded to the technology grid"]
