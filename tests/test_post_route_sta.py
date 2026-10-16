@@ -4447,6 +4447,185 @@ def test_live_engine_report_ports(tmp_path):
     assert report["worst_hold_path"]["startpoint"] == "rst_n"
 
 
+# --------------------------------------------------------------------------- #
+# constraints.false_path_from -- static-input timing exclusions (issue #2968).
+# --------------------------------------------------------------------------- #
+
+
+def test_validate_false_path_from_omitted_and_empty_are_none():
+    assert post_route_sta._validate_false_path_from({}, "clk") is None
+    assert (
+        post_route_sta._validate_false_path_from({"false_path_from": []}, "clk") is None
+    )
+
+
+def test_validate_false_path_from_keeps_request_order():
+    constraints = {"false_path_from": ["b_in", "a_in", "cfg[3]"]}
+    assert post_route_sta._validate_false_path_from(constraints, "clk") == [
+        "b_in",
+        "a_in",
+        "cfg[3]",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ("a_in", "must be a list of input port names"),
+        ({"a_in": 1}, "must be a list of input port names"),
+        ([1], "non-empty port-name strings"),
+        ([""], "non-empty port-name strings"),
+        ([" a_in"], "non-empty port-name strings"),
+        (["a\nb"], "control character"),
+        (["clk"], "must not name the clock port"),
+        (["a_in", "b_in", "a_in"], r"must not repeat a port \('a_in'\)"),
+    ],
+)
+def test_validate_false_path_from_rejects(value, message):
+    with pytest.raises(PostRouteStaError, match=message):
+        post_route_sta._validate_false_path_from({"false_path_from": value}, "clk")
+
+
+def test_run_sta_false_path_from_validation_runs_before_engine(tmp_path, monkeypatch):
+    request_path = _setup_verilog_success_env(
+        tmp_path,
+        monkeypatch,
+        constraints=_boundary_constraints(false_path_from=["a_in", "a_in"]),
+    )
+
+    def fail_run(*args, **kwargs):
+        raise AssertionError("engine must not run for an invalid request")
+
+    monkeypatch.setattr(post_route_sta.subprocess, "run", fail_run)
+    with pytest.raises(PostRouteStaError, match="must not repeat a port"):
+        run_sta(request_path)
+
+
+def test_omitting_false_path_from_leaves_tcl_unchanged():
+    assert post_route_sta._false_path_lines(None) == []
+    assert post_route_sta._false_path_lines([]) == []
+    for maps in ((None, None), (_BOUNDARY_INPUT_DELAYS, _BOUNDARY_OUTPUT_DELAYS)):
+        assert post_route_sta._port_check_lines(*maps, report_ports=["x"]) == (
+            post_route_sta._port_check_lines(
+                *maps, report_ports=["x"], false_path_from=None
+            )
+        )
+        assert post_route_sta._port_check_lines(*maps) == (
+            post_route_sta._port_check_lines(*maps, false_path_from=[])
+        )
+    assert post_route_sta._request_io_delay_lines(
+        "clk", 0.0, 0.1, None, None
+    ) == post_route_sta._io_delay_lines("clk", 0.0, 0.1)
+
+
+def test_false_path_lines_escape_and_follow_delay_lines():
+    lines = post_route_sta._request_io_delay_lines(
+        "clk", 0.0, 0.1, None, None, false_path_from=["a_in", "cfg[3]", "we$ird"]
+    )
+    delay = post_route_sta._io_delay_lines("clk", 0.0, 0.1)
+    assert lines[-3:] == [
+        "set_false_path -from [get_ports a_in]",
+        r"set_false_path -from [get_ports cfg\[3\]]",
+        r"set_false_path -from [get_ports we\$ird]",
+    ]
+    assert lines[-3 - len(delay) : -3] == delay
+    text = "\n".join(lines)
+    assert "false_path a_in {input inout bidirect}" in text
+    assert post_route_sta._PORT_CHECK_BEGIN in text
+
+
+def test_false_path_from_with_port_delay_maps_comes_after_them():
+    lines = post_route_sta._request_io_delay_lines(
+        "clk",
+        0.0,
+        0.1,
+        _BOUNDARY_INPUT_DELAYS,
+        _BOUNDARY_OUTPUT_DELAYS,
+        false_path_from=["a_in"],
+    )
+    assert lines[-1] == "set_false_path -from [get_ports a_in]"
+    assert "klt_input_mapped" in "\n".join(lines)
+
+
+def test_run_sta_false_path_from_single_corner(tmp_path, monkeypatch):
+    request_path = _setup_verilog_success_env(
+        tmp_path,
+        monkeypatch,
+        constraints=_boundary_constraints(false_path_from=["a_in", "b_in"]),
+    )
+    scripts = _stub_openroad_capture(monkeypatch, {None: "boundary_tt_025C_1v80"})
+
+    report = run_sta(request_path)
+
+    assert scripts[0].count("set_false_path -from") == 2
+    assert "set_false_path -from [get_ports b_in]" in scripts[0]
+    assert report["false_path_from"] == ["a_in", "b_in"]
+
+
+def test_run_sta_without_false_path_from_has_no_echo_or_exceptions(
+    tmp_path, monkeypatch
+):
+    request_path = _setup_verilog_success_env(
+        tmp_path, monkeypatch, constraints=_boundary_constraints()
+    )
+    scripts = _stub_openroad_capture(monkeypatch, {None: "boundary_tt_025C_1v80"})
+
+    report = run_sta(request_path)
+
+    assert "false_path_from" not in report
+    assert "set_false_path" not in scripts[0]
+
+
+def test_run_sta_false_path_from_multi_corner_every_session(tmp_path, monkeypatch):
+    request_path = _setup_multi_corner_env(
+        tmp_path,
+        monkeypatch,
+        constraints=_boundary_constraints(false_path_from=["a_in"]),
+    )
+    scripts = _stub_openroad_capture(
+        monkeypatch,
+        {
+            "tt_025C_1v80": "boundary_tt_025C_1v80",
+            "ss_100C_1v60": "boundary_ss_100C_1v60",
+        },
+    )
+
+    report = run_sta(request_path)
+
+    assert len(scripts) == 2
+    assert all("set_false_path -from [get_ports a_in]" in text for text in scripts)
+    assert report["false_path_from"] == ["a_in"]
+    assert all("false_path_from" not in entry for entry in report["corners"])
+
+
+def test_run_sta_false_path_from_rejected_by_engine_check(tmp_path, monkeypatch):
+    request_path = _setup_verilog_success_env(
+        tmp_path,
+        monkeypatch,
+        constraints=_boundary_constraints(false_path_from=["q_a"]),
+    )
+    block = (
+        f"{post_route_sta._PORT_CHECK_BEGIN}\nfalse_path\tq_a\tdirection_output\n"
+        f"{post_route_sta._PORT_CHECK_END}\n"
+    )
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["openroad", "-version"]:
+            return fake_completed(stdout="unknown \n")
+        return fake_completed(returncode=3, stdout=block)
+
+    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+
+    with pytest.raises(PostRouteStaError) as excinfo:
+        run_sta(request_path)
+    message = str(excinfo.value)
+    assert message.startswith("constraints.false_path_from rejected")
+    assert (
+        "constraints.false_path_from['q_a']: port direction is 'output', not an input"
+        in message
+    )
+
+
 _LIVE_ONLY = pytest.mark.skipif(
     _live_sky130_env() is None,
     reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
@@ -4528,6 +4707,25 @@ def test_live_engine_input_transitions_bad_port_rejected(tmp_path):
     assert message.startswith("constraints.input_transitions rejected")
     assert "constraints.input_transitions['nope']" in message
     assert "constraints.input_transitions['q_a']" in message
+
+
+@_LIVE_ONLY
+def test_live_engine_false_path_from(tmp_path):
+    """Engine integration (issue #2968): excluding the setup-binding input
+    must move the worst setup path off that startpoint."""
+    _write(tmp_path / "boundary.v", _WORST_PATH_CAPTURES["netlist"])
+    request = {
+        "verilog": "boundary.v",
+        "hdl_toplevel": "top",
+        "pdk": {"cell_library": "sky130_fd_sc_hd", "corner": "tt_025C_1v80"},
+        "constraints": _boundary_constraints(false_path_from=["b_in"]),
+    }
+    request_path = _write_request(tmp_path / "request.json", request)
+
+    report = run_sta(request_path, pdk_variant="sky130A")
+
+    assert report["false_path_from"] == ["b_in"]
+    assert report["worst_setup_path"]["startpoint"] != "b_in"
 
 
 def _write_clock_fixtures(tmp_path) -> dict[str, str]:

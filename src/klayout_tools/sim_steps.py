@@ -155,6 +155,20 @@ def _refuse_crossings(spec: dict[str, Any]) -> None:
         )
 
 
+def _refuse_optional(spec: dict[str, Any]) -> None:
+    """Issue #2925: ``optional: true`` (a value-less measurement grades
+    ``absent`` instead of ``error``) is implemented for the scalar analysis
+    only; a step measurement's no-value paths also carry ``step_failed`` /
+    ``derived_input_unavailable`` causes that must stay errors, so the flag is
+    refused by name rather than silently ignored."""
+    if spec.get("optional") is True:
+        raise _error(
+            f"measurement {spec.get('name')!r}: 'optional' is not supported "
+            "with analysis_steps -- use the scalar analysis for a measurement "
+            "that may legitimately be absent"
+        )
+
+
 def _refuse_cycle_mean(spec: dict[str, Any]) -> None:
     """Issue #2947: like ``crossings``, a ``cycle_mean`` reads one transient
     plot's rawfile and has no per-step equivalent -- refused by name."""
@@ -382,6 +396,7 @@ def _resolve_step_measurements(
     for spec in specs:
         _validate_measurement_form(spec)
         _refuse_crossings(spec)
+        _refuse_optional(spec)
         _refuse_cycle_mean(spec)
         local = spec["name"]
         if not isinstance(local, str) or not _NAME_RE.match(local):
@@ -572,6 +587,7 @@ def _resolve_derived_measurements(
     for position, spec in enumerate(specs):
         name = spec["name"]
         _refuse_crossings(spec)
+        _refuse_optional(spec)
         _refuse_cycle_mean(spec)
         if spec.get("spice") is not None:
             raise _error(
