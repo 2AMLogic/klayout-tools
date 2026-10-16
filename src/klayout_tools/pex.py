@@ -1339,6 +1339,7 @@ _ERROR_STAGE_BY_CODE = {
     "batch_job_failed": "execute",
     "batch_job_timeout": "execute",
     "batch_poll_timeout": "execute",
+    "batch_job_interrupted": "execute",
     "missing_include": "execute",
     "timeout_budget_unreachable": "execute",
     "budget_exceeded": "execute",

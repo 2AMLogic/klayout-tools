@@ -5903,7 +5903,12 @@ def test_cli_max_units_per_job_flag_overrides_the_request(tmp_path, monkeypatch)
 
 
 @pytest.mark.parametrize(
-    "codes", [("batch_job_failed", "batch_poll_timeout"), ("batch_job_timeout",) * 2]
+    "codes",
+    [
+        ("batch_job_failed", "batch_poll_timeout"),
+        ("batch_job_timeout",) * 2,
+        ("batch_job_interrupted", "batch_job_failed"),
+    ],
 )
 def test_run_sim_batch_resume_resubmits_job_failure_and_poll_timeout(
     tmp_path, monkeypatch, codes
