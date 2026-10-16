@@ -763,6 +763,53 @@ def _graph_landings_and_ports(
     return landings, ports, interior
 
 
+class _ResistanceGraphCollector:
+    """Per-net geometry kept for ``--resistance-graph`` (issue #2982). Every
+    method is a no-op when ``enabled`` is false, so the caller stays
+    branch-free and the default path does no graph work and adds no key."""
+
+    def __init__(self, enabled: bool) -> None:
+        self._enabled = enabled
+        self._roles: dict[
+            Any, list[tuple[str, float | None, kdb.Region, kdb.Region | None]]
+        ] = {}
+        self._landings: dict[Any, tuple[kdb.Region | None, list[kdb.Region]]] = {}
+
+    def begin_net(
+        self, net: Any, contacts: kdb.Region | None, vias: list[kdb.Region]
+    ) -> None:
+        if self._enabled:
+            self._roles[net] = []
+            self._landings[net] = (contacts, vias)
+
+    def add_role(
+        self,
+        net: Any,
+        name: str,
+        sheet_res: float | None,
+        region: kdb.Region,
+        drawn: kdb.Region | None,
+    ) -> None:
+        if self._enabled:
+            self._roles[net].append((name, sheet_res, region, drawn))
+
+    def attach(self, entry: dict[str, Any], net: Any, dbu: float) -> None:
+        """Add the additive ``resistance_graph`` key to a finished ground entry."""
+        if self._enabled:
+            entry["resistance_graph"] = _resistance_graph_report(
+                self._roles[net],
+                *self._landings[net],
+                dbu,
+                entry["resistance_ohm"],
+            )
+
+
+def _copy_resistance_graph(entry: dict[str, Any], report_net: dict[str, Any]) -> None:
+    """Carry the opt-in ``resistance_graph`` key onto a report net, if present."""
+    if "resistance_graph" in entry:
+        report_net["resistance_graph"] = entry["resistance_graph"]
+
+
 def _resistance_graph_report(
     roles: list[tuple[str, float | None, kdb.Region, kdb.Region | None]],
     contacts: kdb.Region | None,
@@ -1468,12 +1515,7 @@ def _compute_parasitics(
     contact_layer_index = layer_index.get("contact")
     # `resistance_graph` (issue #2982): each net's per-role geometry and
     # landings, kept only when the opt-in flag is on.
-    graph_roles: dict[
-        kdb.Net, list[tuple[str, float | None, kdb.Region, kdb.Region | None]]
-    ] = {}
-    graph_landing_regions: dict[
-        kdb.Net, tuple[kdb.Region | None, list[kdb.Region]]
-    ] = {}
+    graph_collector = _ResistanceGraphCollector(resistance_graph)
 
     for net in nets:
         r_ohm = 0.0
@@ -1487,9 +1529,7 @@ def _compute_parasitics(
         net_contacts, net_vias = _net_port_regions(
             l2n, net, contact_layer_index, via_index
         )
-        if resistance_graph:
-            graph_roles[net] = []
-            graph_landing_regions[net] = (net_contacts, net_vias)
+        graph_collector.begin_net(net, net_contacts, net_vias)
 
         for role_name, layer_rc, indices, subtract in non_metal_roles:
             (
@@ -1519,10 +1559,9 @@ def _compute_parasitics(
             role_r_ohm = layer_rc.sheet_res_ohm_sq * _region_n_squares(
                 role_region, dbu, port_region=net_contacts, drawn_region=role_drawn
             )
-            if resistance_graph:
-                graph_roles[net].append(
-                    (role_name, layer_rc.sheet_res_ohm_sq, role_region, role_drawn)
-                )
+            graph_collector.add_role(
+                net, role_name, layer_rc.sheet_res_ohm_sq, role_region, role_drawn
+            )
             c_ff += role_c_ff
             r_ohm += role_r_ohm
             net_role_c_ff[(net, role_name)] = role_c_ff
@@ -1561,10 +1600,9 @@ def _compute_parasitics(
                 region, dbu, port_region=metal_ports, drawn_region=metal_drawn
             )
             net_metal_r_ohm[(net, i)] = metal_r_ohm
-            if resistance_graph:
-                graph_roles[net].append(
-                    (f"metal{i}", layer_rc.sheet_res_ohm_sq, region, metal_drawn)
-                )
+            graph_collector.add_role(
+                net, f"metal{i}", layer_rc.sheet_res_ohm_sq, region, metal_drawn
+            )
             base_r_ohm[net] += metal_r_ohm
             metal_regions[i][net] = region
             # `--parasitics-top-cell-only` (issue #1704): the metal role's
@@ -1897,14 +1935,7 @@ def _compute_parasitics(
                 ),
             }
         )
-        if resistance_graph:
-            # Additive (issue #2982): absent unless the flag was given.
-            results[-1]["resistance_graph"] = _resistance_graph_report(
-                graph_roles[net],
-                *graph_landing_regions[net],
-                dbu,
-                results[-1]["resistance_ohm"],
-            )
+        graph_collector.attach(results[-1], net, dbu)
 
     results.sort(key=lambda entry: (entry["net"], entry["net_id"]))
 
@@ -2946,9 +2977,7 @@ def _inject_parasitics(
                 ],
             }
         )
-        if "resistance_graph" in entry:
-            # Additive (issue #2982): only present under `--resistance-graph`.
-            report_nets[-1]["resistance_graph"] = entry["resistance_graph"]
+        _copy_resistance_graph(entry, report_nets[-1])
 
     # One two-terminal `C` card per coupled net pair, between the two nets'
     # **hub** nodes -- built only after every entry above has established its

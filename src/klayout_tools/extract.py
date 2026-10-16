@@ -1271,6 +1271,13 @@ def _timed(func: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]
     return wrapper
 
 
+def _require_parasitics_for_resistance_graph(
+    resistance_graph: bool, parasitics: bool
+) -> None:
+    if resistance_graph and not parasitics:
+        raise ExtractError("--resistance-graph requires --parasitics")
+
+
 @_timed
 def run_extract(
     path: str,
@@ -2674,8 +2681,7 @@ def run_extract(
 
     # `--resistance-graph` (issue #2982) attaches to the same per-net
     # `parasitics.nets[]` entries, so it needs `--parasitics`.
-    if resistance_graph and not parasitics:
-        raise ExtractError("--resistance-graph requires --parasitics")
+    _require_parasitics_for_resistance_graph(resistance_graph, parasitics)
 
     # `--distributed-rc` (issue #977) requires `--critical-net`: it reuses
     # that flag's own net set as the "which nets get the ladder" scope
