@@ -5334,6 +5334,7 @@ def test_cli_json_contract(tmp_path, capsys):
         "spec",
         "pdk",
         "findings_only",
+        "antenna_tables_omitted",
         "gate_role",
         "gate_count",
         "gates",
