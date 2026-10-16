@@ -214,37 +214,11 @@ def draw(request: dict[str, Any]) -> dict[str, Any]:
         raise DrawError("request.options must be a JSON object")
     _reject_unknown_keys(options, _ALLOWED_OPTIONS_KEYS, "options")
 
-    base_gds = params.get("base_gds")
-    base_cell = params.get("base_cell")
-    erase_raw = params.get("erase_um")
-    if base_gds is None:
-        for key in ("base_cell", "erase_um"):
-            if params.get(key) is not None:
-                raise DrawError(f"params.{key} requires params.base_gds")
-    else:
-        if not isinstance(base_gds, str) or not base_gds:
-            raise DrawError("params.base_gds must be a non-empty string")
-        if base_cell is not None and (not isinstance(base_cell, str) or not base_cell):
-            raise DrawError("params.base_cell must be a non-empty string")
-    erase_windows = _parse_erase(erase_raw) if base_gds is not None else []
+    base_gds, base_cell, erase_windows = _parse_base_params(params)
 
     dbu_um = _resolve_dbu(params.get("dbu_um"))
 
-    shapes = params.get("shapes")
-    if base_gds is not None and shapes is None:
-        shapes = []
-    if not isinstance(shapes, list):
-        raise DrawError("params.shapes is required and must be a list")
-    if not shapes and not (base_gds is not None and erase_windows):
-        if base_gds is not None:
-            raise DrawError(
-                "params.shapes and params.erase_um must not both be empty -- "
-                "`klt draw` will not write an unchanged copy of the base"
-            )
-        raise DrawError(
-            "params.shapes must not be empty -- `klt draw` will not write an "
-            "empty layout (nothing to prove a DRC flow against)"
-        )
+    shapes = _resolve_shapes(params, base_gds, erase_windows)
 
     labels = params.get("labels") or []
     if not isinstance(labels, list):
@@ -266,22 +240,9 @@ def draw(request: dict[str, Any]) -> dict[str, Any]:
     import klayout.db as kdb
 
     layout = kdb.Layout()
-    if base_gds is None:
-        layout.dbu = dbu_um
-        top = layout.create_cell(cell_name)
-    else:
-        base = load_layout(base_gds, DrawError)
-        if params.get("dbu_um") is not None and abs(base.dbu - dbu_um) > 1e-12:
-            raise DrawError(
-                f"params.dbu_um ({dbu_um}) differs from the base layout's "
-                f"dbu ({base.dbu}) -- omit it to use the base's"
-            )
-        dbu_um = base.dbu
-        base_top = resolve_top_cell(base, base_cell, DrawError, path=base_gds)
-        layout.dbu = dbu_um
-        top = layout.create_cell(cell_name)
-        top.copy_tree(base_top)
-        top.flatten(True)
+    top, base_name, dbu_um = _seed_layout(
+        layout, kdb, cell_name, dbu_um, params, base_gds, base_cell
+    )
 
     # Track per-(layer, datatype) shape counts and names for the response, in
     # first-seen order, so the report reads back deterministically.
@@ -306,21 +267,9 @@ def draw(request: dict[str, Any]) -> dict[str, Any]:
     def _to_dbu(value_um: float) -> int:
         return int(round(value_um / dbu_um))
 
-    erased_shapes = 0
-    erased_labels = 0
-    if base_gds is not None:
-        for window, scope in erase_windows:
-            n_shapes, n_labels = _erase(top, layout, window, scope, _to_dbu, kdb)
-            erased_shapes += n_shapes
-            erased_labels += n_labels
-        for idx in layout.layer_indexes():
-            info = layout.get_info(idx)
-            count = sum(1 for sh in top.shapes(idx).each() if not sh.is_text())
-            if count:
-                pair = (info.layer, info.datatype)
-                layer_order.append(pair)
-                layer_counts[pair] = count
-                layer_names[pair] = info.name or None
+    erased_shapes, erased_labels = _erase_base(
+        top, layout, erase_windows, _to_dbu, kdb, layer_order, layer_counts, layer_names
+    )
 
     for i, shape in enumerate(shapes):
         pair, name = _shape_layer(shape, i)
@@ -380,14 +329,113 @@ def draw(request: dict[str, Any]) -> dict[str, Any]:
         "bbox_um": bbox_um,
         "warnings": [NOT_DESIGN_LEGAL_WARNING],
     }
-    if base_gds is not None:
-        # Additive fields, present only when a base was used, so the default
-        # response is unchanged.
-        report["base_gds"] = base_gds
-        report["base_cell"] = base_top.name
-        report["erased_shape_count"] = erased_shapes
-        report["erased_label_count"] = erased_labels
+    report.update(
+        _base_report_fields(base_gds, base_name, erased_shapes, erased_labels)
+    )
     return report
+
+
+def _parse_base_params(params: dict[str, Any]) -> tuple[Any, Any, list]:
+    """Validate ``base_gds``/``base_cell``/``erase_um``; return them parsed.
+
+    Returns ``(base_gds, base_cell, erase_windows)``; ``base_gds`` is ``None``
+    (and the windows empty) when no base was requested.
+    """
+    base_gds = params.get("base_gds")
+    base_cell = params.get("base_cell")
+    if base_gds is None:
+        for key in ("base_cell", "erase_um"):
+            if params.get(key) is not None:
+                raise DrawError(f"params.{key} requires params.base_gds")
+        return None, base_cell, []
+    if not isinstance(base_gds, str) or not base_gds:
+        raise DrawError("params.base_gds must be a non-empty string")
+    if base_cell is not None and (not isinstance(base_cell, str) or not base_cell):
+        raise DrawError("params.base_cell must be a non-empty string")
+    return base_gds, base_cell, _parse_erase(params.get("erase_um"))
+
+
+def _resolve_shapes(params: dict[str, Any], base_gds: Any, erase_windows: list) -> list:
+    """Return ``params.shapes``, enforcing the non-empty rule (relaxed for erases)."""
+    shapes = params.get("shapes")
+    if base_gds is not None and shapes is None:
+        shapes = []
+    if not isinstance(shapes, list):
+        raise DrawError("params.shapes is required and must be a list")
+    if shapes or (base_gds is not None and erase_windows):
+        return shapes
+    if base_gds is not None:
+        raise DrawError(
+            "params.shapes and params.erase_um must not both be empty -- "
+            "`klt draw` will not write an unchanged copy of the base"
+        )
+    raise DrawError(
+        "params.shapes must not be empty -- `klt draw` will not write an "
+        "empty layout (nothing to prove a DRC flow against)"
+    )
+
+
+def _seed_layout(layout, kdb, cell_name, dbu_um, params, base_gds, base_cell):
+    """Create the output top cell; return ``(top, base_cell_name, dbu_um)``.
+
+    Without a base this is an empty cell at ``dbu_um`` (``base_cell_name`` is
+    ``None``). With a base, the base cell is flattened into the new top cell and
+    the base's dbu wins (an explicit, differing ``params.dbu_um`` is an error).
+    The base cell's *name* is returned, not the cell: the base layout dies with
+    this call.
+    """
+    if base_gds is None:
+        layout.dbu = dbu_um
+        return layout.create_cell(cell_name), None, dbu_um
+    base = load_layout(base_gds, DrawError)
+    if params.get("dbu_um") is not None and abs(base.dbu - dbu_um) > 1e-12:
+        raise DrawError(
+            f"params.dbu_um ({dbu_um}) differs from the base layout's "
+            f"dbu ({base.dbu}) -- omit it to use the base's"
+        )
+    base_top = resolve_top_cell(base, base_cell, DrawError, path=base_gds)
+    layout.dbu = base.dbu
+    top = layout.create_cell(cell_name)
+    top.copy_tree(base_top)
+    top.flatten(True)
+    return top, base_top.name, base.dbu
+
+
+def _erase_base(
+    top, layout, erase_windows, to_dbu, kdb, layer_order, layer_counts, layer_names
+) -> tuple[int, int]:
+    """Apply every erase window, then seed the per-layer report from what remains.
+
+    Returns ``(erased_shapes, erased_labels)``. A no-op (``(0, 0)``) when there
+    is no base -- the top cell is empty -- so the caller needs no branch.
+    """
+    erased_shapes = 0
+    erased_labels = 0
+    for window, scope in erase_windows:
+        n_shapes, n_labels = _erase(top, layout, window, scope, to_dbu, kdb)
+        erased_shapes += n_shapes
+        erased_labels += n_labels
+    for idx in layout.layer_indexes():
+        info = layout.get_info(idx)
+        count = sum(1 for sh in top.shapes(idx).each() if not sh.is_text())
+        if count:
+            pair = (info.layer, info.datatype)
+            layer_order.append(pair)
+            layer_counts[pair] = count
+            layer_names[pair] = info.name or None
+    return erased_shapes, erased_labels
+
+
+def _base_report_fields(base_gds, base_name, erased_shapes, erased_labels) -> dict:
+    """Additive response fields for a base run; ``{}`` when no base was used."""
+    if base_gds is None:
+        return {}
+    return {
+        "base_gds": base_gds,
+        "base_cell": base_name,
+        "erased_shape_count": erased_shapes,
+        "erased_label_count": erased_labels,
+    }
 
 
 def _parse_erase(raw: Any) -> list[tuple[tuple[float, float, float, float], Any]]:
