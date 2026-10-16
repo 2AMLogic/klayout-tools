@@ -986,6 +986,29 @@ def _partition_waived(
     return kept, waived, unused
 
 
+def _apply_waivers(
+    violations: list[dict[str, Any]], waivers: list[dict[str, str]]
+) -> tuple[list[dict[str, Any]], dict[str, int], dict[str, Any]]:
+    """Apply ``waivers`` to ``violations`` (issue #3483). Returns the kept
+    violations, their recomputed per-rule counts, and the report fields the
+    waiver run adds (``waived_count``, ``waived_rule_counts``, ``waived``,
+    ``unused_waivers``)."""
+    kept, waived, unused = _partition_waived(violations, waivers)
+    rule_counts: dict[str, int] = {}
+    for violation in kept:
+        rule_counts[violation["rule"]] = rule_counts.get(violation["rule"], 0) + 1
+    waived_rule_counts: dict[str, int] = {}
+    for entry in waived:
+        waived_rule_counts[entry["rule"]] = waived_rule_counts.get(entry["rule"], 0) + 1
+    fields = {
+        "waived_count": len(waived),
+        "waived_rule_counts": dict(sorted(waived_rule_counts.items())),
+        "waived": waived,
+        "unused_waivers": unused,
+    }
+    return kept, rule_counts, fields
+
+
 def run_drc(
     path: str,
     deck_name: str,
@@ -1825,13 +1848,9 @@ def run_drc(
     # verb's unconditional success). See `docs/coverage-contract.md`.
     # Issue #3483: waived markers leave every count and the verdict, and are
     # reported in full under `waived` -- never dropped.
-    waived: list[dict[str, Any]] = []
-    unused_waivers: list[dict[str, str]] = []
+    waiver_fields: dict[str, Any] = {}
     if waivers is not None:
-        violations, waived, unused_waivers = _partition_waived(violations, waivers)
-        rule_counts = {}
-        for violation in violations:
-            rule_counts[violation["rule"]] = rule_counts.get(violation["rule"], 0) + 1
+        violations, rule_counts, waiver_fields = _apply_waivers(violations, waivers)
     rollup = coverage_rollup({"coverage": coverage}, failed=bool(violations))
     report: dict[str, Any] = {
         "schema_version": 2,
@@ -1847,17 +1866,8 @@ def run_drc(
         # Issue #2768: present only for a `--rules` run, so a default run's
         # report (and every committed one) is byte-identical to before.
         **({} if rule_selection is None else {"rule_selection": rule_selection}),
+        **waiver_fields,
     }
-    if waivers is not None:
-        waived_rule_counts: dict[str, int] = {}
-        for entry in waived:
-            waived_rule_counts[entry["rule"]] = (
-                waived_rule_counts.get(entry["rule"], 0) + 1
-            )
-        report["waived_count"] = len(waived)
-        report["waived_rule_counts"] = dict(sorted(waived_rule_counts.items()))
-        report["waived"] = waived
-        report["unused_waivers"] = unused_waivers
     report["provenance"] = build_provenance(
         deck_name=deck_name,
         deck_path=deck_source_path(deck_name),
