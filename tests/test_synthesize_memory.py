@@ -196,6 +196,30 @@ def test_collect_memory_evidence_never_raises_on_yosys_failure(tmp_path, monkeyp
     assert blackboxes is None
 
 
+@pytest.mark.parametrize("repo_root", [None, "REPO"])
+def test_collect_memory_evidence_runs_yosys_in_repo_root(
+    tmp_path, monkeypatch, repo_root
+):
+    from klayout_tools import synthesize
+
+    seen = {}
+
+    def spy(script_path, **kwargs):
+        seen.update(kwargs)
+        raise SynthesizeError("stop")
+
+    monkeypatch.setattr(synthesize, "_run_yosys", spy)
+    root = str(tmp_path) if repo_root else None
+    sm.collect_memory_evidence(
+        output_dir=str(tmp_path),
+        resolved_sources=[str(tmp_path / "x.v")],
+        hdl_toplevel="x",
+        final_stats_path=str(tmp_path / "missing.json"),
+        repo_root=root,
+    )
+    assert seen["cwd"] == root
+
+
 # ---------------------------------------------------------------------------
 # Optional real-Yosys tests
 # ---------------------------------------------------------------------------

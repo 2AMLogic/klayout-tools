@@ -153,6 +153,9 @@ _DERIVED_LAYER_MODES = {
     "gate_endcap",
 }
 
+# Every `DerivedLayer.context` value (issue #3484); `None` = no partition.
+_DERIVED_CONTEXTS = {None, "near", "far"}
+
 # Every `DrcRule.other_layer_selection` value `run_drc()` knows how to apply
 # (issue #2688) -- validated per rule for the same "fail loudly, never
 # silently check a different population" reason as `_DERIVED_LAYER_MODES`.
@@ -473,6 +476,44 @@ def _cell_region_or_empty(cell: Any, layer_index: int | None) -> Any:
 
 
 def _derived_region(
+    rule: DrcRule,
+    base_region: Any,
+    intersect_region: Any,
+    dbu: float,
+    context_region: Any | None = None,
+) -> Any:
+    """Build the checked region for a ``derived_layer`` rule, then apply its
+    optional well-context partition (issue #3484, see ``DerivedLayer``):
+    ``context_region`` is the already-joined (unsized) union of
+    ``derived_layer.context_layers``, oversized here by ``context_sized_by_um``
+    and used to keep only the whole polygons ``interacting`` with it
+    (``"near"``) or ``not_interacting`` with it (``"far"``)."""
+    region = _derived_region_unscoped(rule, base_region, intersect_region, dbu)
+    derived = rule.derived_layer
+    if derived is None or derived.context is None or context_region is None:
+        return region
+    size_dbu = round(derived.context_sized_by_um / dbu)
+    ctx = context_region.sized(size_dbu) if size_dbu else context_region
+    if derived.context == "near":
+        return region.interacting(ctx)
+    return region.not_interacting(ctx)
+
+
+def _context_region(cell: Any, layout: Any, rule: DrcRule) -> Any | None:
+    """Join of ``rule.derived_layer.context_layers`` in ``cell`` (absent
+    layers contribute nothing), or ``None`` when the rule has no context."""
+    import klayout.db as kdb
+
+    derived = rule.derived_layer
+    if derived is None or derived.context is None:
+        return None
+    region = kdb.Region()
+    for layer in derived.context_layers:
+        region += _cell_region_or_empty(cell, layout.find_layer(*layer))
+    return region.merged()
+
+
+def _derived_region_unscoped(
     rule: DrcRule, base_region: Any, intersect_region: Any, dbu: float
 ) -> Any:
     """Build the checked region for a ``derived_layer`` rule (#345, marker-
@@ -902,6 +943,17 @@ def list_deck_rules(deck_name: str) -> dict[str, Any]:
                     "base": _fmt_layer(derived.base),
                     "intersect_with": _fmt_layer(derived.intersect_with),
                     "sized_by_um": derived.sized_by_um,
+                    **(
+                        {}
+                        if derived.context is None
+                        else {
+                            "context": derived.context,
+                            "context_layers": [
+                                _fmt_layer(c) for c in derived.context_layers
+                            ],
+                            "context_sized_by_um": derived.context_sized_by_um,
+                        }
+                    ),
                 },
                 "scope": rule.scope or None,
             }
@@ -927,6 +979,108 @@ def list_deck_rules(deck_name: str) -> dict[str, Any]:
     }
 
 
+_WAIVER_KEYS = ("cell", "rule", "justification")
+
+
+def load_waivers(path: str) -> list[dict[str, str]]:
+    """Read a ``--waivers`` file (issue #3483): a JSON object
+    ``{"waivers": [{"cell": str, "rule": str, "justification": str}, ...]}``.
+
+    ``cell`` is matched against a violation's ``source_cell``; ``rule`` is an
+    exact rule id or a case-sensitive shell-style glob (the ``--rules``
+    matcher). All three keys are required and non-blank -- there is
+    deliberately no cell-wide blanket waiver, which would hide real
+    violations in the waived cell.
+
+    Raises :class:`DrcError` for an unreadable, non-JSON or malformed file,
+    naming the offending entry -- before the layout is ever read.
+    """
+    label = f"waivers file (--waivers) '{path}'"
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except OSError as exc:
+        raise DrcError(f"could not read {label}: {exc.strerror or exc}") from exc
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise DrcError(f"{label} is not valid JSON: {exc}") from exc
+    entries = data.get("waivers") if isinstance(data, dict) else None
+    if not isinstance(entries, list) or not entries:
+        raise DrcError(f"{label} must be a JSON object with a non-empty 'waivers' list")
+    waivers: list[dict[str, str]] = []
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            raise DrcError(f"{label}: waivers[{index}] must be an object")
+        unknown = sorted(set(entry) - set(_WAIVER_KEYS))
+        if unknown:
+            raise DrcError(
+                f"{label}: waivers[{index}] has unknown key(s) "
+                f"{', '.join(unknown)} (allowed: {', '.join(_WAIVER_KEYS)})"
+            )
+        for key in _WAIVER_KEYS:
+            value = entry.get(key)
+            if not isinstance(value, str) or not value.strip():
+                raise DrcError(
+                    f"{label}: waivers[{index}] is missing a non-empty string '{key}'"
+                )
+        waivers.append({key: entry[key].strip() for key in _WAIVER_KEYS})
+    return waivers
+
+
+def _waiver_matches(waiver: dict[str, str], violation: dict[str, Any]) -> bool:
+    source_cell = violation.get("source_cell")
+    if source_cell is None or source_cell != waiver["cell"]:
+        return False
+    return fnmatch.fnmatchcase(violation["rule"], waiver["rule"])
+
+
+def _partition_waived(
+    violations: list[dict[str, Any]], waivers: list[dict[str, str]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, str]]]:
+    """Split ``violations`` into ``(kept, waived, unused_waivers)`` (issue
+    #3483). A violation is waived by the first waiver whose ``cell`` equals
+    its ``source_cell`` and whose ``rule`` matches its rule id; a violation
+    with no ``source_cell`` is never waived. Waived entries keep the full
+    violation shape plus ``waiver_justification``."""
+    kept: list[dict[str, Any]] = []
+    waived: list[dict[str, Any]] = []
+    used: set[int] = set()
+    for violation in violations:
+        for index, waiver in enumerate(waivers):
+            if _waiver_matches(waiver, violation):
+                used.add(index)
+                waived.append(
+                    {**violation, "waiver_justification": waiver["justification"]}
+                )
+                break
+        else:
+            kept.append(violation)
+    unused = [waiver for index, waiver in enumerate(waivers) if index not in used]
+    return kept, waived, unused
+
+
+def _apply_waivers(
+    violations: list[dict[str, Any]], waivers: list[dict[str, str]]
+) -> tuple[list[dict[str, Any]], dict[str, int], dict[str, Any]]:
+    """Apply ``waivers`` to ``violations`` (issue #3483). Returns the kept
+    violations, their recomputed per-rule counts, and the report fields the
+    waiver run adds (``waived_count``, ``waived_rule_counts``, ``waived``,
+    ``unused_waivers``)."""
+    kept, waived, unused = _partition_waived(violations, waivers)
+    rule_counts: dict[str, int] = {}
+    for violation in kept:
+        rule_counts[violation["rule"]] = rule_counts.get(violation["rule"], 0) + 1
+    waived_rule_counts: dict[str, int] = {}
+    for entry in waived:
+        waived_rule_counts[entry["rule"]] = waived_rule_counts.get(entry["rule"], 0) + 1
+    fields = {
+        "waived_count": len(waived),
+        "waived_rule_counts": dict(sorted(waived_rule_counts.items())),
+        "waived": waived,
+        "unused_waivers": unused,
+    }
+    return kept, rule_counts, fields
+
+
 def run_drc(
     path: str,
     deck_name: str,
@@ -934,6 +1088,7 @@ def run_drc(
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
     rules: list[str] | None = None,
+    waivers_file: str | None = None,
 ) -> dict[str, Any]:
     """Run ``deck_name``'s rules against the layout at ``path``.
 
@@ -1166,6 +1321,18 @@ def run_drc(
     ``None``, so a default run's report is unchanged. Selecting every rule is
     equivalent to a full run (``omitted: []``).
 
+    ``waivers_file`` (issue #3483, ``--waivers``) names a reviewed JSON file
+    of rule-scoped cell waivers (:func:`load_waivers`). A violation whose
+    ``source_cell`` and rule both match a waiver moves out of ``violations``/
+    ``violation_count``/``rule_counts``/``metrics`` (and so out of
+    ``status``) into a top-level ``waived`` array carrying
+    ``waiver_justification``, with ``waived_count``, ``waived_rule_counts``
+    and ``unused_waivers`` alongside; ``provenance.waivers`` pins the file by
+    content hash. All of these are absent when ``waivers_file`` is ``None``,
+    so a default report is unchanged. A marker straddling two instances
+    carries the container's ``source_cell`` (see
+    :func:`_attribute_to_instance`), so waive it under that cell.
+
     Raises :class:`DrcError` if the file is missing/unreadable, the deck
     name is unknown, ``top`` names a cell absent from the stream, a rule is
     malformed (e.g. a two-layer check missing ``other_layer``),
@@ -1204,6 +1371,7 @@ def run_drc(
     # so a bad selector never costs a stream load. `omitted_ids` is empty for
     # a full run (no selection, or a selection naming every rule).
     rule_selection, omitted_ids = _resolve_optional_selection(deck, rules)
+    waivers = None if waivers_file is None else load_waivers(waivers_file)
 
     layout = load_layout(path, DrcError)
 
@@ -1347,6 +1515,7 @@ def run_drc(
                     base_region,
                     _cell_region_or_empty(cell, intersect_index),
                     layout.dbu,
+                    _context_region(cell, layout, rule),
                 )
             else:
                 region = _select_primary_region(
@@ -1750,6 +1919,11 @@ def run_drc(
     # (exit 4), and successful checks alongside a nonempty skipped-request
     # list are `clean_partial` (exit 0, a real result that is *not* this
     # verb's unconditional success). See `docs/coverage-contract.md`.
+    # Issue #3483: waived markers leave every count and the verdict, and are
+    # reported in full under `waived` -- never dropped.
+    waiver_fields: dict[str, Any] = {}
+    if waivers is not None:
+        violations, rule_counts, waiver_fields = _apply_waivers(violations, waivers)
     rollup = coverage_rollup({"coverage": coverage}, failed=bool(violations))
     report: dict[str, Any] = {
         "schema_version": 2,
@@ -1765,6 +1939,7 @@ def run_drc(
         # Issue #2768: present only for a `--rules` run, so a default run's
         # report (and every committed one) is byte-identical to before.
         **({} if rule_selection is None else {"rule_selection": rule_selection}),
+        **waiver_fields,
     }
     report["provenance"] = build_provenance(
         deck_name=deck_name,
@@ -1773,6 +1948,11 @@ def run_drc(
         input_path=path,
         include_klayout_version_mismatch=True,
     )
+    if waivers_file is not None:
+        report["provenance"]["waivers"] = {
+            "file": waivers_file,
+            "content_hash": _content_hash(waivers_file),
+        }
     return report
 
 
@@ -1854,6 +2034,16 @@ def check_drc_report(report_path: str) -> dict[str, Any]:
             _content_hash(_deck_path_for_report(committed)),
         ),
     ]
+    # Issue #3483: a waived report also pins its waivers file.
+    waivers_file = get_path(committed, ("provenance", "waivers", "file"))
+    if waivers_file is not None:
+        checks.append(
+            hash_check(
+                "provenance.waivers.content_hash",
+                get_path(committed, ("provenance", "waivers", "content_hash")),
+                _content_hash(waivers_file),
+            )
+        )
     return build_check_result(report_path=report_path, checks=checks)
 
 
@@ -1945,7 +2135,12 @@ def rerun_drc_report(report_path: str) -> dict[str, Any]:
         # up as drift); a report without `rule_selection` -- every report
         # written before the flag existed -- keeps its full-deck meaning.
         fresh = run_drc(
-            file_path, deck, top=None, rules=_recorded_rule_selectors(committed)
+            file_path,
+            deck,
+            top=None,
+            rules=_recorded_rule_selectors(committed),
+            # Issue #3483: replay the waivers the committed report applied.
+            waivers_file=get_path(committed, ("provenance", "waivers", "file")),
         )
 
     return build_rerun_result(report_path=report_path, committed=committed, fresh=fresh)
@@ -2207,6 +2402,18 @@ def _validate_derived_layer(rule: DrcRule) -> None:
     ):
         raise DrcError(
             f"rule '{rule.id}': derived_layer mode 'union' requires intersect_with"
+        )
+    if derived is not None and derived.context not in _DERIVED_CONTEXTS:
+        raise DrcError(
+            f"rule '{rule.id}': unknown derived_layer context "
+            f"'{derived.context}' (known: near, far, or unset)"
+        )
+    if derived is not None and (derived.context is None) == bool(
+        derived.context_layers
+    ):
+        raise DrcError(
+            f"rule '{rule.id}': derived_layer context and context_layers "
+            "must be set together"
         )
 
 
