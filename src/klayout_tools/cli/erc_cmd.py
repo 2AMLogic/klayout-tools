@@ -119,6 +119,12 @@ def _print_gate_count(report: dict) -> None:
         print("  (no transistor gate in this cell; antenna checks not applicable)")
 
 
+def _print_antenna_tables_omitted(report: dict) -> None:
+    """The ``--omit-antenna-tables`` note, printed only when the flag was used."""
+    if report.get("antenna_tables_omitted"):
+        print("antenna_tables_omitted: True (--omit-antenna-tables)")
+
+
 def _print_text(report: dict) -> None:
     print(f"file: {report['file']}")
     print(f"spec: {report['spec']}")
@@ -131,8 +137,7 @@ def _print_text(report: dict) -> None:
     if deck_provenance is not None:
         print(f"deck: {deck_provenance['name']}")
     print(f"findings_only: {report['findings_only']}")
-    if report.get("antenna_tables_omitted"):
-        print("antenna_tables_omitted: True (--omit-antenna-tables)")
+    _print_antenna_tables_omitted(report)
     print(f"status: {report['status']}")
     print(f"gate_role: {report['gate_role']}")
     _print_gate_count(report)
