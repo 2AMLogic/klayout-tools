@@ -333,6 +333,20 @@ could re-check mechanically.
 - `layers` — the drawn layer name(s) the rule reads, in `layer`/`other_layer`
   order (`"poly.drawing"`; the raw `"<layer>/<datatype>"` pair when the deck
   publishes no name for it).
+- `layer_refs` — parallel to `layers` (same length and order): one
+  `{"name": str | null, "layer": int, "datatype": int}` per entry, so a rule's
+  layers map to stream layer/datatype pairs from CLI JSON alone. `name` is
+  `null` when the deck publishes none (the `layers` entry is then the raw
+  `"<layer>/<datatype>"` string). Additive: `layers` is unchanged, so no
+  `schema_version` bump.
+- `layer_table` (top-level) — every `{"name", "layer", "datatype"}` the deck
+  names, sorted by `(layer, datatype)`; pinned by the report's `content_hash`.
+- `ambiguous_names` (top-level) — `[{"name", "pairs": [{"layer", "datatype"}]}]`
+  for each name the deck gives to more than one pair (those pairs also appear
+  individually in `layer_table`); `[]` when every name is unique.
+- `unresolved` (top-level) — `[{"layer", "datatype", "rules": [id, ...]}]` for
+  each pair the reported rules read that has no deck name (their `layer_refs`
+  entries carry `name: null`), so nothing is silently dropped.
 - `scope` — the DRM section or rule-id family this rule implements
   (`coverage.deck_scope`'s per-rule source), or `null` when unscoped.
 - `provenance` — the rule's structured upstream citation, or `null` when the

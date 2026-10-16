@@ -424,7 +424,8 @@
         "klayout_tools.sim_remote",
         "klayout_tools.sim_set",
         "klayout_tools.sim_staging",
-        "klayout_tools.sim_steps"
+        "klayout_tools.sim_steps",
+        "klayout_tools.sim_transfer"
       ]
     },
     "size": {

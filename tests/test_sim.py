@@ -822,6 +822,26 @@ def test_validate_measurement_forms_rejects_multiline_expr():
         sim._validate_measurement_forms([{"name": "vout", "expr": "v(out)\nquit"}])
 
 
+@pytest.mark.parametrize(
+    "expr",
+    [
+        "vecmax((v(a) < v(b))*v(a))",
+        "vecmax((v(a) > v(b))*v(a))",
+        "vecmax((v(a) < v(b)) + (v(a) > v(c)))",
+    ],
+)
+def test_validate_measurement_forms_rejects_redirection_operators_in_expr(expr):
+    """`<` / `>` are ngspice I/O redirection, not comparisons (issue #2940)."""
+    with pytest.raises(sim.SimError, match=r"gt / lt / ge / le / eq / ne"):
+        sim._validate_measurement_forms([{"name": "m", "expr": expr}])
+
+
+def test_validate_measurement_forms_accepts_word_comparisons_in_expr():
+    sim._validate_measurement_forms(
+        [{"name": "m", "expr": "vecmax((v(a) lt v(b))*v(a))"}]
+    )
+
+
 @pytest.mark.parametrize("name", ["v.out", "1vout", "v out", "v(out)", "v-out"])
 def test_validate_measurement_forms_rejects_unemittable_expr_name(name):
     """An `expr` name is an ngspice vector name in the deck *and* the key read
@@ -12648,3 +12668,26 @@ def test_timeout_budget_hint_near_budget_and_timeout():
 
 def test_timeout_budget_hint_absent_when_well_inside_budget():
     assert sim._timeout_budget_hint([_hint_corner(100.0)], 600) is None
+
+
+# --------------------------------------------------------------------------- #
+# noise_representation (issue #3006)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("plotname", "vtype", "expected"),
+    [
+        ("Integrated Noise", "voltage", "amplitude"),
+        ("Integrated Noise - V^2 or A^2", "voltage^2", "power"),
+        ("Integrated Noise", "current^2", "power"),
+        ("Integrated Noise - V^2 or A^2", "voltage", "power"),
+    ],
+)
+def test_noise_representation(plotname, vtype, expected):
+    waveform = {
+        "plotname": plotname,
+        "variables": [{"index": 0, "name": "onoise_total", "type": vtype}],
+        "points": [[1.0]],
+    }
+    assert sim.noise_representation(waveform) == expected
