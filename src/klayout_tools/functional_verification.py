@@ -241,11 +241,11 @@ from .functional_verification_sdf import (
     _write_sdf_annotate_shim,
     _write_sdf_dut_wrapper,
 )
-from .reset_coverage import ResetCoverageError, sequential_elements
 from .functional_verification_sdf_rename import (
     _apply_sdf_escaped_divider_rename,
     _sdf_renamed_report,
 )
+from .reset_coverage import ResetCoverageError, sequential_elements
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
