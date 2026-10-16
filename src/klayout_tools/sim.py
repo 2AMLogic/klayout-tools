@@ -3048,8 +3048,8 @@ def _run_sim_corners(
         )
 
     backend_source = _backend_source(backend, request)
-    requested_backend, _ = resolve_backend(backend, request)
     backend, backend_from_host_default = resolve_backend(backend, request)
+    requested_backend = backend
     if backend not in SUPPORTED_BACKENDS:
         source = f" (from ${BACKEND_ENV})" if backend_from_host_default else ""
         raise SimError(

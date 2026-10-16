@@ -182,7 +182,8 @@ def _resolve_event(
     else:
         transition = head["rise"] if edge == "rise" else head["fall"]
     applied = max(transition, MIN_TRANSITION_S)
-    if start < state["busy_until"]:
+    # A hold writes no PWL points, so it cannot collide with a running edge.
+    if edge != "hold" and start < state["busy_until"]:
         raise StimulusError(
             f"{ewhere}: edge starts at {start:g}s, before the previous edge "
             f"finishes at {state['busy_until']:g}s; shorten the transition or "

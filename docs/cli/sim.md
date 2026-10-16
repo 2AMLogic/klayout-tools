@@ -1523,6 +1523,7 @@ release segment:
 |---|---|---|
 | `analysis_steps` ([#2482](https://github.com/2AMLogic/klayout-tools/issues/2482)) | `analysis_steps` is present | `0.7.1` |
 | `transfer` ([#2924](https://github.com/2AMLogic/klayout-tools/issues/2924)) | any `measurements[]` entry declares `transfer` | `0.7.1` (**mandatory**, see below) |
+| `stimulus` ([#2977](https://github.com/2AMLogic/klayout-tools/issues/2977)) | `stimulus` is present | `0.7.1` (**mandatory**, see below) |
 
 `decks[]` ([#3303](https://github.com/2AMLogic/klayout-tools/issues/3303)) is
 the next registry entry.
@@ -1546,8 +1547,10 @@ the next registry entry.
 - Limit: a `0.7.1.devN` runner built before a feature landed looks the same as
   one built after, so it counts as supporting it.
 
-**Mandatory features (`transfer`, [#2924](https://github.com/2AMLogic/klayout-tools/issues/2924)).**
-A runner that predates `measurements[].transfer` would drop the metric, so
+**Mandatory features (`transfer`, [#2924](https://github.com/2AMLogic/klayout-tools/issues/2924); `stimulus`, [#2977](https://github.com/2AMLogic/klayout-tools/issues/2977)).**
+A runner that predates `measurements[].transfer` would drop the metric (and one
+that predates `stimulus` would simulate with the digital control lines
+undriven), so
 this entry is not relaxed by `runner_version_check: "warn"` and "unknown" is
 not tolerated on the runner side:
 
@@ -4080,11 +4083,12 @@ and `batch` forward the request, and the worker's own `klt sim` expands it the
 same way (the orchestrating report echoes the schedule too). The checkpoint
 fingerprint includes the expanded cards, so editing the schedule invalidates a
 `--resume` checkpoint. **A runner older than this feature ignores the
-`stimulus` key and would simulate with no drive.** No client-side
-request-feature/runner-version capability check exists yet
-([#2877](https://github.com/2AMLogic/klayout-tools/issues/2877)); until it
-lands, use a runner at least as new as the client (see "Runner/client `klt`
-version skew"), and register `stimulus` there when it does.
+`stimulus` key and would simulate with no drive, so `stimulus` is registered
+as a **mandatory** request feature (first runner release `0.7.1`; see
+"Request-feature capability check"): a `remote`/`batch` request that carries
+it is refused with `batch_runner_feature_unsupported` when the runner
+predates it or its version cannot be read, even under
+`runner_version_check: "warn"`.
 
 Not in scope here: stimulus *variants* as a Monte Carlo/corner axis
 ([#3099](https://github.com/2AMLogic/klayout-tools/issues/3099)) and per-step

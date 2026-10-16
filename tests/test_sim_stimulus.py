@@ -175,6 +175,14 @@ def test_overlapping_edges_are_refused():
     assert _code(request) == sim_stimulus.CODE_OVERLAP
 
 
+def test_hold_inside_a_running_edge_is_not_an_overlap():
+    request = _stim(
+        rise_s=2e-9,
+        events=[{"t_s": 1e-9, "level": 1}, {"t_s": 2e-9, "level": 1}],
+    )
+    _resolve(request, _TRAN)  # does not raise
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
