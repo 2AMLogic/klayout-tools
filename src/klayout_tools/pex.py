@@ -1198,6 +1198,8 @@ _SIDE_ENVIRONMENT_KEYS = (
     "engine",
     "engine_version",
     "ngspice_binary",
+    "engine_host",
+    "client_ngspice_binary",
     "remote",
 )
 
@@ -1308,6 +1310,13 @@ def _row_status(
     return "pass"
 
 
+def _side_status(measurement: dict[str, Any] | None) -> str:
+    """One side's own limit status for a delta row's additive
+    ``schematic_status`` / ``extracted_status`` (issue #2989); a missing
+    measurement is ``"error"``, matching :func:`_row_status`."""
+    return measurement["status"] if measurement is not None else "error"
+
+
 def _build_delta_rows(
     *,
     spec_row_prefix: str | None,
@@ -1340,6 +1349,8 @@ def _build_delta_rows(
                         extracted_measurement["value"],
                     ),
                     "status": _row_status(schematic_measurement, extracted_measurement),
+                    "schematic_status": _side_status(schematic_measurement),
+                    "extracted_status": _side_status(extracted_measurement),
                 }
             )
     return rows
@@ -1375,6 +1386,8 @@ def _unextracted_delta_rows(
                     "extracted_value": None,
                     "delta_pct": None,
                     "status": "error",
+                    "schematic_status": _side_status(measurement),
+                    "extracted_status": "error",
                 }
             )
     return rows
@@ -2784,6 +2797,9 @@ def run_pex(
     passed = sum(1 for row in delta if row["status"] == "pass")
     failed = sum(1 for row in delta if row["status"] == "fail")
     errored = sum(1 for row in delta if row["status"] == "error")
+    # Issue #2989: schematic-side limit failures, reported beside -- never
+    # folded into -- `status`, `coverage` or the exit code.
+    schematic_failed = sum(1 for row in delta if row["schematic_status"] == "fail")
     # Issue #2109: use the shared coverage decision table so a partial
     # comparison can never be reported as an unconditional pass, while real
     # failures and errors retain precedence over coverage qualification.
@@ -2879,6 +2895,9 @@ def run_pex(
         "passed": passed,
         "failed": failed,
         "errored": errored,
+        # Additive field (issue #2989): rows whose schematic side itself
+        # failed its limits; `status` still grades the extracted side only.
+        "schematic_failed": schematic_failed,
         # Additive field (issue #1030): `None` on every run whose extracted
         # side actually simulated -- byte-identical to before this feature
         # existed. Non-`None` names the schematic/extracted top-level pin-list

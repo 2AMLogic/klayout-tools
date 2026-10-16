@@ -1725,7 +1725,12 @@ def run_deck_request(
     streams *are* the result. It defaults to a ``.klt/sim/`` directory next
     to the request file, the same convention as the corner backend.
     """
-    from .sim import SimError, _resolve_max_workers, _resolve_ngspice_binary
+    from .sim import (
+        SimError,
+        _resolve_max_workers,
+        _resolve_ngspice_binary,
+        apply_engine_host,
+    )
 
     if max_workers is not None and (
         not isinstance(max_workers, int)
@@ -1748,14 +1753,21 @@ def run_deck_request(
         # never a launched job that cannot run.
         files, worker_request = stage_deck_job(request, request_dir=request_dir)
         if backend == "remote":
-            return _run_decks_remote(request, files, worker_request, outdir=outdir)
-        return _run_decks_batch(request, files, worker_request, outdir=outdir)
+            report = _run_decks_remote(request, files, worker_request, outdir=outdir)
+        else:
+            report = _run_decks_batch(request, files, worker_request, outdir=outdir)
+        apply_engine_host(
+            report.setdefault("environment", {}),
+            backend=backend,
+            client_ngspice_binary=ngspice_binary,
+        )
+        return report
 
     if backend == "local":
         workers = 1
     else:
         workers = _resolve_max_workers(max_workers)
-    return _run_decks_local(
+    report = _run_decks_local(
         units,
         staging_root=request_dir,
         outdir=outdir,
@@ -1763,3 +1775,7 @@ def run_deck_request(
         max_workers=workers,
         backend=backend,
     )
+    apply_engine_host(
+        report["environment"], backend=backend, client_ngspice_binary=None
+    )
+    return report

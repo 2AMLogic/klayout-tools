@@ -2794,13 +2794,13 @@ def test_port_io_delay_lines_target_only_mapped_ports():
         "clk", 0.0, 0.1, _BOUNDARY_INPUT_DELAYS, _BOUNDARY_OUTPUT_DELAYS
     )
     delay_lines = [ln for ln in lines if ln.lstrip().startswith("set_")]
-    assert [ln for ln in delay_lines if "[get_ports" in ln and "-m" in ln] == [
-        "set_input_delay -min 0.3 -clock clk [get_ports a_in]",
-        "set_input_delay -max 0.6 -clock clk [get_ports a_in]",
-        "set_input_delay -min 0.05 -clock clk [get_ports b_in]",
-        "set_input_delay -max 1.2 -clock clk [get_ports b_in]",
-        "set_input_delay -min -0.2 -clock clk [get_ports bus\\[1\\]]",
-        "set_output_delay -max 0.5 -clock clk [get_ports q_a]",
+    assert [ln for ln in delay_lines if "$klt_ports_by_name" in ln and "-m" in ln] == [
+        "set_input_delay -min 0.3 -clock clk [dict get $klt_ports_by_name a_in]",
+        "set_input_delay -max 0.6 -clock clk [dict get $klt_ports_by_name a_in]",
+        "set_input_delay -min 0.05 -clock clk [dict get $klt_ports_by_name b_in]",
+        "set_input_delay -max 1.2 -clock clk [dict get $klt_ports_by_name b_in]",
+        "set_input_delay -min -0.2 -clock clk [dict get $klt_ports_by_name bus\\[1\\]]",
+        "set_output_delay -max 0.5 -clock clk [dict get $klt_ports_by_name q_a]",
     ]
     # Partial bounds are never mirrored onto the other side.
     assert not any("-max" in ln and "bus\\[1\\]" in ln for ln in lines)
@@ -2824,7 +2824,9 @@ def test_port_io_delay_lines_without_scalar_emits_no_default():
     lines = post_route_sta._port_io_delay_lines(
         "clk", None, None, {"a": {"max_ns": 1.0}}, None
     )
-    assert lines == ["set_input_delay -max 1.0 -clock clk [get_ports a]"]
+    assert lines == [
+        "set_input_delay -max 1.0 -clock clk [dict get $klt_ports_by_name a]"
+    ]
 
 
 @pytest.mark.parametrize(
@@ -2845,7 +2847,9 @@ def test_tcl_literal_port_names_never_substituted(port, tcl):
     lines = post_route_sta._port_io_delay_lines(
         "clk", None, None, {port: {"min_ns": 0.1}}, None
     )
-    assert lines == [f"set_input_delay -min 0.1 -clock clk [get_ports {tcl}]"]
+    assert lines == [
+        f"set_input_delay -min 0.1 -clock clk [dict get $klt_ports_by_name {tcl}]"
+    ]
 
 
 def test_port_check_lines_list_every_key_with_allowed_directions():
@@ -2859,8 +2863,113 @@ def test_port_check_lines_list_every_key_with_allowed_directions():
     ) in script
     assert f'puts "{post_route_sta._PORT_CHECK_BEGIN}"' in lines
     assert f"    exit {post_route_sta._PORT_CHECK_EXIT_CODE}" in lines
-    # Literal match only: exactly one port, whose full name equals the key.
-    assert "[get_full_name $klt_port] ne $klt_name" in script
+    # Literal match only: a dict keyed by exact full name, never `get_ports`
+    # (which re-parses its argument as a Tcl list of glob patterns, #3050).
+    assert "dict set klt_ports_by_name [get_full_name $klt_port] $klt_port" in script
+    assert "dict exists $klt_ports_by_name $klt_name" in script
+    assert "get_ports" not in script
+
+
+_TCL_STUB_PORTS = """
+proc get_ports {name} {
+    if {$name ne "clk"} { error "unexpected get_ports $name" }
+    return pi_clk
+}
+proc all_inputs {} { return {pi_clk pi_b pi_inout} }
+proc all_outputs {} { return {po_y pi_inout} }
+proc get_property {port prop} { return [dict get $::klt_dirs $port] }
+proc get_full_name {port} { return [dict get $::klt_names $port] }
+proc set_input_delay {args} { lappend ::klt_calls [list in {*}$args] }
+proc set_output_delay {args} { lappend ::klt_calls [list out {*}$args] }
+set klt_calls {}
+"""
+
+
+def _run_generated_tcl(tmp_path, names, dirs, body_lines):
+    """Execute generated port Tcl under a real ``tclsh`` with the OpenSTA
+    port commands stubbed (``get_ports`` only answers for the clock port: a
+    per-port lookup through it fails the run). ``names``/``dirs`` map the stub port
+    objects to their full names / directions."""
+    import shutil
+    import subprocess
+
+    tclsh = shutil.which("tclsh")
+    if tclsh is None:
+        pytest.skip("needs tclsh")
+    script = (
+        "set klt_names [dict create "
+        + " ".join(f"{k} {post_route_sta._tcl_literal(v)}" for k, v in names.items())
+        + "]\n"
+        "set klt_dirs [dict create "
+        + " ".join(f"{k} {v}" for k, v in dirs.items())
+        + "]\n"
+        + _TCL_STUB_PORTS
+        + "\n".join(body_lines)
+        + "\nputs [list CALLS $klt_calls]\n"
+    )
+    path = tmp_path / "ports.tcl"
+    path.write_text(script, encoding="utf-8")
+    done = subprocess.run([tclsh, str(path)], capture_output=True, text=True)
+    return done
+
+
+def test_generated_port_lookup_resolves_awkward_names_literally(tmp_path):
+    """Issue #3050: names that break ``get_ports``' list re-parse (`{port`,
+    `"port`, `sp ace`) or look like globs resolve to exactly their own port
+    object, which the delay commands receive unchanged."""
+    ports = ["{port", '"port', "sp ace", "a[0]", "*"]
+    names = {"pi_clk": "clk", "pi_b": "b", "pi_inout": "io", "po_y": "y"}
+    dirs = {
+        "pi_clk": "input",
+        "pi_b": "input",
+        "pi_inout": "bidirect",
+        "po_y": "output",
+    }
+    # Rename the stub inputs so each awkward name is a real port.
+    names = {f"pi_{i}": p for i, p in enumerate(ports)} | names
+    dirs = {f"pi_{i}": "input" for i in range(len(ports))} | dirs
+
+    stub_inputs = " ".join(f"pi_{i}" for i in range(len(ports)))
+    in_map = {p: {"min_ns": 0.1 * (i + 1)} for i, p in enumerate(ports)}
+    lines = [
+        f"proc all_inputs {{}} {{ return {{{stub_inputs} pi_clk pi_b pi_inout}} }}"
+    ]
+    lines += post_route_sta._request_io_delay_lines(
+        "clk", 0.5, None, in_map, {"io": {"max_ns": 0.2}}
+    )
+    done = _run_generated_tcl(tmp_path, names, dirs, lines)
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert f"{post_route_sta._PORT_CHECK_BEGIN}\n{post_route_sta._PORT_CHECK_END}" in (
+        done.stdout
+    )
+    calls = done.stdout.split("CALLS ", 1)[1]
+    for i in range(len(ports)):
+        # Each per-port delay was applied to that port's own object.
+        assert f"in -min {0.1 * (i + 1)!r} -clock clk pi_{i}" in calls
+    assert "out -max 0.2 -clock clk pi_inout" in calls
+
+
+def test_generated_port_lookup_reports_missing_and_wrong_direction(tmp_path):
+    names = {"pi_a": "{port", "po_y": "y"}
+    dirs = {"pi_a": "input", "po_y": "output"}
+    lines = [
+        "proc all_inputs {} { return pi_a }",
+        "proc all_outputs {} { return po_y }",
+    ]
+    lines += post_route_sta._port_check_lines(
+        {"{port": {"min_ns": 0.1}, "{por": {"min_ns": 0.1}, "y": {"min_ns": 0.1}},
+        {"p*": {"max_ns": 0.1}},
+    )
+    done = _run_generated_tcl(tmp_path, names, dirs, lines)
+
+    assert done.returncode == post_route_sta._PORT_CHECK_EXIT_CODE
+    rows = post_route_sta._parse_port_check_errors(done.stdout)
+    assert rows == [
+        ("input", "{por", "not_found"),
+        ("input", "y", "direction_output"),
+        ("output", "p*", "not_found"),
+    ]
 
 
 @pytest.mark.parametrize("mode", ["def", "verilog"])
@@ -2881,7 +2990,7 @@ def test_run_sta_both_modes_apply_same_port_semantics(tmp_path, monkeypatch, mod
     assert clock_idx < start
     # The port check precedes every per-port delay write.
     assert lines.index(f'puts "{post_route_sta._PORT_CHECK_END}"') < lines.index(
-        "set_input_delay -min 0.3 -clock clk [get_ports a_in]"
+        "set_input_delay -min 0.3 -clock clk [dict get $klt_ports_by_name a_in]"
     )
 
 
@@ -3744,6 +3853,422 @@ def test_live_engine_boundary_paths(tmp_path):
     )
     assert hold["consistent_with_aggregate"] is True
     assert setup["consistent_with_aggregate"] is True
+
+
+# --------------------------------------------------------------------------- #
+# constraints.report_ports -- per-port worst-path queries (issue #3042).
+#
+# The port-query stdout below is synthesized from the *measured* direct-engine
+# values in `boundary_captures.json` ("direct_queries"), not captured from a
+# `report_ports` session: no engine is available to the offline suite. The live
+# engine test at the end of this block is the real-engine check.
+# --------------------------------------------------------------------------- #
+
+
+def _port_block(*rows: str) -> str:
+    return "\n".join(
+        [post_route_sta._PORT_PATHS_BEGIN, *rows, post_route_sta._PORT_PATHS_END, ""]
+    )
+
+
+def _direct_port_rows(port: str, direction: str = "input") -> list[str]:
+    """``DIR``/``PATH`` rows for ``port`` from the fixture's direct queries."""
+    direct = _WORST_PATH_CAPTURES["direct_queries"]["tt_025C_1v80"]["from"][port]
+    rows = [f"DIR\t{port}\t{direction}"]
+    for side in ("max", "min"):
+        if direct[side] is not None:
+            role, slack_s, endpoint = direct[side]
+            rows.append(
+                f"PATH\t{port}\t{side}\t{role}\t{slack_s!r}\t{port}\t{endpoint}"
+            )
+    return rows
+
+
+def test_validate_report_ports_omitted_and_empty_are_none():
+    assert post_route_sta._validate_report_ports({}, "clk") is None
+    assert post_route_sta._validate_report_ports({"report_ports": []}, "clk") is None
+
+
+def test_validate_report_ports_keeps_request_order():
+    constraints = {"report_ports": ["b_in", "a_in", "bus[1]"]}
+    assert post_route_sta._validate_report_ports(constraints, "clk") == [
+        "b_in",
+        "a_in",
+        "bus[1]",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ("a_in", "must be a list of port names"),
+        ({"a_in": 1}, "must be a list of port names"),
+        ([1], "non-empty port-name strings"),
+        ([None], "non-empty port-name strings"),
+        ([""], "non-empty port-name strings"),
+        ([" a_in"], "non-empty port-name strings"),
+        (["a\nb"], "control character"),
+        (["clk"], "must not name the clock port"),
+        (["a_in", "b_in", "a_in"], r"must not repeat a port \('a_in'\)"),
+    ],
+)
+def test_validate_report_ports_rejects(value, message):
+    with pytest.raises(PostRouteStaError, match=message):
+        post_route_sta._validate_report_ports({"report_ports": value}, "clk")
+
+
+def test_run_sta_report_ports_validation_runs_before_engine(tmp_path, monkeypatch):
+    request_path = _setup_verilog_success_env(
+        tmp_path,
+        monkeypatch,
+        constraints=_boundary_constraints(report_ports=["a_in", "a_in"]),
+    )
+
+    def fail_run(*args, **kwargs):
+        raise AssertionError("engine must not run for an invalid request")
+
+    monkeypatch.setattr(post_route_sta.subprocess, "run", fail_run)
+    with pytest.raises(PostRouteStaError, match="must not repeat a port"):
+        run_sta(request_path)
+
+
+def test_omitting_report_ports_leaves_tcl_unchanged():
+    assert post_route_sta._port_path_lines(None) == []
+    assert post_route_sta._port_path_lines([]) == []
+    for maps in ((None, None), (_BOUNDARY_INPUT_DELAYS, _BOUNDARY_OUTPUT_DELAYS)):
+        assert post_route_sta._port_check_lines(*maps) == (
+            post_route_sta._port_check_lines(*maps, None)
+        )
+    assert post_route_sta._request_io_delay_lines(
+        "clk", 0.0, 0.1, None, None
+    ) == post_route_sta._io_delay_lines("clk", 0.0, 0.1)
+    script = "\n".join(
+        post_route_sta._sta_netlist_script_lines(
+            tech_lef="t.lef",
+            cell_lef="c.lef",
+            verilog_path="top.v",
+            liberty_path="l.lib",
+            hdl_toplevel="top",
+            clock_port="clk",
+            clock_period_ns=2.0,
+        )
+    )
+    assert post_route_sta._PORT_PATHS_BEGIN not in script
+
+
+def test_report_ports_alone_still_emits_port_check_and_scalar_delays():
+    lines = post_route_sta._request_io_delay_lines(
+        "clk", 0.0, 0.1, None, None, ["a_in"]
+    )
+    text = "\n".join(lines)
+    assert post_route_sta._PORT_CHECK_BEGIN in text
+    assert "report a_in {input output inout bidirect}" in text
+    assert lines[-len(post_route_sta._io_delay_lines("clk", 0.0, 0.1)) :] == (
+        post_route_sta._io_delay_lines("clk", 0.0, 0.1)
+    )
+
+
+def test_port_check_lines_add_report_side_with_any_direction():
+    text = "\n".join(
+        post_route_sta._port_check_lines(
+            _BOUNDARY_INPUT_DELAYS, _BOUNDARY_OUTPUT_DELAYS, ["q_b", "bus[1]"]
+        )
+    )
+    assert "report q_b {input output inout bidirect}" in text
+    assert r"report bus\[1\] {input output inout bidirect}" in text
+    assert "input a_in {input inout bidirect}" in text
+
+
+def test_port_path_lines_query_from_and_to_with_bounded_counts():
+    lines = post_route_sta._port_path_lines(["a_in", "bus[1]", "we$ird"])
+    text = "\n".join(lines)
+    assert lines[0] == f'puts "{post_route_sta._PORT_PATHS_BEGIN}"'
+    assert lines[-1] == f'puts "{post_route_sta._PORT_PATHS_END}"'
+    assert r"[list a_in bus\[1\] we\$ird]" in text
+    assert text.count("-group_path_count 1 -endpoint_path_count 1") == 2
+    assert "find_timing_paths -from $klt_rp_port -path_delay $klt_rp_side" in text
+    assert "find_timing_paths -to $klt_rp_port -path_delay $klt_rp_side" in text
+    # An input is never queried `-to`, an output never `-from`.
+    assert 'if {$klt_rp_dir ne "output"}' in text
+    assert 'if {$klt_rp_dir ne "input"}' in text
+    assert "catch" in text
+
+
+def test_parse_port_paths_matches_direct_engine_values():
+    direct = _WORST_PATH_CAPTURES["direct_queries"]["tt_025C_1v80"]["from"]
+    stdout = _port_block(*_direct_port_rows("a_in"), *_direct_port_rows("b_in"))
+
+    result = post_route_sta._port_paths(stdout, ["a_in", "b_in"])
+
+    assert list(result) == ["a_in", "b_in"]
+    for port in ("a_in", "b_in"):
+        entry = result[port]
+        assert entry["direction"] == "input"
+        for side, key in (("setup", "max"), ("hold", "min")):
+            role, slack_s, endpoint = direct[port][key]
+            record = entry[side]
+            assert record["status"] == "ok"
+            assert record["engine_check_role"] == role
+            assert record["startpoint"] == port
+            assert record["endpoint"] == endpoint
+            assert record["slack_ns"] == round(slack_s * 1e9, 5)
+            assert record["consistent_with_aggregate"] is None
+    assert result["a_in"]["hold"]["slack_ns"] == pytest.approx(0.33, abs=0.01)
+    assert result["b_in"]["hold"]["slack_ns"] == pytest.approx(0.08, abs=0.01)
+
+
+def test_parse_port_paths_side_without_constrained_path_is_no_paths():
+    # `bus[1]` has a min-only delay: the engine reports no setup path at all.
+    stdout = _port_block(*_direct_port_rows("bus[1]"))
+
+    entry = post_route_sta._port_paths(stdout, ["bus[1]"])["bus[1]"]
+
+    assert entry["setup"] == post_route_sta._empty_path_record("no_paths", None)
+    assert entry["hold"]["status"] == "ok"
+    assert entry["hold"]["slack_ns"] < 0
+
+
+def test_parse_port_paths_output_port_reports_path_to_it():
+    stdout = _port_block(
+        "DIR\tq_a\toutput",
+        "PATH\tq_a\tmax\toutput setup\t1.5e-09\tff_a/CLK\tq_a",
+    )
+
+    entry = post_route_sta._port_paths(stdout, ["q_a"])["q_a"]
+
+    assert entry["direction"] == "output"
+    assert entry["setup"]["endpoint"] == "q_a"
+    assert entry["setup"]["check_type"] == "output_setup"
+    assert entry["hold"]["status"] == "no_paths"
+
+
+def test_parse_port_paths_inout_takes_minimum_over_both_directions():
+    stdout = _port_block(
+        "DIR\tio\tbidirect",
+        "PATH\tio\tmax\tsetup\t2e-09\tio\tff/D",
+        "PATH\tio\tmax\toutput setup\t5e-10\tff/CLK\tio",
+        "PATH\tio\tmin\thold\t1e-10\tio\tff/D",
+    )
+
+    entry = post_route_sta._port_paths(stdout, ["io"])["io"]
+
+    assert entry["direction"] == "inout"
+    assert (entry["setup"]["startpoint"], entry["setup"]["endpoint"]) == (
+        "ff/CLK",
+        "io",
+    )
+    assert entry["setup"]["slack_ns"] == 0.5
+    assert entry["hold"]["startpoint"] == "io"
+
+
+def test_parse_port_paths_engine_error_is_unavailable_for_that_port_only():
+    stdout = _port_block(
+        "warning: something unrelated",
+        *_direct_port_rows("a_in"),
+        "ERROR\tb_in\tboom",
+    )
+
+    result = post_route_sta._port_paths(stdout, ["a_in", "b_in", "c_in"])
+
+    assert result["a_in"]["setup"]["status"] == "ok"
+    for side in ("setup", "hold"):
+        assert result["b_in"][side]["status"] == "unavailable"
+        assert "boom" in result["b_in"][side]["reason"]
+        assert result["b_in"][side]["startpoint"] is None
+        assert result["c_in"][side]["status"] == "unavailable"
+    assert result["b_in"]["direction"] is None
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        "PATH\ta_in\tmax\tsetup\tnotanumber\ta_in\tff/D",
+        "PATH\ta_in\tmax\tsetup\tinf\ta_in\tff/D",
+        "PATH\ta_in\tbogus\tsetup\t1e-9\ta_in\tff/D",
+        "PATH\ta_in\tmax\tsetup\t1e-9\ta_in",
+    ],
+)
+def test_parse_port_paths_malformed_row_is_unavailable(row):
+    stdout = _port_block("DIR\ta_in\tinput", row)
+    entry = post_route_sta._port_paths(stdout, ["a_in"])["a_in"]
+    assert entry["setup"]["status"] == "unavailable"
+    assert entry["hold"]["status"] == "unavailable"
+
+
+def test_parse_port_paths_absent_block_is_unavailable_for_every_port():
+    result = post_route_sta._port_paths("no markers here\n", ["a_in", "b_in"])
+    assert all(
+        entry[side]["status"] == "unavailable"
+        for entry in result.values()
+        for side in ("setup", "hold")
+    )
+
+
+def _append_port_block(monkeypatch, block: str) -> None:
+    """Make every stubbed engine run also print ``block`` on stdout."""
+    inner = post_route_sta.subprocess.run
+
+    def run(cmd, **kwargs):
+        completed = inner(cmd, **kwargs)
+        if completed.stdout and post_route_sta._WORST_PATHS_BEGIN in completed.stdout:
+            completed.stdout += block
+        return completed
+
+    monkeypatch.setattr(post_route_sta.subprocess, "run", run)
+
+
+def test_run_sta_report_ports_single_corner(tmp_path, monkeypatch):
+    request_path = _setup_verilog_success_env(
+        tmp_path,
+        monkeypatch,
+        constraints=_boundary_constraints(report_ports=["a_in", "b_in"]),
+    )
+    scripts = _stub_openroad_capture(monkeypatch, {None: "boundary_tt_025C_1v80"})
+    _append_port_block(
+        monkeypatch, _port_block(*_direct_port_rows("a_in"), *_direct_port_rows("b_in"))
+    )
+
+    report = run_sta(request_path)
+
+    assert "report a_in {input output inout bidirect}" in scripts[0]
+    assert post_route_sta._PORT_PATHS_BEGIN in scripts[0]
+    assert list(report["port_paths"]) == ["a_in", "b_in"]
+    assert report["port_paths"]["a_in"]["hold"]["startpoint"] == "a_in"
+    assert report["port_paths"]["a_in"]["hold"]["slack_ns"] == pytest.approx(
+        0.33, abs=0.01
+    )
+    assert report["port_paths"]["b_in"]["hold"]["slack_ns"] == pytest.approx(
+        0.08, abs=0.01
+    )
+    # The global worst hold path stays the unrelated async-reset check.
+    assert report["worst_hold_path"]["startpoint"] == "rst_n"
+    assert report["worst_hold_path"]["endpoint"] == "ff_a/RESET_B"
+
+
+def test_run_sta_without_report_ports_has_no_port_paths(tmp_path, monkeypatch):
+    request_path = _setup_verilog_success_env(
+        tmp_path, monkeypatch, constraints=_boundary_constraints()
+    )
+    scripts = _stub_openroad_capture(monkeypatch, {None: "boundary_tt_025C_1v80"})
+
+    report = run_sta(request_path)
+
+    assert "port_paths" not in report
+    assert post_route_sta._PORT_PATHS_BEGIN not in scripts[0]
+
+
+def test_run_sta_report_ports_multi_corner_each_entry(tmp_path, monkeypatch):
+    request_path = _setup_multi_corner_env(
+        tmp_path,
+        monkeypatch,
+        constraints=_boundary_constraints(report_ports=["a_in"]),
+    )
+    _stub_openroad_capture(
+        monkeypatch,
+        {
+            "tt_025C_1v80": "boundary_tt_025C_1v80",
+            "ss_100C_1v60": "boundary_ss_100C_1v60",
+        },
+    )
+    _append_port_block(monkeypatch, _port_block(*_direct_port_rows("a_in")))
+
+    report = run_sta(request_path)
+
+    assert "port_paths" not in report
+    assert len(report["corners"]) == 2
+    for entry in report["corners"]:
+        assert list(entry["port_paths"]) == ["a_in"]
+        assert entry["port_paths"]["a_in"]["direction"] == "input"
+
+
+def test_run_sta_report_ports_rejected_by_engine_check(tmp_path, monkeypatch):
+    request_path = _setup_verilog_success_env(
+        tmp_path,
+        monkeypatch,
+        constraints=_boundary_constraints(report_ports=["nope"]),
+    )
+    block = (
+        f"{post_route_sta._PORT_CHECK_BEGIN}\nreport\tnope\tnot_found\n"
+        f"{post_route_sta._PORT_CHECK_END}\n"
+    )
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["openroad", "-version"]:
+            return fake_completed(stdout="unknown \n")
+        return fake_completed(returncode=3, stdout=block)
+
+    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+
+    with pytest.raises(PostRouteStaError) as excinfo:
+        run_sta(request_path)
+    message = str(excinfo.value)
+    assert message.startswith("constraints.report_ports rejected")
+    assert "constraints.report_ports['nope']: no port with exactly this name" in message
+
+
+def test_print_text_renders_port_paths(capsys):
+    from klayout_tools.cli import sta_cmd
+
+    record = {
+        "status": "ok",
+        "check_type": "hold",
+        "startpoint": "a_in",
+        "endpoint": "ff_a/D",
+        "slack_ns": 0.33143,
+    }
+    empty = post_route_sta._empty_path_record("no_paths", None)
+    fields = {
+        "worst_slack_ns": 0.1,
+        "total_negative_slack_ns": 0,
+        "worst_hold_slack_ns": 0.1,
+        "total_negative_hold_slack_ns": 0,
+        "fmax_mhz": 1,
+        "setup_violation_count": 0,
+        "hold_violation_count": 0,
+        "clock_skew_ns": 0,
+        "estimated_power_mw": 0,
+        "port_paths": {"a_in": {"direction": "input", "setup": empty, "hold": record}},
+    }
+
+    sta_cmd._print_slack_fields(fields, indent="")
+
+    out = capsys.readouterr().out
+    assert "port_paths[a_in].setup: no_paths" in out
+    assert "port_paths[a_in].hold: hold a_in -> ff_a/D slack_ns=0.33143 (ok)" in out
+
+
+@pytest.mark.skipif(
+    _live_sky130_env() is None,
+    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
+    "KLT_SKIP_OPENROAD_TESTS unset",
+)
+def test_live_engine_report_ports(tmp_path):
+    """Engine integration (issue #3042): the boundary request with
+    ``report_ports`` against a real session must give the boundary ports'
+    own hold margins while the global worst hold stays the async removal."""
+    _write(tmp_path / "boundary.v", _WORST_PATH_CAPTURES["netlist"])
+    request = {
+        "verilog": "boundary.v",
+        "hdl_toplevel": "top",
+        "pdk": {"cell_library": "sky130_fd_sc_hd", "corner": "tt_025C_1v80"},
+        "constraints": _boundary_constraints(
+            report_ports=["a_in", "b_in", "bus[1]", "q_a"]
+        ),
+    }
+    request_path = _write_request(tmp_path / "request.json", request)
+
+    report = run_sta(request_path, pdk_variant="sky130A")
+
+    direct = _WORST_PATH_CAPTURES["direct_queries"]["tt_025C_1v80"]["from"]
+    paths = report["port_paths"]
+    for port in ("a_in", "b_in"):
+        hold = paths[port]["hold"]
+        assert hold["startpoint"] == port
+        assert hold["slack_ns"] == pytest.approx(direct[port]["min"][1] * 1e9, abs=1e-3)
+    assert paths["bus[1]"]["setup"]["status"] == "no_paths"
+    assert paths["q_a"]["direction"] == "output"
+    assert paths["q_a"]["setup"]["endpoint"] == "q_a"
+    assert report["worst_hold_path"]["startpoint"] == "rst_n"
 
 
 def _write_clock_fixtures(tmp_path) -> dict[str, str]:
