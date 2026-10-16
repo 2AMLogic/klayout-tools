@@ -486,6 +486,7 @@ from . import (
     BipolarDevice,
     CapacitorDevice,
     CapacitorFlavour,
+    CutRC,
     DerivedLayer,
     DiodeDevice,
     DrcRule,
@@ -2637,13 +2638,23 @@ PARASITICS = ParasiticsDeck(
     poly=LayerRC(sheet_res_ohm_sq=7.3, cap_area_ff_um2=0.11067, cap_perim_ff_um=0.05),
     metals=(
         # Metal1. perim from `defaultperimeter` Metal1 (39.431 aF/um).
-        LayerRC(sheet_res_ohm_sq=0.09, cap_area_ff_um2=0.03, cap_perim_ff_um=0.039431),
+        LayerRC(
+            sheet_res_ohm_sq=0.09,
+            sheet_res_high_ohm_sq=0.104,
+            sheet_res_low_ohm_sq=0.076,
+            cap_area_ff_um2=0.03,
+            cap_perim_ff_um=0.039431,
+        ),
         # Metal2 (issue #547). sheet from `resist (allm2)/metal2 90`
         # (unconditional -- M2 is never the top/thick metal in any gf180mcu
         # stack option); area/perim from `defaultareacap`/`defaultperimeter`
         # allm2 metal2 (15.016 aF/um^2, 33.298 aF/um).
         LayerRC(
-            sheet_res_ohm_sq=0.09, cap_area_ff_um2=0.015016, cap_perim_ff_um=0.033298
+            sheet_res_ohm_sq=0.09,
+            sheet_res_high_ohm_sq=0.104,
+            sheet_res_low_ohm_sq=0.076,
+            cap_area_ff_um2=0.015016,
+            cap_perim_ff_um=0.033298,
         ),
         # Metal3 (issue #547). sheet from `resist (allm3)/metal3 90`, the
         # `#ifdef METALS4 || METALS5 || METALS6` row -- this deck's 5-metal
@@ -2654,7 +2665,11 @@ PARASITICS = ParasiticsDeck(
         # aF/um^2, 30.021 aF/um) -- unconditional; thickness options only vary
         # M3's sheet resistance, never its cap coefficients.
         LayerRC(
-            sheet_res_ohm_sq=0.09, cap_area_ff_um2=0.010094, cap_perim_ff_um=0.030021
+            sheet_res_ohm_sq=0.09,
+            sheet_res_high_ohm_sq=0.104,
+            sheet_res_low_ohm_sq=0.076,
+            cap_area_ff_um2=0.010094,
+            cap_perim_ff_um=0.030021,
         ),
         # Metal4 (issue #547). sheet from `resist (allm4)/metal4 90`, the
         # `#ifdef METALS5 || METALS6` row (same reasoning as Metal3 -- not the
@@ -2662,7 +2677,11 @@ PARASITICS = ParasiticsDeck(
         # `defaultareacap`/`defaultperimeter` allm4 metal4 (7.602 aF/um^2,
         # 28.153 aF/um).
         LayerRC(
-            sheet_res_ohm_sq=0.09, cap_area_ff_um2=0.007602, cap_perim_ff_um=0.028153
+            sheet_res_ohm_sq=0.09,
+            sheet_res_high_ohm_sq=0.104,
+            sheet_res_low_ohm_sq=0.076,
+            cap_area_ff_um2=0.007602,
+            cap_perim_ff_um=0.028153,
         ),
         # Metal5 (issue #547, corrected by #572), the top metal of this
         # 5-level stack. sheet from the resolved, pre-built
@@ -2678,7 +2697,11 @@ PARASITICS = ParasiticsDeck(
         # `defaultareacap`/`defaultperimeter` allm5 metal5 (5.798 aF/um^2,
         # 30.386 aF/um) -- unconditional across every THICKMET option.
         LayerRC(
-            sheet_res_ohm_sq=0.06, cap_area_ff_um2=0.005798, cap_perim_ff_um=0.030386
+            sheet_res_ohm_sq=0.06,
+            sheet_res_high_ohm_sq=0.07,
+            sheet_res_low_ohm_sq=0.05,
+            cap_area_ff_um2=0.005798,
+            cap_perim_ff_um=0.030386,
         ),
     ),
     # `defaultoverlap` vertical plate-coupling coefficients (issue #760,
@@ -2712,5 +2735,24 @@ PARASITICS = ParasiticsDeck(
         # Metal4 (idx3) <-> Metal5 (idx4): `defaultoverlap allm5 metal5
         # allm4 metal4 39.351`.
         0.039351,
+    ),
+    # Per-cut via resistance and the interconnect-resistance corners (issue
+    # #3053), from the same resolved `gf180mcuD.tech` / pinned PDK commit
+    # c6d73a35f524070e85faff4a6a9eef49553ebc2b as Metal5 above. Magic states
+    # `contact` rows in milliohm per cut; divided by 1000. Nominal: `variants
+    # ()` block (L3058-3061); high-R: `variants (hrhc),(hrlc)` (L3107-3110,
+    # 15000 = 15 ohm, 3.3x nominal); low-R: `variants (lrhc),(lrlc)`
+    # (L3156-3159, 0 -- an ideal short, stored as published, not clamped; see
+    # `CutRC`). The high/low *metal* sheet resistances are on `metals` above
+    # (L3093-3099 / L3142-3148). `lower_metal_index` is the Metal level the
+    # cut lands on: m2c = Metal1->Metal2, m3c = Metal2->Metal3, via3 =
+    # Metal3->Metal4, via4 = Metal4->Metal5. `mimcc` (MiM cap contact, also
+    # 4.5 ohm) and the diffusion/poly contacts (`ndc` ... `pc`) are not
+    # curated: they are not between two metals of this stack.
+    cuts=(
+        CutRC("m2c", 0, nominal_ohm=4.5, high_ohm=15.0, low_ohm=0.0),
+        CutRC("m3c", 1, nominal_ohm=4.5, high_ohm=15.0, low_ohm=0.0),
+        CutRC("via3", 2, nominal_ohm=4.5, high_ohm=15.0, low_ohm=0.0),
+        CutRC("via4", 3, nominal_ohm=4.5, high_ohm=15.0, low_ohm=0.0),
     ),
 )

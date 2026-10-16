@@ -27,7 +27,7 @@ provenance fields:
   :class:`CapacitorFlavour`, :class:`MomCapacitorDevice`,
   :class:`DiodeDevice`, :class:`LayerExpr`, :class:`InvalidLabelLayerError`).
 - :mod:`klayout_tools.decks.parasitics` -- the parasitics domain
-  (:class:`LayerRC`, :class:`ParasiticsDeck`,
+  (:class:`LayerRC`, :class:`CutRC`, :class:`ParasiticsDeck`,
   :class:`UnknownExtractionDeckError`, :class:`InvalidDeckOptionError`).
 
 Every public name from those three modules is re-exported below, so
@@ -57,10 +57,16 @@ from .extraction import (
 )
 from .finfet import FinFETExtractionDeck, FinFETFlavour
 from .parasitics import (
+    HIGH_CORNER,
+    LOW_CORNER,
+    NOMINAL_CORNER,
+    RESISTANCE_CORNERS,
+    CutRC,
     InvalidDeckOptionError,
     LayerRC,
     ParasiticsDeck,
     UnknownExtractionDeckError,
+    describe_cut_resistance_gaps,
 )
 from .rules import DerivedLayer, DrcRule, RuleProvenance, UnknownDeckError
 
@@ -68,19 +74,24 @@ __all__ = [
     "BipolarDevice",
     "CapacitorDevice",
     "CapacitorFlavour",
+    "CutRC",
     "DerivedLayer",
     "DiodeDevice",
     "DrcRule",
     "ExtractionDeck",
     "FinFETExtractionDeck",
     "FinFETFlavour",
+    "HIGH_CORNER",
     "InvalidDeckOptionError",
     "InvalidLabelLayerError",
     "LayerExpr",
+    "LOW_CORNER",
     "LayerRC",
     "MOSFlavour",
     "MomCapacitorDevice",
+    "NOMINAL_CORNER",
     "ParasiticsDeck",
+    "RESISTANCE_CORNERS",
     "ResistorDevice",
     "ResistorFlavour",
     "RuleProvenance",
@@ -88,6 +99,7 @@ __all__ = [
     "UnknownDeckError",
     "UnknownExtractionDeckError",
     "deck_names",
+    "describe_cut_resistance_gaps",
     "deck_source_path",
     "get_deck",
     "get_extraction_deck",

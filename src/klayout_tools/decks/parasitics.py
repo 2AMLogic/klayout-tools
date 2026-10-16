@@ -21,6 +21,26 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+NOMINAL_CORNER = "nominal"
+HIGH_CORNER = "high"
+LOW_CORNER = "low"
+RESISTANCE_CORNERS = (NOMINAL_CORNER, HIGH_CORNER, LOW_CORNER)
+
+
+def _corner_value(
+    corner: str, nominal: float, high: float | None, low: float | None
+) -> float | None:
+    if corner == NOMINAL_CORNER:
+        return nominal
+    if corner == HIGH_CORNER:
+        return high
+    if corner == LOW_CORNER:
+        return low
+    raise ValueError(
+        f"unknown resistance corner '{corner}' "
+        f"(available: {', '.join(RESISTANCE_CORNERS)})"
+    )
+
 
 @dataclass(frozen=True)
 class LayerRC:
@@ -54,6 +74,51 @@ class LayerRC:
     sheet_res_ohm_sq: float
     cap_area_ff_um2: float
     cap_perim_ff_um: float
+    # Interconnect-resistance corners (issue #3053), ohms per square, only
+    # where the PDK publishes them (magic's ``variants (hrhc),(hrlc)`` =
+    # high-R and ``(lrhc),(lrlc)`` = low-R blocks). ``None`` means the PDK
+    # publishes no such corner for this role -- absent, never zero.
+    sheet_res_high_ohm_sq: float | None = None
+    sheet_res_low_ohm_sq: float | None = None
+
+    def sheet_res(self, corner: str = NOMINAL_CORNER) -> float | None:
+        """Sheet resistance (ohm/sq) at ``corner``; ``None`` if unpublished."""
+        return _corner_value(
+            corner,
+            self.sheet_res_ohm_sq,
+            self.sheet_res_high_ohm_sq,
+            self.sheet_res_low_ohm_sq,
+        )
+
+
+@dataclass(frozen=True)
+class CutRC:
+    """Resistance of one via/contact cut layer (issue #3053).
+
+    ``name`` is the PDK's own cut-layer name (magic ``contact`` row, e.g.
+    ``m2c``). ``lower_metal_index`` is the index into the matching
+    :class:`ExtractionDeck`'s ``metals`` stack of the lower metal level this
+    cut lands on, so the cut joins ``metals[lower_metal_index]`` to
+    ``metals[lower_metal_index + 1]`` (same index alignment as
+    :attr:`ParasiticsDeck.metal_overlaps`).
+
+    ``nominal_ohm`` is the per-cut resistance in ohms. ``high_ohm`` /
+    ``low_ohm`` are the PDK's published high-R / low-R interconnect corners,
+    ``None`` where unpublished. A published ``0.0`` is stored as published
+    (the low-R corner of gf180mcu prices every cut at 0 ohm): ``klt power``
+    treats a ``resistance_ohm: 0`` edge as an ideal short, so the value is
+    meaningful and is neither clamped nor rejected here.
+    """
+
+    name: str
+    lower_metal_index: int
+    nominal_ohm: float
+    high_ohm: float | None = None
+    low_ohm: float | None = None
+
+    def resistance(self, corner: str = NOMINAL_CORNER) -> float | None:
+        """Per-cut resistance (ohm) at ``corner``; ``None`` if unpublished."""
+        return _corner_value(corner, self.nominal_ohm, self.high_ohm, self.low_ohm)
 
 
 @dataclass(frozen=True)
@@ -124,6 +189,16 @@ class ParasiticsDeck:
     that same docstring's "known simplification" note. Both empty by default,
     so a deck that never populates them (or a run that never names a
     ``critical_nets`` entry) behaves exactly as before this field existed.
+
+    ``cuts`` (issue #3053) curates the per-cut resistance of each via/contact
+    layer between adjacent ``metals`` levels, as :class:`CutRC` rows with
+    nominal/high/low corners where the PDK publishes them. Cut resistances
+    are per layer, not one scalar per deck (sky130's range from 0.38 to
+    9.3 ohm). Empty by default, so a deck with no cut data behaves exactly as
+    before this field existed; :func:`describe_cut_resistance_gaps` reports
+    which levels are uncurated rather than leaving them silently zero. The
+    high/low metal sheet-resistance corners live on :class:`LayerRC`.
+    Nothing in ``klt extract`` or ``klt power`` consumes ``cuts`` yet.
     """
 
     diffusion: LayerRC | None = None
@@ -132,6 +207,26 @@ class ParasiticsDeck:
     metal_overlaps: tuple[float | None, ...] = ()
     metal_sidewalls: tuple[float | None, ...] = ()
     metal_sidewall_lookback_um: tuple[float | None, ...] = ()
+    cuts: tuple[CutRC, ...] = ()
+
+
+def describe_cut_resistance_gaps(
+    deck: ParasiticsDeck, n_metals: int
+) -> list[dict[str, int]]:
+    """Adjacent metal-level pairs (of an ``n_metals`` stack) with no
+    :class:`CutRC` row, the cut-resistance analogue of
+    ``_describe_parasitics_overlap_gaps`` (issue #3053).
+
+    One ``{"lower_metal_index": i, "upper_metal_index": i + 1}`` entry per
+    gap, sorted by ``lower_metal_index``. A deck with no ``cuts`` at all
+    reports every adjacent pair.
+    """
+    covered = {cut.lower_metal_index for cut in deck.cuts}
+    return [
+        {"lower_metal_index": i, "upper_metal_index": i + 1}
+        for i in range(n_metals - 1)
+        if i not in covered
+    ]
 
 
 class UnknownExtractionDeckError(Exception):
