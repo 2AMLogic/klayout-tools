@@ -306,10 +306,11 @@
     },
     "pex": {
       "kind": "verb",
-      "description": "`klt pex` implementation: core modules plus CLI adapter.",
+      "description": "`klt pex` implementation: core modules (including the SPICE-text subckt flattener behind --flatten-schematic) plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.pex_cmd",
-        "klayout_tools.pex"
+        "klayout_tools.pex",
+        "klayout_tools.spice_flatten"
       ]
     },
     "place_and_route": {
@@ -432,6 +433,14 @@
       "modules": [
         "klayout_tools.cli.size_cmd",
         "klayout_tools.size"
+      ]
+    },
+    "reset_coverage": {
+      "kind": "verb",
+      "description": "`klt reset_coverage` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.reset_coverage_cmd",
+        "klayout_tools.reset_coverage"
       ]
     },
     "socket_check": {
@@ -898,6 +907,11 @@
       "consumer": "report",
       "exporter": "cli-infra",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "reset_coverage",
+      "exporter": "cli-infra",
+      "reason": "Verb CLI adapter uses the shared output envelope helpers, as every other verb does."
     },
     {
       "consumer": "ring_check",

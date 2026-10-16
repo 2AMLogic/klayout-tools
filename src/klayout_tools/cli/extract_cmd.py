@@ -53,7 +53,7 @@ from ..extract import (
 )
 from . import _request_document as reqdoc
 from ._parsing import parse_deck_options, parse_declared_pins, parse_label_layers
-from .output import emit_error, emit_success, render_rerun_drift
+from .output import EXIT_USAGE_ERROR, emit_error, emit_success, render_rerun_drift
 
 EXIT_OK = 0
 EXIT_DRIFTED = 3
@@ -335,6 +335,7 @@ _REQUEST_FIELD_DESTS = {
         "spef",
         "critical_nets",
         "parasitics_nets",
+        "parasitic_variants",
         "parasitics_top_cell_only",
         "distributed_rc",
         "resistance_paths",
@@ -435,6 +436,7 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             "spef": _path("spef"),
             "critical_nets": _str_list("critical_nets"),
             "parasitics_nets": _str_list("parasitics_nets"),
+            "parasitic_variants": _str_list("parasitic_variants"),
             "parasitics_top_cell_only": _bool("parasitics_top_cell_only"),
             "distributed_rc": _bool("distributed_rc"),
             "resistance_paths": _request_resistance_paths(request),
@@ -505,6 +507,15 @@ def run(args: argparse.Namespace) -> int:
             args = _apply_request(args)
         if not args.deck:
             raise ExtractError("argument --deck is required")
+        if args.parasitic_variants and not args.parasitics:
+            # Usage error (exit 2), caught here rather than in `run_extract`
+            # so a request document gets the same exit code as argv.
+            return emit_error(
+                "extract",
+                "--parasitic-variant requires --parasitics",
+                args.format,
+                exit_code=EXIT_USAGE_ERROR,
+            )
         declared_pins = _parse_declared_pins(args.pins)
         def_pins = _parse_def_pins(args.def_pins)
         pin_source_cells = _parse_pin_source_cells(args.pin_source_cells)
@@ -577,6 +588,10 @@ def run(args: argparse.Namespace) -> int:
             # every net in the design. `None` when the flag was never given,
             # unchanged from every call site that predates it.
             parasitics_nets=args.parasitics_nets,
+            # `--parasitic-variant` (issue #3056): drops R/C elements at
+            # injection time. `None` when the flag was never given,
+            # unchanged from every call site that predates it.
+            parasitic_variants=args.parasitic_variants,
             # `--parasitics-top-cell-only` (issue #1704): additionally
             # splits each net's ground R/C into a top-cell-drawn/instance-
             # drawn share. `False` when the flag was never given, unchanged
@@ -752,6 +767,7 @@ def _print_text(report: dict) -> None:
     # Both are None under `--no-netlist` (issue #2850).
     print(f"netlist_path: {report['netlist_path']}")
     print(f"netlist_sha256: {report['netlist_sha256']}")
+    print(f"netlist_normalized_sha256: {report['netlist_normalized_sha256']}")
     print(
         f"devices: {report['device_count']}  "
         f"nets: {report['net_count']}  "
@@ -789,6 +805,9 @@ def _print_text(report: dict) -> None:
         parasitics_nets = parasitics.get("parasitics_nets")
         if parasitics_nets:
             print(f"parasitics_nets: {', '.join(parasitics_nets)}")
+        # Additive (issue #3056): only printed when --parasitic-variant was given.
+        if parasitics.get("parasitic_variant"):
+            print(f"parasitic_variant: {', '.join(parasitics['parasitic_variant'])}")
         # Additive (issue #977): only printed when --distributed-rc was given.
         if parasitics.get("distributed_rc"):
             distributed_count = sum(

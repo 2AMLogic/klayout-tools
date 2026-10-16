@@ -560,16 +560,19 @@ parameter/unit mapping into a sign-off tool must never pass silently):
   base/collector geometry the fixed-geometry cell name does not encode, and
   they are *secondary* parameters — once the primary `AE`/`NE` agree the
   devices pair and the comparer never reports them.
-- `nf`/`m`/`mult` > 1 on a resistor/capacitor call, and `m`/`mult` > 1 on a
-  MOS call (a multiplied device the curated plain-element form cannot
-  represent) is **rejected** with a specific error naming the device —
+- `nf`/`m`/`mult` > 1 on a resistor/capacitor call (a multiplied device the
+  curated plain-element form cannot represent) is **rejected** with a specific error naming the device —
   never silently dropped or misinterpreted. Flatten it (one device per
   drawn gate) in the schematic netlist first. Two exceptions: bipolar's
   `mult` is carried onto `NE`, not rejected, since
   `DeviceClassBJT3Transistor` can represent multiple parallel emitters that
-  way; and MOS's own `nf` is *expanded*, not rejected (see above) — `m`/
-  `mult` on a MOS call is a different, whole-device replication count (not
-  finger-folding) and is still rejected exactly like resistor/capacitor's.
+  way; and MOS's own `nf` and `m` are *expanded*, not rejected (see above).
+  MOS `m=N` (positive integer) becomes `N` parallel plain `M` cards named
+  `<instance>_m0` ... (`nf*m` cards named `<instance>_m0_f0` ... when
+  combined with `nf`), total width `m*W`; pair with `options.combine_devices`
+  to match an N-unit layout. MOS `mult` is ignored (it must still be
+  numeric): in the sky130 model subckt it only feeds the mismatch-sigma
+  expressions (`sqrt(l*w*mult)`), never the device card.
 
 A reference netlist that *mixes* plain-element (`M`/`R`/`C`/`Q`) cards and
 subckt-call `X` device cards converts correctly under `form:
@@ -2958,6 +2961,23 @@ again a practical signoff artifact. A `device.combine_incomplete` entry's
 `description` field discloses the number of attempts that were made
 (`"...after 5 attempts against independent netlist copies (issue #1185)..."`)
 when more than one was tried.
+
+**Cross-class folds (issue #3019).** The same entry is also emitted when
+`Netlist.combine_devices()` returns *normally* but has folded the devices of
+one device class into another class's survivor — seen with two capacitor
+classes in parallel on one net pair (sky130's stacked `sky130_fd_pr__model__cap_mim`
+over `..._cap_mim_m4`), where one class showed `layout_devices: 0` after
+combining under `layout.file` while `layout.netlist` of the same extraction
+matched. KLayout tells classes apart by an internal id that copied classes
+(the extractor's, and every `Netlist.dup()` clone) can carry uninitialised, so
+the fold depends on heap state. `klt lvs` therefore rebuilds all but one of the
+device classes that have devices on the very same nets on freshly constructed
+classes before combining (the emptied original is renamed
+`<class>__renewed`, so the comparer may add one `topology` warning for a class
+with no devices), and checks the combined result for a class that vanished
+from nets another class still occupies. If every attempt still folds, the side
+is reported here (the `description` names the folded class) rather than
+compared. No JSON field changes.
 
 **Exhaustion rate scales with netlist size and shape — the default budget's
 derivation does not generalize (issue #1412).** The ~1-in-30,000 figure above

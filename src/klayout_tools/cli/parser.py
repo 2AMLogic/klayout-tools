@@ -10,6 +10,7 @@ import sys
 
 from .. import arith_gen, netlist, netlist_batch, pdk_stackup, pex
 from ..equiv import SUPPORTED_SIM_BACKENDS
+from ..extract_parasitics import parse_parasitic_variants
 from ..render import DEFAULT_HEIGHT, DEFAULT_WIDTH
 from . import (
     arith_gen_cmd,
@@ -45,6 +46,7 @@ from . import (
     precheck_cmd,
     render_cmd,
     report_cmd,
+    reset_coverage_cmd,
     ring_check_cmd,
     signoff_cmd,
     sim_cmd,
@@ -77,6 +79,13 @@ def _add_format_arg(
     to override for the few subcommands with non-standard format options.
     """
     parser.add_argument("--format", choices=list(choices), default="text", help=help)
+
+
+def _parasitic_variant_arg(value: str) -> str:
+    """argparse ``type=`` for ``--parasitic-variant`` (issue #3056): a value
+    outside the closed grammar is a usage error (exit 2)."""
+    parse_parasitic_variants([value], argparse.ArgumentTypeError)
+    return value
 
 
 def _deck_names_str() -> str:
@@ -223,6 +232,8 @@ def create_parser() -> argparse.ArgumentParser:
     _add_precheck_parser(subparsers)
 
     _add_socket_check_parser(subparsers)
+
+    _add_reset_coverage_parser(subparsers)
 
     _add_lef_abstract_parser(subparsers)
 
@@ -2017,6 +2028,25 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     extract_parser.add_argument(
+        "--parasitic-variant",
+        dest="parasitic_variants",
+        type=_parasitic_variant_arg,
+        action="append",
+        default=None,
+        metavar="VARIANT",
+        help=(
+            "drop parasitic elements at injection time (issue #3056); "
+            "repeatable and composable. One of drop-r:NET|* (short the "
+            "net's star legs into its hub -- no series R), "
+            "drop-c-ground:NET|* (omit the net's ground C), or "
+            "drop-c-coupling (omit every Ccc_* card). Requires "
+            "--parasitics. Anything else is a usage error; a NET matching "
+            "no net is reported in `warnings`. Off by default -- "
+            "byte-identical to today's behavior. See docs/cli/extract.md's "
+            "'--parasitic-variant' section."
+        ),
+    )
+    extract_parser.add_argument(
         "--mom-rlc-net",
         dest="mom_rlc_net",
         default=None,
@@ -2759,6 +2789,29 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     pex_parser.add_argument(
+        "--flatten-schematic",
+        dest="flatten_schematic",
+        action="store_true",
+        default=False,
+        help=(
+            "flatten the schematic DUT to PDK leaf devices before the "
+            "schematic-side run (issue #2889): every subcircuit the DUT "
+            "netlist defines is inlined (instance-path-prefixed device/node "
+            "names, parameter and m= overrides propagated, .global nets "
+            "kept), written to <outdir>/schematic-dut.flat.spice, and each "
+            "testbench's DUT .include is re-pointed at it -- so a "
+            "hierarchical schematic compares like with like against the "
+            "always-flat extraction and model_mismatch stops firing on "
+            "hierarchy alone. A cycle, an X-call pin-count mismatch or a "
+            "card the flattener cannot rename safely is an error "
+            "(error.code schematic_flatten_*), never a partial flatten. Off "
+            "by default -- byte-identical to today's behavior. Reported as "
+            "`flatten_schematic` plus the `schematic_flatten` block (path, "
+            "sha256, inlining summary). The klt pex counterpart of klt "
+            "lvs's options.flatten_reference."
+        ),
+    )
+    pex_parser.add_argument(
         "--deck",
         required=True,
         help=(
@@ -2916,6 +2969,25 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "extract --distributed-rc`; requires --critical-net. Off by "
             "default -- byte-identical to today's behavior. See "
             "docs/cli/extract.md's '--distributed-rc' section."
+        ),
+    )
+    pex_parser.add_argument(
+        "--parasitic-variant",
+        dest="parasitic_variants",
+        type=_parasitic_variant_arg,
+        action="append",
+        default=None,
+        metavar="VARIANT",
+        help=(
+            "drop parasitic elements at injection time (issue #3056); "
+            "repeatable and composable. One of drop-r:NET|* (short the "
+            "net's star legs into its hub -- no series R), "
+            "drop-c-ground:NET|* (omit the net's ground C), or "
+            "drop-c-coupling (omit every Ccc_* card). Requires "
+            "--parasitics. Anything else is a usage error; a NET matching "
+            "no net is reported in `warnings`. Off by default -- "
+            "byte-identical to today's behavior. See docs/cli/extract.md's "
+            "'--parasitic-variant' section."
         ),
     )
     pex_parser.add_argument(
@@ -3202,7 +3274,9 @@ def _add_components_parser(subparsers: argparse._SubParsersAction) -> None:
         help=(
             "conductor layer set as a path to a JSON file, or an inline JSON "
             'array of {"name": str, "layer": [layer, datatype]} objects '
-            '(e.g. \'[{"name": "m1", "layer": [68, 20]}]\'). Not '
+            '(e.g. \'[{"name": "m1", "layer": [68, 20]}]\'); an entry may '
+            'add "and"/"not": lists of [layer, datatype] pairs that keep only '
+            "the part of its layer overlapping / outside those layers. Not "
             "validated by argparse -- an empty/malformed value exits 1 with "
             "a clean error, per docs/cli/components.md's exit-code contract, "
             "rather than argparse's usage-error exit 2."
@@ -3217,7 +3291,8 @@ def _add_components_parser(subparsers: argparse._SubParsersAction) -> None:
             '"between": [conductor_name_a, conductor_name_b]} objects '
             '(e.g. \'[{"name": "mcon", "layer": [67, 44], "between": '
             '["li", "m1"]}]\'); each via joins the two named --conductors '
-            "entries only where its own shapes actually land on both. Omit "
+            "entries only where its own shapes actually land on both. Takes "
+            'the same optional "and"/"not" qualifiers as --conductors. Omit '
             "for a purely same-layer connectivity report."
         ),
     )
@@ -4597,6 +4672,15 @@ def _add_layers_parser(subparsers: argparse._SubParsersAction) -> None:
             "unique text strings (requires --flattened)"
         ),
     )
+    layers_parser.add_argument(
+        "--deck",
+        default=None,
+        help=(
+            "built-in deck whose layer-name table fills each entry's name "
+            "when the stream carries none; the report also records the "
+            "deck's content_hash"
+        ),
+    )
     _add_format_arg(layers_parser)
     layers_parser.set_defaults(func=layers_cmd.run)
 
@@ -5155,6 +5239,55 @@ def _add_precheck_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(precheck_parser)
     precheck_parser.set_defaults(func=precheck_cmd.run)
+
+
+def _add_reset_coverage_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``reset-coverage`` verb: unreset state elements of a netlist."""
+    reset_parser = subparsers.add_parser(
+        "reset-coverage",
+        help="list state elements of a gate-level netlist an async reset misses",
+        description=(
+            "Classify every sequential cell and hard macro of a flat "
+            "gate-level Verilog netlist: reset/set from the named reset port "
+            "through only buffers/inverters with the right polarity, or "
+            "unreset with a machine-readable reason. A --waivers file "
+            "justifies unreset elements; an unwaived element or a waiver "
+            "naming no unreset element fails (exit 3). Read-only, headless. "
+            "See docs/cli/reset-coverage.md."
+        ),
+    )
+    reset_parser.add_argument(
+        "netlist", help="path to a flat gate-level Verilog netlist"
+    )
+    reset_parser.add_argument(
+        "--cell-models",
+        required=True,
+        action="append",
+        metavar="FILE",
+        help="PDK functional Verilog cell-model file (repeatable)",
+    )
+    reset_parser.add_argument(
+        "--reset-port", required=True, help="name of the reset port of the top module"
+    )
+    reset_parser.add_argument(
+        "--reset-polarity",
+        choices=("low", "high"),
+        default="low",
+        help="level at which the reset port is asserted (default: low)",
+    )
+    reset_parser.add_argument(
+        "--top", default=None, help="top module (required when the netlist has several)"
+    )
+    reset_parser.add_argument(
+        "--waivers",
+        default=None,
+        metavar="FILE",
+        help=(
+            'JSON waiver file: {"waivers": [{"instance", "justification", "reason"?}]}'
+        ),
+    )
+    _add_format_arg(reset_parser)
+    reset_parser.set_defaults(func=reset_coverage_cmd.run)
 
 
 def _add_socket_check_parser(subparsers: argparse._SubParsersAction) -> None:

@@ -857,6 +857,31 @@ with their `.drc.json` reports checked in alongside).
 | `ring_gap_offset_um` | double | `0.0`         | Slide the opening off its side's midpoint (µm) — e.g. onto the row of device ports a route needs to reach. |
 | `ring_padding_um` | double | `0.5`            | Padding between the array's own shared-footprint box (`well_box_um`) and the guard ring's inner edge (µm), when `add_guard_ring` is set. Must be `>= 0`. |
 | `interior_channel_um` | double | `0.0`         | Extra gap (µm) reserved between adjacent rows/columns, on top of the fixed inter-device spacing, so an interior unit device's pin has a navigable path to the array's edge (issue #1531). Must be `>= 0`. `0.0` (the default) is a strict no-op — byte-for-byte identical geometry to every request that predates this param. A positive value widens `row_pitch`/`col_pitch` by that amount and reports the resulting inter-row/inter-column gap bands in the response's `navigable_regions` field (`{"x0_um", "y0_um", "x1_um", "y1_um"}` rectangles). `klt gen-compose` (issue #1835) subtracts a block's own declared `navigable_regions` from its obstacle bbox before its own overlap check runs, so a `waypoints_um` backbone that stays inside the declared channel is no longer rejected as crossing its own block. |
+| `pitch_x_um`/`pitch_y_um` | double | `0.0`      | Override the column/row pitch (µm) between adjacent unit devices (issue #3299). Must be `>= 0`. `0.0` (the default) means no override — byte-for-byte identical geometry to every request that predates these params. The default pitch is already the legal minimum (unit extent + the fixed `0.4` µm same-layer spacing), so an override can only *widen* it: a value below that minimum is **clamped up** to it, never emitted as DRC-violating geometry. When either is set, `drc_hints.pitch` reports `col_pitch_um`/`row_pitch_um` (effective), `min_col_pitch_um`/`min_row_pitch_um` and `pitch_x_clamped`/`pitch_y_clamped`, and a clamp adds a `warnings` entry. Composes with `interior_channel_um`: the channel is added on top of the effective pitch. |
+
+#### Tighter than the generator allows: draw your own primitives
+
+`mos_array` places every unit device as a fully isolated cell, so its pitch
+cannot go below the legal minimum above (no shared source/drain abutment or
+mirroring yet — tracked separately from #3299). When a design needs a denser
+array than that, hand-draw the devices with `klayout.db` (the same Python API
+`klt` uses), then run the same headless gates on the result:
+
+```python
+import klayout.db as db
+
+layout = db.Layout()
+layout.dbu = 0.001
+top = layout.create_cell("DENSE_ARRAY")
+# ... insert your own active/poly/contact/metal shapes, e.g.
+#     top.shapes(layout.layer(<layer>, <datatype>)).insert(db.DBox(...))
+layout.write("dense_array.gds")
+```
+
+Then check it with [`klt drc`](drc.md), [`klt extract`](extract.md) (confirm
+the device count) and [`klt lvs`](lvs.md) against the schematic. DRC can pass
+while connectivity is wrong when diffusion is shared, so treat extract/LVS as
+the gate for any hand-abutted layout.
 
 ### `res_array` (family 2: resistor/capacitor array)
 
@@ -870,6 +895,17 @@ layers, so the footprint — not the layer stack — is what's shared). Each
 real (non-dummy) unit gets two ports, `R<i>_A`/`R<i>_B`. `device_count` is
 `num` (dummies excluded). `drc_hints.matched_group_id` is `"res_array:<num>"`
 (unaffected by `rows`).
+
+**Series strings (`series=true`, issue #2997).** Draws a jumper for each of the
+`num - 1` joints between `R<i>_B` and `R<i+1>_A` — a horizontal bridge across
+the effective `spacing_um` within a row, a vertical bridge across the fold gap
+(`row_pitch_um - pad_height_um`) at a row transition — on the unit end pads'
+layer (the local-metal role for a poly body; the body layer for
+`metal_level > 0`), as wide as the pad is tall. Only the two outer terminals
+are reported as ports, `R0_A` and `R<num-1>_B`; interior ports are omitted.
+`device_count` stays `num` (`klt extract` reports the chain as `num` series
+devices; merging them into one logical device is not done). `drc_hints.notes`
+states the joint count and per-joint overhead.
 
 `rows` (default `1`, the original single-row layout) folds the `num` unit
 resistors into that many parallel rows in boustrophedon ("snake") order —
@@ -922,7 +958,35 @@ ladder uses to spend far fewer squares per ohm. The layer/purpose numbers
 come straight from the same `klayout_tools.decks.sky130` extraction deck that
 recognises them, so a `flavor="high"`/`"xhigh"` array round-trips through
 `klt extract` to the matching device class rather than always reading
-`res_generic_po`. On gf180mcu (issue #1550), `"1k"`/`"2k"`/`"3k"` each draw
+`res_generic_po`. One exception (issue #3077): on sky130 `"high"`/`"xhigh"`
+also draw `npc` `(95, 20)`, which the curated extraction deck never requires
+but the open_pdks Magic tech does — `sky130A.tech` forms its
+`xhrpoly`/`uhrpoly` resistor only where `RPM|URPM & POLYRES & POLY & PSDM &
+NPC`, so without it Magic sees no resistor at all (an independent Magic
+`ext2spice` of the cell comes out empty). `rpm`/`urpm`, `psdm` and `npc` all
+cover the whole unit, end heads included, at `0.2`/`0.11`/`0.095` µm
+enclosure (`rpm.3`, `rpm.4`, and the 0.095 µm with which `sky130A.tech`'s
+own `cifoutput` grows NPC around the resistor), so adjacent units' masks
+abut and merge. With that, Magic's `extract all` + `ext2spice` recognises
+the cell as `sky130_fd_pr__res_high_po_<w>` / `res_xhigh_po_<w>`. Magic's own
+`drc(full)` still reports, on these cells, `licon.1c`'s "poly contact extends
+poly resistor by < 2.16um" and `rpm.1`'s minimum RPM/URPM width: the
+generator's heads are not drawn to the foundry cell's head geometry, and
+`klt drc --deck sky130` does not check those rules (see `docs/cli/drc.md`,
+"Precision-poly-resistor head rules are not checked"). So the `high`/`xhigh`
+output is recognised by Magic but is **not** Magic-DRC-clean; use `klt drc
+--engine klayout` for the independent check. A reporter also saw Magic
+(10 nm input scale) extract a body whose length is an odd multiple of 5 nm
+(e.g. `length_um: 9.765`) as a generic `res_high_po` with both terminals
+on one net when its left edge sat on the 10 nm grid, and correctly when
+shifted by 5 nm; a 9.76 µm body worked at either offset. That is Magic's
+input-scale rounding, not something the generator can correct without
+changing the requested geometry, so it is documented rather than snapped:
+when an independent Magic extraction matters, prefer body lengths that are
+multiples of 10 nm or place the cell on a 5 nm offset. (Not reproduced when
+re-measured: at the generator's own output placement, 9.76 and 9.765 µm
+bodies were both recognised and extracted with the right length; only the
+reporter's placement was seen to fail, so this note is as-reported.) On gf180mcu (issue #1550), `"1k"`/`"2k"`/`"3k"` each draw
 `SAB` `(49, 0)` plus the `Resistor` high-sheet-rho marker `(62, 0)` over the
 `RES_MK` body — no `Pplus`, since `ppolyf_u_1k`'s (and its `_2k`/`_3k`
 siblings') own `requires` set neither needs nor excludes it. All three names
@@ -1087,6 +1151,7 @@ see the `met5` discussion above) rather than sourced from this flavour table.
 | `num`          | int    | `4`     | Number of matched unit resistors. Must be `>= 1`. |
 | `dummy`        | int    | `1`     | Dummy unit resistors added at each end. Must be `>= 0`. |
 | `rows`         | int    | `1`     | Fold the `num` unit resistors into this many parallel rows (boustrophedon order) instead of one long row. Must be `>= 1`. |
+| `series`       | bool   | `false` | Join the `num` units end to end (`R<i>_B` to `R<i+1>_A`) with local-metal jumpers (issue #2997): one logical series resistor. Default `false` is byte-for-byte unchanged. See "Series strings" below. |
 | `flavor`       | string | `"generic"` | Poly-resistor flavour / recognised device class: `"generic"` (base sheet-rho — `res_generic_po` on sky130, `ppolyf_u` on gf180mcu, `rsil` on sg13g2/sg13cmos5l — also reachable on sg13cmos5l as `"rsil"`); on sky130, `"high"` (`res_high_po`) / `"xhigh"` (`res_xhigh_po`); on gf180mcu, `"1k"` / `"2k"` / `"3k"` (`ppolyf_u_1k`/`_2k`/`_3k`, 1000/2000/3000 Ω/□ — pair with `klt extract --deck-option poly_res=<value>`); on sg13g2/sg13cmos5l, `"rppd"` (260 Ω/□) / `"rhigh"` (1360 Ω/□). Must be a flavour the resolved PDK family exposes. Ignored when `metal_level` is non-zero. |
 | `metal_level`  | int    | `0`     | Draw a metal-layer resistor body instead of poly: `0` (default) draws the original poly-body resistor selected by `flavor`; `1`..`5` on sky130 draws that level's `res_generic_mN` device (`met1`..`met5`) instead (issue #1639); `1`..`2` on sg13g2 draws `res_metal1`/`res_metal2` (`Metal1`/`Metal2`) instead (issue #1758); `1`..`3` on gf180mcu draws `rm1`/`rm2`/`rm3` (`Metal1`/`Metal2`/`Metal3`) instead (issue #1731). Must be between `0` and `5`; a level a resolved PDK family does not expose (every non-zero value on sg13cmos5l, `3`..`5` on sg13g2, or `4`..`5` on gf180mcu, today) raises a clear error. |
 

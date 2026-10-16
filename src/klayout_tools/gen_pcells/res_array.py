@@ -16,6 +16,17 @@ if TYPE_CHECKING:
     import klayout.db as kdb
 
 
+def _pcell_params(pcell: object, *names: str) -> list:
+    """Read declared PCell parameters by name (they are attached dynamically,
+    so a plain ``self.<name>`` is an untyped-attribute diagnostic under mypy)."""
+    return [getattr(pcell, name) for name in names]
+
+
+def _series_joint_boxes(info: dict, series: bool) -> list:
+    """Absolute-um boxes of the ``series=true`` joint jumpers (none otherwise)."""
+    return [j["box_um"] for j in info["jumpers"]] if series else []
+
+
 def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
     """Build the ``res_array`` reference generator's PCell -- a resistor array.
 
@@ -78,6 +89,15 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "be >= 1; default 1 reproduces the original single-row "
                 "layout.",
                 default=1,
+            )
+            self.param(
+                "series",
+                kdb.PCellParameterDeclaration.TypeBoolean,
+                "Join the num unit resistors end to end (R<i>_B to "
+                "R<i + 1>_A) with short local-metal jumpers so the array is "
+                "one logical series resistor; default False draws "
+                "independent units (issue #2997)",
+                default=False,
             )
             self.param(
                 "flavor",
@@ -300,6 +320,19 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     _insert_boxes(
                         self.cell, li, dbu, unit_boxes[role], c["x0_um"], c["y0_um"]
                     )
+
+            # Issue #2997: series joints, on the unit end pads' layer (the
+            # body layer for a metal_level resistor, whose end pad is the
+            # body itself).
+            series, metal_level = _pcell_params(self, "series", "metal_level")
+            _insert_boxes(
+                self.cell,
+                li_poly if metal_level else li_metal,
+                dbu,
+                _series_joint_boxes(info, series),
+                0.0,
+                0.0,
+            )
 
             # Draw the PDK resistor-ID marker, plus every requires-mask the
             # requested flavour needs (none on sky130's `res_generic_po`, two
