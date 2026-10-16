@@ -73,9 +73,9 @@ def _print_dry_run_text(report: dict[str, Any]) -> None:
         print(f"  warning: {warning}")
 
 
-def run(args: argparse.Namespace) -> int:
-    if getattr(args, "batch_set", None) is not None:
-        return _run_batch_set(args)
+def _reject_single_request_misuse(args: argparse.Namespace) -> int | None:
+    """Usage failures of the single-request form of ``klt sim`` (``None`` =
+    the arguments are fine)."""
     if args.request is None:
         # Keep the pre---batch-set contract: a bare ``klt sim`` is an
         # argparse-style usage failure (stderr message, SystemExit(2)).
@@ -91,6 +91,15 @@ def run(args: argparse.Namespace) -> int:
             args.format,
             exit_code=EXIT_USAGE_ERROR,
         )
+    return None
+
+
+def run(args: argparse.Namespace) -> int:
+    if getattr(args, "batch_set", None) is not None:
+        return _run_batch_set(args)
+    misuse = _reject_single_request_misuse(args)
+    if misuse is not None:
+        return misuse
     if getattr(args, "op_lint", False):
         return _run_op_lint(args)
 
