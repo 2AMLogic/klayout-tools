@@ -2767,7 +2767,8 @@ and for any value other than `"error"`/`"null"`. It is not applied to
 
 ## Measurements that are not `.meas` cards (`measurements[].expr`)
 
-A `measurements[]` entry declares **exactly one** of two forms:
+A `measurements[]` entry declares **exactly one** of two forms (plus the
+`crossings` and `noise` forms, documented in their own sections below):
 
 | Form    | What it is                                                          | Where it lands in the deck                    |
 | ------- | ------------------------------------------------------------------- | --------------------------------------------- |
@@ -3130,6 +3131,57 @@ Worked `op` example — the case that had no expression at all before:
   well as from `spice`, so an operating-point measurement naming a node the
   netlist does not define is still a named finding rather than a silent 0 V
   (see "Operating-point lint" below).
+
+## Noise-spectrum measurements (`measurements[].noise`)
+
+Issue [#2938](https://github.com/2AMLogic/klayout-tools/issues/2938).
+ngspice's `.meas` has no `noise` analysis type, so a number out of
+`analysis.kind: "noise"` used to need an `expr` with a hard-coded `noise1.`
+prefix and hand-rolled index/trapezoid arithmetic. A `noise` entry states the
+quantity instead; `klt sim` evaluates it against the spectrum:
+
+```json
+"measurements": [
+  { "name": "vn_1k",  "noise": { "quantity": "inoise", "at_hz": 1e3 },            "unit": "V/rtHz" },
+  { "name": "vn_band", "noise": { "quantity": "onoise", "band_hz": [100, 1e5] }, "unit": "V" }
+]
+```
+
+| Key | Meaning |
+| --- | ------- |
+| `quantity` | `"inoise"` (input-referred) or `"onoise"` (output-referred). Required. |
+| `at_hz` | Spot density (per √Hz) at that frequency, interpolated between the two bracketing spectrum points -- in log-frequency for a `dec`/`oct` sweep, linearly for `lin`; exact on a grid point. |
+| `band_hz` | `[lo, hi]`: total rms over the band, `sqrt(∫ density² df)`, trapezoidal on the swept grid with the band edges interpolated in the squared density. |
+
+Exactly one of `at_hz` / `band_hz`. The `noise1.` plot prefix is internal; it
+is never part of a request. The value is an ordinary
+`corners[].measurements[]` entry (`limits`, `plausible_range`, `unit` work as
+for any measurement), and the entry is lowered to `let`/`print` lines in the
+generated `.control` block -- the same seam as `expr`.
+
+On a reasonably dense grid the band value agrees with ngspice's own
+`onoise_total`/`inoise_total` from a band-limited re-run to well under 1e-3
+relative (regression-tested). A sparse grid is a trapezoid approximation of
+a smooth spectrum; densify the sweep (`dec 50`) rather than trusting a coarse
+one.
+
+Refused up front (exit 1, message names the entry): `noise` together with
+another form; `band_hz` with `lo >= hi`; a frequency outside the swept range
+of `analysis.args`; `noise` under a non-`noise` analysis; `noise` inside
+`analysis_steps`; `engine: "xyce"` (like `expr`, it needs ngspice's control
+block). The measurement name must match `[A-Za-z_][A-Za-z0-9_]*`.
+
+### Runner version
+
+The form is evaluated by `klt sim` itself, on whichever host runs the corner.
+A `remote`/`batch` runner must therefore run a `klt` release that includes
+this feature -- the first release after the one that predates #2938 -- and,
+like `measurements[].expr`, a runner older than that rejects the request
+(`batch_runner_version_mismatch` under `batch.runner_version_check:
+"enforce"`; see "Runner/client `klt` version skew"). The batch runner image
+(klt 0.5.0 at the time of writing) predates both `expr` and `noise`, so
+noise benches stay refused on the batch backend until the image is updated;
+there is no `.meas`-card form that older runners could accept.
 
 ## Optional measurements (`measurements[].optional`)
 
@@ -4411,7 +4463,42 @@ a corner grid. A stock ngspice without the module still produces the
   ignored, `.subckt`-local declarations ignored), **not** a complete SPICE
   parser: `.include`d/`.lib` files and hierarchical targets are not resolved,
   so a waveform declared there is not detected, and an unresolved declaration
-  is never assumed to be DC. Rewriting waveform sources is out of scope.
+  is never assumed to be DC. The rejection message names
+  `corners.supply_waveforms` for a PWL/PULSE source; to sweep a ramped supply
+  see the next entry.
+- **`corners.supply_waveforms`** (`array<string>`, optional; issue #2902) —
+  names of `corners.supply_v` keys whose top-level **`PWL(...)`/`PULSE(...)`**
+  source is *rescaled* per corner instead of `alter`ed. Every entry must also
+  be a `corners.supply_v` key; no `alter` is emitted for it. The corner runs
+  against a per-corner copy of the netlist (`netlist.supply_waveforms.cir`
+  in the corner directory; relative `.include` targets are made absolute) in
+  which the source's voltage levels are multiplied by `supply / peak`, where
+  `peak` is the signed nominal level of largest magnitude: **the rail's peak equals the
+  swept supply value** and every other level moves proportionally (a
+  `PWL(0 0 1u 0.9 2u 1.8)` ramp swept to `1.2` becomes
+  `PWL(0 0 1u 0.6 2u 1.2)`; `PULSE` scales `V1`/`V2`; times and trailing
+  options such as `r=` are untouched). A negative-going source is swept with negative `supply_v`
+  values (`PWL(0 0 1n -1.8)` at `-1.62` scales by `0.9`); a `supply_v` whose
+  sign disagrees with the source's peak is rejected rather than mirrored, and
+  a zero supply flattens it. The rewrite is fail-closed: only plain numeric
+  levels in a parenthesised list of a top-level source are rewritten, and a
+  `{param}`/expression level, `SIN`/`EXP`/behavioural source, a source with
+  no waveform, or one declared only in an `.include`d file or `.subckt` is
+  rejected before any run with an error naming the source. Works on every
+  backend, including `--backend batch` (the worker reads the same field).
+  Each affected corner report gains an additive `supply_waveforms` object,
+  keyed by source, that discloses what was simulated:
+
+  ```json
+  "supply_waveforms": { "vdd": { "waveform": "pwl", "rule": "scale-peak-to-supply",
+    "supply_v": 1.2, "nominal_peak_v": 1.8, "scale": 0.6667,
+    "nominal_levels_v": [0.0, 1.8], "effective_levels_v": [0.0, 1.2] } }
+  ```
+
+  The key is absent for requests that do not use the option. A `.param`-driven
+  ramp level is not rewritten (use a numeric literal or the parameter axis,
+  #3035). `analysis_steps[]` per-step `alter`s keep their own waveform
+  rejection (#3117).
 - **`corners.variants`** (`array<{"name": string, "sources": {<source>: number | string}}>`,
   optional, issue #3252) — named, *correlated* bias arrangements crossed with
   the other axes (outer to inner: process, `supply_v`, variants, temperature).

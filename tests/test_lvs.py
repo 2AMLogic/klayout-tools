@@ -44,7 +44,7 @@ from pathlib import Path
 import pytest
 
 from helpers.subprocess_fakes import fake_completed
-from klayout_tools import lvs, lvs_netgen, pdk
+from klayout_tools import _provenance, lvs, lvs_netgen, pdk
 from klayout_tools.cli import main
 from klayout_tools.lvs import LvsError, run_lvs
 
@@ -11709,6 +11709,67 @@ def test_detect_empty_for_plain_element_netlist():
 # --- integration through run_lvs -------------------------------------------- #
 
 
+@pytest.mark.parametrize(
+    "card, name",
+    [
+        (
+            "X$1 d g s b sky130_fd_pr__nfet_01v8 L=0.15U W=0.65U",
+            "sky130_fd_pr__nfet_01v8",
+        ),
+        ("X$1 d g s b nfet_06v0 L=0.6U W=0.82U", "nfet_06v0"),
+    ],
+)
+def test_run_lvs_rejects_subckt_call_layout_netlist(tmp_path, card, name):
+    """Issue #2972: a PDK-bound (`klt extract --pdk`) layout netlist fails with
+    a form-mismatch error instead of reading as zero devices."""
+    layout_path = _write(
+        tmp_path / "layout.spice", f".subckt inv d g s b\n{card}\n.ends\n"
+    )
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv"},
+    }
+    with pytest.raises(LvsError, match=r"layout netlist .*simulation") as excinfo:
+        run_lvs(json.dumps(request))
+    assert name in str(excinfo.value)
+    assert "--pdk" in str(excinfo.value)
+
+
+def test_run_lvs_layout_netlist_defining_the_subckt_is_not_rejected(tmp_path):
+    text = (
+        ".subckt nfet_06v0 d g s b\n.ends\n"
+        ".subckt inv d g s b\nX$1 d g s b nfet_06v0 L=0.6U W=0.82U\n.ends\n"
+    )
+    layout_path = _write(tmp_path / "layout.spice", text)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv"},
+    }
+    # The in-file `.subckt` makes this a different (out-of-scope) case, not
+    # the form mismatch: whatever the compare does, it must not be that error.
+    try:
+        run_lvs(json.dumps(request))
+    except LvsError as exc:
+        assert "subcircuit-call" not in str(exc)
+
+
+def test_run_lvs_non_mos_generated_x_card_layout_netlist_is_not_rejected(tmp_path):
+    """Bare `klt extract` round-trips resistors as `X$n ... rsil` cards."""
+    text = ".subckt inv d g s b\nX$1 d g rsil W=1U L=2U\n.ends\n"
+    layout_path = _write(tmp_path / "layout.spice", text)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv"},
+    }
+    try:
+        run_lvs(json.dumps(request))
+    except LvsError as exc:
+        assert "subcircuit-call" not in str(exc)
+
+
 def test_run_lvs_subckt_call_reference_converts_and_matches(tmp_path):
     layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
     reference_path = _write(tmp_path / "ref.spice", _INVERTER_SUBCKT_CALL_SKY130)
@@ -15537,7 +15598,7 @@ def test_check_lvs_report_klt_version_drift_advisory(tmp_path):
     advisories = {entry["field"]: entry for entry in result["advisories"]}
     assert advisories.keys() == {"provenance.klt_version"}
     assert advisories["provenance.klt_version"]["report"] == "0.0.1-forged"
-    assert advisories["provenance.klt_version"]["current"] == lvs._klt_version()
+    assert advisories["provenance.klt_version"]["current"] == _provenance._klt_version()
 
 
 def test_check_lvs_report_klayout_version_drift_advisory(tmp_path):
@@ -15558,7 +15619,10 @@ def test_check_lvs_report_klayout_version_drift_advisory(tmp_path):
     advisories = {entry["field"]: entry for entry in result["advisories"]}
     assert advisories.keys() == {"provenance.klayout_version"}
     assert advisories["provenance.klayout_version"]["report"] == "0.0.1-forged"
-    assert advisories["provenance.klayout_version"]["current"] == lvs._klayout_version()
+    assert (
+        advisories["provenance.klayout_version"]["current"]
+        == _provenance._klayout_version()
+    )
 
 
 def test_check_lvs_report_missing_version_fields_no_crash(tmp_path):

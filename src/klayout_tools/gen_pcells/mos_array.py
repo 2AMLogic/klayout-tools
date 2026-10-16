@@ -37,6 +37,42 @@ def _insert_mos_cap_mark(pcell: Any, info: dict[str, Any], dbu: float) -> None:
     )
 
 
+def _insert_unit_shapes(
+    cell: Any,
+    dbu: float,
+    role_layers: list[tuple[str, int]],
+    unit_boxes: dict[str, list[tuple[float, float, float, float]]],
+    placements: list[dict[str, Any]],
+    share_sd: bool,
+) -> None:
+    """Draw each placed unit's per-role boxes (issue #3551).
+
+    Under ``share_sd`` adjacent units draw the shared S/D segment's
+    active/contact/metal at identical coordinates; insert each distinct shape
+    once rather than as stacked duplicates."""
+    from klayout_tools.gen import _insert_boxes
+
+    drawn: set[tuple[str, int, int, int, int]] = set()
+    for c in placements:
+        for role, li in role_layers:
+            if not share_sd:
+                _insert_boxes(cell, li, dbu, unit_boxes[role], c["x0_um"], c["y0_um"])
+                continue
+            for x0, y0, x1, y1 in unit_boxes[role]:
+                ox, oy = c["x0_um"], c["y0_um"]
+                shifted = (x0 + ox, y0 + oy, x1 + ox, y1 + oy)
+                key = (
+                    role,
+                    int(round(shifted[0] / dbu)),
+                    int(round(shifted[1] / dbu)),
+                    int(round(shifted[2] / dbu)),
+                    int(round(shifted[3] / dbu)),
+                )
+                if key not in drawn:
+                    drawn.add(key)
+                    _insert_boxes(cell, li, dbu, [shifted])
+
+
 def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
     """Build the ``mos_array`` reference generator's PCell -- a matched MOS
     transistor array.
@@ -98,6 +134,11 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         ``pitch_x_um``/``pitch_y_um`` (issue #3299, Phase 1) override the
         column/row pitch, clamped up to the legal minimum -- see
         :func:`_mos_array_layout`'s own docstring. ``0.0`` (the default)
+        draws byte-for-byte unchanged geometry.
+
+        ``share_sd`` (issue #3551, Phase 2 of #3299) abuts adjacent unit
+        devices in a row so they share one contacted S/D segment -- see
+        :func:`_mos_array_layout`'s own docstring. ``False`` (the default)
         draws byte-for-byte unchanged geometry."""
 
         # Declared via ``self.param("mfg_grid_um", ...)`` below; the
@@ -437,6 +478,17 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "(default) = no override",
                 default=0.0,
             )
+            self.param(
+                "share_sd",
+                getattr(self, "TypeBoolean"),  # noqa: B009 -- see type baseline
+                "Abut horizontally adjacent unit devices so each pair shares "
+                "one contacted S/D segment (U<i>_D and U<i+1>_S are the same "
+                "node); changes electrical topology (issue #3551). Requires "
+                "topology='array' and fingers=1; exclusive with pitch_x_um/"
+                "interior_channel_um. False (default) = isolated units, "
+                "byte-for-byte unchanged",
+                default=False,
+            )
             # Fixed drawn side of every cut on contact_layer (issue #2585) --
             # harness-computed by `_cut_fixed_size_um` from the resolved PDK
             # family and layer. `0.0` (no upper size bound) leaves the cuts
@@ -506,18 +558,24 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.pitch_x_um,
                 self.pitch_y_um,
                 top_endcap_um=self.top_endcap_um,
+                # Not a typed attribute (PCell params are set dynamically);
+                # `getattr` keeps the type baseline from growing per param.
+                share_sd=getattr(self, "share_sd"),  # noqa: B009
             )
             unit_boxes = info["unit"]["boxes_um"]
-            for c in info["cells"] + info["dummy_cells"]:
-                for role, li in (
+            _insert_unit_shapes(
+                self.cell,
+                dbu,
+                [
                     ("active", li_active),
                     ("poly", li_poly),
                     ("contact", li_contact),
                     ("metal", li_metal),
-                ):
-                    _insert_boxes(
-                        self.cell, li, dbu, unit_boxes[role], c["x0_um"], c["y0_um"]
-                    )
+                ],
+                unit_boxes,
+                info["cells"] + info["dummy_cells"],
+                info["share_sd"],
+            )
 
             # Source/drain implant (issue #1577): drawn over every real *and*
             # dummy unit device's own active body -- DF.12-style coverage

@@ -425,6 +425,15 @@ reference netlist (in the default `plain-element` form) instantiates a
 actionable error naming the form mismatch instead of producing the misleading
 cascade.
 
+The same guard applies to a pre-extracted `layout.netlist` (issue #2972): a
+netlist written by `klt extract --pdk` carries PDK-bound `X` cards (e.g.
+`X$1 d g s b nfet_06v0 L=0.6U W=0.82U`) and is rejected with a layout-specific
+form-mismatch error naming the offending MOS subcircuits. There is no
+`layout.form` conversion; re-extract the layout without `--pdk` to get the
+plain-element form. `X` cards naming a deck's custom device classes (MoM
+capacitors, drawn resistors), non-MOS devices and subcircuits the file itself
+defines are not flagged (only a curated MOS subcircuit call is).
+
 An undefined `X` card naming anything **else** — a PDK device with no curated
 binding yet (e.g. sg13g2's `npn13G2`), or a typo'd/missing subcircuit — is not
 a form mismatch this guard can name, but it is no longer silent either (issue

@@ -64,29 +64,39 @@ evidence of nothing.
 
 **Not every item has a tool behind it.** Items 3-7 each name a `klt` verb
 that can mechanically grade them, and item 8 has a purpose-built generic
-evidence envelope — but items **1**, **2**, **9**, and **10** have no
-`klt` verb. For those four, the evidence the tool can read is an
-**artifact-anchored generic envelope** (issue #2718). The envelope declares
-the item it attests (`"t1_item": <id>`) and pins the audited artifact by
-path and content hash, and the manifest pins the same hash. The row is
-`met` only when the artifact still re-hashes to that value. The artifact
-per item:
+evidence envelope — but items **1**, **2**, **9**, and **10** are claims
+about what a repository contains. For those four, the evidence the tool can
+read is an **artifact-anchored generic envelope** (issue #2718). The
+envelope declares the item it attests (`"t1_item": <id>`) and pins the
+audited artifact by path and content hash, and the manifest pins the same
+hash. The row is `met` only when the artifact still re-hashes to that value.
+The artifact per item:
 
 - item 1: the design-source inventory;
 - item 2: the committed layout stream;
 - item 9: the testbench inventory;
-- item 10: the repo-hygiene audit record, for example the CI workflow
-  file or a checklist covering README, spec table and license.
+- item 10: the repo-hygiene inventory.
+
+For items 1, 9 and 10 that envelope is **tool-produced**, not hand-rolled:
+`klt signoff --attest {1,9,10} --inventory <file>` (issue #2844) reads a
+versioned inventory and derives `status` from item-specific mechanical
+checks it records in the envelope — item 1, every source and derived
+netlist exists and each derived netlist passes its declared freshness check
+(e.g. `klt netlist --check`); item 9, every testbench exists, the declared
+cold-start invocation succeeds, and the PDK revision and tool versions are
+pinned; item 10, every hygiene artifact exists and every declared CI/audit
+command succeeds. `--check` re-attests and fails on any drift of the
+inventory, an inventoried file, or a check outcome. A passing native
+envelope (a clean DRC report, say) **no longer satisfies items 1, 9 or
+10**. Item 2 still accepts one, for compatibility; its citation carries no
+`artifact_binding`, which marks it as a cited pass the tool could not judge
+for relevance. See [`docs/cli/signoff.md`](cli/signoff.md)'s "Items 1, 2,
+9, and 10" and "Attesting items 1, 9 and 10".
 
 Where the claim is about a set of files (item 1's sources plus the derived
 netlist; item 9's or 10's several files), the envelope may bind the set with
 `provenance.input.paths` (issue #3044) so that editing any member turns the
 row stale; see [`docs/cli/signoff.md`](cli/signoff.md).
-
-A passing native envelope cited for one of these four is still accepted,
-for compatibility. Its citation carries no `artifact_binding`, which marks
-it as a cited pass the tool could not judge for relevance. See
-[`docs/cli/signoff.md`](cli/signoff.md)'s "Items 1, 2, 9, and 10".
 
 ### What a T1 claim is scoped to
 

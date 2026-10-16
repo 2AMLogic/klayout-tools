@@ -419,6 +419,7 @@
       "modules": [
         "klayout_tools.cli.signoff_cmd",
         "klayout_tools.signoff",
+        "klayout_tools.signoff_attest",
         "klayout_tools.signoff_envelopes",
         "klayout_tools.signoff_power_delivery"
       ]
@@ -444,6 +445,7 @@
         "klayout_tools.sim_injected",
         "klayout_tools.sim_merge",
         "klayout_tools.sim_mismatch_gate",
+        "klayout_tools.sim_noise",
         "klayout_tools.sim_plot",
         "klayout_tools.sim_portable",
         "klayout_tools.sim_raw",
@@ -451,6 +453,7 @@
         "klayout_tools.sim_set",
         "klayout_tools.sim_staging",
         "klayout_tools.sim_steps",
+        "klayout_tools.sim_supply_waveform",
         "klayout_tools.sim_transfer",
         "klayout_tools.sim_transfer_meas"
       ]
@@ -1231,18 +1234,6 @@
       "consumer": "klayout_tools.lvs",
       "exporter": "klayout_tools._provenance",
       "symbol": "_content_hash",
-      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
-    },
-    {
-      "consumer": "klayout_tools.lvs",
-      "exporter": "klayout_tools._provenance",
-      "symbol": "_klayout_version",
-      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
-    },
-    {
-      "consumer": "klayout_tools.lvs",
-      "exporter": "klayout_tools._provenance",
-      "symbol": "_klt_version",
       "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
     },
     {

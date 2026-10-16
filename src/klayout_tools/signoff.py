@@ -419,7 +419,8 @@ its device/net-count reporting -- exactly as issue #1987 left them. What
 changes is only whether an `extract` citation (or any other wrong-kind one)
 can satisfy a *numbered tier item*.
 
-**Items 1, 2, 9 and 10 are deliberately left unrestricted.** Unlike items
+**Items 1, 2, 9 and 10 were deliberately left unrestricted** (issue #2844
+later restricted 1, 9 and 10 -- see "Attested evidence" below). Unlike items
 3-8 they name no `klt` verb at all, and ``docs/cli/signoff.md``'s "Items
 1, 2, 9, and 10" section states the grading consequence plainly: any
 recognised, passing native kind satisfies them, topical relevance
@@ -441,13 +442,26 @@ documents the four conditions; :func:`_generic_item_binding_refusal` and
 :func:`_grade_evidence` enforce them, and the ``"met"`` citation carries an
 ``artifact_binding`` block disclosing the bound artifact.
 
-Strictly additive: a native citation for these items grades exactly as it
-did before (and carries no ``artifact_binding``, which is how a reader tells
-"a passing envelope was cited" apart from "the item is bound to an audited
-artifact"); items 3-7 and 11 still reject ``"generic"``; item 8 accepts a
-generic envelope with no ``t1_item`` exactly as before, and refuses one that
-declares a different item (:data:`_REASON_WRONG_ITEM`), so an anchored
-attestation for item 9 cannot be replayed onto item 8 either.
+As shipped by issue #2718 this was strictly additive: a native citation for
+these items graded exactly as before (and carried no ``artifact_binding``,
+which is how a reader tells "a passing envelope was cited" apart from "the
+item is bound to an audited artifact"); items 3-7 and 11 still reject
+``"generic"``; item 8 accepts a generic envelope with no ``t1_item`` exactly
+as before, and refuses one that declares a different item
+(:data:`_REASON_WRONG_ITEM`), so an anchored attestation for item 9 cannot
+be replayed onto item 8 either.
+
+## Attested evidence for items 1, 9 and 10 (issue #2844)
+
+Issue #2718 gave these items something to bind to, but no producer: the
+inventory, its hash, the envelope and its ``status: "pass"`` were all
+hand-written. :mod:`.signoff_attest` (``klt signoff --attest {1,9,10}
+--inventory FILE``) is that producer -- it runs item-specific mechanical
+checks over a versioned inventory and emits the same anchored generic
+envelope, graded here with no special path. With a real producer in place,
+:data:`_ITEMS_REQUIRING_ATTESTED_EVIDENCE` restricts items 1, 9 and 10 to
+``{"generic"}`` (:func:`_allowed_kinds_for`), so an unrelated native pass
+no longer turns them green. Item 2 is unchanged.
 
 ## Power delivery (structural): item 11 <- `klt erc` + `klt lvs` (+ P&R) (issue #2025)
 
@@ -1050,7 +1064,10 @@ _MIXED_SIGNAL_PARTITIONS = ("analog", "digital")
 #: and passed as :func:`_build_tier_item`'s ``allowed_kinds`` parameter. An
 #: item id absent from this map (items 1, 2, 9 and 10, today) is
 #: unrestricted (``None``), preserving the original Phase 0/1 behaviour where
-#: any recognised, passing envelope kind satisfies any item.
+#: any recognised, passing envelope kind satisfies any item -- except that
+#: :func:`_allowed_kinds_for` restricts items 1, 9 and 10 to ``"generic"``
+#: through the separate :data:`_ITEMS_REQUIRING_ATTESTED_EVIDENCE` (issue
+#: #2844; see that constant for why it is not an entry here).
 #:
 #: **Every T1 item that names evidence is restricted here** (issue #2044):
 #: items 3-8. The four absent ids are exactly the four
@@ -1175,15 +1192,35 @@ _ITEMS_ACCEPTING_GENERIC_EVIDENCE: frozenset[int] = frozenset({1, 2, 8, 9, 10})
 #: :data:`_REASON_UNANCHORED_EVIDENCE`. The met citation then carries an
 #: ``artifact_binding`` block disclosing what was bound.
 #:
-#: Deliberately **not** in :data:`_ITEM_ALLOWED_KINDS`: these four still
-#: accept any passing native envelope exactly as before (no verdict any
-#: existing manifest renders changes), and so stay "structurally
-#: ungradeable" for the fleet roll-up's blocker reduction
-#: (:func:`_is_structurally_ungradeable_item`). The absence of
-#: ``artifact_binding`` on such a citation is what tells a reader the row
-#: was satisfied by a passing envelope the grader could not judge for
-#: relevance, rather than by an item-bound artifact.
+#: Deliberately **not** in :data:`_ITEM_ALLOWED_KINDS`, and so still
+#: "structurally ungradeable" for the fleet roll-up's blocker reduction
+#: (:func:`_is_structurally_ungradeable_item`). Item 2 still accepts any
+#: passing native envelope exactly as before; items 1, 9 and 10 no longer do
+#: (issue #2844, :data:`_ITEMS_REQUIRING_ATTESTED_EVIDENCE`). The absence of
+#: ``artifact_binding`` on an item-2 native citation is what tells a reader
+#: the row was satisfied by a passing envelope the grader could not judge
+#: for relevance, rather than by an item-bound artifact.
 _ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE: frozenset[int] = frozenset({1, 2, 9, 10})
+
+#: T1 item ids whose **only** accepted evidence is an artifact-anchored
+#: ``"generic"`` envelope (issue #2844) -- items 1 (Design sources), 9
+#: (Testbenches shipped) and 10 (Repo hygiene). Before that issue a passing
+#: native envelope of any recognised kind satisfied them, topical relevance
+#: notwithstanding (a clean `klt drc` report "proved" repo hygiene). Now that
+#: ``klt signoff --attest`` (:mod:`.signoff_attest`) produces a mechanically
+#: derived envelope for exactly these three, :func:`_allowed_kinds_for`
+#: restricts them to ``{"generic"}``, so a native citation renders
+#: ``"unmet"``/:data:`_REASON_WRONG_KIND`.
+#:
+#: Item 2 (Layout) is deliberately absent: it is outside issue #2844's scope
+#: and keeps accepting any passing native envelope as before.
+#:
+#: Kept separate from :data:`_ITEM_ALLOWED_KINDS` on purpose: that table also
+#: decides :func:`_is_structurally_ungradeable_item` and
+#: :func:`_is_graded_by_build`, and moving these ids into it would silently
+#: re-rank the fleet roll-up's ``blocking_item`` (issue #2178) -- a separate
+#: behaviour change this tightening does not make.
+_ITEMS_REQUIRING_ATTESTED_EVIDENCE: frozenset[int] = frozenset({1, 9, 10})
 
 #: T1 item ids a ``"power"``-kind citation (issue #1321, see this module's
 #: "`klt power` (IR-drop/EM) evidence ingestion" docstring section) may
@@ -5281,14 +5318,17 @@ def _allowed_kinds_for(item_id: int, partition_kind: str) -> set[str] | None:
     mixed-signal block's digital partition as to a pure ``"digital"`` block,
     with no separate wiring.
 
-    ``None`` means unrestricted (items 1, 2, 9 and 10 today -- every item
-    that names no evidence at all, issue #2044). An item
+    ``None`` means unrestricted (item 2 today -- issue #2044 left items 1,
+    2, 9 and 10 unrestricted; issue #2844 restricted 1, 9 and 10 to
+    ``{"generic"}`` via :data:`_ITEMS_REQUIRING_ATTESTED_EVIDENCE`). An item
     present in
     :data:`_ITEM_ALLOWED_KINDS` but with no entry for this partition kind
     falls back to the ``"analog"`` (strictest) set rather than becoming
     silently unrestricted -- an unrecognised partition kind must never
     *loosen* an item's evidence requirement.
     """
+    if item_id in _ITEMS_REQUIRING_ATTESTED_EVIDENCE:
+        return {"generic"}
     by_partition_kind = _ITEM_ALLOWED_KINDS.get(item_id)
     if by_partition_kind is None:
         return None
@@ -6496,6 +6536,21 @@ def _generic_artifact_binding(
         value = envelope.get(field)
         if isinstance(value, str):
             binding[field] = value
+    # Issue #2844: an envelope produced by `klt signoff --attest` names the
+    # producer and how many item-specific checks backed its status, so a
+    # reader (or a fleet roll-up) can tell a derived pass from a hand-written
+    # one. Disclosure only -- never graded, and absent for any envelope that
+    # carries no `attestation` block.
+    attestation = envelope.get("attestation")
+    if isinstance(attestation, Mapping) and isinstance(
+        attestation.get("producer"), str
+    ):
+        binding["attestation"] = {
+            "producer": attestation["producer"],
+            "inventory_schema_version": attestation.get("inventory_schema_version"),
+            "check_count": attestation.get("check_count"),
+            "passed_count": attestation.get("passed_count"),
+        }
     return binding
 
 
@@ -6853,7 +6908,9 @@ def _build_tier_item(
     restriction, preserving Phase 0/1's original behaviour where any
     recognised, passing envelope kind satisfies any item -- since issue
     #2044 only T1 items 1, 2, 9 and 10 (the four naming no evidence at all)
-    still pass ``None`` (see :data:`_ITEM_ALLOWED_KINDS` and
+    passed ``None``, and since issue #2844 only item 2 does -- items 1, 9
+    and 10 get ``{"generic"}`` (see :data:`_ITEM_ALLOWED_KINDS`,
+    :data:`_ITEMS_REQUIRING_ATTESTED_EVIDENCE` and
     :func:`_allowed_kinds_for`).
 
     ``partition_kind`` (issue #2362) is the partition this row grades --

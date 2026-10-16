@@ -432,12 +432,24 @@ not `klt --version`, if you need to detect this kind of drift. See
   layer instead of extracting silently device-less. Additive; no schema,
   exit-code or `status` change.
 
+- **`klt sim` native noise measurements** (issue #2938): a
+  `measurements[]` entry may declare `noise: {quantity: "inoise"|"onoise",
+  at_hz | band_hz}` to read a spot density or a band-integrated rms value
+  from a `noise` analysis without `expr` or the `noise1.` plot prefix.
+  **Additive contract change:** a new optional measurement form; runners
+  older than this release reject it (see `docs/cli/sim.md`).
 - **New verb `klt tap-distance`** (issue #3009): asserts every point of a
   subject region is within a Euclidean distance of a qualifying tap (latch-up /
   tie spacing), optionally per island and filtered to taps wired to named
   nets. Reports a proven `lower_bound_um`/`measured_max_distance_um` bracket;
   exits `0` pass, `3` fail, `4` `unsupported` (rule not evaluable, never a
   pass). See `docs/cli/tap-distance.md`.
+- **`klt sim` can sweep a ramped (PWL/PULSE) supply** (issue #2902): new
+  `corners.supply_waveforms` lists `corners.supply_v` keys whose PWL/PULSE
+  source is rescaled per corner (peak level = the swept supply value) instead
+  of `alter`ed. Additive corner field `supply_waveforms` discloses the
+  nominal and effective levels. The #2706 rejection stays for unlisted
+  sources and now names the option.
 - **Bipolar markers can be derived layer expressions** (issue #2860):
   `BipolarDevice.marker` now accepts a `LayerExpr`, a frozen AND/NOT tree
   of drawn layers that can nest, as well as a bare `(layer, datatype)`
@@ -698,6 +710,23 @@ not `klt --version`, if you need to detect this kind of drift. See
   a read-back `power_pins` verdict and `--require-power-pins`; `klt signoff`
   recognises both envelopes as opt-in kinds scoped to item 11.
 
+- **`klt signoff --attest {1,9,10}`: tool-produced evidence for T1 items 1,
+  9 and 10** (issue #2844): reads a versioned attestation inventory
+  (`"kind": "t1-attestation-inventory"`, `schema_version: 1`), runs
+  item-specific checks (item 1: sources and derived netlists exist and each
+  netlist passes its declared freshness command; item 9: testbenches exist,
+  the cold-start invocation succeeds, PDK revision and tool versions are
+  pinned; item 10: hygiene files exist and declared CI/audit commands
+  succeed) and emits the artifact-anchored `generic` envelope with
+  `status` derived from those checks and an `attestation.checks[]` record.
+  `-o` writes only a passing envelope, only when its bytes change;
+  `--check <committed>` re-attests and exits `3` on any drift or failure.
+  **Behaviour change:** items 1, 9 and 10 now accept only an anchored
+  `generic` envelope, so a passing but unrelated native envelope (e.g. a
+  clean `klt drc` report) renders `unmet`/`wrong_kind` for them. Item 2 is
+  unchanged. A met anchored citation's `artifact_binding` gains an additive
+  `attestation` block when the envelope came from `--attest`. See
+  `docs/cli/signoff.md` "Attesting items 1, 9 and 10".
 - **Output-directory ownership for `klt pex` / `sim` / `place-and-route`**
   (issue #2770): each run takes a non-blocking OS-backed advisory lock on its
   persistent artifact root; a competing cooperating run fails fast with the

@@ -596,6 +596,16 @@ more specific `unanchored_evidence`. No `schema_version` bump. See
 [`docs/cli/signoff.md`](cli/signoff.md)'s "Items 1, 2, 9, and 10: bind them
 to an audited artifact".
 
+Issue #2844 adds `klt signoff --attest {1,9,10}`, which produces that
+envelope, and restricts items 1, 9 and 10 to it. A native citation for those
+three now renders `unmet`/`wrong_kind`, an existing `reason` value; this is a
+**grading-rule change**, recorded in `CHANGELOG.md`, not a shape change, so
+no `schema_version` bump (the `build.grading_ruleset_id` hash moves, which
+is what it is for). `citation.artifact_binding` gains an optional
+`attestation` object when the cited envelope came from `--attest`. Item 2 is
+unchanged. The inventory `--attest` reads is its own versioned contract —
+see "A versioned *input* contract" below.
+
 Issue #3044 adds an optional `provenance.input.paths` set form to that
 envelope and, on its citation, an additive `artifact_binding.members` list
 (`[{path, content_hash, status}]`; the item's `detail.artifact_binding.members`
@@ -1602,6 +1612,35 @@ the envelope is additive and flat:
   byte-compare a committed copy. Field-level documentation, the matching
   rules, and the signoff freshness consequence are in
   [`cli/yield.md`](cli/yield.md#deriving-a-sample-set-from-two-klt-sim-reports-klt-yield-samples).
+
+## A versioned *input* contract: the attestation inventory (`klt signoff --attest`, issue #2844)
+
+`klt signoff --attest {1,9,10} --inventory FILE` reads a document a block
+repo authors and commits: the **attestation inventory**
+(`"kind": "t1-attestation-inventory"`). Unlike a request document consumed
+once, it is a public, versioned contract in its own right, because the
+envelope `--attest` emits pins its raw-byte hash and a fleet of block repos
+depends on its meaning staying fixed:
+
+- The inventory carries its own `schema_version` (currently `1`),
+  independent of `klt signoff`'s output `schema_version`. A build refuses
+  (exit `1`) any version it does not read rather than guessing at its
+  semantics.
+- Within a version, the inventory is **closed**: unknown top-level fields
+  are refused, so a typo cannot silently drop a check. Adding a new optional
+  field or a new item therefore lands as a new inventory `schema_version`,
+  not as an additive change. A build that adds version `2` keeps reading
+  `1`.
+- The emitted envelope is an ordinary `generic` evidence envelope plus an
+  additive `attestation` block (`producer`, `inventory_schema_version`,
+  `hash_algorithm`, `check_count`, `passed_count`, `checks[]`). Its fields
+  follow this document's usual additive rules.
+- Hashes are `sha256:<hex>` of raw bytes (`hash_algorithm:
+  "sha256-raw-bytes"`). Introducing any normalisation would be a new named
+  algorithm recorded in the envelope, never a silent change to this one.
+
+Field-level schema, path rules, examples and exit codes:
+[`cli/signoff.md`](cli/signoff.md#attesting-items-1-9-and-10---attest-issue-2844).
 
 ## Error shape
 
