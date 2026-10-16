@@ -101,6 +101,14 @@ one) — the "new optional member, absent when not applicable" rule above.
 No `schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s
 "Threshold-crossing time series (`measurements[].crossings`)".
 
+`klt sim` also gains an additive `environment.netlist_identity` (normalised,
+comment/whitespace/path-insensitive netlist-closure hash; `null` plus
+`netlist_identity_error` when not computable) and an optional request field
+`expect_netlist_identity`: a value differing from the computed identity is
+refused before simulating (exit 1, usual error envelope) with both stamps in
+the message. No `schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s
+"`environment.netlist_identity`".
+
 This caveat is narrow: it covers a field's *value set* growing (a new enum
 member appearing), not what an existing, unchanged-type field's value
 *means*. Redefining the semantics of an already-shipped field — e.g. `klt

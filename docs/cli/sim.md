@@ -4822,6 +4822,7 @@ the *response* echoes back.
 | `options.ngspice_options` | object | Issue #3111. Solver/convergence `.options` (`gmin`, `gminsteps`, `srcsteps`, `itl1`, `itl2`, `itl4`, `noopiter`, `method`, `reltol`, `abstol`, `vntol`, `pivtol`) rendered as one `.options` card after `.temp` in every corner deck and echoed verbatim as `environment.ngspice_options`. Values are numbers, booleans or bare-token strings; an unknown key or other value is an application error (exit 1) naming it; refused for `engine: "xyce"`. Unset: no card, no echo. See "Solver options: `options.ngspice_options`" above. |
 | `options.ngspice_init`   | array\<string\>   | Issue #2520. Lines materialized as a `.spiceinit` file inside each corner's own artifact directory (`cwd=` for that corner's `ngspice` invocation), most commonly `["set ngbehavior=hsa"]` to select a compatibility mode for vendor decks written in HSPICE style. Defaults to unset — no `.spiceinit` is written (no behavior change). `engine: "ngspice"` only; accepted-and-ignored for `"xyce"`. See "ngspice's working directory, and `.spiceinit` compatibility mode" above. |
 | *(CLI-only)* `--plot <dir>` | string         | No request-document equivalent (like `trajectory --plot`) — writes one waveform SVG per non-sweep signal per corner to `<dir>`, forcing `options.waveforms`/`keep_artifacts` on for this run. See "Waveform plots" above. |
+| `expect_netlist_identity` | string           | Optional (issue #3074). The `environment.netlist_identity` stamp of the record this run is compared against. When present and different from the identity computed for this request, `klt sim` refuses before simulating (application error, exit 1) with a message naming both stamps. Absent or matching changes nothing. Also refused if the identity cannot be computed (see `netlist_identity_error`). |
 | `netlist_source`         | string            | Optional caller-declared provenance of `netlist`: `"schematic"` (pre-layout, e.g. an S6 sizing netlist) or `"extracted"` (post-layout, from `klt extract`). Omit for unchanged behavior — the field is purely additive. An unrecognized value is an application error (exit 1). See "Post-layout verification" below. |
 | `decks[]`                | array\<object\>   | Issue #2804. **Deck-list request**: declares pre-composed caller-owned ngspice decks to transport, instead of the corner matrix above. When present, `netlist`/`corners`/`analysis`/`measurements` and friends must be absent, and the report takes the deck shape (`mode: "decks"`). Per-unit fields (`id`, `deck`, `inputs`, `outputs`, `timeout_s`) and the preservation/isolation contract are documented in "Pre-composed decks" above. |
 
@@ -5218,3 +5219,22 @@ of the file's on-disk bytes). A directive left to the executing host is
 `pdk_root`. If the closure cannot be resolved (e.g. a missing include),
 `environment.netlist_closure_error` carries the message instead and the report
 is otherwise unchanged.
+
+### `environment.netlist_identity` (issue #3074)
+
+`environment.netlist_sha256` and `netlist_closure` hash raw bytes, so a comment
+edit or a moved include changes them. `environment.netlist_identity` is the
+comparable stamp: `sha256:<hex>` over the netlist and its resolved
+`.include`/`.inc` closure (resolution order, as in `netlist_closure`) after
+dropping `*` comment lines and trailing `;`/`$` comments and blank lines,
+folding `+` continuations, collapsing whitespace, folding case, and omitting
+the *target text* of `.include`/`.inc` directives (content, not location).
+Line order is **not** normalised (`.param`/`.model` order can matter), so a
+reorder is a mismatch: a false mismatch is safe, a false match is not.
+
+The identity is `null`, with `environment.netlist_identity_error`, when the
+closure cannot be fully read (an unresolvable include, or an env-var/PDK-rooted
+include left to the executing host). It is computed client-side, so `local`,
+`remote` and `batch` report the same value for one request. `klt sim` stays
+stateless: to guard a comparison, copy the earlier report's stamp into the new
+request's `expect_netlist_identity`.
