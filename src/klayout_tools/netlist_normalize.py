@@ -1447,6 +1447,13 @@ def detect_subckt_call_devices(text: str) -> list[str]:
     capacitor, bipolar), not just MOS -- a reference netlist whose only
     subckt-call devices are e.g. resistors is now detected the same way a
     MOS-only one always was.
+
+    A card whose instance name contains ``$`` (``X$1``, the name KLayout's
+    own extractor writes) is reported only when it is a MOS call: bare
+    ``klt extract`` round-trips resistors/capacitors/bipolars as such cards
+    under the same curated names (issues #1157/#1942), so those are not
+    evidence of the simulation form. Only ``klt extract --pdk`` emits MOS
+    ``X`` cards (issue #2972).
     """
     known = known_device_subckt_names()
     defined: set[str] = set()
@@ -1471,8 +1478,11 @@ def detect_subckt_call_devices(text: str) -> list[str]:
         if not positional:
             continue
         subckt_name = positional[-1]
-        if subckt_name in known and subckt_name not in seen:
-            used.append(subckt_name)
-            seen.add(subckt_name)
+        if subckt_name not in known or subckt_name in seen:
+            continue
+        if "$" in tokens[0] and known[subckt_name][1].kind != "mos":
+            continue
+        used.append(subckt_name)
+        seen.add(subckt_name)
 
     return [name for name in used if name not in defined]

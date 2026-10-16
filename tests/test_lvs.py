@@ -11269,10 +11269,27 @@ def test_run_lvs_layout_netlist_defining_the_subckt_is_not_rejected(tmp_path):
         "layout": {"netlist": layout_path, "top": "inv"},
         "reference": {"netlist": reference_path, "top": "inv"},
     }
+    # The in-file `.subckt` makes this a different (out-of-scope) case, not
+    # the form mismatch: whatever the compare does, it must not be that error.
     try:
         run_lvs(json.dumps(request))
     except LvsError as exc:
-        assert "simulation" not in str(exc)
+        assert "subcircuit-call" not in str(exc)
+
+
+def test_run_lvs_non_mos_generated_x_card_layout_netlist_is_not_rejected(tmp_path):
+    """Bare `klt extract` round-trips resistors as `X$n ... rsil` cards."""
+    text = ".subckt inv d g s b\nX$1 d g rsil W=1U L=2U\n.ends\n"
+    layout_path = _write(tmp_path / "layout.spice", text)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv"},
+    }
+    try:
+        run_lvs(json.dumps(request))
+    except LvsError as exc:
+        assert "subcircuit-call" not in str(exc)
 
 
 def test_run_lvs_subckt_call_reference_converts_and_matches(tmp_path):
