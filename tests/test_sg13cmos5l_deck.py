@@ -118,7 +118,7 @@ def test_sg13cmos5l_deck_registered_with_six_width_space_rules():
     assert {rule.check for rule in mos_only_rules} == {"width", "space"}
 
 
-def test_sg13cmos5l_deck_has_37_rules_after_nwell_enclosure_rules():
+def test_sg13cmos5l_deck_has_41_rules_after_nwell_space_rules():
     """Issue #1417 extends the curated deck past its #1400 Activ/GatPoly/
     Metal1-only starter to cover the full Metal1-TopMetal1 stack and its
     Via1/Via2/Via3/TopVia1 vias -- 30 rules total (27 + 3 upper-landing containment
@@ -128,15 +128,17 @@ def test_sg13cmos5l_deck_has_37_rules_after_nwell_enclosure_rules():
     on NWell (31/0): 32 rules across 12 layers; #3572 adds the net-aware
     `nwell.space.2` (NW.b1): 33. Issue #3573 adds the four derived-region
     `"enclosed"` NWell-enclosure rules (NW.c/c1/e/e1), which report on
-    Activ (1/0): 37 rules, same 12 layers."""
+    Activ (1/0): 37 rules, same 12 layers. Issue #3645 adds the four
+    derived-region `"separation"` NWell-to-Activ rules (NW.d/d1/f/f1): 41."""
     deck = get_deck("sg13cmos5l")
-    assert len(deck) == 37
+    assert len(deck) == 41
     assert {rule.check for rule in deck} == {
         "width",
         "space",
         "enclosing",
         "net_space",
         "enclosed",
+        "separation",
     }
     assert {rule.layer for rule in deck} == {
         (1, 0),  # Activ.drawing
@@ -310,18 +312,14 @@ def test_run_drc_sg13cmos5l_nw_b1_corner_to_corner(tmp_path: Path):
 
 
 def test_run_drc_sg13cmos5l_nwell_reports_remaining_unchecked(tmp_path: Path):
-    """NW.b1 is now checked (#3572); the NWell rules still unmodelled after
-    #3573 are named in `coverage.unchecked_rules` so `clean` is not read as
-    covering them."""
+    """NW.b1 (#3572) and NW.d/d1/f/f1 (#3645) are now checked; the NWell rules
+    still unmodelled after #3573 are named in `coverage.unchecked_rules` so
+    `clean` is not read as covering them."""
     path = _nwell_layout(tmp_path, "nw_unchecked.gds", [(0, 0, 3, 3)])
     report = run_drc(path, "sg13cmos5l")
     assert report["status"] == "clean"
     unchecked = report["coverage"]["unchecked_rules"]
     assert {u["rule"] for u in unchecked} == {
-        "NW.d",
-        "NW.d1",
-        "NW.f",
-        "NW.f1",
         "NW.c1.dig",
         "NW.d1.dig",
         "NW.e1.dig",
@@ -433,6 +431,64 @@ def test_run_drc_sg13cmos5l_nwell_enclosure_unmarked_thickgateox_absent_is_lv(
     report = run_drc(path, "sg13cmos5l")
     assert report["status"] == "clean"
     assert "nwell.enclosing.pactiv.1" in report["coverage"]["rules_checked"]
+
+
+_NW_SPACE_RULES = {
+    # (implant layer, thick gate ox) -> (rule id, threshold um)
+    ((7, 0), False): ("nwell.space.nactiv.1", 0.31),
+    ((7, 0), True): ("nwell.space.nactiv.hv.1", 0.62),
+    ((14, 0), False): ("nwell.space.pactiv.1", 0.24),
+    ((14, 0), True): ("nwell.space.pactiv.hv.1", 0.62),
+}
+
+
+@pytest.mark.parametrize(("implant", "hv"), list(_NW_SPACE_RULES))
+def test_run_drc_sg13cmos5l_nwell_space_threshold_edges(tmp_path: Path, implant, hv):
+    """NW.d/d1/f/f1: Activ 0.01 um short of the spacing trips only the rule for
+    its implant and ThickGateOx column; exactly at the threshold is clean."""
+    rule_id, space = _NW_SPACE_RULES[(implant, hv)]
+
+    def run(gap: float) -> dict:
+        left = 4 + gap
+        gox = (left - 1, -1, left + 3, 3) if hv else None
+        path = _nwell_activ_layout(
+            tmp_path,
+            f"nws_{rule_id}_{gap}.gds",
+            implant=implant,
+            activ=(left, 0, left + 2, 2),
+            nwell=(0, 0, 4, 4),
+            thick_gate_ox=gox,
+        )
+        return run_drc(path, "sg13cmos5l")
+
+    bad = run(round(space - 0.01, 3))
+    assert bad["status"] == "violations"
+    fired = {
+        k
+        for k in bad["rule_counts"]
+        if k.startswith("nwell.space.nactiv") or k.startswith("nwell.space.pactiv")
+    }
+    assert fired == {rule_id}
+
+    ok = run(space)
+    assert ok["status"] == "clean", ok["rule_counts"]
+    assert rule_id in ok["coverage"]["rules_checked"]
+
+
+@pytest.mark.parametrize("implant", [(7, 0), (14, 0)])
+def test_run_drc_sg13cmos5l_nwell_space_ignores_activ_inside_well(
+    tmp_path: Path, implant
+):
+    """Well tie / P+ wholly inside NWell is the enclosure rules' job, not a
+    space violation."""
+    path = _nwell_activ_layout(
+        tmp_path,
+        f"nws_inside_{implant[0]}.gds",
+        implant=implant,
+        activ=(1, 1, 3, 3),
+    )
+    report = run_drc(path, "sg13cmos5l")
+    assert not [k for k in report["rule_counts"] if k.startswith("nwell.space.")]
 
 
 def test_run_drc_sg13cmos5l_no_nwell_no_unchecked_marker(tmp_path: Path):
