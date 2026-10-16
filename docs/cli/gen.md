@@ -737,6 +737,26 @@ flags it as anonymous/unbiased the way it does a floating PMOS body — there
 is no equivalent `unbiased_nmos_body_nets[]` check for `flavor="nfet"` to
 satisfy.
 
+`mos_cap` (issue #3283) draws each unit as a **MOS capacitor** instead of a
+transistor: gate over diffusion with every source/drain segment tied into a
+single local-metal strap, plus the PDK's MOS-capacitor marker layer drawn
+over the array (`gf180mcu`: `MOS_CAP_MK`, `166/5`, matching the official
+gf180mcu DRC deck's `mos_cap_mk = get_polygons(166, 5)`). Ports are `U<i>_SD` (the tied S/D strap, metal) and `U<i>_G` (gate
+poly; with `fingers > 1` the gate pads are tied by a poly bar), and the body
+tie is the guard ring's `TAP_*` ports, so `mos_cap` **requires
+`add_guard_ring: true`** and does not support `gate_contact`.
+`finger_topology` is ignored. The width floor is **not** the flat `0.42`
+µm of a plain transistor: it is the deck's own COMP min-width rule for the
+selected oxide (`comp.width.1` = 0.22 µm thin oxide, `comp.width.mv.1` = 0.30
+µm with `voltage_flavor: "medium_voltage"` on `gf180mcu`), and a `w_um` below
+it is rejected with an error naming the rule. Below the contact-plus-
+enclosure width each S/D segment grows a diffusion landing bump above the
+channel (channel width stays `w_um`) and the gate landing pad is lifted
+clear of it. A PDK family with no MOS-capacitor marker (everything but
+`gf180mcu` today) is rejected with a `GenError`. Plain `mos_array`
+(`mos_cap: false`, the default) is unchanged. `klt extract` does not yet
+recognise the marker as a capacitor device class (#2919).
+
 `voltage_flavor` (issue #1054) is a separate, orthogonal opt-in for a PDK's
 **medium-voltage/thick-oxide transistor variant** — a common multi-voltage-
 domain process feature distinct from `flavor`'s NMOS-vs-PMOS selection. The
