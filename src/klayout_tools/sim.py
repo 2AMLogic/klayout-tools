@@ -2276,6 +2276,23 @@ def _stamp_netlist_identity(
         environment["netlist_identity_error"] = netlist_identity_error
 
 
+def _check_capacity_wait_applies(
+    capacity_wait_s: Any, backend: str, attach_job_id: Any
+) -> None:
+    """Refuse ``--wait-for-capacity`` where it has nothing to wait for."""
+    if capacity_wait_s is None:
+        return
+    if backend != "batch":
+        raise SimError(
+            f"--wait-for-capacity requires backend 'batch' (got '{backend}')"
+        )
+    if attach_job_id is not None:
+        raise SimError(
+            "--wait-for-capacity cannot be combined with --attach: attach "
+            "launches nothing, so there is no capacity to wait for"
+        )
+
+
 def _apply_attach(
     engine_kwargs: dict[str, Any],
     attach_job_id: str | None,
@@ -2870,15 +2887,7 @@ def _run_sim_corners(
         else {"request_dir": request_dir}
     )
     _apply_attach(local_engine_kwargs, attach_job_id, backend, hosts, submit_only)
-    if capacity_wait_s is not None and backend != "batch":
-        raise SimError(
-            f"--wait-for-capacity requires backend 'batch' (got '{backend}')"
-        )
-    if capacity_wait_s is not None and attach_job_id is not None:
-        raise SimError(
-            "--wait-for-capacity cannot be combined with --attach: attach "
-            "launches nothing, so there is no capacity to wait for"
-        )
+    _check_capacity_wait_applies(capacity_wait_s, backend, attach_job_id)
 
     # Issue #2668: stage the complete job closure once, here, before any
     # backend runs -- so a missing model input, unresolvable dependency or
