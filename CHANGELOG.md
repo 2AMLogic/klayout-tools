@@ -34,6 +34,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   Decks without `reset` are byte-identical; a non-boolean value is refused by
   name. `docs/cli/sim.md` now also states that steps otherwise share circuit
   and solver state. Additive; no `schema_version` bump.
+
+- **`klt pex` no longer discards the schematic side on an extracted-side
+  backend failure** (issue #2990): an extracted-side `klt sim` failure other
+  than the pin-count mismatch (e.g. a batch-fleet capacity refusal) now
+  returns a normal response -- every `delta[]` row of that testbench is an
+  `error` row with the schematic value intact -- and names the failure in the
+  new additive top-level `backend_failure` field (`{testbench, side, message,
+  code}`, `null` otherwise). A schematic-side failure still aborts, but its
+  error envelope now carries `error.code` (e.g. `batch_no_capacity`).
 - **ASAP7 DRC deck checks `ACTIVE.W.2` and `SDT.W.3`** (issue #3085): the
   vertical-width-is-an-integer-multiple-of-27-nm rules (DRM Tables 3.5.1 /
   3.8.1) are now measured per local vertical width of each merged rectilinear
