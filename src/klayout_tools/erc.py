@@ -2268,6 +2268,13 @@ def _deck_device_cuts(
     - :class:`~klayout_tools.decks.ResistorDevice` -- conducting-body layer
       is ``body``; region is ``body & marker`` narrowed by ``requires``/
       ``excludes`` (:func:`~klayout_tools.extract._resistor_body_region`).
+      For a ``topology="abutting_heads"`` entry (sg13g2's poly resistors,
+      issue #2679) the region is instead the narrowed ``marker`` body that
+      touches two separate ``body``-layer heads -- the same region ``klt
+      extract`` recognises. Cutting it from the matching ``body`` role then
+      removes only whatever ``body`` geometry the marker actually covers (a
+      continuous bar's resistive span), never the abutting heads, so a
+      PDK-PCell-drawn resistor's two head nets stay distinct here too.
     - :class:`~klayout_tools.decks.CapacitorDevice` -- two independent
       conducting-body layers, each checked separately:
 

@@ -131,6 +131,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   Verilog netlist as reset-covered or unreset (machine-readable reason code),
   with a waiver file (fail on an unwaived element and on a stale waiver).
   `options.initial_state` for `functional-verification` follows separately.
+- **sg13g2 poly resistors from PDK PCells** (issue #2679): `klt extract
+  --deck sg13g2` now recognises `rsil`/`rppd`/`rhigh` drawn the way IHP's own
+  PCells draw them (`polyres` 128/0 as the body, two abutting `GatPoly` 5/0
+  heads) via a new `ResistorDevice.topology="abutting_heads"` mode (default
+  `"overlap"` is unchanged). A body missing a head, or separated from one by
+  a gap, is not recognised. `klt gen res_array` on sg13g2 now draws the same
+  convention, and `klt erc --deck sg13g2`'s auto-detected device cuts agree
+  with extraction. `klt deck devices` gains an additive `topology` field on
+  `resistor` entries.
 
 - **`openroad` Docker wrapper no longer runs as root** (issue #3151):
   `scripts/install-openroad-docker.sh` now writes a wrapper that passes

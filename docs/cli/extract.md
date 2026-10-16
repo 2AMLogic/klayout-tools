@@ -1755,6 +1755,26 @@ passes LVS silently.
 | `gf180mcu` | `rm3` | `gf180mcu_fd_pr__rm3` | `Metal3` 42/0 | `metal3_res` 110/13 | — | **0.09 Ω/□** | — |
 | `gf180mcu` | `tm6k`/`tm9k`/`tm11k`/`tm30k` | `gf180mcu_fd_pr__tm{6k,9k,11k,30k}` (top-metal thickness flavour, `METAL_TOP` default `9K`, caller-selectable via `--deck-option metal_top=`) | `Metal5` 81/0 (this curated deck's own top-of-stack — see `decks/gf180mcu.py`'s module docstring for the 6LM/`MetalTop` approximation this makes) | `metal5_res` 110/15 | — | **0.06/0.04/0.04/0.0095 Ω/□** | — |
 
+sg13g2's poly resistors `rsil`/`rppd`/`rhigh` are not
+drawn as a marked segment of a poly bar: IHP's own `SG13_dev` PCells draw
+`PolyRes` (128/0) as the **whole resistive body** and `GatPoly` (5/0) only
+as the two contact heads, which *abut* the body with zero overlap area
+(issue #2679). Their deck entries therefore declare
+`ResistorDevice.topology="abutting_heads"`: the recognised segment is the
+`PolyRes` region narrowed by each flavour's `requires`/`excludes` masks
+(upstream `res_derivations.lvs`'s `polyres_mk` core), kept only where it
+touches `GatPoly` in **two separate head regions**. `L`/`W` (and so
+`r_ohm`, including each flavour's end-term and width corrections) are
+measured from that `PolyRes` body, and the two heads are the device's
+terminals — KLayout's native resistor extractor attaches each directly
+across its shared edge with the body, so no upstream-style 5 nm port
+growth is applied. A body with one head missing, or separated from a head
+by any gap, is not a resistor (no device, rather than a guessed one); a
+continuous `GatPoly` bar with `PolyRes` over its middle still extracts the
+same device. Every other resistor class keeps the default
+`topology="overlap"` (`body & marker`) unchanged; `klt deck devices`
+reports each resistor class's `topology`.
+
 sky130's `res_generic_m1`..`res_generic_m5` (issue #1621) have no `.subckt`
 in the real sky130 device library — only a bare `.model
 sky130_fd_pr__res_generic_mN r ...` card — so `--pdk` leaves them as the
