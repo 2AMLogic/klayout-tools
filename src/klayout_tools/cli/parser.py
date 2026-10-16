@@ -1880,7 +1880,10 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
         pdk_help=(
             "PDK variant to resolve (e.g. sky130A); overrides $PDK. "
             "Optional -- extraction runs from --deck alone when omitted; "
-            "when given, an unresolvable PDK is an application error."
+            "when given, an unresolvable PDK is an application error. "
+            "Omitted, MOS devices are written as bare M cards that are not "
+            "mismatch-capable under Monte Carlo; pass --pdk for the "
+            "subckt-wrapper X call."
         ),
     )
     extract_parser.add_argument(
@@ -5646,6 +5649,33 @@ def _add_netlist_parser(subparsers: argparse._SubParsersAction) -> None:
             "checkout). The schematic and a project --rcfile must be tracked "
             "files under it; the uncompressed total is capped at "
             f"{netlist_batch.MAX_BATCH_TREE_BYTES // (1024 * 1024)} MiB"
+        ),
+    )
+    netlist_parser.add_argument(
+        "--batch-include",
+        dest="batch_include",
+        action="append",
+        default=None,
+        metavar="GLOB",
+        help=(
+            "--backend batch only, repeatable: upload only the git-tracked "
+            "files under the batch root matching this root-relative glob "
+            "(a bare directory name selects everything under it; '*' also "
+            "crosses '/'). The schematic and a project --rcfile must match, "
+            "or the run is refused"
+        ),
+    )
+    netlist_parser.add_argument(
+        "--batch-exclude",
+        dest="batch_exclude",
+        action="append",
+        default=None,
+        metavar="GLOB",
+        help=(
+            "--backend batch only, repeatable: leave the files matching this "
+            "root-relative glob out of the upload (applied after "
+            "--batch-include). The schematic and a project --rcfile cannot "
+            "be excluded"
         ),
     )
     netlist_parser.add_argument(
