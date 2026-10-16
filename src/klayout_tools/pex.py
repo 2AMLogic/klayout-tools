@@ -1144,6 +1144,18 @@ def _pin_count_mismatch_from_message(
     )
 
 
+def _backend_failure(testbench_path: str, exc: SimError) -> dict[str, Any]:
+    """The ``backend_failure`` record for an extracted-side
+    :class:`~klayout_tools.sim.SimError` that is not a pin-count mismatch
+    (issue #2990)."""
+    return {
+        "testbench": testbench_path,
+        "side": "extracted",
+        "message": str(exc),
+        "code": exc.code,
+    }
+
+
 def _pin_count_mismatch_from_report(
     sim_report: dict[str, Any],
     *,
@@ -2839,13 +2851,9 @@ def run_pex(
                     extracted_netlist=extracted_netlist_path,
                 )
                 if mismatch is None:
-                    if backend_failure is None:
-                        backend_failure = {
-                            "testbench": testbench_path,
-                            "side": "extracted",
-                            "message": str(exc),
-                            "code": exc.code,
-                        }
+                    backend_failure = backend_failure or _backend_failure(
+                        testbench_path, exc
+                    )
                 else:
                     pin_count_mismatch = pin_count_mismatch or mismatch
                 extracted_failure = (str(exc), exc.code)
