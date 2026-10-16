@@ -136,6 +136,17 @@ refused before simulating (exit 1, usual error envelope) with both stamps in
 the message. No `schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s
 "`environment.netlist_identity`".
 
+`stimulus` (issue #2977) is a new optional **request** block (declarative
+timed edges, expanded by `klt sim` into PWL sources) with two new optional
+**response** members under `environment`: `environment.stimulus` (the schedule
+as applied, present only when the request declared `stimulus`) and
+`environment.backend` (`{resolved, source, requested}`, present on every
+corner-sweep report). Every pre-existing request is unchanged and no existing
+response member changes type or meaning, so there is no `schema_version` bump.
+An older `klt` or fleet runner that predates the key ignores it rather than
+rejecting it; see [`docs/cli/sim.md`](cli/sim.md)'s "Declarative timed
+stimulus (`stimulus`)" for the compatibility caveat.
+
 This caveat is narrow: it covers a field's *value set* growing (a new enum
 member appearing), not what an existing, unchanged-type field's value
 *means*. Redefining the semantics of an already-shipped field — e.g. `klt
@@ -1779,6 +1790,12 @@ refusal exit codes `5`-`10` (a set that is not exactly the planned one; stdout c
 `status: "refused"` payload whose `refusal.code` names the class) alongside `klt sim`'s
 `3`/`4` verdicts. See [`docs/cli/sim.md`](cli/sim.md) "Merging per-request
 reports" and `docs/schemas/sim-merge-report.schema.json`.
+
+`klt sim-plan` (issue #3423) writes the shard requests and `sim-merge` manifest
+beside a request and prints `{schema_version, axis, manifest, shard_count,
+shards[]}` (`id`, `request`, `request_sha256`, `corner_count`). It exits `0` or
+`1` (error envelope on stderr) only. See [`docs/cli/sim.md`](cli/sim.md)
+"Planning shards".
 
 ## Exit codes
 

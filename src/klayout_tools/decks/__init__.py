@@ -71,6 +71,7 @@ from .rules import (
     DerivedLayer,
     DrcRule,
     RuleProvenance,
+    TapDistanceSpec,
     UnknownDeckError,
 )
 
@@ -98,6 +99,7 @@ __all__ = [
     "RuleProvenance",
     "TerminalRelation",
     "SizeFilter",
+    "TapDistanceSpec",
     "UnknownDeckError",
     "UnknownExtractionDeckError",
     "UnsupportedDeviceMarker",

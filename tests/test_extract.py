@@ -20707,7 +20707,8 @@ def test_spef_floating_duplicate_named_outputs_are_skipped(tmp_path):
 def test_spef_unlabelled_dollar_nets_absent_from_def_are_skipped(tmp_path):
     """Issue #3580: a unique-named unlabelled `$N` net with no DEF net (and not
     a port) gets no `*D_NET` (STA-1650) and its coupling is dropped; a `$N`
-    that the DEF names, a port, and a labelled non-DEF net are untouched."""
+    that the DEF names and a port are untouched. Issue #3662: a labelled net
+    (e.g. a sub-cell label `Z`/`ZN`) with no DEF net is skipped the same way."""
     from klayout_tools.extract_spef import _write_spef
 
     def run(name, **kwargs):
@@ -20734,10 +20735,10 @@ def test_spef_unlabelled_dollar_nets_absent_from_def_are_skipped(tmp_path):
     skipped, text = run(
         "on", net_instance_pins={"sig": (("u1", "A"),), "$12": (("u2", "A"),)}
     )
-    assert skipped == ["$7"]
+    assert skipped == ["$7", "lab"]
     assert "*D_NET \\$7 " not in text
     assert "*D_NET \\$12 " in text
-    assert "*D_NET lab " in text
+    assert "*D_NET lab " not in text
     assert "*D_NET sig 1.000000" in text  # coupling cap not folded in
 
     skipped, _ = run("empty", net_instance_pins={})

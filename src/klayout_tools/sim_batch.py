@@ -622,7 +622,8 @@ def _runner_gate_release(version: str) -> str | None:
 #: ``0.7.1.devN``). A ``0.7.1.devN`` runner built before the feature landed is
 #: indistinguishable from one built after, so it counts as supporting it.
 #: ``transfer`` (``measurements[].transfer``, #2923/#2924) was merged after
-#: ``v0.7.0`` too, so ``0.7.1`` is likewise its first release segment.
+#: ``v0.7.0`` too, so ``0.7.1`` is likewise its first release segment, as is
+#: ``stimulus`` (the declarative timed stimulus block, #2977).
 _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
     "analysis_steps": (
         (0, 7, 1),
@@ -634,14 +635,21 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
             sim_transfer_meas.transfer_measurements(request.get("measurements") or [])
         ),
     ),
+    "stimulus": (
+        (0, 7, 1),
+        lambda request: request.get("stimulus") is not None,
+    ),
 }
 
 #: Registry features a runner must be *known* to support (issue #2924): a
 #: runner that predates one, or whose version cannot be read, is refused
 #: whatever ``runner_version_check`` says, because the alternative is a worker
 #: that accepts the request and omits the metric. Every other registry
-#: feature keeps the warn-and-run behaviour of #3249.
-_MANDATORY_RUNNER_FEATURES = frozenset({"transfer"})
+#: feature keeps the warn-and-run behaviour of #3249. ``stimulus`` is
+#: mandatory for the same reason: an older runner would ignore the key and
+#: simulate with the digital control lines undriven, exiting 0 with
+#: plausible-looking numbers (#2977).
+_MANDATORY_RUNNER_FEATURES = frozenset({"transfer", "stimulus"})
 
 
 def _uses_measurement_expr(request: dict[str, Any]) -> bool:

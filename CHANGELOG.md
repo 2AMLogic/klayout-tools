@@ -14,6 +14,23 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sim` declarative timed stimulus and resolved-backend provenance**
+  (issue #2977): a request may declare `stimulus.signals[]` (per-signal
+  event lists with level, optional transition time and skew). `klt sim`
+  validates them up front (coded errors `stimulus_*`), expands them into
+  PWL sources in every corner deck, and echoes the schedule as applied in
+  `environment.stimulus`. Every corner-sweep report also gains
+  `environment.backend` (`resolved`, `source`, `requested`) so a `local`
+  run under `KLT_SIM_BACKEND=batch` is detectable. **Additive contract
+  change:** two new optional `environment` members, no `schema_version`
+  bump. A runner older than this change ignores the `stimulus` key (client
+  capability check tracked in #2877). `docs/cli/sim.md` also names `klt
+  0.7.0` as the first release that reads `$KLT_SIM_BACKEND`.
+- **`klt sim --op-lint` caps total subcircuit expansion** (issue #3595): the
+  hierarchy walk stops after 20 000 expanded subcircuit instances (a 7-level
+  fan-out-8 hierarchy previously expanded to ~2M devices and took ~29 s) and
+  emits one `unsupported_hierarchy` warning naming the cap; devices reached
+  before it are still linted. Additive; no `schema_version` bump.
 - **`klt lvs`: new `mismatches[].category` `device.series_fold_offset_absorbed`**
   (issue #3017): when `options.combine_devices` folds N>1 series primitives of
   a resistor class with a nonzero head term (`fixed_offset_ohm` +
@@ -66,6 +83,13 @@ not `klt --version`, if you need to detect this kind of drift. See
   The aggregated report gains `environment.{backend,remote.fleet[]}` and
   `corner_runs[].job_id`/`error_code` (batch runs only). Additive; no
   `schema_version` bump.
+- **`klt sim` multi-pass AC acquisition** (issue #3159): an `ac` analysis may
+  declare `analysis.passes` (named passes, each stating its complete `alter`
+  set) to run several AC solves per corner and retain each pass's complex
+  result privately; corners gain an additive `passes` list and the
+  `pass_failed` diagnostic code. Local/local-parallel ngspice only; Xyce,
+  `remote`/`batch`, `measurements[]` and `options.waveforms` are refused.
+  Additive; no `schema_version` bump.
 - **`klt extract --spef --def-net-connections` omits unlabelled `$N` nets absent
   from the DEF** (issue #3580): generalises the #3257 gap C omission from
   duplicate-named nets to unique-named `$<digits>` nets (and coupling to them),
@@ -82,6 +106,23 @@ not `klt --version`, if you need to detect this kind of drift. See
   `engine: "xyce"` fail visibly; an off-host worker that does not echo the maps
   fails with `nodeset_unsupported_worker`. Omitting the option changes nothing.
   Additive; no `schema_version` bump.
+- **`klt sim`: solver-tolerance corner axis `corners.options`** (issue #3125):
+  numeric ngspice `.options` names (`reltol`, `abstol`, `vntol`, `itl1`..`itl4`,
+  `gmin`, ...) mapped to equal-length arrays, zipped by index and expanded
+  innermost after `params`. Each point emits one `.options` card ahead of the
+  body (ngspice honors the first card that sets a name), its corner report
+  gains an `options` field and its `corner_id` a `/options:<pairs>` suffix;
+  `exclude[].options` selects rungs. Additive: a request without the field is
+  byte-identical. Off-host workers must echo it (`options_unsupported_worker`);
+  Xyce and `--op-lint` refuse it.
+- **`klt sim-plan` plans mergeable shards** (issue #3423): splits one `klt sim`
+  request by `corners.process` entry and writes the per-shard requests plus the
+  `klt sim-merge` manifest next to it. Manifest `corners` come from the same
+  `_expand_corners` expansion `klt sim` runs, output is byte-deterministic, and
+  Monte Carlo, deck-list and `corners.units` requests, a missing or
+  single-entry process axis, and a shard emptied by `exclude` are refused
+  (exit `1`). Additive: new verb, no `schema_version` bump. See
+  `docs/cli/sim.md` "Planning shards".
 - **`klt sim` batch: opt-in auto-split of a request that cannot fit the fleet's
   whole-job ceiling** (issue #3446): `batch.job_ceiling_check: "split"`,
   `batch.max_units_per_job` and `--max-units-per-job N` reroute a
@@ -103,8 +144,8 @@ not `klt --version`, if you need to detect this kind of drift. See
   duplicate, unexpected or mismatching report, or a changed request, is
   refused with its own exit code (`5`-`10`, `status: "refused"` payload).
   Additive: new verb, new `merge` block, no `schema_version` bump. See
-  `docs/cli/sim.md` "Merging per-request reports". Shard planning is not
-  included.
+  `docs/cli/sim.md` "Merging per-request reports". Shard planning is
+  `klt sim-plan`.
 - **ASAP7 DRC deck checks the four net-aware spacings `ACTIVE.S.2A`,
   `LIG.LISD.S.6`, `LIG.LISD.S.7` and `LIG.SDT.S.8`** (issue #3084): DRM Tables
   3.5.1 and 3.10.1 apply these only to shapes on different nets, so the deck
@@ -697,6 +738,19 @@ not `klt --version`, if you need to detect this kind of drift. See
   compare). New additive `drift.path_comments_differ` field. Generation is
   unchanged.
 
+- **`klt lvs` `layout.abstract_cells`/`layout.abstract_cell_lef`** (issue
+  #2853). Inline extraction now forwards `klt extract --abstract-cells`/
+  `--abstract-cell-lef`, so a mixed-level compare (a transistor-level region
+  plus pin-only black-box cells against a reference with pin-only stubs) runs
+  in one request, and `body_verification` is evaluated for the transistor
+  region. Given with `layout.netlist`, either field is an application error.
+  The response gains top-level `abstract_cells`, `abstract_cell_lef` and
+  `abstracted_cells`, present only when abstraction was requested; `--check
+  --rerun` replays them. For a non-`gate-level-verilog` reference whose
+  layout instantiates pin-only cells, `power_connectivity` stays
+  `"unchecked"`, and its `reason` now names those cells and says their pins
+  were compared by name as ordinary connectivity. This is an additive request
+  and response change, so there is no `schema_version` bump.
 - **`klt lvs` opt-in `options.strict_top_level_pin_count`** (issue #2845):
   unequal top-circuit pin counts yield `status: mismatch` with a new
   `pin.count` error finding (both counts in `details`). Default unchanged;

@@ -1212,6 +1212,55 @@ marker (241/0).
 - `klt drc rules` lists the covering and marker layers in the rule's
   `layers`.
 
+### `"tap_distance"` check kind (issue #3607)
+
+A second region rule, declared with `DrcRule(check="tap_distance",
+region_spec=TapDistanceSpec(...))`. It reports every *whole* active polygon
+that does not lie within `max_distance_um` of a tap. gf180mcu's
+`comp.tap_distance.nwell.lv.1` (DRM `DF.13_LV`: PCOMP inside a well, taps are
+NCOMP inside the well) and `comp.tap_distance.psub.lv.1` (DRM `DF.14_LV`:
+NCOMP outside any well, taps are PCOMP outside the well) are the first users,
+both at 20 µm for the 3.3 V column. The `_MV` variants are not declared.
+
+The descriptor carries `well_domain` (`"inside"` / `"outside"`), `voltage`
+(`"lv"` / `"mv"`), `max_distance_um`, `step_um` (default 0.5) and the
+`nwell`/`dnwell`/`lvpwell`/`nplus`/`pplus`/`res_mk`/`dualgate`/`v5_xtor` layers
+it reads. A malformed descriptor (unknown domain/voltage, non-positive
+distance or step, distance not a multiple of the step) raises `ValueError`
+when the deck module is imported.
+
+- **Semantics** follow the pinned upstream deck, not a per-point reading of the
+  DRM text: selection is of whole polygons that do not interact with the tap
+  reach region, so a long active with one end near a tap is legal. `inside`
+  grows the tap in `step_um` octagon steps, clipping every step with the raw
+  `nwell` layer; `outside` uses a diamond candidate filter refined by a
+  Euclidean separation check. The two do not share one boundary metric. See
+  `docs/design/gf180mcu-comp-checks-spike.md` and the gf180mcu deck's "Known
+  approximations" (D1–D3, D7).
+- **Reporting**: one violation per selected polygon (`check: "tap_distance"`,
+  real `bbox` and `polygon`). Evaluated flat, per top cell, on merged regions.
+- **Empty tap layers never skip the rule**: with active present and no tap
+  drawn (or every tap under a `res_mk` marker), the active is reported.
+- **Voltage markers**: `dualgate` / `v5_xtor` are marker reads. `lv` selects
+  active touching neither; `mv` selects active overlapping `dualgate`. A rule
+  that reads the marker is not part of `coverage.voltage_domain_warnings`.
+- **Coverage**: `comp` absent → `inapplicable` (`no_applicable_geometry`).
+  `comp` drawn but the voltage-selected active region empty →
+  `inapplicable` (`inapplicable_empty_checked_region`), not counted in
+  `rules_checked`. A `max_distance_um` or `step_um` that is not a whole number
+  of database units on the layout's `dbu` is *skipped* with reason
+  `grid_not_representable` rather than rounded.
+- `klt drc rules` reports `value_um: null` for these rules and exposes
+  `well_domain`, `voltage`, `max_distance_um` and `step_um` under `limits`.
+
+- **Generator output is not tap-clean on gf180mcu.** DF.13_LV/DF.14_LV are in
+  the default deck and are not suppressed or relaxed (the 20 µm limit is the
+  published rule). `klt gen` does not emit well/substrate taps yet (tracked
+  separately), so tapless generator and `gen-compose` output on gf180mcu
+  reports `comp.tap_distance.*` violations. That is a real missing-tap finding,
+  not a deck bug; tests and `examples/dogbone-terminal` assert exactly that
+  rather than a whole-deck `clean`.
+
 ### `"ongrid"` / `"angle"` check kinds (issue #2642)
 
 Two single-layer **vertex** check kinds, as opposed to the distance checks

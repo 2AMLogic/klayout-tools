@@ -5830,6 +5830,47 @@ def test_prelaunch_defers_transfer_to_the_runner_when_the_image_is_unknown(
     sb._enforce_published_runner_features(_TRANSFER_REQUEST, assessment)  # no raise
 
 
+# --- mandatory `stimulus` worker gate (issue #2977) --------------------------
+
+_STIMULUS_REQUEST = {
+    "models": {"pdk": "sky130A"},
+    "options": {},
+    "stimulus": {"signals": []},
+}
+
+
+def test_stimulus_is_a_registered_mandatory_runner_feature():
+    assert sb._request_features(_STIMULUS_REQUEST) == ["stimulus"]
+    assert sb._request_features({"models": {}, "options": {}}) == []
+    assert "stimulus" in sb._MANDATORY_RUNNER_FEATURES
+
+
+@pytest.mark.parametrize("version_check", ["enforce", "warn"])
+@pytest.mark.parametrize("runner", ["klt 0.7.0", "klt dirty", "klt"])
+def test_stimulus_on_an_old_or_unknown_runner_is_rejected_even_under_warn(
+    tmp_path, runner, version_check
+):
+    spec = _feature_spec(tmp_path, _STIMULUS_REQUEST, version_check=version_check)
+    proc, out_dir, marker = _run_job_cmd_with_fake_klt(
+        tmp_path, spec, _fake_klt(runner)
+    )
+    assert proc.returncode == sb._BATCH_PREFLIGHT_REJECT_EXIT
+    assert not marker.exists()  # klt sim never ran
+    error = json.loads((out_dir / "report.json").read_text())["error"]
+    assert error["code"] == sb.BATCH_RUNNER_FEATURE_CODE
+    assert "stimulus" in error["message"]
+
+
+@pytest.mark.parametrize("runner", ["0.7.1", "0.7.1.dev5+gabc", "0.7.3"])
+def test_stimulus_on_a_supporting_runner_runs(tmp_path, runner):
+    spec = _feature_spec(tmp_path, _STIMULUS_REQUEST, version_check="enforce")
+    proc, _, marker = _run_job_cmd_with_fake_klt(
+        tmp_path, spec, _fake_klt(f"klt {runner}")
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert marker.exists()
+
+
 # --------------------------------------------------------------------------- #
 # Whole-job ceiling: opt-in auto-split (issue #3446)
 # --------------------------------------------------------------------------- #
