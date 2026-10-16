@@ -65,7 +65,8 @@ tests/golden_deck/
                             # metal4.space.1 pair,
                             # +2 for issue #3484's nplus.space.pcomp.far.1/
                             # pplus.enclosing.comp.far.1 well-distance split)
-  sg13g2/manifest.json     # 32 entries (issue #905/#911, Epic #711 Phase 3b
+  sg13g2/manifest.json     # 34 entries (+2 for issue #3571's
+                            # nwell.width.1/nwell.space.1; issue #905/#911, Epic #711 Phase 3b
                             # -- see that deck's own module docstring; width/
                             # space only, same split as sky130 -- its 5
                             # enclosing/separation rules ship as hand-written
