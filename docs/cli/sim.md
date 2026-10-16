@@ -1892,6 +1892,35 @@ before the circuit is even parsed. A request declaring neither `measurements[]`
 nor `options.waveforms` omits `save all` entirely, leaving that path
 byte-identical to before (issue #2521).
 
+### Solver options: `options.ngspice_options` (issue #3111)
+
+`options.ngspice_options` declares ngspice solver/convergence `.options` for
+the request, so the setting is part of the report's evidence instead of being
+buried in a netlist include:
+
+```json
+{ "options": { "ngspice_options": { "gminsteps": 0, "itl1": 400, "noopiter": true } } }
+```
+
+klt renders one `.options gminsteps=0 itl1=400 noopiter` card after `.temp` in
+each corner deck (alongside a Monte Carlo `.options seed=`, which is
+unchanged) and reports the map as `environment.ngspice_options`. `true`
+renders the bare flag; `false` renders nothing (the ngspice default) but is
+still echoed. The map is request-wide: split requests to use different
+settings per device family. Only the solver options listed in the table below
+are accepted, because ngspice silently ignores an unknown `.options` name.
+
+This is distinct from `options.ngspice_init`: `.spiceinit` lines are not
+reliably honoured for `.options` names (a `.spiceinit` `option itl1=1` had no
+effect on the solve, the same name as a deck `.options` did), so
+`ngspice_init` cannot carry them.
+
+For `remote`/`batch` the map rides the forwarded request document. A worker
+that predates the field would drop it silently, so the client compares the
+returned report's `environment.ngspice_options` with the declared map and
+fails with an application error naming the option on any difference. The
+map is also part of the `options.resume` checkpoint fingerprint.
+
 ### Opting out: `options.save_mode` (issue #2732)
 
 `options.save_mode` decides who owns the corner's saved vector set. It takes
@@ -4261,6 +4290,7 @@ the *response* echoes back.
 | `options.stage_model_inputs` | boolean       | Issue #2668. For `backend: "remote"`/`"batch"`, upload `models.lib`, per-section corner libraries and `options.osdi_preload` binaries — with their full `.include`/file-bearing `.lib` closure — and point the worker request at the staged copies. Defaults to `false` (models resolve on the runner image, unchanged). A non-boolean is an application error (exit 1); no effect on `local`/`local-parallel`. See "Staging the request's model inputs" above. |
 | `options.ngspice_binary` | string            | Issue #2423. Explicit `ngspice` binary name or path, overriding `$KLT_NGSPICE_BINARY` and the bare `ngspice` name on `$PATH`. A path containing a separator resolves relative to the request file's own directory. Only read for `engine: "ngspice"` (the default) — see "Which ngspice binary is run" above. |
 | `options.save_mode`      | string            | Issue #2732. `"all"` (default; omitted means the same) keeps the generated `save all`; `"netlist"` suppresses it so the netlist's own `.save` cards decide the resident vector set, and the caller owns measurement/waveform coverage. Any other value (including `null`) is an application error (exit 1); an explicit value is refused for `engine: "xyce"`. Off-host workers must include this implementation. See "Opting out: `options.save_mode`" above. |
+| `options.ngspice_options` | object | Issue #3111. Solver/convergence `.options` (`gmin`, `gminsteps`, `srcsteps`, `itl1`, `itl2`, `itl4`, `noopiter`, `method`, `reltol`, `abstol`, `vntol`, `pivtol`) rendered as one `.options` card after `.temp` in every corner deck and echoed verbatim as `environment.ngspice_options`. Values are numbers, booleans or bare-token strings; an unknown key or other value is an application error (exit 1) naming it; refused for `engine: "xyce"`. Unset: no card, no echo. See "Solver options: `options.ngspice_options`" above. |
 | `options.ngspice_init`   | array\<string\>   | Issue #2520. Lines materialized as a `.spiceinit` file inside each corner's own artifact directory (`cwd=` for that corner's `ngspice` invocation), most commonly `["set ngbehavior=hsa"]` to select a compatibility mode for vendor decks written in HSPICE style. Defaults to unset — no `.spiceinit` is written (no behavior change). `engine: "ngspice"` only; accepted-and-ignored for `"xyce"`. See "ngspice's working directory, and `.spiceinit` compatibility mode" above. |
 | *(CLI-only)* `--plot <dir>` | string         | No request-document equivalent (like `trajectory --plot`) — writes one waveform SVG per non-sweep signal per corner to `<dir>`, forcing `options.waveforms`/`keep_artifacts` on for this run. See "Waveform plots" above. |
 | `netlist_source`         | string            | Optional caller-declared provenance of `netlist`: `"schematic"` (pre-layout, e.g. an S6 sizing netlist) or `"extracted"` (post-layout, from `klt extract`). Omit for unchanged behavior — the field is purely additive. An unrecognized value is an application error (exit 1). See "Post-layout verification" below. |
