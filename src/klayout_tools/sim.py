@@ -86,7 +86,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import IO, Any, NamedTuple
 
@@ -6574,7 +6574,14 @@ def _corner_measurement_results(
     attributed: set[str] = set()
     # Forms whose value comes from a rawfile reduction rather than the log:
     # (spec predicate, response-entry builder, position -> outcome map).
-    sidecar_forms = (
+    sidecar_forms: tuple[
+        tuple[
+            Callable[[dict[str, Any]], bool],
+            Callable[..., tuple[dict[str, Any], list[dict[str, Any]]]],
+            dict[int, Any] | None,
+        ],
+        ...,
+    ] = (
         (sim_crossings.is_crossings, _crossings_measurement_result, crossings),
         (sim_energy.is_energy, _energy_measurement_result, energy),
         (sim_cycle_mean.is_cycle_mean, _cycle_mean_measurement_result, cycle_means),
