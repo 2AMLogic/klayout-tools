@@ -270,6 +270,7 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "batch_job_failed",
         "batch_job_timeout",
         "batch_poll_timeout",
+        "batch_job_interrupted",
         # Report-level (`environment.job_diagnostic`, issue #2970).
         "all_units_at_timeout",
     }
@@ -2534,7 +2535,13 @@ def _dispatch_deck_request(
 #: a job that failed or was stopped by the harness, or a poll that gave up
 #: while the job may still be running (``sim_batch._unrun_corner_report``).
 _UNRUN_BATCH_CODES = frozenset(
-    {"lost_shard", "batch_job_failed", "batch_job_timeout", "batch_poll_timeout"}
+    {
+        "lost_shard",
+        "batch_job_failed",
+        "batch_job_timeout",
+        "batch_poll_timeout",
+        "batch_job_interrupted",
+    }
 )
 
 
@@ -2554,7 +2561,8 @@ def _record_batch_checkpoint(
     Issue #3367: `_run_batch` collects a shard's reports in one
     ``report.json``, so there is nothing to record incrementally; record the
     returned set after dispatch. A corner that never ran (``lost_shard``,
-    ``batch_job_failed``, ``batch_job_timeout``, ``batch_poll_timeout``) is
+    ``batch_job_failed``, ``batch_job_timeout``, ``batch_poll_timeout``,
+    ``batch_job_interrupted``) is
     left out and stays outstanding for the next ``--resume``; a corner that
     ran and genuinely errored is recorded exactly as the local backends do.
     A no-op without a checkpoint or off ``batch``.
@@ -3487,7 +3495,8 @@ def _run_sim_corners(
         )
     )
     # Issue #3367: a corner that never ran on `batch` (`lost_shard`,
-    # `batch_job_failed`, `batch_job_timeout`, `batch_poll_timeout`) is
+    # `batch_job_failed`, `batch_job_timeout`, `batch_poll_timeout`,
+    # `batch_job_interrupted`) is
     # outstanding too, so a checkpoint holding the rest must outlive this
     # run. Kept out of `corners_skipped`
     # (the reported `environment.budget.corners_skipped`) to leave that

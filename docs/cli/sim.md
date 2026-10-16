@@ -670,6 +670,16 @@ plain `klt sim ... --backend local-parallel --format json` invocation on the
 fleet's own pinned image, so corner expansion, ordering, measurement
 extraction, and pass/fail classification are never reimplemented for it.
 
+**Retry contract, up front.** A launch refused for lack of Spot capacity is
+*not* retried unless you opt in: `batch.capacity_wait_s` defaults to `0` (one
+attempt), and the refusal then fails the request with
+`error.code: "batch_no_capacity"` — match on that code, not on the message
+text. With `capacity_wait_s > 0` the client re-launches the same job id with
+backoff until that budget is spent (see "Capacity refusal and
+`batch_no_capacity`" below). A Spot **interruption** is never retried by the
+client — 2am's `reconcile` re-launches — but the wait is bounded by
+`batch.interrupted_grace_s` ([#2992](https://github.com/2AMLogic/klayout-tools/issues/2992)).
+
 What differs from `remote` is *who acquires the machine*:
 
 | | `remote` | `batch` |
@@ -677,7 +687,7 @@ What differs from `remote` is *who acquires the machine*:
 | Capacity | This process calls `RunInstances` itself (Spot by default, one AZ/type) | 2am's `batch-fleet-provision.sh launch` calls `CreateFleet` across a diversified AZ × instance-type pool |
 | Credentials here | AWS credentials with `RunInstances` + an SSH private key on every host that runs a sim | An `aws` CLI profile name (`batch-runner-submit`) — S3 put/get only; no key material, no EC2 authority |
 | Transport | SSH/SCP push-then-pull | `s3://<bucket>/jobs/<job-id>/` (`job.json`, `inputs/`, `status.json`, `outputs/`) |
-| Spot interruption | The whole request fails | `status.json` reports `interrupted`; 2am's scheduled `reconcile` re-launches the job and this client simply keeps waiting |
+| Spot interruption | The whole request fails | `status.json` reports `interrupted`; 2am's scheduled `reconcile` re-launches the job and this client keeps waiting — for at most `batch.interrupted_grace_s` (default 1800 s) of continuous `interrupted`, after which the units come back `batch_job_interrupted` ([#2992](https://github.com/2AMLogic/klayout-tools/issues/2992)). The client never re-launches the job itself |
 | Spend guardrail | A caller-side `max_hourly_cost_usd` estimate | The fleet's own shared concurrency cap and budget, enforced inside `launch` before any AWS call |
 
 ```json
@@ -751,6 +761,7 @@ field and is tracked with the `analysis_steps[]` equivalent in
 | `batch.profile` | string | `aws` CLI **profile name** the submit path runs under — a name, never a credential; the key it resolves to lives in the operator's own AWS config. Defaults to `$KLT_BATCH_PROFILE`, else the fleet config's `BATCH_SUBMIT_PROFILE`, else `"batch-runner-submit"`. |
 | `batch.poll_interval_s` | number | How often `status.json` is re-read. Defaults to `30`. |
 | `batch.poll_timeout_s` | number | Wall-clock budget waiting for a terminal `status.json`. Defaults to the fully-serial worst case (`options.timeout_s × corner count + 120`) plus 1800s of Spot-acquisition/boot slack. On overrun every unit is reported with a `batch_poll_timeout` diagnostic (the job may still be running on the fleet — see "Failure classification" below). |
+| `batch.interrupted_grace_s` | number ≥ 0 | How long a job may stay **continuously** `interrupted` (Spot-reclaimed, waiting for 2am's scheduled `reconcile` to re-launch it) before polling stops early ([#2992](https://github.com/2AMLogic/klayout-tools/issues/2992)). Defaults to `1800`; `0` disables the fail-fast, so an interrupted job is waited on until `poll_timeout_s`. Seeing `running` again resets the clock; an unreadable `status.json` neither starts nor resets it. On expiry every unit is reported with a `batch_job_interrupted` diagnostic (not `batch_poll_timeout`), and `environment.remote` carries `job_id`, `state: "interrupted"` and `interrupted_s`. The job may still be recoverable on the fleet — the client does not re-launch it (that would double-spend the shared fleet budget). A grace longer than `poll_timeout_s` never fires. A negative, non-finite, or non-numeric value is rejected before any S3 write. |
 | `batch.runner_version_check` | `"enforce"` \| `"warn"` | Runner/client `klt` version-skew policy (default `"enforce"`), applied both to the pre-launch check against the AMI manifest's published runner version and to the runner-side preflight; see "Runner/client `klt` version skew" below. Any other value is rejected before any S3 write. |
 | `batch.capacity_wait_s` | number ≥ 0 | Wall-clock budget, per `launch` call, for waiting out a Spot **capacity refusal** or a fleet **concurrency-cap refusal** ([#2721](https://github.com/2AMLogic/klayout-tools/issues/2721)). Defaults to `0`: one launch attempt, exactly as before. See "Capacity refusal and `batch_no_capacity`" below. A negative, non-finite, or non-numeric value is rejected before any S3 write. |
 | `batch.max_job_seconds` | number > 0 | The fleet's **whole-job ceiling** the one-job pre-submit check compares against ([#2833](https://github.com/2AMLogic/klayout-tools/issues/2833)). Resolution order: this field, then `$KLT_BATCH_MAX_JOB_SECONDS`, then `BATCH_MAX_JOB_SECONDS` in the `batch-fleet.env` beside the provision script, else `3600` (the harness's own fallback when its `MaxJobSeconds` tag is absent). The value used and its source are reported; see "Three budgets, and the fleet's whole-job ceiling" below. A present but non-positive, non-finite, or non-numeric value from any source is rejected before any S3 write. |
@@ -1261,7 +1272,14 @@ a consumer-repo wrapper does"), and `klt` implements exactly its four steps:
 3. **poll** `status.json`. `running` and `interrupted` both mean *wait* —
    an `interrupted` job is re-launched by 2am's own scheduled `reconcile`,
    never re-submitted by this client (that would double-spend the shared
-   fleet budget). `done`/`failed`/`timeout` are terminal.
+   fleet budget). The wait on `interrupted` is bounded by
+   `batch.interrupted_grace_s` (`batch_job_interrupted`, above).
+   `done`/`failed`/`timeout` are terminal. While polling, `klt sim` prints
+   the job id at submit time and a state line (`state`, elapsed seconds,
+   `instance` when `status.json` carries one) on every state change and about
+   every ten polls, **on stderr only** — stdout and the JSON envelope are
+   unchanged, so a long run is distinguishable from a stuck one and the job id
+   is on hand to inspect `s3://<bucket>/<jobs>/<job-id>/status.json`.
 4. **collect** `outputs/`, read `report.json` out of it, and return it
    through the same reducer the `remote` backend uses — so a `--format json`
    report from `batch` is structurally identical to `local`/`remote`'s.
@@ -1662,8 +1680,9 @@ the same way whichever file it came from:
 | Download itself fails | Same fallback, the collection error is noted; the primary job failure is never replaced. |
 
 A `done` job (or exit 3/4) whose collection fails still raises as before. A
-`batch_poll_timeout` is not a terminal failure (the job may still be
-running), so no recovery is attempted. Raw logs are never copied into the
+`batch_poll_timeout` or `batch_job_interrupted` is not a terminal failure
+(the job may still be running or be re-launched), so no recovery is
+attempted. Raw logs are never copied into the
 JSON; use the retained artifacts below.
 
 While a job is waiting, `klt sim` writes one progress line per state change
@@ -5162,6 +5181,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `batch_job_timeout` | The corner never completed: the `batch` job exceeded its own `timeout_seconds` on the fleet instance and was killed by 2am's harness. |
 | `all_units_at_timeout` | Report-level only (`environment.job_diagnostic`, never on a corner): every unit of a ≥2-unit run hit the time budget — see "Timeout-budget hint". |
 | `batch_poll_timeout` | The corner's result was never observed: `batch.poll_timeout_s` elapsed with the job still non-terminal, or the job never published a `status.json` within 1800s (the message says it never started). The job may still be running on the fleet — this is what the client knows, not a claim the run failed. |
+| `batch_job_interrupted` | The corner's result was never observed: the job stayed `interrupted` (Spot-reclaimed, no re-launch seen) for longer than `batch.interrupted_grace_s`, so polling stopped before `poll_timeout_s`. Distinct from `batch_poll_timeout`; the job may still be recoverable on the fleet and the client does not re-launch it. |
 | `timeout_budget_unreachable` | The corner never started: `options.fail_fast_probe`'s calibration probe measured a rate implying `options.timeout_s` cannot plausibly cover the full analysis window, so the whole grid was aborted before dispatch (issue #1694). Carries additional `reached_s`/`fraction` fields — an *estimate* of how far this corner would have gotten, derived from the measured rate, not a real per-corner recovery. See "Timeout-budget preflight" above. |
 | `convergence_retry` | The record of an opt-in retry (`options.retry_on_convergence_error`, issue #2973): the unit's first attempt ended in a `nonconvergence` error, so it was re-run with tighter solver options. The message names the `.options` card used and whether the retry recovered. `severity: "warning"`; informational, it never changes the unit's status. See "Retrying a non-converged unit" below. |
 | `inconclusive` | **Emitted, never selectable.** The marker this command attaches to a corner it graded `status: "inconclusive"` because `options.fail_on_diagnostic` named a code the corner emitted (issue #2492) — the message names those code(s), so the report says *why* a corner whose numbers look fine is not being reported as a pass. `severity: "warning"`. See "Grading a recovered diagnostic as inconclusive" below. |
@@ -5792,7 +5812,7 @@ the *response* echoes back.
 | `engine`                 | string            | Engine selector. Defaults to `"ngspice"`; `"xyce"` (Sandia's Xyce, the cross-validation oracle — issue #2016) is implemented for DC/OP/TRAN analyses, process/temperature corners, and the local backends — see the "Xyce engine" section below. Any other value is an application error.                                                                                                |
 | `backend`                | string            | Execution backend for the corner matrix. Defaults to `"local"` (runs corners sequentially in-process); `"local-parallel"` runs the same matrix across a bounded local worker pool; `"remote"` provisions an EC2 instance and runs it there; `"batch"` submits an S3 job contract to 2am's EDA batch fleet (see "Execution backends", "Remote backend", and "Batch backend" above). Overridable with the `--backend` CLI flag. |
 | `remote.*`               | object            | Request fields for the `remote` backend (`region`, `key_name`, `ssh_key_path`, `launcher_cidr`/`launcher_cidrs`/`security_group_id`, `subnet_id`, `ssh_user`, `provider`, `spot`, `max_hourly_cost_usd`, `ssh_ready_timeout_s`, `ssh_timeout_s`, `ami_manifest`) — see "Remote backend" above. Only read/validated when `backend: "remote"` is selected. |
-| `batch.*`                | object            | Request fields for the `batch` backend (`provision_script_path`, `bucket`, `jobs_prefix`, `region`, `profile`, `poll_interval_s`, `poll_timeout_s`, `capacity_wait_s`) — see "Batch backend" above. Only read/validated when `backend: "batch"` is selected. |
+| `batch.*`                | object            | Request fields for the `batch` backend (`provision_script_path`, `bucket`, `jobs_prefix`, `region`, `profile`, `poll_interval_s`, `poll_timeout_s`, `capacity_wait_s`, `interrupted_grace_s`) — see "Batch backend" above. Only read/validated when `backend: "batch"` is selected. |
 | `remote.hosts`           | integer           | Shard the expanded unit list across this many hosts and merge the per-shard reports. Defaults to `1` (today's single-host behaviour, byte-identical). Must be a positive integer, and (for `backend: "remote"`) no greater than the unit count. `local`/`local-parallel` shard in-process; `backend: "remote"` provisions a real `hosts`-instance EC2 fleet ([#906](https://github.com/2AMLogic/klayout-tools/issues/906)). Overridable with the `--hosts` CLI flag, same precedence rule as `backend`/`--backend`. See "Fleet sharding" above. |
 | `models.lib`             | string            | Model library to bind process-corner `.lib` sections from. Required only when `corners.process` is set **and** at least one selected section reads from it (a bundle whose every section names its own `lib` needs none — issue #2522). See "Model library resolution" above. |
 | `models.pdk`/`pdk_root`  | string            | Resolve `models.lib` — and any per-section `lib` — through `klt pdk find` instead of a literal path.                                                                    |

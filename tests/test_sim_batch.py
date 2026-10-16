@@ -963,6 +963,156 @@ def test_poll_timeout_raises_batch_poll_timeout_with_last_state(tmp_path):
     assert excinfo.value.last_state == "running"
 
 
+class _Clock:
+    """A fake monotonic clock advanced by the injected ``sleep``."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def _poll_with_clock(tmp_path, runner, **config_overrides):
+    clock = _Clock()
+    return sb.poll_status(
+        _config(tmp_path, poll_interval_s=10.0, **config_overrides),
+        "job-1",
+        runner=runner,
+        sleep=clock.sleep,
+        monotonic=clock.monotonic,
+    )
+
+
+def test_poll_fails_fast_on_a_job_stuck_interrupted(tmp_path):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("interrupted"))
+
+    with pytest.raises(sb.BatchJobInterrupted) as excinfo:
+        _poll_with_clock(
+            tmp_path, runner, poll_timeout_s=5400.0, interrupted_grace_s=100.0
+        )
+
+    assert excinfo.value.code == sb.BATCH_JOB_INTERRUPTED_CODE
+    assert excinfo.value.last_state == "interrupted"
+    assert excinfo.value.interrupted_s >= 100.0
+    assert "job-1" in str(excinfo.value)
+    # Failed fast: nowhere near the 5400s poll budget.
+    assert len(runner.argvs_matching("status.json")) < 20
+
+
+def test_poll_running_resets_the_interrupted_clock(tmp_path):
+    runner = _FakeRunner()
+    for state in ["interrupted"] * 6 + ["running"] + ["interrupted"] * 6 + ["done"]:
+        runner.queue("status.json", fake_completed(_status(state)))
+
+    # 6 interrupted polls span 50-60s each time: under the 100s grace only
+    # because the `running` poll in between restarted the clock.
+    status = _poll_with_clock(
+        tmp_path, runner, poll_timeout_s=1000.0, interrupted_grace_s=100.0
+    )
+    assert status["state"] == "done"
+
+
+def test_poll_unreadable_status_does_not_start_the_interrupted_clock(tmp_path):
+    runner = _FakeRunner()
+    runner.default = fake_completed(returncode=1, stderr="404")
+
+    with pytest.raises(sb.BatchPollTimeout) as excinfo:
+        _poll_with_clock(
+            tmp_path, runner, poll_timeout_s=200.0, interrupted_grace_s=10.0
+        )
+    assert not isinstance(excinfo.value, sb.BatchJobInterrupted)
+    assert excinfo.value.code == "batch_poll_timeout"
+
+
+def test_poll_running_forever_is_still_a_poll_timeout(tmp_path):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("running"))
+
+    with pytest.raises(sb.BatchPollTimeout) as excinfo:
+        _poll_with_clock(
+            tmp_path, runner, poll_timeout_s=100.0, interrupted_grace_s=10.0
+        )
+    assert not isinstance(excinfo.value, sb.BatchJobInterrupted)
+    assert excinfo.value.code == "batch_poll_timeout"
+
+
+def test_poll_grace_larger_than_poll_timeout_lets_the_timeout_win(tmp_path):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("interrupted"))
+
+    with pytest.raises(sb.BatchPollTimeout) as excinfo:
+        _poll_with_clock(
+            tmp_path, runner, poll_timeout_s=100.0, interrupted_grace_s=5000.0
+        )
+    assert not isinstance(excinfo.value, sb.BatchJobInterrupted)
+    assert excinfo.value.last_state == "interrupted"
+
+
+def test_poll_zero_grace_disables_the_fail_fast(tmp_path):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("interrupted"))
+
+    with pytest.raises(sb.BatchPollTimeout) as excinfo:
+        _poll_with_clock(
+            tmp_path, runner, poll_timeout_s=300.0, interrupted_grace_s=0.0
+        )
+    assert not isinstance(excinfo.value, sb.BatchJobInterrupted)
+
+
+def test_poll_progress_goes_to_stderr_only_and_is_throttled(tmp_path, capsys):
+    runner = _FakeRunner()
+    for state in ["running"] * 25 + ["done"]:
+        runner.queue("status.json", fake_completed(_status(state)))
+
+    _poll_with_clock(tmp_path, runner, poll_timeout_s=1000.0)
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    lines = [ln for ln in captured.err.splitlines() if "state=" in ln]
+    # First sighting plus polls 10 and 20; not one line per poll.
+    assert len(lines) == 3
+    assert "job-1" in lines[0] and "state=running" in lines[0]
+    assert "instance=i-0fake" in lines[0]
+
+
+def test_poll_progress_reports_every_state_change(tmp_path, capsys):
+    runner = _FakeRunner()
+    for state in ["running", "interrupted", "running", "done"]:
+        runner.queue("status.json", fake_completed(_status(state)))
+
+    _poll_with_clock(tmp_path, runner, poll_timeout_s=1000.0)
+
+    err = capsys.readouterr().err
+    assert err.count("state=running") == 2
+    assert err.count("state=interrupted") == 1
+
+
+def test_submit_announces_the_job_id_on_stderr(tmp_path, capsys):
+    runner = _FakeRunner()
+    spec = sb.BatchJobSpec(cmd="true", tool="ngspice")
+
+    sb.submit_job(_config(tmp_path), "klt-sim-abc123", spec, runner=runner)
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "klt-sim-abc123" in captured.err
+
+
+def test_interrupted_grace_request_field_is_validated(tmp_path):
+    from klayout_tools.sim import SimError
+
+    for bad in (-1, True, "10", float("inf")):
+        with pytest.raises(SimError, match="interrupted_grace_s"):
+            sb._resolve_interrupted_grace_s({"interrupted_grace_s": bad})
+    assert sb._resolve_interrupted_grace_s({}) == sb.DEFAULT_INTERRUPTED_GRACE_S
+    assert sb._resolve_interrupted_grace_s({"interrupted_grace_s": 0}) == 0.0
+
+
 def test_poll_reports_each_state_change_once(tmp_path):
     runner = _FakeRunner()
     runner.queue("status.json", fake_completed(returncode=1, stderr="404"))
@@ -2553,6 +2703,38 @@ def test_poll_budget_overrun_reports_unrun_corners(tmp_path, monkeypatch):
             }
         ]
     assert environment["state"] == "running"
+
+
+def test_interrupted_grace_reports_distinct_unrun_corners(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("interrupted"))
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+
+    corners, _, environment = sb._run_batch_job(
+        # The real monotonic clock with a fake sleep: any positive elapsed
+        # time between two polls exceeds this grace.
+        config=_config(tmp_path, interrupted_grace_s=1e-9),
+        job_id="job-1",
+        corner_points=_corner_points(2),
+        netlist_path=str(_write_body(tmp_path)),
+        timeout_s=30.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        artifacts_dir=str(tmp_path / "artifacts"),
+        request={"netlist": "body.spice"},
+        measurements_spec=_measurements_spec(),
+        runner=runner,
+        sleep=runner.sleep,
+    )
+
+    assert len(corners) == 2
+    for corner in corners:
+        assert corner["status"] == "error"
+        assert corner["diagnostics"][0]["code"] == "batch_job_interrupted"
+        assert "job-1" in corner["diagnostics"][0]["message"]
+    assert environment["job_id"] == "job-1"
+    assert environment["state"] == "interrupted"
+    assert environment["interrupted_s"] >= 0.0
 
 
 def test_transport_failure_is_a_sim_error(tmp_path, monkeypatch):
@@ -5811,7 +5993,12 @@ def test_cli_max_units_per_job_flag_overrides_the_request(tmp_path, monkeypatch)
 
 
 @pytest.mark.parametrize(
-    "codes", [("batch_job_failed", "batch_poll_timeout"), ("batch_job_timeout",) * 2]
+    "codes",
+    [
+        ("batch_job_failed", "batch_poll_timeout"),
+        ("batch_job_timeout",) * 2,
+        ("batch_job_interrupted", "batch_job_failed"),
+    ],
 )
 def test_run_sim_batch_resume_resubmits_job_failure_and_poll_timeout(
     tmp_path, monkeypatch, codes
@@ -5862,8 +6049,8 @@ def test_poll_heartbeat_fires_on_state_change_and_coarse_interval(tmp_path, caps
     runner.queue("status.json", fake_completed(_status("running")))
     runner.queue("status.json", fake_completed(_status("interrupted")))
     runner.queue("status.json", fake_completed(_status("done")))
-    # started, then elapsed at each non-terminal poll.
-    clock = iter([0.0, 0.0, 30.0, 400.0, 430.0])
+    # started, then elapsed at each poll (the terminal one included).
+    clock = iter([0.0, 0.0, 30.0, 400.0, 430.0, 430.0])
 
     sb.poll_status(
         _config(tmp_path, poll_timeout_s=10000.0),
@@ -5872,6 +6059,7 @@ def test_poll_heartbeat_fires_on_state_change_and_coarse_interval(tmp_path, caps
         sleep=runner.sleep,
         monotonic=lambda: next(clock),
         heartbeat=True,
+        progress=False,
     )
 
     lines = capsys.readouterr().err.splitlines()
