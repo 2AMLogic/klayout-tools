@@ -5894,7 +5894,18 @@ klt sim <request.json> --op-lint [--op-lint-corner <corner_id>] [--format text|j
 | `gate_shorted_to_source` | `error` | Gate and source are the same node: `Vgs` is 0 by construction. |
 | `bulk_not_tied` | `warning` | Bulk is tied to neither the device's own source nor the matching rail. A warning, not an error — a deep-nwell/isolated device may genuinely want this. |
 | `missing_node` | `error` | A declared I/O node (`op_lint.nodes`, or any `v(<node>)` reference inside the request's own measurements — `spice` cards and `expr` expressions alike) that does not appear in the netlist at all — the usual cause of a measurement that silently reads 0 V. |
-| `floating_node` | `warning` | A node with exactly one element terminal on it and no DC path. This is the *structural* counterpart of the singular-matrix / gmin-stepping narration the sweep classifies from the log ([#205](https://github.com/2AMLogic/klayout-tools/issues/205)); that classification is reused here verbatim rather than re-implemented, so the two never disagree. |
+| `floating_node` | `warning` | A node with exactly one element terminal on it and no DC path. Behavioural `B` sources count as two terminals, and each `v(<node>)` in a `B` expression counts as a terminal on that node. This is the *structural* counterpart of the singular-matrix / gmin-stepping narration the sweep classifies from the log ([#205](https://github.com/2AMLogic/klayout-tools/issues/205)); that classification is reused here verbatim rather than re-implemented, so the two never disagree. |
+
+**Hierarchy.** A `.subckt` defined in the netlist body (or in a file it
+`.include`s, resolved relative to the netlist) is expanded wherever an `X`
+line instantiates it: its MOS devices are reported with hierarchical names
+(`Xdut.M1`), probed at ngspice's `@m.xdut.m1[...]` path, and checked like
+top-level devices. A definition nothing instantiates contributes nothing; `.lib`
+sections and `params:` value propagation are not followed. An `X` instance that
+is neither a recognised MOS model nor a resolvable subcircuit gets a
+`unsupported_hierarchy` warning in `diagnostics[]` naming it, and a netlist
+with no enumerated device and such an instance reports `status: "findings"`,
+never `clean`.
 
 Every threshold comparison is on **magnitudes**: BSIM4 reports a PMOS's
 `vgs`/`vds`/`vth`/`vdsat` as positive numbers while a bare SPICE level-1
