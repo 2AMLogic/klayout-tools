@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from helpers.drc_tap import assert_clean_except_tap_distance
 from klayout_tools import gen, pdk
 from klayout_tools.cli import main
 from klayout_tools.drc import run_drc
@@ -722,7 +723,7 @@ def test_phase2_generator_default_params_are_drc_clean(
     assert output.is_file()
 
     drc_report = run_drc(str(output), deck)
-    assert drc_report["status"] == "clean"
+    assert_clean_except_tap_distance(drc_report)
 
     # bbox_um and ports[] are populated (acceptance criterion #3).
     bbox = report["bbox_um"]
@@ -1141,7 +1142,7 @@ def test_mos_array_flavor_pfet_draws_well_and_is_drc_clean(
     assert report["drc_hints"]["notes"] == expected_notes
 
     drc_report = run_drc(str(output), deck)
-    assert drc_report["status"] == "clean", drc_report["violations"]
+    assert_clean_except_tap_distance(drc_report)
 
 
 # --------------------------------------------------------------------------- #
@@ -1416,8 +1417,10 @@ def test_mos_array_minimum_gate_length_is_drc_clean(
     assert report["drc_hints"]["notes"], "expected an advisory note below the default"
 
     drc_report = run_drc(str(output), deck)
-    assert drc_report["status"] == "clean", drc_report["violations"]
-    assert drc_report["rule_counts"] == {}
+    assert_clean_except_tap_distance(drc_report)
+    assert set(drc_report["rule_counts"]) <= {
+        r["rule"] for r in drc_report["violations"] if r["check"] == "tap_distance"
+    }
 
 
 @pytest.mark.parametrize(
@@ -1899,7 +1902,7 @@ def test_mos_gate_contact_reports_metal_port_and_is_drc_clean(
     assert gate_metal != source_metal
 
     drc_report = run_drc(str(output), deck)
-    assert drc_report["status"] == "clean"
+    assert_clean_except_tap_distance(drc_report)
 
 
 def test_mos_gate_contact_defaults_off_and_leaves_geometry_unchanged(
@@ -2044,7 +2047,7 @@ def test_mos_array_parallel_fingers_are_drc_clean(
     )
 
     drc_report = run_drc(str(output), deck)
-    assert drc_report["status"] == "clean", drc_report["violations"]
+    assert_clean_except_tap_distance(drc_report)
 
 
 def test_mos_array_series_finger_topology_reports_notes_not_warnings(
@@ -2408,7 +2411,7 @@ def test_mos_array_interior_channel_is_drc_clean(tmp_path, both_pdk_root):
                 }
             )
             drc_report = run_drc(str(output), deck)
-            assert drc_report["status"] == "clean", drc_report["violations"]
+            assert_clean_except_tap_distance(drc_report)
 
 
 # `pitch_x_um`/`pitch_y_um` (issue #3299, Phase 1): explicit pitch override,
@@ -7582,7 +7585,7 @@ def test_gf180mcu_mos_array_pfet_flavor_still_omits_well_tap_port(
     assert "WELL_TAP" not in {p["name"] for p in response["ports"]}
 
     drc_report = run_drc(str(output), "gf180mcu")
-    assert drc_report["status"] == "clean", drc_report["violations"]
+    assert_clean_except_tap_distance(drc_report)
 
 
 #: cmos5l's thick-gate-oxide ("-HV") marker (issue #1472) -- the same
@@ -9510,7 +9513,7 @@ def test_phase2_generator_stays_drc_clean_at_pdk_resolved_finer_dbu(
     assert report["dbu_um"] == pytest.approx(0.0005)
 
     drc_report = run_drc(str(fine), "gf180mcu")
-    assert drc_report["status"] == "clean", drc_report["violations"]
+    assert_clean_except_tap_distance(drc_report)
 
     assert _merged_geometry_um(coarse) == _merged_geometry_um(fine), (
         f"{generator_name}: drawn geometry differs between 0.001 and 0.0005 dbu"
@@ -9551,7 +9554,7 @@ def test_dogbone_terminal_example_matches_committed_json(family):
     actual = run_drc(gds_rel_path, family)
     actual.pop("provenance", None)
 
-    assert actual["status"] == "clean"
+    assert_clean_except_tap_distance(actual)
     assert actual == expected
 
 
@@ -9711,7 +9714,7 @@ def test_gf180mcu_mos_array_bottom_edge_gate_endcap_matches_top_edge_pad_clearan
     assert poly_bbox["bottom"] == pytest.approx(active_bbox["bottom"] - endcap_um)
 
     drc_report = run_drc(str(output), "gf180mcu")
-    assert drc_report["status"] == "clean", drc_report["violations"]
+    assert_clean_except_tap_distance(drc_report)
 
 
 @pytest.mark.parametrize(
@@ -9764,7 +9767,7 @@ def test_gf180mcu_sd_implant_covers_every_drawn_comp_shape(
     assert (active_region - implant_region).is_empty()
 
     drc_report = run_drc(str(output), "gf180mcu")
-    assert drc_report["status"] == "clean", drc_report["violations"]
+    assert_clean_except_tap_distance(drc_report)
 
 
 def test_gf180mcu_mos_array_pfet_flavor_draws_pplus_not_nplus_implant(
@@ -9803,7 +9806,7 @@ def test_gf180mcu_mos_array_pfet_flavor_draws_pplus_not_nplus_implant(
     assert (active_region - implant_region).is_empty()
 
     drc_report = run_drc(str(output), "gf180mcu")
-    assert drc_report["status"] == "clean", drc_report["violations"]
+    assert_clean_except_tap_distance(drc_report)
 
 
 def _sd_implant_absence_note(family: str, flavor: str) -> str:

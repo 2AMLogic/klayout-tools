@@ -1961,8 +1961,9 @@ Notes and guarantees:
 - **Geometry is unchanged.** A finer dbu changes only the integer grid the
   shapes are stored on, not the shapes: `bbox_um`, `ports[].x_um`/`y_um`, and
   every drawn polygon are identical in micrometres, and every generator's
-  documented default `params` stay `klt drc --deck gf180mcu` clean at
-  `0.0005µm`. sky130 output is byte-identical to before.
+  documented default `params` raise no `klt drc --deck gf180mcu` violation other
+  than the tap-distance rules (DF.13_LV/DF.14_LV, which tapless output fails
+  by design) at `0.0005µm`. sky130 output is byte-identical to before.
 - **`dbu` is not a request parameter.** It is a property of the resolved PDK,
   not a caller knob — there is no `options.dbu`. To compose blocks at a given
   dbu, resolve them all against the same PDK.

@@ -1253,6 +1253,14 @@ when the deck module is imported.
 - `klt drc rules` reports `value_um: null` for these rules and exposes
   `well_domain`, `voltage`, `max_distance_um` and `step_um` under `limits`.
 
+- **Generator output is not tap-clean on gf180mcu.** DF.13_LV/DF.14_LV are in
+  the default deck and are not suppressed or relaxed (the 20 µm limit is the
+  published rule). `klt gen` does not emit well/substrate taps yet (tracked
+  separately), so tapless generator and `gen-compose` output on gf180mcu
+  reports `comp.tap_distance.*` violations. That is a real missing-tap finding,
+  not a deck bug; tests and `examples/dogbone-terminal` assert exactly that
+  rather than a whole-deck `clean`.
+
 ### `"ongrid"` / `"angle"` check kinds (issue #2642)
 
 Two single-layer **vertex** check kinds, as opposed to the distance checks
