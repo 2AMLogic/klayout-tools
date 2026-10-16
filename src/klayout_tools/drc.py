@@ -1480,22 +1480,17 @@ def run_drc(
         # `DerivedLayer`'s docstring. `rule.layer` itself is resolved only for
         # `coverage`/`layer_label` reporting below, never used to build the
         # checked region in this branch.
-        if rule.check in _COMP_COVERAGE_CHECKS:
-            # Region rule (issue #3587): resolves its own layers (named
-            # layers other than the checked one may be absent) and decides
-            # checked-vs-inapplicable itself -- see `_run_comp_coverage_check`.
-            if layout.find_layer(*rule.layer) is None:
-                rules_skipped.append(rule.id)  # absent checked layer
-                continue
-            found = _run_comp_coverage_check(rule, layout, top_cells, layer_names)
-            if found is None:
-                rules_skipped.append(rule.id)
-                empty_checked_region_ids.add(rule.id)
-                continue
-            rules_checked.append(rule.id)
-            violations.extend(found)
-            if found:
-                rule_counts[rule.id] = rule_counts.get(rule.id, 0) + len(found)
+        if _dispatch_region_rule(
+            rule,
+            layout,
+            top_cells,
+            layer_names,
+            violations,
+            rule_counts,
+            rules_checked,
+            rules_skipped,
+            empty_checked_region_ids,
+        ):
             continue
 
         base_index: int | None = None
@@ -2896,6 +2891,43 @@ def _run_density_check(region: Any, rule: DrcRule, dbu: float) -> list[Any]:
         y += window_dbu
 
     return violations
+
+
+def _dispatch_region_rule(
+    rule: DrcRule,
+    layout: Any,
+    top_cells: list[Any],
+    layer_names: dict[tuple[int, int], str],
+    violations: list[dict[str, Any]],
+    rule_counts: dict[str, int],
+    rules_checked: list[str],
+    rules_skipped: list[str],
+    empty_checked_region_ids: set[str],
+) -> bool:
+    """Run a :data:`_COMP_COVERAGE_CHECKS` rule (issue #3587), recording its
+    outcome in the caller's accumulators; ``False`` when ``rule`` is not one.
+
+    A region rule resolves its own layers (named layers other than the
+    checked one may be absent) and decides checked-vs-inapplicable itself --
+    see :func:`_run_comp_coverage_check`. Only an absent *checked* layer or
+    an empty checked region lands the rule in ``rules_skipped`` (the latter
+    also in ``empty_checked_region_ids``).
+    """
+    if rule.check not in _COMP_COVERAGE_CHECKS:
+        return False
+    if layout.find_layer(*rule.layer) is None:
+        rules_skipped.append(rule.id)  # absent checked layer
+        return True
+    found = _run_comp_coverage_check(rule, layout, top_cells, layer_names)
+    if found is None:
+        rules_skipped.append(rule.id)
+        empty_checked_region_ids.add(rule.id)
+        return True
+    rules_checked.append(rule.id)
+    violations.extend(found)
+    if found:
+        rule_counts[rule.id] = rule_counts.get(rule.id, 0) + len(found)
+    return True
 
 
 def _run_comp_coverage_check(
