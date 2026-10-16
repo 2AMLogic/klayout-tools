@@ -626,14 +626,15 @@ name differs from the deck's device-class label and has no curated entry yet
 "not a known device for the requested deck" error lists the full resolved
 set so the gap is visible from the failure itself.
 
-**Native-Vt NMOS is not supported on sky130 (issue #2912).** A `form:
-"subckt-call"` card naming `sky130_fd_pr__nfet_05v0_nvt` is rejected as "not a
-known device for the requested deck": the sky130 deck has no native-NMOS device
-class (upstream derives it from `hvi` AND `lvtn`, not a single marker layer),
-and `klt gen mos_array` cannot draw it (see `gen.md`, `voltage_flavor`).
-Mapping it with `reference.device_map` onto the plain `nfet` class would
-compare a device of the wrong type and is not an honest workaround — exclude
-the native device from the comparison explicitly instead.
+**Native-Vt NMOS on sky130 (issue #3600).** A `form: "subckt-call"` card naming
+`sky130_fd_pr__nfet_05v0_nvt` is accepted, and `klt gen mos_array
+--params '{"voltage_flavor": "nvt"}'` draws the `hvi` + `lvtn` markers the deck
+extracts it from (see `gen.md`, `voltage_flavor`), so gen -> extract -> lvs
+reaches `match`. Like every MOS flavour subcircuit, it is compared as the base
+`nfet` class: `klt lvs` does not distinguish flavour models, so a reference
+naming a different `nfet` model of matching topology also matches. The model
+binding itself is verified at the extract layer (`klt extract` emits
+`nfet_05v0_nvt`).
 
 **`sg13g2`'s `rfcmim` was the one live case of that gap** (issue #1470, now
 closed). Derivation binds the *declared class* name as its own subcircuit

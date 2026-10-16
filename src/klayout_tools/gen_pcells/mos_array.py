@@ -169,6 +169,11 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         # Declared via ``self.param("mfg_grid_um", ...)`` below; the
         # PCellDeclarationHelper stubs cannot see it, so annotate for mypy.
         mfg_grid_um: float
+        voltage_flavor_mark_layer: kdb.LayerInfo
+        voltage_flavor_mark_present: bool
+        voltage_flavor_mark_margin_um: float
+        voltage_flavor_extra_mark_layer: kdb.LayerInfo
+        voltage_flavor_extra_mark_present: bool
 
         def __init__(self) -> None:
             super().__init__()
@@ -354,6 +359,21 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.TypeBoolean,
                 "Whether voltage_flavor_mark_layer is a real layer resolved "
                 "for params.voltage_flavor on this PDK family",
+                default=False,
+            )
+            self.param(
+                "voltage_flavor_extra_mark_layer",
+                self.TypeLayer,
+                "Second voltage_flavor marker layer drawn over the same box "
+                "(sky130 native-Vt: lvtn alongside hvi; only used when "
+                "voltage_flavor_extra_mark_present)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "voltage_flavor_extra_mark_present",
+                self.TypeBoolean,
+                "Whether voltage_flavor_extra_mark_layer is a real layer "
+                "resolved for params.voltage_flavor on this PDK family",
                 default=False,
             )
             self.param(
@@ -817,6 +837,16 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 _insert_boxes(
                     self.cell,
                     li_voltage_flavor_mark,
+                    dbu,
+                    [info["voltage_flavor_mark_box_um"]],
+                )
+            if (
+                self.voltage_flavor_mark_present
+                and self.voltage_flavor_extra_mark_present
+            ):
+                _insert_boxes(
+                    self.cell,
+                    self.layout.layer(self.voltage_flavor_extra_mark_layer),
                     dbu,
                     [info["voltage_flavor_mark_box_um"]],
                 )

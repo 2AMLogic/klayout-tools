@@ -10,10 +10,25 @@ submodule only imports it, never the reverse).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import klayout.db as kdb
+
+
+def _insert_voltage_flavor_marks(
+    pcell: Any, dbu: float, mark_box: tuple[float, float, float, float]
+) -> None:
+    """Draw ``mark_box`` on the primary ``voltage_flavor`` marker layer and,
+    when the PDK flavour resolves one (sky130 native-Vt: lvtn alongside
+    hvi), on the extra marker layer too."""
+    from klayout_tools.gen import _insert_boxes
+
+    layers = [pcell.voltage_flavor_mark_layer]
+    if pcell.voltage_flavor_extra_mark_present:
+        layers.append(pcell.voltage_flavor_extra_mark_layer)
+    for layer in layers:
+        _insert_boxes(pcell.cell, pcell.layout.layer(layer), dbu, [mark_box])
 
 
 def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
@@ -288,6 +303,21 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default=False,
             )
             self.param(
+                "voltage_flavor_extra_mark_layer",
+                self.TypeLayer,
+                "Second voltage_flavor marker layer drawn over the same box "
+                "(sky130 native-Vt: lvtn alongside hvi; only used when "
+                "voltage_flavor_extra_mark_present)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "voltage_flavor_extra_mark_present",
+                self.TypeBoolean,
+                "Whether voltage_flavor_extra_mark_layer is a real layer "
+                "resolved for params.voltage_flavor on this PDK family",
+                default=False,
+            )
+            self.param(
                 "voltage_flavor_mark_margin_um",
                 self.TypeDouble,
                 "Harness-resolved margin the voltage_flavor marker box grows "
@@ -458,9 +488,6 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             # well's own margin does, see
             # `_PDK_VOLTAGE_FLAVOR_MARK_MARGIN_UM`'s own docstring.
             if self.voltage_flavor_mark_present:
-                li_voltage_flavor_mark = self.layout.layer(
-                    self.voltage_flavor_mark_layer
-                )
                 mark_margin = self.voltage_flavor_mark_margin_um
                 mark_box = (
                     -mark_margin,
@@ -468,7 +495,7 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     info["core_w_um"] + mark_margin,
                     info["core_h_um"] + mark_margin,
                 )
-                _insert_boxes(self.cell, li_voltage_flavor_mark, dbu, [mark_box])
+                _insert_voltage_flavor_marks(self, dbu, mark_box)
 
             if info["ring"] is not None and self.add_guard_ring:
                 li_tap = self.layout.layer(self.tap_layer)
