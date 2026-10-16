@@ -691,7 +691,7 @@ def _mos_array_describe(
         ports = _mos_series_ports(port_cells, unit, metal_layer, gate_layer)
     else:
         for prefix, c in port_cells:
-            mirrored = c["mirrored"]
+            mirrored = c.get("mirrored", False)
             sx, sy = _terminal_xy(unit, "s_xy", mirrored)
             dx, dy = _terminal_xy(unit, "d_xy", mirrored)
             gx, gy = _terminal_xy(unit, "g_xy", mirrored)
