@@ -713,6 +713,11 @@
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
     },
     {
+      "consumer": "extract",
+      "exporter": "power",
+      "reason": "Issue #2981: the terminal-pair effective-resistance adapter in extract_resistance_graph is deliberately built on the public ir_solver.solve_ir_drop, so extraction and klt power share one resistor-network solver."
+    },
+    {
       "consumer": "functional_verification",
       "exporter": "reset_coverage",
       "reason": "options.initial_state derives the gate-level flop list from reset_coverage's netlist/cell-model classification instead of re-parsing (issue #2998)."

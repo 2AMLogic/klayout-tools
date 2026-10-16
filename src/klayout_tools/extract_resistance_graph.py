@@ -784,30 +784,13 @@ def terminal_resistance_matrix(
 
     solves = 0
     for group in members.values():
-        reference = group[0]
-        transfer: dict[str, dict[str, float]] = {}
-        for source in group[1:]:
-            result = solve_ir_drop(
-                node_ids,
-                edges,
-                pads=pads,
-                injections={node[source]: 1.0},
-                max_iterations=max_iterations,
-            )
-            solves += 1
-            row = {t: result["voltages"][node[t]] for t in group}
-            if _unconverged(result) or any(
-                v is None or not math.isfinite(v) for v in row.values()
-            ):
-                return _singular(names, solves)
-            transfer[source] = row
-        for k, a in enumerate(group[1:], start=1):
-            matrix[position[a]][position[reference]] = transfer[a][a]
-            matrix[position[reference]][position[a]] = transfer[a][a]
-            for b in group[k + 1 :]:
-                r = transfer[a][a] + transfer[b][b] - 2.0 * transfer[a][b]
-                matrix[position[a]][position[b]] = r
-                matrix[position[b]][position[a]] = r
+        transfer, used = _component_transfer(
+            group, (node_ids, edges, node), pads, max_iterations
+        )
+        solves += used
+        if transfer is None:
+            return _singular(names, solves)
+        _fill_component(matrix, position, group, transfer)
 
     diagnostics: list[GraphDiagnostic] = []
     if len(members) > 1:
@@ -829,6 +812,56 @@ def terminal_resistance_matrix(
         tuple(sorted(diagnostics, key=_diagnostic_sort_key)),
         solves,
     )
+
+
+def _component_transfer(
+    group: list[str],
+    network: tuple[list[str], list[dict[str, Any]], dict[str, str]],
+    pads: dict[str, float],
+    max_iterations: int | None,
+) -> tuple[dict[str, dict[str, float]] | None, int]:
+    """One unit-current solve per non-reference terminal of ``group``.
+
+    Returns ``(transfer, solves)`` where ``transfer[source][t]`` is the voltage
+    at ``t`` when injecting at ``source``; ``transfer`` is ``None`` when a
+    solve did not converge or produced a non-finite voltage."""
+    node_ids, edges, node = network
+    transfer: dict[str, dict[str, float]] = {}
+    solves = 0
+    for source in group[1:]:
+        result = solve_ir_drop(
+            node_ids,
+            edges,
+            pads=pads,
+            injections={node[source]: 1.0},
+            max_iterations=max_iterations,
+        )
+        solves += 1
+        row = {t: result["voltages"][node[t]] for t in group}
+        if _unconverged(result) or any(
+            v is None or not math.isfinite(v) for v in row.values()
+        ):
+            return None, solves
+        transfer[source] = row
+    return transfer, solves
+
+
+def _fill_component(
+    matrix: list[list[float | None]],
+    position: dict[str, int],
+    group: list[str],
+    transfer: dict[str, dict[str, float]],
+) -> None:
+    """Write ``R_{i,ref} = Z_ii`` and ``R_ij = Z_ii + Z_jj - 2 Z_ij`` for one
+    component's terminals into the symmetric ``matrix``."""
+    reference = group[0]
+    for k, a in enumerate(group[1:], start=1):
+        matrix[position[a]][position[reference]] = transfer[a][a]
+        matrix[position[reference]][position[a]] = transfer[a][a]
+        for b in group[k + 1 :]:
+            r = transfer[a][a] + transfer[b][b] - 2.0 * transfer[a][b]
+            matrix[position[a]][position[b]] = r
+            matrix[position[b]][position[a]] = r
 
 
 def effective_resistance(
