@@ -8,7 +8,7 @@ Phase 1a of [Epic #709](https://github.com/2AMLogic/klayout-tools/issues/709)
 ("PEX-aware post-layout sim flow for klt").
 
 ```
-klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--outdir <dir>] [--backend <backend>] [--deck-option <key>=<value>]... [--pins <a,b,...>] [--rename-declared-pins] [--label-layer <role>=<layer>/<datatype>]... [--critical-net <net>]... [--critical-net-pattern <glob>]... [--critical-net-all] [--critical-net-exclude <glob>]... [--distributed-rc] [--parasitic-variant <variant>]... [--mom-rlc-net <net>] [--mom-rlc-resistance-ohm <r>] [--mom-rlc-capacitance-ff <c>] [--mom-rlc-inductance-nh <l>] [--flatten-schematic] [--device-only-leg] [--format text|json]
+klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--outdir <dir>] [--backend <backend>] [--deck-option <key>=<value>]... [--pins <a,b,...>] [--rename-declared-pins] [--label-layer <role>=<layer>/<datatype>]... [--critical-net <net>]... [--critical-net-pattern <glob>]... [--critical-net-all] [--critical-net-exclude <glob>]... [--distributed-rc] [--parasitic-variant <variant>]... [--substrate-tie-ohms <ohms>] [--mom-rlc-net <net>] [--mom-rlc-resistance-ohm <r>] [--mom-rlc-capacitance-ff <c>] [--mom-rlc-inductance-nh <l>] [--flatten-schematic] [--device-only-leg] [--format text|json]
 klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <schematic.spice> [--measure-timeout-s <seconds>] [<every flag above>]
 ```
 
@@ -155,6 +155,10 @@ klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <
   failing delta row. Echoed as `extraction.parasitic_variant` (present only
   when given). See [`extract.md`](extract.md)'s `--parasitic-variant`
   section.
+- `--substrate-tie-ohms` — passed through to `klt extract
+  --substrate-tie-ohms` (issue #3089): the substrate DC-tie resistance (default
+  `1e12`, substrate capacitively floating in transient; `0` = hard tie). See
+  [`extract.md`](extract.md)'s "Substrate tie value" section.
 - `--mom-rlc-net` / `--mom-rlc-resistance-ohm` / `--mom-rlc-capacitance-ff` /
   `--mom-rlc-inductance-nh` — passed through to `klt extract --mom-rlc-net`
   (issue #988, Epic #709 Phase 3a). Substitutes a caller-supplied,
@@ -886,6 +890,8 @@ klt pex 06-layout.gds --deck sky130 \
   | `KLT_PEX_SIDE` | `schematic` or `extracted` |
   | `KLT_PEX_NETLIST` | the same path passed as the final argument |
   | `KLT_PEX_ARTIFACTS_DIR` | a per-side directory under this run's `--outdir` (`<outdir>/measure/<side>/`), created before the command runs — for whatever decks/logs/raw files the harness wants to keep |
+  | `KLT_PEX_BACKEND` | the `--backend` value (`local`/`batch`/…), set **only** when `klt pex` was given `--backend`; the same value is also exported as `KLT_SIM_BACKEND` so a child `klt sim` obeys it. Absent otherwise — the host's inherited `$KLT_SIM_BACKEND` default applies unchanged |
+  | `KLT_OUTDIR_LOCK_INHERIT` | the canonical path of `$KLT_PEX_ARTIFACTS_DIR`; a nested `klt` (e.g. `klt sim` on a request under that directory, default `-o`) treats that directory and its descendants as already owned by this run instead of failing with `outdir_locked` (additive, #3291) |
 
 - **A non-zero exit, an unrunnable command, a timeout, or stdout that is not
   valid JSON is a hard error** (exit `1`), with a bounded tail of the
@@ -975,6 +981,24 @@ applies to its `.include` target
 ([issue #1255](https://github.com/2AMLogic/klayout-tools/issues/1255), Gap 1)
 — so a parameter/corner file named by mistake is a clean error rather than a
 vacuous pass.
+
+### Running a corner grid from the command
+
+The command inherits `klt pex`'s environment, so on a host that sets
+`$KLT_SIM_BACKEND=batch` a child `klt sim` already routes a multi-unit request
+(corners / Monte Carlo) to the batch fleet. A harness that measures a PVT grid
+should therefore express it as a `klt sim` request and call `klt sim` — not
+hand-roll `ngspice` loops on the invoking host. An explicit
+`klt pex --backend X` reaches the child as `$KLT_PEX_BACKEND` and
+`$KLT_SIM_BACKEND` (the flag wins over a pre-set `$KLT_SIM_BACKEND`, matching
+`klt sim`'s `--backend` > env precedence); a harness that must refuse or route
+differently can read `$KLT_PEX_BACKEND`.
+
+- The two legs run **sequentially**, so batch wall time is two grid
+  submissions back to back.
+- Pass `klt sim -o` a path **outside** `$KLT_PEX_ARTIFACTS_DIR`: a child
+  `klt sim` writing under that tree hits `outdir_locked`
+  ([#3291](https://github.com/2AMLogic/klayout-tools/issues/3291)).
 
 ### Portability note: `.include`d files travel off-host
 
@@ -1290,7 +1314,15 @@ per-testbench `klt sim` runs on `<outdir>/<testbench>/schematic|extracted`
 inherit that ownership, and an independent `klt sim`/`klt pex` aimed at one
 of those child directories is refused while the run is active. A killed or
 crashed run releases ownership automatically; a leftover owner record never
-blocks the next run. `outdir_lock_unavailable` (same exit/streams) means
+blocks the next run. A `--measure-command` harness is the one child process
+that inherits ownership: `klt pex` exports `KLT_OUTDIR_LOCK_INHERIT` (the
+canonical `$KLT_PEX_ARTIFACTS_DIR`), so a nested `klt sim` whose output
+directory is that directory or a descendant -- including the default
+`.klt/sim/` beside a request written there -- runs without `outdir_locked`.
+Only descendants are covered: an ancestor or sibling of it is still refused,
+and a harness that fans out parallel `klt sim`s into the same directory loses
+the guard among themselves. Pass `klt sim -o <dir>` to a distinct directory
+per parallel run. `outdir_lock_unavailable` (same exit/streams) means
 locking itself is not possible here. Full policy, library exceptions and
 platform scope: [json-contract.md](../json-contract.md) "Output-directory
 ownership".

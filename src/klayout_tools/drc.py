@@ -69,6 +69,7 @@ from .decks import (
     get_deck,
     get_layer_names,
     get_nominal_dbu,
+    get_unchecked_rules,
     get_unmodeled_voltage_markers,
 )
 from .layers import layers_report
@@ -97,7 +98,13 @@ _SINGLE_LAYER_CHECKS = {"width", "space", "notch", "isolated"}
 # `_validate_threshold_max`/`_run_width_max_check` below.
 _MAX_BOUND_CHECKS = {"width"}
 # Check kinds that compare a region against another region (other_layer required).
-_TWO_LAYER_CHECKS = {"separation", "enclosing", "enclosed", "overlap"}
+_TWO_LAYER_CHECKS = {
+    "separation",
+    "enclosing",
+    "enclosed",
+    "overlap",
+    "enclosing_adjacent",
+}
 # Two-layer check kinds where the "enclosed" layer can lie entirely outside
 # the "enclosing" layer -- a case `Region.enclosing_check`/`enclosed_check`
 # never reports (they only measure *facing edges*, so zero spatial overlap
@@ -140,6 +147,9 @@ _ANGLE_CHECKS = {"angle"}
 # both kinds (`_run_vertex_check`), so adding a third vertex check kind does
 # not add another branch to `run_drc` itself.
 _VERTEX_CHECKS = _GRID_CHECKS | _ANGLE_CHECKS
+# Region rules (issue #3587): a typed `DrcRule.region_spec` descriptor
+# evaluated by `_run_comp_coverage_check`, not a distance primitive.
+_COMP_COVERAGE_CHECKS = {"comp_coverage"}
 
 # Every `DerivedLayer.mode` `run_drc()` knows how to derive a region for --
 # see that class's docstring for each one's derivation. Validated per rule
@@ -151,6 +161,7 @@ _DERIVED_LAYER_MODES = {
     "not_interacting",
     "holes",
     "union",
+    "gate_endcap",
 }
 
 # Every `DerivedLayer.context` value (issue #3484); `None` = no partition.
@@ -284,6 +295,14 @@ INAPPLICABLE_REASON_NO_APPLICABLE_GEOMETRY = "no_applicable_geometry"
 #: :func:`_grid_is_representable` for why rounding the grid to something
 #: expressible would be worse than reporting the gap.
 SKIP_REASON_GRID_NOT_REPRESENTABLE = "grid_not_representable"
+
+#: The curated engine's second ``coverage.inapplicable[].reason`` (issue
+#: #3587): a ``"comp_coverage"`` rule whose checked layer *is* drawn but whose
+#: checked region is empty once the rule's marker exemption is applied (every
+#: COMP polygon is under an exempting marker), so there was nothing for it to
+#: constrain. Distinct from
+#: :data:`INAPPLICABLE_REASON_NO_APPLICABLE_GEOMETRY` (checked layer absent).
+INAPPLICABLE_REASON_EMPTY_CHECKED_REGION = "inapplicable_empty_checked_region"
 
 
 def _grid_is_representable(rule: DrcRule, dbu: float) -> bool:
@@ -419,7 +438,8 @@ def _vacuity_layers(rule: DrcRule) -> set[tuple[int, int]]:
     elif rule.derived_layer is not None:
         layers = {rule.derived_layer.base}
         if rule.derived_layer.intersect_with is not None and (
-            rule.derived_layer.mode in ("sized_intersection", "overlapping")
+            rule.derived_layer.mode
+            in ("sized_intersection", "overlapping", "gate_endcap")
         ):
             layers.add(rule.derived_layer.intersect_with)
     else:
@@ -542,6 +562,7 @@ def _derived_region_unscoped(
     Region; neither input (nor the source layout) is modified.
     """
     derived = rule.derived_layer
+    assert derived is not None, "_derived_region requires a derived_layer rule"
     size_dbu = round(derived.sized_by_um / dbu)
     if derived.mode == "holes":
         # Interior voids of the merged `base` region (#1976) --
@@ -553,6 +574,23 @@ def _derived_region_unscoped(
         # with no holes at all derives an empty region, which is simply
         # nothing to report -- not an error.
         return base_region.merged().holes()
+    if derived.mode == "gate_endcap":
+        # Endcap probe zones (#2936), e.g. sky130's `poly.8`: the part of
+        # each `base` (diffusion) edge that lies under or flush with an
+        # `intersect_with` (poly) shape is a gate end edge; extend it
+        # outward by `sized_by_um`. Only the *outer* side is probed, so poly
+        # that merely abuts the diffusion from outside never reads as a
+        # gate. The rule pairs this region with `check="enclosed"`,
+        # `other_layer=<poly>` and a zero threshold: whatever part of a probe
+        # zone is not covered by poly is the missing endcap. A flush poly
+        # edge is collinear with the diffusion edge, which `inside_part`
+        # alone excludes, hence the explicit edge AND.
+        base_edges = base_region.merged().edges()
+        poly_region = intersect_region.merged()
+        gate_end_edges = (
+            base_edges.inside_part(poly_region) + (base_edges & poly_region.edges())
+        ).merged()
+        return gate_end_edges.extended(0, 0, size_dbu, 0, False)
     if derived.mode == "union":
         # Boolean join of both inputs (#2688), e.g. sg13g2's `Cnt.c`
         # enclosing region `activ.join(activ_mask)`. `_run_check` merges it
@@ -647,7 +685,10 @@ def _rule_outside_voltage_gate(
 
 
 def _classify_skipped_rules(
-    deck: list[DrcRule], rules_skipped: list[str], layout: Any
+    deck: list[DrcRule],
+    rules_skipped: list[str],
+    layout: Any,
+    empty_checked_region_ids: frozenset[str] = frozenset(),
 ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
     """Split ``rules_skipped`` into common-coverage *skipped* and
     *inapplicable* records (issue #2110).
@@ -705,6 +746,11 @@ def _classify_skipped_rules(
     categories, unchanged: it is the pre-contract spelling of "did not run",
     and this classification is additive to it.
 
+    ``empty_checked_region_ids`` (issue #3587) names the ``"comp_coverage"``
+    rules whose checked layer is drawn but whose checked region came out empty
+    (:data:`INAPPLICABLE_REASON_EMPTY_CHECKED_REGION`): a rule constraining
+    nothing in this stream, so inapplicable rather than skipped.
+
     Returns ``(skipped, inapplicable)``, each a list of ``{"id", "reason"}``
     records sorted by rule id.
     """
@@ -713,6 +759,11 @@ def _classify_skipped_rules(
     inapplicable: list[dict[str, str]] = []
     for rule in deck:
         if rule.id not in skipped_ids:
+            continue
+        if rule.id in empty_checked_region_ids:
+            inapplicable.append(
+                {"id": rule.id, "reason": INAPPLICABLE_REASON_EMPTY_CHECKED_REGION}
+            )
             continue
         vacuous = (
             any(layout.find_layer(*layer) is None for layer in _vacuity_layers(rule))
@@ -1120,6 +1171,10 @@ def run_drc(
                 "voltage_domain_warnings": [
                     {"marker": "<layer>/<datatype>", "description": str}, ...
                 ],
+                "unchecked_rules": [
+                    {"rule": str, "layer": "<layer>/<datatype>",
+                     "description": str}, ...
+                ],
                 "deck_scope": [<scope identifier>, ...],
                 "nothing_checked": bool,
                 "nothing_checked_reasons": [<reason code>, ...],
@@ -1391,6 +1446,8 @@ def run_drc(
         deck_layer_tuples.add(rule.layer)
         if rule.other_layer is not None:
             deck_layer_tuples.add(rule.other_layer)
+        if rule.region_spec is not None:
+            deck_layer_tuples.update(rule.region_spec.layers())
         if rule.derived_layer is not None:
             # `rule.layer` is only the derived rule's *reporting* identity
             # (see DerivedLayer's docstring) -- the layer(s) actually read
@@ -1416,6 +1473,7 @@ def run_drc(
     rule_counts: dict[str, int] = {}
     rules_skipped: list[str] = []
     rules_checked: list[str] = []
+    empty_checked_region_ids: set[str] = set()
 
     # Issue #2768: a rule left out of a `--rules` subset is never dispatched
     # -- not run-and-filtered (see `_dispatched_rules`). It is recorded
@@ -1447,6 +1505,19 @@ def run_drc(
         # `DerivedLayer`'s docstring. `rule.layer` itself is resolved only for
         # `coverage`/`layer_label` reporting below, never used to build the
         # checked region in this branch.
+        if _dispatch_region_rule(
+            rule,
+            layout,
+            top_cells,
+            layer_names,
+            violations,
+            rule_counts,
+            rules_checked,
+            rules_skipped,
+            empty_checked_region_ids,
+        ):
+            continue
+
         base_index: int | None = None
         intersect_index: int | None = None
         layer_index: int | None = None
@@ -1872,13 +1943,24 @@ def run_drc(
                 {"marker": _fmt(marker), "description": description}
             )
 
+    # Issue #3012: foundry rules the deck knows but cannot evaluate, named so
+    # a `clean` cannot be read as covering them. Only when the rule's layer
+    # is actually in the stream.
+    unchecked_rules = [
+        {"rule": rule_id, "layer": _fmt(layer), "description": description}
+        for rule_id, (layer, description) in sorted(
+            get_unchecked_rules(deck_name).items()
+        )
+        if layer in stream_layer_tuples
+    ]
+
     # Issue #2110: the two common-coverage categories this engine's single
     # "a layer it reads is absent" skip splits into -- see
     # `_classify_skipped_rules` for why an empty assessment domain is
     # inapplicable work rather than a skipped request, and why anything else
     # stays a disclosed skip.
     skipped_records, inapplicable_records = _classify_skipped_rules(
-        deck, rules_skipped, layout
+        deck, rules_skipped, layout, frozenset(empty_checked_region_ids)
     )
     # Issue #2768: every deliberately omitted rule is requested work that did
     # not run -- a skip, never inapplicable, even when its layers are absent
@@ -1896,6 +1978,7 @@ def run_drc(
         "rules_checked": sorted(rules_checked),
         "rules_skipped": sorted(rules_skipped),
         "voltage_domain_warnings": voltage_domain_warnings,
+        "unchecked_rules": unchecked_rules,
         "deck_scope": deck_scope,
         # Issue #1996: the shared roll-up, so a reader (`klt signoff`) can
         # refuse a "clean" verdict measured over nothing without re-deriving
@@ -2300,6 +2383,8 @@ def _run_check(
     if check in _TWO_LAYER_CHECKS:
         if other_region is None:
             raise DrcError(f"rule '{rule.id}': check '{check}' requires other_layer")
+        if check == "enclosing_adjacent":
+            return _run_enclosing_adjacent_check(region, other_region, d)
         edge_pairs = getattr(region, f"{check}_check")(other_region, d)
 
         outside_region = None
@@ -2327,6 +2412,37 @@ def _run_check(
         return edge_pairs, outside_region
 
     raise DrcError(f"rule '{rule.id}': unsupported check kind '{check}'")
+
+
+def _run_enclosing_adjacent_check(
+    region: Any, other_region: Any, d: int
+) -> tuple[Any, Any]:
+    """``check="enclosing_adjacent"``: sky130's two-adjacent-edges enclosure
+    rules (``via.5a``, ``m2.5``, ``via2.5``, ``via3.5``, #3316).
+
+    Mirrors ``sky130A_mr.drc``: the cut edges whose enclosure is below ``d``
+    (``enclosing_check(...).second_edges``) are tested for a *corner* --
+    two short edges meeting at an angle under 100 degrees -- and every cut
+    touching such a corner is a violation. So a cut passes when its short
+    sides (< ``d``) are at most one side or two opposite sides; it fails
+    when two adjacent sides are both short. A cut with no facing edge at
+    all yields no edge pair and is not reported here (the sibling
+    ``enclosing`` rule already reports an escape).
+
+    Returns ``(empty EdgePairs, cuts)``: one polygon per offending cut
+    (reported through ``run_drc``'s polygon-term path), not one entry per
+    corner, which is the official deck's per-cut counting.
+    """
+    import klayout.db as kdb
+
+    short_edges = region.enclosing_check(
+        other_region, d, metrics=kdb.Metrics.Projection
+    ).second_edges()
+    corners = short_edges.width_check(
+        1, metrics=kdb.Metrics.Euclidian, ignore_angle=100
+    )
+    bad_cuts = other_region.interacting(corners.polygons(1))
+    return kdb.EdgePairs(), bad_cuts
 
 
 def _rule_input_layers(rule: DrcRule) -> set[tuple[int, int]]:
@@ -2812,6 +2928,107 @@ def _run_density_check(region: Any, rule: DrcRule, dbu: float) -> list[Any]:
         y += window_dbu
 
     return violations
+
+
+def _dispatch_region_rule(
+    rule: DrcRule,
+    layout: Any,
+    top_cells: list[Any],
+    layer_names: dict[tuple[int, int], str],
+    violations: list[dict[str, Any]],
+    rule_counts: dict[str, int],
+    rules_checked: list[str],
+    rules_skipped: list[str],
+    empty_checked_region_ids: set[str],
+) -> bool:
+    """Run a :data:`_COMP_COVERAGE_CHECKS` rule (issue #3587), recording its
+    outcome in the caller's accumulators; ``False`` when ``rule`` is not one.
+
+    A region rule resolves its own layers (named layers other than the
+    checked one may be absent) and decides checked-vs-inapplicable itself --
+    see :func:`_run_comp_coverage_check`. Only an absent *checked* layer or
+    an empty checked region lands the rule in ``rules_skipped`` (the latter
+    also in ``empty_checked_region_ids``).
+    """
+    if rule.check not in _COMP_COVERAGE_CHECKS:
+        return False
+    if layout.find_layer(*rule.layer) is None:
+        rules_skipped.append(rule.id)  # absent checked layer
+        return True
+    found = _run_comp_coverage_check(rule, layout, top_cells, layer_names)
+    if found is None:
+        rules_skipped.append(rule.id)
+        empty_checked_region_ids.add(rule.id)
+        return True
+    rules_checked.append(rule.id)
+    violations.extend(found)
+    if found:
+        rule_counts[rule.id] = rule_counts.get(rule.id, 0) + len(found)
+    return True
+
+
+def _run_comp_coverage_check(
+    rule: DrcRule,
+    layout: Any,
+    top_cells: list[Any],
+    layer_names: dict[tuple[int, int], str],
+) -> list[dict[str, Any]] | None:
+    """``check="comp_coverage"`` (issue #3587): the rule's checked layer minus
+    every ``region_spec.covered_by_any`` layer, with whole checked polygons
+    exempted when they interact with an ``exempt_markers`` polygon -- gf180mcu
+    ``DF.12`` (``comp.not_interacting(schottky_diode).not(nplus).not(pplus)``).
+
+    Evaluated flat per top cell on merged regions. Every named layer other
+    than the checked one is read as an *empty* region when absent from the
+    stream and is never a reason to skip: an unimplanted COMP is the
+    violation. One violation per residual polygon.
+
+    Returns ``None`` when the checked region (the checked layer after the
+    marker exemption) is empty in every top cell -- the rule constrains
+    nothing here, so the caller records it as inapplicable
+    (:data:`INAPPLICABLE_REASON_EMPTY_CHECKED_REGION`), not as checked.
+    """
+    spec = rule.region_spec
+    if spec is None:
+        raise DrcError(f"rule '{rule.id}': check '{rule.check}' requires region_spec")
+    layer_label = layer_names.get(rule.layer, f"{rule.layer[0]}/{rule.layer[1]}")
+
+    def merged(cell: Any, layer: tuple[int, int]) -> Any:
+        return _cell_region_or_empty(cell, layout.find_layer(*layer)).merged()
+
+    any_checked = False
+    found: list[dict[str, Any]] = []
+    for cell in top_cells:
+        region = merged(cell, rule.layer)
+        for marker in spec.exempt_markers:
+            region = region.not_interacting(merged(cell, marker))
+        if region.is_empty():
+            continue
+        any_checked = True
+        for covering in spec.covered_by_any:
+            region = region - merged(cell, covering)
+        for polygon in region.merged().each():
+            bbox = polygon.bbox()
+            source_cell, source_path = _attribute_to_instance(cell, bbox)
+            found.append(
+                {
+                    "rule": rule.id,
+                    "description": rule.description,
+                    "check": rule.check,
+                    "layer": layer_label,
+                    "cell": cell.name,
+                    "source_cell": source_cell,
+                    "source_path": source_path,
+                    "bbox": {
+                        "left": bbox.left,
+                        "bottom": bbox.bottom,
+                        "right": bbox.right,
+                        "top": bbox.top,
+                    },
+                    "polygon": [[pt.x, pt.y] for pt in polygon.each_point_hull()],
+                }
+            )
+    return found if any_checked else None
 
 
 def _run_antenna_check(region: Any, other_region: Any | None, rule: DrcRule) -> Any:
@@ -3744,6 +3961,7 @@ def _klayout_engine_coverage(
         "layers_in_stream_without_rules": [],
         "rules_skipped": [],
         "voltage_domain_warnings": [],
+        "unchecked_rules": [],
         "deck_scope": [],
         **build_check_coverage(checked=checked, unknown=unknown),
     }

@@ -333,14 +333,40 @@ up against this family's curated deck (`klayout_tools.decks.sg13g2`) today;
   poly-to-unrelated-active spacing rule in this repo's curated deck, so the
   overhang had never tripped a DRC check before. **Issue #1450 fixed the
   geometry**: on a family that declares a gate-pad clearance
-  (`gen.py`'s `_PDK_GATE_PAD_ACTIVE_CLEARANCE_UM` — `sg13g2`: 0.1µm, the
-  only entry today), the landing pad is lifted that far clear of the
-  diffusion edge and the gap is bridged by a poly stem of exactly the gate
-  length, so no poly edge faces `Activ` at zero distance. On `sky130` and
-  `gf180mcu` the clearance is `0`, so their drawn geometry and their
-  `U<i>_G` port position/width are byte-for-byte unchanged. On `sg13g2` the
-  reported `U<i>_G` port sits 0.1µm higher than the equivalent sky130 device
-  (its *width* is still the landing pad's, unchanged).
+  (`gen.py`'s `_PDK_GATE_PAD_ACTIVE_CLEARANCE_UM` — `sg13g2`: 0.1µm,
+  `gf180mcu`: 0.35µm, `sky130`: 0.15µm), the landing pad is lifted that far
+  clear of the diffusion edge and the gap is bridged by a poly stem of
+  exactly the gate length, so no poly edge faces `Activ` at zero distance.
+  The reported `U<i>_G` port moves up by the family's clearance (its
+  *width* is still the landing pad's, unchanged).
+
+  > **sky130 note (issue #3115):** sky130 was `0` until this issue, so its
+  > pad abutted the diffusion; for any gate length below the 0.42µm pad
+  > width the PDK's own Magic `poly.4` (poly to unrelated diffusion,
+  > 0.075µm — not in the curated deck, so `klt drc` never saw it) failed.
+  > The landing pad, the `gate_contact` stack and the reported `U<i>_G`
+  > ports now sit 0.15µm higher (which also satisfies `poly.8`'s 0.13µm
+  > endcap on the top edge), and `core_h_um` grows by the same amount.
+  > Likewise the nwell drawn around the n-tap guard ring of a
+  > `flavor="pfet"` `mos_array`/`diff_pair`/`guard_ring` now extends 0.2µm
+  > (was 0.15µm) past the ring on sky130, clearing `diff/tap.10` (0.18µm);
+  > other families keep 0.15µm. The two rules remain unchecked by
+  > `klt drc --deck sky130`.
+
+**sky130 gate-poly endcap (issue #2936).** The sky130 unit device used to end
+the gate poly flush with the diffusion: the bottom edge exactly at `y == 0`,
+and the top edge only through the landing-pad neck (narrower than the gate
+once `l_um` exceeds the 0.42µm pad). The PDK's `poly.8` ("min. poly extention
+gate (endcap)", 0.13µm) rejects both, and the curated deck could not see it.
+The deck now carries `poly.endcap.diff.1` ([`klt drc`](drc.md)), and
+`mos_array`/`diff_pair`/`esd_device` draw a 0.15µm endcap on sky130 at both
+ends along the full gate width: `gen.py`'s `_PDK_GATE_BOTTOM_ENDCAP_UM`
+gained a `sky130` entry, and the new `_PDK_GATE_TOP_ENDCAP_UM` adds a
+stripe-width neck above the diffusion before the landing pad widens (the
+parallel-finger shape already runs its stripes up into the comb). The unit
+device is therefore 0.15µm taller (`bbox` grows at the bottom; row pitch
+follows), and the S/D ports are unchanged. Other families' geometry is
+unchanged.
 
 `esd_device`/`bond_pad`/`well_island` were simply not attempted for
 `sg13g2` by issue #1448 (no citable curated passivation-opening layer for
@@ -1030,6 +1056,19 @@ as that class rather than the default. sg13g2 exposes all three of its
 recognised poly-resistor classes (issue #1451), each drawing that class's own
 `requires` set from `klayout_tools.decks.sg13g2.EXTRACTION_DECK.resistors`:
 
+On gf180mcu the `SAB` salicide block is not the body-only marker box (issue
+#3000). The PDK runset's `sab.drc` needs it `0.15` µm from every contact
+(`SB.4`) and running `0.22` µm past the poly body's long edges (`SB.9`/
+`SB.10`), so the end heads are lengthened to `0.52` µm (contact edge to body
+`0.15` µm) and the `SAB` is drawn `0.22` µm wider than the body on each side.
+The body, `Pplus` and `RES_MK` marker keep the requested `length_um`, so
+`klt extract` still reads the same `L`. Folded rows are `0.4` µm apart, so
+neighbouring rows' `SAB` overlap and merge. A gf180mcu `res_array` cell is
+therefore `0.22` µm taller on each side and `0.20` µm longer than before; with
+`flavor` `1k`/`2k`/`3k` it reports no `SB.*` violation from the PDK's
+`run_drc.py`. (`generic` still reports `PRES.5`/`PRES.6`/`PP.9`, which are not
+salicide-block rules.) sky130 and sg13g2 output is unchanged.
+
 | `flavor` | sg13g2 device class | Sheet ρ | Masks drawn over each body |
 | -------- | ------------------- | ------- | -------------------------- |
 | `"generic"` (default) | `rsil` | 7 Ω/□ | `EXTBlock` `(111, 0)` + `Res` `(24, 0)` |
@@ -1697,9 +1736,11 @@ extracted netlist. On `sky130` this moves the ring from `diff.drawing`
 **This generator draws from base layers, not from a vendor library cell.** The
 result is a DRC-clean, matching-faithful *floorplan* of the device (layer
 stack + common-centroid/dummy arrangement), **not** a SPICE-model-exact
-replacement for the PDK's characterized vertical PNP — the curated decks check
-no implant layer, so emitter/base/collector all draw on the one diffusion
-role. See [`docs/design/gen-bjt-array-spike.md`](../design/gen-bjt-array-spike.md)
+replacement for the PDK's characterized vertical PNP — emitter/base/collector
+all draw on the one diffusion role. On gf180mcu, whose deck forbids Comp not
+covered by an implant (`DF.12`), each emitter pad gets a Pplus implant and each
+base-tie pad an Nplus implant (0.16 µm extension), and the collector ring sits
+further out to keep implant spacing. See [`docs/design/gen-bjt-array-spike.md`](../design/gen-bjt-array-spike.md)
 for why draw-from-scratch was chosen over vendor-cell instantiation, and the
 fidelity limits that choice carries.
 
@@ -1715,6 +1756,40 @@ fidelity limits that choice carries.
 | `ring_gap_side`      | string | `""`               | Cut one routing opening through the collector ring on this side (`""`/`"N"`/`"S"`/`"E"`/`"W"`) — see `guard_ring`'s "Ring routing openings" above. |
 | `ring_gap_um`        | double | `0.0`              | Length of that opening along its side (µm). Required (`>= 0.4`) with `ring_gap_side`, `0` otherwise. |
 | `ring_gap_offset_um` | double | `0.0`              | Slide the opening off its side's midpoint (µm) — e.g. onto the column of emitter ports a route needs to reach. |
+
+### `cap_vpp_array` (PDK fixed-cell capacitor array, issue #3100)
+
+A row of `num` instances of one of the PDK's **fixed, pre-drawn**
+vertical-parallel-plate (interdigitated metal) capacitor cells — sky130's
+`sky130_fd_pr__cap_vpp_*` (70 cells in `libs.ref/sky130_fd_pr/gds/sky130_fd_pr.gds`).
+Unlike every other generator it draws no geometry of its own: the named cell
+is copied from the resolved PDK's GDS at request time (never vendored) and
+placed as drawn, with the first instance's bounding box at the origin.
+sky130 only.
+
+| Param      | Type   | Default | Meaning |
+|------------|--------|---------|---------|
+| `pdk_cell` | string | `sky130_fd_pr__cap_vpp_02p4x04p6_m1m2_noshield` | PDK cell to array. Named `pdk_cell`, not `cell`, because `cell` collides with the PCell helper's own target-cell attribute. An unknown name fails with the standard error envelope listing every available `cap_vpp_*` name. |
+| `num`      | int    | `4`     | Instances in the row; must be `>= 1`. |
+| `pitch_um` | double | `0.0`   | Centre-to-centre pitch. `0` abuts at the cell's bounding-box width; a non-zero pitch smaller than the cell width (with `num > 1`) is rejected rather than silently overlapping. |
+
+**Ports** are derived from the cell's own pin labels (e.g. `C0`, `C1`, `SUB`),
+reported per instance as `U<i>_<label>` with the label's layer/datatype, its
+position, and an additive `bbox_um` — the smallest drawing-datatype shape
+under the label, or `null` when none is found. A cell with no pin labels
+(13 of sky130's 70, mostly the `pol1…` and `o2subcell` variants) reports no
+ports and says so in `drc_hints.notes`; ports are never invented.
+
+Terminals are **not** strapped between instances, and no matched/common-
+centroid placement is done. The output passes `klt drc --deck sky130` without
+a generator-introduced crash; whether `klt lvs` recognises `cap_vpp` as a
+device depends on the sky130 deck and is not claimed here.
+
+```bash
+klt gen cap_vpp_array --pdk sky130A \
+  --params '{"pdk_cell":"sky130_fd_pr__cap_vpp_02p4x04p6_m1m2_noshield","num":4,"pitch_um":3}' \
+  -o caps.gds --format json
+```
 
 ### `bond_pad` (chip-boundary bond pad, issue #568)
 

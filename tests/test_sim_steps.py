@@ -117,7 +117,7 @@ def _stub_ngspice(monkeypatch, log_text: str) -> list[str]:
     record the deck text each invocation was handed."""
     decks: list[str] = []
 
-    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None):
         decks.append(Path(cmd[cmd.index("-b") + 1]).read_text())
         Path(cmd[cmd.index("-o") + 1]).write_text(log_text)
         return fake_completed("** ngspice-46\n")
@@ -528,6 +528,98 @@ def test_run_sim_refuses_alter_of_a_waveform_source(tmp_path, monkeypatch):
     with pytest.raises(sim.SimError, match="explicit PULSE waveform"):
         sim.run_sim(str(_write_request(tmp_path, request)))
     assert decks == []
+
+
+_PWL_BODY = _BODY + "VEN en 0 dc 0 pwl(0 0 1u 0 2u 3.3 1 3.3)\n"
+
+
+def _pwl_request(value, step=0):
+    request = _two_point_request()
+    request["analysis_steps"][step]["alter"] = {"VEN": value}
+    return request
+
+
+def test_run_sim_accepts_pwl_alter_of_a_pwl_source(tmp_path, monkeypatch):
+    _write_body(tmp_path, _PWL_BODY)
+    decks = _stub_ngspice(monkeypatch, "")
+    request = _pwl_request({"pwl": [0, 0, 1e-6, 0, 2e-6, 1.8, 1, 1.8]})
+    sim.run_sim(str(_write_request(tmp_path, request)))
+    assert decks
+    assert "alter @VEN[pwl] = [ 0 0 1e-06 0 2e-06 1.8 1 1.8 ]" in decks[0]
+
+
+def test_pwl_alter_is_case_insensitive_and_allows_repeated_time(tmp_path):
+    analysis, specs = _resolve(
+        {
+            "analysis_steps": [
+                {
+                    "name": "a",
+                    "analysis": {"kind": "op", "args": ""},
+                    "alter": {"VEN": {"pwl": [0, 0, 1, 0, 1, 3, 2, 3]}},
+                }
+            ]
+        }
+    )
+    sim_steps._check_alter_target(
+        "a", "VEN", set(), {"ven": "pwl"}, analysis["steps"][0]["alter"][0][1]
+    )
+    lines = sim_steps.control_lines(analysis, specs)
+    assert "alter @VEN[pwl] = [ 0 0 1 0 1 3 2 3 ]" in lines
+
+
+@pytest.mark.parametrize(
+    "value, match",
+    [
+        ({"pwl": [0, 0, 1]}, "even-length"),
+        ({"pwl": [0, 0]}, "at least 2 points"),
+        ({"pwl": [0, 0, 1, float("inf")]}, "finite"),
+        ({"pwl": [0, 0, 1, True]}, "finite"),
+        ({"pwl": "0 0 1 1"}, "even-length"),
+        ({"pwl": [0, 0, 2, 1, 1, 1]}, "decreasing times"),
+        ({"pwl": [0, 0, 1, 1], "extra": 1}, "exactly one key"),
+    ],
+)
+def test_run_sim_refuses_malformed_pwl_alter(tmp_path, monkeypatch, value, match):
+    _write_body(tmp_path, _PWL_BODY)
+    decks = _stub_ngspice(monkeypatch, "")
+    with pytest.raises(sim.SimError, match=match):
+        sim.run_sim(str(_write_request(tmp_path, _pwl_request(value))))
+    assert decks == []
+
+
+@pytest.mark.parametrize(
+    "extra, target, match",
+    [
+        ("VEN en 0 dc 1.0\n", "VEN", "no PWL waveform"),
+        ("VEN en 0 PULSE(0 1 0 1n 1n 1u 2u)\n", "VEN", "PULSE waveform"),
+        ("Rx a 0 1k\n", "Rx", "no PWL waveform"),
+    ],
+)
+def test_run_sim_refuses_pwl_alter_of_a_non_pwl_target(
+    tmp_path, monkeypatch, extra, target, match
+):
+    _write_body(tmp_path, _BODY + extra)
+    decks = _stub_ngspice(monkeypatch, "")
+    request = _two_point_request()
+    request["analysis_steps"][0]["alter"] = {target: {"pwl": [0, 0, 1, 1]}}
+    with pytest.raises(sim.SimError, match=match):
+        sim.run_sim(str(_write_request(tmp_path, request)))
+    assert decks == []
+
+
+def test_run_sim_scalar_alter_of_a_pwl_source_points_to_pwl_form(tmp_path, monkeypatch):
+    _write_body(tmp_path, _PWL_BODY)
+    decks = _stub_ngspice(monkeypatch, "")
+    with pytest.raises(sim.SimError, match=r'explicit PWL waveform.*\{"pwl"'):
+        sim.run_sim(str(_write_request(tmp_path, _pwl_request(1.8))))
+    assert decks == []
+
+
+def test_pwl_alter_still_conflicts_with_supply_axis():
+    with pytest.raises(sim.SimError, match="corners.supply_v"):
+        sim_steps._check_alter_target(
+            "a", "VEN", {"ven"}, {"ven": "pwl"}, {"pwl": [0, 0, 1, 1]}
+        )
 
 
 def test_run_sim_refuses_alter_of_a_param_only_name(tmp_path, monkeypatch):
@@ -1114,6 +1206,22 @@ def test_real_ngspice_failed_derived_expression(tmp_path):
     failing = [d for d in corner["diagnostics"] if "bad_ratio" in d["message"]]
     assert [d["code"] for d in failing] == ["measurement"]
     assert all(step["status"] == "ok" for step in corner["steps"])
+
+
+def test_optional_true_is_refused_in_step_and_derived_measurements():
+    """Issue #2925: `optional` is scalar-analysis only; refused, not ignored."""
+    step_request = _two_point_request()
+    step_request["analysis_steps"][0]["measurements"][0]["optional"] = True
+    with pytest.raises(sim.SimError, match="'optional' is not supported"):
+        _resolve(step_request)
+    derived_request = _two_point_request()
+    derived_request["measurements"][0]["optional"] = True
+    with pytest.raises(sim.SimError, match="'optional' is not supported"):
+        _resolve(derived_request)
+    # `false` is the default and stays accepted.
+    ok = _two_point_request()
+    ok["measurements"][0]["optional"] = False
+    _resolve(ok)
 
 
 # --------------------------------------------------------------------------- #

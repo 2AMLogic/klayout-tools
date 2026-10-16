@@ -78,6 +78,11 @@ per item:
 - item 10: the repo-hygiene audit record, for example the CI workflow
   file or a checklist covering README, spec table and license.
 
+Where the claim is about a set of files (item 1's sources plus the derived
+netlist; item 9's or 10's several files), the envelope may bind the set with
+`provenance.input.paths` (issue #3044) so that editing any member turns the
+row stale; see [`docs/cli/signoff.md`](cli/signoff.md).
+
 A passing native envelope cited for one of these four is still accepted,
 for compatibility. Its citation carries no `artifact_binding`, which marks
 it as a cited pass the tool could not judge for relevance. See
@@ -300,6 +305,20 @@ written to every block.
    platform, still needs a repo checkout with a Rust toolchain; see
    `docs/cli/yield.md`'s "What the extra does and does not reach" callout and
    `docs/releasing-native.md`.
+   **When "not applicable" is legitimate** (issue #2865): a block whose
+   ratified spec has *no* statistical row passes this item by a recorded
+   "not applicable", not by a waiver at grant time and not by inventing a
+   statistical claim. That holds only when the spec is ratified, a committed
+   statement accounts for every spec row with the reason its row class is
+   not statistical (for example "timing rows are corner-bounded by STA at the
+   PDK's characterised corners"), and both are bound by content hash so
+   editing either invalidates the claim. Any accuracy, offset, matching or
+   yield row is statistical by definition: a spec carrying one — or a sigma,
+   yield, Cpk or `3σ`-style bound — cannot use the outcome and needs `klt
+   yield` evidence for that row. The outcome is available to a digital
+   partition only; an analog partition (including the analog half of a
+   mixed-signal block) always requires Monte Carlo evidence. `klt signoff`
+   reports it as `not_applicable`, never as `met`.
 7. **Post-layout verification**
    - *Analog* — the spec suite re-run against the netlist extracted from
      the layout, not only the drawn schematic (#252). Parasitic extraction

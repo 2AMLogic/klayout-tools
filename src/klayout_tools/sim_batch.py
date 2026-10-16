@@ -90,24 +90,30 @@ import random
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
-from . import _provenance, remote_transport, sim_staging
+from . import _provenance, remote_transport, sim_staging, sim_transfer_meas
 from .remote_launcher import (
     ASSUMED_THREADS_PER_CORNER,
     RemoteLaunchError,
+    _signal_handlers_install,
+    _signal_handlers_restore,
     ami_pdk_key,
     published_runner_identities,
 )
 from .sim_remote import (
     _build_remote_request,
+    _points_to_push,
     _rewrite_remote_artifact_paths,
     _run_sharded,
     _unrun_corner_report,
@@ -181,6 +187,29 @@ _BATCH_PREFLIGHT_REJECT_EXIT = 87
 #: client's before any simulation runs; ``warn`` runs anyway and reports the
 #: skew in ``environment.remote``.
 RUNNER_VERSION_CHECK_MODES = ("enforce", "warn")
+
+#: Request feature -> minimum ``klt`` release whose runner understands it
+#: (#2877). Pure data, importable without side effects, so a client-side field
+#: preflight (#2901) can consume it. ``None`` means the feature exists only on
+#: unreleased ``main`` (no git tag contains it yet) -- never a guessed version.
+#: Versions were derived with ``git log -S<token>`` plus
+#: ``git tag --contains <commit>``; the commit is cited per entry. The 0.5.0
+#: fleet image predates every entry below that has a version.
+REQUEST_FEATURE_MIN_RUNNER_VERSION: dict[str, str | None] = {
+    # 328b552b feat(sim): add measurements[].expr (#2533); first in v0.7.0.
+    "measurements[].expr": "0.7.0",
+    # 31baf0bc per-section model libraries in a corners.process bundle (#2538);
+    # first in v0.7.0. (The plain-string sections[] form dates from 9bea8456,
+    # #357, v0.2.0 line.)
+    "corners.process[].sections[] (object form)": "0.7.0",
+    # 1b51954f options.ngspice_init (#2530); first in v0.7.0.
+    "options.ngspice_init": "0.7.0",
+    # 8296828c options.osdi_preload (#2534); first in v0.7.0.
+    "options.osdi_preload": "0.7.0",
+    # d4d497ee ordered analysis_steps[] (#2482), 2026-10-09, after v0.7.0:
+    # the only route to .meas cards on a noise analysis. Untagged.
+    "analysis_steps[].measurements[] (noise analysis .meas cards)": None,
+}
 
 #: Upper bound on how much of the collected stderr file recovery reads (its
 #: tail). The envelope is the last thing klt writes; anything earlier is
@@ -300,6 +329,16 @@ BATCH_NO_CAPACITY_CODE = "batch_no_capacity"
 #: can tell slot contention from a Spot shortage.
 BATCH_CONCURRENCY_CAP_CODE = "batch_concurrency_cap"
 
+#: ``error.code`` of a client terminated (SIGINT/SIGTERM) while waiting on a
+#: submitted job (issue #3065). The remote job is deliberately left running.
+BATCH_INTERRUPTED_CODE = "batch_client_interrupted"
+
+#: Submit receipt written into the artifacts directory right after launch
+#: (issue #3065) -- the on-disk record of which fleet job this client
+#: orphaned if it dies mid-wait. A sharded run writes
+#: ``batch-receipt-<job-id>.json`` per shard instead.
+BATCH_RECEIPT_FILENAME = "batch-receipt.json"
+
 #: Capacity-wait backoff (``request.batch.capacity_wait_s``, issue #2721):
 #: the first re-launch waits ~:data:`_CAPACITY_BACKOFF_BASE_S`, each further
 #: one doubles, capped at :data:`_CAPACITY_BACKOFF_CAP_S`. Every delay is
@@ -363,6 +402,21 @@ class BatchError(Exception):
     def __init__(self, message: str, *, code: str | None = None) -> None:
         super().__init__(message)
         self.code = code
+
+
+class BatchClientInterrupted(BatchError):
+    """SIGINT/SIGTERM arrived while waiting on a submitted job (issue #3065).
+
+    Re-raised by :func:`_run_batch` as a ``SimError`` carrying
+    :data:`BATCH_INTERRUPTED_CODE`. The fleet exposes no cancel primitive, so
+    the remote job keeps running; the message names it so the caller can
+    tell whether resubmitting would pay twice.
+    """
+
+    def __init__(self, message: str, *, job_id: str, signum: int) -> None:
+        super().__init__(message, code=BATCH_INTERRUPTED_CODE)
+        self.job_id = job_id
+        self.signum = signum
 
 
 class BatchPollTimeout(BatchError):
@@ -518,13 +572,27 @@ def _runner_gate_release(version: str) -> str | None:
 #: release segment that can carry it is ``0.7.1`` (post-tag builds render as
 #: ``0.7.1.devN``). A ``0.7.1.devN`` runner built before the feature landed is
 #: indistinguishable from one built after, so it counts as supporting it.
-#: Next candidate entry: ``decks[]`` (#3303).
+#: ``transfer`` (``measurements[].transfer``, #2923/#2924) was merged after
+#: ``v0.7.0`` too, so ``0.7.1`` is likewise its first release segment.
 _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
     "analysis_steps": (
         (0, 7, 1),
         lambda request: request.get("analysis_steps") is not None,
     ),
+    "transfer": (
+        (0, 7, 1),
+        lambda request: bool(
+            sim_transfer_meas.transfer_measurements(request.get("measurements") or [])
+        ),
+    ),
 }
+
+#: Registry features a runner must be *known* to support (issue #2924): a
+#: runner that predates one, or whose version cannot be read, is refused
+#: whatever ``runner_version_check`` says, because the alternative is a worker
+#: that accepts the request and omits the metric. Every other registry
+#: feature keeps the warn-and-run behaviour of #3249.
+_MANDATORY_RUNNER_FEATURES = frozenset({"transfer"})
 
 
 def _release_key(release: str) -> int | None:
@@ -920,6 +988,15 @@ def _runner_preflight_script(
     ]
     if required_features:
         lines.append(_feature_gate_shell(required_features, client_version))
+    mandatory = tuple(
+        name for name in required_features if name in _MANDATORY_RUNNER_FEATURES
+    )
+    if mandatory:
+        lines.append(
+            _mandatory_feature_gate_shell(
+                mandatory, report_path=report_path
+            ).removesuffix("; ")
+        )
     if capture:
         # Issue #2834: the worker capture rides the same preflight, *before*
         # the enforce gate so a rejected job still leaves it collectable.
@@ -936,6 +1013,118 @@ def _runner_preflight_script(
             "exit " + str(_BATCH_PREFLIGHT_REJECT_EXIT) + "; fi"
         )
     return "; ".join(lines) + "; "
+
+
+def _mandatory_feature_gate_shell(
+    features: tuple[str, ...], *, report_path: str | None = None
+) -> str:
+    """Shell that rejects a runner not known to support a
+    :data:`_MANDATORY_RUNNER_FEATURES` entry (issue #2924); needs ``$rv``.
+    Unlike the version gate and :func:`_feature_gate_shell` it is not relaxed
+    by ``runner_version_check: "warn"``, and an unreadable runner version is
+    rejected too. Exits :data:`_BATCH_PREFLIGHT_REJECT_EXIT` with the message
+    on stderr and, when ``report_path`` is given (the batch job), a klt error
+    envelope carrying :data:`BATCH_RUNNER_FEATURE_CODE` there -- before
+    ``klt sim`` runs."""
+    envelope = ""
+    if report_path is not None:
+        envelope = (
+            'printf \'{"schema_version": 1, "error": {"command": "sim", '
+            f'"code": "{BATCH_RUNNER_FEATURE_CODE}", "message": "%s"}}}}\\n\' '
+            f'"$mmsg" >{report_path}; '
+        )
+    return (
+        _mandatory_feature_probe_shell(features)
+        + 'if [ -n "$mmiss" ]; then '
+        + 'mmsg="the worker runs klt ${rv:-<unknown>}, which is not known '
+        + "to support the request feature(s) $mmiss -- the request was not run "
+        + '(rebuild the runner image from a release that has the feature)"; '
+        + envelope
+        + 'echo "$mmsg" >&2; exit '
+        + str(_BATCH_PREFLIGHT_REJECT_EXIT)
+        + "; fi; "
+    )
+
+
+def remote_feature_preflight(request: dict[str, Any]) -> str:
+    """Shell prefix for the ``remote`` backend's ``klt sim`` command (issue
+    #2924): on the provisioned host, read ``klt --version`` and refuse a
+    request that uses a :data:`_MANDATORY_RUNNER_FEATURES` entry the host's
+    ``klt`` is not known to support, before any simulation. Empty (the
+    command is byte-identical to before) when the request uses none."""
+    features = tuple(
+        name
+        for name in _request_features(request)
+        if name in _MANDATORY_RUNNER_FEATURES
+    )
+    if not features:
+        return ""
+    return (
+        "rv=$(klt --version 2>/dev/null | head -n 1 | tr -cd 'A-Za-z0-9._+ -'"
+        " | cut -c1-80); rv=${rv#klt }; rv=${rv# }; "
+        + _mandatory_feature_gate_shell(features)
+    )
+
+
+def assess_remote_runner_features(
+    request: dict[str, Any], pdk: str | None, region: str | None, manifest: Any
+) -> None:
+    """Refuse a ``remote`` request before any billable launch when the AMI
+    manifest says the image it would boot predates a mandatory registry
+    feature the request uses (issue #2924). Anything less certain (no
+    manifest, a legacy entry without ``klt_version``) proceeds to
+    :func:`remote_feature_preflight` on the host. Never relaxed by a warn
+    policy: ``remote`` has none, and a silently dropped metric is worse."""
+    from .sim import SimError
+
+    features = [
+        name
+        for name in _request_features(request)
+        if name in _MANDATORY_RUNNER_FEATURES
+    ]
+    if not features:
+        return
+    try:
+        images = published_runner_identities(pdk, region, manifest)
+    except (RemoteLaunchError, OSError, TypeError, ValueError, AttributeError):
+        return
+    gaps = [
+        _missing_runner_features(features, image["klt_version"]) for image in images
+    ]
+    if not gaps or any(not gap for gap in gaps):
+        return
+    missing = sorted({name for gap in gaps for name in gap or ()})
+    versions = ", ".join(sorted({str(image["klt_version"]) for image in images}))
+    raise SimError(
+        f"backend 'remote' refused before launch: the request uses "
+        f"{', '.join(missing)}, which the AMI manifest's runner image "
+        f"(klt {versions}) predates -- no instance was launched (rebuild the "
+        "remote-sim AMI from a release that has the feature; see "
+        "docs/cli/sim.md)",
+        code=BATCH_RUNNER_FEATURE_CODE,
+    )
+
+
+def _mandatory_feature_probe_shell(features: tuple[str, ...]) -> str:
+    """Shell setting ``$mmiss`` to the ``features`` the runner is not known
+    to support, from ``$rv`` (the runner's ``klt --version`` string). It
+    derives the full release segment itself so the remote backend can reuse
+    it without the batch preflight's ``$rfull``."""
+    checks = " ".join(
+        f'if [ "$mk" -lt {_feature_release_key(name)} ]; '
+        f'then mmiss="${{mmiss}}${{mmiss:+, }}{name}"; fi;'
+        for name in features
+    )
+    names = ", ".join(features)
+    return (
+        "mmiss=; mr=${rv%%+*}; mr=${mr%%[!0-9.]*}; mr=${mr%.}; "
+        'case "$mr" in ""|.*|*..*) mr= ;; esac; '
+        'if [ -z "$mr" ]; then '
+        f'mmiss="{names}"; else '
+        'IFS=. read -r f1 f2 f3 _ <<<"$mr"; '
+        "mk=$(( (10#${f1:-0} * 1000000 + 10#${f2:-0}) * 1000000 "
+        "+ 10#${f3:-0} )); " + checks + " fi; "
+    )
 
 
 def _feature_gate_shell(features: tuple[str, ...], client_version: str) -> str:
@@ -1330,6 +1519,43 @@ def _validate_batch_models_lib(request: dict[str, Any]) -> None:
     )
 
 
+def _validate_batch_pdk_variant(request: dict[str, Any], region: str | None) -> None:
+    """Refuse a ``models.pdk`` variant the fleet image does not ship,
+    **before** any S3 write (issue #3251).
+
+    :func:`_validate_batch_pdk` only reduces a variant to its family
+    (``gf180mcuC`` -> ``gf180mcu``), so a variant the image lacks used to
+    surface on the runner as one ``batch_job_failed`` per corner. When the
+    AMI manifest's entries publish ``pdk_variants``, the request is refused
+    only if **every** candidate image (see :func:`_assess_published_runner`
+    for the selection) publishes the field and none lists the variant.
+    Legacy entries, no manifest, no candidate or a request without a PDK
+    stay unchanged. Never raises anything but :class:`SimError`.
+    """
+    from .sim import SimError
+
+    pdk = (request.get("models") or {}).get("pdk")
+    if not pdk:
+        return
+    try:
+        images = published_runner_identities(str(pdk), region)
+    except (RemoteLaunchError, OSError, TypeError, ValueError, AttributeError):
+        return
+    published = [image.get("pdk_variants") for image in images]
+    listed: list[list[str]] = [v for v in published if v is not None]
+    if not listed or len(listed) != len(published):
+        return
+    if any(str(pdk) in variants for variants in listed):
+        return
+    carried = sorted({v for variants in listed for v in variants})
+    raise SimError(
+        f"backend 'batch': PDK variant {str(pdk)!r} is not shipped by the fleet "
+        f"image the AMI manifest publishes (it carries: {', '.join(carried)}) "
+        "-- the request was not submitted and no instance was launched; use "
+        "one of those variants as models.pdk"
+    )
+
+
 def _resolve_batch_config(
     request: dict[str, Any],
     *,
@@ -1430,6 +1656,8 @@ def _resolve_batch_config(
         assessment = _assess_published_runner(request, config)
         _enforce_published_runner_version(assessment)
         _enforce_published_runner_features(request, assessment)
+        # Issue #3251: refuse a PDK variant the published image does not ship.
+        _validate_batch_pdk_variant(request, config.region)
     return config
 
 
@@ -1544,12 +1772,22 @@ def _enforce_published_runner_features(
     if any(not gap for gap in gaps):  # unknown (None) or complete (empty)
         return
     missing = sorted({name for gap in gaps for name in gap or ()})
+    mandatory = bool(_MANDATORY_RUNNER_FEATURES.intersection(missing))
     versions = ", ".join(sorted({str(image["klt_version"]) for image in images}))
     message = (
         f"the request uses {', '.join(missing)}, which the fleet runner image "
         f"(klt {versions}) predates; the submitting client is klt "
         f"{assessment['client_klt_version']}"
     )
+    if mandatory:
+        raise SimError(
+            f"backend 'batch' refused before submission: {message} -- the "
+            "request was not submitted and no instance was launched; a "
+            "runner that predates this feature would drop it, so "
+            "runner_version_check does not relax this (rebuild the runner "
+            "image from a release that has the feature; see docs/cli/sim.md)",
+            code=BATCH_RUNNER_FEATURE_CODE,
+        )
     if assessment["check"] != "enforce":
         print(f"klt sim: warning: {message}; submitting anyway", file=sys.stderr)
         return
@@ -2145,6 +2383,11 @@ def job_exists(
     return result.returncode == 0
 
 
+def _report_progress(job_id: str, state: str) -> None:
+    """One per-job progress line on stderr (stdout carries the JSON report)."""
+    print(f"klt sim: batch job {job_id}: {state}", file=sys.stderr, flush=True)
+
+
 def poll_status(
     config: BatchConfig,
     job_id: str,
@@ -2153,6 +2396,7 @@ def poll_status(
     sleep: Any = time.sleep,
     monotonic: Any = time.monotonic,
     heartbeat: bool = False,
+    on_state: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Poll ``status.json`` until the job reaches a terminal state
     (:data:`BATCH_TERMINAL_STATES`) and return that status document.
@@ -2163,8 +2407,16 @@ def poll_status(
     ``reconcile`` re-launches the job -- a client that also re-launched
     would double-spend the shared fleet budget.
 
+    ``on_state`` is called once per *change* of observed state (including a
+    flip back, e.g. ``interrupted`` -> ``running``); unchanged and unreadable
+    polls do not call it.
+
     Raises :class:`BatchPollTimeout` once ``config.poll_timeout_s`` elapses
-    (the caller reports unrun corners rather than a failed sweep), and
+    (the caller reports unrun corners rather than a failed sweep) -- or
+    once :data:`_BATCH_PROVISION_SLACK_S` passes with no ``status.json`` ever
+    observed, so a job that never launched does not wait out the (possibly
+    hours-long) serial budget. ``last_state`` is ``None`` in that case.
+    Raises
     :class:`BatchError` on a state outside the documented set -- a contract
     violation, surfaced loudly rather than waited on forever.
 
@@ -2182,7 +2434,10 @@ def poll_status(
     while True:
         status = _read_status(config, job_id, run)
         if status is not None:
-            last_state = str(status.get("state") or "")
+            new_state = str(status.get("state") or "")
+            if on_state is not None and new_state != last_state:
+                on_state(new_state)
+            last_state = new_state
             if last_state in BATCH_TERMINAL_STATES:
                 return status
             if last_state not in BATCH_WAITING_STATES:
@@ -2192,6 +2447,17 @@ def poll_status(
                     f"{', '.join(BATCH_WAITING_STATES + BATCH_TERMINAL_STATES)})"
                 )
         elapsed = monotonic() - started
+        if (
+            last_state is None
+            and elapsed >= _BATCH_PROVISION_SLACK_S
+            and elapsed < config.poll_timeout_s
+        ):
+            raise BatchPollTimeout(
+                f"job {job_id} never started: no status.json after "
+                f"{_BATCH_PROVISION_SLACK_S:g}s (last observed state: "
+                "no status.json yet)",
+                last_state=None,
+            )
         if elapsed >= config.poll_timeout_s:
             raise BatchPollTimeout(
                 f"job {job_id} did not reach a terminal state within "
@@ -2979,6 +3245,85 @@ def _prepare_batch_job_spec(
     )
 
 
+def _utc_now() -> str:
+    """The current wall clock as an RFC3339 UTC string (the default ``now``
+    seam of :func:`_run_batch_job`)."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _write_batch_receipt(path: str, receipt: dict[str, Any]) -> None:
+    """Atomically (temp + rename) write the submit receipt. A failure to
+    write is a stderr warning, never a failed sweep: the receipt is
+    provenance, not part of the result."""
+    tmp_path = f"{path}.tmp.{os.getpid()}"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(receipt, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.replace(tmp_path, path)
+    except OSError as exc:
+        print(
+            f"klt sim: warning: could not write batch receipt {path}: {exc}",
+            file=sys.stderr,
+        )
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
+def _poll_status_interruptibly(
+    config: BatchConfig,
+    job_id: str,
+    *,
+    runner: remote_transport.CommandRunner | None,
+    sleep: Any,
+    heartbeat: bool = False,
+    on_state: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    """:func:`poll_status`, with SIGINT/SIGTERM converted into
+    :class:`BatchClientInterrupted` for the duration of the wait only
+    (issue #3065). Prior handlers are restored on every exit path. Handlers
+    can only be installed from the main thread, so a sharded run's worker
+    threads poll unwrapped (their receipts are still written)."""
+    if threading.current_thread() is not threading.main_thread():
+        return poll_status(
+            config,
+            job_id,
+            runner=runner,
+            sleep=sleep,
+            heartbeat=heartbeat,
+            on_state=on_state,
+        )
+
+    def _handle(signum: int, _frame: Any) -> None:
+        raise BatchClientInterrupted(
+            f"client terminated by {signal.Signals(signum).name} while waiting "
+            f"on job {job_id} (bucket {config.bucket}, region {config.region}); "
+            "the remote job is left running -- the fleet has no cancel",
+            job_id=job_id,
+            signum=signum,
+        )
+
+    prev_handlers: dict[int, Any] = {}
+    _signal_handlers_install(prev_handlers, _handle)
+    try:
+        return poll_status(
+            config,
+            job_id,
+            runner=runner,
+            sleep=sleep,
+            heartbeat=heartbeat,
+            on_state=on_state,
+        )
+    except BatchClientInterrupted as exc:
+        print(f"klt sim: {exc}", file=sys.stderr)
+        raise
+    finally:
+        _signal_handlers_restore(prev_handlers)
+
+
 def _run_batch_job(
     *,
     config: BatchConfig,
@@ -2996,6 +3341,8 @@ def _run_batch_job(
     sleep: Any = time.sleep,
     request_dir: str | None = None,
     attach: bool = False,
+    now: Callable[[], str] = _utc_now,
+    receipt_name: str | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """Submit, wait for, and collect **one** batch job's worth of corners --
     the shared body of the single-job ``batch`` backend (:func:`_run_batch`)
@@ -3019,6 +3366,11 @@ def _run_batch_job(
     ``job.json`` (else :data:`BATCH_UNKNOWN_JOB_CODE`) and the call goes
     straight to polling and collecting. A job Spot-reclaimed mid-run is
     still waited on, never re-launched (see :func:`poll_status`).
+
+    The returned environment also carries client-observed wall-clock
+    timestamps (``client_submitted_at``, ``client_launched_at``,
+    ``client_status_terminal_at``, ``client_collected_at``; ``now`` is the
+    clock seam). A phase that was not reached is ``None``, never fabricated.
     """
     if attach:
         if not job_exists(config, job_id, runner=runner):
@@ -3038,6 +3390,13 @@ def _run_batch_job(
             measurements_spec=measurements_spec,
             runner=runner,
             sleep=sleep,
+            timestamps={
+                "client_submitted_at": None,
+                "client_launched_at": None,
+                "client_status_terminal_at": None,
+                "client_collected_at": None,
+            },
+            now=now,
         )
     spec = _prepare_batch_job_spec(
         request,
@@ -3047,11 +3406,19 @@ def _run_batch_job(
         timeout_s=timeout_s,
         keep_artifacts=keep_artifacts,
         want_waveforms=want_waveforms,
-        explicit_points=explicit_points,
+        explicit_points=_points_to_push(request, corner_points, explicit_points),
         request_dir=request_dir,
     )
+    timestamps: dict[str, str | None] = {
+        "client_submitted_at": now(),
+        "client_launched_at": None,
+        "client_status_terminal_at": None,
+        "client_collected_at": None,
+    }
     submit_job(config, job_id, spec, runner=runner)
+    _report_progress(job_id, "submitted")
     launch_job(config, job_id, runner=runner)
+    timestamps["client_launched_at"] = now()
     # Issue #2978: name the job on stderr the moment it exists, so a caller
     # killed by an outer wall-clock limit knows what it orphaned.
     sys.stderr.write(
@@ -3059,6 +3426,24 @@ def _run_batch_job(
         f"re-attach with `klt sim <request> --backend batch --attach {job_id}`\n"
     )
     sys.stderr.flush()
+    receipt_path = os.path.join(
+        artifacts_dir,
+        BATCH_RECEIPT_FILENAME if receipt_name is None else receipt_name,
+    )
+    receipt: dict[str, Any] = {
+        "job_id": job_id,
+        # getattr: the receipt is best-effort and must never break a run.
+        "bucket": getattr(config, "bucket", None),
+        "jobs_prefix": getattr(config, "jobs_prefix", None),
+        "region": getattr(config, "region", None),
+        "profile": getattr(config, "profile", None),
+        "launched_at": datetime.now(timezone.utc).isoformat(),
+        "request_sha256": hashlib.sha256(
+            json.dumps(request, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest(),
+        "state": None,
+    }
+    _write_batch_receipt(receipt_path, receipt)
     return _poll_and_collect(
         config=config,
         job_id=job_id,
@@ -3069,6 +3454,10 @@ def _run_batch_job(
         measurements_spec=measurements_spec,
         runner=runner,
         sleep=sleep,
+        timestamps=timestamps,
+        now=now,
+        receipt_path=receipt_path,
+        receipt=receipt,
     )
 
 
@@ -3083,11 +3472,34 @@ def _poll_and_collect(
     measurements_spec: list[dict[str, Any]],
     runner: remote_transport.CommandRunner | None,
     sleep: Any,
+    timestamps: dict[str, str | None],
+    now: Callable[[], str],
+    receipt_path: str | None = None,
+    receipt: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
-    """The wait-and-collect tail shared by a fresh submit and ``--attach``."""
+    """The wait-and-collect tail shared by a fresh submit and ``--attach``.
+
+    ``timestamps`` carries the client-observed phase times already recorded
+    (all ``None`` on ``--attach``, where this client never submitted or
+    launched); the terminal/collected phases are filled in here.
+
+    ``receipt_path``/``receipt`` (issue #3065) are the submit receipt a fresh
+    submit wrote; ``--attach`` passes none and writes no receipt."""
     try:
-        status = poll_status(config, job_id, runner=runner, sleep=sleep, heartbeat=True)
+        status = _poll_status_interruptibly(
+            config,
+            job_id,
+            runner=runner,
+            sleep=sleep,
+            heartbeat=True,
+            on_state=lambda state: _report_progress(job_id, state),
+        )
     except BatchPollTimeout as exc:
+        if receipt_path is not None and receipt is not None:
+            _write_batch_receipt(
+                receipt_path,
+                {**receipt, "poll_timed_out": True, "last_state": exc.last_state},
+            )
         return (
             _poll_timeout_corners(corner_points, measurements_spec, exc),
             None,
@@ -3098,10 +3510,21 @@ def _poll_and_collect(
                 "region": config.region,
                 "state": exc.last_state,
                 **_read_job_identity(None),
+                **timestamps,
             },
         )
 
-    environment = _batch_environment(config, job_id, status)
+    timestamps["client_status_terminal_at"] = now()
+    if receipt_path is not None and receipt is not None:
+        _write_batch_receipt(
+            receipt_path,
+            {
+                **receipt,
+                "state": status.get("state"),
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+    environment = {**_batch_environment(config, job_id, status), **timestamps}
     if status.get("state") != "done" and (
         _status_exit_code(status) not in _BATCH_SIM_SUCCESS_EXIT_CODES
     ):
@@ -3120,6 +3543,7 @@ def _poll_and_collect(
         collect_outputs(config, job_id, collected, runner=runner)
         from .sim import check_ngspice_options_echo
 
+        environment["client_collected_at"] = now()
         report = read_collected_report(collected)
         check_ngspice_options_echo(request, report)
         environment = {**environment, **_read_job_identity(collected, request)}
@@ -3377,6 +3801,7 @@ def _run_batch_fleet(
             measurements_spec=measurements_spec,
             explicit_points=shard_points,
             request_dir=request_dir,
+            receipt_name=f"batch-receipt-{job_id}.json",
         )
 
     return _run_sharded(
@@ -3392,6 +3817,7 @@ def _run_batch_fleet(
 #: the `remote` backend established -- see that module's import block.
 __all__ = [
     "BATCH_ARTIFACTS_DIRNAME",
+    "BATCH_INTERRUPTED_CODE",
     "BATCH_JOB_CEILING_CODE",
     "BATCH_MAX_UNITS_CODE",
     "BATCH_JOB_TOOL",
@@ -3399,6 +3825,7 @@ __all__ = [
     "BATCH_NO_CAPACITY_CODE",
     "BATCH_UNKNOWN_JOB_CODE",
     "BATCH_NETLIST_FILENAME",
+    "BATCH_RECEIPT_FILENAME",
     "BATCH_REPORT_FILENAME",
     "BATCH_RUNNER_IDENTITY_FILENAME",
     "BATCH_RUNNER_FEATURE_CODE",
@@ -3409,6 +3836,7 @@ __all__ = [
     "BATCH_TERMINAL_STATES",
     "BATCH_WAITING_STATES",
     "BatchConfig",
+    "BatchClientInterrupted",
     "BatchError",
     "BatchJobInput",
     "BatchJobSpec",

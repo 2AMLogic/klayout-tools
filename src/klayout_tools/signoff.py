@@ -839,13 +839,15 @@ neither is a findings-list/key-metrics report in its sense).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
+import re
 import shlex
 import subprocess
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from functools import cache
 from pathlib import Path
 from typing import (
@@ -1614,6 +1616,11 @@ def describe_grader() -> dict[str, Any]:
         # Additive (issue #2655): derived from the grader's own table.
         "opt_in_evidence_kinds": opt_in_kind_scopes(),
         "opt_in_kinds_by_item": opt_in_kinds_by_item(),
+        # Additive (issue #2865): the items that accept a recorded
+        # `not_applicable` outcome, and on which partitions.
+        "not_applicable_items": {
+            str(_STATISTICAL_CLAIMS_ITEM_ID): [_NOT_APPLICABLE_PARTITION]
+        },
     }
 
 
@@ -1901,6 +1908,318 @@ _REASON_NEGATIVE_CONTROL_NOT_DETECTED = "negative_control_not_detected"
 #: refusals differ because they apply to an envelope that *passed*, where
 #: "cite a different artifact" really is the more actionable answer.
 _REASON_PARTIAL_COVERAGE = "partial_coverage"
+
+# --- Item 6 ``not_applicable`` outcome (issue #2865) ----------------------- #
+#: The T1 item whose "statistical claims" requirement a block with no
+#: statistical spec row can discharge by a recorded "not applicable".
+_STATISTICAL_CLAIMS_ITEM_ID = 6
+#: The only partition that may use the outcome. An analog partition's spec
+#: rows are statistical by definition (accuracy/offset/matching/yield), so it
+#: always requires `klt yield` evidence.
+_NOT_APPLICABLE_PARTITION = "digital"
+#: A ``not_applicable`` item's ``status`` -- distinct from ``"met"``, never
+#: rendered as it, but counted toward T1 completion when the guard passes.
+STATUS_NOT_APPLICABLE = "not_applicable"
+#: Statuses that satisfy a T1 item for the ``tier`` roll-up.
+_T1_SATISFIED_STATUSES = frozenset({"met", STATUS_NOT_APPLICABLE})
+#: The ``not_applicable`` form was used on a partition that may not use it
+#: (analog, or the analog half of a mixed-signal block).
+_REASON_NOT_APPLICABLE_WRONG_PARTITION = "not_applicable_wrong_partition"
+#: The cited spec's ``status`` is not ``"ratified"``.
+_REASON_NOT_APPLICABLE_SPEC_UNRATIFIED = "not_applicable_spec_unratified"
+#: The cited spec (or the statement) contains a row that is, or looks,
+#: statistical; ``detail.row`` names it. The statement file is the primary
+#: claim; this scan is a conservative backstop.
+_REASON_NOT_APPLICABLE_STATISTICAL_ROW = "not_applicable_statistical_row"
+#: The statement does not account for exactly the spec's rows (a spec row
+#: with no statement row, a statement row naming no spec row, a row without
+#: a ``class``/``reason``, or a spec with no rows at all).
+_REASON_NOT_APPLICABLE_STATEMENT_INCOMPLETE = "not_applicable_statement_incomplete"
+
+_NA_STATISTICAL_KEY_RE = re.compile(
+    r"sigma|σ|yield|cpk|ppk|offset|mismatch|monte[_ -]?carlo|std[_ -]?dev",
+    re.IGNORECASE,
+)
+_NA_STATISTICAL_TEXT_RE = re.compile(
+    r"σ|\bsigma\b|\bcpk\b|\bppk\b|\byield\b|\bmonte[ _-]?carlo\b"
+    r"|\bmismatch\b|\bmatching\b|\boffset\b|\baccuracy\b",
+    re.IGNORECASE,
+)
+
+
+def _na_scan_dict(value: dict[str, Any], path: str) -> str | None:
+    """:func:`_na_scan_statistical` for a JSON object."""
+    for key, child in value.items():
+        key_path = f"{path}.{key}" if path else str(key)
+        if str(key).lower() == "statistical":
+            if child not in (None, False, 0, "", "false", "no"):
+                return key_path
+            continue
+        keyed = _NA_STATISTICAL_KEY_RE.search(str(key)) and child not in (
+            None,
+            False,
+            "",
+            [],
+            {},
+        )
+        if keyed:
+            return key_path
+        hit = _na_scan_statistical(child, key_path)
+        if hit is not None:
+            return hit
+    return None
+
+
+def _na_scan_statistical(value: Any, path: str) -> str | None:
+    """Conservative scan of one spec/statement row for anything statistical.
+
+    Returns a ``path`` description of the first hit, or ``None``. A key named
+    ``statistical`` hits only when truthy (``statistical: false`` is the
+    honest declaration); a key naming sigma/yield/Cpk/offset/mismatch/Monte
+    Carlo hits on any non-empty value; any string value mentioning one of
+    those (or ``3σ``, accuracy, matching) hits. False positives refuse, which
+    is the safe direction -- the author fixes the row's wording or cites real
+    ``klt yield`` evidence.
+    """
+    if isinstance(value, dict):
+        return _na_scan_dict(value, path)
+    if isinstance(value, list):
+        for index, child in enumerate(value):
+            hit = _na_scan_statistical(child, f"{path}[{index}]")
+            if hit is not None:
+                return hit
+        return None
+    if isinstance(value, str) and _NA_STATISTICAL_TEXT_RE.search(value):
+        return path
+    return None
+
+
+def _na_document(
+    raw: Any, label: str
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Normalize one ``{"file", "content_hash"}`` reference of the
+    ``not_applicable`` form; ``(ref, None)`` or ``(None, detail)``."""
+    if (
+        not isinstance(raw, dict)
+        or not isinstance(raw.get("file"), str)
+        or not raw["file"]
+        or not isinstance(raw.get("content_hash"), str)
+        or not raw["content_hash"]
+    ):
+        return None, {
+            "document": label,
+            "problem": "needs a string 'file' and a string 'content_hash'",
+        }
+    return {"file": raw["file"], "content_hash": raw["content_hash"]}, None
+
+
+def _na_load(
+    ref: dict[str, Any], label: str
+) -> tuple[dict[str, Any] | None, str | None, dict[str, Any]]:
+    """Hash-check and parse one referenced document -> ``(doc, reason,
+    detail)``; ``doc`` is a JSON object on success."""
+    digest = sha256_file(ref["file"])
+    if digest is None:
+        return None, _REASON_UNREADABLE_EVIDENCE, {"document": label}
+    actual = f"sha256:{digest}"
+    if actual != ref["content_hash"]:
+        return (
+            None,
+            _REASON_STALE_EVIDENCE,
+            {
+                "document": label,
+                "expected_content_hash": ref["content_hash"],
+                "actual_content_hash": actual,
+            },
+        )
+    try:
+        with open(ref["file"], encoding="utf-8") as handle:
+            doc = json.load(handle)
+    except (OSError, ValueError):
+        return None, _REASON_UNREADABLE_EVIDENCE, {"document": label}
+    if not isinstance(doc, dict):
+        return (
+            None,
+            _REASON_INVALID_EVIDENCE,
+            {"document": label, "problem": "must be a JSON object"},
+        )
+    return doc, None, {}
+
+
+_NaRefusal = tuple[str, str | None, None, dict[str, Any]]
+
+
+def _na_refusal(reason: str | None, detail: dict[str, Any]) -> _NaRefusal:
+    """An ``unmet`` :func:`_grade_not_applicable` result."""
+    return "unmet", reason, None, detail
+
+
+def _na_load_documents(
+    form: Any,
+) -> tuple[tuple[dict, dict, dict, dict] | None, _NaRefusal | None]:
+    """Validate the form and load both documents -> ``((spec_ref,
+    statement_ref, spec_doc, statement_doc), None)`` or ``(None, refusal)``."""
+    if not isinstance(form, dict):
+        return None, _na_refusal(
+            _REASON_INVALID_EVIDENCE, {"problem": "'not_applicable' must be an object"}
+        )
+    refs = []
+    for label in ("spec", "statement"):
+        ref, bad = _na_document(form.get(label), label)
+        if ref is None:
+            return None, _na_refusal(_REASON_INVALID_EVIDENCE, bad or {})
+        refs.append(ref)
+    docs = []
+    for ref, label in zip(refs, ("spec", "statement"), strict=True):
+        doc, reason, detail = _na_load(ref, label)
+        if doc is None:
+            return None, _na_refusal(reason, detail)
+        docs.append(doc)
+    return (refs[0], refs[1], docs[0], docs[1]), None
+
+
+def _na_spec_shape_refusal(spec_rows: Any) -> _NaRefusal | None:
+    """Refuse a spec whose ``rows`` are malformed, duplicated or empty."""
+    if not isinstance(spec_rows, list) or not all(
+        isinstance(row, dict) and isinstance(row.get("id"), str) and row["id"]
+        for row in spec_rows
+    ):
+        return _na_refusal(
+            _REASON_INVALID_EVIDENCE,
+            {
+                "document": "spec",
+                "problem": "'rows' must be a list of objects each with a string 'id'",
+            },
+        )
+    spec_ids = [row["id"] for row in spec_rows]
+    if len(set(spec_ids)) != len(spec_ids):
+        return _na_refusal(
+            _REASON_INVALID_EVIDENCE,
+            {"document": "spec", "problem": "duplicate row ids"},
+        )
+    if not spec_rows:
+        return _na_refusal(
+            _REASON_NOT_APPLICABLE_STATEMENT_INCOMPLETE,
+            {"problem": "the cited spec has no rows"},
+        )
+    return None
+
+
+def _na_spec_refusal(spec_doc: dict[str, Any]) -> _NaRefusal | None:
+    """Ratification, row shape and the statistical scan of the spec."""
+    status_value = spec_doc.get("status")
+    if not (
+        isinstance(status_value, str) and status_value.strip().lower() == "ratified"
+    ):
+        return _na_refusal(
+            _REASON_NOT_APPLICABLE_SPEC_UNRATIFIED, {"spec_status": status_value}
+        )
+    spec_rows = spec_doc.get("rows")
+    shape = _na_spec_shape_refusal(spec_rows)
+    if shape is not None:
+        return shape
+    for row in cast("list[dict[str, Any]]", spec_rows):
+        hit = _na_scan_statistical(row, "")
+        if hit is not None:
+            return _na_refusal(
+                _REASON_NOT_APPLICABLE_STATISTICAL_ROW,
+                {"row": row["id"], "field": hit or "id", "document": "spec"},
+            )
+    return None
+
+
+def _na_statement_refusal(
+    statement_rows: Any, spec_ids: list[str]
+) -> _NaRefusal | None:
+    """Shape, statistical-class and coverage checks of the statement."""
+    if not isinstance(statement_rows, list) or not all(
+        isinstance(row, dict)
+        and all(
+            isinstance(row.get(key), str) and row[key].strip()
+            for key in ("id", "class", "reason")
+        )
+        for row in statement_rows
+    ):
+        return _na_refusal(
+            _REASON_NOT_APPLICABLE_STATEMENT_INCOMPLETE,
+            {"problem": "statement 'rows' needs string id, class and reason per row"},
+        )
+    for row in statement_rows:
+        # The statement's own class must not concede a statistical row.
+        if _na_scan_statistical({"class": row["class"]}, "") is not None:
+            return _na_refusal(
+                _REASON_NOT_APPLICABLE_STATISTICAL_ROW,
+                {"row": row["id"], "field": "class", "document": "statement"},
+            )
+    statement_ids = [row["id"] for row in statement_rows]
+    uncovered = [rid for rid in spec_ids if rid not in statement_ids]
+    unknown = [rid for rid in statement_ids if rid not in spec_ids]
+    if uncovered or unknown or len(set(statement_ids)) != len(statement_ids):
+        return _na_refusal(
+            _REASON_NOT_APPLICABLE_STATEMENT_INCOMPLETE,
+            {"uncovered_row_ids": uncovered, "unknown_row_ids": unknown},
+        )
+    return None
+
+
+def _grade_not_applicable(
+    form: Any, partition_kind: str
+) -> tuple[str, str | None, dict[str, Any] | None, dict[str, Any]]:
+    """Grade item 6's ``not_applicable`` form (issue #2865) ->
+    ``(status, reason, not_applicable_block, detail)``.
+
+    Manifest form (``"6"`` / ``"6.digital"``)::
+
+        {"not_applicable": {
+            "spec":      {"file": "spec.json", "content_hash": "sha256:..."},
+            "statement": {"file": "na.json",   "content_hash": "sha256:..."}}}
+
+    ``spec`` is the block's ratified target spec (``{"status": "ratified",
+    "rows": [{"id": ...}, ...]}``); ``statement`` is the committed claim that
+    no row is statistical (``{"rows": [{"id", "class", "reason"}, ...]}``,
+    one entry per spec row). Both are bound by content hash exactly like
+    other evidence. Rows are keyed by ``id`` so a later partial-coverage
+    outcome (issue #2908) can extend the same block. Order of refusal:
+    partition, form, readability/staleness, ratification, statistical scan,
+    statement completeness.
+    """
+    if partition_kind != _NOT_APPLICABLE_PARTITION:
+        return _na_refusal(
+            _REASON_NOT_APPLICABLE_WRONG_PARTITION, {"partition": partition_kind}
+        )
+    loaded, refusal = _na_load_documents(form)
+    if loaded is None:
+        return cast(_NaRefusal, refusal)
+    spec_ref, statement_ref, spec_doc, statement_doc = loaded
+
+    refusal = _na_spec_refusal(spec_doc)
+    if refusal is not None:
+        return refusal
+    spec_rows = spec_doc["rows"]
+    raw_statement_rows = statement_doc.get("rows")
+    refusal = _na_statement_refusal(raw_statement_rows, [r["id"] for r in spec_rows])
+    if refusal is not None:
+        return refusal
+    statement_rows = cast("list[dict[str, Any]]", raw_statement_rows)
+
+    block = {
+        "spec": {
+            "file": spec_ref["file"],
+            "content_hash": spec_ref["content_hash"],
+            "status": "ratified",
+            "row_count": len(spec_rows),
+        },
+        "statement": {
+            "file": statement_ref["file"],
+            "content_hash": statement_ref["content_hash"],
+            "rows": [
+                {"id": r["id"], "class": r["class"], "reason": r["reason"]}
+                for r in statement_rows
+            ],
+        },
+    }
+    return STATUS_NOT_APPLICABLE, None, block, {}
+
 
 #: The status token each kind reports for a partial result (issue #2109):
 #: the kind's own success token from :func:`_check_passed`, suffixed
@@ -2729,6 +3048,73 @@ def _sta_timing_passed(envelope: dict[str, Any]) -> bool:
             for corner in corners
         )
     return _sta_corner_timing_passed(envelope)
+
+
+def _sta_annotation_shortfalls(envelope: dict[str, Any]) -> list[dict[str, Any]]:
+    """The corners of a `klt sta` envelope whose ``spef_annotation`` block is
+    present but does not report ``annotation_complete`` as literal ``True``
+    (issue #3258), as ``{"corner", "annotation_complete",
+    "annotation_warning"}`` entries.
+
+    Graded over the same corner set as :func:`_sta_timing_passed` (every
+    corner of a multi-corner response, or the flat envelope itself). A corner
+    whose ``spef_annotation`` is absent or ``null`` (no SPEF supplied) is not
+    a shortfall: the requirement cannot turn a no-SPEF run into a parasitics
+    claim. A present block whose ``annotation_complete`` is missing, ``null``
+    or non-boolean *is* one (fail-closed).
+    """
+    corners = envelope.get("corners")
+    scopes = (
+        [c for c in corners if isinstance(c, dict)]
+        if isinstance(corners, list)
+        else [envelope]
+    )
+    shortfalls: list[dict[str, Any]] = []
+    for scope in scopes:
+        block = scope.get("spef_annotation")
+        if block is None:
+            continue
+        if not isinstance(block, dict):
+            shortfalls.append(
+                {
+                    "corner": scope.get("corner"),
+                    "annotation_complete": None,
+                    "annotation_warning": None,
+                }
+            )
+            continue
+        if block.get("annotation_complete") is True:
+            continue
+        shortfalls.append(
+            {
+                "corner": scope.get("corner"),
+                "annotation_complete": block.get("annotation_complete"),
+                "annotation_warning": block.get("annotation_warning"),
+            }
+        )
+    return shortfalls
+
+
+def _sta_annotation_refusal(
+    check_kind: str, spec: dict[str, Any], envelope: dict[str, Any]
+) -> tuple[str, str, None, dict[str, Any]] | None:
+    """Issue #3258: the ``unmet`` grade for a cited `sta` envelope whose SPEF
+    annotation was not fully applied, when the evidence entry opted in with
+    ``require_annotation_complete``; ``None`` when the requirement is off, the
+    kind is not ``sta``, or every annotated corner is complete. The offending
+    corner(s)' ``annotation_warning`` ride along as the item's detail.
+    """
+    if check_kind != "sta" or spec.get("require_annotation_complete") is not True:
+        return None
+    shortfalls = _sta_annotation_shortfalls(envelope)
+    if not shortfalls:
+        return None
+    return (
+        "unmet",
+        _REASON_CHECK_FAILED,
+        None,
+        {"sta_annotation_incomplete": shortfalls},
+    )
 
 
 def _sta_worst_corner(envelope: dict[str, Any]) -> dict[str, Any]:
@@ -4690,6 +5076,7 @@ def build_tier_report(
 
     items: list[dict[str, Any]] = []
     met_count = 0
+    not_applicable_count = 0
     total = 0
     for t1_item in doc["t1_items"]:
         graded_by_build = _is_graded_by_build(t1_item["id"], build_item_ids)
@@ -4737,8 +5124,8 @@ def build_tier_report(
                     ),
                 )
             total += 1
-            if entry["status"] == "met":
-                met_count += 1
+            met_count += entry["status"] == "met"
+            not_applicable_count += entry["status"] == STATUS_NOT_APPLICABLE
             items.append(entry)
 
     for ladder_row in doc["ladder"]:
@@ -4758,7 +5145,7 @@ def build_tier_report(
             }
         )
 
-    tier = "T1" if total > 0 and met_count == total else None
+    tier = "T1" if total > 0 and met_count + not_applicable_count == total else None
 
     return {
         "schema_version": TIER_REPORT_SCHEMA_VERSION,
@@ -4779,6 +5166,15 @@ def build_tier_report(
         # t1_item_count`. `None` when the shipped doc is unreadable.
         "build_t1_item_count": _build_t1_row_count(build_item_ids, len(partitions)),
         "t1_met_count": met_count,
+        # Issue #2865: items satisfied by a recorded "not applicable", never
+        # folded into `t1_met_count`. Omitted when zero so a report with none
+        # is byte-identical to what this build rendered before the field
+        # existed (absent means 0).
+        **(
+            {"t1_not_applicable_count": not_applicable_count}
+            if not_applicable_count
+            else {}
+        ),
         "source_doc": doc_source_label(tiers_doc),
         "source_doc_content_hash": doc["content_hash"],
         "build": _build_identity(),
@@ -4995,6 +5391,11 @@ def _normalize_evidence_entry(raw: Any) -> dict[str, Any] | None:
       both keys (which the schema does not ask for, but a caller might
       send) is treated as command-backed.
 
+    ``"require_annotation_complete"`` (issue #3258) is an optional boolean on
+    **both** shapes, always present in the returned spec (``False`` when
+    absent); a non-boolean value makes the entry malformed. It only has an
+    effect on a ``sta`` citation -- see :func:`_sta_annotation_shortfalls`.
+
     ``"pointer"`` (issue #2342) is accepted on **both** shapes, and is always
     present in the returned spec (``None`` when the entry named none). It
     says *where inside* the cited document the `klt` envelope lives, so an
@@ -5015,6 +5416,13 @@ def _normalize_evidence_entry(raw: Any) -> dict[str, Any] | None:
     if not pointer_ok:
         return None
 
+    # Issue #3258: opt-in, additive. A non-boolean value is a malformed entry
+    # (degrades this one item to `invalid_evidence`) rather than silently
+    # reading as "off" -- an opt-in requirement must never fail open.
+    require_annotation = raw.get("require_annotation_complete", False)
+    if not isinstance(require_annotation, bool):
+        return None
+
     command = raw.get("command")
     if (
         isinstance(command, list)
@@ -5033,6 +5441,7 @@ def _normalize_evidence_entry(raw: Any) -> dict[str, Any] | None:
             "cwd": cwd,
             "content_hash": expected_hash,
             "pointer": pointer,
+            "require_annotation_complete": require_annotation,
         }
 
     file = raw.get("file")
@@ -5046,6 +5455,7 @@ def _normalize_evidence_entry(raw: Any) -> dict[str, Any] | None:
         "file": file,
         "content_hash": expected_hash,
         "pointer": pointer,
+        "require_annotation_complete": require_annotation,
     }
 
 
@@ -5708,6 +6118,10 @@ def _grade_evidence(
             _critical_metric_detail(envelope),
         )
 
+    annotation_refusal = _sta_annotation_refusal(check_kind, spec, envelope)
+    if annotation_refusal is not None:
+        return annotation_refusal
+
     # The two refusals that apply only to a kind this item actually accepts --
     # `nothing_checked` (issue #1996) and `not_post_layout` -- resolved
     # together, in that order. See `_kind_gated_refusal`.
@@ -5748,7 +6162,7 @@ def _grade_evidence(
         check_kind, item_id, resolution, citation
     )
     if anchored_refusal is not None:
-        return "unmet", anchored_refusal, None, {}
+        return "unmet", anchored_refusal, None, _input_members_detail(resolution)
     return "met", None, citation, {}
 
 
@@ -5856,6 +6270,161 @@ def _generic_binding_path(envelope: Mapping[str, Any]) -> Any:
     return None
 
 
+def _binding_member_name(path: Any) -> str | None:
+    """The path string of one ``provenance.input.paths`` member's ``path``
+    (a non-empty string, or a ``{path, scope: "repo"}`` object), or ``None``
+    when it is neither."""
+    if isinstance(path, str) and path:
+        return path
+    if isinstance(path, Mapping) and path.get("scope") == "repo":
+        name = path.get("path")
+        if isinstance(name, str) and name:
+            return name
+    return None
+
+
+def _generic_input_set(
+    envelope: Mapping[str, Any],
+) -> tuple[bool, list[tuple[Any, str]] | None]:
+    """``(declared, members)`` for a generic envelope's opt-in
+    ``provenance.input.paths`` (issue #3044): a non-empty list of ``{path,
+    content_hash}`` members, ``path`` being as for ``input.path``.
+
+    ``declared`` is whether the key is present at all; ``members`` is the
+    ``(path value, recorded hash)`` pairs, or ``None`` when it is present
+    but malformed (not a list, empty, a member of the wrong shape, a
+    non-string or empty ``content_hash``, or two members naming the same
+    path). A malformed set never falls back to ``input.path``."""
+    provenance = envelope.get("provenance")
+    input_block = provenance.get("input") if isinstance(provenance, Mapping) else None
+    if not isinstance(input_block, Mapping) or "paths" not in input_block:
+        return False, None
+    raw = input_block["paths"]
+    if not isinstance(raw, list) or not raw:
+        return True, None
+    members: list[tuple[Any, str]] = []
+    names: set[str] = set()
+    for entry in raw:
+        if not isinstance(entry, Mapping):
+            return True, None
+        name = _binding_member_name(entry.get("path"))
+        recorded = entry.get("content_hash")
+        if name is None or not isinstance(recorded, str) or not recorded:
+            return True, None
+        if name in names:
+            return True, None
+        names.add(name)
+        members.append((entry["path"], recorded))
+    return True, members
+
+
+def _generic_binding_present(envelope: Mapping[str, Any]) -> bool:
+    """Whether a generic envelope names something to bind: a valid
+    ``provenance.input.paths`` set (issue #3044) when it declares one, else a
+    usable ``provenance.input.path`` (issue #2718)."""
+    declared, members = _generic_input_set(envelope)
+    if declared:
+        return members is not None
+    return _generic_binding_path(envelope) is not None
+
+
+def input_set_digest(members: Iterable[tuple[str, str]]) -> str:
+    """The combined ``provenance.input.content_hash`` for a set binding (issue
+    #3044): ``sha256:`` over the lines ``"<hex>  <path>\\n"`` -- ``<hex>`` the
+    member's hash without its ``sha256:`` prefix, ``<path>`` the member path
+    as the envelope names it -- sorted bytewise by path, so member order does
+    not matter. Equivalent to ``sha256sum`` over the members in ``LC_ALL=C``
+    sorted order, piped into ``sha256sum``."""
+    ordered = sorted(members, key=lambda pair: pair[0].encode("utf-8"))
+    body = "".join(
+        f"{content_hash.removeprefix('sha256:')}  {path}\n"
+        for path, content_hash in ordered
+    )
+    return f"sha256:{hashlib.sha256(body.encode('utf-8')).hexdigest()}"
+
+
+def _verify_generic_input_set(
+    members: list[tuple[Any, str]],
+    spec: Mapping[str, Any],
+    evidence_file: str | None,
+    repo_root: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    """Re-hash each member of a generic envelope's ``provenance.input.paths``
+    (issue #3044) through :func:`_resolve_input_artifact_value`, as
+    :func:`_verify_pex_schematic_inputs` does for ``pex``. One ``{path,
+    content_hash, status}`` per member, ``status`` being ``"verified"``,
+    ``"stale"`` or ``"unverifiable"`` with the same meanings."""
+    evidence_dir = (
+        os.path.dirname(os.path.abspath(evidence_file)) if evidence_file else None
+    )
+    results: list[dict[str, Any]] = []
+    for path_value, recorded in members:
+        read_any = False
+        matched = False
+        for candidate in _resolve_input_artifact_value(
+            path_value, spec, evidence_dir, repo_root
+        ):
+            digest = sha256_file(candidate)
+            if digest is None:
+                continue
+            read_any = True
+            if f"sha256:{digest}" == recorded:
+                matched = True
+                break
+        results.append(
+            {
+                "path": path_value,
+                "content_hash": recorded,
+                "status": "verified"
+                if matched
+                else ("stale" if read_any else "unverifiable"),
+            }
+        )
+    return results
+
+
+def _fold_generic_input_set(
+    envelope: Mapping[str, Any],
+    spec: Mapping[str, Any],
+    file_label: str | None,
+    recorded_hash: Any,
+    input_verified: bool | None,
+    repo_root: str | Path | None = None,
+) -> tuple[list[dict[str, Any]] | None, bool | None]:
+    """Verify a generic envelope's ``provenance.input.paths`` (issue #3044)
+    and fold it into ``input_verified``, replacing whatever the single-path
+    check said -- a set envelope's ``input.content_hash`` is the combined
+    digest, not any one file's.
+
+    Returns ``(members, input_verified)``; ``members`` is ``None`` (and
+    ``input_verified`` unchanged) for an envelope with no set, and a
+    malformed set yields ``(None, None)``. ``False`` when any member is
+    stale or the recorded combined digest is not the one its own members
+    produce (member hashes rewritten without the digest); ``True`` only when
+    every member re-hashes and the digest is consistent; else ``None``."""
+    declared, parsed = _generic_input_set(envelope)
+    if not declared:
+        return None, input_verified
+    if parsed is None:
+        return None, None
+    members = _verify_generic_input_set(parsed, spec, file_label, repo_root)
+    combined = input_set_digest(
+        (_binding_member_name(path) or "", recorded) for path, recorded in parsed
+    )
+    statuses = {member["status"] for member in members}
+    if "stale" in statuses or recorded_hash != combined:
+        return members, False
+    return members, True if statuses == {"verified"} else None
+
+
+def _input_members_detail(resolution: Mapping[str, Any]) -> dict[str, Any]:
+    """The ``detail`` an unmet anchored set citation carries (issue #3044):
+    every member with its ``status``, so the drifted one is named. ``{}``
+    for a single-path or non-generic citation."""
+    members = resolution.get("input_members")
+    return {"artifact_binding": {"members": members}} if members else {}
+
+
 def _generic_item_binding_refusal(
     check_kind: str,
     item_id: int | None,
@@ -5895,7 +6464,7 @@ def _generic_item_binding_refusal(
     elif declared != item_id:
         return _REASON_WRONG_ITEM
     if anchored and (
-        _generic_binding_path(envelope) is None
+        not _generic_binding_present(envelope)
         or not isinstance(spec.get("content_hash"), str)
     ):
         return _REASON_UNANCHORED_EVIDENCE
@@ -5921,6 +6490,8 @@ def _generic_artifact_binding(
         "content_hash": resolution["content_hash"],
         "input_verified": resolution.get("input_verified"),
     }
+    if resolution.get("input_members"):
+        binding["members"] = resolution["input_members"]
     for field in ("summary", "source"):
         value = envelope.get(field)
         if isinstance(value, str):
@@ -5950,6 +6521,38 @@ def _fold_pex_schematic_inputs(
     if input_verified is True and statuses == {"verified"}:
         return checked_inputs, True
     return checked_inputs, None
+
+
+def _fold_kind_inputs(
+    check_kind: str,
+    envelope: dict[str, Any],
+    spec: dict[str, Any],
+    file_label: str | None,
+    actual_hash: Any,
+    input_verified: bool | None,
+    repo_root: str | Path | None = None,
+) -> tuple[list[dict[str, Any]] | None, list[dict[str, Any]] | None, bool | None]:
+    """Fold the kind-specific multi-input verifications into ``input_verified``.
+
+    Returns ``(pex_inputs, input_members, input_verified)``.
+
+    Issue #2875: a ``pex`` envelope also pins the schematic side of its
+    comparison, verified per role so a changed resolvable input can never keep
+    a fully verified citation. Issue #3044: a ``generic`` envelope may bind a
+    *set* of artifacts (``provenance.input.paths``) instead of one; its members
+    are verified the same way.
+    """
+    pex_inputs: list[dict[str, Any]] | None = None
+    input_members: list[dict[str, Any]] | None = None
+    if check_kind == "pex":
+        pex_inputs, input_verified = _fold_pex_schematic_inputs(
+            envelope, spec, file_label, input_verified, repo_root
+        )
+    elif check_kind == "generic":
+        input_members, input_verified = _fold_generic_input_set(
+            envelope, spec, file_label, actual_hash, input_verified, repo_root
+        )
+    return pex_inputs, input_members, input_verified
 
 
 def _resolve_evidence(
@@ -6095,14 +6698,9 @@ def _resolve_evidence(
             check_kind, envelope, spec, actual_hash, file_label, repo_root
         )
 
-    # Issue #2875: a `pex` envelope also pins the schematic side of its
-    # comparison. Verified per role and folded into `input_verified` so a
-    # changed resolvable input can never keep a fully verified citation.
-    pex_inputs: list[dict[str, Any]] | None = None
-    if check_kind == "pex":
-        pex_inputs, input_verified = _fold_pex_schematic_inputs(
-            envelope, spec, file_label, input_verified, repo_root
-        )
+    pex_inputs, input_members, input_verified = _fold_kind_inputs(
+        check_kind, envelope, spec, file_label, actual_hash, input_verified, repo_root
+    )
 
     return (
         {
@@ -6116,6 +6714,7 @@ def _resolve_evidence(
             "content_hash_unresolved": content_hash_unresolved,
             "input_verified": input_verified,
             "pex_inputs": pex_inputs,
+            "input_members": input_members,
         },
         None,
     )
@@ -6322,6 +6921,8 @@ def _build_tier_item(
     status = "unmet"
     reason: str | None = _REASON_NO_EVIDENCE
 
+    not_applicable: dict[str, Any] | None = None
+
     def grade_spec(
         spec: dict[str, Any],
     ) -> tuple[str, str | None, dict[str, Any] | None, dict[str, Any]]:
@@ -6350,6 +6951,15 @@ def _build_tier_item(
     raw_entry = _lookup_evidence(evidence, item_id, partition_kind)
     if raw_entry is not None and not graded_by_build:
         reason = _REASON_UNGRADEABLE_BY_BUILD
+    elif (
+        item_id == _STATISTICAL_CLAIMS_ITEM_ID
+        and isinstance(raw_entry, dict)
+        and "not_applicable" in raw_entry
+    ):
+        # Issue #2865: item 6's recorded "not applicable" outcome.
+        status, reason, not_applicable, failure_detail = _grade_not_applicable(
+            raw_entry["not_applicable"], partition_kind
+        )
     elif (
         raw_entry is not None
         and item_id in _ITEMS_ACCEPTING_MULTI_CITATION
@@ -6386,6 +6996,7 @@ def _build_tier_item(
         "reason": reason,
         "graded_by_build": graded_by_build,
         "citation": citation,
+        **({"not_applicable": not_applicable} if not_applicable is not None else {}),
         **extra,
         **({"detail": failure_detail} if failure_detail else {}),
     }
@@ -6840,6 +7451,11 @@ def build_fleet_report(
                 # of that count, so the two must never be rendered apart.
                 "build_t1_item_count": tier_report["build_t1_item_count"],
                 "t1_met_count": tier_report["t1_met_count"],
+                **(
+                    {"t1_not_applicable_count": tier_report["t1_not_applicable_count"]}
+                    if tier_report.get("t1_not_applicable_count")
+                    else {}
+                ),
                 "source_doc_content_hash": tier_report["source_doc_content_hash"],
                 "blocking_item": blocking_item,
                 "ungraded_items": _ungraded_t1_items(tier_report["items"]),
@@ -7258,7 +7874,7 @@ def _blocking_t1_item(items: list[dict[str, Any]]) -> dict[str, Any] | None:
     structural: dict[str, Any] | None = None
 
     for item in items:
-        if item["tier"] != "T1" or item["status"] == "met":
+        if item["tier"] != "T1" or item["status"] in _T1_SATISFIED_STATUSES:
             continue
         # Order matters: today every ungradeable-by-build id is *also*
         # structurally ungradeable, so this branch has to be asked first for
@@ -7316,7 +7932,7 @@ def _ungraded_t1_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         _blocking_item_view(item)
         for item in items
         if item["tier"] == "T1"
-        and item["status"] != "met"
+        and item["status"] not in _T1_SATISFIED_STATUSES
         and (
             _is_structurally_ungradeable_item(item["id"])
             or _is_ungradeable_by_build(item)

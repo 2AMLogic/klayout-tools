@@ -90,6 +90,15 @@ request is unchanged — byte-identical deck, byte-identical response — and th
 `corners[].measurements[]` entry. See [`docs/cli/sim.md`](cli/sim.md)'s
 "Measurements that are not `.meas` cards (`measurements[].expr`)".
 
+`measurements[].optional` (issue #2925) is an opt-in boolean (default
+`false`) that extends the per-measurement `status` vocabulary with an
+additive value, `"absent"` (`value: null`, `margin: null`, info diagnostic
+`measurement_absent`), for a `spice`/`expr` measurement that legitimately has
+no value; it never makes its corner `error`. A request that omits the field is
+byte-identical, so no `schema_version` bump -- but a consumer that switches
+exhaustively on measurement `status` must treat `"absent"` as "no value, not a
+failure". See [`docs/cli/sim.md`](cli/sim.md)'s "Optional measurements".
+
 `measurements[].crossings` (issue #2868) is the third form and the first
 whose result is a **series**, not a scalar. It does *not* retype `value`:
 `value` stays a number (the count of crossings found), so every consumer that
@@ -181,6 +190,17 @@ sees a member appear or disappear. The concrete precedent: issue #1704's
 number when it is. See `docs/cli/extract.md`'s "Top-cell-only hierarchy
 split" section for the full derivation.
 
+**An opt-in flag may also add a whole new object key to an already-shipped
+per-entry shape, absent unless asked for.** Issue #2982's `klt extract
+--resistance-graph` adds `resistance_graph` (`status`, `terminals`,
+`pair_resistance_ohm`, `legacy_resistance_ohm`, `nodes`, `edges`,
+`diagnostics`) to each `parasitics.nets[]` entry. Without the flag the key does
+not exist and the output is byte-identical to before; with it, every existing
+field (`resistance_ohm`, `terminals[]`, `by_layer`, the ladder) keeps its
+meaning and value. A consumer must treat the key as optional. No field is
+removed, renamed or retyped, so **no `schema_version` bump**. See
+`docs/cli/extract.md`'s "Terminal-aware resistance graph" section.
+
 **A new *qualifier* field next to an existing numeric field is additive — and
 is strictly preferable to retyping that field to `number | null`.** When an
 engine reports a sentinel instead of a measurement, the honest fix looks like
@@ -249,6 +269,13 @@ the stream layer/datatype behind each entry arrives as a new parallel
 a `deck: {name, content_hash}` block; without it the output is byte-identical.
 No `schema_version` bump on either command. See `docs/cli/deck.md` and
 `docs/cli/layers.md`.
+
+Issue #2952's `klt lvs` category `reference.unresolved_subckt_call` is
+likewise additive (no `schema_version` bump), but unlike the diagnostic-only
+`pin.declared_short` it **forces** `status: "mismatch"`, so a request whose
+inputs are unchanged can flip from `"match"` to `"mismatch"` on upgrade —
+callers gating on `status` should expect that (see `docs/cli/lvs.md`,
+"`reference.unresolved_subckt_call`").
 
 **A new key in a documented open map, and a new member on one class of that
 map's entries, are additive.** `klt functional-verification`'s
@@ -383,6 +410,49 @@ This first contract increment confirms that synthesis pilot; it does not
 claim every existing verb has been audited or add warnings to every
 response. Further verb adoption preserves each verb's existing envelope.
 
+## Wrapping an external tool
+
+A verb that wraps an external EDA tool inherits the
+[requested-but-unperformed rule](#requested-but-unperformed-analysis): a
+zero exit status from the tool is not evidence that it did what was asked.
+Any new wrapper meets these four requirements, each a checkable statement
+(operator ruling on [#2093](https://github.com/2AMLogic/klayout-tools/issues/2093)):
+
+1. **Requested vs achieved.** The response carries both the requested value
+   and the value the tool actually delivered, and flags a mismatch beyond a
+   documented tolerance (a warning entry, or the verb's documented error)
+   rather than returning an unqualified `"status": "ok"`. Upstream case: a
+   PLL generator answering a different frequency than requested at exit 0
+   ([YosysHQ/prjtrellis#270](https://github.com/YosysHQ/prjtrellis/issues/270)).
+2. **Stage identity.** Every reported figure names the flow stage it comes
+   from (for example a post-placement estimate vs final timing). A figure
+   parsed from an unlabelled tool print is not reported as a final result.
+   Upstream case: an unlabelled first Fmax line
+   ([YosysHQ/nextpnr#1808](https://github.com/YosysHQ/nextpnr/issues/1808)).
+3. **Actual tool identity.** The tool name and version captured from the
+   invocation itself go into [`provenance`](#shared-provenance-block). An
+   empty or unparseable version is reported as unknown (`null`), never
+   fabricated or filled from a pin or a default.
+4. **Retained failure evidence.** The stdout/stderr of a failed invocation is
+   kept and referenced from the error or warning. Existing artefacts combined
+   with a missing metrics object are not read as stage success. Tracked for
+   the OpenROAD IR-drop case in [#2124](https://github.com/2AMLogic/klayout-tools/issues/2124).
+
+### Wrapper audit checklist
+
+When reviewing a new or existing wrapper, each answer must be yes:
+
+- [ ] Does every requested value that the tool can silently adjust appear
+      next to its achieved value, with a mismatch flagged beyond tolerance?
+- [ ] Does every reported metric name the stage it was measured at?
+- [ ] Is the tool name and version taken from the actual invocation, with
+      `null` when it cannot be parsed?
+- [ ] On a non-zero exit, or a missing metrics object, is the captured
+      stdout/stderr retained and referenced from the error or warning?
+
+In-tree implementations to compare against: [#2091](https://github.com/2AMLogic/klayout-tools/issues/2091)
+and [#2124](https://github.com/2AMLogic/klayout-tools/issues/2124).
+
 ## Shared `provenance` block
 
 Verbs whose verdict depends on the exact tool build, PDK release, and rule
@@ -497,6 +567,12 @@ them was already `unmet`, and its `reason` changes from `wrong_kind` to the
 more specific `unanchored_evidence`. No `schema_version` bump. See
 [`docs/cli/signoff.md`](cli/signoff.md)'s "Items 1, 2, 9, and 10: bind them
 to an audited artifact".
+
+Issue #3044 adds an optional `provenance.input.paths` set form to that
+envelope and, on its citation, an additive `artifact_binding.members` list
+(`[{path, content_hash, status}]`; the item's `detail.artifact_binding.members`
+when unmet). Single-path citations are byte-identical to before. No
+`schema_version` bump.
 
 `klt erc` since issue #2183 also carries a second verb-local key,
 `provenance.devices`: one entry per `devices[]` spec declaration (`{name,
@@ -669,6 +745,23 @@ stability statement, concrete precedents, and drift-detection guidance, and
     Populated by `klt sim` today; the underlying detection lives in
     `klayout_tools.pdk.find_pdk` (`ambiguous_roots`) and is available to
     every verb that resolves a PDK — see `docs/cli/pdk.md`.
+  - `version` (issue #3070) is a self-describing stamp, or `null` when no
+    revision can be read mechanically (never guessed): an open_pdks `SOURCES`
+    file (the lines joined with `"; "`, unchanged), else `fetched:<marker>`
+    from the `.fetched-version` file `scripts/fetch-*.sh` writes (searched at
+    the variant dir and up to two parents), else `git:<40-hex HEAD>` — with a
+    `-dirty` suffix when the work tree has uncommitted changes — when the
+    variant dir or its parent *is* a git work tree root. A tree nested inside
+    an unrelated checkout (e.g. klt's own) never reports that checkout's
+    `HEAD`; a missing or failing `git` yields `null`.
+  - `linked_trees` (issue #3070) — present **only** when the model library the
+    run resolved (`provenance.deck`) realpath-resolves into a *different* PDK
+    variant tree than `name` (a cross-variant symlink): a list of
+    `{name, version}`, `version` read exactly as above. Path-free, absent
+    otherwise, so a run without cross-tree resolution is byte-identical to
+    before. Populated by verbs that pass a model library (`klt sim` today).
+    Like `version`, it carries a revision and is excluded from `--rerun`
+    drift comparison. Additive; no `schema_version` bump.
 - `deck` — the rule (or model) deck the run used, as
   `{name, content_hash, released}`. `content_hash` is a `sha256:`-prefixed
   hex digest of the deck file actually used, so "clean against *this exact*
@@ -1587,7 +1680,13 @@ artifacts:
   own `run_sim` calls inherit its ownership and never self-contend; within
   one thread, re-entry on an owned root or its descendants is free, while
   owning a descendant and then requesting its ancestor is refused (acquire
-  outermost first). Acquisition never blocks, so it cannot deadlock.
+  outermost first). Acquisition never blocks, so it cannot deadlock. A child
+  process does not inherit a lock, with one additive exception (#3291):
+  `klt pex --measure-command` exports `KLT_OUTDIR_LOCK_INHERIT=<canonical
+  $KLT_PEX_ARTIFACTS_DIR>`, and a `klt` run whose output directory is that
+  directory or a descendant is covered by the parent's ownership. Ancestors,
+  siblings and unrelated roots are refused as usual; `error.code` values and
+  `schema_version` are unchanged.
 - **Scope and limits.** Cooperating `klt` writers on one host that resolve
   the same lock registry (`$KLT_LOCK_DIR`, default `/tmp/klt-locks-<uid>`)
   on a filesystem where `flock` works. Other tools, writers that do not use
@@ -1610,6 +1709,13 @@ per-request code** (a partial set exits `4` for `klt sim`), which is `>= 3`,
 so the "a report was emitted" rule below holds. See
 [`docs/cli/sim.md`](cli/sim.md) "Submitting a set of requests" and
 `docs/schemas/sim-set-report.schema.json`.
+
+`klt sim-merge` (issue #3045) emits a single `klt sim` report over the union of
+several per-request reports, plus an additive `merge` block; it defines the
+refusal exit codes `5`-`10` (a set that is not exactly the planned one; stdout carries a
+`status: "refused"` payload whose `refusal.code` names the class) alongside `klt sim`'s
+`3`/`4` verdicts. See [`docs/cli/sim.md`](cli/sim.md) "Merging per-request
+reports" and `docs/schemas/sim-merge-report.schema.json`.
 
 ## Exit codes
 
@@ -1724,6 +1830,8 @@ engines plus the non-verdict `--list-rules` listing; its `coverage` block
    message, args.format)` on the documented error path.
 3. Document the command's fields in `docs/cli/<verb>.md`, including its
    `schema_version`.
+4. If the command wraps an external tool, meet the four requirements in
+   [Wrapping an external tool](#wrapping-an-external-tool).
 
 See `src/klayout_tools/cli/layers_cmd.py` and `docs/cli/layers.md` for a
 worked example.

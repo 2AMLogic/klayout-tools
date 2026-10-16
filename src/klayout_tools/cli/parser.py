@@ -50,11 +50,13 @@ from . import (
     ring_check_cmd,
     signoff_cmd,
     sim_cmd,
+    sim_merge_cmd,
     size_cmd,
     socket_check_cmd,
     sta_cmd,
     stats_cmd,
     synthesize_cmd,
+    tap_distance_cmd,
     techmap_cmd,
     trajectory_cmd,
     version_cmd,
@@ -63,6 +65,7 @@ from . import (
     yield_cmd,
     yield_samples_cmd,
     yield_sensitivity_cmd,
+    yield_threshold_cmd,
 )
 from .color import add_color_args
 
@@ -238,6 +241,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_lef_abstract_parser(subparsers)
 
     _add_ring_check_parser(subparsers)
+    _add_tap_distance_parser(subparsers)
 
     _add_layout_metrics_parser(subparsers)
 
@@ -281,6 +285,8 @@ def create_parser() -> argparse.ArgumentParser:
 
     _add_sim_parser(subparsers)
 
+    _add_sim_merge_parser(subparsers)
+
     _add_pex_parser(subparsers)
 
     _add_size_parser(subparsers)
@@ -304,6 +310,8 @@ def create_parser() -> argparse.ArgumentParser:
     _add_yield_campaign_parser(subparsers)
 
     _add_yield_sensitivity_parser(subparsers)
+
+    _add_yield_threshold_parser(subparsers)
 
     _add_design_centering_parser(subparsers)
 
@@ -630,6 +638,21 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     sim_parser.add_argument(
+        "--wait-for-capacity",
+        dest="wait_for_capacity",
+        metavar="SECONDS",
+        type=float,
+        default=None,
+        help=(
+            "with --backend batch, wait up to SECONDS (>= 0) for fleet "
+            "capacity when the launch is refused (batch_no_capacity / "
+            "batch_concurrency_cap), re-launching the same job with jittered "
+            "backoff; overrides the request's `batch.capacity_wait_s`. 0 "
+            "means one attempt. Also applies with --submit-only (issue "
+            "#3564). See docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
         "--job-status",
         dest="job_status",
         metavar="JOB_ID",
@@ -853,6 +876,37 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(sim_parser)
     sim_parser.set_defaults(func=sim_cmd.run)
+
+
+def _add_sim_merge_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``sim-merge`` verb (issue #3045).
+
+    Recombines the per-request reports of one corner grid that had to be
+    split across several ``klt sim`` requests. A separate verb rather than
+    ``klt sim merge``: ``klt sim`` takes a positional request path, so a
+    ``merge`` subcommand would collide with a request file of that name. See
+    docs/cli/sim.md "Merging per-request reports".
+    """
+    merge_parser = subparsers.add_parser(
+        "sim-merge",
+        help="merge per-request klt sim reports of one split corner grid",
+        description=(
+            "Merge the reports of N per-request `klt sim` runs (one corner grid "
+            "split across requests) into the report a single request over the "
+            "whole grid would have produced. Rollups, coverage and counters are "
+            "recomputed over the union; a missing, duplicate, unexpected or "
+            "mismatching report is refused with a distinct exit code. See "
+            "docs/cli/sim.md 'Merging per-request reports'."
+        ),
+    )
+    merge_parser.add_argument(
+        "manifest", help="shard manifest JSON (planned requests and expected corners)"
+    )
+    merge_parser.add_argument(
+        "reports", nargs="+", metavar="report", help="per-request klt sim report JSON"
+    )
+    _add_format_arg(merge_parser)
+    merge_parser.set_defaults(func=sim_merge_cmd.run)
 
 
 def _add_size_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -1267,6 +1321,79 @@ def _add_yield_samples_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(parser)
     parser.set_defaults(func=yield_samples_cmd.run)
+
+
+def _add_yield_threshold_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``yield-threshold`` verb (issue #2976).
+
+    Probit fit of a binary outcome against a swept stimulus: the threshold
+    distribution of a comparator/latch/trip point. Pure Python; needs no
+    native extension.
+    """
+    parser = subparsers.add_parser(
+        "yield-threshold",
+        help=(
+            "per-sample (stimulus, binary outcome) records -> probit threshold "
+            "mean/sigma with profile-likelihood CIs, per corner"
+        ),
+        description=(
+            "Fit P(decided high | stimulus) = Phi((stimulus - mu) / sigma) to "
+            "per-sample binary outcomes, per corner (issue #2976): the "
+            "input-referred offset of a comparator, latch or trip point is never "
+            "observed directly, only through which way each sample decided. "
+            "Reports mu/sigma with profile-likelihood confidence intervals, "
+            "per-stimulus proportions with Clopper-Pearson intervals, a "
+            "chi-square goodness of fit and, with --target-error-rate, the "
+            "stimulus at that error rate (flagged extrapolated beyond what the "
+            "sample count resolves). Degenerate data (one outcome, separation, "
+            "fewer than 2 stimulus levels) yields null estimates and a "
+            "fit.status, never a fabricated sigma. See docs/cli/yield-threshold.md."
+        ),
+    )
+    parser.add_argument(
+        "records",
+        help=(
+            'path to the records JSON document: {"corners": [{"name", '
+            '"records": [{"stimulus", "outcome"}]}]} or a flat '
+            '{"records": [...]} with an optional per-record "corner"'
+        ),
+    )
+    parser.add_argument(
+        "--confidence",
+        type=float,
+        default=0.95,
+        help="two-sided confidence level for every interval (default: 0.95)",
+    )
+    parser.add_argument(
+        "--target-error-rate",
+        dest="target_error_rate",
+        type=float,
+        default=None,
+        metavar="RATE",
+        help=(
+            "also report the stimulus at which the wrong-decision rate reaches "
+            "RATE (0 < RATE < 0.5), flagged extrapolated when RATE is below "
+            "what the sample count resolves"
+        ),
+    )
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=None,
+        help=(
+            "derive each record's outcome from its numeric `value` against "
+            "this threshold instead of reading a given `outcome`"
+        ),
+    )
+    parser.add_argument(
+        "--outcome-when",
+        dest="outcome_when",
+        choices=["above", "below"],
+        default="above",
+        help="with --threshold: decided high when value is above (default) or below it",
+    )
+    _add_format_arg(parser)
+    parser.set_defaults(func=yield_threshold_cmd.run)
 
 
 def _add_yield_campaign_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -2132,6 +2259,21 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     extract_parser.add_argument(
+        "--resistance-graph",
+        dest="resistance_graph",
+        action="store_true",
+        help=(
+            "additionally attach a terminal-aware resistor-graph result to "
+            "each `parasitics.nets[]` entry as `resistance_graph` (issue "
+            "#2982): the terminal-pair effective-resistance matrix, graph "
+            "node/edge counts, the legacy scalar and diagnostics. Additive "
+            "only -- `resistance_ohm` and every other field keep their "
+            "legacy value. Requires --parasitics. Off by default -- "
+            "byte-identical to today's behavior. See docs/cli/extract.md's "
+            "'--resistance-graph' section."
+        ),
+    )
+    extract_parser.add_argument(
         "--distributed-rc",
         dest="distributed_rc",
         action="store_true",
@@ -2148,6 +2290,24 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
             "model (nothing to chain) -- reported in `warnings`, not an "
             "error. Off by default -- byte-identical to today's behavior. "
             "See docs/cli/extract.md's '--distributed-rc' section."
+        ),
+    )
+    extract_parser.add_argument(
+        "--substrate-tie-ohms",
+        dest="substrate_tie_ohms",
+        type=float,
+        default=None,
+        metavar="OHM",
+        help=(
+            "resistance of the DC-reference tie each synthesized substrate "
+            "net gets to ground under --parasitics (issue #3089). Default "
+            "1e12: the substrate is only capacitively held, i.e. floating "
+            "in transient analysis. A small value pins it; 0 is a hard tie "
+            "(written as a 1 mohm resistor -- SPICE has no zero-ohm "
+            "resistor). Must be >= 0. Reported as "
+            "`parasitics.substrate_dc_tie.resistance_ohm`/`mode`. Requires "
+            "--parasitics. See docs/cli/extract.md's 'Substrate tie value' "
+            "section."
         ),
     )
     extract_parser.add_argument(
@@ -2937,7 +3097,9 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "once with the netlist this run extracted -- never through a "
             "shell. Each invocation gets the netlist path as its final "
             "argument plus $KLT_PEX_SIDE/$KLT_PEX_NETLIST/"
-            "$KLT_PEX_ARTIFACTS_DIR in its environment, and must print a "
+            "$KLT_PEX_ARTIFACTS_DIR in its environment (plus "
+            "$KLT_PEX_BACKEND and $KLT_SIM_BACKEND when --backend is given), "
+            "and must print a "
             'measurement document on stdout: {"corners": [{"corner_id": '
             '..., "measurements": [{"name": ..., "value": ..., "status": '
             "...}]}]}. Use it for a spec row no single `.meas` card can "
@@ -3085,7 +3247,9 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "recognised keys are gf180mcu's `poly_res` (values `1k` "
             "(default), `2k`, `3k`) and `mim_cap` (values "
             "`cap_mim_1f0_m4m5_noshield`, `cap_mim_1f5_m4m5_noshield`, "
-            "`cap_mim_2f0_m4m5_noshield` (default)). Without this flag `klt "
+            "`cap_mim_2f0_m4m5_noshield` (default)) and `mim_option` (`B` "
+            "(default), `A`; MIM option A is the Metal2/Metal3 stack). "
+            "Without this flag `klt "
             "pex` extracts against whatever the deck's own default flavour "
             "is, which is not necessarily the one the design uses -- and "
             "reports a delta computed from the wrong parasitics. An "
@@ -3228,6 +3392,20 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "no net is reported in `warnings`. Off by default -- "
             "byte-identical to today's behavior. See docs/cli/extract.md's "
             "'--parasitic-variant' section."
+        ),
+    )
+    pex_parser.add_argument(
+        "--substrate-tie-ohms",
+        dest="substrate_tie_ohms",
+        type=float,
+        default=None,
+        metavar="OHM",
+        help=(
+            "resistance of the substrate DC-reference tie (default 1e12, "
+            "substrate floating in transient; 0 = hard tie), passed "
+            "through to `klt extract --substrate-tie-ohms` (issue #3089). "
+            "Must be >= 0. See docs/cli/extract.md's 'Substrate tie value' "
+            "section."
         ),
     )
     pex_parser.add_argument(
@@ -3960,6 +4138,19 @@ def _add_place_and_route_parser(subparsers: argparse._SubParsersAction) -> None:
         "request", help="path to a klt place-and-route request JSON file"
     )
     _add_pdk_args(place_and_route_parser)
+    place_and_route_parser.add_argument(
+        "--backend",
+        choices=("local", "batch"),
+        default=None,
+        help=(
+            "where the units of a `pdk.rebuild_corners` request run (default: "
+            "the request's `backend` field, then $KLT_SIM_BACKEND, then "
+            "local). `batch` submits one job per corner to the Spot batch "
+            "fleet and never falls back to running OpenROAD on this host; a "
+            "single-unit request stays local under a host-default batch. See "
+            "docs/cli/place-and-route.md, 'Physical rebuild per corner'"
+        ),
+    )
     _add_flow_verify_args(
         place_and_route_parser,
         verb="place-and-route",
@@ -5672,6 +5863,87 @@ def _add_socket_check_parser(subparsers: argparse._SubParsersAction) -> None:
     socket_check_parser.set_defaults(func=socket_check_cmd.run)
 
 
+def _add_tap_distance_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``tap-distance`` verb: latch-up / tie-spacing distance bound."""
+    tap_parser = subparsers.add_parser(
+        "tap-distance",
+        help="assert every subject point is within a Euclidean distance of a tap",
+        description=(
+            "Assert that every point of a subject region (e.g. diffusion) lies "
+            "within --max-distance-um (Euclidean) of a qualifying tap "
+            "(e.g. a well/substrate tie), optionally per island (e.g. per well) "
+            "and optionally counting only taps wired to named nets. The "
+            "distance is measured with an inscribed-polygon Minkowski sum, so "
+            "it errs on the safe side and reports an explicit error bound. A "
+            "rule that cannot be evaluated reports status 'unsupported' "
+            "(exit 4), never a pass. Runs fully headless via KLayout's native "
+            "batch database API. See docs/cli/tap-distance.md."
+        ),
+    )
+    tap_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
+    tap_parser.add_argument(
+        "--subject",
+        required=True,
+        help=(
+            "subject layer expression: '<layer>/<datatype>' terms joined by "
+            "'+' (union), '&' (intersection), '-' (difference), left to right "
+            "(e.g. '65/20 & 125/44')"
+        ),
+    )
+    tap_parser.add_argument(
+        "--taps", required=True, help="tap layer expression (same syntax as --subject)"
+    )
+    tap_parser.add_argument(
+        "--max-distance-um",
+        required=True,
+        type=float,
+        help="maximum allowed Euclidean subject-to-tap distance in micrometres",
+    )
+    tap_parser.add_argument(
+        "--island",
+        default=None,
+        help=(
+            "optional island-partition layer expression (e.g. a well layer): "
+            "each merged polygon is checked on its own, counting only taps "
+            "that touch it; an island with subject but no tap fails"
+        ),
+    )
+    tap_parser.add_argument(
+        "--tap-net",
+        action="append",
+        default=None,
+        metavar="NET",
+        help=(
+            "repeatable net name; count only taps wired to one of these nets "
+            "(needs --net-spec)"
+        ),
+    )
+    tap_parser.add_argument(
+        "--net-spec",
+        default=None,
+        help=(
+            "path to a JSON connectivity spec for --tap-net: {'stackup': "
+            "[{'name', 'layer', 'label_layer'}], 'vias': [{'name', 'layer', "
+            "'between': [a, b]}], 'tap_connect_to': <stackup name>}"
+        ),
+    )
+    tap_parser.add_argument(
+        "--region",
+        default=None,
+        help=(
+            "optional subject clip window as an inline JSON array of four "
+            "micrometre coordinates [left, bottom, right, top]"
+        ),
+    )
+    tap_parser.add_argument(
+        "--top",
+        default=None,
+        help="top cell to check when the stream has more than one",
+    )
+    _add_format_arg(tap_parser)
+    tap_parser.set_defaults(func=tap_distance_cmd.run)
+
+
 def _add_ring_check_parser(subparsers: argparse._SubParsersAction) -> None:
     """Register the ``ring-check`` verb: assert a layer set forms a closed annulus."""
     ring_check_parser = subparsers.add_parser(
@@ -6025,6 +6297,20 @@ def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
             "antenna_tables_omitted: true; every verdict, erc_findings and "
             "the exit code are identical to the same run without it. "
             "Requires --findings-only -- passing it alone exits 1."
+        ),
+    )
+    erc_parser.add_argument(
+        "--compact",
+        action="store_true",
+        help=(
+            "with --findings-only, replace the per-gate gates[] rows, the "
+            "per-(gate, level) coverage.skipped 'findings_only' records and "
+            "the per-gate erc.floating_gate checked ids with one aggregate "
+            "record each plus a top-level 'compact' counts block "
+            "(issue #2965). gates stays a list (empty); nets, erc_findings, "
+            "erc_status and the tie entries of erc_coverage are unchanged. "
+            "Requires --findings-only -- passing it alone exits 1. Omitted, "
+            "output is byte-identical."
         ),
     )
     _add_format_arg(erc_parser)

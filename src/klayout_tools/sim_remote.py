@@ -207,6 +207,8 @@ def _unrun_corner_report(
             "process_seed": point.mc_seed["process_seed"],
             "mismatch_seed": point.mc_seed["mismatch_seed"],
         }
+        if "seed_scope" in point.mc_seed:
+            monte_carlo["seed_scope"] = point.mc_seed["seed_scope"]
     diagnostic: dict[str, Any] = {
         "severity": "error",
         "code": code,
@@ -230,6 +232,7 @@ def _unrun_corner_report(
         "diagnostics": [diagnostic],
         "artifacts": {"log": None, "raw": None, "waveform": None, "deck": None},
         "monte_carlo": monte_carlo,
+        **({"variant": point.variant} if point.variant is not None else {}),
     }
 
 
@@ -461,6 +464,7 @@ def _run_remote(
         )
     ssh_user = remote_spec.get("ssh_user") or remote_transport.DEFAULT_SSH_USER
     _preflight_include_closure(request, netlist_path, request_dir)
+    _assess_remote_runner_features(request, pdk, remote_spec)
 
     job_id = f"klt-sim-{uuid.uuid4().hex[:12]}"
     launcher = RemoteLauncher(
@@ -552,6 +556,30 @@ def _run_remote(
     return corners, engine_version, remote_environment
 
 
+def _points_to_push(
+    request: dict[str, Any],
+    corner_points: list[CornerPoint],
+    explicit_points: list[CornerPoint] | None,
+) -> list[CornerPoint] | None:
+    """The explicit point list to push to the job box, or ``None`` to forward
+    ``corners``/``monte_carlo`` for the box to re-expand.
+
+    A non-default ``monte_carlo.seed_scope`` (issue #2899) is resolved
+    client-side: a runner older than the field would silently drop it and
+    re-derive ``per_corner`` seeds, so the already-derived seeds are shipped
+    instead (the same wire a fleet shard uses). The default forwards the
+    request unchanged.
+    """
+    if explicit_points is not None:
+        return explicit_points
+    mc_spec = request.get("monte_carlo")
+    if isinstance(mc_spec, dict) and mc_spec.get("seed_scope", "per_corner") != (
+        "per_corner"
+    ):
+        return corner_points
+    return None
+
+
 def _run_remote_dispatch(
     *,
     launcher: RemoteLauncher,
@@ -596,7 +624,7 @@ def _run_remote_dispatch(
         timeout_s=timeout_s,
         keep_artifacts=keep_artifacts,
         want_waveforms=want_waveforms,
-        explicit_points=explicit_points,
+        explicit_points=_points_to_push(request, corner_points, explicit_points),
         max_workers=max_workers,
     )
     job = _build_remote_job_description(
@@ -789,6 +817,7 @@ def _run_remote_fleet(
         )
     ssh_user = remote_spec.get("ssh_user") or remote_transport.DEFAULT_SSH_USER
     _preflight_include_closure(request, netlist_path, request_dir)
+    _assess_remote_runner_features(request, pdk, remote_spec)
 
     shards = _shard_corner_points(corner_points, hosts)
     job_id_prefix = f"klt-sim-fleet-{uuid.uuid4().hex[:8]}"
@@ -982,11 +1011,33 @@ def _build_remote_job_description(
             ),
         ),
         command=(
-            f"klt sim {remote_transport.REMOTE_REQUEST_FILENAME} "
+            _remote_feature_preflight(remote_request)
+            + f"klt sim {remote_transport.REMOTE_REQUEST_FILENAME} "
             "--backend local-parallel --format json"
         ),
         success_exit_codes=_REMOTE_SIM_SUCCESS_EXIT_CODES,
         artifacts_relative_dir=remote_transport.DEFAULT_ARTIFACTS_RELATIVE_DIR,
+    )
+
+
+def _remote_feature_preflight(remote_request: dict[str, Any]) -> str:
+    """Host-side refusal prefix for a request using a mandatory runner feature
+    (issue #2924); ``sim_batch`` owns the registry and imports this module,
+    hence the function-local import."""
+    from . import sim_batch
+
+    return sim_batch.remote_feature_preflight(remote_request)
+
+
+def _assess_remote_runner_features(
+    request: dict[str, Any], pdk: str | None, remote_spec: dict[str, Any]
+) -> None:
+    """Pre-launch half of the same gate; see
+    :func:`sim_batch.assess_remote_runner_features`."""
+    from . import sim_batch
+
+    sim_batch.assess_remote_runner_features(
+        request, pdk, remote_spec.get("region"), remote_spec.get("ami_manifest")
     )
 
 

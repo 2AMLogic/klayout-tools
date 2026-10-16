@@ -137,6 +137,7 @@ from __future__ import annotations
 import functools
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -171,6 +172,7 @@ from .decks import (
     InvalidDeckOptionError,
     InvalidLabelLayerError,
     ParasiticsDeck,
+    SizeFilter,
     UnknownExtractionDeckError,
     deck_source_path,
     get_extraction_deck,
@@ -242,6 +244,7 @@ from .extract_passive_regions import (
     _diode_terminal_region,
     _exclude_capacitor_top_via_overlap,
     _resolve_resistors,
+    _unselected_capacitor_variant_warnings,
 )
 from .extract_passive_regions import (
     _capacitor_top_via_overlap_region as _capacitor_top_via_overlap_region,
@@ -296,7 +299,7 @@ from .extract_report import (
 # redundant `X as X` aliases mark them explicit re-exports, so neither reads as
 # an unused import in a module that never calls them itself.
 from .extract_spef import ExtractError as ExtractError
-from .extract_spef import _write_spef
+from .extract_spef import _unescape_spice_safe_net_name, _write_spef
 from .extract_spef import def_net_instance_pins as def_net_instance_pins
 from .metrics import is_registered
 from .parasitic_integrity import empty_integrity_summary
@@ -446,6 +449,43 @@ _SPICE_GLOBAL_GROUND_NODE = "0"
 #: numerical anchor for the DC solve, not a circuit element.
 SUBSTRATE_DC_TIE_RESISTANCE_OHM = 1e12
 
+
+def substrate_tie_written_ohms(requested_ohms: float) -> float:
+    """Resistance (ohms) the substrate tie card is actually written with.
+
+    ``--substrate-tie-ohms 0`` asks for a *hard* tie, but a zero-ohm ``R``
+    card is not legal SPICE (ngspice errors or clamps it). A hard tie is
+    therefore written as the :data:`_MIN_PARASITIC_R_OHM` floor (1 mohm --
+    the value the issue #3089 measurements used for a hard-grounded
+    substrate); every positive request is written verbatim.
+    """
+    return requested_ohms if requested_ohms > 0 else _MIN_PARASITIC_R_OHM
+
+
+def substrate_tie_mode(requested_ohms: float) -> str:
+    """``"hard"`` for a ``0`` request, ``"shunt"`` otherwise (issue #3089)."""
+    return "hard" if requested_ohms == 0 else "shunt"
+
+
+def _resolve_substrate_tie_ohms(value: float | None, parasitics: bool) -> float:
+    """Validate ``--substrate-tie-ohms`` (issue #3089) and return the
+    requested tie resistance, defaulting to
+    :data:`SUBSTRATE_DC_TIE_RESISTANCE_OHM` when the flag was not given.
+
+    Raises :class:`ExtractError` when given without ``--parasitics`` (the
+    tie only exists in a parasitic netlist) or when not a finite value
+    ``>= 0``.
+    """
+    _require_parasitics("--substrate-tie-ohms", value, parasitics)
+    if value is None:
+        return SUBSTRATE_DC_TIE_RESISTANCE_OHM
+    if not math.isfinite(value) or value < 0:
+        raise ExtractError(
+            f"--substrate-tie-ohms must be a finite value >= 0 (got {value!r})"
+        )
+    return float(value)
+
+
 #: Machine-readable declaration of what `--parasitics` does and does not
 #: model (issue #728, updated by #760). Most `C` cards `_inject_parasitics`
 #: emits hang off the deck's ground/substrate net; since issue #760 a net
@@ -502,7 +542,31 @@ PARASITIC_MODEL_SCOPE: dict[str, str] = {
 }
 
 
-def _parasitic_model_header_comment() -> str:
+def _substrate_tie_header_line(requested_ohms: float) -> str:
+    """The ``* - substrate tie: ...`` header line (issue #3089)."""
+    written = substrate_tie_written_ohms(requested_ohms)
+    if substrate_tie_mode(requested_ohms) == "hard":
+        return (
+            f"* - substrate tie: hard tie to ground ({written:g} ohm; "
+            "SPICE has no zero-ohm resistor) -- the substrate node is "
+            "DC-fixed at 0 V in transient analysis"
+        )
+    if requested_ohms >= SUBSTRATE_DC_TIE_RESISTANCE_OHM:
+        consequence = (
+            "the substrate is capacitively floating in transient analysis "
+            "(DC reference only); see --substrate-tie-ohms"
+        )
+    else:
+        consequence = (
+            "the substrate is held near 0 V in transient analysis through "
+            "this resistance"
+        )
+    return f"* - substrate tie: {written:g} ohm to ground -- {consequence}"
+
+
+def _parasitic_model_header_comment(
+    substrate_tie_ohms: float = SUBSTRATE_DC_TIE_RESISTANCE_OHM,
+) -> str:
     """Render :data:`PARASITIC_MODEL_SCOPE` as `*`-prefixed SPICE comment
     lines for the written netlist's header (issue #728).
 
@@ -518,6 +582,7 @@ def _parasitic_model_header_comment() -> str:
     lines = ["* parasitic model (--parasitics):"]
     for key, value in PARASITIC_MODEL_SCOPE.items():
         lines.append(f"* - {key}: {value}")
+    lines.append(_substrate_tie_header_line(substrate_tie_ohms))
     return "\n".join(lines)
 
 
@@ -1232,10 +1297,10 @@ def _spef_warnings(
         more = len(skipped_nets) - 5
         out.append(
             f"--spef: omitted *D_NET blocks for {len(skipped_nets)} "
-            "duplicate-named net(s) with no DEF net (floating cell "
-            f"outputs / unrouted supplies): {shown}"
+            "duplicate-named or unlabelled ($N) net(s) with no DEF net "
+            f"(floating cell outputs / unrouted supplies): {shown}"
             + (f", ... (+{more} more)" if more > 0 else "")
-            + ". Same-named *D_NET blocks are rejected by OpenSTA "
+            + ". Such *D_NET blocks are rejected by OpenSTA "
             "(STA-1650) and attach to no driver."
         )
     return out
@@ -1270,6 +1335,13 @@ def _timed(func: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]
     return wrapper
 
 
+def _require_parasitics_for_resistance_graph(
+    resistance_graph: bool, parasitics: bool
+) -> None:
+    if resistance_graph and not parasitics:
+        raise ExtractError("--resistance-graph requires --parasitics")
+
+
 @_timed
 def run_extract(
     path: str,
@@ -1298,6 +1370,7 @@ def run_extract(
     parasitics_net_patterns: Sequence[str] | None = None,
     strict_net_patterns: bool = False,
     parasitics_top_cell_only: bool = False,
+    resistance_graph: bool = False,
     distributed_rc: bool = False,
     resistance_paths: Sequence[tuple[int, str, str]] | None = None,
     resistance_path_max_nodes: int | None = None,
@@ -1317,6 +1390,7 @@ def run_extract(
     substrate_spreading_net: str | None = None,
     hierarchical_cells: Sequence[str] = (),
     no_netlist: bool = False,
+    substrate_tie_ohms: float | None = None,
     probes: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """Extract a schematic-equivalent netlist from the layout at ``path``.
@@ -1755,6 +1829,14 @@ def run_extract(
     and runs no extra ``Region`` work at all -- byte-identical to before this
     feature existed.
 
+    ``resistance_graph`` (``klt extract --resistance-graph``, issue #2982,
+    Stage 3.D5 increment 3) adds the opt-in ``resistance_graph`` object to each
+    ``parasitics.nets[]`` entry: the terminal-pair effective-resistance matrix
+    of the net's geometry-derived resistor graph, with coverage counts and
+    diagnostics. Purely additive -- ``resistance_ohm``, the ladder and every
+    other field are unchanged, and ``False`` (the default) adds no key.
+    Requires ``parasitics=True``. See :func:`_compute_parasitics`.
+
     ``distributed_rc`` (``klt extract --distributed-rc``, issue #977, Epic
     #709 Phase 2b) replaces the single-lumped-element star/Gamma-shunt R/C
     model (see :func:`_inject_parasitics`) with a distributed, multi-segment
@@ -1997,6 +2079,13 @@ def run_extract(
             ],
             "voltage_domain_warnings": [
                 {"marker": "<layer>/<datatype>", "description": str}, ...
+            ],
+            "unsupported_devices": [
+                {
+                    "kind": str, "marker": "<layer>/<datatype>",
+                    "count": int, "bbox_um": {...}, "description": str,
+                },
+                ...
             ],
             "merged_net_labels": [
                 {"net": str, "labels": [str, ...]}, ...
@@ -2635,6 +2724,13 @@ def run_extract(
     # no branch to an already heavily-branching function.
     _require_parasitics("--substrate-spreading", substrate_spreading_net, parasitics)
 
+    # `--substrate-tie-ohms` (issue #3089): validated up front, same helper
+    # route as above; `substrate_tie_requested` is the default (1e12) when
+    # the flag was not given.
+    substrate_tie_requested = _resolve_substrate_tie_ohms(
+        substrate_tie_ohms, parasitics
+    )
+
     # `--critical-net` (issue #976) requires `--parasitics`: it scopes the
     # lateral-coupling pass onto the same lumped-RC extraction this flag
     # piggybacks on, same reasoning as `--mom-net`/`--spef` above.
@@ -2661,6 +2757,10 @@ def run_extract(
     # `--parasitics-net`/`--critical-net` above.
     if parasitics_top_cell_only and not parasitics:
         raise ExtractError("--parasitics-top-cell-only requires --parasitics")
+
+    # `--resistance-graph` (issue #2982) attaches to the same per-net
+    # `parasitics.nets[]` entries, so it needs `--parasitics`.
+    _require_parasitics_for_resistance_graph(resistance_graph, parasitics)
 
     # `--distributed-rc` (issue #977) requires `--critical-net`: it reuses
     # that flag's own net set as the "which nets get the ladder" scope
@@ -2767,7 +2867,9 @@ def run_extract(
     hierarchy_placements: dict[int, Any] = {}
     subcircuit_info: dict[str, Any] = {}
     missing_flavour_markers: list[dict[str, Any]] = []
+    unsupported_devices: list[dict[str, Any]] = []
     probe_results: list[dict[str, Any]] = []
+    dotted_renames: list[tuple[str, str, str]] = []
 
     (
         netlist,
@@ -2806,6 +2908,7 @@ def run_extract(
         parasitics_nets=parasitics_nets_set,
         net_selectors=net_selectors,
         parasitics_top_cell_only=parasitics_top_cell_only,
+        resistance_graph=resistance_graph,
         def_pins=def_pins,
         pin_source_cells=pin_source_cells,
         # Issue #2854: rename each surviving promoted pin net to its
@@ -2822,8 +2925,10 @@ def run_extract(
         # `--pdk-root` resolved one above.
         pdk_info=pdk_info,
         missing_flavour_markers=missing_flavour_markers,
+        unsupported_devices=unsupported_devices,
         probes=probes,
         probe_results=probe_results,
+        dotted_renames_out=dotted_renames,
     )
 
     # `--critical-net-pattern`/`--parasitics-net-pattern` (issue #2974): the
@@ -3236,6 +3341,7 @@ def run_extract(
                 coupled_pairs,
                 ground_net,
                 distributed_rc_nets=(critical_nets_set if distributed_rc else None),
+                substrate_tie_ohms=substrate_tie_requested,
                 mom_rlc_inductor=(
                     (mom_rlc_net, mom_rlc_inductance_nh)
                     if mom_rlc_net is not None and mom_rlc_inductance_nh is not None
@@ -3264,7 +3370,10 @@ def run_extract(
                 # a DC tie to anchor either -- the block is still present
                 # (schema stability), just empty.
                 "substrate_dc_tie": {
-                    "resistance_ohm": SUBSTRATE_DC_TIE_RESISTANCE_OHM,
+                    "resistance_ohm": substrate_tie_written_ohms(
+                        substrate_tie_requested
+                    ),
+                    "mode": substrate_tie_mode(substrate_tie_requested),
                     "nets": [],
                 },
                 # Additive field (issue #2764): no nets injected, so the
@@ -3518,6 +3627,7 @@ def run_extract(
             raise ExtractError(
                 f"cannot create output directory {spef_out_dir}: {exc}"
             ) from exc
+        spef_conn_map = _remap_def_net_connections(def_net_connections, dotted_renames)
         spef_skipped_nets = _write_spef(
             spef_path,
             design_name=top_cell_name,
@@ -3527,7 +3637,12 @@ def run_extract(
             # Issue #961: real cell-instance `*CONN`/`*RES` correlation from
             # the routed DEF's own `NETS` section -- `None` (the default)
             # falls back to the pre-#961 port-only behavior.
-            net_instance_pins=def_net_connections,
+            net_instance_pins=spef_conn_map,
+        )
+        warnings.extend(
+            _spef_missing_conn_warnings(
+                parasitics_report, def_net_connections, spef_conn_map
+            )
         )
         warnings.extend(
             _spef_warnings(
@@ -3576,7 +3691,9 @@ def run_extract(
     writer.use_net_names = True
     netlist_description = f"extracted by klt extract --deck {deck_name}"
     if parasitics_report is not None:
-        netlist_description += "\n" + _parasitic_model_header_comment()
+        netlist_description += "\n" + _parasitic_model_header_comment(
+            substrate_tie_requested
+        )
         netlist_description += "".join(
             "\n* " + note for note in fixed_value_capacitor_note
         )
@@ -3613,6 +3730,7 @@ def run_extract(
         model_bindings=model_bindings,
         substrate_global_nets=substrate_global_nets,
         parasitics=parasitics_report is not None,
+        substrate_tie_ohms=substrate_tie_requested,
     )
     # The slice's own warnings are also surfaced in the top-level `warnings[]`,
     # so a caller reading only that (the documented contract) still sees them.
@@ -3678,6 +3796,11 @@ def run_extract(
         # declares `mos_flavours` whose marker layer has zero shapes in the
         # whole layout -- see `_detect_missing_flavour_markers`.
         "missing_flavour_markers": missing_flavour_markers,
+        # Additive field (issue #2919): always a list, empty unless the
+        # layout draws shapes on a deck `unsupported_device_markers` layer
+        # (a device class the deck cannot extract yet, e.g. gf180mcu MOS
+        # capacitors) -- see `_detect_unsupported_devices`.
+        "unsupported_devices": unsupported_devices,
         # Additive field (issue #555): always a list, empty when no PMOS
         # device's body net is the anonymous, KLayout-synthesized kind -- see
         # run_extract's docstring and `_detect_unbiased_pmos_body_nets` for
@@ -4086,6 +4209,7 @@ def _write_subcircuit_deck(
     model_bindings: Mapping[str, Any] | None,
     substrate_global_nets: list[str],
     parasitics: bool,
+    substrate_tie_ohms: float = SUBSTRATE_DC_TIE_RESISTANCE_OHM,
 ) -> dict[str, Any] | None:
     """Slice ``cell_name`` out of the already-written flat extraction and write
     it as its own ``.SUBCKT`` deck -- ``klt extract --subcircuit`` (issue
@@ -4169,7 +4293,7 @@ def _write_subcircuit_deck(
         "* see docs/cli/extract.md, section: Sub-circuit isolation"
     )
     if parasitics:
-        description += "\n" + _parasitic_model_header_comment()
+        description += "\n" + _parasitic_model_header_comment(substrate_tie_ohms)
     try:
         netlist.write(subcircuit_path, writer, description)
     except Exception as exc:
@@ -4773,6 +4897,7 @@ def extract_netlist_from_layout(
     parasitics_nets: frozenset[str] | None = None,
     net_selectors: NetSelectors | None = None,
     parasitics_top_cell_only: bool = False,
+    resistance_graph: bool = False,
     def_pins: frozenset[str] | None = None,
     pin_source_cells: frozenset[str] | None = None,
     rename_declared_pins: bool = False,
@@ -4783,6 +4908,8 @@ def extract_netlist_from_layout(
     substrate_spreading_net: str | None = None,
     pdk_info: dict[str, Any] | None = None,
     missing_flavour_markers: list[dict[str, Any]] | None = None,
+    unsupported_devices: list[dict[str, Any]] | None = None,
+    dotted_renames_out: list[tuple[str, str, str]] | None = None,
 ) -> tuple[
     kdb.Netlist,
     str,
@@ -5220,12 +5347,14 @@ def extract_netlist_from_layout(
         parasitics_nets=parasitics_nets,
         net_selectors=net_selectors,
         parasitics_top_cell_only=parasitics_top_cell_only,
+        resistance_graph=resistance_graph,
         def_pins=def_pins,
         pin_source_cells=pin_source_cells,
         rename_declared_pins=rename_declared_pins,
         substrate_spreading_net=substrate_spreading_net,
         probes=probes,
         probe_results=probe_results,
+        dotted_renames_out=dotted_renames_out,
     )
 
     # `klt extract --substrate-spreading <net>` (issue #2561): the closed-form
@@ -5267,6 +5396,12 @@ def extract_netlist_from_layout(
     warnings = warnings + missing_marker_prose_warnings
     if missing_flavour_markers is not None:
         missing_flavour_markers.extend(missing_marker_entries)
+
+    # Unsupported devices (issue #2919): additive diagnostic through the
+    # optional `unsupported_devices` out-parameter, same idiom as above.
+    warnings = warnings + _detect_unsupported_devices(
+        layout, top_cell, deck, unsupported_devices
+    )
 
     # Issue #2722: per-device placement attribution for
     # `--hierarchical-cells`, keyed by `Device.id()`, filled into the
@@ -6721,6 +6856,82 @@ def _dotted_rename_warnings(renames: list[tuple[str, str, str]]) -> list[str]:
     ]
 
 
+def _remap_def_net_connections(
+    def_net_connections: Mapping[str, Sequence[tuple[str, str]]] | None,
+    renames: list[tuple[str, str, str]],
+) -> Mapping[str, Sequence[tuple[str, str]]] | None:
+    """Re-key ``def_net_connections`` through the extractor's own dotted-net
+    rename (issue #2903).
+
+    :func:`_rewrite_dotted_net_names` renames ``a.b`` to ``a_b`` (or a
+    collision-suffixed ``a_b_1``) on the live net, so the SPEF writer sees the
+    renamed spelling while the DEF's own keys stay dotted. Using the rename's
+    actual ``before -> after`` triples (not a context-free ``.`` -> ``_``)
+    keeps collision outcomes identical. ``None`` / no renames return the
+    input unchanged, so dot-free runs are byte-identical.
+    """
+    if not def_net_connections or not renames:
+        return def_net_connections
+    after_by_before: dict[str, str] = {}
+    for _circuit, before, after in renames:
+        after_by_before.setdefault(before, after)
+    remapped: dict[str, Sequence[tuple[str, str]]] = {}
+    renamed_items: dict[str, Sequence[tuple[str, str]]] = {}
+    for key, pins in def_net_connections.items():
+        target = after_by_before.get(key)
+        if target is None:
+            remapped[key] = pins
+        else:
+            renamed_items[target] = pins
+    # The renamed net is what actually exists, so it wins any key clash.
+    remapped.update(renamed_items)
+    return remapped
+
+
+def _spef_missing_conn_warnings(
+    parasitics_report: Mapping[str, Any],
+    original: Mapping[str, Sequence[tuple[str, str]]] | None,
+    remapped: Mapping[str, Sequence[tuple[str, str]]] | None,
+) -> list[str]:
+    """Zero or one ``warnings[]`` entry naming written ``*D_NET`` blocks that
+    correspond to a ``--def-net-connections`` net yet get no instance
+    ``*CONN`` pins (issue #2903): a duplicated net name (the writer keeps
+    those port-only), or a dotted DEF net whose rewritten spelling did not
+    reach the key lookup."""
+    if not remapped:
+        return []
+    names = [
+        _unescape_spice_safe_net_name(entry["net"])
+        for entry in parasitics_report["nets"]
+    ]
+    counts: dict[str, int] = {}
+    for name in names:
+        counts[name] = counts.get(name, 0) + 1
+    stale = {
+        key.replace(SPICE_HIERARCHY_SEPARATOR, SPICE_SAFE_HIERARCHY_JOIN)
+        for key in (original or {})
+        if SPICE_HIERARCHY_SEPARATOR in key and key in remapped
+    }
+    missing = sorted(
+        name
+        for name in counts
+        if (remapped.get(name) and counts[name] > 1)
+        or (name in stale and not remapped.get(name))
+    )
+    if not missing:
+        return []
+    shown = ", ".join(missing[:_DOTTED_RENAME_WARNING_EXAMPLES])
+    more = len(missing) - _DOTTED_RENAME_WARNING_EXAMPLES
+    return [
+        f"{len(missing)} *D_NET block(s) correspond to a --def-net-connections "
+        f"net but were written without instance *CONN pins ({shown}"
+        + (f", +{more} more" if more > 0 else "")
+        + ") -- duplicated net names stay port-only, and a DEF net name the "
+        "extractor did not rename cannot be matched; downstream `klt sta` "
+        "will report these nets as partially unannotated"
+    ]
+
+
 def _rewrite_dotted_net_names(netlist: kdb.Netlist) -> list[tuple[str, str, str]]:
     """Rename every net whose name contains ngspice's hierarchy separator
     (``.``) to the SPICE-addressable ``_`` spelling
@@ -7186,6 +7397,158 @@ def _diode_near_miss_warning(
     )
 
 
+def _size_bounds_dbu(rng: tuple[float, float], unit: float) -> tuple[int, int]:
+    """Convert an inclusive ``(lo, hi)`` range in ``unit``-sized steps into
+    KLayout's half-open integer ``[lo, hi + 1)`` bounds (round to nearest)."""
+    return round(rng[0] / unit), round(rng[1] / unit) + 1
+
+
+def _apply_size_filter(region: kdb.Region, size: SizeFilter, dbu: float) -> kdb.Region:
+    """Keep the polygons of ``region`` satisfying every dimension of ``size``
+    (issue #2861). Bounds are rounded to the nearest dbu (area: dbu^2) and
+    are inclusive at both ends -- see :class:`SizeFilter`."""
+    out = region
+    if size.bbox_min_um is not None:
+        lo, hi = _size_bounds_dbu(size.bbox_min_um, dbu)
+        out = out.with_bbox_min(lo, hi, False)
+    if size.bbox_max_um is not None:
+        lo, hi = _size_bounds_dbu(size.bbox_max_um, dbu)
+        out = out.with_bbox_max(lo, hi, False)
+    if size.area_um2 is not None:
+        lo, hi = _size_bounds_dbu(size.area_um2, dbu * dbu)
+        out = out.with_area(lo, hi, False)
+    return out
+
+
+def _size_filters_overlap_dbu(a: SizeFilter, b: SizeFilter, dbu: float) -> bool:
+    """True when some whole-dbupolygon could satisfy both filters once
+    :func:`_apply_size_filter`'s rounding is applied: every dimension
+    constrained by *both* has intersecting **integer** ranges. Physical
+    disjointness is not enough -- at dbu=0.001 the distinct ranges 0.0701 um
+    and 0.0702 um both round to 70 dbu, so a 70-dbu-side window matches
+    either flavour (area compares in dbu^2)."""
+
+    for name, unit in (
+        ("bbox_min_um", dbu),
+        ("bbox_max_um", dbu),
+        ("area_um2", dbu * dbu),
+    ):
+        ra, rb = getattr(a, name), getattr(b, name)
+        if ra is None or rb is None:
+            continue
+        a_lo, a_hi = round(ra[0] / unit), round(ra[1] / unit)
+        b_lo, b_hi = round(rb[0] / unit), round(rb[1] / unit)
+        if a_hi < b_lo or b_hi < a_lo:
+            return False
+    return True
+
+
+def _validate_bipolar_size_filters(
+    bipolars: tuple[BipolarDevice, ...], dbu: float
+) -> None:
+    """Reject two ``BipolarDevice`` entries that share ``base``/``marker``/
+    ``emitter`` and narrowing but whose ``emitter_size`` windows overlap
+    *after dbu rounding*: a window matching both flavours would be ambiguous
+    (issue #2861). An ``emitter_size=None`` entry in the same flavour group
+    as a sized one is rejected too -- ``None`` matches every window, so it
+    claims whatever the sized entry claims and no unclaimed-window warning
+    can ever be right."""
+
+    def same_group(a: BipolarDevice, b: BipolarDevice) -> bool:
+        a_key = (a.base, a.marker, a.emitter, a.emitter_requires, a.emitter_excludes)
+        return a_key == (
+            b.base,
+            b.marker,
+            b.emitter,
+            b.emitter_requires,
+            b.emitter_excludes,
+        )
+
+    sized = [b for b in bipolars if b.emitter_size is not None]
+    for i, a in enumerate(sized):
+        for b in sized[i + 1 :]:
+            if not same_group(a, b):
+                continue
+            assert a.emitter_size is not None and b.emitter_size is not None
+            if _size_filters_overlap_dbu(a.emitter_size, b.emitter_size, dbu):
+                raise ExtractError(
+                    f"bipolar entries '{a.class_name}' and '{b.class_name}' "
+                    "share base/marker/emitter and have overlapping "
+                    "emitter_size ranges once rounded to the layout dbu "
+                    f"({dbu:g} um) -- a window matching both is ambiguous"
+                )
+    unsized = [b for b in bipolars if b.emitter_size is None]
+    for a in unsized:
+        for b in sized:
+            if not same_group(a, b):
+                continue
+            raise ExtractError(
+                f"bipolar entries '{a.class_name}' (no emitter_size) and "
+                f"'{b.class_name}' share base/marker/emitter -- the unsized "
+                "entry matches every window the sized one claims, so a "
+                "window would extract as both devices; give the fallback "
+                "an explicit disjoint emitter_size or a distinct marker"
+            )
+
+
+def _narrow_bipolar_emitter_by_size(
+    bipolar: BipolarDevice,
+    emitter: kdb.Region,
+    groups: dict[tuple, list[kdb.Region]],
+    matched: dict[tuple, list[kdb.Region]],
+    dbu: float,
+) -> kdb.Region:
+    """Apply ``bipolar.emitter_size`` to ``emitter`` (issue #2861), recording
+    the pre-filter emitter in ``groups`` and the size-matched emitter in
+    ``matched`` under the entry's flavour-group key so
+    :func:`_collect_bipolar_size_warnings` can report unclaimed windows.
+    Returns ``emitter`` unchanged when the entry declares no size filter."""
+    if bipolar.emitter_size is None:
+        return emitter
+    # Measure whole windows, not fragments split by the base edge.
+    emitter = emitter.merged()
+    group_key = (
+        bipolar.base,
+        bipolar.marker,
+        bipolar.emitter,
+        bipolar.emitter_requires,
+        bipolar.emitter_excludes,
+    )
+    groups.setdefault(group_key, []).append(emitter)
+    emitter = _apply_size_filter(emitter, bipolar.emitter_size, dbu)
+    matched.setdefault(group_key, []).append(emitter)
+    return emitter
+
+
+def _collect_bipolar_size_warnings(
+    groups: dict[tuple, list[kdb.Region]],
+    matched: dict[tuple, list[kdb.Region]],
+    dbu: float,
+) -> list[str]:
+    """One ``warnings[]`` line per marked emitter window that no
+    ``emitter_size``-bearing entry of its flavour group matched (issue
+    #2861). Such a window produced no device."""
+    import klayout.db as kdb
+
+    warnings: list[str] = []
+    for key, pre_regions in groups.items():
+        candidates = pre_regions[0]
+        claimed = kdb.Region()
+        for region in matched[key]:
+            claimed = claimed + region
+        for poly in candidates.not_interacting(claimed).each():
+            box = poly.bbox()
+            warnings.append(
+                "bipolar emitter window matches no emitter_size flavour "
+                f"(bbox {box.left * dbu:g},{box.bottom * dbu:g} "
+                f"{box.right * dbu:g},{box.top * dbu:g} um; "
+                f"{box.width() * dbu:g} x {box.height() * dbu:g} um, "
+                f"area {poly.area() * dbu * dbu:g} um^2) -- no device "
+                "extracted"
+            )
+    return warnings
+
+
 def _collect_diode_near_miss_warnings(
     layout: kdb.Layout,
     top_cell: kdb.Cell,
@@ -7434,6 +7797,11 @@ def _detect_missing_flavour_markers(
     warnings: list[str] = []
     entries: list[dict[str, Any]] = []
     for flavour in deck.mos_flavours:
+        if flavour.and_markers:
+            # A combination flavour (issue #3599) shares its base marker with
+            # a plain flavour that already reports it; a missing refining
+            # layer is a legitimate layout, not a gap.
+            continue
         if not _region(layout, top_cell, flavour.marker).is_empty():
             continue
         marker_label = f"{flavour.marker[0]}/{flavour.marker[1]}"
@@ -7451,6 +7819,53 @@ def _detect_missing_flavour_markers(
             }
         )
     return warnings, entries
+
+
+def _detect_unsupported_devices(
+    layout: kdb.Layout,
+    top_cell: kdb.Cell,
+    deck: ExtractionDeck,
+    entries_out: list[dict[str, Any]] | None = None,
+) -> list[str]:
+    """Flag each ``deck.unsupported_device_markers`` layer that carries shapes
+    in the extracted cell (issue #2919).
+
+    The deck cannot extract that device class, so the devices are missing
+    from the netlist even though the run reports ``status: extracted``.
+
+    Returns the prose warnings and extends ``entries_out`` (when given) with
+    one entry per flagged marker: ``{"kind": str, "marker":
+    "<layer>/<datatype>", "count": int, "bbox_um": {...}, "description":
+    str}`` where ``count`` is the number of connected marker components and
+    ``bbox_um`` bounds all of them. Nothing is returned or appended when the
+    deck declares no such marker or none has shapes.
+    """
+    warnings: list[str] = []
+    entries: list[dict[str, Any]] = []
+    for spec in deck.unsupported_device_markers:
+        region = _region(layout, top_cell, spec.marker).merged()
+        if region.is_empty():
+            continue
+        count = region.count()
+        marker_label = f"{spec.marker[0]}/{spec.marker[1]}"
+        warnings.append(
+            f"unsupported device class '{spec.kind}': marker layer "
+            f"{marker_label} carries {count} shape(s) ({spec.description}), "
+            "but this deck does not extract that device, so it is absent "
+            "from the netlist"
+        )
+        entries.append(
+            {
+                "kind": spec.kind,
+                "marker": marker_label,
+                "count": count,
+                "bbox_um": _bbox_um_rounded(region.bbox(), layout.dbu),
+                "description": spec.description,
+            }
+        )
+    if entries_out is not None:
+        entries_out.extend(entries)
+    return warnings
 
 
 def _detect_voltage_domain_overlap(
@@ -7980,6 +8395,8 @@ def _extract_bipolar_device(
     top_cell: kdb.Cell,
     bipolar: BipolarDevice,
     dummy: kdb.Region,
+    size_groups: dict[tuple, list[kdb.Region]],
+    size_matched: dict[tuple, list[kdb.Region]],
 ) -> tuple[
     tuple[kdb.Region, kdb.Region, kdb.Region, kdb.Region, kdb.Region | None],
     int,
@@ -7987,7 +8404,8 @@ def _extract_bipolar_device(
     """Resolve, register and extract one ``deck.bipolars`` entry; returns its
     ``(base, emitter, collector, substrate, substrate_layer)`` regions (for
     the connectivity wiring in :func:`_extract_netlist`) and its
-    dummy-dropped count.
+    dummy-dropped count. ``size_groups``/``size_matched`` are caller-owned
+    bookkeeping for ``emitter_size`` entries (issue #2861).
 
     An entry with no terminal relation takes :func:`_bipolar_legacy_regions`
     and is handed to ``DeviceExtractorBJT3Transistor`` exactly as before
@@ -8026,6 +8444,9 @@ def _extract_bipolar_device(
         base, emitter, collector, dropped = _bipolar_legacy_regions(
             layout, top_cell, bipolar, dummy
         )
+    emitter = _narrow_bipolar_emitter_by_size(
+        bipolar, emitter, size_groups, size_matched, layout.dbu
+    )
     l2n.register(base, f"{bipolar.class_name}_base")
     l2n.register(emitter, f"{bipolar.class_name}_emitter")
     l2n.register(collector, f"{bipolar.class_name}_collector")
@@ -8086,10 +8507,12 @@ def _extract_netlist(
     parasitics_nets: frozenset[str] | None = None,
     net_selectors: NetSelectors | None = None,
     parasitics_top_cell_only: bool = False,
+    resistance_graph: bool = False,
     def_pins: frozenset[str] | None = None,
     pin_source_cells: frozenset[str] | None = None,
     rename_declared_pins: bool = False,
     substrate_spreading_net: str | None = None,
+    dotted_renames_out: list[tuple[str, str, str]] | None = None,
 ) -> tuple[
     kdb.Netlist,
     list[str],
@@ -8534,15 +8957,33 @@ def _extract_netlist(
     # geometry is removed from `active` before the default nfet/pfet split
     # further below, so the default split is unaffected outside every
     # flavour marker -- no regression for the common (unflavoured) case.
+    # A flavour may refine its `marker` with `and_markers`/`not_markers`/
+    # `nfet_only` (issue #3599, sky130 native-Vt); all empty/False for every
+    # other flavour, so the claim test below reduces to `interacting(marker)`.
     flavour_active: list[kdb.Region] = []
     for flavour in deck.mos_flavours:
         marker_region = _region(layout, top_cell, flavour.marker)
+        and_regions = [_region(layout, top_cell, m) for m in flavour.and_markers]
+        not_regions = [_region(layout, top_cell, m) for m in flavour.not_markers]
         claimed = kdb.Region()
         if not marker_region.is_empty() and not active.is_empty():
             remaining = kdb.Region()
             for component in active.merged().each():
                 component_region = kdb.Region(component)
-                if not component_region.interacting(marker_region).is_empty():
+                if (
+                    not component_region.interacting(marker_region).is_empty()
+                    and all(
+                        not component_region.interacting(r).is_empty()
+                        for r in and_regions
+                    )
+                    and all(
+                        component_region.interacting(r).is_empty() for r in not_regions
+                    )
+                    and not (
+                        flavour.nfet_only
+                        and not component_region.interacting(nwell).is_empty()
+                    )
+                ):
                     claimed += component_region
                 else:
                     remaining += component_region
@@ -8992,12 +9433,26 @@ def _extract_netlist(
             kdb.Region | None,
         ]
     ] = []
+    _validate_bipolar_size_filters(deck.bipolars, layout.dbu)
+    # Size-filter bookkeeping (issue #2861): per flavour group, the narrowed
+    # pre-filter emitter and each entry's size-matched emitter.
+    bipolar_size_groups: dict[tuple, list[kdb.Region]] = {}
+    bipolar_size_matched: dict[tuple, list[kdb.Region]] = {}
     for bipolar in deck.bipolars:
         regions, dropped = _extract_bipolar_device(
-            l2n, layout, top_cell, bipolar, dummy
+            l2n,
+            layout,
+            top_cell,
+            bipolar,
+            dummy,
+            bipolar_size_groups,
+            bipolar_size_matched,
         )
         dummy_devices_dropped += dropped
         bipolar_regions.append((bipolar, *regions))
+    bipolar_size_warnings = _collect_bipolar_size_warnings(
+        bipolar_size_groups, bipolar_size_matched, layout.dbu
+    )
 
     # Junction-diode device recognition (issue #542): each of the deck's
     # optional `diodes` entries (see `DiodeDevice` in `decks/__init__.py`)
@@ -9203,6 +9658,11 @@ def _extract_netlist(
             {"P1": bottom_region, "P2": top_region},
         )
 
+    # Issue #2920: a capacitor of an unselected deck option drawn on the layout.
+    capacitor_variant_warnings = _unselected_capacitor_variant_warnings(
+        layout, top_cell, deck
+    )
+
     # MoM (Metal-oxide-Metal) capacitor device recognition (issue #1466):
     # each of the deck's optional `mom_capacitors` entries (see
     # `MomCapacitorDevice` in `decks/__init__.py`) is recognised by a single
@@ -9360,6 +9820,8 @@ def _extract_netlist(
         # recognition block above, where the per-entry terminal regions and
         # the MOS/tap geometry the filter needs are both still in scope.
         + diode_near_miss_warnings
+        + bipolar_size_warnings
+        + capacitor_variant_warnings
     )
 
     # Connectivity. Deliberately does *not* connect `nwell`/`tap` to
@@ -10118,7 +10580,12 @@ def _extract_netlist(
     # all then see one spelling. Unlike the `,`/leading-`$` cases,
     # `NetlistSpiceWriter` applies no escape of its own for `.`, so this has
     # to change the real net's name -- see `_rewrite_dotted_net_names`.
-    warnings.extend(_dotted_rename_warnings(_rewrite_dotted_net_names(netlist)))
+    dotted_renames = _rewrite_dotted_net_names(netlist)
+    if dotted_renames_out is not None:
+        # Issue #2903: hand the `(circuit, before, after)` triples back so
+        # `--def-net-connections` keys can follow the rename.
+        dotted_renames_out.extend(dotted_renames)
+    warnings.extend(_dotted_rename_warnings(dotted_renames))
 
     # Post-extraction device-parameter corrections (issues #512, #518, #521):
     # applied to the live `kdb.Device` objects here -- *before* the netlist is
@@ -10201,6 +10668,7 @@ def _extract_netlist(
             critical_nets=critical_nets,
             parasitics_nets=parasitics_nets,
             parasitics_top_cell_only=parasitics_top_cell_only,
+            resistance_graph=resistance_graph,
             # Per-fragment square counting (issue #2359): `via_index` lets
             # the parasitics pass read each net's own via landings back
             # through `polygons_of_net`, so it can tell where current enters
