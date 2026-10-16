@@ -72,6 +72,11 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         pitch to reserve a navigable routing channel between interior
         rows/columns, reported back as ``navigable_regions_um`` -- see
         :func:`_mos_array_layout`'s own docstring. ``0.0`` (the default)
+        draws byte-for-byte unchanged geometry.
+
+        ``pitch_x_um``/``pitch_y_um`` (issue #3299, Phase 1) override the
+        column/row pitch, clamped up to the legal minimum -- see
+        :func:`_mos_array_layout`'s own docstring. ``0.0`` (the default)
         draws byte-for-byte unchanged geometry."""
 
         def __init__(self) -> None:
@@ -377,6 +382,22 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "geometry to every existing caller",
                 default=0.0,
             )
+            self.param(
+                "pitch_x_um",
+                self.TypeDouble,
+                "Column pitch override (um), clamped up to the legal minimum "
+                "(unit extent + min same-layer spacing); interior_channel_um "
+                "is added on top (issue #3299). 0.0 (default) = no override",
+                default=0.0,
+            )
+            self.param(
+                "pitch_y_um",
+                self.TypeDouble,
+                "Row pitch override (um), clamped up to the legal minimum; "
+                "interior_channel_um is added on top (issue #3299). 0.0 "
+                "(default) = no override",
+                default=0.0,
+            )
             # Fixed drawn side of every cut on contact_layer (issue #2585) --
             # harness-computed by `_cut_fixed_size_um` from the resolved PDK
             # family and layer. `0.0` (no upper size bound) leaves the cuts
@@ -443,6 +464,8 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.voltage_flavor_mark_margin_um,
                 self.interior_channel_um,
                 self.mos_cap,
+                self.pitch_x_um,
+                self.pitch_y_um,
             )
             unit_boxes = info["unit"]["boxes_um"]
             for c in info["cells"] + info["dummy_cells"]:
