@@ -97,6 +97,7 @@ import time
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from . import _provenance, remote_transport, sim_staging
@@ -2979,6 +2980,12 @@ def _prepare_batch_job_spec(
     )
 
 
+def _utc_now() -> str:
+    """The current wall clock as an RFC3339 UTC string (the default ``now``
+    seam of :func:`_run_batch_job`)."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
 def _run_batch_job(
     *,
     config: BatchConfig,
@@ -2996,6 +3003,7 @@ def _run_batch_job(
     sleep: Any = time.sleep,
     request_dir: str | None = None,
     attach: bool = False,
+    now: Callable[[], str] = _utc_now,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """Submit, wait for, and collect **one** batch job's worth of corners --
     the shared body of the single-job ``batch`` backend (:func:`_run_batch`)
@@ -3019,6 +3027,11 @@ def _run_batch_job(
     ``job.json`` (else :data:`BATCH_UNKNOWN_JOB_CODE`) and the call goes
     straight to polling and collecting. A job Spot-reclaimed mid-run is
     still waited on, never re-launched (see :func:`poll_status`).
+
+    The returned environment also carries client-observed wall-clock
+    timestamps (``client_submitted_at``, ``client_launched_at``,
+    ``client_status_terminal_at``, ``client_collected_at``; ``now`` is the
+    clock seam). A phase that was not reached is ``None``, never fabricated.
     """
     if attach:
         if not job_exists(config, job_id, runner=runner):
@@ -3038,6 +3051,13 @@ def _run_batch_job(
             measurements_spec=measurements_spec,
             runner=runner,
             sleep=sleep,
+            timestamps={
+                "client_submitted_at": None,
+                "client_launched_at": None,
+                "client_status_terminal_at": None,
+                "client_collected_at": None,
+            },
+            now=now,
         )
     spec = _prepare_batch_job_spec(
         request,
@@ -3050,8 +3070,15 @@ def _run_batch_job(
         explicit_points=explicit_points,
         request_dir=request_dir,
     )
+    timestamps: dict[str, str | None] = {
+        "client_submitted_at": now(),
+        "client_launched_at": None,
+        "client_status_terminal_at": None,
+        "client_collected_at": None,
+    }
     submit_job(config, job_id, spec, runner=runner)
     launch_job(config, job_id, runner=runner)
+    timestamps["client_launched_at"] = now()
     # Issue #2978: name the job on stderr the moment it exists, so a caller
     # killed by an outer wall-clock limit knows what it orphaned.
     sys.stderr.write(
@@ -3069,6 +3096,8 @@ def _run_batch_job(
         measurements_spec=measurements_spec,
         runner=runner,
         sleep=sleep,
+        timestamps=timestamps,
+        now=now,
     )
 
 
@@ -3083,8 +3112,14 @@ def _poll_and_collect(
     measurements_spec: list[dict[str, Any]],
     runner: remote_transport.CommandRunner | None,
     sleep: Any,
+    timestamps: dict[str, str | None],
+    now: Callable[[], str],
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
-    """The wait-and-collect tail shared by a fresh submit and ``--attach``."""
+    """The wait-and-collect tail shared by a fresh submit and ``--attach``.
+
+    ``timestamps`` carries the client-observed phase times already recorded
+    (all ``None`` on ``--attach``, where this client never submitted or
+    launched); the terminal/collected phases are filled in here."""
     try:
         status = poll_status(config, job_id, runner=runner, sleep=sleep, heartbeat=True)
     except BatchPollTimeout as exc:
@@ -3098,10 +3133,12 @@ def _poll_and_collect(
                 "region": config.region,
                 "state": exc.last_state,
                 **_read_job_identity(None),
+                **timestamps,
             },
         )
 
-    environment = _batch_environment(config, job_id, status)
+    timestamps["client_status_terminal_at"] = now()
+    environment = {**_batch_environment(config, job_id, status), **timestamps}
     if status.get("state") != "done" and (
         _status_exit_code(status) not in _BATCH_SIM_SUCCESS_EXIT_CODES
     ):
@@ -3120,6 +3157,7 @@ def _poll_and_collect(
         collect_outputs(config, job_id, collected, runner=runner)
         from .sim import check_ngspice_options_echo
 
+        environment["client_collected_at"] = now()
         report = read_collected_report(collected)
         check_ngspice_options_echo(request, report)
         environment = {**environment, **_read_job_identity(collected, request)}
