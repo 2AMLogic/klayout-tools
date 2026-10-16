@@ -3238,6 +3238,13 @@ def _parse_port_check_errors(stdout: str) -> list[tuple[str, str, str]]:
     return rows
 
 
+_PORT_CHECK_PREFIXES: dict[str | None, str] = {
+    "report": "constraints.report_ports rejected",
+    "false_path": "constraints.false_path_from rejected",
+    "input_transition": "constraints.input_transitions rejected",
+}
+
+
 def _port_check_error_message(rows: list[tuple[str, str, str]]) -> str:
     details = []
     for side, port, problem in rows:
@@ -3269,14 +3276,10 @@ def _port_check_error_message(rows: list[tuple[str, str, str]]) -> str:
         else:
             details.append(f"{field}: {problem}")
     sides = {side for side, _, _ in rows}
-    if sides == {"report"}:
-        prefix = "constraints.report_ports rejected"
-    elif sides == {"false_path"}:
-        prefix = "constraints.false_path_from rejected"
-    elif sides == {"input_transition"}:
-        prefix = "constraints.input_transitions rejected"
-    else:
-        prefix = "per-port I/O delay constraint(s) rejected"
+    only_side = next(iter(sides)) if len(sides) == 1 else None
+    prefix = _PORT_CHECK_PREFIXES.get(
+        only_side, "per-port I/O delay constraint(s) rejected"
+    )
     return f"{prefix}: " + "; ".join(details)
 
 
