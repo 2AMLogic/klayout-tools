@@ -61,6 +61,10 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         docstring and :data:`_PDK_VOLTAGE_FLAVOR_LAYERS` for the flavour
         names each PDK family recognises."""
 
+        # Declared via ``self.param("mfg_grid_um", ...)`` below; the
+        # PCellDeclarationHelper stubs cannot see it, so annotate for mypy.
+        mfg_grid_um: float
+
         def __init__(self) -> None:
             super().__init__()
             self.param("w_um", self.TypeDouble, "Unit device width (um)", default=0.42)

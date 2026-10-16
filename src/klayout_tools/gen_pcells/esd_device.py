@@ -73,6 +73,10 @@ def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         `_bjt_unit_layout` already documents for its own device).
         """
 
+        # Declared via ``self.param("mfg_grid_um", ...)`` below; the
+        # PCellDeclarationHelper stubs cannot see it, so annotate for mypy.
+        mfg_grid_um: float
+
         def __init__(self) -> None:
             super().__init__()
             self.param(

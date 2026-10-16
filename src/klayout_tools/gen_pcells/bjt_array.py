@@ -57,6 +57,10 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         exact device) is recorded there too.
         """
 
+        # Declared via ``self.param("mfg_grid_um", ...)`` below; the
+        # PCellDeclarationHelper stubs cannot see it, so annotate for mypy.
+        mfg_grid_um: float
+
         def __init__(self) -> None:
             super().__init__()
             self.param(

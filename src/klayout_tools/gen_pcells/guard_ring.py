@@ -46,6 +46,10 @@ def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         :func:`_ring_layout`), optionally enclosed by a well tie on PDK
         families whose curated deck checks one (see ``well_present``)."""
 
+        # Declared via ``self.param("mfg_grid_um", ...)`` below; the
+        # PCellDeclarationHelper stubs cannot see it, so annotate for mypy.
+        mfg_grid_um: float
+
         def __init__(self) -> None:
             super().__init__()
             self.param(

@@ -74,6 +74,10 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         :func:`_mos_array_layout`'s own docstring. ``0.0`` (the default)
         draws byte-for-byte unchanged geometry."""
 
+        # Declared via ``self.param("mfg_grid_um", ...)`` below; the
+        # PCellDeclarationHelper stubs cannot see it, so annotate for mypy.
+        mfg_grid_um: float
+
         def __init__(self) -> None:
             super().__init__()
             self.param("w_um", self.TypeDouble, "Unit device width (um)", default=0.42)
