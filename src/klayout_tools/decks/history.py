@@ -922,6 +922,11 @@ def _project_device_classes(
                 ],
                 layer_names=layer_names,
                 provenance=resistor.provenance,
+                # Issue #2679: how `body` relates to `marker`. Under
+                # "abutting_heads" the `requires`/`excludes` above narrow
+                # the *marker* region (the resistive body itself), and the
+                # `body` layer only has to abut it as two separate heads.
+                extra={"topology": resistor.topology},
             )
         )
 

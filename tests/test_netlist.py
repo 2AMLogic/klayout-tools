@@ -45,11 +45,21 @@ from klayout_tools.netlist import (
 # xschem stubs
 # --------------------------------------------------------------------------- #
 
+#: Answers ``--version`` before anything is logged, so the version probe never
+#: clobbers the argv log of the real run. Silent when ``STUB_VERSION`` is unset.
+_STUB_VERSION_ANSWER = r"""#!/bin/sh
+if [ "$1" = "--version" ]; then
+  [ -n "$STUB_VERSION" ] && echo "XSCHEM V$STUB_VERSION"
+  exit 0
+fi
+"""
+
 #: Shared prologue: record the full argv (one arg per line, so a test can
 #: assert on exact flags) and work out where the netlist is meant to go from
 #: the invocation itself.
-_STUB_PREAMBLE = r"""#!/bin/sh
-printf '%s\n' "$@" > "$ARGV_LOG"
+_STUB_PREAMBLE = (
+    _STUB_VERSION_ANSWER
+    + r"""printf '%s\n' "$@" > "$ARGV_LOG"
 out_dir=""
 schematic=""
 prev=""
@@ -60,6 +70,7 @@ for arg in "$@"; do
 done
 stem=$(basename "$schematic" .sch)
 """
+)
 
 #: The normal case, and issue #55's first sharp edge: a *successful* batch
 #: netlist that exits non-zero. If `klt netlist` ever regresses to trusting
@@ -1099,3 +1110,127 @@ def test_path_normalization_keeps_the_file_name():
     assert normalize(a) != normalize(c)
     # Not a path comment: untouched.
     assert normalize(b"* sch_path: /x/y.sch\n") == b"* sch_path: /x/y.sch\n"
+
+
+# --------------------------------------------------------------------------- #
+# Unevaluated expr() content gate and xschem version (issue #3482)
+# --------------------------------------------------------------------------- #
+
+_EXPR_BODY = (
+    "* stub netlist\n.subckt block a b\n"
+    "XM1 a b c d nfet ad=expr('int((@nf + 1)/2) * @W / @nf * 0.29')\n.ends\n.end"
+)
+
+
+def test_unevaluated_expr_fails_with_stable_code(tmp_path, argv_log, monkeypatch):
+    monkeypatch.setenv("NETLIST_BODY", _EXPR_BODY)
+    monkeypatch.setenv("STUB_VERSION", "3.4.4")
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "block.spice"
+
+    with pytest.raises(NetlistError) as excinfo:
+        run_netlist(schematic, str(output), xschem_binary=binary)
+
+    assert excinfo.value.code == "unevaluated_expr"
+    message = str(excinfo.value)
+    assert "line 3" in message
+    assert "3.4.4" in message
+    assert "3.4.5" in message
+    assert not output.exists()
+
+
+def test_unevaluated_expr_fails_check_instead_of_drifting(
+    tmp_path, argv_log, monkeypatch
+):
+    monkeypatch.setenv("NETLIST_BODY", _EXPR_BODY)
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "block.spice"
+    output.write_text("* committed\n", encoding="utf-8")
+
+    with pytest.raises(NetlistError) as excinfo:
+        run_netlist(schematic, str(output), check=True, xschem_binary=binary)
+
+    assert excinfo.value.code == "unevaluated_expr"
+    assert "unknown" in str(excinfo.value)
+    assert output.read_text(encoding="utf-8") == "* committed\n"
+
+
+def test_unevaluated_expr_applies_after_block_mode(tmp_path, argv_log, monkeypatch):
+    monkeypatch.setenv("NETLIST_BODY", _EXPR_BODY)
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+
+    with pytest.raises(NetlistError, match="unevaluated expr"):
+        run_netlist(
+            schematic, str(tmp_path / "b.spice"), xschem_binary=binary, block=True
+        )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "* ad=expr(1+2)\n.subckt block a b\n.ends\n.end",
+        "** note: expr(x)\n.subckt block a b\n.ends\n.end",
+        "X1 a b nfet myexpr(3)\n.end",
+    ],
+)
+def test_expr_in_comment_or_longer_identifier_does_not_trigger(
+    tmp_path, argv_log, monkeypatch, body
+):
+    monkeypatch.setenv("NETLIST_BODY", body)
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+
+    report = run_netlist(schematic, str(tmp_path / "b.spice"), xschem_binary=binary)
+
+    assert report["status"] == "generated"
+
+
+def test_whitespace_before_paren_still_triggers(tmp_path, argv_log, monkeypatch):
+    monkeypatch.setenv("NETLIST_BODY", "X1 a b nfet ad=expr (1)\n.end")
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+
+    with pytest.raises(NetlistError, match="unevaluated expr"):
+        run_netlist(schematic, str(tmp_path / "b.spice"), xschem_binary=binary)
+
+
+def test_clean_netlist_reports_xschem_version(tmp_path, argv_log, monkeypatch):
+    monkeypatch.setenv("STUB_VERSION", "3.4.7")
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+
+    report = run_netlist(schematic, str(tmp_path / "b.spice"), xschem_binary=binary)
+
+    assert report["status"] == "generated"
+    assert report["xschem"]["version"] == "3.4.7"
+    # The probe must not have replaced the real run's recorded argv.
+    assert "-x" in _recorded_argv(argv_log)
+
+
+def test_version_is_null_when_probe_output_is_garbage(tmp_path, argv_log, monkeypatch):
+    monkeypatch.setenv("STUB_VERSION", "not-a-version")
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+
+    report = run_netlist(schematic, str(tmp_path / "b.spice"), xschem_binary=binary)
+
+    assert report["xschem"]["version"] is None
+
+
+def test_version_is_null_when_probe_hangs(tmp_path, argv_log, monkeypatch):
+    monkeypatch.setattr(netlist_module, "VERSION_PROBE_TIMEOUT_S", 0.3)
+    schematic = _write_schematic(tmp_path)
+    hang_on_version = (
+        '#!/bin/sh\nif [ "$1" = "--version" ]; then trap \'\' TERM; '
+        "while : ; do sleep 0.05; done; fi\n"
+        + _STUB_NONZERO_EXIT.split("\n", 1)[1].split("fi\n", 1)[1]
+    )
+    binary = _write_stub(tmp_path, hang_on_version)
+
+    report = run_netlist(schematic, str(tmp_path / "b.spice"), xschem_binary=binary)
+
+    assert report["status"] == "generated"
+    assert report["xschem"]["version"] is None

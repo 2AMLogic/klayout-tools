@@ -1646,6 +1646,134 @@ def test_expand_monte_carlo_produces_n_samples_per_corner():
     ]
 
 
+def _mc_by_corner(sampled):
+    out = {}
+    for p in sampled:
+        out.setdefault(p.corner_id.rsplit("/mc", 1)[0], {})[p.sample_index] = p.mc_seed
+    return out
+
+
+def test_seed_scope_default_is_bit_identical_to_pre_2899_seeds():
+    # Concrete integers computed from the original positional derivation
+    # (seed, axis, corner_index, sample_index-or-"fixed"); must never change.
+    points = sim._expand_corners({"process": ["tt", "ss"]}, [])
+    for mc in (
+        {"n": 2, "seed": 42, "vary": "mismatch"},
+        {"n": 2, "seed": 42, "vary": "mismatch", "seed_scope": "per_corner"},
+    ):
+        sampled, info = sim._expand_monte_carlo(points, mc)
+        assert info.get("seed_scope", "per_corner") == "per_corner"
+        got = [
+            (
+                p.mc_seed["process_seed"],
+                p.mc_seed["mismatch_seed"],
+                p.mc_seed["rndseed"],
+            )
+            for p in sampled
+        ]
+        assert got == [
+            (1973556995, 1917083296, 1010234817),
+            (1973556995, 801777546, 195950796),
+            (29864885, 1595696400, 212062138),
+            (29864885, 869917166, 734373890),
+        ]
+
+
+def test_seed_scope_rejects_unknown_value():
+    with pytest.raises(sim.SimError, match="monte_carlo.seed_scope"):
+        sim._validate_monte_carlo_spec(
+            {"n": 1, "seed": 1, "vary": "both", "seed_scope": "bogus"}
+        )
+
+
+def test_seed_scope_shared_pairs_samples_across_corners():
+    points = sim._expand_corners(
+        {"process": ["tt", "ss"], "temperature_c": [-40, 125]}, []
+    )
+    sampled, info = sim._expand_monte_carlo(
+        points, {"n": 3, "seed": 7, "vary": "both", "seed_scope": "shared"}
+    )
+    assert info["seed_scope"] == "shared"
+    by_corner = _mc_by_corner(sampled)
+    assert len(by_corner) == 4
+    for k in range(3):
+        assert len({tuple(sorted(c[k].items())) for c in by_corner.values()}) == 1
+    first = next(iter(by_corner.values()))
+    assert len({first[k]["mismatch_seed"] for k in range(3)}) == 3
+    assert all(p.mc_seed["seed_scope"] == "shared" for p in sampled)
+
+
+@pytest.mark.parametrize(
+    ("vary", "pinned"), [("mismatch", "process_seed"), ("process", "mismatch_seed")]
+)
+@pytest.mark.parametrize("scope", ["per_corner", "shared", "point"])
+def test_seed_scope_keeps_negative_control(scope, vary, pinned):
+    points = sim._expand_corners({"process": ["tt", "ss"]}, [])
+    sampled, _ = sim._expand_monte_carlo(
+        points, {"n": 4, "seed": 3, "vary": vary, "seed_scope": scope}
+    )
+    for corner in _mc_by_corner(sampled).values():
+        assert len({corner[k][pinned] for k in range(4)}) == 1
+
+
+def test_seed_scope_point_is_split_and_order_stable():
+    # The #3081 repro: 2 process x 2 temp x 2 supply, n=3, seed=45.
+    axes = {
+        "process": ["tt", "ss"],
+        "temperature_c": [-40, 125],
+        "supply_v": {"vdd": [1.62, 1.98]},
+    }
+    mc = {"n": 3, "seed": 45, "vary": "mismatch", "seed_scope": "point"}
+    full_points = sim._expand_corners(axes, [])
+    full, _ = sim._expand_monte_carlo(full_points, mc)
+    full_by = _mc_by_corner(full)
+    assert len(full_by) == 8
+    # Distinct points still draw distinct dice.
+    assert len({tuple(c[0].items()) for c in full_by.values()}) == 8
+
+    reordered, _ = sim._expand_monte_carlo(list(reversed(full_points)), mc)
+    assert _mc_by_corner(reordered) == full_by
+
+    for point in full_points:
+        alone, _ = sim._expand_monte_carlo([point], mc)
+        assert _mc_by_corner(alone) == {point.corner_id: full_by[point.corner_id]}
+
+
+def test_checkpoint_fingerprint_changes_with_seed_scope(tmp_path):
+    netlist = tmp_path / "n.cir"
+    netlist.write_text("* x\n.end\n")
+    points = sim._expand_corners({"process": ["tt", "ss"]}, [])
+
+    def fp(scope):
+        sampled, _ = sim._expand_monte_carlo(
+            points, {"n": 2, "seed": 1, "vary": "both", "seed_scope": scope}
+        )
+        return sim._checkpoint_fingerprint(
+            netlist_path=str(netlist),
+            models_lib=None,
+            analysis={"type": "op"},
+            measurements_spec=[],
+            corner_points=sampled,
+            timeout_s=1.0,
+            engine="ngspice",
+        )
+
+    assert fp("per_corner") != fp("shared") != fp("point")
+    assert fp("shared") != fp("per_corner")
+
+
+def test_points_to_push_resolves_non_default_scope_client_side():
+    from klayout_tools import sim_remote
+
+    points = sim._expand_corners({"process": ["tt"]}, [])
+    base = {"monte_carlo": {"n": 1, "seed": 1, "vary": "both"}}
+    assert sim_remote._points_to_push(base, points, None) is None
+    shared = {"monte_carlo": {**base["monte_carlo"], "seed_scope": "shared"}}
+    assert sim_remote._points_to_push(shared, points, None) is points
+    explicit = list(points)
+    assert sim_remote._points_to_push(base, points, explicit) is explicit
+
+
 def test_expand_monte_carlo_is_reproducible_given_the_same_seed():
     corner_points = sim._expand_corners({"process": ["tt"]}, [])
     mc_spec = {"n": 5, "seed": 20260801, "vary": "both"}
@@ -2044,10 +2172,48 @@ def test_recovered_from_stepping_true_when_measurements_all_resolved():
 
 
 def test_recovered_from_stepping_false_with_no_measurements_declared():
-    # No measurements[] at all -- nothing independently confirms the run
-    # actually succeeded, so a singular-matrix classification stays fatal.
+    # No measurements[] and no completed waveform -- nothing independently
+    # confirms the run actually succeeded, so a singular-matrix
+    # classification stays fatal.
     log = "Warning: singular matrix:  check node b\n"
     assert sim._recovered_from_stepping([], [], log) is False
+    assert sim._recovered_from_stepping([], [], log, waveform_complete=False) is False
+
+
+def test_recovered_from_stepping_true_for_complete_waveform_without_measurements():
+    # Issue #3246: a waveform-capture-only request recovers on the waveform.
+    log = "Warning: Dynamic gmin stepping failed\n"
+    assert sim._recovered_from_stepping([], [], log, waveform_complete=True) is True
+
+
+def test_recovered_from_stepping_false_for_complete_waveform_with_abort_trailer():
+    log = "Warning: Dynamic gmin stepping failed\ntran simulation(s) aborted\n"
+    assert sim._recovered_from_stepping([], [], log, waveform_complete=True) is False
+
+
+def _wf(last_time, name="time"):
+    return {
+        "plotname": "Transient Analysis",
+        "variables": [{"index": 0, "name": name, "type": "time"}],
+        "points": [[0.0], [last_time]],
+    }
+
+
+@pytest.mark.parametrize(
+    ("waveform", "analysis", "expected"),
+    [
+        (_wf(1e-6), {"kind": "tran", "args": "1n 1u"}, True),
+        (_wf(1e-6), {"kind": "tran", "args": "1n 1u 0 uic"}, True),
+        (_wf(0.9e-6), {"kind": "tran", "args": "1n 1u"}, False),  # truncated
+        (_wf(1e-6), {"kind": "tran", "args": "garbage"}, False),
+        (_wf(1e-6), {"kind": "ac", "args": "dec 10 1 1meg"}, False),
+        (_wf(1e-6, name="frequency"), {"kind": "tran", "args": "1n 1u"}, False),
+        ({**_wf(1e-6), "points": []}, {"kind": "tran", "args": "1n 1u"}, False),
+        (None, {"kind": "tran", "args": "1n 1u"}, False),
+    ],
+)
+def test_waveform_reached_tran_window(waveform, analysis, expected):
+    assert sim._waveform_reached_tran_window(waveform, analysis) is expected
 
 
 def test_recovered_from_stepping_false_when_a_measurement_errored():
@@ -4702,6 +4868,66 @@ def test_run_sim_monte_carlo_family_mismatch_reports_gf180mcu_resistor_disabled(
     assert by_family["capacitor"] is False
 
 
+@pytest.mark.parametrize(
+    "section, expected",
+    [
+        ("mos_tt_mismatch", True),
+        ("mos_tt", False),
+        ("mos_tt_stat", False),
+        (None, None),
+    ],
+)
+def test_run_sim_monte_carlo_family_mismatch_sg13g2_mosfet_is_section_dependent(
+    tmp_path, monkeypatch, section, expected
+):
+    """Issue #2961: sg13g2 MOS subcircuit calls classify as `mosfet` (not
+    `other`) and `active` follows whether the selected section is a
+    `*_mismatch` one; unknown section -> `None`."""
+    (tmp_path / "body.spice").write_text(
+        "Vdd vdd 0 DC 1.2\n"
+        "XM1 mid g out b sg13_lv_nmos L=0.13u W=1u\n"
+        "XM2 mid g vdd vdd sg13_hv_pmos L=0.45u W=1u\n"
+    )
+    spec: dict = {
+        "netlist": "body.spice",
+        "models": {"pdk": "ihp-sg13g2"},
+        "monte_carlo": {"n": 2, "seed": 1, "vary": "mismatch"},
+        "analysis": {"kind": "tran", "args": "1n 1u"},
+    }
+    if section is not None:
+        spec["models"]["lib"] = str(tmp_path / "corner.lib")
+        spec["corners"] = {"process": [section]}
+        (tmp_path / "corner.lib").write_text(f".lib {section}\n.endl {section}\n")
+    request = _write_request(tmp_path, spec)
+    _stub_subprocess_run(monkeypatch)
+    # No ihp-sg13g2 install on CI: stub PDK resolution (the section libs
+    # above are absolute paths, so only the resolution call itself matters).
+    monkeypatch.setattr(
+        sim,
+        "find_pdk",
+        lambda **_kw: {"root": str(tmp_path), "variant": "ihp-sg13g2"},
+    )
+
+    report = sim.run_sim(str(request))
+
+    family_mismatch = report["environment"]["monte_carlo"]["family_mismatch"]
+    by_family = {entry["family"]: entry["active"] for entry in family_mismatch}
+    assert by_family == {"mosfet": expected}
+
+
+@pytest.mark.parametrize(
+    "line, family",
+    [
+        ("XM1 d g s b sg13_lv_nmos L=1u W=1u", "mosfet"),
+        ("XM1 d g s b sg13_hv_pmos L=1u W=1u", "mosfet"),
+        ("XC1 a b sg13_lv_nmoscap W=1u", "capacitor"),
+        ("XQ1 c b e npn13G2", "bipolar"),
+    ],
+)
+def test_classify_device_family_sg13g2_subckts(line, family):
+    assert sim._classify_device_family("X", line) == family
+
+
 def test_run_sim_monte_carlo_family_mismatch_scans_include_closure(
     tmp_path, monkeypatch
 ):
@@ -5136,6 +5362,98 @@ def test_rollup_measurements_implausible_outranks_fail():
     (entry,) = sim._rollup_measurements([{"name": "vref"}], corners)
 
     assert entry["status"] == "inconclusive"
+
+
+def _scope_corners(per_corner: dict[str, list[float | None]]) -> list[dict]:
+    return [
+        _sampled_corner(base, i, v)
+        for base, values in per_corner.items()
+        for i, v in enumerate(values)
+    ]
+
+
+def _scope_rollup(per_corner, window_scope, *, k_sigma=3.0, limits=None):
+    (entry,) = sim._rollup_measurements(
+        [{"name": "vref", "limits": limits or {"min": 0.0, "max": 10.0}}],
+        _scope_corners(per_corner),
+        {
+            "quantiles": sim.DEFAULT_MC_QUANTILES,
+            "k_sigma": k_sigma,
+            "window_scope": window_scope,
+        },
+    )
+    return entry
+
+
+# Corner "b" is wide on its own, but 20 tight samples in "a" shrink the
+# pooled sigma enough for the pooled window to sit inside the limits.
+_B_ALONE_FAILS = {"a": [5.0] * 20, "b": [0.5, 9.5]}
+# Each corner is tight, but the between-corner spread inflates the pooled
+# sigma past the limits.
+_POOLED_ONLY_FAILS = {"a": [1.0, 1.2], "b": [8.8, 9.0]}
+
+
+def test_window_scope_per_corner_fails_when_one_corner_window_fails():
+    pooled = _scope_rollup(_B_ALONE_FAILS, "pooled")
+    assert pooled["monte_carlo"]["sigma_window"]["status"] == "pass"
+    assert pooled["status"] == "pass"
+    assert "failing_corners" not in pooled["monte_carlo"]
+
+    entry = _scope_rollup(_B_ALONE_FAILS, "per_corner")
+    assert entry["status"] == "fail"
+    assert entry["monte_carlo"]["failing_corners"] == ["b"]
+
+
+def test_window_scope_per_corner_passes_when_only_pooled_window_fails():
+    pooled = _scope_rollup(_POOLED_ONLY_FAILS, "pooled")
+    assert pooled["status"] == "fail"
+
+    entry = _scope_rollup(_POOLED_ONLY_FAILS, "per_corner")
+    assert entry["monte_carlo"]["sigma_window"]["status"] == "fail"
+    assert entry["status"] == "pass"
+    assert entry["monte_carlo"]["failing_corners"] == []
+
+
+@pytest.mark.parametrize("scope", [None, "pooled"])
+def test_window_scope_default_response_is_unchanged(scope):
+    explicit = _scope_rollup(_B_ALONE_FAILS, scope)
+    (legacy,) = sim._rollup_measurements(
+        [{"name": "vref", "limits": {"min": 0.0, "max": 10.0}}],
+        _scope_corners(_B_ALONE_FAILS),
+        {"quantiles": sim.DEFAULT_MC_QUANTILES, "k_sigma": 3.0},
+    )
+    assert explicit == legacy
+    assert "failing_corners" not in explicit["monte_carlo"]
+
+
+def test_window_scope_per_corner_error_outranks_window_fail():
+    per_corner = {"a": [5.0] * 20, "b": [0.5, 9.5, None]}
+    entry = _scope_rollup(per_corner, "per_corner")
+    assert entry["monte_carlo"]["failing_corners"] == ["b"]
+    assert entry["status"] == "error"
+
+
+def test_window_scope_per_corner_without_k_sigma_is_a_noop():
+    entry = _scope_rollup(_B_ALONE_FAILS, "per_corner", k_sigma=None)
+    assert entry["status"] == "pass"
+    assert entry["monte_carlo"]["failing_corners"] == []
+
+
+def test_window_scope_single_corner_scopes_agree():
+    single = {"b": [0.5, 9.5]}
+    pooled = _scope_rollup(single, "pooled")
+    per_corner = _scope_rollup(single, "per_corner")
+    assert pooled["status"] == per_corner["status"] == "fail"
+    assert per_corner["monte_carlo"]["failing_corners"] == ["b"]
+
+
+def test_window_scope_validation():
+    assert sim._validate_mc_window_scope({}) == "pooled"
+    assert sim._validate_mc_window_scope({"window_scope": None}) == "pooled"
+    assert sim._validate_mc_window_scope({"window_scope": "per_corner"}) == "per_corner"
+    for bad in ("per-corner", "", 3, True, ["pooled"]):
+        with pytest.raises(sim.SimError, match="window_scope.*'pooled', 'per_corner'"):
+            sim._validate_mc_window_scope({"window_scope": bad})
 
 
 def test_rollup_measurements_by_corner_splits_per_originating_corner():
@@ -11742,6 +12060,7 @@ def test_run_sim_per_section_libs_alongside_a_models_lib_section(tmp_path, monke
     assert report["environment"]["models_lib_sha256"] == sim.sha256_file(
         str(models_lib)
     )
+    assert report["environment"]["models_lib_sha256_scope"] == "local"
 
 
 def test_run_sim_without_per_section_libs_omits_the_environment_field(
@@ -12913,7 +13232,7 @@ def test_expand_netlist_includes_keeps_relative_meaning_beside_env_include(
 def _control_for(kind, args):
     from types import SimpleNamespace
 
-    point = SimpleNamespace(supply_v={})
+    point = SimpleNamespace(supply_v={}, params={})
     return sim._corner_deck_control_lines(
         point=point,
         analysis={"kind": kind, "args": args},
@@ -13393,3 +13712,99 @@ def test_expect_netlist_identity_match_runs_and_mismatch_refuses(tmp_path, monke
         )
     assert stamp in str(err.value)
     assert "mismatch" in str(err.value)
+
+
+# --------------------------------------------------------------------------- #
+# Waveform-only recovered stepping (#3246)
+# --------------------------------------------------------------------------- #
+
+_GMIN_STEPPING_LOG = (
+    "Note: Starting dynamic gmin stepping\n"
+    "Warning: Dynamic gmin stepping failed\n"
+    "Note: Starting true gmin stepping\n"
+    "Note: True gmin stepping completed\n"
+    "Note: Transient op finished successfully\n"
+)
+
+
+def _capture_only_corner(
+    tmp_path, monkeypatch, *, points, log_text, analysis=None, options=None
+):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": analysis or {"kind": "tran", "args": "1n 1u"},
+            "measurements": [],
+            "options": {"waveforms": True, **(options or {})},
+        },
+    )
+    _stub_subprocess_run_with_waveform(monkeypatch, points=points, log_text=log_text)
+    report = sim.run_sim(str(request))
+    (corner,) = report["corners"]
+    return corner
+
+
+def test_capture_only_tran_recovers_when_waveform_reaches_stop_time(
+    tmp_path, monkeypatch
+):
+    corner = _capture_only_corner(
+        tmp_path,
+        monkeypatch,
+        points=[(0.0, 0.0), (5e-7, 0.5), (1e-6, 1.0)],
+        log_text=_GMIN_STEPPING_LOG,
+        options={"keep_artifacts": True},
+    )
+    assert corner["status"] == "pass"
+    stepping = [
+        d
+        for d in corner["diagnostics"]
+        if d["code"] in ("nonconvergence", "singular_matrix")
+    ]
+    assert stepping
+    assert all(d["severity"] == "warning" for d in stepping)
+    assert all("captured waveform" in d["message"] for d in stepping)
+    assert corner["artifacts"]["waveform"] is not None
+
+
+def test_capture_only_tran_stays_error_when_waveform_truncated(tmp_path, monkeypatch):
+    corner = _capture_only_corner(
+        tmp_path,
+        monkeypatch,
+        points=[(0.0, 0.0), (5e-7, 0.5)],
+        log_text=_GMIN_STEPPING_LOG,
+    )
+    assert corner["status"] == "error"
+
+
+def test_capture_only_tran_stays_error_with_abort_trailer(tmp_path, monkeypatch):
+    corner = _capture_only_corner(
+        tmp_path,
+        monkeypatch,
+        points=[(0.0, 0.0), (1e-6, 1.0)],
+        log_text=_GMIN_STEPPING_LOG + "tran simulation(s) aborted\n",
+    )
+    assert corner["status"] == "error"
+
+
+def test_capture_only_tran_fail_on_diagnostic_still_disqualifies(tmp_path, monkeypatch):
+    corner = _capture_only_corner(
+        tmp_path,
+        monkeypatch,
+        points=[(0.0, 0.0), (1e-6, 1.0)],
+        log_text=_GMIN_STEPPING_LOG,
+        options={"fail_on_diagnostic": ["nonconvergence"]},
+    )
+    assert corner["status"] == "inconclusive"
+
+
+def test_capture_only_non_tran_stays_error(tmp_path, monkeypatch):
+    corner = _capture_only_corner(
+        tmp_path,
+        monkeypatch,
+        points=[(0.0, 0.0), (1e6, 1.0)],
+        log_text=_GMIN_STEPPING_LOG,
+        analysis={"kind": "ac", "args": "dec 10 1 1meg"},
+    )
+    assert corner["status"] == "error"

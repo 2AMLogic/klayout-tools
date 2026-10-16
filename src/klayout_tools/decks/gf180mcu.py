@@ -455,9 +455,11 @@ variant -- confirmed by ``globalfoundries-pdk-libs-gf180mcu_fd_pv``'s
 ``top_via = via4`` when ``top_metal = metal5``) matches Option B's bottom
 plate landing on ``Metal4`` for that stack, the same stack the issue's own
 reproducer layout uses (``Metal4``/``FuseTop``/``Via4``/``Metal5``) -- so
-only Option B (``MIMTM.*``) is transcribed above; Option A's ``MIM.*`` rule
-set targets a different (3-metal-layer) process variant this deck does not
-model and is not duplicated here.
+only Option B (``MIMTM.*``) is transcribed above, and is the default for
+``klt extract``. Option A's ``MIM.*`` DRC rule set is not duplicated here, but
+its *extraction* is selectable (issue #2920): ``--deck-option mim_option=A``
+recognises the ``Metal2``/``FuseTop``/``Via2``/``Metal3`` stack and the
+``cap_mim_*_m2m3_noshield`` device names (see ``_MIM_OPTION_A_CAPACITORS``).
 
 Layer numbers (verified against ``google/globalfoundries-pdk-libs-gf180mcu_fd_pv``'s
 ``klayout/drc/rule_decks/main.drc`` layer derivations, e.g. ``comp =
@@ -498,10 +500,13 @@ alongside the already-transcribed ``via4 = get_polygons(41, 0)``):
 
 from __future__ import annotations
 
+import dataclasses
+
 from . import (
     BipolarDevice,
     CapacitorDevice,
     CapacitorFlavour,
+    CapacitorVariant,
     DerivedLayer,
     DiodeDevice,
     DrcRule,
@@ -2257,21 +2262,19 @@ UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {
 # #3429, a different pin: the DRC-side re-derivation cites `f6eeac7` against
 # the *DRC* rule decks, `klayout/tech/drc/...`, not the LVS ones below).
 #
-# **Deliberately still `c6d73a3`, not `f6eeac7` (issue #3429, 2026-10-16).**
-# Unlike the DRC-side constant above, the LVS rule decks this table
-# transcribes did not survive the `c6d73a3` -> `f6eeac7` re-pin unchanged:
-# `libs.tech/klayout/lvs/rule_decks/` moved to `libs.tech/klayout/tech/lvs/
-# rule_decks/` and `res_derivations.lvs` now splits every poly resistor into
-# `*_sub`/`*_nwell` body variants (e.g. `npolyf_u_layer` became
-# `npolyf_u_sub_layer`/`npolyf_u_nwell_layer`), `mimcap_derivations.lvs`
-# gates the virtual bottom plate on `MIM_OPTION`, and the `metal1`/`metaltop`
-# terminals became `metal1_con`/`metaltop_con` in the diode/general
-# derivations. None of that has been re-checked against this table's device
-# entries, so the pin keeps naming the tree they were actually verified
-# against. Retire this note (and bump the constant) once the follow-up
-# re-verification lands.
+# **Re-pinned from `c6d73a3` to `f6eeac7` (issue #3540, 2026-10-16).** The LVS
+# rule decks did not survive the #3429 re-pin unchanged (`libs.tech/klayout/lvs/
+# rule_decks/` moved to `libs.tech/klayout/tech/lvs/rule_decks/`, poly resistors
+# split into `*_sub`/`*_nwell` variants, the `metal1`/`metaltop` terminals became
+# `*_con`), so every entry below was re-read against `f6eeac7`.
 _GF180MCU_LVS_REPO = "google/globalfoundries-pdk-libs-gf180mcu_fd_pv"
-_GF180MCU_LVS_COMMIT = "c6d73a35f524070e85faff4a6a9eef49553ebc2b"
+# Re-pinned to open_pdks `f6eeac7` (issue #3540, child B of #3420): the LVS rule
+# decks moved to `libs.tech/klayout/tech/lvs/rule_decks/` and were re-read there
+# (entry-by-entry table: PR for #3540). Unlike the derivation comments above,
+# which describe the `c6d73a3` tree they were originally transcribed from, every
+# `source_path`/`rule_id` handed to `_gf180mcu_lvs_provenance` is verified
+# against `f6eeac7`.
+_GF180MCU_LVS_COMMIT = "f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7"
 
 
 def _gf180mcu_lvs_provenance(source_path: str, rule_id: str) -> RuleProvenance:
@@ -2289,18 +2292,14 @@ def _gf180mcu_lvs_provenance(source_path: str, rule_id: str) -> RuleProvenance:
 
 
 # The official KLayout LVS deck's own per-device-family file, following the
-# naming convention this module's own derivation comments above already
-# verify for three sibling families (`res_derivations.lvs`/
-# `res_extraction.lvs`, `diode_derivations.lvs`/`diode_extraction.lvs`,
-# `mimcap_derivations.lvs`/`mimcap_extraction.lvs`, all under
-# `libs.tech/klayout/lvs/rule_decks/`) -- `"mos_extraction.lvs"` for the MOS
-# family is inferred from that same, independently-verified convention
-# rather than read from a fetched file directly (unlike the three siblings
-# above, no `extract_devices(mos4(...))` snippet for gf180mcu is quoted
-# anywhere in this module), so treat this one `source_path` as
-# lower-confidence than the others below until independently re-verified
-# against a real fetched install.
-_GF180MCU_MOS_LVS_SOURCE_PATH = "libs.tech/klayout/lvs/rule_decks/mos_extraction.lvs"
+# naming convention of the sibling `res_`/`diode_`/`mimcap_` families, all under
+# `libs.tech/klayout/tech/lvs/rule_decks/`. Verified against the real
+# `mos_extraction.lvs` at `f6eeac7` (issue #3540): it holds the
+# `extract_devices(mos4('nfet_03v3'|'pfet_03v3'|'nfet_06v0'|'pfet_06v0', ...))`
+# calls these entries cite (previously inferred, lower-confidence).
+_GF180MCU_MOS_LVS_SOURCE_PATH = (
+    "libs.tech/klayout/tech/lvs/rule_decks/mos_extraction.lvs"
+)
 
 EXTRACTION_DECK = ExtractionDeck(
     active=(22, 0),  # Comp
@@ -2473,6 +2472,15 @@ EXTRACTION_DECK = ExtractionDeck(
             # mim_cap=cap_mim_1f0_m4m5_noshield` (or `...1f5...`) selects a
             # sibling density explicitly; omitting `--deck-option` keeps
             # today's `cap_mim_2f0_m4m5_noshield` default, byte-for-byte.
+            # `f6eeac7` (issue #3540): `mimcap_extraction.lvs` no longer branches
+            # on `MIM_OPTION`/`METAL_LEVEL` and names its devices `cap_mim_1f0fF`/
+            # `cap_mim_1f5fF`/`cap_mim_2f0fF` (so `provenance.rule_id` below is
+            # `cap_mim_2f0fF`); `MIM_OPTION` now only selects the virtual bottom
+            # plate in `mimcap_derivations.lvs` (default `'B'`, `topmin1_metal`,
+            # which is what this deck models for its Metal5 top). The
+            # `*_m4m5_noshield` names here are this deck's own extracted-netlist
+            # device names (the previous deck's names, kept for netlist
+            # stability); only the citation moved.
             flavour_option="mim_cap",
             flavours=(
                 CapacitorFlavour(
@@ -2495,12 +2503,19 @@ EXTRACTION_DECK = ExtractionDeck(
                 ),
             ),
             provenance=_gf180mcu_lvs_provenance(
-                "libs.tech/klayout/lvs/rule_decks/mimcap_extraction.lvs",
-                "cap_mim_2f0_m4m5_noshield",
+                "libs.tech/klayout/tech/lvs/rule_decks/mimcap_extraction.lvs",
+                "cap_mim_2f0fF",
             ),
         ),
     ),
     resistors=(
+        # `f6eeac7` (issue #3540): `res_derivations.lvs` splits every poly
+        # resistor into `*_sub` / `*_nwell` body variants (`W` => `sub` vs.
+        # `nwell_con`; `npolyf_u/s`, `ppolyf_u/s`, ...) under the same device
+        # name and value. This deck keeps ONE entry per device with
+        # `bulk_to_substrate=True`: an acknowledged approximation -- the
+        # resistance value and device name are identical either way, only the
+        # bulk terminal of a poly resistor drawn over Nwell differs.
         ResistorDevice(
             name="ppolyf_u",  # gf180mcu_fd_pr__ppolyf_u
             body=(30, 0),  # Poly2
@@ -2518,7 +2533,7 @@ EXTRACTION_DECK = ExtractionDeck(
             ),
             bulk_to_substrate=True,  # upstream extracts it with 'W' => sub
             provenance=_gf180mcu_lvs_provenance(
-                "libs.tech/klayout/lvs/rule_decks/res_extraction.lvs",
+                "libs.tech/klayout/tech/lvs/rule_decks/res_extraction.lvs",
                 "gf180mcu_fd_pr__ppolyf_u",
             ),
         ),
@@ -2561,7 +2576,7 @@ EXTRACTION_DECK = ExtractionDeck(
                 ),
             ),
             provenance=_gf180mcu_lvs_provenance(
-                "libs.tech/klayout/lvs/rule_decks/res_extraction.lvs",
+                "libs.tech/klayout/tech/lvs/rule_decks/res_extraction.lvs",
                 "gf180mcu_fd_pr__ppolyf_u_1k",
             ),
         ),
@@ -2577,7 +2592,7 @@ EXTRACTION_DECK = ExtractionDeck(
             marker=(110, 11),  # metal1_res
             sheet_rho_ohm_sq=0.09,  # res_extraction.lvs: resistor('rm1', 0.09, ...)
             provenance=_gf180mcu_lvs_provenance(
-                "libs.tech/klayout/lvs/rule_decks/res_extraction.lvs",
+                "libs.tech/klayout/tech/lvs/rule_decks/res_extraction.lvs",
                 "gf180mcu_fd_pr__rm1",
             ),
         ),
@@ -2587,7 +2602,7 @@ EXTRACTION_DECK = ExtractionDeck(
             marker=(110, 12),  # metal2_res
             sheet_rho_ohm_sq=0.09,  # res_extraction.lvs: resistor('rm2', 0.09, ...)
             provenance=_gf180mcu_lvs_provenance(
-                "libs.tech/klayout/lvs/rule_decks/res_extraction.lvs",
+                "libs.tech/klayout/tech/lvs/rule_decks/res_extraction.lvs",
                 "gf180mcu_fd_pr__rm2",
             ),
         ),
@@ -2597,7 +2612,7 @@ EXTRACTION_DECK = ExtractionDeck(
             marker=(110, 13),  # metal3_res
             sheet_rho_ohm_sq=0.09,  # res_extraction.lvs: resistor('rm3', 0.09, ...)
             provenance=_gf180mcu_lvs_provenance(
-                "libs.tech/klayout/lvs/rule_decks/res_extraction.lvs",
+                "libs.tech/klayout/tech/lvs/rule_decks/res_extraction.lvs",
                 "gf180mcu_fd_pr__rm3",
             ),
         ),
@@ -2624,7 +2639,7 @@ EXTRACTION_DECK = ExtractionDeck(
                 ResistorFlavour(value="30K", name="tm30k", sheet_rho_ohm_sq=0.0095),
             ),
             provenance=_gf180mcu_lvs_provenance(
-                "libs.tech/klayout/lvs/rule_decks/res_extraction.lvs",
+                "libs.tech/klayout/tech/lvs/rule_decks/res_extraction.lvs",
                 "gf180mcu_fd_pr__tm9k",
             ),
         ),
@@ -2657,7 +2672,7 @@ EXTRACTION_DECK = ExtractionDeck(
                 (127, 5),  # DRC_BJT /
             ),
             provenance=_gf180mcu_lvs_provenance(
-                "libs.tech/klayout/lvs/rule_decks/diode_extraction.lvs",
+                "libs.tech/klayout/tech/lvs/rule_decks/diode_extraction.lvs",
                 "gf180mcu_fd_pr__diode_nd2ps_06v0",
             ),
         ),
@@ -2680,7 +2695,7 @@ EXTRACTION_DECK = ExtractionDeck(
                 (12, 0),  # DNWELL -> the `_dn` deep-nwell variant
             ),
             provenance=_gf180mcu_lvs_provenance(
-                "libs.tech/klayout/lvs/rule_decks/diode_extraction.lvs",
+                "libs.tech/klayout/tech/lvs/rule_decks/diode_extraction.lvs",
                 "gf180mcu_fd_pr__diode_pd2nw_06v0",
             ),
         ),
@@ -2698,8 +2713,8 @@ EXTRACTION_DECK = ExtractionDeck(
     # drawn entirely inside `Dualgate` (55/0) is gf180mcu's 5V/6V thick-oxide
     # flavour, whose real upstream device-class names are `nfet_06v0`/
     # `pfet_06v0` (same `mos_extraction.lvs` source as the default pair
-    # above -- see `_GF180MCU_MOS_LVS_SOURCE_PATH`'s own lower-confidence
-    # note). `MOSFlavour.flavour="06v0"` is the key `pdk_models.py`'s
+    # above -- see `_GF180MCU_MOS_LVS_SOURCE_PATH`'s verification note).
+    # `MOSFlavour.flavour="06v0"` is the key `pdk_models.py`'s
     # `_MOS_MODEL_FLAVOURS[("gf180mcu", "gf180mcu")]` table binds to those
     # two real subcircuit names under `--pdk` -- see that module's docstring
     # for the verified-provenance citation (`nfet_06v0` is independently
@@ -2712,6 +2727,73 @@ EXTRACTION_DECK = ExtractionDeck(
             flavour="06v0",
             description="gf180mcu 5V/6V thick-oxide domain (Dualgate 55/0)",
         ),
+    ),
+)
+
+
+# MIM option A (issue #2920): bottom plate Metal2, top plate FuseTop under
+# Metal3, joined to Metal3 by Via2 *inside* FuseTop. Selected with
+# `--deck-option mim_option=A`; the deck's own `capacitors` above are option B
+# (the default, byte-for-byte unchanged). Recognition mirrors the PDK's
+# `mimcap_derivations.lvs` (`mim_virtual = fusetop.sized(1.06um) &
+# metal2.interacting(fusetop) - (efuse_mk | plfuse)`, `fuse_cap = fusetop
+# interacting cap_mk, mim_l_mk, - (efuse_mk | plfuse)`) and the device names
+# and densities come from `mimcap_extraction.lvs`'s `MIM_OPTION 'A'` branch
+# (`cap_mim_{1f0,1f5,2f0}_m2m3_noshield`); the area/perimeter coefficients are
+# the same `sm141064.ngspice` cards as option B's. The top-plate Via2 is cut
+# from the generic Via2 layer where it overlaps Metal2 by the existing
+# `top_plate_via` machinery, the equivalent of the runset's `via2_n_cap`.
+_MIM_OPTION_A_CAPACITORS = (
+    CapacitorDevice(
+        name="cap_mim_2f0_m2m3_noshield",
+        top_plate=(75, 0),  # FuseTop
+        top_plate_requires=(
+            (117, 5),  # CAP_MK
+            (117, 10),  # MIM_L_MK
+        ),
+        top_plate_excludes=(
+            (80, 5),  # efuse_mk
+            (125, 5),  # plfuse
+        ),
+        bottom_plate=(36, 0),  # Metal2
+        bottom_plate_oversize_um=1.06,
+        area_cap_f_um2=1.99e-15,
+        perim_cap_f_um=2.383e-16,
+        top_plate_via=(38, 0),  # Via2
+        top_plate_via_metal=(42, 0),  # Metal3
+        flavour_option="mim_cap",
+        flavours=(
+            CapacitorFlavour(
+                value="cap_mim_1f0_m2m3_noshield",
+                name="cap_mim_1f0_m2m3_noshield",
+                area_cap_f_um2=9.87e-16,
+                perim_cap_f_um=3.3e-16,
+            ),
+            CapacitorFlavour(
+                value="cap_mim_1f5_m2m3_noshield",
+                name="cap_mim_1f5_m2m3_noshield",
+                area_cap_f_um2=1.47e-15,
+                perim_cap_f_um=3.79e-16,
+            ),
+            CapacitorFlavour(
+                value="cap_mim_2f0_m2m3_noshield",
+                name="cap_mim_2f0_m2m3_noshield",
+                area_cap_f_um2=1.99e-15,
+                perim_cap_f_um=2.383e-16,
+            ),
+        ),
+        provenance=_gf180mcu_lvs_provenance(
+            "libs.tech/klayout/lvs/rule_decks/mimcap_extraction.lvs",
+            "cap_mim_2f0_m2m3_noshield",
+        ),
+    ),
+)
+
+EXTRACTION_DECK = dataclasses.replace(
+    EXTRACTION_DECK,
+    capacitor_variants=(
+        CapacitorVariant("mim_option", "B", EXTRACTION_DECK.capacitors),
+        CapacitorVariant("mim_option", "A", _MIM_OPTION_A_CAPACITORS),
     ),
 )
 
@@ -2770,25 +2852,24 @@ PARASITICS = ParasiticsDeck(
         LayerRC(
             sheet_res_ohm_sq=0.09, cap_area_ff_um2=0.007602, cap_perim_ff_um=0.028153
         ),
-        # Metal5 (issue #547, corrected by #572), the top metal of this
-        # 5-level stack. sheet from the resolved, pre-built
+        # Metal5 (issue #547, revised by #572 and again by #3540), the top
+        # metal of this 5-level stack. sheet from the resolved, pre-built
         # `gf180mcuD.tech` for the pinned PDK commit
-        # c6d73a35f524070e85faff4a6a9eef49553ebc2b (nominal `variants ()`
-        # corner block, line 3050): `resist (allm5)/metal5    60` (60
-        # milliohm/sq = 0.06 ohm/sq), the `else` (non-thick-metal) branch --
-        # not the `#ifdef METALS5` / `THICKMET0P9 || THICKMET1P1` branch of
-        # the generic templated `gf180mcu.tech` (40 milliohm/sq), which a
-        # prior curation (#571) mistakenly used by manually resolving that
-        # file's unresolved macros instead of reading the shipped,
-        # pre-resolved file for this exact pinned commit. **As of the
-        # open_pdks `f6eeac7` re-pin (#3429, 2026-10-16) that same file's
-        # nominal block reads 40 milliohm/sq here (49/31 for the other two
-        # corner blocks, was 70/50)**; this value is deliberately left at
-        # the verified `c6d73a3` figure until #3540 decides it. area/perim from
-        # `defaultareacap`/`defaultperimeter` allm5 metal5 (5.798 aF/um^2,
-        # 30.386 aF/um) -- unconditional across every THICKMET option.
+        # f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7 (nominal `variants ()`
+        # corner block, line 3347): `resist (allm5)/metal5    40` (40
+        # milliohm/sq = 0.04 ohm/sq). At the earlier pin
+        # c6d73a35f524070e85faff4a6a9eef49553ebc2b that same resolved row read
+        # 60 (the other two corner blocks 70 -> 49 and 50 -> 31), which #572
+        # adopted over #571's 40 taken from the unresolved generic
+        # `gf180mcu.tech`; f6eeac7's resolved file now carries 40, matching
+        # the value #572 rejected, so 0.04 here is a re-pin delta rather than
+        # a return to #571's derivation. No other `resist`/`defaultareacap`/
+        # `defaultperimeter`/`defaultoverlap allm[2-5]` row changed between
+        # the two pins. area/perim from `defaultareacap`/`defaultperimeter`
+        # allm5 metal5 (5.798 aF/um^2, 30.386 aF/um) -- unconditional across
+        # every THICKMET option.
         LayerRC(
-            sheet_res_ohm_sq=0.06, cap_area_ff_um2=0.005798, cap_perim_ff_um=0.030386
+            sheet_res_ohm_sq=0.04, cap_area_ff_um2=0.005798, cap_perim_ff_um=0.030386
         ),
     ),
     # `defaultoverlap` vertical plate-coupling coefficients (issue #760,
@@ -2797,7 +2878,8 @@ PARASITICS = ParasiticsDeck(
     # table has `len(metals) - 1` = 4 entries for this 5-level stack.
     #
     # Transcribed from the resolved, pre-built `gf180mcuD.tech` for the
-    # pinned PDK commit c6d73a35f524070e85faff4a6a9eef49553ebc2b, nominal
+    # pinned PDK commit f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7 (values
+    # re-checked unchanged from c6d73a3, issue #3540), nominal
     # `variants ()` corner block -- the same source and corner Metal5's
     # sheet resistance above is cited from (issue #572), chosen over the
     # generic `gf180mcu.tech` because only the resolved file has the

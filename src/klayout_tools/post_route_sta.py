@@ -229,7 +229,7 @@ import json
 import os
 import re
 import subprocess  # noqa: F401 -- tests patch post_route_sta.subprocess.run
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from typing import Any
 
@@ -626,6 +626,7 @@ def run_sta(
     )
     propagated_clock = _validate_propagated_clock(request["constraints"], has_def)
 
+    spef_map: dict[str, str] | None = None
     if has_verilog:
         if request.get("spef") is not None:
             raise PostRouteStaError(
@@ -642,7 +643,15 @@ def run_sta(
             )
         geometry_source = "netlist_estimate"
     else:
-        spef_path = _resolve_spef(request.get("spef"), request_dir)
+        spef_field = request.get("spef")
+        if isinstance(spef_field, dict):
+            # Issue #3228: the map form (`{"min"|"nom"|"max": path}`) is the
+            # interconnect axis of a liberty x interconnect matrix; there is
+            # no single hoistable `spef_path` for it.
+            spef_map = _resolve_spef_map(spef_field, request_dir)
+            spef_path = None
+        else:
+            spef_path = _resolve_spef(spef_field, request_dir)
         geometry_source = _validate_geometry_source(request.get("geometry_source"))
 
     output_dir = os.path.join(request_dir, ".klt", "sta")
@@ -665,6 +674,7 @@ def run_sta(
         def_path=def_path,
         verilog_path=verilog_path,
         spef_path=spef_path,
+        spef_map=spef_map,
         repo_root=env_provenance.find_repo_root(request_dir),
     )
     with report_paths.scrubbing_errors():
@@ -690,6 +700,7 @@ def run_sta(
             input_transitions=input_transitions,
             report_ports=report_ports,
             spef_path=spef_path,
+            spef_map=spef_map,
             wire_load_model=wire_load_model,
             wire_load_mode=wire_load_mode,
             propagated_clock=propagated_clock,
@@ -728,11 +739,15 @@ class _ReportPaths:
         def_path: dict[str, Any] | None,
         verilog_path: dict[str, Any] | None,
         spef_path: dict[str, Any] | None,
+        spef_paths: dict[str, dict[str, Any]] | None,
         replacements: list[tuple[str, str]],
     ) -> None:
         self.def_path = def_path
         self.verilog_path = verilog_path
         self.spef_path = spef_path
+        # Issue #3228: per-interconnect-corner envelopes of a map-form
+        # `request.spef` (`None` otherwise); `spef_path` is `None` then.
+        self.spef_paths = spef_paths
         self._replacements = replacements
 
     @classmethod
@@ -743,13 +758,18 @@ class _ReportPaths:
         verilog_path: str | None,
         spef_path: str | None,
         repo_root: str | None,
+        spef_map: dict[str, str] | None = None,
     ) -> _ReportPaths:
         envelopes: dict[str, dict[str, Any] | None] = {}
         labels: dict[str, str] = {}
+        spef_fields = [
+            (f"spef_path.{key}", path) for key, path in (spef_map or {}).items()
+        ]
         for field, engine_path in (
             ("def_path", def_path),
             ("verilog_path", verilog_path),
             ("spef_path", spef_path),
+            *spef_fields,
         ):
             if engine_path is None:
                 envelopes[field] = None
@@ -768,10 +788,17 @@ class _ReportPaths:
         replacements = sorted(
             labels.items(), key=lambda item: len(item[0]), reverse=True
         )
+        spef_envelopes: dict[str, dict[str, Any]] = {}
+        for key in spef_map or {}:
+            # Map-form entries always carry a path, so never None.
+            spef_envelope = envelopes[f"spef_path.{key}"]
+            assert spef_envelope is not None
+            spef_envelopes[key] = spef_envelope
         return cls(
             def_path=envelopes["def_path"],
             verilog_path=envelopes["verilog_path"],
             spef_path=envelopes["spef_path"],
+            spef_paths=spef_envelopes or None,
             replacements=replacements,
         )
 
@@ -823,6 +850,7 @@ def _dispatch_sta(
     input_transitions: dict[str, float] | None,
     report_ports: list[str] | None,
     spef_path: str | None,
+    spef_map: dict[str, str] | None,
     wire_load_model: str | None,
     wire_load_mode: str | None,
     propagated_clock: bool,
@@ -838,9 +866,11 @@ def _dispatch_sta(
     # resolved up to this point (`def`/`verilog` are loaded fresh in *every*
     # corner's own OpenSTA session, never modified in between), and this is
     # the one branch point where their responses actually diverge.
-    if requested_corners is not None:
+    # Issue #3228: a map-form `spef` always takes the `corners[]` shape, over
+    # the one scalar (or nominal) liberty corner when no list was given.
+    if requested_corners is not None or spef_map is not None:
         return _run_multi_corner(
-            requested_corners,
+            requested_corners if requested_corners is not None else [requested_corner],
             cell_library=cell_library,
             pdk_variant=pdk_variant,
             pdk_root=pdk_root,
@@ -859,6 +889,7 @@ def _dispatch_sta(
             input_transitions=input_transitions,
             report_ports=report_ports,
             spef_path=spef_path,
+            spef_map=spef_map,
             wire_load_model=wire_load_model,
             wire_load_mode=wire_load_mode,
             propagated_clock=propagated_clock,
@@ -1194,7 +1225,7 @@ def _run_corner_session(
 
 
 def _run_multi_corner(
-    corners: list[str],
+    corners: Sequence[str | None],
     *,
     cell_library: str,
     pdk_variant: str | None,
@@ -1214,6 +1245,7 @@ def _run_multi_corner(
     input_transitions: dict[str, float] | None,
     report_ports: list[str] | None,
     spef_path: str | None,
+    spef_map: dict[str, str] | None,
     wire_load_model: str | None,
     wire_load_mode: str | None,
     propagated_clock: bool,
@@ -1252,13 +1284,27 @@ def _run_multi_corner(
     error instead of a `corners` array that silently characterizes more than
     one piece of geometry, the exact failure mode a caller's own hand-rolled
     N-subprocess loop could never itself detect.
+
+    Issue #3228: a map-form ``request.spef`` (``spef_map``, already in
+    canonical min/nom/max order) adds an interconnect axis -- one session per
+    liberty corner (request order) x supplied interconnect key. Each entry
+    then also carries ``interconnect_corner`` and its own ``spef_path``, and
+    the top-level ``spef_path`` is ``null``.
     """
     input_hash_before = sha256_file(input_path)
 
     engine_version = _openroad_version()
     shared_pdk_info: dict[str, Any] | None = None
     corner_entries: list[dict[str, Any]] = []
-    for corner_name in corners:
+    spef_axis: list[tuple[str | None, str | None]] = (
+        list(spef_map.items()) if spef_map is not None else [(None, spef_path)]
+    )
+    for corner_name, (interconnect, pair_spef) in (
+        (c, s) for c in corners for s in spef_axis
+    ):
+        script_tag = f"{basename}__{corner_name or 'nominal'}"
+        if interconnect is not None:
+            script_tag += f"__{interconnect}"
         corner_fields, resolution = _run_corner_session(
             corner_name=corner_name,
             cell_library=cell_library,
@@ -1277,20 +1323,28 @@ def _run_multi_corner(
             input_transition_ns=input_transition_ns,
             input_transitions=input_transitions,
             report_ports=report_ports,
-            spef_path=spef_path,
+            spef_path=pair_spef,
             wire_load_model=wire_load_model,
             wire_load_mode=wire_load_mode,
             propagated_clock=propagated_clock,
             output_dir=output_dir,
-            script_tag=f"{basename}__{corner_name}",
+            script_tag=script_tag,
             scrub=report_paths.scrub,
         )
         if shared_pdk_info is None:
             shared_pdk_info = resolution["pdk_info"]
         deck_name = f"{cell_library}__{resolution['corner']}"
+        axis_fields: dict[str, Any] = {}
+        if interconnect is not None:
+            assert report_paths.spef_paths is not None
+            axis_fields = {
+                "interconnect_corner": interconnect,
+                "spef_path": report_paths.spef_paths[interconnect],
+            }
         corner_entries.append(
             {
                 "corner": resolution["corner"],
+                **axis_fields,
                 **corner_fields,
                 "deck": _deck_block(deck_name, resolution["liberty_path"]),
             }
@@ -1301,7 +1355,7 @@ def _run_multi_corner(
         raise PostRouteStaError(
             "the geometry backing this multi-corner characterization "
             f"({input_path}) changed while characterizing corners "
-            + ", ".join(corners)
+            + ", ".join(c or "nominal" for c in corners)
             + " -- a klt sta corners response is only meaningful when every "
             "corner analyses the identical geometry, so this run cannot be "
             "reported"
@@ -1495,6 +1549,38 @@ def _resolve_verilog(verilog_field: Any, request_dir: str) -> str:
             f"could not read verilog '{verilog_field}': {exc}"
         ) from exc
     return os.path.abspath(path)
+
+
+_INTERCONNECT_CORNERS = ("min", "nom", "max")
+
+
+def _resolve_spef_map(spef_field: dict[str, Any], request_dir: str) -> dict[str, str]:
+    """Issue #3228: validate map-form ``request.spef`` and return the engine
+    paths keyed by interconnect corner in canonical min/nom/max order."""
+    if not spef_field:
+        raise PostRouteStaError(
+            "request.spef must be a non-empty object when given as a map"
+        )
+    unknown = [key for key in spef_field if key not in _INTERCONNECT_CORNERS]
+    if unknown:
+        raise PostRouteStaError(
+            f"request.spef has unknown interconnect corner '{unknown[0]}' "
+            f"-- allowed keys are {', '.join(_INTERCONNECT_CORNERS)}"
+        )
+    resolved: dict[str, str] = {}
+    for key in _INTERCONNECT_CORNERS:
+        if key not in spef_field:
+            continue
+        value = spef_field[key]
+        if not isinstance(value, str) or not value:
+            raise PostRouteStaError(
+                f"request.spef.{key} must be a non-empty string when given"
+            )
+        path = value if os.path.isabs(value) else os.path.join(request_dir, value)
+        if not os.path.isfile(path):
+            raise PostRouteStaError(f"spef not found for request.spef.{key}: {value}")
+        resolved[key] = os.path.abspath(path)
+    return resolved
 
 
 def _resolve_spef(spef_field: Any, request_dir: str) -> str | None:
@@ -3085,11 +3171,13 @@ def _port_check_error_message(rows: list[tuple[str, str, str]]) -> str:
             )
         else:
             details.append(f"{field}: {problem}")
-    prefix = (
-        "constraints.report_ports rejected"
-        if all(side == "report" for side, _, _ in rows)
-        else "per-port I/O delay constraint(s) rejected"
-    )
+    sides = {side for side, _, _ in rows}
+    if sides == {"report"}:
+        prefix = "constraints.report_ports rejected"
+    elif sides == {"input_transition"}:
+        prefix = "constraints.input_transitions rejected"
+    else:
+        prefix = "per-port I/O delay constraint(s) rejected"
     return f"{prefix}: " + "; ".join(details)
 
 

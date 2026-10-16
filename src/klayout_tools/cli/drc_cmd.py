@@ -102,7 +102,7 @@ def run(args: argparse.Namespace) -> int:
             args = _apply_request(args)
         report = _run(args)
     except DrcError as exc:
-        return emit_error("drc", str(exc), args.format)
+        return emit_error("drc", str(exc), args.format, code=exc.code)
     except pdk_module.PdkNotFoundError as exc:
         return emit_error("drc", str(exc), args.format)
 
@@ -216,6 +216,8 @@ _REQUEST_FIELD_DESTS = {
     "expect_rule_categories": "expect_rule_categories",
     "expect_rule_categories_file": "expect_rule_categories_file",
     "min_klayout_version": "min_klayout_version",
+    "negative_control": "negative_control",
+    "negative_control_categories": "negative_control_categories",
     "pdk": "pdk",
     "pdk_root": "pdk_root",
     "rules": "rules",
@@ -285,6 +287,10 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             # directory, like every other path field.
             "expect_rule_categories_file": _path("expect_rule_categories_file"),
             "min_klayout_version": _str("min_klayout_version"),
+            # Issue #3076: resolved against the request document's own
+            # directory, like every other path field.
+            "negative_control": _path("negative_control"),
+            "negative_control_categories": _str("negative_control_categories"),
             "pdk": _str("pdk"),
             "pdk_root": _path("pdk_root"),
             "rules": _request_rules(request),
@@ -365,6 +371,8 @@ def _run(args: argparse.Namespace) -> dict:
             expected_rule_categories=args.expect_rule_categories,
             min_klayout_version=args.min_klayout_version,
             expected_rule_category_names=_expected_rule_category_names(args),
+            negative_control=args.negative_control,
+            negative_control_categories=_negative_control_categories(args),
         )
 
     if not args.deck:
@@ -382,6 +390,22 @@ def _run(args: argparse.Namespace) -> dict:
         rules=selectors,
         waivers_file=args.waivers,
     )
+
+
+def _negative_control_categories(args: argparse.Namespace) -> list[str] | None:
+    """Split ``--negative-control-categories`` (issue #3076) into names;
+    refused without ``--negative-control`` rather than silently ignored."""
+    raw = args.negative_control_categories
+    if raw is None:
+        return None
+    if args.negative_control is None:
+        raise DrcError(
+            "--negative-control-categories requires --negative-control <layout>"
+        )
+    names = sorted({name.strip() for name in raw.split(",") if name.strip()})
+    if not names:
+        raise DrcError("--negative-control-categories names no category")
+    return names
 
 
 def _expected_rule_category_names(args: argparse.Namespace) -> list[str] | None:
