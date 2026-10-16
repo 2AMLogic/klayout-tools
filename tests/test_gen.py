@@ -2385,6 +2385,110 @@ def test_mos_array_interior_channel_is_drc_clean(tmp_path, both_pdk_root):
             assert drc_report["status"] == "clean", drc_report["violations"]
 
 
+# `pitch_x_um`/`pitch_y_um` (issue #3299, Phase 1): explicit pitch override,
+# clamped up to the legal minimum.
+
+
+def _mos_array_pitch_request(tmp_path, pdk_root, name, **params):
+    return {
+        "generator": "mos_array",
+        "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+        "params": {"rows": 2, "cols": 3, "dummy": 0, **params},
+        "options": {"output": str(tmp_path / f"{name}.gds")},
+    }
+
+
+def test_mos_array_default_pitch_override_output_unchanged(tmp_path, pdk_root):
+    implicit = generate(_mos_array_pitch_request(tmp_path, pdk_root, "implicit"))
+    explicit = generate(
+        _mos_array_pitch_request(
+            tmp_path, pdk_root, "explicit", pitch_x_um=0.0, pitch_y_um=0.0
+        )
+    )
+    _assert_gds_geometry_equal(tmp_path / "implicit.gds", tmp_path / "explicit.gds")
+    assert "pitch" not in implicit["drc_hints"]
+    assert "pitch" not in explicit["drc_hints"]
+    assert implicit["warnings"] == explicit["warnings"]
+
+
+def test_mos_array_pitch_override_widens_and_reports_effective_pitch(
+    tmp_path, pdk_root
+):
+    base = generate(_mos_array_pitch_request(tmp_path, pdk_root, "base"))
+    wide = generate(
+        _mos_array_pitch_request(
+            tmp_path, pdk_root, "wide", pitch_x_um=50.0, pitch_y_um=60.0
+        )
+    )
+    base_w = base["bbox_um"]["x1"] - base["bbox_um"]["x0"]
+    wide_w = wide["bbox_um"]["x1"] - wide["bbox_um"]["x0"]
+    base_h = base["bbox_um"]["y1"] - base["bbox_um"]["y0"]
+    wide_h = wide["bbox_um"]["y1"] - wide["bbox_um"]["y0"]
+    pitch = wide["drc_hints"]["pitch"]
+    assert pitch["col_pitch_um"] == pytest.approx(50.0)
+    assert pitch["row_pitch_um"] == pytest.approx(60.0)
+    assert pitch["pitch_x_clamped"] is False
+    assert pitch["pitch_y_clamped"] is False
+    # cols=3 -> 2 column gaps; rows=2 -> 1 row gap.
+    assert wide_w == pytest.approx(base_w + 2 * (50.0 - pitch["min_col_pitch_um"]))
+    assert wide_h == pytest.approx(base_h + (60.0 - pitch["min_row_pitch_um"]))
+
+
+def test_mos_array_sub_minimum_pitch_is_clamped_and_reported(tmp_path, pdk_root):
+    base = generate(_mos_array_pitch_request(tmp_path, pdk_root, "base"))
+    clamped = generate(
+        _mos_array_pitch_request(
+            tmp_path, pdk_root, "clamped", pitch_x_um=0.1, pitch_y_um=0.1
+        )
+    )
+    pitch = clamped["drc_hints"]["pitch"]
+    assert pitch["pitch_x_clamped"] is True
+    assert pitch["pitch_y_clamped"] is True
+    assert pitch["col_pitch_um"] == pytest.approx(pitch["min_col_pitch_um"])
+    assert pitch["row_pitch_um"] == pytest.approx(pitch["min_row_pitch_um"])
+    assert len(clamped["warnings"]) == 2
+    # Clamped to the minimum == the default geometry.
+    _assert_gds_geometry_equal(tmp_path / "base.gds", tmp_path / "clamped.gds")
+    assert base["bbox_um"] == clamped["bbox_um"]
+
+
+def test_mos_array_pitch_override_composes_with_interior_channel(tmp_path, pdk_root):
+    report = generate(
+        _mos_array_pitch_request(
+            tmp_path,
+            pdk_root,
+            "both",
+            pitch_x_um=40.0,
+            pitch_y_um=40.0,
+            interior_channel_um=2.0,
+        )
+    )
+    pitch = report["drc_hints"]["pitch"]
+    # The channel is added on top of the effective (overridden) base pitch.
+    assert pitch["col_pitch_um"] == pytest.approx(42.0)
+    assert pitch["row_pitch_um"] == pytest.approx(42.0)
+    assert len(report["navigable_regions"]) == 3  # 1 row gap + 2 column gaps
+
+
+@pytest.mark.parametrize("name", ["pitch_x_um", "pitch_y_um"])
+def test_mos_array_negative_pitch_rejected(tmp_path, pdk_root, name):
+    with pytest.raises(GenError):
+        generate(_mos_array_pitch_request(tmp_path, pdk_root, "neg", **{name: -1.0}))
+
+
+def test_mos_array_pitch_at_clamp_boundary_is_drc_clean(tmp_path, pdk_root):
+    """A sub-minimum request is clamped to the dense boundary pitch, which
+    must itself be DRC-clean."""
+    output = tmp_path / "dense.gds"
+    request = _mos_array_pitch_request(
+        tmp_path, pdk_root, "dense", pitch_x_um=0.1, pitch_y_um=0.1
+    )
+    request["params"]["dummy"] = 1
+    generate(request)
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
 # --- res_array --------------------------------------------------------------- #
 
 

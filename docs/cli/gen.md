@@ -857,6 +857,31 @@ with their `.drc.json` reports checked in alongside).
 | `ring_gap_offset_um` | double | `0.0`         | Slide the opening off its side's midpoint (µm) — e.g. onto the row of device ports a route needs to reach. |
 | `ring_padding_um` | double | `0.5`            | Padding between the array's own shared-footprint box (`well_box_um`) and the guard ring's inner edge (µm), when `add_guard_ring` is set. Must be `>= 0`. |
 | `interior_channel_um` | double | `0.0`         | Extra gap (µm) reserved between adjacent rows/columns, on top of the fixed inter-device spacing, so an interior unit device's pin has a navigable path to the array's edge (issue #1531). Must be `>= 0`. `0.0` (the default) is a strict no-op — byte-for-byte identical geometry to every request that predates this param. A positive value widens `row_pitch`/`col_pitch` by that amount and reports the resulting inter-row/inter-column gap bands in the response's `navigable_regions` field (`{"x0_um", "y0_um", "x1_um", "y1_um"}` rectangles). `klt gen-compose` (issue #1835) subtracts a block's own declared `navigable_regions` from its obstacle bbox before its own overlap check runs, so a `waypoints_um` backbone that stays inside the declared channel is no longer rejected as crossing its own block. |
+| `pitch_x_um`/`pitch_y_um` | double | `0.0`      | Override the column/row pitch (µm) between adjacent unit devices (issue #3299). Must be `>= 0`. `0.0` (the default) means no override — byte-for-byte identical geometry to every request that predates these params. The default pitch is already the legal minimum (unit extent + the fixed `0.4` µm same-layer spacing), so an override can only *widen* it: a value below that minimum is **clamped up** to it, never emitted as DRC-violating geometry. When either is set, `drc_hints.pitch` reports `col_pitch_um`/`row_pitch_um` (effective), `min_col_pitch_um`/`min_row_pitch_um` and `pitch_x_clamped`/`pitch_y_clamped`, and a clamp adds a `warnings` entry. Composes with `interior_channel_um`: the channel is added on top of the effective pitch. |
+
+#### Tighter than the generator allows: draw your own primitives
+
+`mos_array` places every unit device as a fully isolated cell, so its pitch
+cannot go below the legal minimum above (no shared source/drain abutment or
+mirroring yet — tracked separately from #3299). When a design needs a denser
+array than that, hand-draw the devices with `klayout.db` (the same Python API
+`klt` uses), then run the same headless gates on the result:
+
+```python
+import klayout.db as db
+
+layout = db.Layout()
+layout.dbu = 0.001
+top = layout.create_cell("DENSE_ARRAY")
+# ... insert your own active/poly/contact/metal shapes, e.g.
+#     top.shapes(layout.layer(<layer>, <datatype>)).insert(db.DBox(...))
+layout.write("dense_array.gds")
+```
+
+Then check it with [`klt drc`](drc.md), [`klt extract`](extract.md) (confirm
+the device count) and [`klt lvs`](lvs.md) against the schematic. DRC can pass
+while connectivity is wrong when diffusion is shared, so treat extract/LVS as
+the gate for any hand-abutted layout.
 
 ### `res_array` (family 2: resistor/capacitor array)
 
