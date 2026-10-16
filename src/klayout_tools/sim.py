@@ -1679,6 +1679,8 @@ def _required_save_vectors(
                         if vector not in vectors:
                             vectors.append(vector)
     return vectors
+
+
 #: ``options.ngspice_options`` (issue #3111): the solver/convergence
 #: ``.options`` names a request may set. ngspice silently ignores an unknown
 #: ``.options`` name, so a free-form map would hide a typo as "no effect";
@@ -6587,8 +6589,8 @@ def _run_corner(
                     artifacts["waveform"] = waveform_path
                     if analysis.get("kind") == "noise":
                         with open(waveform_path, encoding="utf-8") as fh:
-                            noise_fields["noise_representation"] = (
-                                noise_representation(json.load(fh))
+                            noise_fields["noise_representation"] = noise_representation(
+                                json.load(fh)
                             )
             except (SimError, ValueError) as exc:
                 # Generic defensive catch, not expected in normal operation:
