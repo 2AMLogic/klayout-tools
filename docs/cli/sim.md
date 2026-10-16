@@ -840,7 +840,11 @@ status read therefore cannot say how far through the grid a running job is, and
 `klt` does not estimate one from elapsed time. That needs the fleet to publish
 progress first (tracked against 2AMLogic/2am).
 
-Collecting a finished `--submit-only` job's report is `--attach`, below.
+`--submit-only` also writes the [submit receipt](#submit-receipt-and-client-termination-3065)
+(`batch-receipt.json`, `state: null`) into the artifacts directory, so the job
+id survives the caller. Collecting a finished `--submit-only` job's report is
+`--attach`, below: the full flow is `--submit-only` → `--job-status` (repeat) →
+`--attach <job_id>`, and an `interrupted` job is reported, never re-launched.
 
 ### Waiting, job id, and re-attaching ([#2978](https://github.com/2AMLogic/klayout-tools/issues/2978))
 
