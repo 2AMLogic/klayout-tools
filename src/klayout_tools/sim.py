@@ -141,6 +141,8 @@ from .remote_launcher import RemoteLaunchError as RemoteLaunchError
 from .sim_batch import _build_batch_job_spec as _build_batch_job_spec
 from .sim_batch import _resolve_batch_config as _resolve_batch_config
 from .sim_batch import _run_batch, _run_batch_fleet
+from .sim_batch_async import SUBMIT_ONLY_UNSUPPORTED_CODE
+from .sim_batch_async import submit_only as _submit_batch_only
 from .sim_decks import run_deck_request
 from .sim_plot import render_waveform_svg
 
@@ -1656,6 +1658,7 @@ def run_sim(
     fail_fast_probe: bool | None = None,
     fail_on_diagnostic: list[str] | tuple[str, ...] | None = None,
     dry_run: bool = False,
+    submit_only: bool = False,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """Run the request at ``request_path`` and return its report.
@@ -1867,6 +1870,14 @@ def run_sim(
     library, unsupported engine, unknown backend) -- once the sweep starts,
     every corner is reported in the response, including ones that error.
 
+    **Async submit (issue #3073).** ``submit_only=True`` uploads and launches
+    one ``batch`` job, then returns its identity (``job_id``, ``bucket``,
+    ``launched_at``, ...) *instead of the report*, without polling or
+    collecting; read it later with :func:`sim_batch_async.read_job_status`.
+    Anything it cannot represent as one job (another backend, ``hosts > 1``,
+    ``resume``, ``plot_dir``, a deck-list request) raises :class:`SimError`
+    with code ``submit_only_unsupported`` before any S3 write.
+
     **Output-directory ownership (issue #2770).** A run that writes
     persistent artifacts -- ``options.keep_artifacts``, ``resume``, a
     ``plot_dir``, or an off-host (``remote``/``batch``) backend that collects
@@ -1898,6 +1909,11 @@ def run_sim(
                 "--dry-run does not apply to deck-list requests (`decks`); "
                 "it validates corner/Monte Carlo requests only"
             )
+        if submit_only:
+            raise SimError(
+                "--submit-only is not supported for deck-list requests",
+                code=SUBMIT_ONLY_UNSUPPORTED_CODE,
+            )
         return _dispatch_deck_request(
             request,
             request_path=request_path,
@@ -1924,6 +1940,7 @@ def run_sim(
         fail_fast_probe=fail_fast_probe,
         fail_on_diagnostic=fail_on_diagnostic,
         dry_run=dry_run,
+        submit_only=submit_only,
         _ownership=_ownership,
     )
 
@@ -2011,6 +2028,29 @@ def _dispatch_deck_request(
     )
 
 
+def _refuse_unsupported_submit_only(
+    backend: str, hosts: int, resume: bool | None, plot_dir: str | None
+) -> None:
+    """``--submit-only`` is one batch job: refuse everything else by name,
+    before the first S3 write (issue #3073). A sharded run would need one
+    job id per shard and a merge on fetch -- not represented, so refused
+    rather than silently submitting only part of the request."""
+    reason = None
+    if backend != "batch":
+        reason = f"requires backend 'batch' (resolved backend: '{backend}')"
+    elif hosts != 1:
+        reason = (
+            "submits one job; --hosts/remote.hosts > 1 would need one job per "
+            "shard and is not supported"
+        )
+    elif resume:
+        reason = "cannot be combined with --resume"
+    elif plot_dir is not None:
+        reason = "cannot be combined with --plot (nothing is collected)"
+    if reason is not None:
+        raise SimError(f"--submit-only {reason}", code=SUBMIT_ONLY_UNSUPPORTED_CODE)
+
+
 def _with_forwarded_budget(
     request: dict[str, Any],
     options: dict[str, Any],
@@ -2042,6 +2082,7 @@ def _run_sim_corners(
     fail_fast_probe: bool | None = None,
     fail_on_diagnostic: list[str] | tuple[str, ...] | None = None,
     dry_run: bool = False,
+    submit_only: bool = False,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """The corner-sweep body of :func:`run_sim` -- every parameter, the
@@ -2579,6 +2620,18 @@ def _run_sim_corners(
             corner_points=corner_points,
             monte_carlo_info=monte_carlo_info,
             staged_model_environment=staged_model_environment,
+        )
+
+    if submit_only:
+        _refuse_unsupported_submit_only(backend, hosts, resume, plot_dir)
+        return _submit_batch_only(
+            request=request,
+            corner_points=dispatch_points,
+            netlist_path=netlist_path,
+            timeout_s=timeout_s,
+            keep_artifacts=keep_artifacts,
+            want_waveforms=want_waveforms,
+            request_dir=request_dir,
         )
 
     if hosts == 1:

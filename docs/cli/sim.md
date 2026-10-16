@@ -675,6 +675,65 @@ in its `batch_job_failed` message, or carries the tail of the retrieved
 | `batch.max_job_seconds` | number > 0 | The fleet's **whole-job ceiling** the one-job pre-submit check compares against ([#2833](https://github.com/2AMLogic/klayout-tools/issues/2833)). Resolution order: this field, then `$KLT_BATCH_MAX_JOB_SECONDS`, then `BATCH_MAX_JOB_SECONDS` in the `batch-fleet.env` beside the provision script, else `3600` (the harness's own fallback when its `MaxJobSeconds` tag is absent). The value used and its source are reported; see "Three budgets, and the fleet's whole-job ceiling" below. A present but non-positive, non-finite, or non-numeric value from any source is rejected before any S3 write. |
 | `batch.job_ceiling_check` | `"warn"` \| `"enforce"` | What the one-job pre-submit check does when the job's conservative bound exceeds `max_job_seconds`: `"warn"` (default) submits and warns, `"enforce"` refuses before any S3 write with `error.code: "batch_job_ceiling_exceeded"`. Any other value is rejected before any S3 write. |
 
+### Asynchronous submit and status (`--submit-only`, `--job-status`, [#3073](https://github.com/2AMLogic/klayout-tools/issues/3073))
+
+A blocking `klt sim --backend batch` run prints nothing until the fleet job
+ends. To hand a long run off instead:
+
+```bash
+klt sim request.json --backend batch --submit-only --format json
+klt sim request.json --job-status klt-sim-0123456789ab --format json
+```
+
+`--submit-only` runs the same pre-submit gates as the blocking path (bucket
+and runner-version resolution, the whole-job ceiling), uploads the job,
+launches it, and exits `0` with the job's identity — it never polls and never
+collects:
+
+| Field | Description |
+| ----- | ----------- |
+| `schema_version` | `1` |
+| `status` | `"submitted"` (this is not a sim report; there is no verdict to grade) |
+| `job_id`, `bucket`, `region`, `jobs_prefix`, `job_uri` | Where the job lives |
+| `launched_at` | UTC time the launch returned |
+| `request_sha256` | Digest of the request document, to tie a later read back to it |
+| `unit_count` | Corners × Monte Carlo samples in the job |
+| `job_ceiling` | The pre-submit whole-job-ceiling assessment (same object as `environment.remote.job_ceiling`) |
+
+It is one job only. Anything it cannot represent as one job fails **before any
+S3 write** with `error.code: "submit_only_unsupported"`: a non-`batch`
+backend, `--hosts`/`remote.hosts` > 1 (a sharded run would need one job id per
+shard), `--plot`, or a deck-list request. `--resume` is already refused on the
+batch backend.
+
+`--job-status JOB_ID` makes one `status.json` read (the positional request only
+supplies the bucket/region/profile) and exits `0` whatever the *job's* state —
+the exit code describes the read, `state` describes the job:
+
+| Field | Description |
+| ----- | ----------- |
+| `state` | `pending` (no `status.json` yet — the instance has not booted; not an error), `running`, `interrupted`, `done`, `failed` or `timeout` |
+| `terminal` | `true` for `done`/`failed`/`timeout` |
+| `detail`, `started_at`, `updated_at`, `elapsed_seconds`, `exit_code`, `tool` | As written by the fleet harness; absent ones are omitted |
+| `instance` | `instance_id`, `instance_type`, `availability_zone`, `lifecycle`, `spot`, ... when published |
+
+An unknown job id (no `job.json` under the prefix) is an error envelope with
+`error.code: "batch_job_not_found"`; a malformed id is
+`"batch_job_id_invalid"`. Reading an `interrupted` job re-launches nothing —
+2am's own `reconcile` does that.
+
+**No unit counts.** The fleet's `status.json` is written at state transitions
+only (`fetching inputs`, `executing`, the terminal state) and carries no
+completed/total unit count; `outputs/` is uploaded only after the job ends. A
+status read therefore cannot say how far through the grid a running job is, and
+`klt` does not estimate one from elapsed time. That needs the fleet to publish
+progress first (tracked against 2AMLogic/2am).
+
+Collecting a finished job's report is `--attach`
+([#2978](https://github.com/2AMLogic/klayout-tools/issues/2978)); until that
+lands, `--submit-only` jobs can be read with `--job-status` but not yet fetched
+by `klt`.
+
 ### Capacity refusal and `batch_no_capacity`
 
 When 2am's `batch-fleet-provision.sh launch` finds no Spot capacity in any

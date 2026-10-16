@@ -46,7 +46,8 @@ from typing import Any
 from ..env_provenance import render_path_field
 from ..op_sanity import OpSanityError, run_op_sanity
 from ..output_lock import OutputLockError
-from ..sim import SimError, run_sim
+from ..sim import SimError, load_request, run_sim
+from ..sim_batch_async import read_job_status
 from ..sim_set import DEFAULT_MAX_IN_FLIGHT, run_sim_set
 from .output import EXIT_USAGE_ERROR, emit_error, emit_success, write_json_file
 
@@ -102,7 +103,12 @@ def run(args: argparse.Namespace) -> int:
         return misuse
     if getattr(args, "op_lint", False):
         return _run_op_lint(args)
+    if getattr(args, "job_status", None) is not None:
+        return _run_job_status(args)
+    return _run_sweep(args)
 
+
+def _run_sweep(args: argparse.Namespace) -> int:
     try:
         report = run_sim(
             args.request,
@@ -116,6 +122,7 @@ def run(args: argparse.Namespace) -> int:
             fail_fast_probe=args.fail_fast_probe,
             fail_on_diagnostic=args.fail_on_diagnostic,
             dry_run=getattr(args, "dry_run", False),
+            submit_only=getattr(args, "submit_only", False),
         )
     except SimError as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)
@@ -125,6 +132,10 @@ def run(args: argparse.Namespace) -> int:
     write_failure = _write_report_out(report, args)
     if write_failure is not None:
         return write_failure
+    if report.get("status") == "submitted" and getattr(args, "submit_only", False):
+        # Issue #3073: submitted, not run -- there is no verdict to grade.
+        emit_success(report, args.format, _print_submitted_text)
+        return EXIT_PASS
 
     if report.get("dry_run"):
         # Issue #3064: a dry run reaching here passed every pre-dispatch
@@ -177,6 +188,53 @@ def _write_report_out(report: dict, args: argparse.Namespace) -> int | None:
     return None
 
 
+def _run_job_status(args: argparse.Namespace) -> int:
+    """``klt sim REQUEST --job-status JOB_ID``: one state read (issue #3073).
+
+    Exit ``0`` whenever the read succeeded -- whatever state the *job* is in
+    (``failed`` included): the exit code reports this read, the ``state``
+    field reports the job. ``1`` for an unknown job id or a transport error.
+    """
+    if getattr(args, "submit_only", False):
+        return emit_error(
+            "sim",
+            "--job-status cannot be combined with --submit-only",
+            args.format,
+            exit_code=EXIT_USAGE_ERROR,
+        )
+    if args.backend not in (None, "batch"):
+        return emit_error(
+            "sim",
+            f"--job-status reads a batch job (got --backend {args.backend})",
+            args.format,
+            exit_code=EXIT_USAGE_ERROR,
+        )
+    try:
+        status = read_job_status(load_request(args.request), args.job_status)
+    except SimError as exc:
+        return emit_error("sim", str(exc), args.format, code=exc.code)
+    emit_success(status, args.format, _print_job_status_text)
+    return EXIT_PASS
+
+
+def _print_submitted_text(report: dict) -> None:
+    print(f"submitted: {report['job_id']}  units: {report['unit_count']}")
+    print(f"job: {report['job_uri']}  launched_at: {report['launched_at']}")
+    print(f"poll with: klt sim <request> --job-status {report['job_id']}")
+
+
+def _print_job_status_text(status: dict) -> None:
+    print(f"job: {status['job_id']}  state: {status['state']}")
+    for key in ("detail", "elapsed_seconds", "updated_at"):
+        if key in status:
+            print(f"{key}: {status[key]}")
+    instance = status.get("instance") or {}
+    if instance:
+        kind = instance.get("instance_type", "-")
+        where = instance.get("availability_zone", "-")
+        print(f"instance: {kind} ({instance.get('lifecycle', '-')}, {where})")
+
+
 def _run_batch_set(args: argparse.Namespace) -> int:
     """``klt sim --batch-set``: submit a set of requests (issue #2869).
 
@@ -193,6 +251,8 @@ def _run_batch_set(args: argparse.Namespace) -> int:
             ("--resume", args.resume),
             ("--plot", args.plot),
             ("--op-lint", getattr(args, "op_lint", False)),
+            ("--submit-only", getattr(args, "submit_only", False)),
+            ("--job-status", getattr(args, "job_status", None)),
         )
         if value
     ]
