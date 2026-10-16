@@ -569,6 +569,23 @@ def _antenna_skip_reason(pdk: str | None, findings_only: bool) -> str:
     return REASON_MISSING_ANTENNA_PDK if pdk is None else "missing_antenna_limit"
 
 
+def _compact_antenna_records(
+    gates: list[dict[str, Any]], reason: str
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """The aggregate ``(skipped, inapplicable)`` antenna records ``--compact``
+    emits in place of the per-(gate, level) and per-gate-reference ones."""
+    skipped = []
+    if sum(len(gate["levels"]) - 1 for gate in gates):
+        skipped.append({"id": work_id("antenna", "levels"), "reason": reason})
+    inapplicable = [
+        {
+            "id": work_id("antenna", "gate_reference_levels"),
+            "reason": "gate_reference_level",
+        }
+    ]
+    return skipped, inapplicable
+
+
 def _antenna_coverage(
     gates: list[dict[str, Any]],
     pdk: str | None,
@@ -593,15 +610,9 @@ def _antenna_coverage(
     inapplicable = []
     reason = _antenna_skip_reason(pdk, findings_only)
     if compact and gates:
-        skipped_levels = sum(len(gate["levels"]) - 1 for gate in gates)
-        if skipped_levels:
-            skipped.append({"id": work_id("antenna", "levels"), "reason": reason})
-        inapplicable.append(
-            {
-                "id": work_id("antenna", "gate_reference_levels"),
-                "reason": "gate_reference_level",
-            }
-        )
+        compact_skipped, compact_inapplicable = _compact_antenna_records(gates, reason)
+        skipped += compact_skipped
+        inapplicable += compact_inapplicable
     if not gates:
         # (issue #2896) Nothing to accumulate against: inapplicable, not
         # skipped -- no antenna work was requested that failed to run.
