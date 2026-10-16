@@ -209,6 +209,7 @@
       "vpp.ongrid.1"
     ],
     "voltage_domain_warnings": [],
+    "unchecked_rules": [],
     "deck_scope": [
       "cap2m",
       "capm",
