@@ -402,29 +402,43 @@ def _validate_stackup(spec: dict[str, Any], spec_path: str) -> list[dict[str, An
 
 
 def _validate_vias(
-    spec: dict[str, Any], spec_path: str, stackup_names: list[str]
+    spec: dict[str, Any],
+    spec_path: str,
+    stackup_names: list[str],
+    *,
+    deck_given: bool = False,
 ) -> list[dict[str, Any]]:
+    """``deck_given`` (issue #3400) makes ``resistance_ohm`` optional: a via
+    that omits it gets ``resistance_ohm: None`` here and is filled from the
+    parasitics deck by :func:`_apply_deck_via_resistance`. An explicit value
+    (including ``0``) is always kept as the spec's own."""
     entries: list[dict[str, Any]] = []
     for i, entry, name, layer, between in _validate_via_entries(
         spec,
         spec_path,
         stackup_names,
         PowerError,
-        required_keys=("layer", "between", "resistance_ohm"),
+        required_keys=(
+            ("layer", "between")
+            if deck_given
+            else ("layer", "between", "resistance_ohm")
+        ),
         extra_allowed_keys=_VIA_EXTRA_KEYS,
     ):
-        try:
-            resistance_ohm = float(entry["resistance_ohm"])
-        except (TypeError, ValueError) as exc:
-            raise PowerError(
-                f"spec '{spec_path}': vias[{i}].resistance_ohm must be a "
-                f"number (got {entry['resistance_ohm']!r})"
-            ) from exc
-        if resistance_ohm < 0:
-            raise PowerError(
-                f"spec '{spec_path}': vias[{i}].resistance_ohm must be >= 0 "
-                f"(got {resistance_ohm!r})"
-            )
+        resistance_ohm: float | None = None
+        if "resistance_ohm" in entry:
+            try:
+                resistance_ohm = float(entry["resistance_ohm"])
+            except (TypeError, ValueError) as exc:
+                raise PowerError(
+                    f"spec '{spec_path}': vias[{i}].resistance_ohm must be a "
+                    f"number (got {entry['resistance_ohm']!r})"
+                ) from exc
+            if resistance_ohm < 0:
+                raise PowerError(
+                    f"spec '{spec_path}': vias[{i}].resistance_ohm must be >= 0 "
+                    f"(got {resistance_ohm!r})"
+                )
 
         # `current_limit_a` (issue #846, Phase 1c): this via role's own EM
         # limit -- unlike a metal role's `current_limit_a_per_um`, a real
@@ -458,11 +472,73 @@ def _validate_vias(
                 "layer": layer,
                 "between": between,
                 "resistance_ohm": resistance_ohm,
+                "resistance_source": "spec",
                 "current_limit_a": current_limit_a,
                 "current_limit_source": current_limit_source,
             }
         )
     return entries
+
+
+def _apply_deck_via_resistance(
+    vias: list[dict[str, Any]], deck_name: str, corner: str, spec_path: str
+) -> None:
+    """Fill each via that carries no ``resistance_ohm`` from ``deck_name``'s
+    per-cut resistance at ``corner`` (issue #3400), recording
+    ``resistance_source = "deck:<name>:<corner>"``. Mutates ``vias``.
+
+    The spec via's GDS ``layer`` is located in the extraction deck's ``vias``
+    stack; entry ``i`` there joins ``metals[i]`` to ``metals[i + 1]``, and
+    the parasitics deck's :class:`~.decks.parasitics.CutRC` with
+    ``lower_metal_index == i`` carries its resistance. A layer the deck does
+    not know, a cut level with no curated :class:`CutRC`, or a corner the
+    deck does not publish is an error -- never a silent default. A published
+    ``0.0`` passes through unchanged (an ideal short).
+    """
+    from .decks import (
+        UnknownExtractionDeckError,
+        get_extraction_deck,
+        get_parasitics_deck,
+    )
+
+    pending = [via for via in vias if via["resistance_ohm"] is None]
+    if not pending:
+        return
+    try:
+        extraction = get_extraction_deck(deck_name)
+        parasitics = get_parasitics_deck(deck_name)
+    except UnknownExtractionDeckError as exc:
+        raise PowerError(str(exc)) from exc
+
+    cuts = {cut.lower_metal_index: cut for cut in parasitics.cuts}
+    for via in pending:
+        layer = tuple(via["layer"])
+        label = f"vias[{via['name']!r}] (layer {layer[0]}/{layer[1]})"
+        try:
+            level = extraction.vias.index(layer)
+        except ValueError:
+            raise PowerError(
+                f"spec '{spec_path}': {label} has no 'resistance_ohm' and "
+                f"deck '{deck_name}' has no via layer {layer[0]}/{layer[1]} "
+                "to default it from -- set 'resistance_ohm' explicitly"
+            ) from None
+        cut = cuts.get(level)
+        if cut is None:
+            raise PowerError(
+                f"spec '{spec_path}': {label} has no 'resistance_ohm' and "
+                f"deck '{deck_name}' publishes no cut resistance for that "
+                "via level -- set 'resistance_ohm' explicitly"
+            )
+        resistance = cut.resistance(corner)
+        if resistance is None:
+            raise PowerError(
+                f"spec '{spec_path}': {label} has no 'resistance_ohm' and "
+                f"deck '{deck_name}' publishes no '{corner}' resistance for "
+                f"cut {cut.name!r} -- set 'resistance_ohm' explicitly or "
+                "pick another corner"
+            )
+        via["resistance_ohm"] = resistance
+        via["resistance_source"] = f"deck:{deck_name}:{corner}"
 
 
 def _require_number(
@@ -2071,6 +2147,8 @@ def run_power(
     spec_path: str,
     *,
     top: str | None = None,
+    deck: str | None = None,
+    resistance_corner: str | None = None,
 ) -> dict[str, Any]:
     """Run ``klt power``'s resistive-network extraction (and, when the spec
     asks for one, the static IR-drop solve) end to end.
@@ -2126,6 +2204,15 @@ def run_power(
     one (required in that case, matching ``select_top_cells``'s convention
     -- see ``docs/cli/layers.md``'s ``--top``).
 
+    ``deck`` (issue #3400) names a built-in parasitics deck (``klt extract
+    --deck``'s name space) that supplies ``vias[].resistance_ohm`` for any
+    via whose spec entry omits it, at ``resistance_corner`` (``nominal``,
+    ``high`` or ``low``; default ``nominal``). An explicit spec value always
+    wins. ``resistance_corner`` without ``deck`` is an error. With ``deck``,
+    the report gains ``resistance_corner`` and a top-level ``vias`` block
+    recording each via's ``resistance_ohm`` and ``resistance_source``, and
+    ``provenance.deck`` is populated; without it the report is unchanged.
+
     Returns a dict matching the documented ``klt power`` JSON schema (see
     ``docs/cli/power.md``), including ``schema_version``.
 
@@ -2156,13 +2243,29 @@ def run_power(
     ``warnings`` rather than raised, as long as at least one net resolved
     to at least one island).
     """
+    if deck is None and resistance_corner is not None:
+        raise PowerError(
+            "--resistance-corner needs --deck: the corner selects which of "
+            "a deck's published via resistances to use"
+        )
+    corner = resistance_corner if resistance_corner is not None else "nominal"
+    if deck is not None:
+        from .decks import RESISTANCE_CORNERS
+
+        if corner not in RESISTANCE_CORNERS:
+            raise PowerError(
+                f"unknown resistance corner '{corner}' "
+                f"(available: {', '.join(RESISTANCE_CORNERS)})"
+            )
     spec = _load_spec_json(spec_path, PowerError)
     _reject_unknown_keys(spec, _SPEC_KEYS, spec_path, "", PowerError)
     power_net_entries = _validate_power_nets(spec, spec_path)
     power_nets = [entry["name"] for entry in power_net_entries]
     stackup = _validate_stackup(spec, spec_path)
     stackup_names = [entry["name"] for entry in stackup]
-    vias = _validate_vias(spec, spec_path, stackup_names)
+    vias = _validate_vias(spec, spec_path, stackup_names, deck_given=deck is not None)
+    if deck is not None:
+        _apply_deck_via_resistance(vias, deck, corner, spec_path)
     # The `devices[]` fragment is shared verbatim with `klt erc` (issue
     # #2260), so it lives in `_devices.py` and takes the flat list of
     # conductor role names -- `stackup` first, then `vias`.
@@ -2350,11 +2453,23 @@ def run_power(
     # the KLayout build and the cell it ran on are both part of what the
     # numbers depend on (`klayout_version` itself comes from the shared
     # block, for the same reason `klt erc` records it).
-    provenance = build_provenance(input_path=file, input_role=INPUT_ROLE_LAYOUT)
+    # Issue #3400: with `--deck`, the deck that defaulted the via
+    # resistances is recorded; without it `deck` stays `null`.
+    if deck is not None:
+        from .decks import deck_source_path
+
+        provenance = build_provenance(
+            deck_name=deck,
+            deck_path=deck_source_path(deck),
+            input_path=file,
+            input_role=INPUT_ROLE_LAYOUT,
+        )
+    else:
+        provenance = build_provenance(input_path=file, input_role=INPUT_ROLE_LAYOUT)
     provenance["spec"] = {"content_hash": _content_hash(spec_path)}
     provenance["top_cell"] = top_cell.name
 
-    return {
+    report: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "file": file,
         "spec": spec_path,
@@ -2373,3 +2488,15 @@ def run_power(
         "warnings": warnings,
         "provenance": provenance,
     }
+    if deck is not None:
+        report["resistance_corner"] = corner
+        report["vias"] = [
+            {
+                "name": via["name"],
+                "layer": f"{via['layer'][0]}/{via['layer'][1]}",
+                "resistance_ohm": via["resistance_ohm"],
+                "resistance_source": via["resistance_source"],
+            }
+            for via in vias
+        ]
+    return report

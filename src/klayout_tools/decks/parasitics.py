@@ -198,7 +198,8 @@ class ParasiticsDeck:
     before this field existed; :func:`describe_cut_resistance_gaps` reports
     which levels are uncurated rather than leaving them silently zero. The
     high/low metal sheet-resistance corners live on :class:`LayerRC`.
-    Nothing in ``klt extract`` or ``klt power`` consumes ``cuts`` yet.
+    ``klt power --deck`` defaults a spec via's ``resistance_ohm`` from ``cuts``
+    (issue #3400); ``klt extract`` does not consume them yet.
     """
 
     diffusion: LayerRC | None = None

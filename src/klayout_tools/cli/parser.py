@@ -1183,6 +1183,26 @@ def _add_power_parser(subparsers: argparse._SubParsersAction) -> None:
             "top cell, unlike klt layers' default of summing across all)"
         ),
     )
+    power_parser.add_argument(
+        "--deck",
+        default=None,
+        help=(
+            f"parasitics deck (currently: {_deck_names_str()}) that supplies "
+            "'vias[].resistance_ohm' for any via whose spec entry omits it "
+            "(issue #3400); an explicit spec value always wins. Also "
+            "populates provenance.deck"
+        ),
+    )
+    power_parser.add_argument(
+        "--resistance-corner",
+        default=None,
+        choices=("nominal", "high", "low"),
+        help=(
+            "which of --deck's published interconnect-resistance corners "
+            "defaults a via's resistance (default: nominal). Distinct from "
+            "`klt stackup --corner`'s tech-LEF min/nom/max; requires --deck"
+        ),
+    )
     _add_format_arg(power_parser)
     power_parser.set_defaults(func=power_cmd.run)
 

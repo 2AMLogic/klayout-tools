@@ -3919,3 +3919,197 @@ def test_decompose_manhattan_polygon_extra_cuts_default_to_none():
     assert cut is not None and len(cut) > len(plain)
     assert sum(box.area() for _, _, box in cut) == l_shape.area()
     assert {box.right for _, _, box in cut} >= {200}
+
+
+# --- `--deck`: via resistance defaulted from a parasitics deck (#3400) ----
+
+
+def _gf180_via_fixture(path) -> None:
+    """One VPWR island: Metal1 rail + Via1 (35/0) + Metal2 stub, on
+    gf180mcu's own layer numbers so the deck's via stack matches."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(34, 0)).insert(kdb.Box.new(_um(0), _um(5), _um(10), _um(6)))
+    top.shapes(layout.layer(34, 10)).insert(
+        kdb.Text("VPWR", kdb.Trans(_um(5), _um(5.5)))
+    )
+    top.shapes(layout.layer(35, 0)).insert(kdb.Box.new(_um(4), _um(5), _um(6), _um(6)))
+    top.shapes(layout.layer(36, 0)).insert(kdb.Box.new(_um(4), _um(5), _um(6), _um(10)))
+    layout.write(str(path))
+
+
+def _gf180_spec(path, *, vias) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "power_nets": ["VPWR"],
+                "stackup": [
+                    {
+                        "name": "met1",
+                        "layer": "34/0",
+                        "label_layer": "34/10",
+                        "sheet_resistance_ohm_per_sq": 0.1,
+                    },
+                    {
+                        "name": "met2",
+                        "layer": "36/0",
+                        "sheet_resistance_ohm_per_sq": 0.05,
+                    },
+                ],
+                "vias": vias,
+            }
+        )
+    )
+
+
+def _deck_via(**extra) -> dict:
+    return {"name": "via1", "layer": "35/0", "between": ["met1", "met2"], **extra}
+
+
+def _via_edge_ohms(report) -> list[float]:
+    return [
+        edge["resistance_ohm"]
+        for net in report["networks"]
+        for island in net["islands"]
+        for edge in island["edges"]
+        if edge["kind"] == "via"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("corner", "ohms"), [(None, 4.5), ("nominal", 4.5), ("high", 15.0), ("low", 0.0)]
+)
+def test_power_deck_defaults_via_resistance_per_corner(tmp_path, corner, ohms):
+    gds, spec = tmp_path / "g.gds", tmp_path / "g.json"
+    _gf180_via_fixture(gds)
+    _gf180_spec(spec, vias=[_deck_via()])
+
+    report = run_power(str(gds), str(spec), deck="gf180mcu", resistance_corner=corner)
+
+    assert _via_edge_ohms(report) == [ohms]
+    used = corner or "nominal"
+    assert report["resistance_corner"] == used
+    assert report["vias"] == [
+        {
+            "name": "via1",
+            "layer": "35/0",
+            "resistance_ohm": ohms,
+            "resistance_source": f"deck:gf180mcu:{used}",
+        }
+    ]
+    assert report["provenance"]["deck"]["name"] == "gf180mcu"
+
+
+def test_power_deck_explicit_spec_value_wins_including_zero(tmp_path):
+    gds, spec = tmp_path / "g.gds", tmp_path / "g.json"
+    _gf180_via_fixture(gds)
+    _gf180_spec(spec, vias=[_deck_via(resistance_ohm=0)])
+
+    report = run_power(str(gds), str(spec), deck="gf180mcu", resistance_corner="high")
+
+    assert _via_edge_ohms(report) == [0.0]
+    assert report["vias"][0]["resistance_source"] == "spec"
+
+
+def test_power_deck_mixed_sources_are_recorded_per_via(tmp_path):
+    gds, spec = tmp_path / "g.gds", tmp_path / "g.json"
+    _gf180_via_fixture(gds)
+    _gf180_spec(
+        spec,
+        vias=[
+            _deck_via(),
+            {
+                "name": "via2",
+                "layer": "38/0",
+                "between": ["met1", "met2"],
+                "resistance_ohm": 2.0,
+            },
+        ],
+    )
+
+    report = run_power(str(gds), str(spec), deck="gf180mcu")
+
+    assert [v["resistance_source"] for v in report["vias"]] == [
+        "deck:gf180mcu:nominal",
+        "spec",
+    ]
+
+
+def test_power_deck_missing_cut_layer_is_a_clear_error(tmp_path):
+    gds, spec = tmp_path / "g.gds", tmp_path / "g.json"
+    _gf180_via_fixture(gds)
+    _gf180_spec(spec, vias=[_deck_via(layer="99/0")])
+
+    with pytest.raises(PowerError, match=r"via1.*99/0.*no via layer"):
+        run_power(str(gds), str(spec), deck="gf180mcu")
+
+
+def test_power_deck_unpublished_corner_does_not_fall_back(tmp_path, monkeypatch):
+    from klayout_tools.decks import parasitics
+
+    gds, spec = tmp_path / "g.gds", tmp_path / "g.json"
+    _gf180_via_fixture(gds)
+    _gf180_spec(spec, vias=[_deck_via()])
+    unpublished = parasitics.CutRC("m2c", 0, nominal_ohm=4.5)
+    real = parasitics.ParasiticsDeck
+    monkeypatch.setattr(
+        "klayout_tools.decks.get_parasitics_deck",
+        lambda name: real(cuts=(unpublished,)),
+    )
+
+    with pytest.raises(PowerError, match="publishes no 'high' resistance"):
+        run_power(str(gds), str(spec), deck="gf180mcu", resistance_corner="high")
+
+
+def test_power_deck_unknown_deck_is_a_power_error(tmp_path):
+    gds, spec = tmp_path / "g.gds", tmp_path / "g.json"
+    _gf180_via_fixture(gds)
+    _gf180_spec(spec, vias=[_deck_via()])
+
+    with pytest.raises(PowerError, match="unknown deck"):
+        run_power(str(gds), str(spec), deck="nope")
+
+
+def test_power_resistance_corner_without_deck_is_an_error(tmp_path):
+    gds, spec = tmp_path / "basic.gds", tmp_path / "basic.power.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    with pytest.raises(PowerError, match="needs --deck"):
+        run_power(str(gds), str(spec), resistance_corner="low")
+
+
+def test_power_without_deck_still_requires_via_resistance(tmp_path):
+    gds, spec = tmp_path / "g.gds", tmp_path / "g.json"
+    _gf180_via_fixture(gds)
+    _gf180_spec(spec, vias=[_deck_via()])
+
+    with pytest.raises(PowerError, match="missing 'resistance_ohm'"):
+        run_power(str(gds), str(spec))
+
+
+def test_power_without_deck_output_has_no_deck_fields(tmp_path):
+    gds, spec = tmp_path / "basic.gds", tmp_path / "basic.power.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    report = run_power(str(gds), str(spec))
+
+    assert "vias" not in report and "resistance_corner" not in report
+    assert report["provenance"]["deck"] is None
+
+
+def test_cli_power_deck_flags(tmp_path, capsys):
+    gds, spec = tmp_path / "g.gds", tmp_path / "g.json"
+    _gf180_via_fixture(gds)
+    _gf180_spec(spec, vias=[_deck_via()])
+
+    code = main(
+        ["power", str(gds), str(spec), "--deck", "gf180mcu",
+         "--resistance-corner", "high", "--format", "json"]
+    )  # fmt: skip
+
+    assert code == 4
+    data = json.loads(capsys.readouterr().out)
+    assert data["vias"][0]["resistance_ohm"] == 15.0
