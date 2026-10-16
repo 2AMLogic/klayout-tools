@@ -330,7 +330,7 @@ naming what *is* supported:
   `measurements[]` constraint as ngspice applies.
 - **Corners**: `process` (`.lib` sections — note Xyce requires a *named*
   `.endl <section>` in the library file where ngspice accepts a bare
-  `.endl`) and `temperature`. **`corners.supply_v` and `corners.params` are refused**: Xyce has
+  `.endl`) and `temperature`. **`corners.supply_v`, `corners.params` and `corners.options` are refused**: Xyce has
   no netlist equivalent of ngspice's `alter`/`alterparam`, so per-corner
   supply rails and parameter rows cannot be patched into the deck — keep
   them hardcoded in the netlist body.
@@ -4550,15 +4550,49 @@ a corner grid. A stock ngspice without the module still produces the
     echo the dispatched `corner_id` and `params`, otherwise the request fails
     with error code `params_unsupported_worker` and reports no result. Update
     the runner image, or use a local backend.
+- **`corners.options`** (`object`, optional, [#3125](https://github.com/2AMLogic/klayout-tools/issues/3125))
+  — a solver-tolerance axis: ngspice `.options` names mapped to equal-length,
+  nonempty arrays of finite numbers, zipped by index and expanded innermost
+  (after `params`). `.options` cannot be altered from ngspice's control
+  language, so a tolerance ladder cannot be a `foreach` loop in the body; this
+  axis keeps it in one request instead of one body copy per rung.
+
+  ```json
+  {"corners": {"options": {"reltol": [1e-3, 1e-4, 1e-5]}}}
+  ```
+
+  - **Rules.** Same as `corners.params` (finite numbers only, nonempty,
+    equal lengths, no duplicate rows, names case-insensitive), with names
+    restricted to a numeric solver allow-list: `abstol`, `gmin`, `gminsteps`,
+    `itl1`, `itl2`, `itl3`, `itl4`, `pivtol`, `reltol`, `srcsteps`, `vntol`.
+    Anything else is a `SimError` before dispatch (ngspice would silently
+    ignore an unknown `.options` name). Flag and token options such as
+    `method` stay in the fixed `options.ngspice_options`.
+  - **Deck.** One `.options name=value ...` card per point, written *ahead of*
+    the `.include`d body. ngspice honors the **first** `.options` card that
+    sets a name (measured on ngspice-46), so the corner's value wins over a
+    body-level `.options reltol=` and over `options.ngspice_options`.
+  - **Identity.** Each corner report echoes `options` and its `corner_id`
+    gains `/options:<pairs>` after any `/params:` segment and before `/mc<N>`
+    (e.g. `default/novdd/27C/options:reltol=0.0001`); the artifact directory is
+    the PVT slug plus `_params_` plus the SHA-256 of the whole ID, as for
+    `corners.params`. A request without the field keeps its IDs, slugs and
+    decks byte-for-byte.
+  - **Support.** ngspice on every backend. `remote`/`batch` need an updated
+    worker image: every returned corner must echo the dispatched `corner_id`
+    and `options`, otherwise the request fails with error code
+    `options_unsupported_worker`. `engine: "xyce"` fails before execution, and
+    `--op-lint` refuses a corner that carries options.
 - **`exclude`** (`array<object>`, optional) — partial corner specs
-  (`process`, `temperature_c`, `supply_v`, and/or `params`) dropped from the
-  expansion, for sparse matrices. `exclude[].params` is an exact-match subset
-  of a point's `params` map (names case-insensitive, values compared
+  (`process`, `temperature_c`, `supply_v`, `params`, and/or `options`) dropped
+  from the expansion, for sparse matrices. `exclude[].params` is an exact-match
+  subset of a point's `params` map (names case-insensitive, values compared
   numerically), ANDed with the other selector keys; naming a parameter the
-  request does not sweep is a `SimError`.
+  request does not sweep is a `SimError`. `exclude[].options` works the same
+  way against `corners.options`.
 
 Expansion is deterministic and odometer-style: process outermost, supply
-next, temperature next, parameter row innermost — the same corner list, same
+next, temperature next, parameter row next, option row innermost — the same corner list, same
 order, every run against the same request.
 
 ### Explicit unit list: `corners.units`
@@ -6080,6 +6114,7 @@ the *response* echoes back.
 | `corners.variants`       | array\<object\> | Issue #3252. Named correlated source arrangements `{name, sources: {src: number \| expr}}`; each is its own corner unit (`corner_id` suffix `/@<name>`, report field `variant`). See "Corner axes" above. |
 | `corners.temperature_c`  | array\<number\>   | Temperature axis, degrees Celsius. Defaults to `[27]`.                                                                                                                 |
 | `corners.params`         | object            | Issue #3035. Numeric design-parameter axis: SPICE parameter name → equal-length nonempty array of finite numbers, zipped by index and expanded innermost (after temperature). Applied with `alterparam` + `reset`; each corner echoes `params` and its `corner_id` gains `/params:<pairs>`. See "Corner axes" above. |
+| `corners.options`        | object            | Issue #3125. Solver-tolerance axis: numeric `.options` name (`reltol`, `abstol`, `vntol`, `itl1`..`itl4`, `gmin`, ...) → equal-length nonempty array of finite numbers, zipped by index and expanded innermost (after `params`). Emitted as one `.options` card ahead of the body; each corner echoes `options` and its `corner_id` gains `/options:<pairs>`. See "Corner axes" above. |
 | `exclude`                | array\<object\>   | Partial corner specs (`process`, `temperature_c`, `supply_v`, `params`) dropped from the expansion.                                                                      |
 | `monte_carlo.n`          | integer           | Number of samples per expanded corner point. Positive integer, required when `monte_carlo` is present. See "Monte Carlo sampling" above.                              |
 | `monte_carlo.seed`       | integer           | Base seed the sample sequence derives from. Required when `monte_carlo` is present.                                                                                    |

@@ -1327,6 +1327,13 @@ def _refuse_param_axis(point: Any) -> None:
             "operating-point lint does not apply; lint a request without a "
             "parameter axis"
         )
+    if point.options:
+        # Issue #3125: the lint's deck carries no corner `.options` card.
+        raise OpSanityError(
+            f"corner '{point.corner_id}' carries corners.options, which the "
+            "operating-point lint does not apply; lint a request without an "
+            "options axis"
+        )
 
 
 def run_op_sanity(
