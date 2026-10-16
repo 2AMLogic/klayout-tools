@@ -808,6 +808,60 @@ def test_mos_array_device_count_and_ports(tmp_path, pdk_root):
     assert ports_by_name["U0_D"]["layer"] == {"layer": 67, "datatype": 20, "name": None}
 
 
+def _mos_array_port_names(tmp_path, pdk_root, **params):
+    report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": params,
+            "options": {"output": str(tmp_path / "mos_array.gds")},
+        }
+    )
+    return report["ports"]
+
+
+@pytest.mark.parametrize("dummy", [0, 1, 2])
+@pytest.mark.parametrize("rows", [1, 2])
+def test_mos_array_dummy_ports_opt_in(tmp_path, pdk_root, dummy, rows):
+    # #2904: default output is unchanged; the opt-in adds D<k>_S/D/G per dummy.
+    base = {"rows": rows, "cols": 2, "dummy": dummy, "gate_contact": True}
+    default_ports = _mos_array_port_names(tmp_path, pdk_root, **base)
+    assert not any(p["name"].startswith("D") for p in default_ports)
+    assert default_ports == _mos_array_port_names(
+        tmp_path, pdk_root, dummy_ports=False, **base
+    )
+
+    ports = _mos_array_port_names(tmp_path, pdk_root, dummy_ports=True, **base)
+    n_dummy = 2 * dummy * rows
+    assert ports[: len(default_ports)] == default_ports
+    extra = ports[len(default_ports) :]
+    assert [p["name"] for p in extra] == [
+        f"D{k}_{t}" for k in range(n_dummy) for t in "SDG"
+    ]
+    real = {p["name"]: p for p in default_ports}
+    for p in extra:
+        # Same layer as the real units' matching terminal.
+        assert p["layer"] == real[f"U0_{p['name'][-1]}"]["layer"]
+        assert p["direction_deg"] == real[f"U0_{p['name'][-1]}"]["direction_deg"]
+
+
+def test_mos_array_dummy_ports_series_fingers(tmp_path, pdk_root):
+    base = {
+        "rows": 1,
+        "cols": 1,
+        "dummy": 1,
+        "fingers": 2,
+        "finger_topology": "series",
+    }
+    default_ports = _mos_array_port_names(tmp_path, pdk_root, **base)
+    ports = _mos_array_port_names(tmp_path, pdk_root, dummy_ports=True, **base)
+    names = {p["name"] for p in ports}
+    unit_names = {p["name"][len("U0_") :] for p in default_ports}
+    for k in (0, 1):
+        assert {f"D{k}_{n}" for n in unit_names} <= names
+    assert len(ports) == 3 * len(default_ports)
+
+
 def test_mos_array_1x1_boundary(tmp_path, pdk_root):
     output = tmp_path / "mos_array_1x1.gds"
     report = generate(

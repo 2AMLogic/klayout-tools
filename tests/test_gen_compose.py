@@ -17307,3 +17307,74 @@ def test_compose_plane_bearing_waypoint_rejects_a_four_element_waypoint(
     )
     with pytest.raises(GenComposeError, match=r"waypoints_um\[1\] must be"):
         compose(request)
+
+
+def test_compose_ties_off_mos_array_dummy_units_without_dead_metal(tmp_path, pdk_root):
+    # #2904: with `dummy_ports` a dummy's S/D/G are tie-able, so its li1 pads
+    # join a named net instead of extracting as `dead_metal`.
+    params = {
+        "w_um": 2,
+        "l_um": 1,
+        "rows": 1,
+        "cols": 2,
+        "dummy": 1,
+        "gate_contact": True,
+        "topology": "array",
+    }
+    arr_off = _gen_block(tmp_path, pdk_root, "mos_array", "arr_off", **params)
+    assert not any(p["name"].startswith("D") for p in arr_off["ports"])
+    before = extract.run_extract(str(tmp_path / "arr_off.gds"), "sky130", top="arr_off")
+
+    arr = _gen_block(
+        tmp_path, pdk_root, "mos_array", "arr_tied", dummy_ports=True, **params
+    )
+    right = _gen_block(tmp_path, pdk_root, "resistor_strip", "rail_right")
+    output = tmp_path / "tied.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "arr", "generator_report": arr},
+                {"id": "right", "generator_report": right},
+            ],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["arr", "right"],
+                "origins_um": {
+                    "arr": {"x": 0.0, "y": 0.0},
+                    "right": {"x": arr["bbox_um"]["x1"] + 6.0, "y": 0.0},
+                },
+            },
+            # D1 is the rightmost dummy; tying it to a rail block on its own
+            # side keeps the single-layer route from crossing the array.
+            "connectivity": [
+                {
+                    "net": "VSS_R",
+                    "pins": [{"block": "arr", "port": f"D1_{t}"} for t in "SDG"]
+                    + [{"block": "right", "port": "P1"}],
+                }
+            ],
+            "routing": {
+                "layer_role": "metal",
+                "width_um": 0.17,
+                "cross_block_layer_role": "metal2",
+            },
+            "options": {"cell_name": "tied_0", "output": str(output)},
+        }
+    )
+    assert report["unrouted_nets"] == [], [
+        leg.get("reason") for n in report["nets"] for leg in n["legs"]
+    ]
+
+    # Dead metal on the tied (right) dummy is gone; the untied left dummy
+    # still extracts as floating.
+    right_x0 = min(p["x_um"] for p in arr["ports"] if p["name"].startswith("D1_"))
+    arr_right = lambda dm: dm["bbox_um"]["right"] > right_x0 - 0.5  # noqa: E731
+    after = extract.run_extract(str(output), "sky130", top="tied_0")
+    in_dummy = [
+        d
+        for d in after["dead_metal"]
+        if arr_right(d) and d["bbox_um"]["left"] < arr["bbox_um"]["x1"]
+    ]
+    assert [d for d in before["dead_metal"] if arr_right(d)], "fixture must float"
+    assert in_dummy == [], in_dummy
