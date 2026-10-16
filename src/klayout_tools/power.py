@@ -407,6 +407,38 @@ def _validate_stackup(spec: dict[str, Any], spec_path: str) -> list[dict[str, An
     return entries
 
 
+def _validate_via_cut_geometry(
+    entry: dict[str, Any], spec_path: str, i: int
+) -> dict[str, float | None]:
+    """Issue #3401: optional cut geometry, both-or-neither, so a merged
+    via-array shape can be priced as ``resistance_ohm / n_cuts``."""
+    if ("cut_size_um" in entry) != ("cut_space_um" in entry):
+        raise PowerError(
+            f"spec '{spec_path}': vias[{i}] must give 'cut_size_um' and "
+            "'cut_space_um' together or neither"
+        )
+    cut_geometry: dict[str, float | None] = {
+        "cut_size_um": None,
+        "cut_space_um": None,
+    }
+    for key in cut_geometry:
+        if key not in entry:
+            continue
+        try:
+            value = float(entry[key])
+        except (TypeError, ValueError) as exc:
+            raise PowerError(
+                f"spec '{spec_path}': vias[{i}].{key} must be a number "
+                f"(got {entry[key]!r})"
+            ) from exc
+        if not value > 0:
+            raise PowerError(
+                f"spec '{spec_path}': vias[{i}].{key} must be > 0 (got {value!r})"
+            )
+        cut_geometry[key] = value
+    return cut_geometry
+
+
 def _validate_vias(
     spec: dict[str, Any],
     spec_path: str,
@@ -472,32 +504,7 @@ def _validate_vias(
         if current_limit_source is not None:
             current_limit_source = str(current_limit_source)
 
-        # Issue #3401: optional cut geometry, both-or-neither, so a merged
-        # via-array shape can be priced as `resistance_ohm / n_cuts`.
-        if ("cut_size_um" in entry) != ("cut_space_um" in entry):
-            raise PowerError(
-                f"spec '{spec_path}': vias[{i}] must give 'cut_size_um' and "
-                "'cut_space_um' together or neither"
-            )
-        cut_geometry: dict[str, float | None] = {
-            "cut_size_um": None,
-            "cut_space_um": None,
-        }
-        for key in cut_geometry:
-            if key not in entry:
-                continue
-            try:
-                value = float(entry[key])
-            except (TypeError, ValueError) as exc:
-                raise PowerError(
-                    f"spec '{spec_path}': vias[{i}].{key} must be a number "
-                    f"(got {entry[key]!r})"
-                ) from exc
-            if not value > 0:
-                raise PowerError(
-                    f"spec '{spec_path}': vias[{i}].{key} must be > 0 (got {value!r})"
-                )
-            cut_geometry[key] = value
+        cut_geometry = _validate_via_cut_geometry(entry, spec_path, i)
 
         entries.append(
             {
