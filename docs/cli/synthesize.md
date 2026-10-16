@@ -1858,6 +1858,27 @@ same request against its own just-produced response instead (`baseline.json
 area_um2: 0.0, critical_path_ns: 0.0}` — see
 `tests/test_synthesize.py::test_run_synthesize_baseline_response_path_zero_delta`.
 
+## Pinned golden: gf180 operator probe (issue #3069)
+
+`tests/test_synth_gf180_operator_probe.py` pins a `klt synthesize` area /
+cell / `dffq_1` regression on the vendored gf180-dx7 operator probe
+(`tests/corpus/synth_gf180_operator_probe/`, Apache-2.0, pinned to upstream
+commit `eb74e94f`). The fixture hashes are checked offline; the synthesis test
+needs `yosys` plus the gf180mcu `gf180mcu_fd_sc_mcu7t5v0` / `tt_025C_5v00`
+liberty (e.g. `volare enable --pdk gf180mcu`, `PDK_ROOT`/`PDK=gf180mcuD`) and
+**skips with that reason otherwise** -- default CI does not provision it.
+
+Reading the baseline: the historical reference (46,939.96 um2, 2,407 cells, 99
+`dffq_1`) is *not* the assert target. The golden is today's `klt synthesize`
+result (50,968.15 um2, 2,686 cells, 99 `dffq_1`). It is ~9% above the upstream
+script's plain `abc -liberty` result (46,766.54 um2, 2,381 cells) because klt
+adds the ABC driving-cell/load constraints for this library and the post-ABC
+`clean`/`setundef -zero`/`hilomap` passes; the flop count is unchanged. The
+step-by-step measurements, tolerance rationale and the unexplained residual
+against the historical number are in that directory's `README.md`. Note that
+the RTL `$readmemh`s its ROM tables relative to the synthesis cwd, which
+`klt synthesize` sets to the request's repo root.
+
 ## Out of scope
 
 - **Switching/dynamic power.** `leakage_power_nw`/`leakage_by_type_nw`
