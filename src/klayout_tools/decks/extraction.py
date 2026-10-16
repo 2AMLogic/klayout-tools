@@ -30,6 +30,7 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from .rules import RuleProvenance
 
@@ -422,6 +423,28 @@ class MOSFlavour:
 
 
 @dataclass(frozen=True)
+class CapacitorVariant:
+    """One caller-selectable alternative **capacitor set** for an
+    :class:`ExtractionDeck` (issue #2920) -- for a PDK whose capacitor family
+    exists in several mutually-exclusive process options that draw
+    *different geometry* (gf180mcu's MIM option A: ``Metal2`` bottom plate
+    under ``Metal3``; option B: ``Metal(n-1)`` under the top metal), which
+    :class:`CapacitorDevice`'s ``flavours`` (identical geometry, different
+    coefficients) cannot express.
+
+    ``option`` is the deck-option key (``--deck-option <option>=<value>``),
+    ``value`` the string selecting this variant, ``capacitors`` the entries
+    that replace the deck's ``capacitors`` when it is selected. The deck's
+    own ``capacitors`` are the *default* variant, and must also be listed
+    here (as the first variant) so that every variant's geometry is known.
+    """
+
+    option: str
+    value: str
+    capacitors: tuple[CapacitorDevice, ...]
+
+
+@dataclass(frozen=True)
 class ExtractionDeck:
     """Connectivity + device-extraction rule set for ``klt extract`` (see
     ``docs/design/lvs-extraction-spike.md`` and ``docs/cli/extract.md``).
@@ -700,6 +723,26 @@ class ExtractionDeck:
     mos_flavours: tuple[MOSFlavour, ...] = ()
     nfet_provenance: RuleProvenance | None = None
     pfet_provenance: RuleProvenance | None = None
+    capacitor_variants: tuple[CapacitorVariant, ...] = ()
+    capacitor_variant_selected: str | None = None
+
+    @property
+    def unselected_capacitors(self) -> tuple[tuple[str, CapacitorDevice], ...]:
+        """``(option value, entry)`` for every :attr:`capacitor_variants`
+        capacitor that is *not* currently wired into :attr:`capacitors`
+        (issue #2920) -- what ``extract.py`` checks to warn that a layout
+        draws a capacitor option the active selection does not recognise.
+        Empty for a deck that declares no variants.
+        """
+        if not self.capacitor_variants:
+            return ()
+        selected = self.capacitor_variant_selected or self.capacitor_variants[0].value
+        return tuple(
+            (variant.value, capacitor)
+            for variant in self.capacitor_variants
+            if variant.value != selected
+            for capacitor in variant.capacitors
+        )
 
     @property
     def device_classes(self) -> tuple[str, ...]:
@@ -789,6 +832,12 @@ class ExtractionDeck:
             wired = next((f for f in device.flavours if f.name == device.name), None)
             if wired is not None:
                 values[key] = wired.value
+        if self.capacitor_variant_selected is not None:
+            # Issue #2920: the variant selector (`mim_option`) is echoed only
+            # when a variant was actually selected, so a run that takes the
+            # default keeps exactly the provenance/options hash it had before
+            # the key existed.
+            values[self.capacitor_variants[0].option] = self.capacitor_variant_selected
         return dict(sorted(values.items()))
 
     @property
@@ -1087,7 +1136,7 @@ class ExtractionDeck:
                     f"{where} label-layer role {role!r} override must be a "
                     f"(layer, datatype) pair of integers or None, got {layer!r}"
                 )
-        replacements: dict[str, object] = {}
+        replacements: dict[str, Any] = {}
         if "well" in overrides:
             replacements["well_label"] = overrides["well"]
         if "poly" in overrides:

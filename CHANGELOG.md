@@ -14,6 +14,14 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt lvs` refuses a bare pre-extracted `layout.netlist` carrying a
+  resistor `X` card** (issue #3078): a `klt extract` `X$n a b vsubs
+  <class> r=… L=… W=…` card naming a resistor class of `reference.deck`,
+  with no `layout.deck`, was read as an undefined subcircuit, so the layout
+  side had no resistor devices and a correct layout reported a plausible
+  `mismatch`. It now exits 1 with an error naming `layout.deck` as the fix;
+  the same request with `layout.deck` still matches, and netlists without
+  such cards (or without `reference.deck`) behave as before.
 - **`klt sim` batch: opt-in auto-split of a request that cannot fit the fleet's
   whole-job ceiling** (issue #3446): `batch.job_ceiling_check: "split"`,
   `batch.max_units_per_job` and `--max-units-per-job N` reroute a
@@ -102,6 +110,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   polygon, in integer database units. The deck grows from 232 to 234 rule
   categories (`--expect-rule-categories 234`); both ids leave the "Not
   implemented" list. Additive; no `schema_version` bump.
+- **`klt extract --parasitics --substrate-tie-ohms <ohms>`** (issue #3089, also
+  forwarded by `klt pex`): sets the substrate DC-tie resistance (default
+  `1e12`, which leaves the substrate capacitively floating in transient
+  analysis; `0` is a hard tie, written as a 1 mohm resistor because SPICE has
+  no zero-ohm resistor). Additive: `parasitics.substrate_dc_tie.mode`
+  (`"shunt"`/`"hard"`), `resistance_ohm` now reflects the written value, and a
+  `* - substrate tie: …` line in the `--parasitics` netlist header comment.
+  Default output is otherwise unchanged.
 - **ASAP7 deck: eight SRAMDRC-scoped MOL rules** (issue #3083): `klt drc
   --engine klayout --deck-file asap7.drc` now checks `SRAM.SDT.W.4`,
   `SRAM.SDT.ACTIVE.OV.3`, `SRAM.SDT.LISD.OV.4`, `SRAM.LISD.S.4`,
@@ -129,6 +145,13 @@ not `klt --version`, if you need to detect this kind of drift. See
   instead of claiming the sides "instantiate different device models". The
   block is still non-`null` in both cases; `model_set` output is unchanged.
   Additive; no `schema_version` bump.
+- **`klt sim` `options.portable_artifacts`** (issue #3052): opt-in, additive
+  (default off; deck and log bytes unchanged when off). With
+  `keep_artifacts`, the persisted `corner.cir`, engine log,
+  `netlist.expanded.cir` and `.spiceinit` have host paths (PDK, models
+  directory, request/artifacts directories, `$HOME`) replaced by stable
+  `$TOKEN`s, and `environment.portable_artifacts.substitutions` records
+  the map. See `docs/cli/sim.md` "Portable deck and log".
 
 - **`klt sim` gains a numeric design-parameter axis, `corners.params`**
   (issue #3035): SPICE parameter names mapped to equal-length arrays of
@@ -225,6 +248,13 @@ not `klt --version`, if you need to detect this kind of drift. See
   An untapped NMOS or an anonymous-body PMOS in a `klt extract -o` netlist
   now reports `unverified` (and emits `device.body_unverified`), matching the
   inline-extraction verdict. Inline-extraction results are unchanged.
+- **`klt lvs` docs: `parameter_tolerance` on passive-only cells** (issue
+  #3023): documented that a structure-less cell with two or more off-value
+  devices (e.g. parallel capacitors) still reports `mismatch` under
+  `options.parameter_tolerance` alone, and that adding
+  `options.anchor_top_level_pins: true` is the working fix. Tests pin the
+  limit, the workaround and the out-of-tolerance negative control. No code or
+  JSON change.
 
 - **sky130 two-adjacent-edges enclosure rules** (issue #3316): new
   `DrcRule.check` kind `"enclosing_adjacent"` (a cut is flagged once when two

@@ -1423,6 +1423,16 @@ the packaged `data/` copy. See
   request is submitted unchanged and the runner-side preflight above
   decides, exactly as before #2851. No historical manifest entry becomes
   unusable.
+- **PDK variant (#3251).** A manifest entry may publish `pdk_variants`, the
+  PDK variant directories its image ships (e.g. `["gf180mcuD"]`;
+  `build-remote-sim-ami.sh --pdk-variants`). The family-level check only maps
+  `gf180mcuC` to `gf180mcu`, so without this field an unshipped variant fails
+  on the runner as one `batch_job_failed` per corner. When **every** candidate
+  image (same selection as above) publishes `pdk_variants` and none lists the
+  request's `models.pdk`, the whole request is refused with a `SimError`
+  naming the variants the image carries, before any S3 write or launch. A
+  legacy entry without the field, an absent manifest, or a request without
+  `models.pdk` is unchanged.
 - **Discovering the runner version before submit.** Read the manifest:
   `jq '.images[] | {pdk, region, ami_id, built_at, klt_version, klt_ref}'
   "${KLT_AMI_MANIFEST:-$HOME/.config/klt/remote-sim-ami-manifest.json}"`.
@@ -1548,6 +1558,48 @@ raw `stderr.log` text never does. The stderr capture is part of the command
 the *submitting* client generates, so it works whatever klt version the fleet
 image runs. When neither file yields an envelope, the reason is in
 `harness.log` (and `stderr.log`) under the job's S3 prefix.
+
+### Portable deck and log (`options.portable_artifacts`, [#3052](https://github.com/2AMLogic/klayout-tools/issues/3052))
+
+With `options.keep_artifacts`, `corner.cir` and the engine log
+(`ngspice.log` / `xyce.log`) name the absolute paths of the machine that ran
+them. Set `options.portable_artifacts: true` (boolean, default `false`; a
+no-op without `keep_artifacts`) to have klt rewrite them, after the corner
+finishes, so they can be committed as the raw record of a run:
+
+| Token | Stands for |
+|---|---|
+| `$CORNER_DIR` | the corner's own artifact directory |
+| `$PDK_ROOT` | `$PDK_ROOT` from the environment, when set |
+| `$MODELS_DIR` | the directory of `models.lib` |
+| `$SECTION_LIB_DIR_<n>` / `$OSDI_DIR_<n>` | further `corner_section_libs` / `osdi_preload` directories |
+| `$REQUEST_DIR` | the directory holding the request file |
+| `$ARTIFACTS_DIR` | the artifacts root (`--outdir`) |
+| `$HOME` | the user's home directory |
+
+Where roots nest, the earlier row wins (so a model file under `$PDK_ROOT` is
+`$PDK_ROOT/<rel>`); a root is replaced only as a whole path prefix, and its
+symlink-resolved form is replaced too. The same substitution is applied to
+`netlist.expanded.cir` (the include-expanded netlist copy) and `.spiceinit`
+in the corner directory. Paths outside every root are left as written.
+
+The persisted `corner.cir` is **a record, not a re-runnable input**: ngspice
+does not expand `$VAR` in include paths, so klt executes the real-path deck
+and rewrites it only after the engine has exited. With the option off, deck
+and log bytes are unchanged.
+
+`environment.portable_artifacts.substitutions` lists each token and what it
+stood for (normalised like every other path in the report, never a host
+path). The inputs stay identified by `environment.models_lib_sha256` and
+`environment.netlist_closure`; the `$MODELS_DIR` entry repeats
+`models_lib_sha256`. Output is deterministic for a given environment: the
+same request from two checkout locations yields byte-identical deck and log.
+
+Backends: `local` and `local-parallel` apply it directly. On `batch` and
+`remote` the worker runs the forwarded request, so the option applies on the
+worker and the returned `artifacts/` are already portable. `klt
+env-provenance scan` over a portable deck or log reports no `home-path`
+findings.
 
 ### Getting the per-corner deck and ngspice log through klt
 
@@ -3196,6 +3248,22 @@ A line sensitivity has the same shape: alter the input source (`"alter":
 {"VIN": 3.0}` / `{"VIN": 3.3}`) and divide, as in `"expr": "(hi.vout -
 lo.vout) / 0.3"`.
 
+A PWL-declared stimulus (`Vx n 0 dc 0 pwl(0 0 1u 0 2u 3.3 1 3.3)`) is
+retargeted per step with the PWL form, so independent cold-start points can
+differ in the high level of the enable without one request per point:
+
+```json
+"analysis_steps": [
+  {"name": "v33", "analysis": {"kind": "tran", "args": "10n 3u"},
+   "alter": {"Vx": {"pwl": [0, 0, 1e-6, 0, 2e-6, 3.3, 1, 3.3]}}},
+  {"name": "v18", "analysis": {"kind": "tran", "args": "10n 3u"},
+   "alter": {"Vx": {"pwl": [0, 0, 1e-6, 0, 2e-6, 1.8, 1, 1.8]}}}
+]
+```
+
+which emits `alter @Vx[pwl] = [ 0 0 1e-06 0 2e-06 3.3 1 3.3 ]` before the
+first solve and the 1.8 V vector before the second.
+
 ### Request rules
 
 Every rule below is checked **before any corner is dispatched** (application
@@ -3212,6 +3280,14 @@ error, exit 1).
 - **`alter`** maps a top-level source or passive element (`V`/`I`/`R`/`C`/`L`
   name) to a finite number. The overrides are applied as `alter` commands
   before that step's solve, in declaration order.
+  - A source the netlist declares with a `pwl(...)` waveform takes a PWL
+    vector instead: `"alter": {"VEN": {"pwl": [t0, v0, t1, v1, ...]}}` (an
+    even-length flat list of finite numbers, at least two points, times
+    non-decreasing; a repeated time is a step edge). It is emitted as
+    `alter @VEN[pwl] = [ t0 v0 t1 v1 ... ]` before that step's solve, so
+    each step can run its own stimulus. The form is refused for any target
+    that is not a `pwl`-declared source (a DC, PULSE or SIN source, or a
+    passive).
   - Overrides are **cumulative**, as in ngspice: a later step sees an
     earlier step's value unless it alters the element again. Without
     `reset` (below), steps share circuit **and** solver state (each solve
@@ -3221,8 +3297,9 @@ error, exit 1).
     - a target repeated within one step;
     - a target that is also a `corners.supply_v` key, because the step would
       silently replace the corner's own value;
-    - a source declared with an explicit transient waveform, where `alter`
-      has no effect (the same rule as the supply axis,
+    - a scalar value for a source declared with an explicit transient
+      waveform, where `alter` has no effect (use the `{"pwl": [...]}` form
+      for a PWL source; the same rule as the supply axis,
       [#2706](https://github.com/2AMLogic/klayout-tools/issues/2706));
     - a name the netlist declares only as a top-level `.param` (no element
       of that name), where `alter` also has no effect -- the same rule and
@@ -4301,6 +4378,13 @@ hierarchy level. The netlist you wrote is not modified; a gated copy runs.
 Hierarchical probes of a wrapped instance gain one level
 (`xm1.xm1_klt`).
 
+**Verified on ngspice 46 with sky130A (2026-10-16, #3442).** Wrapping every
+`X` instance under `tt_mm` removed all spread (8/8 samples exactly `0.0`, the
+same as a mismatch-off run), so the PDK model cards do resolve the local
+`mc_mm_switch=0` in the wrapper's scope. With `xm1`/`xm2` randomised the
+`vdiff` stddev was 10.7 mV, and `m` is carried inside the wrapper verbatim.
+ngspice 42 has not been compared (unverified).
+
 Refused up front with a `SimError`: a glob that matches no `X` instance (or
 only non-subcircuit elements), a hierarchical glob (`.`/`/`), `vary:
 "process"`, a `models.pdk` without a known switch, and the `remote`/`batch`
@@ -5324,7 +5408,7 @@ the *response* echoes back.
 | `monte_carlo.k_sigma`    | number            | Run-wide sigma multiple `k` for the `mean ± k*stddev` limit-window check. Omit for no window check. Must be a non-negative number.                                      |
 | `monte_carlo.window_scope` | string          | `"pooled"` (default) or `"per_corner"`: which `mean ± k*stddev` window gates status. `"per_corner"` fails a measurement if any `by_corner[]` window fails and adds `failing_corners` to its `monte_carlo` block; see "Pooled vs. per corner". |
 | `analysis`               | object            | `kind` (e.g. `"op"`, `"dc"`, `"ac"`, `"tran"`) and `args`, the engine-syntax analysis-card arguments. One analysis per corner. `"op"` is a valid `kind`, but see `measurements[]` below — it cannot be paired with a `.meas op` card; measure an operating-point quantity with `measurements[].expr` instead. Required unless the request declares `analysis_steps` instead; declaring both is an application error (exit 1). |
-| `analysis_steps[]`       | array\<object\>   | Issue #2482. Additive alternative to `analysis`: an ordered, non-empty sequence of named solves run inside each corner's one deck — each step `{name, analysis: {kind, args}, alter?, reset?, measurements?}`. With it, the top-level `measurements[]` are **derived** `expr`s over `<step>.<measurement>` results. ngspice only (refused for `engine: "xyce"`); refuses `options.waveforms`/`--plot`. See "Several solves per corner (`analysis_steps[]`)" above for the full rules. |
+| `analysis_steps[]`       | array\<object\>   | Issue #2482. Additive alternative to `analysis`: an ordered, non-empty sequence of named solves run inside each corner's one deck — each step `{name, analysis: {kind, args}, alter?, reset?, measurements?}` (`alter` values are a finite number, or `{"pwl": [t0, v0, ...]}` for a `pwl`-declared source). With it, the top-level `measurements[]` are **derived** `expr`s over `<step>.<measurement>` results. ngspice only (refused for `engine: "xyce"`); refuses `options.waveforms`/`--plot`. See "Several solves per corner (`analysis_steps[]`)" above for the full rules. |
 | `measurements[]`         | array\<object\>   | `name` (stable response key) plus **exactly one** of `spice` (a verbatim `.meas` card), `expr` (issue #2533 — a single-line ngspice expression evaluated after the analysis inside `klt sim`'s own `.control` block; see "Measurements that are not `.meas` cards" above), `crossings` (issue #2868 — `{signal, level, edge?, from?, to?, max?}`, a threshold-crossing time series, `tran` only; see "Threshold-crossing time series" above), `cycle_mean` (issue #2947 — `{signal, align, level, cycles, edge?, from?}`, a time-weighted mean over whole reference cycles, `tran` only; see "Cycle-aligned mean" above), `energy` (issue #3033 — `{source, voltage, from?, to?}`, a source's net/gross/recovered energy and charge over a transient window, `tran` only; see "Source energy over a transient window" above), or `transfer` (issue #2923 — `{num, den, metric}`, an AC return-ratio metric, `ac` and local backends only; see "AC return-ratio metrics" above), plus optional `unit`, `limits` (`min`/`max`, either optional), `k_sigma` (per-measurement override of `monte_carlo.k_sigma`), and `plausible_range` (issue #2493 — `min`/`max`, either optional but at least one required; per-measurement plausibility bound, unscoped by `unit`; overrides `options.node_voltage_bounds` when both apply). No `limits` -> reported, never fails; no `plausible_range` (and no applicable `options.node_voltage_bounds`) -> plausibility check never runs, exactly as before this issue. Declaring both `spice` and `expr`, or neither, is an application error (exit 1). `spice`'s declared analysis type must be one ngspice's own `.MEASURE` implements (`dc`/`ac`/`tran`/`sp`) — there is no `.MEASURE OP`; a `.meas op` card is rejected up front (`SimError`), regardless of the request's own `analysis.kind`. `expr` must reduce to a single real scalar, must be one line, must have a name matching `[A-Za-z_][A-Za-z0-9_]*` unique across `measurements[]`, and is refused for `engine: "xyce"`. |
 | `options.node_voltage_bounds` | object       | Issue #2493. Run-wide plausibility default (`min`/`max`, either optional but at least one required) — see "Plausibility bounds" above. **Voltage-scoped**: only auto-applies to a measurement declaring `unit: "V"` that has no own `plausible_range`. Omit for no default (today's behaviour, unchanged). |
 | `options.timeout_s`      | number            | Per-corner wall-clock budget. Defaults to `120`. Exceeding it kills the process and yields an `error`-status corner.                                                    |

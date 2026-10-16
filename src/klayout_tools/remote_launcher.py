@@ -704,6 +704,20 @@ def _manifest_runner_field(image: dict[str, Any], key: str) -> str | None:
     return value
 
 
+def _manifest_pdk_variants(image: dict[str, Any]) -> list[str] | None:
+    """The ``pdk_variants`` a manifest entry publishes (issue #3251), or
+    ``None`` -- explicitly unknown -- when the entry is a legacy one without
+    the field or the value is not a non-empty list of non-empty strings."""
+    value = image.get("pdk_variants")
+    if (
+        not isinstance(value, list)
+        or not value
+        or not all(isinstance(item, str) and item.strip() for item in value)
+    ):
+        return None
+    return [item.strip() for item in value]
+
+
 def _latest_image(candidates: list[dict[str, Any]]) -> dict[str, Any]:
     # Most recently built wins -- `built_at` is an ISO-8601 string per the
     # manifest schema (see scripts/aws/build-remote-sim-ami.sh), so plain
@@ -724,8 +738,10 @@ def published_runner_identities(
     ``None`` for ``pdk`` or ``region`` widens the selection to every PDK key
     or every region: the batch fleet chooses its own Spot pool, so a client
     that does not pin a region cannot know which region's image it gets.
-    Each item is ``{"pdk", "region", "ami_id", "klt_version", "klt_ref"}``;
-    the last two are ``None`` for a legacy entry. Raises
+    Each item is ``{"pdk", "region", "ami_id", "klt_version", "klt_ref",
+    "pdk_variants"}``; the last three are ``None`` for a legacy entry
+    (``pdk_variants`` is the list of PDK variant directories the image
+    ships, issue #3251). Raises
     :class:`RemoteLaunchError` when the manifest cannot be loaded or ``pdk``
     has no AMI family, like :func:`resolve_ami`.
     """
@@ -752,6 +768,7 @@ def published_runner_identities(
                 "ami_id": latest["ami_id"],
                 "klt_version": _manifest_runner_field(latest, "klt_version"),
                 "klt_ref": _manifest_runner_field(latest, "klt_ref"),
+                "pdk_variants": _manifest_pdk_variants(latest),
             }
         )
     return identities
@@ -788,7 +805,8 @@ def ami_manifest_entry(
     built_at: str,
     klt_version: str,
     klt_ref: str,
-) -> dict[str, str]:
+    pdk_variants: list[str] | None = None,
+) -> dict[str, Any]:
     """One AMI-manifest ``images[]`` entry, as
     ``scripts/aws/build-remote-sim-ami.sh`` publishes it (issue #2851).
 
@@ -798,6 +816,12 @@ def ami_manifest_entry(
     new entry, so a build can never publish an image whose runner identity
     is unknown; they stay optional in the schema only so historical entries
     still load. Raises :class:`RemoteLaunchError` for an unusable value.
+
+    ``pdk_variants`` (issue #3251) optionally lists the PDK variant
+    directories the image ships (e.g. ``["gf180mcuD"]``); the batch backend
+    refuses a request for an unlisted variant before any S3 write. It is
+    left out of the entry when not given, so the entry stays loadable by
+    older clients.
     """
     version = (klt_version or "").strip()
     if version.startswith("klt "):
@@ -812,7 +836,7 @@ def ami_manifest_entry(
         raise RemoteLaunchError(
             f"klt_ref {klt_ref!r} must be a non-empty git ref without whitespace"
         )
-    return {
+    entry: dict[str, Any] = {
         "pdk": pdk,
         "region": region,
         "ami_id": ami_id,
@@ -822,6 +846,19 @@ def ami_manifest_entry(
         "klt_version": version,
         "klt_ref": ref,
     }
+    if pdk_variants is not None:
+        variants = [v.strip() for v in pdk_variants]
+        if (
+            not variants
+            or not all(variants)
+            or any(ch.isspace() for v in variants for ch in v)
+        ):
+            raise RemoteLaunchError(
+                f"pdk_variants {pdk_variants!r} must be a non-empty list of "
+                "PDK variant directory names without whitespace"
+            )
+        entry["pdk_variants"] = variants
+    return entry
 
 
 def resolve_ami(
