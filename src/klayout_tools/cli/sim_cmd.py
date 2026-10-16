@@ -40,7 +40,9 @@ see ``docs/cli/sim.md``'s "Operating-point lint" section.
 """
 
 import argparse
+import json
 import sys
+from pathlib import Path
 
 from ..env_provenance import render_path_field
 from ..op_sanity import OpSanityError, run_op_sanity
@@ -72,6 +74,13 @@ def run(args: argparse.Namespace) -> int:
             args.format,
             exit_code=EXIT_USAGE_ERROR,
         )
+    if getattr(args, "report", None) is not None and getattr(args, "op_lint", False):
+        return emit_error(
+            "sim",
+            "--report cannot be combined with --op-lint",
+            args.format,
+            exit_code=EXIT_USAGE_ERROR,
+        )
     if getattr(args, "op_lint", False):
         return _run_op_lint(args)
 
@@ -94,6 +103,17 @@ def run(args: argparse.Namespace) -> int:
         return emit_error("sim", str(exc), args.format, code=exc.code)
 
     deck_mode = report.get("mode") == "decks"
+    report_path = getattr(args, "report", None)
+    if report_path is not None:
+        # Issue #3057: same bytes `--format json` prints to stdout.
+        try:
+            path = Path(report_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(report, indent=2) + "\n")
+        except OSError as exc:
+            return emit_error(
+                "sim", f"could not write --report {report_path}: {exc}", args.format
+            )
     emit_success(report, args.format, _print_deck_text if deck_mode else _print_text)
 
     if deck_mode:
@@ -130,6 +150,7 @@ def _run_batch_set(args: argparse.Namespace) -> int:
             ("--resume", args.resume),
             ("--plot", args.plot),
             ("--op-lint", getattr(args, "op_lint", False)),
+            ("--report", getattr(args, "report", None)),
         )
         if value
     ]

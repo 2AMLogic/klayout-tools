@@ -614,6 +614,18 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     sim_parser.add_argument(
+        "--report",
+        dest="report",
+        metavar="FILE",
+        default=None,
+        help=(
+            "also write the JSON report (the same envelope `--format json` "
+            "prints) to FILE, creating parent directories; written only on "
+            "a successful run, always JSON whatever --format is. Not "
+            "combinable with --batch-set or --op-lint (issue #3057)"
+        ),
+    )
+    sim_parser.add_argument(
         "--backend",
         default=None,
         help=(

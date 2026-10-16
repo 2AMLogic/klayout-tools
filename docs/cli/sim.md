@@ -4,7 +4,7 @@ Run a SPICE process/voltage/temperature (PVT) corner matrix headlessly and
 report per-corner measurement pass/fail as structured data.
 
 ```
-klt sim <request.json> [-o|--outdir <dir>] [--backend <name>] [--max-workers <n>] [--hosts <n>] [--budget-s <seconds>] [--resume] [--fail-fast-probe] [--fail-on-diagnostic <code>] [--plot <dir>] [--op-lint [--op-lint-corner <corner_id>]] [--format text|json]
+klt sim <request.json> [-o|--outdir <dir>] [--report <file>] [--backend <name>] [--max-workers <n>] [--hosts <n>] [--budget-s <seconds>] [--resume] [--fail-fast-probe] [--fail-on-diagnostic <code>] [--plot <dir>] [--op-lint [--op-lint-corner <corner_id>]] [--format text|json]
 ```
 
 This is the build carried by the accepted spike,
@@ -16,7 +16,14 @@ this document (and the code) win.
 - `<request.json>` — path to a request document (see "Request" below). A
   *reference*, not inline JSON on the command line — corner matrices and
   measurement lists get long fast.
-- `--outdir` — override where per-corner logs/rawfiles are written when the
+- `--report` — also write the JSON report (byte-identical to what `--format
+  json` prints on stdout, whatever `--format` is) to this file, creating parent
+  directories. Works on every backend; `environment.remote` is included for
+  `batch`. Written only after a successful run: a run that fails with an error
+  envelope leaves the path untouched. Not combinable with `--batch-set` (which
+  writes a `report.json` per request under `--outdir`) or `--op-lint`.
+- `--outdir` / `-o` — a *directory*, not a report file: override where
+  per-corner logs/rawfiles are written when the
   request sets `options.keep_artifacts`. Defaults to a `.klt/sim/` directory
   next to the request file (the same "next to the input" convention as `klt
   render`'s default output directory).
