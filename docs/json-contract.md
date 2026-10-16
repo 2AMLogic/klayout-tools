@@ -90,6 +90,15 @@ request is unchanged — byte-identical deck, byte-identical response — and th
 `corners[].measurements[]` entry. See [`docs/cli/sim.md`](cli/sim.md)'s
 "Measurements that are not `.meas` cards (`measurements[].expr`)".
 
+`measurements[].optional` (issue #2925) is an opt-in boolean (default
+`false`) that extends the per-measurement `status` vocabulary with an
+additive value, `"absent"` (`value: null`, `margin: null`, info diagnostic
+`measurement_absent`), for a `spice`/`expr` measurement that legitimately has
+no value; it never makes its corner `error`. A request that omits the field is
+byte-identical, so no `schema_version` bump -- but a consumer that switches
+exhaustively on measurement `status` must treat `"absent"` as "no value, not a
+failure". See [`docs/cli/sim.md`](cli/sim.md)'s "Optional measurements".
+
 `measurements[].crossings` (issue #2868) is the third form and the first
 whose result is a **series**, not a scalar. It does *not* retype `value`:
 `value` stays a number (the count of crossings found), so every consumer that

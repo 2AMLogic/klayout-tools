@@ -13386,6 +13386,272 @@ def test_timeout_budget_hint_absent_when_well_inside_budget():
 
 
 # --------------------------------------------------------------------------- #
+# measurements[].optional / status "absent" (issue #2925)
+# --------------------------------------------------------------------------- #
+
+_OUT_OF_INTERVAL_LOG = (
+    "  Measurements for Transient Analysis\n\n"
+    "Error: measure  edge  when(WHEN) : out of interval\n"
+    " .meas tran edge when v(o)=5 rise=1 failed!\n\n"
+    "avg                 =   1.23448e-06\n"
+)
+
+
+def _optional_corner(tmp_path, monkeypatch, log_text, measurements, **extra):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": measurements,
+            **extra,
+        },
+    )
+    _stub_subprocess_run(monkeypatch, log_text=log_text)
+    return sim.run_sim(str(request))
+
+
+def _edge_and_avg(optional):
+    edge = {"name": "edge", "spice": ".meas tran edge when v(o)=5 rise=1"}
+    if optional is not None:
+        edge["optional"] = optional
+    return [edge, {"name": "avg", "spice": ".meas tran avg avg v(o)"}]
+
+
+def test_optional_absent_measurement_does_not_error_corner(tmp_path, monkeypatch):
+    report = _optional_corner(
+        tmp_path, monkeypatch, _OUT_OF_INTERVAL_LOG, _edge_and_avg(True)
+    )
+    (corner,) = report["corners"]
+    by_name = {m["name"]: m for m in corner["measurements"]}
+    assert by_name["edge"] == {
+        "name": "edge",
+        "value": None,
+        "unit": None,
+        "status": "absent",
+        "margin": None,
+    }
+    assert by_name["avg"]["value"] == pytest.approx(1.23448e-06)
+    assert corner["status"] == "pass"
+    assert report["errored"] == 0
+    info = [d for d in corner["diagnostics"] if d["code"] == "measurement_absent"]
+    assert [d["severity"] for d in info] == ["info"]
+    assert not [d for d in corner["diagnostics"] if d["severity"] == "error"]
+    rolled = {m["name"]: m for m in report["measurements"]}
+    assert rolled["edge"]["status"] == "absent"
+    assert rolled["edge"]["worst_case"] is None
+    assert rolled["avg"]["status"] == "pass"
+
+
+@pytest.mark.parametrize("flag", [None, False])
+def test_non_optional_absent_measurement_still_errors(tmp_path, monkeypatch, flag):
+    report = _optional_corner(
+        tmp_path, monkeypatch, _OUT_OF_INTERVAL_LOG, _edge_and_avg(flag)
+    )
+    (corner,) = report["corners"]
+    assert corner["status"] == "error"
+    assert {m["name"]: m["status"] for m in corner["measurements"]}["edge"] == "error"
+    assert not any(d["code"] == "measurement_absent" for d in corner["diagnostics"])
+
+
+def test_optional_does_not_mask_a_non_optional_missing_value(tmp_path, monkeypatch):
+    measurements = _edge_and_avg(True) + [
+        {"name": "other", "spice": ".meas tran other max v(o)"}
+    ]
+    report = _optional_corner(tmp_path, monkeypatch, _OUT_OF_INTERVAL_LOG, measurements)
+    (corner,) = report["corners"]
+    by_name = {m["name"]: m["status"] for m in corner["measurements"]}
+    assert by_name == {"edge": "absent", "avg": "pass", "other": "error"}
+    assert corner["status"] == "error"
+
+
+def test_optional_malformed_meas_card_stays_error(tmp_path, monkeypatch):
+    report = _optional_corner(
+        tmp_path,
+        monkeypatch,
+        _MEAS_ERR_LOG,
+        [
+            {
+                "name": "bad",
+                "spice": ".meas tran bad when v(o)=0.5*1.62",
+                "optional": True,
+            }
+        ],
+    )
+    (corner,) = report["corners"]
+    assert corner["measurements"][0]["status"] == "error"
+    assert corner["status"] == "error"
+
+
+def test_optional_absent_ignores_limits_and_plausible_range(tmp_path, monkeypatch):
+    measurements = _edge_and_avg(True)
+    measurements[0]["limits"] = {"min": 1.0}
+    measurements[0]["plausible_range"] = {"max": 2.0}
+    report = _optional_corner(tmp_path, monkeypatch, _OUT_OF_INTERVAL_LOG, measurements)
+    (corner,) = report["corners"]
+    assert corner["measurements"][0]["status"] == "absent"
+    assert corner["status"] == "pass"
+
+
+def test_all_optional_all_absent_is_not_checked(tmp_path, monkeypatch):
+    report = _optional_corner(
+        tmp_path,
+        monkeypatch,
+        "  Measurements for Transient Analysis\n\n",
+        [{"name": "edge", "spice": ".meas tran edge when v(o)=5", "optional": True}],
+    )
+    assert report["status"] == "not_checked"
+    assert report["measurements"][0]["status"] == "absent"
+
+
+@pytest.mark.parametrize("bad", ["true", 1, None])
+def test_non_boolean_optional_is_rejected(tmp_path, monkeypatch, bad):
+    measurements = _edge_and_avg(None)
+    measurements[0]["optional"] = bad
+    with pytest.raises(sim.SimError, match="non-boolean 'optional'"):
+        _optional_corner(tmp_path, monkeypatch, "", measurements)
+
+
+def test_optional_on_crossings_is_refused(tmp_path, monkeypatch):
+    with pytest.raises(sim.SimError, match="'optional' is not supported on"):
+        _optional_corner(
+            tmp_path,
+            monkeypatch,
+            "",
+            [
+                {
+                    "name": "x",
+                    "crossings": {"signal": "v(o)", "level": 0.5},
+                    "optional": True,
+                }
+            ],
+        )
+
+
+def test_optional_expr_without_value_is_absent(tmp_path, monkeypatch):
+    report = _optional_corner(
+        tmp_path,
+        monkeypatch,
+        "avg = 1.0e+00\n",
+        [
+            {"name": "avg", "expr": "v(o)"},
+            {"name": "gone", "expr": "v(nope)", "optional": True},
+        ],
+        analysis={"kind": "op", "args": ""},
+    )
+    statuses = {m["name"]: m["status"] for m in report["corners"][0]["measurements"]}
+    assert statuses == {"avg": "pass", "gone": "absent"}
+
+
+# A log with text but no `.meas` value: the engine ran and reported nothing for
+# the optional measurement. An *empty* log would instead trip the "engine wrote
+# no output" error (issue #3016), which is not an absent measurement.
+_NO_VALUE_LOG = "No. of Data Rows : 1\n"
+
+
+def test_rollup_mixed_absent_and_pass_corners(tmp_path, monkeypatch):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "op", "args": ""},
+            "corners": {"temperature_c": [27, 85]},
+            "measurements": [
+                {"name": "m", "expr": "v(out)", "optional": True, "limits": {"min": 0}}
+            ],
+        },
+    )
+
+    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+        deck_text = Path(cmd[2]).read_text()
+        log_path = cmd[cmd.index("-o") + 1]
+        hot = "85" in deck_text and ".temp 85" in deck_text
+        with open(log_path, "w", encoding="utf-8") as handle:
+            handle.write(_NO_VALUE_LOG if hot else "m = 1.0e+00\n")
+        return fake_completed("** ngspice-99\n")
+
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+    report = sim.run_sim(str(request))
+    statuses = sorted(c["measurements"][0]["status"] for c in report["corners"])
+    assert statuses == ["absent", "pass"]
+    (entry,) = report["measurements"]
+    assert entry["status"] == "pass"
+    assert entry["worst_case"]["value"] == pytest.approx(1.0)
+    assert report["errored"] == 0
+
+
+def test_monte_carlo_counts_absent_samples_separately(tmp_path, monkeypatch):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "op", "args": ""},
+            "monte_carlo": {"n": 4, "seed": 7, "vary": "mismatch"},
+            "measurements": [{"name": "m", "expr": "v(out)", "optional": True}],
+        },
+    )
+
+    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+        deck_text = Path(cmd[2]).read_text()
+        index = int(re.search(r"mc_sample_index=(\d+)", deck_text).group(1))
+        log_path = cmd[cmd.index("-o") + 1]
+        with open(log_path, "w", encoding="utf-8") as handle:
+            handle.write(_NO_VALUE_LOG if index % 2 else f"m = {1.0 + index:.6e}\n")
+        return fake_completed("** ngspice-99\n")
+
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+    report = sim.run_sim(str(request))
+    (entry,) = report["measurements"]
+    stats = entry["monte_carlo"]
+    assert (stats["n"], stats["errored"], stats["inconclusive"], stats["absent"]) == (
+        2,
+        0,
+        0,
+        2,
+    )
+    assert report["errored"] == 0
+
+
+def test_monte_carlo_every_sample_absent(tmp_path, monkeypatch):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "op", "args": ""},
+            "monte_carlo": {"n": 3, "seed": 7, "vary": "mismatch"},
+            "measurements": [{"name": "m", "expr": "v(out)", "optional": True}],
+        },
+    )
+    _stub_subprocess_run(monkeypatch, log_text="")
+    report = sim.run_sim(str(request))
+    (entry,) = report["measurements"]
+    assert entry["status"] == "absent"
+    assert entry["monte_carlo"]["absent"] == 3
+    assert entry["monte_carlo"]["n"] == 0
+    assert entry["monte_carlo"]["mean"] is None
+
+
+def test_monte_carlo_block_has_no_absent_key_unless_optional(tmp_path, monkeypatch):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "op", "args": ""},
+            "monte_carlo": {"n": 2, "seed": 7, "vary": "mismatch"},
+            "measurements": [{"name": "m", "expr": "v(out)"}],
+        },
+    )
+    _stub_subprocess_run(monkeypatch, log_text="m = 1.0e+00\n")
+    report = sim.run_sim(str(request))
+    assert "absent" not in report["measurements"][0]["monte_carlo"]
+
+
+# --------------------------------------------------------------------------- #
 # corners.units -- explicit, non-crossed unit list (issue #2993)
 # --------------------------------------------------------------------------- #
 

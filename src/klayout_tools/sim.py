@@ -248,6 +248,8 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "engine_killed",
         "engine_aborted",
         "measurement",
+        # An `optional` measurement with no value (issue #2925); info severity.
+        "measurement_absent",
         "unknown",
         # Opt-in convergence retry record (`options.retry_on_convergence_error`,
         # issue #2973), attached by `_run_corner_with_retry` after the retry ran.
@@ -1470,6 +1472,38 @@ def _validate_measurement_forms(measurements_spec: list[dict[str, Any]]) -> None
     _validate_expr_names_unique(measurements_spec)
 
 
+def _validate_optional_flag(name: Any, spec: dict[str, Any]) -> None:
+    """Issue #2925: ``optional``, when present, must be a real boolean."""
+    if "optional" in spec and not isinstance(spec["optional"], bool):
+        raise SimError(
+            f"measurement '{name}' has a non-boolean 'optional' "
+            f"({spec['optional']!r}): it must be true or false"
+        )
+
+
+def _validate_crossings_form(
+    name: Any, spec: dict[str, Any], scalar_form: bool
+) -> None:
+    """Issue #2868: ``crossings`` is a third, mutually exclusive measurement
+    form (``scalar_form`` = the entry also declares ``spice``/``expr``), and
+    issue #2925: it cannot be ``optional`` -- a signal with no crossings
+    reports a count of 0; a missing series is a read failure, not absent data."""
+    if scalar_form:
+        raise SimError(
+            f"measurement '{name}' declares 'crossings' together with "
+            f"'{'spice' if spec.get('spice') is not None else 'expr'}': they are "
+            "alternative forms of a measurement -- declare exactly one (use a "
+            "separate measurements[] entry for the scalar)"
+        )
+    if spec.get("optional") is True:
+        raise SimError(
+            f"measurement '{name}': 'optional' is not supported on "
+            "'crossings' (a signal with no crossings reports a count of "
+            "0; a missing series is a read failure, not absent data)"
+        )
+    sim_crossings.validate_crossings_spec(name, spec["crossings"])
+
+
 def _validate_rawfile_form(
     name: Any, spec: dict[str, Any], present: dict[str, bool]
 ) -> bool:
@@ -1508,6 +1542,7 @@ def _validate_measurement_form(spec: dict[str, Any]) -> None:
     has_spice = spec.get("spice") is not None
     has_expr = spec.get("expr") is not None
     has_crossings = sim_crossings.is_crossings(spec)
+    _validate_optional_flag(name, spec)
     has_cycle_mean = sim_cycle_mean.is_cycle_mean(spec)
     has_energy = sim_energy.is_energy(spec)
     if name is None or not (
@@ -1535,15 +1570,7 @@ def _validate_measurement_form(spec: dict[str, Any]) -> None:
     ):
         return
     if has_crossings:
-        # Issue #2868: a third, mutually exclusive form.
-        if has_spice or has_expr:
-            raise SimError(
-                f"measurement '{name}' declares 'crossings' together with "
-                f"'{'spice' if has_spice else 'expr'}': they are alternative "
-                "forms of a measurement -- declare exactly one (use a "
-                "separate measurements[] entry for the scalar)"
-            )
-        sim_crossings.validate_crossings_spec(name, spec["crossings"])
+        _validate_crossings_form(name, spec, has_spice or has_expr)
         return
     if has_spice and has_expr:
         raise SimError(
@@ -7992,23 +8019,13 @@ def _corner_measurement_results(
         value = _harvest_measurement_value(measurement_values, spec, is_xyce=is_xyce)
         unit = spec.get("unit")
         if value is None:
-            measurement_results.append(
-                {
-                    "name": name,
-                    "value": None,
-                    "unit": unit,
-                    "status": "error",
-                    "margin": None,
-                }
+            result, diagnostic, was_attributed = _no_value_measurement(
+                spec, meas_errors, save_mode=save_mode
             )
-            message = _no_value_message(spec, save_mode=save_mode)
-            cause = meas_errors.get(str(name).lower()) if spec.get("spice") else None
-            if cause is not None:
+            measurement_results.append(result)
+            diagnostics.append(diagnostic)
+            if was_attributed:
                 attributed.add(str(name).lower())
-                message += f" -- ngspice reported: {cause}"
-            diagnostics.append(
-                {"severity": "error", "code": "measurement", "message": message}
-            )
             continue
         # `_grade_measurement_value` owns the plausibility-pre-check ->
         # `limits` ordering (issue #2493) in one place, so there is no
@@ -8042,6 +8059,81 @@ def _corner_measurement_results(
                 }
             )
     return measurement_results, diagnostics, {}
+
+
+#: The measurement ``status`` of an ``optional`` measurement that produced no
+#: value (issue #2925): data ("this figure does not exist at this point"),
+#: not a failure -- it never makes its corner ``error``/``fail``.
+_ABSENT_STATUS = "absent"
+ABSENT_DIAGNOSTIC_CODE = "measurement_absent"
+
+
+#: ngspice's reason text when a ``.meas`` search (``WHEN``/``TRIG``/``TARG``/
+#: ``FIND ... WHEN``) never found its crossing in the analysis interval, e.g.
+#: ``Error: measure  x  when(WHEN) : out of interval`` (verified on ngspice-46).
+#: The one engine reason that means "this figure does not exist at this point";
+#: any other ``Error: measure`` reason is a malformed card and stays an error.
+_MEAS_ABSENT_CAUSE_RE = re.compile(r"out of interval", re.IGNORECASE)
+
+
+def _is_legitimately_absent(cause: str | None) -> bool:
+    """Whether a value-less ``optional`` measurement is absent data rather than
+    an engine failure: no ngspice ``Error: measure`` reason at all, or the
+    "out of interval" (never crossed) reason."""
+    return cause is None or _MEAS_ABSENT_CAUSE_RE.search(cause) is not None
+
+
+def _absent_measurement(
+    spec: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """``(result, diagnostic)`` for an ``optional: true`` measurement with no
+    value: ``value``/``margin`` null, ``status: "absent"``, and an
+    info-severity diagnostic. ``limits`` are not evaluated (no pass/fail claim)."""
+    name = spec["name"]
+    result = {
+        "name": name,
+        "value": None,
+        "unit": spec.get("unit"),
+        "status": _ABSENT_STATUS,
+        "margin": None,
+    }
+    diagnostic = {
+        "severity": "info",
+        "code": ABSENT_DIAGNOSTIC_CODE,
+        "message": f"optional measurement '{name}' produced no value "
+        "(reported absent; not an error)",
+    }
+    return result, diagnostic
+
+
+def _no_value_measurement(
+    spec: dict[str, Any],
+    meas_errors: dict[str, str],
+    *,
+    save_mode: str,
+) -> tuple[dict[str, Any], dict[str, Any], bool]:
+    """``(result, diagnostic, attributed)`` for a scalar measurement whose log
+    carried no value: ``absent`` when it is ``optional`` and the engine gave no
+    reason other than "never crossed" (issue #2925), else an ``error`` entry
+    with a ``measurement`` diagnostic. ``attributed`` is whether an ngspice
+    ``.meas`` error was tied to this measurement by name (issue #2826)."""
+    name = spec["name"]
+    cause = meas_errors.get(str(name).lower()) if spec.get("spice") else None
+    if spec.get("optional") is True and _is_legitimately_absent(cause):
+        result, diagnostic = _absent_measurement(spec)
+        return result, diagnostic, cause is not None
+    message = _no_value_message(spec, save_mode=save_mode)
+    if cause is not None:
+        message += f" -- ngspice reported: {cause}"
+    result = {
+        "name": name,
+        "value": None,
+        "unit": spec.get("unit"),
+        "status": "error",
+        "margin": None,
+    }
+    diagnostic = {"severity": "error", "code": "measurement", "message": message}
+    return result, diagnostic, cause is not None
 
 
 def _crossings_measurement_result(
@@ -10166,6 +10258,7 @@ def _sample_statistics(
     *,
     errored: int,
     inconclusive: int = 0,
+    absent: int | None = None,
     quantiles: tuple[float, ...],
     k_sigma: float | None,
     limits: dict[str, float] | None,
@@ -10193,6 +10286,13 @@ def _sample_statistics(
     many samples were set aside. ``n + errored + inconclusive`` always
     equals the number of samples drawn for this measurement.
 
+    ``absent`` (issue #2925) counts the samples of an ``optional`` measurement
+    that legitimately produced no value; the key is present only for such a
+    measurement (``absent is None`` omits it, keeping every other request's
+    block unchanged) and the identity becomes ``n + errored + inconclusive +
+    absent``. Absent samples are excluded from every statistic and are *not*
+    ``errored``, which keeps meaning "the simulation failed".
+
     ``stddev`` is the **sample** standard deviation (Bessel-corrected,
     ``n - 1``), the estimator appropriate for a finite Monte Carlo draw from
     a population, and is ``null`` for ``n < 2`` (undefined, never faked as
@@ -10209,10 +10309,12 @@ def _sample_statistics(
     if k_sigma is not None and mean is not None and stddev is not None:
         sigma_window = _evaluate_sigma_window(mean, stddev, k_sigma, limits)
 
+    absent_field = {} if absent is None else {"absent": absent}
     return {
         "n": n,
         "errored": errored,
         "inconclusive": inconclusive,
+        **absent_field,
         "mean": mean,
         "stddev": stddev,
         "min": ordered[0] if n else None,
@@ -10308,17 +10410,22 @@ def _monte_carlo_rollup(
         # itself. Neither is caught by the pre-existing `value is not None`
         # filter, since a distrusted sample has a real, non-null value --
         # that is exactly what makes it dangerous to the pooled statistics.
+        absent = sum(1 for _, m in pairs if m["status"] == _ABSENT_STATUS)
+        # The `absent` count is reported only for a measurement declared
+        # `optional`, so every other request keeps its exact statistics shape.
+        report_absent = absent if spec.get("optional") is True else None
         trusted = [
             (c, m)
             for c, m in pairs
             if c.get("status") != _INCONCLUSIVE_STATUS
-            and m["status"] != _INCONCLUSIVE_STATUS
+            and m["status"] not in (_INCONCLUSIVE_STATUS, _ABSENT_STATUS)
         ]
         values = [m["value"] for _, m in trusted if m["value"] is not None]
         return _sample_statistics(
             values,
             errored=len(trusted) - len(values),
-            inconclusive=len(pairs) - len(trusted),
+            inconclusive=len(pairs) - len(trusted) - absent,
+            absent=report_absent,
             quantiles=quantiles,
             k_sigma=k_sigma,
             limits=limits,
@@ -10372,6 +10479,8 @@ def _aggregate_measurement_status(
         return _INCONCLUSIVE_STATUS
     if "fail" in statuses:
         return "fail"
+    if statuses == {_ABSENT_STATUS}:
+        return _ABSENT_STATUS
     return "pass"
 
 
@@ -10428,6 +10537,8 @@ def _rollup_measurements(
         worst_case = None
         worst_margin = None
         for corner, m in entries:
+            if m["status"] == _ABSENT_STATUS:
+                continue
             margin = m["margin"]
             sort_key = margin if margin is not None else float("-inf")
             if worst_case is None or sort_key < worst_margin:

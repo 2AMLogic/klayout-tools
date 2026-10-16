@@ -175,7 +175,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   `device.combine_incomplete` (so `status` degrades to `inconclusive` instead
   of a false verdict). Additive; no `schema_version` bump. See
   `docs/cli/lvs.md`'s `device.combine_incomplete` section.
-
+- **`klt sim` `measurements[].optional`** (issue #2925): an opt-in boolean
+  (default `false`, existing reports unchanged). A `spice`/`expr` measurement
+  that legitimately has no value (no ngspice reason, or `out of interval`)
+  reports `status: "absent"`, `value: null`, an info `measurement_absent`
+  diagnostic, and no longer grades its corner `error`. Rollup, `worst_case` and
+  Monte Carlo statistics (new `absent` count, only for optional measurements)
+  treat it as data; `crossings` and `analysis_steps[]` refuse the flag. See
+  `docs/cli/sim.md` "Optional measurements".
 - **`klt pex` `model_mismatch.kind`** (issue #3054): the `model_mismatch`
   block gains an additive `kind` field, `"model_set"` when `reference_only`
   or `extracted_only` is non-empty and `"count_only"` when the model sets are
