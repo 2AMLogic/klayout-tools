@@ -4697,7 +4697,9 @@ def _add_stats_parser(subparsers: argparse._SubParsersAction) -> None:
             "(not instance-resolved); flattened_polygon_count/"
             "flattened_vertex_count are the instance-resolved counterparts, "
             "weighted by CellInstArray multiplicity like area_um2, matching "
-            "'klt layers --flattened'."
+            "'klt layers --flattened'. area_um2 is the raw sum of shape "
+            "areas (overlaps double-counted); merged_area_um2 is the "
+            "unioned area."
         ),
     )
     stats_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
@@ -4712,6 +4714,27 @@ def _add_stats_parser(subparsers: argparse._SubParsersAction) -> None:
         help=(
             "top cell to report on when the stream has more than one "
             "(required in that case; optional otherwise)"
+        ),
+    )
+    stats_parser.add_argument(
+        "--density-window",
+        type=float,
+        default=None,
+        metavar="UM",
+        help=(
+            "also report per-layer drawn-area fraction (merged geometry) over "
+            "square windows of this size in um tiled over the top-cell bbox; "
+            "edge windows are clipped and judged against their clipped area"
+        ),
+    )
+    stats_parser.add_argument(
+        "--window-layer",
+        action="append",
+        default=None,
+        metavar="L/D",
+        help=(
+            "restrict --density-window to this layer/datatype (repeatable); "
+            "default: every non-annotation layer with geometry"
         ),
     )
     _add_format_arg(stats_parser)
