@@ -139,6 +139,17 @@ resolve under the one shared root the normal open_pdks-multi-variant way
 PDK_ROOT=pdks/ihp-open-pdk PDK=ihp-sg13cmos5l klt pdk find
 ```
 
+**Known-incomplete sibling (issue #3133).** The pinned `ihp-sg13cmos5l`
+subtree is a `dev` commit, but `fetch-ihp-sg13g2.sh` installs the `ihp-sg13g2`
+sibling at release `v0.3.0`, which predates the SG13CMOS5L merge. Some
+symlink targets may exist only on `dev`, so on a clean install 262 of 530
+links dangled (as of `159527a5`, 2026-10; re-measure). The fetcher now counts
+dangling links after extraction and on the cached re-run, prints a sample and
+the sibling version, and warns loudly; it still exits 0 (models-only use
+works) unless `--strict` is passed (exit 3). `klt pdk check` reports the same
+condition. Repinning the sibling is a separate human decision (it changes a
+checksummed pin used by CI).
+
 **Fetching the PDK alone does not make it simulatable.** `fetch-ihp-sg13g2.sh`
 ships the PDK's Verilog-A compact-model *sources*
 (`libs.tech/verilog-a/{psp103,psp103_nqs,r3_cmc,mosvar}`) but no compiled

@@ -1083,6 +1083,18 @@ def load_request(request_path: str) -> dict[str, Any]:
     )
 
 
+def _refuse_param_axis(point: Any) -> None:
+    """Issue #3035: the lint's deck does not apply the parameter axis, so it
+    would bias the netlist's own defaults while echoing a corner that names
+    other values."""
+    if point.params:
+        raise OpSanityError(
+            f"corner '{point.corner_id}' carries corners.params, which the "
+            "operating-point lint does not apply; lint a request without a "
+            "parameter axis"
+        )
+
+
 def run_op_sanity(
     request_path: str,
     *,
@@ -1149,6 +1161,7 @@ def run_op_sanity(
         point = selected[0]
     else:
         point = points[0]
+    _refuse_param_axis(point)
 
     models = request.get("models") or {}
     models_lib: str | None = None

@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://2amlogic.com/klayout-tools/schemas/cells-response.schema.json",
+  "title": "klt cells --format json success response, version 1",
+  "description": "Success payload of `klt cells`. See docs/cli/cells.md.",
+  "type": "object",
+  "required": ["schema_version", "file", "dbu_um", "cell_count", "top_cell_count", "cells"],
+  "properties": {
+    "schema_version": {"type": "integer", "const": 1},
+    "file": {"type": "string"},
+    "dbu_um": {"type": "number"},
+    "cell_count": {"type": "integer", "minimum": 0},
+    "top_cell_count": {"type": "integer", "minimum": 0},
+    "cells": {"type": "array", "items": {"$ref": "#/$defs/cell"}}
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "cell": {
+      "type": "object",
+      "required": ["name", "index", "is_top", "shapes", "instances", "children", "parents", "bbox_um"],
+      "properties": {
+        "name": {"type": "string"},
+        "index": {"type": "integer", "minimum": 0},
+        "is_top": {"type": "boolean"},
+        "shapes": {"type": "integer", "minimum": 0},
+        "instances": {"type": "integer", "minimum": 0},
+        "children": {"type": "array", "items": {"type": "string"}},
+        "parents": {"type": "array", "items": {"type": "string"}},
+        "bbox_um": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["left", "bottom", "right", "top"],
+              "properties": {
+                "left": {"type": "number"},
+                "bottom": {"type": "number"},
+                "right": {"type": "number"},
+                "top": {"type": "number"}
+              },
+              "additionalProperties": true
+            }
+          ]
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}
