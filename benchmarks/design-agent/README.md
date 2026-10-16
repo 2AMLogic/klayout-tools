@@ -336,11 +336,12 @@ constants are checked against the interactive provider's.
   `seed_from`, is part of the run's seed identity, and is round zero of the
   refine phase, so `gen+refine` can never score worse than its seed. With no
   valid `gen-only` seed the run is `not_run_no_seed` (unscored, counted).
-- **Refinement sufficiency (measured).** `klt draw` is write-only from scratch,
-  so refinement is **additive only** today (seed placed as a `gen-compose`
-  `blocks[].cell` plus a `draw` patch). Nothing deletes, moves or resizes seeded
-  geometry. Follow-up: #3378. Reports must disclose "additive-only" until it
-  lands. `tests/test_design_agent_benchmark_layout.py` pins the measurement.
+- **Refinement sufficiency (measured).** `klt draw` has a read-modify-write
+  mode (`base_gds` plus `erase_um` windows, #3378), so refinement can trim or
+  replace seeded geometry as well as add to it (seed placed as a `gen-compose`
+  `blocks[].cell` plus a `draw` patch). The verdict is `sufficient` and reports
+  need no additive-only disclosure.
+  `tests/test_design_agent_benchmark_layout.py` pins the measurement.
 - **Eligibility.** A task is in or out for all three arms: frozen netlist, a
   DRC+LVS-clean reference layout, a generator recipe reaching a valid layout,
   negative controls, open PDK.
@@ -385,7 +386,7 @@ unchanged and never read any `layout-*` file.
 | Question | Outcome |
 |---|---|
 | Seed `gen+refine` from the agent's own `gen-only` best, or a fixed reference composition? | Own best valid `gen-only` (`seeding_decision`); a fixed-reference seed is a later ablation, not a protocol change. |
-| Does `klt draw` expose enough edit primitives for a fair refinement arm? | Additive only; subtractive edits missing → follow-up #3378 (`refinement_sufficiency`). |
+| Does `klt draw` expose enough edit primitives for a fair refinement arm? | Yes: `klt draw` `base_gds` + `erase_um` (#3378) covers subtractive edits (`refinement_sufficiency`). |
 | Cost envelope for live-agent CI (cf. #1781)? | `budget` block: existing per-run ceilings, `usage` accounting, live off by default, one-task smoke. |
 
 ## Current task set

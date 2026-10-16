@@ -106,8 +106,8 @@ def test_protocol_records_seeding_and_refinement_decisions(
     # Issue #3024: prefer the same run's best valid gen-only result.
     assert protocol["seeding_decision"]["decision"] == "same_run_best_valid_gen_only"
     sufficiency = protocol["refinement_sufficiency"]
-    assert sufficiency["verdict"] == "additive_only"
-    assert sufficiency["gap"] and sufficiency["follow_up"]
+    assert sufficiency["verdict"] == "sufficient"
+    assert sufficiency["gap"] is None and sufficiency["follow_up"] is None
 
 
 def test_protocol_rejects_unknown_field(protocol: dict[str, Any]) -> None:
@@ -530,26 +530,34 @@ def _klt(*argv: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_klt_draw_cannot_edit_an_existing_stream(tmp_path: Path) -> None:
+def test_klt_draw_can_edit_an_existing_stream(tmp_path: Path) -> None:
     """The measurement behind protocol `refinement_sufficiency.verdict`
-    'additive_only': `klt draw` rejects any request key that would name an
-    existing stream to modify or a region to erase. If this starts passing
-    with such a key accepted, the recorded verdict and its follow-up are
-    stale and the protocol version must be bumped."""
-    shape = {"layer": [66, 20], "rect_um": [0, 0, 1, 1]}
-    for key, value in (("base_gds", "seed.gds"), ("erase_um", [[0, 0, 1, 1]])):
-        proc = _klt(
-            "draw",
-            "--params",
-            json.dumps({"shapes": [shape], key: value}),
-            "-o",
-            str(tmp_path / "out.gds"),
-            "--format",
-            "json",
-        )
-        assert proc.returncode == 1, (key, proc.stdout, proc.stderr)
-        assert key in proc.stderr
-        assert not (tmp_path / "out.gds").exists()
+    'sufficient': `klt draw` starts from an existing stream (`base_gds`) and
+    erases a window of it (`erase_um`). If this stops passing, the recorded
+    verdict is stale and the protocol version must be bumped."""
+    layer = [66, 20]
+    seed, out = tmp_path / "seed.gds", tmp_path / "out.gds"
+    made = _klt(
+        "draw",
+        "--params",
+        json.dumps({"shapes": [{"layer": layer, "rect_um": [0, 0, 1, 1]}]}),
+        "-o",
+        str(seed),
+        "--format",
+        "json",
+    )
+    assert made.returncode == 0, (made.stdout, made.stderr)
+    edit = {
+        "base_gds": str(seed),
+        "erase_um": [{"rect_um": [-1, -1, 2, 2], "layer": layer}],
+        "shapes": [{"layer": layer, "rect_um": [3, 0, 4, 1]}],
+    }
+    proc = _klt(
+        "draw", "--params", json.dumps(edit), "-o", str(out), "--format", "json"
+    )
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert json.loads(proc.stdout)["erased_shape_count"] >= 1
+    assert out.exists()
 
 
 # --------------------------------------------------------------------------

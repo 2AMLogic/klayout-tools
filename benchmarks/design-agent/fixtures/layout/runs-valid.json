@@ -2,7 +2,7 @@
   {
     "schema": "klt.design_agent_benchmark.layout_run/1",
     "run_id": "fixture-draw-only-1",
-    "protocol_sha256": "6c76fd34f258025b11e6936adae0aa04dd59547307d2db037c63e1b998e1ef8d",
+    "protocol_sha256": "c05526c1a26afa3f9aeafd873ddea2c4d038b0c5ecfcba9e5d8f21c6af59e3cd",
     "task_id": "five-transistor-ota-layout",
     "task_sha256": "60806484c248b4333cbfe3bd7d07925c8fc2f6149ef0e123a998c07bd96af5e0",
     "arm": "draw-only",
@@ -70,7 +70,7 @@
   {
     "schema": "klt.design_agent_benchmark.layout_run/1",
     "run_id": "fixture-gen-only-1",
-    "protocol_sha256": "6c76fd34f258025b11e6936adae0aa04dd59547307d2db037c63e1b998e1ef8d",
+    "protocol_sha256": "c05526c1a26afa3f9aeafd873ddea2c4d038b0c5ecfcba9e5d8f21c6af59e3cd",
     "task_id": "five-transistor-ota-layout",
     "task_sha256": "60806484c248b4333cbfe3bd7d07925c8fc2f6149ef0e123a998c07bd96af5e0",
     "arm": "gen-only",
@@ -145,7 +145,7 @@
   {
     "schema": "klt.design_agent_benchmark.layout_run/1",
     "run_id": "fixture-gen-refine-1",
-    "protocol_sha256": "6c76fd34f258025b11e6936adae0aa04dd59547307d2db037c63e1b998e1ef8d",
+    "protocol_sha256": "c05526c1a26afa3f9aeafd873ddea2c4d038b0c5ecfcba9e5d8f21c6af59e3cd",
     "task_id": "five-transistor-ota-layout",
     "task_sha256": "60806484c248b4333cbfe3bd7d07925c8fc2f6149ef0e123a998c07bd96af5e0",
     "arm": "gen+refine",

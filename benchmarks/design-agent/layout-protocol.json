@@ -59,15 +59,15 @@
   },
   "refinement_sufficiency": {
     "question": "Does `klt draw` today expose enough edit primitives for a fair refinement arm? (#2252 open question 2)",
-    "verdict": "additive_only",
+    "verdict": "sufficient",
     "evidence": [
-      "`klt draw` takes only {dbu_um, shapes, labels} and rejects any other key (docs/cli/draw.md 'Unrecognised keys'): it cannot read an existing stream, so it cannot edit one in place.",
-      "Additive refinement is expressible today: `klt gen-compose` places the seed as a `blocks[].cell` library cell next to a `klt draw` patch cell and routes between them (docs/cli/gen-compose.md, #1189).",
-      "`klt clip --region` can keep a window of a stream, but nothing deletes, moves, or resizes a specific seed shape or erases a window while keeping the rest."
+      "`klt draw` read-modify-write mode (#3378): `params.base_gds` starts from an existing stream and `params.erase_um` windows remove its geometry before `shapes` are added (docs/cli/draw.md `base_gds`/`erase_um`), so a seeded shape can be trimmed or replaced in place.",
+      "The response reports `erased_shape_count` / `erased_label_count` when `base_gds` is given, so an erase is observable in the recorded call.",
+      "Additive refinement is also still expressible: `klt gen-compose` places the seed as a `blocks[].cell` library cell next to a `klt draw` patch cell and routes between them (docs/cli/gen-compose.md, #1189)."
     ],
-    "gap": "No verb removes or modifies existing geometry in a stream (delete a shape, erase a window, move or resize a rectangle). Refinement that trims or shifts seeded geometry -- the usual way to recover area -- is not expressible.",
-    "consequence": "gen+refine is run with the additive surface above and every report must disclose that it is additive-only until the follow-up lands; a negative gen+refine result is not evidence against refinement itself.",
-    "follow_up": "smallest capability: a read-modify-write mode for `klt draw` (`base_gds` plus `erase_um` windows), tracked in #3378."
+    "gap": null,
+    "consequence": "gen+refine is run with both the additive and the subtractive surface; no additive-only disclosure is required in reports.",
+    "follow_up": null
   },
   "task_eligibility": {
     "description": "A task enters the comparison only if every rule holds; a task failing any rule is excluded from all three arms, never from just one, so arms stay comparable.",
