@@ -5482,6 +5482,14 @@ def _series_chain_lengths(pre_circuit: Any, class_name: str, interior: set[str])
     return chains
 
 
+def _resistor_head_term_ohm(device: Any, fixed_offset: float, end_term: float) -> float:
+    """``fixed_offset_ohm + end_term_ohm_um / W`` for one resistor `device`
+    (the head term the #559 correction charges once; ``end_term_ohm_um`` is
+    skipped when the class has no usable ``W``, as the correction does)."""
+    width = device.parameter("W") if end_term else None
+    return fixed_offset + (end_term / width if width else 0.0)
+
+
 def _series_fold_offset_absorbed_warnings(
     pre_combine_netlist: Any,
     netlist: Any,
@@ -5508,9 +5516,9 @@ def _series_fold_offset_absorbed_warnings(
     nothing).
     """
     offsets = {
-        resistor.name.lower(): resistor.fixed_offset_ohm
+        resistor.name.lower(): (resistor.fixed_offset_ohm, resistor.end_term_ohm_um)
         for resistor in deck.resistors
-        if resistor.fixed_offset_ohm
+        if resistor.fixed_offset_ohm or resistor.end_term_ohm_um
     }
     if combine_incomplete or not offsets:
         return []
@@ -5527,9 +5535,11 @@ def _series_fold_offset_absorbed_warnings(
         chain_cache: dict[str, Any] = {}
         for device in circuit.each_device():
             device_class = device.device_class()
-            offset = offsets.get(device_class.name.lower())
-            if offset is None:
+            terms = offsets.get(device_class.name.lower())
+            if terms is None:
                 continue
+            fixed_offset, end_term = terms
+            offset = _resistor_head_term_ohm(device, fixed_offset, end_term)
             net_a, net_b = device.net_for_terminal(0), device.net_for_terminal(1)
             if net_a is None or net_b is None:
                 continue
@@ -5553,8 +5563,9 @@ def _series_fold_offset_absorbed_warnings(
                     f"options.combine_devices folded {folded} series "
                     f"{device_class.name} primitives in circuit "
                     f"{circuit.name!r} into one device ({device.name or '<unnamed>'}) "
-                    f"and charged fixed_offset_ohm ({offset!r} ohm) once, so "
-                    f"{absorbed!r} ohm ((N-1) * fixed_offset_ohm) the drawn chain "
+                    f"and charged the head term ({offset!r} ohm: fixed_offset_ohm "
+                    f"+ end_term_ohm_um / W) once, so {absorbed!r} ohm "
+                    "((N-1) * head term) the drawn chain "
                     "physically carries was not charged to the compare "
                     "(see docs/cli/lvs.md, "
                     "'device.series_fold_offset_absorbed')",
@@ -5564,7 +5575,8 @@ def _series_fold_offset_absorbed_warnings(
                         "device": device.name or None,
                         "class": device_class.name,
                         "folded_primitives": folded,
-                        "fixed_offset_ohm": offset,
+                        "fixed_offset_ohm": fixed_offset,
+                        "end_term_ohm": offset - fixed_offset,
                         "absorbed_offset_ohm": absorbed,
                         "fraction_of_r": fraction,
                     },

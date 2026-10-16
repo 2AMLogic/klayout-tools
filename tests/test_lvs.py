@@ -4126,7 +4126,11 @@ def test_series_fold_offset_absorbed_is_disclosed_as_warning(tmp_path):
     details = entries[0]["details"]
     assert details["class"] == "res_high_po"
     assert details["folded_primitives"] == segments
-    assert details["fixed_offset_ohm"] == pytest.approx(_RES_HIGH_PO_FIXED_OFFSET_OHM)
+    # The deck splits the w=1um head term into a constant part and a
+    # width-normalized part (#3049); the disclosure sums both.
+    assert details["fixed_offset_ohm"] + details["end_term_ohm"] == pytest.approx(
+        _RES_HIGH_PO_FIXED_OFFSET_OHM
+    )
     absorbed = (segments - 1) * _RES_HIGH_PO_FIXED_OFFSET_OHM
     assert details["absorbed_offset_ohm"] == pytest.approx(absorbed)
     r_final = _series_res_high_po_expected_r_ohm(segments, 10.0, offset_count=1)

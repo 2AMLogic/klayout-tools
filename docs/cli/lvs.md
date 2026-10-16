@@ -3146,7 +3146,9 @@ supplied (issue #3017). `klt lvs` charges a deck resistor row's
 `fixed_offset_ohm` head/end term once per post-combine device (issue #559), so
 a chain of N separately contacted primitives folded into one device compares
 clean against a one-element reference. A real contacted chain, though,
-carries N head/end terms; the fold absorbs the other `(N-1) * fixed_offset_ohm`.
+carries N head/end terms; the fold absorbs the other `(N-1)` of them, where a
+term is `fixed_offset_ohm + end_term_ohm_um / W` (the width-normalized part,
+issue #3049, is included).
 This warning discloses that, once per folded device (`side: "layout"`; the
 reference never receives the correction):
 
@@ -3154,8 +3156,9 @@ reference never receives the correction):
 |---|---|
 | `circuit`, `device`, `class` | The surviving device. |
 | `folded_primitives` | N, the number of series primitives folded into it. |
-| `fixed_offset_ohm` | The deck row's offset, charged once. |
-| `absorbed_offset_ohm` | `(N-1) * fixed_offset_ohm`, not charged to the compare. |
+| `fixed_offset_ohm` | The deck row's constant offset, charged once. |
+| `end_term_ohm` | `end_term_ohm_um / W` for the folded device, charged once (`0` when the row has none). |
+| `absorbed_offset_ohm` | `(N-1) * (fixed_offset_ohm + end_term_ohm)`, not charged to the compare. |
 | `fraction_of_r` | `absorbed_offset_ohm` divided by the folded device's final `R`. |
 
 N is derived from the pre-combine topology: the survivor's two end nets are
@@ -3164,9 +3167,9 @@ reported. When a parallel primitive or a second chain joins the same two end
 nets, N cannot be attributed to the survivor and no entry is emitted rather
 than a guessed one. No entry is emitted when `combine_devices` is off or
 excludes the resistor class, no `layout.deck` is given, the class has
-`fixed_offset_ohm == 0`, or N is 1. Covers `options.combine_devices` only, not
-`options.combine_devices_per_circuit`. The absorption of `end_term_ohm_um` /
-`width_offset_um` is not disclosed.
+neither `fixed_offset_ohm` nor `end_term_ohm_um`, or N is 1. Covers `options.combine_devices` only, not
+`options.combine_devices_per_circuit`. The effect of `width_offset_um` is not
+disclosed.
 
 #### `topology.flattened`: `options.flatten_reference`/`options.flatten_layout` collapsed a side's hierarchy before comparing
 
