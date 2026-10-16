@@ -9077,9 +9077,9 @@ def _power_pins_derivation(
         # Issue #2707: multi-library derivation. `reason` names each library
         # that could not be corroborated on its own.
         weak = [entry for entry in libraries if not entry["corroborated"]]
-        reason = None
+        lib_reason = None
         if weak:
-            reason = (
+            lib_reason = (
                 "the power/ground pin universe is derived per library "
                 "(union of each library's own intersection), and "
                 + "; ".join(
@@ -9100,7 +9100,7 @@ def _power_pins_derivation(
             "masters": list(masters),
             "master_count": len(masters),
             "corroborated": corroborated,
-            "reason": reason,
+            "reason": lib_reason,
             "libraries": libraries,
         }
     reason: str | None = None
