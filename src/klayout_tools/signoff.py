@@ -478,6 +478,17 @@ claim is disclosed as ``artifact_binding.regeneration`` with
 before. Items 9 and 10 neither grade nor echo the block. See
 :func:`_regeneration_claim`.
 
+### Operator-approved generator execution (issue #3289)
+
+``klt signoff --allow-generator-exec --generator-approvals FILE`` (default
+off) lets ``klt`` itself run the claimed ``generator`` -- only if trusted
+approvals **outside the manifest** bind that exact interpreter, script
+(content hash), arguments and artifact -- on the existing Spot batch lifecycle,
+and byte-compare the collected output with the committed artifact. See
+:mod:`.signoff_generator_batch` and :func:`_execute_regeneration`. Without the
+opt-in, or without a matching approval, nothing is submitted and the row is
+the nonexecuting attestation above (``executed_by_klt: false``).
+
 ## Power delivery (structural): item 11 <- `klt erc` + `klt lvs` (+ P&R) (issue #2025)
 
 Every item above is proved by **one** artifact. T1 item 11 ("Power delivery
@@ -960,6 +971,11 @@ from .signoff_envelopes import _StaEnvelope as _StaEnvelope
 from .signoff_envelopes import _StaRequired as _StaRequired
 from .signoff_envelopes import _YieldEnvelope as _YieldEnvelope
 from .signoff_envelopes import _YieldRequired as _YieldRequired
+from .signoff_generator_batch import (
+    GeneratorExecution,
+    match_approval,
+    run_approved_generator,
+)
 
 # T1 item 11's ("Power delivery (structural)") grading subsystem lives in its
 # own module (issue #2626, split out of this one at ~7600 lines), following
@@ -4573,6 +4589,7 @@ def build_tier_report(
     *,
     tiers_doc: str | Path | None = None,
     repo_root: str | Path | None = None,
+    generator_exec: GeneratorExecution | None = None,
 ) -> dict[str, Any]:
     """Grade a block manifest against the T1-T4 evidence-tier item skeleton
     mechanically parsed from ``docs/design-evidence-tiers.md``
@@ -4608,6 +4625,11 @@ def build_tier_report(
     unpacked CI artifact) needs this to resolve repo-scoped citations at
     all; with it absent, behaviour is exactly as before this parameter
     existed. The caller validates the directory exists.
+
+    ``generator_exec`` (``klt signoff --allow-generator-exec``, issue #3289)
+    opts in to running an operator-approved item-1/2 regeneration generator
+    on the batch runner; ``None`` (the default) keeps the nonexecuting
+    attestation grading byte-identical. See :func:`_execute_regeneration`.
 
     ``manifest`` (JSON in)::
 
@@ -5201,6 +5223,7 @@ def build_tier_report(
                         t1_item["id"] in spec_rows_by_item
                         and spec_rows_by_item[t1_item["id"]] is None
                     ),
+                    generator_exec=generator_exec,
                 )
             total += 1
             met_count += entry["status"] == "met"
@@ -6083,6 +6106,7 @@ def _grade_evidence(
     allowed_kinds: set[str] | None = None,
     item_id: int | None = None,
     repo_root: str | Path | None = None,
+    generator_exec: GeneratorExecution | None = None,
 ) -> tuple[str, str | None, dict[str, Any] | None, dict[str, Any]]:
     """Grade one resolved evidence ``spec`` (:func:`_normalize_evidence_entry`)
     and return ``(status, reason, citation, failure_detail)``.
@@ -6093,6 +6117,11 @@ def _grade_evidence(
     ``repo_root`` (``klt signoff --repo-root``, issue #2878) is forwarded to
     :func:`_resolve_evidence` -- an explicitly named repo root replaces the
     ``.git``-ancestor discovery for ``scope: "repo"`` input echoes.
+
+    ``generator_exec`` (``klt signoff --allow-generator-exec``, issue #3289)
+    is the opt-in for running an *operator-approved* item-1/2 generator on the
+    batch runner; ``None`` (the default) leaves grading exactly as before. See
+    :func:`_execute_regeneration`.
 
     ``status`` is ``"met"`` or ``"unmet"``. ``reason`` is ``None`` when
     ``status == "met"``, otherwise one of the ``_REASON_*`` constants
@@ -6240,11 +6269,23 @@ def _grade_evidence(
         return "unmet", _REASON_STALE_EVIDENCE, None, {}
 
     citation = _citation(resolution)
+    execution_detail: dict[str, Any] = {}
     anchored_refusal = _bind_anchored_citation(
-        check_kind, item_id, resolution, citation
+        check_kind,
+        item_id,
+        resolution,
+        citation,
+        repo_root=repo_root,
+        generator_exec=generator_exec,
+        execution_detail=execution_detail,
     )
     if anchored_refusal is not None:
-        return "unmet", anchored_refusal, None, _input_members_detail(resolution)
+        return (
+            "unmet",
+            anchored_refusal,
+            None,
+            {**_input_members_detail(resolution), **execution_detail},
+        )
     return "met", None, citation, {}
 
 
@@ -6309,6 +6350,10 @@ def _bind_anchored_citation(
     item_id: int | None,
     resolution: Mapping[str, Any],
     citation: dict[str, Any],
+    *,
+    repo_root: str | Path | None = None,
+    generator_exec: GeneratorExecution | None = None,
+    execution_detail: dict[str, Any] | None = None,
 ) -> str | None:
     """For a ``"generic"`` citation of an artifact-anchored item (issue
     #2718), require the bound artifact to re-hash to the recorded hash and
@@ -6338,10 +6383,107 @@ def _bind_anchored_citation(
         )
         if refusal is not None:
             return refusal
+        if regeneration is not None and generator_exec is not None:
+            regeneration, refusal, detail = _execute_regeneration(
+                generator_exec, resolution, regeneration, repo_root
+            )
+            if execution_detail is not None:
+                execution_detail.update(detail)
+            if refusal is not None:
+                return refusal
         if regeneration is not None:
             binding["regeneration"] = regeneration
     citation["artifact_binding"] = binding
     return None
+
+
+def _bound_artifact(
+    resolution: Mapping[str, Any], repo_root: str | Path | None
+) -> tuple[str, str] | None:
+    """``(root, repo-relative path)`` of the single artifact a ``"generic"``
+    citation is bound to, or ``None`` when it cannot be pinned down: a
+    multi-member binding, no candidate that re-hashes to the bound hash, no
+    repo root, or an artifact outside that root."""
+    if resolution.get("input_members"):
+        return None
+    spec = resolution["spec"]
+    evidence_file = resolution.get("file")
+    evidence_dir = (
+        os.path.dirname(os.path.abspath(evidence_file)) if evidence_file else None
+    )
+    root = (
+        repo_root
+        if repo_root is not None
+        else find_repo_root(evidence_dir or spec.get("cwd") or os.getcwd())
+    )
+    if root is None:
+        return None
+    for candidate in _input_artifact_candidates(
+        "generic", resolution["envelope"], spec, evidence_file, repo_root
+    ):
+        if f"sha256:{sha256_file(candidate)}" != resolution["content_hash"]:
+            continue
+        relative = os.path.relpath(os.path.realpath(candidate), os.path.realpath(root))
+        if relative == os.pardir or relative.startswith(os.pardir + os.sep):
+            return None
+        return str(root), relative.replace(os.sep, "/")
+    return None
+
+
+def _execute_regeneration(
+    generator_exec: GeneratorExecution,
+    resolution: Mapping[str, Any],
+    regeneration: dict[str, Any],
+    repo_root: str | Path | None,
+) -> tuple[dict[str, Any] | None, str | None, dict[str, Any]]:
+    """Run an operator-approved item-1/2 generator on the batch runner and
+    grade the collected output (issue #3289; opt-in, see
+    :mod:`.signoff_generator_batch`).
+
+    Returns ``(regeneration, reason, detail)``. The manifest only *requests* a
+    generator; :func:`~.signoff_generator_batch.match_approval` decides, against
+    approvals from outside the manifest, whether it may run. No match (or a
+    binding that cannot be pinned to one repo artifact) returns
+    ``regeneration`` untouched -- the nonexecuting attestation, with its
+    ``executed_by_klt: false`` -- and submits nothing. A match runs; then:
+
+    - byte-identical output -> the disclosure gains ``executed_by_klt: true``
+      and an ``execution`` block (recipe, command, script hash, input tree,
+      output hash, remote job);
+    - a byte difference -> :data:`_REASON_STALE_ARTIFACT`;
+    - any failure, timeout, missing/incomplete output, incompatible runner or
+      failed collection -> :data:`_REASON_CHECK_ERRORED`, never ``met``.
+
+    ``detail`` carries ``generator_execution`` for either refusal.
+    """
+    bound = _bound_artifact(resolution, repo_root)
+    if bound is None:
+        return regeneration, None, {}
+    root, artifact = bound
+    matched = match_approval(
+        generator_exec.approvals, regeneration["generator"], artifact
+    )
+    if matched is None:
+        return regeneration, None, {}
+    approval, arguments = matched
+    outcome = run_approved_generator(
+        generator_exec,
+        approval,
+        arguments,
+        root=root,
+        committed_hash=resolution["content_hash"],
+        artifact=artifact,
+    )
+    if outcome.state == "fresh":
+        return (
+            {**regeneration, "executed_by_klt": True, "execution": outcome.evidence},
+            None,
+            {},
+        )
+    detail = {"generator_execution": outcome.evidence}
+    if outcome.state == "stale":
+        return None, _REASON_STALE_ARTIFACT, detail
+    return None, _REASON_CHECK_ERRORED, detail
 
 
 def _regeneration_claim(
@@ -6992,6 +7134,7 @@ def _build_tier_item(
     repo_root: str | Path | None = None,
     spec_rows: list[dict[str, Any]] | None = None,
     spec_rows_invalid: bool = False,
+    generator_exec: GeneratorExecution | None = None,
 ) -> dict[str, Any]:
     """Grade one T1 checklist item against ``evidence`` -- see
     :func:`build_tier_report`'s docstring for the full met/unmet rule and
@@ -7087,6 +7230,7 @@ def _build_tier_item(
             allowed_kinds=allowed_kinds,
             item_id=item_id,
             repo_root=repo_root,
+            generator_exec=generator_exec,
         )
         opt_in_items = (
             _OPT_IN_KIND_ITEMS.get(spec_citation["kind"])
@@ -7381,6 +7525,7 @@ def build_fleet_report(
     *,
     tiers_doc: str | Path | None = None,
     repo_root: str | Path | None = None,
+    generator_exec: GeneratorExecution | None = None,
 ) -> dict[str, Any]:
     """Grade every block in a **fleet manifest** against the T1-T4 item
     skeleton (:func:`build_tier_report`, called once per block) and reduce
@@ -7609,7 +7754,10 @@ def build_fleet_report(
             )
 
         tier_report = build_tier_report(
-            manifest, tiers_doc=tiers_doc, repo_root=repo_root
+            manifest,
+            tiers_doc=tiers_doc,
+            repo_root=repo_root,
+            generator_exec=generator_exec,
         )
         blocking_item = _blocking_t1_item(tier_report["items"])
         if tier_report["tier"] == "T1":
@@ -7830,6 +7978,7 @@ def check_tier_report(
     *,
     tiers_doc: str | None = None,
     repo_root: str | Path | None = None,
+    generator_exec: GeneratorExecution | None = None,
 ) -> dict[str, Any]:
     """``klt signoff --manifest M --check REPORT`` (issue #2249): verify that
     a previously committed tier report at ``report_path`` still reproduces
@@ -7861,7 +8010,12 @@ def check_tier_report(
     or one that is not a tier report at all -- never a traceback.
     """
     committed = _load_committed_signoff_report(report_path, "items", "--manifest")
-    fresh = build_tier_report(manifest, tiers_doc=tiers_doc, repo_root=repo_root)
+    fresh = build_tier_report(
+        manifest,
+        tiers_doc=tiers_doc,
+        repo_root=repo_root,
+        generator_exec=generator_exec,
+    )
     return _check_signoff_report(report_path, committed, fresh)
 
 
@@ -7871,6 +8025,7 @@ def check_fleet_report(
     *,
     tiers_doc: str | None = None,
     repo_root: str | Path | None = None,
+    generator_exec: GeneratorExecution | None = None,
 ) -> dict[str, Any]:
     """``klt signoff --fleet F --check REPORT`` (issue #2249): the
     :func:`check_tier_report` contract, one level up -- verify a committed
@@ -7887,7 +8042,12 @@ def check_fleet_report(
     as at the top level, and the ``title`` its reduced item views carry.
     """
     committed = _load_committed_signoff_report(report_path, "blocks", "--fleet")
-    fresh = build_fleet_report(fleet, tiers_doc=tiers_doc, repo_root=repo_root)
+    fresh = build_fleet_report(
+        fleet,
+        tiers_doc=tiers_doc,
+        repo_root=repo_root,
+        generator_exec=generator_exec,
+    )
     return _check_signoff_report(report_path, committed, fresh)
 
 
