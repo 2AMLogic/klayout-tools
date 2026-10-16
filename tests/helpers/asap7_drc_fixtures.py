@@ -602,6 +602,148 @@ def _select_cases() -> list[Case]:
     return c
 
 
+def _sram_active(
+    sel: str,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    *,
+    h: float = 46,
+    v: float = 27,
+    marker: bool = True,
+) -> list[Shape]:
+    """An ACTIVE box under ``sel`` (``h`` / ``v`` nm of horizontal / vertical
+    enclosure) plus, when ``marker``, an SRAMDRC box that overlaps the ACTIVE
+    by half its width. Every other rule sees the same geometry either way, so
+    the with/without pair isolates the SRAMDRC scoping."""
+    shapes: list[Shape] = [box("ACTIVE", x1, y1, x2, y2)]
+    if sel == "NSELECT" or sel == "PSELECT":
+        shapes.append(box(sel, x1 - h, y1 - v, x2 + h, y2 + v))
+    else:
+        # ACTIVE.AUX.1 wants ACTIVE under NSELECT or PSELECT, so the VT layers
+        # ride on a loosely enclosing NSELECT.
+        shapes.append(box("NSELECT", x1 - 46, y1 - 27, x2 + 46, y2 + 27))
+        shapes.append(box(sel, x1 - h, y1 - v, x2 + h, y2 + v))
+    if marker:
+        shapes.append(box("SRAMDRC", (x1 + x2) / 2, y1 - 10, x2 + 10, y2 + 10))
+    return shapes
+
+
+def _sram_cases() -> list[Case]:
+    """SRAMDRC-scoped ACTIVE rules (DRM 1.2.2 note 7, Tables 3.5.1, 3.5.2 and
+    3.7.1). Each threshold pair is paired with a control that draws the same
+    geometry without SRAMDRC, where the non-SRAM rule applies instead."""
+    c: list[Case] = []
+    active = (0, 0, 70, 81)
+    for gap, mk in ((13.5 - D, _fail), (13.5, _pass)):
+        well = box("WELL", 70 + gap, 0, 300, 81)
+        c.append(mk("SRAM.ACTIVE.WELL.S.5", [*_sram_active("NSELECT", *active), well]))
+    # Outside SRAMDRC the same 13.5 nm gap is the 27 nm ACTIVE.WELL.S.4 case.
+    c.append(
+        _fail(
+            "ACTIVE.WELL.S.4",
+            [
+                *_sram_active("NSELECT", *active, marker=False),
+                box("WELL", 83.5, 0, 300, 81),
+            ],
+        )
+    )
+    for m, mk in ((13.5 - D, _fail), (13.5, _pass)):
+        well = box("WELL", -m, -m, 130, 141)
+        c.append(mk("SRAM.ACTIVE.WELL.EN.2", [*_sram_active("PSELECT", *active), well]))
+    c.append(
+        _fail(
+            "ACTIVE.WELL.EN.1",
+            [
+                *_sram_active("PSELECT", *active, marker=False),
+                box("WELL", -13.5, -13.5, 130, 141),
+            ],
+        )
+    )
+
+    # Area: the smallest legal ACTIVE (16 x 27 nm, ACTIVE.W.3 x ACTIVE.W.1) is
+    # exactly 432 nm^2, so anything smaller also breaks a width rule.
+    thin = (0, 0, 16, 27)
+    fail_thin = (0, 0, 16, 27 - D)
+    kw = {"h": 52, "v": 27}
+    c.append(
+        _fail(
+            "SRAM.ACTIVE.A.2A",
+            _sram_active("NSELECT", *fail_thin, **kw),
+            also=["ACTIVE.W.1", "ACTIVE.W.2"],
+        )
+    )
+    c.append(_pass("SRAM.ACTIVE.A.2A", _sram_active("NSELECT", *thin, **kw)))
+    c.append(_fail("ACTIVE.A.1A", _sram_active("NSELECT", *thin, marker=False, **kw)))
+    outer = (0, 0, 200, 120)
+    for hole, mk, also in (
+        ((84, 46, 100, 73 - D), _fail, ["ACTIVE.S.2B", "ACTIVE.S.1", "ACTIVE.W.2"]),
+        ((84, 46, 100, 73), _pass, ["ACTIVE.S.2B", "ACTIVE.W.2"]),
+    ):
+        shapes = [ring("ACTIVE", outer, hole), box("NSELECT", -46, -27, 246, 147)]
+        shapes.append(box("SRAMDRC", 0, 0, 20, 20))
+        c.append(mk("SRAM.ACTIVE.A.2B", shapes, also=also))
+    c.append(
+        _fail(
+            "ACTIVE.A.1B",
+            [
+                ring("ACTIVE", outer, (84, 46, 100, 73)),
+                box("NSELECT", -46, -27, 246, 147),
+            ],
+            also=["ACTIVE.S.2B", "ACTIVE.W.2"],
+        )
+    )
+
+    # AUX.2: ACTIVE sharing no area with SRAMDRC may not touch it. An edge
+    # abutment or a single shared corner is a touch; one database unit of
+    # clearance, or real overlap, is not.
+    base = active_in("NSELECT", 0, 0, 70, 81)
+    abut = [*base, box("SRAMDRC", 70, 0, 150, 81)]
+    # Touching makes the polygon "interact", so it is also held to the SRAM
+    # values -- which it meets with the full 46 / 27 nm enclosure.
+    c.append(_fail("SRAM.ACTIVE.AUX.2", abut))
+    c.append(_fail("SRAM.ACTIVE.AUX.2", [*base, box("SRAMDRC", 70, 81, 150, 160)]))
+    c.append(_pass("SRAM.ACTIVE.AUX.2", [*base, box("SRAMDRC", 70 + D, 0, 150, 81)]))
+    c.append(_pass("SRAM.ACTIVE.AUX.2", [*base, box("SRAMDRC", 35, 0, 150, 81)]))
+
+    # Select enclosure of SRAM ACTIVE: 13.5 nm each way, for the NSELECT rules
+    # and the section 3.7 mirrors on the other four layers. 90 x 81 nm ACTIVE
+    # keeps the select above its own 108 x 54 nm minimum.
+    wide = (0, 0, 90, 81)
+    for name in ("NSELECT", "PSELECT", "SLVT", "LVT", "SRAMVT"):
+        c.append(
+            _fail(
+                f"SRAM.{name}.ACTIVE.EN.3", _sram_active(name, *wide, h=13.5 - D, v=27)
+            )
+        )
+        c.append(
+            _pass(f"SRAM.{name}.ACTIVE.EN.3", _sram_active(name, *wide, h=13.5, v=27))
+        )
+        c.append(
+            _fail(
+                f"SRAM.{name}.ACTIVE.EN.4", _sram_active(name, *wide, h=46, v=13.5 - D)
+            )
+        )
+        c.append(
+            _pass(f"SRAM.{name}.ACTIVE.EN.4", _sram_active(name, *wide, h=46, v=13.5))
+        )
+        # Without SRAMDRC the same 13.5 nm enclosure is the 46 / 27 nm rule.
+        c.append(
+            _fail(
+                f"{name}.ACTIVE.EN.1",
+                _sram_active(name, *wide, h=13.5, v=27, marker=False),
+            )
+        )
+        c.append(
+            _fail(
+                f"{name}.ACTIVE.EN.2",
+                _sram_active(name, *wide, h=46, v=13.5, marker=False),
+            )
+        )
+    return c
+
+
 def _sdt_w3_cases() -> list[Case]:
     """SDT.W.3: like ACTIVE.W.2 for SDT (outside SRAMDRC). SDT horizontal
     edges lie on ACTIVE's (SDT.ACTIVE.AUX.2) and SDT sits inside LISD
@@ -1965,6 +2107,7 @@ def all_cases() -> list[Case]:
         *_active_cases(),
         *_gcut_cases(),
         *_select_cases(),
+        *_sram_cases(),
         *_sdt_cases(),
         *_lisd_cases(),
         *_lig_cases(),
