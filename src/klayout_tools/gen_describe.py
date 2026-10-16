@@ -68,6 +68,7 @@ from .gen_layer_params import (
     _cut_fixed_size_um,
     _gate_bottom_endcap_um,
     _gate_pad_clearance_um,
+    _gate_top_endcap_um,
     _metal_res_geometry_min_um,
     _metal_res_layers,
     _mos_array_well_tap_role_layer,
@@ -506,6 +507,7 @@ def _mos_array_describe(
         mos_cap=params["mos_cap"],
         pitch_x_um=params["pitch_x_um"],
         pitch_y_um=params["pitch_y_um"],
+        top_endcap_um=_gate_top_endcap_um(family),
     )
     unit = info["unit"]
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
@@ -2004,6 +2006,7 @@ def _diff_pair_describe(
         # See the equivalent note in `_mos_array_describe` (issue #1577).
         _contact_gate_extra_offset_um(family),
         _gate_bottom_endcap_um(family),
+        top_endcap_um=_gate_top_endcap_um(family),
     )
     unit = info["unit"]
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
@@ -2465,6 +2468,7 @@ def _esd_device_describe(
         # See the equivalent note in `_mos_array_describe` (issue #1577).
         _contact_gate_extra_offset_um(family),
         _gate_bottom_endcap_um(family),
+        top_endcap_um=_gate_top_endcap_um(family),
     )
     unit = info["unit"]
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]

@@ -10382,10 +10382,15 @@ _DIFF_PAIR_GAP_E = {
     "ring_gap_um": 1.0,
     # Re-centre the E/W opening on the lower device row (the source/drain
     # ports' y) rather than the ring's own mid-height. core_h grew with the
-    # gate landing pad's row-pitch bump (issue #461) and the sky130 pad
-    # stand-off (issue #3115), so the centring offset (ring mid-height minus
-    # the device-row y) grew with them.
-    "ring_gap_offset_um": -0.98,
+    # gate landing pad's row-pitch bump (issue #461), the sky130 pad
+    # stand-off (issue #3115) and the sky130 gate-stripe top endcap
+    # (0.15, issue #2936), so the centring offset (ring mid-height minus
+    # the device-row y) grew with them. The ring's lower straight-run end
+    # would now sit only 0.41um below the device row, short of the 0.485um a
+    # 0.17um route needs inside the opening, so the ring padding is widened
+    # by 0.1um to give the opening that room.
+    "ring_padding_um": 0.6,
+    "ring_gap_offset_um": -1.13,
 }
 _DIFF_PAIR_GAP_W = dict(_DIFF_PAIR_GAP_E, ring_gap_side="W")
 

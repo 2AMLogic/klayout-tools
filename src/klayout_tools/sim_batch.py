@@ -90,9 +90,11 @@ import random
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from collections.abc import Callable, Sequence
@@ -104,11 +106,14 @@ from . import _provenance, remote_transport, sim_staging
 from .remote_launcher import (
     ASSUMED_THREADS_PER_CORNER,
     RemoteLaunchError,
+    _signal_handlers_install,
+    _signal_handlers_restore,
     ami_pdk_key,
     published_runner_identities,
 )
 from .sim_remote import (
     _build_remote_request,
+    _points_to_push,
     _rewrite_remote_artifact_paths,
     _run_sharded,
     _unrun_corner_report,
@@ -301,6 +306,16 @@ BATCH_NO_CAPACITY_CODE = "batch_no_capacity"
 #: can tell slot contention from a Spot shortage.
 BATCH_CONCURRENCY_CAP_CODE = "batch_concurrency_cap"
 
+#: ``error.code`` of a client terminated (SIGINT/SIGTERM) while waiting on a
+#: submitted job (issue #3065). The remote job is deliberately left running.
+BATCH_INTERRUPTED_CODE = "batch_client_interrupted"
+
+#: Submit receipt written into the artifacts directory right after launch
+#: (issue #3065) -- the on-disk record of which fleet job this client
+#: orphaned if it dies mid-wait. A sharded run writes
+#: ``batch-receipt-<job-id>.json`` per shard instead.
+BATCH_RECEIPT_FILENAME = "batch-receipt.json"
+
 #: Capacity-wait backoff (``request.batch.capacity_wait_s``, issue #2721):
 #: the first re-launch waits ~:data:`_CAPACITY_BACKOFF_BASE_S`, each further
 #: one doubles, capped at :data:`_CAPACITY_BACKOFF_CAP_S`. Every delay is
@@ -364,6 +379,21 @@ class BatchError(Exception):
     def __init__(self, message: str, *, code: str | None = None) -> None:
         super().__init__(message)
         self.code = code
+
+
+class BatchClientInterrupted(BatchError):
+    """SIGINT/SIGTERM arrived while waiting on a submitted job (issue #3065).
+
+    Re-raised by :func:`_run_batch` as a ``SimError`` carrying
+    :data:`BATCH_INTERRUPTED_CODE`. The fleet exposes no cancel primitive, so
+    the remote job keeps running; the message names it so the caller can
+    tell whether resubmitting would pay twice.
+    """
+
+    def __init__(self, message: str, *, job_id: str, signum: int) -> None:
+        super().__init__(message, code=BATCH_INTERRUPTED_CODE)
+        self.job_id = job_id
+        self.signum = signum
 
 
 class BatchPollTimeout(BatchError):
@@ -3053,6 +3083,79 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
+def _write_batch_receipt(path: str, receipt: dict[str, Any]) -> None:
+    """Atomically (temp + rename) write the submit receipt. A failure to
+    write is a stderr warning, never a failed sweep: the receipt is
+    provenance, not part of the result."""
+    tmp_path = f"{path}.tmp.{os.getpid()}"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(receipt, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.replace(tmp_path, path)
+    except OSError as exc:
+        print(
+            f"klt sim: warning: could not write batch receipt {path}: {exc}",
+            file=sys.stderr,
+        )
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
+def _poll_status_interruptibly(
+    config: BatchConfig,
+    job_id: str,
+    *,
+    runner: remote_transport.CommandRunner | None,
+    sleep: Any,
+    heartbeat: bool = False,
+    on_state: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    """:func:`poll_status`, with SIGINT/SIGTERM converted into
+    :class:`BatchClientInterrupted` for the duration of the wait only
+    (issue #3065). Prior handlers are restored on every exit path. Handlers
+    can only be installed from the main thread, so a sharded run's worker
+    threads poll unwrapped (their receipts are still written)."""
+    if threading.current_thread() is not threading.main_thread():
+        return poll_status(
+            config,
+            job_id,
+            runner=runner,
+            sleep=sleep,
+            heartbeat=heartbeat,
+            on_state=on_state,
+        )
+
+    def _handle(signum: int, _frame: Any) -> None:
+        raise BatchClientInterrupted(
+            f"client terminated by {signal.Signals(signum).name} while waiting "
+            f"on job {job_id} (bucket {config.bucket}, region {config.region}); "
+            "the remote job is left running -- the fleet has no cancel",
+            job_id=job_id,
+            signum=signum,
+        )
+
+    prev_handlers: dict[int, Any] = {}
+    _signal_handlers_install(prev_handlers, _handle)
+    try:
+        return poll_status(
+            config,
+            job_id,
+            runner=runner,
+            sleep=sleep,
+            heartbeat=heartbeat,
+            on_state=on_state,
+        )
+    except BatchClientInterrupted as exc:
+        print(f"klt sim: {exc}", file=sys.stderr)
+        raise
+    finally:
+        _signal_handlers_restore(prev_handlers)
+
+
 def _run_batch_job(
     *,
     config: BatchConfig,
@@ -3071,6 +3174,7 @@ def _run_batch_job(
     request_dir: str | None = None,
     attach: bool = False,
     now: Callable[[], str] = _utc_now,
+    receipt_name: str | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """Submit, wait for, and collect **one** batch job's worth of corners --
     the shared body of the single-job ``batch`` backend (:func:`_run_batch`)
@@ -3134,7 +3238,7 @@ def _run_batch_job(
         timeout_s=timeout_s,
         keep_artifacts=keep_artifacts,
         want_waveforms=want_waveforms,
-        explicit_points=explicit_points,
+        explicit_points=_points_to_push(request, corner_points, explicit_points),
         request_dir=request_dir,
     )
     timestamps: dict[str, str | None] = {
@@ -3154,6 +3258,24 @@ def _run_batch_job(
         f"re-attach with `klt sim <request> --backend batch --attach {job_id}`\n"
     )
     sys.stderr.flush()
+    receipt_path = os.path.join(
+        artifacts_dir,
+        BATCH_RECEIPT_FILENAME if receipt_name is None else receipt_name,
+    )
+    receipt: dict[str, Any] = {
+        "job_id": job_id,
+        # getattr: the receipt is best-effort and must never break a run.
+        "bucket": getattr(config, "bucket", None),
+        "jobs_prefix": getattr(config, "jobs_prefix", None),
+        "region": getattr(config, "region", None),
+        "profile": getattr(config, "profile", None),
+        "launched_at": datetime.now(timezone.utc).isoformat(),
+        "request_sha256": hashlib.sha256(
+            json.dumps(request, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest(),
+        "state": None,
+    }
+    _write_batch_receipt(receipt_path, receipt)
     return _poll_and_collect(
         config=config,
         job_id=job_id,
@@ -3166,6 +3288,8 @@ def _run_batch_job(
         sleep=sleep,
         timestamps=timestamps,
         now=now,
+        receipt_path=receipt_path,
+        receipt=receipt,
     )
 
 
@@ -3182,14 +3306,19 @@ def _poll_and_collect(
     sleep: Any,
     timestamps: dict[str, str | None],
     now: Callable[[], str],
+    receipt_path: str | None = None,
+    receipt: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The wait-and-collect tail shared by a fresh submit and ``--attach``.
 
     ``timestamps`` carries the client-observed phase times already recorded
     (all ``None`` on ``--attach``, where this client never submitted or
-    launched); the terminal/collected phases are filled in here."""
+    launched); the terminal/collected phases are filled in here.
+
+    ``receipt_path``/``receipt`` (issue #3065) are the submit receipt a fresh
+    submit wrote; ``--attach`` passes none and writes no receipt."""
     try:
-        status = poll_status(
+        status = _poll_status_interruptibly(
             config,
             job_id,
             runner=runner,
@@ -3198,6 +3327,11 @@ def _poll_and_collect(
             on_state=lambda state: _report_progress(job_id, state),
         )
     except BatchPollTimeout as exc:
+        if receipt_path is not None and receipt is not None:
+            _write_batch_receipt(
+                receipt_path,
+                {**receipt, "poll_timed_out": True, "last_state": exc.last_state},
+            )
         return (
             _poll_timeout_corners(corner_points, measurements_spec, exc),
             None,
@@ -3213,6 +3347,15 @@ def _poll_and_collect(
         )
 
     timestamps["client_status_terminal_at"] = now()
+    if receipt_path is not None and receipt is not None:
+        _write_batch_receipt(
+            receipt_path,
+            {
+                **receipt,
+                "state": status.get("state"),
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
     environment = {**_batch_environment(config, job_id, status), **timestamps}
     if status.get("state") != "done" and (
         _status_exit_code(status) not in _BATCH_SIM_SUCCESS_EXIT_CODES
@@ -3490,6 +3633,7 @@ def _run_batch_fleet(
             measurements_spec=measurements_spec,
             explicit_points=shard_points,
             request_dir=request_dir,
+            receipt_name=f"batch-receipt-{job_id}.json",
         )
 
     return _run_sharded(
@@ -3505,6 +3649,7 @@ def _run_batch_fleet(
 #: the `remote` backend established -- see that module's import block.
 __all__ = [
     "BATCH_ARTIFACTS_DIRNAME",
+    "BATCH_INTERRUPTED_CODE",
     "BATCH_JOB_CEILING_CODE",
     "BATCH_MAX_UNITS_CODE",
     "BATCH_JOB_TOOL",
@@ -3512,6 +3657,7 @@ __all__ = [
     "BATCH_NO_CAPACITY_CODE",
     "BATCH_UNKNOWN_JOB_CODE",
     "BATCH_NETLIST_FILENAME",
+    "BATCH_RECEIPT_FILENAME",
     "BATCH_REPORT_FILENAME",
     "BATCH_RUNNER_IDENTITY_FILENAME",
     "BATCH_RUNNER_FEATURE_CODE",
@@ -3522,6 +3668,7 @@ __all__ = [
     "BATCH_TERMINAL_STATES",
     "BATCH_WAITING_STATES",
     "BatchConfig",
+    "BatchClientInterrupted",
     "BatchError",
     "BatchJobInput",
     "BatchJobSpec",

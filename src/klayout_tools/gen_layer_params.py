@@ -169,11 +169,15 @@ def _contact_gate_extra_offset_um(family: str) -> float:
 #:   thresholds.
 #:
 #: A family absent from this table gets ``0.0`` (see
-#: :func:`_gate_bottom_endcap_um`): sky130's/sg13g2's/sg13cmos5l's curated
-#: decks transcribe neither rule, so every existing caller there keeps
+#: :func:`_gate_bottom_endcap_um`): sg13g2's/sg13cmos5l's curated
+#: decks transcribe neither rule (sky130's gained its own endcap rule, so it
+#: has an entry above, issue #2936), so every existing caller there keeps
 #: byte-for-byte identical geometry.
 _PDK_GATE_BOTTOM_ENDCAP_UM: dict[str, float] = {
     "gf180mcu": 0.25,  # PL.4_LV (0.22um) / DF.6_LV (0.24um)
+    # poly.8 (0.13um, issue #2936), with margin; the curated deck's
+    # `poly.endcap.diff.1` checks it.
+    "sky130": 0.15,
 }
 
 
@@ -182,6 +186,24 @@ def _gate_bottom_endcap_um(family: str) -> float:
     :data:`_PDK_GATE_BOTTOM_ENDCAP_UM`), or ``0.0`` for a family that
     declares none -- byte-for-byte unchanged geometry there."""
     return _PDK_GATE_BOTTOM_ENDCAP_UM.get(family, 0.0)
+
+
+#: Gate-stripe *top*-edge endcap (um) the series ``_mos_unit_layout`` draws
+#: as a stripe-width poly neck before the landing pad (issue #2936). Distinct
+#: from :data:`_PDK_GATE_BOTTOM_ENDCAP_UM` because the top edge already has
+#: the #461 landing pad, which clears the diffusion for ``L`` up to the pad
+#: width only; a family whose pad already satisfies its deck (gf180mcu) is
+#: left out so its geometry stays byte-for-byte unchanged.
+_PDK_GATE_TOP_ENDCAP_UM: dict[str, float] = {
+    "sky130": 0.15,  # poly.8 (0.13um) with margin
+}
+
+
+def _gate_top_endcap_um(family: str) -> float:
+    """Return ``family``'s gate-stripe top-edge endcap neck length (see
+    :data:`_PDK_GATE_TOP_ENDCAP_UM`), or ``0.0`` for a family that declares
+    none -- byte-for-byte unchanged geometry there."""
+    return _PDK_GATE_TOP_ENDCAP_UM.get(family, 0.0)
 
 
 #: Margin (um) :func:`_mos_unit_layout`/:func:`_mos_unit_strapped_layout`
@@ -2882,6 +2904,7 @@ def _device_layer_params(
         "gate_pad_clearance_um": _gate_pad_clearance_um(family),
         "contact_gate_offset_um": _contact_gate_extra_offset_um(family),
         "bottom_endcap_um": _gate_bottom_endcap_um(family),
+        "top_endcap_um": _gate_top_endcap_um(family),
         "sd_implant_layer": (
             sd_implant if sd_implant is not None else kdb.LayerInfo(0, 0)
         ),
@@ -3506,6 +3529,7 @@ def _esd_device_layer_params(
         "salicide_block_present": salicide_block is not None,
         "contact_gate_offset_um": _contact_gate_extra_offset_um(family),
         "bottom_endcap_um": _gate_bottom_endcap_um(family),
+        "top_endcap_um": _gate_top_endcap_um(family),
         "sd_implant_layer": (
             sd_implant if sd_implant is not None else kdb.LayerInfo(0, 0)
         ),

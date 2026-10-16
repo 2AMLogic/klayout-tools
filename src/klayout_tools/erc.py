@@ -569,11 +569,29 @@ def _antenna_skip_reason(pdk: str | None, findings_only: bool) -> str:
     return REASON_MISSING_ANTENNA_PDK if pdk is None else "missing_antenna_limit"
 
 
+def _compact_antenna_records(
+    gates: list[dict[str, Any]], reason: str
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """The aggregate ``(skipped, inapplicable)`` antenna records ``--compact``
+    emits in place of the per-(gate, level) and per-gate-reference ones."""
+    skipped = []
+    if sum(len(gate["levels"]) - 1 for gate in gates):
+        skipped.append({"id": work_id("antenna", "levels"), "reason": reason})
+    inapplicable = [
+        {
+            "id": work_id("antenna", "gate_reference_levels"),
+            "reason": "gate_reference_level",
+        }
+    ]
+    return skipped, inapplicable
+
+
 def _antenna_coverage(
     gates: list[dict[str, Any]],
     pdk: str | None,
     findings_only: bool = False,
     omit_tables: bool = False,
+    compact: bool = False,
 ) -> dict[str, Any]:
     """Grade coverage against actual non-gate antenna levels, not gate count.
 
@@ -581,16 +599,25 @@ def _antenna_coverage(
     ``skipped`` and ``gate_reference_level`` ``inapplicable`` entries to one
     aggregate entry each (same reason, distinct ids so the common validator's
     one-category-per-identity rule holds). ``checked`` is left verbatim.
+
+    ``compact`` (issue #2965) collapses the per-(gate, level) ``skipped``
+    records and per-gate ``gate_reference_level`` ``inapplicable`` records
+    into one aggregate record each (counts live in the top-level
+    ``compact`` block), so the declined antenna work is still disclosed.
     """
     checked = []
     skipped = []
     inapplicable = []
     reason = _antenna_skip_reason(pdk, findings_only)
+    if compact and gates:
+        compact_skipped, compact_inapplicable = _compact_antenna_records(gates, reason)
+        skipped += compact_skipped
+        inapplicable += compact_inapplicable
     if not gates:
         # (issue #2896) Nothing to accumulate against: inapplicable, not
         # skipped -- no antenna work was requested that failed to run.
         inapplicable.append({"id": work_id("antenna"), "reason": REASON_NO_GATES})
-    for gate in gates:
+    for gate in [] if compact else gates:
         for index, level in enumerate(gate["levels"]):
             identity = work_id("antenna", gate["gate_id"], level["layer"])
             if index == 0:
@@ -920,6 +947,7 @@ def _connectivity_coverage(
     well_asserted_ties: set[str] | None = None,
     undeclared_stream_layers: list[str] | None = None,
     well_assertion_coverage: list[dict[str, Any]] | None = None,
+    compact: bool = False,
 ) -> dict[str, Any]:
     """The *second* checked-work scope this envelope carries (issue #2179):
     the connectivity/geometry rules behind ``erc_findings``.
@@ -1060,7 +1088,13 @@ def _connectivity_coverage(
     degenerate = degenerate_ties or {}
     asserted = asserted_ties or set()
     well_asserted = well_asserted_ties or set()
-    checked = [work_id("erc.floating_gate", gate["gate_id"]) for gate in gates]
+    if compact:
+        # (issue #2965) One aggregate id in place of one per gate; the count
+        # is `compact.floating_gate_checked`. Kept non-empty when any gate
+        # exists so the roll-up never sees a spurious "nothing checked".
+        checked = [work_id("erc.floating_gate")] if gates else []
+    else:
+        checked = [work_id("erc.floating_gate", gate["gate_id"]) for gate in gates]
     inapplicable: list[dict[str, str]] = []
     skipped: list[dict[str, str]] = []
     checked_by_assertion: list[str] = []
@@ -4199,6 +4233,7 @@ def run_erc(
     deck: str | None = None,
     findings_only: bool = False,
     omit_antenna_tables: bool = False,
+    compact: bool = False,
 ) -> dict[str, Any]:
     """Run ``klt erc``'s connectivity-model extraction, antenna-ratio
     check, and core ERC finding checks end to end.
@@ -4376,6 +4411,13 @@ def run_erc(
         raise ErcError(
             "--omit-antenna-tables drops tables that only a --findings-only "
             "run leaves empty, so it requires --findings-only"
+        )
+    if compact and not findings_only:
+        raise ErcError(
+            "--compact summarises the per-gate antenna scaffolding a "
+            "--findings-only run leaves null; without --findings-only that "
+            "scaffolding carries real verdicts, so pass --compact together "
+            "with --findings-only"
         )
     if findings_only and pdk is not None:
         raise ErcError(
@@ -4693,7 +4735,9 @@ def run_erc(
     any_antenna_violation = any(
         level["verdict"] == "violate" for gate in gates for level in gate["levels"]
     )
-    coverage = _antenna_coverage(gates, pdk, findings_only, omit_antenna_tables)
+    coverage = _antenna_coverage(
+        gates, pdk, findings_only, omit_antenna_tables, compact
+    )
 
     # The common rollup rule (issue #2109, this adapter's own #2115) decides
     # `status` from `coverage` plus the two violation signals above, rather
@@ -4765,6 +4809,7 @@ def run_erc(
             deck_obj,
         ),
         well_assertion_coverage,
+        compact,
     )
     erc_rollup = coverage_rollup(
         {"coverage": erc_coverage}, failed=bool(erc_finding_count)
@@ -4864,7 +4909,20 @@ def run_erc(
     # present; `[]` when no stackup role declares a `label_layer`.
     provenance["label_layers"] = label_layers
 
-    return {
+    # (issue #2965) Opt-in `--compact` summary of the per-gate scaffolding
+    # this run omitted. Built before `gates` is emptied below.
+    compact_block = (
+        {
+            "gate_count": len(gates),
+            "antenna_levels_skipped": sum(len(g["levels"]) - 1 for g in gates),
+            "antenna_reference_levels": len(gates),
+            "floating_gate_checked": len(gates),
+            "skipped_reason": REASON_FINDINGS_ONLY,
+        }
+        if compact
+        else None
+    )
+    report = {
         "schema_version": SCHEMA_VERSION,
         "file": file,
         "spec": spec_path,
@@ -4906,3 +4964,10 @@ def run_erc(
         "ties_disclosure": ties_disclosure,
         "provenance": provenance,
     }
+    if compact_block is not None:
+        # Additive and conditional: absent unless asked for, so a default
+        # run stays byte-identical. `gates` stays a list (empty) so
+        # `klt signoff`'s envelope classifier still recognises the report.
+        report["gates"] = []
+        report["compact"] = compact_block
+    return report

@@ -9905,6 +9905,33 @@ def test_item_11_digital_met_with_pdn_erc_and_power_connectivity(tmp_path):
     }
 
 
+def test_item_11_grades_a_compact_erc_envelope_like_the_full_one(tmp_path):
+    """Issue #2965: `klt erc --findings-only --compact` empties `gates` (still
+    a list) and adds a `compact` counts block; item 11 grades it identically."""
+    compact = {
+        **ERC_CLEAN_ENVELOPE,
+        "gates": [],
+        "compact": {"gate_count": 1, "skipped_reason": "findings_only"},
+    }
+    results = []
+    for envelope in (ERC_CLEAN_ENVELOPE, compact):
+        item = _item_11(
+            build_tier_report(
+                _manifest(
+                    kind="digital",
+                    evidence={
+                        "11": _power_delivery_evidence(
+                            tmp_path, kind="digital", erc_envelope=envelope
+                        )
+                    },
+                )
+            )
+        )
+        results.append((item["status"], item["reason"]))
+
+    assert results[0] == results[1] == ("met", None)
+
+
 def test_item_11_analog_met_with_supply_net_correspondence(tmp_path):
     result = build_tier_report(
         _manifest(
@@ -15079,3 +15106,94 @@ def test_item5_list_in_another_item_is_still_invalid(tmp_path):
     report = build_tier_report(_manifest(evidence={"8": [sim]}))
     item_8 = next(i for i in report["items"] if i["id"] == 8)
     assert item_8["reason"] == "invalid_evidence"
+
+
+# --- Issue #3258: opt-in `require_annotation_complete` on `sta` evidence ----
+
+
+def _sta_with_annotation(corner_blocks: list) -> dict:
+    """The clean multi-corner `klt sta` envelope with each corner's
+    ``spef_annotation`` replaced, in corner order."""
+    corners = [
+        {**corner, "spef_annotation": block}
+        for corner, block in zip(
+            STA_MULTI_CORNER_CLEAN_ENVELOPE["corners"], corner_blocks, strict=True
+        )
+    ]
+    return {**STA_MULTI_CORNER_CLEAN_ENVELOPE, "corners": corners}
+
+
+def _grade_sta_item_5(tmp_path, envelope: dict, **entry_extra):
+    path = _write(tmp_path, "sta.json", envelope)
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={"5.digital": {"file": path, **entry_extra}},
+        )
+    )
+    return next(item for item in result["items"] if item["id"] == 5)
+
+
+_ANNOTATED = {"annotation_complete": True, "annotation_warning": None}
+_UNANNOTATED = {
+    "annotation_complete": False,
+    "annotation_warning": "delay_changed was false: parasitics not applied",
+}
+
+
+def test_require_annotation_complete_passes_when_every_corner_complete(tmp_path):
+    envelope = _sta_with_annotation([_ANNOTATED, _ANNOTATED])
+    item = _grade_sta_item_5(tmp_path, envelope, require_annotation_complete=True)
+    assert item["status"] == "met"
+
+
+def test_require_annotation_complete_fails_with_warning_in_detail(tmp_path):
+    envelope = _sta_with_annotation([_ANNOTATED, _UNANNOTATED])
+    item = _grade_sta_item_5(tmp_path, envelope, require_annotation_complete=True)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "check_failed"
+    (shortfall,) = item["detail"]["sta_annotation_incomplete"]
+    assert shortfall["corner"] == "tt_025C_1v80"  # non-worst corner still counts
+    assert "parasitics not applied" in shortfall["annotation_warning"]
+
+
+def test_annotation_incomplete_unchanged_when_option_not_set(tmp_path):
+    envelope = _sta_with_annotation([_UNANNOTATED, _UNANNOTATED])
+    assert _grade_sta_item_5(tmp_path, envelope)["status"] == "met"
+    item = _grade_sta_item_5(tmp_path, envelope, require_annotation_complete=False)
+    assert item["status"] == "met"
+
+
+@pytest.mark.parametrize("block", [None, "absent"])
+def test_require_annotation_complete_no_effect_without_spef_annotation(tmp_path, block):
+    """Absent/null `spef_annotation` (no SPEF supplied): option is a no-op."""
+    envelope = _sta_with_annotation([None, None])
+    if block == "absent":
+        for corner in envelope["corners"]:
+            del corner["spef_annotation"]
+    item = _grade_sta_item_5(tmp_path, envelope, require_annotation_complete=True)
+    assert item["status"] == "met"
+
+
+@pytest.mark.parametrize(
+    "block", [{}, {"annotation_complete": None}, {"annotation_complete": "yes"}]
+)
+def test_require_annotation_complete_fails_closed_on_non_true(tmp_path, block):
+    envelope = _sta_with_annotation([_ANNOTATED, block])
+    item = _grade_sta_item_5(tmp_path, envelope, require_annotation_complete=True)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "check_failed"
+
+
+def test_require_annotation_complete_flat_single_corner_shape(tmp_path):
+    envelope = {**STA_SINGLE_CORNER_CLEAN_ENVELOPE, "spef_annotation": _UNANNOTATED}
+    item = _grade_sta_item_5(tmp_path, envelope, require_annotation_complete=True)
+    assert item["status"] == "unmet"
+    assert _grade_sta_item_5(tmp_path, envelope)["status"] == "met"
+
+
+def test_require_annotation_complete_non_boolean_entry_is_invalid_evidence(tmp_path):
+    envelope = _sta_with_annotation([_ANNOTATED, _ANNOTATED])
+    item = _grade_sta_item_5(tmp_path, envelope, require_annotation_complete="true")
+    assert item["status"] == "unmet"
+    assert item["reason"] == "invalid_evidence"
