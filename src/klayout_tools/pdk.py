@@ -89,10 +89,11 @@ from __future__ import annotations
 import math
 import os
 import re
+import subprocess
 from typing import Any
 
 from .lef_header import parse_lef_header
-from .pdk_compat import check_compatibility
+from .pdk_compat import check_compatibility, read_fetched_marker
 from .pdk_families import family_subset, pdk_variant_family
 
 #: The ciel/volare stores, in resolution order (step 3). ``~`` is expanded at
@@ -434,7 +435,8 @@ def _probe_root(root_path: str) -> list[dict[str, Any]]:
         variants.append(
             {
                 "name": name,
-                "version": _read_version(variant_dir),
+                "version": read_version(variant_dir),
+                "_sources": read_sources(variant_dir),
                 "_dir": variant_dir,
                 "_layout": layout,
             }
@@ -473,7 +475,8 @@ def _probe_flat_variant(root_path: str) -> list[dict[str, Any]]:
     return [
         {
             "name": name,
-            "version": _read_version(root_path),
+            "version": read_version(root_path),
+            "_sources": read_sources(root_path),
             "_dir": root_path,
             "_layout": layout,
         }
@@ -509,29 +512,132 @@ def _is_asap7_tree(directory: str) -> bool:
 
 def _compatibility_for(entry: dict[str, Any]) -> dict[str, Any]:
     """Compatibility result (:mod:`klayout_tools.pdk_compat`) for a probed
-    variant entry."""
+    variant entry.
+
+    Fed the real open_pdks ``SOURCES`` stamp only (``_sources``), never the
+    display ``version``: its ``git:``/``fetched:`` fallbacks are not SOURCES
+    stamps and would read as a spurious ``mismatch`` (issue #3070).
+    """
     return check_compatibility(
-        entry["name"], entry["_dir"], entry["_layout"], entry["version"]
+        entry["name"], entry["_dir"], entry["_layout"], entry["_sources"]
     )
 
 
-def _read_version(variant_dir: str) -> str | None:
-    """Read the version stamp from the variant's ``SOURCES`` file, or ``None``.
-
-    open_pdks writes a ``SOURCES`` file recording the upstream commits the
-    install was built from. Its non-empty lines are whitespace-normalised and
-    joined with ``"; "`` into a single stamp. Absent/unreadable/empty → ``None``
-    (never guessed).
-    """
+def read_sources(variant_dir: str) -> str | None:
+    """open_pdks' ``SOURCES`` file -- non-empty lines whitespace-normalised
+    and joined with ``"; "`` -- or ``None`` when absent/unreadable/empty."""
     sources = os.path.join(variant_dir, "SOURCES")
-    if not os.path.isfile(sources):
-        return None
+    if os.path.isfile(sources):
+        try:
+            with open(sources, encoding="utf-8") as handle:
+                lines = [line.strip() for line in handle if line.strip()]
+        except OSError:
+            lines = []
+        if lines:
+            return "; ".join(lines)
+    return None
+
+
+def read_version(variant_dir: str) -> str | None:
+    """Read the version stamp for a variant install, or ``None``.
+
+    In order: (1) open_pdks' ``SOURCES`` file -- non-empty lines
+    whitespace-normalised and joined with ``"; "`` (unchanged, byte-identical
+    to before the fallbacks existed); (2) a ``.fetched-version`` marker
+    (``scripts/fetch-*.sh``) as ``fetched:<marker>``; (3) when the variant
+    directory or its parent is itself a git work tree root, ``git:<40-hex
+    HEAD>`` with a ``-dirty`` suffix for uncommitted changes (issue #3070).
+    Absent/unreadable/empty → ``None`` (never guessed).
+    """
+    sources = read_sources(variant_dir)
+    if sources:
+        return sources
+    marker = read_fetched_marker(variant_dir)
+    if marker:
+        return f"fetched:{marker}"
+    return _git_version(variant_dir)
+
+
+_HEX40 = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _git_run(directory: str, *args: str) -> str | None:
+    """stdout of ``git -C directory <args>``, or ``None`` on any failure
+    (``git`` missing, not a work tree, non-zero exit, timeout)."""
     try:
-        with open(sources, encoding="utf-8") as handle:
-            lines = [line.strip() for line in handle if line.strip()]
-    except OSError:
+        proc = subprocess.run(
+            ["git", "-C", directory, *args],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
         return None
-    return "; ".join(lines) if lines else None
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def _git_version(variant_dir: str) -> str | None:
+    """``git:<HEAD>[-dirty]`` when the git work tree root is ``variant_dir``
+    or its parent (the PDK-root layout), else ``None``.
+
+    A work tree rooted anywhere else -- e.g. a tarball install nested inside
+    an unrelated checkout such as klt's own -- is not the PDK's revision and
+    is deliberately ignored. Not cached: it runs once per probed variant, and
+    a cache would go stale across runs that edit the tree.
+    """
+    real = os.path.realpath(variant_dir)
+    # A work tree rooted at ``real`` or its parent has a ``.git`` entry there
+    # (dir, or file for linked worktrees/submodules); skip the subprocess otherwise.
+    if not any(
+        os.path.exists(os.path.join(d, ".git")) for d in (real, os.path.dirname(real))
+    ):
+        return None
+    top = _git_run(real, "rev-parse", "--show-toplevel")
+    if top is None:
+        return None
+    toplevel = os.path.realpath(top.strip())
+    if toplevel not in (real, os.path.dirname(real)):
+        return None
+    head = _git_run(real, "rev-parse", "HEAD")
+    if head is None or not _HEX40.match(head.strip()):
+        return None
+    status = _git_run(real, "status", "--porcelain")
+    dirty = "-dirty" if status and status.strip() else ""
+    return f"git:{head.strip()}{dirty}"
+
+
+def variant_dir_of(pdk: dict[str, Any]) -> str | None:
+    """Absolute directory of the variant a :func:`find_pdk` payload resolved.
+
+    The payload deliberately carries only ``root`` + ``variant``: a nested
+    layout's variant is ``root/<variant>``, a flat one is ``root`` itself.
+    """
+    root = pdk.get("root")
+    name = pdk.get("variant")
+    if not root:
+        return None
+    nested = os.path.join(root, name) if name else None
+    if (
+        nested
+        and os.path.isdir(nested)
+        and (os.path.isdir(os.path.join(nested, "libs.tech")) or _is_asap7_tree(nested))
+    ):
+        return nested
+    return root
+
+
+def tree_of(path: str) -> str | None:
+    """Nearest ancestor directory of ``path`` that is a PDK variant tree
+    (open_pdks ``libs.tech`` or ASAP7 shape), or ``None``."""
+    current = os.path.dirname(os.path.realpath(path))
+    while True:
+        if os.path.isdir(os.path.join(current, "libs.tech")) or _is_asap7_tree(current):
+            return current
+        parent = os.path.dirname(current)
+        if parent == current:
+            return None
+        current = parent
 
 
 def _asset_dirs(variant_dir: str) -> dict[str, str | None]:

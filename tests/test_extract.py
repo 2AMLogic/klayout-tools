@@ -10456,10 +10456,94 @@ def test_sky130_deck_declares_hvi_mos_flavour():
     """The sky130 extraction deck declares one `mos_flavours` entry keyed on
     `hvi` (75/20) -- the deck-data half of issue #1369."""
     deck = get_extraction_deck("sky130")
-    assert len(deck.mos_flavours) == 1
-    flavour = deck.mos_flavours[0]
+    # Issue #3599 adds the native-Vt combination flavour *before* `hvi`.
+    assert [f.flavour for f in deck.mos_flavours] == ["nvt", "hvi"]
+    flavour = deck.mos_flavours[1]
     assert flavour.marker == (75, 20)
     assert flavour.flavour == "hvi"
+    assert flavour.and_markers == ()
+    assert flavour.not_markers == ((125, 44),)
+
+
+def _sky130_flavour_layout(markers, *, pmos=False) -> kdb.Layout:
+    """One sky130 NMOS (or, with ``pmos``, the same device inside an nwell)
+    with every ``(layer, datatype)`` in ``markers`` drawn over it."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    _draw_sky130_nmos(top, layout, 0, "S", drain_label="D")
+    if pmos:
+        top.shapes(layout.layer(64, 20)).insert(kdb.Box(-1000, -1000, 3000, 2000))
+    for layer, datatype in markers:
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Box(-500, -500, 2500, 1500)
+        )
+    return layout
+
+
+def _sky130_bound_models(tmp_path, name, markers, *, pmos=False):
+    path = _write_gds(
+        _sky130_flavour_layout(markers, pmos=pmos), tmp_path / f"{name}.gds"
+    )
+    root = _make_pdk_install(tmp_path, "sky130A")
+    report = run_extract(
+        path,
+        "sky130",
+        pdk_variant="sky130A",
+        pdk_root=root,
+        output=str(tmp_path / f"{name}.spice"),
+    )
+    lines = [
+        line
+        for line in Path(report["netlist_path"]).read_text().splitlines()
+        if line and line[0] in ("M", "X")
+    ]
+    return report, lines
+
+
+def test_sky130_hvi_lvtn_binds_native_vt_nfet(tmp_path):
+    report, lines = _sky130_bound_models(tmp_path, "nvt", [(75, 20), (125, 44)])
+    assert report["device_counts"] == {"nfet": 1}
+    (line,) = lines
+    assert "sky130_fd_pr__nfet_05v0_nvt" in line
+    assert "g5v0d10v5" not in line
+
+
+def test_sky130_hvi_only_still_binds_g5v0d10v5(tmp_path):
+    _report, lines = _sky130_bound_models(tmp_path, "hvi", [(75, 20)])
+    (line,) = lines
+    assert "sky130_fd_pr__nfet_g5v0d10v5" in line
+
+
+def test_sky130_plain_nfet_binds_default_model(tmp_path):
+    _report, lines = _sky130_bound_models(tmp_path, "plain", [])
+    (line,) = lines
+    assert "sky130_fd_pr__nfet_01v8" in line
+
+
+def test_sky130_lvtn_only_is_not_native_5v(tmp_path):
+    _report, lines = _sky130_bound_models(tmp_path, "lvtn", [(125, 44)])
+    (line,) = lines
+    assert "nvt" not in line
+
+
+def test_sky130_hvi_lvtn_areaid_le_is_not_bound_as_5v_native(tmp_path):
+    """3v3 native (areaid_le) is out of scope but must not be mis-bound as
+    the 5v0 native model or as g5v0d10v5."""
+    _report, lines = _sky130_bound_models(
+        tmp_path, "le", [(75, 20), (125, 44), (81, 60)]
+    )
+    (line,) = lines
+    assert "nfet_05v0_nvt" not in line
+    assert "g5v0d10v5" not in line
+
+
+def test_sky130_hvi_lvtn_in_nwell_is_not_claimed_as_native(tmp_path):
+    """No native PMOS: a pfet island with hvi+lvtn never binds the nvt model."""
+    _report, lines = _sky130_bound_models(
+        tmp_path, "pnvt", [(75, 20), (125, 44)], pmos=True
+    )
+    assert lines
+    assert not any("nvt" in line for line in lines)
 
 
 def _make_sky130_straddling_hvi_mos_layout() -> kdb.Layout:
@@ -20611,6 +20695,49 @@ def test_spef_floating_duplicate_named_outputs_are_skipped(tmp_path):
     assert "X:" not in text
 
 
+def test_spef_unlabelled_dollar_nets_absent_from_def_are_skipped(tmp_path):
+    """Issue #3580: a unique-named unlabelled `$N` net with no DEF net (and not
+    a port) gets no `*D_NET` (STA-1650) and its coupling is dropped; a `$N`
+    that the DEF names, a port, and a labelled non-DEF net are untouched."""
+    from klayout_tools.extract_spef import _write_spef
+
+    def run(name, **kwargs):
+        report = {
+            "nets": [
+                _plain_net("sig", coupled=[{"net": "$7", "capacitance_ff": 0.3}]),
+                _plain_net("$7", coupled=[{"net": "sig", "capacitance_ff": 0.3}]),
+                _plain_net("$12"),
+                _plain_net("lab"),
+                _plain_net("p"),
+            ]
+        }
+        out = tmp_path / f"{name}.spef"
+        skipped = _write_spef(
+            str(out),
+            design_name="top",
+            klt_version="0.0.0",
+            parasitics_report=report,
+            port_names=["p"],
+            **kwargs,
+        )
+        return skipped, out.read_text()
+
+    skipped, text = run(
+        "on", net_instance_pins={"sig": (("u1", "A"),), "$12": (("u2", "A"),)}
+    )
+    assert skipped == ["$7"]
+    assert "*D_NET \\$7 " not in text
+    assert "*D_NET \\$12 " in text
+    assert "*D_NET lab " in text
+    assert "*D_NET sig 1.000000" in text  # coupling cap not folded in
+
+    skipped, _ = run("empty", net_instance_pins={})
+    assert skipped == []
+    skipped, text = run("none")
+    assert skipped == []
+    assert "*D_NET \\$7 " in text
+
+
 def test_spef_def_net_connections_without_def_pins_warns(tmp_path):
     """Issue #3257 gap A: structured warning, SPEF bytes unchanged by it."""
     layout_path = str(CORPUS_DIR / "sky130" / "sky130_fd_sc_hd__inv_1.gds")
@@ -25177,6 +25304,61 @@ def test_no_netlist_with_spef_still_works(tmp_path):
     assert not (tmp_path / "inv.spice").exists()
 
 
+def _make_gf180mcu_mos_cap_layout(*, with_marker: bool) -> kdb.Layout:
+    """One gf180mcu NMOS plus, optionally, a MOS-capacitor stack (Comp + Poly2
+    under ``MOS_CAP_MK`` 166/5) -- issue #2919."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    _draw_gf180mcu_nmos(top, layout, 0, "S", drain_label="D")
+    top.shapes(layout.layer(22, 0)).insert(kdb.Box(10000, 0, 14000, 4000))
+    top.shapes(layout.layer(30, 0)).insert(kdb.Box(10500, -300, 13500, 4300))
+    if with_marker:
+        top.shapes(layout.layer(166, 5)).insert(kdb.Box(10000, 0, 14000, 4000))
+    return layout
+
+
+def test_gf180mcu_extract_flags_mos_cap_marker_as_unsupported(tmp_path):
+    """Issue #2919: shapes on `MOS_CAP_MK` (166/5) are reported in
+    `unsupported_devices[]` and `warnings[]` instead of a silent clean run."""
+    path = _write_gds(
+        _make_gf180mcu_mos_cap_layout(with_marker=True), tmp_path / "moscap.gds"
+    )
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "moscap.spice"))
+
+    assert report["status"] == "extracted"
+    (entry,) = report["unsupported_devices"]
+    assert entry["kind"] == "mos_capacitor"
+    assert entry["marker"] == "166/5"
+    assert entry["count"] == 1
+    assert entry["bbox_um"] == {"left": 10.0, "bottom": 0.0, "right": 14.0, "top": 4.0}
+    assert any(
+        "mos_capacitor" in w and "166/5" in w and "absent" in w
+        for w in report["warnings"]
+    )
+
+
+def test_gf180mcu_extract_unsupported_devices_empty_without_marker(tmp_path):
+    """Issue #2919: no 166/5 shapes -> empty field, no extra warning."""
+    path = _write_gds(
+        _make_gf180mcu_mos_cap_layout(with_marker=False), tmp_path / "nomarker.gds"
+    )
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "nomarker.spice"))
+
+    assert report["unsupported_devices"] == []
+    assert not any("unsupported device" in w for w in report["warnings"])
+
+
+def test_sky130_extract_unsupported_devices_always_present_and_empty(tmp_path):
+    """Issue #2919: a deck declaring no unsupported-device marker still emits
+    the (empty) additive field."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    _draw_sky130_nmos(top, layout, 0, "S", drain_label="D")
+    path = _write_gds(layout, tmp_path / "sky.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "sky.spice"))
+    assert report["unsupported_devices"] == []
+
+
 # --- BipolarDevice.emitter_size / SizeFilter (issue #2861) -------------------
 #
 # Source for the npn13G2 window: IHP SG13G2 LVS runset,
@@ -26075,6 +26257,244 @@ def test_probe_bad_role_via_cli_exits_one(tmp_path, capsys):
     )
 
     assert "bogus" in message and "available:" in message
+
+
+# ---------------------------------------------------------------------------
+# Terminal-aware resistance graph (--resistance-graph, issue #2982 -- Stage
+# 3.D5 increment 3 of docs/design/extract-fidelity-roadmap.md)
+# ---------------------------------------------------------------------------
+
+_LI1_RS_OHM_SQ = 12.8  # sky130 PARASITICS li1 sheet resistance
+
+
+def _make_li1_strip_layout(length: int = 5000, width: int = 170) -> kdb.Layout:
+    """One labelled li1 strip, ``length`` x ``width`` dbu, with a full-width
+    licon1 square at each end: the Stage 3.D4 F1 row drawn as a layout. No
+    diffusion/poly role is modelled for the licon landings, so each is where
+    current leaves the net -- one terminal per end."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(67, 20)).insert(kdb.Box(0, 0, length, width))
+    top.shapes(layout.layer(67, 5)).insert(
+        kdb.Text("S", kdb.Trans(length // 2, width // 2))
+    )
+    cut = layout.layer(66, 44)
+    top.shapes(cut).insert(kdb.Box(0, 0, width, width))
+    top.shapes(cut).insert(kdb.Box(length - width, 0, length, width))
+    return layout
+
+
+def test_resistance_graph_requires_parasitics():
+    with pytest.raises(ExtractError, match="--resistance-graph requires --parasitics"):
+        run_extract("/nonexistent.gds", "sky130", resistance_graph=True)
+
+
+def test_resistance_graph_off_adds_no_key_and_on_changes_nothing_else(tmp_path):
+    """Default output carries no `resistance_graph` key; turning the flag on
+    changes only that additive key (and not the written netlist)."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    base = run_extract(
+        path, "sky130", output=str(tmp_path / "base.spice"), parasitics=True
+    )
+    graph = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "graph.spice"),
+        parasitics=True,
+        resistance_graph=True,
+    )
+    assert all("resistance_graph" not in e for e in base["parasitics"]["nets"])
+    assert base["netlist_sha256"] == graph["netlist_sha256"]
+    stripped = json.loads(json.dumps(graph["parasitics"]))
+    for entry in stripped["nets"]:
+        assert "resistance_graph" in entry
+        del entry["resistance_graph"]
+    assert stripped == base["parasitics"]
+
+
+def test_resistance_graph_two_terminal_strip_matches_analytic(tmp_path):
+    """F1: the graph's terminal-pair resistance is the strip's `Rs * L / W`
+    between its two end edges, while the legacy scalar keeps its meaning."""
+    path = _write_gds(_make_li1_strip_layout(), tmp_path / "strip.gds")
+    base = run_extract(
+        path, "sky130", output=str(tmp_path / "b.spice"), parasitics=True
+    )
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "g.spice"),
+        parasitics=True,
+        resistance_graph=True,
+    )
+    (entry,) = report["parasitics"]["nets"]
+    (base_entry,) = base["parasitics"]["nets"]
+    graph = entry["resistance_graph"]
+    assert graph["status"] == "ok"
+    assert len(graph["terminals"]) == 2
+    expected = _LI1_RS_OHM_SQ * 5000 / 170
+    matrix = graph["pair_resistance_ohm"]
+    assert matrix[0][0] == matrix[1][1] == 0.0
+    assert matrix[0][1] == matrix[1][0] == pytest.approx(expected, rel=1e-6)
+    assert graph["legacy_resistance_ohm"] == entry["resistance_ohm"]
+    assert entry["resistance_ohm"] == base_entry["resistance_ohm"]
+    assert graph["nodes"] > 0 and graph["edges"] > 0
+    assert graph["diagnostics"] == []
+
+
+def test_resistance_graph_unsupported_net_keeps_the_legacy_scalar(tmp_path):
+    """The deck curates no per-cut resistance, so a net containing a
+    poly->li1 landing reports `unsupported` (with an explicit
+    `unsupported_geometry` diagnostic) and the legacy scalar stays exactly
+    as it was."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    base = run_extract(
+        path, "sky130", output=str(tmp_path / "b.spice"), parasitics=True
+    )
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "g.spice"),
+        parasitics=True,
+        resistance_graph=True,
+    )
+    unsupported = [
+        e
+        for e in report["parasitics"]["nets"]
+        if e["resistance_graph"]["status"] == "unsupported"
+    ]
+    assert unsupported
+    for entry in unsupported:
+        graph = entry["resistance_graph"]
+        assert [d["code"] for d in graph["diagnostics"]] == ["unsupported_geometry"]
+        assert graph["terminals"] == [] and graph["pair_resistance_ohm"] == []
+        assert graph["nodes"] == 0 and graph["edges"] == 0
+        assert graph["legacy_resistance_ohm"] == entry["resistance_ohm"]
+    assert [e["resistance_ohm"] for e in report["parasitics"]["nets"]] == [
+        e["resistance_ohm"] for e in base["parasitics"]["nets"]
+    ]
+
+
+def test_resistance_graph_single_terminal_net_is_skipped(tmp_path):
+    path = _write_gds(_make_hierarchy_layout(), tmp_path / "hier.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "h.spice"),
+        parasitics=True,
+        resistance_graph=True,
+    )
+    for entry in report["parasitics"]["nets"]:
+        graph = entry["resistance_graph"]
+        assert graph["status"] == "skipped"
+        assert [d["code"] for d in graph["diagnostics"]] == ["too_few_terminals"]
+        assert graph["legacy_resistance_ohm"] == entry["resistance_ohm"]
+
+
+def test_resistance_graph_is_deterministic_across_repeated_requests(tmp_path):
+    path = _write_gds(_make_li1_strip_layout(), tmp_path / "strip.gds")
+    dumps = []
+    for run in range(2):
+        report = run_extract(
+            path,
+            "sky130",
+            output=str(tmp_path / f"r{run}.spice"),
+            parasitics=True,
+            resistance_graph=True,
+        )
+        dumps.append(json.dumps(report["parasitics"]["nets"], sort_keys=True))
+    assert dumps[0] == dumps[1]
+
+
+def test_resistance_graph_with_distributed_rc_leaves_the_ladder_unchanged(tmp_path):
+    """`resistance_ohm` and the `--distributed-rc` ladder conserve the legacy
+    scalar whether or not the graph is attached."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    kwargs = {"parasitics": True, "critical_nets": ["Y"], "distributed_rc": True}
+    base = run_extract(path, "sky130", output=str(tmp_path / "b.spice"), **kwargs)
+    graph = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "g.spice"),
+        resistance_graph=True,
+        **kwargs,
+    )
+    assert base["netlist_sha256"] == graph["netlist_sha256"]
+    for b, g in zip(
+        base["parasitics"]["nets"], graph["parasitics"]["nets"], strict=True
+    ):
+        assert b["resistance_ohm"] == g["resistance_ohm"]
+        assert b["rc_model"] == g["rc_model"]
+        assert b["segments"] == g["segments"]
+
+
+def _graph_report_regions():
+    um = 1000
+
+    def region(*boxes):
+        return kdb.Region([kdb.Box(*b) for b in boxes])
+
+    return um, region
+
+
+@pytest.mark.parametrize(
+    ("r_cut", "expected"), [(0.0, 150.0), (10.0, 160.0), (None, None)]
+)
+def test_resistance_graph_report_two_level_series_matches_analytic(r_cut, expected):
+    """F5/F5v at adapter level: a metal0 strip (Rs = 10, 20 x 2 um) and a
+    metal1 strip (10 x 2 um) joined by one landing at their shared end edge
+    (x = 20 um), terminals at the two far ends: `Rs * 20 / 2` on level 0, the
+    single cut, `Rs * 10 / 2` on level 1."""
+    from klayout_tools.extract_parasitics import _resistance_graph_report
+
+    um, region = _graph_report_regions()
+    roles = [
+        ("metal0", 10.0, region((0, 0, 20 * um, 2 * um)), None),
+        ("metal1", 10.0, region((10 * um, 0, 20 * um, 2 * um)), None),
+    ]
+    contacts = region((0, 0, um // 2, 2 * um))  # metal0 far-end terminal
+    vias = [
+        region((19 * um, 0, 20 * um, 2 * um)),  # metal0 <-> metal1 landing
+        region((10 * um, 0, 10 * um + um // 2, 2 * um)),  # metal1 terminal
+    ]
+    report = _resistance_graph_report(roles, contacts, vias, 0.001, 123.0, r_cut)
+    assert report["legacy_resistance_ohm"] == 123.0
+    if expected is None:
+        assert report["status"] == "unsupported"
+        assert [d["code"] for d in report["diagnostics"]] == ["via_resistance_unknown"]
+        return
+    assert report["status"] == "ok"
+    assert report["pair_resistance_ohm"][0][1] == pytest.approx(expected, rel=1e-9)
+
+
+def test_resistance_graph_report_interior_contact_is_unsupported_geometry():
+    """A contact wholly inside the conductor has no boundary side to attach
+    to; it is reported, not solved with an attachment that doubles the
+    conductance across it."""
+    from klayout_tools.extract_parasitics import _resistance_graph_report
+
+    um, region = _graph_report_regions()
+    roles = [("metal0", 10.0, region((0, 0, 20 * um, 2 * um)), None)]
+    contacts = region((0, 0, um // 2, 2 * um), (10 * um, 500, 10 * um + 500, 1500))
+    report = _resistance_graph_report(roles, contacts, [], 0.001, 7.0)
+    assert report["status"] == "unsupported"
+    assert report["legacy_resistance_ohm"] == 7.0
+    (diag,) = report["diagnostics"]
+    assert diag["code"] == "unsupported_geometry"
+    assert diag["detail"]["interior_landings"][0]["x_um"] == pytest.approx(10.25)
+    assert report["terminals"] == [] and report["nodes"] == 0
+
+
+def test_cli_resistance_graph_json(tmp_path, capsys):
+    path = str(_write_gds(_make_li1_strip_layout(), tmp_path / "strip.gds"))
+    code = main(
+        ["extract", path, "--deck", "sky130", "--parasitics", "--resistance-graph"]
+        + ["--format", "json"]
+    )
+    assert code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["parasitics"]["nets"][0]["resistance_graph"]["status"] == "ok"
+    code = main(["extract", path, "--deck", "sky130", "--resistance-graph"])
+    assert code != 0
 
 
 def test_def_net_connections_dotted_net_gets_conn_block(tmp_path):

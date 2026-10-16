@@ -4233,6 +4233,154 @@ R1 RA RB vsubs {reference_r_ohm:.5f} res_high_po
     assert buggy_report["status"] == "mismatch"
 
 
+def _run_series_fold_lvs(tmp_path, segments, options, *, deck=True, name="fold"):
+    """`run_lvs` over the `_write_series_res_high_po_gds` chain against a
+    one-element reference carrying the once-charged offset (issue #3017)."""
+    l_um = 10.0
+    gds = _write_series_res_high_po_gds(
+        tmp_path / f"{name}.gds", segments=segments, l_um=l_um
+    )
+    r_ohm = _series_res_high_po_expected_r_ohm(segments, l_um, offset_count=1)
+    reference_path = _write(
+        tmp_path / f"{name}.spice",
+        f".subckt RES RA RB vsubs\nR1 RA RB vsubs {r_ohm:.5f} res_high_po\n.ends\n",
+    )
+    if deck:
+        layout = {"file": gds, "deck": "sky130"}
+    else:
+        # `layout.file` requires a deck, so supply a pre-extracted netlist
+        # (offset deferred) with no `layout.deck`: no correction is applied.
+        from klayout_tools.extract import run_extract
+
+        spice = str(tmp_path / f"{name}_layout.spice")
+        run_extract(gds, "sky130", output=spice, apply_resistor_fixed_offset=False)
+        layout = {"netlist": spice, "top": "RES"}
+    return run_lvs(
+        _write_request(
+            tmp_path / f"{name}.json",
+            {
+                "layout": layout,
+                "reference": {"netlist": reference_path, "top": "RES"},
+                "options": options,
+            },
+        )
+    )
+
+
+def _fold_entries(report):
+    return [
+        m
+        for m in report["mismatches"]
+        if m["category"] == "device.series_fold_offset_absorbed"
+    ]
+
+
+def test_series_fold_offset_absorbed_is_disclosed_as_warning(tmp_path):
+    """Issue #3017: a folded N-segment chain stays a `match` but carries one
+    warning naming N and the `(N-1) * fixed_offset_ohm` the fold absorbed."""
+    segments = 4
+    report = _run_series_fold_lvs(tmp_path, segments, {"combine_devices": True})
+    assert report["status"] == "match"
+    entries = _fold_entries(report)
+    assert len(entries) == 1
+    assert entries[0]["severity"] == "warning"
+    details = entries[0]["details"]
+    assert details["class"] == "res_high_po"
+    assert details["folded_primitives"] == segments
+    # The deck splits the w=1um head term into a constant part and a
+    # width-normalized part (#3049); the disclosure sums both.
+    assert details["fixed_offset_ohm"] + details["end_term_ohm"] == pytest.approx(
+        _RES_HIGH_PO_FIXED_OFFSET_OHM
+    )
+    absorbed = (segments - 1) * _RES_HIGH_PO_FIXED_OFFSET_OHM
+    assert details["absorbed_offset_ohm"] == pytest.approx(absorbed)
+    r_final = _series_res_high_po_expected_r_ohm(segments, 10.0, offset_count=1)
+    assert details["fraction_of_r"] == pytest.approx(absorbed / r_final)
+
+
+def test_series_fold_offset_absorbed_does_not_change_verdict(tmp_path):
+    """The warning never moves status or error counts."""
+    report = _run_series_fold_lvs(tmp_path, 3, {"combine_devices": True})
+    assert report["status"] == "match"
+    assert not [m for m in report["mismatches"] if m["severity"] == "error"]
+    assert not report["category_error_counts"].get("device.series_fold_offset_absorbed")
+
+
+def test_series_fold_offset_absorbed_absent_when_not_folded(tmp_path):
+    """No entry without `combine_devices`, without a deck, with a class list
+    excluding the resistor, or for a single primitive."""
+    for name, segments, options, deck in [
+        ("nocombine", 3, {}, True),
+        ("nodeck", 3, {"combine_devices": True}, False),
+        ("excluded", 3, {"combine_devices": ["nfet"]}, True),
+        ("single", 1, {"combine_devices": True}, True),
+    ]:
+        report = _run_series_fold_lvs(tmp_path, segments, options, deck=deck, name=name)
+        assert _fold_entries(report) == [], name
+
+
+def _run_spice_fold_lvs(tmp_path, layout_body, reference_body, ports, name):
+    layout = _write(
+        tmp_path / f"{name}_layout.spice", f".subckt TOP {ports}\n{layout_body}.ends\n"
+    )
+    reference = _write(
+        tmp_path / f"{name}_ref.spice", f".subckt TOP {ports}\n{reference_body}.ends\n"
+    )
+    return run_lvs(
+        _write_request(
+            tmp_path / f"{name}.json",
+            {
+                "layout": {"netlist": layout, "top": "TOP", "deck": "sky130"},
+                "reference": {"netlist": reference, "top": "TOP"},
+                "options": {"combine_devices": True},
+            },
+        )
+    )
+
+
+def test_series_fold_offset_absorbed_two_chains_and_parallel(tmp_path):
+    """Issue #3017: two separate series chains in one circuit -> two entries;
+    a parallel fold, or a chain in parallel with another path between the same
+    end nets (N not attributable), -> none."""
+    r = 1000.0
+    rr = r + _RES_HIGH_PO_FIXED_OFFSET_OHM
+    two_chains = _run_spice_fold_lvs(
+        tmp_path,
+        "".join(
+            f"R{i} {a} {b} vsubs {r} res_high_po\n"
+            for i, (a, b) in enumerate(
+                [("A", "m1"), ("m1", "B"), ("C", "m2"), ("m2", "m3"), ("m3", "D")]
+            )
+        ),
+        f"RX A B vsubs {2 * r + _RES_HIGH_PO_FIXED_OFFSET_OHM} res_high_po\n"
+        f"RY C D vsubs {3 * r + _RES_HIGH_PO_FIXED_OFFSET_OHM} res_high_po\n",
+        "A B C D vsubs",
+        "twochains",
+    )
+    assert sorted(
+        e["details"]["folded_primitives"] for e in _fold_entries(two_chains)
+    ) == [2, 3]
+
+    parallel = _run_spice_fold_lvs(
+        tmp_path,
+        f"R1 A B vsubs {r} res_high_po\nR2 A B vsubs {r} res_high_po\n",
+        f"RX A B vsubs {r / 2 + _RES_HIGH_PO_FIXED_OFFSET_OHM} res_high_po\n",
+        "A B vsubs",
+        "parallel",
+    )
+    assert _fold_entries(parallel) == []
+
+    mixed = _run_spice_fold_lvs(
+        tmp_path,
+        f"R1 A m vsubs {r} res_high_po\nR2 m B vsubs {r} res_high_po\n"
+        f"R3 A B vsubs {r} res_high_po\n",
+        f"RX A B vsubs {rr} res_high_po\n",
+        "A B vsubs",
+        "mixed",
+    )
+    assert _fold_entries(mixed) == []
+
+
 def test_combine_devices_false_still_applies_fixed_offset_per_primitive(tmp_path):
     """Regression guard for issue #559's fix: when `options.combine_devices`
     is `false` (or simply omitted -- the default), each of N series-wired
@@ -12211,6 +12359,8 @@ def test_build_device_binding_map_derived_fallback_shape():
         "sky130_fd_pr__pfet_01v8",
         "sky130_fd_pr__nfet_g5v0d10v5",
         "sky130_fd_pr__pfet_g5v0d10v5",
+        # Native-Vt 5V NMOS via marker combination (issue #3599).
+        "sky130_fd_pr__nfet_05v0_nvt",
         "sky130_fd_pr__res_generic_po",
         "sky130_fd_pr__res_high_po",
         "sky130_fd_pr__res_xhigh_po",
@@ -18392,6 +18542,11 @@ def test_run_lvs_macro_bus_anchoring_does_not_reach_internal_tie_nets(tmp_path):
     ]
     assert entry["details"]["pins"] == ["DIN[0]", "DIN[1]", "DOUT"]
 
+    # Issue #3014: the same swapped layout with the opt-in declaration is
+    # caught; the undeclared verdict above stays pinned as `match`.
+    declared = _constant_nets_report(tmp_path / "declared", swapped=True)
+    assert declared["status"] == "mismatch"
+
 
 # --------------------------------------------------------------------------- #
 # Issue #2704 design spike: can paired-instance pin anchoring be derived
@@ -18837,6 +18992,183 @@ def test_spike_2704_explicit_tie_net_declaration_catches_the_swap(tmp_path):
         ("LO", "__CONST0__"),
     ]
     assert all(m["details"] is None for m in rejected)
+
+
+_CONSTANT_NETS = {"__CONST0__": "LO", "__CONST1__": "HI"}
+
+
+def _constant_nets_report(tmp_path, *, swapped, constant_nets=None, hints=None):
+    """`run_lvs` over the #2692 tie fixture with `hints.constant_nets`."""
+    layout = _MACRO_TIE_LAYOUT_SPICE_SWAPPED if swapped else _MACRO_TIE_LAYOUT_SPICE
+    request = json.loads(
+        _macro_bus_request(tmp_path, layout, _MACRO_TIE_REFERENCE_VERILOG)
+    )
+    request["hints"] = {
+        **(hints or {}),
+        "constant_nets": _CONSTANT_NETS if constant_nets is None else constant_nets,
+    }
+    return run_lvs(json.dumps(request))
+
+
+def test_run_lvs_constant_nets_catches_swapped_tie_and_matches_clean(tmp_path):
+    """Issue #3014: `hints.constant_nets` binds each reference constant to the
+    layout node that carries it, so the swapped tie fixture reports
+    `mismatch` and its clean twin `match`. Refusals are attributed through
+    `details.declared_constant_net` (a hand-written `same_nets` refusal keeps
+    `details: null`), and the run discloses the bindings as a warning that
+    does not change `status`."""
+    clean = _constant_nets_report(tmp_path / "clean", swapped=False)
+    assert clean["status"] == "match"
+    assert clean["error_count"] == 0
+    (disclosure,) = [
+        m
+        for m in clean["mismatches"]
+        if m["category"] == "hints.constant_nets_declared"
+    ]
+    assert disclosure["severity"] == "warning"
+    assert disclosure["details"]["constant_nets"] == _CONSTANT_NETS
+    assert clean["constant_nets_applied"] == _CONSTANT_NETS
+
+    swapped = _constant_nets_report(tmp_path / "swapped", swapped=True)
+    assert swapped["status"] == "mismatch"
+    rejected = [m for m in swapped["mismatches"] if m["category"] == "hints.rejected"]
+    assert sorted(m["details"]["declared_constant_net"] for m in rejected) == [
+        "__CONST0__",
+        "__CONST1__",
+    ]
+    assert sorted((m["net"]["layout"], m["net"]["reference"]) for m in rejected) == [
+        ("HI", "__CONST1__"),
+        ("LO", "__CONST0__"),
+    ]
+
+
+def test_run_lvs_constant_nets_absent_emits_no_disclosure(tmp_path):
+    request = json.loads(
+        _macro_bus_request(
+            tmp_path, _MACRO_TIE_LAYOUT_SPICE, _MACRO_TIE_REFERENCE_VERILOG
+        )
+    )
+    report = run_lvs(json.dumps(request))
+    assert report["status"] == "match"
+    assert report["constant_nets_applied"] is None
+    assert not [
+        m
+        for m in report["mismatches"]
+        if m["category"] == "hints.constant_nets_declared"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("constant_nets", "hints", "message"),
+    [
+        ({"__CONST2__": "LO"}, None, "not a constant net the reference carries"),
+        ({"DIN[0]": "LO"}, None, "not a constant net the reference carries"),
+        ({"__CONST0__": "NOPE"}, None, "layout net 'NOPE' not found"),
+        (
+            {"__CONST0__": "LO", "__CONST1__": "LO"},
+            None,
+            "both bound to layout net 'LO'",
+        ),
+        (
+            _CONSTANT_NETS,
+            {"same_nets": [["LO", "__CONST0__"]]},
+            "ambiguous authority",
+        ),
+        (["__CONST0__"], None, "must be a JSON object"),
+    ],
+    ids=[
+        "unknown-constant",
+        "non-constant-net",
+        "missing-layout-net",
+        "two-constants-one-net",
+        "also-in-same-nets",
+        "wrong-shape",
+    ],
+)
+def test_run_lvs_constant_nets_validation_errors(
+    tmp_path, constant_nets, hints, message
+):
+    with pytest.raises(LvsError, match=message):
+        _constant_nets_report(
+            tmp_path, swapped=False, constant_nets=constant_nets, hints=hints
+        )
+
+
+def test_run_lvs_constant_nets_rejected_on_netgen_engine(tmp_path, monkeypatch):
+    _stub_netgen_subprocess(monkeypatch, log_text=_NETGEN_MATCH_LOG)
+    path = _netgen_request(tmp_path)
+    request = json.loads(Path(path).read_text())
+    request["hints"] = {"constant_nets": _CONSTANT_NETS}
+    Path(path).write_text(json.dumps(request))
+    with pytest.raises(LvsError, match="only supported for engine 'klayout'"):
+        run_lvs(path)
+
+
+def test_run_lvs_constant_nets_replayed_on_parameter_tolerance_retry(
+    tmp_path, monkeypatch
+):
+    """Issue #3014: the bindings are comparer state, re-applied on the fresh
+    comparer the `options.parameter_tolerance` second pass builds. The retry
+    is forced by stubbing the snap collection to offer one (no-op) snap, then
+    the verdict must still come from the bound compare -- a second pass that
+    dropped the bindings would flip the swapped fixture to `match`."""
+    from klayout_tools import lvs as lvs_module
+
+    applied = []
+    real = lvs_module._apply_constant_nets
+
+    def spy(*args, **kwargs):
+        result = real(*args, **kwargs)
+        applied.append(len(result[0]))
+        return result
+
+    offered = []
+
+    def one_snap(*_args, **_kwargs):
+        if offered:
+            return []
+        offered.append(True)
+        return ["snap"]
+
+    monkeypatch.setattr(lvs_module, "_apply_constant_nets", spy)
+    monkeypatch.setattr(lvs_module, "_collect_tolerance_snaps", one_snap)
+    monkeypatch.setattr(lvs_module, "_apply_tolerance_snaps", lambda *a, **k: None)
+    monkeypatch.setattr(
+        lvs_module,
+        "_tolerance_disclosure",
+        lambda *a, **k: lvs_module._mismatch("topology", "warning", "stub", "both"),
+    )
+
+    request = json.loads(
+        _macro_bus_request(
+            tmp_path, _MACRO_TIE_LAYOUT_SPICE_SWAPPED, _MACRO_TIE_REFERENCE_VERILOG
+        )
+    )
+    request["hints"] = {"constant_nets": _CONSTANT_NETS}
+    request.setdefault("options", {})["parameter_tolerance"] = 0.01
+    report = run_lvs(json.dumps(request))
+
+    assert applied == [2, 2]  # first pass + retry pass
+    assert report["status"] == "mismatch"
+
+
+def test_rerun_reconstructs_constant_nets_from_the_echo():
+    """Issue #3014: `--rerun` replays the applied bindings from the report's
+    `constant_nets_applied` echo."""
+    from klayout_tools.lvs import _reconstruct_lvs_request
+
+    request = _reconstruct_lvs_request(
+        {
+            "layout": "l.spice",
+            "reference": "r.spice",
+            "top": "top",
+            "constant_nets_applied": _CONSTANT_NETS,
+        }
+    )
+    assert request["hints"] == {"constant_nets": _CONSTANT_NETS}
+    assert "hints" not in _reconstruct_lvs_request(
+        {"layout": "l.spice", "reference": "r.spice", "constant_nets_applied": None}
+    )
 
 
 def test_run_lvs_anchor_top_level_pins_rejects_a_non_boolean(tmp_path):

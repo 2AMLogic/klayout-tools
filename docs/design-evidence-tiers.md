@@ -305,6 +305,20 @@ written to every block.
    platform, still needs a repo checkout with a Rust toolchain; see
    `docs/cli/yield.md`'s "What the extra does and does not reach" callout and
    `docs/releasing-native.md`.
+   **When "not applicable" is legitimate** (issue #2865): a block whose
+   ratified spec has *no* statistical row passes this item by a recorded
+   "not applicable", not by a waiver at grant time and not by inventing a
+   statistical claim. That holds only when the spec is ratified, a committed
+   statement accounts for every spec row with the reason its row class is
+   not statistical (for example "timing rows are corner-bounded by STA at the
+   PDK's characterised corners"), and both are bound by content hash so
+   editing either invalidates the claim. Any accuracy, offset, matching or
+   yield row is statistical by definition: a spec carrying one — or a sigma,
+   yield, Cpk or `3σ`-style bound — cannot use the outcome and needs `klt
+   yield` evidence for that row. The outcome is available to a digital
+   partition only; an analog partition (including the analog half of a
+   mixed-signal block) always requires Monte Carlo evidence. `klt signoff`
+   reports it as `not_applicable`, never as `met`.
 7. **Post-layout verification**
    - *Analog* — the spec suite re-run against the netlist extracted from
      the layout, not only the drawn schematic (#252). Parasitic extraction
