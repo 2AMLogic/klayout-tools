@@ -547,6 +547,133 @@ def test_defines_keys_must_be_nonempty_strings(tmp_path):
         run_functional_verification(request_path)
 
 
+def _source_defines_request(tmp_path, source_defines, **options):
+    _setup_inputs(tmp_path)
+    _write(tmp_path / "macro.v", "module macro; endmodule\n")
+    request = _base_request(options={"source_defines": source_defines, **options})
+    request["sources"] = ["gcd.v", "macro.v"]
+    return _write_request(tmp_path / "request.json", request)
+
+
+@pytest.mark.parametrize("value", ["FUNCTIONAL", ["FUNCTIONAL"], 7])
+def test_source_defines_must_be_object(tmp_path, value):
+    request_path = _source_defines_request(tmp_path, value)
+    with pytest.raises(
+        FunctionalVerificationError,
+        match="options.source_defines must be a JSON object",
+    ):
+        run_functional_verification(request_path)
+
+
+def test_source_defines_unknown_source_is_a_request_error(tmp_path):
+    request_path = _source_defines_request(tmp_path, {"nope.v": {"FUNCTIONAL": "1"}})
+    with pytest.raises(FunctionalVerificationError, match="'nope.v'.*request.sources"):
+        run_functional_verification(request_path)
+
+
+@pytest.mark.parametrize("value", [7, 1.5, True, []])
+def test_source_defines_values_must_be_string_or_null(tmp_path, value):
+    request_path = _source_defines_request(tmp_path, {"macro.v": {"FUNCTIONAL": value}})
+    with pytest.raises(
+        FunctionalVerificationError,
+        match=r"source_defines\['macro.v'\]\['FUNCTIONAL'\]",
+    ):
+        run_functional_verification(request_path)
+
+
+def test_source_defines_entry_must_be_a_defines_object(tmp_path):
+    request_path = _source_defines_request(tmp_path, {"macro.v": "FUNCTIONAL"})
+    with pytest.raises(
+        FunctionalVerificationError, match=r"source_defines\['macro.v'\] must be"
+    ):
+        run_functional_verification(request_path)
+
+
+def test_scoped_functional_with_sdf_is_not_rejected_but_global_still_is(
+    tmp_path, monkeypatch
+):
+    """Issue #3290: FUNCTIONAL scoped to a hard-macro source does not trip the
+    SDF rejection (std-cell sources stay unaffected); a global FUNCTIONAL does."""
+    _write(tmp_path / "route.sdf", _MINIMAL_SDF)
+    request_path = _source_defines_request(
+        tmp_path, {"macro.v": {"FUNCTIONAL": None}}, sdf={"file": "route.sdf"}
+    )
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+    try:
+        run_functional_verification(request_path)
+    except FunctionalVerificationError as exc:
+        assert "cannot be combined with a 'FUNCTIONAL' define" not in str(exc)
+
+    request_path = _source_defines_request(
+        tmp_path,
+        {"macro.v": {"FUNCTIONAL": None}},
+        sdf={"file": "route.sdf"},
+        defines={"FUNCTIONAL": None},
+    )
+    with pytest.raises(
+        FunctionalVerificationError,
+        match="options.sdf cannot be combined with a 'FUNCTIONAL' define",
+    ):
+        run_functional_verification(request_path)
+
+
+def test_scoped_defines_wrapper_content_and_position(tmp_path):
+    gcd = str(tmp_path / "gcd.v")
+    macro = str(tmp_path / "macro.v")
+    sources, include_dirs = fv._write_scoped_define_wrappers(
+        [gcd, macro, gcd],
+        {macro: {"FUNCTIONAL": None, "WIDTH": "8"}},
+        str(tmp_path / "out"),
+    )
+    assert sources[0] == gcd and sources[2] == gcd
+    assert sources[1] != macro
+    assert Path(sources[1]).read_text().splitlines() == [
+        "`define FUNCTIONAL",
+        "`define WIDTH 8",
+        f'`include "{macro}"',
+        "`undef FUNCTIONAL",
+        "`undef WIDTH",
+    ]
+    assert include_dirs == [str(tmp_path)]
+
+
+def test_scoped_defines_absent_leaves_sources_untouched(tmp_path):
+    assert fv._write_scoped_define_wrappers(["a.v", "b.v"], {}, str(tmp_path)) == (
+        ["a.v", "b.v"],
+        [],
+    )
+
+
+def test_stubbed_run_substitutes_wrapper_and_echoes_source_defines(
+    tmp_path, monkeypatch
+):
+    request_path = _source_defines_request(tmp_path, {"macro.v": {"FUNCTIONAL": "1"}})
+    runner = _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    report = run_functional_verification(request_path)
+
+    macro = str((tmp_path / "macro.v").resolve())
+    built = runner.build_kwargs["sources"]
+    assert built[0] == str((tmp_path / "gcd.v").resolve())
+    assert built[1] != macro and macro in Path(built[1]).read_text()
+    assert runner.build_kwargs["defines"] == {}
+    assert report["environment"]["source_defines"] == {macro: {"FUNCTIONAL": "1"}}
+
+
+def test_stubbed_run_without_source_defines_echoes_empty(tmp_path, monkeypatch):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    runner = _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    report = run_functional_verification(request_path)
+
+    assert report["environment"]["source_defines"] == {}
+    assert all(
+        not Path(s).name.startswith("scoped_defines_")
+        for s in runner.build_kwargs["sources"]
+    )
+
+
 @pytest.mark.parametrize("build_args", ["--foo", [7], [""], {"a": 1}])
 def test_build_args_shape_validation(tmp_path, build_args):
     _setup_inputs(tmp_path)
@@ -1038,9 +1165,14 @@ def test_stubbed_run_reports_the_full_contract_shape(tmp_path, monkeypatch):
         # the spike captured live (section 4) -- this is the authoritative
         # echo, read back from `results.xml` itself.
         "random_seed": 1785780800,
+        # Additive (issue #3290): `{}` without `options.source_defines`.
+        "source_defines": {},
         # Additive (issue #1002): `null` on any run without `options.sdf`,
         # so an unannotated verdict is never mistakable for an annotated one.
         "sdf": None,
+        # Additive (issue #2998): `null` on any run without
+        # `options.initial_state`.
+        "initial_state": None,
     }
     results_xml = report["environment"]["results_xml"]
     assert os.path.isabs(results_xml)
@@ -1151,6 +1283,93 @@ def test_stubbed_run_default_engine_and_timescale(tmp_path, monkeypatch):
     assert report["engine"] == "icarus"
     assert runner.build_kwargs["timescale"] == ("1ns", "1ps")
     assert runner.test_kwargs["timescale"] == ("1ns", "1ps")
+
+
+def test_stubbed_run_outdir_redirects_artifacts(tmp_path, monkeypatch):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+    outdir = tmp_path / "nested" / "run_a"
+
+    report = run_functional_verification(request_path, output_dir=str(outdir))
+
+    results_xml = Path(report["environment"]["results_xml"])
+    assert results_xml.parent == outdir.resolve()
+    assert results_xml.is_file()
+    assert not (tmp_path / ".klt").exists()
+
+
+def test_stubbed_run_two_outdirs_keep_both_result_sets(tmp_path, monkeypatch):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    first = run_functional_verification(request_path, output_dir=str(tmp_path / "a"))
+    second = run_functional_verification(request_path, output_dir=str(tmp_path / "b"))
+
+    assert first["environment"]["results_xml"] != second["environment"]["results_xml"]
+    assert os.path.isfile(first["environment"]["results_xml"])
+    assert os.path.isfile(second["environment"]["results_xml"])
+
+
+def test_stubbed_run_default_output_dir_unchanged(tmp_path, monkeypatch):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    report = run_functional_verification(request_path)
+
+    expected = tmp_path / ".klt" / "functional-verification" / "results_icarus.xml"
+    assert Path(report["environment"]["results_xml"]) == expected.resolve()
+
+
+def test_stubbed_run_relative_outdir_resolves_against_cwd(tmp_path, monkeypatch):
+    req_dir = tmp_path / "req"
+    req_dir.mkdir()
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    _setup_inputs(req_dir)
+    request_path = _write_request(req_dir / "request.json", _base_request())
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+    monkeypatch.chdir(cwd)
+
+    report = run_functional_verification(request_path, output_dir="out")
+
+    assert Path(report["environment"]["results_xml"]).parent == (cwd / "out").resolve()
+    assert not (req_dir / ".klt").exists()
+
+
+def test_stubbed_run_unwritable_outdir_is_a_clean_error(tmp_path, monkeypatch):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+    blocker = tmp_path / "blocker"
+    blocker.write_text("a file, not a directory", encoding="utf-8")
+
+    with pytest.raises(FunctionalVerificationError, match="could not create output"):
+        run_functional_verification(request_path, output_dir=str(blocker / "sub"))
+
+
+def test_cli_outdir_flag_is_threaded_through(tmp_path, monkeypatch, capsys):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+    outdir = tmp_path / "cli_out"
+
+    main(
+        [
+            "functional-verification",
+            request_path,
+            "--outdir",
+            str(outdir),
+            "--format",
+            "json",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    data = payload.get("data", payload)
+    assert Path(data["environment"]["results_xml"]).parent == outdir.resolve()
 
 
 def test_stubbed_run_passes_testcase_filter_through(tmp_path, monkeypatch):
@@ -2443,6 +2662,93 @@ def test_stubbed_sdf_still_fails_on_a_wellformed_error_beside_a_splice(
             _RESULTS_XML_WITH_SKIP,
             extra_test_log=(
                 _SPLICED_TIMINGCHECK_TRANSCRIPT
+                + "SDF ERROR: route.sdf:2976: Unable to match ModPath D -> Q "
+                "in gcd._647_\n"
+            ),
+        ),
+    )
+
+    with pytest.raises(
+        FunctionalVerificationError,
+        match="did not fully apply: 1 diagnostic.*Unable to match ModPath",
+    ):
+        run_functional_verification(request_path)
+
+
+#: Issue #2996: the splice lands *after* an intact locator, inside the
+#: message, with the orphaned tail on a later line of its own.
+_MESSAGE_SPLICED_TRANSCRIPT = (
+    "SDF WARNING: /abs/path/klt_sdf_safe.sdf:21217: TIM   590.00ns INFO     "
+    "cocotb.klt_sdf_dut_wrapper         watching uo_out against 4 edge checks\n"
+    "INGCHECK not supported.\n"
+)
+
+#: Issue #2996: cut inside the path; the spliced-in Python warning line
+#: carries its own ``<file>:<line>:`` which satisfies the locator regex.
+_PYWARNINGS_SPLICED_TRANSCRIPT = (
+    "SDF WARNING: /abs/flow/post-layout- 48164.00ns WARNING  py.warnings  "
+    "/abs/tb.py:251: DeprecationWarning: `task.kill()` is deprecated in "
+    "favor of `task.cancel()`.\n"
+)
+
+
+@pytest.mark.parametrize(
+    "transcript",
+    [
+        _MESSAGE_SPLICED_TRANSCRIPT,
+        _PYWARNINGS_SPLICED_TRANSCRIPT,
+        "SDF WARNING: /a/x.sdf:1: TIM 12.50ps DEBUG cocotb.x y\n",
+        "SDF WARNING: /a/x.sdf:1: TIM 3us CRITICAL cocotb.x y\n",
+    ],
+)
+def test_scan_sdf_diagnostics_drops_a_message_spliced_line(tmp_path, transcript):
+    """Issue #2996: a splice after the locator is dropped from both buckets."""
+    log = _write(tmp_path / "test_icarus.log", transcript)
+
+    assert fv._scan_sdf_diagnostics(log) == ([], {})
+
+
+def test_scan_sdf_diagnostics_message_splice_keeps_intact_siblings(tmp_path):
+    log = _write(
+        tmp_path / "test_icarus.log",
+        "SDF WARNING: /a/x.sdf:1: TIMINGCHECK not supported.\n"
+        + _MESSAGE_SPLICED_TRANSCRIPT,
+    )
+
+    actionable, dropped = fv._scan_sdf_diagnostics(log)
+
+    assert actionable == []
+    assert dropped == {"timingcheck": 1}
+
+
+def test_stubbed_sdf_tolerates_a_message_spliced_transcript(tmp_path, monkeypatch):
+    """End-to-end regression for issue #2996."""
+    request_path = _sdf_request(tmp_path)
+    _stub_runner(
+        monkeypatch,
+        _FakeRunner(
+            _RESULTS_XML_WITH_SKIP,
+            extra_test_log=_MESSAGE_SPLICED_TRANSCRIPT + _PYWARNINGS_SPLICED_TRANSCRIPT,
+        ),
+    )
+
+    report = run_functional_verification(request_path)
+
+    assert report["status"] == "pass"
+    sdf = report["environment"]["sdf"]
+    assert sdf["annotated"] is True
+
+
+def test_stubbed_sdf_still_fails_on_a_wellformed_error_beside_a_message_splice(
+    tmp_path, monkeypatch
+):
+    request_path = _sdf_request(tmp_path)
+    _stub_runner(
+        monkeypatch,
+        _FakeRunner(
+            _RESULTS_XML_WITH_SKIP,
+            extra_test_log=(
+                _MESSAGE_SPLICED_TRANSCRIPT
                 + "SDF ERROR: route.sdf:2976: Unable to match ModPath D -> Q "
                 "in gcd._647_\n"
             ),

@@ -15,7 +15,9 @@ shipped as one.
 
 - a stable unique ``name`` (an ngspice-vector-safe identifier),
 - an ``analysis`` (``kind`` + ``args``, exactly like the scalar form),
-- optional ``alter`` source-value overrides applied before that solve, and
+- optional ``alter`` source-value overrides applied before that solve,
+- optional ``reset: true`` -- start the step from a freshly parsed circuit
+  (ngspice ``reset``; issue #3103), and
 - optional step-scoped ``measurements[]`` (``expr`` or a ``.meas`` card whose
   analysis type matches the step's own ``kind``).
 
@@ -48,7 +50,11 @@ to hand-rolled decks -- a plausible but mis-paired number):
    step-qualified reference ``lo.vout`` is rewritten to
    ``{$klt_plot_<index>}.vout`` -- ngspice's own plot-qualified vector syntax
    -- so it always addresses that step's solve, at full double precision
-   (never a printed, rounded copy).
+   (never a printed, rounded copy). After ``noise`` that plot holds only the
+   integrated totals; a ``noise`` step's spectra live in the plot made just
+   before it, captured (only when referenced) into
+   ``klt_plot_<index>_spectrum`` and addressed as
+   ``<step>.spectrum.inoise_spectrum`` / ``<step>.spectrum.onoise_spectrum``.
 4. Each step-scoped value is copied to a unique, stable log key
    ``<step>__<measurement>`` and ``print``ed, so two steps both measuring
    ``vout`` are harvested separately.
@@ -92,17 +98,23 @@ _NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 #: (``@m1[w]``) targets are out of scope.
 _ALTER_TARGET_RE = re.compile(r"^[VIRCLvircl][A-Za-z0-9_]*$")
 
+#: The ``<step>.spectrum.<vec>`` qualifier: addresses the spectrum plot of a
+#: ``noise`` step (``inoise_spectrum`` / ``onoise_spectrum``), not its totals.
+_SPECTRUM_QUALIFIER = "spectrum"
+
 #: A step-scoped ``.meas``/``.measure`` card: type, name, remainder.
 _MEAS_CARD_RE = re.compile(r"^\s*\.meas(?:ure)?\s+(\S+)\s+(\S+)(.*)$", re.IGNORECASE)
 
 #: One token of an expression this module cares about: a signal accessor
 #: (``v(x1.out)``, ``i(vdd)``, ``vdb(out)``) whose argument may legitimately
 #: contain dots and is passed through untouched; or a step-qualified
-#: reference ``<step>.<measurement>``. The look-behind keeps ``1.5``,
-#: ``@m.x1.m0[id]`` and an already-qualified ``{$p}.x`` from matching.
+#: reference ``<step>.<measurement>`` (or ``<step>.spectrum.<vector>``). The
+#: look-behind keeps ``1.5``, ``@m.x1.m0[id]`` and an already-qualified
+#: ``{$p}.x`` from matching.
 _TOKEN_RE = re.compile(
     r"(?P<signal>\b[vi][a-z]{0,2}\s*\([^()]*\))"
-    r"|(?<![\w.$}@])(?P<step>[A-Za-z_][A-Za-z0-9_]*)\.(?P<meas>[A-Za-z_][A-Za-z0-9_]*)\b",
+    r"|(?<![\w.$}@])(?P<step>[A-Za-z_][A-Za-z0-9_]*)\.(?P<meas>[A-Za-z_][A-Za-z0-9_]*)"
+    r"(?:\.(?P<vec>[A-Za-z_][A-Za-z0-9_]*))?\b",
     re.IGNORECASE,
 )
 
@@ -140,6 +152,17 @@ def _refuse_crossings(spec: dict[str, Any]) -> None:
             f"measurement {spec.get('name')!r}: 'energy' is not supported "
             "with analysis_steps -- use the scalar analysis "
             '(kind "tran") for a source-energy measurement'
+        )
+
+
+def _refuse_cycle_mean(spec: dict[str, Any]) -> None:
+    """Issue #2947: like ``crossings``, a ``cycle_mean`` reads one transient
+    plot's rawfile and has no per-step equivalent -- refused by name."""
+    if spec.get("cycle_mean") is not None:
+        raise _error(
+            f"measurement {spec.get('name')!r}: 'cycle_mean' is not supported "
+            "with analysis_steps -- use the scalar analysis "
+            '(kind "tran") for a cycle-aligned mean'
         )
 
 
@@ -201,6 +224,7 @@ def resolve_analysis_steps(
         known[step["name"].lower()] = {
             "index": index,
             "name": step["name"],
+            "kind": step["kind"],
             "measurements": {spec["local_name"].lower(): spec for spec in step_specs},
         }
         steps.append(step)
@@ -229,12 +253,21 @@ def _resolve_step(
             "case-insensitively): step names must be unique"
         )
     kind, args = _resolve_step_analysis(raw.get("analysis"), name)
-    return {
+    resolved: dict[str, Any] = {
         "name": name,
         "kind": kind,
         "args": args,
         "alter": _resolve_alter(raw.get("alter"), name),
     }
+    reset = raw.get("reset")
+    if reset is not None:
+        if not isinstance(reset, bool):
+            raise _error(f"step {name!r}: reset must be a boolean (got {reset!r})")
+        if reset:
+            # Only present when true, so a no-reset sequence resolves (and
+            # fingerprints) exactly as before.
+            resolved["reset"] = True
+    return resolved
 
 
 def _resolve_step_analysis(analysis: Any, step: str) -> tuple[str, str]:
@@ -313,6 +346,7 @@ def _resolve_step_measurements(
     for spec in specs:
         _validate_measurement_form(spec)
         _refuse_crossings(spec)
+        _refuse_cycle_mean(spec)
         local = spec["name"]
         if not isinstance(local, str) or not _NAME_RE.match(local):
             raise _error(
@@ -351,16 +385,19 @@ def _flatten_step_measurement(
         flat["meas_card"] = spec["spice"]
         first = _meas_command(spec["spice"], local, step)
         derived_from: list[str] = []
+        spectrum_steps: list[str] = []
     else:
         expr = spec["expr"]
         flat["expr"] = expr
-        deck_expr, derived_from = _substitute_refs(
+        deck_expr, derived_from, spectrum_steps = _substitute_refs(
             expr, known, owner=f"{step['name']}.{local}"
         )
         first = f"let {local} = {deck_expr}"
     flat["deck_lines"] = [first, f"let {log_key} = {local}", f"print {log_key}"]
     if derived_from:
         flat["derived_from"] = derived_from
+    if spectrum_steps:
+        flat["spectrum_steps"] = spectrum_steps
     return flat
 
 
@@ -405,20 +442,25 @@ def _meas_command(card: str, local: str, step: dict[str, Any]) -> str:
 
 def _substitute_refs(
     expr: str, known: dict[str, dict[str, Any]], *, owner: str
-) -> tuple[str, list[str]]:
+) -> tuple[str, list[str], list[str]]:
     """Rewrite every ``<step>.<measurement>`` reference in ``expr`` to that
-    step's plot-qualified vector, returning ``(deck_expr, references)``.
+    step's plot-qualified vector, returning ``(deck_expr, references,
+    spectrum_steps)``. ``spectrum_steps`` names the ``noise`` steps whose
+    spectrum plot a ``<step>.spectrum.<vector>`` reference reads.
 
     ``known`` holds only the steps declared *before* the expression's own
     position, so an unknown name and a forward/self reference are both
     caught here, distinguished by whether the step exists at all."""
     references: list[str] = []
+    spectrum_steps: list[str] = []
 
     def _replace(match: re.Match[str]) -> str:
         if match.group("signal") is not None:
             return match.group("signal")
         step_ref, meas_ref = match.group("step"), match.group("meas")
         target = known.get(step_ref.lower())
+        if match.group("vec") is not None:
+            return _replace_spectrum(match, target, owner, spectrum_steps)
         if target is None:
             raise _error(
                 f"measurement {owner!r} references {step_ref}.{meas_ref}, but "
@@ -436,7 +478,48 @@ def _substitute_refs(
             references.append(meas["name"])
         return "{$klt_plot_" + str(target["index"]) + "}." + meas["local_name"]
 
-    return _TOKEN_RE.sub(_replace, expr), references
+    return _TOKEN_RE.sub(_replace, expr), references, spectrum_steps
+
+
+def _replace_spectrum(
+    match: re.Match[str],
+    target: dict[str, Any] | None,
+    owner: str,
+    spectrum_steps: list[str],
+) -> str:
+    """One ``<step>.spectrum.<vector>`` reference -> the vector in that
+    ``noise`` step's spectrum plot (captured in :func:`control_lines`)."""
+    from .sim import NOISE_SPECTRUM_VECTORS
+
+    step_ref, qualifier, vec = match.group("step", "meas", "vec")
+    text = f"{step_ref}.{qualifier}.{vec}"
+    if qualifier.lower() != _SPECTRUM_QUALIFIER:
+        raise _error(
+            f"measurement {owner!r} references {text}, but the only "
+            f"three-part step reference is '<step>.{_SPECTRUM_QUALIFIER}."
+            "<vector>' (a noise step's spectrum plot)"
+        )
+    if target is None:
+        raise _error(
+            f"measurement {owner!r} references {text}, but {step_ref!r} is "
+            "not an earlier step: a reference may only name a step declared "
+            "before it (unknown, forward and self references are refused)"
+        )
+    if target["kind"].lower() != "noise":
+        raise _error(
+            f"measurement {owner!r} references {text}, but step "
+            f"{target['name']!r} runs '{target['kind']}', not 'noise' -- only "
+            "a noise step has a spectrum plot"
+        )
+    if vec.lower() not in NOISE_SPECTRUM_VECTORS:
+        raise _error(
+            f"measurement {owner!r} references {text}, but {vec!r} is not a "
+            f"noise spectrum vector of step {target['name']!r} (expected one "
+            f"of: {', '.join(NOISE_SPECTRUM_VECTORS)})"
+        )
+    if target["name"] not in spectrum_steps:
+        spectrum_steps.append(target["name"])
+    return "{$klt_plot_" + str(target["index"]) + "_spectrum}." + vec.lower()
 
 
 def _resolve_derived_measurements(
@@ -453,6 +536,7 @@ def _resolve_derived_measurements(
     for position, spec in enumerate(specs):
         name = spec["name"]
         _refuse_crossings(spec)
+        _refuse_cycle_mean(spec)
         if spec.get("spice") is not None:
             raise _error(
                 f"measurement {name!r}: with analysis_steps, a top-level "
@@ -460,11 +544,13 @@ def _resolve_derived_measurements(
                 ".meas card would run after every step's analysis -- declare "
                 "it in the matching step's own measurements[] instead"
             )
-        deck_expr, references = _substitute_refs(spec["expr"], known, owner=name)
+        deck_expr, references, spectrum_steps = _substitute_refs(
+            spec["expr"], known, owner=name
+        )
         references += _derived_name_refs(
             spec["expr"], name, position, derived_names, known
         )
-        if not references:
+        if not references and not spectrum_steps:
             raise _error(
                 f"measurement {name!r} references no step result: with "
                 "analysis_steps, a top-level measurement combines "
@@ -479,6 +565,8 @@ def _resolve_derived_measurements(
                 "deck_lines": [f"let {name} = {deck_expr}", f"print {name}"],
             }
         )
+        if spectrum_steps:
+            flat["spectrum_steps"] = spectrum_steps
         resolved.append(flat)
     return resolved
 
@@ -627,13 +715,25 @@ def _format_value(value: float) -> str:
 
 
 def control_lines(
-    analysis: dict[str, Any], measurements_spec: list[dict[str, Any]]
+    analysis: dict[str, Any],
+    measurements_spec: list[dict[str, Any]],
+    reset_prefix: list[str] | None = None,
 ) -> list[str]:
     """The step-sequence body of the generated ``.control`` block -- placed
     after the corner's own ``alter`` cards and before ``quit``. See this
-    module's docstring for why each line exists."""
+    module's docstring for why each line exists.
+
+    ``reset_prefix`` is the corner prefix (``save all`` and the corner's
+    ``supply_v`` ``alter`` cards) re-emitted after ``reset`` for a step with
+    ``reset: true``, since ``reset`` reverts both."""
     lines: list[str] = []
+    spectrum_needed = {
+        name for spec in measurements_spec for name in spec.get("spectrum_steps", [])
+    }
     for index, step in enumerate(analysis["steps"]):
+        if step.get("reset"):
+            lines.append("reset")
+            lines.extend(reset_prefix or [])
         for target, value in step["alter"]:
             lines.append(f"alter {target}={_format_value(value)}")
         lines.append("setplot new")
@@ -641,6 +741,22 @@ def control_lines(
         lines.append(f"{step['kind']} {step['args']}".rstrip())
         lines.append(f"echo klt_step_end {index} $curplot")
         lines.append(f"set klt_plot_{index} = $curplot")
+        if step["name"] in spectrum_needed:
+            # `noise` leaves the integrated plot current; the spectra are in
+            # the plot made just before it -- the second-to-last of $plots
+            # right after the analysis. A failed solve is blocked in Python
+            # (step_failed), so a stale pick there is never graded.
+            lines.extend(
+                [
+                    f"set klt_pa{index} = none",
+                    f"set klt_pb{index} = none",
+                    "foreach klt_p $plots",
+                    f"set klt_pa{index} = $klt_pb{index}",
+                    f"set klt_pb{index} = $klt_p",
+                    "end",
+                    f"set klt_plot_{index}_spectrum = $klt_pa{index}",
+                ]
+            )
         for spec in measurements_spec:
             if spec.get("step") == step["name"]:
                 lines.extend(spec["deck_lines"])
@@ -758,6 +874,11 @@ def _grade_one(
         name
         for name in spec.get("derived_from", [])
         if by_name.get(name, {}).get("value") is None
+    ]
+    missing += [
+        f"{name}.spectrum"
+        for name in spec.get("spectrum_steps", [])
+        if not outcomes[name]
     ]
     if missing:
         return errored, [
