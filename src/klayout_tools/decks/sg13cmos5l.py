@@ -1290,6 +1290,7 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
     (10, 0): "Metal2.drawing",
     (10, 2): "Metal2.pin",
     (14, 0): "pSD.drawing",
+    (16, 0): "DigiBnd.drawing",
     (19, 0): "Via1.drawing",
     (24, 0): "RES.drawing",
     (28, 0): "SalBlock.drawing",
