@@ -5415,6 +5415,30 @@ def test_yield_samples_source_edit_without_regeneration_is_not_rechecked(
     assert item_6["citation"]["content_hash"] == pin
 
 
+def test_yield_csv_derived_document_is_what_signoff_hashes(tmp_path, capsys):
+    """`klt yield-csv` (issue #2931) follows the `yield-samples` model:
+    signoff pins the derived sample set; the CSV's own hash is audit
+    metadata inside it, and an un-re-derived CSV edit is not re-checked."""
+    csv_path = tmp_path / "trials.csv"
+    csv_path.write_text("metric,result\nvref,1.20\nvref,1.21\nvref,1.19\n")
+    argv = ["yield-csv", str(csv_path), "--group-by", "metric", "--value", "result"]
+    assert main([*argv, "--format", "json"]) == 0
+    derived = tmp_path / "mc-samples.json"
+    derived.write_text(capsys.readouterr().out)
+
+    item_6 = _yield_item_6(tmp_path)
+
+    assert item_6["status"] == "met"
+    derived_hash = "sha256:" + hashlib.sha256(derived.read_bytes()).hexdigest()
+    assert item_6["citation"]["content_hash"] == derived_hash
+    csv_hash = "sha256:" + hashlib.sha256(csv_path.read_bytes()).hexdigest()
+    assert item_6["citation"]["content_hash"] != csv_hash
+    assert csv_hash in derived.read_text()
+
+    csv_path.write_text("metric,result\nvref,9\n")
+    assert _yield_item_6(tmp_path, pin=derived_hash)["status"] == "met"
+
+
 def test_mixed_signal_manifest_shares_bare_item_6_yield_evidence_across_partitions(
     tmp_path,
 ):
