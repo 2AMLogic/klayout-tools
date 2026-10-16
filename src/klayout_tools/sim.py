@@ -253,6 +253,9 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "engine_killed",
         "engine_aborted",
         "measurement",
+        # An opted-in (`on_unreached: "null"`) unreached `.meas` target
+        # (issue #3108); `info` severity, so it never fails a corner itself.
+        "measurement_not_reached",
         # An `optional` measurement with no value (issue #2925); info severity.
         "measurement_absent",
         "unknown",
@@ -1847,6 +1850,7 @@ def _validate_measurement_form(spec: dict[str, Any]) -> None:
     _require_measurement_form(
         name, has_spice or has_expr or has_crossings or has_cycle_mean or has_energy
     )
+    _validate_on_unreached(name, spec, has_spice=has_spice)
     if _validate_rawfile_form(
         name,
         spec,
@@ -1878,6 +1882,27 @@ def _validate_measurement_form(spec: dict[str, Any]) -> None:
             "name is emitted as an ngspice vector name (`let <name> = "
             "...`) and read back from the log, so it must match "
             "[A-Za-z_][A-Za-z0-9_]* (no dots, no leading digit)"
+        )
+
+
+def _validate_on_unreached(name: Any, spec: dict[str, Any], *, has_spice: bool) -> None:
+    """``measurements[].on_unreached`` (issue #3108): ``"error"`` | ``"null"``,
+    and only on a ``spice`` (``.meas``) measurement -- an ``expr`` or
+    ``crossings`` entry has no "target" to leave unreached, so it is rejected
+    rather than silently ignored."""
+    if "on_unreached" not in spec:
+        return
+    value = spec["on_unreached"]
+    if value not in ON_UNREACHED_VALUES:
+        raise SimError(
+            f"measurement '{name}' has on_unreached={value!r}: must be one of "
+            + ", ".join(repr(v) for v in ON_UNREACHED_VALUES)
+        )
+    if not has_spice:
+        raise SimError(
+            f"measurement '{name}' declares 'on_unreached' without 'spice': "
+            "it only applies to a .meas card whose WHEN/AT target may go "
+            "unreached"
         )
 
 
@@ -4126,6 +4151,7 @@ def _run_sim_corners(
         # Additive/optional (issue #2901): only present when a batch runner
         # predates a request feature under `runner_version_check: "warn"`.
         report["diagnostics"] = [request_feature_diagnostic]
+    _attach_not_reached_count(report, measurements_spec, corners)
     if plot_dir is not None:
         # Additive/optional: only present when `--plot`/`plot_dir` was
         # requested -- the flat list of every SVG actually written, in
@@ -9106,6 +9132,7 @@ def _run_corner(
             energy=energy,
             cycle_means=cycle_means,
             transfers=transfers,
+            engine_diagnostics=diagnostics,
         )
     )
     measurement_diagnostics = _demote_abort_cascade(
@@ -9393,6 +9420,7 @@ def _corner_measurement_results(
     energy: dict[int, sim_energy.EnergyOutcome] | None = None,
     cycle_means: dict[int, sim_cycle_mean.CycleMeanOutcome] | None = None,
     transfers: dict[int, sim_transfer_meas.TransferOutcome] | None = None,
+    engine_diagnostics: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     """One corner's ``(measurement_results, diagnostics, extra_corner_fields)``
     from its harvested log values.
@@ -9410,6 +9438,12 @@ def _corner_measurement_results(
     other corner takes the original single-analysis path below, unchanged:
     one result per spec in declared order, a ``measurement`` diagnostic for
     each one that produced no value, and ``extra_corner_fields`` empty.
+
+    ``engine_diagnostics`` (issue #3108) are the corner's diagnostics so far
+    (solver/timeout classification); a ``spice`` measurement declaring
+    ``on_unreached: "null"`` is graded :data:`NOT_REACHED_STATUS` instead of
+    ``error`` only when none of them is error-severity. Not applied to an
+    ``analysis_steps[]`` corner.
     """
     if sim_steps.is_steps_analysis(analysis):
         return sim_steps.grade_step_measurements(
@@ -9422,6 +9456,7 @@ def _corner_measurement_results(
     measurement_results: list[dict[str, Any]] = []
     diagnostics: list[dict[str, Any]] = []
     meas_errors = {} if is_xyce else _parse_meas_errors(log_text)
+    unreached_names = set() if is_xyce else _parse_meas_unreached_names(log_text)
     attributed: set[str] = set()
     # Forms whose value comes from a rawfile reduction rather than the log:
     # (spec predicate, response-entry builder, position -> outcome map).
@@ -9458,6 +9493,31 @@ def _corner_measurement_results(
         name = spec["name"]
         value = _harvest_measurement_value(measurement_values, spec, is_xyce=is_xyce)
         unit = spec.get("unit")
+        if value is None and _is_unreached(
+            spec,
+            unreached_names=unreached_names,
+            diagnostics=engine_diagnostics or [],
+        ):
+            attributed.add(str(name).lower())
+            measurement_results.append(
+                {
+                    "name": name,
+                    "value": None,
+                    "unit": unit,
+                    "status": NOT_REACHED_STATUS,
+                    "margin": None,
+                }
+            )
+            diagnostics.append(
+                {
+                    "severity": "info",
+                    "code": NOT_REACHED_DIAGNOSTIC_CODE,
+                    "message": f"measurement '{name}' target not reached: the "
+                    "analysis completed but ngspice's .meas never satisfied "
+                    f"its condition ({spec['spice'].strip()})",
+                }
+            )
+            continue
         if value is None:
             result, diagnostic, was_attributed = _no_value_measurement(
                 spec, meas_errors, save_mode=save_mode
@@ -9898,6 +9958,62 @@ def _parse_meas_errors(log_text: str) -> dict[str, str]:
             text = text[: _MEAS_ERROR_MAX_CHARS - 3] + "..."
         errors.setdefault(match.group(1).lower(), text)
     return errors
+
+
+#: ``measurements[].on_unreached`` (issue #3108): what a ``spice`` ``.meas``
+#: card that the completed analysis never satisfied (a ``WHEN``/``AT`` target
+#: outside the swept range) is graded as. ``"error"`` (the default) is today's
+#: behaviour byte-for-byte; ``"null"`` opts into :data:`NOT_REACHED_STATUS`.
+ON_UNREACHED_VALUES = ("error", "null")
+
+#: The additive measurement status (and ``code``) for an unreached target.
+NOT_REACHED_STATUS = "not_reached"
+NOT_REACHED_DIAGNOSTIC_CODE = "measurement_not_reached"
+
+
+#: ngspice-46's reason line for a ``.meas`` target the completed sweep never
+#: reached (``WHEN``/``AT``/``TRIG``/``TARG`` outside the swept range), e.g.
+#: ``Error: measure  x  when(WHEN) : out of interval`` (verified empirically:
+#: a malformed card or a missing vector logs a different reason, or none).
+#: Unlike :data:`_MEAS_ERROR_RE` this is uncapped -- a deck can have dozens.
+_MEAS_UNREACHED_RE = re.compile(
+    r"^\s*Error:\s*measure\s+(\S+)\s+\S+\s*:\s*out of interval\s*$",
+    re.MULTILINE | re.IGNORECASE,
+)
+
+
+def _parse_meas_unreached_names(log_text: str) -> set[str]:
+    """Lower-cased names of ``.meas`` cards that ngspice logged as both
+    ``out of interval`` and ``failed!`` (the latter guards against the
+    reason text appearing without the card actually failing)."""
+    text = log_text or ""
+    failed = {
+        match.group(1).lower()
+        for raw in text.splitlines()
+        if (match := _MEAS_FAILED_RE.match(raw.strip()))
+    }
+    return {
+        match.group(1).lower()
+        for match in _MEAS_UNREACHED_RE.finditer(text)
+        if match.group(1).lower() in failed
+    }
+
+
+def _is_unreached(
+    spec: dict[str, Any],
+    *,
+    unreached_names: set[str],
+    diagnostics: list[dict[str, Any]],
+) -> bool:
+    """True when this value-less ``spice`` measurement opted into
+    ``on_unreached: "null"``, ngspice reported exactly "out of interval" for
+    it, and the corner carries no error-severity diagnostic (solver
+    divergence, timeout, ...) -- i.e. the analysis itself completed."""
+    if spec.get("on_unreached") != "null" or spec.get("spice") is None:
+        return False
+    if str(spec["name"]).lower() not in unreached_names:
+        return False
+    return not any(d["severity"] == "error" for d in diagnostics)
 
 
 def _harvest_measurement_value(
@@ -11505,6 +11621,9 @@ def _measurement_coverage(
     # would make a distrusted corner look uncovered instead.
     implausible = measurement.get("status") == _INCONCLUSIVE_STATUS
     measured = has_value and measurement.get("status") in {"pass", "fail"}
+    # Issue #3108: an unreached target is an answered question (an
+    # observation) but no bound was applied to it, like `implausible`.
+    not_reached = measurement.get("status") == NOT_REACHED_STATUS
     checked = []
     skipped = []
     inapplicable = []
@@ -11512,7 +11631,7 @@ def _measurement_coverage(
         inapplicable.append(
             {"id": identity + "/limits", "reason": "characterization_without_limits"}
         )
-        if measured or implausible:
+        if measured or implausible or not_reached:
             checked.append(identity + "/observation")
         else:
             skipped.append(
@@ -11537,6 +11656,8 @@ def _measurement_coverage(
                 else IMPLAUSIBLE_DIAGNOSTIC_CODE
             )
             skipped.append({"id": bound_id, "reason": reason})
+        elif not_reached:
+            skipped.append({"id": bound_id, "reason": NOT_REACHED_STATUS})
         elif not measured:
             skipped.append({"id": bound_id, "reason": "unavailable_measurement"})
         else:
@@ -12034,6 +12155,25 @@ def _monte_carlo_rollup(
     return rollup
 
 
+def _attach_not_reached_count(
+    report: dict[str, Any],
+    measurements_spec: list[dict[str, Any]],
+    corners: list[dict[str, Any]],
+) -> None:
+    """Additive/optional (issue #3108): the top-level ``not_reached`` count,
+    present only when some measurement declared ``on_unreached`` so a request
+    that never opts in keeps its exact report shape. Counts corner x
+    measurement results, kept apart from ``errored`` (which counts corners)."""
+    if not any("on_unreached" in spec for spec in measurements_spec):
+        return
+    report["not_reached"] = sum(
+        1
+        for corner in corners
+        for m in corner["measurements"]
+        if m["status"] == NOT_REACHED_STATUS
+    )
+
+
 def _aggregate_measurement_status(
     entries: list[tuple[dict[str, Any], dict[str, Any]]],
 ) -> str:
@@ -12070,6 +12210,8 @@ def _aggregate_measurement_status(
         return _INCONCLUSIVE_STATUS
     if "fail" in statuses:
         return "fail"
+    if statuses == {NOT_REACHED_STATUS}:
+        return NOT_REACHED_STATUS
     if statuses == {_ABSENT_STATUS}:
         return _ABSENT_STATUS
     return "pass"
