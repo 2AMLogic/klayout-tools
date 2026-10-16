@@ -250,6 +250,13 @@ a `deck: {name, content_hash}` block; without it the output is byte-identical.
 No `schema_version` bump on either command. See `docs/cli/deck.md` and
 `docs/cli/layers.md`.
 
+Issue #2952's `klt lvs` category `reference.unresolved_subckt_call` is
+likewise additive (no `schema_version` bump), but unlike the diagnostic-only
+`pin.declared_short` it **forces** `status: "mismatch"`, so a request whose
+inputs are unchanged can flip from `"match"` to `"mismatch"` on upgrade —
+callers gating on `status` should expect that (see `docs/cli/lvs.md`,
+"`reference.unresolved_subckt_call`").
+
 **A new key in a documented open map, and a new member on one class of that
 map's entries, are additive.** `klt functional-verification`'s
 `environment.sdf.dropped` is documented as an open map keyed by class name,
@@ -383,6 +390,49 @@ This first contract increment confirms that synthesis pilot; it does not
 claim every existing verb has been audited or add warnings to every
 response. Further verb adoption preserves each verb's existing envelope.
 
+## Wrapping an external tool
+
+A verb that wraps an external EDA tool inherits the
+[requested-but-unperformed rule](#requested-but-unperformed-analysis): a
+zero exit status from the tool is not evidence that it did what was asked.
+Any new wrapper meets these four requirements, each a checkable statement
+(operator ruling on [#2093](https://github.com/2AMLogic/klayout-tools/issues/2093)):
+
+1. **Requested vs achieved.** The response carries both the requested value
+   and the value the tool actually delivered, and flags a mismatch beyond a
+   documented tolerance (a warning entry, or the verb's documented error)
+   rather than returning an unqualified `"status": "ok"`. Upstream case: a
+   PLL generator answering a different frequency than requested at exit 0
+   ([YosysHQ/prjtrellis#270](https://github.com/YosysHQ/prjtrellis/issues/270)).
+2. **Stage identity.** Every reported figure names the flow stage it comes
+   from (for example a post-placement estimate vs final timing). A figure
+   parsed from an unlabelled tool print is not reported as a final result.
+   Upstream case: an unlabelled first Fmax line
+   ([YosysHQ/nextpnr#1808](https://github.com/YosysHQ/nextpnr/issues/1808)).
+3. **Actual tool identity.** The tool name and version captured from the
+   invocation itself go into [`provenance`](#shared-provenance-block). An
+   empty or unparseable version is reported as unknown (`null`), never
+   fabricated or filled from a pin or a default.
+4. **Retained failure evidence.** The stdout/stderr of a failed invocation is
+   kept and referenced from the error or warning. Existing artefacts combined
+   with a missing metrics object are not read as stage success. Tracked for
+   the OpenROAD IR-drop case in [#2124](https://github.com/2AMLogic/klayout-tools/issues/2124).
+
+### Wrapper audit checklist
+
+When reviewing a new or existing wrapper, each answer must be yes:
+
+- [ ] Does every requested value that the tool can silently adjust appear
+      next to its achieved value, with a mismatch flagged beyond tolerance?
+- [ ] Does every reported metric name the stage it was measured at?
+- [ ] Is the tool name and version taken from the actual invocation, with
+      `null` when it cannot be parsed?
+- [ ] On a non-zero exit, or a missing metrics object, is the captured
+      stdout/stderr retained and referenced from the error or warning?
+
+In-tree implementations to compare against: [#2091](https://github.com/2AMLogic/klayout-tools/issues/2091)
+and [#2124](https://github.com/2AMLogic/klayout-tools/issues/2124).
+
 ## Shared `provenance` block
 
 Verbs whose verdict depends on the exact tool build, PDK release, and rule
@@ -497,6 +547,12 @@ them was already `unmet`, and its `reason` changes from `wrong_kind` to the
 more specific `unanchored_evidence`. No `schema_version` bump. See
 [`docs/cli/signoff.md`](cli/signoff.md)'s "Items 1, 2, 9, and 10: bind them
 to an audited artifact".
+
+Issue #3044 adds an optional `provenance.input.paths` set form to that
+envelope and, on its citation, an additive `artifact_binding.members` list
+(`[{path, content_hash, status}]`; the item's `detail.artifact_binding.members`
+when unmet). Single-path citations are byte-identical to before. No
+`schema_version` bump.
 
 `klt erc` since issue #2183 also carries a second verb-local key,
 `provenance.devices`: one entry per `devices[]` spec declaration (`{name,
@@ -1617,6 +1673,13 @@ so the "a report was emitted" rule below holds. See
 [`docs/cli/sim.md`](cli/sim.md) "Submitting a set of requests" and
 `docs/schemas/sim-set-report.schema.json`.
 
+`klt sim-merge` (issue #3045) emits a single `klt sim` report over the union of
+several per-request reports, plus an additive `merge` block; it defines the
+refusal exit codes `5`-`10` (a set that is not exactly the planned one; stdout carries a
+`status: "refused"` payload whose `refusal.code` names the class) alongside `klt sim`'s
+`3`/`4` verdicts. See [`docs/cli/sim.md`](cli/sim.md) "Merging per-request
+reports" and `docs/schemas/sim-merge-report.schema.json`.
+
 ## Exit codes
 
 | Exit code | Meaning                                                                                     |
@@ -1730,6 +1793,8 @@ engines plus the non-verdict `--list-rules` listing; its `coverage` block
    message, args.format)` on the documented error path.
 3. Document the command's fields in `docs/cli/<verb>.md`, including its
    `schema_version`.
+4. If the command wraps an external tool, meet the four requirements in
+   [Wrapping an external tool](#wrapping-an-external-tool).
 
 See `src/klayout_tools/cli/layers_cmd.py` and `docs/cli/layers.md` for a
 worked example.
