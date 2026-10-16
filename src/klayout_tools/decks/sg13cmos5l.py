@@ -94,9 +94,10 @@ recognition; it has since grown three follow-on increments the way
 - **Added by #3573**: NW.c/NW.c1/NW.e/NW.e1 (NWell enclosure of P+/N+
   Activ, LV/HV split by ThickGateOx) as ``nwell.enclosing.{pactiv,nactiv}
   [.hv].1``; approximations are listed at the rules. Not yet modelled, and
-  reported via ``UNCHECKED_RULES``: the DigiBnd variants NW.c1/d1/e1/f1.dig
-  (DigiBnd 16/0 is not read yet, so the HV enclosure rules hold digital
-  blocks to the stricter analog value).
+  reported via ``UNCHECKED_RULES``: the DigiBnd variants NW.d1/f1.dig.
+- **Added by #3682**: NW.c1.dig / NW.e1.dig as ``nwell.enclosing.{pactiv,
+  nactiv}.dig.1`` through the second ``DerivedLayer`` context stage (HV Activ
+  inside DigiBnd 16/0); ``.hv.1`` now covers only HV Activ outside DigiBnd.
 - **Still out of scope**, left for follow-on issues: the
   ``res_metal1``..``res_topmetal1`` metal-resistor family (now reachable
   in principle now that #1417 lands the metal stack those bodies sit on,
@@ -985,10 +986,10 @@ DECK: list[DrcRule] = [
     #     (text-marker derived) and NWell inside SRAM (`NWell_Nsram`); none
     #     of these are modelled, so varicap/schottky Activ is held to the
     #     ordinary threshold (stricter) and SRAM-marked NWell is not removed.
-    #   * The HV rules apply upstream's analog 0.62 / 0.62 um everywhere;
-    #     inside DigiBnd upstream relaxes them to 0.31 / 0.24 um (NW.c1.dig /
-    #     NW.e1.dig, listed in UNCHECKED_RULES), so a digital HV block is
-    #     held to the stricter analog value here (never under-checked). ----
+    #   * Inside DigiBnd (16/0) upstream relaxes the HV 0.62 / 0.62 um to
+    #     0.31 / 0.24 um (NW.c1.dig / NW.e1.dig): `.hv.1` keeps HV Activ
+    #     outside DigiBnd (second context stage `far`) and `.dig.1` is the
+    #     exact whole-polygon complement (`near`). ----
     DrcRule(
         id="nwell.enclosing.pactiv.1",
         description="minimum NWell enclosure of P+ Activ outside ThickGateOx",
@@ -1028,6 +1029,8 @@ DECK: list[DrcRule] = [
             intersect_with=(14, 0),  # pSD -> P+ Activ
             context_layers=((44, 0),),  # ThickGateOx
             context="near",
+            context2_layers=((16, 0),),  # DigiBnd
+            context2="far",
         ),
         scope="5.1 NWell",
         provenance=_cmos5l_provenance(
@@ -1083,6 +1086,8 @@ DECK: list[DrcRule] = [
             intersect_with=(7, 0),  # nSD -> N+ Activ
             context_layers=((44, 0),),  # ThickGateOx
             context="near",
+            context2_layers=((16, 0),),  # DigiBnd
+            context2="far",
         ),
         scope="5.1 NWell",
         provenance=_cmos5l_provenance(
@@ -1189,6 +1194,61 @@ DECK: list[DrcRule] = [
             "NW.f1",
         ),
     ),
+    DrcRule(
+        id="nwell.enclosing.pactiv.dig.1",
+        description=(
+            "minimum NWell enclosure of P+ Activ inside ThickGateOx and DigiBnd"
+        ),
+        layer=(1, 0),  # Activ.drawing (reporting identity; region is derived)
+        other_layer=(31, 0),  # NWell.drawing
+        check="enclosed",
+        threshold_dbu=310,  # 0.31 um
+        # sg13cmos5l_maximal.drc rule "NW.c1.dig" (lines 2714-2725): the
+        # DigiBnd-relaxed counterpart of the HV rule, the exact whole-polygon
+        # complement of nwell.enclosing.pactiv.hv.1.
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ
+            sized_by_um=0.0,
+            intersect_with=(14, 0),  # pSD -> P+ Activ
+            context_layers=((44, 0),),  # ThickGateOx
+            context="near",
+            context2_layers=((16, 0),),  # DigiBnd
+            context2="near",
+        ),
+        scope="5.1 NWell",
+        provenance=_cmos5l_provenance(
+            "libs.tech/klayout/tech/drc/rule_decks/sg13cmos5l_maximal.drc",
+            "NW.c1.dig",
+        ),
+    ),
+    DrcRule(
+        id="nwell.enclosing.nactiv.dig.1",
+        description=(
+            "minimum NWell enclosure of N+ Activ (well tie) inside ThickGateOx "
+            "and DigiBnd"
+        ),
+        layer=(1, 0),  # Activ.drawing (reporting identity; region is derived)
+        other_layer=(31, 0),  # NWell.drawing
+        check="enclosed",
+        threshold_dbu=240,  # 0.24 um
+        # sg13cmos5l_maximal.drc rule "NW.e1.dig" (lines 2714-2725): the
+        # DigiBnd-relaxed counterpart of the HV rule, the exact whole-polygon
+        # complement of nwell.enclosing.nactiv.hv.1.
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ
+            sized_by_um=0.0,
+            intersect_with=(7, 0),  # nSD -> N+ Activ
+            context_layers=((44, 0),),  # ThickGateOx
+            context="near",
+            context2_layers=((16, 0),),  # DigiBnd
+            context2="near",
+        ),
+        scope="5.1 NWell",
+        provenance=_cmos5l_provenance(
+            "libs.tech/klayout/tech/drc/rule_decks/sg13cmos5l_maximal.drc",
+            "NW.e1.dig",
+        ),
+    ),
 ]
 
 # Foundry rules this curated deck knows about but cannot evaluate (issue
@@ -1196,31 +1256,20 @@ DECK: list[DrcRule] = [
 # `coverage.unchecked_rules` whenever its layer is present in the stream, so
 # a `clean` verdict cannot be read as "this rule was checked".
 UNCHECKED_RULES: dict[str, tuple[tuple[int, int], str]] = {
-    "NW.c1.dig": (
-        (31, 0),
-        "NW.c1.dig (NWell enclosure of P+ Activ inside ThickGateOx and "
-        "DigiBnd, 0.31 um; nwell.enclosing.pactiv.hv.1 applies 0.62 um "
-        "there) is not modelled yet (issue #3573 follow-up); a violation "
-        "of it is not flagged.",
-    ),
     "NW.d1.dig": (
         (31, 0),
         "NW.d1.dig (NWell space to external N+ Activ inside ThickGateOx "
-        "and DigiBnd, 0.31 um) is not modelled yet (issue #3573 follow- "
-        "up); a violation of it is not flagged.",
-    ),
-    "NW.e1.dig": (
-        (31, 0),
-        "NW.e1.dig (NWell enclosure of N+ Activ tie inside ThickGateOx "
-        "and DigiBnd, 0.24 um; nwell.enclosing.nactiv.hv.1 applies 0.62 "
-        "um there) is not modelled yet (issue #3573 follow-up); a "
-        "violation of it is not flagged.",
+        "and DigiBnd, 0.31 um) is not modelled yet: the DigiBnd context "
+        "engine exists (issue #3682), only the base NWell space rules "
+        "NW.d/d1 are missing; a violation of it is not flagged.",
     ),
     "NW.f1.dig": (
         (31, 0),
         "NW.f1.dig (NWell space to substrate-tie P+ Activ inside "
-        "ThickGateOx and DigiBnd, 0.24 um) is not modelled yet (issue "
-        "#3573 follow-up); a violation of it is not flagged.",
+        "ThickGateOx and DigiBnd, 0.24 um) is not modelled yet: the "
+        "DigiBnd context engine exists (issue #3682), only the base NWell "
+        "space rules NW.f/f1 are missing; a violation of it is not "
+        "flagged.",
     ),
 }
 

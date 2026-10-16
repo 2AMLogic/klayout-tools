@@ -548,34 +548,62 @@ def _derived_region(
     intersect_region: Any,
     dbu: float,
     context_region: Any | None = None,
+    context2_region: Any | None = None,
 ) -> Any:
     """Build the checked region for a ``derived_layer`` rule, then apply its
     optional well-context partition (issue #3484, see ``DerivedLayer``):
     ``context_region`` is the already-joined (unsized) union of
     ``derived_layer.context_layers``, oversized here by ``context_sized_by_um``
     and used to keep only the whole polygons ``interacting`` with it
-    (``"near"``) or ``not_interacting`` with it (``"far"``)."""
+    (``"near"``) or ``not_interacting`` with it (``"far"``). The optional
+    second stage (issue #3682, ``context2*``) repeats that on the stage-1
+    result, so the two stages AND together."""
     region = _derived_region_unscoped(rule, base_region, intersect_region, dbu)
     derived = rule.derived_layer
     if derived is None or derived.context is None or context_region is None:
         return region
-    size_dbu = round(derived.context_sized_by_um / dbu)
+    region = _apply_context(
+        region, context_region, derived.context_sized_by_um, derived.context, dbu
+    )
+    if derived.context2 is None or context2_region is None:
+        return region
+    return _apply_context(
+        region, context2_region, derived.context2_sized_by_um, derived.context2, dbu
+    )
+
+
+def _apply_context(
+    region: Any, context_region: Any, sized_by_um: float, mode: str, dbu: float
+) -> Any:
+    """One near/far whole-polygon partition of ``region`` by ``context_region``
+    oversized by ``sized_by_um``."""
+    size_dbu = round(sized_by_um / dbu)
     ctx = context_region.sized(size_dbu) if size_dbu else context_region
-    if derived.context == "near":
+    if mode == "near":
         return region.interacting(ctx)
     return region.not_interacting(ctx)
 
 
-def _context_region(cell: Any, layout: Any, rule: DrcRule) -> Any | None:
-    """Join of ``rule.derived_layer.context_layers`` in ``cell`` (absent
-    layers contribute nothing), or ``None`` when the rule has no context."""
+def _context_region(
+    cell: Any, layout: Any, rule: DrcRule, stage: int = 1
+) -> Any | None:
+    """Join of ``rule.derived_layer.context_layers`` (``context2_layers`` for
+    ``stage=2``) in ``cell`` (absent layers contribute nothing), or ``None``
+    when the rule has no such context."""
     import klayout.db as kdb
 
     derived = rule.derived_layer
-    if derived is None or derived.context is None:
+    if derived is None:
+        return None
+    mode, layers = (
+        (derived.context, derived.context_layers)
+        if stage == 1
+        else (derived.context2, derived.context2_layers)
+    )
+    if mode is None:
         return None
     region = kdb.Region()
-    for layer in derived.context_layers:
+    for layer in layers:
         region += _cell_region_or_empty(cell, layout.find_layer(*layer))
     return region.merged()
 
@@ -1038,6 +1066,17 @@ def list_deck_rules(deck_name: str) -> dict[str, Any]:
                                 _fmt_layer(c) for c in derived.context_layers
                             ],
                             "context_sized_by_um": derived.context_sized_by_um,
+                        }
+                    ),
+                    **(
+                        {}
+                        if derived.context2 is None
+                        else {
+                            "context2": derived.context2,
+                            "context2_layers": [
+                                _fmt_layer(c) for c in derived.context2_layers
+                            ],
+                            "context2_sized_by_um": derived.context2_sized_by_um,
                         }
                     ),
                 },
@@ -1622,6 +1661,7 @@ def run_drc(
                     _cell_region_or_empty(cell, intersect_index),
                     layout.dbu,
                     _context_region(cell, layout, rule),
+                    _context_region(cell, layout, rule, stage=2),
                 )
             else:
                 region = _select_primary_region(
@@ -2660,6 +2700,23 @@ def _validate_derived_layer(rule: DrcRule) -> None:
         raise DrcError(
             f"rule '{rule.id}': derived_layer context and context_layers "
             "must be set together"
+        )
+    if derived is not None and derived.context2 not in _DERIVED_CONTEXTS:
+        raise DrcError(
+            f"rule '{rule.id}': unknown derived_layer context2 "
+            f"'{derived.context2}' (known: near, far, or unset)"
+        )
+    if derived is not None and (derived.context2 is None) == bool(
+        derived.context2_layers
+    ):
+        raise DrcError(
+            f"rule '{rule.id}': derived_layer context2 and context2_layers "
+            "must be set together"
+        )
+    if derived is not None and derived.context2 is not None and derived.context is None:
+        raise DrcError(
+            f"rule '{rule.id}': derived_layer context2 requires context "
+            "(stage 2 applies after stage 1)"
         )
 
 
