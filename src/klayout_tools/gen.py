@@ -421,6 +421,9 @@ _HIDDEN_PARAMS = {
     # per (family, flavor) by `_res_end_contact_um`; never request-facing.
     "end_contact_w_um",
     "end_contact_h_um",
+    # sg13g2 PDK-PCell poly-resistor convention (issue #2679): poly drawn as
+    # the two abutting heads only; resolved per family, never request-facing.
+    "res_poly_heads_only",
 }
 
 #: ``res_array``'s flavour mask slots are generated from
@@ -1417,6 +1420,7 @@ def _res_unit_layout(
     via_enclosure_min_um: float = 0.0,
     end_contact_w_um: float = 0.0,
     end_contact_h_um: float = 0.0,
+    poly_heads_only: bool = False,
 ) -> dict[str, Any]:
     """One unit resistor (or unit MoM/MiM cap cell footprint): a poly body
     of ``length_um`` between two contact+local-metal end pads.
@@ -1455,6 +1459,13 @@ def _res_unit_layout(
     resistor body, ``end_contact_h_um + 2 * enclosure`` tall, centred on the
     body (a "dogbone" head). The resistor-ID marker still spans only the
     body segment. With both ``0.0`` every existing caller is unchanged.
+
+    ``poly_heads_only`` (issue #2679, ``False`` by default) draws the
+    ``"poly"`` role as just the two end heads, leaving the body span between
+    them undrawn on the poly layer -- the IHP sg13g2 PCell convention where
+    ``GatPoly`` is only the two abutting contact heads and the resistive body
+    is the ``"marker"`` box alone (``polyres``). Default ``False`` keeps the
+    continuous poly bar with the marker overlaid on its interior.
     """
     rect_contact = end_contact_w_um > 0.0 and end_contact_h_um > 0.0
     contact_side_um = max(CONTACT_SIZE_UM, via_min_w_um)
@@ -1476,7 +1487,11 @@ def _res_unit_layout(
     ]
 
     boxes: dict[str, list[tuple[float, float, float, float]]] = {
-        "poly": [(0.0, 0.0, total_len_um, width_um)],
+        "poly": (
+            [(a0, 0.0, a1, width_um) for a0, a1 in seg_positions]
+            if poly_heads_only
+            else [(0.0, 0.0, total_len_um, width_um)]
+        ),
         "contact": [],
         "metal": [],
         "marker": [(contact_region_um, 0.0, contact_region_um + length_um, width_um)],
@@ -1528,6 +1543,7 @@ def _res_array_layout(
     min_spacing_um: float = 0.0,
     end_contact_w_um: float = 0.0,
     end_contact_h_um: float = 0.0,
+    poly_heads_only: bool = False,
 ) -> dict[str, Any]:
     """``num`` matched unit resistors (see :func:`_res_unit_layout`), folded
     into ``rows`` parallel rows in boustrophedon ("snake") order once
@@ -1582,6 +1598,7 @@ def _res_array_layout(
         via_enclosure_min_um,
         end_contact_w_um,
         end_contact_h_um,
+        poly_heads_only,
     )
     effective_spacing_um = max(spacing_um, min_spacing_um)
     pitch = unit["total_len_um"] + effective_spacing_um
@@ -2771,6 +2788,48 @@ def _clamp_cut_boxes(
             shape.box = new_box
 
 
+def _ring_grid_dbu(mfg_grid_um: float, dbu: float) -> int:
+    """``mfg_grid_um`` as a whole number of dbu, or ``0`` (no snapping) for
+    ``mfg_grid_um <= 0`` or a grid that is not a whole number of dbu -- the
+    same gate :func:`_clamp_cut_boxes` applies."""
+    grid_dbu = int(round(mfg_grid_um / dbu)) if mfg_grid_um > 0.0 else 0
+    if grid_dbu < 2 or abs(grid_dbu * dbu - mfg_grid_um) > 1e-9:
+        return 0
+    return grid_dbu
+
+
+def _snap_ring_box_um(
+    box_um: tuple[float, float, float, float],
+    mfg_grid_um: float,
+    dbu: float,
+    inward: bool = False,
+) -> tuple[float, float, float, float]:
+    """``box_um`` with every edge moved onto the ``mfg_grid_um`` manufacturing
+    grid (issue #3364), for the ring boxes :func:`_insert_ring` subtracts.
+
+    An off-grid ``ring_padding_um`` puts the ring's outer/inner/gap box edges
+    at arbitrary dbu, so the ``Comp``/implant/``Metal1`` ring polygon gets
+    off-grid vertices (``*.ongrid.1``). The snap is directional so it can only
+    *grow* the drawn ring band: an outer (or gap) box moves outward by up to
+    one grid step (``inward=False``: low edges floor, high edges ceil -- a gap
+    opening only widens), the inner box moves inward (``inward=True``). A no-op
+    for an on-grid box, ``mfg_grid_um <= 0`` or a grid that is not a whole
+    number of dbu.
+    """
+    grid_dbu = _ring_grid_dbu(mfg_grid_um, dbu)
+    if not grid_dbu:
+        return box_um
+    x0, y0, x1, y1 = (int(round(v / dbu)) for v in box_um)
+
+    def _lo(v: int) -> int:
+        return (-(-v // grid_dbu) if inward else v // grid_dbu) * grid_dbu
+
+    def _hi(v: int) -> int:
+        return (v // grid_dbu if inward else -(-v // grid_dbu)) * grid_dbu
+
+    return (_lo(x0) * dbu, _lo(y0) * dbu, _hi(x1) * dbu, _hi(y1) * dbu)
+
+
 def _insert_ring(
     cell: Any,
     layer_index: int,
@@ -2778,6 +2837,7 @@ def _insert_ring(
     outer_box_um: tuple[float, float, float, float],
     inner_box_um: tuple[float, float, float, float],
     gap_box_um: tuple[float, float, float, float] | None = None,
+    mfg_grid_um: float = 0.0,
 ) -> None:
     """Insert an outer-box-minus-inner-box ring as one boolean ``Region`` --
     guarantees a single unbroken polygon (no same-layer internal-space
@@ -2786,8 +2846,17 @@ def _insert_ring(
     ``gap_box_um`` (#434), when given, is subtracted as well: it cuts one
     routing opening through the ring's band on a single side, leaving a
     C-shaped -- still connected, still one polygon -- conductor.
+
+    ``mfg_grid_um`` (> 0) snaps every box edge onto the manufacturing grid
+    first (:func:`_snap_ring_box_um`, issue #3364); the default ``0.0`` keeps
+    the historical dbu-only rounding.
     """
     import klayout.db as kdb
+
+    outer_box_um = _snap_ring_box_um(outer_box_um, mfg_grid_um, dbu)
+    inner_box_um = _snap_ring_box_um(inner_box_um, mfg_grid_um, dbu, inward=True)
+    if gap_box_um is not None:
+        gap_box_um = _snap_ring_box_um(gap_box_um, mfg_grid_um, dbu)
 
     def _to_box(box_um: tuple[float, float, float, float]) -> Any:
         x0, y0, x1, y1 = box_um
@@ -2895,6 +2964,7 @@ def _insert_implant_ring(
     gap_box_um: tuple[float, float, float, float] | None = None,
     gap_side: str | None = None,
     margin_um: float = 0.0,
+    mfg_grid_um: float = 0.0,
 ) -> None:
     """Insert the implant ring covering a tap/collector ring's own ``Comp``
     band (issue #1580), extended ``margin_um`` beyond every one of that band's
@@ -2927,8 +2997,18 @@ def _insert_implant_ring(
     family that resolves no margin keeps byte-for-byte identical geometry.
     """
     if margin_um <= 0:
-        _insert_ring(cell, layer_index, dbu, outer_box_um, inner_box_um, gap_box_um)
+        _insert_ring(
+            cell, layer_index, dbu, outer_box_um, inner_box_um, gap_box_um, mfg_grid_um
+        )
         return
+    # Snap the tap ring's boxes exactly as `_insert_ring` does for the Comp
+    # ring *before* growing them, so the implant keeps its exact margin past
+    # the (snapped) Comp edges (issue #3364). `margin_um` is a grid multiple
+    # on every family that resolves one, so the grown boxes stay on-grid.
+    outer_box_um = _snap_ring_box_um(outer_box_um, mfg_grid_um, dbu)
+    inner_box_um = _snap_ring_box_um(inner_box_um, mfg_grid_um, dbu, inward=True)
+    if gap_box_um is not None:
+        gap_box_um = _snap_ring_box_um(gap_box_um, mfg_grid_um, dbu)
     implant_gap_um = (
         _implant_gap_box_um(gap_box_um, gap_side or "E", margin_um, dbu)
         if gap_box_um is not None
@@ -2951,6 +3031,7 @@ def _insert_implant_ring(
         _grow_box_um(outer_box_um, margin_um, dbu),
         inner_um,
         implant_gap_um,
+        mfg_grid_um,
     )
 
 

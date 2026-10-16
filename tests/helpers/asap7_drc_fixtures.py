@@ -1847,6 +1847,77 @@ def _insert(
     cell.shapes(layer).insert(polygon)
 
 
+def topology_gap_probes() -> list[Case]:
+    """Drawings for the two topology gaps (``GATE.AUX.2``, ``ACTIVE.AUX.3``,
+    #3086), each ``expect`` being the rules the deck trips *today*.
+
+    They are not part of :func:`all_cases`: neither rule is implemented, so
+    the cases pin that the gap is real (the DRM's illegal drawing passes the
+    deck) and which existing rules already cover part of it. Gates sit between
+    two neighbour columns as tall as the stack so ``GATE.S.3`` stays quiet;
+    ACTIVE is 162 nm tall (6 x 27 nm) with the slot 54 nm up, so every strip
+    left beside a slot meets ``ACTIVE.W.1`` and the full-height and bottom
+    strips meet ``ACTIVE.W.2``; the strip above a slot is a multiple of 27 nm
+    only for a 27 nm slot, so the other slot heights also trip ``ACTIVE.W.2``
+    (an existing rule reporting the strip, not the notch)."""
+
+    def column(x: float, y0: float, y1: float) -> Shape:
+        return box("GATE", x, y0, x + 20, y1)
+
+    def gates(*columns: Shape) -> list[Shape]:
+        top = max(s[4] for s in columns if len(s) == 5 and s[0] == "GATE")
+        return [*columns, column(-54, 0, top), column(-108, 0, top)]
+
+    def slot(height: float, depth: float) -> list[Shape]:
+        """A rectangular slot cut into the right (vertical) edge."""
+        y0 = 54
+        hull = (
+            (0, 0), (100, 0), (100, y0), (100 - depth, y0),
+            (100 - depth, y0 + height), (100, y0 + height), (100, 162), (0, 162),
+        )  # fmt: skip
+        return [poly("ACTIVE", *hull), box("NSELECT", -46, -27, 146, 189)]
+
+    def active(*hull: Point) -> list[Shape]:
+        return [poly("ACTIVE", *hull), box("NSELECT", -46, -27, 146, 189)]
+
+    def slot_expect(height: float) -> frozenset[str]:
+        rules = {"ACTIVE.S.1"} if height < 27 else set()
+        if height != 27:
+            rules.add("ACTIVE.W.2")
+        return frozenset(rules)
+
+    c = [
+        # GATE.AUX.2: Fig. 3.4.2(a) drawn at several gaps, and (d) as one
+        # polygon under GCUT.
+        *(
+            Case(f"gate-stack-gap{g}", "probe", tuple(gates(column(0, 0, 40),
+               column(0, 40 + g, 80 + g))))
+            for g in (1, 20, 50, 100, 500, 2000)
+        ),
+        Case("gate-stack-gcut-over-gap", "probe", tuple(gates(
+            column(0, 0, 40), column(0, 80, 120), box("GCUT", -17, 40, 37, 80)))),
+        Case("gate-single-gcut", "probe", tuple(gates(
+            column(0, 0, 120), box("GCUT", -17, 40, 37, 80)))),
+        Case("gate-stack-abut", "probe", tuple(gates(
+            column(0, 0, 40), column(0, 40, 80)))),
+        # ACTIVE.AUX.3: Fig. 3.5.4(b) slots in a vertical edge; ACTIVE.S.1
+        # (27 nm) already reports the narrow ones, ACTIVE.W.2 the strip above.
+        *(
+            Case(f"active-slot-h{h}", "probe", tuple(slot(h, 20)),
+                 slot_expect(h))
+            for h in (8, 26, 27, 30, 40)
+        ),
+        Case("active-slot-h30-d5", "probe", tuple(slot(30, 5)), slot_expect(30)),
+        Case("active-slot-h30-d60", "probe", tuple(slot(30, 60)), slot_expect(30)),
+        Case("active-L", "probe", tuple(active(
+            (0, 0), (100, 0), (100, 54), (50, 54), (50, 162), (0, 162)))),
+        Case("active-U-vertical-fingers", "probe", tuple(active(
+            (0, 0), (100, 0), (100, 162), (70, 162), (70, 54), (30, 54),
+            (30, 162), (0, 162)))),
+    ]  # fmt: skip
+    return c
+
+
 def write_shapes(path: str, shapes: Sequence[Shape], scale: float = 1.0) -> None:
     """Write one set of shapes as a single-top-cell GDS (``scale`` multiplies
     every coordinate; 4.0 draws the same geometry at 4x)."""

@@ -146,6 +146,13 @@ def _refuse_crossings(spec: dict[str, Any]) -> None:
             "with analysis_steps -- use the scalar analysis "
             '(kind "tran") for a threshold-crossing series'
         )
+    if spec.get("energy") is not None:
+        # Issue #3033: same reason -- one transient plot's rawfile.
+        raise _error(
+            f"measurement {spec.get('name')!r}: 'energy' is not supported "
+            "with analysis_steps -- use the scalar analysis "
+            '(kind "tran") for a source-energy measurement'
+        )
 
 
 def _refuse_optional(spec: dict[str, Any]) -> None:

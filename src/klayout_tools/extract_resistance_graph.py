@@ -1,13 +1,16 @@
 """Deterministic geometry-to-resistor-graph construction for extraction
-(issue #2980; Stage 3.D5 increment 1 of ``docs/design/extract-fidelity-roadmap.md``).
+(issue #2980; Stage 3.D5 increment 1 of ``docs/design/extract-fidelity-roadmap.md``),
+plus the thin effective-resistance adapter over it (issue #2981, increment 2).
 
-This module is **pure construction**: it turns conductor-role polygons,
-declared ports (terminals and ideal nodes) and via/contact landings into a
-resistor graph -- nodes, edges, and explicit diagnostics -- following the
-Stage 3.D2 model. It does **not** solve for effective resistance (increment 2,
-the adapter over :func:`klayout_tools.ir_solver.solve_ir_drop`), is not wired
-to ``klt extract`` (increment 3), and changes no default extraction output or
-JSON field. The inputs are graph-level geometry in database units (dbu); an
+Construction turns conductor-role polygons, declared ports (terminals and
+ideal nodes) and via/contact landings into a resistor graph -- nodes, edges,
+and explicit diagnostics -- following the Stage 3.D2 model.
+:func:`terminal_resistance_matrix` and :func:`effective_resistance` (at the end
+of the module) solve a built graph by reusing
+:func:`klayout_tools.ir_solver.solve_ir_drop`; there is no second solver.
+Nothing here is wired to ``klt extract`` (increment 3) or changes a default
+extraction output or JSON field. The construction inputs are graph-level
+geometry in database units (dbu); an
 adapter from ``_region_n_squares`` / ``_net_port_regions`` /
 ``_fragment_port_points_um`` output is part of the integration increment.
 
@@ -51,9 +54,12 @@ a non-positive ``cut_area_um2``) raise :class:`ValueError`.
 
 from __future__ import annotations
 
+import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from .ir_solver import solve_ir_drop
 from .resistor_mesh import _decompose_manhattan_polygon, _rails_under_via
 
 if TYPE_CHECKING:
@@ -606,3 +612,287 @@ def build_resistance_graph(
     builder.add_landings()
     graph = builder.assemble()
     return builder.too_large(max_nodes, max_edges) or graph
+
+
+# -- Effective resistance (issue #2981; Stage 3.D2 "Terminal matrix") ---------
+
+
+@dataclass(frozen=True)
+class TerminalResistanceMatrix:
+    """The ``T x T`` terminal-pair effective resistance of one graph.
+
+    ``terminals`` are the terminal names in sorted order; ``pair_resistance_ohm``
+    is indexed the same way, symmetric, with a ``0.0`` diagonal and ``None``
+    (JSON ``null``) for a pair in different connected components. ``status`` is
+    ``"ok"``, ``"unsupported"`` (the graph was unsupported, or a component did
+    not converge: ``singular_system``) or ``"skipped"`` (``too_few_terminals``).
+    ``solves`` counts the injection solves only -- the component-grouping call
+    runs no CG and is not counted."""
+
+    status: str
+    terminals: tuple[str, ...]
+    pair_resistance_ohm: tuple[tuple[float | None, ...], ...]
+    diagnostics: tuple[GraphDiagnostic, ...]
+    solves: int
+
+    def as_dict(self) -> dict[str, Any]:
+        """A JSON-ready rendering; ``None`` entries serialise as ``null``."""
+        return {
+            "status": self.status,
+            "terminals": list(self.terminals),
+            "pair_resistance_ohm": [list(row) for row in self.pair_resistance_ohm],
+            "diagnostics": [
+                {"code": d.code, "message": d.message, "detail": d.detail}
+                for d in self.diagnostics
+            ],
+        }
+
+
+def _no_result(
+    status: str,
+    terminals: tuple[str, ...],
+    diagnostics: tuple[GraphDiagnostic, ...],
+    solves: int = 0,
+) -> TerminalResistanceMatrix:
+    return TerminalResistanceMatrix(status, terminals, (), diagnostics, solves)
+
+
+def _solver_network(
+    graph: ResistanceGraph, ties: Sequence[tuple[str, str]]
+) -> tuple[list[str], list[dict[str, Any]], dict[str, str]]:
+    """``solve_ir_drop`` input for ``graph``: node ids and edge mappings in
+    graph (id) order, and the terminal name -> node id map. A tie is a ``0.0``
+    ohm edge between two terminals, which the solver merges -- a boundary
+    condition, not a topology change."""
+    node = dict(graph.terminals)
+    node_ids = [n.id for n in graph.nodes]
+    edges = [
+        {"id": f"e{i}", "from": e.a, "to": e.b, "resistance_ohm": e.resistance_ohm}
+        for i, e in enumerate(graph.edges)
+    ]
+    for k, (name_a, name_b) in enumerate(ties):
+        for name in (name_a, name_b):
+            if name not in node:
+                raise ValueError(f"tie references unknown terminal {name!r}")
+        edges.append(
+            {
+                "id": f"tie{k}",
+                "from": node[name_a],
+                "to": node[name_b],
+                "resistance_ohm": 0.0,
+            }
+        )
+    return node_ids, edges, node
+
+
+def _unconverged(result: dict[str, Any]) -> bool:
+    return any(c["reason"] == "not_converged" for c in result["components"])
+
+
+def _singular(terminals: tuple[str, ...], solves: int) -> TerminalResistanceMatrix:
+    return _no_result(
+        "unsupported",
+        terminals,
+        (
+            GraphDiagnostic(
+                "singular_system",
+                "the resistor network solve did not converge for a "
+                "terminal-bearing component",
+                {},
+            ),
+        ),
+        solves,
+    )
+
+
+def _floating_components(
+    graph: ResistanceGraph,
+    grouping: dict[str, Any],
+    bearing: set[int],
+    dbu: float | None,
+) -> GraphDiagnostic | None:
+    """``floating_component`` for the conductor components with no terminal
+    (the ones ``solve_ir_drop`` reports ``no_pad`` once every terminal-bearing
+    component is pinned). A component holding only ports is not conductor."""
+    area: dict[int, int] = {}
+    for n in graph.nodes:
+        if n.kind == "piece" and n.bbox is not None:
+            index = grouping["node_component"][n.id]
+            if index not in bearing:
+                left, bottom, right, top = n.bbox
+                area[index] = area.get(index, 0) + (right - left) * (top - bottom)
+    if not area:
+        return None
+    total = sum(area.values())
+    detail: dict[str, Any] = {"count": len(area), "area_dbu2": total}
+    if dbu is not None:
+        detail["area_um2"] = total * dbu * dbu
+    return GraphDiagnostic(
+        "floating_component",
+        f"{len(area)} conductor component(s) carry no terminal and are dropped",
+        detail,
+    )
+
+
+def terminal_resistance_matrix(
+    graph: ResistanceGraph,
+    *,
+    ties: Sequence[tuple[str, str]] = (),
+    dbu: float | None = None,
+    max_iterations: int | None = None,
+) -> TerminalResistanceMatrix:
+    """The full terminal-pair effective-resistance matrix of ``graph``.
+
+    Follows 3.D2 "Terminal matrix": one pad-less call to
+    :func:`solve_ir_drop` groups the terminals by connected component; the
+    lowest-named terminal of each terminal-bearing component is its reference
+    and is pinned to ``0 V`` in *every* solve; each non-reference terminal
+    then takes one unit-current injection, for ``sum_c (T_c - 1)`` solves in
+    total. With ``Z_ij`` the voltage at ``j`` when injecting at ``i``,
+    ``R_{i,ref} = Z_ii`` and ``R_ij = Z_ii + Z_jj - 2 Z_ij``. Cross-component
+    entries are ``None`` with one ``terminals_disconnected`` diagnostic.
+    ``ties`` are ``(terminal, terminal)`` pairs held at one potential;
+    unknown names raise :class:`ValueError`. ``dbu`` only adds an
+    ``area_um2`` to the ``floating_component`` detail."""
+    names = tuple(name for name, _ in graph.terminals)
+    if graph.status != "ok":
+        return _no_result("unsupported", (), graph.diagnostics)
+    if len(names) < 2:
+        return _no_result(
+            "skipped",
+            names,
+            (
+                GraphDiagnostic(
+                    "too_few_terminals",
+                    f"{len(names)} terminal(s); at least 2 are needed",
+                    {"terminals": len(names)},
+                ),
+            ),
+        )
+    node_ids, edges, node = _solver_network(graph, ties)
+
+    grouping = solve_ir_drop(node_ids, edges, max_iterations=max_iterations)
+    members: dict[int, list[str]] = {}  # component index -> sorted names
+    for name in names:
+        members.setdefault(grouping["node_component"][node[name]], []).append(name)
+    pads = {node[group[0]]: 0.0 for group in members.values()}
+
+    position = {name: i for i, name in enumerate(names)}
+    matrix: list[list[float | None]] = [[None] * len(names) for _ in names]
+    for i in range(len(names)):
+        matrix[i][i] = 0.0
+
+    solves = 0
+    for group in members.values():
+        transfer, used = _component_transfer(
+            group, (node_ids, edges, node), pads, max_iterations
+        )
+        solves += used
+        if transfer is None:
+            return _singular(names, solves)
+        _fill_component(matrix, position, group, transfer)
+
+    diagnostics: list[GraphDiagnostic] = []
+    if len(members) > 1:
+        diagnostics.append(
+            GraphDiagnostic(
+                "terminals_disconnected",
+                f"terminals fall in {len(members)} disconnected groups; "
+                "cross-group pairs are null",
+                {"groups": [list(g) for g in members.values()]},
+            )
+        )
+    floating = _floating_components(graph, grouping, set(members), dbu)
+    if floating is not None:
+        diagnostics.append(floating)
+    return TerminalResistanceMatrix(
+        "ok",
+        names,
+        tuple(tuple(row) for row in matrix),
+        tuple(sorted(diagnostics, key=_diagnostic_sort_key)),
+        solves,
+    )
+
+
+def _component_transfer(
+    group: list[str],
+    network: tuple[list[str], list[dict[str, Any]], dict[str, str]],
+    pads: dict[str, float],
+    max_iterations: int | None,
+) -> tuple[dict[str, dict[str, float]] | None, int]:
+    """One unit-current solve per non-reference terminal of ``group``.
+
+    Returns ``(transfer, solves)`` where ``transfer[source][t]`` is the voltage
+    at ``t`` when injecting at ``source``; ``transfer`` is ``None`` when a
+    solve did not converge or produced a non-finite voltage."""
+    node_ids, edges, node = network
+    transfer: dict[str, dict[str, float]] = {}
+    solves = 0
+    for source in group[1:]:
+        result = solve_ir_drop(
+            node_ids,
+            edges,
+            pads=pads,
+            injections={node[source]: 1.0},
+            max_iterations=max_iterations,
+        )
+        solves += 1
+        row = {t: result["voltages"][node[t]] for t in group}
+        if _unconverged(result) or any(
+            v is None or not math.isfinite(v) for v in row.values()
+        ):
+            return None, solves
+        transfer[source] = row
+    return transfer, solves
+
+
+def _fill_component(
+    matrix: list[list[float | None]],
+    position: dict[str, int],
+    group: list[str],
+    transfer: dict[str, dict[str, float]],
+) -> None:
+    """Write ``R_{i,ref} = Z_ii`` and ``R_ij = Z_ii + Z_jj - 2 Z_ij`` for one
+    component's terminals into the symmetric ``matrix``."""
+    reference = group[0]
+    for k, a in enumerate(group[1:], start=1):
+        matrix[position[a]][position[reference]] = transfer[a][a]
+        matrix[position[reference]][position[a]] = transfer[a][a]
+        for b in group[k + 1 :]:
+            r = transfer[a][a] + transfer[b][b] - 2.0 * transfer[a][b]
+            matrix[position[a]][position[b]] = r
+            matrix[position[b]][position[a]] = r
+
+
+def effective_resistance(
+    graph: ResistanceGraph,
+    source: str,
+    sink: str,
+    *,
+    ties: Sequence[tuple[str, str]] = (),
+    max_iterations: int | None = None,
+) -> float | None:
+    """Two-terminal ``R_st``: one unit current injected at ``source`` with
+    ``sink`` pinned to ``0 V`` (``pads={t: 0.0}``, ``injections={s: 1.0}``);
+    every other terminal floats unless tied. ``None`` when the graph is not
+    ``ok``, the terminals lie in different components, or the solve did not
+    converge. Unknown terminal names raise :class:`ValueError`."""
+    node_ids, edges, node = _solver_network(graph, ties)
+    for name in (source, sink):
+        if name not in node:
+            raise ValueError(f"unknown terminal {name!r}")
+    if graph.status != "ok":
+        return None
+    if source == sink:
+        return 0.0
+    result = solve_ir_drop(
+        node_ids,
+        edges,
+        pads={node[sink]: 0.0},
+        injections={node[source]: 1.0},
+        max_iterations=max_iterations,
+    )
+    voltage = result["voltages"][node[source]]
+    if _unconverged(result) or voltage is None or not math.isfinite(voltage):
+        return None
+    return float(voltage)
