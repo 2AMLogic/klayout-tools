@@ -1595,6 +1595,74 @@ def test_corner_id_and_slug_get_sample_suffix():
     assert point.slug == "tt_1p800V_27C_mc3"
 
 
+def _long_supply(n=25, **extra):
+    supply = {f"vctl_source_{i:02d}": 1.0 for i in range(n)}
+    supply.update(extra)
+    return supply
+
+
+def test_corner_slug_bounded_for_many_supply_keys():
+    point = sim.CornerPoint("typical", _long_supply(), 27)
+    assert len(point.slug.encode()) < 255 - len("__probe")
+    assert point.slug == sim.CornerPoint("typical", _long_supply(), 27).slug
+    assert point.slug != point.readable_slug
+    assert "/" not in point.slug
+
+
+def test_corner_slug_bounded_distinguishes_value_and_sample():
+    base = sim.CornerPoint("typical", _long_supply(), 27)
+    other_value = sim.CornerPoint("typical", _long_supply(vctl_source_24=2.0), 27)
+    sample = sim.CornerPoint(
+        "typical",
+        _long_supply(),
+        27,
+        sample_index=1,
+        mc_seed={"process_seed": 1, "mismatch_seed": 2, "rndseed": 3},
+    )
+    assert len({base.slug, other_value.slug, sample.slug}) == 3
+
+
+def test_corner_slug_bounded_multibyte_keys():
+    point = sim.CornerPoint("tt", {f"v\u00e9{i:02d}": 1.0 for i in range(30)}, 27)
+    assert len(point.slug.encode()) < 255 - len("__probe")
+
+
+def test_corner_slug_params_axis_bounds_pvt_prefix():
+    pvt = sim.CornerPoint("typical", _long_supply(), 27).corner_id
+    corner_id = f"{pvt}/params:w=1.5,l=0.15"
+    slug = sim._slugify_corner_id(corner_id)
+    assert len(slug.encode()) < 255 - len("__probe")
+    assert slug.endswith("_params_" + hashlib.sha256(corner_id.encode()).hexdigest())
+    assert slug != sim._slugify_corner_id(f"{pvt}/params:w=1.6,l=0.15")
+
+
+def test_run_sim_keep_artifacts_many_supply_keys(tmp_path, monkeypatch):
+    supply = _long_supply()
+    (tmp_path / "body.spice").write_text(
+        "".join(f"{k} n_{k} 0 DC 1.0\nR_{k} n_{k} 0 1k\n" for k in supply)
+    )
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "corners": {"supply_v": {k: [v] for k, v in supply.items()}},
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "options": {"keep_artifacts": True},
+        },
+    )
+    _stub_subprocess_run(monkeypatch, log_text="clean run\n")
+    artifacts = tmp_path / "artifacts"
+
+    report = sim.run_sim(str(request), artifacts_dir=str(artifacts))
+
+    (corner,) = report["corners"]
+    assert os.path.isfile(corner["artifacts"]["log"])
+    corner_dir = artifacts / sim._slugify_corner_id(corner["corner_id"])
+    assert len(corner_dir.name.encode()) < 255
+    recorded = json.loads((corner_dir / "corner.json").read_text())
+    assert recorded["corner_id"] == corner["corner_id"]
+
+
 # --------------------------------------------------------------------------- #
 # Monte Carlo sampling: request validation, seed contract, negative control
 # --------------------------------------------------------------------------- #
