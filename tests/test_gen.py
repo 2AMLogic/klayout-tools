@@ -7822,6 +7822,56 @@ def test_sg13cmos5l_mos_array_pfet_flavor_friction_report_repro(
     assert report["unbiased_pmos_body_nets"] == []
 
 
+def test_sg13cmos5l_mos_array_well_tap_nwell_margin(tmp_path, sg13cmos5l_pdk_root):
+    """Regression pin for `WELL_TAP_ENCLOSURE_MARGIN_UM` (issue #3652): the
+    NWell around the `mos_array` well-tap pad must enclose the tap Activ by at
+    least that margin on all four sides, and the output must carry no
+    `nwell.enclosing.nactiv.1` violation. `sg13cmos5l` is the only family in
+    `_MOS_ARRAY_WELL_TAP_FAMILIES`, so it is the only PDK that reaches the
+    `draw_well_tap` path (other PDKs' output is pinned unchanged by
+    `test_gf180mcu_mos_array_pfet_flavor_still_omits_well_tap_port`)."""
+    import klayout.db as kdb
+
+    output = tmp_path / "mos_array_sg13cmos5l_well_tap_margin.gds"
+    response = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": _SG13CMOS5L_VARIANT, "root": str(sg13cmos5l_pdk_root)},
+            "params": {
+                "w_um": 5.0,
+                "l_um": 0.5,
+                "rows": 1,
+                "cols": 2,
+                "flavor": "pfet",
+            },
+            "options": {"output": str(output)},
+        }
+    )
+    assert "WELL_TAP" in {p["name"] for p in response["ports"]}
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    dbu = layout.dbu
+    top = layout.top_cell()
+    active = kdb.Region(top.begin_shapes_rec(layout.layer(1, 0))).merged()
+    nwell = kdb.Region(top.begin_shapes_rec(layout.layer(31, 0))).merged()
+    # The tap pad sits right of the array's own active, so it is the
+    # rightmost merged Activ polygon.
+    tap = max(active.each(), key=lambda poly: poly.bbox().left)
+    margin_dbu = round(gen.WELL_TAP_ENCLOSURE_MARGIN_UM / dbu)
+    # Growing the tap by the margin on all four sides must stay inside NWell.
+    grown = kdb.Region(tap.bbox().enlarged(margin_dbu, margin_dbu))
+    assert (grown - nwell).is_empty(), (
+        f"NWell encloses tap Activ by < {gen.WELL_TAP_ENCLOSURE_MARGIN_UM} um"
+    )
+
+    drc_report = run_drc(str(output), "sg13cmos5l")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+    assert not any(
+        "nwell.enclosing.nactiv.1" in json.dumps(v) for v in drc_report["violations"]
+    )
+
+
 def test_gf180mcu_mos_array_pfet_flavor_still_omits_well_tap_port(
     tmp_path, both_pdk_root
 ):
