@@ -4,6 +4,28 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-16
 
+- **PR #3583**: fix: fill CI wall-clock baseline from usable runs when main is mostly cancelled
+- **PR #3582**: docs: codify external-tool wrapper contract in json-contract
+- **PR #3521**: fix: fail klt netlist on unevaluated expr() and report xschem version
+- **PR #3478**: fix(gen): clear sky130 poly.4 and diff/tap.10 for short-gate pfet pairs with a guard ring
+- **PR #3477**: feat(signoff): disclose content_hash pin state on yield campaign refusals
+- **PR #3461**: fix(sim): recover stepping narration on capture-only tran from an intact waveform
+- **PR #3417**: feat(drc): add enclosing_adjacent check and sky130 two-adjacent-edge via rules
+- **PR #3336**: docs(gen,lvs): flag sky130 native-Vt NMOS as unsupported with a specific note
+- **PR #3325**: feat(signoff): bind T1 evidence to a set of artifacts via provenance.input.paths
+- **PR #3307**: feat(sim): report sg13g2 MOS subckts as mosfet with section-dependent mismatch activity
+- **PR #3302**: feat(pex): pass --backend through to --measure-command harnesses
+- **Issue #3591** (closed): perf(extract): netlist_normalized_hash is quadratic in device count
+- **Issue #3575** (closed): ci: 'CI wall-clock budget' job fails on main — Tests (Python 3.10-3.13) run 710-800s vs 700s ceiling
+- **Issue #3569** (closed): docs: codify the external-tool wrapper contract (requested-vs-achieved, stage, tool identity, retained failure evidence)
+- **Issue #3482** (closed): klt netlist: silently emits unevaluated expr() device parameters when xschem predates expr() support
+- **Issue #3316** (closed): sky130 DRC: add two-adjacent-edges enclosure check primitive and via.5a/m2.5/via2.5/via3.5 rules
+- **Issue #3246** (closed): klt sim: a waveform-only request never gets the recovered-stepping downgrade, so OP gmin-stepping narration errors a completed transient
+- **Issue #3115** (closed): gen (sky130): short-L gate landing pad abuts diffusion (poly.4) and pfet guard-ring well under-encloses the n-tap (diff/tap.10)
+- **Issue #3063** (closed): signoff: report stale content_hash pin even when a yield citation is unmet for sample size
+- **Issue #3044** (closed): signoff: artifact-anchored generic evidence (items 1, 2, 9, 10) binds a single path; no way to bind a set of source files
+- **Issue #2962** (closed): pex --measure-command: no way to route the per-corner measurement grid to the sim batch backend
+- **Issue #2961** (closed): klt sim monte_carlo: family_mismatch reports sg13g2 MOS subcircuit calls (sg13_lv_nmos/...) as 'other' and has no curated sg13g2 entry
 - **PR #3506**: feat(gen): add mos_cap option to mos_array for marked MOS capacitors
 - **PR #3421**: fix(extract): replay --pins/--def-pins and keep --rerun off the committed netlist
 - **PR #3579**: fix: side-aware input_transitions port-check prefix and live-engine tests
