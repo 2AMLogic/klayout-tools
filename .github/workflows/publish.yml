@@ -42,6 +42,8 @@ jobs:
     runs-on: ubuntu-24.04
     environment: pypi
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
       - uses: actions/download-artifact@v8
         with:
           name: dist
@@ -50,6 +52,11 @@ jobs:
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: "latest"
+
+      # Issue #2900: v0.6.0/v0.7.0 shipped a `[yield]` extra pinning
+      # klt-yield-native before it was on PyPI. Fail the release instead.
+      - name: Check klt-*-native extra pins are published
+        run: uv run --python 3.12 --no-project python scripts/check_native_extras.py
 
       - name: Publish to PyPI
         run: uv publish

@@ -387,6 +387,19 @@ not `klt --version`, if you need to detect this kind of drift. See
   nets. Reports a proven `lower_bound_um`/`measured_max_distance_um` bracket;
   exits `0` pass, `3` fail, `4` `unsupported` (rule not evaluable, never a
   pass). See `docs/cli/tap-distance.md`.
+
+- **Honest `[yield]` install guidance and a pre-publish guard** (issue #2900,
+  refs): `klayout-tools[yield]` does not resolve for 0.6.0/0.7.0 because
+  `klt-yield-native` was never published. `klt yield`/`yield-sensitivity`
+  `--help`, the README and the yield/signoff/evidence-tier docs now lead with
+  the from-source build as the supported route and state the extra resolves
+  only for releases cut after the wheel is on PyPI. New
+  `scripts/check_native_extras.py`, run by `publish.yml` before `uv publish`,
+  fails a release whose `klt-*-native` extra pin is not published (exit 1
+  unpublished, exit 2 PyPI unreachable). Help/doc text only; no JSON field or
+  `schema_version` changes. The PyPI project, trusted publisher and
+  `klt-yield-native-v0.1.0` tag remain operator steps.
+
 - **Bipolar markers can be derived layer expressions** (issue #2860):
   `BipolarDevice.marker` now accepts a `LayerExpr`, a frozen AND/NOT tree
   of drawn layers that can nest, as well as a bare `(layer, datatype)`
