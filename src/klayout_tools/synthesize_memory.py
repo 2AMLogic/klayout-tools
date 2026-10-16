@@ -348,8 +348,9 @@ def collect_memory_evidence(
     change nor pre-empt production errors. **Never raises**: a Yosys
     failure, timeout, or unreadable stage degrades ``memory_mapping`` to
     ``status: "indeterminate"`` with the failure in ``reason`` (and
-    ``blackbox_modules`` to ``None``). Like the trial/baseline scripts, the
-    evidence script embeds absolute paths only and runs with no ``cwd``.
+    ``blackbox_modules`` to ``None``). The evidence script embeds absolute
+    paths only, but the RTL may not (``$readmemh "reference/x.hex"``), so
+    the run uses ``cwd=repo_root`` -- the same cwd as the main Yosys run.
     """
     from .synthesize import (
         SynthesizeError,
@@ -384,7 +385,7 @@ def collect_memory_evidence(
                 adder_techmap_path=adder_techmap_path,
             ),
         )
-        _run_yosys(script_path)
+        _run_yosys(script_path, cwd=repo_root)
     except (SynthesizeError, OSError) as exc:
         reason = _scrub_paths(f"memory evidence invocation failed: {exc}", repo_root)
         return _indeterminate(reason, reported_script), None
