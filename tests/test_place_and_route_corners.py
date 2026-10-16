@@ -192,3 +192,22 @@ def test_cli_exit_code_reflects_unit_failure(tmp_path, monkeypatch, capsys):
     failed = json.loads(capsys.readouterr().out)
     assert failed["failed_corners"] == [CORNERS[1]]
     assert os.path.isdir(failed["corner_runs"][0]["output_dir"])
+
+
+def test_cli_prints_unit_warnings_to_stderr_with_corner_prefix(
+    tmp_path, monkeypatch, capsys
+):
+    request_path = _setup(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch, stages=("floorplan",))
+    monkeypatch.setattr(
+        place_and_route, "_response_warnings", lambda *a, **k: ["no tapcells placed"]
+    )
+
+    assert main(["place-and-route", request_path, "--format", "json"]) == 0
+    captured = capsys.readouterr()
+    json.loads(captured.out)  # stdout stays one parseable document
+    for corner in CORNERS:
+        assert (
+            f"klt place-and-route: warning: [{corner}] no tapcells placed"
+            in captured.err
+        )

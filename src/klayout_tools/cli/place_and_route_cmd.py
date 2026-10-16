@@ -73,6 +73,13 @@ def run(args: argparse.Namespace) -> int:
     if "corner_runs" in report:
         # Issue #3507: a `pdk.rebuild_corners` request emits its aggregated
         # report either way; a unit that failed still fails the command.
+        # Each unit's own #2086 warnings go to stderr too, corner-prefixed.
+        for run in report["corner_runs"]:
+            for warning in run.get("warnings", ()):
+                print(
+                    f"klt place-and-route: warning: [{run['corner']}] {warning}",
+                    file=sys.stderr,
+                )
         return 0 if report["status"] == "ok" else 1
     # Issue #2086: the response's own `warnings` list also goes to stderr,
     # in *both* formats. A run that placed no tapcells, no PDN and no
