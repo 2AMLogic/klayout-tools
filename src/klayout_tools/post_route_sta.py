@@ -3273,6 +3273,8 @@ def _port_check_error_message(rows: list[tuple[str, str, str]]) -> str:
         prefix = "constraints.report_ports rejected"
     elif sides == {"false_path"}:
         prefix = "constraints.false_path_from rejected"
+    elif sides == {"input_transition"}:
+        prefix = "constraints.input_transitions rejected"
     else:
         prefix = "per-port I/O delay constraint(s) rejected"
     return f"{prefix}: " + "; ".join(details)

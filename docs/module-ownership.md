@@ -163,6 +163,7 @@ The `synthesize` verb maps RTL to a standard-cell netlist against a resolved lib
 
 - `yield-campaign` = `cli/yield_campaign_cmd.py` + `yield_campaign.py` (multi-run campaign orchestration; also borrows `yield_cmd.py`'s text-report printer for its own text output)
 - `yield-sensitivity` = `cli/yield_sensitivity_cmd.py` + `yield_sensitivity.py` (parameter sensitivity ranking for a completed campaign)
+- `yield-threshold` = `cli/yield_threshold_cmd.py` + `probit.py` (probit threshold fit for binary-outcome decision circuits; pure Python, no native extension, issue #2976)
 
 Both fit the single-implementation-module pattern (see "Single-File Verbs" below) once their own cmd/core pair is counted separately from `yield`'s.
 

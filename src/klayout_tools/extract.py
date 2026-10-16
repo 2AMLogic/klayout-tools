@@ -242,6 +242,7 @@ from .extract_passive_regions import (
     _diode_terminal_region,
     _exclude_capacitor_top_via_overlap,
     _resolve_resistors,
+    _unselected_capacitor_variant_warnings,
 )
 from .extract_passive_regions import (
     _capacitor_top_via_overlap_region as _capacitor_top_via_overlap_region,
@@ -3719,6 +3720,14 @@ def run_extract(
         # sets `pin_renames.declared_pins`/`pin_renames.def_pins` echo --
         # see `rerun_extract_report`.
         "rename_declared_pins": rename_declared_pins,
+        # Additive fields (issue #3061): the `--pins` / `--def-pins` sets as
+        # given -- a sorted list, or `null` when the flag was not given (`[]`
+        # stays distinct from `null`: the demotion passes treat an empty set
+        # differently from an absent one). Always present, independent of
+        # `--rename-declared-pins`, so `--check --rerun` can replay them; see
+        # `rerun_extract_report`.
+        "declared_pins": None if declared_pins is None else sorted(declared_pins),
+        "def_pins": None if def_pins is None else sorted(def_pins),
         # Additive field (issue #2656): `null` unless `label_layers`
         # (--label-layer) was given, otherwise the caller's own role ->
         # [layer, datatype] (or `null`) mapping echoed verbatim -- the record
@@ -4522,16 +4531,18 @@ def rerun_extract_report(report_path: str) -> dict[str, Any]:
     by an earlier build of this unreleased feature or hand-edited, replays
     its ``declared`` union as ``--pins`` alone) -- when the committed report
     carries a ``pin_renames`` block,
-    writing the fresh netlist back to the same ``netlist_path`` the
-    committed report recorded
-    (so that field, too, is a meaningful comparison rather than an
-    incidental path difference). **Known limitation**, mirroring ``klt lvs
+    writing the fresh netlist to a private temp directory deleted afterward
+    (issue #3061: the committed ``netlist_path`` file is never modified;
+    ``netlist_sha256`` is still computed, and ``fresh.netlist_path`` reports
+    the committed path so that field is not an incidental path difference).
+    The top-level ``declared_pins``/``def_pins`` echoes (issue #3061) replay
+    ``--pins``/``--def-pins`` independent of ``--rename-declared-pins``, and
+    win over the ``pin_renames`` echoes, which stay the fallback for an older
+    report. **Known limitation**, mirroring ``klt lvs
     --check``'s ``rerun_lvs_report()`` (``lvs.py``): every *other* optional
     ``klt extract`` flag (``--parasitics``, ``--mom-net``, ``--spef``,
     ``--critical-net``, ``--distributed-rc``, ``--def-net-names``,
     ``--def-net-connections``, ``--mom-rlc-*``, ``--top-cell-pins``,
-    ``--pins``/``--def-pins`` -- except through the ``pin_renames`` echoes
-    a run that also used ``--rename-declared-pins`` carries, see above --,
     ``--defer-resistor-fixed-offset``, ``--abstract-cells``,
     ``--abstract-cell-lef``, ``--matched-group``, ``--subcircuit``/
     ``--subcircuit-output``, ``--pdk``/``--pdk-root``)
@@ -4614,54 +4625,49 @@ def rerun_extract_report(report_path: str) -> dict[str, Any]:
     # block -- or one whose echoes lost their shape -- replays without the
     # flag and legitimately drifts on the pin fields, the same documented
     # limitation every other unechoed flag has.
-    rename_declared_pins = committed.get("rename_declared_pins") is True
-    pin_renames_echo = committed.get("pin_renames")
-    rerun_declared_pins: frozenset[str] | None = None
-    rerun_def_pins: frozenset[str] | None = None
-    if rename_declared_pins and isinstance(pin_renames_echo, dict):
-        if "declared_pins" in pin_renames_echo or "def_pins" in pin_renames_echo:
-            valid_pins, rerun_declared_pins = _parse_declared_set_echo(
-                pin_renames_echo.get("declared_pins")
-            )
-            valid_def, rerun_def_pins = _parse_declared_set_echo(
-                pin_renames_echo.get("def_pins")
-            )
-            if not (valid_pins and valid_def):
-                rename_declared_pins = False
-                rerun_declared_pins = None
-                rerun_def_pins = None
-        else:
-            # A block without the separate echoes (an earlier build of this
-            # unreleased feature, or a hand-edited report): the union
-            # `declared` is the only echo -- replay it as `--pins` alone
-            # (the previous behavior; imperfect when the original run's
-            # `--def-pins` further restricted the surviving set, but
-            # strictly better than discarding the rename the block does
-            # carry).
-            union_echo = pin_renames_echo.get("declared")
-            if isinstance(union_echo, list) and all(
-                isinstance(name, str) for name in union_echo
-            ):
-                rerun_declared_pins = frozenset(union_echo) if union_echo else None
-            else:
-                rename_declared_pins = False
-    else:
-        rename_declared_pins = False
-
-    fresh = run_extract(
-        file_path,
-        deck_name,
-        output=committed.get("netlist_path"),
-        # A report recorded by `--no-netlist` (issue #2850) has a null path:
-        # replay it as census-only rather than writing beside the input.
-        no_netlist="netlist_path" in committed and committed["netlist_path"] is None,
-        top=committed.get("top"),
-        deck_options=deck_options,
-        label_layers=label_layers,
-        declared_pins=rerun_declared_pins,
-        def_pins=rerun_def_pins,
-        rename_declared_pins=rename_declared_pins,
+    rename_declared_pins, rerun_declared_pins, rerun_def_pins = (
+        _replay_pin_renames_echo(committed)
     )
+
+    # Issue #3061: the top-level `declared_pins`/`def_pins` echoes (emitted
+    # whether or not `--rename-declared-pins` was on) win over the
+    # `pin_renames` echo above, which stays the fallback for a report that
+    # predates them. A malformed echo degrades to "not replayed".
+    top_echo = _replay_top_level_pin_echo(committed)
+    if top_echo is not None:
+        rerun_declared_pins, rerun_def_pins = top_echo
+
+    # Issue #3061: the rerun never writes over the committed netlist. A report
+    # recorded by `--no-netlist` (issue #2850) has a null path: replay it as
+    # census-only. Otherwise the fresh netlist goes to a private temp dir (so
+    # `netlist_sha256` is still computed) that is deleted afterward, and the
+    # embedded `fresh.netlist_path` reports the committed path -- the netlist
+    # text does not embed its own path, so the hash is unaffected.
+    committed_netlist_path = committed.get("netlist_path")
+    no_netlist = "netlist_path" in committed and committed_netlist_path is None
+    scratch_dir = None if no_netlist else tempfile.mkdtemp(prefix="klt-extract-rerun-")
+    try:
+        fresh = run_extract(
+            file_path,
+            deck_name,
+            output=(
+                None
+                if scratch_dir is None
+                else os.path.join(scratch_dir, "extracted.spice")
+            ),
+            no_netlist=no_netlist,
+            top=committed.get("top"),
+            deck_options=deck_options,
+            label_layers=label_layers,
+            declared_pins=rerun_declared_pins,
+            def_pins=rerun_def_pins,
+            rename_declared_pins=rename_declared_pins,
+        )
+    finally:
+        if scratch_dir is not None:
+            shutil.rmtree(scratch_dir, ignore_errors=True)
+    if scratch_dir is not None and fresh.get("netlist_path") is not None:
+        fresh["netlist_path"] = committed_netlist_path
     return build_rerun_result(
         report_path=report_path,
         committed=committed,
@@ -4669,6 +4675,65 @@ def rerun_extract_report(report_path: str) -> dict[str, Any]:
         committed_for_diff=_canonicalize_extract_report_for_rerun_diff(committed),
         fresh_for_diff=_canonicalize_extract_report_for_rerun_diff(fresh),
     )
+
+
+def _replay_pin_renames_echo(
+    committed: Mapping[str, Any],
+) -> tuple[bool, frozenset[str] | None, frozenset[str] | None]:
+    """The ``(rename_declared_pins, declared_pins, def_pins)`` replay
+    arguments :func:`rerun_extract_report` reconstructs from the committed
+    report's ``pin_renames`` block (issue #2854). A report without the block
+    -- or one whose echoes lost their shape -- replays without the flag and
+    legitimately drifts on the pin fields, the same documented limitation
+    every other unechoed flag has."""
+    pin_renames_echo = committed.get("pin_renames")
+    if committed.get("rename_declared_pins") is not True or not isinstance(
+        pin_renames_echo, dict
+    ):
+        return False, None, None
+    if "declared_pins" not in pin_renames_echo and "def_pins" not in pin_renames_echo:
+        return _replay_union_pin_echo(pin_renames_echo)
+    valid_pins, declared_pins = _parse_declared_set_echo(
+        pin_renames_echo.get("declared_pins")
+    )
+    valid_def, def_pins = _parse_declared_set_echo(pin_renames_echo.get("def_pins"))
+    if not (valid_pins and valid_def):
+        return False, None, None
+    return True, declared_pins, def_pins
+
+
+def _replay_union_pin_echo(
+    pin_renames_echo: Mapping[str, Any],
+) -> tuple[bool, frozenset[str] | None, frozenset[str] | None]:
+    """:func:`_replay_pin_renames_echo`'s fallback for a block without the
+    separate ``declared_pins``/``def_pins`` echoes (an earlier build of this
+    unreleased feature, or a hand-edited report): the union ``declared`` is
+    the only echo -- replay it as ``--pins`` alone (the previous behavior;
+    imperfect when the original run's ``--def-pins`` further restricted the
+    surviving set, but strictly better than discarding the rename the block
+    does carry)."""
+    union_echo = pin_renames_echo.get("declared")
+    if isinstance(union_echo, list) and all(
+        isinstance(name, str) for name in union_echo
+    ):
+        return True, (frozenset(union_echo) if union_echo else None), None
+    return False, None, None
+
+
+def _replay_top_level_pin_echo(
+    committed: Mapping[str, Any],
+) -> tuple[frozenset[str] | None, frozenset[str] | None] | None:
+    """The ``(declared_pins, def_pins)`` replay sets from the committed
+    report's top-level echoes (issue #3061), or ``None`` when neither echo is
+    present or either lost its shape (a malformed echo degrades to "not
+    replayed")."""
+    if "declared_pins" not in committed and "def_pins" not in committed:
+        return None
+    valid_pins, declared_pins = _parse_declared_set_echo(committed.get("declared_pins"))
+    valid_def, def_pins = _parse_declared_set_echo(committed.get("def_pins"))
+    if not (valid_pins and valid_def):
+        return None
+    return declared_pins, def_pins
 
 
 def _parse_declared_set_echo(value: Any) -> tuple[bool, frozenset[str] | None]:
@@ -9139,6 +9204,11 @@ def _extract_netlist(
             {"P1": bottom_region, "P2": top_region},
         )
 
+    # Issue #2920: a capacitor of an unselected deck option drawn on the layout.
+    capacitor_variant_warnings = _unselected_capacitor_variant_warnings(
+        layout, top_cell, deck
+    )
+
     # MoM (Metal-oxide-Metal) capacitor device recognition (issue #1466):
     # each of the deck's optional `mom_capacitors` entries (see
     # `MomCapacitorDevice` in `decks/__init__.py`) is recognised by a single
@@ -9296,6 +9366,7 @@ def _extract_netlist(
         # recognition block above, where the per-entry terminal regions and
         # the MOS/tap geometry the filter needs are both still in scope.
         + diode_near_miss_warnings
+        + capacitor_variant_warnings
     )
 
     # Connectivity. Deliberately does *not* connect `nwell`/`tap` to

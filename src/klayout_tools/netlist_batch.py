@@ -69,6 +69,7 @@ from .netlist import (
     SCHEMA_VERSION,
     STATUS_GENERATED,
     NetlistError,
+    _check_no_unevaluated_expr,
     _check_result,
     _netlist_block,
     _sha256_file_hash,
@@ -914,6 +915,8 @@ def run_netlist_batch(
         report = _read_runner_report(collected, job_id)
         data = _read_collected_netlist(collected, report, job_id)
         data = _rewrite_runner_paths(data, _read_tree_roots(collected), tree.root)
+        # The runner's klt gates too; this keeps the guarantee client-side.
+        _check_no_unevaluated_expr(data, report["xschem"].get("version"))
         remote = {
             **sim_batch._batch_environment(config, job_id, status),
             **sim_batch._read_runner_identity(collected),
