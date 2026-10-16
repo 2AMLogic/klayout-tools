@@ -25304,6 +25304,61 @@ def test_no_netlist_with_spef_still_works(tmp_path):
     assert not (tmp_path / "inv.spice").exists()
 
 
+def _make_gf180mcu_mos_cap_layout(*, with_marker: bool) -> kdb.Layout:
+    """One gf180mcu NMOS plus, optionally, a MOS-capacitor stack (Comp + Poly2
+    under ``MOS_CAP_MK`` 166/5) -- issue #2919."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    _draw_gf180mcu_nmos(top, layout, 0, "S", drain_label="D")
+    top.shapes(layout.layer(22, 0)).insert(kdb.Box(10000, 0, 14000, 4000))
+    top.shapes(layout.layer(30, 0)).insert(kdb.Box(10500, -300, 13500, 4300))
+    if with_marker:
+        top.shapes(layout.layer(166, 5)).insert(kdb.Box(10000, 0, 14000, 4000))
+    return layout
+
+
+def test_gf180mcu_extract_flags_mos_cap_marker_as_unsupported(tmp_path):
+    """Issue #2919: shapes on `MOS_CAP_MK` (166/5) are reported in
+    `unsupported_devices[]` and `warnings[]` instead of a silent clean run."""
+    path = _write_gds(
+        _make_gf180mcu_mos_cap_layout(with_marker=True), tmp_path / "moscap.gds"
+    )
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "moscap.spice"))
+
+    assert report["status"] == "extracted"
+    (entry,) = report["unsupported_devices"]
+    assert entry["kind"] == "mos_capacitor"
+    assert entry["marker"] == "166/5"
+    assert entry["count"] == 1
+    assert entry["bbox_um"] == {"left": 10.0, "bottom": 0.0, "right": 14.0, "top": 4.0}
+    assert any(
+        "mos_capacitor" in w and "166/5" in w and "absent" in w
+        for w in report["warnings"]
+    )
+
+
+def test_gf180mcu_extract_unsupported_devices_empty_without_marker(tmp_path):
+    """Issue #2919: no 166/5 shapes -> empty field, no extra warning."""
+    path = _write_gds(
+        _make_gf180mcu_mos_cap_layout(with_marker=False), tmp_path / "nomarker.gds"
+    )
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "nomarker.spice"))
+
+    assert report["unsupported_devices"] == []
+    assert not any("unsupported device" in w for w in report["warnings"])
+
+
+def test_sky130_extract_unsupported_devices_always_present_and_empty(tmp_path):
+    """Issue #2919: a deck declaring no unsupported-device marker still emits
+    the (empty) additive field."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    _draw_sky130_nmos(top, layout, 0, "S", drain_label="D")
+    path = _write_gds(layout, tmp_path / "sky.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "sky.spice"))
+    assert report["unsupported_devices"] == []
+
+
 # --- BipolarDevice.emitter_size / SizeFilter (issue #2861) -------------------
 #
 # Source for the npn13G2 window: IHP SG13G2 LVS runset,

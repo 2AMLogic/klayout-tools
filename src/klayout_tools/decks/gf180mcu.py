@@ -527,6 +527,7 @@ from . import (
     ResistorDevice,
     ResistorFlavour,
     RuleProvenance,
+    UnsupportedDeviceMarker,
 )
 
 # `RuleProvenance.source_repo`/`.commit` shared by every gf180mcu width/space
@@ -1786,6 +1787,7 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
     (127, 5): "DRC_BJT",
     (117, 5): "CAP_MK",
     (117, 10): "MIM_L_MK",
+    (166, 5): "MOS_CAP_MK",
     (80, 5): "efuse_mk",
     (125, 5): "plfuse",
     (241, 0): "Schottky_diode",
@@ -2761,6 +2763,16 @@ EXTRACTION_DECK = ExtractionDeck(
             marker=(55, 0),  # Dualgate
             flavour="06v0",
             description="gf180mcu 5V/6V thick-oxide domain (Dualgate 55/0)",
+        ),
+    ),
+    # Issue #2919: MOS capacitors (`cap_nmos_*`/`cap_pmos_*`) are marked by
+    # `MOS_CAP_MK` (166/5) and have no device class here yet, so they would
+    # otherwise vanish from the netlist with a clean `extracted` status.
+    unsupported_device_markers=(
+        UnsupportedDeviceMarker(
+            marker=(166, 5),  # MOS_CAP_MK
+            kind="mos_capacitor",
+            description="MOS capacitor (MOS_CAP_MK 166/5)",
         ),
     ),
 )
