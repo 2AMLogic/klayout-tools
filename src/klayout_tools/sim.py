@@ -86,8 +86,9 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Iterator
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from typing import Any, NamedTuple
+from typing import IO, Any, NamedTuple
 
 from . import (
     env_provenance,
@@ -8371,32 +8372,57 @@ def parse_ascii_rawfile(raw_path: str) -> dict[str, Any]:
     its magnitude equals its real part). See ``docs/cli/sim.md``'s waveform
     JSON shape section for the documented representation.
     """
+    with _open_ascii_rawfile(raw_path) as (plotname, variables, points):
+        return {"plotname": plotname, "variables": variables, "points": list(points)}
+
+
+def _note_rawfile_header_field(meta: dict[str, Any], line: str) -> None:
+    """Record the first ``Plotname:`` / ``Flags:`` / ``No. Variables:`` header
+    line seen into ``meta`` (later duplicates are ignored)."""
+    if meta["plotname"] is None and line.startswith("Plotname:"):
+        meta["plotname"] = line[len("Plotname:") :].strip()
+    elif meta["is_complex"] is None and line.startswith("Flags:"):
+        meta["is_complex"] = "complex" in line.lower()
+    elif meta["var_count"] is None:
+        count_match = re.match(r"No\. Variables:\s*(\d+)$", line)
+        if count_match is not None:
+            meta["var_count"] = int(count_match.group(1))
+
+
+def _scan_rawfile_header(
+    handle: IO[str],
+) -> tuple[dict[str, Any], bool, bool, list[str]]:
+    """Read ``handle`` up to the ``Values:`` marker.
+
+    Returns ``(meta, in_variables, saw_values, variable_lines)``.
+    """
+    meta: dict[str, Any] = {"plotname": None, "is_complex": None, "var_count": None}
+    in_variables = False
+    saw_values = False
+    variable_lines: list[str] = []
     try:
-        with open(raw_path, encoding="utf-8", errors="replace") as handle:
-            text = handle.read()
+        for raw_line in handle:
+            line = raw_line.rstrip("\r\n")
+            if line == "Values:":
+                saw_values = True
+                break
+            if in_variables:
+                variable_lines.append(line)
+            elif line == "Variables:":
+                in_variables = True
+            else:
+                _note_rawfile_header_field(meta, line)
     except OSError as exc:
         raise SimError(f"could not read rawfile: {exc}") from exc
+    return meta, in_variables, saw_values, variable_lines
 
-    header_match = re.search(r"^Plotname:\s*(.*)$", text, re.MULTILINE)
-    if header_match is None:
-        raise SimError(f"not a recognisable ngspice rawfile: {raw_path}")
-    plotname = header_match.group(1).strip()
 
-    flags_match = re.search(r"^Flags:\s*(.*)$", text, re.MULTILINE)
-    is_complex = flags_match is not None and "complex" in flags_match.group(1).lower()
-
-    var_count_match = re.search(r"^No\. Variables:\s*(\d+)$", text, re.MULTILINE)
-    if var_count_match is None:
-        raise SimError(f"malformed rawfile (no variable count): {raw_path}")
-    var_count = int(var_count_match.group(1))
-
-    variables_block_match = re.search(
-        r"^Variables:\n(.*?)^Values:\n", text, re.MULTILINE | re.DOTALL
-    )
-    if variables_block_match is None:
-        raise SimError(f"malformed rawfile (no Variables/Values section): {raw_path}")
+def _parse_rawfile_variables(
+    variable_lines: list[str], var_count: int
+) -> list[dict[str, Any]]:
+    """Parse the ``Variables:`` table lines, checking the declared count."""
     variables: list[dict[str, Any]] = []
-    for line in variables_block_match.group(1).splitlines():
+    for line in variable_lines:
         parts = line.split()
         if len(parts) < 3:
             continue
@@ -8406,38 +8432,74 @@ def parse_ascii_rawfile(raw_path: str) -> dict[str, Any]:
             f"malformed rawfile: declared {var_count} variables, "
             f"parsed {len(variables)}"
         )
+    return variables
 
-    def _parse_value(token: str) -> float:
-        if not is_complex:
-            return float(token)
-        # "real,imag" -- reduce to a single real-valued magnitude, applied
-        # uniformly to every column (including the sweep variable, whose
-        # imaginary part is always 0 so its magnitude equals its real part).
-        real_str, _, imag_str = token.partition(",")
-        real = float(real_str)
-        imag = float(imag_str) if imag_str else 0.0
-        return math.hypot(real, imag)
 
-    values_text = text[variables_block_match.end() :]
-    points: list[list[float]] = []
+def _parse_rawfile_value(token: str, complex_values: bool) -> float:
+    if not complex_values:
+        return float(token)
+    # "real,imag" -- reduce to a single real-valued magnitude, applied
+    # uniformly to every column (including the sweep variable, whose
+    # imaginary part is always 0 so its magnitude equals its real part).
+    real_str, _, imag_str = token.partition(",")
+    real = float(real_str)
+    imag = float(imag_str) if imag_str else 0.0
+    return math.hypot(real, imag)
+
+
+def _iter_rawfile_points(
+    handle: IO[str], var_count: int, complex_values: bool
+) -> Iterator[list[float]]:
+    """Lazily yield one ``list[float]`` per point from the ``Values:`` body."""
     current: list[float] = []
-    for raw_line in values_text.splitlines():
-        line = raw_line.strip()
-        if not line:
+    for raw_line in handle:
+        tokens = raw_line.split()
+        if not tokens:
             continue
-        tokens = line.split()
         if len(tokens) == 2 and current == []:
             # "<point_index> <value0>" -- start of a new point.
-            current = [_parse_value(tokens[1])]
+            current = [_parse_rawfile_value(tokens[1], complex_values)]
         elif len(tokens) == 1:
-            current.append(_parse_value(tokens[0]))
+            current.append(_parse_rawfile_value(tokens[0], complex_values))
         else:
             continue
         if len(current) == var_count:
-            points.append(current)
+            yield current
             current = []
 
-    return {"plotname": plotname, "variables": variables, "points": points}
+
+@contextlib.contextmanager
+def _open_ascii_rawfile(
+    raw_path: str,
+) -> Iterator[tuple[str, list[dict[str, Any]], Iterator[list[float]]]]:
+    """Open an ngspice ASCII rawfile and yield ``(plotname, variables,
+    points)``, where ``points`` lazily yields one ``list[float]`` per point.
+
+    The header is read line by line up to the ``Values:`` marker, so a
+    non-rawfile or malformed header raises :class:`SimError` before any point
+    is produced, and peak memory does not scale with the size of the
+    ``Values:`` section (issue #3360). See :func:`parse_ascii_rawfile` for the
+    format notes (``Flags: complex`` magnitude reduction in particular).
+    """
+    try:
+        handle = open(raw_path, encoding="utf-8", errors="replace")  # noqa: SIM115
+    except OSError as exc:
+        raise SimError(f"could not read rawfile: {exc}") from exc
+    with handle:
+        meta, in_variables, saw_values, variable_lines = _scan_rawfile_header(handle)
+        plotname = meta["plotname"]
+        var_count = meta["var_count"]
+        if plotname is None:
+            raise SimError(f"not a recognisable ngspice rawfile: {raw_path}")
+        if var_count is None:
+            raise SimError(f"malformed rawfile (no variable count): {raw_path}")
+        if not (in_variables and saw_values):
+            raise SimError(
+                f"malformed rawfile (no Variables/Values section): {raw_path}"
+            )
+        variables = _parse_rawfile_variables(variable_lines, var_count)
+        points = _iter_rawfile_points(handle, var_count, bool(meta["is_complex"]))
+        yield plotname, variables, points
 
 
 def noise_representation(waveform: dict[str, Any]) -> str:
@@ -8466,10 +8528,24 @@ def _parse_and_persist_waveform(raw_path: str) -> str:
     waveform-shaped size -- per the spike, waveform data is an optional
     *artifact*, referenced by path, not inlined.
     """
-    waveform = parse_ascii_rawfile(raw_path)
     json_path = raw_path + ".json"
-    with open(json_path, "w", encoding="utf-8") as handle:
-        json.dump(waveform, handle)
+    # Streamed point by point (issue #3360) so peak memory does not scale with
+    # the rawfile; the output is byte-identical to `json.dump` of the dict
+    # `parse_ascii_rawfile` returns.
+    try:
+        with _open_ascii_rawfile(raw_path) as (plotname, variables, points):
+            with open(json_path, "w", encoding="utf-8") as handle:
+                handle.write('{"plotname": ' + json.dumps(plotname))
+                handle.write(', "variables": ' + json.dumps(variables))
+                handle.write(', "points": [')
+                for index, point in enumerate(points):
+                    handle.write((", " if index else "") + json.dumps(point))
+                handle.write("]}")
+    except (SimError, ValueError):
+        # Do not leave a truncated artifact behind a failed parse.
+        with contextlib.suppress(OSError):
+            os.remove(json_path)
+        raise
     return json_path
 
 

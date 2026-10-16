@@ -4240,6 +4240,12 @@ per declared variable, in `variables[].index` order. Waveform data is never
 inlined into the response — only `artifacts.raw` (the rawfile itself) and
 `artifacts.waveform` (its parsed JSON) paths are.
 
+The rawfile stays ASCII (`set filetype=ascii`) and the waveform JSON shape is
+unchanged (issue #3360): the rawfile is stream-parsed and the JSON written one
+point at a time, so `klt sim`'s peak memory converting it does not scale with
+rawfile size. A binary rawfile reader was considered and rejected because it
+would change the `artifacts.raw` format.
+
 ### Complex-valued (`ac`/`sp`) rawfiles
 
 An `ac`/`sp` rawfile declares `Flags: complex` in its header, and ngspice
