@@ -1093,6 +1093,7 @@ def _make_gf180mcu_dualgate_layout(*, overlap: bool) -> kdb.Layout:
         draw(55, 0, kdb.Box(-1000, -1000, 1250, 4000))  # Dualgate, overlapping
     else:
         draw(55, 0, kdb.Box(100_000, 100_000, 101_000, 101_000))  # far away
+    _exempt_gf180mcu_comp_from_tap_distance(layout)
     return layout
 
 
@@ -1151,6 +1152,21 @@ def _exempt_gf180mcu_comp_from_df12(layout: kdb.Layout) -> None:
     box = kdb.Region(top.begin_shapes_rec(comp)).bbox().enlarged(100, 100)
     marker = layout.layer(241, 0)
     layout.set_info(marker, kdb.LayerInfo(241, 0))
+    top.shapes(marker).insert(box)
+
+
+def _exempt_gf180mcu_comp_from_tap_distance(layout: kdb.Layout) -> None:
+    """Draw a `v5_xtor` marker (112/1) over every `Comp` shape so the deck's
+    `DF.13_LV`/`DF.14_LV` tap-distance rules (issue #3607) leave it out of
+    their 3.3V active region. For fixtures that exercise *other* rules on an
+    implanted `Comp` with no tap; no other rule reads the marker."""
+    top = layout.top_cell()
+    comp = layout.find_layer(22, 0)
+    if comp is None:
+        return
+    box = kdb.Region(top.begin_shapes_rec(comp)).bbox().enlarged(100, 100)
+    marker = layout.layer(112, 1)
+    layout.set_info(marker, kdb.LayerInfo(112, 1))
     top.shapes(marker).insert(box)
 
 
@@ -4331,6 +4347,7 @@ def _gf180mcu_implant_layout(shapes):
         index = layout.layer(layer_num, datatype)
         layout.set_info(index, kdb.LayerInfo(layer_num, datatype, name))
         top.shapes(index).insert(box)
+    _exempt_gf180mcu_comp_from_tap_distance(layout)
     return layout
 
 

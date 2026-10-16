@@ -15,6 +15,7 @@ from itertools import pairwise
 
 import pytest
 
+from helpers.drc_tap import assert_clean_except_tap_distance
 from klayout_tools import extract, gen, gen_compose, pdk
 from klayout_tools.cli import main
 from klayout_tools.decks import get_extraction_deck
@@ -5973,7 +5974,7 @@ def test_compose_gf180mcu_row_routes_a_non_adjacent_device_pair(
     assert report["nets"][0]["routed"] is True
 
     drc_report = run_drc(str(output), "gf180mcu")
-    assert drc_report["status"] == "clean", drc_report["violations"]
+    assert_clean_except_tap_distance(drc_report)
 
 
 def _gf180mcu_two_device_metal_request(both_pdk_root, tmp_path, width_um, output):
@@ -6050,7 +6051,7 @@ def test_compose_gf180mcu_routing_width_at_deck_minimum_is_accepted_and_drc_clea
     assert report["nets"][0]["routed"] is True
 
     drc_report = run_drc(str(output), "gf180mcu")
-    assert drc_report["status"] == "clean", drc_report["violations"]
+    assert_clean_except_tap_distance(drc_report)
 
 
 def test_compose_gf180mcu_metal2_via_drop_uses_deck_via_width_floor_and_is_drc_clean(
@@ -6119,7 +6120,7 @@ def test_compose_gf180mcu_metal2_via_drop_uses_deck_via_width_floor_and_is_drc_c
         assert (box.height() * dbu) >= 0.26 - 1e-9
 
     drc_report = run_drc(str(output), "gf180mcu")
-    assert drc_report["status"] == "clean", drc_report["violations"]
+    assert_clean_except_tap_distance(drc_report)
 
 
 def test_compose_route_two_pin_waypoints_um_rejects_malformed_entries(
@@ -8735,7 +8736,7 @@ def test_compose_cross_block_layer_role_no_longer_forces_width_um_to_the_cross_f
     assert _path_widths_um(metal2) == [0.28]
 
     drc_report = run_drc(str(output), "gf180mcu")
-    assert drc_report["status"] == "clean", drc_report["violations"]
+    assert_clean_except_tap_distance(drc_report)
 
 
 def test_compose_cross_block_width_um_below_cross_floor_is_rejected(
@@ -11904,7 +11905,7 @@ def test_compose_widens_stub_beside_a_wide_gate_pad_is_drc_clean(
     assert report["nets"][0]["routed"] is True
 
     drc_report = run_drc(str(output), family)
-    assert drc_report["status"] == "clean", drc_report["violations"]
+    assert_clean_except_tap_distance(drc_report)
 
 
 def test_compose_gf180mcu_gate_pad_gap_is_a_real_pre_fix_violation(
@@ -15447,10 +15448,11 @@ def test_compose_per_net_layer_role_wins_over_cross_block_layer_role(
 #: below: both `U0_D` ports face +x, so the fixed one-jog shape would have to
 #: reach u2's pin through u2's own body. The path lifts over the row instead
 #: and comes back down to the right of u2, approaching that pin from its own
-#: outward side. Derived from the fixture's own geometry: 1.12um-wide blocks
-#: on a 3.0um row spacing put u1 at x=[4.12, 5.24] and u2 at x=[8.24, 9.36],
-#: with both drain pads on the y=0.21 row.
-_DRAIN_BUS_LEG_WAYPOINTS_UM = [[5.6, 2.5], [9.8, 2.5], [9.8, 0.21]]
+#: outward side. Derived from the fixture's own geometry: 1.37um-wide blocks
+#: on a 3.0um row spacing put u1 at x=[4.245, 5.615] and u2 at
+#: x=[8.615, 9.985] (each block bbox includes the 0.125um sky130 S/D implant
+#: margin, issue #2934), with both drain pads on the y=0.21 row.
+_DRAIN_BUS_LEG_WAYPOINTS_UM = [[6.0, 2.5], [10.3, 2.5], [10.3, 0.21]]
 
 
 def _drain_bus_request(tmp_path, pdk_root, output, cell_name):
@@ -15969,7 +15971,7 @@ def test_compose_rejects_a_recessed_gate_approach_that_violates_deck_spacing(
 
     # The block itself is clean: whatever the composition draws is what
     # introduces the violation, not the generator's own geometry.
-    assert run_drc(dp["gds_path"], "gf180mcu")["status"] == "clean"
+    assert_clean_except_tap_distance(run_drc(dp["gds_path"], "gf180mcu"))
 
     report = compose(request)
 
@@ -15988,7 +15990,7 @@ def test_compose_rejects_a_recessed_gate_approach_that_violates_deck_spacing(
 
     # The composed layout agrees -- the violating approach was never drawn.
     drc_report = run_drc(str(output), "gf180mcu")
-    assert drc_report["status"] == "clean", drc_report["violations"]
+    assert_clean_except_tap_distance(drc_report)
 
 
 def test_compose_still_routes_the_same_blocks_unobstructed_gate(
@@ -16009,7 +16011,7 @@ def test_compose_still_routes_the_same_blocks_unobstructed_gate(
     assert net["routed"] is True
     assert all(leg["routed"] for leg in net["legs"]), net["legs"]
     drc_report = run_drc(str(output), "gf180mcu")
-    assert drc_report["status"] == "clean", drc_report["violations"]
+    assert_clean_except_tap_distance(drc_report)
 
 
 def test_compose_own_block_spacing_check_does_not_reject_dummy_column_routes(
@@ -17158,7 +17160,7 @@ def test_compose_plane_bearing_waypoint_changes_plane_mid_leg(tmp_path, pdk_root
         pdk_root,
         output,
         "plane_change",
-        [[5.6, 2.5], [7.0, 2.5, "metal3"], [9.8, 2.5], [9.8, 0.21]],
+        [[6.0, 2.5], [7.0, 2.5, "metal3"], [10.3, 2.5], [10.3, 0.21]],
     )
     report = compose(request)
 
@@ -17194,15 +17196,15 @@ def test_compose_plane_bearing_waypoint_changes_plane_mid_leg(tmp_path, pdk_root
 
 
 def _gate_net_crossing_plane_change(layer_role):
-    """A u1.G -> u2.G net whose descent at x=8.8 crosses the met2 segment of
-    the plane-changing DBUS leg (y=2.5, x=7.0..9.8) in the fixture above."""
+    """A u1.G -> u2.G net whose descent at x=9.3 crosses the met2 segment of
+    the plane-changing DBUS leg (y=2.5, x=7.0..10.3) in the fixture above."""
     entry = {
         "net": "GLINK",
         "pins": [
             {"block": "u1", "port": "U0_G"},
             {"block": "u2", "port": "U0_G"},
         ],
-        "waypoints_um": [[4.68, 3.5], [8.8, 3.5]],
+        "waypoints_um": [[4.93, 3.5], [9.3, 3.5]],
     }
     if layer_role is not None:
         entry["layer_role"] = layer_role
@@ -17228,7 +17230,7 @@ def test_compose_plane_bearing_waypoint_checks_each_segment_on_its_own_plane(
         pdk_root,
         output,
         "plane_change_cross",
-        [[5.6, 2.5], [7.0, 2.5, "metal3"], [9.8, 2.5], [9.8, 0.21]],
+        [[6.0, 2.5], [7.0, 2.5, "metal3"], [10.3, 2.5], [10.3, 0.21]],
     )
     request["connectivity"].append(_gate_net_crossing_plane_change(layer_role))
     report = compose(request)
@@ -17253,7 +17255,7 @@ def test_compose_plane_bearing_waypoint_on_a_two_pin_net(tmp_path, pdk_root):
                 {"block": "u1", "port": "U0_D"},
                 {"block": "u2", "port": "U0_D"},
             ],
-            "waypoints_um": [[5.6, 2.5, "metal3"], [9.8, 2.5], [9.8, 0.21]],
+            "waypoints_um": [[6.0, 2.5, "metal3"], [10.3, 2.5], [10.3, 0.21]],
         }
     ]
     report = compose(request)
@@ -17274,7 +17276,7 @@ def test_compose_plane_bearing_waypoint_unknown_role_is_an_application_error(
         pdk_root,
         tmp_path / "bad_role.gds",
         "bad_role",
-        [[5.6, 2.5], [7.0, 2.5, "metal99"], [9.8, 2.5], [9.8, 0.21]],
+        [[6.0, 2.5], [7.0, 2.5, "metal99"], [10.3, 2.5], [10.3, 0.21]],
     )
     with pytest.raises(GenComposeError, match=r"legs\[1\]\.waypoints_um\[1\]"):
         compose(request)
@@ -17289,7 +17291,7 @@ def test_compose_plane_bearing_waypoint_rejects_a_malformed_role(
         pdk_root,
         tmp_path / "bad_triple.gds",
         "bad_triple",
-        [[5.6, 2.5], [7.0, 2.5, bad_role], [9.8, 2.5], [9.8, 0.21]],
+        [[6.0, 2.5], [7.0, 2.5, bad_role], [10.3, 2.5], [10.3, 0.21]],
     )
     with pytest.raises(GenComposeError, match=r"waypoints_um\[1\]\[2\]"):
         compose(request)
@@ -17303,7 +17305,78 @@ def test_compose_plane_bearing_waypoint_rejects_a_four_element_waypoint(
         pdk_root,
         tmp_path / "bad_len.gds",
         "bad_len",
-        [[5.6, 2.5], [7.0, 2.5, "metal3", 1], [9.8, 2.5], [9.8, 0.21]],
+        [[6.0, 2.5], [7.0, 2.5, "metal3", 1], [10.3, 2.5], [10.3, 0.21]],
     )
     with pytest.raises(GenComposeError, match=r"waypoints_um\[1\] must be"):
         compose(request)
+
+
+def test_compose_ties_off_mos_array_dummy_units_without_dead_metal(tmp_path, pdk_root):
+    # #2904: with `dummy_ports` a dummy's S/D/G are tie-able, so its li1 pads
+    # join a named net instead of extracting as `dead_metal`.
+    params = {
+        "w_um": 2,
+        "l_um": 1,
+        "rows": 1,
+        "cols": 2,
+        "dummy": 1,
+        "gate_contact": True,
+        "topology": "array",
+    }
+    arr_off = _gen_block(tmp_path, pdk_root, "mos_array", "arr_off", **params)
+    assert not any(p["name"].startswith("D") for p in arr_off["ports"])
+    before = extract.run_extract(str(tmp_path / "arr_off.gds"), "sky130", top="arr_off")
+
+    arr = _gen_block(
+        tmp_path, pdk_root, "mos_array", "arr_tied", dummy_ports=True, **params
+    )
+    right = _gen_block(tmp_path, pdk_root, "resistor_strip", "rail_right")
+    output = tmp_path / "tied.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "arr", "generator_report": arr},
+                {"id": "right", "generator_report": right},
+            ],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["arr", "right"],
+                "origins_um": {
+                    "arr": {"x": 0.0, "y": 0.0},
+                    "right": {"x": arr["bbox_um"]["x1"] + 6.0, "y": 0.0},
+                },
+            },
+            # D1 is the rightmost dummy; tying it to a rail block on its own
+            # side keeps the single-layer route from crossing the array.
+            "connectivity": [
+                {
+                    "net": "VSS_R",
+                    "pins": [{"block": "arr", "port": f"D1_{t}"} for t in "SDG"]
+                    + [{"block": "right", "port": "P1"}],
+                }
+            ],
+            "routing": {
+                "layer_role": "metal",
+                "width_um": 0.17,
+                "cross_block_layer_role": "metal2",
+            },
+            "options": {"cell_name": "tied_0", "output": str(output)},
+        }
+    )
+    assert report["unrouted_nets"] == [], [
+        leg.get("reason") for n in report["nets"] for leg in n["legs"]
+    ]
+
+    # Dead metal on the tied (right) dummy is gone; the untied left dummy
+    # still extracts as floating.
+    right_x0 = min(p["x_um"] for p in arr["ports"] if p["name"].startswith("D1_"))
+    arr_right = lambda dm: dm["bbox_um"]["right"] > right_x0 - 0.5  # noqa: E731
+    after = extract.run_extract(str(output), "sky130", top="tied_0")
+    in_dummy = [
+        d
+        for d in after["dead_metal"]
+        if arr_right(d) and d["bbox_um"]["left"] < arr["bbox_um"]["x1"]
+    ]
+    assert [d for d in before["dead_metal"] if arr_right(d)], "fixture must float"
+    assert in_dummy == [], in_dummy

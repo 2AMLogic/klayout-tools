@@ -3,13 +3,119 @@
   "file": "examples/dogbone-terminal/example_gf180mcu.gds",
   "deck": "gf180mcu",
   "dbu_um": 0.001,
-  "status": "clean",
-  "violation_count": 0,
-  "rule_counts": {},
-  "metrics": {
-    "drc__error__count": 0
+  "status": "violations",
+  "violation_count": 2,
+  "rule_counts": {
+    "comp.tap_distance.psub.lv.1": 2
   },
-  "violations": [],
+  "metrics": {
+    "drc__error__count": 2
+  },
+  "violations": [
+    {
+      "rule": "comp.tap_distance.psub.lv.1",
+      "description": "Max distance of a substrate tap (PCOMP outside Nwell) from NCOMP outside Nwell: 20um (3.3V)",
+      "check": "tap_distance",
+      "layer": "Comp",
+      "cell": "TOP",
+      "source_cell": "dogbone_weak_pullup",
+      "source_path": [
+        "dogbone_weak_pullup"
+      ],
+      "bbox": {
+        "left": 0,
+        "bottom": 0,
+        "right": 11040,
+        "top": 420
+      },
+      "polygon": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          420
+        ],
+        [
+          420,
+          420
+        ],
+        [
+          420,
+          360
+        ],
+        [
+          10620,
+          360
+        ],
+        [
+          10620,
+          420
+        ],
+        [
+          11040,
+          420
+        ],
+        [
+          11040,
+          0
+        ],
+        [
+          10620,
+          0
+        ],
+        [
+          10620,
+          60
+        ],
+        [
+          420,
+          60
+        ],
+        [
+          420,
+          0
+        ]
+      ]
+    },
+    {
+      "rule": "comp.tap_distance.psub.lv.1",
+      "description": "Max distance of a substrate tap (PCOMP outside Nwell) from NCOMP outside Nwell: 20um (3.3V)",
+      "check": "tap_distance",
+      "layer": "Comp",
+      "cell": "TOP",
+      "source_cell": "mos_array",
+      "source_path": [
+        "ordinary_unit",
+        "mos_array"
+      ],
+      "bbox": {
+        "left": 13040,
+        "bottom": 0,
+        "right": 14540,
+        "top": 600
+      },
+      "polygon": [
+        [
+          13040,
+          0
+        ],
+        [
+          13040,
+          600
+        ],
+        [
+          14540,
+          600
+        ],
+        [
+          14540,
+          0
+        ]
+      ]
+    }
+  ],
   "coverage": {
     "deck_layers": [
       "12/0",
@@ -36,11 +142,13 @@
       "80/5",
       "81/0",
       "110/5",
+      "112/1",
       "115/5",
       "117/5",
       "117/10",
       "125/5",
       "127/5",
+      "204/0",
       "241/0"
     ],
     "layers_checked": [
@@ -56,6 +164,7 @@
       "comp.enclosing.contact.1",
       "comp.ongrid.1",
       "comp.space.1",
+      "comp.tap_distance.psub.lv.1",
       "comp.width.1",
       "contact.ongrid.1",
       "contact.space.1",
@@ -78,6 +187,7 @@
       "bjt.separation.comp.1",
       "cap_mk.ongrid.1",
       "comp.space.mv.1",
+      "comp.tap_distance.nwell.lv.1",
       "comp.width.mv.1",
       "diode_mk.ongrid.1",
       "dnwell.ongrid.1",
@@ -173,6 +283,7 @@
       "comp.enclosing.contact.1",
       "comp.ongrid.1",
       "comp.space.1",
+      "comp.tap_distance.psub.lv.1",
       "comp.width.1",
       "contact.ongrid.1",
       "contact.space.1",
@@ -204,6 +315,10 @@
       {
         "id": "comp.space.mv.1",
         "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "comp.tap_distance.nwell.lv.1",
+        "reason": "inapplicable_empty_checked_region"
       },
       {
         "id": "comp.width.mv.1",

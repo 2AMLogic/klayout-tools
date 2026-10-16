@@ -374,6 +374,7 @@ from __future__ import annotations
 from . import (
     BipolarDevice,
     CapacitorDevice,
+    CutRC,
     DerivedLayer,
     DrcRule,
     ExtractionDeck,
@@ -2640,11 +2641,21 @@ PARASITICS = ParasiticsDeck(
     poly=LayerRC(sheet_res_ohm_sq=48.2, cap_area_ff_um2=0.107, cap_perim_ff_um=0.05527),
     metals=(
         # li1 local interconnect. perim from `defaultperimeter` li1 (40.7 aF/um).
-        LayerRC(sheet_res_ohm_sq=12.8, cap_area_ff_um2=0.037, cap_perim_ff_um=0.0407),
+        LayerRC(
+            sheet_res_ohm_sq=12.8,
+            sheet_res_high_ohm_sq=17.0,
+            sheet_res_low_ohm_sq=10.5,
+            cap_area_ff_um2=0.037,
+            cap_perim_ff_um=0.0407,
+        ),
         # met1. area/perim from `defaultareacap`/`defaultperimeter` met1
         # (25.78 aF/um^2, 40.57 aF/um).
         LayerRC(
-            sheet_res_ohm_sq=0.125, cap_area_ff_um2=0.02578, cap_perim_ff_um=0.04057
+            sheet_res_ohm_sq=0.125,
+            sheet_res_high_ohm_sq=0.145,
+            sheet_res_low_ohm_sq=0.105,
+            cap_area_ff_um2=0.02578,
+            cap_perim_ff_um=0.04057,
         ),
         # met2 (issue #508). sheet: `resist (allm2)/metal2` in the same
         # nominal `variants (),(orig),(si)` block as met1 above (125
@@ -2653,7 +2664,11 @@ PARASITICS = ParasiticsDeck(
         # `defaultareacap`/`defaultperimeter allm2 metal2` entries (17.5
         # aF/um^2, 37.76 aF/um).
         LayerRC(
-            sheet_res_ohm_sq=0.125, cap_area_ff_um2=0.0175, cap_perim_ff_um=0.03776
+            sheet_res_ohm_sq=0.125,
+            sheet_res_high_ohm_sq=0.145,
+            sheet_res_low_ohm_sq=0.105,
+            cap_area_ff_um2=0.0175,
+            cap_perim_ff_um=0.03776,
         ),
         # met3 (issue #619). sheet: `resist (allm3)/metal3` in the same
         # nominal `variants (),(orig),(si)` block as met1/met2 above (47
@@ -2662,7 +2677,11 @@ PARASITICS = ParasiticsDeck(
         # (12.37 aF/um^2, 40.99 aF/um -- the `#else (!RERAM)` branch, the
         # same branch met1/met2's own values above were transcribed from).
         LayerRC(
-            sheet_res_ohm_sq=0.047, cap_area_ff_um2=0.01237, cap_perim_ff_um=0.04099
+            sheet_res_ohm_sq=0.047,
+            sheet_res_high_ohm_sq=0.056,
+            sheet_res_low_ohm_sq=0.038,
+            cap_area_ff_um2=0.01237,
+            cap_perim_ff_um=0.04099,
         ),
         # met4 (issue #619). sheet: `resist (allm4)/metal4`, same nominal
         # block and `#ifdef METAL5` guard sky130.tech wraps met4/met5 in (47
@@ -2671,15 +2690,43 @@ PARASITICS = ParasiticsDeck(
         # `defaultareacap`/`defaultperimeter allm4 metal4` entries (8.42
         # aF/um^2, 36.68 aF/um).
         LayerRC(
-            sheet_res_ohm_sq=0.047, cap_area_ff_um2=0.00842, cap_perim_ff_um=0.03668
+            sheet_res_ohm_sq=0.047,
+            sheet_res_high_ohm_sq=0.056,
+            sheet_res_low_ohm_sq=0.038,
+            cap_area_ff_um2=0.00842,
+            cap_perim_ff_um=0.03668,
         ),
         # met5 (issue #619). sheet: `resist (allm5)/metal5`, same nominal
         # block (29 milliohms/sq = 0.029 ohm/sq); area/perim from the
         # matching nominal, non-RERAM `defaultareacap`/`defaultperimeter
         # allm5 metal5` entries (6.32 aF/um^2, 38.85 aF/um).
         LayerRC(
-            sheet_res_ohm_sq=0.029, cap_area_ff_um2=0.00632, cap_perim_ff_um=0.03885
+            sheet_res_ohm_sq=0.029,
+            sheet_res_high_ohm_sq=0.036,
+            sheet_res_low_ohm_sq=0.021,
+            cap_area_ff_um2=0.00632,
+            cap_perim_ff_um=0.03885,
         ),
+    ),
+    # Per-cut via resistance and the interconnect-resistance corners (issue
+    # #3053), from `sky130A.tech` at the pinned PDK commit
+    # f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7. `contact` rows are milliohm
+    # per cut, divided by 1000. Nominal: `variants (),(orig),(si)` block
+    # (L5132-5138); high-R: `variants (hrhc),(hrlc)` (L5180-5186); low-R:
+    # `variants (lrhc),(lrlc)` (L5228-5234). The high/low *metal* sheet
+    # resistances on `metals` above are from L5166-5170 / L5214-5218 (li1 is
+    # `allli`, L5165 / L5213; nominal L5117-5122). Unlike gf180mcu the cuts
+    # differ per layer.
+    # `lower_metal_index` is the level the cut lands on: mcon = li1->met1,
+    # m2c = met1->met2, m3c = met2->met3, via3 = met3->met4, via4 =
+    # met4->met5. Not curated: the diffusion/poly contacts (`ndc`, `pdc`,
+    # `pc`, ...), `mimcc`/`mim2cc`, and `mrdlc` (RDL, outside this stack).
+    cuts=(
+        CutRC("mcon", 0, nominal_ohm=9.3, high_ohm=23.0, low_ohm=1.6),
+        CutRC("m2c", 1, nominal_ohm=4.5, high_ohm=15.0, low_ohm=2.0),
+        CutRC("m3c", 2, nominal_ohm=3.41, high_ohm=8.0, low_ohm=0.5),
+        CutRC("via3", 3, nominal_ohm=3.41, high_ohm=8.0, low_ohm=0.5),
+        CutRC("via4", 4, nominal_ohm=0.38, high_ohm=0.891, low_ohm=0.012),
     ),
     # `defaultoverlap` vertical plate-coupling coefficients (issue #760,
     # Extract Stage 2a): entry `i` is the coefficient between `metals[i]`

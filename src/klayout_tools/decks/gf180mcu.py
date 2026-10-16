@@ -372,9 +372,25 @@ are always the real, unmodified DRM values:
   polygon that touches or overlaps a Schottky-diode marker (241/0) anywhere
   is exempted whole, exactly as upstream; an absent implant or marker layer
   is an empty region, so unimplanted COMP is reported rather than skipped.
-  The ``res_mk``-style well/voltage partitions of ``DF.13``/``DF.14`` are not
-  involved. The rule is not voltage-split in the DRM, hence
-  ``voltage_independent``.
+  The well/voltage partitions of ``DF.13``/``DF.14`` are not involved. The rule
+  is not voltage-split in the DRM, hence ``voltage_independent``.
+- ``comp.tap_distance.nwell.lv.1`` / ``comp.tap_distance.psub.lv.1`` (DRM
+  ``DF.13_LV`` / ``DF.14_LV``, ``check="tap_distance"``, issue #3607): the
+  3.3 V columns only (``DF.13_MV`` / ``DF.14_MV`` are not declared), evaluated
+  flat on merged regions as a ``klayout.db.Region`` translation of the
+  upstream ``comp.rb`` operation sequence
+  (``docs/design/gf180mcu-comp-checks-spike.md``). Recorded approximations:
+  **D1** selection is of *whole* active polygons that do not interact with the
+  tap reach region, so a long active with one end near a tap is legal, as
+  upstream; **D2** ``DF.13`` clips every growth step with the raw ``Nwell``
+  layer exactly as upstream, not with ``Nwell`` plus ``DNWELL`` -- a
+  DNWELL-only well therefore flags its PCOMP; **D3** the LV selection (touching
+  neither ``v5_xtor`` nor ``dualgate``) and the MV one (overlapping
+  ``dualgate``) are not complements, so active touching ``v5_xtor`` alone is
+  covered by neither; **D7** only upstream's ``flat`` mode was compared, not
+  its ``deep``/tiled modes. ``DF.13`` measures with octagon steps and
+  ``DF.14`` with a Euclidean separation, so the two rules do not share one
+  boundary metric.
 - ``bjt.separation.comp.1``: the official ``BJT.3`` scopes to COMP
   "unrelated" to the BJT device (i.e. excludes COMP that is itself part of
   the same bipolar device, a connectivity/netlist notion); our engine has no
@@ -517,6 +533,7 @@ from . import (
     CapacitorFlavour,
     CapacitorVariant,
     CompCoverageSpec,
+    CutRC,
     DerivedLayer,
     DiodeDevice,
     DrcRule,
@@ -527,6 +544,7 @@ from . import (
     ResistorDevice,
     ResistorFlavour,
     RuleProvenance,
+    TapDistanceSpec,
     UnsupportedDeviceMarker,
 )
 
@@ -1328,6 +1346,66 @@ DECK: list[DrcRule] = [
         # DF.12 publishes no 3.3V/5V column split, so it cannot have read the
         # wrong voltage column -- see `DrcRule.voltage_independent`.
         voltage_independent=True,
+    ),
+    DrcRule(
+        id="comp.tap_distance.nwell.lv.1",
+        description=(
+            "Max distance of an Nwell tap (NCOMP inside Nwell) from PCOMP inside "
+            "Nwell: 20um (3.3V)"
+        ),
+        layer=(22, 0),  # Comp -- the checked layer
+        check="tap_distance",
+        threshold_dbu=0,  # no dbu threshold: the distance is in the spec
+        region_spec=TapDistanceSpec(
+            well_domain="inside",
+            voltage="lv",
+            max_distance_um=20.0,
+            nwell=(21, 0),
+            dnwell=(12, 0),
+            lvpwell=(204, 0),
+            nplus=(32, 0),
+            pplus=(31, 0),
+            res_mk=(110, 5),
+            dualgate=(55, 0),
+            v5_xtor=(112, 1),
+        ),
+        # DRM 7.5 Comp, rule "DF.13": "Max distance of Nwell tap (NCOMP inside
+        # Nwell) from (PCOMP inside Nwell)" (3.3V column, 20 um). Re-derived from
+        # the PDK's executable `comp.rb` (pactive not interacting
+        # v5_xtor/dualgate/the 20um tap reach); see the module docstring's "Known
+        # approximations" note on `comp.tap_distance.nwell.lv.1`.
+        scope="7.5 Comp",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_klayout_deck_provenance("comp", "DF.13_LV"),
+    ),
+    DrcRule(
+        id="comp.tap_distance.psub.lv.1",
+        description=(
+            "Max distance of a substrate tap (PCOMP outside Nwell) from NCOMP "
+            "outside Nwell: 20um (3.3V)"
+        ),
+        layer=(22, 0),  # Comp -- the checked layer
+        check="tap_distance",
+        threshold_dbu=0,  # no dbu threshold: the distance is in the spec
+        region_spec=TapDistanceSpec(
+            well_domain="outside",
+            voltage="lv",
+            max_distance_um=20.0,
+            nwell=(21, 0),
+            dnwell=(12, 0),
+            lvpwell=(204, 0),
+            nplus=(32, 0),
+            pplus=(31, 0),
+            res_mk=(110, 5),
+            dualgate=(55, 0),
+            v5_xtor=(112, 1),
+        ),
+        # DRM 7.5 Comp, rule "DF.14": "Max distance of substrate tap (PCOMP
+        # outside Nwell) from (NCOMP outside Nwell)" (3.3V column, 20 um).
+        # Re-derived from the PDK's executable `comp.rb` (nactive minus a diamond
+        # 20um ptap filter, refined by sep(ptap, 20um)); see the module
+        # docstring's "Known approximations" note on `comp.tap_distance.psub.lv.1`.
+        scope="7.5 Comp",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_klayout_deck_provenance("comp", "DF.14_LV"),
     ),
     DrcRule(
         id="nplus.width.1",
@@ -3081,13 +3159,23 @@ PARASITICS = ParasiticsDeck(
     poly=LayerRC(sheet_res_ohm_sq=7.3, cap_area_ff_um2=0.11067, cap_perim_ff_um=0.05),
     metals=(
         # Metal1. perim from `defaultperimeter` Metal1 (39.431 aF/um).
-        LayerRC(sheet_res_ohm_sq=0.09, cap_area_ff_um2=0.03, cap_perim_ff_um=0.039431),
+        LayerRC(
+            sheet_res_ohm_sq=0.09,
+            sheet_res_high_ohm_sq=0.104,
+            sheet_res_low_ohm_sq=0.076,
+            cap_area_ff_um2=0.03,
+            cap_perim_ff_um=0.039431,
+        ),
         # Metal2 (issue #547). sheet from `resist (allm2)/metal2 90`
         # (unconditional -- M2 is never the top/thick metal in any gf180mcu
         # stack option); area/perim from `defaultareacap`/`defaultperimeter`
         # allm2 metal2 (15.016 aF/um^2, 33.298 aF/um).
         LayerRC(
-            sheet_res_ohm_sq=0.09, cap_area_ff_um2=0.015016, cap_perim_ff_um=0.033298
+            sheet_res_ohm_sq=0.09,
+            sheet_res_high_ohm_sq=0.104,
+            sheet_res_low_ohm_sq=0.076,
+            cap_area_ff_um2=0.015016,
+            cap_perim_ff_um=0.033298,
         ),
         # Metal3 (issue #547). sheet from `resist (allm3)/metal3 90`, the
         # `#ifdef METALS4 || METALS5 || METALS6` row -- this deck's 5-metal
@@ -3098,7 +3186,11 @@ PARASITICS = ParasiticsDeck(
         # aF/um^2, 30.021 aF/um) -- unconditional; thickness options only vary
         # M3's sheet resistance, never its cap coefficients.
         LayerRC(
-            sheet_res_ohm_sq=0.09, cap_area_ff_um2=0.010094, cap_perim_ff_um=0.030021
+            sheet_res_ohm_sq=0.09,
+            sheet_res_high_ohm_sq=0.104,
+            sheet_res_low_ohm_sq=0.076,
+            cap_area_ff_um2=0.010094,
+            cap_perim_ff_um=0.030021,
         ),
         # Metal4 (issue #547). sheet from `resist (allm4)/metal4 90`, the
         # `#ifdef METALS5 || METALS6` row (same reasoning as Metal3 -- not the
@@ -3106,7 +3198,11 @@ PARASITICS = ParasiticsDeck(
         # `defaultareacap`/`defaultperimeter` allm4 metal4 (7.602 aF/um^2,
         # 28.153 aF/um).
         LayerRC(
-            sheet_res_ohm_sq=0.09, cap_area_ff_um2=0.007602, cap_perim_ff_um=0.028153
+            sheet_res_ohm_sq=0.09,
+            sheet_res_high_ohm_sq=0.104,
+            sheet_res_low_ohm_sq=0.076,
+            cap_area_ff_um2=0.007602,
+            cap_perim_ff_um=0.028153,
         ),
         # Metal5 (issue #547, revised by #572 and again by #3540), the top
         # metal of this 5-level stack. sheet from the resolved, pre-built
@@ -3125,7 +3221,11 @@ PARASITICS = ParasiticsDeck(
         # allm5 metal5 (5.798 aF/um^2, 30.386 aF/um) -- unconditional across
         # every THICKMET option.
         LayerRC(
-            sheet_res_ohm_sq=0.04, cap_area_ff_um2=0.005798, cap_perim_ff_um=0.030386
+            sheet_res_ohm_sq=0.04,
+            sheet_res_high_ohm_sq=0.049,
+            sheet_res_low_ohm_sq=0.031,
+            cap_area_ff_um2=0.005798,
+            cap_perim_ff_um=0.030386,
         ),
     ),
     # `defaultoverlap` vertical plate-coupling coefficients (issue #760,
@@ -3160,5 +3260,24 @@ PARASITICS = ParasiticsDeck(
         # Metal4 (idx3) <-> Metal5 (idx4): `defaultoverlap allm5 metal5
         # allm4 metal4 39.351`.
         0.039351,
+    ),
+    # Per-cut via resistance and the interconnect-resistance corners (issue
+    # #3053), from the same resolved `gf180mcuD.tech` / pinned PDK commit
+    # f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7 as Metal5 above. Magic states
+    # `contact` rows in milliohm per cut; divided by 1000. Nominal: `variants
+    # ()` block (L3355-3358); high-R: `variants (hrhc),(hrlc)` (L3404-3407,
+    # 15000 = 15 ohm, 3.3x nominal); low-R: `variants (lrhc),(lrlc)`
+    # (L3453-3456, 0 -- an ideal short, stored as published, not clamped; see
+    # `CutRC`). The high/low *metal* sheet resistances are on `metals` above
+    # (L3390-3396 / L3439-3445). `lower_metal_index` is the Metal level the
+    # cut lands on: m2c = Metal1->Metal2, m3c = Metal2->Metal3, via3 =
+    # Metal3->Metal4, via4 = Metal4->Metal5. `mimcc` (MiM cap contact, also
+    # 4.5 ohm) and the diffusion/poly contacts (`ndc` ... `pc`) are not
+    # curated: they are not between two metals of this stack.
+    cuts=(
+        CutRC("m2c", 0, nominal_ohm=4.5, high_ohm=15.0, low_ohm=0.0),
+        CutRC("m3c", 1, nominal_ohm=4.5, high_ohm=15.0, low_ohm=0.0),
+        CutRC("via3", 2, nominal_ohm=4.5, high_ohm=15.0, low_ohm=0.0),
+        CutRC("via4", 3, nominal_ohm=4.5, high_ohm=15.0, low_ohm=0.0),
     ),
 )
