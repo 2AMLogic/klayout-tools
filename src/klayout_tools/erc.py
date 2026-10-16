@@ -4981,8 +4981,6 @@ def run_erc(
     return report
 
 
-
-
 # --------------------------------------------------------------------------- #
 # --check / --rerun: verify a previously committed report (issue #3060)
 # --------------------------------------------------------------------------- #
@@ -5108,5 +5106,6 @@ def rerun_erc_report(report_path: str) -> dict[str, Any]:
         deck=deck.get("name") if isinstance(deck, dict) else None,
         findings_only=bool(committed.get("findings_only")),
         omit_antenna_tables=bool(committed.get("antenna_tables_omitted")),
+        compact="compact" in committed,
     )
     return build_rerun_result(report_path=report_path, committed=committed, fresh=fresh)
