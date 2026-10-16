@@ -6201,9 +6201,7 @@ def _run_corner(
         classified = _classify_engine_diagnostics(log_text, netlist_path, engine)
         diagnostics.extend(classified)
         no_log_reported = False
-        diagnostics.extend(
-            _alterparam_failures(point, log_text + "\n" + stdout_text)
-        )
+        diagnostics.extend(_alterparam_failures(point, log_text + "\n" + stdout_text))
         if engine_exit_code and not log_text and not os.path.exists(log_path):
             diagnostics.append(
                 {
