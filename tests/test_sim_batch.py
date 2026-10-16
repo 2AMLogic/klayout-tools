@@ -4271,6 +4271,72 @@ def test_sim_set_partial_refusal_is_one_summary(tmp_path):
     jsonschema.validate(report, json.loads(SET_SCHEMA_PATH.read_text()))
 
 
+def test_sim_set_manifest_written_before_completion(tmp_path):
+    from klayout_tools import sim_set
+
+    paths = _write_set(tmp_path, 2)
+    out = tmp_path / "out"
+    seen = {}
+
+    def fake_run(path, **kwargs):
+        manifest = json.loads((out / "set-manifest.json").read_text())
+        seen[path] = [e["status"] for e in manifest["requests"]]
+        return _fake_report(job_id="job-" + os.path.basename(path))
+
+    sim_set.run_sim_set(paths, outdir=str(out), max_in_flight=1, run=fake_run)
+
+    assert seen[paths[0]] == ["running", "pending"]
+    assert seen[paths[1]] == ["pass", "running"] or seen[paths[1]] == [
+        "not_checked",
+        "running",
+    ]
+    final = json.loads((out / "set-manifest.json").read_text())["requests"]
+    assert [e["dir"] for e in final] == [str(out / "req0"), str(out / "req1")]
+    assert final[0]["job_id"] == "job-req0.json"
+
+
+def test_sim_set_capacity_retry_bounded_and_capacity_only(tmp_path):
+    from klayout_tools import sim_set
+
+    paths = _write_set(tmp_path, 2)
+    calls: dict[str, int] = {}
+    sleeps: list[float] = []
+
+    def fake_run(path, **kwargs):
+        calls[path] = calls.get(path, 0) + 1
+        if path.endswith("req0.json"):
+            if calls[path] < 3:
+                raise sim.SimError("full", code="batch_concurrency_cap")
+            return _fake_report()
+        raise sim.SimError("bad request", code="batch_bad")
+
+    report = sim_set.run_sim_set(
+        paths, run=fake_run, capacity_retries=2, sleep=sleeps.append
+    )
+    assert calls[paths[0]] == 3 and report["requests"][0]["error"] is None
+    assert calls[paths[1]] == 1  # non-capacity error is never retried
+    assert sleeps == [5.0, 10.0]
+
+    calls.clear()
+
+    def always_full(path, **kwargs):
+        calls[path] = calls.get(path, 0) + 1
+        raise sim.SimError("full", code="batch_no_capacity")
+
+    report = sim_set.run_sim_set(
+        paths[:1], run=always_full, capacity_retries=1, sleep=lambda s: None
+    )
+    assert calls[paths[0]] == 2
+    assert report["refused_codes"] == ["batch_no_capacity"]
+
+    calls.clear()
+    sim_set.run_sim_set(paths[:1], run=always_full, sleep=lambda s: None)
+    assert calls[paths[0]] == 1  # off by default
+
+    with pytest.raises(sim.SimError):
+        sim_set.run_sim_set(paths, capacity_retries=-1)
+
+
 def test_sim_set_rejects_empty_and_bad_bound():
     from klayout_tools import sim_set
 
