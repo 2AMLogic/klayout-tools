@@ -315,6 +315,13 @@ are always the real, unmodified DRM values:
   *checked region* is the real ``PCOMP``/``NCOMP`` boolean via
   :class:`~klayout_tools.decks.DerivedLayer`, not raw ``Comp`` -- see the
   rules' own comments for why an unscoped version would be actively wrong.
+  **Well-distance split (issue #3484):** the ``PCOMP`` side of ``NP.3`` is no
+  longer collapsed -- ``nplus.space.pcomp.1`` is the near-well half (a
+  ``PCOMP`` within 0.429um of an ``Nwell``, or touching a ``Dnwell``, at
+  0.16um) and ``nplus.space.pcomp.far.1`` (``NP.3cii``, 0.08um) the exact
+  complement, selected with ``DerivedLayer.context``. The ``Dnwell``/
+  ``LVPWELL`` relaxation ``NP.3bii`` is still not expressed (strict). The
+  mirrored ``pplus.space.ncomp.1`` keeps the flat 0.16um.
 - ``nplus.enclosing.poly2.1``/``pplus.enclosing.poly2.1``: the official
   ``NP.5a``/``PP.5a`` scope to ``ngate``/``pgate``, which the PDK deck's own
   ``main.drc`` derives from four drawn layers plus two well/marker
@@ -333,7 +340,12 @@ are always the real, unmodified DRM values:
   ``NP.5c``/``NP.5d`` (``PP.5c``/``PP.5d``) well-context splits for a tap
   further than 0.43um from an ``LVPWELL``/``Nwell`` edge; neither
   sub-threshold split is expressible here, so the strict 0.16um is applied
-  to every NCOMP/PCOMP edge this rule actually checks. They also measure
+  to every NCOMP/PCOMP edge this rule actually checks -- **except** (issue
+  #3484) for ``pplus.enclosing.comp.1``'s PCOMP, which is now split by
+  ``DerivedLayer.context``: PCOMP within 0.429um of an ``Nwell`` or touching a
+  ``Dnwell`` stays on the strict 0.16um, the rest moves to
+  ``pplus.enclosing.comp.far.1`` (``PP.5di``, 0.02um). ``NP.5c``/``NP.5d`` and
+  ``PP.5ci`` remain unexpressed (strict). They also measure
   with KLayout's default ``euclidian`` metric where the official rules use
   ``projection`` -- again the conservative direction (a corner distance the
   official rule ignores can be reported, never the reverse). **Unlike
@@ -1344,6 +1356,9 @@ DECK: list[DrcRule] = [
             base=(31, 0),  # Pplus, unsized -- `pcomp = comp AND pplus`
             sized_by_um=0.0,
             intersect_with=(22, 0),  # Comp
+            context_layers=((21, 0), (12, 0)),  # Nwell, Dnwell
+            context_sized_by_um=0.429,  # the PDK deck's own `sized(0.429.um)`
+            context="near",
         ),
         scope="7.8 Nplus",  # DRM section this rule is transcribed from (#566)
         # Cited from the executable rule deck rather than the DRM's own CSV
@@ -1354,6 +1369,43 @@ DECK: list[DrcRule] = [
         # The 7.8 Nplus/7.9 Pplus tables publish a single column (no
         # 3.3V/5V split), so this rule can never have read the wrong
         # voltage column -- see `DrcRule.voltage_independent`.
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="nplus.space.pcomp.far.1",
+        description=(
+            "minimum Nplus implant space to PCOMP (p-type diffusion) at least "
+            "0.429um from any Nwell/Dnwell"
+        ),
+        layer=(32, 0),  # Nplus -- reporting identity, shared with the rules above
+        other_layer=(32, 0),  # Nplus -- the "other" side of the separation check
+        check="separation",
+        threshold_dbu=80,  # 0.08 um
+        # DRM 7.8 Nplus, rule "NP.3cii": "Space to PCOMP: For Outside DNWELL:
+        # (ii) For PCOMP space to Nwell >= 0.43um" -> 0.08 (issue #3484), i.e.
+        # `np3_nplus.not(dnwell).separation(pcomp.not(dnwell).not(
+        # nwell_n_dn.sized(0.429.um)), 0.08.um, euclidian)` in
+        # `rule_decks/nplus.drc`. The far half of the split whose near half is
+        # `nplus.space.pcomp.1` above (`DerivedLayer.context`): a PCOMP shape
+        # (`Comp` AND `Pplus`) touching no `Nwell`/`Dnwell` grown by 0.429um is
+        # held to 0.08 instead of 0.16 -- the substrate tap of an unmodified
+        # PDK endcap/filltie cell sits ~0.48um from its Nwell and is Pplus-
+        # enclosed with an Nplus 0.08um away, which the flat 0.16 mis-flagged.
+        # Errs strict: the DNWELL branches (`NP.3bii`, inside LVPWELL) are not
+        # relaxed (any PCOMP within reach of a `Dnwell` stays on the 0.16
+        # near rule), and selection is whole-polygon, so a PCOMP only partly
+        # within reach stays on the near rule. Same butting approximation as
+        # the near rule.
+        derived_layer=DerivedLayer(
+            base=(31, 0),  # Pplus, unsized -- `pcomp = comp AND pplus`
+            sized_by_um=0.0,
+            intersect_with=(22, 0),  # Comp
+            context_layers=((21, 0), (12, 0)),  # Nwell, Dnwell
+            context_sized_by_um=0.429,
+            context="far",
+        ),
+        scope="7.8 Nplus",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_klayout_deck_provenance("nplus", "NP.3cii"),
         voltage_independent=True,
     ),
     DrcRule(
@@ -1580,12 +1632,48 @@ DECK: list[DrcRule] = [
             base=(31, 0),  # Pplus, unsized -- `pcomp = comp AND pplus`
             sized_by_um=0.0,
             intersect_with=(22, 0),  # Comp
+            context_layers=((21, 0), (12, 0)),  # Nwell, Dnwell
+            context_sized_by_um=0.429,  # the PDK deck's own `sized(0.429.um)`
+            context="near",
         ),
         scope="7.9 Pplus",  # DRM section this rule is transcribed from (#566)
         provenance=_gf180mcu_klayout_deck_provenance("pplus", "PP.5b"),
         # The 7.8 Nplus/7.9 Pplus tables publish a single column (no
         # 3.3V/5V split), so this rule can never have read the wrong
         # voltage column -- see `DrcRule.voltage_independent`.
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="pplus.enclosing.comp.far.1",
+        description=(
+            "minimum Pplus implant extension beyond PCOMP (p-type diffusion) "
+            "at least 0.429um from any Nwell/Dnwell"
+        ),
+        layer=(31, 0),  # Pplus -- reporting identity, shared with the rules above
+        other_layer=(31, 0),  # Pplus -- the enclosing side of the `enclosed` check
+        check="enclosed",
+        threshold_dbu=20,  # 0.02 um
+        # DRM 7.9 Pplus, rule "PP.5di": "Extension beyond COMP: For Outside
+        # DNWELL (i) For Pplus to NWELL space >= 0.43um for Pfield or LVPWELL
+        # tap" -> 0.02 (issue #3484), i.e. `pcomp.outside(dnwell).edges.not(
+        # nplus_edges).not(nwell_n_dn.sized(0.429.um))` enclosed by Pplus
+        # edges at 0.02 in `rule_decks/pplus.drc`. The far half of the split
+        # whose near half is `pplus.enclosing.comp.1` above
+        # (`DerivedLayer.context`; the strict `PP.5dii`/`PP.5b` 0.16 stays
+        # there). Errs strict exactly like `nplus.space.pcomp.far.1`: PCOMP
+        # within reach of any `Dnwell` (the `PP.5ci`/`PP.5cii` branches) is
+        # not relaxed, and selection is whole-polygon. Euclidian metric where
+        # the official rule is `projection`, as for the near rule.
+        derived_layer=DerivedLayer(
+            base=(31, 0),  # Pplus, unsized -- `pcomp = comp AND pplus`
+            sized_by_um=0.0,
+            intersect_with=(22, 0),  # Comp
+            context_layers=((21, 0), (12, 0)),  # Nwell, Dnwell
+            context_sized_by_um=0.429,
+            context="far",
+        ),
+        scope="7.9 Pplus",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_klayout_deck_provenance("pplus", "PP.5di"),
         voltage_independent=True,
     ),
     DrcRule(
