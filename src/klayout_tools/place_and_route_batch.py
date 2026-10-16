@@ -499,6 +499,84 @@ def _local_deck_hash(
     return _content_hash(path)
 
 
+def _preflight(
+    request: dict[str, Any], request_dir: str, pdk_variant: str | None
+) -> tuple[str, str, list[tuple[str, str]], float, sim_batch.BatchConfig]:
+    """The request-level checks done before any upload: the netlist hash, the
+    cell library, the packaged tree, the job timeout and the fleet config."""
+    netlist_path = _resolve_netlist(request["netlist"], request_dir)
+    input_hash = _content_hash(netlist_path)
+    cell_library = request["pdk"].get("cell_library")
+    if not isinstance(cell_library, str) or not cell_library:
+        raise PlaceAndRouteError("request.pdk.cell_library is required")
+    files = package_tree(request, request_dir)
+    timeout_s = _job_timeout_s(request)
+    config = _resolve_config(request, pdk_variant, timeout_s)
+    return input_hash, cell_library, files, timeout_s, config
+
+
+def _collect_corner(
+    name: str,
+    config: sim_batch.BatchConfig,
+    job_id: str | None,
+    failure: _UnitFailed | None,
+    *,
+    scratch: str,
+    unit_dir: str,
+    input_hash: str,
+    cell_library: str,
+    pdk_variant: str | None,
+    fleet: list[dict[str, Any]],
+    runner: remote_transport.CommandRunner | None,
+    sleep: Callable[[float], None],
+) -> dict[str, Any]:
+    """One corner's ``corner_runs`` entry: its job's report, or the failure
+    recorded in place. Appends the unit's fleet block to ``fleet``."""
+    entry: dict[str, Any] = {
+        "corner": name,
+        "output_dir": unit_dir,
+        "input_content_hash": input_hash,
+        "deck_content_hash": None,
+    }
+    try:
+        if failure is not None:
+            raise failure
+        assert job_id is not None
+        entry["job_id"] = job_id
+        report, remote = _finish_unit(
+            config,
+            job_id,
+            os.path.join(scratch, name),
+            unit_dir,
+            runner=runner,
+            sleep=sleep,
+        )
+        fleet.append({"corner": name, **remote})
+        runner_deck = _runner_deck_hash(report)
+        entry["deck_content_hash"] = runner_deck
+        local_deck = _local_deck_hash(cell_library, name, pdk_variant)
+        if local_deck is not None and local_deck != runner_deck:
+            raise _UnitFailed(
+                f"batch job {job_id}: the runner's '{name}' liberty deck "
+                f"({runner_deck}) differs from this host's ({local_deck}); "
+                "the fleet image's PDK does not match "
+                f"{_NO_FALLBACK}",
+                code=BATCH_DECK_MISMATCH_CODE,
+                job_id=job_id,
+            )
+    except _UnitFailed as exc:
+        entry.update({"status": "failed", "error": str(exc)})
+        if exc.code is not None:
+            entry["error_code"] = exc.code
+        if exc.job_id is not None:
+            entry["job_id"] = exc.job_id
+        if exc.remote is not None:
+            fleet.append({"corner": name, **exc.remote})
+    else:
+        entry.update(report)
+    return entry
+
+
 # --------------------------------------------------------------------------- #
 # Entry point
 # --------------------------------------------------------------------------- #
@@ -528,14 +606,9 @@ def run_rebuild_corners_batch(
     """
     request_dir = os.path.dirname(os.path.abspath(request_path))
     request_name = os.path.basename(request_path)
-    netlist_path = _resolve_netlist(request["netlist"], request_dir)
-    input_hash = _content_hash(netlist_path)
-    cell_library = request["pdk"].get("cell_library")
-    if not isinstance(cell_library, str) or not cell_library:
-        raise PlaceAndRouteError("request.pdk.cell_library is required")
-    files = package_tree(request, request_dir)
-    timeout_s = _job_timeout_s(request)
-    config = _resolve_config(request, pdk_variant, timeout_s)
+    input_hash, cell_library, files, timeout_s, config = _preflight(
+        request, request_dir, pdk_variant
+    )
 
     stage_root = os.path.join(request_dir, ".klt", "place-and-route")
     corner_runs: list[dict[str, Any]] = []
@@ -567,50 +640,22 @@ def run_rebuild_corners_batch(
                 submitted[name] = job_id
 
         for name in corners:
-            unit_dir = os.path.join(stage_root, name)
-            entry: dict[str, Any] = {
-                "corner": name,
-                "output_dir": unit_dir,
-                "input_content_hash": input_hash,
-                "deck_content_hash": None,
-            }
-            try:
-                if name in failures:
-                    raise failures[name]
-                job_id = submitted[name]
-                entry["job_id"] = job_id
-                report, remote = _finish_unit(
+            corner_runs.append(
+                _collect_corner(
+                    name,
                     config,
-                    job_id,
-                    os.path.join(scratch, name),
-                    unit_dir,
+                    submitted.get(name),
+                    failures.get(name),
+                    scratch=scratch,
+                    unit_dir=os.path.join(stage_root, name),
+                    input_hash=input_hash,
+                    cell_library=cell_library,
+                    pdk_variant=pdk_variant,
+                    fleet=fleet,
                     runner=runner,
                     sleep=sleep,
                 )
-                fleet.append({"corner": name, **remote})
-                runner_deck = _runner_deck_hash(report)
-                entry["deck_content_hash"] = runner_deck
-                local_deck = _local_deck_hash(cell_library, name, pdk_variant)
-                if local_deck is not None and local_deck != runner_deck:
-                    raise _UnitFailed(
-                        f"batch job {job_id}: the runner's '{name}' liberty deck "
-                        f"({runner_deck}) differs from this host's ({local_deck}); "
-                        "the fleet image's PDK does not match "
-                        f"{_NO_FALLBACK}",
-                        code=BATCH_DECK_MISMATCH_CODE,
-                        job_id=job_id,
-                    )
-            except _UnitFailed as exc:
-                entry.update({"status": "failed", "error": str(exc)})
-                if exc.code is not None:
-                    entry["error_code"] = exc.code
-                if exc.job_id is not None:
-                    entry["job_id"] = exc.job_id
-                if exc.remote is not None:
-                    fleet.append({"corner": name, **exc.remote})
-            else:
-                entry.update(report)
-            corner_runs.append(entry)
+            )
 
     failed = [run["corner"] for run in corner_runs if run["status"] != "ok"]
     return {

@@ -108,32 +108,36 @@ class _FakeRunner:
                 return value
         if "launch" in argv:
             self.launched.append(argv[argv.index("--job") + 1])
-            return fake_completed()
-        if "cp" in argv:
+        elif "cp" in argv:
             source, destination = argv[argv.index("cp") + 1 : argv.index("cp") + 3]
             if destination.startswith("s3://"):
-                job_id, _, rest = destination.split("/", 4)[-1].partition("/")
-                kept = self.upload(job_id, rest.removeprefix("inputs/"))
-                kept.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(source, kept)
-                if rest == "inputs/request.json":
-                    unit = json.loads(kept.read_text(encoding="utf-8"))
-                    self.corner_of[job_id] = unit["pdk"]["corner"]
-                return fake_completed()
-            job_id = source.split("/")[-2] if source.endswith("status.json") else ""
-            if source.endswith("/status.json"):
-                corner = self.corner_of.get(job_id)
-                if corner is None:
-                    return fake_completed(returncode=1, stderr="NoSuchKey")
-                return fake_completed(stdout=self.status.get(corner, _status("done")))
-            if source.endswith("/outputs/"):
-                corner = self.corner_of[source.split("/")[-3]]
-                files = self.outputs.get(corner, self.default_outputs(corner))
-                for name, content in files.items():
-                    path = Path(destination) / name
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_text(content, encoding="utf-8")
-                return fake_completed()
+                self._upload_file(source, destination)
+            else:
+                return self._download(source, destination)
+        return fake_completed()
+
+    def _upload_file(self, source: str, destination: str) -> None:
+        job_id, _, rest = destination.split("/", 4)[-1].partition("/")
+        kept = self.upload(job_id, rest.removeprefix("inputs/"))
+        kept.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, kept)
+        if rest == "inputs/request.json":
+            unit = json.loads(kept.read_text(encoding="utf-8"))
+            self.corner_of[job_id] = unit["pdk"]["corner"]
+
+    def _download(self, source: str, destination: str) -> object:
+        if source.endswith("/status.json"):
+            corner = self.corner_of.get(source.split("/")[-2])
+            if corner is None:
+                return fake_completed(returncode=1, stderr="NoSuchKey")
+            return fake_completed(stdout=self.status.get(corner, _status("done")))
+        if source.endswith("/outputs/"):
+            corner = self.corner_of[source.split("/")[-3]]
+            files = self.outputs.get(corner, self.default_outputs(corner))
+            for name, content in files.items():
+                path = Path(destination) / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
         return fake_completed()
 
 
