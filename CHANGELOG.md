@@ -14,6 +14,14 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **ASAP7 DRC deck checks `V9.PAD.EN.2` and `V9.AUX.1`** (issue #3156): the
+  V8 enclosure-by-M9 and inside-M8-and-M9 rules carry over to V9 with PAD
+  (DRM section 3.19 preamble), reading PAD (mask 96, GDS 96/0) by layer
+  number since the pinned `asap7.lyp` has no entry for it. The deck grows
+  from 261 to 263 rule categories (`--expect-rule-categories 263`).
+  `M8.S.4`-`M8.S.8` / `M9.S.4`-`M9.S.8` stay under "Not implemented", now
+  with the reason that Fig. 3.18.1's width-class reading still contradicts
+  `S.1`. Additive; no `schema_version` bump.
 - **`klt lvs` refuses a bare pre-extracted `layout.netlist` carrying a
   resistor `X` card** (issue #3078): a `klt extract` `X$n a b vsubs
   <class> r=… L=… W=…` card naming a resistor class of `reference.deck`,
@@ -22,6 +30,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   `mismatch`. It now exits 1 with an error naming `layout.deck` as the fix;
   the same request with `layout.deck` still matches, and netlists without
   such cards (or without `reference.deck`) behave as before.
+- **`klt place-and-route --backend batch`: run `pdk.rebuild_corners` units on
+  the Spot batch fleet** (issue #3518): `--backend` / the request's `backend` /
+  `$KLT_SIM_BACKEND` (`klt sim`'s precedence) submits one `sim_batch` job per
+  corner and collects each into `.klt/place-and-route/<corner>/`. A single-unit
+  request stays local under a host default; a failed submit or unit is a
+  `failed` `corner_runs` entry (`error_code`, `job_id`), never a local run.
+  The aggregated report gains `environment.{backend,remote.fleet[]}` and
+  `corner_runs[].job_id`/`error_code` (batch runs only). Additive; no
+  `schema_version` bump.
 - **`klt sim` batch: opt-in auto-split of a request that cannot fit the fleet's
   whole-job ceiling** (issue #3446): `batch.job_ceiling_check: "split"`,
   `batch.max_units_per_job` and `--max-units-per-job N` reroute a
@@ -104,6 +121,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   new additive top-level `backend_failure` field (`{testbench, side, message,
   code}`, `null` otherwise). A schematic-side failure still aborts, but its
   error envelope now carries `error.code` (e.g. `batch_no_capacity`).
+- **`klt erc --findings-only --compact`** (issue #2965): opt-in flag that
+  replaces the per-gate `gates[]` rows, per-(gate, level) `findings_only`
+  skips and per-gate `erc.floating_gate` checked ids with aggregate coverage
+  records plus a top-level `compact` counts block, shrinking the envelope on
+  large macros. `gates` stays a list (empty); `nets`, `erc_findings`,
+  `erc_status` and tie coverage are unchanged. Requires `--findings-only`
+  (exit 1 otherwise). Additive; default output is byte-identical; no
+  `schema_version` bump.
 - **ASAP7 DRC deck checks `ACTIVE.W.2` and `SDT.W.3`** (issue #3085): the
   vertical-width-is-an-integer-multiple-of-27-nm rules (DRM Tables 3.5.1 /
   3.8.1) are now measured per local vertical width of each merged rectilinear
@@ -190,6 +215,17 @@ not `klt --version`, if you need to detect this kind of drift. See
   Verilog netlist as reset-covered or unreset (machine-readable reason code),
   with a waiver file (fail on an unwaived element and on a stale waiver).
   `options.initial_state` for `functional-verification` follows separately.
+- **sky130 gate-poly endcap is checked and drawn** (issue #2936): the curated
+  `sky130` deck gains `poly.endcap.diff.1` (the PDK's `poly.8`, 0.13 µm poly
+  extension past diffusion at a gate), so `klt drc --deck sky130` no longer
+  returns `clean` for gates whose poly ends flush with the diffusion. It
+  needs a new `DerivedLayer` mode, `"gate_endcap"`. `klt gen mos_array`/
+  `diff_pair`/`esd_device` now draw a 0.15 µm endcap at both gate ends on
+  sky130 (units are 0.15 µm taller at the bottom; the PCells gain a
+  `top_endcap_um` parameter). The deck grows by one rule. Committed
+  sky130 example layouts (`examples/design-pipeline` S7-S9, `dogbone-terminal`)
+  were regenerated.
+
 - **sg13g2 poly resistors from PDK PCells** (issue #2679): `klt extract
   --deck sg13g2` now recognises `rsil`/`rppd`/`rhigh` drawn the way IHP's own
   PCells draw them (`polyres` 128/0 as the body, two abutting `GatPoly` 5/0
@@ -264,7 +300,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   `met2.enclosing_adjacent.via2.1` (`via2.5`), `met3.enclosing_adjacent.via3.1`
   (`via3.5`). The sky130 deck grows from 136 to 140 rules (additive; the
   deck hash changes).
-
+- **`klt lvs` gate-level-verilog accepts more `assign` shapes** (issue
+  #2941): a part-select on either side (`assign imm = word[7:0];`,
+  `assign bus[15:8] = hi;`), a sized constant of any base on the right-hand
+  side (`assign flags = 8'h00;`, `assign unused = 1'h0;`), and a
+  left-hand-side concatenation of bit-selects (`assign { w[7], w[4] } =
+  2'h0;`) are expanded bit by bit, MSB first, with an equal-width check.
+  An unsupported `assign` operand no longer reports "instance port
+  connection". Previously rejected input now converts; no JSON field changes.
 - **`klt yield-threshold`** (issue #2976): a new verb that fits the threshold
   distribution of a binary-outcome decision circuit (comparator, latch, trip
   point). From per-sample `(stimulus, outcome)` records it reports, per corner,
@@ -277,6 +320,21 @@ not `klt --version`, if you need to detect this kind of drift. See
   sigma. Pure Python, no native extension; log-space CDF is stable past 38
   sigma. **Additive:** no existing payload changes.
   See [`docs/cli/yield-threshold.md`](docs/cli/yield-threshold.md).
+
+- **`klt lvs`: unresolved reference subcircuit calls are an error, not a
+  silent drop** (issue #2952): a reference `X` card naming a subcircuit that
+  is not defined in the reference, was not converted to a device, and has no
+  same-named layout circuit (e.g. sg13g2 `XQ1 c b e sub npn13G2 Nx=1` while no
+  bipolar binding exists) used to be read as an empty placeholder circuit, so
+  with `options.flatten_reference` a zero-device layout reported
+  `status: "match"`. Each such instance now emits a new
+  `mismatches[].category` value, `reference.unresolved_subckt_call`
+  (`severity: "error"`, naming the containing circuit, instance and callee),
+  and forces `status: "mismatch"` under `reference.form` `plain-element` and
+  `subckt-call` (never downgraded to `"inconclusive"`). Defined hierarchy,
+  deck custom-device-class `X ... PARAMS:` cards, callees paired by name with
+  a layout circuit, and `gate-level-verilog` references are unaffected.
+  **Additive contract change**; `schema_version` is unchanged.
 
 - **Bipolar markers can be derived layer expressions** (issue #2860):
   `BipolarDevice.marker` now accepts a `LayerExpr`, a frozen AND/NOT tree

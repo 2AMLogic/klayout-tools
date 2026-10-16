@@ -9905,6 +9905,33 @@ def test_item_11_digital_met_with_pdn_erc_and_power_connectivity(tmp_path):
     }
 
 
+def test_item_11_grades_a_compact_erc_envelope_like_the_full_one(tmp_path):
+    """Issue #2965: `klt erc --findings-only --compact` empties `gates` (still
+    a list) and adds a `compact` counts block; item 11 grades it identically."""
+    compact = {
+        **ERC_CLEAN_ENVELOPE,
+        "gates": [],
+        "compact": {"gate_count": 1, "skipped_reason": "findings_only"},
+    }
+    results = []
+    for envelope in (ERC_CLEAN_ENVELOPE, compact):
+        item = _item_11(
+            build_tier_report(
+                _manifest(
+                    kind="digital",
+                    evidence={
+                        "11": _power_delivery_evidence(
+                            tmp_path, kind="digital", erc_envelope=envelope
+                        )
+                    },
+                )
+            )
+        )
+        results.append((item["status"], item["reason"]))
+
+    assert results[0] == results[1] == ("met", None)
+
+
 def test_item_11_analog_met_with_supply_net_correspondence(tmp_path):
     result = build_tier_report(
         _manifest(

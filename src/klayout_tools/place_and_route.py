@@ -1838,7 +1838,24 @@ class PlaceAndRouteError(Exception):
     stopped short of a *later* stage the request never asked for -- this
     exception is raised only when a run fails to reach the stage it was
     actually asked to reach.
+
+    ``code``, ``job_id`` and ``details`` are optional and set only by the
+    ``batch`` backend (issue #3518, mirroring ``NetlistError``): a
+    machine-readable ``error.code`` for the CLI's error envelope, the batch
+    job id, and extra structured envelope fields.
     """
+
+    def __init__(
+        self,
+        *args: object,
+        code: str | None = None,
+        job_id: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(*args)
+        self.code = code
+        self.job_id = job_id
+        self.details = details
 
 
 def load_request(request_path: str) -> dict[str, Any]:
@@ -1958,6 +1975,7 @@ def run_place_and_route(
     *,
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
+    backend: str | None = None,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """Run the OpenROAD place-and-route flow declared by the request at
@@ -1998,10 +2016,32 @@ def run_place_and_route(
     into its own ``.klt/place-and-route/<corner>/`` directory, and returns
     one aggregated report (:func:`_run_rebuild_corners`). Without the field
     the request takes the single-run path, byte-for-byte unchanged.
+
+    **Batch dispatch (issue #3518).** ``backend`` (the CLI's ``--backend``) >
+    ``request.backend`` > ``$KLT_SIM_BACKEND`` > ``local`` selects where the
+    ``pdk.rebuild_corners`` units run; ``batch`` submits one job per corner
+    to the Spot batch fleet (:mod:`klayout_tools.place_and_route_batch`) and
+    never falls back to running a unit on this host. A single-unit request
+    stays local under a host-default ``batch``.
     """
     _own_stage_root(_ownership, request_path)
     request = load_request(request_path)
     rebuild_corners = _validate_rebuild_corners(request)
+
+    from . import place_and_route_batch
+
+    selected = place_and_route_batch.resolve_backend(
+        backend, request, units=len(rebuild_corners) if rebuild_corners else 1
+    )
+    if selected == "batch":
+        assert rebuild_corners is not None and _ownership is not None
+        return place_and_route_batch.run_rebuild_corners_batch(
+            request_path,
+            request,
+            rebuild_corners,
+            pdk_variant=pdk_variant,
+            ownership=_ownership,
+        )
     if rebuild_corners is not None:
         assert _ownership is not None  # supplied by `owns_run`
         return _run_rebuild_corners(
@@ -5830,6 +5870,7 @@ def rerun_place_and_route_report(
     *,
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
+    backend: str | None = None,
 ) -> dict[str, Any]:
     """``klt place-and-route <request> --check <report> --rerun`` (full mode,
     issue #2224): verify a committed report by actually re-running the
@@ -5857,7 +5898,7 @@ def rerun_place_and_route_report(
     """
     committed = load_committed_report(report_path, PlaceAndRouteError)
     fresh = run_place_and_route(
-        request_path, pdk_variant=pdk_variant, pdk_root=pdk_root
+        request_path, pdk_variant=pdk_variant, pdk_root=pdk_root, backend=backend
     )
     return build_rerun_result(
         report_path=report_path,

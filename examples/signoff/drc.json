@@ -76,6 +76,7 @@
       "met1.space.1",
       "met1.width.1",
       "poly.angle.1",
+      "poly.endcap.diff.1",
       "poly.ongrid.1",
       "poly.width.1"
     ],
@@ -208,6 +209,7 @@
       "vpp.ongrid.1"
     ],
     "voltage_domain_warnings": [],
+    "unchecked_rules": [],
     "deck_scope": [
       "cap2m",
       "capm",
@@ -247,6 +249,7 @@
       "met1.space.1",
       "met1.width.1",
       "poly.angle.1",
+      "poly.endcap.diff.1",
       "poly.ongrid.1",
       "poly.width.1"
     ],
@@ -767,7 +770,7 @@
     "pdk": null,
     "deck": {
       "name": "sky130",
-      "content_hash": "sha256:5b49a439f3ee9bca502b2df98855b9aec6d1823a3e3f356b6c877d06074b14a8",
+      "content_hash": "sha256:87a36e4de3ed06f596ed7e843bbaf44ff5300354f515c90a59f3940570c4bdb3",
       "released": null
     },
     "input": {

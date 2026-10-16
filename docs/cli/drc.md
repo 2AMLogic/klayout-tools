@@ -237,7 +237,7 @@ also the order a `--rules` subset executes in.
   "mode": "list_rules",
   "deck": "sky130",
   "engine": "curated",
-  "rule_count": 142,
+  "rule_count": 143,
   "groups": {
     "check": { "angle": 37, "area": 10, "enclosing": 17, "...": 0 },
     "scope": { "m1": 5, "poly": 1, "...": 0 }
@@ -319,7 +319,7 @@ A `--rules` run adds one top-level block, `rule_selection`, relative to the
   "selectors": ["met1.*"],
   "selected": ["met1.width.1", "met1.space.1", "met1.enclosing.mcon.1", "..."],
   "omitted": ["poly.width.1", "diff.width.1", "..."],
-  "deck_rule_count": 142,
+  "deck_rule_count": 143,
   "subset": true
 }
 ```
@@ -359,7 +359,7 @@ in either envelope aggregation or numbered-citation grading — see
 Before signoff, re-run without `--rules`.
 
 The text form adds one line, e.g.
-`rule selection: 5 of 142 rules (137 omitted; partial run) -- selectors: met1.*`,
+`rule selection: 5 of 143 rules (138 omitted; partial run) -- selectors: met1.*`,
 and does not list `not_selected` rules one per line under "skipped requested
 rules".
 
@@ -1263,7 +1263,7 @@ single-layer kind.
 ## Coverage
 
 The `sky130` deck is a **curated starter subset**, not the full sky130
-design rule manual (which spans hundreds of rules). It currently covers 142
+design rule manual (which spans hundreds of rules). It currently covers 143
 rules — width, spacing, area, and enclosure checks across the `poly`, `diff`,
 `tap` (issue #2321), `rpm`/`urpm` marker width (issue #3030),
 `li1`, `met1`, `licon1`, `mcon`, `met2`, `via` (met1&lt;-&gt;met2 via1),
@@ -1291,19 +1291,32 @@ Broken down by check kind:
 | `space`      |    13 |
 | `isolated`   |     1 |
 | `enclosing`  |    17 |
+| `enclosed`   |     1 |
 | `enclosing_adjacent` | 4 |
 | `separation` |     2 |
 | `area`       |    10 |
 | `ongrid`     |    38 |
 | `angle`      |    37 |
-| **total**    |**142**|
+| **total**    |**143**|
 
 (`enclosing_adjacent` is the four two-adjacent-edges enclosure rules, issue #3316 — see "`enclosing_adjacent`" below. `isolated` is `nwell.space.1`, issue #1654 — see below. `area` is the
 five `met{1..5}.area.1` minimum-area rules, issue #1955, plus the five
 `met{1..5}.holes_area.1` holes-area rules, issue #1976 — see the next
 paragraph. `ongrid`/`angle` are the `OFFGRID` group, issue #2642 — the
 angle count is one short of the grid count because one layer,
-`areaid.rfdiode`, is grid-checked but not angle-checked by the source deck.)
+`areaid.rfdiode`, is grid-checked but not angle-checked by the source deck.
+`enclosed` is `poly.endcap.diff.1`, issue #2936 — see below.)
+
+`poly.endcap.diff.1` (issue #2936) transcribes `poly.8` ("min. poly extention
+gate (endcap)", 0.13 µm): gate poly must extend at least 0.13 µm past the
+diffusion edge at every transistor, along the full gate width. It uses the
+`DerivedLayer(mode="gate_endcap")` derivation (`diff` edges under or flush
+with `poly`, pushed 0.13 µm outward) paired with `check="enclosed"` and a zero
+threshold, so a *flush* gate end — the case the source `.lydrc`'s own
+`enclosing(...).without_area(0)` drops — is reported. Not checked: the
+SRAM-core 0.11 µm variant and `poly.7` (diffusion extension past poly,
+0.25 µm). `klt gen mos_array`/`diff_pair` draw 0.15 µm endcaps on sky130 so
+generated devices stay clean.
 
 `nwell.width.1`/`nwell.space.1` (issue #1420) close this deck's original
 gap on the well layer: before these two rules, `DECK` had *zero* rules
@@ -2049,7 +2062,7 @@ it is installed with the package, next to its declared rule-id list
 ```bash
 klt drc layout.gds --engine klayout \
     --deck-file src/klayout_tools/decks/asap7.drc \
-    --expect-rule-categories 261 --format json
+    --expect-rule-categories 263 --format json
 ```
 
 `--pdk asap7` does not resolve this deck: `klt pdk` finds an ASAP7 process
@@ -2066,7 +2079,7 @@ Tables 3.11.1-2. Phase 2 (#2810) adds the BEOL stack: `V0.LIG.A.1`, M1-M3
 Tables 3.1-3.19 is listed under "Not implemented" below with its reason and
 tracking issue: the track- and enclosure-relative V0-V3 rules are #3147,
 the track-, net- and M8-direction-dependent M4-M7 / V4-V7 rules are #3155,
-the ambiguous M8-M9 wide-metal spacings and the PAD-dependent V9 rules are
+the ambiguous M8-M9 wide-metal spacings are
 #3156, and the FEOL/MOL gaps are #2812. The DRM states no density rule,
 so the deck checks none (see "Density" below), and the pinned shipped cells
 are the acceptance gate for every implemented rule (#2811, see "Shipped
@@ -2097,10 +2110,10 @@ Each RDB category is the DRM rule name verbatim (DRM section 1.2.3). Where the
 DRM says a rule "applies to the layers PSELECT, SLVT, LVT, and SRAMVT as
 well" (section 3.7), or that the M1 / V1 / M4 / V4 / M6 / V6 / M8 / V8
 rules apply to the layers above them (sections 3.12-3.19), the mirrored rule
-substitutes the layer name. These 261 ids are declared once, in
+substitutes the layer name. These 263 ids are declared once, in
 `asap7_rules.RULES`; renaming or dropping one is a breaking change, and a
 test fails if the deck, that list, the fixtures or this table drift apart.
-Pass `--expect-rule-categories 261` so that a deck
+Pass `--expect-rule-categories 263` so that a deck
 which silently drops a category fails the run (exit 1) instead of reporting
 `clean`.
 
@@ -2142,13 +2155,13 @@ the generated fixtures do, each with a no-SRAMDRC control.
 | Table 3.17.1 | `V6.S.1`, `V6.S.3`, `V6.AUX.1`, `V7.S.1`, `V7.S.3`, `V7.AUX.1`, `V6.W.1`, `V6.M7.AUX.2`, `V6.M6.EN.1`, `V6.M7.EN.2`, `V7.M7.EN.1`, `V7.M8.EN.2` |
 | Table 3.18.1 | `M8.W.1`, `M8.W.2`, `M8.W.3`, `M8.W.4`, `M8.W.5`, `M8.S.1`, `M8.S.2`, `M8.S.3`, `M9.W.1`, `M9.W.2`, `M9.W.3`, `M9.W.4`, `M9.W.5`, `M9.S.1`, `M9.S.2`, `M9.S.3` |
 | Table 3.18.2 | `M8.A.1`, `M8.L.1`, `M9.A.1`, `M9.L.1` |
-| Table 3.19.1 | `V8.W.1`, `V8.S.1`, `V8.S.2`, `V9.W.1`, `V9.S.1`, `V9.S.2`, `V8.M8.EN.1`, `V8.M9.EN.2`, `V9.M9.EN.1`, `V8.AUX.1` |
+| Table 3.19.1 | `V8.W.1`, `V8.S.1`, `V8.S.2`, `V9.W.1`, `V9.S.1`, `V9.S.2`, `V8.M8.EN.1`, `V8.M9.EN.2`, `V9.M9.EN.1`, `V9.PAD.EN.2`, `V8.AUX.1`, `V9.AUX.1` |
 
 ### Approximations
 
 | Rule id | DRM table | How it differs from the DRM text |
 | --- | --- | --- |
-| `GEOMETRY.NONORTHOGONAL` | Table 3.1.1 | applied to every drawing layer the deck reads (FEOL, MOL, M1-M9, V0-V9); the PAD layer is not read |
+| `GEOMETRY.NONORTHOGONAL` | Table 3.1.1 | applied to every drawing layer the deck reads (FEOL, MOL, M1-M9, V0-V9); the PAD layer is read only by `V9.PAD.EN.2` and `V9.AUX.1` |
 | `FIN.S.1` | Table 3.3.1 | exact pitch checked edge-to-edge for minimum-width shapes: neighbours closer than two pitches must sit exactly one pitch apart; alignment of shapes two or more pitches apart is not checked |
 | `GATE.S.1` | Table 3.4.1 | exact pitch checked edge-to-edge for minimum-width shapes: neighbours closer than two pitches must sit exactly one pitch apart; alignment of shapes two or more pitches apart is not checked |
 | `GATE.S.3` | Table 3.4.1 | centre-to-centre distance checked as edge-to-edge spacing <= 34 nm, exact for 20 nm GATE (GATE.W.1) |
@@ -2250,8 +2263,10 @@ Related notes:
   edge lengths, `M8.S.5`-`M8.S.8` would override `M8.S.1` (two edges >= 80
   nm need 40 nm) for every edge it covers, and `M8.S.4` (60 nm for a 60-80
   nm edge) would override `M8.S.2` (43 nm) and `M8.S.3` (46 nm) for every
-  such edge. The intended reading is a width class the DRM does not state;
-  they are not checked (#3156).
+  such edge. Fig. 3.18.1 labels S.1-S.8 by W1 / W2 width ranges, but even as
+  width classes `M8.S.5` (80-120 nm wide needs 80 nm) contradicts `M8.S.1`
+  (two shapes of 80 nm or more need 40 nm), so the DRM supports no
+  consistent reading; they are not checked (#3156).
 - **Via enclosure.** `V2.M2.EN.1`, `V3.M3.EN.1`, `V3.M4.EN.2` and the
   V4-V9 enclosure rules ("on (at least) two opposite sides") flag a via only
   when its enclosure is short on the left/right pair *and* on the top/bottom
@@ -2377,7 +2392,8 @@ dbu. The shipped-cell regression needed no new deviation.
 DRM rules in Tables 3.1-3.19 that the deck does not check yet. Rows group
 ids that share a table, reason and tracking issue. Section 3.13 extends the
 V1 rules to V2 and V3 (and note 2 adds `V3.M3.EN.1`); sections 3.14-3.19 do
-the same for M5, V5, M7, V7, M9 and V9, whose V9 enclosure is by PAD.
+the same for M5, V5, M7, V7, M9 and V9, whose V9 enclosure is by PAD (mask 96,
+read by number: the pinned asap7.lyp has no PAD entry).
 Nothing in Tables 3.14-3.19 is left out for want of mask colouring.
 
 | Rule ids | DRM table | Reason | Tracked by |
@@ -2418,7 +2434,6 @@ Nothing in Tables 3.14-3.19 is left out for want of mask colouring.
 | `M8.S.5`, `M8.S.6`, `M8.S.7`, `M8.S.8` | Table 3.18.2 | read literally (edge length) they override M8.S.1-S.3: every edge of 80 nm or more would need 80-1000 nm, so S.1's 40 nm could never apply; the intended width-class reading is not stated | #3156 |
 | `M9.S.4` | Table 3.18.1 | read literally (edge length) it overrides M8.S.2-S.3: an edge of 60-80 nm would need 60 nm, so S.2's 43 nm and S.3's 46 nm could never apply to it; the intended width-class reading is not stated | #3156 |
 | `M9.S.5`, `M9.S.6`, `M9.S.7`, `M9.S.8` | Table 3.18.2 | read literally (edge length) they override M8.S.1-S.3: every edge of 80 nm or more would need 80-1000 nm, so S.1's 40 nm could never apply; the intended width-class reading is not stated | #3156 |
-| `V9.PAD.EN.2`, `V9.AUX.1` | Table 3.19.1 | PAD (DRM mask 96) is not a layer of the pinned asap7.lyp, so the deck does not read it | #3156 |
 
 ### Topology gaps: `GATE.AUX.2` and `ACTIVE.AUX.3`
 
@@ -2941,6 +2956,7 @@ for which skipped rules make a run partial and which do not.
 | `layers_in_stream_without_rules`   | array\<string\> | `"<layer>/<datatype>"` pairs present in the input stream that no active rule in the selected deck references at all — the load-bearing field: turns `"clean"` into "clean, and here is exactly what was not looked at." Sorted ascending by `(layer, datatype)`. |
 | `rules_skipped`                    | array\<string\> | Rule ids silently skipped because a layer they read was absent from this stream — `layer`/`other_layer`, or a `derived_layer` input (with one documented exception: a `"not_interacting"` derived rule still runs when its marker layer is absent, see "Voltage-domain rule pairs" above). Sorted alphabetically. |
 | `voltage_domain_warnings`          | array\<object\> | `{"marker": "<layer>/<datatype>", "description": string}` — see below. Sorted by marker `(layer, datatype)`. |
+| `unchecked_rules`                  | array\<object\> | `{"rule": string, "layer": "<layer>/<datatype>", "description": string}` — foundry rules the deck knows about but cannot evaluate (issue #3012; e.g. `sg13cmos5l`'s net-aware `NW.b1`), listed only when the rule's layer is in the stream, so a `clean` is not read as covering them. Purely informational: does not change `status`. Sorted by rule id. Additive; `[]` for decks that declare none. |
 | `deck_scope`                       | array\<string\> | Every distinct DRM section / official rule-id prefix the selected deck's rules claim to implement — a static property of the deck, independent of the input stream (issue #566). Sorted alphabetically. |
 | `rule_categories`                  | array\<string\> | KLayout engine only: declared RDB categories, never execution proof. |
 | `nothing_checked`                  | boolean         | Whether this run checked *nothing at all*, so its `status` says nothing about the layout — the shared convention in [`../json-contract.md`](../json-contract.md). See below. |
@@ -3192,7 +3208,7 @@ compound rule), issue #2594's `licon1.width.1`/`mcon.width.1` cite
 `licon.1`/`ct.1`, and every one of issue #2642's 75 `OFFGRID`-group rules
 (38 `ongrid` + 37 `angle`) cites its own `x.1b`/`x.3a`/`x.2`/`x.2c` source id,
 and #3316's four `enclosing_adjacent` rules cite `via.5a`/`m2.5`/`via2.5`/`via3.5`,
-so 123 of its 142 rules are covered.
+so 123 of its 143 rules are covered.
 
 ### The golden-pair manifest (`tests/golden_deck/`)
 
