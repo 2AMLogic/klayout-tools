@@ -30,6 +30,7 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from .rules import RuleProvenance
 
@@ -397,6 +398,28 @@ class MOSFlavour:
 
 
 @dataclass(frozen=True)
+class CapacitorVariant:
+    """One caller-selectable alternative **capacitor set** for an
+    :class:`ExtractionDeck` (issue #2920) -- for a PDK whose capacitor family
+    exists in several mutually-exclusive process options that draw
+    *different geometry* (gf180mcu's MIM option A: ``Metal2`` bottom plate
+    under ``Metal3``; option B: ``Metal(n-1)`` under the top metal), which
+    :class:`CapacitorDevice`'s ``flavours`` (identical geometry, different
+    coefficients) cannot express.
+
+    ``option`` is the deck-option key (``--deck-option <option>=<value>``),
+    ``value`` the string selecting this variant, ``capacitors`` the entries
+    that replace the deck's ``capacitors`` when it is selected. The deck's
+    own ``capacitors`` are the *default* variant, and must also be listed
+    here (as the first variant) so that every variant's geometry is known.
+    """
+
+    option: str
+    value: str
+    capacitors: tuple[CapacitorDevice, ...]
+
+
+@dataclass(frozen=True)
 class ExtractionDeck:
     """Connectivity + device-extraction rule set for ``klt extract`` (see
     ``docs/design/lvs-extraction-spike.md`` and ``docs/cli/extract.md``).
@@ -675,6 +698,26 @@ class ExtractionDeck:
     mos_flavours: tuple[MOSFlavour, ...] = ()
     nfet_provenance: RuleProvenance | None = None
     pfet_provenance: RuleProvenance | None = None
+    capacitor_variants: tuple[CapacitorVariant, ...] = ()
+    capacitor_variant_selected: str | None = None
+
+    @property
+    def unselected_capacitors(self) -> tuple[tuple[str, CapacitorDevice], ...]:
+        """``(option value, entry)`` for every :attr:`capacitor_variants`
+        capacitor that is *not* currently wired into :attr:`capacitors`
+        (issue #2920) -- what ``extract.py`` checks to warn that a layout
+        draws a capacitor option the active selection does not recognise.
+        Empty for a deck that declares no variants.
+        """
+        if not self.capacitor_variants:
+            return ()
+        selected = self.capacitor_variant_selected or self.capacitor_variants[0].value
+        return tuple(
+            (variant.value, capacitor)
+            for variant in self.capacitor_variants
+            if variant.value != selected
+            for capacitor in variant.capacitors
+        )
 
     @property
     def device_classes(self) -> tuple[str, ...]:
@@ -764,6 +807,12 @@ class ExtractionDeck:
             wired = next((f for f in device.flavours if f.name == device.name), None)
             if wired is not None:
                 values[key] = wired.value
+        if self.capacitor_variant_selected is not None:
+            # Issue #2920: the variant selector (`mim_option`) is echoed only
+            # when a variant was actually selected, so a run that takes the
+            # default keeps exactly the provenance/options hash it had before
+            # the key existed.
+            values[self.capacitor_variants[0].option] = self.capacitor_variant_selected
         return dict(sorted(values.items()))
 
     @property
@@ -1062,7 +1111,7 @@ class ExtractionDeck:
                     f"{where} label-layer role {role!r} override must be a "
                     f"(layer, datatype) pair of integers or None, got {layer!r}"
                 )
-        replacements: dict[str, object] = {}
+        replacements: dict[str, Any] = {}
         if "well" in overrides:
             replacements["well_label"] = overrides["well"]
         if "poly" in overrides:
@@ -1285,6 +1334,74 @@ def layer_operand_leaves(
 
 
 @dataclass(frozen=True)
+class SizeFilter:
+    """Pure-data size restriction on a recognition or terminal region (issue
+    #2861): bounding-box minimum / maximum side and polygon area, each an
+    **inclusive** ``(lo, hi)`` range in microns (um) / square microns (um^2).
+    An exact value is the degenerate range ``(v, v)``. A dimension left
+    ``None`` is unconstrained; a polygon must satisfy *every* declared
+    dimension. It is independent of any one device family so resistor and
+    capacitor flavours can adopt it later (today only
+    :attr:`BipolarDevice.emitter_size` consumes it).
+
+    Dimensions, measured per merged polygon:
+
+    - ``bbox_min_um`` -- the shorter side of the polygon's bounding box
+      (KLayout ``Region.with_bbox_min``);
+    - ``bbox_max_um`` -- the longer side (``with_bbox_max``);
+    - ``area_um2`` -- the polygon area (``with_area``).
+
+    Rounding rule (applied by ``extract.py``): bounds are converted to the
+    layout's database unit by rounding to the nearest integer dbu (area to
+    the nearest dbu^2), so a PDK value such as 0.063 um^2 is exact at
+    ``dbu=0.001`` and tolerant of float noise at any other dbu; the range is
+    then inclusive at both ends. One dbu outside either bound does not match.
+
+    Construction rejects a negative bound, ``lo > hi``, and an *empty*
+    filter (all three dimensions ``None``) -- an empty filter would be a
+    silent no-op, so use ``emitter_size=None`` for "no size restriction".
+    """
+
+    bbox_min_um: tuple[float, float] | None = None
+    bbox_max_um: tuple[float, float] | None = None
+    area_um2: tuple[float, float] | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            self.bbox_min_um is None
+            and self.bbox_max_um is None
+            and self.area_um2 is None
+        ):
+            raise ValueError(
+                "SizeFilter must constrain at least one of bbox_min_um, "
+                "bbox_max_um, area_um2 (use None instead of an empty filter)"
+            )
+        for name in ("bbox_min_um", "bbox_max_um", "area_um2"):
+            rng = getattr(self, name)
+            if rng is None:
+                continue
+            if len(rng) != 2:
+                raise ValueError(f"SizeFilter.{name} must be a (lo, hi) pair")
+            lo, hi = rng
+            if lo < 0 or hi < 0:
+                raise ValueError(f"SizeFilter.{name} bounds must be non-negative")
+            if lo > hi:
+                raise ValueError(f"SizeFilter.{name} has lo > hi: {rng!r}")
+
+    def overlaps(self, other: SizeFilter) -> bool:
+        """True when some polygon could satisfy both filters: every
+        dimension constrained by *both* has intersecting ranges (a dimension
+        either leaves unconstrained cannot separate them)."""
+        for name in ("bbox_min_um", "bbox_max_um", "area_um2"):
+            a, b = getattr(self, name), getattr(other, name)
+            if a is None or b is None:
+                continue
+            if a[1] < b[0] or b[1] < a[0]:
+                return False
+        return True
+
+
+@dataclass(frozen=True)
 class BipolarDevice:
     """One drawn vertical-BJT device-recognition entry for an
     :class:`ExtractionDeck`'s optional ``bipolars`` field (issue #223),
@@ -1352,6 +1469,16 @@ class BipolarDevice:
     documented residual limitation, see that deck's docstring. Both default
     to ``()`` (no narrowing), so a deck that declares neither extracts
     exactly as it did before the fields existed.
+
+    ``emitter_size`` (issue #2861) is an optional :class:`SizeFilter` applied
+    to the *merged* emitter region after ``emitter_requires``/
+    ``emitter_excludes``, so entries sharing ``base``/``marker``/``emitter``
+    can tell flavours apart by drawn emitter-window size (e.g. SG13G2's
+    ``npn13G2``/``npn13G2l``/``npn13G2v``). A marked emitter matching no
+    entry of such a group is reported in ``warnings[]`` (with its bbox) and
+    yields no device; entries of a group whose size ranges overlap are
+    rejected with an ``ExtractError``. ``None`` (default) means no size
+    restriction and leaves extraction and the deck hash unchanged.
 
     ``class_name`` names the extracted ``DeviceClassBJT3Transistor`` device
     class (``devices[].class`` in the JSON response, and one of the values
@@ -1443,6 +1570,7 @@ class BipolarDevice:
     base_relation: TerminalRelation | None = None
     emitter_relation: TerminalRelation | None = None
     collector_relation: TerminalRelation | None = None
+    emitter_size: SizeFilter | None = None
 
     def __post_init__(self) -> None:
         # Validates eagerly so a malformed deck entry fails where it is

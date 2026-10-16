@@ -1792,6 +1792,7 @@ def _run_measure_command(
     netlist_path: str,
     artifacts_dir: str,
     timeout_s: float,
+    backend: str | None = None,
 ) -> tuple[dict[str, Any], int]:
     """Run the caller-supplied measurement command (issue #2478) once, for
     one side, and return ``(normalized measurement document, exit status)``.
@@ -1808,6 +1809,11 @@ def _run_measure_command(
       ``$KLT_PEX_ARTIFACTS_DIR`` (a per-side directory under this run's own
       ``--outdir``, created before the command runs, for whatever decks/logs/
       raw files the harness wants to keep).
+
+    When ``backend`` is given (``klt pex --backend``), it is also exported as
+    ``$KLT_PEX_BACKEND`` and ``$KLT_SIM_BACKEND`` so a child ``klt sim`` obeys
+    it (``--backend`` beats the inherited env, as in `klt sim` itself). When
+    it is ``None`` neither is set and the inherited environment applies.
 
     Run with :func:`subprocess.run` and an argv **list** -- never
     ``shell=True`` -- the same way `klt signoff` runs a command-backed
@@ -1827,6 +1833,9 @@ def _run_measure_command(
     env["KLT_PEX_SIDE"] = side
     env["KLT_PEX_NETLIST"] = netlist_path
     env["KLT_PEX_ARTIFACTS_DIR"] = artifacts_dir
+    if backend is not None:
+        env["KLT_PEX_BACKEND"] = backend
+        env["KLT_SIM_BACKEND"] = backend
 
     try:
         completed = subprocess.run(
@@ -1967,6 +1976,7 @@ def _measure_both_sides(
     work_dir: str,
     timeout_s: float,
     repo_root: str | None,
+    backend: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Run ``command`` once per side and return ``(delta rows, the report's
     ``measurement.sides`` block)`` (issue #2478).
@@ -1990,6 +2000,7 @@ def _measure_both_sides(
             netlist_path=side_netlist,
             artifacts_dir=os.path.join(work_dir, "measure", side),
             timeout_s=timeout_s,
+            backend=backend,
         )
         side_reports[side] = side_report
         sides[side] = {
@@ -2477,6 +2488,7 @@ def run_pex(
     critical_net_excludes: Sequence[str] | None = None,
     distributed_rc: bool = False,
     parasitic_variants: Sequence[str] | None = None,
+    substrate_tie_ohms: float | None = None,
     mom_rlc_net: str | None = None,
     mom_rlc_resistance_ohm: float | None = None,
     mom_rlc_capacitance_ff: float | None = None,
@@ -2750,6 +2762,7 @@ def run_pex(
             critical_net_excludes=critical_net_excludes,
             distributed_rc=distributed_rc,
             parasitic_variants=parasitic_variants,
+            substrate_tie_ohms=substrate_tie_ohms,
             mom_rlc_net=mom_rlc_net,
             mom_rlc_resistance_ohm=mom_rlc_resistance_ohm,
             mom_rlc_capacitance_ff=mom_rlc_capacitance_ff,
@@ -3019,6 +3032,7 @@ def run_pex(
             work_dir=work_dir,
             timeout_s=_measure_timeout(measure_timeout_s),
             repo_root=repo_root,
+            backend=backend,
         )
         delta.extend(command_rows)
 

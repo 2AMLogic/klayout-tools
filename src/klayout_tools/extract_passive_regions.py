@@ -288,6 +288,57 @@ def _capacitor_plate_regions(
     return top_region, bottom_region
 
 
+def _unselected_capacitor_variant_warnings(
+    layout: kdb.Layout, top_cell: kdb.Cell, deck: ExtractionDeck
+) -> list[str]:
+    """Warn when the layout draws a capacitor the deck's *unselected*
+    :attr:`ExtractionDeck.capacitor_variants` would recognise but no active
+    entry does (issue #2920) -- e.g. a gf180mcu MIM option-A cap
+    (``Metal2``/``FuseTop``) extracted under the default ``mim_option=B``,
+    where nothing claims the cap and its top-plate vias would otherwise
+    silently join the two plates into one net.
+
+    Geometry an active entry already recognises is never reported, so a
+    layout of the selected option stays warning-free even if it happens to
+    have the other option's bottom metal under the top plate. One warning per
+    (unselected option, device); empty for a deck with no variants.
+    """
+    unselected = deck.unselected_capacitors
+    if not unselected:
+        return []
+    recognised = None
+    for capacitor in deck.capacitors:
+        top_region, bottom_region = _capacitor_plate_regions(
+            layout, top_cell, capacitor
+        )
+        if not bottom_region.is_empty():
+            recognised = top_region if recognised is None else recognised + top_region
+    option = deck.capacitor_variants[0].option
+    selected = deck.capacitor_variant_selected or deck.capacitor_variants[0].value
+    warnings: list[str] = []
+    for value, capacitor in unselected:
+        top_region, bottom_region = _capacitor_plate_regions(
+            layout, top_cell, capacitor
+        )
+        if bottom_region.is_empty():
+            continue
+        unclaimed = top_region.merged()
+        if recognised is not None:
+            unclaimed = unclaimed.not_interacting(recognised)
+        if unclaimed.is_empty():
+            continue
+        count = unclaimed.count()
+        warnings.append(
+            f"{count} capacitor top-plate shape(s) on layer "
+            f"{capacitor.top_plate[0]}/{capacitor.top_plate[1]} match "
+            f"'{capacitor.name}' (deck option {option}={value}) but this run "
+            f"uses {option}={selected}, so no capacitor was extracted for "
+            "them and their top-plate vias join the plates into one net; "
+            f"re-run with --deck-option {option}={value}."
+        )
+    return warnings
+
+
 def _diode_terminal_region(
     layout: kdb.Layout,
     top_cell: kdb.Cell,

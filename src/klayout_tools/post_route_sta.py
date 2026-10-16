@@ -3171,11 +3171,13 @@ def _port_check_error_message(rows: list[tuple[str, str, str]]) -> str:
             )
         else:
             details.append(f"{field}: {problem}")
-    prefix = (
-        "constraints.report_ports rejected"
-        if all(side == "report" for side, _, _ in rows)
-        else "per-port I/O delay constraint(s) rejected"
-    )
+    sides = {side for side, _, _ in rows}
+    if sides == {"report"}:
+        prefix = "constraints.report_ports rejected"
+    elif sides == {"input_transition"}:
+        prefix = "constraints.input_transitions rejected"
+    else:
+        prefix = "per-port I/O delay constraint(s) rejected"
     return f"{prefix}: " + "; ".join(details)
 
 

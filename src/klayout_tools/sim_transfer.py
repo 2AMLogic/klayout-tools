@@ -703,10 +703,11 @@ def _fill_band(
     # The low-frequency start must not sit on the negative real axis beyond -1
     # (a type-2+ integrator loop, whose indentation arc crosses that ray; not
     # counted here).
+    first_offset = g[first] if first is not None else None
     if (
         first is not None
         and (mag_db[first] or 0.0) > 0.0
-        and abs(g[first] or 180.0) < 45.0
+        and abs(180.0 if first_offset is None else first_offset) < 45.0
     ):
         _add(amb, REASON_LOW_FREQUENCY_ON_AXIS)
 

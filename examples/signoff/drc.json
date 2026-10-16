@@ -76,6 +76,7 @@
       "met1.space.1",
       "met1.width.1",
       "poly.angle.1",
+      "poly.endcap.diff.1",
       "poly.ongrid.1",
       "poly.width.1"
     ],
@@ -112,10 +113,13 @@
       "mcon.width.1",
       "met1.enclosing.mcon.1",
       "met1.enclosing.via.1",
+      "met1.enclosing_adjacent.via.1",
       "met2.angle.1",
       "met2.area.1",
       "met2.enclosing.via.1",
       "met2.enclosing.via2.1",
+      "met2.enclosing_adjacent.via.1",
+      "met2.enclosing_adjacent.via2.1",
       "met2.holes_area.1",
       "met2.ongrid.1",
       "met2.space.1",
@@ -125,6 +129,7 @@
       "met3.enclosing.capm.1",
       "met3.enclosing.via2.1",
       "met3.enclosing.via3.1",
+      "met3.enclosing_adjacent.via3.1",
       "met3.holes_area.1",
       "met3.ongrid.1",
       "met3.space.1",
@@ -204,6 +209,7 @@
       "vpp.ongrid.1"
     ],
     "voltage_domain_warnings": [],
+    "unchecked_rules": [],
     "deck_scope": [
       "cap2m",
       "capm",
@@ -243,6 +249,7 @@
       "met1.space.1",
       "met1.width.1",
       "poly.angle.1",
+      "poly.endcap.diff.1",
       "poly.ongrid.1",
       "poly.width.1"
     ],
@@ -377,6 +384,10 @@
         "reason": "no_applicable_geometry"
       },
       {
+        "id": "met1.enclosing_adjacent.via.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
         "id": "met2.angle.1",
         "reason": "no_applicable_geometry"
       },
@@ -390,6 +401,14 @@
       },
       {
         "id": "met2.enclosing.via2.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "met2.enclosing_adjacent.via.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "met2.enclosing_adjacent.via2.1",
         "reason": "no_applicable_geometry"
       },
       {
@@ -426,6 +445,10 @@
       },
       {
         "id": "met3.enclosing.via3.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "met3.enclosing_adjacent.via3.1",
         "reason": "no_applicable_geometry"
       },
       {
@@ -747,7 +770,7 @@
     "pdk": null,
     "deck": {
       "name": "sky130",
-      "content_hash": "sha256:6ce40f0040dbd296578843ff3d0a251a161f81a69044aa509baf602b34bc4c16",
+      "content_hash": "sha256:a260a5ada7d0733f3f701b6e72055e1e34c0aec54827b4cd633708dcc152ecae",
       "released": null
     },
     "input": {

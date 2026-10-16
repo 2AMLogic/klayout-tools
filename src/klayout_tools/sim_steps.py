@@ -302,6 +302,39 @@ def _resolve_step_analysis(analysis: Any, step: str) -> tuple[str, str]:
     return kind.lower(), args
 
 
+def _resolve_pwl_alter(value: dict[str, Any], target: str, step: str) -> dict[str, Any]:
+    """Validate a ``{"pwl": [t0, v0, t1, v1, ...]}`` alter value."""
+    if set(value) != {"pwl"}:
+        raise _error(
+            f"step {step!r}: alter value for {target!r} as an object must have "
+            f'exactly one key, "pwl" (got {sorted(value)!r})'
+        )
+    vector = value["pwl"]
+    if (
+        not isinstance(vector, list)
+        or len(vector) < 4
+        or len(vector) % 2
+        or any(
+            isinstance(v, bool)
+            or not isinstance(v, (int, float))
+            or not math.isfinite(v)
+            for v in vector
+        )
+    ):
+        raise _error(
+            f"step {step!r}: alter pwl for {target!r} must be an even-length "
+            "flat list of finite numbers [t0, v0, t1, v1, ...] with at least "
+            f"2 points (got {vector!r})"
+        )
+    times = vector[0::2]
+    if any(b < a for a, b in zip(times, times[1:], strict=False)):
+        raise _error(
+            f"step {step!r}: alter pwl for {target!r} has decreasing times "
+            f"{times!r}; times must be non-decreasing"
+        )
+    return {"pwl": list(vector)}
+
+
 def _resolve_alter(alter: Any, step: str) -> list[list[Any]]:
     """``alter`` as ordered ``[target, value]`` pairs (declaration order)."""
     if alter is None:
@@ -336,14 +369,17 @@ def _resolve_alter(alter: Any, step: str) -> list[list[Any]]:
         if target.lower() in seen:
             raise _error(f"step {step!r}: alter target {target!r} is repeated")
         seen.add(target.lower())
-        if (
+        if isinstance(value, dict):
+            value = _resolve_pwl_alter(value, target, step)
+        elif (
             isinstance(value, bool)
             or not isinstance(value, (int, float))
             or not math.isfinite(value)
         ):
             raise _error(
                 f"step {step!r}: alter value for {target!r} must be a finite "
-                f"number (got {value!r})"
+                f'number or a {{"pwl": [t0, v0, t1, v1, ...]}} object '
+                f"(got {value!r})"
             )
         pairs.append([target, value])
     return pairs
@@ -688,9 +724,11 @@ def validate_alter_targets(
     except (OSError, UnicodeDecodeError):
         waveforms = {}
     for step in analysis["steps"]:
-        for target, _value in step["alter"]:
+        for target, value in step["alter"]:
             if not is_ac_alter_target(target):
-                _check_alter_target(step["name"], target, supply_targets, waveforms)
+                _check_alter_target(
+                    step["name"], target, supply_targets, waveforms, value
+                )
     step_targets = sorted(
         {
             target
@@ -749,7 +787,11 @@ def _check_ac_alter_targets_exist(analysis: dict[str, Any], netlist_path: str) -
 
 
 def _check_alter_target(
-    step: str, target: str, supply_targets: set[str], waveforms: dict[str, str]
+    step: str,
+    target: str,
+    supply_targets: set[str],
+    waveforms: dict[str, str],
+    value: Any = None,
 ) -> None:
     if target.lower() in supply_targets:
         raise _error(
@@ -759,11 +801,27 @@ def _check_alter_target(
             "from corners.supply_v"
         )
     waveform = waveforms.get(target.lower())
+    if isinstance(value, dict):
+        if waveform != "pwl":
+            declared = (
+                f"a {waveform.upper()} waveform" if waveform else "no PWL waveform"
+            )
+            raise _error(
+                f"step {step!r}: alter target {target!r} is declared with "
+                f'{declared}; the {{"pwl": [...]}} form only retargets a '
+                "V/I source the netlist declares with a pwl(...) waveform"
+            )
+        return
     if waveform is not None:
+        hint = (
+            ' -- pass {"pwl": [t0, v0, ...]} to give this step its own vector'
+            if waveform == "pwl"
+            else " -- declare it as a plain DC value"
+        )
         raise _error(
             f"step {step!r}: alter target {target!r} is declared with an "
             f"explicit {waveform.upper()} waveform, and ngspice's alter has no "
-            "effect on it -- declare it as a plain DC value"
+            f"effect on it{hint}"
         )
 
 
@@ -803,6 +861,9 @@ def control_lines(
                 lines.append(
                     f"alter {target[: -len(_AC_SUFFIX)]} ac = {_format_value(value)}"
                 )
+            elif isinstance(value, dict):
+                vector = " ".join(_format_value(v) for v in value["pwl"])
+                lines.append(f"alter @{target}[pwl] = [ {vector} ]")
             else:
                 lines.append(f"alter {target}={_format_value(value)}")
         lines.append("setplot new")

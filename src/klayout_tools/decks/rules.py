@@ -175,6 +175,22 @@ class DerivedLayer:
     ``intersect_with`` alone, and vice versa. ``intersect_with`` is
     required for this mode.
 
+    **``"gate_endcap"`` mode (issue #2936).** A rule on how far one layer
+    must *extend past* another's edge where the two cross -- sky130's
+    ``poly.8`` ("min. poly extention gate (endcap)", 0.13 um), the poly
+    beyond a diffusion edge at a transistor. No enclosing/space primitive
+    expresses it: measuring the gate (``poly & diff``) against poly also
+    reports the gate's long sides, which are coincident with poly's own
+    edges. ``"gate_endcap"`` derives, instead, the *probe zones*: each
+    ``base`` (diffusion) edge segment lying under or flush with
+    ``intersect_with`` (poly) is a gate end edge, and the zone is that edge
+    pushed outward by ``sized_by_um`` (the required extension). Pair it
+    with ``check="enclosed"``, ``other_layer=<the poly layer>`` and
+    ``threshold_dbu=0``: the engine's outside-region term then reports
+    exactly the part of each zone poly fails to cover, including a flush
+    (zero-extension) end. Orientation-free (a rotated gate works the same),
+    and poly that merely abuts a diffusion from outside is not a gate.
+
     **Well-context partition (issue #3484).** Any mode above can be followed
     by a second, optional stage that keeps only the part of the derived
     region that is ``"near"`` or ``"far"`` from a *context* region:

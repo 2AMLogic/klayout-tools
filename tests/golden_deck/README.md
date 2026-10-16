@@ -72,7 +72,8 @@ tests/golden_deck/
                             # pairs in tests/test_drc.py instead; grown from
                             # 14 to 32 by issue #1247's extended
                             # metals/vias-to-TopMetal2 stack)
-  sg13cmos5l/manifest.json # 27 entries (issue #1400, width/space/enclosing
+  sg13cmos5l/manifest.json # 29 entries (+2 for issue #3012's
+                            # nwell.width.1/nwell.space.1; issue #1400, width/space/enclosing
                             # on Activ/GatPoly/Metal1; issue #1417 extends
                             # coverage to the Metal2-TopMetal1 stack's width/
                             # space rules plus every via level's width/space/
