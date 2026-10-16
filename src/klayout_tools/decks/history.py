@@ -372,7 +372,9 @@ def deck_info(name: str | None = None) -> dict[str, Any]:
 #: ``"ongrid"``/``"angle"`` (issue #2642) are the vertex check kinds: a grid
 #: in micrometres and a minimum interior corner angle in degrees, neither of
 #: them a ``threshold_dbu`` distance either.
-_NON_DISTANCE_CHECKS = frozenset({"area", "density", "antenna", "ongrid", "angle"})
+_NON_DISTANCE_CHECKS = frozenset(
+    {"area", "density", "antenna", "ongrid", "angle", "comp_coverage"}
+)
 
 
 def deck_rules(name: str, rule_id: str | None = None) -> dict[str, Any]:
@@ -435,6 +437,21 @@ def deck_rules(name: str, rule_id: str | None = None) -> dict[str, Any]:
       (:class:`~klayout_tools.decks.rules.RuleProvenance` as a dict), or
       ``None`` when the rule carries no structured provenance yet (its
       inline comment remains the only record).
+    - ``layer_refs`` -- parallel to ``layers`` (issue #3092): one
+      ``{"name": str | None, "layer": int, "datatype": int}`` per entry, so a
+      rule's layers map to stream layer/datatype pairs without importing the
+      deck module. ``name`` is ``None`` when the deck publishes none (the
+      matching ``layers`` entry is then the raw ``"L/D"`` string).
+
+    Top-level, pinned by ``content_hash`` like the rules:
+
+    - ``layer_table`` -- every ``{"name", "layer", "datatype"}`` the deck
+      names, sorted by ``(layer, datatype)``.
+    - ``ambiguous_names`` -- ``[{"name", "pairs": [{"layer", "datatype"}]}]``
+      for each name the deck gives to more than one pair (those pairs also
+      appear individually in ``layer_table``); sorted by name.
+    - ``unresolved`` -- ``[{"layer", "datatype", "rules": [id]}]`` for each
+      pair the (selected) rules read that has no deck name; sorted.
     """
     # Imported lazily for the same circular-import reason `deck_info` is --
     # see its own note.
@@ -472,6 +489,7 @@ def deck_rules(name: str, rule_id: str | None = None) -> dict[str, Any]:
         "content_hash": f"sha256:{digest}" if digest is not None else None,
         "nominal_dbu_um": nominal_dbu,
         "rules": [_project_rule(rule, nominal_dbu, layer_names) for rule in rules],
+        **_layer_table_fields(rules, layer_names),
     }
 
 
@@ -522,16 +540,27 @@ def deck_devices(name: str, device_class: str | None = None) -> dict[str, Any]:
     - ``kind`` -- the recognition family (``"mos"``, ``"bipolar"``,
       ``"capacitor"``, ``"mom_capacitor"``, ``"resistor"``, ``"diode"``).
     - ``marker`` -- the class's device-recognition marker layer, or ``None``
-      for a markerless (geometry-driven) class.
+      for a markerless (geometry-driven) class or one whose marker is a
+      derived expression.
+    - ``marker_expression`` -- ``None`` unless the marker is a derived
+      :class:`~klayout_tools.decks.LayerExpr` (issue #2860), in which case
+      it is ``{op, name, operands}`` with each operand a layer object or a
+      nested node of the same shape. Its leaves are folded into
+      ``required_layers`` (under an even number of ``"not"`` subtractions)
+      or ``excluded_layers`` (under an odd number).
     - ``marker_gated`` / ``predicate_gated`` -- booleans, so "which classes
       need something beyond their own conductor/diffusion geometry" is
       answerable by filtering rather than by prose. ``marker_gated`` is
-      ``marker is not None``; ``predicate_gated`` is ``True`` when any
-      terminal declares a non-empty ``requires``.
+      ``True`` when ``marker`` or ``marker_expression`` is set;
+      ``predicate_gated`` is ``True`` when any terminal declares a non-empty
+      ``requires``.
     - ``terminals`` -- one entry per recognised terminal, each
-      ``{name, layer, requires, excludes}``. ``layer`` is ``None`` for a
-      terminal formed by the substrate rather than by a drawn mask (e.g.
-      ``diode_nd2ps_06v0``'s anode).
+      ``{name, layer, requires, excludes, relation}``. ``layer`` is ``None``
+      for a terminal formed by the substrate rather than by a drawn mask
+      (e.g. ``diode_nd2ps_06v0``'s anode). ``relation`` (issue #2863) is
+      ``None`` unless the terminal is selected by geometric interaction with
+      another terminal of the same device, then ``{"source", "op",
+      "extents"}`` -- see :class:`~klayout_tools.decks.TerminalRelation`.
     - ``required_layers`` / ``excluded_layers`` -- the flattened union, in
       first-mention order: every layer that must be drawn over the geometry
       for this class to be recognised, and every layer whose presence
@@ -610,13 +639,49 @@ def _terminal_entry(
     requires: tuple[tuple[int, int], ...],
     excludes: tuple[tuple[int, int], ...],
     layer_names: dict[tuple[int, int], str],
+    relation: Any = None,
 ) -> dict[str, Any]:
-    """One terminal of a device class, in :func:`deck_devices`' shape."""
+    """One terminal of a device class, in :func:`deck_devices`' shape.
+
+    ``relation`` is the terminal's
+    :class:`~klayout_tools.decks.TerminalRelation` (issue #2863) -- reported
+    as ``{"source", "op", "extents"}`` so two entries differing only in a
+    relation project differently -- or ``None`` (``null``) for a terminal
+    defined by its static layer/``requires``/``excludes`` alone, which is
+    every terminal of every non-bipolar class.
+    """
     return {
         "name": name,
         "layer": _layer_entry(layer, layer_names),
         "requires": [_layer_entry(pair, layer_names) for pair in requires],
         "excludes": [_layer_entry(pair, layer_names) for pair in excludes],
+        "relation": (
+            None
+            if relation is None
+            else {
+                "source": relation.source,
+                "op": relation.op,
+                "extents": relation.extents,
+            }
+        ),
+    }
+
+
+def _marker_expression_entry(
+    expr: Any, layer_names: dict[tuple[int, int], str]
+) -> dict[str, Any]:
+    """A :class:`~klayout_tools.decks.LayerExpr` as :func:`deck_devices`'
+    ``marker_expression`` object (issue #2860): ``{op, name, operands}``,
+    each operand either a layer object or another such node."""
+    return {
+        "op": expr.op,
+        "name": expr.name or None,
+        "operands": [
+            _layer_entry(operand, layer_names)
+            if isinstance(operand, tuple)
+            else _marker_expression_entry(operand, layer_names)
+            for operand in expr.operands
+        ],
     }
 
 
@@ -624,7 +689,7 @@ def _device_class_entry(
     *,
     name: str,
     kind: str,
-    marker: tuple[int, int] | None,
+    marker: Any,
     terminals: list[dict[str, Any]],
     layer_names: dict[tuple[int, int], str],
     provenance: Any = None,
@@ -645,8 +710,20 @@ def _device_class_entry(
             return
         bucket.append(entry)
 
-    marker_entry = _layer_entry(marker, layer_names)
-    add(required, marker_entry)
+    marker_expression: dict[str, Any] | None = None
+    if marker is None or isinstance(marker, tuple):
+        marker_entry = _layer_entry(marker, layer_names)
+        add(required, marker_entry)
+    else:
+        # A derived `LayerExpr` marker (issue #2860): no single layer to
+        # report as `marker`, so the tree goes in `marker_expression` and its
+        # leaves feed the flattened unions by polarity.
+        marker_entry = None
+        marker_expression = _marker_expression_entry(marker, layer_names)
+        for pair in marker.required_layers():
+            add(required, _layer_entry(pair, layer_names))
+        for pair in marker.excluded_layers():
+            add(excluded, _layer_entry(pair, layer_names))
     predicate_gated = False
     for terminal in terminals:
         add(required, terminal["layer"])
@@ -660,7 +737,8 @@ def _device_class_entry(
         "name": name,
         "kind": kind,
         "marker": marker_entry,
-        "marker_gated": marker_entry is not None,
+        "marker_expression": marker_expression,
+        "marker_gated": marker_entry is not None or marker_expression is not None,
         "predicate_gated": predicate_gated,
         "terminals": terminals,
         "required_layers": required,
@@ -745,15 +823,30 @@ def _project_device_classes(
         # when the entry declares it, so every deck predating that field
         # diffs identically.
         terminals = [
-            _terminal_entry("base", bipolar.base, (), (), layer_names),
+            _terminal_entry(
+                "base",
+                bipolar.base,
+                (),
+                (),
+                layer_names,
+                bipolar.base_relation,
+            ),
             _terminal_entry(
                 "emitter",
                 bipolar.emitter,
                 bipolar.emitter_requires,
                 bipolar.emitter_excludes,
                 layer_names,
+                bipolar.emitter_relation,
             ),
-            _terminal_entry("collector", bipolar.collector, (), (), layer_names),
+            _terminal_entry(
+                "collector",
+                bipolar.collector,
+                (),
+                (),
+                layer_names,
+                bipolar.collector_relation,
+            ),
         ]
         if bipolar.substrate is not None:
             terminals.append(
@@ -831,6 +924,11 @@ def _project_device_classes(
                 ],
                 layer_names=layer_names,
                 provenance=resistor.provenance,
+                # Issue #2679: how `body` relates to `marker`. Under
+                # "abutting_heads" the `requires`/`excludes` above narrow
+                # the *marker* region (the resistive body itself), and the
+                # `body` layer only has to abut it as two separate heads.
+                extra={"topology": resistor.topology},
             )
         )
 
@@ -878,6 +976,14 @@ def _project_rule(
         "description": rule.description,
         "check": rule.check,
         "layers": _rule_layers(rule, layer_names),
+        "layer_refs": [
+            {
+                "name": layer_names.get(pair) or None,
+                "layer": pair[0],
+                "datatype": pair[1],
+            }
+            for pair in _rule_pairs(rule)
+        ],
         "scope": rule.scope or None,
         "value_um": _scaled(rule.threshold_dbu, nominal_dbu) if is_distance else None,
         "value_dbu": rule.threshold_dbu if is_distance else None,
@@ -899,10 +1005,57 @@ def _rule_layers(rule: DrcRule, layer_names: dict[tuple[int, int], str]) -> list
     """The drawn layer name(s) a rule reads, in ``layer``/``other_layer``
     order -- the deck's published name when it has one, else the raw
     ``"<layer>/<datatype>"`` pair so the entry is never empty."""
+    return [
+        layer_names.get(pair) or f"{pair[0]}/{pair[1]}" for pair in _rule_pairs(rule)
+    ]
+
+
+def _rule_pairs(rule: DrcRule) -> list[tuple[int, int]]:
+    """The ``(layer, datatype)`` pair(s) a rule reads, in ``layer``/
+    ``other_layer`` order."""
     pairs = [rule.layer]
     if rule.other_layer is not None:
         pairs.append(rule.other_layer)
-    return [layer_names.get(pair) or f"{pair[0]}/{pair[1]}" for pair in pairs]
+    if rule.region_spec is not None:
+        pairs.extend(rule.region_spec.layers())
+    return pairs
+
+
+def _layer_table_fields(
+    rules: list[DrcRule], layer_names: dict[tuple[int, int], str]
+) -> dict[str, Any]:
+    """The ``layer_table`` / ``ambiguous_names`` / ``unresolved`` fields of
+    :func:`deck_rules` (issue #3092)."""
+    by_name: dict[str, list[tuple[int, int]]] = {}
+    for pair in sorted(layer_names):
+        by_name.setdefault(layer_names[pair], []).append(pair)
+
+    unresolved: dict[tuple[int, int], list[str]] = {}
+    for rule in rules:
+        for pair in _rule_pairs(rule):
+            if not layer_names.get(pair):
+                ids = unresolved.setdefault(pair, [])
+                if rule.id not in ids:
+                    ids.append(rule.id)
+
+    return {
+        "layer_table": [
+            {"name": layer_names[pair], "layer": pair[0], "datatype": pair[1]}
+            for pair in sorted(layer_names)
+        ],
+        "ambiguous_names": [
+            {
+                "name": layer_name,
+                "pairs": [{"layer": p[0], "datatype": p[1]} for p in pairs],
+            }
+            for layer_name, pairs in sorted(by_name.items())
+            if len(pairs) > 1
+        ],
+        "unresolved": [
+            {"layer": pair[0], "datatype": pair[1], "rules": ids}
+            for pair, ids in sorted(unresolved.items())
+        ],
+    }
 
 
 def _rule_limits(rule: DrcRule, nominal_dbu: float) -> dict[str, Any]:

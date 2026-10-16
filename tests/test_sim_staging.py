@@ -814,3 +814,17 @@ def test_netlist_closure_missing_include_raises(tmp_path):
     (tmp_path / "top.spice").write_text(".include nope.spice\n")
     with pytest.raises(st.IncludeStagingError):
         st.netlist_closure({}, str(tmp_path / "top.spice"))
+
+
+def test_tilde_and_quoted_env_targets_still_host_resolved_off_host(tmp_path):
+    """Issue #2926: expansion happens on the executing host only; the
+    off-host stager leaves `$VAR` includes (quoted or `.inc`) verbatim."""
+    netlist = _write(
+        tmp_path, "tb.spice", ".inc ${INCDIR}/a.sp\n.include '$INCDIR/b.sp'\n"
+    )
+
+    staged = _stage(netlist)
+
+    assert staged.includes == ()
+    assert staged.netlist.local_path == str(netlist)
+    assert set(staged.host_resolved) == {"${INCDIR}/a.sp", "$INCDIR/b.sp"}

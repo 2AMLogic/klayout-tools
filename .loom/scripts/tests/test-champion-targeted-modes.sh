@@ -75,6 +75,7 @@ cat > "$TMP/bin/loom-daemon" <<S
 #!/usr/bin/env bash
 case "\$*" in
   "forge merge-queue step "*) printf '%s\n' "\$*" >> "$TMP/queue-argv"; echo LOOM-MERGE-QUEUE-DIRECT; exit 0 ;;
+  "champion-hold classify "*) echo "LOOM-CHAMPION-HOLD state=clear pr=42 detail=-"; exit 0 ;;
 esac
 exit 99
 S
@@ -97,11 +98,11 @@ run_step3() { # [EXPECTED_HEAD]
 }
 
 run_step3
-check "batch: merge-pr.sh argv is exactly today's" eval '[[ "$MARGV" == "42 --auto --redate-stale-checks" ]]'
+check "batch: merge-pr.sh argv is exactly today's" eval '[[ "$MARGV" == "42 --auto" ]]'
 check "batch: the head comes from Step 3's own read" eval '[[ -s "$TMP/gh-calls" ]] && [[ "$QARGV" == *"--approved-sha 1111111111111111111111111111111111111111"* ]]'
 
 run_step3 "$EVAL_SHA"
-check "--pr N: merge-pr.sh gets --expected-head <evaluated sha>" eval '[[ "$MARGV" == "42 --auto --redate-stale-checks --expected-head $EVAL_SHA" ]]'
+check "--pr N: merge-pr.sh gets --expected-head <evaluated sha>" eval '[[ "$MARGV" == "42 --auto --expected-head $EVAL_SHA" ]]'
 check "--pr N: the queue authorizes the evaluated sha, not a fresh read" eval '[[ "$QARGV" == *"--approved-sha $EVAL_SHA"* ]] && [[ ! -s "$TMP/gh-calls" ]]'
 check "--pr N, merged: outcome rc=0" has "CHAMPION-MERGE-OUTCOME pr=42 rc=0"
 
@@ -128,11 +129,36 @@ run_step3 1111111111111111111111111111111111111111
 check "pin file + a DIFFERENT EXPECTED_HEAD: no merge" eval '[[ ! -e "$TMP/merge-argv" ]] && has CHAMPION-PIN-MISSING'
 run_step3 "$EVAL_SHA"
 check "pin file + the literal pinned SHA: merges pinned" \
-  eval '[[ "$MARGV" == "42 --auto --redate-stale-checks --expected-head $EVAL_SHA" ]] && hasnt CHAMPION-PIN-MISSING'
+  eval '[[ "$MARGV" == "42 --auto --expected-head $EVAL_SHA" ]] && hasnt CHAMPION-PIN-MISSING'
 touch -t 202001010000 "$PIN_FILE"
 run_step3
 check "a pin file over 60 minutes old (a crashed step) no longer blocks the batch merge" \
-  eval '[[ "$MARGV" == "42 --auto --redate-stale-checks" ]] && hasnt CHAMPION-PIN-MISSING'
+  eval '[[ "$MARGV" == "42 --auto" ]] && hasnt CHAMPION-PIN-MISSING'
+# #11902: the pin records its step's agent process ($PPID); while that runs, a
+# step longer than 60 minutes keeps its backstop (up to 24h).
+sleep 600 & LIVE_PID=$!
+( exit 0 ) & DEAD_PID=$!; wait "$DEAD_PID"
+two_hours_ago() { touch -t "$(date -r $(( $(date +%s) - 7200 )) +%Y%m%d%H%M 2>/dev/null || date -d @$(( $(date +%s) - 7200 )) +%Y%m%d%H%M)" "$PIN_FILE"; }
+printf '%s %s\n' "$EVAL_SHA" "$LIVE_PID" > "$PIN_FILE"; two_hours_ago
+run_step3
+check "a 2h-old pin whose step process still runs (a long --pr step) still refuses an unpinned merge" \
+  eval '[[ ! -e "$TMP/merge-argv" ]] && has "CHAMPION-PIN-MISSING pr=42: set EXPECTED_HEAD=$EVAL_SHA"'
+run_step3 "$EVAL_SHA"
+check "the long step's literal pin still merges pinned" \
+  eval '[[ "$MARGV" == "42 --auto --expected-head $EVAL_SHA" ]]'
+printf '%s %s\n' "$EVAL_SHA" "$DEAD_PID" > "$PIN_FILE"; two_hours_ago
+run_step3
+check "a 2h-old pin whose step process is gone (a crashed step) does not block the batch merge" \
+  eval '[[ "$MARGV" == "42 --auto" ]] && hasnt CHAMPION-PIN-MISSING'
+printf '%s %s\n' "$EVAL_SHA" "$LIVE_PID" > "$PIN_FILE"; touch -t 202001010000 "$PIN_FILE"
+run_step3
+check "a live process cannot hold a pin past 24h (pid reuse)" \
+  eval '[[ "$MARGV" == "42 --auto" ]] && hasnt CHAMPION-PIN-MISSING'
+printf '%s %s\n' "$EVAL_SHA" "$LIVE_PID" > "$PIN_FILE"
+run_step3
+check "a fresh pin with a recorded pid reads the SHA alone" \
+  eval 'has "CHAMPION-PIN-MISSING pr=42: set EXPECTED_HEAD=$EVAL_SHA in this block"'
+kill "$LIVE_PID" 2>/dev/null; wait "$LIVE_PID" 2>/dev/null
 rm -f "$PIN_FILE"
 
 # ---------------------------------------------------------------------------
@@ -156,6 +182,7 @@ check "an unknown or doubled argument refuses and touches nothing" \
   doc_has "$TARGETED_MD" 'Error: /loom:champion takes --pr N, --issue N or --non-item'
 # --pr N
 check "--pr: writes the pin file only for an eligible PR" doc_has "$TARGETED_MD" '[ -n "$EVALUATED_SHA" ] && printf'
+check "--pr: the pin records the step's agent process (#11902)" doc_has "$TARGETED_MD" '"$EVALUATED_SHA" "$PPID" > "$PIN_FILE"'
 check "--pr: Step 3 must carry the SHA literally (env does not survive tool calls)" \
   doc_has "$TARGETED_MD" 'first line must be `EXPECTED_HEAD=<that SHA, written out literally>`'
 check "--pr: a lost pin is outcome requeued, never merged" doc_has "$TARGETED_MD" '9 (`CHAMPION-PIN-MISSING`): not merged, still approved, no "Merge Failed"'
@@ -177,22 +204,24 @@ check "--issue: the four terminal verdicts plus closed and not-eligible, no defe
   eval '[[ "$VERDICTS" == "promoted revise blocked operator closed not-eligible " ]]'
 check "--issue: revise sends the issue to Curator as loom:triage without loom:curated (#11860)" \
   doc_has "$TARGETED_MD" '`loom:curated` and the claim removed, `loom:triage` added'
-check "--issue: a blocked issue is re-evaluated only once its blocker has closed (#11860)" \
-  doc_has "$TARGETED_MD" 'or a merged PR, remove `loom:blocked` and go on; else outcome `blocked`'
+check "--issue: a blocked issue is lifted only once its blocker has closed (#11860)" \
+  doc_has "$TARGETED_MD" 'body is a closed issue or a merged PR, remove `loom:blocked` and go on.'
+check "--issue: a still-blocked issue is left untouched, outcome blocked (#12078)" \
+  doc_has "$TARGETED_MD" 'Otherwise leave the issue exactly as it is (no comment, no label change,'
 # --non-item
 NONITEM="$(awk '/^## `--non-item`/{on=1} on' "$TARGETED_MD")"
 out="$NONITEM"
-check "--non-item: names the role-runner knob that launches it" has 'autonomous.roleRunner.championMode: "non-item"'
+check "--non-item: says the role runner launches every interval run this way" has 'The role runner launches every interval and idle-edge Champion run this way'
 for q in "Pass 0b, Pass 0c" "Priority 3: architect, hermit and auditor proposals" "Priority 4: epic proposals" \
          "Priority 5: Doctor-cycle-capped PRs" "Rollout Check Pass" "Held-PR Census and Per-PR Digest"; do
   check "--non-item runs: $q" has "$q"
 done
 check "--non-item skips Priority 1 (loom:pr merges) and Priority 2 (curated)" \
   has '**Skipped:** Priority 1 (`pr-queue --role champion`, every merge, the Held-PR'
-check "--non-item: never claims, evaluates or writes a verdict on a curated issue; writes nothing on a loom:pr PR" \
+check "--non-item: never claims, evaluates or writes a verdict on a curated proposal (epics stay Priority 4's); writes nothing on a loom:pr PR" \
   has 'It never
-claims, evaluates or writes a verdict on one, and it writes nothing on a
-`loom:pr` PR'
+claims, evaluates or writes a verdict on a curated proposal (epics are
+Priority 4'"'"'s), and it writes nothing on a `loom:pr` PR'
 check "--non-item: the census line is still mandatory" has '`Merge-risk holds:` line is still mandatory'
 
 echo "Results: $PASS passed, $FAIL failed"

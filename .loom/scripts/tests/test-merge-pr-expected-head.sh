@@ -97,6 +97,7 @@ if ! grep -q -- '--expected-head)' "$PARSE"; then echo "FATAL: could not extract
 run_parse() {
     set +e
     LAST_OUT="$( (PR_NUMBER=""; EXPECTED_HEAD_SHA=""; ALLOW_RED_REQUIRED=()
+        warning() { echo "WARN: $*" >&2; }
         # shellcheck disable=SC1090
         source "$PARSE"; echo "PIN=$EXPECTED_HEAD_SHA PR=$PR_NUMBER") 2>&1 )"; LAST_RC=$?
     set -e
@@ -108,6 +109,11 @@ set -- --expected-head "$SHA_256" 7 --auto; run_parse "$@"
 assert_contains "$LAST_OUT" "PIN=$SHA_256 PR=7" "64-hex (SHA-256 repo) is accepted, in any position"
 set -- 7 --auto; run_parse "$@"
 assert_contains "$LAST_OUT" "PIN= PR=7" "no flag: no pin"
+# --redate-stale-checks was removed outright (#12063): an unresynced caller
+# that still passes it is refused, never silently merged.
+set -- 7 --auto --redate-stale-checks --expected-head "$SHA_A"; run_parse "$@"
+assert_eq 1 "$LAST_RC" "--redate-stale-checks is refused (removed, #12063)"
+assert_contains "$LAST_OUT" "Unknown option: --redate-stale-checks" "--redate-stale-checks: says why"
 for bad in "${SHA_A:0:12}" "$(tr a A <<<"$SHA_A")" "${SHA_A}0" "--auto"; do
     set -- 7 --expected-head "$bad"; run_parse "$@"
     assert_eq 1 "$LAST_RC" "rejected value '${bad:0:16}': exit 1"
@@ -158,8 +164,9 @@ assert_contains "$(sed -n "${PRE_LINE}p" "$MERGE_PR_SRC")" 'MERGE_PRECONDITION_S
 # ---------------------------------------------------------------------------
 echo "Part 5: the #8164 self-sync retry is declined under the pin"
 # head-sync-retry authorizes a retry from the new head's PARENTS only, never
-# its tree, so under --expected-head merge-pr.sh must pass --retry-used and
-# exit 3: the pinned caller re-evaluates the new head instead.
+# its tree, so under --expected-head merge-pr.sh refuses the retry the verb
+# would allow and exits 3: the pinned caller re-evaluates the new head instead.
+# #11902: the refusal names the pin, not a spent retry budget.
 RETRY="$WORK/retry.sh"
 awk '/^_head_moved_or_resync\(\) \{$/ { on=1 } on { print } on && /^\}$/ { exit }' "$MERGE_PR_SRC" > "$RETRY"
 if ! grep -q 'merge-pr head-sync-retry' "$RETRY"; then echo "FATAL: could not extract _head_moved_or_resync" >&2; exit 2; fi
@@ -167,12 +174,13 @@ if ! grep -q 'merge-pr head-sync-retry' "$RETRY"; then echo "FATAL: could not ex
 source "$RETRY"
 info() { echo "INFO: $*"; }; warning() { echo "WARN: $*" >&2; }
 error_head_moved() { echo "HEAD-MOVED: $1" >&2; exit 3; }
-# Stub daemon: authorizes the retry unless told --retry-used (the real verb's contract).
+# Stub daemon: authorizes the retry unless told --retry-used, then says the
+# budget is spent (the real verb's contract and wording).
 cat > "$WORK/daemon" <<STUB
 #!/usr/bin/env bash
 printf '%s\n' "\$*" > "$WORK/retry-argv"
 cat >/dev/null
-case " \$* " in *" --retry-used "*) exit 1 ;; esac
+case " \$* " in *" --retry-used "*) echo "the single re-read-and-retry is already spent"; exit 1 ;; esac
 echo "LOOM-HEAD-SELF-SYNC-RETRY $SHA_B"
 STUB
 chmod +x "$WORK/daemon"
@@ -190,7 +198,9 @@ assert_not_contains "$(cat "$WORK/retry-argv")" "--retry-used" "no pin: --retry-
 run_retry "$SHA_A"
 assert_eq 3 "$LAST_RC" "pinned: the retry is declined and the run exits 3"
 assert_not_contains "$LAST_OUT" "RETRY-ADOPTED" "pinned: the synced head is never adopted"
-assert_contains "$(cat "$WORK/retry-argv")" "--retry-used" "pinned: --retry-used is passed to head-sync-retry"
+assert_contains "$LAST_OUT" "the --expected-head pin forbids the #8164 retry" "pinned: the refusal names the pin (#11902)"
+assert_contains "$LAST_OUT" "new head $SHA_B was never evaluated" "pinned: the refusal names the unevaluated head"
+assert_not_contains "$LAST_OUT" "already spent" "pinned: a first retry is never reported as an already-spent budget (#11902)"
 
 echo
 echo "Tests run: $TESTS_RUN, passed: $TESTS_PASSED, failed: $TESTS_FAILED"

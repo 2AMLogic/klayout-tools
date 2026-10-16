@@ -111,6 +111,7 @@ def test_registry_shape():
     assert set(PATH_ONLY_KEYS_BY_VERB) == {"drc", "extract"}
     assert {("file",), ("netlist_path",)} <= EXTRACT_PATH_ONLY_PATHS
     assert ("file",) in DRC_PATH_ONLY_PATHS
+    assert ("timing",) in EXTRACT_PATH_ONLY_PATHS
     assert all(isinstance(p, tuple) and p for p in EXTRACT_PATH_ONLY_PATHS)
 
 

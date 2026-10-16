@@ -34,7 +34,8 @@
       "55/0",
       "75/0",
       "81/0",
-      "127/5"
+      "127/5",
+      "241/0"
     ],
     "layers_checked": [
       "22/0",
@@ -45,6 +46,7 @@
     ],
     "layers_in_stream_without_rules": [],
     "rules_checked": [
+      "comp.coverage.1",
       "comp.enclosing.contact.1",
       "comp.space.1",
       "comp.width.1",
@@ -87,10 +89,12 @@
       "mim.enclosing.via4.1",
       "mim.space.1",
       "nplus.space.pcomp.1",
+      "nplus.space.pcomp.far.1",
       "nwell.enclosing.comp.1",
       "nwell.space.1",
       "pad.enclosing.metal5.1",
       "pplus.enclosing.comp.1",
+      "pplus.enclosing.comp.far.1",
       "pplus.enclosing.poly2.1",
       "pplus.space.1",
       "pplus.space.ncomp.1",
@@ -105,6 +109,7 @@
       "via4.width.1"
     ],
     "voltage_domain_warnings": [],
+    "unchecked_rules": [],
     "deck_scope": [
       "10.4.2 MIM Option B",
       "10.7 DRC_BJT Mark Layer",
@@ -122,6 +127,7 @@
     "schema_version": 1,
     "known": true,
     "checked": [
+      "comp.coverage.1",
       "comp.enclosing.contact.1",
       "comp.space.1",
       "comp.width.1",
@@ -241,6 +247,10 @@
         "reason": "no_applicable_geometry"
       },
       {
+        "id": "nplus.space.pcomp.far.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
         "id": "nwell.enclosing.comp.1",
         "reason": "no_applicable_geometry"
       },
@@ -254,6 +264,10 @@
       },
       {
         "id": "pplus.enclosing.comp.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "pplus.enclosing.comp.far.1",
         "reason": "no_applicable_geometry"
       },
       {

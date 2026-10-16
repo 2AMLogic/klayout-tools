@@ -103,7 +103,7 @@ def run(args: argparse.Namespace) -> int:
             args = _apply_request(args)
         report = _run(args)
     except DrcError as exc:
-        return emit_error("drc", str(exc), args.format)
+        return emit_error("drc", str(exc), args.format, code=exc.code)
     except pdk_module.PdkNotFoundError as exc:
         return emit_error("drc", str(exc), args.format)
 
@@ -162,6 +162,15 @@ def _non_default_flags(
 
 
 def _run_check(args: argparse.Namespace) -> int:
+    if args.waivers is not None:
+        # Issue #3483: like --rules, the waivers a report was run with are
+        # recorded in its provenance and replayed by `--check --rerun`.
+        return emit_error(
+            "drc",
+            "--waivers cannot be combined with --check: --check --rerun "
+            "replays the committed report's own recorded waivers file",
+            args.format,
+        )
     if args.rules is not None:
         # Issue #2768: `--check` verifies a committed report as it was run;
         # `--rerun` replays that report's own recorded `rule_selection`, so a
@@ -208,9 +217,12 @@ _REQUEST_FIELD_DESTS = {
     "expect_rule_categories": "expect_rule_categories",
     "expect_rule_categories_file": "expect_rule_categories_file",
     "min_klayout_version": "min_klayout_version",
+    "negative_control": "negative_control",
+    "negative_control_categories": "negative_control_categories",
     "pdk": "pdk",
     "pdk_root": "pdk_root",
     "rules": "rules",
+    "waivers_file": "waivers",
 }
 
 
@@ -219,8 +231,8 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
     its fields in place of the argv flags they mirror (issue #1867).
 
     Relative paths inside the document (``file``, ``deck_file``, ``pdk_root``,
-    ``expect_rule_categories_file``) resolve against the document's own
-    directory for the file form, or the current working directory for the
+    ``expect_rule_categories_file``, ``waivers_file``) resolve against the
+    document's own directory for the file form, or the current working directory for the
     stdin/inline forms -- ``klt lvs``'s convention, implemented by the same
     shared helper.
     """
@@ -276,9 +288,15 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             # directory, like every other path field.
             "expect_rule_categories_file": _path("expect_rule_categories_file"),
             "min_klayout_version": _str("min_klayout_version"),
+            # Issue #3076: resolved against the request document's own
+            # directory, like every other path field.
+            "negative_control": _path("negative_control"),
+            "negative_control_categories": _str("negative_control_categories"),
             "pdk": _str("pdk"),
             "pdk_root": _path("pdk_root"),
             "rules": _request_rules(request),
+            # Issue #3483: resolved against the request document's directory.
+            "waivers": _path("waivers_file"),
         }
     )
 
@@ -317,6 +335,12 @@ def _expect_rule_categories(request: dict) -> int | None:
 
 def _run(args: argparse.Namespace) -> dict:
     if args.engine == "klayout":
+        if args.waivers is not None:
+            raise DrcError(
+                "--waivers is not supported with --engine klayout: waivers "
+                "match a marker's source_cell, which only the curated engine "
+                "attributes (see docs/cli/drc.md, 'Waivers')"
+            )
         if args.rules is not None:
             # Issue #2768: a native runset's rules are not the curated
             # registry `--rules` resolves against (#2806 tracks native
@@ -348,6 +372,8 @@ def _run(args: argparse.Namespace) -> dict:
             expected_rule_categories=args.expect_rule_categories,
             min_klayout_version=args.min_klayout_version,
             expected_rule_category_names=_expected_rule_category_names(args),
+            negative_control=args.negative_control,
+            negative_control_categories=_negative_control_categories(args),
         )
 
     if not args.deck:
@@ -363,7 +389,24 @@ def _run(args: argparse.Namespace) -> dict:
         pdk_variant=args.pdk,
         pdk_root=args.pdk_root,
         rules=selectors,
+        waivers_file=args.waivers,
     )
+
+
+def _negative_control_categories(args: argparse.Namespace) -> list[str] | None:
+    """Split ``--negative-control-categories`` (issue #3076) into names;
+    refused without ``--negative-control`` rather than silently ignored."""
+    raw = args.negative_control_categories
+    if raw is None:
+        return None
+    if args.negative_control is None:
+        raise DrcError(
+            "--negative-control-categories requires --negative-control <layout>"
+        )
+    names = sorted({name.strip() for name in raw.split(",") if name.strip()})
+    if not names:
+        raise DrcError("--negative-control-categories names no category")
+    return names
 
 
 def _expected_rule_category_names(args: argparse.Namespace) -> list[str] | None:
@@ -527,6 +570,10 @@ def _print_text(report: dict) -> None:
         for line in deck_errors["error_lines"]:
             print(f"  {line}")
     print(f"violations: {report['violation_count']}")
+    if "waived_count" in report:
+        print(f"waived: {report['waived_count']}")
+        for waiver in report["unused_waivers"]:
+            print(f"  unused waiver: {waiver['cell']} / {waiver['rule']}")
     _print_rule_selection(report.get("rule_selection"))
     _print_coverage_assertion(report.get("coverage_assertion"))
     _print_coverage_gaps(report["coverage"])

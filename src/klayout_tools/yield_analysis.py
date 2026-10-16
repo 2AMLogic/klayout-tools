@@ -39,6 +39,7 @@ module of its own, so both inputs go through the same sim-report reader
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import math
@@ -94,9 +95,12 @@ def _load_json(path: str, what: str) -> Any:
     if os.path.isdir(path):
         raise YieldError(f"not a file: {path}")
     try:
-        with open(path) as f:
+        with open(path, "rb") as raw:
+            gzipped = raw.read(2) == b"\x1f\x8b"
+        opener = gzip.open if gzipped else open
+        with opener(path, "rt", encoding="utf-8") as f:
             return json.load(f)
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, EOFError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise YieldError(f"could not read {what} '{path}': {exc}") from exc
 
 

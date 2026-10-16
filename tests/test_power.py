@@ -1478,6 +1478,8 @@ def test_cli_json_contract(tmp_path, capsys):
         # declaration subtracted, empty for a spec that declares none, so
         # again no `schema_version` bump.
         "devices",
+        # Added additively by #3124 -- the effective decomposition cap.
+        "max_decomposition_cells",
         "warnings",
         # Added additively by #2349 -- the shared `provenance` block `klt
         # erc` already emits, same field names, so no `schema_version`
@@ -3814,3 +3816,106 @@ def test_devices_entry_name_defaults_to_its_index(tmp_path):
     )
 
     assert report["devices"][0]["name"] == "device0"
+
+
+def _l_bus_cells_needed(tmp_path):
+    """Run the L-bus fixture under a cap of 1 and read back how many cells
+    the refusal says it needs."""
+    import re
+
+    gds = tmp_path / "lshape.gds"
+    spec = tmp_path / "lshape.power.json"
+    _l_bus_fixture(gds)
+    _l_bus_spec(spec)
+    payload = json.loads(spec.read_text())
+    payload["max_decomposition_cells"] = 1
+    _write_spec(spec, payload)
+    reason = run_power(str(gds), str(spec))["networks"][0]["islands"][0][
+        "unsolved_reason"
+    ]
+    return (
+        gds,
+        spec,
+        payload,
+        int(re.search(r"up to (\d+) mesh cells", reason).group(1)),
+    )
+
+
+def test_max_decomposition_cells_spec_field_raises_the_cap(tmp_path):
+    gds, spec, payload, needed = _l_bus_cells_needed(tmp_path)
+
+    payload["max_decomposition_cells"] = needed - 1
+    _write_spec(spec, payload)
+    report = run_power(str(gds), str(spec))
+    assert report["max_decomposition_cells"] == needed - 1
+    assert report["networks"][0]["islands"][0]["unsolved_reason"] is not None
+
+    payload["max_decomposition_cells"] = needed
+    _write_spec(spec, payload)
+    report = run_power(str(gds), str(spec))
+    island = report["networks"][0]["islands"][0]
+    assert island["unsolved_reason"] is None
+    assert island["edges"]
+
+
+def test_max_decomposition_cells_defaults_to_the_module_constant(tmp_path, monkeypatch):
+    import klayout_tools.power as power_module
+
+    gds = tmp_path / "lshape.gds"
+    spec = tmp_path / "lshape.power.json"
+    _l_bus_fixture(gds)
+    _l_bus_spec(spec)
+    assert run_power(str(gds), str(spec))["max_decomposition_cells"] == 4096
+    monkeypatch.setattr(power_module, "MAX_DECOMPOSITION_CELLS", 7)
+    assert run_power(str(gds), str(spec))["max_decomposition_cells"] == 7
+
+
+@pytest.mark.parametrize("bad", [0, -1, True, "4096", 1.5])
+def test_max_decomposition_cells_rejects_invalid_values(tmp_path, bad):
+    gds = tmp_path / "lshape.gds"
+    spec = tmp_path / "lshape.power.json"
+    _l_bus_fixture(gds)
+    _l_bus_spec(spec)
+    payload = json.loads(spec.read_text())
+    payload["max_decomposition_cells"] = bad
+    _write_spec(spec, payload)
+    with pytest.raises(PowerError, match="max_decomposition_cells"):
+        run_power(str(gds), str(spec))
+
+
+def test_mesh_helpers_moved_to_resistor_mesh_and_power_reimports_them():
+    """Issue #2980: the decomposition helpers live in `resistor_mesh` and
+    `power` re-imports the very same objects, so `klt power` is unchanged."""
+    from klayout_tools import power, resistor_mesh
+
+    assert (
+        power._decompose_manhattan_polygon is resistor_mesh._decompose_manhattan_polygon
+    )
+    assert power._rails_under_via is resistor_mesh._rails_under_via
+
+
+def test_decompose_manhattan_polygon_extra_cuts_default_to_none():
+    from klayout_tools.resistor_mesh import _decompose_manhattan_polygon
+
+    l_shape = kdb.Polygon(
+        [
+            kdb.Point(0, 0),
+            kdb.Point(300, 0),
+            kdb.Point(300, 100),
+            kdb.Point(100, 100),
+            kdb.Point(100, 300),
+            kdb.Point(0, 300),
+        ]
+    )
+    plain, reason = _decompose_manhattan_polygon(l_shape, 4096)
+    assert reason is None and plain is not None
+    same, _ = _decompose_manhattan_polygon(l_shape, 4096, (), ())
+    assert same == plain
+    # Cuts outside the polygon's own extent change nothing.
+    outside, _ = _decompose_manhattan_polygon(l_shape, 4096, (-50, 300, 900), (0, 301))
+    assert outside == plain
+
+    cut, _ = _decompose_manhattan_polygon(l_shape, 4096, (200,), (200,))
+    assert cut is not None and len(cut) > len(plain)
+    assert sum(box.area() for _, _, box in cut) == l_shape.area()
+    assert {box.right for _, _, box in cut} >= {200}

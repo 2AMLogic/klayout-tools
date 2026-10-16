@@ -4,7 +4,9 @@ dataclasses an :class:`ExtractionDeck` composes.
 Split out of ``decks/__init__.py`` (issue #1821) as a self-contained
 domain: :class:`ResistorDevice`/:class:`ResistorFlavour`,
 :class:`MOSFlavour`, :class:`ExtractionDeck` itself,
-:class:`BipolarDevice`, :class:`CapacitorDevice`/:class:`CapacitorFlavour`,
+:class:`BipolarDevice` (with its :class:`LayerExpr` derived-marker form) and
+:class:`TerminalRelation`,
+:class:`CapacitorDevice`/:class:`CapacitorFlavour`,
 :class:`MomCapacitorDevice`, and :class:`DiodeDevice` -- the curated device
 tables ``klt extract`` matches drawn geometry against to recognise
 precision resistors, MOS transistors, bipolar junction transistors, MiM/MOM
@@ -28,6 +30,7 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from .rules import RuleProvenance
 
@@ -168,6 +171,28 @@ class ResistorDevice:
     entry that does not set them extracts ``R`` bit-for-bit as before this
     field existed.
 
+    ``topology`` (issue #2679) selects how ``body``/``marker`` relate:
+
+    - ``"overlap"`` (the default, every deck entry before this field
+      existed) -- the marker lies *on* the body conductor and the segment is
+      ``body & marker``, as described above.
+    - ``"abutting_heads"`` -- the PDK draws the resistive body on the
+      ``marker`` layer itself and the ``body`` layer is only the two contact
+      heads, which *abut* (zero overlap) the marker. IHP sg13g2's
+      ``rsil``/``rppd``/``rhigh`` PCells draw ``polyres`` (128/0) as the whole
+      resistive body and ``GatPoly`` (5/0) only as the two head pads at either
+      end, so ``body & marker`` is empty there. The segment is then
+      ``marker & requires - excludes`` (mirroring upstream
+      ``res_derivations.lvs``'s ``polyres & extblock ...``), kept only
+      where it touches the ``terminal`` (default ``body``) conductor in **two
+      or more** separate head regions -- a body with a missing head, or one
+      separated from its heads by a gap, is not a resistor. The terminals
+      are the touching heads (``terminal`` minus the segment), which
+      KLayout's native extractor attaches directly to the abutting body
+      edge; the segment is still cut out of the ``body`` conductor, so a
+      layout that *does* overlap (a continuous bar marked by ``polyres``)
+      keeps extracting as before.
+
     ``name`` is the extracted device-class name (``devices[].class`` in the
     JSON response, and the model token on the written ``R`` card -- a
     consumer simulating the netlist supplies a matching ``.model``, exactly
@@ -244,6 +269,18 @@ class ResistorDevice:
     flavour_option: str | None = None
     flavours: tuple[ResistorFlavour, ...] = ()
     provenance: RuleProvenance | None = None
+    topology: str = "overlap"
+
+    def __post_init__(self) -> None:
+        if self.topology not in RESISTOR_TOPOLOGIES:
+            raise ValueError(
+                f"ResistorDevice '{self.name}': unknown topology "
+                f"{self.topology!r} (expected one of {RESISTOR_TOPOLOGIES})"
+            )
+
+
+#: Valid :attr:`ResistorDevice.topology` values.
+RESISTOR_TOPOLOGIES: tuple[str, ...] = ("overlap", "abutting_heads")
 
 
 @dataclass(frozen=True)
@@ -267,6 +304,25 @@ class ResistorFlavour:
     value: str
     name: str
     sheet_rho_ohm_sq: float
+
+
+@dataclass(frozen=True)
+class UnsupportedDeviceMarker:
+    """A marker layer whose drawn shapes mean the layout holds a device class
+    this deck does not recognise (issue #2919) -- e.g. gf180mcu's
+    ``MOS_CAP_MK`` (166/5) over a MOS capacitor.
+
+    ``extract.py`` reports every such layer that carries shapes in the
+    extracted cell in the response's ``unsupported_devices[]`` field and in
+    ``warnings[]``, so a netlist that silently lacks those devices cannot read
+    as a clean extraction. ``kind`` is a short machine-readable token (e.g.
+    ``"mos_capacitor"``); ``description`` is the prose used in the warning.
+    The marker takes no part in recognition or connectivity.
+    """
+
+    marker: tuple[int, int]
+    kind: str
+    description: str
 
 
 @dataclass(frozen=True)
@@ -351,6 +407,28 @@ class MOSFlavour:
     same default every other ``provenance`` field in this module carries, so a
     deck that leaves them unset (e.g. gf180mcu's ``Dualgate`` entry, whose
     prose comment remains the record) is unaffected.
+
+    ``and_markers``/``not_markers``/``nfet_only`` (issue #3599) express a
+    marker *combination*, for a flavour upstream derives as
+    ``<base>.and(A).not(B)`` rather than from a single layer -- e.g. sky130's
+    native-Vt NMOS (``hvi`` AND ``lvtn``, NOT ``areaid_ed``/``areaid_le``/
+    ``vpp``). All three default to empty/``False``, in which case
+    classification is exactly the single-``marker`` behaviour above:
+
+    - ``and_markers``: the island must also ``interacting``-overlap *every*
+      one of these layers to be claimed.
+    - ``not_markers``: an island that ``interacting``-overlaps *any* of these
+      layers is not claimed (it stays available to later flavours / the
+      default split). Like ``marker``, this is island-level, not a geometric
+      subtraction -- the same documented straddling policy.
+    - ``nfet_only``: the flavour has no PMOS counterpart; an island
+      ``interacting`` the deck's ``nwell`` is never claimed (no PMOS is
+      extracted or bound for it).
+
+    ``extract.py`` processes ``mos_flavours`` in declaration order and each
+    flavour removes what it claims before the next runs, so a combination
+    flavour must be declared *before* any flavour whose ``marker`` it
+    refines (or that flavour must list the refining layer in ``not_markers``).
     """
 
     marker: tuple[int, int]
@@ -358,6 +436,31 @@ class MOSFlavour:
     description: str = ""
     nfet_provenance: RuleProvenance | None = None
     pfet_provenance: RuleProvenance | None = None
+    and_markers: tuple[tuple[int, int], ...] = ()
+    not_markers: tuple[tuple[int, int], ...] = ()
+    nfet_only: bool = False
+
+
+@dataclass(frozen=True)
+class CapacitorVariant:
+    """One caller-selectable alternative **capacitor set** for an
+    :class:`ExtractionDeck` (issue #2920) -- for a PDK whose capacitor family
+    exists in several mutually-exclusive process options that draw
+    *different geometry* (gf180mcu's MIM option A: ``Metal2`` bottom plate
+    under ``Metal3``; option B: ``Metal(n-1)`` under the top metal), which
+    :class:`CapacitorDevice`'s ``flavours`` (identical geometry, different
+    coefficients) cannot express.
+
+    ``option`` is the deck-option key (``--deck-option <option>=<value>``),
+    ``value`` the string selecting this variant, ``capacitors`` the entries
+    that replace the deck's ``capacitors`` when it is selected. The deck's
+    own ``capacitors`` are the *default* variant, and must also be listed
+    here (as the first variant) so that every variant's geometry is known.
+    """
+
+    option: str
+    value: str
+    capacitors: tuple[CapacitorDevice, ...]
 
 
 @dataclass(frozen=True)
@@ -610,6 +713,12 @@ class ExtractionDeck:
     this field's introduction) disables the exclusion: a poly shape matching
     the signature is flagged exactly as it was before this field existed, no
     behaviour change for a deck/layout that declares or draws no marker.
+
+    ``unsupported_device_markers`` (issue #2919) is an optional tuple of
+    :class:`UnsupportedDeviceMarker` entries naming marker layers that flag a
+    device class the deck cannot yet extract; shapes on one are reported in
+    ``unsupported_devices[]``/``warnings[]``. Empty (the default) reports
+    nothing.
     """
 
     active: tuple[int, int]
@@ -637,8 +746,29 @@ class ExtractionDeck:
     resistors: tuple[ResistorDevice, ...] = ()
     diodes: tuple[DiodeDevice, ...] = ()
     mos_flavours: tuple[MOSFlavour, ...] = ()
+    unsupported_device_markers: tuple[UnsupportedDeviceMarker, ...] = ()
     nfet_provenance: RuleProvenance | None = None
     pfet_provenance: RuleProvenance | None = None
+    capacitor_variants: tuple[CapacitorVariant, ...] = ()
+    capacitor_variant_selected: str | None = None
+
+    @property
+    def unselected_capacitors(self) -> tuple[tuple[str, CapacitorDevice], ...]:
+        """``(option value, entry)`` for every :attr:`capacitor_variants`
+        capacitor that is *not* currently wired into :attr:`capacitors`
+        (issue #2920) -- what ``extract.py`` checks to warn that a layout
+        draws a capacitor option the active selection does not recognise.
+        Empty for a deck that declares no variants.
+        """
+        if not self.capacitor_variants:
+            return ()
+        selected = self.capacitor_variant_selected or self.capacitor_variants[0].value
+        return tuple(
+            (variant.value, capacitor)
+            for variant in self.capacitor_variants
+            if variant.value != selected
+            for capacitor in variant.capacitors
+        )
 
     @property
     def device_classes(self) -> tuple[str, ...]:
@@ -728,6 +858,12 @@ class ExtractionDeck:
             wired = next((f for f in device.flavours if f.name == device.name), None)
             if wired is not None:
                 values[key] = wired.value
+        if self.capacitor_variant_selected is not None:
+            # Issue #2920: the variant selector (`mim_option`) is echoed only
+            # when a variant was actually selected, so a run that takes the
+            # default keeps exactly the provenance/options hash it had before
+            # the key existed.
+            values[self.capacitor_variants[0].option] = self.capacitor_variant_selected
         return dict(sorted(values.items()))
 
     @property
@@ -771,7 +907,7 @@ class ExtractionDeck:
         for bipolar in self.bipolars:
             layers.add(bipolar.base)
             layers.add(bipolar.emitter)
-            layers.add(bipolar.marker)
+            layers.update(layer_operand_leaves(bipolar.marker))
             layers.update(bipolar.emitter_requires)
             layers.update(bipolar.emitter_excludes)
             # `filter(None, ...)` rather than two `is not None` branches so
@@ -1026,7 +1162,7 @@ class ExtractionDeck:
                     f"{where} label-layer role {role!r} override must be a "
                     f"(layer, datatype) pair of integers or None, got {layer!r}"
                 )
-        replacements: dict[str, object] = {}
+        replacements: dict[str, Any] = {}
         if "well" in overrides:
             replacements["well_label"] = overrides["well"]
         if "poly" in overrides:
@@ -1044,6 +1180,276 @@ class ExtractionDeck:
                 labels[index] = layer
             replacements["metal_labels"] = tuple(labels)
         return dataclasses.replace(self, **replacements)
+
+
+#: The terminal names a :class:`TerminalRelation` may reference on a
+#: :class:`BipolarDevice` -- also the order :meth:`BipolarDevice.terminal_
+#: resolution_order` falls back to when nothing forces a different one.
+BIPOLAR_TERMINALS: tuple[str, ...] = ("base", "emitter", "collector")
+
+#: The geometric operations a :class:`TerminalRelation` may name (issue
+#: #2863). Deliberately closed: each value is one KLayout ``Region`` method
+#: ``extract.py`` applies verbatim, so an unknown op fails at deck
+#: construction rather than silently selecting nothing.
+TERMINAL_RELATION_OPS: tuple[str, ...] = ("interacting",)
+
+
+@dataclass(frozen=True)
+class TerminalRelation:
+    """A per-terminal geometric relation to *another terminal of the same
+    device* (issue #2863): "this terminal is the part of its candidate layer
+    that is related by ``op`` to the already-resolved ``source`` terminal".
+
+    A static ``requires``/``excludes`` layer set (what every device entry
+    already supports) can only say "this layer, narrowed by those layers".
+    It cannot say "the piece of this layer that touches *that instance's*
+    emitter", which is how a PDK attributes a base ring to the one device it
+    surrounds when several devices' rings sit side by side -- e.g. SG13G2's
+    ``pnpMPA`` base, transcribed from its LVS deck as::
+
+        pnp_mpa_b = pnp_b.interacting(pnp_b.extents.interacting(pnp_mpa_e))
+
+    which is ``TerminalRelation(source="emitter", extents=True)`` on the
+    base terminal.
+
+    - ``source`` -- the terminal this one is selected against: one of
+      :data:`BIPOLAR_TERMINALS` other than the terminal that declares the
+      relation. It is resolved first (see
+      :meth:`BipolarDevice.terminal_resolution_order`).
+    - ``op`` -- the geometric selection; ``"interacting"`` (the only value
+      today, see :data:`TERMINAL_RELATION_OPS`) keeps each whole polygon of
+      the candidate region that touches or overlaps ``source``.
+    - ``extents`` -- when ``False``, a candidate polygon is kept if *the
+      polygon itself* interacts with ``source``
+      (``candidate.interacting(source)``). When ``True``, it is kept if its
+      own **bounding box** interacts with ``source``
+      (``candidate.interacting(candidate.extents.interacting(source))``,
+      the PDK idiom above) -- what selects a ring that *surrounds* its
+      emitter without touching it.
+
+    Pure data with no geometry of its own; ``extract.py`` applies it. Frozen
+    and hashable, so two deck entries differing only in a relation compare
+    unequal and project differently in ``klt deck devices``.
+    """
+
+    source: str
+    op: str = "interacting"
+    extents: bool = False
+
+    def __post_init__(self) -> None:
+        if self.source not in BIPOLAR_TERMINALS:
+            raise ValueError(
+                f"TerminalRelation: unknown source terminal {self.source!r} "
+                f"(expected one of: {', '.join(BIPOLAR_TERMINALS)})"
+            )
+        if self.op not in TERMINAL_RELATION_OPS:
+            raise ValueError(
+                f"TerminalRelation: unknown op {self.op!r} "
+                f"(expected one of: {', '.join(TERMINAL_RELATION_OPS)})"
+            )
+
+
+#: The two boolean operators a :class:`LayerExpr` node may apply (issue
+#: #2860). ``"and"`` intersects every operand; ``"not"`` subtracts every
+#: operand after the first from the first.
+LAYER_EXPR_OPS = frozenset({"and", "not"})
+
+
+@dataclass(frozen=True)
+class LayerExpr:
+    """A derived device-recognition layer: a boolean expression over drawn
+    ``(layer, datatype)`` pairs and other :class:`LayerExpr` nodes (issue
+    #2860).
+
+    Some PDKs do not draw their device-recognition mark as one literal
+    layer. IHP SG13G2's NPN marker is a three-operand boolean, one operand of
+    which is itself derived (``bjt_derivations.lvs`` /
+    ``general_derivations.lvs`` in the PDK's own KLayout LVS runset)::
+
+        npn_mk = trans_drw.and(pwell).and(ptap_holes)
+        pwell  = pwell_allowed.not(nwell_drw).not(digisub_gap)
+
+    A ``LayerExpr`` tree expresses exactly that, as plain frozen data (so a
+    deck stays hashable and comparable like every other deck dataclass)::
+
+        pwell = LayerExpr.not_(PWELL_ALLOWED, NWELL, DIGISUB_GAP, name="pwell")
+        npn_mk = LayerExpr.and_(TRANS, pwell, PTAP_HOLES, name="npn_mk")
+
+    ``op`` is one of :data:`LAYER_EXPR_OPS`:
+
+    - ``"and"`` -- the intersection of every operand.
+    - ``"not"`` -- the first operand minus every later operand (``a - b - c``).
+
+    A single-operand node of either kind is just that operand, so
+    ``LayerExpr.and_((82, 44))`` recognises exactly what the bare ``(82, 44)``
+    pair does. ``OR`` is deliberately not offered: no curated PDK marker needs
+    it yet, and without it every leaf has one unambiguous polarity (see
+    :meth:`required_layers` / :meth:`excluded_layers`).
+
+    ``name`` is an optional human-readable label for the derived layer (the
+    PDK runset's own variable name, e.g. ``"pwell"``/``"npn_mk"``). It has no
+    effect on evaluation; ``klt deck devices`` reports it.
+
+    This is distinct from :class:`~klayout_tools.decks.rules.DerivedLayer`,
+    which is a fixed-mode, exactly-two-layer derivation for DRC rule scoping
+    (sized intersection / whole-polygon selection) and cannot nest. Today
+    only :attr:`BipolarDevice.marker` accepts a ``LayerExpr``; ``extract.py``
+    evaluates it with :func:`klayout_tools._layout.region_expr`.
+    """
+
+    op: str
+    operands: tuple[tuple[int, int] | LayerExpr, ...]
+    name: str = ""
+
+    def __post_init__(self) -> None:
+        if self.op not in LAYER_EXPR_OPS:
+            raise ValueError(
+                f"LayerExpr op must be one of {sorted(LAYER_EXPR_OPS)}, got {self.op!r}"
+            )
+        if not self.operands:
+            raise ValueError("LayerExpr needs at least one operand")
+        for operand in self.operands:
+            if isinstance(operand, LayerExpr):
+                continue
+            if (
+                isinstance(operand, tuple)
+                and len(operand) == 2
+                and all(
+                    isinstance(part, int) and not isinstance(part, bool)
+                    for part in operand
+                )
+            ):
+                continue
+            raise ValueError(
+                "LayerExpr operands must be (layer, datatype) int pairs or "
+                f"LayerExpr nodes, got {operand!r}"
+            )
+
+    @classmethod
+    def and_(cls, *operands: tuple[int, int] | LayerExpr, name: str = "") -> LayerExpr:
+        """The intersection of ``operands``."""
+        return cls("and", tuple(operands), name)
+
+    @classmethod
+    def not_(
+        cls,
+        base: tuple[int, int] | LayerExpr,
+        *subtract: tuple[int, int] | LayerExpr,
+        name: str = "",
+    ) -> LayerExpr:
+        """``base`` minus every layer in ``subtract``."""
+        return cls("not", (base, *subtract), name)
+
+    def _leaves(self, negated: bool) -> list[tuple[tuple[int, int], bool]]:
+        """Every leaf in first-mention order, paired with whether it sits
+        under an odd number of subtractions."""
+        out: list[tuple[tuple[int, int], bool]] = []
+        for index, operand in enumerate(self.operands):
+            flipped = negated ^ (self.op == "not" and index > 0)
+            if isinstance(operand, LayerExpr):
+                out.extend(operand._leaves(flipped))
+            else:
+                out.append((operand, flipped))
+        return out
+
+    def leaf_layers(self) -> tuple[tuple[int, int], ...]:
+        """Every drawn ``(layer, datatype)`` this expression reads, deduped,
+        in first-mention order -- the set a deck must register as read
+        (:attr:`ExtractionDeck.device_recognition_layers`), or extraction
+        would evaluate the expression over layers it never loaded."""
+        return tuple(dict.fromkeys(leaf for leaf, _ in self._leaves(False)))
+
+    def required_layers(self) -> tuple[tuple[int, int], ...]:
+        """The leaves that must be drawn for the expression to be non-empty
+        (an even number of subtractions above them), in first-mention order."""
+        return tuple(
+            dict.fromkeys(leaf for leaf, negated in self._leaves(False) if not negated)
+        )
+
+    def excluded_layers(self) -> tuple[tuple[int, int], ...]:
+        """The leaves whose presence removes area from the expression (an odd
+        number of subtractions above them), in first-mention order."""
+        return tuple(
+            dict.fromkeys(leaf for leaf, negated in self._leaves(False) if negated)
+        )
+
+
+def layer_operand_leaves(
+    operand: tuple[int, int] | LayerExpr,
+) -> tuple[tuple[int, int], ...]:
+    """The drawn layers ``operand`` reads: itself for a bare pair, or
+    :meth:`LayerExpr.leaf_layers` for an expression."""
+    if isinstance(operand, LayerExpr):
+        return operand.leaf_layers()
+    return (operand,)
+
+
+@dataclass(frozen=True)
+class SizeFilter:
+    """Pure-data size restriction on a recognition or terminal region (issue
+    #2861): bounding-box minimum / maximum side and polygon area, each an
+    **inclusive** ``(lo, hi)`` range in microns (um) / square microns (um^2).
+    An exact value is the degenerate range ``(v, v)``. A dimension left
+    ``None`` is unconstrained; a polygon must satisfy *every* declared
+    dimension. It is independent of any one device family so resistor and
+    capacitor flavours can adopt it later (today only
+    :attr:`BipolarDevice.emitter_size` consumes it).
+
+    Dimensions, measured per merged polygon:
+
+    - ``bbox_min_um`` -- the shorter side of the polygon's bounding box
+      (KLayout ``Region.with_bbox_min``);
+    - ``bbox_max_um`` -- the longer side (``with_bbox_max``);
+    - ``area_um2`` -- the polygon area (``with_area``).
+
+    Rounding rule (applied by ``extract.py``): bounds are converted to the
+    layout's database unit by rounding to the nearest integer dbu (area to
+    the nearest dbu^2), so a PDK value such as 0.063 um^2 is exact at
+    ``dbu=0.001`` and tolerant of float noise at any other dbu; the range is
+    then inclusive at both ends. One dbu outside either bound does not match.
+
+    Construction rejects a negative bound, ``lo > hi``, and an *empty*
+    filter (all three dimensions ``None``) -- an empty filter would be a
+    silent no-op, so use ``emitter_size=None`` for "no size restriction".
+    """
+
+    bbox_min_um: tuple[float, float] | None = None
+    bbox_max_um: tuple[float, float] | None = None
+    area_um2: tuple[float, float] | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            self.bbox_min_um is None
+            and self.bbox_max_um is None
+            and self.area_um2 is None
+        ):
+            raise ValueError(
+                "SizeFilter must constrain at least one of bbox_min_um, "
+                "bbox_max_um, area_um2 (use None instead of an empty filter)"
+            )
+        for name in ("bbox_min_um", "bbox_max_um", "area_um2"):
+            rng = getattr(self, name)
+            if rng is None:
+                continue
+            if len(rng) != 2:
+                raise ValueError(f"SizeFilter.{name} must be a (lo, hi) pair")
+            lo, hi = rng
+            if lo < 0 or hi < 0:
+                raise ValueError(f"SizeFilter.{name} bounds must be non-negative")
+            if lo > hi:
+                raise ValueError(f"SizeFilter.{name} has lo > hi: {rng!r}")
+
+    def overlaps(self, other: SizeFilter) -> bool:
+        """True when some polygon could satisfy both filters: every
+        dimension constrained by *both* has intersecting ranges (a dimension
+        either leaves unconstrained cannot separate them)."""
+        for name in ("bbox_min_um", "bbox_max_um", "area_um2"):
+            a, b = getattr(self, name), getattr(other, name)
+            if a is None or b is None:
+                continue
+            if a[1] < b[0] or b[1] < a[0]:
+                return False
+        return True
 
 
 @dataclass(frozen=True)
@@ -1072,6 +1478,16 @@ class BipolarDevice:
     region, and only diffusion inside *that* scoped base region becomes an
     emitter; an ordinary PMOS-only nwell drawn elsewhere in the layout is
     never misrecognised as a bipolar base.
+
+    ``marker`` is either a bare ``(layer, datatype)`` pair -- one drawn
+    layer, the form both sky130 and gf180mcu use -- or a :class:`LayerExpr`
+    (issue #2860) for a PDK whose recognition mark is itself a boolean of
+    several drawn layers, possibly nested (IHP SG13G2's ``npn_mk = trans &
+    (pwell_allowed - nwell - digisub_gap) & ptap_holes``). ``extract.py``
+    evaluates the expression to a region and uses it exactly where it would
+    use the drawn marker layer, and every leaf layer of the expression
+    counts as read (:attr:`ExtractionDeck.device_recognition_layers`). A
+    bare pair means exactly what it always has.
 
     ``collector`` is ``None`` when the PDK's vertical bipolar has no drawn
     collector layer of its own (collector formed by the substrate -- true
@@ -1104,6 +1520,16 @@ class BipolarDevice:
     documented residual limitation, see that deck's docstring. Both default
     to ``()`` (no narrowing), so a deck that declares neither extracts
     exactly as it did before the fields existed.
+
+    ``emitter_size`` (issue #2861) is an optional :class:`SizeFilter` applied
+    to the *merged* emitter region after ``emitter_requires``/
+    ``emitter_excludes``, so entries sharing ``base``/``marker``/``emitter``
+    can tell flavours apart by drawn emitter-window size (e.g. SG13G2's
+    ``npn13G2``/``npn13G2l``/``npn13G2v``). A marked emitter matching no
+    entry of such a group is reported in ``warnings[]`` (with its bbox) and
+    yields no device; entries of a group whose size ranges overlap are
+    rejected with an ``ExtractError``. ``None`` (default) means no size
+    restriction and leaves extraction and the deck hash unchanged.
 
     ``class_name`` names the extracted ``DeviceClassBJT3Transistor`` device
     class (``devices[].class`` in the JSON response, and one of the values
@@ -1143,17 +1569,153 @@ class BipolarDevice:
     been backfilled for this entry yet -- the prose citation in the deck
     module's own inline comment remains the only record, exactly as for
     every entry before this field existed.
+
+    ``base_relation``/``emitter_relation``/``collector_relation`` (issue
+    #2863) each optionally define that terminal by a geometric relation to
+    *another terminal of the same device* -- see :class:`TerminalRelation`.
+    All three default to ``None``, and an entry declaring none of them is
+    resolved by exactly the fixed base-first path described above
+    (``base & marker``, then emitter/collector scoped to that base), so every
+    existing deck extracts bit-for-bit as before. Once *any* relation is
+    declared, each terminal is resolved from a marker-scoped **candidate**
+    region (its own layer ``& marker``, minus the deck's ``dummy`` marker;
+    the emitter's candidate is further narrowed by
+    ``emitter_requires``/``emitter_excludes`` first), then:
+
+    - a terminal that declares a relation keeps only the candidate polygons
+      the relation selects against its (already-resolved) ``source``;
+    - a terminal that declares none keeps the legacy scoping -- the emitter
+      and collector are intersected with the resolved base -- *unless* the
+      base itself is relation-defined, in which case they stay at their
+      marker-scoped candidate (scoping them to a base that is itself derived
+      from them would be circular).
+
+    Terminals are resolved in :meth:`terminal_resolution_order`. An entry
+    whose relations reference the declaring terminal itself, form a cycle,
+    or reference / declare a relation on a ``collector`` that is ``None``
+    is rejected at construction with a :class:`ValueError` naming the
+    problem, never resolved to a silently-empty region.
+
+    The device is still formed by KLayout's stock
+    ``DeviceExtractorBJT3Transistor``, which only recognises an emitter
+    lying *inside* a base polygon. A base selected with ``extents=True`` is
+    typically a ring around its emitter, so ``extract.py`` hands the
+    extractor each selected base polygon's bounding box as the device body
+    while still registering the ring itself as the base terminal's
+    connectivity layer. Likewise a drawn collector only becomes the ``C``
+    terminal where it overlaps that body; a lateral collector ring lying
+    wholly *outside* the base body is not attributable through the stock
+    extractor (``extract.py`` then falls back to the vertical,
+    collector-is-base case) -- a limit of the extractor, not of the relation.
     """
 
     base: tuple[int, int]
     emitter: tuple[int, int]
-    marker: tuple[int, int]
+    marker: tuple[int, int] | LayerExpr
     collector: tuple[int, int] | None = None
     emitter_requires: tuple[tuple[int, int], ...] = ()
     emitter_excludes: tuple[tuple[int, int], ...] = ()
     class_name: str = "bjt"
     provenance: RuleProvenance | None = None
     substrate: tuple[int, int] | None = None
+    base_relation: TerminalRelation | None = None
+    emitter_relation: TerminalRelation | None = None
+    collector_relation: TerminalRelation | None = None
+    emitter_size: SizeFilter | None = None
+
+    def __post_init__(self) -> None:
+        # Validates eagerly so a malformed deck entry fails where it is
+        # declared (at import of the deck module), not on the first layout
+        # that happens to draw the device.
+        self.terminal_resolution_order()
+
+    def relation(self, terminal: str) -> TerminalRelation | None:
+        """The :class:`TerminalRelation` ``terminal`` declares, or ``None``."""
+        if terminal not in BIPOLAR_TERMINALS:
+            raise ValueError(
+                f"bipolar '{self.class_name}': unknown terminal {terminal!r} "
+                f"(expected one of: {', '.join(BIPOLAR_TERMINALS)})"
+            )
+        relation: TerminalRelation | None = getattr(self, f"{terminal}_relation")
+        return relation
+
+    @property
+    def has_relations(self) -> bool:
+        """Whether any terminal is relation-defined -- ``False`` selects the
+        legacy fixed base-first resolution path unchanged."""
+        return any(self.relation(t) is not None for t in BIPOLAR_TERMINALS)
+
+    def terminal_dependencies(self, terminal: str) -> tuple[str, ...]:
+        """The terminals ``terminal``'s region is derived from: its declared
+        relation's ``source``, else (legacy scoping) ``("base",)`` for the
+        emitter/collector while the base is not itself relation-defined,
+        else nothing."""
+        relation = self.relation(terminal)
+        if relation is not None:
+            return (relation.source,)
+        if terminal != "base" and self.base_relation is None:
+            return ("base",)
+        return ()
+
+    def terminal_resolution_order(self) -> tuple[str, ...]:
+        """The deterministic order ``extract.py`` resolves this entry's
+        drawn terminals in: a topological order of
+        :meth:`terminal_dependencies`, ties broken by
+        :data:`BIPOLAR_TERMINALS` order. A ``None`` collector is omitted
+        (it has no drawn geometry to resolve).
+
+        Raises :class:`ValueError` for a self-referencing relation, a
+        relation on or against a ``None`` collector, or a dependency cycle.
+        """
+        name = f"bipolar '{self.class_name}'"
+        drawn = tuple(
+            t
+            for t in BIPOLAR_TERMINALS
+            if t != "collector" or self.collector is not None
+        )
+        for terminal in BIPOLAR_TERMINALS:
+            relation = self.relation(terminal)
+            if relation is None:
+                continue
+            if terminal not in drawn:
+                raise ValueError(
+                    f"{name}: collector_relation is set but collector is None "
+                    "-- a substrate-formed collector has no drawn geometry to "
+                    "select from; declare a collector layer or drop the relation"
+                )
+            if relation.source == terminal:
+                raise ValueError(
+                    f"{name}: {terminal}_relation references {terminal} itself "
+                    "-- a terminal cannot be selected against its own region"
+                )
+            if relation.source not in drawn:
+                raise ValueError(
+                    f"{name}: {terminal}_relation references the collector, "
+                    "but collector is None (substrate-formed, no drawn "
+                    "geometry to select against)"
+                )
+
+        order: list[str] = []
+        remaining = list(drawn)
+        while remaining:
+            ready = [
+                t
+                for t in remaining
+                if all(dep in order for dep in self.terminal_dependencies(t))
+            ]
+            if not ready:
+                cycle = ", ".join(
+                    f"{t} -> {'/'.join(self.terminal_dependencies(t))}"
+                    for t in remaining
+                )
+                raise ValueError(
+                    f"{name}: terminal relations form a dependency cycle "
+                    f"({cycle}) -- at least one terminal must be resolvable "
+                    "from its own layer alone"
+                )
+            order.append(ready[0])
+            remaining.remove(ready[0])
+        return tuple(order)
 
 
 @dataclass(frozen=True)

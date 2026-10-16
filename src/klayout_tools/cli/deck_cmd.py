@@ -157,6 +157,19 @@ def _layer_text(entry: dict | None) -> str:
     return f"{name} ({pair})" if name else pair
 
 
+def _expression_text(node: dict) -> str:
+    """A derived ``marker_expression`` (issue #2860) as infix text, each
+    named node prefixed by its name, e.g. ``npn_mk = (1/0 & pwell = (2/0 -
+    3/0))``."""
+    joiner = " & " if node["op"] == "and" else " - "
+    parts = [
+        _expression_text(operand) if "op" in operand else _layer_text(operand)
+        for operand in node["operands"]
+    ]
+    body = f"({joiner.join(parts)})"
+    return f"{node['name']} = {body}" if node.get("name") else body
+
+
 def _layers_text(entries: list) -> str:
     return ", ".join(_layer_text(entry) for entry in entries) if entries else "none"
 
@@ -174,12 +187,19 @@ def _print_devices_text(report: dict) -> None:
         print()
         print(f"{entry['name']} ({entry['kind']})")
         print(f"  gating: {', '.join(gating) if gating else 'drawn geometry only'}")
-        print(f"  marker: {_layer_text(entry['marker'])}")
+        if entry.get("marker_expression") is not None:
+            print(f"  marker: {_expression_text(entry['marker_expression'])}")
+        else:
+            print(f"  marker: {_layer_text(entry['marker'])}")
         for terminal in entry["terminals"]:
             print(f"  terminal {terminal['name']}:")
             print(f"    layer: {_layer_text(terminal['layer'])}")
             print(f"    requires: {_layers_text(terminal['requires'])}")
             print(f"    excludes: {_layers_text(terminal['excludes'])}")
+            relation = terminal.get("relation")
+            if relation is not None:
+                via = " (via extents)" if relation["extents"] else ""
+                print(f"    relation: {relation['op']} {relation['source']}{via}")
         for flavour in entry.get("flavours", []):
             print(f"  flavour {flavour['flavour']}: {_layer_text(flavour['marker'])}")
         print(f"  required_layers: {_layers_text(entry['required_layers'])}")

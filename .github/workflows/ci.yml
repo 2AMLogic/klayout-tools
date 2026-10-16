@@ -109,6 +109,15 @@ jobs:
         # review cycle.
         run: uv run --frozen --extra dev python scripts/check_complexity_baseline.py
 
+      - name: Type-check ratchet (mypy)
+        # scripts/check_type_baseline.py (issue #3221): mypy over src/ against
+        # type-baseline.json, keyed on (file, error code, message). Fails on a
+        # new diagnostic or a baselined one occurring more often; decreases
+        # never fail. Runs on this job's single Python version only. Refresh
+        # procedure: docs/type-checking.md. GATES -- do not add
+        # continue-on-error.
+        run: uv run --frozen --extra dev python scripts/check_type_baseline.py
+
       - name: Verb-module import boundaries
         # scripts/check_import_boundaries.py (issue #2767): static AST gate
         # for docs/ARCHITECTURE.md's "verb modules stay self-contained"

@@ -8,7 +8,7 @@ the first place. A 2026-08 disclosure audit of the public canary repos found
 ~3,937 committed records carrying three identifier classes written *by
 design* by each canary's own harness:
 
-    - PDK: volare `gf180mcuD`, open_pdks `c6d73a3`
+    - PDK: volare `gf180mcuD`, open_pdks `f6eeac7`
       (/Users/<author>/.volare/gf180mcuD, found via search_root:~/.volare)
     - Host: macOS-26.6.1-arm64-arm-64bit-Mach-O (<hostname>)
 
