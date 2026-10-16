@@ -1,17 +1,18 @@
 {
   "$comment": "Golden metrics for the sky130 5T OTA klt gen-compose -> klt extract -> klt drc pipeline (issue #248). Regenerate with `python tests/golden_metrics/generate_golden_metrics.py` -- see tests/golden_metrics/README.md for the update policy.",
   "metrics": {
-    "drc.coverage.checked_count": 16,
+    "drc.coverage.checked_count": 17,
     "drc.coverage.deck_layers_count": 41,
     "drc.coverage.deck_scope_count": 20,
     "drc.coverage.inapplicable_count": 127,
     "drc.coverage.layers_checked_count": 4,
     "drc.coverage.layers_in_stream_without_rules_count": 2,
     "drc.coverage.nothing_checked_reasons_count": 0,
-    "drc.coverage.rules_checked_count": 16,
+    "drc.coverage.rules_checked_count": 17,
     "drc.coverage.rules_skipped_count": 127,
     "drc.coverage.schema_version": 1,
     "drc.coverage.skipped_count": 0,
+    "drc.coverage.unchecked_rules_count": 0,
     "drc.coverage.unknown_count": 0,
     "drc.coverage.unmodeled_rules_count": 5,
     "drc.coverage.voltage_domain_warnings_count": 0,
@@ -52,9 +53,9 @@
       "value": 13.440000000000001,
       "tol_pct": 2
     },
-    "gen_compose.bbox_um.y0": 0.0,
+    "gen_compose.bbox_um.y0": -0.15,
     "gen_compose.bbox_um.y1": {
-      "value": 2.38,
+      "value": 2.5300000000000002,
       "tol_pct": 2
     },
     "gen_compose.blocks_count": 3,

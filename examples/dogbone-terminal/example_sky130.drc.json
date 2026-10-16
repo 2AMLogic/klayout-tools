@@ -76,6 +76,7 @@
       "licon1.width.1",
       "poly.angle.1",
       "poly.enclosing.licon.1",
+      "poly.endcap.diff.1",
       "poly.ongrid.1",
       "poly.width.1"
     ],
@@ -209,6 +210,7 @@
       "vpp.ongrid.1"
     ],
     "voltage_domain_warnings": [],
+    "unchecked_rules": [],
     "deck_scope": [
       "cap2m",
       "capm",
@@ -255,6 +257,7 @@
       "licon1.width.1",
       "poly.angle.1",
       "poly.enclosing.licon.1",
+      "poly.endcap.diff.1",
       "poly.ongrid.1",
       "poly.width.1"
     ],

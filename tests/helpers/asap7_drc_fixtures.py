@@ -56,6 +56,7 @@ LAYERS = {
     "V8": 85,
     "M9": 90,
     "V9": 95,
+    "PAD": 96,
     "SDT": 88,
     "SLVT": 97,
     "LVT": 98,
@@ -2000,8 +2001,8 @@ def _top_metal_cases(layer: str) -> list[Case]:
     return c
 
 
-#: V8 / V9 -> (metal below, metal above or None: PAD is not read).
-_TOP_VIAS: dict[str, tuple[str, str | None]] = {"V8": ("M8", "M9"), "V9": ("M9", None)}
+#: V8 / V9 -> (metal below, layer above: M9 for V8, PAD for V9).
+_TOP_VIAS: dict[str, tuple[str, str | None]] = {"V8": ("M8", "M9"), "V9": ("M9", "PAD")}
 
 
 def _top_via_one(via: str, lo: str, up: str | None) -> list[Case]:

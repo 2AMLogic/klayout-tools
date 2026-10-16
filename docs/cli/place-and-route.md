@@ -8,7 +8,7 @@ digital engine class — Yosys + OpenROAD — RTL→GDS as a first-class `klt`
 flow").
 
 ```
-klt place-and-route <request> [--pdk VARIANT] [--pdk-root ROOT] [--format text|json]
+klt place-and-route <request> [--pdk VARIANT] [--pdk-root ROOT] [--backend local|batch] [--format text|json]
 ```
 
 This is the build phase carried by two accepted Phase 1 documents — read
@@ -36,6 +36,8 @@ Like `klt synthesize`/`klt lvs`/`klt sim`, `klt place-and-route` takes a
   Optional — omit to use `find_pdk()`'s own default search order.
 - `--pdk-root` — explicit PDK install root; overrides `$PDK_ROOT` and the
   search order.
+- `--backend` — where a `pdk.rebuild_corners` request's units run:
+  `local` or `batch` (the Spot batch fleet). See "Backend selection".
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
 ## Engine
@@ -2844,7 +2846,8 @@ independent runs. `pdk.rebuild_corners` makes that one request:
 Each corner is an independent unit — the full flow with that corner as
 `pdk.corner` — written to its own `.klt/place-and-route/<corner>/` directory
 (held under the same output-directory ownership as a single run). Units run
-serially in-process; there is no `--backend` yet. A request without the field
+serially in-process by default, or on the Spot batch fleet with
+`--backend batch` (see "Backend selection" below). A request without the field
 behaves, and reports, exactly as before.
 
 The report is a different shape from a single run's. `schema_version` stays
@@ -2870,6 +2873,61 @@ One failing unit does not stop the others. The command exits `1` when
 `corner_runs[<corner>].input_content_hash`/`.deck_content_hash` against a fresh
 re-hash, and `drifted` names which unit moved. `--rerun` re-runs every unit and
 diffs the aggregated report.
+
+### Backend selection (`--backend`, issue #3518)
+
+The units of a `pdk.rebuild_corners` request run where the backend says:
+
+| Source (highest wins) | Value |
+| --- | --- |
+| `--backend` flag | `local` \| `batch` |
+| the request's `backend` field | `local` \| `batch` |
+| `$KLT_SIM_BACKEND` (host default) | `local` \| `batch` |
+| otherwise | `local` |
+
+This is `klt sim`'s precedence (`sim.resolve_backend`). A host default of
+`batch` is a *preference*: a single-unit request (no `rebuild_corners`, or a
+one-element list) stays local. An **explicit** `--backend batch` (flag or
+request field) on a single-unit request is an error, not a silent local run.
+Any other value is an error.
+
+With `batch`, each corner is submitted as one job on the same S3 job contract
+as `klt sim --backend batch` (bucket, profile, provision script and runner
+version gate resolve as there; `request.batch.*` is honored). All jobs are
+submitted and launched first, then polled, so the fleet runs them
+concurrently. Per job:
+
+- The request's directory (minus `.klt/` and `.git/`) is uploaded as one tree,
+  capped at 256 MiB, plus that unit's request (`pdk.rebuild_corners` replaced
+  by `pdk.corner`). The netlist and macro LEF/GDS must be under the request
+  directory; one outside it is refused before any upload
+  (`batch_input_outside_tree`, `batch_input_too_large`).
+- The runner executes `klt place-and-route` on the unit request with
+  `--backend local`, and its `.klt/place-and-route/` is collected into this
+  host's `.klt/place-and-route/<corner>/`. Paths in the unit's report point
+  there, so `--check` and `--rerun` work on a batch-produced report.
+- `request.batch.job_timeout_s` (default 14400) bounds one job.
+
+The aggregated report keeps the shape above and adds:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `environment.backend` | `"batch"` | Present only for a batch run. |
+| `environment.remote.fleet[]` | array\<object\> | One `klt sim`-style remote block per job (`job_id`, `instance_type`, `state`, `runner_klt_version`, ...), with the unit's `corner`. |
+| `corner_runs[].job_id` | string | The unit's batch job. |
+| `corner_runs[].error_code` | string | Failed batch units only, when the transport or the runner's klt set one (`batch_no_capacity`, `batch_poll_timeout`, `batch_job_timeout`, `batch_deck_mismatch`, ...). |
+
+`corner_runs[].deck_content_hash` is the hash of the liberty deck the runner
+used; if this host can resolve the same corner's deck and the hashes differ,
+the unit fails with `batch_deck_mismatch` (the fleet image's PDK does not match
+this host's).
+
+**There is never a local fallback.** A unit whose upload, launch, poll or run
+fails is a `failed` `corner_runs` entry with the error and job id, the other
+units still complete, and the command exits `1` with the aggregated report on
+stdout. A request-level problem (unresolvable fleet config, input outside the
+tree) is a normal error envelope (exit `1`, `error.code` when set) before any
+job is submitted. OpenROAD is never started on this host on the batch path.
 
 ## Partial completion (`target_stage`)
 

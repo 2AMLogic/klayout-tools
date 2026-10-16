@@ -13690,6 +13690,7 @@ def test_parasitics_summary_block_shape(tmp_path):
     # reference" in `docs/cli/extract.md`.
     assert para["substrate_dc_tie"] == {
         "resistance_ohm": 1e12,
+        "mode": "shunt",
         "nets": [{"net": "vsubs", "device": "Rvsubs_dctie"}],
         "node_scope": "global",
     }
@@ -17765,6 +17766,79 @@ def _make_floating_substrate_layout() -> kdb.Layout:
     return layout
 
 
+def test_substrate_tie_ohms_default_header_states_floating(tmp_path):
+    """Issue #3089: the default tie is announced in the netlist header."""
+    path = _write_gds(_make_floating_substrate_layout(), tmp_path / "floating.gds")
+    para = run_extract(
+        path, "sky130", output=str(tmp_path / "para.spice"), parasitics=True
+    )
+    text = Path(para["netlist_path"]).read_text()
+    assert "* - substrate tie: 1e+12 ohm to ground" in text
+    assert "capacitively floating in transient" in text
+
+
+def test_substrate_tie_ohms_custom_value(tmp_path):
+    """Issue #3089: a positive value is written verbatim and reported."""
+    path = _write_gds(_make_floating_substrate_layout(), tmp_path / "floating.gds")
+    para = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "para.spice"),
+        parasitics=True,
+        substrate_tie_ohms=1e-3,
+    )
+    text = Path(para["netlist_path"]).read_text()
+    assert "Rvsubs_dctie vsubs 0 0.001" in text
+    assert "* - substrate tie: 0.001 ohm to ground" in text
+    tie = para["parasitics"]["substrate_dc_tie"]
+    assert tie["resistance_ohm"] == 1e-3
+    assert tie["mode"] == "shunt"
+    assert para["parasitics"]["integrity"]["short_candidates"] == 0
+
+
+def test_substrate_tie_ohms_zero_is_hard_tie(tmp_path):
+    """Issue #3089: 0 is a hard tie, written as a legal (1 mohm) resistor."""
+    path = _write_gds(_make_floating_substrate_layout(), tmp_path / "floating.gds")
+    para = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "para.spice"),
+        parasitics=True,
+        substrate_tie_ohms=0,
+    )
+    text = Path(para["netlist_path"]).read_text()
+    assert "Rvsubs_dctie vsubs 0 0.001" in text
+    assert "hard tie to ground" in text
+    tie = para["parasitics"]["substrate_dc_tie"]
+    assert tie["mode"] == "hard"
+    assert tie["resistance_ohm"] == 1e-3
+    assert para["parasitics"]["integrity"]["short_candidates"] == 0
+
+
+@pytest.mark.parametrize("bad", [-1.0, float("nan"), float("inf")])
+def test_substrate_tie_ohms_rejects_invalid(tmp_path, bad):
+    path = _write_gds(_make_floating_substrate_layout(), tmp_path / "floating.gds")
+    with pytest.raises(ExtractError, match="--substrate-tie-ohms"):
+        run_extract(
+            path,
+            "sky130",
+            output=str(tmp_path / "x.spice"),
+            parasitics=True,
+            substrate_tie_ohms=bad,
+        )
+
+
+def test_substrate_tie_ohms_requires_parasitics(tmp_path):
+    path = _write_gds(_make_floating_substrate_layout(), tmp_path / "floating.gds")
+    with pytest.raises(ExtractError, match="--substrate-tie-ohms requires"):
+        run_extract(
+            path,
+            "sky130",
+            output=str(tmp_path / "x.spice"),
+            substrate_tie_ohms=1e3,
+        )
+
+
 def test_parasitics_writes_substrate_dc_tie_inside_subckt_body(tmp_path):
     """The structural half of issue #1263 (DC convergence) plus issue #1503
     (node scope): `--parasitics` writes one large shunt resistor from the
@@ -17804,6 +17878,7 @@ def test_parasitics_writes_substrate_dc_tie_inside_subckt_body(tmp_path):
 
     assert para["parasitics"]["substrate_dc_tie"] == {
         "resistance_ohm": 1e12,
+        "mode": "shunt",
         "nets": [{"net": "vsubs", "device": "Rvsubs_dctie"}],
         "node_scope": "global",
     }
@@ -25804,3 +25879,80 @@ def test_probe_bad_role_via_cli_exits_one(tmp_path, capsys):
     )
 
     assert "bogus" in message and "available:" in message
+
+
+def test_def_net_connections_dotted_net_gets_conn_block(tmp_path):
+    """Regression (issue #2903): a DEF net whose name carries `.` is renamed by
+    the extractor (#2145) before the SPEF is written, so its `--def-net-
+    connections` entry must follow the rename and still yield `*CONN` pins."""
+    path = _write_gds(
+        _make_inverter_layout(substrate_tap_label="XTAP.vsub"), tmp_path / "d.gds"
+    )
+    spef_path = tmp_path / "d.spef"
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "d.spice"),
+        parasitics=True,
+        spef_output=str(spef_path),
+        def_net_connections={"XTAP.vsub": (("u1", "VPB"),)},
+    )
+    text = spef_path.read_text()
+    block = text.split("*D_NET XTAP_vsub ", 1)[1].split("*D_NET", 1)[0]
+    assert "*I u1:VPB B" in block
+    assert not any("without instance *CONN" in w for w in report["warnings"])
+
+
+def test_remap_def_net_connections_follows_collision_suffix():
+    """`a.b` alongside an existing `a_b` lands on `a_b_1`; each DEF net's pins
+    stay on its own distinct rewritten net (issue #2903)."""
+    from klayout_tools.extract import (
+        _remap_def_net_connections,
+        _rewrite_dotted_net_names,
+    )
+
+    netlist = kdb.Netlist()
+    circuit = kdb.Circuit()
+    circuit.name = "TOP"
+    netlist.add(circuit)
+    for name in ("a_b", "a.b"):
+        circuit.create_net(name)
+    renames = _rewrite_dotted_net_names(netlist)
+    assert [(b, a) for _c, b, a in renames] == [("a.b", "a_b_1")]
+
+    remapped = _remap_def_net_connections(
+        {"a_b": (("u1", "A"),), "a.b": (("u2", "B"),), "plain": (("u3", "C"),)},
+        renames,
+    )
+    assert remapped == {
+        "a_b": (("u1", "A"),),
+        "a_b_1": (("u2", "B"),),
+        "plain": (("u3", "C"),),
+    }
+    # No renames / no map: returned untouched (byte-identical path).
+    original = {"x": (("u", "p"),)}
+    assert _remap_def_net_connections(original, []) is original
+    assert _remap_def_net_connections(None, renames) is None
+
+
+def test_spef_missing_conn_warning_names_unmatched_and_duplicate_nets():
+    """Issue #2903 ask 2: a written `*D_NET` that matches a DEF net but gets
+    no instance `*CONN` is disclosed in `warnings[]`."""
+    from klayout_tools.extract import _spef_missing_conn_warnings
+
+    report = {"nets": [{"net": "a_b"}, {"net": "dup"}, {"net": "dup"}, {"net": "ok"}]}
+    original = {
+        "a.b": (("u1", "A"),),
+        "dup": (("u2", "B"),),
+        "ok": (("u3", "C"),),
+    }
+    # Stale: dotted key never remapped, so `a_b` has no pins.
+    warns = _spef_missing_conn_warnings(report, original, original)
+    assert len(warns) == 1
+    assert "2 *D_NET" in warns[0] and "a_b" in warns[0] and "dup" in warns[0]
+    assert "ok" not in warns[0].split("(", 1)[1].split(")", 1)[0]
+    # Clean case: no warning.
+    assert (
+        _spef_missing_conn_warnings({"nets": [{"net": "ok"}]}, original, original) == []
+    )
+    assert _spef_missing_conn_warnings(report, None, None) == []

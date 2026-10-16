@@ -270,12 +270,6 @@
       "file": "src/klayout_tools/drc.py",
       "code": "union-attr",
       "message": "Item \"None\" of \"DerivedLayer | None\" has no attribute \"mode\"",
-      "count": 5
-    },
-    {
-      "file": "src/klayout_tools/drc.py",
-      "code": "union-attr",
-      "message": "Item \"None\" of \"DerivedLayer | None\" has no attribute \"sized_by_um\"",
       "count": 1
     },
     {
@@ -834,7 +828,7 @@
       "file": "src/klayout_tools/gen_pcells/diff_pair.py",
       "code": "attr-defined",
       "message": "\"_DiffPairPCell\" has no attribute \"TypeDouble\"",
-      "count": 15
+      "count": 16
     },
     {
       "file": "src/klayout_tools/gen_pcells/diff_pair.py",
@@ -1019,6 +1013,12 @@
     {
       "file": "src/klayout_tools/gen_pcells/diff_pair.py",
       "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"top_endcap_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
       "message": "\"_DiffPairPCell\" has no attribute \"voltage_flavor_mark_layer\"",
       "count": 1
     },
@@ -1062,7 +1062,7 @@
       "file": "src/klayout_tools/gen_pcells/esd_device.py",
       "code": "attr-defined",
       "message": "\"_EsdDevicePCell\" has no attribute \"TypeDouble\"",
-      "count": 11
+      "count": 12
     },
     {
       "file": "src/klayout_tools/gen_pcells/esd_device.py",
@@ -1257,6 +1257,12 @@
       "count": 1
     },
     {
+      "file": "src/klayout_tools/gen_pcells/esd_device.py",
+      "code": "attr-defined",
+      "message": "\"_EsdDevicePCell\" has no attribute \"top_endcap_um\"",
+      "count": 1
+    },
+    {
       "file": "src/klayout_tools/gen_pcells/guard_ring.py",
       "code": "attr-defined",
       "message": "\"_GuardRingPCell\" has no attribute \"TypeBoolean\"",
@@ -1422,7 +1428,7 @@
       "file": "src/klayout_tools/gen_pcells/mos_array.py",
       "code": "attr-defined",
       "message": "\"_MosArrayPCell\" has no attribute \"TypeDouble\"",
-      "count": 17
+      "count": 18
     },
     {
       "file": "src/klayout_tools/gen_pcells/mos_array.py",
@@ -1662,6 +1668,12 @@
       "file": "src/klayout_tools/gen_pcells/mos_array.py",
       "code": "attr-defined",
       "message": "\"_MosArrayPCell\" has no attribute \"tap_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"top_endcap_um\"",
       "count": 1
     },
     {
@@ -2177,7 +2189,7 @@
     {
       "file": "src/klayout_tools/lvs.py",
       "code": "no-redef",
-      "message": "Name \"reason\" already defined on line 8705",
+      "message": "Name \"reason\" already defined on line 8877",
       "count": 1
     },
     {

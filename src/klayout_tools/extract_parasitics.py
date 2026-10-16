@@ -1981,7 +1981,7 @@ def _record_substrate_ties(
     """Mirror the substrate DC-reference shunts (issue #1263) into the
     integrity record (issue #2764) as **intentional** DC ties.
 
-    Each tie is a large (``1e12`` ohm) resistor from a synthesized substrate
+    Each tie is a large (``1e12`` ohm by default) resistor from a synthesized substrate
     identity to SPICE's global ground node ``0`` -- a deliberate cross-net
     (net-to-ground) element, so it is flagged ``intentional_dc_tie`` and
     excluded from the suspicious-resistor and short-candidate checks
@@ -2046,6 +2046,7 @@ def _inject_parasitics(
     mom_rlc_inductor: tuple[str, float] | None = None,
     record_slice_topology: bool = False,
     variants: ParasiticVariants | None = None,
+    substrate_tie_ohms: float | None = None,
 ) -> dict[str, Any]:
     """Inject a star-topology parasitic RC per net (or a distributed
     multi-segment ladder for a caller-declared subset, see below), plus one
@@ -2722,7 +2723,7 @@ def _inject_parasitics(
     # #1263) -- last, so it sees every net this function created and cannot
     # collide with one of them.
     substrate_dc_tie = _tie_substrate_nets_to_ground(
-        circuit, res_class, ground_net_name
+        circuit, res_class, ground_net_name, substrate_tie_ohms
     )
 
     # Issue #2764: check the emitted network and attach the results -- the
@@ -2759,10 +2760,14 @@ def _tie_substrate_nets_to_ground(
     circuit: kdb.Circuit,
     res_class: kdb.DeviceClass,
     substrate_net: str,
+    substrate_tie_ohms: float | None = None,
 ) -> dict[str, Any]:
     """Give every *synthesized* substrate identity in ``circuit`` a DC path
     to SPICE's global ground node ``0``, via one large shunt resistor per net
-    (``R<net>_dctie <net> 0 1e12``), and report what was written (issue
+    (``R<net>_dctie <net> 0 1e12`` by default; ``substrate_tie_ohms``, issue
+    #3089, overrides the value -- ``0`` is a hard tie, written as the 1 mohm
+    floor because SPICE has no zero-ohm resistor), and report what was
+    written (issue
     #1263). The tied net names are also declared SPICE-global by the caller
     (``run_extract``, via ``create_model_binding_delegate``'s ``global_nets``
     -- see issue #1503 below): this function only builds the *name list* and
@@ -2877,7 +2882,16 @@ def _tie_substrate_nets_to_ground(
         _SPICE_GLOBAL_GROUND_NODE,
         SUBSTRATE_DC_TIE_RESISTANCE_OHM,
         _is_synthesized_substrate_net_name,
+        substrate_tie_mode,
+        substrate_tie_written_ohms,
     )
+
+    requested_ohms = (
+        SUBSTRATE_DC_TIE_RESISTANCE_OHM
+        if substrate_tie_ohms is None
+        else substrate_tie_ohms
+    )
+    written_ohms = substrate_tie_written_ohms(requested_ohms)
 
     tied_nets = [
         net
@@ -2899,7 +2913,7 @@ def _tie_substrate_nets_to_ground(
             tie = circuit.create_device(res_class, instance_name)
             tie.connect_terminal("A", net)
             tie.connect_terminal("B", reference)
-            tie.set_parameter("R", SUBSTRATE_DC_TIE_RESISTANCE_OHM)
+            tie.set_parameter("R", written_ohms)
             entries.append(
                 {
                     # Report-boundary escape (issue #1162), so this JSON
@@ -2910,7 +2924,11 @@ def _tie_substrate_nets_to_ground(
                 }
             )
     return {
-        "resistance_ohm": SUBSTRATE_DC_TIE_RESISTANCE_OHM,
+        "resistance_ohm": written_ohms,
+        # Additive field (issue #3089): `"shunt"` (a positive resistance) or
+        # `"hard"` (`--substrate-tie-ohms 0`; `resistance_ohm` then holds the
+        # 1 mohm floor actually written).
+        "mode": substrate_tie_mode(requested_ohms),
         "nets": entries,
         # Additive field (issue #1503): constant `"global"` -- every
         # `nets[].net` identity above is also declared SPICE-global (see
