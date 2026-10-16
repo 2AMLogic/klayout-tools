@@ -76,6 +76,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import itertools
 import json
 import math
 import os
@@ -100,8 +101,10 @@ from . import (
     sim_injected,
     sim_mismatch_gate,
     sim_noise,
+    sim_passes,
     sim_portable,
     sim_steps,
+    sim_stimulus,
     sim_supply_waveform,
     sim_transfer_meas,
 )
@@ -267,6 +270,9 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         # produced no plot, and a result whose inputs produced no value.
         "step_failed",
         "derived_input_unavailable",
+        # Multi-pass AC acquisition (`analysis.passes`, issue #3159): a pass
+        # whose AC analysis left no decodable rawfile.
+        "pass_failed",
         # Units that never ran (`_unrun_corner_report` and friends).
         "budget_exceeded",
         "orphaned",
@@ -424,6 +430,19 @@ def resolve_backend(backend: str | None, request: dict[str, Any]) -> tuple[str, 
     if env_value:
         return env_value, True
     return "local", False
+
+
+def _backend_source(backend: str | None, request: dict[str, Any]) -> str:
+    """Where :func:`resolve_backend`'s answer came from: ``"flag"``,
+    ``"request"``, ``"env"`` (``$KLT_SIM_BACKEND``) or ``"default"``
+    (issue #2977, reported as ``environment.backend.source``)."""
+    if backend is not None:
+        return "flag"
+    if request.get("backend") is not None:
+        return "request"
+    if os.environ.get(BACKEND_ENV, "").strip():
+        return "env"
+    return "default"
 
 
 def _yield_host_default_backend(
@@ -1085,6 +1104,125 @@ class SimError(Exception):
         self.code = code
 
 
+#: ``SimError.code`` for a request whose ``engine_version`` pin the resolved
+#: engine does not satisfy (issue #3041): the *tool* is unavailable at the
+#: pinned build. Distinct from :data:`UNSUPPORTED_ANALYSIS_CODE`.
+ENGINE_VERSION_UNMET_CODE = "engine_version_unmet"
+
+#: ``SimError.code`` for an analysis kind `klt sim` has no implementation for
+#: (issue #3041): the *capability* is absent, whatever engine build is pinned.
+UNSUPPORTED_ANALYSIS_CODE = "unsupported_analysis"
+
+#: Periodic small-signal / noise analysis kinds a request may name but `klt
+#: sim` does not implement (no PSS/pnoise/pac; see also issue #2985).
+UNSUPPORTED_ANALYSIS_KINDS: tuple[str, ...] = ("pss", "pnoise", "pac")
+
+
+def reject_unsupported_analysis(kind: Any) -> None:
+    """Raise :class:`SimError` (``code="unsupported_analysis"``) when ``kind``
+    names a periodic analysis (issue #3041) -- before any corner runs, so
+    callers can record "capability absent" apart from "tool unavailable"."""
+    if isinstance(kind, str) and kind.lower() in UNSUPPORTED_ANALYSIS_KINDS:
+        raise SimError(
+            f"analysis.kind {kind!r} is not supported: `klt sim` implements no "
+            "periodic small-signal/noise analysis "
+            f"({', '.join(UNSUPPORTED_ANALYSIS_KINDS)}); "
+            'see docs/cli/sim.md "Supported analyses"',
+            code=UNSUPPORTED_ANALYSIS_CODE,
+        )
+
+
+def _version_components(text: str) -> tuple[int, ...] | None:
+    """Leading dotted integer components of a version string (``"44.2"`` ->
+    ``(44, 2)``, ``"7.10.0-opensource"`` -> ``(7, 10, 0)``), or ``None``."""
+    match = re.match(r"\s*(\d+(?:\.\d+)*)", text)
+    if match is None:
+        return None
+    return tuple(int(part) for part in match.group(1).split("."))
+
+
+def _validate_engine_version_pin(request: dict[str, Any]) -> tuple[int, ...] | None:
+    """The request's ``engine_version`` pin as ``(major,)`` or ``(major,
+    minor)`` (issue #3041), ``None`` when unset."""
+    pin = request.get("engine_version")
+    if pin is None:
+        return None
+    if not isinstance(pin, str) or not re.fullmatch(r"\d+(?:\.\d+)?", pin.strip()):
+        raise SimError(
+            "request.engine_version must be a string of the form 'MAJOR' or "
+            f"'MAJOR.MINOR' (got {pin!r})"
+        )
+    return _version_components(pin) or None
+
+
+def _check_engine_version_pin(
+    pin: tuple[int, ...], found: str | None, engine: str, *, where: str
+) -> None:
+    """Fail closed with ``engine_version_unmet`` unless ``found`` matches the
+    pin on every component the pin states (``"44"`` pins the major only)."""
+    required = ".".join(str(part) for part in pin)
+    parsed = _version_components(found) if found else None
+    if parsed is not None and parsed[: len(pin)] == pin:
+        return
+    if found is None:
+        detail = f"{where} reported no {engine} version"
+    elif parsed is None:
+        detail = f"{where} reported an unparseable {engine} version {found!r}"
+    else:
+        detail = f"{where} found {engine} {found}"
+    raise SimError(
+        f"pinned simulator unavailable: request requires {engine} {required}; {detail}",
+        code=ENGINE_VERSION_UNMET_CODE,
+    )
+
+
+def _check_local_engine_version_pin(
+    pin: tuple[int, ...] | None, backend: str, engine: str, binary: str
+) -> None:
+    """Enforce the pin before any corner runs, where this process can see the
+    engine (local backends); a no-op when unset or for off-host backends."""
+    if pin is None or backend in _OFFHOST_BACKENDS:
+        return
+    _check_engine_version_pin(
+        pin,
+        _probe_engine_version(engine, binary),
+        engine,
+        where="the local engine probe",
+    )
+
+
+def _check_offhost_engine_version_pin(
+    pin: tuple[int, ...] | None,
+    backend: str,
+    engine: str,
+    engine_version: str | None,
+) -> None:
+    """Enforce the pin for off-host backends. No pre-submit probe exists for a
+    remote/batch runner, so it is checked against the version its reports
+    carried (after the run)."""
+    if pin is None or backend not in _OFFHOST_BACKENDS:
+        return
+    _check_engine_version_pin(
+        pin, engine_version, engine, where=f"the {backend} runner's report"
+    )
+
+
+def _probe_engine_version(engine: str, binary: str) -> str | None:
+    """Ask the local engine binary for its version without simulating."""
+    argv = [binary, "--version"] if engine == "ngspice" else [binary, "-v"]
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, timeout=30, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    text = (proc.stdout or "") + (proc.stderr or "")
+    if engine == "ngspice":
+        return _extract_engine_version(text)
+    match = re.search(r"Release\s+([\w.]+)", text)
+    return match.group(1) if match else None
+
+
 def _worker_ngspice_binary(remote: Any) -> str | None:
     """The worker-observed ngspice path out of ``environment.remote`` (issue
     #3110): ``worker_environment.simulator.selected_path`` when its capture is
@@ -1208,6 +1346,10 @@ def _resolve_analysis_and_measurements(
     analysis = request.get("analysis") or {}
     if "kind" not in analysis or "args" not in analysis:
         raise SimError("request.analysis requires 'kind' and 'args'")
+    reject_unsupported_analysis(analysis["kind"])
+    # Issue #3159: `analysis.passes` (AC only) is validated and normalised
+    # here, before any engine launch; absent `passes` returns `analysis` as is.
+    analysis = sim_passes.resolve_analysis(analysis)
     measurements_spec = request.get("measurements", [])
     # Issue #2533: `spice` (a verbatim top-level `.meas` card) and `expr` (an
     # expression evaluated after the analysis, inside the generated
@@ -2938,7 +3080,9 @@ def _run_sim_corners(
             f"unsupported engine '{engine}' (supported: {', '.join(SUPPORTED_ENGINES)})"
         )
 
+    backend_source = _backend_source(backend, request)
     backend, backend_from_host_default = resolve_backend(backend, request)
+    requested_backend = backend
     if backend not in SUPPORTED_BACKENDS:
         source = f" (from ${BACKEND_ENV})" if backend_from_host_default else ""
         raise SimError(
@@ -3066,6 +3210,13 @@ def _run_sim_corners(
             "options.stage_model_inputs: true to upload binaries built for "
             "the runner's platform and ngspice OSDI ABI"
         )
+    # Issue #3041: an `engine_version` pin is checked before any corner runs
+    # where this process can see the engine (local backends); off-host
+    # backends are checked against the report's `engine_version` afterwards.
+    engine_version_pin = _validate_engine_version_pin(request)
+    _check_local_engine_version_pin(
+        engine_version_pin, backend, engine, ngspice_binary or XYCE_BINARY
+    )
     timeout_s = options.get("timeout_s", DEFAULT_TIMEOUT_S)
     keep_artifacts = bool(options.get("keep_artifacts", False))
     portable_artifacts = _portable_artifacts_option(options)
@@ -3083,6 +3234,13 @@ def _run_sim_corners(
     sim_steps.refuse_unsupported_options(
         analysis, want_waveforms=want_waveforms, plot_requested=plot_dir is not None
     )
+    sim_passes.refuse_unsupported(
+        analysis,
+        measurements_spec,
+        want_waveforms=want_waveforms,
+        plot_requested=plot_dir is not None,
+    )
+    sim_passes.refuse_xyce(analysis, engine)
     capture_only = _capture_only_requested(
         options, want_waveforms=want_waveforms, measurements_spec=measurements_spec
     )
@@ -3290,6 +3448,14 @@ def _run_sim_corners(
     # Issue #2482: the same pre-dispatch check for a step's own `alter`
     # overrides (plus a clash with the corner's own supply axis).
     sim_steps.validate_alter_targets(analysis, netlist_path, corner_points)
+    sim_passes.validate_alter_targets(analysis, netlist_path, corner_points)
+    # Issue #2977: the declarative timed stimulus, validated and expanded
+    # before any corner is dispatched (an off-host worker re-expands it
+    # from the forwarded request).
+    stimulus_signals = _resolve_stimulus(
+        request, analysis, engine, netlist_path, corner_points
+    )
+    stimulus_lines = sim_stimulus.deck_lines(stimulus_signals)
 
     # Issue #2522: a `corners.process` bundle may name its own model library
     # per section. Resolved (and existence-checked) per host, from the refs
@@ -3371,6 +3537,7 @@ def _run_sim_corners(
         save_mode=save_mode,
         save_vectors=save_vectors,
         ngspice_options=ngspice_options,
+        stimulus_lines=stimulus_lines,
     )
 
     dispatch_points = (
@@ -3384,10 +3551,20 @@ def _run_sim_corners(
     backend = _yield_host_default_backend(
         backend, backend_from_host_default, reason_ok=len(dispatch_points) > 1
     )
+    # Issue #2977: which backend actually ran, and where the request for it
+    # came from -- so a host-policy audit can spot a `local` run although
+    # `$KLT_SIM_BACKEND=batch` asked otherwise.
+    backend_provenance = {
+        "resolved": backend,
+        "source": backend_source,
+        "requested": requested_backend,
+    }
     # Issue #2924: off-host workers run the whole `klt sim` request and return
     # only the scalar results (the AC rawfile never leaves the worker), so the
     # `transfer` form is gated by the mandatory runner-feature check in
     # `sim_batch`/`sim_remote` rather than refused here.
+    # Issue #3159: per-pass complex rawfiles are corner-local too.
+    sim_passes.refuse_offhost_backend(analysis, backend)
 
     # Two-pass fail-fast probe (issue #1694, opt-in via `fail_fast_probe`/
     # `options.fail_fast_probe`): run once per grid, before any real corner
@@ -3417,6 +3594,7 @@ def _run_sim_corners(
             osdi_preload=osdi_preload,
             save_mode=save_mode,
             ngspice_options=ngspice_options,
+            stimulus_lines=stimulus_lines,
         )
 
     probe_abort: dict[str, Any] | None = None
@@ -3500,6 +3678,7 @@ def _run_sim_corners(
             "save_vectors": save_vectors,
             "waveform_max_bytes": waveform_max_bytes,
             "ngspice_options": ngspice_options,
+            "stimulus_lines": stimulus_lines,
             "convergence_retry": convergence_retry,
         }
         if backend not in _OFFHOST_BACKENDS
@@ -3545,6 +3724,7 @@ def _run_sim_corners(
             keep_artifacts=keep_artifacts,
             want_waveforms=want_waveforms,
             request_dir=request_dir,
+            artifacts_dir=artifacts_dir,
         )
 
     if hosts == 1:
@@ -3628,6 +3808,7 @@ def _run_sim_corners(
 
     _require_params_echo(dispatch_points, corners_new, backend=backend)
     _require_nodeset_echo(dispatch_points, corners_new, backend=backend)
+    _require_options_echo(dispatch_points, corners_new, backend=backend)
     _record_batch_checkpoint(checkpoint, backend, corners_new, backend_engine_version)
 
     if resume:
@@ -3658,6 +3839,9 @@ def _run_sim_corners(
         backend_engine_version
         if backend_engine_version is not None
         else loaded_engine_version
+    )
+    _check_offhost_engine_version_pin(
+        engine_version_pin, backend, engine, engine_version
     )
 
     budget_exceeded = any(
@@ -3849,6 +4033,10 @@ def _run_sim_corners(
     apply_engine_host(
         environment, backend=backend, client_ngspice_binary=ngspice_binary
     )
+    environment["backend"] = backend_provenance
+    # Issue #2977: additive, only when declared; the schedule as applied (skew
+    # and transition times resolved, PWL points included) -- see docs/cli/sim.md.
+    environment.update(sim_stimulus.environment_entry(stimulus_signals))
     if monte_carlo_info is not None:
         # Additive/optional: only present when the request declares
         # `monte_carlo` -- the seed contract's request-level echo, per
@@ -4585,6 +4773,10 @@ class CornerPoint:
     ``{}`` for a point no ``options.nodeset`` rule matched. It is a solver
     hint, not part of the point's identity: it never changes :attr:`corner_id`.
 
+    ``options`` (issue #3125) is the same for the ``corners.options`` axis: the
+    normalized ``{solver option: number}`` row, ``{}`` when the request has
+    no such axis (and then the IDs/slugs are untouched).
+
     ``process_sections`` is populated only when the request's
     ``corners.process[]`` entry for this point was the multi-section bundle
     object form (``{"name": str, "sections": [...]}``, see
@@ -4622,6 +4814,7 @@ class CornerPoint:
         "temperature_c",
         "params",
         "nodeset",
+        "options",
         "sample_index",
         "mc_seed",
         "variant",
@@ -4640,6 +4833,7 @@ class CornerPoint:
         process_section_libs_resolved: list[str | None] | None = None,
         params: dict[str, int | float] | None = None,
         nodeset: dict[str, float] | None = None,
+        options: dict[str, int | float] | None = None,
         sample_index: int | None = None,
         mc_seed: dict[str, Any] | None = None,
         variant: str | None = None,
@@ -4650,6 +4844,7 @@ class CornerPoint:
         self.process = process
         self.params: dict[str, int | float] = params or {}
         self.nodeset: dict[str, float] = nodeset or {}
+        self.options: dict[str, int | float] = options or {}
         self.process_sections = process_sections
         self.process_section_libs = process_section_libs
         self.process_section_libs_resolved = process_section_libs_resolved
@@ -4710,6 +4905,8 @@ class CornerPoint:
             base = f"{base}/@{self.variant}"
         if self.params:
             base = f"{base}/params:{_format_params_label(self.params)}"
+        if self.options:
+            base = f"{base}/options:{_format_params_label(self.options)}"
         if self.sample_index is None:
             return base
         return f"{base}/mc{self.sample_index}"
@@ -4737,6 +4934,12 @@ def _nodeset_report_field(point: CornerPoint) -> dict[str, Any]:
     """The additive ``nodeset`` field of a corner report (issue #3036):
     present only for a point an ``options.nodeset`` rule selected."""
     return {"nodeset": dict(point.nodeset)} if point.nodeset else {}
+
+
+def _options_report_field(point: CornerPoint) -> dict[str, Any]:
+    """The additive ``options`` field of a corner report (issue #3125):
+    present only for a point on a ``corners.options`` axis."""
+    return {"options": dict(point.options)} if point.options else {}
 
 
 def _format_number(value: float) -> str:
@@ -4871,6 +5074,97 @@ def _expand_param_axis(
             raise SimError(f"corners.params declares the row {label!r} twice")
         seen.add(label)
     return rows
+
+
+#: ``corners.options`` (issue #3125): the numeric solver ``.options`` a
+#: corner axis may sweep. A subset of :data:`NGSPICE_SOLVER_OPTIONS` -- the
+#: flag/token options (``method``, ``noopiter``) are not numbers -- plus
+#: ``itl3``. ngspice silently ignores an unknown ``.options`` name, so the
+#: allow-list turns a typo into a named error.
+CORNER_OPTION_NAMES = (
+    "abstol",
+    "gmin",
+    "gminsteps",
+    "itl1",
+    "itl2",
+    "itl3",
+    "itl4",
+    "pivtol",
+    "reltol",
+    "srcsteps",
+    "vntol",
+)
+
+
+def _validate_corner_option_name(name: Any, where: str) -> str:
+    lowered = name.lower() if isinstance(name, str) else name
+    if lowered not in CORNER_OPTION_NAMES:
+        raise SimError(
+            f"{where} name {name!r} is not a supported numeric solver "
+            f"option; supported: {', '.join(CORNER_OPTION_NAMES)}"
+        )
+    return lowered
+
+
+def _expand_options_axis(
+    corners_spec: dict[str, Any],
+) -> list[dict[str, int | float]]:
+    """The zipped ``corners.options`` rows (issue #3125), or ``[{}]`` for a
+    request with no options axis. Same shape and rules as
+    :func:`_expand_param_axis`: names zip by index, every array nonempty and
+    the same length, duplicate rows rejected."""
+    spec = corners_spec.get("options")
+    if spec is None or spec == {}:
+        return [{}]
+    if not isinstance(spec, dict):
+        raise SimError(
+            "corners.options must be an object mapping solver option names "
+            "to equal-length arrays of numbers"
+        )
+    columns: dict[str, list[int | float]] = {}
+    for name, values in spec.items():
+        lowered = _validate_corner_option_name(name, "corners.options")
+        if lowered in columns:
+            raise SimError(
+                f"corners.options declares {lowered!r} more than once "
+                "(names are case-insensitive)"
+            )
+        if not isinstance(values, list) or not values:
+            raise SimError(
+                f"corners.options.{name} must be a nonempty array of numbers"
+            )
+        columns[lowered] = [
+            _validate_param_scalar(value, f"corners.options.{name}[{i}]")
+            for i, value in enumerate(values)
+        ]
+    if len({len(values) for values in columns.values()}) != 1:
+        raise SimError("corners.options arrays must all be the same length")
+    count = len(next(iter(columns.values())))
+    rows = [
+        dict(sorted((name, values[i]) for name, values in columns.items()))
+        for i in range(count)
+    ]
+    seen: set[str] = set()
+    for row in rows:
+        label = _format_params_label(row)
+        if label in seen:
+            raise SimError(f"corners.options declares the row {label!r} twice")
+        seen.add(label)
+    return rows
+
+
+def _normalize_option_row(raw: Any, where: str) -> dict[str, int | float]:
+    """One scalar ``{option: number}`` row (a report/wire ``options`` map),
+    validated and normalized."""
+    if not isinstance(raw, dict):
+        raise SimError(f"{where} must be an object mapping names to numbers")
+    row: dict[str, int | float] = {}
+    for name, value in raw.items():
+        lowered = _validate_corner_option_name(name, where)
+        if lowered in row:
+            raise SimError(f"{where} declares {lowered!r} more than once")
+        row[lowered] = _validate_param_scalar(value, f"{where}.{name}")
+    return dict(sorted(row.items()))
 
 
 def _parse_process_entry(
@@ -5031,6 +5325,9 @@ def _corner_points_to_wire(points: list[CornerPoint]) -> list[dict[str, Any]]:
             # Issue #3036: the already-selected map, never the rules -- a
             # shard holds a subset of the points and could not re-resolve them.
             entry["nodeset"] = point.nodeset
+        if point.options:
+            # Issue #3125: likewise additive, only for an options point.
+            entry["options"] = point.options
         wire.append(entry)
     return wire
 
@@ -5080,6 +5377,12 @@ def _corner_points_from_wire(data: Any) -> list[CornerPoint]:
             if raw_nodeset is not None
             else {}
         )
+        raw_options = entry.get("options")
+        options = (
+            _normalize_option_row(raw_options, "request._explicit_points[].options")
+            if raw_options is not None
+            else {}
+        )
         points.append(
             CornerPoint(
                 entry.get("process"),
@@ -5089,6 +5392,7 @@ def _corner_points_from_wire(data: Any) -> list[CornerPoint]:
                 process_section_libs=section_libs,
                 params=params,
                 nodeset=nodeset,
+                options=options,
                 sample_index=entry.get("sample_index"),
                 mc_seed=entry.get("mc_seed"),
                 variant=entry.get("variant"),
@@ -5132,7 +5436,8 @@ def _expand_corners(
     """Expand the declared axes into the deterministic, odometer-style corner list.
 
     Axis order (outer to inner, per the spike): process, then the supply
-    sweep, then temperature. A missing axis collapses to a single default
+    sweep, then temperature, then ``params`` (#3035), then ``options``
+    (#3125). A missing axis collapses to a single default
     point (``process=None``, ``supply_v={}``, ``temperature_c=27``) rather
     than an error -- a request that only cares about one axis need not
     populate the others.
@@ -5181,6 +5486,9 @@ def _expand_corners(
     param_rows = _expand_param_axis(corners_spec)
     declared_params = set(param_rows[0])
     _validate_exclude_params(exclude_spec, declared_params)
+    # Issue #3125: the solver-option axis, innermost of all.
+    option_rows = _expand_options_axis(corners_spec)
+    _validate_exclude_options(exclude_spec, set(option_rows[0]))
 
     points: list[CornerPoint] = []
     for process, process_sections, process_section_libs in processes:
@@ -5188,7 +5496,9 @@ def _expand_corners(
             for variant_name, variant_sources in variants:
                 point_supply = {**supply_v, **variant_sources}
                 for temperature_c in temperatures:
-                    for param_row in param_rows:
+                    for param_row, option_row in itertools.product(
+                        param_rows, option_rows
+                    ):
                         point = CornerPoint(
                             process,
                             point_supply,
@@ -5196,6 +5506,7 @@ def _expand_corners(
                             process_sections=process_sections,
                             process_section_libs=process_section_libs,
                             params=param_row,
+                            options=option_row,
                             variant=variant_name,
                             supply_waveforms=supply_waveforms,
                         )
@@ -5229,6 +5540,32 @@ def _validate_exclude_params(
                     )
                 )
             _validate_param_scalar(value, f"exclude[].params.{name}")
+
+
+def _validate_exclude_options(
+    exclude_spec: list[dict[str, Any]], declared: set[str]
+) -> None:
+    """Reject an ``exclude[].options`` selector naming an option the request
+    does not sweep (issue #3125) -- it could never match."""
+    for entry in exclude_spec:
+        if not isinstance(entry, dict) or "options" not in entry:
+            continue
+        selector = entry["options"]
+        if not isinstance(selector, dict):
+            raise SimError("exclude[].options must be an object of name: number")
+        for name, value in selector.items():
+            lowered = name.lower() if isinstance(name, str) else name
+            if lowered not in declared:
+                raise SimError(
+                    f"exclude[].options names {name!r}, which is not a "
+                    "corners.options option of this request"
+                    + (
+                        f" (declared: {', '.join(sorted(declared))})"
+                        if declared
+                        else ""
+                    )
+                )
+            _validate_param_scalar(value, f"exclude[].options.{name}")
 
 
 _CORNER_UNIT_KEYS = ("process", "temperature_c", "supply_v")
@@ -5561,20 +5898,25 @@ def _mapping_matches(actual: dict[str, Any], selector: Any, fold: Any) -> bool:
     return all(actual.get(fold(name)) == value for name, value in selector.items())
 
 
+def _fold_lower(name: Any) -> str:
+    return str(name).lower()
+
+
+# exclude-entry key -> predicate(point, selector value); an unknown key never matches.
+_EXCLUDE_KEY_MATCHERS: dict[str, Any] = {
+    "process": lambda point, value: point.process == value,
+    "temperature_c": lambda point, value: point.temperature_c == value,
+    "variant": lambda point, value: point.variant == value,
+    "supply_v": lambda point, value: _mapping_matches(point.supply_v, value, str),
+    "params": lambda point, value: _mapping_matches(point.params, value, _fold_lower),
+    "options": lambda point, value: _mapping_matches(point.options, value, _fold_lower),
+}
+
+
 def _matches_exclude(point: CornerPoint, entry: dict[str, Any]) -> bool:
-    scalars = {
-        "process": point.process,
-        "temperature_c": point.temperature_c,
-        "variant": point.variant,
-    }
     for key, value in entry.items():
-        if key == "supply_v":
-            if not _mapping_matches(point.supply_v, value, str):
-                return False
-        elif key == "params":
-            if not _mapping_matches(point.params, value, lambda n: str(n).lower()):
-                return False
-        elif key not in scalars or scalars[key] != value:
+        matcher = _EXCLUDE_KEY_MATCHERS.get(key)
+        if matcher is None or not matcher(point, value):
             return False
     return True
 
@@ -6463,6 +6805,7 @@ def _expand_monte_carlo(
                     params=base.params,
                     variant=base.variant,
                     nodeset=base.nodeset,
+                    options=base.options,
                     sample_index=sample_index,
                     mc_seed=mc_seed,
                     mc_injected=(
@@ -6532,6 +6875,7 @@ def _checkpoint_fingerprint(
     save_mode: str = DEFAULT_SAVE_MODE,
     save_vectors: tuple[str, ...] = (),
     ngspice_options: dict[str, Any] | None = None,
+    stimulus_lines: tuple[str, ...] = (),
 ) -> str:
     """A SHA-256 fingerprint of everything that determines what a sweep's
     corners actually run -- the basis for deciding whether an on-disk
@@ -6589,6 +6933,11 @@ def _checkpoint_fingerprint(
         # drawn from other seeds. Only keyed in off the default, so an
         # existing checkpoint stays valid for a request that omits the field.
         payload["mc_seed_scope"] = sorted(mc_scopes)
+    if stimulus_lines:
+        # Issue #2977: the declared stimulus decides every corner's drive, so
+        # an edited schedule must invalidate the checkpoint. Only keyed in
+        # when declared, so existing checkpoints stay valid.
+        payload["stimulus"] = list(stimulus_lines)
     if any(point.nodeset for point in corner_points):
         # Issue #3036: an initial guess can change which solution a
         # multi-equilibrium circuit lands on, so a changed hint must not reuse
@@ -6814,6 +7163,17 @@ def _refuse_xyce_nodeset(declared: bool) -> None:
         )
 
 
+def _refuse_xyce_options_axis(corners_spec: dict[str, Any]) -> None:
+    """The ``engine: "xyce"`` refusal for ``corners.options`` (issue #3125):
+    the axis is a generated ngspice ``.options`` card."""
+    if corners_spec.get("options"):
+        raise SimError(
+            "engine 'xyce' does not support corners.options: the axis is "
+            "emitted as ngspice solver `.options` cards, whose names Xyce "
+            "does not share -- use engine 'ngspice'"
+        )
+
+
 def _enforce_xyce_support_boundary(
     *,
     engine: str,
@@ -6866,6 +7226,7 @@ def _enforce_xyce_support_boundary(
         )
     _refuse_xyce_alter_corner_axes(corners_spec)
     _refuse_xyce_params_axis(corners_spec)
+    _refuse_xyce_options_axis(corners_spec)
     if monte_carlo_declared:
         raise SimError(
             "engine 'xyce' does not implement monte_carlo sampling -- "
@@ -6961,6 +7322,7 @@ def _run_local(
     ngspice_options: dict[str, Any] | None = None,
     convergence_retry: dict[str, Any] | None = None,
     portable_roots: sim_portable.Roots | None = None,
+    stimulus_lines: tuple[str, ...] = (),
     threads_per_worker: int | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``local`` backend: run each expanded corner sequentially in-process.
@@ -7048,6 +7410,7 @@ def _run_local(
             ngspice_options=ngspice_options,
             convergence_retry=convergence_retry,
             portable_roots=portable_roots,
+            stimulus_lines=stimulus_lines,
             threads_per_worker=threads_per_worker,
         )
         corners.append(result)
@@ -7197,6 +7560,7 @@ def _run_local_parallel(
     ngspice_options: dict[str, Any] | None = None,
     convergence_retry: dict[str, Any] | None = None,
     portable_roots: sim_portable.Roots | None = None,
+    stimulus_lines: tuple[str, ...] = (),
     threads_per_worker: int | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``local-parallel`` backend: fan the expanded corner list across a
@@ -7313,6 +7677,7 @@ def _run_local_parallel(
                     ngspice_options=ngspice_options,
                     convergence_retry=convergence_retry,
                     portable_roots=portable_roots,
+                    stimulus_lines=stimulus_lines,
                     threads_per_worker=threads_per_worker,
                 )
                 in_flight[future] = next_index
@@ -7777,6 +8142,50 @@ def _param_target_hint(param: str, sources: list[str]) -> str:
     )
 
 
+def _resolve_stimulus(
+    request: dict[str, Any],
+    analysis: dict[str, Any],
+    engine: str,
+    netlist_path: str,
+    corner_points: list[CornerPoint],
+) -> list[dict[str, Any]]:
+    """The request's resolved ``stimulus`` signals (issue #2977), every
+    problem raised as a coded :class:`SimError` before any corner runs."""
+    try:
+        signals = sim_stimulus.resolve_stimulus(request, analysis)
+        if not signals:
+            return []
+        if engine != "ngspice":
+            raise sim_stimulus.StimulusError(
+                f"request.stimulus is not supported for engine {engine!r}; "
+                "it is expanded into the ngspice deck only",
+                sim_stimulus.CODE_UNSUPPORTED,
+            )
+        existing = _stimulus_existing_elements(netlist_path)
+        sim_stimulus.check_collisions(signals, existing)
+        sim_stimulus.check_supply_conflict(
+            signals,
+            {key.strip().lower() for point in corner_points for key in point.supply_v},
+        )
+    except sim_stimulus.StimulusError as exc:
+        raise SimError(str(exc), code=exc.code) from exc
+    return signals
+
+
+def _stimulus_existing_elements(netlist_path: str) -> set[str]:
+    """Lower-cased top-level element names of the netlist and every
+    ``.include``/``.lib`` file the lexical scan can resolve."""
+    try:
+        with open(netlist_path, encoding="utf-8", errors="replace") as handle:
+            decl = _netlist_declarations(handle.read())
+    except OSError:
+        return set()
+    elements = set(decl.elements)
+    if decl.includes:
+        elements |= _included_elements(netlist_path, decl.includes) or set()
+    return elements
+
+
 def _validate_supply_override_targets(
     netlist_path: str, corner_points: list[CornerPoint]
 ) -> None:
@@ -8045,6 +8454,7 @@ def _prepare_corner_run(
     save_mode: str = DEFAULT_SAVE_MODE,
     save_vectors: tuple[str, ...] = (),
     ngspice_options: dict[str, Any] | None = None,
+    stimulus_lines: tuple[str, ...] = (),
     extra_options_card: str | None = None,
 ) -> tuple[list[str], str, str | None, str]:
     """Write the engine's per-corner deck and build its command line.
@@ -8101,6 +8511,7 @@ def _prepare_corner_run(
             save_mode=save_mode,
             save_vectors=save_vectors,
             ngspice_options=ngspice_options,
+            stimulus_lines=stimulus_lines,
             extra_options_card=extra_options_card,
         )
         _write_spiceinit(corner_dir, ngspice_init)
@@ -8175,6 +8586,51 @@ def _require_params_echo(
             "every row; update the runner image to this klt release, or "
             "use a local backend. No result was reported",
             code=PARAMS_UNSUPPORTED_WORKER_CODE,
+        )
+
+
+OPTIONS_UNSUPPORTED_WORKER_CODE = "options_unsupported_worker"
+
+
+def _require_options_echo(
+    points: list[CornerPoint],
+    corners: list[dict[str, Any]],
+    *,
+    backend: str = "remote",
+) -> None:
+    """Fail the request when an off-host worker did not honor a
+    ``corners.options`` axis (issue #3125) -- the counterpart of
+    :func:`_require_params_echo`. A worker that predates the axis ignores
+    it and would run every rung at the default tolerance under the legacy
+    corner ID; a supporting worker echoes each point's ``options`` and its
+    option-suffixed ``corner_id``."""
+    if backend not in _OFFHOST_BACKENDS or not any(p.options for p in points):
+        return
+    problem: str | None = None
+    if len(corners) != len(points):
+        problem = (
+            f"it returned {len(corners)} corner report(s) for "
+            f"{len(points)} dispatched point(s)"
+        )
+    else:
+        for point, corner in zip(points, corners, strict=True):
+            if corner.get("corner_id") != point.corner_id or (
+                corner.get("options") or {}
+            ) != (point.options or {}):
+                problem = (
+                    f"corner {point.corner_id!r} came back as "
+                    f"{corner.get('corner_id')!r} with options "
+                    f"{corner.get('options')!r}"
+                )
+                break
+    if problem is not None:
+        raise SimError(
+            "the remote/batch worker did not honor corners.options -- "
+            f"{problem}. A worker built before the options axis (issue "
+            "#3125) ignores it and would simulate the default solver "
+            "tolerances for every rung; update the runner image to this klt "
+            "release, or use a local backend. No result was reported",
+            code=OPTIONS_UNSUPPORTED_WORKER_CODE,
         )
 
 
@@ -8446,6 +8902,7 @@ def _run_corner(
     waveform_max_bytes: int | None = DEFAULT_WAVEFORM_MAX_BYTES,
     ngspice_options: dict[str, Any] | None = None,
     portable_roots: sim_portable.Roots | None = None,
+    stimulus_lines: tuple[str, ...] = (),
     threads_per_worker: int | None = None,
 ) -> tuple[dict[str, Any], str | None]:
     """Run one corner point through the selected engine's batch binary and
@@ -8522,6 +8979,7 @@ def _run_corner(
         save_mode=save_mode,
         save_vectors=save_vectors,
         ngspice_options=ngspice_options,
+        stimulus_lines=stimulus_lines,
         extra_options_card=extra_options_card,
     )
 
@@ -8669,6 +9127,10 @@ def _run_corner(
         measurement_diagnostics, engine_aborted
     )
     diagnostics.extend(measurement_diagnostics)
+    pass_fields, pass_diagnostics = sim_passes.corner_fields(
+        analysis, corner_dir, keep_artifacts=keep_artifacts
+    )
+    diagnostics.extend(pass_diagnostics)
 
     # Issue #3016: the engine ran (any exit status, including 0) yet left no
     # log text and not a single requested measurement has a value -- the
@@ -8818,6 +9280,7 @@ def _run_corner(
         "temperature_c": point.temperature_c,
         **_params_report_field(point),
         **_nodeset_report_field(point),
+        **_options_report_field(point),
         "status": status,
         "runtime_s": runtime_s,
         # Additive (issue #2848): the engine process's raw outcome. Both are
@@ -8836,6 +9299,9 @@ def _run_corner(
         # Additive/optional (issue #2482): `steps` -- per-step outcomes --
         # only for an `analysis_steps[]` request; empty for every other one.
         **step_fields,
+        # Additive/optional (issue #3159): per-pass status for an
+        # `analysis.passes` request; absent for every other one.
+        **pass_fields,
         # Additive/optional (issue #2902): the effective per-corner waveform
         # levels, only for a request that scales a PWL/PULSE supply source.
         **(
@@ -9700,6 +10166,7 @@ def _write_corner_deck(
     save_mode: str = DEFAULT_SAVE_MODE,
     save_vectors: tuple[str, ...] = (),
     ngspice_options: dict[str, Any] | None = None,
+    stimulus_lines: tuple[str, ...] = (),
     extra_options_card: str | None = None,
 ) -> None:
     """Generate the corner-specific ngspice deck: an optional Monte Carlo
@@ -9738,12 +10205,27 @@ def _write_corner_deck(
         lines.append(f".param mc_mismatch_seed={point.mc_seed['mismatch_seed']}")
         if point.mc_injected is not None:
             lines.extend(sim_injected.deck_lines(point.mc_injected))
+    if point.options:
+        # Issue #3125: the swept solver options. ngspice honors the FIRST
+        # `.options` card that sets a name (measured on ngspice-46: a card
+        # after the `.include`d body, or after `options.ngspice_options`,
+        # is ignored), so this sits ahead of both -- the corner value wins
+        # over a body-level or request-level setting of the same option.
+        lines.append(
+            ".options "
+            + " ".join(
+                f"{name}={_format_param_value(value)}"
+                for name, value in sorted(point.options.items())
+            )
+        )
     # The corner's `.lib` cards: one per section for a multi-section bundle
     # (e.g. gf180mcu's per-device-family cards, each optionally against its
     # own library file -- issue #2522), a single card for a bare-string
     # process corner, none without a process axis. See `_corner_lib_lines`.
     lines.extend(_corner_lib_lines(point, models_lib))
     lines.append(f".include {netlist_path}")
+    # Issue #2977: the request's declared `stimulus`, expanded to PWL sources.
+    lines.extend(stimulus_lines)
     lines.append(f".temp {point.temperature_c}")
     options_card = _ngspice_options_card(ngspice_options)
     if options_card is not None:
@@ -9800,6 +10282,26 @@ def _param_reset_lines(point: CornerPoint) -> list[str]:
         ),
         "reset",
     ]
+
+
+def _save_control_lines(
+    measurements_spec: list[dict[str, Any]],
+    raw_path: str | None,
+    save_mode: str,
+    save_vectors: tuple[str, ...],
+) -> list[str]:
+    """The ``save`` card :func:`_corner_deck_control_lines` emits (step 2 of
+    its ordering contract), or no lines when the corner has nothing to save
+    or ``save_mode`` opts out."""
+    if save_mode != DEFAULT_SAVE_MODE or not (
+        measurements_spec or raw_path is not None
+    ):
+        return []
+    if save_vectors:
+        return [
+            "save " + " ".join(_required_save_vectors(save_vectors, measurements_spec))
+        ]
+    return ["save all"]
 
 
 def _supply_alter_lines(point: CornerPoint) -> list[str]:
@@ -9923,14 +10425,9 @@ def _corner_deck_control_lines(
     # Issue #3035: the parameter reset must come first -- `reset` reloads the
     # circuit, so everything after it (save/alter/analysis) re-applies on top.
     prefix: list[str] = _param_reset_lines(point)
-    if save_mode == DEFAULT_SAVE_MODE and (measurements_spec or raw_path is not None):
-        if save_vectors:
-            prefix.append(
-                "save "
-                + " ".join(_required_save_vectors(save_vectors, measurements_spec))
-            )
-        else:
-            prefix.append("save all")
+    prefix.extend(
+        _save_control_lines(measurements_spec, raw_path, save_mode, save_vectors)
+    )
     prefix.extend(_supply_alter_lines(point))
     lines.extend(prefix)
     if sim_steps.is_steps_analysis(analysis):
@@ -9940,6 +10437,12 @@ def _corner_deck_control_lines(
         lines.extend(
             sim_steps.control_lines(analysis, measurements_spec, reset_prefix=prefix)
         )
+        lines.extend(["quit", ".endc"])
+        return lines
+    if sim_passes.is_passes_analysis(analysis):
+        # Issue #3159: one `alter`/`setplot new`/`ac`/`write` group per
+        # pass; the corner prefix above already set the corner up.
+        lines.extend(sim_passes.control_lines(analysis, corner_dir))
         lines.extend(["quit", ".endc"])
         return lines
     crossings_lines = sim_crossings.control_lines(measurements_spec, corner_dir)
@@ -10440,6 +10943,7 @@ def _run_calibration_probe(
     osdi_preload: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
     ngspice_options: dict[str, Any] | None = None,
+    stimulus_lines: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Run one short, bounded ``tran`` slice -- the calibration half of the
     two-pass probe model -- and report how it went.
@@ -10503,6 +11007,7 @@ def _run_calibration_probe(
         osdi_preload=osdi_preload,
         save_mode=save_mode,
         ngspice_options=ngspice_options,
+        stimulus_lines=stimulus_lines,
     )
     _write_spiceinit(probe_dir, ngspice_init)
 
@@ -10552,6 +11057,7 @@ def _run_fail_fast_probe(
     osdi_preload: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
     ngspice_options: dict[str, Any] | None = None,
+    stimulus_lines: tuple[str, ...] = (),
 ) -> dict[str, Any] | None:
     """The two-pass probe model's dispatch-time entry point (issue #1694):
     run one short, bounded calibration ``tran`` slice on the grid's first
@@ -10598,6 +11104,7 @@ def _run_fail_fast_probe(
         osdi_preload=osdi_preload,
         save_mode=save_mode,
         ngspice_options=ngspice_options,
+        stimulus_lines=stimulus_lines,
     )
     if probe["error"] is not None:
         return None
@@ -12113,8 +12620,12 @@ def _readable_slug(corner_id: str) -> str:
     return _slugify_label(corner_id)
 
 
-#: ``<pvt>/params:<pairs>[/mc<n>]`` -- the shape of a parameter-axis ID.
-_PARAMS_ID_RE = re.compile(r"(?P<pvt>.*?)/params:[^/]*(?:/mc\d+)?")
+#: ``<pvt>[/params:<pairs>][/options:<pairs>][/mc<n>]`` with at least one of
+#: the two axis segments -- the shape of a parameter- or options-axis ID.
+_PARAMS_ID_RE = re.compile(
+    r"(?P<pvt>.*?)(?:/params:[^/]*/options:[^/]*|/params:[^/]*|/options:[^/]*)"
+    r"(?:/mc\d+)?"
+)
 
 #: A readable slug longer than this many UTF-8 bytes is replaced by a bounded
 #: form (readable prefix + hash of the full corner id) so the artifact

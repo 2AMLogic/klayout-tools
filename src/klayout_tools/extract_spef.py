@@ -60,8 +60,6 @@ _SPEF_DATE_PLACEHOLDER = "Thu Jan 01 00:00:00 1970"
 #: admit bare -- anything outside ``[A-Za-z0-9_]``. Matched one character at a
 #: time by :func:`_spef_name`, which backslash-escapes each hit.
 _SPEF_ESCAPE_RE = re.compile(r"[^A-Za-z0-9_]")
-# KLayout's spelling of an unlabelled layout net (issue #3580).
-_UNLABELLED_NET_RE = re.compile(r"\$\d+")
 
 
 def _spef_name(name: str) -> str:
@@ -505,15 +503,16 @@ def _drop_floating_duplicate_nets(
     """Gap C (issue #3257): drop duplicate-named nets the DEF knows nothing
     about, and any coupling that pointed at them. Issue #3580 extends this to
     unique-named unlabelled ``$<digits>`` nets, which OpenSTA rejects the same
-    way (``STA-1650``). Returns the filtered report and the skipped net names."""
+    way (``STA-1650``). Issue #3662 widens it to every net that is neither a
+    declared port nor in the DEF connection map (sub-cell label nets such as
+    ``Z``/``ZN``): with a DEF map supplied, the DEF is the authority on which
+    nets the design has. Returns the filtered report and the skipped net names."""
     if not net_instance_pins_map:
         return parasitics_report, frozenset()
     skipped = frozenset(
         name
-        for name, count in name_counts.items()
-        if (count > 1 or _UNLABELLED_NET_RE.fullmatch(name))
-        and name not in port_name_set
-        and name not in net_instance_pins_map
+        for name in name_counts
+        if name not in port_name_set and name not in net_instance_pins_map
     )
     if not skipped:
         return parasitics_report, skipped

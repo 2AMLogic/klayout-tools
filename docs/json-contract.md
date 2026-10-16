@@ -146,6 +146,17 @@ for a request that declared the field. Consumers that switch on measurement
 `schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s "Unreached
 `.meas` targets (`measurements[].on_unreached`)".
 
+`stimulus` (issue #2977) is a new optional **request** block (declarative
+timed edges, expanded by `klt sim` into PWL sources) with two new optional
+**response** members under `environment`: `environment.stimulus` (the schedule
+as applied, present only when the request declared `stimulus`) and
+`environment.backend` (`{resolved, source, requested}`, present on every
+corner-sweep report). Every pre-existing request is unchanged and no existing
+response member changes type or meaning, so there is no `schema_version` bump.
+An older `klt` or fleet runner that predates the key ignores it rather than
+rejecting it; see [`docs/cli/sim.md`](cli/sim.md)'s "Declarative timed
+stimulus (`stimulus`)" for the compatibility caveat.
+
 This caveat is narrow: it covers a field's *value set* growing (a new enum
 member appearing), not what an existing, unchanged-type field's value
 *means*. Redefining the semantics of an already-shipped field — e.g. `klt
@@ -1673,6 +1684,8 @@ the exit code alone is authoritative.
 
   | Command | `error.code` | Meaning |
   |---------|--------------|---------|
+  | `sim` | `engine_version_unmet` | The request's `engine_version` pin (`"MAJOR"` or `"MAJOR.MINOR"`) is not satisfied by the engine that would run it, or the version could not be determined (fail closed). Raised before any corner simulates on the `local`/`local-parallel` backends; on `remote`/`batch` the pin is checked against the runner report's `engine_version` after the run. The *tool* is unavailable. See [docs/cli/sim.md](cli/sim.md) "Pinning the simulator version". |
+  | `sim` | `unsupported_analysis` | The request names a periodic analysis (`pss`, `pnoise`, `pac`) that `klt sim` does not implement. The *capability* is absent regardless of simulator build. Raised before any corner runs. See [docs/cli/sim.md](cli/sim.md) "Supported analyses". |
   | `sim` | `batch_no_capacity` | `--backend batch`: 2am's fleet launcher refused the job for lack of Spot capacity in every pool (after any `batch.capacity_wait_s` budget was spent). A fleet-wide, usually transient condition — retrying later is reasonable. See [docs/cli/sim.md](cli/sim.md) "Batch backend". |
   | `sim` | `batch_concurrency_cap` | `--backend batch`: 2am's fleet launcher refused the job because the shared fleet is at `BATCH_MAX_CONCURRENT_INSTANCES` (after any `batch.capacity_wait_s` budget was spent). Transient slot contention, distinct from a Spot shortage; retrying later is reasonable. See [docs/cli/sim.md](cli/sim.md) "Batch backend". |
   | `sim` | `batch_runner_version_mismatch` | `--backend batch` under `batch.runner_version_check: "enforce"` (the default): the AMI manifest publishes a runner `klt` whose major.minor differs from this client's, for every image the request could boot. Refused once, before any upload or launch, so no report and no per-corner diagnostics exist (issue #2851). Not retryable without a matching runner image or client. A mismatch found only on the runner keeps reporting through per-corner `batch_job_failed` diagnostics with `runner_code`. See [docs/cli/sim.md](cli/sim.md) "Pre-launch check from the AMI manifest". |
@@ -1786,6 +1799,12 @@ refusal exit codes `5`-`10` (a set that is not exactly the planned one; stdout c
 `status: "refused"` payload whose `refusal.code` names the class) alongside `klt sim`'s
 `3`/`4` verdicts. See [`docs/cli/sim.md`](cli/sim.md) "Merging per-request
 reports" and `docs/schemas/sim-merge-report.schema.json`.
+
+`klt sim-plan` (issue #3423) writes the shard requests and `sim-merge` manifest
+beside a request and prints `{schema_version, axis, manifest, shard_count,
+shards[]}` (`id`, `request`, `request_sha256`, `corner_count`). It exits `0` or
+`1` (error envelope on stderr) only. See [`docs/cli/sim.md`](cli/sim.md)
+"Planning shards".
 
 ## Exit codes
 

@@ -228,6 +228,16 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default=False,
             )
             self.param(
+                "dummy_ports",
+                self.TypeBoolean,
+                "Report the dummy units' S/D/G as D<k>_S/D<k>_D/D<k>_G ports "
+                "(series fingers: D<k>_S<n>/D<k>_D<n>/D<k>_G<n>) so a "
+                "gen-compose request can tie them off. False (default) "
+                "reports only the real units' ports, byte-for-byte as before "
+                "(issue #2904)",
+                default=False,
+            )
+            self.param(
                 "active_layer",
                 self.TypeLayer,
                 "Active/diffusion drawing layer",
