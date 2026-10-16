@@ -2495,6 +2495,108 @@ def test_clock_period_ns_must_be_positive(tmp_path, monkeypatch, clock_period_ns
         run_synthesize(request_path)
 
 
+def _clocks_request(tmp_path, monkeypatch, constraints):
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    return _write_request(
+        tmp_path / "request.json", _base_request(constraints=constraints)
+    )
+
+
+def test_clocks_list_uses_tightest_period_and_is_echoed(tmp_path, monkeypatch):
+    request_path = _clocks_request(
+        tmp_path,
+        monkeypatch,
+        {
+            "clocks": [
+                {"port": "clk_a", "period_ns": 5},
+                {"port": "clk_b", "period_ns": 2.5},
+            ]
+        },
+    )
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["timing"]["delay_target_ps"] == 2500
+    assert report["clock_targets"] == {
+        "clocks": [
+            {"port": "clk_a", "period_ns": 5},
+            {"port": "clk_b", "period_ns": 2.5},
+        ],
+        "delay_target_ps": 2500,
+        "delay_target_basis": "min_clocks_period_ns",
+        "per_clock_enforced": False,
+    }
+
+
+def test_clock_period_ns_alone_reports_single_global_basis(tmp_path, monkeypatch):
+    request_path = _clocks_request(tmp_path, monkeypatch, {"clock_period_ns": 4})
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["clock_targets"]["delay_target_basis"] == "clock_period_ns"
+    assert report["clock_targets"]["delay_target_ps"] == 4000
+    assert report["clock_targets"]["clocks"] == []
+
+
+def test_explicit_clock_period_ns_wins_over_clocks(tmp_path, monkeypatch):
+    request_path = _clocks_request(
+        tmp_path,
+        monkeypatch,
+        {"clock_period_ns": 3, "clocks": [{"port": "clk", "period_ns": 2}]},
+    )
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["timing"]["delay_target_ps"] == 3000
+    assert report["clock_targets"]["delay_target_basis"] == "clock_period_ns"
+    assert report["clock_targets"]["clocks"] == [{"port": "clk", "period_ns": 2}]
+
+
+def test_no_constraints_reports_basis_none(tmp_path, monkeypatch):
+    request_path = _clocks_request(tmp_path, monkeypatch, {})
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["clock_targets"]["delay_target_basis"] == "none"
+    assert report["clock_targets"]["delay_target_ps"] is None
+
+
+@pytest.mark.parametrize(
+    ("clocks", "message"),
+    [
+        ("clk", "non-empty array"),
+        ([], "non-empty array"),
+        (["clk"], r"clocks\[0\] must be a"),
+        ([{"port": "", "period_ns": 1}], "port must be a non-empty string"),
+        ([{"port": "c", "period_ns": "x"}], "period_ns must be a positive number"),
+        ([{"port": "c", "period_ns": True}], "period_ns must be a positive number"),
+        ([{"port": "c", "period_ns": 0}], "greater than zero"),
+        ([{"port": "c", "period_ns": 1, "extra": 1}], "unknown key"),
+        (
+            [{"port": "c", "period_ns": 1}, {"port": "c", "period_ns": 2}],
+            "more than once",
+        ),
+    ],
+)
+def test_clocks_validation_errors(tmp_path, monkeypatch, clocks, message):
+    _isolate_pdk(monkeypatch, tmp_path)
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(constraints={"clocks": clocks}),
+    )
+    with pytest.raises(SynthesizeError, match=message):
+        run_synthesize(request_path)
+
+
 def test_abc_constr_file_is_written_from_the_table(tmp_path, monkeypatch):
     """The `<top>_abc.constr` artifact is the exact two-line file
     `help abc`/ORFS both use, built from this library's own table entry --

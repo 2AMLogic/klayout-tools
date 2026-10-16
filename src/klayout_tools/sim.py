@@ -248,7 +248,12 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "engine_killed",
         "engine_aborted",
         "measurement",
+        # An `optional` measurement with no value (issue #2925); info severity.
+        "measurement_absent",
         "unknown",
+        # Opt-in convergence retry record (`options.retry_on_convergence_error`,
+        # issue #2973), attached by `_run_corner_with_retry` after the retry ran.
+        "convergence_retry",
         # Waveform JSON conversion skipped over options.waveform_max_bytes
         # (issue #3211); always a warning.
         "waveform_too_large",
@@ -1467,6 +1472,38 @@ def _validate_measurement_forms(measurements_spec: list[dict[str, Any]]) -> None
     _validate_expr_names_unique(measurements_spec)
 
 
+def _validate_optional_flag(name: Any, spec: dict[str, Any]) -> None:
+    """Issue #2925: ``optional``, when present, must be a real boolean."""
+    if "optional" in spec and not isinstance(spec["optional"], bool):
+        raise SimError(
+            f"measurement '{name}' has a non-boolean 'optional' "
+            f"({spec['optional']!r}): it must be true or false"
+        )
+
+
+def _validate_crossings_form(
+    name: Any, spec: dict[str, Any], scalar_form: bool
+) -> None:
+    """Issue #2868: ``crossings`` is a third, mutually exclusive measurement
+    form (``scalar_form`` = the entry also declares ``spice``/``expr``), and
+    issue #2925: it cannot be ``optional`` -- a signal with no crossings
+    reports a count of 0; a missing series is a read failure, not absent data."""
+    if scalar_form:
+        raise SimError(
+            f"measurement '{name}' declares 'crossings' together with "
+            f"'{'spice' if spec.get('spice') is not None else 'expr'}': they are "
+            "alternative forms of a measurement -- declare exactly one (use a "
+            "separate measurements[] entry for the scalar)"
+        )
+    if spec.get("optional") is True:
+        raise SimError(
+            f"measurement '{name}': 'optional' is not supported on "
+            "'crossings' (a signal with no crossings reports a count of "
+            "0; a missing series is a read failure, not absent data)"
+        )
+    sim_crossings.validate_crossings_spec(name, spec["crossings"])
+
+
 def _validate_rawfile_form(
     name: Any, spec: dict[str, Any], present: dict[str, bool]
 ) -> bool:
@@ -1505,6 +1542,7 @@ def _validate_measurement_form(spec: dict[str, Any]) -> None:
     has_spice = spec.get("spice") is not None
     has_expr = spec.get("expr") is not None
     has_crossings = sim_crossings.is_crossings(spec)
+    _validate_optional_flag(name, spec)
     has_cycle_mean = sim_cycle_mean.is_cycle_mean(spec)
     has_energy = sim_energy.is_energy(spec)
     if name is None or not (
@@ -1532,15 +1570,7 @@ def _validate_measurement_form(spec: dict[str, Any]) -> None:
     ):
         return
     if has_crossings:
-        # Issue #2868: a third, mutually exclusive form.
-        if has_spice or has_expr:
-            raise SimError(
-                f"measurement '{name}' declares 'crossings' together with "
-                f"'{'spice' if has_spice else 'expr'}': they are alternative "
-                "forms of a measurement -- declare exactly one (use a "
-                "separate measurements[] entry for the scalar)"
-            )
-        sim_crossings.validate_crossings_spec(name, spec["crossings"])
+        _validate_crossings_form(name, spec, has_spice or has_expr)
         return
     if has_spice and has_expr:
         raise SimError(
@@ -1682,6 +1712,112 @@ def _validate_fail_on_diagnostic(value: Any) -> tuple[str, ...]:
         if code not in codes:
             codes.append(code)
     return tuple(codes)
+
+
+#: ``options.retry_on_convergence_error`` (issue #2973): the solver options a
+#: retried unit runs with when the object form leaves a key out. ``gear``
+#: integration and a looser ``reltol`` are the standard first remedies for
+#: ngspice's "time step too small".
+DEFAULT_CONVERGENCE_RETRY: dict[str, Any] = {
+    "max_attempts": 1,
+    "reltol": 0.003,
+    "method": "gear",
+}
+_CONVERGENCE_RETRY_METHODS = ("trap", "gear")
+
+
+def _validate_convergence_retry(value: Any) -> dict[str, Any] | None:
+    """Validate and normalise ``options.retry_on_convergence_error`` (issue
+    #2973).
+
+    ``None``/absent/``false`` -> ``None``: no retry, today's behaviour
+    exactly. ``true`` -> :data:`DEFAULT_CONVERGENCE_RETRY`. An object may set
+    ``max_attempts`` (integer >= 1), ``reltol`` (number in ``(0, 1)``) and
+    ``method`` (``"trap"``/``"gear"``); omitted keys take the default and an
+    unknown key is an application error (``SimError``) rather than a silent
+    no-op, like :func:`_validate_fail_on_diagnostic`.
+    """
+    if value is None or value is False:
+        return None
+    if value is True:
+        return dict(DEFAULT_CONVERGENCE_RETRY)
+    if not isinstance(value, dict):
+        raise SimError(
+            "options.retry_on_convergence_error must be a boolean or an object "
+            'like {"max_attempts": 1, "reltol": 0.003, "method": "gear"}'
+        )
+    unknown = sorted(set(value) - set(DEFAULT_CONVERGENCE_RETRY))
+    if unknown:
+        raise SimError(
+            "options.retry_on_convergence_error has unknown key(s): "
+            f"{', '.join(unknown)} (known: {', '.join(DEFAULT_CONVERGENCE_RETRY)})"
+        )
+    resolved = {**DEFAULT_CONVERGENCE_RETRY, **value}
+    attempts = resolved["max_attempts"]
+    if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 1:
+        raise SimError(
+            "options.retry_on_convergence_error.max_attempts must be an integer >= 1"
+        )
+    reltol = resolved["reltol"]
+    if (
+        isinstance(reltol, bool)
+        or not isinstance(reltol, (int, float))
+        or not 0 < reltol < 1
+    ):
+        raise SimError(
+            "options.retry_on_convergence_error.reltol must be a number "
+            "between 0 and 1 (exclusive)"
+        )
+    if resolved["method"] not in _CONVERGENCE_RETRY_METHODS:
+        raise SimError(
+            "options.retry_on_convergence_error.method must be one of: "
+            + ", ".join(_CONVERGENCE_RETRY_METHODS)
+        )
+    return resolved
+
+
+def _resolve_convergence_retry(
+    options: dict[str, Any], engine: str
+) -> dict[str, Any] | None:
+    """Validate ``options.retry_on_convergence_error`` for ``engine`` (issue
+    #2973); the retry emits an ngspice ``.options`` card, so Xyce is refused."""
+    retry = _validate_convergence_retry(options.get("retry_on_convergence_error"))
+    if retry is not None and engine == "xyce":
+        raise SimError(
+            "options.retry_on_convergence_error is not supported for engine "
+            "'xyce': the retry emits an ngspice `.options` card"
+        )
+    return retry
+
+
+def _convergence_retry_environment(
+    retry: dict[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    """The ``environment`` fragment recording a resolved retry policy (empty
+    when the request did not opt in)."""
+    return {} if retry is None else {"retry_on_convergence_error": retry}
+
+
+def _convergence_retry_deck_options(retry: dict[str, Any]) -> str:
+    """The ``.options`` card a retried unit's deck carries."""
+    return f".options reltol={retry['reltol']} method={retry['method']}"
+
+
+#: Error-severity diagnostic codes that can accompany a ``nonconvergence``
+#: failure without making it something other than one (the measurements and
+#: vectors a failed solve never produced). Any *other* error-severity code
+#: -- ``singular_matrix``, ``netlist``, ``timeout``, ``engine_killed``, ... --
+#: means a different failure class, which is never retried (issue #2973).
+_CONVERGENCE_CONSEQUENCE_CODES = frozenset(
+    {"nonconvergence", "measurement", "no_such_vector"}
+)
+
+
+def _is_retryable_convergence_failure(corner: dict[str, Any]) -> bool:
+    if corner["status"] != "error":
+        return False
+    codes = {d["code"] for d in corner["diagnostics"] if d["severity"] == "error"}
+    return "nonconvergence" in codes and codes <= _CONVERGENCE_CONSEQUENCE_CODES
 
 
 def _validate_ngspice_init(value: Any) -> tuple[str, ...]:
@@ -2010,6 +2146,7 @@ def run_sim(
     dry_run: bool = False,
     submit_only: bool = False,
     attach_job_id: str | None = None,
+    capacity_wait_s: float | None = None,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """Run the request at ``request_path`` and return its report.
@@ -2261,6 +2398,8 @@ def run_sim(
         artifacts_dir = os.path.abspath(artifacts_dir)
     if attach_job_id is not None and sim_decks.DECKS_FIELD in request:
         raise SimError("--attach does not apply to deck-list requests")
+    if capacity_wait_s is not None and sim_decks.DECKS_FIELD in request:
+        raise SimError("--wait-for-capacity does not apply to deck-list requests")
     if sim_decks.DECKS_FIELD in request:
         if dry_run:
             raise SimError(
@@ -2301,6 +2440,7 @@ def run_sim(
         dry_run=dry_run,
         submit_only=submit_only,
         attach_job_id=attach_job_id,
+        capacity_wait_s=capacity_wait_s,
         _ownership=_ownership,
     )
 
@@ -2481,6 +2621,25 @@ def _with_max_units_override(
     }
 
 
+def _with_capacity_wait_override(
+    request: dict[str, Any], capacity_wait_s: float | None
+) -> dict[str, Any]:
+    """Fold the ``--wait-for-capacity`` CLI override into
+    ``request.batch.capacity_wait_s`` (issue #3564), leaving the loaded request
+    untouched. The flag wins over the request field, and the value is validated
+    by the one resolver the field uses, so a bad value is refused before any
+    S3 write."""
+    if capacity_wait_s is None:
+        return request
+    from .sim_batch import _resolve_capacity_wait_s
+
+    value = _resolve_capacity_wait_s({"capacity_wait_s": capacity_wait_s})
+    return {
+        **request,
+        "batch": {**(request.get("batch") or {}), "capacity_wait_s": value},
+    }
+
+
 def _check_expected_netlist_identity(
     expect_identity: Any,
     netlist_identity: str | None,
@@ -2515,6 +2674,23 @@ def _stamp_netlist_identity(
     environment["netlist_identity"] = netlist_identity
     if netlist_identity_error is not None:
         environment["netlist_identity_error"] = netlist_identity_error
+
+
+def _check_capacity_wait_applies(
+    capacity_wait_s: Any, backend: str, attach_job_id: Any
+) -> None:
+    """Refuse ``--wait-for-capacity`` where it has nothing to wait for."""
+    if capacity_wait_s is None:
+        return
+    if backend != "batch":
+        raise SimError(
+            f"--wait-for-capacity requires backend 'batch' (got '{backend}')"
+        )
+    if attach_job_id is not None:
+        raise SimError(
+            "--wait-for-capacity cannot be combined with --attach: attach "
+            "launches nothing, so there is no capacity to wait for"
+        )
 
 
 def _apply_attach(
@@ -2557,6 +2733,7 @@ def _run_sim_corners(
     dry_run: bool = False,
     submit_only: bool = False,
     attach_job_id: str | None = None,
+    capacity_wait_s: float | None = None,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """The corner-sweep body of :func:`run_sim` -- every parameter, the
@@ -2564,6 +2741,7 @@ def _run_sim_corners(
     are documented there. Kept as its own function so the deck dispatch
     in ``run_sim`` adds nothing to this sweep's own complexity budget."""
     request = _with_max_units_override(load_request(request_path), max_units_per_job)
+    request = _with_capacity_wait_override(request, capacity_wait_s)
     request_dir = os.path.dirname(os.path.abspath(request_path))
     # Issue #1261 (and #1274 for `environment.models_lib`): every input-path
     # field this run's own JSON response echoes (`netlist`,
@@ -2724,6 +2902,9 @@ def _run_sim_corners(
     sim_steps.refuse_unsupported_options(
         analysis, want_waveforms=want_waveforms, plot_requested=plot_dir is not None
     )
+    capture_only = _capture_only_requested(
+        options, want_waveforms=want_waveforms, measurements_spec=measurements_spec
+    )
 
     max_workers = max_workers if max_workers is not None else options.get("max_workers")
     if max_workers is not None:
@@ -2773,6 +2954,11 @@ def _run_sim_corners(
     # this is a per-request compatibility-mode declaration, not a runtime
     # dial an operator would reach for per invocation.
     ngspice_init_lines = _validate_ngspice_init(options.get("ngspice_init"))
+    # Issue #2973: opt-in per-unit retry on a `nonconvergence` failure.
+    # Validated up front like every option; an off-host worker re-reads it
+    # from the forwarded request document, so only the local backends
+    # receive the resolved value below.
+    convergence_retry = _resolve_convergence_retry(options, engine)
     # Issue #2732: validated up front, before any corner, probe or off-host
     # job is launched. An off-host worker re-reads it from the forwarded
     # request document (see `_build_remote_request`), so only the local
@@ -3116,11 +3302,13 @@ def _run_sim_corners(
             "save_vectors": save_vectors,
             "waveform_max_bytes": waveform_max_bytes,
             "ngspice_options": ngspice_options,
+            "convergence_retry": convergence_retry,
         }
         if backend not in _OFFHOST_BACKENDS
         else {"request_dir": request_dir}
     )
     _apply_attach(local_engine_kwargs, attach_job_id, backend, hosts, submit_only)
+    _check_capacity_wait_applies(capacity_wait_s, backend, attach_job_id)
 
     # Issue #2668: stage the complete job closure once, here, before any
     # backend runs -- so a missing model input, unresolvable dependency or
@@ -3362,7 +3550,7 @@ def _run_sim_corners(
                 entry, specs_by_name.get(entry["name"]), plots_by_corner
             )
 
-    coverage = _build_coverage(measurements_spec, corners)
+    coverage = _build_coverage(measurements_spec, corners, capture_only=capture_only)
     graded = _grade_corners(corners, measurements_rollup, coverage)
     passed = graded["passed"]
     failed = graded["failed"]
@@ -3440,6 +3628,18 @@ def _run_sim_corners(
             models_lib_sha256=environment["models_lib_sha256"],
         )
     )
+    # Additive/optional (issue #2985): ngspice generates no device or
+    # resistor noise in `.tran`, so a transient that relies on declared
+    # `trnoise`/`trrandom` sources says so. Absent when it does not apply.
+    environment.update(
+        _transient_noise_environment(
+            netlist_path,
+            request=request,
+            analysis=analysis,
+            engine=engine,
+            repo_root=repo_root,
+        )
+    )
     if remote_environment is not None:
         # Additive/optional: only present for the `remote` backend -- see
         # `_run_remote` and docs/cli/sim.md's "Remote backend" section.
@@ -3453,6 +3653,9 @@ def _run_sim_corners(
         # docs/cli/sim.md's "Monte Carlo" section. Per-sample seed values
         # live on each corner (`corners[].monte_carlo`), not here.
         environment["monte_carlo"] = monte_carlo_info
+    # Additive/optional (issue #2973): the resolved retry policy, only when
+    # `options.retry_on_convergence_error` opted in.
+    environment.update(_convergence_retry_environment(convergence_retry))
     if budget_s is not None:
         # Additive/optional: only present when the request declares
         # `options.wall_clock_budget_s` (or `--budget-s` overrides it) --
@@ -5889,6 +6092,7 @@ def _run_local(
     save_vectors: tuple[str, ...] = (),
     waveform_max_bytes: int | None = DEFAULT_WAVEFORM_MAX_BYTES,
     ngspice_options: dict[str, Any] | None = None,
+    convergence_retry: dict[str, Any] | None = None,
     portable_roots: sim_portable.Roots | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``local`` backend: run each expanded corner sequentially in-process.
@@ -5955,7 +6159,7 @@ def _run_local(
                 )
             )
             continue
-        result, version = _run_corner(
+        result, version = _run_corner_with_retry(
             point=point,
             netlist_path=netlist_path,
             models_lib=models_lib,
@@ -5974,6 +6178,7 @@ def _run_local(
             save_vectors=save_vectors,
             waveform_max_bytes=waveform_max_bytes,
             ngspice_options=ngspice_options,
+            convergence_retry=convergence_retry,
             portable_roots=portable_roots,
         )
         corners.append(result)
@@ -6121,6 +6326,7 @@ def _run_local_parallel(
     save_vectors: tuple[str, ...] = (),
     waveform_max_bytes: int | None = DEFAULT_WAVEFORM_MAX_BYTES,
     ngspice_options: dict[str, Any] | None = None,
+    convergence_retry: dict[str, Any] | None = None,
     portable_roots: sim_portable.Roots | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``local-parallel`` backend: fan the expanded corner list across a
@@ -6216,7 +6422,7 @@ def _run_local_parallel(
             ):
                 point = corner_points[next_index]
                 future = pool.submit(
-                    _run_corner,
+                    _run_corner_with_retry,
                     point=point,
                     netlist_path=netlist_path,
                     models_lib=models_lib,
@@ -6235,6 +6441,7 @@ def _run_local_parallel(
                     save_vectors=save_vectors,
                     waveform_max_bytes=waveform_max_bytes,
                     ngspice_options=ngspice_options,
+                    convergence_retry=convergence_retry,
                     portable_roots=portable_roots,
                 )
                 in_flight[future] = next_index
@@ -6342,12 +6549,12 @@ def _noise_sources_in_text(netlist_text: str) -> list[tuple[str, str]]:
     return found
 
 
-def _unseeded_noise_report(
+def _scan_noise_sources(
     netlist_path: str, *, request: dict[str, Any], repo_root: str | None
-) -> dict[str, Any] | None:
-    """Additive ``environment.monte_carlo`` fields for transient-noise
-    sources the ``monte_carlo.seed`` contract does not govern (issue #2963),
-    or ``None`` when no scanned file declares one (shape unchanged)."""
+) -> tuple[set[tuple[str, str]], list[dict[str, str]]]:
+    """``(sources, not_scanned)``: every ``trnoise``/``trrandom`` source
+    declared in the netlist's scanned ``.include`` closure (issues #2963,
+    #2985), and what part of the closure could not be scanned."""
     files, not_scanned = _mismatch_scan_closure(request, netlist_path, repo_root)
     sources: set[tuple[str, str]] = set()
     for _label, path in files:
@@ -6356,6 +6563,18 @@ def _unseeded_noise_report(
                 sources.update(_noise_sources_in_text(handle.read()))
         except (OSError, UnicodeDecodeError):
             not_scanned.append({"target": _label, "reason": "unreadable"})
+    return sources, not_scanned
+
+
+def _unseeded_noise_report(
+    netlist_path: str, *, request: dict[str, Any], repo_root: str | None
+) -> dict[str, Any] | None:
+    """Additive ``environment.monte_carlo`` fields for transient-noise
+    sources the ``monte_carlo.seed`` contract does not govern (issue #2963),
+    or ``None`` when no scanned file declares one (shape unchanged)."""
+    sources, not_scanned = _scan_noise_sources(
+        netlist_path, request=request, repo_root=repo_root
+    )
     if not sources:
         return None
     report: dict[str, Any] = {
@@ -6367,6 +6586,50 @@ def _unseeded_noise_report(
     if not_scanned:
         report["unseeded_sources_not_scanned"] = not_scanned
     return report
+
+
+def _analysis_runs_tran(analysis: dict[str, Any]) -> bool:
+    """Does the resolved analysis run a transient (scalar ``tran`` or an
+    ``analysis_steps[]`` tran step)?"""
+    if sim_steps.is_steps_analysis(analysis):
+        return any(
+            str(step.get("kind", "")).lower() == "tran"
+            for step in analysis.get("steps", [])
+        )
+    return str(analysis.get("kind", "")).lower() == "tran"
+
+
+def _transient_noise_environment(
+    netlist_path: str,
+    *,
+    request: dict[str, Any],
+    analysis: dict[str, Any],
+    engine: str,
+    repo_root: str | None,
+) -> dict[str, Any]:
+    """Additive ``environment.transient_noise`` (issue #2985): what noise an
+    ngspice transient contains -- only the declared ``trnoise``/``trrandom``
+    sources, no intrinsic device or resistor noise. ``{}`` (field absent)
+    unless the engine is ngspice, a transient runs and a scanned file
+    declares such a source."""
+    if engine != "ngspice" or not _analysis_runs_tran(analysis):
+        return {}
+    sources, not_scanned = _scan_noise_sources(
+        netlist_path, request=request, repo_root=repo_root
+    )
+    if not sources:
+        return {}
+    report: dict[str, Any] = {
+        "engine": engine,
+        "sources": [
+            {"name": name, "kind": keyword} for name, keyword in sorted(sources)
+        ],
+        "intrinsic_device_noise": False,
+        "intrinsic_resistor_noise": False,
+    }
+    if not_scanned:
+        report["sources_not_scanned"] = not_scanned
+    return {"transient_noise": report}
 
 
 def _with_unseeded_noise(
@@ -6875,6 +7138,7 @@ def _prepare_corner_run(
     save_mode: str = DEFAULT_SAVE_MODE,
     save_vectors: tuple[str, ...] = (),
     ngspice_options: dict[str, Any] | None = None,
+    extra_options_card: str | None = None,
 ) -> tuple[list[str], str, str | None, str]:
     """Write the engine's per-corner deck and build its command line.
 
@@ -6930,6 +7194,7 @@ def _prepare_corner_run(
             save_mode=save_mode,
             save_vectors=save_vectors,
             ngspice_options=ngspice_options,
+            extra_options_card=extra_options_card,
         )
         _write_spiceinit(corner_dir, ngspice_init)
         command = [ngspice_binary or "ngspice", "-b", deck_path, "-o", log_path]
@@ -7101,6 +7366,52 @@ def _grade_corner(
     return "pass"
 
 
+def _run_corner_with_retry(
+    *,
+    convergence_retry: dict[str, Any] | None = None,
+    **kwargs: Any,
+) -> tuple[dict[str, Any], str | None]:
+    """Run one corner point (see :func:`_run_corner`), optionally
+    retrying a ``nonconvergence`` failure (issue #2973).
+
+    With ``convergence_retry`` (the validated
+    ``options.retry_on_convergence_error`` policy) a unit that ends
+    ``status: "error"`` purely from a ``nonconvergence`` failure is re-run
+    on the *same* :class:`CornerPoint` -- so ``sample_index`` and the Monte
+    Carlo seeds are unchanged by construction -- with the policy's tighter
+    solver options on an extra ``.options`` card, up to ``max_attempts``
+    times. The outcome is recorded as a ``convergence_retry`` diagnostic on
+    the unit. Any other failure class is never retried. ``None`` (the
+    default) is exactly the single-attempt behaviour.
+    """
+    corner, version = _run_corner(**kwargs)
+    if convergence_retry is None or not _is_retryable_convergence_failure(corner):
+        return corner, version
+    card = _convergence_retry_deck_options(convergence_retry)
+    max_attempts = convergence_retry["max_attempts"]
+    total_runtime = corner["runtime_s"]
+    for attempt in range(1, max_attempts + 1):
+        retried, retried_version = _run_corner(**kwargs, extra_options_card=card)
+        total_runtime += retried["runtime_s"]
+        recovered = retried["status"] != "error"
+        retried["diagnostics"].append(
+            {
+                "severity": "warning",
+                "code": "convergence_retry",
+                "message": (
+                    f"nonconvergence on the first attempt; retry {attempt}/"
+                    f"{max_attempts} with `{card}` "
+                    + ("recovered" if recovered else "still failed")
+                ),
+            }
+        )
+        corner, version = retried, retried_version or version
+        if recovered or not _is_retryable_convergence_failure(retried):
+            break
+    corner["runtime_s"] = round(total_runtime, 3)
+    return corner, version
+
+
 def _persist_waveform_artifact(
     raw_path: str,
     raw_size: int,
@@ -7145,6 +7456,7 @@ def _persist_waveform_artifact(
 
 def _run_corner(
     *,
+    extra_options_card: str | None = None,
     point: CornerPoint,
     netlist_path: str,
     models_lib: str | None,
@@ -7235,6 +7547,7 @@ def _run_corner(
         save_mode=save_mode,
         save_vectors=save_vectors,
         ngspice_options=ngspice_options,
+        extra_options_card=extra_options_card,
     )
 
     diagnostics: list[dict[str, str]] = list(include_diagnostics)
@@ -7706,23 +8019,13 @@ def _corner_measurement_results(
         value = _harvest_measurement_value(measurement_values, spec, is_xyce=is_xyce)
         unit = spec.get("unit")
         if value is None:
-            measurement_results.append(
-                {
-                    "name": name,
-                    "value": None,
-                    "unit": unit,
-                    "status": "error",
-                    "margin": None,
-                }
+            result, diagnostic, was_attributed = _no_value_measurement(
+                spec, meas_errors, save_mode=save_mode
             )
-            message = _no_value_message(spec, save_mode=save_mode)
-            cause = meas_errors.get(str(name).lower()) if spec.get("spice") else None
-            if cause is not None:
+            measurement_results.append(result)
+            diagnostics.append(diagnostic)
+            if was_attributed:
                 attributed.add(str(name).lower())
-                message += f" -- ngspice reported: {cause}"
-            diagnostics.append(
-                {"severity": "error", "code": "measurement", "message": message}
-            )
             continue
         # `_grade_measurement_value` owns the plausibility-pre-check ->
         # `limits` ordering (issue #2493) in one place, so there is no
@@ -7756,6 +8059,81 @@ def _corner_measurement_results(
                 }
             )
     return measurement_results, diagnostics, {}
+
+
+#: The measurement ``status`` of an ``optional`` measurement that produced no
+#: value (issue #2925): data ("this figure does not exist at this point"),
+#: not a failure -- it never makes its corner ``error``/``fail``.
+_ABSENT_STATUS = "absent"
+ABSENT_DIAGNOSTIC_CODE = "measurement_absent"
+
+
+#: ngspice's reason text when a ``.meas`` search (``WHEN``/``TRIG``/``TARG``/
+#: ``FIND ... WHEN``) never found its crossing in the analysis interval, e.g.
+#: ``Error: measure  x  when(WHEN) : out of interval`` (verified on ngspice-46).
+#: The one engine reason that means "this figure does not exist at this point";
+#: any other ``Error: measure`` reason is a malformed card and stays an error.
+_MEAS_ABSENT_CAUSE_RE = re.compile(r"out of interval", re.IGNORECASE)
+
+
+def _is_legitimately_absent(cause: str | None) -> bool:
+    """Whether a value-less ``optional`` measurement is absent data rather than
+    an engine failure: no ngspice ``Error: measure`` reason at all, or the
+    "out of interval" (never crossed) reason."""
+    return cause is None or _MEAS_ABSENT_CAUSE_RE.search(cause) is not None
+
+
+def _absent_measurement(
+    spec: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """``(result, diagnostic)`` for an ``optional: true`` measurement with no
+    value: ``value``/``margin`` null, ``status: "absent"``, and an
+    info-severity diagnostic. ``limits`` are not evaluated (no pass/fail claim)."""
+    name = spec["name"]
+    result = {
+        "name": name,
+        "value": None,
+        "unit": spec.get("unit"),
+        "status": _ABSENT_STATUS,
+        "margin": None,
+    }
+    diagnostic = {
+        "severity": "info",
+        "code": ABSENT_DIAGNOSTIC_CODE,
+        "message": f"optional measurement '{name}' produced no value "
+        "(reported absent; not an error)",
+    }
+    return result, diagnostic
+
+
+def _no_value_measurement(
+    spec: dict[str, Any],
+    meas_errors: dict[str, str],
+    *,
+    save_mode: str,
+) -> tuple[dict[str, Any], dict[str, Any], bool]:
+    """``(result, diagnostic, attributed)`` for a scalar measurement whose log
+    carried no value: ``absent`` when it is ``optional`` and the engine gave no
+    reason other than "never crossed" (issue #2925), else an ``error`` entry
+    with a ``measurement`` diagnostic. ``attributed`` is whether an ngspice
+    ``.meas`` error was tied to this measurement by name (issue #2826)."""
+    name = spec["name"]
+    cause = meas_errors.get(str(name).lower()) if spec.get("spice") else None
+    if spec.get("optional") is True and _is_legitimately_absent(cause):
+        result, diagnostic = _absent_measurement(spec)
+        return result, diagnostic, cause is not None
+    message = _no_value_message(spec, save_mode=save_mode)
+    if cause is not None:
+        message += f" -- ngspice reported: {cause}"
+    result = {
+        "name": name,
+        "value": None,
+        "unit": spec.get("unit"),
+        "status": "error",
+        "margin": None,
+    }
+    diagnostic = {"severity": "error", "code": "measurement", "message": message}
+    return result, diagnostic, cause is not None
 
 
 def _crossings_measurement_result(
@@ -8154,6 +8532,7 @@ def _write_corner_deck(
     save_mode: str = DEFAULT_SAVE_MODE,
     save_vectors: tuple[str, ...] = (),
     ngspice_options: dict[str, Any] | None = None,
+    extra_options_card: str | None = None,
 ) -> None:
     """Generate the corner-specific ngspice deck: an optional Monte Carlo
     seed card, ``.lib``/``.include``/``.temp``, the request's verbatim
@@ -8203,6 +8582,13 @@ def _write_corner_deck(
         # Issue #3111: `options.ngspice_options`, after `.temp`; omitted
         # entirely when unset so existing decks stay byte-identical.
         lines.append(options_card)
+    if extra_options_card is not None:
+        # Issue #2973: the solver options of a convergence retry. Emitted
+        # last of the `.options` cards (after the netlist body's `.include`
+        # and `options.ngspice_options`) so that, when two cards set the
+        # same key, the retry policy wins and the second attempt actually
+        # differs from the first.
+        lines.append(extra_options_card)
 
     for spec in measurements_spec:
         if spec.get("spice") is not None:
@@ -9567,11 +9953,63 @@ def _measurement_coverage(
     return checked, skipped, inapplicable
 
 
-def _build_coverage(
+def _capture_only_requested(
+    options: dict[str, Any],
+    *,
+    want_waveforms: bool,
     measurements_spec: list[dict[str, Any]],
-    corners: list[dict[str, Any]],
-) -> dict[str, Any]:
-    """Common checked-work v1 plus the existing simulation coverage counters."""
+) -> bool:
+    """Validate and return ``request.options.capture_only`` (issue #3158).
+
+    Absent means ``False``. ``true`` declares "capture the waveforms, check
+    nothing", so it only makes sense for a request that does capture them
+    (``options.waveforms`` or ``--plot``) and declares no measurements --
+    anything else would turn the flag into a general "suppress exit 4"
+    switch for a genuinely unchecked run, so it is a request error.
+    """
+    value = options.get("capture_only", False)
+    if not isinstance(value, bool):
+        raise SimError(
+            f"request.options.capture_only must be a boolean (got {value!r})"
+        )
+    if not value:
+        return False
+    if not want_waveforms:
+        raise SimError(
+            "request.options.capture_only requires options.waveforms: true "
+            "(or --plot): there is nothing to capture otherwise"
+        )
+    if measurements_spec:
+        raise SimError(
+            "request.options.capture_only conflicts with a non-empty "
+            "`measurements` list: declare measurements to be checked, or "
+            "none to capture waveforms only"
+        )
+    return True
+
+
+def _corner_without_measurements(
+    corner: dict[str, Any], corner_index: int, capture_only: bool
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """Coverage for one corner of a request that declares no measurements.
+
+    Returns ``(checked, skipped)``. Under ``capture_only`` (issue #3158) a
+    corner that ran clean counts its waveform capture as checked work; any
+    other corner is a ``no_requested_measurements`` skip.
+    """
+    corner_work = work_id("corner", corner_index, corner["corner_id"])
+    if capture_only and corner["status"] == "pass":
+        return [corner_work + "/waveform_capture"], []
+    return [], [{"id": corner_work, "reason": "no_requested_measurements"}]
+
+
+def _summarise_limits(
+    measurements_spec: list[dict[str, Any]],
+) -> tuple[int, int, list[dict[str, Any]]]:
+    """Count declared limits and collect unrecognised limit keys per measurement.
+
+    Returns ``(limits_declared, measurements_with_limits, unrecognized)``.
+    """
     unrecognized: list[dict[str, Any]] = []
     limits_declared = 0
     measurements_with_limits = 0
@@ -9586,17 +10024,37 @@ def _build_coverage(
         if any(limits.get(k) is not None for k in _RECOGNISED_LIMIT_KEYS):
             measurements_with_limits += 1
 
+    return limits_declared, measurements_with_limits, unrecognized
+
+
+def _build_coverage(
+    measurements_spec: list[dict[str, Any]],
+    corners: list[dict[str, Any]],
+    *,
+    capture_only: bool = False,
+) -> dict[str, Any]:
+    """Common checked-work v1 plus the existing simulation coverage counters.
+
+    ``capture_only`` (issue #3158) is the request's declared intent to
+    capture waveforms with no measurements: each corner that ran clean then
+    counts its capture as the checked work, and ``capture_only: true`` is
+    recorded on the block. A corner that did not pass stays a skip, so a run
+    failure is never waived.
+    """
+    limits_declared, measurements_with_limits, unrecognized = _summarise_limits(
+        measurements_spec
+    )
+
     checked = []
     skipped = []
     inapplicable = []
     for corner_index, corner in enumerate(corners):
         if not measurements_spec:
-            skipped.append(
-                {
-                    "id": work_id("corner", corner_index, corner["corner_id"]),
-                    "reason": "no_requested_measurements",
-                }
+            corner_checked, corner_skipped = _corner_without_measurements(
+                corner, corner_index, capture_only
             )
+            checked.extend(corner_checked)
+            skipped.extend(corner_skipped)
         for spec in measurements_spec:
             actual, missing, irrelevant = _measurement_coverage(
                 spec, corner, corner_index
@@ -9613,7 +10071,7 @@ def _build_coverage(
     if limits_declared and not measurements_with_limits and unrecognized:
         reasons.append(REASON_UNRECOGNIZED_LIMIT_KEYS)
 
-    return {
+    block = {
         "corners_simulated": len(corners),
         "measurements_declared": len(measurements_spec),
         "measurements_with_limits": measurements_with_limits,
@@ -9625,6 +10083,9 @@ def _build_coverage(
             nothing_checked_reasons=reasons,
         ),
     }
+    if capture_only:
+        block["capture_only"] = True
+    return block
 
 
 def _evaluate_limits(
@@ -9797,6 +10258,7 @@ def _sample_statistics(
     *,
     errored: int,
     inconclusive: int = 0,
+    absent: int | None = None,
     quantiles: tuple[float, ...],
     k_sigma: float | None,
     limits: dict[str, float] | None,
@@ -9824,6 +10286,13 @@ def _sample_statistics(
     many samples were set aside. ``n + errored + inconclusive`` always
     equals the number of samples drawn for this measurement.
 
+    ``absent`` (issue #2925) counts the samples of an ``optional`` measurement
+    that legitimately produced no value; the key is present only for such a
+    measurement (``absent is None`` omits it, keeping every other request's
+    block unchanged) and the identity becomes ``n + errored + inconclusive +
+    absent``. Absent samples are excluded from every statistic and are *not*
+    ``errored``, which keeps meaning "the simulation failed".
+
     ``stddev`` is the **sample** standard deviation (Bessel-corrected,
     ``n - 1``), the estimator appropriate for a finite Monte Carlo draw from
     a population, and is ``null`` for ``n < 2`` (undefined, never faked as
@@ -9840,10 +10309,12 @@ def _sample_statistics(
     if k_sigma is not None and mean is not None and stddev is not None:
         sigma_window = _evaluate_sigma_window(mean, stddev, k_sigma, limits)
 
+    absent_field = {} if absent is None else {"absent": absent}
     return {
         "n": n,
         "errored": errored,
         "inconclusive": inconclusive,
+        **absent_field,
         "mean": mean,
         "stddev": stddev,
         "min": ordered[0] if n else None,
@@ -9939,17 +10410,22 @@ def _monte_carlo_rollup(
         # itself. Neither is caught by the pre-existing `value is not None`
         # filter, since a distrusted sample has a real, non-null value --
         # that is exactly what makes it dangerous to the pooled statistics.
+        absent = sum(1 for _, m in pairs if m["status"] == _ABSENT_STATUS)
+        # The `absent` count is reported only for a measurement declared
+        # `optional`, so every other request keeps its exact statistics shape.
+        report_absent = absent if spec.get("optional") is True else None
         trusted = [
             (c, m)
             for c, m in pairs
             if c.get("status") != _INCONCLUSIVE_STATUS
-            and m["status"] != _INCONCLUSIVE_STATUS
+            and m["status"] not in (_INCONCLUSIVE_STATUS, _ABSENT_STATUS)
         ]
         values = [m["value"] for _, m in trusted if m["value"] is not None]
         return _sample_statistics(
             values,
             errored=len(trusted) - len(values),
-            inconclusive=len(pairs) - len(trusted),
+            inconclusive=len(pairs) - len(trusted) - absent,
+            absent=report_absent,
             quantiles=quantiles,
             k_sigma=k_sigma,
             limits=limits,
@@ -10003,6 +10479,8 @@ def _aggregate_measurement_status(
         return _INCONCLUSIVE_STATUS
     if "fail" in statuses:
         return "fail"
+    if statuses == {_ABSENT_STATUS}:
+        return _ABSENT_STATUS
     return "pass"
 
 
@@ -10059,6 +10537,8 @@ def _rollup_measurements(
         worst_case = None
         worst_margin = None
         for corner, m in entries:
+            if m["status"] == _ABSENT_STATUS:
+                continue
             margin = m["margin"]
             sort_key = margin if margin is not None else float("-inf")
             if worst_case is None or sort_key < worst_margin:

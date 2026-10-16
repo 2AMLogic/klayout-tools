@@ -188,6 +188,29 @@ _BATCH_PREFLIGHT_REJECT_EXIT = 87
 #: skew in ``environment.remote``.
 RUNNER_VERSION_CHECK_MODES = ("enforce", "warn")
 
+#: Request feature -> minimum ``klt`` release whose runner understands it
+#: (#2877). Pure data, importable without side effects, so a client-side field
+#: preflight (#2901) can consume it. ``None`` means the feature exists only on
+#: unreleased ``main`` (no git tag contains it yet) -- never a guessed version.
+#: Versions were derived with ``git log -S<token>`` plus
+#: ``git tag --contains <commit>``; the commit is cited per entry. The 0.5.0
+#: fleet image predates every entry below that has a version.
+REQUEST_FEATURE_MIN_RUNNER_VERSION: dict[str, str | None] = {
+    # 328b552b feat(sim): add measurements[].expr (#2533); first in v0.7.0.
+    "measurements[].expr": "0.7.0",
+    # 31baf0bc per-section model libraries in a corners.process bundle (#2538);
+    # first in v0.7.0. (The plain-string sections[] form dates from 9bea8456,
+    # #357, v0.2.0 line.)
+    "corners.process[].sections[] (object form)": "0.7.0",
+    # 1b51954f options.ngspice_init (#2530); first in v0.7.0.
+    "options.ngspice_init": "0.7.0",
+    # 8296828c options.osdi_preload (#2534); first in v0.7.0.
+    "options.osdi_preload": "0.7.0",
+    # d4d497ee ordered analysis_steps[] (#2482), 2026-10-09, after v0.7.0:
+    # the only route to .meas cards on a noise analysis. Untagged.
+    "analysis_steps[].measurements[] (noise analysis .meas cards)": None,
+}
+
 #: Upper bound on how much of the collected stderr file recovery reads (its
 #: tail). The envelope is the last thing klt writes; anything earlier is
 #: progress/warning noise that is never parsed or copied into the JSON.

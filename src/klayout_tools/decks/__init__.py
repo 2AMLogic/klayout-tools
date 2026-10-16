@@ -57,6 +57,7 @@ from .extraction import (
     ResistorFlavour,
     SizeFilter,
     TerminalRelation,
+    UnsupportedDeviceMarker,
 )
 from .finfet import FinFETExtractionDeck, FinFETFlavour
 from .parasitics import (
@@ -65,13 +66,20 @@ from .parasitics import (
     ParasiticsDeck,
     UnknownExtractionDeckError,
 )
-from .rules import DerivedLayer, DrcRule, RuleProvenance, UnknownDeckError
+from .rules import (
+    CompCoverageSpec,
+    DerivedLayer,
+    DrcRule,
+    RuleProvenance,
+    UnknownDeckError,
+)
 
 __all__ = [
     "BipolarDevice",
     "CapacitorDevice",
     "CapacitorFlavour",
     "CapacitorVariant",
+    "CompCoverageSpec",
     "DerivedLayer",
     "DiodeDevice",
     "DrcRule",
@@ -92,6 +100,7 @@ __all__ = [
     "SizeFilter",
     "UnknownDeckError",
     "UnknownExtractionDeckError",
+    "UnsupportedDeviceMarker",
     "deck_names",
     "deck_source_path",
     "get_deck",

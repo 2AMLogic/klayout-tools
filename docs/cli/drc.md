@@ -1187,6 +1187,31 @@ rule they check — a future golden-pair author authoring a real `"antenna"`
 rule against this primitive must not assume more precision (in particular,
 no per-net isolation) than it actually has.
 
+### `"comp_coverage"` check kind (issue #3587)
+
+A region rule rather than a distance check, declared with
+`DrcRule(check="comp_coverage", region_spec=CompCoverageSpec(...))`. It
+reports the rule's `layer` (the checked layer) minus every
+`covered_by_any` layer, after exempting — *whole polygon* — any checked
+polygon that touches or overlaps an `exempt_markers` polygon. gf180mcu's
+`comp.coverage.1` (DRM `DF.12`) is the first user: `Comp` not covered by
+`Nplus` or `Pplus` is forbidden, except `Comp` under the Schottky-diode
+marker (241/0).
+
+- **Reporting**: one violation per residual polygon (`check:
+  "comp_coverage"`, real `bbox` and `polygon`). Evaluated flat, per top cell,
+  on merged regions.
+- **Empty covering/marker layers never skip the rule**: an absent `Nplus`,
+  `Pplus` or marker layer is an empty region, so unimplanted `Comp` is
+  reported. Only the *checked* layer matters for applicability.
+- **Coverage**: checked layer absent → `inapplicable`
+  (`no_applicable_geometry`). Checked layer drawn but empty after the marker
+  exemption (all of it under a marker) → `inapplicable`
+  (`inapplicable_empty_checked_region`), and the rule is not counted in
+  `rules_checked`. Otherwise it is in `rules_checked`.
+- `klt drc rules` lists the covering and marker layers in the rule's
+  `layers`.
+
 ### `"ongrid"` / `"angle"` check kinds (issue #2642)
 
 Two single-layer **vertex** check kinds, as opposed to the distance checks
