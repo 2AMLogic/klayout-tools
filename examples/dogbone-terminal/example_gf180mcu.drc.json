@@ -104,6 +104,7 @@
       "via4.width.1"
     ],
     "voltage_domain_warnings": [],
+    "unchecked_rules": [],
     "deck_scope": [
       "10.4.2 MIM Option B",
       "10.7 DRC_BJT Mark Layer",
