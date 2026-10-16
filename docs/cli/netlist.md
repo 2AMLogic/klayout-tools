@@ -7,7 +7,7 @@ on the SPICE side: it produces the netlist `klt sim` simulates and (eventually)
 `klt lvs` compares a layout against.
 
 ```
-klt netlist <schematic> -o <netlist> [--check] [--block] [--timeout-s <s>] [--rcfile <path>] [--pdk <variant>] [--pdk-root <path>] [--xschem-binary <path>] [--backend local|batch] [--batch-root <dir>] [--format text|json]
+klt netlist <schematic> -o <netlist> [--check] [--block] [--timeout-s <s>] [--rcfile <path>] [--pdk <variant>] [--pdk-root <path>] [--xschem-binary <path>] [--backend local|batch] [--batch-root <dir>] [--batch-include <glob>]... [--batch-exclude <glob>]... [--format text|json]
 ```
 
 - `<schematic>` — path to the xschem schematic to netlist (`.sch`). Checked
@@ -42,6 +42,9 @@ klt netlist <schematic> -o <netlist> [--check] [--block] [--timeout-s <s>] [--rc
   [Batch backend](#batch-backend).
 - `--batch-root` — `--backend batch` only: the directory whose git-tracked
   files are uploaded (default: the schematic's git checkout).
+- `--batch-include <glob>` / `--batch-exclude <glob>` — `--backend batch`
+  only, repeatable: narrow the uploaded set to the files a schematic needs
+  while keeping a repo-level root (see "What is uploaded").
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
 ## Why this verb exists
@@ -249,7 +252,34 @@ a project `--rcfile` must be tracked files under the root (exit `1`
 otherwise, naming the file). The uncompressed total is capped at **64 MiB**
 (`netlist_batch.MAX_BATCH_TREE_BYTES`) and checked before the archive is
 built; above it, pass a narrower `--batch-root` (the directory holding the
-schematics, symbols and `xschemrc`). Member owner names are cleared.
+schematics, symbols and `xschemrc`) or select just what the schematic needs.
+
+**Selecting files.** `--batch-include <glob>` keeps only the tracked files
+matching a root-relative glob (repeatable; none given means every tracked
+file); `--batch-exclude <glob>` then drops matches. Matching is `fnmatch`
+over the POSIX path, so `*` also crosses `/`; a pattern without glob
+characters names a file or a directory (`design` selects everything under
+it). The schematic and a project `--rcfile` must stay in the selected set
+(exit `1` naming the file otherwise). The 64 MiB cap and
+`environment.remote.input_files` / `input_bytes` describe the *selected*
+set. Keep a repo-level root when the `xschemrc` uses root-relative paths:
+
+```bash
+klt netlist design/block.sch -o design/netlist/block.spice --backend batch \
+  --batch-include design --batch-include pdk-symbols --batch-exclude 'design/layout/*'
+```
+
+Member owner names are cleared.
+
+**Failure diagnostics.** When a job fails and the runner's `stderr.log` holds
+no klt error envelope (the job died in `tar`, the shell wrapper, or an xschem
+crash), the error carries the last 2 KiB of that file, sanitized (invalid
+UTF-8 replaced, ANSI escapes and control characters other than newline/tab
+dropped), in `error.remote_stderr_tail`, plus `error.remote_exit_code`,
+`error.remote_state` and `error.harness_log` (the `s3://` URI of the full
+`harness.log`). These fields are absent when the runner's own envelope was
+recovered. The tail is raw runner output and may contain paths from the
+runner; it is netlist-only (`klt sim` still never surfaces raw stderr).
 
 **PDK-relative `--rcfile`.** An `xschemrc` that ships with the PDK is given in
 its PDK-relative form, quoted so the shell does not expand it:

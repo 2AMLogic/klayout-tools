@@ -322,6 +322,74 @@ This is the same reproducibility bar `klt sim`'s Monte Carlo seeding and
 `klt lvs`'s `environment` hashes already set (issue #423) — a stored CI
 result's `environment.random_seed` is enough to reproduce it exactly.
 
+## Gate-level power-up state: `options.initial_state`
+
+Silicon flops do not power up at 0, and the sign-off question for a digital
+block is "from reset alone, with every flop starting at an arbitrary value,
+does the design reach a defined state?". A cell-model UDP's state cannot be
+written through VPI, so the testbench cannot simply set the flops.
+`options.initial_state` (issue #2998) does it for you on a **gate-level
+Icarus** run:
+
+```json
+"options": {
+  "initial_state": {
+    "mode": "random",
+    "seeds": [1, 2, 3],
+    "netlist": "netlist.v",
+    "clock": "clk"
+  }
+}
+```
+
+| Key | Meaning |
+| --- | --- |
+| `mode` | `"x"` — every flop starts unknown (one run). `"random"` — every flop starts at a seeded-random bit, one regression **per seed**. |
+| `seeds` | Required, non-empty, duplicate-free integers for `random`; rejected for `x`. Same seed ⇒ identical initial state. |
+| `netlist` | The flat gate-level Verilog netlist of `hdl_toplevel` (as `klt place-and-route`'s `verilog_path` writes it); resolved relative to the request. The state elements are derived from it and `request.sources`' cell models — the same classification [`klt reset-coverage`](reset-coverage.md) uses — never from a hand-built flop list. |
+| `clock` | Optional. The net of `hdl_toplevel` whose first full cycle captures the forced values. Defaults to the one net every state element's clock/enable pin connects to; a netlist with several is exit 1 asking for it. |
+
+**How it works.** A generated second elaboration root (`klt_initial_state`,
+written next to the artifacts) hierarchically `force`s each flop's `D` pin to
+the requested value, lets the testbench's own clock take **one full real
+cycle** (`negedge`, `posedge`, `negedge`, so the first undriven-to-level
+transition of a clock is never mistaken for a capturing edge), then
+`release`s `D`. Only `D` is forced — never the clock or an asynchronous
+control — because releasing a forced net discards what the testbench
+deposited there and a released clock/reset reads `x`, which the real cell
+UDPs turn into an unknown state. The seed reaches the shim as the
+`+klt_init_seed=<n>` plusarg (`$random(seed)`), so one build serves all seeds.
+
+**Honest limits.**
+
+- Flops whose `D` connects to the **same net** share one value (Icarus
+  collapses connected ports into a single net); `environment.initial_state`
+  reports `state_elements` (instances) and `d_nets` (independent draws).
+- A flop whose asynchronous reset is asserted during that first cycle simply
+  stays reset — which is the point: reset-covered flops are covered, and the
+  initial state decides the *unreset* ones (list those with `klt
+  reset-coverage`).
+- A value the testbench writes straight onto a flop's `D` net during that
+  first cycle is lost on release; write stimulus after it. The testbench must
+  drive a clock, and — for flops with a reset pin — keep that pin driven
+  (an undriven `RESET_B` is `x`, and the real UDPs then capture `x`).
+- Hard macros (SRAM, IP), scan cells, and sequential cells whose model has no
+  `D` or clock/enable pin are exit 1 naming the instance — never silently
+  skipped. Memory-macro arrays are not initialised.
+- `engine: "verilator"` (no hierarchical `force` of cell-model pins) is exit 1,
+  as are the combinations with `options.sdf` and `--mutations` (not designed:
+  the SDF build elaborates a generated wrapper as the root; the isolated
+  per-mutant builds do not carry the shim).
+
+**Response.** `environment.initial_state` is `null` unless requested; otherwise
+`{mode, seeds, netlist, clock, state_elements, d_nets, runs}` where `runs`
+has one `{seed, status, results_xml}` per seed. For `random`, `tests` holds
+every seed's tests, each tagged `initial_state_seed`; `status` is `"fail"` if
+any seed failed, and the counts sum across seeds. `environment.results_xml`
+and `environment.random_seed` describe the first run.
+A worked example is
+[`examples/functional-verification/initial-state/`](../../examples/functional-verification/initial-state/).
+
 ## SDF back-annotation: `options.sdf`
 
 `options.sdf` re-runs a **gate-level** regression with real post-route delays
@@ -1244,6 +1312,7 @@ exactly.
 | `options.sdf.file` | string | Optional. Path to an IEEE-1497 SDF file, resolved relative to the request like every other path field, and back-annotated onto the design through Icarus's `$sdf_annotate` (see "SDF back-annotation"). Requires `engine: "icarus"` at version 13.0 or newer — `options.sdf` with `engine: "verilator"`, against a pre-13.0 `iverilog` (no `-ginterconnect`), or alongside a `FUNCTIONAL` entry in `options.defines`, is exit 1, never a silent no-op. A missing/unreadable file is exit 1 (issue #1002). |
 | `options.sdf.corner` | string | Optional, one of `"min"`/`"typ"`/`"max"`, default `"typ"`. Selects one member of each SDF `min:typ:max` triplet, via the compile-time `iverilog -T` flag. Only valid inside an `options.sdf` block; an unknown key inside that block is exit 1 rather than silently ignored. |
 | `options.sdf.entries` | string | Optional, one of `"all"`/`"interconnect"`, default `"all"` (issue #2364). `"all"` annotates every delay entry the SDF carries. `"interconnect"` drops every non-`INTERCONNECT` delay entry (on a real `write_sdf` output, the `IOPATH` population) before annotation and reports the count as the `iopath_interconnect_only` `environment.sdf.dropped` class — the supported net-delay back-annotation configuration for a design whose post-route STA closes (see "SDF back-annotation"). Echoed as `environment.sdf.entries`. An unknown value is exit 1 rather than silently ignored. |
+| `options.initial_state` | object | Optional. Gate-level power-up state control, Icarus only (`mode`, `seeds`, `netlist`, `clock`) — see "Gate-level power-up state: `options.initial_state`". Not combinable with `options.sdf` or `--mutations` (exit 1). |
 | `options.trace` | boolean | Defaults to `false`. `true` turns on cocotb's own `Runner(waves=True)` on both the build and test steps for whichever engine ran — Icarus dumps `<hdl_toplevel>.fst`, Verilator dumps `dump.vcd` — and the resulting file is contracted in the response's `trace` field, ready to hand to [`klt wave build`](wave.md). Not engine-restricted, unlike `options.coverage`/`options.sdf`: both engines have a waveform-dump path through cocotb. Not currently combinable with `--mutations` (exit 1) — see "Mutation testing: `--mutations`" → "Out of scope". |
 | `parameters` | object | Optional. String key -> scalar value (integer, float, string, or boolean), forwarded unchanged to both `Runner.build(parameters=...)` and `Runner.test(parameters=...)`. Overrides Verilog `parameter` (or VHDL `generic`) values at elaboration time -- e.g. `{"WIDTH": 8}` to elaborate a design's `#(parameter WIDTH = 16)` at 8 bits instead of its default. cocotb's own per-engine backend translates each entry into the right flag (Icarus: `-P<toplevel>.<name>=<value>`; Verilator: `-G<name>=<value>`) -- this verb never needs to know that syntax itself. Omitted/empty is a no-op, identical to today's behavior. Non-empty together with `options.sdf` on Icarus is exit 1 (see "How the annotation is wired") -- the SDF top-level-port workaround elaborates a generated wrapper as the new `-s` root, and cocotb's parameter-override syntax would then silently target that wrapper instead of the real DUT. |
 
@@ -1280,7 +1349,8 @@ exactly.
     "cocotb_version": "2.1.0",
     "results_xml": "/abs/path/.klt/functional-verification/results_icarus.xml",
     "random_seed": 1785780800,
-    "sdf": null
+    "sdf": null,
+    "initial_state": null
   }
 }
 ```
@@ -1309,7 +1379,7 @@ set `options.trace: true`; on such a run it looks like this — the identical
 | `tests` | array\<object\> | One entry per `@cocotb.test()`, in the order cocotb ran them. `status` is `"passed"`/`"failed"`/`"skipped"`; `sim_time_ns`/`real_time_s` are `null` when the simulator did not report them. `sim_time_ns` is read from whichever shape the installed cocotb writes into `results.xml` — the `<testcase sim_time_ns="...">` attribute cocotb 2.0.x emitted, or the `<properties>` block (`sim_time_duration` scaled by the reported `sim_time_unit`, never assumed to be `ns`) cocotb 2.1.0 replaced it with (issue #2592) — so the field carries the same nanosecond value either way. `error_type`/`error_message` are present **only** on `"failed"` entries, taken verbatim from the `<failure>` element's attributes. |
 | `coverage` | object \| null | `null` unless `options.coverage: true`; otherwise `line_pct`/`toggle_pct`/`branch_pct`/`expr_pct` (numbers, or `null` for a category `verilator_coverage` did not report) plus `info_path`, an absolute path to the lcov `.info` artifact. |
 | `trace` | object \| null | `null` unless `options.trace: true` (Epic #1585 Phase 3, issue #1845); otherwise `path` (absolute), `format` (`"vcd"` or `"fst"` — resolved from which engine ran, never a request choice), and `size_bytes` — the same shape [`klt wave build`](wave.md)'s own `trace` field uses. `options.trace: true` with no waveform file produced by the run is exit 1, not a silent `null` (indistinguishable from "not requested" otherwise). |
-| `environment` | object | Reproducibility block: `engine`, `engine_version` (the simulator's own version token, `null` if unresolvable), `cocotb_version`, `results_xml` — the absolute path to the raw evidence this report was derived from, so a stored verdict can be re-checked against it — and `random_seed` (the effective seed cocotb used, `null` only if `results.xml` lacked the property; see "Reproducibility: `random_seed`"), plus `sdf` (issue #1002) — `null` on an ordinary run, an object on an SDF-annotated one, so an annotated verdict is never mistakable for a zero-delay one from the JSON alone: `file`, `corner`, `annotated: true`, plus `partial` and `dropped` (issue #1102) — `partial` is `true` when anything was dropped, either a benign diagnostic class filtered out of the transcript scan (`timingcheck`) or an `INTERCONNECT` entry normalized away before annotation (`zero_delay_alias_port_interconnect`, issue #2285; `zero_delay_physical_only_interconnect`, issue #2363) or an `IOPATH` entry onto an arc whose only modpaths Icarus discards (`iopath_ifnone_edge_modpath`, issue #2885, whose entry additionally lists the affected `arcs`), and `dropped` names each such class with `{count, reason}`. See "SDF back-annotation" for the full shape. |
+| `environment` | object | Reproducibility block: `engine`, `engine_version` (the simulator's own version token, `null` if unresolvable), `cocotb_version`, `results_xml` — the absolute path to the raw evidence this report was derived from, so a stored verdict can be re-checked against it — and `random_seed` (the effective seed cocotb used, `null` only if `results.xml` lacked the property; see "Reproducibility: `random_seed`"), plus `initial_state` (issue #2998; additive) — `null` unless `options.initial_state` was requested, else the echo described in "Gate-level power-up state" (`mode`, effective `seeds`, `netlist`, `clock`, `state_elements`, `d_nets`, per-seed `runs`) — plus `sdf` (issue #1002) — `null` on an ordinary run, an object on an SDF-annotated one, so an annotated verdict is never mistakable for a zero-delay one from the JSON alone: `file`, `corner`, `annotated: true`, plus `partial` and `dropped` (issue #1102) — `partial` is `true` when anything was dropped, either a benign diagnostic class filtered out of the transcript scan (`timingcheck`) or an `INTERCONNECT` entry normalized away before annotation (`zero_delay_alias_port_interconnect`, issue #2285; `zero_delay_physical_only_interconnect`, issue #2363) or an `IOPATH` entry onto an arc whose only modpaths Icarus discards (`iopath_ifnone_edge_modpath`, issue #2885, whose entry additionally lists the affected `arcs`), and `dropped` names each such class with `{count, reason}`. See "SDF back-annotation" for the full shape. |
 
 There is no shared `provenance` block: this verb's verdict depends on no PDK
 and no rule deck (see `docs/json-contract.md` → "Shared `provenance`
@@ -1320,7 +1390,7 @@ block"), and `environment` is the contract's own reproducibility surface.
 | Code | Meaning |
 | --- | --- |
 | `0` | At least one test executed and every executed test passed (`status: "pass"`); skipped tests are allowed. |
-| `1` | Failed to run — bad request, unresolvable RTL source or testbench module, coverage requested on an engine that has none, `options.sdf` on an engine (or an Icarus older than 13.0) that has no usable `$sdf_annotate` path, `options.sdf` alongside a `FUNCTIONAL` define, an unresolvable/unreadable SDF file, an SDF annotation that did not fully apply (`SDF WARNING`/`SDF ERROR` in the transcript), `options.trace` requested but the run produced no waveform file, missing cocotb/simulator install, build or elaboration error, simulator crash, no `results.xml` produced, or a regression that registered zero tests or skipped every test. |
+| `1` | Failed to run — bad request, unresolvable RTL source or testbench module, coverage requested on an engine that has none, `options.sdf` on an engine (or an Icarus older than 13.0) that has no usable `$sdf_annotate` path, `options.sdf` alongside a `FUNCTIONAL` define, an unresolvable/unreadable SDF file, an SDF annotation that did not fully apply (`SDF WARNING`/`SDF ERROR` in the transcript), `options.trace` requested but the run produced no waveform file, a bad `options.initial_state` (bad shape, `verilator`, a state element it cannot drive, an ambiguous clock), missing cocotb/simulator install, build or elaboration error, simulator crash, no `results.xml` produced, or a regression that registered zero tests or skipped every test. |
 | `2` | Usage error (missing argument, bad `--format` value) — from argparse. |
 | `3` | Ran successfully; at least one test failed (`status: "fail"`). |
 
