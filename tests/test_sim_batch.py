@@ -5248,3 +5248,10 @@ def test_run_sim_attach_requires_batch_backend(tmp_path):
     path = _write_request(tmp_path, request)
     with pytest.raises(sim.SimError, match="--attach requires backend 'batch'"):
         sim.run_sim(str(path), attach_job_id="klt-sim-abc123")
+
+
+def test_attach_refused_with_submit_only(tmp_path):
+    _write_body(tmp_path)
+    path = _write_request(tmp_path, _batch_request(tmp_path))
+    with pytest.raises(sim.SimError, match="mutually exclusive"):
+        sim.run_sim(str(path), attach_job_id="klt-sim-abc123", submit_only=True)
