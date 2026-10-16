@@ -102,7 +102,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
-from . import _provenance, remote_transport, sim_staging
+from . import _provenance, remote_transport, sim_staging, sim_transfer_meas
 from .remote_launcher import (
     ASSUMED_THREADS_PER_CORNER,
     RemoteLaunchError,
@@ -618,13 +618,27 @@ def _runner_gate_release(version: str) -> str | None:
 #: release segment that can carry it is ``0.7.1`` (post-tag builds render as
 #: ``0.7.1.devN``). A ``0.7.1.devN`` runner built before the feature landed is
 #: indistinguishable from one built after, so it counts as supporting it.
-#: Next candidate entry: ``decks[]`` (#3303).
+#: ``transfer`` (``measurements[].transfer``, #2923/#2924) was merged after
+#: ``v0.7.0`` too, so ``0.7.1`` is likewise its first release segment.
 _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
     "analysis_steps": (
         (0, 7, 1),
         lambda request: request.get("analysis_steps") is not None,
     ),
+    "transfer": (
+        (0, 7, 1),
+        lambda request: bool(
+            sim_transfer_meas.transfer_measurements(request.get("measurements") or [])
+        ),
+    ),
 }
+
+#: Registry features a runner must be *known* to support (issue #2924): a
+#: runner that predates one, or whose version cannot be read, is refused
+#: whatever ``runner_version_check`` says, because the alternative is a worker
+#: that accepts the request and omits the metric. Every other registry
+#: feature keeps the warn-and-run behaviour of #3249.
+_MANDATORY_RUNNER_FEATURES = frozenset({"transfer"})
 
 
 def _release_key(release: str) -> int | None:
@@ -1020,6 +1034,15 @@ def _runner_preflight_script(
     ]
     if required_features:
         lines.append(_feature_gate_shell(required_features, client_version))
+    mandatory = tuple(
+        name for name in required_features if name in _MANDATORY_RUNNER_FEATURES
+    )
+    if mandatory:
+        lines.append(
+            _mandatory_feature_gate_shell(
+                mandatory, report_path=report_path
+            ).removesuffix("; ")
+        )
     if capture:
         # Issue #2834: the worker capture rides the same preflight, *before*
         # the enforce gate so a rejected job still leaves it collectable.
@@ -1036,6 +1059,118 @@ def _runner_preflight_script(
             "exit " + str(_BATCH_PREFLIGHT_REJECT_EXIT) + "; fi"
         )
     return "; ".join(lines) + "; "
+
+
+def _mandatory_feature_gate_shell(
+    features: tuple[str, ...], *, report_path: str | None = None
+) -> str:
+    """Shell that rejects a runner not known to support a
+    :data:`_MANDATORY_RUNNER_FEATURES` entry (issue #2924); needs ``$rv``.
+    Unlike the version gate and :func:`_feature_gate_shell` it is not relaxed
+    by ``runner_version_check: "warn"``, and an unreadable runner version is
+    rejected too. Exits :data:`_BATCH_PREFLIGHT_REJECT_EXIT` with the message
+    on stderr and, when ``report_path`` is given (the batch job), a klt error
+    envelope carrying :data:`BATCH_RUNNER_FEATURE_CODE` there -- before
+    ``klt sim`` runs."""
+    envelope = ""
+    if report_path is not None:
+        envelope = (
+            'printf \'{"schema_version": 1, "error": {"command": "sim", '
+            f'"code": "{BATCH_RUNNER_FEATURE_CODE}", "message": "%s"}}}}\\n\' '
+            f'"$mmsg" >{report_path}; '
+        )
+    return (
+        _mandatory_feature_probe_shell(features)
+        + 'if [ -n "$mmiss" ]; then '
+        + 'mmsg="the worker runs klt ${rv:-<unknown>}, which is not known '
+        + "to support the request feature(s) $mmiss -- the request was not run "
+        + '(rebuild the runner image from a release that has the feature)"; '
+        + envelope
+        + 'echo "$mmsg" >&2; exit '
+        + str(_BATCH_PREFLIGHT_REJECT_EXIT)
+        + "; fi; "
+    )
+
+
+def remote_feature_preflight(request: dict[str, Any]) -> str:
+    """Shell prefix for the ``remote`` backend's ``klt sim`` command (issue
+    #2924): on the provisioned host, read ``klt --version`` and refuse a
+    request that uses a :data:`_MANDATORY_RUNNER_FEATURES` entry the host's
+    ``klt`` is not known to support, before any simulation. Empty (the
+    command is byte-identical to before) when the request uses none."""
+    features = tuple(
+        name
+        for name in _request_features(request)
+        if name in _MANDATORY_RUNNER_FEATURES
+    )
+    if not features:
+        return ""
+    return (
+        "rv=$(klt --version 2>/dev/null | head -n 1 | tr -cd 'A-Za-z0-9._+ -'"
+        " | cut -c1-80); rv=${rv#klt }; rv=${rv# }; "
+        + _mandatory_feature_gate_shell(features)
+    )
+
+
+def assess_remote_runner_features(
+    request: dict[str, Any], pdk: str | None, region: str | None, manifest: Any
+) -> None:
+    """Refuse a ``remote`` request before any billable launch when the AMI
+    manifest says the image it would boot predates a mandatory registry
+    feature the request uses (issue #2924). Anything less certain (no
+    manifest, a legacy entry without ``klt_version``) proceeds to
+    :func:`remote_feature_preflight` on the host. Never relaxed by a warn
+    policy: ``remote`` has none, and a silently dropped metric is worse."""
+    from .sim import SimError
+
+    features = [
+        name
+        for name in _request_features(request)
+        if name in _MANDATORY_RUNNER_FEATURES
+    ]
+    if not features:
+        return
+    try:
+        images = published_runner_identities(pdk, region, manifest)
+    except (RemoteLaunchError, OSError, TypeError, ValueError, AttributeError):
+        return
+    gaps = [
+        _missing_runner_features(features, image["klt_version"]) for image in images
+    ]
+    if not gaps or any(not gap for gap in gaps):
+        return
+    missing = sorted({name for gap in gaps for name in gap or ()})
+    versions = ", ".join(sorted({str(image["klt_version"]) for image in images}))
+    raise SimError(
+        f"backend 'remote' refused before launch: the request uses "
+        f"{', '.join(missing)}, which the AMI manifest's runner image "
+        f"(klt {versions}) predates -- no instance was launched (rebuild the "
+        "remote-sim AMI from a release that has the feature; see "
+        "docs/cli/sim.md)",
+        code=BATCH_RUNNER_FEATURE_CODE,
+    )
+
+
+def _mandatory_feature_probe_shell(features: tuple[str, ...]) -> str:
+    """Shell setting ``$mmiss`` to the ``features`` the runner is not known
+    to support, from ``$rv`` (the runner's ``klt --version`` string). It
+    derives the full release segment itself so the remote backend can reuse
+    it without the batch preflight's ``$rfull``."""
+    checks = " ".join(
+        f'if [ "$mk" -lt {_feature_release_key(name)} ]; '
+        f'then mmiss="${{mmiss}}${{mmiss:+, }}{name}"; fi;'
+        for name in features
+    )
+    names = ", ".join(features)
+    return (
+        "mmiss=; mr=${rv%%+*}; mr=${mr%%[!0-9.]*}; mr=${mr%.}; "
+        'case "$mr" in ""|.*|*..*) mr= ;; esac; '
+        'if [ -z "$mr" ]; then '
+        f'mmiss="{names}"; else '
+        'IFS=. read -r f1 f2 f3 _ <<<"$mr"; '
+        "mk=$(( (10#${f1:-0} * 1000000 + 10#${f2:-0}) * 1000000 "
+        "+ 10#${f3:-0} )); " + checks + " fi; "
+    )
 
 
 def _feature_gate_shell(features: tuple[str, ...], client_version: str) -> str:
@@ -1686,12 +1821,22 @@ def _enforce_published_runner_features(
     if any(not gap for gap in gaps):  # unknown (None) or complete (empty)
         return
     missing = sorted({name for gap in gaps for name in gap or ()})
+    mandatory = bool(_MANDATORY_RUNNER_FEATURES.intersection(missing))
     versions = ", ".join(sorted({str(image["klt_version"]) for image in images}))
     message = (
         f"the request uses {', '.join(missing)}, which the fleet runner image "
         f"(klt {versions}) predates; the submitting client is klt "
         f"{assessment['client_klt_version']}"
     )
+    if mandatory:
+        raise SimError(
+            f"backend 'batch' refused before submission: {message} -- the "
+            "request was not submitted and no instance was launched; a "
+            "runner that predates this feature would drop it, so "
+            "runner_version_check does not relax this (rebuild the runner "
+            "image from a release that has the feature; see docs/cli/sim.md)",
+            code=BATCH_RUNNER_FEATURE_CODE,
+        )
     if assessment["check"] != "enforce":
         print(f"klt sim: warning: {message}; submitting anyway", file=sys.stderr)
         return

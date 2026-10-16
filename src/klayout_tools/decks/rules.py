@@ -305,11 +305,40 @@ class RuleProvenance:
 
 
 @dataclass(frozen=True)
+class CompCoverageSpec:
+    """Descriptor for ``DrcRule(check="comp_coverage")`` (issue #3587): the
+    checked layer (``DrcRule.layer``) minus every ``covered_by_any`` layer,
+    with a *whole* checked polygon exempted when it interacts with any
+    ``exempt_markers`` polygon -- gf180mcu's ``DF.12``: ``comp.not_interacting
+    (schottky_diode).not(nplus).not(pplus)``.
+
+    Every named layer other than the checked one may be absent from a stream:
+    it is read as an empty region, never as a reason to skip the rule (an
+    unimplanted COMP is exactly the violation). Why this is a typed descriptor
+    rather than a :class:`DerivedLayer` mode: see
+    ``docs/design/gf180mcu-comp-checks-spike.md`` section 7.
+    """
+
+    covered_by_any: tuple[tuple[int, int], ...]
+    exempt_markers: tuple[tuple[int, int], ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.covered_by_any:
+            raise ValueError("covered_by_any must name at least one layer")
+
+    def layers(self) -> tuple[tuple[int, int], ...]:
+        """Every non-checked layer this spec reads, in declaration order."""
+        return (*self.covered_by_any, *self.exempt_markers)
+
+
+@dataclass(frozen=True)
 class DrcRule:
     """One rule in a DRC deck.
 
     ``layer`` and ``other_layer`` are ``(layer, datatype)`` pairs. ``check``
-    selects which ``klayout.db.Region`` check primitive to run:
+    selects which ``klayout.db.Region`` check primitive to run (or, for
+    ``"comp_coverage"`` -- issue #3587 -- a region rule described by
+    ``region_spec``, see :class:`CompCoverageSpec`):
     ``"width"`` / ``"space"`` / ``"notch"`` / ``"isolated"`` are single-layer
     checks; ``"separation"`` / ``"enclosing"`` / ``"enclosed"`` / ``"overlap"``
     are two-layer checks and require ``other_layer``; ``"area"``, ``"density"``,
@@ -684,6 +713,7 @@ class DrcRule:
     require_containment: bool = False
     other_layer_selection: str | None = None
     layer_selection: str | None = None
+    region_spec: CompCoverageSpec | None = None
 
 
 class UnknownDeckError(Exception):

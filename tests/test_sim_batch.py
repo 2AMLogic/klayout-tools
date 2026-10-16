@@ -5656,6 +5656,96 @@ def test_request_feature_registry_matches_docs_table():
         assert line.rstrip().endswith(f"| {shown} |"), (feature, line)
 
 
+# --- mandatory `transfer` worker gate (issue #2924) --------------------------
+
+_TRANSFER_REQUEST = {
+    "models": {"pdk": "sky130A"},
+    "options": {},
+    "measurements": [
+        {
+            "name": "pm",
+            "transfer": {
+                "num": "v(out)",
+                "den": "v(in)",
+                "metric": "phase_margin_deg",
+            },
+        }
+    ],
+}
+
+
+def test_transfer_is_a_registered_mandatory_runner_feature():
+    assert sb._request_features(_TRANSFER_REQUEST) == ["transfer"]
+    assert (
+        sb._request_features({"measurements": [{"name": "x", "spice": ".meas"}]}) == []
+    )
+    assert "transfer" in sb._MANDATORY_RUNNER_FEATURES
+    assert "analysis_steps" not in sb._MANDATORY_RUNNER_FEATURES
+
+
+@pytest.mark.parametrize("version_check", ["enforce", "warn"])
+@pytest.mark.parametrize("runner", ["klt 0.7.0", "klt dirty", "klt"])
+def test_transfer_on_an_old_or_unknown_runner_is_rejected_even_under_warn(
+    tmp_path, runner, version_check
+):
+    spec = _feature_spec(tmp_path, _TRANSFER_REQUEST, version_check=version_check)
+    proc, out_dir, marker = _run_job_cmd_with_fake_klt(
+        tmp_path, spec, _fake_klt(runner)
+    )
+    assert proc.returncode == sb._BATCH_PREFLIGHT_REJECT_EXIT
+    assert not marker.exists()  # klt sim never ran
+    error = json.loads((out_dir / "report.json").read_text())["error"]
+    assert error["code"] == sb.BATCH_RUNNER_FEATURE_CODE
+    assert "transfer" in error["message"]
+
+
+@pytest.mark.parametrize("version_check", ["enforce", "warn"])
+@pytest.mark.parametrize("runner", ["0.7.1", "0.7.1.dev5+gabc", "0.7.3"])
+def test_transfer_on_a_supporting_runner_runs(tmp_path, runner, version_check):
+    spec = _feature_spec(tmp_path, _TRANSFER_REQUEST, version_check=version_check)
+    proc, _, marker = _run_job_cmd_with_fake_klt(
+        tmp_path, spec, _fake_klt(f"klt {runner}")
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert marker.exists()
+
+
+def test_request_without_transfer_keeps_the_warn_semantics_on_an_old_runner(tmp_path):
+    spec = _feature_spec(tmp_path, _STEPS_REQUEST, version_check="warn")
+    proc, _, marker = _run_job_cmd_with_fake_klt(tmp_path, spec, _fake_klt("klt 0.7.0"))
+    assert proc.returncode == 0, proc.stderr
+    assert marker.exists()
+
+
+def test_job_command_is_unchanged_for_a_request_without_transfer(tmp_path):
+    plain = {"models": {}, "options": {}}
+    command = _feature_spec(tmp_path, plain).cmd
+    assert "mmiss" not in command
+
+
+def test_prelaunch_refuses_transfer_on_an_old_image_even_under_warn(
+    tmp_path, monkeypatch
+):
+    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
+    _publish_manifest(tmp_path, monkeypatch, [_image(klt_version="0.7.0")])
+    assessment = sb._assess_published_runner(
+        _TRANSFER_REQUEST, _config(tmp_path, runner_version_check="warn")
+    )
+    with pytest.raises(sim.SimError) as raised:
+        sb._enforce_published_runner_features(_TRANSFER_REQUEST, assessment)
+    assert raised.value.code == sb.BATCH_RUNNER_FEATURE_CODE
+    assert "transfer" in str(raised.value)
+
+
+def test_prelaunch_defers_transfer_to_the_runner_when_the_image_is_unknown(
+    tmp_path, monkeypatch
+):
+    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
+    _publish_manifest(tmp_path, monkeypatch, [_image()])  # legacy: no klt_version
+    assessment = sb._assess_published_runner(_TRANSFER_REQUEST, _config(tmp_path))
+    sb._enforce_published_runner_features(_TRANSFER_REQUEST, assessment)  # no raise
+
+
 # --------------------------------------------------------------------------- #
 # Whole-job ceiling: opt-in auto-split (issue #3446)
 # --------------------------------------------------------------------------- #

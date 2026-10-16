@@ -1837,6 +1837,10 @@ def _run_measure_command(
     if backend is not None:
         env["KLT_PEX_BACKEND"] = backend
         env["KLT_SIM_BACKEND"] = backend
+    # The parent holds the pex root locked while blocked here; let a nested
+    # `klt sim` under that root (its default `.klt/sim` beside a request in
+    # $KLT_PEX_ARTIFACTS_DIR) proceed instead of tripping outdir_locked (#3291).
+    env[output_lock.INHERIT_ENV] = output_lock.canonical_dir(artifacts_dir)
 
     try:
         completed = subprocess.run(
