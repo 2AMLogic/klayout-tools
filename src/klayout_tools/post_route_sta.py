@@ -2900,10 +2900,20 @@ def _parasitic_annotation_lines() -> list[str]:
         "}",
         f'puts "{_PARASITIC_ANNOTATION_END}"',
         f'puts "{_FLOATING_DRIVERS_BEGIN}"',
+        # Floating = no net, or a driver-only dangling net (no other pin, no
+        # port): either way the DEF/SPEF has nothing to annotate (issue #3669).
         "catch {",
         "  foreach klt_pin [get_pins -hierarchical *] {",
-        '    if {[get_property $klt_pin direction] eq "output" '
-        "&& [llength [get_nets -quiet -of_objects $klt_pin]] == 0} {",
+        '    if {[get_property $klt_pin direction] ne "output"} {continue}',
+        "    set klt_nets [get_nets -quiet -of_objects $klt_pin]",
+        "    set klt_floating [expr {[llength $klt_nets] == 0}]",
+        "    if {!$klt_floating} {",
+        "      set klt_net [lindex $klt_nets 0]",
+        "      set klt_floating [expr {"
+        "[llength [get_pins -quiet -of_objects $klt_net]] <= 1 "
+        "&& [llength [get_ports -quiet -of_objects $klt_net]] == 0}]",
+        "    }",
+        "    if {$klt_floating} {",
         f'      puts "{_FLOATING_DRIVER_PREFIX} [get_full_name $klt_pin]"',
         "    }",
         "  }",
