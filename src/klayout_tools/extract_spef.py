@@ -272,6 +272,24 @@ class DefNetConnections(dict):  # type: ignore[type-arg]
         self.port_pins = dict(port_pins or {})
 
 
+def _record_def_net_refs(
+    connections: dict[str, list[tuple[str, str]]],
+    port_pins: dict[str, list[str]],
+    net: str,
+    found: Iterable[tuple[str, str]],
+) -> None:
+    """File a DEF net record's ``( ref pin )`` pairs under ``net``: instance
+    connections into ``connections``, top-level ``( PIN <name> )`` port
+    references into ``port_pins``."""
+    found = list(found)
+    pairs = [(DefName(ref), DefName(pin)) for ref, pin in found if ref != "PIN"]
+    ports = [DefName(pin) for ref, pin in found if ref == "PIN"]
+    if pairs:
+        connections.setdefault(net, []).extend(pairs)
+    if ports:
+        port_pins.setdefault(net, []).extend(ports)
+
+
 def def_net_instance_pins(def_path: str) -> DefNetConnections:
     """Parse ``def_path``'s own ``NETS`` section for each net's real
     ``(instance, pin)`` connectivity (issue #961's device-terminal
@@ -342,13 +360,9 @@ def def_net_instance_pins(def_path: str) -> DefNetConnections:
             # scanning the whole body would invent connections out of wire
             # points (see `_DEF_NET_CLAUSE_RE`).
             body = _DEF_NET_CLAUSE_RE.split(" ".join(current_body), maxsplit=1)[0]
-            found = _DEF_NET_CONN_RE.findall(body)
-            pairs = [(DefName(ref), DefName(pin)) for ref, pin in found if ref != "PIN"]
-            if pairs:
-                connections.setdefault(current_net, []).extend(pairs)
-            ports = [DefName(pin) for ref, pin in found if ref == "PIN"]
-            if ports:
-                port_pins.setdefault(current_net, []).extend(ports)
+            _record_def_net_refs(
+                connections, port_pins, current_net, _DEF_NET_CONN_RE.findall(body)
+            )
         current_net = None
         current_body = []
 
@@ -478,6 +492,85 @@ def _def_net_spellings(
 
 def _net_spef(def_net_spellings: Mapping[str, str], name: str) -> str:
     return def_net_spellings.get(name) or _spef_name(name)
+
+
+def _drop_floating_duplicate_nets(
+    parasitics_report: Mapping[str, Any],
+    port_name_set: Iterable[str],
+    net_instance_pins_map: Mapping[str, Any],
+    name_counts: Mapping[str, int],
+) -> tuple[Mapping[str, Any], frozenset[str]]:
+    """Gap C (issue #3257): drop duplicate-named nets the DEF knows nothing
+    about, and any coupling that pointed at them. Returns the filtered report
+    and the skipped net names."""
+    if not net_instance_pins_map:
+        return parasitics_report, frozenset()
+    skipped = frozenset(
+        name
+        for name, count in name_counts.items()
+        if count > 1 and name not in port_name_set and name not in net_instance_pins_map
+    )
+    if not skipped:
+        return parasitics_report, skipped
+    return {
+        **parasitics_report,
+        "nets": [
+            {
+                **entry,
+                "coupled": [
+                    coupled
+                    for coupled in entry.get("coupled", [])
+                    if coupled["net"] not in skipped
+                ],
+            }
+            for entry in parasitics_report["nets"]
+            if entry["net"] not in skipped
+        ],
+    }, skipped
+
+
+def _renamed_ports(
+    net_instance_pins: Mapping[str, Sequence[tuple[str, str]]] | None,
+    port_name_set: Iterable[str],
+) -> dict[str, Sequence[str]]:
+    """Gap B (issue #3257): ports whose DEF PIN name differs from their net."""
+    port_pin_map: Mapping[str, Sequence[str]] = getattr(
+        net_instance_pins, "port_pins", {}
+    )
+    return {
+        net: pins
+        for net, pins in port_pin_map.items()
+        if net in port_name_set and tuple(map(str, pins)) != (net,)
+    }
+
+
+def _port_conn_lines(
+    net: str,
+    spef_net: str,
+    is_port: bool,
+    renamed_ports: Mapping[str, Sequence[str]],
+) -> list[str]:
+    """The ``*P`` entries a net's ``*CONN`` block opens with: one per DEF PIN
+    for a renamed port (issue #3257 gap B), else one under the net's own name
+    when it is a port."""
+    if net in renamed_ports:
+        return [f"*P {_def_spef(pin)} B" for pin in renamed_ports[net]]
+    return [f"*P {spef_net} B"] if is_port else []
+
+
+def _port_spellings(
+    port_name_set: Iterable[str], renamed_ports: Mapping[str, Sequence[str]]
+) -> dict[str, str]:
+    """``*PORTS`` names for ``port_name_set``, using the DEF PIN name(s) for
+    each renamed port (issue #3257 gap B)."""
+    spellings: dict[str, str] = {}
+    for name in port_name_set:
+        if name in renamed_ports:
+            for pin in renamed_ports[name]:
+                spellings[str(pin)] = _def_spef(pin)
+        else:
+            spellings[name] = _spef_name(name)
+    return spellings
 
 
 def _write_spef(
@@ -699,43 +792,11 @@ def _write_spef(
     for entry in parasitics_report["nets"]:
         name_counts[entry["net"]] = name_counts.get(entry["net"], 0) + 1
 
-    # Gap C (issue #3257): drop duplicate-named nets the DEF knows nothing
-    # about, and any coupling that pointed at them.
-    skipped_nets: frozenset[str] = frozenset()
-    if net_instance_pins_map:
-        skipped_nets = frozenset(
-            name
-            for name, count in name_counts.items()
-            if count > 1
-            and name not in port_name_set
-            and name not in net_instance_pins_map
-        )
-    if skipped_nets:
-        parasitics_report = {
-            **parasitics_report,
-            "nets": [
-                {
-                    **entry,
-                    "coupled": [
-                        coupled
-                        for coupled in entry.get("coupled", [])
-                        if coupled["net"] not in skipped_nets
-                    ],
-                }
-                for entry in parasitics_report["nets"]
-                if entry["net"] not in skipped_nets
-            ],
-        }
-
-    # Gap B (issue #3257): ports whose DEF PIN name differs from their net.
-    port_pin_map: Mapping[str, Sequence[str]] = getattr(
-        net_instance_pins, "port_pins", {}
+    # Gaps B and C (issue #3257).
+    parasitics_report, skipped_nets = _drop_floating_duplicate_nets(
+        parasitics_report, port_name_set, net_instance_pins_map, name_counts
     )
-    renamed_ports: dict[str, Sequence[str]] = {
-        net: pins
-        for net, pins in port_pin_map.items()
-        if net in port_name_set and tuple(map(str, pins)) != (net,)
-    }
+    renamed_ports = _renamed_ports(net_instance_pins, port_name_set)
 
     # One two-terminal coupling `*CAP` card per distinct coupled net pair
     # (issue #760's `coupled[]`), emitted exactly once -- `coupled[]` reports
@@ -795,13 +856,7 @@ def _write_spef(
         "*L_UNIT 1 HENRY",
     ]
 
-    port_spellings: dict[str, str] = {}
-    for name in port_name_set:
-        if name in renamed_ports:
-            for pin in renamed_ports[name]:
-                port_spellings[str(pin)] = _def_spef(pin)
-        else:
-            port_spellings[name] = _spef_name(name)
+    port_spellings = _port_spellings(port_name_set, renamed_ports)
     if port_spellings:
         lines.append("")
         lines.append("*PORTS")
@@ -859,12 +914,7 @@ def _write_spef(
 
         lines.append("")
         lines.append(f"*D_NET {spef_net} {total_cap_ff:.6f}")
-        conn_lines: list[str] = []
-        if net in renamed_ports:
-            for pin in renamed_ports[net]:
-                conn_lines.append(f"*P {_def_spef(pin)} B")
-        elif is_port:
-            conn_lines.append(f"*P {spef_net} B")
+        conn_lines = _port_conn_lines(net, spef_net, is_port, renamed_ports)
         for inst, pin in instance_pins:
             # Direction is unknown without a LEF pin-direction lookup (the
             # DEF `NETS` section alone does not carry it) -- declared `B`,
