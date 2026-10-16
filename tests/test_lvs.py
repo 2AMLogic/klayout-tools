@@ -4233,6 +4233,154 @@ R1 RA RB vsubs {reference_r_ohm:.5f} res_high_po
     assert buggy_report["status"] == "mismatch"
 
 
+def _run_series_fold_lvs(tmp_path, segments, options, *, deck=True, name="fold"):
+    """`run_lvs` over the `_write_series_res_high_po_gds` chain against a
+    one-element reference carrying the once-charged offset (issue #3017)."""
+    l_um = 10.0
+    gds = _write_series_res_high_po_gds(
+        tmp_path / f"{name}.gds", segments=segments, l_um=l_um
+    )
+    r_ohm = _series_res_high_po_expected_r_ohm(segments, l_um, offset_count=1)
+    reference_path = _write(
+        tmp_path / f"{name}.spice",
+        f".subckt RES RA RB vsubs\nR1 RA RB vsubs {r_ohm:.5f} res_high_po\n.ends\n",
+    )
+    if deck:
+        layout = {"file": gds, "deck": "sky130"}
+    else:
+        # `layout.file` requires a deck, so supply a pre-extracted netlist
+        # (offset deferred) with no `layout.deck`: no correction is applied.
+        from klayout_tools.extract import run_extract
+
+        spice = str(tmp_path / f"{name}_layout.spice")
+        run_extract(gds, "sky130", output=spice, apply_resistor_fixed_offset=False)
+        layout = {"netlist": spice, "top": "RES"}
+    return run_lvs(
+        _write_request(
+            tmp_path / f"{name}.json",
+            {
+                "layout": layout,
+                "reference": {"netlist": reference_path, "top": "RES"},
+                "options": options,
+            },
+        )
+    )
+
+
+def _fold_entries(report):
+    return [
+        m
+        for m in report["mismatches"]
+        if m["category"] == "device.series_fold_offset_absorbed"
+    ]
+
+
+def test_series_fold_offset_absorbed_is_disclosed_as_warning(tmp_path):
+    """Issue #3017: a folded N-segment chain stays a `match` but carries one
+    warning naming N and the `(N-1) * fixed_offset_ohm` the fold absorbed."""
+    segments = 4
+    report = _run_series_fold_lvs(tmp_path, segments, {"combine_devices": True})
+    assert report["status"] == "match"
+    entries = _fold_entries(report)
+    assert len(entries) == 1
+    assert entries[0]["severity"] == "warning"
+    details = entries[0]["details"]
+    assert details["class"] == "res_high_po"
+    assert details["folded_primitives"] == segments
+    # The deck splits the w=1um head term into a constant part and a
+    # width-normalized part (#3049); the disclosure sums both.
+    assert details["fixed_offset_ohm"] + details["end_term_ohm"] == pytest.approx(
+        _RES_HIGH_PO_FIXED_OFFSET_OHM
+    )
+    absorbed = (segments - 1) * _RES_HIGH_PO_FIXED_OFFSET_OHM
+    assert details["absorbed_offset_ohm"] == pytest.approx(absorbed)
+    r_final = _series_res_high_po_expected_r_ohm(segments, 10.0, offset_count=1)
+    assert details["fraction_of_r"] == pytest.approx(absorbed / r_final)
+
+
+def test_series_fold_offset_absorbed_does_not_change_verdict(tmp_path):
+    """The warning never moves status or error counts."""
+    report = _run_series_fold_lvs(tmp_path, 3, {"combine_devices": True})
+    assert report["status"] == "match"
+    assert not [m for m in report["mismatches"] if m["severity"] == "error"]
+    assert not report["category_error_counts"].get("device.series_fold_offset_absorbed")
+
+
+def test_series_fold_offset_absorbed_absent_when_not_folded(tmp_path):
+    """No entry without `combine_devices`, without a deck, with a class list
+    excluding the resistor, or for a single primitive."""
+    for name, segments, options, deck in [
+        ("nocombine", 3, {}, True),
+        ("nodeck", 3, {"combine_devices": True}, False),
+        ("excluded", 3, {"combine_devices": ["nfet"]}, True),
+        ("single", 1, {"combine_devices": True}, True),
+    ]:
+        report = _run_series_fold_lvs(tmp_path, segments, options, deck=deck, name=name)
+        assert _fold_entries(report) == [], name
+
+
+def _run_spice_fold_lvs(tmp_path, layout_body, reference_body, ports, name):
+    layout = _write(
+        tmp_path / f"{name}_layout.spice", f".subckt TOP {ports}\n{layout_body}.ends\n"
+    )
+    reference = _write(
+        tmp_path / f"{name}_ref.spice", f".subckt TOP {ports}\n{reference_body}.ends\n"
+    )
+    return run_lvs(
+        _write_request(
+            tmp_path / f"{name}.json",
+            {
+                "layout": {"netlist": layout, "top": "TOP", "deck": "sky130"},
+                "reference": {"netlist": reference, "top": "TOP"},
+                "options": {"combine_devices": True},
+            },
+        )
+    )
+
+
+def test_series_fold_offset_absorbed_two_chains_and_parallel(tmp_path):
+    """Issue #3017: two separate series chains in one circuit -> two entries;
+    a parallel fold, or a chain in parallel with another path between the same
+    end nets (N not attributable), -> none."""
+    r = 1000.0
+    rr = r + _RES_HIGH_PO_FIXED_OFFSET_OHM
+    two_chains = _run_spice_fold_lvs(
+        tmp_path,
+        "".join(
+            f"R{i} {a} {b} vsubs {r} res_high_po\n"
+            for i, (a, b) in enumerate(
+                [("A", "m1"), ("m1", "B"), ("C", "m2"), ("m2", "m3"), ("m3", "D")]
+            )
+        ),
+        f"RX A B vsubs {2 * r + _RES_HIGH_PO_FIXED_OFFSET_OHM} res_high_po\n"
+        f"RY C D vsubs {3 * r + _RES_HIGH_PO_FIXED_OFFSET_OHM} res_high_po\n",
+        "A B C D vsubs",
+        "twochains",
+    )
+    assert sorted(
+        e["details"]["folded_primitives"] for e in _fold_entries(two_chains)
+    ) == [2, 3]
+
+    parallel = _run_spice_fold_lvs(
+        tmp_path,
+        f"R1 A B vsubs {r} res_high_po\nR2 A B vsubs {r} res_high_po\n",
+        f"RX A B vsubs {r / 2 + _RES_HIGH_PO_FIXED_OFFSET_OHM} res_high_po\n",
+        "A B vsubs",
+        "parallel",
+    )
+    assert _fold_entries(parallel) == []
+
+    mixed = _run_spice_fold_lvs(
+        tmp_path,
+        f"R1 A m vsubs {r} res_high_po\nR2 m B vsubs {r} res_high_po\n"
+        f"R3 A B vsubs {r} res_high_po\n",
+        f"RX A B vsubs {rr} res_high_po\n",
+        "A B vsubs",
+        "mixed",
+    )
+    assert _fold_entries(mixed) == []
+
+
 def test_combine_devices_false_still_applies_fixed_offset_per_primitive(tmp_path):
     """Regression guard for issue #559's fix: when `options.combine_devices`
     is `false` (or simply omitted -- the default), each of N series-wired

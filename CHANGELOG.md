@@ -14,6 +14,20 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt lvs`: new `mismatches[].category` `device.series_fold_offset_absorbed`**
+  (issue #3017): when `options.combine_devices` folds N>1 series primitives of
+  a resistor class with a nonzero head term (`fixed_offset_ohm` +
+  `end_term_ohm_um / W`) into one device, the deferred #559 correction charges
+  that head term once, so `(N-1) * head term` ohms the drawn chain physically
+  carries is not charged to the compare. Each such fold is now disclosed as a
+  `severity: "warning"` entry (never changes `status`; a `match` stays a
+  `match`) with `details` `circuit`, `device`, `class`, `folded_primitives`,
+  `fixed_offset_ohm`, `end_term_ohm`, `absorbed_offset_ohm` and
+  `fraction_of_r`. Only a pure series chain is reported; ambiguous topologies
+  (branches, parallel primitives, chains sharing end nets) emit nothing rather
+  than a guessed N. See `docs/cli/lvs.md`'s
+  `device.series_fold_offset_absorbed` section. Additive; no `schema_version`
+  bump.
 - **`klt extract --resistance-graph`: opt-in terminal-aware resistance graph**
   (issue #2982, Stage 3.D5 increment 3): adds `parasitics.nets[].resistance_graph`
   (`status`, `terminals`, `pair_resistance_ohm`, `legacy_resistance_ohm`,

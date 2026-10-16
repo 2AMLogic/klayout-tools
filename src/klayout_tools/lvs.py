@@ -318,6 +318,13 @@ CATEGORY_DEVICE_COMBINE_INCOMPLETE = "device.combine_incomplete"
 #:
 #: See `_correct_combine_parameters`.
 CATEGORY_DEVICE_COMBINE_PARAMETER_CORRECTED = "device.combine_parameter_corrected"
+#: Issue #3017: `options.combine_devices` folded a pure series chain of N>1
+#: resistor primitives of a class whose deck row has a nonzero
+#: `fixed_offset_ohm`, and the deferred correction (#559) charged that offset
+#: once for the folded device -- so `(N-1) * fixed_offset_ohm` the drawn
+#: chain physically carries was absorbed by the fold. Always `severity:
+#: "warning"`. See `_series_fold_offset_absorbed_warnings`.
+CATEGORY_DEVICE_SERIES_FOLD_OFFSET_ABSORBED = "device.series_fold_offset_absorbed"
 CATEGORY_PIN_UNMATCHED = "pin.unmatched"
 #: Issue #2845: `options.strict_top_level_pin_count` found the two compared
 #: top circuits declaring a different number of pins. Always `severity:
@@ -1752,6 +1759,16 @@ def run_lvs(request: str) -> dict[str, Any]:
             # would have produced. Skipping it here would leave the degraded
             # run reporting under-valued resistances.
             apply_resistor_fixed_offset_corrections(layout_netlist, layout_deck)
+            # Issue #3017: disclose the (N-1) head/end terms the fold above
+            # absorbed (a no-op after a symmetric degrade).
+            combine_warnings.extend(
+                _series_fold_offset_absorbed_warnings(
+                    layout_snapshot,
+                    layout_netlist,
+                    layout_deck,
+                    combine_incomplete=combine_incomplete,
+                )
+            )
 
     bulk_warnings: list[dict[str, Any]] = []
     short_nets_warnings: list[dict[str, Any]] = []
@@ -5600,6 +5617,145 @@ def _correct_combine_parameters(
         side,
         details={"corrected": corrected},
     )
+
+
+def _series_chain_lengths(pre_circuit: Any, class_name: str, interior: set[str]):
+    """Map ``(net_a, net_b)`` (sorted expanded net names) to the lengths of
+    every pure series chain of ``class_name`` devices in `pre_circuit`
+    running between those two non-interior nets through `interior` nets
+    only (a lone device between two non-interior nets is a chain of 1)."""
+    edges: dict[str, list[tuple[Any, str]]] = {}
+    for device in pre_circuit.each_device():
+        if device.device_class().name != class_name:
+            continue
+        net_a, net_b = device.net_for_terminal(0), device.net_for_terminal(1)
+        if net_a is None or net_b is None:
+            continue
+        name_a, name_b = net_a.expanded_name(), net_b.expanded_name()
+        edges.setdefault(name_a, []).append((device, name_b))
+        edges.setdefault(name_b, []).append((device, name_a))
+
+    chains: dict[tuple[str, str], list[int]] = {}
+    for start, incident in edges.items():
+        if start in interior:
+            continue
+        for first_device, first_next in incident:
+            length, previous, here = 1, first_device, first_next
+            while here in interior:
+                onward = [e for e in edges.get(here, []) if e[0] is not previous]
+                if len(onward) != 1:
+                    break  # a branch or dead end, not a pure series chain
+                previous, here = onward[0]
+                length += 1
+            else:
+                key = (min(start, here), max(start, here))
+                # Each chain is walked from both ends; keep one direction.
+                if start <= here:
+                    chains.setdefault(key, []).append(length)
+    return chains
+
+
+def _resistor_head_term_ohm(device: Any, fixed_offset: float, end_term: float) -> float:
+    """``fixed_offset_ohm + end_term_ohm_um / W`` for one resistor `device`
+    (the head term the #559 correction charges once; ``end_term_ohm_um`` is
+    skipped when the class has no usable ``W``, as the correction does)."""
+    width = device.parameter("W") if end_term else None
+    return fixed_offset + (end_term / width if width else 0.0)
+
+
+def _series_fold_offset_absorbed_warnings(
+    pre_combine_netlist: Any,
+    netlist: Any,
+    deck: Any,
+    *,
+    combine_incomplete: bool = False,
+) -> list[dict[str, Any]]:
+    """One ``severity: "warning"``
+    :data:`CATEGORY_DEVICE_SERIES_FOLD_OFFSET_ABSORBED` entry per post-combine
+    resistor that is a fold of N>1 series primitives of a class with a
+    nonzero ``fixed_offset_ohm`` (issue #3017).
+
+    The deferred correction (#559, ``apply_resistor_fixed_offset_corrections``)
+    charges the offset once per surviving device, so the fold absorbs
+    ``(N-1) * fixed_offset_ohm`` the drawn chain physically carries. N is
+    derived from `pre_combine_netlist` topology: the survivor's two end nets
+    are walked back through the nets the fold emptied. Only a **pure series
+    chain** is reported -- when more than one chain (or a parallel primitive)
+    joins the same two end nets, N cannot be attributed to the survivor, so no
+    entry is emitted rather than a guessed one.
+
+    Call after the correction ran, so ``fraction_of_r`` uses the final ``R``.
+    Returns ``[]`` when `combine_incomplete` (a symmetric degrade folded
+    nothing).
+    """
+    offsets = {
+        resistor.name.lower(): (resistor.fixed_offset_ohm, resistor.end_term_ohm_um)
+        for resistor in deck.resistors
+        if resistor.fixed_offset_ohm or resistor.end_term_ohm_um
+    }
+    if combine_incomplete or not offsets:
+        return []
+
+    warnings: list[dict[str, Any]] = []
+    for circuit in netlist.each_circuit():
+        pre_circuit = pre_combine_netlist.circuit_by_name(circuit.name)
+        if pre_circuit is None:
+            continue
+        post_nets = {net.expanded_name() for net in circuit.each_net()}
+        interior = {net.expanded_name() for net in pre_circuit.each_net()} - post_nets
+        if not interior:
+            continue
+        chain_cache: dict[str, Any] = {}
+        for device in circuit.each_device():
+            device_class = device.device_class()
+            terms = offsets.get(device_class.name.lower())
+            if terms is None:
+                continue
+            fixed_offset, end_term = terms
+            offset = _resistor_head_term_ohm(device, fixed_offset, end_term)
+            net_a, net_b = device.net_for_terminal(0), device.net_for_terminal(1)
+            if net_a is None or net_b is None:
+                continue
+            if device_class.name not in chain_cache:
+                chain_cache[device_class.name] = _series_chain_lengths(
+                    pre_circuit, device_class.name, interior
+                )
+            name_a, name_b = net_a.expanded_name(), net_b.expanded_name()
+            key = (min(name_a, name_b), max(name_a, name_b))
+            lengths = chain_cache[device_class.name].get(key, [])
+            if len(lengths) != 1 or lengths[0] < 2:
+                continue
+            folded = lengths[0]
+            absorbed = (folded - 1) * offset
+            r_final = device.parameter("R")
+            fraction = absorbed / r_final if r_final else None
+            warnings.append(
+                _mismatch(
+                    CATEGORY_DEVICE_SERIES_FOLD_OFFSET_ABSORBED,
+                    "warning",
+                    f"options.combine_devices folded {folded} series "
+                    f"{device_class.name} primitives in circuit "
+                    f"{circuit.name!r} into one device ({device.name or '<unnamed>'}) "
+                    f"and charged the head term ({offset!r} ohm: fixed_offset_ohm "
+                    f"+ end_term_ohm_um / W) once, so {absorbed!r} ohm "
+                    "((N-1) * head term) the drawn chain "
+                    "physically carries was not charged to the compare "
+                    "(see docs/cli/lvs.md, "
+                    "'device.series_fold_offset_absorbed')",
+                    "layout",
+                    details={
+                        "circuit": circuit.name,
+                        "device": device.name or None,
+                        "class": device_class.name,
+                        "folded_primitives": folded,
+                        "fixed_offset_ohm": fixed_offset,
+                        "end_term_ohm": offset - fixed_offset,
+                        "absorbed_offset_ohm": absorbed,
+                        "fraction_of_r": fraction,
+                    },
+                )
+            )
+    return warnings
 
 
 def _flatten_netlist_safely(netlist: kdb.Netlist, side: str) -> dict[str, Any] | None:
