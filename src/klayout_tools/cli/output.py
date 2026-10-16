@@ -33,9 +33,12 @@ Design notes (additive envelope, not a wrapping one):
 
 from __future__ import annotations
 
+import gzip
+import io
 import json
 import sys
 from collections.abc import Callable
+from typing import Any
 
 #: Application-level error exit code (as opposed to argparse's usage-error 2).
 ERROR_EXIT_CODE = 1
@@ -63,6 +66,27 @@ def emit_success(
         print()
     else:
         text_renderer(payload)
+
+
+def write_json_file(payload: dict, path: str) -> None:
+    """Write ``payload`` to ``path`` byte-identical to what
+    :func:`emit_success` puts on stdout under ``--format json``.
+
+    A ``.gz`` ``path`` is gzip-compressed with ``mtime=0`` and no embedded
+    filename, so identical payloads give byte-identical files. Streams via
+    ``json.dump`` rather than building a second in-memory copy. Raises
+    :class:`OSError` if ``path`` cannot be written.
+    """
+    if path.endswith(".gz"):
+        with open(path, "wb") as raw:
+            with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as gz:
+                with io.TextIOWrapper(gz, encoding="utf-8", newline="") as text:
+                    json.dump(payload, text, indent=2)
+                    text.write("\n")
+    else:
+        with open(path, "w", encoding="utf-8", newline="") as handle:
+            json.dump(payload, handle, indent=2)
+            handle.write("\n")
 
 
 def render_table(
@@ -150,6 +174,7 @@ def emit_error(
     format: str,
     exit_code: int = ERROR_EXIT_CODE,
     code: str | None = None,
+    details: dict[str, Any] | None = None,
 ) -> int:
     """Emit an error envelope and return the exit code to use.
 
@@ -170,11 +195,17 @@ def emit_error(
     emitted as ``error.code`` **only when set** -- the envelope of every
     error without one is byte-for-byte unchanged. It does not appear in the
     ``--format text`` line, which stays the plain message.
+
+    ``details`` is an optional mapping of extra structured fields merged into
+    ``error`` (after the standard keys, which it cannot override); like
+    ``code`` it appears only in the JSON envelope and only when set.
     """
     if format == "json":
-        error: dict[str, str] = {"command": command, "message": message}
+        error: dict[str, Any] = {"command": command, "message": message}
         if code is not None:
             error["code"] = code
+        for key, value in (details or {}).items():
+            error.setdefault(key, value)
         error_payload = {"schema_version": 1, "error": error}
         json.dump(error_payload, sys.stderr, indent=2)
         print(file=sys.stderr)

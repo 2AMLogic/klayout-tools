@@ -146,6 +146,17 @@ def _refuse_crossings(spec: dict[str, Any]) -> None:
         )
 
 
+def _refuse_cycle_mean(spec: dict[str, Any]) -> None:
+    """Issue #2947: like ``crossings``, a ``cycle_mean`` reads one transient
+    plot's rawfile and has no per-step equivalent -- refused by name."""
+    if spec.get("cycle_mean") is not None:
+        raise _error(
+            f"measurement {spec.get('name')!r}: 'cycle_mean' is not supported "
+            "with analysis_steps -- use the scalar analysis "
+            '(kind "tran") for a cycle-aligned mean'
+        )
+
+
 def is_steps_analysis(analysis: dict[str, Any]) -> bool:
     """Whether a resolved ``analysis`` object is a step sequence."""
     return analysis.get("kind") == STEPS_KIND and "steps" in analysis
@@ -317,6 +328,7 @@ def _resolve_step_measurements(
     for spec in specs:
         _validate_measurement_form(spec)
         _refuse_crossings(spec)
+        _refuse_cycle_mean(spec)
         local = spec["name"]
         if not isinstance(local, str) or not _NAME_RE.match(local):
             raise _error(
@@ -506,6 +518,7 @@ def _resolve_derived_measurements(
     for position, spec in enumerate(specs):
         name = spec["name"]
         _refuse_crossings(spec)
+        _refuse_cycle_mean(spec)
         if spec.get("spice") is not None:
             raise _error(
                 f"measurement {name!r}: with analysis_steps, a top-level "
