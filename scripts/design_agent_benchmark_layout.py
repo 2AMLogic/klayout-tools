@@ -193,10 +193,8 @@ def _class_of_verb(protocol: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def _protocol_semantic_errors(protocol: dict[str, Any]) -> list[str]:
+def _disjoint_class_errors(classes: dict[str, list[str]]) -> list[str]:
     errors: list[str] = []
-    classes: dict[str, list[str]] = protocol["tool_classes"]
-
     seen: dict[str, str] = {}
     for cls, verbs in classes.items():
         for verb in verbs:
@@ -206,12 +204,13 @@ def _protocol_semantic_errors(protocol: dict[str, Any]) -> list[str]:
                     f"{cls!r}; classes must be disjoint"
                 )
             seen[verb] = cls
+    return errors
 
-    arms = {arm["id"]: arm for arm in protocol["arms"]}
-    if sorted(arms) != sorted(ARM_IDS):
-        errors.append(f"arms: expected exactly {sorted(ARM_IDS)}, got {sorted(arms)}")
-        return errors
 
+def _arm_phase_errors(
+    arms: dict[str, dict[str, Any]], classes: dict[str, list[str]]
+) -> list[str]:
+    errors: list[str] = []
     for arm_id, arm in arms.items():
         phase_ids = [phase["id"] for phase in arm["phases"]]
         if len(set(phase_ids)) != len(phase_ids):
@@ -223,16 +222,26 @@ def _protocol_semantic_errors(protocol: dict[str, Any]) -> list[str]:
                         f"arms/{arm_id}/{phase['id']}: allowed class {cls!r} is not "
                         f"declared in tool_classes"
                     )
+    return errors
 
-    def allowed(arm_id: str) -> set[str]:
-        return {c for p in arms[arm_id]["phases"] for c in p["allowed_classes"]}
 
-    if "generate" in allowed("draw-only"):
+def _arm_allowed_classes(arm: dict[str, Any]) -> set[str]:
+    return {c for p in arm["phases"] for c in p["allowed_classes"]}
+
+
+def _arm_class_policy_errors(arms: dict[str, dict[str, Any]]) -> list[str]:
+    errors: list[str] = []
+    if "generate" in _arm_allowed_classes(arms["draw-only"]):
         errors.append("arms/draw-only: must not allow the 'generate' class")
-    if "draw" in allowed("gen-only"):
+    if "draw" in _arm_allowed_classes(arms["gen-only"]):
         errors.append("arms/gen-only: must not allow the 'draw' class")
-    if not {"generate", "draw"} <= allowed(SEEDED_ARM):
+    if not {"generate", "draw"} <= _arm_allowed_classes(arms[SEEDED_ARM]):
         errors.append("arms/gen+refine: must allow both 'generate' and 'draw'")
+    return errors
+
+
+def _arm_seed_errors(protocol: dict[str, Any], arms: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
     for arm_id in ("draw-only", "gen-only"):
         if arms[arm_id]["seed"] is not None:
             errors.append(f"arms/{arm_id}: unseeded arm must have seed: null")
@@ -250,14 +259,13 @@ def _protocol_semantic_errors(protocol: dict[str, Any]) -> list[str]:
             "seeding_decision: 'same_run_best_valid_gen_only' requires "
             "arms/gen+refine seed.policy 'same_run_best_valid'"
         )
+    return errors
 
-    if sorted(protocol["tool_recording"]["record_fields"]) != sorted(
-        ["seq", "phase", "verb", "class", "exit_code"]
-    ):
-        errors.append(
-            "tool_recording.record_fields: must be the run schema's five fields"
-        )
 
+def _status_reference_errors(
+    protocol: dict[str, Any], seed: dict[str, Any] | None
+) -> list[str]:
+    errors: list[str] = []
     statuses = {s["id"]: s for s in protocol["failure_semantics"]["statuses"]}
     run_statuses = _run_status_enum()
     if sorted(statuses) != sorted(run_statuses):
@@ -276,27 +284,42 @@ def _protocol_semantic_errors(protocol: dict[str, Any]) -> list[str]:
         errors.append("budget.exhaustion_status: not a declared status")
     if seed is not None and seed["unseedable_status"] not in statuses:
         errors.append("arms/gen+refine: seed.unseedable_status not a declared status")
+    return errors
 
+
+def _score_errors(score: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    fields = [f["id"] for f in score["fields"]]
+    if score["primary"] not in fields:
+        errors.append("score.primary: not listed in score.fields")
+    for field in score["fields"]:
+        if field["id"] == score["primary"] and not field["required"]:
+            errors.append("score.primary: the primary score field must be required")
+    return errors
+
+
+def _declared_set_errors(protocol: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    if sorted(protocol["tool_recording"]["record_fields"]) != sorted(
+        ["seq", "phase", "verb", "class", "exit_code"]
+    ):
+        errors.append(
+            "tool_recording.record_fields: must be the run schema's five fields"
+        )
     eligibility = [rule["id"] for rule in protocol["task_eligibility"]["rules"]]
     if len(set(eligibility)) != len(eligibility):
         errors.append("task_eligibility: duplicate rule ids")
     if sorted(eligibility) != sorted(_ELIGIBILITY_RULES):
         errors.append(f"task_eligibility: expected rules {sorted(_ELIGIBILITY_RULES)}")
-
     if sorted(protocol["validity"]["required_checks"]) != ["drc", "lvs", "provenance"]:
         errors.append("validity.required_checks: must be drc, lvs and provenance")
-
-    fields = [f["id"] for f in protocol["score"]["fields"]]
-    if protocol["score"]["primary"] not in fields:
-        errors.append("score.primary: not listed in score.fields")
-    for field in protocol["score"]["fields"]:
-        if field["id"] == protocol["score"]["primary"] and not field["required"]:
-            errors.append("score.primary: the primary score field must be required")
-
     if sorted(protocol["seed_identity"]["fields"]) != sorted(_SEED_FIELDS):
         errors.append(f"seed_identity.fields: expected {sorted(_SEED_FIELDS)}")
+    return errors
 
-    per_run = protocol["budget"]["per_run"]
+
+def _budget_errors(per_run: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
     if per_run["agent_timeout_s"] != DEFAULT_INTERACTIVE_TIMEOUT_S:
         errors.append(
             f"budget.per_run.agent_timeout_s: {per_run['agent_timeout_s']} "
@@ -311,6 +334,25 @@ def _protocol_semantic_errors(protocol: dict[str, Any]) -> list[str]:
             f"the interactive provider's DEFAULT_TOOL_CALL_BUDGET "
             f"({DEFAULT_TOOL_CALL_BUDGET})"
         )
+    return errors
+
+
+def _protocol_semantic_errors(protocol: dict[str, Any]) -> list[str]:
+    classes: dict[str, list[str]] = protocol["tool_classes"]
+    errors = _disjoint_class_errors(classes)
+
+    arms = {arm["id"]: arm for arm in protocol["arms"]}
+    if sorted(arms) != sorted(ARM_IDS):
+        errors.append(f"arms: expected exactly {sorted(ARM_IDS)}, got {sorted(arms)}")
+        return errors
+
+    errors += _arm_phase_errors(arms, classes)
+    errors += _arm_class_policy_errors(arms)
+    errors += _arm_seed_errors(protocol, arms)
+    errors += _status_reference_errors(protocol, arms[SEEDED_ARM]["seed"])
+    errors += _declared_set_errors(protocol)
+    errors += _score_errors(protocol["score"])
+    errors += _budget_errors(protocol["budget"]["per_run"])
     return errors
 
 
@@ -467,84 +509,166 @@ def _tool_call_errors(protocol: dict[str, Any], run: dict[str, Any]) -> list[str
     return errors
 
 
+def _valid_run_errors(
+    protocol: dict[str, Any], run: dict[str, Any], task: dict[str, Any] | None
+) -> list[str]:
+    errors: list[str] = []
+    gds = run["artifact"]["gds_sha256"]
+    drc, lvs = run["validity"]["drc"], run["validity"]["lvs"]
+    drc_pass = protocol["validity"]["drc"]["pass_status"]
+    lvs_pass = protocol["validity"]["lvs"]["pass_status"]
+    if drc["status"] != drc_pass:
+        errors.append(
+            f"status valid but drc status is {drc['status']!r}, not {drc_pass!r}"
+        )
+    if lvs["status"] != lvs_pass:
+        errors.append(
+            f"status valid but lvs status is {lvs['status']!r}, not {lvs_pass!r}"
+        )
+    for name, check in (("drc", drc), ("lvs", lvs)):
+        if check["gds_sha256"] != gds:
+            errors.append(
+                f"provenance: {name} report was produced on a different GDS than "
+                f"the scored artifact"
+            )
+    if "netlist_sha256" not in lvs:
+        errors.append("lvs: netlist_sha256 is required on a valid run")
+    elif task is not None and lvs["netlist_sha256"] != task["frozen_netlist"]["sha256"]:
+        errors.append(
+            "provenance: lvs compared against a netlist other than the "
+            "task's frozen one"
+        )
+    return errors
+
+
+def _lvs_status_errors(
+    protocol: dict[str, Any], drc: dict[str, Any] | None, lvs: dict[str, Any] | None
+) -> list[str]:
+    errors: list[str] = []
+    drc_pass = protocol["validity"]["drc"]["pass_status"]
+    lvs_pass = protocol["validity"]["lvs"]["pass_status"]
+    if drc is None or drc["status"] != drc_pass:
+        errors.append("status invalid_lvs requires a clean drc check")
+    if lvs is None or lvs["status"] == lvs_pass:
+        errors.append("status invalid_lvs but no failing lvs check is recorded")
+    return errors
+
+
+def _provenance_status_errors(
+    protocol: dict[str, Any],
+    artifact: dict[str, Any],
+    drc: dict[str, Any] | None,
+    lvs: dict[str, Any] | None,
+) -> list[str]:
+    drc_pass = protocol["validity"]["drc"]["pass_status"]
+    lvs_pass = protocol["validity"]["lvs"]["pass_status"]
+    bound = all(
+        check is not None and check["gds_sha256"] == artifact["gds_sha256"]
+        for check in (drc, lvs)
+    )
+    passing = (
+        drc is not None
+        and lvs is not None
+        and drc["status"] == drc_pass
+        and lvs["status"] == lvs_pass
+    )
+    if bound and passing:
+        return [
+            "status invalid_provenance but drc/lvs pass and are bound to the artifact"
+        ]
+    return []
+
+
+def _scorer_ran_errors(protocol: dict[str, Any], run: dict[str, Any]) -> list[str]:
+    """invalid_drc / invalid_lvs / invalid_provenance: the scorer ran."""
+    status, artifact, validity = run["status"], run["artifact"], run["validity"]
+    if artifact is None or validity is None:
+        return [f"status {status!r} requires an artifact and recorded validity checks"]
+    drc, lvs = validity["drc"], validity["lvs"]
+    drc_pass = protocol["validity"]["drc"]["pass_status"]
+    errors: list[str] = []
+    if status == "invalid_drc" and (drc is None or drc["status"] == drc_pass):
+        errors.append("status invalid_drc but no failing drc check is recorded")
+    if status == "invalid_lvs":
+        errors += _lvs_status_errors(protocol, drc, lvs)
+    if status == "invalid_provenance":
+        errors += _provenance_status_errors(protocol, artifact, drc, lvs)
+    return errors
+
+
 def _validity_errors(
     protocol: dict[str, Any], run: dict[str, Any], task: dict[str, Any] | None
 ) -> list[str]:
     """Status vs. recorded checks vs. provenance. A ``valid`` run needs
     clean DRC, matching LVS, and every hash bound to the one scored GDS."""
-    errors: list[str] = []
     status = run["status"]
-    artifact, validity, score = run["artifact"], run["validity"], run["score"]
-    drc_pass = protocol["validity"]["drc"]["pass_status"]
-    lvs_pass = protocol["validity"]["lvs"]["pass_status"]
-
     if status == SCORED_STATUS:
-        gds = artifact["gds_sha256"]
-        drc, lvs = validity["drc"], validity["lvs"]
-        if drc["status"] != drc_pass:
-            errors.append(
-                f"status valid but drc status is {drc['status']!r}, not {drc_pass!r}"
-            )
-        if lvs["status"] != lvs_pass:
-            errors.append(
-                f"status valid but lvs status is {lvs['status']!r}, not {lvs_pass!r}"
-            )
-        for name, check in (("drc", drc), ("lvs", lvs)):
-            if check["gds_sha256"] != gds:
-                errors.append(
-                    f"provenance: {name} report was produced on a different GDS than "
-                    f"the scored artifact"
-                )
-        if "netlist_sha256" not in lvs:
-            errors.append("lvs: netlist_sha256 is required on a valid run")
-        elif (
-            task is not None
-            and lvs["netlist_sha256"] != task["frozen_netlist"]["sha256"]
-        ):
-            errors.append(
-                "provenance: lvs compared against a netlist other than the "
-                "task's frozen one"
-            )
-        return errors
+        return _valid_run_errors(protocol, run, task)
 
-    if score is not None:
+    errors: list[str] = []
+    if run["score"] is not None:
         errors.append(f"status {status!r} must not carry a score")
     if status in _NO_VALIDITY_STATUSES:
-        if artifact is not None and status == "not_run_no_seed":
+        if run["artifact"] is not None and status == "not_run_no_seed":
             errors.append("not_run_no_seed must not carry an artifact")
         return errors
+    return errors + _scorer_ran_errors(protocol, run)
 
-    # invalid_drc / invalid_lvs / invalid_provenance: the scorer ran.
-    if artifact is None or validity is None:
-        errors.append(
-            f"status {status!r} requires an artifact and recorded validity checks"
-        )
-        return errors
-    drc, lvs = validity["drc"], validity["lvs"]
-    if status == "invalid_drc" and (drc is None or drc["status"] == drc_pass):
-        errors.append("status invalid_drc but no failing drc check is recorded")
-    if status == "invalid_lvs":
-        if drc is None or drc["status"] != drc_pass:
-            errors.append("status invalid_lvs requires a clean drc check")
-        if lvs is None or lvs["status"] == lvs_pass:
-            errors.append("status invalid_lvs but no failing lvs check is recorded")
-    if status == "invalid_provenance":
-        bound = all(
-            check is not None and check["gds_sha256"] == artifact["gds_sha256"]
-            for check in (drc, lvs)
-        )
-        passing = (
-            drc is not None
-            and lvs is not None
-            and drc["status"] == drc_pass
-            and lvs["status"] == lvs_pass
-        )
-        if bound and passing:
+
+def _run_binding_errors(
+    protocol: dict[str, Any], run: dict[str, Any], task: dict[str, Any] | None
+) -> list[str]:
+    errors: list[str] = []
+    if run["protocol_sha256"] != document_sha256(protocol):
+        errors.append("protocol_sha256 does not match the protocol document")
+    if task is not None:
+        if run["task_id"] != task["id"]:
             errors.append(
-                "status invalid_provenance but drc/lvs pass and are bound to "
-                "the artifact"
+                f"task_id {run['task_id']!r} does not match task {task['id']!r}"
             )
+        if run["task_sha256"] != document_sha256(task):
+            errors.append("task_sha256 does not match the task document")
     return errors
+
+
+def _seed_from_errors(run: dict[str, Any], arm: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    link = run["seed_from"]
+    if arm["seed"] is None:
+        if link is not None:
+            errors.append(f"arm {run['arm']!r} is unseeded: seed_from must be null")
+    elif link is None:
+        if run["status"] != arm["seed"]["unseedable_status"]:
+            errors.append(f"arm {run['arm']!r} is seeded: seed_from is required")
+        elif run["tool_calls"]:
+            errors.append("a run that was never seeded must record no tool calls")
+    return errors
+
+
+def _seed_identity_errors(protocol: dict[str, Any], run: dict[str, Any]) -> list[str]:
+    seed_artifact = run["seed_from"]["gds_sha256"] if run["seed_from"] else None
+    expected_seed = run_seed_sha256(
+        protocol,
+        task_id=run["task_id"],
+        task_sha256=run["task_sha256"],
+        arm=run["arm"],
+        agent_id=run["agent"]["id"],
+        replicate=run["replicate"],
+        seed_artifact_sha256=seed_artifact,
+    )
+    if run["seed_sha256"] != expected_seed:
+        return ["seed_sha256 does not match the recomputed seed identity"]
+    return []
+
+
+def _refusal_errors(run: dict[str, Any]) -> list[str]:
+    if run["status"] != "invalid_tool_surface" and any(
+        call["exit_code"] == 126 for call in run["tool_calls"]
+    ):
+        return [
+            "a tool call was refused (exit 126) but status is not invalid_tool_surface"
+        ]
+    return []
 
 
 def validate_run(
@@ -560,56 +684,58 @@ def validate_run(
     if errors:
         return {"valid": False, "errors": errors}
 
-    if run["protocol_sha256"] != document_sha256(protocol):
-        errors.append("protocol_sha256 does not match the protocol document")
-    if task is not None:
-        if run["task_id"] != task["id"]:
+    errors += _run_binding_errors(protocol, run, task)
+    errors += _seed_from_errors(run, _arm(protocol, run["arm"]))
+    errors += _seed_identity_errors(protocol, run)
+    errors += _tool_call_errors(protocol, run)
+    errors += _refusal_errors(run)
+    errors += _validity_errors(protocol, run, task)
+    return {"valid": not errors, "errors": errors}
+
+
+def _seed_run_match_errors(
+    where: str, run: dict[str, Any], seed_run: dict[str, Any], link: dict[str, Any]
+) -> list[str]:
+    errors: list[str] = []
+    for key in ("task_id", "replicate"):
+        if seed_run[key] != run[key]:
             errors.append(
-                f"task_id {run['task_id']!r} does not match task {task['id']!r}"
+                f"{where}: seed run {key} differs (seed must be the same run's)"
             )
-        if run["task_sha256"] != document_sha256(task):
-            errors.append("task_sha256 does not match the task document")
+    if seed_run["agent"]["id"] != run["agent"]["id"]:
+        errors.append(
+            f"{where}: seed run agent differs (seed must be the same agent's)"
+        )
+    if seed_run["artifact"]["gds_sha256"] != link["gds_sha256"]:
+        errors.append(
+            f"{where}: seed_from.gds_sha256 differs from the seed run's artifact"
+        )
+    return errors
 
-    arm = _arm(protocol, run["arm"])
-    seeded = arm["seed"] is not None
-    if (
-        seeded
-        and run["seed_from"] is None
-        and run["status"] != arm["seed"]["unseedable_status"]
-    ):
-        errors.append(f"arm {run['arm']!r} is seeded: seed_from is required")
-    if not seeded and run["seed_from"] is not None:
-        errors.append(f"arm {run['arm']!r} is unseeded: seed_from must be null")
-    if (
-        seeded
-        and run["seed_from"] is None
-        and run["status"] == arm["seed"]["unseedable_status"]
-    ):
-        if run["tool_calls"]:
-            errors.append("a run that was never seeded must record no tool calls")
 
-    seed_artifact = run["seed_from"]["gds_sha256"] if run["seed_from"] else None
-    expected_seed = run_seed_sha256(
-        protocol,
-        task_id=run["task_id"],
-        task_sha256=run["task_sha256"],
-        arm=run["arm"],
-        agent_id=run["agent"]["id"],
-        replicate=run["replicate"],
-        seed_artifact_sha256=seed_artifact,
-    )
-    if run["seed_sha256"] != expected_seed:
-        errors.append("seed_sha256 does not match the recomputed seed identity")
-
-    errors.extend(_tool_call_errors(protocol, run))
-    if run["status"] != "invalid_tool_surface" and any(
-        call["exit_code"] == 126 for call in run["tool_calls"]
+def _seed_linkage_errors(
+    run: dict[str, Any], by_id: dict[str, dict[str, Any]]
+) -> list[str]:
+    link = run["seed_from"]
+    where = f"run {run['run_id']!r}"
+    seed_run = by_id.get(link["run_id"])
+    if seed_run is None:
+        return [f"{where}: seed run {link['run_id']!r} is not in the run set"]
+    errors: list[str] = []
+    if seed_run["arm"] != SEED_ARM:
+        errors.append(f"{where}: seed run is arm {seed_run['arm']!r}, not {SEED_ARM!r}")
+    if seed_run["status"] != SCORED_STATUS:
+        errors.append(f"{where}: seed run status is {seed_run['status']!r}, not valid")
+        return errors
+    errors += _seed_run_match_errors(where, run, seed_run, link)
+    if run["status"] == SCORED_STATUS and (
+        run["score"]["area_um2"] > seed_run["score"]["area_um2"]
     ):
         errors.append(
-            "a tool call was refused (exit 126) but status is not invalid_tool_surface"
+            f"{where}: scores worse than its seed; the seed is round zero of the "
+            f"refine phase so the artifact must be the seed or better"
         )
-    errors.extend(_validity_errors(protocol, run, task))
-    return {"valid": not errors, "errors": errors}
+    return errors
 
 
 def validate_run_set(
@@ -627,41 +753,6 @@ def validate_run_set(
             errors.append(f"duplicate run_id {run['run_id']!r}")
         by_id[run["run_id"]] = run
     for run in runs:
-        link = run["seed_from"]
-        if run["arm"] != SEEDED_ARM or link is None:
-            continue
-        where = f"run {run['run_id']!r}"
-        seed_run = by_id.get(link["run_id"])
-        if seed_run is None:
-            errors.append(f"{where}: seed run {link['run_id']!r} is not in the run set")
-            continue
-        if seed_run["arm"] != SEED_ARM:
-            errors.append(
-                f"{where}: seed run is arm {seed_run['arm']!r}, not {SEED_ARM!r}"
-            )
-        if seed_run["status"] != SCORED_STATUS:
-            errors.append(
-                f"{where}: seed run status is {seed_run['status']!r}, not valid"
-            )
-            continue
-        for key in ("task_id", "replicate"):
-            if seed_run[key] != run[key]:
-                errors.append(
-                    f"{where}: seed run {key} differs (seed must be the same run's)"
-                )
-        if seed_run["agent"]["id"] != run["agent"]["id"]:
-            errors.append(
-                f"{where}: seed run agent differs (seed must be the same agent's)"
-            )
-        if seed_run["artifact"]["gds_sha256"] != link["gds_sha256"]:
-            errors.append(
-                f"{where}: seed_from.gds_sha256 differs from the seed run's artifact"
-            )
-        if run["status"] == SCORED_STATUS and (
-            run["score"]["area_um2"] > seed_run["score"]["area_um2"]
-        ):
-            errors.append(
-                f"{where}: scores worse than its seed; the seed is round zero of the "
-                f"refine phase so the artifact must be the seed or better"
-            )
+        if run["arm"] == SEEDED_ARM and run["seed_from"] is not None:
+            errors += _seed_linkage_errors(run, by_id)
     return {"valid": not errors, "errors": errors}
