@@ -116,6 +116,7 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         WELL_ENCLOSURE_MARGIN_UM,
         _clamp_cut_boxes,
         _close_implant_gaps,
+        _draw_npc_over_poly_contacts,
         _insert_boxes,
         _insert_implant_ring,
         _insert_ring,
@@ -448,6 +449,35 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Harness-resolved minimum spacing between separate source/"
                 "drain implant shapes; closer ones are merged (only used "
                 "when sd_implant_present)",
+                default=0.0,
+            )
+            # getattr: keeps these new hidden params out of the mypy type
+            # baseline (PCellDeclarationHelper's dynamic attrs are untyped).
+            self.param(
+                "npc_layer",
+                getattr(self, "TypeLayer"),  # noqa: B009
+                "npc drawing layer (only used when npc_present)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "npc_present",
+                getattr(self, "TypeBoolean"),  # noqa: B009
+                "Whether npc_layer is a real layer this PDK family needs "
+                "over each poly-contact licon",
+                default=False,
+            )
+            self.param(
+                "npc_margin_um",
+                getattr(self, "TypeDouble"),  # noqa: B009
+                "Harness-resolved margin npc grows beyond each poly-contact "
+                "licon (only used when npc_present)",
+                default=0.0,
+            )
+            self.param(
+                "npc_min_space_um",
+                getattr(self, "TypeDouble"),  # noqa: B009
+                "Harness-resolved minimum npc spacing; closer shapes merge "
+                "(only used when npc_present)",
                 default=0.0,
             )
             self.param(
@@ -851,5 +881,16 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.contact_fixed_size_um,
                 self.mfg_grid_um,
             )
+
+            if getattr(self, "npc_present"):  # noqa: B009
+                _draw_npc_over_poly_contacts(
+                    self.cell,
+                    self.layout.layer(getattr(self, "npc_layer")),  # noqa: B009
+                    li_contact,
+                    li_poly,
+                    dbu,
+                    getattr(self, "npc_margin_um"),  # noqa: B009
+                    getattr(self, "npc_min_space_um"),  # noqa: B009
+                )
 
     return {"mos_array": _MosArrayPCell}

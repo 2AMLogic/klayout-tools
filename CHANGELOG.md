@@ -290,6 +290,19 @@ not `klt --version`, if you need to detect this kind of drift. See
   generators list the sky130 masks still omitted (ring tap implant, `npc`) in
   `drc_hints.notes` (additive). Tap-ring implants, `npc` and the deck rules
   remain open on #2934.
+- **sky130 guard/tap rings draw their implant and gate contacts get `npc`**
+  (issue #2934, phase B): the tap ring of `guard_ring`, `mos_array`,
+  `diff_pair`, `esd_device` and `bjt_array` is now covered by `nsdm` (93/44,
+  well-tie ring of a pfet) or `psdm` (94/20, substrate-tie ring), 0.125 µm past
+  the tap (`n/psdm.5b`, `sky130A.lydrc`), and `mos_array`/`diff_pair` with
+  `gate_contact` draw `npc` (95/20) 0.095 µm around each poly-contact licon
+  (the margin `sky130A.tech` uses for `xpc`; the official `sky130A_mr.drc` has
+  no npc-enclosure rule), merged where closer than `npc.2`'s 0.27 µm.
+  `klt extract` results on the generated cells are unchanged and
+  `sky130A_mr.drc` reports no violations. The sky130 "ring tap implant" and
+  "npc" entries of phase A's `drc_hints.notes` are gone (additive JSON
+  contract: no field removed). The curated `--deck sky130` rules remain open
+  on #2934 (phase C).
 - **ASAP7 DRC deck checks `ACTIVE.W.2` and `SDT.W.3`** (issue #3085): the
   vertical-width-is-an-integer-multiple-of-27-nm rules (DRM Tables 3.5.1 /
   3.8.1) are now measured per local vertical width of each merged rectilinear

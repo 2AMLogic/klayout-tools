@@ -373,6 +373,10 @@ _HIDDEN_PARAMS = {
     "sd_implant_margin_um",
     "mos_cap_mark_layer",
     "sd_implant_min_space_um",
+    "npc_layer",
+    "npc_present",
+    "npc_margin_um",
+    "npc_min_space_um",
     "bjt_mark_layer",
     "bjt_mark_present",
     "res_mark_layer",
@@ -2988,6 +2992,50 @@ def _close_implant_gaps(
     closed = region.sized(half).sized(-half)
     shapes.clear()
     shapes.insert(closed)
+
+
+def _draw_npc_over_poly_contacts(
+    cell: Any,
+    npc_layer_index: int,
+    contact_layer_index: int,
+    poly_layer_index: int,
+    dbu: float,
+    margin_um: float,
+    min_space_um: float,
+) -> None:
+    """Draw ``npc`` over every poly-contact licon already on the cell (issue
+    #2934): each licon lying wholly inside the (merged) poly -- a gate
+    contact, never a source/drain or tap one -- gets a box grown by
+    ``margin_um``; shapes closer than ``min_space_um`` (``npc.2``) merge.
+    No-op when ``margin_um`` is not positive."""
+    import klayout.db as kdb
+
+    if margin_um <= 0:
+        return
+    contacts = kdb.Region(cell.shapes(contact_layer_index))
+    poly = kdb.Region(cell.shapes(poly_layer_index)).merged()
+    npc = contacts.inside(poly).sized(int(round(margin_um / dbu)))
+    cell.shapes(npc_layer_index).insert(npc.merged())
+    _close_implant_gaps(cell, npc_layer_index, dbu, min_space_um)
+
+
+def _draw_pcell_npc(
+    pcell: Any, contact_layer_index: int, poly_layer_index: int, dbu: float
+) -> None:
+    """Draw ``npc`` for a PCell instance carrying the ``npc_*`` parameters
+    (issue #2934), when its ``npc_present`` is set. Keeps the parameter
+    unpacking out of the PCell ``produce_impl`` bodies."""
+    if not getattr(pcell, "npc_present"):  # noqa: B009
+        return
+    _draw_npc_over_poly_contacts(
+        pcell.cell,
+        pcell.layout.layer(getattr(pcell, "npc_layer")),  # noqa: B009
+        contact_layer_index,
+        poly_layer_index,
+        dbu,
+        getattr(pcell, "npc_margin_um"),  # noqa: B009
+        getattr(pcell, "npc_min_space_um"),  # noqa: B009
+    )
 
 
 def _fixed_cut_side_um(side_um: float, fixed_size_um: float) -> float:
