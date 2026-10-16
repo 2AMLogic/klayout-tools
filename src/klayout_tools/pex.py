@@ -1442,6 +1442,17 @@ def _build_delta_rows(
     return rows
 
 
+def _static_extracted_failure(
+    pin_count_mismatch: dict[str, Any] | None,
+    flat_dut_mismatch: dict[str, Any] | None,
+) -> tuple[str, str | None] | None:
+    """``(message, code)`` for a statically detected extracted-side mismatch."""
+    static = pin_count_mismatch or flat_dut_mismatch
+    if static is None or not static.get("detail"):
+        return None
+    return str(static["detail"]), "pin_count_mismatch" if pin_count_mismatch else None
+
+
 def _unextracted_delta_rows(
     *,
     spec_row_prefix: str | None,
@@ -2835,12 +2846,9 @@ def run_pex(
         )
         if extracted_report is None:
             if extracted_failure is None:
-                static = pin_count_mismatch or flat_dut_mismatch
-                if static is not None and static.get("detail"):
-                    extracted_failure = (
-                        str(static["detail"]),
-                        "pin_count_mismatch" if pin_count_mismatch else None,
-                    )
+                extracted_failure = _static_extracted_failure(
+                    pin_count_mismatch, flat_dut_mismatch
+                )
             delta.extend(
                 _unextracted_delta_rows(
                     spec_row_prefix=spec_row_prefix,
