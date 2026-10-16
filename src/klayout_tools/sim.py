@@ -7007,24 +7007,13 @@ def _run_corner(
                         "message": f"could not parse waveform rawfile: {exc}",
                     }
                 )
-        if portable_roots is not None:
-            # Issue #3052: the engine has exited and its log is parsed, so
-            # the persisted deck/log can now be rewritten to stable tokens.
-            try:
-                sim_portable.rewrite_corner_files(
-                    corner_dir, deck_path, log_path, portable_roots
-                )
-            except OSError as exc:
-                diagnostics.append(
-                    {
-                        "severity": "warning",
-                        "code": "unknown",
-                        "message": (
-                            "options.portable_artifacts: could not rewrite the "
-                            f"persisted deck/log (host paths remain): {exc}"
-                        ),
-                    }
-                )
+        # Issue #3052: the engine has exited and its log is parsed, so the
+        # persisted deck/log can now be rewritten to stable tokens.
+        diagnostics.extend(
+            sim_portable.rewrite_corner_artifacts(
+                corner_dir, deck_path, log_path, portable_roots
+            )
+        )
         if os.path.isfile(deck_path):
             artifacts["deck"] = deck_path
     else:

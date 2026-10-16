@@ -139,3 +139,29 @@ def rewrite_corner_files(
                 path, "w", encoding="utf-8", errors="surrogateescape", newline=""
             ) as fh:
                 fh.write(rewritten)
+
+
+def rewrite_corner_artifacts(
+    corner_dir: str, deck_path: str, log_path: str, roots: Roots | None
+) -> list[dict[str, str]]:
+    """:func:`rewrite_corner_files`, as a ``diagnostics`` fragment for the caller.
+
+    ``roots=None`` (``options.portable_artifacts`` off) is a no-op. A failed
+    rewrite is a warning, not an error: the host paths simply remain.
+    """
+    if roots is None:
+        return []
+    try:
+        rewrite_corner_files(corner_dir, deck_path, log_path, roots)
+    except OSError as exc:
+        return [
+            {
+                "severity": "warning",
+                "code": "unknown",
+                "message": (
+                    "options.portable_artifacts: could not rewrite the "
+                    f"persisted deck/log (host paths remain): {exc}"
+                ),
+            }
+        ]
+    return []
