@@ -274,6 +274,9 @@ Every field name is the flag's own `dest`, so the mapping is one-for-one:
 | `spef` | string | `--spef` |
 | `critical_nets` | array\<string\> \| string | repeatable `--critical-net` |
 | `parasitics_nets` | array\<string\> \| string | repeatable `--parasitics-net` |
+| `critical_net_patterns` / `parasitics_net_patterns` | array\<string\> \| string | repeatable `--critical-net-pattern` / `--parasitics-net-pattern` (issue #2974) |
+| `critical_net_all` / `strict_net_patterns` | bool | `--critical-net-all` / `--strict-net-patterns` |
+| `critical_net_excludes` | array\<string\> \| string | repeatable `--critical-net-exclude` |
 | `parasitic_variants` | array\<string\> \| string | repeatable `--parasitic-variant` |
 | `parasitics_top_cell_only` | bool | `--parasitics-top-cell-only` |
 | `distributed_rc` | bool | `--distributed-rc` |
@@ -5012,6 +5015,10 @@ klt extract cell.gds --deck sky130 --parasitics --parasitics-net VOUT --parasiti
   convention as `--critical-net` (and unlike `--mom-net`): a caller may
   legitimately name several candidate nets across several blocks/runs, so an
   unmatched name is reported in `warnings` rather than raised.
+- **Many nets.** A request document's `parasitics_nets` already accepts an
+  array, and `--parasitics-net-pattern GLOB` (issue #2974) selects by glob —
+  see the `--critical-net` section's "Many nets" paragraph for the matching
+  rules.
 - **Naming an anonymous net.** Matches against the same spelling
   `parasitics.nets[].net` reports (see "Anonymous nets are backslash-escaped"
   below) — an unlabelled net's placeholder must be given backslash-escaped
@@ -5123,11 +5130,39 @@ klt extract cell.gds --deck sky130 --parasitics --critical-net VOUT --critical-n
   `--critical-net '\$2'`), not bare (`--critical-net '$2'` matches no net,
   issue #1162).
 
+**Many nets: lists, globs, all-nets (issue #2974).** For a regular generated
+array (`bl_0 .. bl_N`) do not expand one flag per net:
+
+- In a request document, `critical_nets` / `parasitics_nets` already accept
+  a JSON array of exact names (or a bare string), so argv length is not a
+  limit there.
+- `--critical-net-pattern GLOB` / `--parasitics-net-pattern GLOB` (repeatable;
+  request fields `critical_net_patterns` / `parasitics_net_patterns`) take a
+  shell-style glob (`fnmatch`: `*`, `?`, `[seq]`), resolved against the
+  extracted nets once they exist, and merged with any exact names. They are
+  separate flags because a net name may itself contain `*`/`[`/`?`, which
+  would make an exact `--critical-net` ambiguous. Matching uses the escaped
+  spelling `parasitics.nets[].net` reports; an anonymous `\$N` net matches
+  only a glob that itself starts with `\$`.
+- `--critical-net-all` marks every labelled (non-anonymous, non-substrate)
+  net critical; `--critical-net-exclude GLOB` (repeatable, requires
+  `--critical-net-all`; also applied to `--critical-net-pattern` matches)
+  removes supply/substrate nets, e.g. `--critical-net-exclude VSS
+  --critical-net-exclude 'sub*'`.
+- A pattern matching no net, or `--critical-net-all` selecting none, is a
+  `warnings` entry naming the pattern (distinct from the exact-name
+  "match no net with ground-eligible parasitics geometry" text). With
+  `--strict-net-patterns` it is an error (exit 1) instead.
+- `--distributed-rc` accepts a pattern-resolved set; if it resolves empty,
+  the run errors.
+- Omitted, none of this changes anything: the report is byte-identical.
+
 Output, additive:
 
 | Field | Meaning |
 |---|---|
-| `parasitics.critical_nets` | The `--critical-net` request, echoed back verbatim. `[]` when the flag was never given. |
+| `parasitics.critical_nets` | The `--critical-net` request, echoed back verbatim. `[]` when the flag was never given. When a pattern / `--critical-net-all` was given: the resolved concrete names, sorted (exact names included). |
+| `parasitics.critical_net_patterns` / `.critical_net_all` / `.critical_net_excludes` / `.parasitics_net_patterns` | The requested selectors, present only when given. (`parasitics.parasitics_nets` likewise echoes the resolved sorted names when `--parasitics-net-pattern` was given.) |
 | `parasitics.nets[].coupled[].lateral_levels` | Per coupling counterpart, the sorted list of same-`metal_index` levels that contributed lateral coupling to that pair — `[]` unless one side was named `--critical-net`. |
 
 Both `sky130`'s deck curates `metal_sidewalls`/its lookback distance for

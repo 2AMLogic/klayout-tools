@@ -2471,6 +2471,24 @@ def test_run_pex_critical_nets_threaded_through_to_extraction(
 
 
 @_SKIP_NO_NGSPICE
+def test_run_pex_critical_net_pattern_threaded_through_to_extraction(
+    tmp_path, resistor_layout
+):
+    """`--critical-net-pattern` (issue #2974) is forwarded to `run_extract`;
+    `extraction.critical_nets` echoes the resolved concrete names."""
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    report = run_pex(
+        resistor_layout, [str(request)], "sky130", critical_net_patterns=["R*"]
+    )
+
+    assert report["extraction"]["critical_nets"] == ["RA", "RB"]
+    assert report["status"] == "pass"
+
+
+@_SKIP_NO_NGSPICE
 def test_run_pex_parasitic_variant_threaded_through_to_extraction(
     tmp_path, resistor_layout
 ):
