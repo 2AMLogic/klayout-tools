@@ -5442,6 +5442,36 @@ def test_sky130_capacitor_drm_legal_top_via_does_not_short_plates(
     assert device["nets"]["a"] != device["nets"]["b"]
 
 
+def test_sky130_via_on_bottom_plate_outside_top_plate_stays_connected(tmp_path):
+    """Issue #3020: `bottom_region.interacting(top_region)` keeps the *whole*
+    bottom-plate polygon, so an ordinary via3 landing on that met3 polygon
+    well outside the `capm` footprint used to be cut from connectivity too,
+    leaving the met4 pad above it a floating anonymous net. Only the via
+    that lands on the top plate may be excluded."""
+    layout = _make_sky130_mim_layout_with_drm_legal_top_via()
+    top = layout.top_cell()
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    # Ordinary via3 + met4 pad on the bottom plate, far from capm.
+    draw(70, 44, _box_um(-12, -12, -10, -10))  # via3.drawing
+    draw(71, 20, _box_um(-13, -13, -9, -9))  # met4.drawing pad
+    label = top.shapes(layout.layer(71, 5))
+    label.insert(kdb.Text("BOT", kdb.Trans(kdb.Vector(-11000, -11000))))
+
+    path = _write_gds(layout, tmp_path / "mim_outside_via.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "mim_outside_via.spice"))
+
+    assert report["device_counts"] == {"sky130_fd_pr__model__cap_mim": 1}
+    # Bottom plate (+ the routed pad) and the top plate: two nets, no
+    # floating anonymous net for the pad.
+    assert report["net_count"] == 2
+    (device,) = report["devices"]
+    bot_net = next(n for n in report["nets"] if n["name"] == "BOT")
+    assert bot_net["name"] in device["nets"].values()
+
+
 def _make_gf180mcu_mim_square_layout(side_um: float) -> kdb.Layout:
     """A `side_um`x`side_um` `FuseTop`-over-`Metal4` MiM cap, marked with
     `CAP_MK`/`MIM_L_MK` and drawn well clear of `Metal4`'s own edges so the
@@ -7850,16 +7880,16 @@ def _parasitic_cards(netlist_path: str) -> list[str]:
 def test_pdk_unbound_mim_flavour_writes_bare_value_only_capacitor_card(
     tmp_path, flavour, expected_c_f
 ):
-    """Issue #1558, Gap 2: `--pdk <variant> --parasitics` on a layout whose
+    """Issue #1558, Gap 2: `--parasitics` without `--pdk` on a layout whose
     MiM cap uses one of gf180mcu's non-default densities emits a bare,
     value-only `C` card -- **no** trailing `cap_mim_1f0_m4m5_noshield`-style
     token, which ngspice would reject as an unresolvable `.model` reference
     (`unknown parameter (...)`/`could not find a valid modelname`).
 
-    Neither flavour has a `_CAPACITOR_MODEL_TABLE` row (only the default
-    `cap_mim_2f0_m4m5_noshield` does), so the device falls through to
-    KLayout's own default primitive-card writer -- the path that used to
-    append the class name. The flavour identity is still recorded, in the
+    With no `--pdk` there are no bindings at all (under `--pdk` the `1f0`/`1f5`
+    flavours bind to their `X` subcircuit since issue #3090), so the device
+    falls through to KLayout's own default primitive-card writer -- the path
+    that used to append the class name. The flavour identity is still recorded, in the
     writer's own preceding `* device instance ...` comment and in
     `devices[].class`."""
     path = _write_gds(_make_gf180mcu_mim_layout(), tmp_path / f"{flavour}.gds")
@@ -7867,8 +7897,6 @@ def test_pdk_unbound_mim_flavour_writes_bare_value_only_capacitor_card(
     report = run_extract(
         path,
         "gf180mcu",
-        pdk_variant="gf180mcuA",
-        pdk_root=_make_pdk_install(tmp_path, "gf180mcuA"),
         output=out,
         parasitics=True,
         deck_options={"mim_cap": flavour},
@@ -7946,6 +7974,92 @@ def test_pdk_bound_default_mim_flavour_still_writes_x_card(tmp_path):
     assert " cap_mim_2f0_m4m5_noshield " in card
 
 
+@pytest.mark.parametrize("parasitics", [False, True])
+@pytest.mark.parametrize(
+    "flavour",
+    [
+        "cap_mim_1f0_m4m5_noshield",
+        "cap_mim_1f5_m4m5_noshield",
+        "cap_mim_2f0_m4m5_noshield",
+    ],
+)
+def test_pdk_binds_every_gf180mcu_mim_density_to_subckt(tmp_path, flavour, parasitics):
+    """Issue #3090: `--pdk` binds all three selectable gf180mcu MiM densities
+    to their PDK `cap_mim_*` subcircuit (`c_length`/`c_width`), with and
+    without `--parasitics`, so PDK process-corner sections can move the
+    capacitor. No fixed-value-capacitor warning is raised for a bound class."""
+    path = _write_gds(_make_gf180mcu_mim_layout(), tmp_path / f"{flavour}.gds")
+    out = str(tmp_path / f"{flavour}.spice")
+    report = run_extract(
+        path,
+        "gf180mcu",
+        pdk_variant="gf180mcuA",
+        pdk_root=_make_pdk_install(tmp_path, "gf180mcuA"),
+        output=out,
+        parasitics=parasitics,
+        deck_options={"mim_cap": flavour},
+    )
+
+    card = _capacitor_device_card(out)
+    assert card.startswith("X"), card
+    assert f" {flavour} " in card
+    assert "c_length=" in card and "c_width=" in card
+    assert not any("fixed-value" in w for w in report["warnings"])
+
+
+def test_pdk_parasitics_sky130_mim_writes_subckt_card(tmp_path):
+    """Issue #3090: `--pdk` + `--parasitics` + a sky130 MiM reaches the
+    binding writer (an `X` subcircuit call, not a bare `C` card)."""
+    path = _write_gds(_make_sky130_mim_layout(), tmp_path / "sky130_mim.gds")
+    out = str(tmp_path / "sky130_mim.spice")
+    report = run_extract(
+        path,
+        "sky130",
+        pdk_variant="sky130A",
+        pdk_root=_make_pdk_install(tmp_path, "sky130A"),
+        output=out,
+        parasitics=True,
+    )
+
+    card = _capacitor_device_card(out)
+    assert card.startswith("X"), card
+    assert "sky130_fd_pr__cap_mim_m3_1" in card
+    assert not any("fixed-value" in w for w in report["warnings"])
+
+
+@pytest.mark.parametrize(
+    ("deck_name", "layout_factory"),
+    [
+        ("gf180mcu", _make_gf180mcu_mim_layout),
+        ("sky130", _make_sky130_mim_layout),
+    ],
+)
+def test_fixed_value_capacitor_warns_and_documents_in_header(
+    tmp_path, deck_name, layout_factory
+):
+    """Issue #3090: a capacitor written as a fixed-value `C` card (no
+    `--pdk`) is flagged in one aggregate `warnings[]` line, and under
+    `--parasitics` the same fact lands in the netlist header comment."""
+    path = _write_gds(layout_factory(), tmp_path / f"{deck_name}_fixed.gds")
+    out = str(tmp_path / f"{deck_name}_fixed.spice")
+    report = run_extract(path, deck_name, output=out, parasitics=True)
+
+    notes = [w for w in report["warnings"] if "fixed-value" in w]
+    assert len(notes) == 1, report["warnings"]
+    assert "process corners" in notes[0] and "--pdk" in notes[0]
+
+    header = [
+        line
+        for line in Path(out).read_text().splitlines()
+        if line.startswith("*") and "fixed-value" in line
+    ]
+    assert len(header) == 1, header
+
+    no_parasitics_out = str(tmp_path / f"{deck_name}_fixed_np.spice")
+    run_extract(path, deck_name, output=no_parasitics_out)
+    assert "fixed-value" not in Path(no_parasitics_out).read_text()
+
+
 @pytest.mark.parametrize(
     ("deck_name", "layout_factory"),
     [
@@ -7985,8 +8099,6 @@ def test_unbound_mim_capacitor_netlist_simulates_in_ngspice(tmp_path):
     run_extract(
         path,
         "gf180mcu",
-        pdk_variant="gf180mcuA",
-        pdk_root=_make_pdk_install(tmp_path, "gf180mcuA"),
         output=out,
         parasitics=True,
         deck_options={"mim_cap": flavour},
@@ -20059,6 +20171,81 @@ def test_def_net_instance_pins_empty_when_file_missing(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
+def _divider_report(net):
+    return {
+        "nets": [
+            {
+                "net": net,
+                "hub_net": net,
+                "capacitance_ff": 1.5,
+                "resistance_ohm": 0.0,
+                "terminals": [{"leg_net": "leg_$1_G", "resistance_ohm": 5.0}],
+                "coupled": [],
+            },
+        ]
+    }
+
+
+def test_spef_preserves_def_hierarchy_divider_and_escaped_slash(tmp_path):
+    """Issue #2969: a bare `/` in the DEF (hierarchy divider) is emitted bare
+    in `*I`/`*RES`/`*D_NET`; an escaped `\\/` (literal slash, the #1623 shape)
+    keeps its backslash; escaped brackets keep theirs."""
+    from klayout_tools.extract_spef import _write_spef
+
+    def_path = tmp_path / "h.def"
+    def_path.write_text(
+        "NETS 2 ;\n"
+        "- sub/n1 ( sub/_001_ A ) ( g_slice\\[0\\].u\\/_08_ Y ) ;\n"
+        "- flat\\/n2 ( u3 A ) ;\n"
+        "END NETS\n"
+    )
+    pins = def_net_instance_pins(str(def_path))
+    # Equality against plain str is unchanged by the spelling carrier.
+    assert pins["sub/n1"] == (("sub/_001_", "A"), ("g_slice[0].u/_08_", "Y"))
+
+    report = {
+        "nets": [
+            _divider_report("sub/n1")["nets"][0],
+            _divider_report("flat/n2")["nets"][0],
+        ]
+    }
+    out = tmp_path / "h.spef"
+    _write_spef(
+        str(out),
+        design_name="top",
+        klt_version="0.0.0",
+        parasitics_report=report,
+        port_names=[],
+        net_instance_pins=pins,
+    )
+    text = out.read_text()
+    assert "*D_NET sub/n1 " in text
+    assert "*I sub/_001_:A B" in text
+    assert "1 sub/n1:1 sub/n1:2 5.000000" in text
+    assert "2 sub/n1:1 sub/_001_:A 0.000000" in text
+    assert "*I g_slice\\[0\\]\\.u\\/_08_:Y B" in text
+    assert "*D_NET flat\\/n2 " in text
+
+
+def test_spef_names_without_def_origin_are_unchanged(tmp_path):
+    """Issue #2969 regression: plain-str names keep `_spef_name` escaping,
+    including `/`."""
+    from klayout_tools.extract_spef import _write_spef
+
+    out = tmp_path / "p.spef"
+    _write_spef(
+        str(out),
+        design_name="top",
+        klt_version="0.0.0",
+        parasitics_report=_divider_report("a/b"),
+        port_names=[],
+        net_instance_pins={"a/b": (("sub/u", "A"),)},
+    )
+    text = out.read_text()
+    assert "*D_NET a\\/b " in text
+    assert "*I sub\\/u:A B" in text
+
+
 def test_spef_conn_emits_instance_pin_entries_and_zero_ohm_legs(tmp_path):
     """`net_instance_pins` adds one `*I <inst>:<pin> B` `*CONN` entry per
     connection (alongside any `*P` port entry) and wires each into the RC
@@ -21993,6 +22180,8 @@ def test_extract_request_document_file_form_matches_argv(tmp_path, capsys):
     request_code, request_report = _run_extract_json(capsys, [str(request_path)])
 
     assert argv_code == request_code == 0
+    # `timing` is a wall-clock measurement of the run (issue #3181), not content.
+    argv_report.pop("timing"), request_report.pop("timing")
     assert request_report == argv_report
 
 
@@ -22510,7 +22699,7 @@ def test_subcircuit_leaves_the_flat_extraction_byte_identical(tmp_path):
     assert plain["netlist_sha256"] == sliced["netlist_sha256"]
     assert plain["subcircuit"] is None
 
-    volatile = {"netlist_path", "subcircuit", "warnings", "provenance"}
+    volatile = {"netlist_path", "subcircuit", "warnings", "provenance", "timing"}
     assert {k: v for k, v in plain.items() if k not in volatile} == {
         k: v for k, v in sliced.items() if k not in volatile
     }
@@ -23831,8 +24020,8 @@ def test_hierarchical_cells_conservation_failure_is_refused_before_output(
 
     real = extract_hierarchy._build_child
 
-    def lossy(netlist, cell, group):
-        child, pin_sigs = real(netlist, cell, group)
+    def lossy(netlist, cell, group, *args, **kwargs):
+        child, pin_sigs = real(netlist, cell, group, *args, **kwargs)
         child.remove_device(next(iter(child.each_device())))
         return child, pin_sigs
 
@@ -23848,6 +24037,161 @@ def test_hierarchical_cells_conservation_failure_is_refused_before_output(
             hierarchical_cells=("STAGE",),
         )
     assert not output.exists()
+
+
+def _make_hier_nested_layout() -> kdb.Layout:
+    """``TOP`` places ``OUTER`` twice; each ``OUTER`` holds two ``STAGE``
+    placements. Every ``STAGE`` input head carries a pad labelled in the top
+    cell (``IN_1`` .. ``IN_4``), so each is a pin of the flat deck."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    stage = _draw_hier_stage(layout, "STAGE", "MID")
+    outer = layout.create_cell("OUTER")
+    li1 = layout.layer(67, 20)
+    li1_label = layout.layer(67, 5)
+    stage_ys = (0, 40000)
+    for y in stage_ys:
+        outer.insert(kdb.CellInstArray(stage.cell_index(), kdb.Trans(0, y)))
+    count = 0
+    for outer_y in (0, 100000):
+        top.insert(kdb.CellInstArray(outer.cell_index(), kdb.Trans(0, outer_y)))
+        for y in stage_ys:
+            count += 1
+            top.shapes(li1).insert(
+                kdb.Box(1100, 200 + outer_y + y, 1900, 800 + outer_y + y)
+            )
+            top.shapes(li1_label).insert(
+                kdb.Text(f"IN_{count}", kdb.Trans(1500, 500 + outer_y + y))
+            )
+    return layout
+
+
+def _flat_device_count(tmp_path: Path, layout: kdb.Layout) -> int:
+    return run_extract(
+        _write_gds(layout, tmp_path / "flat.gds"),
+        "sky130",
+        output=str(tmp_path / "flat.spice"),
+        top_cell_pins_only=True,
+    )["device_count"]
+
+
+def test_hierarchical_cells_nested_selection_emits_nested_subckt_tree(tmp_path):
+    report, output = _run_hier(tmp_path, _make_hier_nested_layout(), ("OUTER", "STAGE"))
+    circuits = _spice_circuits(str(output))
+    assert set(circuits) == {"TOP", "OUTER", "STAGE"}
+
+    def instances(circuit: str) -> list[list[str]]:
+        return [c for c in circuits[circuit]["cards"] if c[0].startswith("X")]
+
+    def devices(circuit: str) -> list[list[str]]:
+        return [c for c in circuits[circuit]["cards"] if c[0].startswith("R")]
+
+    assert [c[-1] for c in instances("TOP")] == ["OUTER", "OUTER"]
+    assert [c[-1] for c in instances("OUTER")] == ["STAGE", "STAGE"]
+    assert instances("STAGE") == []
+    assert devices("TOP") == [] and devices("OUTER") == []
+    assert len(devices("STAGE")) == 2
+    # Nested instances connect to the parent's own pins: every STAGE input
+    # is a distinct OUTER pin, and every OUTER pin is wired from the top.
+    assert len(circuits["OUTER"]["pins"]) == 2
+    assert {c[1] for c in instances("OUTER")} == set(circuits["OUTER"]["pins"])
+    assert {n for c in instances("TOP") for n in c[1:-1]} == {
+        "IN_1",
+        "IN_2",
+        "IN_3",
+        "IN_4",
+    }
+    cells = {entry["cell"]: entry for entry in report["hierarchy"]["cells"]}
+    assert cells["OUTER"]["placements"] == 2
+    assert cells["STAGE"]["placements"] == 4
+    assert cells["OUTER"]["children"] == [
+        {"cell": "STAGE", "instances": ["XSTAGE_1", "XSTAGE_2"]}
+    ]
+    assert "children" not in cells["STAGE"]
+    assert cells["STAGE"]["instances"] == []
+    assert report["hierarchy"]["top_device_count"] == 0
+
+
+def test_hierarchical_cells_nested_selection_conserves_every_device(tmp_path):
+    layout = _make_hier_nested_layout()
+    flat = _flat_device_count(tmp_path, layout)
+    _report, output = _run_hier(tmp_path, layout, ("OUTER", "STAGE"))
+    circuits = _spice_circuits(str(output))
+    # 1 STAGE definition (2 R) x 2 per OUTER x 2 OUTER placements
+    stage_devices = sum(1 for c in circuits["STAGE"]["cards"] if c[0].startswith("R"))
+    assert flat == 8
+    assert stage_devices * 2 * 2 == flat
+
+
+def test_hierarchical_cells_nested_conservation_failure_is_refused(
+    tmp_path, monkeypatch
+):
+    """Negative control across levels: losing a device from the *inner*
+    definition must fail the conservation check at the top."""
+    from klayout_tools import extract_hierarchy
+
+    real = extract_hierarchy._build_child
+
+    def lossy(netlist, cell, group, *args, **kwargs):
+        child, pin_sigs = real(netlist, cell, group, *args, **kwargs)
+        if cell == "STAGE":
+            child.remove_device(next(iter(child.each_device())))
+        return child, pin_sigs
+
+    monkeypatch.setattr(extract_hierarchy, "_build_child", lossy)
+    path = _write_gds(_make_hier_nested_layout(), tmp_path / "block.gds")
+    output = tmp_path / "block.spice"
+    with pytest.raises(ExtractError, match="conservation check failed"):
+        run_extract(
+            path,
+            "sky130",
+            output=str(output),
+            top_cell_pins_only=True,
+            hierarchical_cells=("OUTER", "STAGE"),
+        )
+    assert not output.exists()
+
+
+def test_hierarchical_cells_nested_and_top_level_placements_of_one_cell(tmp_path):
+    """``STAGE`` is placed under ``WRAP`` and directly in ``TOP``: one
+    definition, one instance in each parent circuit, numbered per parent."""
+
+    def layout() -> kdb.Layout:
+        return _make_subcircuit_slice_layout(
+            wrapper_cell="WRAP", second_placement=kdb.Trans(kdb.Vector(0, 80000))
+        )
+
+    flat = _flat_device_count(tmp_path, layout())
+    report, output = _run_hier(tmp_path, layout(), ("WRAP", "STAGE"))
+    circuits = _spice_circuits(str(output))
+    assert set(circuits) == {"TOP", "WRAP", "STAGE"}
+    assert sorted(c[-1] for c in circuits["TOP"]["cards"] if c[0].startswith("X")) == [
+        "STAGE",
+        "WRAP",
+    ]
+    assert [c[-1] for c in circuits["WRAP"]["cards"] if c[0].startswith("X")] == [
+        "STAGE"
+    ]
+    cells = {entry["cell"]: entry for entry in report["hierarchy"]["cells"]}
+    assert cells["STAGE"]["placements"] == 2
+    assert cells["STAGE"]["instances"] == ["XSTAGE_1"]  # the top-level one
+    assert cells["WRAP"]["children"] == [{"cell": "STAGE", "instances": ["XSTAGE_1"]}]
+    top_r = sum(1 for c in circuits["TOP"]["cards"] if c[0].startswith("R"))
+    stage_r = sum(1 for c in circuits["STAGE"]["cards"] if c[0].startswith("R"))
+    assert top_r + stage_r * 2 == flat  # R3 in TOP + STAGE (2 R) in both parents
+
+
+def test_hierarchical_cells_single_wrapper_selection_keeps_inner_cell_inline(
+    tmp_path,
+):
+    """Selecting only the outer cell keeps the inner placement's devices
+    inside the outer definition (no nested ``.SUBCKT``)."""
+    _report, output = _run_hier(
+        tmp_path, _make_subcircuit_slice_layout(wrapper_cell="WRAP"), ("WRAP",)
+    )
+    circuits = _spice_circuits(str(output))
+    assert set(circuits) == {"TOP", "WRAP"}
+    assert sum(1 for c in circuits["WRAP"]["cards"] if c[0].startswith("R")) == 2
 
 
 def test_hierarchical_cells_flat_mode_is_byte_identical(tmp_path):
@@ -23877,8 +24221,6 @@ def test_hierarchical_cells_flat_mode_is_byte_identical(tmp_path):
     [
         (("NOPE",), {}, "names no cell in this layout"),
         (("TOP",), {}, "names the top cell itself"),
-        (("STAGE", "WRAP"), {"wrapper_cell": "WRAP"}, "#2916"),
-        (("WRAP", "STAGE"), {"wrapper_cell": "WRAP"}, "nested selections"),
     ],
 )
 def test_hierarchical_cells_rejects_bad_selection_before_output(
@@ -24388,6 +24730,7 @@ def test_no_netlist_writes_nothing_and_reports_null(tmp_path):
     assert not (tmp_path / "inv.spice").exists()
     assert result["netlist_path"] is None
     assert result["netlist_sha256"] is None
+    assert result["netlist_normalized_sha256"] is None
     for key in ("status", "device_count", "net_count", "device_counts"):
         assert result[key] == normal[key]
 
@@ -24398,6 +24741,7 @@ def test_default_still_writes_next_to_input(tmp_path):
     assert result["netlist_path"] == str(tmp_path / "inv.spice")
     assert (tmp_path / "inv.spice").is_file()
     assert isinstance(result["netlist_sha256"], str)
+    assert isinstance(result["netlist_normalized_sha256"], str)
 
 
 def test_no_netlist_cli_json_and_text(tmp_path, capsys):
@@ -24447,3 +24791,166 @@ def test_no_netlist_with_spef_still_works(tmp_path):
     )
     assert result["netlist_path"] is None
     assert not (tmp_path / "inv.spice").exists()
+
+
+def _anon_connectivity(first: int, second: int):
+    """A two-device report fragment whose two anonymous nets are numbered
+    ``first``/``second`` -- the only thing varied between builds (#3407)."""
+    a, b = f"\\${first}", f"\\${second}"
+    devices = [
+        {"name": "M1", "nets": {"D": a, "G": "IN", "S": "VSS"}},
+        {"name": "M2", "nets": {"D": b, "G": a, "S": "VSS"}},
+    ]
+    nets = [
+        {"name": "IN", "net_id": 1},
+        {"name": a, "net_id": first},
+        {"name": b, "net_id": second},
+        {"name": "VSS", "net_id": 4},
+    ]
+    return devices, nets
+
+
+def test_normalized_netlist_hash_ignores_anonymous_net_numbering():
+    from klayout_tools.extract import _normalized_netlist_sha256
+
+    base = _normalized_netlist_sha256(*_anon_connectivity(3, 7))
+    renumbered = _normalized_netlist_sha256(*_anon_connectivity(81, 12))
+    assert base == renumbered
+
+
+def test_normalized_netlist_hash_detects_connectivity_change():
+    from klayout_tools.extract import _normalized_netlist_sha256
+
+    devices, nets = _anon_connectivity(3, 7)
+    base = _normalized_netlist_sha256(devices, nets)
+    devices[1]["nets"]["G"] = "IN"  # rewire M2's gate off the anonymous net
+    assert _normalized_netlist_sha256(devices, nets) != base
+
+
+def test_normalized_netlist_hash_is_stable_across_reruns(tmp_path):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    a = run_extract(path, "sky130", output=str(tmp_path / "a.spice"))
+    b = run_extract(path, "sky130", output=str(tmp_path / "b.spice"))
+    assert a["netlist_normalized_sha256"] == b["netlist_normalized_sha256"]
+    assert len(a["netlist_normalized_sha256"]) == 64
+    other = _write_gds(_make_series_resistor_chain_layout(), tmp_path / "chain.gds")
+    c = run_extract(other, "sky130", output=str(tmp_path / "c.spice"))
+    assert c["netlist_normalized_sha256"] != a["netlist_normalized_sha256"]
+
+
+# --progress / `timing` (issue #3181) ----------------------------------------
+
+
+def test_report_carries_additive_timing_object(tmp_path):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    result = run_extract(path, "sky130")
+    timing = result["timing"]
+    assert timing["total_seconds"] >= 0
+    stages = timing["stages"]
+    assert {"read_layout", "device_extraction", "netlist_write"} <= set(stages)
+    assert all(seconds >= 0 for seconds in stages.values())
+    assert timing["unattributed_seconds"] >= 0
+    assert sum(stages.values()) + timing["unattributed_seconds"] == pytest.approx(
+        timing["total_seconds"], abs=0.01
+    )
+
+
+def test_progress_lines_go_to_stderr_and_stdout_stays_json(tmp_path, capsys):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    code = main(["extract", path, "--deck", "sky130", "--progress", "--format", "json"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "timing" in json.loads(captured.out)
+    assert "read_layout started" in captured.err
+    assert "device_extraction finished" in captured.err
+    assert "klt extract:" not in captured.out
+
+
+def test_no_progress_is_silent_even_off_a_tty(tmp_path, capsys):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    code = main(
+        ["extract", path, "--deck", "sky130", "--no-progress", "--format", "json"]
+    )
+    assert code == 0
+    assert capsys.readouterr().err == ""
+
+
+def test_default_off_a_tty_is_heartbeat_only_so_short_runs_stay_clean(tmp_path, capsys):
+    # pytest's captured stderr is not a TTY, so the unset default is the
+    # heartbeat-only mode: a short run writes nothing to stderr.
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    assert main(["extract", path, "--deck", "sky130", "--format", "json"]) == 0
+    assert capsys.readouterr().err == ""
+
+
+def test_progress_request_document_key(tmp_path, capsys):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    request = tmp_path / "req.json"
+    request.write_text(
+        json.dumps(
+            {
+                "schema": "klt.extract.request/1",
+                "file": path,
+                "deck": "sky130",
+                "progress": False,
+            }
+        )
+    )
+    assert main(["extract", str(request), "--format", "json"]) == 0
+    assert capsys.readouterr().err == ""
+
+
+def test_short_run_emits_no_heartbeat(tmp_path, capsys):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    run_extract(path, "sky130", progress=True)
+    assert "still running" not in capsys.readouterr().err
+
+
+def test_stage_timer_heartbeat_fires_during_a_long_stage():
+    import io
+    import time
+
+    from klayout_tools.extract_progress import StageTimer, active_timer, stage
+
+    stream = io.StringIO()
+    timer = StageTimer(progress=True, stream=stream, heartbeat_s=0.05)
+    with active_timer(timer), stage("slow"):
+        time.sleep(0.3)
+    assert "slow still running" in stream.getvalue()
+    assert "slow started" in stream.getvalue()
+    assert timer.report()["stages"]["slow"] >= 0.25
+
+
+def test_heartbeat_mode_omits_stage_lines():
+    import io
+    import time
+
+    from klayout_tools.extract_progress import StageTimer, active_timer, stage
+
+    stream = io.StringIO()
+    timer = StageTimer(progress="heartbeat", stream=stream, heartbeat_s=0.05)
+    with active_timer(timer), stage("slow"):
+        time.sleep(0.2)
+    assert "slow still running" in stream.getvalue()
+    assert "started" not in stream.getvalue()
+    assert "finished" not in stream.getvalue()
+
+
+def test_stage_is_a_noop_without_an_active_timer():
+    from klayout_tools.extract_progress import stage
+
+    with stage("nothing"):
+        pass
+
+
+def test_timing_is_ignored_by_rerun_drift(tmp_path):
+    from klayout_tools._report_verify import VOLATILE_PROVENANCE_PATHS
+
+    assert ("timing",) in VOLATILE_PROVENANCE_PATHS
+
+
+def test_consecutive_runs_give_identical_netlist_sha256(tmp_path):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    first = run_extract(path, "sky130", output=str(tmp_path / "a.spice"))
+    second = run_extract(path, "sky130", output=str(tmp_path / "b.spice"))
+    assert first["netlist_sha256"] == second["netlist_sha256"]

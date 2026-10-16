@@ -40,6 +40,7 @@ and diff verdict-bearing fields. Both reuse ``status: "match"`` /
 """
 
 import argparse
+import sys
 
 from .._paths import looks_like_request_document
 from ..extract import (
@@ -326,6 +327,7 @@ _REQUEST_FIELD_DESTS = {
         "deck",
         "output",
         "no_netlist",
+        "progress",
         "top",
         "pdk",
         "pdk_root",
@@ -427,6 +429,9 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             "deck": _str("deck"),
             "output": _path("output"),
             "no_netlist": _bool("no_netlist"),
+            # Tri-state like the flag: absent keeps the stderr-is-not-a-TTY
+            # auto default (issue #3181).
+            "progress": _bool("progress") if "progress" in request else None,
             "top": _str("top"),
             "pdk": _str("pdk"),
             "pdk_root": _path("pdk_root"),
@@ -532,6 +537,16 @@ def run(args: argparse.Namespace) -> int:
             args.deck,
             output=args.output,
             no_netlist=args.no_netlist,
+            # `--progress` (issue #3181): stage lines + heartbeat on stderr.
+            # Unset means "heartbeat only, and only when stderr is not a
+            # TTY": an agent or CI run gets liveness on a long extraction,
+            # while a short run keeps stderr clean (the error envelope lives
+            # there) and an interactive shell stays quiet.
+            progress=(
+                args.progress
+                if args.progress is not None
+                else ("heartbeat" if not sys.stderr.isatty() else False)
+            ),
             top=args.top,
             pdk_variant=args.pdk,
             pdk_root=args.pdk_root,
@@ -767,6 +782,7 @@ def _print_text(report: dict) -> None:
     # Both are None under `--no-netlist` (issue #2850).
     print(f"netlist_path: {report['netlist_path']}")
     print(f"netlist_sha256: {report['netlist_sha256']}")
+    print(f"netlist_normalized_sha256: {report['netlist_normalized_sha256']}")
     print(
         f"devices: {report['device_count']}  "
         f"nets: {report['net_count']}  "

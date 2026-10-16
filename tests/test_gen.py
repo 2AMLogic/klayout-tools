@@ -2385,6 +2385,110 @@ def test_mos_array_interior_channel_is_drc_clean(tmp_path, both_pdk_root):
             assert drc_report["status"] == "clean", drc_report["violations"]
 
 
+# `pitch_x_um`/`pitch_y_um` (issue #3299, Phase 1): explicit pitch override,
+# clamped up to the legal minimum.
+
+
+def _mos_array_pitch_request(tmp_path, pdk_root, name, **params):
+    return {
+        "generator": "mos_array",
+        "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+        "params": {"rows": 2, "cols": 3, "dummy": 0, **params},
+        "options": {"output": str(tmp_path / f"{name}.gds")},
+    }
+
+
+def test_mos_array_default_pitch_override_output_unchanged(tmp_path, pdk_root):
+    implicit = generate(_mos_array_pitch_request(tmp_path, pdk_root, "implicit"))
+    explicit = generate(
+        _mos_array_pitch_request(
+            tmp_path, pdk_root, "explicit", pitch_x_um=0.0, pitch_y_um=0.0
+        )
+    )
+    _assert_gds_geometry_equal(tmp_path / "implicit.gds", tmp_path / "explicit.gds")
+    assert "pitch" not in implicit["drc_hints"]
+    assert "pitch" not in explicit["drc_hints"]
+    assert implicit["warnings"] == explicit["warnings"]
+
+
+def test_mos_array_pitch_override_widens_and_reports_effective_pitch(
+    tmp_path, pdk_root
+):
+    base = generate(_mos_array_pitch_request(tmp_path, pdk_root, "base"))
+    wide = generate(
+        _mos_array_pitch_request(
+            tmp_path, pdk_root, "wide", pitch_x_um=50.0, pitch_y_um=60.0
+        )
+    )
+    base_w = base["bbox_um"]["x1"] - base["bbox_um"]["x0"]
+    wide_w = wide["bbox_um"]["x1"] - wide["bbox_um"]["x0"]
+    base_h = base["bbox_um"]["y1"] - base["bbox_um"]["y0"]
+    wide_h = wide["bbox_um"]["y1"] - wide["bbox_um"]["y0"]
+    pitch = wide["drc_hints"]["pitch"]
+    assert pitch["col_pitch_um"] == pytest.approx(50.0)
+    assert pitch["row_pitch_um"] == pytest.approx(60.0)
+    assert pitch["pitch_x_clamped"] is False
+    assert pitch["pitch_y_clamped"] is False
+    # cols=3 -> 2 column gaps; rows=2 -> 1 row gap.
+    assert wide_w == pytest.approx(base_w + 2 * (50.0 - pitch["min_col_pitch_um"]))
+    assert wide_h == pytest.approx(base_h + (60.0 - pitch["min_row_pitch_um"]))
+
+
+def test_mos_array_sub_minimum_pitch_is_clamped_and_reported(tmp_path, pdk_root):
+    base = generate(_mos_array_pitch_request(tmp_path, pdk_root, "base"))
+    clamped = generate(
+        _mos_array_pitch_request(
+            tmp_path, pdk_root, "clamped", pitch_x_um=0.1, pitch_y_um=0.1
+        )
+    )
+    pitch = clamped["drc_hints"]["pitch"]
+    assert pitch["pitch_x_clamped"] is True
+    assert pitch["pitch_y_clamped"] is True
+    assert pitch["col_pitch_um"] == pytest.approx(pitch["min_col_pitch_um"])
+    assert pitch["row_pitch_um"] == pytest.approx(pitch["min_row_pitch_um"])
+    assert len(clamped["warnings"]) == 2
+    # Clamped to the minimum == the default geometry.
+    _assert_gds_geometry_equal(tmp_path / "base.gds", tmp_path / "clamped.gds")
+    assert base["bbox_um"] == clamped["bbox_um"]
+
+
+def test_mos_array_pitch_override_composes_with_interior_channel(tmp_path, pdk_root):
+    report = generate(
+        _mos_array_pitch_request(
+            tmp_path,
+            pdk_root,
+            "both",
+            pitch_x_um=40.0,
+            pitch_y_um=40.0,
+            interior_channel_um=2.0,
+        )
+    )
+    pitch = report["drc_hints"]["pitch"]
+    # The channel is added on top of the effective (overridden) base pitch.
+    assert pitch["col_pitch_um"] == pytest.approx(42.0)
+    assert pitch["row_pitch_um"] == pytest.approx(42.0)
+    assert len(report["navigable_regions"]) == 3  # 1 row gap + 2 column gaps
+
+
+@pytest.mark.parametrize("name", ["pitch_x_um", "pitch_y_um"])
+def test_mos_array_negative_pitch_rejected(tmp_path, pdk_root, name):
+    with pytest.raises(GenError):
+        generate(_mos_array_pitch_request(tmp_path, pdk_root, "neg", **{name: -1.0}))
+
+
+def test_mos_array_pitch_at_clamp_boundary_is_drc_clean(tmp_path, pdk_root):
+    """A sub-minimum request is clamped to the dense boundary pitch, which
+    must itself be DRC-clean."""
+    output = tmp_path / "dense.gds"
+    request = _mos_array_pitch_request(
+        tmp_path, pdk_root, "dense", pitch_x_um=0.1, pitch_y_um=0.1
+    )
+    request["params"]["dummy"] = 1
+    generate(request)
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
 # --- res_array --------------------------------------------------------------- #
 
 
@@ -2402,6 +2506,75 @@ def test_res_array_device_count_and_ports(tmp_path, pdk_root):
     assert report["device_count"] == 3
     assert len(report["ports"]) == 6
     assert report["drc_hints"]["matched_group_id"] == "res_array:3"
+
+
+def _series_report(tmp_path, pdk_root, name, **params):
+    output = tmp_path / f"{name}.gds"
+    report = generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": params,
+            "options": {"output": str(output)},
+        }
+    )
+    return output, report
+
+
+def test_res_array_series_false_matches_default(tmp_path, pdk_root):
+    _, default = _series_report(tmp_path, pdk_root, "d", num=4, rows=2)
+    _, off = _series_report(tmp_path, pdk_root, "o", num=4, rows=2, series=False)
+    assert default["ports"] == off["ports"]
+    assert default["drc_hints"] == off["drc_hints"]
+    assert len(off["ports"]) == 8
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"rows": 1},
+        {"rows": 2},
+        {"rows": 3, "num": 7},
+        {"rows": 2, "flavor": "high", "width_um": 0.35},
+        {"rows": 2, "flavor": "xhigh", "width_um": 0.35},
+        {"rows": 2, "metal_level": 1, "width_um": 0.5},
+        {"rows": 2, "metal_level": 5, "width_um": 2.0, "length_um": 4.0},
+    ],
+)
+def test_res_array_series_ports_note_and_drc_clean(tmp_path, pdk_root, extra):
+    params = {"num": 6, "dummy": 1, **extra}
+    output, report = _series_report(tmp_path, pdk_root, "s", series=True, **params)
+    num = params["num"]
+    assert [p["name"] for p in report["ports"]] == ["R0_A", f"R{num - 1}_B"]
+    assert report["device_count"] == num
+    assert report["drc_hints"]["matched_group_id"] == f"res_array:{num}"
+    notes = " ".join(report["drc_hints"]["notes"])
+    assert f"{num - 1} joint jumper" in notes
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+def test_res_array_series_num_1_has_no_jumpers(tmp_path, pdk_root):
+    _, report = _series_report(tmp_path, pdk_root, "s1", num=1, series=True)
+    assert [p["name"] for p in report["ports"]] == ["R0_A", "R0_B"]
+    assert "0 joint jumper" in " ".join(report["drc_hints"]["notes"])
+
+
+def test_res_array_series_extracts_as_connected_chain(tmp_path, pdk_root):
+    output, _ = _series_report(
+        tmp_path, pdk_root, "chain", num=4, rows=2, dummy=0, series=True
+    )
+    extract_report = run_extract(str(output), "sky130")
+    assert extract_report["device_counts"] == {"res_generic_po": 4}
+    cards = Path(extract_report["netlist_path"]).read_text().splitlines()
+    ends = [line.split()[1:3] for line in cards if line.startswith("R")]
+    degree: dict[str, int] = {}
+    for a, b in ends:
+        degree[a] = degree.get(a, 0) + 1
+        degree[b] = degree.get(b, 0) + 1
+    # A 4-resistor series chain: 5 nets, two terminals (degree 1), three
+    # interior joints (degree 2). Unjoined units would give 8 degree-1 nets.
+    assert sorted(degree.values()) == [1, 1, 2, 2, 2], degree
 
 
 def test_res_array_num_1_boundary_and_zero_dummy(tmp_path, pdk_root):
@@ -3482,6 +3655,7 @@ def test_res_array_extracts_as_resistor_not_a_short(
 _SKY130_PSDM_LAYER = (94, 20)  # P+ implant, shared by res_high_po/res_xhigh_po
 _SKY130_RPM_LAYER = (86, 20)  # 300 ohm precision-resistor mask -> res_high_po
 _SKY130_URPM_LAYER = (79, 20)  # 2 kohm precision-resistor mask -> res_xhigh_po
+_SKY130_NPC_LAYER = (95, 20)  # Magic's xhrpoly/uhrpoly need it (issue #3077)
 
 
 def _layers_present(gds_path):
@@ -3512,6 +3686,7 @@ def test_res_array_sky130_default_flavor_draws_no_implant_or_block(tmp_path, pdk
     assert _SKY130_PSDM_LAYER not in present
     assert _SKY130_RPM_LAYER not in present
     assert _SKY130_URPM_LAYER not in present
+    assert _SKY130_NPC_LAYER not in present
 
 
 def test_res_array_sky130_default_matches_explicit_generic(tmp_path, pdk_root):
@@ -3556,6 +3731,7 @@ def test_res_array_sky130_flavor_high_draws_psdm_and_rpm(tmp_path, pdk_root):
     assert _SKY130_PSDM_LAYER in present
     assert _SKY130_RPM_LAYER in present
     assert _SKY130_URPM_LAYER not in present
+    assert _SKY130_NPC_LAYER in present  # issue #3077
 
 
 def test_res_array_sky130_flavor_xhigh_draws_psdm_and_urpm(tmp_path, pdk_root):
@@ -3575,6 +3751,7 @@ def test_res_array_sky130_flavor_xhigh_draws_psdm_and_urpm(tmp_path, pdk_root):
     assert _SKY130_PSDM_LAYER in present
     assert _SKY130_URPM_LAYER in present
     assert _SKY130_RPM_LAYER not in present
+    assert _SKY130_NPC_LAYER in present  # issue #3077
 
 
 def test_res_array_invalid_flavor_rejected(tmp_path, pdk_root):

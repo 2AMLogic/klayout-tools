@@ -1013,6 +1013,12 @@ def _model_mismatch(
     which names appear): a run whose two sides name the same models but a
     different number of each still reports the divergence, since that
     could equally mean a device was dropped/duplicated on one side.
+
+    The additive ``kind`` field (issue #3054) separates the two meanings:
+    ``"model_set"`` when either ``*_only`` list is non-empty (a wrong model
+    flavour), ``"count_only"`` when the model sets are identical and only
+    the instance counts differ (usually finger/multiplier decomposition),
+    each with its own ``detail`` wording.
     """
     reference_text = _read_text(reference_netlist) or ""
     reference_counts = _device_model_counts(reference_text)
@@ -1038,6 +1044,7 @@ def _model_mismatch(
         if key not in reference_multiset
     )
 
+    kind = "model_set" if reference_only or extracted_only else "count_only"
     hierarchical_reference = _reference_is_hierarchical(reference_text)
     if hierarchical_reference:
         unrelated_clause = (
@@ -1056,6 +1063,18 @@ def _model_mismatch(
             "run, before treating this as evidence the two sides are "
             "unrelated. "
         )
+    elif kind == "count_only":
+        unrelated_clause = (
+            "the reference (schematic) and extracted netlists instantiate "
+            "the same device models/`.subckt`s and differ only in how many "
+            "instances of each they carry. The usual cause is "
+            "finger/multiplier decomposition: the layout draws a device as "
+            "several fingers while the schematic has one instance (with "
+            "`nf`/`m`, or none), a difference `klt lvs` has already "
+            "reconciled. It does not by itself make `delta[]` unrelated, "
+            "but representation effects (fingering, AS/AD) are folded "
+            "into `delta[]` alongside the parasitics. "
+        )
     else:
         unrelated_clause = (
             "the reference (schematic) and extracted netlists instantiate "
@@ -1065,6 +1084,7 @@ def _model_mismatch(
         )
 
     return {
+        "kind": kind,
         "reference_only": reference_only,
         "extracted_only": extracted_only,
         "counts": {
@@ -1089,7 +1109,7 @@ def _model_mismatch(
                 "to the PDK family's default flavour while the reference "
                 "netlist names a different one -- see docs/cli/pex.md's "
                 "`model_mismatch` section"
-                if not hierarchical_reference
+                if kind == "model_set" and not hierarchical_reference
                 else "See docs/cli/pex.md's `model_mismatch` section"
             )
         ),
@@ -1178,6 +1198,8 @@ _SIDE_ENVIRONMENT_KEYS = (
     "engine",
     "engine_version",
     "ngspice_binary",
+    "engine_host",
+    "client_ngspice_binary",
     "remote",
 )
 
@@ -1288,6 +1310,13 @@ def _row_status(
     return "pass"
 
 
+def _side_status(measurement: dict[str, Any] | None) -> str:
+    """One side's own limit status for a delta row's additive
+    ``schematic_status`` / ``extracted_status`` (issue #2989); a missing
+    measurement is ``"error"``, matching :func:`_row_status`."""
+    return measurement["status"] if measurement is not None else "error"
+
+
 def _build_delta_rows(
     *,
     spec_row_prefix: str | None,
@@ -1320,6 +1349,8 @@ def _build_delta_rows(
                         extracted_measurement["value"],
                     ),
                     "status": _row_status(schematic_measurement, extracted_measurement),
+                    "schematic_status": _side_status(schematic_measurement),
+                    "extracted_status": _side_status(extracted_measurement),
                 }
             )
     return rows
@@ -1355,6 +1386,8 @@ def _unextracted_delta_rows(
                     "extracted_value": None,
                     "delta_pct": None,
                     "status": "error",
+                    "schematic_status": _side_status(measurement),
+                    "extracted_status": "error",
                 }
             )
     return rows
@@ -2764,6 +2797,9 @@ def run_pex(
     passed = sum(1 for row in delta if row["status"] == "pass")
     failed = sum(1 for row in delta if row["status"] == "fail")
     errored = sum(1 for row in delta if row["status"] == "error")
+    # Issue #2989: schematic-side limit failures, reported beside -- never
+    # folded into -- `status`, `coverage` or the exit code.
+    schematic_failed = sum(1 for row in delta if row["schematic_status"] == "fail")
     # Issue #2109: use the shared coverage decision table so a partial
     # comparison can never be reported as an unconditional pass, while real
     # failures and errors retain precedence over coverage qualification.
@@ -2859,6 +2895,9 @@ def run_pex(
         "passed": passed,
         "failed": failed,
         "errored": errored,
+        # Additive field (issue #2989): rows whose schematic side itself
+        # failed its limits; `status` still grades the extracted side only.
+        "schematic_failed": schematic_failed,
         # Additive field (issue #1030): `None` on every run whose extracted
         # side actually simulated -- byte-identical to before this feature
         # existed. Non-`None` names the schematic/extracted top-level pin-list
