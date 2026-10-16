@@ -1717,15 +1717,16 @@ def run_lvs(request: str) -> dict[str, Any]:
             # would have produced. Skipping it here would leave the degraded
             # run reporting under-valued resistances.
             apply_resistor_fixed_offset_corrections(layout_netlist, layout_deck)
-            if not combine_incomplete:
-                # Issue #3017: disclose the (N-1) head/end terms the fold
-                # above absorbed. Skipped after a symmetric degrade, where
-                # nothing was folded.
-                combine_warnings.extend(
-                    _series_fold_offset_absorbed_warnings(
-                        layout_snapshot, layout_netlist, layout_deck
-                    )
+            # Issue #3017: disclose the (N-1) head/end terms the fold above
+            # absorbed (a no-op after a symmetric degrade).
+            combine_warnings.extend(
+                _series_fold_offset_absorbed_warnings(
+                    layout_snapshot,
+                    layout_netlist,
+                    layout_deck,
+                    combine_incomplete=combine_incomplete,
                 )
+            )
 
     bulk_warnings: list[dict[str, Any]] = []
     short_nets_warnings: list[dict[str, Any]] = []
@@ -5474,7 +5475,7 @@ def _series_chain_lengths(pre_circuit: Any, class_name: str, interior: set[str])
                 previous, here = onward[0]
                 length += 1
             else:
-                key = tuple(sorted((start, here)))
+                key = (min(start, here), max(start, here))
                 # Each chain is walked from both ends; keep one direction.
                 if start <= here:
                     chains.setdefault(key, []).append(length)
@@ -5482,7 +5483,11 @@ def _series_chain_lengths(pre_circuit: Any, class_name: str, interior: set[str])
 
 
 def _series_fold_offset_absorbed_warnings(
-    pre_combine_netlist: Any, netlist: Any, deck: Any
+    pre_combine_netlist: Any,
+    netlist: Any,
+    deck: Any,
+    *,
+    combine_incomplete: bool = False,
 ) -> list[dict[str, Any]]:
     """One ``severity: "warning"``
     :data:`CATEGORY_DEVICE_SERIES_FOLD_OFFSET_ABSORBED` entry per post-combine
@@ -5499,13 +5504,15 @@ def _series_fold_offset_absorbed_warnings(
     entry is emitted rather than a guessed one.
 
     Call after the correction ran, so ``fraction_of_r`` uses the final ``R``.
+    Returns ``[]`` when `combine_incomplete` (a symmetric degrade folded
+    nothing).
     """
     offsets = {
         resistor.name.lower(): resistor.fixed_offset_ohm
         for resistor in deck.resistors
         if resistor.fixed_offset_ohm
     }
-    if not offsets:
+    if combine_incomplete or not offsets:
         return []
 
     warnings: list[dict[str, Any]] = []
@@ -5530,7 +5537,8 @@ def _series_fold_offset_absorbed_warnings(
                 chain_cache[device_class.name] = _series_chain_lengths(
                     pre_circuit, device_class.name, interior
                 )
-            key = tuple(sorted((net_a.expanded_name(), net_b.expanded_name())))
+            name_a, name_b = net_a.expanded_name(), net_b.expanded_name()
+            key = (min(name_a, name_b), max(name_a, name_b))
             lengths = chain_cache[device_class.name].get(key, [])
             if len(lengths) != 1 or lengths[0] < 2:
                 continue
