@@ -348,7 +348,7 @@ def _resolve_alter(alter: Any, step: str) -> list[list[Any]]:
     seen: set[str] = set()
     for target, value in alter.items():
         base = target[: -len(_AC_SUFFIX)] if is_ac_alter_target(target) else target
-        if is_ac_alter_target(target) and base[:1].lower() in "rcl":
+        if is_ac_alter_target(target) and base[:1].lower() in tuple("rcl"):
             raise _error(
                 f"step {step!r}: alter target {target!r}: the .ac form sets a "
                 "source's AC magnitude, so it takes a V or I source name "
@@ -369,6 +369,11 @@ def _resolve_alter(alter: Any, step: str) -> list[list[Any]]:
         if target.lower() in seen:
             raise _error(f"step {step!r}: alter target {target!r} is repeated")
         seen.add(target.lower())
+        if isinstance(value, dict) and is_ac_alter_target(target):
+            raise _error(
+                f"step {step!r}: alter target {target!r}: the .ac form takes a "
+                "finite number (an AC magnitude), not a pwl object"
+            )
         if isinstance(value, dict):
             value = _resolve_pwl_alter(value, target, step)
         elif (

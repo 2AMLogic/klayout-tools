@@ -736,6 +736,8 @@ def test_ac_alter_emits_ac_magnitude_cards_in_declaration_order():
         ({"R1.ac": 1}, "V or I source"),
         ({"V1.foo": 1}, r"only supported key suffix is '\.ac'"),
         ({"V1.ac": float("inf")}, "finite number"),
+        ({"V1.ac": {"pwl": [0, 0, 1, 1]}}, "not a pwl object"),
+        ({".ac": 1}, "not a top-level independent source"),
         ({"V1.ac": 1, "v1.AC": 2}, "is repeated"),
     ],
 )
