@@ -1252,6 +1252,27 @@ case the diagnostic and `environment.remote` give `job_id` and `bucket`;
 the remaining evidence (`status.json`, `harness.log`, `outputs/`) lives at
 `s3://<bucket>/<jobs prefix>/<job_id>/`.
 
+### Post-processing waveforms from a batch run locally
+
+Per-corner waveforms come back from `batch` the same way as from `local`, as
+long as **both** `options.waveforms: true` and `options.keep_artifacts: true`
+are set (`waveforms` alone captures the rawfile on the job instance, but
+nothing is brought home without `keep_artifacts`). Both options are forwarded
+verbatim to the job's own `klt sim`; `batch` adds no trace-related refusal.
+Pass `--outdir DIR` to choose where the artifacts land:
+
+```json
+{ "backend": "batch", "analysis": {"kind": "tran", "args": "1n 1u"},
+  "options": {"waveforms": true, "keep_artifacts": true} }
+```
+
+Each corner's `artifacts.waveform` / `artifacts.raw` / `artifacts.log` /
+`artifacts.deck` then point at local copies under `DIR` (under
+`DIR/<job_id>/` per shard when `hosts > 1`), so a local script can read the
+per-corner waveform JSON exactly as it would after `--backend local`.
+`options.waveforms` is refused for `analysis_steps[]` sequences on every
+backend. Regression: `test_run_sim_batch_returns_per_corner_waveform_artifacts`.
+
 ### gf180 local-versus-batch troubleshooting checklist
 
 A gf180mcuD netlist was reported to simulate locally but fail on the fleet
