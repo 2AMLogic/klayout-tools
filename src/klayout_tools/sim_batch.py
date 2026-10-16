@@ -3263,10 +3263,11 @@ def _run_batch_job(
     )
     receipt: dict[str, Any] = {
         "job_id": job_id,
-        "bucket": config.bucket,
-        "jobs_prefix": config.jobs_prefix,
-        "region": config.region,
-        "profile": config.profile,
+        # getattr: the receipt is best-effort and must never break a run.
+        "bucket": getattr(config, "bucket", None),
+        "jobs_prefix": getattr(config, "jobs_prefix", None),
+        "region": getattr(config, "region", None),
+        "profile": getattr(config, "profile", None),
         "launched_at": datetime.now(timezone.utc).isoformat(),
         "request_sha256": hashlib.sha256(
             json.dumps(request, sort_keys=True, default=str).encode("utf-8")
