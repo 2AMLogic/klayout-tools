@@ -132,6 +132,7 @@ exercised by ``tests/test_extract.py``.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
@@ -255,6 +256,7 @@ from .extract_passive_regions import (
     mom_capacitor_device_class as mom_capacitor_device_class,
 )
 from .extract_passive_regions import mom_capacitor_has_feed as mom_capacitor_has_feed
+from .extract_progress import StageTimer, active_timer, stage
 
 # The netlist-report-description subsystem lives in its own module (issue
 # #2070, the fourth split of this one after `extract_abstract.py`,
@@ -1131,6 +1133,36 @@ def _label_layers_from_report(
     return overrides or None
 
 
+def _staged(name: str, func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+    """Call ``func`` as timed stage ``name`` (issue #3181)."""
+    with stage(name):
+        return func(*args, **kwargs)
+
+
+def _timed(func: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]:
+    """Wrap :func:`run_extract` with the issue #3181 stage timer.
+
+    Adds the additive ``timing`` object to the report and, when the caller
+    passes ``progress=True``, narrates stage starts/finishes and a heartbeat
+    to stderr (never stdout); ``progress="heartbeat"`` emits the heartbeat
+    alone. ``progress`` is consumed here, so the wrapped function's own
+    signature is unchanged.
+    """
+
+    @functools.wraps(func)
+    def wrapper(
+        *args: Any, progress: bool | str = False, **kwargs: Any
+    ) -> dict[str, Any]:
+        timer = StageTimer(progress=progress)
+        with active_timer(timer):
+            result = func(*args, **kwargs)
+        result["timing"] = timer.report()
+        return result
+
+    return wrapper
+
+
+@_timed
 def run_extract(
     path: str,
     deck_name: str,
@@ -1174,6 +1206,13 @@ def run_extract(
     no_netlist: bool = False,
 ) -> dict[str, Any]:
     """Extract a schematic-equivalent netlist from the layout at ``path``.
+
+    The report carries an additive ``timing`` object (issue #3181):
+    ``stages`` (wall seconds per named stage), ``total_seconds`` and
+    ``unattributed_seconds``. The ``progress`` keyword (added by the
+    ``_timed`` wrapper, not part of the signature below) narrates stages to
+    stderr when ``True`` and emits only the 30 s heartbeat for
+    ``"heartbeat"``; the default writes nothing.
 
     ``no_netlist`` (issue #2850, ``klt extract --no-netlist``) is the opt-in
     census-only mode: nothing is written beside the input (or anywhere
@@ -3376,15 +3415,17 @@ def run_extract(
             "\n* " + note for note in fixed_value_capacitor_note
         )
     try:
-        netlist.write(netlist_path, writer, netlist_description)
+        with stage("netlist_write"):
+            netlist.write(netlist_path, writer, netlist_description)
     except Exception as exc:
         if scratch_dir is not None:
             shutil.rmtree(scratch_dir, ignore_errors=True)
         raise ExtractError(f"could not write netlist '{netlist_path}': {exc}") from exc
 
-    reported_netlist_path, netlist_sha256 = _finish_netlist_write(
-        netlist_path, scratch_dir
-    )
+    with stage("netlist_hash"):
+        reported_netlist_path, netlist_sha256 = _finish_netlist_write(
+            netlist_path, scratch_dir
+        )
 
     # `--subcircuit` (issue #2245): a *second*, independent deck carrying one
     # named `.SUBCKT <cell>` for the sub-cell's own extracted devices. Run
@@ -4695,7 +4736,8 @@ def extract_netlist_from_layout(
 
     layout = kdb.Layout()
     try:
-        layout.read(path)
+        with stage("read_layout"):
+            layout.read(path)
     except Exception as exc:  # klayout raises RuntimeError for bad/unknown streams
         raise ExtractError(f"could not read layout '{path}': {exc}") from exc
 
@@ -4867,7 +4909,9 @@ def extract_netlist_from_layout(
         def_pin_promotion,
         substrate_taps,
         pin_renames,
-    ) = _netlist_extractor(deck)(
+    ) = _staged(
+        "device_extraction",
+        _netlist_extractor(deck),
         layout,
         top_cell,
         deck,
@@ -4912,7 +4956,9 @@ def extract_netlist_from_layout(
     (
         voltage_domain_prose_warnings,
         voltage_domain_warnings,
-    ) = _detect_voltage_domain_overlap(layout, top_cell, deck, deck_name)
+    ) = _staged(
+        "diagnostics", _detect_voltage_domain_overlap, layout, top_cell, deck, deck_name
+    )
     warnings = warnings + voltage_domain_prose_warnings
 
     # Missing flavour markers (issue #2417): additive diagnostic, reported

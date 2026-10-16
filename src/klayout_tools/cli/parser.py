@@ -1830,6 +1830,17 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     extract_parser.add_argument(
+        "--progress",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "write stage start/finish lines and a periodic heartbeat to "
+            "stderr (stdout stays the pure response). Default: heartbeat "
+            "lines only (every 30s of a long stage) when stderr is not a "
+            "TTY, nothing on a TTY; --no-progress forces off"
+        ),
+    )
+    extract_parser.add_argument(
         "--top",
         default=None,
         help=(
