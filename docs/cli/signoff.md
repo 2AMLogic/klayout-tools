@@ -3461,6 +3461,17 @@ Three states, three treatments, decided by what the *report* itself claims:
 | Any declared `negative_control` has `verdict: "not_detected"` | `"unmet"`, `reason: "negative_control_not_detected"`, no citation |
 | **No** measurement declared a `negative_control` | `"met"`, with `citation.yield_campaign.negative_control: "not_declared"` |
 
+**A stale pin is disclosed beside either refusal (issue #3063).** When the
+entry pins `content_hash`, the two refusals above also carry
+`detail.content_hash_pin` — `"verified"` (the live hash of the samples
+document the report names equals the pin), `"stale"` (it differs), or
+`"unverifiable"` (the samples document could not be found, so there is no
+live hash to compare). It is disclosure only: `status` and `reason` stay
+`unmet` / `undersized_sample` (or `negative_control_not_detected`), so a bad
+pin is visible now rather than only after the sample size is raised. The key
+is absent when the entry pins no `content_hash`, on every other refusal, and
+on `met` items.
+
 **Why the third is a disclosure rather than a refusal.** `klt yield` itself
 draws that line: an undeclared control is a run-level warning with "no
 exit-code change for this … so existing automation is not broken by adopting
