@@ -2118,7 +2118,7 @@ def _na_spec_refusal(spec_doc: dict[str, Any]) -> _NaRefusal | None:
     shape = _na_spec_shape_refusal(spec_rows)
     if shape is not None:
         return shape
-    for row in spec_rows:
+    for row in cast("list[dict[str, Any]]", spec_rows):
         hit = _na_scan_statistical(row, "")
         if hit is not None:
             return _na_refusal(
@@ -2196,10 +2196,11 @@ def _grade_not_applicable(
     if refusal is not None:
         return refusal
     spec_rows = spec_doc["rows"]
-    statement_rows = statement_doc.get("rows")
-    refusal = _na_statement_refusal(statement_rows, [r["id"] for r in spec_rows])
+    raw_statement_rows = statement_doc.get("rows")
+    refusal = _na_statement_refusal(raw_statement_rows, [r["id"] for r in spec_rows])
     if refusal is not None:
         return refusal
+    statement_rows = cast("list[dict[str, Any]]", raw_statement_rows)
 
     block = {
         "spec": {
