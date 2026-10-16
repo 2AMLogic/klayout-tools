@@ -13087,6 +13087,12 @@ def test_optional_expr_without_value_is_absent(tmp_path, monkeypatch):
     assert statuses == {"avg": "pass", "gone": "absent"}
 
 
+# A log with text but no `.meas` value: the engine ran and reported nothing for
+# the optional measurement. An *empty* log would instead trip the "engine wrote
+# no output" error (issue #3016), which is not an absent measurement.
+_NO_VALUE_LOG = "No. of Data Rows : 1\n"
+
+
 def test_rollup_mixed_absent_and_pass_corners(tmp_path, monkeypatch):
     _write_body(tmp_path)
     request = _write_request(
@@ -13106,7 +13112,7 @@ def test_rollup_mixed_absent_and_pass_corners(tmp_path, monkeypatch):
         log_path = cmd[cmd.index("-o") + 1]
         hot = "85" in deck_text and ".temp 85" in deck_text
         with open(log_path, "w", encoding="utf-8") as handle:
-            handle.write("" if hot else "m = 1.0e+00\n")
+            handle.write(_NO_VALUE_LOG if hot else "m = 1.0e+00\n")
         return fake_completed("** ngspice-99\n")
 
     monkeypatch.setattr(sim.subprocess, "run", fake_run)
@@ -13136,7 +13142,7 @@ def test_monte_carlo_counts_absent_samples_separately(tmp_path, monkeypatch):
         index = int(re.search(r"mc_sample_index=(\d+)", deck_text).group(1))
         log_path = cmd[cmd.index("-o") + 1]
         with open(log_path, "w", encoding="utf-8") as handle:
-            handle.write("" if index % 2 else f"m = {1.0 + index:.6e}\n")
+            handle.write(_NO_VALUE_LOG if index % 2 else f"m = {1.0 + index:.6e}\n")
         return fake_completed("** ngspice-99\n")
 
     monkeypatch.setattr(sim.subprocess, "run", fake_run)
