@@ -455,9 +455,11 @@ variant -- confirmed by ``globalfoundries-pdk-libs-gf180mcu_fd_pv``'s
 ``top_via = via4`` when ``top_metal = metal5``) matches Option B's bottom
 plate landing on ``Metal4`` for that stack, the same stack the issue's own
 reproducer layout uses (``Metal4``/``FuseTop``/``Via4``/``Metal5``) -- so
-only Option B (``MIMTM.*``) is transcribed above; Option A's ``MIM.*`` rule
-set targets a different (3-metal-layer) process variant this deck does not
-model and is not duplicated here.
+only Option B (``MIMTM.*``) is transcribed above, and is the default for
+``klt extract``. Option A's ``MIM.*`` DRC rule set is not duplicated here, but
+its *extraction* is selectable (issue #2920): ``--deck-option mim_option=A``
+recognises the ``Metal2``/``FuseTop``/``Via2``/``Metal3`` stack and the
+``cap_mim_*_m2m3_noshield`` device names (see ``_MIM_OPTION_A_CAPACITORS``).
 
 Layer numbers (verified against ``google/globalfoundries-pdk-libs-gf180mcu_fd_pv``'s
 ``klayout/drc/rule_decks/main.drc`` layer derivations, e.g. ``comp =
@@ -498,10 +500,13 @@ alongside the already-transcribed ``via4 = get_polygons(41, 0)``):
 
 from __future__ import annotations
 
+import dataclasses
+
 from . import (
     BipolarDevice,
     CapacitorDevice,
     CapacitorFlavour,
+    CapacitorVariant,
     CutRC,
     DerivedLayer,
     DiodeDevice,
@@ -2726,6 +2731,73 @@ EXTRACTION_DECK = ExtractionDeck(
     ),
 )
 
+
+# MIM option A (issue #2920): bottom plate Metal2, top plate FuseTop under
+# Metal3, joined to Metal3 by Via2 *inside* FuseTop. Selected with
+# `--deck-option mim_option=A`; the deck's own `capacitors` above are option B
+# (the default, byte-for-byte unchanged). Recognition mirrors the PDK's
+# `mimcap_derivations.lvs` (`mim_virtual = fusetop.sized(1.06um) &
+# metal2.interacting(fusetop) - (efuse_mk | plfuse)`, `fuse_cap = fusetop
+# interacting cap_mk, mim_l_mk, - (efuse_mk | plfuse)`) and the device names
+# and densities come from `mimcap_extraction.lvs`'s `MIM_OPTION 'A'` branch
+# (`cap_mim_{1f0,1f5,2f0}_m2m3_noshield`); the area/perimeter coefficients are
+# the same `sm141064.ngspice` cards as option B's. The top-plate Via2 is cut
+# from the generic Via2 layer where it overlaps Metal2 by the existing
+# `top_plate_via` machinery, the equivalent of the runset's `via2_n_cap`.
+_MIM_OPTION_A_CAPACITORS = (
+    CapacitorDevice(
+        name="cap_mim_2f0_m2m3_noshield",
+        top_plate=(75, 0),  # FuseTop
+        top_plate_requires=(
+            (117, 5),  # CAP_MK
+            (117, 10),  # MIM_L_MK
+        ),
+        top_plate_excludes=(
+            (80, 5),  # efuse_mk
+            (125, 5),  # plfuse
+        ),
+        bottom_plate=(36, 0),  # Metal2
+        bottom_plate_oversize_um=1.06,
+        area_cap_f_um2=1.99e-15,
+        perim_cap_f_um=2.383e-16,
+        top_plate_via=(38, 0),  # Via2
+        top_plate_via_metal=(42, 0),  # Metal3
+        flavour_option="mim_cap",
+        flavours=(
+            CapacitorFlavour(
+                value="cap_mim_1f0_m2m3_noshield",
+                name="cap_mim_1f0_m2m3_noshield",
+                area_cap_f_um2=9.87e-16,
+                perim_cap_f_um=3.3e-16,
+            ),
+            CapacitorFlavour(
+                value="cap_mim_1f5_m2m3_noshield",
+                name="cap_mim_1f5_m2m3_noshield",
+                area_cap_f_um2=1.47e-15,
+                perim_cap_f_um=3.79e-16,
+            ),
+            CapacitorFlavour(
+                value="cap_mim_2f0_m2m3_noshield",
+                name="cap_mim_2f0_m2m3_noshield",
+                area_cap_f_um2=1.99e-15,
+                perim_cap_f_um=2.383e-16,
+            ),
+        ),
+        provenance=_gf180mcu_lvs_provenance(
+            "libs.tech/klayout/lvs/rule_decks/mimcap_extraction.lvs",
+            "cap_mim_2f0_m2m3_noshield",
+        ),
+    ),
+)
+
+EXTRACTION_DECK = dataclasses.replace(
+    EXTRACTION_DECK,
+    capacitor_variants=(
+        CapacitorVariant("mim_option", "B", EXTRACTION_DECK.capacitors),
+        CapacitorVariant("mim_option", "A", _MIM_OPTION_A_CAPACITORS),
+    ),
+)
+
 # --------------------------------------------------------------------------- #
 # `klt extract --parasitics` first-order lumped-RC coefficients
 # --------------------------------------------------------------------------- #
@@ -2858,13 +2930,13 @@ PARASITICS = ParasiticsDeck(
     ),
     # Per-cut via resistance and the interconnect-resistance corners (issue
     # #3053), from the same resolved `gf180mcuD.tech` / pinned PDK commit
-    # c6d73a35f524070e85faff4a6a9eef49553ebc2b as Metal5 above. Magic states
+    # f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7 as Metal5 above. Magic states
     # `contact` rows in milliohm per cut; divided by 1000. Nominal: `variants
-    # ()` block (L3058-3061); high-R: `variants (hrhc),(hrlc)` (L3107-3110,
+    # ()` block (L3355-3358); high-R: `variants (hrhc),(hrlc)` (L3404-3407,
     # 15000 = 15 ohm, 3.3x nominal); low-R: `variants (lrhc),(lrlc)`
-    # (L3156-3159, 0 -- an ideal short, stored as published, not clamped; see
+    # (L3453-3456, 0 -- an ideal short, stored as published, not clamped; see
     # `CutRC`). The high/low *metal* sheet resistances are on `metals` above
-    # (L3093-3099 / L3142-3148). `lower_metal_index` is the Metal level the
+    # (L3390-3396 / L3439-3445). `lower_metal_index` is the Metal level the
     # cut lands on: m2c = Metal1->Metal2, m3c = Metal2->Metal3, via3 =
     # Metal3->Metal4, via4 = Metal4->Metal5. `mimcc` (MiM cap contact, also
     # 4.5 ohm) and the diffusion/poly contacts (`ndc` ... `pc`) are not

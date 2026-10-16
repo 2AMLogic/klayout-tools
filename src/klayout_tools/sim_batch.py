@@ -97,6 +97,7 @@ import time
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from . import _provenance, remote_transport, sim_staging
@@ -1330,6 +1331,43 @@ def _validate_batch_models_lib(request: dict[str, Any]) -> None:
     )
 
 
+def _validate_batch_pdk_variant(request: dict[str, Any], region: str | None) -> None:
+    """Refuse a ``models.pdk`` variant the fleet image does not ship,
+    **before** any S3 write (issue #3251).
+
+    :func:`_validate_batch_pdk` only reduces a variant to its family
+    (``gf180mcuC`` -> ``gf180mcu``), so a variant the image lacks used to
+    surface on the runner as one ``batch_job_failed`` per corner. When the
+    AMI manifest's entries publish ``pdk_variants``, the request is refused
+    only if **every** candidate image (see :func:`_assess_published_runner`
+    for the selection) publishes the field and none lists the variant.
+    Legacy entries, no manifest, no candidate or a request without a PDK
+    stay unchanged. Never raises anything but :class:`SimError`.
+    """
+    from .sim import SimError
+
+    pdk = (request.get("models") or {}).get("pdk")
+    if not pdk:
+        return
+    try:
+        images = published_runner_identities(str(pdk), region)
+    except (RemoteLaunchError, OSError, TypeError, ValueError, AttributeError):
+        return
+    published = [image.get("pdk_variants") for image in images]
+    listed: list[list[str]] = [v for v in published if v is not None]
+    if not listed or len(listed) != len(published):
+        return
+    if any(str(pdk) in variants for variants in listed):
+        return
+    carried = sorted({v for variants in listed for v in variants})
+    raise SimError(
+        f"backend 'batch': PDK variant {str(pdk)!r} is not shipped by the fleet "
+        f"image the AMI manifest publishes (it carries: {', '.join(carried)}) "
+        "-- the request was not submitted and no instance was launched; use "
+        "one of those variants as models.pdk"
+    )
+
+
 def _resolve_batch_config(
     request: dict[str, Any],
     *,
@@ -1430,6 +1468,8 @@ def _resolve_batch_config(
         assessment = _assess_published_runner(request, config)
         _enforce_published_runner_version(assessment)
         _enforce_published_runner_features(request, assessment)
+        # Issue #3251: refuse a PDK variant the published image does not ship.
+        _validate_batch_pdk_variant(request, config.region)
     return config
 
 
@@ -2145,6 +2185,11 @@ def job_exists(
     return result.returncode == 0
 
 
+def _report_progress(job_id: str, state: str) -> None:
+    """One per-job progress line on stderr (stdout carries the JSON report)."""
+    print(f"klt sim: batch job {job_id}: {state}", file=sys.stderr, flush=True)
+
+
 def poll_status(
     config: BatchConfig,
     job_id: str,
@@ -2153,6 +2198,7 @@ def poll_status(
     sleep: Any = time.sleep,
     monotonic: Any = time.monotonic,
     heartbeat: bool = False,
+    on_state: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Poll ``status.json`` until the job reaches a terminal state
     (:data:`BATCH_TERMINAL_STATES`) and return that status document.
@@ -2163,8 +2209,16 @@ def poll_status(
     ``reconcile`` re-launches the job -- a client that also re-launched
     would double-spend the shared fleet budget.
 
+    ``on_state`` is called once per *change* of observed state (including a
+    flip back, e.g. ``interrupted`` -> ``running``); unchanged and unreadable
+    polls do not call it.
+
     Raises :class:`BatchPollTimeout` once ``config.poll_timeout_s`` elapses
-    (the caller reports unrun corners rather than a failed sweep), and
+    (the caller reports unrun corners rather than a failed sweep) -- or
+    once :data:`_BATCH_PROVISION_SLACK_S` passes with no ``status.json`` ever
+    observed, so a job that never launched does not wait out the (possibly
+    hours-long) serial budget. ``last_state`` is ``None`` in that case.
+    Raises
     :class:`BatchError` on a state outside the documented set -- a contract
     violation, surfaced loudly rather than waited on forever.
 
@@ -2182,7 +2236,10 @@ def poll_status(
     while True:
         status = _read_status(config, job_id, run)
         if status is not None:
-            last_state = str(status.get("state") or "")
+            new_state = str(status.get("state") or "")
+            if on_state is not None and new_state != last_state:
+                on_state(new_state)
+            last_state = new_state
             if last_state in BATCH_TERMINAL_STATES:
                 return status
             if last_state not in BATCH_WAITING_STATES:
@@ -2192,6 +2249,17 @@ def poll_status(
                     f"{', '.join(BATCH_WAITING_STATES + BATCH_TERMINAL_STATES)})"
                 )
         elapsed = monotonic() - started
+        if (
+            last_state is None
+            and elapsed >= _BATCH_PROVISION_SLACK_S
+            and elapsed < config.poll_timeout_s
+        ):
+            raise BatchPollTimeout(
+                f"job {job_id} never started: no status.json after "
+                f"{_BATCH_PROVISION_SLACK_S:g}s (last observed state: "
+                "no status.json yet)",
+                last_state=None,
+            )
         if elapsed >= config.poll_timeout_s:
             raise BatchPollTimeout(
                 f"job {job_id} did not reach a terminal state within "
@@ -2979,6 +3047,12 @@ def _prepare_batch_job_spec(
     )
 
 
+def _utc_now() -> str:
+    """The current wall clock as an RFC3339 UTC string (the default ``now``
+    seam of :func:`_run_batch_job`)."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
 def _run_batch_job(
     *,
     config: BatchConfig,
@@ -2996,6 +3070,7 @@ def _run_batch_job(
     sleep: Any = time.sleep,
     request_dir: str | None = None,
     attach: bool = False,
+    now: Callable[[], str] = _utc_now,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """Submit, wait for, and collect **one** batch job's worth of corners --
     the shared body of the single-job ``batch`` backend (:func:`_run_batch`)
@@ -3019,6 +3094,11 @@ def _run_batch_job(
     ``job.json`` (else :data:`BATCH_UNKNOWN_JOB_CODE`) and the call goes
     straight to polling and collecting. A job Spot-reclaimed mid-run is
     still waited on, never re-launched (see :func:`poll_status`).
+
+    The returned environment also carries client-observed wall-clock
+    timestamps (``client_submitted_at``, ``client_launched_at``,
+    ``client_status_terminal_at``, ``client_collected_at``; ``now`` is the
+    clock seam). A phase that was not reached is ``None``, never fabricated.
     """
     if attach:
         if not job_exists(config, job_id, runner=runner):
@@ -3038,6 +3118,13 @@ def _run_batch_job(
             measurements_spec=measurements_spec,
             runner=runner,
             sleep=sleep,
+            timestamps={
+                "client_submitted_at": None,
+                "client_launched_at": None,
+                "client_status_terminal_at": None,
+                "client_collected_at": None,
+            },
+            now=now,
         )
     spec = _prepare_batch_job_spec(
         request,
@@ -3050,8 +3137,16 @@ def _run_batch_job(
         explicit_points=explicit_points,
         request_dir=request_dir,
     )
+    timestamps: dict[str, str | None] = {
+        "client_submitted_at": now(),
+        "client_launched_at": None,
+        "client_status_terminal_at": None,
+        "client_collected_at": None,
+    }
     submit_job(config, job_id, spec, runner=runner)
+    _report_progress(job_id, "submitted")
     launch_job(config, job_id, runner=runner)
+    timestamps["client_launched_at"] = now()
     # Issue #2978: name the job on stderr the moment it exists, so a caller
     # killed by an outer wall-clock limit knows what it orphaned.
     sys.stderr.write(
@@ -3069,6 +3164,8 @@ def _run_batch_job(
         measurements_spec=measurements_spec,
         runner=runner,
         sleep=sleep,
+        timestamps=timestamps,
+        now=now,
     )
 
 
@@ -3083,10 +3180,23 @@ def _poll_and_collect(
     measurements_spec: list[dict[str, Any]],
     runner: remote_transport.CommandRunner | None,
     sleep: Any,
+    timestamps: dict[str, str | None],
+    now: Callable[[], str],
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
-    """The wait-and-collect tail shared by a fresh submit and ``--attach``."""
+    """The wait-and-collect tail shared by a fresh submit and ``--attach``.
+
+    ``timestamps`` carries the client-observed phase times already recorded
+    (all ``None`` on ``--attach``, where this client never submitted or
+    launched); the terminal/collected phases are filled in here."""
     try:
-        status = poll_status(config, job_id, runner=runner, sleep=sleep, heartbeat=True)
+        status = poll_status(
+            config,
+            job_id,
+            runner=runner,
+            sleep=sleep,
+            heartbeat=True,
+            on_state=lambda state: _report_progress(job_id, state),
+        )
     except BatchPollTimeout as exc:
         return (
             _poll_timeout_corners(corner_points, measurements_spec, exc),
@@ -3098,10 +3208,12 @@ def _poll_and_collect(
                 "region": config.region,
                 "state": exc.last_state,
                 **_read_job_identity(None),
+                **timestamps,
             },
         )
 
-    environment = _batch_environment(config, job_id, status)
+    timestamps["client_status_terminal_at"] = now()
+    environment = {**_batch_environment(config, job_id, status), **timestamps}
     if status.get("state") != "done" and (
         _status_exit_code(status) not in _BATCH_SIM_SUCCESS_EXIT_CODES
     ):
@@ -3120,6 +3232,7 @@ def _poll_and_collect(
         collect_outputs(config, job_id, collected, runner=runner)
         from .sim import check_ngspice_options_echo
 
+        environment["client_collected_at"] = now()
         report = read_collected_report(collected)
         check_ngspice_options_echo(request, report)
         environment = {**environment, **_read_job_identity(collected, request)}

@@ -59,6 +59,11 @@ from typing import TYPE_CHECKING, Any
 
 from ._layout import write_layout
 from ._provenance import build_provenance
+from .gen_cap_vpp import (
+    _cap_vpp_array_describe,
+    _cap_vpp_array_layer_params,
+    _cap_vpp_array_validate,
+)
 
 # Issue #2347 moved every family's `validate`/`describe` pair (plus the
 # helpers used only by them, and `_well_island_layer_params`, which #1875 had
@@ -292,6 +297,7 @@ from .gen_pcells import (
     _build_bjt_array_pcell,
     _build_bond_pad_pcell,
     _build_cap_array_pcell,
+    _build_cap_vpp_array_pcell,
     _build_diff_pair_pcell,
     _build_esd_device_pcell,
     _build_guard_ring_pcell,
@@ -330,6 +336,7 @@ _PCELL_LIBRARY_NAME = "klt_gen_reference"
 #: ``cap_top_requires_<i>_*`` slots are appended the same way below
 #: :data:`_PDK_CAP_TOP_PLATE_REQUIRES` (issue #1555).
 _HIDDEN_PARAMS = {
+    "vpp_gds_path",
     "layer",
     "active_layer",
     "poly_layer",
@@ -344,6 +351,7 @@ _HIDDEN_PARAMS = {
     "well_tap_implant_present",
     "well_margin_resolved_um",
     "gate_pad_clearance_um",
+    "ring_well_margin_um",
     # `mos_array`/`diff_pair`/`esd_device`'s issue #1577 harness-computed
     # knobs -- resolved per PDK family exactly like `gate_pad_clearance_um`
     # above, never part of the request schema.
@@ -422,6 +430,9 @@ _HIDDEN_PARAMS = {
     # per (family, flavor) by `_res_end_contact_um`; never request-facing.
     "end_contact_w_um",
     "end_contact_h_um",
+    # gf180mcu salicide-block clearance from the end contacts (issue #3000),
+    # resolved per family by `_res_sab_geometry_um`; never request-facing.
+    "res_contact_space_um",
     # sg13g2 PDK-PCell poly-resistor convention (issue #2679): poly drawn as
     # the two abutting heads only; resolved per family, never request-facing.
     "res_poly_heads_only",
@@ -436,7 +447,7 @@ _HIDDEN_PARAMS = {
 _HIDDEN_PARAMS |= {
     f"res_flavor_{i}_{suffix}"
     for i in range(_MAX_RES_FLAVOR_LAYERS)
-    for suffix in ("layer", "present", "head_enclosure_um")
+    for suffix in ("layer", "present", "head_enclosure_um", "side_extension_um")
 }
 
 #: ``cap_array``'s top-plate requires-mask slots are generated from
@@ -1510,6 +1521,7 @@ def _res_unit_layout(
     via_enclosure_min_um: float = 0.0,
     end_contact_w_um: float = 0.0,
     end_contact_h_um: float = 0.0,
+    marker_contact_space_um: float = 0.0,
     poly_heads_only: bool = False,
 ) -> dict[str, Any]:
     """One unit resistor (or unit MoM/MiM cap cell footprint): a poly body
@@ -1550,6 +1562,13 @@ def _res_unit_layout(
     body (a "dogbone" head). The resistor-ID marker still spans only the
     body segment. With both ``0.0`` every existing caller is unchanged.
 
+    ``marker_contact_space_um`` (issue #3000, ``0.0`` by default) is the
+    minimum space from the body-segment marker -- and so from the salicide
+    block drawn over it -- to the end contact's edge: the head is lengthened
+    until ``contact_region_um`` leaves that much poly between the contact and
+    the marker. gf180mcu's ``SB.4`` needs 0.15um where the generic enclosure
+    margin leaves 0.10um.
+
     ``poly_heads_only`` (issue #2679, ``False`` by default) draws the
     ``"poly"`` role as just the two end heads, leaving the body span between
     them undrawn on the poly layer -- the IHP sg13g2 PCell convention where
@@ -1562,7 +1581,7 @@ def _res_unit_layout(
     enclosure_um = max(ENCLOSURE_MARGIN_UM, via_enclosure_min_um)
     contact_w_um = end_contact_w_um if rect_contact else contact_side_um
     contact_h_um = end_contact_h_um if rect_contact else contact_side_um
-    contact_region_um = contact_w_um + 2 * enclosure_um
+    contact_region_um = contact_w_um + 2 * max(enclosure_um, marker_contact_space_um)
     # Pad extent across the body axis: the body width, grown to enclose a
     # taller-than-body rectangular contact (dogbone head).
     pad_h_um = (
@@ -1633,6 +1652,7 @@ def _res_array_layout(
     min_spacing_um: float = 0.0,
     end_contact_w_um: float = 0.0,
     end_contact_h_um: float = 0.0,
+    marker_contact_space_um: float = 0.0,
     poly_heads_only: bool = False,
 ) -> dict[str, Any]:
     """``num`` matched unit resistors (see :func:`_res_unit_layout`), folded
@@ -1680,6 +1700,7 @@ def _res_array_layout(
     ``end_contact_w_um``/``end_contact_h_um`` (issue #2449) forward to
     :func:`_res_unit_layout`'s rectangular precision-poly end contact; a
     dogbone head taller than the body also widens the row-to-row pitch.
+    ``marker_contact_space_um`` (issue #3000) forwards likewise.
     """
     unit = _res_unit_layout(
         length_um,
@@ -1688,6 +1709,7 @@ def _res_array_layout(
         via_enclosure_min_um,
         end_contact_w_um,
         end_contact_h_um,
+        marker_contact_space_um,
         poly_heads_only,
     )
     effective_spacing_um = max(spacing_um, min_spacing_um)
@@ -3544,6 +3566,7 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
     pcell_classes.update(_build_mos_array_pcell())
     pcell_classes.update(_build_res_array_pcell())
     pcell_classes.update(_build_cap_array_pcell())
+    pcell_classes.update(_build_cap_vpp_array_pcell())
     pcell_classes.update(_build_guard_ring_pcell())
     pcell_classes.update(_build_well_island_pcell())
     pcell_classes.update(_build_diff_pair_pcell())
@@ -3656,6 +3679,19 @@ _GENERATOR_SPECS: dict[str, _GeneratorSpec] = {
         validate=_cap_array_validate,
         describe=_cap_array_describe,
         layer_params=_cap_array_layer_params,
+    ),
+    "cap_vpp_array": _GeneratorSpec(
+        name="cap_vpp_array",
+        summary=(
+            "Row of a PDK's fixed-layout vertical-parallel-plate capacitor "
+            "cell (sky130's sky130_fd_pr__cap_vpp_*), instantiated as-drawn "
+            "from the PDK GDS on params.pitch_um; ports are read from the "
+            "cell's own pin labels (issue #3100)."
+        ),
+        dbu=0.001,
+        validate=_cap_vpp_array_validate,
+        describe=_cap_vpp_array_describe,
+        layer_params=_cap_vpp_array_layer_params,
     ),
     "guard_ring": _GeneratorSpec(
         name="guard_ring",

@@ -13690,6 +13690,7 @@ def test_parasitics_summary_block_shape(tmp_path):
     # reference" in `docs/cli/extract.md`.
     assert para["substrate_dc_tie"] == {
         "resistance_ohm": 1e12,
+        "mode": "shunt",
         "nets": [{"net": "vsubs", "device": "Rvsubs_dctie"}],
         "node_scope": "global",
     }
@@ -17765,6 +17766,79 @@ def _make_floating_substrate_layout() -> kdb.Layout:
     return layout
 
 
+def test_substrate_tie_ohms_default_header_states_floating(tmp_path):
+    """Issue #3089: the default tie is announced in the netlist header."""
+    path = _write_gds(_make_floating_substrate_layout(), tmp_path / "floating.gds")
+    para = run_extract(
+        path, "sky130", output=str(tmp_path / "para.spice"), parasitics=True
+    )
+    text = Path(para["netlist_path"]).read_text()
+    assert "* - substrate tie: 1e+12 ohm to ground" in text
+    assert "capacitively floating in transient" in text
+
+
+def test_substrate_tie_ohms_custom_value(tmp_path):
+    """Issue #3089: a positive value is written verbatim and reported."""
+    path = _write_gds(_make_floating_substrate_layout(), tmp_path / "floating.gds")
+    para = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "para.spice"),
+        parasitics=True,
+        substrate_tie_ohms=1e-3,
+    )
+    text = Path(para["netlist_path"]).read_text()
+    assert "Rvsubs_dctie vsubs 0 0.001" in text
+    assert "* - substrate tie: 0.001 ohm to ground" in text
+    tie = para["parasitics"]["substrate_dc_tie"]
+    assert tie["resistance_ohm"] == 1e-3
+    assert tie["mode"] == "shunt"
+    assert para["parasitics"]["integrity"]["short_candidates"] == 0
+
+
+def test_substrate_tie_ohms_zero_is_hard_tie(tmp_path):
+    """Issue #3089: 0 is a hard tie, written as a legal (1 mohm) resistor."""
+    path = _write_gds(_make_floating_substrate_layout(), tmp_path / "floating.gds")
+    para = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "para.spice"),
+        parasitics=True,
+        substrate_tie_ohms=0,
+    )
+    text = Path(para["netlist_path"]).read_text()
+    assert "Rvsubs_dctie vsubs 0 0.001" in text
+    assert "hard tie to ground" in text
+    tie = para["parasitics"]["substrate_dc_tie"]
+    assert tie["mode"] == "hard"
+    assert tie["resistance_ohm"] == 1e-3
+    assert para["parasitics"]["integrity"]["short_candidates"] == 0
+
+
+@pytest.mark.parametrize("bad", [-1.0, float("nan"), float("inf")])
+def test_substrate_tie_ohms_rejects_invalid(tmp_path, bad):
+    path = _write_gds(_make_floating_substrate_layout(), tmp_path / "floating.gds")
+    with pytest.raises(ExtractError, match="--substrate-tie-ohms"):
+        run_extract(
+            path,
+            "sky130",
+            output=str(tmp_path / "x.spice"),
+            parasitics=True,
+            substrate_tie_ohms=bad,
+        )
+
+
+def test_substrate_tie_ohms_requires_parasitics(tmp_path):
+    path = _write_gds(_make_floating_substrate_layout(), tmp_path / "floating.gds")
+    with pytest.raises(ExtractError, match="--substrate-tie-ohms requires"):
+        run_extract(
+            path,
+            "sky130",
+            output=str(tmp_path / "x.spice"),
+            substrate_tie_ohms=1e3,
+        )
+
+
 def test_parasitics_writes_substrate_dc_tie_inside_subckt_body(tmp_path):
     """The structural half of issue #1263 (DC convergence) plus issue #1503
     (node scope): `--parasitics` writes one large shunt resistor from the
@@ -17804,6 +17878,7 @@ def test_parasitics_writes_substrate_dc_tie_inside_subckt_body(tmp_path):
 
     assert para["parasitics"]["substrate_dc_tie"] == {
         "resistance_ohm": 1e12,
+        "mode": "shunt",
         "nets": [{"net": "vsubs", "device": "Rvsubs_dctie"}],
         "node_scope": "global",
     }
@@ -25100,6 +25175,103 @@ def test_no_netlist_with_spef_still_works(tmp_path):
     assert not (tmp_path / "inv.spice").exists()
 
 
+def _make_gf180mcu_mim_option_a_layout() -> kdb.Layout:
+    """A gf180mcu MIM *option A* cap (issue #2920): `Metal2` bottom plate,
+    `FuseTop` top plate, a sea of `Via2` inside `FuseTop` strapped by a
+    `Metal3` labelled `VTOP`, and the bottom plate labelled `VBOT` through a
+    `Via2`/`Metal3` pad *outside* `FuseTop` (ordinary routing)."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    draw(36, 0, _box_um(-20, -20, 20, 20))  # Metal2 (bottom plate conductor)
+    draw(75, 0, _box_um(0, 0, 10, 10))  # FuseTop (top plate)
+    draw(117, 5, _box_um(-5, -5, 15, 15))  # CAP_MK
+    draw(117, 10, _box_um(-5, -5, 15, 15))  # MIM_L_MK
+    draw(38, 0, _box_um(2, 2, 3, 3))  # Via2 inside FuseTop
+    draw(38, 0, _box_um(6, 6, 7, 7))  # Via2 inside FuseTop
+    draw(42, 0, _box_um(1, 1, 8, 8))  # Metal3 strap
+    top.shapes(layout.layer(42, 10)).insert(kdb.Text("VTOP", _trans_um(4, 4)))
+    draw(38, 0, _box_um(-15, -15, -14, -14))  # Via2 outside FuseTop
+    draw(42, 0, _box_um(-16, -16, -13, -13))  # Metal3 pad
+    top.shapes(layout.layer(42, 10)).insert(kdb.Text("VBOT", _trans_um(-14.5, -14.5)))
+    return layout
+
+
+def test_gf180mcu_mim_option_a_extracts_cap_with_distinct_plate_nets(tmp_path):
+    """Issue #2920: `mim_option=A` recognises the Metal2/FuseTop/Via2/Metal3
+    MIM as one `m2m3` capacitor; the top-plate Via2s do not join the plates,
+    while the Via2 outside FuseTop is still ordinary Metal2-Metal3 routing."""
+    path = _write_gds(_make_gf180mcu_mim_option_a_layout(), tmp_path / "a.gds")
+    report = run_extract(
+        path,
+        "gf180mcu",
+        output=str(tmp_path / "a.spice"),
+        deck_options={"mim_option": "A"},
+    )
+
+    assert report["device_counts"] == {"cap_mim_2f0_m2m3_noshield": 1}
+    (device,) = report["devices"]
+    assert device["nets"]["a"] == "VBOT"
+    assert device["nets"]["b"] == "VTOP"
+    assert not any("merges" in w for w in report["warnings"])
+    assert report["provenance"]["deck"]["options"]["mim_option"] == "A"
+
+
+def test_gf180mcu_mim_option_a_density_flavour(tmp_path):
+    path = _write_gds(_make_gf180mcu_mim_option_a_layout(), tmp_path / "a.gds")
+    report = run_extract(
+        path,
+        "gf180mcu",
+        output=str(tmp_path / "a.spice"),
+        deck_options={"mim_option": "A", "mim_cap": "cap_mim_1f0_m2m3_noshield"},
+    )
+    assert report["device_counts"] == {"cap_mim_1f0_m2m3_noshield": 1}
+
+
+def test_gf180mcu_mim_option_b_flavour_rejected_under_option_a(tmp_path):
+    path = _write_gds(_make_gf180mcu_mim_option_a_layout(), tmp_path / "a.gds")
+    with pytest.raises(ExtractError, match="cap_mim_1f0_m4m5_noshield"):
+        run_extract(
+            path,
+            "gf180mcu",
+            output=str(tmp_path / "a.spice"),
+            deck_options={"mim_option": "A", "mim_cap": "cap_mim_1f0_m4m5_noshield"},
+        )
+
+
+def test_gf180mcu_mim_option_rejects_unknown_value(tmp_path):
+    path = _write_gds(_make_gf180mcu_mim_option_a_layout(), tmp_path / "a.gds")
+    with pytest.raises(ExtractError, match="mim_option=C"):
+        run_extract(
+            path,
+            "gf180mcu",
+            output=str(tmp_path / "a.spice"),
+            deck_options={"mim_option": "C"},
+        )
+
+
+def test_gf180mcu_mim_option_a_layout_under_default_warns(tmp_path):
+    """Issue #2920 item 3: an option-A cap under the default option B is not
+    silently extracted as one net -- a warning names the option to select."""
+    path = _write_gds(_make_gf180mcu_mim_option_a_layout(), tmp_path / "a.gds")
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "a.spice"))
+
+    assert report["device_counts"] == {}
+    (warning,) = [w for w in report["warnings"] if "mim_option=A" in w]
+    assert "--deck-option mim_option=A" in warning
+    assert "mim_option" not in report["provenance"]["deck"]["options"]
+
+
+def test_gf180mcu_mim_option_b_layout_has_no_variant_warning(tmp_path):
+    path = _write_gds(_make_gf180mcu_mim_layout(), tmp_path / "b.gds")
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "b.spice"))
+    assert report["device_counts"] == {"cap_mim_2f0_m4m5_noshield": 1}
+    assert not any("mim_option" in w for w in report["warnings"])
+
+
 def _anon_connectivity(first: int, second: int):
     """A two-device report fragment whose two anonymous nets are numbered
     ``first``/``second`` -- the only thing varied between builds (#3407)."""
@@ -25337,10 +25509,11 @@ def test_normalized_netlist_hash_scales_roughly_linearly():
         _normalized_netlist_sha256(devices, nets)
         return time.perf_counter() - start
 
-    small = min(timed(3000) for _ in range(2))
-    large = min(timed(12000) for _ in range(2))
-    # 4x the nets: ~4x when linear, ~16x when quadratic.
-    assert large < small * 9, (small, large)
+    small = min(timed(3000) for _ in range(5))
+    large = min(timed(12000) for _ in range(5))
+    # 4x the nets: ~4x when linear, ~16x when quadratic. The bound sits between
+    # the two, loose enough to absorb shared-runner noise (issue #3610).
+    assert large < small * 12, (small, large)
 
 
 # --progress / `timing` (issue #3181) ----------------------------------------

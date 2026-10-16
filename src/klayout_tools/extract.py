@@ -137,6 +137,7 @@ from __future__ import annotations
 import functools
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -242,6 +243,7 @@ from .extract_passive_regions import (
     _diode_terminal_region,
     _exclude_capacitor_top_via_overlap,
     _resolve_resistors,
+    _unselected_capacitor_variant_warnings,
 )
 from .extract_passive_regions import (
     _capacitor_top_via_overlap_region as _capacitor_top_via_overlap_region,
@@ -446,6 +448,43 @@ _SPICE_GLOBAL_GROUND_NODE = "0"
 #: numerical anchor for the DC solve, not a circuit element.
 SUBSTRATE_DC_TIE_RESISTANCE_OHM = 1e12
 
+
+def substrate_tie_written_ohms(requested_ohms: float) -> float:
+    """Resistance (ohms) the substrate tie card is actually written with.
+
+    ``--substrate-tie-ohms 0`` asks for a *hard* tie, but a zero-ohm ``R``
+    card is not legal SPICE (ngspice errors or clamps it). A hard tie is
+    therefore written as the :data:`_MIN_PARASITIC_R_OHM` floor (1 mohm --
+    the value the issue #3089 measurements used for a hard-grounded
+    substrate); every positive request is written verbatim.
+    """
+    return requested_ohms if requested_ohms > 0 else _MIN_PARASITIC_R_OHM
+
+
+def substrate_tie_mode(requested_ohms: float) -> str:
+    """``"hard"`` for a ``0`` request, ``"shunt"`` otherwise (issue #3089)."""
+    return "hard" if requested_ohms == 0 else "shunt"
+
+
+def _resolve_substrate_tie_ohms(value: float | None, parasitics: bool) -> float:
+    """Validate ``--substrate-tie-ohms`` (issue #3089) and return the
+    requested tie resistance, defaulting to
+    :data:`SUBSTRATE_DC_TIE_RESISTANCE_OHM` when the flag was not given.
+
+    Raises :class:`ExtractError` when given without ``--parasitics`` (the
+    tie only exists in a parasitic netlist) or when not a finite value
+    ``>= 0``.
+    """
+    _require_parasitics("--substrate-tie-ohms", value, parasitics)
+    if value is None:
+        return SUBSTRATE_DC_TIE_RESISTANCE_OHM
+    if not math.isfinite(value) or value < 0:
+        raise ExtractError(
+            f"--substrate-tie-ohms must be a finite value >= 0 (got {value!r})"
+        )
+    return float(value)
+
+
 #: Machine-readable declaration of what `--parasitics` does and does not
 #: model (issue #728, updated by #760). Most `C` cards `_inject_parasitics`
 #: emits hang off the deck's ground/substrate net; since issue #760 a net
@@ -502,7 +541,31 @@ PARASITIC_MODEL_SCOPE: dict[str, str] = {
 }
 
 
-def _parasitic_model_header_comment() -> str:
+def _substrate_tie_header_line(requested_ohms: float) -> str:
+    """The ``* - substrate tie: ...`` header line (issue #3089)."""
+    written = substrate_tie_written_ohms(requested_ohms)
+    if substrate_tie_mode(requested_ohms) == "hard":
+        return (
+            f"* - substrate tie: hard tie to ground ({written:g} ohm; "
+            "SPICE has no zero-ohm resistor) -- the substrate node is "
+            "DC-fixed at 0 V in transient analysis"
+        )
+    if requested_ohms >= SUBSTRATE_DC_TIE_RESISTANCE_OHM:
+        consequence = (
+            "the substrate is capacitively floating in transient analysis "
+            "(DC reference only); see --substrate-tie-ohms"
+        )
+    else:
+        consequence = (
+            "the substrate is held near 0 V in transient analysis through "
+            "this resistance"
+        )
+    return f"* - substrate tie: {written:g} ohm to ground -- {consequence}"
+
+
+def _parasitic_model_header_comment(
+    substrate_tie_ohms: float = SUBSTRATE_DC_TIE_RESISTANCE_OHM,
+) -> str:
     """Render :data:`PARASITIC_MODEL_SCOPE` as `*`-prefixed SPICE comment
     lines for the written netlist's header (issue #728).
 
@@ -518,6 +581,7 @@ def _parasitic_model_header_comment() -> str:
     lines = ["* parasitic model (--parasitics):"]
     for key, value in PARASITIC_MODEL_SCOPE.items():
         lines.append(f"* - {key}: {value}")
+    lines.append(_substrate_tie_header_line(substrate_tie_ohms))
     return "\n".join(lines)
 
 
@@ -1317,6 +1381,7 @@ def run_extract(
     substrate_spreading_net: str | None = None,
     hierarchical_cells: Sequence[str] = (),
     no_netlist: bool = False,
+    substrate_tie_ohms: float | None = None,
     probes: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """Extract a schematic-equivalent netlist from the layout at ``path``.
@@ -2635,6 +2700,13 @@ def run_extract(
     # no branch to an already heavily-branching function.
     _require_parasitics("--substrate-spreading", substrate_spreading_net, parasitics)
 
+    # `--substrate-tie-ohms` (issue #3089): validated up front, same helper
+    # route as above; `substrate_tie_requested` is the default (1e12) when
+    # the flag was not given.
+    substrate_tie_requested = _resolve_substrate_tie_ohms(
+        substrate_tie_ohms, parasitics
+    )
+
     # `--critical-net` (issue #976) requires `--parasitics`: it scopes the
     # lateral-coupling pass onto the same lumped-RC extraction this flag
     # piggybacks on, same reasoning as `--mom-net`/`--spef` above.
@@ -3236,6 +3308,7 @@ def run_extract(
                 coupled_pairs,
                 ground_net,
                 distributed_rc_nets=(critical_nets_set if distributed_rc else None),
+                substrate_tie_ohms=substrate_tie_requested,
                 mom_rlc_inductor=(
                     (mom_rlc_net, mom_rlc_inductance_nh)
                     if mom_rlc_net is not None and mom_rlc_inductance_nh is not None
@@ -3264,7 +3337,10 @@ def run_extract(
                 # a DC tie to anchor either -- the block is still present
                 # (schema stability), just empty.
                 "substrate_dc_tie": {
-                    "resistance_ohm": SUBSTRATE_DC_TIE_RESISTANCE_OHM,
+                    "resistance_ohm": substrate_tie_written_ohms(
+                        substrate_tie_requested
+                    ),
+                    "mode": substrate_tie_mode(substrate_tie_requested),
                     "nets": [],
                 },
                 # Additive field (issue #2764): no nets injected, so the
@@ -3576,7 +3652,9 @@ def run_extract(
     writer.use_net_names = True
     netlist_description = f"extracted by klt extract --deck {deck_name}"
     if parasitics_report is not None:
-        netlist_description += "\n" + _parasitic_model_header_comment()
+        netlist_description += "\n" + _parasitic_model_header_comment(
+            substrate_tie_requested
+        )
         netlist_description += "".join(
             "\n* " + note for note in fixed_value_capacitor_note
         )
@@ -3613,6 +3691,7 @@ def run_extract(
         model_bindings=model_bindings,
         substrate_global_nets=substrate_global_nets,
         parasitics=parasitics_report is not None,
+        substrate_tie_ohms=substrate_tie_requested,
     )
     # The slice's own warnings are also surfaced in the top-level `warnings[]`,
     # so a caller reading only that (the documented contract) still sees them.
@@ -4086,6 +4165,7 @@ def _write_subcircuit_deck(
     model_bindings: Mapping[str, Any] | None,
     substrate_global_nets: list[str],
     parasitics: bool,
+    substrate_tie_ohms: float = SUBSTRATE_DC_TIE_RESISTANCE_OHM,
 ) -> dict[str, Any] | None:
     """Slice ``cell_name`` out of the already-written flat extraction and write
     it as its own ``.SUBCKT`` deck -- ``klt extract --subcircuit`` (issue
@@ -4169,7 +4249,7 @@ def _write_subcircuit_deck(
         "* see docs/cli/extract.md, section: Sub-circuit isolation"
     )
     if parasitics:
-        description += "\n" + _parasitic_model_header_comment()
+        description += "\n" + _parasitic_model_header_comment(substrate_tie_ohms)
     try:
         netlist.write(subcircuit_path, writer, description)
     except Exception as exc:
@@ -9203,6 +9283,11 @@ def _extract_netlist(
             {"P1": bottom_region, "P2": top_region},
         )
 
+    # Issue #2920: a capacitor of an unselected deck option drawn on the layout.
+    capacitor_variant_warnings = _unselected_capacitor_variant_warnings(
+        layout, top_cell, deck
+    )
+
     # MoM (Metal-oxide-Metal) capacitor device recognition (issue #1466):
     # each of the deck's optional `mom_capacitors` entries (see
     # `MomCapacitorDevice` in `decks/__init__.py`) is recognised by a single
@@ -9360,6 +9445,7 @@ def _extract_netlist(
         # recognition block above, where the per-entry terminal regions and
         # the MOS/tap geometry the filter needs are both still in scope.
         + diode_near_miss_warnings
+        + capacitor_variant_warnings
     )
 
     # Connectivity. Deliberately does *not* connect `nwell`/`tap` to

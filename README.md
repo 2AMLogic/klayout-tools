@@ -119,6 +119,7 @@ klt yield mc.json --limits spec.json     # MC sample set + spec limits -> yield 
 klt yield-samples mc.json --negative-control bad.json --format json  # two MC sim reports -> yield sample set carrying a negative control
 klt yield-campaign spec.json             # launch + manage the MC campaign itself, sharded via klt sim, then yield's own pipeline unmodified
 klt yield-sensitivity campaign.json      # campaign parameter draws + output values -> ranked contribution to the spread (Rust core)
+klt yield-threshold records.json         # comparator/latch (stimulus, binary outcome) records -> probit threshold mu/sigma with CIs, per corner
 klt design-centering request.json        # yield-sensitivity ranking + sized device -> re-centering candidates
 klt layout-metrics design.gds            # normalized layout.json per block
 klt kb search bandgap                    # query the circuit-design knowledge base

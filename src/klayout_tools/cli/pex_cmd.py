@@ -108,6 +108,8 @@ def run(args: argparse.Namespace) -> int:
             # every `--critical-net`-named net. `False` when the flag was
             # never given, unchanged from every call site that predates it.
             distributed_rc=args.distributed_rc,
+            # `--substrate-tie-ohms` (issue #3089): `None` when never given.
+            substrate_tie_ohms=args.substrate_tie_ohms,
             # `--mom-rlc-net`/`--mom-rlc-resistance-ohm`/
             # `--mom-rlc-capacitance-ff`/`--mom-rlc-inductance-nh` (issue
             # #988, Epic #709 Phase 3a): substitutes a caller-supplied R/L/C
