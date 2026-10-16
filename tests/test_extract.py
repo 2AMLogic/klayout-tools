@@ -14847,6 +14847,105 @@ def test_critical_net_requires_parasitics():
 
 
 # ---------------------------------------------------------------------------
+# Glob / all-nets selectors for --critical-net / --parasitics-net (issue #2974)
+# ---------------------------------------------------------------------------
+
+
+def _lateral_run(tmp_path, **kwargs):
+    path = _write_gds(_make_lateral_coupling_layout(), tmp_path / "lateral.gds")
+    return run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "lateral.spice"),
+        parasitics=True,
+        **kwargs,
+    )
+
+
+def test_critical_net_pattern_matches_explicit_names(tmp_path):
+    explicit = _lateral_run(tmp_path, critical_nets=["VIC"])["parasitics"]
+    pattern = _lateral_run(tmp_path, critical_net_patterns=["V*"])["parasitics"]
+    assert pattern["critical_nets"] == ["VIC"]
+    assert pattern["critical_net_patterns"] == ["V*"]
+    assert pattern["cc_count"] == explicit["cc_count"] == 1
+    assert pattern["total_coupling_capacitance_ff"] == pytest.approx(
+        explicit["total_coupling_capacitance_ff"]
+    )
+
+
+def test_critical_net_pattern_merges_with_exact_names(tmp_path):
+    para = _lateral_run(tmp_path, critical_nets=["FAR"], critical_net_patterns=["V*"])[
+        "parasitics"
+    ]
+    assert para["critical_nets"] == ["FAR", "VIC"]
+
+
+def test_no_selector_leaves_report_fields_absent(tmp_path):
+    para = _lateral_run(tmp_path, critical_nets=["VIC"])["parasitics"]
+    assert "critical_net_patterns" not in para
+    assert "critical_net_all" not in para
+    assert "parasitics_net_patterns" not in para
+
+
+def test_critical_net_pattern_zero_match_warns_distinctly(tmp_path):
+    report = _lateral_run(tmp_path, critical_net_patterns=["bl_*"])
+    assert any(
+        "--critical-net-pattern pattern(s) 'bl_*' match no net" in w
+        for w in report["warnings"]
+    )
+    assert report["parasitics"]["critical_nets"] == []
+
+
+def test_critical_net_pattern_zero_match_is_error_when_strict(tmp_path):
+    with pytest.raises(ExtractError, match="'bl_\\*' match no net.*strict-net"):
+        _lateral_run(tmp_path, critical_net_patterns=["bl_*"], strict_net_patterns=True)
+
+
+def test_critical_net_all_with_exclude(tmp_path):
+    para = _lateral_run(tmp_path, critical_net_all=True, critical_net_excludes=["FAR"])[
+        "parasitics"
+    ]
+    assert para["critical_nets"] == ["AGR", "VIC"]
+    assert para["critical_net_all"] is True
+    assert para["critical_net_excludes"] == ["FAR"]
+
+
+def test_parasitics_net_pattern_scopes_ground_pass(tmp_path):
+    para = _lateral_run(tmp_path, parasitics_net_patterns=["[AV]*"])["parasitics"]
+    assert para["parasitics_nets"] == ["AGR", "VIC"]
+    assert {entry["net"] for entry in para["nets"]} == {"AGR", "VIC"}
+
+
+def test_net_selector_flag_validation(tmp_path):
+    with pytest.raises(ExtractError, match="require --parasitics"):
+        run_extract("/nonexistent.gds", "sky130", critical_net_patterns=["V*"])
+    with pytest.raises(ExtractError, match="requires --critical-net-all"):
+        run_extract(
+            "/nonexistent.gds", "sky130", parasitics=True, critical_net_excludes=["x"]
+        )
+    with pytest.raises(ExtractError, match="--strict-net-patterns requires"):
+        run_extract(
+            "/nonexistent.gds", "sky130", parasitics=True, strict_net_patterns=True
+        )
+
+
+def test_distributed_rc_with_empty_resolving_pattern_errors(tmp_path):
+    with pytest.raises(ExtractError, match="resolved to no net"):
+        _lateral_run(tmp_path, critical_net_patterns=["bl_*"], distributed_rc=True)
+
+
+def test_net_selector_anonymous_nets_only_match_explicit_dollar_glob():
+    from klayout_tools.extract_netselect import NetSelectors
+
+    selectors = NetSelectors(error=ExtractError)
+    named = ["bl_0", "bl_1", "VSS"]
+    anonymous = ["\\$3"]
+    assert selectors._select("f", ["*"], named, anonymous) == set(named)
+    assert selectors._select("f", ["\\$*"], named, anonymous) == {"\\$3"}
+    assert selectors._select("f", [], named, anonymous, select_all=True) == set(named)
+
+
+# ---------------------------------------------------------------------------
 # Scoping the ground R/C pass to named nets (--parasitics-net, issue #1700 --
 # the cost half of friction report #1699)
 # ---------------------------------------------------------------------------

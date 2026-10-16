@@ -2460,6 +2460,9 @@ def run_pex(
     rename_declared_pins: bool = False,
     label_layers: Mapping[str, tuple[int, int] | None] | None = None,
     critical_nets: Sequence[str] | None = None,
+    critical_net_patterns: Sequence[str] | None = None,
+    critical_net_all: bool = False,
+    critical_net_excludes: Sequence[str] | None = None,
     distributed_rc: bool = False,
     parasitic_variants: Sequence[str] | None = None,
     mom_rlc_net: str | None = None,
@@ -2524,7 +2527,12 @@ def run_pex(
     always-on vertical-overlap coupling (issue #760), so the re-simulated
     extracted-side testbench (and the resulting `delta[]` rows) reflect it.
     ``None``/empty (the default) skips it entirely -- byte-identical to
-    before this feature existed. ``distributed_rc`` (``klt pex
+    before this feature existed. ``critical_net_patterns``/
+    ``critical_net_all``/``critical_net_excludes`` (``klt pex
+    --critical-net-pattern``/``--critical-net-all``/``--critical-net-exclude``,
+    issue #2974) are the glob / all-nets forms of ``critical_nets``, passed
+    straight through; ``extraction.critical_nets`` then echoes the resolved
+    concrete names. ``distributed_rc`` (``klt pex
     --distributed-rc``, issue #977, Epic #709 Phase 2b) is also passed
     straight through to :func:`~klayout_tools.extract.run_extract` --
     replaces the single-lumped-element star model with a distributed,
@@ -2725,6 +2733,9 @@ def run_pex(
             # was never given -- the exact `run_extract` call made before it.
             label_layers=label_layers,
             critical_nets=critical_nets,
+            critical_net_patterns=critical_net_patterns,
+            critical_net_all=critical_net_all,
+            critical_net_excludes=critical_net_excludes,
             distributed_rc=distributed_rc,
             parasitic_variants=parasitic_variants,
             mom_rlc_net=mom_rlc_net,

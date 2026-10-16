@@ -32,6 +32,21 @@ not `klt --version`, if you need to detect this kind of drift. See
   grows from 234 to 238 rule categories (`--expect-rule-categories 238`); the
   four ids leave the "Not implemented" list. The pinned shipped-cell
   regression needed no new deviation. Additive; no `schema_version` bump.
+- **`klt extract` / `klt pex`: glob and all-nets selectors for
+  `--critical-net` / `--parasitics-net`** (issue #2974): new repeatable
+  `--critical-net-pattern GLOB` and `--parasitics-net-pattern GLOB`
+  (request fields `critical_net_patterns` / `parasitics_net_patterns`),
+  `--critical-net-all` with `--critical-net-exclude GLOB`, and
+  `--strict-net-patterns`. Globs resolve against the extracted nets and
+  merge with exact names; a zero-match pattern is a distinct `warnings`
+  entry (an error under `--strict-net-patterns`). Additive fields
+  `parasitics.critical_net_patterns` / `critical_net_all` /
+  `critical_net_excludes` / `parasitics_net_patterns` appear only when
+  requested; `parasitics.critical_nets` / `parasitics_nets` then echo the
+  resolved names. No `schema_version` bump; output without the new flags is
+  unchanged. `klt pex` forwards the `--critical-net-*` forms. Documented
+  that the request document already accepts a list for exact names. See
+  `docs/cli/extract.md`.
 - **`klt sim` `measurements[].cycle_mean`: a mean over whole reference
   cycles** (issue #2947): a fourth measurement form
   `{signal, align, level, cycles, edge?, from?}` (`tran` only) returns the
