@@ -234,6 +234,20 @@ not `klt --version`, if you need to detect this kind of drift. See
   `met2.enclosing_adjacent.via2.1` (`via2.5`), `met3.enclosing_adjacent.via3.1`
   (`via3.5`). The sky130 deck grows from 136 to 140 rules (additive; the
   deck hash changes).
+
+- **`klt yield-threshold`** (issue #2976): a new verb that fits the threshold
+  distribution of a binary-outcome decision circuit (comparator, latch, trip
+  point). From per-sample `(stimulus, outcome)` records it reports, per corner,
+  per-stimulus proportions with Clopper-Pearson intervals, the probit
+  maximum-likelihood threshold `mu`/`sigma` with profile-likelihood confidence
+  intervals, a chi-square goodness of fit, and (with `--target-error-rate`) the
+  stimulus at that error rate flagged `extrapolated` when the sample count
+  cannot resolve it. Degenerate data (one outcome, separation, fewer than two
+  stimulus levels) yields `null` estimates and a `fit.status`, never a faked
+  sigma. Pure Python, no native extension; log-space CDF is stable past 38
+  sigma. **Additive:** no existing payload changes.
+  See [`docs/cli/yield-threshold.md`](docs/cli/yield-threshold.md).
+
 - **Bipolar markers can be derived layer expressions** (issue #2860):
   `BipolarDevice.marker` now accepts a `LayerExpr`, a frozen AND/NOT tree
   of drawn layers that can nest, as well as a bare `(layer, datatype)`
