@@ -7850,16 +7850,16 @@ def _parasitic_cards(netlist_path: str) -> list[str]:
 def test_pdk_unbound_mim_flavour_writes_bare_value_only_capacitor_card(
     tmp_path, flavour, expected_c_f
 ):
-    """Issue #1558, Gap 2: `--pdk <variant> --parasitics` on a layout whose
+    """Issue #1558, Gap 2: `--parasitics` without `--pdk` on a layout whose
     MiM cap uses one of gf180mcu's non-default densities emits a bare,
     value-only `C` card -- **no** trailing `cap_mim_1f0_m4m5_noshield`-style
     token, which ngspice would reject as an unresolvable `.model` reference
     (`unknown parameter (...)`/`could not find a valid modelname`).
 
-    Neither flavour has a `_CAPACITOR_MODEL_TABLE` row (only the default
-    `cap_mim_2f0_m4m5_noshield` does), so the device falls through to
-    KLayout's own default primitive-card writer -- the path that used to
-    append the class name. The flavour identity is still recorded, in the
+    With no `--pdk` there are no bindings at all (under `--pdk` the `1f0`/`1f5`
+    flavours bind to their `X` subcircuit since issue #3090), so the device
+    falls through to KLayout's own default primitive-card writer -- the path
+    that used to append the class name. The flavour identity is still recorded, in the
     writer's own preceding `* device instance ...` comment and in
     `devices[].class`."""
     path = _write_gds(_make_gf180mcu_mim_layout(), tmp_path / f"{flavour}.gds")
@@ -7867,8 +7867,6 @@ def test_pdk_unbound_mim_flavour_writes_bare_value_only_capacitor_card(
     report = run_extract(
         path,
         "gf180mcu",
-        pdk_variant="gf180mcuA",
-        pdk_root=_make_pdk_install(tmp_path, "gf180mcuA"),
         output=out,
         parasitics=True,
         deck_options={"mim_cap": flavour},
@@ -7946,6 +7944,92 @@ def test_pdk_bound_default_mim_flavour_still_writes_x_card(tmp_path):
     assert " cap_mim_2f0_m4m5_noshield " in card
 
 
+@pytest.mark.parametrize("parasitics", [False, True])
+@pytest.mark.parametrize(
+    "flavour",
+    [
+        "cap_mim_1f0_m4m5_noshield",
+        "cap_mim_1f5_m4m5_noshield",
+        "cap_mim_2f0_m4m5_noshield",
+    ],
+)
+def test_pdk_binds_every_gf180mcu_mim_density_to_subckt(tmp_path, flavour, parasitics):
+    """Issue #3090: `--pdk` binds all three selectable gf180mcu MiM densities
+    to their PDK `cap_mim_*` subcircuit (`c_length`/`c_width`), with and
+    without `--parasitics`, so PDK process-corner sections can move the
+    capacitor. No fixed-value-capacitor warning is raised for a bound class."""
+    path = _write_gds(_make_gf180mcu_mim_layout(), tmp_path / f"{flavour}.gds")
+    out = str(tmp_path / f"{flavour}.spice")
+    report = run_extract(
+        path,
+        "gf180mcu",
+        pdk_variant="gf180mcuA",
+        pdk_root=_make_pdk_install(tmp_path, "gf180mcuA"),
+        output=out,
+        parasitics=parasitics,
+        deck_options={"mim_cap": flavour},
+    )
+
+    card = _capacitor_device_card(out)
+    assert card.startswith("X"), card
+    assert f" {flavour} " in card
+    assert "c_length=" in card and "c_width=" in card
+    assert not any("fixed-value" in w for w in report["warnings"])
+
+
+def test_pdk_parasitics_sky130_mim_writes_subckt_card(tmp_path):
+    """Issue #3090: `--pdk` + `--parasitics` + a sky130 MiM reaches the
+    binding writer (an `X` subcircuit call, not a bare `C` card)."""
+    path = _write_gds(_make_sky130_mim_layout(), tmp_path / "sky130_mim.gds")
+    out = str(tmp_path / "sky130_mim.spice")
+    report = run_extract(
+        path,
+        "sky130",
+        pdk_variant="sky130A",
+        pdk_root=_make_pdk_install(tmp_path, "sky130A"),
+        output=out,
+        parasitics=True,
+    )
+
+    card = _capacitor_device_card(out)
+    assert card.startswith("X"), card
+    assert "sky130_fd_pr__cap_mim_m3_1" in card
+    assert not any("fixed-value" in w for w in report["warnings"])
+
+
+@pytest.mark.parametrize(
+    ("deck_name", "layout_factory"),
+    [
+        ("gf180mcu", _make_gf180mcu_mim_layout),
+        ("sky130", _make_sky130_mim_layout),
+    ],
+)
+def test_fixed_value_capacitor_warns_and_documents_in_header(
+    tmp_path, deck_name, layout_factory
+):
+    """Issue #3090: a capacitor written as a fixed-value `C` card (no
+    `--pdk`) is flagged in one aggregate `warnings[]` line, and under
+    `--parasitics` the same fact lands in the netlist header comment."""
+    path = _write_gds(layout_factory(), tmp_path / f"{deck_name}_fixed.gds")
+    out = str(tmp_path / f"{deck_name}_fixed.spice")
+    report = run_extract(path, deck_name, output=out, parasitics=True)
+
+    notes = [w for w in report["warnings"] if "fixed-value" in w]
+    assert len(notes) == 1, report["warnings"]
+    assert "process corners" in notes[0] and "--pdk" in notes[0]
+
+    header = [
+        line
+        for line in Path(out).read_text().splitlines()
+        if line.startswith("*") and "fixed-value" in line
+    ]
+    assert len(header) == 1, header
+
+    no_parasitics_out = str(tmp_path / f"{deck_name}_fixed_np.spice")
+    run_extract(path, deck_name, output=no_parasitics_out)
+    assert "fixed-value" not in Path(no_parasitics_out).read_text()
+
+
 @pytest.mark.parametrize(
     ("deck_name", "layout_factory"),
     [
@@ -7985,8 +8069,6 @@ def test_unbound_mim_capacitor_netlist_simulates_in_ngspice(tmp_path):
     run_extract(
         path,
         "gf180mcu",
-        pdk_variant="gf180mcuA",
-        pdk_root=_make_pdk_install(tmp_path, "gf180mcuA"),
         output=out,
         parasitics=True,
         deck_options={"mim_cap": flavour},

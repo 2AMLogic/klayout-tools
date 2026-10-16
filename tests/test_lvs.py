@@ -11956,6 +11956,9 @@ def test_build_device_binding_map_derived_fallback_shape():
         "tm9k",
         "tm11k",
         "tm30k",
+        # MiM densities (issue #3090) -- curated in `_CAPACITOR_MODEL_TABLE`.
+        "cap_mim_1f0_m4m5_noshield",
+        "cap_mim_1f5_m4m5_noshield",
         "cap_mim_2f0_m4m5_noshield",
     }
     assert set(build_device_binding_map("sky130")) == {
