@@ -883,7 +883,8 @@ things, in order:
    on this design class is `options.sdf.entries: "interconnect"` (below).
 1. **`environment.sdf.dropped`** — if it is `{}` (or only `timingcheck`,
    `zero_delay_alias_port_interconnect` and
-   `zero_delay_physical_only_interconnect`, none of which can change a
+   `zero_delay_physical_only_interconnect` and
+   `zero_delay_bus_port_source_interconnect`, none of which can change a
    delay), every delay applied and no annotation failed. An
    `iopath_ifnone_edge_modpath` class means the arcs it lists ran with no
    module-path delay. A genuinely failed annotation
@@ -985,24 +986,37 @@ entry population — `"all"` or `"interconnect"` — so a stored report is
 self-describing about which delay population its verdict was measured
 against.
 
-Five `dropped` classes exist today. The first three cannot change a
-simulated delay; the fourth deliberately does — it is the requested
-net-delay-only mode, and the count is what makes that choice honest; the
-fifth cannot change a delay relative to annotating (its entries have no
-modpath to land on) but marks arcs that run with no module-path delay, so it
-also names them in `arcs`:
+Seven `dropped` classes exist today. The first four (`timingcheck` and the
+three zero-delay `INTERCONNECT` classes) cannot change a simulated delay;
+`iopath_interconnect_only` deliberately does — it is the requested
+net-delay-only mode, and the count is what makes that choice honest; the two
+`iopath_*_modpath` classes cannot change a delay relative to annotating (their
+entries have no modpath to land on) but mark arcs that run with no module-path
+delay, so they also name them in `arcs`:
 
 | Class | Source | Meaning |
 |---|---|---|
 | `timingcheck` | Transcript scan (issue #1102) | Icarus implements SDF delays but not SDF `TIMINGCHECK`; every `TIMINGCHECK` section in the SDF was dropped by the simulator. |
 | `zero_delay_alias_port_interconnect` | SDF-text normalization (issue #2285) | An `INTERCONNECT` entry whose destination is a top-level port bit the netlist drives through an `assign` alias, carrying zero delay at every corner, was removed before annotation because Icarus cannot insert an intermodpath across that join. |
 | `zero_delay_physical_only_interconnect` | SDF-text normalization (issue #2363) | An `INTERCONNECT` entry from a bit-selected top-level input port onto a pin of a physical-only instance (a router-inserted antenna diode, or any filler/tapcell whose model has no `specify` block and no output pin), carrying zero delay at every corner, was removed before annotation because Icarus cannot insert an intermodpath onto a modpath-free destination. |
+| `zero_delay_bus_port_source_interconnect` | SDF-text normalization (issue #2984) | An `INTERCONNECT` entry whose source is a bit-selected top-level **input** port (`ui_in[3] u1.A`), whatever its destination, carrying zero delay at every corner, was removed before annotation because Icarus can fail to insert an intermodpath from such a source (`Could not find intermodpath!`). Entries the `zero_delay_physical_only_interconnect` pass already removed are not counted again. A non-zero entry of the same shape is left in place and still fails the run. |
 | `iopath_interconnect_only` | Requested mode (issue #2364) | The request selected `options.sdf.entries: "interconnect"`, so every non-`INTERCONNECT` delay entry — on a real `write_sdf` output, the `IOPATH` module-path delays — was removed before annotation and counted here. Only ever present on a run that selected the mode. |
 | `iopath_ifnone_edge_modpath` | SDF-text normalization (issue #2885) | An `IOPATH` entry onto a cell arc whose only module paths in the cell's own Verilog model are `ifnone` + edge-sensitive (gf180mcu XOR/XNOR/MUX-select/half-adder-sum arcs) was removed before annotation, because Icarus discards those paths at elaboration and no `IOPATH` can match them. Carries an additional `arcs` list — `{celltype, from, to}` per distinct dropped arc, sorted — naming every arc that ran with no module-path delay. |
 | `iopath_bus_bit_modpath` | SDF-text normalization (issue #2958) | A bit-selected `IOPATH` entry (`IOPATH A_CLK A_DOUT[0]`) onto a bus output that the cell's own Verilog model reaches only through a whole-vector module path (a hard macro's `(A_CLK *> A_DOUT)`) was removed before annotation, because Icarus registers no per-bit modpath. Carries an additional `arcs` list — `{celltype, from, to}` per distinct dropped arc (`to` is the bus, bit-select dropped), sorted. |
 
 New classes may be added; a consumer should treat `dropped` as an open map
 keyed by class name, not as a fixed set of keys.
+
+### Limitation: `value_change` triggers on combinational outputs
+
+Observed by a reporter on Icarus 13.0 (issue #2984; not independently
+reproduced here): with module-path delays active (`options.sdf.entries:
+"all"`), cocotb `value_change` triggers on **combinational** DUT outputs —
+nets driven by annotated gates — did not fire, while the same triggers fire
+in the unannotated run and on flop-driven outputs. If you measure output
+latency from a testbench under SDF, prefer observing registered outputs, and
+treat a `value_change` timeout on a combinational output as possibly this
+limitation rather than a design fault.
 
 ## Run identity — **proposed v1 pilot, NOT yet emitted** (issue #2097)
 
@@ -1397,7 +1411,7 @@ set `options.trace: true`; on such a run it looks like this — the identical
 | `tests` | array\<object\> | One entry per `@cocotb.test()`, in the order cocotb ran them. `status` is `"passed"`/`"failed"`/`"skipped"`; `sim_time_ns`/`real_time_s` are `null` when the simulator did not report them. `sim_time_ns` is read from whichever shape the installed cocotb writes into `results.xml` — the `<testcase sim_time_ns="...">` attribute cocotb 2.0.x emitted, or the `<properties>` block (`sim_time_duration` scaled by the reported `sim_time_unit`, never assumed to be `ns`) cocotb 2.1.0 replaced it with (issue #2592) — so the field carries the same nanosecond value either way. `error_type`/`error_message` are present **only** on `"failed"` entries, taken verbatim from the `<failure>` element's attributes. |
 | `coverage` | object \| null | `null` unless `options.coverage: true`; otherwise `line_pct`/`toggle_pct`/`branch_pct`/`expr_pct` (numbers, or `null` for a category `verilator_coverage` did not report) plus `info_path`, an absolute path to the lcov `.info` artifact. |
 | `trace` | object \| null | `null` unless `options.trace: true` (Epic #1585 Phase 3, issue #1845); otherwise `path` (absolute), `format` (`"vcd"` or `"fst"` — resolved from which engine ran, never a request choice), and `size_bytes` — the same shape [`klt wave build`](wave.md)'s own `trace` field uses. `options.trace: true` with no waveform file produced by the run is exit 1, not a silent `null` (indistinguishable from "not requested" otherwise). |
-| `environment` | object | Reproducibility block: `engine`, `engine_version` (the simulator's own version token, `null` if unresolvable), `cocotb_version`, `results_xml` — the absolute path to the raw evidence this report was derived from, so a stored verdict can be re-checked against it — `test_log` and `build_log` (issue #3013), the absolute paths of the simulator/cocotb console transcript and the build transcript the run wrote (paths only, never inlined; `--format text` prints `test_log:` and, on a failed run, its tail) — and `random_seed` (the effective seed cocotb used, `null` only if `results.xml` lacked the property; see "Reproducibility: `random_seed`"), plus `initial_state` (issue #2998; additive) — `null` unless `options.initial_state` was requested, else the echo described in "Gate-level power-up state" (`mode`, effective `seeds`, `netlist`, `clock`, `state_elements`, `d_nets`, per-seed `runs`) — plus `sdf` (issue #1002) — `null` on an ordinary run, an object on an SDF-annotated one, so an annotated verdict is never mistakable for a zero-delay one from the JSON alone: `file`, `corner`, `annotated: true`, plus `partial` and `dropped` (issue #1102) — `partial` is `true` when anything was dropped, either a benign diagnostic class filtered out of the transcript scan (`timingcheck`) or an `INTERCONNECT` entry normalized away before annotation (`zero_delay_alias_port_interconnect`, issue #2285; `zero_delay_physical_only_interconnect`, issue #2363) or an `IOPATH` entry onto an arc whose only modpaths Icarus discards (`iopath_ifnone_edge_modpath`, issue #2885, whose entry additionally lists the affected `arcs`), and `dropped` names each such class with `{count, reason}`. See "SDF back-annotation" for the full shape. |
+| `environment` | object | Reproducibility block: `engine`, `engine_version` (the simulator's own version token, `null` if unresolvable), `cocotb_version`, `results_xml` — the absolute path to the raw evidence this report was derived from, so a stored verdict can be re-checked against it — `test_log` and `build_log` (issue #3013), the absolute paths of the simulator/cocotb console transcript and the build transcript the run wrote (paths only, never inlined; `--format text` prints `test_log:` and, on a failed run, its tail) — and `random_seed` (the effective seed cocotb used, `null` only if `results.xml` lacked the property; see "Reproducibility: `random_seed`"), plus `initial_state` (issue #2998; additive) — `null` unless `options.initial_state` was requested, else the echo described in "Gate-level power-up state" (`mode`, effective `seeds`, `netlist`, `clock`, `state_elements`, `d_nets`, per-seed `runs`) — plus `sdf` (issue #1002) — `null` on an ordinary run, an object on an SDF-annotated one, so an annotated verdict is never mistakable for a zero-delay one from the JSON alone: `file`, `corner`, `annotated: true`, plus `partial` and `dropped` (issue #1102) — `partial` is `true` when anything was dropped, either a benign diagnostic class filtered out of the transcript scan (`timingcheck`) or an `INTERCONNECT` entry normalized away before annotation (`zero_delay_alias_port_interconnect`, issue #2285; `zero_delay_physical_only_interconnect`, issue #2363; `zero_delay_bus_port_source_interconnect`, issue #2984) or an `IOPATH` entry onto an arc whose only modpaths Icarus discards (`iopath_ifnone_edge_modpath`, issue #2885, whose entry additionally lists the affected `arcs`), and `dropped` names each such class with `{count, reason}`. See "SDF back-annotation" for the full shape. |
 
 There is no shared `provenance` block: this verb's verdict depends on no PDK
 and no rule deck (see `docs/json-contract.md` → "Shared `provenance`

@@ -114,6 +114,17 @@ not `klt --version`, if you need to detect this kind of drift. See
   grows from 234 to 238 rule categories (`--expect-rule-categories 238`); the
   four ids leave the "Not implemented" list. The pinned shipped-cell
   regression needed no new deviation. Additive; no `schema_version` bump.
+- **`options.sdf` drops zero-delay `INTERCONNECT` entries from bit-selected
+  top-level input ports** (issue #2984): an entry such as
+  `INTERCONNECT ui_in[3] u1.A (0.000:0.000:0.000)` whose source is a bus input
+  port bit and whose destination is an ordinary cell made Icarus fail with
+  `Could not find intermodpath!`. Entries whose every `min:typ:max` value is
+  zero are now removed before annotation and counted under the new
+  `environment.sdf.dropped` class `zero_delay_bus_port_source_interconnect`
+  (entries claimed by `zero_delay_physical_only_interconnect` keep that class);
+  non-zero entries of the same shape still fail loudly. Also documents the
+  reported `value_change`-on-combinational-outputs limitation. Additive; no
+  `schema_version` bump.
 - **`klt extract` / `klt pex`: glob and all-nets selectors for
   `--critical-net` / `--parasitics-net`** (issue #2974): new repeatable
   `--critical-net-pattern GLOB` and `--parasitics-net-pattern GLOB`

@@ -118,6 +118,7 @@ klt sim request.json                     # SPICE PVT corner sweep (ngspice), JSO
 klt size request.json                    # gm/Id sizing (single device or coupled diff-pair+mirror+tail), ngspice-scored
 klt yield mc.json --limits spec.json     # MC sample set + spec limits -> yield estimate with CIs, Cpk, sample-size verdict (Rust core)
 klt yield-samples mc.json --negative-control bad.json --format json  # two MC sim reports -> yield sample set carrying a negative control
+klt yield-csv trials.csv --group-by metric --value result --format json  # per-draw MC CSV -> yield sample set (hash-citable)
 klt yield-campaign spec.json             # launch + manage the MC campaign itself, sharded via klt sim, then yield's own pipeline unmodified
 klt yield-sensitivity campaign.json      # campaign parameter draws + output values -> ranked contribution to the spread (Rust core)
 klt yield-threshold records.json         # comparator/latch (stimulus, binary outcome) records -> probit threshold mu/sigma with CIs, per corner

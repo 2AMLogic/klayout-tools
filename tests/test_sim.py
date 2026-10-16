@@ -13655,6 +13655,101 @@ def test_timeout_budget_hint_absent_when_well_inside_budget():
 
 
 # --------------------------------------------------------------------------- #
+# Issue #3041: engine_version pin / unsupported_analysis
+# --------------------------------------------------------------------------- #
+
+
+def _pin_request(tmp_path: Path, **extra) -> Path:
+    _write_body(tmp_path)
+    request = {
+        "netlist": "body.spice",
+        "analysis": {"kind": "tran", "args": "1n 1u"},
+        "measurements": [
+            {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"}
+        ],
+    }
+    request.update(extra)
+    return _write_request(tmp_path, request)
+
+
+def _fake_engine_probe(monkeypatch, banner: str) -> list[list[str]]:
+    """Stub subprocess.run: ``--version`` answers ``banner``; any simulation
+    call is recorded (and fails the test via the returned list)."""
+    sims: list[list[str]] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        if "--version" in cmd:
+            return fake_completed(banner)
+        sims.append(list(cmd))
+        raise AssertionError("no simulation may run")
+
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+    return sims
+
+
+def test_engine_version_unmet_fails_before_simulating(tmp_path, monkeypatch):
+    sims = _fake_engine_probe(monkeypatch, "** ngspice-42 : Circuit level\n")
+    request = _pin_request(tmp_path, engine_version="44")
+    with pytest.raises(
+        sim.SimError, match="requires ngspice 44; .*found ngspice 42"
+    ) as exc:
+        sim.run_sim(str(request), backend="local")
+    assert exc.value.code == "engine_version_unmet"
+    assert sims == []
+
+
+def test_engine_version_pin_unparseable_probe_fails_closed(tmp_path, monkeypatch):
+    _fake_engine_probe(monkeypatch, "no banner here\n")
+    request = _pin_request(tmp_path, engine_version="42")
+    with pytest.raises(sim.SimError, match="no ngspice version") as exc:
+        sim.run_sim(str(request), backend="local")
+    assert exc.value.code == "engine_version_unmet"
+
+
+def test_engine_version_pin_must_be_major_or_major_minor(tmp_path):
+    request = _pin_request(tmp_path, engine_version="v42")
+    with pytest.raises(sim.SimError, match="MAJOR") as exc:
+        sim.run_sim(str(request), backend="local")
+    assert exc.value.code is None
+
+
+def test_engine_version_pin_satisfied_by_major_and_by_major_minor():
+    sim._check_engine_version_pin((42,), "42", "ngspice", where="t")
+    sim._check_engine_version_pin((44, 2), "44.2", "ngspice", where="t")
+    sim._check_engine_version_pin((7,), "7.10.0", "xyce", where="t")
+    with pytest.raises(sim.SimError):
+        sim._check_engine_version_pin((44, 2), "44.1", "ngspice", where="t")
+
+
+def test_engine_version_unset_does_not_probe(tmp_path, monkeypatch):
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        calls.append(list(cmd))
+        if "-b" in cmd:
+            log_path = cmd[cmd.index("-o") + 1]
+            with open(log_path, "w", encoding="utf-8") as handle:
+                handle.write(_HOST_DEFAULT_LOG)
+        return fake_completed("** ngspice-42\n")
+
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+    sim.run_sim(str(_pin_request(tmp_path)), backend="local")
+    assert not any("--version" in c for c in calls)
+
+
+@pytest.mark.parametrize("kind", ["pss", "pnoise", "PAC"])
+def test_periodic_analysis_is_unsupported_analysis(tmp_path, monkeypatch, kind):
+    def must_not_run(*args, **kwargs):
+        raise AssertionError("no engine may run")
+
+    monkeypatch.setattr(sim.subprocess, "run", must_not_run)
+    request = _pin_request(tmp_path, analysis={"kind": kind, "args": "1e6"})
+    with pytest.raises(sim.SimError, match="not supported") as exc:
+        sim.run_sim(str(request), backend="local")
+    assert exc.value.code == "unsupported_analysis"
+
+
+# --------------------------------------------------------------------------- #
 # measurements[].optional / status "absent" (issue #2925)
 # --------------------------------------------------------------------------- #
 
