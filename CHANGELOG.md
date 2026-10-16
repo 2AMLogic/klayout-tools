@@ -218,6 +218,13 @@ not `klt --version`, if you need to detect this kind of drift. See
   dispatched `params` fails the request with `params_unsupported_worker`
   instead of passing at the netlist defaults. `engine: "xyce"` and
   `--op-lint` refuse the axis. See `docs/cli/sim.md` "Corner axes".
+- **`klt pex --measure-command` harnesses can run a nested `klt sim`**
+  (issue #3291): the measure command's environment gains an additive
+  `KLT_OUTDIR_LOCK_INHERIT` (the canonical `$KLT_PEX_ARTIFACTS_DIR`); a `klt`
+  run whose output directory is at or under it is covered by the parent's
+  output-directory ownership, so a default-`-o` `klt sim` no longer fails with
+  `outdir_locked`. Ancestors/siblings are still refused; no `error.code` or
+  `schema_version` change.
 - **`klt signoff` opt-in `require_annotation_complete` for `sta` evidence**
   (issue #3258): an evidence entry citing a `klt sta` envelope may set
   `"require_annotation_complete": true`; every corner carrying a
