@@ -1411,6 +1411,26 @@ def _validate_no_dependent_meas_cards(measurements_spec: list[dict[str, Any]]) -
                 )
 
 
+def _validate_noise_measurement(
+    name: Any, spec: dict[str, Any], has_other_form: bool
+) -> None:
+    """Issue #2938: ``noise`` is a form mutually exclusive with the others."""
+    if has_other_form or name is None:
+        raise SimError(
+            f"measurement '{name}' declares 'noise' together with "
+            "another form (or has no name): declare a 'name' and "
+            "exactly one of 'spice', 'expr', 'crossings', 'cycle_mean', "
+            "'energy' or 'noise'"
+        )
+    sim_noise.validate_noise_spec(name, spec["noise"])
+    if not _EXPR_MEAS_NAME_RE.match(str(name)):
+        raise SimError(
+            f"measurement '{name}' cannot be declared with 'noise': its "
+            "name becomes an ngspice vector name, so it must match "
+            "[A-Za-z_][A-Za-z0-9_]* (no dots, no leading digit)"
+        )
+
+
 def _validate_measurement_forms(measurements_spec: list[dict[str, Any]]) -> None:
     """Validate the *form* of every ``request.measurements[]`` entry: that it
     declares exactly one of ``spice`` (a verbatim top-level ``.meas`` card --
@@ -1512,28 +1532,8 @@ def _validate_measurement_form(spec: dict[str, Any]) -> None:
     has_cycle_mean = sim_cycle_mean.is_cycle_mean(spec)
     has_energy = sim_energy.is_energy(spec)
     if sim_noise.is_noise(spec):
-        # Issue #2938: a fourth, mutually exclusive form.
-        if (
-            has_spice
-            or has_expr
-            or has_crossings
-            or has_cycle_mean
-            or has_energy
-            or name is None
-        ):
-            raise SimError(
-                f"measurement '{name}' declares 'noise' together with "
-                "another form (or has no name): declare a 'name' and "
-                "exactly one of 'spice', 'expr', 'crossings', 'cycle_mean', "
-                "'energy' or 'noise'"
-            )
-        sim_noise.validate_noise_spec(name, spec["noise"])
-        if not _EXPR_MEAS_NAME_RE.match(str(name)):
-            raise SimError(
-                f"measurement '{name}' cannot be declared with 'noise': its "
-                "name becomes an ngspice vector name, so it must match "
-                "[A-Za-z_][A-Za-z0-9_]* (no dots, no leading digit)"
-            )
+        others = has_spice or has_expr or has_crossings or has_cycle_mean or has_energy
+        _validate_noise_measurement(name, spec, others)
         return
     if name is None or not (
         has_spice or has_expr or has_crossings or has_cycle_mean or has_energy
