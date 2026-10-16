@@ -65,6 +65,9 @@ VOLATILE_PROVENANCE_PATHS: frozenset[tuple[str, ...]] = frozenset(
         ("provenance", "klt_version"),
         ("provenance", "klayout_version"),
         ("provenance", "pdk", "version"),
+        # `klt extract`'s additive wall-clock `timing` object (issue #3181):
+        # a measurement of the run, never part of the evidence.
+        ("timing",),
     }
 )
 
@@ -315,6 +318,9 @@ EXTRACT_PATH_ONLY_PATHS: frozenset[tuple[str, ...]] = frozenset(
         ("subcircuit", "path"),
         ("abstracted_cells", LIST_ITEM, "lef_path"),
         ("pdk", "root"),
+        # Run-scoped, not a path: wall-clock measurements of this one run
+        # (issue #3181) -- never part of the result being compared.
+        ("timing",),
     }
 )
 

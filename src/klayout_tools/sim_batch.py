@@ -1120,7 +1120,11 @@ def _validate_batch_pdk(request: dict[str, Any]) -> None:
 
 
 def _resolve_batch_config(
-    request: dict[str, Any], *, corner_count: int, timeout_s: float
+    request: dict[str, Any],
+    *,
+    corner_count: int,
+    timeout_s: float,
+    check_runner: bool = True,
 ) -> BatchConfig:
     """Resolve every ``batch.*`` knob, raising
     :class:`~klayout_tools.sim.SimError` before any S3 write.
@@ -1143,6 +1147,8 @@ def _resolve_batch_config(
     ``runner_version_check: "enforce"`` a known mismatch raises
     ``batch_runner_version_mismatch`` here, so neither ``klt sim`` (one job
     or every shard) nor ``klt netlist`` uploads or launches anything.
+    ``check_runner=False`` skips that last comparison for a read-only caller
+    (``klt sim --job-status``, issue #3073) that submits nothing.
     """
     from .sim import SimError
 
@@ -1208,9 +1214,10 @@ def _resolve_batch_config(
     # Issue #2851: compare the runner klt the AMI manifest publishes with
     # this client, once per request (so once for every shard of a
     # `hosts > 1` run), before any S3 write or launch.
-    assessment = _assess_published_runner(request, config)
-    _enforce_published_runner_version(assessment)
-    _enforce_published_runner_features(request, assessment)
+    if check_runner:
+        assessment = _assess_published_runner(request, config)
+        _enforce_published_runner_version(assessment)
+        _enforce_published_runner_features(request, assessment)
     return config
 
 
@@ -2647,6 +2654,45 @@ def _poll_timeout_corners(
     ]
 
 
+def _prepare_batch_job_spec(
+    request: dict[str, Any],
+    netlist_path: str,
+    *,
+    config: BatchConfig,
+    corner_count: int,
+    timeout_s: float,
+    keep_artifacts: bool,
+    want_waveforms: bool,
+    explicit_points: list[CornerPoint] | None = None,
+    request_dir: str | None = None,
+) -> BatchJobSpec:
+    """Build one job's :class:`BatchJobSpec` from the client's request --
+    the shared front half of :func:`_run_batch_job` and the submit-only path
+    (:mod:`klayout_tools.sim_batch_async`). Uploads nothing."""
+    remote_request = _build_remote_request(
+        request,
+        timeout_s=timeout_s,
+        keep_artifacts=keep_artifacts,
+        want_waveforms=want_waveforms,
+        explicit_points=explicit_points,
+    )
+    # The `batch` block is submit-side configuration (bucket, profile, the
+    # launch script's path on *this* host); it is meaningless on the job
+    # instance, which runs `local-parallel`. `_build_remote_request` drops
+    # `remote` for the same reason and is reused verbatim otherwise.
+    remote_request.pop("batch", None)
+
+    return _build_batch_job_spec(
+        remote_request,
+        netlist_path,
+        corner_count=corner_count,
+        timeout_s=timeout_s,
+        keep_artifacts=keep_artifacts,
+        request_dir=request_dir,
+        version_check=config.runner_version_check,
+    )
+
+
 def _run_batch_job(
     *,
     config: BatchConfig,
@@ -2681,27 +2727,16 @@ def _run_batch_job(
     transport failure (a failed upload/launch/collect, an unreadable report,
     an undocumented status state) raises :class:`BatchError`.
     """
-    remote_request = _build_remote_request(
+    spec = _prepare_batch_job_spec(
         request,
+        netlist_path,
+        config=config,
+        corner_count=len(corner_points),
         timeout_s=timeout_s,
         keep_artifacts=keep_artifacts,
         want_waveforms=want_waveforms,
         explicit_points=explicit_points,
-    )
-    # The `batch` block is submit-side configuration (bucket, profile, the
-    # launch script's path on *this* host); it is meaningless on the job
-    # instance, which runs `local-parallel`. `_build_remote_request` drops
-    # `remote` for the same reason and is reused verbatim otherwise.
-    remote_request.pop("batch", None)
-
-    spec = _build_batch_job_spec(
-        remote_request,
-        netlist_path,
-        corner_count=len(corner_points),
-        timeout_s=timeout_s,
-        keep_artifacts=keep_artifacts,
         request_dir=request_dir,
-        version_check=config.runner_version_check,
     )
     submit_job(config, job_id, spec, runner=runner)
     launch_job(config, job_id, runner=runner)
