@@ -4600,6 +4600,41 @@ injects itself and let `klt sim` own the draws and report them:
 Worked example: `examples/sim/request-monte-carlo-injected.json` (with
 `testbench-mc-injected.spice`).
 
+## Retrying a non-converged unit (`options.retry_on_convergence_error`)
+
+Issue #2973. One unit of a large `monte_carlo` request can end `status: "error"`
+from a purely numerical failure (ngspice "time step too small"). Resubmitting the
+whole request is expensive and the rest of the population is already good, so a
+request can opt into a per-unit retry:
+
+```json
+{ "options": { "retry_on_convergence_error": { "max_attempts": 1, "reltol": 0.003, "method": "gear" } } }
+```
+
+`true` is shorthand for the object above; `false`/absent (the default) leaves
+every request and report unchanged. Object keys: `max_attempts` (integer >= 1),
+`reltol` (number in `(0, 1)`), `method` (`"trap"` or `"gear"`). An unknown key or
+a bad value is refused with an application error before any unit runs.
+
+- **Trigger.** Only a unit whose first attempt is `status: "error"` *because of* a
+  `nonconvergence` diagnostic (plus the missing-measurement / missing-vector
+  errors that follow from it). `singular_matrix`, `netlist`, `timeout`,
+  `engine_killed` and every other error class are never retried, and a
+  `nonconvergence` ngspice recovered from by itself (a `pass`) is not either.
+- **Same draw.** The retry re-runs the same unit, so `sample_index` and
+  `monte_carlo.{seed,process_seed,mismatch_seed}` are unchanged; only an extra
+  `.options reltol=<reltol> method=<method>` card is added to the deck.
+- **Recorded.** The returned `corners[]` entry carries a `convergence_retry`
+  diagnostic naming the card and whether the retry recovered; its `runtime_s` is
+  the total across attempts. A recovered unit contributes to the Monte Carlo
+  statistics and `coverage` like any other sample; one that still fails stays
+  `error`.
+- **Echo.** The resolved policy is reported as
+  `environment.retry_on_convergence_error` (only when set).
+- **Backends.** `local`/`local-parallel` apply it directly. `remote`/`batch`
+  forward the request's `options` verbatim, so the runner applies it itself (the
+  runner's `klt` must support the option). `engine: "xyce"` refuses it.
+
 ## Monte Carlo statistics
 
 A `monte_carlo` request additionally reduces its samples to a **statistical
@@ -4972,6 +5007,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `batch_job_timeout` | The corner never completed: the `batch` job exceeded its own `timeout_seconds` on the fleet instance and was killed by 2am's harness. |
 | `batch_poll_timeout` | The corner's result was never observed: `batch.poll_timeout_s` elapsed with the job still non-terminal, or the job never published a `status.json` within 1800s (the message says it never started). The job may still be running on the fleet — this is what the client knows, not a claim the run failed. |
 | `timeout_budget_unreachable` | The corner never started: `options.fail_fast_probe`'s calibration probe measured a rate implying `options.timeout_s` cannot plausibly cover the full analysis window, so the whole grid was aborted before dispatch (issue #1694). Carries additional `reached_s`/`fraction` fields — an *estimate* of how far this corner would have gotten, derived from the measured rate, not a real per-corner recovery. See "Timeout-budget preflight" above. |
+| `convergence_retry` | The record of an opt-in retry (`options.retry_on_convergence_error`, issue #2973): the unit's first attempt ended in a `nonconvergence` error, so it was re-run with tighter solver options. The message names the `.options` card used and whether the retry recovered. `severity: "warning"`; informational, it never changes the unit's status. See "Retrying a non-converged unit" below. |
 | `inconclusive` | **Emitted, never selectable.** The marker this command attaches to a corner it graded `status: "inconclusive"` because `options.fail_on_diagnostic` named a code the corner emitted (issue #2492) — the message names those code(s), so the report says *why* a corner whose numbers look fine is not being reported as a pass. `severity: "warning"`. See "Grading a recovered diagnostic as inconclusive" below. |
 | `implausible_solution` | **Emitted, never selectable.** The marker for the *other* route to `status: "inconclusive"`: a measurement's value fell outside its declared `options.node_voltage_bounds`/`measurements[].plausible_range` (issue #2493); see "Plausibility bounds" above. `severity: "warning"`, never `"error"`. |
 
