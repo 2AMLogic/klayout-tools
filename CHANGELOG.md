@@ -114,6 +114,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   unchanged. `klt pex` forwards the `--critical-net-*` forms. Documented
   that the request document already accepts a list for exact names. See
   `docs/cli/extract.md`.
+- **`klt drc --deck sky130`: `nwell.9` and `coverage.unmodeled_rules`**
+  (issue #3031): new rule `nwell.enclosed.hvi.1` (runset `nwell.9`, HVnwell
+  must be enclosed by `hvi` 75/20; only `hvi` of the runset's
+  `hvi|rdl|uhvi|vhvi` marker is read). New additive, deck-static
+  `coverage.unmodeled_rules` lists official runset ids the curated deck does
+  not transcribe (sky130: `m1.5`, `m2.5`, `via.5a`, `via2.5`, `via3.5`, the
+  two-adjacent-edges enclosure refinements) so a clean verdict is not read as
+  full coverage; empty for decks that declare none. Curated engine only.
+
 - **`klt sim` `measurements[].cycle_mean`: a mean over whole reference
   cycles** (issue #2947): a fourth measurement form
   `{signal, align, level, cycles, edge?, from?}` (`tran` only) returns the
