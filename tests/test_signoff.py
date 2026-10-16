@@ -14583,3 +14583,148 @@ def test_sta_schema_v1_foreign_absolute_path_is_not_re_rooted(tmp_path):
 
     assert item["status"] == "met"
     assert item["citation"]["input_verified"] is None
+
+
+# --------------------------------------------------------------------------- #
+# Item 5: several citations + declared spec rows (issue #2959)
+# --------------------------------------------------------------------------- #
+
+
+def _item5(evidence, spec_rows=None, **overrides) -> dict:
+    manifest = _manifest(evidence=evidence, **overrides)
+    if spec_rows is not None:
+        manifest["spec_rows"] = {"5": spec_rows}
+    return next(i for i in build_tier_report(manifest)["items"] if i["id"] == 5)
+
+
+def test_item5_one_passing_one_failing_citation_is_unmet_and_names_the_failure(
+    tmp_path,
+):
+    good = _write(tmp_path, "good.json", SIM_PASS_ENVELOPE)
+    bad = _write(tmp_path, "bad.json", SIM_FAIL_ENVELOPE)
+
+    item = _item5({"5": [good, bad]})
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "check_failed"
+    assert item["detail"]["failed_citations"] == [bad]
+    assert [c["status"] for c in item["citations_graded"]] == ["met", "unmet"]
+
+
+def test_item5_multiple_passing_citations_without_rows_is_met(tmp_path):
+    a = _write(tmp_path, "a.json", SIM_PASS_ENVELOPE)
+    b = _write(tmp_path, "b.json", SIM_PASS_ENVELOPE)
+
+    item = _item5({"5": [a, {"file": b}]})
+
+    assert item["status"] == "met"
+    assert item["citation"]["kind"] == "sim"
+    assert len(item["citations"]) == 2
+
+
+def test_item5_declared_rows_with_one_uncovered_is_partial_coverage(tmp_path):
+    a = _write(tmp_path, "a.json", SIM_PASS_ENVELOPE)
+    b = _write(tmp_path, "b.json", SIM_PASS_ENVELOPE)
+    rows = [{"id": "tdec"}, {"id": "zin"}, {"id": "mc"}]
+
+    item = _item5(
+        {"5": [{"file": a, "rows": ["tdec"]}, {"file": b, "rows": ["zin"]}]}, rows
+    )
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "partial_coverage"
+    assert item["detail"]["uncovered_rows"] == ["mc"]
+    assert item["detail"]["failed_rows"] == []
+    assert item["detail"]["declared_gaps"] == []
+
+
+def test_item5_declared_gap_row_is_reported_apart_and_never_met(tmp_path):
+    a = _write(tmp_path, "a.json", SIM_PASS_ENVELOPE)
+    rows = [{"id": "tdec"}, {"id": "zin", "gap": "multi-solve reduction"}]
+
+    item = _item5({"5": [{"file": a, "rows": ["tdec"]}]}, rows)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "partial_coverage"
+    assert item["detail"]["uncovered_rows"] == []
+    assert item["detail"]["declared_gaps"] == [
+        {"id": "zin", "gap": "multi-solve reduction"}
+    ]
+
+
+def test_item5_all_declared_rows_covered_is_met_with_row_coverage(tmp_path):
+    a = _write(tmp_path, "a.json", SIM_PASS_ENVELOPE)
+
+    item = _item5(
+        {"5": [{"file": a, "rows": ["tdec", "zin"]}]}, [{"id": "tdec"}, {"id": "zin"}]
+    )
+
+    assert item["status"] == "met"
+    assert item["row_coverage"]["uncovered_rows"] == []
+
+
+def test_item5_failing_citation_rows_are_listed_as_failed_rows(tmp_path):
+    a = _write(tmp_path, "a.json", SIM_PASS_ENVELOPE)
+    bad = _write(tmp_path, "bad.json", SIM_FAIL_ENVELOPE)
+
+    item = _item5(
+        {"5": [{"file": a, "rows": ["tdec"]}, {"file": bad, "rows": ["zin"]}]},
+        [{"id": "tdec"}, {"id": "zin"}],
+    )
+
+    assert item["status"] == "unmet"
+    assert item["detail"]["failed_rows"] == ["zin"]
+    assert item["detail"]["uncovered_rows"] == []
+
+
+@pytest.mark.parametrize(
+    "entry, rows",
+    [
+        ([], None),
+        (["a.json", 42], None),
+        ([{"file": "a.json", "rows": "tdec"}], None),
+        ([{"file": "a.json", "rows": ["undeclared"]}], [{"id": "tdec"}]),
+        ([{"file": "a.json", "rows": ["zin"]}], [{"id": "zin", "gap": "no bench"}]),
+        (["a.json"], [{"id": "x"}, {"id": "x"}]),
+    ],
+)
+def test_item5_malformed_list_degrades_only_item_5(tmp_path, entry, rows):
+    good = _write(tmp_path, "good.json", SIM_PASS_ENVELOPE)
+    manifest = _manifest(evidence={"5": entry, "8": good})
+    if rows is not None:
+        manifest["spec_rows"] = {"5": rows}
+
+    report = build_tier_report(manifest)
+
+    item = next(i for i in report["items"] if i["id"] == 5)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "invalid_evidence"
+    assert {i["id"] for i in report["items"] if i["tier"] == "T1"} >= {5, 8}
+
+
+def test_item5_stale_content_hash_on_one_member_is_unmet(tmp_path):
+    good = _write(tmp_path, "good.json", SIM_PASS_ENVELOPE)
+    other = _write(tmp_path, "other.json", SIM_PASS_ENVELOPE)
+
+    item = _item5({"5": [good, {"file": other, "content_hash": "sha256:stale"}]})
+
+    assert item["status"] == "unmet"
+    assert item["detail"]["failed_citations"] == [other]
+
+
+def test_item5_single_citation_report_is_unchanged(tmp_path):
+    sim = _write(tmp_path, "sim.json", SIM_PASS_ENVELOPE)
+
+    item = _item5({"5": sim})
+
+    assert item["status"] == "met"
+    assert "citations" not in item
+    assert "citations_graded" not in item
+    assert "row_coverage" not in item
+
+
+def test_item5_list_in_another_item_is_still_invalid(tmp_path):
+    sim = _write(tmp_path, "sim.json", SIM_PASS_ENVELOPE)
+    report = build_tier_report(_manifest(evidence={"8": [sim]}))
+    item_8 = next(i for i in report["items"] if i["id"] == 8)
+    assert item_8["reason"] == "invalid_evidence"

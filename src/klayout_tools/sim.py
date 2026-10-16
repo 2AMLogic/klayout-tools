@@ -1244,6 +1244,14 @@ def _validate_expr_body(name: Any, expr: Any) -> None:
             ".control block, so a newline would split it into a "
             "separate control command -- use a single-line expression"
         )
+    if "<" in expr or ">" in expr:
+        raise SimError(
+            f"measurement '{name}' has a bare '<' or '>' in 'expr': in "
+            "ngspice's control language these are I/O redirection, not "
+            "comparisons, so the measurement would produce no value (and "
+            "stray files) -- spell comparisons gt / lt / ge / le / eq / ne, "
+            "e.g. `(v(a) lt v(b))*v(a)`"
+        )
 
 
 def _validate_expr_names_unique(measurements_spec: list[dict[str, Any]]) -> None:
@@ -5479,13 +5487,21 @@ def _run_corner(
         "waveform": None,
         "deck": None,
     }
+    # Additive (issue #3006): only for a `noise` corner whose rawfile parsed.
+    noise_fields: dict[str, str] = {}
     if keep_artifacts:
         if os.path.isfile(log_path):
             artifacts["log"] = log_path
         if raw_path is not None and os.path.isfile(raw_path):
             artifacts["raw"] = raw_path
             try:
-                artifacts["waveform"] = _parse_and_persist_waveform(raw_path)
+                waveform_path = _parse_and_persist_waveform(raw_path)
+                artifacts["waveform"] = waveform_path
+                if analysis.get("kind") == "noise":
+                    with open(waveform_path, encoding="utf-8") as fh:
+                        noise_fields["noise_representation"] = noise_representation(
+                            json.load(fh)
+                        )
             except (SimError, ValueError) as exc:
                 # Generic defensive catch, not expected in normal operation:
                 # `parse_ascii_rawfile` understands both plain-real (`tran`/
@@ -5540,6 +5556,7 @@ def _run_corner(
         "measurements": measurement_results,
         "diagnostics": diagnostics,
         "artifacts": artifacts,
+        **noise_fields,
         "monte_carlo": monte_carlo,
         # Additive/optional (issue #2482): `steps` -- per-step outcomes --
         # only for an `analysis_steps[]` request; empty for every other one.
@@ -7794,6 +7811,23 @@ def parse_ascii_rawfile(raw_path: str) -> dict[str, Any]:
             current = []
 
     return {"plotname": plotname, "variables": variables, "points": points}
+
+
+def noise_representation(waveform: dict[str, Any]) -> str:
+    """``"power"`` or ``"amplitude"`` for a parsed ``noise`` waveform dict
+    (issue #3006).
+
+    ngspice's ``sqrnoise`` squares every noise output vector. The rawfile
+    records which mode produced it: the integrated plot is named
+    ``Integrated Noise`` with ``voltage``/``current`` variables, or
+    ``Integrated Noise - V^2 or A^2`` with ``voltage^2``/``current^2`` ones.
+    """
+    if str(waveform.get("plotname", "")).strip().endswith("V^2 or A^2"):
+        return "power"
+    for var in waveform.get("variables", []):
+        if str(var.get("type", "")).endswith("^2"):
+            return "power"
+    return "amplitude"
 
 
 def _parse_and_persist_waveform(raw_path: str) -> str:

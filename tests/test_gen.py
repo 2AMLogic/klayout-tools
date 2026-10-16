@@ -3417,6 +3417,7 @@ def test_res_array_extracts_as_resistor_not_a_short(
 _SKY130_PSDM_LAYER = (94, 20)  # P+ implant, shared by res_high_po/res_xhigh_po
 _SKY130_RPM_LAYER = (86, 20)  # 300 ohm precision-resistor mask -> res_high_po
 _SKY130_URPM_LAYER = (79, 20)  # 2 kohm precision-resistor mask -> res_xhigh_po
+_SKY130_NPC_LAYER = (95, 20)  # Magic's xhrpoly/uhrpoly need it (issue #3077)
 
 
 def _layers_present(gds_path):
@@ -3447,6 +3448,7 @@ def test_res_array_sky130_default_flavor_draws_no_implant_or_block(tmp_path, pdk
     assert _SKY130_PSDM_LAYER not in present
     assert _SKY130_RPM_LAYER not in present
     assert _SKY130_URPM_LAYER not in present
+    assert _SKY130_NPC_LAYER not in present
 
 
 def test_res_array_sky130_default_matches_explicit_generic(tmp_path, pdk_root):
@@ -3491,6 +3493,7 @@ def test_res_array_sky130_flavor_high_draws_psdm_and_rpm(tmp_path, pdk_root):
     assert _SKY130_PSDM_LAYER in present
     assert _SKY130_RPM_LAYER in present
     assert _SKY130_URPM_LAYER not in present
+    assert _SKY130_NPC_LAYER in present  # issue #3077
 
 
 def test_res_array_sky130_flavor_xhigh_draws_psdm_and_urpm(tmp_path, pdk_root):
@@ -3510,6 +3513,7 @@ def test_res_array_sky130_flavor_xhigh_draws_psdm_and_urpm(tmp_path, pdk_root):
     assert _SKY130_PSDM_LAYER in present
     assert _SKY130_URPM_LAYER in present
     assert _SKY130_RPM_LAYER not in present
+    assert _SKY130_NPC_LAYER in present  # issue #3077
 
 
 def test_res_array_invalid_flavor_rejected(tmp_path, pdk_root):
