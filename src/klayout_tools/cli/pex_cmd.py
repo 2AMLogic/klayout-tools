@@ -26,6 +26,7 @@ docs/cli/sim.md's "Exit codes" section.)
 
 import argparse
 import shlex
+import sys
 
 from ..env_provenance import render_path_field
 from ..output_lock import OutputLockError
@@ -109,6 +110,9 @@ def run(args: argparse.Namespace) -> int:
             # for one named net's Phase 1/2 lumped-RC/coupling-C value.
             # `None` for all four when the flags were never given,
             # unchanged from every call site that predates them.
+            # `--parasitic-variant` (issue #3056): `None` when the flag was
+            # never given, unchanged from every call site that predates it.
+            parasitic_variants=args.parasitic_variants,
             mom_rlc_net=args.mom_rlc_net,
             mom_rlc_resistance_ohm=args.mom_rlc_resistance_ohm,
             mom_rlc_capacitance_ff=args.mom_rlc_capacitance_ff,
@@ -126,6 +130,10 @@ def run(args: argparse.Namespace) -> int:
             # when the flag was never given, unchanged from every call site
             # that predates it.
             flatten_schematic=args.flatten_schematic,
+            # `--device-only-leg` (issue #3298): a parasitic-free third leg
+            # splitting `delta[]` into representation and parasitic parts.
+            # `False` when the flag was never given.
+            device_only_leg=args.device_only_leg,
         )
     except PexError as exc:
         # Issue #2889: a classified error (today: `schematic_flatten_*`)
@@ -138,10 +146,30 @@ def run(args: argparse.Namespace) -> int:
     emit_success(report, args.format, _print_text)
 
     if report["status"] in {"error", "not_checked"}:
+        summary = _errored_rows_summary(report)
+        if summary:
+            print(summary, file=sys.stderr)
         return EXIT_ROW_ERRORED
     if report["status"] == "fail":
         return EXIT_ROW_FAILED
     return EXIT_PASS
+
+
+def _errored_rows_summary(report: dict) -> str | None:
+    """One stderr line for a run that exited 4 on errored ``delta[]`` rows
+    (issue #3062): the count, the first distinct cause and its stage -- so
+    the cause is visible without opening the JSON. ``None`` when no row
+    carries an ``error`` object."""
+    errored = [row for row in report.get("delta", []) if row.get("error")]
+    if not errored:
+        return None
+    first = errored[0]["error"]
+    return (
+        f"klt pex: {len(errored)} of {len(report['delta'])} delta rows errored; "
+        f"first cause ({first['side']} side, stage {first['stage']}"
+        + (f", {first['code']}" if first.get("code") else "")
+        + f"): {' '.join(str(first['message']).split())}"
+    )
 
 
 def _parse_measure_command(raw: str | None) -> list[str] | None:
@@ -198,6 +226,34 @@ def _print_schematic_flatten(block: dict | None) -> None:
     )
 
 
+def _print_device_only_leg(report: dict) -> None:
+    """One ``device_only_netlist:`` line (issue #3298), or nothing when
+    ``--device-only-leg`` was not given."""
+    if "device_only_netlist" not in report:
+        return
+    print(
+        f"device_only_netlist: {render_path_field(report['device_only_netlist'])}  "
+        f"device_cards={report['device_card_count']}  "
+        f"match={report['device_cards_match']}"
+    )
+
+
+def _device_only_desc(row: dict) -> str:
+    """The ``--device-only-leg`` split of one delta row (issue #3298), or
+    nothing for a row that carries none."""
+    if "device_only_value" not in row:
+        return ""
+
+    def pct(value: float | None) -> str:
+        return f"{value:+.3f}%" if value is not None else "-"
+
+    return (
+        f"  device_only={row['device_only_value']!r}  "
+        f"representation={pct(row['representation_delta_pct'])}  "
+        f"parasitic={pct(row['parasitic_delta_pct'])}"
+    )
+
+
 def _print_text(report: dict) -> None:
     # Issue #1261: `layout`/`netlist`/`reference_netlist` are the
     # `{path, scope}` shape `env_provenance.repo_relative_path` defines --
@@ -209,6 +265,8 @@ def _print_text(report: dict) -> None:
     print(f"reference_netlist: {render_path_field(report['reference_netlist'])}")
     # Additive (issue #2889): only printed when --flatten-schematic was given.
     _print_schematic_flatten(report.get("schematic_flatten"))
+    # Additive (issue #3298): only printed when --device-only-leg was given.
+    _print_device_only_leg(report)
     print(f"status: {report['status']}")
     print(
         f"corners: {report['corner_count']}  "
@@ -286,4 +344,5 @@ def _print_text(report: dict) -> None:
             f"  {row['spec_row']} @ {row['corner_id']}  [{row['status']}]  "
             f"schematic={row['schematic_value']!r}  "
             f"extracted={row['extracted_value']!r}  delta={delta_desc}"
+            + _device_only_desc(row)
         )
