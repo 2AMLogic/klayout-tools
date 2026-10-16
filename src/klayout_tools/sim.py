@@ -89,7 +89,14 @@ import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import Any, NamedTuple
 
-from . import env_provenance, output_lock, sim_crossings, sim_decks, sim_steps
+from . import (
+    env_provenance,
+    output_lock,
+    sim_crossings,
+    sim_cycle_mean,
+    sim_decks,
+    sim_steps,
+)
 
 #: `remote_fleet`/`remote_transport`/`RemoteLauncher`/`RemoteLaunchError` are
 #: not called directly from this module's own code any more (that code moved
@@ -1077,6 +1084,8 @@ def _resolve_analysis_and_measurements(
             )
     # Issue #2868: a crossings series is a transient-time quantity.
     sim_crossings.validate_crossings_context(measurements_spec, analysis)
+    # Issue #2947: so is a cycle-aligned mean.
+    sim_cycle_mean.validate_cycle_mean_context(measurements_spec, analysis)
     return analysis, measurements_spec
 
 
@@ -1201,13 +1210,35 @@ def _validate_measurement_form(spec: dict[str, Any]) -> None:
     has_spice = spec.get("spice") is not None
     has_expr = spec.get("expr") is not None
     has_crossings = sim_crossings.is_crossings(spec)
-    if name is None or not (has_spice or has_expr or has_crossings):
+    has_cycle_mean = sim_cycle_mean.is_cycle_mean(spec)
+    if name is None or not (has_spice or has_expr or has_crossings or has_cycle_mean):
         raise SimError(
             "each request.measurements[] entry requires 'name' and "
             "exactly one of 'spice' (a verbatim .meas card), 'expr' "
             "(an ngspice expression evaluated after the analysis) or "
-            "'crossings' (a threshold-crossing time series)"
+            "'crossings' (a threshold-crossing time series) or "
+            "'cycle_mean' (a mean over whole reference cycles)"
         )
+    if has_cycle_mean:
+        # Issue #2947: a fourth, mutually exclusive form.
+        others = [
+            form
+            for form, present in (
+                ("spice", has_spice),
+                ("expr", has_expr),
+                ("crossings", has_crossings),
+            )
+            if present
+        ]
+        if others:
+            raise SimError(
+                f"measurement '{name}' declares 'cycle_mean' together with "
+                f"'{others[0]}': they are alternative forms of a measurement "
+                "-- declare exactly one (use a separate measurements[] entry "
+                "for the other)"
+            )
+        sim_cycle_mean.validate_cycle_mean_spec(name, spec["cycle_mean"])
+        return
     if has_crossings:
         # Issue #2868: a third, mutually exclusive form.
         if has_spice or has_expr:
@@ -2187,6 +2218,9 @@ def _run_sim_corners(
         analysis_steps_declared=sim_steps.is_steps_analysis(analysis),
         crossings_declared=bool(
             sim_crossings.crossings_measurements(measurements_spec)
+        ),
+        cycle_mean_declared=bool(
+            sim_cycle_mean.cycle_mean_measurements(measurements_spec)
         ),
     )
     monte_carlo_info: dict[str, Any] | None = None
@@ -4185,7 +4219,7 @@ class _Checkpoint:
 
 
 def _refuse_xyce_control_block_measurements(
-    *, expr_declared: bool, crossings_declared: bool
+    *, expr_declared: bool, crossings_declared: bool, cycle_mean_declared: bool
 ) -> None:
     """The ``engine: "xyce"`` refusals for measurement forms that exist only
     as commands in klt's generated ngspice ``.control`` block (``expr``,
@@ -4217,6 +4251,14 @@ def _refuse_xyce_control_block_measurements(
             "`.control` block, and the Xyce deck has none; use engine "
             "'ngspice'"
         )
+    if cycle_mean_declared:
+        # Issue #2947: same `.control` let/write boundary as `crossings`.
+        raise SimError(
+            "measurements[].cycle_mean is not supported for engine 'xyce': "
+            "the signals are dumped by ngspice `let`/`write` commands inside "
+            "a `.control` block, and the Xyce deck has none; use engine "
+            "'ngspice'"
+        )
 
 
 def _enforce_xyce_support_boundary(
@@ -4232,6 +4274,7 @@ def _enforce_xyce_support_boundary(
     ngspice_options_declared: bool = False,
     analysis_steps_declared: bool = False,
     crossings_declared: bool = False,
+    cycle_mean_declared: bool = False,
 ) -> None:
     """Refuse the ``engine: "xyce"`` combinations the v1 path does not
     implement (issue #2016) -- up front, with the same clean
@@ -4300,6 +4343,7 @@ def _enforce_xyce_support_boundary(
     _refuse_xyce_control_block_measurements(
         expr_declared=expr_measurements_declared,
         crossings_declared=crossings_declared,
+        cycle_mean_declared=cycle_mean_declared,
     )
     if save_mode_declared:
         # Issue #2732: `save_mode` selects whether klt's generated ngspice
@@ -5598,6 +5642,9 @@ def _run_corner(
     # directory now, before it is cleaned up below -- so the reduced array is
     # what leaves the corner, on every backend, whatever `keep_artifacts` is.
     crossings = sim_crossings.extract_corner_crossings(measurements_spec, corner_dir)
+    cycle_means = sim_cycle_mean.extract_corner_cycle_means(
+        measurements_spec, corner_dir
+    )
     measurement_results, measurement_diagnostics, step_fields = (
         _corner_measurement_results(
             measurement_values,
@@ -5607,6 +5654,7 @@ def _run_corner(
             is_xyce=is_xyce,
             save_mode=save_mode,
             crossings=crossings,
+            cycle_means=cycle_means,
         )
     )
     diagnostics.extend(measurement_diagnostics)
@@ -5799,6 +5847,7 @@ def _corner_measurement_results(
     is_xyce: bool,
     save_mode: str,
     crossings: dict[int, sim_crossings.CrossingsOutcome] | None = None,
+    cycle_means: dict[int, sim_cycle_mean.CycleMeanOutcome] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     """One corner's ``(measurement_results, diagnostics, extra_corner_fields)``
     from its harvested log values.
@@ -5832,6 +5881,13 @@ def _corner_measurement_results(
         if sim_crossings.is_crossings(spec):
             result, extra = _crossings_measurement_result(
                 spec, (crossings or {}).get(position), save_mode=save_mode
+            )
+            measurement_results.append(result)
+            diagnostics.extend(extra)
+            continue
+        if sim_cycle_mean.is_cycle_mean(spec):
+            result, extra = _cycle_mean_measurement_result(
+                spec, (cycle_means or {}).get(position), save_mode=save_mode
             )
             measurement_results.append(result)
             diagnostics.extend(extra)
@@ -5936,6 +5992,62 @@ def _crossings_measurement_result(
         "status": m_status,
         "margin": margin,
         "crossings": outcome.report(),
+    }
+    return result, grading_diagnostics
+
+
+def _cycle_mean_measurement_result(
+    spec: dict[str, Any],
+    outcome: sim_cycle_mean.CycleMeanOutcome | None,
+    *,
+    save_mode: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """One ``cycle_mean`` measurement's response entry (issue #2947).
+
+    ``value`` is the time-weighted mean, graded through
+    :func:`_grade_measurement_value` like any scalar; the window rides the
+    additive ``cycle_mean`` sibling. A failure is ``status: "error"``,
+    ``value: null`` and a ``code: "measurement"`` diagnostic whose message
+    starts with a stable ``[<reason>]`` token (one of
+    :data:`klayout_tools.sim_cycle_mean.ERROR_CODES`), so the existing
+    ``diagnostics[].code`` vocabulary is unchanged."""
+    name = spec["name"]
+    unit = spec.get("unit")
+    if outcome is None or outcome.mean is None:
+        message = (
+            outcome.error
+            if outcome is not None and outcome.error is not None
+            else f"measurement '{name}' produced no cycle_mean value"
+        )
+        reason = (
+            outcome.code
+            if outcome is not None and outcome.code is not None
+            else "cycle_mean_vector_missing"
+        )
+        if save_mode == "netlist" and reason == "cycle_mean_vector_missing":
+            message += SAVE_MODE_NETLIST_NO_VALUE_HINT
+        result = {
+            "name": name,
+            "value": None,
+            "unit": unit,
+            "status": "error",
+            "margin": None,
+        }
+        return result, [
+            {
+                "severity": "error",
+                "code": "measurement",
+                "message": f"[{reason}] {message}",
+            }
+        ]
+    m_status, margin, grading_diagnostics = _grade_measurement_value(spec, outcome.mean)
+    result = {
+        "name": name,
+        "value": outcome.mean,
+        "unit": unit,
+        "status": m_status,
+        "margin": margin,
+        "cycle_mean": outcome.report(),
     }
     return result, grading_diagnostics
 
@@ -6277,6 +6389,11 @@ def _corner_deck_control_lines(
        vector. ``set filetype=ascii`` is emitted before the analysis when
        any are declared (the rawfile reader is ASCII-only). None of this
        appears without a crossings entry.
+    6. Per ``measurements[].cycle_mean`` entry (issue #2947), two ``let``
+       lines and one ``write`` of both vectors
+       (:func:`klayout_tools.sim_cycle_mean.control_lines`), after the
+       crossings lines; same ``set filetype=ascii`` rule. None of this
+       appears without a cycle_mean entry.
 
     An ``analysis_steps[]`` request (issue #2482) replaces step 3's analysis
     and 4's ``expr`` lines with the ordered step sequence
@@ -6297,7 +6414,8 @@ def _corner_deck_control_lines(
         lines.extend(["quit", ".endc"])
         return lines
     crossings_lines = sim_crossings.control_lines(measurements_spec, corner_dir)
-    if raw_path is not None or crossings_lines:
+    cycle_mean_lines = sim_cycle_mean.control_lines(measurements_spec, corner_dir)
+    if raw_path is not None or crossings_lines or cycle_mean_lines:
         lines.append("set filetype=ascii")
     lines.append(f"{analysis['kind']} {analysis['args']}")
     if raw_path is not None:
@@ -6313,6 +6431,7 @@ def _corner_deck_control_lines(
         lines.append(f"let {spec['name']} = {spec['expr']}")
         lines.append(f"print {spec['name']}")
     lines.extend(crossings_lines)
+    lines.extend(cycle_mean_lines)
     lines.append("quit")
     lines.append(".endc")
     return lines

@@ -2419,6 +2419,103 @@ skew"); an older runner refuses the request rather than ignoring it.
 - `engine: "xyce"` (exit 1): the dump is ngspice `.control` commands.
 - Inside `analysis_steps[]` (exit 1): no per-step series is implemented.
 
+## Cycle-aligned mean (`measurements[].cycle_mean`)
+
+Issue [#2947](https://github.com/2AMLogic/klayout-tools/issues/2947). A
+converter or regulator output carries ripple at the switching frequency, so
+its DC level is the mean over a **whole number of periods of a reference
+clock**, starting on one of that clock's edges. A fixed literal window biases
+the mean by up to ripple / cycles-in-window, and the in-deck routes are
+closed: `.meas AVG ... TRIG/TARG` is a syntax error, `FROM=`/`TO=` cannot
+reference an earlier `.meas` result, and an `expr` is a single scalar
+expression. These remain **unsupported**; `cycle_mean` is the supported way:
+
+```json
+{
+  "name": "vout_avg",
+  "unit": "V",
+  "cycle_mean": {
+    "signal": "v(out)",
+    "align": "v(clk)",
+    "level": 0.9,
+    "edge": "rise",
+    "from": "10u",
+    "cycles": 8
+  },
+  "limits": {"min": 1.78, "max": 1.82}
+}
+```
+
+| Key      | Required | Meaning |
+| -------- | -------- | ------- |
+| `signal` | yes      | One-line ngspice vector expression to average (`"v(out)"`, `"i(vdd)"`). |
+| `align`  | yes      | One-line vector expression of the reference whose edges bound the window. |
+| `level`  | yes      | Finite number, in the reference's own unit: the edge threshold. |
+| `edge`   | no       | `"rise"` (default) or `"fall"`. (`"either"` is refused: "one cycle" would be ambiguous.) |
+| `from`   | no       | Earliest allowed window start, in seconds (a number or a SPICE literal such as `"10u"`); default 0. The window starts at the first reference edge at or after it. Named `from` to match `crossings`. |
+| `cycles` | yes      | Integer `>= 1`: the window spans this many reference periods (`cycles + 1` edges). |
+
+`cycle_mean` is a fourth measurement form, mutually exclusive with `spice`,
+`expr` and `crossings` (declaring two is exit 1). It requires `analysis.kind:
+"tran"`, is refused for `engine: "xyce"` and inside `analysis_steps[]`, and
+rejects unknown keys by name. Optional `unit`, `limits`, `plausible_range`
+and `k_sigma` apply to the mean.
+
+### Response
+
+An ordinary `corners[].measurements[]` entry plus one additive member (no
+`schema_version` bump):
+
+```json
+{"name": "vout_avg", "value": 1.7993, "unit": "V", "status": "pass",
+ "margin": 0.0093,
+ "cycle_mean": {"t_start": 1.0e-05, "t_end": 1.8e-05, "cycles_used": 8}}
+```
+
+`value` is the mean, a plain number, so `limits`, `plausible_range`, Monte
+Carlo statistics and coverage need nothing new. `cycle_mean` is present only
+when a mean was computed.
+
+### Averaging method
+
+The simulator's timestep is non-uniform, so a plain sample mean is biased
+toward wherever it took small steps. `klt sim` instead computes the
+**time-weighted (trapezoidal) integral** of the piecewise-linear signal over
+`[t_0, t_N]` divided by `t_N - t_0`, where `t_0 ... t_N` are the first
+`cycles + 1` reference crossings at or after `from`, each **linearly
+interpolated** (same edge finder as `crossings`) and with the signal
+interpolated at those exact times.
+
+### Failure modes
+
+None is a silent number: the entry is `status: "error"`, `value: null`, no
+`cycle_mean` member, plus a `code: "measurement"` diagnostic (the existing
+code; no new `diagnostics[].code` value) whose `message` starts with one of
+these stable reason tokens in brackets, e.g. `[cycle_mean_insufficient_edges] ...`:
+
+| Reason token | Cause |
+| ------------ | ----- |
+| `cycle_mean_vector_missing` | `signal` or `align` did not resolve (unknown node, or dropped by `options.save_mode: "netlist"`), or its rawfile was unreadable. |
+| `cycle_mean_no_reference_crossing` | The reference never crosses `level` (with that `edge`) at or after `from`. |
+| `cycle_mean_insufficient_edges` | Fewer than `cycles + 1` aligned edges remain after `from`. |
+
+### What `klt sim` generates, and why it works off-host
+
+After the analysis (and after any `crossings` lines), each `cycle_mean`
+entry adds
+
+```
+let __klt_cmean_<k>_sig = <signal>
+let __klt_cmean_<k>_ref = <align>
+write <corner_dir>/cycle_mean_<k>.raw __klt_cmean_<k>_sig __klt_cmean_<k>_ref
+```
+
+to the generated `.control` block (plus `set filetype=ascii`). The reduction
+runs inside the corner run, so a `remote`/`batch` worker reports the scalar
+inline with `options.keep_artifacts: false` and no waveform artifact. As with
+`crossings`, the off-host runner must carry this implementation (see
+"Runner/client `klt` version skew").
+
 ## Several solves per corner (`analysis_steps[]`)
 
 The scalar `analysis` runs **one** analysis per corner. Many analog figures of
@@ -4315,7 +4412,7 @@ the *response* echoes back.
 | `monte_carlo.k_sigma`    | number            | Run-wide sigma multiple `k` for the `mean ± k*stddev` limit-window check. Omit for no window check. Must be a non-negative number.                                      |
 | `analysis`               | object            | `kind` (e.g. `"op"`, `"dc"`, `"ac"`, `"tran"`) and `args`, the engine-syntax analysis-card arguments. One analysis per corner. `"op"` is a valid `kind`, but see `measurements[]` below — it cannot be paired with a `.meas op` card; measure an operating-point quantity with `measurements[].expr` instead. Required unless the request declares `analysis_steps` instead; declaring both is an application error (exit 1). |
 | `analysis_steps[]`       | array\<object\>   | Issue #2482. Additive alternative to `analysis`: an ordered, non-empty sequence of named solves run inside each corner's one deck — each step `{name, analysis: {kind, args}, alter?, measurements?}`. With it, the top-level `measurements[]` are **derived** `expr`s over `<step>.<measurement>` results. ngspice only (refused for `engine: "xyce"`); refuses `options.waveforms`/`--plot`. See "Several solves per corner (`analysis_steps[]`)" above for the full rules. |
-| `measurements[]`         | array\<object\>   | `name` (stable response key) plus **exactly one** of `spice` (a verbatim `.meas` card), `expr` (issue #2533 — a single-line ngspice expression evaluated after the analysis inside `klt sim`'s own `.control` block; see "Measurements that are not `.meas` cards" above), or `crossings` (issue #2868 — `{signal, level, edge?, from?, to?, max?}`, a threshold-crossing time series, `tran` only; see "Threshold-crossing time series" above), plus optional `unit`, `limits` (`min`/`max`, either optional), `k_sigma` (per-measurement override of `monte_carlo.k_sigma`), and `plausible_range` (issue #2493 — `min`/`max`, either optional but at least one required; per-measurement plausibility bound, unscoped by `unit`; overrides `options.node_voltage_bounds` when both apply). No `limits` -> reported, never fails; no `plausible_range` (and no applicable `options.node_voltage_bounds`) -> plausibility check never runs, exactly as before this issue. Declaring both `spice` and `expr`, or neither, is an application error (exit 1). `spice`'s declared analysis type must be one ngspice's own `.MEASURE` implements (`dc`/`ac`/`tran`/`sp`) — there is no `.MEASURE OP`; a `.meas op` card is rejected up front (`SimError`), regardless of the request's own `analysis.kind`. `expr` must reduce to a single real scalar, must be one line, must have a name matching `[A-Za-z_][A-Za-z0-9_]*` unique across `measurements[]`, and is refused for `engine: "xyce"`. |
+| `measurements[]`         | array\<object\>   | `name` (stable response key) plus **exactly one** of `spice` (a verbatim `.meas` card), `expr` (issue #2533 — a single-line ngspice expression evaluated after the analysis inside `klt sim`'s own `.control` block; see "Measurements that are not `.meas` cards" above), `crossings` (issue #2868 — `{signal, level, edge?, from?, to?, max?}`, a threshold-crossing time series, `tran` only; see "Threshold-crossing time series" above), or `cycle_mean` (issue #2947 — `{signal, align, level, cycles, edge?, from?}`, a time-weighted mean over whole reference cycles, `tran` only; see "Cycle-aligned mean" above), plus optional `unit`, `limits` (`min`/`max`, either optional), `k_sigma` (per-measurement override of `monte_carlo.k_sigma`), and `plausible_range` (issue #2493 — `min`/`max`, either optional but at least one required; per-measurement plausibility bound, unscoped by `unit`; overrides `options.node_voltage_bounds` when both apply). No `limits` -> reported, never fails; no `plausible_range` (and no applicable `options.node_voltage_bounds`) -> plausibility check never runs, exactly as before this issue. Declaring both `spice` and `expr`, or neither, is an application error (exit 1). `spice`'s declared analysis type must be one ngspice's own `.MEASURE` implements (`dc`/`ac`/`tran`/`sp`) — there is no `.MEASURE OP`; a `.meas op` card is rejected up front (`SimError`), regardless of the request's own `analysis.kind`. `expr` must reduce to a single real scalar, must be one line, must have a name matching `[A-Za-z_][A-Za-z0-9_]*` unique across `measurements[]`, and is refused for `engine: "xyce"`. |
 | `options.node_voltage_bounds` | object       | Issue #2493. Run-wide plausibility default (`min`/`max`, either optional but at least one required) — see "Plausibility bounds" above. **Voltage-scoped**: only auto-applies to a measurement declaring `unit: "V"` that has no own `plausible_range`. Omit for no default (today's behaviour, unchanged). |
 | `options.timeout_s`      | number            | Per-corner wall-clock budget. Defaults to `120`. Exceeding it kills the process and yields an `error`-status corner.                                                    |
 | `options.keep_artifacts` | boolean           | Retain per-corner logs/rawfiles on disk under `--outdir` (or its default) and reference them from the response. Defaults to `false`.                                   |
@@ -4505,7 +4602,7 @@ corner-sweep rollup fields above are declared.
 | `engine_exit_code` | integer \| null | Additive (issue #2848): the simulator process's exit code (`0` or nonzero). `null` when the engine was killed by a signal, when the harness's own `timeout` ended it, when it never launched, and for corners that never ran (`budget_exceeded`, `orphaned`, `lost_shard`, …). A nonzero exit alone does not change `status`. Rides in `report.json` unchanged on `--backend batch`/`remote`. |
 | `noise_representation` | string | Additive (issue #3006), `noise` corners only: `"power"` when the rawfile's integrated-noise plot is squared (`Integrated Noise - V^2 or A^2`, `voltage^2` variables — ngspice `sqrnoise` set), else `"amplitude"`. Omitted for other analyses and when no rawfile was parsed (needs `options.waveforms`/`keep_artifacts`). No `schema_version` bump. |
 | `engine_killed_by_signal` | string \| null | Additive (issue #2848): the signal name (e.g. `"SIGKILL"`) when the engine process was killed by a signal the harness did not send; such a corner also carries an `engine_killed` error diagnostic. `null` otherwise, including on a harness `timeout`. |
-| `measurements[]` | array\<object\>  | `name`, `value` (number, or `null` when unextractable), `unit`, `status` (`"pass"`/`"fail"`/`"error"`, plus `"inconclusive"` when this value fell outside its declared plausibility bound — issue #2493), `margin` (`null` on that `"inconclusive"` path — `limits` never ran). An `options.fail_on_diagnostic` disqualification (issue #2492) leaves each measurement's own `status` alone — it applies to the whole corner — so a `pass` measurement inside an `inconclusive` corner is expected, and is exactly what the corner's marker diagnostic explains. Additive/optional (issue #2482, `analysis_steps[]` requests only): a step-scoped entry also carries `step` (its source step's name; its `name` is `<step>.<measurement>`), and any entry computed from other results carries `derived_from` (the `name`s of its inputs, in first-reference order). Absent for every scalar-`analysis` request. Additive/optional (issue #2868): an entry declared with `crossings` carries `value` = the crossing count and a `crossings` object `{times, edges, truncated}` (see "Threshold-crossing time series" above); absent on every other entry and when no series was extracted. |
+| `measurements[]` | array\<object\>  | `name`, `value` (number, or `null` when unextractable), `unit`, `status` (`"pass"`/`"fail"`/`"error"`, plus `"inconclusive"` when this value fell outside its declared plausibility bound — issue #2493), `margin` (`null` on that `"inconclusive"` path — `limits` never ran). An `options.fail_on_diagnostic` disqualification (issue #2492) leaves each measurement's own `status` alone — it applies to the whole corner — so a `pass` measurement inside an `inconclusive` corner is expected, and is exactly what the corner's marker diagnostic explains. Additive/optional (issue #2482, `analysis_steps[]` requests only): a step-scoped entry also carries `step` (its source step's name; its `name` is `<step>.<measurement>`), and any entry computed from other results carries `derived_from` (the `name`s of its inputs, in first-reference order). Absent for every scalar-`analysis` request. Additive/optional (issue #2868): an entry declared with `crossings` carries `value` = the crossing count and a `crossings` object `{times, edges, truncated}` (see "Threshold-crossing time series" above); absent on every other entry and when no series was extracted. Additive/optional (issue #2947): an entry declared with `cycle_mean` carries `value` = the cycle-aligned mean and a `cycle_mean` object `{t_start, t_end, cycles_used}` (see "Cycle-aligned mean" above); absent on every other entry and when no mean was computed. |
 | `steps`          | array\<object\>  | Additive/optional (issue #2482): present only on a corner of an `analysis_steps[]` request that was dispatched to the engine — one `{name, kind, status}` per declared step, in declaration order, `status` `"ok"` when that step's analysis produced its own plot and `"error"` otherwise (it failed, or the run was killed before reaching it). Absent for scalar-`analysis` requests and for corners that never started (`budget_exceeded`, `orphaned`, …). |
 | `diagnostics`    | array\<object\>  | `{ "severity": "error"\|"warning", "code": "...", "message": "..." }` — see the classification table above. `"warning"` occurs for a recovered `singular_matrix`/`nonconvergence` (does not affect `status`) and for the two grading markers, `inconclusive` and `implausible_solution` (issues #2492/#2493) — neither marker *causes* the status by itself; each records which of the two reasons graded this corner `inconclusive`. Every other code is always `"error"`. A few codes carry additional code-specific fields beside these three (additive, no `schema_version` bump): `timeout_budget_unreachable`'s `reached_s`/`fraction`, `timestep_too_small`'s `time_s`/`timestep_s`/`node` (issue #2918). Empty for a clean run. |
 | `artifacts`      | object           | `{"log": ..., "raw": ..., "waveform": ..., "deck": ...}`, each an absolute path or `null`. All `null` unless `options.keep_artifacts` is true; `raw`/`waveform` additionally require `options.waveforms`. `deck` is the exact per-corner ngspice deck synthesized for this corner (`.lib`/`.temp`/`alter` lines included) -- the file ngspice actually consumed, not a hash of the unexpanded source netlist (see `environment.netlist_sha256` for that). Raw log text is **never** inlined into the JSON. Additive/optional (issue #1723): also carries `plots` (array of `{signal, path}`) when `--plot` was used and this corner's waveform rendered at least one signal. |

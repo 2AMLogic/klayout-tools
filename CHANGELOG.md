@@ -14,6 +14,19 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sim` `measurements[].cycle_mean`: a mean over whole reference
+  cycles** (issue #2947): a fourth measurement form
+  `{signal, align, level, cycles, edge?, from?}` (`tran` only) returns the
+  time-weighted (trapezoidal) mean of `signal` between the first and
+  `cycles`-th-after reference edge at or after `from`, edges linearly
+  interpolated. `value` stays a scalar (so `limits`/`plausible_range`/Monte
+  Carlo/coverage apply); the window rides an additive `cycle_mean`
+  `{t_start, t_end, cycles_used}` sibling -- no `schema_version` bump. Reduced
+  inside the corner run, so `remote`/`batch` work with
+  `keep_artifacts: false`. Refused for `engine: "xyce"` and `analysis_steps[]`;
+  failures are `status: "error"` with a `measurement` diagnostic led by a
+  `[cycle_mean_*]` reason token. `.meas AVG ... TRIG/TARG` and `FROM=<meas>`
+  remain unsupported. See `docs/cli/sim.md`.
 - **ASAP7 DRC deck checks `ACTIVE.W.2` and `SDT.W.3`** (issue #3085): the
   vertical-width-is-an-integer-multiple-of-27-nm rules (DRM Tables 3.5.1 /
   3.8.1) are now measured per local vertical width of each merged rectilinear
