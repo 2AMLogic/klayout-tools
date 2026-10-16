@@ -74,6 +74,13 @@ not `klt --version`, if you need to detect this kind of drift. See
   run`, so files OpenROAD creates under `$PWD`/`$TMPDIR` are owned by the
   caller instead of root on Linux. Hosts with an older wrapper should re-run
   `scripts/install-openroad-docker.sh` to upgrade it in place.
+- **Docs: `monte_carlo.vary: "process"` negative control is scoped**
+  (issue #2937): the sigma=0 guarantee holds for the reported
+  `mismatch_seed` and for decks consuming `mc_mismatch_seed` directly, not
+  for decks that draw mismatch from ngspice's own RNG (`agauss`/`gauss`),
+  where the combined `.options seed` still varies per sample. Docs and the
+  `_expand_monte_carlo` docstring now say so and name the working control
+  (switch the deck's mismatch off). No seed derivation or JSON change.
 - **Bipolar markers can be derived layer expressions** (issue #2860):
   `BipolarDevice.marker` now accepts a `LayerExpr`, a frozen AND/NOT tree
   of drawn layers that can nest, as well as a bare `(layer, datatype)`

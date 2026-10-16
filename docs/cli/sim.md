@@ -1892,6 +1892,35 @@ before the circuit is even parsed. A request declaring neither `measurements[]`
 nor `options.waveforms` omits `save all` entirely, leaving that path
 byte-identical to before (issue #2521).
 
+### Solver options: `options.ngspice_options` (issue #3111)
+
+`options.ngspice_options` declares ngspice solver/convergence `.options` for
+the request, so the setting is part of the report's evidence instead of being
+buried in a netlist include:
+
+```json
+{ "options": { "ngspice_options": { "gminsteps": 0, "itl1": 400, "noopiter": true } } }
+```
+
+klt renders one `.options gminsteps=0 itl1=400 noopiter` card after `.temp` in
+each corner deck (alongside a Monte Carlo `.options seed=`, which is
+unchanged) and reports the map as `environment.ngspice_options`. `true`
+renders the bare flag; `false` renders nothing (the ngspice default) but is
+still echoed. The map is request-wide: split requests to use different
+settings per device family. Only the solver options listed in the table below
+are accepted, because ngspice silently ignores an unknown `.options` name.
+
+This is distinct from `options.ngspice_init`: `.spiceinit` lines are not
+reliably honoured for `.options` names (a `.spiceinit` `option itl1=1` had no
+effect on the solve, the same name as a deck `.options` did), so
+`ngspice_init` cannot carry them.
+
+For `remote`/`batch` the map rides the forwarded request document. A worker
+that predates the field would drop it silently, so the client compares the
+returned report's `environment.ngspice_options` with the declared map and
+fails with an application error naming the option on any difference. The
+map is also part of the `options.resume` checkpoint fingerprint.
+
 ### Opting out: `options.save_mode` (issue #2732)
 
 `options.save_mode` decides who owns the corner's saved vector set. It takes
@@ -2060,9 +2089,25 @@ resolve by **bare name** (e.g. `onoise_spectrum[10]`, `onoise_total`); the
 so `options.waveforms` output is unchanged, and decks for other analysis kinds
 are byte-identical.
 
-Limitation: this applies to the single-analysis path only. Inside
-`analysis_steps` a `noise` step's spectrum plot is not captured, so spectrum
-vectors are not reachable there (tracked in [#3284](https://github.com/2AMLogic/klayout-tools/issues/3284)).
+Inside `analysis_steps`, `$curplot` after a `noise` step is likewise the
+totals plot, so a step-scoped `expr` sees `onoise_total`/`inoise_total` only.
+A derived (top-level) or later-step `expr` reaches a `noise` step's spectra
+with the `<step>.spectrum.<vector>` reference, where `<vector>` is
+`inoise_spectrum` or `onoise_spectrum`:
+
+```json
+{ "name": "a_spot", "expr": "a.spectrum.onoise_spectrum[10]", "unit": "V/sqrt(Hz)" }
+```
+
+The spectrum plot name is captured per step (it is not a fixed `noise1`), so two
+`noise` steps resolve to their own distinct plots. The capture is emitted only
+for `noise` steps that a `.spectrum.` reference names, so every other deck is
+byte-identical. `<step>.spectrum.<vector>` on a non-`noise` step, an unknown
+vector, or a forward/unknown step fails validation naming the measurement and
+step. If the `noise` step fails, its dependents are reported
+`derived_input_unavailable` (alongside the step's `step_failed`), never a stale
+value. A step-scoped measurement that is literally named `spectrum` is still
+referenced as `<step>.spectrum`; only the three-part form is the qualifier.
 
 ### Noise units and `sqrnoise`
 
@@ -2216,6 +2261,12 @@ Worked `op` example — the case that had no expression at all before:
   exactly as before.
 - **Single line only.** The expression is spliced verbatim into one `let`
   line; an embedded newline would become a separate control command.
+- **No bare `<` / `>`.** In ngspice's control language these are I/O
+  redirection, not comparisons: `vecmax((v(a) < v(b))*v(a))` would redirect
+  stdin/stdout, create stray files in the corner directory and report
+  `produced no value`. `klt sim` rejects such an `expr` up front (application
+  error, exit 1) before any ngspice launch. Spell comparisons `gt` / `lt` /
+  `ge` / `le` / `eq` / `ne`: `vecmax((v(a) lt v(b))*v(a))`.
 - **`corners.*` / `monte_carlo`**: nothing special. The `let`/`print` pair is
   regenerated in every corner's own deck, after that corner's `alter` cards
   and analysis, so the expression is evaluated against that corner's solve.
@@ -3233,8 +3284,16 @@ Seeding these sources per sample is not implemented.
 **Deterministic negative control.** A seed component only varies across
 samples when `monte_carlo.vary` actually asks for that axis — requesting
 `vary: "process"` derives a different `process_seed` per sample but the
-*same* `mismatch_seed` for every sample of a given corner (sigma=0
-downstream), and vice versa for `vary: "mismatch"`. This guards against a
+*same* `mismatch_seed` for every sample of a given corner, and vice versa
+for `vary: "mismatch"`. Sigma=0 holds for the reported seed fields and for
+decks/netlists that consume `mc_mismatch_seed` directly. It does **not**
+hold for a deck that draws mismatch from ngspice's own RNG
+(`agauss`/`gauss` in `.param` expressions, as the gf180mcu deck does):
+ngspice receives only the combined `.options seed=<rndseed>`, which is
+derived from both components and so still changes per sample under
+`vary: "process"`. For such decks the working control is to switch the
+deck's own mismatch off (e.g. gf180mcu `sw_stat_mismatch=0`) and confirm
+sigma=0. The control guards against a
 broken/no-op sampler that silently produces no variation at all (or
 variation from an unrelated source): the axis nobody asked to vary is
 provably pinned, not just "happens to look the same" this run. Two public
@@ -4255,6 +4314,7 @@ the *response* echoes back.
 | `options.stage_model_inputs` | boolean       | Issue #2668. For `backend: "remote"`/`"batch"`, upload `models.lib`, per-section corner libraries and `options.osdi_preload` binaries — with their full `.include`/file-bearing `.lib` closure — and point the worker request at the staged copies. Defaults to `false` (models resolve on the runner image, unchanged). A non-boolean is an application error (exit 1); no effect on `local`/`local-parallel`. See "Staging the request's model inputs" above. |
 | `options.ngspice_binary` | string            | Issue #2423. Explicit `ngspice` binary name or path, overriding `$KLT_NGSPICE_BINARY` and the bare `ngspice` name on `$PATH`. A path containing a separator resolves relative to the request file's own directory. Only read for `engine: "ngspice"` (the default) — see "Which ngspice binary is run" above. |
 | `options.save_mode`      | string            | Issue #2732. `"all"` (default; omitted means the same) keeps the generated `save all`; `"netlist"` suppresses it so the netlist's own `.save` cards decide the resident vector set, and the caller owns measurement/waveform coverage. Any other value (including `null`) is an application error (exit 1); an explicit value is refused for `engine: "xyce"`. Off-host workers must include this implementation. See "Opting out: `options.save_mode`" above. |
+| `options.ngspice_options` | object | Issue #3111. Solver/convergence `.options` (`gmin`, `gminsteps`, `srcsteps`, `itl1`, `itl2`, `itl4`, `noopiter`, `method`, `reltol`, `abstol`, `vntol`, `pivtol`) rendered as one `.options` card after `.temp` in every corner deck and echoed verbatim as `environment.ngspice_options`. Values are numbers, booleans or bare-token strings; an unknown key or other value is an application error (exit 1) naming it; refused for `engine: "xyce"`. Unset: no card, no echo. See "Solver options: `options.ngspice_options`" above. |
 | `options.ngspice_init`   | array\<string\>   | Issue #2520. Lines materialized as a `.spiceinit` file inside each corner's own artifact directory (`cwd=` for that corner's `ngspice` invocation), most commonly `["set ngbehavior=hsa"]` to select a compatibility mode for vendor decks written in HSPICE style. Defaults to unset — no `.spiceinit` is written (no behavior change). `engine: "ngspice"` only; accepted-and-ignored for `"xyce"`. See "ngspice's working directory, and `.spiceinit` compatibility mode" above. |
 | *(CLI-only)* `--plot <dir>` | string         | No request-document equivalent (like `trajectory --plot`) — writes one waveform SVG per non-sweep signal per corner to `<dir>`, forcing `options.waveforms`/`keep_artifacts` on for this run. See "Waveform plots" above. |
 | `netlist_source`         | string            | Optional caller-declared provenance of `netlist`: `"schematic"` (pre-layout, e.g. an S6 sizing netlist) or `"extracted"` (post-layout, from `klt extract`). Omit for unchanged behavior — the field is purely additive. An unrecognized value is an application error (exit 1). See "Post-layout verification" below. |
@@ -4434,7 +4494,7 @@ corner-sweep rollup fields above are declared.
 | `steps`          | array\<object\>  | Additive/optional (issue #2482): present only on a corner of an `analysis_steps[]` request that was dispatched to the engine — one `{name, kind, status}` per declared step, in declaration order, `status` `"ok"` when that step's analysis produced its own plot and `"error"` otherwise (it failed, or the run was killed before reaching it). Absent for scalar-`analysis` requests and for corners that never started (`budget_exceeded`, `orphaned`, …). |
 | `diagnostics`    | array\<object\>  | `{ "severity": "error"\|"warning", "code": "...", "message": "..." }` — see the classification table above. `"warning"` occurs for a recovered `singular_matrix`/`nonconvergence` (does not affect `status`) and for the two grading markers, `inconclusive` and `implausible_solution` (issues #2492/#2493) — neither marker *causes* the status by itself; each records which of the two reasons graded this corner `inconclusive`. Every other code is always `"error"`. A few codes carry additional code-specific fields beside these three (additive, no `schema_version` bump): `timeout_budget_unreachable`'s `reached_s`/`fraction`, `timestep_too_small`'s `time_s`/`timestep_s`/`node` (issue #2918). Empty for a clean run. |
 | `artifacts`      | object           | `{"log": ..., "raw": ..., "waveform": ..., "deck": ...}`, each an absolute path or `null`. All `null` unless `options.keep_artifacts` is true; `raw`/`waveform` additionally require `options.waveforms`. `deck` is the exact per-corner ngspice deck synthesized for this corner (`.lib`/`.temp`/`alter` lines included) -- the file ngspice actually consumed, not a hash of the unexpanded source netlist (see `environment.netlist_sha256` for that). Raw log text is **never** inlined into the JSON. Additive/optional (issue #1723): also carries `plots` (array of `{signal, path}`) when `--plot` was used and this corner's waveform rendered at least one signal. |
-| `monte_carlo`    | object \| null   | `null` unless this corner is a Monte Carlo sample, else `{sample_index, seed, process_seed, mismatch_seed}` — this sample's index and its derived seed components (`seed` is the combined value written as `.options seed=` in the generated deck). See "Monte Carlo sampling" above for the seed contract and negative-control guarantee. |
+| `monte_carlo`    | object \| null   | `null` unless this corner is a Monte Carlo sample, else `{sample_index, seed, process_seed, mismatch_seed}` — this sample's index and its derived seed components (`seed` is the combined value written as `.options seed=` in the generated deck). See "Monte Carlo sampling" above for the seed contract and the scope of the negative control (it does not cover decks that draw mismatch from ngspice's own RNG). |
 
 ### `coverage`
 

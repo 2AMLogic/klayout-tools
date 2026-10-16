@@ -1244,6 +1244,14 @@ def _validate_expr_body(name: Any, expr: Any) -> None:
             ".control block, so a newline would split it into a "
             "separate control command -- use a single-line expression"
         )
+    if "<" in expr or ">" in expr:
+        raise SimError(
+            f"measurement '{name}' has a bare '<' or '>' in 'expr': in "
+            "ngspice's control language these are I/O redirection, not "
+            "comparisons, so the measurement would produce no value (and "
+            "stray files) -- spell comparisons gt / lt / ge / le / eq / ne, "
+            "e.g. `(v(a) lt v(b))*v(a)`"
+        )
 
 
 def _validate_expr_names_unique(measurements_spec: list[dict[str, Any]]) -> None:
@@ -1418,6 +1426,111 @@ def _validate_save_mode(options: dict[str, Any]) -> tuple[str, bool]:
             "leaves the saved set to the netlist's own .save cards"
         )
     return value, True
+
+
+#: ``options.ngspice_options`` (issue #3111): the solver/convergence
+#: ``.options`` names a request may set. ngspice silently ignores an unknown
+#: ``.options`` name, so a free-form map would hide a typo as "no effect";
+#: the allowlist turns it into a named error instead.
+NGSPICE_SOLVER_OPTIONS = (
+    "abstol",
+    "gmin",
+    "gminsteps",
+    "itl1",
+    "itl2",
+    "itl4",
+    "method",
+    "noopiter",
+    "pivtol",
+    "reltol",
+    "srcsteps",
+    "vntol",
+)
+
+#: A string option value lands verbatim in a deck card, so it is limited to
+#: a bare token (``method=gear``) -- no whitespace, quotes or newlines.
+_NGSPICE_OPTION_TOKEN = re.compile(r"[A-Za-z0-9_.+-]+")
+
+
+def _validate_ngspice_options(value: Any) -> dict[str, Any]:
+    """Validate ``options.ngspice_options`` (issue #3111).
+
+    Returns the declared map unchanged (``{}`` when omitted or ``null``).
+    Keys must come from :data:`NGSPICE_SOLVER_OPTIONS`; values must be a
+    finite number, a bool or a bare-token string.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise SimError(
+            "options.ngspice_options must be an object mapping ngspice "
+            f".options names to scalar values (got {json.dumps(value, default=repr)})"
+        )
+    for name, item in value.items():
+        if name not in NGSPICE_SOLVER_OPTIONS:
+            raise SimError(
+                f"options.ngspice_options key {json.dumps(name)} is not a "
+                "supported solver option; supported: "
+                + ", ".join(NGSPICE_SOLVER_OPTIONS)
+            )
+        if isinstance(item, bool):
+            continue
+        if isinstance(item, (int, float)):
+            if not math.isfinite(item):
+                raise SimError(
+                    f"options.ngspice_options.{name} must be finite (got {item!r})"
+                )
+            continue
+        if isinstance(item, str) and _NGSPICE_OPTION_TOKEN.fullmatch(item):
+            continue
+        raise SimError(
+            f"options.ngspice_options.{name} must be a number, a boolean or "
+            f"a bare-token string (got {json.dumps(item, default=repr)})"
+        )
+    return dict(value)
+
+
+def _ngspice_options_card(ngspice_options: dict[str, Any] | None) -> str | None:
+    """Render the ``.options`` card for ``options.ngspice_options`` (issue
+    #3111), or ``None`` when it would be empty. ``true`` renders as the bare
+    flag (``noopiter``); ``false`` is the ngspice default for a flag and
+    renders nothing (it is still echoed in ``environment.ngspice_options``).
+    """
+    terms = []
+    for name, item in (ngspice_options or {}).items():
+        if item is True:
+            terms.append(name)
+        elif item is not False:
+            terms.append(f"{name}={item}")
+    return ".options " + " ".join(terms) if terms else None
+
+
+def check_ngspice_options_echo(request: dict[str, Any], report: dict[str, Any]) -> None:
+    """Fail loudly when an off-host report did not honour
+    ``options.ngspice_options`` (issue #3111).
+
+    A runner that predates the field drops it silently; its report then
+    omits ``environment.ngspice_options``. Comparing the echo with the
+    declared map turns that into a named :class:`SimError`.
+    """
+    declared = (request.get("options") or {}).get("ngspice_options") or {}
+    if not declared:
+        return
+    echoed = (report.get("environment") or {}).get("ngspice_options") or {}
+    for name in declared:
+        if echoed.get(name) != declared[name] or name not in echoed:
+            raise SimError(
+                f"off-host runner did not honour options.ngspice_options."
+                f"{name}: declared {json.dumps(declared[name])}, runner "
+                f"echoed {json.dumps(echoed.get(name))} (the runner is "
+                "likely older than this client and dropped the option)"
+            )
+    if set(echoed) != set(declared):
+        raise SimError(
+            "off-host runner echoed options.ngspice_options "
+            f"{json.dumps(echoed, sort_keys=True)}, which differs from the "
+            f"declared {json.dumps(declared, sort_keys=True)}"
+        )
 
 
 def _own_persistent_roots(
@@ -2013,6 +2126,9 @@ def _run_sim_corners(
     # request document (see `_build_remote_request`), so only the local
     # backends receive the resolved value below.
     save_mode, save_mode_declared = _validate_save_mode(options)
+    # Issue #3111: same up-front validation; off-host workers re-read it from
+    # the forwarded request document, and the echo check below verifies it.
+    ngspice_options = _validate_ngspice_options(options.get("ngspice_options"))
 
     # Timeout budget preflight (issue #1686): a coarse, pre-grid sanity
     # check -- never blocks the sweep, only surfaces an advisory string. See
@@ -2055,6 +2171,7 @@ def _run_sim_corners(
         osdi_preload_declared=bool(osdi_preload),
         expr_measurements_declared=bool(_expr_measurements(measurements_spec)),
         save_mode_declared=save_mode_declared,
+        ngspice_options_declared=bool(ngspice_options),
         analysis_steps_declared=sim_steps.is_steps_analysis(analysis),
         crossings_declared=bool(
             sim_crossings.crossings_measurements(measurements_spec)
@@ -2200,6 +2317,7 @@ def _run_sim_corners(
             osdi_preload=osdi_preload,
             corner_section_libs=corner_section_libs,
             save_mode=save_mode,
+            ngspice_options=ngspice_options,
         )
         pre_completed, loaded_engine_version = _load_checkpoint(
             checkpoint_path, fingerprint
@@ -2242,6 +2360,7 @@ def _run_sim_corners(
             ngspice_init=ngspice_init_lines,
             osdi_preload=osdi_preload,
             save_mode=save_mode,
+            ngspice_options=ngspice_options,
         )
 
     probe_abort: dict[str, Any] | None = None
@@ -2305,6 +2424,7 @@ def _run_sim_corners(
             "ngspice_init": ngspice_init_lines,
             "osdi_preload": osdi_preload,
             "save_mode": save_mode,
+            "ngspice_options": ngspice_options,
         }
         if backend not in _OFFHOST_BACKENDS
         else {"request_dir": request_dir}
@@ -2632,6 +2752,9 @@ def _run_sim_corners(
         )
     except sim_staging.IncludeStagingError as exc:
         environment["netlist_closure_error"] = str(exc)
+    # Additive/optional (issue #3111): the declared solver options, verbatim,
+    # so the setting is part of the report's evidence.
+    environment.update({"ngspice_options": ngspice_options} if ngspice_options else {})
     if netlist_source is not None:
         # Additive/optional: only present when the request declares it, so
         # existing consumers of a request that omits netlist_source see an
@@ -3825,11 +3948,17 @@ def _expand_monte_carlo(
     for that axis (``"process"``/``"mismatch"``/``"both"``); otherwise every
     sample of that corner derives the same value for it. This is the
     **deterministic negative control**: request ``vary: "process"`` and
-    every sample's ``mismatch_seed`` -- and therefore anything downstream
-    that depends only on it -- is identical across the N samples (sigma=0),
-    proving the sampler isn't silently injecting variation nobody asked
-    for. Requesting the *same* ``mc_spec["seed"]`` again (same process,
-    different process, doesn't matter) reproduces the exact same sequence
+    every sample's reported ``mismatch_seed`` -- and anything downstream
+    that consumes ``mc_mismatch_seed`` directly -- is identical across the
+    N samples (sigma=0), proving the sampler isn't silently injecting
+    variation nobody asked for. The control does **not** extend to a deck
+    that draws mismatch from ngspice's own RNG (``agauss``/``gauss`` in
+    ``.param`` expressions): ngspice receives only the combined
+    ``.options seed=<rndseed>``, derived from both components, so it still
+    changes per sample under ``vary: "process"``. For such decks, switch
+    the deck's own mismatch off (e.g. gf180mcu ``sw_stat_mismatch=0``) to
+    get a sigma=0 control. Requesting the *same* ``mc_spec["seed"]`` again
+    (same process, different process, doesn't matter) reproduces the exact same sequence
     of derived seeds -- see :func:`_derive_mc_seed`.
     """
     n, seed, vary = _validate_monte_carlo_spec(mc_spec)
@@ -3897,6 +4026,7 @@ def _checkpoint_fingerprint(
     osdi_preload: tuple[str, ...] = (),
     corner_section_libs: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
+    ngspice_options: dict[str, Any] | None = None,
 ) -> str:
     """A SHA-256 fingerprint of everything that determines what a sweep's
     corners actually run -- the basis for deciding whether an on-disk
@@ -3935,6 +4065,11 @@ def _checkpoint_fingerprint(
         # Only keyed in off the default, so an existing checkpoint stays
         # valid for a request that omits the option.
         payload["save_mode"] = save_mode
+    if ngspice_options:
+        # Issue #3111: solver options change which solves converge, so a
+        # checkpoint written under other options never applies. Only keyed
+        # in when declared, leaving existing fingerprints untouched.
+        payload["ngspice_options"] = ngspice_options
     if corner_section_libs:
         # Issue #2522: a corner's per-section libraries determine its device
         # models exactly as `models.lib` does, so editing one must invalidate
@@ -4082,6 +4217,7 @@ def _enforce_xyce_support_boundary(
     osdi_preload_declared: bool = False,
     expr_measurements_declared: bool = False,
     save_mode_declared: bool = False,
+    ngspice_options_declared: bool = False,
     analysis_steps_declared: bool = False,
     crossings_declared: bool = False,
 ) -> None:
@@ -4164,6 +4300,15 @@ def _enforce_xyce_support_boundary(
             "`.control` block, which the Xyce deck does not have; use "
             "engine 'ngspice' or omit options.save_mode"
         )
+    if ngspice_options_declared:
+        # Issue #3111: the names are ngspice `.options` solver controls; the
+        # Xyce deck has its own `.options` namespaces, so they are refused
+        # by name rather than silently mapped or dropped.
+        raise SimError(
+            "options.ngspice_options is not supported for engine 'xyce': "
+            "its names are ngspice solver `.options`; use engine 'ngspice' "
+            "or omit options.ngspice_options"
+        )
 
 
 def _run_local(
@@ -4189,6 +4334,7 @@ def _run_local(
     ngspice_init: tuple[str, ...] = (),
     osdi_preload: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
+    ngspice_options: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``local`` backend: run each expanded corner sequentially in-process.
 
@@ -4270,6 +4416,7 @@ def _run_local(
             ngspice_init=ngspice_init,
             osdi_preload=osdi_preload,
             save_mode=save_mode,
+            ngspice_options=ngspice_options,
         )
         corners.append(result)
         if version is not None:
@@ -4413,6 +4560,7 @@ def _run_local_parallel(
     ngspice_init: tuple[str, ...] = (),
     osdi_preload: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
+    ngspice_options: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``local-parallel`` backend: fan the expanded corner list across a
     bounded local worker pool.
@@ -4523,6 +4671,7 @@ def _run_local_parallel(
                     ngspice_init=ngspice_init,
                     osdi_preload=osdi_preload,
                     save_mode=save_mode,
+                    ngspice_options=ngspice_options,
                 )
                 in_flight[future] = next_index
                 next_index += 1
@@ -5106,6 +5255,7 @@ def _prepare_corner_run(
     ngspice_init: tuple[str, ...] = (),
     osdi_preload: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
+    ngspice_options: dict[str, Any] | None = None,
 ) -> tuple[list[str], str, str | None, str]:
     """Write the engine's per-corner deck and build its command line.
 
@@ -5159,6 +5309,7 @@ def _prepare_corner_run(
             raw_path=raw_path,
             osdi_preload=osdi_preload,
             save_mode=save_mode,
+            ngspice_options=ngspice_options,
         )
         _write_spiceinit(corner_dir, ngspice_init)
         command = [ngspice_binary or "ngspice", "-b", deck_path, "-o", log_path]
@@ -5263,6 +5414,7 @@ def _run_corner(
     ngspice_init: tuple[str, ...] = (),
     osdi_preload: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
+    ngspice_options: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], str | None]:
     """Run one corner point through the selected engine's batch binary and
     classify the result.
@@ -5332,6 +5484,7 @@ def _run_corner(
         ngspice_init=ngspice_init,
         osdi_preload=osdi_preload,
         save_mode=save_mode,
+        ngspice_options=ngspice_options,
     )
 
     diagnostics: list[dict[str, str]] = list(include_diagnostics)
@@ -5908,6 +6061,7 @@ def _write_corner_deck(
     raw_path: str | None,
     osdi_preload: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
+    ngspice_options: dict[str, Any] | None = None,
 ) -> None:
     """Generate the corner-specific ngspice deck: an optional Monte Carlo
     seed card, ``.lib``/``.include``/``.temp``, the request's verbatim
@@ -5950,6 +6104,11 @@ def _write_corner_deck(
     lines.extend(_corner_lib_lines(point, models_lib))
     lines.append(f".include {netlist_path}")
     lines.append(f".temp {point.temperature_c}")
+    options_card = _ngspice_options_card(ngspice_options)
+    if options_card is not None:
+        # Issue #3111: `options.ngspice_options`, after `.temp`; omitted
+        # entirely when unset so existing decks stay byte-identical.
+        lines.append(options_card)
 
     for spec in measurements_spec:
         if spec.get("spice") is not None:
@@ -6555,6 +6714,7 @@ def _run_calibration_probe(
     ngspice_init: tuple[str, ...] = (),
     osdi_preload: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
+    ngspice_options: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run one short, bounded ``tran`` slice -- the calibration half of the
     two-pass probe model -- and report how it went.
@@ -6617,6 +6777,7 @@ def _run_calibration_probe(
         raw_path=None,
         osdi_preload=osdi_preload,
         save_mode=save_mode,
+        ngspice_options=ngspice_options,
     )
     _write_spiceinit(probe_dir, ngspice_init)
 
@@ -6665,6 +6826,7 @@ def _run_fail_fast_probe(
     ngspice_init: tuple[str, ...] = (),
     osdi_preload: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
+    ngspice_options: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """The two-pass probe model's dispatch-time entry point (issue #1694):
     run one short, bounded calibration ``tran`` slice on the grid's first
@@ -6710,6 +6872,7 @@ def _run_fail_fast_probe(
         ngspice_init=ngspice_init,
         osdi_preload=osdi_preload,
         save_mode=save_mode,
+        ngspice_options=ngspice_options,
     )
     if probe["error"] is not None:
         return None
