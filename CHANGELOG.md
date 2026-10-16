@@ -14,6 +14,14 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt lvs` refuses a bare pre-extracted `layout.netlist` carrying a
+  resistor `X` card** (issue #3078): a `klt extract` `X$n a b vsubs
+  <class> r=… L=… W=…` card naming a resistor class of `reference.deck`,
+  with no `layout.deck`, was read as an undefined subcircuit, so the layout
+  side had no resistor devices and a correct layout reported a plausible
+  `mismatch`. It now exits 1 with an error naming `layout.deck` as the fix;
+  the same request with `layout.deck` still matches, and netlists without
+  such cards (or without `reference.deck`) behave as before.
 - **`klt sim` batch: opt-in auto-split of a request that cannot fit the fleet's
   whole-job ceiling** (issue #3446): `batch.job_ceiling_check: "split"`,
   `batch.max_units_per_job` and `--max-units-per-job N` reroute a
