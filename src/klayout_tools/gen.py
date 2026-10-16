@@ -1634,6 +1634,57 @@ def _res_array_layout(
                 "y0_um": last_row * row_pitch,
             }
         )
+    # Issue #2997: the `series=true` joint jumpers -- one box (absolute um)
+    # per `R<i>_B` -> `R<i + 1>_A` pair, bridging the gap between the two
+    # physically-adjacent end pads. Computed unconditionally (cheap, pure
+    # geometry); only drawn when the caller asks for `series`.
+    left_pad, right_pad = unit["boxes_um"]["metal"]
+    pad_y0 = unit["pad_y0_um"]
+    pad_y1 = pad_y0 + unit["pad_height_um"]
+    jumpers = []
+    for i in range(num - 1):
+        cur, nxt = cells[i], cells[i + 1]
+        if cur["y0_um"] == nxt["y0_um"]:
+            # Same row: bridge the `effective_spacing_um` gap between cur's
+            # exit pad and nxt's entry pad.
+            if cur["direction"] > 0:
+                x0, x1 = cur["x0_um"] + right_pad[2], nxt["x0_um"] + left_pad[0]
+            else:
+                x0, x1 = nxt["x0_um"] + right_pad[2], cur["x0_um"] + left_pad[0]
+            jumpers.append(
+                {
+                    "kind": "row",
+                    "box_um": (x0, cur["y0_um"] + pad_y0, x1, cur["y0_um"] + pad_y1),
+                    "length_um": x1 - x0,
+                }
+            )
+        else:
+            # Fold: the boustrophedon puts the last unit of one row and the
+            # first of the next in the same column, with the exit and entry
+            # pads on the same physical side.
+            # The bridge is grown inward to at least the body width so a
+            # narrow end pad does not leave a sub-minimum-width strip on a
+            # metal-body (`metal_level`) layer.
+            grow = max(
+                0.0,
+                min(unit["height_um"], unit["total_len_um"])
+                - (left_pad[2] - left_pad[0]),
+            )
+            if cur["direction"] > 0:
+                jx0, jx1 = (
+                    cur["x0_um"] + right_pad[0] - grow,
+                    cur["x0_um"] + right_pad[2],
+                )
+            else:
+                jx0, jx1 = cur["x0_um"] + left_pad[0], cur["x0_um"] + left_pad[2] + grow
+            y0, y1 = cur["y0_um"] + pad_y1, nxt["y0_um"] + pad_y0
+            jumpers.append(
+                {
+                    "kind": "fold",
+                    "box_um": (jx0, y0, jx1, y1),
+                    "length_um": y1 - y0,
+                }
+            )
     return {
         "unit": unit,
         "pitch_um": pitch,
@@ -1641,6 +1692,7 @@ def _res_array_layout(
         "cols_per_row": cols_per_row,
         "cells": cells,
         "dummy_cells": dummy_cells,
+        "jumpers": jumpers,
         "spacing_um": effective_spacing_um,
     }
 
