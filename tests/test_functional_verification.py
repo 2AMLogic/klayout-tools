@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -5802,6 +5803,153 @@ def test_mutations_killed_and_survived_end_to_end(tmp_path, monkeypatch):
     # "no cross-contamination between sequential per-proposal builds" edge
     # case from the issue's own Test Plan).
     assert (tmp_path / "dut.v").read_text(encoding="utf-8") == _MUTATION_DUT_RTL
+
+
+class _WrapperFollowingRunner(_ContentAwareFakeRunner):
+    """`_ContentAwareFakeRunner` reads only the `sources` bytes, which for a
+    scoped-defines wrapper is just an `` `include`` line and hides the
+    mutation marker. This one also folds in the text of each wrapper's
+    `` `include`` target, the way a real simulator would read through it."""
+
+    def build(self, **kwargs):
+        super().build(**kwargs)
+        for source in kwargs["sources"]:
+            if Path(source).name.startswith("scoped_defines_"):
+                target = _wrapper_include_target(source)
+                self._last_sources_text += Path(target).read_text(encoding="utf-8")
+
+
+def _wrapper_include_target(wrapper: str) -> str:
+    match = re.search(r'`include "([^"]+)"', Path(wrapper).read_text())
+    assert match, wrapper
+    return match.group(1)
+
+
+def _record_mutant_variants(monkeypatch) -> list[dict]:
+    """Wrap `fv._run_isolated_variant` (called in the parent process while
+    `plan.applied(index)` has the mutant written in place -- the runner itself
+    runs in a forked child, so it cannot record into the parent) and capture
+    each call's `sources`/`includes`, plus the text each wrapper's `include`
+    resolves to at that moment."""
+    calls: list[dict] = []
+    real = fv._run_isolated_variant
+
+    def recording(**kwargs):
+        calls.append(
+            {
+                "build_dir": kwargs["build_dir"],
+                "sources": list(kwargs["sources"]),
+                "includes": list(kwargs["includes"]),
+                "included": {
+                    s: Path(_wrapper_include_target(s)).read_text(encoding="utf-8")
+                    for s in kwargs["sources"]
+                    if Path(s).name.startswith("scoped_defines_")
+                },
+            }
+        )
+        return real(**kwargs)
+
+    monkeypatch.setattr(fv, "_run_isolated_variant", recording)
+    return calls
+
+
+def _write_source_defines_mutation_request(tmp_path: Path, **options) -> str:
+    _write(tmp_path / "dut.v", _MUTATION_DUT_RTL)
+    _write(tmp_path / "other.v", "module other; endmodule\n")
+    _write(tmp_path / "test_dut.py", _TESTBENCH)
+    return _write_request(
+        tmp_path / "request.json",
+        _base_request(
+            sources=["other.v", "dut.v"],
+            hdl_toplevel="dut",
+            testbench={"module": "test_dut", "testcase": None},
+            options={"coverage": False, **options},
+        ),
+    )
+
+
+def test_mutations_source_defines_wrapper_per_mutant(tmp_path, monkeypatch):
+    request_path = _write_source_defines_mutation_request(
+        tmp_path, source_defines={"dut.v": {"FUNCTIONAL": "1", "NO_PWR": None}}
+    )
+    proposals_path = _write_mutation_proposals(tmp_path)
+    _stub_mutation_runner(
+        monkeypatch,
+        _WrapperFollowingRunner(
+            _MUTATION_BASELINE_XML, _MUTATION_KILLED_XML, "wire a = 9;"
+        ),
+    )
+    mutant_builds = _record_mutant_variants(monkeypatch)
+
+    report = run_functional_verification_with_mutations(request_path, proposals_path)
+
+    # The wrapped file's in-place mutation reaches the fake simulator through
+    # the wrapper's `include: mutant 1 is killed, mutant 2 survives.
+    mutation_testing = report["mutation_testing"]
+    assert mutation_testing["killed_count"] == 1
+    assert mutation_testing["survived_count"] == 1
+
+    dut = str((tmp_path / "dut.v").resolve())
+    other = str((tmp_path / "other.v").resolve())
+    assert len(mutant_builds) == 2
+
+    wrappers = []
+    for build, index in zip(mutant_builds, (1, 2), strict=True):
+        mutant_dir = (
+            tmp_path
+            / ".klt"
+            / "functional-verification"
+            / "mutants"
+            / f"mutant_{index}"
+        )
+        # Same list position as `dut.v`; the un-named source is untouched.
+        assert build["sources"][0] == other
+        wrapper = Path(build["sources"][1])
+        assert wrapper.parent == mutant_dir
+        assert wrapper.name == "scoped_defines_1_dut.v"
+        assert wrapper.read_text(encoding="utf-8") == (
+            f'`define FUNCTIONAL 1\n`define NO_PWR\n`include "{dut}"\n'
+            "`undef FUNCTIONAL\n`undef NO_PWR\n"
+        )
+        assert build["includes"] == [str(tmp_path)]
+        wrappers.append(wrapper)
+
+        # The wrapper's `include resolves to the source mutated in place for
+        # *this* mutant -- not the pristine file, not another mutant's.
+        proposal = _mutation_proposals_doc()["proposals"][index - 1]
+        (included_text,) = build["included"].values()
+        assert proposal["mutated_code"] in included_text
+        assert proposal["original_code"] not in included_text
+
+    # Each mutant gets its own wrapper directory.
+    assert wrappers[0] != wrappers[1]
+    assert wrappers[0].parent != wrappers[1].parent
+    # The pristine source is restored afterwards.
+    assert (tmp_path / "dut.v").read_text(encoding="utf-8") == _MUTATION_DUT_RTL
+
+
+def test_mutations_without_source_defines_pass_sources_unchanged(tmp_path, monkeypatch):
+    request_path = _write_source_defines_mutation_request(tmp_path)
+    proposals_path = _write_mutation_proposals(tmp_path)
+    _stub_mutation_runner(
+        monkeypatch,
+        _WrapperFollowingRunner(
+            _MUTATION_BASELINE_XML, _MUTATION_KILLED_XML, "wire a = 9;"
+        ),
+    )
+    mutant_builds = _record_mutant_variants(monkeypatch)
+
+    run_functional_verification_with_mutations(request_path, proposals_path)
+
+    assert len(mutant_builds) == 2
+    expected_sources = [
+        str((tmp_path / "other.v").resolve()),
+        str((tmp_path / "dut.v").resolve()),
+    ]
+    for build in mutant_builds:
+        assert build["sources"] == expected_sources
+        assert build["includes"] == []
+        assert build["included"] == {}
 
 
 def test_mutations_baseline_must_pass_gate(tmp_path, monkeypatch):
