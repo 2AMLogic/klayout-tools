@@ -3127,6 +3127,59 @@ def test_generic_pass_check_passes(tmp_path):
     assert check["provenance"] is None
 
 
+GENERIC_PASS_PARTIAL_COVERAGE_ENVELOPE = {
+    **GENERIC_PASS_ENVELOPE,
+    "coverage": build_check_coverage(
+        checked=["row.1"],
+        skipped=[{"id": "row.2", "reason": "absent_input_layer"}],
+    ),
+}
+
+
+def test_generic_pass_with_skipped_work_is_partial_not_met(tmp_path):
+    """Issue #2906: a wrapper's `status: pass` cannot outvote its own
+    coverage block's skipped work; the qualification is still disclosed."""
+    path = _write(tmp_path, "gen.json", GENERIC_PASS_PARTIAL_COVERAGE_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"8": path}))
+    aggregate = build_signoff([path])
+
+    item_8 = next(item for item in result["items"] if item["id"] == 8)
+    assert item_8["status"] == "unmet"
+    assert item_8["reason"] == "partial_coverage"
+    check = aggregate["checks"][0]
+    assert check["passed"] is False
+    assert check["detail"]["coverage_qualification"]["reason"] == "partial_coverage"
+
+
+def test_generic_pass_with_complete_or_legacy_coverage_still_passes(tmp_path):
+    full = _write(
+        tmp_path,
+        "full.json",
+        {**GENERIC_PASS_ENVELOPE, "coverage": build_check_coverage(checked=["row.1"])},
+    )
+    legacy = _write(tmp_path, "legacy.json", GENERIC_PASS_ENVELOPE)
+
+    assert build_signoff([full])["checks"][0]["passed"] is True
+    assert build_signoff([legacy])["checks"][0]["passed"] is True
+
+
+def test_generic_inapplicable_work_does_not_downgrade(tmp_path):
+    path = _write(
+        tmp_path,
+        "inap.json",
+        {
+            **GENERIC_PASS_ENVELOPE,
+            "coverage": build_check_coverage(
+                checked=["row.1"],
+                inapplicable=[{"id": "row.2", "reason": "not_applicable"}],
+            ),
+        },
+    )
+
+    assert build_signoff([path])["checks"][0]["passed"] is True
+
+
 def test_generic_fail_check_fails(tmp_path):
     path = _write(tmp_path, "characterization.json", GENERIC_FAIL_ENVELOPE)
 

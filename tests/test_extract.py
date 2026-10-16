@@ -5442,6 +5442,36 @@ def test_sky130_capacitor_drm_legal_top_via_does_not_short_plates(
     assert device["nets"]["a"] != device["nets"]["b"]
 
 
+def test_sky130_via_on_bottom_plate_outside_top_plate_stays_connected(tmp_path):
+    """Issue #3020: `bottom_region.interacting(top_region)` keeps the *whole*
+    bottom-plate polygon, so an ordinary via3 landing on that met3 polygon
+    well outside the `capm` footprint used to be cut from connectivity too,
+    leaving the met4 pad above it a floating anonymous net. Only the via
+    that lands on the top plate may be excluded."""
+    layout = _make_sky130_mim_layout_with_drm_legal_top_via()
+    top = layout.top_cell()
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    # Ordinary via3 + met4 pad on the bottom plate, far from capm.
+    draw(70, 44, _box_um(-12, -12, -10, -10))  # via3.drawing
+    draw(71, 20, _box_um(-13, -13, -9, -9))  # met4.drawing pad
+    label = top.shapes(layout.layer(71, 5))
+    label.insert(kdb.Text("BOT", kdb.Trans(kdb.Vector(-11000, -11000))))
+
+    path = _write_gds(layout, tmp_path / "mim_outside_via.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "mim_outside_via.spice"))
+
+    assert report["device_counts"] == {"sky130_fd_pr__model__cap_mim": 1}
+    # Bottom plate (+ the routed pad) and the top plate: two nets, no
+    # floating anonymous net for the pad.
+    assert report["net_count"] == 2
+    (device,) = report["devices"]
+    bot_net = next(n for n in report["nets"] if n["name"] == "BOT")
+    assert bot_net["name"] in device["nets"].values()
+
+
 def _make_gf180mcu_mim_square_layout(side_um: float) -> kdb.Layout:
     """A `side_um`x`side_um` `FuseTop`-over-`Metal4` MiM cap, marked with
     `CAP_MK`/`MIM_L_MK` and drawn well clear of `Metal4`'s own edges so the
@@ -22150,6 +22180,8 @@ def test_extract_request_document_file_form_matches_argv(tmp_path, capsys):
     request_code, request_report = _run_extract_json(capsys, [str(request_path)])
 
     assert argv_code == request_code == 0
+    # `timing` is a wall-clock measurement of the run (issue #3181), not content.
+    argv_report.pop("timing"), request_report.pop("timing")
     assert request_report == argv_report
 
 
@@ -22667,7 +22699,7 @@ def test_subcircuit_leaves_the_flat_extraction_byte_identical(tmp_path):
     assert plain["netlist_sha256"] == sliced["netlist_sha256"]
     assert plain["subcircuit"] is None
 
-    volatile = {"netlist_path", "subcircuit", "warnings", "provenance"}
+    volatile = {"netlist_path", "subcircuit", "warnings", "provenance", "timing"}
     assert {k: v for k, v in plain.items() if k not in volatile} == {
         k: v for k, v in sliced.items() if k not in volatile
     }
@@ -24804,3 +24836,121 @@ def test_normalized_netlist_hash_is_stable_across_reruns(tmp_path):
     other = _write_gds(_make_series_resistor_chain_layout(), tmp_path / "chain.gds")
     c = run_extract(other, "sky130", output=str(tmp_path / "c.spice"))
     assert c["netlist_normalized_sha256"] != a["netlist_normalized_sha256"]
+
+
+# --progress / `timing` (issue #3181) ----------------------------------------
+
+
+def test_report_carries_additive_timing_object(tmp_path):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    result = run_extract(path, "sky130")
+    timing = result["timing"]
+    assert timing["total_seconds"] >= 0
+    stages = timing["stages"]
+    assert {"read_layout", "device_extraction", "netlist_write"} <= set(stages)
+    assert all(seconds >= 0 for seconds in stages.values())
+    assert timing["unattributed_seconds"] >= 0
+    assert sum(stages.values()) + timing["unattributed_seconds"] == pytest.approx(
+        timing["total_seconds"], abs=0.01
+    )
+
+
+def test_progress_lines_go_to_stderr_and_stdout_stays_json(tmp_path, capsys):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    code = main(["extract", path, "--deck", "sky130", "--progress", "--format", "json"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "timing" in json.loads(captured.out)
+    assert "read_layout started" in captured.err
+    assert "device_extraction finished" in captured.err
+    assert "klt extract:" not in captured.out
+
+
+def test_no_progress_is_silent_even_off_a_tty(tmp_path, capsys):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    code = main(
+        ["extract", path, "--deck", "sky130", "--no-progress", "--format", "json"]
+    )
+    assert code == 0
+    assert capsys.readouterr().err == ""
+
+
+def test_default_off_a_tty_is_heartbeat_only_so_short_runs_stay_clean(tmp_path, capsys):
+    # pytest's captured stderr is not a TTY, so the unset default is the
+    # heartbeat-only mode: a short run writes nothing to stderr.
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    assert main(["extract", path, "--deck", "sky130", "--format", "json"]) == 0
+    assert capsys.readouterr().err == ""
+
+
+def test_progress_request_document_key(tmp_path, capsys):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    request = tmp_path / "req.json"
+    request.write_text(
+        json.dumps(
+            {
+                "schema": "klt.extract.request/1",
+                "file": path,
+                "deck": "sky130",
+                "progress": False,
+            }
+        )
+    )
+    assert main(["extract", str(request), "--format", "json"]) == 0
+    assert capsys.readouterr().err == ""
+
+
+def test_short_run_emits_no_heartbeat(tmp_path, capsys):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    run_extract(path, "sky130", progress=True)
+    assert "still running" not in capsys.readouterr().err
+
+
+def test_stage_timer_heartbeat_fires_during_a_long_stage():
+    import io
+    import time
+
+    from klayout_tools.extract_progress import StageTimer, active_timer, stage
+
+    stream = io.StringIO()
+    timer = StageTimer(progress=True, stream=stream, heartbeat_s=0.05)
+    with active_timer(timer), stage("slow"):
+        time.sleep(0.3)
+    assert "slow still running" in stream.getvalue()
+    assert "slow started" in stream.getvalue()
+    assert timer.report()["stages"]["slow"] >= 0.25
+
+
+def test_heartbeat_mode_omits_stage_lines():
+    import io
+    import time
+
+    from klayout_tools.extract_progress import StageTimer, active_timer, stage
+
+    stream = io.StringIO()
+    timer = StageTimer(progress="heartbeat", stream=stream, heartbeat_s=0.05)
+    with active_timer(timer), stage("slow"):
+        time.sleep(0.2)
+    assert "slow still running" in stream.getvalue()
+    assert "started" not in stream.getvalue()
+    assert "finished" not in stream.getvalue()
+
+
+def test_stage_is_a_noop_without_an_active_timer():
+    from klayout_tools.extract_progress import stage
+
+    with stage("nothing"):
+        pass
+
+
+def test_timing_is_ignored_by_rerun_drift(tmp_path):
+    from klayout_tools._report_verify import VOLATILE_PROVENANCE_PATHS
+
+    assert ("timing",) in VOLATILE_PROVENANCE_PATHS
+
+
+def test_consecutive_runs_give_identical_netlist_sha256(tmp_path):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    first = run_extract(path, "sky130", output=str(tmp_path / "a.spice"))
+    second = run_extract(path, "sky130", output=str(tmp_path / "b.spice"))
+    assert first["netlist_sha256"] == second["netlist_sha256"]

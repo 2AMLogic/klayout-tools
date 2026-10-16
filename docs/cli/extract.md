@@ -7,7 +7,7 @@ first-order lumped RC interconnect parasitics (see "Parasitic (RC)
 extraction" below).
 
 ```
-klt extract <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l|asap7 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--top-cell-pins] [--pins <A,B,VDD,VSS>] [--rename-declared-pins] [--deck-option <key>=<value> ...] [--label-layer <role>=<layer>/<datatype> ...] [--defer-resistor-fixed-offset] [--abstract-cells <glob> ...] [--abstract-cell-lef <path> ...] [--subcircuit <cell>] [--subcircuit-output <path>] [--hierarchical-cells <cell>[,<cell>...]] [--format text|json]
+klt extract <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l|asap7 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--top-cell-pins] [--pins <A,B,VDD,VSS>] [--rename-declared-pins] [--deck-option <key>=<value> ...] [--label-layer <role>=<layer>/<datatype> ...] [--defer-resistor-fixed-offset] [--abstract-cells <glob> ...] [--abstract-cell-lef <path> ...] [--subcircuit <cell>] [--subcircuit-output <path>] [--hierarchical-cells <cell>[,<cell>...]] [--progress|--no-progress] [--format text|json]
 klt extract <request.json>|-|'{...}' [--format text|json]
 klt extract --check <report.json> [--rerun] [--format text|json]
 ```
@@ -86,6 +86,13 @@ two disagree, this document (and the code) win.
   netlist back and combine freely (`--spef` still writes its own file).
   Without the flag the default is unchanged. A report recorded with
   `--no-netlist` is replayed as `--no-netlist` by `--check --rerun`.
+- `--progress` / `--no-progress` — stderr liveness for long runs (issue
+  #3181). `--progress` writes a `klt extract: <stage> started|finished …`
+  line per stage and a `<stage> still running (…)` heartbeat every 30 s;
+  `--no-progress` writes nothing. Unset (the default) is heartbeat-only and
+  only when stderr is not a TTY, so a short run leaves stderr empty (the
+  error envelope lives there) while an agent or CI log still shows life on a
+  long one. stdout is never touched. See "Progress and timing" below.
 - `--top` — top cell to extract when the stream has more than one (required
   in that case; optional otherwise, and must name the sole top cell if
   given).
@@ -627,11 +634,53 @@ the JSON `provenance.klayout_version` field — see "JSON schema (the
 contract)" below) on every environment that produces or compares extracted
 netlists.
 
+**Evidence pins (issue #3181):** `netlist_sha256` is a stable pin only for
+runs on the same pinned `klayout` build and `klt` commit; a pin recorded on a
+different one can change once even when every count matches, because the
+writer owns the `$N` labels (above) and `klt extract` does not renumber them.
+A numbering-independent hash field is not yet offered — it is tracked in
+#3407. Two consecutive runs on the same environment produce identical
+`netlist_sha256` (`test_consecutive_runs_give_identical_netlist_sha256`).
+
 Rather than hand-rolling this normalization, `klt extract --check <report>
 --rerun` (issue #1559) already applies it — see "Field classes: content,
 bookkeeping, tool metadata" and "`--check` / `--rerun`" below, which also
 name `net_id` and `parasitics.nets[]` ordering as the same class of
 extractor-internal bookkeeping.
+
+### Progress and timing (issue #3181)
+
+A large routed block can spend tens of minutes inside one extraction call, so
+two things let a caller tell a slow run from a hang and budget the step:
+
+- **stderr progress** — see `--progress` above. Lines read
+  `klt extract: device_extraction finished in 1.8s (2s total)`; the heartbeat
+  reads `klt extract: device_extraction still running (30s in stage, 31s
+  total)`. The request document accepts `"progress": true|false` (absent
+  keeps the default). stdout stays the pure envelope either way.
+- **`timing` in the response** — an additive object (no existing field
+  changed): `stages` (wall seconds per named stage), `total_seconds`, and
+  `unattributed_seconds` (the remainder no stage covers, so
+  `sum(stages) + unattributed_seconds ≈ total_seconds`). Stages, in order:
+  `read_layout`, `device_extraction` (the `LayoutToNetlist` run plus dead-metal,
+  passive-region and `--parasitics` computation), `diagnostics` (voltage-domain
+  and flavour-marker checks), `netlist_write`, `netlist_hash`.
+  `--check --rerun` ignores `timing` (a measurement, not evidence).
+
+**Measured scaling** (sky130, `--no-netlist`, one 8-vCPU shared host, the
+routed digital blocks in `tests/corpus/place_and_route/`):
+
+| block | devices | nets | `device_extraction` | `netlist_write` | total |
+| ----- | ------- | ---- | ------------------- | --------------- | ----- |
+| `mult8` | 2,274 | 1,109 | 0.81 s | 0.03 s | 1.0 s |
+| `gcd` | 4,857 | 2,054 | 1.82 s | 0.06 s | 2.2 s |
+
+`device_extraction` is 80–90 % of the run on both and scales roughly linearly
+with device count at this size (~0.35–0.4 ms/device); every other stage is
+under 0.1 s. **Not measured:** the ~8,500-instance, ~4 MB block that
+motivated the issue (it is not in this repo) — whether extraction turns
+super-linear there is for a caller with that block to confirm from the
+`timing` object, and a larger-block run is tracked in #3408.
 
 ### Reserved annotation layer
 
@@ -4201,6 +4250,17 @@ sky130 and gf180mcu both ship their primitive MOS device as a SPICE
 built-in `nmos`/`pmos` model — so this `M` card cannot bind a real PDK model
 library at all.
 
+**The bare `M` card is also not mismatch-capable.** A PDK that puts its
+statistical-mismatch expressions in the device subckt wrapper's body (e.g.
+gf180mcu's `sw_stat_mismatch`-gated `delvto`/`mulu0` terms) has them skipped
+by this form: the card instantiates the raw class label, never the wrapper.
+A netlist that simulates identically at the nominal point is then silently
+mismatch-free under `klt sim` Monte Carlo (every draw returns bit-identical
+measurements, with no diagnostic from klt or ngspice; see `docs/cli/sim.md`
+§ `family_mismatch`). Do not adapt the bare card by rewriting the class name
+by hand — extract with `--pdk` (below) so each device is written as the
+wrapper `X` call instead.
+
 **When a PDK resolves now**, each extracted device is written as an `X`
 subcircuit call against the resolved PDK's real device library instead:
 
@@ -7221,6 +7281,7 @@ exit codes).
 | `netlist_path`     | string \| null             | Resolved path of the written SPICE netlist (echoes `--output` or the computed default). `null` only when `--no-netlist` was passed. |
 | `netlist_sha256`   | string \| null             | SHA-256 hex digest of the written netlist file. `null` only when `--no-netlist` was passed.            |
 | `netlist_normalized_sha256` | string \| null | Additive (issue #3407). SHA-256 hex digest of the flat `devices[]`/`nets[]` connectivity with anonymous-net numbering normalized away (`net_id` dropped, each `\$N` net rewritten to its sorted `<device>.<terminal>` attachment list, `nets[]` re-sorted — the same canonicalization `--check --rerun` uses), serialized as sorted-key compact JSON. Pin this, not `netlist_sha256`, as cross-build evidence: it is unchanged when only the `$N` numbering differs, and changes on any real connectivity, device-parameter or net-name change. Covers the flat netlist only (not `--subcircuit` decks or `--parasitics` R/C elements). `null` only when `--no-netlist` was passed. Existing `netlist_sha256` values are unchanged. |
+| `timing`           | object                     | Additive (issue #3181): wall-clock `stages` (seconds per stage), `total_seconds`, `unattributed_seconds`. A measurement, ignored by `--check --rerun`. |
 | `status`           | `"extracted"`              | Never `"error"` — a failed run does not emit this envelope at all (see Exit codes).                    |
 | `device_count`     | integer                    | `len(devices)`.                                                                                        |
 | `net_count`        | integer                    | `len(nets)`.                                                                                           |
