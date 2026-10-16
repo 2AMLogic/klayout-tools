@@ -7013,10 +7013,15 @@ def _build_tier_item(
         and isinstance(raw_entry, dict)
         and "not_applicable" in raw_entry
     ):
-        # Issue #2865: item 6's recorded "not applicable" outcome.
-        status, reason, not_applicable, failure_detail = _grade_not_applicable(
-            raw_entry["not_applicable"], partition_kind
-        )
+        # Issue #2865: item 6's recorded "not applicable" outcome. Issue
+        # #2908: it asserts zero statistical rows, so it contradicts a
+        # declared row set -- invalid, never silently preferred.
+        if spec_rows is not None or spec_rows_invalid:
+            reason = _REASON_INVALID_EVIDENCE
+        else:
+            status, reason, not_applicable, failure_detail = _grade_not_applicable(
+                raw_entry["not_applicable"], partition_kind
+            )
     elif (
         raw_entry is not None
         and item_id in _ITEMS_ACCEPTING_MULTI_CITATION
@@ -7060,21 +7065,25 @@ def _build_tier_item(
 
 
 #: T1 items whose manifest entry may be a **list** of citations with optional
-#: ``spec_rows`` coverage (issue #2959). Item 5 today; item 6 (#2908) reuses
-#: :func:`_grade_multi_citation` by joining this set.
-_ITEMS_ACCEPTING_MULTI_CITATION: frozenset[int] = frozenset({5})
+#: ``spec_rows`` coverage (issue #2959). Item 5, and item 6 (issue #2908: a
+#: block whose spec has several statistical rows, only some evidenced).
+_ITEMS_ACCEPTING_MULTI_CITATION: frozenset[int] = frozenset({5, 6})
 
 
 def _read_spec_rows(
     manifest: dict[str, Any],
 ) -> dict[int, list[dict[str, Any]] | None]:
     """Read the manifest's optional ``spec_rows`` declaration (issue #2959):
-    ``{"<item id>": [{"id": "<row>", "gap": "<reason>"?}, ...]}``.
+    ``{"<item id>": [{"id": "<row>", "gap": "<reason>"?, "ratified": bool?},
+    ...]}``.
 
     Returns ``item id -> rows``; a malformed declaration for an item maps to
     ``None`` so only that item degrades to ``invalid_evidence``, never the
     whole report. A ``gap`` row is one no producible envelope can cover; it
-    is reported as a declared gap and never counts as covered.
+    is reported as a declared gap and never counts as covered. ``ratified``
+    (default ``true``, issue #2908) is ``false`` for a row whose target is a
+    proposed, unratified limit: evidence against it is provisional and never
+    grades ``met``.
     """
     raw = manifest.get("spec_rows")
     if raw is None:
@@ -7096,16 +7105,18 @@ def _read_spec_rows(
             for row in rows:
                 row_id = row.get("id") if isinstance(row, dict) else None
                 gap = row.get("gap") if isinstance(row, dict) else None
+                ratified = row.get("ratified", True) if isinstance(row, dict) else True
                 if (
                     not isinstance(row_id, str)
                     or not row_id
                     or row_id in seen
                     or (gap is not None and (not isinstance(gap, str) or not gap))
+                    or not isinstance(ratified, bool)
                 ):
                     valid = []
                     break
                 seen.add(row_id)
-                valid.append({"id": row_id, "gap": gap})
+                valid.append({"id": row_id, "gap": gap, "ratified": ratified})
             parsed = valid or None
         out[item_id] = parsed
     return out
@@ -7134,7 +7145,9 @@ def _grade_multi_citation(
       envelopes named under ``detail.failed_citations``;
     - all members pass but a declared row is uncovered or a declared gap ->
       ``unmet``/``partial_coverage`` with ``failed_rows``, ``uncovered_rows``
-      and ``declared_gaps`` listed separately under ``detail``;
+      and ``declared_gaps`` listed separately under ``detail``; a declared
+      row with ``ratified: false`` (``unratified_rows``) is likewise
+      provisional and never ``met`` (issue #2908);
     - otherwise ``met``; ``citation`` is the first member's and ``citations``
       carries all of them.
 
@@ -7176,7 +7189,11 @@ def _grade_multi_citation(
             **row_info,
         }
         return "unmet", first[1], None, detail, extra
-    if row_info and (row_info["uncovered_rows"] or row_info["declared_gaps"]):
+    if row_info and (
+        row_info["uncovered_rows"]
+        or row_info["declared_gaps"]
+        or row_info["unratified_rows"]
+    ):
         return "unmet", _REASON_PARTIAL_COVERAGE, None, row_info, extra
     if row_info:
         extra["row_coverage"] = row_info
@@ -7228,8 +7245,10 @@ def _members_rows_declared(
 def _multi_row_info(
     graded: list[Any], failed: list[Any], spec_rows: list[dict[str, Any]] | None
 ) -> dict[str, Any]:
-    """``failed_rows`` / ``uncovered_rows`` / ``declared_gaps`` for the
-    declared ``spec_rows`` (empty when none were declared)."""
+    """``failed_rows`` / ``uncovered_rows`` / ``declared_gaps`` /
+    ``unratified_rows`` for the declared ``spec_rows`` (empty when none were
+    declared). ``unratified_rows`` lists every non-gap row declared
+    ``ratified: false``, covered or not."""
     if spec_rows is None:
         return {}
     covered = {r for _, rows, g in graded if g[0] == "met" for r in rows or []}
@@ -7247,6 +7266,9 @@ def _multi_row_info(
             {"id": row["id"], "gap": row["gap"]}
             for row in spec_rows
             if row["gap"] is not None
+        ],
+        "unratified_rows": [
+            row["id"] for row in spec_rows if row["gap"] is None and not row["ratified"]
         ],
     }
 

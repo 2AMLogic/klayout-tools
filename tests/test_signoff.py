@@ -16234,3 +16234,124 @@ def test_require_annotation_complete_non_boolean_entry_is_invalid_evidence(tmp_p
     item = _grade_sta_item_5(tmp_path, envelope, require_annotation_complete="true")
     assert item["status"] == "unmet"
     assert item["reason"] == "invalid_evidence"
+
+
+# --------------------------------------------------------------------------- #
+# Item 6: several citations + declared statistical rows (issue #2908)
+# --------------------------------------------------------------------------- #
+
+
+def _item6_rows(tmp_path, entry, rows=None, kind="digital"):
+    evidence = _full_t1_evidence(tmp_path, kind=kind)
+    evidence["6"] = entry
+    manifest = _manifest(kind=kind, evidence=evidence)
+    if rows is not None:
+        manifest["spec_rows"] = {"6": rows}
+    return build_tier_report(manifest), _item6(build_tier_report(manifest))
+
+
+def test_item6_two_declared_rows_one_cited_is_partial_coverage(tmp_path):
+    a = _write(tmp_path, "mc_a.json", YIELD_PASS_ENVELOPE)
+    rows = [{"id": "offset"}, {"id": "gain_err", "gap": "function not implemented"}]
+
+    report, item = _item6_rows(tmp_path, [{"file": a, "rows": ["offset"]}], rows)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "partial_coverage"
+    assert item["detail"]["uncovered_rows"] == []
+    assert item["detail"]["declared_gaps"] == [
+        {"id": "gain_err", "gap": "function not implemented"}
+    ]
+    assert report["tier"] is None
+
+
+def test_item6_second_row_without_a_citation_is_named_uncovered(tmp_path):
+    a = _write(tmp_path, "mc_a.json", YIELD_PASS_ENVELOPE)
+    rows = [{"id": "offset"}, {"id": "gain_err"}]
+
+    _, item = _item6_rows(tmp_path, [{"file": a, "rows": ["offset"]}], rows)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "partial_coverage"
+    assert item["detail"]["uncovered_rows"] == ["gain_err"]
+
+
+def test_item6_unratified_row_is_provisional_not_met(tmp_path):
+    a = _write(tmp_path, "mc_a.json", YIELD_PASS_ENVELOPE)
+    rows = [{"id": "offset", "ratified": False}]
+
+    _, item = _item6_rows(tmp_path, [{"file": a, "rows": ["offset"]}], rows)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "partial_coverage"
+    assert item["detail"]["unratified_rows"] == ["offset"]
+    assert item["detail"]["uncovered_rows"] == []
+
+
+def test_item6_all_declared_rows_covered_and_ratified_is_met(tmp_path):
+    a = _write(tmp_path, "mc_a.json", YIELD_PASS_ENVELOPE)
+    b = _write(tmp_path, "mc_b.json", YIELD_PASS_ENVELOPE)
+    rows = [{"id": "offset"}, {"id": "gain_err", "ratified": True}]
+
+    report, item = _item6_rows(
+        tmp_path,
+        [{"file": a, "rows": ["offset"]}, {"file": b, "rows": ["gain_err"]}],
+        rows,
+    )
+
+    assert item["status"] == "met"
+    assert item["row_coverage"]["unratified_rows"] == []
+    assert report["tier"] == "T1"
+
+
+def test_item6_failing_citation_names_its_row_while_another_passes(tmp_path):
+    a = _write(tmp_path, "mc_a.json", YIELD_PASS_ENVELOPE)
+    bad = _write(tmp_path, "mc_bad.json", YIELD_FAIL_ENVELOPE)
+    rows = [{"id": "offset"}, {"id": "gain_err"}]
+
+    _, item = _item6_rows(
+        tmp_path,
+        [{"file": a, "rows": ["offset"]}, {"file": bad, "rows": ["gain_err"]}],
+        rows,
+    )
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "check_failed"
+    assert item["detail"]["failed_rows"] == ["gain_err"]
+
+
+@pytest.mark.parametrize(
+    "entry_rows, rows",
+    [
+        (["undeclared"], [{"id": "offset"}]),
+        (["gain_err"], [{"id": "gain_err", "gap": "not implemented"}]),
+        (["offset"], [{"id": "offset"}, {"id": "offset"}]),
+        (["offset"], [{"id": "offset", "ratified": "no"}]),
+    ],
+)
+def test_item6_malformed_row_declaration_is_invalid_evidence(
+    tmp_path, entry_rows, rows
+):
+    a = _write(tmp_path, "mc_a.json", YIELD_PASS_ENVELOPE)
+
+    _, item = _item6_rows(tmp_path, [{"file": a, "rows": entry_rows}], rows)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "invalid_evidence"
+
+
+def test_item6_not_applicable_with_declared_rows_is_invalid(tmp_path):
+    _, item = _item6_rows(tmp_path, _na_entry(tmp_path), [{"id": "offset"}])
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "invalid_evidence"
+
+
+def test_item6_without_declaration_grades_as_before(tmp_path):
+    a = _write(tmp_path, "mc_a.json", YIELD_PASS_ENVELOPE)
+
+    _, item = _item6_rows(tmp_path, a)
+
+    assert item["status"] == "met"
+    assert "citations" not in item
+    assert "row_coverage" not in item
