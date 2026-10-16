@@ -737,6 +737,18 @@ def test_ambiguity_does_not_downgrade_a_report_only_margin(tmp_path, monkeypatch
     assert report["status"] == "pass"
 
 
+def test_margin_tokens_are_a_mandatory_transfer_runner_feature():
+    # Margin tokens are ``transfer`` metrics, so the mandatory ``transfer``
+    # worker gate (issue #2924) covers them; they shipped in the same release
+    # segment as ``transfer`` itself, so no separate registry entry is needed.
+    for metric in sim_transfer_meas.MARGIN_METRICS:
+        request = {
+            "measurements": [{"name": "m", "transfer": {**_PM_MIN, "metric": metric}}]
+        }
+        assert sim_batch._request_features(request) == ["transfer"], metric
+    assert "transfer" in sim_batch._MANDATORY_RUNNER_FEATURES
+
+
 @pytest.mark.parametrize("backend", ["batch", "remote"])
 def test_margin_tokens_reach_the_offhost_backends(tmp_path, monkeypatch, backend):
     """Issue #3626: like plain transfer (#2924), a margin request is no longer
