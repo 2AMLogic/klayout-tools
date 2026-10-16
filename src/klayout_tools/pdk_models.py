@@ -396,13 +396,16 @@ MOS_FLAVOUR_PROPERTY = "mos_flavour"
 #: -- the derivation `decks/sg13g2.py`'s `mos_flavours` entry transcribes.
 #:
 #: sky130's 5V-gate/10.5V-drain thick-oxide pair (issue #1369) is confirmed in
-#: the same real fetched sky130A install (volare,
-#: `c6d73a35f524070e85faff4a6a9eef49553ebc2b`) the module docstring's `01v8`
-#: entry above cites -- `libs.tech/combined/continuous/models_fet.spice:15382`
-#: (`.subckt  sky130_fd_pr__nfet_g5v0d10v5  d g s b  mult=1`) and `:36917`
-#: (the `pfet` analogue), each followed by the identical
+#: the same real fetched sky130A install (ciel,
+#: `f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7`) the module docstring's `01v8`
+#: entry above cites --
+#: `libs.tech/combined/continuous/models_fet/sky130_fd_pr__nfet_g5v0d10v5.spice:29`
+#: (`.subckt  sky130_fd_pr__nfet_g5v0d10v5  d g s b  mult=1`) and
+#: `.../sky130_fd_pr__pfet_g5v0d10v5.spice:30` (the `pfet` analogue), each
+#: followed by the identical
 #: `.param  l = 1 w = 1 nf = 1 ad = 0 as = 0 pd = 0 ps = 0 ...` line the
-#: `01v8` pair carries at `:10037`, i.e. the same `d g s b` terminal order
+#: `01v8` pair carries at `.../sky130_fd_pr__nfet_01v8.spice:34`, i.e. the
+#: same `d g s b` terminal order
 #: and `l`/`w`/`as`/`ad`/`ps`/`pd` call-site convention
 #: :func:`create_model_binding_delegate` already writes for the default pair.
 #: Extracted under exactly those names by the PDK's own
@@ -420,7 +423,7 @@ MOS_FLAVOUR_PROPERTY = "mos_flavour"
 #: independent sources in the same install: the KLayout layer-properties
 #: file `libs.tech/klayout/tech/sky130A.lyp:3127`
 #: (`<name>hvi.drawing - 75/20</name>`) and the magic technology file
-#: `libs.tech/magic/sky130A.tech:3980` (`calma HVI 75 20`).
+#: `libs.tech/magic/sky130A.tech:3975` (`calma HVI 75 20`).
 _MOS_MODEL_FLAVOURS: dict[tuple[str, str], dict[str, dict[str, str]]] = {
     ("gf180mcu", "gf180mcu"): {
         "06v0": {
@@ -1449,7 +1452,15 @@ _CAPACITOR_MODEL_TABLE: dict[tuple[str, str], dict[str, str]] = {
         "sky130_fd_pr__model__cap_mim": "sky130_fd_pr__cap_mim_m3_1",
         "sky130_fd_pr__model__cap_mim_m4": "sky130_fd_pr__cap_mim_m3_2",
     },
+    # The `1f0`/`1f5` densities (selectable via `--deck-option mim_cap=`,
+    # issue #1151) are bound too (issue #3090): the PDK ships
+    # `.subckt cap_mim_1f0_m4m5_noshield` / `cap_mim_1f5_m4m5_noshield`
+    # (`libs.tech/ngspice/sm141064_mim.ngspice`, same `c_length`/`c_width`
+    # parameters as `2f0`), whose `mim_corner_*` params the process-corner
+    # sections scale -- a bare `C` card cannot follow those corners.
     ("gf180mcu", "gf180mcu"): {
+        "cap_mim_1f0_m4m5_noshield": "cap_mim_1f0_m4m5_noshield",
+        "cap_mim_1f5_m4m5_noshield": "cap_mim_1f5_m4m5_noshield",
         "cap_mim_2f0_m4m5_noshield": "cap_mim_2f0_m4m5_noshield",
     },
     # sg13g2's two declared MIM capacitor classes (issue #1470; classes

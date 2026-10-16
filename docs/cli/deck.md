@@ -297,7 +297,7 @@ could re-check mechanically.
         "source_repo": "fossi-foundation/open-pdks",
         "source_path": "sky130/klayout/sky130.lydrc",
         "rule_id": "poly.1a",
-        "commit": "c6d73a35f524070e85faff4a6a9eef49553ebc2b"
+        "commit": "f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7"
       }
     }
   ]
@@ -496,6 +496,17 @@ field by field, which two separate passes on a real design had to do
   `requires`). `required_layers` is the "what am I missing?" list — every
   one of these has to be drawn over the same geometry, and missing any one
   of them fails identically and silently.
+- `topology` — `resistor` entries only (issue #2679): how the `body`
+  terminal's layer relates to the `marker`. `"overlap"` (the default, and
+  every resistor class except sg13g2's poly resistors) means the marker is drawn *on* the
+  body conductor and the resistor is their overlap, narrowed by `requires`/
+  `excludes`. `"abutting_heads"` (sg13g2's `rsil`/`rppd`/`rhigh`) means the
+  marker layer *is* the resistive body — `requires`/`excludes` narrow the
+  marker region — and the `body` layer is only the contact heads: it must
+  touch that body in two separate head regions (abutting with zero overlap,
+  as IHP's own PCells draw it, or the two ends of a continuous bar the
+  marker covers). A body with a missing head, or a gap to one, is not a
+  resistor.
 - `provenance` — the entry's structured upstream PDK-LVS citation, or `null`
   when it carries none yet (the same shape `klt deck rules` reports).
 - Every layer is `{"layer": <int>, "datatype": <int>, "name": <str|null>}` —

@@ -368,6 +368,48 @@ something the mode can tighten.
 straightened control (it must equal the legacy short-circuit `Z_sc`, same
 geometry) and a bent fixture against real NEC2++.
 
+### Winding comparison (issue #2730)
+
+`tests/test_mom_cross_validation.py::test_bent_winding_driving_point_matches_nec_reference`
+validates `klt mom`'s series-path winding sweep against this mode.
+
+**Fixture.** Signal L `(0,0) → (200,0) → (200,100)` and return U
+`(200,120) → (180,120) → (180,20) → (0,20)` µm, 2×2 µm sections on
+`z ∈ [0, 2]` µm, vacuum, 1 GHz, equal-area radius `1.128379 µm`. NEC2++
+(`PyNEC` 2.3.4) closes the loop with the 20 µm far connector and near feed
+stub. `klt mom` models the same four bars as four conductors (signal winding,
+return winding, connector, stub), the connector and stub shortened by 1.5 µm
+at each end so no two conductors touch (17 µm electrical instead of 20 µm),
+and forms `Z_in = sᵀ Z s` from the full impedance matrix, `s = (+1, −1, +1,
+−1)` giving each conductor's current direction against its canonical
+traversal (the return runs from the lexicographically larger terminal; the
+stub carries the NEC source polarity: signal terminal positive).
+
+**Segmentation.** The two solvers are each run at their own valid
+discretisation, not at one shared segment length: `klt mom` at 1 µm cells
+(converged, see `mom-validation.md` §3), NEC2++ at 10 and 20 µm. NEC2's
+thin-wire kernel wants segments ≳ 8 wire radii (≈ 9 µm here); below that its
+answer is not usable on this fixture (`Im Z_in` at 1 GHz for NEC segment
+20/10/8/6/5/4/3/2.5/2 µm: 2.45, 2.26, 2.59, 2.73, 2.81, 3.35, 2.55, −3.27,
+−40.6 Ω — the single-segment connector and stub sit next to ever finer
+neighbours). The agreement is therefore limited by the oracle, and the
+tolerance is set from its spread rather than from `klt mom`'s own
+convergence.
+
+| Quantity | `klt mom` | NEC2++ | rel. diff | Bound |
+|---|---|---|---|---|
+| `Z_in`, NEC segment 10 µm | 1.26e-10 + 2.2033j Ω | 1.54e-10 + 2.2596j Ω | **2.49%** | 15% |
+| `Z_in`, NEC segment 20 µm | 1.26e-10 + 2.2033j Ω | 1.51e-10 + 2.4463j Ω | **9.93%** | 15% |
+| control: return path co-directed (wrong polarity) | 5.0543j Ω | 2.2596j Ω | 124% | must exceed 45% |
+
+The real parts are radiation resistance only (≲1e-9 Ω, both lossless) and are
+asserted merely negligible against the reactance. The static PEEC loop
+reactance of the same request (measured once, not asserted) is 2.388j Ω; `klt mom`'s 2.203j Ω sits 7.7%
+below it for the thin-wire-kernel reason in `mom-validation.md` §3, and NEC2++
+straddles the two. The control shows the comparison is not vacuous: a solver
+that ignored the traversal direction (or mis-signed the antiparallel
+coupling) lands far outside the bound.
+
 ## Reproducing this cross-check
 
 ```bash
