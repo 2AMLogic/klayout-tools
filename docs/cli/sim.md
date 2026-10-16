@@ -1283,6 +1283,32 @@ reports only the first two, a failed job the first three. Under sharding every
 `client_status_terminal_at - client_submitted_at - elapsed_seconds`; it is an
 approximation, since it also includes upload, launch and polling latency.
 
+### Request features and minimum runner version ([#2877](https://github.com/2AMLogic/klayout-tools/issues/2877))
+
+Older fleet runners reject some newer request fields loudly (for example
+`each request.measurements[] entry requires 'name' and 'spice'` on 0.5.0) and
+silently ignore others. The minimum `klt` release that understands each field
+is recorded in `klayout_tools.sim_batch.REQUEST_FEATURE_MIN_RUNNER_VERSION`;
+this table is tested against it. `unreleased` means the feature is on `main`
+but no tagged release contains it yet.
+
+| Request feature | Minimum runner `klt` |
+| --- | --- |
+| `measurements[].expr` | 0.7.0 |
+| `corners.process[].sections[]` (object form) | 0.7.0 |
+| `options.ngspice_init` | 0.7.0 |
+| `options.osdi_preload` | 0.7.0 |
+| `analysis_steps[].measurements[]` (noise analysis `.meas` cards) | unreleased |
+
+Safe on an old runner: a plain `measurements[]` `{name, spice}` `.meas` card
+and the plain-string `sections[]` form. Prefer them over `expr` when the
+fleet image is older than the client. Do not rely on `options.ngspice_init` /
+`options.osdi_preload` against an older image: they may be silently ignored.
+
+In `expr` expressions, spell comparisons `lt` / `gt`, not `<` / `>`: ngspice 42
+parses `<` inside a `let` as a redirect while 46 accepts it, and `lt`/`gt`
+work on both ([#2940](https://github.com/2AMLogic/klayout-tools/issues/2940)).
+
 ### Runner/client `klt` version skew ([#2719](https://github.com/2AMLogic/klayout-tools/issues/2719))
 
 The job runs the `klt` baked into the fleet image, which can be older than the

@@ -5457,6 +5457,23 @@ def test_prelaunch_feature_check_warn_mode_does_not_raise(tmp_path, monkeypatch)
     sb._enforce_published_runner_features(request, assessment)
 
 
+def test_request_feature_registry_matches_docs_table():
+    """Every registry entry has a matching row in docs/cli/sim.md (#2877)."""
+    from pathlib import Path
+
+    from klayout_tools.sim_batch import REQUEST_FEATURE_MIN_RUNNER_VERSION as reg
+
+    assert reg
+    doc = (Path(__file__).resolve().parents[1] / "docs/cli/sim.md").read_text()
+    for feature, version in reg.items():
+        assert version is None or version.count(".") == 2
+        shown = version if version is not None else "unreleased"
+        row = f"| `{feature.split(' (')[0]}`"
+        assert row in doc, feature
+        line = next(ln for ln in doc.splitlines() if ln.startswith(row))
+        assert line.rstrip().endswith(f"| {shown} |"), (feature, line)
+
+
 # --------------------------------------------------------------------------- #
 # Whole-job ceiling: opt-in auto-split (issue #3446)
 # --------------------------------------------------------------------------- #
