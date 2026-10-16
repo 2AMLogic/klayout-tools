@@ -101,6 +101,14 @@ one) — the "new optional member, absent when not applicable" rule above.
 No `schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s
 "Threshold-crossing time series (`measurements[].crossings`)".
 
+`klt sim` also gains an additive `environment.netlist_identity` (normalised,
+comment/whitespace/path-insensitive netlist-closure hash; `null` plus
+`netlist_identity_error` when not computable) and an optional request field
+`expect_netlist_identity`: a value differing from the computed identity is
+refused before simulating (exit 1, usual error envelope) with both stamps in
+the message. No `schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s
+"`environment.netlist_identity`".
+
 This caveat is narrow: it covers a field's *value set* growing (a new enum
 member appearing), not what an existing, unchanged-type field's value
 *means*. Redefining the semantics of an already-shipped field — e.g. `klt
@@ -652,6 +660,12 @@ stability statement, concrete precedents, and drift-detection guidance, and
     stderr warning instead. Absent in the ordinary single-install case, so
     an unambiguous run's `provenance` is byte-identical to what it was
     before this field existed and a stored-report diff cannot drift on it.
+  - `compatibility` (issue #3427) — present **only** when the resolved
+    variant's `SOURCES` stamp differs from the declared open_pdks pin
+    (`klt pdk`'s `compatibility.status == "mismatch"`):
+    `{status: "mismatch", package, expected}`. Absent when the status is
+    `match`/`unknown`/`not_declared`, so a matching run's `provenance` is
+    byte-identical to before.
     Populated by `klt sim` today; the underlying detection lives in
     `klayout_tools.pdk.find_pdk` (`ambiguous_roots`) and is available to
     every verb that resolves a PDK — see `docs/cli/pdk.md`.

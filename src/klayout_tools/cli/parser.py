@@ -607,6 +607,45 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
         help="with --batch-set, how many requests are in flight at once (default: 4)",
     )
     sim_parser.add_argument(
+        "--capacity-retries",
+        dest="capacity_retries",
+        type=int,
+        default=None,
+        help=(
+            "with --batch-set, re-submit a request refused for fleet capacity "
+            "(batch_no_capacity / batch_concurrency_cap) up to N more times "
+            "with doubling backoff (default: 0, off); other failures are "
+            "never retried (issue #3520)"
+        ),
+    )
+    sim_parser.add_argument(
+        "--submit-only",
+        dest="submit_only",
+        action="store_true",
+        default=False,
+        help=(
+            "with --backend batch, upload and launch the job, print its "
+            "identity (job_id, bucket, region, launched_at, request_sha256) "
+            "and exit 0 immediately -- no polling, no collection (issue "
+            "#3073). Read the job later with --job-status. One job only: "
+            "refused with --hosts > 1, --resume, --plot, a deck request, or "
+            "a non-batch backend. See docs/cli/sim.md 'Asynchronous submit'."
+        ),
+    )
+    sim_parser.add_argument(
+        "--job-status",
+        dest="job_status",
+        metavar="JOB_ID",
+        default=None,
+        help=(
+            "read one batch job's state by id (one status.json read; "
+            "state `pending` before the instance writes one) and exit. The "
+            "positional request supplies the bucket/region/profile. Submits "
+            "and launches nothing. Unit counts are not published by the "
+            "fleet and are not reported. See docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
         "-o",
         "--outdir",
         default=None,
@@ -680,6 +719,18 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
             "checkpoint.json), skipping corners already completed by a "
             "prior interrupted run of this same request; overrides the "
             "request's own `options.resume` when given. See docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        help=(
+            "validate the request and print its expansion (resolved "
+            "backend/engine, corner ids, per-sample Monte Carlo seeds, "
+            "staged model files, unknown-key warnings) without running "
+            "ngspice or touching SSH/S3/EC2; exits 1 on any validation "
+            "failure. Corner/Monte Carlo requests only. See docs/cli/sim.md."
         ),
     )
     sim_parser.add_argument(
@@ -2375,6 +2426,27 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     extract_parser.add_argument(
+        "--probe",
+        dest="probes",
+        action="append",
+        default=None,
+        metavar="name=ID,layer=ROLE,x=UM,y=UM",
+        help=(
+            "ask which extracted net lies under one point (issue #2986), as "
+            "'name=<id>,layer=<role>,x=<um>,y=<um>'; repeatable. x/y are "
+            "micrometres in the top cell's frame (the frame label positions "
+            "use). ROLE is the same vocabulary as --label-layer: `well`, "
+            "`poly`, or `metal<i>` (0-based, index-aligned with the deck's "
+            "metal stack). Answered on the extraction this command already "
+            "runs, so the net is the same one `nets[]` reports under "
+            "--def-net-names / --abstract-cells / --pins. The JSON "
+            "`probes[]` carries {name, layer, x_um, y_um, found, net, "
+            "cluster_id}; two probes on one net share `cluster_id`. A point "
+            "on empty space or inside a black-box region is `found: false`, "
+            "not an error. See docs/cli/extract.md's 'Point-to-net probes'."
+        ),
+    )
+    extract_parser.add_argument(
         "--defer-resistor-fixed-offset",
         dest="defer_resistor_fixed_offset",
         action="store_true",
@@ -2871,6 +2943,24 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "`flatten_schematic` plus the `schematic_flatten` block (path, "
             "sha256, inlining summary). The klt pex counterpart of klt "
             "lvs's options.flatten_reference."
+        ),
+    )
+    pex_parser.add_argument(
+        "--device-only-leg",
+        dest="device_only_leg",
+        action="store_true",
+        default=False,
+        help=(
+            "also measure a parasitic-free third leg (issue #3298): the same "
+            "layout extracted again without parasitics (same devices and "
+            "AS/AD/PS/PD, no R/C cards or star nodes), written beside the "
+            "extracted netlist as <name>.device-only<ext>, and every "
+            "testbench re-run against it. Each delta[] row then also carries "
+            "device_only_value, representation_delta_pct (device-only vs "
+            "schematic) and parasitic_delta_pct (extracted vs device-only), "
+            "splitting device-representation effects from parasitics. Not "
+            "supported with --measure-command. Off by default -- "
+            "byte-identical to today's behavior."
         ),
     )
     pex_parser.add_argument(
@@ -5273,6 +5363,21 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
             "replays a report's recorded selection)"
         ),
     )
+    drc_parser.add_argument(
+        "--waivers",
+        dest="waivers",
+        metavar="PATH",
+        default=None,
+        help=(
+            "rule-scoped cell waivers (issue #3483, --engine curated only): "
+            'a JSON file {"waivers": [{"cell": ..., "rule": <id|glob>, '
+            '"justification": ...}]}. Markers whose source_cell and rule '
+            "match move out of violations/violation_count/status into a "
+            "separate waived array (with waiver_justification), never "
+            "dropped silently; the file is pinned in provenance.waivers. "
+            "See docs/cli/drc.md, 'Waivers'"
+        ),
+    )
     _add_format_arg(drc_parser)
     _record_request_argv_flags(
         drc_parser, exclude=(*_REQUEST_ARGV_FLAG_EXCLUDE, "list_rules")
@@ -5795,6 +5900,20 @@ def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
             "'findings_only'. Gate on erc_status, as any --pdk-less run "
             "already must. Mutually exclusive with --pdk (a limit table "
             "with nothing to grade) -- passing both exits 1."
+        ),
+    )
+    erc_parser.add_argument(
+        "--omit-antenna-tables",
+        action="store_true",
+        help=(
+            "with --findings-only, drop the all-'unchecked' gates[] array "
+            "(gate_count keeps the real count) and collapse the antenna "
+            "coverage's per-gate skipped/gate_reference_level entries to "
+            "one aggregate entry each, so a dense layout's report is small "
+            "enough to commit verbatim (issue #3011). Sets "
+            "antenna_tables_omitted: true; every verdict, erc_findings and "
+            "the exit code are identical to the same run without it. "
+            "Requires --findings-only -- passing it alone exits 1."
         ),
     )
     _add_format_arg(erc_parser)
