@@ -28,6 +28,12 @@ not `klt --version`, if you need to detect this kind of drift. See
   than a guessed N. See `docs/cli/lvs.md`'s
   `device.series_fold_offset_absorbed` section. Additive; no `schema_version`
   bump.
+- **`klt pex`: asymmetric `absent` measurement is a delta `error`** (issue
+  #3620): a `delta[]` row whose optional measurement is `"absent"` on exactly
+  one side (schematic or extracted) is now `status: "error"` (`delta_pct:
+  null`, `error` blames the absent side) instead of a silent `pass`; absent on
+  both sides stays `pass`. `schematic_status` / `extracted_status` may now be
+  `"absent"`. Additive: `delta[].status` stays `pass|fail|error`.
 - **`klt extract --resistance-graph`: opt-in terminal-aware resistance graph**
   (issue #2982, Stage 3.D5 increment 3): adds `parasitics.nets[].resistance_graph`
   (`status`, `terminals`, `pair_resistance_ohm`, `legacy_resistance_ohm`,

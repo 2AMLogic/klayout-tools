@@ -1305,7 +1305,10 @@ def _row_status(
     actually grades): ``"pass"`` unless the extracted measurement itself
     failed or errored, or the schematic side is missing/errored (in which
     case no trustworthy delta exists to report at all -- ``"error"``, never
-    a silently-fabricated ``"pass"``)."""
+    a silently-fabricated ``"pass"``). An optional measurement that is
+    ``"absent"`` (issue #3620) on exactly one side is a lost -- or newly
+    appearing -- figure, so also ``"error"``; absent on both sides is
+    ``"pass"`` (the figure legitimately does not exist)."""
     extracted_status = extracted_measurement["status"]
     schematic_status = (
         schematic_measurement["status"]
@@ -1318,6 +1321,10 @@ def _row_status(
         or extracted_status == "error"
     ):
         return "error"
+    if (schematic_status == "absent") != (extracted_status == "absent"):
+        return "error"
+    if extracted_status == "absent":
+        return "pass"
     if extracted_status == "fail":
         return "fail"
     return "pass"
@@ -1478,9 +1485,13 @@ def _build_delta_rows(
             if row["status"] == "error":
                 # Issue #3062: blame the schematic side when it is the one
                 # with no trustworthy value, else the extracted side.
-                schematic_bad = (
-                    schematic_measurement is None
-                    or schematic_measurement["status"] == "error"
+                # Issue #3620: an asymmetric ``absent`` blames the absent side.
+                schematic_bad = schematic_measurement is None or (
+                    schematic_measurement["status"] == "error"
+                    or (
+                        schematic_measurement["status"] == "absent"
+                        and extracted_measurement["status"] != "absent"
+                    )
                 )
                 row["error"] = (
                     _side_error("schematic", schematic_report, corner_id)
