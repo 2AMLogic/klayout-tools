@@ -1722,7 +1722,8 @@ adding a second one:
 - **An explicit plane wins over the automatic fallback.** A net that names its
   own `layer_role` is never retried onto `routing.cross_block_layer_role`; a
   net that names none keeps that fallback (and the #1393/#1680 retries)
-  exactly as before. A net that genuinely needs two planes says so per leg.
+  exactly as before. A net that genuinely needs two planes says so per leg — and
+  a leg that changes plane *mid-route* says so per waypoint (below).
 - **Per-leg overrides** (`connectivity[].legs[].layer_role`/`.width_um`) do
   the same for one named leg of any net, overriding the net's own choice.
   `layer_role` is the part that takes control of a plane: a leg that names one
@@ -1744,6 +1745,59 @@ adding a second one:
 - **Purely additive.** Omitting both fields reproduces today's behaviour
   byte-for-byte (the test suite asserts the composed GDS bytes are identical),
   so there is no `schema_version` bump.
+
+### Changing plane mid-leg (plane-bearing waypoints, #2930)
+
+A leg's `waypoints_um` entry may carry a third element, a layer role:
+`[x_um, y_um, "layer_role"]`. The route **changes plane at that point** and
+continues on the named plane — so a two-layer H/V channel route is expressible
+from JSON alone, with no caller-built junction GDS:
+
+```json
+{
+  "net": "DBUS",
+  "pins": [ /* ... */ ],
+  "legs": [{
+    "from_pin": { "block": "u1", "port": "U0_D" },
+    "to_pin":   { "block": "u2", "port": "U0_D" },
+    "layer_role": "metal2",
+    "waypoints_um": [[5.6, 2.5], [7.0, 2.5, "metal3"], [9.8, 2.5], [9.8, 0.21]]
+  }]
+}
+```
+
+The leg starts on its own plane (`layer_role`, else the net's), runs to
+`(7.0, 2.5)` on met1, takes a via ladder there, and finishes on met2. A 2-pin
+net's own `waypoints_um` accepts the same triple (the net then starts on its
+own plane). A role equal to the plane already being drawn on is just a plain
+waypoint; the two-number form is unchanged.
+
+- **Per segment, per plane.** The leg is routed as one same-plane segment per
+  plane. Every routability check — obstacles, guard rings, own-block shorts —
+  and the route-vs-route check run for each segment on the plane it is drawn
+  on: two same-plane segments of different nets that cross are still
+  rejected, segments on different planes are not compared as a short.
+- **The via ladder is the existing one.** The plane change is drawn by the
+  same #454/#1567 ladder (via square plus enclosure-sized landing pads on both
+  planes) a block pin gets, so it is DRC-legal by the same sizing. A plane
+  with no via ladder to the adjacent plane rejects that leg
+  (`reason: "plane change at waypoints_um[k] (x, y): …"`), never a
+  disconnected stub.
+- **Pinned like a layer-pinned leg.** No cross-block retry, and no automatic
+  re-pickup of the pin pair if a segment is rejected.
+- **Width** is the leg's `width_um` (else the net's), floored against *each*
+  plane's own deck minimum; an inherited width that is too narrow for the new
+  plane is an application error naming `legs[i].width_um`.
+- **Errors** (application errors, exit 1, the usual `error.message`): a
+  non-string or empty role (`...waypoints_um[k][2] must be a non-empty layer
+  role string`), a waypoint of more than three elements, an unknown role or a
+  role with no layer in the family's deck (named `legs[i].waypoints_um[k]`).
+- **Purely additive**; no `schema_version` bump. The response is unchanged —
+  one `legs[]` entry per named leg.
+
+The design record, including the rejected alternatives (a net-level H/V mode
+and a hand-placed junction block), is
+[`docs/design/gen-compose-plane-bearing-waypoints.md`](../design/gen-compose-plane-bearing-waypoints.md).
 
 ### What this does *not* do
 
