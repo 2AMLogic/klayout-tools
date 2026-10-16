@@ -2014,7 +2014,7 @@ def test_unsupported_model_level_corner_is_an_error_never_a_pass(tmp_path, monke
         },
     )
 
-    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None):
         log_path = cmd[cmd.index("-o") + 1]
         with open(log_path, "w", encoding="utf-8") as handle:
             handle.write(_NO_LEVEL72_LOG)
@@ -3222,7 +3222,7 @@ def _stub_subprocess_run(
     side_effect=None,
     returncode: int = 0,
 ):
-    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None):
         log_path = cmd[cmd.index("-o") + 1]
         if side_effect is not None:
             raise side_effect
@@ -3632,7 +3632,7 @@ def test_run_sim_stubbed_expr_is_evaluated_and_graded_in_every_corner(
         },
     )
 
-    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None):
         deck_text = Path(cmd[2]).read_text()
         assert "let vout_op = v(out)" in deck_text
         assert "print vout_op" in deck_text
@@ -3669,7 +3669,7 @@ def test_run_sim_stubbed_expr_samples_are_pooled_into_monte_carlo_statistics(
         },
     )
 
-    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None):
         deck_text = Path(cmd[2]).read_text()
         sample_index = int(re.search(r"mc_sample_index=(\d+)", deck_text).group(1))
         log_path = cmd[cmd.index("-o") + 1]
@@ -3729,7 +3729,7 @@ def _stub_ngspice_subprocess(monkeypatch, *, captured_cmds: list | None = None):
     """Like `_stub_subprocess_run` above, but also records every invoked
     `cmd` so a test can assert which binary was actually spawned."""
 
-    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None):
         if captured_cmds is not None:
             captured_cmds.append(cmd)
         log_path = cmd[cmd.index("-o") + 1]
@@ -3987,7 +3987,7 @@ def test_run_calibration_probe_measures_wall_time(tmp_path, monkeypatch):
     point = sim.CornerPoint(None, {}, 27.0)
     probe_timeouts: list[float] = []
 
-    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None):
         probe_timeouts.append(timeout)
         log_path = cmd[cmd.index("-o") + 1]
         with open(log_path, "w", encoding="utf-8") as handle:
@@ -4017,7 +4017,7 @@ def test_run_calibration_probe_timeout_reports_timed_out(tmp_path, monkeypatch):
     _write_body(tmp_path)
     point = sim.CornerPoint(None, {}, 27.0)
 
-    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None):
         raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
 
     monkeypatch.setattr(sim.subprocess, "run", fake_run)
@@ -4044,7 +4044,7 @@ def test_run_calibration_probe_missing_binary_is_inconclusive(tmp_path, monkeypa
     _write_body(tmp_path)
     point = sim.CornerPoint(None, {}, 27.0)
 
-    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None):
         raise FileNotFoundError("no ngspice")
 
     monkeypatch.setattr(sim.subprocess, "run", fake_run)
@@ -4068,7 +4068,7 @@ def test_run_calibration_probe_aborted_analysis_is_inconclusive(tmp_path, monkey
     _write_body(tmp_path)
     point = sim.CornerPoint(None, {}, 27.0)
 
-    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None):
         log_path = cmd[cmd.index("-o") + 1]
         with open(log_path, "w", encoding="utf-8") as handle:
             handle.write("Warning: singular matrix\nsimulation(s) aborted\n")
@@ -5542,7 +5542,7 @@ def _stub_subprocess_values(monkeypatch, name: str, values: list[float | None]) 
     """
     state = {"index": 0}
 
-    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None):
         log_path = cmd[cmd.index("-o") + 1]
         value = values[state["index"]]
         state["index"] += 1
@@ -5892,6 +5892,8 @@ def _stripped_report(report: dict) -> dict:
     byte-exact-fixture caveat)."""
     clone = json.loads(json.dumps(report))
     clone["environment"].pop("engine_version", None)
+    # Issue #2970: legitimately differs between `local` and `local-parallel`.
+    clone["environment"].pop("threads_per_worker", None)
     for corner in clone["corners"]:
         corner.pop("runtime_s", None)
     return clone
@@ -5979,7 +5981,7 @@ def test_run_sim_local_parallel_backend_is_order_identical_to_local(
         "options": {"max_workers": 4},
     }
 
-    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None):
         deck_path = cmd[2]
         log_path = cmd[cmd.index("-o") + 1]
         deck_text = Path(deck_path).read_text()
@@ -6035,7 +6037,7 @@ def test_run_sim_local_parallel_failing_corner_does_not_abort_siblings(
         },
     )
 
-    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None):
         deck_path = cmd[2]
         log_path = cmd[cmd.index("-o") + 1]
         deck_text = Path(deck_path).read_text()
@@ -6480,7 +6482,7 @@ def _fake_run_sleeping(run_calls: list, sleep_s: float = 0.1):
     sleeps ``sleep_s`` before "completing" -- used to make budget/orphan
     checks between corners deterministic without a real ngspice binary."""
 
-    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None):
         deck_path = cmd[2]
         log_path = cmd[cmd.index("-o") + 1]
         deck_text = Path(deck_path).read_text()
@@ -7236,7 +7238,7 @@ def test_run_sim_monte_carlo_statistics_over_sharded_run_equal_unsharded(
         "options": {"max_workers": 4},
     }
 
-    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None):
         deck_path = cmd[2]
         log_path = cmd[cmd.index("-o") + 1]
         deck_text = Path(deck_path).read_text()
@@ -9923,7 +9925,7 @@ def _stub_subprocess_run_with_waveform(monkeypatch, *, points, log_text="clean r
     fakes that side effect so the plot-writing code under test has a real
     waveform artifact to read."""
 
-    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None):
         log_path = cmd[cmd.index("-o") + 1]
         with open(log_path, "w", encoding="utf-8") as handle:
             handle.write(log_text)
@@ -11004,7 +11006,7 @@ def _stub_subprocess_values_with_logs(
     """
     state = {"index": 0}
 
-    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None):
         log_path = cmd[cmd.index("-o") + 1]
         index = state["index"]
         state["index"] += 1
@@ -11178,7 +11180,7 @@ def _stub_subprocess_run_capturing_cwd(
     real code passed, so a test can assert which directory ngspice was
     actually launched from (issue #2520)."""
 
-    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None):
         if captured_cwds is not None:
             captured_cwds.append(cwd)
         log_path = cmd[cmd.index("-o") + 1]
@@ -11399,7 +11401,7 @@ def test_run_sim_ngspice_init_not_forwarded_to_xyce(tmp_path, monkeypatch):
         },
     )
 
-    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None):
         log_path = cmd[cmd.index("-l") + 1]
         with open(log_path, "w", encoding="utf-8") as handle:
             handle.write("Xyce version 7.10.0\n")
@@ -11491,7 +11493,7 @@ def _capture_decks(monkeypatch) -> list[str]:
     """Stub ngspice, recording the text of every deck it is handed."""
     decks: list[str] = []
 
-    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None):
         decks.append(Path(cmd[cmd.index("-b") + 1]).read_text())
         log_path = cmd[cmd.index("-o") + 1]
         with open(log_path, "w", encoding="utf-8") as handle:
@@ -13064,7 +13066,7 @@ def test_run_sim_relative_artifacts_dir_is_absolutised(tmp_path, monkeypatch):
     )
     seen = []
 
-    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None):
         log_path = cmd[cmd.index("-o") + 1]
         seen.append((cmd, cwd))
         assert os.path.isabs(log_path)
@@ -14213,3 +14215,101 @@ def test_capture_only_non_tran_stays_error(tmp_path, monkeypatch):
         analysis={"kind": "ac", "args": "dec 10 1 1meg"},
     )
     assert corner["status"] == "error"
+
+
+# Issue #2970: per-worker OpenMP thread control + job-level timeout diagnostic
+def _capture_worker_env(monkeypatch):
+    seen: list[str | None] = []
+
+    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None):
+        seen.append(None if env is None else env.get("OMP_NUM_THREADS"))
+        log_path = cmd[cmd.index("-o") + 1]
+        with open(log_path, "w", encoding="utf-8") as handle:
+            handle.write("")
+        return fake_completed("** ngspice-99\n")
+
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+    return seen
+
+
+def _threads_request(tmp_path, backend, options):
+    _write_body(tmp_path)
+    return _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "backend": backend,
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "corners": {"supply_v": {"vdd": [1.0, 1.5, 1.8]}},
+            "options": options,
+        },
+    )
+
+
+def test_local_parallel_multi_worker_pins_one_omp_thread(tmp_path, monkeypatch):
+    monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
+    request = _threads_request(tmp_path, "local-parallel", {"max_workers": 2})
+    seen = _capture_worker_env(monkeypatch)
+    report = sim.run_sim(str(request))
+    assert seen == ["1", "1", "1"]
+    assert report["environment"]["threads_per_worker"] == 1
+
+
+def test_local_parallel_single_worker_keeps_ambient_env(tmp_path, monkeypatch):
+    request = _threads_request(tmp_path, "local-parallel", {"max_workers": 1})
+    seen = _capture_worker_env(monkeypatch)
+    report = sim.run_sim(str(request))
+    assert seen == [None, None, None]
+    assert "threads_per_worker" not in report["environment"]
+
+
+def test_threads_per_worker_option_overrides_default(tmp_path, monkeypatch):
+    request = _threads_request(
+        tmp_path, "local-parallel", {"max_workers": 2, "threads_per_worker": 4}
+    )
+    seen = _capture_worker_env(monkeypatch)
+    report = sim.run_sim(str(request))
+    assert seen == ["4", "4", "4"]
+    assert report["environment"]["threads_per_worker"] == 4
+
+
+def test_threads_per_worker_applies_to_local_backend(tmp_path, monkeypatch):
+    request = _threads_request(tmp_path, "local", {"threads_per_worker": 2})
+    seen = _capture_worker_env(monkeypatch)
+    sim.run_sim(str(request))
+    assert seen == ["2", "2", "2"]
+
+
+@pytest.mark.parametrize("bad_value", [0, -1, 1.5, "2", True])
+def test_invalid_threads_per_worker_raises(tmp_path, bad_value):
+    request = _threads_request(
+        tmp_path, "local-parallel", {"threads_per_worker": bad_value}
+    )
+    with pytest.raises(sim.SimError, match="threads_per_worker"):
+        sim.run_sim(str(request))
+
+
+def _timed_out_corner(runtime_s, *, code="timeout"):
+    return {
+        "corner_id": "c",
+        "runtime_s": runtime_s,
+        "diagnostics": [{"code": code}] if code else [],
+    }
+
+
+def test_job_timeout_diagnostic_when_every_unit_hits_budget():
+    corners = [_timed_out_corner(300.019) for _ in range(3)]
+    diag = sim._job_timeout_diagnostic(corners, 300.0)
+    assert diag["code"] == sim.ALL_UNITS_AT_TIMEOUT_CODE
+    assert diag["units"] == 3
+
+
+def test_job_timeout_diagnostic_detects_runtime_at_timeout_without_code():
+    corners = [_timed_out_corner(300.0, code=None) for _ in range(2)]
+    assert sim._job_timeout_diagnostic(corners, 300.0) is not None
+
+
+def test_job_timeout_diagnostic_absent_when_any_unit_finished():
+    corners = [_timed_out_corner(300.0), _timed_out_corner(1.7, code=None)]
+    assert sim._job_timeout_diagnostic(corners, 300.0) is None
+    assert sim._job_timeout_diagnostic([_timed_out_corner(300.0)], 300.0) is None

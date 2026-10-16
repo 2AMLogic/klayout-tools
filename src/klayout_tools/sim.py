@@ -270,6 +270,8 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "batch_job_failed",
         "batch_job_timeout",
         "batch_poll_timeout",
+        # Report-level (`environment.job_diagnostic`, issue #2970).
+        "all_units_at_timeout",
     }
 )
 
@@ -2914,6 +2916,7 @@ def _run_sim_corners(
             or max_workers < 1
         ):
             raise SimError("options.max_workers must be a positive integer")
+    threads_per_worker = _validate_threads_per_worker(options.get("threads_per_worker"))
     # Host worker cap (issue #2286): validated here, up front, so a malformed
     # `$KLT_SIM_MAX_WORKERS` fails the sweep with a clean application error
     # before any corner is dispatched -- rather than surfacing from inside a
@@ -3290,9 +3293,13 @@ def _run_sim_corners(
         corner_points=corner_points,
         osdi_preload=osdi_preload,
     )
+    effective_threads = _effective_threads_per_worker(
+        threads_per_worker, backend, max_workers, len(dispatch_points)
+    )
     local_engine_kwargs = (
         {
             "portable_roots": portable_roots,
+            "threads_per_worker": effective_threads,
             "engine": engine,
             "ngspice_binary": ngspice_binary,
             "fail_on_diagnostic": fail_on_diagnostic_codes,
@@ -3585,6 +3592,7 @@ def _run_sim_corners(
         ),
         "netlist_sha256": sha256_file(netlist_path),
     }
+    environment.update(_threads_environment(effective_threads))
     # Issue #2799: `netlist_sha256` covers only the top-level file, so also
     # pin the resolved `.include`/`.inc` closure (same resolver the
     # off-host backends stage with). Additive; an unresolvable closure is
@@ -3924,6 +3932,55 @@ def _timeout_budget_hint(
     }
 
 
+#: Code of the report-level diagnostic :func:`_job_timeout_diagnostic` emits
+#: (issue #2970); listed in the vocabulary above, but it never appears on a
+#: corner, so selecting it in ``options.fail_on_diagnostic`` has no effect.
+ALL_UNITS_AT_TIMEOUT_CODE = "all_units_at_timeout"
+
+#: Relative tolerance for "this unit's ``runtime_s`` equals the timeout".
+_AT_TIMEOUT_TOLERANCE = 0.02
+
+
+def _job_timeout_diagnostic(
+    corners: list[dict[str, Any]], timeout_s: float
+) -> dict[str, Any] | None:
+    """One job-level diagnostic when *every* unit hit the time budget
+    (issue #2970): each unit carries a ``timeout``/``batch_job_timeout``
+    diagnostic, or ran for exactly ``options.timeout_s``. N identical
+    per-unit timeouts plus M "produced no value" measurement errors read
+    like N independent failures; this says they are one cause. Needs >= 2
+    units (a lone timeout is already unambiguous)."""
+
+    def _at_timeout(corner: dict[str, Any]) -> bool:
+        codes = {d.get("code") for d in corner.get("diagnostics") or []}
+        if codes & {"timeout", "batch_job_timeout"}:
+            return True
+        runtime = corner.get("runtime_s")
+        return (
+            isinstance(runtime, (int, float))
+            and timeout_s > 0
+            and abs(runtime - timeout_s) <= _AT_TIMEOUT_TOLERANCE * timeout_s
+        )
+
+    if len(corners) < 2 or not all(_at_timeout(c) for c in corners):
+        return None
+    return {
+        "code": ALL_UNITS_AT_TIMEOUT_CODE,
+        "severity": "error",
+        "units": len(corners),
+        "timeout_s": timeout_s,
+        "message": (
+            f"All {len(corners)} units hit the time budget "
+            f"(options.timeout_s={timeout_s:g}s). The per-unit runtime_s is "
+            "the timeout, not a measured cost, and the job's elapsed time is "
+            "far below units x timeout. Concurrent workers oversubscribing "
+            "the host's cores is a common cause: check "
+            "environment.threads_per_worker, or set "
+            "options.threads_per_worker=1 and split the request."
+        ),
+    }
+
+
 def _attach_timeout_budget_hint(
     environment: dict[str, Any], corners: list[dict[str, Any]], timeout_s: float
 ) -> None:
@@ -3934,6 +3991,9 @@ def _attach_timeout_budget_hint(
     hint = _timeout_budget_hint(corners, timeout_s)
     if hint is not None:
         environment["timeout_budget_hint"] = hint
+    job_diagnostic = _job_timeout_diagnostic(corners, timeout_s)
+    if job_diagnostic is not None:
+        environment["job_diagnostic"] = job_diagnostic
 
 
 def _warn_pdk_ambiguity(resolution: dict[str, Any] | None) -> None:
@@ -6094,6 +6154,7 @@ def _run_local(
     ngspice_options: dict[str, Any] | None = None,
     convergence_retry: dict[str, Any] | None = None,
     portable_roots: sim_portable.Roots | None = None,
+    threads_per_worker: int | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``local`` backend: run each expanded corner sequentially in-process.
 
@@ -6180,6 +6241,7 @@ def _run_local(
             ngspice_options=ngspice_options,
             convergence_retry=convergence_retry,
             portable_roots=portable_roots,
+            threads_per_worker=threads_per_worker,
         )
         corners.append(result)
         if version is not None:
@@ -6328,6 +6390,7 @@ def _run_local_parallel(
     ngspice_options: dict[str, Any] | None = None,
     convergence_retry: dict[str, Any] | None = None,
     portable_roots: sim_portable.Roots | None = None,
+    threads_per_worker: int | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``local-parallel`` backend: fan the expanded corner list across a
     bounded local worker pool.
@@ -6443,6 +6506,7 @@ def _run_local_parallel(
                     ngspice_options=ngspice_options,
                     convergence_retry=convergence_retry,
                     portable_roots=portable_roots,
+                    threads_per_worker=threads_per_worker,
                 )
                 in_flight[future] = next_index
                 next_index += 1
@@ -7454,6 +7518,56 @@ def _persist_waveform_artifact(
     return waveform_path
 
 
+def _worker_env_kwargs(threads_per_worker: int | None) -> dict[str, Any]:
+    """``subprocess.run`` kwargs for one ngspice worker (issue #2970): an
+    ``env`` with ``OMP_NUM_THREADS`` pinned when a thread count was resolved,
+    nothing (inherit unchanged) otherwise, so a single-worker run is untouched."""
+    if threads_per_worker is None:
+        return {}
+    return {"env": {**os.environ, "OMP_NUM_THREADS": str(threads_per_worker)}}
+
+
+def _threads_environment(effective: int | None) -> dict[str, int]:
+    """Additive/optional ``environment.threads_per_worker`` (issue #2970): the
+    OpenMP thread count each ngspice worker actually ran with. Absent when the
+    ambient environment decided (a single worker, nothing requested)."""
+    return {} if effective is None else {"threads_per_worker": effective}
+
+
+def _validate_threads_per_worker(value: Any) -> int | None:
+    """Validate ``options.threads_per_worker`` (issue #2970)."""
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise SimError("options.threads_per_worker must be a positive integer")
+    return value
+
+
+def _effective_threads_per_worker(
+    explicit: int | None, backend: str, max_workers: int | None, units: int
+) -> int | None:
+    """Resolve the per-worker OpenMP thread count (issue #2970); ``None`` for
+    the off-host backends, whose worker re-resolves it from the forwarded
+    request.
+
+    An explicit ``options.threads_per_worker`` always wins. Otherwise
+    workers sharing a host run single-threaded: N workers x ngspice's default
+    OpenMP team oversubscribes the cores (measured 270x per-unit slowdown on
+    the batch fleet). A lone worker keeps the ambient behaviour. A netlist
+    that itself ``set num_threads=N`` still overrides this (it runs later).
+    """
+    if backend in _OFFHOST_BACKENDS:
+        return None
+    if explicit is not None:
+        return explicit
+    if (
+        backend == "local-parallel"
+        and min(_resolve_max_workers(max_workers), units) > 1
+    ):
+        return 1
+    return None
+
+
 def _run_corner(
     *,
     extra_options_card: str | None = None,
@@ -7476,6 +7590,7 @@ def _run_corner(
     waveform_max_bytes: int | None = DEFAULT_WAVEFORM_MAX_BYTES,
     ngspice_options: dict[str, Any] | None = None,
     portable_roots: sim_portable.Roots | None = None,
+    threads_per_worker: int | None = None,
 ) -> tuple[dict[str, Any], str | None]:
     """Run one corner point through the selected engine's batch binary and
     classify the result.
@@ -7567,6 +7682,7 @@ def _run_corner(
             text=True,
             timeout=timeout_s,
             cwd=corner_dir,
+            **_worker_env_kwargs(None if is_xyce else threads_per_worker),
         )
         stdout_text = completed.stdout or ""
         stderr_text = completed.stderr or ""

@@ -396,6 +396,23 @@ solve/BLAS), so naive one-worker-per-corner oversubscribes a small box
 immediately. A non-positive or non-integer `max_workers` is an application
 error (exit 1).
 
+**Threads per worker (issue [#2970](https://github.com/2AMLogic/klayout-tools/issues/2970)).**
+The `max_workers // 8` estimate above (`_ASSUMED_THREADS_PER_NGSPICE`) is kept:
+it sizes the *pool* for the cores one ngspice may use. Separately, whenever a
+`local-parallel` (hence `batch`) run has more than one worker in flight, each
+`ngspice` is started with `OMP_NUM_THREADS=1` in its process environment, so N
+workers do not each spawn a full OpenMP team and oversubscribe the host (on the
+fleet this was a measured ~270× per-unit slowdown, bit-identical `.meas`
+values). The environment variable is used rather than `options.ngspice_init`
+because an older runner silently drops the latter. `options.threads_per_worker`
+(positive integer; anything else is an application error, exit 1) overrides the
+default for `local` and `local-parallel` alike. A single worker with no
+override keeps the ambient environment. A netlist that itself runs
+`set num_threads=N` in a `.control` block still wins (it executes after the
+environment is read). `engine: "xyce"` is not given the variable. The value in
+force is reported as `environment.threads_per_worker` (absent when the ambient
+environment decided).
+
 **Useful on a workstation, harmful on a shared worker.** `local-parallel`
 trades CPU/memory for wall-clock time — fine on a dedicated development
 machine with idle cores, but a bad default on a shared CI runner or
@@ -2232,6 +2249,22 @@ field changes):
 It states that the failure is a per-unit time budget, not a netlist problem,
 and suggests a larger `options.timeout_s` (twice the larger of the two
 numbers, rounded up to a whole minute).
+
+When **every** unit (at least two) hit the time budget — each carries a
+`timeout`/`batch_job_timeout` diagnostic, or has `runtime_s` within 2% of
+`options.timeout_s` — the report also gains one additive
+`environment.job_diagnostic` object instead of leaving N identical per-unit
+timeouts to be read as N failures (issue
+[#2970](https://github.com/2AMLogic/klayout-tools/issues/2970)):
+
+```json
+{"code": "all_units_at_timeout", "severity": "error", "units": 45,
+ "timeout_s": 300, "message": "..."}
+```
+
+It is report-level and never appears on a corner, so naming it in
+`options.fail_on_diagnostic` has no effect. In that case `runtime_s` is the timeout, not
+a measured cost.
 
 ## Timeout-budget preflight
 
@@ -5070,6 +5103,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `lost_shard`       | The corner's `hosts > 1` shard never returned (Epic #375). See "Fleet sharding" above. |
 | `batch_job_failed` | The corner never started, or its report was never written: the `batch` backend's fleet job reached a terminal `failed` state with an exit code outside `klt sim`'s own `0`/`3`/`4` (see "Batch backend" above). |
 | `batch_job_timeout` | The corner never completed: the `batch` job exceeded its own `timeout_seconds` on the fleet instance and was killed by 2am's harness. |
+| `all_units_at_timeout` | Report-level only (`environment.job_diagnostic`, never on a corner): every unit of a ≥2-unit run hit the time budget — see "Timeout-budget hint". |
 | `batch_poll_timeout` | The corner's result was never observed: `batch.poll_timeout_s` elapsed with the job still non-terminal, or the job never published a `status.json` within 1800s (the message says it never started). The job may still be running on the fleet — this is what the client knows, not a claim the run failed. |
 | `timeout_budget_unreachable` | The corner never started: `options.fail_fast_probe`'s calibration probe measured a rate implying `options.timeout_s` cannot plausibly cover the full analysis window, so the whole grid was aborted before dispatch (issue #1694). Carries additional `reached_s`/`fraction` fields — an *estimate* of how far this corner would have gotten, derived from the measured rate, not a real per-corner recovery. See "Timeout-budget preflight" above. |
 | `convergence_retry` | The record of an opt-in retry (`options.retry_on_convergence_error`, issue #2973): the unit's first attempt ended in a `nonconvergence` error, so it was re-run with tighter solver options. The message names the `.options` card used and whether the retry recovered. `severity: "warning"`; informational, it never changes the unit's status. See "Retrying a non-converged unit" below. |
@@ -5725,6 +5759,7 @@ the *response* echoes back.
 | `options.keep_artifacts` | boolean           | Retain per-corner logs/rawfiles on disk under `--outdir` (or its default) and reference them from the response. Defaults to `false`.                                   |
 | `options.waveforms`      | boolean           | Capture the optional waveform artifact (see above). Defaults to `false`.                                                                                               |
 | `options.max_workers`    | integer           | Worker-pool size for the `local-parallel` backend; ignored by `local`. Must be a positive integer. Defaults to a conservative estimate derived from the local CPU count (see "Execution backends" above). Overridable with the `--max-workers` CLI flag, and capped by the host's `KLT_SIM_MAX_WORKERS` when set (a larger value is clamped, not refused). |
+| `options.threads_per_worker` | integer       | OpenMP threads each ngspice worker may use (`OMP_NUM_THREADS`). Positive integer. Defaults to `1` when more than one worker runs concurrently, otherwise the ambient environment. See "Threads per worker" under "Execution backends". |
 | `options.wall_clock_budget_s` | number       | Overall wall-clock budget in seconds for the whole sweep. Must be a positive number. Defaults to unbounded (today's behaviour). Overridable with the `--budget-s` CLI flag. See "Wall-clock budget, orphan safety, and resume" above. |
 | `options.resume`         | boolean           | Resume from a matching on-disk checkpoint under `--outdir`, skipping corners already completed by a prior interrupted run of this same request. Defaults to `false`. Overridable with the `--resume` CLI flag. Not supported with `backend: "remote"` (application error, exit 1). See "Wall-clock budget, orphan safety, and resume" above. |
 | `options.fail_fast_probe` | boolean          | Two-pass fail-fast probe (issue #1694): run a bounded calibration `tran` slice on the grid's first corner before dispatching any real corner, and abort the whole grid if the measured rate implies `options.timeout_s` cannot plausibly cover the full analysis window. Defaults to `false`. Overridable with the `--fail-fast-probe` CLI flag. Only applies to `kind: "tran"` analyses on the `local`/`local-parallel` backends. See "Timeout-budget preflight" above. |
