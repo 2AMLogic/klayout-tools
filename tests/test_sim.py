@@ -3004,6 +3004,89 @@ def test_corner_records_engine_exit_code(tmp_path, monkeypatch, returncode):
     assert "engine_killed" not in [d["code"] for d in corner["diagnostics"]]
 
 
+def _silent_engine_corner(
+    tmp_path, monkeypatch, *, returncode=0, stderr="", stdout="", write_log=None
+):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [
+                {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"}
+            ],
+        },
+    )
+
+    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+        if write_log is not None:
+            with open(cmd[cmd.index("-o") + 1], "w", encoding="utf-8") as handle:
+                handle.write(write_log)
+        return fake_completed(stdout, returncode=returncode, stderr=stderr)
+
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+    (corner,) = sim.run_sim(str(request))["corners"]
+    return corner
+
+
+def _unknown_messages(corner):
+    return [d["message"] for d in corner["diagnostics"] if d["code"] == "unknown"]
+
+
+def test_silent_exit_zero_without_log_surfaces_stderr(tmp_path, monkeypatch):
+    """Issue #3016: exit 0, no log, no measurements -> the diagnostic names
+    the exit status and carries the engine's stderr."""
+    corner = _silent_engine_corner(tmp_path, monkeypatch, stderr="boom")
+    assert corner["status"] == "error"
+    (message,) = _unknown_messages(corner)
+    assert "exited with code 0" in message
+    assert "stderr tail: boom" in message
+
+
+def test_silent_exit_zero_with_empty_log_surfaces_stdout(tmp_path, monkeypatch):
+    corner = _silent_engine_corner(
+        tmp_path, monkeypatch, stdout="** ngspice-99\nbye\n", write_log=""
+    )
+    (message,) = _unknown_messages(corner)
+    assert "exited with code 0" in message
+    assert "stdout tail:" in message and "bye" in message
+
+
+def test_nonzero_exit_without_log_extends_existing_message(tmp_path, monkeypatch):
+    corner = _silent_engine_corner(
+        tmp_path, monkeypatch, returncode=2, stderr="cannot open deck"
+    )
+    (message,) = _unknown_messages(corner)  # exactly one: no double report
+    assert "exited with code 2 without writing its log" in message
+    assert "cannot open deck" in message
+
+
+def test_silent_engine_output_tail_is_bounded(tmp_path, monkeypatch):
+    corner = _silent_engine_corner(
+        tmp_path, monkeypatch, stderr="head-marker" + "x" * 10_000 + "tail-marker"
+    )
+    (message,) = _unknown_messages(corner)
+    assert "tail-marker" in message
+    assert "head-marker" not in message
+    assert len(message) < 3000
+
+
+def test_engine_output_tail_tolerates_undecodable_text():
+    assert sim._engine_output_tail("", "bad \udcff byte") != ""
+    assert sim._engine_output_tail("", "") == ""
+
+
+def test_log_present_run_gets_no_silent_engine_diagnostic(tmp_path, monkeypatch):
+    corner = _silent_engine_corner(
+        tmp_path,
+        monkeypatch,
+        stderr="noise",
+        write_log="vout = 1.2\n",
+    )
+    assert "exited with code" not in " ".join(_unknown_messages(corner))
+
+
 def test_corner_killed_by_signal_gets_distinct_diagnostic(tmp_path, monkeypatch):
     corner = _engine_outcome_corner(tmp_path, monkeypatch, returncode=-9)
     assert corner["engine_exit_code"] is None
