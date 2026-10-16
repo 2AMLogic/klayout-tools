@@ -14217,6 +14217,69 @@ def test_capture_only_non_tran_stays_error(tmp_path, monkeypatch):
     assert corner["status"] == "error"
 
 
+# Issue #3520: pre-submit lint for a literal `AT=` that cannot resolve.
+def _at_lint(args: str, spice: str, kind: str = "dc") -> list[dict[str, str]]:
+    return sim._meas_at_lint(
+        {"kind": kind, "args": args},
+        [{"name": "m", "spice": spice}],
+    )
+
+
+def test_meas_at_lint_degenerate_dc_sweep_warns():
+    (diag,) = _at_lint("V1 0 0 1", ".meas dc m find v(out) at=0")
+    assert diag["severity"] == "warning"
+    assert diag["code"] == "measurement"
+    assert "'m'" in diag["message"] and "single point" in diag["message"]
+
+
+def test_meas_at_lint_out_of_range_literal_warns():
+    (diag,) = _at_lint("V1 0 1 0.1", ".meas dc m FIND v(out) AT=2")
+    assert "outside" in diag["message"]
+
+
+def test_meas_at_lint_suffixes_and_case():
+    assert _at_lint("V1 0 1meg 1k", ".meas dc m find v(out) AT=2meg")
+    assert not _at_lint("V1 0 1meg 1k", ".meas dc m find v(out) AT=500k")
+
+
+@pytest.mark.parametrize(
+    ("args", "spice", "kind"),
+    [
+        ("V1 0 1 0.1", ".meas dc m find v(out) at=0.5", "dc"),
+        ("V1 0 1 0.1", ".meas dc m find v(out) at=1", "dc"),
+        ("V1 0 0 1", ".meas dc m find v(out) at=t_flip", "dc"),
+        ("V1 0 0 1", ".meas dc m find v(out) at=0.5*2.5u", "dc"),
+        ("V1 0 {vmax} 1", ".meas dc m find v(out) at=5", "dc"),
+        ("0 1n 10n", ".meas tran m find v(out) at=5n", "tran"),
+    ],
+)
+def test_meas_at_lint_leaves_other_cards_alone(args, spice, kind):
+    assert _at_lint(args, spice, kind) == []
+
+
+def test_meas_at_lint_only_flags_the_bad_card():
+    found = sim._meas_at_lint(
+        {"kind": "dc", "args": "V1 0 1 0.1"},
+        [
+            {"name": "good", "spice": ".meas dc good find v(out) at=0.5"},
+            {"name": "bad", "spice": ".meas dc bad find v(out) at=3"},
+            {"name": "x", "expr": "v(out)"},
+        ],
+    )
+    assert [d["message"].split("'")[1] for d in found] == ["bad"]
+
+
+def test_attach_meas_lint_adds_warning_to_every_corner(capsys):
+    corners = [{"diagnostics": []}, {"diagnostics": []}]
+    sim._attach_meas_lint(
+        corners,
+        {"kind": "dc", "args": "V1 0 0 1"},
+        [{"name": "m", "spice": ".meas dc m find v(out) at=0"}],
+    )
+    assert all(len(c["diagnostics"]) == 1 for c in corners)
+    assert "warning:" in capsys.readouterr().err
+
+
 # Issue #2970: per-worker OpenMP thread control + job-level timeout diagnostic
 def _capture_worker_env(monkeypatch):
     seen: list[str | None] = []

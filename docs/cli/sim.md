@@ -2874,6 +2874,15 @@ card. Either pick a step that lands exactly on the end point (a power-of-two
 fraction), or read the last sample from `options.waveforms` instead of using
 `AT=`.
 
+`klt sim` also lints this before you pay for a fleet round trip: a `.meas`
+card with a **literal numeric** `AT=<x>` on a `dc` analysis whose sweep is given
+as literal numbers gets a `measurement` diagnostic with severity `warning`
+(also echoed on stderr, once per corner) when the sweep is a single point
+(`start == stop`) or `x` lies outside `[start, stop]`. Parameterized or
+expression `AT=` (`at=t_flip`, `at=0.5*2.5u`), non-literal sweep arguments and
+non-`dc` analyses are not linted. The run still proceeds; results and exit code
+are unchanged.
+
 ### Operating-point values via `spice` cards
 
 For a runner without `expr`, read an operating-point quantity with a `spice`

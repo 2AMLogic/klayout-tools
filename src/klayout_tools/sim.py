@@ -1251,6 +1251,100 @@ def _report_path(path: str | None, *, repo_root: str | None) -> dict[str, Any]:
     return env_provenance.repo_relative_path(path, repo_root=repo_root)
 
 
+#: A literal numeric ``AT=<x>`` on a ``.meas`` card (issue #3520). The value
+#: must be a bare SPICE number; ``at=t_flip`` / ``at=0.5*2.5u`` never match
+#: (the lookahead rejects a trailing expression character).
+_MEAS_AT_LITERAL_RE = re.compile(
+    r"\bat\s*=\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?[a-zA-Z]*)(?![\w.*/+\-(])",
+    re.IGNORECASE,
+)
+
+
+def _dc_sweep_bounds(analysis: dict[str, Any]) -> tuple[float, float] | None:
+    """``(start, stop)`` of a ``dc`` analysis whose first sweep is all
+    literal numbers (``"V1 0 1 0.1"``), else ``None``."""
+    if str(analysis.get("kind", "")).lower() != "dc":
+        return None
+    tokens = str(analysis.get("args", "")).split()
+    if len(tokens) < 4:
+        return None
+    start = _parse_plain_number(tokens[1])
+    stop = _parse_plain_number(tokens[2])
+    if start is None or stop is None:
+        return None
+    suffix_scale = _spice_scale(tokens[1]), _spice_scale(tokens[2])
+    return start * suffix_scale[0], stop * suffix_scale[1]
+
+
+def _spice_scale(raw: str) -> float:
+    """The engineering-suffix multiplier of a numeric SPICE literal."""
+    match = _WIDTH_NUMBER_RE.match(raw.strip())
+    suffix = match.group(2).lower() if match else ""
+    for name, value in _WIDTH_UNIT_SUFFIXES:
+        if suffix.startswith(name):
+            return value
+    return 1.0
+
+
+def _meas_at_lint(
+    analysis: dict[str, Any], measurements_spec: list[dict[str, Any]]
+) -> list[dict[str, str]]:
+    """Warning-severity ``measurement`` diagnostics for a ``.meas`` card whose
+    literal ``AT=<x>`` cannot resolve on a literal ``dc`` sweep (issue #3520):
+    the sweep is degenerate (start == stop, one sample -- nothing to
+    interpolate) or ``x`` lies outside ``[start, stop]``. Parameterized /
+    expression ``AT=`` and non-literal or non-``dc`` sweeps are left alone.
+    """
+    bounds = _dc_sweep_bounds(analysis)
+    if bounds is None:
+        return []
+    lo, hi = min(bounds), max(bounds)
+    found: list[dict[str, str]] = []
+    for spec in measurements_spec:
+        match = _MEAS_AT_LITERAL_RE.search(spec.get("spice") or "")
+        if match is None:
+            continue
+        at = _parse_plain_number(match.group(1))
+        if at is None:
+            continue
+        at *= _spice_scale(match.group(1))
+        if lo == hi:
+            why = (
+                f"the dc sweep is a single point ({lo:g}); AT= needs two "
+                "samples to interpolate"
+            )
+        elif not lo <= at <= hi:
+            why = f"AT={match.group(1)} lies outside the dc sweep [{lo:g}, {hi:g}]"
+        else:
+            continue
+        found.append(
+            {
+                "severity": "warning",
+                "code": "measurement",
+                "message": (
+                    f"measurement '{spec['name']}' will likely report "
+                    f"'out of interval': {why}"
+                ),
+            }
+        )
+    return found
+
+
+def _attach_meas_lint(
+    corners: list[dict[str, Any]],
+    analysis: dict[str, Any],
+    measurements_spec: list[dict[str, Any]],
+) -> None:
+    """Add the :func:`_meas_at_lint` warnings (once per corner) to a run's
+    corner reports, and echo them to stderr. Computed client-side from the
+    request alone, so it is identical for local, batch and remote runs."""
+    lint = _meas_at_lint(analysis, measurements_spec)
+    for diag in lint:
+        print(f"warning: {diag['message']}", file=sys.stderr)
+    for corner in corners:
+        corner["diagnostics"].extend(dict(d) for d in lint)
+
+
 def _portable_artifacts_option(options: dict[str, Any]) -> bool:
     """Validate ``options.portable_artifacts`` (issue #3052): a boolean, default off."""
     value = options.get("portable_artifacts", False)
@@ -3481,6 +3575,7 @@ def _run_sim_corners(
         # `remote`, whose corners this process never reconciles against a
         # local `CornerPoint` list).
         corners = corners_new
+    _attach_meas_lint(corners, analysis, measurements_spec)
     engine_version = (
         backend_engine_version
         if backend_engine_version is not None
