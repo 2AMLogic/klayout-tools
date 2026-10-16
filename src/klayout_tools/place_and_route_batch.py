@@ -464,7 +464,8 @@ def _read_unit_report(collected: str, job_id: str) -> dict[str, Any]:
             job_id=job_id,
         ) from exc
     if report.get("status") != "ok":
-        error = report.get("error") if isinstance(report.get("error"), dict) else {}
+        raw_error = report.get("error")
+        error: dict[str, Any] = raw_error if isinstance(raw_error, dict) else {}
         what = (
             f"the runner's klt reported: {error['message']}"
             if error.get("message")
@@ -501,7 +502,7 @@ def _local_deck_hash(
 
 def _preflight(
     request: dict[str, Any], request_dir: str, pdk_variant: str | None
-) -> tuple[str, str, list[tuple[str, str]], float, sim_batch.BatchConfig]:
+) -> tuple[str | None, str, list[tuple[str, str]], float, sim_batch.BatchConfig]:
     """The request-level checks done before any upload: the netlist hash, the
     cell library, the packaged tree, the job timeout and the fleet config."""
     netlist_path = _resolve_netlist(request["netlist"], request_dir)
@@ -523,7 +524,7 @@ def _collect_corner(
     *,
     scratch: str,
     unit_dir: str,
-    input_hash: str,
+    input_hash: str | None,
     cell_library: str,
     pdk_variant: str | None,
     fleet: list[dict[str, Any]],
