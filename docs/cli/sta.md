@@ -146,6 +146,7 @@ A request naming both, or neither, is a request error.
 | `constraints.wire_load_model` / `.wire_load_mode` | string \| omitted | (Issue #1825.) **Only valid in `verilog` mode** — a request error otherwise. Drives OpenSTA's own `set_wire_load_model`/`set_wire_load_mode`, the parasitics-estimate mechanism for a from-scratch netlist session that has no placement or routing to estimate from. See "From-scratch netlist input" below. |
 | `constraints.propagated_clock` | boolean \| omitted | Additive field (issue #2739). **`def` mode only.** `true` marks the request's created clock propagated (`set_propagated_clock`) in every analyzed corner, so hold/removal checks include the DEF's clock-tree insertion delay and skew (and, with a caller-supplied `spef`, its clock-net RC) — the timing a routed post-CTS design actually meets. Omitted or `false` (the default) keeps the **ideal** SDC-only clock this command has always timed — byte-for-byte the pre-#2739 behavior — so existing requests' numbers never change. Any non-boolean value is a request error; `true` together with `verilog` is a request error (a linked netlist has no placed clock tree to propagate through). Meaningful only for a **post-CTS** DEF: a pre-CTS DEF propagates through plain wires and reports ~zero insertion delay — the response's `clock_propagation` evidence block is what says what propagation actually reached (see "Propagated-clock timing" below). |
 | `spef` | string \| object \| omitted | A caller-supplied SPEF (e.g. from `klt extract --parasitics`) to annotate real parasitics via `read_spef`, in place of OpenSTA's own default (unannotated, LEF-capacitance-only) timing. **Only valid in `def` mode** — rejected together with `verilog` (no routed/placement geometry in that mode for a SPEF to annotate onto). Resolved relative to the request file's own directory. Omitted (the default) times the design with whatever parasitics OpenSTA derives from the loaded LEF/DEF alone. An **object** mapping a non-empty subset of `min`/`nom`/`max` to SPEF paths (same resolution rule) requests the liberty × interconnect matrix — see "Liberty × interconnect matrix" below (issue #3228). An unknown key, an empty object, or a missing/invalid path is a request error naming the offending key; the object form together with `verilog` is a request error. |
+| `sdf` | boolean \| omitted | Additive field (issue #2886). **`def` mode only, and requires `spef`.** `true` writes one post-route IEEE-1497 SDF per analyzed corner (`write_sdf -divider . -include_typ`, immediately after `read_spef`) to `.klt/sta/<def stem>.<corner>.sdf`, reported per corner as the response's `sdf` field. Omitted or `false` (the default) writes nothing and leaves the generated Tcl byte-identical. Any non-boolean value, `true` with `verilog`, and `true` without `spef`, and `true` with the map form of `spef` (one SDF per liberty corner is ambiguous across the interconnect axis) are each a request error (exit 1). See "Post-route SDF per corner" below. |
 | `geometry_source` | string \| omitted | In `def` mode (issue #1826): `"routed"` (the default, when omitted) declares `def` a fully-implemented, detailed-SPEF-eligible signoff geometry — this command's original and only behaviour. `"placement_estimate"` declares `def` a pre-route DEF from `klt place-and-route`'s `"place"`/`"cts"` stages (its own `unrouted_def_path` output) — nothing about this command's OpenSTA session construction actually changes (it is a plain `read_def` either way), but a placement-/CTS-stage DEF's parasitics come from `estimate_parasitics -placement` (a placement/bounding-box estimate, not routing-derived RC), so the resulting slack numbers are real but less accurate than the same fields on a routed DEF. Purely a caller-supplied label — a bare DEF file carries no stage provenance, so this command cannot infer it — echoed back verbatim as the response's own `geometry_source` field (see "Pre-route DEFs" below). Any other value is a request error in `def` mode. In `verilog` mode (issue #1825): this field is forced to `"netlist_estimate"` regardless of whether the request supplies it — omit it, or set it explicitly to `"netlist_estimate"`; any other explicit value is a request error. |
 
 ## Response
@@ -262,6 +263,7 @@ the path itself, an external one as `<outside repo>`, and an unused input as
 | `clock_skew_ns` | number \| null | Worst setup-side clock skew (`report_clock_skew_metric -setup`) across the clock tree the loaded DEF already contains. `null` if the DEF has no clock tree (`report_clock_skew_metric` reports nothing to measure). |
 | `estimated_power_mw` | number \| null | From `report_power_metric`, against whatever parasitics (SPEF-annotated or LEF-capacitance-only) this run used. |
 | `spef_annotation` | object \| null | `null` unless `request.spef` was given. See "Annotation evidence" below for the field shapes — and read it before quoting a SPEF-annotated timing number as a real-parasitics measurement. |
+| `sdf` | object \| null | Additive field (issue #2886). `null` unless `request.sdf: true`. Otherwise `{path, scope, content_hash}`: the `{path, scope}` identity of the SDF this corner's session wrote (the same envelope `spef_path` uses — never an absolute host path) plus the `sha256:`-prefixed digest of its bytes, so it can be cited as an input. On a `corners` response the field is not hoisted — one per `corners[]` entry. See "Post-route SDF per corner" below. |
 | `electrical_checks` | object \| null | Additive field (issue #3005). **`def` mode only** (`null` with `verilog`). Max-transition and max-capacitance checks from the same OpenSTA session as the timing numbers, so with a `spef` they are against the extracted parasitics. Per `corners[]` entry on a multi-corner response. See "Electrical limit checks" below. |
 | `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names the resolved liberty file (`<cell_library>__<corner>`); `pdk` is `find_pdk()`'s resolved triple; `input` is the content hash of `def` (`input.role: "layout"`) — or of `verilog` in netlist mode, where the role is `"netlist"` instead (issue #2027, so a consumer never compares a netlist digest against a layout one). On a `pdk.corners` (list) response this block carries `deck: null` at the top level — see "Multi-corner characterization" below for where the per-corner `deck` block actually lives. |
 
@@ -550,7 +552,7 @@ alongside that corner's own
 `worst_slack_ns`/`total_negative_slack_ns`/`worst_hold_slack_ns`/
 `total_negative_hold_slack_ns`/`timing_status`/`fmax_mhz`/
 `setup_violation_count`/`hold_violation_count`/`clock_skew_ns`/
-`estimated_power_mw`/`spef_annotation` — the exact same per-corner fields
+`estimated_power_mw`/`spef_annotation`/`sdf` — the exact same per-corner fields
 the scalar `pdk.corner` response already reports, one entry per requested
 name, in request order.
 
@@ -583,6 +585,61 @@ checkpointing the loaded LEF/DEF once via `write_db`/`read_db`, as the
 liberty deck differs per invocation) is tracked as follow-up work, not
 required for this field's initial scope — see the issue tracker for the
 follow-up.
+
+## Post-route SDF per corner (`sdf`, issue #2886)
+
+`klt place-and-route`'s `post_route_sdf` writes an SDF only at the flow's own
+`pdk.corner`; re-running the flow at another corner re-places and re-routes,
+so the SDF would describe a different layout. `sdf: true` instead writes one
+SDF per analyzed corner from the **same committed DEF + SPEF**, alongside the
+timing numbers that corner's session reports:
+
+```json
+{
+  "def": "gcd.def",
+  "spef": "gcd.spef",
+  "sdf": true,
+  "pdk": { "cell_library": "sky130_fd_sc_hd", "corners": ["ss_100C_1v60", "tt_025C_1v80"] },
+  "constraints": { "clock_port": "clk", "clock_period_ns": 1.1 }
+}
+```
+
+```json
+"corners": [
+  {
+    "corner": "ss_100C_1v60",
+    "...": "...",
+    "sdf": {
+      "path": "flows/gcd/.klt/sta/gcd.ss_100C_1v60.sdf",
+      "scope": "repo",
+      "content_hash": "sha256:<hex>"
+    }
+  },
+  { "corner": "tt_025C_1v80", "...": "...", "sdf": { "...": "..." } }
+]
+```
+
+- **One file per corner**, `.klt/sta/<def stem>.<corner>.sdf` next to the
+  request file. A scalar `pdk.corner` (or neither field) writes one file and
+  reports `sdf` at the top level.
+- **Same command and flags as `post_route_sdf`** — one shared helper emits
+  `write_sdf -divider . -include_typ <path>` in both verbs, immediately after
+  `read_spef` (outside the reader-warning markers, so writer diagnostics are
+  never counted as SPEF reader warnings) and before every report command. See
+  [`place-and-route.md` "SDF export"](place-and-route.md#sdf-export-post_route_sdf-issue-1002)
+  for why each flag is there. The file's consumer is
+  [`klt functional-verification`](functional-verification.md)'s `options.sdf`.
+- **Requires `spef`, `def` mode only** — for parity with `post_route_sdf`
+  requiring `post_route_spef`: an SDF written without the routed parasitics
+  would look like a post-route delay file while carrying none of the routed
+  interconnect, and a `verilog`-mode request has no routed geometry at all.
+- **A missing or empty file is an error** (exit 1), never a reported path.
+  Any earlier file at the same path is removed before the session runs, so a
+  re-run overwrites cleanly and a stale file can never be reported as this
+  run's output.
+- **`content_hash` names the bytes, not a reproducible value.** OpenSTA
+  stamps a `(DATE ...)` line into the header, so two runs of the same request
+  write different bytes; cite the hash of the file you actually consume.
 
 ## Liberty × interconnect matrix (map-form `spef`, issue #3228)
 

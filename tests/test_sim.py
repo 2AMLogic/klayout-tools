@@ -1595,6 +1595,74 @@ def test_corner_id_and_slug_get_sample_suffix():
     assert point.slug == "tt_1p800V_27C_mc3"
 
 
+def _long_supply(n=25, **extra):
+    supply = {f"vctl_source_{i:02d}": 1.0 for i in range(n)}
+    supply.update(extra)
+    return supply
+
+
+def test_corner_slug_bounded_for_many_supply_keys():
+    point = sim.CornerPoint("typical", _long_supply(), 27)
+    assert len(point.slug.encode()) < 255 - len("__probe")
+    assert point.slug == sim.CornerPoint("typical", _long_supply(), 27).slug
+    assert point.slug != point.readable_slug
+    assert "/" not in point.slug
+
+
+def test_corner_slug_bounded_distinguishes_value_and_sample():
+    base = sim.CornerPoint("typical", _long_supply(), 27)
+    other_value = sim.CornerPoint("typical", _long_supply(vctl_source_24=2.0), 27)
+    sample = sim.CornerPoint(
+        "typical",
+        _long_supply(),
+        27,
+        sample_index=1,
+        mc_seed={"process_seed": 1, "mismatch_seed": 2, "rndseed": 3},
+    )
+    assert len({base.slug, other_value.slug, sample.slug}) == 3
+
+
+def test_corner_slug_bounded_multibyte_keys():
+    point = sim.CornerPoint("tt", {f"v\u00e9{i:02d}": 1.0 for i in range(30)}, 27)
+    assert len(point.slug.encode()) < 255 - len("__probe")
+
+
+def test_corner_slug_params_axis_bounds_pvt_prefix():
+    pvt = sim.CornerPoint("typical", _long_supply(), 27).corner_id
+    corner_id = f"{pvt}/params:w=1.5,l=0.15"
+    slug = sim._slugify_corner_id(corner_id)
+    assert len(slug.encode()) < 255 - len("__probe")
+    assert slug.endswith("_params_" + hashlib.sha256(corner_id.encode()).hexdigest())
+    assert slug != sim._slugify_corner_id(f"{pvt}/params:w=1.6,l=0.15")
+
+
+def test_run_sim_keep_artifacts_many_supply_keys(tmp_path, monkeypatch):
+    supply = _long_supply()
+    (tmp_path / "body.spice").write_text(
+        "".join(f"{k} n_{k} 0 DC 1.0\nR_{k} n_{k} 0 1k\n" for k in supply)
+    )
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "corners": {"supply_v": {k: [v] for k, v in supply.items()}},
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "options": {"keep_artifacts": True},
+        },
+    )
+    _stub_subprocess_run(monkeypatch, log_text="clean run\n")
+    artifacts = tmp_path / "artifacts"
+
+    report = sim.run_sim(str(request), artifacts_dir=str(artifacts))
+
+    (corner,) = report["corners"]
+    assert os.path.isfile(corner["artifacts"]["log"])
+    corner_dir = artifacts / sim._slugify_corner_id(corner["corner_id"])
+    assert len(corner_dir.name.encode()) < 255
+    recorded = json.loads((corner_dir / "corner.json").read_text())
+    assert recorded["corner_id"] == corner["corner_id"]
+
+
 # --------------------------------------------------------------------------- #
 # Monte Carlo sampling: request validation, seed contract, negative control
 # --------------------------------------------------------------------------- #
@@ -12608,6 +12676,191 @@ def test_supply_override_explicit_points_are_validated(tmp_path, monkeypatch):
         sim.run_sim(str(_write_request(tmp_path, request)))
 
 
+# --- #2902: swept PWL/PULSE supply via corners.supply_waveforms ----------- #
+
+
+def _scaled_request_doc(tmp_path, body, supply_v, scaled, extra):
+    (tmp_path / "body.spice").write_text(body)
+    doc = {
+        "netlist": "body.spice",
+        "analysis": {"kind": "tran", "args": "10n 3u"},
+        "corners": {"supply_v": supply_v, "supply_waveforms": scaled},
+    }
+    doc.update(extra)
+    return doc
+
+
+def test_scale_netlist_pwl_peak_equals_supply():
+    from klayout_tools import sim_supply_waveform as sw
+
+    text = "Vdd vdd 0 PWL(0 0 1u 0.9 2u 1.8) r=0\nR1 vdd 0 1k\n"
+    out, info = sw.scale_netlist(text, {"vdd": 1.2}, ("vdd",), error_cls=sim.SimError)
+    assert "PWL(0 0 1u 0.6 2u 1.2) r=0" in out
+    assert out.endswith("R1 vdd 0 1k\n")
+    assert info["vdd"]["effective_levels_v"] == [0.0, 0.6, 1.2]
+    assert info["vdd"]["nominal_peak_v"] == 1.8
+    assert info["vdd"]["rule"] == "scale-peak-to-supply"
+
+
+def test_scale_netlist_pulse_and_continuation_and_case():
+    from klayout_tools import sim_supply_waveform as sw
+
+    text = "vclk clk 0\n+ pulse (0 1.8 0 1n 1n 1u 2u)\n"
+    out, info = sw.scale_netlist(text, {"VCLK": 0.9}, ("VCLK",), error_cls=sim.SimError)
+    assert out.strip() == "vclk clk 0 pulse (0 0.9 0 1n 1n 1u 2u)"
+    assert info["VCLK"]["waveform"] == "pulse"
+
+
+@pytest.mark.parametrize(
+    "decl,match",
+    [
+        ("Vdd vdd 0 SIN(0 1 1k)", "SIN"),
+        ("Vdd vdd 0 PWL(0 0 1u {vtop})", "plain numeric"),
+        ("Vdd vdd 0 DC 1.8", "no PWL/PULSE"),
+        ("Vother vdd 0 PWL(0 0 1u 1)", "not found"),
+        (".subckt b a\nVdd a 0 PWL(0 0 1u 1)\n.ends\nR1 a 0 1", "not found"),
+    ],
+)
+def test_supply_waveforms_unsupported_constructs_fail_closed(
+    tmp_path, monkeypatch, decl, match
+):
+    monkeypatch.setattr(sim.subprocess, "run", _boom)
+    monkeypatch.setattr(sim.subprocess, "Popen", _boom)
+    doc = _scaled_request_doc(
+        tmp_path, decl + "\nR1 vdd 0 1k\n", {"vdd": [1.0]}, ["vdd"], {}
+    )
+    path = _write_request(tmp_path, doc)
+    with pytest.raises(sim.SimError, match=match):
+        sim.run_sim(str(path))
+
+
+def test_scale_netlist_zero_peak_fails_closed():
+    from klayout_tools import sim_supply_waveform as sw
+
+    with pytest.raises(sim.SimError, match="zero"):
+        sw.scale_netlist(
+            "Vdd vdd 0 PWL(0 0 1u 0)\n", {"vdd": 1.0}, ("vdd",), error_cls=sim.SimError
+        )
+
+
+def test_scale_netlist_negative_rail_keeps_polarity():
+    from klayout_tools import sim_supply_waveform as sw
+
+    out, info = sw.scale_netlist(
+        "V1 vdd 0 PWL(0 0 1n -1.8)\n", {"V1": -1.62}, ("V1",), error_cls=sim.SimError
+    )
+    assert out.strip() == "V1 vdd 0 PWL(0 0 1n -1.62)"
+    assert info["V1"]["nominal_peak_v"] == -1.8
+    assert info["V1"]["scale"] == pytest.approx(0.9)
+    assert info["V1"]["effective_levels_v"] == pytest.approx([0.0, -1.62])
+
+    out, info = sw.scale_netlist(
+        "V1 vdd 0 PWL(0 0 1n -1.8)\n", {"V1": -1.8}, ("V1",), error_cls=sim.SimError
+    )
+    assert info["V1"]["scale"] == pytest.approx(1.0)
+    assert "-1.8" in out
+
+    out, info = sw.scale_netlist(
+        "V2 vss 0 PULSE(0 -1.8 0 1n 1n 1u 2u)\n",
+        {"V2": -0.9},
+        ("V2",),
+        error_cls=sim.SimError,
+    )
+    assert out.strip() == "V2 vss 0 PULSE(0 -0.9 0 1n 1n 1u 2u)"
+    assert info["V2"]["nominal_peak_v"] == -1.8
+
+
+@pytest.mark.parametrize(
+    "card,target",
+    [
+        ("V1 vdd 0 PWL(0 0 1n -1.8)", 1.8),
+        ("V1 vdd 0 PWL(0 0 1n 1.8)", -1.8),
+        ("V1 vdd 0 PULSE(0 -1.8 0 1n 1n 1u 2u)", 1.62),
+    ],
+)
+def test_scale_netlist_sign_mismatch_fails_closed(card, target):
+    from klayout_tools import sim_supply_waveform as sw
+
+    with pytest.raises(sim.SimError, match="opposite sign"):
+        sw.scale_netlist(card + "\n", {"V1": target}, ("V1",), error_cls=sim.SimError)
+
+
+def test_supply_waveforms_key_must_be_a_supply_v_key(tmp_path, monkeypatch):
+    monkeypatch.setattr(sim.subprocess, "run", _boom)
+    doc = _scaled_request_doc(
+        tmp_path, "Vdd vdd 0 PWL(0 0 1u 1)\n", {"vdd": [1]}, ["vref"], {}
+    )
+    with pytest.raises(sim.SimError, match="supply_v does not sweep"):
+        sim.run_sim(str(_write_request(tmp_path, doc)))
+
+
+def test_unlisted_waveform_rejection_names_the_new_option(tmp_path, monkeypatch):
+    monkeypatch.setattr(sim.subprocess, "run", _boom)
+    path = _supply_deck_request(
+        tmp_path, "Vdd vdd 0 PWL(0 0 1u 5)\nR1 vdd 0 1k\n", {"vdd": [1.0]}
+    )
+    with pytest.raises(sim.SimError, match="corners.supply_waveforms"):
+        sim.run_sim(str(path))
+
+
+def test_scaled_source_gets_no_alter_in_the_deck(tmp_path):
+    point = sim.CornerPoint(
+        None, {"vdd": 1.2, "vref": 0.5}, 27, supply_waveforms=("vdd",)
+    )
+    lines = sim._corner_deck_control_lines(
+        point=point,
+        analysis={"kind": "tran", "args": "1n 1u"},
+        measurements_spec=[],
+        raw_path=None,
+        osdi_preload=(),
+    )
+    assert "alter vref=0.5" in lines
+    assert not any(line.startswith("alter vdd") for line in lines)
+
+
+def test_supply_waveforms_survive_the_explicit_points_wire():
+    point = sim.CornerPoint(None, {"vdd": 1.2}, 27, supply_waveforms=("vdd",))
+    (back,) = sim._corner_points_from_wire(sim._corner_points_to_wire([point]))
+    assert back.supply_waveforms == ("vdd",)
+    (plain,) = sim._corner_points_from_wire(
+        [{"process": None, "supply_v": {}, "temperature_c": 27}]
+    )
+    assert plain.supply_waveforms == ()
+
+
+@_SKIP_NO_NGSPICE
+def test_integration_swept_pwl_supply_reaches_each_supply_value(tmp_path):
+    """Negative control (#2902): the simulated rail peaks at N volts for each
+    swept N -- an operating-point check, not a deck-text assertion."""
+    body = "Vdd vdd 0 PWL(0 0 1u 1.8)\nR1 vdd out 1k\nC1 out 0 1p\n"
+    doc = _scaled_request_doc(
+        tmp_path,
+        body,
+        {"vdd": [1.2, 1.8, 2.4]},
+        ["vdd"],
+        {
+            "measurements": [{"name": "vpeak", "spice": ".meas tran vpeak MAX v(vdd)"}],
+            "options": {"keep_artifacts": True},
+        },
+    )
+    report = sim.run_sim(
+        str(_write_request(tmp_path, doc)), artifacts_dir=str(tmp_path / "artifacts")
+    )
+    peaks = {}
+    for corner in report["corners"]:
+        assert corner["status"] == "pass", corner
+        (meas,) = corner["measurements"]
+        peaks[corner["supply_v"]["vdd"]] = meas["value"]
+        info = corner["supply_waveforms"]["vdd"]
+        assert info["effective_levels_v"][-1] == pytest.approx(
+            corner["supply_v"]["vdd"]
+        )
+        assert info["nominal_levels_v"] == [0.0, 1.8]
+    assert len(peaks) == 3
+    for supply, peak in peaks.items():
+        assert peak == pytest.approx(supply, rel=1e-6)
+
+
 # --- #2867: supply override vs. a `.param` (PDK-free) ---------------------- #
 
 
@@ -14219,6 +14472,69 @@ def test_capture_only_non_tran_stays_error(tmp_path, monkeypatch):
         analysis={"kind": "ac", "args": "dec 10 1 1meg"},
     )
     assert corner["status"] == "error"
+
+
+# Issue #3520: pre-submit lint for a literal `AT=` that cannot resolve.
+def _at_lint(args: str, spice: str, kind: str = "dc") -> list[dict[str, str]]:
+    return sim._meas_at_lint(
+        {"kind": kind, "args": args},
+        [{"name": "m", "spice": spice}],
+    )
+
+
+def test_meas_at_lint_degenerate_dc_sweep_warns():
+    (diag,) = _at_lint("V1 0 0 1", ".meas dc m find v(out) at=0")
+    assert diag["severity"] == "warning"
+    assert diag["code"] == "measurement"
+    assert "'m'" in diag["message"] and "single point" in diag["message"]
+
+
+def test_meas_at_lint_out_of_range_literal_warns():
+    (diag,) = _at_lint("V1 0 1 0.1", ".meas dc m FIND v(out) AT=2")
+    assert "outside" in diag["message"]
+
+
+def test_meas_at_lint_suffixes_and_case():
+    assert _at_lint("V1 0 1meg 1k", ".meas dc m find v(out) AT=2meg")
+    assert not _at_lint("V1 0 1meg 1k", ".meas dc m find v(out) AT=500k")
+
+
+@pytest.mark.parametrize(
+    ("args", "spice", "kind"),
+    [
+        ("V1 0 1 0.1", ".meas dc m find v(out) at=0.5", "dc"),
+        ("V1 0 1 0.1", ".meas dc m find v(out) at=1", "dc"),
+        ("V1 0 0 1", ".meas dc m find v(out) at=t_flip", "dc"),
+        ("V1 0 0 1", ".meas dc m find v(out) at=0.5*2.5u", "dc"),
+        ("V1 0 {vmax} 1", ".meas dc m find v(out) at=5", "dc"),
+        ("0 1n 10n", ".meas tran m find v(out) at=5n", "tran"),
+    ],
+)
+def test_meas_at_lint_leaves_other_cards_alone(args, spice, kind):
+    assert _at_lint(args, spice, kind) == []
+
+
+def test_meas_at_lint_only_flags_the_bad_card():
+    found = sim._meas_at_lint(
+        {"kind": "dc", "args": "V1 0 1 0.1"},
+        [
+            {"name": "good", "spice": ".meas dc good find v(out) at=0.5"},
+            {"name": "bad", "spice": ".meas dc bad find v(out) at=3"},
+            {"name": "x", "expr": "v(out)"},
+        ],
+    )
+    assert [d["message"].split("'")[1] for d in found] == ["bad"]
+
+
+def test_attach_meas_lint_adds_warning_to_every_corner(capsys):
+    corners = [{"diagnostics": []}, {"diagnostics": []}]
+    sim._attach_meas_lint(
+        corners,
+        {"kind": "dc", "args": "V1 0 0 1"},
+        [{"name": "m", "spice": ".meas dc m find v(out) at=0"}],
+    )
+    assert all(len(c["diagnostics"]) == 1 for c in corners)
+    assert "warning:" in capsys.readouterr().err
 
 
 # Issue #2970: per-worker OpenMP thread control + job-level timeout diagnostic

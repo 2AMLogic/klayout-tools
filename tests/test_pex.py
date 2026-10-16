@@ -336,6 +336,21 @@ def test_row_status_error_when_schematic_missing():
     assert _row_status(None, _measurement(1.1)) == "error"
 
 
+def test_row_status_error_when_only_extracted_absent():
+    assert _row_status(_measurement(1.0), _measurement(None, "absent")) == "error"
+
+
+def test_row_status_error_when_only_schematic_absent():
+    assert _row_status(_measurement(None, "absent"), _measurement(1.1)) == "error"
+
+
+def test_row_status_pass_when_both_absent():
+    assert (
+        _row_status(_measurement(None, "absent"), _measurement(None, "absent"))
+        == "pass"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # `_build_delta_rows`
 # --------------------------------------------------------------------------- #
@@ -394,6 +409,49 @@ def test_build_delta_rows_missing_schematic_measurement_is_error_side():
     )
     assert row["schematic_status"] == "error"
     assert row["extracted_status"] == "pass"
+
+
+def _absent_rows(schematic_status, extracted_status):
+    def side(status):
+        return _sim_report(
+            [
+                {
+                    "corner_id": "tt",
+                    "measurements": [
+                        _measurement(None if status == "absent" else 1.0, status)
+                    ],
+                    "diagnostics": [],
+                }
+            ]
+        )
+
+    return _build_delta_rows(
+        spec_row_prefix=None,
+        schematic_report=side(schematic_status),
+        extracted_report=side(extracted_status),
+    )
+
+
+def test_build_delta_rows_extracted_absent_is_error_blaming_extracted():
+    (row,) = _absent_rows("pass", "absent")
+    assert row["status"] == "error"
+    assert row["delta_pct"] is None
+    assert row["extracted_status"] == "absent"
+    assert row["error"]["side"] == "extracted"
+
+
+def test_build_delta_rows_schematic_absent_is_error_blaming_schematic():
+    (row,) = _absent_rows("absent", "pass")
+    assert row["status"] == "error"
+    assert row["schematic_status"] == "absent"
+    assert row["error"]["side"] == "schematic"
+
+
+def test_build_delta_rows_both_absent_is_pass():
+    (row,) = _absent_rows("absent", "absent")
+    assert row["status"] == "pass"
+    assert row["delta_pct"] is None
+    assert "error" not in row
 
 
 def test_unextracted_delta_rows_carry_per_side_status():
