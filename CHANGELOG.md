@@ -395,6 +395,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   `error.code` `schematic_flatten_*`. Default runs are unchanged apart from
   the two new fields (`false` / `null`); no `schema_version` bump.
 
+- **`klt synthesize` accepts `constraints.clocks` and echoes `clock_targets`**
+  (issue #2883): optional `[{port, period_ns}]` for multi-clock designs
+  (`clock_period_ns` stays the single-clock shorthand and wins if both are
+  given). ABC still takes one global `-D`, so the tightest listed period is
+  used when only `clocks` is given. The new additive `clock_targets` response
+  object reports the clocks, the delay target, its basis, and
+  `per_clock_enforced: false`. No `schema_version` bump.
+
 - **ASAP7 BSIM-CMG real-run evidence recorded** (issue #2814, part of #2761):
   extracted `INVx1` / `NAND2xp5` simulate at TT/FF/SS through `klt sim` in
   ngspice-46 with the pinned OpenVAF-Reloaded-compiled BSIM-CMG 111.0.0 OSDI
