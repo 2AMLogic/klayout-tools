@@ -24,7 +24,6 @@ not `klt --version`, if you need to detect this kind of drift. See
   disclosed as `citation.artifact_binding.regeneration` with
   `executed_by_klt: false`, and text output adds a `regeneration:` line.
   **Additive contract change**; `schema_version` is unchanged.
-
 - **`klt sim` declarative timed stimulus and resolved-backend provenance**
   (issue #2977): a request may declare `stimulus.signals[]` (per-signal
   event lists with level, optional transition time and skew). `klt sim`
