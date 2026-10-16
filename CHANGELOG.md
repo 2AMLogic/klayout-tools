@@ -59,12 +59,28 @@ not `klt --version`, if you need to detect this kind of drift. See
   source engine limitation that commonly triggers it. Additive; no
   `schema_version` bump.
 
+- **`klt place-and-route` reports routability** (issue #2994): the route
+  stage entry (and top level) gains an additive `congestion` object —
+  global-route overflow and per-layer usage, detailed-route violation series,
+  unrouted-net count and routability-driven placement congestion. Figures the
+  engine cannot produce are `null` and named in `congestion.null_reasons`.
+  The generated route script now runs `global_route -verbose` (routing is
+  unchanged) so the engine prints its congestion table.
+  `schema_version` is unchanged.
+
 - **`klt reset-coverage`** (issue #2998, part 1 of 2): a read-only verb that
   classifies every sequential cell and hard macro of a flat gate-level
   Verilog netlist as reset-covered or unreset (machine-readable reason code),
   with a waiver file (fail on an unwaived element and on a stale waiver).
   `options.initial_state` for `functional-verification` follows separately.
 
+- **Docs: `monte_carlo.vary: "process"` negative control is scoped**
+  (issue #2937): the sigma=0 guarantee holds for the reported
+  `mismatch_seed` and for decks consuming `mc_mismatch_seed` directly, not
+  for decks that draw mismatch from ngspice's own RNG (`agauss`/`gauss`),
+  where the combined `.options seed` still varies per sample. Docs and the
+  `_expand_monte_carlo` docstring now say so and name the working control
+  (switch the deck's mismatch off). No seed derivation or JSON change.
 - **Bipolar markers can be derived layer expressions** (issue #2860):
   `BipolarDevice.marker` now accepts a `LayerExpr`, a frozen AND/NOT tree
   of drawn layers that can nest, as well as a bare `(layer, datatype)`

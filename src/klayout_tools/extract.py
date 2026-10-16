@@ -132,6 +132,8 @@ exercised by ``tests/test_extract.py``.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import shutil
@@ -512,6 +514,43 @@ def _parasitic_model_header_comment() -> str:
     for key, value in PARASITIC_MODEL_SCOPE.items():
         lines.append(f"* - {key}: {value}")
     return "\n".join(lines)
+
+
+def _fixed_value_capacitor_classes(
+    deck: Any,
+    device_counts: Mapping[str, int],
+    model_bindings: Mapping[str, Any] | None,
+) -> list[tuple[str, int]]:
+    """``(class, count)`` for every extracted MiM capacitor class that is
+    written as a fixed-value ``C`` card rather than a ``--pdk`` subcircuit
+    call (issue #3090): no ``--pdk`` at all, or a class with no curated
+    ``_CAPACITOR_MODEL_TABLE`` binding."""
+    bound = model_bindings or {}
+    return [
+        (capacitor.name, device_counts[capacitor.name])
+        for capacitor in deck.capacitors
+        if device_counts.get(capacitor.name, 0) > 0 and capacitor.name not in bound
+    ]
+
+
+def _fixed_value_capacitor_note(classes: Sequence[tuple[str, int]]) -> list[str]:
+    """The one-line statement (``warnings[]`` entry / ``--parasitics`` header
+    comment) that these capacitors are fixed values PDK corners cannot move,
+    as a zero- or one-element list (empty when ``classes`` is empty)."""
+    if not classes:
+        return []
+    total = sum(count for _, count in classes)
+    names = ", ".join(f"'{name}'" for name, _ in classes)
+    device_word = "capacitor" if total == 1 else "capacitors"
+    return [
+        f"{total} drawn {device_word} ({names}) written as a fixed-value "
+        "'C' card (the deck's nominal area+perimeter value) -- PDK process "
+        "corners (e.g. mimcap_ff/mimcap_ss) do not apply to it, so "
+        "schematic-vs-extracted deltas at non-typical corners include a "
+        "capacitor-corner term; pass --pdk to bind the PDK capacitor "
+        "subcircuit instead. See docs/cli/extract.md's 'SPICE model binding' "
+        "section."
+    ]
 
 
 #: Relative permittivity assumed for the `klt mom` cross-check
@@ -1697,6 +1736,8 @@ def run_extract(
             "dbu_um": <database unit in micrometres, float>,
             "netlist_path": <resolved output path>,
             "netlist_sha256": <hex digest of the written netlist file>,
+            "netlist_normalized_sha256": <hex digest of the devices[]/nets[]
+                connectivity with anonymous-net numbering normalized away>,
             "status": "extracted",
             "device_count": <int>,
             "net_count": <int>,
@@ -2737,6 +2778,15 @@ def run_extract(
             "docs/cli/extract.md's 'Parasitic (RC) extraction' section."
         )
 
+    # Drawn MiM capacitors written as a fixed-value `C` card (issue #3090): the
+    # value is the deck's nominal area+perimeter law, so PDK process-corner
+    # sections cannot move it (a `--pdk`-bound `X` subckt call can). One
+    # aggregate line, plus the same fact in the `--parasitics` header below.
+    fixed_value_capacitor_note = _fixed_value_capacitor_note(
+        _fixed_value_capacitor_classes(deck, device_counts, model_bindings)
+    )
+    warnings.extend(fixed_value_capacitor_note)
+
     # `--pdk`-bound device classes whose target subcircuit has no parameter
     # for something the extractor measured (issue #695): today, only a
     # sky130 `pnp` bipolar binding, whose fixed-geometry `pnp_05v5_*` cells
@@ -3320,6 +3370,9 @@ def run_extract(
     netlist_description = f"extracted by klt extract --deck {deck_name}"
     if parasitics_report is not None:
         netlist_description += "\n" + _parasitic_model_header_comment()
+        netlist_description += "".join(
+            "\n* " + note for note in fixed_value_capacitor_note
+        )
     try:
         netlist.write(netlist_path, writer, netlist_description)
     except Exception as exc:
@@ -3364,6 +3417,15 @@ def run_extract(
         "dbu_um": dbu_um,
         "netlist_path": reported_netlist_path,
         "netlist_sha256": netlist_sha256,
+        # Additive field (issue #3407): `null` exactly when `netlist_sha256`
+        # is (`--no-netlist`); otherwise a numbering-independent digest of
+        # the flat `devices[]`/`nets[]` connectivity -- see
+        # `_normalized_netlist_sha256`.
+        "netlist_normalized_sha256": (
+            None
+            if netlist_sha256 is None
+            else _normalized_netlist_sha256(devices, nets)
+        ),
         "status": "extracted",
         "device_count": len(devices),
         "net_count": len(nets),
@@ -4123,6 +4185,25 @@ def _canonicalize_extract_report_for_rerun_diff(
             )
 
     return normalized
+
+
+def _normalized_netlist_sha256(devices: list[Any], nets: list[Any]) -> str:
+    """Issue #3407: SHA-256 hex digest of this run's flat ``devices[]`` /
+    ``nets[]`` connectivity with KLayout's anonymous-net numbering
+    normalized away -- the same ``net_id`` strip, ``\\$<n>`` structural
+    rewrite and ``(name, attachment key)`` re-sort
+    :func:`_canonicalize_extract_report_for_rerun_diff` applies, serialized
+    as sorted-key compact JSON. Unlike ``netlist_sha256`` (the written
+    ``.spice`` bytes, which embed the ``$N`` counter) it is stable across
+    ``klayout`` builds that only renumber anonymous nets; any real
+    connectivity, device-parameter or net-name change alters it. Covers the
+    flat netlist only (not ``--subcircuit`` decks or parasitics output).
+    """
+    canonical = _canonicalize_extract_report_for_rerun_diff(
+        {"devices": devices, "nets": nets}
+    )
+    payload = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _parasitics_net_attachment_key(entry: Mapping[str, Any]) -> str:

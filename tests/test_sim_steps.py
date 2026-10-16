@@ -1016,3 +1016,151 @@ def test_optional_true_is_refused_in_step_and_derived_measurements():
     ok = _two_point_request()
     ok["measurements"][0]["optional"] = False
     _resolve(ok)
+
+
+# --------------------------------------------------------------------------- #
+# `<step>.spectrum.<vector>`: a noise step's spectrum plot (issue #3284)
+# --------------------------------------------------------------------------- #
+
+_NOISE_BODY = "V1 in 0 dc 0 ac 1\nR1 in out 1k\nR2 out 0 2k\n"
+
+
+def _noise_request(**overrides) -> dict:
+    """Two `noise` solves with a different `R2`, one spectrum point of each
+    plus a derived ratio -- the thermal noise of the divider differs."""
+    step = {
+        "analysis": {"kind": "noise", "args": "v(out) V1 dec 3 10 1e5"},
+        "measurements": [{"name": "tot", "expr": "onoise_total"}],
+    }
+    request = {
+        "netlist": "body.spice",
+        "analysis_steps": [
+            {"name": "a", "alter": {"R2": 2000}, **copy.deepcopy(step)},
+            {"name": "b", "alter": {"R2": 8000}, **copy.deepcopy(step)},
+        ],
+        "measurements": [
+            {"name": "a_spot", "expr": "a.spectrum.onoise_spectrum[1]"},
+            {"name": "b_spot", "expr": "b.spectrum.onoise_spectrum[1]"},
+        ],
+    }
+    request.update(overrides)
+    return request
+
+
+def test_spectrum_reference_rewrites_to_the_steps_own_spectrum_plot():
+    analysis, specs = _resolve(_noise_request())
+    a_spot = next(s for s in specs if s["name"] == "a_spot")
+    b_spot = next(s for s in specs if s["name"] == "b_spot")
+    assert a_spot["deck_lines"][0] == (
+        "let a_spot = {$klt_plot_0_spectrum}.onoise_spectrum[1]"
+    )
+    assert b_spot["deck_lines"][0] == (
+        "let b_spot = {$klt_plot_1_spectrum}.onoise_spectrum[1]"
+    )
+    assert a_spot["spectrum_steps"] == ["a"]
+    # Provenance fields are unchanged: a spectrum read is not a step result.
+    assert sim_steps.measurement_provenance(a_spot) == {"derived_from": []}
+    lines = sim_steps.control_lines(analysis, specs)
+    assert lines.count("set klt_plot_0_spectrum = $klt_pa0") == 1
+    assert lines.count("set klt_plot_1_spectrum = $klt_pa1") == 1
+    assert lines.index("set klt_plot_0 = $curplot") < lines.index(
+        "set klt_plot_0_spectrum = $klt_pa0"
+    )
+
+
+def test_spectrum_capture_only_for_referenced_noise_steps():
+    request = _noise_request()
+    request["measurements"] = [request["measurements"][1]]
+    analysis, specs = _resolve(request)
+    lines = sim_steps.control_lines(analysis, specs)
+    assert "set klt_plot_1_spectrum = $klt_pa1" in lines
+    assert not any("klt_plot_0_spectrum" in line for line in lines)
+
+
+def test_decks_without_spectrum_references_are_unchanged():
+    request = _noise_request()
+    request["measurements"] = [{"name": "t", "expr": "a.tot - b.tot"}]
+    analysis, specs = _resolve(request)
+    assert not any(
+        "spectrum" in line for line in sim_steps.control_lines(analysis, specs)
+    )
+
+
+def test_step_named_spectrum_and_measurement_named_spectrum_do_not_collide():
+    request = _noise_request()
+    request["analysis_steps"][0]["measurements"].append(
+        {"name": "spectrum", "expr": "onoise_total"}
+    )
+    request["measurements"].append({"name": "m", "expr": "a.spectrum * 2"})
+    _, specs = _resolve(request)
+    m = next(s for s in specs if s["name"] == "m")
+    assert m["derived_from"] == ["a.spectrum"]
+    assert "spectrum_steps" not in m
+
+
+@pytest.mark.parametrize(
+    "expr, match",
+    [
+        ("lo.spectrum.onoise_spectrum[1]", r"step 'lo' runs 'op', not 'noise'"),
+        ("a.spectrum.vout[1]", r"'vout' is not a noise spectrum vector of step 'a'"),
+        ("a.other.onoise_spectrum[1]", r"only three-part step reference"),
+        ("zz.spectrum.onoise_spectrum[1]", r"'zz' is not an earlier step"),
+    ],
+)
+def test_invalid_spectrum_references_are_refused(expr, match):
+    request = _noise_request()
+    request["analysis_steps"].insert(
+        0,
+        {
+            "name": "lo",
+            "analysis": {"kind": "op", "args": ""},
+            "measurements": [{"name": "vout", "expr": "v(out)"}],
+        },
+    )
+    request["measurements"] = [{"name": "bad", "expr": expr}]
+    with pytest.raises(sim.SimError, match=match):
+        _resolve(request)
+
+
+def test_spectrum_reference_is_a_valid_sole_input_of_a_derived_measurement():
+    # No `<step>.<meas>` reference at all: the spectrum read alone qualifies.
+    request = _noise_request()
+    request["measurements"] = [{"name": "s", "expr": "b.spectrum.inoise_spectrum[0]"}]
+    _, specs = _resolve(request)
+    assert specs[-1]["spectrum_steps"] == ["b"]
+
+
+def test_failed_noise_step_never_grades_its_spectrum_dependents():
+    request = _noise_request()
+    log = _step_log(
+        steps=2,
+        failed=(1,),
+        values={"a__tot": 1.0, "a_spot": 1.0, "b_spot": 9.0},
+    )
+    results, diagnostics, _ = _grade(request, log)
+    by_name = {r["name"]: r for r in results}
+    assert by_name["a_spot"]["value"] == 1.0
+    assert by_name["b_spot"]["value"] is None
+    assert by_name["b_spot"]["status"] == "error"
+    unavailable = [d for d in diagnostics if d["code"] == "derived_input_unavailable"]
+    assert len(unavailable) == 1
+    assert "b_spot" in unavailable[0]["message"]
+    assert "b.spectrum" in unavailable[0]["message"]
+
+
+@_SKIP_NO_NGSPICE
+def test_real_ngspice_two_noise_steps_read_their_own_spectrum(tmp_path):
+    _write_body(tmp_path, _NOISE_BODY)
+    request = _noise_request()
+    report = sim.run_sim(str(_write_request(tmp_path, request)))
+    corner = report["corners"][0]
+    assert corner["status"] == "pass", corner["diagnostics"]
+    values = {m["name"]: m["value"] for m in corner["measurements"]}
+    assert values["a_spot"] is not None
+    assert values["b_spot"] is not None
+    # Flat thermal noise of R1 || R2 (27 C): each step reads its own solve,
+    # never the previous step's.
+    for step, r2 in (("a", 2000.0), ("b", 8000.0)):
+        r_par = 1000.0 * r2 / (1000.0 + r2)
+        expected = (4 * 1.380649e-23 * 300.15 * r_par) ** 0.5
+        assert values[f"{step}_spot"] == pytest.approx(expected, rel=1e-3)

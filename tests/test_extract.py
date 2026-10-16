@@ -7850,16 +7850,16 @@ def _parasitic_cards(netlist_path: str) -> list[str]:
 def test_pdk_unbound_mim_flavour_writes_bare_value_only_capacitor_card(
     tmp_path, flavour, expected_c_f
 ):
-    """Issue #1558, Gap 2: `--pdk <variant> --parasitics` on a layout whose
+    """Issue #1558, Gap 2: `--parasitics` without `--pdk` on a layout whose
     MiM cap uses one of gf180mcu's non-default densities emits a bare,
     value-only `C` card -- **no** trailing `cap_mim_1f0_m4m5_noshield`-style
     token, which ngspice would reject as an unresolvable `.model` reference
     (`unknown parameter (...)`/`could not find a valid modelname`).
 
-    Neither flavour has a `_CAPACITOR_MODEL_TABLE` row (only the default
-    `cap_mim_2f0_m4m5_noshield` does), so the device falls through to
-    KLayout's own default primitive-card writer -- the path that used to
-    append the class name. The flavour identity is still recorded, in the
+    With no `--pdk` there are no bindings at all (under `--pdk` the `1f0`/`1f5`
+    flavours bind to their `X` subcircuit since issue #3090), so the device
+    falls through to KLayout's own default primitive-card writer -- the path
+    that used to append the class name. The flavour identity is still recorded, in the
     writer's own preceding `* device instance ...` comment and in
     `devices[].class`."""
     path = _write_gds(_make_gf180mcu_mim_layout(), tmp_path / f"{flavour}.gds")
@@ -7867,8 +7867,6 @@ def test_pdk_unbound_mim_flavour_writes_bare_value_only_capacitor_card(
     report = run_extract(
         path,
         "gf180mcu",
-        pdk_variant="gf180mcuA",
-        pdk_root=_make_pdk_install(tmp_path, "gf180mcuA"),
         output=out,
         parasitics=True,
         deck_options={"mim_cap": flavour},
@@ -7946,6 +7944,92 @@ def test_pdk_bound_default_mim_flavour_still_writes_x_card(tmp_path):
     assert " cap_mim_2f0_m4m5_noshield " in card
 
 
+@pytest.mark.parametrize("parasitics", [False, True])
+@pytest.mark.parametrize(
+    "flavour",
+    [
+        "cap_mim_1f0_m4m5_noshield",
+        "cap_mim_1f5_m4m5_noshield",
+        "cap_mim_2f0_m4m5_noshield",
+    ],
+)
+def test_pdk_binds_every_gf180mcu_mim_density_to_subckt(tmp_path, flavour, parasitics):
+    """Issue #3090: `--pdk` binds all three selectable gf180mcu MiM densities
+    to their PDK `cap_mim_*` subcircuit (`c_length`/`c_width`), with and
+    without `--parasitics`, so PDK process-corner sections can move the
+    capacitor. No fixed-value-capacitor warning is raised for a bound class."""
+    path = _write_gds(_make_gf180mcu_mim_layout(), tmp_path / f"{flavour}.gds")
+    out = str(tmp_path / f"{flavour}.spice")
+    report = run_extract(
+        path,
+        "gf180mcu",
+        pdk_variant="gf180mcuA",
+        pdk_root=_make_pdk_install(tmp_path, "gf180mcuA"),
+        output=out,
+        parasitics=parasitics,
+        deck_options={"mim_cap": flavour},
+    )
+
+    card = _capacitor_device_card(out)
+    assert card.startswith("X"), card
+    assert f" {flavour} " in card
+    assert "c_length=" in card and "c_width=" in card
+    assert not any("fixed-value" in w for w in report["warnings"])
+
+
+def test_pdk_parasitics_sky130_mim_writes_subckt_card(tmp_path):
+    """Issue #3090: `--pdk` + `--parasitics` + a sky130 MiM reaches the
+    binding writer (an `X` subcircuit call, not a bare `C` card)."""
+    path = _write_gds(_make_sky130_mim_layout(), tmp_path / "sky130_mim.gds")
+    out = str(tmp_path / "sky130_mim.spice")
+    report = run_extract(
+        path,
+        "sky130",
+        pdk_variant="sky130A",
+        pdk_root=_make_pdk_install(tmp_path, "sky130A"),
+        output=out,
+        parasitics=True,
+    )
+
+    card = _capacitor_device_card(out)
+    assert card.startswith("X"), card
+    assert "sky130_fd_pr__cap_mim_m3_1" in card
+    assert not any("fixed-value" in w for w in report["warnings"])
+
+
+@pytest.mark.parametrize(
+    ("deck_name", "layout_factory"),
+    [
+        ("gf180mcu", _make_gf180mcu_mim_layout),
+        ("sky130", _make_sky130_mim_layout),
+    ],
+)
+def test_fixed_value_capacitor_warns_and_documents_in_header(
+    tmp_path, deck_name, layout_factory
+):
+    """Issue #3090: a capacitor written as a fixed-value `C` card (no
+    `--pdk`) is flagged in one aggregate `warnings[]` line, and under
+    `--parasitics` the same fact lands in the netlist header comment."""
+    path = _write_gds(layout_factory(), tmp_path / f"{deck_name}_fixed.gds")
+    out = str(tmp_path / f"{deck_name}_fixed.spice")
+    report = run_extract(path, deck_name, output=out, parasitics=True)
+
+    notes = [w for w in report["warnings"] if "fixed-value" in w]
+    assert len(notes) == 1, report["warnings"]
+    assert "process corners" in notes[0] and "--pdk" in notes[0]
+
+    header = [
+        line
+        for line in Path(out).read_text().splitlines()
+        if line.startswith("*") and "fixed-value" in line
+    ]
+    assert len(header) == 1, header
+
+    no_parasitics_out = str(tmp_path / f"{deck_name}_fixed_np.spice")
+    run_extract(path, deck_name, output=no_parasitics_out)
+    assert "fixed-value" not in Path(no_parasitics_out).read_text()
+
+
 @pytest.mark.parametrize(
     ("deck_name", "layout_factory"),
     [
@@ -7985,8 +8069,6 @@ def test_unbound_mim_capacitor_netlist_simulates_in_ngspice(tmp_path):
     run_extract(
         path,
         "gf180mcu",
-        pdk_variant="gf180mcuA",
-        pdk_root=_make_pdk_install(tmp_path, "gf180mcuA"),
         output=out,
         parasitics=True,
         deck_options={"mim_cap": flavour},
@@ -20059,6 +20141,81 @@ def test_def_net_instance_pins_empty_when_file_missing(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
+def _divider_report(net):
+    return {
+        "nets": [
+            {
+                "net": net,
+                "hub_net": net,
+                "capacitance_ff": 1.5,
+                "resistance_ohm": 0.0,
+                "terminals": [{"leg_net": "leg_$1_G", "resistance_ohm": 5.0}],
+                "coupled": [],
+            },
+        ]
+    }
+
+
+def test_spef_preserves_def_hierarchy_divider_and_escaped_slash(tmp_path):
+    """Issue #2969: a bare `/` in the DEF (hierarchy divider) is emitted bare
+    in `*I`/`*RES`/`*D_NET`; an escaped `\\/` (literal slash, the #1623 shape)
+    keeps its backslash; escaped brackets keep theirs."""
+    from klayout_tools.extract_spef import _write_spef
+
+    def_path = tmp_path / "h.def"
+    def_path.write_text(
+        "NETS 2 ;\n"
+        "- sub/n1 ( sub/_001_ A ) ( g_slice\\[0\\].u\\/_08_ Y ) ;\n"
+        "- flat\\/n2 ( u3 A ) ;\n"
+        "END NETS\n"
+    )
+    pins = def_net_instance_pins(str(def_path))
+    # Equality against plain str is unchanged by the spelling carrier.
+    assert pins["sub/n1"] == (("sub/_001_", "A"), ("g_slice[0].u/_08_", "Y"))
+
+    report = {
+        "nets": [
+            _divider_report("sub/n1")["nets"][0],
+            _divider_report("flat/n2")["nets"][0],
+        ]
+    }
+    out = tmp_path / "h.spef"
+    _write_spef(
+        str(out),
+        design_name="top",
+        klt_version="0.0.0",
+        parasitics_report=report,
+        port_names=[],
+        net_instance_pins=pins,
+    )
+    text = out.read_text()
+    assert "*D_NET sub/n1 " in text
+    assert "*I sub/_001_:A B" in text
+    assert "1 sub/n1:1 sub/n1:2 5.000000" in text
+    assert "2 sub/n1:1 sub/_001_:A 0.000000" in text
+    assert "*I g_slice\\[0\\]\\.u\\/_08_:Y B" in text
+    assert "*D_NET flat\\/n2 " in text
+
+
+def test_spef_names_without_def_origin_are_unchanged(tmp_path):
+    """Issue #2969 regression: plain-str names keep `_spef_name` escaping,
+    including `/`."""
+    from klayout_tools.extract_spef import _write_spef
+
+    out = tmp_path / "p.spef"
+    _write_spef(
+        str(out),
+        design_name="top",
+        klt_version="0.0.0",
+        parasitics_report=_divider_report("a/b"),
+        port_names=[],
+        net_instance_pins={"a/b": (("sub/u", "A"),)},
+    )
+    text = out.read_text()
+    assert "*D_NET a\\/b " in text
+    assert "*I sub\\/u:A B" in text
+
+
 def test_spef_conn_emits_instance_pin_entries_and_zero_ohm_legs(tmp_path):
     """`net_instance_pins` adds one `*I <inst>:<pin> B` `*CONN` entry per
     connection (alongside any `*P` port entry) and wires each into the RC
@@ -24388,6 +24545,7 @@ def test_no_netlist_writes_nothing_and_reports_null(tmp_path):
     assert not (tmp_path / "inv.spice").exists()
     assert result["netlist_path"] is None
     assert result["netlist_sha256"] is None
+    assert result["netlist_normalized_sha256"] is None
     for key in ("status", "device_count", "net_count", "device_counts"):
         assert result[key] == normal[key]
 
@@ -24398,6 +24556,7 @@ def test_default_still_writes_next_to_input(tmp_path):
     assert result["netlist_path"] == str(tmp_path / "inv.spice")
     assert (tmp_path / "inv.spice").is_file()
     assert isinstance(result["netlist_sha256"], str)
+    assert isinstance(result["netlist_normalized_sha256"], str)
 
 
 def test_no_netlist_cli_json_and_text(tmp_path, capsys):
@@ -24447,3 +24606,48 @@ def test_no_netlist_with_spef_still_works(tmp_path):
     )
     assert result["netlist_path"] is None
     assert not (tmp_path / "inv.spice").exists()
+
+
+def _anon_connectivity(first: int, second: int):
+    """A two-device report fragment whose two anonymous nets are numbered
+    ``first``/``second`` -- the only thing varied between builds (#3407)."""
+    a, b = f"\\${first}", f"\\${second}"
+    devices = [
+        {"name": "M1", "nets": {"D": a, "G": "IN", "S": "VSS"}},
+        {"name": "M2", "nets": {"D": b, "G": a, "S": "VSS"}},
+    ]
+    nets = [
+        {"name": "IN", "net_id": 1},
+        {"name": a, "net_id": first},
+        {"name": b, "net_id": second},
+        {"name": "VSS", "net_id": 4},
+    ]
+    return devices, nets
+
+
+def test_normalized_netlist_hash_ignores_anonymous_net_numbering():
+    from klayout_tools.extract import _normalized_netlist_sha256
+
+    base = _normalized_netlist_sha256(*_anon_connectivity(3, 7))
+    renumbered = _normalized_netlist_sha256(*_anon_connectivity(81, 12))
+    assert base == renumbered
+
+
+def test_normalized_netlist_hash_detects_connectivity_change():
+    from klayout_tools.extract import _normalized_netlist_sha256
+
+    devices, nets = _anon_connectivity(3, 7)
+    base = _normalized_netlist_sha256(devices, nets)
+    devices[1]["nets"]["G"] = "IN"  # rewire M2's gate off the anonymous net
+    assert _normalized_netlist_sha256(devices, nets) != base
+
+
+def test_normalized_netlist_hash_is_stable_across_reruns(tmp_path):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    a = run_extract(path, "sky130", output=str(tmp_path / "a.spice"))
+    b = run_extract(path, "sky130", output=str(tmp_path / "b.spice"))
+    assert a["netlist_normalized_sha256"] == b["netlist_normalized_sha256"]
+    assert len(a["netlist_normalized_sha256"]) == 64
+    other = _write_gds(_make_series_resistor_chain_layout(), tmp_path / "chain.gds")
+    c = run_extract(other, "sky130", output=str(tmp_path / "c.spice"))
+    assert c["netlist_normalized_sha256"] != a["netlist_normalized_sha256"]
