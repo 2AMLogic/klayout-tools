@@ -22150,6 +22150,8 @@ def test_extract_request_document_file_form_matches_argv(tmp_path, capsys):
     request_code, request_report = _run_extract_json(capsys, [str(request_path)])
 
     assert argv_code == request_code == 0
+    # `timing` is a wall-clock measurement of the run (issue #3181), not content.
+    argv_report.pop("timing"), request_report.pop("timing")
     assert request_report == argv_report
 
 
@@ -22667,7 +22669,7 @@ def test_subcircuit_leaves_the_flat_extraction_byte_identical(tmp_path):
     assert plain["netlist_sha256"] == sliced["netlist_sha256"]
     assert plain["subcircuit"] is None
 
-    volatile = {"netlist_path", "subcircuit", "warnings", "provenance"}
+    volatile = {"netlist_path", "subcircuit", "warnings", "provenance", "timing"}
     assert {k: v for k, v in plain.items() if k not in volatile} == {
         k: v for k, v in sliced.items() if k not in volatile
     }
@@ -23988,8 +23990,8 @@ def test_hierarchical_cells_conservation_failure_is_refused_before_output(
 
     real = extract_hierarchy._build_child
 
-    def lossy(netlist, cell, group):
-        child, pin_sigs = real(netlist, cell, group)
+    def lossy(netlist, cell, group, *args, **kwargs):
+        child, pin_sigs = real(netlist, cell, group, *args, **kwargs)
         child.remove_device(next(iter(child.each_device())))
         return child, pin_sigs
 
@@ -24005,6 +24007,161 @@ def test_hierarchical_cells_conservation_failure_is_refused_before_output(
             hierarchical_cells=("STAGE",),
         )
     assert not output.exists()
+
+
+def _make_hier_nested_layout() -> kdb.Layout:
+    """``TOP`` places ``OUTER`` twice; each ``OUTER`` holds two ``STAGE``
+    placements. Every ``STAGE`` input head carries a pad labelled in the top
+    cell (``IN_1`` .. ``IN_4``), so each is a pin of the flat deck."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    stage = _draw_hier_stage(layout, "STAGE", "MID")
+    outer = layout.create_cell("OUTER")
+    li1 = layout.layer(67, 20)
+    li1_label = layout.layer(67, 5)
+    stage_ys = (0, 40000)
+    for y in stage_ys:
+        outer.insert(kdb.CellInstArray(stage.cell_index(), kdb.Trans(0, y)))
+    count = 0
+    for outer_y in (0, 100000):
+        top.insert(kdb.CellInstArray(outer.cell_index(), kdb.Trans(0, outer_y)))
+        for y in stage_ys:
+            count += 1
+            top.shapes(li1).insert(
+                kdb.Box(1100, 200 + outer_y + y, 1900, 800 + outer_y + y)
+            )
+            top.shapes(li1_label).insert(
+                kdb.Text(f"IN_{count}", kdb.Trans(1500, 500 + outer_y + y))
+            )
+    return layout
+
+
+def _flat_device_count(tmp_path: Path, layout: kdb.Layout) -> int:
+    return run_extract(
+        _write_gds(layout, tmp_path / "flat.gds"),
+        "sky130",
+        output=str(tmp_path / "flat.spice"),
+        top_cell_pins_only=True,
+    )["device_count"]
+
+
+def test_hierarchical_cells_nested_selection_emits_nested_subckt_tree(tmp_path):
+    report, output = _run_hier(tmp_path, _make_hier_nested_layout(), ("OUTER", "STAGE"))
+    circuits = _spice_circuits(str(output))
+    assert set(circuits) == {"TOP", "OUTER", "STAGE"}
+
+    def instances(circuit: str) -> list[list[str]]:
+        return [c for c in circuits[circuit]["cards"] if c[0].startswith("X")]
+
+    def devices(circuit: str) -> list[list[str]]:
+        return [c for c in circuits[circuit]["cards"] if c[0].startswith("R")]
+
+    assert [c[-1] for c in instances("TOP")] == ["OUTER", "OUTER"]
+    assert [c[-1] for c in instances("OUTER")] == ["STAGE", "STAGE"]
+    assert instances("STAGE") == []
+    assert devices("TOP") == [] and devices("OUTER") == []
+    assert len(devices("STAGE")) == 2
+    # Nested instances connect to the parent's own pins: every STAGE input
+    # is a distinct OUTER pin, and every OUTER pin is wired from the top.
+    assert len(circuits["OUTER"]["pins"]) == 2
+    assert {c[1] for c in instances("OUTER")} == set(circuits["OUTER"]["pins"])
+    assert {n for c in instances("TOP") for n in c[1:-1]} == {
+        "IN_1",
+        "IN_2",
+        "IN_3",
+        "IN_4",
+    }
+    cells = {entry["cell"]: entry for entry in report["hierarchy"]["cells"]}
+    assert cells["OUTER"]["placements"] == 2
+    assert cells["STAGE"]["placements"] == 4
+    assert cells["OUTER"]["children"] == [
+        {"cell": "STAGE", "instances": ["XSTAGE_1", "XSTAGE_2"]}
+    ]
+    assert "children" not in cells["STAGE"]
+    assert cells["STAGE"]["instances"] == []
+    assert report["hierarchy"]["top_device_count"] == 0
+
+
+def test_hierarchical_cells_nested_selection_conserves_every_device(tmp_path):
+    layout = _make_hier_nested_layout()
+    flat = _flat_device_count(tmp_path, layout)
+    _report, output = _run_hier(tmp_path, layout, ("OUTER", "STAGE"))
+    circuits = _spice_circuits(str(output))
+    # 1 STAGE definition (2 R) x 2 per OUTER x 2 OUTER placements
+    stage_devices = sum(1 for c in circuits["STAGE"]["cards"] if c[0].startswith("R"))
+    assert flat == 8
+    assert stage_devices * 2 * 2 == flat
+
+
+def test_hierarchical_cells_nested_conservation_failure_is_refused(
+    tmp_path, monkeypatch
+):
+    """Negative control across levels: losing a device from the *inner*
+    definition must fail the conservation check at the top."""
+    from klayout_tools import extract_hierarchy
+
+    real = extract_hierarchy._build_child
+
+    def lossy(netlist, cell, group, *args, **kwargs):
+        child, pin_sigs = real(netlist, cell, group, *args, **kwargs)
+        if cell == "STAGE":
+            child.remove_device(next(iter(child.each_device())))
+        return child, pin_sigs
+
+    monkeypatch.setattr(extract_hierarchy, "_build_child", lossy)
+    path = _write_gds(_make_hier_nested_layout(), tmp_path / "block.gds")
+    output = tmp_path / "block.spice"
+    with pytest.raises(ExtractError, match="conservation check failed"):
+        run_extract(
+            path,
+            "sky130",
+            output=str(output),
+            top_cell_pins_only=True,
+            hierarchical_cells=("OUTER", "STAGE"),
+        )
+    assert not output.exists()
+
+
+def test_hierarchical_cells_nested_and_top_level_placements_of_one_cell(tmp_path):
+    """``STAGE`` is placed under ``WRAP`` and directly in ``TOP``: one
+    definition, one instance in each parent circuit, numbered per parent."""
+
+    def layout() -> kdb.Layout:
+        return _make_subcircuit_slice_layout(
+            wrapper_cell="WRAP", second_placement=kdb.Trans(kdb.Vector(0, 80000))
+        )
+
+    flat = _flat_device_count(tmp_path, layout())
+    report, output = _run_hier(tmp_path, layout(), ("WRAP", "STAGE"))
+    circuits = _spice_circuits(str(output))
+    assert set(circuits) == {"TOP", "WRAP", "STAGE"}
+    assert sorted(c[-1] for c in circuits["TOP"]["cards"] if c[0].startswith("X")) == [
+        "STAGE",
+        "WRAP",
+    ]
+    assert [c[-1] for c in circuits["WRAP"]["cards"] if c[0].startswith("X")] == [
+        "STAGE"
+    ]
+    cells = {entry["cell"]: entry for entry in report["hierarchy"]["cells"]}
+    assert cells["STAGE"]["placements"] == 2
+    assert cells["STAGE"]["instances"] == ["XSTAGE_1"]  # the top-level one
+    assert cells["WRAP"]["children"] == [{"cell": "STAGE", "instances": ["XSTAGE_1"]}]
+    top_r = sum(1 for c in circuits["TOP"]["cards"] if c[0].startswith("R"))
+    stage_r = sum(1 for c in circuits["STAGE"]["cards"] if c[0].startswith("R"))
+    assert top_r + stage_r * 2 == flat  # R3 in TOP + STAGE (2 R) in both parents
+
+
+def test_hierarchical_cells_single_wrapper_selection_keeps_inner_cell_inline(
+    tmp_path,
+):
+    """Selecting only the outer cell keeps the inner placement's devices
+    inside the outer definition (no nested ``.SUBCKT``)."""
+    _report, output = _run_hier(
+        tmp_path, _make_subcircuit_slice_layout(wrapper_cell="WRAP"), ("WRAP",)
+    )
+    circuits = _spice_circuits(str(output))
+    assert set(circuits) == {"TOP", "WRAP"}
+    assert sum(1 for c in circuits["WRAP"]["cards"] if c[0].startswith("R")) == 2
 
 
 def test_hierarchical_cells_flat_mode_is_byte_identical(tmp_path):
@@ -24034,8 +24191,6 @@ def test_hierarchical_cells_flat_mode_is_byte_identical(tmp_path):
     [
         (("NOPE",), {}, "names no cell in this layout"),
         (("TOP",), {}, "names the top cell itself"),
-        (("STAGE", "WRAP"), {"wrapper_cell": "WRAP"}, "#2916"),
-        (("WRAP", "STAGE"), {"wrapper_cell": "WRAP"}, "nested selections"),
     ],
 )
 def test_hierarchical_cells_rejects_bad_selection_before_output(
@@ -24651,3 +24806,121 @@ def test_normalized_netlist_hash_is_stable_across_reruns(tmp_path):
     other = _write_gds(_make_series_resistor_chain_layout(), tmp_path / "chain.gds")
     c = run_extract(other, "sky130", output=str(tmp_path / "c.spice"))
     assert c["netlist_normalized_sha256"] != a["netlist_normalized_sha256"]
+
+
+# --progress / `timing` (issue #3181) ----------------------------------------
+
+
+def test_report_carries_additive_timing_object(tmp_path):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    result = run_extract(path, "sky130")
+    timing = result["timing"]
+    assert timing["total_seconds"] >= 0
+    stages = timing["stages"]
+    assert {"read_layout", "device_extraction", "netlist_write"} <= set(stages)
+    assert all(seconds >= 0 for seconds in stages.values())
+    assert timing["unattributed_seconds"] >= 0
+    assert sum(stages.values()) + timing["unattributed_seconds"] == pytest.approx(
+        timing["total_seconds"], abs=0.01
+    )
+
+
+def test_progress_lines_go_to_stderr_and_stdout_stays_json(tmp_path, capsys):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    code = main(["extract", path, "--deck", "sky130", "--progress", "--format", "json"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "timing" in json.loads(captured.out)
+    assert "read_layout started" in captured.err
+    assert "device_extraction finished" in captured.err
+    assert "klt extract:" not in captured.out
+
+
+def test_no_progress_is_silent_even_off_a_tty(tmp_path, capsys):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    code = main(
+        ["extract", path, "--deck", "sky130", "--no-progress", "--format", "json"]
+    )
+    assert code == 0
+    assert capsys.readouterr().err == ""
+
+
+def test_default_off_a_tty_is_heartbeat_only_so_short_runs_stay_clean(tmp_path, capsys):
+    # pytest's captured stderr is not a TTY, so the unset default is the
+    # heartbeat-only mode: a short run writes nothing to stderr.
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    assert main(["extract", path, "--deck", "sky130", "--format", "json"]) == 0
+    assert capsys.readouterr().err == ""
+
+
+def test_progress_request_document_key(tmp_path, capsys):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    request = tmp_path / "req.json"
+    request.write_text(
+        json.dumps(
+            {
+                "schema": "klt.extract.request/1",
+                "file": path,
+                "deck": "sky130",
+                "progress": False,
+            }
+        )
+    )
+    assert main(["extract", str(request), "--format", "json"]) == 0
+    assert capsys.readouterr().err == ""
+
+
+def test_short_run_emits_no_heartbeat(tmp_path, capsys):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    run_extract(path, "sky130", progress=True)
+    assert "still running" not in capsys.readouterr().err
+
+
+def test_stage_timer_heartbeat_fires_during_a_long_stage():
+    import io
+    import time
+
+    from klayout_tools.extract_progress import StageTimer, active_timer, stage
+
+    stream = io.StringIO()
+    timer = StageTimer(progress=True, stream=stream, heartbeat_s=0.05)
+    with active_timer(timer), stage("slow"):
+        time.sleep(0.3)
+    assert "slow still running" in stream.getvalue()
+    assert "slow started" in stream.getvalue()
+    assert timer.report()["stages"]["slow"] >= 0.25
+
+
+def test_heartbeat_mode_omits_stage_lines():
+    import io
+    import time
+
+    from klayout_tools.extract_progress import StageTimer, active_timer, stage
+
+    stream = io.StringIO()
+    timer = StageTimer(progress="heartbeat", stream=stream, heartbeat_s=0.05)
+    with active_timer(timer), stage("slow"):
+        time.sleep(0.2)
+    assert "slow still running" in stream.getvalue()
+    assert "started" not in stream.getvalue()
+    assert "finished" not in stream.getvalue()
+
+
+def test_stage_is_a_noop_without_an_active_timer():
+    from klayout_tools.extract_progress import stage
+
+    with stage("nothing"):
+        pass
+
+
+def test_timing_is_ignored_by_rerun_drift(tmp_path):
+    from klayout_tools._report_verify import VOLATILE_PROVENANCE_PATHS
+
+    assert ("timing",) in VOLATILE_PROVENANCE_PATHS
+
+
+def test_consecutive_runs_give_identical_netlist_sha256(tmp_path):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    first = run_extract(path, "sky130", output=str(tmp_path / "a.spice"))
+    second = run_extract(path, "sky130", output=str(tmp_path / "b.spice"))
+    assert first["netlist_sha256"] == second["netlist_sha256"]

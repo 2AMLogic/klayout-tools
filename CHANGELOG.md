@@ -68,6 +68,13 @@ not `klt --version`, if you need to detect this kind of drift. See
   with a waiver file (fail on an unwaived element and on a stale waiver).
   `options.initial_state` for `functional-verification` follows separately.
 
+- **Docs: `monte_carlo.vary: "process"` negative control is scoped**
+  (issue #2937): the sigma=0 guarantee holds for the reported
+  `mismatch_seed` and for decks consuming `mc_mismatch_seed` directly, not
+  for decks that draw mismatch from ngspice's own RNG (`agauss`/`gauss`),
+  where the combined `.options seed` still varies per sample. Docs and the
+  `_expand_monte_carlo` docstring now say so and name the working control
+  (switch the deck's mismatch off). No seed derivation or JSON change.
 - **Bipolar markers can be derived layer expressions** (issue #2860):
   `BipolarDevice.marker` now accepts a `LayerExpr`, a frozen AND/NOT tree
   of drawn layers that can nest, as well as a bare `(layer, datatype)`
