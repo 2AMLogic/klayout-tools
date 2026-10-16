@@ -4072,6 +4072,19 @@ def _add_place_and_route_parser(subparsers: argparse._SubParsersAction) -> None:
         "request", help="path to a klt place-and-route request JSON file"
     )
     _add_pdk_args(place_and_route_parser)
+    place_and_route_parser.add_argument(
+        "--backend",
+        choices=("local", "batch"),
+        default=None,
+        help=(
+            "where the units of a `pdk.rebuild_corners` request run (default: "
+            "the request's `backend` field, then $KLT_SIM_BACKEND, then "
+            "local). `batch` submits one job per corner to the Spot batch "
+            "fleet and never falls back to running OpenROAD on this host; a "
+            "single-unit request stays local under a host-default batch. See "
+            "docs/cli/place-and-route.md, 'Physical rebuild per corner'"
+        ),
+    )
     _add_flow_verify_args(
         place_and_route_parser,
         verb="place-and-route",
