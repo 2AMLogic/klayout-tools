@@ -1309,6 +1309,25 @@ does not exhibit the merge. A four-terminal entry may combine with
 drawn): the empty `C` input keeps the three-terminal collector semantics,
 staying tied to `substrate_net`.
 
+**Emitter size filter (`BipolarDevice.emitter_size`, issue #2861).** An
+optional `SizeFilter` (`klayout_tools.decks.SizeFilter`) tells bipolar
+flavours apart by drawn emitter-window size, as SG13G2 does for `npn13G2` /
+`npn13G2l` / `npn13G2v`. It holds inclusive `(lo, hi)` ranges in microns for
+`bbox_min_um` (shorter bounding-box side), `bbox_max_um` (longer side) and
+`area_um2` (µm²); an exact value is `(v, v)`, an unset dimension is
+unconstrained, and a window must satisfy every set one. An all-`None`
+filter and `lo > hi` or negative bounds are rejected at construction.
+
+- Applied to the **merged** emitter region, after `emitter_requires` /
+  `emitter_excludes`, so a window split by the base edge is measured whole.
+- Rounding: bounds convert to the layout dbu by rounding to the nearest
+  integer (area: nearest dbu²), then compare inclusively at both ends; a
+  window one dbu outside a bound does not match. Works at any dbu.
+- Entries sharing `base`/`marker`/`emitter` (and narrowing) with overlapping
+  size ranges raise `ExtractError`; a window matching none of a group's
+  entries yields no device and one `warnings[]` line giving its bbox, size
+  and area. Default `None` leaves extraction and deck hashes unchanged.
+
 `devices[].nets` for a bipolar device uses `"c"`/`"b"`/`"e"` terminal keys
 (collector/base/emitter) instead of MOS's `"s"`/`"g"`/`"d"`/`"b"` — plus
 `"s"` (substrate) for a deck entry that declares the optional `substrate`

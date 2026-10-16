@@ -39,6 +39,7 @@ from klayout_tools.decks import (
     ExtractionDeck,
     InvalidLabelLayerError,
     LayerExpr,
+    SizeFilter,
     get_extraction_deck,
     get_unmodeled_voltage_markers,
 )
@@ -46,6 +47,7 @@ from klayout_tools.decks.extraction import layer_operand_leaves
 from klayout_tools.extract import (
     PARASITIC_MODEL_SCOPE,
     ExtractError,
+    _apply_size_filter,
     _describe_devices,
     _describe_matched_device_groups,
     _detect_single_terminal_nets,
@@ -25173,6 +25175,200 @@ def test_no_netlist_with_spef_still_works(tmp_path):
     )
     assert result["netlist_path"] is None
     assert not (tmp_path / "inv.spice").exists()
+
+
+# --- BipolarDevice.emitter_size / SizeFilter (issue #2861) -------------------
+#
+# Source for the npn13G2 window: IHP SG13G2 LVS runset,
+#   npn13G2_e_pin = npn13G2_e_.with_bbox_min(0.07.um).with_bbox_max(0.9.um)
+#                              .with_area(0.063.um)
+# (quoted in issue #2861). The issue cites NO numbers for npn13G2l / npn13G2v,
+# so the ranges for those two flavours below are SYNTHETIC (0.07 um wide, 1.8
+# and 2.7 um long) chosen only to be disjoint from npn13G2 -- not IHP data.
+
+_SIZED_NPN = SizeFilter(
+    bbox_min_um=(0.07, 0.07), bbox_max_um=(0.9, 0.9), area_um2=(0.063, 0.063)
+)
+_SIZED_NPN_L = SizeFilter(  # synthetic, see above
+    bbox_min_um=(0.07, 0.07), bbox_max_um=(1.8, 1.8), area_um2=(0.126, 0.126)
+)
+_SIZED_NPN_V = SizeFilter(  # synthetic, see above
+    bbox_min_um=(0.07, 0.07), bbox_max_um=(2.7, 2.7), area_um2=(0.189, 0.189)
+)
+
+
+def _sized_bjt_deck(*filters_by_class):
+    base = get_extraction_deck("sky130")
+    entries = tuple(
+        BipolarDevice(
+            base=(64, 20),
+            emitter=(65, 20),
+            marker=(82, 44),
+            class_name=name,
+            emitter_size=size,
+        )
+        for name, size in filters_by_class
+    )
+    return dataclasses.replace(base, bipolars=entries)
+
+
+def _sized_bjt_layout(windows_dbu):
+    """A marked base with one emitter window per (w, h) in dbu, 5000 apart."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer, box):
+        top.shapes(layout.layer(layer, 20 if layer == 64 else 44)).insert(box)
+
+    x = 500
+    for w, h in windows_dbu:
+        top.shapes(layout.layer(65, 20)).insert(kdb.Box(x, 500, x + w, 500 + h))
+        x += 5000
+    top.shapes(layout.layer(64, 20)).insert(kdb.Box(0, 0, x, 4000))
+    top.shapes(layout.layer(82, 44)).insert(kdb.Box(0, 0, x, 4000))
+    return layout
+
+
+def _sized_bjt_run(deck, windows_dbu):
+    layout = _sized_bjt_layout(windows_dbu)
+    result = _extract_netlist(layout, layout.top_cell(), deck, None)
+    netlist, warnings = result[0], result[1]
+    classes = sorted(
+        d.device_class().name
+        for c in netlist.each_circuit()
+        for d in c.each_device()
+        if d.device_class().name.startswith("npn")
+    )
+    return classes, [w for w in warnings if "emitter_size" in w]
+
+
+def test_emitter_size_three_windows_give_three_classes():
+    deck = _sized_bjt_deck(
+        ("npn13G2", _SIZED_NPN),
+        ("npn13G2l", _SIZED_NPN_L),
+        ("npn13G2v", _SIZED_NPN_V),
+    )
+    classes, warns = _sized_bjt_run(deck, [(70, 900), (70, 1800), (70, 2700)])
+    assert classes == ["npn13G2", "npn13G2l", "npn13G2v"]
+    assert warns == []
+
+
+def test_emitter_size_unrecognised_window_warns_and_makes_no_device():
+    deck = _sized_bjt_deck(("npn13G2", _SIZED_NPN), ("npn13G2l", _SIZED_NPN_L))
+    classes, warns = _sized_bjt_run(deck, [(70, 900), (300, 300)])
+    assert classes == ["npn13G2"]
+    assert len(warns) == 1
+    assert "0.3 x 0.3 um" in warns[0] and "bbox" in warns[0]
+
+
+def test_emitter_size_unrecognised_when_only_oversize_of_three():
+    deck = _sized_bjt_deck(("npn13G2", _SIZED_NPN))
+    # one dbu wider than the exact 0.07 x 0.9 window: area/bbox_min differ.
+    classes, warns = _sized_bjt_run(deck, [(71, 900)])
+    assert classes == [] and len(warns) == 1
+
+
+def test_emitter_size_merges_before_measuring():
+    """An emitter split into two abutting boxes is measured as one window."""
+    deck = _sized_bjt_deck(("npn13G2", _SIZED_NPN))
+    layout = _sized_bjt_layout([(70, 450)])
+    top = layout.top_cell()
+    top.shapes(layout.layer(65, 20)).insert(kdb.Box(500, 950, 570, 1400))
+    result = _extract_netlist(layout, top, deck, None)
+    names = [
+        d.device_class().name for c in result[0].each_circuit() for d in c.each_device()
+    ]
+    assert names.count("npn13G2") == 1
+
+
+def test_emitter_size_overlapping_ranges_rejected():
+    deck = _sized_bjt_deck(("a", _SIZED_NPN), ("b", _SIZED_NPN))
+    with pytest.raises(ExtractError, match="overlapping emitter_size"):
+        _sized_bjt_run(deck, [(70, 900)])
+
+
+def test_emitter_size_quantized_overlap_rejected():
+    """Physically distinct ranges that round to the same integer dbu bounds
+    (0.0701 um and 0.0702 um both round to 70 dbu at dbu=0.001) are rejected:
+    without this, one 70 x 900 dbu window extracted as both devices."""
+    quantized_a = SizeFilter(
+        bbox_min_um=(0.0701, 0.0701), bbox_max_um=(0.9, 0.9), area_um2=(0.063, 0.063)
+    )
+    quantized_b = SizeFilter(
+        bbox_min_um=(0.0702, 0.0702), bbox_max_um=(0.9, 0.9), area_um2=(0.063, 0.063)
+    )
+    assert not quantized_a.overlaps(quantized_b)  # disjoint in physical um
+    deck = _sized_bjt_deck(("npn_a", quantized_a), ("npn_b", quantized_b))
+    with pytest.raises(ExtractError, match="overlapping emitter_size"):
+        _sized_bjt_run(deck, [(70, 900)])
+
+
+def test_emitter_size_unsized_sibling_rejected():
+    """An emitter_size=None entry sharing base/marker/emitter with a sized
+    one matches every window the sized one claims: it would extract the same
+    window twice and suppress/misreport the unclaimed-window warning."""
+    deck = _sized_bjt_deck(("npn_a", _SIZED_NPN), ("npn_fallback", None))
+    with pytest.raises(ExtractError, match="no emitter_size"):
+        _sized_bjt_run(deck, [(70, 900), (300, 300)])
+
+
+def test_emitter_size_disjoint_ranges_not_rejected_and_overlap_logic():
+    assert not _SIZED_NPN.overlaps(_SIZED_NPN_L)
+    assert SizeFilter(area_um2=(0, 1)).overlaps(SizeFilter(bbox_min_um=(5, 6)))
+    assert SizeFilter(area_um2=(0, 1)).overlaps(SizeFilter(area_um2=(1, 2)))
+    assert not SizeFilter(area_um2=(0, 1)).overlaps(SizeFilter(area_um2=(1.1, 2)))
+
+
+def test_size_filter_validation():
+    with pytest.raises(ValueError, match="at least one"):
+        SizeFilter()
+    with pytest.raises(ValueError, match="lo > hi"):
+        SizeFilter(area_um2=(2.0, 1.0))
+    with pytest.raises(ValueError, match="non-negative"):
+        SizeFilter(bbox_min_um=(-0.1, 1.0))
+
+
+def test_emitter_size_default_is_none():
+    assert (
+        BipolarDevice(base=(1, 0), emitter=(2, 0), marker=(3, 0)).emitter_size is None
+    )
+
+
+@pytest.mark.parametrize("dbu", [0.001, 0.005, 0.0005])
+def test_size_filter_bbox_boundaries(dbu):
+    """Inclusive at lo and hi; one dbu outside either end does not match."""
+    size = SizeFilter(bbox_min_um=(0.1, 0.2))
+    one = lambda w: round(w / dbu)  # noqa: E731
+
+    def matches(width_um):
+        r = kdb.Region(kdb.Box(0, 0, one(width_um), one(1.0)))
+        return not _apply_size_filter(r, size, dbu).is_empty()
+
+    assert matches(0.1)
+    assert matches(0.2)
+    assert matches(0.15)
+    assert _apply_size_filter(
+        kdb.Region(kdb.Box(0, 0, one(0.1) - 1, one(1.0))), size, dbu
+    ).is_empty()
+    assert _apply_size_filter(
+        kdb.Region(kdb.Box(0, 0, one(0.2) + 1, one(1.0))), size, dbu
+    ).is_empty()
+
+
+@pytest.mark.parametrize("dbu", [0.001, 0.005])
+def test_size_filter_area_and_bbox_max_boundaries(dbu):
+    size = SizeFilter(bbox_max_um=(0.5, 1.0), area_um2=(0.25, 0.5))
+    n = lambda v: round(v / dbu)  # noqa: E731
+
+    def matches(w, h):
+        r = kdb.Region(kdb.Box(0, 0, n(w), n(h)))
+        return not _apply_size_filter(r, size, dbu).is_empty()
+
+    assert matches(0.5, 0.5)  # bbox_max and area both at lo
+    assert matches(0.5, 1.0)  # bbox_max at hi, area at hi
+    assert not matches(0.5, 1.0 + dbu)  # one dbu past hi
+    assert not matches(0.5 - dbu, 0.5)  # bbox_max one dbu below lo
+    assert not matches(0.5, 0.5 - dbu)  # area below lo (bbox_max too)
 
 
 def _make_gf180mcu_mim_option_a_layout() -> kdb.Layout:

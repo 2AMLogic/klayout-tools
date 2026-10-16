@@ -269,7 +269,9 @@ it extracts upstream through the same stock `DeviceExtractorBJT3Transistor`
 extractor `BipolarDevice` wires up, but its emitter terminal is a fixed-size
 box synthesized from a bounding-box-size-filtered region and its collector
 terminal a dynamic per-instance `.covering(...)` derivation — neither
-expressible by `BipolarDevice`'s plain layer-intersection fields. See
+expressible by `BipolarDevice`'s plain layer-intersection fields. (A size
+filter now exists as `BipolarDevice.emitter_size`, #2861, but the
+collector-derivation and synthesized-emitter gaps remain.) See
 `src/klayout_tools/decks/sg13g2.py`'s "Schottky diode (schottky_nbl1) —
 investigated, declined" docstring section for the full finding.
 
