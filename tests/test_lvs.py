@@ -44,7 +44,7 @@ from pathlib import Path
 import pytest
 
 from helpers.subprocess_fakes import fake_completed
-from klayout_tools import lvs, lvs_netgen, pdk
+from klayout_tools import _provenance, lvs, lvs_netgen, pdk
 from klayout_tools.cli import main
 from klayout_tools.lvs import LvsError, run_lvs
 
@@ -15537,7 +15537,7 @@ def test_check_lvs_report_klt_version_drift_advisory(tmp_path):
     advisories = {entry["field"]: entry for entry in result["advisories"]}
     assert advisories.keys() == {"provenance.klt_version"}
     assert advisories["provenance.klt_version"]["report"] == "0.0.1-forged"
-    assert advisories["provenance.klt_version"]["current"] == lvs._klt_version()
+    assert advisories["provenance.klt_version"]["current"] == _provenance._klt_version()
 
 
 def test_check_lvs_report_klayout_version_drift_advisory(tmp_path):
@@ -15558,7 +15558,10 @@ def test_check_lvs_report_klayout_version_drift_advisory(tmp_path):
     advisories = {entry["field"]: entry for entry in result["advisories"]}
     assert advisories.keys() == {"provenance.klayout_version"}
     assert advisories["provenance.klayout_version"]["report"] == "0.0.1-forged"
-    assert advisories["provenance.klayout_version"]["current"] == lvs._klayout_version()
+    assert (
+        advisories["provenance.klayout_version"]["current"]
+        == _provenance._klayout_version()
+    )
 
 
 def test_check_lvs_report_missing_version_fields_no_crash(tmp_path):

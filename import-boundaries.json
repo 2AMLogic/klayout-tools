@@ -1229,18 +1229,6 @@
       "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
     },
     {
-      "consumer": "klayout_tools.lvs",
-      "exporter": "klayout_tools._provenance",
-      "symbol": "_klayout_version",
-      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
-    },
-    {
-      "consumer": "klayout_tools.lvs",
-      "exporter": "klayout_tools._provenance",
-      "symbol": "_klt_version",
-      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
-    },
-    {
       "consumer": "klayout_tools.netlist_batch",
       "exporter": "klayout_tools._provenance",
       "symbol": "_klt_version",

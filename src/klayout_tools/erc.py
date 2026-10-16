@@ -5043,9 +5043,7 @@ def check_erc_report(report_path: str) -> dict[str, Any]:
     Raises :class:`ErcError` for a missing/unparseable committed report --
     never a traceback.
     """
-    # Imported here, not at module level: ``lvs`` is a heavyweight module and
-    # only the --check path needs its version-drift advisory helper.
-    from .lvs import _version_drift_advisories
+    from ._provenance import version_drift_advisories
 
     committed = _load_committed_report(report_path, ErcError)
     checks = [
@@ -5072,7 +5070,7 @@ def check_erc_report(report_path: str) -> dict[str, Any]:
             )
         )
     result = build_check_result(report_path=report_path, checks=checks)
-    result["advisories"] = _version_drift_advisories(committed)
+    result["advisories"] = version_drift_advisories(committed)
     return result
 
 

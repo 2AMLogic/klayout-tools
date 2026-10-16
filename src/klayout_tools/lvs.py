@@ -121,7 +121,7 @@ import fnmatch
 import json
 import os
 import re
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -132,11 +132,10 @@ from ._provenance import (
     INPUT_ROLE_LAYOUT,
     INPUT_ROLE_NETLIST,
     _content_hash,
-    _klayout_version,
-    _klt_version,
     build_provenance,
     explicit_deck_options,
     sha256_file,
+    version_drift_advisories,
 )
 from ._report_verify import (
     VOLATILE_PROVENANCE_PATHS,
@@ -2693,51 +2692,6 @@ def run_lvs(request: str) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 
-#: `provenance` fields `check_lvs_report()` treats as a non-fatal *advisory*
-#: rather than a hash-integrity failure (issue #1373). `klt_version` and
-#: `klayout_version` are included because they answer the question `--check`
-#: was previously silent on: "did the engine itself change between the
-#: committed run and now". `provenance.pdk.version` is deliberately left out
-#: -- unlike the tool build, a PDK release routinely differs by design
-#: between machines/CI runners without implying anything about *this*
-#: report's reproducibility, so folding it in here would make the advisory
-#: noisy rather than informative. This mirrors -- but is a distinct read
-#: path from -- `_report_verify.VOLATILE_PROVENANCE_PATHS`, which excludes
-#: all three fields from `--rerun`'s drift diff (#1106); that exclusion is
-#: unchanged by this constant.
-_VERSION_ADVISORY_FIELDS: tuple[tuple[str, Callable[[], str | None]], ...] = (
-    ("klt_version", _klt_version),
-    ("klayout_version", _klayout_version),
-)
-
-
-def _version_drift_advisories(committed: dict[str, Any]) -> list[dict[str, Any]]:
-    """Non-fatal advisories (issue #1373) naming any `provenance.<field>` in
-    `_VERSION_ADVISORY_FIELDS` that differs between `committed` and the
-    engine currently running `--check`. A missing value on either side (an
-    older report predating these fields, or an unresolvable current
-    version) is "unknown", not "drift" -- it is silently skipped rather than
-    reported, so `--check` never crashes or false-positives on a report
-    format gap.
-    """
-    advisories = []
-    for field, current_getter in _VERSION_ADVISORY_FIELDS:
-        report_value = get_path(committed, ("provenance", field))
-        current_value = current_getter()
-        if report_value is None or current_value is None:
-            continue
-        if report_value == current_value:
-            continue
-        advisories.append(
-            {
-                "field": f"provenance.{field}",
-                "report": report_value,
-                "current": current_value,
-            }
-        )
-    return advisories
-
-
 def _input_hash_check(
     field: str, expected: str | None, echoed: Any, report_path: str
 ) -> dict[str, Any]:
@@ -2833,7 +2787,7 @@ def check_lvs_report(report_path: str) -> dict[str, Any]:
     The result additionally carries an ``advisories`` list (issue #1373):
     entries naming a ``provenance.klt_version``/``provenance.klayout_version``
     that differs between the committed report and the engine currently
-    running ``--check`` -- see :func:`_version_drift_advisories`. This is
+    running ``--check`` -- see :func:`version_drift_advisories`. This is
     purely informational: it never affects ``status`` (still driven only by
     the hash ``checks`` above) or the caller's exit code, and is never folded
     into ``checks``' ``[OK]``/``[DRIFTED]`` list, so a scripted gate grepping
@@ -2864,7 +2818,7 @@ def check_lvs_report(report_path: str) -> dict[str, Any]:
             )
         )
     result = build_check_result(report_path=report_path, checks=checks)
-    result["advisories"] = _version_drift_advisories(committed)
+    result["advisories"] = version_drift_advisories(committed)
     return result
 
 
