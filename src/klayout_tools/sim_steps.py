@@ -836,6 +836,15 @@ def _format_value(value: float) -> str:
     return repr(float(value))
 
 
+def _alter_line(target: str, value: Any) -> str:
+    if is_ac_alter_target(target):
+        return f"alter {target[: -len(_AC_SUFFIX)]} ac = {_format_value(value)}"
+    if isinstance(value, dict):
+        vector = " ".join(_format_value(v) for v in value["pwl"])
+        return f"alter @{target}[pwl] = [ {vector} ]"
+    return f"alter {target}={_format_value(value)}"
+
+
 def control_lines(
     analysis: dict[str, Any],
     measurements_spec: list[dict[str, Any]],
@@ -857,15 +866,7 @@ def control_lines(
             lines.append("reset")
             lines.extend(reset_prefix or [])
         for target, value in step["alter"]:
-            if is_ac_alter_target(target):
-                lines.append(
-                    f"alter {target[: -len(_AC_SUFFIX)]} ac = {_format_value(value)}"
-                )
-            elif isinstance(value, dict):
-                vector = " ".join(_format_value(v) for v in value["pwl"])
-                lines.append(f"alter @{target}[pwl] = [ {vector} ]")
-            else:
-                lines.append(f"alter {target}={_format_value(value)}")
+            lines.append(_alter_line(target, value))
         lines.append("setplot new")
         lines.append(f"echo klt_step_begin {index} $curplot")
         lines.append(f"{step['kind']} {step['args']}".rstrip())
