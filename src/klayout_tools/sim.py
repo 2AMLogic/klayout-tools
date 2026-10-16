@@ -1628,13 +1628,18 @@ def _own_persistent_roots(
     plot_dir: str | None,
     *,
     persistent: bool,
+    dry_run: bool = False,
 ) -> None:
     """Enter the output-directory lock for each persistent root (#2770).
+
+    A dry run (#3064) writes nothing, so it owns nothing.
 
     Roots are taken outermost first (shortest canonical path), so a
     ``plot_dir`` that contains ``artifacts_dir`` (or vice versa) is owned
     once and the inner one re-enters for free instead of self-contending.
     """
+    if dry_run:
+        return
     roots = ([artifacts_dir] if persistent else []) + (
         [plot_dir] if plot_dir is not None else []
     )
@@ -1655,6 +1660,7 @@ def run_sim(
     plot_dir: str | None = None,
     fail_fast_probe: bool | None = None,
     fail_on_diagnostic: list[str] | tuple[str, ...] | None = None,
+    dry_run: bool = False,
     submit_only: bool = False,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
@@ -1886,6 +1892,13 @@ def run_sim(
     owns its outdir (#3168). Ownership of an ancestor
     (``run_pex``'s) is inherited, never re-acquired. ``_ownership`` is
     internal: the exit stack that releases the lock when the run ends.
+
+    **Dry run (issue #3064).** ``dry_run=True`` runs every pre-dispatch
+    check of a corner request (shape, Monte Carlo spec, measurement forms,
+    model/OSDI resolution, staging closure, off-host PDK check) and returns
+    :func:`_build_dry_run_report` -- the expanded unit list with its derived
+    seeds -- without running the fail-fast probe, taking an output-directory
+    lock, or invoking any backend (no ngspice, SSH, S3 or EC2).
     """
     request = load_request(request_path)
     # Issue #2892: the engine runs with ``cwd=<corner dir>``, so a relative
@@ -1894,6 +1907,11 @@ def run_sim(
     if artifacts_dir is not None:
         artifacts_dir = os.path.abspath(artifacts_dir)
     if sim_decks.DECKS_FIELD in request:
+        if dry_run:
+            raise SimError(
+                "--dry-run does not apply to deck-list requests (`decks`); "
+                "it validates corner/Monte Carlo requests only"
+            )
         if submit_only:
             raise SimError(
                 "--submit-only is not supported for deck-list requests",
@@ -1924,6 +1942,7 @@ def run_sim(
         plot_dir=plot_dir,
         fail_fast_probe=fail_fast_probe,
         fail_on_diagnostic=fail_on_diagnostic,
+        dry_run=dry_run,
         submit_only=submit_only,
         _ownership=_ownership,
     )
@@ -2065,6 +2084,7 @@ def _run_sim_corners(
     plot_dir: str | None = None,
     fail_fast_probe: bool | None = None,
     fail_on_diagnostic: list[str] | tuple[str, ...] | None = None,
+    dry_run: bool = False,
     submit_only: bool = False,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
@@ -2461,31 +2481,24 @@ def _run_sim_corners(
         artifacts_dir,
         plot_dir,
         persistent=bool(keep_artifacts or resume or backend in _OFFHOST_BACKENDS),
+        dry_run=dry_run,
     )
     checkpoint_path = _checkpoint_path(artifacts_dir)
-    pre_completed: dict[str, dict[str, Any]] = {}
-    loaded_engine_version: str | None = None
-    checkpoint: _Checkpoint | None = None
-    if resume:
-        fingerprint = _checkpoint_fingerprint(
-            netlist_path=dispatch_netlist_path,
-            models_lib=models_lib,
-            analysis=analysis,
-            measurements_spec=measurements_spec,
-            corner_points=corner_points,
-            timeout_s=timeout_s,
-            engine=engine,
-            osdi_preload=osdi_preload,
-            corner_section_libs=corner_section_libs,
-            save_mode=save_mode,
-            ngspice_options=ngspice_options,
-        )
-        pre_completed, loaded_engine_version = _load_checkpoint(
-            checkpoint_path, fingerprint
-        )
-        checkpoint = _Checkpoint(checkpoint_path, fingerprint)
-        checkpoint.completed = dict(pre_completed)
-        checkpoint.engine_version = loaded_engine_version
+    pre_completed, loaded_engine_version, checkpoint = _open_resume_checkpoint(
+        checkpoint_path,
+        resume=bool(resume),
+        netlist_path=dispatch_netlist_path,
+        models_lib=models_lib,
+        analysis=analysis,
+        measurements_spec=measurements_spec,
+        corner_points=corner_points,
+        timeout_s=timeout_s,
+        engine=engine,
+        osdi_preload=osdi_preload,
+        corner_section_libs=corner_section_libs,
+        save_mode=save_mode,
+        ngspice_options=ngspice_options,
+    )
 
     dispatch_points = (
         [point for point in corner_points if point.corner_id not in pre_completed]
@@ -2508,7 +2521,12 @@ def _run_sim_corners(
     # did not run at all (opted out, wrong analysis kind, empty grid) or
     # came back inconclusive -- see `_run_fail_fast_probe`.
     probe_result: dict[str, Any] | None = None
-    if fail_fast_probe and backend not in _OFFHOST_BACKENDS and dispatch_points:
+    if (
+        fail_fast_probe
+        and not dry_run
+        and backend not in _OFFHOST_BACKENDS
+        and dispatch_points
+    ):
         probe_result = _run_fail_fast_probe(
             corner_points=dispatch_points,
             netlist_path=dispatch_netlist_path,
@@ -2604,6 +2622,19 @@ def _run_sim_corners(
         backend=backend,
         enabled=stage_model_inputs,
     )
+
+    if dry_run:
+        return _build_dry_run_report(
+            request,
+            engine=engine,
+            backend=backend,
+            hosts=hosts,
+            netlist_path=netlist_path,
+            models_lib=models_lib,
+            corner_points=corner_points,
+            monte_carlo_info=monte_carlo_info,
+            staged_model_environment=staged_model_environment,
+        )
 
     if submit_only:
         _refuse_unsupported_submit_only(backend, hosts, resume, plot_dir)
@@ -3149,6 +3180,83 @@ def _warn_pdk_ambiguity(resolution: dict[str, Any] | None) -> None:
     warning = pdk_ambiguity_warning(resolution) if resolution else None
     if warning is not None:
         print(warning, file=sys.stderr)
+
+
+#: Top-level request keys ``klt sim`` reads (or documents). A dry run
+#: reports anything else as a warning (issue #3064) -- never an error, so no
+#: existing request starts failing.
+_KNOWN_REQUEST_KEYS = frozenset(
+    {
+        "analysis",
+        "analysis_steps",
+        "backend",
+        "batch",
+        "confidence",
+        "corners",
+        "decks",
+        "engine",
+        "exclude",
+        "measurements",
+        "models",
+        "monte_carlo",
+        "netlist",
+        "netlist_source",
+        "options",
+        "remote",
+        "schema",
+        "schema_version",
+        "target_ci_halfwidth",
+        "_explicit_points",
+        sim_staging.STAGED_MODEL_INPUTS_FIELD,
+    }
+)
+
+
+def _build_dry_run_report(
+    request: dict[str, Any],
+    *,
+    engine: str,
+    backend: str,
+    hosts: int,
+    netlist_path: str,
+    models_lib: str | None,
+    corner_points: list[CornerPoint],
+    monte_carlo_info: dict[str, Any] | None,
+    staged_model_environment: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    """The ``klt sim --dry-run`` response (issue #3064): the request as
+    :func:`_run_sim_corners` expanded it, with nothing simulated or submitted.
+
+    Built from the same ``corner_points`` / ``monte_carlo_info`` the real run
+    dispatches, so the per-sample seeds are exactly the ones a real run uses.
+    """
+    units: list[dict[str, Any]] = []
+    for point in corner_points:
+        unit: dict[str, Any] = {"corner_id": point.corner_id}
+        if point.sample_index is not None:
+            unit["sample_index"] = point.sample_index
+        if point.mc_seed is not None:
+            for key in ("rndseed", "process_seed", "mismatch_seed"):
+                unit[key] = point.mc_seed[key]
+        units.append(unit)
+    warnings = [
+        f"unknown top-level request key '{key}' (ignored by klt sim)"
+        for key in sorted(set(request) - _KNOWN_REQUEST_KEYS)
+    ]
+    return {
+        "dry_run": True,
+        "status": "valid",
+        "engine": engine,
+        "backend": backend,
+        "hosts": hosts,
+        "netlist": netlist_path,
+        "models_lib": models_lib,
+        "unit_count": len(units),
+        "units": units,
+        "monte_carlo": monte_carlo_info,
+        "staged_files": staged_model_environment.get("staged_model_inputs", []),
+        "warnings": warnings,
+    }
 
 
 def _preflight_staged_model_inputs(
@@ -4280,6 +4388,29 @@ def _checkpoint_path(artifacts_dir: str) -> str:
     regardless of ``keep_artifacts``.
     """
     return os.path.join(artifacts_dir, "checkpoint.json")
+
+
+def _open_resume_checkpoint(
+    checkpoint_path: str,
+    *,
+    resume: bool,
+    **fingerprint_inputs: Any,
+) -> tuple[dict[str, dict[str, Any]], str | None, _Checkpoint | None]:
+    """The ``resume`` state of :func:`_run_sim_corners`: the corner reports a
+    prior run of this same request already recorded, the engine version that
+    run saw, and the checkpoint this run keeps extending. Without ``resume``
+    there is nothing to load and no checkpoint is kept.
+    """
+    if not resume:
+        return {}, None, None
+    fingerprint = _checkpoint_fingerprint(**fingerprint_inputs)
+    pre_completed, loaded_engine_version = _load_checkpoint(
+        checkpoint_path, fingerprint
+    )
+    checkpoint = _Checkpoint(checkpoint_path, fingerprint)
+    checkpoint.completed = dict(pre_completed)
+    checkpoint.engine_version = loaded_engine_version
+    return pre_completed, loaded_engine_version, checkpoint
 
 
 def _checkpoint_fingerprint(

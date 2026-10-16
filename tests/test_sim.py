@@ -12952,6 +12952,114 @@ def test_noise_representation(plotname, vtype, expected):
 
 
 # --------------------------------------------------------------------------- #
+# klt sim --dry-run (issue #3064)
+# --------------------------------------------------------------------------- #
+
+
+def _dry_run_mc_request(tmp_path, **extra):
+    _write_body(tmp_path)
+    return _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "monte_carlo": {"n": 3, "seed": 7, "vary": "both"},
+            **extra,
+        },
+    )
+
+
+def test_run_sim_dry_run_seeds_match_real_run_and_invoke_no_engine(
+    tmp_path, monkeypatch
+):
+    request = _dry_run_mc_request(tmp_path)
+
+    monkeypatch.delenv(sim.BACKEND_ENV, raising=False)
+    _stub_subprocess_run(monkeypatch)
+    real = sim.run_sim(str(request))
+
+    def boom(*args, **kwargs):
+        raise AssertionError("dry run must not invoke the engine")
+
+    monkeypatch.setattr(sim.subprocess, "run", boom)
+    for name in list(sim._BACKENDS):
+        monkeypatch.setitem(sim._BACKENDS, name, boom)
+    dry = sim.run_sim(str(request), dry_run=True)
+
+    assert dry["dry_run"] is True
+    assert dry["status"] == "valid"
+    assert dry["unit_count"] == len(dry["units"]) == 3
+    assert dry["warnings"] == []
+
+    real_seeds = [
+        (
+            c["monte_carlo"]["seed"],
+            c["monte_carlo"]["process_seed"],
+            c["monte_carlo"]["mismatch_seed"],
+        )
+        for c in real["corners"]
+    ]
+    dry_seeds = [
+        (u["rndseed"], u["process_seed"], u["mismatch_seed"]) for u in dry["units"]
+    ]
+    assert dry_seeds == real_seeds
+    assert [u["corner_id"] for u in dry["units"]] == [
+        c["corner_id"] for c in real["corners"]
+    ]
+
+
+def test_run_sim_dry_run_warns_on_unknown_key(tmp_path):
+    request = _dry_run_mc_request(tmp_path, monte_carol_typo=1)
+    report = sim.run_sim(str(request), dry_run=True)
+    assert len(report["warnings"]) == 1
+    assert "monte_carol_typo" in report["warnings"][0]
+
+
+def test_run_sim_dry_run_reports_same_error_as_real_run(tmp_path):
+    request = _dry_run_mc_request(tmp_path)
+    bad = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "monte_carlo": {"n": 0, "seed": 1},
+        },
+    )
+    with pytest.raises(sim.SimError) as real_exc:
+        sim.run_sim(str(bad))
+    with pytest.raises(sim.SimError) as dry_exc:
+        sim.run_sim(str(bad), dry_run=True)
+    assert str(dry_exc.value) == str(real_exc.value)
+    assert request.exists()
+
+
+def test_run_sim_dry_run_missing_netlist_raises(tmp_path):
+    request = _write_request(
+        tmp_path,
+        {"netlist": "nope.spice", "analysis": {"kind": "tran", "args": "1n 1u"}},
+    )
+    with pytest.raises(sim.SimError, match="netlist not found"):
+        sim.run_sim(str(request), dry_run=True)
+
+
+def test_run_sim_dry_run_refuses_deck_requests(tmp_path):
+    request = _write_request(tmp_path, {"decks": [{"name": "a", "deck": "x"}]})
+    with pytest.raises(sim.SimError, match="--dry-run"):
+        sim.run_sim(str(request), dry_run=True)
+
+
+def test_cli_sim_dry_run_json_envelope(tmp_path, capsys, monkeypatch):
+
+    monkeypatch.delenv(sim.BACKEND_ENV, raising=False)
+    request = _dry_run_mc_request(tmp_path)
+    assert main(["sim", str(request), "--dry-run", "--format", "json"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["dry_run"] is True
+    assert len(out["units"]) == 3
+    assert out["backend"] == "local"
+
+
+# --------------------------------------------------------------------------- #
 # environment.engine_host (issue #3110)
 # --------------------------------------------------------------------------- #
 
