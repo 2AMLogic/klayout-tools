@@ -61,7 +61,12 @@ def run(args: argparse.Namespace) -> int:
         else:
             report = run_functional_verification(args.request, output_dir=outdir)
     except FunctionalVerificationError as exc:
-        return emit_error("functional-verification", str(exc), args.format)
+        return emit_error(
+            "functional-verification",
+            str(exc),
+            args.format,
+            code=getattr(exc, "code", None),
+        )
 
     emit_success(report, args.format, _print_text)
 

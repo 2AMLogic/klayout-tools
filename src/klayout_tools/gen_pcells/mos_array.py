@@ -10,10 +10,31 @@ submodule only imports it, never the reverse).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import klayout.db as kdb
+
+
+def _mos_cap_enabled(pcell: Any) -> bool:
+    """``pcell.mos_cap`` (the PCell params are dynamic attributes)."""
+    return bool(pcell.mos_cap)
+
+
+def _insert_mos_cap_mark(pcell: Any, info: dict[str, Any], dbu: float) -> None:
+    """Draw the MOS-capacitor marker (issue #3283) when ``pcell.mos_cap`` is
+    set: the same enclosing box as the voltage-flavor marker, so it covers
+    every unit device."""
+    if not _mos_cap_enabled(pcell):
+        return
+    from klayout_tools.gen import _insert_boxes
+
+    _insert_boxes(
+        pcell.cell,
+        pcell.layout.layer(pcell.mos_cap_mark_layer),
+        dbu,
+        [info["voltage_flavor_mark_box_um"]],
+    )
 
 
 def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
@@ -79,6 +100,10 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         :func:`_mos_array_layout`'s own docstring. ``0.0`` (the default)
         draws byte-for-byte unchanged geometry."""
 
+        # Declared via ``self.param("mfg_grid_um", ...)`` below; the
+        # PCellDeclarationHelper stubs cannot see it, so annotate for mypy.
+        mfg_grid_um: float
+
         def __init__(self) -> None:
             super().__init__()
             self.param("w_um", self.TypeDouble, "Unit device width (um)", default=0.42)
@@ -134,6 +159,22 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "doesn't recognise draws nothing and is reported via "
                 "drc_hints.notes, never silently dropped",
                 default="",
+            )
+            self.param(
+                "mos_cap",
+                self.TypeBoolean,  # type: ignore[attr-defined]
+                "Draw a MOS capacitor instead of a transistor: every "
+                "source/drain segment is strapped into one terminal and the "
+                "PDK's MOS-capacitor marker is drawn over the array (needs "
+                "add_guard_ring for the body tie; finger_topology is "
+                "ignored; gate_contact is unsupported)",
+                default=False,
+            )
+            self.param(
+                "mos_cap_mark_layer",
+                self.TypeLayer,  # type: ignore[attr-defined]
+                "PDK MOS-capacitor marker drawing layer (only used when mos_cap)",
+                default=kdb.LayerInfo(0, 0),
             )
             self.param(
                 "gate_contact",
@@ -447,6 +488,7 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.sd_implant_margin_um if self.sd_implant_present else 0.0,
                 self.voltage_flavor_mark_margin_um,
                 self.interior_channel_um,
+                _mos_cap_enabled(self),
                 self.pitch_x_um,
                 self.pitch_y_um,
             )
@@ -535,6 +577,7 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     _shift_box(ring["outer_box_um"], ox, oy),
                     _shift_box(ring["inner_box_um"], ox, oy),
                     gap_box,
+                    self.mfg_grid_um,
                 )
                 _insert_ring(
                     self.cell,
@@ -543,6 +586,7 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     _shift_box(ring["outer_box_um"], ox, oy),
                     _shift_box(ring["inner_box_um"], ox, oy),
                     gap_box,
+                    self.mfg_grid_um,
                 )
                 _insert_boxes(
                     self.cell, li_contact, dbu, ring["contact_boxes_um"], ox, oy
@@ -583,6 +627,7 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                         gap_box,
                         ring["gap"]["side"] if ring["gap"] is not None else None,
                         self.ring_implant_margin_um,
+                        self.mfg_grid_um,
                     )
 
             # Medium-voltage/thick-oxide device-class marker (issue #1054):
@@ -604,6 +649,8 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     dbu,
                     [info["voltage_flavor_mark_box_um"]],
                 )
+
+            _insert_mos_cap_mark(self, info, dbu)
 
             # Dummy-device marker (issue #491): drawn only over
             # dummy_cells' gate footprint (unit_boxes["poly"], the exact

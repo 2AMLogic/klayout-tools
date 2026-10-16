@@ -23,6 +23,7 @@ import json
 import os
 import re
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -14333,13 +14334,11 @@ def test_gf180mcu_parasitics_metals_covers_full_stack():
     assert m2.cap_perim_ff_um == pytest.approx(0.033298)
 
     # Metal5 (index 4, top metal of this 5-level stack): sheet from the
-    # resolved, pre-built gf180mcuD.tech for the pinned PDK commit
-    # (`resist (allm5)/metal5    60`, 60 milliohm/sq), the non-thick-metal
-    # `else` branch -- not the generic templated gf180mcu.tech's
-    # THICKMET1P1 row (40 milliohm/sq), which a prior curation (#571)
-    # mistakenly used (corrected by #572).
+    # resolved, pre-built gf180mcuD.tech for the pinned PDK commit f6eeac7
+    # (`resist (allm5)/metal5    40`, 40 milliohm/sq; it read 60 at the
+    # earlier c6d73a3 pin -- issue #3540).
     m5 = gf180mcu.PARASITICS.metals[4]
-    assert m5.sheet_res_ohm_sq == pytest.approx(0.06)
+    assert m5.sheet_res_ohm_sq == pytest.approx(0.04)
     assert m5.cap_area_ff_um2 == pytest.approx(0.005798)
     assert m5.cap_perim_ff_um == pytest.approx(0.030386)
 
@@ -14846,6 +14845,105 @@ def test_critical_net_unmatched_name_is_a_warning_not_an_error(tmp_path):
 def test_critical_net_requires_parasitics():
     with pytest.raises(ExtractError, match="--critical-net requires --parasitics"):
         run_extract("/nonexistent.gds", "sky130", critical_nets=["VIC"])
+
+
+# ---------------------------------------------------------------------------
+# Glob / all-nets selectors for --critical-net / --parasitics-net (issue #2974)
+# ---------------------------------------------------------------------------
+
+
+def _lateral_run(tmp_path, **kwargs):
+    path = _write_gds(_make_lateral_coupling_layout(), tmp_path / "lateral.gds")
+    return run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "lateral.spice"),
+        parasitics=True,
+        **kwargs,
+    )
+
+
+def test_critical_net_pattern_matches_explicit_names(tmp_path):
+    explicit = _lateral_run(tmp_path, critical_nets=["VIC"])["parasitics"]
+    pattern = _lateral_run(tmp_path, critical_net_patterns=["V*"])["parasitics"]
+    assert pattern["critical_nets"] == ["VIC"]
+    assert pattern["critical_net_patterns"] == ["V*"]
+    assert pattern["cc_count"] == explicit["cc_count"] == 1
+    assert pattern["total_coupling_capacitance_ff"] == pytest.approx(
+        explicit["total_coupling_capacitance_ff"]
+    )
+
+
+def test_critical_net_pattern_merges_with_exact_names(tmp_path):
+    para = _lateral_run(tmp_path, critical_nets=["FAR"], critical_net_patterns=["V*"])[
+        "parasitics"
+    ]
+    assert para["critical_nets"] == ["FAR", "VIC"]
+
+
+def test_no_selector_leaves_report_fields_absent(tmp_path):
+    para = _lateral_run(tmp_path, critical_nets=["VIC"])["parasitics"]
+    assert "critical_net_patterns" not in para
+    assert "critical_net_all" not in para
+    assert "parasitics_net_patterns" not in para
+
+
+def test_critical_net_pattern_zero_match_warns_distinctly(tmp_path):
+    report = _lateral_run(tmp_path, critical_net_patterns=["bl_*"])
+    assert any(
+        "--critical-net-pattern pattern(s) 'bl_*' match no net" in w
+        for w in report["warnings"]
+    )
+    assert report["parasitics"]["critical_nets"] == []
+
+
+def test_critical_net_pattern_zero_match_is_error_when_strict(tmp_path):
+    with pytest.raises(ExtractError, match="'bl_\\*' match no net.*strict-net"):
+        _lateral_run(tmp_path, critical_net_patterns=["bl_*"], strict_net_patterns=True)
+
+
+def test_critical_net_all_with_exclude(tmp_path):
+    para = _lateral_run(tmp_path, critical_net_all=True, critical_net_excludes=["FAR"])[
+        "parasitics"
+    ]
+    assert para["critical_nets"] == ["AGR", "VIC"]
+    assert para["critical_net_all"] is True
+    assert para["critical_net_excludes"] == ["FAR"]
+
+
+def test_parasitics_net_pattern_scopes_ground_pass(tmp_path):
+    para = _lateral_run(tmp_path, parasitics_net_patterns=["[AV]*"])["parasitics"]
+    assert para["parasitics_nets"] == ["AGR", "VIC"]
+    assert {entry["net"] for entry in para["nets"]} == {"AGR", "VIC"}
+
+
+def test_net_selector_flag_validation(tmp_path):
+    with pytest.raises(ExtractError, match="require --parasitics"):
+        run_extract("/nonexistent.gds", "sky130", critical_net_patterns=["V*"])
+    with pytest.raises(ExtractError, match="requires --critical-net-all"):
+        run_extract(
+            "/nonexistent.gds", "sky130", parasitics=True, critical_net_excludes=["x"]
+        )
+    with pytest.raises(ExtractError, match="--strict-net-patterns requires"):
+        run_extract(
+            "/nonexistent.gds", "sky130", parasitics=True, strict_net_patterns=True
+        )
+
+
+def test_distributed_rc_with_empty_resolving_pattern_errors(tmp_path):
+    with pytest.raises(ExtractError, match="resolved to no net"):
+        _lateral_run(tmp_path, critical_net_patterns=["bl_*"], distributed_rc=True)
+
+
+def test_net_selector_anonymous_nets_only_match_explicit_dollar_glob():
+    from klayout_tools.extract_netselect import NetSelectors
+
+    selectors = NetSelectors(error=ExtractError)
+    named = ["bl_0", "bl_1", "VSS"]
+    anonymous = ["\\$3"]
+    assert selectors._select("f", ["*"], named, anonymous) == set(named)
+    assert selectors._select("f", ["\\$*"], named, anonymous) == {"\\$3"}
+    assert selectors._select("f", [], named, anonymous, select_all=True) == set(named)
 
 
 # ---------------------------------------------------------------------------
@@ -21620,6 +21718,101 @@ def test_rerun_extract_report_clean_pass(tmp_path):
     assert result["fresh"]["status"] == "extracted"
 
 
+def test_extract_report_echoes_pins_and_def_pins_sets(tmp_path):
+    """Issue #3061: `declared_pins`/`def_pins` are always present -- a sorted
+    list, or `null` for "flag not given" (`[]` stays distinct)."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "echo.gds")
+    plain = run_extract(path, "sky130", output=str(tmp_path / "a.spice"))
+    assert plain["declared_pins"] is None
+    assert plain["def_pins"] is None
+    given = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "b.spice"),
+        declared_pins=frozenset({"VPWR", "A"}),
+        def_pins=frozenset(),
+    )
+    assert given["declared_pins"] == ["A", "VPWR"]
+    assert given["def_pins"] == []
+
+
+def test_rerun_extract_report_replays_plain_pins_without_rename(tmp_path):
+    """Issue #3061: a plain `--pins`/`--def-pins` run (no
+    `--rename-declared-pins`) replays from the top-level echoes and matches."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "plain_pins.gds")
+    report_path = tmp_path / "plain_pins.extract.json"
+    committed = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "plain_pins.spice"),
+        declared_pins=frozenset({"A", "VGND", "VPWR", "VPB", "Y"}),
+        def_pins=frozenset({"A", "VGND", "VPWR", "VPB"}),
+    )
+    _write_report(report_path, committed)
+    assert committed["pin_renames"] is None
+
+    result = rerun_extract_report(str(report_path))
+
+    assert result["status"] == "match"
+    assert result["drift"] == []
+    assert result["fresh"]["declared_pins"] == committed["declared_pins"]
+    assert result["fresh"]["def_pins"] == committed["def_pins"]
+    assert result["fresh"]["def_pin_promotion"] is not None
+
+
+def test_rerun_extract_report_legacy_report_without_pin_echoes(tmp_path):
+    """Issue #3061: a report predating the top-level echoes still replays via
+    the `pin_renames` fallback."""
+    path = _write_gds(
+        _make_inverter_layout(extra_y_label="clk"), tmp_path / "legacy.gds"
+    )
+    report_path = tmp_path / "legacy.extract.json"
+    committed = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "legacy.spice"),
+        declared_pins=frozenset({"clk", "VGND", "VPWR", "VPB", "A"}),
+        rename_declared_pins=True,
+    )
+    del committed["declared_pins"]
+    del committed["def_pins"]
+    _write_report(report_path, committed)
+
+    result = rerun_extract_report(str(report_path))
+
+    # The only drift is the additive fields the legacy report lacks; the pin
+    # fields themselves reproduce through the `pin_renames` fallback.
+    assert {d["field"] for d in result["drift"]} <= {"declared_pins", "def_pins"}
+    assert result["fresh"]["pin_renames"]["renamed"] == [{"from": "Y|clk", "to": "clk"}]
+
+
+def test_rerun_extract_report_never_modifies_committed_netlist(tmp_path):
+    """Issue #3061: `--rerun` leaves the committed netlist bytes alone, even
+    when it reports drift (here a tampered netlist -> `netlist_sha256`
+    drift), leaves no stray temp netlist, and reports the committed path."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "keep.gds")
+    report_path = tmp_path / "keep.extract.json"
+    netlist_path = tmp_path / "keep.spice"
+    committed = run_extract(path, "sky130", output=str(netlist_path))
+    _write_report(report_path, committed)
+    netlist_path.write_text(netlist_path.read_text() + "* tampered\n")
+    tampered = netlist_path.read_bytes()
+    before = set(os.listdir(tempfile.gettempdir()))
+
+    result = rerun_extract_report(str(report_path))
+
+    assert netlist_path.read_bytes() == tampered
+    assert result["fresh"]["netlist_path"] == str(netlist_path)
+    assert not [
+        n
+        for n in set(os.listdir(tempfile.gettempdir())) - before
+        if n.startswith("klt-extract-rerun-")
+    ]
+    # The hash compared is the freshly regenerated netlist's, not the file on
+    # disk's, so the tampered file is neither read as truth nor overwritten.
+    assert result["status"] == "match"
+
+
 def test_rerun_extract_report_detects_device_recognition_change(tmp_path):
     """A layout mutated to add a drawn substrate tie after the report was
     committed changes the NMOS body terminal's resolved net (issue #1084's
@@ -24952,6 +25145,204 @@ def test_normalized_netlist_hash_is_stable_across_reruns(tmp_path):
     assert c["netlist_normalized_sha256"] != a["netlist_normalized_sha256"]
 
 
+# Issue #3568: the digest path was quadratic in net count. These pin the digest
+# value and check the linear implementation against the old simple scans.
+
+
+def _digest_fixture(n_devices: int = 300) -> tuple[list[Any], list[Any]]:
+    """Deterministic multi-hundred-device / multi-hundred-anonymous-net
+    connectivity (issue #3568): suffix-style and prefix-colliding names, a
+    device with two terminals on one net, a floating anonymous net, and
+    non-dict entries."""
+    devices: list[Any] = []
+    nets: list[Any] = [{"name": "VDD", "net_id": 1}, {"name": "VSS", "net_id": 2}]
+    for i in range(n_devices):
+        # Anonymous numbers are deliberately not in device order, and span
+        # one, two and three digits so `\$3` / `\$31` / `\$310` all occur.
+        a = f"\\${(i * 7919) % 1009}"
+        b = f"\\${(i * 104729 + 5) % 1009}"
+        devices.append(
+            {
+                "name": f"M{i}",
+                "type": "nmos",
+                "params": {"w": 1 + i % 5, "label": f"{a}__t0"},
+                "nets": {"D": a, "G": b, "S": "VSS", "B": "VSS" if i % 2 else a},
+            }
+        )
+        nets.append({"name": a, "net_id": 10 + i})
+    nets.append({"name": "\\$3", "net_id": 5000})
+    nets.append({"name": "\\$31", "net_id": 5001})
+    nets.append({"name": "\\$9999", "net_id": 5002})  # floating: no attachments
+    devices.append({"name": "Mx", "nets": {"D": "\\$3", "S": "\\$31"}})
+    devices.append("not-a-device")
+    devices.append({"name": "Mnone", "nets": None})
+    nets.append("not-a-net")
+    nets.append({"net_id": 5003})
+    return devices, nets
+
+
+# Digest computed with the pre-#3568 (quadratic) implementation.
+_DIGEST_FIXTURE_SHA256 = (
+    "942a05bcdac16c10cebaecdb5b9b68ebe275556f6bf603f87667c6deae38affc"
+)
+
+
+def _ref_net_attachment_key(net_name, devices):
+    return ",".join(
+        sorted(
+            f"{device.get('name')}.{terminal}"
+            for device in devices
+            if isinstance(device, dict)
+            for terminal, terminal_net in (device.get("nets") or {}).items()
+            if terminal_net == net_name
+        )
+    )
+
+
+def _ref_anonymous_net_name_map(report):
+    nets = report.get("nets")
+    devices = report.get("devices")
+    if not isinstance(nets, list) or not isinstance(devices, list):
+        return {}
+    name_map = {}
+    for entry in nets:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        if not isinstance(name, str) or not re.match(r"^\\\$\d+$", name):
+            continue
+        key = _ref_net_attachment_key(name, devices)
+        if key:
+            name_map[name] = f"$anon<{key}>"
+    return name_map
+
+
+def _ref_rewrite_net_name(value, name_map):
+    if not isinstance(value, str):
+        return value
+    canonical = name_map.get(value)
+    if canonical is not None:
+        return canonical
+    for raw_name, canonical_name in name_map.items():
+        if not value.startswith(raw_name):
+            continue
+        boundary = value[len(raw_name) : len(raw_name) + 1]
+        if boundary and boundary.isalnum():
+            continue
+        return canonical_name + value[len(raw_name) :]
+    return value
+
+
+def test_normalized_netlist_hash_golden_digest_unchanged():
+    from klayout_tools.extract import _normalized_netlist_sha256
+
+    devices, nets = _digest_fixture()
+    assert _normalized_netlist_sha256(devices, nets) == _DIGEST_FIXTURE_SHA256
+
+
+def test_anonymous_net_name_map_matches_reference():
+    from klayout_tools.extract import _anonymous_net_name_map
+
+    devices, nets = _digest_fixture()
+    report = {"devices": devices, "nets": nets}
+    got = _anonymous_net_name_map(report)
+    assert got == _ref_anonymous_net_name_map(report)
+    assert "\\$9999" not in got  # floating anonymous net stays unmapped
+    assert len(got) > 300
+
+
+def test_rewrite_net_name_matches_reference_on_probe_strings():
+    from klayout_tools.extract import _rewrite_net_name
+
+    devices, nets = _digest_fixture()
+    name_map = _ref_anonymous_net_name_map({"devices": devices, "nets": nets})
+    probes = [
+        "\\$3",
+        "\\$3__t0",
+        "\\$31",
+        "\\$31__t0",
+        "\\$310",
+        "\\$3x",
+        "\\$3 ",
+        "\\$3_",
+        "\\$",
+        "\\$x",
+        "\\$99999",
+        "\\$9999__t1",
+        "$3",
+        "\\\\$3",
+        " \\$3",
+        "M1",
+        "",
+        "\\$\u0663",
+        "\\$3\u0663",
+        "\\$3\u00e9",
+        7,
+        None,
+        ["\\$3"],
+    ]
+    probes += list(name_map)[:50] + [k + "__seg0" for k in list(name_map)[:50]]
+    probes += [k + "9" for k in list(name_map)[:50]]
+    for probe in probes:
+        assert _rewrite_net_name(probe, name_map) == _ref_rewrite_net_name(
+            probe, name_map
+        ), probe
+    assert _rewrite_net_name("\\$3__t0", name_map) == name_map["\\$3"] + "__t0"
+
+
+def test_canonicalize_matches_reference_for_shuffled_reports():
+    import random
+
+    from klayout_tools.extract import (
+        _canonicalize_extract_report_for_rerun_diff,
+        _strip_net_id_and_rewrite_names,
+    )
+
+    rng = random.Random(3568)
+    for _ in range(5):
+        devices, nets = _digest_fixture(60)
+        rng.shuffle(devices)
+        rng.shuffle(nets)
+        report = {"devices": devices, "nets": nets}
+        got = _canonicalize_extract_report_for_rerun_diff(report)
+
+        ref_map = _ref_anonymous_net_name_map(report)
+        expected = _strip_net_id_and_rewrite_names(report, ref_map)
+        expected["nets"] = sorted(
+            expected["nets"],
+            key=lambda entry: (
+                (
+                    entry.get("name", ""),
+                    _ref_net_attachment_key(entry.get("name", ""), expected["devices"]),
+                )
+                if isinstance(entry, dict)
+                else ("", "")
+            ),
+        )
+        assert got == expected
+
+
+def test_normalized_netlist_hash_scales_roughly_linearly():
+    import time
+
+    from klayout_tools.extract import _normalized_netlist_sha256
+
+    def timed(n_nets: int) -> float:
+        devices = [
+            {"name": f"M{i}", "nets": {"D": f"\\${i}", "G": f"\\${(i + 1) % n_nets}"}}
+            for i in range(n_nets)
+        ]
+        nets = [{"name": f"\\${i}", "net_id": i} for i in range(n_nets)]
+        start = time.perf_counter()
+        _normalized_netlist_sha256(devices, nets)
+        return time.perf_counter() - start
+
+    small = min(timed(3000) for _ in range(2))
+    large = min(timed(12000) for _ in range(2))
+    # 4x the nets: ~4x when linear, ~16x when quadratic.
+    assert large < small * 9, (small, large)
+
+
 # --progress / `timing` (issue #3181) ----------------------------------------
 
 
@@ -25068,3 +25459,250 @@ def test_consecutive_runs_give_identical_netlist_sha256(tmp_path):
     first = run_extract(path, "sky130", output=str(tmp_path / "a.spice"))
     second = run_extract(path, "sky130", output=str(tmp_path / "b.spice"))
     assert first["netlist_sha256"] == second["netlist_sha256"]
+
+
+# --------------------------------------------------------------------------- #
+# `--probe`: point-to-net queries on the run's own extraction (issue #2986)
+# --------------------------------------------------------------------------- #
+
+
+def _probe(name, layer, x, y):
+    return {"name": name, "layer": layer, "x": x, "y": y}
+
+
+def _probe_by_name(report):
+    return {entry["name"]: entry for entry in report["probes"]}
+
+
+def test_probes_absent_reports_an_empty_array(tmp_path):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+
+    report = run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
+
+    assert report["probes"] == []
+
+
+def test_probe_same_net_shares_cluster_id_and_different_net_differs(tmp_path):
+    """The two drain pads both carry the label `Y` but are distinct nets, so
+    only `cluster_id` -- the `nets[].net_id` -- tells them apart."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "inv.spice"),
+        probes=[
+            _probe("nmos_drain", "metal0", 1.8, 0.5),
+            _probe("nmos_drain_edge", "metal0", 2.0, 0.5),
+            _probe("pmos_drain", "metal0", 1.8, 2.5),
+            _probe("gate", "poly", 1.0, 1.0),
+        ],
+    )
+
+    probes = _probe_by_name(report)
+    assert [entry["name"] for entry in report["probes"]] == [
+        "nmos_drain",
+        "nmos_drain_edge",
+        "pmos_drain",
+        "gate",
+    ]
+    assert probes["nmos_drain"] == {
+        "name": "nmos_drain",
+        "layer": "metal0",
+        "x_um": 1.8,
+        "y_um": 0.5,
+        "found": True,
+        "net": "Y",
+        "cluster_id": probes["nmos_drain"]["cluster_id"],
+    }
+    assert probes["nmos_drain_edge"]["cluster_id"] == probes["nmos_drain"]["cluster_id"]
+    assert probes["pmos_drain"]["net"] == "Y"
+    assert probes["pmos_drain"]["cluster_id"] != probes["nmos_drain"]["cluster_id"]
+    assert probes["gate"]["net"] == "A"
+    # Every reported cluster_id is a real nets[].net_id carrying that name.
+    by_id = {net["net_id"]: net["name"] for net in report["nets"]}
+    for entry in report["probes"]:
+        assert by_id[entry["cluster_id"]] == entry["net"]
+
+
+def test_probe_on_empty_space_is_not_found_not_an_error(tmp_path):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "inv.spice"),
+        probes=[
+            _probe("void", "metal0", 50.0, 50.0),
+            _probe("neg", "metal0", -5, -4.0),
+        ],
+    )
+
+    for entry in report["probes"]:
+        assert entry["found"] is False
+        assert entry["net"] is None
+        assert entry["cluster_id"] is None
+
+
+def test_probe_inside_a_black_box_region_is_not_found(tmp_path):
+    layout = _make_inverter_layout()
+    # Reserved annotation layer (issue #289) over the NMOS drain pad.
+    layout.cell("TOP").shapes(layout.layer(990, 0)).insert(
+        kdb.Box(1500, 100, 2100, 900)
+    )
+    path = _write_gds(layout, tmp_path / "bb.gds")
+
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "bb.spice"),
+        probes=[
+            _probe("masked", "metal0", 1.8, 0.5),
+            _probe("open", "metal0", 1.8, 2.5),
+        ],
+    )
+
+    probes = _probe_by_name(report)
+    assert probes["masked"]["found"] is False
+    assert probes["open"]["net"] == "Y"
+
+
+def test_probe_under_def_net_names_reports_the_def_name(tmp_path):
+    """The issue's case: the DEF name replaces the label, so a wire joined to
+    the renamed net and one that is not give different `cluster_id`s and the
+    renamed one reports the DEF name."""
+    layout_path = _inverter_with_def_net_property(tmp_path)
+
+    report = run_extract(
+        layout_path,
+        "sky130",
+        output=str(tmp_path / "def.spice"),
+        def_net_names=True,
+        probes=[
+            _probe("joined", "metal0", 1.8, 0.5),
+            _probe("other", "metal0", 1.8, 2.5),
+        ],
+    )
+
+    probes = _probe_by_name(report)
+    assert probes["joined"]["net"] == "_019_"
+    assert probes["other"]["net"] == "Y"
+    assert probes["joined"]["cluster_id"] != probes["other"]["cluster_id"]
+
+
+def test_probe_with_abstract_cells_does_not_crash(tmp_path):
+    path = _write_gds(_make_abstract_cells_layout(), tmp_path / "abstract.gds")
+
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "abstract.spice"),
+        abstract_cell_patterns=("SC_BUF",),
+        probes=[_probe("a1", "metal1", 1.8, 0.5), _probe("a2", "metal1", 6.8, 0.5)],
+    )
+
+    probes = _probe_by_name(report)
+    assert probes["a1"]["net"] == "INST1_A"
+    assert probes["a2"]["net"] == "INST2_A"
+
+
+def test_probe_with_declared_pins_reports_the_final_net_name(tmp_path):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "inv.spice"),
+        declared_pins=frozenset({"A", "Y"}),
+        probes=[_probe("gate", "poly", 1.0, 1.0)],
+    )
+
+    by_id = {net["net_id"]: net["name"] for net in report["nets"]}
+    (entry,) = report["probes"]
+    assert by_id[entry["cluster_id"]] == entry["net"] == "A"
+
+
+def test_probe_unknown_role_lists_available_roles(tmp_path):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+
+    with pytest.raises(ExtractError) as excinfo:
+        run_extract(
+            path,
+            "sky130",
+            output=str(tmp_path / "inv.spice"),
+            probes=[_probe("bad", "metal99", 0.0, 0.0)],
+        )
+
+    message = str(excinfo.value)
+    assert "metal99" in message
+    assert "available:" in message
+    assert "metal0" in message
+
+
+def test_probe_cli_flag_emits_probes_and_request_document_matches(tmp_path, capsys):
+    path = str(_write_gds(_make_inverter_layout(), tmp_path / "inv.gds"))
+    output = tmp_path / "inv.spice"
+
+    argv_code, argv_report = _run_extract_json(
+        capsys,
+        [
+            path,
+            "--deck",
+            "sky130",
+            "-o",
+            str(output),
+            "--probe",
+            "name=nd,layer=metal0,x=1.8,y=0.5",
+            "--probe",
+            "name=void,layer=metal0,x=50,y=-4.0",
+        ],
+    )
+    request = _extract_request_document(path, output)
+    request["probes"] = [
+        {"name": "nd", "layer": "metal0", "x": 1.8, "y": 0.5},
+        "name=void,layer=metal0,x=50,y=-4.0",
+    ]
+    request_path = tmp_path / "extract.request.json"
+    request_path.write_text(json.dumps(request))
+    request_code, request_report = _run_extract_json(capsys, [str(request_path)])
+
+    assert argv_code == request_code == 0
+    assert [entry["name"] for entry in argv_report["probes"]] == ["nd", "void"]
+    assert argv_report["probes"][0]["net"] == "Y"
+    assert argv_report["probes"][1]["found"] is False
+    argv_report.pop("timing"), request_report.pop("timing")
+    assert request_report == argv_report
+
+
+@pytest.mark.parametrize(
+    "specs",
+    [
+        ["layer=metal0,x=1,y=1"],  # missing name
+        ["name=a,layer=metal0,x=1"],  # missing y
+        ["name=a,layer=metal0,x=one,y=1"],  # non-numeric
+        ["name=a,layer=metal0,x=1,y=1,z=3"],  # unknown key
+        ["name=a,layer=metal0,x=1,x=2,y=1"],  # repeated key
+        ["nonsense"],
+        ["name=a,layer=metal0,x=1,y=1", "name=a,layer=poly,x=2,y=2"],  # duplicate name
+    ],
+)
+def test_probe_malformed_spec_is_an_application_error(tmp_path, capsys, specs):
+    path = str(_write_gds(_make_inverter_layout(), tmp_path / "inv.gds"))
+    argv = [path, "--deck", "sky130"]
+    for spec in specs:
+        argv += ["--probe", spec]
+
+    message = _extract_error_message(capsys, argv)
+
+    assert "--probe" in message
+
+
+def test_probe_bad_role_via_cli_exits_one(tmp_path, capsys):
+    path = str(_write_gds(_make_inverter_layout(), tmp_path / "inv.gds"))
+
+    message = _extract_error_message(
+        capsys,
+        [path, "--deck", "sky130", "--probe", "name=a,layer=bogus,x=0,y=0"],
+    )
+
+    assert "bogus" in message and "available:" in message

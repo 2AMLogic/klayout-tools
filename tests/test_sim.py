@@ -761,6 +761,90 @@ def test_validate_meas_card_op_error_points_at_expr(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# Dependent `spice` cards (issue #3038)
+# --------------------------------------------------------------------------- #
+
+
+def _spice_specs(*cards):
+    return [{"name": n, "spice": c} for n, c in cards]
+
+
+@pytest.mark.parametrize(
+    "dependent",
+    [
+        ".meas tran vos find v(rmp) at=t_flip",
+        ".meas tran vos find v(rmp) at = T_FLIP",  # case-insensitive
+        ".meas tran vos find v(rmp) when v(x)=t_flip",
+        ".meas tran vos avg v(rmp) from=t_flip to=2u",
+        ".meas tran vos avg v(rmp) from=1u to=t_flip",
+        ".meas tran vos find v(rmp) when v(dn)=0.5 rise=1 td=t_flip",
+    ],
+)
+def test_dependent_meas_card_refused(dependent):
+    specs = _spice_specs(
+        ("t_flip", ".meas tran t_flip when v(dn)=0.5 rise=1 td=8u"),
+        ("vos", dependent),
+    )
+    with pytest.raises(sim.SimError, match=r"'vos' references measurement 't_flip'"):
+        sim._validate_no_dependent_meas_cards(specs)
+
+
+def test_independent_meas_cards_accepted():
+    specs = _spice_specs(
+        ("vout", ".meas tran vout find v(vout) at=1u"),  # v(<name>) is a signal
+        ("i1", ".meas tran i1 max i(vout) from=0 to=1u"),
+        ("t0", ".meas tran t0 when v(a)=0.5 rise=1"),
+        ("self", ".meas tran self find v(a) at='1u+2n'"),
+        ("selfref", ".meas tran selfref find v(a) at=selfref"),  # own name only
+    )
+    sim._validate_no_dependent_meas_cards(specs)  # must not raise
+
+
+def test_dependent_meas_scan_ignores_expr_entries():
+    specs = [
+        {"name": "ta", "spice": ".meas tran ta when v(o)=0.8 rise=3"},
+        {"name": "t", "expr": "ta/8"},
+    ]
+    sim._validate_no_dependent_meas_cards(specs)  # `expr` has its own rule
+
+
+def test_run_sim_refuses_dependent_meas_card(tmp_path):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 10u"},
+            "measurements": _spice_specs(
+                ("t_flip", ".meas tran t_flip when v(dn)=0.5 rise=1 td=8u"),
+                ("vos", ".meas tran vos find v(rmp) at=t_flip"),
+            ),
+        },
+    )
+    with pytest.raises(sim.SimError, match="cannot read another .meas result"):
+        sim.run_sim(str(request))
+
+
+def test_dependent_check_not_applied_to_analysis_steps_path():
+    # `analysis_steps[]` resolves through `sim_steps`, which never reaches the
+    # file-scope dependent-card check (control-scope `meas` differs).
+    request = {
+        "netlist": "x",
+        "analysis_steps": [
+            {
+                "name": "s1",
+                "analysis": {"kind": "tran", "args": "1n 10u"},
+                "measurements": _spice_specs(
+                    ("t_flip", ".meas tran t_flip when v(dn)=0.5 rise=1"),
+                    ("vos", ".meas tran vos find v(rmp) at=t_flip"),
+                ),
+            }
+        ],
+    }
+    sim._resolve_analysis_and_measurements(request)  # must not raise
+
+
+# --------------------------------------------------------------------------- #
 # `measurements[].expr` form validation (issue #2533)
 # --------------------------------------------------------------------------- #
 
@@ -1960,10 +2044,48 @@ def test_recovered_from_stepping_true_when_measurements_all_resolved():
 
 
 def test_recovered_from_stepping_false_with_no_measurements_declared():
-    # No measurements[] at all -- nothing independently confirms the run
-    # actually succeeded, so a singular-matrix classification stays fatal.
+    # No measurements[] and no completed waveform -- nothing independently
+    # confirms the run actually succeeded, so a singular-matrix
+    # classification stays fatal.
     log = "Warning: singular matrix:  check node b\n"
     assert sim._recovered_from_stepping([], [], log) is False
+    assert sim._recovered_from_stepping([], [], log, waveform_complete=False) is False
+
+
+def test_recovered_from_stepping_true_for_complete_waveform_without_measurements():
+    # Issue #3246: a waveform-capture-only request recovers on the waveform.
+    log = "Warning: Dynamic gmin stepping failed\n"
+    assert sim._recovered_from_stepping([], [], log, waveform_complete=True) is True
+
+
+def test_recovered_from_stepping_false_for_complete_waveform_with_abort_trailer():
+    log = "Warning: Dynamic gmin stepping failed\ntran simulation(s) aborted\n"
+    assert sim._recovered_from_stepping([], [], log, waveform_complete=True) is False
+
+
+def _wf(last_time, name="time"):
+    return {
+        "plotname": "Transient Analysis",
+        "variables": [{"index": 0, "name": name, "type": "time"}],
+        "points": [[0.0], [last_time]],
+    }
+
+
+@pytest.mark.parametrize(
+    ("waveform", "analysis", "expected"),
+    [
+        (_wf(1e-6), {"kind": "tran", "args": "1n 1u"}, True),
+        (_wf(1e-6), {"kind": "tran", "args": "1n 1u 0 uic"}, True),
+        (_wf(0.9e-6), {"kind": "tran", "args": "1n 1u"}, False),  # truncated
+        (_wf(1e-6), {"kind": "tran", "args": "garbage"}, False),
+        (_wf(1e-6), {"kind": "ac", "args": "dec 10 1 1meg"}, False),
+        (_wf(1e-6, name="frequency"), {"kind": "tran", "args": "1n 1u"}, False),
+        ({**_wf(1e-6), "points": []}, {"kind": "tran", "args": "1n 1u"}, False),
+        (None, {"kind": "tran", "args": "1n 1u"}, False),
+    ],
+)
+def test_waveform_reached_tran_window(waveform, analysis, expected):
+    assert sim._waveform_reached_tran_window(waveform, analysis) is expected
 
 
 def test_recovered_from_stepping_false_when_a_measurement_errored():
@@ -5052,6 +5174,98 @@ def test_rollup_measurements_implausible_outranks_fail():
     (entry,) = sim._rollup_measurements([{"name": "vref"}], corners)
 
     assert entry["status"] == "inconclusive"
+
+
+def _scope_corners(per_corner: dict[str, list[float | None]]) -> list[dict]:
+    return [
+        _sampled_corner(base, i, v)
+        for base, values in per_corner.items()
+        for i, v in enumerate(values)
+    ]
+
+
+def _scope_rollup(per_corner, window_scope, *, k_sigma=3.0, limits=None):
+    (entry,) = sim._rollup_measurements(
+        [{"name": "vref", "limits": limits or {"min": 0.0, "max": 10.0}}],
+        _scope_corners(per_corner),
+        {
+            "quantiles": sim.DEFAULT_MC_QUANTILES,
+            "k_sigma": k_sigma,
+            "window_scope": window_scope,
+        },
+    )
+    return entry
+
+
+# Corner "b" is wide on its own, but 20 tight samples in "a" shrink the
+# pooled sigma enough for the pooled window to sit inside the limits.
+_B_ALONE_FAILS = {"a": [5.0] * 20, "b": [0.5, 9.5]}
+# Each corner is tight, but the between-corner spread inflates the pooled
+# sigma past the limits.
+_POOLED_ONLY_FAILS = {"a": [1.0, 1.2], "b": [8.8, 9.0]}
+
+
+def test_window_scope_per_corner_fails_when_one_corner_window_fails():
+    pooled = _scope_rollup(_B_ALONE_FAILS, "pooled")
+    assert pooled["monte_carlo"]["sigma_window"]["status"] == "pass"
+    assert pooled["status"] == "pass"
+    assert "failing_corners" not in pooled["monte_carlo"]
+
+    entry = _scope_rollup(_B_ALONE_FAILS, "per_corner")
+    assert entry["status"] == "fail"
+    assert entry["monte_carlo"]["failing_corners"] == ["b"]
+
+
+def test_window_scope_per_corner_passes_when_only_pooled_window_fails():
+    pooled = _scope_rollup(_POOLED_ONLY_FAILS, "pooled")
+    assert pooled["status"] == "fail"
+
+    entry = _scope_rollup(_POOLED_ONLY_FAILS, "per_corner")
+    assert entry["monte_carlo"]["sigma_window"]["status"] == "fail"
+    assert entry["status"] == "pass"
+    assert entry["monte_carlo"]["failing_corners"] == []
+
+
+@pytest.mark.parametrize("scope", [None, "pooled"])
+def test_window_scope_default_response_is_unchanged(scope):
+    explicit = _scope_rollup(_B_ALONE_FAILS, scope)
+    (legacy,) = sim._rollup_measurements(
+        [{"name": "vref", "limits": {"min": 0.0, "max": 10.0}}],
+        _scope_corners(_B_ALONE_FAILS),
+        {"quantiles": sim.DEFAULT_MC_QUANTILES, "k_sigma": 3.0},
+    )
+    assert explicit == legacy
+    assert "failing_corners" not in explicit["monte_carlo"]
+
+
+def test_window_scope_per_corner_error_outranks_window_fail():
+    per_corner = {"a": [5.0] * 20, "b": [0.5, 9.5, None]}
+    entry = _scope_rollup(per_corner, "per_corner")
+    assert entry["monte_carlo"]["failing_corners"] == ["b"]
+    assert entry["status"] == "error"
+
+
+def test_window_scope_per_corner_without_k_sigma_is_a_noop():
+    entry = _scope_rollup(_B_ALONE_FAILS, "per_corner", k_sigma=None)
+    assert entry["status"] == "pass"
+    assert entry["monte_carlo"]["failing_corners"] == []
+
+
+def test_window_scope_single_corner_scopes_agree():
+    single = {"b": [0.5, 9.5]}
+    pooled = _scope_rollup(single, "pooled")
+    per_corner = _scope_rollup(single, "per_corner")
+    assert pooled["status"] == per_corner["status"] == "fail"
+    assert per_corner["monte_carlo"]["failing_corners"] == ["b"]
+
+
+def test_window_scope_validation():
+    assert sim._validate_mc_window_scope({}) == "pooled"
+    assert sim._validate_mc_window_scope({"window_scope": None}) == "pooled"
+    assert sim._validate_mc_window_scope({"window_scope": "per_corner"}) == "per_corner"
+    for bad in ("per-corner", "", 3, True, ["pooled"]):
+        with pytest.raises(sim.SimError, match="window_scope.*'pooled', 'per_corner'"):
+            sim._validate_mc_window_scope({"window_scope": bad})
 
 
 def test_rollup_measurements_by_corner_splits_per_originating_corner():
@@ -11658,6 +11872,7 @@ def test_run_sim_per_section_libs_alongside_a_models_lib_section(tmp_path, monke
     assert report["environment"]["models_lib_sha256"] == sim.sha256_file(
         str(models_lib)
     )
+    assert report["environment"]["models_lib_sha256_scope"] == "local"
 
 
 def test_run_sim_without_per_section_libs_omits_the_environment_field(
@@ -12829,7 +13044,7 @@ def test_expand_netlist_includes_keeps_relative_meaning_beside_env_include(
 def _control_for(kind, args):
     from types import SimpleNamespace
 
-    point = SimpleNamespace(supply_v={})
+    point = SimpleNamespace(supply_v={}, params={})
     return sim._corner_deck_control_lines(
         point=point,
         analysis={"kind": kind, "args": args},
@@ -13220,3 +13435,188 @@ def test_pex_side_environment_carries_engine_host():
     from klayout_tools import pex
 
     assert {"engine_host", "client_ngspice_binary"} <= set(pex._SIDE_ENVIRONMENT_KEYS)
+
+
+# --- issue #3074: normalised netlist identity --------------------------------
+
+
+def _identity_for(tmp_path, monkeypatch, top_text, shared_text="R1 a b 1k\n", **extra):
+    _write_body(tmp_path)
+    (tmp_path / "shared.spice").write_text(shared_text)
+    (tmp_path / "top.spice").write_text(top_text)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "top.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            **extra,
+        },
+    )
+    _stub_subprocess_run(monkeypatch)
+    return sim.run_sim(str(request))["environment"]
+
+
+def test_netlist_identity_stable_under_comment_whitespace_case_edits(
+    tmp_path, monkeypatch
+):
+    (tmp_path / "a").mkdir()
+    base = _identity_for(
+        tmp_path / "a",
+        monkeypatch,
+        ".include shared.spice\nR2 a 0 2k\n.param x=1\n",
+    )
+    (tmp_path / "b").mkdir()
+    noisy = _identity_for(
+        tmp_path / "b",
+        monkeypatch,
+        "* a comment\n.INCLUDE   ./shared.spice\n\nr2  a  0\n+ 2K $ note\n.PARAM x=1\n",
+    )
+    assert base["netlist_identity"].startswith("sha256:")
+    assert base["netlist_identity"] == noisy["netlist_identity"]
+    # raw-byte hash still differs: the new field is the comparable one
+    assert base["netlist_sha256"] != noisy["netlist_sha256"]
+
+
+def test_netlist_identity_changes_on_value_or_include_edit(tmp_path, monkeypatch):
+    for name in ("a", "b", "c"):
+        (tmp_path / name).mkdir()
+    top = ".include shared.spice\nR2 a 0 2k\n"
+    base = _identity_for(tmp_path / "a", monkeypatch, top)
+    value = _identity_for(tmp_path / "b", monkeypatch, top.replace("2k", "3k"))
+    included = _identity_for(
+        tmp_path / "c", monkeypatch, top, shared_text="R1 a b 2k\n"
+    )
+    assert (
+        len(
+            {
+                base["netlist_identity"],
+                value["netlist_identity"],
+                included["netlist_identity"],
+            }
+        )
+        == 3
+    )
+
+
+def test_netlist_identity_null_with_error_when_include_unresolved(
+    tmp_path, monkeypatch
+):
+    env = _identity_for(tmp_path, monkeypatch, ".include missing.spice\n")
+    assert env["netlist_identity"] is None
+    assert env["netlist_identity_error"]
+
+
+def test_expect_netlist_identity_match_runs_and_mismatch_refuses(tmp_path, monkeypatch):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    top = ".include shared.spice\nR2 a 0 2k\n"
+    stamp = _identity_for(tmp_path / "a", monkeypatch, top)["netlist_identity"]
+    ok = _identity_for(tmp_path / "b", monkeypatch, top, expect_netlist_identity=stamp)
+    assert ok["netlist_identity"] == stamp
+
+    (tmp_path / "c").mkdir()
+    with pytest.raises(sim.SimError) as err:
+        _identity_for(
+            tmp_path / "c",
+            monkeypatch,
+            top.replace("2k", "9k"),
+            expect_netlist_identity=stamp,
+        )
+    assert stamp in str(err.value)
+    assert "mismatch" in str(err.value)
+
+
+# --------------------------------------------------------------------------- #
+# Waveform-only recovered stepping (#3246)
+# --------------------------------------------------------------------------- #
+
+_GMIN_STEPPING_LOG = (
+    "Note: Starting dynamic gmin stepping\n"
+    "Warning: Dynamic gmin stepping failed\n"
+    "Note: Starting true gmin stepping\n"
+    "Note: True gmin stepping completed\n"
+    "Note: Transient op finished successfully\n"
+)
+
+
+def _capture_only_corner(
+    tmp_path, monkeypatch, *, points, log_text, analysis=None, options=None
+):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": analysis or {"kind": "tran", "args": "1n 1u"},
+            "measurements": [],
+            "options": {"waveforms": True, **(options or {})},
+        },
+    )
+    _stub_subprocess_run_with_waveform(monkeypatch, points=points, log_text=log_text)
+    report = sim.run_sim(str(request))
+    (corner,) = report["corners"]
+    return corner
+
+
+def test_capture_only_tran_recovers_when_waveform_reaches_stop_time(
+    tmp_path, monkeypatch
+):
+    corner = _capture_only_corner(
+        tmp_path,
+        monkeypatch,
+        points=[(0.0, 0.0), (5e-7, 0.5), (1e-6, 1.0)],
+        log_text=_GMIN_STEPPING_LOG,
+        options={"keep_artifacts": True},
+    )
+    assert corner["status"] == "pass"
+    stepping = [
+        d
+        for d in corner["diagnostics"]
+        if d["code"] in ("nonconvergence", "singular_matrix")
+    ]
+    assert stepping
+    assert all(d["severity"] == "warning" for d in stepping)
+    assert all("captured waveform" in d["message"] for d in stepping)
+    assert corner["artifacts"]["waveform"] is not None
+
+
+def test_capture_only_tran_stays_error_when_waveform_truncated(tmp_path, monkeypatch):
+    corner = _capture_only_corner(
+        tmp_path,
+        monkeypatch,
+        points=[(0.0, 0.0), (5e-7, 0.5)],
+        log_text=_GMIN_STEPPING_LOG,
+    )
+    assert corner["status"] == "error"
+
+
+def test_capture_only_tran_stays_error_with_abort_trailer(tmp_path, monkeypatch):
+    corner = _capture_only_corner(
+        tmp_path,
+        monkeypatch,
+        points=[(0.0, 0.0), (1e-6, 1.0)],
+        log_text=_GMIN_STEPPING_LOG + "tran simulation(s) aborted\n",
+    )
+    assert corner["status"] == "error"
+
+
+def test_capture_only_tran_fail_on_diagnostic_still_disqualifies(tmp_path, monkeypatch):
+    corner = _capture_only_corner(
+        tmp_path,
+        monkeypatch,
+        points=[(0.0, 0.0), (1e-6, 1.0)],
+        log_text=_GMIN_STEPPING_LOG,
+        options={"fail_on_diagnostic": ["nonconvergence"]},
+    )
+    assert corner["status"] == "inconclusive"
+
+
+def test_capture_only_non_tran_stays_error(tmp_path, monkeypatch):
+    corner = _capture_only_corner(
+        tmp_path,
+        monkeypatch,
+        points=[(0.0, 0.0), (1e6, 1.0)],
+        log_text=_GMIN_STEPPING_LOG,
+        analysis={"kind": "ac", "args": "dec 10 1 1meg"},
+    )
+    assert corner["status"] == "error"
