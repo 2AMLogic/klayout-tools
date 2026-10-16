@@ -670,23 +670,42 @@ two things let a caller tell a slow run from a hang and budget the step:
   `sum(stages) + unattributed_seconds ≈ total_seconds`). Stages, in order:
   `read_layout`, `device_extraction` (the `LayoutToNetlist` run plus dead-metal,
   passive-region and `--parasitics` computation), `diagnostics` (voltage-domain
-  and flavour-marker checks), `netlist_write`, `netlist_hash`.
+  and flavour-marker checks), `netlist_write`, `netlist_hash` (the raw-file
+  SHA-256), and `netlist_normalized_hash` (the numbering-independent
+  `netlist_normalized_sha256` canonicalization, issue #3408; present only when a
+  netlist is written, absent under `--no-netlist`).
   `--check --rerun` ignores `timing` (a measurement, not evidence).
 
-**Measured scaling** (sky130, `--no-netlist`, one 8-vCPU shared host, the
-routed digital blocks in `tests/corpus/place_and_route/`):
+**Measured scaling** (sky130, one shared 16-core host, `klt extract --deck
+sky130`, the routed digital blocks in `tests/corpus/place_and_route/`; measured
+2026-10-16 at `2c515415`). The two larger rows are **synthesized**, not a real
+placed-and-routed block: the vendored `gcd.gds.gz` is instantiated side by side
+(20 µm pitch, no shared nets) under a new top cell, 2× and 4×, so the tiles are
+electrically independent and the device/net counts are exact multiples. Open
+PDK only; nothing is vendored. Each row is one run (a second run of the 2× tile
+agreed within ~10 % on `device_extraction`).
 
-| block | devices | nets | `device_extraction` | `netlist_write` | total |
-| ----- | ------- | ---- | ------------------- | --------------- | ----- |
-| `mult8` | 2,274 | 1,109 | 0.81 s | 0.03 s | 1.0 s |
-| `gcd` | 4,857 | 2,054 | 1.82 s | 0.06 s | 2.2 s |
+| block | devices | nets | `device_extraction` | `netlist_write` | `netlist_normalized_hash` | total |
+| ----- | ------- | ---- | ------------------- | --------------- | ------------------------- | ----- |
+| `mult8` | 2,274 | 1,109 | 0.81 s | 0.03 s | — (`--no-netlist`) | 1.0 s |
+| `gcd` | 4,857 | 2,054 | 1.74 s | 0.07 s | 4.9 s | 7.0 s |
+| 2× `gcd` | 9,714 | 4,107 | 3.96 s | 0.14 s | 20.4 s | 24.9 s |
+| 4× `gcd` | 19,428 | 8,213 | 10.4 s | 0.26 s | 79.7 s | 90.9 s |
 
-`device_extraction` is 80–90 % of the run on both and scales roughly linearly
-with device count at this size (~0.35–0.4 ms/device); every other stage is
-under 0.1 s. **Not measured:** the ~8,500-instance, ~4 MB block that
-motivated the issue (it is not in this repo) — whether extraction turns
-super-linear there is for a caller with that block to confirm from the
-`timing` object, and a larger-block run is tracked in #3408.
+**Scaling.** `device_extraction` is mildly super-linear (≈0.36 → 0.41 → 0.54
+ms/device across 4.9k → 9.7k → 19.4k devices, roughly n^1.2) but is not the
+problem. `netlist_normalized_hash` is: it grows ~4× per doubling (quadratic) and
+is 70–88 % of the whole run once a netlist is written, which is the default.
+A ~8.5k-instance block (≈9–10k devices, the 2× row) spends ~20 s of a ~25 s run
+there. Before issue #3408 that time was reported as `unattributed_seconds`
+(5.1 s of 7.0 s on `gcd`), so the `timing` object understated the cost; it now
+has its own stage. Passing `--no-netlist` skips it (the `mult8` row and the
+earlier `device_extraction`-dominated numbers).
+
+`device_extraction` was not split further: it is under 50 % of a default run
+and its growth is close to linear, so the data does not warrant it. Making the
+normalized hash itself sub-quadratic is a separate change and is out of scope
+here; this section only records and attributes the cost.
 
 ### Reserved annotation layer
 

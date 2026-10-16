@@ -3751,7 +3751,9 @@ def run_extract(
         "netlist_normalized_sha256": (
             None
             if netlist_sha256 is None
-            else _normalized_netlist_sha256(devices, nets)
+            else _staged(
+                "netlist_normalized_hash", _normalized_netlist_sha256, devices, nets
+            )
         ),
         "status": "extracted",
         "device_count": len(devices),

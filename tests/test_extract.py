@@ -25911,6 +25911,18 @@ def test_report_carries_additive_timing_object(tmp_path):
     )
 
 
+def test_normalized_hash_has_its_own_stage_only_when_netlist_written(tmp_path):
+    # Issue #3408: the numbering-independent hash dominates a large block's
+    # run, so it must be attributed to a stage, not left in
+    # `unattributed_seconds`.
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    written = run_extract(path, "sky130")
+    assert "netlist_normalized_hash" in written["timing"]["stages"]
+    skipped = run_extract(path, "sky130", no_netlist=True)
+    assert skipped["netlist_normalized_sha256"] is None
+    assert "netlist_normalized_hash" not in skipped["timing"]["stages"]
+
+
 def test_progress_lines_go_to_stderr_and_stdout_stays_json(tmp_path, capsys):
     path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
     code = main(["extract", path, "--deck", "sky130", "--progress", "--format", "json"])
