@@ -861,6 +861,20 @@ Contract:
   shortcuts apply. The default (`False`) keeps the #318 behaviour, so shared
   populations such as gf180mcu Contact vs Poly2/Comp are unaffected.
 
+### `report_escapes=False` — extension rules without the escape term (issue #3001)
+
+The #318 zero-overlap escape term (above) is right for a *containment* rule
+(a cut must sit inside its conductor) and wrong for an *extension* rule whose
+enclosed layer is legitimately wider than the enclosing one in other
+directions. gf180mcu's `SB.10` (`sab.enclosed(poly_sab, 0.22)`: poly must
+extend 0.22 um past the SAB edge) is the case: a correct SAB-blocked poly
+resistor has SAB overhanging the poly sideways, and the default escape term
+would flag that overhang on every cell. A `DrcRule` with
+`report_escapes=False` reports only the marginal facing-edge shortfall —
+exactly the DRC-DSL statement, which has no escape term. The default (`True`)
+keeps every other rule's behaviour unchanged; the flag is ignored by every
+check kind except `"enclosing"`/`"enclosed"`.
+
 The `sg13cmos5l` deck opts in for all eight via-stack relationships (cut /
 lower / upper): Via1 Metal1/Metal2, Via2 Metal2/Metal3, Via3 Metal3/Metal4,
 TopVia1 Metal4/TopMetal1. The lower sides reuse the existing
@@ -1665,10 +1679,23 @@ Three transcribed absences, recorded rather than inferred — the issue's own
   `tests/test_drc_offgrid.py` fails if a future layer joins the deck without
   landing in one list or the other.
 
-**Other decks remain uncovered.** `gf180mcu`, `sg13g2`, and `sg13cmos5l`
-author no `"ongrid"`/`"angle"` rule yet: the check kinds are PDK-agnostic, but
-each deck's grid/angle values have to be transcribed from *its own* signoff
-deck, which is separate work per PDK and is not done here.
+**gf180mcu has the grid half only (issue #3001).** The PDK runset's
+`rule_decks/geom.drc` opens with the same on-by-default `if OFFGRID` group
+(`run_drc.py --no_offgrid` disables it), and the `gf180mcu` deck now carries
+29 `<layer>.ongrid.1` rules at its single published grid, 0.005 um — one per
+curated layer the runset grid-checks (`_OFFGRID_ROWS` in
+`src/klayout_tools/decks/gf180mcu.py`; the runset layers with no curated GDS
+number are listed in its `OFFGRID_UNCHECKED_LAYERS`). There is **no**
+`"angle"` rule: the runset's `<layer>_angle` statements are
+`edges.without_angle(0).without_angle(45)…` edge-direction checks, not the
+`with_angle` corner-angle primitive sky130 uses, and no `DrcRule` check kind
+expresses them. Before this, a `klt gen mos_array` guard-ring cell the runset
+failed with `contact_OFFGRID` read `clean` here.
+
+**`sg13g2` and `sg13cmos5l` remain uncovered.** They author no
+`"ongrid"`/`"angle"` rule yet: the check kinds are PDK-agnostic, but each
+deck's grid/angle values have to be transcribed from *its own* signoff deck,
+which is separate work per PDK and is not done here.
 
 Antenna coverage, unlike density, is **not** a gap in the toolset — it is
 simply a different verb. `klt erc` (issue #860) produces a per-gate
@@ -1678,7 +1705,7 @@ the per-net connectivity a real process-antenna-area-ratio check needs and
 not have. See [`docs/cli/erc.md`](erc.md); this deck's *not* authoring an
 `"antenna"`-kind `DrcRule` is a scoping choice, not missing capability.
 
-The `gf180mcu` deck is likewise a **curated starter subset**: 56 rules —
+The `gf180mcu` deck is likewise a **curated starter subset**: 89 rules —
 width, spacing, and enclosure checks across the `Poly2`, `Comp`
 (diffusion/active), `Nplus`/`Pplus` (implant), `Contact`, `Via1`-`Via4`,
 `Metal1`-`Metal5`, and `MetalTop`
@@ -1747,6 +1774,24 @@ six rules' own DRM values but **not verified** against a real signoff-deck
 run, since this sandbox has none; this deck itself still transcribes none of
 the six, so `klt drc --deck gf180mcu` staying clean neither confirms nor
 denies that fix either.
+
+**Salicide-block (`SB.*`) rules (issue #3001).** The deck transcribes the four
+`rule_decks/sab.drc` rules the existing check kinds express exactly: `SB.1`/
+`SB.2` (`sab.width.1`/`sab.space.1`, 0.42 um), `SB.4`
+(`sab.separation.contact.1`, SAB to contact, 0.15 um) and `SB.10`
+(`poly2.enclosing.sab.1`, poly extension past SAB, 0.22 um, with
+`report_escapes=False` — see above). Until then a poly-resistor cell with SAB
+too close to a contact or a poly that stops short of the SAB read `clean`. The
+rest of the group is deliberately not transcribed, and the module docstring of
+`decks/gf180mcu.py` names each rule with its reason: `SB.3`/`SB.5a`/`SB.5b`/
+`SB.9`/`SB.15a`/`SB.15b` are scoped to "unrelated" COMP/Poly2/implant
+(`not_overlapping` derivations the `DerivedLayer` modes cannot state
+exactly), `SB.6`/`SB.7`/`SB.11` need COMP-side enclosure/overlap variants,
+`SB.8` is a Boolean `contact & sab`, `SB.12`/`SB.14*`/`SB.16` need `ESD_MK`/
+`LVS_IO`/gate recognition, and `SB.13` (minimum area) is a follow-up. `SB.4`
+also does not report SAB drawn *over* a contact (`Region.separation_check`
+reports nothing for overlapping shapes; the runset reports it under `SB.4`
+and `SB.8`).
 
 The conductor *above* a cut is checked as well as the layers below it
 (issue #551). `Contact` previously had `CO.3` (Poly2) and `CO.4` (Comp) —

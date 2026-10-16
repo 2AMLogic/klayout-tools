@@ -91,6 +91,14 @@
         "klayout_tools.draw"
       ]
     },
+    "diff": {
+      "kind": "verb",
+      "description": "`klt diff` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.diff_cmd",
+        "klayout_tools.layout_diff"
+      ]
+    },
     "drc": {
       "kind": "verb",
       "description": "`klt drc` implementation: core modules plus CLI adapter.",
@@ -1072,6 +1080,11 @@
       "consumer": "sta",
       "exporter": "env_provenance",
       "reason": "klt sta reports its def/verilog/spef inputs as {path, scope} envelopes via repo_relative_path/render_path_field, like sim/pex (issue #2879)."
+    },
+    {
+      "consumer": "diff",
+      "exporter": "cli-infra",
+      "reason": "klt diff emits through the shared cli output envelope (issue #3093)."
     },
     {
       "consumer": "stats",

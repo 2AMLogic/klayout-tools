@@ -1117,6 +1117,64 @@ def test_timed_unannotated_driver_still_gates():
     assert "1 driver(s)" in block["annotation_warning"]
 
 
+def _with_driver_nets(stdout, rows):
+    return "\n".join(
+        [
+            stdout,
+            post_route_sta._DRIVER_NETS_BEGIN,
+            *[f"KLT_DRIVER_NET {pin} {n} {net}" for pin, n, net in rows],
+            post_route_sta._DRIVER_NETS_END,
+        ]
+    )
+
+
+def test_floating_match_ignores_escape_backslashes():
+    """Issue #3668: `report_parasitic_annotation` and `get_full_name` can
+    spell the same bus pin differently (`\\[0\\]` vs `[0]`); a spelling
+    difference must not hide a floating pin."""
+    block = _annotation_from(_listed_stdout(["clkload\\[0\\]/Z"], [], ["clkload[0]/Z"]))
+
+    assert block["annotation_complete"] is True
+    assert block["floating_driver_count"] == 1
+    assert block["unannotated_driver_sample"] == []
+
+
+def test_gating_driver_detail_names_pin_and_net_status():
+    stdout = _with_driver_nets(
+        _listed_stdout(["clkload1/Z", "u2/X", "u7/Y"], [], ["clkload1/Z"]),
+        [("u2/X", 1, "dangling_n")],
+    )
+    block = _annotation_from(stdout)
+
+    assert block["annotation_complete"] is False
+    assert block["unannotated_driver_detail"] == [
+        {"pin": "u2/X", "net_status": "single_pin_net", "net": "dangling_n"},
+        {"pin": "u7/Y", "net_status": "net_with_other_pins", "net": None},
+    ]
+    assert "u2/X" in block["annotation_warning"]
+    assert "single_pin_net" in block["annotation_warning"]
+
+
+def test_single_pin_net_driver_is_not_treated_as_floating():
+    """Widening "floating" to a one-pin net would let a driver whose only
+    other connection is a port pass the strict gate; it must keep gating."""
+    stdout = _with_driver_nets(_listed_stdout(["u2/X"], [], []), [("u2/X", 1, "c0_r")])
+    block = _annotation_from(stdout)
+
+    assert block["annotation_complete"] is False
+    assert block["floating_driver_count"] == 0
+
+
+def test_driver_detail_is_null_without_pin_listing():
+    block = _annotation_from(
+        _parasitic_block(
+            "Found 2 unannotated drivers.\nFound 0 partially unannotated drivers."
+        )
+    )
+
+    assert block["unannotated_driver_detail"] is None
+
+
 def test_unlisted_unannotated_drivers_keep_gating_without_pin_listing():
     """A build without `-report_unannotated` prints only the counts: the raw
     count keeps gating and the new fields degrade to null / empty."""

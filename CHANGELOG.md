@@ -274,6 +274,12 @@ not `klt --version`, if you need to detect this kind of drift. See
   `v(<node>)` they read) now count as element terminals, ending false
   `floating_node` warnings on behaviourally driven nodes. Additive; no
   `schema_version` bump.
+- **New `klt diff A B [--top CELL]`** (issue #3093): compares two GDSII/OASIS
+  streams for equal geometry, labels and hierarchy. Ignores stream timestamps,
+  element order and library name; never ignores coordinates, path widths, text,
+  instance transforms, dbu or cell names. Reports `stream_sha256` and
+  `canonical_hash` separately. Exit `0` equivalent, `3` layouts differ, `1`
+  unreadable file or unknown `--top`. Additive; new verb.
 - **sky130 `mos_array`/`diff_pair` draw the S/D implant** (issue #2934, phase
   A): `nsdm` (93/44) over n-type and `psdm` (94/20) over p-type unit devices,
   0.125 µm beyond the diffusion (`n/psdm.5a`, `sky130A.lydrc`), merged where
@@ -550,6 +556,28 @@ not `klt --version`, if you need to detect this kind of drift. See
   of `alter`ed. Additive corner field `supply_waveforms` discloses the
   nominal and effective levels. The #2706 rejection stays for unlisted
   sources and now names the option.
+
+- **Added** (#3001, `klt drc --deck gf180mcu`; additive — `schema_version`
+  unchanged, but **a layout that reported `clean` before can now report
+  `violations`**): the gf180mcu curated deck now carries the PDK runset's
+  manufacturing-grid group and four salicide-block rules, closing a
+  false-`clean` where `klt gen mos_array` guard-ring cells and `res_array`
+  cells that the runset (`run_drc.py --variant=D`) fails read `clean` here.
+  29 `<layer>.ongrid.1` rules (0.005 um, `geom.drc`'s `if OFFGRID` group;
+  grid only — the runset has no `with_angle` call) and `sab.width.1` /
+  `sab.space.1` / `sab.separation.contact.1` / `poly2.enclosing.sab.1`
+  (`SB.1`/`SB.2`/`SB.4`/`SB.10`), taking the deck from 56 to 89 rules, each
+  with a `RuleProvenance` citation. The remaining `SB.*` rules and the
+  uncurated runset layers are listed, with reasons, in `decks/gf180mcu.py`.
+  New `DrcRule.report_escapes` field (default `True`, no behaviour change for
+  any existing rule) lets an extension rule such as `SB.10` skip the #318
+  zero-overlap escape term. Because `klt gen` reads its manufacturing grid
+  from the deck, gf180mcu cut centres now snap onto 0.005 um as sky130's do
+  (#2648), which changes the committed `examples/dogbone-terminal`
+  gf180mcu stream. Two generator defects the new rules expose are tracked
+  separately: `res_array` SAB geometry (#3000) and off-grid guard-ring
+  bodies at a non-multiple `ring_padding_um` (#3364). See
+  [`docs/cli/drc.md`](docs/cli/drc.md).
 - **Bipolar markers can be derived layer expressions** (issue #2860):
   `BipolarDevice.marker` now accepts a `LayerExpr`, a frozen AND/NOT tree
   of drawn layers that can nest, as well as a bare `(layer, datatype)`
