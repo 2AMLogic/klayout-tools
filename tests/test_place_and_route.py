@@ -1276,6 +1276,86 @@ def test_power_net_fields_default_to_vdd_vss():
     assert validated["ground_net"] == "VSS"
 
 
+def test_power_tapcell_distance_defaults_to_none():
+    validated = place_and_route._validate_power({"straps": _BASE_STRAPS})
+    assert validated["tapcell_distance_um"] is None
+
+
+def test_power_tapcell_distance_accepted():
+    validated = place_and_route._validate_power(
+        {"straps": _BASE_STRAPS, "tapcell": {"distance_um": 50}}
+    )
+    assert validated["tapcell_distance_um"] == 50
+
+
+@pytest.mark.parametrize(
+    "tapcell",
+    [
+        {"distance_um": 0},
+        {"distance_um": -5},
+        {"distance_um": True},
+        {"distance_um": "50"},
+        {"distance_um": float("nan")},
+        {"distance_um": float("inf")},
+        {},
+        {"distance_um": 50, "halo": 1},
+        "50",
+    ],
+)
+def test_power_tapcell_rejects_invalid(tapcell):
+    with pytest.raises(PlaceAndRouteError, match=r"request\.power\.tapcell"):
+        place_and_route._validate_power({"straps": _BASE_STRAPS, "tapcell": tapcell})
+
+
+def test_power_tapcell_override_rejected_without_tapcell_library():
+    with pytest.raises(PlaceAndRouteError, match="no tap/endcap"):
+        place_and_route._validate_power(
+            {"straps": _BASE_STRAPS, "tapcell": {"distance_um": 50}},
+            "sg13g2_stdcell",
+        )
+
+
+def test_tapcell_lines_default_and_override():
+    default = "tapcell -distance 14 -tapcell_master sky130_fd_sc_hd__tapvpwrvgnd_1"
+    assert place_and_route._tapcell_lines("sky130_fd_sc_hd") == [default]
+    assert place_and_route._tapcell_lines("sky130_fd_sc_hd", None) == [default]
+    assert place_and_route._tapcell_lines("sky130_fd_sc_hd", 50) == [
+        "tapcell -distance 50 -tapcell_master sky130_fd_sc_hd__tapvpwrvgnd_1"
+    ]
+    assert place_and_route._tapcell_lines("sky130_fd_sc_hd", 12.5)[0].startswith(
+        "tapcell -distance 12.5 "
+    )
+
+
+def test_stubbed_route_tapcell_distance_override_in_tcl_and_report(
+    tmp_path, monkeypatch
+):
+    """Issue #3051: `request.power.tapcell.distance_um` reaches the Tcl and
+    the report's `power` block."""
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        power={"straps": _BASE_STRAPS, "tapcell": {"distance_um": 50}},
+    )
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert report["status"] == "ok"
+    assert report["power"]["tapcell_distance_um"] == 50
+    floorplan_script = os.path.join(
+        os.path.dirname(request_path),
+        ".klt",
+        "place-and-route",
+        "pnr_gcd_floorplan.tcl",
+    )
+    lines = _script_lines(floorplan_script)
+    assert (
+        "tapcell -distance 50 -tapcell_master sky130_fd_sc_hd__tapvpwrvgnd_1" in lines
+    )
+
+
 def test_power_normalizes_strap_numbers_and_defaults():
     validated = place_and_route._validate_power(
         {"straps": [{"layer": "met1", "width_um": 1, "pitch_um": 5}]}
@@ -2732,6 +2812,7 @@ def test_stubbed_full_route_success(tmp_path, monkeypatch):
         "ground_net": None,
         "tapcell_master": None,
         "endcap_master": None,
+        "tapcell_distance_um": None,
         "filler_masters": [],
         "straps": [],
         "connects": [],
@@ -2955,6 +3036,7 @@ def test_stubbed_full_route_with_power_emits_pdn_tapcell_and_filler_tcl(
         "ground_net": "VSS",
         "tapcell_master": "sky130_fd_sc_hd__tapvpwrvgnd_1",
         "endcap_master": None,
+        "tapcell_distance_um": 14,
         "filler_masters": [
             "sky130_fd_sc_hd__fill_1",
             "sky130_fd_sc_hd__fill_2",

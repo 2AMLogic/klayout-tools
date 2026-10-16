@@ -7,7 +7,7 @@ first-order lumped RC interconnect parasitics (see "Parasitic (RC)
 extraction" below).
 
 ```
-klt extract <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l|asap7 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--top-cell-pins] [--pins <A,B,VDD,VSS>] [--rename-declared-pins] [--deck-option <key>=<value> ...] [--label-layer <role>=<layer>/<datatype> ...] [--defer-resistor-fixed-offset] [--abstract-cells <glob> ...] [--abstract-cell-lef <path> ...] [--subcircuit <cell>] [--subcircuit-output <path>] [--hierarchical-cells <cell>[,<cell>...]] [--format text|json]
+klt extract <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l|asap7 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--top-cell-pins] [--pins <A,B,VDD,VSS>] [--rename-declared-pins] [--deck-option <key>=<value> ...] [--label-layer <role>=<layer>/<datatype> ...] [--defer-resistor-fixed-offset] [--abstract-cells <glob> ...] [--abstract-cell-lef <path> ...] [--subcircuit <cell>] [--subcircuit-output <path>] [--hierarchical-cells <cell>[,<cell>...]] [--progress|--no-progress] [--format text|json]
 klt extract <request.json>|-|'{...}' [--format text|json]
 klt extract --check <report.json> [--rerun] [--format text|json]
 ```
@@ -86,6 +86,13 @@ two disagree, this document (and the code) win.
   netlist back and combine freely (`--spef` still writes its own file).
   Without the flag the default is unchanged. A report recorded with
   `--no-netlist` is replayed as `--no-netlist` by `--check --rerun`.
+- `--progress` / `--no-progress` — stderr liveness for long runs (issue
+  #3181). `--progress` writes a `klt extract: <stage> started|finished …`
+  line per stage and a `<stage> still running (…)` heartbeat every 30 s;
+  `--no-progress` writes nothing. Unset (the default) is heartbeat-only and
+  only when stderr is not a TTY, so a short run leaves stderr empty (the
+  error envelope lives there) while an agent or CI log still shows life on a
+  long one. stdout is never touched. See "Progress and timing" below.
 - `--top` — top cell to extract when the stream has more than one (required
   in that case; optional otherwise, and must name the sole top cell if
   given).
@@ -198,8 +205,8 @@ two disagree, this document (and the code) win.
 - `--hierarchical-cells` — optional, unset by default (the output stays
   flat). Comma-separated cell name(s) to emit as their **own `.SUBCKT`** in
   the written deck instead of flattening them into the top circuit (issue
-  #2722, increment 1): one definition per named cell, one `X` instance per
-  placement, so per-circuit `klt lvs` options such as
+  #2722; nested named cells yield a nested `.SUBCKT` tree, #2916): one
+  definition per named cell, one `X` instance per placement, so per-circuit `klt lvs` options such as
   `options.combine_devices_per_circuit` have layout-side circuits to key on.
   Unlike `--subcircuit` this *is* the primary deck, not a second artifact.
   See "Hierarchical output" below.
@@ -627,11 +634,53 @@ the JSON `provenance.klayout_version` field — see "JSON schema (the
 contract)" below) on every environment that produces or compares extracted
 netlists.
 
+**Evidence pins (issue #3181):** `netlist_sha256` is a stable pin only for
+runs on the same pinned `klayout` build and `klt` commit; a pin recorded on a
+different one can change once even when every count matches, because the
+writer owns the `$N` labels (above) and `klt extract` does not renumber them.
+A numbering-independent hash field is not yet offered — it is tracked in
+#3407. Two consecutive runs on the same environment produce identical
+`netlist_sha256` (`test_consecutive_runs_give_identical_netlist_sha256`).
+
 Rather than hand-rolling this normalization, `klt extract --check <report>
 --rerun` (issue #1559) already applies it — see "Field classes: content,
 bookkeeping, tool metadata" and "`--check` / `--rerun`" below, which also
 name `net_id` and `parasitics.nets[]` ordering as the same class of
 extractor-internal bookkeeping.
+
+### Progress and timing (issue #3181)
+
+A large routed block can spend tens of minutes inside one extraction call, so
+two things let a caller tell a slow run from a hang and budget the step:
+
+- **stderr progress** — see `--progress` above. Lines read
+  `klt extract: device_extraction finished in 1.8s (2s total)`; the heartbeat
+  reads `klt extract: device_extraction still running (30s in stage, 31s
+  total)`. The request document accepts `"progress": true|false` (absent
+  keeps the default). stdout stays the pure envelope either way.
+- **`timing` in the response** — an additive object (no existing field
+  changed): `stages` (wall seconds per named stage), `total_seconds`, and
+  `unattributed_seconds` (the remainder no stage covers, so
+  `sum(stages) + unattributed_seconds ≈ total_seconds`). Stages, in order:
+  `read_layout`, `device_extraction` (the `LayoutToNetlist` run plus dead-metal,
+  passive-region and `--parasitics` computation), `diagnostics` (voltage-domain
+  and flavour-marker checks), `netlist_write`, `netlist_hash`.
+  `--check --rerun` ignores `timing` (a measurement, not evidence).
+
+**Measured scaling** (sky130, `--no-netlist`, one 8-vCPU shared host, the
+routed digital blocks in `tests/corpus/place_and_route/`):
+
+| block | devices | nets | `device_extraction` | `netlist_write` | total |
+| ----- | ------- | ---- | ------------------- | --------------- | ----- |
+| `mult8` | 2,274 | 1,109 | 0.81 s | 0.03 s | 1.0 s |
+| `gcd` | 4,857 | 2,054 | 1.82 s | 0.06 s | 2.2 s |
+
+`device_extraction` is 80–90 % of the run on both and scales roughly linearly
+with device count at this size (~0.35–0.4 ms/device); every other stage is
+under 0.1 s. **Not measured:** the ~8,500-instance, ~4 MB block that
+motivated the issue (it is not in this repo) — whether extraction turns
+super-linear there is for a caller with that block to confirm from the
+`timing` object, and a larger-block run is tracked in #3408.
 
 ### Reserved annotation layer
 
@@ -1991,14 +2040,11 @@ Rules of thumb:
   matched MiM overlap is reported as — never *whether* it is recognised, and
   never how many devices a drawn overlap produces (still exactly one,
   whichever flavour is selected).
-- **Unlike `poly_res`, combining `--deck-option mim_cap=...` with `--pdk`
-  does not yet bind a curated simulation subcircuit for the two
-  non-default flavours** (`cap_mim_1f0_m4m5_noshield`/
-  `cap_mim_1f5_m4m5_noshield` have no `_CAPACITOR_MODEL_TABLE` entry as of
-  this option's introduction) — the extracted `C` card is written unbound
-  (the same documented carve-out an unbound device class anywhere else in
-  this deck gets, e.g. gf180mcu's `bjt`), not a wrong subcircuit call. See
-  "SPICE model binding" below.
+- Combining `--deck-option mim_cap=...` with `--pdk` binds the selected
+  density to its PDK subcircuit (`cap_mim_1f0_m4m5_noshield`/
+  `cap_mim_1f5_m4m5_noshield` as well as the default, issue #3090); without
+  `--pdk` the capacitor is a fixed-value `C` card. See "SPICE model binding"
+  below.
 
 ### Junction diodes (issue #542)
 
@@ -3944,6 +3990,14 @@ R$2 MID_A OUT_A 289.2 res_generic_po L=6U W=1U
 ...
 ```
 
+- **Nested selections (issue #2916).** A named cell may contain other named
+  cells: each gets its own `.SUBCKT` and the outer definition instantiates it
+  (`XSTAGE_1 IN_1 STAGE` inside `.SUBCKT OUTER`), numbered per parent
+  circuit. A device is written in exactly one circuit — the innermost named
+  placement it is drawn in. A net is a pin of the outer definition when it
+  touches a device outside the outer placement's whole subtree (nested cells
+  included) or is a pin of the flat deck; a nested instance's pins are wired
+  to the outer definition's nets by the flat net they resolve to.
 - **One definition per cell, one instance per placement.** Two placements of
   `macro_a` write one `.SUBCKT MACRO_A` and two `X` cards
   (`XMACRO_A_1`, `XMACRO_A_2`, numbered in a deterministic placement order),
@@ -3961,8 +4015,9 @@ R$2 MID_A OUT_A 289.2 res_generic_po L=6U W=1U
   declarations, provenance and `netlist_sha256` are the existing writer's.
 - **Conservation.** Before anything is written, every pre-transform device
   must appear exactly once (checked per device class, across the top circuit
-  and every child definition × instance count); a transform that lost or
-  duplicated a device is an error.
+  and every definition × its instance count from the top, so the check spans
+  every nesting level); a transform that lost or duplicated a device is an
+  error.
 - **Placements must be identical.** All placements of one cell must have the
   same devices at the same cell-local positions with the same parameters and
   the same net partition; otherwise one shared definition would be wrong for
@@ -3996,6 +4051,11 @@ byte-for-byte what it was). Otherwise:
 }
 ```
 
+`instances` lists the instances placed in the *top* circuit. A cell that holds
+nested named cells also carries a `children` array
+(`[{"cell": "STAGE", "instances": ["XSTAGE_1", "XSTAGE_2"]}]`) naming the
+instances inside its own definition; leaf cells omit it, so a non-nested run's
+JSON is unchanged. `placements` counts every placement, nested ones included.
 `device_count` is per definition (not multiplied by placements);
 `top_device_count`/`top_instance_count` describe the top circuit; `circuits`
 lists every emitted `.SUBCKT`, top first.
@@ -4021,23 +4081,33 @@ folds `MACRO_A`'s series pair to its lumped reference resistor while leaving
 Extracting the same layout flat reports `combine_devices_per_circuit.unmatched`
 for the layout side and a mismatch.
 
-### Errors and limitations (increment 1)
+### Errors and limitations
 
 All of these are application errors (exit 1) raised **before any output file
 is written**:
 
 - a named cell that is **absent**, **is the top cell**, or **has no reachable
   placement** under the top cell;
-- a **nested selection** — a named cell that contains another named cell;
 - a named cell that **contributes no recognized device**;
 - **placements of one cell that are not electrically identical**;
 - combination with **`--parasitics`**, **`--subcircuit`** or
   **`--abstract-cells`/`--abstract-cell-lef`** — the error names the
-  combination.
+  combination and the reason.
 
-Nesting and those three combinations (parasitic ownership at hierarchy
-boundaries, slicing a hierarchical deck, abstracted instances) are deferred
-to issue #2916. `--check --rerun` cannot reconstruct this flag (like every
+Those three combinations are **rejected by design** (decision recorded in
+issue #2916), not deferred:
+
+- `--parasitics`: parasitic elements are extracted on the flat deck against
+  flat nets, and a net crossing a `.SUBCKT` boundary has no single owning
+  circuit, so splitting boundary and coupling elements across definitions
+  would drop or double count them. Extract parasitics from a flat run.
+- `--subcircuit`: it writes a second, flat slice of one cell from the flat
+  deck, which would compete with the emitted hierarchy.
+- `--abstract-cells` / `--abstract-cell-lef`: abstracted cells are erased
+  before extraction, so the placements this option attributes devices to no
+  longer exist.
+
+`--check --rerun` cannot reconstruct this flag (like every
 other optional flag — see "Full mode"); use cheap `--check`. Not supported for
 FinFET decks (see "Not supported (refused by name)").
 
@@ -4286,6 +4356,23 @@ same fetched IHP-Open-PDK v0.3.0 install's
 / `.subckt cap_rfcmim PLUS MINUS bn`), both taking plain `l`/`w` in raw
 metres, the same convention as this family's MOS/resistor bindings.
 
+gf180mcu capacitor note (issue #3090): all three `--deck-option mim_cap=`
+densities bind to their identically-named PDK subcircuit, taking
+`c_length`/`c_width` — confirmed in the installed PDK's
+`libs.tech/ngspice/sm141064_mim.ngspice`:
+
+| `mim_cap` class | Bound subcircuit |
+|---|---|
+| `cap_mim_1f0_m4m5_noshield` | `cap_mim_1f0_m4m5_noshield` |
+| `cap_mim_1f5_m4m5_noshield` | `cap_mim_1f5_m4m5_noshield` |
+| `cap_mim_2f0_m4m5_noshield` (default) | `cap_mim_2f0_m4m5_noshield` |
+
+Binding matters for corners: the PDK's `mimcap_ff`/`mimcap_ss` sections scale
+the subcircuit via `mim_corner_*`, which a bare `C` card cannot follow. A
+capacitor written as a fixed-value `C` card instead (no `--pdk`, or a class
+with no curated row) earns one aggregate `warnings[]` line saying so, and under
+`--parasitics` the same line in the netlist header comment.
+
 Bipolar note: sky130's `pnp_05v5` ships as discrete geometry-named cells
 (`…_W0p68L0p68`, `…_W3p40L3p40`), not one parameterized cell, so the writer
 selects the variant whose nominal emitter area is nearest the device's
@@ -4408,11 +4495,10 @@ future epic):
   *subcircuit* names, which a `C` card cannot reference either. The card was
   therefore unsimulatable as written (`unknown parameter (…)` / `could not
   find a valid modelname`), breaking the extracted-netlist → simulation leg
-  of the flow outright. Reachable both **with** `--pdk` (a recognised
-  flavour with no curated table row — e.g. gf180mcu's non-default
-  `cap_mim_1f0_m4m5_noshield`/`cap_mim_1f5_m4m5_noshield` densities, which
-  `--deck-option mim_cap=` selects) and **without** it (no bindings at all,
-  so every deck's capacitor class is unbound). Nothing is lost: the flavour
+  of the flow outright. Reachable **without** `--pdk` (no bindings at all,
+  so every deck's capacitor class is unbound) and, in principle, with
+  `--pdk` for a recognised flavour with no curated table row (none today:
+  gf180mcu's `1f0`/`1f5` densities were bound by issue #3090). Nothing is lost: the flavour
   identity is still on the writer's own preceding
   `* device instance … <class>` comment line and in `devices[].class`.
   `--parasitics`' own ground/coupling capacitors are unaffected — their
@@ -7172,6 +7258,7 @@ exit codes).
 | `netlist_path`     | string \| null             | Resolved path of the written SPICE netlist (echoes `--output` or the computed default). `null` only when `--no-netlist` was passed. |
 | `netlist_sha256`   | string \| null             | SHA-256 hex digest of the written netlist file. `null` only when `--no-netlist` was passed.            |
 | `netlist_normalized_sha256` | string \| null | Additive (issue #3407). SHA-256 hex digest of the flat `devices[]`/`nets[]` connectivity with anonymous-net numbering normalized away (`net_id` dropped, each `\$N` net rewritten to its sorted `<device>.<terminal>` attachment list, `nets[]` re-sorted — the same canonicalization `--check --rerun` uses), serialized as sorted-key compact JSON. Pin this, not `netlist_sha256`, as cross-build evidence: it is unchanged when only the `$N` numbering differs, and changes on any real connectivity, device-parameter or net-name change. Covers the flat netlist only (not `--subcircuit` decks or `--parasitics` R/C elements). `null` only when `--no-netlist` was passed. Existing `netlist_sha256` values are unchanged. |
+| `timing`           | object                     | Additive (issue #3181): wall-clock `stages` (seconds per stage), `total_seconds`, `unattributed_seconds`. A measurement, ignored by `--check --rerun`. |
 | `status`           | `"extracted"`              | Never `"error"` — a failed run does not emit this envelope at all (see Exit codes).                    |
 | `device_count`     | integer                    | `len(devices)`.                                                                                        |
 | `net_count`        | integer                    | `len(nets)`.                                                                                           |
