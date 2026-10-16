@@ -3579,7 +3579,45 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
             "of the same pinned commit report different ones (issue #2249). "
             "Use this rather than byte-comparing the committed file against "
             "a fresh render. Only meaningful with --manifest/--fleet; see "
-            "docs/cli/signoff.md's '--check' section."
+            "docs/cli/signoff.md's '--check' section. With --attest, REPORT "
+            "is a committed attestation envelope instead: re-attests and "
+            "exits 0 only if it still reproduces and still passes, 3 "
+            "otherwise -- never rewriting it."
+        ),
+    )
+    signoff_parser.add_argument(
+        "--attest",
+        metavar="ITEM",
+        type=int,
+        choices=[1, 9, 10],
+        help=(
+            "produce the artifact-anchored generic envelope for T1 item 1 "
+            "(Design sources), 9 (Testbenches shipped) or 10 (Repo hygiene) "
+            "from --inventory, by running the item-specific checks the "
+            "inventory declares (issue #2844). Status is derived from those "
+            "checks: exit 0 pass, 3 fail (nothing written), 1 malformed "
+            "inventory. Mutually exclusive with <file>/--manifest/--fleet/"
+            "--describe-grader/--tiers-doc. See docs/cli/signoff.md's "
+            "'Attesting items 1, 9 and 10' section."
+        ),
+    )
+    signoff_parser.add_argument(
+        "--inventory",
+        metavar="FILE",
+        help=(
+            "with --attest: path to the versioned attestation inventory "
+            "(schema_version 1, kind 't1-attestation-inventory') inside a "
+            "git repository; the envelope pins this file's raw-byte sha256."
+        ),
+    )
+    signoff_parser.add_argument(
+        "-o",
+        "--output",
+        metavar="FILE",
+        help=(
+            "with --attest: also write the envelope to FILE when it passes, "
+            "only if its bytes changed (an unchanged attestation leaves the "
+            "committed file untouched)."
         ),
     )
     signoff_parser.add_argument(
@@ -3589,7 +3627,8 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
             "print which T1 checklist item ids this build has grading "
             "rules for, plus the content hash identifying the grading code "
             "itself, without reading source or running any check -- "
-            "mutually exclusive with <file>/--manifest/--fleet/--tiers-doc "
+            "mutually exclusive with <file>/--manifest/--fleet/--tiers-doc/"
+            "--attest "
             "(this always reports the build's own shipped grading rules, "
             "never an overridden doc's item list). See docs/cli/signoff.md's "
             "'Identifying the grading build' section."

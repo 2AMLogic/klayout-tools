@@ -20,9 +20,16 @@
    content hash identifying the grading code itself -- purely informational,
    reads no manifest and runs no check. See :func:`..signoff.describe_grader`.
 
-The four modes are mutually exclusive: ``--manifest``/``--fleet``/
-``--describe-grader`` each replace the positional ``<file>...`` arguments and
-each other.
+5. **Attest T1 items 1, 9, 10** (``--attest ITEM --inventory FILE``, issue
+   #2844): run the item-specific checks a versioned inventory declares and
+   emit the artifact-anchored generic envelope ``--manifest`` binds (see
+   :mod:`..signoff_attest`). With ``--check COMMITTED`` it re-attests and
+   diffs instead, writing nothing; exit ``0`` only when the committed
+   envelope still reproduces and still passes, ``3`` otherwise.
+
+The modes are mutually exclusive: ``--manifest``/``--fleet``/
+``--describe-grader``/``--attest`` each replace the positional ``<file>...``
+arguments and each other.
 
 ``--check REPORT`` (issue #2249) is a *modifier* on the two doc-parsing
 modes, not a fifth mode: it re-grades the same manifest and, instead of
@@ -121,6 +128,7 @@ from ..signoff import (
     check_tier_report,
     describe_grader,
 )
+from ..signoff_attest import build_attestation, check_attestation, write_attestation
 from .color import Palette, resolve_palette
 from .output import emit_error, emit_success, render_rerun_drift
 
@@ -142,6 +150,9 @@ _CHECK_EXIT_CODES = {"match": EXIT_PASS, "drifted": EXIT_FAIL}
 def run(args: argparse.Namespace) -> int:
     manifest_source = getattr(args, "manifest", None)
     fleet_source = getattr(args, "fleet", None)
+    attest_result = _maybe_run_attest(args, manifest_source, fleet_source)
+    if attest_result is not None:
+        return attest_result
     if getattr(args, "describe_grader", False):
         return _run_describe_grader(args, manifest_source, fleet_source)
     if manifest_source and fleet_source:
@@ -189,6 +200,28 @@ def run(args: argparse.Namespace) -> int:
     return _run_envelope_aggregation(args)
 
 
+def _maybe_run_attest(
+    args: argparse.Namespace,
+    manifest_source: str | None,
+    fleet_source: str | None,
+) -> int | None:
+    """``--attest`` dispatch (issue #2844) -- run it, or refuse its flags.
+
+    Returns the exit code when the invocation is an ``--attest`` one (run it)
+    or an ``--inventory``/``--output`` misuse (refuse them), and ``None``
+    otherwise so ``run`` can fall through to the other modes.
+    """
+    if getattr(args, "attest", None) is not None:
+        return _run_attest(args, manifest_source, fleet_source)
+    if getattr(args, "inventory", None) or getattr(args, "output", None):
+        return emit_error(
+            "signoff",
+            "--inventory/--output only apply to --attest",
+            args.format,
+        )
+    return None
+
+
 def _run_describe_grader(
     args: argparse.Namespace,
     manifest_source: str | None,
@@ -226,6 +259,108 @@ def _run_describe_grader(
     result = describe_grader()
     emit_success(result, args.format, _print_describe_grader_text)
     return EXIT_PASS
+
+
+def _run_attest(
+    args: argparse.Namespace,
+    manifest_source: str | None,
+    fleet_source: str | None,
+) -> int:
+    """``--attest ITEM --inventory FILE [-o OUT] [--check COMMITTED]`` (issue
+    #2844) -- see :mod:`..signoff_attest`.
+
+    Generate mode prints the envelope (``--format json``) and, when it
+    passes, writes it to ``--output`` only if its bytes changed; a failing
+    attestation exits ``3`` and writes nothing, so a committed passing
+    envelope is never silently replaced by a failing one. ``--check`` writes
+    nothing ever and exits ``0`` only when the committed envelope still
+    reproduces *and* still passes."""
+    if (
+        args.files
+        or manifest_source
+        or fleet_source
+        or getattr(args, "describe_grader", False)
+        or getattr(args, "tiers_doc", None)
+    ):
+        return emit_error(
+            "signoff",
+            "--attest cannot be combined with <file> arguments, --manifest, "
+            "--fleet, --describe-grader, or --tiers-doc",
+            args.format,
+        )
+    inventory = getattr(args, "inventory", None)
+    if not inventory:
+        return emit_error(
+            "signoff",
+            "--attest requires --inventory <file> (the versioned attestation "
+            "inventory; see docs/cli/signoff.md)",
+            args.format,
+        )
+    committed = getattr(args, "check", None)
+    output = getattr(args, "output", None)
+    if committed is not None and output:
+        return emit_error(
+            "signoff",
+            "--check and --output are mutually exclusive with --attest: "
+            "--check verifies a committed envelope and never writes",
+            args.format,
+        )
+    try:
+        if committed is not None:
+            result = check_attestation(args.attest, inventory, committed)
+        else:
+            result = build_attestation(args.attest, inventory)
+    except SignoffError as exc:
+        return emit_error("signoff", str(exc), args.format)
+
+    if committed is not None:
+        emit_success(result, args.format, _print_attestation_check_text)
+        ok = result["status"] == "match" and result["fresh_status"] == "pass"
+        return EXIT_PASS if ok else EXIT_FAIL
+
+    if result["status"] == "pass" and output:
+        try:
+            write_attestation(result, output)
+        except OSError as exc:
+            return emit_error(
+                "signoff", f"could not write --output '{output}': {exc}", args.format
+            )
+    emit_success(result, args.format, _print_attestation_text)
+    return EXIT_PASS if result["status"] == "pass" else EXIT_FAIL
+
+
+def _attestation_check_line(check: dict) -> str:
+    marker = "PASS" if check["passed"] else "FAIL"
+    if check["check"] == "present":
+        what = f"{check['role']} {check['path']} present"
+    elif check["check"] == "command":
+        label = check.get("target") or check.get("name") or check["role"]
+        status = check.get("error") or f"exit {check['exit_status']}"
+        what = f"{check['role']} {label}: {' '.join(check['argv'])} ({status})"
+    else:
+        what = (
+            f"pin {check['role']}: {check['value'] if check['passed'] else 'missing'}"
+        )
+    return f"[{marker}] {what}"
+
+
+def _print_attestation_text(result: dict) -> None:
+    print(f"attest: T1 item {result['t1_item']}  status: {result['status']}")
+    attestation = result["attestation"]
+    print(f"checks: {attestation['passed_count']}/{attestation['check_count']} passed")
+    binding = result["provenance"]["input"]
+    print(f"inventory: {binding['path']['path']} ({binding['content_hash']})")
+    print()
+    for check in attestation["checks"]:
+        print(_attestation_check_line(check))
+
+
+def _print_attestation_check_text(result: dict) -> None:
+    render_rerun_drift(result)
+    print(f"fresh_status: {result['fresh_status']}")
+    failed = [c for c in result["fresh"]["attestation"]["checks"] if not c["passed"]]
+    for check in failed:
+        print(_attestation_check_line(check))
 
 
 def _run_envelope_aggregation(args: argparse.Namespace) -> int:

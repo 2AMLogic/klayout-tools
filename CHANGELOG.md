@@ -702,6 +702,23 @@ not `klt --version`, if you need to detect this kind of drift. See
   a read-back `power_pins` verdict and `--require-power-pins`; `klt signoff`
   recognises both envelopes as opt-in kinds scoped to item 11.
 
+- **`klt signoff --attest {1,9,10}`: tool-produced evidence for T1 items 1,
+  9 and 10** (issue #2844): reads a versioned attestation inventory
+  (`"kind": "t1-attestation-inventory"`, `schema_version: 1`), runs
+  item-specific checks (item 1: sources and derived netlists exist and each
+  netlist passes its declared freshness command; item 9: testbenches exist,
+  the cold-start invocation succeeds, PDK revision and tool versions are
+  pinned; item 10: hygiene files exist and declared CI/audit commands
+  succeed) and emits the artifact-anchored `generic` envelope with
+  `status` derived from those checks and an `attestation.checks[]` record.
+  `-o` writes only a passing envelope, only when its bytes change;
+  `--check <committed>` re-attests and exits `3` on any drift or failure.
+  **Behaviour change:** items 1, 9 and 10 now accept only an anchored
+  `generic` envelope, so a passing but unrelated native envelope (e.g. a
+  clean `klt drc` report) renders `unmet`/`wrong_kind` for them. Item 2 is
+  unchanged. A met anchored citation's `artifact_binding` gains an additive
+  `attestation` block when the envelope came from `--attest`. See
+  `docs/cli/signoff.md` "Attesting items 1, 9 and 10".
 - **Output-directory ownership for `klt pex` / `sim` / `place-and-route`**
   (issue #2770): each run takes a non-blocking OS-backed advisory lock on its
   persistent artifact root; a competing cooperating run fails fast with the
