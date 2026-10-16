@@ -181,6 +181,17 @@ sees a member appear or disappear. The concrete precedent: issue #1704's
 number when it is. See `docs/cli/extract.md`'s "Top-cell-only hierarchy
 split" section for the full derivation.
 
+**An opt-in flag may also add a whole new object key to an already-shipped
+per-entry shape, absent unless asked for.** Issue #2982's `klt extract
+--resistance-graph` adds `resistance_graph` (`status`, `terminals`,
+`pair_resistance_ohm`, `legacy_resistance_ohm`, `nodes`, `edges`,
+`diagnostics`) to each `parasitics.nets[]` entry. Without the flag the key does
+not exist and the output is byte-identical to before; with it, every existing
+field (`resistance_ohm`, `terminals[]`, `by_layer`, the ladder) keeps its
+meaning and value. A consumer must treat the key as optional. No field is
+removed, renamed or retyped, so **no `schema_version` bump**. See
+`docs/cli/extract.md`'s "Terminal-aware resistance graph" section.
+
 **A new *qualifier* field next to an existing numeric field is additive — and
 is strictly preferable to retyping that field to `number | null`.** When an
 engine reports a sentinel instead of a measurement, the honest fix looks like

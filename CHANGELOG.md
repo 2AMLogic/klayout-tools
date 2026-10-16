@@ -14,6 +14,13 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt extract --resistance-graph`: opt-in terminal-aware resistance graph**
+  (issue #2982, Stage 3.D5 increment 3): adds `parasitics.nets[].resistance_graph`
+  (`status`, `terminals`, `pair_resistance_ohm`, `legacy_resistance_ohm`,
+  `nodes`, `edges`, `diagnostics`) from the Stage 3.D graph builder and DC
+  solve. Request field `resistance_graph`; requires `--parasitics`. Without the
+  flag no key is added and output is byte-identical; `resistance_ohm` and the
+  ladder are unchanged. Additive; no `schema_version` bump.
 - **`klt sim` batch: opt-in auto-split of a request that cannot fit the fleet's
   whole-job ceiling** (issue #3446): `batch.job_ceiling_check: "split"`,
   `batch.max_units_per_job` and `--max-units-per-job N` reroute a
