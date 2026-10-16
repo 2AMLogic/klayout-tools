@@ -345,3 +345,137 @@ def test_bent_fixture_driving_point_is_finite_and_repeatable():
         f"\nbent fixture Z_in={z_in:.4f} ohm  tool={first['tool']}  "
         f"f={first['frequency_hz']:.3e} Hz  wires={len(first['wires'])}"
     )
+
+
+# --- bent-path winding: klt mom vs NEC2++ driving-point impedance (#2730) -----
+#
+# The signal winding is an L ((0,0) -> (200,0) -> (200,100)), the return a U
+# ((200,120) -> (180,120) -> (180,20) -> (0,20)); 2x2 um sections on z in
+# [0, 2] um. NEC2++'s bent-path driving-point mode (#3037) closes the loop with
+# a far connector ((200,100) -> (200,120)) and a near feed stub ((0,20) ->
+# (0,0)); klt mom models the same four bars as four conductors, with the
+# connector/stub shortened by 1.5 um at each end so no two conductors touch
+# (the electrical lengths are 17 um instead of 20 um). The loop impedance is
+# the signed sum Z_in = s^T Z s over the full impedance matrix, `s` giving each
+# conductor's current direction against its canonical traversal (S +1, R -1:
+# the return runs from the lexicographically larger terminal; connector +1;
+# stub -1, i.e. the polarity the NEC source stub carries).
+
+BENT_FREQUENCY_HZ = 1.0e9
+BENT_KLT_SEGMENT_UM = 1.0
+# NEC2's thin-wire kernel needs segment length >~ 8 wire radii (radius 1.128
+# um -> ~9 um); finer segmentation makes the single-segment source stub's
+# neighbours ill-conditioned (Im(Z_in) swings through zero below 3 um on this
+# fixture). The oracle is therefore run at its own valid segmentations, and its
+# spread between them (2.5% .. 9.9% against klt mom) sets the tolerance.
+BENT_NEC_SEGMENTS_UM = (10.0, 20.0)
+BENT_TOLERANCE = 0.15
+
+_BENT_SIGNAL = [[0, 0, 0], [200, 0, 0], [200, 100, 0]]
+_BENT_RETURN = [[200, 120, 0], [180, 120, 0], [180, 20, 0], [0, 20, 0]]
+_BENT_BOXES_UM = (
+    # signal L (corner square owned by the horizontal leg)
+    [(0, -1, 201, 1), (199, 1, 201, 100)],
+    # return U (corner squares owned by the leg arriving at each)
+    [(179, 119, 200, 121), (179, 21, 181, 119), (0, 19, 181, 21)],
+    # far connector, near feed stub
+    [(199, 101.5, 201, 118.5)],
+    [(-1, 1.5, 1, 18.5)],
+)
+_BENT_SIGNS = (1.0, -1.0, 1.0, -1.0)
+
+
+@pytest.fixture(scope="module")
+def bent_klt_matrix(tmp_path_factory) -> list[list[complex]]:
+    root = tmp_path_factory.mktemp("mom-bent-winding")
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    for i, boxes in enumerate(_BENT_BOXES_UM, start=1):
+        for x0, y0, x1, y1 in boxes:
+            top.shapes(layout.layer(i, 0)).insert(
+                kdb.Box.new(_dbu(x0), _dbu(y0), _dbu(x1), _dbu(y1))
+            )
+    layout.write(str(root / "bent.gds"))
+    (root / "bent.mom.json").write_text(
+        json.dumps(
+            {
+                "background_permittivity": 1.0,
+                "panel_size_um": 2.0,
+                "frequencies_hz": [BENT_FREQUENCY_HZ],
+                "segment_size_um": BENT_KLT_SEGMENT_UM,
+                "stackup": [
+                    {"layer": f"{i}/0", "conductor": name, "z0_um": 0.0, "z1_um": 2.0}
+                    for i, name in enumerate(("signal", "return", "far", "near"), 1)
+                ],
+            }
+        )
+    )
+    report = run_mom(str(root / "bent.gds"), str(root / "bent.mom.json"))
+    point = report["full_wave_sweep"][0]
+    z = [
+        [complex(re, im) for re, im in zip(row_re, row_im, strict=True)]
+        for row_re, row_im in zip(
+            point["impedance_matrix_real_ohm"],
+            point["impedance_matrix_imag_ohm"],
+            strict=True,
+        )
+    ]
+    return z
+
+
+def _loop_impedance(z, signs) -> complex:
+    return sum(signs[i] * z[i][j] * signs[j] for i in range(4) for j in range(4))
+
+
+@pytest.mark.parametrize("nec_segment_um", BENT_NEC_SEGMENTS_UM)
+def test_bent_winding_driving_point_matches_nec_reference(
+    bent_klt_matrix, nec_segment_um
+):
+    request = _bent_request(_BENT_SIGNAL, _BENT_RETURN)
+    request["segment_size_um"] = nec_segment_um
+    result = _run_nec_request(request)
+    z_nec = complex(result["z_in_real_ohm"], result["z_in_imag_ohm"])
+    z_klt = _loop_impedance(bent_klt_matrix, _BENT_SIGNS)
+    rel = abs(z_klt - z_nec) / abs(z_nec)
+
+    # the oracle actually executed, on the stated geometry and frequency
+    assert result["tool"]["name"] == "nec2++" and result["tool"]["binding"] == "PyNEC"
+    assert result["tool"]["version"]
+    assert result["frequency_hz"] == BENT_FREQUENCY_HZ
+    assert len(result["wires"]) == 7 and result["source"]["tag"] == 7
+    assert math.isfinite(z_nec.real) and math.isfinite(z_nec.imag)
+    # lossless conductors: the real part is radiation only (<< the reactance)
+    assert abs(z_klt.real) < 1e-6 * abs(z_klt.imag)
+    assert abs(z_nec.real) < 1e-6 * abs(z_nec.imag)
+
+    print(
+        f"\nbent winding driving point @ {BENT_FREQUENCY_HZ:.3e} Hz "
+        f"(NEC2++ {result['tool']['version']}, NEC segment {nec_segment_um} um, "
+        f"klt segment {BENT_KLT_SEGMENT_UM} um): klt mom Z_in="
+        f"{z_klt.real:.4e}{z_klt.imag:+.4f}j ohm  NEC2++ Z_in="
+        f"{z_nec.real:.4e}{z_nec.imag:+.4f}j ohm  rel.err={rel * 100:.3f}%"
+    )
+    assert rel < BENT_TOLERANCE, (
+        f"klt mom Z_in {z_klt} vs NEC2++ {z_nec}: rel.err {rel * 100:.3f}% "
+        f"exceeds {BENT_TOLERANCE * 100:.0f}%"
+    )
+
+
+def test_bent_winding_control_wrong_return_polarity_is_far_outside_tolerance(
+    bent_klt_matrix,
+):
+    """Falsifiability control: treating the return path as co-directed with the
+    signal (the sign a solver that ignored the traversal direction would use)
+    lands far outside the tolerance, so agreement above is not vacuous."""
+    request = _bent_request(_BENT_SIGNAL, _BENT_RETURN)
+    request["segment_size_um"] = BENT_NEC_SEGMENTS_UM[0]
+    result = _run_nec_request(request)
+    z_nec = complex(result["z_in_real_ohm"], result["z_in_imag_ohm"])
+    z_wrong = _loop_impedance(bent_klt_matrix, (1.0, 1.0, 1.0, 1.0))
+    rel = abs(z_wrong - z_nec) / abs(z_nec)
+    print(
+        f"\ncontrol (wrong polarity): Z={z_wrong:.4f} vs NEC2++ {z_nec:.4f}, "
+        f"rel={rel:.2f}"
+    )
+    assert rel > 3 * BENT_TOLERANCE
