@@ -2256,7 +2256,13 @@ def _request_io_delay_lines(
         )
     else:
         delay_lines = _io_delay_lines(clock_port, input_delay_ns, output_delay_ns)
-    if input_delays or output_delays or input_transitions or report_ports or false_path_from:
+    if (
+        input_delays
+        or output_delays
+        or input_transitions
+        or report_ports
+        or false_path_from
+    ):
         delay_lines = (
             _port_check_lines(
                 input_delays,

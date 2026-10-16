@@ -4492,11 +4492,13 @@ def test_omitting_false_path_from_leaves_tcl_unchanged():
     assert post_route_sta._false_path_lines(None) == []
     assert post_route_sta._false_path_lines([]) == []
     for maps in ((None, None), (_BOUNDARY_INPUT_DELAYS, _BOUNDARY_OUTPUT_DELAYS)):
-        assert post_route_sta._port_check_lines(*maps, ["x"]) == (
-            post_route_sta._port_check_lines(*maps, ["x"], None)
+        assert post_route_sta._port_check_lines(*maps, report_ports=["x"]) == (
+            post_route_sta._port_check_lines(
+                *maps, report_ports=["x"], false_path_from=None
+            )
         )
         assert post_route_sta._port_check_lines(*maps) == (
-            post_route_sta._port_check_lines(*maps, None, [])
+            post_route_sta._port_check_lines(*maps, false_path_from=[])
         )
     assert post_route_sta._request_io_delay_lines(
         "clk", 0.0, 0.1, None, None
@@ -4505,7 +4507,7 @@ def test_omitting_false_path_from_leaves_tcl_unchanged():
 
 def test_false_path_lines_escape_and_follow_delay_lines():
     lines = post_route_sta._request_io_delay_lines(
-        "clk", 0.0, 0.1, None, None, None, ["a_in", "cfg[3]", "we$ird"]
+        "clk", 0.0, 0.1, None, None, false_path_from=["a_in", "cfg[3]", "we$ird"]
     )
     delay = post_route_sta._io_delay_lines("clk", 0.0, 0.1)
     assert lines[-3:] == [
@@ -4526,8 +4528,7 @@ def test_false_path_from_with_port_delay_maps_comes_after_them():
         0.1,
         _BOUNDARY_INPUT_DELAYS,
         _BOUNDARY_OUTPUT_DELAYS,
-        None,
-        ["a_in"],
+        false_path_from=["a_in"],
     )
     assert lines[-1] == "set_false_path -from [get_ports a_in]"
     assert "klt_input_mapped" in "\n".join(lines)
