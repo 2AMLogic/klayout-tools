@@ -13734,7 +13734,9 @@ def test_engine_version_unset_does_not_probe(tmp_path, monkeypatch):
 
     monkeypatch.setattr(sim.subprocess, "run", fake_run)
     sim.run_sim(str(_pin_request(tmp_path)), backend="local")
-    assert not any("--version" in c for c in calls)
+    # The only ``--version`` call is the once-per-sweep engine_build probe;
+    # the engine_version probe (same argv) must not add a second one.
+    assert sum("--version" in c for c in calls) == 1
 
 
 @pytest.mark.parametrize("kind", ["pss", "pnoise", "PAC"])
