@@ -14,6 +14,14 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **ASAP7 DRC deck checks `V9.PAD.EN.2` and `V9.AUX.1`** (issue #3156): the
+  V8 enclosure-by-M9 and inside-M8-and-M9 rules carry over to V9 with PAD
+  (DRM section 3.19 preamble), reading PAD (mask 96, GDS 96/0) by layer
+  number since the pinned `asap7.lyp` has no entry for it. The deck grows
+  from 261 to 263 rule categories (`--expect-rule-categories 263`).
+  `M8.S.4`-`M8.S.8` / `M9.S.4`-`M9.S.8` stay under "Not implemented", now
+  with the reason that Fig. 3.18.1's width-class reading still contradicts
+  `S.1`. Additive; no `schema_version` bump.
 - **`klt lvs` refuses a bare pre-extracted `layout.netlist` carrying a
   resistor `X` card** (issue #3078): a `klt extract` `X$n a b vsubs
   <class> r=… L=… W=…` card naming a resistor class of `reference.deck`,
