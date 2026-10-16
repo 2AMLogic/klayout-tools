@@ -230,6 +230,16 @@ the flag was not given), and `klt lvs` gained the optional request field
 `docs/cli/extract.md`'s "Renaming promoted pins to their declared name"
 section.
 
+**A new field *next to* a string-list field is how a list's element type
+changes without breaking it.** Issue #3092: `klt deck rules`' per-rule
+`layers` stays `list[str]` (deck name, or the raw `"L/D"` string when unnamed);
+the stream layer/datatype behind each entry arrives as a new parallel
+`layer_refs` list, plus top-level `layer_table`, `ambiguous_names` and
+`unresolved`. `klt layers` gained an opt-in `--deck` that fills `name` and adds
+a `deck: {name, content_hash}` block; without it the output is byte-identical.
+No `schema_version` bump on either command. See `docs/cli/deck.md` and
+`docs/cli/layers.md`.
+
 **A new key in a documented open map, and a new member on one class of that
 map's entries, are additive.** `klt functional-verification`'s
 `environment.sdf.dropped` is documented as an open map keyed by class name,
@@ -1155,6 +1165,7 @@ any list index.
 | `drc` | `file` | input layout, as provided by the caller |
 | `extract` | `file` | input layout, as provided by the caller |
 | `extract` | `netlist_path` | written SPICE netlist (explicit `--output`, else derived from `file`); `null` only under `--no-netlist` (issue #2850), where `netlist_sha256` is `null` too |
+| `extract` | `netlist_normalized_sha256` | additive (issue #3407): SHA-256 hex of the flat `devices[]`/`nets[]` connectivity with anonymous-net (`$N`) numbering normalized away, so it is stable across `klayout` builds where `netlist_sha256` (written-bytes hash) is not; `null` exactly when `netlist_sha256` is; no `schema_version` bump |
 | `extract` | `spef_path` | written SPEF (`--spef`), else `null` |
 | `extract` | `subcircuit.path` | written sub-circuit netlist (`--subcircuit`) |
 | `extract` | `abstracted_cells.*.lef_path` | LEF file an abstracted cell's pins came from |
@@ -1478,8 +1489,11 @@ the exit code alone is authoritative.
   | Command | `error.code` | Meaning |
   |---------|--------------|---------|
   | `sim` | `batch_no_capacity` | `--backend batch`: 2am's fleet launcher refused the job for lack of Spot capacity in every pool (after any `batch.capacity_wait_s` budget was spent). A fleet-wide, usually transient condition — retrying later is reasonable. See [docs/cli/sim.md](cli/sim.md) "Batch backend". |
+  | `sim` | `batch_concurrency_cap` | `--backend batch`: 2am's fleet launcher refused the job because the shared fleet is at `BATCH_MAX_CONCURRENT_INSTANCES` (after any `batch.capacity_wait_s` budget was spent). Transient slot contention, distinct from a Spot shortage; retrying later is reasonable. See [docs/cli/sim.md](cli/sim.md) "Batch backend". |
   | `sim` | `batch_runner_version_mismatch` | `--backend batch` under `batch.runner_version_check: "enforce"` (the default): the AMI manifest publishes a runner `klt` whose major.minor differs from this client's, for every image the request could boot. Refused once, before any upload or launch, so no report and no per-corner diagnostics exist (issue #2851). Not retryable without a matching runner image or client. A mismatch found only on the runner keeps reporting through per-corner `batch_job_failed` diagnostics with `runner_code`. See [docs/cli/sim.md](cli/sim.md) "Pre-launch check from the AMI manifest". |
   | `netlist` | `batch_no_capacity` | `--backend batch`: the fleet launcher refused the job for lack of Spot capacity. Usually transient; retrying later is reasonable. Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
+  | `sim` | `batch_runner_feature_unsupported` | `--backend batch` under `batch.runner_version_check: "enforce"`: the request uses a feature (currently `analysis_steps`) that every runner image the AMI manifest publishes predates. Refused once, before any upload or launch (issue #3249). The same code appears as `runner_code` on per-corner `batch_job_failed` diagnostics when the runner-side preflight finds it. See [docs/cli/sim.md](cli/sim.md) "Request-feature capability check". |
+  | `netlist` | `batch_concurrency_cap` | `--backend batch`: the fleet launcher refused the job because the shared fleet is at `BATCH_MAX_CONCURRENT_INSTANCES`. Usually transient; retrying later is reasonable. Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
   | `netlist` | `batch_runner_version_mismatch` | `--backend batch`: the runner's `klt` version differs from this client's; the job was refused before netlisting, or before submission when the AMI manifest already publishes the mismatch (issue #2851). Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
   | `netlist` | `batch_runner_version_unknown` | `--backend batch`: the runner's `klt` version could not be read; the job was refused before netlisting. Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
   | `netlist` | `batch_poll_timeout` | `--backend batch`: the job did not finish within the client's poll budget. It may still finish on the runner; nothing was collected. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
@@ -1638,6 +1652,33 @@ violation (issue #2029).
   part of the contract and may change between releases without notice.
 - `json` — the stable API. Breaking a JSON field (renaming, removing, or
   retyping it) is a breaking change per CLAUDE.md; adding a field is not.
+
+## Response schemas (`docs/schemas/<verb>-response.schema.json`)
+
+A verb's success payload may ship a machine-readable JSON Schema (Draft
+2020-12) alongside its prose in `docs/cli/<verb>.md`. Today `klt layers`,
+`klt cells` and `klt stats` have one:
+[`layers-response`](schemas/layers-response.schema.json),
+[`cells-response`](schemas/cells-response.schema.json) and
+[`stats-response`](schemas/stats-response.schema.json).
+
+- **Naming.** `docs/schemas/<verb>-response.schema.json`, one file per verb.
+- **Required means always present.** Every field the verb always emits is in
+  `required`; fields that appear only under a flag (e.g. `klt layers
+  --flattened`) are declared in `properties` but not required. Nullable
+  fields are typed explicitly (`["string", "null"]`).
+- **Version pin.** The top-level `schema_version` is pinned with `const`.
+- **Extensibility.** Object boundaries keep `additionalProperties: true`, so
+  additive pre-1.0 fields stay compatible. That does not excuse leaving a
+  documented field out of `properties`.
+- **Version-bump rule.** Renaming, removing or retyping a field, or making an
+  optional field always-present, changes the shape: bump the verb's
+  `schema_version` and the schema's `const` together. Adding an optional
+  field does not bump it, but the schema must be updated to describe it.
+- **Testing.** The verb's existing `test_json_*` module loads the shipped
+  schema, runs `Draft202012Validator.check_schema` on it, validates real CLI
+  output for each option-dependent shape, and asserts that deleting a
+  required field raises `jsonschema.ValidationError`.
 
 ## Adding a new command
 

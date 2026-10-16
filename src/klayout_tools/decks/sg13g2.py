@@ -629,6 +629,10 @@ DECK: list[DrcRule] = [
         check="width",
         threshold_dbu=160,  # 0.16 um
         threshold_max_dbu=160,  # 0.16 um -- same value: a *fixed*-size rule
+        # Square-contact selection (issues #2943, #3139): only `cont_sq` is
+        # measured; contact bars and rows of abutting contacts (the PDK's own
+        # npn13G2/rsil cells) are `CntB.*`'s, not `Cnt.a`'s.
+        layer_selection="squares",
         # 5_14_cont.drc rule "Cnt.a":
         # cont_sq.without_bbox_width(0.16um)  (min AND max bbox width)
         # -> "5.14. Cnt.a : Min. and max. Cont width : 0.16 um"
@@ -652,6 +656,7 @@ DECK: list[DrcRule] = [
         layer=(6, 0),  # Cont.drawing
         check="space",
         threshold_dbu=180,  # 0.18 um
+        layer_selection="squares",  # cont_sq only (issues #2943, #3139)
         # 5_14_cont.drc rule "Cnt.b": cont_sq.space(0.18um, euclidian)
         # -> "5.14. Cnt.b : Min. Cont space : 0.18 um"
         # (sg13g2_tech_default.json: drc_rules.Cnt_b == 0.18)

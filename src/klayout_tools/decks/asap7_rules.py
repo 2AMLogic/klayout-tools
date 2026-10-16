@@ -250,6 +250,7 @@ RULES: tuple[Asap7Rule, ...] = (
     # ACTIVE
     Asap7Rule("ACTIVE.FIN.EX.1", "Table 3.5.1"),
     Asap7Rule("ACTIVE.W.1", "Table 3.5.1"),
+    Asap7Rule("ACTIVE.W.2", "Table 3.5.1"),
     Asap7Rule("ACTIVE.W.3", "Table 3.5.1"),
     Asap7Rule("ACTIVE.S.1", "Table 3.5.1"),
     Asap7Rule("ACTIVE.S.2B", "Table 3.5.1"),
@@ -278,6 +279,7 @@ RULES: tuple[Asap7Rule, ...] = (
     # SDT
     Asap7Rule("SDT.W.1", "Table 3.8.1"),
     Asap7Rule("SDT.W.2", "Table 3.8.1"),
+    Asap7Rule("SDT.W.3", "Table 3.8.1"),
     Asap7Rule("SDT.S.1", "Table 3.8.1"),
     Asap7Rule("SDT.GATE.S.2", "Table 3.8.1"),
     Asap7Rule("SDT.ACTIVE.OV.1", "Table 3.8.1"),
@@ -386,7 +388,6 @@ _SRAM = (
     "says SRAM rules may be waived for other cells"
 )
 _NETS = "needs net connectivity (different-net spacing)"
-_MULTIPLE = "integer-multiple width has no modulo predicate in the DRC DSL"
 _NO_BOUND = "the DRM gives no distance bound to check against"
 _TRACK = (
     "classified by routing track (same / parallel / aligned tracks); the deck "
@@ -399,6 +400,13 @@ _END_CAP = (
 _EXACT_EN = (
     "exact (==) or per-side paired enclosure ('5 & 2', '(5 & 5) | (5 & 0)') "
     "needs routing direction and a per-side enclosure predicate"
+)
+_LISD_EXACT_3 = (
+    "'== 3 nm on at least two opposite sides' is expressible without a routing "
+    "direction, but the literal '==' contradicts the pinned shipped cells (100 "
+    "V0 in 57 of 212 RVT cells are enclosed by LISD by more than 3 nm on every "
+    "opposite pair, e.g. 4 / 2 nm across and 27 / 36 nm along); the cells "
+    "satisfy only the 'at least 3 nm' reading, so the exact check is not shipped"
 )
 _EXACT_W = "exact width across the metal track needs the metal routing direction"
 _SADP_TRACK = (
@@ -477,7 +485,6 @@ _ONE_SIDE = (
 #: DRM rules from the covered tables (3.1-3.19) the deck does not check yet.
 NOT_IMPLEMENTED: tuple[Asap7RuleGap, ...] = (
     Asap7RuleGap("GATE.AUX.2", "Table 3.4.1", _NO_BOUND, "#2812"),
-    Asap7RuleGap("ACTIVE.W.2", "Table 3.5.1", _MULTIPLE, "#2812"),
     Asap7RuleGap("ACTIVE.S.2A", "Table 3.5.1", _NETS, "#2812"),
     Asap7RuleGap("SRAM.ACTIVE.WELL.S.5", "Table 3.5.1", _SRAM, "#2812"),
     Asap7RuleGap("SRAM.ACTIVE.WELL.EN.2", "Table 3.5.1", _SRAM, "#2812"),
@@ -488,12 +495,13 @@ NOT_IMPLEMENTED: tuple[Asap7RuleGap, ...] = (
     Asap7RuleGap(
         "ACTIVE.LUP.1",
         "Table 3.5.2",
-        "latch-up distance (30 um) needs tap/device classification",
+        "DRM-confirmed 30 um maximum, but the DRM defines no tap layer, "
+        "distance metric or connectivity test; no sound predicate yet "
+        "(evidence: docs/cli/drc.md)",
         "#2812",
     ),
     Asap7RuleGap("SRAM.NSELECT.ACTIVE.EN.3", "Table 3.7.1", _SRAM, "#2812"),
     Asap7RuleGap("SRAM.NSELECT.ACTIVE.EN.4", "Table 3.7.1", _SRAM, "#2812"),
-    Asap7RuleGap("SDT.W.3", "Table 3.8.1", _MULTIPLE, "#2812"),
     Asap7RuleGap("SRAM.SDT.W.4", "Table 3.8.1", _SRAM, "#2812"),
     Asap7RuleGap("SRAM.SDT.ACTIVE.OV.3", "Table 3.8.1", _SRAM, "#2812"),
     Asap7RuleGap("SRAM.SDT.LISD.OV.4", "Table 3.8.1", _SRAM, "#2812"),
@@ -509,8 +517,7 @@ NOT_IMPLEMENTED: tuple[Asap7RuleGap, ...] = (
     Asap7RuleGap("V0.S.1", "Table 3.11.1", _TRACK, "#3147"),
     *_gaps(("V0.S.2", "V0.S.3", "V0.S.4"), "Table 3.11.1", _END_CAP, "#3147"),
     Asap7RuleGap("V0.M1.EN.1", "Table 3.11.1", _EXACT_EN, "#3147"),
-    Asap7RuleGap("V0.LISD.EN.2", "Table 3.11.2", _EXACT_EN, "#3147"),
-    Asap7RuleGap("V0.LISD.EN.3", "Table 3.11.2", _EXACT_EN, "#3147"),
+    *_gaps(("V0.LISD.EN.2", "V0.LISD.EN.3"), "Table 3.11.2", _LISD_EXACT_3, "#3147"),
     Asap7RuleGap("V0.LIG.EN.4", "Table 3.11.2", _ONE_SIDE, "#3147"),
     Asap7RuleGap(
         "V0.LIG.AUX.2",
