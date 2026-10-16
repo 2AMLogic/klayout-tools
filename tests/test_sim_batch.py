@@ -5639,6 +5639,90 @@ def test_prelaunch_feature_check_warn_mode_does_not_raise(tmp_path, monkeypatch)
     sb._enforce_published_runner_features(request, assessment)
 
 
+_PREDATED_REQUEST = {
+    "models": {"pdk": "sky130A"},
+    "options": {"osdi_preload": ["bsimcmg.osdi"]},
+    "measurements": [{"name": "v", "expr": "v(out)"}],
+}
+
+
+def test_released_registry_entries_all_have_detectors():
+    for key, version in sb.REQUEST_FEATURE_MIN_RUNNER_VERSION.items():
+        assert (key.split(" (")[0] in sb._RUNNER_REQUEST_FEATURES) == (
+            version is not None
+        ), key
+
+
+def test_request_features_detect_the_released_fields():
+    assert sb._request_features(_PREDATED_REQUEST) == [
+        "measurements[].expr",
+        "options.osdi_preload",
+    ]
+    request = {
+        "options": {"ngspice_init": ["set x=1"]},
+        "corners": {
+            "process": ["tt", {"name": "b", "sections": [{"lib": "a", "section": "s"}]}]
+        },
+    }
+    assert sorted(sb._request_features(request)) == [
+        "corners.process[].sections[]",
+        "options.ngspice_init",
+    ]
+    plain = {"corners": {"process": [{"name": "b", "sections": ["a"]}]}}
+    assert sb._request_features(plain) == []
+
+
+def test_prelaunch_warn_returns_one_diagnostic_naming_every_field(
+    tmp_path, monkeypatch
+):
+    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
+    _publish_manifest(tmp_path, monkeypatch, [_image(klt_version="0.5.0")])
+    assessment = sb._assess_published_runner(
+        _PREDATED_REQUEST, _config(tmp_path, runner_version_check="warn")
+    )
+    diagnostic = sb._enforce_published_runner_features(_PREDATED_REQUEST, assessment)
+    assert diagnostic["code"] == sb.BATCH_RUNNER_FEATURE_PREDATED_CODE
+    assert diagnostic["severity"] == "warning"
+    assert diagnostic["features"] == ["measurements[].expr", "options.osdi_preload"]
+    assert diagnostic["runner_klt_version"] == "0.5.0"
+    assert diagnostic["source"] == "manifest"
+
+
+@pytest.mark.parametrize("runner", ["0.7.0", None])
+def test_prelaunch_warn_has_no_diagnostic_for_a_new_or_unknown_runner(
+    tmp_path, monkeypatch, runner
+):
+    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
+    images = [_image(klt_version=runner)] if runner else [_image()]
+    _publish_manifest(tmp_path, monkeypatch, images)
+    assessment = sb._assess_published_runner(
+        _PREDATED_REQUEST, _config(tmp_path, runner_version_check="warn")
+    )
+    assert sb._enforce_published_runner_features(_PREDATED_REQUEST, assessment) is None
+
+
+def test_prelaunch_enforce_refuses_a_predated_released_field(tmp_path, monkeypatch):
+    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
+    _publish_manifest(tmp_path, monkeypatch, [_image(klt_version="0.5.0")])
+    assessment = sb._assess_published_runner(_PREDATED_REQUEST, _config(tmp_path))
+    with pytest.raises(sim.SimError) as raised:
+        sb._enforce_published_runner_features(_PREDATED_REQUEST, assessment)
+    assert raised.value.code == sb.BATCH_RUNNER_FEATURE_CODE
+    assert "options.osdi_preload" in str(raised.value)
+
+
+def test_post_run_identity_carries_the_diagnostic(tmp_path, monkeypatch):
+    _pin_client_version(monkeypatch, "0.7.1.dev384+gf386aca")
+    (tmp_path / "runner_identity.json").write_text(_identity("0.5.0"))
+    fields = sb._read_runner_identity(str(tmp_path), _PREDATED_REQUEST)
+    diagnostic = fields["request_feature_diagnostic"]
+    assert diagnostic["source"] == "runner"
+    assert diagnostic["runner_klt_version"] == "0.5.0"
+    (tmp_path / "runner_identity.json").write_text(_identity("0.7.0"))
+    fields = sb._read_runner_identity(str(tmp_path), _PREDATED_REQUEST)
+    assert "request_feature_diagnostic" not in fields
+
+
 def test_request_feature_registry_matches_docs_table():
     """Every registry entry has a matching row in docs/cli/sim.md (#2877)."""
     from pathlib import Path

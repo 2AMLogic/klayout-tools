@@ -98,7 +98,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -167,6 +167,9 @@ BATCH_RUNNER_IDENTITY_FILENAME = "runner_identity.json"
 BATCH_RUNNER_MISMATCH_CODE = "batch_runner_version_mismatch"
 BATCH_RUNNER_UNKNOWN_CODE = "batch_runner_version_unknown"
 BATCH_RUNNER_FEATURE_CODE = "batch_runner_feature_unsupported"
+#: Top-level report diagnostic under ``runner_version_check: "warn"`` naming
+#: the request features the runner predates (issue #2901).
+BATCH_RUNNER_FEATURE_PREDATED_CODE = "batch_runner_request_feature_predated"
 #: A deck-list (``decks[]``, #2804) request needs a runner ``klt`` that knows
 #: the deck-list contract; the major.minor gate cannot see that (issue #3303).
 BATCH_RUNNER_LACKS_DECKS_CODE = "batch_runner_lacks_decks"
@@ -639,6 +642,51 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
 #: that accepts the request and omits the metric. Every other registry
 #: feature keeps the warn-and-run behaviour of #3249.
 _MANDATORY_RUNNER_FEATURES = frozenset({"transfer"})
+
+
+def _uses_measurement_expr(request: dict[str, Any]) -> bool:
+    return any(
+        isinstance(spec, dict) and spec.get("expr") is not None
+        for spec in request.get("measurements") or []
+    )
+
+
+def _uses_process_section_objects(request: dict[str, Any]) -> bool:
+    bundles = (request.get("corners") or {}).get("process") or []
+    return any(
+        isinstance(section, dict)
+        for bundle in bundles
+        if isinstance(bundle, dict)
+        for section in bundle.get("sections") or []
+    )
+
+
+def _uses_option(name: str) -> Any:
+    return lambda request: bool((request.get("options") or {}).get(name))
+
+
+#: Detectors for the :data:`REQUEST_FEATURE_MIN_RUNNER_VERSION` entries that
+#: name a released version (issue #2901), keyed by the registry key's name
+#: before its `` (`` note. A ``None`` (unreleased) entry has no detector on
+#: purpose: it is never turned into "every runner is too old" -- the feature
+#: it describes is already gated by ``analysis_steps`` above.
+_RELEASED_FEATURE_DETECTORS: dict[str, Any] = {
+    "measurements[].expr": _uses_measurement_expr,
+    "corners.process[].sections[]": _uses_process_section_objects,
+    "options.ngspice_init": _uses_option("ngspice_init"),
+    "options.osdi_preload": _uses_option("osdi_preload"),
+}
+
+# One registry, not two: the #3232 minimum versions feed the same table the
+# pre-launch, runner-side and post-run checks already read.
+for _key, _version in REQUEST_FEATURE_MIN_RUNNER_VERSION.items():
+    _name = _key.split(" (")[0]
+    if _version is not None:
+        _RUNNER_REQUEST_FEATURES[_name] = (
+            tuple(int(part) for part in _version.split(".")),  # type: ignore[assignment]
+            _RELEASED_FEATURE_DETECTORS[_name],
+        )
+del _key, _version, _name
 
 
 def _release_key(release: str) -> int | None:
@@ -1390,6 +1438,9 @@ class BatchConfig:
     max_units_per_job: int | None = None
     #: ``request.batch.interrupted_grace_s`` (issue #2992); ``0`` disables.
     interrupted_grace_s: float = DEFAULT_INTERRUPTED_GRACE_S
+    #: Pre-launch ``warn`` diagnostic for request features the manifest's
+    #: runner predates (issue #2901); reported as a top-level diagnostic.
+    feature_diagnostic: dict[str, Any] | None = None
 
 
 def _read_fleet_config(provision_script: str) -> dict[str, str]:
@@ -1704,7 +1755,9 @@ def _resolve_batch_config(
     if check_runner:
         assessment = _assess_published_runner(request, config)
         _enforce_published_runner_version(assessment)
-        _enforce_published_runner_features(request, assessment)
+        diagnostic = _enforce_published_runner_features(request, assessment)
+        if diagnostic is not None:
+            config = replace(config, feature_diagnostic=diagnostic)
         # Issue #3251: refuse a PDK variant the published image does not ship.
         _validate_batch_pdk_variant(request, config.region)
     return config
@@ -1802,13 +1855,37 @@ def _enforce_published_runner_version(assessment: dict[str, Any]) -> None:
     print(f"klt sim: warning: {message}; submitting anyway", file=sys.stderr)
 
 
+def _feature_diagnostic(
+    missing: list[str], runner: str, client: str | None, source: str
+) -> dict[str, Any]:
+    """The top-level report diagnostic for request features a runner predates
+    (issue #2901): one entry naming every such feature and the runner
+    version; ``source`` is ``"manifest"`` (known before launch) or
+    ``"runner"`` (read from the job's identity file after the run)."""
+    return {
+        "code": BATCH_RUNNER_FEATURE_PREDATED_CODE,
+        "severity": "warning",
+        "message": (
+            f"the request uses {', '.join(missing)}, which the fleet runner "
+            f"(klt {runner}) predates; the runner may have ignored or "
+            "rejected it"
+        ),
+        "features": list(missing),
+        "runner_klt_version": runner,
+        "client_klt_version": client,
+        "source": source,
+    }
+
+
 def _enforce_published_runner_features(
     request: dict[str, Any], assessment: dict[str, Any]
-) -> None:
+) -> dict[str, Any] | None:
     """Refuse before any S3 write or launch when *every* image the AMI
     manifest publishes predates a request feature (issue #3249). An unknown
     runner version, a legacy entry, or one image that has the feature leaves
-    the decision to the runner-side preflight. ``warn`` only reports."""
+    the decision to the runner-side preflight. ``warn`` reports: it returns
+    the :func:`_feature_diagnostic` the report carries (issue #2901), else
+    ``None``."""
     from .sim import SimError
 
     features = _request_features(request)
@@ -1839,7 +1916,9 @@ def _enforce_published_runner_features(
         )
     if assessment["check"] != "enforce":
         print(f"klt sim: warning: {message}; submitting anyway", file=sys.stderr)
-        return
+        return _feature_diagnostic(
+            missing, versions, assessment["client_klt_version"], "manifest"
+        )
     raise SimError(
         f"backend 'batch' refused before submission: {message} -- the request "
         "was not submitted and no instance was launched (rebuild the runner "
@@ -3008,6 +3087,10 @@ def _read_runner_identity(
                 else "supported"
             ),
         }
+        if missing:
+            fields["request_feature_diagnostic"] = _feature_diagnostic(
+                missing, str(runner), client, "runner"
+            )
         if missing and warning is None:
             warning = (
                 f"the fleet runner ran klt {runner}, which predates the request "
@@ -3874,7 +3957,11 @@ def _run_batch(
         except BatchError as exc:
             raise SimError(f"batch backend failed: {exc}", code=exc.code) from exc
         if environment is not None:
-            environment = {**environment, "job_ceiling": job_ceiling}
+            environment = {
+                **environment,
+                "job_ceiling": job_ceiling,
+                **_feature_diagnostic_field(config),
+            }
         return corners, engine_version, environment
     try:
         corners, engine_version, environment = _run_batch_job(
@@ -3895,8 +3982,22 @@ def _run_batch(
     if environment is not None:
         # Additive (issue #2833): the assessment and the ceiling's provenance
         # ride every one-job batch report, exceeded or not.
-        environment = {**environment, "job_ceiling": job_ceiling}
+        environment = {
+            **environment,
+            "job_ceiling": job_ceiling,
+            **_feature_diagnostic_field(config),
+        }
     return corners, engine_version, environment
+
+
+def _feature_diagnostic_field(config: BatchConfig) -> dict[str, Any]:
+    """``environment.remote.request_feature_diagnostic`` for the pre-launch
+    ``warn`` result (issue #2901); empty when there is none, so a post-run one
+    from :func:`_read_runner_identity` is left alone. ``run_sim`` hoists it to
+    the report's top-level ``diagnostics[]``."""
+    if config.feature_diagnostic is None:
+        return {}
+    return {"request_feature_diagnostic": config.feature_diagnostic}
 
 
 def _run_batch_fleet(
