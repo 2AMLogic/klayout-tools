@@ -1595,6 +1595,74 @@ def test_corner_id_and_slug_get_sample_suffix():
     assert point.slug == "tt_1p800V_27C_mc3"
 
 
+def _long_supply(n=25, **extra):
+    supply = {f"vctl_source_{i:02d}": 1.0 for i in range(n)}
+    supply.update(extra)
+    return supply
+
+
+def test_corner_slug_bounded_for_many_supply_keys():
+    point = sim.CornerPoint("typical", _long_supply(), 27)
+    assert len(point.slug.encode()) < 255 - len("__probe")
+    assert point.slug == sim.CornerPoint("typical", _long_supply(), 27).slug
+    assert point.slug != point.readable_slug
+    assert "/" not in point.slug
+
+
+def test_corner_slug_bounded_distinguishes_value_and_sample():
+    base = sim.CornerPoint("typical", _long_supply(), 27)
+    other_value = sim.CornerPoint("typical", _long_supply(vctl_source_24=2.0), 27)
+    sample = sim.CornerPoint(
+        "typical",
+        _long_supply(),
+        27,
+        sample_index=1,
+        mc_seed={"process_seed": 1, "mismatch_seed": 2, "rndseed": 3},
+    )
+    assert len({base.slug, other_value.slug, sample.slug}) == 3
+
+
+def test_corner_slug_bounded_multibyte_keys():
+    point = sim.CornerPoint("tt", {f"v\u00e9{i:02d}": 1.0 for i in range(30)}, 27)
+    assert len(point.slug.encode()) < 255 - len("__probe")
+
+
+def test_corner_slug_params_axis_bounds_pvt_prefix():
+    pvt = sim.CornerPoint("typical", _long_supply(), 27).corner_id
+    corner_id = f"{pvt}/params:w=1.5,l=0.15"
+    slug = sim._slugify_corner_id(corner_id)
+    assert len(slug.encode()) < 255 - len("__probe")
+    assert slug.endswith("_params_" + hashlib.sha256(corner_id.encode()).hexdigest())
+    assert slug != sim._slugify_corner_id(f"{pvt}/params:w=1.6,l=0.15")
+
+
+def test_run_sim_keep_artifacts_many_supply_keys(tmp_path, monkeypatch):
+    supply = _long_supply()
+    (tmp_path / "body.spice").write_text(
+        "".join(f"{k} n_{k} 0 DC 1.0\nR_{k} n_{k} 0 1k\n" for k in supply)
+    )
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "corners": {"supply_v": {k: [v] for k, v in supply.items()}},
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "options": {"keep_artifacts": True},
+        },
+    )
+    _stub_subprocess_run(monkeypatch, log_text="clean run\n")
+    artifacts = tmp_path / "artifacts"
+
+    report = sim.run_sim(str(request), artifacts_dir=str(artifacts))
+
+    (corner,) = report["corners"]
+    assert os.path.isfile(corner["artifacts"]["log"])
+    corner_dir = artifacts / sim._slugify_corner_id(corner["corner_id"])
+    assert len(corner_dir.name.encode()) < 255
+    recorded = json.loads((corner_dir / "corner.json").read_text())
+    assert recorded["corner_id"] == corner["corner_id"]
+
+
 # --------------------------------------------------------------------------- #
 # Monte Carlo sampling: request validation, seed contract, negative control
 # --------------------------------------------------------------------------- #
@@ -14361,6 +14429,69 @@ def test_on_unreached_limits_not_evaluated_and_not_claimed(tmp_path, monkeypatch
 def test_on_unreached_validation(tmp_path, spec, fragment):
     with pytest.raises(sim.SimError, match=fragment):
         sim._validate_measurement_forms([spec])
+
+
+# Issue #3520: pre-submit lint for a literal `AT=` that cannot resolve.
+def _at_lint(args: str, spice: str, kind: str = "dc") -> list[dict[str, str]]:
+    return sim._meas_at_lint(
+        {"kind": kind, "args": args},
+        [{"name": "m", "spice": spice}],
+    )
+
+
+def test_meas_at_lint_degenerate_dc_sweep_warns():
+    (diag,) = _at_lint("V1 0 0 1", ".meas dc m find v(out) at=0")
+    assert diag["severity"] == "warning"
+    assert diag["code"] == "measurement"
+    assert "'m'" in diag["message"] and "single point" in diag["message"]
+
+
+def test_meas_at_lint_out_of_range_literal_warns():
+    (diag,) = _at_lint("V1 0 1 0.1", ".meas dc m FIND v(out) AT=2")
+    assert "outside" in diag["message"]
+
+
+def test_meas_at_lint_suffixes_and_case():
+    assert _at_lint("V1 0 1meg 1k", ".meas dc m find v(out) AT=2meg")
+    assert not _at_lint("V1 0 1meg 1k", ".meas dc m find v(out) AT=500k")
+
+
+@pytest.mark.parametrize(
+    ("args", "spice", "kind"),
+    [
+        ("V1 0 1 0.1", ".meas dc m find v(out) at=0.5", "dc"),
+        ("V1 0 1 0.1", ".meas dc m find v(out) at=1", "dc"),
+        ("V1 0 0 1", ".meas dc m find v(out) at=t_flip", "dc"),
+        ("V1 0 0 1", ".meas dc m find v(out) at=0.5*2.5u", "dc"),
+        ("V1 0 {vmax} 1", ".meas dc m find v(out) at=5", "dc"),
+        ("0 1n 10n", ".meas tran m find v(out) at=5n", "tran"),
+    ],
+)
+def test_meas_at_lint_leaves_other_cards_alone(args, spice, kind):
+    assert _at_lint(args, spice, kind) == []
+
+
+def test_meas_at_lint_only_flags_the_bad_card():
+    found = sim._meas_at_lint(
+        {"kind": "dc", "args": "V1 0 1 0.1"},
+        [
+            {"name": "good", "spice": ".meas dc good find v(out) at=0.5"},
+            {"name": "bad", "spice": ".meas dc bad find v(out) at=3"},
+            {"name": "x", "expr": "v(out)"},
+        ],
+    )
+    assert [d["message"].split("'")[1] for d in found] == ["bad"]
+
+
+def test_attach_meas_lint_adds_warning_to_every_corner(capsys):
+    corners = [{"diagnostics": []}, {"diagnostics": []}]
+    sim._attach_meas_lint(
+        corners,
+        {"kind": "dc", "args": "V1 0 0 1"},
+        [{"name": "m", "spice": ".meas dc m find v(out) at=0"}],
+    )
+    assert all(len(c["diagnostics"]) == 1 for c in corners)
+    assert "warning:" in capsys.readouterr().err
 
 
 # Issue #2970: per-worker OpenMP thread control + job-level timeout diagnostic

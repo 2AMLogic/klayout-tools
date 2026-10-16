@@ -28,6 +28,12 @@ not `klt --version`, if you need to detect this kind of drift. See
   than a guessed N. See `docs/cli/lvs.md`'s
   `device.series_fold_offset_absorbed` section. Additive; no `schema_version`
   bump.
+- **`klt pex`: asymmetric `absent` measurement is a delta `error`** (issue
+  #3620): a `delta[]` row whose optional measurement is `"absent"` on exactly
+  one side (schematic or extracted) is now `status: "error"` (`delta_pct:
+  null`, `error` blames the absent side) instead of a silent `pass`; absent on
+  both sides stays `pass`. `schematic_status` / `extracted_status` may now be
+  `"absent"`. Additive: `delta[].status` stays `pass|fail|error`.
 - **`klt extract --resistance-graph`: opt-in terminal-aware resistance graph**
   (issue #2982, Stage 3.D5 increment 3): adds `parasitics.nets[].resistance_graph`
   (`status`, `terminals`, `pair_resistance_ohm`, `legacy_resistance_ohm`,
@@ -67,6 +73,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   Docs now state `--def-net-names` is required alongside
   `--def-net-connections --def-pins`. SPEF output without
   `--def-net-connections` is unchanged. Additive; no `schema_version` bump.
+- **`klt sim` initial-guess hints: `options.nodeset`** (issue #3036): rules
+  `{match, values}` select per-point `{node: volts}` maps (after corner
+  expansion/`exclude`, before Monte Carlo cloning) that are rendered as
+  file-scope `.nodeset` cards, echoed as `nodeset` on each hinted corner
+  report and keyed into the `options.resume` fingerprint. Overlapping or unused
+  rules, unsupported node spellings, an unknown node (an `error` diagnostic) and
+  `engine: "xyce"` fail visibly; an off-host worker that does not echo the maps
+  fails with `nodeset_unsupported_worker`. Omitting the option changes nothing.
+  Additive; no `schema_version` bump.
 - **`klt sim` batch: opt-in auto-split of a request that cannot fit the fleet's
   whole-job ceiling** (issue #3446): `batch.job_ceiling_check: "split"`,
   `batch.max_units_per_job` and `--max-units-per-job N` reroute a
@@ -122,6 +137,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   graded against `limits`, and a top-level `not_reached` count appears only
   for requests that declare the field. Default (`"error"`) output is
   byte-identical. Additive; no `schema_version` bump.
+- **`klt drc --deck sky130`: `nwell.9` and `coverage.unmodeled_rules`**
+  (issue #3031): new rule `nwell.enclosed.hvi.1` (runset `nwell.9`, HVnwell
+  must be enclosed by `hvi` 75/20; only `hvi` of the runset's
+  `hvi|rdl|uhvi|vhvi` marker is read). New additive, deck-static
+  `coverage.unmodeled_rules` lists official runset ids the curated deck does
+  not transcribe (sky130: `m1.5`, `m2.5`, `via.5a`, `via2.5`, `via3.5`, the
+  two-adjacent-edges enclosure refinements) so a clean verdict is not read as
+  full coverage; empty for decks that declare none. Curated engine only.
+
 - **`klt sim` `measurements[].cycle_mean`: a mean over whole reference
   cycles** (issue #2947): a fourth measurement form
   `{signal, align, level, cycles, edge?, from?}` (`tran` only) returns the
@@ -365,7 +389,7 @@ not `klt --version`, if you need to detect this kind of drift. See
   `sky130A_mr.drc`) and four sky130 rules using it: `met1.enclosing_adjacent.via.1`
   (`via.5a`), `met2.enclosing_adjacent.via.1` (`m2.5`),
   `met2.enclosing_adjacent.via2.1` (`via2.5`), `met3.enclosing_adjacent.via3.1`
-  (`via3.5`). The sky130 deck grows from 136 to 140 rules (additive; the
+  (`via3.5`). The sky130 deck grows from 138 to 142 rules (additive; the
   deck hash changes).
 - **`klt lvs` gate-level-verilog accepts more `assign` shapes** (issue
   #2941): a part-select on either side (`assign imm = word[7:0];`,
@@ -402,6 +426,11 @@ not `klt --version`, if you need to detect this kind of drift. See
   deck custom-device-class `X ... PARAMS:` cards, callees paired by name with
   a layout circuit, and `gate-level-verilog` references are unaffected.
   **Additive contract change**; `schema_version` is unchanged.
+- **`klt extract` warns on an unclaimed resistor marker** (issue #3138): a
+  deck-declared resistor marker drawn on the layout but claimed by no
+  `ResistorDevice` (empty body) now adds one `warnings[]` string per marker
+  layer instead of extracting silently device-less. Additive; no schema,
+  exit-code or `status` change.
 
 - **New verb `klt tap-distance`** (issue #3009): asserts every point of a
   subject region is within a Euclidean distance of a qualifying tap (latch-up /
@@ -458,6 +487,18 @@ not `klt --version`, if you need to detect this kind of drift. See
   `netlist_sha256`, inlining summary); flattener failures carry
   `error.code` `schematic_flatten_*`. Default runs are unchanged apart from
   the two new fields (`false` / `null`); no `schema_version` bump.
+
+- **Added** (#2886, `klt sta`; additive JSON only): per-corner post-route
+  SDF export for an already-routed DEF. `sdf: true` (`def` mode, requires
+  `spef`) writes `.klt/sta/<def stem>.<corner>.sdf` per analyzed corner with
+  the same `write_sdf -divider . -include_typ` command `place-and-route`'s
+  `post_route_sdf` uses, immediately after `read_spef`, and reports it as
+  `sdf: {path, scope, content_hash}` (per `corners[]` entry, or top level for
+  a scalar corner; `null` when not requested). Non-boolean values, `true`
+  with `verilog`, and `true` without `spef` are request errors; a missing or
+  empty file is exit 1. Omitted/`false` leaves the generated Tcl unchanged;
+  no `schema_version` bump. Documented in `docs/cli/sta.md` ("Post-route
+  SDF per corner").
 
 - **`klt synthesize` accepts `constraints.clocks` and echoes `clock_targets`**
   (issue #2883): optional `[{port, period_ns}]` for multi-clock designs

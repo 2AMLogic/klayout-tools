@@ -126,6 +126,11 @@ def _print_slack_fields(fields: dict, *, indent: str) -> None:
                 f"{', '.join(propagation['clock_sinks_sample'])}"
             )
     print(f"{indent}estimated_power_mw: {fields['estimated_power_mw']}")
+    # Issue #2886: the per-corner SDF, only when `request.sdf` asked for one
+    # (text output for a request without it stays unchanged).
+    sdf = fields.get("sdf")
+    if sdf is not None:
+        print(f"{indent}sdf: {_render_input_path(sdf)} ({sdf['content_hash']})")
 
 
 def _print_constraint_completeness(block: dict | None, *, indent: str) -> None:

@@ -97,7 +97,10 @@ additive value, `"absent"` (`value: null`, `margin: null`, info diagnostic
 no value; it never makes its corner `error`. A request that omits the field is
 byte-identical, so no `schema_version` bump -- but a consumer that switches
 exhaustively on measurement `status` must treat `"absent"` as "no value, not a
-failure". See [`docs/cli/sim.md`](cli/sim.md)'s "Optional measurements".
+failure". `klt pex` `delta[].schematic_status` / `extracted_status` echo it
+(issue #3620): `"absent"` on exactly one side makes the row `status: "error"`;
+on both sides, `"pass"` -- `delta[].status` stays `pass|fail|error`. See
+[`docs/cli/sim.md`](cli/sim.md)'s "Optional measurements".
 
 `measurements[].crossings` (issue #2868) is the third form and the first
 whose result is a **series**, not a scalar. It does *not* retype `value`:
@@ -109,6 +112,21 @@ when the series was extracted (absent on every other entry and on an errored
 one) — the "new optional member, absent when not applicable" rule above.
 No `schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s
 "Threshold-crossing time series (`measurements[].crossings`)".
+
+`measurements[].transfer` (issues #2923, #3088) gains three `metric` tokens —
+`phase_margin_min_deg`, `gain_margin_min_db`, `encirclement_count` — that reduce
+the AC ratio at **every** crossing. Additive only: the six earlier tokens and
+their entries are byte-identical, a margin entry's `transfer` sibling gains
+optional `margins` (the full per-crossing report: `phase_margins[]`,
+`gain_margins[]`, `band`, `reasons`, `ambiguity[]`) and `verdict`
+(`pass`/`fail`/`ambiguous`) members, and an ambiguous AC band grades the entry
+(and its corner) with the **existing** `status: "inconclusive"` (exit `4`)
+plus a new `severity: "warning"` marker diagnostic `code: "margin_ambiguous"` —
+the same one-status-many-reasons shape as `implausible_solution`, so the
+`passed + failed + errored + inconclusive == corner_count` invariant holds. No
+`schema_version` bump, and `docs/schemas/sim-set-report.schema.json` (the
+`--batch-set` aggregate, which only references per-request reports by path) is
+unchanged. See [`docs/cli/sim.md`](cli/sim.md)'s "AC return-ratio metrics".
 
 `klt sim` also gains an additive `environment.netlist_identity` (normalised,
 comment/whitespace/path-insensitive netlist-closure hash; `null` plus
@@ -1175,6 +1193,7 @@ probing the value's Python type at runtime.
 | `place-and-route`, `sta` | New OpenROAD log fields `engine_logs[]` (P&R), `engine_log` / `corners[].engine_log` (STA): `script_path`, `metrics_path`, `directory`, `stdout_path`, `stderr_path`, `metadata_path` | 1 | #2124 |
 | `characterize` | `cell.netlist`, `cells[].cell.netlist` | 1 | #2502 (`cells[]` #2503) |
 | `sta` | `def_path`, `verilog_path`, `spef_path` (`null` when the request does not use that input) | 2 | #2879 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
+| `sta` | `sdf` / `corners[].sdf` — a written output: the envelope plus `content_hash` (`null` unless `request.sdf: true`; additive, no bump) | 2 | #2886 |
 
 **Plain-string fields** — intentionally unchanged by this issue:
 
@@ -1625,6 +1644,8 @@ the exit code alone is authoritative.
   | `netlist` | `batch_runner_version_mismatch` | `--backend batch`: the runner's `klt` version differs from this client's; the job was refused before netlisting, or before submission when the AMI manifest already publishes the mismatch (issue #2851). Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
   | `netlist` | `batch_runner_version_unknown` | `--backend batch`: the runner's `klt` version could not be read; the job was refused before netlisting. Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
   | `netlist` | `batch_poll_timeout` | `--backend batch`: the job did not finish within the client's poll budget. It may still finish on the runner; nothing was collected. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
+  | `sim` | `batch_job_interrupted` | `--backend batch` (a per-unit diagnostic code, not an `error.code`): the job stayed `interrupted` (Spot-reclaimed, no re-launch seen) longer than `batch.interrupted_grace_s`, so polling stopped before `batch.poll_timeout_s`. See [docs/cli/sim.md](cli/sim.md) "Batch backend". |
+  | `netlist` | `batch_job_interrupted` | `--backend batch`: the job stayed `interrupted` past the default grace; nothing was collected. It may still be recoverable on the runner. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
   | `netlist` | `batch_job_failed` | `--backend batch`: the job failed, or left no usable report or netlist. When the runner's own `klt netlist` reported an error, its message is quoted and, if that error carried an `error.code`, the runner's code is passed through in place of `batch_job_failed`. Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). When the runner left no klt error envelope, `error` also carries `remote_stderr_tail` (last 2 KiB of the runner's `stderr.log`, sanitized), `remote_exit_code`, `remote_state` and `harness_log` (additive; absent otherwise). |
   | `netlist` | `batch_job_timeout` | `--backend batch`: the fleet harness stopped the job at its `timeout_seconds` (`--timeout-s` plus headroom). See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
   | `netlist` | `batch_input_too_large` | `--backend batch`: the input tree's uncompressed size is above the batch cap. Raised before any archive is built or anything is uploaded. Not retryable without shrinking the tree. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |

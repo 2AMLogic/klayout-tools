@@ -135,8 +135,8 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Callable, Mapping
-from typing import NamedTuple
+from collections.abc import Callable, Collection, Mapping
+from typing import Any, NamedTuple
 
 from ._paths import _fold_spice_continuations
 from .pdk_models import (
@@ -613,6 +613,7 @@ def _convert_x_card(
     custom_device_classes: Mapping[str, str] | None = None,
     param_scopes: ParamScopes | None = None,
     subckt_scope: str = "",
+    resistor_values: Mapping[str, Callable[[float, float], float]] | None = None,
 ) -> str:
     """Convert one ``X`` subcircuit-call line to a plain-element ``M``/``R``/
     ``C``/``Q`` line, or return it unchanged if it is not a recognised device
@@ -651,6 +652,11 @@ def _convert_x_card(
     ``"capacitor"``), so a downstream consumer can tell that the class's
     value token is the literal ``0`` placeholder rather than a real
     resistance/capacitance. ``None`` (the default) records nothing.
+
+    ``resistor_values`` (issue #2905) maps a lower-cased resistor device-class
+    name to its deck-derived ``(L_um, W_um) -> R`` function; a resistor call
+    of such a class gets its real value instead of the ``0`` placeholder and
+    is not recorded in ``placeholder_value_classes``.
 
     ``custom_device_classes`` (issue #2327) is ``deck``'s
     :func:`~klayout_tools.netlist_capacitor_recovery.custom_device_classes_for_deck`
@@ -702,10 +708,16 @@ def _convert_x_card(
             geometry_style=geometry_style,
         )
     if lookup.kind == "resistor":
-        card = _convert_geometry_card(
-            instance, nodes, subckt_name, lookup, params, geometry_style=geometry_style
+        card, is_placeholder = _convert_geometry_card(
+            instance,
+            nodes,
+            subckt_name,
+            lookup,
+            params,
+            geometry_style=geometry_style,
+            resistor_value=(resistor_values or {}).get(lookup.device_class.lower()),
         )
-        if placeholder_value_classes is not None:
+        if is_placeholder and placeholder_value_classes is not None:
             placeholder_value_classes[lookup.device_class] = "resistor"
         return card
     if lookup.kind == "capacitor":
@@ -950,8 +962,15 @@ def _convert_geometry_card(
     params: dict[str, str],
     *,
     geometry_style: str | None = None,
-) -> str:
-    """Convert a resistor call to a plain-element ``R`` card.
+    resistor_value: Callable[[float, float], float] | None = None,
+) -> tuple[str, bool]:
+    """Convert a resistor call to a plain-element ``R`` card, returning
+    ``(card, is_placeholder)``.
+
+    ``resistor_value`` (issue #2905) is the deck-derived ``(L_um, W_um) -> R``
+    function for this class (the same corrected formula ``klt extract`` uses
+    for ``r_ohm``). When given and the call states its geometry, the real
+    value replaces the placeholder ``0`` and ``is_placeholder`` is ``False``.
 
     KLayout's native ``DeviceClassResistor`` requires a positional value
     token before the model name (``R<name> n1 n2 [n3] <value> <model>``, the
@@ -982,10 +1001,22 @@ def _convert_geometry_card(
     not validated here -- nodes pass through positionally, unchanged.
     """
     _reject_multiplicity(instance, subckt_name, params)
-    extra = _geometry_suffix(
+    resolved = _resolve_call_geometry(
         instance, subckt_name, lookup, params, geometry_style=geometry_style
     )
-    return f"{instance} {' '.join(nodes)} 0 {lookup.device_class}{extra}"
+    if resolved is None:
+        extra = ""
+    else:
+        extra = f" L={_format_um(resolved[0])} W={_format_um(resolved[1])}"
+    value = "0"
+    is_placeholder = True
+    if resistor_value is not None and resolved is not None and resolved[1] > 0:
+        value = repr(float(resistor_value(*resolved)))
+        is_placeholder = False
+    return (
+        f"{instance} {' '.join(nodes)} {value} {lookup.device_class}{extra}",
+        is_placeholder,
+    )
 
 
 def _convert_capacitor_card(
@@ -1145,10 +1176,31 @@ def _geometry_suffix(
     against a subcircuit whose *name* fixes ``W`` (sky130's
     ``res_high_po_2p85``) still emits both.
     """
+    resolved = _resolve_call_geometry(
+        instance, subckt_name, lookup, params, geometry_style=geometry_style
+    )
+    if resolved is None:
+        return ""
+    l_um, w_um = resolved
+    return f" L={_format_um(l_um)} W={_format_um(w_um)}"
+
+
+def _resolve_call_geometry(
+    instance: str,
+    subckt_name: str,
+    lookup: DeviceLookup,
+    params: dict[str, str],
+    *,
+    geometry_style: str | None = None,
+) -> tuple[float, float] | None:
+    """The call's resolved ``(L, W)`` in micrometres, or ``None`` when the
+    call supplies neither dimension (the subcircuit's own default geometry
+    then applies). Shared by :func:`_geometry_suffix` and the deck-derived
+    resistor value (issue #2905)."""
     has_length_param = lookup.length_param in params
     has_width_param = lookup.width_param in params
     if not (has_length_param or has_width_param):
-        return ""
+        return None
     l_um = _resolve_geometry_dimension(
         instance,
         subckt_name,
@@ -1168,7 +1220,8 @@ def _geometry_suffix(
         geometry_style=geometry_style,
     )
     _require_both(instance, subckt_name, lookup, l_um is not None, w_um is not None)
-    return f" L={_format_um(l_um)} W={_format_um(w_um)}"
+    assert l_um is not None and w_um is not None
+    return l_um, w_um
 
 
 def _resolve_geometry_dimension(
@@ -1586,6 +1639,42 @@ def _resolve_custom_device_classes(deck: str | None) -> dict[str, str]:
     return custom_device_classes_for_deck(resolved)
 
 
+def _deck_resistor_values(
+    deck: str | None,
+    classes: Collection[str] | None,
+    deck_options: Mapping[str, str] | None,
+) -> dict[str, Callable[[float, float], float]]:
+    """``{<lower-cased class>: (L_um, W_um) -> R}`` for each requested class
+    ``deck`` models with a sheet resistance (issue #2905), built on
+    ``extract.resistor_r_ohm_for_geometry`` so the reference side can never
+    drift from ``klt extract``'s ``r_ohm``. Best-effort: an unresolvable deck
+    yields ``{}`` (:func:`_build_subckt_map` owns the authoritative error)."""
+    if not deck or not classes:
+        return {}
+    from .decks import (
+        InvalidDeckOptionError,
+        UnknownExtractionDeckError,
+        get_extraction_deck,
+    )
+    from .extract import resistor_r_ohm_for_geometry
+
+    try:
+        resolved = get_extraction_deck(deck, deck_options)
+    except (UnknownExtractionDeckError, InvalidDeckOptionError):
+        return {}
+    wanted = {name.lower() for name in classes}
+    values: dict[str, Callable[[float, float], float]] = {}
+    for resistor in resolved.resistors:
+        key = resistor.name.lower()
+        if key in wanted and resistor.sheet_rho_ohm_sq:
+
+            def _value(l_um: float, w_um: float, _resistor: Any = resistor) -> float:
+                return resistor_r_ohm_for_geometry(_resistor, l_um, w_um)
+
+            values[key] = _value
+    return values
+
+
 class ReferenceConversion(NamedTuple):
     """The result of one :func:`convert_reference_netlist` run.
 
@@ -1615,6 +1704,8 @@ def convert_reference_netlist(
     *,
     deck: str | None = None,
     device_map: dict[str, object] | None = None,
+    resistor_value_classes: Collection[str] | None = None,
+    deck_options: Mapping[str, str] | None = None,
 ) -> ReferenceConversion:
     """Convert subckt-call-form SPICE ``text`` to the plain-element form,
     returning the converted text *plus* the conversion metadata
@@ -1634,6 +1725,15 @@ def convert_reference_netlist(
     #1271 -- see :func:`_device_lookup_from_override`). With neither ``deck``
     nor ``device_map``, each device subcircuit name is auto-resolved against
     the whole curated table.
+
+    ``resistor_value_classes`` (issue #2905) names resistor device classes
+    (case-insensitive) whose ``R`` should be computed from ``deck``'s own
+    sheet resistance -- through the very function ``klt extract`` uses for
+    ``r_ohm`` (fixed offset, end term and width offset included) -- and the
+    call's ``L``/``W``, instead of the ``0`` placeholder. A class the deck has
+    no resistor model for (or without a sheet resistance), or a call that
+    states no geometry, keeps the placeholder. ``deck_options`` selects the
+    deck's flavours exactly as for extraction.
 
     Non-device lines (comments, ``.subckt``/``.ends``/``.model``, existing
     plain-element ``M`` cards, genuine hierarchical ``X`` instances) pass
@@ -1669,6 +1769,7 @@ def convert_reference_netlist(
     param_scopes = _collect_param_scopes(logical_lines)
     subckt_scope = ""
 
+    resistor_values = _deck_resistor_values(deck, resistor_value_classes, deck_options)
     placeholder_value_classes: dict[str, str] = {}
     out: list[str] = []
     for line in logical_lines:
@@ -1694,6 +1795,7 @@ def convert_reference_netlist(
                     custom_device_classes,
                     param_scopes,
                     subckt_scope,
+                    resistor_values,
                 )
             )
         else:
