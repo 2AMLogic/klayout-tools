@@ -522,6 +522,7 @@ from . import (
     DrcRule,
     ExtractionDeck,
     LayerRC,
+    MosCapacitorDevice,
     MOSFlavour,
     ParasiticsDeck,
     ResistorDevice,
@@ -2338,6 +2339,102 @@ _GF180MCU_MOS_LVS_SOURCE_PATH = (
     "libs.tech/klayout/tech/lvs/rule_decks/mos_extraction.lvs"
 )
 
+
+# MOS capacitors (issue #2919): `cap_nmos_*`/`cap_pmos_*`, a poly-over-COMP
+# gate whose COMP is covered by `MOS_CAP_MK` (166/5). Transcribed from
+# `rule_decks/moscap_derivations.lvs` / `moscap_extraction.lvs` at the pinned
+# `_GF180MCU_LVS_COMMIT` (read from a real fetched f6eeac7 install):
+#
+# - plain `cap_nmos_<v>` = an NMOS-style gate (Nplus COMP) outside Nwell and
+#   outside DNWELL; `cap_pmos_<v>` = a PMOS-style gate (Pplus COMP) inside
+#   Nwell and outside DNWELL. `_dn` = the same inside DNWELL. (The runset's
+#   `CONSIDER_DN_DW_FEATURES` option, default off, folds a `_dn` gate onto the
+#   plain model name; this deck always reports the `_dn` name -- the model that
+#   geometry really is -- so a `klt lvs` reference using `_dn` matches.)
+# - `_b` (`cap_nmos_<v>_b` = `ngate_*_base.and(nwell)`, `cap_pmos_<v>_b` =
+#   `pgate_*_base.and(ptap)`) is the "same-polarity well" form: an Nplus gate
+#   inside Nwell / a Pplus gate outside it. `_b` is not DNWELL-split.
+# - `<v>`: `03v3` outside `Dualgate` (55/0), `06v0` inside it. The two
+#   `capacitor(...)` area coefficients are 4.4e-15 F/um^2 (03v3) and 2.3e-15
+#   F/um^2 (06v0).
+# - `moscap_exclude` marker set: transcribed below as `_MOS_CAP_EXCLUDES`,
+#   minus `lvs_source` (100/8): this curated deck deliberately reads nothing
+#   else on layer number 100 (its `dummy` convention marker is 100/50, see
+#   `test_gf180mcu_dummy_marker_does_not_collide_with_any_read_layer`), and an
+#   LVS-source annotation over a MOS capacitor is not modelled.
+#
+# Deliberate approximations: the runset subtracts the excluded markers
+# geometrically from the gate; here an island overlapping any of them at all is
+# not a capacitor (the same island-level policy `MOSFlavour` documents). The
+# well/body terminal the runset names (`P2`) takes no part in the device -- the
+# runset's terminals are the poly (`tA`) and the diffusion (`tB`).
+_MOS_CAP_EXCLUDES: tuple[tuple[int, int], ...] = (
+    (62, 0),  # resistor
+    (24, 0),  # esd
+    (49, 0),  # sab
+    (96, 1),  # fusewindow_d
+    (220, 0),  # polyfuse
+    (110, 5),  # res_mk
+    (115, 5),  # diode_mk
+    (127, 5),  # drc_bjt
+    (5, 0),  # nat
+    (24, 5),  # esd_mk
+    (80, 5),  # efuse_mk
+    (125, 5),  # plfuse
+    (210, 0),  # mvsd
+    (11, 39),  # mvpsd
+    (226, 0),  # ldmos_xtor
+    (241, 0),  # schottky_diode
+)
+
+_NPLUS = (32, 0)
+_PPLUS = (31, 0)
+_DNWELL = (12, 0)
+_DUALGATE = (55, 0)
+
+
+def _mos_cap(
+    name: str, implant: tuple[int, int], in_well: bool, voltage: str, deep: bool | None
+) -> MosCapacitorDevice:
+    """One `MosCapacitorDevice`; `deep` is `True`/`False` for a DNWELL
+    requirement/exclusion, `None` for the `_b` forms that do not split on it."""
+    thick = voltage == "06v0"
+    other = _PPLUS if implant == _NPLUS else _NPLUS
+    requires: tuple[tuple[int, int], ...] = ((_DUALGATE,) if thick else ()) + (
+        (_DNWELL,) if deep else ()
+    )
+    excludes = (
+        (other,)
+        + (() if thick else (_DUALGATE,))
+        + ((_DNWELL,) if deep is False else ())
+        + _MOS_CAP_EXCLUDES
+    )
+    return MosCapacitorDevice(
+        name=name,
+        marker=(166, 5),  # MOS_CAP_MK
+        implant=implant,
+        in_well=in_well,
+        area_cap_f_um2=2.3e-15 if thick else 4.4e-15,
+        requires=requires,
+        excludes=excludes,
+        provenance=_gf180mcu_lvs_provenance(
+            "libs.tech/klayout/tech/lvs/rule_decks/moscap_extraction.lvs", name
+        ),
+    )
+
+
+_MOS_CAPACITORS: tuple[MosCapacitorDevice, ...] = tuple(
+    _mos_cap(f"cap_{kind}_{volt}{suffix}", implant, in_well, volt, deep)
+    for volt in ("03v3", "06v0")
+    for kind, implant, in_well in (("nmos", _NPLUS, False), ("pmos", _PPLUS, True))
+    for suffix, deep in (("", False), ("_dn", True))
+) + tuple(
+    _mos_cap(f"cap_{kind}_{volt}_b", implant, in_well, volt, None)
+    for volt in ("03v3", "06v0")
+    for kind, implant, in_well in (("nmos", _NPLUS, True), ("pmos", _PPLUS, False))
+)
+
+
 EXTRACTION_DECK = ExtractionDeck(
     active=(22, 0),  # Comp
     poly=(30, 0),  # Poly2
@@ -2766,8 +2863,11 @@ EXTRACTION_DECK = ExtractionDeck(
         ),
     ),
     # Issue #2919: MOS capacitors (`cap_nmos_*`/`cap_pmos_*`) are marked by
-    # `MOS_CAP_MK` (166/5) and have no device class here yet, so they would
-    # otherwise vanish from the netlist with a clean `extracted` status.
+    # `MOS_CAP_MK` (166/5); see `_MOS_CAPACITORS` above. Marker components the
+    # recogniser could not classify (no gate, mixed implant, an excluded
+    # marker) stay reported here, so they cannot vanish from the netlist with
+    # a clean `extracted` status.
+    mos_capacitors=_MOS_CAPACITORS,
     unsupported_device_markers=(
         UnsupportedDeviceMarker(
             marker=(166, 5),  # MOS_CAP_MK
