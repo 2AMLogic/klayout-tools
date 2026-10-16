@@ -1208,6 +1208,22 @@ def test_real_ngspice_failed_derived_expression(tmp_path):
     assert all(step["status"] == "ok" for step in corner["steps"])
 
 
+def test_optional_true_is_refused_in_step_and_derived_measurements():
+    """Issue #2925: `optional` is scalar-analysis only; refused, not ignored."""
+    step_request = _two_point_request()
+    step_request["analysis_steps"][0]["measurements"][0]["optional"] = True
+    with pytest.raises(sim.SimError, match="'optional' is not supported"):
+        _resolve(step_request)
+    derived_request = _two_point_request()
+    derived_request["measurements"][0]["optional"] = True
+    with pytest.raises(sim.SimError, match="'optional' is not supported"):
+        _resolve(derived_request)
+    # `false` is the default and stays accepted.
+    ok = _two_point_request()
+    ok["measurements"][0]["optional"] = False
+    _resolve(ok)
+
+
 # --------------------------------------------------------------------------- #
 # `<step>.spectrum.<vector>`: a noise step's spectrum plot (issue #3284)
 # --------------------------------------------------------------------------- #
