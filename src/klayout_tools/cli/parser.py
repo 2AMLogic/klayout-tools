@@ -5236,6 +5236,21 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
             "replays a report's recorded selection)"
         ),
     )
+    drc_parser.add_argument(
+        "--waivers",
+        dest="waivers",
+        metavar="PATH",
+        default=None,
+        help=(
+            "rule-scoped cell waivers (issue #3483, --engine curated only): "
+            'a JSON file {"waivers": [{"cell": ..., "rule": <id|glob>, '
+            '"justification": ...}]}. Markers whose source_cell and rule '
+            "match move out of violations/violation_count/status into a "
+            "separate waived array (with waiver_justification), never "
+            "dropped silently; the file is pinned in provenance.waivers. "
+            "See docs/cli/drc.md, 'Waivers'"
+        ),
+    )
     _add_format_arg(drc_parser)
     _record_request_argv_flags(
         drc_parser, exclude=(*_REQUEST_ARGV_FLAG_EXCLUDE, "list_rules")
