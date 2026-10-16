@@ -3198,6 +3198,19 @@ def test_port_check_error_message_names_input_transitions_field():
         "constraints.input_transitions['q']: port direction is 'output', not an input"
         in message
     )
+    assert message.startswith("constraints.input_transitions rejected: ")
+
+
+def test_port_check_error_message_mixed_rows_keep_delay_prefix():
+    message = post_route_sta._port_check_error_message(
+        [
+            ("input_transition", "nope", "not_found"),
+            ("input", "bus", "matches_2_ports"),
+        ]
+    )
+    assert message.startswith("per-port I/O delay constraint(s) rejected: ")
+    assert "constraints.input_transitions['nope']" in message
+    assert "constraints.input_delays['bus']" in message
 
 
 # -- engine port check ------------------------------------------------------ #
@@ -4432,6 +4445,89 @@ def test_live_engine_report_ports(tmp_path):
     assert paths["q_a"]["direction"] == "output"
     assert paths["q_a"]["setup"]["endpoint"] == "q_a"
     assert report["worst_hold_path"]["startpoint"] == "rst_n"
+
+
+_LIVE_ONLY = pytest.mark.skipif(
+    _live_sky130_env() is None,
+    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
+    "KLT_SKIP_OPENROAD_TESTS unset",
+)
+
+
+def _live_verilog_request(tmp_path, **constraint_overrides) -> str:
+    _write(tmp_path / "boundary.v", _WORST_PATH_CAPTURES["netlist"])
+    return _write_request(
+        tmp_path / "request.json",
+        {
+            "verilog": "boundary.v",
+            "hdl_toplevel": "top",
+            "pdk": {"cell_library": "sky130_fd_sc_hd", "corner": "tt_025C_1v80"},
+            "constraints": _boundary_constraints(**constraint_overrides),
+        },
+    )
+
+
+@_LIVE_ONLY
+def test_live_engine_input_transitions_verilog(tmp_path):
+    """Engine integration (issue #3555): valid transitions are accepted in
+    verilog mode and a slower slew on the setup-critical input moves the
+    measured setup result."""
+    fast = run_sta(
+        _live_verilog_request(tmp_path, input_transitions={"b_in": 0.01}),
+        pdk_variant="sky130A",
+    )
+    slow = run_sta(
+        _live_verilog_request(
+            tmp_path, input_transition_ns=0.05, input_transitions={"b_in": 1.5}
+        ),
+        pdk_variant="sky130A",
+    )
+    assert fast["worst_slack_ns"] != slow["worst_slack_ns"]
+    assert slow["worst_slack_ns"] < fast["worst_slack_ns"]
+
+
+@_LIVE_ONLY
+def test_live_engine_input_transitions_def(tmp_path):
+    """Engine integration (issue #3555): the same options are accepted in
+    DEF mode and a different transition changes the measured result."""
+    paths = _write_clock_fixtures(tmp_path)
+
+    def run(constraints: dict) -> dict:
+        return run_sta(
+            _write_request(
+                tmp_path / "request.json",
+                {
+                    "def": paths["buffered.def"],
+                    "pdk": {
+                        "cell_library": "sky130_fd_sc_hd",
+                        "corner": "tt_025C_1v80",
+                    },
+                    "constraints": constraints,
+                },
+            ),
+            pdk_variant="sky130A",
+        )
+
+    fast = run(_propagated_constraints(input_transitions={"d1": 0.01, "d2": 0.01}))
+    slow = run(
+        _propagated_constraints(
+            input_transition_ns=0.05, input_transitions={"d1": 1.5, "d2": 1.5}
+        )
+    )
+    assert slow["worst_slack_ns"] < fast["worst_slack_ns"]
+
+
+@_LIVE_ONLY
+def test_live_engine_input_transitions_bad_port_rejected(tmp_path):
+    request_path = _live_verilog_request(
+        tmp_path, input_transitions={"nope": 0.1, "q_a": 0.1}
+    )
+    with pytest.raises(PostRouteStaError) as exc_info:
+        run_sta(request_path, pdk_variant="sky130A")
+    message = str(exc_info.value)
+    assert message.startswith("constraints.input_transitions rejected")
+    assert "constraints.input_transitions['nope']" in message
+    assert "constraints.input_transitions['q_a']" in message
 
 
 def _write_clock_fixtures(tmp_path) -> dict[str, str]:

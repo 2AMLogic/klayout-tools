@@ -23,6 +23,7 @@ import json
 import os
 import re
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -21717,6 +21718,101 @@ def test_rerun_extract_report_clean_pass(tmp_path):
     assert result["fresh"]["status"] == "extracted"
 
 
+def test_extract_report_echoes_pins_and_def_pins_sets(tmp_path):
+    """Issue #3061: `declared_pins`/`def_pins` are always present -- a sorted
+    list, or `null` for "flag not given" (`[]` stays distinct)."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "echo.gds")
+    plain = run_extract(path, "sky130", output=str(tmp_path / "a.spice"))
+    assert plain["declared_pins"] is None
+    assert plain["def_pins"] is None
+    given = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "b.spice"),
+        declared_pins=frozenset({"VPWR", "A"}),
+        def_pins=frozenset(),
+    )
+    assert given["declared_pins"] == ["A", "VPWR"]
+    assert given["def_pins"] == []
+
+
+def test_rerun_extract_report_replays_plain_pins_without_rename(tmp_path):
+    """Issue #3061: a plain `--pins`/`--def-pins` run (no
+    `--rename-declared-pins`) replays from the top-level echoes and matches."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "plain_pins.gds")
+    report_path = tmp_path / "plain_pins.extract.json"
+    committed = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "plain_pins.spice"),
+        declared_pins=frozenset({"A", "VGND", "VPWR", "VPB", "Y"}),
+        def_pins=frozenset({"A", "VGND", "VPWR", "VPB"}),
+    )
+    _write_report(report_path, committed)
+    assert committed["pin_renames"] is None
+
+    result = rerun_extract_report(str(report_path))
+
+    assert result["status"] == "match"
+    assert result["drift"] == []
+    assert result["fresh"]["declared_pins"] == committed["declared_pins"]
+    assert result["fresh"]["def_pins"] == committed["def_pins"]
+    assert result["fresh"]["def_pin_promotion"] is not None
+
+
+def test_rerun_extract_report_legacy_report_without_pin_echoes(tmp_path):
+    """Issue #3061: a report predating the top-level echoes still replays via
+    the `pin_renames` fallback."""
+    path = _write_gds(
+        _make_inverter_layout(extra_y_label="clk"), tmp_path / "legacy.gds"
+    )
+    report_path = tmp_path / "legacy.extract.json"
+    committed = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "legacy.spice"),
+        declared_pins=frozenset({"clk", "VGND", "VPWR", "VPB", "A"}),
+        rename_declared_pins=True,
+    )
+    del committed["declared_pins"]
+    del committed["def_pins"]
+    _write_report(report_path, committed)
+
+    result = rerun_extract_report(str(report_path))
+
+    # The only drift is the additive fields the legacy report lacks; the pin
+    # fields themselves reproduce through the `pin_renames` fallback.
+    assert {d["field"] for d in result["drift"]} <= {"declared_pins", "def_pins"}
+    assert result["fresh"]["pin_renames"]["renamed"] == [{"from": "Y|clk", "to": "clk"}]
+
+
+def test_rerun_extract_report_never_modifies_committed_netlist(tmp_path):
+    """Issue #3061: `--rerun` leaves the committed netlist bytes alone, even
+    when it reports drift (here a tampered netlist -> `netlist_sha256`
+    drift), leaves no stray temp netlist, and reports the committed path."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "keep.gds")
+    report_path = tmp_path / "keep.extract.json"
+    netlist_path = tmp_path / "keep.spice"
+    committed = run_extract(path, "sky130", output=str(netlist_path))
+    _write_report(report_path, committed)
+    netlist_path.write_text(netlist_path.read_text() + "* tampered\n")
+    tampered = netlist_path.read_bytes()
+    before = set(os.listdir(tempfile.gettempdir()))
+
+    result = rerun_extract_report(str(report_path))
+
+    assert netlist_path.read_bytes() == tampered
+    assert result["fresh"]["netlist_path"] == str(netlist_path)
+    assert not [
+        n
+        for n in set(os.listdir(tempfile.gettempdir())) - before
+        if n.startswith("klt-extract-rerun-")
+    ]
+    # The hash compared is the freshly regenerated netlist's, not the file on
+    # disk's, so the tampered file is neither read as truth nor overwritten.
+    assert result["status"] == "match"
+
+
 def test_rerun_extract_report_detects_device_recognition_change(tmp_path):
     """A layout mutated to add a drawn substrate tie after the report was
     committed changes the NMOS body terminal's resolved net (issue #1084's
@@ -25004,6 +25100,103 @@ def test_no_netlist_with_spef_still_works(tmp_path):
     assert not (tmp_path / "inv.spice").exists()
 
 
+def _make_gf180mcu_mim_option_a_layout() -> kdb.Layout:
+    """A gf180mcu MIM *option A* cap (issue #2920): `Metal2` bottom plate,
+    `FuseTop` top plate, a sea of `Via2` inside `FuseTop` strapped by a
+    `Metal3` labelled `VTOP`, and the bottom plate labelled `VBOT` through a
+    `Via2`/`Metal3` pad *outside* `FuseTop` (ordinary routing)."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    draw(36, 0, _box_um(-20, -20, 20, 20))  # Metal2 (bottom plate conductor)
+    draw(75, 0, _box_um(0, 0, 10, 10))  # FuseTop (top plate)
+    draw(117, 5, _box_um(-5, -5, 15, 15))  # CAP_MK
+    draw(117, 10, _box_um(-5, -5, 15, 15))  # MIM_L_MK
+    draw(38, 0, _box_um(2, 2, 3, 3))  # Via2 inside FuseTop
+    draw(38, 0, _box_um(6, 6, 7, 7))  # Via2 inside FuseTop
+    draw(42, 0, _box_um(1, 1, 8, 8))  # Metal3 strap
+    top.shapes(layout.layer(42, 10)).insert(kdb.Text("VTOP", _trans_um(4, 4)))
+    draw(38, 0, _box_um(-15, -15, -14, -14))  # Via2 outside FuseTop
+    draw(42, 0, _box_um(-16, -16, -13, -13))  # Metal3 pad
+    top.shapes(layout.layer(42, 10)).insert(kdb.Text("VBOT", _trans_um(-14.5, -14.5)))
+    return layout
+
+
+def test_gf180mcu_mim_option_a_extracts_cap_with_distinct_plate_nets(tmp_path):
+    """Issue #2920: `mim_option=A` recognises the Metal2/FuseTop/Via2/Metal3
+    MIM as one `m2m3` capacitor; the top-plate Via2s do not join the plates,
+    while the Via2 outside FuseTop is still ordinary Metal2-Metal3 routing."""
+    path = _write_gds(_make_gf180mcu_mim_option_a_layout(), tmp_path / "a.gds")
+    report = run_extract(
+        path,
+        "gf180mcu",
+        output=str(tmp_path / "a.spice"),
+        deck_options={"mim_option": "A"},
+    )
+
+    assert report["device_counts"] == {"cap_mim_2f0_m2m3_noshield": 1}
+    (device,) = report["devices"]
+    assert device["nets"]["a"] == "VBOT"
+    assert device["nets"]["b"] == "VTOP"
+    assert not any("merges" in w for w in report["warnings"])
+    assert report["provenance"]["deck"]["options"]["mim_option"] == "A"
+
+
+def test_gf180mcu_mim_option_a_density_flavour(tmp_path):
+    path = _write_gds(_make_gf180mcu_mim_option_a_layout(), tmp_path / "a.gds")
+    report = run_extract(
+        path,
+        "gf180mcu",
+        output=str(tmp_path / "a.spice"),
+        deck_options={"mim_option": "A", "mim_cap": "cap_mim_1f0_m2m3_noshield"},
+    )
+    assert report["device_counts"] == {"cap_mim_1f0_m2m3_noshield": 1}
+
+
+def test_gf180mcu_mim_option_b_flavour_rejected_under_option_a(tmp_path):
+    path = _write_gds(_make_gf180mcu_mim_option_a_layout(), tmp_path / "a.gds")
+    with pytest.raises(ExtractError, match="cap_mim_1f0_m4m5_noshield"):
+        run_extract(
+            path,
+            "gf180mcu",
+            output=str(tmp_path / "a.spice"),
+            deck_options={"mim_option": "A", "mim_cap": "cap_mim_1f0_m4m5_noshield"},
+        )
+
+
+def test_gf180mcu_mim_option_rejects_unknown_value(tmp_path):
+    path = _write_gds(_make_gf180mcu_mim_option_a_layout(), tmp_path / "a.gds")
+    with pytest.raises(ExtractError, match="mim_option=C"):
+        run_extract(
+            path,
+            "gf180mcu",
+            output=str(tmp_path / "a.spice"),
+            deck_options={"mim_option": "C"},
+        )
+
+
+def test_gf180mcu_mim_option_a_layout_under_default_warns(tmp_path):
+    """Issue #2920 item 3: an option-A cap under the default option B is not
+    silently extracted as one net -- a warning names the option to select."""
+    path = _write_gds(_make_gf180mcu_mim_option_a_layout(), tmp_path / "a.gds")
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "a.spice"))
+
+    assert report["device_counts"] == {}
+    (warning,) = [w for w in report["warnings"] if "mim_option=A" in w]
+    assert "--deck-option mim_option=A" in warning
+    assert "mim_option" not in report["provenance"]["deck"]["options"]
+
+
+def test_gf180mcu_mim_option_b_layout_has_no_variant_warning(tmp_path):
+    path = _write_gds(_make_gf180mcu_mim_layout(), tmp_path / "b.gds")
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "b.spice"))
+    assert report["device_counts"] == {"cap_mim_2f0_m4m5_noshield": 1}
+    assert not any("mim_option" in w for w in report["warnings"])
+
+
 def _anon_connectivity(first: int, second: int):
     """A two-device report fragment whose two anonymous nets are numbered
     ``first``/``second`` -- the only thing varied between builds (#3407)."""
@@ -25241,10 +25434,11 @@ def test_normalized_netlist_hash_scales_roughly_linearly():
         _normalized_netlist_sha256(devices, nets)
         return time.perf_counter() - start
 
-    small = min(timed(3000) for _ in range(2))
-    large = min(timed(12000) for _ in range(2))
-    # 4x the nets: ~4x when linear, ~16x when quadratic.
-    assert large < small * 9, (small, large)
+    small = min(timed(3000) for _ in range(5))
+    large = min(timed(12000) for _ in range(5))
+    # 4x the nets: ~4x when linear, ~16x when quadratic. The bound sits between
+    # the two, loose enough to absorb shared-runner noise (issue #3610).
+    assert large < small * 12, (small, large)
 
 
 # --progress / `timing` (issue #3181) ----------------------------------------

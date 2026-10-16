@@ -5,7 +5,7 @@
 #
 #   klt drc <layout.gds> --engine klayout \
 #       --deck-file src/klayout_tools/decks/asap7.drc \
-#       --expect-rule-categories 248 --format json
+#       --expect-rule-categories 263 --format json
 #
 # or directly:
 #
@@ -112,6 +112,11 @@ channel = active & gate
 # DRM 1.2.2 note 7: rules apply to geometry not interacting with SRAMDRC
 # unless stated otherwise.
 active_ns = active.not_interacting(sramdrc)
+# ... and the SRAM-variant rules (SRAM.*) apply to ACTIVE interacting with it.
+# "Interacting" is overlap or touch, so exactly one of active_ns / active_s
+# holds for every polygon; SRAM.ACTIVE.AUX.2 reports the touch-only polygons
+# the DRM forbids.
+active_s = active.interacting(sramdrc)
 
 # DRM 1.2.2 note 5: "horizontal"/"vertical" restrict the direction in which a
 # distance is measured. A horizontal width/space is measured between
@@ -274,6 +279,17 @@ well.enclosing(active_ns.interacting(well), 27.nm)
   .output("ACTIVE.WELL.EN.1", "Table 3.5.1: min enclosure of ACTIVE (outside SRAMDRC) by WELL 27 nm")
 active_ns.with_area(nil, nm2(864)).output("ACTIVE.A.1A", "Table 3.5.2: min ACTIVE area 864 nm^2")
 active_ns.holes.with_area(nil, nm2(864)).output("ACTIVE.A.1B", "Table 3.5.2: min ACTIVE enclosed area 864 nm^2")
+# SRAMDRC-marked variants (DRM 1.2.2 note 7 "unless stated otherwise"): the
+# same measurements on ACTIVE interacting with SRAMDRC, at the SRAM values.
+active_s.separation(well, 13.5.nm)
+  .output("SRAM.ACTIVE.WELL.S.5", "Table 3.5.1: min spacing ACTIVE (interacting with SRAMDRC) to WELL 13.5 nm")
+well.enclosing(active_s.interacting(well), 13.5.nm)
+  .output("SRAM.ACTIVE.WELL.EN.2", "Table 3.5.1: min enclosure of ACTIVE (interacting with SRAMDRC) by WELL 13.5 nm")
+active_s.with_area(nil, nm2(432)).output("SRAM.ACTIVE.A.2A", "Table 3.5.2: min ACTIVE area (interacting with SRAMDRC) 432 nm^2")
+active_s.holes.with_area(nil, nm2(432)).output("SRAM.ACTIVE.A.2B", "Table 3.5.2: min ACTIVE enclosed area (interacting with SRAMDRC) 432 nm^2")
+# SRAM.ACTIVE.AUX.2: ACTIVE that shares no area with SRAMDRC may not touch it.
+active.not_overlapping(sramdrc).interacting(sramdrc)
+  .output("SRAM.ACTIVE.AUX.2", "Table 3.5.2: ACTIVE not belonging to an SRAM cell may not touch SRAMDRC")
 # ACTIVE.AUX.1: enclosed by NSELECT or by PSELECT with no coincident edge.
 # Shrinking each select by one database unit (0.25 nm) turns a coincident
 # edge into an "outside" one.
@@ -312,6 +328,11 @@ gcut.interacting(channel).output("GCUT.AUX.3", "Table 3.6.1: GCUT may not intera
     .output("#{name}.ACTIVE.EN.1", "Table 3.7.1: min horizontal enclosure of ACTIVE (not interacting with SRAMDRC) by #{name} 46 nm")
   horz(sel).enclosing(horz(inner), 27.nm, projection)
     .output("#{name}.ACTIVE.EN.2", "Table 3.7.1: min vertical enclosure of ACTIVE (not interacting with SRAMDRC) by #{name} 27 nm")
+  inner_s = active_s.inside(sel)
+  vert(sel).enclosing(vert(inner_s), 13.5.nm, projection)
+    .output("SRAM.#{name}.ACTIVE.EN.3", "Table 3.7.1: min horizontal enclosure of ACTIVE (interacting with SRAMDRC) by #{name} 13.5 nm")
+  horz(sel).enclosing(horz(inner_s), 13.5.nm, projection)
+    .output("SRAM.#{name}.ACTIVE.EN.4", "Table 3.7.1: min vertical enclosure of ACTIVE (interacting with SRAMDRC) by #{name} 13.5 nm")
   vert(sel).enclosing(vert(gate_nc), 7.nm, projection)
     .output("#{name}.GATE.EX.1", "Table 3.7.1: min horizontal extension of #{name} past GATE (not cut by GCUT) 7 nm")
   horz(sel).enclosing(horz(gate_nc), 7.nm, projection)

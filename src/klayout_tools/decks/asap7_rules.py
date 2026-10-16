@@ -193,11 +193,21 @@ def _select_family(layer: str) -> tuple[Asap7Rule, ...]:
     # DRM section 3.7: rules stated for NSELECT apply to PSELECT, SLVT, LVT
     # and SRAMVT as well, unless otherwise stated.
     t = "Table 3.7.1"
+    # The DRM lists SRAM.NSELECT.ACTIVE.EN.3 / .4 only; the other layers' SRAM
+    # enclosures are the same sentence's mirrors, so they get no separate id.
+    mirror = (
+        ""
+        if layer == "NSELECT"
+        else "mirror of SRAM.NSELECT.ACTIVE.EN.3 / .4 (section 3.7 applies the "
+        "table to this layer as well; the DRM lists no separate id)"
+    )
     return (
         Asap7Rule(f"{layer}.W.1", t),
         Asap7Rule(f"{layer}.W.2", t),
         Asap7Rule(f"{layer}.ACTIVE.EN.1", t),
         Asap7Rule(f"{layer}.ACTIVE.EN.2", t),
+        Asap7Rule(f"SRAM.{layer}.ACTIVE.EN.3", t, mirror),
+        Asap7Rule(f"SRAM.{layer}.ACTIVE.EN.4", t, mirror),
         Asap7Rule(f"{layer}.GATE.EX.1", t),
         Asap7Rule(f"{layer}.GATE.EX.2", t),
     )
@@ -272,9 +282,20 @@ RULES: tuple[Asap7Rule, ...] = (
     Asap7Rule("ACTIVE.S.2B", "Table 3.5.1"),
     Asap7Rule("ACTIVE.WELL.S.4", "Table 3.5.1"),
     Asap7Rule("ACTIVE.WELL.EN.1", "Table 3.5.1"),
+    Asap7Rule("SRAM.ACTIVE.WELL.S.5", "Table 3.5.1"),
+    Asap7Rule("SRAM.ACTIVE.WELL.EN.2", "Table 3.5.1"),
     Asap7Rule("ACTIVE.A.1A", "Table 3.5.2"),
     Asap7Rule("ACTIVE.A.1B", "Table 3.5.2"),
+    Asap7Rule("SRAM.ACTIVE.A.2A", "Table 3.5.2"),
+    Asap7Rule("SRAM.ACTIVE.A.2B", "Table 3.5.2"),
     Asap7Rule("ACTIVE.AUX.1", "Table 3.5.2"),
+    Asap7Rule(
+        "SRAM.ACTIVE.AUX.2",
+        "Table 3.5.2",
+        "'do not intersect' read as sharing no area with SRAMDRC; the DRM's "
+        "'completely outside' and 'may not touch' are both covered by "
+        "reporting ACTIVE that touches SRAMDRC without overlapping it",
+    ),
     # GCUT
     Asap7Rule("GCUT.W.1", "Table 3.6.1"),
     Asap7Rule("GCUT.ACTIVE.S.1", "Table 3.6.1"),
@@ -548,11 +569,6 @@ _ONE_SIDE = (
 #: DRM rules from the covered tables (3.1-3.19) the deck does not check yet.
 NOT_IMPLEMENTED: tuple[Asap7RuleGap, ...] = (
     Asap7RuleGap("GATE.AUX.2", "Table 3.4.1", _GATE_DISCONTINUOUS, "#2812"),
-    Asap7RuleGap("SRAM.ACTIVE.WELL.S.5", "Table 3.5.1", _SRAM, "#2812"),
-    Asap7RuleGap("SRAM.ACTIVE.WELL.EN.2", "Table 3.5.1", _SRAM, "#2812"),
-    Asap7RuleGap("SRAM.ACTIVE.A.2A", "Table 3.5.2", _SRAM, "#2812"),
-    Asap7RuleGap("SRAM.ACTIVE.A.2B", "Table 3.5.2", _SRAM, "#2812"),
-    Asap7RuleGap("SRAM.ACTIVE.AUX.2", "Table 3.5.2", _SRAM, "#2812"),
     Asap7RuleGap("ACTIVE.AUX.3", "Table 3.5.2", _ACTIVE_NOTCH, "#2812"),
     Asap7RuleGap(
         "ACTIVE.LUP.1",
@@ -562,8 +578,6 @@ NOT_IMPLEMENTED: tuple[Asap7RuleGap, ...] = (
         "(evidence: docs/cli/drc.md)",
         "#2812",
     ),
-    Asap7RuleGap("SRAM.NSELECT.ACTIVE.EN.3", "Table 3.7.1", _SRAM, "#2812"),
-    Asap7RuleGap("SRAM.NSELECT.ACTIVE.EN.4", "Table 3.7.1", _SRAM, "#2812"),
     # V0 (Tables 3.11.1 / 3.11.2)
     Asap7RuleGap("V0.S.1", "Table 3.11.1", _TRACK, "#3147"),
     *_gaps(("V0.S.2", "V0.S.3", "V0.S.4"), "Table 3.11.1", _END_CAP, "#3147"),
