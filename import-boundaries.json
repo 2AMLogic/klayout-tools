@@ -860,6 +860,11 @@
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
     },
     {
+      "consumer": "lvs",
+      "exporter": "socket_check",
+      "reason": "Issue #2971: klt lvs power findings reuse the verb's public classify_pin_by_name ground/power name heuristic to decide which pins get the substrate-continuity caveat, so lvs and socket-check never disagree about what a ground pin is."
+    },
+    {
       "consumer": "mcp",
       "exporter": "cli-infra",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."

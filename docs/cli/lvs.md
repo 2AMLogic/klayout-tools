@@ -1358,6 +1358,18 @@ case the rule above already fixes.
 | `power.unexpected_pin_net` | `options.power_connectivity.expected_nets` names this pin and at least one instance reaches a **different net than declared**. Strictly stronger than the rule above — it also catches a design in which *every* instance is miswired the same way, which no amount of cross-instance agreement can. Replaces the consistency rule for any pin the mapping names. As with the rule above, the finding's `description` also names a missing `request.power` block as a possible cause, alongside re-checking `expected_nets` itself. |
 | `power.unconnected_pin` | An instance's power/ground pin resolved to **no net at all** — it never landed on routed conductor. Reported separately because the defect differs in kind: not "wired to the wrong rail" but "wired to nothing". |
 
+**Ground pins and substrate continuity (issue #2971).** For a ground-class
+pin (`VSS`, `VGND`, `GND`, `VNB` — matched by pin name), `power.inconsistent_pin_net`
+and `power.unexpected_pin_net` append a caveat to `description`: abstract-cell
+extraction black-boxes each cell and erases the substrate taps that join
+separate Metal1 ground rails in a transistor-level extraction of the same GDS
+(substrate continuity through taps is **not modelled in abstract mode**), so the
+finding may be an artifact rather than a defect. Classify it by re-running `klt
+extract` **without** `--abstract-cells` and comparing the pin's net count: one
+net there means the abstract-mode finding is the modelling gap, several means a
+real defect. `VDD`/power-pin findings, the rule ids and the JSON fields are
+unchanged.
+
 Every finding is `severity: "error"`. These are `findings[].rule` values on a
 new field, **not** `mismatches[].category` values — `category_counts` and
 `category_error_counts` are untouched, and every existing consumer keyed on

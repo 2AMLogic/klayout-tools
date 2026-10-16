@@ -19614,6 +19614,39 @@ def test_run_lvs_gate_level_verilog_power_connectivity_unexpected_net_remedy(
         assert "klt place-and-route" in finding["description"]
 
 
+def test_run_lvs_gate_level_verilog_power_ground_finding_discloses_substrate_caveat(
+    tmp_path,
+):
+    """Issue #2971: a ground pin's inconsistent/unexpected finding says that
+    substrate continuity is not modelled in abstract-cell extraction (the
+    finding may be an artifact); the power pin's finding does not."""
+    miswired = _GATE_LEVEL_LAYOUT_SPICE_WITH_POWER.replace(
+        "X1 in mid VGND VPWR mylib__inv_1", "X1 in mid VPWR VPWR mylib__inv_1"
+    )
+    report = run_lvs(json.dumps(_gate_level_power_request(tmp_path, miswired)))
+    (ground,) = report["power_connectivity"]["findings"]
+    assert ground["pin"] == "VGND"
+    assert ground["rule"] == "power.inconsistent_pin_net"
+    assert "substrate continuity" in ground["description"]
+    assert "--abstract-cells" in ground["description"]
+
+    swapped = _GATE_LEVEL_LAYOUT_SPICE_WITH_POWER.replace(
+        "X1 in mid VGND VPWR mylib__inv_1", "X1 in mid VPWR VGND mylib__inv_1"
+    ).replace("X2 mid out VGND VPWR mylib__buf_1", "X2 mid out VPWR VGND mylib__buf_1")
+    request = _gate_level_power_request(
+        tmp_path,
+        swapped,
+        power_connectivity={"expected_nets": {"VPWR": "VPWR", "VGND": "VGND"}},
+    )
+    by_pin = {
+        f["pin"]: f
+        for f in run_lvs(json.dumps(request))["power_connectivity"]["findings"]
+    }
+    assert by_pin["VGND"]["rule"] == "power.unexpected_pin_net"
+    assert "substrate continuity" in by_pin["VGND"]["description"]
+    assert "substrate continuity" not in by_pin["VPWR"]["description"]
+
+
 def test_run_lvs_gate_level_verilog_power_connectivity_flags_unchecked_expected_pin(
     tmp_path,
 ):

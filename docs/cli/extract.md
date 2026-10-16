@@ -1197,6 +1197,15 @@ path).
 | Output | the same, single netlist file | a **second**, standalone deck; the flat netlist is untouched |
 | Instantiated by | the flat top-level circuit, via `X` cards | a testbench you write, via an `X` card |
 
+**Ground continuity caveat (issue #2971).** Abstraction erases the cells'
+device and tap layers, so substrate ties that join separate Metal1 ground rails
+(e.g. per-row `VSS` follow-pin rails with no vertical straps) in a
+transistor-level extraction are **not** modelled: the same GDS can report one
+`VSS` net without `--abstract-cells` and several with it. `klt lvs`'s
+`power_connectivity` ground-pin findings say so; re-extract without
+`--abstract-cells` to classify them. (Well conductor/ties are restored; substrate
+continuity is not.)
+
 ### Bipolar (BJT) device recognition
 
 Both curated decks additionally declare one vertical-BJT device-recognition

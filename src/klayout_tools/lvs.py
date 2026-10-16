@@ -198,6 +198,7 @@ from .netlist_capacitor_recovery import (
     resistor_classes_for_deck,
 )
 from .pdk import PdkNotFoundError, find_pdk
+from .socket_check import classify_pin_by_name
 from .verilog_netlist import (
     VerilogNetlistError,
     collect_gate_level_port_aliases,
@@ -9000,6 +9001,27 @@ def _describe_power_net_groups(groups: list[dict[str, Any]]) -> str:
     return "; ".join(parts)
 
 
+#: Appended to a ground-class pin's ``power.inconsistent_pin_net`` /
+#: ``power.unexpected_pin_net`` ``description`` (issue #2971). Abstract-cell
+#: extraction black-boxes each cell, erasing the substrate taps that join
+#: separate ground rails in a transistor-level extraction of the same GDS, so
+#: a ground finding here can be a modelling artifact rather than a defect.
+_GROUND_SUBSTRATE_CAVEAT = (
+    ". Caveat for this ground pin: substrate continuity through the cells' "
+    "own taps is not modelled in abstract-cell extraction, so separate "
+    "Metal1 ground rails that a transistor-level extraction joins through "
+    "the substrate are reported here as distinct nets -- this finding may "
+    "be an artifact. To classify it, re-run klt extract without "
+    "--abstract-cells and compare the pin's net count"
+)
+
+
+def _ground_pin_caveat(pin: str) -> str:
+    """:data:`_GROUND_SUBSTRATE_CAVEAT` for a ground-class ``pin`` (by the
+    repo's shared name heuristic), ``""`` for a power or signal pin."""
+    return _GROUND_SUBSTRATE_CAVEAT if classify_pin_by_name(pin)[1] == "GROUND" else ""
+
+
 def _power_connectivity_findings(
     rows: list[dict[str, Any]], expected_nets: dict[str, str] | None
 ) -> list[dict[str, Any]]:
@@ -9081,6 +9103,7 @@ def _power_connectivity_findings(
                             "routed at all, the more likely fix is "
                             "request.power in klt place-and-route rather "
                             "than this option"
+                            f"{_ground_pin_caveat(pin)}"
                         ),
                         "instance_count": len(entries),
                         "nets": groups,
@@ -9113,6 +9136,7 @@ def _power_connectivity_findings(
                         "the same signature as no PDN having been added -- "
                         "the more likely fix is request.power in klt "
                         "place-and-route rather than either option above"
+                        f"{_ground_pin_caveat(pin)}"
                     ),
                     "instance_count": len(entries),
                     "nets": groups,
