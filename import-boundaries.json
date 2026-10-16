@@ -421,6 +421,7 @@
         "klayout_tools.remote_transport",
         "klayout_tools.sim",
         "klayout_tools.sim_batch",
+        "klayout_tools.sim_batch_async",
         "klayout_tools.sim_crossings",
         "klayout_tools.sim_decks",
         "klayout_tools.sim_plot",
