@@ -8277,6 +8277,26 @@ def _param_reset_lines(point: CornerPoint) -> list[str]:
     ]
 
 
+def _save_control_lines(
+    measurements_spec: list[dict[str, Any]],
+    raw_path: str | None,
+    save_mode: str,
+    save_vectors: tuple[str, ...],
+) -> list[str]:
+    """The ``save`` card :func:`_corner_deck_control_lines` emits (step 2 of
+    its ordering contract), or no lines when the corner has nothing to save
+    or ``save_mode`` opts out."""
+    if save_mode != DEFAULT_SAVE_MODE or not (
+        measurements_spec or raw_path is not None
+    ):
+        return []
+    if save_vectors:
+        return [
+            "save " + " ".join(_required_save_vectors(save_vectors, measurements_spec))
+        ]
+    return ["save all"]
+
+
 def _corner_deck_control_lines(
     *,
     point: CornerPoint,
@@ -8388,14 +8408,9 @@ def _corner_deck_control_lines(
     # Issue #3035: the parameter reset must come first -- `reset` reloads the
     # circuit, so everything after it (save/alter/analysis) re-applies on top.
     prefix: list[str] = _param_reset_lines(point)
-    if save_mode == DEFAULT_SAVE_MODE and (measurements_spec or raw_path is not None):
-        if save_vectors:
-            prefix.append(
-                "save "
-                + " ".join(_required_save_vectors(save_vectors, measurements_spec))
-            )
-        else:
-            prefix.append("save all")
+    prefix.extend(
+        _save_control_lines(measurements_spec, raw_path, save_mode, save_vectors)
+    )
     for key, value in sorted(point.supply_v.items()):
         prefix.append(f"alter {key}={value}")
     lines.extend(prefix)
