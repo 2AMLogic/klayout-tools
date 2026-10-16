@@ -94,6 +94,7 @@ __all__ = [
     "get_layer_names",
     "get_nominal_dbu",
     "get_parasitics_deck",
+    "get_unmodeled_rules",
     "get_unmodeled_voltage_markers",
     "known_extraction_deck_names",
     "resolve_deck_option_values",
@@ -242,6 +243,26 @@ def get_unmodeled_voltage_markers(name: str) -> dict[tuple[int, int], str]:
     an unregistered deck name returns an empty map rather than raising.
     """
     return _unmodeled_voltage_marker_registry().get(name, {})
+
+
+def get_unmodeled_rules(name: str) -> list[str]:
+    """Return the sorted official rule ids ``name``'s deck knowingly does not
+    transcribe (issue #3031), surfaced as ``klt drc``'s
+    ``coverage.unmodeled_rules`` so a ``clean`` verdict is not read as full
+    coverage of the foundry runset. A deck with no such declaration (or an
+    unregistered name) returns an empty list rather than raising, mirroring
+    :func:`get_unmodeled_voltage_markers`.
+    """
+    from . import gf180mcu, sg13cmos5l, sg13g2, sky130
+
+    modules = {
+        "sky130": sky130,
+        "gf180mcu": gf180mcu,
+        "sg13g2": sg13g2,
+        "sg13cmos5l": sg13cmos5l,
+    }
+    module = modules.get(name)
+    return sorted(getattr(module, "UNMODELED_RULES", ())) if module else []
 
 
 def _nominal_dbu_registry() -> dict[str, float]:

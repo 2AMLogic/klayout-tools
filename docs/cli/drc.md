@@ -237,7 +237,7 @@ also the order a `--rules` subset executes in.
   "mode": "list_rules",
   "deck": "sky130",
   "engine": "curated",
-  "rule_count": 138,
+  "rule_count": 139,
   "groups": {
     "check": { "angle": 37, "area": 10, "enclosing": 17, "...": 0 },
     "scope": { "m1": 5, "poly": 1, "...": 0 }
@@ -319,7 +319,7 @@ A `--rules` run adds one top-level block, `rule_selection`, relative to the
   "selectors": ["met1.*"],
   "selected": ["met1.width.1", "met1.space.1", "met1.enclosing.mcon.1", "..."],
   "omitted": ["poly.width.1", "diff.width.1", "..."],
-  "deck_rule_count": 138,
+  "deck_rule_count": 139,
   "subset": true
 }
 ```
@@ -359,7 +359,7 @@ in either envelope aggregation or numbered-citation grading — see
 Before signoff, re-run without `--rules`.
 
 The text form adds one line, e.g.
-`rule selection: 5 of 136 rules (131 omitted; partial run) -- selectors: met1.*`,
+`rule selection: 5 of 139 rules (134 omitted; partial run) -- selectors: met1.*`,
 and does not list `not_selected` rules one per line under "skipped requested
 rules".
 
@@ -1244,12 +1244,12 @@ single-layer kind.
 ## Coverage
 
 The `sky130` deck is a **curated starter subset**, not the full sky130
-design rule manual (which spans hundreds of rules). It currently covers 138
+design rule manual (which spans hundreds of rules). It currently covers 139
 rules — width, spacing, area, and enclosure checks across the `poly`, `diff`,
 `tap` (issue #2321), `rpm`/`urpm` marker width (issue #3030),
 `li1`, `met1`, `licon1`, `mcon`, `met2`, `via` (met1&lt;-&gt;met2 via1),
 `met3`-`met5`, `via2`-`via4`, `capm`/`capm2` (MiM-cap top plates), and
-`nwell` (issue #1420) layers, plus the source deck's entire
+`nwell` (issue #1420; `nwell.enclosed.hvi.1`, issue #3031) layers, plus the source deck's entire
 manufacturing-grid/corner-angle (`OFFGRID`) group across 38 layers (issue
 #2642, see "Manufacturing grid and corner angle" below) — transcribed
 directly from the official
@@ -1272,11 +1272,22 @@ Broken down by check kind:
 | `space`      |    13 |
 | `isolated`   |     1 |
 | `enclosing`  |    17 |
+| `enclosed`   |     1 |
 | `separation` |     2 |
 | `area`       |    10 |
 | `ongrid`     |    38 |
 | `angle`      |    37 |
-| **total**    |**138**|
+| **total**    |**139**|
+
+(`enclosed` is `nwell.enclosed.hvi.1`, issue #3031 — `sky130A_mr.drc`'s
+`nwell.9`, "HVnwell must be enclosed by hv marker": a well that touches `hvi`
+(75/20) must lie wholly inside it, with no margin required; a well that never
+touches `hvi` is not an HV well and is not flagged. **Approximation**: the
+runset's marker is `hvi | rdl | uhvi | vhvi`; only `hvi` is read here, so a
+well touching `hvi` while also sitting inside an `rdl` (74/20), `uhvi` (74/22)
+or `vhvi` (74/21) marker would be flagged. The `m1.5`/`m2.5`/`via.5a`/`via2.5`/
+`via3.5` refinements are not modelled and are listed in
+`coverage.unmodeled_rules`.)
 
 (`isolated` is `nwell.space.1`, issue #1654 — see below. `area` is the
 five `met{1..5}.area.1` minimum-area rules, issue #1955, plus the five
@@ -2907,6 +2918,7 @@ for which skipped rules make a run partial and which do not.
 | `rules_skipped`                    | array\<string\> | Rule ids silently skipped because a layer they read was absent from this stream — `layer`/`other_layer`, or a `derived_layer` input (with one documented exception: a `"not_interacting"` derived rule still runs when its marker layer is absent, see "Voltage-domain rule pairs" above). Sorted alphabetically. |
 | `voltage_domain_warnings`          | array\<object\> | `{"marker": "<layer>/<datatype>", "description": string}` — see below. Sorted by marker `(layer, datatype)`. |
 | `deck_scope`                       | array\<string\> | Every distinct DRM section / official rule-id prefix the selected deck's rules claim to implement — a static property of the deck, independent of the input stream (issue #566). Sorted alphabetically. |
+| `unmodeled_rules`                  | array\<string\> | Curated engine only: official foundry-runset rule ids the selected deck knowingly does **not** transcribe (issue #3031) — a static property of the deck. sky130: `m1.5`, `m2.5`, `via.5a`, `via2.5`, `via3.5`. See below. Sorted alphabetically; empty for a deck that declares none. |
 | `rule_categories`                  | array\<string\> | KLayout engine only: declared RDB categories, never execution proof. |
 | `nothing_checked`                  | boolean         | Whether this run checked *nothing at all*, so its `status` says nothing about the layout — the shared convention in [`../json-contract.md`](../json-contract.md). See below. |
 | `nothing_checked_reasons`          | array\<string\> | Why, using the shared reason codes. Empty exactly when `nothing_checked` is `false`. |
@@ -3045,9 +3057,9 @@ such as a `Dualgate`-narrowed ESD diode) likewise produces no entry —
 avoiding a warning with nothing behind it. Always a list, empty for a deck
 that registers no such marker, or a layout that draws none of it overlapping
 unscoped checked geometry. sky130's curated deck registers `hvi` (75/20) as
-of issue #1369 — unlike gf180mcu's partially-modelled `Dualgate`, *no* rule
-in that deck reads `hvi`, so any `hvi` shape overlapping checked geometry
-warns (e.g. `diff.width.1` checks `difftap.1`'s 0.15 µm where the DRM's
+of issue #1369 — unlike gf180mcu's partially-modelled `Dualgate`, only one rule
+in that deck reads `hvi` (`nwell.enclosed.hvi.1`, issue #3031), so an `hvi`
+shape overlapping any other checked geometry warns (e.g. `diff.width.1` checks `difftap.1`'s 0.15 µm where the DRM's
 medium-voltage column, `difftap.14`, requires 0.29 µm).
 
 **What this field does and does not guarantee**: it flags that the checked
@@ -3061,6 +3073,18 @@ domain," not as a corrected verdict. The converse also holds and is the
 point of the per-rule gate: an *empty* `voltage_domain_warnings` on a layout
 that draws the marker means every rule that touched marked geometry read the
 marker, not that the marker was ignored quietly.
+
+#### `coverage.unmodeled_rules`
+
+`deck_scope` says what a deck claims; `unmodeled_rules` says what it knowingly
+leaves out, so a `clean` verdict is not read as full coverage of the foundry
+runset (issue #3031). For sky130 these are the "two-adjacent-edges-relaxed"
+enclosure refinements — `m1.5`, `m2.5`, `via.5a`, `via2.5`, `via3.5` — which
+need a per-edge-pair primitive `DrcRule` does not have; the deck checks only
+each family's primary (stricter-margin, all-edges) rule. A layout can
+therefore pass `klt drc --deck sky130` and still fail the runset on exactly
+these. The field is purely additive and deck-static (identical across inputs);
+re-check those enclosures with the PDK's own `sky130A_mr.drc` before signoff.
 
 #### `coverage.deck_scope`
 
@@ -3156,7 +3180,8 @@ carry a populated `provenance` citing their own `sky130A_mr.drc` rule id
 compound rule), issue #2594's `licon1.width.1`/`mcon.width.1` cite
 `licon.1`/`ct.1`, and every one of issue #2642's 75 `OFFGRID`-group rules
 (38 `ongrid` + 37 `angle`) cites its own `x.1b`/`x.3a`/`x.2`/`x.2c` source id,
-so 117 of its 136 rules are covered.
+and issue #3031's `nwell.enclosed.hvi.1` cites `nwell.9`, so 120 of its 139 rules
+are covered.
 
 ### The golden-pair manifest (`tests/golden_deck/`)
 

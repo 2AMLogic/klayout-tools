@@ -69,6 +69,7 @@ from .decks import (
     get_deck,
     get_layer_names,
     get_nominal_dbu,
+    get_unmodeled_rules,
     get_unmodeled_voltage_markers,
 )
 from .layers import layers_report
@@ -1121,6 +1122,7 @@ def run_drc(
                     {"marker": "<layer>/<datatype>", "description": str}, ...
                 ],
                 "deck_scope": [<scope identifier>, ...],
+                "unmodeled_rules": [<official rule id>, ...],
                 "nothing_checked": bool,
                 "nothing_checked_reasons": [<reason code>, ...],
             },
@@ -1897,6 +1899,9 @@ def run_drc(
         "rules_skipped": sorted(rules_skipped),
         "voltage_domain_warnings": voltage_domain_warnings,
         "deck_scope": deck_scope,
+        # Issue #3031: deck-static, like `deck_scope` -- official rule ids the
+        # deck knowingly does not transcribe.
+        "unmodeled_rules": get_unmodeled_rules(deck_name),
         # Issue #1996: the shared roll-up, so a reader (`klt signoff`) can
         # refuse a "clean" verdict measured over nothing without re-deriving
         # that emptiness from `rules_skipped` vs. the deck's own rule count.
