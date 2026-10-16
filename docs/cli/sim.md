@@ -125,6 +125,24 @@ as `environment.ngspice_binary` (alongside `engine_version`), `null` for
 `environment.netgen_binary` (issue #2373). `klt sim` has no `--check`/
 `--rerun` mode, so there is no drift-diff exclusion to add for this field.
 
+**Pinning the simulator version (`engine_version`, issue #3041).** A request
+may carry an optional `engine_version` string, `"MAJOR"` (e.g. `"44"`) or
+`"MAJOR.MINOR"`, naming the build it requires. When set, `klt sim` compares it
+with the engine it resolved and, on a mismatch, exits 1 *before simulating*
+with `error.code: "engine_version_unmet"` naming required vs found. A version
+that cannot be determined or parsed also fails (closed). On `local` and
+`local-parallel` the engine is probed (`ngspice --version` / `Xyce -v`) up
+front. `remote` and `batch` have no pre-submit probe, so the pin is checked
+against the version in the runner's report once the run returns; the job has
+already run by then. Unset, behaviour is unchanged.
+
+**Supported analyses (issue #3041).** `analysis.kind` (and each
+`analysis_steps[]` step) is a control-block analysis such as `op`, `dc`, `ac`,
+`tran`, `noise`. Periodic small-signal/noise analyses — `pss`, `pnoise`,
+`pac` — are **not implemented**; naming one exits 1 with
+`error.code: "unsupported_analysis"` before anything runs. That code means the
+capability is absent; `engine_version_unmet` means the tool is unavailable.
+
 **Which machine ran it: `environment.engine_host` (issue #3110).** Every
 report (corner and deck mode) carries `environment.engine_host`: `"local"`
 or `"worker"` (`--backend remote`/`batch`). It says which machine every
@@ -3525,8 +3543,8 @@ Grading, in order:
   indeterminate, so with `limits` it grades `inconclusive`.
 
 Off-host: the new tokens are `transfer` entries, so `backend: "remote"` /
-`"batch"` requests are refused exactly as above (a single corner may use
-`--backend local`).
+`"batch"` requests are handled exactly as above (not refused locally; the
+worker's mandatory `transfer` feature gate decides -- see "Backends" below).
 
 One rawfile and one ratio computation are used per unique `num`/`den` pair, and
 the capture does not depend on `options.waveforms`.
@@ -3739,8 +3757,18 @@ error, exit 1).
     earlier step's value unless it alters the element again. Without
     `reset` (below), steps share circuit **and** solver state (each solve
     starts from the previous one's solution).
+  - **`"<SRC>.ac": <number>`** sets a source's **AC magnitude** instead of its
+    DC value, emitted as `alter <SRC> ac = <number>` before that step's
+    analysis (e.g. `{"VDM.ac": 1, "VCM.ac": 0}` for a differential-drive vs.
+    common-mode-drive pair of `ac` steps). Plain `"<SRC>": n` keeps meaning
+    DC; `VDM` and `VDM.ac` may both appear in one step. Only `V`/`I` sources
+    take the suffix, the target must be an element of the netlist, and AC
+    overrides are cumulative like DC ones. The `corners.supply_v` and
+    transient-waveform refusals below protect the DC value and do not apply
+    to `.ac`.
   - Refused:
-    - a hierarchical or device-parameter target;
+    - a hierarchical or device-parameter target, or any key suffix other
+      than `.ac`;
     - a target repeated within one step;
     - a target that is also a `corners.supply_v` key, because the step would
       silently replace the corner's own value;
@@ -3836,6 +3864,39 @@ print load_reg
 quit
 .endc
 ```
+
+### Worked example: CMRR over a Monte Carlo draw
+
+Two `ac` steps drive the same sampled circuit differentially and then
+common-mode, so each sample's `cmrr_db` pairs two sweeps of the *same*
+devices (`alter ... ac` retargets the excitation; one deck, one draw):
+
+```json
+{
+  "netlist": "ota.spice",
+  "analysis_steps": [
+    {
+      "name": "dm",
+      "alter": { "VDM.ac": 1, "VCM.ac": 0 },
+      "analysis": { "kind": "ac", "args": "dec 1 1k 10k" },
+      "measurements": [{ "name": "gain", "expr": "mag(v(out))[0]" }]
+    },
+    {
+      "name": "cm",
+      "alter": { "VDM.ac": 0, "VCM.ac": 1 },
+      "analysis": { "kind": "ac", "args": "dec 1 1k 10k" },
+      "measurements": [{ "name": "gain", "expr": "mag(v(out))[0]" }]
+    }
+  ],
+  "measurements": [
+    { "name": "cmrr_db", "expr": "20*log10(dm.gain/cm.gain)", "unit": "dB" }
+  ],
+  "monte_carlo": { "n": 3, "seed": 1, "vary": "mismatch" }
+}
+```
+
+Each sample reports distinct `dm.gain`, `cm.gain` and `cmrr_db` values, and
+`cmrr_db` appears in `monte_carlo` with `mean`/`sigma` like any measurement.
 
 Each part guards against a plausible but wrongly paired number:
 
