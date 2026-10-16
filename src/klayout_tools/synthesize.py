@@ -1337,6 +1337,10 @@ def run_synthesize(
         "leakage_power_nw": leakage_power_nw,
         "leakage_by_type_nw": leakage_by_type_nw,
         "timing": timing,
+        # Issue #2883: which clock constraints the request carried and that
+        # `timing.delay_target_ps` is ONE global ABC target (never per-clock).
+        # Additive field, no `schema_version` bump (docs/json-contract.md).
+        "clock_targets": _describe_clock_targets(constraints, delay_target_ps),
         "sta": sta,
         # Issue #2628: *why* `sta` is `null`, so a caller can tell "STA
         # unavailable here -- install the optional extension and retry" from
@@ -1794,9 +1798,79 @@ def _resolve_liberty(
     )
 
 
+def _resolve_clocks(constraints: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """The validated ``constraints.clocks`` list as ``[{port, period_ns}]``
+    (issue #2883), empty when omitted/``null``.
+
+    Each entry must be an object with a non-empty string ``port`` (unique
+    across the list) and a positive numeric ``period_ns``. Unknown entry keys
+    and a non-array / empty list are errors -- a request that means to
+    constrain several clocks but expresses it wrongly must not be silently
+    downgraded, exactly as for ``clock_period_ns``.
+    """
+    if not constraints:
+        return []
+    raw = constraints.get("clocks")
+    if raw is None:
+        return []
+    if not isinstance(raw, list) or not raw:
+        raise SynthesizeError(
+            "request.constraints.clocks must be a non-empty array of "
+            "{port, period_ns} objects or null"
+        )
+    clocks: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, entry in enumerate(raw):
+        where = f"request.constraints.clocks[{index}]"
+        clock = _validate_clock_entry(entry, where)
+        port = clock["port"]
+        if port in seen:
+            raise SynthesizeError(f"{where}.port '{port}' is listed more than once")
+        seen.add(port)
+        clocks.append(clock)
+    return clocks
+
+
+def _validate_clock_entry(entry: Any, where: str) -> dict[str, Any]:
+    """One validated ``constraints.clocks`` entry as ``{port, period_ns}``
+    (issue #2883).
+
+    Checks the entry in isolation -- object shape, no unknown keys, a
+    non-empty string ``port`` and a positive numeric ``period_ns``. The
+    list-level checks (array type, non-empty, unique ports) stay in
+    :func:`_resolve_clocks`. ``where`` prefixes every error message.
+    """
+    if not isinstance(entry, dict):
+        raise SynthesizeError(f"{where} must be a {{port, period_ns}} object")
+    unknown = sorted(set(entry) - {"port", "period_ns"})
+    if unknown:
+        raise SynthesizeError(
+            f"{where} has unknown key(s): {', '.join(map(str, unknown))} "
+            "(allowed: port, period_ns)"
+        )
+    port = entry.get("port")
+    if not isinstance(port, str) or not port.strip():
+        raise SynthesizeError(f"{where}.port must be a non-empty string")
+    period = entry.get("period_ns")
+    if isinstance(period, bool) or not isinstance(period, (int, float)):
+        raise SynthesizeError(
+            f"{where}.period_ns must be a positive number (nanoseconds)"
+        )
+    if period <= 0:
+        raise SynthesizeError(f"{where}.period_ns must be greater than zero")
+    return {"port": port, "period_ns": period}
+
+
 def _resolve_delay_target_ps(constraints: dict[str, Any] | None) -> int | None:
-    """``constraints.clock_period_ns`` as an integer picosecond ABC delay
-    target (``abc -D``), or ``None`` when the request does not supply one.
+    """The integer picosecond ABC delay target (``abc -D``) derived from
+    ``constraints``, or ``None`` when the request does not supply one.
+
+    Precedence (issue #2883): an explicit ``constraints.clock_period_ns`` is
+    the global target; otherwise, when ``constraints.clocks`` is given, the
+    *tightest* (smallest) listed ``period_ns`` -- ABC takes a single global
+    ``-D``, so the conservative choice is the one that cannot under-target
+    any listed domain. See :func:`_describe_clock_targets` for the envelope
+    echo of which one was used.
 
     ``None``/omitted is a deliberate, documented state, not an oversight
     (``docs/cli/synthesize.md``): the run still gets ``-constr`` -- so ABC's
@@ -1811,8 +1885,11 @@ def _resolve_delay_target_ps(constraints: dict[str, Any] | None) -> int | None:
     """
     if not constraints:
         return None
+    clocks = _resolve_clocks(constraints)
     clock_period_ns = constraints.get("clock_period_ns")
     if clock_period_ns is None:
+        if clocks:
+            return int(round(min(c["period_ns"] for c in clocks) * 1000))
         return None
     if isinstance(clock_period_ns, bool) or not isinstance(
         clock_period_ns, (int, float)
@@ -1826,6 +1903,34 @@ def _resolve_delay_target_ps(constraints: dict[str, Any] | None) -> int | None:
             "request.constraints.clock_period_ns must be greater than zero"
         )
     return int(round(clock_period_ns * 1000))
+
+
+def _describe_clock_targets(
+    constraints: dict[str, Any] | None, delay_target_ps: int | None
+) -> dict[str, Any]:
+    """The response's ``clock_targets`` object (issue #2883): which clock
+    constraints the request carried and how the single ABC delay target was
+    derived from them.
+
+    ``abc -D`` is one global number, so per-clock periods are *never*
+    individually enforced; ``per_clock_enforced`` is always ``false`` and
+    ``delay_target_basis`` names where ``delay_target_ps`` came from:
+    ``"none"``, ``"clock_period_ns"`` or ``"min_clocks_period_ns"``.
+    """
+    clocks = _resolve_clocks(constraints)
+    explicit = (constraints or {}).get("clock_period_ns") is not None
+    if explicit:
+        basis = "clock_period_ns"
+    elif clocks:
+        basis = "min_clocks_period_ns"
+    else:
+        basis = "none"
+    return {
+        "clocks": clocks,
+        "delay_target_ps": delay_target_ps,
+        "delay_target_basis": basis,
+        "per_clock_enforced": False,
+    }
 
 
 def _write_constr(constr_path: str, driving_cell: str, load_ff: float) -> None:

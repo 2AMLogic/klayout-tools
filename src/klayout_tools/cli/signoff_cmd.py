@@ -658,12 +658,54 @@ def _print_partition_boundary(result: dict) -> None:
         print(f"  {partition}: {text}")
 
 
+def _status_marker(status: str, palette: Palette) -> tuple[str, str]:
+    """The ``(marker, color)`` for an item ``status`` in the text report."""
+    if status == "met":
+        return "MET  ", palette.green
+    if status == "not_applicable":
+        return "N/A  ", palette.green
+    return "UNMET", palette.red
+
+
+def _not_applicable_suffix(report: dict) -> str:
+    """``", N not_applicable"`` when the report has items satisfied by a
+    recorded "not applicable" (issue #2865); empty otherwise, so a report
+    with none renders exactly as before."""
+    count = report.get("t1_not_applicable_count")
+    return f", {count} not_applicable" if count else ""
+
+
+def _print_not_applicable(item: dict) -> None:
+    """The evidence behind a ``not_applicable`` item (issue #2865): the
+    ratified spec and the committed statement, each with its content hash,
+    and the statement's per-row reasons."""
+    block = item.get("not_applicable")
+    if not block:
+        return
+    spec = block["spec"]
+    statement = block["statement"]
+    print(
+        f"        not applicable: spec {spec['file']} "
+        f"(status={spec['status']}, rows={spec['row_count']}, "
+        f"content_hash={spec['content_hash']})"
+    )
+    print(
+        f"        statement: {statement['file']} "
+        f"(content_hash={statement['content_hash']})"
+    )
+    for row in statement["rows"]:
+        print(f"          {row['id']} [{row['class']}]: {row['reason']}")
+
+
 def _print_tier_report_text(result: dict, palette: Palette) -> None:
     block = result["block"] or "(unnamed block)"
     print(f"block: {block}  kind: {result['kind']}")
     _print_partition_boundary(result)
     print(f"tier: {result['tier'] or 'none'}")
-    print(f"T1: {result['t1_met_count']}/{result['t1_item_count']} items met")
+    print(
+        f"T1: {result['t1_met_count']}/{result['t1_item_count']} items met"
+        f"{_not_applicable_suffix(result)}"
+    )
     # Issue #2202: the reverse of the per-row `graded_by_build` note below.
     # A `--tiers-doc`/`$KLT_TIERS_DOC` copy listing *fewer* T1 items than
     # this build grades renders a shorter checklist, so `11/11 items met`
@@ -676,8 +718,9 @@ def _print_tier_report_text(result: dict, palette: Palette) -> None:
     print()
 
     for item in result["items"]:
-        marker = "MET  " if item["status"] == "met" else "UNMET"
-        color = palette.green if item["status"] == "met" else palette.red
+        # Issue #2865: a recorded "not applicable" is its own marker, never
+        # the plain MET one.
+        marker, color = _status_marker(item["status"], palette)
         item_id = str(item["id"]) if item["id"] is not None else "-"
         partition = f" [{item['partition']}]" if item["partition"] else ""
         print(
@@ -696,6 +739,7 @@ def _print_tier_report_text(result: dict, palette: Palette) -> None:
                 f"(no rules for item #{item_id} in klt {result['build']['version']}"
                 f"; it is in {result['source_doc']}, not this build's own doc)"
             )
+        _print_not_applicable(item)
         citation = item["citation"]
         if citation:
             # Command-backed evidence (issue #825) has no static file --
@@ -762,6 +806,10 @@ def _print_tier_report_text(result: dict, palette: Palette) -> None:
             # from "a check ran and did not pass" (e.g. check_failed) even
             # in the terminal-first text rendering, not just the JSON.
             print(f"        {palette.red}reason: {item['reason']}{palette.reset}")
+            # Issue #2865: a refused `not_applicable` names the offending row.
+            row = (item.get("detail") or {}).get("row")
+            if row:
+                print(f"        row: {row}")
             _print_binding_members(
                 (item.get("detail") or {}).get("artifact_binding", {}).get("members")
             )
@@ -791,6 +839,7 @@ def _print_fleet_report_text(result: dict, palette: Palette) -> None:
             f"[{color}{marker}{palette.reset}] {block['block']} "
             f"({block['kind']})  "
             f"T1: {block['t1_met_count']}/{block['t1_item_count']} items met"
+            f"{_not_applicable_suffix(block)}"
         )
         # Issue #2202: same disclosure as tier-report mode, for the same
         # reason -- this row renders `t1_item_count`, so it must also render

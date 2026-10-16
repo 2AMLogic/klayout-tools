@@ -307,6 +307,25 @@ class ResistorFlavour:
 
 
 @dataclass(frozen=True)
+class UnsupportedDeviceMarker:
+    """A marker layer whose drawn shapes mean the layout holds a device class
+    this deck does not recognise (issue #2919) -- e.g. gf180mcu's
+    ``MOS_CAP_MK`` (166/5) over a MOS capacitor.
+
+    ``extract.py`` reports every such layer that carries shapes in the
+    extracted cell in the response's ``unsupported_devices[]`` field and in
+    ``warnings[]``, so a netlist that silently lacks those devices cannot read
+    as a clean extraction. ``kind`` is a short machine-readable token (e.g.
+    ``"mos_capacitor"``); ``description`` is the prose used in the warning.
+    The marker takes no part in recognition or connectivity.
+    """
+
+    marker: tuple[int, int]
+    kind: str
+    description: str
+
+
+@dataclass(frozen=True)
 class MOSFlavour:
     """One additional, marker-scoped MOS voltage/gate-oxide flavour an
     :class:`ExtractionDeck` recognises via its optional ``mos_flavours``
@@ -388,6 +407,28 @@ class MOSFlavour:
     same default every other ``provenance`` field in this module carries, so a
     deck that leaves them unset (e.g. gf180mcu's ``Dualgate`` entry, whose
     prose comment remains the record) is unaffected.
+
+    ``and_markers``/``not_markers``/``nfet_only`` (issue #3599) express a
+    marker *combination*, for a flavour upstream derives as
+    ``<base>.and(A).not(B)`` rather than from a single layer -- e.g. sky130's
+    native-Vt NMOS (``hvi`` AND ``lvtn``, NOT ``areaid_ed``/``areaid_le``/
+    ``vpp``). All three default to empty/``False``, in which case
+    classification is exactly the single-``marker`` behaviour above:
+
+    - ``and_markers``: the island must also ``interacting``-overlap *every*
+      one of these layers to be claimed.
+    - ``not_markers``: an island that ``interacting``-overlaps *any* of these
+      layers is not claimed (it stays available to later flavours / the
+      default split). Like ``marker``, this is island-level, not a geometric
+      subtraction -- the same documented straddling policy.
+    - ``nfet_only``: the flavour has no PMOS counterpart; an island
+      ``interacting`` the deck's ``nwell`` is never claimed (no PMOS is
+      extracted or bound for it).
+
+    ``extract.py`` processes ``mos_flavours`` in declaration order and each
+    flavour removes what it claims before the next runs, so a combination
+    flavour must be declared *before* any flavour whose ``marker`` it
+    refines (or that flavour must list the refining layer in ``not_markers``).
     """
 
     marker: tuple[int, int]
@@ -395,6 +436,9 @@ class MOSFlavour:
     description: str = ""
     nfet_provenance: RuleProvenance | None = None
     pfet_provenance: RuleProvenance | None = None
+    and_markers: tuple[tuple[int, int], ...] = ()
+    not_markers: tuple[tuple[int, int], ...] = ()
+    nfet_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -669,6 +713,12 @@ class ExtractionDeck:
     this field's introduction) disables the exclusion: a poly shape matching
     the signature is flagged exactly as it was before this field existed, no
     behaviour change for a deck/layout that declares or draws no marker.
+
+    ``unsupported_device_markers`` (issue #2919) is an optional tuple of
+    :class:`UnsupportedDeviceMarker` entries naming marker layers that flag a
+    device class the deck cannot yet extract; shapes on one are reported in
+    ``unsupported_devices[]``/``warnings[]``. Empty (the default) reports
+    nothing.
     """
 
     active: tuple[int, int]
@@ -696,6 +746,7 @@ class ExtractionDeck:
     resistors: tuple[ResistorDevice, ...] = ()
     diodes: tuple[DiodeDevice, ...] = ()
     mos_flavours: tuple[MOSFlavour, ...] = ()
+    unsupported_device_markers: tuple[UnsupportedDeviceMarker, ...] = ()
     nfet_provenance: RuleProvenance | None = None
     pfet_provenance: RuleProvenance | None = None
     capacitor_variants: tuple[CapacitorVariant, ...] = ()

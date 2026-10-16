@@ -3547,7 +3547,11 @@ def test_clock_capture_fixture_matches_module_tcl():
     # -- so the pre-#2780 capture still matches everything before it.
     completeness = post_route_sta._constraint_completeness_lines()
     assert fresh[-len(completeness) :] == completeness
-    assert stored == fresh[: -len(completeness)]
+    # Issue #3005 likewise inserts the electrical-limit block just before it.
+    electrical = post_route_sta._electrical_check_lines()
+    head = fresh[: -len(completeness)]
+    assert head[-len(electrical) :] == electrical
+    assert stored == head[: -len(electrical)]
 
 
 # -- request validation ------------------------------------------------------#
@@ -4447,6 +4451,185 @@ def test_live_engine_report_ports(tmp_path):
     assert report["worst_hold_path"]["startpoint"] == "rst_n"
 
 
+# --------------------------------------------------------------------------- #
+# constraints.false_path_from -- static-input timing exclusions (issue #2968).
+# --------------------------------------------------------------------------- #
+
+
+def test_validate_false_path_from_omitted_and_empty_are_none():
+    assert post_route_sta._validate_false_path_from({}, "clk") is None
+    assert (
+        post_route_sta._validate_false_path_from({"false_path_from": []}, "clk") is None
+    )
+
+
+def test_validate_false_path_from_keeps_request_order():
+    constraints = {"false_path_from": ["b_in", "a_in", "cfg[3]"]}
+    assert post_route_sta._validate_false_path_from(constraints, "clk") == [
+        "b_in",
+        "a_in",
+        "cfg[3]",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ("a_in", "must be a list of input port names"),
+        ({"a_in": 1}, "must be a list of input port names"),
+        ([1], "non-empty port-name strings"),
+        ([""], "non-empty port-name strings"),
+        ([" a_in"], "non-empty port-name strings"),
+        (["a\nb"], "control character"),
+        (["clk"], "must not name the clock port"),
+        (["a_in", "b_in", "a_in"], r"must not repeat a port \('a_in'\)"),
+    ],
+)
+def test_validate_false_path_from_rejects(value, message):
+    with pytest.raises(PostRouteStaError, match=message):
+        post_route_sta._validate_false_path_from({"false_path_from": value}, "clk")
+
+
+def test_run_sta_false_path_from_validation_runs_before_engine(tmp_path, monkeypatch):
+    request_path = _setup_verilog_success_env(
+        tmp_path,
+        monkeypatch,
+        constraints=_boundary_constraints(false_path_from=["a_in", "a_in"]),
+    )
+
+    def fail_run(*args, **kwargs):
+        raise AssertionError("engine must not run for an invalid request")
+
+    monkeypatch.setattr(post_route_sta.subprocess, "run", fail_run)
+    with pytest.raises(PostRouteStaError, match="must not repeat a port"):
+        run_sta(request_path)
+
+
+def test_omitting_false_path_from_leaves_tcl_unchanged():
+    assert post_route_sta._false_path_lines(None) == []
+    assert post_route_sta._false_path_lines([]) == []
+    for maps in ((None, None), (_BOUNDARY_INPUT_DELAYS, _BOUNDARY_OUTPUT_DELAYS)):
+        assert post_route_sta._port_check_lines(*maps, report_ports=["x"]) == (
+            post_route_sta._port_check_lines(
+                *maps, report_ports=["x"], false_path_from=None
+            )
+        )
+        assert post_route_sta._port_check_lines(*maps) == (
+            post_route_sta._port_check_lines(*maps, false_path_from=[])
+        )
+    assert post_route_sta._request_io_delay_lines(
+        "clk", 0.0, 0.1, None, None
+    ) == post_route_sta._io_delay_lines("clk", 0.0, 0.1)
+
+
+def test_false_path_lines_escape_and_follow_delay_lines():
+    lines = post_route_sta._request_io_delay_lines(
+        "clk", 0.0, 0.1, None, None, false_path_from=["a_in", "cfg[3]", "we$ird"]
+    )
+    delay = post_route_sta._io_delay_lines("clk", 0.0, 0.1)
+    assert lines[-3:] == [
+        "set_false_path -from [get_ports a_in]",
+        r"set_false_path -from [get_ports cfg\[3\]]",
+        r"set_false_path -from [get_ports we\$ird]",
+    ]
+    assert lines[-3 - len(delay) : -3] == delay
+    text = "\n".join(lines)
+    assert "false_path a_in {input inout bidirect}" in text
+    assert post_route_sta._PORT_CHECK_BEGIN in text
+
+
+def test_false_path_from_with_port_delay_maps_comes_after_them():
+    lines = post_route_sta._request_io_delay_lines(
+        "clk",
+        0.0,
+        0.1,
+        _BOUNDARY_INPUT_DELAYS,
+        _BOUNDARY_OUTPUT_DELAYS,
+        false_path_from=["a_in"],
+    )
+    assert lines[-1] == "set_false_path -from [get_ports a_in]"
+    assert "klt_input_mapped" in "\n".join(lines)
+
+
+def test_run_sta_false_path_from_single_corner(tmp_path, monkeypatch):
+    request_path = _setup_verilog_success_env(
+        tmp_path,
+        monkeypatch,
+        constraints=_boundary_constraints(false_path_from=["a_in", "b_in"]),
+    )
+    scripts = _stub_openroad_capture(monkeypatch, {None: "boundary_tt_025C_1v80"})
+
+    report = run_sta(request_path)
+
+    assert scripts[0].count("set_false_path -from") == 2
+    assert "set_false_path -from [get_ports b_in]" in scripts[0]
+    assert report["false_path_from"] == ["a_in", "b_in"]
+
+
+def test_run_sta_without_false_path_from_has_no_echo_or_exceptions(
+    tmp_path, monkeypatch
+):
+    request_path = _setup_verilog_success_env(
+        tmp_path, monkeypatch, constraints=_boundary_constraints()
+    )
+    scripts = _stub_openroad_capture(monkeypatch, {None: "boundary_tt_025C_1v80"})
+
+    report = run_sta(request_path)
+
+    assert "false_path_from" not in report
+    assert "set_false_path" not in scripts[0]
+
+
+def test_run_sta_false_path_from_multi_corner_every_session(tmp_path, monkeypatch):
+    request_path = _setup_multi_corner_env(
+        tmp_path,
+        monkeypatch,
+        constraints=_boundary_constraints(false_path_from=["a_in"]),
+    )
+    scripts = _stub_openroad_capture(
+        monkeypatch,
+        {
+            "tt_025C_1v80": "boundary_tt_025C_1v80",
+            "ss_100C_1v60": "boundary_ss_100C_1v60",
+        },
+    )
+
+    report = run_sta(request_path)
+
+    assert len(scripts) == 2
+    assert all("set_false_path -from [get_ports a_in]" in text for text in scripts)
+    assert report["false_path_from"] == ["a_in"]
+    assert all("false_path_from" not in entry for entry in report["corners"])
+
+
+def test_run_sta_false_path_from_rejected_by_engine_check(tmp_path, monkeypatch):
+    request_path = _setup_verilog_success_env(
+        tmp_path,
+        monkeypatch,
+        constraints=_boundary_constraints(false_path_from=["q_a"]),
+    )
+    block = (
+        f"{post_route_sta._PORT_CHECK_BEGIN}\nfalse_path\tq_a\tdirection_output\n"
+        f"{post_route_sta._PORT_CHECK_END}\n"
+    )
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["openroad", "-version"]:
+            return fake_completed(stdout="unknown \n")
+        return fake_completed(returncode=3, stdout=block)
+
+    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+
+    with pytest.raises(PostRouteStaError) as excinfo:
+        run_sta(request_path)
+    message = str(excinfo.value)
+    assert message.startswith("constraints.false_path_from rejected")
+    assert (
+        "constraints.false_path_from['q_a']: port direction is 'output', not an input"
+        in message
+    )
+
+
 _LIVE_ONLY = pytest.mark.skipif(
     _live_sky130_env() is None,
     reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
@@ -4528,6 +4711,25 @@ def test_live_engine_input_transitions_bad_port_rejected(tmp_path):
     assert message.startswith("constraints.input_transitions rejected")
     assert "constraints.input_transitions['nope']" in message
     assert "constraints.input_transitions['q_a']" in message
+
+
+@_LIVE_ONLY
+def test_live_engine_false_path_from(tmp_path):
+    """Engine integration (issue #2968): excluding the setup-binding input
+    must move the worst setup path off that startpoint."""
+    _write(tmp_path / "boundary.v", _WORST_PATH_CAPTURES["netlist"])
+    request = {
+        "verilog": "boundary.v",
+        "hdl_toplevel": "top",
+        "pdk": {"cell_library": "sky130_fd_sc_hd", "corner": "tt_025C_1v80"},
+        "constraints": _boundary_constraints(false_path_from=["b_in"]),
+    }
+    request_path = _write_request(tmp_path / "request.json", request)
+
+    report = run_sta(request_path, pdk_variant="sky130A")
+
+    assert report["false_path_from"] == ["b_in"]
+    assert report["worst_setup_path"]["startpoint"] != "b_in"
 
 
 def _write_clock_fixtures(tmp_path) -> dict[str, str]:
@@ -5435,6 +5637,124 @@ def test_run_sta_evidence_input_verified_from_second_checkout(
     citation_b = grade(checkout_b / "flows" / "sta.json")
     assert citation_b is not None
     assert citation_b["input_verified"] is True
+
+
+# --------------------------------------------------------------------------- #
+# electrical_checks (issue #3005)
+# --------------------------------------------------------------------------- #
+
+_SLEW_REPORT = """max slew
+
+Pin                                       Limit       Slew      Slack
+---------------------------------------------------------------------
+u1/Y                                    0.00100    0.03000   -0.02900 (VIOLATED)
+u2/A                                    0.00100    0.03000   -0.02900 (VIOLATED)
+y                                       0.00100    0.01057   -0.00957 (VIOLATED)
+
+KLT_ELECTRICAL_NET u1/Y n1
+KLT_ELECTRICAL_NET u2/A n1
+KLT_ELECTRICAL_NET y y
+KLT_ELECTRICAL_OK
+"""
+
+
+def _slew_block(body):
+    return "\n".join(
+        [post_route_sta._MAX_SLEW_BEGIN, body, post_route_sta._MAX_SLEW_END]
+    )
+
+
+def test_parse_electrical_check_violating():
+    result = post_route_sta._parse_electrical_check(
+        _slew_block(_SLEW_REPORT),
+        post_route_sta._MAX_SLEW_BEGIN,
+        post_route_sta._MAX_SLEW_END,
+        "ns",
+    )
+
+    assert result == {
+        "coverage": "checked",
+        "limit_source": "liberty",
+        "unit": "ns",
+        "violation_count": 3,
+        "net_count": 2,
+        "worst_excess": 0.029,
+        "worst_pin": "u1/Y",
+    }
+
+
+def test_parse_electrical_check_clean_is_checked_zero():
+    """A clean design prints nothing from `report_check_types`; only the
+    sentinel says the check ran, and that is a real zero."""
+    result = post_route_sta._parse_electrical_check(
+        _slew_block("\nKLT_ELECTRICAL_OK\n"),
+        post_route_sta._MAX_SLEW_BEGIN,
+        post_route_sta._MAX_SLEW_END,
+        "ns",
+    )
+
+    assert result["coverage"] == "checked"
+    assert result["violation_count"] == 0
+    assert result["net_count"] == 0
+    assert result["worst_pin"] is None
+
+
+def test_parse_electrical_check_command_unsupported():
+    result = post_route_sta._parse_electrical_check(
+        _slew_block("KLT_ELECTRICAL_UNSUPPORTED"),
+        post_route_sta._MAX_SLEW_BEGIN,
+        post_route_sta._MAX_SLEW_END,
+        "ns",
+    )
+
+    assert result["coverage"] == "unsupported"
+    assert result["violation_count"] is None
+    assert result["net_count"] is None
+
+
+def test_parse_electrical_check_session_aborted_is_not_run():
+    result = post_route_sta._parse_electrical_check(
+        "no markers here",
+        post_route_sta._MAX_SLEW_BEGIN,
+        post_route_sta._MAX_SLEW_END,
+        "ns",
+    )
+
+    assert result["coverage"] == "not_run"
+    assert result["violation_count"] is None
+    assert result["worst_excess"] is None
+
+
+def test_electrical_checks_block_parasitics_source_follows_spef():
+    stdout = _slew_block(_SLEW_REPORT)
+
+    with_spef = post_route_sta._electrical_checks_block(stdout, True)
+    without = post_route_sta._electrical_checks_block(stdout, False)
+
+    assert with_spef["parasitics_source"] == "spef"
+    assert without["parasitics_source"] == "none"
+    assert with_spef["max_transition"]["coverage"] == "checked"
+    assert with_spef["max_capacitance"]["coverage"] == "not_run"
+    assert with_spef["max_capacitance"]["unit"] == "pF"
+
+
+def test_sta_script_runs_electrical_checks_after_read_spef():
+    lines = post_route_sta._sta_script_lines(
+        tech_lef="t.lef",
+        cell_lef="c.lef",
+        def_path="d.def",
+        liberty_path="l.lib",
+        clock_port="clk",
+        clock_period_ns=10.0,
+        spef_path="x.spef",
+    )
+
+    text = "\n".join(lines)
+    assert lines.index("read_spef x.spef") < lines.index(
+        f'puts "{post_route_sta._MAX_SLEW_BEGIN}"'
+    )
+    assert "report_check_types -max_slew -violators" in text
+    assert "report_check_types -max_capacitance -violators" in text
 
 
 # --------------------------------------------------------------------------- #

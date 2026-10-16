@@ -90,6 +90,15 @@ request is unchanged — byte-identical deck, byte-identical response — and th
 `corners[].measurements[]` entry. See [`docs/cli/sim.md`](cli/sim.md)'s
 "Measurements that are not `.meas` cards (`measurements[].expr`)".
 
+`measurements[].optional` (issue #2925) is an opt-in boolean (default
+`false`) that extends the per-measurement `status` vocabulary with an
+additive value, `"absent"` (`value: null`, `margin: null`, info diagnostic
+`measurement_absent`), for a `spice`/`expr` measurement that legitimately has
+no value; it never makes its corner `error`. A request that omits the field is
+byte-identical, so no `schema_version` bump -- but a consumer that switches
+exhaustively on measurement `status` must treat `"absent"` as "no value, not a
+failure". See [`docs/cli/sim.md`](cli/sim.md)'s "Optional measurements".
+
 `measurements[].crossings` (issue #2868) is the third form and the first
 whose result is a **series**, not a scalar. It does *not* retype `value`:
 `value` stays a number (the count of crossings found), so every consumer that
@@ -191,6 +200,17 @@ sees a member appear or disappear. The concrete precedent: issue #1704's
 `parasitics.nets[]` entry — `null` unless the flag is given, a computed
 number when it is. See `docs/cli/extract.md`'s "Top-cell-only hierarchy
 split" section for the full derivation.
+
+**An opt-in flag may also add a whole new object key to an already-shipped
+per-entry shape, absent unless asked for.** Issue #2982's `klt extract
+--resistance-graph` adds `resistance_graph` (`status`, `terminals`,
+`pair_resistance_ohm`, `legacy_resistance_ohm`, `nodes`, `edges`,
+`diagnostics`) to each `parasitics.nets[]` entry. Without the flag the key does
+not exist and the output is byte-identical to before; with it, every existing
+field (`resistance_ohm`, `terminals[]`, `by_layer`, the ladder) keeps its
+meaning and value. A consumer must treat the key as optional. No field is
+removed, renamed or retyped, so **no `schema_version` bump**. See
+`docs/cli/extract.md`'s "Terminal-aware resistance graph" section.
 
 **A new *qualifier* field next to an existing numeric field is additive — and
 is strictly preferable to retyping that field to `number | null`.** When an
@@ -736,6 +756,23 @@ stability statement, concrete precedents, and drift-detection guidance, and
     Populated by `klt sim` today; the underlying detection lives in
     `klayout_tools.pdk.find_pdk` (`ambiguous_roots`) and is available to
     every verb that resolves a PDK — see `docs/cli/pdk.md`.
+  - `version` (issue #3070) is a self-describing stamp, or `null` when no
+    revision can be read mechanically (never guessed): an open_pdks `SOURCES`
+    file (the lines joined with `"; "`, unchanged), else `fetched:<marker>`
+    from the `.fetched-version` file `scripts/fetch-*.sh` writes (searched at
+    the variant dir and up to two parents), else `git:<40-hex HEAD>` — with a
+    `-dirty` suffix when the work tree has uncommitted changes — when the
+    variant dir or its parent *is* a git work tree root. A tree nested inside
+    an unrelated checkout (e.g. klt's own) never reports that checkout's
+    `HEAD`; a missing or failing `git` yields `null`.
+  - `linked_trees` (issue #3070) — present **only** when the model library the
+    run resolved (`provenance.deck`) realpath-resolves into a *different* PDK
+    variant tree than `name` (a cross-variant symlink): a list of
+    `{name, version}`, `version` read exactly as above. Path-free, absent
+    otherwise, so a run without cross-tree resolution is byte-identical to
+    before. Populated by verbs that pass a model library (`klt sim` today).
+    Like `version`, it carries a revision and is excluded from `--rerun`
+    drift comparison. Additive; no `schema_version` bump.
 - `deck` — the rule (or model) deck the run used, as
   `{name, content_hash, released}`. `content_hash` is a `sha256:`-prefixed
   hex digest of the deck file actually used, so "clean against *this exact*
@@ -1654,7 +1691,13 @@ artifacts:
   own `run_sim` calls inherit its ownership and never self-contend; within
   one thread, re-entry on an owned root or its descendants is free, while
   owning a descendant and then requesting its ancestor is refused (acquire
-  outermost first). Acquisition never blocks, so it cannot deadlock.
+  outermost first). Acquisition never blocks, so it cannot deadlock. A child
+  process does not inherit a lock, with one additive exception (#3291):
+  `klt pex --measure-command` exports `KLT_OUTDIR_LOCK_INHERIT=<canonical
+  $KLT_PEX_ARTIFACTS_DIR>`, and a `klt` run whose output directory is that
+  directory or a descendant is covered by the parent's ownership. Ancestors,
+  siblings and unrelated roots are refused as usual; `error.code` values and
+  `schema_version` are unchanged.
 - **Scope and limits.** Cooperating `klt` writers on one host that resolve
   the same lock registry (`$KLT_LOCK_DIR`, default `/tmp/klt-locks-<uid>`)
   on a filesystem where `flock` works. Other tools, writers that do not use
