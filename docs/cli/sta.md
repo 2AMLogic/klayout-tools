@@ -831,7 +831,11 @@ reader's own. It answers "does the SPEF name the nets this design has", not
 - `partially_unannotated_driver_sample` — capped sample (at most 20) of the
   partially unannotated driver pins, so a caller can judge whether the count
   is real missing parasitics or a counting artefact. `null` when pins cannot
-  be listed.
+  be listed. Measured on OpenROAD 26Q3 (issue #3668, reduced DEF): a flop `Q`
+  whose net also reaches a top-level port with a different name (net
+  `c0_r`, port `c0`) is listed as partially unannotated together with that
+  port, and clock-net sinks are listed under their driver. Partial drivers
+  never gate `annotation_complete`.
 
 All the fields above are additive; none of the existing fields changed meaning
 except that `unannotated_driver_count` now gates net of the floating drivers.
