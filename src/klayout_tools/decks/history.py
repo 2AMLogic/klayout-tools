@@ -372,7 +372,9 @@ def deck_info(name: str | None = None) -> dict[str, Any]:
 #: ``"ongrid"``/``"angle"`` (issue #2642) are the vertex check kinds: a grid
 #: in micrometres and a minimum interior corner angle in degrees, neither of
 #: them a ``threshold_dbu`` distance either.
-_NON_DISTANCE_CHECKS = frozenset({"area", "density", "antenna", "ongrid", "angle"})
+_NON_DISTANCE_CHECKS = frozenset(
+    {"area", "density", "antenna", "ongrid", "angle", "comp_coverage"}
+)
 
 
 def deck_rules(name: str, rule_id: str | None = None) -> dict[str, Any]:
@@ -1014,6 +1016,8 @@ def _rule_pairs(rule: DrcRule) -> list[tuple[int, int]]:
     pairs = [rule.layer]
     if rule.other_layer is not None:
         pairs.append(rule.other_layer)
+    if rule.region_spec is not None:
+        pairs.extend(rule.region_spec.layers())
     return pairs
 
 

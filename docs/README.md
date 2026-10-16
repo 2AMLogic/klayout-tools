@@ -71,6 +71,7 @@ docs/
     sta.md
     stats.md
     synthesize.md
+    tap-distance.md
     techmap.md
     trajectory.md
     version.md

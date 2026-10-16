@@ -107,6 +107,7 @@ klt cells design.gds --top               # cell hierarchy
 klt drc design.gds --deck sky130        # run a DRC deck, structured results
 klt precheck design.gds --grid-um 0.005  # off-grid/zero-area/naming hygiene checks
 klt ring-check design.gds --layers '[[22,0],[34,0]]'  # guard/tap ring is a closed annulus
+klt tap-distance design.gds --subject '65/20' --taps '65/44' --max-distance-um 15  # every diffusion point within a Euclidean distance of a tap
 klt components design.gds --conductors '[{"name":"m1","layer":[68,20]}]'  # connected components, no deck
 klt clip design.gds --cell SUBCELL -o subcell.gds  # write a bbox region or named cell's subtree out as its own stream
 klt stats design.gds --per-layer         # densities, bbox, polygon counts
