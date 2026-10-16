@@ -25337,10 +25337,11 @@ def test_normalized_netlist_hash_scales_roughly_linearly():
         _normalized_netlist_sha256(devices, nets)
         return time.perf_counter() - start
 
-    small = min(timed(3000) for _ in range(2))
-    large = min(timed(12000) for _ in range(2))
-    # 4x the nets: ~4x when linear, ~16x when quadratic.
-    assert large < small * 9, (small, large)
+    small = min(timed(3000) for _ in range(5))
+    large = min(timed(12000) for _ in range(5))
+    # 4x the nets: ~4x when linear, ~16x when quadratic. The bound sits between
+    # the two, loose enough to absorb shared-runner noise (issue #3610).
+    assert large < small * 12, (small, large)
 
 
 # --progress / `timing` (issue #3181) ----------------------------------------
