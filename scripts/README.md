@@ -348,7 +348,10 @@ mounting `$PDK_ROOT` alongside `$PWD` so a real PDK install resolves inside
 the container too — falling back to `klt pdk find`'s own resolved root when
 `$PDK_ROOT` is unset, so the mount always matches what `klt
 place-and-route` will actually reference (issue #1868) — see the script's
-own header comment for why that matters.
+own header comment for why that matters. The container runs as the caller's
+uid:gid (`--user "$(id -u):$(id -g)"`, with `HOME` set to `$TMPDIR`) so files it
+writes into the mounted `$PWD`/`$TMPDIR` are not root-owned on Linux (issue
+#3151); re-run the installer to upgrade an older wrapper.
 
 The image is **pinned by digest** (`ORFS_IMAGE_DIGEST` near the top of the
 script), not by the moving `:latest` tag: both the `docker pull` and the

@@ -62,7 +62,9 @@ tests/golden_deck/
   gf180mcu/manifest.json   # 46 entries (full DRC deck, issue #904;
                             # +2 for issue #1110's DF.1a/DF.3a _LV/_MV split,
                             # +2 for issue #1688's metal4.width.1/
-                            # metal4.space.1 pair)
+                            # metal4.space.1 pair,
+                            # +2 for issue #3484's nplus.space.pcomp.far.1/
+                            # pplus.enclosing.comp.far.1 well-distance split)
   sg13g2/manifest.json     # 32 entries (issue #905/#911, Epic #711 Phase 3b
                             # -- see that deck's own module docstring; width/
                             # space only, same split as sky130 -- its 5

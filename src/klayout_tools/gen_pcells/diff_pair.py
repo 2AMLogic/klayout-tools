@@ -61,6 +61,10 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         docstring and :data:`_PDK_VOLTAGE_FLAVOR_LAYERS` for the flavour
         names each PDK family recognises."""
 
+        # Declared via ``self.param("mfg_grid_um", ...)`` below; the
+        # PCellDeclarationHelper stubs cannot see it, so annotate for mypy.
+        mfg_grid_um: float
+
         def __init__(self) -> None:
             super().__init__()
             self.param("w_um", self.TypeDouble, "Unit device width (um)", default=0.42)
@@ -251,6 +255,13 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default=WELL_ENCLOSURE_MARGIN_UM,
             )
             self.param(
+                "ring_well_margin_um",
+                self.TypeDouble,
+                "Harness-resolved nwell enclosure of the n-tap guard ring "
+                "(see _PDK_RING_WELL_MARGIN_UM)",
+                default=WELL_ENCLOSURE_MARGIN_UM,
+            )
+            self.param(
                 "gate_pad_clearance_um",
                 self.TypeDouble,
                 "Harness-resolved clearance the gate-poly landing pad keeps "
@@ -420,6 +431,7 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     _shift_box(ring["outer_box_um"], ox, oy),
                     _shift_box(ring["inner_box_um"], ox, oy),
                     gap_box,
+                    self.mfg_grid_um,
                 )
                 _insert_ring(
                     self.cell,
@@ -428,13 +440,14 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     _shift_box(ring["outer_box_um"], ox, oy),
                     _shift_box(ring["inner_box_um"], ox, oy),
                     gap_box,
+                    self.mfg_grid_um,
                 )
                 _insert_boxes(
                     self.cell, li_contact, dbu, ring["contact_boxes_um"], ox, oy
                 )
                 if self.well_present and self.flavor == "pfet":
                     li_well = self.layout.layer(self.well_layer)
-                    margin = WELL_ENCLOSURE_MARGIN_UM
+                    margin = self.ring_well_margin_um
                     well_box = (
                         -margin,
                         -margin,
@@ -460,6 +473,7 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                         gap_box,
                         ring["gap"]["side"] if ring["gap"] is not None else None,
                         self.ring_implant_margin_um,
+                        self.mfg_grid_um,
                     )
 
             # Issue #2585: clamp every cut on a fixed-size cut/via layer down
