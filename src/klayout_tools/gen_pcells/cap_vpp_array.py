@@ -7,7 +7,7 @@ cell lookup and port reporting live in :mod:`klayout_tools.gen_cap_vpp`.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import klayout.db as kdb
@@ -17,7 +17,11 @@ def _build_cap_vpp_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
     """Build the ``cap_vpp_array`` PCell -- a row of one PDK fixed cell."""
     import klayout.db as kdb
 
-    class _CapVppArrayPCell(kdb.PCellDeclarationHelper):
+    # PCellDeclarationHelper exposes its declared params and Type* constants
+    # dynamically, which the type checker cannot see; type the base as Any.
+    pcell_base: Any = kdb.PCellDeclarationHelper
+
+    class _CapVppArrayPCell(pcell_base):
         """Row of ``num`` instances of one PDK ``cap_vpp_*`` cell."""
 
         def __init__(self) -> None:
