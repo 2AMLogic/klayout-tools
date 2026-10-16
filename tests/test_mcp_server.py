@@ -152,10 +152,13 @@ def test_option_injection_refused(tools, policy):
         for d, p in array_tool.input_schema["properties"].items()
         if p.get("type") == "array" and d in array_tool.path_dests
     )
-    # Supply every other required arg so the missing-required check (which
-    # runs before the safety check) cannot pre-empt the refusal under test.
+    # Satisfy the tool's other required arguments so the refusal under test is
+    # the option check, not "missing required argument(s)".
+    props = array_tool.input_schema["properties"]
     others = {
-        d: "x.json" for d in array_tool.input_schema.get("required", []) if d != dest
+        d: ["x"] if props[d].get("type") == "array" else "x"
+        for d in array_tool.input_schema.get("required", [])
+        if d != dest
     }
     with pytest.raises(ToolCallRefused, match="option"):
         build_argv(array_tool, {**others, dest: ["a", "-x"]}, policy)

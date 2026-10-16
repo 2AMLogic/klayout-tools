@@ -477,6 +477,18 @@ _MISMATCH_ACTIVITY: dict[tuple[str, str], dict[str, Any]] = {
             "'Known-good mismatch mechanisms')."
         ),
     },
+    ("sky130", "resistor"): {
+        "active": True,
+        "note": (
+            "Poly-resistor subcircuits (e.g. sky130_fd_pr__res_high_po_*) "
+            "draw a per-instance AGAUSS term (res_match, rend) scaled by "
+            "MC_MM_SWITCH, which any _mm-suffixed process-corner section "
+            "(e.g. tt_mm) sets to 1 -- identical instances sample "
+            "independent values (see docs/cli/sim.md's 'Known-good "
+            "mismatch mechanisms'). Corner-level var_mult is a separate, "
+            "shared term. See issue #3032."
+        ),
+    },
 }
 
 #: SPICE element-type letter (first character of the instance name) ->
@@ -3948,11 +3960,17 @@ def _expand_monte_carlo(
     for that axis (``"process"``/``"mismatch"``/``"both"``); otherwise every
     sample of that corner derives the same value for it. This is the
     **deterministic negative control**: request ``vary: "process"`` and
-    every sample's ``mismatch_seed`` -- and therefore anything downstream
-    that depends only on it -- is identical across the N samples (sigma=0),
-    proving the sampler isn't silently injecting variation nobody asked
-    for. Requesting the *same* ``mc_spec["seed"]`` again (same process,
-    different process, doesn't matter) reproduces the exact same sequence
+    every sample's reported ``mismatch_seed`` -- and anything downstream
+    that consumes ``mc_mismatch_seed`` directly -- is identical across the
+    N samples (sigma=0), proving the sampler isn't silently injecting
+    variation nobody asked for. The control does **not** extend to a deck
+    that draws mismatch from ngspice's own RNG (``agauss``/``gauss`` in
+    ``.param`` expressions): ngspice receives only the combined
+    ``.options seed=<rndseed>``, derived from both components, so it still
+    changes per sample under ``vary: "process"``. For such decks, switch
+    the deck's own mismatch off (e.g. gf180mcu ``sw_stat_mismatch=0``) to
+    get a sigma=0 control. Requesting the *same* ``mc_spec["seed"]`` again
+    (same process, different process, doesn't matter) reproduces the exact same sequence
     of derived seeds -- see :func:`_derive_mc_seed`.
     """
     n, seed, vary = _validate_monte_carlo_spec(mc_spec)
@@ -5486,8 +5504,10 @@ def _run_corner(
     timed_out = False
     engine_version: str | None = None
     stdout_text = ""
+    stderr_text = ""
     engine_exit_code: int | None = None
     engine_killed_by_signal: str | None = None
+    launched = False
     try:
         completed = subprocess.run(
             command,
@@ -5497,6 +5517,8 @@ def _run_corner(
             cwd=corner_dir,
         )
         stdout_text = completed.stdout or ""
+        stderr_text = completed.stderr or ""
+        launched = True
         engine_exit_code, engine_killed_by_signal = _split_returncode(
             completed.returncode
         )
@@ -5545,6 +5567,7 @@ def _run_corner(
                 }
             )
         diagnostics.extend(_classify_engine_diagnostics(log_text, netlist_path, engine))
+        no_log_reported = False
         if engine_exit_code and not log_text and not os.path.exists(log_path):
             diagnostics.append(
                 {
@@ -5553,9 +5576,11 @@ def _run_corner(
                     "message": (
                         f"{engine_name} exited with code {engine_exit_code} "
                         "without writing its log (deck or log path not found?)"
+                        f"{_engine_output_tail(stdout_text, stderr_text)}"
                     ),
                 }
             )
+            no_log_reported = True
 
     # Both engines fold a `.meas`/`.measure` card's name to lower-case in
     # their own report output (Xyce actually upper-cases, but
@@ -5585,6 +5610,31 @@ def _run_corner(
         )
     )
     diagnostics.extend(measurement_diagnostics)
+
+    # Issue #3016: the engine ran (any exit status, including 0) yet left no
+    # log text and not a single requested measurement has a value -- the
+    # bare N x "produced no value" says nothing about why, so attach the
+    # exit status and the engine's own stdout/stderr tail.
+    if (
+        launched
+        and not timed_out
+        and engine_killed_by_signal is None
+        and not no_log_reported
+        and not log_text.strip()
+        and measurement_results
+        and all(m.get("value") is None for m in measurement_results)
+    ):
+        diagnostics.append(
+            {
+                "severity": "error",
+                "code": "unknown",
+                "message": (
+                    f"{engine_name} exited with code {engine_exit_code} but "
+                    "wrote no log output and produced no measurement values"
+                    f"{_engine_output_tail(stdout_text, stderr_text)}"
+                ),
+            }
+        )
 
     # A recovered `singular_matrix`/`nonconvergence` classification (the
     # engine's own stepping-recovery narration -- routine noise on the way
@@ -5702,6 +5752,28 @@ def _run_corner(
         **step_fields,
     }
     return corner, engine_version
+
+
+_ENGINE_OUTPUT_TAIL_BYTES = 2048
+
+
+def _engine_output_tail(stdout_text: str, stderr_text: str) -> str:
+    """``"; <stream> tail: ..."`` fragments for whichever of the engine's
+    stderr/stdout captured anything, each bounded to its last
+    :data:`_ENGINE_OUTPUT_TAIL_BYTES` bytes (issue #3016). Empty when both
+    streams are empty. Never raises on undecodable bytes."""
+    parts = []
+    for label, text in (("stderr", stderr_text), ("stdout", stdout_text)):
+        text = text.strip()
+        if not text:
+            continue
+        raw = text.encode("utf-8", errors="replace")
+        if len(raw) > _ENGINE_OUTPUT_TAIL_BYTES:
+            text = "..." + raw[-_ENGINE_OUTPUT_TAIL_BYTES:].decode(
+                "utf-8", errors="replace"
+            )
+        parts.append(f"; {label} tail: {text}")
+    return "".join(parts)
 
 
 def _split_returncode(returncode: int) -> tuple[int | None, str | None]:
