@@ -487,10 +487,9 @@ pub(crate) fn classify_bar(name: &str, b: &BoxRequest) -> Result<Bar, String> {
 /// explicit series path in [`oriented_path`] instead of relaxing this
 /// function: its parallel-bundle checks stay exactly as they are. The static
 /// PEEC solve (`discretize_bars`, #2729) routes such a conductor to the
-/// series-path model; the full-wave sweep (`classify_full_wave_bars`) calls
-/// this function directly, so a winding keeps failing here -- and every
-/// frequency-sweep request for it keeps rejecting -- until retarded
-/// series-path coupling lands (#2730).
+/// series-path model, and so does the full-wave sweep
+/// (`classify_full_wave_bars`, #2730); a winding therefore never reaches this
+/// function.
 ///
 /// Returns one entry **per box** (not per conductor, now that a conductor
 /// may contribute more than one), in request order (conductor order, then
@@ -929,51 +928,87 @@ pub struct FullWaveConductorGeom {
     pub area_um2: f64,
 }
 
-impl FullWaveConductorGeom {
-    /// Centreline length (um).
-    pub fn length_um(&self) -> f64 {
-        let mut acc = 0.0;
-        for k in 0..3 {
-            let d = self.end_um[k] - self.start_um[k];
-            acc += d * d;
-        }
-        acc.sqrt()
-    }
-}
-
 /// The bar geometry the full-wave solve discretises every conductor into:
 /// each conductor's [`FullWaveConductorGeom`], in the same order as the
 /// request's `conductors`, plus the `[lo, hi]` axial span they all share
 /// **if** they share one.
 ///
-/// `shared_axial_span` is `None` for cross-axis or axially-offset requests.
-/// The retarded impedance fill itself does not need it (issue #1842), but
-/// the derived transmission-line quantities and port de-embedding do -- see
+/// `shared_axial_span` is `None` for cross-axis or axially-offset requests,
+/// and always for a request containing a series winding. The retarded
+/// impedance fill itself does not need it (issue #1842), but the derived
+/// transmission-line quantities and port de-embedding do -- see
 /// `fullwave::solve_full_wave_sweep`.
+///
+/// `windings[i]` is `Some` exactly when conductor `i` is a series winding
+/// (issue #2730): the solve then meshes the path's legs individually instead
+/// of the one equivalent straight wire `conductors[i]` describes (for a
+/// winding that entry only records the terminal-to-terminal chord and the
+/// volume-equivalent area, for diagnostics).
 pub struct FullWaveBarLayout {
     pub shared_axial_span: Option<(f64, f64)>,
     pub conductors: Vec<FullWaveConductorGeom>,
+    pub windings: Vec<Option<oriented_path::OrientedPath>>,
 }
 
 /// Classify every conductor's box(es) into the bar geometry the full-wave
-/// retarded solve needs -- see `classify_bars` for the validation this
-/// shares with PEEC's `discretize_bars` (every box individually bar-shaped;
-/// a multi-box conductor's own boxes co-axis and co-spanning). A multi-box
-/// conductor's several boxes are combined into the single equivalent thin
-/// wire this module's docs describe: total cross-sectional area is the sum
-/// of each box's transverse rectangle area, and the transverse centroid is
-/// that same area-weighted average -- the natural generalisation of "one
-/// equivalent wire per conductor" from one box to several (e.g. a coax
-/// shield's wall segments combine into one effective shield wire). The
-/// shared axis index itself is not part of [`FullWaveBarLayout`] -- unlike
-/// PEEC's `BarLayout`, `fullwave.rs` never needs to name it (its error
-/// messages only reference axial positions/distances, already
-/// axis-agnostic).
+/// retarded solve needs. Each conductor is first routed by
+/// [`oriented_path::classify_conductor_topology`], exactly as the static PEEC
+/// solve does (`discretize_bars`): a parallel bundle goes through
+/// `classify_bars` (every box individually bar-shaped; a multi-box
+/// conductor's own boxes co-axis and co-spanning) and is combined into the
+/// single equivalent thin wire this module's docs describe -- total
+/// cross-sectional area is the sum of each box's transverse rectangle area,
+/// and the transverse centroid is that same area-weighted average, the
+/// natural generalisation of "one equivalent wire per conductor" from one
+/// box to several (e.g. a coax shield's wall segments combine into one
+/// effective shield wire); a connected non-branching mixed-axis chain is kept
+/// as its [`oriented_path::OrientedPath`] (issue #2730). The shared axis index
+/// itself is not part of [`FullWaveBarLayout`] -- unlike PEEC's `BarLayout`,
+/// `fullwave.rs` never needs to name it (its error messages only reference
+/// axial positions/distances, already axis-agnostic).
 pub fn classify_full_wave_bars(
     conductors: &[ConductorRequest],
 ) -> Result<FullWaveBarLayout, String> {
-    let bars = classify_bars(conductors)?;
-    let shared_axial_span = shared_axial_span(&bars).map(|(_axis, lo, hi)| (lo, hi));
+    if conductors.is_empty() {
+        return Err("at least one conductor is required".to_string());
+    }
+
+    // Per-conductor routing. `bars` collects the bundle conductors' per-box
+    // bars with `Bar` entries re-tagged by their request-level conductor
+    // index (`classify_bars` sees one conductor at a time here, so its own
+    // index is always 0).
+    let mut bars: Vec<(usize, &str, Bar)> = Vec::new();
+    let mut windings: Vec<Option<oriented_path::OrientedPath>> =
+        Vec::with_capacity(conductors.len());
+    for (conductor_index, c) in conductors.iter().enumerate() {
+        match oriented_path::classify_conductor_topology(conductor_index, c) {
+            Ok(oriented_path::ConductorTopology::ParallelBundle) => {
+                let mut one = classify_bars(std::slice::from_ref(c))?;
+                for entry in &mut one {
+                    entry.0 = conductor_index;
+                }
+                bars.extend(one);
+                windings.push(None);
+            }
+            Ok(oriented_path::ConductorTopology::OrientedPath(path)) => {
+                windings.push(Some(path));
+            }
+            Err(path_err) => {
+                return Err(match classify_bars(std::slice::from_ref(c)) {
+                    Err(legacy) => format!(
+                        "{legacy} (it is not a supported series winding either: {path_err})"
+                    ),
+                    Ok(_) => path_err,
+                });
+            }
+        }
+    }
+    let any_winding = windings.iter().any(Option::is_some);
+    let shared_axial_span = if any_winding {
+        None
+    } else {
+        shared_axial_span(&bars).map(|(_axis, lo, hi)| (lo, hi))
+    };
 
     // Per-conductor aggregation over the per-box bars. `classify_bars`
     // guarantees a conductor's boxes share one axis and axial span, so their
@@ -994,12 +1029,25 @@ pub fn classify_full_wave_bars(
         weighted_centroid_um[*conductor_index][1] += area * 0.5 * (v0 + v1);
     }
 
-    // `area_um2[i]` is a sum of strictly-positive per-box areas (every box
-    // passed `classify_bar`'s non-zero-extent check), and every conductor
-    // contributed at least one box (`classify_bars` rejects zero boxes) --
-    // so this division is never by zero.
-    let conductors: Vec<FullWaveConductorGeom> = (0..conductors.len())
+    // For a bundle conductor `area_um2[i]` is a sum of strictly-positive
+    // per-box areas (every box passed `classify_bar`'s non-zero-extent
+    // check), and it contributed at least one box (`classify_bars` rejects
+    // zero boxes) -- so this division is never by zero.
+    let geoms: Vec<FullWaveConductorGeom> = (0..conductors.len())
         .map(|i| {
+            if let Some(path) = &windings[i] {
+                let length_um = path.total_length_um();
+                let volume_um3: f64 = path
+                    .segments
+                    .iter()
+                    .map(|s| s.length_um() * s.area_um2())
+                    .sum();
+                return FullWaveConductorGeom {
+                    start_um: path.start_terminal_um(),
+                    end_um: path.end_terminal_um(),
+                    area_um2: volume_um3 / length_um,
+                };
+            }
             let bar = first_bar[i].expect("classify_bars rejects zero-box conductors");
             let uc = weighted_centroid_um[i][0] / area_um2[i];
             let vc = weighted_centroid_um[i][1] / area_um2[i];
@@ -1013,7 +1061,8 @@ pub fn classify_full_wave_bars(
 
     Ok(FullWaveBarLayout {
         shared_axial_span,
-        conductors,
+        conductors: geoms,
+        windings,
     })
 }
 

@@ -604,6 +604,33 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
         help="with --batch-set, how many requests are in flight at once (default: 4)",
     )
     sim_parser.add_argument(
+        "--submit-only",
+        dest="submit_only",
+        action="store_true",
+        default=False,
+        help=(
+            "with --backend batch, upload and launch the job, print its "
+            "identity (job_id, bucket, region, launched_at, request_sha256) "
+            "and exit 0 immediately -- no polling, no collection (issue "
+            "#3073). Read the job later with --job-status. One job only: "
+            "refused with --hosts > 1, --resume, --plot, a deck request, or "
+            "a non-batch backend. See docs/cli/sim.md 'Asynchronous submit'."
+        ),
+    )
+    sim_parser.add_argument(
+        "--job-status",
+        dest="job_status",
+        metavar="JOB_ID",
+        default=None,
+        help=(
+            "read one batch job's state by id (one status.json read; "
+            "state `pending` before the instance writes one) and exit. The "
+            "positional request supplies the bucket/region/profile. Submits "
+            "and launches nothing. Unit counts are not published by the "
+            "fleet and are not reported. See docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
         "-o",
         "--outdir",
         default=None,
@@ -5239,6 +5266,21 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
             "replays a report's recorded selection)"
         ),
     )
+    drc_parser.add_argument(
+        "--waivers",
+        dest="waivers",
+        metavar="PATH",
+        default=None,
+        help=(
+            "rule-scoped cell waivers (issue #3483, --engine curated only): "
+            'a JSON file {"waivers": [{"cell": ..., "rule": <id|glob>, '
+            '"justification": ...}]}. Markers whose source_cell and rule '
+            "match move out of violations/violation_count/status into a "
+            "separate waived array (with waiver_justification), never "
+            "dropped silently; the file is pinned in provenance.waivers. "
+            "See docs/cli/drc.md, 'Waivers'"
+        ),
+    )
     _add_format_arg(drc_parser)
     _record_request_argv_flags(
         drc_parser, exclude=(*_REQUEST_ARGV_FLAG_EXCLUDE, "list_rules")
@@ -5761,6 +5803,20 @@ def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
             "'findings_only'. Gate on erc_status, as any --pdk-less run "
             "already must. Mutually exclusive with --pdk (a limit table "
             "with nothing to grade) -- passing both exits 1."
+        ),
+    )
+    erc_parser.add_argument(
+        "--omit-antenna-tables",
+        action="store_true",
+        help=(
+            "with --findings-only, drop the all-'unchecked' gates[] array "
+            "(gate_count keeps the real count) and collapse the antenna "
+            "coverage's per-gate skipped/gate_reference_level entries to "
+            "one aggregate entry each, so a dense layout's report is small "
+            "enough to commit verbatim (issue #3011). Sets "
+            "antenna_tables_omitted: true; every verdict, erc_findings and "
+            "the exit code are identical to the same run without it. "
+            "Requires --findings-only -- passing it alone exits 1."
         ),
     )
     _add_format_arg(erc_parser)

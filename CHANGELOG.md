@@ -27,6 +27,13 @@ not `klt --version`, if you need to detect this kind of drift. See
   failures are `status: "error"` with a `measurement` diagnostic led by a
   `[cycle_mean_*]` reason token. `.meas AVG ... TRIG/TARG` and `FROM=<meas>`
   remain unsupported. See `docs/cli/sim.md`.
+- **`klt sim` `analysis_steps[].reset`** (issue #3103): `reset: true` starts a
+  step from a freshly parsed circuit (ngspice `reset`), so independent
+  configurations of one analysis share a request instead of one job each. The
+  deck re-emits `save all` and the corner's `supply_v` `alter`s after `reset`.
+  Decks without `reset` are byte-identical; a non-boolean value is refused by
+  name. `docs/cli/sim.md` now also states that steps otherwise share circuit
+  and solver state. Additive; no `schema_version` bump.
 - **ASAP7 DRC deck checks `ACTIVE.W.2` and `SDT.W.3`** (issue #3085): the
   vertical-width-is-an-integer-multiple-of-27-nm rules (DRM Tables 3.5.1 /
   3.8.1) are now measured per local vertical width of each merged rectilinear
@@ -81,6 +88,12 @@ not `klt --version`, if you need to detect this kind of drift. See
   with a waiver file (fail on an unwaived element and on a stale waiver).
   `options.initial_state` for `functional-verification` follows separately.
 
+- **`openroad` Docker wrapper no longer runs as root** (issue #3151):
+  `scripts/install-openroad-docker.sh` now writes a wrapper that passes
+  `--user "$(id -u):$(id -g)"` and `-e HOME="${TMPDIR:-/tmp}"` to `docker
+  run`, so files OpenROAD creates under `$PWD`/`$TMPDIR` are owned by the
+  caller instead of root on Linux. Hosts with an older wrapper should re-run
+  `scripts/install-openroad-docker.sh` to upgrade it in place.
 - **Docs: `monte_carlo.vary: "process"` negative control is scoped**
   (issue #2937): the sigma=0 guarantee holds for the reported
   `mismatch_seed` and for decks consuming `mc_mismatch_seed` directly, not
@@ -106,6 +119,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   Additive; no `schema_version` bump. Also fixes `klt reset-coverage` on the
   real sky130 cell models, whose `input wire CLK` declarations hid every
   asynchronous pin (every flop classified `no_async_pin`).
+
+- **`klt lvs` `body_verification` no longer reports a false `"verified"`
+  for `layout.netlist` + `layout.deck`** (issue #3177): the body
+  determination compared device-class and substrate-net names
+  case-sensitively and matched only the raw `$<n>` anonymous-net spelling,
+  but a netlist read back from disk presents `NFET`/`VSUBS` and `\\$<n>`.
+  An untapped NMOS or an anonymous-body PMOS in a `klt extract -o` netlist
+  now reports `unverified` (and emits `device.body_unverified`), matching the
+  inline-extraction verdict. Inline-extraction results are unchanged.
 
 - **Bipolar markers can be derived layer expressions** (issue #2860):
   `BipolarDevice.marker` now accepts a `LayerExpr`, a frozen AND/NOT tree

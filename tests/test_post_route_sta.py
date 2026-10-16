@@ -3039,6 +3039,167 @@ def test_run_sta_scalar_only_request_tcl_unchanged(tmp_path, monkeypatch):
     assert "klt_input_mapped" not in script
 
 
+# -- input transitions (issue #3227) ---------------------------------------- #
+
+
+def test_validate_input_transitions_omitted_and_empty_are_none():
+    assert post_route_sta._validate_input_transitions({}, "clk") == (None, None)
+    assert post_route_sta._validate_input_transitions(
+        {"input_transitions": {}}, "clk"
+    ) == (None, None)
+
+
+def test_validate_input_transitions_scalar_zero_and_map():
+    scalar, mapping = post_route_sta._validate_input_transitions(
+        {"input_transition_ns": 0, "input_transitions": {"a": 0.2, "b[0]": 1}},
+        "clk",
+    )
+    assert scalar == 0.0
+    assert mapping == {"a": 0.2, "b[0]": 1.0}
+
+
+@pytest.mark.parametrize(
+    ("constraints", "message"),
+    [
+        ({"input_transition_ns": -0.1}, "input_transition_ns must be a finite"),
+        ({"input_transition_ns": float("nan")}, "input_transition_ns must be a finite"),
+        ({"input_transition_ns": float("inf")}, "input_transition_ns must be a finite"),
+        ({"input_transition_ns": True}, "input_transition_ns must be a finite"),
+        ({"input_transition_ns": "0.1"}, "input_transition_ns must be a finite"),
+        ({"input_transitions": [1]}, "input_transitions must be a JSON object"),
+        ({"input_transitions": {"a": -1}}, r"input_transitions\['a'\] must be"),
+        ({"input_transitions": {"a": None}}, r"input_transitions\['a'\] must be"),
+        ({"input_transitions": {"a": False}}, r"input_transitions\['a'\] must be"),
+        ({"input_transitions": {"a": {"max_ns": 1}}}, r"input_transitions\['a'\]"),
+        ({"input_transitions": {"clk": 0.1}}, "must not name the clock port"),
+        ({"input_transitions": {"": 0.1}}, "non-empty port names"),
+        ({"input_transitions": {" a": 0.1}}, "leading/trailing whitespace"),
+        ({"input_transitions": {"a\nb": 0.1}}, "control character"),
+    ],
+)
+def test_validate_input_transitions_rejects(constraints, message):
+    with pytest.raises(PostRouteStaError, match=message):
+        post_route_sta._validate_input_transitions(constraints, "clk")
+
+
+def test_input_transition_lines_omitted_and_empty_add_nothing():
+    assert post_route_sta._input_transition_lines("clk", None, None) == []
+    base = post_route_sta._request_io_delay_lines("clk", 0.2, 0.3, None, None)
+    assert (
+        post_route_sta._request_io_delay_lines("clk", 0.2, 0.3, None, None, None, None)
+        == base
+    )
+
+
+def test_input_transition_lines_scalar_zero_excludes_clock_and_mapped():
+    lines = "\n".join(
+        post_route_sta._input_transition_lines("clk", 0.0, {"a_in": 0.4, "b[1]": 0.0})
+    )
+    assert "[lsearch -inline -all -not -exact [all_inputs]" in lines
+    assert "set klt_transition_mapped [list a_in b\\[1\\]]" in lines
+    assert "set_input_transition 0.0 $klt_transition_default_ports" in lines
+    assert "set_input_transition 0.4 [get_ports a_in]" in lines
+    assert "set_input_transition 0.0 [get_ports b\\[1\\]]" in lines
+
+
+def test_input_transition_map_triggers_single_port_check():
+    lines = post_route_sta._request_io_delay_lines(
+        "clk",
+        None,
+        None,
+        {"a": {"min_ns": 0.1}},
+        None,
+        None,
+        {"a": 0.2, "b": 0.3},
+    )
+    text = "\n".join(lines)
+    assert text.count("proc klt_port_problem") == 1
+    assert text.count("set klt_port_errors {}") == 1
+    assert "input_transition b {input inout bidirect}" in text
+    assert text.index("klt_port_problem") < text.index("set_input_transition")
+
+
+@pytest.mark.parametrize("mode", ["def", "verilog"])
+def test_run_sta_input_transitions_emitted_in_both_modes(tmp_path, monkeypatch, mode):
+    constraints = {
+        "clock_port": "clk",
+        "clock_period_ns": 1.1,
+        "input_transition_ns": 0.05,
+        "input_transitions": {"a_in": 0.3},
+    }
+    if mode == "def":
+        request_path = _setup_success_env(
+            tmp_path, monkeypatch, constraints=constraints
+        )
+    else:
+        request_path = _setup_verilog_success_env(
+            tmp_path, monkeypatch, constraints=constraints
+        )
+    _stub_openroad_success(monkeypatch)
+
+    run_sta(request_path)
+
+    script = _sta_script_text(tmp_path)
+    assert "set_input_transition 0.05 $klt_transition_default_ports" in script
+    assert "set_input_transition 0.3 [get_ports a_in]" in script
+    assert script.index("klt_port_problem") < script.index("set_input_transition")
+    assert script.count("proc klt_port_problem") == 1
+
+
+@pytest.mark.parametrize("mode", ["def", "verilog"])
+def test_run_sta_without_input_transitions_tcl_unchanged(tmp_path, monkeypatch, mode):
+    constraints = dict(_IO_DELAY_CONSTRAINTS)
+    if mode == "def":
+        request_path = _setup_success_env(
+            tmp_path, monkeypatch, constraints=constraints
+        )
+    else:
+        request_path = _setup_verilog_success_env(
+            tmp_path, monkeypatch, constraints=constraints
+        )
+    _stub_openroad_success(monkeypatch)
+
+    run_sta(request_path)
+
+    script = _sta_script_text(tmp_path)
+    assert "set_input_transition" not in script
+    assert "klt_transition" not in script
+    assert post_route_sta._PORT_CHECK_BEGIN not in script
+
+
+def test_run_sta_input_transition_validation_runs_before_engine(tmp_path, monkeypatch):
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        constraints={
+            "clock_port": "clk",
+            "clock_period_ns": 1.1,
+            "input_transitions": {"clk": 0.1},
+        },
+    )
+    calls: list = []
+    monkeypatch.setattr(
+        post_route_sta.subprocess, "run", lambda *a, **k: calls.append(a)
+    )
+    with pytest.raises(PostRouteStaError, match="must not name the clock port"):
+        run_sta(request_path)
+    assert calls == []
+
+
+def test_port_check_error_message_names_input_transitions_field():
+    message = post_route_sta._port_check_error_message(
+        [
+            ("input_transition", "nope", "not_found"),
+            ("input_transition", "q", "direction_output"),
+        ]
+    )
+    assert "constraints.input_transitions['nope']: no port with exactly" in message
+    assert (
+        "constraints.input_transitions['q']: port direction is 'output', not an input"
+        in message
+    )
+
+
 # -- engine port check ------------------------------------------------------ #
 
 
@@ -3958,7 +4119,7 @@ def test_omitting_report_ports_leaves_tcl_unchanged():
 
 def test_report_ports_alone_still_emits_port_check_and_scalar_delays():
     lines = post_route_sta._request_io_delay_lines(
-        "clk", 0.0, 0.1, None, None, ["a_in"]
+        "clk", 0.0, 0.1, None, None, report_ports=["a_in"]
     )
     text = "\n".join(lines)
     assert post_route_sta._PORT_CHECK_BEGIN in text
@@ -3971,7 +4132,9 @@ def test_report_ports_alone_still_emits_port_check_and_scalar_delays():
 def test_port_check_lines_add_report_side_with_any_direction():
     text = "\n".join(
         post_route_sta._port_check_lines(
-            _BOUNDARY_INPUT_DELAYS, _BOUNDARY_OUTPUT_DELAYS, ["q_b", "bus[1]"]
+            _BOUNDARY_INPUT_DELAYS,
+            _BOUNDARY_OUTPUT_DELAYS,
+            report_ports=["q_b", "bus[1]"],
         )
     )
     assert "report q_b {input output inout bidirect}" in text
