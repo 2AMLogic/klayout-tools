@@ -4515,6 +4515,19 @@ def _refuse_xyce_control_block_measurements(
         )
 
 
+def _refuse_xyce_params_axis(corners_spec: dict[str, Any]) -> None:
+    """The ``engine: "xyce"`` refusal for ``corners.params``. Split out of
+    :func:`_enforce_xyce_support_boundary` to keep that gate under the
+    complexity limit."""
+    if corners_spec.get("params"):
+        raise SimError(
+            "engine 'xyce' does not support corners.params: the parameter "
+            "axis is applied with ngspice's `alterparam` + `reset` control "
+            "commands, which Xyce has no netlist equivalent of -- use engine "
+            "'ngspice'"
+        )
+
+
 def _enforce_xyce_support_boundary(
     *,
     engine: str,
@@ -4569,13 +4582,7 @@ def _enforce_xyce_support_boundary(
             "-- leave corners.supply_v unset (fixed supply, hardcoded in "
             "the netlist body) or use engine 'ngspice'"
         )
-    if corners_spec.get("params"):
-        raise SimError(
-            "engine 'xyce' does not support corners.params: the parameter "
-            "axis is applied with ngspice's `alterparam` + `reset` control "
-            "commands, which Xyce has no netlist equivalent of -- use engine "
-            "'ngspice'"
-        )
+    _refuse_xyce_params_axis(corners_spec)
     if monte_carlo_declared:
         raise SimError(
             "engine 'xyce' does not implement monte_carlo sampling -- "
