@@ -2328,7 +2328,7 @@ def _apply_sdf_physical_only_drop(
 def _apply_sdf_bus_port_source_drop(
     annotate_source_path: str,
     output_dir: str,
-    ports: list[tuple[str, int, str]],
+    ports: list[tuple[str, str, str]],
     sdf_pre_dropped_counts: dict[str, int],
 ) -> str:
     """Issue #2984's zero-delay bit-selected-input-source SDF-text drop, the
