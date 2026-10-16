@@ -1241,11 +1241,11 @@ full `repo`/`external`/`absent` scope meanings.
 | `schematic_status` | string         | Issue #2989 (additive). The schematic-side measurement's own `klt sim` limit status: `"pass"`, `"fail"`, or `"error"` (also when the schematic measurement is missing). Does not affect `status`. |
 | `extracted_status` | string         | Issue #2989 (additive). The extracted-side measurement's own `klt sim` limit status; `"error"` for rows whose extracted side never produced a response. |
 | `error`           | object          | Issue #3062 (additive). Present **only** on `status: "error"` rows (absent on `pass`/`fail`), naming why the row has no trustworthy value: `side` (`"schematic"` or `"extracted"`), `stage` (`"submit"`, `"execute"`, `"collect"`, `"parse"` or `"unknown"` — `"unknown"` when the source code maps to no stage, never guessed), `message`, and `code` when the source has one (e.g. `batch_job_failed`, `batch_no_capacity`). Taken from that side's corner `diagnostics[]` (first error-severity entry) or, when that side never returned a report, from the recorded failure; `remote` carries the side's `environment.remote` (the batch job id) when present. The side's full evidence stays under `testbenches[].sides.<side>.corners[]` for the same `corner_id`. |
-
 | `device_only_value` | number \| null | Issue #3298 (additive, `--device-only-leg` only). The measurement on the parasitic-free third leg; `null` when that leg produced nothing for this row. |
 | `representation_delta_pct` | number \| null | Issue #3298 (additive, `--device-only-leg` only). `delta_pct`'s rule applied to `schematic_value` → `device_only_value`: the device-representation/geometry part of `delta_pct`. |
 | `parasitic_delta_pct` | number \| null | Issue #3298 (additive, `--device-only-leg` only). `delta_pct`'s rule applied to `device_only_value` → `extracted_value`: the parasitic part of `delta_pct`. |
 | `device_only_status` | string | Issue #3298 (additive, `--device-only-leg` only). The device-only measurement's own `klt sim` status, or `"error"` when the leg produced nothing for this row. |
+
 When the exit code is `4` because rows errored and at least one row carries an
 `error`, one line is also printed to **stderr** (both `--format json` and
 `--format text`; stdout is unchanged): the errored-row count, and the first
