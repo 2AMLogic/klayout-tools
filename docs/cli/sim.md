@@ -399,6 +399,27 @@ for a single-unit run (one corner does not repay a Spot boot), an
 `options.resume`. An explicit flag or request field is never overridden —
 pass `--backend local` to keep a multi-corner run on the host on purpose.
 
+`$KLT_SIM_BACKEND` was introduced in `klt` **0.7.0** (the first tag that
+reads it). An older client never reads the variable, so `KLT_SIM_BACKEND=batch`
+with, say, `uvx --from klayout-tools==0.5.0 klt sim` silently runs every corner
+on the local host. No change in this repository can make an old client fail
+closed; the guard belongs in the worker spec (pin the `klt` version the host
+exposes). Audit a run with `environment.backend` (below): a `local` run whose
+`requested` is `batch` and `source` is `env` stepped aside by design; a report
+from an old client has no `environment.backend` at all.
+
+**Resolved backend (`environment.backend`, issue #2977).** Every report
+records which backend ran and where the choice came from:
+
+```json
+"backend": { "resolved": "local", "source": "env", "requested": "batch" }
+```
+
+`source` is `flag` (`--backend`), `request` (`request.backend`), `env`
+(`$KLT_SIM_BACKEND`) or `default`. `requested` is the value that source named;
+`resolved` is what ran, and differs from `requested` only when a host default
+stepped aside to `local` (see above). Additive; no `schema_version` bump.
+
 | `backend`        | Behaviour                                                                                                          |
 | ----------------- | ------------------------------------------------------------------------------------------------------------------- |
 | `local` (default) | Runs corners sequentially, one `ngspice -b` subprocess at a time, in-process.                                       |
@@ -1537,6 +1558,7 @@ release segment:
 |---|---|---|
 | `analysis_steps` ([#2482](https://github.com/2AMLogic/klayout-tools/issues/2482)) | `analysis_steps` is present | `0.7.1` |
 | `transfer` ([#2924](https://github.com/2AMLogic/klayout-tools/issues/2924)) | any `measurements[]` entry declares `transfer` | `0.7.1` (**mandatory**, see below) |
+| `stimulus` ([#2977](https://github.com/2AMLogic/klayout-tools/issues/2977)) | `stimulus` is present | `0.7.1` (**mandatory**, see below) |
 
 `decks[]` ([#3303](https://github.com/2AMLogic/klayout-tools/issues/3303)) is
 the next registry entry.
@@ -1560,8 +1582,10 @@ the next registry entry.
 - Limit: a `0.7.1.devN` runner built before a feature landed looks the same as
   one built after, so it counts as supporting it.
 
-**Mandatory features (`transfer`, [#2924](https://github.com/2AMLogic/klayout-tools/issues/2924)).**
-A runner that predates `measurements[].transfer` would drop the metric, so
+**Mandatory features (`transfer`, [#2924](https://github.com/2AMLogic/klayout-tools/issues/2924); `stimulus`, [#2977](https://github.com/2AMLogic/klayout-tools/issues/2977)).**
+A runner that predates `measurements[].transfer` would drop the metric (and one
+that predates `stimulus` would simulate with the digital control lines
+undriven), so
 this entry is not relaxed by `runner_version_check: "warn"` and "unknown" is
 not tolerated on the runner side:
 
@@ -4060,6 +4084,93 @@ into a step `expr` measurement. Write the cross-point arithmetic as a derived
 measurement over `<step>.<name>` references, with `limits` attached. Then
 remove the `.control` block from the netlist body (see "Netlist convention"
 above). The bench can then run on any backend.
+
+## Declarative timed stimulus (`stimulus`)
+
+A bench that drives digital control lines with timed edges used to expand each
+edge list into `PWL` sources inside the netlist and keep a side-car schedule in
+sync by convention. Declare the schedule in the request instead
+([#2977](https://github.com/2AMLogic/klayout-tools/issues/2977)):
+
+```json
+"stimulus": {
+  "signals": [
+    { "source": "vclk", "node": "clk", "ref": "0", "initial": 0.0,
+      "rise_s": 1e-10, "fall_s": 1e-10, "skew_s": 2e-10,
+      "events": [ { "t_s": 1e-9, "level": 1.8 },
+                  { "t_s": 5e-9, "level": 0.0, "transition_s": 5e-11 } ] }
+  ]
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `signals[].source` | SPICE voltage-source name to create (must start with `V`; unique within the block). |
+| `signals[].node` / `ref` | Positive node and reference node (`ref` defaults to `0`). |
+| `signals[].initial` | Level at `t=0` (default `0`). |
+| `signals[].rise_s` / `fall_s` | Default transition time of an increasing / decreasing edge (default `0`). |
+| `signals[].skew_s` | Shift applied to every event of this signal (default `0`; may be negative while `t_s + skew_s >= 0`). |
+| `signals[].events[]` | `t_s` (edge start, strictly increasing, `>= 0`), `level`, optional `transition_s` overriding the signal default for that edge. |
+
+An event at `t_s` (plus `skew_s`) is when the edge **starts**; the level is
+reached one transition later. A transition of `0` cannot be written as a PWL
+(time points must increase), so it is applied as 1 fs (`1e-15`); the report
+shows the value applied. An event whose level equals the current level is a
+`hold` and adds no points.
+
+`klt sim` appends one `<source> <node> <ref> PWL(...)` card per signal to every
+corner's deck, right after the netlist `.include`, so the caller no longer
+hand-writes PWL. Requirements:
+
+- `analysis.kind` is `tran` (or `analysis_steps[]`), engine `ngspice`.
+- The source name must not already be defined in the netlist or its resolvable
+  `.include`/`.lib` closure, and must not be a `corners.supply_v` target.
+
+Everything is validated before any corner runs; failures are `SimError`s whose
+`error.code` is one of `stimulus_invalid`, `stimulus_bad_time`
+(non-monotonic, negative, or skewed below zero), `stimulus_edge_overlap` (an
+edge starts before the previous one finishes), `stimulus_edge_after_stop` (an
+edge starts at or after the transient stop time), `stimulus_source_collision`,
+`stimulus_supply_conflict`, `stimulus_unsupported`.
+
+### Response: `environment.stimulus`
+
+The schedule **as applied** is echoed so analyzers read event times from the
+report, not from a side-car file:
+
+```json
+"stimulus": { "signals": [ {
+  "source": "vclk", "node": "clk", "ref": "0", "initial": 0.0, "skew_s": 2e-10,
+  "events": [ { "t_s": 1e-9, "t_applied_s": 1.2e-9, "level": 1.8,
+                "edge": "rise", "transition_s": 1e-10 } ],
+  "pwl": [ [0.0, 0.0], [1.2e-9, 0.0], [1.3e-9, 1.8] ] } ] }
+```
+
+`edge` is `rise`, `fall` or `hold`; `t_applied_s` is `t_s + skew_s`.
+Additive: absent when the request declares no `stimulus`. No `schema_version`
+bump (see `docs/json-contract.md`).
+
+### Backends, resume, and runner compatibility
+
+`local` and `local-parallel` write the cards into each corner deck. `remote`
+and `batch` forward the request, and the worker's own `klt sim` expands it the
+same way (the orchestrating report echoes the schedule too). The checkpoint
+fingerprint includes the expanded cards, so editing the schedule invalidates a
+`--resume` checkpoint. **A runner older than this feature ignores the
+`stimulus` key and would simulate with no drive, so `stimulus` is registered
+as a **mandatory** request feature (first runner release `0.7.1`; see
+"Request-feature capability check"): a `remote`/`batch` request that carries
+it is refused with `batch_runner_feature_unsupported` when the runner
+predates it or its version cannot be read, even under
+`runner_version_check: "warn"`.
+
+Not in scope here: stimulus *variants* as a Monte Carlo/corner axis
+([#3099](https://github.com/2AMLogic/klayout-tools/issues/3099)) and per-step
+retargeting of a PWL-declared source
+([#3117](https://github.com/2AMLogic/klayout-tools/issues/3117)). The block is
+an object (`signals` is one key of it) and each signal is addressed by its
+`source` name, so a future `variants` sibling or an `alter` that names a
+stimulus `source` can build on it without changing this shape.
 
 ## Off-host backends stage the netlist's `.include` closure
 

@@ -50,13 +50,15 @@ pull-up" shape the issue describes.
 - `generate.py` — builds `example_sky130.gds`/`example_gf180mcu.gds`: the
   hand-drawn dog-bone device placed beside a real `klt gen mos_array` unit
   device (`w_um=0.6`, an ordinary width above the floor) in one cell, for
-  each family. Verifies both are `klt drc`-clean against the matching
-  curated deck before writing the companion `.drc.json` report, and raises
-  if either is not.
+  each family. Verifies both have no `klt drc` violations against the matching
+  curated deck other than gf180mcu's `tap_distance` rules (see below) before
+  writing the companion `.drc.json` report, and raises if either does.
 - `example_sky130.gds` / `example_sky130.drc.json` — the sky130 result
   (`"status": "clean"`).
 - `example_gf180mcu.gds` / `example_gf180mcu.drc.json` — the gf180mcu result
-  (`"status": "clean"`).
+  (`"status": "violations"`, only `comp.tap_distance.*` -- DF.13_LV/DF.14_LV
+  fire because the layout has no well/substrate taps; generator tap emission
+  is tracked separately, so this is not a DRC-clean layout).
 
 Regenerate all four with:
 
