@@ -3028,6 +3028,12 @@ a corner grid. A stock ngspice without the module still produces the
     etc.), following the same validation principle: the section must exist in
     the model library and produce trustworthy device-level parameter spread
     over multiple Monte Carlo samples.
+    Poly resistors (`sky130_fd_pr__res_*`) are covered too: their subcircuits
+    draw per-instance `AGAUSS` terms (`res_match`, `rend`) scaled by
+    `MC_MM_SWITCH`, so two identical instances differ under `tt_mm` (measured
+    on the volare sky130A build `c6d73a35…`; note the term is upper-case, so a
+    case-sensitive `grep agauss` misses it). The corner-level `var_mult` is a
+    separate term shared by all instances.
   - **gf180mcu**: Mismatch works differently — there is **no** corner-suffixed
     `_mm` section to select. `sm141064.ngspice` (`libs.tech/ngspice/`) exposes
     only plain corner sections (`typical`, `ss`, `ff`, `sf`, `fs`, plus
