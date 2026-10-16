@@ -3547,7 +3547,11 @@ def test_clock_capture_fixture_matches_module_tcl():
     # -- so the pre-#2780 capture still matches everything before it.
     completeness = post_route_sta._constraint_completeness_lines()
     assert fresh[-len(completeness) :] == completeness
-    assert stored == fresh[: -len(completeness)]
+    # Issue #3005 likewise inserts the electrical-limit block just before it.
+    electrical = post_route_sta._electrical_check_lines()
+    head = fresh[: -len(completeness)]
+    assert head[-len(electrical) :] == electrical
+    assert stored == head[: -len(electrical)]
 
 
 # -- request validation ------------------------------------------------------#
@@ -5923,6 +5927,124 @@ def test_live_engine_sdf_per_corner(tmp_path):
     tt_text, ss_text = texts
     iopath = re.compile(r"\(IOPATH .*")
     assert iopath.findall(tt_text) != iopath.findall(ss_text)
+
+
+# --------------------------------------------------------------------------- #
+# electrical_checks (issue #3005)
+# --------------------------------------------------------------------------- #
+
+_SLEW_REPORT = """max slew
+
+Pin                                       Limit       Slew      Slack
+---------------------------------------------------------------------
+u1/Y                                    0.00100    0.03000   -0.02900 (VIOLATED)
+u2/A                                    0.00100    0.03000   -0.02900 (VIOLATED)
+y                                       0.00100    0.01057   -0.00957 (VIOLATED)
+
+KLT_ELECTRICAL_NET u1/Y n1
+KLT_ELECTRICAL_NET u2/A n1
+KLT_ELECTRICAL_NET y y
+KLT_ELECTRICAL_OK
+"""
+
+
+def _slew_block(body):
+    return "\n".join(
+        [post_route_sta._MAX_SLEW_BEGIN, body, post_route_sta._MAX_SLEW_END]
+    )
+
+
+def test_parse_electrical_check_violating():
+    result = post_route_sta._parse_electrical_check(
+        _slew_block(_SLEW_REPORT),
+        post_route_sta._MAX_SLEW_BEGIN,
+        post_route_sta._MAX_SLEW_END,
+        "ns",
+    )
+
+    assert result == {
+        "coverage": "checked",
+        "limit_source": "liberty",
+        "unit": "ns",
+        "violation_count": 3,
+        "net_count": 2,
+        "worst_excess": 0.029,
+        "worst_pin": "u1/Y",
+    }
+
+
+def test_parse_electrical_check_clean_is_checked_zero():
+    """A clean design prints nothing from `report_check_types`; only the
+    sentinel says the check ran, and that is a real zero."""
+    result = post_route_sta._parse_electrical_check(
+        _slew_block("\nKLT_ELECTRICAL_OK\n"),
+        post_route_sta._MAX_SLEW_BEGIN,
+        post_route_sta._MAX_SLEW_END,
+        "ns",
+    )
+
+    assert result["coverage"] == "checked"
+    assert result["violation_count"] == 0
+    assert result["net_count"] == 0
+    assert result["worst_pin"] is None
+
+
+def test_parse_electrical_check_command_unsupported():
+    result = post_route_sta._parse_electrical_check(
+        _slew_block("KLT_ELECTRICAL_UNSUPPORTED"),
+        post_route_sta._MAX_SLEW_BEGIN,
+        post_route_sta._MAX_SLEW_END,
+        "ns",
+    )
+
+    assert result["coverage"] == "unsupported"
+    assert result["violation_count"] is None
+    assert result["net_count"] is None
+
+
+def test_parse_electrical_check_session_aborted_is_not_run():
+    result = post_route_sta._parse_electrical_check(
+        "no markers here",
+        post_route_sta._MAX_SLEW_BEGIN,
+        post_route_sta._MAX_SLEW_END,
+        "ns",
+    )
+
+    assert result["coverage"] == "not_run"
+    assert result["violation_count"] is None
+    assert result["worst_excess"] is None
+
+
+def test_electrical_checks_block_parasitics_source_follows_spef():
+    stdout = _slew_block(_SLEW_REPORT)
+
+    with_spef = post_route_sta._electrical_checks_block(stdout, True)
+    without = post_route_sta._electrical_checks_block(stdout, False)
+
+    assert with_spef["parasitics_source"] == "spef"
+    assert without["parasitics_source"] == "none"
+    assert with_spef["max_transition"]["coverage"] == "checked"
+    assert with_spef["max_capacitance"]["coverage"] == "not_run"
+    assert with_spef["max_capacitance"]["unit"] == "pF"
+
+
+def test_sta_script_runs_electrical_checks_after_read_spef():
+    lines = post_route_sta._sta_script_lines(
+        tech_lef="t.lef",
+        cell_lef="c.lef",
+        def_path="d.def",
+        liberty_path="l.lib",
+        clock_port="clk",
+        clock_period_ns=10.0,
+        spef_path="x.spef",
+    )
+
+    text = "\n".join(lines)
+    assert lines.index("read_spef x.spef") < lines.index(
+        f'puts "{post_route_sta._MAX_SLEW_BEGIN}"'
+    )
+    assert "report_check_types -max_slew -violators" in text
+    assert "report_check_types -max_capacitance -violators" in text
 
 
 # --------------------------------------------------------------------------- #

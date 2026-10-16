@@ -320,6 +320,24 @@ _DELAY_POST_END = "===KLT_STA_DELAY_POST_END==="
 #: :func:`_parasitic_annotation_lines` / :func:`_parse_parasitic_annotation`.
 _PARASITIC_ANNOTATION_BEGIN = "===KLT_STA_PARASITIC_ANNOTATION_BEGIN==="
 _PARASITIC_ANNOTATION_END = "===KLT_STA_PARASITIC_ANNOTATION_END==="
+#: Marker pairs and sentinels for the per-corner ``electrical_checks`` block
+#: (issue #3005): one ``report_check_types -violators`` region per limit class.
+#: See :func:`_electrical_check_lines` / :func:`_parse_electrical_check`.
+_MAX_SLEW_BEGIN = "===KLT_STA_MAX_SLEW_BEGIN==="
+_MAX_SLEW_END = "===KLT_STA_MAX_SLEW_END==="
+_MAX_CAP_BEGIN = "===KLT_STA_MAX_CAP_BEGIN==="
+_MAX_CAP_END = "===KLT_STA_MAX_CAP_END==="
+_ELECTRICAL_OK = "KLT_ELECTRICAL_OK"
+_ELECTRICAL_UNSUPPORTED = "KLT_ELECTRICAL_UNSUPPORTED"
+_ELECTRICAL_NET_PREFIX = "KLT_ELECTRICAL_NET"
+#: One violator row of ``report_check_types``: ``<pin> <limit> <value> <slack>
+#: (VIOLATED)``. Anchored from the right so a pin name is taken verbatim.
+_ELECTRICAL_ROW_RE = re.compile(
+    r"^(?P<pin>\S.*?)\s+(?P<limit>-?[\d.]+(?:e[-+]?\d+)?)\s+"
+    r"(?P<value>-?[\d.]+(?:e[-+]?\d+)?)\s+(?P<slack>-?[\d.]+(?:e[-+]?\d+)?)"
+    r"\s+\(VIOLATED\)\s*$",
+    re.IGNORECASE,
+)
 #: Any OpenSTA-tagged warning. Only ever matched *inside* the
 #: :data:`_SPEF_READ_BEGIN`/:data:`_SPEF_READ_END` stdout region, where the
 #: SPEF reader is the only thing running.
@@ -1046,6 +1064,8 @@ def _dispatch_sta(
     # Additive field (issue #2886): the post-route SDF this corner's session
     # wrote -- `{path, scope, content_hash}`, `null` unless `request.sdf`.
     response["sdf"] = corner_fields["sdf"]
+    # Additive field (issue #3005): see `_electrical_checks_block`.
+    response["electrical_checks"] = corner_fields["electrical_checks"]
     response["engine_log"] = corner_fields["engine_log"]
 
     return response
@@ -1273,6 +1293,14 @@ def _run_corner_session(
     # Issue #2739: the propagated-clock evidence block -- what propagation
     # actually reached -- parsed from this session's `report_clock_latency`
     # dump; `null` unless the request asked for propagated-clock timing.
+    # Additive field (issue #3005): max-transition / max-capacitance checks
+    # against this session's parasitics; `null` in netlist mode (no routed
+    # geometry to check).
+    corner_fields["electrical_checks"] = (
+        _electrical_checks_block(completed.stdout or "", spef_path is not None)
+        if has_def
+        else None
+    )
     if propagated_clock and has_def:
         corner_fields["clock_propagation"] = _parse_clock_latency(
             completed.stdout or "", clock_port
@@ -2847,6 +2875,59 @@ def _violation_count_lines() -> list[str]:
     )
 
 
+def _electrical_check_lines() -> list[str]:
+    """Marker-delimited max-transition / max-capacitance violator reports
+    (issue #3005), run in the same session that already did ``read_spef`` so
+    the numbers are against the extracted parasitics when a ``spef`` was
+    given.
+
+    Units are pinned with ``set_cmd_units`` (``ns`` / ``pF``) so the report
+    is in the units the response states regardless of the Liberty's own.
+    Each report runs through ``sta::redirect_string_begin``/``_end`` inside a
+    ``catch``: a clean design prints nothing from ``report_check_types``, so
+    the explicit ``KLT_ELECTRICAL_OK`` sentinel is what distinguishes
+    "checked, zero violations" from a command that never ran
+    (``KLT_ELECTRICAL_UNSUPPORTED`` when the ``catch`` fired; a missing
+    block is ``not_run``). For every violating pin a ``KLT_ELECTRICAL_NET``
+    row maps it to its net (ports are their own net) so distinct nets can be
+    counted."""
+    lines = ["set_cmd_units -time ns -capacitance pF"]
+    for flag, begin, end in (
+        ("-max_slew", _MAX_SLEW_BEGIN, _MAX_SLEW_END),
+        ("-max_capacitance", _MAX_CAP_BEGIN, _MAX_CAP_END),
+    ):
+        lines += [
+            f'puts "{begin}"',
+            "set klt_elec_rep {}",
+            "if {[catch {",
+            "  sta::redirect_string_begin",
+            f"  report_check_types {flag} -violators -digits 5",
+            "  set klt_elec_rep [sta::redirect_string_end]",
+            "} klt_elec_msg]} {",
+            f'  puts "{_ELECTRICAL_UNSUPPORTED}"',
+            "} else {",
+            "  puts $klt_elec_rep",
+            '  foreach klt_elec_line [split $klt_elec_rep "\\n"] {',
+            '    if {[string match "*(VIOLATED)*" $klt_elec_line]} {',
+            "      set klt_elec_pin [lindex $klt_elec_line 0]",
+            "      set klt_elec_obj [get_pins -quiet $klt_elec_pin]",
+            "      if {[llength $klt_elec_obj]} {",
+            "        set klt_elec_net [get_nets -quiet -of_objects $klt_elec_obj]",
+            "        set klt_elec_net_name [expr {[llength $klt_elec_net] ? "
+            "[get_full_name $klt_elec_net] : $klt_elec_pin}]",
+            "      } else {",
+            "        set klt_elec_net_name $klt_elec_pin",
+            "      }",
+            f'      puts "{_ELECTRICAL_NET_PREFIX} $klt_elec_pin $klt_elec_net_name"',
+            "    }",
+            "  }",
+            f'  puts "{_ELECTRICAL_OK}"',
+            "}",
+            f'puts "{end}"',
+        ]
+    return lines
+
+
 def _sta_script_lines(
     *,
     tech_lef: str,
@@ -2948,6 +3029,9 @@ def _sta_script_lines(
     lines += _violation_count_lines()
     lines += _worst_path_lines()
     lines += _port_path_lines(report_ports)
+    # Before the completeness query, which must stay the script's last
+    # statements (issue #2780): it can take the session down.
+    lines += _electrical_check_lines()
     lines += _constraint_completeness_lines()
     return lines
 
@@ -3366,6 +3450,69 @@ def _parse_parasitic_annotation(stdout: str) -> tuple[int | None, int | None]:
         int(unannotated_match.group(1)) if unannotated_match else None,
         int(partial_match.group(1)) if partial_match else None,
     )
+
+
+def _electrical_class(
+    coverage: str, unit: str, rows: list[tuple[str, float, float]], nets: set[str]
+) -> dict[str, Any]:
+    """One limit class of the ``electrical_checks`` block. Counts, excess and
+    pin are ``null`` unless ``coverage == "checked"``."""
+    checked = coverage == "checked"
+    worst = max(rows, key=lambda row: row[2], default=None) if checked else None
+    return {
+        "coverage": coverage,
+        "limit_source": "liberty",
+        "unit": unit,
+        "violation_count": len(rows) if checked else None,
+        "net_count": len(nets) if checked else None,
+        "worst_excess": round(worst[2], 5) if worst is not None else None,
+        "worst_pin": worst[0] if worst is not None else None,
+    }
+
+
+def _parse_electrical_check(
+    stdout: str, begin: str, end: str, unit: str
+) -> dict[str, Any]:
+    """Parse one ``report_check_types -violators`` block (issue #3005).
+
+    ``coverage`` is ``"not_run"`` when the markers are absent (the session
+    never reached the block), ``"unsupported"`` when the Tcl ``catch`` fired,
+    and ``"checked"`` only when the ``KLT_ELECTRICAL_OK`` sentinel closed the
+    block -- so zero violations is only ever reported for a check that ran.
+    ``worst_excess`` is ``value - limit`` of the worst violator (positive)."""
+    block = _extract_block(stdout, begin, end)
+    if block is None:
+        return _electrical_class("not_run", unit, [], set())
+    if _ELECTRICAL_UNSUPPORTED in block or _ELECTRICAL_OK not in block:
+        return _electrical_class("unsupported", unit, [], set())
+    rows: list[tuple[str, float, float]] = []
+    nets: set[str] = set()
+    for line in block.splitlines():
+        if line.startswith(_ELECTRICAL_NET_PREFIX + " "):
+            parts = line.split(None, 2)
+            if len(parts) == 3:
+                nets.add(parts[2].strip())
+            continue
+        match = _ELECTRICAL_ROW_RE.match(line)
+        if match:
+            excess = float(match.group("value")) - float(match.group("limit"))
+            rows.append((match.group("pin"), float(match.group("limit")), excess))
+    return _electrical_class("checked", unit, rows, nets)
+
+
+def _electrical_checks_block(stdout: str, has_spef: bool) -> dict[str, Any]:
+    """The per-corner ``electrical_checks`` response block (issue #3005).
+    ``parasitics_source`` says whether the numbers are against the
+    caller-supplied extracted SPEF or LEF/DEF-only wire models."""
+    return {
+        "parasitics_source": "spef" if has_spef else "none",
+        "max_transition": _parse_electrical_check(
+            stdout, _MAX_SLEW_BEGIN, _MAX_SLEW_END, "ns"
+        ),
+        "max_capacitance": _parse_electrical_check(
+            stdout, _MAX_CAP_BEGIN, _MAX_CAP_END, "pF"
+        ),
+    }
 
 
 # --------------------------------------------------------------------------- #

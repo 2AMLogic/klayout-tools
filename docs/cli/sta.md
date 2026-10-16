@@ -264,7 +264,46 @@ the path itself, an external one as `<outside repo>`, and an unused input as
 | `estimated_power_mw` | number \| null | From `report_power_metric`, against whatever parasitics (SPEF-annotated or LEF-capacitance-only) this run used. |
 | `spef_annotation` | object \| null | `null` unless `request.spef` was given. See "Annotation evidence" below for the field shapes — and read it before quoting a SPEF-annotated timing number as a real-parasitics measurement. |
 | `sdf` | object \| null | Additive field (issue #2886). `null` unless `request.sdf: true`. Otherwise `{path, scope, content_hash}`: the `{path, scope}` identity of the SDF this corner's session wrote (the same envelope `spef_path` uses — never an absolute host path) plus the `sha256:`-prefixed digest of its bytes, so it can be cited as an input. On a `corners` response the field is not hoisted — one per `corners[]` entry. See "Post-route SDF per corner" below. |
+| `electrical_checks` | object \| null | Additive field (issue #3005). **`def` mode only** (`null` with `verilog`). Max-transition and max-capacitance checks from the same OpenSTA session as the timing numbers, so with a `spef` they are against the extracted parasitics. Per `corners[]` entry on a multi-corner response. See "Electrical limit checks" below. |
 | `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names the resolved liberty file (`<cell_library>__<corner>`); `pdk` is `find_pdk()`'s resolved triple; `input` is the content hash of `def` (`input.role: "layout"`) — or of `verilog` in netlist mode, where the role is `"netlist"` instead (issue #2027, so a consumer never compares a netlist digest against a layout one). On a `pdk.corners` (list) response this block carries `deck: null` at the top level — see "Multi-corner characterization" below for where the per-corner `deck` block actually lives. |
+
+## Electrical limit checks (`electrical_checks`, issue #3005)
+
+```json
+"electrical_checks": {
+  "parasitics_source": "spef",
+  "max_transition": {
+    "coverage": "checked",
+    "limit_source": "liberty",
+    "unit": "ns",
+    "violation_count": 4,
+    "net_count": 2,
+    "worst_excess": 0.029,
+    "worst_pin": "u1/Y"
+  },
+  "max_capacitance": { "coverage": "checked", "limit_source": "liberty", "unit": "pF",
+    "violation_count": 0, "net_count": 0, "worst_excess": null, "worst_pin": null }
+}
+```
+
+- `parasitics_source` — `"spef"` when the request gave a `spef`, `"none"`
+  otherwise (LEF/DEF-only parasitics: never read those numbers as
+  extracted-route numbers).
+- `coverage` — `"checked"` (the report ran; `violation_count: 0` is a real
+  zero), `"unsupported"` (the OpenSTA build rejected the report command), or
+  `"not_run"` (the session never reached the check). Counts, `net_count`,
+  `worst_excess` and `worst_pin` are `null` unless `coverage` is `"checked"`
+  — an absent check can never be read as zero violations.
+- `limit_source` — always `"liberty"` today: `klt sta` has no limit-override
+  constraints, so the limits are the loaded deck's own per-pin / per-cell
+  values (which differ per corner).
+- `violation_count` — violating pins; `net_count` — distinct nets those pins
+  sit on. `worst_excess` is `value - limit` (positive) of the worst violator,
+  in `unit` (`ns` for transition, `pF` for capacitance); `worst_pin` is where.
+
+Report only: no pass/fail verdict is derived from these counts. This is
+independent of `place-and-route`'s in-flow `max_transition_violation_count`
+/ `max_capacitance_violation_count`, which are a global-route *estimate*.
 
 ## Violation counts: check families (issue #2741)
 
@@ -657,8 +696,10 @@ measurement.
 **What a `klt extract --spef` SPEF models (issue #3257).** By default it is
 lumped capacitance per net with no wire resistance between DEF-level pins
 (zero-ohm legs), so `read_spef` adds wire load but not pin-to-pin wire delay.
-Build it with `--def-net-connections` **and** `--def-pins`; without the
-latter, most nets cannot attach (`STA-1656`) and `delay_changed` stays false.
+Build it with `--def-net-connections`, `--def-pins` **and** `--def-net-names`;
+without `--def-pins`, most nets cannot attach (`STA-1656`) and `delay_changed`
+stays false, and without `--def-net-names` the extracted names are `$N` so
+almost nothing correlates (52 / 537 `gcd` nets annotated).
 See `docs/cli/extract.md`, "SPEF export".
 
 `klt sta` answers that with **four independent pieces of evidence**, three

@@ -1297,10 +1297,10 @@ def _spef_warnings(
         more = len(skipped_nets) - 5
         out.append(
             f"--spef: omitted *D_NET blocks for {len(skipped_nets)} "
-            "duplicate-named net(s) with no DEF net (floating cell "
-            f"outputs / unrouted supplies): {shown}"
+            "duplicate-named or unlabelled ($N) net(s) with no DEF net "
+            f"(floating cell outputs / unrouted supplies): {shown}"
             + (f", ... (+{more} more)" if more > 0 else "")
-            + ". Same-named *D_NET blocks are rejected by OpenSTA "
+            + ". Such *D_NET blocks are rejected by OpenSTA "
             "(STA-1650) and attach to no driver."
         )
     return out
@@ -2079,6 +2079,13 @@ def run_extract(
             ],
             "voltage_domain_warnings": [
                 {"marker": "<layer>/<datatype>", "description": str}, ...
+            ],
+            "unsupported_devices": [
+                {
+                    "kind": str, "marker": "<layer>/<datatype>",
+                    "count": int, "bbox_um": {...}, "description": str,
+                },
+                ...
             ],
             "merged_net_labels": [
                 {"net": str, "labels": [str, ...]}, ...
@@ -2860,6 +2867,7 @@ def run_extract(
     hierarchy_placements: dict[int, Any] = {}
     subcircuit_info: dict[str, Any] = {}
     missing_flavour_markers: list[dict[str, Any]] = []
+    unsupported_devices: list[dict[str, Any]] = []
     probe_results: list[dict[str, Any]] = []
     dotted_renames: list[tuple[str, str, str]] = []
 
@@ -2917,6 +2925,7 @@ def run_extract(
         # `--pdk-root` resolved one above.
         pdk_info=pdk_info,
         missing_flavour_markers=missing_flavour_markers,
+        unsupported_devices=unsupported_devices,
         probes=probes,
         probe_results=probe_results,
         dotted_renames_out=dotted_renames,
@@ -3787,6 +3796,11 @@ def run_extract(
         # declares `mos_flavours` whose marker layer has zero shapes in the
         # whole layout -- see `_detect_missing_flavour_markers`.
         "missing_flavour_markers": missing_flavour_markers,
+        # Additive field (issue #2919): always a list, empty unless the
+        # layout draws shapes on a deck `unsupported_device_markers` layer
+        # (a device class the deck cannot extract yet, e.g. gf180mcu MOS
+        # capacitors) -- see `_detect_unsupported_devices`.
+        "unsupported_devices": unsupported_devices,
         # Additive field (issue #555): always a list, empty when no PMOS
         # device's body net is the anonymous, KLayout-synthesized kind -- see
         # run_extract's docstring and `_detect_unbiased_pmos_body_nets` for
@@ -4894,6 +4908,7 @@ def extract_netlist_from_layout(
     substrate_spreading_net: str | None = None,
     pdk_info: dict[str, Any] | None = None,
     missing_flavour_markers: list[dict[str, Any]] | None = None,
+    unsupported_devices: list[dict[str, Any]] | None = None,
     dotted_renames_out: list[tuple[str, str, str]] | None = None,
 ) -> tuple[
     kdb.Netlist,
@@ -5381,6 +5396,12 @@ def extract_netlist_from_layout(
     warnings = warnings + missing_marker_prose_warnings
     if missing_flavour_markers is not None:
         missing_flavour_markers.extend(missing_marker_entries)
+
+    # Unsupported devices (issue #2919): additive diagnostic through the
+    # optional `unsupported_devices` out-parameter, same idiom as above.
+    warnings = warnings + _detect_unsupported_devices(
+        layout, top_cell, deck, unsupported_devices
+    )
 
     # Issue #2722: per-device placement attribution for
     # `--hierarchical-cells`, keyed by `Device.id()`, filled into the
@@ -7798,6 +7819,53 @@ def _detect_missing_flavour_markers(
             }
         )
     return warnings, entries
+
+
+def _detect_unsupported_devices(
+    layout: kdb.Layout,
+    top_cell: kdb.Cell,
+    deck: ExtractionDeck,
+    entries_out: list[dict[str, Any]] | None = None,
+) -> list[str]:
+    """Flag each ``deck.unsupported_device_markers`` layer that carries shapes
+    in the extracted cell (issue #2919).
+
+    The deck cannot extract that device class, so the devices are missing
+    from the netlist even though the run reports ``status: extracted``.
+
+    Returns the prose warnings and extends ``entries_out`` (when given) with
+    one entry per flagged marker: ``{"kind": str, "marker":
+    "<layer>/<datatype>", "count": int, "bbox_um": {...}, "description":
+    str}`` where ``count`` is the number of connected marker components and
+    ``bbox_um`` bounds all of them. Nothing is returned or appended when the
+    deck declares no such marker or none has shapes.
+    """
+    warnings: list[str] = []
+    entries: list[dict[str, Any]] = []
+    for spec in deck.unsupported_device_markers:
+        region = _region(layout, top_cell, spec.marker).merged()
+        if region.is_empty():
+            continue
+        count = region.count()
+        marker_label = f"{spec.marker[0]}/{spec.marker[1]}"
+        warnings.append(
+            f"unsupported device class '{spec.kind}': marker layer "
+            f"{marker_label} carries {count} shape(s) ({spec.description}), "
+            "but this deck does not extract that device, so it is absent "
+            "from the netlist"
+        )
+        entries.append(
+            {
+                "kind": spec.kind,
+                "marker": marker_label,
+                "count": count,
+                "bbox_um": _bbox_um_rounded(region.bbox(), layout.dbu),
+                "description": spec.description,
+            }
+        )
+    if entries_out is not None:
+        entries_out.extend(entries)
+    return warnings
 
 
 def _detect_voltage_domain_overlap(

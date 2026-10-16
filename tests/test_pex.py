@@ -3957,6 +3957,41 @@ def test_run_pex_measure_command_leaves_backend_env_alone_without_flag(
     }
 
 
+#: A harness that takes ownership of the directory a nested ``klt sim`` would
+#: default to (``.klt/sim`` beside a request under $KLT_PEX_ARTIFACTS_DIR) while
+#: the parent ``klt pex`` holds its outdir locked (#3291).
+_NESTED_LOCK_HARNESS = """\
+import json, os
+from klayout_tools import output_lock
+
+with output_lock.hold_output_dir(
+    os.path.join(os.environ["KLT_PEX_ARTIFACTS_DIR"], ".klt", "sim")
+):
+    pass
+print(json.dumps({"corners": [{"corner_id": "tt", "measurements": [
+    {"name": "t_cross", "value": 1.0, "status": "pass"}]}]}))
+"""
+
+
+def test_run_pex_measure_command_child_can_own_dir_under_artifacts_dir(
+    tmp_path, resistor_layout, measure_reference, monkeypatch
+):
+    """Issue #3291: the parent's flock is per-process, so without the inherited
+    marker a nested `klt sim` under $KLT_PEX_ARTIFACTS_DIR is `outdir_locked`."""
+    monkeypatch.setenv("KLT_LOCK_DIR", str(tmp_path / "locks"))
+    report = run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        output=str(tmp_path / "res.spice"),
+        artifacts_dir=str(tmp_path / "art"),
+        measure_command=_write_harness(tmp_path, _NESTED_LOCK_HARNESS),
+        reference_netlist=measure_reference,
+    )
+
+    assert report["status"] == "pass"
+
+
 def test_run_pex_measure_command_keeps_extraction_disclosures(
     tmp_path, resistor_layout, measure_reference
 ):

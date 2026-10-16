@@ -46,6 +46,13 @@ not `klt --version`, if you need to detect this kind of drift. See
   The aggregated report gains `environment.{backend,remote.fleet[]}` and
   `corner_runs[].job_id`/`error_code` (batch runs only). Additive; no
   `schema_version` bump.
+- **`klt extract --spef --def-net-connections` omits unlabelled `$N` nets absent
+  from the DEF** (issue #3580): generalises the #3257 gap C omission from
+  duplicate-named nets to unique-named `$<digits>` nets (and coupling to them),
+  which OpenSTA rejects with `STA-1650`; they are listed in `warnings[]`.
+  Docs now state `--def-net-names` is required alongside
+  `--def-net-connections --def-pins`. SPEF output without
+  `--def-net-connections` is unchanged. Additive; no `schema_version` bump.
 - **`klt sim` batch: opt-in auto-split of a request that cannot fit the fleet's
   whole-job ceiling** (issue #3446): `batch.job_ceiling_check: "split"`,
   `batch.max_units_per_job` and `--max-units-per-job N` reroute a
@@ -211,6 +218,13 @@ not `klt --version`, if you need to detect this kind of drift. See
   dispatched `params` fails the request with `params_unsupported_worker`
   instead of passing at the netlist defaults. `engine: "xyce"` and
   `--op-lint` refuse the axis. See `docs/cli/sim.md` "Corner axes".
+- **`klt pex --measure-command` harnesses can run a nested `klt sim`**
+  (issue #3291): the measure command's environment gains an additive
+  `KLT_OUTDIR_LOCK_INHERIT` (the canonical `$KLT_PEX_ARTIFACTS_DIR`); a `klt`
+  run whose output directory is at or under it is covered by the parent's
+  output-directory ownership, so a default-`-o` `klt sim` no longer fails with
+  `outdir_locked`. Ancestors/siblings are still refused; no `error.code` or
+  `schema_version` change.
 - **`klt signoff` opt-in `require_annotation_complete` for `sta` evidence**
   (issue #3258): an evidence entry citing a `klt sta` envelope may set
   `"require_annotation_complete": true`; every corner carrying a

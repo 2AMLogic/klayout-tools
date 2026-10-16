@@ -70,6 +70,12 @@ except ImportError:  # pragma: no cover - Windows
 #: Environment variable overriding the lock registry directory.
 LOCK_DIR_ENV = "KLT_LOCK_DIR"
 
+#: Environment variable a parent run exports to a child process it launches and
+#: blocks on (``klt pex --measure-command``): the canonical root the parent
+#: owns. A child ``hold_output_dir`` for that root or a descendant is covered
+#: by the parent's lock (#3291). Additive; never an ancestor or sibling.
+INHERIT_ENV = "KLT_OUTDIR_LOCK_INHERIT"
+
 #: ``error.code`` of the CLI envelope for contention.
 CODE_LOCKED = "outdir_locked"
 #: ``error.code`` of the CLI envelope when locking cannot be provided at all
@@ -204,6 +210,15 @@ def _covered(canonical: str) -> bool:
     return False
 
 
+def _inherited(canonical: str) -> bool:
+    """True when ``canonical`` is at/under the root a parent run handed down."""
+    root = os.environ.get(INHERIT_ENV)
+    if not root or not os.path.isabs(root):
+        return False
+    root = canonical_dir(root)
+    return canonical == root or canonical.startswith(root.rstrip(os.sep) + os.sep)
+
+
 def _open_lock_file(registry: str, canonical: str) -> int:
     try:
         os.makedirs(registry, mode=0o700, exist_ok=True)
@@ -307,10 +322,11 @@ def hold_output_dir(path: str | os.PathLike[str]) -> Iterator[str]:
     descendant, and :class:`OutputLockUnavailableError` if ownership cannot
     be provided at all. Nothing under ``path`` is created or modified.
     Re-entrant per thread: a thread already owning ``path`` or one of its
-    ancestors gets a no-op.
+    ancestors gets a no-op, as is a child process whose parent exported
+    ``$KLT_OUTDIR_LOCK_INHERIT`` for ``path`` or one of its ancestors (#3291).
     """
     canonical = canonical_dir(path)
-    if _covered(canonical):
+    if _covered(canonical) or _inherited(canonical):
         yield canonical
         return
     if fcntl is None:

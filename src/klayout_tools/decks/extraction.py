@@ -307,6 +307,25 @@ class ResistorFlavour:
 
 
 @dataclass(frozen=True)
+class UnsupportedDeviceMarker:
+    """A marker layer whose drawn shapes mean the layout holds a device class
+    this deck does not recognise (issue #2919) -- e.g. gf180mcu's
+    ``MOS_CAP_MK`` (166/5) over a MOS capacitor.
+
+    ``extract.py`` reports every such layer that carries shapes in the
+    extracted cell in the response's ``unsupported_devices[]`` field and in
+    ``warnings[]``, so a netlist that silently lacks those devices cannot read
+    as a clean extraction. ``kind`` is a short machine-readable token (e.g.
+    ``"mos_capacitor"``); ``description`` is the prose used in the warning.
+    The marker takes no part in recognition or connectivity.
+    """
+
+    marker: tuple[int, int]
+    kind: str
+    description: str
+
+
+@dataclass(frozen=True)
 class MOSFlavour:
     """One additional, marker-scoped MOS voltage/gate-oxide flavour an
     :class:`ExtractionDeck` recognises via its optional ``mos_flavours``
@@ -694,6 +713,12 @@ class ExtractionDeck:
     this field's introduction) disables the exclusion: a poly shape matching
     the signature is flagged exactly as it was before this field existed, no
     behaviour change for a deck/layout that declares or draws no marker.
+
+    ``unsupported_device_markers`` (issue #2919) is an optional tuple of
+    :class:`UnsupportedDeviceMarker` entries naming marker layers that flag a
+    device class the deck cannot yet extract; shapes on one are reported in
+    ``unsupported_devices[]``/``warnings[]``. Empty (the default) reports
+    nothing.
     """
 
     active: tuple[int, int]
@@ -721,6 +746,7 @@ class ExtractionDeck:
     resistors: tuple[ResistorDevice, ...] = ()
     diodes: tuple[DiodeDevice, ...] = ()
     mos_flavours: tuple[MOSFlavour, ...] = ()
+    unsupported_device_markers: tuple[UnsupportedDeviceMarker, ...] = ()
     nfet_provenance: RuleProvenance | None = None
     pfet_provenance: RuleProvenance | None = None
     capacitor_variants: tuple[CapacitorVariant, ...] = ()

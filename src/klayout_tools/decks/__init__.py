@@ -57,6 +57,7 @@ from .extraction import (
     ResistorFlavour,
     SizeFilter,
     TerminalRelation,
+    UnsupportedDeviceMarker,
 )
 from .finfet import FinFETExtractionDeck, FinFETFlavour
 from .parasitics import (
@@ -99,6 +100,7 @@ __all__ = [
     "SizeFilter",
     "UnknownDeckError",
     "UnknownExtractionDeckError",
+    "UnsupportedDeviceMarker",
     "deck_names",
     "deck_source_path",
     "get_deck",
