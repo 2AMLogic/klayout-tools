@@ -150,8 +150,13 @@ from .remote_launcher import RemoteLaunchError as RemoteLaunchError
 #: ``sim_remote``'s: `run_sim` dispatches into them and re-exports their
 #: helpers (self-aliased) so ``klayout_tools.sim.<name>`` resolves them too.
 from .sim_batch import _build_batch_job_spec as _build_batch_job_spec
+from .sim_batch import (
+    _remove_shard_manifest,
+    _run_batch,
+    _run_batch_fleet,
+    attach_engine_build_comparison,
+)
 from .sim_batch import _resolve_batch_config as _resolve_batch_config
-from .sim_batch import _run_batch, _run_batch_fleet, attach_engine_build_comparison
 from .sim_batch_async import SUBMIT_ONLY_UNSUPPORTED_CODE
 from .sim_batch_async import submit_only as _submit_batch_only
 from .sim_decks import run_deck_request
@@ -284,6 +289,9 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "batch_job_interrupted",
         # Report-level (`environment.job_diagnostic`, issue #2970).
         "all_units_at_timeout",
+        # Report-level (top-level `diagnostics[]`, issue #2901): batch runner
+        # predates request fields, under `runner_version_check: "warn"`.
+        "batch_runner_request_feature_predated",
     }
 )
 
@@ -3522,22 +3530,23 @@ def _run_sim_corners(
         dry_run=dry_run,
     )
     checkpoint_path = _checkpoint_path(artifacts_dir)
+    fingerprint_inputs: dict[str, Any] = {
+        "netlist_path": dispatch_netlist_path,
+        "models_lib": models_lib,
+        "analysis": analysis,
+        "measurements_spec": measurements_spec,
+        "corner_points": corner_points,
+        "timeout_s": timeout_s,
+        "engine": engine,
+        "osdi_preload": osdi_preload,
+        "corner_section_libs": corner_section_libs,
+        "save_mode": save_mode,
+        "save_vectors": save_vectors,
+        "ngspice_options": ngspice_options,
+        "stimulus_lines": stimulus_lines,
+    }
     pre_completed, loaded_engine_version, checkpoint = _open_resume_checkpoint(
-        checkpoint_path,
-        resume=bool(resume),
-        netlist_path=dispatch_netlist_path,
-        models_lib=models_lib,
-        analysis=analysis,
-        measurements_spec=measurements_spec,
-        corner_points=corner_points,
-        timeout_s=timeout_s,
-        engine=engine,
-        osdi_preload=osdi_preload,
-        corner_section_libs=corner_section_libs,
-        save_mode=save_mode,
-        save_vectors=save_vectors,
-        ngspice_options=ngspice_options,
-        stimulus_lines=stimulus_lines,
+        checkpoint_path, resume=bool(resume), **fingerprint_inputs
     )
 
     dispatch_points = (
@@ -3763,6 +3772,17 @@ def _run_sim_corners(
         # needs its own S3 job contract and launch. See this function's
         # docstring on `hosts`.
         fleet_dispatch = _run_remote_fleet if backend == "remote" else _run_batch_fleet
+        # Issue #3300: a sharded batch run keeps a shard-to-job-id map keyed
+        # by the resume fingerprint, so `--resume` re-attaches to shards that
+        # already ran instead of paying for them again.
+        shard_kwargs: dict[str, Any] = (
+            {
+                "shard_fingerprint": _checkpoint_fingerprint(**fingerprint_inputs),
+                "resume": bool(resume),
+            }
+            if backend == "batch"
+            else {}
+        )
         corners_new, backend_engine_version, remote_environment = fleet_dispatch(
             corner_points=dispatch_points,
             netlist_path=netlist_path,
@@ -3774,6 +3794,7 @@ def _run_sim_corners(
             hosts=hosts,
             measurements_spec=measurements_spec,
             request_dir=request_dir,
+            **shard_kwargs,
         )
     else:
 
@@ -3882,6 +3903,10 @@ def _run_sim_corners(
     # diagnostic grid reports empty dicts and a zero count, never omits the
     # field) -- see docs/cli/sim.md's report schema.
     diagnostic_counts = _diagnostic_counts(corners)
+
+    if backend == "batch" and corners_skipped == 0 and corners_lost == 0:
+        # Issue #3300: nothing left to re-attach to.
+        _remove_shard_manifest(artifacts_dir)
 
     if checkpoint is not None:
         if corners_skipped == 0 and corners_lost == 0:
@@ -4100,6 +4125,11 @@ def _run_sim_corners(
 
     _attach_timeout_budget_hint(environment, corners, timeout_s)
 
+    # Issue #2901: lifted out of `environment.remote` to the top level.
+    request_feature_diagnostic = (environment.get("remote") or {}).pop(
+        "request_feature_diagnostic", None
+    )
+
     report = {
         "schema_version": SCHEMA_VERSION,
         "netlist": _report_path(netlist_path, repo_root=repo_root),
@@ -4145,6 +4175,10 @@ def _run_sim_corners(
         "measurements": measurements_rollup,
         "corners": corners,
     }
+    if request_feature_diagnostic is not None:
+        # Additive/optional (issue #2901): only present when a batch runner
+        # predates a request feature under `runner_version_check: "warn"`.
+        report["diagnostics"] = [request_feature_diagnostic]
     _attach_not_reached_count(report, measurements_spec, corners)
     if plot_dir is not None:
         # Additive/optional: only present when `--plot`/`plot_dir` was
@@ -7006,6 +7040,10 @@ class _Checkpoint:
     ``local-parallel``'s bounded dispatch window and ``_run_sharded``'s
     per-shard threads call :meth:`record` concurrently.
     """
+
+    @property
+    def fingerprint(self) -> str:
+        return self._fingerprint
 
     def __init__(self, path: str, fingerprint: str) -> None:
         self._path = path

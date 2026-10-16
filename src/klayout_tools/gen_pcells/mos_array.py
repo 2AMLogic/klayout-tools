@@ -115,6 +115,7 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         GUARD_RING_DEFAULT_PADDING_UM,
         WELL_ENCLOSURE_MARGIN_UM,
         _clamp_cut_boxes,
+        _close_implant_gaps,
         _insert_boxes,
         _insert_implant_ring,
         _insert_ring,
@@ -167,6 +168,11 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         # Declared via ``self.param("mfg_grid_um", ...)`` below; the
         # PCellDeclarationHelper stubs cannot see it, so annotate for mypy.
         mfg_grid_um: float
+        voltage_flavor_mark_layer: kdb.LayerInfo
+        voltage_flavor_mark_present: bool
+        voltage_flavor_mark_margin_um: float
+        voltage_flavor_extra_mark_layer: kdb.LayerInfo
+        voltage_flavor_extra_mark_present: bool
 
         def __init__(self) -> None:
             super().__init__()
@@ -355,6 +361,21 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default=False,
             )
             self.param(
+                "voltage_flavor_extra_mark_layer",
+                self.TypeLayer,
+                "Second voltage_flavor marker layer drawn over the same box "
+                "(sky130 native-Vt: lvtn alongside hvi; only used when "
+                "voltage_flavor_extra_mark_present)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "voltage_flavor_extra_mark_present",
+                self.TypeBoolean,
+                "Whether voltage_flavor_extra_mark_layer is a real layer "
+                "resolved for params.voltage_flavor on this PDK family",
+                default=False,
+            )
+            self.param(
                 "voltage_flavor_mark_margin_um",
                 self.TypeDouble,
                 "Harness-resolved margin the voltage_flavor marker box grows "
@@ -417,6 +438,16 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Harness-resolved margin the source/drain implant box grows "
                 "beyond each unit device's own active box (only used when "
                 "sd_implant_present)",
+                default=0.0,
+            )
+            # getattr: keeps this new hidden param out of the mypy type
+            # baseline (PCellDeclarationHelper's dynamic attrs are untyped).
+            self.param(
+                "sd_implant_min_space_um",
+                getattr(self, "TypeDouble"),  # noqa: B009
+                "Harness-resolved minimum spacing between separate source/"
+                "drain implant shapes; closer ones are merged (only used "
+                "when sd_implant_present)",
                 default=0.0,
             )
             self.param(
@@ -642,6 +673,12 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                         c["x0_um"],
                         c["y0_um"],
                     )
+                _close_implant_gaps(
+                    self.cell,
+                    li_sd_implant,
+                    dbu,
+                    getattr(self, "sd_implant_min_space_um"),  # noqa: B009
+                )
 
             if self.flavor == "pfet" and self.well_present:
                 li_well = self.layout.layer(self.well_layer)
@@ -770,6 +807,16 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 _insert_boxes(
                     self.cell,
                     li_voltage_flavor_mark,
+                    dbu,
+                    [info["voltage_flavor_mark_box_um"]],
+                )
+            if (
+                self.voltage_flavor_mark_present
+                and self.voltage_flavor_extra_mark_present
+            ):
+                _insert_boxes(
+                    self.cell,
+                    self.layout.layer(self.voltage_flavor_extra_mark_layer),
                     dbu,
                     [info["voltage_flavor_mark_box_um"]],
                 )

@@ -623,6 +623,17 @@ envelope and, on its citation, an additive `artifact_binding.members` list
 when unmet). Single-path citations are byte-identical to before. No
 `schema_version` bump.
 
+Issue #2887 adds an optional `provenance.regeneration` object
+(`{generator, regenerated_hash}`) to an item-1/2 artifact-anchored
+`generic` envelope. `klt signoff` never executes `generator`. On a matching
+claim the citation's `artifact_binding` gains a `regeneration` object
+(`{generator, regenerated_hash, executed_by_klt: false}`). A mismatched
+claim renders the new `reason` value `stale_artifact`, and a malformed one
+renders the existing `unanchored_evidence`. An envelope that makes no
+claim grades and renders exactly as before. No `schema_version` bump. See
+[`docs/cli/signoff.md`](cli/signoff.md)'s "Items 1 and 2: attesting that
+the artifact was regenerated".
+
 `klt erc` since issue #2183 also carries a second verb-local key,
 `provenance.devices`: one entry per `devices[]` spec declaration (`{name,
 body_layer, on, body_area_um2}`), `[]` when none were declared. A
@@ -1691,6 +1702,7 @@ the exit code alone is authoritative.
   | `sim` | `batch_runner_version_mismatch` | `--backend batch` under `batch.runner_version_check: "enforce"` (the default): the AMI manifest publishes a runner `klt` whose major.minor differs from this client's, for every image the request could boot. Refused once, before any upload or launch, so no report and no per-corner diagnostics exist (issue #2851). Not retryable without a matching runner image or client. A mismatch found only on the runner keeps reporting through per-corner `batch_job_failed` diagnostics with `runner_code`. See [docs/cli/sim.md](cli/sim.md) "Pre-launch check from the AMI manifest". |
   | `netlist` | `batch_no_capacity` | `--backend batch`: the fleet launcher refused the job for lack of Spot capacity. Usually transient; retrying later is reasonable. Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
   | `sim` | `batch_runner_feature_unsupported` | `--backend batch` under `batch.runner_version_check: "enforce"`: the request uses a feature (currently `analysis_steps`) that every runner image the AMI manifest publishes predates. Refused once, before any upload or launch (issue #3249). The same code appears as `runner_code` on per-corner `batch_job_failed` diagnostics when the runner-side preflight finds it. See [docs/cli/sim.md](cli/sim.md) "Request-feature capability check". |
+  | `sim` | `batch_runner_request_feature_predated` | A **warning** (top-level `diagnostics[]` entry, not an error code): `--backend batch` under `batch.runner_version_check: "warn"` and the request uses fields (`options.osdi_preload`, `measurements[].expr`, ...) the fleet runner `klt` predates. Lists `features[]`, `runner_klt_version`, `source` (`manifest` before launch, `runner` post-run). See [docs/cli/sim.md](cli/sim.md) "Request-feature capability check" (issue #2901). |
   | `netlist` | `batch_concurrency_cap` | `--backend batch`: the fleet launcher refused the job because the shared fleet is at `BATCH_MAX_CONCURRENT_INSTANCES`. Usually transient; retrying later is reasonable. Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
   | `sim` | `batch_runner_lacks_decks` | `--backend batch` with a deck-list (`decks[]`) request: the AMI manifest publishes only runner images whose `klt` predates `decks[]` support, so the request was refused once, before any upload or launch (issue #3303). Also the `error.code` of a runner-side preflight envelope (exit 87) when the runner's own `klt --version` lacks `decks[]`; `runner_version_check: "warn"` does not relax it. Not retryable without a rebuilt runner image. See [docs/cli/sim.md](cli/sim.md) "Runner support for `decks[]` on the batch backend". |
   | `netlist` | `batch_runner_version_mismatch` | `--backend batch`: the runner's `klt` version differs from this client's; the job was refused before netlisting, or before submission when the AMI manifest already publishes the mismatch (issue #2851). Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
@@ -1881,13 +1893,14 @@ violation (issue #2029).
 
 A verb's success payload may ship a machine-readable JSON Schema (Draft
 2020-12) alongside its prose in `docs/cli/<verb>.md`. Today `klt layers`,
-`klt cells`, `klt stats` and `klt drc` have one:
+`klt cells`, `klt stats`, `klt drc` and `klt lvs` have one:
 [`layers-response`](schemas/layers-response.schema.json),
 [`cells-response`](schemas/cells-response.schema.json),
-[`stats-response`](schemas/stats-response.schema.json) and
+[`stats-response`](schemas/stats-response.schema.json),
 [`drc-response`](schemas/drc-response.schema.json) (verdict reports from both
 engines plus the non-verdict `--list-rules` listing; its `coverage` block
-`$ref`s [`coverage.schema.json`](schemas/coverage.schema.json)).
+`$ref`s [`coverage.schema.json`](schemas/coverage.schema.json)) and
+[`lvs-response`](schemas/lvs-response.schema.json).
 
 - **Naming.** `docs/schemas/<verb>-response.schema.json`, one file per verb.
 - **Required means always present.** Every field the verb always emits is in

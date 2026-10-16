@@ -231,13 +231,32 @@ def _gate_top_endcap_um(family: str) -> float:
 #: A family absent from this table gets ``0.0`` (see
 #: :func:`_sd_implant_margin_um`), and :func:`_device_layer_params` never
 #: resolves a ``sd_implant_layer`` for one either (no family besides
-#: gf180mcu declares the ``"nplus"``/``"pplus"`` roles) -- sky130's/
-#: sg13g2's/sg13cmos5l's curated decks all recognise a MOS device from
+#: gf180mcu and, since issue #2934, sky130 declare the ``"nplus"``/``"pplus"``
+#: roles) -- sg13g2's/sg13cmos5l's curated decks recognise a MOS device from
 #: ``active``/``well`` alone, with no implant mask at all, so every existing
 #: caller there keeps byte-for-byte identical geometry (no implant drawn).
 _PDK_SD_IMPLANT_MARGIN_UM: dict[str, float] = {
     "gf180mcu": 0.25,  # NP.5a/PP.5a (gate overlap) are 0.23um
+    # sky130 (issue #2934): n/psdm.5a, "min. n/psdm enclosure diff except
+    # butting edge", 0.125um (sky130A.lydrc, PDK c6d73a35).
+    "sky130": 0.125,
 }
+
+
+#: Minimum same-layer spacing (um) between two separate source/drain implant
+#: shapes, for a family whose implant boxes can land closer than that
+#: between adjacent unit devices (issue #2934): sky130's ``nsdm.2``/``psdm.2``
+#: is 0.38um, while the per-unit boxes (diff + 0.125um margin) sit only
+#: ~0.15um apart in a ``mos_array``/``diff_pair`` row. Gaps below this are
+#: closed (the shapes merge) in :func:`~klayout_tools.gen._close_implant_gaps`.
+#: A family absent from this table is left untouched (``0.0``).
+_PDK_SD_IMPLANT_MIN_SPACE_UM: dict[str, float] = {
+    "sky130": 0.38,  # nsdm.2/psdm.2 (sky130A_mr.drc)
+}
+
+
+def _sd_implant_min_space_um(family: str) -> float:
+    return _PDK_SD_IMPLANT_MIN_SPACE_UM.get(family, 0.0)
 
 
 def _sd_implant_margin_um(family: str) -> float:
@@ -555,6 +574,9 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         "poly": (66, 20),  # poly.drawing
         "contact": (66, 44),  # licon1.drawing
         "metal": (67, 20),  # li1.drawing
+        "nplus": (93, 44),  # nsdm.drawing -- n+ S/D implant (nfet flavor),
+        # issue #2934; margin in :data:`_PDK_SD_IMPLANT_MARGIN_UM`.
+        "pplus": (94, 20),  # psdm.drawing -- p+ S/D implant (pfet flavor)
         "well": (64, 20),  # nwell.drawing -- matches
         # `klayout_tools.decks.sky130.EXTRACTION_DECK.nwell`; no curated DRC
         # rule checks this layer, but it is real and extraction already
@@ -2645,6 +2667,11 @@ _PDK_VOLTAGE_FLAVOR_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
     "sky130": {
         "hvi": (75, 20),  # hvi.drawing -- same citation as
         # decks.sky130.EXTRACTION_DECK.mos_flavours' MOSFlavour(flavour="hvi").
+        # Native-Vt NMOS (issue #3600): hvi AND lvtn. This is the primary
+        # (hvi) half; the lvtn half lives in
+        # :data:`_PDK_VOLTAGE_FLAVOR_EXTRA_LAYERS`.
+        "native": (75, 20),
+        "nvt": (75, 20),
     },
     "sg13g2": {
         "hv": (44, 0),  # ThickGateOx.drawing -- same citation as
@@ -2655,6 +2682,34 @@ _PDK_VOLTAGE_FLAVOR_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         # decks.sg13cmos5l.EXTRACTION_DECK.mos_flavours' MOSFlavour(flavour="hv").
     },
 }
+
+
+#: Second marker layer a ``voltage_flavor`` needs drawn *in addition to* its
+#: :data:`_PDK_VOLTAGE_FLAVOR_LAYERS` entry (issue #3600). sky130's native-Vt
+#: NMOS (``sky130_fd_pr__nfet_05v0_nvt``) is hvi AND lvtn
+#: (``decks.sky130.EXTRACTION_DECK.mos_flavours``' ``MOSFlavour(flavour="nvt",
+#: and_markers=((125, 44),))``), so the hvi box alone would extract as
+#: ``nfet_g5v0d10v5``. ``areaid_le`` (81/60), which upstream subtracts for the
+#: 5V native device, is simply never drawn.
+_PDK_VOLTAGE_FLAVOR_EXTRA_LAYERS: dict[str, dict[str, tuple[int, int]]] = {
+    "sky130": {
+        "native": (125, 44),  # lvtn.drawing
+        "nvt": (125, 44),
+    },
+}
+
+#: ``(family, voltage_flavor)`` pairs with no PMOS counterpart: requesting one
+#: with ``flavor="pfet"`` is a hard ``GenError`` (issue #3600).
+_NFET_ONLY_VOLTAGE_FLAVORS = frozenset({("sky130", "native"), ("sky130", "nvt")})
+
+
+def _voltage_flavor_extra_mark_layer(family: str, voltage_flavor: str) -> Any:
+    """The ``kdb.LayerInfo`` of ``voltage_flavor``'s second marker layer in
+    :data:`_PDK_VOLTAGE_FLAVOR_EXTRA_LAYERS`, or ``None`` when it needs none."""
+    import klayout.db as kdb
+
+    pair = _PDK_VOLTAGE_FLAVOR_EXTRA_LAYERS.get(family, {}).get(voltage_flavor)
+    return kdb.LayerInfo(*pair) if pair is not None else None
 
 
 def _voltage_flavor_mark_layer(family: str, voltage_flavor: str) -> Any:
@@ -2826,6 +2881,21 @@ def _device_layer_params(
     voltage_flavor_mark = (
         _voltage_flavor_mark_layer(family, voltage_flavor) if voltage_flavor else None
     )
+    voltage_flavor_extra_mark = (
+        _voltage_flavor_extra_mark_layer(family, voltage_flavor)
+        if voltage_flavor
+        else None
+    )
+    if (family, voltage_flavor) in _NFET_ONLY_VOLTAGE_FLAVORS and (
+        params.get("flavor", "nfet") != "nfet"
+    ):
+        from .gen import GenError
+
+        raise GenError(
+            f"params.voltage_flavor '{voltage_flavor}' is an NMOS-only device "
+            f"on PDK family '{family}' (no PMOS counterpart); use "
+            "flavor='nfet'"
+        )
     # Source/drain implant (issue #1577): the family's `"nplus"`/`"pplus"`
     # role, selected by `flavor` (`esd_device`'s own params never carry a
     # `flavor` key at all -- that generator is always NMOS-style, so the
@@ -2900,6 +2970,12 @@ def _device_layer_params(
             else kdb.LayerInfo(0, 0)
         ),
         "voltage_flavor_mark_present": voltage_flavor_mark is not None,
+        "voltage_flavor_extra_mark_layer": (
+            voltage_flavor_extra_mark
+            if voltage_flavor_extra_mark is not None
+            else kdb.LayerInfo(0, 0)
+        ),
+        "voltage_flavor_extra_mark_present": voltage_flavor_extra_mark is not None,
         "voltage_flavor_mark_margin_um": _voltage_flavor_mark_margin_um(family),
         "gate_pad_clearance_um": _gate_pad_clearance_um(family),
         "contact_gate_offset_um": _contact_gate_extra_offset_um(family),
@@ -2910,6 +2986,7 @@ def _device_layer_params(
         ),
         "sd_implant_present": sd_implant is not None and sd_implant_margin > 0,
         "sd_implant_margin_um": sd_implant_margin if sd_implant is not None else 0.0,
+        "sd_implant_min_space_um": _sd_implant_min_space_um(family),
     }
     if mos_cap_mark is not None:
         # Only `mos_array` declares these PCell params (`diff_pair` shares this

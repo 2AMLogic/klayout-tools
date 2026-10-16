@@ -118,6 +118,7 @@ from typing import Any
 
 from ..design_evidence_tiers import DesignEvidenceTiersError
 from ..signoff import (
+    _ITEMS_ACCEPTING_REGENERATION_CLAIMS,
     _ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE,
     SignoffError,
     _read_json_source,
@@ -621,11 +622,30 @@ def _print_artifact_binding(item: dict, citation: dict) -> None:
             f"(content_hash={binding.get('content_hash')})"
         )
         _print_binding_members(members)
+        if item.get("id") in _ITEMS_ACCEPTING_REGENERATION_CLAIMS:
+            _print_regeneration(binding.get("regeneration"))
         return
     print(
         f"        topic: not bound -- a passing {citation.get('kind')} envelope "
         "satisfies this item, but klt signoff cannot judge its relevance "
         "(cite an artifact-anchored generic envelope to bind it)"
+    )
+
+
+def _print_regeneration(regeneration: Any) -> None:
+    """The ``regeneration:`` line under an item-1/2 ``bound:`` line (issue
+    #2887): what was checked (the attested regenerated hash equals the bound
+    artifact's) and what was not (the generator was never run by klt, and
+    neither its correctness nor the artifact's topical relevance is judged).
+    """
+    if not regeneration:
+        print("        regeneration: not claimed")
+        return
+    print(
+        f"        regeneration: {regeneration.get('regenerated_hash')} matches "
+        f"the bound artifact; generator `{regeneration.get('generator')}` was "
+        "attested, not run by klt (generator correctness and topical relevance "
+        "not checked)"
     )
 
 

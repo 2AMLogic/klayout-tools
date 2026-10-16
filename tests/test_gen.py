@@ -1191,7 +1191,9 @@ def test_mos_array_flavor_pfet_draws_well_and_is_drc_clean(
     # an empty list -- the note is the only difference.
     family = gen._pdk_family(variant)
     expected_notes = (
-        [] if family == "gf180mcu" else [_sd_implant_absence_note(family, "pfet")]
+        []
+        if family in ("gf180mcu", "sky130")
+        else [_sd_implant_absence_note(family, "pfet")]
     )
     assert report["drc_hints"]["notes"] == expected_notes
 
@@ -1294,9 +1296,7 @@ def test_mos_array_guard_ring_flavor_pfet_draws_well_and_is_drc_clean(
     # Same sky130-vs-gf180mcu split as the no-ring pfet test above (issue
     # #2580's reporting-only absence note).
     family = gen._pdk_family(variant)
-    expected_notes = (
-        [] if family == "gf180mcu" else [_sd_implant_absence_note(family, "pfet")]
-    )
+    expected_notes = [_SKY130_RING_TAP_IMPLANT_NOTE] if family == "sky130" else []
     assert report["drc_hints"]["notes"] == expected_notes
 
     drc_report = run_drc(str(output), deck)
@@ -1558,11 +1558,9 @@ def test_mos_array_default_voltage_flavor_output_unchanged(tmp_path, pdk_root):
     _assert_gds_geometry_equal(implicit, explicit)
     assert report["drc_hints"]["voltage_flavor"] is None
     assert report["drc_hints"]["voltage_flavor_mark_present"] is False
-    # sky130's S/D-implant absence note (issue #2580) is the one entry this
-    # default sky130 request now carries -- identical for the implicit and
-    # explicit requests compared above, so the default-unchanged contract
-    # holds.
-    assert report["drc_hints"]["notes"] == [_sd_implant_absence_note("sky130", "nfet")]
+    # sky130 draws its S/D implant since issue #2934, so a default request
+    # carries no notes.
+    assert report["drc_hints"]["notes"] == []
 
 
 def test_mos_array_voltage_flavor_medium_voltage_draws_marker_and_is_drc_clean(
@@ -1619,25 +1617,125 @@ def test_mos_array_voltage_flavor_unsupported_on_sky130_notes_not_drawn(
 
 
 @pytest.mark.parametrize("name", ["native", "nvt"])
-def test_mos_array_voltage_flavor_native_on_sky130_names_unsupported_nvt(
-    tmp_path, both_pdk_root, name
+def test_mos_array_voltage_flavor_native_draws_hvi_and_lvtn_no_areaid_le(
+    tmp_path, pdk_root, name
 ):
-    """sky130's native-Vt NMOS (`nfet_05v0_nvt`) is derived upstream from
-    hvi AND lvtn, which a single-marker `voltage_flavor` cannot express: the
-    note must name that flavour as unsupported rather than only reporting a
-    generic "no marker layer resolved" (issue #2912)."""
+    """sky130's native-Vt NMOS (`nfet_05v0_nvt`) is hvi AND lvtn: both marker
+    boxes are drawn over the device, `areaid_le` (81/60) never is, and the
+    flavour is reported as resolved (issue #3600)."""
     output = tmp_path / f"mos_array_voltage_flavor_{name}.gds"
     report = generate(
         {
             "generator": "mos_array",
-            "pdk": {"variant": "sky130A", "root": str(both_pdk_root)},
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
             "params": {"voltage_flavor": name},
             "options": {"output": str(output)},
         }
     )
-    assert report["drc_hints"]["voltage_flavor_mark_present"] is False
-    notes = report["drc_hints"]["notes"]
-    assert any("nfet_05v0_nvt" in n and "unsupported" in n for n in notes)
+    assert report["drc_hints"]["voltage_flavor_mark_present"] is True
+    assert not any("nvt" in n for n in report["drc_hints"]["notes"])
+    hvi = _layer_bbox(output, 75, 20)
+    lvtn = _layer_bbox(output, 125, 44)
+    assert hvi == lvtn
+    assert hvi["right"] > hvi["left"]
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    assert layout.top_cell().bbox_per_layer(layout.layer(81, 60)).empty()
+
+
+@pytest.mark.parametrize("generator", ["mos_array", "diff_pair"])
+def test_voltage_flavor_native_rejects_pfet(tmp_path, pdk_root, generator):
+    """The native-Vt device has no PMOS counterpart (issue #3600)."""
+    with pytest.raises(GenError, match="NMOS-only"):
+        generate(
+            {
+                "generator": generator,
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "params": {"flavor": "pfet", "voltage_flavor": "nvt"},
+                "options": {"output": str(tmp_path / "x.gds")},
+            }
+        )
+
+
+def _native_nfet_lvs(tmp_path, pdk_root, model):
+    import json
+
+    from klayout_tools.lvs import run_lvs
+
+    gds = tmp_path / "nvt.gds"
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {
+                "flavor": "nfet",
+                "voltage_flavor": "nvt",
+                "w_um": 1.0,
+                "l_um": 25.0,
+                "rows": 1,
+                "cols": 1,
+                "dummy": 0,
+            },
+            "options": {"output": str(gds)},
+        }
+    )
+    ref = tmp_path / "ref.spice"
+    ref.write_text(f".subckt ref d g s b\nX1 d g s b {model} L=25u W=1u\n.ends\n")
+    return run_lvs(
+        json.dumps(
+            {
+                "layout": {
+                    "file": str(gds),
+                    "deck": "sky130",
+                },
+                "reference": {
+                    "netlist": str(ref),
+                    "top": "ref",
+                    "form": "subckt-call",
+                    "deck": "sky130",
+                },
+            }
+        )
+    )
+
+
+def test_native_nfet_gen_extract_lvs_round_trip_matches(tmp_path, pdk_root):
+    """gen -> extract -> lvs against a `nfet_05v0_nvt` subckt-call reference
+    reaches `match` (issue #3600)."""
+    report = _native_nfet_lvs(tmp_path, pdk_root, "sky130_fd_pr__nfet_05v0_nvt")
+    assert report["status"] == "match", report
+
+
+def test_native_nfet_extracts_as_nvt_not_g5v0d10v5_or_thin_oxide(tmp_path, pdk_root):
+    """The extracted model is `nfet_05v0_nvt` -- never the hvi-only
+    `nfet_g5v0d10v5` nor the thin-oxide `nfet_01v8` (issue #3600).
+
+    `klt lvs` itself does not compare MOS flavour subckts (they all collapse to
+    the base `nfet` class, see `build_subckt_to_class_map`), so a wrong-model
+    *reference* still matches there; the model binding is asserted at the
+    extract layer instead."""
+    output = tmp_path / "nvt_extract.gds"
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"flavor": "nfet", "voltage_flavor": "nvt"},
+            "options": {"output": str(output)},
+        }
+    )
+    report = run_extract(
+        str(output), "sky130", pdk_variant="sky130A", pdk_root=str(pdk_root)
+    )
+    cards = [
+        line
+        for line in Path(report["netlist_path"]).read_text().splitlines()
+        if line and line[0] in ("M", "X")
+    ]
+    assert any(" sky130_fd_pr__nfet_05v0_nvt " in line for line in cards)
+    assert not any(" sky130_fd_pr__nfet_g5v0d10v5 " in line for line in cards)
+    assert not any(" sky130_fd_pr__nfet_01v8 " in line for line in cards)
 
 
 def test_mos_array_voltage_flavor_unrecognised_name_notes_not_drawn(
@@ -1723,9 +1821,8 @@ def test_mos_array_voltage_flavor_hvi_draws_marker_and_is_drc_clean(tmp_path, pd
     assert _SKY130_VOLTAGE_FLAVOR_MARK_LAYER in present
     assert report["drc_hints"]["voltage_flavor"] == "hvi"
     assert report["drc_hints"]["voltage_flavor_mark_present"] is True
-    # sky130's S/D-implant absence note (issue #2580) is the one entry this
-    # pfet request now carries.
-    assert report["drc_hints"]["notes"] == [_sd_implant_absence_note("sky130", "pfet")]
+    # sky130 draws its S/D implant since issue #2934: no notes.
+    assert report["drc_hints"]["notes"] == []
 
     drc_report = run_drc(str(output), "sky130")
     assert drc_report["status"] == "clean", drc_report["violations"]
@@ -2240,12 +2337,9 @@ def test_mos_array_parallel_is_the_default_finger_topology(tmp_path, pdk_root):
     _assert_gds_geometry_equal(implicit, explicit)
     assert implicit_report["ports"] == explicit_report["ports"]
     assert implicit_report["warnings"] == []
-    # sky130's S/D-implant absence note (issue #2580) is the one entry this
-    # default-flavour sky130 unit now carries -- identical on both sides, so
-    # the implicit-vs-explicit contract holds.
-    assert implicit_report["drc_hints"]["notes"] == [
-        _sd_implant_absence_note("sky130", "nfet")
-    ]
+    # sky130 draws its S/D implant since issue #2934, so a default unit
+    # carries no notes -- identical on both sides.
+    assert implicit_report["drc_hints"]["notes"] == []
 
 
 @pytest.mark.parametrize("gate_contact", [False, True])
@@ -6126,7 +6220,9 @@ def test_diff_pair_flavor_pfet_draws_well_and_is_drc_clean(
         for i in layout.layer_indexes()
     }
     assert well_pair in present
-    assert report["drc_hints"]["notes"] == []
+    assert report["drc_hints"]["notes"] == (
+        [_SKY130_RING_TAP_IMPLANT_NOTE] if variant == "sky130A" else []
+    )
 
     drc_report = run_drc(str(output), deck)
     assert drc_report["status"] == "clean"
@@ -6183,7 +6279,7 @@ def test_diff_pair_default_voltage_flavor_output_unchanged(tmp_path, pdk_root):
     _assert_gds_geometry_equal(implicit, explicit)
     assert report["drc_hints"]["voltage_flavor"] is None
     assert report["drc_hints"]["voltage_flavor_mark_present"] is False
-    assert report["drc_hints"]["notes"] == []
+    assert report["drc_hints"]["notes"] == [_SKY130_RING_TAP_IMPLANT_NOTE]
 
 
 def test_diff_pair_voltage_flavor_medium_voltage_draws_marker_and_is_drc_clean(
@@ -6244,7 +6340,7 @@ def test_diff_pair_voltage_flavor_hvi_draws_marker_and_is_drc_clean(
     assert _SKY130_VOLTAGE_FLAVOR_MARK_LAYER in present
     assert report["drc_hints"]["voltage_flavor"] == "hvi"
     assert report["drc_hints"]["voltage_flavor_mark_present"] is True
-    assert report["drc_hints"]["notes"] == []
+    assert report["drc_hints"]["notes"] == [_SKY130_RING_TAP_IMPLANT_NOTE]
 
     drc_report = run_drc(str(output), "sky130")
     assert drc_report["status"] == "clean"
@@ -9812,7 +9908,7 @@ def test_families_without_the_1577_gf180mcu_knobs_are_unchanged(family):
     assert gen._contact_gate_extra_offset_um(family) == 0.0
     if family != "sky130":
         assert gen._gate_bottom_endcap_um(family) == 0.0
-    assert gen._sd_implant_margin_um(family) == 0.0
+    assert gen._sd_implant_margin_um(family) == (0.125 if family == "sky130" else 0.0)
     assert gen._voltage_flavor_mark_margin_um(family) == gen.WELL_ENCLOSURE_MARGIN_UM
 
 
@@ -9967,6 +10063,12 @@ def test_gf180mcu_mos_array_pfet_flavor_draws_pplus_not_nplus_implant(
     assert_clean_except_tap_distance(drc_report)
 
 
+_SKY130_RING_TAP_IMPLANT_NOTE = (
+    "sky130 guard/tap ring draws no nsdm/psdm tap implant -- "
+    "the ring's tap implant mask was not drawn"
+)
+
+
 def _sd_implant_absence_note(family: str, flavor: str) -> str:
     """The exact ``drc_hints.notes`` entry ``mos_array`` emits on a family
     whose role-layer table declares no S/D implant role for ``flavor``
@@ -10100,23 +10202,68 @@ def test_mos_array_sg13g2_draws_dummy_marker_over_dummy_cells_only(
     }
 
 
+@pytest.mark.parametrize("generator", ["mos_array", "diff_pair"])
 @pytest.mark.parametrize("flavor", ["nfet", "pfet"])
-def test_mos_array_sd_implant_absence_noted_on_sky130(tmp_path, pdk_root, flavor):
-    """sky130 declares no ``"nplus"``/``"pplus"`` role either -- the same gap
-    as sg13g2, never filed only because sky130's curated deck has no implant
-    rule to make it visible (issue #2580's scope correction). The note must
-    fire there too, naming the flavor-selected role."""
-    output = tmp_path / f"mos_array_sky130_sd_implant_{flavor}.gds"
+def test_sky130_sd_implant_drawn_and_no_absence_note(
+    tmp_path, pdk_root, generator, flavor
+):
+    """sky130 (issue #2934) now draws nsdm (93/44) over n-diff and psdm
+    (94/20) over p-diff, for both ``mos_array`` and ``diff_pair`` alike, so
+    neither reports the S/D-implant absence note; the masks still omitted are
+    reported instead (ring tap implant, npc under ``gate_contact``)."""
+    import klayout.db as kdb
+
+    output = tmp_path / f"{generator}_sky130_sd_implant_{flavor}.gds"
     report = generate(
         {
-            "generator": "mos_array",
+            "generator": generator,
             "pdk": {"variant": "sky130A", "root": str(pdk_root)},
-            "params": {"flavor": flavor},
+            "params": {
+                "flavor": flavor,
+                "gate_contact": True,
+                "add_guard_ring": True,
+            },
             "options": {"output": str(output)},
         }
     )
-    assert report["drc_hints"]["sd_implant_present"] is False
-    assert _sd_implant_absence_note("sky130", flavor) in report["drc_hints"]["notes"]
+    assert report["drc_hints"]["sd_implant_present"] is True
+    notes = report["drc_hints"]["notes"]
+    assert _sd_implant_absence_note("sky130", flavor) not in notes
+    assert _SKY130_RING_TAP_IMPLANT_NOTE in notes
+    assert any("no npc" in n for n in notes)
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert ((93, 44) if flavor == "nfet" else (94, 20)) in present
+    assert ((94, 20) if flavor == "nfet" else (93, 44)) not in present
+    assert run_drc(str(output), "sky130")["status"] == "clean"
+
+
+def test_sky130_sd_implant_boxes_merge_below_min_spacing(tmp_path, pdk_root):
+    """Adjacent unit devices' implant boxes sit closer than ``nsdm.2``'s
+    0.38um; they must be merged so no sub-minimum gap remains."""
+    import klayout.db as kdb
+
+    output = tmp_path / "mos_array_sky130_merge.gds"
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"flavor": "nfet", "rows": 1, "cols": 3},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    region = kdb.Region(
+        layout.top_cell().begin_shapes_rec(layout.find_layer(93, 44))
+    ).merged()
+    assert region.count() == 1
+    assert region.space_check(380).count() == 0
 
 
 @pytest.mark.parametrize("flavor", ["nfet", "pfet"])

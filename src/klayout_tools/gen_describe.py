@@ -435,10 +435,6 @@ def _mos_array_validate(params: dict[str, Any]) -> None:
     )
 
 
-# Spellings callers use for sky130's native (zero-threshold) NMOS (issue #2912).
-_SKY130_NATIVE_VT_NAMES = frozenset({"native", "nvt"})
-
-
 def _voltage_flavor_hints(
     family: str, params: dict[str, Any], notes: list[str]
 ) -> dict[str, Any]:
@@ -453,21 +449,7 @@ def _voltage_flavor_hints(
     mark_present = False
     if voltage_flavor:
         mark_present = _voltage_flavor_mark_layer(family, voltage_flavor) is not None
-        if (
-            not mark_present
-            and family == "sky130"
-            and voltage_flavor in _SKY130_NATIVE_VT_NAMES
-        ):
-            notes.append(
-                f"params.voltage_flavor '{voltage_flavor}': the sky130 native-Vt "
-                "NMOS (sky130_fd_pr__nfet_05v0_nvt) is unsupported -- no marker "
-                "was drawn, so the device extracts as a plain nfet. Upstream "
-                "derives it from hvi AND lvtn (not a single marker layer), which "
-                "the single-marker voltage_flavor model cannot express; see "
-                "docs/cli/gen.md (voltage_flavor) and docs/cli/lvs.md "
-                "(native-Vt NMOS) for the exclusion workflow (issue #2912)"
-            )
-        elif not mark_present:
+        if not mark_present:
             notes.append(
                 f"params.voltage_flavor '{voltage_flavor}' has no marker layer "
                 f"resolved for the resolved PDK family ('{family}') -- no marker "
@@ -503,6 +485,20 @@ def _sd_implant_hints(
             f"('{sd_implant_role}') for flavor '{flavor}' -- no implant "
             "mask was drawn"
         )
+    if family == "sky130":
+        # Phase A of issue #2934 draws the unit devices' nsdm/psdm only;
+        # report the masks still omitted (never silently) until the tap/
+        # guard-ring implant and npc phases land.
+        if params.get("add_guard_ring"):
+            notes.append(
+                "sky130 guard/tap ring draws no nsdm/psdm tap implant -- "
+                "the ring's tap implant mask was not drawn"
+            )
+        if params.get("gate_contact"):
+            notes.append(
+                "sky130 draws no npc (95/20) over the poly-contact licons -- "
+                "no npc mask was drawn"
+            )
     return {
         "sd_implant_present": (
             sd_implant is not None and _sd_implant_margin_um(family) > 0
@@ -2243,6 +2239,7 @@ def _diff_pair_describe(
         )
 
     voltage_flavor_hints = _voltage_flavor_hints(family, params, notes)
+    sd_implant_hints = _sd_implant_hints(family, params, notes)
 
     snapped = _grid_snapped(dbu, params["w_um"], params["l_um"])
     kind = "mirror" if params["mirror"] else "pair"
@@ -2259,6 +2256,7 @@ def _diff_pair_describe(
             "snapped_to_grid": snapped,
             "notes": notes,
             **voltage_flavor_hints,
+            **sd_implant_hints,
         },
         "warnings": (
             ["one or more dimensions were rounded to the technology grid"]
