@@ -6,11 +6,14 @@ every other ``klt`` subcommand -- see ``docs/json-contract.md``.
 
 Exit codes (see ``docs/cli/place-and-route.md`` for the full table):
     0 - place-and-route reached (at least) the requested target_stage
+        (for a `pdk.rebuild_corners` request: in every corner)
     1 - failed to run (bad request, unresolvable netlist/PDK/LEF, a
         floorplan spec with more than one method set, or an OpenROAD engine
         error that stops the run before reaching the requested
         target_stage) -- returned by ``emit_error`` as
-        ``output.ERROR_EXIT_CODE``
+        ``output.ERROR_EXIT_CODE``; also a `pdk.rebuild_corners` request in
+        which any corner's unit failed (the aggregated report is still
+        emitted, with the failure in that corner's `corner_runs` entry)
     3 - ``--check`` only: the committed report no longer reproduces
         (``status: "drifted"``)
 (2 is reserved for argparse usage errors, as with every other ``klt``
@@ -67,6 +70,10 @@ def run(args: argparse.Namespace) -> int:
         return emit_error("place-and-route", str(exc), args.format, code=exc.code)
 
     emit_success(report, args.format, _print_text)
+    if "corner_runs" in report:
+        # Issue #3507: a `pdk.rebuild_corners` request emits its aggregated
+        # report either way; a unit that failed still fails the command.
+        return 0 if report["status"] == "ok" else 1
     # Issue #2086: the response's own `warnings` list also goes to stderr,
     # in *both* formats. A run that placed no tapcells, no PDN and no
     # fillers is the failure mode this exists for -- it completes, exits 0,
@@ -127,7 +134,26 @@ def _print_check_text(result: dict) -> None:
             print(f"      actual:   {check['actual']}")
 
 
+def _print_corner_runs_text(report: dict) -> None:
+    """`--format text` rendering of a `pdk.rebuild_corners` report (#3507)."""
+    print(f"engine: {report['engine']} {report['engine_version'] or ''}".rstrip())
+    print(f"hdl_toplevel: {report['hdl_toplevel']}")
+    print(f"status: {report['status']}")
+    print()
+    print("corner_runs:")
+    for run in report["corner_runs"]:
+        line = f"  {run['corner']}: {run['status']}"
+        if run["status"] == "ok":
+            line += f", worst_slack_ns={run['worst_slack_ns']}"
+        else:
+            line += f", error={run['error']}"
+        print(f"{line} ({run['output_dir']})")
+
+
 def _print_text(report: dict) -> None:
+    if "corner_runs" in report:
+        _print_corner_runs_text(report)
+        return
     print(f"engine: {report['engine']} {report['engine_version'] or ''}".rstrip())
     print(f"hdl_toplevel: {report['hdl_toplevel']}")
     print(f"status: {report['status']}")
