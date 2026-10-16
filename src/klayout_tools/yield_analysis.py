@@ -39,8 +39,10 @@ module of its own, so both inputs go through the same sim-report reader
 
 from __future__ import annotations
 
+import csv
 import gzip
 import hashlib
+import io
 import json
 import math
 import os
@@ -1123,5 +1125,158 @@ def derive_sample_set(
                 "description": description,
             },
             "measurements": disclosures,
+        },
+    }
+
+
+def _read_csv_bytes(csv_path: str) -> tuple[str, str]:
+    """Read the CSV once, as ``(text, content_hash)``; the same bytes are
+    hashed and parsed. A UTF-8 BOM is dropped."""
+    if not os.path.exists(csv_path):
+        raise YieldError(f"CSV not found: {csv_path}")
+    if os.path.isdir(csv_path):
+        raise YieldError(f"CSV is not a file: {csv_path}")
+    try:
+        with open(csv_path, "rb") as f:
+            raw = f.read()
+        text = raw.decode("utf-8-sig")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise YieldError(f"could not read CSV '{csv_path}': {exc}") from exc
+    return text, "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def _csv_reader(text: str, csv_path: str, wanted: list[str]) -> csv.DictReader:
+    reader = csv.DictReader(io.StringIO(text, newline=""))
+    header = reader.fieldnames
+    if not header:
+        raise YieldError(f"CSV '{csv_path}' is empty (no header row)")
+    missing = [c for c in wanted if c not in header]
+    if missing:
+        raise YieldError(
+            f"CSV '{csv_path}' has no column(s) {', '.join(missing)}; "
+            f"header is: {', '.join(header)}"
+        )
+    return reader
+
+
+def _csv_row_group(
+    row: dict[str, Any], where: str, group_by: str, draw_col: str | None, seen: set
+) -> str:
+    """The row's group key; rejects a missing group or a repeated draw."""
+    if None in row:
+        raise YieldError(f"{where} has more cells than the header")
+    group = (row[group_by] or "").strip()
+    if not group:
+        raise YieldError(f"{where}: empty '{group_by}'")
+    if draw_col is not None:
+        key = (group, (row[draw_col] or "").strip())
+        if key in seen:
+            raise YieldError(f"{where}: duplicate draw '{key[1]}' in group '{group}'")
+        seen.add(key)
+    return group
+
+
+def _csv_row_sample(
+    row: dict[str, Any], value: str, status_col: str | None, pass_value: str | None
+) -> float | None:
+    """The row's finite sample, or ``None`` when it counts ``errored``."""
+    if status_col is not None and (row[status_col] or "").strip() != pass_value:
+        return None
+    try:
+        number = float((row[value] or "").strip())
+    except ValueError:
+        return None
+    return number if math.isfinite(number) else None
+
+
+def derive_sample_set_from_csv(
+    csv_path: str,
+    *,
+    group_by: str,
+    value: str,
+    status_col: str | None = None,
+    pass_value: str | None = None,
+    draw_col: str | None = None,
+    unit: str | None = None,
+    limits: dict[str, float] | None = None,
+) -> dict[str, Any]:
+    """Derive a sample-set document from a long-format per-draw Monte Carlo
+    CSV (issue #2931): one row per draw, one measurement per distinct
+    ``group_by`` value.
+
+    The result has the same shape as :func:`derive_sample_set`'s -- a
+    sample-set document ``klt yield`` reads unchanged, plus ``schema_version``
+    and an additive ``derivation`` block -- so there is no parallel path into
+    the estimator.
+
+    Rules (see ``docs/cli/yield.md``'s "Deriving a sample set from a
+    per-draw CSV"):
+
+    - The file is read once; the same bytes are hashed and parsed. A UTF-8
+      BOM and CRLF line endings are accepted.
+    - With ``status_col``, a row whose status differs from ``pass_value``
+      is counted ``errored`` and its ``value`` cell is not read.
+    - A passing row whose value cell is empty, non-numeric or non-finite is
+      also counted ``errored`` -- never dropped, never a sample.
+    - Samples keep file order; the grading counts do not depend on it. With
+      ``draw_col``, a repeated (group, draw) pair is rejected.
+    - A group with no usable sample is an error, not an empty measurement.
+    """
+    if (status_col is None) != (pass_value is None):
+        raise YieldError("--status-col and --pass-value must be given together")
+    text, content_hash = _read_csv_bytes(csv_path)
+    wanted = [group_by, value] + [c for c in (status_col, draw_col) if c]
+    reader = _csv_reader(text, csv_path, wanted)
+
+    groups: dict[str, dict[str, Any]] = {}
+    seen: set[tuple[str, str]] = set()
+    rows = 0
+    try:
+        for row in reader:
+            rows += 1
+            where = f"CSV '{csv_path}' row {rows + 1}"
+            group = _csv_row_group(row, where, group_by, draw_col, seen)
+            slot = groups.setdefault(group, {"samples": [], "errored": 0, "rows": 0})
+            slot["rows"] += 1
+            sample = _csv_row_sample(row, value, status_col, pass_value)
+            if sample is None:
+                slot["errored"] += 1
+            else:
+                slot["samples"].append(sample)
+    except csv.Error as exc:
+        raise YieldError(f"could not parse CSV '{csv_path}': {exc}") from exc
+    if not groups:
+        raise YieldError(f"CSV '{csv_path}' has a header but no data rows")
+
+    out_measurements: list[dict[str, Any]] = []
+    for name, slot in groups.items():
+        if not slot["samples"]:
+            raise YieldError(
+                f"group '{name}' in '{csv_path}' has no usable draws "
+                f"({slot['errored']} errored of {slot['rows']} rows)"
+            )
+        out_measurements.append(
+            {
+                "name": name,
+                "unit": unit,
+                "samples": slot["samples"],
+                "errored": slot["errored"],
+                "limits": dict(limits) if limits else None,
+            }
+        )
+    return {
+        "schema_version": SAMPLE_SET_SCHEMA_VERSION,
+        "measurements": out_measurements,
+        "derivation": {
+            "csv": {
+                "path": csv_path,
+                "content_hash": content_hash,
+                "rows": rows,
+                "group_by": group_by,
+                "value": value,
+                "status_col": status_col,
+                "pass_value": pass_value,
+                "draw_col": draw_col,
+            },
         },
     }
