@@ -4813,13 +4813,9 @@ def extract_netlist_from_layout(
 
     # Unsupported devices (issue #2919): additive diagnostic through the
     # optional `unsupported_devices` out-parameter, same idiom as above.
-    (
-        unsupported_prose_warnings,
-        unsupported_entries,
-    ) = _detect_unsupported_devices(layout, top_cell, deck)
-    warnings = warnings + unsupported_prose_warnings
-    if unsupported_devices is not None:
-        unsupported_devices.extend(unsupported_entries)
+    warnings = warnings + _detect_unsupported_devices(
+        layout, top_cell, deck, unsupported_devices
+    )
 
     # Issue #2722: per-device placement attribution for
     # `--hierarchical-cells`, keyed by `Device.id()`, filled into the
@@ -6908,18 +6904,20 @@ def _detect_unsupported_devices(
     layout: kdb.Layout,
     top_cell: kdb.Cell,
     deck: ExtractionDeck,
-) -> tuple[list[str], list[dict[str, Any]]]:
+    entries_out: list[dict[str, Any]] | None = None,
+) -> list[str]:
     """Flag each ``deck.unsupported_device_markers`` layer that carries shapes
     in the extracted cell (issue #2919).
 
     The deck cannot extract that device class, so the devices are missing
     from the netlist even though the run reports ``status: extracted``.
 
-    Returns ``(warnings, entries)``; each entry is ``{"kind": str, "marker":
+    Returns the prose warnings and extends ``entries_out`` (when given) with
+    one entry per flagged marker: ``{"kind": str, "marker":
     "<layer>/<datatype>", "count": int, "bbox_um": {...}, "description":
     str}`` where ``count`` is the number of connected marker components and
-    ``bbox_um`` bounds all of them. Both empty when the deck declares no such
-    marker or none has shapes.
+    ``bbox_um`` bounds all of them. Nothing is returned or appended when the
+    deck declares no such marker or none has shapes.
     """
     warnings: list[str] = []
     entries: list[dict[str, Any]] = []
@@ -6944,7 +6942,9 @@ def _detect_unsupported_devices(
                 "description": spec.description,
             }
         )
-    return warnings, entries
+    if entries_out is not None:
+        entries_out.extend(entries)
+    return warnings
 
 
 def _detect_voltage_domain_overlap(
