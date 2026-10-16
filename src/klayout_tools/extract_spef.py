@@ -253,7 +253,26 @@ def _def_name_to_spef(raw: str) -> str:
     return "".join(out)
 
 
-def def_net_instance_pins(def_path: str) -> dict[str, tuple[tuple[str, str], ...]]:
+class DefNetConnections(dict):  # type: ignore[type-arg]
+    """:func:`def_net_instance_pins`'s ``{net: ((inst, pin), ...)}`` mapping
+    (a plain ``dict`` for every existing consumer) that also carries
+    :attr:`port_pins` -- the top-level design-port names the DEF ``NETS``
+    section attaches to each net via a ``( PIN <name> )`` reference (issue
+    #3257 gap B). A port's name differs from its net's whenever the DEF's
+    ``PINS`` record says ``- PortA + NET netA``."""
+
+    port_pins: dict[str, tuple[str, ...]]
+
+    def __init__(
+        self,
+        connections: Mapping[str, tuple[tuple[str, str], ...]] | None = None,
+        port_pins: Mapping[str, tuple[str, ...]] | None = None,
+    ) -> None:
+        super().__init__(connections or {})
+        self.port_pins = dict(port_pins or {})
+
+
+def def_net_instance_pins(def_path: str) -> DefNetConnections:
     """Parse ``def_path``'s own ``NETS`` section for each net's real
     ``(instance, pin)`` connectivity (issue #961's device-terminal
     ``*CONN`` correlation): a small, targeted scan in the same style as
@@ -266,7 +285,9 @@ def def_net_instance_pins(def_path: str) -> dict[str, tuple[tuple[str, str], ...
     top-level design-port connection -- already covered by
     :func:`_write_spef`'s existing ``port_names``/``*P`` handling via
     ``place_and_route.py``'s ``declared_pins``, so ``PIN`` entries are
-    dropped here rather than double-reported). A record may span several
+    dropped from the returned mapping rather than double-reported, but kept
+    on its :attr:`DefNetConnections.port_pins` so :func:`_write_spef` can
+    name the port by its PIN rather than its net). A record may span several
     lines (a high-fanout net wraps in a real routed DEF), so this
     accumulates a record's own text across lines until the terminating
     ``;``, matching ``_def_pin_net_names``'s own multi-line handling.
@@ -303,9 +324,10 @@ def def_net_instance_pins(def_path: str) -> dict[str, tuple[tuple[str, str], ...
         with open(def_path, encoding="utf-8", errors="replace") as handle:
             text = handle.read()
     except OSError:
-        return {}
+        return DefNetConnections()
 
     connections: dict[str, list[tuple[str, str]]] = {}
+    port_pins: dict[str, list[str]] = {}
     in_nets = False
     current_net: str | None = None
     current_body: list[str] = []
@@ -320,13 +342,13 @@ def def_net_instance_pins(def_path: str) -> dict[str, tuple[tuple[str, str], ...
             # scanning the whole body would invent connections out of wire
             # points (see `_DEF_NET_CLAUSE_RE`).
             body = _DEF_NET_CLAUSE_RE.split(" ".join(current_body), maxsplit=1)[0]
-            pairs = [
-                (DefName(ref), DefName(pin))
-                for ref, pin in _DEF_NET_CONN_RE.findall(body)
-                if ref != "PIN"
-            ]
+            found = _DEF_NET_CONN_RE.findall(body)
+            pairs = [(DefName(ref), DefName(pin)) for ref, pin in found if ref != "PIN"]
             if pairs:
                 connections.setdefault(current_net, []).extend(pairs)
+            ports = [DefName(pin) for ref, pin in found if ref == "PIN"]
+            if ports:
+                port_pins.setdefault(current_net, []).extend(ports)
         current_net = None
         current_body = []
 
@@ -347,7 +369,10 @@ def def_net_instance_pins(def_path: str) -> dict[str, tuple[tuple[str, str], ...
         if line.rstrip().endswith(";"):
             _flush()
 
-    return {name: tuple(pairs) for name, pairs in connections.items()}
+    return DefNetConnections(
+        {name: tuple(pairs) for name, pairs in connections.items()},
+        {name: tuple(pins) for name, pins in port_pins.items()},
+    )
 
 
 def _spef_net_topology_nodes(
@@ -463,7 +488,7 @@ def _write_spef(
     parasitics_report: Mapping[str, Any],
     port_names: Iterable[str],
     net_instance_pins: Mapping[str, Sequence[tuple[str, str]]] | None = None,
-) -> None:
+) -> list[str]:
     """Write ``parasitics_report`` (an already-computed :func:`_inject_parasitics`
     summary -- see ``run_extract``'s ``spef_output``/``klt extract --spef``
     flag) as a Standard Parasitic Exchange Format file (SPEF,
@@ -604,6 +629,26 @@ def _write_spef(
     below is copied through unchanged -- no femtofarad/ohm rescaling, and
     therefore no unit-conversion error to introduce.
 
+    **A port whose PIN name differs from its NET name (issue #3257 gap B).**
+    A DEF ``- PortA + NET netA`` record makes the design port ``PortA`` while
+    the routed net -- and so the ``*D_NET`` -- is ``netA``. OpenSTA resolves a
+    bare node through the design's top-level *pin* names, so naming
+    ``netA`` in ``*PORTS``/``*P`` or as the RC hub is a non-existent port pin
+    (``STA-1656``). When ``net_instance_pins`` is a :class:`DefNetConnections`
+    whose ``port_pins`` names such a pin, ``*PORTS`` and the net's ``*P``
+    entries use the PIN name(s) and the hub is the internal ``<net>:1`` node.
+
+    **Floating duplicate-named nets are skipped (issue #3257 gap C).** With
+    ``net_instance_pins`` given, a non-port net name that appears on several
+    islands and has no DEF ``NETS`` record (a floating cell output, e.g. a CTS
+    dummy load's pin label) would be written as several same-named ``*D_NET``
+    blocks, which OpenSTA rejects (``STA-1650``) and which can attach to
+    nothing. Those blocks, and any coupling ``*CAP`` that referenced them,
+    are omitted; the sorted skipped net names are returned so the caller can
+    report them.
+
+    Returns the skipped net names (empty unless gap C applied).
+
     Raises :class:`ExtractError` if ``path`` cannot be written.
     """
     # Reverse `spice_safe_net_name`'s leading-`$` backslash escape (issue
@@ -654,6 +699,44 @@ def _write_spef(
     for entry in parasitics_report["nets"]:
         name_counts[entry["net"]] = name_counts.get(entry["net"], 0) + 1
 
+    # Gap C (issue #3257): drop duplicate-named nets the DEF knows nothing
+    # about, and any coupling that pointed at them.
+    skipped_nets: frozenset[str] = frozenset()
+    if net_instance_pins_map:
+        skipped_nets = frozenset(
+            name
+            for name, count in name_counts.items()
+            if count > 1
+            and name not in port_name_set
+            and name not in net_instance_pins_map
+        )
+    if skipped_nets:
+        parasitics_report = {
+            **parasitics_report,
+            "nets": [
+                {
+                    **entry,
+                    "coupled": [
+                        coupled
+                        for coupled in entry.get("coupled", [])
+                        if coupled["net"] not in skipped_nets
+                    ],
+                }
+                for entry in parasitics_report["nets"]
+                if entry["net"] not in skipped_nets
+            ],
+        }
+
+    # Gap B (issue #3257): ports whose DEF PIN name differs from their net.
+    port_pin_map: Mapping[str, Sequence[str]] = getattr(
+        net_instance_pins, "port_pins", {}
+    )
+    renamed_ports: dict[str, Sequence[str]] = {
+        net: pins
+        for net, pins in port_pin_map.items()
+        if net in port_name_set and tuple(map(str, pins)) != (net,)
+    }
+
     # One two-terminal coupling `*CAP` card per distinct coupled net pair
     # (issue #760's `coupled[]`), emitted exactly once -- `coupled[]` reports
     # every pair from *both* endpoints (docs/cli/extract.md's "Vertical-
@@ -675,7 +758,11 @@ def _write_spef(
     for entry in parasitics_report["nets"]:
         this_net = entry["net"]
         if this_net not in hub_by_net_name:
-            is_unique_port = this_net in port_name_set and name_counts[this_net] == 1
+            is_unique_port = (
+                this_net in port_name_set
+                and name_counts[this_net] == 1
+                and this_net not in renamed_ports
+            )
             _, this_hub_node, _ = _spef_net_topology_nodes(
                 _net_spef(def_net_spellings, this_net),
                 hub_differs=entry["hub_net"] != this_net,
@@ -708,16 +795,22 @@ def _write_spef(
         "*L_UNIT 1 HENRY",
     ]
 
-    sorted_ports = sorted(port_name_set)
-    if sorted_ports:
+    port_spellings: dict[str, str] = {}
+    for name in port_name_set:
+        if name in renamed_ports:
+            for pin in renamed_ports[name]:
+                port_spellings[str(pin)] = _def_spef(pin)
+        else:
+            port_spellings[name] = _spef_name(name)
+    if port_spellings:
         lines.append("")
         lines.append("*PORTS")
-        for name in sorted_ports:
+        for name in sorted(port_spellings):
             # Direction is unknown from layout-derived extraction alone (a
             # GDS text label carries no I/O-direction metadata) -- declared
             # `B` (bidirectional/unspecified, a real SPEF direction token),
             # never guessed as `I`/`O`.
-            lines.append(f"{_spef_name(name)} B")
+            lines.append(f"{port_spellings[name]} B")
 
     for entry in parasitics_report["nets"]:
         net = entry["net"]
@@ -745,7 +838,9 @@ def _write_spef(
         # `_spef_port_node_name`'s). `next_node_idx` is where any further
         # per-block internal nodes (device-terminal legs, below) continue
         # numbering from.
-        is_unique_port = is_port and name_counts.get(net, 0) == 1
+        is_unique_port = (
+            is_port and name_counts.get(net, 0) == 1 and net not in renamed_ports
+        )
         net_node, hub_node, next_node_idx = _spef_net_topology_nodes(
             spef_net,
             hub_differs=hub_differs,
@@ -765,7 +860,10 @@ def _write_spef(
         lines.append("")
         lines.append(f"*D_NET {spef_net} {total_cap_ff:.6f}")
         conn_lines: list[str] = []
-        if is_port:
+        if net in renamed_ports:
+            for pin in renamed_ports[net]:
+                conn_lines.append(f"*P {_def_spef(pin)} B")
+        elif is_port:
             conn_lines.append(f"*P {spef_net} B")
         for inst, pin in instance_pins:
             # Direction is unknown without a LEF pin-direction lookup (the
@@ -840,3 +938,4 @@ def _write_spef(
             handle.write("\n".join(lines) + "\n")
     except OSError as exc:
         raise ExtractError(f"could not write SPEF '{path}': {exc}") from exc
+    return sorted(skipped_nets)

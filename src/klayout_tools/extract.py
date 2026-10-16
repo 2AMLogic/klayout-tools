@@ -3359,7 +3359,7 @@ def run_extract(
             raise ExtractError(
                 f"cannot create output directory {spef_out_dir}: {exc}"
             ) from exc
-        _write_spef(
+        spef_skipped_nets = _write_spef(
             spef_path,
             design_name=top_cell_name,
             klt_version=_klt_version(),
@@ -3370,6 +3370,30 @@ def run_extract(
             # falls back to the pre-#961 port-only behavior.
             net_instance_pins=def_net_connections,
         )
+        # Issue #3257 gap A: DEF connectivity without a declared-port set
+        # leaves every labelled net a bare-name port, which OpenSTA cannot
+        # attach (`STA-1656`). A warning only -- the SPEF bytes are unchanged.
+        if def_net_connections and def_pins is None and declared_pins is None:
+            warnings.append(
+                "--def-net-connections without --def-pins/--pins: every "
+                "labelled net is written as a top-level port, so OpenSTA "
+                "read_spef cannot attach the nets (bare-name port hubs, "
+                "STA-1656) and timing stays identical to an unannotated "
+                "run. Pass --def-pins <routed.def> (or --pins) to declare "
+                "only the real ports."
+            )
+        # Issue #3257 gap C: same-named floating nets omitted from the SPEF.
+        if spef_skipped_nets:
+            shown = ", ".join(spef_skipped_nets[:5])
+            more = len(spef_skipped_nets) - 5
+            warnings.append(
+                f"--spef: omitted *D_NET blocks for {len(spef_skipped_nets)} "
+                "duplicate-named net(s) with no DEF net (floating cell "
+                f"outputs / unrouted supplies): {shown}"
+                + (f", ... (+{more} more)" if more > 0 else "")
+                + ". Same-named *D_NET blocks are rejected by OpenSTA "
+                "(STA-1650) and attach to no driver."
+            )
 
     # Issue #1503: every synthesized substrate identity `_tie_substrate_nets_
     # to_ground` just tied to ground (`substrate_dc_tie["nets"]`, already

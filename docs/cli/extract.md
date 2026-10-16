@@ -5590,6 +5590,38 @@ every same-named `*D_NET` block would overclaim. `klt place-and-route`'s
 own `post_route_spef` pass does this automatically, sourcing the DEF path
 from the same routed DEF `declared_pins` already reads.
 
+**Pair it with `--def-pins` (issue #3257).** `--def-net-connections` alone
+leaves every labelled net a top-level port, and OpenSTA resolves a bare-name
+port hub through the design's *pin* names, so most nets fail to attach
+(`STA-1656`) and timing comes out byte-identical to the unannotated run.
+Pass `--def-pins <routed.def>` (or `--pins`) too. Without either, the
+response's `warnings[]` carries a `--def-net-connections without
+--def-pins/--pins` entry; the SPEF bytes are unchanged by the warning.
+
+**Port PIN name ≠ NET name (issue #3257).** For a DEF `- PortA + NET netA`
+record, the `*PORTS` list and the net's `*P` entry use the PIN name
+(`PortA`) and the net's RC hub is the internal `netA:1` node, not the bare
+net name. The PIN names come from the `( PIN <name> )` references in the
+DEF `NETS` section. A port whose pin and net names agree is unchanged.
+
+**Floating duplicate-named outputs (issue #3257).** With
+`--def-net-connections`, a non-port net name that appears on several islands
+and is absent from the DEF `NETS` section (for example the unconnected
+output pins of CTS dummy-load cells, which share a pin label) is **omitted**
+from the SPEF, along with any coupling capacitor that referenced it. Several
+same-named `*D_NET` blocks are rejected by OpenSTA (`STA-1650`) and attach to
+no driver. `warnings[]` lists the omitted names. This also drops duplicate
+supply nets (`VGND`/`VPWR` islands) that the DEF only declares in
+`SPECIALNETS`.
+
+**Parasitic model (default, non-`--distributed-rc`).** The SPEF carries a
+single lumped capacitance per net, hung on the net's hub node, and no wire
+resistance between DEF-level pins: each DEF pin joins the net's primary node
+through a zero-ohm `*RES` leg. Only the per-device-terminal star legs carry
+resistance. Timing from this SPEF therefore sees wire *capacitance* but not
+wire *delay* on pin-to-pin paths. This is the intended model (see "The model:
+a star topology"), not an omission.
+
 A `generate`-block hierarchy's net/instance names are Verilog-*escaped*
 identifiers — the DEF `NETS` section spells them with a backslash before
 every special character (`g_slice\[0\].u_slice\/_08_`), the same
