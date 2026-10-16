@@ -85,6 +85,10 @@ during #196's bring-up:
    for the law, where to source the process's real matching constants, and
    the worked spec-to-parameter conversion (including the
    `topology="common_centroid"` vs. plain-`"array"` choice).
+   For a MOS capacitor (decoupling, compensation) use `mos_array` with
+   `mos_cap: true` and `add_guard_ring: true` (gf180mcu): S/D tied into one
+   `U<i>_SD` port, marker layer drawn, width floor taken from the deck's COMP
+   min-width rule (`docs/cli/gen.md`).
 2. **Compose multiple generated blocks into one placed-and-routed
    circuit.** `klt gen-compose <request.json>` places a row of already-
    generated blocks and routes two-pin *and* >2-pin (shared rail, fanout)

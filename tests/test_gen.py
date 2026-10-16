@@ -1560,6 +1560,28 @@ def test_mos_array_voltage_flavor_unsupported_on_sky130_notes_not_drawn(
     assert any("voltage_flavor" in n for n in report["drc_hints"]["notes"])
 
 
+@pytest.mark.parametrize("name", ["native", "nvt"])
+def test_mos_array_voltage_flavor_native_on_sky130_names_unsupported_nvt(
+    tmp_path, both_pdk_root, name
+):
+    """sky130's native-Vt NMOS (`nfet_05v0_nvt`) is derived upstream from
+    hvi AND lvtn, which a single-marker `voltage_flavor` cannot express: the
+    note must name that flavour as unsupported rather than only reporting a
+    generic "no marker layer resolved" (issue #2912)."""
+    output = tmp_path / f"mos_array_voltage_flavor_{name}.gds"
+    report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(both_pdk_root)},
+            "params": {"voltage_flavor": name},
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["drc_hints"]["voltage_flavor_mark_present"] is False
+    notes = report["drc_hints"]["notes"]
+    assert any("nfet_05v0_nvt" in n and "unsupported" in n for n in notes)
+
+
 def test_mos_array_voltage_flavor_unrecognised_name_notes_not_drawn(
     tmp_path, both_pdk_root
 ):
@@ -3735,6 +3757,45 @@ def test_res_array_sky130_flavor_high_draws_psdm_and_rpm(tmp_path, pdk_root):
     assert _SKY130_RPM_LAYER in present
     assert _SKY130_URPM_LAYER not in present
     assert _SKY130_NPC_LAYER in present  # issue #3077
+
+
+@pytest.mark.parametrize(
+    ("flavor", "marker_layer", "rule_id"),
+    [
+        ("high", _SKY130_RPM_LAYER, "rpm.width.1"),
+        ("xhigh", _SKY130_URPM_LAYER, "urpm.width.1"),
+    ],
+)
+def test_res_array_sky130_min_width_marker_meets_pdk_minimum(
+    tmp_path, pdk_root, flavor, marker_layer, rule_id
+):
+    """A minimum-width (0.42 um) `res_array` keeps its rpm/urpm marker at or
+    above the PDK's 1.27 um floor (`rpm.1a`/`urpm.1a`): the marker covers the
+    contacted heads, not just the narrow body (#2449). The curated deck's
+    `rpm.width.1`/`urpm.width.1` (#3030) guard that, so a regression to a
+    body-width marker is visible to `klt drc --deck sky130`."""
+    import klayout.db as kdb
+
+    output = tmp_path / f"res_array_min_{flavor}.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"flavor": flavor, "width_um": 0.42, "length_um": 52},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.top_cell()
+    marker = kdb.Region(top.begin_shapes_rec(layout.layer(*marker_layer))).merged()
+    assert not marker.is_empty()
+    for polygon in marker.each():
+        bbox = polygon.bbox()
+        assert min(bbox.width(), bbox.height()) * layout.dbu >= 1.27
+
+    drc_report = run_drc(str(output), "sky130")
+    assert rule_id not in drc_report["rule_counts"]
 
 
 def test_res_array_sky130_flavor_xhigh_draws_psdm_and_urpm(tmp_path, pdk_root):
@@ -6094,6 +6155,43 @@ def test_sg13g2_res_array_default_params_recognised_as_rsil(tmp_path, sg13g2_pdk
     # literal keeps this tied to `res_array`'s documented default `num`.
     assert report["device_counts"] == {"rsil": gen_report["device_count"]}
     assert report["dummy_devices_dropped"] == 2
+
+
+@pytest.mark.parametrize(
+    ("flavor", "device"), [("generic", "rsil"), ("rppd", "rppd"), ("rhigh", "rhigh")]
+)
+def test_sg13g2_res_array_uses_pdk_pcell_polyres_body_abutting_gatpoly_heads(
+    tmp_path, sg13g2_pdk_root, flavor, device
+):
+    """Issue #2679: `res_array` on sg13g2 draws the IHP PCell convention --
+    `polyres` is the resistive body and `GatPoly` only the two abutting
+    heads (zero overlap) -- and every flavour round-trips through `klt
+    extract --deck sg13g2` to exactly `num` devices, each with two distinct
+    terminal nets (the body does not short its heads)."""
+    import klayout.db as kdb
+
+    output = tmp_path / f"res_array_sg13g2_{flavor}.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+            "params": {"flavor": flavor, "num": 3, "dummy": 0},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.top_cell()
+    gatpoly = kdb.Region(top.begin_shapes_rec(layout.layer(5, 0)))
+    polyres = kdb.Region(top.begin_shapes_rec(layout.layer(*_SG13G2_RES_MARK_LAYER)))
+    assert not polyres.is_empty()
+    assert (gatpoly & polyres).is_empty()
+    assert not (gatpoly.sized(1) & polyres).is_empty()
+
+    report = run_extract(str(output), "sg13g2")
+    assert report["device_counts"] == {device: 3}
+    for dev in report["devices"]:
+        assert dev["nets"]["a"] != dev["nets"]["b"]
 
 
 def test_sg13g2_res_array_explicit_generic_matches_default(tmp_path, sg13g2_pdk_root):
@@ -10623,3 +10721,138 @@ def test_sky130_short_gate_pad_and_ring_well_clear_magic_rules(
     )
     assert poly.separation_check(diff, 75).count() == 0
     assert nwell.enclosing_check(tap, 180).count() == 0
+
+
+# --------------------------------------------------------------------------- #
+# mos_array `mos_cap` option (issue #3283)
+# --------------------------------------------------------------------------- #
+
+_GF180_MOS_CAP_MARK = (166, 5)
+
+
+def _gen_mos_cap(tmp_path, root, variant="gf180mcuD", **params):
+    output = tmp_path / "mos_cap.gds"
+    report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": variant, "root": str(root)},
+            "params": {"mos_cap": True, "add_guard_ring": True, **params},
+            "options": {"output": str(output)},
+        }
+    )
+    return output, report
+
+
+def _gds_layers(path):
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(path))
+    return {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+
+
+@pytest.mark.parametrize(
+    "params",
+    (
+        {"w_um": 1.0},
+        {"w_um": 0.22},  # LV COMP min width (DF.1a_LV)
+        {"w_um": 0.30, "voltage_flavor": "medium_voltage"},  # MV min (DF.1a_MV)
+        {"w_um": 1.0, "fingers": 3},
+        {"w_um": 1.0, "rows": 2, "cols": 2, "dummy": 1},
+        {"w_um": 1.0, "flavor": "pfet"},
+    ),
+)
+def test_mos_cap_gf180mcu_is_marked_ported_and_drc_clean(
+    params, tmp_path, both_pdk_root
+):
+    output, report = _gen_mos_cap(tmp_path, both_pdk_root, **params)
+    assert _GF180_MOS_CAP_MARK in _gds_layers(output)
+    names = {p["name"] for p in report["ports"]}
+    assert {"U0_SD", "U0_G"} <= names
+    # S and D are one tied terminal, not two, and the body tie is the ring.
+    assert "U0_S" not in names and "U0_D" not in names
+    assert any(n.startswith("TAP_") for n in names)
+    assert run_drc(str(output), "gf180mcu")["status"] == "clean"
+
+
+def test_mos_cap_ties_every_source_drain_segment(tmp_path, both_pdk_root):
+    """Every S/D segment of a multi-finger cap lands on the one strap: the
+    metal net containing the `U0_SD` port reaches all `fingers + 1` contacts."""
+    import klayout.db as kdb
+
+    output, report = _gen_mos_cap(tmp_path, both_pdk_root, w_um=1.0, fingers=3)
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.top_cell()
+    contacts = kdb.Region(top.begin_shapes_rec(layout.layer(33, 0)))  # Contact
+    metal1 = kdb.Region(top.begin_shapes_rec(layout.layer(34, 0))).merged()  # Metal1
+    sd = next(p for p in report["ports"] if p["name"] == "U0_SD")
+    dbu = layout.dbu
+    probe = kdb.Region(
+        kdb.Box(
+            int(sd["x_um"] / dbu) - 1,
+            int(sd["y_um"] / dbu) - 1,
+            int(sd["x_um"] / dbu) + 1,
+            int(sd["y_um"] / dbu) + 1,
+        )
+    )
+    strap_net = metal1.interacting(probe)
+    sd_contacts = contacts.interacting(strap_net)
+    # 4 S/D segments for 3 fingers (the ring contacts are on its own net).
+    assert sd_contacts.count() >= 4
+
+
+def test_mos_cap_rejects_width_below_deck_comp_rule(tmp_path, both_pdk_root):
+    with pytest.raises(GenError, match=r"comp\.width\.1"):
+        _gen_mos_cap(tmp_path, both_pdk_root, w_um=0.2)
+    with pytest.raises(GenError, match=r"comp\.width\.mv\.1"):
+        _gen_mos_cap(
+            tmp_path, both_pdk_root, w_um=0.25, voltage_flavor="medium_voltage"
+        )
+
+
+def test_mos_cap_unsupported_pdk_family_is_a_clear_generror(tmp_path, both_pdk_root):
+    with pytest.raises(GenError, match="no MOS-capacitor marker"):
+        _gen_mos_cap(tmp_path, both_pdk_root, variant="sky130A", w_um=1.0)
+
+
+@pytest.mark.parametrize(
+    ("params", "match"),
+    (
+        ({"add_guard_ring": False}, "add_guard_ring"),
+        ({"gate_contact": True}, "gate_contact"),
+    ),
+)
+def test_mos_cap_rejects_unsupported_combinations(
+    params, match, tmp_path, both_pdk_root
+):
+    with pytest.raises(GenError, match=match):
+        _gen_mos_cap(tmp_path, both_pdk_root, w_um=1.0, **params)
+
+
+def test_plain_mos_array_is_unchanged_by_mos_cap_option(tmp_path, both_pdk_root):
+    """Without `mos_cap` there is no marker, the S/D/G port set is the old
+    one, and the flat 0.42um width floor still applies."""
+    output = tmp_path / "plain.gds"
+    report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "options": {"output": str(output)},
+        }
+    )
+    assert _GF180_MOS_CAP_MARK not in _gds_layers(output)
+    names = {p["name"] for p in report["ports"]}
+    assert {"U0_S", "U0_D", "U0_G"} <= names and "U0_SD" not in names
+    with pytest.raises(GenError, match="0.42"):
+        generate(
+            {
+                "generator": "mos_array",
+                "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+                "params": {"w_um": 0.3},
+                "options": {"output": str(tmp_path / "narrow.gds")},
+            }
+        )

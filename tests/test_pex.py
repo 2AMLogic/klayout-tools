@@ -1567,12 +1567,24 @@ def test_run_pex_relative_output_bakes_absolute_include_line(tmp_path, monkeypat
     assert report["netlist"]["scope"] == "repo"
 
 
-def test_run_pex_unrelated_sim_error_still_aborts(
+def _two_corner_schematic_report():
+    return {
+        "corners": [
+            {"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.4)]},
+            {"corner_id": "ss/1.620V/-40C", "measurements": [_measurement(1.3)]},
+        ],
+        "corner_count": 2,
+        "measurements": [{"name": "vout"}],
+    }
+
+
+def test_run_pex_extracted_side_backend_failure_keeps_schematic_results(
     tmp_path, resistor_layout, monkeypatch
 ):
-    """The new diagnostic is scoped to the pin-count-mismatch text only --
-    every other extracted-side `SimError` aborts with a `PexError`, exactly
-    as before."""
+    """Issue #2990: a non-pin-count extracted-side `SimError` (here a batch
+    capacity refusal) no longer aborts the run and discards the completed
+    schematic side -- every row is an error row with the schematic value
+    intact, and the failure is named in `backend_failure`."""
     import klayout_tools.pex as pex_module
     from klayout_tools.sim import SimError
 
@@ -1581,14 +1593,11 @@ def test_run_pex_unrelated_sim_error_still_aborts(
     def _fake_run_sim(*_args, **_kwargs):
         calls["n"] += 1
         if calls["n"] == 1:
-            return {
-                "corners": [
-                    {"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.4)]}
-                ],
-                "corner_count": 1,
-                "measurements": [{"name": "vout"}],
-            }
-        raise SimError("model library not found: /nope/sky130.lib.spice")
+            return _two_corner_schematic_report()
+        raise SimError(
+            "batch backend failed: no capacity in any of the 30 pools",
+            code="batch_no_capacity",
+        )
 
     monkeypatch.setattr(pex_module, "run_sim", _fake_run_sim)
 
@@ -1596,8 +1605,82 @@ def test_run_pex_unrelated_sim_error_still_aborts(
     tb = _write_testbench(tmp_path / "testbench.spice", dut)
     request = _write_request(tmp_path / "request.json", tb)
 
-    with pytest.raises(PexError, match="extracted-side simulation failed"):
+    report = run_pex(resistor_layout, [str(request)], "sky130")
+
+    assert report["status"] == "error"
+    assert report["errored"] == 2
+    assert [row["status"] for row in report["delta"]] == ["error", "error"]
+    assert [row["schematic_value"] for row in report["delta"]] == [1.4, 1.3]
+    assert all(row["extracted_value"] is None for row in report["delta"])
+    failure = report["backend_failure"]
+    assert failure["side"] == "extracted"
+    assert failure["code"] == "batch_no_capacity"
+    assert "no capacity" in failure["message"]
+    assert failure["testbench"] == str(request)
+    assert report["pin_count_mismatch"] is None
+
+
+def test_run_pex_backend_failure_only_second_testbench_keeps_first_graded(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """Issue #2990: with two testbenches, a failure on the second one's
+    extracted side leaves the first one's rows graded normally."""
+    import klayout_tools.pex as pex_module
+    from klayout_tools.sim import SimError
+
+    one_corner = {
+        "corners": [
+            {"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.4)]}
+        ],
+        "corner_count": 1,
+        "measurements": [{"name": "vout"}],
+    }
+    calls = {"n": 0}
+
+    def _fake_run_sim(*_args, **_kwargs):
+        calls["n"] += 1
+        if calls["n"] == 4:
+            raise SimError("batch backend failed: boom", code="batch_no_capacity")
+        return one_corner
+
+    monkeypatch.setattr(pex_module, "run_sim", _fake_run_sim)
+
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    requests = []
+    for name in ("a", "b"):
+        tb = _write_testbench(tmp_path / f"{name}.spice", dut)
+        requests.append(str(_write_request(tmp_path / f"{name}.json", tb)))
+
+    report = run_pex(resistor_layout, requests, "sky130")
+
+    assert calls["n"] == 4
+    statuses = [row["status"] for row in report["delta"]]
+    assert len(statuses) == 2
+    assert statuses[0] != "error"
+    assert statuses[1] == "error"
+    assert report["backend_failure"]["testbench"] == requests[1]
+
+
+def test_run_pex_schematic_side_sim_error_keeps_code(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """Issue #2990: a schematic-side `SimError` still aborts, but its
+    machine-readable `code` survives on the `PexError`."""
+    import klayout_tools.pex as pex_module
+    from klayout_tools.sim import SimError
+
+    def _fake_run_sim(*_args, **_kwargs):
+        raise SimError("batch backend failed: no capacity", code="batch_no_capacity")
+
+    monkeypatch.setattr(pex_module, "run_sim", _fake_run_sim)
+
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    with pytest.raises(PexError, match="schematic-side simulation failed") as info:
         run_pex(resistor_layout, [str(request)], "sky130")
+    assert info.value.code == "batch_no_capacity"
 
 
 def test_run_pex_flat_dut_mismatch_skips_extracted_side_entirely(
@@ -2467,6 +2550,24 @@ def test_run_pex_critical_nets_threaded_through_to_extraction(
     report = run_pex(resistor_layout, [str(request)], "sky130", critical_nets=["RB"])
 
     assert report["extraction"]["critical_nets"] == ["RB"]
+    assert report["status"] == "pass"
+
+
+@_SKIP_NO_NGSPICE
+def test_run_pex_critical_net_pattern_threaded_through_to_extraction(
+    tmp_path, resistor_layout
+):
+    """`--critical-net-pattern` (issue #2974) is forwarded to `run_extract`;
+    `extraction.critical_nets` echoes the resolved concrete names."""
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    report = run_pex(
+        resistor_layout, [str(request)], "sky130", critical_net_patterns=["R*"]
+    )
+
+    assert report["extraction"]["critical_nets"] == ["RA", "RB"]
     assert report["status"] == "pass"
 
 

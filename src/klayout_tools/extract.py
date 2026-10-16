@@ -204,6 +204,7 @@ from .extract_abstract import (
     lef_layer_probe_roles,
 )
 from .extract_abstract import _sanitize_instance_name as _sanitize_instance_name
+from .extract_netselect import NetSelectors
 
 # The RC-parasitics subsystem lives in its own module (issue #1572, following
 # the same split as `extract_abstract.py`/`extract_spef.py` above). This
@@ -972,6 +973,76 @@ def _substrate_spreading_block(
     return block
 
 
+def _build_net_selectors(
+    critical_net_patterns: Sequence[str] | None,
+    critical_net_all: bool,
+    critical_net_excludes: Sequence[str] | None,
+    parasitics_net_patterns: Sequence[str] | None,
+    strict_net_patterns: bool,
+    *,
+    parasitics: bool,
+) -> NetSelectors | None:
+    """Validate the pattern/all-nets selector flags (issue #2974); ``None``
+    when none was given, so every report stays byte-identical to before."""
+    if critical_net_excludes and not critical_net_all:
+        raise ExtractError("--critical-net-exclude requires --critical-net-all")
+    selecting = critical_net_patterns or critical_net_all or parasitics_net_patterns
+    if not selecting and not strict_net_patterns:
+        return None
+    if not selecting:
+        raise ExtractError(
+            "--strict-net-patterns requires --critical-net-pattern, "
+            "--critical-net-all or --parasitics-net-pattern"
+        )
+    if not parasitics:
+        raise ExtractError(
+            "--critical-net-pattern/--critical-net-all/--parasitics-net-pattern "
+            "require --parasitics"
+        )
+    return NetSelectors(
+        critical_patterns=tuple(critical_net_patterns or ()),
+        critical_all=critical_net_all,
+        critical_excludes=tuple(critical_net_excludes or ()),
+        parasitics_patterns=tuple(parasitics_net_patterns or ()),
+        strict=strict_net_patterns,
+        error=ExtractError,
+    )
+
+
+def _selects_critical(net_selectors: NetSelectors | None) -> bool:
+    return net_selectors is not None and net_selectors.has_critical
+
+
+def _adopt_resolved_net_selectors(
+    net_selectors: NetSelectors | None,
+    critical_nets_set: frozenset[str] | None,
+    parasitics_nets_set: frozenset[str] | None,
+    distributed_rc: bool,
+) -> tuple[frozenset[str] | None, frozenset[str] | None]:
+    """Take the net sets :class:`NetSelectors` resolved during extraction
+    (issue #2974); ``--distributed-rc`` needs the resolved set non-empty."""
+    if net_selectors is None:
+        return critical_nets_set, parasitics_nets_set
+    critical_nets_set = net_selectors.critical_nets or critical_nets_set
+    parasitics_nets_set = net_selectors.parasitics_nets or parasitics_nets_set
+    if distributed_rc and not critical_nets_set:
+        raise ExtractError(
+            "--distributed-rc requires --critical-net: the requested "
+            "--critical-net-pattern/--critical-net-all resolved to no net"
+        )
+    return critical_nets_set, parasitics_nets_set
+
+
+def _report_net_selectors(
+    net_selectors: NetSelectors | None,
+    parasitics_report: dict[str, Any],
+    warnings: list[str],
+) -> None:
+    if net_selectors is not None:
+        parasitics_report.update(net_selectors.echo())
+        warnings.extend(net_selectors.warnings)
+
+
 def _require_parasitics(flag: str, value: Any, parasitics: bool) -> None:
     """Reject ``flag`` when it was given without ``--parasitics``.
 
@@ -1221,6 +1292,11 @@ def run_extract(
     def_net_names: bool = False,
     critical_nets: Sequence[str] | None = None,
     parasitics_nets: Sequence[str] | None = None,
+    critical_net_patterns: Sequence[str] | None = None,
+    critical_net_all: bool = False,
+    critical_net_excludes: Sequence[str] | None = None,
+    parasitics_net_patterns: Sequence[str] | None = None,
+    strict_net_patterns: bool = False,
     parasitics_top_cell_only: bool = False,
     distributed_rc: bool = False,
     resistance_paths: Sequence[tuple[int, str, str]] | None = None,
@@ -2590,7 +2666,19 @@ def run_extract(
     # that flag's own net set as the "which nets get the ladder" scope
     # rather than inventing a second net classification mechanism -- with
     # nothing named there is nothing to scope this onto.
-    if distributed_rc and not critical_nets_set:
+    net_selectors = _build_net_selectors(
+        critical_net_patterns,
+        critical_net_all,
+        critical_net_excludes,
+        parasitics_net_patterns,
+        strict_net_patterns,
+        parasitics=parasitics,
+    )
+    if (
+        distributed_rc
+        and not critical_nets_set
+        and not _selects_critical(net_selectors)
+    ):
         raise ExtractError("--distributed-rc requires --critical-net")
 
     # `--resistance-path` (issue #2765): validated up front, in a helper so
@@ -2716,6 +2804,7 @@ def run_extract(
         def_net_names=def_net_names,
         critical_nets=critical_nets_set,
         parasitics_nets=parasitics_nets_set,
+        net_selectors=net_selectors,
         parasitics_top_cell_only=parasitics_top_cell_only,
         def_pins=def_pins,
         pin_source_cells=pin_source_cells,
@@ -2735,6 +2824,12 @@ def run_extract(
         missing_flavour_markers=missing_flavour_markers,
         probes=probes,
         probe_results=probe_results,
+    )
+
+    # `--critical-net-pattern`/`--parasitics-net-pattern` (issue #2974): the
+    # selectors were resolved against the extracted nets inside the call above.
+    critical_nets_set, parasitics_nets_set = _adopt_resolved_net_selectors(
+        net_selectors, critical_nets_set, parasitics_nets_set, distributed_rc
     )
 
     # `--subcircuit` (issue #2245), layout-dependent half: both rejections
@@ -3220,7 +3315,9 @@ def run_extract(
         # `warnings` instead, mirroring `--pins`' "declared name matched no
         # promoted net" convention.
         parasitics_report["critical_nets"] = (
-            list(critical_nets) if critical_nets else []
+            sorted(critical_nets_set or ())
+            if _selects_critical(net_selectors)
+            else (list(critical_nets) if critical_nets else [])
         )
         # Additive field (issue #1700): echoes the `--parasitics-net` request
         # back verbatim (as given, not sorted/deduplicated) -- `[]` when the
@@ -3228,8 +3325,13 @@ def run_extract(
         # `parasitics.nets[]` would be indistinguishable from a layout whose
         # other nets genuinely had no ground-eligible geometry.
         parasitics_report["parasitics_nets"] = (
-            list(parasitics_nets) if parasitics_nets else []
+            sorted(parasitics_nets_set or ())
+            if net_selectors is not None and net_selectors.parasitics_patterns
+            else (list(parasitics_nets) if parasitics_nets else [])
         )
+        # Additive fields (issue #2974): the requested selectors, present
+        # only when one was given, plus their zero-match warnings.
+        _report_net_selectors(net_selectors, parasitics_report, warnings)
         if variants is not None:
             # Additive field (issue #3056): present only when
             # `--parasitic-variant` was given, so every other report is
@@ -3617,6 +3719,14 @@ def run_extract(
         # sets `pin_renames.declared_pins`/`pin_renames.def_pins` echo --
         # see `rerun_extract_report`.
         "rename_declared_pins": rename_declared_pins,
+        # Additive fields (issue #3061): the `--pins` / `--def-pins` sets as
+        # given -- a sorted list, or `null` when the flag was not given (`[]`
+        # stays distinct from `null`: the demotion passes treat an empty set
+        # differently from an absent one). Always present, independent of
+        # `--rename-declared-pins`, so `--check --rerun` can replay them; see
+        # `rerun_extract_report`.
+        "declared_pins": None if declared_pins is None else sorted(declared_pins),
+        "def_pins": None if def_pins is None else sorted(def_pins),
         # Additive field (issue #2656): `null` unless `label_layers`
         # (--label-layer) was given, otherwise the caller's own role ->
         # [layer, datatype] (or `null`) mapping echoed verbatim -- the record
@@ -4137,9 +4247,35 @@ def check_extract_report(report_path: str) -> dict[str, Any]:
 # etc.) -- the bookkeeping spelling issue #1559's field-class table
 # (`docs/cli/extract.md`) documents as not a stable contract across builds.
 _ANONYMOUS_NET_NAME_RE = re.compile(r"^\\\$\d+$")
+# The unanchored-at-the-end form of the above: the longest `\$<digits>` prefix
+# of a string leaf, which is the only prefix :func:`_rewrite_net_name` can
+# possibly rename (issue #3568).
+_ANONYMOUS_NET_PREFIX_RE = re.compile(r"^\\\$\d+")
 
 
-def _net_attachment_key(net_name: str, devices: list[Any]) -> str:
+def _net_attachment_index(devices: list[Any]) -> dict[str, list[str]]:
+    """``{net name: [<device>.<terminal>, ...]}`` for every string-named net a
+    ``devices[]`` terminal touches, built in one pass so
+    :func:`_net_attachment_key` is a dict lookup instead of a rescan of every
+    device per net (issue #3568). Duplicates are kept: one device with two
+    terminals on the same net contributes two entries."""
+    index: dict[str, list[str]] = {}
+    for device in devices:
+        if not isinstance(device, dict):
+            continue
+        for terminal, terminal_net in (device.get("nets") or {}).items():
+            if isinstance(terminal_net, str):
+                index.setdefault(terminal_net, []).append(
+                    f"{device.get('name')}.{terminal}"
+                )
+    return index
+
+
+def _net_attachment_key(
+    net_name: str,
+    devices: list[Any],
+    index: Mapping[str, list[str]] | None = None,
+) -> str:
     """The sorted ``<device>.<terminal>`` attachment list for ``net_name``,
     read from this same report's already-built ``devices[]`` array -- the
     structural identity issue #1559 normalizes an anonymous net's unstable
@@ -4152,7 +4288,12 @@ def _net_attachment_key(net_name: str, devices: list[Any]) -> str:
     ground/substrate net) -- nothing to disambiguate by, so the caller
     leaves that net's original spelling untouched rather than fabricate a
     key that cannot be trusted to be unique.
+
+    ``index`` (from :func:`_net_attachment_index` over the same ``devices``)
+    makes the call O(attachments of this net) rather than O(all terminals).
     """
+    if index is not None and isinstance(net_name, str):
+        return ",".join(sorted(index.get(net_name, ())))
     attachments = sorted(
         f"{device.get('name')}.{terminal}"
         for device in devices
@@ -4176,13 +4317,14 @@ def _anonymous_net_name_map(report: Mapping[str, Any]) -> dict[str, str]:
     if not isinstance(nets, list) or not isinstance(devices, list):
         return {}
     name_map: dict[str, str] = {}
+    index = _net_attachment_index(devices)
     for entry in nets:
         if not isinstance(entry, dict):
             continue
         name = entry.get("name")
         if not isinstance(name, str) or not _ANONYMOUS_NET_NAME_RE.match(name):
             continue
-        attachment_key = _net_attachment_key(name, devices)
+        attachment_key = _net_attachment_key(name, devices, index)
         if attachment_key:
             name_map[name] = f"$anon<{attachment_key}>"
     return name_map
@@ -4204,14 +4346,23 @@ def _rewrite_net_name(value: Any, name_map: Mapping[str, str]) -> Any:
     canonical = name_map.get(value)
     if canonical is not None:
         return canonical
-    for raw_name, canonical_name in name_map.items():
-        if not value.startswith(raw_name):
-            continue
-        boundary = value[len(raw_name) : len(raw_name) + 1]
-        if boundary and boundary.isalnum():
-            continue
-        return canonical_name + value[len(raw_name) :]
-    return value
+    # Every ``name_map`` key is ``\\$<digits>``, so the only key a leaf can
+    # start with (past the boundary rule) is its longest ``\\$<digits>``
+    # prefix: any shorter digit prefix is followed by a digit, i.e. an
+    # alphanumeric, and would be rejected below (issue #3568).
+    if not name_map or not value.startswith("\\$"):
+        return value
+    match = _ANONYMOUS_NET_PREFIX_RE.match(value)
+    if match is None:
+        return value
+    raw_name = match.group()
+    canonical_name = name_map.get(raw_name)
+    if canonical_name is None:
+        return value
+    boundary = value[len(raw_name) : len(raw_name) + 1]
+    if boundary and boundary.isalnum():
+        return value
+    return canonical_name + value[len(raw_name) :]
 
 
 def _canonicalize_extract_report_for_rerun_diff(
@@ -4268,12 +4419,13 @@ def _canonicalize_extract_report_for_rerun_diff(
     nets = normalized.get("nets")
     devices = normalized.get("devices")
     if isinstance(nets, list) and isinstance(devices, list):
+        index = _net_attachment_index(devices)
         normalized["nets"] = sorted(
             nets,
             key=lambda entry: (
                 (
                     entry.get("name", ""),
-                    _net_attachment_key(entry.get("name", ""), devices),
+                    _net_attachment_key(entry.get("name", ""), devices, index),
                 )
                 if isinstance(entry, dict)
                 else ("", "")
@@ -4378,16 +4530,18 @@ def rerun_extract_report(report_path: str) -> dict[str, Any]:
     by an earlier build of this unreleased feature or hand-edited, replays
     its ``declared`` union as ``--pins`` alone) -- when the committed report
     carries a ``pin_renames`` block,
-    writing the fresh netlist back to the same ``netlist_path`` the
-    committed report recorded
-    (so that field, too, is a meaningful comparison rather than an
-    incidental path difference). **Known limitation**, mirroring ``klt lvs
+    writing the fresh netlist to a private temp directory deleted afterward
+    (issue #3061: the committed ``netlist_path`` file is never modified;
+    ``netlist_sha256`` is still computed, and ``fresh.netlist_path`` reports
+    the committed path so that field is not an incidental path difference).
+    The top-level ``declared_pins``/``def_pins`` echoes (issue #3061) replay
+    ``--pins``/``--def-pins`` independent of ``--rename-declared-pins``, and
+    win over the ``pin_renames`` echoes, which stay the fallback for an older
+    report. **Known limitation**, mirroring ``klt lvs
     --check``'s ``rerun_lvs_report()`` (``lvs.py``): every *other* optional
     ``klt extract`` flag (``--parasitics``, ``--mom-net``, ``--spef``,
     ``--critical-net``, ``--distributed-rc``, ``--def-net-names``,
     ``--def-net-connections``, ``--mom-rlc-*``, ``--top-cell-pins``,
-    ``--pins``/``--def-pins`` -- except through the ``pin_renames`` echoes
-    a run that also used ``--rename-declared-pins`` carries, see above --,
     ``--defer-resistor-fixed-offset``, ``--abstract-cells``,
     ``--abstract-cell-lef``, ``--matched-group``, ``--subcircuit``/
     ``--subcircuit-output``, ``--pdk``/``--pdk-root``)
@@ -4470,54 +4624,49 @@ def rerun_extract_report(report_path: str) -> dict[str, Any]:
     # block -- or one whose echoes lost their shape -- replays without the
     # flag and legitimately drifts on the pin fields, the same documented
     # limitation every other unechoed flag has.
-    rename_declared_pins = committed.get("rename_declared_pins") is True
-    pin_renames_echo = committed.get("pin_renames")
-    rerun_declared_pins: frozenset[str] | None = None
-    rerun_def_pins: frozenset[str] | None = None
-    if rename_declared_pins and isinstance(pin_renames_echo, dict):
-        if "declared_pins" in pin_renames_echo or "def_pins" in pin_renames_echo:
-            valid_pins, rerun_declared_pins = _parse_declared_set_echo(
-                pin_renames_echo.get("declared_pins")
-            )
-            valid_def, rerun_def_pins = _parse_declared_set_echo(
-                pin_renames_echo.get("def_pins")
-            )
-            if not (valid_pins and valid_def):
-                rename_declared_pins = False
-                rerun_declared_pins = None
-                rerun_def_pins = None
-        else:
-            # A block without the separate echoes (an earlier build of this
-            # unreleased feature, or a hand-edited report): the union
-            # `declared` is the only echo -- replay it as `--pins` alone
-            # (the previous behavior; imperfect when the original run's
-            # `--def-pins` further restricted the surviving set, but
-            # strictly better than discarding the rename the block does
-            # carry).
-            union_echo = pin_renames_echo.get("declared")
-            if isinstance(union_echo, list) and all(
-                isinstance(name, str) for name in union_echo
-            ):
-                rerun_declared_pins = frozenset(union_echo) if union_echo else None
-            else:
-                rename_declared_pins = False
-    else:
-        rename_declared_pins = False
-
-    fresh = run_extract(
-        file_path,
-        deck_name,
-        output=committed.get("netlist_path"),
-        # A report recorded by `--no-netlist` (issue #2850) has a null path:
-        # replay it as census-only rather than writing beside the input.
-        no_netlist="netlist_path" in committed and committed["netlist_path"] is None,
-        top=committed.get("top"),
-        deck_options=deck_options,
-        label_layers=label_layers,
-        declared_pins=rerun_declared_pins,
-        def_pins=rerun_def_pins,
-        rename_declared_pins=rename_declared_pins,
+    rename_declared_pins, rerun_declared_pins, rerun_def_pins = (
+        _replay_pin_renames_echo(committed)
     )
+
+    # Issue #3061: the top-level `declared_pins`/`def_pins` echoes (emitted
+    # whether or not `--rename-declared-pins` was on) win over the
+    # `pin_renames` echo above, which stays the fallback for a report that
+    # predates them. A malformed echo degrades to "not replayed".
+    top_echo = _replay_top_level_pin_echo(committed)
+    if top_echo is not None:
+        rerun_declared_pins, rerun_def_pins = top_echo
+
+    # Issue #3061: the rerun never writes over the committed netlist. A report
+    # recorded by `--no-netlist` (issue #2850) has a null path: replay it as
+    # census-only. Otherwise the fresh netlist goes to a private temp dir (so
+    # `netlist_sha256` is still computed) that is deleted afterward, and the
+    # embedded `fresh.netlist_path` reports the committed path -- the netlist
+    # text does not embed its own path, so the hash is unaffected.
+    committed_netlist_path = committed.get("netlist_path")
+    no_netlist = "netlist_path" in committed and committed_netlist_path is None
+    scratch_dir = None if no_netlist else tempfile.mkdtemp(prefix="klt-extract-rerun-")
+    try:
+        fresh = run_extract(
+            file_path,
+            deck_name,
+            output=(
+                None
+                if scratch_dir is None
+                else os.path.join(scratch_dir, "extracted.spice")
+            ),
+            no_netlist=no_netlist,
+            top=committed.get("top"),
+            deck_options=deck_options,
+            label_layers=label_layers,
+            declared_pins=rerun_declared_pins,
+            def_pins=rerun_def_pins,
+            rename_declared_pins=rename_declared_pins,
+        )
+    finally:
+        if scratch_dir is not None:
+            shutil.rmtree(scratch_dir, ignore_errors=True)
+    if scratch_dir is not None and fresh.get("netlist_path") is not None:
+        fresh["netlist_path"] = committed_netlist_path
     return build_rerun_result(
         report_path=report_path,
         committed=committed,
@@ -4525,6 +4674,65 @@ def rerun_extract_report(report_path: str) -> dict[str, Any]:
         committed_for_diff=_canonicalize_extract_report_for_rerun_diff(committed),
         fresh_for_diff=_canonicalize_extract_report_for_rerun_diff(fresh),
     )
+
+
+def _replay_pin_renames_echo(
+    committed: Mapping[str, Any],
+) -> tuple[bool, frozenset[str] | None, frozenset[str] | None]:
+    """The ``(rename_declared_pins, declared_pins, def_pins)`` replay
+    arguments :func:`rerun_extract_report` reconstructs from the committed
+    report's ``pin_renames`` block (issue #2854). A report without the block
+    -- or one whose echoes lost their shape -- replays without the flag and
+    legitimately drifts on the pin fields, the same documented limitation
+    every other unechoed flag has."""
+    pin_renames_echo = committed.get("pin_renames")
+    if committed.get("rename_declared_pins") is not True or not isinstance(
+        pin_renames_echo, dict
+    ):
+        return False, None, None
+    if "declared_pins" not in pin_renames_echo and "def_pins" not in pin_renames_echo:
+        return _replay_union_pin_echo(pin_renames_echo)
+    valid_pins, declared_pins = _parse_declared_set_echo(
+        pin_renames_echo.get("declared_pins")
+    )
+    valid_def, def_pins = _parse_declared_set_echo(pin_renames_echo.get("def_pins"))
+    if not (valid_pins and valid_def):
+        return False, None, None
+    return True, declared_pins, def_pins
+
+
+def _replay_union_pin_echo(
+    pin_renames_echo: Mapping[str, Any],
+) -> tuple[bool, frozenset[str] | None, frozenset[str] | None]:
+    """:func:`_replay_pin_renames_echo`'s fallback for a block without the
+    separate ``declared_pins``/``def_pins`` echoes (an earlier build of this
+    unreleased feature, or a hand-edited report): the union ``declared`` is
+    the only echo -- replay it as ``--pins`` alone (the previous behavior;
+    imperfect when the original run's ``--def-pins`` further restricted the
+    surviving set, but strictly better than discarding the rename the block
+    does carry)."""
+    union_echo = pin_renames_echo.get("declared")
+    if isinstance(union_echo, list) and all(
+        isinstance(name, str) for name in union_echo
+    ):
+        return True, (frozenset(union_echo) if union_echo else None), None
+    return False, None, None
+
+
+def _replay_top_level_pin_echo(
+    committed: Mapping[str, Any],
+) -> tuple[frozenset[str] | None, frozenset[str] | None] | None:
+    """The ``(declared_pins, def_pins)`` replay sets from the committed
+    report's top-level echoes (issue #3061), or ``None`` when neither echo is
+    present or either lost its shape (a malformed echo degrades to "not
+    replayed")."""
+    if "declared_pins" not in committed and "def_pins" not in committed:
+        return None
+    valid_pins, declared_pins = _parse_declared_set_echo(committed.get("declared_pins"))
+    valid_def, def_pins = _parse_declared_set_echo(committed.get("def_pins"))
+    if not (valid_pins and valid_def):
+        return None
+    return declared_pins, def_pins
 
 
 def _parse_declared_set_echo(value: Any) -> tuple[bool, frozenset[str] | None]:
@@ -4563,6 +4771,7 @@ def extract_netlist_from_layout(
     probe_results: list[dict[str, Any]] | None = None,
     critical_nets: frozenset[str] | None = None,
     parasitics_nets: frozenset[str] | None = None,
+    net_selectors: NetSelectors | None = None,
     parasitics_top_cell_only: bool = False,
     def_pins: frozenset[str] | None = None,
     pin_source_cells: frozenset[str] | None = None,
@@ -4831,8 +5040,10 @@ def extract_netlist_from_layout(
             "--mom-net": mom_net is not None,
             "--def-net-names": def_net_names,
             "--probe": bool(probes),
-            "--critical-net": bool(critical_nets),
-            "--parasitics-net": bool(parasitics_nets),
+            "--critical-net": bool(critical_nets)
+            or (net_selectors is not None and net_selectors.has_critical),
+            "--parasitics-net": bool(parasitics_nets)
+            or (net_selectors is not None and bool(net_selectors.parasitics_patterns)),
             "--def-pins": bool(def_pins),
             "--pin-source-cells": bool(pin_source_cells),
             "--rename-declared-pins": rename_declared_pins,
@@ -5007,6 +5218,7 @@ def extract_netlist_from_layout(
         def_net_names=def_net_names,
         critical_nets=critical_nets,
         parasitics_nets=parasitics_nets,
+        net_selectors=net_selectors,
         parasitics_top_cell_only=parasitics_top_cell_only,
         def_pins=def_pins,
         pin_source_cells=pin_source_cells,
@@ -7872,6 +8084,7 @@ def _extract_netlist(
     probe_results: list[dict[str, Any]] | None = None,
     critical_nets: frozenset[str] | None = None,
     parasitics_nets: frozenset[str] | None = None,
+    net_selectors: NetSelectors | None = None,
     parasitics_top_cell_only: bool = False,
     def_pins: frozenset[str] | None = None,
     pin_source_cells: frozenset[str] | None = None,
@@ -9970,6 +10183,11 @@ def _extract_netlist(
     substrate_taps: dict[str, Any] | None = None
     if parasitics_deck is not None:
         circuit = netlist.circuit_by_name(top_cell.name)
+        if net_selectors is not None:
+            # Issue #2974: patterns can only resolve once the nets exist.
+            critical_nets, parasitics_nets = net_selectors.resolve(
+                circuit, deck, critical_nets, parasitics_nets
+            )
         parasitic_nets = _compute_parasitics(
             l2n,
             circuit,
