@@ -1275,6 +1275,34 @@ def _clamp_pitch_override(override_um: float, minimum_um: float) -> tuple[float,
     return max(override_um, minimum_um), override_um < minimum_um
 
 
+def _shared_sd_col_pitch(
+    unit: dict[str, Any], min_col_pitch: float, share_sd: bool
+) -> float:
+    """Issue #3551: under ``share_sd`` the real columns abut, overlapping by
+    one contacted S/D segment, so the legal minimum pitch drops to
+    ``total_len_um - contact_region_um``."""
+    if not share_sd:
+        return min_col_pitch
+    return unit["total_len_um"] - (CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM)
+
+
+def _dummy_col_x0s(
+    dc: int,
+    cols: int,
+    col_pitch: float,
+    isolated_col_pitch: float,
+    share_sd: bool,
+) -> tuple[float, float]:
+    """x0 of the ``dc``-th left/right dummy column. Under ``share_sd`` dummies
+    stay at the isolated-unit pitch, measured from the abutted real columns."""
+    if share_sd:
+        return (
+            -dc * isolated_col_pitch,
+            (cols - 1) * col_pitch + dc * isolated_col_pitch,
+        )
+    return -dc * col_pitch, (cols - 1 + dc) * col_pitch
+
+
 def _mos_array_layout(
     w_um: float,
     l_um: float,
@@ -1414,10 +1442,7 @@ def _mos_array_layout(
     min_col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
     # Issue #3551: dummy columns keep the isolated-unit pitch under `share_sd`.
     isolated_col_pitch = min_col_pitch
-    if share_sd:
-        min_col_pitch = unit["total_len_um"] - (
-            CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM
-        )
+    min_col_pitch = _shared_sd_col_pitch(unit, min_col_pitch, share_sd)
     min_row_pitch = unit["bbox_height_um"] + MIN_SAME_LAYER_SPACING_UM
     # Issue #3299 (Phase 1): an explicit pitch override, clamped up to the
     # legal minimum. `0.0` (the default) leaves the pitch untouched.
@@ -1445,11 +1470,9 @@ def _mos_array_layout(
     dummy_cells = []
     for r in range(rows):
         for dc in range(1, dummy + 1):
-            left_x0 = -dc * col_pitch
-            right_x0 = (cols - 1 + dc) * col_pitch
-            if share_sd:
-                left_x0 = -dc * isolated_col_pitch
-                right_x0 = (cols - 1) * col_pitch + dc * isolated_col_pitch
+            left_x0, right_x0 = _dummy_col_x0s(
+                dc, cols, col_pitch, isolated_col_pitch, share_sd
+            )
             dummy_cells.append(
                 {"row": r, "col": -dc, "x0_um": left_x0, "y0_um": r * row_pitch}
             )

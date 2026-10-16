@@ -211,6 +211,24 @@ def _shared_sd_nodes(info: dict[str, Any], cols: int) -> list[dict[str, Any]]:
     ]
 
 
+def _share_sd_hints(
+    params: dict[str, Any], info: dict[str, Any], notes: list[str]
+) -> dict[str, Any]:
+    """Issue #3551: ``drc_hints`` entries for ``share_sd`` (empty when off);
+    appends the explanatory note to ``notes`` when any pair is abutted."""
+    if not params["share_sd"]:
+        return {}
+    shared_nodes = _shared_sd_nodes(info, params["cols"])
+    if shared_nodes:
+        notes.append(
+            "params.share_sd abuts adjacent units: each U<i>_D / U<i+1>_S "
+            "pair in drc_hints.shared_sd_nodes is one shared S/D node "
+            "(reported at the same position), so each row extracts as a "
+            "series chain"
+        )
+    return {"share_sd": True, "shared_sd_nodes": shared_nodes}
+
+
 def _pitch_hints_and_warnings(
     params: dict[str, Any], info: dict[str, Any]
 ) -> tuple[dict[str, Any], list[str]]:
@@ -728,17 +746,7 @@ def _mos_array_describe(
 
     pitch_hints, pitch_warnings = _pitch_hints_and_warnings(params, info)
 
-    share_sd_hints: dict[str, Any] = {}
-    if params["share_sd"]:
-        shared_nodes = _shared_sd_nodes(info, params["cols"])
-        share_sd_hints = {"share_sd": True, "shared_sd_nodes": shared_nodes}
-        if shared_nodes:
-            notes.append(
-                "params.share_sd abuts adjacent units: each U<i>_D / U<i+1>_S "
-                "pair in drc_hints.shared_sd_nodes is one shared S/D node "
-                "(reported at the same position), so each row extracts as a "
-                "series chain"
-            )
+    share_sd_hints = _share_sd_hints(params, info, notes)
 
     return {
         "device_count": device_count,
