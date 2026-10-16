@@ -2257,6 +2257,21 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     extract_parser.add_argument(
+        "--resistance-graph",
+        dest="resistance_graph",
+        action="store_true",
+        help=(
+            "additionally attach a terminal-aware resistor-graph result to "
+            "each `parasitics.nets[]` entry as `resistance_graph` (issue "
+            "#2982): the terminal-pair effective-resistance matrix, graph "
+            "node/edge counts, the legacy scalar and diagnostics. Additive "
+            "only -- `resistance_ohm` and every other field keep their "
+            "legacy value. Requires --parasitics. Off by default -- "
+            "byte-identical to today's behavior. See docs/cli/extract.md's "
+            "'--resistance-graph' section."
+        ),
+    )
+    extract_parser.add_argument(
         "--distributed-rc",
         dest="distributed_rc",
         action="store_true",

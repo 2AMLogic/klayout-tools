@@ -1335,6 +1335,13 @@ def _timed(func: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]
     return wrapper
 
 
+def _require_parasitics_for_resistance_graph(
+    resistance_graph: bool, parasitics: bool
+) -> None:
+    if resistance_graph and not parasitics:
+        raise ExtractError("--resistance-graph requires --parasitics")
+
+
 @_timed
 def run_extract(
     path: str,
@@ -1363,6 +1370,7 @@ def run_extract(
     parasitics_net_patterns: Sequence[str] | None = None,
     strict_net_patterns: bool = False,
     parasitics_top_cell_only: bool = False,
+    resistance_graph: bool = False,
     distributed_rc: bool = False,
     resistance_paths: Sequence[tuple[int, str, str]] | None = None,
     resistance_path_max_nodes: int | None = None,
@@ -1820,6 +1828,14 @@ def run_extract(
     ``parasitics_nets`` above. ``False`` (the default) computes neither field
     and runs no extra ``Region`` work at all -- byte-identical to before this
     feature existed.
+
+    ``resistance_graph`` (``klt extract --resistance-graph``, issue #2982,
+    Stage 3.D5 increment 3) adds the opt-in ``resistance_graph`` object to each
+    ``parasitics.nets[]`` entry: the terminal-pair effective-resistance matrix
+    of the net's geometry-derived resistor graph, with coverage counts and
+    diagnostics. Purely additive -- ``resistance_ohm``, the ladder and every
+    other field are unchanged, and ``False`` (the default) adds no key.
+    Requires ``parasitics=True``. See :func:`_compute_parasitics`.
 
     ``distributed_rc`` (``klt extract --distributed-rc``, issue #977, Epic
     #709 Phase 2b) replaces the single-lumped-element star/Gamma-shunt R/C
@@ -2735,6 +2751,10 @@ def run_extract(
     if parasitics_top_cell_only and not parasitics:
         raise ExtractError("--parasitics-top-cell-only requires --parasitics")
 
+    # `--resistance-graph` (issue #2982) attaches to the same per-net
+    # `parasitics.nets[]` entries, so it needs `--parasitics`.
+    _require_parasitics_for_resistance_graph(resistance_graph, parasitics)
+
     # `--distributed-rc` (issue #977) requires `--critical-net`: it reuses
     # that flag's own net set as the "which nets get the ladder" scope
     # rather than inventing a second net classification mechanism -- with
@@ -2880,6 +2900,7 @@ def run_extract(
         parasitics_nets=parasitics_nets_set,
         net_selectors=net_selectors,
         parasitics_top_cell_only=parasitics_top_cell_only,
+        resistance_graph=resistance_graph,
         def_pins=def_pins,
         pin_source_cells=pin_source_cells,
         # Issue #2854: rename each surviving promoted pin net to its
@@ -4862,6 +4883,7 @@ def extract_netlist_from_layout(
     parasitics_nets: frozenset[str] | None = None,
     net_selectors: NetSelectors | None = None,
     parasitics_top_cell_only: bool = False,
+    resistance_graph: bool = False,
     def_pins: frozenset[str] | None = None,
     pin_source_cells: frozenset[str] | None = None,
     rename_declared_pins: bool = False,
@@ -5310,6 +5332,7 @@ def extract_netlist_from_layout(
         parasitics_nets=parasitics_nets,
         net_selectors=net_selectors,
         parasitics_top_cell_only=parasitics_top_cell_only,
+        resistance_graph=resistance_graph,
         def_pins=def_pins,
         pin_source_cells=pin_source_cells,
         rename_declared_pins=rename_declared_pins,
@@ -8411,6 +8434,7 @@ def _extract_netlist(
     parasitics_nets: frozenset[str] | None = None,
     net_selectors: NetSelectors | None = None,
     parasitics_top_cell_only: bool = False,
+    resistance_graph: bool = False,
     def_pins: frozenset[str] | None = None,
     pin_source_cells: frozenset[str] | None = None,
     rename_declared_pins: bool = False,
@@ -10553,6 +10577,7 @@ def _extract_netlist(
             critical_nets=critical_nets,
             parasitics_nets=parasitics_nets,
             parasitics_top_cell_only=parasitics_top_cell_only,
+            resistance_graph=resistance_graph,
             # Per-fragment square counting (issue #2359): `via_index` lets
             # the parasitics pass read each net's own via landings back
             # through `polygons_of_net`, so it can tell where current enters
