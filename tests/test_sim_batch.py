@@ -1567,11 +1567,158 @@ def test_run_sim_batch_report_is_structurally_identical_to_remote(
     assert set(batch_report["environment"]) == set(remote_result["environment"])
 
 
-def test_run_sim_batch_resume_raises(tmp_path):
+def test_run_sim_remote_resume_still_raises(tmp_path):
     _write_body(tmp_path)
     request = _batch_request(tmp_path, options={"resume": True})
+    request["backend"] = "remote"
+    request.pop("batch")
+    request["remote"] = {"region": "us-east-1"}
     with pytest.raises(sim.SimError, match="resume"):
         sim.run_sim(str(_write_request(tmp_path, request)))
+
+
+def _checkpoint_file(tmp_path: Path) -> Path:
+    return tmp_path / "artifacts" / "checkpoint.json"
+
+
+def _run(path: Path, tmp_path: Path, **kwargs) -> dict:
+    return sim.run_sim(str(path), artifacts_dir=str(tmp_path / "artifacts"), **kwargs)
+
+
+def _resume_request(tmp_path: Path, **batch_overrides) -> Path:
+    _write_body(tmp_path)
+    request = _batch_request(
+        tmp_path,
+        options={"resume": True},
+        corners={"supply_v": {"vdd": [1.6, 1.8, 2.0]}, "temperature_c": [27]},
+    )
+    request["batch"].update(batch_overrides)
+    return _write_request(tmp_path, request)
+
+
+def _fake_corner(
+    point, *, lost: bool = False, errored: bool = False, code: str | None = None
+) -> dict:
+    report = {
+        "corner_id": point.corner_id,
+        "status": "pass",
+        "measurements": [],
+        "diagnostics": [],
+    }
+    if lost or code:
+        report["status"] = "error"
+        report["diagnostics"] = [
+            {
+                "severity": "error",
+                "code": code or "lost_shard",
+                "message": "no capacity",
+            }
+        ]
+    elif errored:
+        report["status"] = "error"
+        report["diagnostics"] = [
+            {"severity": "error", "code": "sim_failed", "message": "boom"}
+        ]
+    return report
+
+
+def _install_fake_batch(
+    monkeypatch, *, lost_ids=(), errored_ids=(), codes=None, fleet=False
+):
+    """Replace the batch dispatch with a fake that records which corners it
+    was asked to run and loses `lost_ids` (a Spot-capacity loss)."""
+    dispatched: list[list[str]] = []
+
+    def fake(*, corner_points, **kwargs):
+        dispatched.append([point.corner_id for point in corner_points])
+        corners = [
+            _fake_corner(
+                point,
+                lost=point.corner_id in lost_ids,
+                errored=point.corner_id in errored_ids,
+                code=(codes or {}).get(point.corner_id),
+            )
+            for point in corner_points
+        ]
+        return corners, "46", {"provider": "aws-batch-fleet"}
+
+    if fleet:
+        monkeypatch.setattr(sim, "_run_batch_fleet", fake)
+    else:
+        monkeypatch.setitem(sim._BACKENDS, "batch", fake)
+    return dispatched
+
+
+@pytest.mark.parametrize("fleet", [False, True])
+def test_run_sim_batch_resume_reruns_only_lost_corners(tmp_path, monkeypatch, fleet):
+    path = _resume_request(tmp_path)
+    kwargs = {"hosts": 2} if fleet else {}
+    first_dispatch = _install_fake_batch(monkeypatch, fleet=fleet)
+    first = _run(path, tmp_path, **kwargs)
+    ids = [corner["corner_id"] for corner in first["corners"]]
+    assert len(ids) == 3
+    assert not _checkpoint_file(tmp_path).exists()
+    assert len(first_dispatch[0]) == 3
+
+    # Second sweep: the middle corner's shard is lost.
+    # (Fresh run: nothing checkpointed because the first run completed.)
+    dispatched = _install_fake_batch(monkeypatch, lost_ids={ids[1]}, fleet=fleet)
+    second = _run(path, tmp_path, **kwargs)
+    assert [c["corner_id"] for c in second["corners"]] == ids
+    assert second["environment"]["resume"]["checkpoint_retained"] is True
+    assert second["environment"]["resume"]["resumed_corners"] == 0
+
+    # Resume: only the lost corner is submitted; order is the request's.
+    dispatched = _install_fake_batch(monkeypatch, fleet=fleet)
+    third = _run(path, tmp_path, **kwargs)
+    assert dispatched == [[ids[1]]]
+    assert [c["corner_id"] for c in third["corners"]] == ids
+    assert all(c["status"] == "pass" for c in third["corners"])
+    assert third["environment"]["resume"]["resumed_corners"] == 2
+    assert third["environment"]["resume"]["checkpoint_retained"] is False
+    assert not _checkpoint_file(tmp_path).exists()
+
+
+def test_run_sim_batch_resume_checkpoints_errored_but_not_lost(tmp_path, monkeypatch):
+    path = _resume_request(tmp_path)
+    probe = _install_fake_batch(monkeypatch)
+    ids = [c["corner_id"] for c in _run(path, tmp_path)["corners"]]
+    assert probe
+
+    _install_fake_batch(monkeypatch, lost_ids={ids[0]}, errored_ids={ids[2]})
+    _run(path, tmp_path)
+    checkpoint = json.loads(_checkpoint_file(tmp_path).read_text())
+    assert set(checkpoint["completed"]) == {ids[1], ids[2]}
+
+
+def test_run_sim_batch_resume_all_corners_lost(tmp_path, monkeypatch):
+    path = _resume_request(tmp_path)
+    _install_fake_batch(monkeypatch)
+    ids = [c["corner_id"] for c in _run(path, tmp_path)["corners"]]
+    _install_fake_batch(monkeypatch, lost_ids=set(ids))
+    report = _run(path, tmp_path)
+    assert report["environment"]["resume"]["checkpoint_retained"] is True
+    dispatched = _install_fake_batch(monkeypatch)
+    _run(path, tmp_path)
+    assert dispatched == [ids]
+
+
+def test_run_sim_batch_resume_discards_checkpoint_when_request_changes(
+    tmp_path, monkeypatch
+):
+    path = _resume_request(tmp_path)
+    _install_fake_batch(monkeypatch)
+    ids = [c["corner_id"] for c in _run(path, tmp_path)["corners"]]
+    _install_fake_batch(monkeypatch, lost_ids={ids[1]})
+    _run(path, tmp_path)
+
+    request = json.loads(path.read_text())
+    request["analysis"] = {"kind": "tran", "args": "2n 2u"}
+    path.write_text(json.dumps(request))
+    dispatched = _install_fake_batch(monkeypatch)
+    report = _run(path, tmp_path)
+    assert dispatched == [ids]
+    assert report["environment"]["resume"]["resumed_corners"] == 0
 
 
 def test_run_sim_batch_skips_the_fail_fast_probe(tmp_path, monkeypatch):
@@ -5118,3 +5265,26 @@ def test_prelaunch_feature_check_warn_mode_does_not_raise(tmp_path, monkeypatch)
         request, _config(tmp_path, runner_version_check="warn")
     )
     sb._enforce_published_runner_features(request, assessment)
+
+
+@pytest.mark.parametrize(
+    "codes", [("batch_job_failed", "batch_poll_timeout"), ("batch_job_timeout",) * 2]
+)
+def test_run_sim_batch_resume_resubmits_job_failure_and_poll_timeout(
+    tmp_path, monkeypatch, codes
+):
+    path = _resume_request(tmp_path)
+    _install_fake_batch(monkeypatch)
+    ids = [c["corner_id"] for c in _run(path, tmp_path)["corners"]]
+
+    _install_fake_batch(monkeypatch, codes=dict(zip(ids[:2], codes, strict=True)))
+    report = _run(path, tmp_path)
+    assert report["environment"]["resume"]["checkpoint_retained"] is True
+    checkpoint = json.loads(_checkpoint_file(tmp_path).read_text())
+    assert set(checkpoint["completed"]) == {ids[2]}
+
+    dispatched = _install_fake_batch(monkeypatch)
+    third = _run(path, tmp_path)
+    assert dispatched == [ids[:2]]
+    assert all(c["status"] == "pass" for c in third["corners"])
+    assert third["environment"]["resume"]["checkpoint_retained"] is False

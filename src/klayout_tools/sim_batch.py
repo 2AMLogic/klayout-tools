@@ -2899,10 +2899,11 @@ def _run_batch(
     likewise accepted but not honored, for the same reason ``_run_remote``
     does not honor them: the corner dispatch loop runs in a *different*
     process on a machine this function only observes through ``status.json``
-    (``options.resume`` is rejected up front by ``run_sim`` for exactly this
-    reason). The batch path's own wall-clock bound is
-    ``request.batch.poll_timeout_s``, whose overrun reports every unit
-    through the same unrun-corner shape.
+    (``checkpoint`` is therefore unused here: ``run_sim`` records the
+    returned reports into the resume checkpoint after dispatch, skipping
+    ``lost_shard`` corners -- issue #3367). The batch path's own wall-clock
+    bound is ``request.batch.poll_timeout_s``, whose overrun reports every
+    unit through the same unrun-corner shape.
 
     Before submitting, the job's conservative bound is checked against the
     fleet's whole-job ceiling (:func:`_assess_job_ceiling`, issue #2833):

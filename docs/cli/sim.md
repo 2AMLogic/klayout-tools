@@ -4,7 +4,7 @@ Run a SPICE process/voltage/temperature (PVT) corner matrix headlessly and
 report per-corner measurement pass/fail as structured data.
 
 ```
-klt sim <request.json> [-o|--outdir <dir>] [--report-out <path>] [--backend <name>] [--max-workers <n>] [--hosts <n>] [--budget-s <seconds>] [--resume] [--fail-fast-probe] [--fail-on-diagnostic <code>] [--require-pdk-match] [--plot <dir>] [--op-lint [--op-lint-corner <corner_id>]] [--format text|json]
+klt sim <request.json> [-o|--outdir <dir>] [--report-out <path>] [--backend <name>] [--max-workers <n>] [--hosts <n>] [--budget-s <seconds>] [--resume] [--fail-fast-probe] [--fail-on-diagnostic <code>] [--dry-run] [--require-pdk-match] [--plot <dir>] [--op-lint [--op-lint-corner <corner_id>]] [--format text|json]
 ```
 
 This is the build carried by the accepted spike,
@@ -44,6 +44,22 @@ this document (and the code) win.
   cannot plausibly cover the full analysis window, overriding the
   request's own `options.fail_fast_probe` when given. See "Timeout-budget
   preflight" below.
+- `--dry-run` — validate the request and report its expansion without
+  simulating or submitting anything ([#3064](https://github.com/2AMLogic/klayout-tools/issues/3064)).
+  Every pre-dispatch check a real run performs still runs (request shape,
+  Monte Carlo spec, measurement forms, model/OSDI resolution, the
+  `stage_model_inputs` closure and the off-host PDK check), and a failure
+  exits 1 with the same message a real run gives. It then returns before
+  the fail-fast probe, the output-directory lock and any backend, so no
+  ngspice, SSH, S3 or EC2 is touched. Corner/Monte Carlo requests only;
+  `decks` requests are refused. The JSON response is the shared envelope
+  with: `dry_run: true`, `status: "valid"`, `engine`, `backend` (resolved),
+  `hosts`, `netlist`, `models_lib`, `unit_count`, `units[]` (`corner_id`
+  and, for Monte Carlo, `sample_index`, `rndseed`, `process_seed`,
+  `mismatch_seed` -- the values the real run derives), `monte_carlo`,
+  `staged_files[]` (the staged model inputs, as in
+  `environment.staged_model_inputs`), and `warnings[]` (unknown top-level
+  request keys; a warning only, never an error).
 - `--fail-on-diagnostic` — grade any corner that emitted this diagnostic
   `code` as `status: "inconclusive"` rather than `pass`/`fail` ("the solve
   did not convincingly converge", reported as a distinct claim from "the
@@ -1008,10 +1024,17 @@ is added when `options.keep_artifacts` is set so per-corner logs/rawfiles
 land inside the one tree the harness collects. The generated document's
 schema is [`docs/schemas/batch-job-spec.schema.json`](../schemas/batch-job-spec.schema.json).
 
-**`options.resume` is rejected for `batch`**, exactly as for `remote`: the
-corners come back from an independently-run job via a report this process
-did not construct, so there is no local `corner_id` to reconcile a
-checkpoint against. The dispatch-time fail-fast probe is likewise skipped —
+**`options.resume` is supported for `batch`** (unlike `remote`). The job's
+reports are recorded into the checkpoint after the job returns, keyed by
+`corner_id`, except corners that never ran: those carrying a `lost_shard`
+(Spot capacity lost), `batch_job_failed`, `batch_job_timeout` or
+`batch_poll_timeout` diagnostic. A re-run with `--resume` submits only those
+corners and merges them with the checkpointed reports in the request's
+corner order; the checkpoint is retained while any of them remains. Corners
+that ran and errored are checkpointed like on `local`.
+Works for `hosts == 1` and `hosts > 1`.
+
+The dispatch-time fail-fast probe is skipped for `batch` —
 probing *this* host's ngspice says nothing about the fleet instance's
 hardware.
 
@@ -1811,9 +1834,11 @@ three gaps directly, as an extension of `local`/`local-parallel` (and any
   expanded corner-ID list; a checkpoint whose fingerprint no longer matches
   (netlist edited, corner matrix changed) is treated as if it did not exist
   — never silently reused against a since-modified request. The checkpoint
-  file is removed once a sweep finishes with nothing skipped. Currently
-  implemented for `local`/`local-parallel` only (including any `hosts > 1`
-  shard on them) — pairing `options.resume` with `backend: "remote"` is a
+  file is removed once a sweep finishes with nothing skipped. Implemented for
+  `local`/`local-parallel` (including any `hosts > 1` shard on them) and
+  `batch` (recorded after the job returns; corners that never ran --
+  `lost_shard`, `batch_job_failed`, `batch_job_timeout`, `batch_poll_timeout` --
+  are not checkpointed, so only they are re-submitted) — pairing `options.resume` with `backend: "remote"` is a
   clear application error today (exit 1): a `remote` shard's dispatch loop
   runs on the provisioned box(es), outside this process, so there is no
   local checkpoint to write against.
@@ -3395,6 +3420,41 @@ Expansion is deterministic and odometer-style: process outermost, supply
 next, temperature innermost — the same corner list, same order, every run
 against the same request.
 
+### Explicit unit list: `corners.units`
+
+The crossed axes above always produce a full cross product. For adaptive
+refinement (a few extra samples at specific coordinates) or a dependent sweep
+(a source level scanned `0..supply` *per* supply value), pass
+**`corners.units`** instead: a non-empty array of
+`{"process"?, "temperature_c"?, "supply_v"?: {rail: number}}` records, each
+executed exactly as given with no crossing
+([#2993](https://github.com/2AMLogic/klayout-tools/issues/2993)).
+
+```json
+"corners": {
+  "units": [
+    {"process": "tt", "temperature_c": 27, "supply_v": {"vdd": 1.8, "vin": 0.90}},
+    {"process": "tt", "temperature_c": 27, "supply_v": {"vdd": 1.8, "vin": 0.95}},
+    {"process": "ss", "temperature_c": 125, "supply_v": {"vdd": 1.62, "vin": 0.81}}
+  ]
+}
+```
+
+- Omitted fields collapse to the crossed form's defaults (`process` none,
+  `supply_v` `{}`, `temperature_c` 27); `process` accepts the same string or
+  bundle forms; `supply_v` values are **scalars**, not arrays.
+- `corner_id`/slug are unchanged, so a unit naming the same coordinates as a
+  crossed point has an identical `corner_id` (`--resume` checkpoints and
+  `pre_completed` reuse work across both forms). `corners[]` in the report is
+  in record order, and `monte_carlo` clones each unit as usual.
+- Mutually exclusive with `corners.process` / `supply_v` / `temperature_c`
+  and with `exclude`; an empty list, a non-object record, an unknown record
+  key, an array-valued `supply_v`, or two records with the same `corner_id`
+  (supply is formatted to 3 decimals, so 0.1004 V and 0.1001 V collide) is a
+  `SimError`.
+- Works on every backend, including `remote`/batch (the worker re-expands the
+  same list).
+
 ### Per-section corner libraries
 
 gf180mcu's bundle above still reads every section from **one** file. Some
@@ -4371,6 +4431,30 @@ measurement's own `worst_case` corner:
 so an agent (or a skill, e.g. `design-sizing`'s Loop A) reading a miss knows
 exactly which picture to open next, without re-deriving which signal a
 `.meas` card was even about.
+
+## Stability margins at every crossing (`analyze_margins`, issue #3088)
+
+`klayout_tools.sim_transfer.analyze_margins` reduces a complex loop gain
+`T = numerator / denominator` to margins at **every** crossing. It is a pure
+helper (no simulator, no request/response schema change); the `klt sim`
+limit wiring lands once the `transfer` measurement form (#2923/#2724) is on
+`main`. Existing first-crossing metrics from `analyze_transfer` are unchanged.
+
+| Field | Meaning |
+|---|---|
+| `phase_margins[]` | `{freq_hz, direction, phase_margin_deg}` per 0 dB crossing (rise and fall). PM is `wrap(phase + 180)` into (-180, 180]: distance to the nearest -180 line, modulo 360, never from unwrapped phase. |
+| `gain_margins[]` | `{freq_hz, direction, gain_margin_db}` per -180 deg crossing (mod 360); `-dB(|T|)`, so negative when `|T| > 1`. |
+| `phase_margin_min_deg`, `gain_margin_min_db` | The scored values: the minimum over the lists. `null` plus a `reasons` entry (`no_zero_db_crossing`, `no_phase_crossing`, plateau) when absent -- no -180 crossing is neither a failure nor infinite margin. |
+| `encirclement` | Clockwise encirclements of -1 (`2 x` net signed crossings of the ray left of -1), or `"indeterminate"`. 0 means stable for an open-loop-stable loop. |
+| `band` | `f_min_hz`, `f_max_hz`, `mag_below_unity_at_top`, `low_freq_mag_db`, `min_samples_per_decade_near_crossing`, `crossings_bracketed`. |
+| `ambiguity[]` | Why the band cannot support a pass: `top_not_below_unity`, `crossing_not_bracketed` (under 10 samples/decade or over 90 deg phase step at a crossing; tunable), `invalid_samples`, plateaus, `low_frequency_on_negative_real_axis`. |
+
+`grade_margins(report, min_phase_margin_deg=, min_gain_margin_db=,
+require_no_encirclement=)` returns `pass`, `fail` or `ambiguous`. A violation
+among crossings actually found is a sound `fail`; `pass` needs an empty
+`ambiguity`; otherwise `ambiguous`, which is never `pass` and never `fail`.
+Corner status, rollup, exit code and schema treatment of `ambiguous` are part
+of the follow-up wiring (tracked on #3088).
 
 ## Post-layout verification (`netlist_source`)
 
