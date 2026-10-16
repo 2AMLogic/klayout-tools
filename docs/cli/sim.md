@@ -3738,6 +3738,10 @@ values), *and* reduced to a per-measurement statistical verdict under
   the run-wide limit-window check (see "Monte Carlo statistics"). Omit for
   no window check. Overridable per measurement with
   `measurements[].k_sigma`.
+- **`monte_carlo.window_scope`** (string, optional) — which population's
+  `mean ± k*sigma` window gates status: `"pooled"` (default) or
+  `"per_corner"` (see "Pooled vs. per corner"). Anything else is an
+  application error.
 
 `monte_carlo` is orthogonal to `corners.*`: the PVT axes still select
 *which* process/supply/temperature points are simulated — including an
@@ -4021,6 +4025,21 @@ two describe the same draw. For a request that combines a PVT matrix *with*
 corner is its own population, and the pooled block is the union across
 populations, which is a useful worst-case envelope but not a distribution
 anyone sampled.
+
+By default only the pooled window gates `measurements[].status` (and so the
+envelope `status` and exit code), so a corner whose own population violates
+the window passes if the pooled union does, and a pooled window inflated by
+between-corner spread can fail although every corner passes. Declare
+`monte_carlo.window_scope: "per_corner"` to grade every `by_corner[]` window
+instead: the measurement fails if **any** corner's `sigma_window.status` is
+`fail`, and the pooled window is still reported but no longer gates. The
+measurement's `monte_carlo` block then also carries an additive
+`failing_corners` array (the `corner_id`s whose window failed; `[]` when none)
+— present only when `window_scope: "per_corner"` was declared, so default
+responses are unchanged. `error` and `inconclusive` still outrank a window
+`fail`, and a corner with no window (`sigma_window: null`, e.g. no `k_sigma`
+declared) never fails the measurement. For a single-corner request both
+scopes agree.
 
 ## Model library resolution (via `klt pdk`)
 
@@ -4893,6 +4912,7 @@ the *response* echoes back.
 | `monte_carlo.vary`       | string            | `"mismatch"`, `"process"`, or `"both"` — which axis the sample sequence varies. Required when `monte_carlo` is present.                                                 |
 | `monte_carlo.quantiles`  | array\<number\>   | Percentiles in `[0, 100]` reported per measurement. Defaults to `[5, 50, 95]`. See "Monte Carlo statistics" above.                                                      |
 | `monte_carlo.k_sigma`    | number            | Run-wide sigma multiple `k` for the `mean ± k*stddev` limit-window check. Omit for no window check. Must be a non-negative number.                                      |
+| `monte_carlo.window_scope` | string          | `"pooled"` (default) or `"per_corner"`: which `mean ± k*stddev` window gates status. `"per_corner"` fails a measurement if any `by_corner[]` window fails and adds `failing_corners` to its `monte_carlo` block; see "Pooled vs. per corner". |
 | `analysis`               | object            | `kind` (e.g. `"op"`, `"dc"`, `"ac"`, `"tran"`) and `args`, the engine-syntax analysis-card arguments. One analysis per corner. `"op"` is a valid `kind`, but see `measurements[]` below — it cannot be paired with a `.meas op` card; measure an operating-point quantity with `measurements[].expr` instead. Required unless the request declares `analysis_steps` instead; declaring both is an application error (exit 1). |
 | `analysis_steps[]`       | array\<object\>   | Issue #2482. Additive alternative to `analysis`: an ordered, non-empty sequence of named solves run inside each corner's one deck — each step `{name, analysis: {kind, args}, alter?, reset?, measurements?}`. With it, the top-level `measurements[]` are **derived** `expr`s over `<step>.<measurement>` results. ngspice only (refused for `engine: "xyce"`); refuses `options.waveforms`/`--plot`. See "Several solves per corner (`analysis_steps[]`)" above for the full rules. |
 | `measurements[]`         | array\<object\>   | `name` (stable response key) plus **exactly one** of `spice` (a verbatim `.meas` card), `expr` (issue #2533 — a single-line ngspice expression evaluated after the analysis inside `klt sim`'s own `.control` block; see "Measurements that are not `.meas` cards" above), `crossings` (issue #2868 — `{signal, level, edge?, from?, to?, max?}`, a threshold-crossing time series, `tran` only; see "Threshold-crossing time series" above), `cycle_mean` (issue #2947 — `{signal, align, level, cycles, edge?, from?}`, a time-weighted mean over whole reference cycles, `tran` only; see "Cycle-aligned mean" above), or `transfer` (issue #2923 — `{num, den, metric}`, an AC return-ratio metric, `ac` and local backends only; see "AC return-ratio metrics" above), plus optional `unit`, `limits` (`min`/`max`, either optional), `k_sigma` (per-measurement override of `monte_carlo.k_sigma`), and `plausible_range` (issue #2493 — `min`/`max`, either optional but at least one required; per-measurement plausibility bound, unscoped by `unit`; overrides `options.node_voltage_bounds` when both apply). No `limits` -> reported, never fails; no `plausible_range` (and no applicable `options.node_voltage_bounds`) -> plausibility check never runs, exactly as before this issue. Declaring both `spice` and `expr`, or neither, is an application error (exit 1). `spice`'s declared analysis type must be one ngspice's own `.MEASURE` implements (`dc`/`ac`/`tran`/`sp`) — there is no `.MEASURE OP`; a `.meas op` card is rejected up front (`SimError`), regardless of the request's own `analysis.kind`. `expr` must reduce to a single real scalar, must be one line, must have a name matching `[A-Za-z_][A-Za-z0-9_]*` unique across `measurements[]`, and is refused for `engine: "xyce"`. |
