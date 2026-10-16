@@ -165,6 +165,31 @@ def test_every_rule_has_a_fail_and_a_boundary_pass_fixture():
             assert case.rule not in case.expect, case.name
 
 
+_NET_RULES = ("ACTIVE.S.2A", "LIG.LISD.S.6", "LIG.LISD.S.7", "LIG.SDT.S.8")
+
+
+def test_net_aware_rules_are_checked_not_gaps():
+    gaps = {g.id for g in NOT_IMPLEMENTED}
+    for rule_id in _NET_RULES:
+        assert rule_id in RULE_IDS
+        assert rule_id not in gaps
+    assert "### Net-aware spacing" in _docs_asap7_section()
+
+
+@pytest.mark.parametrize("rule_id", _NET_RULES)
+def test_net_aware_rules_draw_the_same_pair_joined_and_unjoined(rule_id):
+    """Each net-aware rule is exercised with a conductor chain (V0 and
+    metal) that makes a too-close pair one net, and with chains that stop
+    short of it: a pass and a fail case each carry that wiring."""
+
+    def wired(case):
+        layers = {shape[0] for shape in case.shapes}
+        return "V0" in layers or "M1" in layers
+
+    cases = [c for c in _CASES if c.rule == rule_id and wired(c)]
+    assert {c.kind for c in cases} == {"fail", "pass"}, rule_id
+
+
 def test_docs_list_every_rule_and_gap():
     section = _docs_asap7_section()
     for rule_id in RULE_IDS:
@@ -208,6 +233,47 @@ def fixture_run(tmp_path_factory):
 def test_fixture_trips_exactly_its_expected_rules(fixture_run, index):
     _, tripped = fixture_run
     assert tripped.get(index, set()) == set(_CASES[index].expect)
+
+
+_TOPOLOGY_GAPS = ("GATE.AUX.2", "ACTIVE.AUX.3")
+_PROBES = fx.topology_gap_probes()
+
+
+def test_topology_gaps_stay_declared_with_distinct_reasons():
+    """#3086: both rules are topological conditions, not missing thresholds;
+    the evidence is recorded but neither is enforced, so both stay gaps."""
+    gaps = {g.id: g for g in NOT_IMPLEMENTED}
+    for rule_id in _TOPOLOGY_GAPS:
+        assert rule_id in gaps
+        assert rule_id not in RULE_IDS
+        assert "topological condition" in gaps[rule_id].reason
+        assert "no distance bound to check" not in gaps[rule_id].reason
+        assert gaps[rule_id].tracked_by == "#2812"
+    assert gaps["GATE.AUX.2"].reason != gaps["ACTIVE.AUX.3"].reason
+    for rule_id in _TOPOLOGY_GAPS:
+        assert f'output("{rule_id}"' not in _deck_text()
+
+
+@pytest.fixture(scope="module")
+def probe_run(tmp_path_factory):
+    if not HAVE_KLAYOUT_BINARY:
+        pytest.skip("klayout binary is not installed on this machine")
+    path = tmp_path_factory.mktemp("asap7_probes") / "probes.gds"
+    fx.write_cases(str(path), _PROBES)
+    report = run_drc_klayout_engine(str(path), str(DECK_PATH))
+    tripped: dict[int, set[str]] = defaultdict(set)
+    for v in report["violations"]:
+        tripped[fx.slot_of(v["bbox"])].add(v["rule"])
+    return tripped
+
+
+@_needs_klayout
+@pytest.mark.parametrize("index", range(len(_PROBES)), ids=[c.name for c in _PROBES])
+def test_topology_gap_probes_stay_silent(probe_run, index):
+    """The DRM's illegal drawings pass the deck (apart from the narrow slots
+    ACTIVE.S.1 already reports and the strips ACTIVE.W.2 reports), which is
+    why the gaps remain declared."""
+    assert probe_run.get(index, set()) == set(_PROBES[index].expect)
 
 
 @_needs_klayout

@@ -85,10 +85,15 @@ def _reject_single_request_misuse(args: argparse.Namespace) -> int | None:
             "request (or --batch-set REQUEST...)\n"
         )
         raise SystemExit(2)
-    if getattr(args, "max_in_flight", None) is not None:
+    for flag, name in (
+        ("max_in_flight", "--max-in-flight"),
+        ("capacity_retries", "--capacity-retries"),
+    ):
+        if getattr(args, flag, None) is None:
+            continue
         return emit_error(
             "sim",
-            "--max-in-flight only applies with --batch-set",
+            f"{name} only applies with --batch-set",
             args.format,
             exit_code=EXIT_USAGE_ERROR,
         )
@@ -121,8 +126,10 @@ def _run_sweep(args: argparse.Namespace) -> int:
             plot_dir=args.plot,
             fail_fast_probe=args.fail_fast_probe,
             fail_on_diagnostic=args.fail_on_diagnostic,
+            max_units_per_job=args.max_units_per_job,
             dry_run=getattr(args, "dry_run", False),
             submit_only=getattr(args, "submit_only", False),
+            attach_job_id=getattr(args, "attach_job_id", None),
         )
     except SimError as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)
@@ -249,6 +256,7 @@ def _run_batch_set(args: argparse.Namespace) -> int:
         for flag, value in (
             ("a positional request", args.request),
             ("--resume", args.resume),
+            ("--attach", getattr(args, "attach_job_id", None)),
             ("--plot", args.plot),
             ("--op-lint", getattr(args, "op_lint", False)),
             ("--submit-only", getattr(args, "submit_only", False)),
@@ -279,6 +287,7 @@ def _run_batch_set(args: argparse.Namespace) -> int:
                 if args.max_in_flight is not None
                 else DEFAULT_MAX_IN_FLIGHT
             ),
+            capacity_retries=args.capacity_retries or 0,
             max_workers=args.max_workers,
             hosts=args.hosts,
             budget_s=args.budget_s,

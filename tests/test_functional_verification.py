@@ -739,8 +739,37 @@ def test_parameters_values_must_be_scalars(tmp_path, value):
 
 def test_missing_cocotb_is_an_actionable_error(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "cocotb_tools", None)
-    with pytest.raises(FunctionalVerificationError, match="cocotb is not installed"):
+    with pytest.raises(
+        FunctionalVerificationError, match="cocotb is not installed"
+    ) as excinfo:
         fv._import_runner()
+    message = str(excinfo.value)
+    assert sys.executable in message
+    assert "klayout-tools[functional-verification]" in message
+    assert "uv sync --extra functional-verification" in message
+    assert excinfo.value.code == "missing_optional_dependency"
+
+
+def test_missing_cocotb_cli_error_carries_code(tmp_path, monkeypatch, capsys):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    monkeypatch.setitem(sys.modules, "cocotb_tools", None)
+
+    exit_code = main(["functional-verification", request_path, "--format", "json"])
+
+    assert exit_code == 1
+    error = json.loads(capsys.readouterr().err)["error"]
+    assert error["code"] == "missing_optional_dependency"
+    assert "cocotb is not installed" in error["message"]
+
+
+def test_other_functional_verification_errors_have_no_code(tmp_path, capsys):
+    exit_code = main(
+        ["functional-verification", str(tmp_path / "nope.json"), "--format", "json"]
+    )
+
+    assert exit_code == 1
+    assert "code" not in json.loads(capsys.readouterr().err)["error"]
 
 
 # --------------------------------------------------------------------------- #

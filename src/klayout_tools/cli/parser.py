@@ -604,6 +604,18 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
         help="with --batch-set, how many requests are in flight at once (default: 4)",
     )
     sim_parser.add_argument(
+        "--capacity-retries",
+        dest="capacity_retries",
+        type=int,
+        default=None,
+        help=(
+            "with --batch-set, re-submit a request refused for fleet capacity "
+            "(batch_no_capacity / batch_concurrency_cap) up to N more times "
+            "with doubling backoff (default: 0, off); other failures are "
+            "never retried (issue #3520)"
+        ),
+    )
+    sim_parser.add_argument(
         "--submit-only",
         dest="submit_only",
         action="store_true",
@@ -652,6 +664,20 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     sim_parser.add_argument(
+        "--attach",
+        dest="attach_job_id",
+        metavar="JOB_ID",
+        default=None,
+        help=(
+            "re-attach to an already-submitted batch job (the id `klt sim` "
+            "prints on stderr at launch) instead of submitting a new one: "
+            "waits for it (bounded by the request's `batch.poll_timeout_s`) "
+            "and reports it, never re-launching. Pass the same request the "
+            "job was submitted from, with --backend batch. See "
+            "docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
         "--max-workers",
         dest="max_workers",
         type=int,
@@ -678,6 +704,20 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
             "the request's `remote.hosts` field); overrides the request "
             "field when given. Currently implemented for `local`/"
             "`local-parallel` only -- see docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
+        "--max-units-per-job",
+        dest="max_units_per_job",
+        type=int,
+        default=None,
+        help=(
+            "backend `batch`, `hosts` 1: split the expanded corner/Monte-Carlo "
+            "unit list into batch jobs of at most this many units, so no job "
+            "outruns the fleet's whole-job ceiling (default: the request's "
+            "`batch.max_units_per_job`, else no split); overrides the request "
+            "field when given. Rejected before any submit when a job of that "
+            "size would still exceed the ceiling. See docs/cli/sim.md."
         ),
     )
     sim_parser.add_argument(
@@ -2380,6 +2420,27 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     extract_parser.add_argument(
+        "--probe",
+        dest="probes",
+        action="append",
+        default=None,
+        metavar="name=ID,layer=ROLE,x=UM,y=UM",
+        help=(
+            "ask which extracted net lies under one point (issue #2986), as "
+            "'name=<id>,layer=<role>,x=<um>,y=<um>'; repeatable. x/y are "
+            "micrometres in the top cell's frame (the frame label positions "
+            "use). ROLE is the same vocabulary as --label-layer: `well`, "
+            "`poly`, or `metal<i>` (0-based, index-aligned with the deck's "
+            "metal stack). Answered on the extraction this command already "
+            "runs, so the net is the same one `nets[]` reports under "
+            "--def-net-names / --abstract-cells / --pins. The JSON "
+            "`probes[]` carries {name, layer, x_um, y_um, found, net, "
+            "cluster_id}; two probes on one net share `cluster_id`. A point "
+            "on empty space or inside a black-box region is `found: false`, "
+            "not an error. See docs/cli/extract.md's 'Point-to-net probes'."
+        ),
+    )
+    extract_parser.add_argument(
         "--defer-resistor-fixed-offset",
         dest="defer_resistor_fixed_offset",
         action="store_true",
@@ -2876,6 +2937,24 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "`flatten_schematic` plus the `schematic_flatten` block (path, "
             "sha256, inlining summary). The klt pex counterpart of klt "
             "lvs's options.flatten_reference."
+        ),
+    )
+    pex_parser.add_argument(
+        "--device-only-leg",
+        dest="device_only_leg",
+        action="store_true",
+        default=False,
+        help=(
+            "also measure a parasitic-free third leg (issue #3298): the same "
+            "layout extracted again without parasitics (same devices and "
+            "AS/AD/PS/PD, no R/C cards or star nodes), written beside the "
+            "extracted netlist as <name>.device-only<ext>, and every "
+            "testbench re-run against it. Each delta[] row then also carries "
+            "device_only_value, representation_delta_pct (device-only vs "
+            "schematic) and parasitic_delta_pct (extracted vs device-only), "
+            "splitting device-representation effects from parasitics. Not "
+            "supported with --measure-command. Off by default -- "
+            "byte-identical to today's behavior."
         ),
     )
     pex_parser.add_argument(

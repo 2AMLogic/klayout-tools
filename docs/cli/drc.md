@@ -2022,7 +2022,7 @@ it is installed with the package, next to its declared rule-id list
 ```bash
 klt drc layout.gds --engine klayout \
     --deck-file src/klayout_tools/decks/asap7.drc \
-    --expect-rule-categories 234 --format json
+    --expect-rule-categories 238 --format json
 ```
 
 `--pdk asap7` does not resolve this deck: `klt pdk` finds an ASAP7 process
@@ -2068,10 +2068,10 @@ Each RDB category is the DRM rule name verbatim (DRM section 1.2.3). Where the
 DRM says a rule "applies to the layers PSELECT, SLVT, LVT, and SRAMVT as
 well" (section 3.7), or that the M1 / V1 / M4 / V4 / M6 / V6 / M8 / V8
 rules apply to the layers above them (sections 3.12-3.19), the mirrored rule
-substitutes the layer name. These 234 ids are declared once, in
+substitutes the layer name. These 238 ids are declared once, in
 `asap7_rules.RULES`; renaming or dropping one is a breaking change, and a
 test fails if the deck, that list, the fixtures or this table drift apart.
-Pass `--expect-rule-categories 234` so that a deck
+Pass `--expect-rule-categories 238` so that a deck
 which silently drops a category fails the run (exit 1) instead of reporting
 `clean`.
 
@@ -2081,13 +2081,13 @@ which silently drops a category fails the run (exit 1) instead of reporting
 | Table 3.2.1 | `WELL.W.1`, `WELL.W.2`, `WELL.S.1`, `WELL.S.2`, `WELL.A.1A`, `WELL.A.1B`, `WELL.GATE.EX.1`, `WELL.GATE.EX.2` |
 | Table 3.3.1 | `FIN.W.1`, `FIN.W.2`, `FIN.S.1`, `FIN.AUX.1` |
 | Table 3.4.1 | `GATE.W.1`, `GATE.W.2`, `GATE.S.1`, `GATE.S.2`, `GATE.S.3`, `GATE.AUX.1`, `GATE.ACTIVE.AUX.3`, `GATE.ACTIVE.EX.1`, `GATE.ACTIVE.EX.2`, `GATE.ACTIVE.S.4` |
-| Table 3.5.1 | `ACTIVE.FIN.EX.1`, `ACTIVE.W.1`, `ACTIVE.W.2`, `ACTIVE.W.3`, `ACTIVE.S.1`, `ACTIVE.S.2B`, `ACTIVE.WELL.S.4`, `ACTIVE.WELL.EN.1` |
+| Table 3.5.1 | `ACTIVE.FIN.EX.1`, `ACTIVE.W.1`, `ACTIVE.W.2`, `ACTIVE.W.3`, `ACTIVE.S.1`, `ACTIVE.S.2A`, `ACTIVE.S.2B`, `ACTIVE.WELL.S.4`, `ACTIVE.WELL.EN.1` |
 | Table 3.5.2 | `ACTIVE.A.1A`, `ACTIVE.A.1B`, `ACTIVE.AUX.1` |
 | Table 3.6.1 | `GCUT.W.1`, `GCUT.ACTIVE.S.1`, `GCUT.GATE.EX.1`, `GCUT.GATE.S.2`, `GCUT.S.3`, `GCUT.AUX.1`, `GCUT.AUX.2`, `GCUT.AUX.3` |
 | Table 3.7.1 | `NSELECT.W.1`, `NSELECT.W.2`, `NSELECT.ACTIVE.EN.1`, `NSELECT.ACTIVE.EN.2`, `NSELECT.GATE.EX.1`, `NSELECT.GATE.EX.2`, `PSELECT.W.1`, `PSELECT.W.2`, `PSELECT.ACTIVE.EN.1`, `PSELECT.ACTIVE.EN.2`, `PSELECT.GATE.EX.1`, `PSELECT.GATE.EX.2`, `SLVT.W.1`, `SLVT.W.2`, `SLVT.ACTIVE.EN.1`, `SLVT.ACTIVE.EN.2`, `SLVT.GATE.EX.1`, `SLVT.GATE.EX.2`, `LVT.W.1`, `LVT.W.2`, `LVT.ACTIVE.EN.1`, `LVT.ACTIVE.EN.2`, `LVT.GATE.EX.1`, `LVT.GATE.EX.2`, `SRAMVT.W.1`, `SRAMVT.W.2`, `SRAMVT.ACTIVE.EN.1`, `SRAMVT.ACTIVE.EN.2`, `SRAMVT.GATE.EX.1`, `SRAMVT.GATE.EX.2`, `NSELECT.PSELECT.AUX.1`, `VT.AUX.2` |
 | Table 3.8.1 | `SDT.W.1`, `SDT.W.2`, `SDT.W.3`, `SDT.S.1`, `SDT.GATE.S.2`, `SDT.ACTIVE.OV.1`, `SDT.LISD.OV.2`, `SDT.GATE.AUX.1`, `SDT.ACTIVE.AUX.2`, `SDT.ACTIVE.AUX.3`, `SDT.LISD.AUX.4` |
 | Table 3.9.1 | `LISD.W.1`, `LISD.S.1`, `LISD.S.2`, `LISD.S.3`, `LISD.A.1` |
-| Table 3.10.1 | `LIG.W.1`, `LIG.S.1`, `LIG.S.2`, `LIG.S.3`, `LIG.S.4`, `LIG.S.5` |
+| Table 3.10.1 | `LIG.W.1`, `LIG.S.1`, `LIG.S.2`, `LIG.S.3`, `LIG.S.4`, `LIG.S.5`, `LIG.LISD.S.6`, `LIG.LISD.S.7`, `LIG.SDT.S.8` |
 | Table 3.10.2 | `LIG.GATE.S.9A`, `LIG.GATE.S.9B`, `LIG.GATE.S.10`, `LIG.GCUT.S.11`, `LIG.A.1`, `LIG.LISD.A.2`, `LIG.GATE.A.3`, `LIG.GATE.AUX.1` |
 | Table 3.10.3 | `LIG.LISD.OV.1`, `LIG.GATE.EX.1` |
 | Table 3.11.1 | `V0.W.1` |
@@ -2112,7 +2112,11 @@ which silently drops a category fails the run (exit 1) instead of reporting
 | `FIN.S.1` | Table 3.3.1 | exact pitch checked edge-to-edge for minimum-width shapes: neighbours closer than two pitches must sit exactly one pitch apart; alignment of shapes two or more pitches apart is not checked |
 | `GATE.S.1` | Table 3.4.1 | exact pitch checked edge-to-edge for minimum-width shapes: neighbours closer than two pitches must sit exactly one pitch apart; alignment of shapes two or more pitches apart is not checked |
 | `GATE.S.3` | Table 3.4.1 | centre-to-centre distance checked as edge-to-edge spacing <= 34 nm, exact for 20 nm GATE (GATE.W.1) |
+| `ACTIVE.S.2A` | Table 3.5.1 | 'same net' is conductor connectivity through transistor source/drain ACTIVE, SDT, LISD, LIG, GATE (not cut), V0, M1-M9 and V1-V9 only: ACTIVE is split at the GATE, the substrate and WELL are not modelled, and a shape that reaches no other conductor is a net of its own; horizontal spacing only (Table 3.5.2 note 2 calls the vertical check an error); the gap is measured between ACTIVE polygons, between the source/drain regions of ACTIVE a GATE crosses (tap ACTIVE is not a source/drain region); SRAMDRC is not excluded, as note 1 requires |
 | `SDT.ACTIVE.AUX.2` | Table 3.8.1 | 'coincide' read as 'lies on and overlaps an ACTIVE horizontal edge', per Fig. 3.8.1(d), which accepts SDT overhanging ACTIVE horizontally |
+| `LIG.LISD.S.6` | Table 3.10.1 | 'same net' is conductor connectivity through transistor source/drain ACTIVE, SDT, LISD, LIG, GATE (not cut), V0, M1-M9 and V1-V9 only: ACTIVE is split at the GATE, the substrate and WELL are not modelled, and a shape that reaches no other conductor is a net of its own; spacing is Euclidean, in any direction |
+| `LIG.LISD.S.7` | Table 3.10.1 | 'same net' is conductor connectivity through transistor source/drain ACTIVE, SDT, LISD, LIG, GATE (not cut), V0, M1-M9 and V1-V9 only: ACTIVE is split at the GATE, the substrate and WELL are not modelled, and a shape that reaches no other conductor is a net of its own; corner-to-corner read as Euclidean spacing between edges whose projections onto each other overlap by less than one database unit |
+| `LIG.SDT.S.8` | Table 3.10.1 | 'same net' is conductor connectivity through transistor source/drain ACTIVE, SDT, LISD, LIG, GATE (not cut), V0, M1-M9 and V1-V9 only: ACTIVE is split at the GATE, the substrate and WELL are not modelled, and a shape that reaches no other conductor is a net of its own; spacing is Euclidean, in any direction |
 | `LIG.LISD.OV.1` | Table 3.10.3 | any LIG/LISD overlap is treated as 'connected together' |
 | `V0.W.1` | Table 3.11.1 | stated along the M1 length; checked in both directions (V0 is as wide as M1 across the track per V0.M1.AUX.3) |
 | `M1.S.6` | Table 3.12.1 | corner-to-corner read as Euclidean spacing between edges whose projections onto each other overlap by less than one database unit |
@@ -2226,6 +2230,65 @@ DRM says (ACTIVE.W.2 has no SRAM qualifier), and non-rectilinear shapes are
 left to `GEOMETRY.NONORTHOGONAL`. The shipped-cell regression below needed no
 new deviation.
 
+### Net-aware spacing (`ACTIVE.S.2A`, `LIG.LISD.S.6`, `LIG.LISD.S.7`, `LIG.SDT.S.8`)
+
+These four rules (DRM Tables 3.5.1 and 3.10.1, Figs. 3.5.2 and 3.10.1) apply
+only to shapes "not on the same net" / "on different nets". The deck builds
+the minimum conductor model they need with KLayout's connectivity engine and
+nothing more (no LVS, no devices): two shapes are one net when a chain of
+overlapping or touching conductors joins them.
+
+| Conductor | Joined to |
+| --- | --- |
+| source/drain ACTIVE (ACTIVE the GATE crosses, minus the GATE) | SDT |
+| SDT | source/drain ACTIVE, LISD |
+| LISD | SDT, LIG, V0 |
+| LIG | LISD, GATE (not cut by GCUT), V0 |
+| V0 | LISD, LIG, M1 |
+| M1-M9 and V1-V9 | the stack, metal to via to metal |
+
+What is deliberately *not* a connection: a GATE and the ACTIVE it crosses
+(the channel never joins the regions on either side of it, so an ACTIVE
+polygon is cut at each GATE before it is given a net); a metal that overlaps
+LISD, LIG or a via without a via between them; LIG over ACTIVE; the substrate
+and WELL. A shape that reaches no other conductor is a net of its own, so it
+is "different" from every neighbour. Tap ACTIVE (no GATE crosses it) is not a
+source/drain region and is not part of `ACTIVE.S.2A`. The model reaches all
+the way up (M9 / V9) so that a remote connection is never missed: a pair
+joined only on M5 is still one net.
+
+- **`ACTIVE.S.2A`** (92 nm, horizontal) is measured between the facing
+  vertical edges of two source/drain regions of different nets, like
+  `ACTIVE.S.2B`'s ACTIVE spacing, and kept only where no ACTIVE lies between
+  the two edges. That keeps the pair of regions either side of one gate (one
+  transistor, 20 nm apart inside one ACTIVE) out, and keeps Fig. 3.5.2(b)
+  (two lobes of one ACTIVE polygon either side of a notch, split by gates)
+  in. Table 3.5.2 note 2 says the foundry deck also checks vertical spacing
+  by mistake and that such violations may be waived; only horizontal spacing
+  is checked here. Note 1 (SRAMDRC) is not excluded: the rule applies there
+  too.
+- **`LIG.LISD.S.6`** and **`LIG.SDT.S.8`** (14 nm) are Euclidean spacing in
+  any direction between a LIG polygon and a LISD (SDT) polygon of a different
+  net. SDT lies inside its LISD in a conforming layout (`SDT.LISD.AUX.4`), so
+  the SDT rule is only distinguishable from the LISD one where SDT sticks out
+  of its LISD; the fixtures draw exactly that (and report
+  `SDT.LISD.AUX.4` with it).
+- **`LIG.LISD.S.7`** (15 nm) is the corner-to-corner case, read like
+  `M1.S.6`: Euclidean spacing between edges whose projections onto each other
+  overlap by less than one database unit. The fixtures use a 9 x 12 nm
+  offset (exactly 15 nm) and one dbu inside it (14.8 nm, which `LIG.LISD.S.6`
+  does not see).
+
+The generated fixtures (`tests/helpers/asap7_drc_fixtures.py::_net_cases`)
+draw each pair twice, identical locally: once with nothing joining the two
+shapes and once with a chain that does, either a V0 / M1 / V0 bar or a V0 /
+M1 / V1 / M2 route whose two ends are on opposite sides of the pair. They
+also check a bridge missing one via, a metal overlapping both shapes with no
+via, a bridge to the wrong source/drain region of a transistor (the GATE
+does not join them), the threshold and one dbu inside it, a corner pair at
+and below the 15 nm / 14 nm distances, and facing edges that overlap by one
+dbu. The shipped-cell regression needed no new deviation.
+
 ### Not implemented
 
 DRM rules in Tables 3.1-3.19 that the deck does not check yet. Rows group
@@ -2236,16 +2299,14 @@ Nothing in Tables 3.14-3.19 is left out for want of mask colouring.
 
 | Rule ids | DRM table | Reason | Tracked by |
 | --- | --- | --- | --- |
-| `GATE.AUX.2` | Table 3.4.1 | the DRM gives no distance bound to check against | #2812 |
-| `ACTIVE.S.2A` | Table 3.5.1 | needs net connectivity (different-net spacing) | #2812 |
+| `GATE.AUX.2` | Table 3.4.1 | no distance bound, but a topological condition (a GATE column split into separate polygons, Fig. 3.4.2(a)); the DRM does not say how far two GATE polygons may overlap sideways to share a column, so the predicate needs that reading ratified before it is enforced | #2812 |
 | `SRAM.ACTIVE.WELL.S.5`, `SRAM.ACTIVE.WELL.EN.2` | Table 3.5.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
 | `SRAM.ACTIVE.A.2A`, `SRAM.ACTIVE.A.2B`, `SRAM.ACTIVE.AUX.2` | Table 3.5.2 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
-| `ACTIVE.AUX.3` | Table 3.5.2 | the DRM gives no distance bound to check against | #2812 |
+| `ACTIVE.AUX.3` | Table 3.5.2 | no distance bound, but a topological condition (a slot cut into a vertical ACTIVE edge, Fig. 3.5.4(b)); the DRM defines neither 'notch' nor its size, so the predicate needs that reading ratified before it is enforced | #2812 |
 | `ACTIVE.LUP.1` | Table 3.5.2 | DRM-confirmed 30 um maximum, but the DRM defines no tap layer, distance metric or connectivity test; no sound predicate yet (evidence: [ACTIVE.LUP.1 evidence](#activelup1-evidence)) | #2812 |
 | `SRAM.NSELECT.ACTIVE.EN.3`, `SRAM.NSELECT.ACTIVE.EN.4` | Table 3.7.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
 | `SRAM.SDT.W.4`, `SRAM.SDT.ACTIVE.OV.3`, `SRAM.SDT.LISD.OV.4` | Table 3.8.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
 | `SRAM.LISD.S.4`, `SRAM.LISD.AUX.1` | Table 3.9.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
-| `LIG.LISD.S.6`, `LIG.LISD.S.7`, `LIG.SDT.S.8` | Table 3.10.1 | needs net connectivity (different-net spacing) | #2812 |
 | `SRAM.LIG.GATE.A.4` | Table 3.10.2 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
 | `SRAM.LIG.AUX.2`, `SRAM.LIG.GATE.OV.2` | Table 3.10.3 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
 | `V0.S.1` | Table 3.11.1 | classified by routing track (same / parallel / aligned tracks); the deck has no routing-direction or track assignment | #3147 |
@@ -2282,6 +2343,70 @@ Nothing in Tables 3.14-3.19 is left out for want of mask colouring.
 | `M9.S.4` | Table 3.18.1 | read literally (edge length) it overrides M8.S.2-S.3: an edge of 60-80 nm would need 60 nm, so S.2's 43 nm and S.3's 46 nm could never apply to it; the intended width-class reading is not stated | #3156 |
 | `M9.S.5`, `M9.S.6`, `M9.S.7`, `M9.S.8` | Table 3.18.2 | read literally (edge length) they override M8.S.1-S.3: every edge of 80 nm or more would need 80-1000 nm, so S.1's 40 nm could never apply; the intended width-class reading is not stated | #3156 |
 | `V9.PAD.EN.2`, `V9.AUX.1` | Table 3.19.1 | PAD (DRM mask 96) is not a layer of the pinned asap7.lyp, so the deck does not read it | #3156 |
+
+### Topology gaps: `GATE.AUX.2` and `ACTIVE.AUX.3`
+
+Both rules are auxiliary rules with no numeric value, which is why they were
+first filed as having "no distance bound". Reading the pinned DRM (Table
+3.4.1 with notes 2-3 and Fig. 3.4.2(a)/(d); Table 3.5.2 and Fig. 3.5.4(b))
+and running the deck on generated drawings shows each is a topological
+condition, not an unbounded distance. **Both stay declared gaps** and the
+deck's rule categories are unchanged; this section records the evidence and
+the predicate a separately reviewed implementation would start from.
+`tests/test_drc_asap7_deck.py::test_topology_gap_probes_stay_silent` pins the
+measurements below.
+
+**`GATE.AUX.2`** -- "GATE may not be discontinuous along the vertical axis".
+Fig. 3.4.2(a) marks two same-column GATE polygons separated by empty space
+illegal; Fig. 3.4.2(d) and note 2 say a cut is drawn as one GATE polygon with
+GCUT over it. Measured: stacked 20 nm GATE polygons in one column with a gap
+of 1, 20, 50, 100, 500 and 2000 nm trip no existing rule, and neither does the
+same pair with GCUT drawn over the gap (note 2 still forbids that drawing).
+Abutting polygons merge into one and are legal.
+
+Candidate predicate, checked in a scratch deck against the same drawings: on
+the merged GATE region, shrink each polygon 1 nm sideways, extend it vertically
+across the layout height, and report a column holding two or more GATE
+polygons. It reports every gap above, reports the GCUT-over-gap pair, and does
+not report the abutting pair, the single cut GATE or a neighbouring column. It
+reports nothing on any of the 212 cells of each pinned library (zero
+vertically stacked GATE pairs, measured with the Python API). What is
+**not** decided by the DRM: a polygon offset sideways by less than its own
+width still shares part of a column, so whether that is "the same column" is
+a reading to ratify (`GATE.W.1` and `GATE.S.1` already flag such offsets).
+
+**`ACTIVE.AUX.3`** -- "A notch in ACTIVE along vertical axis is not allowed".
+Fig. 3.5.4(b) draws the illegal notch as a rectangular slot cut into a
+vertical ACTIVE edge, so the slot opens sideways and its end wall is a
+vertical edge. The text alone is ambiguous about orientation, and the
+pinned cells settle it: of the 212 cells per library, 33 ACTIVE polygons
+(identical in all three libraries) have a slot whose end wall is a
+*horizontal* edge (a notch cut into a horizontal edge), while none has a
+slot whose end wall is a vertical edge. Reading the rule as forbidding the
+horizontal-edge slot would make shipped DRM-clean cells fail it.
+Measured on generated drawings: a slot cut into a vertical edge of a 100 x 162
+nm ACTIVE (20 nm deep, 54 nm up from the bottom) trips `ACTIVE.S.1` when it is
+26 nm tall or less, and `ACTIVE.W.2` for every height except 27 nm (the strip
+left above the slot is then not a multiple of 27 nm, so that rule reports the
+strip, not the notch); a 27 nm slot trips nothing at all. A 30 nm slot trips
+only `ACTIVE.W.2` at depths of 5, 20 and 60 nm. L- and vertical-finger
+U-shapes whose steps are multiples of 27 nm trip nothing.
+
+Candidate predicate: a merged ACTIVE polygon with two consecutive reflex
+corners joined by a vertical edge. On the generated drawings it flags exactly
+the slots cut into a vertical edge, including those `ACTIVE.S.1` already
+reports, and not the L, T or vertical-finger U shapes. **Not decided by the
+DRM:** how deep or wide a slot must be to count as a "notch" rather than the
+gap between two horizontal fingers. The predicate above flags any size, so a
+wide C-shaped ACTIVE would be reported; whether that is intended needs
+ratifying.
+
+**Follow-up acceptance criteria for an implementation** (not done here): add
+`GATE.AUX.2` and `ACTIVE.AUX.3` to the deck and `RULES`, with a failing and a
+boundary-passing fixture each, covering the cases above; keep the 212-cell
+shipped-library regression clean without extending
+`SHIPPED_CELL_DEVIATIONS`; update `--expect-rule-categories` and the counts
+in this document in the same change.
 
 ### ACTIVE.LUP.1 evidence
 
@@ -2381,6 +2506,8 @@ cases list the extra ids and say why, for example:
 - an M4-M7 width or spacing one dbu below its minimum puts an edge off the
   `AUX.1` grid, and the W.2 maximum (20 x W.1) is itself an even multiple
   that `W.3` forbids.
+- LIG.SDT.S.8 is only separable from `LIG.LISD.S.6` where SDT sticks out of
+  its LISD, which is `SDT.LISD.AUX.4` (see "Net-aware spacing").
 
 ## Limitation: whole-layout, flattened
 

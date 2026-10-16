@@ -458,6 +458,11 @@ def _fold_spice_continuations(lines: list[str]) -> list[str]:
     return folded
 
 
+def fold_spice_continuations(lines: list[str]) -> list[str]:
+    """Public alias of :func:`_fold_spice_continuations` for cross-group callers."""
+    return _fold_spice_continuations(lines)
+
+
 def validate_request_shape(
     data: Any,
     source: str,

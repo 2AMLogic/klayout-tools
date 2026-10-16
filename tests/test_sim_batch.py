@@ -4271,6 +4271,72 @@ def test_sim_set_partial_refusal_is_one_summary(tmp_path):
     jsonschema.validate(report, json.loads(SET_SCHEMA_PATH.read_text()))
 
 
+def test_sim_set_manifest_written_before_completion(tmp_path):
+    from klayout_tools import sim_set
+
+    paths = _write_set(tmp_path, 2)
+    out = tmp_path / "out"
+    seen = {}
+
+    def fake_run(path, **kwargs):
+        manifest = json.loads((out / "set-manifest.json").read_text())
+        seen[path] = [e["status"] for e in manifest["requests"]]
+        return _fake_report(job_id="job-" + os.path.basename(path))
+
+    sim_set.run_sim_set(paths, outdir=str(out), max_in_flight=1, run=fake_run)
+
+    assert seen[paths[0]] == ["running", "pending"]
+    assert seen[paths[1]] == ["pass", "running"] or seen[paths[1]] == [
+        "not_checked",
+        "running",
+    ]
+    final = json.loads((out / "set-manifest.json").read_text())["requests"]
+    assert [e["dir"] for e in final] == [str(out / "req0"), str(out / "req1")]
+    assert final[0]["job_id"] == "job-req0.json"
+
+
+def test_sim_set_capacity_retry_bounded_and_capacity_only(tmp_path):
+    from klayout_tools import sim_set
+
+    paths = _write_set(tmp_path, 2)
+    calls: dict[str, int] = {}
+    sleeps: list[float] = []
+
+    def fake_run(path, **kwargs):
+        calls[path] = calls.get(path, 0) + 1
+        if path.endswith("req0.json"):
+            if calls[path] < 3:
+                raise sim.SimError("full", code="batch_concurrency_cap")
+            return _fake_report()
+        raise sim.SimError("bad request", code="batch_bad")
+
+    report = sim_set.run_sim_set(
+        paths, run=fake_run, capacity_retries=2, sleep=sleeps.append
+    )
+    assert calls[paths[0]] == 3 and report["requests"][0]["error"] is None
+    assert calls[paths[1]] == 1  # non-capacity error is never retried
+    assert sleeps == [5.0, 10.0]
+
+    calls.clear()
+
+    def always_full(path, **kwargs):
+        calls[path] = calls.get(path, 0) + 1
+        raise sim.SimError("full", code="batch_no_capacity")
+
+    report = sim_set.run_sim_set(
+        paths[:1], run=always_full, capacity_retries=1, sleep=lambda s: None
+    )
+    assert calls[paths[0]] == 2
+    assert report["refused_codes"] == ["batch_no_capacity"]
+
+    calls.clear()
+    sim_set.run_sim_set(paths[:1], run=always_full, sleep=lambda s: None)
+    assert calls[paths[0]] == 1  # off by default
+
+    with pytest.raises(sim.SimError):
+        sim_set.run_sim_set(paths, capacity_retries=-1)
+
+
 def test_sim_set_rejects_empty_and_bad_bound():
     from klayout_tools import sim_set
 
@@ -5014,6 +5080,252 @@ def test_prelaunch_feature_check_warn_mode_does_not_raise(tmp_path, monkeypatch)
     sb._enforce_published_runner_features(request, assessment)
 
 
+# --------------------------------------------------------------------------- #
+# Whole-job ceiling: opt-in auto-split (issue #3446)
+# --------------------------------------------------------------------------- #
+
+
+def _split_runner(monkeypatch):
+    """A fake transport that answers each uploaded shard request with a
+    report naming exactly the units that shard was sent."""
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    shard_sizes: list[int] = []
+
+    def _capture(argv, timeout_s):
+        if "inputs/request.json" in " ".join(argv):
+            source, destination = argv[argv.index("cp") + 1 : argv.index("cp") + 3]
+            points = json.loads(Path(source).read_text())["_explicit_points"]
+            shard_sizes.append(len(points))
+            runner.outputs_by_job[job_id_of(destination)] = {
+                "report.json": _sim_report(
+                    corner_ids=tuple(
+                        f"tt_1.800_{int(p['temperature_c'])}" for p in points
+                    )
+                )
+            }
+        return runner(argv, timeout_s)
+
+    monkeypatch.setattr(sb, "_run_subprocess", _capture)
+    return runner, shard_sizes
+
+
+def test_split_mode_runs_63_units_as_three_jobs_in_unit_order(
+    tmp_path, monkeypatch, capsys
+):
+    runner, shard_sizes = _split_runner(monkeypatch)
+    monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
+
+    corners, _, environment = sb._run_batch(
+        corner_points=_corner_points(63),
+        netlist_path=str(_write_body(tmp_path)),
+        models_lib=None,
+        analysis={"kind": "tran", "args": "1n 1u"},
+        measurements_spec=_measurements_spec(),
+        timeout_s=120.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        artifacts_dir=str(tmp_path / "artifacts"),
+        max_workers=None,
+        request=_ceiling_request(tmp_path, job_ceiling_check="split"),
+    )
+
+    assert len(runner.argvs_matching("launch", "--apply")) == 3
+    assert sorted(shard_sizes) == [21, 21, 21]
+    assert [c["corner_id"] for c in corners] == [f"tt_1.800_{i}" for i in range(63)]
+    assert len(environment["fleet"]) == 3
+    ceiling = environment["job_ceiling"]
+    assert ceiling["split"] is True
+    assert ceiling["effective_hosts"] == 3
+    assert ceiling["check"] == "split"
+    assert "splitting 63 units into 3 batch jobs" in capsys.readouterr().err
+
+
+def test_max_units_per_job_caps_the_shard_size(tmp_path, monkeypatch):
+    runner, shard_sizes = _split_runner(monkeypatch)
+    monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
+
+    # 10 units fit one job, but the caller asked for jobs of at most 4.
+    corners, _, environment = sb._run_batch(
+        corner_points=_corner_points(10),
+        netlist_path=str(_write_body(tmp_path)),
+        models_lib=None,
+        analysis={"kind": "tran", "args": "1n 1u"},
+        measurements_spec=_measurements_spec(),
+        timeout_s=120.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        artifacts_dir=str(tmp_path / "artifacts"),
+        max_workers=None,
+        request=_ceiling_request(tmp_path, max_units_per_job=4),
+    )
+
+    assert sorted(shard_sizes) == [3, 3, 4]
+    assert len(corners) == 10
+    assert environment["job_ceiling"]["effective_hosts"] == 3
+
+
+def test_split_with_a_fitting_request_stays_one_job(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {"report.json": _sim_report()}
+
+    _, _, environment = _run_one_batch(
+        tmp_path,
+        monkeypatch,
+        runner,
+        units=29,  # bound == ceiling: not exceeded
+        timeout_s=120.0,
+        job_ceiling_check="split",
+    )
+
+    assert len(runner.argvs_matching("launch", "--apply")) == 1
+    assert environment["job_ceiling"]["split"] is False
+    assert environment["job_ceiling"]["effective_hosts"] == 1
+
+
+def test_max_units_per_job_larger_than_unit_count_is_one_job(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {"report.json": _sim_report()}
+
+    _, _, environment = _run_one_batch(
+        tmp_path, monkeypatch, runner, units=5, timeout_s=120.0, max_units_per_job=99
+    )
+
+    assert len(runner.argvs_matching("launch", "--apply")) == 1
+    assert environment["job_ceiling"]["split"] is False
+
+
+@pytest.mark.parametrize("cap", [29, 28])
+def test_max_units_per_job_at_or_under_the_ceiling_limit_is_accepted(
+    tmp_path, monkeypatch, cap
+):
+    runner, shard_sizes = _split_runner(monkeypatch)
+    monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
+
+    sb._run_batch(
+        corner_points=_corner_points(58),
+        netlist_path=str(_write_body(tmp_path)),
+        models_lib=None,
+        analysis={"kind": "tran", "args": "1n 1u"},
+        measurements_spec=_measurements_spec(),
+        timeout_s=120.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        artifacts_dir=str(tmp_path / "artifacts"),
+        max_workers=None,
+        request=_ceiling_request(tmp_path, max_units_per_job=cap),
+    )
+
+    assert max(shard_sizes) <= cap
+
+
+def test_max_units_per_job_over_the_ceiling_limit_is_rejected_before_s3(
+    tmp_path, monkeypatch
+):
+    runner = _FakeRunner()
+    with pytest.raises(sim.SimError) as excinfo:
+        _run_one_batch(
+            tmp_path,
+            monkeypatch,
+            runner,
+            units=63,
+            timeout_s=120.0,
+            max_units_per_job=40,  # 120 x 40 + 120 > 3600
+        )
+
+    assert runner.calls == []
+    assert excinfo.value.code == sb.BATCH_MAX_UNITS_CODE
+    assert "at most 29" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("bad", [0, -3, 2.5, "8", True])
+def test_max_units_per_job_bad_type_is_rejected_before_s3(tmp_path, monkeypatch, bad):
+    runner = _FakeRunner()
+    with pytest.raises(sim.SimError) as excinfo:
+        _run_one_batch(
+            tmp_path,
+            monkeypatch,
+            runner,
+            units=3,
+            timeout_s=30.0,
+            max_units_per_job=bad,
+        )
+
+    assert runner.calls == []
+    assert excinfo.value.code == sb.BATCH_MAX_UNITS_CODE
+
+
+def test_max_units_per_job_conflicts_with_enforce(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    with pytest.raises(sim.SimError) as excinfo:
+        _run_one_batch(
+            tmp_path,
+            monkeypatch,
+            runner,
+            units=3,
+            timeout_s=30.0,
+            max_units_per_job=2,
+            job_ceiling_check="enforce",
+        )
+
+    assert runner.calls == []
+    assert excinfo.value.code == sb.BATCH_MAX_UNITS_CODE
+
+
+def test_split_keeps_the_single_unit_refusal(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    with pytest.raises(sim.SimError) as excinfo:
+        _run_one_batch(
+            tmp_path,
+            monkeypatch,
+            runner,
+            units=4,
+            timeout_s=4000.0,  # one unit alone exceeds the 3600 s ceiling
+            job_ceiling_check="split",
+        )
+
+    assert runner.calls == []
+    assert excinfo.value.code == sb.BATCH_JOB_CEILING_CODE
+    assert "No remote.hosts value fits" in str(excinfo.value)
+
+
+def test_default_still_warns_and_submits_one_job(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {"report.json": _sim_report()}
+
+    _, _, environment = _run_one_batch(
+        tmp_path, monkeypatch, runner, units=63, timeout_s=120.0
+    )
+
+    assert len(runner.argvs_matching("launch", "--apply")) == 1
+    assert "split" not in environment["job_ceiling"]
+    assert "effective_hosts" not in environment["job_ceiling"]
+
+
+def test_cli_max_units_per_job_flag_overrides_the_request(tmp_path, monkeypatch):
+    from klayout_tools.cli import main
+
+    seen: list[dict] = []
+
+    def _capture(**kwargs):
+        seen.append(kwargs["request"])
+        raise sim.SimError("stop here")
+
+    monkeypatch.setitem(sim._BACKENDS, "batch", _capture)
+    _write_body(tmp_path)
+    request = _ceiling_request(tmp_path, max_units_per_job=5)
+    path = _write_request(tmp_path, request)
+
+    main(["sim", str(path), "--max-units-per-job", "7", "--format", "json"])
+
+    assert seen[0]["batch"]["max_units_per_job"] == 7  # the flag beats the request
+    assert seen[0]["batch"]["bucket"] == FAKE_BUCKET  # other batch keys survive
+
+
 @pytest.mark.parametrize(
     "codes", [("batch_job_failed", "batch_poll_timeout"), ("batch_job_timeout",) * 2]
 )
@@ -5035,3 +5347,157 @@ def test_run_sim_batch_resume_resubmits_job_failure_and_poll_timeout(
     assert dispatched == [ids[:2]]
     assert all(c["status"] == "pass" for c in third["corners"])
     assert third["environment"]["resume"]["checkpoint_retained"] is False
+
+
+# --------------------------------------------------------------------------- #
+# Issue #2978: job-id line, heartbeat, --attach
+# --------------------------------------------------------------------------- #
+
+
+def test_launch_prints_job_id_on_stderr_before_polling(tmp_path, monkeypatch, capsys):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {"report.json": _sim_report()}
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    _write_body(tmp_path)
+    path = _write_request(tmp_path, _batch_request(tmp_path))
+
+    report = sim.run_sim(str(path))
+
+    captured = capsys.readouterr()
+    job_id = report["environment"]["remote"]["job_id"]
+    assert captured.out == ""
+    assert f"batch job {job_id} launched" in captured.err
+    assert f"--attach {job_id}" in captured.err
+
+
+def test_poll_heartbeat_fires_on_state_change_and_coarse_interval(tmp_path, capsys):
+    runner = _FakeRunner()
+    runner.queue("status.json", fake_completed(_status("running")))
+    runner.queue("status.json", fake_completed(_status("running")))
+    runner.queue("status.json", fake_completed(_status("running")))
+    runner.queue("status.json", fake_completed(_status("interrupted")))
+    runner.queue("status.json", fake_completed(_status("done")))
+    # started, then elapsed at each non-terminal poll.
+    clock = iter([0.0, 0.0, 30.0, 400.0, 430.0])
+
+    sb.poll_status(
+        _config(tmp_path, poll_timeout_s=10000.0),
+        "job-1",
+        runner=runner,
+        sleep=runner.sleep,
+        monotonic=lambda: next(clock),
+        heartbeat=True,
+    )
+
+    lines = capsys.readouterr().err.splitlines()
+    # t=0 first beat, t=30 silent (same state, < interval), t=400 interval
+    # beat, t=430 state change beat.
+    assert lines == [
+        "klt sim: batch job job-1 state=running elapsed=0s",
+        "klt sim: batch job job-1 state=running elapsed=400s",
+        "klt sim: batch job job-1 state=interrupted elapsed=430s",
+    ]
+
+
+def _attach(tmp_path, runner, **kwargs):
+    return sb._run_batch_job(
+        config=_config(tmp_path, **kwargs),
+        job_id="job-1",
+        corner_points=_corner_points(1),
+        netlist_path=str(_write_body(tmp_path)),
+        timeout_s=30.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        artifacts_dir=str(tmp_path / "artifacts"),
+        request={"netlist": "body.spice"},
+        measurements_spec=_measurements_spec(),
+        runner=runner,
+        sleep=runner.sleep,
+        attach=True,
+    )
+
+
+def test_attach_to_done_job_collects_without_submitting_or_launching(tmp_path):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {"report.json": _sim_report()}
+
+    corners, _, environment = _attach(tmp_path, runner)
+
+    assert [c["corner_id"] for c in corners] == ["tt_1.800_27"]
+    assert environment["job_id"] == "job-1"
+    assert runner.argvs_matching("launch") == []
+    assert [
+        a for a in runner.argvs_matching("s3", "cp") if "inputs/" in " ".join(a)
+    ] == []
+
+
+def test_attach_to_running_job_waits_then_collects(tmp_path):
+    runner = _FakeRunner()
+    runner.queue("status.json", fake_completed(_status("running")))
+    runner.queue("status.json", fake_completed(_status("interrupted")))
+    runner.queue("status.json", fake_completed(_status("done")))
+    runner.outputs = {"report.json": _sim_report()}
+
+    corners, _, _ = _attach(tmp_path, runner)
+
+    assert len(corners) == 1
+    assert len(runner.sleeps) == 2
+    assert runner.argvs_matching("launch") == []
+
+
+def test_attach_unknown_job_id_is_a_coded_error(tmp_path):
+    runner = _FakeRunner()
+    runner.queue("job.json", fake_completed(returncode=1, stderr="404"))
+
+    with pytest.raises(sb.BatchError, match="no batch job 'job-1'") as excinfo:
+        _attach(tmp_path, runner)
+    assert excinfo.value.code == sb.BATCH_UNKNOWN_JOB_CODE
+    assert runner.argvs_matching("status.json") == []
+    assert runner.argvs_matching("launch") == []
+
+
+def test_attach_poll_timeout_reports_unrun_corners(tmp_path):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("running"))
+
+    corners, _, environment = _attach(tmp_path, runner, poll_timeout_s=0.0)
+
+    assert corners[0]["diagnostics"][0]["code"] == "batch_poll_timeout"
+    assert environment["job_id"] == "job-1"
+    assert runner.argvs_matching("launch") == []
+
+
+def test_run_sim_attach_end_to_end_and_unknown_job_envelope(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {"report.json": _sim_report()}
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    _write_body(tmp_path)
+    path = _write_request(tmp_path, _batch_request(tmp_path))
+
+    report = sim.run_sim(str(path), attach_job_id="klt-sim-abc123")
+    assert report["environment"]["remote"]["job_id"] == "klt-sim-abc123"
+    assert runner.argvs_matching("launch") == []
+
+    runner.queue("job.json", fake_completed(returncode=1, stderr="404"))
+    with pytest.raises(sim.SimError, match="batch backend failed") as excinfo:
+        sim.run_sim(str(path), attach_job_id="klt-sim-missing")
+    assert excinfo.value.code == sb.BATCH_UNKNOWN_JOB_CODE
+
+
+def test_run_sim_attach_requires_batch_backend(tmp_path):
+    _write_body(tmp_path)
+    request = _batch_request(tmp_path)
+    request["backend"] = "local"
+    path = _write_request(tmp_path, request)
+    with pytest.raises(sim.SimError, match="--attach requires backend 'batch'"):
+        sim.run_sim(str(path), attach_job_id="klt-sim-abc123")
+
+
+def test_attach_refused_with_submit_only(tmp_path):
+    _write_body(tmp_path)
+    path = _write_request(tmp_path, _batch_request(tmp_path))
+    with pytest.raises(sim.SimError, match="mutually exclusive"):
+        sim.run_sim(str(path), attach_job_id="klt-sim-abc123", submit_only=True)

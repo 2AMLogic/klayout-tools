@@ -818,6 +818,315 @@ def _lig_cases() -> list[Case]:
     return c
 
 
+# --------------------------------------------------------------------------
+# Net-aware spacing (#3084): ACTIVE.S.2A, LIG.LISD.S.6/S.7, LIG.SDT.S.8
+# --------------------------------------------------------------------------
+#
+# Every pair below is drawn twice: once with nothing joining the two shapes
+# (different nets) and once with a conductor chain that makes them one net
+# although they sit just as close. The chain runs through V0 / M1 (and V1 /
+# M2 for the "remote" variants, whose two ends are far from each other); a
+# metal that overlaps both shapes without a via is the "unrelated overlap"
+# control and must not connect them.
+
+
+def _move(shapes: Iterable[Shape], dx: float = 0, dy: float = 0) -> list[Shape]:
+    moved: list[Shape] = []
+    for sh in shapes:
+        if len(sh) == 5:
+            layer, x1, y1, x2, y2 = sh  # type: ignore[misc]
+            moved.append((layer, x1 + dx, y1 + dy, x2 + dx, y2 + dy))
+        else:
+            layer, hull, holes = sh  # type: ignore[misc]
+            moved.append(
+                (
+                    layer,
+                    tuple((x + dx, y + dy) for x, y in hull),
+                    tuple(tuple((x + dx, y + dy) for x, y in h) for h in holes),
+                )
+            )
+    return moved
+
+
+def _lig_lisd_pair(gap: float) -> list[Shape]:
+    """A vertical 18 x 100 nm LIG bar and a 24 x 100 nm LISD bar ``gap`` nm
+    to its right."""
+    return [box("LIG", 0, 0, 18, 100), box("LISD", 18 + gap, 0, 42 + gap, 100)]
+
+
+def _bridge_m1(
+    gap: float, *, lig_via: bool = True, lisd_via: bool = True
+) -> list[Shape]:
+    """An M1 bar along the bottom of both bars of :func:`_lig_lisd_pair`,
+    with a V0 on each (the V0 is left out where ``*_via`` is false)."""
+    shapes: list[Shape] = [box("M1", 0, 0, 39 + gap, 18)]
+    if lig_via:
+        shapes.append(box("V0", 0, 0, 18, 18))
+    if lisd_via:
+        shapes.append(box("V0", 21 + gap, 0, 39 + gap, 18))
+    return shapes
+
+
+def _remote_m2(gap: float, *, far_via: bool = True) -> list[Shape]:
+    """Both bars of :func:`_lig_lisd_pair` reach an M2 bar only through a
+    V0 / M1 / V1 stub each, on opposite sides and ends, so nothing local
+    joins them. The M2 bar also runs over the top of both bars with no via
+    there. ``far_via`` False omits the V1 under the LISD side's M2 end."""
+    shapes: list[Shape] = [
+        box("V0", 0, 0, 18, 18),
+        box("M1", -60, 0, 18, 18),
+        box("V1", -60, 0, -42, 18),
+        box("V0", 21 + gap, 82, 39 + gap, 100),
+        box("M1", 21 + gap, 82, 120 + gap, 100),
+        box("M2", -60, 0, -42, 100),
+        box("M2", -60, 82, 120 + gap, 100),
+    ]
+    if far_via:
+        shapes.append(box("V1", 102 + gap, 82, 120 + gap, 100))
+    return shapes
+
+
+def _corner_pair(dx: float, dy: float) -> list[Shape]:
+    """LIG bar and a LISD bar above and to the right of its top-right corner
+    by ``dx`` / ``dy`` nm (no facing edges)."""
+    return [
+        box("LIG", 0, 0, 18, 100),
+        box("LISD", 18 + dx, 100 + dy, 42 + dx, 200 + dy),
+    ]
+
+
+def _corner_bridge(dx: float, dy: float, *, lisd_via: bool = True) -> list[Shape]:
+    """An L-shaped M1 from the LIG bar's top to the corner LISD bar's bottom
+    (V0 on each; the LISD one is left out if ``lisd_via`` is false), joining
+    the two shapes of :func:`_corner_pair`."""
+    shapes = [
+        box("V0", 0, 82, 18, 100),
+        box("M1", 0, 82, 39 + dx, 100),
+        box("M1", 21 + dx, 82, 39 + dx, 118 + dy),
+    ]
+    if lisd_via:
+        shapes.append(box("V0", 21 + dx, 100 + dy, 39 + dx, 118 + dy))
+    return shapes
+
+
+def _sdt_pair(gap: float) -> list[Shape]:
+    """A LIG bar ``gap`` nm right of an SDT on ACTIVE, with the SDT sticking
+    4 nm out of its LISD (SDT.LISD.AUX.4): LIG and LISD are then ``gap + 4``
+    nm apart, so only LIG.SDT.S.8 can see a pair at 14 nm."""
+    return [
+        *active_in("NSELECT", 0, 0, 70, 81),
+        box("SDT", 10, 0, 34, 81),
+        box("LISD", -14, 0, 30, 81),
+        box("LIG", 34 + gap, 0, 52 + gap, 100),
+    ]
+
+
+def _sdt_bridge(gap: float, *, lig_via: bool = True) -> list[Shape]:
+    """A V0 / M1 / V0 chain from the LISD of :func:`_sdt_pair` to its LIG,
+    over their tops (ACTIVE and select end at y = 81); ``lig_via`` False
+    leaves the M1 lying over the LIG with no V0 on it."""
+    shapes = [
+        box("V0", -11, 82, 7, 100),
+        box("LISD", -14, 81, 30, 100),
+        box("M1", -11, 82, 52 + gap, 100),
+    ]
+    if lig_via:
+        shapes.append(box("V0", 34 + gap, 82, 52 + gap, 100))
+    return shapes
+
+
+#: A two-transistor row: ``device()`` and a copy 162 nm to the right. The
+#: first transistor's ACTIVE ends at x = 116 + ``ext``, the second one's
+#: starts at x = 208, so ``ext`` = 0 leaves the 92 nm ACTIVE.S.2A distance.
+#: ``device()`` has SDT/LISD columns at x 42..66 and 96..120 (and 204..228,
+#: 258..282 in the copy); the one at 96..120 and the one at 204..228 are the
+#: pair that faces the gap.
+_ROW_DX = 162
+
+
+def _row(ext: float = 0) -> list[Shape]:
+    """The row without the two dummy GATE that flank the gap: moving ACTIVE's
+    end by ``ext`` would otherwise break GATE.ACTIVE.S.4 as well."""
+    first = [sh for sh in device(ax1=116 + ext) if not _is_gate(sh, 125)]
+    second = [sh for sh in device() if not _is_gate(sh, 17)]
+    return [*first, *_move(second, _ROW_DX)]
+
+
+def _is_gate(shape: Shape, x1: float) -> bool:
+    return len(shape) == 5 and shape[0] == "GATE" and shape[1] == x1
+
+
+def _row_links(
+    *, left: bool = False, right: bool = True, m2: bool = False
+) -> list[Shape]:
+    """Conductors over :func:`_row`. ``right`` joins the two LISD columns that
+    face the gap (V0 / M1 / V0); ``left`` instead runs the M1 from the first
+    transistor's far LISD column to the second's, passing over its facing one
+    with no via (a bridge to the wrong source/drain region); ``m2`` joins
+    the facing columns through M2 instead of M1."""
+    low = 48  # V0 / M1 / V1 centre height inside the 27..108 nm ACTIVE
+    if m2:
+        return [
+            box("V0", 99, low, 117, low + 18),
+            box("M1", 99, low, 117, low + 28),
+            box("V1", 99, low, 117, low + 18),
+            box("V0", 207, low, 225, low + 18),
+            box("M1", 207, low, 225, low + 28),
+            box("V1", 207, low, 225, low + 18),
+            box("M2", 99, low, 225, low + 18),
+        ]
+    if left:
+        return [
+            box("V0", 45, low, 63, low + 18),
+            box("V0", 207, low, 225, low + 18),
+            box("M1", 45, low, 225, low + 18),
+        ]
+    shapes = [box("M1", 99, low, 225, low + 18)]
+    if right:
+        shapes += [
+            box("V0", 99, low, 117, low + 18),
+            box("V0", 207, low, 225, low + 18),
+        ]
+    return shapes
+
+
+def _notch(gap: float, *, bridge: bool = False) -> list[Shape]:
+    """Fig. 3.5.2(b): one ACTIVE polygon, a 27 nm bar with a 54 nm lobe at
+    each end, ``gap`` nm apart across a notch. Two GATE cross the bar inside
+    the notch, so the lobes are source/drain regions of different
+    transistors (separated by two channels) although they are one polygon.
+    Each lobe has an SDT / LISD column; ``bridge`` joins them (V0 / M1)."""
+    x2 = 116 + gap
+    outline = poly(
+        "ACTIVE",
+        (46, 27), (x2 + 70, 27), (x2 + 70, 108), (x2, 108),
+        (x2, 54), (116, 54), (116, 108), (46, 108),
+    )  # fmt: skip
+    shapes: list[Shape] = [
+        outline,
+        box("NSELECT", 0, 0, x2 + 116, 135),
+        box("GATE", 124, 18, 144, 58),
+        box("GATE", 178, 18, 198, 58),
+        box("SDT", 60, 27, 84, 108),
+        box("LISD", 60, 27, 84, 108),
+        box("SDT", x2 + 28, 27, x2 + 52, 108),
+        box("LISD", x2 + 28, 27, x2 + 52, 108),
+    ]
+    if bridge:
+        shapes += [
+            box("V0", 63, 72, 81, 90),
+            box("V0", x2 + 31, 72, x2 + 49, 90),
+            box("M1", 63, 72, x2 + 49, 90),
+        ]
+    return shapes
+
+
+def _net_cases() -> list[Case]:
+    c: list[Case] = []
+    # ---- LIG.LISD.S.6 / LIG.SDT.S.8: side to side ----
+    # LIG and LISD at exactly 14 nm pass, one dbu closer fails (no SDT here,
+    # so only S.6 applies).
+    for gap, mk in ((14 - D, _fail), (14, _pass)):
+        c.append(mk("LIG.LISD.S.6", _lig_lisd_pair(gap)))
+    # A 10 nm pair is a violation unless one net joins it: through an M1
+    # (direct) or through M2 (the two ends far apart). Without the second V0 /
+    # V1, or with a metal that merely overlaps both, it stays a violation.
+    c += [
+        _fail("LIG.LISD.S.6", [*_lig_lisd_pair(10), *_bridge_m1(10, lisd_via=False)]),
+        _fail("LIG.LISD.S.6", [*_lig_lisd_pair(10), *_bridge_m1(10, lig_via=False)]),
+        _fail("LIG.LISD.S.6", [*_lig_lisd_pair(10), *_remote_m2(10, far_via=False)]),
+        _pass("LIG.LISD.S.6", [*_lig_lisd_pair(10), *_bridge_m1(10)]),
+        _pass("LIG.LISD.S.6", [*_lig_lisd_pair(10), *_remote_m2(10)]),
+    ]
+    # Two LIG on one GATE: spacing to a LISD within 14 nm is judged on the
+    # LISD's own net, so a pair joined only through that GATE passes. (Left
+    # for the S.2A row below, which also checks a GATE does not join the
+    # source/drain regions either side of it.)
+    # Overlap is one conductor, whatever the spacing check sees.
+    c.append(
+        _pass(
+            "LIG.LISD.S.6",
+            [box("LISD", 0, 0, 24, 100), box("LIG", 16, 40, 116, 58)],
+        )
+    )
+    # ---- LIG.LISD.S.7: corner to corner ----
+    # dx = 9, dy = 12 nm is 15 nm apart (a 3-4-5 triangle): pass; a dbu
+    # closer is a corner violation but still 14.8 nm, so not LIG.LISD.S.6.
+    for dy, mk in ((12 - D, _fail), (12, _pass)):
+        c.append(mk("LIG.LISD.S.7", _corner_pair(9, dy)))
+    c += [
+        _pass("LIG.LISD.S.7", [*_corner_pair(9, 12 - D), *_corner_bridge(9, 12 - D)]),
+        _fail(
+            "LIG.LISD.S.7",
+            [*_corner_pair(9, 12 - D), *_corner_bridge(9, 12 - D, lisd_via=False)],
+        ),
+    ]
+    # Below 14 nm a corner pair breaks both rules.
+    c.append(_fail("LIG.LISD.S.6", _corner_pair(9, 9), also=["LIG.LISD.S.7"]))
+    # Facing edges that overlap by one dbu are a side pair (14.5 nm: legal
+    # under S.6), not a corner pair, so S.7 does not see them.
+    c.append(
+        _pass(
+            "LIG.LISD.S.7",
+            [box("LIG", 0, 0, 18, 100), box("LISD", 32.5, 100 - D, 56.5, 200 - D)],
+        )
+    )
+    # ---- LIG.SDT.S.8 ----
+    c += [
+        _fail("LIG.SDT.S.8", _sdt_pair(14 - D), also=["SDT.LISD.AUX.4"]),
+        _pass("LIG.SDT.S.8", _sdt_pair(14), also=["SDT.LISD.AUX.4"]),
+        # Nothing joins them, or something unrelated overlaps both.
+        _fail("LIG.SDT.S.8", _sdt_pair(10), also=["SDT.LISD.AUX.4"]),
+        _fail(
+            "LIG.SDT.S.8",
+            [*_sdt_pair(10), *_sdt_bridge(10, lig_via=False)],
+            also=["SDT.LISD.AUX.4"],
+        ),
+        _pass(
+            "LIG.SDT.S.8",
+            [*_sdt_pair(10), *_sdt_bridge(10)],
+            also=["SDT.LISD.AUX.4"],
+        ),
+    ]
+    # SDT inside its LISD: the two rules see the same 14 nm.
+    for gap, mk in ((14 - D, _fail), (14, _pass)):
+        c.append(
+            mk(
+                "LIG.SDT.S.8",
+                [
+                    *active_in("NSELECT", 0, 0, 70, 81),
+                    box("SDT", 10, 0, 34, 81),
+                    box("LISD", 10, 0, 34, 81),
+                    box("LIG", 34 + gap, 0, 52 + gap, 100),
+                ],
+                also=[] if mk is _pass else ["LIG.LISD.S.6"],
+            )
+        )
+    # ---- ACTIVE.S.2A ----
+    # ext = 0 leaves exactly 92 nm; a dbu of extension takes it to 91.75.
+    c += [
+        _fail("ACTIVE.S.2A", _row(D)),
+        _pass("ACTIVE.S.2A", _row(0)),
+        # 91.75 nm apart is fine when the two regions are one net.
+        _pass("ACTIVE.S.2A", [*_row(D), *_row_links()]),
+        _pass("ACTIVE.S.2A", [*_row(D), *_row_links(m2=True)]),
+        # A metal over both regions with no via joins nothing.
+        _fail("ACTIVE.S.2A", [*_row(D), *_row_links(right=False)]),
+        # The bridge reaches the far column of the first transistor, not the
+        # region facing the gap: a GATE and ACTIVE do not join its two sides.
+        _fail("ACTIVE.S.2A", [*_row(D), *_row_links(left=True)]),
+    ]
+    c += [
+        _fail("ACTIVE.S.2A", _notch(92 - D)),
+        _pass("ACTIVE.S.2A", _notch(92)),
+        _pass("ACTIVE.S.2A", _notch(92 - D, bridge=True)),
+        # Note 2 of Table 3.5.2: only horizontal spacing is checked. Two
+        # transistors on different nets 54 nm apart vertically pass.
+        _pass("ACTIVE.S.2A", [*device(), *_move(device(), dy=135)]),
+    ]
+    return c
+
+
 def _v0_cases() -> list[Case]:
     def via(w: float, under: str | None = "LISD") -> list[Shape]:
         shapes = [box("V0", 3, 40, 3 + w, 58), box("M1", -50, 40, 100, 58)]
@@ -1482,6 +1791,7 @@ def all_cases() -> list[Case]:
         *_sdt_cases(),
         *_lisd_cases(),
         *_lig_cases(),
+        *_net_cases(),
         *_v0_cases(),
         *_metal_cases("M1"),
         *_metal_cases("M2"),
@@ -1535,6 +1845,77 @@ def _insert(
     for hole in holes:
         polygon.insert_hole(pts(hole))
     cell.shapes(layer).insert(polygon)
+
+
+def topology_gap_probes() -> list[Case]:
+    """Drawings for the two topology gaps (``GATE.AUX.2``, ``ACTIVE.AUX.3``,
+    #3086), each ``expect`` being the rules the deck trips *today*.
+
+    They are not part of :func:`all_cases`: neither rule is implemented, so
+    the cases pin that the gap is real (the DRM's illegal drawing passes the
+    deck) and which existing rules already cover part of it. Gates sit between
+    two neighbour columns as tall as the stack so ``GATE.S.3`` stays quiet;
+    ACTIVE is 162 nm tall (6 x 27 nm) with the slot 54 nm up, so every strip
+    left beside a slot meets ``ACTIVE.W.1`` and the full-height and bottom
+    strips meet ``ACTIVE.W.2``; the strip above a slot is a multiple of 27 nm
+    only for a 27 nm slot, so the other slot heights also trip ``ACTIVE.W.2``
+    (an existing rule reporting the strip, not the notch)."""
+
+    def column(x: float, y0: float, y1: float) -> Shape:
+        return box("GATE", x, y0, x + 20, y1)
+
+    def gates(*columns: Shape) -> list[Shape]:
+        top = max(s[4] for s in columns if len(s) == 5 and s[0] == "GATE")
+        return [*columns, column(-54, 0, top), column(-108, 0, top)]
+
+    def slot(height: float, depth: float) -> list[Shape]:
+        """A rectangular slot cut into the right (vertical) edge."""
+        y0 = 54
+        hull = (
+            (0, 0), (100, 0), (100, y0), (100 - depth, y0),
+            (100 - depth, y0 + height), (100, y0 + height), (100, 162), (0, 162),
+        )  # fmt: skip
+        return [poly("ACTIVE", *hull), box("NSELECT", -46, -27, 146, 189)]
+
+    def active(*hull: Point) -> list[Shape]:
+        return [poly("ACTIVE", *hull), box("NSELECT", -46, -27, 146, 189)]
+
+    def slot_expect(height: float) -> frozenset[str]:
+        rules = {"ACTIVE.S.1"} if height < 27 else set()
+        if height != 27:
+            rules.add("ACTIVE.W.2")
+        return frozenset(rules)
+
+    c = [
+        # GATE.AUX.2: Fig. 3.4.2(a) drawn at several gaps, and (d) as one
+        # polygon under GCUT.
+        *(
+            Case(f"gate-stack-gap{g}", "probe", tuple(gates(column(0, 0, 40),
+               column(0, 40 + g, 80 + g))))
+            for g in (1, 20, 50, 100, 500, 2000)
+        ),
+        Case("gate-stack-gcut-over-gap", "probe", tuple(gates(
+            column(0, 0, 40), column(0, 80, 120), box("GCUT", -17, 40, 37, 80)))),
+        Case("gate-single-gcut", "probe", tuple(gates(
+            column(0, 0, 120), box("GCUT", -17, 40, 37, 80)))),
+        Case("gate-stack-abut", "probe", tuple(gates(
+            column(0, 0, 40), column(0, 40, 80)))),
+        # ACTIVE.AUX.3: Fig. 3.5.4(b) slots in a vertical edge; ACTIVE.S.1
+        # (27 nm) already reports the narrow ones, ACTIVE.W.2 the strip above.
+        *(
+            Case(f"active-slot-h{h}", "probe", tuple(slot(h, 20)),
+                 slot_expect(h))
+            for h in (8, 26, 27, 30, 40)
+        ),
+        Case("active-slot-h30-d5", "probe", tuple(slot(30, 5)), slot_expect(30)),
+        Case("active-slot-h30-d60", "probe", tuple(slot(30, 60)), slot_expect(30)),
+        Case("active-L", "probe", tuple(active(
+            (0, 0), (100, 0), (100, 54), (50, 54), (50, 162), (0, 162)))),
+        Case("active-U-vertical-fingers", "probe", tuple(active(
+            (0, 0), (100, 0), (100, 162), (70, 162), (70, 54), (30, 54),
+            (30, 162), (0, 162)))),
+    ]  # fmt: skip
+    return c
 
 
 def write_shapes(path: str, shapes: Sequence[Shape], scale: float = 1.0) -> None:
