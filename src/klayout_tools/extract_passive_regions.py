@@ -291,12 +291,13 @@ def _capacitor_top_via_overlap_region(
     layout: kdb.Layout, top_cell: kdb.Cell, capacitor: CapacitorDevice
 ) -> kdb.Region:
     """The geometric overlap between one :class:`CapacitorDevice` entry's
-    own ``top_plate_via`` footprint and its recognised bottom plate (issue
-    #364) -- the region :func:`_exclude_capacitor_top_via_overlap` cuts from
-    the deck's generic ``vias[]`` connectivity so a MiM/MOM cap's DRM-legal
-    via-to-bottom-plate overlap does not extract as an ordinary via shorting
-    the two plates together. See that function's own docstring for the full
-    "why" (issue #364/#1388).
+    own ``top_plate_via`` footprint, its recognised bottom plate and its
+    recognised top plate (issues #364, #3020) -- the region
+    :func:`_exclude_capacitor_top_via_overlap` cuts from the deck's generic
+    ``vias[]`` connectivity so a MiM/MOM cap's DRM-legal via-to-bottom-plate
+    overlap does not extract as an ordinary via shorting the two plates
+    together. See that function's own docstring for the full "why" (issue
+    #364/#1388).
 
     Factored out (issue #2204) so ``erc.py``'s deck-driven device-body
     auto-detection subtracts the *same* region from a matching ``vias``
@@ -324,7 +325,11 @@ def _capacitor_top_via_overlap_region(
     scoped_bottom_region = bottom_region.interacting(top_region)
     if top_region.is_empty() or scoped_bottom_region.is_empty():
         return kdb.Region()
-    return top_via_region & scoped_bottom_region
+    # Also bound by the top-plate footprint (issue #3020): `interacting`
+    # keeps the *whole* bottom-plate polygon, so without this an ordinary
+    # via landing on that polygon outside the top plate would be cut from
+    # connectivity, leaving the stacked cap's upper plate a false open.
+    return top_via_region & scoped_bottom_region & top_region
 
 
 def _capacitor_top_via_exclusions(

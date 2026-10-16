@@ -48,7 +48,7 @@ from pathlib import Path
 import pytest
 
 from klayout_tools import pdk as pdk_module
-from klayout_tools import synthesize
+from klayout_tools import pdk_cells, synthesize
 from klayout_tools.synthesize import SynthesizeError, run_synthesize
 
 # 4-bit ripple-carry adder -- purely combinational (no clock), so it is
@@ -141,17 +141,14 @@ def _find_any_cell_library() -> tuple[str, str, str, str] | None:
     ``(root, variant, cell_library, corner)`` or ``None``. Duplicated from
     `tests/test_equiv.py`'s own helper of the same name/behaviour (test
     modules in this repo do not import fixtures across each other)."""
-    try:
-        result = pdk_module.list_pdks()
-    except Exception:
-        return None
+    result = pdk_module.list_pdks()
     for install in result["installs"]:
         for variant in install["variants"]:
             try:
-                libraries = pdk_module.list_cell_libraries(
+                libraries = pdk_cells.list_cell_libraries(
                     variant=variant["name"], root=install["root"]
                 )
-            except Exception:
+            except pdk_module.PdkNotFoundError:
                 continue
             for library in libraries["libraries"]:
                 name = library["name"]
@@ -270,6 +267,11 @@ def test_verify_equivalence_gate_fails_hard_on_seeded_mismatch(tmp_path, monkeyp
         # pre-#1844 positional-only signature, so it keeps working across
         # whatever keyword arguments `run_synthesize` passes through.
         log_text = original_run_yosys(script_path, **kwargs)
+        with open(script_path, encoding="utf-8") as handle:
+            if not any(_WRITE_VERILOG_RE.match(line.rstrip("\n")) for line in handle):
+                # Auxiliary scripts (e.g. the memory-evidence pass) write no
+                # netlist; only the synthesis script's output gets seeded.
+                return log_text
         netlist_path = _netlist_path_from_script(script_path)
         with open(netlist_path, "w", encoding="utf-8") as handle:
             handle.write(broken_netlist_text)
