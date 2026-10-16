@@ -6468,12 +6468,19 @@ def _corner_deck_control_lines(
     lines = [".control"]
     for path in osdi_preload:
         lines.append(f"pre_osdi {path}")
+    prefix: list[str] = []
     if save_mode == DEFAULT_SAVE_MODE and (measurements_spec or raw_path is not None):
-        lines.append("save all")
+        prefix.append("save all")
     for key, value in sorted(point.supply_v.items()):
-        lines.append(f"alter {key}={value}")
+        prefix.append(f"alter {key}={value}")
+    lines.extend(prefix)
     if sim_steps.is_steps_analysis(analysis):
-        lines.extend(sim_steps.control_lines(analysis, measurements_spec))
+        # Issue #3103: a `reset: true` step re-emits this same prefix after
+        # ngspice's `reset` (which re-parses the circuit, reverting every
+        # `alter` and dropping the saved set).
+        lines.extend(
+            sim_steps.control_lines(analysis, measurements_spec, reset_prefix=prefix)
+        )
         lines.extend(["quit", ".endc"])
         return lines
     crossings_lines = sim_crossings.control_lines(measurements_spec, corner_dir)

@@ -27,6 +27,13 @@ not `klt --version`, if you need to detect this kind of drift. See
   failures are `status: "error"` with a `measurement` diagnostic led by a
   `[cycle_mean_*]` reason token. `.meas AVG ... TRIG/TARG` and `FROM=<meas>`
   remain unsupported. See `docs/cli/sim.md`.
+- **`klt sim` `analysis_steps[].reset`** (issue #3103): `reset: true` starts a
+  step from a freshly parsed circuit (ngspice `reset`), so independent
+  configurations of one analysis share a request instead of one job each. The
+  deck re-emits `save all` and the corner's `supply_v` `alter`s after `reset`.
+  Decks without `reset` are byte-identical; a non-boolean value is refused by
+  name. `docs/cli/sim.md` now also states that steps otherwise share circuit
+  and solver state. Additive; no `schema_version` bump.
 - **ASAP7 DRC deck checks `ACTIVE.W.2` and `SDT.W.3`** (issue #3085): the
   vertical-width-is-an-integer-multiple-of-27-nm rules (DRM Tables 3.5.1 /
   3.8.1) are now measured per local vertical width of each merged rectilinear

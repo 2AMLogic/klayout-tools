@@ -2596,7 +2596,7 @@ error, exit 1).
 
 - **Steps.** `analysis_steps` is a non-empty array. A one-step sequence is
   valid. Each step is `{name, analysis: {kind, args}, alter?,
-  measurements?}`.
+  reset?, measurements?}`.
   - `name` must match `[A-Za-z_][A-Za-z0-9_]*` and be unique
     (case-insensitive).
   - `analysis.kind` must be one of `op`, `dc`, `ac`, `tran`, `noise`, `sp`,
@@ -2606,7 +2606,9 @@ error, exit 1).
   name) to a finite number. The overrides are applied as `alter` commands
   before that step's solve, in declaration order.
   - Overrides are **cumulative**, as in ngspice: a later step sees an
-    earlier step's value unless it alters the element again.
+    earlier step's value unless it alters the element again. Without
+    `reset` (below), steps share circuit **and** solver state (each solve
+    starts from the previous one's solution).
   - Refused:
     - a hierarchical or device-parameter target;
     - a target repeated within one step;
@@ -2619,6 +2621,24 @@ error, exit 1).
       of that name), where `alter` also has no effect -- the same rule and
       the same lexical limits as the supply axis
       ([#2867](https://github.com/2AMLogic/klayout-tools/issues/2867)).
+- **`reset`** (optional boolean, default `false`;
+  [#3103](https://github.com/2AMLogic/klayout-tools/issues/3103)): `true`
+  starts the step from a freshly parsed circuit, so independent
+  configurations of one analysis can share a request (one job, not one per
+  configuration). A non-boolean value is refused by name.
+  - Isolation contract: a reset step is fully determined by the corner's
+    `supply_v` plus its own `alter`. Earlier steps' `alter`s and solver state
+    do not carry in.
+  - ngspice `reset` reverts every `alter` and drops the saved set, so the deck
+    re-emits, in order: `reset`, `save all` (under the same condition as the
+    corner prefix), the corner's `supply_v` `alter`s, then the step's own
+    `alter`s.
+  - Earlier steps' plots stay readable, so `<step>.<name>` references and
+    derived measurements across a reset step keep working.
+  - `reset: true` on the first step is accepted and has no effect on results.
+  - Decks without any `reset` are unchanged. Like any new request field it
+    needs a runner with a matching `klt` version on the `remote`/`batch`
+    backends.
 - **Step measurements** use the same two forms as the top level, and each
   is evaluated against **that step's own solve**:
   - `expr`: any ngspice expression reducing to one real scalar. It may also
@@ -4431,7 +4451,7 @@ the *response* echoes back.
 | `monte_carlo.quantiles`  | array\<number\>   | Percentiles in `[0, 100]` reported per measurement. Defaults to `[5, 50, 95]`. See "Monte Carlo statistics" above.                                                      |
 | `monte_carlo.k_sigma`    | number            | Run-wide sigma multiple `k` for the `mean ± k*stddev` limit-window check. Omit for no window check. Must be a non-negative number.                                      |
 | `analysis`               | object            | `kind` (e.g. `"op"`, `"dc"`, `"ac"`, `"tran"`) and `args`, the engine-syntax analysis-card arguments. One analysis per corner. `"op"` is a valid `kind`, but see `measurements[]` below — it cannot be paired with a `.meas op` card; measure an operating-point quantity with `measurements[].expr` instead. Required unless the request declares `analysis_steps` instead; declaring both is an application error (exit 1). |
-| `analysis_steps[]`       | array\<object\>   | Issue #2482. Additive alternative to `analysis`: an ordered, non-empty sequence of named solves run inside each corner's one deck — each step `{name, analysis: {kind, args}, alter?, measurements?}`. With it, the top-level `measurements[]` are **derived** `expr`s over `<step>.<measurement>` results. ngspice only (refused for `engine: "xyce"`); refuses `options.waveforms`/`--plot`. See "Several solves per corner (`analysis_steps[]`)" above for the full rules. |
+| `analysis_steps[]`       | array\<object\>   | Issue #2482. Additive alternative to `analysis`: an ordered, non-empty sequence of named solves run inside each corner's one deck — each step `{name, analysis: {kind, args}, alter?, reset?, measurements?}`. With it, the top-level `measurements[]` are **derived** `expr`s over `<step>.<measurement>` results. ngspice only (refused for `engine: "xyce"`); refuses `options.waveforms`/`--plot`. See "Several solves per corner (`analysis_steps[]`)" above for the full rules. |
 | `measurements[]`         | array\<object\>   | `name` (stable response key) plus **exactly one** of `spice` (a verbatim `.meas` card), `expr` (issue #2533 — a single-line ngspice expression evaluated after the analysis inside `klt sim`'s own `.control` block; see "Measurements that are not `.meas` cards" above), `crossings` (issue #2868 — `{signal, level, edge?, from?, to?, max?}`, a threshold-crossing time series, `tran` only; see "Threshold-crossing time series" above), or `cycle_mean` (issue #2947 — `{signal, align, level, cycles, edge?, from?}`, a time-weighted mean over whole reference cycles, `tran` only; see "Cycle-aligned mean" above), plus optional `unit`, `limits` (`min`/`max`, either optional), `k_sigma` (per-measurement override of `monte_carlo.k_sigma`), and `plausible_range` (issue #2493 — `min`/`max`, either optional but at least one required; per-measurement plausibility bound, unscoped by `unit`; overrides `options.node_voltage_bounds` when both apply). No `limits` -> reported, never fails; no `plausible_range` (and no applicable `options.node_voltage_bounds`) -> plausibility check never runs, exactly as before this issue. Declaring both `spice` and `expr`, or neither, is an application error (exit 1). `spice`'s declared analysis type must be one ngspice's own `.MEASURE` implements (`dc`/`ac`/`tran`/`sp`) — there is no `.MEASURE OP`; a `.meas op` card is rejected up front (`SimError`), regardless of the request's own `analysis.kind`. `expr` must reduce to a single real scalar, must be one line, must have a name matching `[A-Za-z_][A-Za-z0-9_]*` unique across `measurements[]`, and is refused for `engine: "xyce"`. |
 | `options.node_voltage_bounds` | object       | Issue #2493. Run-wide plausibility default (`min`/`max`, either optional but at least one required) — see "Plausibility bounds" above. **Voltage-scoped**: only auto-applies to a measurement declaring `unit: "V"` that has no own `plausible_range`. Omit for no default (today's behaviour, unchanged). |
 | `options.timeout_s`      | number            | Per-corner wall-clock budget. Defaults to `120`. Exceeding it kills the process and yields an `error`-status corner.                                                    |
