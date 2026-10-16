@@ -176,22 +176,6 @@ def validate_transfer_context(
         seen.add(key)
 
 
-def refuse_offhost_backend(
-    measurements_spec: list[dict[str, Any]], backend: str
-) -> None:
-    """Transfer extraction reads a corner-local rawfile that off-host workers
-    do not yet return (tracked by #2924): refuse before anything is staged."""
-    declared = transfer_measurements(measurements_spec)
-    if declared and backend in ("remote", "batch"):
-        raise _error(
-            f"measurements[].transfer (measurement '{declared[0]['name']}') "
-            f"is not yet supported for backend {backend!r}: the off-host "
-            "worker does not return the AC rawfile it is computed from "
-            "(tracked in #2924). Run it with backend 'local' or "
-            "'local-parallel' (a single corner may use `--backend local`)"
-        )
-
-
 # --------------------------------------------------------------------------- #
 # Deck emission
 # --------------------------------------------------------------------------- #

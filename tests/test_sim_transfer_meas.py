@@ -19,7 +19,7 @@ import pytest
 
 from helpers.subprocess_fakes import fake_completed
 from klayout_tools import _paths as paths_module
-from klayout_tools import sim, sim_raw, sim_transfer_meas
+from klayout_tools import sim, sim_batch, sim_raw, sim_transfer_meas
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
 
@@ -132,32 +132,52 @@ def test_refused_for_xyce(tmp_path):
         sim.run_sim(str(request))
 
 
+def _stub_offhost_backends(monkeypatch, reached: list[str]) -> None:
+    """Replace every off-host entry point with a recorder, and make any
+    attempt to shell out to the fleet tooling fail the test: these tests must
+    never submit a job or launch an instance."""
+
+    def _stop(name):
+        def _fn(*_a, **_k):
+            reached.append(name)
+            raise sim.SimError("reached backend")
+
+        return _fn
+
+    for name in ("remote", "batch"):
+        monkeypatch.setitem(sim._BACKENDS, name, _stop(name))
+    monkeypatch.setattr(sim, "_run_remote_fleet", _stop("remote"))
+    monkeypatch.setattr(sim, "_run_batch_fleet", _stop("batch"))
+    monkeypatch.setattr(
+        sim_batch,
+        "_run_subprocess",
+        lambda *a, **k: pytest.fail("test tried to reach the batch fleet"),
+    )
+    monkeypatch.delenv("KLT_BATCH_PROVISION_SCRIPT", raising=False)
+
+
 @pytest.mark.parametrize("backend", ["batch", "remote"])
-def test_offhost_backends_are_refused_before_launch(tmp_path, monkeypatch, backend):
+def test_offhost_backends_are_no_longer_refused_locally(tmp_path, monkeypatch, backend):
+    """Issue #2924: the temporary local-only refusal is gone; the request
+    reaches the backend (whose mandatory worker gate decides)."""
+    reached: list[str] = []
+    _stub_offhost_backends(monkeypatch, reached)
     request = _request(tmp_path, [_DECL], backend=backend)
-
-    def boom(*_a, **_k):
-        raise AssertionError("must not launch or provision")
-
-    monkeypatch.setattr(sim.subprocess, "run", boom)
-    monkeypatch.setattr(sim, "_run_batch", boom, raising=False)
-    monkeypatch.setattr(sim, "_run_remote", boom, raising=False)
-    with pytest.raises(
-        sim.SimError, match=f"not yet supported for backend '{backend}'"
-    ):
+    with pytest.raises(sim.SimError, match="reached backend"):
         sim.run_sim(str(request))
+    assert reached == [backend]
 
 
-def test_host_default_batch_multi_corner_is_refused_not_run_locally(
+def test_host_default_batch_multi_corner_reaches_the_batch_backend(
     tmp_path, monkeypatch
 ):
+    reached: list[str] = []
+    _stub_offhost_backends(monkeypatch, reached)
     monkeypatch.setenv("KLT_SIM_BACKEND", "batch")
     request = _request(tmp_path, [_DECL], corners={"temperature_c": [-40, 27, 125]})
-    monkeypatch.setattr(
-        sim.subprocess, "run", lambda *a, **k: pytest.fail("launched locally")
-    )
-    with pytest.raises(sim.SimError, match="not yet supported for backend 'batch'"):
+    with pytest.raises(sim.SimError, match="reached backend"):
         sim.run_sim(str(request))
+    assert reached == ["batch"]
 
 
 # --------------------------------------------------------------------------- #

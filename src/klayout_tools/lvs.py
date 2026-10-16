@@ -318,6 +318,13 @@ CATEGORY_DEVICE_COMBINE_INCOMPLETE = "device.combine_incomplete"
 #:
 #: See `_correct_combine_parameters`.
 CATEGORY_DEVICE_COMBINE_PARAMETER_CORRECTED = "device.combine_parameter_corrected"
+#: Issue #3017: `options.combine_devices` folded a pure series chain of N>1
+#: resistor primitives of a class whose deck row has a nonzero
+#: `fixed_offset_ohm`, and the deferred correction (#559) charged that offset
+#: once for the folded device -- so `(N-1) * fixed_offset_ohm` the drawn
+#: chain physically carries was absorbed by the fold. Always `severity:
+#: "warning"`. See `_series_fold_offset_absorbed_warnings`.
+CATEGORY_DEVICE_SERIES_FOLD_OFFSET_ABSORBED = "device.series_fold_offset_absorbed"
 CATEGORY_PIN_UNMATCHED = "pin.unmatched"
 #: Issue #2845: `options.strict_top_level_pin_count` found the two compared
 #: top circuits declaring a different number of pins. Always `severity:
@@ -377,6 +384,15 @@ CATEGORY_TOPOLOGY_REFERENCE_PORT_ALIAS_JOINED = "topology.reference_port_alias_j
 #: reported as `hints.rejected` (carrying `details.anchored_top_level_pin`),
 #: exactly as a hand-written `hints.same_nets` entry would be.
 CATEGORY_TOPOLOGY_TOP_LEVEL_PINS_ANCHORED = "topology.top_level_pins_anchored"
+
+#: Issue #3014: the single ``severity: "warning"`` disclosure a run emits when
+#: it applied any ``hints.constant_nets`` binding -- the caller's explicit
+#: statement of which layout node carries logic-0 / logic-1. Distinct from
+#: :data:`CATEGORY_TOPOLOGY_TOP_LEVEL_PINS_ANCHORED`: those anchors are
+#: inferred from pin names, these are declared by the caller. A binding the
+#: comparer refuses is reported as `hints.rejected` carrying
+#: `details.declared_constant_net`.
+CATEGORY_HINTS_CONSTANT_NETS_DECLARED = "hints.constant_nets_declared"
 #: Issue #2653: `hints.short_nets` resolved a mask-option (metal-option/
 #: probe-pad/e-fuse trim) reference's behavioural option construct to one
 #: concrete drawn state before comparing -- every reference net group the
@@ -1743,6 +1759,16 @@ def run_lvs(request: str) -> dict[str, Any]:
             # would have produced. Skipping it here would leave the degraded
             # run reporting under-valued resistances.
             apply_resistor_fixed_offset_corrections(layout_netlist, layout_deck)
+            # Issue #3017: disclose the (N-1) head/end terms the fold above
+            # absorbed (a no-op after a symmetric degrade).
+            combine_warnings.extend(
+                _series_fold_offset_absorbed_warnings(
+                    layout_snapshot,
+                    layout_netlist,
+                    layout_deck,
+                    combine_incomplete=combine_incomplete,
+                )
+            )
 
     bulk_warnings: list[dict[str, Any]] = []
     short_nets_warnings: list[dict[str, Any]] = []
@@ -1786,6 +1812,10 @@ def run_lvs(request: str) -> dict[str, Any]:
     # the other request-side disclosures further down.
     anchored_pins: list[_TopLevelPinAnchor] = []
     anchor_warnings: list[dict[str, Any]] = []
+    # Issue #3014: the caller's explicit `hints.constant_nets` bindings; same
+    # roles as `anchored_pins`/`anchor_warnings` above.
+    constant_bindings: list[_ConstantNetBinding] = []
+    constant_warnings: list[dict[str, Any]] = []
 
     if engine == "klayout":
         # Issue #2653: resolve a mask-option (metal-option/probe-pad/e-fuse
@@ -1883,12 +1913,22 @@ def run_lvs(request: str) -> dict[str, Any]:
         # `compare()` for the same reason `same_nets` itself must be: the
         # assertions are comparer state read during the compare, not netlist
         # state.
+        # Issue #3014: applied after `_apply_hints` (a hand-written
+        # `hints.same_nets` pair stays the authority on the nets it names) and
+        # before the pin anchors, which then leave a bound net alone.
+        constant_bindings, constant_warnings = _apply_constant_nets(
+            comparer,
+            request.get("hints") or {},
+            layout_circuit,
+            reference_circuit,
+            declared=same_nets_hints,
+        )
         anchored_pins, anchor_warnings = _apply_top_level_pin_anchors(
             comparer,
             layout_circuit,
             reference_circuit,
             enabled=anchor_top_level_pins,
-            declared=same_nets_hints,
+            declared=[*same_nets_hints, *_constant_binding_pairs(constant_bindings)],
         )
 
         # `logger` is already bound via the `NetlistComparer(logger)` constructor
@@ -1935,12 +1975,24 @@ def run_lvs(request: str) -> dict[str, Any]:
                 # state, so the second pass would otherwise compare on
                 # topology alone and could reach a `"match"` the first,
                 # anchored pass had already refused.
+                # Issue #3014: bindings are comparer state too, so they are
+                # re-applied on the fresh comparer exactly like the hints.
+                constant_bindings, constant_warnings = _apply_constant_nets(
+                    comparer,
+                    request.get("hints") or {},
+                    layout_circuit,
+                    reference_circuit,
+                    declared=same_nets_hints,
+                )
                 anchored_pins, anchor_warnings = _apply_top_level_pin_anchors(
                     comparer,
                     layout_circuit,
                     reference_circuit,
                     enabled=anchor_top_level_pins,
-                    declared=same_nets_hints,
+                    declared=[
+                        *same_nets_hints,
+                        *_constant_binding_pairs(constant_bindings),
+                    ],
                 )
                 compare_result = comparer.compare(layout_netlist, reference_netlist)
                 if compare_result:
@@ -1958,6 +2010,9 @@ def run_lvs(request: str) -> dict[str, Any]:
                 (anchor.layout_net, anchor.reference_net, anchor.pin)
                 for anchor in anchored_pins
             ],
+            # Issue #3014: a refused constant binding is a `hints.rejected`
+            # finding attributed through `details.declared_constant_net`.
+            constant_bindings=constant_bindings,
             excluded_parameters=excluded_parameters,
         )
         if not compare_result and not mismatches:
@@ -2228,6 +2283,9 @@ def run_lvs(request: str) -> dict[str, Any]:
     # no-op) for the same `run_lvs`-complexity reason, see
     # `scripts/check_complexity_baseline.py`.
     mismatches.extend(anchor_warnings)
+    # Issue #3014: same rationale -- a request-side `hints.constant_nets`
+    # disclosure (empty list is a no-op); a warning never changes `status`.
+    mismatches.extend(constant_warnings)
     # Issue #2813: `options.finfet_bulk` disclosure (empty list is a no-op).
     mismatches.extend(
         bulk_disclosures(finfet_bulk_records, CATEGORY_DEVICE_FINFET_BULK_TIED)
@@ -2566,6 +2624,10 @@ def run_lvs(request: str) -> dict[str, Any]:
         # always-present-but-nullable convention for an optional dict-shaped
         # echo -- never a spuriously present empty `{}`.
         "hints_applied": (equivalent_pins_applied if equivalent_pins_applied else None),
+        # Issue #3014: the `hints.constant_nets` bindings applied
+        # (`{constant: layout net}`), `null` when none -- the echo `--rerun`
+        # replays, like `hints_applied` above.
+        "constant_nets_applied": _constant_nets_echo(constant_bindings),
         "status": status,
         # Issue #1952: the power/ground half of a `reference.form:
         # "gate-level-verilog"` compare, reported as its own verdict beside
@@ -2988,6 +3050,9 @@ def _reconstruct_lvs_request(committed: dict[str, Any]) -> dict[str, Any]:
     options.update(finfet_bulk_replay_options(echoed))
     if options:
         request["options"] = options
+    # Issue #3014: replay the applied `hints.constant_nets` bindings; other
+    # hints are not echoed and stay best-effort (see the docstring).
+    request.update(_constant_nets_replay_hints(committed))
     return request
 
 
@@ -3040,6 +3105,15 @@ def _reference_conversion_replay(committed: dict[str, Any]) -> dict[str, Any]:
     if isinstance(echoed.get("device_map"), dict):
         spec["device_map"] = dict(echoed["device_map"])
     return spec
+
+
+def _constant_nets_replay_hints(committed: dict[str, Any]) -> dict[str, Any]:
+    """``{"hints": {"constant_nets": {...}}}`` when the committed report
+    echoed applied bindings, else ``{}`` (issue #3014)."""
+    applied = committed.get("constant_nets_applied")
+    if isinstance(applied, dict) and applied:
+        return {"hints": {"constant_nets": dict(applied)}}
+    return {}
 
 
 def _anchor_top_level_pins_replay_options(echoed: dict[str, Any]) -> dict[str, Any]:
@@ -5545,6 +5619,145 @@ def _correct_combine_parameters(
     )
 
 
+def _series_chain_lengths(pre_circuit: Any, class_name: str, interior: set[str]):
+    """Map ``(net_a, net_b)`` (sorted expanded net names) to the lengths of
+    every pure series chain of ``class_name`` devices in `pre_circuit`
+    running between those two non-interior nets through `interior` nets
+    only (a lone device between two non-interior nets is a chain of 1)."""
+    edges: dict[str, list[tuple[Any, str]]] = {}
+    for device in pre_circuit.each_device():
+        if device.device_class().name != class_name:
+            continue
+        net_a, net_b = device.net_for_terminal(0), device.net_for_terminal(1)
+        if net_a is None or net_b is None:
+            continue
+        name_a, name_b = net_a.expanded_name(), net_b.expanded_name()
+        edges.setdefault(name_a, []).append((device, name_b))
+        edges.setdefault(name_b, []).append((device, name_a))
+
+    chains: dict[tuple[str, str], list[int]] = {}
+    for start, incident in edges.items():
+        if start in interior:
+            continue
+        for first_device, first_next in incident:
+            length, previous, here = 1, first_device, first_next
+            while here in interior:
+                onward = [e for e in edges.get(here, []) if e[0] is not previous]
+                if len(onward) != 1:
+                    break  # a branch or dead end, not a pure series chain
+                previous, here = onward[0]
+                length += 1
+            else:
+                key = (min(start, here), max(start, here))
+                # Each chain is walked from both ends; keep one direction.
+                if start <= here:
+                    chains.setdefault(key, []).append(length)
+    return chains
+
+
+def _resistor_head_term_ohm(device: Any, fixed_offset: float, end_term: float) -> float:
+    """``fixed_offset_ohm + end_term_ohm_um / W`` for one resistor `device`
+    (the head term the #559 correction charges once; ``end_term_ohm_um`` is
+    skipped when the class has no usable ``W``, as the correction does)."""
+    width = device.parameter("W") if end_term else None
+    return fixed_offset + (end_term / width if width else 0.0)
+
+
+def _series_fold_offset_absorbed_warnings(
+    pre_combine_netlist: Any,
+    netlist: Any,
+    deck: Any,
+    *,
+    combine_incomplete: bool = False,
+) -> list[dict[str, Any]]:
+    """One ``severity: "warning"``
+    :data:`CATEGORY_DEVICE_SERIES_FOLD_OFFSET_ABSORBED` entry per post-combine
+    resistor that is a fold of N>1 series primitives of a class with a
+    nonzero ``fixed_offset_ohm`` (issue #3017).
+
+    The deferred correction (#559, ``apply_resistor_fixed_offset_corrections``)
+    charges the offset once per surviving device, so the fold absorbs
+    ``(N-1) * fixed_offset_ohm`` the drawn chain physically carries. N is
+    derived from `pre_combine_netlist` topology: the survivor's two end nets
+    are walked back through the nets the fold emptied. Only a **pure series
+    chain** is reported -- when more than one chain (or a parallel primitive)
+    joins the same two end nets, N cannot be attributed to the survivor, so no
+    entry is emitted rather than a guessed one.
+
+    Call after the correction ran, so ``fraction_of_r`` uses the final ``R``.
+    Returns ``[]`` when `combine_incomplete` (a symmetric degrade folded
+    nothing).
+    """
+    offsets = {
+        resistor.name.lower(): (resistor.fixed_offset_ohm, resistor.end_term_ohm_um)
+        for resistor in deck.resistors
+        if resistor.fixed_offset_ohm or resistor.end_term_ohm_um
+    }
+    if combine_incomplete or not offsets:
+        return []
+
+    warnings: list[dict[str, Any]] = []
+    for circuit in netlist.each_circuit():
+        pre_circuit = pre_combine_netlist.circuit_by_name(circuit.name)
+        if pre_circuit is None:
+            continue
+        post_nets = {net.expanded_name() for net in circuit.each_net()}
+        interior = {net.expanded_name() for net in pre_circuit.each_net()} - post_nets
+        if not interior:
+            continue
+        chain_cache: dict[str, Any] = {}
+        for device in circuit.each_device():
+            device_class = device.device_class()
+            terms = offsets.get(device_class.name.lower())
+            if terms is None:
+                continue
+            fixed_offset, end_term = terms
+            offset = _resistor_head_term_ohm(device, fixed_offset, end_term)
+            net_a, net_b = device.net_for_terminal(0), device.net_for_terminal(1)
+            if net_a is None or net_b is None:
+                continue
+            if device_class.name not in chain_cache:
+                chain_cache[device_class.name] = _series_chain_lengths(
+                    pre_circuit, device_class.name, interior
+                )
+            name_a, name_b = net_a.expanded_name(), net_b.expanded_name()
+            key = (min(name_a, name_b), max(name_a, name_b))
+            lengths = chain_cache[device_class.name].get(key, [])
+            if len(lengths) != 1 or lengths[0] < 2:
+                continue
+            folded = lengths[0]
+            absorbed = (folded - 1) * offset
+            r_final = device.parameter("R")
+            fraction = absorbed / r_final if r_final else None
+            warnings.append(
+                _mismatch(
+                    CATEGORY_DEVICE_SERIES_FOLD_OFFSET_ABSORBED,
+                    "warning",
+                    f"options.combine_devices folded {folded} series "
+                    f"{device_class.name} primitives in circuit "
+                    f"{circuit.name!r} into one device ({device.name or '<unnamed>'}) "
+                    f"and charged the head term ({offset!r} ohm: fixed_offset_ohm "
+                    f"+ end_term_ohm_um / W) once, so {absorbed!r} ohm "
+                    "((N-1) * head term) the drawn chain "
+                    "physically carries was not charged to the compare "
+                    "(see docs/cli/lvs.md, "
+                    "'device.series_fold_offset_absorbed')",
+                    "layout",
+                    details={
+                        "circuit": circuit.name,
+                        "device": device.name or None,
+                        "class": device_class.name,
+                        "folded_primitives": folded,
+                        "fixed_offset_ohm": fixed_offset,
+                        "end_term_ohm": offset - fixed_offset,
+                        "absorbed_offset_ohm": absorbed,
+                        "fraction_of_r": fraction,
+                    },
+                )
+            )
+    return warnings
+
+
 def _flatten_netlist_safely(netlist: kdb.Netlist, side: str) -> dict[str, Any] | None:
     """Call ``netlist.flatten()``, in-process, on ``side``'s netlist (issue
     #1085's ``options.flatten_reference``/``options.flatten_layout``).
@@ -5785,6 +5998,152 @@ def _apply_hints(
         equivalent_pins_applied[subcircuit_name] = applied_groups
 
     return same_nets_declared, equivalent_pins_applied
+
+
+# --------------------------------------------------------------------------- #
+# Constant-net binding: hints.constant_nets (issue #3014)
+# --------------------------------------------------------------------------- #
+
+#: The reference-side constant nets a ``gate-level-verilog`` conversion can
+#: carry (`verilog_netlist._CONST_NET_NAMES`) -- the only legal
+#: ``hints.constant_nets`` keys.
+_CONSTANT_NET_NAMES = ("__CONST0__", "__CONST1__")
+
+
+class _ConstantNetBinding(NamedTuple):
+    """One ``hints.constant_nets`` entry resolved to nets (issue #3014).
+
+    ``layout_net``/``reference_net`` are ``Net.expanded_name()`` values, the
+    spelling :func:`_apply_hints` records its declared pairs under;
+    ``constant`` is the reference constant's name as the caller wrote it.
+    """
+
+    constant: str
+    layout_net: str
+    reference_net: str
+
+
+def _constant_binding_pairs(
+    bindings: Sequence[_ConstantNetBinding],
+) -> list[tuple[str, str]]:
+    return [(b.layout_net, b.reference_net) for b in bindings]
+
+
+def _constant_nets_echo(
+    bindings: Sequence[_ConstantNetBinding],
+) -> dict[str, str] | None:
+    """``{constant: layout net}`` for the applied bindings, else ``None``."""
+    return {b.constant: b.layout_net for b in bindings} or None
+
+
+def _parse_constant_nets(hints: Mapping[str, Any]) -> dict[str, str]:
+    spec = hints.get("constant_nets")
+    if spec is None:
+        return {}
+    if not isinstance(spec, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in spec.items()
+    ):
+        raise LvsError(
+            "hints.constant_nets must be a JSON object mapping a reference "
+            "constant net name ('__CONST0__'/'__CONST1__') to a layout net name"
+        )
+    return dict(spec)
+
+
+def _apply_constant_nets(
+    comparer: Any,
+    hints: Mapping[str, Any],
+    layout_circuit: Any,
+    reference_circuit: Any,
+    *,
+    declared: Sequence[tuple[str, str]],
+) -> tuple[list[_ConstantNetBinding], list[dict[str, Any]]]:
+    """Bind each ``hints.constant_nets`` reference constant to the layout net
+    the caller says carries it (issue #3014), returning ``(bindings,
+    disclosure_warnings)``.
+
+    **Why it exists.** Which layout node is logic-0 and which is logic-1 is
+    net *meaning*, not topology: two tie bits of a black-box macro are
+    topologically interchangeable, so a swap compares clean (#2692/#2704).
+    Only the caller knows the meaning. This is sugar over the mechanism
+    ``hints.same_nets`` exposes -- ``NetlistComparer.same_nets(...,
+    must_match=True)`` -- plus validation and attribution; nothing is inferred.
+
+    Every request error is raised as :class:`LvsError` here, before
+    ``compare()`` runs: a non-object value; a key that is not a constant the
+    reference actually carries; a layout net that does not exist; two
+    constants bound to one layout net; or a constant (or its layout net) also
+    named by a ``hints.same_nets`` pair in ``declared`` (ambiguous authority).
+
+    Comparer state, not netlist state: call it on every fresh comparer.
+    Returns ``([], [])`` when the hint is omitted.
+    """
+    spec = _parse_constant_nets(hints)
+    if not spec:
+        return [], []
+    spoken_for = {name for pair in declared for name in pair}
+    bound_layout: dict[str, str] = {}
+    bindings: list[_ConstantNetBinding] = []
+    for constant, layout_name in spec.items():
+        reference_net = (
+            reference_circuit.net_by_name(constant)
+            if constant in _CONSTANT_NET_NAMES
+            else None
+        )
+        if reference_net is None:
+            raise LvsError(
+                f"hints.constant_nets: '{constant}' is not a constant net the "
+                "reference carries (expected '__CONST0__'/'__CONST1__' present "
+                "on the reference top)"
+            )
+        layout_net = layout_circuit.net_by_name(layout_name)
+        if layout_net is None:
+            raise LvsError(f"hints.constant_nets: layout net '{layout_name}' not found")
+        if layout_name in bound_layout:
+            raise LvsError(
+                f"hints.constant_nets: '{bound_layout[layout_name]}' and "
+                f"'{constant}' are both bound to layout net '{layout_name}'"
+            )
+        bound_layout[layout_name] = constant
+        layout_expanded = layout_net.expanded_name()
+        reference_expanded = reference_net.expanded_name()
+        if layout_expanded in spoken_for or reference_expanded in spoken_for:
+            raise LvsError(
+                f"hints.constant_nets: '{constant}' or layout net "
+                f"'{layout_name}' is also named by a hints.same_nets pair "
+                "(ambiguous authority) -- declare it in one place"
+            )
+        bindings.append(
+            _ConstantNetBinding(constant, layout_expanded, reference_expanded)
+        )
+    for binding in bindings:
+        comparer.same_nets(
+            layout_circuit,
+            reference_circuit,
+            layout_circuit.net_by_name(binding.layout_net),
+            reference_circuit.net_by_name(binding.reference_net),
+            True,
+        )
+    return bindings, [_constant_nets_disclosure(bindings)]
+
+
+def _constant_nets_disclosure(
+    bindings: Sequence[_ConstantNetBinding],
+) -> dict[str, Any]:
+    return _mismatch(
+        CATEGORY_HINTS_CONSTANT_NETS_DECLARED,
+        "warning",
+        f"{len(bindings)} reference constant net(s) were bound to the layout "
+        "node(s) the caller declared (hints.constant_nets): each layout net "
+        "is asserted to be the node that carries that logic constant, which "
+        "the comparer's topology-only pairing does not otherwise require. "
+        'Nothing was inferred -- see docs/cli/lvs.md, "hints.constant_nets"',
+        "both",
+        details={
+            "constant_nets": {b.constant: b.layout_net for b in bindings},
+            "binding_count": len(bindings),
+        },
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -8874,9 +9233,9 @@ def _power_pins_derivation(
         # Issue #2707: multi-library derivation. `reason` names each library
         # that could not be corroborated on its own.
         weak = [entry for entry in libraries if not entry["corroborated"]]
-        reason = None
+        lib_reason = None
         if weak:
-            reason = (
+            lib_reason = (
                 "the power/ground pin universe is derived per library "
                 "(union of each library's own intersection), and "
                 + "; ".join(
@@ -8897,7 +9256,7 @@ def _power_pins_derivation(
             "masters": list(masters),
             "master_count": len(masters),
             "corroborated": corroborated,
-            "reason": reason,
+            "reason": lib_reason,
             "libraries": libraries,
         }
     reason: str | None = None

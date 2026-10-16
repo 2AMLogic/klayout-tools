@@ -559,3 +559,99 @@ def test_cli_place_and_route_contention_is_exit_1_empty_stdout(
     holder = holder_factory(tmp_path / ".klt" / "place-and-route")
     assert main(["place-and-route", str(request), "--format", fmt]) == 1
     _assert_locked_envelope(capsys, "place-and-route", fmt, holder.proc.pid)
+
+
+# --------------------------------------------------------------------------- #
+# Inherited ownership for a child of ``klt pex --measure-command`` (#3291)
+# --------------------------------------------------------------------------- #
+
+_CHILD = textwrap.dedent(
+    """
+    import sys
+    from klayout_tools import output_lock
+
+    try:
+        with output_lock.hold_output_dir(sys.argv[1]):
+            print("OK")
+    except output_lock.OutputDirLockedError as exc:
+        print("LOCKED " + exc.relation)
+    """
+)
+
+
+def _child_result(target: Path, inherit: Path | None) -> str:
+    env = dict(os.environ)
+    env.pop(output_lock.INHERIT_ENV, None)
+    if inherit is not None:
+        env[output_lock.INHERIT_ENV] = str(inherit)
+    done = subprocess.run(
+        [sys.executable, "-c", _CHILD, str(target)],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+    return done.stdout.strip()
+
+
+def test_child_inherits_ownership_at_and_under_marked_root(tmp_path, holder_factory):
+    root = tmp_path / "out"
+    marked = root / "measure" / "schematic"
+    marked.mkdir(parents=True)
+    holder_factory(root)
+
+    assert _child_result(marked / ".klt" / "sim", marked) == "OK"
+    assert _child_result(marked, marked) == "OK"
+
+
+def test_child_without_marker_is_still_refused(tmp_path, holder_factory):
+    root = tmp_path / "out"
+    marked = root / "measure" / "schematic"
+    marked.mkdir(parents=True)
+    holder_factory(root)
+
+    assert _child_result(marked / ".klt" / "sim", None) == "LOCKED ancestor"
+
+
+def test_inheritance_never_covers_ancestor_sibling_or_unrelated(
+    tmp_path, holder_factory
+):
+    root = tmp_path / "out"
+    marked = root / "measure" / "schematic"
+    marked.mkdir(parents=True)
+    holder_factory(root)
+
+    assert _child_result(root, marked) == "LOCKED same"
+    assert _child_result(root / "measure" / "extracted", marked) == "LOCKED ancestor"
+    # An unrelated marker path covers nothing under the held root.
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    assert _child_result(marked / "x", other) == "LOCKED ancestor"
+
+
+def test_inheritance_resolves_symlink_alias_of_marked_root(tmp_path, holder_factory):
+    root = tmp_path / "out"
+    marked = root / "measure" / "schematic"
+    marked.mkdir(parents=True)
+    alias = tmp_path / "alias"
+    alias.symlink_to(marked, target_is_directory=True)
+    holder_factory(root)
+
+    assert _child_result(alias / "sim", marked) == "OK"
+    assert _child_result(marked / "sim", alias) == "OK"
+
+
+def test_relative_marker_is_ignored(tmp_path, holder_factory):
+    root = tmp_path / "out"
+    root.mkdir()
+    holder_factory(root)
+    env = dict(os.environ, **{output_lock.INHERIT_ENV: "out"})
+    done = subprocess.run(
+        [sys.executable, "-c", _CHILD, str(root)],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=tmp_path,
+        check=True,
+    )
+    assert done.stdout.strip() == "LOCKED same"

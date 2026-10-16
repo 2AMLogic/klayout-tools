@@ -833,6 +833,7 @@ def _build_mismatches(
     *,
     same_nets_hints: list[tuple[str, str]] | None = None,
     anchored_pins: Sequence[tuple[str, str, str]] | None = None,
+    constant_bindings: Sequence[tuple[str, str, str]] | None = None,
     excluded_parameters: ExcludedParameters | None = None,
 ) -> list[dict[str, Any]]:
     from .lvs import (
@@ -863,7 +864,8 @@ def _build_mismatches(
     # `same_nets(..., must_match=True)` assertions too, just ones this module
     # declared on the caller's behalf rather than ones the request spelled out.
     hint_outcomes = _same_nets_hint_outcomes(
-        logger, _same_nets_assertion_pairs(same_nets_hints, anchored_pins)
+        logger,
+        _same_nets_assertion_pairs(same_nets_hints, anchored_pins, constant_bindings),
     )
 
     # Issue #1622 deliberately does NOT filter the `circuit_mismatches`/
@@ -1120,7 +1122,9 @@ def _build_mismatches(
     # was refused, and that disagreement is reported rather than silently
     # dropped -- see `_same_nets_rejections`.
     mismatches.extend(
-        _same_nets_rejections(logger, hint_outcomes, same_nets_hints, anchored_pins)
+        _same_nets_rejections(
+            logger, hint_outcomes, same_nets_hints, anchored_pins, constant_bindings
+        )
     )
 
     mismatches.sort(key=_sort_key)
@@ -1130,37 +1134,44 @@ def _build_mismatches(
 def _same_nets_assertion_pairs(
     same_nets_hints: Sequence[tuple[str, str]] | None,
     anchored_pins: Sequence[tuple[str, str, str]] | None,
+    constant_bindings: Sequence[tuple[str, str, str]] | None = None,
 ) -> list[tuple[str, str]]:
     """Every ``(layout net, reference net)`` pair this run asserted with
     ``same_nets(..., must_match=True)`` -- the request's own
-    ``hints.same_nets`` pairs (issue #499) followed by the automatic
-    top-level-pin anchors (issue #2692), whose third element (the pin name
-    that licensed the anchor) is dropped here."""
+    ``hints.same_nets`` pairs (issue #499), the automatic top-level-pin
+    anchors (issue #2692) and the caller's ``hints.constant_nets`` bindings
+    (issue #3014), whose third element (the pin / constant name) is dropped
+    here."""
     return [
-        *(same_nets_hints or ()),
-        *(
-            (layout_name, reference_name)
-            for layout_name, reference_name, _ in anchored_pins or ()
-        ),
+        (layout_name, reference_name)
+        for layout_name, reference_name, _ in _same_nets_assertions(
+            same_nets_hints, anchored_pins, constant_bindings
+        )
     ]
 
 
 def _same_nets_assertions(
     same_nets_hints: Sequence[tuple[str, str]] | None,
     anchored_pins: Sequence[tuple[str, str, str]] | None,
-) -> Iterator[tuple[str, str, str | None]]:
+    constant_bindings: Sequence[tuple[str, str, str]] | None = None,
+) -> Iterator[tuple[str, str, dict[str, str] | None]]:
     """:func:`_same_nets_assertion_pairs` with provenance kept: each pair
-    yielded as ``(layout net, reference net, pin name or None)``, where the
-    pin name is the top-level pin that licensed an automatic anchor (issue
-    #2692) and ``None`` marks a pair the request declared by hand."""
+    yielded as ``(layout net, reference net, details or None)``, where
+    ``details`` is ``{"anchored_top_level_pin": <pin>}`` for an automatic
+    anchor (issue #2692), ``{"declared_constant_net": <constant>}`` for a
+    ``hints.constant_nets`` binding (issue #3014; ``constant_bindings`` is
+    ``(constant, layout net, reference net)``), and ``None`` marks a pair the
+    request declared by hand."""
     for layout_name, reference_name in same_nets_hints or ():
         yield layout_name, reference_name, None
     for layout_name, reference_name, pin_name in anchored_pins or ():
-        yield layout_name, reference_name, pin_name
+        yield layout_name, reference_name, {"anchored_top_level_pin": pin_name}
+    for constant, layout_name, reference_name in constant_bindings or ():
+        yield layout_name, reference_name, {"declared_constant_net": constant}
 
 
 def _same_nets_rejection_description(
-    pin_name: str | None, refused_after_pairing: bool
+    provenance: dict[str, str] | None, refused_after_pairing: bool
 ) -> str:
     """The ``hints.rejected`` description for one refused
     ``same_nets(..., must_match=True)`` assertion.
@@ -1178,7 +1189,7 @@ def _same_nets_rejection_description(
     anchoring exists to produce (typically a permuted boundary bus) -- so it
     names the pin and points at the option rather than at the hint.
     """
-    if pin_name is None:
+    if provenance is None:
         if refused_after_pairing:
             return (
                 "hints.same_nets declared this pairing, but the comparer "
@@ -1192,6 +1203,17 @@ def _same_nets_rejection_description(
             "hints.same_nets declared this pairing, but the comparer "
             "did not confirm it as a topological match"
         )
+    if "declared_constant_net" in provenance:
+        return (
+            f"hints.constant_nets declared this layout net as the node that "
+            f"carries the reference constant '{provenance['declared_constant_net']}'"
+            ", and the comparer did not confirm that pairing. The layout net "
+            "is wired differently from the reference constant (a swapped or "
+            "mis-tied constant is the ordinary cause) -- the underlying "
+            "structural difference is reported separately in this same "
+            'mismatches[] (see docs/cli/lvs.md, "hints.constant_nets")'
+        )
+    pin_name = provenance["anchored_top_level_pin"]
     return (
         f"top-level pin '{pin_name}' is declared on both sides, so "
         "options.anchor_top_level_pins asserted that its layout net and its "
@@ -1210,6 +1232,7 @@ def _same_nets_rejections(
     hint_outcomes: _SameNetsHintOutcomes,
     same_nets_hints: Sequence[tuple[str, str]] | None,
     anchored_pins: Sequence[tuple[str, str, str]] | None,
+    constant_bindings: Sequence[tuple[str, str, str]] | None = None,
 ) -> list[dict[str, Any]]:
     """One ``hints.rejected`` entry per ``same_nets(..., must_match=True)``
     assertion the comparer did not confirm (issue #499 / #1484 / #2692).
@@ -1222,16 +1245,19 @@ def _same_nets_rejections(
     ``NetlistComparer`` log text.
 
     An automatically anchored pin's refusal (issue #2692) carries
-    ``details.anchored_top_level_pin`` naming the pin, so a reader can always
-    tell it apart from a hand-written ``hints.same_nets`` refusal (whose
-    ``details`` stays ``null``, exactly as before this distinction existed).
+    ``details.anchored_top_level_pin`` naming the pin, and a refused
+    ``hints.constant_nets`` binding (issue #3014) carries
+    ``details.declared_constant_net`` naming the constant, so a reader can
+    always tell either apart from a hand-written ``hints.same_nets`` refusal
+    (whose ``details`` stays ``null``, exactly as before this distinction
+    existed).
     """
     from .lvs import CATEGORY_HINTS_REJECTED
 
     top_scope = getattr(logger, "top_scope", None)
     entries: list[dict[str, Any]] = []
-    for layout_name, reference_name, pin_name in _same_nets_assertions(
-        same_nets_hints, anchored_pins
+    for layout_name, reference_name, provenance in _same_nets_assertions(
+        same_nets_hints, anchored_pins, constant_bindings
     ):
         pair = ((top_scope, layout_name), (top_scope, reference_name))
         if pair in hint_outcomes.confirmed:
@@ -1241,13 +1267,11 @@ def _same_nets_rejections(
                 CATEGORY_HINTS_REJECTED,
                 "error",
                 _same_nets_rejection_description(
-                    pin_name, pair in hint_outcomes.refused_after_pairing
+                    provenance, pair in hint_outcomes.refused_after_pairing
                 ),
                 "both",
                 net={"layout": layout_name, "reference": reference_name},
-                details=(
-                    None if pin_name is None else {"anchored_top_level_pin": pin_name}
-                ),
+                details=provenance,
             )
         )
     return entries
