@@ -706,7 +706,7 @@ def _fill_band(
     if (
         first is not None
         and (mag_db[first] or 0.0) > 0.0
-        and abs(g[first] or 180.0) < 45.0
+        and abs(180.0 if g[first] is None else g[first]) < 45.0
     ):
         _add(amb, REASON_LOW_FREQUENCY_ON_AXIS)
 
