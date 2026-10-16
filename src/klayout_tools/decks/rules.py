@@ -332,13 +332,78 @@ class CompCoverageSpec:
 
 
 @dataclass(frozen=True)
+class TapDistanceSpec:
+    """Descriptor for ``DrcRule(check="tap_distance")`` (issue #3607): gf180mcu's
+    ``DF.13`` / ``DF.14`` -- every active polygon must lie within
+    ``max_distance_um`` of a tap. The checked layer (``DrcRule.layer``) is
+    ``comp``; the other layers this rule reads are named here so the deck, not
+    the evaluator, owns the layer numbers.
+
+    ``well_domain="inside"`` is ``DF.13`` (PCOMP inside a well, measured to
+    NCOMP well taps by ``step_um`` octagon steps clipped to ``nwell``);
+    ``"outside"`` is ``DF.14`` (NCOMP outside any well, measured to PCOMP
+    substrate taps by a diamond candidate filter plus Euclidean separation).
+    ``voltage="lv"`` selects active touching neither ``v5_xtor`` nor
+    ``dualgate``; ``"mv"`` selects active overlapping ``dualgate``. Selection
+    is of *whole polygons* that do not interact with the tap reach region --
+    see ``docs/design/gf180mcu-comp-checks-spike.md`` sections 3, 5 and 7 for
+    the upstream derivation and the recorded discrepancies.
+
+    Every non-``comp`` layer may be absent from a stream and is then read as an
+    empty region (zero taps with active present *is* the violation).
+    Malformed descriptors raise :class:`ValueError` at construction, i.e. when
+    the deck module is imported.
+    """
+
+    well_domain: str
+    voltage: str
+    max_distance_um: float
+    nwell: tuple[int, int]
+    dnwell: tuple[int, int]
+    lvpwell: tuple[int, int]
+    nplus: tuple[int, int]
+    pplus: tuple[int, int]
+    res_mk: tuple[int, int]
+    dualgate: tuple[int, int]
+    v5_xtor: tuple[int, int]
+    step_um: float = 0.5
+
+    def __post_init__(self) -> None:
+        if self.well_domain not in ("inside", "outside"):
+            raise ValueError("well_domain must be 'inside' or 'outside'")
+        if self.voltage not in ("lv", "mv"):
+            raise ValueError("voltage must be 'lv' or 'mv'")
+        if self.max_distance_um <= 0:
+            raise ValueError("max_distance_um must be positive")
+        if self.step_um <= 0:
+            raise ValueError("step_um must be positive")
+        steps = self.max_distance_um / self.step_um
+        if abs(steps - round(steps)) > 1e-9:
+            raise ValueError("max_distance_um must be a multiple of step_um")
+
+    def layers(self) -> tuple[tuple[int, int], ...]:
+        """Every non-checked layer this spec reads, in declaration order."""
+        return (
+            self.nwell,
+            self.dnwell,
+            self.lvpwell,
+            self.nplus,
+            self.pplus,
+            self.res_mk,
+            self.dualgate,
+            self.v5_xtor,
+        )
+
+
+@dataclass(frozen=True)
 class DrcRule:
     """One rule in a DRC deck.
 
     ``layer`` and ``other_layer`` are ``(layer, datatype)`` pairs. ``check``
     selects which ``klayout.db.Region`` check primitive to run (or, for
-    ``"comp_coverage"`` -- issue #3587 -- a region rule described by
-    ``region_spec``, see :class:`CompCoverageSpec`):
+    ``"comp_coverage"`` -- issue #3587 -- or ``"tap_distance"`` -- issue
+    #3607 -- a region rule described by ``region_spec``, see
+    :class:`CompCoverageSpec` / :class:`TapDistanceSpec`):
     ``"width"`` / ``"space"`` / ``"notch"`` / ``"isolated"`` are single-layer
     checks; ``"separation"`` / ``"enclosing"`` / ``"enclosed"`` / ``"overlap"``
     are two-layer checks and require ``other_layer``; ``"area"``, ``"density"``,
@@ -713,7 +778,7 @@ class DrcRule:
     require_containment: bool = False
     other_layer_selection: str | None = None
     layer_selection: str | None = None
-    region_spec: CompCoverageSpec | None = None
+    region_spec: CompCoverageSpec | TapDistanceSpec | None = None
 
 
 class UnknownDeckError(Exception):

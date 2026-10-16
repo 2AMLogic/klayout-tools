@@ -104,6 +104,7 @@ ALLOWED_CHECKS: dict[str, tuple[str, ...]] = {
         "separation",
         "enclosed",
         "comp_coverage",
+        "tap_distance",
     ),
     # sg13g2 (issue #905/#911, Epic #711 Phase 3b): width/space rules go
     # through this manifest mechanism (14 entries); its 5 enclosing/
@@ -631,6 +632,46 @@ _DERIVED_LAYER_FIXTURES: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
             ]
         },
     ),
+    # `comp.tap_distance.{nwell,psub}.lv.1` (DF.13_LV / DF.14_LV, issue #3607):
+    # hand-authored -- a reach rule has no dbu threshold to straddle. Violate:
+    # the ZERO-TAP case (active drawn, no tap at all; upstream flags it and the
+    # generic "absent secondary layer -> skip" engine behaviour would hide it).
+    # Clean: the same active 9 um from a tap, well inside the 20 um limit.
+    # Boundary/beyond-20 um/DBU cases live in `tests/test_gf180mcu_tap_distance.py`.
+    "comp.tap_distance.nwell.lv.1": (
+        {  # violate: PCOMP inside Nwell, no NCOMP tap anywhere
+            "shapes": [
+                {"layer": [21, 0], "box": [-1000, -1000, 31000, 4000]},  # Nwell
+                {"layer": [22, 0], "box": [10000, 0, 11000, 1000]},  # Comp (PCOMP)
+                {"layer": [31, 0], "box": [9700, -300, 11300, 1300]},  # Pplus
+            ]
+        },
+        {  # clean: NCOMP tap 9 um from the PCOMP
+            "shapes": [
+                {"layer": [21, 0], "box": [-1000, -1000, 31000, 4000]},  # Nwell
+                {"layer": [22, 0], "box": [0, 0, 1000, 1000]},  # Comp (NCOMP tap)
+                {"layer": [32, 0], "box": [-300, -300, 1300, 1300]},  # Nplus
+                {"layer": [22, 0], "box": [10000, 0, 11000, 1000]},  # Comp (PCOMP)
+                {"layer": [31, 0], "box": [9700, -300, 11300, 1300]},  # Pplus
+            ]
+        },
+    ),
+    "comp.tap_distance.psub.lv.1": (
+        {  # violate: NCOMP outside any well, no PCOMP substrate tap anywhere
+            "shapes": [
+                {"layer": [22, 0], "box": [10000, 0, 11000, 1000]},  # Comp (NCOMP)
+                {"layer": [32, 0], "box": [9700, -300, 11300, 1300]},  # Nplus
+            ]
+        },
+        {  # clean: PCOMP substrate tap 9 um from the NCOMP
+            "shapes": [
+                {"layer": [22, 0], "box": [10000, 0, 11000, 1000]},  # Comp (NCOMP)
+                {"layer": [32, 0], "box": [9700, -300, 11300, 1300]},  # Nplus
+                {"layer": [22, 0], "box": [0, 0, 1000, 1000]},  # Comp (PCOMP tap)
+                {"layer": [31, 0], "box": [-300, -300, 1300, 1300]},  # Pplus
+            ]
+        },
+    ),
     # `nplus.enclosing.comp.1` (NP.5b, 160 dbu): one `Comp` box fully covered
     # by `Nplus`, with the implant extending 110 dbu (violate) / 210 dbu
     # (clean) beyond it on every side. No `Pplus`/`Poly2` is drawn, so every
@@ -827,6 +868,51 @@ def _exempt_comp_from_df12(*fixtures: dict[str, Any]) -> None:
         )
 
 
+#: gf180mcu's `DF.13_LV`/`DF.14_LV` tap-distance rules (`check="tap_distance"`,
+#: issue #3607) flag any implanted `Comp` with no tap within reach, so an
+#: implanted-`Comp` fixture authored for another rule would trip them and stop
+#: being "clean for the whole deck". `v5_xtor` is the rules' own LV exclusion
+#: marker and is read by no other rule, so drawing it over such a fixture's
+#: `Comp` removes it from their LV active region without touching the rule
+#: under test.
+_V5_XTOR_MARKER_LAYER = (112, 1)
+_IMPLANT_LAYERS = ((32, 0), (31, 0))
+
+
+def _exempt_comp_from_tap_distance(
+    rule: DrcRule, deck_rules: list[DrcRule], *fixtures: dict[str, Any]
+) -> None:
+    if rule.check == "tap_distance" or not any(
+        r.check == "tap_distance" for r in deck_rules
+    ):
+        return
+    for fixture in fixtures:
+        layers = [tuple(shape["layer"]) for shape in fixture["shapes"]]
+        if _V5_XTOR_MARKER_LAYER in layers or not any(
+            layer in layers for layer in _IMPLANT_LAYERS
+        ):
+            continue  # idempotent; unimplanted Comp is never active
+        comps = [
+            shape["box"]
+            for shape in fixture["shapes"]
+            if tuple(shape["layer"]) == _COMP_LAYER
+        ]
+        if not comps:
+            continue
+        pad = _SCHOTTKY_PAD_DBU
+        fixture["shapes"].append(
+            {
+                "layer": list(_V5_XTOR_MARKER_LAYER),
+                "box": [
+                    min(c[0] for c in comps) - pad,
+                    min(c[1] for c in comps) - pad,
+                    max(c[2] for c in comps) + pad,
+                    max(c[3] for c in comps) + pad,
+                ],
+            }
+        )
+
+
 def build_manifest(
     deck_name: str,
     deck_rules: list[DrcRule],
@@ -886,6 +972,7 @@ def build_manifest(
             r.id == _COMP_COVERAGE_RULE_ID for r in deck_rules
         ):
             _exempt_comp_from_df12(violate, clean)
+        _exempt_comp_from_tap_distance(rule, deck_rules, violate, clean)
         prior = existing.get(rule.id, {})
         manifest[rule.id] = {
             "check": rule.check,
