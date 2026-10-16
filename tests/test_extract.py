@@ -25135,6 +25135,7 @@ def test_probe_cli_flag_emits_probes_and_request_document_matches(tmp_path, caps
     assert [entry["name"] for entry in argv_report["probes"]] == ["nd", "void"]
     assert argv_report["probes"][0]["net"] == "Y"
     assert argv_report["probes"][1]["found"] is False
+    argv_report.pop("timing"), request_report.pop("timing")
     assert request_report == argv_report
 
 
