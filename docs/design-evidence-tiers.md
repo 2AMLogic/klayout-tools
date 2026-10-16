@@ -242,7 +242,11 @@ written to every block.
 5. **Full corner verification vs a ratified spec**
    - *Analog* — PVT corner-matrix simulation results covering every spec
      row at its bound corners, with per-row pass/fail and the binding
-     corner recorded.
+     corner recorded. A spec needing several testbenches cites several
+     `klt sim` envelopes, optionally naming the rows each covers and
+     declaring the full row set; the item is met only when every cited
+     envelope passes and every declared row is covered, and rows no
+     envelope can express are declared gaps that keep it unmet.
    - *Digital* — multi-corner static timing analysis (setup and hold
      across the PVT corner set) plus a bit-exact functional test suite,
      with per-corner and per-test pass/fail recorded. For the full-custom

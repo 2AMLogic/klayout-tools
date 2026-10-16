@@ -37,6 +37,8 @@ contract.
 - All other top-level fields are defined by the individual command's own
   documentation (e.g. `docs/cli/layers.md`).
 - Written to **stdout only**, as indented JSON with a trailing newline.
+  (`klt sim --report-out PATH` additionally writes the same bytes to a file,
+  gzip-compressed for a `.gz` path; stdout is unchanged.)
 
 ### Pre-1.0 caveat: value sets within an unchanged shape can grow
 
@@ -98,6 +100,14 @@ when the series was extracted (absent on every other entry and on an errored
 one) — the "new optional member, absent when not applicable" rule above.
 No `schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s
 "Threshold-crossing time series (`measurements[].crossings`)".
+
+`klt sim` also gains an additive `environment.netlist_identity` (normalised,
+comment/whitespace/path-insensitive netlist-closure hash; `null` plus
+`netlist_identity_error` when not computable) and an optional request field
+`expect_netlist_identity`: a value differing from the computed identity is
+refused before simulating (exit 1, usual error envelope) with both stamps in
+the message. No `schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s
+"`environment.netlist_identity`".
 
 This caveat is narrow: it covers a field's *value set* growing (a new enum
 member appearing), not what an existing, unchanged-type field's value
@@ -230,6 +240,16 @@ the flag was not given), and `klt lvs` gained the optional request field
 `docs/cli/extract.md`'s "Renaming promoted pins to their declared name"
 section.
 
+**A new field *next to* a string-list field is how a list's element type
+changes without breaking it.** Issue #3092: `klt deck rules`' per-rule
+`layers` stays `list[str]` (deck name, or the raw `"L/D"` string when unnamed);
+the stream layer/datatype behind each entry arrives as a new parallel
+`layer_refs` list, plus top-level `layer_table`, `ambiguous_names` and
+`unresolved`. `klt layers` gained an opt-in `--deck` that fills `name` and adds
+a `deck: {name, content_hash}` block; without it the output is byte-identical.
+No `schema_version` bump on either command. See `docs/cli/deck.md` and
+`docs/cli/layers.md`.
+
 **A new key in a documented open map, and a new member on one class of that
 map's entries, are additive.** `klt functional-verification`'s
 `environment.sdf.dropped` is documented as an open map keyed by class name,
@@ -253,6 +273,13 @@ names this explicitly for `extract`'s own schema — a **content**/
 **bookkeeping**/**tool metadata** partition every `drc`/`lvs`/`extract`
 consumer of the `--check`/`--rerun` machinery below should apply, not just
 `extract`'s.
+
+**A run-measurement object is additive and not evidence.** `klt extract`'s
+top-level `timing` object (issue #3181: per-stage wall seconds, `total_seconds`,
+`unattributed_seconds`) is new and optional-to-read; no existing field changed,
+so no `schema_version` bump. It varies run to run by nature, so `--check
+--rerun` excludes it (`VOLATILE_PROVENANCE_PATHS`). Progress lines for the same
+run go to stderr only; stdout stays the envelope.
 
 ## Requested-but-unperformed analysis
 
@@ -639,6 +666,12 @@ stability statement, concrete precedents, and drift-detection guidance, and
     stderr warning instead. Absent in the ordinary single-install case, so
     an unambiguous run's `provenance` is byte-identical to what it was
     before this field existed and a stored-report diff cannot drift on it.
+  - `compatibility` (issue #3427) — present **only** when the resolved
+    variant's `SOURCES` stamp differs from the declared open_pdks pin
+    (`klt pdk`'s `compatibility.status == "mismatch"`):
+    `{status: "mismatch", package, expected}`. Absent when the status is
+    `match`/`unknown`/`not_declared`, so a matching run's `provenance` is
+    byte-identical to before.
     Populated by `klt sim` today; the underlying detection lives in
     `klayout_tools.pdk.find_pdk` (`ambiguous_roots`) and is available to
     every verb that resolves a PDK — see `docs/cli/pdk.md`.
@@ -1161,10 +1194,12 @@ any list index.
 | `drc` | `file` | input layout, as provided by the caller |
 | `extract` | `file` | input layout, as provided by the caller |
 | `extract` | `netlist_path` | written SPICE netlist (explicit `--output`, else derived from `file`); `null` only under `--no-netlist` (issue #2850), where `netlist_sha256` is `null` too |
+| `extract` | `netlist_normalized_sha256` | additive (issue #3407): SHA-256 hex of the flat `devices[]`/`nets[]` connectivity with anonymous-net (`$N`) numbering normalized away, so it is stable across `klayout` builds where `netlist_sha256` (written-bytes hash) is not; `null` exactly when `netlist_sha256` is; no `schema_version` bump |
 | `extract` | `spef_path` | written SPEF (`--spef`), else `null` |
 | `extract` | `subcircuit.path` | written sub-circuit netlist (`--subcircuit`) |
 | `extract` | `abstracted_cells.*.lef_path` | LEF file an abstracted cell's pins came from |
 | `extract` | `pdk.root` | `{path, scope}` of the PDK install (never absolute, but host-dependent) |
+| `extract` | `timing` | run-scoped, not a path (issue #3181): wall-clock seconds for this run, differs on every run |
 
 Separately, `provenance.klt_version`, `provenance.klayout_version`, and
 `provenance.pdk.version` (`VOLATILE_PROVENANCE_PATHS`) differ across tool
@@ -1484,17 +1519,25 @@ the exit code alone is authoritative.
   | Command | `error.code` | Meaning |
   |---------|--------------|---------|
   | `sim` | `batch_no_capacity` | `--backend batch`: 2am's fleet launcher refused the job for lack of Spot capacity in every pool (after any `batch.capacity_wait_s` budget was spent). A fleet-wide, usually transient condition — retrying later is reasonable. See [docs/cli/sim.md](cli/sim.md) "Batch backend". |
+  | `sim` | `batch_concurrency_cap` | `--backend batch`: 2am's fleet launcher refused the job because the shared fleet is at `BATCH_MAX_CONCURRENT_INSTANCES` (after any `batch.capacity_wait_s` budget was spent). Transient slot contention, distinct from a Spot shortage; retrying later is reasonable. See [docs/cli/sim.md](cli/sim.md) "Batch backend". |
   | `sim` | `batch_runner_version_mismatch` | `--backend batch` under `batch.runner_version_check: "enforce"` (the default): the AMI manifest publishes a runner `klt` whose major.minor differs from this client's, for every image the request could boot. Refused once, before any upload or launch, so no report and no per-corner diagnostics exist (issue #2851). Not retryable without a matching runner image or client. A mismatch found only on the runner keeps reporting through per-corner `batch_job_failed` diagnostics with `runner_code`. See [docs/cli/sim.md](cli/sim.md) "Pre-launch check from the AMI manifest". |
   | `netlist` | `batch_no_capacity` | `--backend batch`: the fleet launcher refused the job for lack of Spot capacity. Usually transient; retrying later is reasonable. Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
+  | `sim` | `batch_runner_feature_unsupported` | `--backend batch` under `batch.runner_version_check: "enforce"`: the request uses a feature (currently `analysis_steps`) that every runner image the AMI manifest publishes predates. Refused once, before any upload or launch (issue #3249). The same code appears as `runner_code` on per-corner `batch_job_failed` diagnostics when the runner-side preflight finds it. See [docs/cli/sim.md](cli/sim.md) "Request-feature capability check". |
+  | `netlist` | `batch_concurrency_cap` | `--backend batch`: the fleet launcher refused the job because the shared fleet is at `BATCH_MAX_CONCURRENT_INSTANCES`. Usually transient; retrying later is reasonable. Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
+  | `sim` | `batch_runner_lacks_decks` | `--backend batch` with a deck-list (`decks[]`) request: the AMI manifest publishes only runner images whose `klt` predates `decks[]` support, so the request was refused once, before any upload or launch (issue #3303). Also the `error.code` of a runner-side preflight envelope (exit 87) when the runner's own `klt --version` lacks `decks[]`; `runner_version_check: "warn"` does not relax it. Not retryable without a rebuilt runner image. See [docs/cli/sim.md](cli/sim.md) "Runner support for `decks[]` on the batch backend". |
   | `netlist` | `batch_runner_version_mismatch` | `--backend batch`: the runner's `klt` version differs from this client's; the job was refused before netlisting, or before submission when the AMI manifest already publishes the mismatch (issue #2851). Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
   | `netlist` | `batch_runner_version_unknown` | `--backend batch`: the runner's `klt` version could not be read; the job was refused before netlisting. Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
   | `netlist` | `batch_poll_timeout` | `--backend batch`: the job did not finish within the client's poll budget. It may still finish on the runner; nothing was collected. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
-  | `netlist` | `batch_job_failed` | `--backend batch`: the job failed, or left no usable report or netlist. When the runner's own `klt netlist` reported an error, its message is quoted and, if that error carried an `error.code`, the runner's code is passed through in place of `batch_job_failed`. Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
+  | `netlist` | `batch_job_failed` | `--backend batch`: the job failed, or left no usable report or netlist. When the runner's own `klt netlist` reported an error, its message is quoted and, if that error carried an `error.code`, the runner's code is passed through in place of `batch_job_failed`. Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). When the runner left no klt error envelope, `error` also carries `remote_stderr_tail` (last 2 KiB of the runner's `stderr.log`, sanitized), `remote_exit_code`, `remote_state` and `harness_log` (additive; absent otherwise). |
   | `netlist` | `batch_job_timeout` | `--backend batch`: the fleet harness stopped the job at its `timeout_seconds` (`--timeout-s` plus headroom). See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
   | `netlist` | `batch_input_too_large` | `--backend batch`: the input tree's uncompressed size is above the batch cap. Raised before any archive is built or anything is uploaded. Not retryable without shrinking the tree. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
+  | `functional-verification` | `missing_optional_dependency` | The `functional-verification` extra (cocotb) is not importable in the interpreter running `klt`. The message names that interpreter and the remedy per install route: put `klayout-tools[functional-verification]` on the install spec for `uv tool install` / `pipx install` / `uvx --from`, or `uv sync --extra functional-verification` for a source checkout. See [docs/cli/functional-verification.md](cli/functional-verification.md#requirements). |
   | `extract` | `finfet_malformed_geometry` | A FinFET deck (`--deck asap7`) found device geometry it refuses to approximate (no crossing fin, clipped fin, wrong gate length, missing select, VT conflict, ...). `error.message` lists each finding with its bounding box. Not retryable: the layout must change. See [docs/cli/extract.md](cli/extract.md) "ASAP7 FinFET extraction". |
   | `extract` | `finfet_dbu_mismatch` | A FinFET deck was run on a layout whose database unit differs from the deck's; it is refused rather than rescaled. See [docs/cli/extract.md](cli/extract.md) "ASAP7 FinFET extraction". |
   | `pex` | `schematic_flatten_cycle`, `schematic_flatten_pin_count_mismatch`, `schematic_flatten_unsupported_card`, `schematic_flatten_malformed` | `--flatten-schematic` (issue #2889): the schematic DUT could not be flattened faithfully — a subcircuit instantiation cycle, an `X` call whose node count differs from the subcircuit's pin count, a card the flattener cannot rename safely, or unbalanced/duplicate `.subckt` definitions. Raised before anything simulates; no partial flatten is written. Not retryable without changing the DUT netlist. See [docs/cli/pex.md](cli/pex.md) "Flattening a hierarchical schematic DUT". |
+  | `drc` | `klayout_unavailable` | `--engine klayout` (issue #3076): the standalone `klayout` application binary is missing or could not be launched (run or `--min-klayout-version` probe) — the second opinion could not run. Exit `1`, never a verdict; not a bad-input error. See [docs/cli/drc.md](cli/drc.md) "Machine-readable failure codes". |
+  | `drc` | `klayout_version_too_old` | `--engine klayout`: the `klayout` on `PATH` is older than `--min-klayout-version`. Exit `1`; the deck is never launched. See [docs/cli/drc.md](cli/drc.md) "Machine-readable failure codes". |
+  | `drc` | `negative_control_failed` | `--engine klayout --negative-control`: the known-bad fixture produced no violations (or missed a `--negative-control-categories` entry) under the same deck, so a clean verdict cannot be trusted. See [docs/cli/drc.md](cli/drc.md) "Negative control". |
   | `pex`, `sim`, `place-and-route` | `outdir_locked` | Another cooperating `klt` run owns this run's persistent output directory (or an ancestor/descendant of it). Exit `1`, empty stdout. Transient: retry after the owner finishes. See "Output-directory ownership" below. |
   | `pex`, `sim`, `place-and-route` | `outdir_lock_unavailable` | Ownership could not be established for a reason other than contention (unwritable lock registry, no `flock` on this platform or filesystem). Not retryable without changing the environment. Exit `1`, empty stdout. |
 
@@ -1644,6 +1687,33 @@ violation (issue #2029).
   part of the contract and may change between releases without notice.
 - `json` — the stable API. Breaking a JSON field (renaming, removing, or
   retyping it) is a breaking change per CLAUDE.md; adding a field is not.
+
+## Response schemas (`docs/schemas/<verb>-response.schema.json`)
+
+A verb's success payload may ship a machine-readable JSON Schema (Draft
+2020-12) alongside its prose in `docs/cli/<verb>.md`. Today `klt layers`,
+`klt cells` and `klt stats` have one:
+[`layers-response`](schemas/layers-response.schema.json),
+[`cells-response`](schemas/cells-response.schema.json) and
+[`stats-response`](schemas/stats-response.schema.json).
+
+- **Naming.** `docs/schemas/<verb>-response.schema.json`, one file per verb.
+- **Required means always present.** Every field the verb always emits is in
+  `required`; fields that appear only under a flag (e.g. `klt layers
+  --flattened`) are declared in `properties` but not required. Nullable
+  fields are typed explicitly (`["string", "null"]`).
+- **Version pin.** The top-level `schema_version` is pinned with `const`.
+- **Extensibility.** Object boundaries keep `additionalProperties: true`, so
+  additive pre-1.0 fields stay compatible. That does not excuse leaving a
+  documented field out of `properties`.
+- **Version-bump rule.** Renaming, removing or retyping a field, or making an
+  optional field always-present, changes the shape: bump the verb's
+  `schema_version` and the schema's `const` together. Adding an optional
+  field does not bump it, but the schema must be updated to describe it.
+- **Testing.** The verb's existing `test_json_*` module loads the shipped
+  schema, runs `Draft202012Validator.check_schema` on it, validates real CLI
+  output for each option-dependent shape, and asserts that deleting a
+  required field raises `jsonschema.ValidationError`.
 
 ## Adding a new command
 
