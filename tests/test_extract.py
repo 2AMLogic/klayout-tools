@@ -13690,6 +13690,7 @@ def test_parasitics_summary_block_shape(tmp_path):
     # reference" in `docs/cli/extract.md`.
     assert para["substrate_dc_tie"] == {
         "resistance_ohm": 1e12,
+        "mode": "shunt",
         "nets": [{"net": "vsubs", "device": "Rvsubs_dctie"}],
         "node_scope": "global",
     }
@@ -17765,6 +17766,79 @@ def _make_floating_substrate_layout() -> kdb.Layout:
     return layout
 
 
+def test_substrate_tie_ohms_default_header_states_floating(tmp_path):
+    """Issue #3089: the default tie is announced in the netlist header."""
+    path = _write_gds(_make_floating_substrate_layout(), tmp_path / "floating.gds")
+    para = run_extract(
+        path, "sky130", output=str(tmp_path / "para.spice"), parasitics=True
+    )
+    text = Path(para["netlist_path"]).read_text()
+    assert "* - substrate tie: 1e+12 ohm to ground" in text
+    assert "capacitively floating in transient" in text
+
+
+def test_substrate_tie_ohms_custom_value(tmp_path):
+    """Issue #3089: a positive value is written verbatim and reported."""
+    path = _write_gds(_make_floating_substrate_layout(), tmp_path / "floating.gds")
+    para = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "para.spice"),
+        parasitics=True,
+        substrate_tie_ohms=1e-3,
+    )
+    text = Path(para["netlist_path"]).read_text()
+    assert "Rvsubs_dctie vsubs 0 0.001" in text
+    assert "* - substrate tie: 0.001 ohm to ground" in text
+    tie = para["parasitics"]["substrate_dc_tie"]
+    assert tie["resistance_ohm"] == 1e-3
+    assert tie["mode"] == "shunt"
+    assert para["parasitics"]["integrity"]["short_candidates"] == 0
+
+
+def test_substrate_tie_ohms_zero_is_hard_tie(tmp_path):
+    """Issue #3089: 0 is a hard tie, written as a legal (1 mohm) resistor."""
+    path = _write_gds(_make_floating_substrate_layout(), tmp_path / "floating.gds")
+    para = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "para.spice"),
+        parasitics=True,
+        substrate_tie_ohms=0,
+    )
+    text = Path(para["netlist_path"]).read_text()
+    assert "Rvsubs_dctie vsubs 0 0.001" in text
+    assert "hard tie to ground" in text
+    tie = para["parasitics"]["substrate_dc_tie"]
+    assert tie["mode"] == "hard"
+    assert tie["resistance_ohm"] == 1e-3
+    assert para["parasitics"]["integrity"]["short_candidates"] == 0
+
+
+@pytest.mark.parametrize("bad", [-1.0, float("nan"), float("inf")])
+def test_substrate_tie_ohms_rejects_invalid(tmp_path, bad):
+    path = _write_gds(_make_floating_substrate_layout(), tmp_path / "floating.gds")
+    with pytest.raises(ExtractError, match="--substrate-tie-ohms"):
+        run_extract(
+            path,
+            "sky130",
+            output=str(tmp_path / "x.spice"),
+            parasitics=True,
+            substrate_tie_ohms=bad,
+        )
+
+
+def test_substrate_tie_ohms_requires_parasitics(tmp_path):
+    path = _write_gds(_make_floating_substrate_layout(), tmp_path / "floating.gds")
+    with pytest.raises(ExtractError, match="--substrate-tie-ohms requires"):
+        run_extract(
+            path,
+            "sky130",
+            output=str(tmp_path / "x.spice"),
+            substrate_tie_ohms=1e3,
+        )
+
+
 def test_parasitics_writes_substrate_dc_tie_inside_subckt_body(tmp_path):
     """The structural half of issue #1263 (DC convergence) plus issue #1503
     (node scope): `--parasitics` writes one large shunt resistor from the
@@ -17804,6 +17878,7 @@ def test_parasitics_writes_substrate_dc_tie_inside_subckt_body(tmp_path):
 
     assert para["parasitics"]["substrate_dc_tie"] == {
         "resistance_ohm": 1e12,
+        "mode": "shunt",
         "nets": [{"net": "vsubs", "device": "Rvsubs_dctie"}],
         "node_scope": "global",
     }
