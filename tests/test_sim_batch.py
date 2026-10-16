@@ -6049,6 +6049,8 @@ def test_pdk_variant_check_absent_manifest_and_any_candidate_match(
     sb._validate_batch_pdk_variant(request, None)  # any candidate lists it
     with pytest.raises(sim.SimError):
         sb._validate_batch_pdk_variant(request, "us-east-1")
+
+
 def test_batch_and_remote_requests_carry_supply_waveforms(tmp_path):
     """#2902: the batch/remote worker re-runs ``run_sim`` on the pushed
     request, so the whole-request form keeps ``corners.supply_waveforms`` and
