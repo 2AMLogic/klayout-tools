@@ -1891,12 +1891,12 @@ def _enforce_published_runner_features(
     features = _request_features(request)
     images = assessment["images"]
     if not features or not images:
-        return
+        return None
     gaps = [
         _missing_runner_features(features, image["klt_version"]) for image in images
     ]
     if any(not gap for gap in gaps):  # unknown (None) or complete (empty)
-        return
+        return None
     missing = sorted({name for gap in gaps for name in gap or ()})
     mandatory = bool(_MANDATORY_RUNNER_FEATURES.intersection(missing))
     versions = ", ".join(sorted({str(image["klt_version"]) for image in images}))
