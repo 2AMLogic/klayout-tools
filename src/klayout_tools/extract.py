@@ -7776,6 +7776,11 @@ def _detect_missing_flavour_markers(
     warnings: list[str] = []
     entries: list[dict[str, Any]] = []
     for flavour in deck.mos_flavours:
+        if flavour.and_markers:
+            # A combination flavour (issue #3599) shares its base marker with
+            # a plain flavour that already reports it; a missing refining
+            # layer is a legitimate layout, not a gap.
+            continue
         if not _region(layout, top_cell, flavour.marker).is_empty():
             continue
         marker_label = f"{flavour.marker[0]}/{flavour.marker[1]}"
@@ -8884,15 +8889,33 @@ def _extract_netlist(
     # geometry is removed from `active` before the default nfet/pfet split
     # further below, so the default split is unaffected outside every
     # flavour marker -- no regression for the common (unflavoured) case.
+    # A flavour may refine its `marker` with `and_markers`/`not_markers`/
+    # `nfet_only` (issue #3599, sky130 native-Vt); all empty/False for every
+    # other flavour, so the claim test below reduces to `interacting(marker)`.
     flavour_active: list[kdb.Region] = []
     for flavour in deck.mos_flavours:
         marker_region = _region(layout, top_cell, flavour.marker)
+        and_regions = [_region(layout, top_cell, m) for m in flavour.and_markers]
+        not_regions = [_region(layout, top_cell, m) for m in flavour.not_markers]
         claimed = kdb.Region()
         if not marker_region.is_empty() and not active.is_empty():
             remaining = kdb.Region()
             for component in active.merged().each():
                 component_region = kdb.Region(component)
-                if not component_region.interacting(marker_region).is_empty():
+                if (
+                    not component_region.interacting(marker_region).is_empty()
+                    and all(
+                        not component_region.interacting(r).is_empty()
+                        for r in and_regions
+                    )
+                    and all(
+                        component_region.interacting(r).is_empty() for r in not_regions
+                    )
+                    and not (
+                        flavour.nfet_only
+                        and not component_region.interacting(nwell).is_empty()
+                    )
+                ):
                     claimed += component_region
                 else:
                     remaining += component_region

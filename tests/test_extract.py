@@ -10456,10 +10456,94 @@ def test_sky130_deck_declares_hvi_mos_flavour():
     """The sky130 extraction deck declares one `mos_flavours` entry keyed on
     `hvi` (75/20) -- the deck-data half of issue #1369."""
     deck = get_extraction_deck("sky130")
-    assert len(deck.mos_flavours) == 1
-    flavour = deck.mos_flavours[0]
+    # Issue #3599 adds the native-Vt combination flavour *before* `hvi`.
+    assert [f.flavour for f in deck.mos_flavours] == ["nvt", "hvi"]
+    flavour = deck.mos_flavours[1]
     assert flavour.marker == (75, 20)
     assert flavour.flavour == "hvi"
+    assert flavour.and_markers == ()
+    assert flavour.not_markers == ((125, 44),)
+
+
+def _sky130_flavour_layout(markers, *, pmos=False) -> kdb.Layout:
+    """One sky130 NMOS (or, with ``pmos``, the same device inside an nwell)
+    with every ``(layer, datatype)`` in ``markers`` drawn over it."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    _draw_sky130_nmos(top, layout, 0, "S", drain_label="D")
+    if pmos:
+        top.shapes(layout.layer(64, 20)).insert(kdb.Box(-1000, -1000, 3000, 2000))
+    for layer, datatype in markers:
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Box(-500, -500, 2500, 1500)
+        )
+    return layout
+
+
+def _sky130_bound_models(tmp_path, name, markers, *, pmos=False):
+    path = _write_gds(
+        _sky130_flavour_layout(markers, pmos=pmos), tmp_path / f"{name}.gds"
+    )
+    root = _make_pdk_install(tmp_path, "sky130A")
+    report = run_extract(
+        path,
+        "sky130",
+        pdk_variant="sky130A",
+        pdk_root=root,
+        output=str(tmp_path / f"{name}.spice"),
+    )
+    lines = [
+        line
+        for line in Path(report["netlist_path"]).read_text().splitlines()
+        if line and line[0] in ("M", "X")
+    ]
+    return report, lines
+
+
+def test_sky130_hvi_lvtn_binds_native_vt_nfet(tmp_path):
+    report, lines = _sky130_bound_models(tmp_path, "nvt", [(75, 20), (125, 44)])
+    assert report["device_counts"] == {"nfet": 1}
+    (line,) = lines
+    assert "sky130_fd_pr__nfet_05v0_nvt" in line
+    assert "g5v0d10v5" not in line
+
+
+def test_sky130_hvi_only_still_binds_g5v0d10v5(tmp_path):
+    _report, lines = _sky130_bound_models(tmp_path, "hvi", [(75, 20)])
+    (line,) = lines
+    assert "sky130_fd_pr__nfet_g5v0d10v5" in line
+
+
+def test_sky130_plain_nfet_binds_default_model(tmp_path):
+    _report, lines = _sky130_bound_models(tmp_path, "plain", [])
+    (line,) = lines
+    assert "sky130_fd_pr__nfet_01v8" in line
+
+
+def test_sky130_lvtn_only_is_not_native_5v(tmp_path):
+    _report, lines = _sky130_bound_models(tmp_path, "lvtn", [(125, 44)])
+    (line,) = lines
+    assert "nvt" not in line
+
+
+def test_sky130_hvi_lvtn_areaid_le_is_not_bound_as_5v_native(tmp_path):
+    """3v3 native (areaid_le) is out of scope but must not be mis-bound as
+    the 5v0 native model or as g5v0d10v5."""
+    _report, lines = _sky130_bound_models(
+        tmp_path, "le", [(75, 20), (125, 44), (81, 60)]
+    )
+    (line,) = lines
+    assert "nfet_05v0_nvt" not in line
+    assert "g5v0d10v5" not in line
+
+
+def test_sky130_hvi_lvtn_in_nwell_is_not_claimed_as_native(tmp_path):
+    """No native PMOS: a pfet island with hvi+lvtn never binds the nvt model."""
+    _report, lines = _sky130_bound_models(
+        tmp_path, "pnvt", [(75, 20), (125, 44)], pmos=True
+    )
+    assert lines
+    assert not any("nvt" in line for line in lines)
 
 
 def _make_sky130_straddling_hvi_mos_layout() -> kdb.Layout:
