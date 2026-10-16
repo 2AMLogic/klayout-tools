@@ -383,6 +383,49 @@ This first contract increment confirms that synthesis pilot; it does not
 claim every existing verb has been audited or add warnings to every
 response. Further verb adoption preserves each verb's existing envelope.
 
+## Wrapping an external tool
+
+A verb that wraps an external EDA tool inherits the
+[requested-but-unperformed rule](#requested-but-unperformed-analysis): a
+zero exit status from the tool is not evidence that it did what was asked.
+Any new wrapper meets these four requirements, each a checkable statement
+(operator ruling on [#2093](https://github.com/2AMLogic/klayout-tools/issues/2093)):
+
+1. **Requested vs achieved.** The response carries both the requested value
+   and the value the tool actually delivered, and flags a mismatch beyond a
+   documented tolerance (a warning entry, or the verb's documented error)
+   rather than returning an unqualified `"status": "ok"`. Upstream case: a
+   PLL generator answering a different frequency than requested at exit 0
+   ([YosysHQ/prjtrellis#270](https://github.com/YosysHQ/prjtrellis/issues/270)).
+2. **Stage identity.** Every reported figure names the flow stage it comes
+   from (for example a post-placement estimate vs final timing). A figure
+   parsed from an unlabelled tool print is not reported as a final result.
+   Upstream case: an unlabelled first Fmax line
+   ([YosysHQ/nextpnr#1808](https://github.com/YosysHQ/nextpnr/issues/1808)).
+3. **Actual tool identity.** The tool name and version captured from the
+   invocation itself go into [`provenance`](#shared-provenance-block). An
+   empty or unparseable version is reported as unknown (`null`), never
+   fabricated or filled from a pin or a default.
+4. **Retained failure evidence.** The stdout/stderr of a failed invocation is
+   kept and referenced from the error or warning. Existing artefacts combined
+   with a missing metrics object are not read as stage success. Tracked for
+   the OpenROAD IR-drop case in [#2124](https://github.com/2AMLogic/klayout-tools/issues/2124).
+
+### Wrapper audit checklist
+
+When reviewing a new or existing wrapper, each answer must be yes:
+
+- [ ] Does every requested value that the tool can silently adjust appear
+      next to its achieved value, with a mismatch flagged beyond tolerance?
+- [ ] Does every reported metric name the stage it was measured at?
+- [ ] Is the tool name and version taken from the actual invocation, with
+      `null` when it cannot be parsed?
+- [ ] On a non-zero exit, or a missing metrics object, is the captured
+      stdout/stderr retained and referenced from the error or warning?
+
+In-tree implementations to compare against: [#2091](https://github.com/2AMLogic/klayout-tools/issues/2091)
+and [#2124](https://github.com/2AMLogic/klayout-tools/issues/2124).
+
 ## Shared `provenance` block
 
 Verbs whose verdict depends on the exact tool build, PDK release, and rule
@@ -1717,6 +1760,8 @@ A verb's success payload may ship a machine-readable JSON Schema (Draft
    message, args.format)` on the documented error path.
 3. Document the command's fields in `docs/cli/<verb>.md`, including its
    `schema_version`.
+4. If the command wraps an external tool, meet the four requirements in
+   [Wrapping an external tool](#wrapping-an-external-tool).
 
 See `src/klayout_tools/cli/layers_cmd.py` and `docs/cli/layers.md` for a
 worked example.
