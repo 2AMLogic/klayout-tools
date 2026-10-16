@@ -2898,6 +2898,55 @@ def test_parse_ascii_rawfile_complex(tmp_path):
             assert isinstance(value, float)
 
 
+@pytest.mark.parametrize("text", [_ASCII_RAWFILE, _ASCII_RAWFILE_COMPLEX])
+def test_parse_and_persist_waveform_matches_parse_ascii_rawfile(tmp_path, text):
+    path = tmp_path / "waveform.raw"
+    path.write_text(text)
+
+    json_path = sim._parse_and_persist_waveform(str(path))
+
+    expected = sim.parse_ascii_rawfile(str(path))
+    with open(json_path, encoding="utf-8") as fh:
+        content = fh.read()
+    assert json.loads(content) == expected
+    # Streamed output is byte-identical to a plain json.dump (issue #3360).
+    assert content == json.dumps(expected)
+
+
+def test_parse_and_persist_waveform_zero_points_and_single_variable(tmp_path):
+    path = tmp_path / "empty.raw"
+    path.write_text(
+        "Plotname: DC\nFlags: real\nNo. Variables: 1\nNo. Points: 0\n"
+        "Variables:\n\t0\tv-sweep\tvoltage\nValues:\n\n"
+    )
+    json_path = sim._parse_and_persist_waveform(str(path))
+    with open(json_path, encoding="utf-8") as fh:
+        assert json.load(fh) == {
+            "plotname": "DC",
+            "variables": [{"index": 0, "name": "v-sweep", "type": "voltage"}],
+            "points": [],
+        }
+
+    path.write_text(
+        "Plotname: DC\nNo. Variables: 1\nVariables:\n\t0\tv-sweep\tvoltage\n"
+        "Values:\n 0\t1.5\n 1\t2.5\n"
+    )
+    json_path = sim._parse_and_persist_waveform(str(path))
+    with open(json_path, encoding="utf-8") as fh:
+        assert json.load(fh)["points"] == [[1.5], [2.5]]
+
+
+def test_parse_and_persist_waveform_failure_leaves_no_artifact(tmp_path):
+    path = tmp_path / "bad.raw"
+    path.write_text(_ASCII_RAWFILE.replace("1.000000000000000e-11", "oops", 1))
+    with pytest.raises(ValueError):
+        sim._parse_and_persist_waveform(str(path))
+    assert not (tmp_path / "bad.raw.json").exists()
+    with pytest.raises(sim.SimError):
+        sim._parse_and_persist_waveform(str(tmp_path / "nope.raw"))
+    assert not (tmp_path / "nope.raw.json").exists()
+
+
 def test_parse_ascii_rawfile_not_a_rawfile_raises(tmp_path):
     path = tmp_path / "notraw.txt"
     path.write_text("hello world\n")
