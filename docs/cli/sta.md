@@ -803,8 +803,9 @@ reader's own. It answers "does the SPEF name the nets this design has", not
   with no distinct RC node of their own), so gating on it would fail honest
   runs.
 - `floating_driver_count` / `floating_driver_sample` (issue #3662) — how many
-  of the unannotated drivers sit on **no net at all** (e.g. the outputs of CTS
-  dummy-load cells: `clkloadN/Z`), with a capped sample (at most 20) of their
+  of the unannotated drivers sit on **no net at all** or on a **driver-only
+  dangling net** (no other pin, no top-level port) — e.g. the outputs of CTS
+  dummy-load cells: `clkloadN/Z` (issue #3669) — with a capped sample (at most 20) of their
   pin names. They carry no load and are on no timed path, so they are
   **excluded from the completeness predicate**; a strict gate can thereby tell
   "floating, untimed" from "timed driver missing parasitics". `null` when the

@@ -1098,6 +1098,16 @@ def test_floating_no_net_drivers_do_not_gate_annotation_complete():
     assert block["partially_unannotated_driver_sample"] == ["u3/Y"]
 
 
+def test_floating_predicate_covers_dangling_driver_only_nets():
+    """Issue #3669: an output pin is floating when it has no net OR its net
+    holds only that pin and no port; a net with a load or port is not."""
+    tcl = "\n".join(post_route_sta._parasitic_annotation_lines())
+
+    assert "get_nets -quiet -of_objects $klt_pin" in tcl
+    assert "[llength [get_pins -quiet -of_objects $klt_net]] <= 1" in tcl
+    assert "[llength [get_ports -quiet -of_objects $klt_net]] == 0" in tcl
+
+
 def test_timed_unannotated_driver_still_gates():
     block = _annotation_from(_listed_stdout(["clkload1/Z", "u2/X"], [], ["clkload1/Z"]))
 
