@@ -112,7 +112,14 @@ def build_5t_ota_metrics(tmp_path: Path, pdk_root: Path) -> dict[str, float | in
 
     metrics: dict[str, float | int] = {}
     metrics.update(flatten_metrics(compose_report, prefix="gen_compose"))
-    metrics.update(flatten_metrics(extract_report, prefix="extract"))
+    # `timing` is wall-clock (issue #3181): a measurement of the run, not a
+    # metric of the design, so it never belongs in a golden file.
+    metrics.update(
+        flatten_metrics(
+            {k: v for k, v in extract_report.items() if k != "timing"},
+            prefix="extract",
+        )
+    )
     metrics.update(flatten_metrics(drc_report, prefix="drc"))
     return metrics
 
