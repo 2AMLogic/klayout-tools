@@ -4239,9 +4239,35 @@ def check_extract_report(report_path: str) -> dict[str, Any]:
 # etc.) -- the bookkeeping spelling issue #1559's field-class table
 # (`docs/cli/extract.md`) documents as not a stable contract across builds.
 _ANONYMOUS_NET_NAME_RE = re.compile(r"^\\\$\d+$")
+# The unanchored-at-the-end form of the above: the longest `\$<digits>` prefix
+# of a string leaf, which is the only prefix :func:`_rewrite_net_name` can
+# possibly rename (issue #3568).
+_ANONYMOUS_NET_PREFIX_RE = re.compile(r"^\\\$\d+")
 
 
-def _net_attachment_key(net_name: str, devices: list[Any]) -> str:
+def _net_attachment_index(devices: list[Any]) -> dict[str, list[str]]:
+    """``{net name: [<device>.<terminal>, ...]}`` for every string-named net a
+    ``devices[]`` terminal touches, built in one pass so
+    :func:`_net_attachment_key` is a dict lookup instead of a rescan of every
+    device per net (issue #3568). Duplicates are kept: one device with two
+    terminals on the same net contributes two entries."""
+    index: dict[str, list[str]] = {}
+    for device in devices:
+        if not isinstance(device, dict):
+            continue
+        for terminal, terminal_net in (device.get("nets") or {}).items():
+            if isinstance(terminal_net, str):
+                index.setdefault(terminal_net, []).append(
+                    f"{device.get('name')}.{terminal}"
+                )
+    return index
+
+
+def _net_attachment_key(
+    net_name: str,
+    devices: list[Any],
+    index: Mapping[str, list[str]] | None = None,
+) -> str:
     """The sorted ``<device>.<terminal>`` attachment list for ``net_name``,
     read from this same report's already-built ``devices[]`` array -- the
     structural identity issue #1559 normalizes an anonymous net's unstable
@@ -4254,7 +4280,12 @@ def _net_attachment_key(net_name: str, devices: list[Any]) -> str:
     ground/substrate net) -- nothing to disambiguate by, so the caller
     leaves that net's original spelling untouched rather than fabricate a
     key that cannot be trusted to be unique.
+
+    ``index`` (from :func:`_net_attachment_index` over the same ``devices``)
+    makes the call O(attachments of this net) rather than O(all terminals).
     """
+    if index is not None and isinstance(net_name, str):
+        return ",".join(sorted(index.get(net_name, ())))
     attachments = sorted(
         f"{device.get('name')}.{terminal}"
         for device in devices
@@ -4278,13 +4309,14 @@ def _anonymous_net_name_map(report: Mapping[str, Any]) -> dict[str, str]:
     if not isinstance(nets, list) or not isinstance(devices, list):
         return {}
     name_map: dict[str, str] = {}
+    index = _net_attachment_index(devices)
     for entry in nets:
         if not isinstance(entry, dict):
             continue
         name = entry.get("name")
         if not isinstance(name, str) or not _ANONYMOUS_NET_NAME_RE.match(name):
             continue
-        attachment_key = _net_attachment_key(name, devices)
+        attachment_key = _net_attachment_key(name, devices, index)
         if attachment_key:
             name_map[name] = f"$anon<{attachment_key}>"
     return name_map
@@ -4306,14 +4338,23 @@ def _rewrite_net_name(value: Any, name_map: Mapping[str, str]) -> Any:
     canonical = name_map.get(value)
     if canonical is not None:
         return canonical
-    for raw_name, canonical_name in name_map.items():
-        if not value.startswith(raw_name):
-            continue
-        boundary = value[len(raw_name) : len(raw_name) + 1]
-        if boundary and boundary.isalnum():
-            continue
-        return canonical_name + value[len(raw_name) :]
-    return value
+    # Every ``name_map`` key is ``\\$<digits>``, so the only key a leaf can
+    # start with (past the boundary rule) is its longest ``\\$<digits>``
+    # prefix: any shorter digit prefix is followed by a digit, i.e. an
+    # alphanumeric, and would be rejected below (issue #3568).
+    if not name_map or not value.startswith("\\$"):
+        return value
+    match = _ANONYMOUS_NET_PREFIX_RE.match(value)
+    if match is None:
+        return value
+    raw_name = match.group()
+    canonical_name = name_map.get(raw_name)
+    if canonical_name is None:
+        return value
+    boundary = value[len(raw_name) : len(raw_name) + 1]
+    if boundary and boundary.isalnum():
+        return value
+    return canonical_name + value[len(raw_name) :]
 
 
 def _canonicalize_extract_report_for_rerun_diff(
@@ -4370,12 +4411,13 @@ def _canonicalize_extract_report_for_rerun_diff(
     nets = normalized.get("nets")
     devices = normalized.get("devices")
     if isinstance(nets, list) and isinstance(devices, list):
+        index = _net_attachment_index(devices)
         normalized["nets"] = sorted(
             nets,
             key=lambda entry: (
                 (
                     entry.get("name", ""),
-                    _net_attachment_key(entry.get("name", ""), devices),
+                    _net_attachment_key(entry.get("name", ""), devices, index),
                 )
                 if isinstance(entry, dict)
                 else ("", "")
