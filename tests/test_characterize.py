@@ -1110,7 +1110,7 @@ def test_example_response_matches_the_documented_envelope(example_run):
     # `cell.netlist` is an *input* being pinned -> {path, scope} envelope.
     assert set(report["cell"]["netlist"]) == {"path", "scope"}
     # Generated artifacts are plain absolute strings (json-contract.md's
-    # "Output-artifact path fields").
+    # "Path fields: envelope vs. plain string").
     for path in (
         report["liberty"]["path"],
         report["simulation"]["testbench"],

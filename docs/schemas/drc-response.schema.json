@@ -2,11 +2,11 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://2amlogic.com/klayout-tools/schemas/drc-response.schema.json",
   "title": "klt drc --format json success response, version 2",
-  "description": "Success payload of `klt drc`. Two shapes share the top-level `schema_version` 2: a verdict report (curated engine, or `--engine klayout`) carrying `status`/`violations`/`coverage`, and the non-verdict `--list-rules` listing (`mode: \"list_rules\"`), which carries neither. Error envelopes are governed by the shared error contract (docs/json-contract.md) and are out of scope. The `coverage` block `$ref`s coverage.schema.json (the shared work records); resolve it through the sibling file or a schema registry. See docs/cli/drc.md.",
+  "description": "Success payload of `klt drc`. Two shapes carry the top-level `schema_version`: a verdict report (3) (curated engine, or `--engine klayout`) carrying `status`/`violations`/`coverage`, and the non-verdict `--list-rules` listing (`mode: \"list_rules\"`, 2), which carries neither. Error envelopes are governed by the shared error contract (docs/json-contract.md) and are out of scope. The `coverage` block `$ref`s coverage.schema.json (the shared work records); resolve it through the sibling file or a schema registry. See docs/cli/drc.md.",
   "type": "object",
   "required": ["schema_version"],
   "properties": {
-    "schema_version": {"type": "integer", "const": 2}
+    "schema_version": {"type": "integer", "enum": [2, 3]}
   },
   "oneOf": [
     {"$ref": "#/$defs/verdict_report"},
@@ -20,8 +20,16 @@
       "required": ["schema_version", "file", "deck", "dbu_um", "status", "violation_count", "rule_counts", "violations", "coverage", "provenance"],
       "not": {"required": ["mode"]},
       "properties": {
-        "schema_version": {"type": "integer", "const": 2},
-        "file": {"type": "string", "description": "Layout path as provided on the command line."},
+        "schema_version": {"type": "integer", "const": 3},
+        "file": {
+          "type": "object",
+          "description": "Layout path as the portable `{path, scope}` envelope (issue #2659): a repo-relative POSIX path with scope `repo`, or `path: null` with scope `external` when the layout lies outside the repo.",
+          "required": ["path", "scope"],
+          "properties": {
+            "path": {"type": ["string", "null"]},
+            "scope": {"type": "string", "enum": ["repo", "external"]}
+          }
+        },
         "deck": {"type": "string", "description": "Curated engine: the deck name (e.g. `sky130`). `--engine klayout`: the deck script's own path."},
         "engine": {"type": "string", "enum": ["curated", "klayout"], "description": "`klayout` on a `--engine klayout` report; the curated engine omits it."},
         "dbu_um": {"type": "number", "description": "Database unit in micrometres; violation coordinates are integers in this unit."},

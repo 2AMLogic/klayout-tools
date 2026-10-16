@@ -1,6 +1,9 @@
 {
-  "schema_version": 2,
-  "file": "examples/signoff/block.gds",
+  "schema_version": 3,
+  "file": {
+    "path": "examples/signoff/block.gds",
+    "scope": "repo"
+  },
   "deck": "sky130",
   "dbu_um": 0.001,
   "status": "clean",

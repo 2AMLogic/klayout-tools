@@ -665,6 +665,11 @@
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
     },
     {
+      "consumer": "drc",
+      "exporter": "env_provenance",
+      "reason": "`klt drc` echoes its input file as env_provenance's committable {path, scope} envelope (issue #2659)."
+    },
+    {
       "consumer": "economy",
       "exporter": "cli-infra",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
@@ -871,6 +876,11 @@
     },
     {
       "consumer": "lvs",
+      "exporter": "env_provenance",
+      "reason": "`klt lvs` echoes its layout input as env_provenance's committable {path, scope} envelope (issue #2659)."
+    },
+    {
+      "consumer": "lvs",
       "exporter": "socket_check",
       "reason": "Issue #2971: klt lvs power findings reuse the verb's public classify_pin_by_name ground/power name heuristic to decide which pins get the substrate-continuity caveat, so lvs and socket-check never disagree about what a ground pin is."
     },
@@ -978,6 +988,11 @@
       "consumer": "report",
       "exporter": "cli-infra",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "report",
+      "exporter": "env_provenance",
+      "reason": "Shared report rendering resolves echoed {path, scope} path fields via env_provenance (issue #2659)."
     },
     {
       "consumer": "reset_coverage",

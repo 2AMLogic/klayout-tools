@@ -37,6 +37,7 @@ normal run (see ``klayout_tools._report_verify``).
 
 import argparse
 
+from ..env_provenance import render_path_field
 from ..lvs import LvsError, check_lvs_report, rerun_lvs_report, run_lvs
 from .output import emit_error, emit_success, render_rerun_drift
 
@@ -99,7 +100,12 @@ def _run_check(args: argparse.Namespace) -> int:
 
 
 def _print_text(report: dict) -> None:
-    print(f"layout: {report['layout']}")
+    # `layout` is the `{path, scope}` object
+    # `env_provenance.repo_relative_path` defines (issue #2659) -- rendered
+    # through the same courtesy helper `klt sim`/`klt pex` use, so the
+    # absolute path is never printed even in text mode. `reference` is still
+    # the request's own verbatim echo (a plain string) and prints as-is.
+    print(f"layout: {render_path_field(report['layout'])}")
     print(f"reference: {report['reference']}")
     print(f"top: {report['top']}")
     # Issue #1205: only printed when the two sides resolved to different top
