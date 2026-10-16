@@ -1,0 +1,211 @@
+"""Tests for `klt sim --submit-only` / `--job-status` (issue #3073,
+`src/klayout_tools/sim_batch_async.py`). Every test injects the fake command
+runner from `test_sim_batch.py`; nothing here reaches `aws` or S3."""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from helpers.subprocess_fakes import fake_completed
+from klayout_tools import sim
+from klayout_tools import sim_batch as sb
+from klayout_tools import sim_batch_async as sba
+from klayout_tools.cli import main
+from test_sim_batch import (
+    FAKE_BUCKET,
+    _batch_request,
+    _FakeRunner,
+    _install_fake_batch_transport,
+    _status,
+    _write_body,
+    _write_request,
+)
+
+
+def _stderr_json(capsys):
+    """The JSON envelope on stderr (skipping any `klt: warning:` prefix)."""
+    err = capsys.readouterr().err
+    return json.loads(err[err.index("{") :])
+
+
+def _setup(tmp_path, monkeypatch, runner, **request_overrides):
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    _write_body(tmp_path)
+    return _write_request(tmp_path, _batch_request(tmp_path, **request_overrides))
+
+
+def _submit(path):
+    return sim.run_sim(str(path), submit_only=True)
+
+
+def test_submit_only_returns_identity_without_polling(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    path = _setup(tmp_path, monkeypatch, runner)
+
+    result = _submit(path)
+
+    assert result["status"] == "submitted"
+    assert result["job_id"].startswith("klt-sim-")
+    assert result["bucket"] == FAKE_BUCKET
+    assert result["region"] == "us-east-1"
+    assert len(result["request_sha256"]) == 64
+    assert result["launched_at"].endswith("Z")
+    assert result["unit_count"] == 1
+    # One launch, and neither a status poll nor an outputs collect.
+    assert len(runner.argvs_matching("launch")) == 1
+    assert runner.argvs_matching("status.json") == []
+    assert runner.argvs_matching("outputs/") == []
+
+
+def test_submit_only_refuses_non_batch_backend_before_any_s3_write(
+    tmp_path, monkeypatch
+):
+    runner = _FakeRunner()
+    path = _setup(tmp_path, monkeypatch, runner, backend="local")
+
+    with pytest.raises(sim.SimError) as err:
+        _submit(path)
+
+    assert err.value.code == sba.SUBMIT_ONLY_UNSUPPORTED_CODE
+    assert runner.calls == []
+
+
+def test_submit_only_refuses_sharded_request_before_any_s3_write(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    path = _setup(tmp_path, monkeypatch, runner)
+
+    with pytest.raises(sim.SimError) as err:
+        sim.run_sim(str(path), submit_only=True, hosts=2)
+
+    assert err.value.code == sba.SUBMIT_ONLY_UNSUPPORTED_CODE
+    assert "hosts" in str(err.value)
+    assert runner.calls == []
+
+
+def test_submit_only_with_resume_is_refused_before_any_s3_write(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    path = _setup(tmp_path, monkeypatch, runner)
+
+    with pytest.raises(sim.SimError):
+        sim.run_sim(str(path), submit_only=True, resume=True)
+
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize("state", ["running", "interrupted", "done", "failed"])
+def test_job_status_reports_state_fields(tmp_path, monkeypatch, state):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status(state, detail="executing"))
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+
+    status = sba.read_job_status(_batch_request(tmp_path), "klt-sim-deadbeef")
+
+    assert status["state"] == state
+    assert status["terminal"] is (state in sb.BATCH_TERMINAL_STATES)
+    assert status["detail"] == "executing"
+    assert status["elapsed_seconds"] == 300
+    assert status["updated_at"] == "2026-09-18T00:05:00Z"
+    assert status["instance"]["instance_type"] == "c7i.4xlarge"
+    # Read-only: exactly one S3 read, nothing launched or submitted.
+    assert len(runner.calls) == 1
+    assert runner.argvs_matching("launch") == []
+
+
+def test_job_status_pending_when_no_status_json_yet(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.queue("status.json", fake_completed("", returncode=1))
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+
+    status = sba.read_job_status(_batch_request(tmp_path), "klt-sim-deadbeef")
+
+    assert status["state"] == "pending"
+    assert status["terminal"] is False
+    assert runner.argvs_matching("head-object")  # job.json confirmed to exist
+
+
+def test_job_status_unknown_job_is_an_error_with_code(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.queue("status.json", fake_completed("", returncode=1))
+    runner.queue(
+        "head-object",
+        fake_completed("", returncode=254, stderr="An error occurred (404): Not Found"),
+    )
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+
+    with pytest.raises(sim.SimError) as err:
+        sba.read_job_status(_batch_request(tmp_path), "klt-sim-nope")
+
+    assert err.value.code == sba.BATCH_JOB_NOT_FOUND_CODE
+
+
+def test_job_status_transport_failure_is_not_reported_as_unknown_job(
+    tmp_path, monkeypatch
+):
+    runner = _FakeRunner()
+    runner.queue("status.json", fake_completed("", returncode=1))
+    runner.queue(
+        "head-object", fake_completed("", returncode=255, stderr="AccessDenied (403)")
+    )
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+
+    with pytest.raises(sim.SimError) as err:
+        sba.read_job_status(_batch_request(tmp_path), "klt-sim-deadbeef")
+
+    assert err.value.code != sba.BATCH_JOB_NOT_FOUND_CODE
+
+
+def test_job_status_rejects_malformed_job_id(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+
+    with pytest.raises(sim.SimError) as err:
+        sba.read_job_status(_batch_request(tmp_path), "../escape")
+
+    assert err.value.code == sba.BATCH_JOB_ID_INVALID_CODE
+    assert runner.calls == []
+
+
+def test_submit_then_status_round_trip_through_the_cli(tmp_path, monkeypatch, capsys):
+    runner = _FakeRunner()
+    path = _setup(tmp_path, monkeypatch, runner)
+
+    assert main(["sim", str(path), "--submit-only", "--format", "json"]) == 0
+    submitted = json.loads(capsys.readouterr().out)
+    job_id = submitted["job_id"]
+
+    runner.default = fake_completed(_status("interrupted", job_id=job_id))
+    launches_before = len(runner.argvs_matching("launch"))
+    assert main(["sim", str(path), "--job-status", job_id, "--format", "json"]) == 0
+    status = json.loads(capsys.readouterr().out)
+
+    assert status["job_id"] == job_id
+    assert status["state"] == "interrupted"
+    # Reading an interrupted job re-launches nothing.
+    assert len(runner.argvs_matching("launch")) == launches_before
+
+
+def test_cli_job_status_unknown_job_exits_1_with_code(tmp_path, monkeypatch, capsys):
+    runner = _FakeRunner()
+    runner.queue("status.json", fake_completed("", returncode=1))
+    runner.queue("head-object", fake_completed("", returncode=254, stderr="Not Found"))
+    path = _setup(tmp_path, monkeypatch, runner)
+
+    code = main(["sim", str(path), "--job-status", "klt-sim-nope", "--format", "json"])
+
+    assert code == 1
+    error = _stderr_json(capsys)["error"]
+    assert error["code"] == sba.BATCH_JOB_NOT_FOUND_CODE
+
+
+def test_cli_submit_only_non_batch_backend_envelope(tmp_path, monkeypatch, capsys):
+    runner = _FakeRunner()
+    path = _setup(tmp_path, monkeypatch, runner, backend="local")
+
+    code = main(["sim", str(path), "--submit-only", "--format", "json"])
+
+    assert code == 1
+    error = _stderr_json(capsys)["error"]
+    assert error["code"] == sba.SUBMIT_ONLY_UNSUPPORTED_CODE
+    assert runner.calls == []

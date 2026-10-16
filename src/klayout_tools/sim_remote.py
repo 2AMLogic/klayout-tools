@@ -221,6 +221,7 @@ def _unrun_corner_report(
         "process": point.process,
         "supply_v": point.supply_v,
         "temperature_c": point.temperature_c,
+        **({"params": dict(point.params)} if point.params else {}),
         "status": "error",
         "runtime_s": 0.0,
         "engine_exit_code": None,
@@ -632,6 +633,9 @@ def _run_remote_dispatch(
         remote_job_dir=remote_job_dir,
     )
 
+    from .sim import check_ngspice_options_echo
+
+    check_ngspice_options_echo(request, remote_report)
     corners = remote_report.get("corners", [])
     if keep_artifacts:
         _rewrite_remote_artifact_paths(

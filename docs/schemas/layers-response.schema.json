@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://2amlogic.com/klayout-tools/schemas/layers-response.schema.json",
+  "title": "klt layers --format json success response, version 1",
+  "description": "Success payload of `klt layers`. Fields marked *(--flattened)* / *(--include-text)* appear only when that flag is given. See docs/cli/layers.md.",
+  "type": "object",
+  "required": ["schema_version", "file", "dbu_um", "layer_count", "layers"],
+  "properties": {
+    "schema_version": {"type": "integer", "const": 1},
+    "file": {"type": "string"},
+    "dbu_um": {"type": "number"},
+    "layer_count": {"type": "integer", "minimum": 0},
+    "layers": {"type": "array", "items": {"$ref": "#/$defs/layer"}}
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "layer": {
+      "type": "object",
+      "required": ["layer", "datatype", "name", "shapes", "annotation"],
+      "properties": {
+        "layer": {"type": "integer"},
+        "datatype": {"type": "integer"},
+        "name": {"type": ["string", "null"]},
+        "shapes": {"type": "integer", "minimum": 0},
+        "annotation": {"type": "boolean"},
+        "flattened_shapes": {"type": "integer", "minimum": 0},
+        "bbox_um": {"$ref": "#/$defs/bbox"},
+        "contributors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["cell", "shapes"],
+            "properties": {
+              "cell": {"type": "string"},
+              "shapes": {"type": "integer", "minimum": 0}
+            },
+            "additionalProperties": true
+          }
+        },
+        "text_count": {"type": "integer", "minimum": 0},
+        "texts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["text", "count"],
+            "properties": {
+              "text": {"type": "string"},
+              "count": {"type": "integer", "minimum": 0}
+            },
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "bbox": {
+      "type": "object",
+      "required": ["left", "bottom", "right", "top", "width", "height"],
+      "properties": {
+        "left": {"type": "number"},
+        "bottom": {"type": "number"},
+        "right": {"type": "number"},
+        "top": {"type": "number"},
+        "width": {"type": "number"},
+        "height": {"type": "number"}
+      },
+      "additionalProperties": true
+    }
+  }
+}

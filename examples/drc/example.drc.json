@@ -208,6 +208,7 @@
       "76/20",
       "76/44",
       "78/44",
+      "79/20",
       "80/20",
       "81/125",
       "82/64",
@@ -281,10 +282,13 @@
       "mcon.width.1",
       "met1.enclosing.mcon.1",
       "met1.enclosing.via.1",
+      "met1.enclosing_adjacent.via.1",
       "met2.angle.1",
       "met2.area.1",
       "met2.enclosing.via.1",
       "met2.enclosing.via2.1",
+      "met2.enclosing_adjacent.via.1",
+      "met2.enclosing_adjacent.via2.1",
       "met2.holes_area.1",
       "met2.ongrid.1",
       "met2.space.1",
@@ -294,6 +298,7 @@
       "met3.enclosing.capm.1",
       "met3.enclosing.via2.1",
       "met3.enclosing.via3.1",
+      "met3.enclosing_adjacent.via3.1",
       "met3.holes_area.1",
       "met3.ongrid.1",
       "met3.space.1",
@@ -340,6 +345,7 @@
       "pwell_rs.ongrid.1",
       "rpm.angle.1",
       "rpm.ongrid.1",
+      "rpm.width.1",
       "tap.angle.1",
       "tap.enclosing.licon.1",
       "tap.ongrid.1",
@@ -348,6 +354,7 @@
       "tunm.ongrid.1",
       "uhvi.angle.1",
       "uhvi.ongrid.1",
+      "urpm.width.1",
       "vhvi.angle.1",
       "vhvi.ongrid.1",
       "via.angle.1",
@@ -384,6 +391,8 @@
       "m5",
       "nwell",
       "poly",
+      "rpm",
+      "urpm",
       "via",
       "via2",
       "via3",
@@ -542,6 +551,10 @@
         "reason": "no_applicable_geometry"
       },
       {
+        "id": "met1.enclosing_adjacent.via.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
         "id": "met2.angle.1",
         "reason": "no_applicable_geometry"
       },
@@ -555,6 +568,14 @@
       },
       {
         "id": "met2.enclosing.via2.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "met2.enclosing_adjacent.via.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "met2.enclosing_adjacent.via2.1",
         "reason": "no_applicable_geometry"
       },
       {
@@ -591,6 +612,10 @@
       },
       {
         "id": "met3.enclosing.via3.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "met3.enclosing_adjacent.via3.1",
         "reason": "no_applicable_geometry"
       },
       {
@@ -778,6 +803,10 @@
         "reason": "no_applicable_geometry"
       },
       {
+        "id": "rpm.width.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
         "id": "tap.angle.1",
         "reason": "no_applicable_geometry"
       },
@@ -807,6 +836,10 @@
       },
       {
         "id": "uhvi.ongrid.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "urpm.width.1",
         "reason": "no_applicable_geometry"
       },
       {

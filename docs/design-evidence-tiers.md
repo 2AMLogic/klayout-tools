@@ -78,6 +78,11 @@ per item:
 - item 10: the repo-hygiene audit record, for example the CI workflow
   file or a checklist covering README, spec table and license.
 
+Where the claim is about a set of files (item 1's sources plus the derived
+netlist; item 9's or 10's several files), the envelope may bind the set with
+`provenance.input.paths` (issue #3044) so that editing any member turns the
+row stale; see [`docs/cli/signoff.md`](cli/signoff.md).
+
 A passing native envelope cited for one of these four is still accepted,
 for compatibility. Its citation carries no `artifact_binding`, which marks
 it as a cited pass the tool could not judge for relevance. See
@@ -237,7 +242,11 @@ written to every block.
 5. **Full corner verification vs a ratified spec**
    - *Analog* — PVT corner-matrix simulation results covering every spec
      row at its bound corners, with per-row pass/fail and the binding
-     corner recorded.
+     corner recorded. A spec needing several testbenches cites several
+     `klt sim` envelopes, optionally naming the rows each covers and
+     declaring the full row set; the item is met only when every cited
+     envelope passes and every declared row is covered, and rows no
+     envelope can express are declared gaps that keep it unmet.
    - *Digital* — multi-corner static timing analysis (setup and hold
      across the PVT corner set) plus a bit-exact functional test suite,
      with per-corner and per-test pass/fail recorded. For the full-custom

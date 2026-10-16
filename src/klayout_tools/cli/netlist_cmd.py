@@ -57,6 +57,8 @@ def run(args: argparse.Namespace) -> int:
                 pdk_root=args.pdk_root,
                 block=args.block,
                 batch_root=getattr(args, "batch_root", None),
+                batch_include=getattr(args, "batch_include", None) or (),
+                batch_exclude=getattr(args, "batch_exclude", None) or (),
                 xschem_binary=args.xschem_binary,
                 warn=_warn,
             )
@@ -73,7 +75,9 @@ def run(args: argparse.Namespace) -> int:
                 block=args.block,
             )
     except NetlistError as exc:
-        return emit_error("netlist", str(exc), args.format, code=exc.code)
+        return emit_error(
+            "netlist", str(exc), args.format, code=exc.code, details=exc.details
+        )
 
     emit_success(report, args.format, _print_text)
     return EXIT_DRIFTED if report["status"] == "drifted" else EXIT_OK
@@ -103,7 +107,8 @@ def _print_text(report: dict) -> None:
     # who sees "exit_status: 1" next to "status: generated" and no explanation
     # reasonably concludes something went wrong (issue #55, edge #1).
     print(
-        f"xschem: {xschem['binary']}  exit_status={xschem['exit_status']} "
+        f"xschem: {xschem['binary']}  version={xschem.get('version') or 'unknown'}"
+        f"  exit_status={xschem['exit_status']} "
         "(not the verdict -- xschem exits non-zero on a successful batch "
         f"netlist)  duration={xschem['duration_s']}s"
     )
