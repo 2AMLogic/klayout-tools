@@ -5587,26 +5587,15 @@ def _run_corner(
                 }
             )
             no_log_reported = True
-        if (
-            not engine_aborted
-            and not no_log_reported
-            and engine_exit_code
-            and not any(d["severity"] == "error" for d in classified)
-        ):
-            # Issue #3067: the engine exited non-zero with no classifiable
-            # cause in its log. Report that as the corner's cause instead of
-            # leaving only N consequential "produced no value" errors. (A
-            # clean exit with no log is #3016's `unknown` diagnostic below.)
-            diagnostics.append(
-                {
-                    "severity": "error",
-                    "code": "engine_aborted",
-                    "message": (
-                        f"{engine_name} exited with code {engine_exit_code}"
-                        + tail_suffix
-                    ),
-                }
+        aborted = (
+            None
+            if engine_aborted or no_log_reported
+            else _engine_aborted_diagnostic(
+                engine_name, engine_exit_code, classified, tail_suffix
             )
+        )
+        if aborted is not None:
+            diagnostics.append(aborted)
             engine_aborted = True
 
     # Both engines fold a `.meas`/`.measure` card's name to lower-case in
@@ -5636,13 +5625,9 @@ def _run_corner(
             crossings=crossings,
         )
     )
-    if engine_aborted:
-        # The abort is the cause; the per-measurement "produced no value"
-        # errors are its consequences (the measurement results themselves
-        # stay `error`), so they must not crowd `diagnostics[0]` (#3067).
-        measurement_diagnostics = [
-            d for d in measurement_diagnostics if d.get("code") != "measurement"
-        ]
+    measurement_diagnostics = _demote_abort_cascade(
+        measurement_diagnostics, engine_aborted
+    )
     diagnostics.extend(measurement_diagnostics)
 
     # Issue #3016: the engine ran (any exit status, including 0) yet left no
@@ -5787,6 +5772,38 @@ def _run_corner(
         **step_fields,
     }
     return corner, engine_version
+
+
+def _engine_aborted_diagnostic(
+    engine_name: str,
+    engine_exit_code: int | None,
+    classified: list[dict],
+    tail_suffix: str,
+) -> dict | None:
+    """Issue #3067: the ``engine_aborted`` diagnostic for an engine that
+    exited non-zero with no classifiable cause in its log, else ``None``.
+    It is the corner's cause, instead of leaving only N consequential
+    ``produced no value`` errors. (A clean exit with no log is #3016's
+    ``unknown`` diagnostic.)"""
+    if not engine_exit_code or any(d["severity"] == "error" for d in classified):
+        return None
+    return {
+        "severity": "error",
+        "code": "engine_aborted",
+        "message": f"{engine_name} exited with code {engine_exit_code}" + tail_suffix,
+    }
+
+
+def _demote_abort_cascade(
+    measurement_diagnostics: list[dict], engine_aborted: bool
+) -> list[dict]:
+    """After an ``engine_aborted`` the per-measurement "produced no value"
+    errors are consequences of the abort (the measurement results themselves
+    stay ``error``), so drop them rather than crowd ``diagnostics[0]``
+    (#3067)."""
+    if not engine_aborted:
+        return measurement_diagnostics
+    return [d for d in measurement_diagnostics if d.get("code") != "measurement"]
 
 
 #: Lines of engine output quoted in an ``engine_killed``/``engine_aborted``
