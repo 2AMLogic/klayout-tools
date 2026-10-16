@@ -4311,6 +4311,13 @@ hierarchy level. The netlist you wrote is not modified; a gated copy runs.
 Hierarchical probes of a wrapped instance gain one level
 (`xm1.xm1_klt`).
 
+**Verified on ngspice 46 with sky130A (2026-10-16, #3442).** Wrapping every
+`X` instance under `tt_mm` removed all spread (8/8 samples exactly `0.0`, the
+same as a mismatch-off run), so the PDK model cards do resolve the local
+`mc_mm_switch=0` in the wrapper's scope. With `xm1`/`xm2` randomised the
+`vdiff` stddev was 10.7 mV, and `m` is carried inside the wrapper verbatim.
+ngspice 42 has not been compared (unverified).
+
 Refused up front with a `SimError`: a glob that matches no `X` instance (or
 only non-subcircuit elements), a hierarchical glob (`.`/`/`), `vary:
 "process"`, a `models.pdk` without a known switch, and the `remote`/`batch`
