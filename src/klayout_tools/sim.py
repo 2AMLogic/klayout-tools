@@ -1249,6 +1249,15 @@ def _validate_measurement_forms(measurements_spec: list[dict[str, Any]]) -> None
     _validate_expr_names_unique(measurements_spec)
 
 
+def _validate_optional_flag(name: Any, spec: dict[str, Any]) -> None:
+    """Issue #2925: ``optional``, when present, must be a real boolean."""
+    if "optional" in spec and not isinstance(spec["optional"], bool):
+        raise SimError(
+            f"measurement '{name}' has a non-boolean 'optional' "
+            f"({spec['optional']!r}): it must be true or false"
+        )
+
+
 def _validate_measurement_form(spec: dict[str, Any]) -> None:
     """One ``request.measurements[]`` entry's form: a ``name`` plus exactly
     one of ``spice``/``expr``, and -- for an ``expr`` -- a name that survives
@@ -1258,11 +1267,7 @@ def _validate_measurement_form(spec: dict[str, Any]) -> None:
     has_spice = spec.get("spice") is not None
     has_expr = spec.get("expr") is not None
     has_crossings = sim_crossings.is_crossings(spec)
-    if "optional" in spec and not isinstance(spec["optional"], bool):
-        raise SimError(
-            f"measurement '{name}' has a non-boolean 'optional' "
-            f"({spec['optional']!r}): it must be true or false"
-        )
+    _validate_optional_flag(name, spec)
     has_cycle_mean = sim_cycle_mean.is_cycle_mean(spec)
     if name is None or not (has_spice or has_expr or has_crossings or has_cycle_mean):
         raise SimError(
@@ -6478,30 +6483,13 @@ def _corner_measurement_results(
         value = _harvest_measurement_value(measurement_values, spec, is_xyce=is_xyce)
         unit = spec.get("unit")
         if value is None:
-            cause = meas_errors.get(str(name).lower()) if spec.get("spice") else None
-            if spec.get("optional") is True and _is_legitimately_absent(cause):
-                result, absent_diagnostic = _absent_measurement(spec)
-                measurement_results.append(result)
-                diagnostics.append(absent_diagnostic)
-                if cause is not None:
-                    attributed.add(str(name).lower())
-                continue
-            measurement_results.append(
-                {
-                    "name": name,
-                    "value": None,
-                    "unit": unit,
-                    "status": "error",
-                    "margin": None,
-                }
+            result, diagnostic, was_attributed = _no_value_measurement(
+                spec, meas_errors, save_mode=save_mode
             )
-            message = _no_value_message(spec, save_mode=save_mode)
-            if cause is not None:
+            measurement_results.append(result)
+            diagnostics.append(diagnostic)
+            if was_attributed:
                 attributed.add(str(name).lower())
-                message += f" -- ngspice reported: {cause}"
-            diagnostics.append(
-                {"severity": "error", "code": "measurement", "message": message}
-            )
             continue
         # `_grade_measurement_value` owns the plausibility-pre-check ->
         # `limits` ordering (issue #2493) in one place, so there is no
@@ -6580,6 +6568,36 @@ def _absent_measurement(
         "(reported absent; not an error)",
     }
     return result, diagnostic
+
+
+def _no_value_measurement(
+    spec: dict[str, Any],
+    meas_errors: dict[str, str],
+    *,
+    save_mode: str,
+) -> tuple[dict[str, Any], dict[str, Any], bool]:
+    """``(result, diagnostic, attributed)`` for a scalar measurement whose log
+    carried no value: ``absent`` when it is ``optional`` and the engine gave no
+    reason other than "never crossed" (issue #2925), else an ``error`` entry
+    with a ``measurement`` diagnostic. ``attributed`` is whether an ngspice
+    ``.meas`` error was tied to this measurement by name (issue #2826)."""
+    name = spec["name"]
+    cause = meas_errors.get(str(name).lower()) if spec.get("spice") else None
+    if spec.get("optional") is True and _is_legitimately_absent(cause):
+        result, diagnostic = _absent_measurement(spec)
+        return result, diagnostic, cause is not None
+    message = _no_value_message(spec, save_mode=save_mode)
+    if cause is not None:
+        message += f" -- ngspice reported: {cause}"
+    result = {
+        "name": name,
+        "value": None,
+        "unit": spec.get("unit"),
+        "status": "error",
+        "margin": None,
+    }
+    diagnostic = {"severity": "error", "code": "measurement", "message": message}
+    return result, diagnostic, cause is not None
 
 
 def _crossings_measurement_result(
