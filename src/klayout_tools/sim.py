@@ -3087,6 +3087,9 @@ def _run_sim_corners(
     # Issue #3111: same up-front validation; off-host workers re-read it from
     # the forwarded request document, and the echo check below verifies it.
     ngspice_options = _validate_ngspice_options(options.get("ngspice_options"))
+    # Issue #3036: the rule grammar is validated up front; the rules are
+    # resolved onto points after expansion, before any dispatch.
+    nodeset_rules = _validate_nodeset_rules(options.get("nodeset"))
 
     # Timeout budget preflight (issue #1686): a coarse, pre-grid sanity
     # check -- never blocks the sweep, only surfaces an advisory string. See
@@ -3131,6 +3134,7 @@ def _run_sim_corners(
         save_mode_declared=save_mode_declared,
         save_vectors_declared=save_vectors_declared,
         ngspice_options_declared=bool(ngspice_options),
+        nodeset_declared=bool(nodeset_rules),
         analysis_steps_declared=sim_steps.is_steps_analysis(analysis),
         crossings_declared=bool(
             sim_crossings.crossings_measurements(measurements_spec)
@@ -3146,6 +3150,13 @@ def _run_sim_corners(
     monte_carlo_info: dict[str, Any] | None = None
     monte_carlo_stats: dict[str, Any] | None = None
     explicit_points_wire = request.get("_explicit_points")
+    # Issue #3036: resolved once, after expansion/exclusions and before Monte
+    # Carlo cloning (samples inherit their base map). A fleet shard (below)
+    # receives the selected maps on the wire instead of re-resolving rules
+    # against its subset of the points.
+    _apply_nodeset_rules(
+        corner_points, nodeset_rules if explicit_points_wire is None else []
+    )
     if explicit_points_wire is not None:
         # Internal-only escape hatch: never set by an external caller or the
         # CLI, only by this same module's own `_run_remote_fleet` when it
@@ -3550,6 +3561,7 @@ def _run_sim_corners(
         )
 
     _require_params_echo(dispatch_points, corners_new, backend=backend)
+    _require_nodeset_echo(dispatch_points, corners_new, backend=backend)
     _record_batch_checkpoint(checkpoint, backend, corners_new, backend_engine_version)
 
     if resume:
@@ -4180,6 +4192,7 @@ def _build_dry_run_report(
     units: list[dict[str, Any]] = []
     for point in corner_points:
         unit: dict[str, Any] = {"corner_id": point.corner_id}
+        unit.update(_nodeset_report_field(point))
         if point.sample_index is not None:
             unit["sample_index"] = point.sample_index
         if point.mc_seed is not None:
@@ -4500,6 +4513,11 @@ class CornerPoint:
     no parameter axis, in which case :attr:`corner_id` and :attr:`slug` are
     exactly the legacy ones.
 
+    ``nodeset`` (issue #3036) is the normalized ``{lowercase node: volts}``
+    initial-guess map :func:`_apply_nodeset_rules` selected for this point --
+    ``{}`` for a point no ``options.nodeset`` rule matched. It is a solver
+    hint, not part of the point's identity: it never changes :attr:`corner_id`.
+
     ``process_sections`` is populated only when the request's
     ``corners.process[]`` entry for this point was the multi-section bundle
     object form (``{"name": str, "sections": [...]}``, see
@@ -4536,6 +4554,7 @@ class CornerPoint:
         "supply_v",
         "temperature_c",
         "params",
+        "nodeset",
         "sample_index",
         "mc_seed",
         "variant",
@@ -4552,6 +4571,7 @@ class CornerPoint:
         process_section_libs: list[str | None] | None = None,
         process_section_libs_resolved: list[str | None] | None = None,
         params: dict[str, int | float] | None = None,
+        nodeset: dict[str, float] | None = None,
         sample_index: int | None = None,
         mc_seed: dict[str, Any] | None = None,
         variant: str | None = None,
@@ -4560,6 +4580,7 @@ class CornerPoint:
         self.variant = variant
         self.process = process
         self.params: dict[str, int | float] = params or {}
+        self.nodeset: dict[str, float] = nodeset or {}
         self.process_sections = process_sections
         self.process_section_libs = process_section_libs
         self.process_section_libs_resolved = process_section_libs_resolved
@@ -4638,6 +4659,12 @@ def _params_report_field(point: CornerPoint) -> dict[str, Any]:
     """The additive ``params`` field of a corner report: present only for a
     point on a ``corners.params`` axis, so every other report is unchanged."""
     return {"params": dict(point.params)} if point.params else {}
+
+
+def _nodeset_report_field(point: CornerPoint) -> dict[str, Any]:
+    """The additive ``nodeset`` field of a corner report (issue #3036):
+    present only for a point an ``options.nodeset`` rule selected."""
+    return {"nodeset": dict(point.nodeset)} if point.nodeset else {}
 
 
 def _format_number(value: float) -> str:
@@ -4927,6 +4954,10 @@ def _corner_points_to_wire(points: list[CornerPoint]) -> list[dict[str, Any]]:
             # request without a `corners.params` axis serialises exactly as
             # before.
             entry["params"] = point.params
+        if point.nodeset:
+            # Issue #3036: the already-selected map, never the rules -- a
+            # shard holds a subset of the points and could not re-resolve them.
+            entry["nodeset"] = point.nodeset
         wire.append(entry)
     return wire
 
@@ -4969,6 +5000,13 @@ def _corner_points_from_wire(data: Any) -> list[CornerPoint]:
             if raw_params is not None
             else {}
         )
+        # Issue #3036: re-validated at the receiving worker as well.
+        raw_nodeset = entry.get("nodeset")
+        nodeset = (
+            _normalize_nodeset_values(raw_nodeset, "request._explicit_points[].nodeset")
+            if raw_nodeset is not None
+            else {}
+        )
         points.append(
             CornerPoint(
                 entry.get("process"),
@@ -4977,6 +5015,7 @@ def _corner_points_from_wire(data: Any) -> list[CornerPoint]:
                 process_sections=sections,
                 process_section_libs=section_libs,
                 params=params,
+                nodeset=nodeset,
                 sample_index=entry.get("sample_index"),
                 mc_seed=entry.get("mc_seed"),
                 variant=entry.get("variant"),
@@ -5435,6 +5474,282 @@ def _matches_exclude(point: CornerPoint, entry: dict[str, Any]) -> bool:
         elif key not in scalars or scalars[key] != value:
             return False
     return True
+
+
+# --------------------------------------------------------------------------- #
+# Initial-guess hints: `options.nodeset` (issue #3036)
+# --------------------------------------------------------------------------- #
+
+#: A node name a ``.nodeset`` card may carry: a bare SPICE identifier (with
+#: ``.``/``:`` for hierarchy) or an all-digit node. Anything else -- spaces,
+#: newlines, parentheses, operators -- could break out of the one generated
+#: card, so it is refused rather than escaped.
+_NODESET_NODE_RE = re.compile(r"(?:[A-Za-z_][A-Za-z0-9_.:]*|[0-9]+)")
+_NODESET_RULE_KEYS = ("match", "values")
+_NODESET_MATCH_KEYS = ("process", "temperature_c", "supply_v", "params")
+
+
+def _normalize_nodeset_values(raw: Any, where: str) -> dict[str, float]:
+    """A nonempty ``{node: volts}`` map, validated: names match
+    :data:`_NODESET_NODE_RE`, are lowercased, and may not repeat
+    case-insensitively; values are finite numbers (booleans and nulls are
+    refused). Used for the request rules and re-run at the receiving worker
+    on the wire map."""
+    if not isinstance(raw, dict) or not raw:
+        raise SimError(f"{where} must be a nonempty object mapping nodes to volts")
+    values: dict[str, float] = {}
+    for node, volts in raw.items():
+        if not isinstance(node, str) or not _NODESET_NODE_RE.fullmatch(node):
+            raise SimError(
+                f"{where} node {node!r} is not a supported node name "
+                "(expected [A-Za-z_][A-Za-z0-9_.:]* or digits only)"
+            )
+        lowered = node.lower()
+        if lowered in values:
+            raise SimError(
+                f"{where} names node {lowered!r} more than once "
+                "(node names are case-insensitive)"
+            )
+        if not _is_plain_number(volts) or not math.isfinite(volts):
+            raise SimError(f"{where}.{node} must be a finite number of volts")
+        values[lowered] = float(volts)
+    return dict(sorted(values.items()))
+
+
+def _nodeset_match_process(value: Any, where: str) -> str:
+    if not isinstance(value, str):
+        raise SimError(f"{where} must be a string")
+    return value
+
+
+def _nodeset_match_number(value: Any, where: str) -> Any:
+    if not _is_plain_number(value) or not math.isfinite(value):
+        raise SimError(f"{where} must be a finite number")
+    return value
+
+
+def _nodeset_match_supply(supply: Any, where: str) -> dict[str, Any]:
+    if not isinstance(supply, dict):
+        raise SimError(f"{where} must be an object of rail: number")
+    return {
+        rail: _nodeset_match_number(v, f"{where}.{rail}") for rail, v in supply.items()
+    }
+
+
+def _nodeset_match_params(params: Any, where: str) -> dict[str, int | float]:
+    if not isinstance(params, dict):
+        raise SimError(f"{where} must be an object of name: number")
+    row: dict[str, int | float] = {}
+    for name, value in params.items():
+        lowered = _validate_param_name(name, where)
+        if lowered in row:
+            raise SimError(
+                f"{where} names {lowered!r} more than once (names are case-insensitive)"
+            )
+        row[lowered] = _validate_param_scalar(value, f"{where}.{name}")
+    return row
+
+
+_NODESET_MATCH_VALIDATORS = {
+    "process": _nodeset_match_process,
+    "temperature_c": _nodeset_match_number,
+    "supply_v": _nodeset_match_supply,
+    "params": _nodeset_match_params,
+}
+
+
+def _validate_nodeset_match(raw: Any, where: str) -> dict[str, Any]:
+    """One rule's ``match`` selector, normalized to the shape
+    :func:`_matches_exclude` consumes (``params`` names lowercased)."""
+    if not isinstance(raw, dict):
+        raise SimError(f"{where} must be an object")
+    unknown = sorted(str(key) for key in set(raw) - set(_NODESET_MATCH_KEYS))
+    if unknown:
+        raise SimError(
+            f"{where} has unknown key(s) {', '.join(unknown)} "
+            f"(supported: {', '.join(_NODESET_MATCH_KEYS)})"
+        )
+    return {
+        key: _NODESET_MATCH_VALIDATORS[key](value, f"{where}.{key}")
+        for key, value in raw.items()
+    }
+
+
+def _validate_nodeset_rules(value: Any) -> list[dict[str, Any]]:
+    """Validate ``options.nodeset`` (issue #3036) into normalized rules
+    ``[{"match": {...}, "values": {node: volts}}]``; ``[]`` when omitted or
+    empty, so a legacy request is untouched."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise SimError(
+            "options.nodeset must be an array of {match, values} rules "
+            f"(got {json.dumps(value, default=repr)})"
+        )
+    rules: list[dict[str, Any]] = []
+    for index, rule in enumerate(value):
+        where = f"options.nodeset[{index}]"
+        if not isinstance(rule, dict) or set(rule) != set(_NODESET_RULE_KEYS):
+            raise SimError(
+                f"{where} must be an object with exactly the keys "
+                f"{', '.join(_NODESET_RULE_KEYS)}"
+            )
+        rules.append(
+            {
+                "match": _validate_nodeset_match(rule["match"], f"{where}.match"),
+                "values": _normalize_nodeset_values(rule["values"], f"{where}.values"),
+            }
+        )
+    return rules
+
+
+def _check_nodeset_selector_names(
+    points: list[CornerPoint], rules: list[dict[str, Any]]
+) -> None:
+    """A selector naming a parameter or supply rail no point carries could
+    never match, so it is refused by name rather than as an unused rule."""
+    declared_params = {name for point in points for name in point.params}
+    declared_rails = {str(rail) for point in points for rail in point.supply_v}
+    for index, rule in enumerate(rules):
+        match = rule["match"]
+        for name in match.get("params", {}):
+            if name not in declared_params:
+                raise SimError(
+                    f"options.nodeset[{index}].match.params names {name!r}, "
+                    "which is not a corners.params parameter of this request"
+                )
+        for rail in match.get("supply_v", {}):
+            if str(rail) not in declared_rails:
+                raise SimError(
+                    f"options.nodeset[{index}].match.supply_v names rail "
+                    f"{rail!r}, which no corner of this request sets"
+                )
+
+
+def _apply_nodeset_rules(
+    points: list[CornerPoint], rules: list[dict[str, Any]]
+) -> None:
+    """Resolve ``options.nodeset`` rules onto ``points`` in place (issue
+    #3036). Runs once, after corner expansion and exclusions and before Monte
+    Carlo cloning, so a sample inherits its base point's map.
+
+    Zero matching rules at a point mean no hint there; exactly one selects its
+    whole map; two is an error whatever their node maps are (no implicit merge
+    or priority). A rule that matches no retained point is an error, and so is
+    a selector naming a parameter or supply rail no point carries.
+    """
+    if not rules:
+        return
+    _check_nodeset_selector_names(points, rules)
+    used = [False] * len(rules)
+    for point in points:
+        hits = [
+            i for i, rule in enumerate(rules) if _matches_exclude(point, rule["match"])
+        ]
+        if len(hits) > 1:
+            raise SimError(
+                f"options.nodeset rules {hits[0]} and {hits[1]} both match "
+                f"corner {point.corner_id!r}; overlapping rules are never "
+                "merged -- make the selectors disjoint"
+            )
+        if hits:
+            used[hits[0]] = True
+            point.nodeset = dict(rules[hits[0]]["values"])
+    if not all(used):
+        raise SimError(
+            f"options.nodeset[{used.index(False)}] matches no retained corner "
+            "of this request (every declared rule must apply somewhere)"
+        )
+
+
+def _nodeset_cards(point: CornerPoint) -> list[str]:
+    """One file-scope ``.nodeset`` card per selected node. ngspice has no
+    ``nodeset`` control command (it answers "no such command"); the card
+    form, placed after the netlist ``.include``, wins over a body-level hint
+    for the same node and survives ``alterparam`` + ``reset``."""
+    return [
+        f".nodeset v({node})={volts!r}" for node, volts in sorted(point.nodeset.items())
+    ]
+
+
+#: ngspice's warning for a ``.nodeset`` whose node the circuit does not have:
+#: it keeps running and exits 0, so without this the corner would grade on an
+#: unhinted solve.
+_NODESET_MISSING_RE = re.compile(
+    r"Nodeset on non-existent node - (?P<node>\S+?), ignored", re.IGNORECASE
+)
+
+
+def _nodeset_failures(point: CornerPoint, log_text: str) -> list[dict[str, Any]]:
+    """An error diagnostic for each requested hint node the engine reported as
+    non-existent (issue #3036). Warnings about a netlist body's own hints on
+    other nodes are none of the request's business and are ignored."""
+    if not point.nodeset:
+        return []
+    missing = sorted(
+        {
+            match.group("node").lower()
+            for match in _NODESET_MISSING_RE.finditer(log_text)
+        }
+        & set(point.nodeset)
+    )
+    return [
+        {
+            "severity": "error",
+            "code": "netlist",
+            "message": (
+                f"options.nodeset could not be applied: the engine reports "
+                f"node {node!r} does not exist, so this corner would have "
+                "solved without the requested initial guess"
+            ),
+        }
+        for node in missing
+    ]
+
+
+NODESET_UNSUPPORTED_WORKER_CODE = "nodeset_unsupported_worker"
+
+
+def _require_nodeset_echo(
+    points: list[CornerPoint],
+    corners: list[dict[str, Any]],
+    *,
+    backend: str = "remote",
+) -> None:
+    """Fail the request when an off-host worker did not honor
+    ``options.nodeset`` (issue #3036).
+
+    A worker built before the field ignores the hints and would report a
+    passing, unhinted solve; one that supports it echoes each point's
+    ``nodeset`` in its corner report, which is compared with what was
+    dispatched. Independent of any version check, so it also catches a
+    same-release runner image built before the feature landed.
+    """
+    if backend not in _OFFHOST_BACKENDS or not any(p.nodeset for p in points):
+        return
+    problem: str | None = None
+    if len(corners) != len(points):
+        problem = (
+            f"it returned {len(corners)} corner report(s) for "
+            f"{len(points)} dispatched point(s)"
+        )
+    else:
+        for point, corner in zip(points, corners, strict=True):
+            if (corner.get("nodeset") or {}) != point.nodeset:
+                problem = (
+                    f"corner {point.corner_id!r} came back with nodeset "
+                    f"{corner.get('nodeset')!r}, expected {point.nodeset!r}"
+                )
+                break
+    if problem is not None:
+        raise SimError(
+            "the remote/batch worker did not honor options.nodeset -- "
+            f"{problem}. A worker built before the field (issue #3036) "
+            "ignores it and would solve without the requested initial "
+            "guesses; update the runner image to this klt release, or use a "
+            "local backend. No result was reported",
+            code=NODESET_UNSUPPORTED_WORKER_CODE,
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -6044,6 +6359,7 @@ def _expand_monte_carlo(
                     process_section_libs=base.process_section_libs,
                     params=base.params,
                     variant=base.variant,
+                    nodeset=base.nodeset,
                     sample_index=sample_index,
                     mc_seed=mc_seed,
                     mc_injected=(
@@ -6170,6 +6486,14 @@ def _checkpoint_fingerprint(
         # drawn from other seeds. Only keyed in off the default, so an
         # existing checkpoint stays valid for a request that omits the field.
         payload["mc_seed_scope"] = sorted(mc_scopes)
+    if any(point.nodeset for point in corner_points):
+        # Issue #3036: an initial guess can change which solution a
+        # multi-equilibrium circuit lands on, so a changed hint must not reuse
+        # a stored result. The corner IDs above do not carry it. Only keyed
+        # in when a hint exists, leaving every legacy fingerprint untouched.
+        payload["nodeset"] = {
+            point.corner_id: point.nodeset for point in corner_points if point.nodeset
+        }
     if corner_section_libs:
         # Issue #2522: a corner's per-section libraries determine its device
         # models exactly as `models.lib` does, so editing one must invalidate
@@ -6376,6 +6700,17 @@ def _refuse_xyce_alter_corner_axes(corners_spec: dict[str, Any]) -> None:
         )
 
 
+def _refuse_xyce_nodeset(declared: bool) -> None:
+    """Issue #3036: the hints are rendered as ngspice `.nodeset v(node)=`
+    cards; the Xyce deck is not given an equivalent."""
+    if declared:
+        raise SimError(
+            "options.nodeset is not supported for engine 'xyce': initial "
+            "guesses are applied as ngspice `.nodeset` cards; use engine "
+            "'ngspice' or omit options.nodeset"
+        )
+
+
 def _enforce_xyce_support_boundary(
     *,
     engine: str,
@@ -6388,6 +6723,7 @@ def _enforce_xyce_support_boundary(
     save_mode_declared: bool = False,
     save_vectors_declared: bool = False,
     ngspice_options_declared: bool = False,
+    nodeset_declared: bool = False,
     analysis_steps_declared: bool = False,
     crossings_declared: bool = False,
     cycle_mean_declared: bool = False,
@@ -6491,6 +6827,7 @@ def _enforce_xyce_support_boundary(
     ):
         if declared:
             raise SimError(message)
+    _refuse_xyce_nodeset(nodeset_declared)
 
 
 def _run_local(
@@ -8122,6 +8459,7 @@ def _run_corner(
         diagnostics.extend(classified)
         no_log_reported = False
         diagnostics.extend(_alterparam_failures(point, log_text + "\n" + stdout_text))
+        diagnostics.extend(_nodeset_failures(point, log_text + "\n" + stdout_text))
         if engine_exit_code and not log_text and not os.path.exists(log_path):
             diagnostics.append(
                 {
@@ -8336,6 +8674,7 @@ def _run_corner(
         "supply_v": point.supply_v,
         "temperature_c": point.temperature_c,
         **_params_report_field(point),
+        **_nodeset_report_field(point),
         "status": status,
         "runtime_s": runtime_s,
         # Additive (issue #2848): the engine process's raw outcome. Both are
@@ -9179,6 +9518,9 @@ def _write_corner_deck(
         # same key, the retry policy wins and the second attempt actually
         # differs from the first.
         lines.append(extra_options_card)
+    # Issue #3036: after the `.include`, so a request hint beats a body-level
+    # `.nodeset` on the same node; nothing is emitted for a legacy point.
+    lines.extend(_nodeset_cards(point))
 
     for spec in measurements_spec:
         if spec.get("spice") is not None:

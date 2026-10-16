@@ -2520,6 +2520,90 @@ returned report's `environment.ngspice_options` with the declared map and
 fails with an application error naming the option on any difference. The
 map is also part of the `options.resume` checkpoint fingerprint.
 
+### Initial-guess hints: `options.nodeset` (issue #3036)
+
+A circuit with more than one DC equilibrium (a latch, a bandgap start-up
+branch) can need a different `.nodeset` guess at different PVT or parameter
+points. `options.nodeset` is an array of selector rules; each picks the
+retained corner points it applies to and the node voltages to hint there:
+
+```json
+{"options": {"nodeset": [
+  {"match": {"process": "tt", "temperature_c": 27, "params": {"code": 0}},
+   "values": {"out": 0.2, "x1.bias": 0.7}}
+]}}
+```
+
+**A nodeset is an initial guess, never an answer.** ngspice starts its DC
+solve from the hint and keeps iterating; a linear circuit lands on its one
+physical solution whatever the guess (a 1 V / 1 k / 1 k divider hinted at
+`out=0.2` still solves to 0.5 V, and `tests/test_sim_nodeset.py` asserts that
+against the real engine). For a multi-equilibrium circuit the hint biases which
+equilibrium is found; klt does not promise any particular one, so check the
+measurement, not the hint.
+
+**Rules.** Each rule has exactly `match` and `values`.
+
+- `match` accepts only `process`, `temperature_c`, `supply_v` and `params`,
+  with the same equality semantics as `exclude[]`: `supply_v` and `params` are
+  subset matches (parameter names are case-insensitive, values compare
+  numerically), all keys in one rule are ANDed, and an empty `match` applies to
+  every retained point. An unknown key, a `params` name the request does not
+  sweep, a `supply_v` rail no corner sets, a `null`, a boolean or a non-finite
+  number is an application error.
+- `values` is a nonempty `{node: volts}` map. A node is a bare identifier
+  (`[A-Za-z_][A-Za-z0-9_.:]*`, so `x1.bias` is fine) or all digits; it is
+  lowercased and two spellings of one node are an error. Anything else —
+  whitespace, newlines, parentheses, operators — is refused instead of escaped,
+  so a name can never break out of the generated card. Other vendor naming
+  dialects are not promised.
+- Rules are resolved once, **after** corner expansion and `exclude`, and
+  **before** Monte Carlo cloning (every sample inherits its base point's map;
+  there is no per-sample selector). A point matched by no rule runs unhinted;
+  exactly one match selects that rule's whole map. Two rules matching the same
+  retained point is an error **even if their maps are disjoint or equal** —
+  there is no merge and no priority order. A rule that matches no retained
+  point (for instance because `exclude` removed it) is an error too. All of
+  this fails before any simulation or remote submission.
+
+**What klt generates.** One file-scope `.nodeset v(<node>)=<volts>` card per
+node, after the netlist `.include` and before the `.control` block. ngspice has
+no `nodeset` *control command*, so the card is the only mechanism. Measured on
+ngspice-42 and covered by the integration tests:
+
+- a request hint **overrides** a body-level `.nodeset` on the same node (the
+  later card wins), while body hints on *other* nodes are kept;
+- the card survives the `alterparam` + `reset` a `corners.params` row emits,
+  and a `reset: true` step in `analysis_steps[]`, so every step of every point
+  starts from the same hint;
+- the fail-fast probe deck, local, `local-parallel` and Monte Carlo runs apply
+  the same selected map.
+
+**Unknown nodes fail visibly.** ngspice exits 0 after printing `Warning :
+Nodeset on non-existent node - <node>, ignored` to the log; klt turns that
+warning, for a node the request hinted, into an `error` diagnostic
+(`code: "netlist"`) so the corner can never grade `pass` on an unhinted solve.
+A warning about a netlist-body hint on some other node is not the request's
+business and is ignored.
+
+**Reporting and identity.** Each corner report (and each `--dry-run` unit) that
+was hinted carries `nodeset`, the selected `{node: volts}` map; a corner no rule
+matched has no such field. Corner IDs and artifact slugs are unchanged — a hint
+is not a sweep axis. The selected maps are part of the `options.resume`
+checkpoint fingerprint, so changing a hint cannot reuse a stored result.
+Omitting `options.nodeset` (or `[]`) leaves decks, IDs and fingerprints
+byte-identical to before.
+
+**Engines and workers.** `engine: "ngspice"` only; a nonempty
+`options.nodeset` with `engine: "xyce"` is refused before anything runs. On
+`remote`/`batch` the *selected* per-point maps travel in each
+`_explicit_points` entry (the worker re-validates them and never re-resolves
+the rules); a worker built before this field would ignore the hints, so the
+client compares each returned corner's `nodeset` with what it dispatched and
+fails with `error.code: "nodeset_unsupported_worker"` on any difference. This
+does not add raw-card injection, `.ic`/`uic`, stimulus rewriting or any runner
+negotiation.
+
 ### Opting out: `options.save_mode` (issue #2732)
 
 `options.save_mode` decides who owns the corner's saved vector set. It takes
@@ -5924,6 +6008,7 @@ the *response* echoes back.
 | `options.ngspice_binary` | string            | Issue #2423. Explicit `ngspice` binary name or path, overriding `$KLT_NGSPICE_BINARY` and the bare `ngspice` name on `$PATH`. A path containing a separator resolves relative to the request file's own directory. Only read for `engine: "ngspice"` (the default) — see "Which ngspice binary is run" above. |
 | `options.save_mode`      | string            | Issue #2732. `"all"` (default; omitted means the same) keeps the generated `save all`; `"netlist"` suppresses it so the netlist's own `.save` cards decide the resident vector set, and the caller owns measurement/waveform coverage. Any other value (including `null`) is an application error (exit 1); an explicit value is refused for `engine: "xyce"`. Off-host workers must include this implementation. See "Opting out: `options.save_mode`" above. |
 | `options.ngspice_options` | object | Issue #3111. Solver/convergence `.options` (`gmin`, `gminsteps`, `srcsteps`, `itl1`, `itl2`, `itl4`, `noopiter`, `method`, `reltol`, `abstol`, `vntol`, `pivtol`) rendered as one `.options` card after `.temp` in every corner deck and echoed verbatim as `environment.ngspice_options`. Values are numbers, booleans or bare-token strings; an unknown key or other value is an application error (exit 1) naming it; refused for `engine: "xyce"`. Unset: no card, no echo. See "Solver options: `options.ngspice_options`" above. |
+| `options.nodeset`        | array\<object\>  | Issue #3036. Initial-guess rules `[{"match": {process?, temperature_c?, supply_v?, params?}, "values": {node: volts}}]` selected per retained corner point and rendered as file-scope `.nodeset v(node)=volts` cards after the netlist `.include`; echoed as `nodeset` on each hinted corner report. Overlapping rules, a rule matching no retained point, an unsupported node spelling or a non-finite value are application errors (exit 1) before any run; an unknown node fails its corner with an `error` diagnostic; refused for `engine: "xyce"`; an off-host worker that does not echo the maps fails with `nodeset_unsupported_worker`. Unset or `[]`: no change. See "Initial-guess hints: `options.nodeset`" above. |
 | `options.ngspice_init`   | array\<string\>   | Issue #2520. Lines materialized as a `.spiceinit` file inside each corner's own artifact directory (`cwd=` for that corner's `ngspice` invocation), most commonly `["set ngbehavior=hsa"]` to select a compatibility mode for vendor decks written in HSPICE style. Defaults to unset — no `.spiceinit` is written (no behavior change). `engine: "ngspice"` only; accepted-and-ignored for `"xyce"`. See "ngspice's working directory, and `.spiceinit` compatibility mode" above. |
 | *(CLI-only)* `--plot <dir>` | string         | No request-document equivalent (like `trajectory --plot`) — writes one waveform SVG per non-sweep signal per corner to `<dir>`, forcing `options.waveforms`/`keep_artifacts` on for this run. See "Waveform plots" above. |
 | `expect_netlist_identity` | string           | Optional (issue #3074). The `environment.netlist_identity` stamp of the record this run is compared against. When present and different from the identity computed for this request, `klt sim` refuses before simulating (application error, exit 1) with a message naming both stamps. Absent or matching changes nothing. Also refused if the identity cannot be computed (see `netlist_identity_error`). |
