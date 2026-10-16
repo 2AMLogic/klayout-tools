@@ -396,6 +396,23 @@ solve/BLAS), so naive one-worker-per-corner oversubscribes a small box
 immediately. A non-positive or non-integer `max_workers` is an application
 error (exit 1).
 
+**Threads per worker (issue [#2970](https://github.com/2AMLogic/klayout-tools/issues/2970)).**
+The `max_workers // 8` estimate above (`_ASSUMED_THREADS_PER_NGSPICE`) is kept:
+it sizes the *pool* for the cores one ngspice may use. Separately, whenever a
+`local-parallel` (hence `batch`) run has more than one worker in flight, each
+`ngspice` is started with `OMP_NUM_THREADS=1` in its process environment, so N
+workers do not each spawn a full OpenMP team and oversubscribe the host (on the
+fleet this was a measured ~270× per-unit slowdown, bit-identical `.meas`
+values). The environment variable is used rather than `options.ngspice_init`
+because an older runner silently drops the latter. `options.threads_per_worker`
+(positive integer; anything else is an application error, exit 1) overrides the
+default for `local` and `local-parallel` alike. A single worker with no
+override keeps the ambient environment. A netlist that itself runs
+`set num_threads=N` in a `.control` block still wins (it executes after the
+environment is read). `engine: "xyce"` is not given the variable. The value in
+force is reported as `environment.threads_per_worker` (absent when the ambient
+environment decided).
+
 **Useful on a workstation, harmful on a shared worker.** `local-parallel`
 trades CPU/memory for wall-clock time — fine on a dedicated development
 machine with idle cores, but a bad default on a shared CI runner or
@@ -1448,6 +1465,7 @@ release segment:
 | Feature | Detected when | First runner release |
 |---|---|---|
 | `analysis_steps` ([#2482](https://github.com/2AMLogic/klayout-tools/issues/2482)) | `analysis_steps` is present | `0.7.1` |
+| `transfer` ([#2924](https://github.com/2AMLogic/klayout-tools/issues/2924)) | any `measurements[]` entry declares `transfer` | `0.7.1` (**mandatory**, see below) |
 
 `decks[]` ([#3303](https://github.com/2AMLogic/klayout-tools/issues/3303)) is
 the next registry entry.
@@ -1470,6 +1488,25 @@ the next registry entry.
   `runner_version_check: "warn"` reports without refusing.
 - Limit: a `0.7.1.devN` runner built before a feature landed looks the same as
   one built after, so it counts as supporting it.
+
+**Mandatory features (`transfer`, [#2924](https://github.com/2AMLogic/klayout-tools/issues/2924)).**
+A runner that predates `measurements[].transfer` would drop the metric, so
+this entry is not relaxed by `runner_version_check: "warn"` and "unknown" is
+not tolerated on the runner side:
+
+- **Before launch**: if every image the AMI manifest publishes predates
+  `transfer`, the request is refused with `batch_runner_feature_unsupported`
+  even under `warn`; nothing is uploaded or launched. A manifest with no
+  `klt_version` for the image (or no manifest) defers to the runner.
+- **On the runner**: the preflight exits `87` with
+  `batch_runner_feature_unsupported` when the runner's `klt --version` is
+  older than `0.7.1` **or cannot be read**, before `klt sim` runs and
+  whatever `runner_version_check` says. This check runs on the job instance,
+  so it launches the instance (a Spot boot) but never a simulation.
+- The worker runs the whole `klt sim` request itself and extracts `transfer`
+  from its own corner-local AC rawfile; only the reduced scalar results,
+  units, limits and diagnostics come back, so the rawfile never needs to be
+  returned and the values, errors and rollups match local execution.
 
 #### Pre-launch check from the AMI manifest ([#2851](https://github.com/2AMLogic/klayout-tools/issues/2851))
 
@@ -2232,6 +2269,22 @@ field changes):
 It states that the failure is a per-unit time budget, not a netlist problem,
 and suggests a larger `options.timeout_s` (twice the larger of the two
 numbers, rounded up to a whole minute).
+
+When **every** unit (at least two) hit the time budget — each carries a
+`timeout`/`batch_job_timeout` diagnostic, or has `runtime_s` within 2% of
+`options.timeout_s` — the report also gains one additive
+`environment.job_diagnostic` object instead of leaving N identical per-unit
+timeouts to be read as N failures (issue
+[#2970](https://github.com/2AMLogic/klayout-tools/issues/2970)):
+
+```json
+{"code": "all_units_at_timeout", "severity": "error", "units": 45,
+ "timeout_s": 300, "message": "..."}
+```
+
+It is report-level and never appears on a corner, so naming it in
+`options.fail_on_diagnostic` has no effect. In that case `runtime_s` is the timeout, not
+a measured cost.
 
 ## Timeout-budget preflight
 
@@ -3248,11 +3301,18 @@ The entry also carries an additive `transfer` object `{num, den, metric}`.
 One rawfile and one ratio computation are used per unique `num`/`den` pair, and
 the capture does not depend on `options.waveforms`.
 
-**Local only.** `backend: "remote"` / `"batch"` requests (explicit or via
-`KLT_SIM_BACKEND`) that declare `transfer` are refused before provisioning with
-an unsupported-backend error; worker support is tracked in
-[#2924](https://github.com/2AMLogic/klayout-tools/issues/2924). `engine:
-"xyce"` is refused too. After the analysis, each unique pair adds
+**Backends.** `local`, `local-parallel`, `remote` and `batch` all run
+`transfer`. On `remote`/`batch` the worker computes it (see "Mandatory features"
+under "Runner/client `klt` version skew"; for `remote` the same minimum `klt`
+`0.7.1` is checked against the AMI manifest before launch and with
+`klt --version` on the provisioned host before the simulation, exit `87`).
+A worker that is older than `0.7.1` or whose version cannot be read returns
+`batch_runner_feature_unsupported` / refuses the request; it never omits the
+metric. **Operator rollout:** publish a `klt` release containing `transfer`
+(first `0.7.1`), rebake the batch runner image and the remote-sim AMI from it
+(`scripts/aws/build-remote-sim-ami.sh` records `klt_version` in the manifest),
+and update any pinned image reference; fleet publication and paid cloud runs
+are outside this repository. `engine: "xyce"` is refused. After the analysis, each unique pair adds
 `let __klt_xfer_<k>_num = <num>`, `let __klt_xfer_<k>_den = <den>` and
 `write <corner_dir>/transfer_<k>.raw ...` to the generated `.control` block.
 
@@ -4133,6 +4193,28 @@ a corner grid. A stock ngspice without the module still produces the
   parser: `.include`d/`.lib` files and hierarchical targets are not resolved,
   so a waveform declared there is not detected, and an unresolved declaration
   is never assumed to be DC. Rewriting waveform sources is out of scope.
+- **`corners.variants`** (`array<{"name": string, "sources": {<source>: number | string}}>`,
+  optional, issue #3252) — named, *correlated* bias arrangements crossed with
+  the other axes (outer to inner: process, `supply_v`, variants, temperature).
+  Each variant is its own corner unit, so a variant that fails to converge
+  yields `status: "error"` for that unit only; sibling variants at the same
+  PVT point still report. Not combinable with `corners.units` (units are
+  executed as given, not crossed; the request is refused). `name` (letters, digits, `_`, `.`, `-`; unique) is
+  appended to `corner_id` as `/@<name>` (so ids and artifact paths never
+  collide) and reported as an additive `corners[].variant` field (absent when
+  the axis is unused). Each `sources` value is a number or an arithmetic
+  expression (`+ - * /`, parentheses, numbers, and *other source names of the
+  same variant*, e.g. `"vb": "va*0.5"`), resolved host-side to a number
+  before `alter <source>=<value>`; cycles, unknown names and malformed
+  expressions are rejected before any corner runs, naming the offender. A
+  variant source overrides a same-named `corners.supply_v` key; the resolved
+  values appear in `corners[].supply_v`. The `supply_v` rules apply to variant
+  source keys (no waveform sources, no `.param`s). `exclude[]` entries may
+  match `{"variant": "<name>"}`. Works with `monte_carlo`, `--resume`,
+  `local-parallel`, and `remote`/`batch` (the variant crosses the corner wire
+  as an additive field; payloads without it still parse). **Refused for
+  `engine: "xyce"`** (no `alter` equivalent). Additive: no `schema_version`
+  bump.
 - **`corners.temperature_c`** (`array<number>`, optional) — degrees Celsius,
   one `.temp <value>` card per point. Defaults to `[27]` when omitted.
 - **`corners.params`** (`object`, optional, [#3035](https://github.com/2AMLogic/klayout-tools/issues/3035))
@@ -5070,6 +5152,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `lost_shard`       | The corner's `hosts > 1` shard never returned (Epic #375). See "Fleet sharding" above. |
 | `batch_job_failed` | The corner never started, or its report was never written: the `batch` backend's fleet job reached a terminal `failed` state with an exit code outside `klt sim`'s own `0`/`3`/`4` (see "Batch backend" above). |
 | `batch_job_timeout` | The corner never completed: the `batch` job exceeded its own `timeout_seconds` on the fleet instance and was killed by 2am's harness. |
+| `all_units_at_timeout` | Report-level only (`environment.job_diagnostic`, never on a corner): every unit of a ≥2-unit run hit the time budget — see "Timeout-budget hint". |
 | `batch_poll_timeout` | The corner's result was never observed: `batch.poll_timeout_s` elapsed with the job still non-terminal, or the job never published a `status.json` within 1800s (the message says it never started). The job may still be running on the fleet — this is what the client knows, not a claim the run failed. |
 | `timeout_budget_unreachable` | The corner never started: `options.fail_fast_probe`'s calibration probe measured a rate implying `options.timeout_s` cannot plausibly cover the full analysis window, so the whole grid was aborted before dispatch (issue #1694). Carries additional `reached_s`/`fraction` fields — an *estimate* of how far this corner would have gotten, derived from the measured rate, not a real per-corner recovery. See "Timeout-budget preflight" above. |
 | `convergence_retry` | The record of an opt-in retry (`options.retry_on_convergence_error`, issue #2973): the unit's first attempt ended in a `nonconvergence` error, so it was re-run with tighter solver options. The message names the `.options` card used and whether the retry recovered. `severity: "warning"`; informational, it never changes the unit's status. See "Retrying a non-converged unit" below. |
@@ -5707,6 +5790,7 @@ the *response* echoes back.
 | `models.pdk`/`pdk_root`  | string            | Resolve `models.lib` — and any per-section `lib` — through `klt pdk find` instead of a literal path.                                                                    |
 | `corners.process`        | array\<string \| {name, sections: array\<string \| {lib, section}\>}\> | Process-corner axis. Each entry is either a bare `.lib` section name (single `.lib` card) or a bundle object `{"name": str, "sections": [...]}` (one `.lib` card per section, in order). Each `sections[]` entry is a bare section name (read from `models.lib`) or `{"lib": str, "section": str}` naming its own model library for that section (issue #2522 — `$VAR`/`~` expand, relative refs resolve like `models.lib`; each must exist, checked before any corner runs, exit 1 otherwise). See "Corner axes" above. |
 | `corners.supply_v`       | object            | Supply axis, keyed by voltage-source name (not a `.param`); arrays sweep together by index.                                                                            |
+| `corners.variants`       | array\<object\> | Issue #3252. Named correlated source arrangements `{name, sources: {src: number \| expr}}`; each is its own corner unit (`corner_id` suffix `/@<name>`, report field `variant`). See "Corner axes" above. |
 | `corners.temperature_c`  | array\<number\>   | Temperature axis, degrees Celsius. Defaults to `[27]`.                                                                                                                 |
 | `corners.params`         | object            | Issue #3035. Numeric design-parameter axis: SPICE parameter name → equal-length nonempty array of finite numbers, zipped by index and expanded innermost (after temperature). Applied with `alterparam` + `reset`; each corner echoes `params` and its `corner_id` gains `/params:<pairs>`. See "Corner axes" above. |
 | `exclude`                | array\<object\>   | Partial corner specs (`process`, `temperature_c`, `supply_v`, `params`) dropped from the expansion.                                                                      |
@@ -5725,6 +5809,7 @@ the *response* echoes back.
 | `options.keep_artifacts` | boolean           | Retain per-corner logs/rawfiles on disk under `--outdir` (or its default) and reference them from the response. Defaults to `false`.                                   |
 | `options.waveforms`      | boolean           | Capture the optional waveform artifact (see above). Defaults to `false`.                                                                                               |
 | `options.max_workers`    | integer           | Worker-pool size for the `local-parallel` backend; ignored by `local`. Must be a positive integer. Defaults to a conservative estimate derived from the local CPU count (see "Execution backends" above). Overridable with the `--max-workers` CLI flag, and capped by the host's `KLT_SIM_MAX_WORKERS` when set (a larger value is clamped, not refused). |
+| `options.threads_per_worker` | integer       | OpenMP threads each ngspice worker may use (`OMP_NUM_THREADS`). Positive integer. Defaults to `1` when more than one worker runs concurrently, otherwise the ambient environment. See "Threads per worker" under "Execution backends". |
 | `options.wall_clock_budget_s` | number       | Overall wall-clock budget in seconds for the whole sweep. Must be a positive number. Defaults to unbounded (today's behaviour). Overridable with the `--budget-s` CLI flag. See "Wall-clock budget, orphan safety, and resume" above. |
 | `options.resume`         | boolean           | Resume from a matching on-disk checkpoint under `--outdir`, skipping corners already completed by a prior interrupted run of this same request. Defaults to `false`. Overridable with the `--resume` CLI flag. Not supported with `backend: "remote"` (application error, exit 1). See "Wall-clock budget, orphan safety, and resume" above. |
 | `options.fail_fast_probe` | boolean          | Two-pass fail-fast probe (issue #1694): run a bounded calibration `tran` slice on the grid's first corner before dispatching any real corner, and abort the whole grid if the measured rate implies `options.timeout_s` cannot plausibly cover the full analysis window. Defaults to `false`. Overridable with the `--fail-fast-probe` CLI flag. Only applies to `kind: "tran"` analyses on the `local`/`local-parallel` backends. See "Timeout-budget preflight" above. |

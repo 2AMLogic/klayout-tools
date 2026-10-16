@@ -1663,7 +1663,13 @@ artifacts:
   own `run_sim` calls inherit its ownership and never self-contend; within
   one thread, re-entry on an owned root or its descendants is free, while
   owning a descendant and then requesting its ancestor is refused (acquire
-  outermost first). Acquisition never blocks, so it cannot deadlock.
+  outermost first). Acquisition never blocks, so it cannot deadlock. A child
+  process does not inherit a lock, with one additive exception (#3291):
+  `klt pex --measure-command` exports `KLT_OUTDIR_LOCK_INHERIT=<canonical
+  $KLT_PEX_ARTIFACTS_DIR>`, and a `klt` run whose output directory is that
+  directory or a descendant is covered by the parent's ownership. Ancestors,
+  siblings and unrelated roots are refused as usual; `error.code` values and
+  `schema_version` are unchanged.
 - **Scope and limits.** Cooperating `klt` writers on one host that resolve
   the same lock registry (`$KLT_LOCK_DIR`, default `/tmp/klt-locks-<uid>`)
   on a filesystem where `flock` works. Other tools, writers that do not use
