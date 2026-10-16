@@ -6031,7 +6031,7 @@ def test_sky130_holes_area_rules_cite_pinned_sky130a_mr_drc():
         assert rule.provenance.source_repo == "fossi-foundation/open-pdks"
         assert rule.provenance.source_path == "sky130/klayout/sky130A_mr.drc"
         assert rule.provenance.rule_id == source_rule_id
-        assert rule.provenance.commit == "c6d73a35f524070e85faff4a6a9eef49553ebc2b"
+        assert rule.provenance.commit == "f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7"
 
 
 def test_sky130_deck_check_kind_breakdown():
@@ -6106,8 +6106,8 @@ def test_sky130_area_rules_cite_pinned_sky130a_mr_drc():
         assert rule.provenance.source_path == "sky130/klayout/sky130A_mr.drc"
         assert rule.provenance.rule_id == source_rule_id
         # sky130.py's own `_OPEN_PDKS_COMMIT` -- the pinned open_pdks revision
-        # of the volare sky130A install every other sky130 rule cites.
-        assert rule.provenance.commit == "c6d73a35f524070e85faff4a6a9eef49553ebc2b"
+        # of the ciel sky130A install every other sky130 rule cites.
+        assert rule.provenance.commit == "f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7"
 
 
 # --- nwell.width.1 / nwell.space.1 (issue #1420) ------------------------
