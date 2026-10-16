@@ -357,7 +357,7 @@ not `klt --version`, if you need to detect this kind of drift. See
   `sky130A_mr.drc`) and four sky130 rules using it: `met1.enclosing_adjacent.via.1`
   (`via.5a`), `met2.enclosing_adjacent.via.1` (`m2.5`),
   `met2.enclosing_adjacent.via2.1` (`via2.5`), `met3.enclosing_adjacent.via3.1`
-  (`via3.5`). The sky130 deck grows from 136 to 140 rules (additive; the
+  (`via3.5`). The sky130 deck grows from 138 to 142 rules (additive; the
   deck hash changes).
 - **`klt lvs` gate-level-verilog accepts more `assign` shapes** (issue
   #2941): a part-select on either side (`assign imm = word[7:0];`,
