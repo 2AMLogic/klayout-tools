@@ -5667,6 +5667,25 @@ Pass `--def-pins <routed.def>` (or `--pins`) too. Without either, the
 response's `warnings[]` carries a `--def-net-connections without
 --def-pins/--pins` entry; the SPEF bytes are unchanged by the warning.
 
+**Live OpenSTA check (issue #3560).** Measured on the `gcd` corpus design
+(`klt place-and-route` to `route`, OpenROAD `26Q3-1510-g6cb3f2b704`, tt
+corner), `klt extract --abstract-cells 'sky130_fd_sc_hd__*' --parasitics
+--spef … --def-net-connections gcd.def --def-pins gcd.def`, then `klt sta`:
+
+| `klt extract` flags | `design_nets_annotated` | `STA-1650` | unannotated drivers | `delay_changed` |
+| --- | --- | --- | --- | --- |
+| above, no `--def-net-names` | 52 / 537 | 520 | 486 | `true` |
+| above plus `--def-net-names` | 537 / 537 | 35 | 3 | `true` |
+| plus `--def-net-names`, no `--def-pins` | 537 / 537 | 1036 | 3 | `true` |
+
+So `--def-pins` is necessary but not sufficient: without `--def-net-names`
+the extracted net names are `$N` and almost nothing correlates, and even with
+both, `annotation_complete` stays `false` (35 `STA-1650`). Those 35 are
+`*D_NET \$N` blocks for unlabelled layout nets, not PIN-name or
+floating-duplicate cases; they are tracked in #3580. The pre-PR-#3512
+baseline was not re-measured, so these numbers show the current state, not
+the delta from #3512.
+
 **Port PIN name ≠ NET name (issue #3257).** For a DEF `- PortA + NET netA`
 record, the `*PORTS` list and the net's `*P` entry use the PIN name
 (`PortA`) and the net's RC hub is the internal `netA:1` node, not the bare
