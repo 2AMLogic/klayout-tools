@@ -8,8 +8,9 @@ defaulting to ``text``. New subcommands register themselves here and point their
 import argparse
 import sys
 
-from .. import arith_gen, netlist, pdk_stackup, pex
+from .. import arith_gen, netlist, netlist_batch, pdk_stackup, pex
 from ..equiv import SUPPORTED_SIM_BACKENDS
+from ..extract_parasitics import parse_parasitic_variants
 from ..render import DEFAULT_HEIGHT, DEFAULT_WIDTH
 from . import (
     arith_gen_cmd,
@@ -45,6 +46,7 @@ from . import (
     precheck_cmd,
     render_cmd,
     report_cmd,
+    reset_coverage_cmd,
     ring_check_cmd,
     signoff_cmd,
     sim_cmd,
@@ -77,6 +79,13 @@ def _add_format_arg(
     to override for the few subcommands with non-standard format options.
     """
     parser.add_argument("--format", choices=list(choices), default="text", help=help)
+
+
+def _parasitic_variant_arg(value: str) -> str:
+    """argparse ``type=`` for ``--parasitic-variant`` (issue #3056): a value
+    outside the closed grammar is a usage error (exit 2)."""
+    parse_parasitic_variants([value], argparse.ArgumentTypeError)
+    return value
 
 
 def _deck_names_str() -> str:
@@ -223,6 +232,8 @@ def create_parser() -> argparse.ArgumentParser:
     _add_precheck_parser(subparsers)
 
     _add_socket_check_parser(subparsers)
+
+    _add_reset_coverage_parser(subparsers)
 
     _add_lef_abstract_parser(subparsers)
 
@@ -564,7 +575,34 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
             "docs/cli/sim.md for the request/response contract."
         ),
     )
-    sim_parser.add_argument("request", help="path to a klt sim request JSON file")
+    sim_parser.add_argument(
+        "request",
+        nargs="?",
+        default=None,
+        help="path to a klt sim request JSON file (or use --batch-set)",
+    )
+    sim_parser.add_argument(
+        "--batch-set",
+        dest="batch_set",
+        nargs="+",
+        metavar="REQUEST",
+        default=None,
+        help=(
+            "submit several independent request files to the batch fleet in "
+            "one invocation (issue #2869) instead of the single positional "
+            "request: at most --max-in-flight run at once, the rest queue, "
+            "and one aggregate JSON envelope reports every request. Always "
+            "backend `batch`; never falls back to local ngspice. See "
+            "docs/cli/sim.md 'Submitting a set of requests'."
+        ),
+    )
+    sim_parser.add_argument(
+        "--max-in-flight",
+        dest="max_in_flight",
+        type=int,
+        default=None,
+        help="with --batch-set, how many requests are in flight at once (default: 4)",
+    )
     sim_parser.add_argument(
         "-o",
         "--outdir",
@@ -1763,7 +1801,19 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
         default=None,
         help=(
             "path to write the extracted SPICE netlist "
-            "(default: <file> with its extension replaced by .spice)"
+            "(default: <file> with its extension replaced by .spice; "
+            "see --no-netlist)"
+        ),
+    )
+    extract_parser.add_argument(
+        "--no-netlist",
+        action="store_true",
+        default=False,
+        help=(
+            "census-only run: write no netlist anywhere (nothing lands next "
+            "to the input) and report netlist_path/netlist_sha256 as null. "
+            "Counts and status are identical to a normal run. Cannot be "
+            "combined with -o/--output or --subcircuit/--subcircuit-output"
         ),
     )
     extract_parser.add_argument(
@@ -1978,6 +2028,25 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     extract_parser.add_argument(
+        "--parasitic-variant",
+        dest="parasitic_variants",
+        type=_parasitic_variant_arg,
+        action="append",
+        default=None,
+        metavar="VARIANT",
+        help=(
+            "drop parasitic elements at injection time (issue #3056); "
+            "repeatable and composable. One of drop-r:NET|* (short the "
+            "net's star legs into its hub -- no series R), "
+            "drop-c-ground:NET|* (omit the net's ground C), or "
+            "drop-c-coupling (omit every Ccc_* card). Requires "
+            "--parasitics. Anything else is a usage error; a NET matching "
+            "no net is reported in `warnings`. Off by default -- "
+            "byte-identical to today's behavior. See docs/cli/extract.md's "
+            "'--parasitic-variant' section."
+        ),
+    )
+    extract_parser.add_argument(
         "--mom-rlc-net",
         dest="mom_rlc_net",
         default=None,
@@ -2134,6 +2203,29 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
             "as the declared set instead of a hand-derived --pins list. "
             "Off by default -- byte-identical to today's behavior. See "
             "docs/cli/extract.md's 'DEF-derived declared pins' section."
+        ),
+    )
+    extract_parser.add_argument(
+        "--rename-declared-pins",
+        dest="rename_declared_pins",
+        action="store_true",
+        default=False,
+        help=(
+            "rename each surviving promoted pin net to its declared name "
+            "(issue #2854): a net whose comma-joined component labels "
+            "contain exactly one --pins/--def-pins name is renamed to it, "
+            "so the written .SUBCKT header and nets[] carry the declared "
+            "name (e.g. 'vss') instead of KLayout's joined multi-label "
+            "form (e.g. 'VGND|g_vss_m1|vss') -- which is what lets `klt "
+            "lvs`'s options.anchor_top_level_pins pair it with a "
+            "same-named reference pin. A net matching 2+ declared names is "
+            "reported (a short between interface pins), never renamed; a "
+            "rename colliding with an existing net name is skipped and "
+            "reported. Every rename is disclosed in a warnings entry and "
+            "the additive pin_renames response field. Requires --pins or "
+            "--def-pins. Off by default -- byte-identical to today's "
+            "behavior. See docs/cli/extract.md's 'Renaming promoted pins "
+            "to their declared name' section."
         ),
     )
     extract_parser.add_argument(
@@ -2697,6 +2789,29 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     pex_parser.add_argument(
+        "--flatten-schematic",
+        dest="flatten_schematic",
+        action="store_true",
+        default=False,
+        help=(
+            "flatten the schematic DUT to PDK leaf devices before the "
+            "schematic-side run (issue #2889): every subcircuit the DUT "
+            "netlist defines is inlined (instance-path-prefixed device/node "
+            "names, parameter and m= overrides propagated, .global nets "
+            "kept), written to <outdir>/schematic-dut.flat.spice, and each "
+            "testbench's DUT .include is re-pointed at it -- so a "
+            "hierarchical schematic compares like with like against the "
+            "always-flat extraction and model_mismatch stops firing on "
+            "hierarchy alone. A cycle, an X-call pin-count mismatch or a "
+            "card the flattener cannot rename safely is an error "
+            "(error.code schematic_flatten_*), never a partial flatten. Off "
+            "by default -- byte-identical to today's behavior. Reported as "
+            "`flatten_schematic` plus the `schematic_flatten` block (path, "
+            "sha256, inlining summary). The klt pex counterpart of klt "
+            "lvs's options.flatten_reference."
+        ),
+    )
+    pex_parser.add_argument(
         "--deck",
         required=True,
         help=(
@@ -2790,6 +2905,24 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     pex_parser.add_argument(
+        "--rename-declared-pins",
+        dest="rename_declared_pins",
+        action="store_true",
+        default=False,
+        help=(
+            "passed through to `klt extract --rename-declared-pins` (issue "
+            "#2854): each surviving promoted pin net whose component "
+            "labels contain exactly one --pins name is renamed to it, so "
+            "the extracted DUT's .SUBCKT header carries the declared names "
+            "the schematic DUT declares (required whenever a boundary net "
+            "carries extra drawn labels and its declared name is only one "
+            "component of KLayout's joined net name). Requires --pins. Off "
+            "by default -- byte-identical to today's behavior. The "
+            "effective value is echoed in the JSON response's "
+            "`extraction.rename_declared_pins`."
+        ),
+    )
+    pex_parser.add_argument(
         "--label-layer",
         dest="label_layers",
         action="append",
@@ -2836,6 +2969,25 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "extract --distributed-rc`; requires --critical-net. Off by "
             "default -- byte-identical to today's behavior. See "
             "docs/cli/extract.md's '--distributed-rc' section."
+        ),
+    )
+    pex_parser.add_argument(
+        "--parasitic-variant",
+        dest="parasitic_variants",
+        type=_parasitic_variant_arg,
+        action="append",
+        default=None,
+        metavar="VARIANT",
+        help=(
+            "drop parasitic elements at injection time (issue #3056); "
+            "repeatable and composable. One of drop-r:NET|* (short the "
+            "net's star legs into its hub -- no series R), "
+            "drop-c-ground:NET|* (omit the net's ground C), or "
+            "drop-c-coupling (omit every Ccc_* card). Requires "
+            "--parasitics. Anything else is a usage error; a NET matching "
+            "no net is reported in `warnings`. Off by default -- "
+            "byte-identical to today's behavior. See docs/cli/extract.md's "
+            "'--parasitic-variant' section."
         ),
     )
     pex_parser.add_argument(
@@ -2968,6 +3120,19 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
             "<file> arguments and with --manifest). See "
             "docs/cli/signoff.md's 'Fleet roll-up' section for the fleet "
             "manifest shape."
+        ),
+    )
+    signoff_parser.add_argument(
+        "--repo-root",
+        metavar="DIR",
+        help=(
+            'directory that `scope: "repo"` input paths resolve against, '
+            "instead of the nearest `.git` ancestor of the evidence file -- "
+            "for grading evidence copied outside any git checkout (a source "
+            "archive, a vendored copy, an unpacked CI artifact). Must be an "
+            "existing directory. Only meaningful with --manifest/--fleet. "
+            "See docs/cli/signoff.md's 'Grading outside a git checkout' "
+            "section."
         ),
     )
     signoff_parser.add_argument(
@@ -3109,7 +3274,9 @@ def _add_components_parser(subparsers: argparse._SubParsersAction) -> None:
         help=(
             "conductor layer set as a path to a JSON file, or an inline JSON "
             'array of {"name": str, "layer": [layer, datatype]} objects '
-            '(e.g. \'[{"name": "m1", "layer": [68, 20]}]\'). Not '
+            '(e.g. \'[{"name": "m1", "layer": [68, 20]}]\'); an entry may '
+            'add "and"/"not": lists of [layer, datatype] pairs that keep only '
+            "the part of its layer overlapping / outside those layers. Not "
             "validated by argparse -- an empty/malformed value exits 1 with "
             "a clean error, per docs/cli/components.md's exit-code contract, "
             "rather than argparse's usage-error exit 2."
@@ -3124,7 +3291,8 @@ def _add_components_parser(subparsers: argparse._SubParsersAction) -> None:
             '"between": [conductor_name_a, conductor_name_b]} objects '
             '(e.g. \'[{"name": "mcon", "layer": [67, 44], "between": '
             '["li", "m1"]}]\'); each via joins the two named --conductors '
-            "entries only where its own shapes actually land on both. Omit "
+            "entries only where its own shapes actually land on both. Takes "
+            'the same optional "and"/"not" qualifiers as --conductors. Omit '
             "for a purely same-layer connectivity report."
         ),
     )
@@ -4504,6 +4672,15 @@ def _add_layers_parser(subparsers: argparse._SubParsersAction) -> None:
             "unique text strings (requires --flattened)"
         ),
     )
+    layers_parser.add_argument(
+        "--deck",
+        default=None,
+        help=(
+            "built-in deck whose layer-name table fills each entry's name "
+            "when the stream carries none; the report also records the "
+            "deck's content_hash"
+        ),
+    )
     _add_format_arg(layers_parser)
     layers_parser.set_defaults(func=layers_cmd.run)
 
@@ -4520,7 +4697,9 @@ def _add_stats_parser(subparsers: argparse._SubParsersAction) -> None:
             "(not instance-resolved); flattened_polygon_count/"
             "flattened_vertex_count are the instance-resolved counterparts, "
             "weighted by CellInstArray multiplicity like area_um2, matching "
-            "'klt layers --flattened'."
+            "'klt layers --flattened'. area_um2 is the raw sum of shape "
+            "areas (overlaps double-counted); merged_area_um2 is the "
+            "unioned area."
         ),
     )
     stats_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
@@ -4535,6 +4714,27 @@ def _add_stats_parser(subparsers: argparse._SubParsersAction) -> None:
         help=(
             "top cell to report on when the stream has more than one "
             "(required in that case; optional otherwise)"
+        ),
+    )
+    stats_parser.add_argument(
+        "--density-window",
+        type=float,
+        default=None,
+        metavar="UM",
+        help=(
+            "also report per-layer drawn-area fraction (merged geometry) over "
+            "square windows of this size in um tiled over the top-cell bbox; "
+            "edge windows are clipped and judged against their clipped area"
+        ),
+    )
+    stats_parser.add_argument(
+        "--window-layer",
+        action="append",
+        default=None,
+        metavar="L/D",
+        help=(
+            "restrict --density-window to this layer/datatype (repeatable); "
+            "default: every non-annotation layer with geometry"
         ),
     )
     _add_format_arg(stats_parser)
@@ -5064,6 +5264,55 @@ def _add_precheck_parser(subparsers: argparse._SubParsersAction) -> None:
     precheck_parser.set_defaults(func=precheck_cmd.run)
 
 
+def _add_reset_coverage_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``reset-coverage`` verb: unreset state elements of a netlist."""
+    reset_parser = subparsers.add_parser(
+        "reset-coverage",
+        help="list state elements of a gate-level netlist an async reset misses",
+        description=(
+            "Classify every sequential cell and hard macro of a flat "
+            "gate-level Verilog netlist: reset/set from the named reset port "
+            "through only buffers/inverters with the right polarity, or "
+            "unreset with a machine-readable reason. A --waivers file "
+            "justifies unreset elements; an unwaived element or a waiver "
+            "naming no unreset element fails (exit 3). Read-only, headless. "
+            "See docs/cli/reset-coverage.md."
+        ),
+    )
+    reset_parser.add_argument(
+        "netlist", help="path to a flat gate-level Verilog netlist"
+    )
+    reset_parser.add_argument(
+        "--cell-models",
+        required=True,
+        action="append",
+        metavar="FILE",
+        help="PDK functional Verilog cell-model file (repeatable)",
+    )
+    reset_parser.add_argument(
+        "--reset-port", required=True, help="name of the reset port of the top module"
+    )
+    reset_parser.add_argument(
+        "--reset-polarity",
+        choices=("low", "high"),
+        default="low",
+        help="level at which the reset port is asserted (default: low)",
+    )
+    reset_parser.add_argument(
+        "--top", default=None, help="top module (required when the netlist has several)"
+    )
+    reset_parser.add_argument(
+        "--waivers",
+        default=None,
+        metavar="FILE",
+        help=(
+            'JSON waiver file: {"waivers": [{"instance", "justification", "reason"?}]}'
+        ),
+    )
+    _add_format_arg(reset_parser)
+    reset_parser.set_defaults(func=reset_coverage_cmd.run)
+
+
 def _add_socket_check_parser(subparsers: argparse._SubParsersAction) -> None:
     """Register the ``socket-check`` verb: check a layout against a socket contract."""
     socket_check_parser = subparsers.add_parser(
@@ -5308,6 +5557,30 @@ def _add_netlist_parser(subparsers: argparse._SubParsersAction) -> None:
             "without a duplicate .end terminating it early (issue #2680, "
             "edge 1). Off by default -- xschem's unmodified export is "
             "correct for a testbench top sheet"
+        ),
+    )
+    netlist_parser.add_argument(
+        "--backend",
+        choices=netlist_batch.SUPPORTED_BACKENDS,
+        default=None,
+        help=(
+            "where xschem runs: 'local' (this host) or 'batch' (the batch "
+            "runner, through the same S3 job contract as `klt sim --backend "
+            "batch`). Default: $KLT_NETLIST_BACKEND, else 'local'. A batch "
+            "failure is an error (exit 1), never a fallback to a local run. "
+            "See docs/cli/netlist.md's 'Batch backend'"
+        ),
+    )
+    netlist_parser.add_argument(
+        "--batch-root",
+        dest="batch_root",
+        default=None,
+        help=(
+            "--backend batch only: the directory whose git-tracked files are "
+            "uploaded as the job's input tree (default: the schematic's git "
+            "checkout). The schematic and a project --rcfile must be tracked "
+            "files under it; the uncompressed total is capped at "
+            f"{netlist_batch.MAX_BATCH_TREE_BYTES // (1024 * 1024)} MiB"
         ),
     )
     netlist_parser.add_argument(

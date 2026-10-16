@@ -1048,6 +1048,41 @@ aimed at the caller's own tighter target actually hit it. That dual meaning
 is exactly what issue #2357 closes below: the two fields above alone cannot
 say *which* limit a given count reflects.
 
+#### Congestion and routability (`congestion`, issue #2994)
+
+Comparing floorplans of one netlist (a utilization or aspect-ratio sweep) needs
+a measure of how close each point is to unroutable, which the headline fields
+above do not give. The route-stage entry carries a typed `congestion` block of
+the engine's raw values:
+
+- **`global_route`** — the global router's final congestion table
+  (`global_route -verbose`, OpenROAD `GRT-0096`): `total_overflow` and the
+  worst `max_horizontal_overflow`/`max_vertical_overflow`, `usage_pct` (all
+  layers) and `max_layer_usage_pct`, `overflow_per_layer` (name →
+  `resource`, `demand`, `usage_pct`, per-direction and total overflow) and
+  `routed_net_count`. Overflow `0` everywhere means the global router found a
+  legal solution. `max_gcell_usage_pct` is always `null`: the engine reports
+  usage per layer, not per GCell.
+- **`detailed_route`** — the violation series of the *first* `detailed_route`
+  pass (the primary route, before antenna-repair reroutes): the count after the
+  first iteration, `iteration_count`, the full `drc_violations_per_iteration`
+  list and whether it `converged` to `0`. The final count stays in
+  `route_drc_violation_count`.
+- **`completeness`** — `unrouted_net_count`: signal nets with two or more
+  terminals that carry no routed wire at all (`0` for a clean route), out of
+  `signal_net_count`. `partially_routed_net_count` is `null` (OpenROAD has no
+  per-net connectivity check), so `route_drc_violation_count: 0` plus
+  `unrouted_net_count: 0` is the strongest completeness statement available.
+- **`placement`** — the last routability-driven placement iteration's
+  `total_routing_overflow` / `overflowed_tile_count` and the final weighted
+  congestion (`GPL-0041`/`GPL-0042`/`GPL-1005`).
+
+Observed on `gcd` (sky130_fd_sc_hd, OpenROAD 26Q3-1510): 38% utilization gave
+`usage_pct` 16.94 / `max_layer_usage_pct` 30.81 / `final_weighted_congestion`
+0.6277; 58% gave 25.64 / 40.81 / 0.717. Neither overflowed, so `total_overflow`
+was `0` in both — usage and weighted congestion are the early signal on a
+design this small.
+
 #### Library-only counterpart (`max_transition_violation_count_vs_library`, `max_capacitance_violation_count_vs_library`, issue #2357)
 
 A caller-stated `constraints.max_transition_ns`/`.max_capacitance_pf` is
@@ -2147,6 +2182,7 @@ plain string" for the full enumeration and rationale.
 | `worst_setup_slack_ns` / `worst_hold_slack_ns` | number \| null | The corner-swept worst-case setup/hold slack — see "Multi-corner setup/hold sweep" below. `null` before the `"route"` stage; distinct from (and does not replace) `worst_slack_ns`, which stays the single nominal-corner value it has always been (issue #949). |
 | `max_transition_violation_count` / `max_capacitance_violation_count` | integer \| null | Additive fields (issue #1709). The **effective design-rule-check verdict** at the same swept corners as `worst_setup_slack_ns`/`worst_hold_slack_ns` above — how many pins violate whichever of the max-transition (OpenSTA `-max_slew`)/max-capacitance limit ends up tighter at those decks: the caller's own `constraints.max_transition_ns`/`.max_capacitance_pf` when given, or the loaded liberty deck's own per-pin limit otherwise — from `report_check_types ... -violators` run inside the sweep's own already-paid-for invocation. `0` on a design-rule-clean run (present-but-zero, like `route_drc_violation_count`); `null` before the `"route"` stage, and `null` when `pdk.sweep_corners` explicitly sweeps zero corners. Reported whether or not `constraints.max_transition_ns`/`.max_capacitance_pf` were given. There is deliberately **no** `max_fanout_violation_count` — see "Design-rule-check verdict" below. |
 | `max_transition_violation_count_vs_library` / `max_capacitance_violation_count_vs_library` | integer \| null | Additive fields (issue #2357). The **library-only** counterpart of the pair above — the same check, run a second time in the same invocation *before* any caller-stated `constraints.max_transition_ns`/`.max_capacitance_pf` override is applied, so it reflects only what the loaded liberty decks themselves declare. Same `null`-before-`"route"`/present-but-zero-when-clean gating as the pair above. Lets a caller tell a guard-band overrun (this pair `0`, the effective pair above nonzero) apart from a genuine library violation (both pairs nonzero) directly from the report — see "Library-only counterpart" below. Identical to the pair above whenever the caller sets neither constraint field. |
+| `congestion` | object \| null | Additive field (issue #2994). Route-stage routability figures, restated at top level; `null` before the `"route"` stage. Sections: `global_route` (`total_overflow`, `max_horizontal_overflow`, `max_vertical_overflow`, `usage_pct`, `max_layer_usage_pct`, `overflow_per_layer`, `routed_net_count`, `max_gcell_usage_pct`), `detailed_route` (`first_iteration_drc_violation_count`, `iteration_count`, `drc_violations_per_iteration`, `converged`), `completeness` (`signal_net_count`, `unrouted_net_count`, `partially_routed_net_count`) and `placement` (`total_routing_overflow`, `overflowed_tile_count`, `final_weighted_congestion`). A figure the engine could not produce is `null` and named, with the reason, in `null_reasons` (keyed `section.field`) — never omitted or `0`. See "Congestion and routability" below. |
 | `corners` | array\<object\> \| null | Additive field (issue #1092). Per-corner breakdown of the sweep behind `worst_setup_slack_ns`/`worst_hold_slack_ns` — one entry per corner actually swept (every shipped corner, or the `request.pdk.sweep_corners`-named subset when given), each `{"name": ..., "setup_slack_ns": ..., "hold_slack_ns": ..., "total_negative_setup_slack_ns": ..., "total_negative_hold_slack_ns": ..., "timing_status": ..., "max_transition_violation_count": ..., "max_capacitance_violation_count": ..., "max_transition_violation_count_vs_library": ..., "max_capacitance_violation_count_vs_library": ...}` (the two effective `max_*_violation_count` fields added by issue #1709 and their two library-only `..._vs_library` counterparts added by issue #2357; the two `total_negative_*_slack_ns` fields added by issue #1866; `timing_status` added by issue #1865 — computed from that corner's own two slack values, so a corner OpenSTA could not time is never mistaken for a clean one). Names which corner decided each aggregate: the entry with the lowest `setup_slack_ns` is the one `worst_setup_slack_ns` came from, and likewise the lowest `hold_slack_ns` for `worst_hold_slack_ns`, and the per-corner violation counts name which deck's limits a pin actually breaks. The two `total_negative_*_slack_ns` fields report that corner's own total negative slack (TNS) — how much of the design fails at that corner, distinct from the worst-single-path `setup_slack_ns`/`hold_slack_ns` — see "Per-corner total negative slack" below. `null` before the `"route"` stage (mirroring the two aggregates above); `[]` when `sweep_corners` explicitly names zero corners. See "Multi-corner setup/hold sweep" below. |
 | `estimated_power_mw` | number \| null | `null` before placement. |
 | `clock_skew_ns` | number \| null | Worst setup-side clock skew (`report_clock_skew_metric -setup`) across the clock tree TritonCTS built. `null` before the `"cts"` stage — no clock tree exists yet, so there is nothing to measure skew across (issue #783). |

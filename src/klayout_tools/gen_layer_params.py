@@ -1438,17 +1438,23 @@ _PDK_RES_FLAVOR_LAYERS: dict[str, dict[str, tuple[tuple[int, int], ...]]] = {
         "generic": (),
         # sky130_fd_pr__res_high_po_* (319.8 ohm/sq): psdm P+ implant + rpm
         # precision-resistor mask (EXTRACTION_DECK.resistors["res_high_po"].
-        # requires).
+        # requires), plus npc (issue #3077): not in that `requires` -- the
+        # curated deck never keys off it -- but the open_pdks Magic tech
+        # forms `xhrpoly` only where `RPM & POLYRES & POLY & PSDM & NPC`, so
+        # without it Magic sees no resistor at all.
         "high": (
             (94, 20),  # psdm -- P+ implant
             (86, 20),  # rpm  -- 300 ohm precision-resistor mask
+            (95, 20),  # npc  -- Magic's `xhrpoly` needs it
         ),
         # sky130_fd_pr__res_xhigh_po_* (2 kohm/sq): psdm P+ implant + urpm
         # (EXTRACTION_DECK.resistors["res_xhigh_po"].requires). rpm/urpm are
-        # mutually exclusive, so drawing urpm (not rpm) selects xhigh.
+        # mutually exclusive, so drawing urpm (not rpm) selects xhigh. npc
+        # as for "high" (Magic's `uhrpoly`, issue #3077).
         "xhigh": (
             (94, 20),  # psdm -- P+ implant
             (79, 20),  # urpm -- 2 kohm precision-resistor mask
+            (95, 20),  # npc  -- Magic's `uhrpoly` needs it
         ),
     },
     "gf180mcu": {
@@ -1688,13 +1694,18 @@ _PDK_RES_FLAVOR_END_CONTACT_UM: dict[str, dict[str, tuple[float, float]]] = {
 #: ``(rpm | urpm) & psdm & poly.interacting(poly_rs)``, so the masks must
 #: cover the end-pad licons. Values are the sky130 periphery rules
 #: ``rpm.3`` (rpm/urpm enclosure of the poly resistor, 0.2um) and ``rpm.4``
-#: (psdm enclosure, 0.11um). The resistor-ID marker (``poly.res`` 66/13)
-#: stays on the body only. A mask absent here keeps the body-only box.
+#: (psdm enclosure, 0.11um); npc (issue #3077) takes the 0.095um with which
+#: ``sky130A.tech``'s own ``cifoutput`` grows NPC around ``xpc`` / ``xhrpoly``
+#: / ``uhrpoly`` (``npc.1``/``npc.2``'s 0.27um width/space are met because
+#: neighbouring units' boxes abut, as for rpm/psdm). The resistor-ID marker
+#: (``poly.res`` 66/13) stays on the body only. A mask absent here keeps the
+#: body-only box.
 _PDK_RES_FLAVOR_MASK_ENCLOSURE_UM: dict[str, dict[tuple[int, int], float]] = {
     "sky130": {
         (86, 20): 0.2,  # rpm  -- rpm.3
         (79, 20): 0.2,  # urpm -- rpm.3
         (94, 20): 0.11,  # psdm -- rpm.4
+        (95, 20): 0.095,  # npc  -- sky130A.tech cifoutput "xpc surrounds ... 0.095um"
     },
 }
 
@@ -2213,7 +2224,7 @@ def _cut_fixed_size_um(family: str, layer: Any) -> float:
     return min(bounds) if bounds else 0.0
 
 
-def _mfg_grid_um(family: str, layer: Any) -> float:
+def mfg_grid_um(family: str, layer: Any) -> float:
     """The manufacturing grid (um) ``family``'s curated deck requires vertices
     on ``layer`` to sit on (issue #2648), or ``0.0`` when the deck declares no
     ``"ongrid"`` rule there (or ``family`` has no registered deck) -- "draw the
@@ -2663,7 +2674,7 @@ def _device_layer_params(
         "active_layer": _role_layer_info(family, "active"),
         "poly_layer": _role_layer_info(family, "poly"),
         "contact_layer": _role_layer_info(family, "contact"),
-        "mfg_grid_um": _mfg_grid_um(family, _PDK_ROLE_LAYERS[family].get("contact")),
+        "mfg_grid_um": mfg_grid_um(family, _PDK_ROLE_LAYERS[family].get("contact")),
         "contact_fixed_size_um": _cut_fixed_size_um(
             family, _PDK_ROLE_LAYERS[family].get("contact")
         ),
@@ -2773,7 +2784,7 @@ def _resistor_layer_params(
         resolved: dict[str, Any] = {
             "poly_layer": kdb.LayerInfo(*levels["body"]),
             "contact_layer": kdb.LayerInfo(*levels["via"]),
-            "mfg_grid_um": _mfg_grid_um(family, levels["via"]),
+            "mfg_grid_um": mfg_grid_um(family, levels["via"]),
             "contact_fixed_size_um": _cut_fixed_size_um(family, levels["via"]),
             "metal_layer": kdb.LayerInfo(*levels["landing"]),
             "res_mark_layer": kdb.LayerInfo(*levels["marker"]),
@@ -2807,7 +2818,7 @@ def _resistor_layer_params(
     resolved = {
         "poly_layer": _role_layer_info(family, "poly"),
         "contact_layer": _role_layer_info(family, "contact"),
-        "mfg_grid_um": _mfg_grid_um(family, _PDK_ROLE_LAYERS[family].get("contact")),
+        "mfg_grid_um": mfg_grid_um(family, _PDK_ROLE_LAYERS[family].get("contact")),
         "contact_fixed_size_um": (
             0.0
             if end_w_um > 0.0
@@ -3037,7 +3048,7 @@ def _ring_layer_params(
     return {
         "tap_layer": _role_layer_info(family, "tap"),
         "contact_layer": _role_layer_info(family, "contact"),
-        "mfg_grid_um": _mfg_grid_um(family, _PDK_ROLE_LAYERS[family].get("contact")),
+        "mfg_grid_um": mfg_grid_um(family, _PDK_ROLE_LAYERS[family].get("contact")),
         "contact_fixed_size_um": _cut_fixed_size_um(
             family, _PDK_ROLE_LAYERS[family].get("contact")
         ),
@@ -3162,7 +3173,7 @@ def _bjt_layer_params(
     return {
         "active_layer": _role_layer_info(family, "active"),
         "contact_layer": _role_layer_info(family, "contact"),
-        "mfg_grid_um": _mfg_grid_um(family, _PDK_ROLE_LAYERS[family].get("contact")),
+        "mfg_grid_um": mfg_grid_um(family, _PDK_ROLE_LAYERS[family].get("contact")),
         "contact_fixed_size_um": _cut_fixed_size_um(
             family, _PDK_ROLE_LAYERS[family].get("contact")
         ),
@@ -3281,7 +3292,7 @@ def _esd_device_layer_params(
         "active_layer": _role_layer_info(family, "active"),
         "poly_layer": _role_layer_info(family, "poly"),
         "contact_layer": _role_layer_info(family, "contact"),
-        "mfg_grid_um": _mfg_grid_um(family, _PDK_ROLE_LAYERS[family].get("contact")),
+        "mfg_grid_um": mfg_grid_um(family, _PDK_ROLE_LAYERS[family].get("contact")),
         "contact_fixed_size_um": _cut_fixed_size_um(
             family, _PDK_ROLE_LAYERS[family].get("contact")
         ),

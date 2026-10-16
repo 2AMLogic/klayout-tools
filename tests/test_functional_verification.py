@@ -1251,7 +1251,8 @@ def test_stubbed_run_forwards_defines_and_includes_to_build(tmp_path, monkeypatc
 
     run_functional_verification(request_path)
 
-    assert runner.build_kwargs["defines"] == defines
+    assert runner.build_kwargs["defines"] == {"FUNCTIONAL": "1"}
+    assert runner.build_kwargs["build_args"] == ["-DUSE_POWER_PINS"]
     assert runner.build_kwargs["includes"] == [str(include_dir.resolve())]
 
 
@@ -1955,7 +1956,8 @@ def test_functional_define_without_sdf_is_untouched(tmp_path, monkeypatch):
     report = run_functional_verification(request_path)
 
     assert report["environment"]["sdf"] is None
-    assert runner.build_kwargs["defines"] == {"FUNCTIONAL": None}
+    assert runner.build_kwargs["defines"] == {}
+    assert runner.build_kwargs["build_args"] == ["-DFUNCTIONAL"]
 
 
 @pytest.mark.parametrize("version", ["12.0", "11.0", "12.0 (stable)"])
@@ -2441,6 +2443,93 @@ def test_stubbed_sdf_still_fails_on_a_wellformed_error_beside_a_splice(
             _RESULTS_XML_WITH_SKIP,
             extra_test_log=(
                 _SPLICED_TIMINGCHECK_TRANSCRIPT
+                + "SDF ERROR: route.sdf:2976: Unable to match ModPath D -> Q "
+                "in gcd._647_\n"
+            ),
+        ),
+    )
+
+    with pytest.raises(
+        FunctionalVerificationError,
+        match="did not fully apply: 1 diagnostic.*Unable to match ModPath",
+    ):
+        run_functional_verification(request_path)
+
+
+#: Issue #2996: the splice lands *after* an intact locator, inside the
+#: message, with the orphaned tail on a later line of its own.
+_MESSAGE_SPLICED_TRANSCRIPT = (
+    "SDF WARNING: /abs/path/klt_sdf_safe.sdf:21217: TIM   590.00ns INFO     "
+    "cocotb.klt_sdf_dut_wrapper         watching uo_out against 4 edge checks\n"
+    "INGCHECK not supported.\n"
+)
+
+#: Issue #2996: cut inside the path; the spliced-in Python warning line
+#: carries its own ``<file>:<line>:`` which satisfies the locator regex.
+_PYWARNINGS_SPLICED_TRANSCRIPT = (
+    "SDF WARNING: /abs/flow/post-layout- 48164.00ns WARNING  py.warnings  "
+    "/abs/tb.py:251: DeprecationWarning: `task.kill()` is deprecated in "
+    "favor of `task.cancel()`.\n"
+)
+
+
+@pytest.mark.parametrize(
+    "transcript",
+    [
+        _MESSAGE_SPLICED_TRANSCRIPT,
+        _PYWARNINGS_SPLICED_TRANSCRIPT,
+        "SDF WARNING: /a/x.sdf:1: TIM 12.50ps DEBUG cocotb.x y\n",
+        "SDF WARNING: /a/x.sdf:1: TIM 3us CRITICAL cocotb.x y\n",
+    ],
+)
+def test_scan_sdf_diagnostics_drops_a_message_spliced_line(tmp_path, transcript):
+    """Issue #2996: a splice after the locator is dropped from both buckets."""
+    log = _write(tmp_path / "test_icarus.log", transcript)
+
+    assert fv._scan_sdf_diagnostics(log) == ([], {})
+
+
+def test_scan_sdf_diagnostics_message_splice_keeps_intact_siblings(tmp_path):
+    log = _write(
+        tmp_path / "test_icarus.log",
+        "SDF WARNING: /a/x.sdf:1: TIMINGCHECK not supported.\n"
+        + _MESSAGE_SPLICED_TRANSCRIPT,
+    )
+
+    actionable, dropped = fv._scan_sdf_diagnostics(log)
+
+    assert actionable == []
+    assert dropped == {"timingcheck": 1}
+
+
+def test_stubbed_sdf_tolerates_a_message_spliced_transcript(tmp_path, monkeypatch):
+    """End-to-end regression for issue #2996."""
+    request_path = _sdf_request(tmp_path)
+    _stub_runner(
+        monkeypatch,
+        _FakeRunner(
+            _RESULTS_XML_WITH_SKIP,
+            extra_test_log=_MESSAGE_SPLICED_TRANSCRIPT + _PYWARNINGS_SPLICED_TRANSCRIPT,
+        ),
+    )
+
+    report = run_functional_verification(request_path)
+
+    assert report["status"] == "pass"
+    sdf = report["environment"]["sdf"]
+    assert sdf["annotated"] is True
+
+
+def test_stubbed_sdf_still_fails_on_a_wellformed_error_beside_a_message_splice(
+    tmp_path, monkeypatch
+):
+    request_path = _sdf_request(tmp_path)
+    _stub_runner(
+        monkeypatch,
+        _FakeRunner(
+            _RESULTS_XML_WITH_SKIP,
+            extra_test_log=(
+                _MESSAGE_SPLICED_TRANSCRIPT
                 + "SDF ERROR: route.sdf:2976: Unable to match ModPath D -> Q "
                 "in gcd._647_\n"
             ),
@@ -5779,3 +5868,30 @@ def test_cli_mutations_text_format_includes_summary(tmp_path, monkeypatch, capsy
     assert "mutations:" in out
     assert "[killed] #1" in out
     assert "[survived] #2" in out
+
+
+def test_valueless_define_is_passed_as_build_arg_not_serialised(tmp_path):
+    """Issue #2884: cocotb 2.x raises TypeError on a ``None`` define value, so
+    ``{"FUNCTIONAL": null}`` must reach the simulator as ``-DFUNCTIONAL``."""
+    captured: dict = {}
+
+    class _Runner:
+        def build(self, **kwargs):
+            captured.update(kwargs)
+
+    runner_module = types.SimpleNamespace(get_runner=lambda engine: _Runner())
+    fv._run_build(
+        runner_module,
+        engine="icarus",
+        sources=[],
+        hdl_toplevel="top",
+        build_dir=str(tmp_path),
+        build_args=["-g2012"],
+        defines={"FUNCTIONAL": None, "MODE": "x"},
+        includes=[],
+        timescale=("1ns", "1ps"),
+        parameters={},
+        log_path=str(tmp_path / "build.log"),
+    )
+    assert captured["defines"] == {"MODE": "x"}
+    assert captured["build_args"] == ["-g2012", "-DFUNCTIONAL"]

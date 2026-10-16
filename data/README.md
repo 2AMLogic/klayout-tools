@@ -31,6 +31,15 @@ or a stale build when the manifest has no matching entry — see
 `src/klayout_tools/remote_launcher.py`'s "no silent defaults for
 cost-relevant fields" discipline.
 
+**Runner `klt` identity (issue #2851):** entries the build script writes now
+also carry `klt_version` (what the image's `klt --version` reports) and
+`klt_ref` (the pinned `--klt-ref` it was installed from). The `batch`
+backend compares `klt_version` with the submitting client before any submit
+or launch (`docs/cli/sim.md`, "Pre-launch check from the AMI manifest").
+The checked-in entries predate the fields and are left without them on
+purpose, because their runner identity was never recorded. Absent means
+unknown, and those requests fall back to the runner-side preflight.
+
 **Pointing at a private/operator-built manifest (issue #370):** this repo's
 copy is only ever the *final fallback* of a 4-step "first hit wins"
 resolution order (`remote_launcher.load_ami_manifest`/

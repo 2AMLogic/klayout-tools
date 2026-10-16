@@ -26,6 +26,7 @@ Four tiers, mirroring `tests/test_place_and_route.py`'s own structure:
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -43,6 +44,11 @@ pytestmark = pytest.mark.usefixtures("real_build_identity_git")
 def _write(path: Path, text: str) -> str:
     path.write_text(text, encoding="utf-8")
     return str(path)
+
+
+#: Issue #2879: the `{path, scope}` shape a `klt sta` input path takes when it
+#: lives outside any repository -- as every `tmp_path` fixture input does.
+_EXTERNAL = {"path": None, "scope": "external"}
 
 
 def _write_request(path: Path, request: dict) -> str:
@@ -1117,7 +1123,7 @@ def test_run_sta_response_envelope(tmp_path, monkeypatch):
 
     report = run_sta(request_path)
 
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == post_route_sta.SCHEMA_VERSION == 2
     assert report["engine"] == "openroad"
     assert report["engine_version"] == "26Q3-771-gdeadbeef"
     assert report["status"] == "ok"
@@ -1130,7 +1136,7 @@ def test_run_sta_response_envelope(tmp_path, monkeypatch):
     assert report["hold_violation_count"] == 0
     assert report["clock_skew_ns"] == 0.021
     assert report["estimated_power_mw"] == 8.4
-    assert report["def_path"].endswith("top.def")
+    assert report["def_path"] == _EXTERNAL
     # Issue #1826: `geometry_source` defaults to `"routed"` when the request
     # omits it -- byte-for-byte the same behaviour this command had before
     # the field existed.
@@ -1255,7 +1261,7 @@ def test_run_sta_corners_produces_per_corner_array(tmp_path, monkeypatch):
 
     report = run_sta(request_path)
 
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == post_route_sta.SCHEMA_VERSION == 2
     assert report["status"] == "ok"
     assert report["engine"] == "openroad"
     assert report["engine_version"] == "26Q3-771-gdeadbeef"
@@ -1282,7 +1288,7 @@ def test_run_sta_corners_produces_per_corner_array(tmp_path, monkeypatch):
     # Structurally identical fields across every corner (issue #1871's own
     # "def_path/provenance.input hoisted once" requirement) are hoisted to
     # the top level -- never repeated inside a `corners[]` entry.
-    assert report["def_path"].endswith("top.def")
+    assert report["def_path"] == _EXTERNAL
     assert report["verilog_path"] is None
     assert report["geometry_source"] == "routed"
     assert report["spef_path"] is None
@@ -1705,7 +1711,7 @@ def test_run_sta_netlist_mode_response_envelope(tmp_path, monkeypatch):
 
     assert report["status"] == "ok"
     assert report["def_path"] is None
-    assert report["verilog_path"].endswith("top.v")
+    assert report["verilog_path"] == _EXTERNAL
     assert report["geometry_source"] == "netlist_estimate"
     assert report["wire_load_model"] == "Medium"
     assert report["wire_load_mode"] == "top"
@@ -1781,7 +1787,7 @@ def test_run_sta_with_spef_reports_annotation(tmp_path, monkeypatch):
 
     report = run_sta(request_path)
 
-    assert report["spef_path"].endswith("top.spef")
+    assert report["spef_path"] == _EXTERNAL
     annotation = report["spef_annotation"]
     assert annotation["nets_annotated"] == 1
     assert annotation["nets_total"] == 1
@@ -2451,7 +2457,7 @@ def test_cli_success_exits_zero_json(tmp_path, monkeypatch, capsys):
     assert exit_code == 0
     out = json.loads(capsys.readouterr().out)
     assert out["status"] == "ok"
-    assert out["schema_version"] == 1
+    assert out["schema_version"] == post_route_sta.SCHEMA_VERSION == 2
 
 
 def test_cli_success_exits_zero_json_multi_corner(tmp_path, monkeypatch, capsys):
@@ -2463,7 +2469,7 @@ def test_cli_success_exits_zero_json_multi_corner(tmp_path, monkeypatch, capsys)
     assert exit_code == 0
     out = json.loads(capsys.readouterr().out)
     assert out["status"] == "ok"
-    assert out["schema_version"] == 1
+    assert out["schema_version"] == post_route_sta.SCHEMA_VERSION == 2
     assert [entry["corner"] for entry in out["corners"]] == [
         "tt_025C_1v80",
         "ss_100C_1v60",
@@ -3740,6 +3746,422 @@ def test_live_engine_boundary_paths(tmp_path):
     assert setup["consistent_with_aggregate"] is True
 
 
+# --------------------------------------------------------------------------- #
+# constraints.report_ports -- per-port worst-path queries (issue #3042).
+#
+# The port-query stdout below is synthesized from the *measured* direct-engine
+# values in `boundary_captures.json` ("direct_queries"), not captured from a
+# `report_ports` session: no engine is available to the offline suite. The live
+# engine test at the end of this block is the real-engine check.
+# --------------------------------------------------------------------------- #
+
+
+def _port_block(*rows: str) -> str:
+    return "\n".join(
+        [post_route_sta._PORT_PATHS_BEGIN, *rows, post_route_sta._PORT_PATHS_END, ""]
+    )
+
+
+def _direct_port_rows(port: str, direction: str = "input") -> list[str]:
+    """``DIR``/``PATH`` rows for ``port`` from the fixture's direct queries."""
+    direct = _WORST_PATH_CAPTURES["direct_queries"]["tt_025C_1v80"]["from"][port]
+    rows = [f"DIR\t{port}\t{direction}"]
+    for side in ("max", "min"):
+        if direct[side] is not None:
+            role, slack_s, endpoint = direct[side]
+            rows.append(
+                f"PATH\t{port}\t{side}\t{role}\t{slack_s!r}\t{port}\t{endpoint}"
+            )
+    return rows
+
+
+def test_validate_report_ports_omitted_and_empty_are_none():
+    assert post_route_sta._validate_report_ports({}, "clk") is None
+    assert post_route_sta._validate_report_ports({"report_ports": []}, "clk") is None
+
+
+def test_validate_report_ports_keeps_request_order():
+    constraints = {"report_ports": ["b_in", "a_in", "bus[1]"]}
+    assert post_route_sta._validate_report_ports(constraints, "clk") == [
+        "b_in",
+        "a_in",
+        "bus[1]",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ("a_in", "must be a list of port names"),
+        ({"a_in": 1}, "must be a list of port names"),
+        ([1], "non-empty port-name strings"),
+        ([None], "non-empty port-name strings"),
+        ([""], "non-empty port-name strings"),
+        ([" a_in"], "non-empty port-name strings"),
+        (["a\nb"], "control character"),
+        (["clk"], "must not name the clock port"),
+        (["a_in", "b_in", "a_in"], r"must not repeat a port \('a_in'\)"),
+    ],
+)
+def test_validate_report_ports_rejects(value, message):
+    with pytest.raises(PostRouteStaError, match=message):
+        post_route_sta._validate_report_ports({"report_ports": value}, "clk")
+
+
+def test_run_sta_report_ports_validation_runs_before_engine(tmp_path, monkeypatch):
+    request_path = _setup_verilog_success_env(
+        tmp_path,
+        monkeypatch,
+        constraints=_boundary_constraints(report_ports=["a_in", "a_in"]),
+    )
+
+    def fail_run(*args, **kwargs):
+        raise AssertionError("engine must not run for an invalid request")
+
+    monkeypatch.setattr(post_route_sta.subprocess, "run", fail_run)
+    with pytest.raises(PostRouteStaError, match="must not repeat a port"):
+        run_sta(request_path)
+
+
+def test_omitting_report_ports_leaves_tcl_unchanged():
+    assert post_route_sta._port_path_lines(None) == []
+    assert post_route_sta._port_path_lines([]) == []
+    for maps in ((None, None), (_BOUNDARY_INPUT_DELAYS, _BOUNDARY_OUTPUT_DELAYS)):
+        assert post_route_sta._port_check_lines(*maps) == (
+            post_route_sta._port_check_lines(*maps, None)
+        )
+    assert post_route_sta._request_io_delay_lines(
+        "clk", 0.0, 0.1, None, None
+    ) == post_route_sta._io_delay_lines("clk", 0.0, 0.1)
+    script = "\n".join(
+        post_route_sta._sta_netlist_script_lines(
+            tech_lef="t.lef",
+            cell_lef="c.lef",
+            verilog_path="top.v",
+            liberty_path="l.lib",
+            hdl_toplevel="top",
+            clock_port="clk",
+            clock_period_ns=2.0,
+        )
+    )
+    assert post_route_sta._PORT_PATHS_BEGIN not in script
+
+
+def test_report_ports_alone_still_emits_port_check_and_scalar_delays():
+    lines = post_route_sta._request_io_delay_lines(
+        "clk", 0.0, 0.1, None, None, ["a_in"]
+    )
+    text = "\n".join(lines)
+    assert post_route_sta._PORT_CHECK_BEGIN in text
+    assert "report a_in {input output inout bidirect}" in text
+    assert lines[-len(post_route_sta._io_delay_lines("clk", 0.0, 0.1)) :] == (
+        post_route_sta._io_delay_lines("clk", 0.0, 0.1)
+    )
+
+
+def test_port_check_lines_add_report_side_with_any_direction():
+    text = "\n".join(
+        post_route_sta._port_check_lines(
+            _BOUNDARY_INPUT_DELAYS, _BOUNDARY_OUTPUT_DELAYS, ["q_b", "bus[1]"]
+        )
+    )
+    assert "report q_b {input output inout bidirect}" in text
+    assert r"report bus\[1\] {input output inout bidirect}" in text
+    assert "input a_in {input inout bidirect}" in text
+
+
+def test_port_path_lines_query_from_and_to_with_bounded_counts():
+    lines = post_route_sta._port_path_lines(["a_in", "bus[1]", "we$ird"])
+    text = "\n".join(lines)
+    assert lines[0] == f'puts "{post_route_sta._PORT_PATHS_BEGIN}"'
+    assert lines[-1] == f'puts "{post_route_sta._PORT_PATHS_END}"'
+    assert r"[list a_in bus\[1\] we\$ird]" in text
+    assert text.count("-group_path_count 1 -endpoint_path_count 1") == 2
+    assert "find_timing_paths -from $klt_rp_port -path_delay $klt_rp_side" in text
+    assert "find_timing_paths -to $klt_rp_port -path_delay $klt_rp_side" in text
+    # An input is never queried `-to`, an output never `-from`.
+    assert 'if {$klt_rp_dir ne "output"}' in text
+    assert 'if {$klt_rp_dir ne "input"}' in text
+    assert "catch" in text
+
+
+def test_parse_port_paths_matches_direct_engine_values():
+    direct = _WORST_PATH_CAPTURES["direct_queries"]["tt_025C_1v80"]["from"]
+    stdout = _port_block(*_direct_port_rows("a_in"), *_direct_port_rows("b_in"))
+
+    result = post_route_sta._port_paths(stdout, ["a_in", "b_in"])
+
+    assert list(result) == ["a_in", "b_in"]
+    for port in ("a_in", "b_in"):
+        entry = result[port]
+        assert entry["direction"] == "input"
+        for side, key in (("setup", "max"), ("hold", "min")):
+            role, slack_s, endpoint = direct[port][key]
+            record = entry[side]
+            assert record["status"] == "ok"
+            assert record["engine_check_role"] == role
+            assert record["startpoint"] == port
+            assert record["endpoint"] == endpoint
+            assert record["slack_ns"] == round(slack_s * 1e9, 5)
+            assert record["consistent_with_aggregate"] is None
+    assert result["a_in"]["hold"]["slack_ns"] == pytest.approx(0.33, abs=0.01)
+    assert result["b_in"]["hold"]["slack_ns"] == pytest.approx(0.08, abs=0.01)
+
+
+def test_parse_port_paths_side_without_constrained_path_is_no_paths():
+    # `bus[1]` has a min-only delay: the engine reports no setup path at all.
+    stdout = _port_block(*_direct_port_rows("bus[1]"))
+
+    entry = post_route_sta._port_paths(stdout, ["bus[1]"])["bus[1]"]
+
+    assert entry["setup"] == post_route_sta._empty_path_record("no_paths", None)
+    assert entry["hold"]["status"] == "ok"
+    assert entry["hold"]["slack_ns"] < 0
+
+
+def test_parse_port_paths_output_port_reports_path_to_it():
+    stdout = _port_block(
+        "DIR\tq_a\toutput",
+        "PATH\tq_a\tmax\toutput setup\t1.5e-09\tff_a/CLK\tq_a",
+    )
+
+    entry = post_route_sta._port_paths(stdout, ["q_a"])["q_a"]
+
+    assert entry["direction"] == "output"
+    assert entry["setup"]["endpoint"] == "q_a"
+    assert entry["setup"]["check_type"] == "output_setup"
+    assert entry["hold"]["status"] == "no_paths"
+
+
+def test_parse_port_paths_inout_takes_minimum_over_both_directions():
+    stdout = _port_block(
+        "DIR\tio\tbidirect",
+        "PATH\tio\tmax\tsetup\t2e-09\tio\tff/D",
+        "PATH\tio\tmax\toutput setup\t5e-10\tff/CLK\tio",
+        "PATH\tio\tmin\thold\t1e-10\tio\tff/D",
+    )
+
+    entry = post_route_sta._port_paths(stdout, ["io"])["io"]
+
+    assert entry["direction"] == "inout"
+    assert (entry["setup"]["startpoint"], entry["setup"]["endpoint"]) == (
+        "ff/CLK",
+        "io",
+    )
+    assert entry["setup"]["slack_ns"] == 0.5
+    assert entry["hold"]["startpoint"] == "io"
+
+
+def test_parse_port_paths_engine_error_is_unavailable_for_that_port_only():
+    stdout = _port_block(
+        "warning: something unrelated",
+        *_direct_port_rows("a_in"),
+        "ERROR\tb_in\tboom",
+    )
+
+    result = post_route_sta._port_paths(stdout, ["a_in", "b_in", "c_in"])
+
+    assert result["a_in"]["setup"]["status"] == "ok"
+    for side in ("setup", "hold"):
+        assert result["b_in"][side]["status"] == "unavailable"
+        assert "boom" in result["b_in"][side]["reason"]
+        assert result["b_in"][side]["startpoint"] is None
+        assert result["c_in"][side]["status"] == "unavailable"
+    assert result["b_in"]["direction"] is None
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        "PATH\ta_in\tmax\tsetup\tnotanumber\ta_in\tff/D",
+        "PATH\ta_in\tmax\tsetup\tinf\ta_in\tff/D",
+        "PATH\ta_in\tbogus\tsetup\t1e-9\ta_in\tff/D",
+        "PATH\ta_in\tmax\tsetup\t1e-9\ta_in",
+    ],
+)
+def test_parse_port_paths_malformed_row_is_unavailable(row):
+    stdout = _port_block("DIR\ta_in\tinput", row)
+    entry = post_route_sta._port_paths(stdout, ["a_in"])["a_in"]
+    assert entry["setup"]["status"] == "unavailable"
+    assert entry["hold"]["status"] == "unavailable"
+
+
+def test_parse_port_paths_absent_block_is_unavailable_for_every_port():
+    result = post_route_sta._port_paths("no markers here\n", ["a_in", "b_in"])
+    assert all(
+        entry[side]["status"] == "unavailable"
+        for entry in result.values()
+        for side in ("setup", "hold")
+    )
+
+
+def _append_port_block(monkeypatch, block: str) -> None:
+    """Make every stubbed engine run also print ``block`` on stdout."""
+    inner = post_route_sta.subprocess.run
+
+    def run(cmd, **kwargs):
+        completed = inner(cmd, **kwargs)
+        if completed.stdout and post_route_sta._WORST_PATHS_BEGIN in completed.stdout:
+            completed.stdout += block
+        return completed
+
+    monkeypatch.setattr(post_route_sta.subprocess, "run", run)
+
+
+def test_run_sta_report_ports_single_corner(tmp_path, monkeypatch):
+    request_path = _setup_verilog_success_env(
+        tmp_path,
+        monkeypatch,
+        constraints=_boundary_constraints(report_ports=["a_in", "b_in"]),
+    )
+    scripts = _stub_openroad_capture(monkeypatch, {None: "boundary_tt_025C_1v80"})
+    _append_port_block(
+        monkeypatch, _port_block(*_direct_port_rows("a_in"), *_direct_port_rows("b_in"))
+    )
+
+    report = run_sta(request_path)
+
+    assert "report a_in {input output inout bidirect}" in scripts[0]
+    assert post_route_sta._PORT_PATHS_BEGIN in scripts[0]
+    assert list(report["port_paths"]) == ["a_in", "b_in"]
+    assert report["port_paths"]["a_in"]["hold"]["startpoint"] == "a_in"
+    assert report["port_paths"]["a_in"]["hold"]["slack_ns"] == pytest.approx(
+        0.33, abs=0.01
+    )
+    assert report["port_paths"]["b_in"]["hold"]["slack_ns"] == pytest.approx(
+        0.08, abs=0.01
+    )
+    # The global worst hold path stays the unrelated async-reset check.
+    assert report["worst_hold_path"]["startpoint"] == "rst_n"
+    assert report["worst_hold_path"]["endpoint"] == "ff_a/RESET_B"
+
+
+def test_run_sta_without_report_ports_has_no_port_paths(tmp_path, monkeypatch):
+    request_path = _setup_verilog_success_env(
+        tmp_path, monkeypatch, constraints=_boundary_constraints()
+    )
+    scripts = _stub_openroad_capture(monkeypatch, {None: "boundary_tt_025C_1v80"})
+
+    report = run_sta(request_path)
+
+    assert "port_paths" not in report
+    assert post_route_sta._PORT_PATHS_BEGIN not in scripts[0]
+
+
+def test_run_sta_report_ports_multi_corner_each_entry(tmp_path, monkeypatch):
+    request_path = _setup_multi_corner_env(
+        tmp_path,
+        monkeypatch,
+        constraints=_boundary_constraints(report_ports=["a_in"]),
+    )
+    _stub_openroad_capture(
+        monkeypatch,
+        {
+            "tt_025C_1v80": "boundary_tt_025C_1v80",
+            "ss_100C_1v60": "boundary_ss_100C_1v60",
+        },
+    )
+    _append_port_block(monkeypatch, _port_block(*_direct_port_rows("a_in")))
+
+    report = run_sta(request_path)
+
+    assert "port_paths" not in report
+    assert len(report["corners"]) == 2
+    for entry in report["corners"]:
+        assert list(entry["port_paths"]) == ["a_in"]
+        assert entry["port_paths"]["a_in"]["direction"] == "input"
+
+
+def test_run_sta_report_ports_rejected_by_engine_check(tmp_path, monkeypatch):
+    request_path = _setup_verilog_success_env(
+        tmp_path,
+        monkeypatch,
+        constraints=_boundary_constraints(report_ports=["nope"]),
+    )
+    block = (
+        f"{post_route_sta._PORT_CHECK_BEGIN}\nreport\tnope\tnot_found\n"
+        f"{post_route_sta._PORT_CHECK_END}\n"
+    )
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["openroad", "-version"]:
+            return fake_completed(stdout="unknown \n")
+        return fake_completed(returncode=3, stdout=block)
+
+    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+
+    with pytest.raises(PostRouteStaError) as excinfo:
+        run_sta(request_path)
+    message = str(excinfo.value)
+    assert message.startswith("constraints.report_ports rejected")
+    assert "constraints.report_ports['nope']: no port with exactly this name" in message
+
+
+def test_print_text_renders_port_paths(capsys):
+    from klayout_tools.cli import sta_cmd
+
+    record = {
+        "status": "ok",
+        "check_type": "hold",
+        "startpoint": "a_in",
+        "endpoint": "ff_a/D",
+        "slack_ns": 0.33143,
+    }
+    empty = post_route_sta._empty_path_record("no_paths", None)
+    fields = {
+        "worst_slack_ns": 0.1,
+        "total_negative_slack_ns": 0,
+        "worst_hold_slack_ns": 0.1,
+        "total_negative_hold_slack_ns": 0,
+        "fmax_mhz": 1,
+        "setup_violation_count": 0,
+        "hold_violation_count": 0,
+        "clock_skew_ns": 0,
+        "estimated_power_mw": 0,
+        "port_paths": {"a_in": {"direction": "input", "setup": empty, "hold": record}},
+    }
+
+    sta_cmd._print_slack_fields(fields, indent="")
+
+    out = capsys.readouterr().out
+    assert "port_paths[a_in].setup: no_paths" in out
+    assert "port_paths[a_in].hold: hold a_in -> ff_a/D slack_ns=0.33143 (ok)" in out
+
+
+@pytest.mark.skipif(
+    _live_sky130_env() is None,
+    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
+    "KLT_SKIP_OPENROAD_TESTS unset",
+)
+def test_live_engine_report_ports(tmp_path):
+    """Engine integration (issue #3042): the boundary request with
+    ``report_ports`` against a real session must give the boundary ports'
+    own hold margins while the global worst hold stays the async removal."""
+    _write(tmp_path / "boundary.v", _WORST_PATH_CAPTURES["netlist"])
+    request = {
+        "verilog": "boundary.v",
+        "hdl_toplevel": "top",
+        "pdk": {"cell_library": "sky130_fd_sc_hd", "corner": "tt_025C_1v80"},
+        "constraints": _boundary_constraints(
+            report_ports=["a_in", "b_in", "bus[1]", "q_a"]
+        ),
+    }
+    request_path = _write_request(tmp_path / "request.json", request)
+
+    report = run_sta(request_path, pdk_variant="sky130A")
+
+    direct = _WORST_PATH_CAPTURES["direct_queries"]["tt_025C_1v80"]["from"]
+    paths = report["port_paths"]
+    for port in ("a_in", "b_in"):
+        hold = paths[port]["hold"]
+        assert hold["startpoint"] == port
+        assert hold["slack_ns"] == pytest.approx(direct[port]["min"][1] * 1e9, abs=1e-3)
+    assert paths["bus[1]"]["setup"]["status"] == "no_paths"
+    assert paths["q_a"]["direction"] == "output"
+    assert paths["q_a"]["setup"]["endpoint"] == "q_a"
+    assert report["worst_hold_path"]["startpoint"] == "rst_n"
+
+
 def _write_clock_fixtures(tmp_path) -> dict[str, str]:
     """Materialize the captured design files for a live engine run."""
     paths = {
@@ -4350,3 +4772,298 @@ def test_live_engine_completeness_matches_check_setup(tmp_path):
 
     assert listed(unconstrained_text) == ["q2", "ff_unclk/D"]
     assert listed(unclocked_text) == ["ff_unclk/CLK"]
+
+
+# --------------------------------------------------------------------------- #
+# Issue #2879: portable `{path, scope}` input-path fields (schema 2)
+# --------------------------------------------------------------------------- #
+
+
+def _checkout(tmp_path: Path, name: str = "checkout") -> tuple[Path, Path]:
+    """A fake repository root (a bare `.git` entry is all
+    `env_provenance.find_repo_root` needs) plus a `flows/` subdirectory the
+    request and its inputs live in -- so a repo-scoped path is visibly
+    repo-relative (`flows/top.def`), not just a basename."""
+    root = tmp_path / name
+    (root / ".git").mkdir(parents=True)
+    flows = root / "flows"
+    flows.mkdir()
+    return root, flows
+
+
+def _assert_no_prefix(value, prefix: str) -> None:
+    text = json.dumps(value)
+    assert prefix not in text, text
+
+
+def test_report_paths_def_mode_single_corner_repo_scoped(tmp_path, monkeypatch):
+    root, flows = _checkout(tmp_path)
+    _write(flows / "top.spef", "*D_NET clk 0.01\n*END\n")
+    request_path = _setup_success_env(flows, monkeypatch, spef="top.spef")
+    _stub_openroad_success(monkeypatch, spef_check=(1, 1, 1, 1))
+
+    report = run_sta(request_path)
+
+    assert report["schema_version"] == 2
+    assert report["def_path"] == {"path": "flows/top.def", "scope": "repo"}
+    assert report["verilog_path"] is None
+    assert report["spef_path"] == {"path": "flows/top.spef", "scope": "repo"}
+    for field in ("def_path", "verilog_path", "spef_path"):
+        _assert_no_prefix(report[field], str(root))
+        _assert_no_prefix(report[field], os.path.realpath(root))
+
+
+def test_report_paths_verilog_mode_repo_scoped(tmp_path, monkeypatch):
+    root, flows = _checkout(tmp_path)
+    request_path = _setup_verilog_success_env(flows, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+
+    report = run_sta(request_path)
+
+    assert report["def_path"] is None
+    assert report["verilog_path"] == {"path": "flows/top.v", "scope": "repo"}
+    assert report["spef_path"] is None
+
+
+def test_report_paths_multi_corner_hoisted_repo_scoped(tmp_path, monkeypatch):
+    root, flows = _checkout(tmp_path)
+    request_path = _setup_multi_corner_env(flows, monkeypatch)
+    _stub_openroad_multi_corner(monkeypatch)
+
+    report = run_sta(request_path)
+
+    assert report["schema_version"] == 2
+    assert report["def_path"] == {"path": "flows/top.def", "scope": "repo"}
+    assert report["verilog_path"] is None
+    assert report["spef_path"] is None
+    for entry in report["corners"]:
+        assert "def_path" not in entry
+
+
+def test_report_paths_input_outside_repository_is_external(tmp_path, monkeypatch):
+    """A SPEF outside the request's repository reports the explicit external
+    shape -- no path at all, never a false portable claim -- while the
+    in-repo DEF stays repo-scoped."""
+    root, flows = _checkout(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    spef = _write(elsewhere / "top.spef", "*D_NET clk 0.01\n*END\n")
+    request_path = _setup_success_env(flows, monkeypatch, spef=spef)
+    _stub_openroad_success(monkeypatch, spef_check=(1, 1, 1, 1))
+
+    report = run_sta(request_path)
+
+    assert report["def_path"] == {"path": "flows/top.def", "scope": "repo"}
+    assert report["spef_path"] == _EXTERNAL
+    _assert_no_prefix(report["spef_path"], str(elsewhere))
+
+
+def test_report_paths_engine_still_reads_absolute_paths(tmp_path, monkeypatch):
+    """Only persisted fields change: the generated script still hands
+    OpenSTA resolved local filesystem paths."""
+    root, flows = _checkout(tmp_path)
+    _write(flows / "top.spef", "*D_NET clk 0.01\n*END\n")
+    request_path = _setup_success_env(flows, monkeypatch, spef="top.spef")
+    _stub_openroad_success(monkeypatch, spef_check=(1, 1, 1, 1))
+
+    run_sta(request_path)
+
+    script = (flows / ".klt" / "sta" / "sta_top.tcl").read_text(encoding="utf-8")
+    assert f"read_def {os.path.abspath(flows / 'top.def')}" in script
+    assert f"read_spef {os.path.abspath(flows / 'top.spef')}" in script
+
+
+def test_reader_warning_sample_drops_checkout_prefix(tmp_path, monkeypatch):
+    root, flows = _checkout(tmp_path)
+    _write(flows / "top.spef", "*D_NET clk 0.01\n*END\n")
+    request_path = _setup_success_env(flows, monkeypatch, spef="top.spef")
+    spef_abs = os.path.abspath(flows / "top.spef")
+    spef_real = os.path.realpath(flows / "top.spef")
+    unrelated = "/opt/pdk/sky130A/libs.ref/cells.lib"
+    _stub_openroad_success(
+        monkeypatch,
+        spef_check=(1, 1, 1, 1),
+        spef_reader_warnings=[
+            f"[WARNING STA-1650] {spef_abs} line 12, net _17_ not found.",
+            f"[WARNING STA-1648] {spef_real} line 40, instance u1:A not found.",
+            f"[WARNING STA-1650] {unrelated} line 3, net x not found.",
+        ],
+    )
+
+    report = run_sta(request_path)
+
+    sample = report["spef_annotation"]["reader_warning_sample"]
+    assert sample == [
+        "[WARNING STA-1650] flows/top.spef line 12, net _17_ not found.",
+        "[WARNING STA-1648] flows/top.spef line 40, instance u1:A not found.",
+        # Bounded: only the three known input paths are rewritten.
+        f"[WARNING STA-1650] {unrelated} line 3, net x not found.",
+    ]
+    _assert_no_prefix(sample, str(root))
+    _assert_no_prefix(sample, os.path.realpath(root))
+
+
+def test_reader_warning_sample_external_input_is_redacted(tmp_path, monkeypatch):
+    root, flows = _checkout(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    spef = _write(elsewhere / "top.spef", "*D_NET clk 0.01\n*END\n")
+    request_path = _setup_success_env(flows, monkeypatch, spef=spef)
+    _stub_openroad_success(
+        monkeypatch,
+        spef_check=(1, 1, 1, 1),
+        spef_reader_warnings=[f"[WARNING STA-1650] {spef} line 12, net n not found."],
+    )
+
+    report = run_sta(request_path)
+
+    assert report["spef_annotation"]["reader_warning_sample"] == [
+        "[WARNING STA-1650] <outside repo> line 12, net n not found."
+    ]
+
+
+def test_engine_error_message_drops_checkout_prefix(tmp_path, monkeypatch):
+    root, flows = _checkout(tmp_path)
+    request_path = _setup_success_env(flows, monkeypatch)
+    def_abs = os.path.abspath(flows / "top.def")
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["openroad", "-version"]:
+            return fake_completed(stdout="26Q3-771-gdeadbeef\n")
+        return fake_completed(
+            returncode=1,
+            stderr=f"[ERROR ODB-0125] DEF parser error in {def_abs} line 7",
+        )
+
+    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+
+    with pytest.raises(PostRouteStaError) as excinfo:
+        run_sta(request_path)
+    message = str(excinfo.value)
+    assert "[ERROR ODB-0125] DEF parser error in flows/top.def line 7" in message
+    assert def_abs not in message
+
+
+def test_report_paths_scrub_is_bounded_to_known_inputs(tmp_path):
+    root, flows = _checkout(tmp_path)
+    def_abs = _write(flows / "top.def", "# def\n")
+    paths = post_route_sta._ReportPaths.build(
+        def_path=def_abs, verilog_path=None, spef_path=None, repo_root=str(root)
+    )
+
+    assert paths.scrub(f"read {def_abs}; see {root}/other.def") == (
+        f"read flows/top.def; see {root}/other.def"
+    )
+
+
+def test_cli_text_renders_repo_and_external_paths(tmp_path, monkeypatch, capsys):
+    root, flows = _checkout(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    spef = _write(elsewhere / "top.spef", "*D_NET clk 0.01\n*END\n")
+    request_path = _setup_success_env(flows, monkeypatch, spef=spef)
+    _stub_openroad_success(monkeypatch, spef_check=(1, 1, 1, 1))
+
+    assert main(["sta", request_path]) == 0
+    out = capsys.readouterr().out
+    assert "def_path: flows/top.def" in out
+    assert "verilog_path: None" in out
+    assert "spef_path: <outside repo>" in out
+    assert str(root) not in out
+    assert str(elsewhere) not in out
+
+
+def test_cli_text_renders_verilog_and_multi_corner_paths(tmp_path, monkeypatch, capsys):
+    root, flows = _checkout(tmp_path)
+    request_path = _setup_verilog_success_env(flows, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    assert main(["sta", request_path]) == 0
+    out = capsys.readouterr().out
+    assert "def_path: None" in out
+    assert "verilog_path: flows/top.v" in out
+
+    root2, flows2 = _checkout(tmp_path, "checkout2")
+    request_path = _setup_multi_corner_env(flows2, monkeypatch)
+    _stub_openroad_multi_corner(monkeypatch)
+    assert main(["sta", request_path, "--format", "json"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["def_path"] == {"path": "flows/top.def", "scope": "repo"}
+    assert main(["sta", request_path]) == 0
+    assert "def_path: flows/top.def" in capsys.readouterr().out
+
+
+def test_run_sta_same_inputs_two_checkouts_emit_identical_path_fields(
+    tmp_path, monkeypatch
+):
+    """The producing checkout's root never reaches the persisted fields: two
+    checkouts of identical inputs report byte-identical path identities."""
+    reports = []
+    for name in ("a", "b"):
+        _, flows = _checkout(tmp_path, name)
+        request_path = _setup_success_env(flows, monkeypatch)
+        _stub_openroad_success(monkeypatch)
+        reports.append(run_sta(request_path))
+    for field in ("def_path", "verilog_path", "spef_path"):
+        assert reports[0][field] == reports[1][field]
+    assert (
+        reports[0]["provenance"]["input"]["content_hash"]
+        == reports[1]["provenance"]["input"]["content_hash"]
+    )
+
+
+@pytest.mark.parametrize("mode", ["def", "verilog", "corners"])
+def test_run_sta_evidence_input_verified_from_second_checkout(
+    tmp_path, monkeypatch, mode
+):
+    """Issue #2879's reproduction end to end: `klt sta` output committed in
+    checkout A is graded by `klt signoff --manifest` from checkout B (A
+    removed). Before schema 2 the absolute `def_path` made B report
+    `input_verified: null`; now both report `true`."""
+    import shutil
+
+    from klayout_tools.signoff import build_tier_report
+
+    monkeypatch.chdir(tmp_path)
+    checkout_a = tmp_path / "a" / "repo"
+    (checkout_a / ".git").mkdir(parents=True)
+    flows = checkout_a / "flows"
+    flows.mkdir()
+    # Timing-clean metrics, so the citation itself grades `met` and carries
+    # an `input_verified` answer at all.
+    clean = {**_STA_METRICS, "timing__setup__ws": 0.2, "timing__setup__tns": 0.0}
+    if mode == "def":
+        request_path = _setup_success_env(flows, monkeypatch)
+        _stub_openroad_success(monkeypatch, metrics=clean)
+    elif mode == "verilog":
+        request_path = _setup_verilog_success_env(flows, monkeypatch)
+        _stub_openroad_success(monkeypatch, metrics=clean)
+    else:
+        request_path = _setup_multi_corner_env(flows, monkeypatch)
+        _stub_openroad_multi_corner(
+            monkeypatch, {"tt_025C_1v80": clean, "ss_100C_1v60": clean}
+        )
+    report = run_sta(request_path)
+    evidence_a = flows / "sta.json"
+    evidence_a.write_text(json.dumps(report), encoding="utf-8")
+    assert str(checkout_a) not in json.dumps(
+        {k: report[k] for k in ("def_path", "verilog_path", "spef_path")}
+    )
+
+    def grade(evidence: Path):
+        result = build_tier_report(
+            {"block": "b", "kind": "digital", "evidence": {"5": str(evidence)}}
+        )
+        item = next(item for item in result["items"] if item["id"] == 5)
+        return item["citation"]
+
+    citation_a = grade(evidence_a)
+    assert citation_a is not None
+    assert citation_a["input_verified"] is True
+
+    checkout_b = tmp_path / "b" / "another" / "repo"
+    shutil.copytree(checkout_a, checkout_b)
+    shutil.rmtree(tmp_path / "a")
+
+    citation_b = grade(checkout_b / "flows" / "sta.json")
+    assert citation_b is not None
+    assert citation_b["input_verified"] is True

@@ -960,7 +960,7 @@ section 10's "whether it is imbalanced") consume these.
 ### Per-test spans (#9456)
 
 The suite spans above only exist for the `LOOM_CI_SHARD` **shell** legs. The
-`nextest-partition` legs — `Rust Unit Tests (k/3)` (the former separate
+`nextest-partition` legs — `Rust Unit Tests (k/N)` (the former separate
 `Rust OTLP Feature Tests` family was folded into it, #10823) — had nothing below step granularity, so "~110s of this leg's 250s was
 the test step" was answerable but *which tests* spent it was not, and
 rebalancing `--partition count:k/N` stayed guesswork (the same Unit partition's
@@ -1116,7 +1116,7 @@ spans from nextest JUnit output (`[profile.ci.junit]`), which would give the
 ### Story stitching (#9088)
 
 A completed run that belongs to exactly one issue N is **also** emitted into
-N's story trace (harness-ops D32 v1, see [tracing](tracing.md)): an extra
+N's story trace (story key v1, see [tracing](tracing.md)): an extra
 `loom.ci.run` span with trace ID `story_context(repo_id, N).trace_id`,
 parented to the story root span, and an extra `loom.ci.job` span per job
 under it. Code: `loom-daemon/src/ci_telemetry/story.rs`.

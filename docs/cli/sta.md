@@ -140,6 +140,7 @@ A request naming both, or neither, is a request error.
 | `constraints.input_delay_ns` | number \| omitted | Additive field (issue #1865) → `set_input_delay <ns> -clock <clock_port>` on every **non-clock** input port. Non-negative number when given (`0` is valid and meaningful). Omitted (the default) emits no `set_input_delay` line, leaving this command's generated Tcl byte-identical to before this field existed. Validated and emitted **here**, independently of `klt place-and-route` — this command can run standalone against an externally-produced DEF/netlist with no place-and-route request anywhere upstream, so nothing is inherited. See "I/O timing constraints" below. |
 | `constraints.output_delay_ns` | number \| omitted | Additive field (issue #1865) → `set_output_delay <ns> -clock <clock_port> [all_outputs]`. Same validation and omitted-default behavior as `input_delay_ns`; the two are independently optional. |
 | `constraints.input_delays` / `.output_delays` | object \| omitted | Additive fields (issue #2740). Per-port maps `{"<port>": {"min_ns": n, "max_ns": n}}` → `set_input_delay -min/-max` / `set_output_delay -min/-max` on exactly that port. Each bound is independently optional (at least one per entry); a missing bound is left **unconstrained**, never copied from the other. Values are finite numbers and may be negative; `min_ns <= max_ns` when both are given. Keys are literal names of one scalar port or one bus bit (`data[3]`) — no wildcards, no whole buses, no Tcl. The scalar `input_delay_ns`/`output_delay_ns` above become the **default for ports absent from the map**. Missing, ambiguous and wrong-direction keys, and the clock port, are request errors. See "Per-port I/O delays and worst-path identity" below. |
+| `constraints.report_ports` | list of strings \| omitted | Additive field (issue #3042). Literal port names (one scalar port or one bus bit such as `data[3]`) whose **own** worst setup and hold path is reported as `port_paths`, alongside the global `worst_*_path`. Same key rules as the per-port delay maps: no wildcards, whole buses or Tcl. Entries must be unique non-empty strings; the clock port, unknown and ambiguous names are request errors. Any direction is allowed. Omitted or `[]` emits nothing. See "Per-port path queries" below. |
 | `constraints.wire_load_model` / `.wire_load_mode` | string \| omitted | (Issue #1825.) **Only valid in `verilog` mode** — a request error otherwise. Drives OpenSTA's own `set_wire_load_model`/`set_wire_load_mode`, the parasitics-estimate mechanism for a from-scratch netlist session that has no placement or routing to estimate from. See "From-scratch netlist input" below. |
 | `constraints.propagated_clock` | boolean \| omitted | Additive field (issue #2739). **`def` mode only.** `true` marks the request's created clock propagated (`set_propagated_clock`) in every analyzed corner, so hold/removal checks include the DEF's clock-tree insertion delay and skew (and, with a caller-supplied `spef`, its clock-net RC) — the timing a routed post-CTS design actually meets. Omitted or `false` (the default) keeps the **ideal** SDC-only clock this command has always timed — byte-for-byte the pre-#2739 behavior — so existing requests' numbers never change. Any non-boolean value is a request error; `true` together with `verilog` is a request error (a linked netlist has no placed clock tree to propagate through). Meaningful only for a **post-CTS** DEF: a pre-CTS DEF propagates through plain wires and reports ~zero insertion delay — the response's `clock_propagation` evidence block is what says what propagation actually reached (see "Propagated-clock timing" below). |
 | `spef` | string \| omitted | A caller-supplied SPEF (e.g. from `klt extract --parasitics`) to annotate real parasitics via `read_spef`, in place of OpenSTA's own default (unannotated, LEF-capacitance-only) timing. **Only valid in `def` mode** — rejected together with `verilog` (no routed/placement geometry in that mode for a SPEF to annotate onto). Resolved relative to the request file's own directory. Omitted (the default) times the design with whatever parasitics OpenSTA derives from the loaded LEF/DEF alone. |
@@ -149,12 +150,12 @@ A request naming both, or neither, is a request error.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "engine": "openroad",
   "engine_version": "26Q3-771-g7cfb2105c9",
   "hdl_toplevel": "gcd",
   "status": "ok",
-  "def_path": "/abs/path/gcd.def",
+  "def_path": { "path": "flows/gcd/gcd.def", "scope": "repo" },
   "verilog_path": null,
   "geometry_source": "routed",
   "wire_load_model": null,
@@ -198,14 +199,41 @@ A request naming both, or neither, is a request error.
 }
 ```
 
-**Path field shape (issue #2073).** `def_path`/`verilog_path`/`spef_path`
-below are plain absolute-path strings, not the `{path, scope}` envelope
-`klt synthesize`/`klt pex`/`klt sim`/`klt size` report their own output
-paths as — including `klt place-and-route`'s `def_path` that this command's
-own `def` field typically consumes as input (see "Response" above). This is
-a deliberate, documented split, not an oversight — see
-`docs/json-contract.md`'s "Output-artifact path fields: envelope vs. plain
-string" for the full enumeration and rationale.
+**Path field shape (issue #2879, schema 2).** `def_path`/`verilog_path`/
+`spef_path` are the `{path, scope}` envelope `klt sim`/`klt pex` report
+their inputs as (issue #1261; built by `env_provenance.repo_relative_path`),
+never an absolute host path:
+
+- `{"path": "<repo-relative POSIX path>", "scope": "repo"}` — the input lives
+  inside the repository that contains the request file. `path` is relative
+  to that repository's root, so committed evidence names the same file from
+  every checkout.
+- `{"path": null, "scope": "external"}` — the input lives outside any
+  repository. The location is deliberately withheld (no false portable
+  claim); `provenance.input.content_hash` still pins *which* bytes ran.
+- `null` — this request does not use that input: `def_path` in `verilog`
+  mode, `verilog_path` in `def` mode, `spef_path` when `request.spef` was
+  not given. (Not `scope: "absent"`: `null` is the schema-1 "not
+  applicable" value, and `klt signoff` relies on it to fall through from
+  `def_path` to `verilog_path`.)
+
+Only the persisted response changes: OpenSTA is still handed the resolved
+absolute local paths (`read_def`/`read_verilog`/`read_spef` in the generated
+`.klt/sta/*.tcl`), and the request's `def`/`verilog`/`spef` fields are still
+resolved relative to the request file's own directory.
+
+**Migration from schema 1.** A schema-1 response (`klt sta` before issue
+#2879) carries these three fields as plain absolute-path strings. Consumers
+should branch on `schema_version` (or on the value's type): a string is a
+schema-1 host path; an object is the envelope above, resolved by joining a
+`scope: "repo"` path to the root of the repository the evidence lives in.
+`klt signoff --manifest` reads both shapes when it re-hashes an `sta`
+citation's input (`input_verified`): a schema-1 absolute path verifies only
+where that exact path still exists, and is never re-rooted by stripping a
+guessed host prefix — regenerate the evidence with schema-2 `klt sta` to make
+it verifiable from other checkouts. The text format renders a repo path as
+the path itself, an external one as `<outside repo>`, and an unused input as
+`None`.
 
 | Field | Type | Description |
 | --- | --- | --- |
@@ -213,13 +241,13 @@ string" for the full enumeration and rationale.
 | `engine` / `engine_version` | string | Always `"openroad"`, plus the resolved OpenROAD build string (`openroad -version`'s own token). `engine_version` is `null` if unresolvable. |
 | `hdl_toplevel` | string \| null | Echo of the request; `null` when omitted. |
 | `status` | string | Always `"ok"` — like `klt place-and-route`, this command has no pass/fail concept of its own; a failed run never emits this envelope. |
-| `def_path` | string \| null | The resolved, absolute path to the analysed DEF; `null` in `verilog` mode (issue #1825). |
-| `verilog_path` | string \| null | Additive field (issue #1825). The resolved, absolute path to the analysed netlist; `null` unless `request.verilog` was given — the mutually-exclusive counterpart to `def_path`. |
+| `def_path` | object \| null | `{path, scope}` identity of the analysed DEF (issue #2879; a plain absolute string in schema 1) — see "Path field shape" above; `null` in `verilog` mode (issue #1825). |
+| `verilog_path` | object \| null | Additive field (issue #1825). `{path, scope}` identity of the analysed netlist (issue #2879; a plain absolute string in schema 1); `null` unless `request.verilog` was given — the mutually-exclusive counterpart to `def_path`. |
 | `geometry_source` | string | Additive field (issue #1826), extended by issue #1825. Echo of `request.geometry_source` in `def` mode — always present (never `null`); `"routed"` when the request omitted it, matching this command's pre-#1826 behaviour byte-for-byte. Forced to `"netlist_estimate"` whenever `request.verilog` was given, regardless of what (if anything) the request supplied. See "Pre-route DEFs" and "From-scratch netlist input" below. |
 | `wire_load_model` / `wire_load_mode` | string \| null | Additive fields (issue #1825). Echo of `request.constraints.wire_load_model`/`.wire_load_mode` — the parasitics-estimate knob actually used, for provenance. Always `null`/`null` on a `def`-mode response (that mode's parasitics never come from a liberty wire-load model); on a `verilog`-mode response, `null`/`null` means no `set_wire_load*` command was issued at all (the resolved liberty's own default wire load, if any, was left in effect). See "From-scratch netlist input" below. |
 | `clock_mode` | string | Additive field (issue #2739). Exactly `"ideal"` or `"propagated"` — which clock mode **every analyzed corner** was timed with. `"ideal"` (the default) is the pre-#2739 behavior; `"propagated"` when the request set `constraints.propagated_clock: true`. Present on both response shapes (hoisted to the top level on a `corners` response) and identical across every per-corner session. **Never infer it from `clock_skew_ns`** — that is a measured skew metric the clock tree carries under ideal timing too. See "Propagated-clock timing" below. |
 | `clock_propagation` | object \| null | Additive field (issue #2739). `null` unless the request asked for propagated-clock timing. On a `corners` response the field is not hoisted — one block per `corners[]` entry instead (the latencies it reports *do* vary per corner). See "Propagated-clock timing" below for the field shapes. |
-| `spef_path` | string \| null | The resolved, absolute path to the caller-supplied SPEF; `null` unless `request.spef` was given (never given together with `request.verilog`). |
+| `spef_path` | object \| null | `{path, scope}` identity of the caller-supplied SPEF (issue #2879; a plain absolute string in schema 1); `null` unless `request.spef` was given (never given together with `request.verilog`). |
 | `worst_slack_ns` / `total_negative_slack_ns` | number \| null | Setup WNS/TNS from `report_worst_slack_metric -setup`/`report_tns_metric -setup`. Negative values are expected, not an error. A design with **no constrained path at all** reports OpenSTA's own unconstrained sentinel (`1e+39`/`0`) here rather than a real number — check `timing_status` below before treating this as a measurement. |
 | `worst_hold_slack_ns` / `total_negative_hold_slack_ns` | number \| null | Hold WNS/TNS from `report_worst_slack_metric -hold`/`report_tns_metric -hold` — the same field name/pairing convention `klt place-and-route`'s own `worst_hold_slack_ns` uses, so a caller correlating the two commands' output does not hit a naming mismatch on the one field they share. A hold-clean design still reports a real (positive) margin here, not `null` — `null` only when OpenSTA has no hold path to measure at all (e.g. a purely combinational design with no register-to-register path). |
 | `timing_status` | string \| null | Additive field (issue #1865). `"constrained"` \| `"unconstrained"` \| `null` — whether the four slack fields above are measurements at all, or OpenSTA's unconstrained-design sentinel (`1e+39`) restated. `"unconstrained"` whenever either setup or hold WNS carries the sentinel; `null` when the run reported no slack metric at all. **Require `timing_status == "constrained"` before reading any slack number**: `1e+39` is a positive value, so a `worst_slack_ns >= 0` gate otherwise reports "timing closed" on a design that was never timed. The slack fields themselves are unchanged and still report exactly what OpenSTA reported — this field is additive and retypes nothing. Computed identically to `klt place-and-route`'s field of the same name, so the two commands' responses can be correlated directly. See "I/O timing constraints" below. |
@@ -227,6 +255,7 @@ string" for the full enumeration and rationale.
 | `fmax_mhz` | number \| null | `report_fmax_metric`'s own `1/(T-WNS)` extrapolation — see "What this is not" above for the not-yet-bisected caveat. |
 | `setup_violation_count` / `hold_violation_count` | integer | Number of **violating endpoints** (one `report_check_types -violators -format end` row per failing endpoint per path group — not every enumerated timing path), counted over the **same timing-check families** the WNS/TNS fields above measure: setup side = data setup (`-max_delay`, incl. output-delay checks) + asynchronous **recovery** + inferred **clock-gating setup**; hold side = data hold (`-min_delay`) + asynchronous **removal** + inferred **clock-gating hold** (issue #2741). See "Violation counts: check families" below. |
 | `worst_setup_path` / `worst_hold_path` | object | Additive fields (issue #2740), present on every response and every `corners[]` entry. Identity of the worst setup-side / hold-side path end in this session: `{status, check_type, engine_check_role, startpoint, endpoint, slack_ns, consistent_with_aggregate, reason}`. `check_type` is one of `setup`, `hold`, `recovery`, `removal`, `clock_gating_setup`, `clock_gating_hold`, `output_setup`, `output_hold`, `latch_setup`, `latch_hold`, or `unknown`, so async recovery/removal is never reported as data setup/hold. `status` is `"ok"`, `"no_paths"`, `"unavailable"` or `"inconsistent"`. Identity fields are `null` unless a path was found. See "Per-port I/O delays and worst-path identity" below. |
+| `port_paths` | object \| omitted | Additive field (issue #3042), present only when `constraints.report_ports` is given — on the single-corner response and on every `corners[]` entry. `{"<port>": {"direction", "setup", "hold"}}` in request order; `setup`/`hold` are path records of the `worst_*_path` shape. See "Per-port path queries" below. |
 | `clock_skew_ns` | number \| null | Worst setup-side clock skew (`report_clock_skew_metric -setup`) across the clock tree the loaded DEF already contains. `null` if the DEF has no clock tree (`report_clock_skew_metric` reports nothing to measure). |
 | `estimated_power_mw` | number \| null | From `report_power_metric`, against whatever parasitics (SPEF-annotated or LEF-capacitance-only) this run used. |
 | `spef_annotation` | object \| null | `null` unless `request.spef` was given. See "Annotation evidence" below for the field shapes — and read it before quoting a SPEF-annotated timing number as a real-parasitics measurement. |
@@ -418,12 +447,12 @@ closes that gap natively:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "engine": "openroad",
   "engine_version": "26Q3-771-g7cfb2105c9",
   "hdl_toplevel": "gcd",
   "status": "ok",
-  "def_path": "/abs/path/gcd.def",
+  "def_path": { "path": "flows/gcd/gcd.def", "scope": "repo" },
   "verilog_path": null,
   "geometry_source": "routed",
   "wire_load_model": null,
@@ -574,7 +603,14 @@ reader's own. It answers "does the SPEF name the nets this design has", not
   <name>:<pin> not found.`). Any non-zero value forces
   `annotation_complete: false`: those parasitics are not in the timing.
 - `reader_warning_sample` — up to 5 of those warning lines verbatim, so the
-  offending name spelling is visible without re-running by hand.
+  offending name spelling is visible without re-running by hand. The one
+  exception (issue #2879): where a line quotes one of this run's three
+  resolved input files (DEF, Verilog, SPEF) by its absolute path, that path
+  is replaced with the input's report identity — its repo-relative path, or
+  `<outside repo>` — so committed evidence does not embed the producing
+  checkout's root. Nothing else in the line is rewritten; any other
+  absolute-looking text stays exactly as OpenSTA printed it. The same
+  bounded replacement applies to an engine error's `error.message`.
 
 ### 3. Delay fingerprint (before vs. after `read_spef`)
 
@@ -958,14 +994,57 @@ as plain SDC. Those queries show `a_in` hold `+0.33` ns and `b_in` hold
 setup path at all from `bus[1]` (min-only) and no hold check on `q_a`
 (max-only).
 
+### Per-port path queries: `constraints.report_ports` (issue #3042)
+
+`worst_*_path` is the *global* worst path end, so when an unrelated check is
+worse (the `rst_n` removal check above) a boundary port's own margin is not in
+the response. Name the ports to ask about:
+
+```json
+"constraints": { "...": "...", "report_ports": ["a_in", "b_in"] }
+```
+
+Each corner then carries `port_paths`, in request order. For the boundary
+example at `tt_025C_1v80` (`a_in` values as measured by the direct engine
+query; `engine_check_role` is also present in each record, omitted here):
+
+```json
+"port_paths": {
+  "a_in": {
+    "direction": "input",
+    "setup": { "status": "ok", "check_type": "setup", "startpoint": "a_in", "endpoint": "ff_a/D", "slack_ns": 1.29511, "consistent_with_aggregate": null, "reason": null },
+    "hold":  { "status": "ok", "check_type": "hold",  "startpoint": "a_in", "endpoint": "ff_a/D", "slack_ns": 0.33143, "consistent_with_aggregate": null, "reason": null }
+  }
+}
+```
+
+The global `worst_hold_path` is still `rst_n → ff_a/RESET_B`.
+
+- **What is queried.** For each port, `find_timing_paths -from [get_ports X]`
+  for an `input` port and `-to [get_ports X]` for an `output` port. An `inout`
+  port is queried both ways and the minimum slack wins. Each query uses
+  `-path_delay max|min -group_path_count 1 -endpoint_path_count 1`, so the
+  output grows with the number of requested ports and path groups, never with
+  design size. For an output port the record's `endpoint` is the port.
+  `direction` is `input`, `output` or `inout`.
+- **Records.** Each `setup`/`hold` record has the shape documented above.
+  There is no per-port aggregate to compare with, so
+  `consistent_with_aggregate` is always `null` and `status` is never
+  `"inconsistent"`. A side with no constrained path (for example the setup side
+  of a `min_ns`-only input) is `"no_paths"` with null identity fields, never
+  omitted. If the engine query fails, both records are `"unavailable"` with a
+  `reason`; no path is fabricated.
+- **Errors.** Names are verified in the engine session exactly like the delay
+  maps, before any timing is reported. A missing or ambiguous name (wildcard,
+  whole bus) stops the run with `constraints.report_ports rejected: ...`.
+- **Omitted means unchanged.** Without `report_ports` the generated Tcl and the
+  response are byte-identical to before; there is no `port_paths` key.
+
 ### What this is not
 
-- **Not a selected-port query.** The records give the identity of the
-  *global* worst setup and hold path end. They explain which check sets the
-  aggregate, but they do not answer "what is the hold slack from port X".
-  When an unrelated check is worse, as in the example, the boundary port's
-  own margin is not in the response. Per-port slack queries are tracked
-  separately in #3042.
+- **Not a general path query.** `report_ports` returns one worst setup and one
+  worst hold record per port. Wildcards, whole buses, non-port pins/nets,
+  top-N paths per port and full path reports are not supported.
 - **Not a completeness proof.** A port left out of a map with no scalar
   default stays unconstrained, and a `min_ns`-only entry leaves the setup
   side unconstrained. Neither produces a path record, so a clean
@@ -1057,7 +1136,7 @@ no PDN, no placement, no routing.
 ```bash
 klt sta netlist_sta_request.json --format json
 # -> geometry_source: "netlist_estimate", def_path: null,
-#    verilog_path: "/abs/path/gcd_netlist.v"
+#    verilog_path: {"path": "flows/gcd/gcd_netlist.v", "scope": "repo"}
 ```
 
 With no DEF at all, this command runs `read_liberty` -> `read_lef` x2 ->
@@ -1171,9 +1250,10 @@ add `corners[].engine_log` for each actual session.
 The entry has the same [fields and retention semantics as P&R](place-and-route.md#retained-openroad-logs):
 invocation ID, script filename/hash, normalized script/metrics/log paths,
 process outcome/return code, and `retention_errors`. New paths use
-`{path, scope}` envelopes; existing `def_path`, `verilog_path`, and
-`spef_path` fields retain their original shapes. `repo` paths resolve from
-the invoking repository root. For withheld `external` paths, find
+`{path, scope}` envelopes (as, since schema 2 / issue #2879, are
+`def_path`, `verilog_path`, and `spef_path`). Log `repo` paths resolve from
+the invoking repository root; the input-path fields resolve from the root of
+the repository containing the request file. For withheld `external` paths, find
 `openroad-logs/<invocation_id>/` beside the generated script in the request's
 `.klt/sta/` directory.
 

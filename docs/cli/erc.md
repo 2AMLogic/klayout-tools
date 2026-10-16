@@ -2223,9 +2223,11 @@ whatsoever, and run to completion on any PDK. `erc_status` is their verdict:
   validation). A successful, but not unconditional, result: read
   `erc_coverage.skipped` for which tie, and which of the four.
 - `"not_checked"` is a reachable token of the shared rollup vocabulary,
-  listed for completeness: `erc_coverage` always grades at least one gate
-  (a run with no gate net at all is exit 1), so a successful run reports
-  one of the three above.
+  listed for completeness: `erc_coverage` grades at least one gate, or --
+  on a passive-only cell with no transistor gate (issue #2896) -- at least
+  one declared `nets[]`/`ties[]` entry (a run with no gate net *and* no
+  declared `nets[]`/`ties[]` is exit 1), so a successful run reports one
+  of the three above.
 
 **Which one to gate on.** Gate a connectivity/structural-supply CI check on
 `erc_status`; gate an antenna check on `status`. Do not derive either from
@@ -2511,7 +2513,7 @@ forward regardless (a `diode_insertion` remedy):
 | `pdk`            | string \| null  | The `--pdk` value exactly as provided; `null` if omitted.                                        |
 | `findings_only`  | boolean         | (issue #2219) Whether `--findings-only` was passed — i.e. whether the per-gate antenna accumulation was skipped. `false` for every ordinary run. When `true`, `levels[].step_area_um2`/`cumulative_area_um2`/`antenna_ratio` are `null` and every level is in `coverage.skipped` for reason `findings_only` — see "Findings-only runs" above. |
 | `gate_role`      | string          | The `stackup[0].name` value — the gate-role layer's own name.                                    |
-| `gate_count`     | integer         | `len(gates)`.                                                                                     |
+| `gate_count`     | integer         | `len(gates)`; `0` on a passive-only cell (issue #2896).                                                                                     |
 | `gates`          | array\<object\> | One entry per net with nonzero area on the gate-role layer — see below.                          |
 | `gates[].gate_id`| string          | `"gate<index>"`, ascending in internal net-id order (stable within one run, not guaranteed stable across `klt`/KLayout versions). |
 | `gates[].net`    | string \| null  | The net's own label text, if any `stackup` role's `label_layer` carries one; `null` if unlabelled. |
@@ -2573,7 +2575,9 @@ actually compared against a limit. Missing PDK or level limits are skipped
 (`missing_antenna_pdk`/`missing_antenna_limit`), as is every non-gate level
 of a `--findings-only` run (`findings_only`, issue #2219 — the caller
 declined the accumulation, the same shape of caller-side skip as omitting
-`--pdk`); the gate reference level is inapplicable.
+`--pdk`); the gate reference level is inapplicable. A cell with no gate at all
+(passive-only, issue #2896) records one inapplicable entry, id `antenna:[]`,
+reason `no_gates` -- independent of `--pdk`/`--findings-only`.
 
 `erc_coverage.scope` is `connectivity`, and grades the `erc_findings` rules,
 which need no `--pdk` at all. One checked ID per subject actually checked:
@@ -2591,8 +2595,17 @@ never skipped —
 an undeclared rule must not make this scope partial, and the distinction is
 what lets a consumer tell "no supply was declared, so `erc.supply_short`
 was never computed" from "the declared supplies came back clean" off the
-envelope alone. The gate scope is never empty: a run in which no net
-carries gate-role geometry is exit 1, not a zero-coverage report.
+envelope alone. A passive-only cell (issue #2896: poly resistors, MoM/MiM
+capacitors, no transistor gate -- including a gate-poly body excluded by
+`active_layer` or a `--deck` device carve-out) with `nets[]`/`ties[]`
+declared runs the connectivity rules as usual and reports `gate_count: 0`,
+`gates: []`; the antenna scope then carries one **inapplicable** entry
+with reason `no_gates` (never skipped: no antenna work was requested that
+failed to run). Top-level `status` is then `not_checked`/exit 4 (zero
+antenna levels graded, the shared rollup), or `violations` if a
+connectivity finding exists; read `erc_status`/`erc_coverage` for the
+connectivity verdict. A run with no gate and no declared `nets[]`/`ties[]`
+asked for nothing gradable and is exit 1, not a zero-coverage report.
 
 A disclosure that names `undeclared_classes` (issue #2541) additionally
 records one `erc.missing_tie:["<class>"]` **inapplicable** entry per named
@@ -2712,7 +2725,7 @@ retain exit 1 and the stderr error envelope.
 | Exit code | Meaning                                                                                              |
 | --------- | ------------------------------------------------------------------------------------------------------ |
 | `0` | `status: "clean"` (at least one antenna level was graded, with no antenna or connectivity finding) or `status: "clean_partial"` (every graded level passed, but some requested antenna work was skipped — #2115). |
-| `1`       | Failed to run: layout/spec file not found or unreadable, a malformed `stackup`/`vias`/`nets`/`ties` declaration, an unrecognised `--pdk` name, `--findings-only` together with `--pdk`, an ambiguous top cell (pass `--top`), or no net in the layout carries any geometry on the declared gate role at all. |
+| `1`       | Failed to run: layout/spec file not found or unreadable, a malformed `stackup`/`vias`/`nets`/`ties` declaration, an unrecognised `--pdk` name, `--findings-only` together with `--pdk`, an ambiguous top cell (pass `--top`), or no gate net (no gate-role geometry overlapping `active_layer`, after `--deck` carve-outs, or a wrong gate-poly layer number) **and** no `nets[]`/`ties[]` declared to check instead. A passive-only cell that does declare `nets[]`/`ties[]` is not an error (issue #2896). |
 | `2`       | Usage error (argparse) — missing/invalid arguments.                                                    |
 | `3` | Antenna or connectivity violations. |
 | `4` | No actual antenna checks; `status: "not_checked"` — including every `--findings-only` run, which skips them by request. |

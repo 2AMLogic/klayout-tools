@@ -467,3 +467,49 @@ def test_shipped_cells_without_documented_deviations_run_clean_via_cli(
     assert payload["violations"] == []
     assert payload["coverage_assertion"]["satisfied"] is True
     assert set(payload["coverage"]["rule_categories"]) == set(RULE_IDS)
+
+
+# --------------------------------------------------------------------------- #
+# ACTIVE.LUP.1 evidence (#3087): a gap, not a deck rule
+# --------------------------------------------------------------------------- #
+
+_LUP = fx.latchup_experiments()
+
+
+def test_active_lup_1_stays_a_documented_gap():
+    gap = next(g for g in NOT_IMPLEMENTED if g.id == "ACTIVE.LUP.1")
+    assert gap.table == "Table 3.5.2"
+    assert "30 um" in gap.reason
+    assert "ACTIVE.LUP.1" not in RULE_IDS
+    assert "ACTIVE.LUP.1" not in _deck_text()
+    section = _docs_asap7_section()
+    assert "### ACTIVE.LUP.1 evidence" in section
+    assert "`<=`, value `30 um`" in section
+
+
+def test_lup_experiments_are_isolated_and_cover_the_controls():
+    names = {e.name for e in _LUP}
+    assert len(names) == len(_LUP)
+    assert {
+        "nmos-ptap-at-30um",
+        "nmos-ptap-1dbu-past-30um",
+        "nmos-ordinary-active-neighbour",
+        "nmos-wrong-class-ntap",
+        "nmos-ptap-in-well",
+        "pmos-ntap-same-well-at-30um",
+        "pmos-ntap-other-well",
+    } <= names
+    # The metric-dependent verdicts are the information deficit.
+    metric_dependent = {e.name for e in _LUP if len(set(e.expect.values())) > 1}
+    assert metric_dependent == {
+        "nmos-ptap-diagonal-21um",
+        "nmos-ptap-diagonal-22um",
+    }
+
+
+@pytest.mark.parametrize("exp", _LUP, ids=[e.name for e in _LUP])
+@pytest.mark.parametrize("metric", fx.LATCHUP_METRICS)
+def test_lup_reference_predicate_on_written_layout(tmp_path, exp, metric):
+    gds = tmp_path / f"{exp.name}.gds"
+    fx.write_latchup_experiment(str(gds), exp)
+    assert fx.latchup_reference(str(gds), metric) is exp.expect[metric]

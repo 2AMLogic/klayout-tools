@@ -229,8 +229,11 @@ import json
 import os
 import re
 import subprocess  # noqa: F401 -- tests patch post_route_sta.subprocess.run
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from typing import Any
 
+from . import env_provenance
 from ._openroad_engine import (
     _container_runtime_hint,
     _count_violations,
@@ -260,7 +263,15 @@ from .pdk_cells import resolve_liberty_for_cell_library
 #: JSON shape -- versioned independently of every other verb's own
 #: ``SCHEMA_VERSION`` (docs/json-contract.md: "versioned per command, not
 #: globally").
-SCHEMA_VERSION = 1
+#:
+#: ``2`` (issue #2879): ``def_path``/``verilog_path``/``spef_path`` are the
+#: ``{path, scope}`` envelope (``env_provenance.repo_relative_path``, the
+#: shape ``klt sim``/``klt pex`` adopted in issue #1261) instead of plain
+#: absolute-path strings, and the SPEF reader-warning sample no longer
+#: embeds the producing checkout's absolute input paths. A schema-``1``
+#: response carried the absolute host path, which made committed STA
+#: evidence verifiable only on the host that produced it.
+SCHEMA_VERSION = 2
 
 _SETUP_VIOLATIONS_BEGIN = "===KLT_STA_SETUP_VIOLATIONS_BEGIN==="
 _SETUP_VIOLATIONS_END = "===KLT_STA_SETUP_VIOLATIONS_END==="
@@ -373,6 +384,15 @@ _PORT_CHECK_EXIT_CODE = 3
 _WORST_PATHS_BEGIN = "===KLT_STA_WORST_PATHS_BEGIN==="
 _WORST_PATHS_END = "===KLT_STA_WORST_PATHS_END==="
 
+#: Issue #3042: brackets the per-port worst-path records
+#: (:func:`_port_path_lines`) a ``constraints.report_ports`` request emits.
+#: Per requested port: one ``DIR\t<port>\t<direction>`` row, then
+#: ``PATH\t<port>\t<max|min>\t<check_role>\t<slack_s>\t<startpoint>\t<endpoint>``
+#: rows (an ``inout`` port contributes its ``-from`` and its ``-to`` paths),
+#: or a single ``ERROR\t<port>\t<message>`` row when that port's query failed.
+_PORT_PATHS_BEGIN = "===KLT_STA_PORT_PATHS_BEGIN==="
+_PORT_PATHS_END = "===KLT_STA_PORT_PATHS_END==="
+
 #: Issue #2739: brackets the ``report_clock_latency -digits 6`` dump a
 #: ``propagated_clock`` request emits after ``set_propagated_clock`` (and,
 #: when present, after ``read_spef``) -- the machine-readable evidence of
@@ -450,6 +470,8 @@ _SLACK_CONSISTENCY_TOL_NS = 1e-4
 #: return that a per-port input/output delay may be applied to.
 _INPUT_PORT_DIRECTIONS = ("input", "inout", "bidirect")
 _OUTPUT_PORT_DIRECTIONS = ("output", "inout", "bidirect")
+#: Issue #3042: ``constraints.report_ports`` accepts a port of any direction.
+_ANY_PORT_DIRECTIONS = ("input", "output", "inout", "bidirect")
 
 
 class PostRouteStaError(Exception):
@@ -595,6 +617,7 @@ def run_sta(
     input_delays, output_delays = _validate_port_delay_maps(
         request["constraints"], clock_port
     )
+    report_ports = _validate_report_ports(request["constraints"], clock_port)
     wire_load_model, wire_load_mode = _validate_wire_load_estimate(
         request["constraints"], has_verilog
     )
@@ -631,6 +654,178 @@ def run_sta(
     assert input_path is not None
     basename = os.path.splitext(os.path.basename(input_path))[0]
 
+    # Issue #2879: the absolute `def_path`/`verilog_path`/`spef_path` above
+    # are *engine* paths -- what `read_def`/`read_verilog`/`read_spef` and
+    # the hashing below consume. What the response persists is derived from
+    # them exactly once, here, and never fed back to the engine.
+    report_paths = _ReportPaths.build(
+        def_path=def_path,
+        verilog_path=verilog_path,
+        spef_path=spef_path,
+        repo_root=env_provenance.find_repo_root(request_dir),
+    )
+    with report_paths.scrubbing_errors():
+        return _dispatch_sta(
+            requested_corner=requested_corner,
+            requested_corners=requested_corners,
+            report_paths=report_paths,
+            cell_library=cell_library,
+            pdk_variant=pdk_variant,
+            pdk_root=pdk_root,
+            has_def=has_def,
+            def_path=def_path,
+            verilog_path=verilog_path,
+            hdl_toplevel=hdl_toplevel,
+            geometry_source=geometry_source,
+            clock_port=clock_port,
+            clock_period_ns=clock_period_ns,
+            input_delay_ns=input_delay_ns,
+            output_delay_ns=output_delay_ns,
+            input_delays=input_delays,
+            output_delays=output_delays,
+            report_ports=report_ports,
+            spef_path=spef_path,
+            wire_load_model=wire_load_model,
+            wire_load_mode=wire_load_mode,
+            propagated_clock=propagated_clock,
+            output_dir=output_dir,
+            input_path=input_path,
+            basename=basename,
+        )
+
+
+class _ReportPaths:
+    """Issue #2879: the persisted identity of ``klt sta``'s three input
+    files, kept separate from the absolute engine paths they derive from.
+
+    ``def_path``/``verilog_path``/``spef_path`` are each the ``{path,
+    scope}`` envelope :func:`env_provenance.repo_relative_path` defines
+    (``scope: "repo"`` with a repo-relative POSIX path, or ``{"path": null,
+    "scope": "external"}`` for an input outside any repository -- never an
+    absolute host path), or plain ``None`` when this request does not use
+    that input at all (``def_path`` in ``verilog`` mode, ``verilog_path`` in
+    ``def`` mode, ``spef_path`` with no ``request.spef``). ``None`` rather
+    than ``scope: "absent"`` keeps the schema-1 "not applicable" value, and
+    is what lets ``klt signoff`` fall through from ``def_path`` to
+    ``verilog_path`` when choosing which artifact to re-hash.
+
+    :meth:`scrub` is the bounded warning/error normaliser: it replaces only
+    the literal resolved forms of these three files (``abspath`` and
+    ``realpath``, longest first so one never half-rewrites the other) with
+    their report identity -- the repo-relative path, or ``<outside repo>``.
+    Any other absolute-looking text an engine diagnostic carries is left
+    exactly as the engine wrote it.
+    """
+
+    def __init__(
+        self,
+        *,
+        def_path: dict[str, Any] | None,
+        verilog_path: dict[str, Any] | None,
+        spef_path: dict[str, Any] | None,
+        replacements: list[tuple[str, str]],
+    ) -> None:
+        self.def_path = def_path
+        self.verilog_path = verilog_path
+        self.spef_path = spef_path
+        self._replacements = replacements
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        def_path: str | None,
+        verilog_path: str | None,
+        spef_path: str | None,
+        repo_root: str | None,
+    ) -> _ReportPaths:
+        envelopes: dict[str, dict[str, Any] | None] = {}
+        labels: dict[str, str] = {}
+        for field, engine_path in (
+            ("def_path", def_path),
+            ("verilog_path", verilog_path),
+            ("spef_path", spef_path),
+        ):
+            if engine_path is None:
+                envelopes[field] = None
+                continue
+            envelope = env_provenance.repo_relative_path(
+                engine_path, repo_root=repo_root
+            )
+            envelopes[field] = envelope
+            label = (
+                envelope["path"]
+                if envelope.get("scope") == "repo"
+                else env_provenance.render_path_field(envelope)
+            )
+            for variant in (engine_path, os.path.realpath(engine_path)):
+                labels.setdefault(variant, label)
+        replacements = sorted(
+            labels.items(), key=lambda item: len(item[0]), reverse=True
+        )
+        return cls(
+            def_path=envelopes["def_path"],
+            verilog_path=envelopes["verilog_path"],
+            spef_path=envelopes["spef_path"],
+            replacements=replacements,
+        )
+
+    def scrub(self, text: str) -> str:
+        for engine_path, label in self._replacements:
+            text = text.replace(engine_path, label)
+        return text
+
+    @contextmanager
+    def scrubbing_errors(self) -> Iterator[None]:
+        """Re-raise a :class:`PostRouteStaError` whose message quotes one of
+        the three resolved input paths (``[ERROR ODB-...] ... /abs/checkout/
+        flows/gcd.def``) with that path rewritten to the input's report
+        identity, exactly like the warning sample. The message is otherwise
+        untouched, and an error that quotes none of them propagates as-is."""
+        try:
+            yield
+        except PostRouteStaError as exc:
+            scrubbed = self.scrub(str(exc))
+            if scrubbed == str(exc):
+                raise
+            raise PostRouteStaError(scrubbed) from exc
+
+
+def _identity(text: str) -> str:
+    return text
+
+
+def _dispatch_sta(
+    *,
+    requested_corner: str | None,
+    requested_corners: list[str] | None,
+    report_paths: _ReportPaths,
+    cell_library: str,
+    pdk_variant: str | None,
+    pdk_root: str | None,
+    has_def: bool,
+    def_path: str | None,
+    verilog_path: str | None,
+    hdl_toplevel: str | None,
+    geometry_source: str,
+    clock_port: str,
+    clock_period_ns: float,
+    input_delay_ns: float | None,
+    output_delay_ns: float | None,
+    input_delays: dict[str, dict[str, float]] | None,
+    output_delays: dict[str, dict[str, float]] | None,
+    report_ports: list[str] | None,
+    spef_path: str | None,
+    wire_load_model: str | None,
+    wire_load_mode: str | None,
+    propagated_clock: bool,
+    output_dir: str,
+    input_path: str,
+    basename: str,
+) -> dict[str, Any]:
+    """Run the single- or multi-corner analysis :func:`run_sta` resolved,
+    and assemble its response. Every ``*_path`` argument is an absolute
+    engine path; ``report_paths`` carries what the response persists."""
     # Issue #1871: `pdk.corners` (a list) is the multi-corner alternative to
     # the scalar `pdk.corner` above -- both share every request field
     # resolved up to this point (`def`/`verilog` are loaded fresh in *every*
@@ -653,6 +848,7 @@ def run_sta(
             output_delay_ns=output_delay_ns,
             input_delays=input_delays,
             output_delays=output_delays,
+            report_ports=report_ports,
             spef_path=spef_path,
             wire_load_model=wire_load_model,
             wire_load_mode=wire_load_mode,
@@ -660,6 +856,7 @@ def run_sta(
             output_dir=output_dir,
             input_path=input_path,
             basename=basename,
+            report_paths=report_paths,
         )
 
     corner_fields, resolution = _run_corner_session(
@@ -677,12 +874,14 @@ def run_sta(
         output_delay_ns=output_delay_ns,
         input_delays=input_delays,
         output_delays=output_delays,
+        report_ports=report_ports,
         spef_path=spef_path,
         wire_load_model=wire_load_model,
         wire_load_mode=wire_load_mode,
         propagated_clock=propagated_clock,
         output_dir=output_dir,
         script_tag=basename,
+        scrub=report_paths.scrub,
     )
 
     engine_version = _openroad_version()
@@ -706,10 +905,12 @@ def run_sta(
         "engine_version": engine_version,
         "hdl_toplevel": hdl_toplevel,
         "status": "ok",
-        "def_path": def_path,
+        # Issue #2879 (schema 2): `{path, scope}` envelopes, never the
+        # absolute engine path -- see `_ReportPaths`.
+        "def_path": report_paths.def_path,
         # Additive field (issue #1825): `null` unless `request.verilog` was
         # given -- the mutually-exclusive counterpart to `def_path` above.
-        "verilog_path": verilog_path,
+        "verilog_path": report_paths.verilog_path,
         # Additive field (issue #1826): echo of `request.geometry_source` --
         # see this module's own docstring "Pre-route DEFs" section. Always
         # present (never `null`): `"routed"` is the default when the request
@@ -732,7 +933,7 @@ def run_sta(
         # shapes; never infer it from clock_skew_ns, which is a measured
         # metric that is non-zero under ideal timing too.
         "clock_mode": "propagated" if propagated_clock else "ideal",
-        "spef_path": spef_path,
+        "spef_path": report_paths.spef_path,
         "worst_slack_ns": corner_fields["worst_slack_ns"],
         "total_negative_slack_ns": corner_fields["total_negative_slack_ns"],
         "worst_hold_slack_ns": corner_fields["worst_hold_slack_ns"],
@@ -763,6 +964,8 @@ def run_sta(
         "provenance": provenance,
     }
 
+    if "port_paths" in corner_fields:
+        response["port_paths"] = corner_fields["port_paths"]
     response["spef_annotation"] = corner_fields["spef_annotation"]
     # Additive field (issue #2739): the propagated-clock evidence block --
     # what propagation actually reached -- `null` unless the request asked
@@ -789,12 +992,14 @@ def _run_corner_session(
     output_delay_ns: float | None,
     input_delays: dict[str, dict[str, float]] | None,
     output_delays: dict[str, dict[str, float]] | None,
+    report_ports: list[str] | None,
     spef_path: str | None,
     wire_load_model: str | None,
     wire_load_mode: str | None,
     propagated_clock: bool,
     output_dir: str,
     script_tag: str,
+    scrub: Callable[[str], str] = _identity,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Run one complete, fresh OpenSTA session (``read_lef`` x2, ``read_def``
     or ``read_verilog``/``link_design``, ``read_liberty``, ``create_clock``,
@@ -857,6 +1062,7 @@ def _run_corner_session(
             output_delay_ns=output_delay_ns,
             input_delays=input_delays,
             output_delays=output_delays,
+            report_ports=report_ports,
             propagated_clock=propagated_clock,
         )
     else:
@@ -876,6 +1082,7 @@ def _run_corner_session(
             output_delay_ns=output_delay_ns,
             input_delays=input_delays,
             output_delays=output_delays,
+            report_ports=report_ports,
         )
     _write_script(script_path, lines)
 
@@ -939,10 +1146,20 @@ def _run_corner_session(
             round(power_w * 1000, 4) if power_w is not None else None
         ),
     }
+    # Additive field (issue #3042): only present when the request named
+    # `constraints.report_ports`, so an unrequested response is unchanged.
+    if report_ports:
+        corner_fields["port_paths"] = _port_paths(completed.stdout or "", report_ports)
     if spef_path is not None:
-        corner_fields["spef_annotation"] = _spef_annotation_block(
-            completed, spef_net_names
-        )
+        spef_annotation = _spef_annotation_block(completed, spef_net_names)
+        # Issue #2879: an OpenSTA reader warning quoting the SPEF (or DEF)
+        # by its resolved absolute path is persisted with that input's
+        # report identity instead -- bounded to the three known input
+        # paths, so every other diagnostic byte is kept verbatim.
+        spef_annotation["reader_warning_sample"] = [
+            scrub(line) for line in spef_annotation["reader_warning_sample"]
+        ]
+        corner_fields["spef_annotation"] = spef_annotation
     else:
         corner_fields["spef_annotation"] = None
     # Issue #2739: the propagated-clock evidence block -- what propagation
@@ -976,6 +1193,7 @@ def _run_multi_corner(
     output_delay_ns: float | None,
     input_delays: dict[str, dict[str, float]] | None,
     output_delays: dict[str, dict[str, float]] | None,
+    report_ports: list[str] | None,
     spef_path: str | None,
     wire_load_model: str | None,
     wire_load_mode: str | None,
@@ -983,6 +1201,7 @@ def _run_multi_corner(
     output_dir: str,
     input_path: str,
     basename: str,
+    report_paths: _ReportPaths,
 ) -> dict[str, Any]:
     """Issue #1871: ``request.pdk.corners`` -- characterize the *same*
     loaded ``def``/``verilog`` geometry at every corner in ``corners``, one
@@ -1036,12 +1255,14 @@ def _run_multi_corner(
             output_delay_ns=output_delay_ns,
             input_delays=input_delays,
             output_delays=output_delays,
+            report_ports=report_ports,
             spef_path=spef_path,
             wire_load_model=wire_load_model,
             wire_load_mode=wire_load_mode,
             propagated_clock=propagated_clock,
             output_dir=output_dir,
             script_tag=f"{basename}__{corner_name}",
+            scrub=report_paths.scrub,
         )
         if shared_pdk_info is None:
             shared_pdk_info = resolution["pdk_info"]
@@ -1084,8 +1305,8 @@ def _run_multi_corner(
         "engine_version": engine_version,
         "hdl_toplevel": hdl_toplevel,
         "status": "ok",
-        "def_path": def_path,
-        "verilog_path": verilog_path,
+        "def_path": report_paths.def_path,
+        "verilog_path": report_paths.verilog_path,
         "geometry_source": geometry_source,
         "wire_load_model": wire_load_model,
         "wire_load_mode": wire_load_mode,
@@ -1096,7 +1317,7 @@ def _run_multi_corner(
         # entry carries that session's own `clock_propagation` evidence
         # block (the network latencies it reports *do* vary per corner).
         "clock_mode": "propagated" if propagated_clock else "ideal",
-        "spef_path": spef_path,
+        "spef_path": report_paths.spef_path,
         "provenance": provenance,
         # Additive field (issue #1871): one entry per requested
         # `request.pdk.corners` name, in the same order the request gave
@@ -1448,6 +1669,45 @@ def _parse_port_delay_entry(field: str, port: str, entry: Any) -> dict[str, floa
     return bounds
 
 
+def _validate_report_ports(
+    constraints: dict[str, Any], clock_port: str
+) -> list[str] | None:
+    """``constraints.report_ports`` (issue #3042): optional list of unique
+    literal port names (one scalar port or one bus bit, e.g. ``data[3]`` --
+    the same key rules as the :func:`_validate_port_delay_maps` maps) whose
+    own worst setup/hold path is reported as ``port_paths``. Returns the
+    list, or ``None`` when the field is omitted *or* empty (nothing is
+    emitted, so the generated Tcl is byte-identical to a request without
+    it). Existence and direction are verified inside the engine session
+    (:func:`_port_check_lines`); the clock port is rejected here."""
+    field = "request.constraints.report_ports"
+    value = constraints.get("report_ports")
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise PostRouteStaError(f"{field} must be a list of port names")
+    seen: set[str] = set()
+    for port in value:
+        if not isinstance(port, str) or not port or port != port.strip():
+            raise PostRouteStaError(
+                f"{field} entries must be non-empty port-name strings without "
+                f"leading/trailing whitespace (got {port!r})"
+            )
+        if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in port):
+            raise PostRouteStaError(
+                f"{field} entry {port!r} contains a control character"
+            )
+        if port == clock_port:
+            raise PostRouteStaError(
+                f"{field} must not name the clock port {port!r} -- "
+                "it has no data path of its own"
+            )
+        if port in seen:
+            raise PostRouteStaError(f"{field} must not repeat a port ({port!r})")
+        seen.add(port)
+    return list(value) or None
+
+
 def _validate_corners(value: Any) -> list[str] | None:
     """Optional ``request.pdk.corners`` (issue #1871) -- the additive,
     multi-corner alternative to the scalar ``request.pdk.corner``: a list of
@@ -1762,14 +2022,22 @@ def _request_io_delay_lines(
     output_delay_ns: float | None,
     input_delays: dict[str, dict[str, float]] | None,
     output_delays: dict[str, dict[str, float]] | None,
+    report_ports: list[str] | None = None,
 ) -> list[str]:
-    """All I/O-delay Tcl for one session. With no per-port map this is
-    exactly :func:`_io_delay_lines` (the scalar-only contract, byte-for-byte
-    the same Tcl as before issue #2740); otherwise
-    :func:`_port_check_lines` followed by :func:`_port_io_delay_lines`."""
+    """All I/O-delay Tcl for one session. With no per-port map and no
+    ``report_ports`` this is exactly :func:`_io_delay_lines` (the
+    scalar-only contract, byte-for-byte the same Tcl as before issue #2740);
+    otherwise :func:`_port_check_lines` (which also verifies every
+    ``report_ports`` name, issue #3042) followed by the delay Tcl."""
     if not input_delays and not output_delays:
-        return _io_delay_lines(clock_port, input_delay_ns, output_delay_ns)
-    return _port_check_lines(input_delays, output_delays) + _port_io_delay_lines(
+        if not report_ports:
+            return _io_delay_lines(clock_port, input_delay_ns, output_delay_ns)
+        return _port_check_lines(None, None, report_ports) + _io_delay_lines(
+            clock_port, input_delay_ns, output_delay_ns
+        )
+    return _port_check_lines(
+        input_delays, output_delays, report_ports
+    ) + _port_io_delay_lines(
         clock_port, input_delay_ns, output_delay_ns, input_delays, output_delays
     )
 
@@ -1777,6 +2045,7 @@ def _request_io_delay_lines(
 def _port_check_lines(
     input_delays: dict[str, dict[str, float]] | None,
     output_delays: dict[str, dict[str, float]] | None,
+    report_ports: list[str] | None = None,
 ) -> list[str]:
     """Verify every per-port map key against the loaded design before any
     delay is applied (issue #2740): each must match **exactly one** port
@@ -1785,11 +2054,15 @@ def _port_check_lines(
     the map allows. Failures are printed between
     :data:`_PORT_CHECK_BEGIN`/:data:`_PORT_CHECK_END` and the session exits
     with :data:`_PORT_CHECK_EXIT_CODE`, so a bad key is an actionable error
-    -- never a request that silently constrains nothing."""
+    -- never a request that silently constrains nothing.
+
+    ``report_ports`` (issue #3042) are checked the same way on a third
+    ``report`` side that accepts a port of any direction."""
     entries: list[str] = []
     for side, mapping, allowed in (
         ("input", input_delays, _INPUT_PORT_DIRECTIONS),
         ("output", output_delays, _OUTPUT_PORT_DIRECTIONS),
+        ("report", dict.fromkeys(report_ports or ()), _ANY_PORT_DIRECTIONS),
     ):
         for port in mapping or {}:
             entries.append(f"{side} {_tcl_literal(port)} {{{' '.join(allowed)}}}")
@@ -1919,6 +2192,59 @@ def _worst_path_lines() -> list[str]:
         "}",
         f'puts "{_WORST_PATHS_END}"',
     ]
+
+
+def _port_path_lines(report_ports: list[str] | None) -> list[str]:
+    """Per-port worst setup (``max``) and hold (``min``) path ends,
+    marker-delimited (issue #3042); no lines at all without
+    ``report_ports``, so an unrequested session is byte-identical.
+
+    For each port: its direction, then ``find_timing_paths -from <port>``
+    when the port can launch a path (``input``/``inout``/``bidirect``) and
+    ``-to <port>`` when it can capture one (``output``/``inout``/
+    ``bidirect``), each with ``-group_path_count 1 -endpoint_path_count 1``
+    -- so output is bounded by (ports x path groups x 2), never by design
+    size. Every port is ``catch``-wrapped on its own: a failed query yields
+    an ``ERROR`` row for that port (reported as ``status: "unavailable"``),
+    never a fabricated path. Port names were verified by
+    :func:`_port_check_lines` before this runs."""
+    if not report_ports:
+        return []
+    ports = " ".join(_tcl_literal(port) for port in report_ports)
+    query = "find_timing_paths {flag} $klt_rp_port -path_delay $klt_rp_side "
+    query += "-group_path_count 1 -endpoint_path_count 1"
+    row = (
+        'puts "PATH\\t$klt_rp_name\\t$klt_rp_side\\t[$klt_pe check_role]\\t'
+        "[$klt_pe slack]\\t[get_full_name [get_property $klt_pe startpoint]]\\t"
+        '[get_full_name [get_property $klt_pe endpoint]]"'
+    )
+    lines = [
+        f'puts "{_PORT_PATHS_BEGIN}"',
+        f"foreach klt_rp_name [list {ports}] {{",
+        "    if {[catch {",
+        "        set klt_rp_port [get_ports $klt_rp_name]",
+        "        set klt_rp_dir [get_property $klt_rp_port direction]",
+        '        puts "DIR\\t$klt_rp_name\\t$klt_rp_dir"',
+        "        foreach klt_rp_side {max min} {",
+    ]
+    for flag, excluded in (("-from", "output"), ("-to", "input")):
+        lines += [
+            f'            if {{$klt_rp_dir ne "{excluded}"}} {{',
+            f"                foreach klt_pe [{query.format(flag=flag)}] {{",
+            f"                    {row}",
+            "                }",
+            "            }",
+        ]
+    lines += [
+        "        }",
+        "    } klt_rp_error]} {",
+        '        puts "ERROR\\t$klt_rp_name\\t'
+        '[string map [list \\n { } \\t { }] $klt_rp_error]"',
+        "    }",
+        "}",
+        f'puts "{_PORT_PATHS_END}"',
+    ]
+    return lines
 
 
 def _constraint_completeness_lines() -> list[str]:
@@ -2095,6 +2421,7 @@ def _sta_script_lines(
     output_delay_ns: float | None = None,
     input_delays: dict[str, dict[str, float]] | None = None,
     output_delays: dict[str, dict[str, float]] | None = None,
+    report_ports: list[str] | None = None,
     propagated_clock: bool = False,
 ) -> list[str]:
     """Build the Tcl script for the single, from-scratch OpenSTA session
@@ -2134,7 +2461,12 @@ def _sta_script_lines(
     if propagated_clock:
         lines += _propagated_clock_lines(clock_port)
     lines += _request_io_delay_lines(
-        clock_port, input_delay_ns, output_delay_ns, input_delays, output_delays
+        clock_port,
+        input_delay_ns,
+        output_delay_ns,
+        input_delays,
+        output_delays,
+        report_ports,
     )
     if spef_path is not None:
         lines += _spef_net_check_lines(spef_net_names or [])
@@ -2157,6 +2489,7 @@ def _sta_script_lines(
     ]
     lines += _violation_count_lines()
     lines += _worst_path_lines()
+    lines += _port_path_lines(report_ports)
     lines += _constraint_completeness_lines()
     return lines
 
@@ -2176,6 +2509,7 @@ def _sta_netlist_script_lines(
     output_delay_ns: float | None = None,
     input_delays: dict[str, dict[str, float]] | None = None,
     output_delays: dict[str, dict[str, float]] | None = None,
+    report_ports: list[str] | None = None,
 ) -> list[str]:
     """Build the Tcl script for a from-scratch, netlist-input OpenSTA
     session (issue #1825): no DEF, no placement, no routing. Links a
@@ -2220,7 +2554,12 @@ def _sta_netlist_script_lines(
     ]
     lines += _clock_lines(clock_port, clock_period_ns)
     lines += _request_io_delay_lines(
-        clock_port, input_delay_ns, output_delay_ns, input_delays, output_delays
+        clock_port,
+        input_delay_ns,
+        output_delay_ns,
+        input_delays,
+        output_delays,
+        report_ports,
     )
     if wire_load_mode is not None:
         lines.append(f"set_wire_load_mode {wire_load_mode}")
@@ -2237,6 +2576,7 @@ def _sta_netlist_script_lines(
     ]
     lines += _violation_count_lines()
     lines += _worst_path_lines()
+    lines += _port_path_lines(report_ports)
     lines += _constraint_completeness_lines()
     return lines
 
@@ -2586,7 +2926,11 @@ def _parse_port_check_errors(stdout: str) -> list[tuple[str, str, str]]:
 def _port_check_error_message(rows: list[tuple[str, str, str]]) -> str:
     details = []
     for side, port, problem in rows:
-        field = f"constraints.{side}_delays[{port!r}]"
+        field = (
+            f"constraints.report_ports[{port!r}]"
+            if side == "report"
+            else f"constraints.{side}_delays[{port!r}]"
+        )
         if problem == "not_found":
             details.append(f"{field}: no port with exactly this name in the design")
         elif problem.startswith("matches_"):
@@ -2604,7 +2948,12 @@ def _port_check_error_message(rows: list[tuple[str, str, str]]) -> str:
             )
         else:
             details.append(f"{field}: {problem}")
-    return "per-port I/O delay constraint(s) rejected: " + "; ".join(details)
+    prefix = (
+        "constraints.report_ports rejected"
+        if all(side == "report" for side, _, _ in rows)
+        else "per-port I/O delay constraint(s) rejected"
+    )
+    return f"{prefix}: " + "; ".join(details)
 
 
 def _empty_path_record(status: str, reason: str | None) -> dict[str, Any]:
@@ -2729,6 +3078,102 @@ def _worst_paths(
         _worst_path_record(rows["max"], setup_ws),
         _worst_path_record(rows["min"], hold_ws),
     )
+
+
+def _apply_port_record(
+    parts: list[str],
+    line: str,
+    directions: dict[str, str],
+    port_rows: dict[str, list[dict[str, Any]]],
+) -> str | None:
+    """Fold one ``DIR``/``PATH``/``ERROR`` record into ``directions`` /
+    ``port_rows``; return a failure reason when the record is bad, else
+    ``None``."""
+    kind, port = parts[0], parts[1]
+    if kind == "ERROR":
+        return "engine path introspection failed: " + "\t".join(parts[2:]).strip()
+    if kind == "DIR":
+        if len(parts) != 3 or not parts[2]:
+            return f"malformed port record: {line!r}"
+        directions[port] = "inout" if parts[2] == "bidirect" else parts[2]
+        return None
+    if len(parts) != 7 or parts[2] not in ("max", "min") or not all(parts[3:]):
+        return f"malformed port path record: {line!r}"
+    try:
+        slack_s = float(parts[4])
+    except ValueError:
+        return f"malformed port path slack: {line!r}"
+    if slack_s != slack_s or abs(slack_s) == float("inf"):
+        return f"non-finite port path slack: {line!r}"
+    port_rows[parts[2]].append(
+        {
+            "engine_check_role": parts[3],
+            "slack_ns": slack_s * 1e9,
+            "startpoint": parts[5],
+            "endpoint": parts[6],
+        }
+    )
+    return None
+
+
+def _parse_port_path_rows(
+    stdout: str, ports: list[str]
+) -> dict[str, tuple[str | None, dict[str, list[dict[str, Any]]] | None, str | None]]:
+    """``{port: (direction, rows, reason)}`` from :func:`_port_path_lines`'
+    block, in request order. ``rows`` is ``{"max": [...], "min": [...]}``
+    (``None`` with a ``reason`` when the port's query failed, its record was
+    malformed, or the block/port is absent). Lines that are neither ``DIR``,
+    ``PATH`` nor ``ERROR`` rows (stray engine warnings) are ignored."""
+    block = _extract_block(stdout, _PORT_PATHS_BEGIN, _PORT_PATHS_END)
+    if block is None:
+        reason = "per-port path records absent from engine output"
+        return {port: (None, None, reason) for port in ports}
+    directions: dict[str, str] = {}
+    rows: dict[str, dict[str, list[dict[str, Any]]]] = {
+        port: {"max": [], "min": []} for port in ports
+    }
+    failures: dict[str, str] = {}
+    for line in block.splitlines():
+        parts = line.split("\t")
+        if parts[0] not in ("DIR", "PATH", "ERROR") or len(parts) < 2:
+            continue
+        port = parts[1]
+        if port not in rows or port in failures:
+            continue
+        failure = _apply_port_record(parts, line, directions, rows[port])
+        if failure is not None:
+            failures[port] = failure
+    parsed: dict[
+        str, tuple[str | None, dict[str, list[dict[str, Any]]] | None, str | None]
+    ] = {}
+    for port in ports:
+        if port in failures:
+            parsed[port] = (directions.get(port), None, failures[port])
+        elif port not in directions:
+            parsed[port] = (None, None, "no record emitted for this port")
+        else:
+            parsed[port] = (directions[port], rows[port], None)
+    return parsed
+
+
+def _port_paths(stdout: str, report_ports: list[str]) -> dict[str, dict[str, Any]]:
+    """``port_paths`` for one session (issue #3042): per requested port, in
+    request order, its ``direction`` and the worst ``setup``/``hold``
+    records. There is no per-port aggregate to cross-check against, so
+    ``consistent_with_aggregate`` stays ``null`` and ``inconsistent`` is
+    never produced; a side with no constrained path is ``no_paths``."""
+    result: dict[str, dict[str, Any]] = {}
+    for port, (direction, rows, reason) in _parse_port_path_rows(
+        stdout, report_ports
+    ).items():
+        if rows is None:
+            setup = _empty_path_record("unavailable", reason)
+            hold = _empty_path_record("unavailable", reason)
+        else:
+            setup = _worst_path_record(rows["max"], None)
+            hold = _worst_path_record(rows["min"], None)
+        result[port] = {"direction": direction, "setup": setup, "hold": hold}
+    return result
 
 
 def _unavailable_completeness_check(reason: str) -> dict[str, Any]:

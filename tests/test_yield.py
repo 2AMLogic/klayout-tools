@@ -2427,3 +2427,163 @@ def test_documented_two_command_pipeline_grades_a_negative_control(tmp_path, cap
         "no measurement declared a negative_control" in w for w in report["warnings"]
     )
     assert (open(nominal, "rb").read(), open(control, "rb").read()) == before
+
+
+# --------------------------------------------------------------------------- #
+# Issue #2873: target_sigma + min_converged_samples
+# --------------------------------------------------------------------------- #
+
+
+def _limits_file(tmp_path, doc):
+    return _write_json(tmp_path / "qual-limits.json", doc)
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("target_sigma", True),
+        ("target_sigma", "3"),
+        ("target_sigma", 0),
+        ("target_sigma", -1.5),
+        ("min_converged_samples", True),
+        ("min_converged_samples", 2.5),
+        ("min_converged_samples", -1),
+        ("min_converged_samples", "10"),
+    ],
+)
+def test_invalid_qualification_keys_raise_yield_error(tmp_path, key, value):
+    samples = _sample_set(tmp_path, _normal_grid(50, 0.0, 1.0))
+    per_measurement = _limits_file(
+        tmp_path, {"measurements": {"m": {"min": -4.0, "max": 4.0, key: value}}}
+    )
+    with pytest.raises(YieldError, match=key):
+        run_yield(samples, limits_path=per_measurement)
+    run_level = _limits_file(
+        tmp_path, {key: value, "measurements": {"m": {"min": -4.0, "max": 4.0}}}
+    )
+    with pytest.raises(YieldError, match=key):
+        run_yield(samples, limits_path=run_level)
+
+
+@requires_native
+def test_an_undeclared_spec_emits_none_of_the_new_fields(tmp_path):
+    path = _sample_set(
+        tmp_path, _normal_grid(100, 0.0, 1.0), limits={"min": -4.0, "max": 4.0}
+    )
+    m = run_yield(path)["measurements"][0]
+    assert "sigma_target" not in m
+    assert "converged_n" not in m
+    assert "target_sigma" not in m["limits"]
+    assert "min_converged_samples" not in m["limits"]
+
+
+@requires_native
+def test_target_sigma_fails_the_run_even_when_target_yield_is_met(tmp_path):
+    """The issue's motivating case: the yield claim holds, the stricter
+    parametric criterion does not, and the envelope must say so (exit 3)."""
+    path = _sample_set(
+        tmp_path,
+        _normal_grid(1000, 0.0, 1.0),
+        limits={"min": -4.0, "max": 4.0, "target_yield": 0.99, "target_sigma": 5.0},
+    )
+    report = run_yield(path)
+    m = report["measurements"][0]
+    assert m["yield"]["empirical"]["confidence_interval"]["low"] >= 0.99
+    assert m["sigma_target"]["met"] is False
+    assert m["sigma_target"]["gate"] == "lower_bound"
+    assert m["sigma_target"]["k"] == 5.0
+    assert report["status"] == "fail"
+    assert (
+        main(
+            [
+                "yield",
+                path,
+                "--limits",
+                _limits_file(
+                    tmp_path,
+                    {
+                        "measurements": {
+                            "m": {
+                                "min": -4.0,
+                                "max": 4.0,
+                                "target_yield": 0.99,
+                                "target_sigma": 5.0,
+                            }
+                        }
+                    },
+                ),
+                "--format",
+                "json",
+            ]
+        )
+        == 3
+    )
+
+
+@requires_native
+def test_run_level_target_sigma_is_a_default_and_per_measurement_wins(tmp_path):
+    path = _sample_set(tmp_path, _normal_grid(1000, 0.0, 1.0))
+    limits = _limits_file(
+        tmp_path,
+        {"target_sigma": 5.0, "measurements": {"m": {"min": -4.0, "max": 4.0}}},
+    )
+    assert run_yield(path, limits_path=limits)["status"] == "fail"
+    limits = _limits_file(
+        tmp_path,
+        {
+            "target_sigma": 5.0,
+            "measurements": {"m": {"min": -4.0, "max": 4.0, "target_sigma": 3.0}},
+        },
+    )
+    report = run_yield(path, limits_path=limits)
+    assert report["status"] == "pass"
+    assert report["measurements"][0]["sigma_target"]["met"] is True
+
+
+@requires_native
+def test_converged_n_shortfall_is_insufficient_evidence_exit_4(tmp_path):
+    entry = {
+        "name": "m",
+        "samples": _normal_grid(100, 0.0, 1.0),
+        "errored": 20,
+        "limits": {"min": -4.0, "max": 4.0, "min_converged_samples": 110},
+    }
+    sample_path = tmp_path / "s.json"
+    sample_path.write_text(json.dumps({"measurements": [entry]}))
+    report = run_yield(str(sample_path))
+    m = report["measurements"][0]
+    assert m["converged_n"] == {
+        "n_requested": 120,
+        "n_converged": 100,
+        "min_converged_samples": 110,
+        "verdict": "insufficient",
+    }
+    assert report["status"] == m["status"] == "insufficient_evidence"
+    assert main(["yield", str(sample_path), "--format", "json"]) == 4
+
+
+@requires_native
+def test_degenerate_fit_sigma_target_is_not_evaluable_never_a_pass(tmp_path):
+    path = _sample_set(
+        tmp_path,
+        [1.0] * 50,
+        limits={"min": 0.0, "max": 2.0, "target_sigma": 3.0},
+    )
+    report = run_yield(path)
+    st = report["measurements"][0]["sigma_target"]
+    assert st["met"] is None
+    assert st["sigma_to_spec"] is None
+    assert st["reason"] == "degenerate_fit"
+    assert report["status"] == "insufficient_evidence"
+
+
+@requires_native
+def test_a_one_sided_limit_supports_a_sigma_target(tmp_path):
+    path = _sample_set(
+        tmp_path,
+        _normal_grid(1000, 0.0, 1.0),
+        limits={"min": -4.0, "target_sigma": 3.0},
+    )
+    m = run_yield(path)["measurements"][0]
+    assert m["capability"]["limiting_side"] == "lower"
+    assert m["sigma_target"]["met"] is True

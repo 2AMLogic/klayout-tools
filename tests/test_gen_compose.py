@@ -10096,39 +10096,165 @@ def test_compose_pins_rejects_unknown_port(tmp_path, pdk_root):
         )
 
 
-def test_compose_pins_rejects_port_also_in_connectivity(tmp_path, pdk_root):
-    # A (block, port) that connectivity[] already wires (and thus labels) may
-    # not also be promoted by pins[] -- a second, possibly inconsistent label
-    # on the same physical shape is ambiguous, not additive (exit 1).
+def _conn_pins_request(tmp_path, pdk_root, pins, connectivity=None, out="out.gds"):
     r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
     r2 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r2")
-    with pytest.raises(GenComposeError, match="already labelled by a connectivity"):
-        compose(
+    return {
+        "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+        "blocks": [
+            {"id": "b1", "generator_report": r1},
+            {"id": "b2", "generator_report": r2},
+        ],
+        "placement": {"strategy": "row", "order": ["b1", "b2"], "spacing_um": 1.0},
+        "connectivity": connectivity
+        or [
             {
-                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
-                "blocks": [
-                    {"id": "b1", "generator_report": r1},
-                    {"id": "b2", "generator_report": r2},
+                "net": "N1",
+                "pins": [
+                    {"block": "b1", "port": "P2"},
+                    {"block": "b2", "port": "P1"},
                 ],
-                "placement": {
-                    "strategy": "row",
-                    "order": ["b1", "b2"],
-                    "spacing_um": 1.0,
-                },
-                "connectivity": [
-                    {
-                        "net": "N1",
-                        "pins": [
-                            {"block": "b1", "port": "P2"},
-                            {"block": "b2", "port": "P1"},
-                        ],
-                    }
-                ],
-                "routing": {"layer_role": "metal", "width_um": 0.17},
-                "pins": [{"net": "N1_ALIAS", "block": "b1", "port": "P2"}],
-                "options": {"output": str(tmp_path / "out.gds")},
             }
-        )
+        ],
+        "routing": {"layer_role": "metal", "width_um": 0.17},
+        "pins": pins,
+        "options": {"output": str(tmp_path / out)},
+    }
+
+
+def test_compose_pins_rejects_port_in_connectivity_with_different_net(
+    tmp_path, pdk_root
+):
+    # A pins[] entry on a connectivity-wired port under a *different* net is a
+    # conflicting label (exit 1) and the message names both nets.
+    req = _conn_pins_request(
+        tmp_path,
+        pdk_root,
+        [{"net": "N1_ALIAS", "block": "b1", "port": "P2"}],
+    )
+    with pytest.raises(GenComposeError, match="N1_ALIAS.*N1|N1.*N1_ALIAS"):
+        compose(req)
+
+
+def test_compose_pins_accepts_port_in_connectivity_with_same_net(tmp_path, pdk_root):
+    # #2881: agreeing net -> routed AND reported in ports[], no duplicate label.
+    req = _conn_pins_request(
+        tmp_path, pdk_root, [{"net": "N1", "block": "b1", "port": "P2"}]
+    )
+    resp = compose(req)
+    assert [p["name"] for p in resp["ports"]] == ["N1"]
+    assert resp["pins"] == [
+        {"net": "N1", "block": "b1", "port": "P2", "labelled": True}
+    ]
+    assert any("supplied by the router" in n for n in resp["drc_hints"]["notes"])
+
+    baseline_req = _conn_pins_request(tmp_path, pdk_root, [], out="base.gds")
+    compose(baseline_req)
+
+    def n1_texts(path):
+        import klayout.db as kdb
+
+        layout = kdb.Layout()
+        layout.read(str(path))
+        top = layout.top_cell()
+        count = 0
+        for li in layout.layer_indexes():
+            for sh in top.begin_shapes_rec(li):
+                s = sh.shape()
+                if s.is_text() and s.text_string == "N1":
+                    count += 1
+        return count
+
+    assert n1_texts(tmp_path / "out.gds") == n1_texts(tmp_path / "base.gds")
+
+
+def test_compose_pins_same_net_bundle_and_multi_entry(tmp_path, pdk_root):
+    # Bundle (3-pin) net: a pin on any member port with the net's name is ok;
+    # a mismatching name on another member still fails.
+    r3 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r3")
+    conn = [
+        {
+            "net": "BUS",
+            "pins": [
+                {"block": "b1", "port": "P2"},
+                {"block": "b2", "port": "P1"},
+                {"block": "b3", "port": "P1"},
+            ],
+        }
+    ]
+    req = _conn_pins_request(
+        tmp_path, pdk_root, [{"net": "BUS", "block": "b2", "port": "P1"}], conn
+    )
+    req["blocks"].append({"id": "b3", "generator_report": r3})
+    req["placement"]["order"] = ["b1", "b2", "b3"]
+    resp = compose(req)
+    assert [p["name"] for p in resp["ports"]] == ["BUS"]
+
+    req["pins"] = [{"net": "OTHER", "block": "b3", "port": "P1"}]
+    with pytest.raises(GenComposeError, match="OTHER.*BUS|BUS.*OTHER"):
+        compose(req)
+
+
+def test_compose_pins_connectivity_promotion_nests(tmp_path, pdk_root):
+    # The response with a promoted internal net is usable as a parent's
+    # blocks[].generator_report and the parent addresses the net by name.
+    req = _conn_pins_request(
+        tmp_path, pdk_root, [{"net": "N1", "block": "b1", "port": "P2"}]
+    )
+    child = compose(req)
+    other = _gen_block(tmp_path, pdk_root, "resistor_strip", "r4")
+    parent = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "kid", "generator_report": child},
+                {"id": "r4", "generator_report": other},
+            ],
+            "placement": {
+                "strategy": "row",
+                "order": ["kid", "r4"],
+                "spacing_um": 2.0,
+            },
+            "connectivity": [
+                {
+                    "net": "UP",
+                    "pins": [
+                        {"block": "kid", "port": "N1"},
+                        {"block": "r4", "port": "P1"},
+                    ],
+                }
+            ],
+            "routing": {"layer_role": "metal", "width_um": 0.17},
+            "options": {"output": str(tmp_path / "parent.gds")},
+        }
+    )
+    assert parent["generator"] == "gen-compose"
+    assert (tmp_path / "parent.gds").exists()
+    # The parent actually routes to the child's promoted net by name.
+    assert parent["unrouted_nets"] == []
+    up = next(n for n in parent["nets"] if n["net"] == "UP")
+    assert up["routed"] is True
+    assert up["landed_on_block"] is True
+
+
+def test_compose_pins_connectivity_conflict_names_every_net(tmp_path, pdk_root):
+    # A port wired by two connectivity[] nets: a pins[] entry matching neither
+    # is rejected, and the message names both wiring nets (#2881 review).
+    conn = [
+        {
+            "net": "N1",
+            "pins": [{"block": "b1", "port": "P2"}, {"block": "b2", "port": "P1"}],
+        },
+        {
+            "net": "N2",
+            "pins": [{"block": "b1", "port": "P2"}, {"block": "b2", "port": "P2"}],
+        },
+    ]
+    req = _conn_pins_request(
+        tmp_path, pdk_root, [{"net": "OTHER", "block": "b1", "port": "P2"}], conn
+    )
+    with pytest.raises(GenComposeError, match="nets 'N1', 'N2'"):
+        compose(req)
 
 
 def test_compose_pins_labels_metal_port_at_its_own_position(tmp_path, pdk_root):
@@ -16692,3 +16818,262 @@ def test_compose_sky130_same_layer_crossing_is_still_rejected(tmp_path, pdk_root
     met3 = layout.layer(70, 20)
     paths = [s for s in layout.cell("x33").shapes(met3).each() if s.is_path()]
     assert len(paths) == 1
+
+
+# ---------------------------------------------------------------------------
+# #2932: routed port attach points are snapped onto the manufacturing grid
+# ---------------------------------------------------------------------------
+
+
+def _snap_fixture(x_um, y_um, width_um, direction_deg=180, offset=(0.0, 0.0)):
+    ports = {
+        "P": {
+            "name": "P",
+            "x_um": x_um,
+            "y_um": y_um,
+            "width_um": width_um,
+            "direction_deg": direction_deg,
+            "layer": {"layer": 67, "datatype": 20},
+        }
+    }
+    blocks = {"b": {"ports": ports}}
+    connectivity = [{"net": "N", "pins": [{"block": "b", "port": "P"}]}]
+    offsets = {"b": {"x": offset[0], "y": offset[1]}}
+    return blocks, connectivity, offsets
+
+
+def _run_snap(blocks, connectivity, offsets, grid=0.005):
+    notes: list[str] = []
+    gen_compose._snap_routed_ports_to_grid(
+        connectivity, blocks, offsets, lambda _layer: grid, (68, 20), notes
+    )
+    return blocks["b"]["ports"]["P"], notes
+
+
+def test_snap_half_grid_port_moves_inside_pad_and_notes():
+    blocks, conn, offs = _snap_fixture(0.21, 1.5075, 3.015)
+    port, notes = _run_snap(blocks, conn, offs)
+    assert port["y_um"] == pytest.approx(1.51)
+    assert port["x_um"] == 0.21
+    pad_lo, pad_hi = 1.5075 - 3.015 / 2, 1.5075 + 3.015 / 2
+    assert pad_lo <= port["y_um"] <= pad_hi
+    assert len(notes) == 1
+    assert "block 'b' port 'P' y" in notes[0] and "0.0025" in notes[0]
+
+
+def test_snap_already_on_grid_is_untouched_and_silent():
+    blocks, conn, offs = _snap_fixture(0.21, 1.51, 3.01)
+    before = dict(blocks["b"]["ports"]["P"])
+    port, notes = _run_snap(blocks, conn, offs)
+    assert port == before
+    assert notes == []
+
+
+def test_snap_accounts_for_block_offset_and_negative_coordinates():
+    # Composed y = -2.0925 + 0.5 is half-grid; the snapped *composed* point
+    # must land on-grid, expressed back in the block's local frame.
+    blocks, conn, offs = _snap_fixture(0.2, -2.0925, 1.0, offset=(0.0, 0.5))
+    port, _notes = _run_snap(blocks, conn, offs)
+    composed = port["y_um"] + 0.5
+    assert composed / 0.005 == pytest.approx(round(composed / 0.005))
+    assert abs(composed - (-2.0925 + 0.5)) <= 0.0025 + 1e-9
+
+
+def test_snap_both_axes_and_finer_grid():
+    # direction 90 -> tangential axis is x; both axes off the 0.0005 grid.
+    blocks, conn, offs = _snap_fixture(0.10025, 0.20075, 1.0, direction_deg=90)
+    port, notes = _run_snap(blocks, conn, offs, grid=0.0005)
+    for key in ("x_um", "y_um"):
+        assert port[key] / 0.0005 == pytest.approx(round(port[key] / 0.0005))
+    assert len(notes) == 2
+
+
+def test_snap_clamps_to_pad_edge_and_reports_unsnappable_pad():
+    # Pad of exactly one grid step centred half a step off-grid: the only
+    # on-grid points are its two edges, both still inside the pad.
+    blocks, conn, offs = _snap_fixture(0.2, 1.0025, 0.005)
+    port, _notes = _run_snap(blocks, conn, offs)
+    assert 1.0 - 1e-9 <= port["y_um"] <= 1.005 + 1e-9
+    assert port["y_um"] / 0.005 == pytest.approx(round(port["y_um"] / 0.005))
+
+    # Pad narrower than a grid step holds no on-grid point: stays put + note.
+    blocks, conn, offs = _snap_fixture(0.2, 1.0025, 0.003)
+    port, notes = _run_snap(blocks, conn, offs)
+    assert port["y_um"] == 1.0025
+    assert len(notes) == 1 and "holds no on-grid point" in notes[0]
+
+
+def test_compose_half_grid_mos_array_port_is_drc_clean(tmp_path, pdk_root):
+    # The #2932 reproduction: w_um=3.015 puts U0_S/U1_S at y=1.5075.
+    arr = _gen_block(
+        tmp_path,
+        pdk_root,
+        "mos_array",
+        "arr",
+        w_um=3.015,
+        l_um=0.5,
+        rows=1,
+        cols=2,
+        dummy=0,
+        topology="array",
+    )
+    output = tmp_path / "snap_top.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "a", "generator_report": arr}],
+            "placement": {"strategy": "row", "order": ["a"], "spacing_um": 1.0},
+            "connectivity": [
+                {
+                    "net": "S",
+                    "pins": [
+                        {"block": "a", "port": "U0_S"},
+                        {"block": "a", "port": "U1_S"},
+                    ],
+                }
+            ],
+            "routing": {"layer_role": "metal2", "width_um": 0.3},
+            "options": {"cell_name": "snap_top", "output": str(output)},
+        }
+    )
+    assert report["nets"][0]["routed"] is True
+    notes = report["drc_hints"]["notes"]
+    assert any("snapped" in n and "port 'U0_S'" in n for n in notes)
+    assert run_drc(str(output), "sky130")["violation_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# #3079: the router's derived jog coordinate is snapped onto the grid
+# ---------------------------------------------------------------------------
+
+
+def _on_grid(value, grid=0.005):
+    return abs(value / grid - round(value / grid)) < 1e-6
+
+
+def test_backbone_half_grid_midpoint_vertical_jog_snaps_on_grid():
+    from klayout_tools.gen_compose_routing import manhattan_backbone
+
+    # Stub ends at x=0.1 and x=1.105 -> raw midpoint 0.6025 (half grid off).
+    raw = manhattan_backbone((0.0, 0.0), 0, (1.205, 1.0), 180, 0.1)
+    assert not _on_grid(raw[2][0])
+    pts = manhattan_backbone((0.0, 0.0), 0, (1.205, 1.0), 180, 0.1, grid_um=0.005)
+    assert all(_on_grid(x) and _on_grid(y) for x, y in pts)
+    assert abs(pts[2][0] - 0.6025) <= 0.0025 + 1e-9
+
+
+def test_backbone_half_grid_midpoint_horizontal_jog_snaps_on_grid():
+    from klayout_tools.gen_compose_routing import manhattan_backbone
+
+    pts = manhattan_backbone((0.0, 0.0), 90, (1.0, 1.205), 270, 0.1, grid_um=0.005)
+    assert all(_on_grid(x) and _on_grid(y) for x, y in pts)
+
+
+def test_backbone_on_grid_midpoint_is_bit_identical():
+    from klayout_tools.gen_compose_routing import manhattan_backbone
+
+    args = ((0.0, 0.0), 0, (1.2, 1.0), 180, 0.1)
+    assert manhattan_backbone(*args, grid_um=0.005) == manhattan_backbone(*args)
+    # grid 0.0 (no ongrid rule in the family) never snaps.
+    off = ((0.0, 0.0), 0, (1.205, 1.0), 180, 0.1)
+    assert manhattan_backbone(*off, grid_um=0.0) == manhattan_backbone(*off)
+
+
+def test_backbone_snaps_channel_offset_track():
+    from klayout_tools.gen_compose_routing import manhattan_backbone
+
+    pts = manhattan_backbone(
+        (0.0, 0.0), 0, (1.2, 1.0), 180, 0.1, channel_offset_um=0.6025, grid_um=0.005
+    )
+    assert all(_on_grid(x) and _on_grid(y) for x, y in pts)
+
+
+def test_backbone_snap_never_crosses_a_stub_end():
+    from klayout_tools.gen_compose_routing import manhattan_backbone
+
+    # Stub ends 0.003 apart: no grid line lies between them, so the jog is
+    # left unsnapped rather than pushed past a stub end.
+    raw = manhattan_backbone((0.001, 0.0), 0, (0.204, 1.0), 180, 0.1)
+    pts = manhattan_backbone((0.001, 0.0), 0, (0.204, 1.0), 180, 0.1, grid_um=0.005)
+    assert pts == raw
+
+
+def test_backbone_waypoints_are_never_snapped():
+    from klayout_tools.gen_compose_routing import manhattan_backbone
+
+    wp = [(0.5025, 2.0)]
+    raw = manhattan_backbone((0.0, 0.0), 0, (1.0, 1.0), 180, 0.1, waypoints=wp)
+    pts = manhattan_backbone(
+        (0.0, 0.0), 0, (1.0, 1.0), 180, 0.1, waypoints=wp, grid_um=0.005
+    )
+    assert pts == raw
+
+
+def test_offgrid_leg_notes_name_net_and_leg():
+    leg = {
+        "routed": True,
+        "pins": [{"block": "a", "port": "X"}, {"block": "b", "port": "Y"}],
+        "points_um": [(0.0, 0.0), (0.5025, 0.0), (0.5025, 1.0)],
+    }
+    notes = gen_compose._offgrid_leg_notes("N1", [leg], 0.005)
+    assert len(notes) == 1
+    assert "net 'N1'" in notes[0] and "a.X -> b.Y" in notes[0]
+    assert gen_compose._offgrid_leg_notes("N1", [leg], 0.0) == []
+    leg["points_um"] = [(0.0, 0.0), (0.5, 0.0)]
+    assert gen_compose._offgrid_leg_notes("N1", [leg], 0.005) == []
+
+
+@pytest.mark.parametrize("origin_x_um", [8.0, 8.005])
+def test_compose_half_grid_backbone_midpoint_is_drc_clean(
+    tmp_path, pdk_root, origin_x_um
+):
+    # Block b at x=8.005 puts the two stub ends' sum at an odd multiple of the
+    # grid, so the jog would land half a grid step off-grid (4 `*.ongrid.1`
+    # violations before #3079); x=8.0 is the already-on-grid control.
+    blocks = [
+        {
+            "id": name,
+            "generator_report": _gen_block(
+                tmp_path,
+                pdk_root,
+                "mos_array",
+                name,
+                w_um=3.0,
+                l_um=0.5,
+                rows=1,
+                cols=1,
+                dummy=0,
+                topology="array",
+            ),
+        }
+        for name in ("a", "b")
+    ]
+    output = tmp_path / f"jog_{origin_x_um}.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": blocks,
+            "placement": {
+                "strategy": "explicit",
+                "order": ["a", "b"],
+                "origins_um": {
+                    "a": {"x": 0.0, "y": 0.0},
+                    "b": {"x": origin_x_um, "y": 5.0},
+                },
+            },
+            "connectivity": [
+                {
+                    "net": "S",
+                    "pins": [
+                        {"block": "a", "port": "U0_S"},
+                        {"block": "b", "port": "U0_S"},
+                    ],
+                }
+            ],
+            "routing": {"layer_role": "metal2", "width_um": 0.3},
+            "options": {"cell_name": "jog_top", "output": str(output)},
+        }
+    )
+    assert report["nets"][0]["routed"] is True
+    assert not any("manufacturing grid" in n for n in report["drc_hints"]["notes"])
+    assert run_drc(str(output), "sky130")["violation_count"] == 0

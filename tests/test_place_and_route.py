@@ -2791,13 +2791,13 @@ def test_stubbed_full_route_success(tmp_path, monkeypatch):
     # see `_row_rail_lines`'s own docstring).
     assert "pdngen -dont_add_pins" in route_lines
     assert route_lines.index("pdngen -dont_add_pins") < route_lines.index(
-        "global_route"
+        "global_route -verbose"
     )
     assert (
         "filler_placement {sky130_fd_sc_hd__fill_1 sky130_fd_sc_hd__fill_2 "
         "sky130_fd_sc_hd__fill_4 sky130_fd_sc_hd__fill_8}" in route_lines
     )
-    assert route_lines.index("global_route") < route_lines.index(
+    assert route_lines.index("global_route -verbose") < route_lines.index(
         "filler_placement {sky130_fd_sc_hd__fill_1 sky130_fd_sc_hd__fill_2 "
         "sky130_fd_sc_hd__fill_4 sky130_fd_sc_hd__fill_8}"
     )
@@ -7295,7 +7295,8 @@ def test_route_stage_omits_critical_nets_percentage_flag_by_default(
     tmp_path, monkeypatch
 ):
     """Issue #939: `request.route_critical_nets_percentage` omitted must
-    reproduce the original `global_route` call exactly -- no flag emitted,
+    reproduce the original `global_route` call apart from the `-verbose` flag
+    (issue #2994) -- no critical-nets flag emitted,
     the A/B disable path."""
     request_path = _setup_success_env(tmp_path, monkeypatch)
     _stub_openroad_success(monkeypatch)
@@ -7304,7 +7305,7 @@ def test_route_stage_omits_critical_nets_percentage_flag_by_default(
     run_place_and_route(request_path)
 
     route_lines = _script_lines(_stage_script(request_path, "route"))
-    assert "global_route" in route_lines
+    assert "global_route -verbose" in route_lines
     assert not any("critical_nets_percentage" in line for line in route_lines)
 
 
@@ -7326,7 +7327,7 @@ def test_route_stage_passes_critical_nets_percentage_flag_when_requested(
     run_place_and_route(request_path)
 
     route_lines = _script_lines(_stage_script(request_path, "route"))
-    assert "global_route -critical_nets_percentage 30" in route_lines
+    assert "global_route -verbose -critical_nets_percentage 30" in route_lines
 
 
 @pytest.mark.parametrize("value", [-1, 101, 1.5, "30", True])

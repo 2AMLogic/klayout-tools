@@ -223,6 +223,8 @@ def _unrun_corner_report(
         "temperature_c": point.temperature_c,
         "status": "error",
         "runtime_s": 0.0,
+        "engine_exit_code": None,
+        "engine_killed_by_signal": None,
         "measurements": measurements,
         "diagnostics": [diagnostic],
         "artifacts": {"log": None, "raw": None, "waveform": None, "deck": None},
@@ -630,6 +632,9 @@ def _run_remote_dispatch(
         remote_job_dir=remote_job_dir,
     )
 
+    from .sim import check_ngspice_options_echo
+
+    check_ngspice_options_echo(request, remote_report)
     corners = remote_report.get("corners", [])
     if keep_artifacts:
         _rewrite_remote_artifact_paths(

@@ -519,8 +519,22 @@ a second input the envelope happens to mention:
 | `lvs` | `layout` | The **layout side** of the compare, which is what `provenance.input` pins (issue #1969) — the GDS/OASIS stream of a `layout.file` request, or the SPICE file of a pre-extracted `layout.netlist` one. `reference` is deliberately not re-hashed: it is pinned separately under `environment.reference_sha256`, so comparing it here would report a mismatch that is not one. |
 | `sim` | `netlist` | The SPICE deck it simulated. |
 | `pex` | `layout` | `klt pex` republishes its own `klt extract` run's `provenance` block, whose input is that layout stream. |
-| `sta` | `def_path`, else `verilog_path` | Mirrors `klt sta`'s own "DEF when given one, the gate-level Verilog otherwise" branch. |
+| `sta` | `def_path`, else `verilog_path` | Mirrors `klt sta`'s own "DEF when given one, the gate-level Verilog otherwise" branch. Since `klt sta` schema 2 (issue #2879) both are `{path, scope}` envelopes, so a repo-scoped input verifies from any checkout; a schema-1 absolute string verifies only where that exact path exists. |
 | `yield` | `samples` | Already re-hashed since issue #870 — a `yield` citation's `content_hash` *is* a live hash of the samples document, so it reports `input_verified: true` by construction. |
+
+**`klt pex` schematic-side inputs (issue #2875).** A `pex` envelope that
+records `testbenches[].{request,netlist,schematic_netlist}_sha256` and/or
+`reference_netlist_sha256` ([`pex.md`](pex.md)) also has each of those files
+re-hashed, and the citation gains `pex_inputs`: one `{role, path, sha256,
+status}` per digest, `status` being `verified` (a resolvable file re-hashes to
+the recorded digest), `stale` (files were read and none match) or
+`unverifiable` (`scope: "external"`/redacted path, or no readable file from
+the grading context). These roles are separate from the layout
+`content_hash` and take no part in layout-consistency comparisons. They fold
+into `input_verified`: any `stale` makes it `false`; `true` requires the
+layout and every schematic-side input to verify; otherwise (unverifiable
+input) it is `null`, never silently `true`. Legacy envelopes with no such
+digests keep layout-only verification and carry no `pex_inputs` key.
 
 Every other kind reports `null`: `functional-verification`, `power` and
 `place-and-route` either populate no `provenance.input` at all or echo only
@@ -538,10 +552,19 @@ use), and relative to the evidence file's own directory, which is how
 evidence committed beside its inputs resolves (`examples/signoff/`'s
 `lvs.json` names `layout.spice`). A `{path, scope}` input echo (issue #1261,
 `klt sim`/`klt pex`) resolves against the repo root the evidence lives in
-when `scope` is `"repo"`; `scope: "external"` carries no path by design and
-is therefore unverifiable here. A *match* on any candidate always wins over
-a mismatch on another, so a coincidentally same-named file beside the
-envelope can never turn a genuinely fresh citation into a reported one.
+when `scope` is `"repo"` — concretely, the nearest ancestor of the evidence
+file that holds a `.git` entry — and a `.git` file (a linked worktree)
+counts too. A tree with no `.git` anywhere above the evidence — a GitHub
+source archive, a vendored copy, a CI artifact unpacked without VCS
+metadata — therefore has no repo root to resolve against, and every
+repo-scoped input grades as unverified (`unverifiable_provenance` for the
+items that require a resolvable artifact, T1 1/2/9/10). Pass
+[`--repo-root`](#grading-outside-a-git-checkout---repo-root) to name the
+root explicitly in that case. `scope: "external"` carries no path by design
+and is therefore unverifiable here, with or without the flag. A *match* on
+any candidate always wins over a mismatch on another, so a coincidentally
+same-named file beside the envelope can never turn a genuinely fresh
+citation into a reported one.
 
 **Cost**: one streamed `sha256` of the named artifact per citation — the
 same read `klt drc --check`/`klt lvs --check` already do, and never an
@@ -1122,7 +1145,7 @@ must hold, or the row is `unmet`:
 | The envelope declares the item it attests: `"t1_item": <id>` (an integer) | envelope | absent or not an integer: `unanchored_evidence`; a different item: `wrong_item` |
 | The envelope names the audited artifact in `provenance.input.path` (a string resolved beside the envelope, or a `{"path", "scope": "repo"}` object) and records its `provenance.input.content_hash` | envelope | `unanchored_evidence` |
 | The manifest entry pins the same `content_hash` | manifest | not pinned: `unanchored_evidence`; pinned but different: `stale_evidence` |
-| The named artifact re-hashes to that value from the grading context (`input_verified: true`) | filesystem | changed since the envelope was written: `stale_evidence`; not found or not readable here: `unverifiable_provenance` |
+| The named artifact re-hashes to that value from the grading context (`input_verified: true`) | filesystem | changed since the envelope was written: `stale_evidence`; not found or not readable here: `unverifiable_provenance` — including a `scope: "repo"` path over a `.git`-less copy of the tree, which [`--repo-root`](#grading-outside-a-git-checkout---repo-root) exists to name a root for |
 
 What each item binds:
 
@@ -1245,6 +1268,53 @@ If the resolved doc cannot be read or does not have the structure the parser
 understands, the command emits the usual error envelope (`schema_version`,
 `error.command: "signoff"`, `error.message`) and exits `1` — a tier report is
 never rendered from a partially-understood doc.
+
+### Grading outside a git checkout: `--repo-root`
+
+A `{path, scope: "repo"}` input echo resolves against "the repo root the
+evidence lives in" — which, by construction, means the nearest ancestor of
+the evidence file holding a `.git` entry. That construction ties the
+re-hash to VCS metadata rather than to the evidence itself: grade the
+unchanged manifest over a **`.git`-less copy** of the same tree — a GitHub
+`/archive/<sha>.tar.gz` source archive, a vendored copy, a CI artifact
+unpacked without `.git` — and every repo-scoped citation loses its anchor.
+For the disclosure-only kinds (`klt sim`'s `netlist`, `klt pex`'s
+`layout`, an opt-in `generic` envelope's `provenance.input.path`) that
+shows as `input_verified: null`; for the artifact-bound generic items (T1
+1, 2, 9, 10 — which [require a resolvable input
+path](#items-1-2-9-and-10-bind-them-to-an-audited-artifact)) it downgrades
+the item from `met` to `unverifiable_provenance`. The grader reports this
+rather than guessing a root, which is correct — but the outcome should not
+depend on whether a hidden `.git` directory happened to survive the copy.
+
+`--repo-root <dir>` names the root explicitly (issue #2878):
+
+```
+$ klt signoff --manifest manifest.json --repo-root /tmp/archive-copy
+```
+
+Every `scope: "repo"` input in the manifest's evidence then resolves
+against `<dir>` instead of a `.git` walk, and a manifest that grades `met`
+inside its checkout grades `met` over the copy. The flag applies to both
+doc-parsing modes (`--manifest` and `--fleet`, including their `--check`
+re-grades); envelope aggregation re-hashes no input artifacts, so the flag
+is refused there, as `--tiers-doc`/`--check` are. Rules:
+
+- The explicit root **replaces** the `.git`-ancestor discovery — it is the
+  repo root, full stop. No fallback to a discovered checkout: a caller that
+  names a root means it.
+- It must be an existing directory. A missing path or a file renders the
+  standard error envelope (`error.command: "signoff"`) and exits `1` — the
+  missing-input-file class — never a silent fallback to discovery.
+- Without the flag, behaviour is exactly what it was: discovery from the
+  evidence file's location, `null`/`unverifiable_provenance` outside a
+  checkout. The flag is additive; no report field changes shape and no
+  `schema_version` moves.
+
+A relative `--repo-root` resolves against this process's working directory,
+like any other path argument. Evidence files need not live under the root —
+only the `scope: "repo"` echoes are joined against it — but naming the tree
+the evidence was actually produced from is the intended use.
 
 ### An overridden doc can outrun the build: `graded_by_build`
 
@@ -1943,6 +2013,55 @@ A citation of any other kind renders `"unmet"` with `reason: "wrong_kind"`,
 exactly as it already did for items 3, 4 and 7 — the cited check did not
 fail on its own terms, it simply does not prove what the item requires.
 
+#### Item 5 with several citations and declared spec rows (issue #2959)
+
+One `klt sim` request is one netlist and one analysis, so a spec needing
+several testbenches has several envelopes. Item 5's `evidence` entry may
+therefore be a **list** of ordinary file/command citations, each optionally
+carrying `rows` (the spec-row ids it covers); the manifest may declare the
+row set under a top-level `spec_rows`, keyed by item id:
+
+```json
+{
+  "evidence": {
+    "5": [
+      {"file": "sim/decision_time.json", "rows": ["t_dec"]},
+      {"file": "sim/source_impedance.json", "rows": ["z_in"]}
+    ]
+  },
+  "spec_rows": {
+    "5": [
+      {"id": "t_dec"},
+      {"id": "z_in"},
+      {"id": "noise_mc", "gap": "statistical reduction a klt sim request cannot express"}
+    ]
+  }
+}
+```
+
+Each citation is graded independently through the usual path (kind
+restriction, `content_hash` staleness, `input_verified`); only aggregation is
+new. Outcomes:
+
+- any citation fails -> `unmet` with that citation's `reason` (e.g.
+  `check_failed`); `detail.failed_citations` names the failing envelopes and,
+  when `spec_rows` is declared, `detail.failed_rows` lists their rows;
+- all pass but a declared row is uncovered or a `gap` -> `unmet` /
+  `partial_coverage`, with `detail.uncovered_rows`, `detail.failed_rows` and
+  `detail.declared_gaps` (`[{id, gap}]`) reported separately -- a gap is never
+  covered;
+- otherwise `met`; `citation` is the first citation, `citations` lists all,
+  and `row_coverage` is present when `spec_rows` was declared;
+- a malformed list, an empty list, malformed `spec_rows`, duplicate row ids,
+  or a citation naming an undeclared or `gap` row -> `unmet` /
+  `invalid_evidence` for item 5 only.
+
+Every list-form item also carries `citations_graded` (per-citation status).
+Without `spec_rows`, several passing citations grade `met` as the union of
+their verdicts. A single string/dict entry with no `spec_rows` renders
+exactly as before. The list form is item 5 only; the same `spec_rows`
+schema is meant to be reused by item 6 (#2908).
+
 #### Item 6's evidence needs a from-source toolchain (issue #2466)
 
 Item 6 accepts only a `yield` envelope, and `klt yield` requires the
@@ -2070,7 +2189,9 @@ pex` already echo their own input under:
 
 `path` may be a bare string (resolved beside the evidence file, mirroring
 `klt drc`'s `file`) or a `{"path": <repo-relative path>, "scope": "repo"}`
-object (resolved against the repo root the evidence lives in, mirroring `klt
+object (resolved against the repo root the evidence lives in — the nearest
+`.git` ancestor, or the directory [`--repo-root`](#grading-outside-a-git-checkout---repo-root)
+names when the evidence sits outside any checkout — mirroring `klt
 sim`'s `netlist`) — never a raw absolute host path, for the same reason
 `repo_relative_path` never emits one for `scope: "external"`. Omitting
 `provenance.input.path` is unaffected either way: `input_verified` stays
@@ -3007,6 +3128,57 @@ or no two inputs share a comparable field at all (e.g. a single-input run).
 | `detail`      | object              | A small, kind-specific excerpt of the source envelope (not the full `violations[]`/`mismatches[]`/`devices[]`/`corners[]` detail — read the original file for that). Gains a `critical_metric_blockers` key (issue #1850, absent when there are none) naming any registered `critical: true` metric that failed its declared polarity — see "Critical-metric consumption" above. An `lvs`-kind check's detail also carries `power_connectivity_status` (issue #1965) — the source envelope's `power_connectivity.status`, or `null` when that key is absent entirely (pre-#1964 evidence) — see "`klt lvs` power/ground connectivity" above. A `drc`-kind check's detail gains a `coverage` key (issue #2002, absent when the source envelope carries no `coverage` block) quoting its `layers_in_stream_without_rules`/`rules_skipped`/`deck_scope` — see "DRC coverage is reported, not graded" above. Any kind's detail gains a `nothing_checked_reasons` key (issue #1996) when the source envelope's `coverage` block reports `nothing_checked: true` — the same condition that forces `passed: false`; absent for every envelope that makes no such statement. See "A check that checked nothing is refused, not reported" above. Any kind's detail also gains a `coverage_qualification` key (issue #2109) when the source envelope's versioned `coverage` block classifies as `partial`, naming the requested work it skipped — see "Partial coverage is qualified, not inferred" above — and a `coverage_state` key naming the rollup row for any envelope carrying versioned coverage at all. A `yield`-kind check's detail gains a `yield_campaign` key (issue #2467, absent when the report carries no measurements) rolling up its per-measurement `sample_size.verdict` and `negative_control` state — reported here, never graded on (`passed` is untouched); the grading gate built on the same statement belongs to `--manifest` item 6, see "Campaign discipline on item 6" below. |
 | `provenance`  | object \| null      | The source envelope's own `provenance` block, echoed verbatim (`null` for an `error`-kind check, which carries none). |
 
+## Regenerating signoff evidence in a consumer repo
+
+A consumer repo that commits its signoff evidence needs a small script to
+re-run the graders. This is the canonical shape (issue #2874). Two properties
+matter: the grader is **always the pinned registry wheel** (`klayout-tools==$KLT_VERSION`),
+never whatever `klt` happens to be on `PATH`; and a host that can run neither
+`uv` nor `python3 -m venv` fails loudly instead of silently grading with
+something else.
+
+Order of preference: `uvx` (needs no `python3-venv`/`ensurepip`), then a
+throwaway `python3 -m venv` + `pip`, then a clear stderr message and a
+non-zero exit.
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# The pin. Refuse to guess: an unset version would grade with an unpinned build.
+: "${KLT_VERSION:?set KLT_VERSION to the pinned klayout-tools release, e.g. KLT_VERSION=1.2.3}"
+
+if command -v uv >/dev/null 2>&1; then
+  # --from pins the registry wheel; uvx never resolves `klt` from PATH.
+  klt() { uvx --from "klayout-tools==${KLT_VERSION}" klt "$@"; }
+else
+  WORK="$(mktemp -d)"
+  trap 'rm -rf "$WORK"' EXIT
+  if python3 -m venv "$WORK/venv" >/dev/null 2>&1; then
+    "$WORK/venv/bin/pip" install --quiet "klayout-tools==${KLT_VERSION}"
+    # Absolute path into the venv, so a `klt` already on PATH is never used.
+    klt() { "$WORK/venv/bin/klt" "$@"; }
+  else
+    echo "error: cannot provision klayout-tools==${KLT_VERSION}: 'uv' is not on PATH" >&2
+    echo "       and 'python3 -m venv' failed (is python3-venv / ensurepip installed?)." >&2
+    echo "       Install uv (https://docs.astral.sh/uv/) or python3-venv and retry." >&2
+    exit 1
+  fi
+fi
+
+klt signoff --manifest signoff/manifest.json --format json > signoff/report.json
+```
+
+Notes:
+
+- `klt` here is a shell function, so every later `klt …` line in the script
+  uses the pinned build; add further verbs (`klt drc`, `klt lvs`, …) the same way.
+- `uvx` needs network (or a warm uv cache) to fetch the pinned wheel; offline
+  with a cold cache it exits non-zero and `set -e` stops the script. It does
+  not fall back to a different `klt`.
+- Verify the committed record with `--check` (see
+  [Verifying a committed report](#verifying-a-committed-report---check-issue-2249)).
+
 ## Exit codes and errors
 
 Envelope-aggregation mode:
@@ -3014,7 +3186,7 @@ Envelope-aggregation mode:
 | Exit code | Meaning                                                                 |
 | --------- | ------------------------------------------------------------------------ |
 | `0`       | `status: "pass"` — every check passed and provenance was consistent.     |
-| `1`       | An input file was missing/unreadable/not valid JSON, was not a JSON object, did not match a recognized `klt drc`/`lvs`/`extract`/`sim`/`yield`/`pex`/`generic`/error envelope shape, neither `<file>...` nor `--manifest` was given, or both were given together. |
+| `1`       | An input file was missing/unreadable/not valid JSON, was not a JSON object, did not match a recognized `klt drc`/`lvs`/`extract`/`sim`/`yield`/`pex`/`generic`/error envelope shape, neither `<file>...` nor `--manifest` was given, both were given together, or `--repo-root` was given without `--manifest`/`--fleet`. |
 | `2`       | Usage error (bad `--format` value) — from argparse.                      |
 | `3`       | `status: "fail"` — provenance was consistent, but at least one check did not pass. |
 | `4`       | `status: "refused"` — two or more inputs' provenance blocks disagree; no pass/fail verdict was produced. |
@@ -3024,7 +3196,7 @@ Tier-verdict report mode (`--manifest`):
 | Exit code | Meaning                                                                 |
 | --------- | ------------------------------------------------------------------------ |
 | `0`       | `tier: "T1"` — every rendered T1 item is `"met"`.                        |
-| `1`       | The manifest file was missing/unreadable/not valid JSON/not a JSON object, its `kind` was missing or invalid, its `evidence` field was not a JSON object, `docs/design-evidence-tiers.md` could not be parsed, or `--manifest` was combined with `<file>...`/`--fleet`. |
+| `1`       | The manifest file was missing/unreadable/not valid JSON/not a JSON object, its `kind` was missing or invalid, its `evidence` field was not a JSON object, `docs/design-evidence-tiers.md` could not be parsed, `--repo-root` named a path that is not an existing directory, or `--manifest` was combined with `<file>...`/`--fleet`. |
 | `2`       | Usage error (bad `--format` value) — from argparse.                      |
 | `3`       | `tier: null` — ran successfully, but at least one T1 item is `"unmet"`.  |
 
@@ -3033,7 +3205,7 @@ Fleet roll-up mode (`--fleet`):
 | Exit code | Meaning                                                                 |
 | --------- | ------------------------------------------------------------------------ |
 | `0`       | `not_t1_count: 0` — every block in the fleet is `tier: "T1"`.             |
-| `1`       | The fleet manifest file was missing/unreadable/not valid JSON/not a JSON object, its `blocks` field was missing/not a non-empty JSON array, a `blocks[]` entry was neither a string nor a JSON object (or a string entry couldn't be read/parsed), a resolved block manifest had no non-empty `block` name, a block manifest was structurally invalid (see "Tier-verdict report mode" above), or `--fleet` was combined with `<file>...`/`--manifest`. |
+| `1`       | The fleet manifest file was missing/unreadable/not valid JSON/not a JSON object, its `blocks` field was missing/not a non-empty JSON array, a `blocks[]` entry was neither a string nor a JSON object (or a string entry couldn't be read/parsed), a resolved block manifest had no non-empty `block` name, a block manifest was structurally invalid (see "Tier-verdict report mode" above), `--repo-root` named a path that is not an existing directory, or `--fleet` was combined with `<file>...`/`--manifest`. |
 | `2`       | Usage error (bad `--format` value) — from argparse.                      |
 | `3`       | `not_t1_count > 0` — ran successfully, but at least one block's tier is not `"T1"`. |
 
@@ -3051,7 +3223,7 @@ Fleet roll-up mode (`--fleet`):
 | Exit code | Meaning                                                                 |
 | --------- | ------------------------------------------------------------------------ |
 | `0`       | Always, once argument validation passes — purely informational, cannot fail. |
-| `1`       | `--describe-grader` was combined with `<file>...`/`--manifest`/`--fleet`/`--tiers-doc`/`--check`. |
+| `1`       | `--describe-grader` was combined with `<file>...`/`--manifest`/`--fleet`/`--tiers-doc`/`--check`/`--repo-root`. |
 | `2`       | Usage error (bad `--format` value) — from argparse.                      |
 
 **Gate on `status`/`tier`/`not_t1_count`, not the exit code, in every mode

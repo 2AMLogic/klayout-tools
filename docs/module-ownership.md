@@ -127,6 +127,7 @@ The `sim` verb runs SPICE simulations over generated netlists and produces struc
 - **sim_cmd** (`cli/sim_cmd.py`): CLI interface, JSON envelope output, request document handling
 - **sim** (`sim.py`): Core SPICE simulation engine wrapper, netlist execution, result collection
 - **sim_plot** (`sim_plot.py`): Result plotting and waveform display utilities (matplotlib/HTML output)
+- **sim_crossings** (`sim_crossings.py`): `measurements[].crossings` (issue #2868) — request validation, the per-measurement rawfile `.control` lines, and the linearly interpolated threshold-crossing extraction run inside each corner
 - **sim_remote** (`sim_remote.py`): Remote simulation orchestration (AMI/cloud runner invocation and result retrieval)
 
 ### sta
@@ -168,7 +169,7 @@ Both fit the single-implementation-module pattern (see "Single-File Verbs" below
 
 The following verbs have all their implementation in a single module (`src/klayout_tools/<verb>.py`) with a corresponding CLI module (`src/klayout_tools/cli/<verb>_cmd.py`):
 
-arith_gen, cells, clip, components, design_centering, draw, drc, economy, env_provenance, equiv, erc, eval, kb, layers, layout_metrics, lef_abstract, mom, pex, power, precheck, render, report, ring_check, size, socket_check, stats, techmap, trajectory, version, wave, yield_campaign, yield_sensitivity
+arith_gen, cells, clip, components, design_centering, draw, drc, economy, env_provenance, equiv, erc, eval, kb, layers, layout_metrics, lef_abstract, mom, pex, power, precheck, render, report, reset_coverage, ring_check, size, socket_check, stats, techmap, trajectory, version, wave, yield_campaign, yield_sensitivity
 
 These verbs follow the simpler pattern: a single implementation module (e.g., `extract.py`) paired with a CLI command module (e.g., `cli/extract_cmd.py`).
 
