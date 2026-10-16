@@ -2372,6 +2372,25 @@ def _report_progress(job_id: str, state: str) -> None:
     print(f"klt sim: batch job {job_id}: {state}", file=sys.stderr, flush=True)
 
 
+def _check_never_started(
+    config: BatchConfig, job_id: str, last_state: str | None, elapsed: float
+) -> None:
+    """Raise :class:`BatchPollTimeout` when no ``status.json`` was ever
+    observed within :data:`_BATCH_PROVISION_SLACK_S` (and the overall poll
+    budget has not itself elapsed, which reports the ordinary timeout)."""
+    if (
+        last_state is None
+        and elapsed >= _BATCH_PROVISION_SLACK_S
+        and elapsed < config.poll_timeout_s
+    ):
+        raise BatchPollTimeout(
+            f"job {job_id} never started: no status.json after "
+            f"{_BATCH_PROVISION_SLACK_S:g}s (last observed state: "
+            "no status.json yet)",
+            last_state=None,
+        )
+
+
 def poll_status(
     config: BatchConfig,
     job_id: str,
@@ -2461,17 +2480,7 @@ def poll_status(
             )
         _check_interrupted_grace(config, job_id, interrupted_since, now)
         elapsed = now - started
-        if (
-            last_state is None
-            and elapsed >= _BATCH_PROVISION_SLACK_S
-            and elapsed < config.poll_timeout_s
-        ):
-            raise BatchPollTimeout(
-                f"job {job_id} never started: no status.json after "
-                f"{_BATCH_PROVISION_SLACK_S:g}s (last observed state: "
-                "no status.json yet)",
-                last_state=None,
-            )
+        _check_never_started(config, job_id, last_state, elapsed)
         if elapsed >= config.poll_timeout_s:
             raise BatchPollTimeout(
                 f"job {job_id} did not reach a terminal state within "
