@@ -72,7 +72,16 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         pitch to reserve a navigable routing channel between interior
         rows/columns, reported back as ``navigable_regions_um`` -- see
         :func:`_mos_array_layout`'s own docstring. ``0.0`` (the default)
+        draws byte-for-byte unchanged geometry.
+
+        ``pitch_x_um``/``pitch_y_um`` (issue #3299, Phase 1) override the
+        column/row pitch, clamped up to the legal minimum -- see
+        :func:`_mos_array_layout`'s own docstring. ``0.0`` (the default)
         draws byte-for-byte unchanged geometry."""
+
+        # Declared via ``self.param("mfg_grid_um", ...)`` below; the
+        # PCellDeclarationHelper stubs cannot see it, so annotate for mypy.
+        mfg_grid_um: float
 
         def __init__(self) -> None:
             super().__init__()
@@ -361,6 +370,22 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "geometry to every existing caller",
                 default=0.0,
             )
+            self.param(
+                "pitch_x_um",
+                self.TypeDouble,
+                "Column pitch override (um), clamped up to the legal minimum "
+                "(unit extent + min same-layer spacing); interior_channel_um "
+                "is added on top (issue #3299). 0.0 (default) = no override",
+                default=0.0,
+            )
+            self.param(
+                "pitch_y_um",
+                self.TypeDouble,
+                "Row pitch override (um), clamped up to the legal minimum; "
+                "interior_channel_um is added on top (issue #3299). 0.0 "
+                "(default) = no override",
+                default=0.0,
+            )
             # Fixed drawn side of every cut on contact_layer (issue #2585) --
             # harness-computed by `_cut_fixed_size_um` from the resolved PDK
             # family and layer. `0.0` (no upper size bound) leaves the cuts
@@ -426,6 +451,8 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.sd_implant_margin_um if self.sd_implant_present else 0.0,
                 self.voltage_flavor_mark_margin_um,
                 self.interior_channel_um,
+                self.pitch_x_um,
+                self.pitch_y_um,
             )
             unit_boxes = info["unit"]["boxes_um"]
             for c in info["cells"] + info["dummy_cells"]:
@@ -512,6 +539,7 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     _shift_box(ring["outer_box_um"], ox, oy),
                     _shift_box(ring["inner_box_um"], ox, oy),
                     gap_box,
+                    self.mfg_grid_um,
                 )
                 _insert_ring(
                     self.cell,
@@ -520,6 +548,7 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     _shift_box(ring["outer_box_um"], ox, oy),
                     _shift_box(ring["inner_box_um"], ox, oy),
                     gap_box,
+                    self.mfg_grid_um,
                 )
                 _insert_boxes(
                     self.cell, li_contact, dbu, ring["contact_boxes_um"], ox, oy
@@ -560,6 +589,7 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                         gap_box,
                         ring["gap"]["side"] if ring["gap"] is not None else None,
                         self.ring_implant_margin_um,
+                        self.mfg_grid_um,
                     )
 
             # Medium-voltage/thick-oxide device-class marker (issue #1054):
