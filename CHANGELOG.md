@@ -424,6 +424,12 @@ not `klt --version`, if you need to detect this kind of drift. See
   layer instead of extracting silently device-less. Additive; no schema,
   exit-code or `status` change.
 
+- **`klt sim` native noise measurements** (issue #2938): a
+  `measurements[]` entry may declare `noise: {quantity: "inoise"|"onoise",
+  at_hz | band_hz}` to read a spot density or a band-integrated rms value
+  from a `noise` analysis without `expr` or the `noise1.` plot prefix.
+  **Additive contract change:** a new optional measurement form; runners
+  older than this release reject it (see `docs/cli/sim.md`).
 - **New verb `klt tap-distance`** (issue #3009): asserts every point of a
   subject region is within a Euclidean distance of a qualifying tap (latch-up /
   tie spacing), optionally per island and filtered to taps wired to named
