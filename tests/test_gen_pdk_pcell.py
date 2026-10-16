@@ -249,6 +249,121 @@ def test_list_pdk_pcells_loads_a_define_only_library(tmp_path):
     assert [c["name"] for c in report["libraries"][0]["cells"]] == [cell]
 
 
+def _sibling_pdk(tmp_path):
+    """Two packages where importing ``A`` also imports ``B`` (IHP sg13g2's
+    native/pycell pair, issue #2944). ``A`` sorts first and registers nothing
+    itself, so ``B``'s self-registered library is attributed to ``A`` by the
+    name diff, and ``B``'s own turn is a ``sys.modules`` hit.
+
+    Returns ``(root, b_package, library, cell)``.
+    """
+    root, b_package, library, cell = _toy_pdk(tmp_path)
+    variant_dir = root / "sky130A"
+    _write_package(variant_dir, "a" + _unique("toya"), f"import {b_package}\n")
+    return root, b_package, library, cell
+
+
+def test_list_pdk_pcells_survives_sibling_import_of_registering_package(tmp_path):
+    root, _b_package, library, cell = _sibling_pdk(tmp_path)
+
+    report = list_pdk_pcells(variant="sky130A", root=str(root))
+
+    assert [lib["library"] for lib in report["libraries"]] == [library]
+    assert [c["name"] for c in report["libraries"][0]["cells"]] == [cell]
+    assert report["unavailable"] == []
+
+
+def test_generate_pdk_pcell_survives_sibling_import_of_registering_package(tmp_path):
+    root, _b_package, library, cell = _sibling_pdk(tmp_path)
+    output = tmp_path / "sibling.gds"
+
+    report = generate_pdk_pcell(
+        {
+            "pdk_pcell": f"{library}/{cell}",
+            "pdk": {"variant": "sky130A", "root": str(root)},
+            "options": {"cell_name": "sibling", "output": str(output)},
+        }
+    )
+
+    assert output.is_file()
+    assert report["pdk_pcell"]["library"] == library
+
+
+def test_load_libraries_does_not_reconstruct_a_sibling_imported_package(tmp_path):
+    """The vendor's `register()` must not run twice (issue #2944)."""
+    root, _b_package, _library, _cell = _sibling_pdk(tmp_path)
+    lib_dir = str(root / "sky130A" / "libs.tech" / "klayout" / "python")
+    calls = []
+    original = pdk_pcell._instantiate_library_classes
+
+    def spy(module, package, kdb):
+        calls.append(package)
+        return original(module, package, kdb)
+
+    pdk_pcell._instantiate_library_classes = spy
+    try:
+        loaded, _unavailable = pdk_pcell._load_libraries(lib_dir)
+    finally:
+        pdk_pcell._instantiate_library_classes = original
+
+    assert len(loaded) == 1
+    assert all(entry["handle"] is not None for entry in loaded)
+    # The sibling whose import already ran the vendor's registration must
+    # never be probed by the fallback constructor.
+    assert not any(name.startswith("toylib") for name in calls)
+
+
+def test_destroyed_handle_while_describing_is_reported_as_unavailable(
+    tmp_path, monkeypatch
+):
+    root, package, _library, _cell = _toy_pdk(tmp_path)
+
+    class _Dead:
+        def layout(self):
+            raise RuntimeError("Object has been destroyed already")
+
+    monkeypatch.setattr(
+        pdk_pcell,
+        "_load_libraries",
+        lambda _d: (
+            [{"library": "dead_lib", "package": package, "handle": _Dead()}],
+            [],
+        ),
+    )
+
+    report = list_pdk_pcells(variant="sky130A", root=str(root))
+
+    assert report["libraries"] == []
+    assert [u["package"] for u in report["unavailable"]] == [package]
+    assert "destroyed" in report["unavailable"][0]["reason"]
+
+
+def test_destroyed_handle_while_producing_is_application_error(tmp_path, monkeypatch):
+    root, package, _library, _cell = _toy_pdk(tmp_path)
+
+    class _Dead:
+        def layout(self):
+            raise RuntimeError("Object has been destroyed already")
+
+    monkeypatch.setattr(
+        pdk_pcell,
+        "_load_libraries",
+        lambda _d: (
+            [{"library": "dead_lib", "package": package, "handle": _Dead()}],
+            [],
+        ),
+    )
+
+    with pytest.raises(PdkPCellError, match="destroyed"):
+        generate_pdk_pcell(
+            {
+                "pdk_pcell": "dead_lib/ToyBox",
+                "pdk": {"variant": "sky130A", "root": str(root)},
+                "options": {"output": str(tmp_path / "x.gds")},
+            }
+        )
+
+
 def test_list_pdk_pcells_is_empty_when_pdk_ships_no_python_dir(tmp_path):
     """A resolved PDK with `assets["klayout"]` but no `python/` (a real
     gf180mcuD install) enumerates empty -- a success, not an error."""

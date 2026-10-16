@@ -30,6 +30,7 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from .rules import RuleProvenance
 
@@ -170,6 +171,28 @@ class ResistorDevice:
     entry that does not set them extracts ``R`` bit-for-bit as before this
     field existed.
 
+    ``topology`` (issue #2679) selects how ``body``/``marker`` relate:
+
+    - ``"overlap"`` (the default, every deck entry before this field
+      existed) -- the marker lies *on* the body conductor and the segment is
+      ``body & marker``, as described above.
+    - ``"abutting_heads"`` -- the PDK draws the resistive body on the
+      ``marker`` layer itself and the ``body`` layer is only the two contact
+      heads, which *abut* (zero overlap) the marker. IHP sg13g2's
+      ``rsil``/``rppd``/``rhigh`` PCells draw ``polyres`` (128/0) as the whole
+      resistive body and ``GatPoly`` (5/0) only as the two head pads at either
+      end, so ``body & marker`` is empty there. The segment is then
+      ``marker & requires - excludes`` (mirroring upstream
+      ``res_derivations.lvs``'s ``polyres & extblock ...``), kept only
+      where it touches the ``terminal`` (default ``body``) conductor in **two
+      or more** separate head regions -- a body with a missing head, or one
+      separated from its heads by a gap, is not a resistor. The terminals
+      are the touching heads (``terminal`` minus the segment), which
+      KLayout's native extractor attaches directly to the abutting body
+      edge; the segment is still cut out of the ``body`` conductor, so a
+      layout that *does* overlap (a continuous bar marked by ``polyres``)
+      keeps extracting as before.
+
     ``name`` is the extracted device-class name (``devices[].class`` in the
     JSON response, and the model token on the written ``R`` card -- a
     consumer simulating the netlist supplies a matching ``.model``, exactly
@@ -246,6 +269,18 @@ class ResistorDevice:
     flavour_option: str | None = None
     flavours: tuple[ResistorFlavour, ...] = ()
     provenance: RuleProvenance | None = None
+    topology: str = "overlap"
+
+    def __post_init__(self) -> None:
+        if self.topology not in RESISTOR_TOPOLOGIES:
+            raise ValueError(
+                f"ResistorDevice '{self.name}': unknown topology "
+                f"{self.topology!r} (expected one of {RESISTOR_TOPOLOGIES})"
+            )
+
+
+#: Valid :attr:`ResistorDevice.topology` values.
+RESISTOR_TOPOLOGIES: tuple[str, ...] = ("overlap", "abutting_heads")
 
 
 @dataclass(frozen=True)
@@ -353,6 +388,28 @@ class MOSFlavour:
     same default every other ``provenance`` field in this module carries, so a
     deck that leaves them unset (e.g. gf180mcu's ``Dualgate`` entry, whose
     prose comment remains the record) is unaffected.
+
+    ``and_markers``/``not_markers``/``nfet_only`` (issue #3599) express a
+    marker *combination*, for a flavour upstream derives as
+    ``<base>.and(A).not(B)`` rather than from a single layer -- e.g. sky130's
+    native-Vt NMOS (``hvi`` AND ``lvtn``, NOT ``areaid_ed``/``areaid_le``/
+    ``vpp``). All three default to empty/``False``, in which case
+    classification is exactly the single-``marker`` behaviour above:
+
+    - ``and_markers``: the island must also ``interacting``-overlap *every*
+      one of these layers to be claimed.
+    - ``not_markers``: an island that ``interacting``-overlaps *any* of these
+      layers is not claimed (it stays available to later flavours / the
+      default split). Like ``marker``, this is island-level, not a geometric
+      subtraction -- the same documented straddling policy.
+    - ``nfet_only``: the flavour has no PMOS counterpart; an island
+      ``interacting`` the deck's ``nwell`` is never claimed (no PMOS is
+      extracted or bound for it).
+
+    ``extract.py`` processes ``mos_flavours`` in declaration order and each
+    flavour removes what it claims before the next runs, so a combination
+    flavour must be declared *before* any flavour whose ``marker`` it
+    refines (or that flavour must list the refining layer in ``not_markers``).
     """
 
     marker: tuple[int, int]
@@ -360,6 +417,31 @@ class MOSFlavour:
     description: str = ""
     nfet_provenance: RuleProvenance | None = None
     pfet_provenance: RuleProvenance | None = None
+    and_markers: tuple[tuple[int, int], ...] = ()
+    not_markers: tuple[tuple[int, int], ...] = ()
+    nfet_only: bool = False
+
+
+@dataclass(frozen=True)
+class CapacitorVariant:
+    """One caller-selectable alternative **capacitor set** for an
+    :class:`ExtractionDeck` (issue #2920) -- for a PDK whose capacitor family
+    exists in several mutually-exclusive process options that draw
+    *different geometry* (gf180mcu's MIM option A: ``Metal2`` bottom plate
+    under ``Metal3``; option B: ``Metal(n-1)`` under the top metal), which
+    :class:`CapacitorDevice`'s ``flavours`` (identical geometry, different
+    coefficients) cannot express.
+
+    ``option`` is the deck-option key (``--deck-option <option>=<value>``),
+    ``value`` the string selecting this variant, ``capacitors`` the entries
+    that replace the deck's ``capacitors`` when it is selected. The deck's
+    own ``capacitors`` are the *default* variant, and must also be listed
+    here (as the first variant) so that every variant's geometry is known.
+    """
+
+    option: str
+    value: str
+    capacitors: tuple[CapacitorDevice, ...]
 
 
 @dataclass(frozen=True)
@@ -641,6 +723,26 @@ class ExtractionDeck:
     mos_flavours: tuple[MOSFlavour, ...] = ()
     nfet_provenance: RuleProvenance | None = None
     pfet_provenance: RuleProvenance | None = None
+    capacitor_variants: tuple[CapacitorVariant, ...] = ()
+    capacitor_variant_selected: str | None = None
+
+    @property
+    def unselected_capacitors(self) -> tuple[tuple[str, CapacitorDevice], ...]:
+        """``(option value, entry)`` for every :attr:`capacitor_variants`
+        capacitor that is *not* currently wired into :attr:`capacitors`
+        (issue #2920) -- what ``extract.py`` checks to warn that a layout
+        draws a capacitor option the active selection does not recognise.
+        Empty for a deck that declares no variants.
+        """
+        if not self.capacitor_variants:
+            return ()
+        selected = self.capacitor_variant_selected or self.capacitor_variants[0].value
+        return tuple(
+            (variant.value, capacitor)
+            for variant in self.capacitor_variants
+            if variant.value != selected
+            for capacitor in variant.capacitors
+        )
 
     @property
     def device_classes(self) -> tuple[str, ...]:
@@ -730,6 +832,12 @@ class ExtractionDeck:
             wired = next((f for f in device.flavours if f.name == device.name), None)
             if wired is not None:
                 values[key] = wired.value
+        if self.capacitor_variant_selected is not None:
+            # Issue #2920: the variant selector (`mim_option`) is echoed only
+            # when a variant was actually selected, so a run that takes the
+            # default keeps exactly the provenance/options hash it had before
+            # the key existed.
+            values[self.capacitor_variants[0].option] = self.capacitor_variant_selected
         return dict(sorted(values.items()))
 
     @property
@@ -1028,7 +1136,7 @@ class ExtractionDeck:
                     f"{where} label-layer role {role!r} override must be a "
                     f"(layer, datatype) pair of integers or None, got {layer!r}"
                 )
-        replacements: dict[str, object] = {}
+        replacements: dict[str, Any] = {}
         if "well" in overrides:
             replacements["well_label"] = overrides["well"]
         if "poly" in overrides:
@@ -1251,6 +1359,74 @@ def layer_operand_leaves(
 
 
 @dataclass(frozen=True)
+class SizeFilter:
+    """Pure-data size restriction on a recognition or terminal region (issue
+    #2861): bounding-box minimum / maximum side and polygon area, each an
+    **inclusive** ``(lo, hi)`` range in microns (um) / square microns (um^2).
+    An exact value is the degenerate range ``(v, v)``. A dimension left
+    ``None`` is unconstrained; a polygon must satisfy *every* declared
+    dimension. It is independent of any one device family so resistor and
+    capacitor flavours can adopt it later (today only
+    :attr:`BipolarDevice.emitter_size` consumes it).
+
+    Dimensions, measured per merged polygon:
+
+    - ``bbox_min_um`` -- the shorter side of the polygon's bounding box
+      (KLayout ``Region.with_bbox_min``);
+    - ``bbox_max_um`` -- the longer side (``with_bbox_max``);
+    - ``area_um2`` -- the polygon area (``with_area``).
+
+    Rounding rule (applied by ``extract.py``): bounds are converted to the
+    layout's database unit by rounding to the nearest integer dbu (area to
+    the nearest dbu^2), so a PDK value such as 0.063 um^2 is exact at
+    ``dbu=0.001`` and tolerant of float noise at any other dbu; the range is
+    then inclusive at both ends. One dbu outside either bound does not match.
+
+    Construction rejects a negative bound, ``lo > hi``, and an *empty*
+    filter (all three dimensions ``None``) -- an empty filter would be a
+    silent no-op, so use ``emitter_size=None`` for "no size restriction".
+    """
+
+    bbox_min_um: tuple[float, float] | None = None
+    bbox_max_um: tuple[float, float] | None = None
+    area_um2: tuple[float, float] | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            self.bbox_min_um is None
+            and self.bbox_max_um is None
+            and self.area_um2 is None
+        ):
+            raise ValueError(
+                "SizeFilter must constrain at least one of bbox_min_um, "
+                "bbox_max_um, area_um2 (use None instead of an empty filter)"
+            )
+        for name in ("bbox_min_um", "bbox_max_um", "area_um2"):
+            rng = getattr(self, name)
+            if rng is None:
+                continue
+            if len(rng) != 2:
+                raise ValueError(f"SizeFilter.{name} must be a (lo, hi) pair")
+            lo, hi = rng
+            if lo < 0 or hi < 0:
+                raise ValueError(f"SizeFilter.{name} bounds must be non-negative")
+            if lo > hi:
+                raise ValueError(f"SizeFilter.{name} has lo > hi: {rng!r}")
+
+    def overlaps(self, other: SizeFilter) -> bool:
+        """True when some polygon could satisfy both filters: every
+        dimension constrained by *both* has intersecting ranges (a dimension
+        either leaves unconstrained cannot separate them)."""
+        for name in ("bbox_min_um", "bbox_max_um", "area_um2"):
+            a, b = getattr(self, name), getattr(other, name)
+            if a is None or b is None:
+                continue
+            if a[1] < b[0] or b[1] < a[0]:
+                return False
+        return True
+
+
+@dataclass(frozen=True)
 class BipolarDevice:
     """One drawn vertical-BJT device-recognition entry for an
     :class:`ExtractionDeck`'s optional ``bipolars`` field (issue #223),
@@ -1318,6 +1494,16 @@ class BipolarDevice:
     documented residual limitation, see that deck's docstring. Both default
     to ``()`` (no narrowing), so a deck that declares neither extracts
     exactly as it did before the fields existed.
+
+    ``emitter_size`` (issue #2861) is an optional :class:`SizeFilter` applied
+    to the *merged* emitter region after ``emitter_requires``/
+    ``emitter_excludes``, so entries sharing ``base``/``marker``/``emitter``
+    can tell flavours apart by drawn emitter-window size (e.g. SG13G2's
+    ``npn13G2``/``npn13G2l``/``npn13G2v``). A marked emitter matching no
+    entry of such a group is reported in ``warnings[]`` (with its bbox) and
+    yields no device; entries of a group whose size ranges overlap are
+    rejected with an ``ExtractError``. ``None`` (default) means no size
+    restriction and leaves extraction and the deck hash unchanged.
 
     ``class_name`` names the extracted ``DeviceClassBJT3Transistor`` device
     class (``devices[].class`` in the JSON response, and one of the values
@@ -1409,6 +1595,7 @@ class BipolarDevice:
     base_relation: TerminalRelation | None = None
     emitter_relation: TerminalRelation | None = None
     collector_relation: TerminalRelation | None = None
+    emitter_size: SizeFilter | None = None
 
     def __post_init__(self) -> None:
         # Validates eagerly so a malformed deck entry fails where it is

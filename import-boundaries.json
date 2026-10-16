@@ -149,8 +149,11 @@
         "klayout_tools.extract_finfet",
         "klayout_tools.extract_hierarchy",
         "klayout_tools.extract_parasitics",
+        "klayout_tools.extract_netselect",
         "klayout_tools.extract_passive_regions",
+        "klayout_tools.extract_progress",
         "klayout_tools.extract_report",
+        "klayout_tools.extract_resistance_graph",
         "klayout_tools.extract_spef",
         "klayout_tools.extract_subcircuit",
         "klayout_tools.parasitic_integrity",
@@ -164,6 +167,7 @@
       "modules": [
         "klayout_tools.cli.functional_verification_cmd",
         "klayout_tools.functional_verification",
+        "klayout_tools.functional_verification_initial_state",
         "klayout_tools.functional_verification_sdf"
       ]
     },
@@ -173,12 +177,14 @@
       "modules": [
         "klayout_tools.cli.gen_cmd",
         "klayout_tools.gen",
+        "klayout_tools.gen_cap_vpp",
         "klayout_tools.gen_describe",
         "klayout_tools.gen_layer_params",
         "klayout_tools.gen_pcells",
         "klayout_tools.gen_pcells.bjt_array",
         "klayout_tools.gen_pcells.bond_pad",
         "klayout_tools.gen_pcells.cap_array",
+        "klayout_tools.gen_pcells.cap_vpp_array",
         "klayout_tools.gen_pcells.diff_pair",
         "klayout_tools.gen_pcells.esd_device",
         "klayout_tools.gen_pcells.guard_ring",
@@ -319,6 +325,7 @@
       "modules": [
         "klayout_tools.cli.place_and_route_cmd",
         "klayout_tools.place_and_route",
+        "klayout_tools.place_and_route_batch",
         "klayout_tools.place_and_route_gds_merge",
         "klayout_tools.place_and_route_min_area",
         "klayout_tools.place_and_route_pdn_fit",
@@ -386,6 +393,7 @@
         "klayout_tools._vendor",
         "klayout_tools._vendor.mutation_variants",
         "klayout_tools._version_scheme",
+        "klayout_tools._verilog_params",
         "klayout_tools.build_identity",
         "klayout_tools.coverage",
         "klayout_tools.design_evidence_tiers",
@@ -393,6 +401,7 @@
         "klayout_tools.metrics",
         "klayout_tools.op_sanity",
         "klayout_tools.output_lock",
+        "klayout_tools.resistor_mesh",
         "klayout_tools.verilog_netlist"
       ]
     },
@@ -412,19 +421,30 @@
       "modules": [
         "klayout_tools.asap7_bsimcmg",
         "klayout_tools.cli.sim_cmd",
+        "klayout_tools.cli.sim_merge_cmd",
         "klayout_tools.digital_fleet",
         "klayout_tools.remote_fleet",
         "klayout_tools.remote_launcher",
         "klayout_tools.remote_transport",
         "klayout_tools.sim",
         "klayout_tools.sim_batch",
+        "klayout_tools.sim_batch_async",
         "klayout_tools.sim_crossings",
+        "klayout_tools.sim_cycle_mean",
         "klayout_tools.sim_decks",
+        "klayout_tools.sim_energy",
+        "klayout_tools.sim_injected",
+        "klayout_tools.sim_merge",
+        "klayout_tools.sim_mismatch_gate",
         "klayout_tools.sim_plot",
+        "klayout_tools.sim_portable",
+        "klayout_tools.sim_raw",
         "klayout_tools.sim_remote",
         "klayout_tools.sim_set",
         "klayout_tools.sim_staging",
-        "klayout_tools.sim_steps"
+        "klayout_tools.sim_steps",
+        "klayout_tools.sim_transfer",
+        "klayout_tools.sim_transfer_meas"
       ]
     },
     "size": {
@@ -433,6 +453,14 @@
       "modules": [
         "klayout_tools.cli.size_cmd",
         "klayout_tools.size"
+      ]
+    },
+    "reset_coverage": {
+      "kind": "verb",
+      "description": "`klt reset_coverage` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.reset_coverage_cmd",
+        "klayout_tools.reset_coverage"
       ]
     },
     "socket_check": {
@@ -531,6 +559,14 @@
       "modules": [
         "klayout_tools.cli.yield_sensitivity_cmd",
         "klayout_tools.yield_sensitivity"
+      ]
+    },
+    "yield_threshold": {
+      "kind": "verb",
+      "description": "`klt yield-threshold` implementation: probit threshold fit plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.yield_threshold_cmd",
+        "klayout_tools.probit"
       ]
     }
   },
@@ -694,6 +730,16 @@
       "consumer": "extract",
       "exporter": "place_and_route",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "extract",
+      "exporter": "power",
+      "reason": "Issue #2981: the terminal-pair effective-resistance adapter in extract_resistance_graph is deliberately built on the public ir_solver.solve_ir_drop, so extraction and klt power share one resistor-network solver."
+    },
+    {
+      "consumer": "functional_verification",
+      "exporter": "reset_coverage",
+      "reason": "options.initial_state derives the gate-level flop list from reset_coverage's netlist/cell-model classification instead of re-parsing (issue #2998)."
     },
     {
       "consumer": "functional_verification",
@@ -901,6 +947,11 @@
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
     },
     {
+      "consumer": "reset_coverage",
+      "exporter": "cli-infra",
+      "reason": "Verb CLI adapter uses the shared output envelope helpers, as every other verb does."
+    },
+    {
       "consumer": "ring_check",
       "exporter": "cli-infra",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
@@ -1066,9 +1117,24 @@
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
     },
     {
+      "consumer": "yield_threshold",
+      "exporter": "cli-infra",
+      "reason": "CLI adapter emits through the shared envelope in cli/output.py (issue #2976), as every verb does."
+    },
+    {
       "consumer": "yield_sensitivity",
       "exporter": "cli-infra",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "place_and_route",
+      "exporter": "sim",
+      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "place_and_route",
+      "exporter": "netlist",
+      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
     }
   ],
   "shared_private_permissions": [
@@ -1211,6 +1277,30 @@
       "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
     },
     {
+      "consumer": "klayout_tools.extract_resistance_graph",
+      "exporter": "klayout_tools.resistor_mesh",
+      "symbol": "_decompose_manhattan_polygon",
+      "reason": "Issue #2980: the Manhattan mesh-decomposition helpers moved unchanged from power.py into the shared resistor_mesh module (keeping their names) so klt power and the extraction resistance-graph builder reuse one implementation."
+    },
+    {
+      "consumer": "klayout_tools.extract_resistance_graph",
+      "exporter": "klayout_tools.resistor_mesh",
+      "symbol": "_rails_under_via",
+      "reason": "Issue #2980: the Manhattan mesh-decomposition helpers moved unchanged from power.py into the shared resistor_mesh module (keeping their names) so klt power and the extraction resistance-graph builder reuse one implementation."
+    },
+    {
+      "consumer": "klayout_tools.power",
+      "exporter": "klayout_tools.resistor_mesh",
+      "symbol": "_decompose_manhattan_polygon",
+      "reason": "Issue #2980: the Manhattan mesh-decomposition helpers moved unchanged from power.py into the shared resistor_mesh module (keeping their names) so klt power and the extraction resistance-graph builder reuse one implementation."
+    },
+    {
+      "consumer": "klayout_tools.power",
+      "exporter": "klayout_tools.resistor_mesh",
+      "symbol": "_rails_under_via",
+      "reason": "Issue #2980: the Manhattan mesh-decomposition helpers moved unchanged from power.py into the shared resistor_mesh module (keeping their names) so klt power and the extraction resistance-graph builder reuse one implementation."
+    },
+    {
       "consumer": "klayout_tools.power",
       "exporter": "klayout_tools._provenance",
       "symbol": "_content_hash",
@@ -1242,6 +1332,12 @@
     },
     {
       "consumer": "klayout_tools.synthesize",
+      "exporter": "klayout_tools._paths",
+      "symbol": "_reject_unknown_keys",
+      "reason": "Request-shape validation helper shared with _devices (issue #3466); promote to a public name when _paths is next reworked."
+    },
+    {
+      "consumer": "klayout_tools.synthesize",
       "exporter": "klayout_tools._provenance",
       "symbol": "_yosys_version",
       "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
@@ -1251,6 +1347,66 @@
       "exporter": "klayout_tools._provenance",
       "symbol": "_klt_version",
       "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.place_and_route_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_batch_environment",
+      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.place_and_route_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_read_runner_identity",
+      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.place_and_route_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_resolve_batch_config",
+      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.place_and_route_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_runner_preflight_script",
+      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.place_and_route_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_status_exit_code",
+      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.place_and_route_batch",
+      "exporter": "klayout_tools.netlist_batch",
+      "symbol": "_remote_stderr_tail",
+      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.place_and_route_batch",
+      "exporter": "klayout_tools.netlist_batch",
+      "symbol": "_runner_error",
+      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.place_and_route_batch",
+      "exporter": "klayout_tools.sim",
+      "symbol": "_yield_host_default_backend",
+      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.place_and_route_batch",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_content_hash",
+      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.place_and_route_batch",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_klt_version",
+      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
     }
   ],
   "legacy_exceptions": {

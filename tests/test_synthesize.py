@@ -2495,6 +2495,108 @@ def test_clock_period_ns_must_be_positive(tmp_path, monkeypatch, clock_period_ns
         run_synthesize(request_path)
 
 
+def _clocks_request(tmp_path, monkeypatch, constraints):
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    return _write_request(
+        tmp_path / "request.json", _base_request(constraints=constraints)
+    )
+
+
+def test_clocks_list_uses_tightest_period_and_is_echoed(tmp_path, monkeypatch):
+    request_path = _clocks_request(
+        tmp_path,
+        monkeypatch,
+        {
+            "clocks": [
+                {"port": "clk_a", "period_ns": 5},
+                {"port": "clk_b", "period_ns": 2.5},
+            ]
+        },
+    )
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["timing"]["delay_target_ps"] == 2500
+    assert report["clock_targets"] == {
+        "clocks": [
+            {"port": "clk_a", "period_ns": 5},
+            {"port": "clk_b", "period_ns": 2.5},
+        ],
+        "delay_target_ps": 2500,
+        "delay_target_basis": "min_clocks_period_ns",
+        "per_clock_enforced": False,
+    }
+
+
+def test_clock_period_ns_alone_reports_single_global_basis(tmp_path, monkeypatch):
+    request_path = _clocks_request(tmp_path, monkeypatch, {"clock_period_ns": 4})
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["clock_targets"]["delay_target_basis"] == "clock_period_ns"
+    assert report["clock_targets"]["delay_target_ps"] == 4000
+    assert report["clock_targets"]["clocks"] == []
+
+
+def test_explicit_clock_period_ns_wins_over_clocks(tmp_path, monkeypatch):
+    request_path = _clocks_request(
+        tmp_path,
+        monkeypatch,
+        {"clock_period_ns": 3, "clocks": [{"port": "clk", "period_ns": 2}]},
+    )
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["timing"]["delay_target_ps"] == 3000
+    assert report["clock_targets"]["delay_target_basis"] == "clock_period_ns"
+    assert report["clock_targets"]["clocks"] == [{"port": "clk", "period_ns": 2}]
+
+
+def test_no_constraints_reports_basis_none(tmp_path, monkeypatch):
+    request_path = _clocks_request(tmp_path, monkeypatch, {})
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["clock_targets"]["delay_target_basis"] == "none"
+    assert report["clock_targets"]["delay_target_ps"] is None
+
+
+@pytest.mark.parametrize(
+    ("clocks", "message"),
+    [
+        ("clk", "non-empty array"),
+        ([], "non-empty array"),
+        (["clk"], r"clocks\[0\] must be a"),
+        ([{"port": "", "period_ns": 1}], "port must be a non-empty string"),
+        ([{"port": "c", "period_ns": "x"}], "period_ns must be a positive number"),
+        ([{"port": "c", "period_ns": True}], "period_ns must be a positive number"),
+        ([{"port": "c", "period_ns": 0}], "greater than zero"),
+        ([{"port": "c", "period_ns": 1, "extra": 1}], "unknown key"),
+        (
+            [{"port": "c", "period_ns": 1}, {"port": "c", "period_ns": 2}],
+            "more than once",
+        ),
+    ],
+)
+def test_clocks_validation_errors(tmp_path, monkeypatch, clocks, message):
+    _isolate_pdk(monkeypatch, tmp_path)
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(constraints={"clocks": clocks}),
+    )
+    with pytest.raises(SynthesizeError, match=message):
+        run_synthesize(request_path)
+
+
 def test_abc_constr_file_is_written_from_the_table(tmp_path, monkeypatch):
     """The `<top>_abc.constr` artifact is the exact two-line file
     `help abc`/ORFS both use, built from this library's own table entry --
@@ -5370,7 +5472,7 @@ def test_check_synthesize_report_clean_pass(tmp_path, monkeypatch):
     assert result["mode"] == "check"
     assert result["report"] == report_path
     assert result["status"] == "match"
-    assert len(result["checks"]) == 2
+    assert len(result["checks"]) == 3
     assert all(check["match"] for check in result["checks"])
 
 
@@ -5839,3 +5941,142 @@ def test_cli_text_format_renders_memory_mapping_and_blackboxes(
     assert "memory_mapping: lowered_to_logic" in out
     assert "gcd: lowered_to_logic (elaborated=1, pre_lowering=1, final=0)" in out
     assert "blackbox_modules (area not included): hm" in out
+
+
+# --------------------------------------------------------------------------- #
+# Issue #3466: `parameters` override + unknown top-level request keys
+# --------------------------------------------------------------------------- #
+
+
+def test_load_request_rejects_unknown_top_level_key(tmp_path):
+    path = _write_request(
+        tmp_path / "request.json", _base_request(paramters={"LAGS": 8})
+    )
+    with pytest.raises(SynthesizeError, match="unknown field 'paramters'"):
+        load_request(path)
+
+
+def test_load_request_tolerates_comment_and_schema(tmp_path):
+    path = _write_request(
+        tmp_path / "request.json",
+        _base_request(_comment="note", schema="klt.synthesize.request/1"),
+    )
+    assert load_request(path)["hdl_toplevel"] == "gcd"
+
+
+@pytest.mark.parametrize(
+    "parameters, match",
+    [
+        ([1], "must be a JSON object"),
+        ({"": 1}, "Verilog identifiers"),
+        ({"1BAD": 1}, "Verilog identifiers"),
+        ({"W": True}, "integer or a string"),
+        ({"W": 1.5}, "integer or a string"),
+        ({"W": [1]}, "integer or a string"),
+        ({"MODE": 'a"; shell rm'}, "outside the supported set"),
+        ({"MODE": "a\nb"}, "outside the supported set"),
+    ],
+)
+def test_run_synthesize_rejects_malformed_parameters(tmp_path, parameters, match):
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    path = _write_request(
+        tmp_path / "request.json", _base_request(parameters=parameters)
+    )
+    with pytest.raises(SynthesizeError, match=match):
+        run_synthesize(path)
+
+
+def test_run_synthesize_applies_and_echoes_parameters(tmp_path, monkeypatch):
+    _setup_success_env(tmp_path, monkeypatch)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(parameters={"LAGS": 8, "MODE": "fast"}),
+    )
+    _stub_yosys_success(monkeypatch)
+    scripts = _record_yosys_scripts(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["parameters"] == {"LAGS": 8, "MODE": "fast"}
+    assert report["provenance"]["parameters"] == {"LAGS": 8, "MODE": "fast"}
+    lines = Path(scripts[0]).read_text(encoding="utf-8").splitlines()
+    chparam = 'chparam -set LAGS 8 -set MODE "fast" gcd'
+    assert chparam in lines
+    assert lines.index(chparam) < lines.index("hierarchy -check -top gcd")
+    first_read = next(i for i, ln in enumerate(lines) if ln.startswith("read_verilog"))
+    assert first_read < lines.index(chparam)
+
+
+def test_run_synthesize_without_parameters_emits_no_chparam(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    scripts = _record_yosys_scripts(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["parameters"] == {}
+    assert report["provenance"]["parameters"] == {}
+    assert "chparam" not in Path(scripts[0]).read_text(encoding="utf-8")
+
+
+def test_check_synthesize_report_detects_parameter_drift(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    report_path = _write_report(
+        tmp_path / "gcd.synth.json", run_synthesize(request_path)
+    )
+
+    _write_request(tmp_path / "request.json", _base_request(parameters={"LAGS": 8}))
+    result = synthesize.check_synthesize_report(report_path, request_path)
+
+    assert result["status"] == "drifted"
+    by_field = {check["field"]: check for check in result["checks"]}
+    assert by_field["parameters"]["match"] is False
+    assert by_field["parameters"]["expected"] == {}
+    assert by_field["parameters"]["actual"] == {"LAGS": 8}
+    assert by_field["provenance.input.content_hash"]["match"] is True
+
+
+def test_check_synthesize_report_treats_missing_parameters_as_empty(
+    tmp_path, monkeypatch
+):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    committed = run_synthesize(request_path)
+    del committed["parameters"]  # a report predating the field
+    report_path = _write_report(tmp_path / "gcd.synth.json", committed)
+
+    result = synthesize.check_synthesize_report(report_path, request_path)
+
+    assert result["status"] == "match"
+
+
+def test_equivalence_gate_forwards_parameters_to_gold_side(tmp_path, monkeypatch):
+    captured: dict = {}
+
+    def fake_run_equiv(request_path, timeout_s=None):
+        captured.update(json.loads(Path(request_path).read_text(encoding="utf-8")))
+        return {
+            "status": "equivalent",
+            "engine": "yosys",
+            "engine_version": "0",
+            "timeout_s": 1,
+            "elapsed_s": 0.1,
+            "artifacts": {},
+        }
+
+    monkeypatch.setattr(synthesize, "run_equiv", fake_run_equiv)
+    kwargs = dict(
+        synthesize_output_dir=str(tmp_path),
+        resolved_sources=["a.v"],
+        hdl_toplevel="gcd",
+        netlist_path="n.v",
+        liberty_path="l.lib",
+        timeout_s=None,
+    )
+    synthesize._verify_synthesis_equivalence(**kwargs, parameters={"W": 8})
+    assert captured["gold"]["parameters"] == {"W": 8}
+    assert "parameters" not in captured["gate"]
+
+    synthesize._verify_synthesis_equivalence(**kwargs)
+    assert "parameters" not in captured["gold"]
