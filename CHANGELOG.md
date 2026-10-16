@@ -345,7 +345,6 @@ not `klt --version`, if you need to detect this kind of drift. See
   a layout circuit, and `gate-level-verilog` references are unaffected.
   **Additive contract change**; `schema_version` is unchanged.
 
-
 - **New verb `klt tap-distance`** (issue #3009): asserts every point of a
   subject region is within a Euclidean distance of a qualifying tap (latch-up /
   tie spacing), optionally per island and filtered to taps wired to named
