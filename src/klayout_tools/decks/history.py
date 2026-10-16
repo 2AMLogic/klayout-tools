@@ -1018,6 +1018,8 @@ def _rule_pairs(rule: DrcRule) -> list[tuple[int, int]]:
         pairs.append(rule.other_layer)
     if rule.region_spec is not None:
         pairs.extend(rule.region_spec.layers())
+    if rule.net_spec is not None:
+        pairs.extend(rule.net_spec.layers())
     return pairs
 
 

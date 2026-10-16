@@ -396,6 +396,44 @@ class TapDistanceSpec:
 
 
 @dataclass(frozen=True)
+class NetSpaceSpec:
+    """Connectivity model for ``DrcRule(check="net_space")`` (issue #3572):
+    which shapes join two regions of the checked layer into one net.
+
+    The checked layer (``DrcRule.layer``) is the net-bearing layer whose
+    spacing is measured -- only between polygons on *different* nets. The
+    model is a straight conductor chain, mirroring KLayout's
+    ``connect(a, b)`` graph:
+
+    - ``tap_and``: layers intersected with the checked layer to form the
+      *tap* region (e.g. ``Activ`` and ``nSD`` for an NWell tie). The tap is
+      joined to the checked layer it sits in.
+    - ``chain``: conductor/cut layers joined in order -- the tap to
+      ``chain[0]``, ``chain[0]`` to ``chain[1]``, and so on (e.g. ``Cont``
+      then ``Metal1``). Same-layer touching shapes join as well.
+
+    Anything not in this chain is *not modelled* and never joins two nets:
+    a checked-layer polygon with no tap is its own net, and two polygons
+    tied only through a layer outside ``chain`` read as different nets (so
+    the rule errs toward flagging, never silently toward passing). Each
+    deck documents its own unmodelled list next to the rule.
+    """
+
+    tap_and: tuple[tuple[int, int], ...]
+    chain: tuple[tuple[int, int], ...]
+
+    def __post_init__(self) -> None:
+        if not self.tap_and:
+            raise ValueError("tap_and must name at least one layer")
+        if not self.chain:
+            raise ValueError("chain must name at least one layer")
+
+    def layers(self) -> tuple[tuple[int, int], ...]:
+        """Every non-checked layer this spec reads, in declaration order."""
+        return (*self.tap_and, *self.chain)
+
+
+@dataclass(frozen=True)
 class DrcRule:
     """One rule in a DRC deck.
 
@@ -660,6 +698,12 @@ class DrcRule:
     :class:`~klayout_tools.drc.DrcError` for an ``"angle"`` rule that leaves
     it unset or outside ``(0, 180]``.
 
+    ``"net_space"`` (issue #3572) is a net-aware spacing check: like
+    ``"space"`` it measures ``layer`` against itself at ``threshold_dbu``,
+    but reports only facing edges of polygons on *different* nets, as
+    decided by ``net_spec`` (:class:`NetSpaceSpec`, required). An isolated
+    polygon (no tap) is its own net.
+
     ``requires_any_layer`` (issue #2634) skips this rule entirely -- the
     same ``coverage.rules_skipped`` path a missing ``layer``/``other_layer``
     already uses -- unless at least one of the listed ``(layer, datatype)``
@@ -779,6 +823,7 @@ class DrcRule:
     other_layer_selection: str | None = None
     layer_selection: str | None = None
     region_spec: CompCoverageSpec | TapDistanceSpec | None = None
+    net_spec: NetSpaceSpec | None = None
 
 
 class UnknownDeckError(Exception):

@@ -1261,6 +1261,33 @@ when the deck module is imported.
   not a deck bug; tests and `examples/dogbone-terminal` assert exactly that
   rather than a whole-deck `clean`.
 
+### `"net_space"` check kind (issue #3572)
+
+A net-aware spacing check: it measures `layer` against itself at
+`threshold_dbu` like `"space"`, but reports only facing edges of polygons on
+**different nets**. Declared with `DrcRule(check="net_space",
+net_spec=NetSpaceSpec(tap_and=..., chain=...))`. sg13cmos5l's `nwell.space.2`
+(`NW.b1`, 1.80 um between NWells of different nets) is the first user, so
+`NW.b1` is no longer listed in `coverage.unchecked_rules`.
+
+- **Connectivity model** (`NetSpaceSpec`): KLayout `LayoutToNetlist` over a
+  straight chain. The *tap* is `layer` intersected with every `tap_and` layer
+  (sg13cmos5l: `Activ` & `nSD`, an n+ well tie); it joins the well it sits in,
+  then `chain[0]`, `chain[1]`, ... in order (sg13cmos5l: `Cont`, then
+  `Metal1`). Touching shapes on one layer join. A well with no tap is its own
+  net.
+- **What is not modelled** (never silently treated as connected, so such wells
+  may be *over*-flagged, not passed): connections through layers outside the
+  chain (Metal2+/Via*, TopMetal*, poly/Activ jumpers), `NWell.pin` labels and
+  substrate connectivity. Each deck states its own list next to the rule.
+- **Reporting**: ordinary edge-pair violations (`check: "net_space"`, real
+  `bbox` and `polygon`, rule id, provenance), identical in shape to `"space"`.
+  Evaluated flat per top cell. Corner-to-corner gaps use Euclidean distance;
+  wells that touch or overlap merge into one polygon and are never flagged.
+- **Contract**: additive only -- a new `check` string and no new JSON field.
+  `nwell.space.1` (geometric, same- and different-net) is unchanged and still
+  over-flags same-net pairs between 0.62 um and its threshold.
+
 ### `"ongrid"` / `"angle"` check kinds (issue #2642)
 
 Two single-layer **vertex** check kinds, as opposed to the distance checks
@@ -3006,7 +3033,7 @@ zero-violation case (where `drc__error__count` is `0`).
 | ------------- | ------------------- | ----------------------------------------------------------------------------- |
 | `rule`        | string               | Stable rule id (e.g. `"poly.width.1"`) — never renumbered once shipped.       |
 | `description` | string               | Human-readable rule description.                                              |
-| `check`       | string               | The check kind (`"width"`, `"space"`, `"enclosing"`, etc.). For `"enclosing"`/`"enclosed"`, `check` does not distinguish a marginal-distance violation from a zero-overlap escape violation — both are reported under the same `check` string; see "`\"enclosing\"`/`\"enclosed\"` also catch zero-overlap escapes" above. |
+| `check`       | string               | The check kind (`"width"`, `"space"`, `"enclosing"`, `"net_space"`, etc.). For `"enclosing"`/`"enclosed"`, `check` does not distinguish a marginal-distance violation from a zero-overlap escape violation — both are reported under the same `check` string; see "`\"enclosing\"`/`\"enclosed\"` also catch zero-overlap escapes" above. |
 | `layer`       | string               | The deck's own layer name (e.g. sky130's `"poly.drawing"` or gf180mcu's `"Poly2"`) if the deck names the layer, else `"<layer>/<datatype>"`. |
 | `cell`        | string               | Name of the top cell the violation was found under. (The check is flattened per top cell — see "Limitation: whole-layout, flattened" — so this is always a top cell, never a sub-instance.) |
 | `source_cell` | string \| null       | Cell-definition name of the *innermost placed instance* whose bounding box fully contains this violation's `bbox` — the originating standard cell for a hierarchical, machine-generated layout. `null` when the violation is contained in no single instance: top-level geometry, or a `bbox` that straddles an instance boundary (a violation *between* two placements belongs to neither). See "Per-instance attribution" below. |
@@ -3040,7 +3067,7 @@ for which skipped rules make a run partial and which do not.
 | `layers_in_stream_without_rules`   | array\<string\> | `"<layer>/<datatype>"` pairs present in the input stream that no active rule in the selected deck references at all — the load-bearing field: turns `"clean"` into "clean, and here is exactly what was not looked at." Sorted ascending by `(layer, datatype)`. |
 | `rules_skipped`                    | array\<string\> | Rule ids silently skipped because a layer they read was absent from this stream — `layer`/`other_layer`, or a `derived_layer` input (with one documented exception: a `"not_interacting"` derived rule still runs when its marker layer is absent, see "Voltage-domain rule pairs" above). Sorted alphabetically. |
 | `voltage_domain_warnings`          | array\<object\> | `{"marker": "<layer>/<datatype>", "description": string}` — see below. Sorted by marker `(layer, datatype)`. |
-| `unchecked_rules`                  | array\<object\> | `{"rule": string, "layer": "<layer>/<datatype>", "description": string}` — foundry rules the deck knows about but cannot evaluate (issue #3012; e.g. `sg13cmos5l`'s net-aware `NW.b1`), listed only when the rule's layer is in the stream, so a `clean` is not read as covering them. Purely informational: does not change `status`. Sorted by rule id. Additive; `[]` for decks that declare none. |
+| `unchecked_rules`                  | array\<object\> | `{"rule": string, "layer": "<layer>/<datatype>", "description": string}` — foundry rules the deck knows about but cannot evaluate (issue #3012; `sg13cmos5l`'s net-aware `NW.b1` was the first, now checked by `net_space`, #3572, so the map is currently empty), listed only when the rule's layer is in the stream, so a `clean` is not read as covering them. Purely informational: does not change `status`. Sorted by rule id. Additive; `[]` for decks that declare none. |
 | `deck_scope`                       | array\<string\> | Every distinct DRM section / official rule-id prefix the selected deck's rules claim to implement — a static property of the deck, independent of the input stream (issue #566). Sorted alphabetically. |
 | `unmodeled_rules`                  | array\<string\> | Curated engine only: official foundry-runset rule ids the selected deck knowingly does **not** transcribe (issue #3031) — a static property of the deck. sky130: `m1.5`, `m2.5`, `via.5a`, `via2.5`, `via3.5`. See below. Sorted alphabetically; empty for a deck that declares none. |
 | `rule_categories`                  | array\<string\> | KLayout engine only: declared RDB categories, never execution proof. |

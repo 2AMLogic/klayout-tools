@@ -226,11 +226,19 @@ def _width_pair(
 
 
 def _space_pair(
-    layer: tuple[int, int], threshold_dbu: int, max_dbu: int | None = None
+    layer: tuple[int, int],
+    threshold_dbu: int,
+    max_dbu: int | None = None,
+    net_space_dbu: int = 0,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     margin = _margin_dbu(threshold_dbu)
     violate_gap = max(threshold_dbu - margin, 1)
     clean_gap = threshold_dbu + margin
+    # A stricter net-aware spacing rule on the same layer (`"net_space"`,
+    # issue #3572) flags an unconnected pair at the plain rule's clean gap,
+    # so widen the clean fixture past it to keep it clean under the deck.
+    if net_space_dbu > threshold_dbu:
+        clean_gap = net_space_dbu + _margin_dbu(net_space_dbu)
     # Same fixed-size clamp as `_width_pair`: on a cut layer the two bars
     # become two legally-sized cut squares, so the spacing fixture doesn't
     # also trip that layer's own size rule.
@@ -938,7 +946,17 @@ def build_manifest(
             )
         elif rule.check == "space":
             violate, clean = _space_pair(
-                rule.layer, rule.threshold_dbu, max_sizes.get(rule.layer)
+                rule.layer,
+                rule.threshold_dbu,
+                max_sizes.get(rule.layer),
+                max(
+                    (
+                        r.threshold_dbu
+                        for r in deck_rules
+                        if r.check == "net_space" and r.layer == rule.layer
+                    ),
+                    default=0,
+                ),
             )
         elif rule.check == "enclosing":
             assert rule.other_layer is not None, rule.id

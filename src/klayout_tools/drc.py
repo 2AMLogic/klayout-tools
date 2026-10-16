@@ -156,6 +156,10 @@ _VERTEX_CHECKS = _GRID_CHECKS | _ANGLE_CHECKS
 _COMP_COVERAGE_CHECKS = {"comp_coverage"}
 _TAP_DISTANCE_CHECKS = {"tap_distance"}
 _REGION_CHECKS = _COMP_COVERAGE_CHECKS | _TAP_DISTANCE_CHECKS
+# Net-aware spacing (issue #3572): `"space"` restricted to facing edges of
+# polygons on different nets, per `DrcRule.net_spec` -- `_run_net_space_check`.
+# Returns `EdgePairs`, so it reuses the ordinary edge-pair reporting path.
+_NET_SPACE_CHECKS = {"net_space"}
 
 # Every `DerivedLayer.mode` `run_drc()` knows how to derive a region for --
 # see that class's docstring for each one's derivation. Validated per rule
@@ -1473,6 +1477,8 @@ def run_drc(
             deck_layer_tuples.add(rule.other_layer)
         if rule.region_spec is not None:
             deck_layer_tuples.update(rule.region_spec.layers())
+        if rule.net_spec is not None:
+            deck_layer_tuples.update(rule.net_spec.layers())
         if rule.derived_layer is not None:
             # `rule.layer` is only the derived rule's *reporting* identity
             # (see DerivedLayer's docstring) -- the layer(s) actually read
@@ -1791,7 +1797,10 @@ def run_drc(
                     rule_counts[rule.id] = rule_counts.get(rule.id, 0) + 1
                 continue
 
-            if rule.check in _VERTEX_CHECKS:
+            if rule.check in _NET_SPACE_CHECKS:
+                edge_pairs = _run_net_space_check(cell, layout, rule, dbu_scale)
+                outside_region = None
+            elif rule.check in _VERTEX_CHECKS:
                 # Vertex checks (issue #2642). Dispatched here rather than
                 # inside `_run_check` because neither reads `threshold_dbu`
                 # (and `"ongrid"` needs the layout's own `dbu`, which
@@ -2440,6 +2449,74 @@ def _run_check(
         return edge_pairs, outside_region
 
     raise DrcError(f"rule '{rule.id}': unsupported check kind '{check}'")
+
+
+def _run_net_space_check(
+    cell: Any, layout: Any, rule: DrcRule, dbu_scale: float
+) -> Any:
+    """``check="net_space"`` (issue #3572): spacing between polygons of
+    ``region`` that sit on *different* nets.
+
+    Nets come from KLayout's own ``LayoutToNetlist`` connectivity over the
+    chain declared in ``rule.net_spec`` (:class:`NetSpaceSpec`): the checked
+    layer joins the tap (``tap_and`` layers intersected with it), the tap
+    joins ``chain[0]``, and so on up the chain. Each polygon of ``region``
+    is tagged with its net id as a user property, and
+    ``Region.space_check(..., DifferentPropertiesConstraint)`` -- the
+    primitive behind the DRC-DSL ``space(d, props_ne)`` the ASAP7 deck uses
+    -- then measures only polygon pairs on different nets. A polygon with no
+    tap is its own net; a connection outside the chain is not modelled.
+    """
+    import klayout.db as kdb
+
+    spec = rule.net_spec
+    if spec is None:
+        raise DrcError(f"rule '{rule.id}': check '{rule.check}' requires net_spec")
+    d = round(rule.threshold_dbu * dbu_scale)
+
+    l2n = kdb.LayoutToNetlist(kdb.RecursiveShapeIterator(layout, cell, []))
+
+    def layer_region(pair: tuple[int, int]) -> Any:
+        index = layout.find_layer(*pair)
+        if index is None:
+            return l2n.make_layer(f"{pair[0]}_{pair[1]}")
+        return l2n.make_layer(index, f"{pair[0]}_{pair[1]}")
+
+    checked = layer_region(rule.layer)
+    tap = checked
+    for pair in spec.tap_and:
+        tap = tap & layer_region(pair)
+    l2n.register(tap, "tap")
+    chain = [layer_region(pair) for pair in spec.chain]
+    for conductor in (checked, tap, *chain):
+        l2n.connect(conductor)
+    l2n.connect(checked, tap)
+    previous = tap
+    for conductor in chain:
+        l2n.connect(previous, conductor)
+        previous = conductor
+    l2n.extract_netlist()
+
+    tagged = kdb.Region()
+    circuit = l2n.netlist().circuit_by_name(cell.name)
+    if circuit is None:
+        return kdb.EdgePairs()
+    for net in circuit.each_net():
+        for polygon in l2n.shapes_of_net(net, checked, True).each():
+            tagged.insert(kdb.PolygonWithProperties(polygon, {1: net.cluster_id}))
+    return tagged.space_check(
+        d,
+        False,
+        kdb.Region.Euclidian,
+        90,
+        None,
+        None,
+        False,
+        kdb.Region.NoOppositeFilter,
+        kdb.Region.NoRectFilter,
+        False,
+        kdb.Region.DifferentPropertiesConstraint,
+    )
 
 
 def _run_enclosing_adjacent_check(

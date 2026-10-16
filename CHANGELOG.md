@@ -31,6 +31,12 @@ not `klt --version`, if you need to detect this kind of drift. See
   fan-out-8 hierarchy previously expanded to ~2M devices and took ~29 s) and
   emits one `unsupported_hierarchy` warning naming the cap; devices reached
   before it are still linted. Additive; no `schema_version` bump.
+- **`klt drc`: new `violations[].check` kind `net_space`** (issue #3572): a
+  net-aware spacing check (`DrcRule.net_spec`, `NetSpaceSpec`) reporting only
+  facing edges of polygons on different nets. `sg13cmos5l` gains
+  `nwell.space.2` (`NW.b1`, 1.80 um between NWells of different nets) and
+  `NW.b1` leaves `coverage.unchecked_rules`. Additive; no `schema_version`
+  change. See `docs/cli/drc.md`.
 - **`klt lvs`: new `mismatches[].category` `device.series_fold_offset_absorbed`**
   (issue #3017): when `options.combine_devices` folds N>1 series primitives of
   a resistor class with a nonzero head term (`fixed_offset_ohm` +

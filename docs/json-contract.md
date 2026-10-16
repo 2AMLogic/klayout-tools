@@ -47,7 +47,7 @@ payload (which top-level fields exist), not the full *set of values* a field
 can take on. Before `klt` reaches `1.0`, an additive change can introduce a
 new enum-like value — most notably a new `mismatches[].category` (and
 therefore a new `category_counts` key) for `klt lvs`, or a new `violations[]`
-rule id for `klt drc` — without a `schema_version` bump and without changing
+rule id or `violations[].check` kind (e.g. `"net_space"`, issue #3572) for `klt drc` — without a `schema_version` bump and without changing
 the reported `klt --version` string. Such a change is a deliberate, additive
 behavior improvement (e.g. a new class of finding the tool did not previously
 surface), not schema drift, but it does mean two runs of the identical `klt`

@@ -118,17 +118,23 @@ def test_sg13cmos5l_deck_registered_with_six_width_space_rules():
     assert {rule.check for rule in mos_only_rules} == {"width", "space"}
 
 
-def test_sg13cmos5l_deck_has_32_rules_after_nwell_rules():
+def test_sg13cmos5l_deck_has_33_rules_after_nwell_rules():
     """Issue #1417 extends the curated deck past its #1400 Activ/GatPoly/
     Metal1-only starter to cover the full Metal1-TopMetal1 stack and its
     Via1/Via2/Via3/TopVia1 vias -- 30 rules total (27 + 3 upper-landing containment
     rules, #2726) across 11 layers, and now
     an `"enclosing"` check kind (the via/metal enclosure rules) alongside
     `"width"`/`"space"`. Issue #3012 adds `nwell.width.1`/`nwell.space.1`
-    on NWell (31/0): 32 rules across 12 layers."""
+    on NWell (31/0): 32 rules across 12 layers; #3572 adds the net-aware
+    `nwell.space.2` (NW.b1): 33."""
     deck = get_deck("sg13cmos5l")
-    assert len(deck) == 32
-    assert {rule.check for rule in deck} == {"width", "space", "enclosing"}
+    assert len(deck) == 33
+    assert {rule.check for rule in deck} == {
+        "width",
+        "space",
+        "enclosing",
+        "net_space",
+    }
     assert {rule.layer for rule in deck} == {
         (1, 0),  # Activ.drawing
         (5, 0),  # GatPoly.drawing
@@ -174,16 +180,100 @@ def test_run_drc_sg13cmos5l_nwell_space_violation(tmp_path: Path):
     assert report["rule_counts"].get("nwell.space.1", 0) >= 1
 
 
-def test_run_drc_sg13cmos5l_two_wells_report_nw_b1_unchecked(tmp_path: Path):
-    """Issue #3012 repro: two 3x3 um wells 1.0 um apart pass the geometric
-    rules, but the net-aware NW.b1 (1.80 um) is named in
-    `coverage.unchecked_rules` so the `clean` is not read as covering it."""
-    path = _nwell_layout(tmp_path, "nw_b1.gds", [(0, 0, 3, 3), (4, 0, 7, 3)])
+def _tied_wells_layout(tmp_path: Path, name: str, wells, tie_wells=(), metal=()) -> str:
+    """NWell boxes plus an n+ tap (Activ & nSD, Cont on top) at the lower-left
+    of each well index in ``tie_wells``, and any ``metal`` boxes (um)."""
+    layout = kdb.Layout()
+    layout.dbu = _DBU_UM
+    top = layout.create_cell("TOP")
+    for box in wells:
+        top.shapes(layout.layer(31, 0)).insert(_box_um(*box))
+    for index in tie_wells:
+        x, y = wells[index][0], wells[index][1]
+        top.shapes(layout.layer(1, 0)).insert(
+            _box_um(x + 0.5, y + 0.5, x + 1.0, y + 1.0)
+        )
+        top.shapes(layout.layer(7, 0)).insert(
+            _box_um(x + 0.4, y + 0.4, x + 1.1, y + 1.1)
+        )
+        top.shapes(layout.layer(6, 0)).insert(
+            _box_um(x + 0.6, y + 0.6, x + 0.8, y + 0.8)
+        )
+    for box in metal:
+        top.shapes(layout.layer(8, 0)).insert(_box_um(*box))
+    return _write_gds(layout, tmp_path / name)
+
+
+_TWO_WELLS_1_5_APART = [(0, 0, 3, 3), (4.5, 0, 7.5, 3)]
+
+
+def test_run_drc_sg13cmos5l_nw_b1_different_nets_flagged(tmp_path: Path):
+    """Issue #3572: two wells 1.5 um apart (< 1.80 um) on different nets
+    (separate Metal1 islands) trip `nwell.space.2`; NW.b1 is no longer an
+    unchecked rule."""
+    path = _tied_wells_layout(
+        tmp_path,
+        "nw_b1_diff.gds",
+        _TWO_WELLS_1_5_APART,
+        tie_wells=(0, 1),
+        metal=[(0.5, 0.5, 1.0, 1.0), (5.0, 0.5, 5.5, 1.0)],
+    )
     report = run_drc(path, "sg13cmos5l")
+    assert report["rule_counts"].get("nwell.space.2", 0) >= 1
+    assert "nwell.space.2" in report["coverage"]["rules_checked"]
+    assert report["coverage"]["unchecked_rules"] == []
+    flagged = [v for v in report["violations"] if v["rule"] == "nwell.space.2"]
+    assert flagged[0]["layer"] == "NWell.drawing"
+    assert flagged[0]["bbox"] is not None
+
+
+def test_run_drc_sg13cmos5l_nw_b1_same_net_not_flagged(tmp_path: Path):
+    """The same pair joined by a Metal1 strap over both taps is one net, so
+    `nwell.space.2` stays quiet (the geometric `nwell.space.1` still sees a
+    1.5 um gap, which is above its 0.62 um floor)."""
+    path = _tied_wells_layout(
+        tmp_path,
+        "nw_b1_same.gds",
+        _TWO_WELLS_1_5_APART,
+        tie_wells=(0, 1),
+        metal=[(0.5, 0.5, 5.5, 1.0)],
+    )
+    report = run_drc(path, "sg13cmos5l")
+    assert report["rule_counts"].get("nwell.space.2", 0) == 0
     assert report["status"] == "clean"
-    unchecked = report["coverage"]["unchecked_rules"]
-    assert [u["rule"] for u in unchecked] == ["NW.b1"]
-    assert unchecked[0]["layer"] == "31/0"
+
+
+def test_run_drc_sg13cmos5l_nw_b1_untapped_well_is_own_net(tmp_path: Path):
+    """A well with no tap is its own net: it is flagged against a tapped
+    neighbour closer than 1.80 um, and two untapped wells likewise."""
+    path = _tied_wells_layout(
+        tmp_path,
+        "nw_b1_untapped.gds",
+        _TWO_WELLS_1_5_APART,
+        tie_wells=(0,),
+        metal=[(0.5, 0.5, 1.0, 1.0)],
+    )
+    assert run_drc(path, "sg13cmos5l")["rule_counts"].get("nwell.space.2", 0) >= 1
+    bare = _nwell_layout(tmp_path, "nw_b1_bare.gds", _TWO_WELLS_1_5_APART)
+    assert run_drc(bare, "sg13cmos5l")["rule_counts"].get("nwell.space.2", 0) >= 1
+
+
+def test_run_drc_sg13cmos5l_nw_b1_far_apart_and_touching_clean(tmp_path: Path):
+    """1.8 um apart passes; wells that touch/overlap merge into one polygon
+    (one net) and are not flagged."""
+    far = _nwell_layout(tmp_path, "nw_b1_far.gds", [(0, 0, 3, 3), (4.8, 0, 7.8, 3)])
+    assert run_drc(far, "sg13cmos5l")["rule_counts"].get("nwell.space.2", 0) == 0
+    touching = _nwell_layout(tmp_path, "nw_b1_touch.gds", [(0, 0, 3, 3), (3, 0, 6, 3)])
+    assert run_drc(touching, "sg13cmos5l")["rule_counts"].get("nwell.space.2", 0) == 0
+
+
+def test_run_drc_sg13cmos5l_nw_b1_corner_to_corner(tmp_path: Path):
+    """Diagonal gap: corners 1.5 um apart in x and y (Euclidean ~2.12 um)
+    pass; 1.0 x 1.0 um (~1.41 um) is flagged."""
+    ok = _nwell_layout(tmp_path, "nw_b1_c_ok.gds", [(0, 0, 3, 3), (4.5, 4.5, 7.5, 7.5)])
+    assert run_drc(ok, "sg13cmos5l")["rule_counts"].get("nwell.space.2", 0) == 0
+    bad = _nwell_layout(tmp_path, "nw_b1_c_bad.gds", [(0, 0, 3, 3), (4, 4, 7, 7)])
+    assert run_drc(bad, "sg13cmos5l")["rule_counts"].get("nwell.space.2", 0) >= 1
 
 
 def test_run_drc_sg13cmos5l_no_nwell_no_unchecked_marker(tmp_path: Path):
