@@ -1719,7 +1719,7 @@ def _accumulated_levels(
             if i == 0 or antenna_limits is None
             else antenna_limits.get(entry["name"])
         )
-        if limit_entry is not None:
+        if limit_entry is not None and pdk is not None:
             limit_value, rule_id = limit_entry
             antenna_ratio_max: float | None = limit_value
             antenna_ratio_source: str | None = (
@@ -3813,7 +3813,9 @@ def run_erc(
     # roll-up, beside the antenna-driven `status` rather than folded into it.
     #
     # `status` above is a roll-up of *both* questions, and its coverage input
-    # is antenna-only, so X, or `--pdk` omitted entirely) it is `"not_checked"`/exit 4
+    # is antenna-only, so on a PDK with no antenna-ratio table (any PDK other
+    # than sky130 and ihp-sg13g2, or `--pdk` omitted entirely) it is
+    # `"not_checked"`/exit 4
     # no matter what the connectivity rules found: a run whose connectivity
     # rules all passed is then indistinguishable, by `status` and by exit
     # code, from a run that checked nothing at all. That is the right answer
