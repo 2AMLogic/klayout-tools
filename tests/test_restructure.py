@@ -588,3 +588,12 @@ def test_default_max_iterations_is_a_positive_bound():
     something absurdly large that defeats the "bounded" acceptance
     criterion."""
     assert 0 < DEFAULT_MAX_ITERATIONS <= 100
+
+
+def test_parse_liberty_text_is_cached_per_text_and_errors_name_source():
+    from klayout_tools.liberty_compare import LibertyCompareError, parse_liberty_text
+
+    text = 'library (x) { cell ("a") { } }'
+    assert parse_liberty_text(text) is parse_liberty_text(text, source="other.lib")
+    with pytest.raises(LibertyCompareError, match="bad.lib"):
+        parse_liberty_text("cell (a) { }", source="bad.lib")

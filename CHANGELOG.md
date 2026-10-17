@@ -23,7 +23,9 @@ not `klt --version`, if you need to detect this kind of drift. See
   are unchanged on that library. A liberty with no `library()` group or an
   unclosed group is now a `RestructureError` in the restructure loop rather
   than an empty cell list. Parsing is slower: ~0.17 s -> ~1.8 s and ~62 MiB
-  peak per read of a 12.8 MB `sky130_fd_sc_hd__tt_025C_1v80.lib`.
+  peak per read of a 12.8 MB `sky130_fd_sc_hd__tt_025C_1v80.lib`; the
+  parse is cached per distinct text, so repeat reads of one library in a run
+  parse once.
 
 - **`klt signoff` grades PDK-runset LVS reports** (issue #2870, building on
   #2849): a `klt lvs` report with `"engine": "klayout-runset"` can satisfy T1
