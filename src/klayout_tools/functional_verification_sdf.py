@@ -2021,6 +2021,143 @@ def _reject_sdf_escaped_divider_interconnects(sdf_path: str) -> None:
     )
 
 
+def _sdf_interconnect_entries(text: str) -> list[tuple[str, int, str]]:
+    """Every ``INTERCONNECT`` entry of ``text`` as ``(cell instance path,
+    start offset, entry text)``, where the instance path is the enclosing
+    ``CELL``'s ``(INSTANCE ...)`` field (empty for the design's own top
+    cell). A ``CELL``/``DELAY`` block that does not balance is skipped --
+    parse failures are the simulator's own parser's job to report.
+    """
+    entries: list[tuple[str, int, str]] = []
+    for cell_match in re.finditer(r"\(CELL\b", text):
+        try:
+            cell_end = _sdf_matching_paren(text, cell_match.start()) + 1
+        except Exception:
+            continue
+        cell_text = text[cell_match.start() : cell_end]
+        instance_match = re.search(r"\(INSTANCE\b\s*([^)\s]*)\s*\)", cell_text)
+        delay_match = re.search(r"\(DELAY\b", cell_text)
+        if instance_match is None or delay_match is None:
+            continue
+        delay_start = cell_match.start() + delay_match.start()
+        try:
+            delay_end = _sdf_matching_paren(text, delay_start) + 1
+            type_spans = _sdf_top_level_clauses(text, delay_start + 1, delay_end - 1)
+        except Exception:
+            continue
+        for type_start, type_end in type_spans:
+            for entry_start, entry_end in _sdf_top_level_clauses(
+                text, type_start + 1, type_end - 1
+            ):
+                entry_text = text[entry_start:entry_end]
+                if re.match(r"\(INTERCONNECT\b", entry_text):
+                    entries.append((instance_match.group(1), entry_start, entry_text))
+    return entries
+
+
+def _sdf_split_unescaped(path: str, divider: str) -> list[str]:
+    """``path`` split at every ``divider`` not preceded by a backslash, with
+    the remaining backslash escapes removed from each part."""
+    parts: list[str] = []
+    current: list[str] = []
+    index = 0
+    while index < len(path):
+        char = path[index]
+        if char == "\\" and index + 1 < len(path):
+            current.append(path[index + 1])
+            index += 2
+            continue
+        if char == divider:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+        index += 1
+    parts.append("".join(current))
+    return parts
+
+
+def _reject_sdf_unresolvable_interconnect_instances(
+    sdf_path: str, source_paths: list[str], hdl_toplevel: str
+) -> None:
+    """Fail loud, before ``vvp`` starts, when an ``INTERCONNECT`` entry of
+    the design's top cell names ``<instance><DIVIDER><pin>`` where
+    ``<instance>`` is not an instance of ``hdl_toplevel`` (issue #3740).
+
+    Icarus 13.0's ``$sdf_annotate`` does not report such an endpoint: its
+    INTERCONNECT path resolver walks off the end of the scope's item list and
+    ``vvp`` dies with ``ERROR: NULL handle passed to vpi_scan.`` /
+    ``Assertion `0' failed`` (SIGABRT). Measured live on raw
+    ``iverilog -ginterconnect``/``vvp`` -- same abort for either endpoint, for
+    scalar or bus ports, and for both ``DIVIDER`` characters -- while a bare
+    name with no divider (an unknown net or port) fails soft with ``Could not
+    find handles for both ports!``. Typical producers: the design name used
+    as a path prefix on a port (``top/a``), or a cell the netlist no longer
+    has (the SDF and the netlist come from different runs or stages).
+
+    The check is deliberately conservative -- it can only turn a ``vvp``
+    abort into a named error, never reject a run that would have worked:
+
+    * a no-op when the top module's instance list cannot be derived
+      (:func:`_find_gate_level_instances`, e.g. an ANSI header or RTL top);
+    * only the design's own top ``CELL`` (empty ``(INSTANCE)``) is checked --
+      a ``CELL`` scoped to a sub-instance has endpoints relative to it;
+    * an endpoint with no unescaped ``DIVIDER`` is never flagged;
+    * an endpoint resolves when its path before the final divider equals an
+      instance name or begins with ``<instance><DIVIDER>`` (hierarchy below a
+      top-level instance is not inspected).
+    """
+    from .functional_verification import FunctionalVerificationError
+
+    try:
+        with open(sdf_path, encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return
+    instances = _find_gate_level_instances(
+        _read_verilog_source_texts(source_paths), hdl_toplevel
+    )
+    names = {str(instance["name"]) for instance in instances}
+    if not names:
+        return
+    divider_match = re.search(r"\(DIVIDER\s+(\S+?)\)", text)
+    divider = divider_match.group(1) if divider_match else "."
+    if divider not in (".", "/"):
+        return
+
+    def resolves(parts: list[str]) -> bool:
+        return any(
+            divider.join(parts[:count]) in names for count in range(1, len(parts))
+        )
+
+    offenders: list[tuple[int, str]] = []
+    for cell_instance, entry_start, entry_text in _sdf_interconnect_entries(text):
+        if cell_instance not in ("", "*"):
+            continue
+        match = re.match(r"\(INTERCONNECT\s+(\S+)\s+(\S+)", entry_text)
+        if match is None:
+            continue
+        for token in match.groups():
+            parts = _sdf_split_unescaped(token, divider)
+            if len(parts) > 1 and not resolves(parts):
+                line = text.count("\n", 0, entry_start) + 1
+                offenders.append((line, token))
+    if not offenders:
+        return
+
+    shown = "; ".join(f"line {line}: {token}" for line, token in offenders[:3])
+    raise FunctionalVerificationError(
+        "options.sdf: this SDF has an INTERCONNECT entry whose endpoint "
+        f"names an instance that is not in '{hdl_toplevel}' ({shown}"
+        f"{'; ...' if len(offenders) > 3 else ''}; {len(offenders)} "
+        "unresolvable endpoint(s)). Icarus Verilog cannot report such an "
+        "endpoint: its $sdf_annotate INTERCONNECT resolver aborts vvp "
+        "outright ('ERROR: NULL handle passed to vpi_scan.', SIGABRT). "
+        "Regenerate the SDF from the same netlist the simulation reads, and "
+        "write top-level ports as bare names (no design-name prefix)"
+    )
+
+
 def _check_sdf_engine_capability(version: str | None) -> None:
     """Reject an ``options.sdf`` request the resolved Icarus cannot serve
     (issue #1004's finding, folded into #1002's own implementation).
