@@ -130,6 +130,11 @@ from ..signoff import (
     describe_grader,
 )
 from ..signoff_attest import build_attestation, check_attestation, write_attestation
+from ..signoff_generator_batch import (
+    GeneratorApprovalError,
+    GeneratorExecution,
+    resolve_execution,
+)
 from .color import Palette, resolve_palette
 from .output import emit_error, emit_success, render_rerun_drift
 
@@ -365,6 +370,15 @@ def _print_attestation_check_text(result: dict) -> None:
 
 
 def _run_envelope_aggregation(args: argparse.Namespace) -> int:
+    if getattr(args, "allow_generator_exec", False) or getattr(
+        args, "generator_approvals", None
+    ):
+        return emit_error(
+            "signoff",
+            "--allow-generator-exec/--generator-approvals only apply to "
+            "--manifest/--fleet (envelope aggregation regenerates nothing)",
+            args.format,
+        )
     if not args.files:
         return emit_error(
             "signoff",
@@ -382,6 +396,17 @@ def _run_envelope_aggregation(args: argparse.Namespace) -> int:
     emit_success(result, args.format, _print_text)
 
     return _EXIT_CODES[result["status"]]
+
+
+def _generator_execution(args: argparse.Namespace) -> GeneratorExecution | None:
+    """``--allow-generator-exec`` / ``--generator-approvals`` (issue #3289):
+    the opt-in, or ``None`` (off) unless the caller asked for it. Raises
+    :class:`GeneratorApprovalError` when the opt-in has no usable trusted
+    approvals."""
+    return resolve_execution(
+        bool(getattr(args, "allow_generator_exec", False)),
+        getattr(args, "generator_approvals", None),
+    )
 
 
 def _run_tier_report(
@@ -403,14 +428,24 @@ def _run_tier_report(
                 f"{type(manifest).__name__}"
             )
         tiers_doc = getattr(args, "tiers_doc", None)
+        generator_exec = _generator_execution(args)
         result = (
-            build_tier_report(manifest, tiers_doc=tiers_doc, repo_root=repo_root)
+            build_tier_report(
+                manifest,
+                tiers_doc=tiers_doc,
+                repo_root=repo_root,
+                generator_exec=generator_exec,
+            )
             if committed is None
             else check_tier_report(
-                committed, manifest, tiers_doc=tiers_doc, repo_root=repo_root
+                committed,
+                manifest,
+                tiers_doc=tiers_doc,
+                repo_root=repo_root,
+                generator_exec=generator_exec,
             )
         )
-    except (SignoffError, DesignEvidenceTiersError) as exc:
+    except (SignoffError, DesignEvidenceTiersError, GeneratorApprovalError) as exc:
         return emit_error("signoff", str(exc), args.format)
 
     if committed is not None:
@@ -444,14 +479,24 @@ def _run_fleet_report(
                 f"{type(fleet).__name__}"
             )
         tiers_doc = getattr(args, "tiers_doc", None)
+        generator_exec = _generator_execution(args)
         result = (
-            build_fleet_report(fleet, tiers_doc=tiers_doc, repo_root=repo_root)
+            build_fleet_report(
+                fleet,
+                tiers_doc=tiers_doc,
+                repo_root=repo_root,
+                generator_exec=generator_exec,
+            )
             if committed is None
             else check_fleet_report(
-                committed, fleet, tiers_doc=tiers_doc, repo_root=repo_root
+                committed,
+                fleet,
+                tiers_doc=tiers_doc,
+                repo_root=repo_root,
+                generator_exec=generator_exec,
             )
         )
-    except (SignoffError, DesignEvidenceTiersError) as exc:
+    except (SignoffError, DesignEvidenceTiersError, GeneratorApprovalError) as exc:
         return emit_error("signoff", str(exc), args.format)
 
     if committed is not None:
@@ -640,6 +685,17 @@ def _print_regeneration(regeneration: Any) -> None:
     """
     if not regeneration:
         print("        regeneration: not claimed")
+        return
+    if regeneration.get("executed_by_klt"):
+        execution = regeneration.get("execution") or {}
+        print(
+            f"        regeneration: klt ran approved recipe "
+            f"`{execution.get('recipe')}` on the batch runner "
+            f"(job {(execution.get('remote') or {}).get('job_id')}); output "
+            f"{execution.get('output_hash')} is byte-identical to the "
+            "committed artifact (generator correctness and topical relevance "
+            "not checked)"
+        )
         return
     print(
         f"        regeneration: {regeneration.get('regenerated_hash')} matches "

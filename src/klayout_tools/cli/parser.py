@@ -3682,6 +3682,30 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     signoff_parser.add_argument(
+        "--allow-generator-exec",
+        action="store_true",
+        help=(
+            "opt in (default off) to running an operator-approved T1 item "
+            "1/2 regeneration generator on the batch runner and "
+            "byte-comparing its output with the committed artifact. Needs "
+            "--generator-approvals (or $KLT_SIGNOFF_GENERATOR_APPROVALS): "
+            "a manifest can never approve its own generator. Trusted-code "
+            "policy, not isolation. Only meaningful with --manifest/--fleet. "
+            "See docs/cli/signoff.md's 'Executing approved generators' "
+            "section."
+        ),
+    )
+    signoff_parser.add_argument(
+        "--generator-approvals",
+        metavar="FILE",
+        help=(
+            "trusted approvals JSON binding each runnable generator's "
+            "interpreter, script content hash, allowed arguments and "
+            "artifact -- operator configuration outside the manifest. Only "
+            "valid with --allow-generator-exec."
+        ),
+    )
+    signoff_parser.add_argument(
         "--tiers-doc",
         metavar="PATH",
         help=(
