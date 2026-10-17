@@ -21,6 +21,7 @@ from klayout_tools.cli import main
 from klayout_tools.decks import (
     get_deck,
     get_extraction_deck,
+    get_marker_blind_layers,
     get_unmodeled_rules,
     get_unmodeled_voltage_markers,
 )
@@ -687,6 +688,7 @@ def test_json_contract(tmp_path, capsys):
         "rules_skipped",
         "voltage_domain_warnings",
         "unchecked_rules",
+        "marker_blind_layers_in_stream",
         "deck_scope",
         "unmodeled_rules",
         # Issue #1996: the shared vacuous-verdict convention
@@ -10834,3 +10836,46 @@ def test_list_deck_rules_context2_keys_only_when_set():
     assert dig["context2_sized_by_um"] == 0.0
     plain = rules["nwell.enclosing.pactiv.1"]["derived_layer"]
     assert not any(k.startswith("context2") for k in plain)
+
+
+def _make_sky130_marker_layout(*, marker: bool) -> kdb.Layout:
+    """Two narrow `li` bars (a seeded width violation each), optionally with
+    an `areaid.ce` (81/2) marker drawn over them."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    li = layout.layer(67, 20)
+    top.shapes(li).insert(kdb.Box(0, 0, 50, 2000))
+    top.shapes(li).insert(kdb.Box(1000, 0, 1050, 2000))
+    if marker:
+        top.shapes(layout.layer(81, 2)).insert(kdb.Box(-500, -500, 1500, 2500))
+    return layout
+
+
+def test_run_drc_sky130_discloses_marker_blind_layer_without_changing_result(tmp_path):
+    """Issue #3815: 81/2 is accepted but unmodelled; the disclosure is
+    informational and leaves violations/status untouched."""
+    plain = tmp_path / "plain.gds"
+    marked = tmp_path / "marked.gds"
+    _make_sky130_marker_layout(marker=False).write(str(plain))
+    _make_sky130_marker_layout(marker=True).write(str(marked))
+
+    plain_report = run_drc(str(plain), "sky130")
+    marked_report = run_drc(str(marked), "sky130")
+
+    assert plain_report["coverage"]["marker_blind_layers_in_stream"] == []
+    assert marked_report["coverage"]["marker_blind_layers_in_stream"] == ["81/2"]
+    assert marked_report["status"] == plain_report["status"]
+    assert marked_report["violation_count"] == plain_report["violation_count"] > 0
+    assert marked_report["rule_counts"] == plain_report["rule_counts"]
+
+
+def test_run_drc_deck_without_marker_declaration_reports_empty(tmp_path):
+    path = tmp_path / "marked.gds"
+    _make_sky130_marker_layout(marker=True).write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["coverage"]["marker_blind_layers_in_stream"] == []
+    assert get_marker_blind_layers("gf180mcu") == []
+    assert get_marker_blind_layers("no-such-deck") == []
+    assert get_marker_blind_layers("sky130") == [(81, 2)]

@@ -326,6 +326,12 @@ a `deck: {name, content_hash}` block; without it the output is byte-identical.
 No `schema_version` bump on either command. See `docs/cli/deck.md` and
 `docs/cli/layers.md`.
 
+Issue #3815 likewise adds, with no `schema_version` bump, `klt drc`'s
+`coverage.marker_blind_layers_in_stream` and `klt deck rules`' top-level
+`marker_blind_layers`: area-marker layers (sky130 `81/2`) the curated deck does
+not model rule-switching for. Informational only; `status` and the exit code
+are unchanged. See `docs/cli/drc.md` and `docs/cli/deck.md`.
+
 Issue #2952's `klt lvs` category `reference.unresolved_subckt_call` is
 likewise additive (no `schema_version` bump), but unlike the diagnostic-only
 `pin.declared_short` it **forces** `status: "mismatch"`, so a request whose
