@@ -239,7 +239,7 @@ from .netlist_capacitor_recovery import (
     parse_capacitor_class_comments,
     resistor_classes_for_deck,
 )
-from .pdk import PdkNotFoundError, find_pdk
+from .pdk import PdkNotFoundError, find_pdk, list_pdks
 from .pdk_models import MOS_FLAVOUR_PROPERTY, flavoured_mos_class_name
 from .verilog_netlist import (
     VerilogNetlistError,
@@ -4500,7 +4500,29 @@ def _resolve_reference_pin_order_files(
     return paths
 
 
-def _library_pin_order_files(libs_ref: str, library: str, variant: str) -> list[str]:
+def _variants_shipping_library(pdk_root: str, library: str, variant: str) -> list[str]:
+    """Names of the *other* variants under ``pdk_root`` whose ``libs.ref``
+    ships ``<library>`` (issue #3748) -- the hint that turns "this variant has
+    no such library" into "pick another variant". Best effort: a variant that
+    does not resolve is simply not listed."""
+    shipping: list[str] = []
+    for install in list_pdks(root=pdk_root)["installs"]:
+        for entry in install["variants"]:
+            name = entry["name"]
+            if name == variant or name in shipping:
+                continue
+            try:
+                libs_ref = find_pdk(variant=name, root=pdk_root)["assets"]["libs_ref"]
+            except PdkNotFoundError:
+                continue
+            if libs_ref is not None and os.path.isdir(os.path.join(libs_ref, library)):
+                shipping.append(name)
+    return shipping
+
+
+def _library_pin_order_files(
+    libs_ref: str, library: str, variant: str, pdk_root: str | None = None
+) -> list[str]:
     """Every pin-order file ``<library>`` ships, in read order (issue #2693).
 
     Two shapes, because real installs ship two. A standard-cell library ships
@@ -4523,7 +4545,9 @@ def _library_pin_order_files(libs_ref: str, library: str, variant: str) -> list[
     nothing; an aggregate-shipping library never reaches this branch.
 
     Raises :class:`LvsError` naming every candidate it tried when the library
-    ships neither shape.
+    ships neither shape. The message also names ``reference.pdk`` / ``$PDK`` as
+    the way to pick the variant and, when ``pdk_root`` is given, any other
+    installed variant under it that ships ``<library>`` (issue #3748).
     """
     lib_dir = os.path.join(libs_ref, library)
     tried: list[str] = []
@@ -4545,10 +4569,16 @@ def _library_pin_order_files(libs_ref: str, library: str, variant: str) -> list[
         ]
         if per_cell:
             return per_cell
-    raise LvsError(
+    message = (
         f"library '{library}' has no pin-order source under PDK variant "
-        f"'{variant}' -- tried: {', '.join(tried)}"
+        f"'{variant}' -- tried: {', '.join(tried)}. Select the variant with "
+        "request.reference.pdk (or $PDK)"
     )
+    if pdk_root is not None:
+        others = _variants_shipping_library(pdk_root, library, variant)
+        if others:
+            message += f"; installed variant(s) that ship it: {', '.join(others)}"
+    raise LvsError(message)
 
 
 def _merge_pin_order_sources(
@@ -4669,7 +4699,7 @@ def _resolve_gate_level_pin_orders(
             plan.extend(
                 (name, path)
                 for path in _library_pin_order_files(
-                    libs_ref, name, pdk_info["variant"]
+                    libs_ref, name, pdk_info["variant"], pdk_info["root"]
                 )
             )
     plan.extend((None, path) for path in explicit_files)
