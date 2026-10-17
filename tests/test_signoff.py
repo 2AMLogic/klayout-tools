@@ -16375,6 +16375,95 @@ def test_item5_stale_content_hash_on_one_member_is_unmet(tmp_path):
     assert item["detail"]["failed_citations"] == [other]
 
 
+def _ms_item5(tmp_path, spec_rows, analog_entry=None):
+    """Mixed-signal item-5 entries by partition (issue #3768)."""
+    sim = _write(tmp_path, "sim.json", SIM_PASS_ENVELOPE)
+    sta = _write(tmp_path, "sta.json", STA_MULTI_CORNER_CLEAN_ENVELOPE)
+    manifest = _manifest(
+        kind="mixed-signal",
+        evidence={
+            "5.analog": analog_entry or [{"file": sim, "rows": ["tdec"]}],
+            "5.digital": sta,
+        },
+        spec_rows=spec_rows,
+    )
+    return {
+        i["partition"]: i
+        for i in build_tier_report(manifest)["items"]
+        if i["id"] == 5 and i["tier"] == "T1"
+    }
+
+
+def test_item5_qualified_spec_rows_do_not_regress_other_partition(tmp_path):
+    items = _ms_item5(tmp_path, {"5.analog": [{"id": "tdec"}]})
+
+    assert items["digital"]["status"] == "met"
+    assert items["analog"]["status"] == "met"
+    assert items["analog"]["row_coverage"]["uncovered_rows"] == []
+
+
+def test_item5_qualified_spec_rows_grade_their_own_partition(tmp_path):
+    items = _ms_item5(tmp_path, {"5.analog": [{"id": "tdec"}, {"id": "zin"}]})
+
+    assert items["digital"]["status"] == "met"
+    assert items["analog"]["status"] == "unmet"
+    assert items["analog"]["reason"] == "partial_coverage"
+    assert items["analog"]["detail"]["uncovered_rows"] == ["zin"]
+
+
+def test_item5_qualified_spec_rows_win_over_bare_for_their_partition(tmp_path):
+    items = _ms_item5(
+        tmp_path,
+        {"5": [{"id": "other"}], "5.analog": [{"id": "tdec"}]},
+    )
+
+    assert items["analog"]["status"] == "met"
+    # Bare "5" still applies to the partition with no qualified key.
+    assert items["digital"]["status"] == "unmet"
+    assert items["digital"]["reason"] == "partial_coverage"
+
+
+def test_item5_bare_spec_rows_key_still_applies_to_every_partition(tmp_path):
+    items = _ms_item5(tmp_path, {"5": [{"id": "tdec"}]})
+
+    assert items["analog"]["status"] == "met"
+    assert items["digital"]["status"] == "unmet"
+    assert items["digital"]["reason"] == "partial_coverage"
+
+
+def test_item5_bad_qualified_suffix_is_invalid_evidence_for_the_item_only(tmp_path):
+    items = _ms_item5(tmp_path, {"5.mixed": [{"id": "tdec"}]})
+
+    assert items["analog"]["status"] == "unmet"
+    assert items["analog"]["reason"] == "invalid_evidence"
+    assert items["digital"]["reason"] == "invalid_evidence"
+
+
+def test_item5_malformed_qualified_rows_degrade_only_that_partition(tmp_path):
+    items = _ms_item5(tmp_path, {"5.analog": []})
+
+    assert items["analog"]["reason"] == "invalid_evidence"
+    assert items["digital"]["status"] == "met"
+
+
+def test_item5_analog_kind_manifest_resolves_qualified_key(tmp_path):
+    sim = _write(tmp_path, "sim.json", SIM_PASS_ENVELOPE)
+    evidence = {"5": [{"file": sim, "rows": ["tdec"]}]}
+
+    manifest = _manifest(
+        kind="analog", evidence=evidence, spec_rows={"5.analog": [{"id": "tdec"}]}
+    )
+    item = next(i for i in build_tier_report(manifest)["items"] if i["id"] == 5)
+    assert item["status"] == "met"
+    assert "row_coverage" in item
+
+    manifest["spec_rows"] = {"5.digital": [{"id": "zin"}]}
+    item = next(i for i in build_tier_report(manifest)["items"] if i["id"] == 5)
+    # A mismatched-partition key is ignored (falls to the absent bare key).
+    assert item["status"] == "met"
+    assert "row_coverage" not in item
+
+
 def test_item5_single_citation_report_is_unchanged(tmp_path):
     sim = _write(tmp_path, "sim.json", SIM_PASS_ENVELOPE)
 
