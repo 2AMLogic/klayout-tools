@@ -1618,7 +1618,8 @@ def test_run_sim_batch_backend_end_to_end(tmp_path, monkeypatch):
     remote_block = report["environment"]["remote"]
     assert remote_block["provider"] == "aws-batch-fleet"
     assert remote_block["instance_id"] == "i-0fake"
-    assert remote_block["bucket"] == FAKE_BUCKET
+    assert "bucket" not in remote_block
+    assert FAKE_BUCKET not in json.dumps(report)
     assert remote_block["job_id"].startswith("klt-sim-")
 
     # Exactly one launch, and the uploaded request is a `local-parallel`
@@ -2420,6 +2421,9 @@ def test_poll_timeout_reports_submitted_and_launched_only(tmp_path, monkeypatch)
     assert environment["client_launched_at"] == "2026-10-15T17:00:01.000000Z"
     assert environment["client_status_terminal_at"] is None
     assert environment["client_collected_at"] is None
+    # #3777: the bucket embeds an AWS account number; reports are committable.
+    assert "bucket" not in environment
+    assert FAKE_BUCKET not in json.dumps(environment)
 
 
 def test_successful_job_reports_ordered_client_timestamps(tmp_path, monkeypatch):
