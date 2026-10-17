@@ -902,6 +902,29 @@ def _undeclared_stream_layers(
     return [f"{layer}/{datatype}" for layer, datatype in sorted(undeclared)]
 
 
+def _net_connectivity_work(
+    nets_decl: list[dict[str, Any]],
+) -> tuple[list[str], list[dict[str, str]]]:
+    """Split declared nets into ``erc.net_connectivity`` checked ids and
+    inapplicable entries (issue #3745).
+
+    An `extractor_global` net is never label-resolved, so
+    `erc.net_connectivity` cannot grade it: disclosed as inapplicable
+    (never silent). Like every other inapplicable entry it leaves
+    `erc_status` alone -- it is work this run was told it cannot do, not
+    requested work that failed to run.
+    """
+    checked: list[str] = []
+    inapplicable: list[dict[str, str]] = []
+    for decl in nets_decl:
+        identity = work_id("erc.net_connectivity", decl["name"])
+        if decl["extractor_global"]:
+            inapplicable.append({"id": identity, "reason": REASON_EXTRACTOR_GLOBAL_NET})
+        else:
+            checked.append(identity)
+    return checked, inapplicable
+
+
 def _connectivity_coverage(
     gates: list[dict[str, Any]],
     nets_decl: list[dict[str, Any]],
@@ -1065,21 +1088,9 @@ def _connectivity_coverage(
     checked_by_assertion: list[str] = []
     checked_by_well_assertion: list[str] = []
 
-    # (issue #3745) An `extractor_global` net is never label-resolved, so
-    # `erc.net_connectivity` cannot grade it: disclosed as inapplicable
-    # (never silent). Like every other inapplicable entry it leaves
-    # `erc_status` alone -- it is work this run was told it cannot do, not
-    # requested work that failed to run.
-    for decl in nets_decl:
-        if decl["extractor_global"]:
-            inapplicable.append(
-                {
-                    "id": work_id("erc.net_connectivity", decl["name"]),
-                    "reason": REASON_EXTRACTOR_GLOBAL_NET,
-                }
-            )
-        else:
-            checked.append(work_id("erc.net_connectivity", decl["name"]))
+    net_checked, net_inapplicable = _net_connectivity_work(nets_decl)
+    checked.extend(net_checked)
+    inapplicable.extend(net_inapplicable)
     if not nets_decl:
         inapplicable.append(
             {"id": work_id("erc.net_connectivity"), "reason": "no_nets_declared"}
