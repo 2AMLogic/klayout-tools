@@ -1,6 +1,6 @@
 """``klt pdk`` command: discover/resolve an installed PDK.
 
-Ten subcommands, all emitting through the shared envelope helpers in
+Eleven subcommands, all emitting through the shared envelope helpers in
 :mod:`.output` (see ``docs/json-contract.md``):
 
 - ``find`` — resolve one install/variant and report its paths.
@@ -12,6 +12,8 @@ Ten subcommands, all emitting through the shared envelope helpers in
   opened" failure mode ``find``/``env`` also report but do not gate on.
 - ``cells`` — per standard-cell library device flavor(s) and nominal supply.
 - ``macros`` — per hard-macro IP library (`*_fd_ip_*`), which views it ships.
+- ``decks`` — the KLayout DRC deck files the variant ships and the ``-rd``
+  globals each consumes (issue #3816).
 - ``corners`` — per SPICE process corner, which device families skew vs.
   resolve to typical.
 - ``em-limits`` — per-layer electromigration current-density limits declared
@@ -47,6 +49,7 @@ import sys
 
 from ..pdk import (
     PdkNotFoundError,
+    drc_decks,
     em_limits,
     find_pdk,
     list_corners,
@@ -148,6 +151,16 @@ def run_macros(args: argparse.Namespace) -> int:
         return emit_error("pdk macros", str(exc), args.format)
 
     emit_success(report, args.format, _print_macros_text)
+    return 0
+
+
+def run_decks(args: argparse.Namespace) -> int:
+    try:
+        report = drc_decks(variant=args.pdk, root=args.pdk_root)
+    except PdkNotFoundError as exc:
+        return emit_error("pdk decks", str(exc), args.format)
+
+    emit_success(report, args.format, _print_decks_text)
     return 0
 
 
@@ -334,6 +347,35 @@ def _print_macros_text(report: dict) -> None:
         rows.append((macro["name"], "/".join(present) or "-"))
 
     render_table(headers, rows, left_aligned={0, 1})
+
+
+def _print_decks_text(report: dict) -> None:
+    decks = report["decks"]
+
+    print(f"pdk: {report['pdk']}")
+    if not decks:
+        print("no DRC decks found (no `.lydrc`/`.drc` under libs.tech/klayout/drc)")
+        return
+
+    headers = ("deck", "kind", "default", "globals")
+    rows = []
+    for deck in decks:
+        names = [
+            g["name"] if not g["required_by_caller"] else f"{g['name']}*"
+            for g in deck["globals"]
+        ]
+        rows.append(
+            (
+                deck["name"],
+                deck["kind"],
+                "yes" if deck["is_default"] else "",
+                ", ".join(names) or "-",
+            )
+        )
+
+    render_table(headers, rows, left_aligned={0, 1, 2, 3})
+    print()
+    print("* = no default detected; supply with `klt drc --deck-var name=value`")
 
 
 def _format_em_field(field: dict) -> str:

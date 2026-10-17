@@ -820,12 +820,9 @@ def drc_deck_file(variant: str | None = None, root: str | None = None) -> str | 
     if klayout_dir is None:
         return None
 
-    drc_dir = os.path.join(klayout_dir, "drc")
-    if not os.path.isdir(drc_dir):
-        nested_drc_dir = os.path.join(klayout_dir, "tech", "drc")
-        if not os.path.isdir(nested_drc_dir):
-            return None
-        drc_dir = nested_drc_dir
+    drc_dir = _klayout_drc_dir(klayout_dir)
+    if drc_dir is None:
+        return None
 
     for name in (f"{info['variant']}.lydrc", f"{info['variant']}.drc"):
         candidate = os.path.join(drc_dir, name)
@@ -833,6 +830,92 @@ def drc_deck_file(variant: str | None = None, root: str | None = None) -> str | 
             return candidate
 
     return None
+
+
+def _klayout_drc_dir(klayout_dir: str) -> str | None:
+    """The ``drc/`` directory under a ``libs.tech/klayout`` asset dir, trying
+    the open_pdks-shaped ``drc/`` before the flat-install ``tech/drc/``."""
+    drc_dir = os.path.join(klayout_dir, "drc")
+    if os.path.isdir(drc_dir):
+        return drc_dir
+    nested_drc_dir = os.path.join(klayout_dir, "tech", "drc")
+    if os.path.isdir(nested_drc_dir):
+        return nested_drc_dir
+    return None
+
+
+#: File extensions `klt pdk decks` treats as KLayout DRC decks; anything
+#: else in the ``drc/`` directory (Python drivers, ...) is not listed.
+_DRC_DECK_KINDS = {".lydrc": "lydrc", ".drc": "drc"}
+
+#: A ``*.rb.drc`` file is a Ruby helper that merely carries the ``.drc``
+#: extension (e.g. sky130's ``zeroarea.rb.drc``); it is reported with
+#: ``kind: "helper"`` rather than hidden.
+_DRC_HELPER_SUFFIX = ".rb.drc"
+
+
+def drc_decks(variant: str | None = None, root: str | None = None) -> dict[str, Any]:
+    """List the KLayout DRC deck files a variant ships, with the ``-rd``
+    globals each consumes (issue #3816).
+
+    Scans ``libs.tech/klayout/drc/`` (or the flat-install ``tech/drc/``) for
+    ``.lydrc`` / ``.drc`` files, name-sorted. ``*.rb.drc`` files are listed
+    with ``kind: "helper"`` and no globals scan; other extensions (Python
+    drivers etc.) are not listed. ``is_default`` marks the file
+    :func:`drc_deck_file` resolves, which is what ``klt drc --pdk`` runs.
+    ``globals`` is the best-effort static scan of
+    :func:`klayout_tools.drc_klayout_engine.scan_deck_globals` -- a heuristic;
+    a missing entry is not proof the deck ignores a variable.
+
+    Returns::
+
+        {
+            "schema_version": 1,
+            "pdk": <variant>,
+            "root": <absolute install root>,
+            "decks": [
+                {"path": str, "name": str, "kind": "lydrc"|"drc"|"helper",
+                 "is_default": bool,
+                 "globals": [{"name": str, "required_by_caller": bool,
+                              "default": str | None}, ...]},
+                ...
+            ],
+        }
+
+    A variant with no ``drc/`` directory yields an empty ``decks`` list.
+    Raises :class:`PdkNotFoundError` when no PDK install resolves.
+    """
+    # Imported lazily: the engine module imports this one.
+    from .drc_klayout_engine import scan_deck_globals
+
+    info = find_pdk(variant=variant, root=root)
+    klayout_dir = info["assets"]["klayout"]
+    drc_dir = _klayout_drc_dir(klayout_dir) if klayout_dir is not None else None
+    default = drc_deck_file(variant=variant, root=root)
+
+    decks: list[dict[str, Any]] = []
+    for name in sorted(os.listdir(drc_dir)) if drc_dir is not None else []:
+        path = os.path.join(drc_dir, name)
+        ext = os.path.splitext(name)[1]
+        if ext not in _DRC_DECK_KINDS or not os.path.isfile(path):
+            continue
+        helper = name.endswith(_DRC_HELPER_SUFFIX)
+        decks.append(
+            {
+                "path": path,
+                "name": name,
+                "kind": "helper" if helper else _DRC_DECK_KINDS[ext],
+                "is_default": default is not None and os.path.samefile(path, default),
+                "globals": [] if helper else scan_deck_globals(path),
+            }
+        )
+
+    return {
+        "schema_version": 1,
+        "pdk": info["variant"],
+        "root": info["root"],
+        "decks": decks,
+    }
 
 
 def lvs_deck_file(variant: str | None = None, root: str | None = None) -> str | None:
