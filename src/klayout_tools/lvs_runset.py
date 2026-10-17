@@ -250,6 +250,12 @@ def _run_runset(
     database written."""
     from .lvs import LvsError
 
+    # The app runs with cwd=work_dir (below), so path arguments must not
+    # depend on klt's own cwd.
+    binary = os.path.abspath(binary) if os.sep in binary else binary
+    deck_file, layout, reference = (
+        os.path.abspath(p) for p in (deck_file, layout, reference)
+    )
     report_path = os.path.join(work_dir, "report.lvsdb")
     cmd = [
         binary,
@@ -268,8 +274,10 @@ def _run_runset(
     for name, value in deck_vars.items():
         cmd.extend(["-rd", f"{name}={value}"])
     try:
+        # cwd=work_dir: the runset writes side files (``<top>_extracted.cir``)
+        # into its cwd; keep them in the temp dir that is removed afterwards.
         completed = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout_s
+            cmd, capture_output=True, text=True, timeout=timeout_s, cwd=work_dir
         )
     except FileNotFoundError as exc:
         raise LvsError(
@@ -283,10 +291,15 @@ def _run_runset(
 
     output = (completed.stdout or "") + (completed.stderr or "")
     if completed.returncode != 0:
+        errors = _error_lines(output)
+        cause = f"last error: {errors[-1]}\n" if errors else ""
+        app_version = _application_version(binary) or "unknown"
+        module_version = _module_version()
         raise LvsError(
-            f"klayout exited with status {completed.returncode} while running "
-            f"the LVS runset -- no trustworthy verdict. klayout's own "
-            f"output:\n{output.strip()}"
+            f"{cause}klayout exited with status {completed.returncode} while "
+            f"running the LVS runset -- no trustworthy verdict (klayout "
+            f"application {app_version}, pip klayout module "
+            f"{module_version}). klayout's own output:\n{output.strip()}"
         )
     if not os.path.isfile(report_path):
         raise LvsError(
@@ -820,6 +833,16 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
         "mismatches": mismatches,
         "net_correspondence": verdict["net_correspondence"],
     }
+
+
+def _module_version() -> str:
+    """Version of the pip ``klayout`` module (``unknown`` if unreadable)."""
+    from importlib import metadata
+
+    try:
+        return metadata.version("klayout")
+    except metadata.PackageNotFoundError:
+        return "unknown"
 
 
 def _application_version(binary: str) -> str | None:
