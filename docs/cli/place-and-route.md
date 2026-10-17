@@ -391,7 +391,7 @@ own route DRC said `0`:
 The `sg13g2` deck's `M1.b`/`M2.a`/`V1.c` transcriptions match IHP's own
 `beol/5_16_metal1.drc`, `5_17_metaln.drc` and `5_19_via1.drc` line for line,
 and the IHP tech LEF's Via1/Via2 pads are all >= 0.20 um wide. The defect
-was in this repo's DEF->GDS merge: `_resolve_layer_map` looked for
+was in this repo's DEF->GDS merge: `_resolve_layer_map` (now `pdk.resolve_klayout_layer_map`) looked for
 `libs.tech/klayout/tech/<variant>.map`, and for IHP the variant is
 `ihp-sg13g2` while the shipped map is `sg13g2.map` (named after the process).
 It found nothing (`layer_map: {"path": null, "resolution": "none"}`), so
@@ -404,8 +404,8 @@ Metal2 pad on `9/0` and Metal3 on `11/0`; `VIA_Via1_YY` put the Via1 cut on
 same cause (cut/pad shapes on mis-numbered layers next to the standard cells'
 real Metal1), and both went to 0 with the map fix alone; the per-shape
 mechanism for those two was inferred from the 0 re-measurement, not
-separately inspected. The fix teaches `_resolve_layer_map` (in `place_and_route.py`,
-`lef_abstract.py` and `extract_abstract.py`) to strip an `ihp-` prefix when
+separately inspected. The fix teaches `resolve_klayout_layer_map` (in `pdk.py`, formerly one copy in
+`place_and_route.py`, `lef_abstract.py` and `extract_abstract.py`) to strip an `ihp-` prefix when
 looking for the family-level map file, so IHP's `sg13g2.map` is used
 (`resolution: "family"`).
 

@@ -39,7 +39,7 @@ one and only geometry analysed.
 Deliberately duplicates a couple of small helpers already defined in
 ``place_and_route.py`` (``_clock_lines``, ``_read_metrics``) rather than
 importing them -- this repo's own stated convention (see
-``place_and_route.py``'s ``_resolve_layer_map`` docstring) is that each verb
+``place_and_route.py``'s own helper docstrings) is that each verb
 module stays self-contained. Every existing cross-module import between verb
 modules in this repo is of a *public* name (``run_place_and_route``,
 ``PlaceAndRouteError``, ``run_extract``, ...), never a private one.
