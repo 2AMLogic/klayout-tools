@@ -221,7 +221,9 @@ def test_docs_list_every_rule_and_gap():
         assert f"`{gap.id}`" in section, gap.id
     for cell in SHIPPED_CELL_DEVIATIONS:
         assert f"`{cell}`" in section, cell
-    assert f"--expect-rule-categories {len(RULE_IDS)}" in section
+    counts = re.findall(r"--expect-rule-categories (\d+)", section)
+    assert counts, "no --expect-rule-categories example in the ASAP7 section"
+    assert {int(n) for n in counts} == {len(RULE_IDS)}, counts
     assert f"--expect-rule-categories {len(RULE_IDS)}" in _deck_text()
 
 
