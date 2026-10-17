@@ -51,11 +51,15 @@ _VECTOR_PREFIX = "__klt_cv_"
 
 
 def validate(
-    options: dict[str, Any], analysis: dict[str, Any], save_mode: str
+    options: dict[str, Any],
+    analysis: dict[str, Any],
+    save_mode: str,
+    engine: str = "ngspice",
 ) -> tuple[str, ...]:
     """The normalized ``options.complex_vectors`` selectors (empty when the
     option is absent), refused before any corner launches when malformed, not
-    an AC analysis, or saved away by ``options.save_mode: "netlist"``."""
+    an AC analysis, saved away by ``options.save_mode: "netlist"``, or aimed at
+    an engine other than ngspice."""
     if OPTION not in options or options[OPTION] is None:
         return ()
     raw = options[OPTION]
@@ -87,10 +91,17 @@ def validate(
             f'"{save_mode}": klt cannot guarantee the declared vectors are '
             "saved; omit options.save_mode"
         )
+    _refuse_for_engine(engine)
     return tuple(vectors)
 
 
-def refuse_for_engine(engine: str) -> None:
+def forces_artifacts(options: dict[str, Any], keep_artifacts: bool) -> bool:
+    """``keep_artifacts``, forced on when vectors are declared (the sidecar is
+    the result)."""
+    return keep_artifacts or options.get(OPTION) is not None
+
+
+def _refuse_for_engine(engine: str) -> None:
     if engine != "ngspice":
         raise SimError(
             f"options.complex_vectors is not supported for engine '{engine}': "
@@ -148,9 +159,68 @@ def _fail(code: str, message: str) -> VectorOutcome:
     return VectorOutcome(diagnostics=[_error(code, message)])
 
 
+def _resolve_columns(
+    vectors: tuple[str, ...], raw: Any
+) -> tuple[dict[str, int], list[dict[str, str]]]:
+    """Rawfile column index per vector selector, plus a diagnostic per vector
+    that did not resolve."""
+    columns = {_bare_name(name): index for index, name in enumerate(raw.names)}
+    found: dict[str, int] = {}
+    diagnostics: list[dict[str, str]] = []
+    for i, vector in enumerate(vectors):
+        index = columns.get(f"{_VECTOR_PREFIX}{i}")
+        if index is None:
+            diagnostics.append(
+                _error(
+                    "complex_vector_missing",
+                    f"complex vector {vector} did not resolve against this AC "
+                    "analysis's saved vectors",
+                )
+            )
+        else:
+            found[vector] = index
+    return found, diagnostics
+
+
+def _collect_samples(
+    vectors: tuple[str, ...], raw: Any, columns: dict[str, int]
+) -> tuple[list[float], dict[str, dict[str, list[float]]], list[dict[str, str]]]:
+    """The frequency axis and per-vector real/imag arrays, plus a diagnostic
+    per non-finite vector or axis."""
+    diagnostics: list[dict[str, str]] = []
+    freqs = [z.real for z in raw.column(0)]
+    data: dict[str, dict[str, list[float]]] = {}
+    for vector in vectors:
+        column = raw.column(columns[vector])
+        if all(math.isfinite(z.real) and math.isfinite(z.imag) for z in column):
+            data[vector] = {
+                "real": [z.real for z in column],
+                "imag": [z.imag for z in column],
+            }
+        else:
+            diagnostics.append(
+                _error(
+                    "complex_vector_non_finite",
+                    f"complex vector {vector} has a non-finite sample",
+                )
+            )
+    if not all(math.isfinite(f) for f in freqs):
+        diagnostics.append(
+            _error(
+                "complex_vector_non_finite",
+                f"complex vector(s) {', '.join(vectors)}: the frequency axis "
+                "has a non-finite sample",
+            )
+        )
+    return freqs, data, diagnostics
+
+
 def extract_corner(vectors: tuple[str, ...], corner_dir: str) -> VectorOutcome:
     """Decode one finished corner's rawfile and write its sidecar. Never
-    raises: any problem becomes an ``error`` diagnostic naming the vector."""
+    raises: any problem becomes an ``error`` diagnostic naming the vector.
+    An empty outcome without declared vectors."""
+    if not vectors:
+        return VectorOutcome()
     joined = ", ".join(vectors)
     raw_path = rawfile_path(corner_dir)
     if not os.path.isfile(raw_path):
@@ -166,17 +236,7 @@ def extract_corner(vectors: tuple[str, ...], corner_dir: str) -> VectorOutcome:
             "complex_vector_raw_invalid",
             f"complex vector(s) {joined}: could not read the rawfile: {exc}",
         )
-    columns = {_bare_name(name): index for index, name in enumerate(raw.names)}
-    diagnostics: list[dict[str, str]] = []
-    for i, vector in enumerate(vectors):
-        if f"{_VECTOR_PREFIX}{i}" not in columns:
-            diagnostics.append(
-                _error(
-                    "complex_vector_missing",
-                    f"complex vector {vector} did not resolve against this AC "
-                    "analysis's saved vectors",
-                )
-            )
+    columns, diagnostics = _resolve_columns(vectors, raw)
     if diagnostics:
         return VectorOutcome(diagnostics=diagnostics)
     if not raw.points:
@@ -184,32 +244,18 @@ def extract_corner(vectors: tuple[str, ...], corner_dir: str) -> VectorOutcome:
             "complex_vector_raw_invalid",
             f"complex vector(s) {joined}: the rawfile holds no samples",
         )
-    freqs = [z.real for z in raw.column(0)]
-    data: dict[str, dict[str, list[float]]] = {}
-    for i, vector in enumerate(vectors):
-        column = raw.column(columns[f"{_VECTOR_PREFIX}{i}"])
-        if not all(math.isfinite(z.real) and math.isfinite(z.imag) for z in column):
-            diagnostics.append(
-                _error(
-                    "complex_vector_non_finite",
-                    f"complex vector {vector} has a non-finite sample",
-                )
-            )
-            continue
-        data[vector] = {
-            "real": [z.real for z in column],
-            "imag": [z.imag for z in column],
-        }
-    if not all(math.isfinite(f) for f in freqs):
-        diagnostics.append(
-            _error(
-                "complex_vector_non_finite",
-                f"complex vector(s) {joined}: the frequency axis has a "
-                "non-finite sample",
-            )
-        )
+    freqs, data, diagnostics = _collect_samples(vectors, raw, columns)
     if diagnostics:
         return VectorOutcome(diagnostics=diagnostics)
+    return _write_sidecar(vectors, corner_dir, freqs, data)
+
+
+def _write_sidecar(
+    vectors: tuple[str, ...],
+    corner_dir: str,
+    freqs: list[float],
+    data: dict[str, dict[str, list[float]]],
+) -> VectorOutcome:
     path = sidecar_path(corner_dir)
     sidecar = {
         "vectors": list(vectors),
@@ -223,9 +269,17 @@ def extract_corner(vectors: tuple[str, ...], corner_dir: str) -> VectorOutcome:
     except OSError as exc:
         return _fail(
             "complex_vector_raw_invalid",
-            f"complex vector(s) {joined}: could not write the sidecar: {exc}",
+            f"complex vector(s) {', '.join(vectors)}: could not write the "
+            f"sidecar: {exc}",
         )
     return VectorOutcome(path=path, points=len(freqs))
+
+
+def artifact_fields(vectors: tuple[str, ...], outcome: VectorOutcome) -> dict[str, Any]:
+    """The ``artifacts.complex_vectors`` entry; empty when undeclared."""
+    if not vectors:
+        return {}
+    return {"complex_vectors": outcome.path}
 
 
 def corner_fields(vectors: tuple[str, ...], outcome: VectorOutcome) -> dict[str, Any]:

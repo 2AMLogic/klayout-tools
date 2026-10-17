@@ -2826,9 +2826,8 @@ def _prepare_sim_request(
     timeout_s = options.get("timeout_s", DEFAULT_TIMEOUT_S)
     # Issue #3337: the complex-vector sidecar is the result, so declared
     # vectors force artifacts on (validated in full below).
-    keep_artifacts = bool(
-        options.get("keep_artifacts", False)
-        or options.get(sim_complex_vectors.OPTION) is not None
+    keep_artifacts = sim_complex_vectors.forces_artifacts(
+        options, bool(options.get("keep_artifacts", False))
     )
     portable_artifacts = _portable_artifacts_option(options)
     want_waveforms = bool(options.get("waveforms", False))
@@ -2918,9 +2917,7 @@ def _prepare_sim_request(
     # Issue #3211: same up-front validation; off-host workers re-read both
     # from the forwarded request document.
     save_vectors, save_vectors_declared = _validate_save_vectors(options, save_mode)
-    complex_vectors = sim_complex_vectors.validate(options, analysis, save_mode)
-    if complex_vectors:
-        sim_complex_vectors.refuse_for_engine(engine)
+    complex_vectors = sim_complex_vectors.validate(options, analysis, save_mode, engine)
     waveform_max_bytes = _validate_waveform_max_bytes(options)
     # Issue #3111: same up-front validation; off-host workers re-read it from
     # the forwarded request document, and the echo check below verifies it.
@@ -8950,11 +8947,7 @@ def _run_corner(
     diagnostics.extend(pass_diagnostics)
     # Issue #3337: decode the declared vectors into the sidecar before the
     # corner is graded, so a missing or non-finite one fails it.
-    complex_outcome = (
-        sim_complex_vectors.extract_corner(complex_vectors, corner_dir)
-        if complex_vectors
-        else sim_complex_vectors.VectorOutcome()
-    )
+    complex_outcome = sim_complex_vectors.extract_corner(complex_vectors, corner_dir)
     diagnostics.extend(complex_outcome.diagnostics)
 
     # Issue #3016: the engine ran (any exit status, including 0) yet left no
@@ -9028,8 +9021,9 @@ def _run_corner(
     }
     # Additive (issue #3006): only for a `noise` corner whose rawfile parsed.
     noise_fields: dict[str, str] = {}
-    if complex_vectors:
-        artifacts["complex_vectors"] = complex_outcome.path
+    artifacts.update(
+        sim_complex_vectors.artifact_fields(complex_vectors, complex_outcome)
+    )
     if keep_artifacts:
         if os.path.isfile(log_path):
             artifacts["log"] = log_path
