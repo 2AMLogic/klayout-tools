@@ -259,6 +259,29 @@ written to every block.
    is not covered. Warnings-only mismatches must be listed with the claim.
    A second, independent engine's concurring verdict (#343) strengthens this
    from "one toolchain agrees with itself" to a cross-checked result.
+   **PDK-runset path (issue #2870, operator ruling of 2026-10-08).** For
+   device families the PDK's own open KLayout LVS runset recognises and the
+   curated extraction deck does not, a `klt lvs` report with
+   `"engine": "klayout-runset"` is accepted evidence for this item, on four
+   conditions: (1) the runset is the PDK's own at a pinned revision — `klt
+   signoff` checks `provenance.runset.content_hash` against a signoff-side
+   allowlist (`signoff_runset.PINNED_RUNSETS`, hash → PDK revision), not against
+   a field the block declares, and the runset file named by the report must
+   still re-hash to that value; (2) the report is a `klt` envelope with the
+   same `--check` re-hash guarantees as a curated-deck report (layout hash,
+   reference netlist hash, plus the runset hash); (3) the report names its
+   engine, and `klt signoff` carries `engine` and the runset hash distinctly in
+   the check detail and the `met` citation; (4) every device is recognised — a
+   non-empty `coverage.declared_not_recognized`, or a `device_census` whose
+   per-class layout and reference counts differ, is a failure
+   (`runset_unrecognised_device`), never a warning, even when `status` reads
+   `match`. A report from a runset that is not in the allowlist is refused
+   `runset_not_pinned`; one whose runset file changed since the run,
+   `runset_hash_mismatch`. **This does not change** the default: curated decks
+   stay the route wherever they recognise every device in the block, and a
+   block may not choose the runset to avoid a curated-deck finding. The
+   allowlist is empty as of this change (2026-10-17) until a published runset's
+   digest is reviewed into it, so no runset report grades `met` before then.
 5. **Full corner verification vs a ratified spec**
    - *Analog* — PVT corner-matrix simulation results covering every spec
      row at its bound corners, with per-row pass/fail and the binding
@@ -459,6 +482,13 @@ written to every block.
       `detail.power_delivery` the supplies the ERC run did prove. Produce
       the ERC supply spec anyway — it is the half that survives an unrelated
       LVS defect, and it is what makes the distinction visible.
+      A `klayout-runset` report (item 4's PDK-runset path) can be this LVS
+      half under the same pin and re-hash conditions: the engine lists the
+      nets its compare paired in `net_correspondence` (issue #2870), so the
+      supply-pairing test above reads the same way, with the same
+      "participation test, not a second opinion" caveat. An unpinned or
+      modified runset renders `runset_not_pinned` / `runset_hash_mismatch`
+      here too.
     - *Digital* — the `klt erc` supply evidence below, plus the routed
       artifact having actually been produced with a power grid, plus item
       4's power/ground verdict having actually run. Concretely: the `klt
