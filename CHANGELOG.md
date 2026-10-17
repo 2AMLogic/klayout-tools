@@ -14,6 +14,14 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sta` power figures state their basis** (issue #3744): new optional
+  `constraints.power_activity` (`{activity, duty}`) emits
+  `set_power_activity -global` before `report_power_metric` in every corner,
+  and every single-corner response and `corners[]` entry carries an additive
+  `power_basis` block (`activity_source`, `activity`, `duty`, `parasitics`).
+  Requests without the field generate an unchanged Tcl script;
+  `schema_version` is unchanged (additive).
+
 - **`klt synthesize --restructure` now finds upsizes on libraries that quote
   cell names** (issue #3709): `restructure`'s and `synthesize`'s private
   regex Liberty readers are replaced by `liberty_compare.parse_liberty_text`.
