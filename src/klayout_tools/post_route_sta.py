@@ -1307,9 +1307,6 @@ def _run_corner_session(
         corner_fields["spef_annotation"] = spef_annotation
     else:
         corner_fields["spef_annotation"] = None
-    # Issue #2739: the propagated-clock evidence block -- what propagation
-    # actually reached -- parsed from this session's `report_clock_latency`
-    # dump; `null` unless the request asked for propagated-clock timing.
     # Additive field (issue #3005): max-transition / max-capacitance checks
     # against this session's parasitics; `null` in netlist mode (no routed
     # geometry to check).
@@ -1318,6 +1315,9 @@ def _run_corner_session(
         if has_def
         else None
     )
+    # Issue #2739: the propagated-clock evidence block -- what propagation
+    # actually reached -- parsed from this session's `report_clock_latency`
+    # dump; `null` unless the request asked for propagated-clock timing.
     if propagated_clock and has_def:
         corner_fields["clock_propagation"] = _parse_clock_latency(
             completed.stdout or "", clock_port
@@ -2997,7 +2997,8 @@ def _electrical_check_lines() -> list[str]:
     ``catch``: a clean design prints nothing from ``report_check_types``, so
     the explicit ``KLT_ELECTRICAL_OK`` sentinel is what distinguishes
     "checked, zero violations" from a command that never ran
-    (``KLT_ELECTRICAL_UNSUPPORTED`` when the ``catch`` fired; a missing
+    (``KLT_ELECTRICAL_UNSUPPORTED`` when the ``catch`` fired, after ending the
+    redirect so later output is not swallowed; a missing
     block is ``not_run``). For every violating pin a ``KLT_ELECTRICAL_NET``
     row maps it to its net (ports are their own net) so distinct nets can be
     counted."""
@@ -3014,6 +3015,9 @@ def _electrical_check_lines() -> list[str]:
             f"  report_check_types {flag} -violators -digits 5",
             "  set klt_elec_rep [sta::redirect_string_end]",
             "} klt_elec_msg]} {",
+            # A throw after redirect_string_begin leaves the redirect active
+            # (verified on OpenROAD 26Q3), swallowing every later puts.
+            "  catch {sta::redirect_string_end}",
             f'  puts "{_ELECTRICAL_UNSUPPORTED}"',
             "} else {",
             "  puts $klt_elec_rep",
