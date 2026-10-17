@@ -178,6 +178,22 @@ def _print_declared_nets(report: dict) -> None:
             )
 
 
+def _print_skipped_coverage(report: dict) -> None:
+    """Name each skipped ``erc_coverage`` entry and its reason (issue #3745).
+
+    A skipped ``erc.missing_tie:*`` (degenerate tap declaration) leaves
+    ``erc_findings`` empty and the exit status 0, so ``erc_status:
+    clean_partial`` alone is easy to read past. Printed only when something
+    was skipped, so output is byte-identical otherwise. ``.get`` because
+    this renderer is also pointed at stored payloads."""
+    skipped = (report.get("erc_coverage") or {}).get("skipped") or []
+    if not skipped:
+        return
+    print(f"erc_skipped: {len(skipped)} (not checked; see erc_coverage.skipped)")
+    for entry in skipped:
+        print(f"  {entry['id']}: {entry['reason']}")
+
+
 def _print_gate_count(report: dict) -> None:
     """The gate count line, plus a note when it is zero (issue #2896).
 
@@ -288,6 +304,7 @@ def _print_text(report: dict) -> None:
         if undeclared:
             print(f"  undeclared classes: {', '.join(undeclared)}")
     _print_declared_nets(report)
+    _print_skipped_coverage(report)
     print(f"erc_findings: {report['erc_finding_count']}")
     for finding in report["erc_findings"]:
         subject = finding["net"] or finding["gate_id"] or finding["layer"] or "?"

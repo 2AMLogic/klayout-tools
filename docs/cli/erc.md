@@ -335,6 +335,17 @@ draws that the spec never declared" below.
     detection are unaffected by the declaration — a declared-multi-domain
     name still shorts against any other name that lands on one of its
     islands.
+  - `extractor_global` (boolean, optional, default `false`, issue #3745) —
+    the net is named by the extractor (a PDK deck's global substrate net),
+    not by GDS label text, so it can never be label-resolved. With `true`
+    it is not graded: no `erc.unconnected_net` for zero matches, no
+    `nets[]` report entry, and it is recorded in
+    `erc_coverage.inapplicable` as `erc.net_connectivity:["<name>"]` with
+    reason `extractor_global_net` (disclosed, never silent). Like every
+    `inapplicable` entry it leaves `erc_status` unchanged. Combining it
+    with `islands`, `same_net_as`, `roles` or `unlabelled_allowed_boxes`
+    — or naming it from another entry's `same_net_as` — is a spec error.
+    Example: `{ "name": "SUB", "kind": "supply", "extractor_global": true }`.
   - `same_net_as` (string, optional, default absent, issue #2463) — the
     `name` of another `nets[]` entry this one is *intentionally* the same
     electrical net as. Declare it when the layout deliberately ties two
@@ -812,6 +823,16 @@ much* (declared geometry that is a device rather than a wire, producing a
 false `erc.supply_short`).
 
 ### Well/tap connectivity (`ties[]`, issue #2169)
+
+**Is my tie actually checked?** A `ties[]` entry whose tap region cannot
+be told apart from an ordinary source/drain contact is *skipped*, not
+passed: `erc.missing_tie:["<name>"]` appears in `erc_coverage.skipped`
+(reason `degenerate_tap_declaration`), `erc_status` reads `clean_partial`,
+and the text output prints an `erc_skipped:` block — but `erc_findings` is
+empty and the exit status stays `0` by design. Gate on `erc_status`, not
+the exit code. To make the declaration non-degenerate, affirm
+`tap_is_dedicated`, narrow with `tap_requires`, or assert `tap_boxes`
+(details below).
 
 A `ties[]` entry is evaluated in its own second extraction: the same
 `stackup`/`vias` graph, plus one extra conductor per tie — that tie's
