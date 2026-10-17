@@ -990,6 +990,14 @@ from .signoff_power_delivery import (
     _read_power_port_policy,
     _strap_layers,
 )
+from .signoff_runset import (
+    REASON_RUNSET_UNRECOGNISED_DEVICE as _REASON_RUNSET_UNRECOGNISED_DEVICE,
+)
+from .signoff_runset import (
+    runset_disclosure,
+    runset_refusal,
+    unrecognised_device_gaps,
+)
 
 __all__ = [
     "SignoffError",
@@ -3613,6 +3621,12 @@ def _check_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
         passed = (
             envelope.get("status") == "match"
             and power_connectivity.get("status") != "mismatch"
+            # Issue #2870: a runset report reads "match" when the devices it
+            # recognised agree; one it did not recognise is a failure here.
+            and not (
+                envelope.get("engine") == "klayout-runset"
+                and unrecognised_device_gaps(cast(dict[str, Any], envelope))
+            )
         )
     elif kind in _PASSING_STATUS_BY_KIND:
         # sim/pex/place-and-route/socket-check/generic: one passing token.
@@ -3829,6 +3843,14 @@ def _non_passing_reason(kind: str, envelope: dict[str, Any]) -> str:
     """
     if _critical_metric_blockers(envelope):
         return _REASON_CHECK_FAILED
+    # Issue #2870: a runset report that matched only the devices it knew.
+    if (
+        kind == "lvs"
+        and envelope.get("status") == "match"
+        and unrecognised_device_gaps(envelope)
+        and envelope.get("engine") == "klayout-runset"
+    ):
+        return _REASON_RUNSET_UNRECOGNISED_DEVICE
     # Issue #2873: a `klt yield` run whose only shortfall is evidence
     # (`min_converged_samples` unmet, or a `target_sigma` that could not be
     # evaluated) is "draw more / fix the sample set", not a design defect.
@@ -3902,6 +3924,11 @@ def _kind_gated_refusal(
     refusal = _coverage_refusal(check_kind, envelope)
     if refusal is not None:
         return refusal
+    if check_kind == "lvs":
+        # Issue #2870: pin and re-hash of a PDK-runset report; None for curated.
+        refusal = runset_refusal(envelope)
+        if refusal is not None:
+            return refusal
     if require_post_layout and not _is_post_layout_evidence(check_kind, envelope):
         return _REASON_NOT_POST_LAYOUT
     return _yield_campaign_refusal(check_kind, envelope)
@@ -4185,6 +4212,8 @@ def _detail(kind: str, envelope: _EvidenceEnvelope) -> dict[str, Any]:
                 "status"
             ),
         }
+        # Issue #2870: engine + runset hash, only for a PDK-runset report.
+        detail.update(runset_disclosure(cast(dict[str, Any], envelope)) or {})
     elif kind == "sim":
         detail = {
             "netlist": envelope.get("netlist"),
@@ -7039,6 +7068,9 @@ def _citation(resolution: dict[str, Any]) -> dict[str, Any]:
     # cited envelope records those digests; legacy envelopes omit it.
     if resolution.get("pex_inputs"):
         citation["pex_inputs"] = resolution["pex_inputs"]
+    # Issue #2870: a PDK-runset LVS citation says which engine produced it.
+    if resolution["kind"] == "lvs":
+        citation.update(runset_disclosure(resolution["envelope"]) or {})
     # Issue #2002: a `drc` citation also carries the three `coverage` fields
     # item 3's doc text requires the claim to disclose -- so the disclosure a
     # claim owes and the numbers it owes it about are in the same artifact.

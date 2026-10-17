@@ -27,6 +27,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   cards; and a subckt-call conversion with several unknown subcircuits now
   names all of them in one refusal instead of the first.
 
+- **`klt signoff` grades PDK-runset LVS reports** (issue #2870, building on
+  #2849): a `klt lvs` report with `"engine": "klayout-runset"` can satisfy T1
+  item 4 and item 11's LVS half when its runset hash is in the signoff-side
+  allowlist `signoff_runset.PINNED_RUNSETS` (shipped empty as of 2026-10-17),
+  the runset file still re-hashes, and every device was recognised. New reason
+  codes `runset_not_pinned`, `runset_hash_mismatch`, `runset_unrecognised_device`;
+  `engine` and `runset_content_hash` appear in the check detail and `met`
+  citation of such reports only. The runset engine now fills
+  `net_correspondence` from its matched nets. Curated-deck grading is unchanged.
 - **sky130 deck checks the implant and npc masks `klt gen` now draws**
   (issue #2934, phase C): `--deck sky130` gains `npc.width.1`/`npc.space.1`
   (`npc.1`/`npc.2`, 0.27 µm) and `nsdm`/`psdm` `width.1`/`space.1`

@@ -522,6 +522,40 @@ def _pair_counts(xref: Any) -> dict[str, dict[str, int]]:
     return counts
 
 
+def _net_correspondence(xref: Any) -> list[dict[str, Any]]:
+    """Every net the runset's compare paired successfully, in ``klt lvs``'s
+    documented ``net_correspondence[]`` shape (issue #2870).
+
+    Item 11's LVS half proves a supply "took part in the compare" by finding
+    it paired here (``signoff_power_delivery._lvs_reference_carries_supplies``),
+    so this lists only *matched* nets -- same rule as the curated engine's
+    ``_build_net_correspondence``. Deduplicated on ``(circuit, layout,
+    reference)`` and sorted for a deterministic report.
+    """
+    from .lvs import _name_or_none
+
+    rows: dict[tuple[str, str | None, str | None], dict[str, Any]] = {}
+    for cp in xref.each_circuit_pair():
+        circuit = cp.first() if cp.first() is not None else cp.second()
+        scope = circuit.name if circuit is not None else ""
+        for pair in xref.each_net_pair(cp):
+            if not _paired_ok(pair):
+                continue
+            layout_net = pair.first()
+            key = (scope, _name_or_none(layout_net), _name_or_none(pair.second()))
+            rows.setdefault(
+                key,
+                {
+                    "layout": key[1],
+                    "reference": key[2],
+                    "pin": bool(layout_net.pin_count() > 0),
+                },
+            )
+    return sorted(
+        rows.values(), key=lambda r: (r["reference"] or "", r["layout"] or "")
+    )
+
+
 def _build_coverage(
     layout_declared: list[str],
     ref_declared: list[str],
@@ -674,6 +708,7 @@ def read_lvsdb_verdict(lvsdb_path: str) -> dict[str, Any]:
         ),
         "device_census": {"layout": layout_counts, "reference": ref_counts},
         "counts": _pair_counts(xref),
+        "net_correspondence": _net_correspondence(xref),
         "top": _first_circuit_name(xref, "first"),
         "reference_top": _first_circuit_name(xref, "second"),
     }
@@ -783,7 +818,7 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
         },
         "provenance": provenance,
         "mismatches": mismatches,
-        "net_correspondence": [],
+        "net_correspondence": verdict["net_correspondence"],
     }
 
 
