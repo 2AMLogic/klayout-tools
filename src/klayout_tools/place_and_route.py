@@ -761,9 +761,6 @@ from .place_and_route_request import (
     _resolve_gds_view as _resolve_gds_view,
 )
 from .place_and_route_request import (
-    _resolve_layer_map as _resolve_layer_map,
-)
-from .place_and_route_request import (
     _resolve_lef as _resolve_lef,
 )
 from .place_and_route_request import (
@@ -2554,7 +2551,7 @@ def _run_single_corner(
         "gds_path": gds_path,
         # Additive field (issue #1029): whether the DEF->GDS merge above
         # actually applied a KLayout LEF/DEF layer-map file, and how it was
-        # resolved -- `_resolve_layer_map` silently degrades to no map at
+        # resolved -- `resolve_klayout_layer_map` silently degrades to no map at
         # all (`resolution: "none"`) when neither a variant-named nor a
         # family-level map file exists, which previously left no trace in
         # this response for a caller to notice. `null` unless

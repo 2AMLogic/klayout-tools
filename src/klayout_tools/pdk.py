@@ -1174,6 +1174,81 @@ def lef_files(
     }
 
 
+def resolve_klayout_layer_map(pdk_info: dict[str, Any]) -> tuple[str | None, str]:
+    """The open_pdks KLayout LEF/DEF layer-map file for a resolved PDK
+    (``libs.tech/klayout/tech/<variant>.map``), as ``(path, resolution)``.
+
+    Prefers the variant-named file (``<variant>.map``, ``resolution=
+    "exact"``); falls back to a family-level file (``<family>.map``,
+    ``resolution="family"``) when the variant-named file is absent -- some
+    open_pdks families (gf180mcu, unlike sky130) ship a single map file
+    shared across every variant (issue #1029). Returns ``(None, "none")``
+    when neither exists, or when the variant ships no ``klayout`` asset at
+    all.
+
+    Shared by ``place_and_route``, ``lef_abstract`` and ``extract_abstract``
+    (issue #3731): PDK resolution is the one logic family ``docs/
+    ARCHITECTURE.md`` keeps out of per-module self-containment.
+    """
+    klayout_dir = pdk_info["assets"].get("klayout")
+    if klayout_dir is None:
+        return None, "none"
+    tech_dir = os.path.join(klayout_dir, "tech")
+    variant = pdk_info["variant"]
+    exact = os.path.join(tech_dir, f"{variant}.map")
+    if os.path.isfile(exact):
+        return exact, "exact"
+
+    family = variant
+    if len(family) > 1 and family[-1].isupper():
+        family = family[:-1]
+    # IHP-Open-PDK (issue #2444): the install variant is ``ihp-sg13g2`` but
+    # the shipped map is named after the process, ``sg13g2.map`` -- without
+    # this the DEF->GDS merge silently fell back to KLayout's sequential
+    # default layer numbering (Via1 cuts on 8/0, Metal2 pads on 9/0, ...).
+    if family.startswith("ihp-"):
+        family = family[len("ihp-") :]
+    if family != variant:
+        family_candidate = os.path.join(tech_dir, f"{family}.map")
+        if os.path.isfile(family_candidate):
+            return family_candidate, "family"
+
+    return None, "none"
+
+
+def load_gds_to_lef_layer_map(map_path: str) -> dict[tuple[int, int], str]:
+    """Parse an open_pdks KLayout ``.map`` file into ``{(gds_layer,
+    gds_datatype): <LEF layer name>}``.
+
+    File shape (whitespace-delimited, one entry per line): ``<lef_layer_name>
+    <comma-separated purposes> <gds_layer> <gds_datatype>``.
+    ``NAME``/``DIEAREA`` pseudo-entries (annotation purposes, not a real
+    drawn layer) are skipped. Several purposes of the same LEF layer simply
+    contribute several entries mapping to the same name -- never a conflict,
+    since distinct purposes always use distinct datatypes in a real
+    open_pdks map file.
+    """
+    mapping: dict[tuple[int, int], str] = {}
+    with open(map_path, encoding="utf-8") as handle:
+        for line in handle:
+            stripped = line.split("#", 1)[0].strip()
+            if not stripped:
+                continue
+            parts = stripped.split()
+            if len(parts) < 4:
+                continue
+            lef_name = parts[0]
+            if lef_name in ("NAME", "DIEAREA"):
+                continue
+            try:
+                gds_layer = int(parts[-2])
+                gds_datatype = int(parts[-1])
+            except ValueError:
+                continue
+            mapping[(gds_layer, gds_datatype)] = lef_name
+    return mapping
+
+
 # --------------------------------------------------------------------------- #
 # `klt pdk em-limits` -- electromigration current-density limits declared
 # across every tech LEF an install ships (issue #1215).
