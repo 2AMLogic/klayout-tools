@@ -291,6 +291,11 @@ _SPEF_D_NET_RE = re.compile(r"^\*D_NET\s+(\S+)", re.MULTILINE)
 #: before every character outside ``[A-Za-z0-9_]``) -- see
 #: :func:`_unescape_spef_name`.
 _SPEF_ESCAPED_CHAR_RE = re.compile(r"\\(.)")
+#: Liberty cell/pin identifier for ``constraints.driving_cell`` (issue #3742).
+_LIBERTY_IDENT_RE = re.compile(r"[A-Za-z0-9_$.]+")
+#: A ``*NAME_MAP`` entry (``*12 data\[0\]``) and a ``*<n>`` index reference.
+_SPEF_NAME_MAP_ENTRY_RE = re.compile(r"^(\*\d+)\s+(\S+)", re.MULTILINE)
+_SPEF_HEADER_DIVIDER_RE = re.compile(r"^\*DIVIDER\s+(\S)", re.MULTILINE)
 
 #: Delimits the (capped) sample of design-side net names that failed to
 #: correlate against the SPEF's own declared name set -- see
@@ -656,6 +661,9 @@ def run_sta(
     input_transition_ns, input_transitions = _validate_input_transitions(
         request["constraints"], clock_port
     )
+    boundary = _validate_boundary(
+        request["constraints"], clock_port, input_transition_ns, input_transitions
+    )
     report_ports = _validate_report_ports(request["constraints"], clock_port)
     false_path_from = _validate_false_path_from(request["constraints"], clock_port)
     wire_load_model, wire_load_mode = _validate_wire_load_estimate(
@@ -741,6 +749,7 @@ def run_sta(
             output_delays=output_delays,
             input_transition_ns=input_transition_ns,
             input_transitions=input_transitions,
+            boundary=boundary,
             report_ports=report_ports,
             false_path_from=false_path_from,
             spef_path=spef_path,
@@ -902,6 +911,7 @@ def _dispatch_sta(
     output_delays: dict[str, dict[str, float]] | None,
     input_transition_ns: float | None,
     input_transitions: dict[str, float] | None,
+    boundary: dict[str, Any] | None,
     report_ports: list[str] | None,
     false_path_from: list[str] | None,
     spef_path: str | None,
@@ -943,6 +953,7 @@ def _dispatch_sta(
             output_delays=output_delays,
             input_transition_ns=input_transition_ns,
             input_transitions=input_transitions,
+            boundary=boundary,
             report_ports=report_ports,
             false_path_from=false_path_from,
             spef_path=spef_path,
@@ -974,6 +985,7 @@ def _dispatch_sta(
         output_delays=output_delays,
         input_transition_ns=input_transition_ns,
         input_transitions=input_transitions,
+        boundary=boundary,
         report_ports=report_ports,
         false_path_from=false_path_from,
         spef_path=spef_path,
@@ -1106,6 +1118,7 @@ def _run_corner_session(
     output_delays: dict[str, dict[str, float]] | None,
     input_transition_ns: float | None,
     input_transitions: dict[str, float] | None,
+    boundary: dict[str, Any] | None,
     report_ports: list[str] | None,
     false_path_from: list[str] | None,
     spef_path: str | None,
@@ -1202,6 +1215,7 @@ def _run_corner_session(
             output_delays=output_delays,
             input_transition_ns=input_transition_ns,
             input_transitions=input_transitions,
+            boundary=boundary,
             report_ports=report_ports,
             false_path_from=false_path_from,
             propagated_clock=propagated_clock,
@@ -1226,6 +1240,7 @@ def _run_corner_session(
             output_delays=output_delays,
             input_transition_ns=input_transition_ns,
             input_transitions=input_transitions,
+            boundary=boundary,
             report_ports=report_ports,
             false_path_from=false_path_from,
         )
@@ -1353,6 +1368,7 @@ def _run_multi_corner(
     output_delays: dict[str, dict[str, float]] | None,
     input_transition_ns: float | None,
     input_transitions: dict[str, float] | None,
+    boundary: dict[str, Any] | None,
     report_ports: list[str] | None,
     false_path_from: list[str] | None,
     spef_path: str | None,
@@ -1434,6 +1450,7 @@ def _run_multi_corner(
             output_delays=output_delays,
             input_transition_ns=input_transition_ns,
             input_transitions=input_transitions,
+            boundary=boundary,
             report_ports=report_ports,
             false_path_from=false_path_from,
             spef_path=pair_spef,
@@ -1859,6 +1876,131 @@ def _validate_input_transitions(
         assert validated is not None  # entry is not None, checked above
         parsed[port] = validated
     return scalar, parsed or None
+
+
+def _validate_driving_cell(value: Any, field: str) -> dict[str, str]:
+    """One ``{"cell": ..., "pin": ..., "input_pin": ...}`` driving-cell entry
+    (``input_pin`` optional). Names are literal liberty identifiers -- never
+    Tcl, never a pattern."""
+    if not isinstance(value, dict):
+        raise PostRouteStaError(
+            f'{field} must be a JSON object {{"cell": ..., "pin": ...}} '
+            '(optional "input_pin")'
+        )
+    unknown = sorted(set(value) - {"cell", "pin", "input_pin"})
+    if unknown:
+        raise PostRouteStaError(
+            f"{field} has unknown key(s) {unknown}; allowed: cell, pin, input_pin"
+        )
+    parsed: dict[str, str] = {}
+    for key in ("cell", "pin", "input_pin"):
+        item = value.get(key)
+        if item is None and key != "input_pin":
+            raise PostRouteStaError(f"{field}.{key} is required")
+        if item is None:
+            continue
+        if (
+            not isinstance(item, str)
+            or not item
+            or not _LIBERTY_IDENT_RE.fullmatch(item)
+        ):
+            raise PostRouteStaError(
+                f"{field}.{key} must be a literal liberty name matching [A-Za-z0-9_$.]+"
+            )
+        parsed[key] = item
+    return parsed
+
+
+def _validate_boundary(
+    constraints: dict[str, Any],
+    clock_port: str,
+    input_transition_ns: float | None,
+    input_transitions: dict[str, float] | None,
+) -> dict[str, Any] | None:
+    """``constraints.driving_cell`` / ``.driving_cells`` and
+    ``.output_load_pf`` / ``.output_loads`` (issue #3742): the boundary
+    conditions an SDC flow expresses with ``set_driving_cell`` / ``set_load``.
+    Returns a dict holding only the supplied keys (``driving_cell``,
+    ``driving_cells``, ``output_load_pf``, ``output_loads``), or ``None`` when
+    none was given -- which leaves the generated Tcl byte-identical.
+
+    ``driving_cell`` is the default for non-clock inputs absent from
+    ``driving_cells`` and from ``input_transitions``; a port may not carry both
+    a driving cell and an input transition (the two would silently override
+    each other), so any such overlap -- or ``input_transition_ns`` together
+    with a driving-cell field -- is a request error. Load values are finite
+    non-boolean numbers ``>= 0`` (pF). Port existence and direction are
+    verified in the engine session (:func:`_port_check_lines`).
+    """
+    prefix = "request.constraints."
+    boundary: dict[str, Any] = {}
+    default_cell = constraints.get("driving_cell")
+    if default_cell is not None:
+        boundary["driving_cell"] = _validate_driving_cell(
+            default_cell, f"{prefix}driving_cell"
+        )
+    field = f"{prefix}driving_cells"
+    cells = constraints.get("driving_cells")
+    if cells is not None:
+        if not isinstance(cells, dict):
+            raise PostRouteStaError(
+                f"{field} must be a JSON object mapping port names to driving cells"
+            )
+        parsed_cells: dict[str, dict[str, str]] = {}
+        for port, entry in cells.items():
+            _check_port_delay_key(field, "input", port, clock_port)
+            parsed_cells[port] = _validate_driving_cell(entry, f"{field}[{port!r}]")
+        if parsed_cells:
+            boundary["driving_cells"] = parsed_cells
+    if "driving_cell" in boundary or "driving_cells" in boundary:
+        if input_transition_ns is not None:
+            raise PostRouteStaError(
+                f"{prefix}input_transition_ns cannot be combined with "
+                "driving_cell/driving_cells -- a driving cell sets the input "
+                "slew itself; give per-port input_transitions for the rest"
+            )
+        overlap = sorted(
+            set(boundary.get("driving_cells", {})) & set(input_transitions or {})
+        )
+        if overlap:
+            raise PostRouteStaError(
+                f"{prefix}driving_cells and {prefix}input_transitions both "
+                f"name port(s) {overlap} -- a port takes one or the other"
+            )
+    scalar = _validate_load_value(
+        constraints.get("output_load_pf"), f"{prefix}output_load_pf"
+    )
+    if scalar is not None:
+        boundary["output_load_pf"] = scalar
+    field = f"{prefix}output_loads"
+    loads = constraints.get("output_loads")
+    if loads is not None:
+        if not isinstance(loads, dict):
+            raise PostRouteStaError(
+                f"{field} must be a JSON object mapping port names to numbers"
+            )
+        parsed_loads: dict[str, float] = {}
+        for port, entry in loads.items():
+            _check_port_delay_key(field, "output", port, clock_port)
+            validated = _validate_load_value(entry, f"{field}[{port!r}]")
+            if validated is None:
+                raise PostRouteStaError(
+                    f"{field}[{port!r}] must be a finite non-negative number"
+                )
+            parsed_loads[port] = validated
+        if parsed_loads:
+            boundary["output_loads"] = parsed_loads
+    return boundary or None
+
+
+def _validate_load_value(value: Any, field: str) -> float | None:
+    """One output load (pF): ``None`` when omitted, else a finite,
+    non-boolean number ``>= 0``."""
+    if value is None:
+        return None
+    if not _is_finite_number(value) or value < 0:
+        raise PostRouteStaError(f"{field} must be a finite non-negative number")
+    return float(value)
 
 
 def _validate_transition_value(value: Any, field: str) -> float | None:
@@ -2468,6 +2610,7 @@ def _request_io_delay_lines(
     input_transitions: dict[str, float] | None = None,
     report_ports: list[str] | None = None,
     false_path_from: list[str] | None = None,
+    boundary: dict[str, Any] | None = None,
 ) -> list[str]:
     """All I/O-timing Tcl for one session. With no per-port map, no
     ``input_transitions``, no ``report_ports`` and no ``false_path_from`` this
@@ -2492,6 +2635,7 @@ def _request_io_delay_lines(
         or input_transitions
         or report_ports
         or false_path_from
+        or boundary
     ):
         delay_lines = (
             _port_check_lines(
@@ -2500,12 +2644,14 @@ def _request_io_delay_lines(
                 input_transitions,
                 report_ports,
                 false_path_from,
+                boundary,
             )
             + delay_lines
         )
     return (
         delay_lines
         + _input_transition_lines(clock_port, input_transition_ns, input_transitions)
+        + _boundary_lines(clock_port, boundary, input_transitions)
         + _false_path_lines(false_path_from)
     )
 
@@ -2525,6 +2671,7 @@ def _port_check_lines(
     input_transitions: dict[str, float] | None = None,
     report_ports: list[str] | None = None,
     false_path_from: list[str] | None = None,
+    boundary: dict[str, Any] | None = None,
 ) -> list[str]:
     """Verify every per-port map key against the loaded design before any
     delay is applied (issue #2740): each must match **exactly one** port
@@ -2544,6 +2691,8 @@ def _port_check_lines(
         ("input", input_delays, _INPUT_PORT_DIRECTIONS),
         ("output", output_delays, _OUTPUT_PORT_DIRECTIONS),
         ("input_transition", input_transitions, _INPUT_PORT_DIRECTIONS),
+        ("driving_cell", (boundary or {}).get("driving_cells"), _INPUT_PORT_DIRECTIONS),
+        ("output_load", (boundary or {}).get("output_loads"), _OUTPUT_PORT_DIRECTIONS),
         ("report", dict.fromkeys(report_ports or ()), _ANY_PORT_DIRECTIONS),
         (
             "false_path",
@@ -2689,6 +2838,78 @@ def _input_transition_lines(
         ]
     for port, value in mapping.items():
         lines.append(f"set_input_transition {value!r} [get_ports {_tcl_literal(port)}]")
+    return lines
+
+
+def _boundary_lines(
+    clock_port: str,
+    boundary: dict[str, Any] | None,
+    input_transitions: dict[str, float] | None,
+) -> list[str]:
+    """``set_driving_cell`` / ``set_load`` for the issue #3742 boundary
+    constraints. The default driving cell goes to every non-clock input absent
+    from ``driving_cells`` and ``input_transitions``; the default load to every
+    output absent from ``output_loads``. Mapped ports are fetched from
+    ``$klt_ports_by_name`` (built by :func:`_port_check_lines`). Nothing when
+    ``boundary`` is ``None``."""
+    if not boundary:
+        return []
+    lines: list[str] = []
+    cells = boundary.get("driving_cells") or {}
+
+    def drive_args(cell: dict[str, str]) -> str:
+        args = f"-lib_cell {cell['cell']} -pin {cell['pin']}"
+        if "input_pin" in cell:
+            args += f" -from_pin {cell['input_pin']}"
+        return args
+
+    default_cell = boundary.get("driving_cell")
+    if default_cell is not None:
+        mapped = " ".join(
+            _tcl_literal(port) for port in [*cells, *(input_transitions or {})]
+        )
+        lines += [
+            f"set klt_drive_clock_port [get_ports {clock_port}]",
+            "set klt_drive_candidates "
+            "[lsearch -inline -all -not -exact [all_inputs] $klt_drive_clock_port]",
+            f"set klt_drive_mapped [list {mapped}]",
+            "set klt_drive_default_ports {}",
+            "foreach klt_port $klt_drive_candidates {",
+            "    if {[lsearch -exact $klt_drive_mapped "
+            "[get_full_name $klt_port]] < 0} {",
+            "        lappend klt_drive_default_ports $klt_port",
+            "    }",
+            "}",
+            "if {[llength $klt_drive_default_ports] > 0} {",
+            f"    set_driving_cell {drive_args(default_cell)} $klt_drive_default_ports",
+            "}",
+        ]
+    for port, cell in cells.items():
+        lines.append(
+            f"set_driving_cell {drive_args(cell)} "
+            f"[dict get $klt_ports_by_name {_tcl_literal(port)}]"
+        )
+    loads = boundary.get("output_loads") or {}
+    scalar = boundary.get("output_load_pf")
+    if scalar is not None:
+        mapped = " ".join(_tcl_literal(port) for port in loads)
+        lines += [
+            f"set klt_load_mapped [list {mapped}]",
+            "set klt_load_default_ports {}",
+            "foreach klt_port [all_outputs] {",
+            "    if {[lsearch -exact $klt_load_mapped "
+            "[get_full_name $klt_port]] < 0} {",
+            "        lappend klt_load_default_ports $klt_port",
+            "    }",
+            "}",
+            "if {[llength $klt_load_default_ports] > 0} {",
+            f"    set_load {scalar!r} $klt_load_default_ports",
+            "}",
+        ]
+    for port, value in loads.items():
+        lines.append(
+            f"set_load {value!r} [dict get $klt_ports_by_name {_tcl_literal(port)}]"
+        )
     return lines
 
 
@@ -3054,6 +3275,7 @@ def _sta_script_lines(
     output_delays: dict[str, dict[str, float]] | None = None,
     input_transition_ns: float | None = None,
     input_transitions: dict[str, float] | None = None,
+    boundary: dict[str, Any] | None = None,
     report_ports: list[str] | None = None,
     false_path_from: list[str] | None = None,
     propagated_clock: bool = False,
@@ -3114,6 +3336,7 @@ def _sta_script_lines(
         input_transitions,
         report_ports,
         false_path_from,
+        boundary,
     )
     if spef_path is not None:
         lines += _spef_net_check_lines(spef_net_names or [])
@@ -3163,6 +3386,7 @@ def _sta_netlist_script_lines(
     output_delays: dict[str, dict[str, float]] | None = None,
     input_transition_ns: float | None = None,
     input_transitions: dict[str, float] | None = None,
+    boundary: dict[str, Any] | None = None,
     report_ports: list[str] | None = None,
     false_path_from: list[str] | None = None,
 ) -> list[str]:
@@ -3218,6 +3442,7 @@ def _sta_netlist_script_lines(
         input_transitions,
         report_ports,
         false_path_from,
+        boundary,
     )
     if wire_load_mode is not None:
         lines.append(f"set_wire_load_mode {wire_load_mode}")
@@ -3277,7 +3502,41 @@ def _spef_net_names(spef_path: str) -> list[str]:
             text = handle.read()
     except OSError as exc:
         raise PostRouteStaError(f"could not read spef '{spef_path}': {exc}") from exc
-    return sorted({_unescape_spef_name(name) for name in _SPEF_D_NET_RE.findall(text)})
+    name_map = _spef_name_map(text)
+    divider_match = _SPEF_HEADER_DIVIDER_RE.search(text)
+    divider = divider_match.group(1) if divider_match else "/"
+    names: set[str] = set()
+    for raw in _SPEF_D_NET_RE.findall(text):
+        # A name-mapped SPEF (OpenROAD's ``write_spef``) declares nets as
+        # ``*D_NET *12 <cap>``; resolve the index through ``*NAME_MAP``
+        # (issue #3742). An unmapped ``*<n>`` is kept verbatim.
+        name = _unescape_spef_name(name_map.get(raw, raw))
+        if divider != "/":
+            # OpenSTA addresses hierarchy with ``/``; translate a header
+            # ``*DIVIDER`` of another character to it.
+            name = name.replace(divider, "/")
+        names.add(name)
+    return sorted(names)
+
+
+def _spef_name_map(text: str) -> dict[str, str]:
+    """``{"*12": "data\\[0\\]", ...}`` from the ``*NAME_MAP`` section (the
+    still-escaped spelling; the caller unescapes), ``{}`` when the SPEF has
+    none. The section is the run of ``*<n> <name>`` lines after the
+    ``*NAME_MAP`` header; it ends at the first other ``*`` section keyword."""
+    names: dict[str, str] = {}
+    in_map = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not in_map:
+            in_map = stripped == "*NAME_MAP"
+            continue
+        match = _SPEF_NAME_MAP_ENTRY_RE.match(stripped)
+        if match:
+            names[match.group(1)] = match.group(2)
+        elif stripped.startswith("*"):
+            break
+    return names
 
 
 # --------------------------------------------------------------------------- #
@@ -3755,6 +4014,8 @@ _PORT_CHECK_PREFIXES: dict[str | None, str] = {
     "report": "constraints.report_ports rejected",
     "false_path": "constraints.false_path_from rejected",
     "input_transition": "constraints.input_transitions rejected",
+    "driving_cell": "constraints.driving_cells rejected",
+    "output_load": "constraints.output_loads rejected",
 }
 
 
@@ -3764,6 +4025,12 @@ def _port_check_error_message(rows: list[tuple[str, str, str]]) -> str:
         if side == "input_transition":
             field = f"constraints.input_transitions[{port!r}]"
             side = "input"
+        elif side == "driving_cell":
+            field = f"constraints.driving_cells[{port!r}]"
+            side = "input"
+        elif side == "output_load":
+            field = f"constraints.output_loads[{port!r}]"
+            side = "output"
         elif side == "report":
             field = f"constraints.report_ports[{port!r}]"
         elif side == "false_path":

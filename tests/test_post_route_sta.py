@@ -754,6 +754,62 @@ def test_spef_net_names_parses_d_net_lines(tmp_path):
     assert names == ["net_a", "net_b[3]"]
 
 
+def test_spef_net_names_resolves_name_map(tmp_path):
+    """Issue #3742: OpenROAD's ``write_spef`` declares nets as
+    ``*D_NET *<n> <cap>`` with the names in a ``*NAME_MAP``; the recovered name
+    set must be the design-side names, not the ``*<n>`` indices."""
+    spef_path = tmp_path / "top.spef"
+    spef_path.write_text(
+        '*SPEF "ieee 1481-1998"\n'
+        '*DESIGN "top"\n'
+        '*DESIGN_FLOW "NAME_SCOPE LOCAL"\n'
+        "*DIVIDER /\n"
+        "*DELIMITER :\n"
+        "*BUS_DELIMITER []\n"
+        "*T_UNIT 1 PS\n"
+        "*C_UNIT 1 FF\n"
+        "\n"
+        "*NAME_MAP\n"
+        "*1 clk\n"
+        "*2 data\\[0\\]\n"
+        "*3 u_sub\\/net\n"
+        "*4 u_sub/inst\n"
+        "\n"
+        "*PORTS\n"
+        "*1 I\n"
+        "*2 O\n"
+        "\n"
+        "*D_NET *1 0.5\n"
+        "*CONN\n"
+        "*P *1 I\n"
+        "*END\n"
+        "*D_NET *2 0.25\n"
+        "*CONN\n"
+        "*END\n"
+        "*D_NET *3 0.25\n"
+        "*CONN\n"
+        "*END\n"
+        "*D_NET literal_net 0.1\n"
+        "*CONN\n"
+        "*END\n",
+        encoding="utf-8",
+    )
+
+    names = post_route_sta._spef_net_names(str(spef_path))
+
+    assert names == ["clk", "data[0]", "literal_net", "u_sub/net"]
+
+
+def test_spef_net_names_translates_non_slash_divider(tmp_path):
+    spef_path = tmp_path / "top.spef"
+    spef_path.write_text(
+        "*DIVIDER .\n*DELIMITER :\n*NAME_MAP\n*1 u_a.n1\n*D_NET *1 0.1\n*END\n",
+        encoding="utf-8",
+    )
+
+    assert post_route_sta._spef_net_names(str(spef_path)) == ["u_a/n1"]
+
+
 def test_unescape_spef_name_reverses_extract_spef_escaping():
     """`_unescape_spef_name` must be the exact inverse of
     `extract_spef.py`'s `_spef_name()` -- imported directly (not
@@ -3460,6 +3516,206 @@ def test_port_check_error_message_mixed_rows_keep_delay_prefix():
     assert message.startswith("per-port I/O delay constraint(s) rejected: ")
     assert "constraints.input_transitions['nope']" in message
     assert "constraints.input_delays['bus']" in message
+
+
+# -- driving cell / output load (issue #3742) -------------------------------- #
+
+
+def test_validate_boundary_omitted_and_empty_are_none():
+    assert post_route_sta._validate_boundary({}, "clk", None, None) is None
+    assert (
+        post_route_sta._validate_boundary(
+            {"driving_cells": {}, "output_loads": {}}, "clk", None, None
+        )
+        is None
+    )
+
+
+def test_validate_boundary_accepts_all_fields():
+    boundary = post_route_sta._validate_boundary(
+        {
+            "driving_cell": {"cell": "sky130_fd_sc_hd__buf_2", "pin": "X"},
+            "driving_cells": {
+                "d[0]": {"cell": "c", "pin": "Y", "input_pin": "A"},
+            },
+            "output_load_pf": 0,
+            "output_loads": {"q": 0.02},
+        },
+        "clk",
+        None,
+        {"rst": 0.1},
+    )
+    assert boundary == {
+        "driving_cell": {"cell": "sky130_fd_sc_hd__buf_2", "pin": "X"},
+        "driving_cells": {"d[0]": {"cell": "c", "pin": "Y", "input_pin": "A"}},
+        "output_load_pf": 0.0,
+        "output_loads": {"q": 0.02},
+    }
+
+
+@pytest.mark.parametrize(
+    ("constraints", "message"),
+    [
+        ({"driving_cell": "buf"}, "driving_cell must be a JSON object"),
+        ({"driving_cell": {"cell": "buf"}}, r"driving_cell\.pin is required"),
+        ({"driving_cell": {"pin": "X"}}, r"driving_cell\.cell is required"),
+        ({"driving_cell": {"cell": "a b", "pin": "X"}}, "literal liberty name"),
+        ({"driving_cell": {"cell": "[a]", "pin": "X"}}, "literal liberty name"),
+        ({"driving_cell": {"cell": "a", "pin": "X", "z": 1}}, "unknown key"),
+        ({"driving_cells": [1]}, "driving_cells must be a JSON object"),
+        (
+            {"driving_cells": {"clk": {"cell": "a", "pin": "X"}}},
+            "must not name the clock port",
+        ),
+        ({"driving_cells": {"a": {"cell": "a"}}}, r"driving_cells\['a'\]\.pin"),
+        ({"output_load_pf": -1}, "output_load_pf must be a finite non-negative"),
+        ({"output_load_pf": True}, "output_load_pf must be a finite non-negative"),
+        ({"output_loads": [1]}, "output_loads must be a JSON object"),
+        ({"output_loads": {"q": None}}, r"output_loads\['q'\] must be"),
+        ({"output_loads": {"q": float("nan")}}, r"output_loads\['q'\] must be"),
+        ({"output_loads": {"": 0.1}}, "non-empty port names"),
+        (
+            {
+                "driving_cell": {"cell": "a", "pin": "X"},
+                "input_transition_ns": 0.1,
+            },
+            "cannot be combined",
+        ),
+        (
+            {"driving_cells": {"a": {"cell": "a", "pin": "X"}}},
+            "both name port",
+        ),
+    ],
+)
+def test_validate_boundary_rejects(constraints, message):
+    with pytest.raises(PostRouteStaError, match=message):
+        post_route_sta._validate_boundary(
+            constraints,
+            "clk",
+            constraints.get("input_transition_ns"),
+            {"a": 0.1},
+        )
+
+
+def test_boundary_lines_none_emit_nothing_and_tcl_unchanged():
+    assert post_route_sta._boundary_lines("clk", None, None) == []
+    base = post_route_sta._request_io_delay_lines("clk", 0.2, 0.3, None, None)
+    assert (
+        post_route_sta._request_io_delay_lines(
+            "clk", 0.2, 0.3, None, None, boundary=None
+        )
+        == base
+    )
+
+
+def test_boundary_lines_emit_driving_cell_and_load():
+    boundary = {
+        "driving_cell": {"cell": "buf_2", "pin": "X"},
+        "driving_cells": {"d[0]": {"cell": "inv_1", "pin": "Y", "input_pin": "A"}},
+        "output_load_pf": 0.05,
+        "output_loads": {"q": 0.2},
+    }
+    text = "\n".join(post_route_sta._boundary_lines("clk", boundary, {"rst": 0.1}))
+    assert "set klt_drive_mapped [list d\\[0\\] rst]" in text
+    assert "set_driving_cell -lib_cell buf_2 -pin X $klt_drive_default_ports" in text
+    assert (
+        "set_driving_cell -lib_cell inv_1 -pin Y -from_pin A "
+        "[dict get $klt_ports_by_name d\\[0\\]]"
+    ) in text
+    assert "set klt_load_mapped [list q]" in text
+    assert "set_load 0.05 $klt_load_default_ports" in text
+    assert "set_load 0.2 [dict get $klt_ports_by_name q]" in text
+
+
+def test_boundary_map_triggers_port_check_with_new_sides():
+    boundary = {
+        "driving_cells": {"a": {"cell": "c", "pin": "X"}},
+        "output_loads": {"q": 0.1},
+    }
+    text = "\n".join(
+        post_route_sta._request_io_delay_lines(
+            "clk", None, None, None, None, boundary=boundary
+        )
+    )
+    assert "driving_cell a {input inout bidirect}" in text
+    assert "output_load q {output inout bidirect}" in text
+    assert text.index("klt_port_problem") < text.index("set_driving_cell")
+
+
+def test_port_check_error_message_names_boundary_fields():
+    message = post_route_sta._port_check_error_message(
+        [("driving_cell", "nope", "not_found"), ("output_load", "d", "direction_input")]
+    )
+    assert "constraints.driving_cells['nope']: no port" in message
+    assert (
+        "constraints.output_loads['d']: port direction is 'input', not an output"
+        in message
+    )
+
+
+@pytest.mark.parametrize("mode", ["def", "verilog"])
+def test_run_sta_boundary_emitted_in_both_modes(tmp_path, monkeypatch, mode):
+    constraints = {
+        "clock_port": "clk",
+        "clock_period_ns": 1.1,
+        "driving_cell": {"cell": "buf_2", "pin": "X"},
+        "output_load_pf": 0.03,
+    }
+    if mode == "def":
+        request_path = _setup_success_env(
+            tmp_path, monkeypatch, constraints=constraints
+        )
+    else:
+        request_path = _setup_verilog_success_env(
+            tmp_path, monkeypatch, constraints=constraints
+        )
+    _stub_openroad_success(monkeypatch)
+
+    run_sta(request_path)
+
+    script = _sta_script_text(tmp_path)
+    assert "set_driving_cell -lib_cell buf_2 -pin X" in script
+    assert "set_load 0.03 $klt_load_default_ports" in script
+
+
+@pytest.mark.parametrize("mode", ["def", "verilog"])
+def test_run_sta_without_boundary_tcl_unchanged(tmp_path, monkeypatch, mode):
+    constraints = dict(_IO_DELAY_CONSTRAINTS)
+    if mode == "def":
+        request_path = _setup_success_env(
+            tmp_path, monkeypatch, constraints=constraints
+        )
+    else:
+        request_path = _setup_verilog_success_env(
+            tmp_path, monkeypatch, constraints=constraints
+        )
+    _stub_openroad_success(monkeypatch)
+
+    run_sta(request_path)
+
+    script = _sta_script_text(tmp_path)
+    assert "set_driving_cell" not in script
+    assert "set_load" not in script
+    assert "klt_drive" not in script
+
+
+def test_run_sta_boundary_validation_runs_before_engine(tmp_path, monkeypatch):
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        constraints={
+            "clock_port": "clk",
+            "clock_period_ns": 1.1,
+            "driving_cells": {"clk": {"cell": "a", "pin": "X"}},
+        },
+    )
+    calls: list = []
+    monkeypatch.setattr(
+        post_route_sta.subprocess, "run", lambda *a, **k: calls.append(a)
+    )
+    with pytest.raises(PostRouteStaError, match="must not name the clock port"):
+        run_sta(request_path)
+    assert calls == []
 
 
 # -- engine port check ------------------------------------------------------ #
