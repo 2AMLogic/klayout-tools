@@ -2341,6 +2341,16 @@ after every device class on today's roadmap lands — it is a property of
 "connectivity layer with no matching extractor", not of any specific missing
 class.
 
+**Unrecognised ESD structures (issue #3858).** On `--deck sg13g2`, any shape
+on `Recog.esd` (99/30) adds one prose `warnings[]` entry stating that ESD
+structures (`nmoscl_*` clamps, `scr1`, `diodevdd_*`/`diodevss_*` protection
+diodes) have no native recognition and extract as no device, and pointing at
+`klt lvs`'s `"klayout-runset"` backend (the PDK's own LVS runset) for layouts
+that contain them. Native recognition is declined: the upstream ESD diodes use
+size-synthesized terminals, the clamps are keyed on a text label, and `scr1`
+has no upstream LVS extraction. Warning only: no new JSON field, and a layout
+with nothing on 99/30 (or any other deck) is unchanged.
+
 **Unclaimed resistor marker (issue #3138).** A second, distinct `warnings[]`
 string covers a resistor-ID marker the deck *declares* but that no
 `ResistorDevice` claims. `_resolve_resistors` drops a spec whose body region
