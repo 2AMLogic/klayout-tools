@@ -113,6 +113,13 @@ one) — the "new optional member, absent when not applicable" rule above.
 No `schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s
 "Threshold-crossing time series (`measurements[].crossings`)".
 
+`analysis.kind: "twoport"` (issue #3338) is a new accepted value of the
+already-shipped `klt sim` `analysis.kind`, with its own `ports`/`freq` fields.
+Every request valid before is unchanged; the *response* gains only an optional
+per-corner `twoport` object and an optional `artifacts.twoport_s2p` path,
+present only for a two-port request. No `schema_version` bump. See
+[`docs/cli/sim.md`](cli/sim.md)'s "Two-port S-parameters".
+
 `measurements[].transfer` (issues #2923, #3088) gains three `metric` tokens —
 `phase_margin_min_deg`, `gain_margin_min_db`, `encirclement_count` — that reduce
 the AC ratio at **every** crossing. Additive only: the six earlier tokens and

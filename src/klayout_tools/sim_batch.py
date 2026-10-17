@@ -102,7 +102,13 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
-from . import _provenance, remote_transport, sim_staging, sim_transfer_meas
+from . import (
+    _provenance,
+    remote_transport,
+    sim_staging,
+    sim_transfer_meas,
+    sim_twoport,
+)
 from .remote_launcher import (
     ASSUMED_THREADS_PER_CORNER,
     RemoteLaunchError,
@@ -626,8 +632,8 @@ def _runner_gate_release(version: str) -> str | None:
 #: ``v0.7.0`` too, so ``0.7.1`` is likewise its first release segment, as is
 #: ``stimulus`` (the declarative timed stimulus block, #2977), and
 #: ``dual_injection`` (``analysis.passes`` / ``measurements[].tian``,
-#: #3159/#3160/#3161), and ``complex_vectors`` (``options.complex_vectors``,
-#: #3337).
+#: #3159/#3160/#3161), ``complex_vectors`` (``options.complex_vectors``,
+#: #3337), and ``twoport`` (``analysis.kind: "twoport"``, #3338).
 _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
     "analysis_steps": (
         (0, 7, 1),
@@ -653,6 +659,10 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
             (request.get("options") or {}).get("complex_vectors") is not None
         ),
     ),
+    "twoport": (
+        (0, 7, 1),
+        lambda request: sim_twoport.is_twoport_request(request.get("analysis")),
+    ),
 }
 
 #: Registry features a runner must be *known* to support (issue #2924): a
@@ -666,9 +676,11 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
 #: an older runner would ignore ``analysis.passes`` and run a single AC pass,
 #: or drop the ``tian`` metrics (#3161). ``complex_vectors`` is mandatory
 #: because an older runner would ignore the option and return no sidecar
-#: (#3337).
+#: (#3337). ``twoport`` is mandatory because an older runner would reject the
+#: unknown analysis kind or, worse, run it as a plain AC with no S-parameters
+#: (#3338).
 _MANDATORY_RUNNER_FEATURES = frozenset(
-    {"transfer", "stimulus", "dual_injection", "complex_vectors"}
+    {"transfer", "stimulus", "dual_injection", "complex_vectors", "twoport"}
 )
 
 

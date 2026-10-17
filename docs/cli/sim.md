@@ -1597,6 +1597,7 @@ release segment:
 | `stimulus` ([#2977](https://github.com/2AMLogic/klayout-tools/issues/2977)) | `stimulus` is present | `0.7.1` (**mandatory**, see below) |
 | `dual_injection` ([#3161](https://github.com/2AMLogic/klayout-tools/issues/3161)) | `analysis.passes` is present or any `measurements[]` entry declares `tian` | `0.7.1` (**mandatory**, see below) |
 | `complex_vectors` ([#3337](https://github.com/2AMLogic/klayout-tools/issues/3337)) | `options.complex_vectors` is present | `0.7.1` (**mandatory**, see below) |
+| `twoport` ([#3338](https://github.com/2AMLogic/klayout-tools/issues/3338)) | `analysis.kind` is `"twoport"` | `0.7.1` (**mandatory**, see below) |
 | `measurements[].expr` | any `measurements[]` entry has `expr` | `0.7.0` |
 | `corners.process[].sections[]` | a `corners.process[]` bundle has an object-form `sections[]` entry | `0.7.0` |
 | `options.ngspice_init` | `options.ngspice_init` is set and non-empty | `0.7.0` |
@@ -1638,7 +1639,7 @@ the next registry entry.
 - Limit: a `0.7.1.devN` runner built before a feature landed looks the same as
   one built after, so it counts as supporting it.
 
-**Mandatory features (`transfer`, [#2924](https://github.com/2AMLogic/klayout-tools/issues/2924); `stimulus`, [#2977](https://github.com/2AMLogic/klayout-tools/issues/2977); `dual_injection`, [#3161](https://github.com/2AMLogic/klayout-tools/issues/3161); `complex_vectors`, [#3337](https://github.com/2AMLogic/klayout-tools/issues/3337)).**
+**Mandatory features (`transfer`, [#2924](https://github.com/2AMLogic/klayout-tools/issues/2924); `stimulus`, [#2977](https://github.com/2AMLogic/klayout-tools/issues/2977); `dual_injection`, [#3161](https://github.com/2AMLogic/klayout-tools/issues/3161); `complex_vectors`, [#3337](https://github.com/2AMLogic/klayout-tools/issues/3337); `twoport`, [#3338](https://github.com/2AMLogic/klayout-tools/issues/3338)).**
 A runner that predates `measurements[].transfer` would drop the metric (and one
 that predates `stimulus` would simulate with the digital control lines
 undriven), so
@@ -2868,6 +2869,90 @@ report byte-identical. On `remote`/`batch` the sidecar returns through the
 ordinary artifact install (paths rewritten to the local artifacts directory),
 and `complex_vectors` is a **mandatory** runner feature (minimum `0.7.1`). A
 changed `complex_vectors` invalidates a `--resume` checkpoint.
+
+### Two-port S-parameters: `analysis.kind: "twoport"` (issue #3338)
+
+A first-class small-signal two-port acquisition: no `.control` block, no
+sentinel `tran`/`.meas`, no log scraping. Declare two ports and a frequency
+grid; `klt sim` compiles the two-excitation AC deck itself and reports
+per-frequency complex S-parameters.
+
+```json
+{
+  "netlist": "amp.spice",
+  "analysis": {
+    "kind": "twoport",
+    "ports": [{"p": "in",  "n": "0", "z0": 50},
+              {"p": "out", "n": "0", "z0": 50}],
+    "freq": {"sweep": "dec", "points": 20, "start": 1e6, "stop": 1e9}
+  }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `ports` | Exactly two `{"p", "n", "z0"}` objects. `p` is the signal node (not ground), `n` the reference node (`"0"`/`"gnd"` or any node), `z0` the real positive reference impedance in ohms. Both ports must share one `z0` (Touchstone 1.1 has a single scalar reference impedance); differing values are rejected. |
+| `freq` | `sweep` (`"lin"` or `"dec"`), `points` (positive integer; per decade for `dec`, total for `lin`), `start` (> 0 Hz) and `stop` (> `start`; a one-point `lin` sweep needs `stop == start`). |
+
+Everything is validated before any engine launch: missing or extra ports,
+non-numeric or non-positive `z0`, a port with `p == n` or `p` on ground, two
+ports on one signal node, a bad grid, unknown keys, and `twoport` combined with
+`analysis_steps` are all request errors. `measurements[]`, `options.waveforms`,
+`--plot` and `engine: "xyce"` are refused for a two-port request (each corner
+runs two AC excitations, so a single measurement or waveform would read only
+one of them). Ngspice only.
+
+**Deck.** For each port `k` the generated deck adds `Rkltp<k>` (value `z0`) in
+series with `Vkltp<k>` (AC magnitude 0) between the port's `p` and `n` nodes.
+The `.control` block then runs one `ac` per excitation (`alter Vkltp<k> ac = 1`,
+the other source 0), each in a fresh plot, and dumps the port voltages
+`V_j = v(p_j) - v(n_j)`. With a 1 V source behind `z0`, and the shared `z0`:
+
+```
+excite port k:   S_kk = 2 V_k - 1        S_jk = 2 V_j   (j != k)
+```
+
+The port terminations are part of the circuit at DC as well (a `z0` to the
+`n` node through an AC-only source), so bias the netlist through or around
+them. A port node that the netlist never uses is simply an open port: it is not
+an error.
+
+**Report.** Each corner gains an additive `twoport` object, and
+`artifacts.twoport_s2p` names a Touchstone 1.1 `.s2p` sidecar (`# HZ S RI R
+<z0>`, columns `freq S11 S21 S12 S22`, the same layout `klt mom --touchstone`
+writes):
+
+```json
+"twoport": {
+  "ports": [{"p": "in", "n": "0", "z0": 50.0}, {"p": "out", "n": "0", "z0": 50.0}],
+  "z0_ohm": 50.0,
+  "points": 41,
+  "frequency_hz": [1000000.0, "..."],
+  "s_parameters": {
+    "s11": {"real": ["..."], "imag": ["..."]},
+    "s21": {"real": ["..."], "imag": ["..."]},
+    "s12": {"real": ["..."], "imag": ["..."]},
+    "s22": {"real": ["..."], "imag": ["..."]}
+  }
+}
+```
+
+The `.s2p` is the result, so a two-port request forces `options.keep_artifacts`
+on. A corner whose rawfile is missing, whose plot is not an AC analysis, whose
+port voltage is absent or non-finite, or whose two excitations disagree on the
+frequency axis is `error` with a `code: "measurement"` diagnostic
+(`[twoport_missing]`, `[twoport_raw_invalid]`, `[twoport_non_finite]`,
+`[twoport_axis_mismatch]`) and an empty `twoport` (zero points), never `pass`.
+Accuracy: a series 100 ohm resistor between two 50 ohm ports reproduces
+`S11 = R/(R+2 z0) = 0.5` and `S21 = 2 z0/(R+2 z0) = 0.5` to better than 1e-9;
+the test suite also checks a shunt resistor and a series-R/shunt-C low-pass
+against their closed forms (1e-6 absolute).
+
+On `remote`/`batch` the `.s2p` returns through the ordinary artifact install
+(paths rewritten to the local artifacts directory) and the S arrays ride the
+returned report; `twoport` is a **mandatory** runner feature (minimum `0.7.1`).
+Requests without `kind: "twoport"` are unchanged. Out of scope: noise,
+NF, stability factors (child C of #3029), mixed-mode and N > 2 ports.
 
 ### Waveform size guard: `options.waveform_max_bytes` (issue #3211)
 
