@@ -1420,6 +1420,17 @@ the remote job (`job_id`, instance, lifecycle). It also states that generator
 correctness and the artifact's topical relevance are not checked. A
 nondeterministic generator reads as `stale_artifact`.
 
+**`--check` of an executed report.** Re-grading submits a new Spot job, so the
+`remote` block (`job_id`, instance, lifecycle, `elapsed_seconds`, ...) differs
+on every run. `--check` therefore ignores the whole `execution.remote` block
+(and `detail.generator_execution.remote` on a failed row); it is neither drift
+nor `doc_drift`. Everything else stays compared, so a changed `output_hash`,
+`script_sha256`, `input_tree` or `command` still reports `drifted`. Pass the
+same `--allow-generator-exec --generator-approvals` to `--check` as to the
+render: without them the check re-grades the nonexecuting attestation, so
+`executed_by_klt` flips from `true` to `false` and the check reports
+`drifted`.
+
 **Limitations.** Published-image tool compatibility, fleet capacity and live
 execution and collection receipts have not been established. Fixtures and a
 fake transport exercise this code; it does not claim deployed generator

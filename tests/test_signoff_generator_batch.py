@@ -655,3 +655,74 @@ def test_cli_flag_outside_tier_mode_is_an_error(tmp_path, capsys):
     code = main(["signoff", "--allow-generator-exec", "--format", "json"])
     assert code != 0
     assert "--manifest/--fleet" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# `--check` round-trip: a per-run Spot identity is not evidence drift (#3690)
+# --------------------------------------------------------------------------- #
+
+
+def _write_report(path: Path, repo: Path, execution=None) -> str:
+    path.write_text(
+        json.dumps(build_tier_report(_manifest(repo), generator_exec=execution))
+    )
+    return str(path)
+
+
+def test_check_of_an_executed_report_does_not_drift_on_remote_identity(
+    repo, fake, tmp_path
+):
+    from klayout_tools.signoff import check_tier_report
+
+    fake.outputs = _good_outputs()
+    execution = _execution(tmp_path)
+    committed = _write_report(tmp_path / "report.json", repo, execution)
+
+    result = check_tier_report(
+        committed, _manifest(repo), generator_exec=execution, repo_root=repo
+    )
+
+    # Two real submissions: the second carries a fresh `job_id`.
+    assert len(fake.submissions()) == 2
+    assert result["status"] == "match", result["drift"]
+
+
+def test_check_of_an_executed_report_still_drifts_on_output_hash(repo, fake, tmp_path):
+    from klayout_tools.signoff import check_tier_report
+
+    fake.outputs = _good_outputs()
+    execution = _execution(tmp_path)
+    path = tmp_path / "report.json"
+    _write_report(path, repo, execution)
+    report = json.loads(path.read_text())
+    item = next(i for i in report["items"] if i["id"] == 1)
+    item["citation"]["artifact_binding"]["regeneration"]["execution"]["output_hash"] = (
+        _sha("tampered")
+    )
+    path.write_text(json.dumps(report))
+
+    result = check_tier_report(
+        str(path), _manifest(repo), generator_exec=execution, repo_root=repo
+    )
+
+    assert result["status"] == "drifted"
+    assert any("output_hash" in entry["field"] for entry in result["drift"])
+
+
+def test_check_without_the_flag_against_an_executed_report_is_pinned(
+    repo, fake, tmp_path
+):
+    """No `--allow-generator-exec` on the check re-grades the nonexecuting
+    attestation, so `executed_by_klt` flips true -> false. That is a real
+    change in what the evidence claims, so it stays drift."""
+    from klayout_tools.signoff import check_tier_report
+
+    fake.outputs = _good_outputs()
+    committed = _write_report(tmp_path / "report.json", repo, _execution(tmp_path))
+
+    result = check_tier_report(
+        committed, _manifest(repo), generator_exec=None, repo_root=repo
+    )
+
+    assert result["status"] == "drifted"
+    assert any("executed_by_klt" in entry["field"] for entry in result["drift"])
