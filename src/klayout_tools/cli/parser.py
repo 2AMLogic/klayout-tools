@@ -6500,7 +6500,7 @@ def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
         default=None,
         help=(
             "PDK antenna-ratio limit table to check each level's "
-            "antenna_ratio against (currently: sky130). Optional -- omit "
+            "antenna_ratio against (currently: sky130, ihp-sg13g2). Optional -- omit "
             "to still report every level's antenna_ratio, just with "
             "verdict 'unchecked' everywhere. Not validated by argparse -- "
             "an unknown name exits 1 with a clean error, per "
