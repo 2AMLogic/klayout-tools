@@ -984,6 +984,7 @@ def run_synthesize(
     equiv_timeout_s: float | None = None,
     restructure_timing: bool = False,
     restructure_max_iterations: int | None = None,
+    _scratch_run_dir: bool = False,
 ) -> dict[str, Any]:
     """Run the Yosys synthesis declared by the request at ``request_path``.
 
@@ -1055,6 +1056,11 @@ def run_synthesize(
     an optional request ``run_id`` exclusively reserves that directory and
     collisions are errors. Declared inputs are checked for mutation before
     returning; transitive Verilog includes are not snapshotted.
+
+    ``_scratch_run_dir`` is private to :func:`rerun_synthesize_report`: it
+    ignores the request's ``outputs.dir`` (still validated) and uses a fresh
+    ``.klt/synthesize/run-<uuid>/`` directory, so a re-run never collides
+    with the populated stable directory the committed report came from.
     """
     request_state = _input_file_state(request_path)
     request = load_request(request_path)
@@ -1143,7 +1149,9 @@ def run_synthesize(
     # Issue #3466: record which elaboration this is, so two parameterisations
     # of the same sources are distinguishable in provenance.
     provenance["parameters"] = dict(parameters)
-    output_dir = _create_run_directory(request_dir, request)
+    output_dir = _create_run_directory(
+        request_dir, request, ignore_outputs_dir=_scratch_run_dir
+    )
 
     script_path = os.path.join(output_dir, f"synth_{hdl_toplevel}.ys")
     netlist_path = os.path.join(output_dir, f"{hdl_toplevel}_synth.v")
@@ -1419,15 +1427,18 @@ def run_synthesize(
     return response
 
 
-def _create_run_directory(request_dir: str, request: dict[str, Any]) -> str:
+def _create_run_directory(
+    request_dir: str, request: dict[str, Any], *, ignore_outputs_dir: bool = False
+) -> str:
     """Exclusively claim a retained directory; an existing ID is never reused.
 
     ``outputs.dir`` (issue #3795) names the run directory itself, relative to
     the request file's directory; it may be absent or an existing *empty*
-    directory, never a populated one.
+    directory, never a populated one. ``ignore_outputs_dir`` (``--rerun``)
+    skips that claim and allocates a fresh ``run-<uuid>`` directory instead.
     """
     _validate_outputs(request, "request")
-    out_dir = request.get("outputs", {}).get("dir")
+    out_dir = None if ignore_outputs_dir else request.get("outputs", {}).get("dir")
     if out_dir is not None:
         output_dir = os.path.normpath(os.path.join(request_dir, out_dir))
         try:
@@ -3759,6 +3770,10 @@ def rerun_synthesize_report(
     run directory, and that refusal (a :class:`SynthesizeError` naming the
     directory) is surfaced unchanged rather than swallowed -- "could not
     verify" is the honest answer there, never a false ``"match"``.
+    A request using ``outputs.dir`` *can* be re-run: the re-run ignores that
+    stable directory (which the first run left populated) and writes into a
+    fresh ``.klt/synthesize/run-<uuid>/`` scratch directory instead, so the
+    committed artifacts are never touched.
 
     Raises :class:`SynthesizeError` for a missing/unparseable committed
     report or any error the re-run itself raises -- never a traceback.
@@ -3772,6 +3787,7 @@ def rerun_synthesize_report(
         equiv_timeout_s=equiv_timeout_s,
         restructure_timing=restructure_timing,
         restructure_max_iterations=restructure_max_iterations,
+        _scratch_run_dir=True,
     )
     return build_rerun_result(
         report_path=report_path,

@@ -289,6 +289,19 @@ def test_outputs_dir_second_run_refused(prepared):
         run_synthesize(request)
 
 
+def test_outputs_dir_rerun_matches_in_scratch_dir(prepared):
+    root, request = prepared
+    _set_outputs(request, {"dir": "out"})
+    report = run_synthesize(request)
+    report_path = root / "committed.json"
+    report_path.write_text(json.dumps(report))
+    before = _evidence(root / "out")
+    result = synthesize.rerun_synthesize_report(str(report_path), request)
+    assert result["status"] == "match"
+    assert _evidence(root / "out") == before
+    assert result["fresh"]["run_id"].startswith("run-")
+
+
 def test_outputs_dir_absolute_path_is_external(prepared, tmp_path_factory):
     root, request = prepared
     target = tmp_path_factory.mktemp("elsewhere") / "syn"

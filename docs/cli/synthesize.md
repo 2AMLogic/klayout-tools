@@ -1667,7 +1667,10 @@ recovered from the committed report; the CLI passes whatever flags you give
 this invocation, and the corresponding blocks legitimately drift if they
 differ. A request pinning an explicit `run_id` cannot be re-run at all — the
 run directory is retained and never reused — and that refusal surfaces as a
-clean exit `1` ("could not verify"), never a false `"match"`.
+clean exit `1` ("could not verify"), never a false `"match"`. A request using
+`outputs.dir` *can* be re-run: `--rerun` ignores that stable directory (already
+populated by the first run) and writes to a fresh `.klt/synthesize/run-<uuid>/`
+scratch directory, leaving the committed artifacts untouched.
 
 ### Exit codes for `--check` / `--rerun`
 
