@@ -90,6 +90,13 @@ def _recorded_deck_hashes() -> dict[str, str] | None:
     return {str(k): v for k, v in recorded.items() if isinstance(v, str)}
 
 
+def _drc_deck_path(name: str) -> str | None:
+    """Path of ``<name>.drc`` beside the deck modules (issue #3826), or
+    ``None`` for a deck that ships no standalone KLayout DRC deck file."""
+    candidate = Path(__file__).resolve().parent / f"{name}.drc"
+    return str(candidate) if candidate.is_file() else None
+
+
 def _self_release_entries(content_hash: str, deck: str | None) -> list[dict[str, Any]]:
     """History-shaped entries for *this running build's own* release, when the
     generated table does not (yet) cover it (issue #2451).
@@ -125,12 +132,19 @@ def _self_release_entries(content_hash: str, deck: str | None) -> list[dict[str,
         for name in deck_names():
             if deck is not None and name != deck:
                 continue
+            # The deck module and, where one ships, the standalone ``.drc``
+            # file are separate hashed artifacts (issue #3826).
+            drc_path = _drc_deck_path(name)
             if recorded is not None:
-                own_hash = recorded.get(name)
+                own_hashes = [recorded.get(name), recorded.get(f"{name}.drc")]
             else:
-                digest = sha256_file(deck_source_path(name))
-                own_hash = f"sha256:{digest}" if digest is not None else None
-            if own_hash is None or own_hash != content_hash:
+                own_hashes = []
+                for path in (deck_source_path(name), drc_path):
+                    digest = sha256_file(path) if path is not None else None
+                    own_hashes.append(
+                        f"sha256:{digest}" if digest is not None else None
+                    )
+            if content_hash not in own_hashes:
                 continue
             matches.append(
                 {
@@ -200,7 +214,10 @@ def resolve_deck(
         candidates = [
             e
             for e in entries
-            if e.get("deck") == deck and e.get("package_version") == version
+            if e.get("deck") == deck
+            and e.get("package_version") == version
+            # The deck module, not its standalone ``.drc`` artifact (#3826).
+            and "artifact" not in e
         ]
         if not candidates:
             raise DeckHistoryError(_not_found_message(deck=deck, version=version))
@@ -215,6 +232,10 @@ def resolve_deck(
         "git_commit": match["git_commit"],
         "package_version": match["package_version"],
     }
+    if match.get("artifact"):
+        # Additive (issue #3826): the hash identified the standalone DRC deck
+        # file rather than the deck module.
+        report["artifact"] = match["artifact"]
     if match.get("self_identified"):
         # Additive (issue #2451): the table did not cover this build's own
         # release; the build vouched for itself.
@@ -267,6 +288,26 @@ def is_deck_hash_released(deck: str | None, content_hash: str | None) -> bool | 
     return bool(_self_release_entries(content_hash, deck))
 
 
+def _release_status(
+    deck_name: str, content_hash: str | None
+) -> tuple[bool | None, dict[str, Any] | None]:
+    """``(released, release)`` for one hashed deck artifact -- the tri-state
+    of :func:`is_deck_hash_released` plus the newest matching release's
+    ``{git_tag, git_commit, package_version}`` (``None`` unless released)."""
+    released = is_deck_hash_released(deck_name, content_hash)
+    if not released:
+        return released, None
+    try:
+        match = resolve_deck(content_hash=content_hash, deck=deck_name)
+    except DeckHistoryError:
+        return released, None
+    return released, {
+        "git_tag": match["git_tag"],
+        "git_commit": match["git_commit"],
+        "package_version": match["package_version"],
+    }
+
+
 def deck_info(name: str | None = None) -> dict[str, Any]:
     """The *currently installed* build's own deck content hash, structural
     device-class coverage, and release status -- without running a live
@@ -312,6 +353,12 @@ def deck_info(name: str | None = None) -> dict[str, Any]:
       ``{git_tag, git_commit, package_version}`` of the (newest) matching
       release, the same information :func:`resolve_deck` would return for
       this hash; ``None`` otherwise.
+    - ``drc_deck`` -- present only for a deck that ships a standalone KLayout
+      DRC deck file (``asap7.drc``; omitted otherwise, never ``null``)
+      (issue #3826). That file is a different artifact from the deck module
+      above, so it carries its own ``{path_kind, content_hash, released,
+      release}`` with the same semantics as the fields of the same name;
+      ``path_kind`` is ``"packaged"`` (the file inside this install).
     """
     # Imported lazily, not at module scope: `_provenance` itself imports
     # `is_deck_hash_released` from this module, so a module-level import here
@@ -336,30 +383,27 @@ def deck_info(name: str | None = None) -> dict[str, Any]:
 
         digest = sha256_file(deck_source_path(deck_name))
         content_hash = f"sha256:{digest}" if digest is not None else None
-        released = is_deck_hash_released(deck_name, content_hash)
+        released, release = _release_status(deck_name, content_hash)
 
-        release: dict[str, Any] | None = None
-        if released:
-            try:
-                match = resolve_deck(content_hash=content_hash, deck=deck_name)
-            except DeckHistoryError:
-                release = None
-            else:
-                release = {
-                    "git_tag": match["git_tag"],
-                    "git_commit": match["git_commit"],
-                    "package_version": match["package_version"],
-                }
-
-        decks.append(
-            {
-                "deck": deck_name,
-                "content_hash": content_hash,
-                "device_classes": list(deck.device_classes),
-                "released": released,
-                "release": release,
+        entry: dict[str, Any] = {
+            "deck": deck_name,
+            "content_hash": content_hash,
+            "device_classes": list(deck.device_classes),
+            "released": released,
+            "release": release,
+        }
+        drc_path = _drc_deck_path(deck_name)
+        if drc_path is not None:
+            drc_digest = sha256_file(drc_path)
+            drc_hash = f"sha256:{drc_digest}" if drc_digest is not None else None
+            drc_released, drc_release = _release_status(deck_name, drc_hash)
+            entry["drc_deck"] = {
+                "path_kind": "packaged",
+                "content_hash": drc_hash,
+                "released": drc_released,
+                "release": drc_release,
             }
-        )
+        decks.append(entry)
 
     return {"schema_version": 1, "decks": decks}
 

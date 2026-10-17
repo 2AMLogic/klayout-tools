@@ -250,6 +250,18 @@ klt deck info --deck gf180mcu # one deck only
   `true`, the `{git_tag, git_commit, package_version}` of the release that
   shipped this exact hash (the same shape `klt deck resolve` returns).
 
+- `drc_deck` — present only for a deck that ships a standalone KLayout DRC
+  deck file (today `asap7`, `asap7.drc`); omitted, never `null`, for the
+  others (issue #3826). It is a different artifact from the deck module that
+  `content_hash` hashes, so it carries its own identity:
+  `{path_kind, content_hash, released, release}` with the same meaning as the
+  top-level fields of those names. `path_kind` is `"packaged"` (the file
+  inside this install). `content_hash` is the value
+  `provenance.deck.content_hash` reports for a DRC run of that deck, so
+  `klt deck resolve --content-hash` resolves it. Additive: `schema_version`
+  stays `1`. In text output the two artifacts print on separate lines
+  labelled `extraction deck` / `drc deck`.
+
 Omitting `--deck` reports every registered deck in one call — useful for a
 "what does this install actually ship" sanity check right after `pip
 install klayout-tools` (or a from-source build), before running any
@@ -567,7 +579,13 @@ git commit -m "chore(decks): regenerate deck history table for vX.Y.Z"
 ```
 
 Idempotent — re-running it against unchanged tag history reproduces
-byte-identical output, so it is safe to run speculatively.
+byte-identical output, so it is safe to run speculatively. A standalone
+`<name>.drc` deck file at a tag gets its own entry marked
+`"artifact": "drc_deck"` (issue #3826), so a DRC run's
+`provenance.deck.released` is `true` for a released `.drc` hash; the
+`--deck`/`--version` lookup still returns the deck module's entry. The
+already-published `0.7.0` wheel's own history table predates this, so its
+`.drc` hash reports `released: false` there.
 
 Coverage is **released** revisions only: an unreleased dev checkout's deck
 hash will not resolve until it has shipped in a tagged release — expected,
