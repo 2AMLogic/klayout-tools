@@ -877,10 +877,39 @@ def _evaluate_category_set_assertion(
     }
 
 
+def _packaged_asap7_unchecked_rules(
+    deck_file: str, layout: Any
+) -> list[dict[str, str]]:
+    """``coverage.unchecked_rules`` for a run of the packaged ASAP7 deck
+    (issue #3807): areas the deck knowingly does not check (PAD), named only
+    when the layout has shapes on the layer, like the curated engine's
+    ``unchecked_rules``. A different deck file yields none -- its content
+    must match the packaged deck byte for byte."""
+    from .decks import asap7_rules
+
+    if sha256_file(deck_file) != sha256_file(str(asap7_rules.DECK_PATH)):
+        return []
+    present = {
+        (info.layer, info.datatype)
+        for index, info in zip(
+            layout.layer_indexes(), layout.layer_infos(), strict=True
+        )
+        if any(not cell.shapes(index).is_empty() for cell in layout.each_cell())
+    }
+    return [
+        {"rule": rule, "layer": f"{layer}/{datatype}", "description": description}
+        for rule, (layer, datatype, description) in sorted(
+            asap7_rules.UNCHECKED_AREAS.items()
+        )
+        if (layer, datatype) in present
+    ]
+
+
 def _klayout_engine_coverage(
     rule_counts: dict[str, int],
     rule_categories: list[str],
     coverage_assertion: dict[str, Any] | None,
+    unchecked_rules: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """The klayout engine's ``coverage`` block. Categories are declarations,
     not execution instrumentation, unless the caller's satisfied
@@ -913,7 +942,7 @@ def _klayout_engine_coverage(
         "layers_in_stream_without_rules": [],
         "rules_skipped": [],
         "voltage_domain_warnings": [],
-        "unchecked_rules": [],
+        "unchecked_rules": unchecked_rules or [],
         "deck_scope": [],
         **build_check_coverage(checked=checked, unknown=unknown),
     }
@@ -1446,7 +1475,10 @@ def run_drc_klayout_engine(
     )
 
     coverage = _klayout_engine_coverage(
-        rule_counts, rule_categories, coverage_assertion
+        rule_counts,
+        rule_categories,
+        coverage_assertion,
+        _packaged_asap7_unchecked_rules(deck_file, layout),
     )
     rollup = coverage_rollup({"coverage": coverage}, failed=bool(violations))
     return {
