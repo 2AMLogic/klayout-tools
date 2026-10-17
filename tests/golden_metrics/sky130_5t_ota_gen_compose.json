@@ -14,7 +14,7 @@
     "drc.coverage.skipped_count": 0,
     "drc.coverage.unchecked_rules_count": 0,
     "drc.coverage.unknown_count": 0,
-    "drc.coverage.unmodeled_rules_count": 17,
+    "drc.coverage.unmodeled_rules_count": 29,
     "drc.coverage.voltage_domain_warnings_count": 0,
     "drc.dbu_um": 0.001,
     "drc.metrics.drc__error__count": 0,
