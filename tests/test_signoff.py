@@ -2355,6 +2355,78 @@ def test_sim_empty_corner_matrix_never_counts_as_a_passing_check(tmp_path):
     assert check["detail"]["nothing_checked_reasons"] == ["empty_corner_matrix"]
 
 
+def _sim_with_counts(declared, limited, **extra):
+    coverage = {
+        "corners_simulated": 1,
+        "measurements_declared": declared,
+        "measurements_with_limits": limited,
+        "unrecognized_limit_keys": [],
+        "nothing_checked": False,
+        "nothing_checked_reasons": [],
+    }
+    return {**SIM_PASS_ENVELOPE, "coverage": coverage, **extra}
+
+
+def test_sim_with_no_limited_measurement_never_counts_as_a_passing_check(tmp_path):
+    """Issue #3769: an all-observation sim envelope applied no spec bound."""
+    path = _write(tmp_path, "sim.json", _sim_with_counts(3, 0))
+
+    check = build_signoff([path])["checks"][0]
+
+    assert check["status"] == "pass"
+    assert check["passed"] is False
+    assert check["detail"]["no_limits_checked"] == {
+        "measurements_declared": 3,
+        "measurements_with_limits": 0,
+    }
+
+
+def test_sim_with_one_limited_measurement_still_passes(tmp_path):
+    path = _write(tmp_path, "sim.json", _sim_with_counts(3, 1))
+
+    check = build_signoff([path])["checks"][0]
+
+    assert check["passed"] is True
+    assert "no_limits_checked" not in check["detail"]
+
+
+def test_tier_report_refuses_a_no_limits_item_5_citation(tmp_path):
+    """Issue #3769: item 5 cannot cite an all-observation sim envelope. It
+    renders `unmet` with the dedicated reason, and a limited one still meets."""
+    path = _write(tmp_path, "sim.json", _sim_with_counts(3, 0))
+
+    result = build_tier_report(_manifest(evidence={"5": path}))
+
+    item_5 = next(item for item in result["items"] if item["id"] == 5)
+    assert item_5["status"] == "unmet"
+    assert item_5["reason"] == "no_limits_checked"
+    assert item_5["citation"] is None
+
+
+def test_tier_report_still_meets_item_5_for_a_limited_sim(tmp_path):
+    path = _write(tmp_path, "sim.json", _sim_with_counts(3, 1))
+
+    result = build_tier_report(_manifest(evidence={"5": path}))
+
+    item_5 = next(item for item in result["items"] if item["id"] == 5)
+    assert item_5["status"] == "met"
+
+
+def test_sim_without_coverage_block_grades_as_before(tmp_path):
+    envelope = {k: v for k, v in SIM_PASS_ENVELOPE.items() if k != "coverage"}
+    path = _write(tmp_path, "sim.json", envelope)
+
+    assert build_signoff([path])["checks"][0]["passed"] is True
+
+
+def test_sim_capture_only_with_no_measurements_declared_not_newly_refused(tmp_path):
+    path = _write(tmp_path, "sim.json", _sim_with_counts(0, 0))
+
+    check = build_signoff([path])["checks"][0]
+
+    assert "no_limits_checked" not in check["detail"]
+
+
 def test_pex_empty_delta_never_counts_as_a_passing_check(tmp_path):
     path = _write(tmp_path, "pex.json", PEX_NOTHING_CHECKED_ENVELOPE)
 
