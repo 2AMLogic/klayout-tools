@@ -62,6 +62,19 @@ to hand-rolled decks -- a plausible but mis-paired number):
    node reference cannot silently resolve against whichever step happened
    to run last.
 
+Two additions (issue #3055), both resolved in this module so they stay
+backend-agnostic:
+
+- ``analysis.args`` may contain ``${<expr>}`` placeholders over earlier steps'
+  scalar results (``"vin ${coarse.zero - 0.05} ${coarse.zero + 0.05} 0.001"``):
+  the expression is ``let`` into a scalar in the step's fresh plot and the
+  analysis line reads it with ngspice's ``$&`` expansion, so a fine sweep can
+  be centred on a feature a coarse step located. A step whose referenced
+  result is unavailable is reported failed (``derived_input_unavailable``)
+  and never runs against a stale window.
+- A measurement entry with ``"intermediate": true`` is ``let`` only: usable
+  by later ``expr`` entries, but never printed, graded, or reported.
+
 Failure propagation is decided in Python, not inferred from ngspice output: a
 measurement whose step failed, or any of whose inputs produced no value, is
 reported ``status: "error"`` with a ``derived_input_unavailable`` (or the
@@ -132,6 +145,12 @@ _TOKEN_RE = re.compile(
 #: qualifier -- used only to find a derived measurement's references to an
 #: earlier derived measurement.
 _BARE_NAME_RE = re.compile(r"(?<![\w.$}@])([A-Za-z_][A-Za-z0-9_]*)\b(?!\s*[.(])")
+
+#: A ``${<expr>}`` placeholder inside a step's ``analysis.args`` (issue
+#: #3055): ``<expr>`` combines earlier steps' scalar results through
+#: ``<step>.<measurement>`` references and is evaluated into a control-scope
+#: scalar the analysis line then reads with ``$&``.
+_ARG_REF_RE = re.compile(r"\$\{([^{}]*)\}")
 
 #: ``echo`` marker emitted around each step's analysis: ``klt_step_begin 0
 #: unknown1`` / ``klt_step_end 0 op1``.
@@ -262,11 +281,21 @@ def resolve_analysis_steps(
             "kind": step["kind"],
             "measurements": {spec["local_name"].lower(): spec for spec in step_specs},
         }
+        if any(spec.get("intermediate") for spec in step_specs):
+            # Declared order matters once unprinted `let`s are interleaved
+            # with the measurements that read them.
+            step["lines"] = [line for spec in step_specs for line in spec["deck_lines"]]
         steps.append(step)
-        flattened.extend(step_specs)
-    flattened.extend(_resolve_derived_measurements(request, known))
+        flattened.extend(spec for spec in step_specs if not spec.get("intermediate"))
+    derived = _resolve_derived_measurements(request, known)
+    analysis: dict[str, Any] = {"kind": STEPS_KIND, "args": "", "steps": steps}
+    if any(spec.get("intermediate") for spec in derived):
+        analysis["derived_lines"] = [
+            line for spec in derived for line in spec["deck_lines"]
+        ]
+    flattened.extend(spec for spec in derived if not spec.get("intermediate"))
     _check_log_keys_unique(flattened)
-    return {"kind": STEPS_KIND, "args": "", "steps": steps}, flattened
+    return analysis, flattened
 
 
 def _resolve_step(
@@ -288,7 +317,7 @@ def _resolve_step(
             "case-insensitively): step names must be unique"
         )
     kind, args = _resolve_step_analysis(raw.get("analysis"), name)
-    resolved: dict[str, Any] = {
+    step: dict[str, Any] = {
         "name": name,
         "kind": kind,
         "args": args,
@@ -301,8 +330,55 @@ def _resolve_step(
         if reset:
             # Only present when true, so a no-reset sequence resolves (and
             # fingerprints) exactly as before.
-            resolved["reset"] = True
-    return resolved
+            step["reset"] = True
+    _resolve_arg_refs(step, index, known)
+    return step
+
+
+def _resolve_arg_refs(
+    step: dict[str, Any], index: int, known: dict[str, dict[str, Any]]
+) -> None:
+    """Issue #3055: turn each ``${<expr>}`` in the step's ``analysis.args``
+    into a control-scope scalar. Adds ``deck_args`` (the args with ``$&``
+    reads), ``arg_lets`` (the ``let`` lines that define them) and
+    ``arg_inputs`` (the earlier measurements the window depends on) to
+    ``step``; adds nothing when the args hold no placeholder, so every
+    pre-existing step keeps its exact shape and deck."""
+    matches = list(_ARG_REF_RE.finditer(step["args"]))
+    if not matches:
+        if "${" in step["args"]:
+            raise _error(
+                f"step {step['name']!r}: analysis.args has an unterminated or "
+                "nested '${...}' placeholder"
+            )
+        return
+    owner = f"step {step['name']} analysis.args"
+    lets: list[str] = []
+    inputs: list[str] = []
+    pieces: list[str] = []
+    cursor = 0
+    for k, match in enumerate(matches):
+        deck_expr, refs, spectrum = _substitute_refs(
+            match.group(1), known, owner=owner, allow_intermediate=False
+        )
+        if spectrum:
+            raise _error(
+                f"{owner}: a '<step>.spectrum.<vector>' reference cannot "
+                "define a sweep window"
+            )
+        if not refs:
+            raise _error(
+                f"{owner}: '${{{match.group(1)}}}' references no earlier step "
+                "result -- write a literal number, or reference "
+                "'<step>.<measurement>'"
+            )
+        var = f"klt_arg_{index}_{k}"
+        lets.append(f"let {var} = {deck_expr}")
+        inputs.extend(ref for ref in refs if ref not in inputs)
+        pieces.append(step["args"][cursor : match.start()] + f"$&{var}")
+        cursor = match.end()
+    pieces.append(step["args"][cursor:])
+    step.update({"deck_args": "".join(pieces), "arg_lets": lets, "arg_inputs": inputs})
 
 
 def _resolve_step_analysis(analysis: Any, step: str) -> tuple[str, str]:
@@ -440,6 +516,7 @@ def _resolve_step_measurements(
         _refuse_optional(spec)
         _refuse_cycle_mean(spec)
         _refuse_noise(spec)
+        _check_intermediate(spec, f"step {step['name']!r}")
         local = spec["name"]
         if not isinstance(local, str) or not _NAME_RE.match(local):
             raise _error(
@@ -455,6 +532,42 @@ def _resolve_step_measurements(
         local_names.add(local.lower())
         resolved.append(_flatten_step_measurement(spec, step, index, known))
     return resolved
+
+
+def _check_intermediate(spec: dict[str, Any], where: str) -> None:
+    """Issue #3055: ``intermediate`` marks an ``expr`` that is ``let`` but
+    never printed, graded, or reported -- so it is refused alongside anything
+    that only means something for a reported result."""
+    flag = spec.get("intermediate")
+    if flag is None:
+        return
+    name = spec.get("name")
+    if not isinstance(flag, bool):
+        raise _error(f"{where}: measurement {name!r}: 'intermediate' must be a boolean")
+    if not flag:
+        return
+    if spec.get("expr") is None:
+        raise _error(
+            f"{where}: measurement {name!r}: an 'intermediate' must be an "
+            "'expr' (a .meas card always reports a value)"
+        )
+    for field in ("limits", "plausible_range"):
+        if spec.get(field) is not None:
+            raise _error(
+                f"{where}: measurement {name!r} is 'intermediate' (never "
+                f"reported or graded), so it cannot declare {field!r}"
+            )
+
+
+def refuse_scalar_intermediate(measurements_spec: list[dict[str, Any]]) -> None:
+    """``intermediate`` is only defined for ``analysis_steps[]``; on the
+    scalar form it would silently be graded, so refuse it by name."""
+    for spec in measurements_spec:
+        if spec.get("intermediate") is not None:
+            raise _error(
+                f"measurement {spec.get('name')!r}: 'intermediate' is only "
+                "supported with analysis_steps"
+            )
 
 
 def _flatten_step_measurement(
@@ -486,7 +599,11 @@ def _flatten_step_measurement(
             expr, known, owner=f"{step['name']}.{local}"
         )
         first = f"let {local} = {deck_expr}"
-    flat["deck_lines"] = [first, f"let {log_key} = {local}", f"print {log_key}"]
+    if spec.get("intermediate"):
+        flat["intermediate"] = True
+        flat["deck_lines"] = [first]
+    else:
+        flat["deck_lines"] = [first, f"let {log_key} = {local}", f"print {log_key}"]
     if derived_from:
         flat["derived_from"] = derived_from
     if spectrum_steps:
@@ -533,8 +650,36 @@ def _meas_command(card: str, local: str, step: dict[str, Any]) -> str:
     return f"meas {meas_type} {local}{rest}".rstrip()
 
 
+def _note_intermediate_use(
+    meas: dict[str, Any],
+    owner: str,
+    ref: str,
+    references: list[str],
+    allowed: bool,
+    used: list[str] | None,
+) -> None:
+    """A reference to an unreported intermediate: not itself an input, so
+    depend on the reported results it read; refused where a scalar is needed."""
+    if not allowed:
+        raise _error(
+            f"{owner} references {ref}, an 'intermediate' (possibly "
+            "non-scalar, never reported): a sweep window can only use a "
+            "reported scalar measurement"
+        )
+    if used is not None:
+        used.append(meas["name"])
+    for inner in meas.get("derived_from", []):
+        if inner not in references:
+            references.append(inner)
+
+
 def _substitute_refs(
-    expr: str, known: dict[str, dict[str, Any]], *, owner: str
+    expr: str,
+    known: dict[str, dict[str, Any]],
+    *,
+    owner: str,
+    allow_intermediate: bool = True,
+    used_intermediate: list[str] | None = None,
 ) -> tuple[str, list[str], list[str]]:
     """Rewrite every ``<step>.<measurement>`` reference in ``expr`` to that
     step's plot-qualified vector, returning ``(deck_expr, references,
@@ -567,7 +712,16 @@ def _substitute_refs(
                 f"measurement {owner!r} references {step_ref}.{meas_ref}, but "
                 f"step {target['name']!r} declares no measurement {meas_ref!r}"
             )
-        if meas["name"] not in references:
+        if meas.get("intermediate"):
+            _note_intermediate_use(
+                meas,
+                owner,
+                f"{step_ref}.{meas_ref}",
+                references,
+                allow_intermediate,
+                used_intermediate,
+            )
+        elif meas["name"] not in references:
             references.append(meas["name"])
         return "{$klt_plot_" + str(target["index"]) + "}." + meas["local_name"]
 
@@ -626,12 +780,14 @@ def _resolve_derived_measurements(
     _validate_measurement_forms(specs)
     derived_names = [str(spec["name"]) for spec in specs]
     resolved: list[dict[str, Any]] = []
+    intermediates: dict[str, list[str]] = {}
     for position, spec in enumerate(specs):
         name = spec["name"]
         _refuse_crossings(spec)
         _refuse_optional(spec)
         _refuse_cycle_mean(spec)
         _refuse_noise(spec)
+        _check_intermediate(spec, "derived")
         if spec.get("spice") is not None:
             raise _error(
                 f"measurement {name!r}: with analysis_steps, a top-level "
@@ -639,13 +795,16 @@ def _resolve_derived_measurements(
                 ".meas card would run after every step's analysis -- declare "
                 "it in the matching step's own measurements[] instead"
             )
+        used: list[str] = []
         deck_expr, references, spectrum_steps = _substitute_refs(
-            spec["expr"], known, owner=name
+            spec["expr"], known, owner=name, used_intermediate=used
         )
-        references += _derived_name_refs(
-            spec["expr"], name, position, derived_names, known
-        )
-        if not references and not spectrum_steps:
+        for ref in _derived_name_refs(
+            spec["expr"], name, position, derived_names, known, intermediates, used
+        ):
+            if ref not in references:
+                references.append(ref)
+        if not references and not used and not spectrum_steps:
             raise _error(
                 f"measurement {name!r} references no step result: with "
                 "analysis_steps, a top-level measurement combines "
@@ -653,15 +812,14 @@ def _resolve_derived_measurements(
                 '"abs(hi.vout - lo.vout)")'
             )
         flat = {k: v for k, v in spec.items()}
-        flat.update(
-            {
-                "log_key": str(name).lower(),
-                "derived_from": references,
-                "deck_lines": [f"let {name} = {deck_expr}", f"print {name}"],
-            }
-        )
+        flat.update({"log_key": str(name).lower(), "derived_from": references})
         if spectrum_steps:
             flat["spectrum_steps"] = spectrum_steps
+        if spec.get("intermediate"):
+            flat["deck_lines"] = [f"let {name} = {deck_expr}"]
+            intermediates[str(name).lower()] = references
+        else:
+            flat["deck_lines"] = [f"let {name} = {deck_expr}", f"print {name}"]
         resolved.append(flat)
     return resolved
 
@@ -672,6 +830,8 @@ def _derived_name_refs(
     position: int,
     derived_names: list[str],
     known: dict[str, dict[str, Any]],
+    intermediates: dict[str, list[str]],
+    used: list[str],
 ) -> list[str]:
     """Bare references from one derived expression to *other derived*
     measurements (earlier ones only), plus a clear refusal for a bare
@@ -689,7 +849,13 @@ def _derived_name_refs(
                     f"{derived_names[target]!r}, which is not declared before "
                     "it (forward and self references are refused)"
                 )
-            if derived_names[target] not in references:
+            if token in intermediates:
+                # Unreported: depend on what the intermediate itself read.
+                used.append(derived_names[target])
+                references.extend(
+                    r for r in intermediates[token] if r not in references
+                )
+            elif derived_names[target] not in references:
                 references.append(derived_names[target])
             continue
         owners = [s["name"] for s in known.values() if token in s["measurements"]]
@@ -873,6 +1039,37 @@ def _format_value(value: float) -> str:
     return repr(float(value))
 
 
+def _spectrum_plot_lines(index: int) -> list[str]:
+    """Pick the spectra plot of step ``index``. `noise` leaves the integrated
+    plot current; the spectra are in the plot made just before it -- the
+    second-to-last of $plots right after the analysis. A failed solve is
+    blocked in Python (step_failed), so a stale pick there is never graded."""
+    return [
+        f"set klt_pa{index} = none",
+        f"set klt_pb{index} = none",
+        "foreach klt_p $plots",
+        f"set klt_pa{index} = $klt_pb{index}",
+        f"set klt_pb{index} = $klt_p",
+        "end",
+        f"set klt_plot_{index}_spectrum = $klt_pa{index}",
+    ]
+
+
+def _derived_lines(
+    analysis: dict[str, Any], measurements_spec: list[dict[str, Any]]
+) -> list[str]:
+    """Trailing ``setplot new`` block for measurements that span steps."""
+    if "derived_lines" in analysis:
+        return ["setplot new", *analysis["derived_lines"]]
+    derived = [spec for spec in measurements_spec if "step" not in spec]
+    if not derived:
+        return []
+    lines = ["setplot new"]
+    for spec in derived:
+        lines.extend(spec["deck_lines"])
+    return lines
+
+
 def _alter_line(target: str, value: Any) -> str:
     if is_ac_alter_target(target):
         return f"alter {target[: -len(_AC_SUFFIX)]} ac = {_format_value(value)}"
@@ -905,34 +1102,20 @@ def control_lines(
         for target, value in step["alter"]:
             lines.append(_alter_line(target, value))
         lines.append("setplot new")
+        lines.extend(step.get("arg_lets", []))
         lines.append(f"echo klt_step_begin {index} $curplot")
-        lines.append(f"{step['kind']} {step['args']}".rstrip())
+        lines.append(f"{step['kind']} {step.get('deck_args', step['args'])}".rstrip())
         lines.append(f"echo klt_step_end {index} $curplot")
         lines.append(f"set klt_plot_{index} = $curplot")
         if step["name"] in spectrum_needed:
-            # `noise` leaves the integrated plot current; the spectra are in
-            # the plot made just before it -- the second-to-last of $plots
-            # right after the analysis. A failed solve is blocked in Python
-            # (step_failed), so a stale pick there is never graded.
-            lines.extend(
-                [
-                    f"set klt_pa{index} = none",
-                    f"set klt_pb{index} = none",
-                    "foreach klt_p $plots",
-                    f"set klt_pa{index} = $klt_pb{index}",
-                    f"set klt_pb{index} = $klt_p",
-                    "end",
-                    f"set klt_plot_{index}_spectrum = $klt_pa{index}",
-                ]
-            )
+            lines.extend(_spectrum_plot_lines(index))
+        if "lines" in step:
+            lines.extend(step["lines"])
+            continue
         for spec in measurements_spec:
             if spec.get("step") == step["name"]:
                 lines.extend(spec["deck_lines"])
-    derived = [spec for spec in measurements_spec if "step" not in spec]
-    if derived:
-        lines.append("setplot new")
-        for spec in derived:
-            lines.extend(spec["deck_lines"])
+    lines.extend(_derived_lines(analysis, measurements_spec))
     return lines
 
 
@@ -972,9 +1155,14 @@ def grade_step_measurements(
     outcome list. Results are graded in flattened order (steps, then derived
     measurements), so every input a result depends on is decided first."""
     outcomes = step_outcomes(analysis, log_text)
+    unmet = _apply_arg_dependencies(
+        analysis, measurements_spec, measurement_values, outcomes
+    )
     diagnostics: list[dict[str, str]] = []
     for step in analysis["steps"]:
-        if not outcomes[step["name"]]:
+        if step["name"] in unmet:
+            diagnostics.append(_input_unavailable_diagnostic(step, unmet[step["name"]]))
+        elif not outcomes[step["name"]]:
             diagnostics.append(_step_failed_diagnostic(step, measurements_spec))
     results: list[dict[str, Any]] = []
     by_name: dict[str, dict[str, Any]] = {}
@@ -994,6 +1182,45 @@ def grade_step_measurements(
         for step in analysis["steps"]
     ]
     return results, diagnostics, {"steps": steps_field}
+
+
+def _apply_arg_dependencies(
+    analysis: dict[str, Any],
+    measurements_spec: list[dict[str, Any]],
+    measurement_values: dict[str, float],
+    outcomes: dict[str, bool],
+) -> dict[str, list[str]]:
+    """Issue #3055: a step whose sweep window reads an earlier result that
+    produced no value is marked failed (in place in ``outcomes``) whatever
+    ngspice made of the unresolved window, so it never reports a solve over
+    a stale or garbage range. Returns ``{step: [unavailable inputs]}``."""
+    specs = {spec["name"]: spec for spec in measurements_spec}
+    unmet: dict[str, list[str]] = {}
+    for step in analysis["steps"]:
+        missing = [
+            name
+            for name in step.get("arg_inputs", [])
+            if not outcomes.get(specs[name]["step"], False)
+            or measurement_values.get(specs[name]["log_key"]) is None
+        ]
+        if missing:
+            outcomes[step["name"]] = False
+            unmet[step["name"]] = missing
+    return unmet
+
+
+def _input_unavailable_diagnostic(
+    step: dict[str, Any], missing: list[str]
+) -> dict[str, str]:
+    return {
+        "severity": "error",
+        "code": "derived_input_unavailable",
+        "message": (
+            f"analysis step {step['name']!r} was not run against a derived "
+            f"sweep window ({step['args']!r}): its input(s) "
+            f"{', '.join(missing)} produced no value in this corner"
+        ),
+    }
 
 
 def _step_failed_diagnostic(
