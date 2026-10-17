@@ -573,6 +573,11 @@ REASON_FINDINGS_ONLY = "findings_only"
 #: ``coverage.inapplicable`` reason (issue #2896): the cell has no transistor
 #: gate, so the antenna half has nothing to grade.
 REASON_NO_GATES = "no_gates"
+#: ``erc_coverage.inapplicable[].reason`` (issue #3745) for a ``nets[]`` entry
+#: declared ``extractor_global``: named by the extractor, not label text, so
+#: ``erc.net_connectivity`` cannot resolve it. Additive; leaves
+#: ``erc_status`` untouched like every other ``inapplicable`` entry.
+REASON_EXTRACTOR_GLOBAL_NET = "extractor_global_net"
 
 #: The skip reason for a level that could have been graded had ``--pdk``
 #: named a PDK with an antenna-ratio table (or named one at all).
@@ -897,6 +902,29 @@ def _undeclared_stream_layers(
     return [f"{layer}/{datatype}" for layer, datatype in sorted(undeclared)]
 
 
+def _net_connectivity_work(
+    nets_decl: list[dict[str, Any]],
+) -> tuple[list[str], list[dict[str, str]]]:
+    """Split declared nets into ``erc.net_connectivity`` checked ids and
+    inapplicable entries (issue #3745).
+
+    An `extractor_global` net is never label-resolved, so
+    `erc.net_connectivity` cannot grade it: disclosed as inapplicable
+    (never silent). Like every other inapplicable entry it leaves
+    `erc_status` alone -- it is work this run was told it cannot do, not
+    requested work that failed to run.
+    """
+    checked: list[str] = []
+    inapplicable: list[dict[str, str]] = []
+    for decl in nets_decl:
+        identity = work_id("erc.net_connectivity", decl["name"])
+        if decl["extractor_global"]:
+            inapplicable.append({"id": identity, "reason": REASON_EXTRACTOR_GLOBAL_NET})
+        else:
+            checked.append(identity)
+    return checked, inapplicable
+
+
 def _connectivity_coverage(
     gates: list[dict[str, Any]],
     nets_decl: list[dict[str, Any]],
@@ -1060,7 +1088,9 @@ def _connectivity_coverage(
     checked_by_assertion: list[str] = []
     checked_by_well_assertion: list[str] = []
 
-    checked.extend(work_id("erc.net_connectivity", decl["name"]) for decl in nets_decl)
+    net_checked, net_inapplicable = _net_connectivity_work(nets_decl)
+    checked.extend(net_checked)
+    inapplicable.extend(net_inapplicable)
     if not nets_decl:
         inapplicable.append(
             {"id": work_id("erc.net_connectivity"), "reason": "no_nets_declared"}
@@ -2319,6 +2349,12 @@ def _net_connectivity_findings(
         {role for decl in nets_decl for role in decl["roles"]},
     )
     for decl in nets_decl:
+        if decl["extractor_global"]:
+            # Issue #3745: named by the extractor, not label text -- nothing
+            # to resolve, count or tie; disclosed in `erc_coverage`.
+            matches[decl["name"]] = []
+            clusters_by_name[decl["name"]] = set()
+            continue
         matched = _match_net_clusters(circuit, decl["name"])
         matches[decl["name"]] = matched
         clusters_by_name[decl["name"]] = {net.cluster_id for net in matched}
