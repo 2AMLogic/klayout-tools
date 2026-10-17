@@ -320,29 +320,20 @@ transcribed from ``sky130.lydrc``'s ``nwell.1a``/``nwell.2a`` (see
 kind, issue #1654).
 
 Two more ``sky130.lydrc`` well rules are deliberately **not** transcribed
-here: ``nwell.enclosing(diff.and(psdm), 0.18)`` and
-``nwell.enclosing(tap.and(nsdm), 0.18)`` (an nwell's minimum enclosure of,
-respectively, the p-select-implant diffusion inside it -- PMOS source/drain
--- and the n-select-implant tap inside it -- the well's own body/substrate
-tie). Both are scoped to a *compound* layer expression this engine's
-single-layer/two-layer ``Region`` check primitives cannot evaluate (the same
-class of gap ``difftap.1``/``poly.1a``'s compound-layer notes above already
-document), and unlike those other compound-layer approximations elsewhere in
-this deck, there is no honest plain-layer stand-in available: ``psdm``/
-``nsdm`` (the implant marker layers the compound expressions key off) are
-not drawn by any ``klt gen`` generator today (per issue #1420's own scoping
-note), so a rule scoped by well-*containment* instead of implant -- "nwell
-encloses whatever diff/tap already overlaps it" -- would silently pass on
-every generator-produced layout regardless of correctness, while risking new
-false positives against the real ``sky130_fd_sc_hd`` standard-cell corpus
-this repo already exercises (whose diff/tap-to-nwell margins are the
-implant-scoped rule's business, not this unscoped stand-in's). Rather than
-ship an untested widening with no generator coverage to exercise it, this
-gap is left explicitly open: ``EXTRACTION_DECK`` still has no ``psdm``/
-``nsdm`` fields, ``coverage.deck_scope`` will not include an enclosure-rule
-entry for the ``nwell.*`` family, and a future issue that also teaches
-``klt gen`` to draw implant layers is the natural place to revisit both
-rules together with real geometry to test them against.
+here: ``difftap.8`` (``nwell.enclosing(diff.and(psdm), 0.18)``) and
+``difftap.10`` (``nwell.enclosing(tap.and(nsdm), 0.18)``). Both are scoped to
+a *compound* layer expression this engine's single-layer/two-layer ``Region``
+check primitives cannot evaluate, and a well-containment stand-in ("nwell
+encloses whatever diff/tap overlaps it") would risk false positives against
+the ``sky130_fd_sc_hd`` corpus. Since issue #2934 ``klt gen`` draws
+``nsdm``/``psdm``/``npc``, and this deck checks their plain-layer rules
+(``npc.1``/``npc.2``, ``nsdm.1``/``psdm.1``, ``n/psdm.1`` spacing). The
+implant area rules (``n/psdm.10a``/``10b``) and the compound implant rules
+(``difftap.8``-``difftap.11``, ``n/psdm.5a``/``5b``/``6``/``7``/``8``,
+``npc.4``) are listed in
+``UNMODELED_RULES`` so ``coverage.unmodeled_rules`` discloses them instead of
+``clean`` implying they were checked. ``EXTRACTION_DECK`` still has no
+``psdm``/``nsdm`` fields.
 
 tap (tie-layer) rule coverage (issue #2321, closing the gap the
 ``difftap``-family notes above and ``_PDK_ROLE_LAYERS["sky130"]["tap"]``'s
@@ -548,6 +539,74 @@ DECK: list[DrcRule] = [
         # -> "li.3 : min. li spacing : 0.17um"
         scope="li",  # sky130.lydrc "li.*" rule-id family (#566)
         provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "li.3"),
+    ),
+    # Implant / npc rules (issue #2934): `klt gen` now draws nsdm/psdm/npc, so
+    # the width/spacing/area rules that were deliberately absent are checked.
+    DrcRule(
+        id="npc.width.1",
+        description="minimum npc width",
+        layer=(95, 20),  # npc.drawing
+        check="width",
+        threshold_dbu=270,
+        # sky130.lydrc rule "npc.1": npc.width(0.27, euclidian)
+        # -> "npc.1 : min. npc width : 0.27um"
+        scope="npc",  # sky130.lydrc "npc.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "npc.1"),
+    ),
+    DrcRule(
+        id="npc.space.1",
+        description="minimum npc spacing (nearer shapes should be merged)",
+        layer=(95, 20),  # npc.drawing
+        check="isolated",
+        threshold_dbu=270,
+        # sky130.lydrc rule "npc.2": npc.isolated(0.27, euclidian)
+        # -> "npc.2 : min. npc spacing, should be manually merged if less : 0.27um"
+        scope="npc",  # sky130.lydrc "npc.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "npc.2"),
+    ),
+    DrcRule(
+        id="nsdm.width.1",
+        description="minimum nsdm width",
+        layer=(93, 44),  # nsdm.drawing
+        check="width",
+        threshold_dbu=380,
+        # sky130.lydrc rule "nsdm.1": nsdm.width(0.38, euclidian)
+        # -> "nsdm.1 : min. nsdm width : 0.38um"
+        scope="nsdm",  # sky130.lydrc "nsdm.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "nsdm.1"),
+    ),
+    DrcRule(
+        id="nsdm.space.1",
+        description="minimum nsdm spacing (nearer shapes should be merged)",
+        layer=(93, 44),  # nsdm.drawing
+        check="isolated",
+        threshold_dbu=380,
+        # sky130.lydrc rule "n/psdm.1": nsdm.isolated(0.38, euclidian)
+        # -> "n/psdm.1 : min. nsdm spacing, should be manually merged if less : 0.38um"
+        scope="nsdm",  # sky130.lydrc "nsdm.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "n/psdm.1"),
+    ),
+    DrcRule(
+        id="psdm.width.1",
+        description="minimum psdm width",
+        layer=(94, 20),  # psdm.drawing
+        check="width",
+        threshold_dbu=380,
+        # sky130.lydrc rule "psdm.1": psdm.width(0.38, euclidian)
+        # -> "psdm.1 : min. psdm width : 0.38um"
+        scope="psdm",  # sky130.lydrc "psdm.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "psdm.1"),
+    ),
+    DrcRule(
+        id="psdm.space.1",
+        description="minimum psdm spacing (nearer shapes should be merged)",
+        layer=(94, 20),  # psdm.drawing
+        check="isolated",
+        threshold_dbu=380,
+        # sky130.lydrc rule "n/psdm.1": psdm.isolated(0.38, euclidian)
+        # -> "n/psdm.1 : min. psdm spacing, should be manually merged if less : 0.38um"
+        scope="psdm",  # sky130.lydrc "psdm.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "n/psdm.1"),
     ),
     DrcRule(
         id="met1.width.1",
@@ -1934,8 +1993,23 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
 #: these, so ``coverage.unmodeled_rules`` lists them rather than let a clean
 #: verdict read as full coverage. Remove an id here when its rule is added.
 UNMODELED_RULES: tuple[str, ...] = (
+    # Implant/npc/well rules (issue #2934) scoped to compound layer
+    # expressions (diff.and(psdm), npsdm enclosing diff/tap, gate, ...) that
+    # `DrcRule` cannot evaluate; ids from sky130.lydrc.
+    "difftap.10",
+    "difftap.11",
+    "difftap.8",
+    "difftap.9",
     "m1.5",
     "m2.5",
+    "n/psdm.10a",
+    "n/psdm.10b",
+    "n/psdm.5a",
+    "n/psdm.5b",
+    "n/psdm.6",
+    "n/psdm.7",
+    "n/psdm.8",
+    "npc.4",
     "via.5a",
     "via2.5",
     "via3.5",

@@ -14,6 +14,14 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **sky130 deck checks the implant and npc masks `klt gen` now draws**
+  (issue #2934, phase C): `--deck sky130` gains `npc.width.1`/`npc.space.1`
+  (`npc.1`/`npc.2`, 0.27 µm) and `nsdm`/`psdm` `width.1`/`space.1`
+  (`nsdm.1`/`psdm.1`/`n/psdm.1`, 0.38 µm), all from `sky130.lydrc`. The
+  compound implant rules the engine cannot evaluate (`n/psdm.5a`/`5b`/`6`/`7`/
+  `8`/`10a`/`10b`, `difftap.8`-`difftap.11`, `npc.4`) are listed in
+  `coverage.unmodeled_rules`. Deck content hash changes; `rule_count` is now 150.
+
 - **`klt lvs` opt-in `options.compare_mos_flavour`** (issue #3650): `true`
   compares a MOS device's flavour (sky130 `nvt`/`hvi`, gf180mcu `06v0`, ...)
   as well as its base `nfet`/`pfet` class, so a native-Vt layout device

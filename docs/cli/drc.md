@@ -237,7 +237,7 @@ also the order a `--rules` subset executes in.
   "mode": "list_rules",
   "deck": "sky130",
   "engine": "curated",
-  "rule_count": 144,
+  "rule_count": 150,
   "groups": {
     "check": { "angle": 37, "area": 10, "enclosing": 17, "...": 0 },
     "scope": { "m1": 5, "poly": 1, "...": 0 }
@@ -319,7 +319,7 @@ A `--rules` run adds one top-level block, `rule_selection`, relative to the
   "selectors": ["met1.*"],
   "selected": ["met1.width.1", "met1.space.1", "met1.enclosing.mcon.1", "..."],
   "omitted": ["poly.width.1", "diff.width.1", "..."],
-  "deck_rule_count": 144,
+  "deck_rule_count": 150,
   "subset": true
 }
 ```
@@ -359,7 +359,7 @@ in either envelope aggregation or numbered-citation grading — see
 Before signoff, re-run without `--rules`.
 
 The text form adds one line, e.g.
-`rule selection: 5 of 144 rules (139 omitted; partial run) -- selectors: met1.*`,
+`rule selection: 5 of 150 rules (145 omitted; partial run) -- selectors: met1.*`,
 and does not list `not_selected` rules one per line under "skipped requested
 rules".
 
@@ -1378,12 +1378,12 @@ single-layer kind.
 ## Coverage
 
 The `sky130` deck is a **curated starter subset**, not the full sky130
-design rule manual (which spans hundreds of rules). It currently covers 144
+design rule manual (which spans hundreds of rules). It currently covers 150
 rules — width, spacing, area, and enclosure checks across the `poly`, `diff`,
 `tap` (issue #2321), `rpm`/`urpm` marker width (issue #3030),
 `li1`, `met1`, `licon1`, `mcon`, `met2`, `via` (met1&lt;-&gt;met2 via1),
 `met3`-`met5`, `via2`-`via4`, `capm`/`capm2` (MiM-cap top plates), and
-`nwell` (issue #1420; `nwell.enclosed.hvi.1`, issue #3031) layers, plus the source deck's entire
+`nwell` (issue #1420; `nwell.enclosed.hvi.1`, issue #3031), and `npc`/`nsdm`/`psdm` (issue #2934) layers, plus the source deck's entire
 manufacturing-grid/corner-angle (`OFFGRID`) group across 38 layers (issue
 #2642, see "Manufacturing grid and corner angle" below) — transcribed
 directly from the official
@@ -1402,9 +1402,9 @@ Broken down by check kind:
 
 | kind         | count |
 | ------------ | ----: |
-| `width`      |    20 |
+| `width`      |    23 |
 | `space`      |    13 |
-| `isolated`   |     1 |
+| `isolated`   |     4 |
 | `enclosing`  |    17 |
 | `enclosed`   |     2 |
 | `enclosing_adjacent` | 4 |
@@ -1412,7 +1412,7 @@ Broken down by check kind:
 | `area`       |    10 |
 | `ongrid`     |    38 |
 | `angle`      |    37 |
-| **total**    |**144**|
+| **total**    |**150**|
 
 (`enclosed` includes `nwell.enclosed.hvi.1`, issue #3031 — `sky130A_mr.drc`'s
 `nwell.9`, "HVnwell must be enclosed by hv marker": a well that touches `hvi`
@@ -3389,9 +3389,9 @@ carry a populated `provenance` citing their own `sky130A_mr.drc` rule id
 compound rule), issue #2594's `licon1.width.1`/`mcon.width.1` cite
 `licon.1`/`ct.1`, and every one of issue #2642's 75 `OFFGRID`-group rules
 (38 `ongrid` + 37 `angle`) cites its own `x.1b`/`x.3a`/`x.2`/`x.2c` source id,
-and issue #3031's `nwell.enclosed.hvi.1` cites `nwell.9`, and #3316's four
+and issue #3031's `nwell.enclosed.hvi.1` cites `nwell.9`, and issue #2934's six `npc`/`nsdm`/`psdm` width and spacing rules cite `npc.1`/`npc.2`/`nsdm.1`/`psdm.1`/`n/psdm.1`, and #3316's four
 `enclosing_adjacent` rules cite `via.5a`/`m2.5`/`via2.5`/`via3.5`,
-so 124 of its 144 rules are covered.
+so 130 of its 150 rules are covered.
 
 ### The golden-pair manifest (`tests/golden_deck/`)
 

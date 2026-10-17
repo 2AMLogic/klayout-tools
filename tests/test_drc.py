@@ -1419,8 +1419,20 @@ def test_run_drc_sky130_coverage_lists_unmodeled_rules(tmp_path):
     report = run_drc(str(path), "sky130")
 
     assert report["coverage"]["unmodeled_rules"] == [
+        "difftap.10",
+        "difftap.11",
+        "difftap.8",
+        "difftap.9",
         "m1.5",
         "m2.5",
+        "n/psdm.10a",
+        "n/psdm.10b",
+        "n/psdm.5a",
+        "n/psdm.5b",
+        "n/psdm.6",
+        "n/psdm.7",
+        "n/psdm.8",
+        "npc.4",
         "via.5a",
         "via2.5",
         "via3.5",
@@ -6172,19 +6184,20 @@ def test_sky130_deck_check_kind_breakdown():
     the angle count is one short of the grid count; #3030 adds
     `rpm.width.1`/`urpm.width.1`; #2936 adds `poly.endcap.diff.1`, the first
     `enclosed` rule; #3031 adds `nwell.enclosed.hvi.1`; #3316 adds the 4
-    `enclosing_adjacent` rules): 144 rules total -- 20 `width`, 13 `space`,
-    1 `isolated`, 17 `enclosing`, 2 `enclosed`, 4 `enclosing_adjacent`,
+    `enclosing_adjacent` rules; #2934 adds npc/nsdm/psdm width + isolated
+    spacing): 150 rules total -- 23 `width`, 13 `space`,
+    4 `isolated`, 17 `enclosing`, 2 `enclosed`, 4 `enclosing_adjacent`,
     2 `separation`, 10 `area`, 38 `ongrid`, 37 `angle`. Fails loudly (at the
     exact number that changed) if a future rule addition/removal drifts from
     that table without updating it."""
     deck = get_deck("sky130")
 
-    assert len(deck) == 144
+    assert len(deck) == 150
     counts = Counter(rule.check for rule in deck)
     assert counts == {
-        "width": 20,
+        "width": 23,
         "space": 13,
-        "isolated": 1,
+        "isolated": 4,
         "enclosing": 17,
         "enclosed": 2,
         "enclosing_adjacent": 4,
