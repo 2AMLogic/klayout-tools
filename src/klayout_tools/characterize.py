@@ -62,7 +62,7 @@ import re
 from typing import Any
 
 from . import liberty_writer, sim
-from ._paths import _fold_spice_continuations, _load_request_json, _resolve_relative
+from ._paths import _load_request_json, _resolve_relative, fold_spice_continuations
 from ._provenance import INPUT_ROLE_NETLIST, build_provenance
 from .characterize_arcs import DerivedArc, FunctionError, derive_arcs
 from .env_provenance import repo_relative_path
@@ -632,7 +632,7 @@ def _read_subckt_terminals(netlist_path: str, subckt: str) -> tuple[str, ...]:
     except OSError as exc:
         raise CharacterizeError(f"could not read '{netlist_path}': {exc}") from exc
 
-    for line in _fold_spice_continuations(lines):
+    for line in fold_spice_continuations(lines):
         match = _SUBCKT_RE.match(line.split("$")[0])
         if match is None:
             continue

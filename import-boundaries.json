@@ -1018,11 +1018,6 @@
     },
     {
       "consumer": "shared-core",
-      "exporter": "netlist",
-      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
-    },
-    {
-      "consumer": "shared-core",
       "exporter": "sim",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
     },
@@ -2198,12 +2193,6 @@
         "consumer": "klayout_tools.techmap",
         "exporter": "klayout_tools._paths",
         "symbol": "_resolve_relative",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.verilog_netlist",
-        "exporter": "klayout_tools.netlist_normalize",
-        "symbol": "_merge_continuations",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {

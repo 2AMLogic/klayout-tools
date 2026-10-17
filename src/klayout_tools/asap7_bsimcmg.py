@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import re
 
-from ._paths import _fold_spice_continuations
+from ._paths import fold_spice_continuations
 
 #: Verilog-A module name the OSDI binary exposes (``module bsimcmg_va`` in
 #: the pinned CMC source); the model card's second token must equal it.
@@ -55,7 +55,7 @@ _PARAMS_PER_LINE = 6
 def _logical_lines(text: str) -> list[str]:
     """Join ``+`` continuations and drop ``*`` comment / blank lines."""
     stripped = (raw.strip() for raw in text.splitlines())
-    return _fold_spice_continuations(
+    return fold_spice_continuations(
         [line for line in stripped if line and not line.startswith("*")]
     )
 
