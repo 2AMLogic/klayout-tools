@@ -1596,6 +1596,7 @@ release segment:
 | `transfer` ([#2924](https://github.com/2AMLogic/klayout-tools/issues/2924)) | any `measurements[]` entry declares `transfer` | `0.7.1` (**mandatory**, see below) |
 | `stimulus` ([#2977](https://github.com/2AMLogic/klayout-tools/issues/2977)) | `stimulus` is present | `0.7.1` (**mandatory**, see below) |
 | `dual_injection` ([#3161](https://github.com/2AMLogic/klayout-tools/issues/3161)) | `analysis.passes` is present or any `measurements[]` entry declares `tian` | `0.7.1` (**mandatory**, see below) |
+| `complex_vectors` ([#3337](https://github.com/2AMLogic/klayout-tools/issues/3337)) | `options.complex_vectors` is present | `0.7.1` (**mandatory**, see below) |
 | `measurements[].expr` | any `measurements[]` entry has `expr` | `0.7.0` |
 | `corners.process[].sections[]` | a `corners.process[]` bundle has an object-form `sections[]` entry | `0.7.0` |
 | `options.ngspice_init` | `options.ngspice_init` is set and non-empty | `0.7.0` |
@@ -1637,7 +1638,7 @@ the next registry entry.
 - Limit: a `0.7.1.devN` runner built before a feature landed looks the same as
   one built after, so it counts as supporting it.
 
-**Mandatory features (`transfer`, [#2924](https://github.com/2AMLogic/klayout-tools/issues/2924); `stimulus`, [#2977](https://github.com/2AMLogic/klayout-tools/issues/2977); `dual_injection`, [#3161](https://github.com/2AMLogic/klayout-tools/issues/3161)).**
+**Mandatory features (`transfer`, [#2924](https://github.com/2AMLogic/klayout-tools/issues/2924); `stimulus`, [#2977](https://github.com/2AMLogic/klayout-tools/issues/2977); `dual_injection`, [#3161](https://github.com/2AMLogic/klayout-tools/issues/3161); `complex_vectors`, [#3337](https://github.com/2AMLogic/klayout-tools/issues/3337)).**
 A runner that predates `measurements[].transfer` would drop the metric (and one
 that predates `stimulus` would simulate with the digital control lines
 undriven), so
@@ -2839,6 +2840,34 @@ former rewrites), and `engine: "xyce"` refuses it like `save_mode`. Omitting it
 leaves the deck byte-identical. A changed `save_vectors` invalidates a
 `--resume` checkpoint. It rides the forwarded request document to
 `remote`/`batch` workers, so the worker image must include this implementation.
+
+### Complex AC vectors: `options.complex_vectors` (issue #3337)
+
+`options.complex_vectors` is a non-empty array of single-ended `v(node)`
+selectors (same grammar as `measurements[].transfer`). It needs
+`analysis.kind: "ac"`; it is refused before launch for any other analysis, under
+`options.save_mode: "netlist"`, and for `engine: "xyce"`. Each corner dumps the
+declared vectors of its finished AC sweep, decodes them with phase intact, and
+writes a sidecar `complex_vectors.json` beside its other artifacts:
+
+```json
+{"vectors": ["v(out)"], "points": 41, "frequency_hz": [10.0, "..."],
+ "data": {"v(out)": {"real": ["..."], "imag": ["..."]}}}
+```
+
+The corner reports the sidecar under `artifacts.complex_vectors` and an
+additive `complex_vectors: {"names": [...], "points": N}` summary; the arrays
+are never inlined in the report. Declared vectors force `options.keep_artifacts`
+on, since the sidecar is the result. A vector that is absent, truncated or has a
+non-finite sample makes the corner `error` with a `code: "measurement"`
+diagnostic that names it (`[complex_vector_missing]`,
+`[complex_vector_raw_invalid]`, `[complex_vector_non_finite]`); then
+`artifacts.complex_vectors` is `null`. With `options.save_vectors`, list the
+declared vectors there yourself. Omitting the option leaves every request and
+report byte-identical. On `remote`/`batch` the sidecar returns through the
+ordinary artifact install (paths rewritten to the local artifacts directory),
+and `complex_vectors` is a **mandatory** runner feature (minimum `0.7.1`). A
+changed `complex_vectors` invalidates a `--resume` checkpoint.
 
 ### Waveform size guard: `options.waveform_max_bytes` (issue #3211)
 

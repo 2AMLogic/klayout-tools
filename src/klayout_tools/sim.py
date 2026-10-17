@@ -95,6 +95,7 @@ from typing import IO, Any, NamedTuple
 from . import (
     env_provenance,
     output_lock,
+    sim_complex_vectors,
     sim_crossings,
     sim_cycle_mean,
     sim_decks,
@@ -2636,6 +2637,7 @@ class _ResolvedSimRequest:
     resume: Any
     save_mode: Any
     save_vectors: Any
+    complex_vectors: Any
     stage_model_inputs: Any
     stimulus_lines: Any
     stimulus_signals: Any
@@ -2822,7 +2824,12 @@ def _prepare_sim_request(
         engine_version_pin, backend, engine, ngspice_binary or XYCE_BINARY
     )
     timeout_s = options.get("timeout_s", DEFAULT_TIMEOUT_S)
-    keep_artifacts = bool(options.get("keep_artifacts", False))
+    # Issue #3337: the complex-vector sidecar is the result, so declared
+    # vectors force artifacts on (validated in full below).
+    keep_artifacts = bool(
+        options.get("keep_artifacts", False)
+        or options.get(sim_complex_vectors.OPTION) is not None
+    )
     portable_artifacts = _portable_artifacts_option(options)
     want_waveforms = bool(options.get("waveforms", False))
     if plot_dir is not None:
@@ -2911,6 +2918,9 @@ def _prepare_sim_request(
     # Issue #3211: same up-front validation; off-host workers re-read both
     # from the forwarded request document.
     save_vectors, save_vectors_declared = _validate_save_vectors(options, save_mode)
+    complex_vectors = sim_complex_vectors.validate(options, analysis, save_mode)
+    if complex_vectors:
+        sim_complex_vectors.refuse_for_engine(engine)
     waveform_max_bytes = _validate_waveform_max_bytes(options)
     # Issue #3111: same up-front validation; off-host workers re-read it from
     # the forwarded request document, and the echo check below verifies it.
@@ -3150,6 +3160,7 @@ def _prepare_sim_request(
         resume=resume,
         save_mode=save_mode,
         save_vectors=save_vectors,
+        complex_vectors=complex_vectors,
         stage_model_inputs=stage_model_inputs,
         stimulus_lines=stimulus_lines,
         stimulus_signals=stimulus_signals,
@@ -3241,6 +3252,7 @@ def _run_sim_corners(
     resume = resolved.resume
     save_mode = resolved.save_mode
     save_vectors = resolved.save_vectors
+    complex_vectors = resolved.complex_vectors
     stage_model_inputs = resolved.stage_model_inputs
     stimulus_lines = resolved.stimulus_lines
     stimulus_signals = resolved.stimulus_signals
@@ -3280,6 +3292,7 @@ def _run_sim_corners(
         "corner_section_libs": corner_section_libs,
         "save_mode": save_mode,
         "save_vectors": save_vectors,
+        "complex_vectors": complex_vectors,
         "ngspice_options": ngspice_options,
         "stimulus_lines": stimulus_lines,
     }
@@ -3423,6 +3436,7 @@ def _run_sim_corners(
             "osdi_preload": osdi_preload,
             "save_mode": save_mode,
             "save_vectors": save_vectors,
+            "complex_vectors": complex_vectors,
             "waveform_max_bytes": waveform_max_bytes,
             "ngspice_options": ngspice_options,
             "stimulus_lines": stimulus_lines,
@@ -6652,6 +6666,7 @@ def _checkpoint_fingerprint(
     corner_section_libs: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
     save_vectors: tuple[str, ...] = (),
+    complex_vectors: tuple[str, ...] = (),
     ngspice_options: dict[str, Any] | None = None,
     stimulus_lines: tuple[str, ...] = (),
 ) -> str:
@@ -6695,6 +6710,9 @@ def _checkpoint_fingerprint(
     if save_vectors:
         # Issue #3211: the saved vector set decides which measurements resolve.
         payload["save_vectors"] = list(save_vectors)
+    if complex_vectors:
+        # Issue #3337: the declared vectors decide what the corner returns.
+        payload["complex_vectors"] = list(complex_vectors)
     if ngspice_options:
         # Issue #3111: solver options change which solves converge, so a
         # checkpoint written under other options never applies. Only keyed
@@ -7100,6 +7118,7 @@ def _run_local(
     osdi_preload: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
     save_vectors: tuple[str, ...] = (),
+    complex_vectors: tuple[str, ...] = (),
     waveform_max_bytes: int | None = DEFAULT_WAVEFORM_MAX_BYTES,
     ngspice_options: dict[str, Any] | None = None,
     convergence_retry: dict[str, Any] | None = None,
@@ -7188,6 +7207,7 @@ def _run_local(
             osdi_preload=osdi_preload,
             save_mode=save_mode,
             save_vectors=save_vectors,
+            complex_vectors=complex_vectors,
             waveform_max_bytes=waveform_max_bytes,
             ngspice_options=ngspice_options,
             convergence_retry=convergence_retry,
@@ -7338,6 +7358,7 @@ def _run_local_parallel(
     osdi_preload: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
     save_vectors: tuple[str, ...] = (),
+    complex_vectors: tuple[str, ...] = (),
     waveform_max_bytes: int | None = DEFAULT_WAVEFORM_MAX_BYTES,
     ngspice_options: dict[str, Any] | None = None,
     convergence_retry: dict[str, Any] | None = None,
@@ -7455,6 +7476,7 @@ def _run_local_parallel(
                     osdi_preload=osdi_preload,
                     save_mode=save_mode,
                     save_vectors=save_vectors,
+                    complex_vectors=complex_vectors,
                     waveform_max_bytes=waveform_max_bytes,
                     ngspice_options=ngspice_options,
                     convergence_retry=convergence_retry,
@@ -8235,6 +8257,7 @@ def _prepare_corner_run(
     osdi_preload: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
     save_vectors: tuple[str, ...] = (),
+    complex_vectors: tuple[str, ...] = (),
     ngspice_options: dict[str, Any] | None = None,
     stimulus_lines: tuple[str, ...] = (),
     extra_options_card: str | None = None,
@@ -8292,6 +8315,7 @@ def _prepare_corner_run(
             osdi_preload=osdi_preload,
             save_mode=save_mode,
             save_vectors=save_vectors,
+            complex_vectors=complex_vectors,
             ngspice_options=ngspice_options,
             stimulus_lines=stimulus_lines,
             extra_options_card=extra_options_card,
@@ -8681,6 +8705,7 @@ def _run_corner(
     osdi_preload: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
     save_vectors: tuple[str, ...] = (),
+    complex_vectors: tuple[str, ...] = (),
     waveform_max_bytes: int | None = DEFAULT_WAVEFORM_MAX_BYTES,
     ngspice_options: dict[str, Any] | None = None,
     portable_roots: sim_portable.Roots | None = None,
@@ -8760,6 +8785,7 @@ def _run_corner(
         osdi_preload=osdi_preload,
         save_mode=save_mode,
         save_vectors=save_vectors,
+        complex_vectors=complex_vectors,
         ngspice_options=ngspice_options,
         stimulus_lines=stimulus_lines,
         extra_options_card=extra_options_card,
@@ -8922,6 +8948,14 @@ def _run_corner(
         analysis, corner_dir, keep_artifacts=keep_artifacts, results=pass_results
     )
     diagnostics.extend(pass_diagnostics)
+    # Issue #3337: decode the declared vectors into the sidecar before the
+    # corner is graded, so a missing or non-finite one fails it.
+    complex_outcome = (
+        sim_complex_vectors.extract_corner(complex_vectors, corner_dir)
+        if complex_vectors
+        else sim_complex_vectors.VectorOutcome()
+    )
+    diagnostics.extend(complex_outcome.diagnostics)
 
     # Issue #3016: the engine ran (any exit status, including 0) yet left no
     # log text and not a single requested measurement has a value -- the
@@ -8994,6 +9028,8 @@ def _run_corner(
     }
     # Additive (issue #3006): only for a `noise` corner whose rawfile parsed.
     noise_fields: dict[str, str] = {}
+    if complex_vectors:
+        artifacts["complex_vectors"] = complex_outcome.path
     if keep_artifacts:
         if os.path.isfile(log_path):
             artifacts["log"] = log_path
@@ -9093,6 +9129,9 @@ def _run_corner(
         # Additive/optional (issue #3159): per-pass status for an
         # `analysis.passes` request; absent for every other one.
         **pass_fields,
+        # Additive/optional (issue #3337): the declared complex vectors'
+        # names and point count; the arrays are in `artifacts.complex_vectors`.
+        **sim_complex_vectors.corner_fields(complex_vectors, complex_outcome),
         # Additive/optional (issue #2902): the effective per-corner waveform
         # levels, only for a request that scales a PWL/PULSE supply source.
         **(
@@ -10008,6 +10047,7 @@ def _write_corner_deck(
     osdi_preload: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
     save_vectors: tuple[str, ...] = (),
+    complex_vectors: tuple[str, ...] = (),
     ngspice_options: dict[str, Any] | None = None,
     stimulus_lines: tuple[str, ...] = (),
     extra_options_card: str | None = None,
@@ -10099,6 +10139,7 @@ def _write_corner_deck(
             osdi_preload=osdi_preload,
             save_mode=save_mode,
             save_vectors=save_vectors,
+            complex_vectors=complex_vectors,
             corner_dir=os.path.dirname(os.path.abspath(deck_path)),
         )
     )
@@ -10166,6 +10207,7 @@ def _corner_deck_control_lines(
     osdi_preload: tuple[str, ...],
     save_mode: str = DEFAULT_SAVE_MODE,
     save_vectors: tuple[str, ...] = (),
+    complex_vectors: tuple[str, ...] = (),
     corner_dir: str = ".",
 ) -> list[str]:
     """The ``.control``/``.endc`` block of :func:`_write_corner_deck`'s
@@ -10292,12 +10334,16 @@ def _corner_deck_control_lines(
     energy_lines = sim_energy.control_lines(measurements_spec, corner_dir)
     cycle_mean_lines = sim_cycle_mean.control_lines(measurements_spec, corner_dir)
     transfer_lines = sim_transfer_meas.control_lines(measurements_spec, corner_dir)
+    complex_vector_lines = sim_complex_vectors.control_lines(
+        complex_vectors, corner_dir
+    )
     if (
         raw_path is not None
         or crossings_lines
         or energy_lines
         or cycle_mean_lines
         or transfer_lines
+        or complex_vector_lines
     ):
         lines.append("set filetype=ascii")
     lines.append(f"{analysis['kind']} {analysis['args']}")
@@ -10318,6 +10364,7 @@ def _corner_deck_control_lines(
     lines.extend(energy_lines)
     lines.extend(cycle_mean_lines)
     lines.extend(transfer_lines)
+    lines.extend(complex_vector_lines)
     lines.append("quit")
     lines.append(".endc")
     return lines
