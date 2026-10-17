@@ -1436,19 +1436,17 @@ def _separate_peer_plates(
     return other_region, peer_edge_pairs
 
 
-def _check_rule_on_cell(
+def _cell_check_regions(
     rule: DrcRule,
     cell: Any,
     setup: _DrcSetup,
-    state: _DrcState,
-    layer_label: str,
     layer_index: int | None,
     base_index: int | None,
     intersect_index: int | None,
     other_index: int | None,
-) -> None:
-    """Evaluate one resolved ``rule`` against one top ``cell``, recording
-    every violation in ``state``."""
+) -> tuple[Any, Any, Any, Any | None]:
+    """Build ``(region, other_region, base_region, peer_edge_pairs)`` for
+    ``rule`` on one top ``cell``."""
     import klayout.db as kdb
 
     layout = setup.layout
@@ -1503,15 +1501,47 @@ def _check_rule_on_cell(
             rule, other_region, base_region, dbu_scale
         )
 
+    return region, other_region, base_region, peer_edge_pairs
+
+
+def _record_polygons(
+    state: _DrcState,
+    rule: DrcRule,
+    layer_label: str,
+    cell: Any,
+    polygons: Any,
+) -> None:
+    """Record one violation per merged polygon in ``polygons``."""
+    for polygon in polygons.each_merged():
+        bbox = polygon.bbox()
+        points = [[pt.x, pt.y] for pt in polygon.each_point_hull()]
+        _record_violation(state, rule, layer_label, cell, bbox, points)
+
+
+def _check_non_edge_pair_rule(
+    rule: DrcRule,
+    cell: Any,
+    setup: _DrcSetup,
+    state: _DrcState,
+    layer_label: str,
+    region: Any,
+    other_region: Any,
+) -> bool:
+    """Run the area / density / antenna checks, which report something other
+    than edge pairs. Returns whether ``rule`` was one of those kinds (and so
+    is fully handled)."""
     if rule.check in _AREA_CHECKS:
-        for polygon in _run_area_check(region, rule, dbu_scale).each_merged():
-            bbox = polygon.bbox()
-            points = [[pt.x, pt.y] for pt in polygon.each_point_hull()]
-            _record_violation(state, rule, layer_label, cell, bbox, points)
-        return
+        _record_polygons(
+            state,
+            rule,
+            layer_label,
+            cell,
+            _run_area_check(region, rule, setup.dbu_scale),
+        )
+        return True
 
     if rule.check in _DENSITY_CHECKS:
-        for window_box in _run_density_check(region, rule, layout.dbu):
+        for window_box in _run_density_check(region, rule, setup.layout.dbu):
             points = [
                 [window_box.left, window_box.bottom],
                 [window_box.right, window_box.bottom],
@@ -1519,7 +1549,7 @@ def _check_rule_on_cell(
                 [window_box.left, window_box.top],
             ]
             _record_violation(state, rule, layer_label, cell, window_box, points)
-        return
+        return True
 
     if rule.check in _ANTENNA_CHECKS:
         antenna_bbox = _run_antenna_check(region, other_region, rule)
@@ -1528,12 +1558,22 @@ def _check_rule_on_cell(
             # corresponds to "the violation" the way an "area" or
             # edge-pair check's does, see `_run_antenna_check`'s docstring.
             _record_violation(state, rule, layer_label, cell, antenna_bbox, None)
-        return
+        return True
 
+    return False
+
+
+def _edge_pairs_for_rule(
+    rule: DrcRule,
+    cell: Any,
+    setup: _DrcSetup,
+    region: Any,
+    other_region: Any,
+) -> tuple[Any, Any]:
+    """``(edge_pairs, outside_region)`` for an edge-pair-reporting ``rule``."""
     if rule.check in _NET_SPACE_CHECKS:
-        edge_pairs = _run_net_space_check(cell, layout, rule, dbu_scale)
-        outside_region = None
-    elif rule.check in _VERTEX_CHECKS:
+        return _run_net_space_check(cell, setup.layout, rule, setup.dbu_scale), None
+    if rule.check in _VERTEX_CHECKS:
         # Vertex checks (issue #2642). Dispatched here rather than
         # inside `_run_check` because neither reads `threshold_dbu`
         # (and `"ongrid"` needs the layout's own `dbu`, which
@@ -1542,10 +1582,35 @@ def _check_rule_on_cell(
         # downstream (bbox/polygon extraction, `rule_counts`,
         # `violations[]`) is reused verbatim. Neither kind has an
         # `outside_region` term.
-        edge_pairs = _run_vertex_check(region, rule, layout.dbu)
-        outside_region = None
-    else:
-        edge_pairs, outside_region = _run_check(region, other_region, rule, dbu_scale)
+        return _run_vertex_check(region, rule, setup.layout.dbu), None
+    return _run_check(region, other_region, rule, setup.dbu_scale)
+
+
+def _check_rule_on_cell(
+    rule: DrcRule,
+    cell: Any,
+    setup: _DrcSetup,
+    state: _DrcState,
+    layer_label: str,
+    layer_index: int | None,
+    base_index: int | None,
+    intersect_index: int | None,
+    other_index: int | None,
+) -> None:
+    """Evaluate one resolved ``rule`` against one top ``cell``, recording
+    every violation in ``state``."""
+    region, other_region, _, peer_edge_pairs = _cell_check_regions(
+        rule, cell, setup, layer_index, base_index, intersect_index, other_index
+    )
+
+    if _check_non_edge_pair_rule(
+        rule, cell, setup, state, layer_label, region, other_region
+    ):
+        return
+
+    edge_pairs, outside_region = _edge_pairs_for_rule(
+        rule, cell, setup, region, other_region
+    )
 
     checked_edge_pairs = (
         edge_pairs
@@ -1583,15 +1648,12 @@ def _check_rule_on_cell(
         term
         for term in (
             outside_region,
-            _run_width_max_check(region, rule, dbu_scale),
+            _run_width_max_check(region, rule, setup.dbu_scale),
         )
         if term is not None
     ]
     for polygon_term in polygon_terms:
-        for polygon in polygon_term.each_merged():
-            bbox = polygon.bbox()
-            points = [[pt.x, pt.y] for pt in polygon.each_point_hull()]
-            _record_violation(state, rule, layer_label, cell, bbox, points)
+        _record_polygons(state, rule, layer_label, cell, polygon_term)
 
 
 def _evaluate_rule(rule: DrcRule, setup: _DrcSetup, state: _DrcState) -> None:
@@ -1700,6 +1762,29 @@ def _evaluate_rule(rule: DrcRule, setup: _DrcSetup, state: _DrcState) -> None:
         )
 
 
+def _marker_interacts_in_cell(
+    layout: Any,
+    cell: Any,
+    marker_index: int,
+    unscoped_layers: set[tuple[int, int]],
+) -> bool:
+    """Whether the marker layer's geometry in ``cell`` interacts with any of
+    ``unscoped_layers``."""
+    import klayout.db as kdb
+
+    marker_region = kdb.Region(cell.begin_shapes_rec(marker_index))
+    if marker_region.is_empty():
+        return False
+    for checked_layer in sorted(unscoped_layers):
+        checked_index = layout.find_layer(*checked_layer)
+        if checked_index is None:
+            continue
+        checked_region = kdb.Region(cell.begin_shapes_rec(checked_index))
+        if not marker_region.interacting(checked_region).is_empty():
+            return True
+    return False
+
+
 def _voltage_domain_warnings(
     setup: _DrcSetup, skipped_rule_ids: set[str]
 ) -> list[dict[str, str]]:
@@ -1725,8 +1810,6 @@ def _voltage_domain_warnings(
     this stream) are excluded too: a rule that never ran applied no
     threshold, right or wrong.
     """
-    import klayout.db as kdb
-
     layout = setup.layout
     stream_layer_tuples = setup.stream_layer_tuples
     warnings: list[dict[str, str]] = []
@@ -1744,22 +1827,10 @@ def _voltage_domain_warnings(
             unscoped_layers |= _rule_input_layers(rule)
         unscoped_layers &= stream_layer_tuples
         unscoped_layers.discard(marker)
-        interacts = False
-        for cell in setup.top_cells:
-            marker_region = kdb.Region(cell.begin_shapes_rec(marker_index))
-            if marker_region.is_empty():
-                continue
-            for checked_layer in sorted(unscoped_layers):
-                checked_index = layout.find_layer(*checked_layer)
-                if checked_index is None:
-                    continue
-                checked_region = kdb.Region(cell.begin_shapes_rec(checked_index))
-                if not marker_region.interacting(checked_region).is_empty():
-                    interacts = True
-                    break
-            if interacts:
-                break
-        if interacts:
+        if any(
+            _marker_interacts_in_cell(layout, cell, marker_index, unscoped_layers)
+            for cell in setup.top_cells
+        ):
             warnings.append({"marker": _layer_str(marker), "description": description})
     return warnings
 
