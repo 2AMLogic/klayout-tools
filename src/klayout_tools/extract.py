@@ -5397,6 +5397,9 @@ def extract_netlist_from_layout(
         layout, top_cell, deck, unsupported_devices
     )
 
+    # Unmodelled device markers (issue #3858): prose-only diagnostic.
+    warnings = warnings + _detect_unmodeled_device_markers(layout, top_cell, deck_name)
+
     # Issue #2722: per-device placement attribution for
     # `--hierarchical-cells`, keyed by `Device.id()`, filled into the
     # out-parameter (same idiom as `subcircuit_info`). Read from the final
@@ -7859,6 +7862,30 @@ def _detect_unsupported_devices(
         )
     if entries_out is not None:
         entries_out.extend(entries)
+    return warnings
+
+
+def _detect_unmodeled_device_markers(
+    layout: kdb.Layout, top_cell: kdb.Cell, deck_name: str
+) -> list[str]:
+    """One prose warning per device-recognition marker layer the deck
+    registers via :func:`~klayout_tools.decks.get_unmodeled_device_markers`
+    that carries shapes in the extracted cell (issue #3858).
+
+    Prose only, no structured field; empty when the deck registers no marker
+    or none has shapes, so such layouts' output is unchanged.
+    """
+    from .decks import get_unmodeled_device_markers
+
+    warnings: list[str] = []
+    for marker, description in sorted(get_unmodeled_device_markers(deck_name).items()):
+        region = _region(layout, top_cell, marker)
+        if region.is_empty():
+            continue
+        warnings.append(
+            f"layer {marker[0]}/{marker[1]} carries {region.merged().count()} "
+            f"shape(s) with no native device recognition: {description}"
+        )
     return warnings
 
 

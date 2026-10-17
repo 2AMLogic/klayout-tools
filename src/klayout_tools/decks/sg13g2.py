@@ -183,7 +183,10 @@ device, never a wrong device with a plausible value):
 - ``schottky_nbl1`` -- see "Schottky diode (``schottky_nbl1``) --
   investigated, declined" below -- plus the ``isolbox`` isolation device,
   the ``sg13_hv_svaricap`` varactor, inductors, ESD devices, and the RF MOS
-  variants, none of which is tracked yet. (``rfcmim``, the RF MIM variant,
+  variants, none of which is tracked yet. (ESD devices were investigated in
+  issue #3858 and declined natively -- see ``UNMODELED_DEVICE_MARKERS``
+  below: ``klt extract`` warns when ``Recog.esd`` 99/30 carries shapes, and
+  ``scr1`` has no upstream LVS extraction at all.) (``rfcmim``, the RF MIM variant,
   *is* recognised as of issue #1454 -- as its 2-terminal plate-to-plate
   core, not its full 3-terminal RF network; see "MIM capacitors" below.)
 
@@ -1474,6 +1477,33 @@ UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {
         "general-case ('-LV') thresholds to geometry regardless of "
         "ThickGateOx's presence (e.g. the Gat.a1/Gat.a2 channel-length-"
         "specific GatPoly widths, not transcribed in this deck yet)."
+    ),
+}
+
+# Device-recognition marker layers this deck draws but has no native
+# recognition for (issue #3858), surfaced as a `klt extract` `warnings[]`
+# entry via `decks.get_unmodeled_device_markers` so the omission is loud
+# rather than silent. Native recognition is declined, not forgotten:
+# - `esd_extraction.lvs` builds the ESD diodes (`diodevdd_*`/`diodevss_*`) as
+#   `bjt3(..., Esd3Term)` with *synthesized* terminals (`*_e.middle.sized(
+#   0.499.um)`, `.extents` of derived regions) -- the same size-filtered,
+#   per-instance dynamic-region gap that declined `schottky_nbl1` (#1234) and
+#   the SiGe HBTs (#1232); they are not a `DiodeDevice` junction-overlap case.
+# - the `nmoscl_2`/`nmoscl_4` clamps are keyed on a text label interacting
+#   with `Recog.esd` plus a gate-count threshold; the extraction engine has no
+#   text-label recognition predicate.
+# - `scr1` has no LVS extraction upstream at all (it only appears in the
+#   maximal DRC deck's exclusion terms), so "extracts as no device" matches
+#   the PDK's own runset.
+# Operator ruling #2864 routes such devices to the PDK's own runset-backed LVS
+# (`klt lvs` `"klayout-runset"`).
+UNMODELED_DEVICE_MARKERS: dict[tuple[int, int], str] = {
+    (99, 30): (
+        "Recog.esd (99/30) marks ESD structures (nmoscl_2/nmoscl_4 clamps, "
+        "scr1, diodevdd_*/diodevss_* protection diodes); this deck has no "
+        "native recognition for them, so they extract as no device. Use "
+        "`klt lvs` with the 'klayout-runset' backend (the PDK's own LVS "
+        "runset) to compare layouts containing them."
     ),
 }
 
