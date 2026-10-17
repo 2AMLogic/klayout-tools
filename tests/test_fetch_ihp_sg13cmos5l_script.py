@@ -18,7 +18,7 @@ def _commit() -> str:
     return m.group(1)
 
 
-def _tree(tmp_path: Path, dangling: int) -> Path:
+def _tree(tmp_path: Path, dangling: int, lvs_dangling: bool = False) -> Path:
     root = tmp_path / "ihp-open-pdk"
     sib = root / "ihp-sg13g2"
     (sib / "libs.tech").mkdir(parents=True)
@@ -32,6 +32,10 @@ def _tree(tmp_path: Path, dangling: int) -> Path:
     (dest / "libs.tech" / "good").symlink_to("ok.txt")
     for i in range(dangling):
         (dest / "libs.tech" / f"bad{i}").symlink_to("../../../ihp-sg13g2/missing")
+    if lvs_dangling:
+        lvs = dest / "libs.tech" / "klayout" / "tech" / "lvs" / "rule_decks"
+        lvs.mkdir(parents=True)
+        (lvs / "cap_cmomi_derivations.lvs").symlink_to("../../../../../../ihp-sg13g2/missing")
     (dest / "libs.ref" / "dangling_dir").symlink_to("nowhere/")
     (dest / "libs.ref" / "loop").symlink_to("loop")
     return tmp_path
@@ -52,6 +56,17 @@ def test_warns_but_exits_zero(tmp_path):
     assert "WARNING: 14 dangling symlink(s)" in r.stderr  # 12 + dir + loop
     assert "0.3.0" in r.stderr
     assert len([ln for ln in r.stderr.splitlines() if ln.startswith("    libs.")]) == 10
+
+
+def test_lvs_dir_dangle_names_runset(tmp_path):
+    r = _run(_tree(tmp_path, 0, lvs_dangling=True))
+    assert r.returncode == 0
+    assert "PDK-native LVS runset" in r.stderr
+
+
+def test_non_lvs_dangle_has_no_lvs_line(tmp_path):
+    r = _run(_tree(tmp_path, 3))
+    assert "LVS runset" not in r.stderr
 
 
 def test_strict_fails(tmp_path):

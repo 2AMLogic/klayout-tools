@@ -86,8 +86,9 @@
 # symlinks under the install, prints a sample and the sibling's version marker,
 # and warns loudly. It still exits 0 (the models-only use case works without
 # the missing targets) unless `--strict` is given, which exits 3 when any
-# link dangles. Repinning the sibling is a separate, human decision: it
-# changes a checksummed pin used by CI. `klt pdk check` also reports these.
+# link dangles. If any dangling link is under libs.tech/klayout/tech/lvs/, the
+# warning also says the PDK-native LVS runset is unrunnable. Repinning the
+# sibling is a separate, human decision: it changes a checksummed pin used by CI. `klt pdk check` also reports these.
 #
 # Usage: scripts/fetch-ihp-sg13cmos5l.sh [--force] [--strict]
 
@@ -167,6 +168,10 @@ report_dangling() {
     echo "  release v0.3.0 is known-incomplete -- see this script's header and pdks/README.md)" >&2
     echo "  first 10 (run 'klt pdk check' for the full report):" >&2
     printf '%s\n' "$list" | head -n 10 | sed "s|^$DEST/|    |" >&2
+    if grep -q '/libs\.tech/klayout/tech/lvs/' <<<"$list"; then
+        echo "  LVS: links under libs.tech/klayout/tech/lvs/ dangle, so the PDK-native LVS runset" >&2
+        echo "  (sg13cmos5l.lvs, 'klt lvs' engine klayout-runset) cannot run; use --strict when fetching for LVS" >&2
+    fi
     return 1
 }
 
