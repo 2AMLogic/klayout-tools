@@ -185,13 +185,13 @@
     },
     {
       "file": "src/klayout_tools/erc.py",
-      "function": "_validate_stackup",
-      "complexity": 13
-    },
-    {
-      "file": "src/klayout_tools/erc.py",
       "function": "run_erc",
       "complexity": 17
+    },
+    {
+      "file": "src/klayout_tools/erc_spec.py",
+      "function": "_validate_stackup",
+      "complexity": 13
     },
     {
       "file": "src/klayout_tools/eval.py",

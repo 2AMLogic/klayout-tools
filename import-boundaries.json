@@ -138,7 +138,8 @@
       "description": "`klt erc` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.erc_cmd",
-        "klayout_tools.erc"
+        "klayout_tools.erc",
+        "klayout_tools.erc_spec"
       ]
     },
     "eval": {
@@ -1667,7 +1668,7 @@
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
-        "consumer": "klayout_tools.erc",
+        "consumer": "klayout_tools.erc_spec",
         "exporter": "klayout_tools._paths",
         "symbol": "_parse_layer_datatype",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
@@ -1679,7 +1680,13 @@
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
-        "consumer": "klayout_tools.erc",
+        "consumer": "klayout_tools.erc_spec",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_reject_unknown_keys",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.erc_spec",
         "exporter": "klayout_tools._paths",
         "symbol": "_validate_via_entries",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
