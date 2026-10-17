@@ -51,6 +51,72 @@ class KeepoutCheckError(Exception):
     response, which is a trustworthy verdict."""
 
 
+def _pieces_to_violations(
+    kdb: Any,
+    pieces: Any,
+    guard: Any,
+    layer: int,
+    datatype: int,
+    cell_name: str,
+    margin_um: float,
+    dbu: float,
+) -> list[dict[str, Any]]:
+    """Turn the forbidden-layer ``pieces`` inside the keep-out zone into
+    violation dicts, classifying each as overlapping ``guard`` or margin-only."""
+    pieces.merge()
+    out: list[dict[str, Any]] = []
+    for piece in pieces.each():
+        inside = not (kdb.Region(piece) & guard).is_empty()
+        out.append(
+            {
+                "rule": RULE_ID,
+                "description": (
+                    f"forbidden layer {layer}/{datatype} shape "
+                    + (
+                        "overlaps the guarded region"
+                        if inside
+                        else f"lies within the {margin_um} um keep-out margin"
+                    )
+                ),
+                "check": CHECK_KIND,
+                "kind": "inside" if inside else "margin",
+                "layer": f"{layer}/{datatype}",
+                "cell": cell_name,
+                "bbox": bbox_um_dict(piece.bbox(), dbu),
+            }
+        )
+    return out
+
+
+def _validate_request(
+    forbidden: list[tuple[int, int]],
+    margin_um: float,
+    cells: list[str] | None,
+    region_um: tuple[float, float, float, float] | None,
+) -> list[str] | None:
+    """Validate the request arguments; return the normalised ``cells`` list."""
+    if not forbidden:
+        raise KeepoutCheckError("layer set is empty: at least one layer required")
+    _validate_margin(margin_um)
+    selected = _validate_cells(cells)
+    if selected is None and region_um is None:
+        raise KeepoutCheckError(
+            "no guard given: pass --cells and/or --region to say what to protect"
+        )
+    return selected
+
+
+def _require_known_cells(layout: Any, selected: list[str] | None) -> None:
+    """Raise unless every name in ``selected`` is a cell of ``layout``."""
+    if selected is None:
+        return
+    unknown = [name for name in selected if layout.cell(name) is None]
+    if unknown:
+        raise KeepoutCheckError(
+            "unknown cell(s) in --cells: " + ", ".join(repr(n) for n in unknown)
+        )
+
+
 def run_keepout_check(
     layout_path: str,
     forbidden: list[tuple[int, int]],
@@ -93,22 +159,10 @@ def run_keepout_check(
     itself and ``"margin"`` when it lies only in the margin band. ``bbox`` is
     the piece of the shape inside the zone, in micrometres.
     """
-    if not forbidden:
-        raise KeepoutCheckError("layer set is empty: at least one layer required")
-    _validate_margin(margin_um)
-    selected = _validate_cells(cells)
-    if selected is None and region_um is None:
-        raise KeepoutCheckError(
-            "no guard given: pass --cells and/or --region to say what to protect"
-        )
+    selected = _validate_request(forbidden, margin_um, cells, region_um)
 
     layout = load_layout(layout_path, KeepoutCheckError)
-    if selected is not None:
-        unknown = [name for name in selected if layout.cell(name) is None]
-        if unknown:
-            raise KeepoutCheckError(
-                "unknown cell(s) in --cells: " + ", ".join(repr(n) for n in unknown)
-            )
+    _require_known_cells(layout, selected)
 
     import klayout.db as kdb
 
@@ -123,48 +177,36 @@ def run_keepout_check(
         guard = kdb.Region()
         if region_box is not None:
             guard.insert(region_box)
-        selected_hit: list[str] = []
         if selected is not None:
-            selected_hit = _insert_cell_boxes(
-                kdb, layout, cell, frozenset(selected), guard
+            found.update(
+                _insert_cell_boxes(kdb, layout, cell, frozenset(selected), guard)
             )
-            found.update(selected_hit)
         if guard.is_empty():
             continue
         guard.merge()
         zone = guard.sized(margin_dbu) if margin_dbu > 0 else guard.dup()
-
-        excluded = []
-        if selected is not None:
-            excluded = [layout.cell(name).cell_index() for name in selected]
+        excluded = (
+            [layout.cell(name).cell_index() for name in selected]
+            if selected is not None
+            else []
+        )
         for layer, datatype in forbidden:
             layer_index = layout.find_layer(layer, datatype)
             if layer_index is None:
                 continue
             shapes = _layer_region(kdb, layout, cell, layer_index, excluded)
-            pieces = shapes & zone
-            pieces.merge()
-            for piece in pieces.each():
-                inside = not (kdb.Region(piece) & guard).is_empty()
-                kind = "inside" if inside else "margin"
-                violations.append(
-                    {
-                        "rule": RULE_ID,
-                        "description": (
-                            f"forbidden layer {layer}/{datatype} shape "
-                            + (
-                                "overlaps the guarded region"
-                                if inside
-                                else f"lies within the {margin_um} um keep-out margin"
-                            )
-                        ),
-                        "check": CHECK_KIND,
-                        "kind": kind,
-                        "layer": f"{layer}/{datatype}",
-                        "cell": cell.name,
-                        "bbox": bbox_um_dict(piece.bbox(), dbu),
-                    }
+            violations.extend(
+                _pieces_to_violations(
+                    kdb,
+                    shapes & zone,
+                    guard,
+                    layer,
+                    datatype,
+                    cell.name,
+                    margin_um,
+                    dbu,
                 )
+            )
 
     if selected is not None:
         missing = [name for name in selected if name not in found]

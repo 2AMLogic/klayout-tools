@@ -83,14 +83,14 @@ def _print_text(report: dict) -> None:
     if not violations:
         return
 
-    rows = [
+    rows: list[tuple[str, ...]] = [
         (
-            entry["kind"],
-            entry["cell"],
-            entry["layer"],
+            str(entry["kind"]),
+            str(entry["cell"]),
+            str(entry["layer"]),
             f"({entry['bbox']['left']},{entry['bbox']['bottom']})-"
             f"({entry['bbox']['right']},{entry['bbox']['top']})",
-            entry["description"],
+            str(entry["description"]),
         )
         for entry in violations
     ]
