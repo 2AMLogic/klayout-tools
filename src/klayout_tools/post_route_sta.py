@@ -1933,6 +1933,20 @@ def _validate_boundary(
     verified in the engine session (:func:`_port_check_lines`).
     """
     prefix = "request.constraints."
+    boundary = _validate_driving_cells(constraints, clock_port, prefix)
+    if boundary:
+        _check_driving_cell_conflicts(
+            boundary, input_transition_ns, input_transitions, prefix
+        )
+    boundary.update(_validate_output_loads(constraints, clock_port, prefix))
+    return boundary or None
+
+
+def _validate_driving_cells(
+    constraints: dict[str, Any], clock_port: str, prefix: str
+) -> dict[str, Any]:
+    """The ``driving_cell`` / ``driving_cells`` half of
+    :func:`_validate_boundary` (only the supplied, non-empty keys)."""
     boundary: dict[str, Any] = {}
     default_cell = constraints.get("driving_cell")
     if default_cell is not None:
@@ -1952,21 +1966,41 @@ def _validate_boundary(
             parsed_cells[port] = _validate_driving_cell(entry, f"{field}[{port!r}]")
         if parsed_cells:
             boundary["driving_cells"] = parsed_cells
-    if "driving_cell" in boundary or "driving_cells" in boundary:
-        if input_transition_ns is not None:
-            raise PostRouteStaError(
-                f"{prefix}input_transition_ns cannot be combined with "
-                "driving_cell/driving_cells -- a driving cell sets the input "
-                "slew itself; give per-port input_transitions for the rest"
-            )
-        overlap = sorted(
-            set(boundary.get("driving_cells", {})) & set(input_transitions or {})
+    return boundary
+
+
+def _check_driving_cell_conflicts(
+    boundary: dict[str, Any],
+    input_transition_ns: float | None,
+    input_transitions: dict[str, float] | None,
+    prefix: str,
+) -> None:
+    """Reject a driving cell combined with an input transition on the same
+    port (or with the scalar ``input_transition_ns``)."""
+    if "driving_cell" not in boundary and "driving_cells" not in boundary:
+        return
+    if input_transition_ns is not None:
+        raise PostRouteStaError(
+            f"{prefix}input_transition_ns cannot be combined with "
+            "driving_cell/driving_cells -- a driving cell sets the input "
+            "slew itself; give per-port input_transitions for the rest"
         )
-        if overlap:
-            raise PostRouteStaError(
-                f"{prefix}driving_cells and {prefix}input_transitions both "
-                f"name port(s) {overlap} -- a port takes one or the other"
-            )
+    overlap = sorted(
+        set(boundary.get("driving_cells", {})) & set(input_transitions or {})
+    )
+    if overlap:
+        raise PostRouteStaError(
+            f"{prefix}driving_cells and {prefix}input_transitions both "
+            f"name port(s) {overlap} -- a port takes one or the other"
+        )
+
+
+def _validate_output_loads(
+    constraints: dict[str, Any], clock_port: str, prefix: str
+) -> dict[str, Any]:
+    """The ``output_load_pf`` / ``output_loads`` half of
+    :func:`_validate_boundary` (only the supplied, non-empty keys)."""
+    boundary: dict[str, Any] = {}
     scalar = _validate_load_value(
         constraints.get("output_load_pf"), f"{prefix}output_load_pf"
     )
@@ -1990,7 +2024,7 @@ def _validate_boundary(
             parsed_loads[port] = validated
         if parsed_loads:
             boundary["output_loads"] = parsed_loads
-    return boundary or None
+    return boundary
 
 
 def _validate_load_value(value: Any, field: str) -> float | None:
