@@ -2328,13 +2328,13 @@ _STAR_NODE_SUFFIX = re.compile(r"__t\d+(?=\s|$)")
 def _logical_cards(text: str) -> list[str]:
     """``text``'s SPICE cards with ``+`` continuation lines joined and
     comments dropped."""
-    cards: list[str] = []
-    for line in text.splitlines():
-        if line.startswith("+") and cards:
-            cards[-1] += " " + line[1:].strip()
-        elif line.strip() and not line.startswith("*"):
-            cards.append(line.strip())
-    return cards
+    return _fold_spice_continuations(
+        [
+            line.strip()
+            for line in text.splitlines()
+            if line.strip() and not line.startswith("*")
+        ]
+    )
 
 
 def _device_only_parity(

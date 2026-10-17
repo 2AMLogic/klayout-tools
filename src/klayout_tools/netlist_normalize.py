@@ -301,18 +301,6 @@ def _tokenize(text: str) -> list[str]:
     return tokens
 
 
-def _merge_continuations(lines: list[str]) -> list[str]:
-    """Join SPICE ``+`` continuation lines into their logical parent line.
-
-    Comment (``*``) and blank lines are preserved as their own entries so
-    they pass through the transform verbatim. Delegates the fold itself to
-    :func:`klayout_tools._paths._fold_spice_continuations`; this module does
-    no comment/blank-line pre-pass of its own (that is handled elsewhere by
-    a quote/paren-depth-aware tokenizer), so the delegation is direct.
-    """
-    return _fold_spice_continuations(lines)
-
-
 def _parse_um(
     raw_value: str,
     *,
@@ -1796,7 +1784,7 @@ def convert_reference_netlist(
     subckt_to_binding, device_map_names = _build_subckt_map(deck, device_map)
     geometry_style = geometry_style_for_family(deck) if deck is not None else None
     custom_device_classes = _resolve_custom_device_classes(deck)
-    logical_lines = _merge_continuations(text.splitlines())
+    logical_lines = _fold_spice_continuations(text.splitlines())
     param_scopes = _collect_param_scopes(logical_lines)
     subckt_scope = ""
 
@@ -1855,7 +1843,7 @@ def defined_subckt_names(text: str) -> set[str]:
     names back that way, so a caller can compare against
     ``kdb.Circuit.name`` directly. ``.include``-d files are not followed."""
     defined: set[str] = set()
-    for line in _merge_continuations(text.splitlines()):
+    for line in _fold_spice_continuations(text.splitlines()):
         parts = line.split()
         if len(parts) >= 2 and parts[0].lower() == ".subckt":
             defined.add(parts[1].upper())
@@ -1891,7 +1879,7 @@ def detect_subckt_call_devices(text: str) -> list[str]:
     used: list[str] = []
     seen: set[str] = set()
 
-    for line in _merge_continuations(text.splitlines()):
+    for line in _fold_spice_continuations(text.splitlines()):
         stripped = line.strip()
         if not stripped or stripped.startswith("*"):
             continue
