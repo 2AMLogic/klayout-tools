@@ -1673,7 +1673,7 @@ which draws:
 | `none`   | no pads; pins inside the outer `mmax` bars             | same metal, at *opposite* y edges of the marker                 |
 
 `klt extract` classifies from exactly that (`extract.py`'s
-`_mom_feed_variant`): different port metals that overlap → `same`; same
+`extract_passive_regions._mom_feed_variant`): different port metals that overlap → `same`; same
 metal and ≥ 50% of the marker width apart in x, then ports within 25% of the
 marker height in y → `double`, or ≥ 75% → `none`. A port layout matching none
 of these (typically a hand-drawn abstraction rather than PCell output) is

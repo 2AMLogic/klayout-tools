@@ -644,11 +644,13 @@ def _unbound_mom_capacitor_card(
 
     **Issue #2445 -- ``feed`` is written when measured.** ``feed`` (``cap_cmomi``
     only) is the token ``none``/``same``/``double`` the extractor recovered
-    from the drawn port placement (``extract._mom_feed_variant``); it is
+    from the drawn port placement
+    (``extract_passive_regions._mom_feed_variant``); it is
     written as ``FEED=<token>`` after ``MMAX=`` and omitted entirely when
     ``None`` (a layout matching no PCell signature, or a ``cap_cmomf``), so an
     unmeasured feed still falls to the ``.subckt`` default instead of being
-    guessed. See ``extract._mom_feed_variant`` for the settled mapping.
+    guessed. See ``extract_passive_regions._mom_feed_variant`` for the settled
+    mapping.
 
     **Four of the upstream subcircuit's parameters are always written, plus
     ``feed`` when measured; ``subblock``/``mm_ok`` are never.** The

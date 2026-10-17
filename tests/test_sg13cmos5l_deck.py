@@ -1696,10 +1696,11 @@ def test_sg13cmos5l_mom_capacitor_card_omits_unmeasured_pdk_subckt_params(
     Those three are omitted deliberately, not accidentally:
 
     - `feed` (`cap_cmomi` only): issue #2445 settled that all three PCell
-      variants ARE separable (see `_mom_feed_variant` in `extract.py` and the
-      per-variant tests below), so a layout drawn with the PCell's port
-      placement now gets `FEED=<variant>`. THESE fixtures hand-place two
-      ports at positions matching none of the three PCell signatures, and
+      variants ARE separable (see `_mom_feed_variant` in
+      `extract_passive_regions.py` and the per-variant tests below), so a
+      layout drawn with the PCell's port placement now gets
+      `FEED=<variant>`. THESE fixtures hand-place two ports at positions
+      matching none of the three PCell signatures, and
       the extractor leaves such a layout unmeasured rather than forcing it
       onto the nearest variant -- the #2408 "never guess" rule -- so `feed`
       is still absent here.
