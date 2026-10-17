@@ -14,6 +14,15 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt lvs --deck sg13cmos5l` now matches the PDK's own stdcells** (issue
+  #3831): `sg13cmos5l_inv_1` draws no `nSD`, so its well tie (unimplanted
+  Activ in NWell) was not recognised and the compare reported
+  `device.unmatched`/`net.merged`/`net.split`. The deck now declares
+  `tap_nplus_complement=(14, 0)` (the sg13g2 #2591 form). Its pin names sit
+  on Metal1.text (8/25), so promote them with `label_layers: {"metal0":
+  [8, 25]}`; without it the verdict is `match` with `device.body_unverified`
+  warnings and one pin.
+
 - **`klt synthesize --restructure` now finds upsizes on libraries that quote
   cell names** (issue #3709): `restructure`'s and `synthesize`'s private
   regex Liberty readers are replaced by `liberty_compare.parse_liberty_text`.
