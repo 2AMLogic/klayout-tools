@@ -786,6 +786,49 @@ def _sha256_path(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _run_recipe_step(
+    step: dict[str, Any], variant: str, workdir: Path, seen: set[str], gds: Path
+) -> dict[str, Any]:
+    """Run one recipe step and return its generator/compose report."""
+    from klayout_tools.gen import GenError, generate
+    from klayout_tools.gen_compose import GenComposeError, compose
+
+    step_id = step["id"]
+    options = {"cell_name": step["cell_name"], "output": str(gds)}
+    try:
+        if step["verb"] == "gen":
+            return generate(
+                {
+                    "schema": "klt.gen.request/1",
+                    "generator": step["generator"],
+                    "pdk": {"variant": variant},
+                    "params": step["params"],
+                    "options": options,
+                }
+            )
+        if step["verb"] != "gen-compose":
+            raise RecipeError(f"{step_id}: unknown verb {step['verb']!r}")
+        request = json.loads(json.dumps(step["request"]))
+        request["pdk"] = {"variant": variant}
+        request["options"] = options
+        for block in request["blocks"]:
+            ref = block.pop("step")
+            if ref not in seen:
+                raise RecipeError(
+                    f"{step_id}: block step {ref!r} is not an earlier step"
+                )
+            block["generator_report"] = str(workdir / f"{ref}.json")
+        report = compose(request, request_dir=str(workdir))
+        if report["unrouted_nets"]:
+            raise RecipeError(
+                f"{step_id}: gen-compose left nets unrouted: "
+                f"{sorted(map(str, report['unrouted_nets']))}"
+            )
+        return report
+    except (GenError, GenComposeError) as exc:
+        raise RecipeError(f"{step_id}: {exc}") from exc
+
+
 def run_recipe(recipe: dict[str, Any], workdir: Path) -> Path:
     """Execute a frozen generator recipe with ``klt``'s ``gen`` / ``gen-compose``
     library entry points and return the path of the layout the last step wrote.
@@ -797,9 +840,6 @@ def run_recipe(recipe: dict[str, Any], workdir: Path) -> Path:
     ``unrouted_nets`` is a :class:`RecipeError` -- a recipe is only evidence of
     reachability if it produced a fully wired layout.
     """
-    from klayout_tools.gen import GenError, generate
-    from klayout_tools.gen_compose import GenComposeError, compose
-
     if recipe.get("schema") != RECIPE_SCHEMA:
         raise RecipeError(f"recipe schema must be {RECIPE_SCHEMA!r}")
     workdir.mkdir(parents=True, exist_ok=True)
@@ -811,39 +851,7 @@ def run_recipe(recipe: dict[str, Any], workdir: Path) -> Path:
         if step_id in seen:
             raise RecipeError(f"duplicate step id {step_id!r}")
         gds = workdir / f"{step_id}.gds"
-        options = {"cell_name": step["cell_name"], "output": str(gds)}
-        try:
-            if step["verb"] == "gen":
-                report = generate(
-                    {
-                        "schema": "klt.gen.request/1",
-                        "generator": step["generator"],
-                        "pdk": {"variant": variant},
-                        "params": step["params"],
-                        "options": options,
-                    }
-                )
-            elif step["verb"] == "gen-compose":
-                request = json.loads(json.dumps(step["request"]))
-                request["pdk"] = {"variant": variant}
-                request["options"] = options
-                for block in request["blocks"]:
-                    ref = block.pop("step")
-                    if ref not in seen:
-                        raise RecipeError(
-                            f"{step_id}: block step {ref!r} is not an earlier step"
-                        )
-                    block["generator_report"] = str(workdir / f"{ref}.json")
-                report = compose(request, request_dir=str(workdir))
-                if report["unrouted_nets"]:
-                    raise RecipeError(
-                        f"{step_id}: gen-compose left nets unrouted: "
-                        f"{sorted(map(str, report['unrouted_nets']))}"
-                    )
-            else:
-                raise RecipeError(f"{step_id}: unknown verb {step['verb']!r}")
-        except (GenError, GenComposeError) as exc:
-            raise RecipeError(f"{step_id}: {exc}") from exc
+        report = _run_recipe_step(step, variant, workdir, seen, gds)
         (workdir / f"{step_id}.json").write_text(json.dumps(report, indent=2))
         seen.add(step_id)
         last = gds
@@ -966,6 +974,67 @@ def _control_coverage_errors(task: dict[str, Any]) -> list[str]:
     ]
 
 
+def _negative_control_results(
+    task: dict[str, Any],
+    repo_root: Path,
+    netlist: Path,
+    top: str,
+    workdir: Path,
+    errors: list[str],
+) -> list[dict[str, Any]]:
+    """Run every negative control; append to ``errors`` any not isolating its check."""
+    controls = []
+    for control in task["negative_controls"]:
+        path = repo_root / control["path"]
+        verdict = gate_verdict(
+            control["sha256"],
+            run_checks(path, netlist, top, workdir / f"control-{control['id']}"),
+            task["frozen_netlist"]["sha256"],
+        )
+        expected = control["expected_failure"]
+        other = "lvs" if expected == "drc" else "drc"
+        controls.append({"id": control["id"], "expected_failure": expected, **verdict})
+        if verdict[expected]:
+            errors.append(
+                f"negative control {control['id']!r} is not rejected by {expected}"
+            )
+        if not verdict[other]:
+            errors.append(
+                f"negative control {control['id']!r} also fails {other}: "
+                f"it must isolate the {expected} check"
+            )
+    return controls
+
+
+def _provenance_control_results(
+    task: dict[str, Any],
+    repo_root: Path,
+    ref_checks: dict[str, Any],
+    netlist_sha: str,
+    errors: list[str],
+) -> dict[str, bool]:
+    """Provenance controls: checks recorded for the reference must not vouch for
+    another file (GDS swapped after the checks) or another netlist."""
+    swapped = _sha256_path(repo_root / task["negative_controls"][0]["path"])
+    swap = provenance_errors(
+        swapped, ref_checks["drc_report"], ref_checks["lvs_report"], netlist_sha
+    )
+    wrong_netlist = provenance_errors(
+        task["reference_layout"]["sha256"],
+        ref_checks["drc_report"],
+        ref_checks["lvs_report"],
+        "0" * 64,
+    )
+    if not swap:
+        errors.append("provenance: a GDS swapped after the checks was not rejected")
+    if not wrong_netlist:
+        errors.append("provenance: a non-frozen LVS reference was not rejected")
+    return {
+        "swapped_gds_rejected": bool(swap),
+        "wrong_netlist_rejected": bool(wrong_netlist),
+    }
+
+
 def check_task_gate(
     task: dict[str, Any], repo_root: Path, workdir: Path
 ) -> dict[str, Any]:
@@ -1036,51 +1105,42 @@ def check_task_gate(
         if built_verdict["failed"]:
             errors.append(f"generator_recipe: result fails {built_verdict['failed']}")
 
-    controls = []
-    for control in task["negative_controls"]:
-        path = repo_root / control["path"]
-        verdict = gate_verdict(
-            control["sha256"],
-            run_checks(path, netlist, top, workdir / f"control-{control['id']}"),
-            netlist_sha,
-        )
-        expected = control["expected_failure"]
-        other = "lvs" if expected == "drc" else "drc"
-        controls.append({"id": control["id"], "expected_failure": expected, **verdict})
-        if verdict[expected]:
-            errors.append(
-                f"negative control {control['id']!r} is not rejected by {expected}"
-            )
-        if not verdict[other]:
-            errors.append(
-                f"negative control {control['id']!r} also fails {other}: "
-                f"it must isolate the {expected} check"
-            )
-    result["negative_controls"] = controls
-
-    # Provenance controls: checks recorded for the reference must not vouch for
-    # another file (GDS swapped after the checks) or another netlist.
-    swapped = _sha256_path(repo_root / task["negative_controls"][0]["path"])
-    swap = provenance_errors(
-        swapped, ref_checks["drc_report"], ref_checks["lvs_report"], netlist_sha
+    result["negative_controls"] = _negative_control_results(
+        task, repo_root, netlist, top, workdir, errors
     )
-    wrong_netlist = provenance_errors(
-        task["reference_layout"]["sha256"],
-        ref_checks["drc_report"],
-        ref_checks["lvs_report"],
-        "0" * 64,
+    result["provenance_controls"] = _provenance_control_results(
+        task, repo_root, ref_checks, netlist_sha, errors
     )
-    result["provenance_controls"] = {
-        "swapped_gds_rejected": bool(swap),
-        "wrong_netlist_rejected": bool(wrong_netlist),
-    }
-    if not swap:
-        errors.append("provenance: a GDS swapped after the checks was not rejected")
-    if not wrong_netlist:
-        errors.append("provenance: a non-frozen LVS reference was not rejected")
 
     result["valid"] = not errors
     return result
+
+
+def _exclusion_recipe_errors(
+    item: dict[str, Any], repo_root: Path, workdir: Path
+) -> list[str]:
+    """Recipe rules for one exclusion: a ``generator_reachable`` exclusion needs a
+    hash-bound recipe that still fails; no other reason may carry a recipe."""
+    recipe = item.get("recipe")
+    if item["reason"] != "generator_reachable":
+        if recipe is None:
+            return []
+        return [f"exclusions/{item['id']}: recipe only applies to generator_reachable"]
+    if recipe is None:
+        return [f"exclusions/{item['id']}: generator_reachable needs a failing recipe"]
+    path = repo_root / recipe["path"]
+    if ".." in Path(recipe["path"]).parts or not path.is_file():
+        return [f"exclusions/{item['id']}: recipe path missing: {recipe['path']}"]
+    if _sha256_path(path) != recipe["sha256"]:
+        return [f"exclusions/{item['id']}: recipe sha256 does not match"]
+    try:
+        run_recipe(json.loads(path.read_text()), workdir / f"exclusion-{item['id']}")
+    except RecipeError:
+        return []
+    return [
+        f"exclusions/{item['id']}: recipe now reaches a layout; "
+        "the exclusion is stale -- promote it to a task"
+    ]
 
 
 def _exclusion_errors(
@@ -1098,38 +1158,7 @@ def _exclusion_errors(
             errors.append(
                 f"exclusions: {item['id']!r} is also a scored task (all arms or none)"
             )
-        recipe = item.get("recipe")
-        if item["reason"] == "generator_reachable":
-            if recipe is None:
-                errors.append(
-                    f"exclusions/{item['id']}: generator_reachable needs a "
-                    "failing recipe"
-                )
-                continue
-            path = repo_root / recipe["path"]
-            if ".." in Path(recipe["path"]).parts or not path.is_file():
-                errors.append(
-                    f"exclusions/{item['id']}: recipe path missing: {recipe['path']}"
-                )
-            elif _sha256_path(path) != recipe["sha256"]:
-                errors.append(f"exclusions/{item['id']}: recipe sha256 does not match")
-            else:
-                try:
-                    run_recipe(
-                        json.loads(path.read_text()),
-                        workdir / f"exclusion-{item['id']}",
-                    )
-                except RecipeError:
-                    pass
-                else:
-                    errors.append(
-                        f"exclusions/{item['id']}: recipe now reaches a layout; "
-                        "the exclusion is stale -- promote it to a task"
-                    )
-        elif recipe is not None:
-            errors.append(
-                f"exclusions/{item['id']}: recipe only applies to generator_reachable"
-            )
+        errors += _exclusion_recipe_errors(item, repo_root, workdir)
     return errors
 
 
