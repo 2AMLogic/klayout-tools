@@ -39,6 +39,7 @@ import fnmatch
 import itertools
 import json
 import os
+from dataclasses import dataclass, field
 from typing import Any
 
 from ._layout import load_layout
@@ -1200,6 +1201,786 @@ def _apply_waivers(
     return kept, rule_counts, fields
 
 
+@dataclass
+class _DrcSetup:
+    """Run-wide inputs :func:`run_drc` resolves once before any rule runs."""
+
+    deck_name: str
+    deck: list[DrcRule]
+    layer_names: dict[tuple[int, int], str]
+    rule_selection: dict[str, Any] | None
+    omitted_ids: set[str]
+    waivers: Any
+    pdk_info: dict[str, Any] | None
+    layout: Any
+    dbu_scale: float
+    top_cells: list[Any]
+    deck_layer_tuples: set[tuple[int, int]]
+    stream_layer_tuples: set[tuple[int, int]]
+
+
+@dataclass
+class _DrcState:
+    """Accumulators the per-rule loop fills and the report assembly reads."""
+
+    violations: list[dict[str, Any]] = field(default_factory=list)
+    rule_counts: dict[str, int] = field(default_factory=dict)
+    rules_skipped: list[str] = field(default_factory=list)
+    rules_checked: list[str] = field(default_factory=list)
+    empty_checked_region_ids: set[str] = field(default_factory=set)
+
+
+def _layer_str(layer_tuple: tuple[int, int]) -> str:
+    return f"{layer_tuple[0]}/{layer_tuple[1]}"
+
+
+def _prepare_drc(
+    path: str,
+    deck_name: str,
+    top: str | None,
+    pdk_variant: str | None,
+    pdk_root: str | None,
+    rules: list[str] | None,
+    waivers_file: str | None,
+) -> _DrcSetup:
+    """The setup phase of :func:`run_drc`: PDK/path/deck resolution, rule
+    selection, the layout load and the deck-static layer inventory."""
+    # Resolved only when `--pdk`/`--pdk-root` was given -- this engine's
+    # rules come entirely from `deck_name`, so the resolved PDK is used for
+    # nothing but `provenance.pdk` (issue #1901). Mirrors extract.py's own
+    # `pdk_variant is not None or pdk_root is not None` guard so an omitted
+    # `--pdk` still yields `provenance.pdk: null`, not a spuriously-resolved
+    # default PDK.
+    pdk_info: dict[str, Any] | None = None
+    if pdk_variant is not None or pdk_root is not None:
+        try:
+            pdk_info = find_pdk(variant=pdk_variant, root=pdk_root)
+        except PdkNotFoundError as exc:
+            raise DrcError(str(exc)) from exc
+
+    # Checked here (ahead of deck lookup) so a missing/bad path is reported
+    # before an unknown deck name, matching this command's historical error
+    # precedence; load_layout() repeats this cheap check before the read.
+    if not os.path.exists(path):
+        raise DrcError(f"file not found: {path}")
+    if os.path.isdir(path):
+        raise DrcError(f"not a file: {path}")
+
+    try:
+        deck = get_deck(deck_name)
+        nominal_dbu_um = get_nominal_dbu(deck_name)
+    except UnknownDeckError as exc:
+        raise DrcError(str(exc)) from exc
+    layer_names = get_layer_names(deck_name)
+
+    # Issue #2768: resolved against the full deck before the layout is read,
+    # so a bad selector never costs a stream load. `omitted_ids` is empty for
+    # a full run (no selection, or a selection naming every rule).
+    rule_selection, omitted_ids = _resolve_optional_selection(deck, rules)
+    waivers = None if waivers_file is None else load_waivers(waivers_file)
+
+    layout = load_layout(path, DrcError)
+
+    # `deck`'s threshold_dbu values are authored against nominal_dbu_um, not
+    # necessarily this layout's own dbu (see DrcRule's docstring / #172) —
+    # rescale so the same physical distance is checked regardless of the
+    # stream's database unit.
+    dbu_scale = nominal_dbu_um / layout.dbu
+
+    top_cells = _select_top_cells(layout, top, DrcError)
+
+    # Deck-static: every (layer, datatype) any rule in this deck references,
+    # regardless of what's actually present in `path`.
+    deck_layer_tuples: set[tuple[int, int]] = set()
+    for rule in deck:
+        deck_layer_tuples.add(rule.layer)
+        if rule.other_layer is not None:
+            deck_layer_tuples.add(rule.other_layer)
+        deck_layer_tuples.update(_spec_layers(rule))
+        if rule.derived_layer is not None:
+            # `rule.layer` is only the derived rule's *reporting* identity
+            # (see DerivedLayer's docstring) -- the layer(s) actually read
+            # to compute the checked region are these, independent of
+            # whether either happens to equal `rule.layer`. `"holes"` mode
+            # (#1976) reads only `base` -- `intersect_with` is `None` for it.
+            deck_layer_tuples.add(rule.derived_layer.base)
+            if rule.derived_layer.intersect_with is not None:
+                deck_layer_tuples.add(rule.derived_layer.intersect_with)
+
+    # Reuse layers.py's existing per-layer enumeration (used today by
+    # `klt layers`) for stream-layer enumeration, rather than a second
+    # `kdb.Layout` layer walk -- see #189. `top=top` keeps this scoped to the
+    # same cells `top_cells` above was just restricted to, so a scoped run's
+    # `coverage` reflects only what was actually checked, not the whole
+    # stream's layer usage.
+    stream_layer_tuples = {
+        (entry["layer"], entry["datatype"])
+        for entry in layers_report(path, top=top)["layers"]
+    }
+    return _DrcSetup(
+        deck_name=deck_name,
+        deck=deck,
+        layer_names=layer_names,
+        rule_selection=rule_selection,
+        omitted_ids=omitted_ids,
+        waivers=waivers,
+        pdk_info=pdk_info,
+        layout=layout,
+        dbu_scale=dbu_scale,
+        top_cells=top_cells,
+        deck_layer_tuples=deck_layer_tuples,
+        stream_layer_tuples=stream_layer_tuples,
+    )
+
+
+def _record_violation(
+    state: _DrcState,
+    rule: DrcRule,
+    layer_label: str,
+    cell: Any,
+    bbox: Any,
+    points: list[list[int]] | None,
+) -> None:
+    """Append one ``violations[]`` entry for ``rule`` and bump its count."""
+    source_cell, source_path = _attribute_to_instance(cell, bbox)
+    state.violations.append(
+        {
+            "rule": rule.id,
+            "description": rule.description,
+            "check": rule.check,
+            "layer": layer_label,
+            "cell": cell.name,
+            "source_cell": source_cell,
+            "source_path": source_path,
+            "bbox": {
+                "left": bbox.left,
+                "bottom": bbox.bottom,
+                "right": bbox.right,
+                "top": bbox.top,
+            },
+            "polygon": points,
+        }
+    )
+    state.rule_counts[rule.id] = state.rule_counts.get(rule.id, 0) + 1
+
+
+def _separate_peer_plates(
+    rule: DrcRule, other_region: Any, base_region: Any, dbu_scale: float
+) -> tuple[Any, Any]:
+    """Split ``other_region`` for a ``derived_layer`` ``"separation"`` rule
+    whose ``other_layer`` is the same drawn layer ``derived_layer.intersect_with``
+    reads (issue #1033); returns ``(other_region, peer_edge_pairs)``."""
+    # A `derived_layer` "separation" rule whose `other_layer` is
+    # the *same* drawn layer `derived_layer.intersect_with` reads
+    # (issue #1033, e.g. gf180mcu's `mim.space.1`: `region` is the
+    # virtual bottom plate carved out of `Metal4`, `other_layer`
+    # is `Metal4` itself) needs `other_region` scoped to exclude
+    # the plate's own footprint -- otherwise `other_region`
+    # trivially contains every shape `region` was built from
+    # (they're the same drawn layer), which is not a meaningful
+    # "spacing to other metal" comparison.
+    #
+    # A plain `other_region - region` is not safe here: `region`
+    # is only the *clipped* fragment of an `other_layer` polygon
+    # that falls inside the oversized `base` window (see
+    # `DerivedLayer`'s docstring) -- any part of that same
+    # physical polygon *outside* the window would be left behind
+    # in `other_region`, touching `region` at the sizing cutoff
+    # with zero gap: a `separation_check` between them reports a
+    # synthetic violation at that seam, an artefact of one
+    # continuous shape being cut in two, not a real spacing gap.
+    #
+    # Instead, exclude the *whole* `other_region` polygon for any
+    # polygon that already overlaps the raw (unsized) `base`
+    # region anywhere. Every polygon that can contribute a
+    # fragment to `region` only does so because it already passed
+    # this same `.interacting(base_region)` pre-filter (see
+    # `region`'s own construction above), so this removes exactly
+    # the candidates `region` was built from, wholesale --
+    # leaving only genuinely distinct `other_layer` geometry (e.g.
+    # ordinary routing/PDN metal with no relationship to any MiM
+    # structure) as "other".
+    other_merged = other_region.merged()
+    peer_region = other_merged.interacting(base_region)
+    other_region = other_merged - peer_region
+
+    # That wholesale exclusion leaves one half of the official
+    # rule unmeasured: gf180mcu's `MIMTM.1` is spacing to the
+    # bottom plate metal "whether adjacent MiM or routing
+    # metal", and every *adjacent MiM* plate has just been
+    # excluded from `other_region` along with this rule's own
+    # plate (both overlap `base`). Measure that half here, as a
+    # peer-to-peer check among the excluded, plate-bearing
+    # polygons themselves, and report it under the same rule id.
+    #
+    # `isolated_check` (spacing between *different* polygons of
+    # one region), not `space_check` (which also measures
+    # intra-polygon notches): a single MiM's own bottom plate
+    # metal is one polygon after `.merged()`, and a legitimate
+    # slot in wide plate metal (a routine density/stress-relief
+    # feature, typically ~1um wide) is not "spacing to another
+    # bottom plate" -- `space_check` would flag it, a fresh
+    # false positive of exactly the kind this issue is about.
+    #
+    # Measured on the *whole* plate-bearing polygons rather than
+    # the sizing-clipped virtual plates, which is deliberate:
+    # clipped plates split a shared bottom plate carrying two
+    # top plates more than `2 * sized_by_um` apart into two
+    # region polygons with no real gap between them (the metal
+    # is continuous), which `isolated_check` would flag. The
+    # residual conservatism this trades for -- two plate-bearing
+    # polygons whose *facing* metal is routing tail rather than
+    # virtual plate on both sides -- is documented in the deck's
+    # own `mim.space.1` note.
+    peer_edge_pairs = peer_region.isolated_check(round(rule.threshold_dbu * dbu_scale))
+    return other_region, peer_edge_pairs
+
+
+def _cell_check_regions(
+    rule: DrcRule,
+    cell: Any,
+    setup: _DrcSetup,
+    layer_index: int | None,
+    base_index: int | None,
+    intersect_index: int | None,
+    other_index: int | None,
+) -> tuple[Any, Any, Any, Any | None]:
+    """Build ``(region, other_region, base_region, peer_edge_pairs)`` for
+    ``rule`` on one top ``cell``."""
+    import klayout.db as kdb
+
+    layout = setup.layout
+    dbu_scale = setup.dbu_scale
+
+    base_region = None
+    if rule.derived_layer is not None:
+        # Virtual/derived region (#345, marker-scoped modes #1110) --
+        # see `DerivedLayer`'s docstring for each mode's full
+        # derivation and why an unscoped check against either raw
+        # input layer would be wrong, not just conservative.
+        # `sized_by_um` is a real micrometre distance, rescaled
+        # against this layout's own `dbu` directly (unlike
+        # `rule.threshold_dbu`, which is rescaled via `dbu_scale`
+        # against the deck's nominal dbu).
+        base_region = _cell_region_or_empty(cell, base_index)
+        region = _derived_region(
+            rule,
+            base_region,
+            _cell_region_or_empty(cell, intersect_index),
+            layout.dbu,
+            _context_region(cell, layout, rule),
+            _context_region(cell, layout, rule, stage=2),
+        )
+    else:
+        region = _select_primary_region(
+            rule,
+            kdb.Region(cell.begin_shapes_rec(layer_index))
+            if layer_index is not None
+            else kdb.Region(),  # absent conductor (#2726)
+        )
+    other_region = (
+        _select_other_region(rule, kdb.Region(cell.begin_shapes_rec(other_index)))
+        if other_index is not None
+        else (kdb.Region() if rule.require_containment else None)
+    )
+
+    # Supplementary edge pairs reported under the same rule id,
+    # alongside whatever `_run_check` returns -- the same additive
+    # pattern `_run_check`'s own `outside_region` escape term already
+    # uses (#318). Only ever set for the derived+`"separation"`
+    # same-drawn-layer case (issue #1033).
+    peer_edge_pairs: Any | None = None
+
+    if (
+        rule.derived_layer is not None
+        and rule.check == "separation"
+        and other_region is not None
+        and rule.other_layer == rule.derived_layer.intersect_with
+    ):
+        other_region, peer_edge_pairs = _separate_peer_plates(
+            rule, other_region, base_region, dbu_scale
+        )
+
+    return region, other_region, base_region, peer_edge_pairs
+
+
+def _record_polygons(
+    state: _DrcState,
+    rule: DrcRule,
+    layer_label: str,
+    cell: Any,
+    polygons: Any,
+) -> None:
+    """Record one violation per merged polygon in ``polygons``."""
+    for polygon in polygons.each_merged():
+        bbox = polygon.bbox()
+        points = [[pt.x, pt.y] for pt in polygon.each_point_hull()]
+        _record_violation(state, rule, layer_label, cell, bbox, points)
+
+
+def _check_non_edge_pair_rule(
+    rule: DrcRule,
+    cell: Any,
+    setup: _DrcSetup,
+    state: _DrcState,
+    layer_label: str,
+    region: Any,
+    other_region: Any,
+) -> bool:
+    """Run the area / density / antenna checks, which report something other
+    than edge pairs. Returns whether ``rule`` was one of those kinds (and so
+    is fully handled)."""
+    if rule.check in _AREA_CHECKS:
+        _record_polygons(
+            state,
+            rule,
+            layer_label,
+            cell,
+            _run_area_check(region, rule, setup.dbu_scale),
+        )
+        return True
+
+    if rule.check in _DENSITY_CHECKS:
+        for window_box in _run_density_check(region, rule, setup.layout.dbu):
+            points = [
+                [window_box.left, window_box.bottom],
+                [window_box.right, window_box.bottom],
+                [window_box.right, window_box.top],
+                [window_box.left, window_box.top],
+            ]
+            _record_violation(state, rule, layer_label, cell, window_box, points)
+        return True
+
+    if rule.check in _ANTENNA_CHECKS:
+        antenna_bbox = _run_antenna_check(region, other_region, rule)
+        if antenna_bbox is not None:
+            # Flat, whole-cell aggregate -- no single real polygon
+            # corresponds to "the violation" the way an "area" or
+            # edge-pair check's does, see `_run_antenna_check`'s docstring.
+            _record_violation(state, rule, layer_label, cell, antenna_bbox, None)
+        return True
+
+    return False
+
+
+def _edge_pairs_for_rule(
+    rule: DrcRule,
+    cell: Any,
+    setup: _DrcSetup,
+    region: Any,
+    other_region: Any,
+) -> tuple[Any, Any]:
+    """``(edge_pairs, outside_region)`` for an edge-pair-reporting ``rule``."""
+    if rule.check in _NET_SPACE_CHECKS:
+        return _run_net_space_check(cell, setup.layout, rule, setup.dbu_scale), None
+    if rule.check in _VERTEX_CHECKS:
+        # Vertex checks (issue #2642). Dispatched here rather than
+        # inside `_run_check` because neither reads `threshold_dbu`
+        # (and `"ongrid"` needs the layout's own `dbu`, which
+        # `_run_check`'s `dbu_scale` has already divided out) -- but
+        # both return the same `EdgePairs` shape, so everything
+        # downstream (bbox/polygon extraction, `rule_counts`,
+        # `violations[]`) is reused verbatim. Neither kind has an
+        # `outside_region` term.
+        return _run_vertex_check(region, rule, setup.layout.dbu), None
+    return _run_check(region, other_region, rule, setup.dbu_scale)
+
+
+def _check_rule_on_cell(
+    rule: DrcRule,
+    cell: Any,
+    setup: _DrcSetup,
+    state: _DrcState,
+    layer_label: str,
+    layer_index: int | None,
+    base_index: int | None,
+    intersect_index: int | None,
+    other_index: int | None,
+) -> None:
+    """Evaluate one resolved ``rule`` against one top ``cell``, recording
+    every violation in ``state``."""
+    region, other_region, _, peer_edge_pairs = _cell_check_regions(
+        rule, cell, setup, layer_index, base_index, intersect_index, other_index
+    )
+
+    if _check_non_edge_pair_rule(
+        rule, cell, setup, state, layer_label, region, other_region
+    ):
+        return
+
+    edge_pairs, outside_region = _edge_pairs_for_rule(
+        rule, cell, setup, region, other_region
+    )
+
+    checked_edge_pairs = (
+        edge_pairs
+        if peer_edge_pairs is None
+        else itertools.chain(edge_pairs, peer_edge_pairs)
+    )
+
+    for edge_pair in checked_edge_pairs:
+        _record_violation(
+            state,
+            rule,
+            layer_label,
+            cell,
+            edge_pair.bbox(),
+            _edge_pair_hull_points(edge_pair),
+        )
+
+    # Polygon-shaped violation terms reported under the same rule id,
+    # additive to the edge-pair violations above (each `None` for
+    # every rule that doesn't opt into it):
+    #
+    # - `outside_region` (only set for "enclosing"/"enclosed", see
+    #   _OUTSIDE_CHECKS) holds the part of the enclosed layer that
+    #   `enclosing_check`/`enclosed_check` structurally cannot
+    #   report: area with zero (or partial) spatial overlap with the
+    #   enclosing layer, up to and including a shape that lies
+    #   entirely outside it -- the worst-case enclosure violation
+    #   (#318).
+    # - the max-size term (only set for a `"width"` rule that
+    #   declares `threshold_max_dbu`, see `_run_width_max_check`)
+    #   holds the merged cuts whose bounding box exceeds the *upper*
+    #   bound of a fixed-size rule like gf180mcu's `CO.1`/`Vn.1`
+    #   (#2370) -- the half no `Region` check primitive reports.
+    polygon_terms = [
+        term
+        for term in (
+            outside_region,
+            _run_width_max_check(region, rule, setup.dbu_scale),
+        )
+        if term is not None
+    ]
+    for polygon_term in polygon_terms:
+        _record_polygons(state, rule, layer_label, cell, polygon_term)
+
+
+def _evaluate_rule(rule: DrcRule, setup: _DrcSetup, state: _DrcState) -> None:
+    """Validate ``rule``, resolve its input layers, and run it on every top
+    cell -- or record it in ``state.rules_skipped`` when an input is absent."""
+    layout = setup.layout
+
+    # A `threshold_max_dbu` (#2370) attached to a check kind with no
+    # upper-bound branch is a deck-authoring mistake that must fail
+    # loudly, including on a stream where this rule's layer is absent
+    # (below) and the check itself never runs -- see
+    # `_validate_threshold_max`.
+    _validate_threshold_max(rule)
+    _validate_require_containment(rule)
+    _validate_other_layer_selection(rule)
+    _validate_layer_selection(rule)
+
+    # Gates that skip a rule before any layer resolution below -- see
+    # `_rule_skipped_before_evaluation` for each one and why. Like a
+    # missing `layer`/`other_layer`, they land the rule in
+    # `coverage.rules_skipped`; `_classify_skipped_rules` decides which
+    # reason code each one reports.
+    if _rule_skipped_before_evaluation(rule, layout):
+        state.rules_skipped.append(rule.id)
+        return
+
+    # For a `derived_layer` rule (#345), the region actually checked is
+    # computed from two *different* drawn layers (`derived_layer.base`/
+    # `intersect_with`) rather than `rule.layer`'s own raw shapes -- see
+    # `DerivedLayer`'s docstring. `rule.layer` itself is resolved only for
+    # `coverage`/`layer_label` reporting below, never used to build the
+    # checked region in this branch.
+    if _dispatch_region_rule(
+        rule,
+        layout,
+        setup.top_cells,
+        setup.layer_names,
+        state.violations,
+        state.rule_counts,
+        state.rules_checked,
+        state.rules_skipped,
+        state.empty_checked_region_ids,
+    ):
+        return
+
+    base_index: int | None = None
+    intersect_index: int | None = None
+    layer_index: int | None = None
+
+    if rule.derived_layer is not None:
+        _validate_derived_layer(rule)
+        base_index = layout.find_layer(*rule.derived_layer.base)
+        intersect_index = (
+            layout.find_layer(*rule.derived_layer.intersect_with)
+            if rule.derived_layer.intersect_with is not None
+            else None
+        )
+        if _derived_inputs_absent(rule, base_index, intersect_index):
+            # See `_derived_inputs_absent` for each mode's skip condition.
+            state.rules_skipped.append(rule.id)
+            return
+    else:
+        layer_index = layout.find_layer(*rule.layer)
+        if layer_index is None and not (
+            rule.require_containment
+            and _containment_layers(rule)[1] == rule.layer
+            and layout.find_layer(*_containment_layers(rule)[0]) is not None
+        ):
+            # rule's layer is absent from this stream -> no violations,
+            # but record it so `coverage.rules_skipped` can surface the
+            # skip.
+            state.rules_skipped.append(rule.id)
+            return
+
+    other_index = None
+    if rule.other_layer is not None:
+        other_index = layout.find_layer(*rule.other_layer)
+        if other_index is None and not (
+            rule.require_containment
+            and _containment_layers(rule)[1] == rule.other_layer
+            and layout.find_layer(*_containment_layers(rule)[0]) is not None
+        ):
+            state.rules_skipped.append(rule.id)
+            return
+
+    # Every return above is a skip; reaching here means this rule's
+    # input layer(s) all resolved, so it is about to be evaluated against
+    # real geometry -- record it so `coverage.rules_checked` (and the
+    # `coverage.nothing_checked` roll-up derived from it) can state what
+    # this verdict was actually measured over (issue #1996).
+    state.rules_checked.append(rule.id)
+
+    layer_label = setup.layer_names.get(rule.layer, f"{rule.layer[0]}/{rule.layer[1]}")
+
+    for cell in setup.top_cells:
+        _check_rule_on_cell(
+            rule,
+            cell,
+            setup,
+            state,
+            layer_label,
+            layer_index,
+            base_index,
+            intersect_index,
+            other_index,
+        )
+
+
+def _marker_interacts_in_cell(
+    layout: Any,
+    cell: Any,
+    marker_index: int,
+    unscoped_layers: set[tuple[int, int]],
+) -> bool:
+    """Whether the marker layer's geometry in ``cell`` interacts with any of
+    ``unscoped_layers``."""
+    import klayout.db as kdb
+
+    marker_region = kdb.Region(cell.begin_shapes_rec(marker_index))
+    if marker_region.is_empty():
+        return False
+    for checked_layer in sorted(unscoped_layers):
+        checked_index = layout.find_layer(*checked_layer)
+        if checked_index is None:
+            continue
+        checked_region = kdb.Region(cell.begin_shapes_rec(checked_index))
+        if not marker_region.interacting(checked_region).is_empty():
+            return True
+    return False
+
+
+def _voltage_domain_warnings(
+    setup: _DrcSetup, skipped_rule_ids: set[str]
+) -> list[dict[str, str]]:
+    """``coverage.voltage_domain_warnings`` (issue #552).
+
+    A marker this deck registers via `get_unmodeled_voltage_markers` (e.g.
+    gf180mcu's `Dualgate` 55/0) selects a second gate-oxide/voltage domain
+    whose real DRC thresholds this deck's rules do not encode -- geometry
+    inside it is checked against the wrong (default) column and would
+    otherwise report an unqualified `layers_checked` pass. Gated on the
+    marker's geometry actually *interacting* with at least one layer an
+    **unscoped** rule checked on this run (not merely present in the stream),
+    so a marker shape that never overlaps any such geometry produces no
+    warning with nothing behind it.
+
+    "Unscoped" is per rule, not per deck (issue #1110): a marker can be
+    partly modelled. gf180mcu's `DF.1a`/`DF.3a` now ship as `_LV`/`_MV`
+    rule pairs that read `Dualgate` themselves via `DerivedLayer`'s
+    `"overlapping"`/`"not_interacting"` modes, so geometry those rules
+    checked was *not* checked against the wrong column and must not
+    produce a warning -- while every rule that ran without reading the
+    marker still can. Rules skipped this run (their layers absent from
+    this stream) are excluded too: a rule that never ran applied no
+    threshold, right or wrong.
+    """
+    layout = setup.layout
+    stream_layer_tuples = setup.stream_layer_tuples
+    warnings: list[dict[str, str]] = []
+    unmodeled_markers = get_unmodeled_voltage_markers(setup.deck_name)
+    for marker, description in sorted(unmodeled_markers.items()):
+        if marker not in stream_layer_tuples:
+            continue
+        marker_index = layout.find_layer(*marker)
+        if marker_index is None:
+            continue
+        unscoped_layers: set[tuple[int, int]] = set()
+        for rule in setup.deck:
+            if _rule_outside_voltage_gate(rule, marker, skipped_rule_ids):
+                continue
+            unscoped_layers |= _rule_input_layers(rule)
+        unscoped_layers &= stream_layer_tuples
+        unscoped_layers.discard(marker)
+        if any(
+            _marker_interacts_in_cell(layout, cell, marker_index, unscoped_layers)
+            for cell in setup.top_cells
+        ):
+            warnings.append({"marker": _layer_str(marker), "description": description})
+    return warnings
+
+
+def _build_coverage(setup: _DrcSetup, state: _DrcState) -> dict[str, Any]:
+    """The report's ``coverage`` block."""
+    deck = setup.deck
+    deck_name = setup.deck_name
+    stream_layer_tuples = setup.stream_layer_tuples
+    deck_layer_tuples = setup.deck_layer_tuples
+    omitted_ids = setup.omitted_ids
+    rules_checked = state.rules_checked
+    rules_skipped = state.rules_skipped
+
+    layers_checked = deck_layer_tuples & stream_layer_tuples
+    layers_in_stream_without_rules = stream_layer_tuples - deck_layer_tuples
+
+    # Deck-static, like `deck_layers` above: every distinct non-empty
+    # DrcRule.scope this deck's rules declare, regardless of what's actually
+    # present in `path` (#566).
+    deck_scope = sorted({rule.scope for rule in deck if rule.scope})
+
+    # A rule omitted from a `--rules` subset (issue #2768) applied no
+    # threshold either, exactly like a skipped one.
+    skipped_rule_ids = set(rules_skipped) | omitted_ids
+    voltage_domain_warnings = _voltage_domain_warnings(setup, skipped_rule_ids)
+
+    # Issue #3012: foundry rules the deck knows but cannot evaluate, named so
+    # a `clean` cannot be read as covering them. Only when the rule's layer
+    # is actually in the stream.
+    unchecked_rules = [
+        {"rule": rule_id, "layer": _layer_str(layer), "description": description}
+        for rule_id, (layer, description) in sorted(
+            get_unchecked_rules(deck_name).items()
+        )
+        if layer in stream_layer_tuples
+    ]
+
+    # Issue #2110: the two common-coverage categories this engine's single
+    # "a layer it reads is absent" skip splits into -- see
+    # `_classify_skipped_rules` for why an empty assessment domain is
+    # inapplicable work rather than a skipped request, and why anything else
+    # stays a disclosed skip.
+    skipped_records, inapplicable_records = _classify_skipped_rules(
+        deck, rules_skipped, setup.layout, frozenset(state.empty_checked_region_ids)
+    )
+    # Issue #2768: every deliberately omitted rule is requested work that did
+    # not run -- a skip, never inapplicable, even when its layers are absent
+    # (the full registered deck is what a DRC verdict is about).
+    skipped_records += [
+        {"id": rule_id, "reason": SKIP_REASON_NOT_SELECTED}
+        for rule_id in sorted(omitted_ids)
+    ]
+    return {
+        "deck_layers": [_layer_str(t) for t in sorted(deck_layer_tuples)],
+        "layers_checked": [_layer_str(t) for t in sorted(layers_checked)],
+        "layers_in_stream_without_rules": [
+            _layer_str(t) for t in sorted(layers_in_stream_without_rules)
+        ],
+        "rules_checked": sorted(rules_checked),
+        "rules_skipped": sorted(rules_skipped),
+        "voltage_domain_warnings": voltage_domain_warnings,
+        "unchecked_rules": unchecked_rules,
+        "deck_scope": deck_scope,
+        # Issue #3031: deck-static, like `deck_scope` -- official rule ids the
+        # deck knowingly does not transcribe.
+        "unmodeled_rules": get_unmodeled_rules(deck_name),
+        # Issue #1996: the shared roll-up, so a reader (`klt signoff`) can
+        # refuse a "clean" verdict measured over nothing without re-deriving
+        # that emptiness from `rules_skipped` vs. the deck's own rule count.
+        **build_check_coverage(
+            checked=sorted(rules_checked),
+            skipped=skipped_records,
+            inapplicable=inapplicable_records,
+            nothing_checked_reasons=_curated_nothing_checked_reasons(
+                deck, rules_checked
+            ),
+        ),
+    }
+
+
+def _assemble_report(
+    path: str, setup: _DrcSetup, state: _DrcState, waivers_file: str | None
+) -> dict[str, Any]:
+    """The report-assembly phase of :func:`run_drc`: sort, coverage, waivers,
+    verdict and provenance."""
+    violations = state.violations
+    rule_counts = state.rule_counts
+    violations.sort(
+        key=lambda v: (
+            v["rule"],
+            v["cell"],
+            v["bbox"]["left"],
+            v["bbox"]["bottom"],
+            v["bbox"]["right"],
+            v["bbox"]["top"],
+        )
+    )
+
+    coverage = _build_coverage(setup, state)
+
+    # Issue #2110: the verdict is the common decision table's, never a local
+    # re-derivation of it -- violations are `failed` (exit 3, decided before
+    # coverage is consulted at all), known zero checked work is `not_checked`
+    # (exit 4), and successful checks alongside a nonempty skipped-request
+    # list are `clean_partial` (exit 0, a real result that is *not* this
+    # verb's unconditional success). See `docs/coverage-contract.md`.
+    # Issue #3483: waived markers leave every count and the verdict, and are
+    # reported in full under `waived` -- never dropped.
+    waiver_fields: dict[str, Any] = {}
+    if setup.waivers is not None:
+        violations, rule_counts, waiver_fields = _apply_waivers(
+            violations, setup.waivers
+        )
+    rollup = coverage_rollup({"coverage": coverage}, failed=bool(violations))
+    report: dict[str, Any] = {
+        "schema_version": 2,
+        "file": path,
+        "deck": setup.deck_name,
+        "dbu_um": setup.layout.dbu,
+        "status": rollup_status(rollup, success="clean", failure="violations"),
+        "violation_count": len(violations),
+        "rule_counts": dict(sorted(rule_counts.items())),
+        "metrics": {_VIOLATION_COUNT_METRIC_NAME: len(violations)},
+        "violations": violations,
+        "coverage": coverage,
+        # Issue #2768: present only for a `--rules` run, so a default run's
+        # report (and every committed one) is byte-identical to before.
+        **(
+            {}
+            if setup.rule_selection is None
+            else {"rule_selection": setup.rule_selection}
+        ),
+        **waiver_fields,
+    }
+    report["provenance"] = build_provenance(
+        deck_name=setup.deck_name,
+        deck_path=deck_source_path(setup.deck_name),
+        pdk=setup.pdk_info,
+        input_path=path,
+        include_klayout_version_mismatch=True,
+    )
+    if waivers_file is not None:
+        report["provenance"]["waivers"] = {
+            "file": waivers_file,
+            "content_hash": _content_hash(waivers_file),
+        }
+    return report
+
+
 def run_drc(
     path: str,
     deck_name: str,
@@ -1463,655 +2244,19 @@ def run_drc(
     ``pdk_variant``/``pdk_root`` is given but no matching PDK can be found,
     or a ``rules`` selector matches no rule.
     """
-    # Resolved only when `--pdk`/`--pdk-root` was given -- this engine's
-    # rules come entirely from `deck_name`, so the resolved PDK is used for
-    # nothing but `provenance.pdk` (issue #1901). Mirrors extract.py's own
-    # `pdk_variant is not None or pdk_root is not None` guard so an omitted
-    # `--pdk` still yields `provenance.pdk: null`, not a spuriously-resolved
-    # default PDK.
-    pdk_info: dict[str, Any] | None = None
-    if pdk_variant is not None or pdk_root is not None:
-        try:
-            pdk_info = find_pdk(variant=pdk_variant, root=pdk_root)
-        except PdkNotFoundError as exc:
-            raise DrcError(str(exc)) from exc
-
-    # Checked here (ahead of deck lookup) so a missing/bad path is reported
-    # before an unknown deck name, matching this command's historical error
-    # precedence; load_layout() repeats this cheap check before the read.
-    if not os.path.exists(path):
-        raise DrcError(f"file not found: {path}")
-    if os.path.isdir(path):
-        raise DrcError(f"not a file: {path}")
-
-    try:
-        deck = get_deck(deck_name)
-        nominal_dbu_um = get_nominal_dbu(deck_name)
-    except UnknownDeckError as exc:
-        raise DrcError(str(exc)) from exc
-    layer_names = get_layer_names(deck_name)
-
-    # Issue #2768: resolved against the full deck before the layout is read,
-    # so a bad selector never costs a stream load. `omitted_ids` is empty for
-    # a full run (no selection, or a selection naming every rule).
-    rule_selection, omitted_ids = _resolve_optional_selection(deck, rules)
-    waivers = None if waivers_file is None else load_waivers(waivers_file)
-
-    layout = load_layout(path, DrcError)
-
-    # `deck`'s threshold_dbu values are authored against nominal_dbu_um, not
-    # necessarily this layout's own dbu (see DrcRule's docstring / #172) —
-    # rescale so the same physical distance is checked regardless of the
-    # stream's database unit.
-    dbu_scale = nominal_dbu_um / layout.dbu
-
-    # Imported lazily (after load_layout, which already paid this cost) for
-    # kdb.Region() below.
-    import klayout.db as kdb
-
-    top_cells = _select_top_cells(layout, top, DrcError)
-
-    # Deck-static: every (layer, datatype) any rule in this deck references,
-    # regardless of what's actually present in `path`.
-    deck_layer_tuples: set[tuple[int, int]] = set()
-    for rule in deck:
-        deck_layer_tuples.add(rule.layer)
-        if rule.other_layer is not None:
-            deck_layer_tuples.add(rule.other_layer)
-        deck_layer_tuples.update(_spec_layers(rule))
-        if rule.derived_layer is not None:
-            # `rule.layer` is only the derived rule's *reporting* identity
-            # (see DerivedLayer's docstring) -- the layer(s) actually read
-            # to compute the checked region are these, independent of
-            # whether either happens to equal `rule.layer`. `"holes"` mode
-            # (#1976) reads only `base` -- `intersect_with` is `None` for it.
-            deck_layer_tuples.add(rule.derived_layer.base)
-            if rule.derived_layer.intersect_with is not None:
-                deck_layer_tuples.add(rule.derived_layer.intersect_with)
-
-    # Reuse layers.py's existing per-layer enumeration (used today by
-    # `klt layers`) for stream-layer enumeration, rather than a second
-    # `kdb.Layout` layer walk -- see #189. `top=top` keeps this scoped to the
-    # same cells `top_cells` above was just restricted to, so a scoped run's
-    # `coverage` reflects only what was actually checked, not the whole
-    # stream's layer usage.
-    stream_layer_tuples = {
-        (entry["layer"], entry["datatype"])
-        for entry in layers_report(path, top=top)["layers"]
-    }
-
-    violations: list[dict[str, Any]] = []
-    rule_counts: dict[str, int] = {}
-    rules_skipped: list[str] = []
-    rules_checked: list[str] = []
-    empty_checked_region_ids: set[str] = set()
+    setup = _prepare_drc(
+        path, deck_name, top, pdk_variant, pdk_root, rules, waivers_file
+    )
+    state = _DrcState()
 
     # Issue #2768: a rule left out of a `--rules` subset is never dispatched
     # -- not run-and-filtered (see `_dispatched_rules`). It is recorded
     # separately from `rules_skipped` (absent-layer skips) so the omission
-    # cannot be reclassified as inapplicable work below.
-    for rule in _dispatched_rules(deck, omitted_ids):
-        # A `threshold_max_dbu` (#2370) attached to a check kind with no
-        # upper-bound branch is a deck-authoring mistake that must fail
-        # loudly, including on a stream where this rule's layer is absent
-        # (below) and the check itself never runs -- see
-        # `_validate_threshold_max`.
-        _validate_threshold_max(rule)
-        _validate_require_containment(rule)
-        _validate_other_layer_selection(rule)
-        _validate_layer_selection(rule)
+    # cannot be reclassified as inapplicable work.
+    for rule in _dispatched_rules(setup.deck, setup.omitted_ids):
+        _evaluate_rule(rule, setup, state)
 
-        # Gates that skip a rule before any layer resolution below -- see
-        # `_rule_skipped_before_evaluation` for each one and why. Like a
-        # missing `layer`/`other_layer`, they land the rule in
-        # `coverage.rules_skipped`; `_classify_skipped_rules` decides which
-        # reason code each one reports.
-        if _rule_skipped_before_evaluation(rule, layout):
-            rules_skipped.append(rule.id)
-            continue
-
-        # For a `derived_layer` rule (#345), the region actually checked is
-        # computed from two *different* drawn layers (`derived_layer.base`/
-        # `intersect_with`) rather than `rule.layer`'s own raw shapes -- see
-        # `DerivedLayer`'s docstring. `rule.layer` itself is resolved only for
-        # `coverage`/`layer_label` reporting below, never used to build the
-        # checked region in this branch.
-        if _dispatch_region_rule(
-            rule,
-            layout,
-            top_cells,
-            layer_names,
-            violations,
-            rule_counts,
-            rules_checked,
-            rules_skipped,
-            empty_checked_region_ids,
-        ):
-            continue
-
-        base_index: int | None = None
-        intersect_index: int | None = None
-        layer_index: int | None = None
-
-        if rule.derived_layer is not None:
-            _validate_derived_layer(rule)
-            base_index = layout.find_layer(*rule.derived_layer.base)
-            intersect_index = (
-                layout.find_layer(*rule.derived_layer.intersect_with)
-                if rule.derived_layer.intersect_with is not None
-                else None
-            )
-            if _derived_inputs_absent(rule, base_index, intersect_index):
-                # See `_derived_inputs_absent` for each mode's skip condition.
-                rules_skipped.append(rule.id)
-                continue
-        else:
-            layer_index = layout.find_layer(*rule.layer)
-            if layer_index is None and not (
-                rule.require_containment
-                and _containment_layers(rule)[1] == rule.layer
-                and layout.find_layer(*_containment_layers(rule)[0]) is not None
-            ):
-                # rule's layer is absent from this stream -> no violations,
-                # but record it so `coverage.rules_skipped` can surface the
-                # skip.
-                rules_skipped.append(rule.id)
-                continue
-
-        other_index = None
-        if rule.other_layer is not None:
-            other_index = layout.find_layer(*rule.other_layer)
-            if other_index is None and not (
-                rule.require_containment
-                and _containment_layers(rule)[1] == rule.other_layer
-                and layout.find_layer(*_containment_layers(rule)[0]) is not None
-            ):
-                rules_skipped.append(rule.id)
-                continue
-
-        # Every `continue` above is a skip; reaching here means this rule's
-        # input layer(s) all resolved, so it is about to be evaluated against
-        # real geometry -- record it so `coverage.rules_checked` (and the
-        # `coverage.nothing_checked` roll-up derived from it) can state what
-        # this verdict was actually measured over (issue #1996).
-        rules_checked.append(rule.id)
-
-        layer_label = layer_names.get(rule.layer, f"{rule.layer[0]}/{rule.layer[1]}")
-
-        for cell in top_cells:
-            if rule.derived_layer is not None:
-                # Virtual/derived region (#345, marker-scoped modes #1110) --
-                # see `DerivedLayer`'s docstring for each mode's full
-                # derivation and why an unscoped check against either raw
-                # input layer would be wrong, not just conservative.
-                # `sized_by_um` is a real micrometre distance, rescaled
-                # against this layout's own `dbu` directly (unlike
-                # `rule.threshold_dbu`, which is rescaled via `dbu_scale`
-                # against the deck's nominal dbu).
-                base_region = _cell_region_or_empty(cell, base_index)
-                region = _derived_region(
-                    rule,
-                    base_region,
-                    _cell_region_or_empty(cell, intersect_index),
-                    layout.dbu,
-                    _context_region(cell, layout, rule),
-                    _context_region(cell, layout, rule, stage=2),
-                )
-            else:
-                region = _select_primary_region(
-                    rule,
-                    kdb.Region(cell.begin_shapes_rec(layer_index))
-                    if layer_index is not None
-                    else kdb.Region(),  # absent conductor (#2726)
-                )
-            other_region = (
-                _select_other_region(
-                    rule, kdb.Region(cell.begin_shapes_rec(other_index))
-                )
-                if other_index is not None
-                else (kdb.Region() if rule.require_containment else None)
-            )
-
-            # Supplementary edge pairs reported under the same rule id,
-            # alongside whatever `_run_check` returns -- the same additive
-            # pattern `_run_check`'s own `outside_region` escape term already
-            # uses (#318). Only ever set for the derived+`"separation"`
-            # same-drawn-layer case immediately below (issue #1033).
-            peer_edge_pairs: Any | None = None
-
-            if (
-                rule.derived_layer is not None
-                and rule.check == "separation"
-                and other_region is not None
-                and rule.other_layer == rule.derived_layer.intersect_with
-            ):
-                # A `derived_layer` "separation" rule whose `other_layer` is
-                # the *same* drawn layer `derived_layer.intersect_with` reads
-                # (issue #1033, e.g. gf180mcu's `mim.space.1`: `region` is the
-                # virtual bottom plate carved out of `Metal4`, `other_layer`
-                # is `Metal4` itself) needs `other_region` scoped to exclude
-                # the plate's own footprint -- otherwise `other_region`
-                # trivially contains every shape `region` was built from
-                # (they're the same drawn layer), which is not a meaningful
-                # "spacing to other metal" comparison.
-                #
-                # A plain `other_region - region` is not safe here: `region`
-                # is only the *clipped* fragment of an `other_layer` polygon
-                # that falls inside the oversized `base` window (see
-                # `DerivedLayer`'s docstring) -- any part of that same
-                # physical polygon *outside* the window would be left behind
-                # in `other_region`, touching `region` at the sizing cutoff
-                # with zero gap: a `separation_check` between them reports a
-                # synthetic violation at that seam, an artefact of one
-                # continuous shape being cut in two, not a real spacing gap.
-                #
-                # Instead, exclude the *whole* `other_region` polygon for any
-                # polygon that already overlaps the raw (unsized) `base`
-                # region anywhere. Every polygon that can contribute a
-                # fragment to `region` only does so because it already passed
-                # this same `.interacting(base_region)` pre-filter (see
-                # `region`'s own construction above), so this removes exactly
-                # the candidates `region` was built from, wholesale --
-                # leaving only genuinely distinct `other_layer` geometry (e.g.
-                # ordinary routing/PDN metal with no relationship to any MiM
-                # structure) as "other".
-                other_merged = other_region.merged()
-                peer_region = other_merged.interacting(base_region)
-                other_region = other_merged - peer_region
-
-                # That wholesale exclusion leaves one half of the official
-                # rule unmeasured: gf180mcu's `MIMTM.1` is spacing to the
-                # bottom plate metal "whether adjacent MiM or routing
-                # metal", and every *adjacent MiM* plate has just been
-                # excluded from `other_region` along with this rule's own
-                # plate (both overlap `base`). Measure that half here, as a
-                # peer-to-peer check among the excluded, plate-bearing
-                # polygons themselves, and report it under the same rule id.
-                #
-                # `isolated_check` (spacing between *different* polygons of
-                # one region), not `space_check` (which also measures
-                # intra-polygon notches): a single MiM's own bottom plate
-                # metal is one polygon after `.merged()`, and a legitimate
-                # slot in wide plate metal (a routine density/stress-relief
-                # feature, typically ~1um wide) is not "spacing to another
-                # bottom plate" -- `space_check` would flag it, a fresh
-                # false positive of exactly the kind this issue is about.
-                #
-                # Measured on the *whole* plate-bearing polygons rather than
-                # the sizing-clipped virtual plates, which is deliberate:
-                # clipped plates split a shared bottom plate carrying two
-                # top plates more than `2 * sized_by_um` apart into two
-                # region polygons with no real gap between them (the metal
-                # is continuous), which `isolated_check` would flag. The
-                # residual conservatism this trades for -- two plate-bearing
-                # polygons whose *facing* metal is routing tail rather than
-                # virtual plate on both sides -- is documented in the deck's
-                # own `mim.space.1` note.
-                peer_edge_pairs = peer_region.isolated_check(
-                    round(rule.threshold_dbu * dbu_scale)
-                )
-
-            if rule.check in _AREA_CHECKS:
-                for polygon in _run_area_check(region, rule, dbu_scale).each_merged():
-                    bbox = polygon.bbox()
-                    points = [[pt.x, pt.y] for pt in polygon.each_point_hull()]
-                    source_cell, source_path = _attribute_to_instance(cell, bbox)
-                    violations.append(
-                        {
-                            "rule": rule.id,
-                            "description": rule.description,
-                            "check": rule.check,
-                            "layer": layer_label,
-                            "cell": cell.name,
-                            "source_cell": source_cell,
-                            "source_path": source_path,
-                            "bbox": {
-                                "left": bbox.left,
-                                "bottom": bbox.bottom,
-                                "right": bbox.right,
-                                "top": bbox.top,
-                            },
-                            "polygon": points,
-                        }
-                    )
-                    rule_counts[rule.id] = rule_counts.get(rule.id, 0) + 1
-                continue
-
-            if rule.check in _DENSITY_CHECKS:
-                for window_box in _run_density_check(region, rule, layout.dbu):
-                    points = [
-                        [window_box.left, window_box.bottom],
-                        [window_box.right, window_box.bottom],
-                        [window_box.right, window_box.top],
-                        [window_box.left, window_box.top],
-                    ]
-                    source_cell, source_path = _attribute_to_instance(cell, window_box)
-                    violations.append(
-                        {
-                            "rule": rule.id,
-                            "description": rule.description,
-                            "check": rule.check,
-                            "layer": layer_label,
-                            "cell": cell.name,
-                            "source_cell": source_cell,
-                            "source_path": source_path,
-                            "bbox": {
-                                "left": window_box.left,
-                                "bottom": window_box.bottom,
-                                "right": window_box.right,
-                                "top": window_box.top,
-                            },
-                            "polygon": points,
-                        }
-                    )
-                    rule_counts[rule.id] = rule_counts.get(rule.id, 0) + 1
-                continue
-
-            if rule.check in _ANTENNA_CHECKS:
-                antenna_bbox = _run_antenna_check(region, other_region, rule)
-                if antenna_bbox is not None:
-                    source_cell, source_path = _attribute_to_instance(
-                        cell, antenna_bbox
-                    )
-                    violations.append(
-                        {
-                            "rule": rule.id,
-                            "description": rule.description,
-                            "check": rule.check,
-                            "layer": layer_label,
-                            "cell": cell.name,
-                            "source_cell": source_cell,
-                            "source_path": source_path,
-                            "bbox": {
-                                "left": antenna_bbox.left,
-                                "bottom": antenna_bbox.bottom,
-                                "right": antenna_bbox.right,
-                                "top": antenna_bbox.top,
-                            },
-                            # Flat, whole-cell aggregate -- no single real
-                            # polygon corresponds to "the violation" the way
-                            # an "area" or edge-pair check's does, see
-                            # `_run_antenna_check`'s docstring.
-                            "polygon": None,
-                        }
-                    )
-                    rule_counts[rule.id] = rule_counts.get(rule.id, 0) + 1
-                continue
-
-            if rule.check in _NET_SPACE_CHECKS:
-                edge_pairs = _run_net_space_check(cell, layout, rule, dbu_scale)
-                outside_region = None
-            elif rule.check in _VERTEX_CHECKS:
-                # Vertex checks (issue #2642). Dispatched here rather than
-                # inside `_run_check` because neither reads `threshold_dbu`
-                # (and `"ongrid"` needs the layout's own `dbu`, which
-                # `_run_check`'s `dbu_scale` has already divided out) -- but
-                # both return the same `EdgePairs` shape, so everything
-                # downstream (bbox/polygon extraction, `rule_counts`,
-                # `violations[]`) is reused verbatim. Neither kind has an
-                # `outside_region` term.
-                edge_pairs = _run_vertex_check(region, rule, layout.dbu)
-                outside_region = None
-            else:
-                edge_pairs, outside_region = _run_check(
-                    region, other_region, rule, dbu_scale
-                )
-
-            checked_edge_pairs = (
-                edge_pairs
-                if peer_edge_pairs is None
-                else itertools.chain(edge_pairs, peer_edge_pairs)
-            )
-
-            for edge_pair in checked_edge_pairs:
-                bbox = edge_pair.bbox()
-                points = _edge_pair_hull_points(edge_pair)
-
-                source_cell, source_path = _attribute_to_instance(cell, bbox)
-                violations.append(
-                    {
-                        "rule": rule.id,
-                        "description": rule.description,
-                        "check": rule.check,
-                        "layer": layer_label,
-                        "cell": cell.name,
-                        "source_cell": source_cell,
-                        "source_path": source_path,
-                        "bbox": {
-                            "left": bbox.left,
-                            "bottom": bbox.bottom,
-                            "right": bbox.right,
-                            "top": bbox.top,
-                        },
-                        "polygon": points,
-                    }
-                )
-                rule_counts[rule.id] = rule_counts.get(rule.id, 0) + 1
-
-            # Polygon-shaped violation terms reported under the same rule id,
-            # additive to the edge-pair violations above (each `None` for
-            # every rule that doesn't opt into it):
-            #
-            # - `outside_region` (only set for "enclosing"/"enclosed", see
-            #   _OUTSIDE_CHECKS) holds the part of the enclosed layer that
-            #   `enclosing_check`/`enclosed_check` structurally cannot
-            #   report: area with zero (or partial) spatial overlap with the
-            #   enclosing layer, up to and including a shape that lies
-            #   entirely outside it -- the worst-case enclosure violation
-            #   (#318).
-            # - the max-size term (only set for a `"width"` rule that
-            #   declares `threshold_max_dbu`, see `_run_width_max_check`)
-            #   holds the merged cuts whose bounding box exceeds the *upper*
-            #   bound of a fixed-size rule like gf180mcu's `CO.1`/`Vn.1`
-            #   (#2370) -- the half no `Region` check primitive reports.
-            polygon_terms = [
-                term
-                for term in (
-                    outside_region,
-                    _run_width_max_check(region, rule, dbu_scale),
-                )
-                if term is not None
-            ]
-            for polygon_term in polygon_terms:
-                for polygon in polygon_term.each_merged():
-                    bbox = polygon.bbox()
-                    points = [[pt.x, pt.y] for pt in polygon.each_point_hull()]
-
-                    source_cell, source_path = _attribute_to_instance(cell, bbox)
-                    violations.append(
-                        {
-                            "rule": rule.id,
-                            "description": rule.description,
-                            "check": rule.check,
-                            "layer": layer_label,
-                            "cell": cell.name,
-                            "source_cell": source_cell,
-                            "source_path": source_path,
-                            "bbox": {
-                                "left": bbox.left,
-                                "bottom": bbox.bottom,
-                                "right": bbox.right,
-                                "top": bbox.top,
-                            },
-                            "polygon": points,
-                        }
-                    )
-                    rule_counts[rule.id] = rule_counts.get(rule.id, 0) + 1
-
-    violations.sort(
-        key=lambda v: (
-            v["rule"],
-            v["cell"],
-            v["bbox"]["left"],
-            v["bbox"]["bottom"],
-            v["bbox"]["right"],
-            v["bbox"]["top"],
-        )
-    )
-
-    def _fmt(layer_tuple: tuple[int, int]) -> str:
-        return f"{layer_tuple[0]}/{layer_tuple[1]}"
-
-    layers_checked = deck_layer_tuples & stream_layer_tuples
-    layers_in_stream_without_rules = stream_layer_tuples - deck_layer_tuples
-
-    # Deck-static, like `deck_layers` above: every distinct non-empty
-    # DrcRule.scope this deck's rules declare, regardless of what's actually
-    # present in `path` (#566).
-    deck_scope = sorted({rule.scope for rule in deck if rule.scope})
-
-    # Voltage-domain marker warnings (issue #552): a marker this deck
-    # registers via `get_unmodeled_voltage_markers` (e.g. gf180mcu's
-    # `Dualgate` 55/0) selects a second gate-oxide/voltage domain whose real
-    # DRC thresholds this deck's rules do not encode -- geometry inside it is
-    # checked against the wrong (default) column and would otherwise report
-    # an unqualified `layers_checked` pass. Gated on the marker's geometry
-    # actually *interacting* with at least one layer an **unscoped** rule
-    # checked on this run (not merely present in the stream), so a marker
-    # shape that never overlaps any such geometry produces no warning with
-    # nothing behind it.
-    #
-    # "Unscoped" is per rule, not per deck (issue #1110): a marker can be
-    # partly modelled. gf180mcu's `DF.1a`/`DF.3a` now ship as `_LV`/`_MV`
-    # rule pairs that read `Dualgate` themselves via `DerivedLayer`'s
-    # `"overlapping"`/`"not_interacting"` modes, so geometry those rules
-    # checked was *not* checked against the wrong column and must not
-    # produce a warning -- while every rule that ran without reading the
-    # marker still can. Rules skipped this run (their layers absent from
-    # this stream) are excluded too: a rule that never ran applied no
-    # threshold, right or wrong.
-    voltage_domain_warnings: list[dict[str, str]] = []
-    unmodeled_markers = get_unmodeled_voltage_markers(deck_name)
-    # A rule omitted from a `--rules` subset (issue #2768) applied no
-    # threshold either, exactly like a skipped one.
-    skipped_rule_ids = set(rules_skipped) | omitted_ids
-    for marker, description in sorted(unmodeled_markers.items()):
-        if marker not in stream_layer_tuples:
-            continue
-        marker_index = layout.find_layer(*marker)
-        if marker_index is None:
-            continue
-        unscoped_layers: set[tuple[int, int]] = set()
-        for rule in deck:
-            if _rule_outside_voltage_gate(rule, marker, skipped_rule_ids):
-                continue
-            unscoped_layers |= _rule_input_layers(rule)
-        unscoped_layers &= stream_layer_tuples
-        unscoped_layers.discard(marker)
-        interacts = False
-        for cell in top_cells:
-            marker_region = kdb.Region(cell.begin_shapes_rec(marker_index))
-            if marker_region.is_empty():
-                continue
-            for checked_layer in sorted(unscoped_layers):
-                checked_index = layout.find_layer(*checked_layer)
-                if checked_index is None:
-                    continue
-                checked_region = kdb.Region(cell.begin_shapes_rec(checked_index))
-                if not marker_region.interacting(checked_region).is_empty():
-                    interacts = True
-                    break
-            if interacts:
-                break
-        if interacts:
-            voltage_domain_warnings.append(
-                {"marker": _fmt(marker), "description": description}
-            )
-
-    # Issue #3012: foundry rules the deck knows but cannot evaluate, named so
-    # a `clean` cannot be read as covering them. Only when the rule's layer
-    # is actually in the stream.
-    unchecked_rules = [
-        {"rule": rule_id, "layer": _fmt(layer), "description": description}
-        for rule_id, (layer, description) in sorted(
-            get_unchecked_rules(deck_name).items()
-        )
-        if layer in stream_layer_tuples
-    ]
-
-    # Issue #2110: the two common-coverage categories this engine's single
-    # "a layer it reads is absent" skip splits into -- see
-    # `_classify_skipped_rules` for why an empty assessment domain is
-    # inapplicable work rather than a skipped request, and why anything else
-    # stays a disclosed skip.
-    skipped_records, inapplicable_records = _classify_skipped_rules(
-        deck, rules_skipped, layout, frozenset(empty_checked_region_ids)
-    )
-    # Issue #2768: every deliberately omitted rule is requested work that did
-    # not run -- a skip, never inapplicable, even when its layers are absent
-    # (the full registered deck is what a DRC verdict is about).
-    skipped_records += [
-        {"id": rule_id, "reason": SKIP_REASON_NOT_SELECTED}
-        for rule_id in sorted(omitted_ids)
-    ]
-    coverage = {
-        "deck_layers": [_fmt(t) for t in sorted(deck_layer_tuples)],
-        "layers_checked": [_fmt(t) for t in sorted(layers_checked)],
-        "layers_in_stream_without_rules": [
-            _fmt(t) for t in sorted(layers_in_stream_without_rules)
-        ],
-        "rules_checked": sorted(rules_checked),
-        "rules_skipped": sorted(rules_skipped),
-        "voltage_domain_warnings": voltage_domain_warnings,
-        "unchecked_rules": unchecked_rules,
-        "deck_scope": deck_scope,
-        # Issue #3031: deck-static, like `deck_scope` -- official rule ids the
-        # deck knowingly does not transcribe.
-        "unmodeled_rules": get_unmodeled_rules(deck_name),
-        # Issue #1996: the shared roll-up, so a reader (`klt signoff`) can
-        # refuse a "clean" verdict measured over nothing without re-deriving
-        # that emptiness from `rules_skipped` vs. the deck's own rule count.
-        **build_check_coverage(
-            checked=sorted(rules_checked),
-            skipped=skipped_records,
-            inapplicable=inapplicable_records,
-            nothing_checked_reasons=_curated_nothing_checked_reasons(
-                deck, rules_checked
-            ),
-        ),
-    }
-
-    # Issue #2110: the verdict is the common decision table's, never a local
-    # re-derivation of it -- violations are `failed` (exit 3, decided before
-    # coverage is consulted at all), known zero checked work is `not_checked`
-    # (exit 4), and successful checks alongside a nonempty skipped-request
-    # list are `clean_partial` (exit 0, a real result that is *not* this
-    # verb's unconditional success). See `docs/coverage-contract.md`.
-    # Issue #3483: waived markers leave every count and the verdict, and are
-    # reported in full under `waived` -- never dropped.
-    waiver_fields: dict[str, Any] = {}
-    if waivers is not None:
-        violations, rule_counts, waiver_fields = _apply_waivers(violations, waivers)
-    rollup = coverage_rollup({"coverage": coverage}, failed=bool(violations))
-    report: dict[str, Any] = {
-        "schema_version": 2,
-        "file": path,
-        "deck": deck_name,
-        "dbu_um": layout.dbu,
-        "status": rollup_status(rollup, success="clean", failure="violations"),
-        "violation_count": len(violations),
-        "rule_counts": dict(sorted(rule_counts.items())),
-        "metrics": {_VIOLATION_COUNT_METRIC_NAME: len(violations)},
-        "violations": violations,
-        "coverage": coverage,
-        # Issue #2768: present only for a `--rules` run, so a default run's
-        # report (and every committed one) is byte-identical to before.
-        **({} if rule_selection is None else {"rule_selection": rule_selection}),
-        **waiver_fields,
-    }
-    report["provenance"] = build_provenance(
-        deck_name=deck_name,
-        deck_path=deck_source_path(deck_name),
-        pdk=pdk_info,
-        input_path=path,
-        include_klayout_version_mismatch=True,
-    )
-    if waivers_file is not None:
-        report["provenance"]["waivers"] = {
-            "file": waivers_file,
-            "content_hash": _content_hash(waivers_file),
-        }
-    return report
+    return _assemble_report(path, setup, state, waivers_file)
 
 
 def drc_exit_code(report: dict[str, Any]) -> int:
