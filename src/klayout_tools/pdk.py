@@ -93,7 +93,11 @@ import subprocess
 from typing import Any
 
 from .lef_header import parse_lef_header
-from .pdk_compat import check_compatibility, read_fetched_marker
+from .pdk_compat import (
+    check_compatibility,
+    check_expected_version,
+    read_fetched_marker,
+)
 from .pdk_families import family_subset, pdk_variant_family
 
 #: The ciel/volare stores, in resolution order (step 3). ``~`` is expanded at
@@ -148,7 +152,11 @@ class PdkNotFoundError(Exception):
     """
 
 
-def find_pdk(variant: str | None = None, root: str | None = None) -> dict[str, Any]:
+def find_pdk(
+    variant: str | None = None,
+    root: str | None = None,
+    expect_version: str | None = None,
+) -> dict[str, Any]:
     """Resolve one PDK install/variant and return its discovery payload.
 
     ``variant`` (the ``--pdk`` flag) selects a variant explicitly and beats
@@ -219,6 +227,10 @@ def find_pdk(variant: str | None = None, root: str | None = None) -> dict[str, A
     (:mod:`klayout_tools.pdk_compat`). Warning-only: ``mismatch``/``unknown``
     never change resolution or exit codes. Additive field.
 
+    ``expect_version`` (issue #3810) adds a ``version_expectation`` object --
+    ``{"status": match|mismatch|unknown, "expected", "installed"}`` -- only
+    when given; see :func:`klayout_tools.pdk_compat.check_expected_version`.
+
     Raises :class:`PdkNotFoundError` when nothing resolves.
     """
     effective_variant = variant if variant is not None else os.environ.get("PDK")
@@ -237,7 +249,7 @@ def find_pdk(variant: str | None = None, root: str | None = None) -> dict[str, A
             chosen = variants[0]  # variants are sorted → deterministic default
         variant_dir = chosen["_dir"]
         assets = _asset_dirs(variant_dir)
-        return {
+        report: dict[str, Any] = {
             "schema_version": 1,
             "root": root_path,
             "variant": chosen["name"],
@@ -251,6 +263,11 @@ def find_pdk(variant: str | None = None, root: str | None = None) -> dict[str, A
             ),
             "compatibility": _compatibility_for(chosen),
         }
+        if expect_version is not None:
+            report["version_expectation"] = check_expected_version(
+                expect_version, variant_dir, chosen["_sources"]
+            )
+        return report
 
     raise PdkNotFoundError(_not_found_message(candidates, effective_variant))
 

@@ -443,6 +443,39 @@ output is unchanged. The comparison lives in
 `klayout_tools.pdk_compat` (`check_compatibility`, `compare_identities`) for
 later consumers that want to enforce.
 
+### Asserting a pin (`--expect-version`, issue #3810)
+
+`compatibility` only compares against the pins klt itself declares and never
+changes an exit code. A downstream repo pinning its own open_pdks commit can
+instead assert it on `find` and `check`:
+
+```bash
+klt pdk check --pdk sky130A --expect-version f6eeac7 --format json || exit 1
+```
+
+`--expect-version` takes an open_pdks commit (a bare hex SHA of 7+ chars,
+matched by prefix, or an `open_pdks <sha>` stamp) compared with the installed
+`SOURCES` stamp, or any other string compared exactly with a lambdapdk
+`.fetched-version` marker. Identities in different namespaces (a SHA against a
+lambdapdk tree) are `unknown`. With the flag, `--format json` adds an additive
+`version_expectation` object (absent otherwise; no paths, no `schema_version`
+change):
+
+```json
+"version_expectation": {
+  "status": "mismatch",
+  "expected": "c6d73a3",
+  "installed": "open_pdks f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7"
+}
+```
+
+`status` is `match`, `mismatch` or `unknown` (the installed identity is
+unreadable or in another namespace; `installed` is `null` when unreadable).
+**Fail closed:** on `mismatch` or `unknown` the normal payload is still
+emitted, one stderr line names both revisions, and the verb exits `6`. If
+`check` also finds dangling symlinks, the lower code `4` wins. Without the
+flag nothing changes.
+
 ### Several installs of one variant (`ambiguous_roots`, issue #2564)
 
 A host that has followed the tooling's own migration ordinarily carries
@@ -1668,6 +1701,7 @@ libraries ship no `techlef/` directory at all, returns an empty
 | `3` | `cells --supply <volts>` ran fine, but no library is compatible with the stated supply (see "Compatibility verdict" above). |
 | `4` | `check` resolved an install, but one or more of its asset directories contain a dangling symlink (see "Dangling symlinks" above). |
 | `5` | `pcell-check` resolved an install, but one or more of its KLayout PyCell packages could not be imported here (see "`klt pdk pcell-check`" above). |
+| `6` | `find`/`check --expect-version` ran fine, but the installed PDK identity is a `mismatch` or `unknown` against the supplied value (see "Asserting a pin"). `check`'s `4` takes precedence. |
 
 On a `find`/`env` failure the error names the search order tried and points at
 a concrete way to install a PDK, so a downstream tool never crashes deep in a
@@ -1686,7 +1720,7 @@ log with a mysterious path error:
 See [`docs/json-contract.md`](../json-contract.md) for the envelope shared
 across all `klt` commands. **Gate on the payload's own verdict, not the
 exit code** — these codes are additive (a future release may add a new one
-above `5`), and the exit code is only a shortcut derived from the payload's
+above `6`), and the exit code is only a shortcut derived from the payload's
 own fields, which are authoritative; see that document's "Exit codes"
 section.
 

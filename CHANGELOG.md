@@ -14,6 +14,13 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt pdk find|check --expect-version <stamp-or-sha>`** (issue #3810):
+  asserts the installed PDK identity against a caller-supplied pin (open_pdks
+  SHA of 7+ hex or `SOURCES` stamp; lambdapdk marker by exact string). With the
+  flag, JSON gains an additive `version_expectation` object
+  (`status`/`expected`/`installed`); on `mismatch` or `unknown` the payload is
+  still emitted and the verb exits **6** (fail closed; `check`'s 4 wins).
+  Without the flag nothing changes.
 - **`klt synthesize --restructure` now finds upsizes on libraries that quote
   cell names** (issue #3709): `restructure`'s and `synthesize`'s private
   regex Liberty readers are replaced by `liberty_compare.parse_liberty_text`.
