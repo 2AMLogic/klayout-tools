@@ -92,7 +92,9 @@ One post-processing stage is **not** Yosys: after `write_verilog` produces
 the mapped netlist, `klt-statime-native` (a compiled Rust extension, called
 in process — see "`sta`" below) analyzes that netlist's timing graph. It is
 optional and additive: a missing extension reports `"sta": null` and changes
-nothing else about the run.
+nothing else about the run. The extension is not shipped with the published
+`klayout-tools` package, so an installed package always reports `"sta": null`
+(see "`sta` is `null`" below).
 
 ## Generated `.ys` script
 
@@ -764,7 +766,12 @@ here, so it does not have to be inferred from the caveat lists above:
 - the optional `klt_statime_native` extension is not installed (it needs a
   Rust toolchain, like every other native `klt` engine; from a checkout,
   `uv sync --group statime`, or `maturin develop --release` inside
-  `native/statime/`), or
+  `native/statime/`). **A published `klayout-tools` install never
+  populates `sta`**: there is no `klayout-tools[statime]` extra and no
+  published `klt-statime-native` wheel, so `sta` is `null` with the
+  reason below. From an installed package, use `klt sta` with a `verilog`
+  request instead (OpenSTA-backed, needs the OpenROAD/OpenSTA toolchain;
+  see [`docs/cli/sta.md`](sta.md)), or
 - the engine could not analyze this particular netlist/liberty pair — e.g. a
   mapped cell type with no liberty entry.
 
@@ -782,7 +789,7 @@ those call for opposite responses. The always-present
 
 ```json
 "sta": null,
-"sta_unavailable_reason": "the optional klt_statime_native extension is not installed, so no gate-level static timing analysis was attempted -- from a repo checkout, run `uv sync --group statime` (or `maturin develop --release` inside native/statime/) and re-run to populate `sta`"
+"sta_unavailable_reason": "the optional klt_statime_native extension is not installed (it is not shipped with the published klayout-tools package), so no gate-level static timing analysis was attempted -- from a repo checkout, run `uv sync --group statime` (or `maturin develop --release` inside native/statime/) and re-run to populate `sta`; from an installed package, `klt sta` with a `verilog` request gives a netlist-level timing estimate (needs OpenSTA)"
 ```
 
 ```json
