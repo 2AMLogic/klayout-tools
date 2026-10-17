@@ -105,6 +105,8 @@ debuggable, saveable artifact (`script_path` in the response), never
 deleted — the same discipline `klt sim`'s generated corner decks already
 follow.
 
+`.klt/` is scratch, regenerable output: add it to your `.gitignore`.
+
 The generated script is the Yosys survey's own verified pass sequence, with
 the `abc` line carrying the constraint/exclusion flags described below:
 
