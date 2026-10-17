@@ -41,11 +41,12 @@ def test_read_absent_and_parent_search(tmp_path):
 
 
 def test_find_pdk_commit_and_version_unchanged(tmp_path):
-    v = _variant(tmp_path / "v")
+    root = tmp_path / "install"
+    v = _variant(root / "sky130A")
     (v / ".fetched-version").write_text("0.3.0\n", encoding="utf-8")
-    assert pdk.find_pdk(root=str(v))["commit"] is None
+    assert pdk.find_pdk(root=str(root))["commit"] is None
     (v / ".fetched-commit").write_text(SHA, encoding="utf-8")
-    report = pdk.find_pdk(root=str(v))
+    report = pdk.find_pdk(root=str(root))
     assert report["commit"] == SHA
     assert report["version"] == "fetched:0.3.0"
 
