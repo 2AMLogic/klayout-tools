@@ -427,6 +427,7 @@
         "klayout_tools.op_sanity",
         "klayout_tools.output_lock",
         "klayout_tools.resistor_mesh",
+        "klayout_tools.touchstone",
         "klayout_tools.verilog_netlist"
       ]
     },
@@ -482,6 +483,7 @@
         "klayout_tools.sim_tian",
         "klayout_tools.sim_transfer",
         "klayout_tools.sim_transfer_meas",
+        "klayout_tools.sim_twoport",
         "klayout_tools.sim_validate"
       ]
     },

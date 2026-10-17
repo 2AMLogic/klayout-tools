@@ -110,6 +110,7 @@ from . import (
     sim_supply_waveform,
     sim_tian,
     sim_transfer_meas,
+    sim_twoport,
 )
 
 #: `remote_fleet`/`remote_transport`/`RemoteLauncher`/`RemoteLaunchError` are
@@ -1333,6 +1334,9 @@ def _resolve_analysis_and_measurements(
     if request.get("analysis_steps") is not None:
         return sim_steps.resolve_analysis_steps(request)
     analysis = request.get("analysis") or {}
+    # Issue #3338: `kind: "twoport"` compiles to an `ac` analysis; resolved
+    # (every structural error raised) before the `kind`/`args` check.
+    analysis = sim_twoport.resolve_analysis(analysis)
     if "kind" not in analysis or "args" not in analysis:
         raise SimError("request.analysis requires 'kind' and 'args'")
     reject_unsupported_analysis(analysis["kind"])
@@ -2851,6 +2855,15 @@ def _prepare_sim_request(
         plot_requested=plot_dir is not None,
     )
     sim_passes.refuse_xyce(analysis, engine)
+    sim_twoport.refuse_unsupported(
+        analysis,
+        measurements_spec,
+        want_waveforms=want_waveforms,
+        plot_requested=plot_dir is not None,
+    )
+    sim_twoport.refuse_xyce(analysis, engine)
+    # The S-parameter `.s2p` sidecar is the result (issue #3338).
+    keep_artifacts = sim_twoport.forces_artifacts(analysis, keep_artifacts)
     capture_only = _capture_only_requested(
         options, want_waveforms=want_waveforms, measurements_spec=measurements_spec
     )
@@ -8949,6 +8962,10 @@ def _run_corner(
     # corner is graded, so a missing or non-finite one fails it.
     complex_outcome = sim_complex_vectors.extract_corner(complex_vectors, corner_dir)
     diagnostics.extend(complex_outcome.diagnostics)
+    # Issue #3338: reduce a two-port corner's two excitations to S; a missing
+    # or non-finite rawfile is an error diagnostic, so it cannot grade `pass`.
+    twoport_outcome = sim_twoport.extract_corner(analysis, corner_dir)
+    diagnostics.extend(twoport_outcome.diagnostics)
 
     # Issue #3016: the engine ran (any exit status, including 0) yet left no
     # log text and not a single requested measurement has a value -- the
@@ -9024,6 +9041,7 @@ def _run_corner(
     artifacts.update(
         sim_complex_vectors.artifact_fields(complex_vectors, complex_outcome)
     )
+    artifacts.update(sim_twoport.artifact_fields(analysis, twoport_outcome))
     if keep_artifacts:
         if os.path.isfile(log_path):
             artifacts["log"] = log_path
@@ -9126,6 +9144,9 @@ def _run_corner(
         # Additive/optional (issue #3337): the declared complex vectors'
         # names and point count; the arrays are in `artifacts.complex_vectors`.
         **sim_complex_vectors.corner_fields(complex_vectors, complex_outcome),
+        # Additive/optional (issue #3338): per-frequency S-parameters of an
+        # `analysis.kind: "twoport"` request; the `.s2p` is in `artifacts`.
+        **sim_twoport.corner_fields(analysis, twoport_outcome),
         # Additive/optional (issue #2902): the effective per-corner waveform
         # levels, only for a request that scales a PWL/PULSE supply source.
         **(
@@ -10103,6 +10124,8 @@ def _write_corner_deck(
     lines.append(f".include {netlist_path}")
     # Issue #2977: the request's declared `stimulus`, expanded to PWL sources.
     lines.extend(stimulus_lines)
+    # Issue #3338: the two-port's per-port z0 + AC-source cards.
+    lines.extend(sim_twoport.deck_lines(analysis))
     lines.append(f".temp {point.temperature_c}")
     options_card = _ngspice_options_card(ngspice_options)
     if options_card is not None:
@@ -10322,6 +10345,11 @@ def _corner_deck_control_lines(
         # Issue #3159: one `alter`/`setplot new`/`ac`/`write` group per
         # pass; the corner prefix above already set the corner up.
         lines.extend(sim_passes.control_lines(analysis, corner_dir))
+        lines.extend(["quit", ".endc"])
+        return lines
+    if sim_twoport.is_twoport(analysis):
+        # Issue #3338: one `alter`/`setplot new`/`ac`/`write` group per port.
+        lines.extend(sim_twoport.control_lines(analysis, corner_dir))
         lines.extend(["quit", ".endc"])
         return lines
     crossings_lines = sim_crossings.control_lines(measurements_spec, corner_dir)
