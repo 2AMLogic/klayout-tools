@@ -7009,6 +7009,11 @@ are explicit skips. Only `min` and `max` are applied. A typo such as
 `{"maximum": 1.8}` cannot count as an applied bound. Partial valid bounds
 and skipped bounds remain distinguishable by identity.
 
+`klt signoff` does not count an envelope with `measurements_declared > 0` and
+`measurements_with_limits == 0` as passing corner-verification evidence
+(reason `no_limits_checked`, issue #3769); the `klt sim` status and
+`coverage` are unchanged.
+
 A deliberate no-limit characterization counts a produced measurement as
 checked and its omitted limit as inapplicable. A launched corner alone does
 not count. With no failure/error, `klt sim` derives the top-level `status`
