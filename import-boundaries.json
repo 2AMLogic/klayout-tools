@@ -454,6 +454,7 @@
         "klayout_tools.sim_cycle_mean",
         "klayout_tools.sim_decks",
         "klayout_tools.sim_energy",
+        "klayout_tools.sim_errors",
         "klayout_tools.sim_injected",
         "klayout_tools.sim_merge",
         "klayout_tools.sim_mismatch_gate",
@@ -470,7 +471,8 @@
         "klayout_tools.sim_stimulus",
         "klayout_tools.sim_supply_waveform",
         "klayout_tools.sim_transfer",
-        "klayout_tools.sim_transfer_meas"
+        "klayout_tools.sim_transfer_meas",
+        "klayout_tools.sim_validate"
       ]
     },
     "size": {
