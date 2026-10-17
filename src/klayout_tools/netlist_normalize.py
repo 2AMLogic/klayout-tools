@@ -724,6 +724,20 @@ def _convert_x_card(
         if placeholder_value_classes is not None:
             placeholder_value_classes[lookup.device_class] = "capacitor"
         return card
+    return _convert_passive_or_bipolar_card(
+        instance, nodes, subckt_name, lookup, params
+    )
+
+
+def _convert_passive_or_bipolar_card(
+    instance: str,
+    nodes: list[str],
+    subckt_name: str,
+    lookup: DeviceLookup,
+    params: dict[str, str],
+) -> str:
+    """The non-MOS/R/C tail of :func:`_convert_x_card`'s dispatch: an
+    ``inductor``/``varactor`` call (issue #3206) or, otherwise, a bipolar."""
     if lookup.kind in _PASSIVE_X_TERMINALS:
         return _convert_passive_x_card(instance, nodes, subckt_name, lookup)
     return _convert_bipolar_card(instance, nodes, subckt_name, lookup, params)

@@ -1025,14 +1025,15 @@ def run_lvs(
     :func:`_parse_anchor_top_level_pins`, :func:`_anchor_top_level_pins_enabled`
     and :func:`_apply_top_level_pin_anchors`.
     """
-    request, request_dir = load_request_arg(request)
+    loaded, request_dir = load_request_arg(request)
+    request = loaded
 
     engine = request.get("engine", "klayout")
     if engine not in SUPPORTED_ENGINES:
         raise LvsError(
             f"unsupported engine '{engine}' (supported: {', '.join(SUPPORTED_ENGINES)})"
         )
-    _merge_deck_flags(request, engine, deck_file, deck_vars)
+    _merge_deck_flags(loaded, engine, deck_file, deck_vars)
 
     layout_spec = request["layout"]
     if not isinstance(layout_spec, dict):
