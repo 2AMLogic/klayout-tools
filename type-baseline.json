@@ -273,7 +273,7 @@
       "count": 1
     },
     {
-      "file": "src/klayout_tools/equiv.py",
+      "file": "src/klayout_tools/equiv_sequential.py",
       "code": "arg-type",
       "message": "Argument \"resume_block\" to \"_resume_report_from_committed_stage1\" has incompatible type \"dict[str, Any] | None\"; expected \"dict[str, Any]\"",
       "count": 1
