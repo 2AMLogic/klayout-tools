@@ -226,6 +226,7 @@ initial scope.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import subprocess  # noqa: F401 -- tests patch post_route_sta.subprocess.run
@@ -662,6 +663,7 @@ def run_sta(
         request["constraints"], has_verilog
     )
     propagated_clock = _validate_propagated_clock(request["constraints"], has_def)
+    power_activity = _validate_power_activity(request["constraints"])
 
     spef_map: dict[str, str] | None = None
     if has_verilog:
@@ -748,6 +750,7 @@ def run_sta(
             wire_load_model=wire_load_model,
             wire_load_mode=wire_load_mode,
             propagated_clock=propagated_clock,
+            power_activity=power_activity,
             write_sdf=write_sdf,
             output_dir=output_dir,
             input_path=input_path,
@@ -909,6 +912,7 @@ def _dispatch_sta(
     wire_load_model: str | None,
     wire_load_mode: str | None,
     propagated_clock: bool,
+    power_activity: dict[str, float] | None,
     output_dir: str,
     input_path: str,
     basename: str,
@@ -950,6 +954,7 @@ def _dispatch_sta(
             wire_load_model=wire_load_model,
             wire_load_mode=wire_load_mode,
             propagated_clock=propagated_clock,
+            power_activity=power_activity,
             write_sdf=write_sdf,
             output_dir=output_dir,
             input_path=input_path,
@@ -980,6 +985,7 @@ def _dispatch_sta(
         wire_load_model=wire_load_model,
         wire_load_mode=wire_load_mode,
         propagated_clock=propagated_clock,
+        power_activity=power_activity,
         output_dir=output_dir,
         script_tag=basename,
         scrub=report_paths.scrub,
@@ -1064,6 +1070,7 @@ def _dispatch_sta(
         "worst_hold_path": corner_fields["worst_hold_path"],
         "clock_skew_ns": corner_fields["clock_skew_ns"],
         "estimated_power_mw": corner_fields["estimated_power_mw"],
+        "power_basis": corner_fields["power_basis"],
         "provenance": provenance,
     }
 
@@ -1112,6 +1119,7 @@ def _run_corner_session(
     wire_load_model: str | None,
     wire_load_mode: str | None,
     propagated_clock: bool,
+    power_activity: dict[str, float] | None,
     output_dir: str,
     script_tag: str,
     scrub: Callable[[str], str] = _identity,
@@ -1205,6 +1213,7 @@ def _run_corner_session(
             report_ports=report_ports,
             false_path_from=false_path_from,
             propagated_clock=propagated_clock,
+            power_activity=power_activity,
             sdf_path=sdf_path,
         )
     else:
@@ -1228,6 +1237,7 @@ def _run_corner_session(
             input_transitions=input_transitions,
             report_ports=report_ports,
             false_path_from=false_path_from,
+            power_activity=power_activity,
         )
     _write_script(script_path, lines)
 
@@ -1290,6 +1300,8 @@ def _run_corner_session(
         "estimated_power_mw": (
             round(power_w * 1000, 4) if power_w is not None else None
         ),
+        # Additive field (issue #3744): the assumptions behind that figure.
+        "power_basis": _power_basis_block(power_activity, spef_path is not None),
     }
     # Additive field (issue #3042): only present when the request named
     # `constraints.report_ports`, so an unrequested response is unchanged.
@@ -1360,6 +1372,7 @@ def _run_multi_corner(
     wire_load_model: str | None,
     wire_load_mode: str | None,
     propagated_clock: bool,
+    power_activity: dict[str, float] | None,
     output_dir: str,
     input_path: str,
     basename: str,
@@ -1440,6 +1453,7 @@ def _run_multi_corner(
             wire_load_model=wire_load_model,
             wire_load_mode=wire_load_mode,
             propagated_clock=propagated_clock,
+            power_activity=power_activity,
             output_dir=output_dir,
             script_tag=script_tag,
             scrub=report_paths.scrub,
@@ -2181,6 +2195,90 @@ def _validate_propagated_clock(constraints: dict[str, Any], has_def: bool) -> bo
             "to propagate through"
         )
     return value
+
+
+_POWER_ACTIVITY_KEYS = ("activity", "duty")
+
+
+def _validate_power_activity(constraints: dict[str, Any]) -> dict[str, float] | None:
+    """Validate ``constraints.power_activity`` (issue #3744), returning the
+    validated ``{"activity"?: float, "duty"?: float}`` mapping, or ``None``
+    when omitted or ``null`` (no ``set_power_activity`` is emitted and the
+    generated script is unchanged).
+
+    The value must be a non-empty JSON object with only the keys
+    ``activity`` (a finite number ``>= 0``) and ``duty`` (a finite number in
+    ``[0, 1]``). Booleans, non-finite numbers, unknown keys and a non-object
+    are request errors that name the offending field.
+    """
+    value = constraints.get("power_activity")
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise PostRouteStaError(
+            "constraints.power_activity must be an object with 'activity' and/or 'duty'"
+        )
+    unknown = sorted(set(value) - set(_POWER_ACTIVITY_KEYS))
+    if unknown:
+        raise PostRouteStaError(
+            "constraints.power_activity has unknown key(s): "
+            + ", ".join(unknown)
+            + " (allowed: activity, duty)"
+        )
+    if not value:
+        raise PostRouteStaError(
+            "constraints.power_activity must give at least one of 'activity' and 'duty'"
+        )
+    out: dict[str, float] = {}
+    for key in _POWER_ACTIVITY_KEYS:
+        if key not in value:
+            continue
+        number = value[key]
+        if (
+            isinstance(number, bool)
+            or not isinstance(number, (int, float))
+            or not math.isfinite(number)
+        ):
+            raise PostRouteStaError(
+                f"constraints.power_activity.{key} must be a finite number"
+            )
+        if number < 0 or (key == "duty" and number > 1):
+            bound = ">= 0" if key == "activity" else "in [0, 1]"
+            raise PostRouteStaError(
+                f"constraints.power_activity.{key} must be {bound}, got {number}"
+            )
+        out[key] = float(number)
+    return out
+
+
+def _power_activity_lines(power_activity: dict[str, float] | None) -> list[str]:
+    """The ``set_power_activity -global`` command (issue #3744) for a
+    validated ``constraints.power_activity``; empty when none was requested,
+    leaving OpenSTA's built-in default activity in force."""
+    if not power_activity:
+        return []
+    flags = "".join(
+        f" -{key} {power_activity[key]!r}"
+        for key in _POWER_ACTIVITY_KEYS
+        if key in power_activity
+    )
+    return [f"set_power_activity -global{flags}"]
+
+
+def _power_basis_block(
+    power_activity: dict[str, float] | None, has_spef: bool
+) -> dict[str, Any]:
+    """The ``power_basis`` response block (issue #3744): what
+    ``estimated_power_mw`` was computed under. ``engine_default`` carries
+    ``null`` activity/duty rather than a guessed numeric default; a
+    ``power_activity`` with only one key leaves the other ``null``."""
+    given = power_activity or {}
+    return {
+        "activity_source": "global" if power_activity else "engine_default",
+        "activity": given.get("activity"),
+        "duty": given.get("duty"),
+        "parasitics": "spef_annotated" if has_spef else "estimate_only",
+    }
 
 
 def _validate_sdf(
@@ -3058,6 +3156,7 @@ def _sta_script_lines(
     false_path_from: list[str] | None = None,
     propagated_clock: bool = False,
     sdf_path: str | None = None,
+    power_activity: dict[str, float] | None = None,
 ) -> list[str]:
     """Build the Tcl script for the single, from-scratch OpenSTA session
     this verb runs: load the LEF/DEF pair directly (no netlist, no
@@ -3133,6 +3232,9 @@ def _sta_script_lines(
         "report_tns_metric -setup",
         "report_tns_metric -hold",
         "report_fmax_metric",
+    ]
+    lines += _power_activity_lines(power_activity)
+    lines += [
         "report_power_metric",
         "report_clock_skew_metric -setup",
     ]
@@ -3165,6 +3267,7 @@ def _sta_netlist_script_lines(
     input_transitions: dict[str, float] | None = None,
     report_ports: list[str] | None = None,
     false_path_from: list[str] | None = None,
+    power_activity: dict[str, float] | None = None,
 ) -> list[str]:
     """Build the Tcl script for a from-scratch, netlist-input OpenSTA
     session (issue #1825): no DEF, no placement, no routing. Links a
@@ -3229,6 +3332,9 @@ def _sta_netlist_script_lines(
         "report_tns_metric -setup",
         "report_tns_metric -hold",
         "report_fmax_metric",
+    ]
+    lines += _power_activity_lines(power_activity)
+    lines += [
         "report_power_metric",
         "report_clock_skew_metric -setup",
     ]
