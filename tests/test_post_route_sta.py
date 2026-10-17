@@ -4963,6 +4963,27 @@ def test_live_engine_input_transitions_bad_port_rejected(tmp_path):
 
 
 @_LIVE_ONLY
+def test_live_engine_input_transitions_whole_bus_key_rejected(tmp_path):
+    """Issue #3498: the port check keys ports by exact full name, so a
+    whole-bus (or wildcard) key that could be read as ambiguous is rejected
+    as not found, naming the offending ``input_transitions`` key."""
+    request_path = _live_verilog_request(
+        tmp_path, input_transitions={"bus": 0.1, "b*": 0.1}
+    )
+    with pytest.raises(PostRouteStaError) as exc_info:
+        run_sta(request_path, pdk_variant="sky130A")
+    message = str(exc_info.value)
+    assert message.startswith("constraints.input_transitions rejected")
+    assert (
+        "constraints.input_transitions['bus']: no port with exactly this name"
+        in message
+    )
+    assert (
+        "constraints.input_transitions['b*']: no port with exactly this name" in message
+    )
+
+
+@_LIVE_ONLY
 def test_live_engine_false_path_from(tmp_path):
     """Engine integration (issue #2968): excluding the setup-binding input
     must move the worst setup path off that startpoint."""
