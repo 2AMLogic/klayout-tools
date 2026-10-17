@@ -279,6 +279,13 @@ before is still valid and still means what it meant. Neither command's
 `schema_version` moved. See `docs/cli/gen-compose.md`'s "Which hint the
 advisory reads, and the two legitimate violations (#2638)".
 
+**A change to extracted *values* is disclosed by a revision field, not a
+`schema_version` bump.** `klt extract --parasitics` reports an integer
+`parasitics.model_revision` (issue #2957), bumped whenever the R or C model
+changes the values extracted from identical input. It is additive;
+`schema_version` is unchanged. See `docs/cli/extract.md`'s `parasitics` field
+table.
+
 **An opt-in flag that changes reported *values* adds its disclosure fields,
 never retypes the old ones.** `klt extract --rename-declared-pins` (issue
 #2854) renames surviving promoted pin nets to their declared names, which

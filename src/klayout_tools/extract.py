@@ -216,6 +216,7 @@ from .extract_netselect import NetSelectors
 # re-exported (`X as X`) because it has external importers of its own
 # (`lvs.py`, `netlist_digest.py`) as well as many call sites in this module.
 from .extract_parasitics import (
+    PARASITICS_MODEL_REVISION,
     SPICE_HIERARCHY_SEPARATOR,
     SPICE_SAFE_HIERARCHY_JOIN,
     _compute_parasitics,
@@ -3593,6 +3594,9 @@ def run_extract(
         # non-zero parasitics, since the model's scope does not depend on
         # what was found. See `PARASITIC_MODEL_SCOPE`'s docstring.
         parasitics_report["model"] = dict(PARASITIC_MODEL_SCOPE)
+        # Additive field (issue #2957): the extraction model's own revision,
+        # so a consumer can tell a model change from a mere tool bump.
+        parasitics_report["model_revision"] = PARASITICS_MODEL_REVISION
         # Additive field (issue #798): `None` unless `--mom-net` was given,
         # in which case it is the swap-and-measure report built above -- see
         # `run_extract`'s `mom_net` docstring paragraph and
