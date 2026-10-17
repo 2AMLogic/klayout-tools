@@ -2559,7 +2559,9 @@ dbu. The shipped-cell regression needed no new deviation.
 
 ### Not implemented
 
-DRM rules in Tables 3.1-3.19 that the deck does not check yet. Rows group
+DRM rules in Tables 3.1-3.19 that the deck does not check yet. The same ids
+are reported, sorted, in `coverage.unmodeled_rules` of a `--engine klayout`
+run with this deck. Rows group
 ids that share a table, reason and tracking issue. Section 3.13 extends the
 V1 rules to V2 and V3 (and note 2 adds `V3.M3.EN.1`); sections 3.14-3.19 do
 the same for M5, V5, M7, V7, M9 and V9, whose V9 enclosure is by PAD (mask 96,
@@ -3132,7 +3134,7 @@ for which skipped rules make a run partial and which do not.
 | `voltage_domain_warnings`          | array\<object\> | `{"marker": "<layer>/<datatype>", "description": string}` — see below. Sorted by marker `(layer, datatype)`. |
 | `unchecked_rules`                  | array\<object\> | `{"rule": string, "layer": "<layer>/<datatype>", "description": string}` — foundry rules the deck knows about but cannot evaluate (issue #3012; `sg13cmos5l`'s net-aware `NW.b1` was the first, now checked by `net_space`, #3572, so the map is currently empty), listed only when the rule's layer is in the stream, so a `clean` is not read as covering them. Purely informational: does not change `status`. Sorted by rule id. Additive; `[]` for decks that declare none. |
 | `deck_scope`                       | array\<string\> | Every distinct DRM section / official rule-id prefix the selected deck's rules claim to implement — a static property of the deck, independent of the input stream (issue #566). Sorted alphabetically. |
-| `unmodeled_rules`                  | array\<string\> | Curated engine only: official foundry-runset rule ids the selected deck knowingly does **not** transcribe (issue #3031) — a static property of the deck. sky130: `m1.5`, `m2.5`, `via.5a`, `via2.5`, `via3.5`. See below. Sorted alphabetically; empty for a deck that declares none. |
+| `unmodeled_rules`                  | array\<string\> | Official foundry-runset rule ids the selected deck knowingly does **not** transcribe (issue #3031) — a static property of the deck. sky130: `m1.5`, `m2.5`, `via.5a`, `via2.5`, `via3.5`. `--engine klayout` with the packaged `asap7.drc`: the ids under "Not implemented" in the ASAP7 deck section; any other deck script gets `[]`. See below. Sorted alphabetically; empty for a deck that declares none. |
 | `rule_categories`                  | array\<string\> | KLayout engine only: declared RDB categories, never execution proof. |
 | `nothing_checked`                  | boolean         | Whether this run checked *nothing at all*, so its `status` says nothing about the layout — the shared convention in [`../json-contract.md`](../json-contract.md). See below. |
 | `nothing_checked_reasons`          | array\<string\> | Why, using the shared reason codes. Empty exactly when `nothing_checked` is `false`. |
@@ -3299,6 +3301,12 @@ each family's primary (stricter-margin, all-edges) rule. A layout can
 therefore pass `klt drc --deck sky130` and still fail the runset on exactly
 these. The field is purely additive and deck-static (identical across inputs);
 re-check those enclosures with the PDK's own `sky130A_mr.drc` before signoff.
+
+`--engine klayout` fills the field too, but only when the `--deck-file` is
+byte-identical (sha256) to the packaged `asap7.drc`: it then lists every id
+under "Not implemented" in the ASAP7 deck section. An edited copy or any other
+deck script yields `[]` (the engine has no deck identity beyond content).
+`status` and the exit code are unchanged.
 
 #### `coverage.deck_scope`
 
