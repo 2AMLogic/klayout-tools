@@ -680,6 +680,27 @@ something to check. Where both apply, the more actionable reason wins:
 `check_failed` (the run did fail) and `wrong_kind` ("cite a different
 artifact") both take precedence over `nothing_checked`.
 
+### A sim envelope that applied no bound (`no_limits_checked`)
+
+Issue #3769: `klt sim` counts a produced measurement with no `limits` as a
+deliberate observation, so an all-observation request is not
+`nothing_checked` and rolls up to `status: "pass"`. For T1 item 5 (corner
+verification against the ratified spec) that pass means only "every
+measurement produced a value". A `sim` envelope whose `coverage` block has
+`measurements_declared > 0` and `measurements_with_limits == 0` is therefore
+refused through the same path as `nothing_checked`:
+
+| Entry point | Result |
+|---|---|
+| Envelope aggregation | `passed: false`; `detail.no_limits_checked` carries `measurements_declared` / `measurements_with_limits` |
+| Tier-verdict report (`--manifest`) | The item renders `"unmet"` with `reason: "no_limits_checked"` |
+
+An envelope with at least one limited measurement, one with no `coverage`
+block (pre-coverage evidence), and a `capture_only` run that declares no
+measurements all grade as before. The `klt sim` output is unchanged; the fix
+is to copy the spec bounds into the request's `measurements[].limits` and
+re-run. The key and reason are additive.
+
 ### Partial coverage is qualified, not inferred
 
 Issue #2109 (Phase 2 of epic #1988) adds the case between the two above: a
