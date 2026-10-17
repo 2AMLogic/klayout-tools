@@ -2993,6 +2993,58 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def _cmd_validate_layout(args: argparse.Namespace) -> int:
+    """Credential-free check of the layout-flow protocol (issue #3024) and any
+    layout task / run documents named on the command line. Imported lazily:
+    ``design_agent_benchmark_layout`` is the split-out home of the logic."""
+    import design_agent_benchmark_layout as layout
+
+    protocol_path = Path(args.protocol)
+    protocol = layout.load_protocol(protocol_path)
+    protocol_result = layout.validate_protocol(protocol)
+    ok = protocol_result["valid"]
+
+    tasks: dict[str, dict[str, Any]] = {}
+    task_results = []
+    for raw in args.task:
+        task = json.loads(Path(raw).read_text())
+        repo_root = Path(args.repo_root) if args.check_task_files else None
+        result = layout.validate_task(task, repo_root=repo_root)
+        ok = ok and result["valid"]
+        if result["valid"]:
+            tasks[task["id"]] = task
+        task_results.append({"path": raw, **result})
+
+    runs: list[dict[str, Any]] = []
+    run_results = []
+    for raw in args.runs:
+        for run in json.loads(Path(raw).read_text()):
+            result = (
+                layout.validate_run(run, protocol, tasks.get(run.get("task_id")))
+                if protocol_result["valid"]
+                else {"valid": False, "errors": ["protocol is not valid"]}
+            )
+            ok = ok and result["valid"]
+            if result["valid"]:
+                runs.append(run)
+            run_results.append({"path": raw, "run_id": run.get("run_id"), **result})
+    run_set_result = layout.validate_run_set(runs) if runs else None
+    ok = ok and (run_set_result is None or run_set_result["valid"])
+
+    print(
+        json.dumps(
+            {
+                "protocol": protocol_result,
+                "tasks": task_results,
+                "runs": run_results,
+                "run_set": run_set_result,
+            },
+            indent=2,
+        )
+    )
+    return 0 if ok else 1
+
+
 def _resolve_agent_timeout(provider: str, value: float | None) -> float:
     """The per-attempt wall-clock ceiling for ``provider``. ``--agent-timeout-s``
     defaults to ``None`` rather than a number so each agent provider can carry
@@ -3129,6 +3181,34 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     validate_parser.set_defaults(func=_cmd_validate)
+
+    layout_parser = subparsers.add_parser(
+        "validate-layout",
+        help=(
+            "validate the layout-flow benchmark protocol (issue #3024) and any "
+            "layout task / run documents -- no simulation, no credentials"
+        ),
+    )
+    layout_parser.add_argument(
+        "--protocol",
+        default=str(REPO_ROOT / "benchmarks" / "design-agent" / "layout-protocol.json"),
+    )
+    layout_parser.add_argument(
+        "--task", action="append", default=[], help="layout task JSON (repeatable)"
+    )
+    layout_parser.add_argument(
+        "--runs",
+        action="append",
+        default=[],
+        help="JSON array of layout run records (repeatable)",
+    )
+    layout_parser.add_argument("--repo-root", default=str(REPO_ROOT))
+    layout_parser.add_argument(
+        "--check-task-files",
+        action="store_true",
+        help="also require each task's frozen files to exist and match their sha256",
+    )
+    layout_parser.set_defaults(func=_cmd_validate_layout)
 
     run_parser = subparsers.add_parser(
         "run", help="run N attempts per task and report pass@k per tier"
