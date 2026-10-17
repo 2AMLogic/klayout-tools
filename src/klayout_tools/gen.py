@@ -297,6 +297,9 @@ from .gen_layer_params import (
     _sd_implant_min_space_um as _sd_implant_min_space_um,
 )
 from .gen_layer_params import (
+    _tap_pad_ring_implant_margins_um as _tap_pad_ring_implant_margins_um,
+)
+from .gen_layer_params import (
     _voltage_flavor_mark_layer as _voltage_flavor_mark_layer,
 )
 from .gen_layer_params import (
@@ -3121,7 +3124,6 @@ def _draw_pcell_npc(
         dbu,
         getattr(pcell, "npc_margin_um"),  # noqa: B009
         getattr(pcell, "npc_min_space_um"),  # noqa: B009
-
     )
 
 
@@ -3130,11 +3132,17 @@ def _pcell_tap_reach_um(pcell: Any) -> float:
     layout (issue #3648): :data:`TAP_PAD_REACH_UM` when it draws no ring and
     its family needs tap pads, else ``0.0`` (no pads).
 
-    ``ring_implant_present`` is only resolved for a family with a tap-distance
-    rule (:func:`~klayout_tools.gen_layer_params._tap_pads_wanted`), so it
-    doubles as the gate without adding a PCell param -- every other family's
-    GDS stream (which carries the PCell params) stays byte-identical."""
-    if pcell.ring_implant_present and not pcell.add_guard_ring:
+    ``mos_array`` only resolves the ring role for a family with a tap-distance
+    rule (:func:`~klayout_tools.gen_layer_params._tap_pads_wanted`), but
+    ``diff_pair`` always does, so the gate also requires the resolved
+    ``ring_implant_margin_um`` to be a tap-distance family's -- no new PCell
+    param, so every other family's GDS stream (which carries the PCell params)
+    stays byte-identical."""
+    if (
+        pcell.ring_implant_present
+        and not pcell.add_guard_ring
+        and pcell.ring_implant_margin_um in _tap_pad_ring_implant_margins_um()
+    ):
         return TAP_PAD_REACH_UM
     return 0.0
 

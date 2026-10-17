@@ -159,3 +159,17 @@ def test_sky130_draws_no_pads(root, tmp_path):
     assert gen_layer_params._tap_pads_wanted("gf180mcu")
     output, _ = _gen(root, tmp_path, "mos_array", {}, "sky130", variant="sky130A")
     assert run_drc(str(output), "sky130")["status"] == "clean"
+
+
+def test_tap_pad_gate_margins_are_unique_to_tap_distance_families():
+    """``gen._pcell_tap_reach_um`` keys on the resolved ring implant margin
+    (``diff_pair`` resolves the ring role for every family), so no family
+    outside ``_TAP_DISTANCE_FAMILIES`` may share a tap-distance family's."""
+    margins = gen_layer_params._tap_pad_ring_implant_margins_um()
+    others = {
+        fam: m
+        for fam, m in gen_layer_params._PDK_RING_IMPLANT_MARGIN_UM.items()
+        if fam not in gen_layer_params._TAP_DISTANCE_FAMILIES
+    }
+    assert margins and all(m > 0.0 for m in margins)
+    assert not {fam for fam, m in others.items() if m in margins}

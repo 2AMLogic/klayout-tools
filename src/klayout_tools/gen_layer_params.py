@@ -355,6 +355,18 @@ TAP_PAD_REACH_UM = 20.0
 _TAP_DISTANCE_FAMILIES = frozenset({"gf180mcu"})
 
 
+def _tap_pad_ring_implant_margins_um() -> frozenset[float]:
+    """The ``ring_implant_margin_um`` values of the :data:`_TAP_DISTANCE_FAMILIES`.
+
+    ``diff_pair`` resolves the ring role (so ``ring_implant_present``) for every
+    family, so a PCell cannot tell a tap-distance family from that flag alone;
+    its resolved ring implant margin -- family-specific and already a hidden
+    param -- does (``tests/test_gen_tap_pads.py`` pins that no other family
+    shares one), without adding a PCell param that would change every other
+    family's GDS stream."""
+    return frozenset(_ring_implant_margin_um(f) for f in _TAP_DISTANCE_FAMILIES)
+
+
 def _tap_pads_wanted(family: str) -> bool:
     """Whether ``family``'s deck enforces a tap-distance rule (see
     :data:`_TAP_DISTANCE_FAMILIES`), so a ring-less array needs tap pads."""
