@@ -3040,6 +3040,32 @@ def _add_lvs_parser(subparsers: argparse._SubParsersAction) -> None:
             "(exit 1) otherwise"
         ),
     )
+    lvs_parser.add_argument(
+        "--deck-file",
+        dest="deck_file",
+        default=None,
+        metavar="PATH",
+        help=(
+            "path to the PDK's KLayout LVS runset for request.engine "
+            "'klayout-runset' (issue #3206); fills request.deck_file, and "
+            "is a clean error (exit 1) if the request already sets it or "
+            "uses another engine. A relative PATH resolves against the "
+            "current directory"
+        ),
+    )
+    lvs_parser.add_argument(
+        "--deck-var",
+        dest="deck_var",
+        action="append",
+        metavar="NAME=VALUE",
+        default=None,
+        help=(
+            "extra '-rd NAME=VALUE' global passed to the runset (engine "
+            "'klayout-runset' only; issue #3206). Repeatable; fills "
+            "request.deck_vars, and is a clean error (exit 1) if the "
+            "request already sets it or uses another engine"
+        ),
+    )
     _add_format_arg(lvs_parser)
     lvs_parser.set_defaults(func=lvs_cmd.run)
 

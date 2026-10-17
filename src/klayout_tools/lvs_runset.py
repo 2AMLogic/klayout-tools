@@ -550,6 +550,78 @@ def _build_coverage(
     return coverage
 
 
+#: ``power_pins_derivation.rule`` for this engine: the runset has no library
+#: pin-order data, so the power/ground universe is the pins the extracted
+#: subcircuits declare whose *names* classify as supplies.
+POWER_PINS_RULE_NAMED_SUBCIRCUIT_PINS = "named-power-ground-pin-of-extracted-subcircuit"
+
+
+def runset_power_connectivity(netlist: Any) -> dict[str, Any]:
+    """The ``power_connectivity`` block for the runset's own extracted
+    netlist (``LayoutVsSchematic.netlist()``, issue #3206), via the same
+    :mod:`.lvs_power` walk the ``klayout`` engine uses: every extracted
+    subcircuit instance's power/ground pins must reach one consistent net.
+
+    ``unchecked`` (with a reason) when there is no extracted netlist, or it
+    holds no subcircuit instance with a supply-named pin -- a flat
+    transistor-level extraction has no instance pins to walk, and "no
+    evidence" is never reported as a clean verdict.
+    """
+    from .lvs_power import (
+        _power_connectivity_findings,
+        _power_connectivity_unchecked,
+        _power_pin_connections,
+    )
+    from .socket_check import classify_pin_by_name
+
+    if netlist is None:
+        return _power_connectivity_unchecked(
+            f"engine '{RUNSET_ENGINE}' produced no extracted netlist in its "
+            ".lvsdb database to run the power/ground connectivity walk on"
+        )
+    masters: dict[str, set[str]] = {}
+    for circuit in netlist.each_circuit():
+        if not any(True for _ in circuit.each_ref()):
+            continue  # never instantiated (the top): no instance pins to walk
+        for pin in circuit.each_pin():
+            name = (pin.name() or "").upper()
+            if name and classify_pin_by_name(name)[1] in ("POWER", "GROUND"):
+                masters.setdefault(str(circuit.name).upper(), set()).add(name)
+    universe = frozenset(name for names in masters.values() for name in names)
+    derivation = {
+        "rule": POWER_PINS_RULE_NAMED_SUBCIRCUIT_PINS,
+        "masters": sorted(masters),
+        "master_count": len(masters),
+        "corroborated": False,
+        "reason": (
+            "the runset's extracted netlist carries no library pin-order "
+            "data, so power/ground pins are recognised by name only"
+        ),
+    }
+    rows = _power_pin_connections(netlist, universe) if universe else []
+    if not rows:
+        return _power_connectivity_unchecked(
+            "no subcircuit instance in the runset's extracted netlist "
+            "declares a power/ground-named pin -- the extraction carries no "
+            "instance-level power connectivity to check",
+            derivation if universe else None,
+        )
+    from .lvs import POWER_STATUS_MATCH, POWER_STATUS_MISMATCH
+
+    findings = _power_connectivity_findings(rows, None)
+    return {
+        "status": POWER_STATUS_MISMATCH if findings else POWER_STATUS_MATCH,
+        "reason": None,
+        "power_pins": sorted({row["pin"] for row in rows}),
+        "power_pins_derivation": derivation,
+        "instance_count": len({(row["circuit"], row["instance"]) for row in rows}),
+        "expected_nets": None,
+        "unchecked_expected_pins": [],
+        "findings": findings,
+        "finding_count": len(findings),
+    }
+
+
 def read_lvsdb_verdict(lvsdb_path: str) -> dict[str, Any]:
     """Read ``lvsdb_path`` and derive the verdict, mismatches, census and
     coverage from its cross-reference. Raises ``LvsError`` when the database
@@ -596,6 +668,7 @@ def read_lvsdb_verdict(lvsdb_path: str) -> dict[str, Any]:
     return {
         "status": status,
         "mismatches": mismatches,
+        "power_connectivity": runset_power_connectivity(l2n.netlist()),
         "coverage": _build_coverage(
             layout_declared, ref_declared, layout_counts, ref_counts
         ),
@@ -622,7 +695,7 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
     """Run ``request`` through the PDK runset and return the ``klt lvs``
     envelope. See this module's docstring; request fields are documented in
     ``docs/cli/lvs.md`` ("klayout-runset")."""
-    from .lvs import SCHEMA_VERSION, _power_connectivity_unchecked
+    from .lvs import SCHEMA_VERSION
 
     layout, reference, deck_file, deck_vars, options = _validate_request(
         request, request_dir
@@ -688,14 +761,7 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
         "options": {k: options[k] for k in _ALLOWED_OPTIONS if k in options},
         "hints_applied": None,
         "status": verdict["status"],
-        # The curated engine's gate-level power/ground walk needs a layout
-        # netlist this engine does not produce (the runset's own extracted
-        # netlist is not routed through lvs_supply.py yet); say so rather
-        # than omit the block.
-        "power_connectivity": _power_connectivity_unchecked(
-            f"engine '{RUNSET_ENGINE}' compares the runset's own extraction; "
-            "the power/ground connectivity walk is not applied to it"
-        ),
+        "power_connectivity": verdict["power_connectivity"],
         "body_verification": None,
         "device_parameter_coverage": None,
         "coverage": verdict["coverage"],

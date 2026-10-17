@@ -14,6 +14,19 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt lvs` runset engine gaps closed** (issue #3206): `klt lvs --deck-file
+  PATH` / repeatable `--deck-var NAME=VALUE` fill `request.deck_file` /
+  `deck_vars` (setting both flag and request field, or using another engine,
+  is a clean error); `engine: klayout-runset` now computes
+  `power_connectivity` from the runset's extracted netlist (same JSON shape;
+  `power_pins_derivation.rule` gains
+  `named-power-ground-pin-of-extracted-subcircuit`) and stays `unchecked`
+  with a reason when there is no instance-level supply pin to walk;
+  `reference.device_map` objects accept `kind: "inductor"` (3 terminals) and
+  `kind: "varactor"` (4 terminals), normalized to `X<name> <nodes> <class>`
+  cards; and a subckt-call conversion with several unknown subcircuits now
+  names all of them in one refusal instead of the first.
+
 - **sky130 deck checks the implant and npc masks `klt gen` now draws**
   (issue #2934, phase C): `--deck sky130` gains `npc.width.1`/`npc.space.1`
   (`npc.1`/`npc.2`, 0.27 µm) and `nsdm`/`psdm` `width.1`/`space.1`
