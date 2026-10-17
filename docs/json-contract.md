@@ -532,6 +532,12 @@ observations are `null` (never the client's values) and `capture` is `ok`,
 `absent` or `malformed`. See [`docs/cli/sim.md`](cli/sim.md) "Worker-observed
 environment" for the field names and limits.
 
+**No bucket in batch reports (issue #3777).** `environment.remote` (and each
+`fleet[]` member) no longer carries `bucket` on any batch verb. The bucket name
+embeds the fleet's AWS account number and reports are committed as evidence.
+`job_id` and `region` remain; see [`docs/cli/sim.md`](cli/sim.md) "Reports omit
+the bucket".
+
 `klt erc` (issue #1968) is a partial exception on `pdk`: its `--pdk` selects
 a built-in antenna-ratio limit table baked into `erc.py` itself (see
 [`docs/cli/erc.md`](cli/erc.md)'s "Sky130 antenna-ratio limits"), not an
