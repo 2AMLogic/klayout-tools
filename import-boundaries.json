@@ -1212,6 +1212,11 @@
       "consumer": "signoff",
       "exporter": "sim",
       "reason": "Issue #3289: operator-approved generator execution reuses the existing Spot batch lifecycle (sim_batch submit/launch/poll/collect) and the netlist batch tree packaging rather than adding another runner."
+    },
+    {
+      "consumer": "synthesize",
+      "exporter": "characterize",
+      "reason": "Issue #3709: restructure and synthesize read Liberty pins through liberty_compare.parse_liberty_text (the one real Liberty parser) instead of a second regex scraper; the scraper found 0 cells on the sky130 library, the parser finds 428."
     }
   ],
   "shared_private_permissions": [
