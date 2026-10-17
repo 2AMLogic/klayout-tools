@@ -340,6 +340,39 @@ def _bjt_unit_implant_margin_um(family: str) -> float:
     return _ring_implant_margin_um(family)
 
 
+#: Reach (um) of the tap-distance rule the layout generators size their tap
+#: pads for (issue #3648): every active shape must lie within this distance of
+#: a well/substrate tap. 20um is the 3.3V column of gf180mcu's ``DF.13`` /
+#: ``DF.14`` (``comp.tap_distance.{nwell,psub}.lv.1`` in
+#: :mod:`klayout_tools.decks.gf180mcu`; ``tests/test_gen.py`` pins the two
+#: equal).
+TAP_PAD_REACH_UM = 20.0
+
+#: Families whose deck enforces that rule, so ``mos_array``/``diff_pair``
+#: draw tap pads even with ``add_guard_ring`` off (see
+#: :func:`_tap_pads_wanted`). Every other family keeps its geometry (and GDS
+#: stream) byte-for-byte unchanged.
+_TAP_DISTANCE_FAMILIES = frozenset({"gf180mcu"})
+
+
+def _tap_pad_ring_implant_margins_um() -> frozenset[float]:
+    """The ``ring_implant_margin_um`` values of the :data:`_TAP_DISTANCE_FAMILIES`.
+
+    ``diff_pair`` resolves the ring role (so ``ring_implant_present``) for every
+    family, so a PCell cannot tell a tap-distance family from that flag alone;
+    its resolved ring implant margin -- family-specific and already a hidden
+    param -- does (``tests/test_gen_tap_pads.py`` pins that no other family
+    shares one), without adding a PCell param that would change every other
+    family's GDS stream."""
+    return frozenset(_ring_implant_margin_um(f) for f in _TAP_DISTANCE_FAMILIES)
+
+
+def _tap_pads_wanted(family: str) -> bool:
+    """Whether ``family``'s deck enforces a tap-distance rule (see
+    :data:`_TAP_DISTANCE_FAMILIES`), so a ring-less array needs tap pads."""
+    return family in _TAP_DISTANCE_FAMILIES
+
+
 def _ring_implant_margin_um(family: str) -> float:
     """Return ``family``'s tap/collector-ring implant margin (see
     :data:`_PDK_RING_IMPLANT_MARGIN_UM`), or ``0.0`` for a family that
@@ -3425,7 +3458,11 @@ def _mos_array_layer_params(
     import klayout.db as kdb
 
     layer_params = _device_layer_params(pdk_info, params)
-    if params.get("add_guard_ring"):
+    # Issue #3648: a family with a tap-distance rule gets tap pads even
+    # without a ring, which need the ring role's tap/implant layers.
+    if params.get("add_guard_ring") or _tap_pads_wanted(
+        _pdk_family(pdk_info["variant"])
+    ):
         layer_params.update(
             _ring_layer_params(pdk_info, params, generator_name="mos_array")
         )

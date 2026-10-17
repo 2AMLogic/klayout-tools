@@ -117,10 +117,12 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         _clamp_cut_boxes,
         _close_implant_gaps,
         _draw_npc_over_poly_contacts,
+        _draw_pcell_tap_pads,
         _insert_boxes,
         _insert_implant_ring,
         _insert_ring,
         _mos_array_layout,
+        _pcell_tap_reach_um,
         _shift_box,
     )
 
@@ -663,6 +665,7 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.pitch_x_um,
                 self.pitch_y_um,
                 top_endcap_um=self.top_endcap_um,
+                tap_reach_um=_pcell_tap_reach_um(self),
                 # Not a typed attribute (PCell params are set dynamically);
                 # `getattr` keeps the type baseline from growing per param.
                 share_sd=getattr(self, "share_sd"),  # noqa: B009
@@ -820,6 +823,11 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                         self.ring_implant_margin_um,
                         self.mfg_grid_um,
                     )
+
+            # Tap pads (issue #3648): on a family with a tap-distance rule the
+            # ring-less array still gets well/substrate taps of its tie's
+            # polarity, so the default output passes the deck.
+            _draw_pcell_tap_pads(self, info["tap_pads"], li_metal, li_contact)
 
             # Medium-voltage/thick-oxide device-class marker (issue #1054):
             # sized to enclose every unit device (real and dummy) --

@@ -874,6 +874,21 @@ same-block self-net — no `gen-compose`-level change was needed for this
 ring around a *separately*-generated block is an explicit non-goal, tracked
 as a future follow-up if still needed).
 
+**Tap pads on gf180mcu (issue #3648).** gf180mcu's default deck enforces
+`DF.13_LV`/`DF.14_LV` (every active within 20 µm of a well/substrate tap), so
+on that family a `mos_array` or `diff_pair` with `add_guard_ring: false` still
+draws tap pads: 0.42 µm square tap/metal pads with one contact and the tap
+implant each (Nplus inside the pfet well, Pplus for nfet), in the band a ring
+would occupy (`ring_padding_um` outside the footprint). They sit at the
+footprint's top and bottom corners, plus evenly spaced interior pads on any
+side longer than 20 µm, so the band stays open where routes leave the block.
+The pads add no ports; `bbox_um` grows to enclose them (the pad band,
+`ring_padding_um` + 0.42 µm, at the top and bottom). A footprint
+deeper than about 17 µm from every side is out of reach of perimeter pads, as
+it is of the ring, and still reports `comp.tap_distance.*`. With
+`add_guard_ring: true` the ring is the tap and no pads are drawn. sky130 and
+the other families draw no pads and are byte-for-byte unchanged.
+
 **Below `UNIT_MIN_W_UM`: dog-bone terminals drawn by hand (issue #1574).**
 `w_um` below `0.42` µm is rejected outright, with no override — that floor is
 about the *contact*, not the target PDK's own diffusion-width minimum (sky130
@@ -1966,9 +1981,8 @@ Notes and guarantees:
 - **Geometry is unchanged.** A finer dbu changes only the integer grid the
   shapes are stored on, not the shapes: `bbox_um`, `ports[].x_um`/`y_um`, and
   every drawn polygon are identical in micrometres, and every generator's
-  documented default `params` raise no `klt drc --deck gf180mcu` violation other
-  than the tap-distance rules (DF.13_LV/DF.14_LV, which tapless output fails
-  by design) at `0.0005µm`. sky130 output is byte-identical to before.
+  documented default `params` stay `klt drc --deck gf180mcu` clean at
+  `0.0005µm`. sky130 output is byte-identical to before.
 - **`dbu` is not a request parameter.** It is a property of the resolved PDK,
   not a caller knob — there is no `options.dbu`. To compose blocks at a given
   dbu, resolve them all against the same PDK.

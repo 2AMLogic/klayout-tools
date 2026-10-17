@@ -3,119 +3,13 @@
   "file": "examples/dogbone-terminal/example_gf180mcu.gds",
   "deck": "gf180mcu",
   "dbu_um": 0.001,
-  "status": "violations",
-  "violation_count": 2,
-  "rule_counts": {
-    "comp.tap_distance.psub.lv.1": 2
-  },
+  "status": "clean",
+  "violation_count": 0,
+  "rule_counts": {},
   "metrics": {
-    "drc__error__count": 2
+    "drc__error__count": 0
   },
-  "violations": [
-    {
-      "rule": "comp.tap_distance.psub.lv.1",
-      "description": "Max distance of a substrate tap (PCOMP outside Nwell) from NCOMP outside Nwell: 20um (3.3V)",
-      "check": "tap_distance",
-      "layer": "Comp",
-      "cell": "TOP",
-      "source_cell": "dogbone_weak_pullup",
-      "source_path": [
-        "dogbone_weak_pullup"
-      ],
-      "bbox": {
-        "left": 0,
-        "bottom": 0,
-        "right": 11040,
-        "top": 420
-      },
-      "polygon": [
-        [
-          0,
-          0
-        ],
-        [
-          0,
-          420
-        ],
-        [
-          420,
-          420
-        ],
-        [
-          420,
-          360
-        ],
-        [
-          10620,
-          360
-        ],
-        [
-          10620,
-          420
-        ],
-        [
-          11040,
-          420
-        ],
-        [
-          11040,
-          0
-        ],
-        [
-          10620,
-          0
-        ],
-        [
-          10620,
-          60
-        ],
-        [
-          420,
-          60
-        ],
-        [
-          420,
-          0
-        ]
-      ]
-    },
-    {
-      "rule": "comp.tap_distance.psub.lv.1",
-      "description": "Max distance of a substrate tap (PCOMP outside Nwell) from NCOMP outside Nwell: 20um (3.3V)",
-      "check": "tap_distance",
-      "layer": "Comp",
-      "cell": "TOP",
-      "source_cell": "mos_array",
-      "source_path": [
-        "ordinary_unit",
-        "mos_array"
-      ],
-      "bbox": {
-        "left": 13040,
-        "bottom": 0,
-        "right": 14540,
-        "top": 600
-      },
-      "polygon": [
-        [
-          13040,
-          0
-        ],
-        [
-          13040,
-          600
-        ],
-        [
-          14540,
-          600
-        ],
-        [
-          14540,
-          0
-        ]
-      ]
-    }
-  ],
+  "violations": [],
   "coverage": {
     "deck_layers": [
       "12/0",
@@ -154,6 +48,7 @@
     "layers_checked": [
       "22/0",
       "30/0",
+      "31/0",
       "32/0",
       "33/0",
       "34/0"
@@ -177,11 +72,19 @@
       "nplus.enclosing.poly2.1",
       "nplus.ongrid.1",
       "nplus.space.1",
+      "nplus.space.pcomp.1",
+      "nplus.space.pcomp.far.1",
       "nplus.width.1",
       "poly2.enclosing.contact.1",
       "poly2.ongrid.1",
       "poly2.space.1",
-      "poly2.width.1"
+      "poly2.width.1",
+      "pplus.enclosing.comp.far.1",
+      "pplus.enclosing.poly2.1",
+      "pplus.ongrid.1",
+      "pplus.space.1",
+      "pplus.space.ncomp.1",
+      "pplus.width.1"
     ],
     "rules_skipped": [
       "bjt.separation.comp.1",
@@ -222,8 +125,6 @@
       "mim.enclosing.via4.1",
       "mim.space.1",
       "mim_l_mk.ongrid.1",
-      "nplus.space.pcomp.1",
-      "nplus.space.pcomp.far.1",
       "nwell.enclosing.comp.1",
       "nwell.ongrid.1",
       "nwell.space.1",
@@ -232,12 +133,6 @@
       "plfuse.ongrid.1",
       "poly2.enclosing.sab.1",
       "pplus.enclosing.comp.1",
-      "pplus.enclosing.comp.far.1",
-      "pplus.enclosing.poly2.1",
-      "pplus.ongrid.1",
-      "pplus.space.1",
-      "pplus.space.ncomp.1",
-      "pplus.width.1",
       "res_mk.ongrid.1",
       "resistor.ongrid.1",
       "sab.ongrid.1",
@@ -296,11 +191,19 @@
       "nplus.enclosing.poly2.1",
       "nplus.ongrid.1",
       "nplus.space.1",
+      "nplus.space.pcomp.1",
+      "nplus.space.pcomp.far.1",
       "nplus.width.1",
       "poly2.enclosing.contact.1",
       "poly2.ongrid.1",
       "poly2.space.1",
-      "poly2.width.1"
+      "poly2.width.1",
+      "pplus.enclosing.comp.far.1",
+      "pplus.enclosing.poly2.1",
+      "pplus.ongrid.1",
+      "pplus.space.1",
+      "pplus.space.ncomp.1",
+      "pplus.width.1"
     ],
     "skipped": [],
     "inapplicable": [
@@ -457,14 +360,6 @@
         "reason": "no_applicable_geometry"
       },
       {
-        "id": "nplus.space.pcomp.1",
-        "reason": "no_applicable_geometry"
-      },
-      {
-        "id": "nplus.space.pcomp.far.1",
-        "reason": "no_applicable_geometry"
-      },
-      {
         "id": "nwell.enclosing.comp.1",
         "reason": "no_applicable_geometry"
       },
@@ -494,30 +389,6 @@
       },
       {
         "id": "pplus.enclosing.comp.1",
-        "reason": "no_applicable_geometry"
-      },
-      {
-        "id": "pplus.enclosing.comp.far.1",
-        "reason": "no_applicable_geometry"
-      },
-      {
-        "id": "pplus.enclosing.poly2.1",
-        "reason": "no_applicable_geometry"
-      },
-      {
-        "id": "pplus.ongrid.1",
-        "reason": "no_applicable_geometry"
-      },
-      {
-        "id": "pplus.space.1",
-        "reason": "no_applicable_geometry"
-      },
-      {
-        "id": "pplus.space.ncomp.1",
-        "reason": "no_applicable_geometry"
-      },
-      {
-        "id": "pplus.width.1",
         "reason": "no_applicable_geometry"
       },
       {
