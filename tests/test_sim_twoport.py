@@ -117,6 +117,13 @@ def test_other_analyses_pass_through_untouched():
             "single-point lin sweep",
         ),
         (_analysis(freq={**_FREQ, "extra": 1}), "unknown key"),
+        (_analysis(noise={}), "source_port is required"),
+        (_analysis(noise={"source_port": 3}), "source_port is required"),
+        (_analysis(noise={"source_port": True}), "source_port is required"),
+        (_analysis(noise={"source_port": 1, "t0_k": 0}), "t0_k must be positive"),
+        (_analysis(noise={"source_port": 1, "t0_k": -3}), "t0_k must be positive"),
+        (_analysis(noise={"source_port": 1, "x": 1}), "unknown key"),
+        (_analysis(noise="yes"), "analysis.noise must be an object"),
     ],
 )
 def test_malformed_forms_are_rejected_before_launch(analysis, match):
@@ -203,6 +210,84 @@ def test_reduce_s_of_a_matched_through():
     half = [0.5 + 0j]
     s = sim_twoport.reduce_s((half, half), (half, half))
     assert s == {"s11": [0j], "s21": [1 + 0j], "s12": [1 + 0j], "s22": [0j]}
+
+
+# --------------------------------------------------------------------------- #
+# Stability and noise: pure reducers, deck lines
+# --------------------------------------------------------------------------- #
+
+
+def test_stability_matches_the_closed_form():
+    s11, s12, s21, s22 = 0.3 - 0.2j, 0.1j, 2.0 + 1.0j, -0.4 + 0.1j
+    k, delta_abs, mu = sim_twoport.stability(s11, s12, s21, s22)
+    delta = s11 * s22 - s12 * s21
+    assert delta_abs == pytest.approx(abs(delta), abs=1e-12)
+    expected_k = (1 - abs(s11) ** 2 - abs(s22) ** 2 + abs(delta) ** 2) / (
+        2 * abs(s12 * s21)
+    )
+    assert k == pytest.approx(expected_k, abs=1e-12)
+    expected_mu = (1 - abs(s11) ** 2) / (
+        abs(s22 - delta * s11.conjugate()) + abs(s12 * s21)
+    )
+    assert mu == pytest.approx(expected_mu, abs=1e-12)
+
+
+def test_stability_of_a_known_matrix():
+    # Reciprocal matched attenuator, 6.02 dB: S21 = S12 = 0.5, S11 = S22 = 0.
+    k, delta_abs, mu = sim_twoport.stability(0j, 0.5 + 0j, 0.5 + 0j, 0j)
+    assert delta_abs == pytest.approx(0.25, abs=1e-12)
+    assert k == pytest.approx((1 + 0.0625) / 0.5, abs=1e-12)
+    assert mu == pytest.approx(1 / 0.25, abs=1e-12)
+
+
+def test_unilateral_stability_reports_null_k():
+    k, delta_abs, mu = sim_twoport.stability(0.5 + 0j, 0j, 3 + 0j, 0.25 + 0j)
+    assert k is None
+    assert delta_abs == pytest.approx(0.125, abs=1e-12)
+    assert mu == pytest.approx(0.75 / (0.25 - 0.125 * 0.5), abs=1e-12)
+    series = sim_twoport.stability_series(
+        {"s11": [0.5 + 0j], "s12": [0j], "s21": [3 + 0j], "s22": [0.25 + 0j]}
+    )
+    assert series["k"] == [None]
+    json.dumps(series, allow_nan=False)
+
+
+def test_nf_reducer_from_a_synthetic_spectrum():
+    rs, t0 = 50.0, 290.0
+    source = math.sqrt(4 * sim_twoport.BOLTZMANN * t0 * rs)
+    assert sim_twoport.nf_db([source, source * math.sqrt(2)], rs, t0) == (
+        pytest.approx([0.0, 10 * math.log10(2)], abs=1e-9)
+    )
+
+
+def test_noise_block_resolves_with_defaults():
+    resolved = sim_twoport.resolve_analysis(_analysis(noise={"source_port": 2}))
+    assert resolved["twoport"]["noise"] == {"source_port": 2, "t0_k": 290.0}
+    assert sim_twoport.has_noise_request(_analysis(noise={"source_port": 1}))
+    assert not sim_twoport.has_noise_request(_analysis())
+
+
+def test_noise_deck_marks_the_sink_termination_quiet():
+    resolved = sim_twoport.resolve_analysis(_analysis(noise={"source_port": 2}))
+    deck = sim_twoport.deck_lines(resolved)
+    assert deck[0] == "Rkltp1 in klt_tp1_x 50.0 noisy=0"
+    assert deck[2] == "Rkltp2 out klt_tp2_x 50.0"
+    control = sim_twoport.control_lines(resolved, "/c")
+    assert control[:5] == [
+        "set filetype=ascii",
+        "unset sqrnoise",
+        "noise v(in) Vkltp2 dec 5 1000000.0 100000000.0",
+        "let __klt_tp_noise = noise1.inoise_spectrum",
+        "write /c/twoport_noise.raw __klt_tp_noise",
+    ]
+
+
+def test_noise_free_deck_is_unchanged():
+    resolved = _resolved()
+    assert all("noisy" not in line for line in sim_twoport.deck_lines(resolved))
+    assert all(
+        "noise" not in line for line in sim_twoport.control_lines(resolved, "/c")
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -442,8 +527,160 @@ def test_existing_ac_requests_are_unchanged(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# Noise figure: extraction failures and real-ngspice oracles
+# --------------------------------------------------------------------------- #
+
+_NOISE_ANALYSIS = _analysis(noise={"source_port": 1, "t0_k": 300.15})
+
+
+def _noise_rawfile(values, plot="Noise Spectral Density Curves", name="__klt_tp_noise"):
+    head = [
+        "Title: t",
+        "Date: d",
+        f"Plotname: {plot}",
+        "Flags: real",
+        "No. Variables: 2",
+        f"No. Points: {len(values)}",
+        "Variables:",
+        "\t0\tfrequency\tfrequency",
+        f"\t1\t{name}\tvoltage",
+        "Values:",
+    ]
+    body = []
+    for i, v in enumerate(values):
+        body += [f" {i}\t{1e6 * (i + 1)!r}", f"\t{v!r}"]
+    return "\n".join(head + body) + "\n"
+
+
+def _good_noise(tmp_path: Path, spectrum_rows=None):
+    good = _rawfile("AC Analysis", _GOOD_ROWS)
+    _write_drives(tmp_path, good, good)
+    if spectrum_rows is not None:
+        (tmp_path / "twoport_noise.raw").write_text(spectrum_rows)
+    return sim_twoport.resolve_analysis(_NOISE_ANALYSIS)
+
+
+def test_noise_rawfile_reduces_to_nf(tmp_path):
+    source = math.sqrt(4 * sim_twoport.BOLTZMANN * 300.15 * 50)
+    analysis = _good_noise(tmp_path, _noise_rawfile([source * math.sqrt(2)] * 2))
+    outcome = sim_twoport.extract_corner(analysis, str(tmp_path))
+    assert outcome.diagnostics == []
+    assert outcome.nf_db == pytest.approx([10 * math.log10(2)] * 2, abs=1e-9)
+    fields = sim_twoport.corner_fields(analysis, outcome)["twoport"]
+    assert fields["noise"]["noise_representation"] == "amplitude"
+    assert fields["noise"]["t0_k"] == 300.15
+    assert len(fields["stability"]["k"]) == 2
+
+
+@pytest.mark.parametrize(
+    ("text", "code"),
+    [
+        (None, "twoport_noise_missing"),
+        ("garbage\n", "twoport_noise_missing"),
+        (_noise_rawfile([1e-9, 1e-9], name="other"), "twoport_noise_missing"),
+        (_noise_rawfile([1e-9]), "twoport_noise_missing"),
+        (_noise_rawfile([1e-9, math.nan]), "twoport_noise_non_finite"),
+        (_noise_rawfile([1e-9, 0.0]), "twoport_noise_non_finite"),
+    ],
+)
+def test_a_missing_or_bad_noise_vector_is_an_error(tmp_path, text, code):
+    analysis = _good_noise(tmp_path, text)
+    outcome = sim_twoport.extract_corner(analysis, str(tmp_path))
+    (diag,) = outcome.diagnostics
+    assert diag["severity"] == "error"
+    assert diag["code"] == "measurement"
+    assert f"[{code}]" in diag["message"]
+    assert outcome.nf_db == []
+    fields = sim_twoport.corner_fields(analysis, outcome)["twoport"]
+    assert fields["noise"]["nf_db"] == []
+
+
+def _noise_run(tmp_path: Path, noise, temp_c=None):
+    extra = {}
+    if temp_c is not None:
+        extra["corners"] = {"temperature_c": [temp_c]}
+    analysis = _analysis(noise=noise, freq={**_FREQ, "start": 1e3, "stop": 1e4})
+    # The load is noiseless; the 50-ohm series resistor is the network's noise.
+    return _run(tmp_path, "R1 in out 50\nR2 out 0 50 noisy=0\n", analysis, **extra)
+
+
+@real_ngspice
+def test_resistive_network_nf_matches_the_analytic_factor(tmp_path):
+    # F = 1 + R1/Rs = 2 when t0 equals the simulated temperature (27 C).
+    corner = _noise_run(tmp_path, {"source_port": 1, "t0_k": 300.15})["corners"][0]
+    assert corner["status"] == "pass"
+    nf = corner["twoport"]["noise"]["nf_db"]
+    assert nf == pytest.approx([10 * math.log10(2)] * len(nf), abs=1e-6)
+    assert corner["twoport"]["noise"]["noise_representation"] == "amplitude"
+
+
+@real_ngspice
+def test_nf_scales_with_a_different_reference_temperature(tmp_path):
+    corner = _noise_run(tmp_path, {"source_port": 1, "t0_k": 290})["corners"][0]
+    expected = 10 * math.log10(2 * 300.15 / 290)
+    nf = corner["twoport"]["noise"]["nf_db"]
+    assert nf == pytest.approx([expected] * len(nf), abs=1e-6)
+
+
+@real_ngspice
+def test_matched_pad_nf_equals_its_loss(tmp_path):
+    # 6 dB-ish matched pi pad between 50-ohm ports: NF = loss in dB at T0.
+    pad = "R1 in 0 150.48\nR2 in out 37.35\nR3 out 0 150.48\n"
+    analysis = _analysis(
+        noise={"source_port": 1, "t0_k": 300.15},
+        freq={**_FREQ, "start": 1e3, "stop": 1e4},
+    )
+    # The sink termination Rkltp2 is quiet; the pad's resistors are noisy.
+    corner = _run(tmp_path, pad, analysis)["corners"][0]
+    s21 = corner["twoport"]["s_parameters"]["s21"]
+    loss_db = -20 * math.log10(math.hypot(s21["real"][0], s21["imag"][0]))
+    nf = corner["twoport"]["noise"]["nf_db"]
+    assert nf == pytest.approx([loss_db] * len(nf), abs=1e-3)
+
+
+@real_ngspice
+def test_source_port_two_uses_the_other_port_as_output(tmp_path):
+    # Mirror image of the series-R case: drive port 2, observe port 1.
+    body = "R1 out in 50\nR2 in 0 50 noisy=0\n"
+    analysis = _analysis(
+        noise={"source_port": 2, "t0_k": 300.15},
+        freq={**_FREQ, "start": 1e3, "stop": 1e4},
+    )
+    corner = _run(tmp_path, body, analysis)["corners"][0]
+    nf = corner["twoport"]["noise"]["nf_db"]
+    assert nf == pytest.approx([10 * math.log10(2)] * len(nf), abs=1e-6)
+
+
+@real_ngspice
+def test_stability_is_reported_without_a_noise_block(tmp_path):
+    corner = _run(tmp_path, "R1 in out 100\n")["corners"][0]
+    assert "noise" not in corner["twoport"]
+    stab = corner["twoport"]["stability"]
+    assert len(stab["k"]) == corner["twoport"]["points"]
+    assert all(x is not None and x >= 1 - 1e-9 for x in stab["k"])
+
+
+@real_ngspice
+def test_deleted_noise_pass_is_an_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(sim_twoport, "_noise_control_lines", lambda *a: [])
+    corner = _noise_run(tmp_path, {"source_port": 1})["corners"][0]
+    assert corner["status"] == "error"
+    assert corner["twoport"]["noise"]["nf_db"] == []
+    assert any("twoport_noise_missing" in d["message"] for d in corner["diagnostics"])
+
+
+# --------------------------------------------------------------------------- #
 # Batch: runner gate and artifact install
 # --------------------------------------------------------------------------- #
+
+
+def test_noise_is_a_registered_mandatory_runner_feature():
+    request = {"analysis": _analysis(noise={"source_port": 1})}
+    assert sim_batch._request_features(request) == ["twoport", "twoport_noise"]
+    assert "twoport_noise" in sim_batch._MANDATORY_RUNNER_FEATURES
+    assert sim_batch._missing_runner_features(["twoport_noise"], "0.7.0") == [
+        "twoport_noise"
+    ]
 
 
 def test_twoport_is_a_registered_mandatory_runner_feature():

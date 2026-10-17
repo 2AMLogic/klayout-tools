@@ -31,6 +31,20 @@ Both ports must share one ``z0`` (Touchstone 1.1 has one scalar reference
 impedance). The port terminations are present at DC too, so the netlist must
 bias the circuit through them or around them (bias tee, ideal inductor).
 
+Stability. ``twoport.stability`` carries Rollett ``k``, ``|Delta|`` and
+Edwards-Sinsky ``mu`` per frequency, computed from the reduced S-matrix on
+every two-port corner.
+
+Noise (#3339). An optional ``analysis.noise`` block
+``{"source_port": 1|2, "t0_k": 290}`` adds a noise pass: ngspice ``noise`` at
+the other port's voltage against the source ``Vkltp<s>`` over the same grid
+(run first, so its spectrum plot is ``noise1``),
+in amplitude (V/sqrt(Hz)) form (``unset sqrnoise``, #3006). The source port's
+``Rkltp`` is the source resistance ``Rs = z0``; the other port's termination
+is marked ``noisy=0`` so only the network's own noise inflates the factor::
+
+    F = inoise_spectrum**2 / (4 k t0_k Rs),    NF = 10 log10 F
+
 Every failure (rawfile missing, a non-AC plot, a missing or non-finite port
 voltage, passes with different frequency axes) is an ``error`` diagnostic --
 never a quiet ``pass``.
@@ -56,21 +70,36 @@ ERROR_CODES = (
     "twoport_raw_invalid",
     "twoport_non_finite",
     "twoport_axis_mismatch",
+    "twoport_noise_missing",
+    "twoport_noise_non_finite",
 )
+
+#: Boltzmann constant, J/K: ngspice's own (CODATA 2014) value, so the factor
+#: is self-consistent with the simulator's 4kT (the 2019 SI value is 3.5e-7 higher).
+BOLTZMANN = 1.38064852e-23
+DEFAULT_T0_K = 290.0
 
 S2P_FILENAME = "twoport.s2p"
 
 _NODE_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.:$#!<>\[\]]*$")
 _GROUND = frozenset({"0", "gnd"})
-_REQUEST_KEYS = frozenset({"kind", "ports", "freq"})
+_REQUEST_KEYS = frozenset({"kind", "ports", "freq", "noise"})
+_NOISE_KEYS = frozenset({"source_port", "t0_k"})
 _PORT_KEYS = frozenset({"p", "n", "z0"})
 _FREQ_KEYS = frozenset({"sweep", "points", "start", "stop"})
 _VECTOR_PREFIX = "__klt_tp_"
+_NOISE_VECTOR = "__klt_tp_noise"
+NOISE_FILENAME = "twoport_noise.raw"
 
 
 def is_twoport_request(analysis: Any) -> bool:
     """Is ``analysis`` the (unresolved) request form ``kind: "twoport"``?"""
     return isinstance(analysis, dict) and str(analysis.get("kind", "")).lower() == KIND
+
+
+def has_noise_request(analysis: Any) -> bool:
+    """Does the (unresolved) twoport request carry an ``analysis.noise`` block?"""
+    return is_twoport_request(analysis) and analysis.get("noise") is not None
 
 
 def is_twoport(analysis: dict[str, Any]) -> bool:
@@ -161,6 +190,28 @@ def _resolve_freq(freq: Any) -> dict[str, Any]:
     return {"sweep": sweep, "points": points, "start": start, "stop": stop}
 
 
+def _resolve_noise(noise: Any) -> dict[str, Any]:
+    if not isinstance(noise, dict):
+        raise SimError(
+            'analysis.noise must be an object {"source_port": 1|2, "t0_k": 290}'
+        )
+    unknown = sorted(set(noise) - _NOISE_KEYS)
+    if unknown:
+        raise SimError(
+            f"analysis.noise: unknown key(s) {unknown}; allowed: {sorted(_NOISE_KEYS)}"
+        )
+    port = noise.get("source_port")
+    if isinstance(port, bool) or port not in (1, 2):
+        raise SimError(
+            "analysis.noise.source_port is required and must be 1 or 2 (the "
+            f"port that drives the noise source; got {port!r})"
+        )
+    t0 = _number(noise.get("t0_k", DEFAULT_T0_K), "analysis.noise.t0_k")
+    if t0 <= 0:
+        raise SimError(f"analysis.noise.t0_k must be positive (got {t0!r})")
+    return {"source_port": int(port), "t0_k": t0}
+
+
 def resolve_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
     """``analysis`` itself unless it is the request form ``kind: "twoport"``;
     then the equivalent ``ac`` analysis carrying the normalised ``twoport``
@@ -194,7 +245,10 @@ def resolve_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
         )
     freq = _resolve_freq(analysis.get("freq"))
     args = f"{freq['sweep']} {freq['points']} {freq['start']!r} {freq['stop']!r}"
-    return {"kind": "ac", "args": args, KIND: {"ports": ports, "freq": freq}}
+    spec: dict[str, Any] = {"ports": ports, "freq": freq}
+    if analysis.get("noise") is not None:
+        spec["noise"] = _resolve_noise(analysis["noise"])
+    return {"kind": "ac", "args": args, KIND: spec}
 
 
 def refuse_unsupported(
@@ -250,9 +304,12 @@ def deck_lines(analysis: dict[str, Any]) -> list[str]:
     if not is_twoport(analysis):
         return []
     lines: list[str] = []
+    noise = analysis[KIND].get("noise")
     for index, port in enumerate(analysis[KIND]["ports"]):
         mid = f"klt_tp{index + 1}_x"
-        lines.append(f"Rkltp{index + 1} {port['p']} {mid} {port['z0']!r}")
+        # The sink termination must not add noise to the factor's numerator.
+        quiet = " noisy=0" if noise and noise["source_port"] != index + 1 else ""
+        lines.append(f"Rkltp{index + 1} {port['p']} {mid} {port['z0']!r}{quiet}")
         lines.append(f"{_source(index)} {mid} {_return_node(port)} DC 0 AC 0")
     return lines
 
@@ -271,12 +328,39 @@ def rawfile_path(corner_dir: str, excited: int) -> str:
     return os.path.join(corner_dir, f"twoport_{excited + 1}.raw")
 
 
+def noise_rawfile_path(corner_dir: str) -> str:
+    return os.path.join(corner_dir, NOISE_FILENAME)
+
+
+def _noise_control_lines(analysis: dict[str, Any], corner_dir: str) -> list[str]:
+    spec = analysis[KIND]
+    noise = spec["noise"]
+    source = noise["source_port"] - 1
+    sink = spec["ports"][1 - source]
+    if sink["n"].lower() in _GROUND:
+        output = f"v({sink['p']})"
+    else:
+        output = f"v({sink['p']},{sink['n']})"
+    return [
+        # Amplitude (V/sqrt(Hz)) spectra, whatever the runner's default (#3006).
+        "unset sqrnoise",
+        f"noise {output} {_source(source)} {analysis['args']}",
+        f"let {_NOISE_VECTOR} = noise1.inoise_spectrum",
+        f"write {noise_rawfile_path(corner_dir)} {_NOISE_VECTOR}",
+    ]
+
+
 def control_lines(analysis: dict[str, Any], corner_dir: str) -> list[str]:
     """The two-excitation sequence for the ``.control`` block (after the
     corner prefix, before ``quit``)."""
     ports = analysis[KIND]["ports"]
     names = [f"{_VECTOR_PREFIX}{i}" for i in range(len(ports))]
     lines = ["set filetype=ascii"]
+    if analysis[KIND].get("noise"):
+        # First, so its spectrum plot is the deck's ``noise1`` (plot names
+        # count up per deck; the current plot after ``noise`` is ``noise2``,
+        # the integrated one).
+        lines.extend(_noise_control_lines(analysis, corner_dir))
     for excited in range(len(ports)):
         for index in range(len(ports)):
             lines.append(f"alter {_source(index)} ac = {1 if index == excited else 0}")
@@ -312,6 +396,46 @@ def reduce_s(
     }
 
 
+def stability(
+    s11: complex, s12: complex, s21: complex, s22: complex
+) -> tuple[float | None, float, float | None]:
+    """``(k, |Delta|, mu)`` of one S-matrix. ``k`` is ``None`` when
+    ``|s12 s21| = 0`` (unilateral: infinite); ``mu`` is ``None`` when its
+    denominator vanishes."""
+    delta = s11 * s22 - s12 * s21
+    cross = abs(s12 * s21)
+    k = (
+        (1 - abs(s11) ** 2 - abs(s22) ** 2 + abs(delta) ** 2) / (2 * cross)
+        if cross > 0
+        else None
+    )
+    denominator = abs(s22 - delta * s11.conjugate()) + cross
+    mu = (1 - abs(s11) ** 2) / denominator if denominator > 0 else None
+    return k, abs(delta), mu
+
+
+def stability_series(s: dict[str, list[complex]]) -> dict[str, list[float | None]]:
+    """``{"k", "delta_abs", "mu"}`` lists over the frequency axis."""
+    rows = [
+        stability(*values)
+        for values in zip(s["s11"], s["s12"], s["s21"], s["s22"], strict=True)
+    ]
+    return {
+        "k": [r[0] for r in rows],
+        "delta_abs": [r[1] for r in rows],
+        "mu": [r[2] for r in rows],
+    }
+
+
+def nf_db(inoise: list[float], rs: float, t0_k: float) -> list[float]:
+    """Noise figure in dB from the amplitude input-referred noise spectrum
+    (V/sqrt(Hz)) of a source resistance ``rs`` referenced to ``t0_k``."""
+    return [
+        10 * math.log10(v * v / (4 * BOLTZMANN * t0_k * rs)) if v != 0 else math.nan
+        for v in inoise
+    ]
+
+
 # --------------------------------------------------------------------------- #
 # Extraction
 # --------------------------------------------------------------------------- #
@@ -325,6 +449,7 @@ class TwoportOutcome:
     s: dict[str, list[complex]] = field(default_factory=dict)
     z0: float | None = None
     s2p_path: str | None = None
+    nf_db: list[float] = field(default_factory=list)
     diagnostics: list[dict[str, str]] = field(default_factory=list)
 
 
@@ -397,6 +522,42 @@ def _read_drive(
     return (freqs, voltages), None
 
 
+def _read_noise(
+    corner_dir: str, freqs: list[float], noise: dict[str, Any], rs: float
+) -> tuple[list[float], dict[str, str] | None]:
+    """``nf_db`` per frequency from the noise rawfile, or a diagnostic."""
+    path = noise_rawfile_path(corner_dir)
+    if not os.path.isfile(path):
+        return [], _error(
+            "twoport_noise_missing",
+            "the noise analysis wrote no rawfile (it failed or never ran)",
+        )
+    try:
+        raw = sim_raw.read_complex_ascii_rawfile(path)
+    except sim_raw.RawFileError as exc:
+        return [], _error(
+            "twoport_noise_missing", f"could not read the noise rawfile: {exc}"
+        )
+    columns = {_bare(name): i for i, name in enumerate(raw.names)}
+    index = columns.get(_NOISE_VECTOR)
+    if index is None or not raw.points:
+        return [], _error(
+            "twoport_noise_missing", "the input-referred noise spectrum is missing"
+        )
+    values = [z.real for z in raw.column(index)]
+    if len(values) != len(freqs):
+        return [], _error(
+            "twoport_noise_missing",
+            f"the noise sweep has {len(values)} points, the S sweep {len(freqs)}",
+        )
+    if not all(math.isfinite(v) and v > 0 for v in values):
+        return [], _error(
+            "twoport_noise_non_finite",
+            "the input-referred noise spectrum has a non-finite or non-positive sample",
+        )
+    return nf_db(values, rs, noise["t0_k"]), None
+
+
 def extract_corner(analysis: dict[str, Any], corner_dir: str) -> TwoportOutcome:
     """Decode one finished corner's two rawfiles, reduce to S and write the
     ``.s2p`` sidecar. Never raises; a problem becomes an ``error`` diagnostic.
@@ -420,6 +581,11 @@ def extract_corner(analysis: dict[str, Any], corner_dir: str) -> TwoportOutcome:
     z0 = ports[0]["z0"]
     s = reduce_s((volts_a[0], volts_a[1]), (volts_b[0], volts_b[1]))
     outcome = TwoportOutcome(freqs=freqs_a, s=s, z0=z0)
+    noise = analysis[KIND].get("noise")
+    if noise:
+        outcome.nf_db, diagnostic = _read_noise(corner_dir, freqs_a, noise, z0)
+        if diagnostic is not None:
+            outcome.diagnostics.append(diagnostic)
     path = os.path.join(corner_dir, S2P_FILENAME)
     text = touchstone.format_s2p(
         freqs_a,
@@ -462,7 +628,7 @@ def corner_fields(analysis: dict[str, Any], outcome: TwoportOutcome) -> dict[str
         return {}
     spec = analysis[KIND]
     names = ("s11", "s21", "s12", "s22")
-    return {
+    fields: dict[str, Any] = {
         "twoport": {
             "ports": [dict(port) for port in spec["ports"]],
             "z0_ohm": outcome.z0 if outcome.z0 is not None else spec["ports"][0]["z0"],
@@ -475,5 +641,16 @@ def corner_fields(analysis: dict[str, Any], outcome: TwoportOutcome) -> dict[str
                 }
                 for name in names
             },
+            "stability": stability_series(outcome.s)
+            if outcome.s
+            else {"k": [], "delta_abs": [], "mu": []},
         }
     }
+    if spec.get("noise"):
+        fields["twoport"]["noise"] = {
+            "source_port": spec["noise"]["source_port"],
+            "t0_k": spec["noise"]["t0_k"],
+            "noise_representation": "amplitude",
+            "nf_db": list(outcome.nf_db),
+        }
+    return fields

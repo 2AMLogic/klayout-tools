@@ -2933,9 +2933,52 @@ writes):
     "s21": {"real": ["..."], "imag": ["..."]},
     "s12": {"real": ["..."], "imag": ["..."]},
     "s22": {"real": ["..."], "imag": ["..."]}
-  }
+  },
+  "stability": {"k": ["..."], "delta_abs": ["..."], "mu": ["..."]}
 }
 ```
+
+`stability` is reduced from the S-matrix on every two-port corner (issue
+#3339): Rollett `k = (1 - |S11|^2 - |S22|^2 + |Delta|^2) / (2 |S12 S21|)`,
+`|Delta|` with `Delta = S11 S22 - S12 S21`, and Edwards-Sinsky
+`mu = (1 - |S11|^2) / (|S22 - Delta conj(S11)| + |S12 S21|)`. Where
+`|S12 S21| = 0` (unilateral) `k` is `null` (infinite), never NaN/Infinity.
+
+#### Noise figure: `analysis.noise` (issue #3339)
+
+```json
+{"kind": "twoport", "ports": [...], "freq": {...},
+ "noise": {"source_port": 1, "t0_k": 290}}
+```
+
+`source_port` (1 or 2) is **required**: that port's `Rkltp` (value `z0`) is
+the source resistance `Rs` and the *other* port is the output. `t0_k`
+(default 290, must be > 0) is the IEEE reference temperature. Unknown keys are
+rejected; `noise` needs `kind: "twoport"` and engine `ngspice`. The deck runs
+ngspice `noise` first (so its spectrum is the deck's `noise1`) on the same
+`freq` grid, with `unset sqrnoise` -- **amplitude** spectra, V/sqrt(Hz), the
+#3006 convention -- and marks the sink port's termination `noisy=0`, so only
+the network's own noise raises the factor:
+
+    F = inoise_spectrum^2 / (4 k t0_k Rs),    NF = 10 log10 F
+
+`k` is ngspice's own Boltzmann constant (1.38064852e-23 J/K). The circuit runs
+at its own corner temperature; `t0_k` is only the reference in the
+denominator, so at a corner temperature `T` the result is `NF` at `t0_k = T`
+plus `10 log10(T / t0_k)` (27 C = 300.15 K by default). The corner gains
+
+```json
+"noise": {"source_port": 1, "t0_k": 290.0, "noise_representation": "amplitude",
+          "nf_db": ["..."]}
+```
+
+A missing noise rawfile or vector, a point-count mismatch or a non-finite /
+non-positive sample is `error` (`[twoport_noise_missing]`,
+`[twoport_noise_non_finite]`) with an empty `nf_db`, never `pass`. Accuracy:
+a series 50 ohm resistor into a noiseless load (`R2 out 0 50 noisy=0`) gives
+`F = 1 + R1/Rs = 2` (3.0103 dB) to better than 1e-6 dB at `t0_k` equal to the
+corner temperature, and a matched resistive pad gives NF equal to its loss.
+`noise` is a **mandatory** runner feature (`twoport_noise`, minimum `0.7.1`).
 
 The `.s2p` is the result, so a two-port request forces `options.keep_artifacts`
 on. A corner whose rawfile is missing, whose plot is not an AC analysis, whose
@@ -2951,8 +2994,9 @@ against their closed forms (1e-6 absolute).
 On `remote`/`batch` the `.s2p` returns through the ordinary artifact install
 (paths rewritten to the local artifacts directory) and the S arrays ride the
 returned report; `twoport` is a **mandatory** runner feature (minimum `0.7.1`).
-Requests without `kind: "twoport"` are unchanged. Out of scope: noise,
-NF, stability factors (child C of #3029), mixed-mode and N > 2 ports.
+Requests without `kind: "twoport"` are unchanged. Out of scope: Fmin,
+Gamma_opt, Rn, a Touchstone noise-data section, `mu'`, mixed-mode and N > 2
+ports.
 
 ### Waveform size guard: `options.waveform_max_bytes` (issue #3211)
 
