@@ -764,7 +764,9 @@ end
 # --------------------------------------------------------------------------
 # Section 3.19: rules for V8 (with M8 / M9) apply to V9 (with M9 / PAD).
 # PAD (DRM mask 96, Table 2.3.1) is not in the pinned asap7.lyp, so it is read
-# by number, like every other layer here; the V8.M9.EN.2 / V8.AUX.1 rules
+# by number, like every other layer here. The DRM has no rule for PAD itself, so
+# shapes on PAD are unchecked beyond the V9 rules below and `klt drc` reports
+# that in coverage.unchecked_rules (asap7_rules.PAD_DISPOSITION, #3807); the V8.M9.EN.2 / V8.AUX.1 rules
 # for "V8 in conjunction with M9" carry over to "V9 in conjunction with PAD".
 { "V8" => [v8, m8], "V9" => [v9, m9] }.each do |name, (via, lower)|
   r = via.rectangles
