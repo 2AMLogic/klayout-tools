@@ -337,6 +337,8 @@ def _run_attest(
 
 def _attestation_check_line(check: dict) -> str:
     marker = "PASS" if check["passed"] else "FAIL"
+    if check.get("skipped"):
+        marker = "SKIP"
     if check["check"] == "present":
         what = f"{check['role']} {check['path']} present"
     elif check["check"] == "command":
@@ -367,6 +369,13 @@ def _print_attestation_check_text(result: dict) -> None:
     failed = [c for c in result["fresh"]["attestation"]["checks"] if not c["passed"]]
     for check in failed:
         print(_attestation_check_line(check))
+    for check in result.get("skipped_checks", []):
+        label = check.get("target") or check.get("name") or check["role"]
+        outcome = "pass" if check["passed"] else "fail"
+        print(
+            f"[SKIP] {check['role']} {label}: {' '.join(check['argv'])} "
+            f"(local_only, not run; committed outcome: {outcome})"
+        )
 
 
 def _run_envelope_aggregation(args: argparse.Namespace) -> int:

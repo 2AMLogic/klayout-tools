@@ -30,6 +30,7 @@ import pytest
 from helpers.subprocess_fakes import fake_completed
 from klayout_tools import signoff as signoff_module
 from klayout_tools import signoff_attest as attest_module
+from klayout_tools._provenance import layout_geometry_digest
 from klayout_tools._report_verify import strip_path_patterns
 from klayout_tools.cli import main
 from klayout_tools.cli.output import render_rerun_drift
@@ -6183,6 +6184,7 @@ def test_unpinned_manifest_entry_renders_unanchored(tmp_path):
 
 
 def test_pin_mismatch_renders_stale(tmp_path):
+    (tmp_path / ".git").mkdir(exist_ok=True)  # a repo root for the geometry digest
     envelope_path, _ = _anchored_generic(tmp_path, 2)
 
     result = build_tier_report(
@@ -16637,3 +16639,194 @@ def test_mismatched_regeneration_claim_on_a_set_binding_is_stale_artifact(tmp_pa
 
     assert item["status"] == "unmet"
     assert item["reason"] == "stale_artifact"
+
+
+# --------------------------------------------------------------------------- #
+# `local_only` attest checks, `hash_kind: geometry` regeneration (issue #3743)
+# --------------------------------------------------------------------------- #
+
+
+def _local_only_inventory(repo: Path, **extra) -> str:
+    inventory = _inventory(1)
+    inventory["derived"][0]["check"] = {"argv": _OK, **extra}
+    return _write_inventory(repo, 1, inventory)
+
+
+def _commit_attestation(repo: Path, inventory: str) -> Path:
+    committed = repo / "evidence" / "item1.json"
+    committed.write_text(attest_module.render_envelope(build_attestation(1, inventory)))
+    return committed
+
+
+def test_attest_check_does_not_run_local_only_command(tmp_path):
+    repo = _attest_repo(tmp_path)
+    marker = repo / "ran.txt"
+    script = f"open({str(marker)!r}, 'w').write('x')"
+    argv = [sys.executable, "-c", script]
+    inventory = _local_only_inventory(repo, argv=argv, local_only=True)
+    committed = _commit_attestation(repo, inventory)
+    assert marker.exists()  # attest (produce) ran it
+    marker.unlink()
+
+    result = check_attestation(1, inventory, str(committed))
+
+    assert not marker.exists()
+    assert result["status"] == "match"
+    assert result["fresh_status"] == "pass"
+    assert [c["role"] for c in result["skipped_checks"]] == ["freshness"]
+    assert result["skipped_checks"][0]["argv"] == argv
+    assert "skipped" not in json.dumps(result["fresh"]["attestation"])
+
+
+def test_attest_check_still_detects_hash_drift_with_local_only(tmp_path):
+    repo = _attest_repo(tmp_path)
+    inventory = _local_only_inventory(repo, local_only=True)
+    committed = _commit_attestation(repo, inventory)
+    (repo / "design" / "ota.sch").write_text("v {xschem edited}\n")
+
+    result = check_attestation(1, inventory, str(committed))
+
+    assert result["status"] == "drifted"
+    assert result["skipped_checks"]
+
+
+def test_attest_check_committed_local_only_failure_fails_gate(tmp_path):
+    repo = _attest_repo(tmp_path)
+    inventory = _local_only_inventory(repo, argv=_STALE, local_only=True)
+    committed = _commit_attestation(repo, inventory)
+    assert json.loads(committed.read_text())["status"] == "fail"
+
+    result = check_attestation(1, inventory, str(committed))
+
+    assert result["status"] == "match"
+    assert result["fresh_status"] == "fail"
+    assert result["skipped_checks"][0]["passed"] is False
+
+
+def test_attest_check_cli_exit_codes_with_local_only(tmp_path, capsys):
+    repo = _attest_repo(tmp_path)
+    inventory = _local_only_inventory(repo, local_only=True)
+    committed = _commit_attestation(repo, inventory)
+
+    code = _attest_cli(1, inventory, "--check", str(committed), "--format", "text")
+
+    assert code == 0
+    assert "[SKIP]" in capsys.readouterr().out
+
+
+def test_attest_without_local_only_still_runs_every_command(tmp_path):
+    repo = _attest_repo(tmp_path)
+    inventory = _local_only_inventory(repo)
+    committed = _commit_attestation(repo, inventory)
+    assert check_attestation(1, inventory, str(committed))["skipped_checks"] == []
+
+
+@pytest.mark.parametrize("value", ["yes", 1, None])
+def test_attest_rejects_non_boolean_local_only(tmp_path, value):
+    repo = _attest_repo(tmp_path)
+    inventory = _local_only_inventory(repo, local_only=value)
+    with pytest.raises(AttestationError, match="local_only"):
+        build_attestation(1, inventory)
+
+
+def _write_gds(path: Path, *, extra_box: bool = False, year: int = 2020) -> None:
+    kdb = pytest.importorskip("klayout.db")
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(1, 0)).insert(kdb.Box(0, 0, 1000, 1000))
+    if extra_box:
+        top.shapes(layout.layer(2, 0)).insert(kdb.Box(0, 0, 500, 500))
+    options = kdb.SaveLayoutOptions()
+    options.format = "GDS2"
+    # Pin different write timestamps so the bytes differ run to run.
+    layout.write(str(path), options)
+    data = bytearray(path.read_bytes())
+    data[10:12] = year.to_bytes(2, "big")  # BGNLIB modification year
+    path.write_bytes(bytes(data))
+
+
+def _geometry_envelope(tmp_path, claim_gds: Path, **claim) -> tuple[str, str]:
+    (tmp_path / ".git").mkdir(exist_ok=True)  # a repo root for the geometry digest
+    envelope_path, _ = _anchored_generic(tmp_path, 2)
+    artifact = tmp_path / "ota.gds"
+    _write_gds(artifact)
+    digest = _hash_of(artifact)
+    envelope = json.loads(Path(envelope_path).read_text())
+    envelope["provenance"]["input"]["content_hash"] = digest
+    regenerated = layout_geometry_digest(str(claim_gds))
+    envelope["provenance"]["regeneration"] = {
+        "generator": _GENERATOR,
+        "regenerated_hash": regenerated,
+        "hash_kind": "geometry",
+        **claim,
+    }
+    Path(envelope_path).write_text(json.dumps(envelope))
+    return envelope_path, digest
+
+
+def test_geometry_regeneration_survives_a_rewrite_with_new_timestamps(tmp_path):
+    other = tmp_path / "regen.gds"
+    _write_gds(other, year=2031)
+    envelope_path, digest = _geometry_envelope(tmp_path, other)
+    assert _hash_of(tmp_path / "ota.gds") != _hash_of(other)
+
+    item = _item(build_tier_report(_anchored_manifest(2, envelope_path, digest)), 2)
+
+    assert item["status"] == "met"
+    regeneration = item["citation"]["artifact_binding"]["regeneration"]
+    assert regeneration["hash_kind"] == "geometry"
+    assert regeneration["executed_by_klt"] is False
+
+
+def test_geometry_regeneration_real_change_is_stale_artifact(tmp_path):
+    other = tmp_path / "regen.gds"
+    _write_gds(other, extra_box=True)
+    envelope_path, digest = _geometry_envelope(tmp_path, other)
+
+    item = _item(build_tier_report(_anchored_manifest(2, envelope_path, digest)), 2)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "stale_artifact"
+
+
+def test_geometry_regeneration_on_non_layout_is_unanchored(tmp_path):
+    envelope_path, digest = _anchored_generic(tmp_path, 1)
+    _with_regeneration(
+        envelope_path,
+        {
+            "generator": _GENERATOR,
+            "regenerated_hash": digest,
+            "hash_kind": "geometry",
+        },
+    )
+
+    item = _item(build_tier_report(_anchored_manifest(1, envelope_path, digest)), 1)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "unanchored_evidence"
+
+
+@pytest.mark.parametrize("kind", ["sha1", "", 3, None])
+def test_unknown_hash_kind_is_unanchored(tmp_path, kind):
+    envelope_path, digest = _anchored_generic(tmp_path, 1)
+    _with_regeneration(
+        envelope_path,
+        {"generator": _GENERATOR, "regenerated_hash": digest, "hash_kind": kind},
+    )
+
+    item = _item(build_tier_report(_anchored_manifest(1, envelope_path, digest)), 1)
+
+    assert item["reason"] == "unanchored_evidence"
+
+
+def test_explicit_bytes_hash_kind_matches_default(tmp_path):
+    envelope_path, digest = _anchored_generic(tmp_path, 1)
+    _with_regeneration(
+        envelope_path,
+        {"generator": _GENERATOR, "regenerated_hash": digest, "hash_kind": "bytes"},
+    )
+
+    item = _item(build_tier_report(_anchored_manifest(1, envelope_path, digest)), 1)
+
+    assert item["status"] == "met"
