@@ -14,6 +14,13 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt signoff` item 5 derives spec-row coverage from the cited envelope**
+  (issue #3778): `klt sim` measurements accept an optional `spec_row` string
+  (echoed on the rollup entry only when declared). A citation with `rows`
+  whose envelope carries `spec_row` tags covers only the rows a passing,
+  limited, tagged measurement grades; untagged envelopes keep the
+  manifest-asserted rows. `row_coverage.row_sources` marks each row
+  `derived` or `asserted`. Additive; no `schema_version` bump.
 - **`klt synthesize --restructure` now finds upsizes on libraries that quote
   cell names** (issue #3709): `restructure`'s and `synthesize`'s private
   regex Liberty readers are replaced by `liberty_compare.parse_liberty_text`.

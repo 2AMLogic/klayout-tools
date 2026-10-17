@@ -16338,6 +16338,112 @@ def test_item5_failing_citation_rows_are_listed_as_failed_rows(tmp_path):
     assert item["detail"]["uncovered_rows"] == []
 
 
+# --- Issue #3778: spec rows derived from `spec_row`-tagged measurements -----
+
+
+def _tagged_sim(measurements: list[dict]) -> dict:
+    return {**SIM_PASS_ENVELOPE, "measurements": measurements}
+
+
+def _meas(name, spec_row=None, *, limits=None, status="pass") -> dict:
+    entry = {"name": name, "status": status, "limits": limits}
+    if spec_row is not None:
+        entry["spec_row"] = spec_row
+    return entry
+
+
+_LIM = {"min": 1.0}
+
+
+def test_item5_tagged_envelope_derives_row_coverage(tmp_path):
+    a = _write(
+        tmp_path,
+        "a.json",
+        _tagged_sim([_meas("t", "tdec", limits=_LIM), _meas("z", "zin", limits=_LIM)]),
+    )
+
+    item = _item5(
+        {"5": [{"file": a, "rows": ["tdec", "zin"]}]}, [{"id": "tdec"}, {"id": "zin"}]
+    )
+
+    assert item["status"] == "met"
+    assert item["row_coverage"]["row_sources"] == {"tdec": "derived", "zin": "derived"}
+
+
+def test_item5_tagged_envelope_without_the_named_row_is_partial_coverage(tmp_path):
+    a = _write(tmp_path, "a.json", _tagged_sim([_meas("t", "tdec", limits=_LIM)]))
+
+    item = _item5(
+        {"5": [{"file": a, "rows": ["tdec", "zin"]}]}, [{"id": "tdec"}, {"id": "zin"}]
+    )
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "partial_coverage"
+    assert item["detail"]["uncovered_rows"] == ["zin"]
+
+
+def test_item5_tag_without_limits_never_covers(tmp_path):
+    a = _write(tmp_path, "a.json", _tagged_sim([_meas("t", "tdec")]))
+
+    item = _item5({"5": [{"file": a, "rows": ["tdec"]}]}, [{"id": "tdec"}])
+
+    assert item["reason"] == "partial_coverage"
+    assert item["detail"]["uncovered_rows"] == ["tdec"]
+
+
+def test_item5_failing_tagged_measurement_does_not_cover(tmp_path):
+    a = _write(
+        tmp_path,
+        "a.json",
+        _tagged_sim(
+            [
+                _meas("t", "tdec", limits=_LIM, status="fail"),
+                _meas("o", "x", limits=_LIM),
+            ]
+        ),
+    )
+
+    item = _item5({"5": [{"file": a, "rows": ["tdec"]}]}, [{"id": "tdec"}])
+
+    assert item["status"] == "unmet"
+    assert item["detail"]["uncovered_rows"] == ["tdec"]
+
+
+def test_item5_tag_for_a_row_the_citation_does_not_name_is_ignored(tmp_path):
+    a = _write(
+        tmp_path,
+        "a.json",
+        _tagged_sim([_meas("t", "tdec", limits=_LIM), _meas("z", "zin", limits=_LIM)]),
+    )
+
+    item = _item5({"5": [{"file": a, "rows": ["tdec"]}]}, [{"id": "tdec"}])
+
+    assert item["status"] == "met"
+    assert item["row_coverage"]["row_sources"] == {"tdec": "derived"}
+
+
+def test_item5_untagged_envelope_keeps_asserted_rows(tmp_path):
+    a = _write(tmp_path, "a.json", _tagged_sim([_meas("t", limits=_LIM)]))
+
+    item = _item5({"5": [{"file": a, "rows": ["tdec"]}]}, [{"id": "tdec"}])
+
+    assert item["status"] == "met"
+    assert item["row_coverage"]["row_sources"] == {"tdec": "asserted"}
+
+
+def test_item5_row_covered_by_a_second_citation_is_still_covered(tmp_path):
+    a = _write(tmp_path, "a.json", _tagged_sim([_meas("t", "tdec", limits=_LIM)]))
+    b = _write(tmp_path, "b.json", _tagged_sim([_meas("z", "zin", limits=_LIM)]))
+
+    item = _item5(
+        {"5": [{"file": a, "rows": ["tdec", "zin"]}, {"file": b, "rows": ["zin"]}]},
+        [{"id": "tdec"}, {"id": "zin"}],
+    )
+
+    assert item["status"] == "met"
+    assert item["row_coverage"]["row_sources"] == {"tdec": "derived", "zin": "derived"}
+
+
 @pytest.mark.parametrize(
     "entry, rows",
     [

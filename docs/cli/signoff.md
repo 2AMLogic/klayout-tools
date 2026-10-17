@@ -2622,6 +2622,19 @@ new. Outcomes:
   or a citation naming an undeclared or `gap` row -> `unmet` /
   `invalid_evidence` for item 5 only.
 
+**Derived coverage (issue #3778).** A `klt sim` measurement may declare the
+spec row it grades (`measurements[].spec_row`, echoed on the report's
+`measurements[]`; see `docs/cli/sim.md`). When a citation carries `rows` **and**
+its envelope has at least one `spec_row`-tagged measurement, a named row counts
+as covered only if the envelope has a *passing* measurement tagged with it that
+declares `limits`; a named row with no such measurement is uncovered
+(`partial_coverage`, listed in `detail.uncovered_rows`). A tag for a row the
+citation does not name is ignored. A citation whose envelope has no tags keeps
+the manifest-asserted `rows`, so existing manifests grade identically.
+`row_coverage.row_sources` maps each covered row to `"derived"` (checked
+against the envelope) or `"asserted"` (the manifest's word only). The change is
+additive: `schema_version` is not bumped.
+
 Every list-form item also carries `citations_graded` (per-citation status).
 Without `spec_rows`, several passing citations grade `met` as the union of
 their verdicts. A single string/dict entry with no `spec_rows` renders

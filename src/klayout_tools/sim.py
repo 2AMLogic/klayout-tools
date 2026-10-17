@@ -2766,6 +2766,10 @@ def _prepare_sim_request(
             _validate_k_sigma(
                 spec["k_sigma"], f"request.measurements[{spec['name']!r}].k_sigma"
             )
+        if spec.get("spec_row") is not None:
+            _validate_spec_row(
+                spec["spec_row"], f"request.measurements[{spec['name']!r}].spec_row"
+            )
 
     options = request.get("options") or {}
     # Issue #2493: validates and resolves both plausibility declarations into
@@ -6189,6 +6193,16 @@ def _validate_k_sigma(value: Any, field: str) -> float:
     if value < 0:
         raise SimError(f"{field} must be a non-negative number (got {value!r})")
     return float(value)
+
+
+def _validate_spec_row(value: Any, field: str) -> str:
+    """Validate ``request.measurements[].spec_row`` (issue #3778): the id of
+    the spec row this measurement grades, a non-empty string. Echoed onto the
+    report's per-measurement rollup so `klt signoff` can derive which spec
+    rows a citation covers instead of trusting the manifest."""
+    if not isinstance(value, str) or not value.strip():
+        raise SimError(f"{field} must be a non-empty string (got {value!r})")
+    return value
 
 
 def _validate_plausible_range(value: Any, field: str) -> dict[str, float]:
@@ -12276,6 +12290,11 @@ def _rollup_measurements(
             # diagnostic, without re-deriving the default-vs-override
             # resolution itself.
             entry["plausible_range"] = plausible_range
+        if spec.get("spec_row") is not None:
+            # Additive/optional (issue #3778): the spec row this measurement
+            # grades, echoed only when declared so `klt signoff` can derive
+            # row coverage from the envelope.
+            entry["spec_row"] = spec["spec_row"]
 
         if monte_carlo is not None:
             mc_stats = _monte_carlo_rollup(
