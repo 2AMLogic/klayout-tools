@@ -190,6 +190,7 @@
         "klayout_tools.gen_cap_vpp",
         "klayout_tools.gen_describe",
         "klayout_tools.gen_layer_params",
+        "klayout_tools.gen_layer_tables",
         "klayout_tools.gen_pcells",
         "klayout_tools.gen_pcells.bjt_array",
         "klayout_tools.gen_pcells.bond_pad",
