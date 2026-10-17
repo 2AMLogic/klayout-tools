@@ -2093,6 +2093,70 @@ Both directions are graded, so the one spec can be the report of record:
 the tie can no longer be silently cut (that is a finding), and a correct
 layout is no longer permanently red (that is a pass).
 
+## Recipe: supply-rail continuity and well ties across abutting cells
+
+There is no dedicated rail-check verb: a row or ring of abutting cells is
+checked by composing `nets[]` (`kind: "supply"`) and `ties[]`. Tested by
+`tests/test_erc.py::test_rail_recipe_*` on a three-cell abutted row (each
+cell draws a `li1` rail segment labelled with its rail name, plus an `nwell`
+with a tap strapped to the rail).
+
+```json
+{
+  "stackup": [
+    { "name": "poly", "layer": "1/0", "role": "gate" },
+    { "name": "li1", "layer": "3/0", "label_layer": "3/5" }
+  ],
+  "nets": [{ "name": "VDD", "kind": "supply" }],
+  "ties": [
+    {
+      "name": "nwell_tie",
+      "well_layer": "10/0",
+      "tap_layer": "11/0",
+      "tap_is_dedicated": true,
+      "connect_to": "li1",
+      "net": "VDD"
+    }
+  ]
+}
+```
+
+```
+klt erc row.gds spec.json --top TOP --format json
+```
+
+Add one `nets[]` entry per rail (`VSS`, ...). `tap_is_dedicated` is
+required whenever `tap_layer` is the only thing marking a tap; without it the
+tie is *skipped* (`degenerate_tap_declaration`) and `erc_status` reads
+`clean_partial` — see "Well/tap connectivity" above.
+
+| Case | `erc_status` | Findings |
+| ---- | ------------ | -------- |
+| (a) clean row | `clean` | none; `nets[].matched_islands == 1` |
+| (b) rail cut at an abutment | `violations` | `erc.unconnected_net` on `VDD`, "2 disconnected electrical islands"; `islands[].bbox` straddle the break |
+| (c) a cell's rail labelled `VSS` but drawn continuous with `VDD` | `violations` | `erc.supply_short` (`net`/`other_net` = the two names), when both are declared `kind: "supply"` |
+| (d) a well with no tap | `violations` | `erc.missing_tie`, "no 'nwell_tie' tap contact drawn" (a tap not reaching `VDD` reports "not connected to declared net") |
+
+Gate on `erc_status`, not the exit code: the CLI exits `3` on any of (b)–(d)
+but `4` on a clean run without `--pdk` (the antenna half is `not_checked`; see
+"Exit codes").
+
+**What this does not see** — do not read a clean row as proof of continuity:
+
+- **Unlabelled cells.** Only *labelled* islands are counted
+  ("`erc.unconnected_net` counts labelled islands, not conductor islands"). A
+  cut that orphans a segment carrying no label reads clean on the rail check
+  (its tap, if any, still trips `erc.missing_tie`). Label the rail in every
+  cell, or declare `nets[].roles: ["li1"]` so the unlabelled remainder fails as
+  `erc.unlabelled_conductor`.
+- **Rails strapped through well body.** Continuity that exists only through
+  diffusion/well is not modelled and shows as a false multi-island finding
+  ("Known false-positive: diffusion/well continuity is not modeled"); declare
+  `nets[].islands` or cross-check with `klt lvs`.
+- **A rail broken on a layer the spec does not declare**, or bridged only by a
+  via missing from `vias[]`.
+- **Spacing** of taps from devices — see [`klt tap-distance`](tap-distance.md).
+
 ## Antenna-ratio verdict (Phase 1b, issue #860)
 
 For every non-gate `stackup` level (`stackup[1:]` — the gate role itself,
