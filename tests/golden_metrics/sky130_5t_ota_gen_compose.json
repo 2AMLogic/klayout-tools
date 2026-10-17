@@ -7,6 +7,7 @@
     "drc.coverage.inapplicable_count": 129,
     "drc.coverage.layers_checked_count": 5,
     "drc.coverage.layers_in_stream_without_rules_count": 2,
+    "drc.coverage.marker_blind_layers_in_stream_count": 0,
     "drc.coverage.nothing_checked_reasons_count": 0,
     "drc.coverage.rules_checked_count": 21,
     "drc.coverage.rules_skipped_count": 129,
