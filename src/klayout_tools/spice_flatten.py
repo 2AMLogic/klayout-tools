@@ -73,6 +73,8 @@ import re
 from collections.abc import Collection
 from dataclasses import dataclass, field
 
+from ._paths import _fold_spice_continuations
+
 __all__ = ["FlattenResult", "SpiceFlattenError", "flatten_spice"]
 
 
@@ -152,14 +154,7 @@ def _logical_lines(text: str) -> list[str]:
             lines.append("")
             continue
         lines.append(_INLINE_COMMENT.split(raw, maxsplit=1)[0].rstrip())
-    folded: list[str] = []
-    for line in lines:
-        stripped = line.lstrip()
-        if stripped.startswith("+") and folded:
-            folded[-1] = f"{folded[-1]} {stripped[1:].strip()}"
-        elif stripped:
-            folded.append(line)
-    return folded
+    return _fold_spice_continuations([line for line in lines if line.strip()])
 
 
 def _lex(line: str) -> list[str]:
