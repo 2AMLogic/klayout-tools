@@ -1364,9 +1364,10 @@ def run_drc_klayout_engine(
     try:
         report_path = os.path.join(work_dir, "report.lyrdb")
         input_path = path
-        if top is not None and len(list(layout.top_cells())) > 1:
-            # Only the named cell's subtree reaches the deck; the caller's
-            # file is untouched.
+        if top is not None and [c.name for c in layout.top_cells()] != [top]:
+            # `top` names a cell other than the stream's sole top cell (one of
+            # several tops, or a child of a single top): only its subtree
+            # reaches the deck; the caller's file is untouched.
             input_path = os.path.join(work_dir, "input-top.gds")
             top_cells[0].write(input_path)
         cmd = [

@@ -974,6 +974,37 @@ def test_klayout_engine_top_prunes_stream_for_deck(tmp_path, monkeypatch):
     assert Path(gds).read_bytes() == before
 
 
+def test_klayout_engine_top_child_of_single_top_prunes_stream(tmp_path, monkeypatch):
+    cmds: list = []
+    seen: dict = {}
+
+    def fake_run(cmd, capture_output, text, timeout):
+        cmds.append(cmd)
+        pruned = kdb.Layout()
+        pruned.read(_input_arg(cmd))
+        seen["tops"] = [c.name for c in pruned.top_cells()]
+        report = next(a for a in cmd if a.startswith("report=")).split("=", 1)[1]
+        with open(report, "w", encoding="utf-8") as handle:
+            handle.write(_EMPTY_RDB)
+        return fake_completed()
+
+    monkeypatch.setattr(engine_module.subprocess, "run", fake_run)
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    sub = layout.create_cell("SUB")
+    top.insert(kdb.CellInstArray(sub.cell_index(), kdb.Trans()))
+    sub.shapes(layout.layer(1, 0)).insert(kdb.Box(0, 0, 100, 1000))
+    gds = str(tmp_path / "single.gds")
+    layout.write(gds)
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    run_drc_klayout_engine(gds, deck_file, top="SUB")
+
+    assert _input_arg(cmds[0]) != gds
+    assert seen["tops"] == ["SUB"]
+
+
 def test_klayout_engine_unknown_top_raises(tmp_path, monkeypatch):
     _stub_klayout_drc_subprocess(monkeypatch)
     gds = _write_multi_top_gds(tmp_path / "multi.gds")
