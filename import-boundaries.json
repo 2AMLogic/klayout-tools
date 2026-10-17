@@ -263,6 +263,7 @@
         "klayout_tools.lvs",
         "klayout_tools.lvs_combine",
         "klayout_tools.lvs_finfet",
+        "klayout_tools.lvs_gate_level",
         "klayout_tools.lvs_mismatch",
         "klayout_tools.lvs_netgen",
         "klayout_tools.lvs_power",

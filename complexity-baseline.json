@@ -514,7 +514,7 @@
       "complexity": 13
     },
     {
-      "file": "src/klayout_tools/lvs.py",
+      "file": "src/klayout_tools/lvs_gate_level.py",
       "function": "_apply_gate_level_port_aliases",
       "complexity": 12
     },
