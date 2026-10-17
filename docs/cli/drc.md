@@ -28,8 +28,9 @@ klt drc --check <report.json> [--rerun] [--format text|json]
   check every top cell (today's default, unchanged). `coverage` (see below)
   is scoped along with it — `layers_in_stream_without_rules`/`layers_checked`
   reflect only `<cell>`'s own hierarchy, not the whole stream. A named cell
-  absent from the stream exits `1` with a clean error. **Not supported yet
-  for `--engine klayout`** (see "Engine" → "klayout" below).
+  absent from the stream exits `1` with a clean error. With `--engine
+  klayout`, a multi-top stream **requires** `--top` (see "Engine" →
+  "klayout" below).
 - `--engine` — `curated` (default) or `klayout` (issue #565, opt-in). See
   "Engine" below.
 - `--deck-file` — explicit path to a KLayout DRC-DSL script (`.lydrc`/`.drc`)
@@ -611,11 +612,13 @@ real open_pdks install never pays for the extra probe.
 
 **Known limitations, relative to the curated engine:**
 
-- **No `--top` support yet.** An arbitrary PDK-native DRC-DSL script has no
-  standard `-rd`-settable "restrict to this one top cell" variable this
-  engine can rely on generically — `sky130A.lydrc`, e.g., always reads the
-  whole `$input` stream. Passing `--top` alongside `--engine klayout` is a
-  clean error rather than a silently-ignored request.
+- **`--top` selects a single top cell.** A PDK-native DRC-DSL script reads
+  the whole `$input` stream as one single-top layout, so with `--top <cell>`
+  klt runs the deck against a temporary stream holding only `<cell>` and its
+  subtree (your input file is untouched). A stream with more than one top
+  cell and no `--top` exits `1` before KLayout is launched, with
+  `error.code` `multiple_top_cells` and a message listing the top cells.
+  Single-top streams are passed to the deck as-is.
 - **External rule execution is unknown without instrumentation.** A deck
   gated by `--deck-var` can produce an empty RDB, but neither an empty report
   nor nonempty category declarations proves which checks executed. DRC v2
