@@ -6052,7 +6052,7 @@ def test_run_pex_extract_only_reports_extraction_without_measuring(
     }
     assert report["status"] == "not_checked"
     assert report["coverage"]["nothing_checked_reasons"] == ["no_delta_rows"]
-    assert report["reference_netlist"]["path"] is None
+    assert report["reference_netlist"] == {"path": None, "scope": "absent"}
     assert report["reference_netlist_sha256"] is None
     assert report["pin_count_mismatch"] is None
     assert report["flat_dut_mismatch"] is None
