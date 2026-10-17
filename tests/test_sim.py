@@ -3107,6 +3107,38 @@ def test_rollup_measurements_worst_case_is_most_negative_margin():
     assert entry["worst_case"]["value"] == 1.25
 
 
+def test_rollup_measurements_echoes_spec_row_only_when_declared():
+    corners = [
+        {
+            "corner_id": "a",
+            "measurements": [
+                {"name": "vref", "value": 1.2, "margin": 0.01, "status": "pass"},
+                {"name": "iq", "value": 1.0, "margin": 0.5, "status": "pass"},
+            ],
+        }
+    ]
+    tagged, untagged = sim._rollup_measurements(
+        [
+            {"name": "vref", "limits": {"max": 1.21}, "spec_row": "vref_acc"},
+            {"name": "iq", "limits": {"max": 2.0}},
+        ],
+        corners,
+    )
+
+    assert tagged["spec_row"] == "vref_acc"
+    assert "spec_row" not in untagged
+
+
+@pytest.mark.parametrize("bad", ["", "  ", 3, ["x"]])
+def test_validate_spec_row_rejects_non_string_or_empty(bad):
+    with pytest.raises(sim.SimError, match="spec_row"):
+        sim._validate_spec_row(bad, "request.measurements['m'].spec_row")
+
+
+def test_validate_spec_row_accepts_a_row_id():
+    assert sim._validate_spec_row("vref_acc", "field") == "vref_acc"
+
+
 def test_rollup_measurements_error_outranks_fail():
     corners = [
         {
