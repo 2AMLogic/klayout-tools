@@ -1095,6 +1095,11 @@
       "reason": "klt sta reports its def/verilog/spef inputs as {path, scope} envelopes via repo_relative_path/render_path_field, like sim/pex (issue #2879)."
     },
     {
+      "consumer": "place_and_route",
+      "exporter": "env_provenance",
+      "reason": "klt place-and-route reports its pinned input netlist as a {path, scope} envelope via find_repo_root/repo_relative_path, like sta/sim/pex (issue #3751)."
+    },
+    {
       "consumer": "diff",
       "exporter": "cli-infra",
       "reason": "klt diff emits through the shared cli output envelope (issue #3093)."
