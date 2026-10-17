@@ -1384,9 +1384,13 @@ stdout/stderr — its own log lines and the job command's — into one
 `outputs/**` and `status.json` are). The generated `job.json` therefore
 redirects stdout with `> "$EDA_OUTPUT_DIR/report.json"`. Because klt writes its
 `--format json` *error* envelope to stderr, the command also tees stderr into
-`$EDA_OUTPUT_DIR/stderr.log` (`2> >(tee ... >&2)`, which still forwards it to
-`harness.log`) and ends with `; rc=$?; wait $! 2>/dev/null; exit $rc` so the
-tee drains before upload and the job keeps klt's own exit code.
+`$EDA_OUTPUT_DIR/stderr.log` (`exec 2> >(tee ... >&2)` as the command's first
+statement, so the runner preflight is covered too; it still forwards stderr to
+`harness.log`). An `EXIT` trap drains the tee before upload, keeps the job's
+exit code, and — only when the command exited non-zero with an empty
+`report.json` and no klt envelope in `stderr.log` — writes a
+`batch_job_command_failed` error envelope into `report.json` carrying the exit
+code and a bounded, sanitized tail of `stderr.log` ([#3818](https://github.com/2AMLogic/klayout-tools/issues/3818)).
 `--outdir "$EDA_OUTPUT_DIR/artifacts"`
 is added when `options.keep_artifacts` is set so per-corner logs/rawfiles
 land inside the one tree the harness collects. The generated document's
@@ -1492,6 +1496,7 @@ but no tagged release contains it yet.
 | `corners.process[].sections[]` (object form) | 0.7.0 |
 | `options.ngspice_init` | 0.7.0 |
 | `options.osdi_preload` | 0.7.0 |
+| `options.stage_model_inputs` | 0.7.0 |
 | `analysis_steps[].measurements[]` (noise analysis `.meas` cards) | unreleased |
 
 Safe on an old runner: a plain `measurements[]` `{name, spice}` `.meas` card
@@ -1603,8 +1608,9 @@ release segment:
 | `corners.process[].sections[]` | a `corners.process[]` bundle has an object-form `sections[]` entry | `0.7.0` |
 | `options.ngspice_init` | `options.ngspice_init` is set and non-empty | `0.7.0` |
 | `options.osdi_preload` | `options.osdi_preload` is set and non-empty | `0.7.0` |
+| `options.stage_model_inputs` | `options.stage_model_inputs` is set | `0.7.0` |
 
-The last four rows are the released entries of
+The last five rows are the released entries of
 `REQUEST_FEATURE_MIN_RUNNER_VERSION` ([#2877](https://github.com/2AMLogic/klayout-tools/issues/2877)),
 the same table the checks below read ([#2901](https://github.com/2AMLogic/klayout-tools/issues/2901)).
 An entry whose minimum is `unreleased` has no detector and never counts as
@@ -1857,8 +1863,10 @@ infers that a unit completed from status timing. To avoid this, size the job
 before submitting it; see "Three budgets, and the fleet's whole-job ceiling"
 above.
 
-**Note.** Only the envelope's structured `message`/`code` reach the JSON;
-raw `stderr.log` text never does. The stderr capture is part of the command
+**Note.** Only an envelope's structured `message`/`code` reach the JSON; raw
+`stderr.log` text never does, except the bounded, character-sanitized tail
+(1500 bytes) the job's own `batch_job_command_failed` envelope quotes when the
+job died without producing any envelope. The stderr capture is part of the command
 the *submitting* client generates, so it works whatever klt version the fleet
 image runs. When neither file yields an envelope, the reason is in
 `harness.log` (and `stderr.log`) under the job's S3 prefix.
