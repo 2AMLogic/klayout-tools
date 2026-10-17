@@ -120,6 +120,14 @@ def test_match_verdict_from_database(tmp_path, fake_klayout):
     assert "feol=true" in fake_klayout["cmd"]
 
 
+def test_match_reports_matched_nets_as_net_correspondence(tmp_path, fake_klayout):
+    report = run_lvs(_request(tmp_path, 1))
+    rows = report["net_correspondence"]
+    assert rows, "a matched compare must list the nets it paired (issue #2870)"
+    assert all({"layout", "reference", "pin"} <= set(r) for r in rows)
+    assert all(r["layout"] and r["reference"] for r in rows)
+
+
 def test_driver_exit_zero_on_mismatch_is_a_mismatch(tmp_path, fake_klayout):
     fake_klayout["returncode"] = 0
     report = run_lvs(_request(tmp_path, 2))

@@ -2151,7 +2151,7 @@
       "count": 1
     },
     {
-      "file": "src/klayout_tools/lvs.py",
+      "file": "src/klayout_tools/lvs_combine.py",
       "code": "assignment",
       "message": "Incompatible types in assignment (expression has type \"bool\", variable has type \"None\")",
       "count": 2
@@ -2175,13 +2175,13 @@
       "count": 1
     },
     {
-      "file": "src/klayout_tools/lvs.py",
+      "file": "src/klayout_tools/lvs_combine.py",
       "code": "misc",
       "message": "Property \"supports_parallel_combination\" defined in \"DeviceClass\" is read-only",
       "count": 1
     },
     {
-      "file": "src/klayout_tools/lvs.py",
+      "file": "src/klayout_tools/lvs_combine.py",
       "code": "misc",
       "message": "Property \"supports_serial_combination\" defined in \"DeviceClass\" is read-only",
       "count": 1

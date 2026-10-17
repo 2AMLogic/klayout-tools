@@ -52,6 +52,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import sim_crossings
+from .sim_errors import SimError
 
 #: Edge polarities that can align a cycle (``either`` would make "one cycle"
 #: ambiguous, so it is refused).
@@ -70,12 +71,6 @@ ERROR_CODES = (
 _ALLOWED_KEYS = frozenset({"signal", "align", "level", "edge", "from", "cycles"})
 
 _VECTOR_PREFIX = "__klt_cmean_"
-
-
-def _error(message: str) -> Exception:
-    from .sim import SimError
-
-    return SimError(message)
 
 
 def is_cycle_mean(spec: dict[str, Any]) -> bool:
@@ -100,14 +95,14 @@ def validate_cycle_mean_spec(name: Any, body: Any) -> None:
     """Validate one ``measurements[].cycle_mean`` object, raising
     :class:`~klayout_tools.sim.SimError` with a corrective message."""
     if not isinstance(body, dict):
-        raise _error(
+        raise SimError(
             f"measurement '{name}': 'cycle_mean' must be an object, e.g. "
             '{"signal": "v(out)", "align": "v(clk)", "level": 0.9, '
             '"cycles": 8}'
         )
     unknown = sorted(set(body) - _ALLOWED_KEYS)
     if unknown:
-        raise _error(
+        raise SimError(
             f"measurement '{name}': unknown cycle_mean key(s) {unknown}; "
             f"allowed: {sorted(_ALLOWED_KEYS)}"
         )
@@ -116,7 +111,7 @@ def validate_cycle_mean_spec(name: Any, body: Any) -> None:
     sim_crossings._validate_level(name, body.get("level"))
     edge = body.get("edge", "rise")
     if edge not in CYCLE_EDGES:
-        raise _error(
+        raise SimError(
             f"measurement '{name}': cycle_mean.edge must be one of "
             f"{list(CYCLE_EDGES)} (got {edge!r})"
         )
@@ -126,7 +121,7 @@ def validate_cycle_mean_spec(name: Any, body: Any) -> None:
         or isinstance(cycles, bool)
         or not 1 <= cycles <= MAX_CYCLES
     ):
-        raise _error(
+        raise SimError(
             f"measurement '{name}': cycle_mean.cycles is required and must be "
             f"an integer in [1, {MAX_CYCLES}] (got {cycles!r})"
         )
@@ -143,7 +138,7 @@ def validate_cycle_mean_context(
         return
     kind = str(analysis.get("kind", "")).lower()
     if kind != "tran":
-        raise _error(
+        raise SimError(
             f"measurement '{declared[0]['name']}' declares 'cycle_mean', "
             "which averages a transient signal over reference cycles and so "
             f'requires analysis.kind "tran" (got {analysis.get("kind")!r})'

@@ -62,6 +62,8 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from .sim_errors import SimError
+
 #: Keys an ``energy`` object may carry. Anything else is refused by name.
 _ALLOWED_KEYS = frozenset({"source", "voltage", "from", "to"})
 
@@ -76,12 +78,6 @@ _SOURCE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.$#]*$")
 #: requested edge lies inside the saved samples (float round-off in the
 #: simulator's own final timepoint).
 _EDGE_TOLERANCE = 1e-9
-
-
-def _error(message: str) -> Exception:
-    from .sim import SimError
-
-    return SimError(message)
 
 
 def is_energy(spec: dict[str, Any]) -> bool:
@@ -106,32 +102,32 @@ def validate_energy_spec(name: Any, body: Any) -> None:
     """Validate one ``measurements[].energy`` object, raising
     :class:`~klayout_tools.sim.SimError` with a corrective message."""
     if not isinstance(body, dict):
-        raise _error(
+        raise SimError(
             f"measurement '{name}': 'energy' must be an object, e.g. "
             '{"source": "vdd", "voltage": "v(a)"}'
         )
     unknown = sorted(set(body) - _ALLOWED_KEYS)
     if unknown:
-        raise _error(
+        raise SimError(
             f"measurement '{name}': unknown energy key(s) {unknown}; "
             f"allowed: {sorted(_ALLOWED_KEYS)}"
         )
     source = body.get("source")
     if not isinstance(source, str) or not _SOURCE_RE.match(source):
-        raise _error(
+        raise SimError(
             f"measurement '{name}': energy.source is required -- the name of "
             f'an independent voltage source in the deck, e.g. "vdd" (got '
             f"{source!r})"
         )
     voltage = body.get("voltage")
     if not isinstance(voltage, str) or not voltage.strip():
-        raise _error(
+        raise SimError(
             f"measurement '{name}': energy.voltage is required -- the "
             "source's positive-terminal voltage vector relative to ground, "
             'e.g. "v(a)"'
         )
     if "\n" in voltage or "\r" in voltage:
-        raise _error(
+        raise SimError(
             f"measurement '{name}': energy.voltage must be a single line (it "
             "is spliced into one `let` command of the generated .control "
             "block)"
@@ -139,7 +135,7 @@ def validate_energy_spec(name: Any, body: Any) -> None:
     start = _window_bound(name, body, "from")
     stop = _window_bound(name, body, "to")
     if start is not None and stop is not None and stop <= start:
-        raise _error(
+        raise SimError(
             f"measurement '{name}': energy.to ({stop!r} s) must be after "
             f"energy.from ({start!r} s)"
         )
@@ -159,7 +155,7 @@ def _window_bound(name: Any, body: dict[str, Any], key: str) -> float | None:
     elif isinstance(raw, str):
         seconds = _parse_spice_seconds(raw)
     if seconds is None or not math.isfinite(seconds):
-        raise _error(
+        raise SimError(
             f"measurement '{name}': energy.{key} must be a time in seconds "
             f'-- a number or a SPICE time literal such as "5n" (got {raw!r})'
         )
@@ -179,7 +175,7 @@ def validate_energy_context(
         return
     kind = str(analysis.get("kind", "")).lower()
     if kind != "tran":
-        raise _error(
+        raise SimError(
             f"measurement '{declared[0]['name']}' declares 'energy', which "
             "integrates power over a time window and so requires "
             f'analysis.kind "tran" (got {analysis.get("kind")!r})'
@@ -197,7 +193,7 @@ def validate_energy_context(
                 <= bound
                 <= tstop * (1 + _EDGE_TOLERANCE)
             ):
-                raise _error(
+                raise SimError(
                     f"measurement '{spec['name']}': energy.{key} ({bound!r} s)"
                     f" is outside the transient analysis window "
                     f"[{tstart!r}, {tstop!r}] s (analysis.args "
