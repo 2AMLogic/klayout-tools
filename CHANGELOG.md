@@ -14,6 +14,10 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`provenance.input.paths` set binding for `klt signoff`** (issue #3044,
+  documented in `docs/cli/signoff.md` "Binding a set of artifacts"): additive.
+  Not in `klt 0.7.0` — a `0.7.0` build grades a `paths`-only envelope
+  `unanchored_evidence`; it first ships in the first release after `v0.7.0`.
 - **`klt synthesize --restructure` now finds upsizes on libraries that quote
   cell names** (issue #3709): `restructure`'s and `synthesize`'s private
   regex Liberty readers are replaced by `liberty_compare.parse_liberty_text`.

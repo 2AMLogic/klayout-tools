@@ -1249,6 +1249,13 @@ resolved against the entry's `cwd`.
 
 #### Binding a set of artifacts: `provenance.input.paths`
 
+> **Availability.** `provenance.input.paths` is **not** in `klt 0.7.0`; it
+> first ships in the first release after `v0.7.0`. A build without it ignores
+> `paths`, falls through to the single-`provenance.input.path` rule, and
+> grades a `paths`-only envelope `unanchored_evidence`. That is that build's
+> expected behavior, not a malformed envelope — pin `klt` to a release (or dev
+> build) that has the binding before relying on it.
+
 Item 1's claim is about a *set* — the schematic sources and the netlist
 derived from them — and items 9/10 are about a set of testbench or hygiene
 files. Binding only the derived artifact leaves source edits undetected;
