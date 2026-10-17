@@ -131,9 +131,9 @@ def test_sg13cmos5l_deck_has_41_rules_after_nwell_space_rules():
     Activ (1/0): 37 rules, same 12 layers. Issue #3645 adds the four
     derived-region `"separation"` NWell-to-Activ rules (NW.d/d1/f/f1): 41.
     Issue #3682 adds the two DigiBnd `.dig.1` variants
-    (NW.c1.dig/NW.e1.dig): 43."""
+    (NW.c1.dig/NW.e1.dig): 43. Issue #3646 adds NW.d1.dig/NW.f1.dig: 45."""
     deck = get_deck("sg13cmos5l")
-    assert len(deck) == 43
+    assert len(deck) == 45
     assert {rule.check for rule in deck} == {
         "width",
         "space",
@@ -313,19 +313,15 @@ def test_run_drc_sg13cmos5l_nw_b1_corner_to_corner(tmp_path: Path):
     assert run_drc(bad, "sg13cmos5l")["rule_counts"].get("nwell.space.2", 0) >= 1
 
 
-def test_run_drc_sg13cmos5l_nwell_reports_remaining_unchecked(tmp_path: Path):
-    """NW.b1 (#3572) and NW.d/d1/f/f1 (#3645) are now checked; the NWell rules
-    still unmodelled after #3573 are named in `coverage.unchecked_rules` so
-    `clean` is not read as covering them."""
+def test_run_drc_sg13cmos5l_nwell_has_no_remaining_unchecked(tmp_path: Path):
+    """NW.b1 (#3572), NW.d/d1/f/f1 (#3645) and the DigiBnd variants (#3682,
+    #3646) are all checked: no NWell rule is left in `unchecked_rules`."""
     path = _nwell_layout(tmp_path, "nw_unchecked.gds", [(0, 0, 3, 3)])
     report = run_drc(path, "sg13cmos5l")
     assert report["status"] == "clean"
-    unchecked = report["coverage"]["unchecked_rules"]
-    assert {u["rule"] for u in unchecked} == {
-        "NW.d1.dig",
-        "NW.f1.dig",
-    }
-    assert {u["layer"] for u in unchecked} == {"31/0"}
+    assert not [
+        u for u in report["coverage"].get("unchecked_rules", []) if u["layer"] == "31/0"
+    ]
 
 
 def _nwell_activ_layout(
@@ -2503,3 +2499,50 @@ def test_digibnd_is_a_named_cmos5l_layer():
     from klayout_tools.decks import sg13cmos5l
 
     assert sg13cmos5l.LAYER_NAMES[(16, 0)] == "DigiBnd.drawing"
+
+
+_NW_SPACE_DIG_RULES = {
+    # implant layer -> (hv rule id, dig rule id, hv um, dig um)
+    (7, 0): ("nwell.space.nactiv.hv.1", "nwell.space.nactiv.dig.1", 0.62, 0.31),
+    (14, 0): ("nwell.space.pactiv.hv.1", "nwell.space.pactiv.dig.1", 0.62, 0.24),
+}
+
+
+@pytest.mark.parametrize("implant", list(_NW_SPACE_DIG_RULES))
+def test_run_drc_sg13cmos5l_nwell_space_digbnd_split(tmp_path: Path, implant):
+    """Issue #3646 (NW.d1.dig / NW.f1.dig): HV Activ inside DigiBnd is held to
+    the relaxed spacing by the `.dig.1` rule only (at threshold clean, 0.01 um
+    short flagged); outside DigiBnd the 0.62 um `.hv.1` rule applies to the
+    same geometry and `.dig.1` is silent. DigiBnd covering only part of the
+    Activ still selects the whole polygon as digital."""
+    hv_id, dig_id, hv_um, dig_um = _NW_SPACE_DIG_RULES[implant]
+
+    def run(gap: float, digbnd) -> dict:
+        left = 4 + gap
+        layout = kdb.Layout()
+        layout.dbu = _DBU_UM
+        top = layout.create_cell("TOP")
+        top.shapes(layout.layer(31, 0)).insert(_box_um(0, 0, 4, 4))
+        activ = _box_um(left, 0, left + 2, 2)
+        top.shapes(layout.layer(1, 0)).insert(activ)
+        top.shapes(layout.layer(*implant)).insert(activ)
+        top.shapes(layout.layer(44, 0)).insert(_box_um(left - 1, -1, left + 3, 3))
+        if digbnd is not None:
+            top.shapes(layout.layer(16, 0)).insert(_box_um(*digbnd))
+        path = _write_gds(layout, tmp_path / f"sdig_{dig_id}_{gap}_{digbnd}.gds")
+        return run_drc(path, "sg13cmos5l")["rule_counts"]
+
+    def fired(counts):
+        return {
+            k
+            for k in counts
+            if k.startswith("nwell.space.")
+            and k != "nwell.space.1"
+            and k != "nwell.space.2"
+        }
+
+    for digbnd in ((3, -2, 12, 4), (5, 0, 5.5, 0.5)):
+        assert fired(run(round(dig_um - 0.01, 3), digbnd)) == {dig_id}
+        assert fired(run(dig_um, digbnd)) == set()
+    assert fired(run(dig_um, None)) == {hv_id}
+    assert fired(run(hv_um, None)) == set()
