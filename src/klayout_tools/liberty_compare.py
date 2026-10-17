@@ -132,10 +132,21 @@ def parse_liberty(path: str) -> Group:
             text = handle.read()
     except OSError as exc:
         raise LibertyCompareError(f"could not read '{path}': {exc}") from exc
+    return parse_liberty_text(text, source=path)
+
+
+def parse_liberty_text(text: str, source: str = "<liberty text>") -> Group:
+    """Parse already-read Liberty ``text`` into its top-level ``library``
+    :class:`Group`; ``source`` only names the text in error messages.
+
+    The text entry point for callers that hold the file contents rather than
+    a path (:func:`parse_liberty` itself reads the file, then calls this).
+    Raises :class:`LibertyCompareError` for text with no ``library()`` group
+    or an unclosed group -- never returns a partial tree.
+    """
     text = _COMMENT_RE.sub(" ", text).replace("\\\r\n", " ").replace("\\\n", " ")
     tokens = _TOKEN_RE.findall(text)
-    parser = _Parser(tokens, path)
-    return parser.library()
+    return _Parser(tokens, source).library()
 
 
 class _Parser:

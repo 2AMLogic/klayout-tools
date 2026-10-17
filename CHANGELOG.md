@@ -14,6 +14,17 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt synthesize --restructure` now finds upsizes on libraries that quote
+  cell names** (issue #3709): `restructure`'s and `synthesize`'s private
+  regex Liberty readers are replaced by `liberty_compare.parse_liberty_text`.
+  The old `restructure` reader matched no cells on a real volare
+  `sky130_fd_sc_hd` liberty (`cell ("...") {`), so it never proposed a
+  pin-compatible upsize there; `leakage_power_nw` and the `dont_use` cell list
+  are unchanged on that library. A liberty with no `library()` group or an
+  unclosed group is now a `RestructureError` in the restructure loop rather
+  than an empty cell list. Parsing is slower: ~0.17 s -> ~1.8 s and ~62 MiB
+  peak per read of a 12.8 MB `sky130_fd_sc_hd__tt_025C_1v80.lib`.
+
 - **sky130 deck checks the implant and npc masks `klt gen` now draws**
   (issue #2934, phase C): `--deck sky130` gains `npc.width.1`/`npc.space.1`
   (`npc.1`/`npc.2`, 0.27 µm) and `nsdm`/`psdm` `width.1`/`space.1`

@@ -168,9 +168,65 @@ def test_parse_liberty_pins_handles_multiple_cells_independently():
     }
 
 
-def test_parse_liberty_pins_unbalanced_braces_raises():
-    with pytest.raises(RestructureError, match="unbalanced"):
-        _parse_liberty_pins("cell (broken) { pin(A) { direction : input; }")
+def test_parse_liberty_pins_handles_quoted_cell_and_pin_names():
+    """A real volare sky130 liberty quotes cell and pin names
+    (`cell ("sky130_fd_sc_hd__buf_1") {`); the old regex scan matched no cells
+    at all on such a library, so no upsize was ever found."""
+    text = (
+        'library ("lib") {\n'
+        '  cell ("sky130_fd_sc_hd__buf_1") {\n'
+        '    pg_pin ("VPWR") { pg_type : "primary_power"; }\n'
+        '    pin ("A") { direction : "input"; }\n'
+        '    pin ("X") { direction : "output"; function : "A"; }\n'
+        "  }\n"
+        '  cell ("sky130_fd_sc_hd__buf_2") {\n'
+        '    pin ("A") { direction : "input"; }\n'
+        '    pin ("X") { direction : "output"; }\n'
+        "  }\n"
+        "}\n"
+    )
+    pins_by_cell = _parse_liberty_pins(text)
+    assert pins_by_cell["sky130_fd_sc_hd__buf_1"] == {"A": "input", "X": "output"}
+    assert _upsize_candidates("sky130_fd_sc_hd__buf_1", pins_by_cell) == [
+        "sky130_fd_sc_hd__buf_2"
+    ]
+
+
+def test_parse_liberty_pins_ignores_comments_and_non_io_directions():
+    text = (
+        "library(l) {\n"
+        "  /* cell (ghost) { pin(A) { direction : input; } } */\n"
+        "  cell (c_1) {\n"
+        "    pin(A) { direction : input; }\n"
+        "    pin(IO) { direction : inout; }\n"
+        "    pin(N) { }\n"
+        "  }\n"
+        "}\n"
+    )
+    assert _parse_liberty_pins(text) == {"c_1": {"A": "input"}}
+
+
+def test_parse_liberty_pins_duplicate_cell_last_wins():
+    text = (
+        "library(l) {\n"
+        "  cell (c_1) { pin(A) { direction : input; } }\n"
+        "  cell (c_1) { pin(B) { direction : output; } }\n"
+        "}\n"
+    )
+    assert _parse_liberty_pins(text) == {"c_1": {"B": "output"}}
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        "library (broken) { cell (c) { pin(A) { direction : input; }",
+        "cell (broken) { pin(A) { direction : input; } }",  # no library()
+        "",
+    ],
+)
+def test_parse_liberty_pins_malformed_raises(malformed):
+    with pytest.raises(RestructureError, match="could not parse liberty"):
+        _parse_liberty_pins(malformed)
 
 
 # ---------------------------------------------------------------------------

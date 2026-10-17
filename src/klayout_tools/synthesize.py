@@ -230,6 +230,7 @@ from ._report_verify import (
 )
 from ._verilog_params import chparam_lines, validate_parameters
 from .equiv import EquivError, run_equiv
+from .liberty_compare import LibertyCompareError, parse_liberty_text
 from .pdk_cells import resolve_liberty_for_cell_library
 from .restructure import RestructureError, restructure_for_timing
 from .sta import StaError, compute_critical_path
@@ -688,24 +689,8 @@ _WARNING_CATEGORY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 #: requirement).
 _MAX_WARNING_REPRESENTATIVES = 10
 
-#: Matches a liberty ``cell (name) {`` header -- used by
-#: :func:`_parse_liberty_leakage_nw` to isolate each cell's own body without
-#: a full brace-matching parse. ``cell_leakage_power`` is always a direct,
-#: top-level attribute of its enclosing ``cell (...) { ... }`` block, never
-#: nested inside a ``pin``/``timing`` sub-block (the Liberty grammar does not
-#: permit it there), so the text between one cell header and the next is
-#: exactly that cell's own body -- :func:`_match_brace`'s full parse (as
-#: ``restructure.py``'s pin-compatibility check needs, since a pin *is*
-#: nested) is not required here. The cell name's own quotes are optional --
-#: a real volare `sky130_fd_sc_hd` liberty quotes it (``cell
-#: ("sky130_fd_sc_hd__buf_1") {``); a synthetic/other-vendor liberty may not
-#: (verified live against both, issue #1626).
-_LIBERTY_CELL_HEADER_RE = re.compile(
-    r'\bcell\s*\(\s*"?(?P<name>[A-Za-z0-9_]+)"?\s*\)\s*\{'
-)
-
-#: The scalar ``cell_leakage_power : <value>;`` attribute Liberty defines for
-#: a cell's state-independent leakage figure -- what issue #1626 asks this
+#: ``cell_leakage_power`` is the scalar attribute Liberty defines for a
+#: cell's state-independent leakage figure -- what issue #1626 asks this
 #: module to sum. Not every cell library populates it: some (verified live,
 #: ``gf180mcu_fd_sc_mcu9t5v0``) report leakage only via per-input-state
 #: ``leakage_power () { when : "..."; value : "..."; }`` groups instead, with
@@ -713,19 +698,16 @@ _LIBERTY_CELL_HEADER_RE = re.compile(
 #: this command has no vector data to supply -- exactly the same "no
 #: activity factor available" gap the issue explicitly carves switching
 #: power out for. :func:`_parse_liberty_leakage_nw` therefore reads *only*
-#: this scalar field and leaves a cell with no such entry absent from its
+#: this scalar attribute and leaves a cell with no such entry absent from its
 #: result, rather than guessing from the conditional groups.
-_CELL_LEAKAGE_POWER_RE = re.compile(
-    r"\bcell_leakage_power\s*:\s*(?P<value>[-+0-9.eE]+)\s*;"
-)
 
-#: ``leakage_power_unit : "1nW";`` (sky130_fd_sc_hd) / ``leakage_power_unit :
-#: 1uW ;`` (gf180mcu_fd_sc_mcu9t5v0, unquoted, space before the semicolon) --
+#: The value of a library's ``leakage_power_unit`` attribute --
+#: ``"1nW"`` (sky130_fd_sc_hd) / ``1uW`` (gf180mcu_fd_sc_mcu9t5v0, unquoted) --
 #: the multiplier a bare ``cell_leakage_power`` number in this liberty is
 #: expressed in. Verified live against both installed liberty families
 #: (issue #1626).
 _LEAKAGE_POWER_UNIT_RE = re.compile(
-    r'\bleakage_power_unit\s*:\s*"?(?P<magnitude>[-+0-9.eE]+)\s*(?P<unit>[a-zA-Z]+)"?\s*;'
+    r"^(?P<magnitude>[-+0-9.eE]+)\s*(?P<unit>[a-zA-Z]+)$"
 )
 
 #: Multiplier from one ``leakage_power_unit`` unit to nanowatts.
@@ -2092,32 +2074,28 @@ def _liberty_cell_names(liberty_path: str) -> frozenset[str] | None:
     """Every ``cell (<name>) { ... }`` group name in the resolved liberty, or
     ``None`` when that set cannot be established (issue #2382).
 
-    Deliberately minimal, the same scope discipline
-    :func:`_parse_liberty_leakage_nw` states for itself -- it reuses that
-    function's own :data:`_LIBERTY_CELL_HEADER_RE` and extracts *only* the
-    names, never a pin/timing model. This is the cell list
-    :func:`_validate_dont_use_against_liberty` checks a request's exclusion
-    patterns against, so that a typo cannot silently change the mapped
-    netlist.
+    This is the cell list :func:`_validate_dont_use_against_liberty` checks a
+    request's exclusion patterns against, so that a typo cannot silently
+    change the mapped netlist. Read via
+    :func:`~klayout_tools.liberty_compare.parse_liberty_text`, so quoted and
+    unquoted names alike are seen.
 
     ``None`` -- meaning "not establishable", which the caller treats as "do
     not validate" rather than "zero cells, reject everything" -- when the file
-    cannot be read *or* when it contains no ``cell (...)`` group at all. The
-    second case is the important one: a liberty this regex cannot see any cell
-    in is a limitation of this deliberately-partial parser, not evidence that
-    the caller's pattern is a typo, and concluding otherwise would reject a
-    perfectly good request. Never raises, matching
+    cannot be read, cannot be parsed as liberty, *or* when it contains no
+    ``cell (...)`` group at all: a liberty we cannot see any cell in is not
+    evidence that the caller's pattern is a typo, and concluding otherwise
+    would reject a perfectly good request. Never raises, matching
     :func:`_abc_supports_dont_use`'s "never break a run over an optional
     probe" posture.
     """
     try:
         with open(liberty_path, encoding="utf-8") as handle:
             liberty_text = handle.read()
-    except (OSError, UnicodeDecodeError):
+        library = parse_liberty_text(liberty_text, source=liberty_path)
+    except (OSError, UnicodeDecodeError, LibertyCompareError):
         return None
-    names = frozenset(
-        match.group("name") for match in _LIBERTY_CELL_HEADER_RE.finditer(liberty_text)
-    )
+    names = frozenset(cell.args[0] for cell in library.children("cell") if cell.args)
     return names or None
 
 
@@ -2992,22 +2970,24 @@ def _read_sta_timing(
         )
 
 
-def _leakage_unit_scale_to_nw(liberty_text: str) -> float:
-    """The multiplier from this liberty's own ``leakage_power_unit`` to
-    nanowatts (see :data:`_LEAKAGE_POWER_UNIT_RE`). Defaults to ``1.0`` --
-    i.e. assumes the file's own ``cell_leakage_power`` numbers are already
-    nanowatts, Liberty's conventional default unit -- when the file declares
-    no ``leakage_power_unit`` at all, or names a unit :data:`_LEAKAGE_UNIT_TO_NW`
-    does not recognise. Never raises, matching
-    :func:`_abc_supports_dont_use`'s own "never break a run over an
-    optional/best-effort probe" posture.
+def _leakage_unit_scale_to_nw(unit_text: str | None) -> float:
+    """Multiplier turning a ``cell_leakage_power`` number expressed in the
+    library's ``leakage_power_unit`` (``unit_text``, the attribute's value --
+    see :data:`_LEAKAGE_POWER_UNIT_RE`) into nanowatts. Defaults to ``1.0``
+    -- liberty's own ``1nW`` default is not assumed to apply, but a library
+    declaring nothing is read as nanowatts -- when ``unit_text`` is absent or
+    names a unit :data:`_LEAKAGE_UNIT_TO_NW` does not recognise. Never
+    raises, matching :func:`_abc_supports_dont_use`'s own "never break a run
+    over an optional/best-effort probe" posture.
     """
-    match = _LEAKAGE_POWER_UNIT_RE.search(liberty_text)
+    if unit_text is None:
+        return 1.0
+    match = _LEAKAGE_POWER_UNIT_RE.match(unit_text.strip())
     if match is None:
         return 1.0
     try:
         magnitude = float(match.group("magnitude"))
-    except ValueError:  # pragma: no cover - regex only matches numbers
+    except ValueError:
         return 1.0
     per_unit_nw = _LEAKAGE_UNIT_TO_NW.get(match.group("unit").lower())
     if per_unit_nw is None:
@@ -3020,36 +3000,32 @@ def _parse_liberty_leakage_nw(liberty_text: str) -> dict[str, float]:
     scalar out of ``liberty_text``, converted to nanowatts via that
     liberty's own ``leakage_power_unit`` (:func:`_leakage_unit_scale_to_nw`).
 
-    Deliberately minimal, matching ``restructure.py``'s
-    :func:`~klayout_tools.restructure._parse_liberty_pins`'s own scope
-    discipline: this is not a general liberty parser, it extracts only the
-    one scalar :func:`_compute_leakage` needs. A cell with no
-    ``cell_leakage_power`` line (see :data:`_CELL_LEAKAGE_POWER_RE`'s
-    docstring -- some libraries, e.g. gf180mcu_fd_sc_mcu9t5v0, report
-    leakage only via per-input-state groups instead) is simply absent from
-    the result, never assigned a guessed value.
+    Extracts only the one scalar :func:`_compute_leakage` needs. A cell with
+    no ``cell_leakage_power`` attribute (see the note above
+    :data:`_LEAKAGE_POWER_UNIT_RE` -- some libraries, e.g.
+    gf180mcu_fd_sc_mcu9t5v0, report leakage only via per-input-state groups
+    instead) is simply absent from the result, never assigned a guessed
+    value. Text that is not parseable liberty yields ``{}`` -- the caller
+    treats that as "leakage not establishable" (``None``), never as a zero.
     """
-    unit_scale = _leakage_unit_scale_to_nw(liberty_text)
-    headers = list(_LIBERTY_CELL_HEADER_RE.finditer(liberty_text))
+    try:
+        library = parse_liberty_text(liberty_text)
+    except LibertyCompareError:
+        return {}
+    unit_scale = _leakage_unit_scale_to_nw(library.attributes.get("leakage_power_unit"))
     leakage_by_cell: dict[str, float] = {}
-    for index, header in enumerate(headers):
-        body_start = header.end()
-        body_end = (
-            headers[index + 1].start()
-            if index + 1 < len(headers)
-            else len(liberty_text)
-        )
-        match = _CELL_LEAKAGE_POWER_RE.search(liberty_text, body_start, body_end)
-        if match is None:
+    for cell in library.children("cell"):
+        raw_value = cell.attributes.get("cell_leakage_power")
+        if raw_value is None or not cell.args:
             continue
         try:
-            value = float(match.group("value"))
-        except ValueError:  # pragma: no cover - regex only matches numbers
+            value = float(raw_value)
+        except ValueError:
             continue
         # A later block for the same cell name (should not happen in a
-        # well-formed liberty) overwrites, matching `_parse_liberty_pins`'s
-        # own "last one wins" convention.
-        leakage_by_cell[header.group("name")] = value * unit_scale
+        # well-formed liberty) overwrites, "last one wins" -- the same
+        # convention as `restructure._parse_liberty_pins`.
+        leakage_by_cell[cell.args[0]] = value * unit_scale
     return leakage_by_cell
 
 
@@ -3074,7 +3050,7 @@ def _compute_leakage(
     *none* of those types have a ``cell_leakage_power`` entry at all (e.g.
     gf180mcu_fd_sc_mcu9t5v0, which reports leakage only via per-input-state
     ``leakage_power()`` groups this module deliberately does not average --
-    see :data:`_CELL_LEAKAGE_POWER_RE`'s docstring). When *some* (not all)
+    see the note above :data:`_LEAKAGE_POWER_UNIT_RE`). When *some* (not all)
     instantiated types are covered, the total sums exactly those --
     ``leakage_by_type_nw`` (the bonus per-type breakdown the issue asks for)
     names precisely which types were covered, so a caller comparing its own
