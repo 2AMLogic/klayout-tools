@@ -14,6 +14,14 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`openroad` Docker wrapper forwards `PLATFORM_DIR` and `OPENROAD_*`**
+  (issue #3821): `scripts/install-openroad-docker.sh` now writes a wrapper that
+  passes `-e PLATFORM_DIR` (when set) and `-e <name>` for each caller variable
+  starting with `OPENROAD_` to `docker run`, so Tcl reading
+  `$::env(PLATFORM_DIR)` no longer fails. Nothing else in the argv changes.
+  Hosts with an older wrapper should re-run
+  `scripts/install-openroad-docker.sh` to upgrade it in place.
+
 - **`klt synthesize --restructure` now finds upsizes on libraries that quote
   cell names** (issue #3709): `restructure`'s and `synthesize`'s private
   regex Liberty readers are replaced by `liberty_compare.parse_liberty_text`.

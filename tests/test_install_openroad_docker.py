@@ -54,3 +54,23 @@ def test_wrapper_home_falls_back_to_tmp(tmp_path: Path) -> None:
     argv = _install(tmp_path, env)
     assert argv[argv.index("--user") + 1] == f"{os.getuid()}:{os.getgid()}"
     assert "HOME=/tmp" in argv
+
+
+def _env_flags(argv: list[str]) -> list[str]:
+    return [argv[i + 1] for i, a in enumerate(argv) if a == "-e"]
+
+
+def test_wrapper_forwards_platform_dir_and_openroad_vars(tmp_path: Path) -> None:
+    argv = _install(
+        tmp_path,
+        {"PLATFORM_DIR": "", "OPENROAD_FOO": "1", "UNRELATED": "x"},
+    )
+    flags = _env_flags(argv)
+    assert "PLATFORM_DIR" in flags
+    assert "OPENROAD_FOO" in flags
+    assert "UNRELATED" not in flags
+
+
+def test_wrapper_forwards_nothing_extra_when_unset(tmp_path: Path) -> None:
+    argv = _install(tmp_path, {"TMPDIR": str(tmp_path)})
+    assert _env_flags(argv) == [f"HOME={tmp_path}"]
