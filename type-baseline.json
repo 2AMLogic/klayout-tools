@@ -2187,7 +2187,7 @@
       "count": 1
     },
     {
-      "file": "src/klayout_tools/lvs.py",
+      "file": "src/klayout_tools/lvs_gate_level.py",
       "code": "union-attr",
       "message": "Item \"None\" of \"Any | None\" has no attribute \"each_circuit\"",
       "count": 1
