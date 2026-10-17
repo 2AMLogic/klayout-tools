@@ -89,6 +89,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from dataclasses import dataclass
 from typing import IO, Any, NamedTuple
 
 from . import (
@@ -2584,29 +2585,85 @@ def _apply_attach(
     engine_kwargs["attach_job_id"] = attach_job_id
 
 
-def _run_sim_corners(
+@dataclass(frozen=True)
+class _ResolvedSimRequest:
+    """Everything :func:`_prepare_sim_request` validated and resolved, before any
+    corner is dispatched. Field names match the locals of the dispatch tail in
+    :func:`_run_sim_corners`, which unpacks them one-for-one."""
+
+    analysis: Any
+    artifacts_dir: Any
+    backend: Any
+    backend_from_host_default: Any
+    backend_source: Any
+    budget_s: Any
+    capture_only: Any
+    convergence_retry: Any
+    corner_points: Any
+    corner_section_libs: Any
+    deadline: Any
+    dispatch_netlist_path: Any
+    engine: Any
+    engine_version_pin: Any
+    fail_fast_probe: Any
+    fail_on_diagnostic_codes: Any
+    hosts: Any
+    initial_ppid: Any
+    keep_artifacts: Any
+    max_workers: Any
+    measurements_spec: Any
+    models_lib: Any
+    monte_carlo_info: Any
+    monte_carlo_stats: Any
+    netlist_identity: Any
+    netlist_identity_error: Any
+    netlist_path: Any
+    netlist_source: Any
+    ngspice_binary: Any
+    ngspice_init_lines: Any
+    ngspice_options: Any
+    osdi_preload: Any
+    portable_artifacts: Any
+    preflight_warning: Any
+    provenance_pdk: Any
+    repo_root: Any
+    request: Any
+    request_dir: Any
+    requested_backend: Any
+    resume: Any
+    save_mode: Any
+    save_vectors: Any
+    stage_model_inputs: Any
+    stimulus_lines: Any
+    stimulus_signals: Any
+    sweep_started: Any
+    threads_per_worker: Any
+    timeout_s: Any
+    want_waveforms: Any
+    waveform_max_bytes: Any
+
+
+def _prepare_sim_request(
     request_path: str,
     *,
-    artifacts_dir: str | None = None,
-    backend: str | None = None,
-    max_workers: int | None = None,
-    hosts: int | None = None,
-    budget_s: float | None = None,
-    resume: bool | None = None,
-    plot_dir: str | None = None,
-    fail_fast_probe: bool | None = None,
-    fail_on_diagnostic: list[str] | tuple[str, ...] | None = None,
-    max_units_per_job: int | None = None,
-    dry_run: bool = False,
-    submit_only: bool = False,
-    attach_job_id: str | None = None,
-    capacity_wait_s: float | None = None,
-    _ownership: contextlib.ExitStack | None = None,
-) -> dict[str, Any]:
-    """The corner-sweep body of :func:`run_sim` -- every parameter, the
-    request/response contract, and the deck-list dispatch alternative
-    are documented there. Kept as its own function so the deck dispatch
-    in ``run_sim`` adds nothing to this sweep's own complexity budget."""
+    artifacts_dir: str | None,
+    backend: str | None,
+    max_workers: int | None,
+    hosts: int | None,
+    budget_s: float | None,
+    resume: bool | None,
+    plot_dir: str | None,
+    fail_fast_probe: bool | None,
+    fail_on_diagnostic: list[str] | tuple[str, ...] | None,
+    max_units_per_job: int | None,
+    capacity_wait_s: float | None,
+    dry_run: bool,
+) -> _ResolvedSimRequest:
+    """The up-front validate-and-resolve phase of :func:`_run_sim_corners`.
+
+    Everything here runs before the first artifact write or backend dispatch;
+    the order of the checks is the error precedence the JSON reports, so it
+    must not be reordered."""
     request = _with_max_units_override(load_request(request_path), max_units_per_job)
     request = _with_capacity_wait_override(request, capacity_wait_s)
     request_dir = os.path.dirname(os.path.abspath(request_path))
@@ -3047,6 +3104,148 @@ def _run_sim_corners(
             "as 'local'/'local-parallel'/'batch' is tracked follow-up work; "
             "use resume with backend 'local', 'local-parallel' or 'batch'"
         )
+    return _ResolvedSimRequest(
+        analysis=analysis,
+        artifacts_dir=artifacts_dir,
+        backend=backend,
+        backend_from_host_default=backend_from_host_default,
+        backend_source=backend_source,
+        budget_s=budget_s,
+        capture_only=capture_only,
+        convergence_retry=convergence_retry,
+        corner_points=corner_points,
+        corner_section_libs=corner_section_libs,
+        deadline=deadline,
+        dispatch_netlist_path=dispatch_netlist_path,
+        engine=engine,
+        engine_version_pin=engine_version_pin,
+        fail_fast_probe=fail_fast_probe,
+        fail_on_diagnostic_codes=fail_on_diagnostic_codes,
+        hosts=hosts,
+        initial_ppid=initial_ppid,
+        keep_artifacts=keep_artifacts,
+        max_workers=max_workers,
+        measurements_spec=measurements_spec,
+        models_lib=models_lib,
+        monte_carlo_info=monte_carlo_info,
+        monte_carlo_stats=monte_carlo_stats,
+        netlist_identity=netlist_identity,
+        netlist_identity_error=netlist_identity_error,
+        netlist_path=netlist_path,
+        netlist_source=netlist_source,
+        ngspice_binary=ngspice_binary,
+        ngspice_init_lines=ngspice_init_lines,
+        ngspice_options=ngspice_options,
+        osdi_preload=osdi_preload,
+        portable_artifacts=portable_artifacts,
+        preflight_warning=preflight_warning,
+        provenance_pdk=provenance_pdk,
+        repo_root=repo_root,
+        request=request,
+        request_dir=request_dir,
+        requested_backend=requested_backend,
+        resume=resume,
+        save_mode=save_mode,
+        save_vectors=save_vectors,
+        stage_model_inputs=stage_model_inputs,
+        stimulus_lines=stimulus_lines,
+        stimulus_signals=stimulus_signals,
+        sweep_started=sweep_started,
+        threads_per_worker=threads_per_worker,
+        timeout_s=timeout_s,
+        want_waveforms=want_waveforms,
+        waveform_max_bytes=waveform_max_bytes,
+    )
+
+
+def _run_sim_corners(
+    request_path: str,
+    *,
+    artifacts_dir: str | None = None,
+    backend: str | None = None,
+    max_workers: int | None = None,
+    hosts: int | None = None,
+    budget_s: float | None = None,
+    resume: bool | None = None,
+    plot_dir: str | None = None,
+    fail_fast_probe: bool | None = None,
+    fail_on_diagnostic: list[str] | tuple[str, ...] | None = None,
+    max_units_per_job: int | None = None,
+    dry_run: bool = False,
+    submit_only: bool = False,
+    attach_job_id: str | None = None,
+    capacity_wait_s: float | None = None,
+    _ownership: contextlib.ExitStack | None = None,
+) -> dict[str, Any]:
+    """The corner-sweep body of :func:`run_sim` -- every parameter, the
+    request/response contract, and the deck-list dispatch alternative
+    are documented there. Kept as its own function so the deck dispatch
+    in ``run_sim`` adds nothing to this sweep's own complexity budget."""
+    resolved = _prepare_sim_request(
+        request_path,
+        artifacts_dir=artifacts_dir,
+        backend=backend,
+        max_workers=max_workers,
+        hosts=hosts,
+        budget_s=budget_s,
+        resume=resume,
+        plot_dir=plot_dir,
+        fail_fast_probe=fail_fast_probe,
+        fail_on_diagnostic=fail_on_diagnostic,
+        max_units_per_job=max_units_per_job,
+        capacity_wait_s=capacity_wait_s,
+        dry_run=dry_run,
+    )
+    analysis = resolved.analysis
+    artifacts_dir = resolved.artifacts_dir
+    backend = resolved.backend
+    backend_from_host_default = resolved.backend_from_host_default
+    backend_source = resolved.backend_source
+    budget_s = resolved.budget_s
+    capture_only = resolved.capture_only
+    convergence_retry = resolved.convergence_retry
+    corner_points = resolved.corner_points
+    corner_section_libs = resolved.corner_section_libs
+    deadline = resolved.deadline
+    dispatch_netlist_path = resolved.dispatch_netlist_path
+    engine = resolved.engine
+    engine_version_pin = resolved.engine_version_pin
+    fail_fast_probe = resolved.fail_fast_probe
+    fail_on_diagnostic_codes = resolved.fail_on_diagnostic_codes
+    hosts = resolved.hosts
+    initial_ppid = resolved.initial_ppid
+    keep_artifacts = resolved.keep_artifacts
+    max_workers = resolved.max_workers
+    measurements_spec = resolved.measurements_spec
+    models_lib = resolved.models_lib
+    monte_carlo_info = resolved.monte_carlo_info
+    monte_carlo_stats = resolved.monte_carlo_stats
+    netlist_identity = resolved.netlist_identity
+    netlist_identity_error = resolved.netlist_identity_error
+    netlist_path = resolved.netlist_path
+    netlist_source = resolved.netlist_source
+    ngspice_binary = resolved.ngspice_binary
+    ngspice_init_lines = resolved.ngspice_init_lines
+    ngspice_options = resolved.ngspice_options
+    osdi_preload = resolved.osdi_preload
+    portable_artifacts = resolved.portable_artifacts
+    preflight_warning = resolved.preflight_warning
+    provenance_pdk = resolved.provenance_pdk
+    repo_root = resolved.repo_root
+    request = resolved.request
+    request_dir = resolved.request_dir
+    requested_backend = resolved.requested_backend
+    resume = resolved.resume
+    save_mode = resolved.save_mode
+    save_vectors = resolved.save_vectors
+    stage_model_inputs = resolved.stage_model_inputs
+    stimulus_lines = resolved.stimulus_lines
+    stimulus_signals = resolved.stimulus_signals
+    sweep_started = resolved.sweep_started
+    threads_per_worker = resolved.threads_per_worker
+    timeout_s = resolved.timeout_s
+    want_waveforms = resolved.want_waveforms
+    waveform_max_bytes = resolved.waveform_max_bytes
 
     # `pre_completed` holds corner reports already recorded by a prior,
     # interrupted run of this *same* request (fingerprint-matched); those
