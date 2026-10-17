@@ -435,7 +435,8 @@
         "klayout_tools.signoff_attest",
         "klayout_tools.signoff_envelopes",
         "klayout_tools.signoff_generator_batch",
-        "klayout_tools.signoff_power_delivery"
+        "klayout_tools.signoff_power_delivery",
+        "klayout_tools.signoff_runset"
       ]
     },
     "sim": {
