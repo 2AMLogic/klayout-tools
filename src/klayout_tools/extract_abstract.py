@@ -1094,6 +1094,41 @@ def _lef_port_access_points(
     return points
 
 
+def _merge_lef_pins(
+    layout: kdb.Layout,
+    cell: kdb.Cell,
+    lef_macros: dict[str, tuple[str, dict[str, list[dict[str, Any]]]]],
+    lef_layer_roles: dict[str, str] | None,
+    labelled: dict[str, Any],
+    pins: list[tuple[str, list[tuple[kdb.Point, str | None]]]],
+) -> tuple[str | None, set[str], list[str]]:
+    """Append the LEF ``MACRO``'s pins the labels did not supply to ``pins``
+    (issue #3749). Returns ``(lef_path or None if nothing merged, merged pin
+    names, warnings)``."""
+    entry = lef_macros.get(cell.name)
+    if entry is None:
+        return None, set(), []
+    lef_path, lef_pins = entry
+    merged: set[str] = set()
+    warnings: list[str] = []
+    for pin_name in sorted(lef_pins):
+        if pin_name in labelled:
+            continue
+        boxes = lef_pins[pin_name]
+        if not boxes:
+            warnings.append(
+                f"--abstract-cell-lef macro '{cell.name}' pin '{pin_name}' "
+                "declared no PORT geometry this parser reads (RECT/POLYGON "
+                "only -- PATH/VIA and malformed POLYGON statements are "
+                "skipped) -- pin not merged into the label-derived pin list"
+            )
+            continue
+        points = _lef_port_access_points(boxes, layout.dbu, lef_layer_roles)
+        pins.append((pin_name, points))
+        merged.add(pin_name)
+    return (lef_path if merged else None), merged, warnings
+
+
 def _resolve_abstract_cell_pins(
     layout: kdb.Layout,
     cell: kdb.Cell,
@@ -1106,10 +1141,12 @@ def _resolve_abstract_cell_pins(
     str | None,
     str | None,
     list[str],
+    set[str],
 ]:
     """Resolve one abstracted cell type's pins (issue #620).
 
-    Returns ``(pins, resolution_source, lef_path, warnings)`` where ``pins`` is
+    Returns ``(pins, resolution_source, lef_path, warnings, lef_merged)``
+    where ``pins`` is
     ``[(pin name, [(access point in **cell-local dbu**, probe layer role or
     ``None``), ...]), ...]`` sorted by pin name (the stable ``.subckt`` pin
     order).
@@ -1156,6 +1193,14 @@ def _resolve_abstract_cell_pins(
       point of this mode is to stop at *this* cell's boundary. Each label
       carries its own layer role, so the pin is probed on exactly the
       conductor its label names.
+      **LEF merge (issue #3749):** when a ``--abstract-cell-lef`` LEF also
+      declares a ``MACRO`` of this cell's name, every LEF pin whose name the
+      labels did not supply is appended (labels win on any name present in
+      both), and ``lef_path`` names that LEF. A standard cell routinely
+      draws its substrate/well pin (``VNB``) on a label layer the deck does
+      not read (sky130 ``pwell.label``), so the labels alone silently lose
+      it; the LEF is the only place it is declared. ``lef_merged`` is the
+      set of appended pin names (always empty on the other paths).
     - ``"lef_abstract"`` -- no such label, but a ``--abstract-cell-lef`` LEF
       declares a ``MACRO`` of this cell's name with ``PORT`` geometry. Each
       port's bounding-box centre is the access point, read directly as
@@ -1261,8 +1306,11 @@ def _resolve_abstract_cell_pins(
         pins: list[tuple[str, list[tuple[kdb.Point, str | None]]]] = [
             (name, list(points)) for name, points in in_cell.items()
         ]
+        merged_lef_path, lef_merged, merge_warnings = _merge_lef_pins(
+            layout, cell, lef_macros, lef_layer_roles, in_cell, pins
+        )
         pins.sort(key=lambda entry: entry[0])
-        return pins, "in_cell_labels", None, []
+        return pins, "in_cell_labels", merged_lef_path, merge_warnings, lef_merged
 
     entry = lef_macros.get(cell.name)
     if entry is not None:
@@ -1285,9 +1333,9 @@ def _resolve_abstract_cell_pins(
                 (pin_name, _lef_port_access_points(boxes, dbu, lef_layer_roles))
             )
         if lef_resolved:
-            return lef_resolved, "lef_abstract", lef_path, lef_warnings
+            return lef_resolved, "lef_abstract", lef_path, lef_warnings, set()
 
-    return [], None, None, []
+    return [], None, None, [], set()
 
 
 def _def_net_name_probes(
@@ -1813,6 +1861,55 @@ def _collapsed_abstract_pin_warning(
     ]
 
 
+def _lef_pin_is_substrate(
+    lef_macros: dict[str, tuple[str, dict[str, list[dict[str, Any]]]]],
+    cell_name: str,
+    pin_name: str,
+) -> bool:
+    """``True`` when every ``PORT`` box of the LEF pin sits on a substrate
+    layer (``pwell``/``psub``/``subs`` in its name) -- issue #3749."""
+    boxes = lef_macros[cell_name][1].get(pin_name) or []
+    layers = [str(box.get("layer") or "").lower() for box in boxes]
+    return bool(layers) and all(
+        any(tag in layer for tag in ("pwell", "psub", "subs")) for layer in layers
+    )
+
+
+def _substrate_pin_names(
+    lef_macros: dict[str, tuple[str, dict[str, list[dict[str, Any]]]]],
+    cell_name: str,
+    lef_merged: set[str],
+    global_net_ports: int,
+) -> set[str]:
+    """LEF-merged pins that stand for the cell's untapped substrate body."""
+    if not global_net_ports:
+        return set()
+    return {
+        name
+        for name in lef_merged
+        if _lef_pin_is_substrate(lef_macros, cell_name, name)
+    }
+
+
+def _probe_pin_or_substrate(
+    l2n: kdb.LayoutToNetlist,
+    global_points: list[tuple[kdb.Point, str | None]],
+    probe_layers: list[tuple[str, kdb.Region]],
+    substrate: kdb.Net | None,
+) -> kdb.Net | None:
+    """Probe a pin's net; a LEF-merged substrate pin (``substrate`` given)
+    that lands on no conductor joins the substrate net (issue #3749)."""
+    return _probe_abstract_pin_net(l2n, global_points, probe_layers) or substrate
+
+
+def _substrate_net(top_circuit: kdb.Circuit, deck: ExtractionDeck) -> kdb.Net:
+    """The deck's substrate global net in ``top_circuit`` (created if absent)
+    -- where a LEF-merged substrate pin connects (issue #3749)."""
+    return top_circuit.net_by_name(deck.substrate_net) or top_circuit.create_net(
+        deck.substrate_net
+    )
+
+
 def _wire_abstract_cells(
     layout: kdb.Layout,
     deck: ExtractionDeck,
@@ -1933,7 +2030,7 @@ def _wire_abstract_cells(
     for cell_index, transforms in grouped.items():
         cell = layout.cell(cell_index)
         local_candidates = (local_candidates_by_cell or {}).get(cell_index)
-        pins, source, lef_path, pin_warnings = _resolve_abstract_cell_pins(
+        pins, source, lef_path, pin_warnings, lef_merged = _resolve_abstract_cell_pins(
             layout, cell, deck, lef_macros, local_candidates, lef_layer_roles
         )
         warnings.extend(pin_warnings)
@@ -1957,7 +2054,12 @@ def _wire_abstract_cells(
         # back one lower than the macro's true port count, and only a caller
         # who independently knew that count could tell.
         global_net_ports = (global_net_ports_by_cell or {}).get(cell_index, 0)
-        if global_net_ports:
+        # Issue #3749: a LEF pin merged into the label-derived list on a
+        # substrate layer *is* that terminal, so it is carried, not dropped.
+        substrate_pins = _substrate_pin_names(
+            lef_macros, cell.name, lef_merged, global_net_ports
+        )
+        if global_net_ports > len(substrate_pins):
             warnings.append(
                 f"--abstract-cells cell type '{cell.name}' "
                 f"({len(transforms)} instance(s)): {global_net_ports} port(s) "
@@ -1965,12 +2067,14 @@ def _wire_abstract_cells(
                 f"'{deck.substrate_net}' -- the cell draws a substrate-formed "
                 "device body (an untapped NMOS) with no substrate tie of its "
                 "own, so no in-cell well_label/poly_label/metal_labels text "
-                "and no --abstract-cell-lef PORT can name that terminal. It "
-                f"is dropped from the black box's pin list ({len(pins)} pin(s) "
-                "resolved), so the abstracted instance carries no connection "
-                "for that net. Draw and label a substrate tie in the cell, or "
-                "declare the port via --abstract-cell-lef, if a downstream "
-                "`klt lvs` compare needs it"
+                "can name that terminal. "
+                f"It is dropped from the black box's pin list ({len(pins)} "
+                "pin(s) resolved), so the abstracted instance carries no "
+                "connection for that net. Draw and label a substrate tie in "
+                "the cell, or pass --abstract-cell-lef declaring the port "
+                "(its pins missing from the cell's labels are merged into the "
+                "label-derived pin list), if a downstream `klt lvs` compare "
+                "needs it"
             )
 
         black_box_circuit = kdb.Circuit()
@@ -1995,7 +2099,14 @@ def _wire_abstract_cells(
             pins_by_net: dict[str, list[str]] = {}
             for pin_name, points in pins:
                 global_points = [(trans * point, role) for point, role in points]
-                net = _probe_abstract_pin_net(l2n, global_points, probe_layers)
+                net = _probe_pin_or_substrate(
+                    l2n,
+                    global_points,
+                    probe_layers,
+                    _substrate_net(top_circuit, deck)
+                    if pin_name in substrate_pins
+                    else None,
+                )
                 if net is None:
                     net = top_circuit.create_net(f"{instance_name}__{pin_name}")
                     warnings.append(
