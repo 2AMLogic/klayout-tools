@@ -210,3 +210,84 @@ def test_check_hashes_runset(tmp_path, fake_klayout):
 @pytest.mark.skipif(shutil.which("klayout") is None, reason="klayout binary absent")
 def test_real_binary_version_probe():
     assert lvs_runset._application_version(shutil.which("klayout")) is not None
+
+
+def _spice_netlist(text: str) -> kdb.Netlist:
+    netlist = kdb.Netlist()
+    reader_input = kdb.NetlistSpiceReader()
+    import os
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "n.sp")
+        with open(path, "w") as fh:
+            fh.write(text)
+        netlist.read(path, reader_input)
+    return netlist
+
+
+_CELL = ".subckt CELL A VPWR VGND\nM1 A A VGND VGND NMOS L=0.2u W=0.4u\n.ends\n"
+
+
+def test_runset_power_connectivity_flags_untied_supply():
+    text = _CELL + (
+        ".subckt TOP A B VPWR VGND VOTHER\n"
+        "X1 A VPWR VGND CELL\n"
+        "X2 B VOTHER VGND CELL\n"
+        ".ends\n"
+    )
+    block = lvs_runset.runset_power_connectivity(_spice_netlist(text))
+    assert block["status"] == "mismatch"
+    assert block["finding_count"] == 1
+    assert block["power_pins"] == ["VGND", "VPWR"]
+    assert block["power_pins_derivation"]["masters"] == ["CELL"]
+
+
+def test_runset_power_connectivity_clean_when_ties_agree():
+    text = _CELL + (
+        ".subckt TOP A B VPWR VGND\nX1 A VPWR VGND CELL\nX2 B VPWR VGND CELL\n.ends\n"
+    )
+    block = lvs_runset.runset_power_connectivity(_spice_netlist(text))
+    assert block["status"] == "match"
+    assert block["findings"] == []
+
+
+def test_runset_power_connectivity_unchecked_without_netlist_or_instances():
+    none_block = lvs_runset.runset_power_connectivity(None)
+    assert none_block["status"] == "unchecked"
+    assert "no extracted netlist" in none_block["reason"]
+    flat = lvs_runset.runset_power_connectivity(_spice_netlist(SPICE_ONE))
+    assert flat["status"] == "unchecked"
+    assert flat["reason"]
+
+
+def test_deck_flags_fill_request(tmp_path, fake_klayout):
+    request = json.loads(_request(tmp_path, 1))
+    deck = request.pop("deck_file")
+    report = run_lvs(json.dumps(request), deck_file=deck, deck_vars={"feol": "true"})
+    assert report["deck_vars"] == {"feol": "true"}
+    assert "feol=true" in fake_klayout["cmd"]
+
+
+def test_deck_flags_conflict_with_request_fields(tmp_path, fake_klayout):
+    with pytest.raises(LvsError, match="--deck-file conflicts"):
+        run_lvs(_request(tmp_path, 1), deck_file=str(tmp_path / "pdk.lvs"))
+    with pytest.raises(LvsError, match="--deck-var conflicts"):
+        run_lvs(_request(tmp_path, 1, deck_vars={"a": "1"}), deck_vars={"b": "2"})
+
+
+def test_deck_flags_refused_for_other_engines(tmp_path):
+    request = json.dumps(
+        {"layout": {"file": "x.gds"}, "reference": {"netlist": "x.sp"}}
+    )
+    with pytest.raises(LvsError, match="only applies to engine 'klayout-runset'"):
+        run_lvs(request, deck_file="d.lvs")
+
+
+def test_cli_deck_var_parsing():
+    from klayout_tools.cli.lvs_cmd import _parse_deck_vars
+
+    assert _parse_deck_vars(["a=1", "b=x=y", "a=2"]) == {"a": "2", "b": "x=y"}
+    assert _parse_deck_vars(None) == {}
+    with pytest.raises(LvsError, match="invalid --deck-var"):
+        _parse_deck_vars(["novalue"])

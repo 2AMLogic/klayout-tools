@@ -14,6 +14,19 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt lvs` runset engine gaps closed** (issue #3206): `klt lvs --deck-file
+  PATH` / repeatable `--deck-var NAME=VALUE` fill `request.deck_file` /
+  `deck_vars` (setting both flag and request field, or using another engine,
+  is a clean error); `engine: klayout-runset` now computes
+  `power_connectivity` from the runset's extracted netlist (same JSON shape;
+  `power_pins_derivation.rule` gains
+  `named-power-ground-pin-of-extracted-subcircuit`) and stays `unchecked`
+  with a reason when there is no instance-level supply pin to walk;
+  `reference.device_map` objects accept `kind: "inductor"` (3 terminals) and
+  `kind: "varactor"` (4 terminals), normalized to `X<name> <nodes> <class>`
+  cards; and a subckt-call conversion with several unknown subcircuits now
+  names all of them in one refusal instead of the first.
+
 - **`klt signoff` grades PDK-runset LVS reports** (issue #2870, building on
   #2849): a `klt lvs` report with `"engine": "klayout-runset"` can satisfy T1
   item 4 and item 11's LVS half when its runset hash is in the signoff-side

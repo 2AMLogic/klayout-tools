@@ -676,8 +676,56 @@ def load_request_arg(value: str) -> tuple[dict[str, Any], str]:
     )
 
 
-def run_lvs(request: str) -> dict[str, Any]:
+def _merge_deck_flags(
+    request: dict[str, Any],
+    engine: str,
+    deck_file: str | None,
+    deck_vars: dict[str, str] | None,
+) -> None:
+    """Fold ``--deck-file``/``--deck-var`` CLI values into ``request`` in
+    place (issue #3206). A relative ``deck_file`` is made absolute against the
+    current directory first -- the request's own relative paths resolve
+    against the request file's directory, which is not what a flag means."""
+    if deck_file is None and not deck_vars:
+        return
+    flags = "/".join(
+        f
+        for f, given in (("--deck-file", deck_file), ("--deck-var", deck_vars))
+        if given
+    )
+    if engine != RUNSET_ENGINE:
+        raise LvsError(
+            f"{flags} only applies to engine '{RUNSET_ENGINE}' (this request "
+            f"uses engine '{engine}')"
+        )
+    if deck_file is not None:
+        if request.get("deck_file") is not None:
+            raise LvsError(
+                "--deck-file conflicts with request.deck_file: set one, not "
+                "both (a flag never silently overrides the request document)"
+            )
+        request["deck_file"] = os.path.abspath(deck_file)
+    if deck_vars:
+        if request.get("deck_vars") is not None:
+            raise LvsError(
+                "--deck-var conflicts with request.deck_vars: set one, not "
+                "both (a flag never silently overrides the request document)"
+            )
+        request["deck_vars"] = dict(deck_vars)
+
+
+def run_lvs(
+    request: str,
+    *,
+    deck_file: str | None = None,
+    deck_vars: dict[str, str] | None = None,
+) -> dict[str, Any]:
     """Run the netlist compare declared by ``request``.
+
+    ``deck_file``/``deck_vars`` (issue #3206) carry the ``klt lvs
+    --deck-file``/``--deck-var`` CLI values for ``engine: klayout-runset``;
+    they fill the request's ``deck_file``/``deck_vars`` fields, and setting
+    both a flag and its request field is a clean :class:`LvsError`.
 
     ``request`` accepts the same three forms every ``klt lvs`` request
     argument does (see :func:`load_request_arg` / docs/cli/lvs.md): a path
@@ -921,13 +969,15 @@ def run_lvs(request: str) -> dict[str, Any]:
     :func:`_parse_anchor_top_level_pins`, :func:`_anchor_top_level_pins_enabled`
     and :func:`_apply_top_level_pin_anchors`.
     """
-    request, request_dir = load_request_arg(request)
+    loaded, request_dir = load_request_arg(request)
+    request = loaded
 
     engine = request.get("engine", "klayout")
     if engine not in SUPPORTED_ENGINES:
         raise LvsError(
             f"unsupported engine '{engine}' (supported: {', '.join(SUPPORTED_ENGINES)})"
         )
+    _merge_deck_flags(loaded, engine, deck_file, deck_vars)
 
     layout_spec = request["layout"]
     if not isinstance(layout_spec, dict):

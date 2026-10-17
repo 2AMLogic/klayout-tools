@@ -8000,7 +8000,14 @@ def test_lvs_cli_exits_4_on_inconclusive(tmp_path, monkeypatch, capsys):
 
     import argparse
 
-    args = argparse.Namespace(request=path, format="json", check=None, rerun=False)
+    args = argparse.Namespace(
+        request=path,
+        format="json",
+        check=None,
+        rerun=False,
+        deck_file=None,
+        deck_var=None,
+    )
     assert lvs_cmd.run(args) == lvs_cmd.EXIT_INCONCLUSIVE
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "inconclusive"

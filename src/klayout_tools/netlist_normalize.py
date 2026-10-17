@@ -724,7 +724,48 @@ def _convert_x_card(
         if placeholder_value_classes is not None:
             placeholder_value_classes[lookup.device_class] = "capacitor"
         return card
+    return _convert_passive_or_bipolar_card(
+        instance, nodes, subckt_name, lookup, params
+    )
+
+
+def _convert_passive_or_bipolar_card(
+    instance: str,
+    nodes: list[str],
+    subckt_name: str,
+    lookup: DeviceLookup,
+    params: dict[str, str],
+) -> str:
+    """The non-MOS/R/C tail of :func:`_convert_x_card`'s dispatch: an
+    ``inductor``/``varactor`` call (issue #3206) or, otherwise, a bipolar."""
+    if lookup.kind in _PASSIVE_X_TERMINALS:
+        return _convert_passive_x_card(instance, nodes, subckt_name, lookup)
     return _convert_bipolar_card(instance, nodes, subckt_name, lookup, params)
+
+
+def _convert_passive_x_card(
+    instance: str, nodes: list[str], subckt_name: str, lookup: DeviceLookup
+) -> str:
+    """Normalize an ``inductor``/``varactor`` ``device_map`` call (issue
+    #3206): ``X<name> n1 n2 [n3 [n4]] <class>``.
+
+    SPICE has no element letter for a substrate-terminal inductor or a
+    4-terminal varactor (``L`` is two-terminal; there is no varactor
+    element), so unlike MOS/R/C/Q the card stays a subcircuit call and only
+    the model name is rewritten to the device-class label -- the form a
+    reader that binds devices by model name sees. Terminal order is the call
+    order, validated against the kind's terminal count so a mis-wired
+    reference fails loudly instead of binding the wrong pins. Call-site
+    parameters are not carried: geometry is not compared for these classes.
+    """
+    expected = _PASSIVE_X_TERMINALS[lookup.kind]
+    if len(nodes) != expected:
+        raise NormalizeError(
+            f"device '{instance}' (subcircuit '{subckt_name}'): a "
+            f"device_map kind '{lookup.kind}' has {expected} terminals, found "
+            f"{len(nodes)}"
+        )
+    return f"{instance} {' '.join(nodes)} {lookup.device_class}"
 
 
 def _flavoured_mos_lookup(
@@ -1385,6 +1426,38 @@ def _passes_through_unconverted(
     return not any(key in params for key in _DEVICE_LIKE_PARAMS)
 
 
+class _UnknownSubcircuitError(NormalizeError):
+    """A device-like ``X`` card whose subcircuit resolves in no table.
+
+    Carries the pieces of its message so :func:`convert_reference_netlist`
+    can keep converting, collect every such name, and refuse once listing all
+    of them (issue #3206) -- a caller fixing ``device_map`` one name per run
+    would otherwise need as many runs as there are unknown names. A single
+    unknown name still raises the original message byte-for-byte.
+    """
+
+    def __init__(self, subckt_name: str, singular: str, plural: str, tail: str) -> None:
+        super().__init__(f"subcircuit '{subckt_name}' {singular} {tail}")
+        self.subckt_name = subckt_name
+        self.plural = plural
+        self.tail = tail
+
+
+def _aggregate_unknown_subcircuits(
+    unknown: list[_UnknownSubcircuitError],
+) -> NormalizeError:
+    """One refusal for ``unknown`` (non-empty, first-seen order, de-duplicated
+    by name): the original error for one name, a combined one for several."""
+    unique: dict[str, _UnknownSubcircuitError] = {}
+    for err in unknown:
+        unique.setdefault(err.subckt_name, err)
+    if len(unique) == 1:
+        return next(iter(unique.values()))
+    first = next(iter(unique.values()))
+    names = ", ".join(f"'{name}'" for name in unique)
+    return NormalizeError(f"subcircuits {names} {first.plural} {first.tail}")
+
+
 def _resolve_binding(
     subckt_name: str, subckt_to_binding: dict[str, DeviceLookup] | None
 ) -> DeviceLookup:
@@ -1392,10 +1465,12 @@ def _resolve_binding(
         lookup = subckt_to_binding.get(subckt_name)
         if lookup is None:
             available = ", ".join(sorted(subckt_to_binding)) or "<none>"
-            raise NormalizeError(
-                f"subcircuit '{subckt_name}' is not a known device for the "
-                f"requested deck (known: {available}); if it is a real device, "
-                "pass reference.device_map to map it explicitly"
+            raise _UnknownSubcircuitError(
+                subckt_name,
+                "is not a known device for the requested deck",
+                "are not known devices for the requested deck",
+                f"(known: {available}); if it is a real device, "
+                "pass reference.device_map to map it explicitly",
             )
         return lookup
 
@@ -1403,10 +1478,12 @@ def _resolve_binding(
     entry = known.get(subckt_name)
     if entry is None:
         available = ", ".join(sorted(known)) or "<none>"
-        raise NormalizeError(
-            f"subcircuit '{subckt_name}' is not a known curated PDK device "
+        raise _UnknownSubcircuitError(
+            subckt_name,
+            "is not a known curated PDK device",
+            "are not known curated PDK devices",
             f"(known: {available}); pass reference.deck or "
-            "reference.device_map to map it explicitly"
+            "reference.device_map to map it explicitly",
         )
     _deck_name, lookup = entry
     return lookup
@@ -1424,6 +1501,8 @@ def _instance_name(name_token: str, kind: str = "mos") -> str:
     ``"R"``/``"C"``/``"Q"`` for resistor/capacitor/bipolar, ``"M"`` -- the
     original #280 default -- for MOS).
     """
+    if kind in _PASSIVE_X_TERMINALS:
+        return name_token  # stays a subcircuit-call card: no element letter
     letter = {"mos": "M", "resistor": "R", "capacitor": "C", "bipolar": "Q"}[kind]
     rest = name_token[1:]  # drop the leading X/x
     if not rest:
@@ -1435,7 +1514,12 @@ def _instance_name(name_token: str, kind: str = "mos") -> str:
 
 #: Every ``kind`` an object-valued ``device_map`` entry may name (issue
 #: #1271) -- the same four families :class:`DeviceLookup` already supports.
-_DEVICE_MAP_KINDS = ("mos", "resistor", "capacitor", "bipolar")
+_DEVICE_MAP_KINDS = ("mos", "resistor", "capacitor", "bipolar", "inductor", "varactor")
+
+#: Terminal count of each ``device_map`` kind with no native SPICE element
+#: letter (issue #3206): a spiral inductor with its substrate terminal
+#: (``p1 p2 sub``) and a varactor (``p1 p2 well sub``).
+_PASSIVE_X_TERMINALS = {"inductor": 3, "varactor": 4}
 
 
 def _device_lookup_from_override(name: str, value: object) -> DeviceLookup:
@@ -1499,7 +1583,7 @@ def _device_lookup_from_override(name: str, value: object) -> DeviceLookup:
             f"device_map entry '{name}': object form requires a non-empty "
             "'class' (the plain-element device-class label)"
         )
-    if kind in ("mos", "bipolar"):
+    if kind in ("mos", "bipolar", "inductor", "varactor"):
         if "length_um" in value or "width_um" in value:
             raise NormalizeError(
                 f"device_map entry '{name}': 'length_um'/'width_um' are only "
@@ -1509,7 +1593,8 @@ def _device_lookup_from_override(name: str, value: object) -> DeviceLookup:
             )
         # mos: `_convert_mos_card` always reads literal `l`/`w`, so a custom
         # spelling here would be silently ignored -- not accepted, to avoid
-        # that trap. bipolar: no geometry call-site parameter exists at all.
+        # that trap. bipolar/inductor/varactor: no geometry call-site
+        # parameter is carried at all.
         return DeviceLookup(kind, device_class, "l", "w")
     length_param = value.get("length_param", "l")
     width_param = value.get("width_param", "w")
@@ -1791,6 +1876,7 @@ def convert_reference_netlist(
     resistor_values = _deck_resistor_values(deck, resistor_value_classes, deck_options)
     placeholder_value_classes: dict[str, str] = {}
     out: list[str] = []
+    unknown_subckts: list[_UnknownSubcircuitError] = []
     for line in logical_lines:
         stripped = line.strip()
         if not stripped or stripped.startswith("*"):
@@ -1804,22 +1890,28 @@ def convert_reference_netlist(
             subckt_scope = ""
         first = stripped.split(None, 1)[0]
         if first and first[0] in "Xx":
-            out.append(
-                _convert_x_card(
-                    line,
-                    subckt_to_binding,
-                    device_map_names,
-                    geometry_style,
-                    placeholder_value_classes,
-                    custom_device_classes,
-                    param_scopes,
-                    subckt_scope,
-                    resistor_values,
-                    mos_flavour_classes,
+            try:
+                out.append(
+                    _convert_x_card(
+                        line,
+                        subckt_to_binding,
+                        device_map_names,
+                        geometry_style,
+                        placeholder_value_classes,
+                        custom_device_classes,
+                        param_scopes,
+                        subckt_scope,
+                        resistor_values,
+                        mos_flavour_classes,
+                    )
                 )
-            )
+            except _UnknownSubcircuitError as exc:
+                unknown_subckts.append(exc)
+                out.append(line)
         else:
             out.append(line)
+    if unknown_subckts:
+        raise _aggregate_unknown_subcircuits(unknown_subckts)
     return ReferenceConversion("\n".join(out) + "\n", placeholder_value_classes)
 
 
