@@ -44,7 +44,7 @@ import json
 import os
 from typing import Any
 
-from ._verilog_params import chparam_lines
+from ._verilog_params import chparam_lines, read_verilog_line
 
 #: The memory outcome vocabulary, per module and overall. Fixed (a caller may
 #: branch on it); see ``docs/cli/synthesize.md`` for each value's meaning.
@@ -95,7 +95,7 @@ def memory_evidence_script_text(
     never modify the design. No liberty is read -- nothing here is
     technology-mapped.
     """
-    lines = [f"read_verilog {path}" for path in sources]
+    lines = [read_verilog_line(path) for path in sources]
     lines += chparam_lines(parameters or {}, hdl_toplevel)
     lines.append(f"hierarchy -check -top {hdl_toplevel}")
     lines.append(f"tee -q -o {blackbox_list_path} select -list =A:blackbox =A:whitebox")

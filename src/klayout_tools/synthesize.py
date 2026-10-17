@@ -228,7 +228,7 @@ from ._report_verify import (
     load_committed_report,
     strip_keys,
 )
-from ._verilog_params import chparam_lines, validate_parameters
+from ._verilog_params import chparam_lines, read_verilog_line, validate_parameters
 from .equiv import EquivError, run_equiv
 from .liberty_compare import LibertyCompareError, parse_liberty_text
 from .pdk_cells import resolve_liberty_for_cell_library
@@ -2402,7 +2402,7 @@ def _write_script(
         abc_command = f"tee -q -o {abc_log_text} {abc_command}"
 
     lines = [
-        f"read_verilog {_script_path_text(path, repo_root=repo_root)}"
+        read_verilog_line(_script_path_text(path, repo_root=repo_root))
         for path in sources
     ]
     # Issue #3466: top-level parameter overrides apply between the reads and

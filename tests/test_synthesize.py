@@ -2494,6 +2494,24 @@ def test_read_stats_cyclic_modules_graph_terminates(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
+def test_generated_script_reads_sv_sources_with_sv_front_end(tmp_path, monkeypatch):
+    """Issue #3797: `.sv` sources get `read_verilog -sv`; `.v` stay plain."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _write(tmp_path / "c.sv", "module c(input logic clk); endmodule\n")
+    request = json.loads(Path(request_path).read_text(encoding="utf-8"))
+    request["sources"] = ["gcd.v", "c.sv"]
+    _write_request(Path(request_path), request)
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    script_text = Path(_abs_path(report["script_path"], tmp_path)).read_text(
+        encoding="utf-8"
+    )
+    assert "read_verilog gcd.v" in script_text
+    assert "read_verilog -sv c.sv" in script_text
+
+
 def test_generated_script_passes_constr_and_dont_use(tmp_path, monkeypatch):
     """The default (no `clock_period_ns`) run passes `-constr` -- which is
     what unlocks ABC's `buffer`/`upsize`/`dnsize` sizing steps and its
