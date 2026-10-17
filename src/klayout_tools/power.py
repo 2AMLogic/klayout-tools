@@ -219,7 +219,13 @@ _STACKUP_KEYS = (
     "current_limit_a_per_um",
     "current_limit_source",
 )
-_VIA_EXTRA_KEYS = ("resistance_ohm", "current_limit_a", "current_limit_source")
+_VIA_EXTRA_KEYS = (
+    "resistance_ohm",
+    "current_limit_a",
+    "current_limit_source",
+    "cut_size_um",
+    "cut_space_um",
+)
 _PAD_KEYS = ("name", "net", "x_um", "y_um", "voltage_v")
 _CURRENT_MODEL_KEYS = ("supply_net", "ground_net", "vdd_v", "instances")
 _INSTANCE_KEYS = (
@@ -401,6 +407,38 @@ def _validate_stackup(spec: dict[str, Any], spec_path: str) -> list[dict[str, An
     return entries
 
 
+def _validate_via_cut_geometry(
+    entry: dict[str, Any], spec_path: str, i: int
+) -> dict[str, float | None]:
+    """Issue #3401: optional cut geometry, both-or-neither, so a merged
+    via-array shape can be priced as ``resistance_ohm / n_cuts``."""
+    if ("cut_size_um" in entry) != ("cut_space_um" in entry):
+        raise PowerError(
+            f"spec '{spec_path}': vias[{i}] must give 'cut_size_um' and "
+            "'cut_space_um' together or neither"
+        )
+    cut_geometry: dict[str, float | None] = {
+        "cut_size_um": None,
+        "cut_space_um": None,
+    }
+    for key in cut_geometry:
+        if key not in entry:
+            continue
+        try:
+            value = float(entry[key])
+        except (TypeError, ValueError) as exc:
+            raise PowerError(
+                f"spec '{spec_path}': vias[{i}].{key} must be a number "
+                f"(got {entry[key]!r})"
+            ) from exc
+        if not value > 0:
+            raise PowerError(
+                f"spec '{spec_path}': vias[{i}].{key} must be > 0 (got {value!r})"
+            )
+        cut_geometry[key] = value
+    return cut_geometry
+
+
 def _validate_vias(
     spec: dict[str, Any],
     spec_path: str,
@@ -466,6 +504,8 @@ def _validate_vias(
         if current_limit_source is not None:
             current_limit_source = str(current_limit_source)
 
+        cut_geometry = _validate_via_cut_geometry(entry, spec_path, i)
+
         entries.append(
             {
                 "name": name,
@@ -475,6 +515,7 @@ def _validate_vias(
                 "resistance_source": "spec",
                 "current_limit_a": current_limit_a,
                 "current_limit_source": current_limit_source,
+                **cut_geometry,
             }
         )
     return entries
@@ -879,6 +920,44 @@ def _connected_component_count(
     return components
 
 
+def _count_via_cuts(
+    polygon: Any,
+    via: dict[str, Any],
+    dbu: float,
+    net_name: str,
+    island_id: str,
+    warnings: list[str],
+) -> tuple[int, str]:
+    """``(n_cuts, n_cuts_source)`` for one merged via polygon (issue #3401).
+
+    Without the via's ``cut_size_um``/``cut_space_um`` the shape is one cut
+    (``"assumed"``, the flat per-shape model). With them, a rectangle holds
+    ``floor((W+s)/(c+s)) * floor((H+s)/(c+s))`` cuts at pitch ``c+s``; a
+    non-rectangular polygon falls back to ``floor(area / (c+s)^2)`` with a
+    warning. Never fewer than one."""
+    cut = via.get("cut_size_um")
+    space = via.get("cut_space_um")
+    if cut is None or space is None:
+        return 1, "assumed"
+    pitch = cut + space
+    box = polygon.bbox()
+    # Epsilon absorbs dbu rounding so an exactly-fitting array is not
+    # undercounted by a float ulp.
+    eps = 1e-9
+    if polygon.is_box():
+        cols = int((box.width() * dbu + space) / pitch + eps)
+        rows = int((box.height() * dbu + space) / pitch + eps)
+        n_cuts = cols * rows
+    else:
+        n_cuts = int(polygon.area() * dbu * dbu / (pitch * pitch) + eps)
+        warnings.append(
+            f"power net {net_name!r} island {island_id!r}: a non-rectangular "
+            f"{via['name']!r} via shape's cut count is estimated from its "
+            "area, not counted per cut"
+        )
+    return max(1, n_cuts), "spec"
+
+
 def _warn_if_network_fragmented(
     nodes: list[dict[str, Any]],
     edges: list[dict[str, Any]],
@@ -1169,6 +1248,8 @@ def _build_island_network(
         length_um: float | None = None,
         cross_um: float | None = None,
         area_um2: float | None = None,
+        n_cuts: int | None = None,
+        n_cuts_source: str | None = None,
     ) -> None:
         edge_id = f"e{counters['edge']}"
         counters["edge"] += 1
@@ -1203,6 +1284,12 @@ def _build_island_network(
                     round(current_limit_a, 12) if current_limit_a is not None else None
                 ),
                 "current_limit_source": current_limit_source,
+                # Issue #3401: cuts this via edge's `resistance_ohm` was
+                # divided across (`null` on a metal edge); `n_cuts_source`
+                # is "spec" when `cut_size_um`/`cut_space_um` derived it,
+                # "assumed" when absent (one cut, the flat per-shape model).
+                "n_cuts": n_cuts,
+                "n_cuts_source": n_cuts_source,
             }
         )
 
@@ -1271,12 +1358,15 @@ def _build_island_network(
                     f"modelled {missing!r} segment of this net -- skipped"
                 )
                 continue
+            n_cuts, n_cuts_source = _count_via_cuts(
+                polygon, via, dbu, net_name, island_id, warnings
+            )
             add_edge(
                 "via",
                 via["name"],
                 node_a,
                 node_b,
-                via["resistance_ohm"],
+                via["resistance_ohm"] / n_cuts,
                 via["current_limit_a"],
                 via["current_limit_source"],
                 # Issue #2345: a via edge's geometry is its merged polygon's
@@ -1285,6 +1375,8 @@ def _build_island_network(
                 # "per-cut vs per-merged-polygon" caveat, now visible in
                 # data).
                 area_um2=polygon.area() * dbu * dbu,
+                n_cuts=n_cuts,
+                n_cuts_source=n_cuts_source,
             )
 
     # The connectivity model already declared these nodes one island, so the

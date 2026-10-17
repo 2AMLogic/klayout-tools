@@ -4113,3 +4113,159 @@ def test_cli_power_deck_flags(tmp_path, capsys):
     assert code == 4
     data = json.loads(capsys.readouterr().out)
     assert data["vias"][0]["resistance_ohm"] == 15.0
+
+
+# --- via-array cut counting: resistance_ohm / n_cuts (#3401) ---------------
+
+
+def _cut_fixture(path, via_boxes_um, *, polygon=None) -> None:
+    """The `_basic_fixture` island B (met1 rail + met2 stub, VPWR) with the
+    via layer redrawn as `via_boxes_um` ((x1, y1, x2, y2) in um), or as one
+    explicit `polygon` (list of (x, y) um points)."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(1, 0)).insert(kdb.Box.new(_um(0), _um(5), _um(10), _um(6)))
+    top.shapes(layout.layer(1, 5)).insert(kdb.Text("VPWR", kdb.Trans(_um(5), _um(5.5))))
+    top.shapes(layout.layer(2, 0)).insert(kdb.Box.new(_um(4), _um(5), _um(6), _um(10)))
+    via_shapes = top.shapes(layout.layer(3, 0))
+    for x1, y1, x2, y2 in via_boxes_um:
+        via_shapes.insert(kdb.Box.new(_um(x1), _um(y1), _um(x2), _um(y2)))
+    if polygon is not None:
+        via_shapes.insert(kdb.Polygon([kdb.Point(_um(x), _um(y)) for x, y in polygon]))
+    layout.write(str(path))
+
+
+def _cut_spec(path, **via_extra) -> None:
+    _basic_spec(path, power_nets=("VPWR",))
+    spec = json.loads(path.read_text())
+    spec["vias"][0].update(via_extra)
+    path.write_text(json.dumps(spec))
+
+
+def _only_via_edge(report) -> dict:
+    edges = [
+        edge
+        for net in report["networks"]
+        for island in net["islands"]
+        for edge in island["edges"]
+        if edge["kind"] == "via"
+    ]
+    assert len(edges) == 1
+    return edges[0]
+
+
+def test_via_array_is_priced_as_resistance_over_n_cuts(tmp_path):
+    gds, spec = tmp_path / "c.gds", tmp_path / "c.json"
+    # 3 x 2 array of 0.2 um cuts at 0.1 um spacing, drawn as one merged shape.
+    _cut_fixture(gds, [(4, 5, 4.8, 5.5)])
+    _cut_spec(spec, cut_size_um=0.2, cut_space_um=0.1)
+
+    edge = _only_via_edge(run_power(str(gds), str(spec)))
+
+    assert edge["n_cuts"] == 6
+    assert edge["n_cuts_source"] == "spec"
+    assert edge["resistance_ohm"] == pytest.approx(5.0 / 6)
+
+
+def test_single_cut_via_matches_the_flat_value(tmp_path):
+    gds, spec = tmp_path / "c.gds", tmp_path / "c.json"
+    _cut_fixture(gds, [(4, 5, 4.2, 5.2)])
+    _cut_spec(spec, cut_size_um=0.2, cut_space_um=0.1)
+
+    edge = _only_via_edge(run_power(str(gds), str(spec)))
+
+    assert edge["n_cuts"] == 1
+    assert edge["resistance_ohm"] == pytest.approx(5.0)
+
+
+def test_via_smaller_than_one_pitch_is_one_cut(tmp_path):
+    gds, spec = tmp_path / "c.gds", tmp_path / "c.json"
+    _cut_fixture(gds, [(4, 5, 4.1, 5.1)])
+    _cut_spec(spec, cut_size_um=0.2, cut_space_um=0.1)
+
+    edge = _only_via_edge(run_power(str(gds), str(spec)))
+
+    assert edge["n_cuts"] == 1
+    assert edge["resistance_ohm"] == pytest.approx(5.0)
+
+
+def test_cut_keys_absent_leave_pricing_unchanged_and_assumed(tmp_path):
+    gds, spec = tmp_path / "c.gds", tmp_path / "c.json"
+    _cut_fixture(gds, [(4, 5, 4.8, 5.5)])
+    _cut_spec(spec)
+
+    edge = _only_via_edge(run_power(str(gds), str(spec)))
+
+    assert edge["n_cuts"] == 1
+    assert edge["n_cuts_source"] == "assumed"
+    assert edge["resistance_ohm"] == pytest.approx(5.0)
+
+
+def test_zero_ohm_via_stays_an_ideal_short_with_cuts(tmp_path):
+    gds, spec = tmp_path / "c.gds", tmp_path / "c.json"
+    _cut_fixture(gds, [(4, 5, 4.8, 5.5)])
+    _cut_spec(spec, resistance_ohm=0, cut_size_um=0.2, cut_space_um=0.1)
+
+    edge = _only_via_edge(run_power(str(gds), str(spec)))
+
+    assert edge["n_cuts"] == 6
+    assert edge["resistance_ohm"] == 0.0
+
+
+def test_non_rectangular_via_falls_back_to_area_with_a_warning(tmp_path):
+    gds, spec = tmp_path / "c.gds", tmp_path / "c.json"
+    # L-shape: 1.2 x 0.6 plus a 0.6 x 0.3 foot = 0.9 um^2 -> 0.9/0.09 = 10.
+    _cut_fixture(
+        gds,
+        [],
+        polygon=[(4, 5), (5.2, 5), (5.2, 5.6), (4.6, 5.6), (4.6, 5.9), (4, 5.9)],
+    )
+    _cut_spec(spec, cut_size_um=0.2, cut_space_um=0.1)
+
+    report = run_power(str(gds), str(spec))
+    edge = _only_via_edge(report)
+
+    assert edge["n_cuts"] == 10
+    assert edge["resistance_ohm"] == pytest.approx(0.5)
+    assert any("non-rectangular" in w and "cut count" in w for w in report["warnings"])
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        ({"cut_size_um": 0.2}, "together or neither"),
+        ({"cut_space_um": 0.1}, "together or neither"),
+        ({"cut_size_um": 0, "cut_space_um": 0.1}, r"cut_size_um must be > 0"),
+        ({"cut_size_um": 0.2, "cut_space_um": -1}, r"cut_space_um must be > 0"),
+        ({"cut_size_um": "x", "cut_space_um": 0.1}, r"cut_size_um must be a number"),
+    ],
+)
+def test_invalid_cut_geometry_is_a_clear_error(tmp_path, extra, message):
+    gds, spec = tmp_path / "c.gds", tmp_path / "c.json"
+    _cut_fixture(gds, [(4, 5, 4.8, 5.5)])
+    _cut_spec(spec, **extra)
+
+    with pytest.raises(PowerError, match=message):
+        run_power(str(gds), str(spec))
+
+
+def test_deck_defaulted_resistance_is_divided_across_cuts(tmp_path):
+    gds, spec = tmp_path / "g.gds", tmp_path / "g.json"
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(34, 0)).insert(kdb.Box.new(_um(0), _um(5), _um(10), _um(6)))
+    top.shapes(layout.layer(34, 10)).insert(
+        kdb.Text("VPWR", kdb.Trans(_um(5), _um(5.5)))
+    )
+    top.shapes(layout.layer(35, 0)).insert(
+        kdb.Box.new(_um(4), _um(5), _um(4.8), _um(5.5))
+    )
+    top.shapes(layout.layer(36, 0)).insert(kdb.Box.new(_um(4), _um(5), _um(6), _um(10)))
+    layout.write(str(gds))
+    _gf180_spec(spec, vias=[_deck_via(cut_size_um=0.2, cut_space_um=0.1)])
+
+    report = run_power(str(gds), str(spec), deck="gf180mcu")
+
+    assert _via_edge_ohms(report) == [pytest.approx(4.5 / 6)]
