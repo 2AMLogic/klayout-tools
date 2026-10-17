@@ -140,6 +140,9 @@ def run(args: argparse.Namespace) -> int:
             # splitting `delta[]` into representation and parasitic parts.
             # `False` when the flag was never given.
             device_only_leg=args.device_only_leg,
+            # `--extract-only` (issue #3739): extract and report, no
+            # measurement leg. `False` when the flag was never given.
+            extract_only=args.extract_only,
         )
     except PexError as exc:
         # Issue #2889: a classified error (today: `schematic_flatten_*`)
@@ -310,6 +313,8 @@ def _print_text(report: dict) -> None:
     # a testbench-mode report's `measurement` block carries no information
     # the `testbenches:` section below does not already show.
     measurement = report.get("measurement") or {}
+    if measurement.get("mode") == "extract-only":
+        print("measurement: extract-only  (nothing measured; no delta rows)")
     if measurement.get("mode") == "command":
         print(f"measurement: command  {shlex.join(measurement['command'])}")
         for side, entry in (measurement.get("sides") or {}).items():

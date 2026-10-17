@@ -6020,3 +6020,150 @@ def test_cli_device_only_leg_with_measure_command_is_a_json_error(
         "--device-only-leg is not supported"
         in json.loads(captured.err)["error"]["message"]
     )
+
+
+# --- `--extract-only` (issue #3739) ----------------------------------------
+
+
+def test_run_pex_extract_only_reports_extraction_without_measuring(
+    tmp_path, resistor_layout
+):
+    netlist = tmp_path / "res.spice"
+    report = run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        output=str(netlist),
+        artifacts_dir=str(tmp_path / "art"),
+        extract_only=True,
+    )
+
+    assert netlist.is_file()
+    assert report["extraction"]["device_count"] >= 1
+    assert report["body_bias"]
+    assert report["provenance"]
+    assert report["testbenches"] == []
+    assert report["delta"] == []
+    assert report["measurement"] == {
+        "mode": "extract-only",
+        "command": None,
+        "timeout_s": None,
+        "sides": None,
+    }
+    assert report["status"] == "not_checked"
+    assert report["coverage"]["nothing_checked_reasons"] == ["no_delta_rows"]
+    assert report["reference_netlist"]["path"] is None
+    assert report["reference_netlist_sha256"] is None
+    assert report["pin_count_mismatch"] is None
+    assert report["flat_dut_mismatch"] is None
+    assert report["model_mismatch"] is None
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "needle"),
+    [
+        ({"measure_command": ["true"]}, "--measure-command"),
+        ({"reference_netlist": "x.spice"}, "--reference-netlist"),
+        ({"measure_timeout_s": 5.0}, "--measure-timeout-s"),
+        ({"device_only_leg": True}, "--device-only-leg"),
+        ({"flatten_schematic": True}, "--flatten-schematic"),
+        ({"testbench_paths": ["tb.json"]}, "a testbench request"),
+    ],
+)
+def test_run_pex_extract_only_rejects_measurement_options(
+    tmp_path, resistor_layout, kwargs, needle
+):
+    testbenches = kwargs.pop("testbench_paths", [])
+    with pytest.raises(PexError, match=f"--extract-only cannot be combined.*{needle}"):
+        run_pex(
+            resistor_layout,
+            testbenches,
+            "sky130",
+            output=str(tmp_path / "res.spice"),
+            artifacts_dir=str(tmp_path / "art"),
+            extract_only=True,
+            **kwargs,
+        )
+
+
+def test_cli_pex_extract_only_json_and_exit_code(tmp_path, resistor_layout, capsys):
+    exit_code = main(
+        [
+            "pex",
+            resistor_layout,
+            "--deck",
+            "sky130",
+            "--extract-only",
+            "-o",
+            str(tmp_path / "res.spice"),
+            "--outdir",
+            str(tmp_path / "art"),
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 4
+    report = json.loads(capsys.readouterr().out)
+    assert report["measurement"]["mode"] == "extract-only"
+    assert report["status"] == "not_checked"
+
+
+def test_cli_pex_extract_only_text_prints_mode(tmp_path, resistor_layout, capsys):
+    main(
+        [
+            "pex",
+            resistor_layout,
+            "--deck",
+            "sky130",
+            "--extract-only",
+            "-o",
+            str(tmp_path / "res.spice"),
+            "--outdir",
+            str(tmp_path / "art"),
+        ]
+    )
+    assert "measurement: extract-only" in capsys.readouterr().out
+
+
+def test_cli_pex_extract_only_conflict_is_clean_error(
+    tmp_path, resistor_layout, capsys
+):
+    exit_code = main(
+        [
+            "pex",
+            resistor_layout,
+            "--deck",
+            "sky130",
+            "--extract-only",
+            "--device-only-leg",
+            "--format",
+            "json",
+        ]
+    )
+    assert exit_code == 1
+    assert (
+        "--extract-only cannot be combined"
+        in json.loads(capsys.readouterr().err)["error"]["message"]
+    )
+
+
+def test_signoff_refuses_extract_only_report_as_evidence(tmp_path, resistor_layout):
+    """Issue #3739: an `--extract-only` envelope is not comparison evidence."""
+    from klayout_tools.signoff import build_signoff
+
+    report = run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        output=str(tmp_path / "res.spice"),
+        artifacts_dir=str(tmp_path / "art"),
+        extract_only=True,
+    )
+    path = tmp_path / "pex.json"
+    path.write_text(json.dumps(report))
+
+    check = build_signoff([str(path)])["checks"][0]
+
+    assert check["passed"] is False
+    assert check["detail"]["nothing_checked_reasons"] == ["no_delta_rows"]

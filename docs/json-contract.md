@@ -1236,7 +1236,7 @@ probing the value's Python type at runtime.
 | Command | Field(s) | `SCHEMA_VERSION` | Originating issue |
 |---|---|---|---|
 | `synthesize` | `netlist_path`, `script_path`, `run_script_path`, `restructuring.restructured_netlist_path`, `arithmetic.candidates[].measured.{netlist_path,script_path}` | 2 | #1844 |
-| `pex` | `layout`, `netlist`, `reference_netlist`, `testbenches[].{request,netlist,schematic_netlist}` | 2 | #1261 (`testbenches[].netlist` additionally #2875) |
+| `pex` | `layout`, `netlist`, `reference_netlist`, `testbenches[].{request,netlist,schematic_netlist}` | 2 | #1261 (`testbenches[].netlist` additionally #2875); additive `measurement.mode: "extract-only"` (`--extract-only`, #3739) carries `reference_netlist: {path: null, scope: "external"}` and empty `testbenches[]`/`delta[]` |
 | `sim` | `netlist`, `environment.models_lib`, `environment.resume.checkpoint_path` | 3 | #1261 (`models_lib` additionally #1274) |
 | `size` | `models_lib` | 2 | #1274 |
 | `place-and-route`, `sta` | New OpenROAD log fields `engine_logs[]` (P&R), `engine_log` / `corners[].engine_log` (STA): `script_path`, `metrics_path`, `directory`, `stdout_path`, `stderr_path`, `metadata_path` | 1 | #2124 |
