@@ -3630,6 +3630,27 @@ def _gf180mcu_and2_corpus_file() -> Path:
     return matches[0]
 
 
+def _without_tap_distance_findings(report):
+    """`(rule_counts, violations)` of a gf180mcu report minus the
+    `comp.tap_distance.*` findings (issues #3607, #3793).
+
+    The row-abutment fixtures are bare 5V standard cells (they carry
+    `Dualgate`) with no tap inside the cell -- well/substrate taps live in
+    separate tap cells -- so the `DF.13_MV`/`DF.14_MV` rules correctly flag
+    them. These tests pin the abutment-sensitive rules, not tap reach."""
+    counts = {
+        rule: n
+        for rule, n in report["rule_counts"].items()
+        if not rule.startswith("comp.tap_distance.")
+    }
+    violations = [
+        v
+        for v in report["violations"]
+        if not v["rule"].startswith("comp.tap_distance.")
+    ]
+    return counts, violations
+
+
 def _gf180mcu_and2_row(tmp_path, name: str, pitch_delta_dbu: int, count: int = 3):
     """Build a GDS with `count` instances of the real `and2_1` standard-cell
     corpus GDS placed in a horizontal row, in a new top cell
@@ -3693,8 +3714,8 @@ def test_run_drc_gf180mcu_row_abutment_real_pitch_clean(tmp_path):
         "poly2.space.1",
     ):
         assert rule_id not in report["coverage"]["rules_skipped"]
-    assert report["status"] == "clean"
-    assert report["violation_count"] == 0
+    _counts, violations = _without_tap_distance_findings(report)
+    assert violations == []
 
 
 def test_run_drc_gf180mcu_row_abutment_issue_reported_pitch_is_real_overlap(tmp_path):
@@ -3720,8 +3741,10 @@ def test_run_drc_gf180mcu_row_abutment_issue_reported_pitch_is_real_overlap(tmp_
 
     report = run_drc(str(path), "gf180mcu", top="ROW_ABUTMENT_TEST")
 
+    rule_counts, _violations = _without_tap_distance_findings(report)
+
     assert report["status"] == "violations"
-    assert report["rule_counts"] == {
+    assert rule_counts == {
         "comp.enclosing.contact.1": 2,
         "contact.space.1": 4,
         "metal1.space.1": 4,
@@ -3750,6 +3773,11 @@ def test_run_drc_gf180mcu_row_abutment_subdbu_gap_real_shortfall(tmp_path):
     # The 1 dbu offset also puts the shifted instance off the 0.005um grid
     # (issue #3001); this test pins the spacing rule, not the grid.
     rule_counts, _violations = _without_grid_findings(report)
+    rule_counts = {
+        rule: n
+        for rule, n in rule_counts.items()
+        if not rule.startswith("comp.tap_distance.")
+    }
 
     assert report["status"] == "violations"
     assert rule_counts == {"metal1.space.1": 4}

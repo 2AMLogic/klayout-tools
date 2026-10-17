@@ -1234,7 +1234,11 @@ that does not lie within `max_distance_um` of a tap. gf180mcu's
 `comp.tap_distance.nwell.lv.1` (DRM `DF.13_LV`: PCOMP inside a well, taps are
 NCOMP inside the well) and `comp.tap_distance.psub.lv.1` (DRM `DF.14_LV`:
 NCOMP outside any well, taps are PCOMP outside the well) are the first users,
-both at 20 µm for the 3.3 V column. The `_MV` variants are not declared.
+both at 20 µm for the 3.3 V column. Their 5 V/6 V siblings
+`comp.tap_distance.nwell.mv.1` (`DF.13_MV`) and
+`comp.tap_distance.psub.mv.1` (`DF.14_MV`) apply a 15 µm reach to active
+overlapping `Dualgate` (issue #3793). The `latchup_mk` marker rules are not
+declared.
 
 The descriptor carries `well_domain` (`"inside"` / `"outside"`), `voltage`
 (`"lv"` / `"mv"`), `max_distance_um`, `step_um` (default 0.5) and the

@@ -91,6 +91,8 @@
       "cap_mk.ongrid.1",
       "comp.space.mv.1",
       "comp.tap_distance.nwell.lv.1",
+      "comp.tap_distance.nwell.mv.1",
+      "comp.tap_distance.psub.mv.1",
       "comp.width.mv.1",
       "diode_mk.ongrid.1",
       "dnwell.ongrid.1",
@@ -221,6 +223,14 @@
       },
       {
         "id": "comp.tap_distance.nwell.lv.1",
+        "reason": "inapplicable_empty_checked_region"
+      },
+      {
+        "id": "comp.tap_distance.nwell.mv.1",
+        "reason": "inapplicable_empty_checked_region"
+      },
+      {
+        "id": "comp.tap_distance.psub.mv.1",
         "reason": "inapplicable_empty_checked_region"
       },
       {
