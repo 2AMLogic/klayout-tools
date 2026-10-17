@@ -6293,7 +6293,19 @@ def _grade_evidence(
         spec.get("content_hash"), resolution["content_hash"]
     )
     if pin_state == _PIN_UNVERIFIABLE:
-        return "unmet", _REASON_UNVERIFIABLE_PROVENANCE, None, {}
+        # Issue #3747: say why -- the pin itself is ungradable for this kind.
+        return (
+            "unmet",
+            _REASON_UNVERIFIABLE_PROVENANCE,
+            None,
+            {
+                "content_hash_pin": _PIN_UNVERIFIABLE,
+                "content_hash_pin_note": (
+                    f"{check_kind} envelopes carry no "
+                    "provenance.input.content_hash; the pin cannot be compared"
+                ),
+            },
+        )
     if pin_state == _PIN_STALE:
         return "unmet", _REASON_STALE_EVIDENCE, None, {}
 
