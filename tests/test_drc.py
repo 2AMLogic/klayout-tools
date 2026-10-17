@@ -10322,7 +10322,7 @@ def _klayout_engine_report(tmp_path, monkeypatch, **kwargs):
     stubbed (other subprocess calls, e.g. `git`, run for real)."""
     import subprocess
 
-    import klayout_tools.drc as drc_module
+    import klayout_tools.drc_klayout_engine as engine_module
     from helpers.subprocess_fakes import fake_completed
     from klayout_tools.drc import run_drc_klayout_engine
 
@@ -10337,7 +10337,7 @@ def _klayout_engine_report(tmp_path, monkeypatch, **kwargs):
         )
         return fake_completed()
 
-    monkeypatch.setattr(drc_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(engine_module.subprocess, "run", fake_run)
     gds = tmp_path / "k.gds"
     _make_clean_layout().write(str(gds))
     deck = tmp_path / "deck.lydrc"
