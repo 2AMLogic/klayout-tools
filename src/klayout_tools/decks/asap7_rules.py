@@ -495,8 +495,16 @@ _LISD_EXACT_3 = (
 )
 _EXACT_W = "exact width across the metal track needs the metal routing direction"
 _SADP_TRACK = (
-    "defined against the routing tracks (adjacent tracks, number of tracks "
-    "spanned); the deck has no per-shape track assignment"
+    "defined against the routing tracks (adjacent tracks, parallel run "
+    "length); the deck has no per-shape track assignment, and the DRM leaves "
+    "'adjacent' and the track pitch undefined (Fig. 3.14.2 shows only min-"
+    "width tracks at 2 x W.1 pitch), so any reading would be a guess"
+)
+_SADP_TRACK_COUNT = (
+    "'spans an even number of minimum-width tracks' is, for the AUX.1 "
+    "grid the deck enforces, the same condition as W.3's even multiple of "
+    "the minimum width, which the deck already reports; a separate check "
+    "would add no violations at the default 0 nm offset"
 )
 _WIDE_EDGE = (
     "'wide' is not defined, and with the default 0 nm offset every multiple "
@@ -534,7 +542,7 @@ def _gaps(
 
 def _sadp_metal_gaps(layer: str, t1: str, t2: str) -> tuple[Asap7RuleGap, ...]:
     return (
-        Asap7RuleGap(f"{layer}.W.4", t1, _SADP_TRACK, "#3155"),
+        Asap7RuleGap(f"{layer}.W.4", t1, _SADP_TRACK_COUNT, "#3155"),
         *_gaps(tuple(f"{layer}.S.{n}" for n in (3, 4, 5)), t1, _SADP_TRACK, "#3155"),
         Asap7RuleGap(f"{layer}.AUX.4", t2, _WIDE_EDGE, "#3155"),
     )
