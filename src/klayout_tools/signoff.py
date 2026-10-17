@@ -1936,6 +1936,16 @@ _REASON_NOT_POST_LAYOUT = "not_post_layout"
 #: fix is to re-run it with something to check, not to fix a defect it found.
 _REASON_NOTHING_CHECKED = "nothing_checked"
 
+#: Issue #3769: a recognised `klt sim` envelope whose own ``coverage`` block
+#: declares measurements (``measurements_declared > 0``) but applied no spec
+#: bound to any of them (``measurements_with_limits == 0``). Its per-corner
+#: ``status: pass`` only means "every measurement produced a value", so
+#: citing it for corner verification would satisfy the item with no bound
+#: ever checked. Grouped with :data:`_REASON_NOTHING_CHECKED` per issue
+#: #826's invariant: the fix is to copy the spec bounds into the request's
+#: ``measurements[].limits`` and re-run, not to fix a defect it found.
+_REASON_NO_LIMITS_CHECKED = "no_limits_checked"
+
 #: Issue #2467: the evidence resolved to a readable, recognised, *passing*
 #: `klt yield` envelope, but at least one of its own measurements reports
 #: ``sample_size.verdict == "insufficient"`` -- the report stating, about
@@ -3414,9 +3424,35 @@ def _coverage_refusal(kind: str, envelope: dict[str, Any]) -> str | None:
     :func:`~klayout_tools.coverage.coverage_refusal_reason`.
     """
     refusal = coverage_refusal_reason(envelope)
+    if kind == "sim" and refusal is None:
+        # Issue #3769: sim coverage counts an unlimited measurement as a
+        # checked observation, so `nothing_checked` stays false for an
+        # all-observation request. For item 5 that is still no bound applied.
+        return _REASON_NO_LIMITS_CHECKED if _sim_no_limits_applied(envelope) else None
     if refusal is None or kind != "erc":
         return refusal
     return None if _erc_connectivity_state(envelope) is not None else refusal
+
+
+def _sim_coverage_counts(envelope: Mapping[str, Any]) -> tuple[int, int] | None:
+    """``(measurements_declared, measurements_with_limits)`` off a `klt sim`
+    envelope's ``coverage`` block, or ``None`` when absent or non-integer
+    (pre-coverage evidence keeps grading exactly as before)."""
+    block = envelope.get("coverage")
+    if not isinstance(block, dict):
+        return None
+    declared = block.get("measurements_declared")
+    limited = block.get("measurements_with_limits")
+    if type(declared) is not int or type(limited) is not int:
+        return None
+    return declared, limited
+
+
+def _sim_no_limits_applied(envelope: Mapping[str, Any]) -> bool:
+    """Whether a `klt sim` envelope declares measurements yet none carry a
+    ``limits`` bound (issue #3769). ``capture_only`` runs declare none."""
+    counts = _sim_coverage_counts(envelope)
+    return counts is not None and counts[0] > 0 and counts[1] == 0
 
 
 def _drc_rule_subset(envelope: Mapping[str, Any]) -> bool:
@@ -4336,6 +4372,12 @@ def _detail(kind: str, envelope: _EvidenceEnvelope) -> dict[str, Any]:
     # the reader-facing half of the `passed: False` `_build_check` applies
     # for the same condition; see "Vacuous-verdict refusal" above.
     detail.update(_nothing_checked_detail(envelope))
+    counts = _sim_coverage_counts(envelope) if kind == "sim" else None
+    if counts is not None and _sim_no_limits_applied(envelope):
+        detail["no_limits_checked"] = {
+            "measurements_declared": counts[0],
+            "measurements_with_limits": counts[1],
+        }
     return detail
 
 
