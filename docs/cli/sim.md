@@ -1713,6 +1713,23 @@ the packaged `data/` copy. See
   naming the variants the image carries, before any S3 write or launch. A
   legacy entry without the field, an absent manifest, or a request without
   `models.pdk` is unchanged.
+- **Which gf180mcu variant the published images ship.** As of the 2026-08-24
+  gf180mcu image, `build-remote-sim-ami.sh` bakes a single variant
+  (`volare enable --pdk gf180mcu` into `PDK_ROOT=/opt/pdk`), which is
+  `gf180mcuD`; check the manifest's `pdk_variants` for the authoritative list
+  once an entry publishes it. **`gf180mcuC` is not shipped.** A
+  `models.pdk: "gf180mcuC"` request passes the client's family-level check and
+  then fails on the runner, one `batch_job_failed` per corner
+  (`no supported-layout PDK install providing variant 'gf180mcuC' was found`).
+  The early refusal above cannot catch it yet: no manifest entry publishes
+  `pdk_variants` (`grep -c pdk_variants data/remote-sim-ami-manifest.json` →
+  `0`), so the check stays dormant until an operator backfills the field from
+  an inspected image. To run a variant the image lacks, either use
+  `--backend local` on a host whose `$PDK_ROOT` has that variant installed, or
+  pin to the shipped one (`models.pdk: "gf180mcuD"`). Provisioning
+  `gf180mcuC` in the fleet image is an infra change tracked outside this repo
+  (`2AMLogic/2am:infra/aws/batch-fleet-provision.sh` provisions the batch
+  fleet).
 - **Discovering the runner version before submit.** Read the manifest:
   `jq '.images[] | {pdk, region, ami_id, built_at, klt_version, klt_ref}'
   "${KLT_AMI_MANIFEST:-$HOME/.config/klt/remote-sim-ami-manifest.json}"`.
