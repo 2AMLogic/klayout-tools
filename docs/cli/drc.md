@@ -581,6 +581,17 @@ flag — passing it alongside `--engine curated` (the default) is silently
 ignored, not rejected, the same treatment `--deck-file`/`--timeout-s`
 already get for that engine mismatch.
 
+**Discovering a deck's globals, and the `deck_globals_not_supplied` warning
+(issue #3816).** `klt pdk decks --pdk <variant>` lists the sibling decks a PDK
+ships and the `-rd` globals each reads. When the deck handed to the klayout
+engine reads a global with no default (`required_by_caller`) and the run
+supplied none via `--deck-var`, the report gains an additive top-level
+`warnings` array of shared-contract entries
+(`{"category": "deck_globals_not_supplied", "count": 1, "text": ...}`). It never
+changes `status`, `violation_count` or the exit code, and does not fire for a
+self-contained deck such as `sky130A.lydrc`. The scan is the same static
+heuristic `klt pdk decks` uses.
+
 **Deck resolution.** `<deck_file>` is resolved, in order: `--deck-file` (an
 explicit path) if given; otherwise `klayout_tools.pdk.drc_deck_file(variant=
 --pdk, root=--pdk-root)` (issue #565), which resolves a PDK-native,
