@@ -2625,12 +2625,24 @@ def _run_single_corner(
         "warnings": warnings,
         "provenance": provenance,
     }
-    if portable_paths:
-        response = portable_response(
-            response,
-            request_dir=os.path.dirname(os.path.abspath(request_path)),
-            pdk_root=pdk_info["root"],
-        )
+    return _finish_response(
+        response,
+        portable=portable_paths,
+        request_dir=os.path.dirname(os.path.abspath(request_path)),
+        pdk_root=pdk_info["root"],
+    )
+
+
+def _finish_response(
+    response: dict[str, Any],
+    *,
+    portable: bool,
+    request_dir: str,
+    pdk_root: str | None = None,
+) -> dict[str, Any]:
+    """Apply the opt-in `portable_paths` rewrite; no-op when not requested."""
+    if portable:
+        return portable_response(response, request_dir=request_dir, pdk_root=pdk_root)
     return response
 
 
@@ -2744,9 +2756,11 @@ def _run_rebuild_corners(
         "failed_corners": failed,
         "corner_runs": corner_runs,
     }
-    if _validate_portable_paths(request.get("portable_paths")):
-        response = portable_response(response, request_dir=request_dir)
-    return response
+    return _finish_response(
+        response,
+        portable=_validate_portable_paths(request.get("portable_paths")),
+        request_dir=request_dir,
+    )
 
 
 # --------------------------------------------------------------------------- #
