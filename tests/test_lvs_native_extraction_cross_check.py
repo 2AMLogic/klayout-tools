@@ -729,8 +729,30 @@ _CROSS_CHECK_VERDICT_RULE_IDS = frozenset(
         "sky130_fd_pr__model__cap_mim",  # documented disagreement (#512)
         "sky130_fd_pr__model__cap_mim_m4",  # documented disagreement (#512)
         "sky130_fd_pr__pnp_05v5_W0p68L0p68",  # deferred (investigated)
+        "sky130_fd_pr__diode_pw2nd_05v5",  # deferred, not run (#3803)
+        "sky130_fd_pr__diode_pw2nd_05v5_lvt",  # deferred, not run (#3803)
+        "sky130_fd_pr__diode_pw2nd_05v5_nvt",  # deferred, not run (#3803)
+        "sky130_fd_pr__diode_pw2nd_11v0",  # deferred, not run (#3803)
+        "sky130_fd_pr__diode_pd2nw_05v5",  # deferred, not run (#3803)
+        "sky130_fd_pr__diode_pd2nw_05v5_lvt",  # deferred, not run (#3803)
+        "sky130_fd_pr__diode_pd2nw_05v5_hvt",  # deferred, not run (#3803)
+        "sky130_fd_pr__diode_pd2nw_11v0",  # deferred, not run (#3803)
     }
 )
+
+
+def test_sky130_diodes_native_cross_check_deferred() -> None:
+    """The eight sky130 junction diodes (issue #3803) are **not**
+    cross-checked against the native `sky130.lvs` by this module -- deferred,
+    not executed. The compiled entries are a transcription of the native
+    derivations (marker `areaid.diode` 81/23, `nsdm`/`psdm` terminals,
+    `hvi`/`lvtn`/`hvtp` flavour split); a second-source run needs a native
+    diode fixture with a `ptap_conn` substrate hole, which is out of that
+    issue's scope. Their golden pairs live in `test_lvs_device_provenance.py`."""
+    names = {d.name for d in EXTRACTION_DECK.diodes}
+    assert len(names) == 8
+    for diode in EXTRACTION_DECK.diodes:
+        assert diode.provenance.rule_id == f"sky130_fd_pr__{diode.name}"
 
 
 def _provenanced_device_rule_ids(deck) -> set[str]:
