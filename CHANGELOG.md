@@ -612,6 +612,20 @@ not `klt --version`, if you need to detect this kind of drift. See
   nets. Reports a proven `lower_bound_um`/`measured_max_distance_um` bracket;
   exits `0` pass, `3` fail, `4` `unsupported` (rule not evaluable, never a
   pass). See `docs/cli/tap-distance.md`.
+
+- **Flat post-route SDFs with escaped-divider instance names now annotate**
+  (issue #2897, following #1890): `klt functional-verification
+  --options.sdf` used to reject an SDF whose `INTERCONNECT` entries named
+  a flattened `generate` array's escaped instance (`g\[0\]\.sub\.u1`),
+  because Icarus aborts `vvp` on it. `klt` now renames those instances to
+  plain identifiers in build-dir copies of the SDF and netlist, so the run
+  annotates and simulates. The caller's files are untouched. This also
+  fixes an escaped `.` under `(DIVIDER /)`, which the #1890 guard missed
+  and which aborted `vvp`. Only an escaped-divider *pin or top-level
+  port* is still rejected up front. **Additive contract change:**
+  `environment.sdf` gains `renamed` (`[{from, to}]`), present only when
+  something was renamed. `schema_version` is unchanged.
+
 - **`klt sim` can sweep a ramped (PWL/PULSE) supply** (issue #2902): new
   `corners.supply_waveforms` lists `corners.supply_v` keys whose PWL/PULSE
   source is rescaled per corner (peak level = the swept supply value) instead
