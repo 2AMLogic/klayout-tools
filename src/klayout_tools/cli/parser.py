@@ -3336,6 +3336,22 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     pex_parser.add_argument(
+        "--extract-only",
+        dest="extract_only",
+        action="store_true",
+        default=False,
+        help=(
+            "extract and report without any measurement leg (issue #3739): "
+            "no testbench or --measure-command is needed, so no placeholder "
+            "measurement lands in delta[]. The response carries "
+            "extraction/body_bias/provenance as usual, testbenches and delta "
+            'are empty, measurement.mode is "extract-only" and status is '
+            "not_checked (exit 4). Cannot be combined with testbenches, "
+            "--measure-command, --reference-netlist, --measure-timeout-s, "
+            "--device-only-leg or --flatten-schematic. Off by default."
+        ),
+    )
+    pex_parser.add_argument(
         "--deck",
         required=True,
         help=(
@@ -6500,7 +6516,7 @@ def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
         default=None,
         help=(
             "PDK antenna-ratio limit table to check each level's "
-            "antenna_ratio against (currently: sky130). Optional -- omit "
+            "antenna_ratio against (currently: sky130, ihp-sg13g2). Optional -- omit "
             "to still report every level's antenna_ratio, just with "
             "verdict 'unchecked' everywhere. Not validated by argparse -- "
             "an unknown name exits 1 with a clean error, per "

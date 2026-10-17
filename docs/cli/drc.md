@@ -2771,7 +2771,7 @@ The gate has two parts, run for each library:
    ```bash
    klt drc <cells.gds> --engine klayout \
        --deck-file src/klayout_tools/decks/asap7.drc \
-       --expect-rule-categories 232 --format json
+       --expect-rule-categories 263 --format json
    ```
 
    and requires exit 0, `status: "clean"`, no violations, a satisfied
