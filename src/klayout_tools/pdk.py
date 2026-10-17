@@ -1791,6 +1791,10 @@ _GF180MCU_FAMILY_PREFIXES: tuple[tuple[str, str], ...] = (
     ("mos_cap", "moscap_"),
 )
 
+#: The one gf180mcu family whose section mixes device flavours (3.3V vs 5/6V)
+#: that the deck skews independently; it gets the additive ``devices`` list.
+_GF180MCU_FLAVOUR_FAMILY = "mos"
+
 #: sky130's per-corner device-family split, keyed by the leading path
 #: component of the `.include` lines a `.lib <corner> ... .endl` block
 #: carries (``"corners/tt.spice"`` -> family ``mos``, ``"r+c/..."`` ->
@@ -1919,9 +1923,12 @@ def list_corners(variant: str | None = None, root: str | None = None) -> dict[st
     its 03v3 flavor does skew, both inside the single curated "mos" family
     (the issue's own worked example) -- this command correctly reports
     "mos" as ``"skewed"`` for that corner (some devices moved), but does
-    not itself flag the 06v0 sub-flavor as unmoved. Resolving that finer,
-    per-flavor question is the spike's own proposed ``klt pdk corner --pdk
-    <variant> --corner <name>`` follow-up (section 2.2), not this command.
+    not itself flag the 06v0 sub-flavor as unmoved in the family-level
+    ``skew``. The finer question is answered by the additive ``devices``
+    list (issue #3794) on gf180mcu's ``mos`` section entries: one
+    ``{flavour, section, skew}`` per device flavour (``03v3``, ``06v0``,
+    ``06v0_nvt``, ...), each classified against its own typical-corner
+    include set. Family-level ``skew`` and ``complete`` are unchanged.
 
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/pdk.md``)::
@@ -1938,7 +1945,10 @@ def list_corners(variant: str | None = None, root: str | None = None) -> dict[st
                     "corner": str,
                     "sections": [
                         {"family": str, "section": str | None,
-                         "skew": "typical" | "skewed" | "param" | None},
+                         "skew": "typical" | "skewed" | "param" | None,
+                         # gf180mcu "mos" only (issue #3794):
+                         "devices": [{"flavour": str, "section": str | None,
+                                      "skew": "typical" | "skewed" | None}]},
                         ...
                     ],
                     "family_count": int,
@@ -2070,6 +2080,7 @@ def _scan_gf180mcu_corners(model_path: str) -> list[dict[str, Any]]:
 
     typical_tokens: dict[str, set[tuple[str, str]]] = {}
     typical_params: dict[str, frozenset[str]] = {}
+    typical_flavours: dict[str, set[tuple[str, str]]] = {}
     corners: list[dict[str, Any]] = []
     for corner in _GF180MCU_CORNER_NAMES:
         sections: list[dict[str, Any]] = []
@@ -2093,9 +2104,64 @@ def _scan_gf180mcu_corners(model_path: str) -> list[dict[str, Any]]:
                     skew = "param"
                 else:
                     skew = "typical"
-            sections.append({"family": family, "section": section_name, "skew": skew})
+            entry: dict[str, Any] = {
+                "family": family,
+                "section": section_name,
+                "skew": skew,
+            }
+            if family == _GF180MCU_FLAVOUR_FAMILY:
+                flavours = _gf180mcu_flavour_tokens(tokens)
+                if corner == "typical":
+                    typical_flavours = flavours
+                entry["devices"] = _flavour_devices(
+                    section_name, flavours, typical_flavours, corner == "typical"
+                )
+            sections.append(entry)
         corners.append(_finish_corner(corner, sections, corner == "typical"))
     return corners
+
+
+def _gf180mcu_flavour_tokens(
+    tokens: set[tuple[str, str]],
+) -> dict[str, set[tuple[str, str]]]:
+    """Group a gf180mcu section's ``.lib '<file>' <token>`` includes by device
+    flavour: ``nfet_06v0_nvt_t`` -> ``06v0_nvt`` (drop the leading device
+    token and the trailing per-corner suffix). A token with fewer than three
+    ``_`` parts has no separable flavour and is keyed by its whole name."""
+    grouped: dict[str, set[tuple[str, str]]] = {}
+    for path, name in tokens:
+        parts = name.split("_")
+        flavour = "_".join(parts[1:-1]) if len(parts) >= 3 else name
+        grouped.setdefault(flavour, set()).add((path, name))
+    return grouped
+
+
+def _flavour_devices(
+    section: str,
+    flavours: dict[str, set[tuple[str, str]]],
+    typical: dict[str, set[tuple[str, str]]],
+    is_typical_corner: bool,
+) -> list[dict[str, Any]]:
+    """Per-flavour ``{flavour, section, skew}`` list, each flavour classified
+    against its own typical-corner include set (``skewed`` when it differs,
+    else ``typical``; ``None`` for a flavour the typical corner has but this
+    section does not)."""
+    devices: list[dict[str, Any]] = []
+    for flavour in sorted(set(flavours) | set(typical)):
+        if flavour not in flavours:
+            skew = None
+        elif is_typical_corner or flavours[flavour] == typical.get(flavour):
+            skew = "typical"
+        else:
+            skew = "skewed"
+        devices.append(
+            {
+                "flavour": flavour,
+                "section": section if skew is not None else None,
+                "skew": skew,
+            }
+        )
+    return devices
 
 
 def _scan_sky130_corners(model_path: str) -> list[dict[str, Any]]:
