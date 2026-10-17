@@ -7919,6 +7919,38 @@ DOC_PROSE_REPORT_PATHS: frozenset[tuple[str, ...]] = frozenset(
 )
 
 
+#: The tier-report paths ``--check`` drops from **both** the verdict diff and
+#: the ``doc_drift`` diff because they identify one Spot run, not the evidence
+#: (issue #3690): the ``remote`` block of an operator-approved generator
+#: execution (issue #3289) -- ``job_id`` (a fresh ``uuid4`` per run),
+#: instance id/type/AZ, ``lifecycle``, ``elapsed_seconds`` and the rest of
+#: :func:`~.sim_batch._batch_environment`. Re-grading submits a *new* job, so
+#: every one of these differs between any two runs of an unchanged manifest
+#: and a self-``--check`` of an executed report could never match.
+#:
+#: Spelled as one whole-``remote`` subtree per location rather than a key
+#: list, so a field the batch environment gains later is volatile too. What
+#: stays compared is everything the grade depends on: ``executed_by_klt``,
+#: ``execution.recipe``/``command``/``script_sha256``/``input_tree``/
+#: ``committed_hash``/``output_hash``. The second path is the same block on a
+#: refused or failed run (``detail.generator_execution``). ``--fleet`` reports
+#: carry only reduced per-block views, never these rows, so one shape suffices.
+RUN_IDENTITY_REPORT_PATHS: frozenset[tuple[str, ...]] = frozenset(
+    {
+        (
+            "items",
+            LIST_ITEM,
+            "citation",
+            "artifact_binding",
+            "regeneration",
+            "execution",
+            "remote",
+        ),
+        ("items", LIST_ITEM, "detail", "generator_execution", "remote"),
+    }
+)
+
+
 def _check_signoff_report(
     report_path: str, committed: dict[str, Any], fresh: dict[str, Any]
 ) -> dict[str, Any]:
@@ -7946,20 +7978,25 @@ def _check_signoff_report(
     ``fresh`` is embedded un-stripped, exactly as before -- the exclusion
     applies to the comparison, never to what the response shows.
     """
+    # Run identity is dropped from both diffs (and so is never doc drift).
+    committed_graded = strip_path_patterns(committed, RUN_IDENTITY_REPORT_PATHS)
+    fresh_graded = strip_path_patterns(fresh, RUN_IDENTITY_REPORT_PATHS)
     result = build_rerun_result(
         report_path=report_path,
         committed=committed,
         fresh=fresh,
         exclude=VOLATILE_REPORT_PATHS,
-        committed_for_diff=strip_path_patterns(committed, DOC_PROSE_REPORT_PATHS),
-        fresh_for_diff=strip_path_patterns(fresh, DOC_PROSE_REPORT_PATHS),
+        committed_for_diff=strip_path_patterns(
+            committed_graded, DOC_PROSE_REPORT_PATHS
+        ),
+        fresh_for_diff=strip_path_patterns(fresh_graded, DOC_PROSE_REPORT_PATHS),
         mode="check",
     )
     verdict_fields = {entry["field"] for entry in result["drift"]}
     doc_drift_fields = [
         entry
         for entry in diff_verdict_fields(
-            committed, fresh, exclude=VOLATILE_REPORT_PATHS
+            committed_graded, fresh_graded, exclude=VOLATILE_REPORT_PATHS
         )
         if entry["field"] not in verdict_fields
     ]
