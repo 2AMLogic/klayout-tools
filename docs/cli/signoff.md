@@ -1315,7 +1315,8 @@ may carry an optional `provenance.regeneration` block (issue #2887):
 | Field | Type | Meaning |
 | ----- | ---- | ------- |
 | `generator` | non-empty string | The command the attester's CI ran to regenerate the artifact. **Echoed, never executed.** |
-| `regenerated_hash` | `"sha256:<64 lowercase hex>"` | The hash of the bytes that run produced. |
+| `regenerated_hash` | `"sha256:<64 lowercase hex>"` | The hash of the bytes that run produced (or, with `hash_kind: "geometry"`, the geometry digest of them). |
+| `hash_kind` | `"bytes"` (default) \| `"geometry"` | What `regenerated_hash` is a hash *of*. Optional; absent means `"bytes"`, and existing envelopes grade identically (issue #3743). |
 
 The workflow: your CI regenerates the artifact into a scratch directory,
 hashes the result, and writes that hash into the attestation beside the
@@ -1326,7 +1327,7 @@ committed artifact's own hash. `klt signoff` then compares the two:
 | Absent, or `null` | Unchanged from the binding above. The row is `met`, and text output adds `regeneration: not claimed`. |
 | `regenerated_hash` equals the hash the bound artifact re-hashes to | `met`. The citation's `artifact_binding` gains `regeneration: {"generator", "regenerated_hash", "executed_by_klt": false}`. |
 | `regenerated_hash` differs | `unmet`/`stale_artifact`. The committed artifact is not what its generator produces. Regenerate it, commit it, and re-attest. |
-| Not an object, `generator` missing/empty/not a string, or `regenerated_hash` not a `sha256:` digest | `unmet`/`unanchored_evidence`. A claim that cannot be read is refused, so a typo can never pass as "not claimed". |
+| Not an object, `generator` missing/empty/not a string, `regenerated_hash` not a `sha256:` digest, or `hash_kind` not `"bytes"`/`"geometry"` | `unmet`/`unanchored_evidence`. A claim that cannot be read is refused, so a typo can never pass as "not claimed". |
 
 The binding's own checks run first. If the committed artifact was edited
 after the attestation, the row is `stale_evidence` whatever the claim says.
@@ -1336,6 +1337,20 @@ neither grade nor echo the block.
 When the item binds a set (`provenance.input.paths`, above), the bound hash
 is the set's combined digest, so `regenerated_hash` must equal that digest;
 the CI step should hash the regenerated set the same way.
+
+**Streams that embed a write time (`hash_kind: "geometry"`, issue #3743).**
+GDS/OASIS headers carry modification dates, so two regenerations of one
+layout differ byte-for-byte while their geometry is identical, and a byte
+hash can never be claimed. With `"hash_kind": "geometry"`, `regenerated_hash`
+is compared to the timestamp- and order-independent geometry digest
+(`layout_geometry_digest`: database unit, cells, shapes, instances) of the
+bound artifact instead. The bytes binding (`stale_evidence` for an edited
+artifact) still runs first. A bound artifact that is not a readable
+GDS/OASIS stream, or a set binding (`provenance.input.paths`; geometry is
+single-artifact only), is `unanchored_evidence` — a geometry claim never
+silently passes. The disclosure echoes `hash_kind: "geometry"` (the key is
+absent for byte claims). A geometry claim is never run by the opt-in
+generator execution, which compares bytes; it stays `executed_by_klt: false`.
 
 **What this does not check.** By default `klt signoff` **never runs**
 `generator`. That holds for file-backed and command-backed evidence alike, and
@@ -1544,9 +1559,12 @@ an inventory the author did not write.
 | | `cold_start`: command | yes | exits `0` (`command`, role `cold_start`) |
 | | `pins`: `{"pdk": {"name", "revision"}, "tools": {<tool>: <version>}}` | checked, not structurally required | `pdk.name` and `pdk.revision` non-empty (`pin`, role `pdk`); `tools` a non-empty map of non-empty versions (`pin`, role `tools`). A missing pin is a **failed check**, not a malformed inventory. |
 | **10** Repo hygiene | `hygiene`: list of paths | yes, non-empty | each file exists (`present`, role `hygiene`) |
-| | `checks`: list of `{name, argv, cwd?}` | yes, non-empty | each exits `0` (`command`, role `audit`); `name` must be unique |
+| | `checks`: list of `{name, argv, cwd?, local_only?}` | yes, non-empty | each exits `0` (`command`, role `audit`); `name` must be unique |
 
-A **command** is `{"argv": ["prog", "arg", ...], "cwd": "<repo-relative dir>"}`.
+A **command** is `{"argv": ["prog", "arg", ...], "cwd": "<repo-relative dir>", "local_only": false}`.
+`local_only` is optional (boolean, default `false`; anything else is refused,
+exit `1`). It marks a command that needs a toolchain the `--check` runner may
+not have (xschem, a PDK): see "CI usage" below.
 `argv` is run directly, never through a shell, with stdin closed and output
 discarded. `cwd` defaults to the repository root. Each command is bounded by
 the same timeout as command-backed manifest evidence. A command that cannot
@@ -1727,6 +1745,21 @@ check's outcome, or to the committed envelope itself is drift. The response
 is the shared `--check` drift shape (`schema_version`, `mode: "check"`,
 `report`, `status: "match"|"drifted"`, `drift[]`, `fresh`) plus
 `fresh_status`, the re-attested envelope's own `status`.
+
+**Toolchain-free runners: `local_only` commands (issue #3743).** A command
+declared `"local_only": true` (an item-1 `derived[].check`, an item-9
+`cold_start`, or an item-10 `checks[]` entry) runs under `--attest` as usual,
+and its outcome is committed in the envelope (the check carries
+`"local_only": true`). Under `--attest --check` it is **not run**: the check
+is carried through with its committed outcome and listed in the response's
+`skipped_checks` (`[{"role", "name"?, "target"?, "argv", "cwd", "passed"}]`,
+`passed` being the *committed* outcome, never a result of this run). Text
+output prints each as `[SKIP]`. Every file-presence and content-hash check
+still runs, so drift in an inventoried file is still drift, and a committed
+failing outcome still gives `fresh_status: "fail"` (exit `3`). The skip is
+visible, never a pass; `skipped_checks` is `[]` when nothing was skipped.
+Run a plain `--attest --check` (no `local_only` commands) on a runner that
+has the toolchain to re-verify them.
 
 #### Exit codes
 

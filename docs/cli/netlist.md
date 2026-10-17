@@ -204,8 +204,11 @@ predecessor and whitespace runs are collapsed (comment lines are left as
 lines; CRLF and trailing whitespace are ignored), so a netlist whose long
 cards a project post-processor re-wrapped still reports `"match"`. Only
 layout is normalized, never a token: a changed device card, parameter value,
-node or pin order still reports `"drifted"`. When the files match only
-because of this, `drift.layout_differs` is `true`. This does not hide the
+node or pin order still reports `"drifted"`. The one exception is the port
+order of xschem's informational `**.subckt <name> <ports...>` comment line,
+which differs between xschem versions and is compared order-insensitively
+(issue #3743); the electrical `.subckt` card's port order is still strict.
+When the files match only because of this, `drift.layout_differs` is `true`. This does not hide the
 `.subckt`/`.ends` wrapper difference — for a committed netlist wrapped as a
 real `.subckt`, pass `--block`, which `--check` applies before comparing
 ([Block mode](#block-mode-an-includable-subckt)).
@@ -484,7 +487,7 @@ error: the netlist is still produced and the exit code is unchanged.
 | `committed_bytes` | integer \| null | Size of the committed netlist, or `null` when absent. |
 | `committed_content_hash` | string \| null | `sha256:<hex>` of the committed netlist, or `null` when absent. |
 | `path_comments_differ` | boolean | `true` when the files differ only in the directories of xschem's `** sch_path:` / `** sym_path:` comments, which `--check` ignores (status is then `"match"`). Additive (issue #3010). |
-| `layout_differs` | boolean | `true` when the files match only after `--check` ignored `+` continuation layout and whitespace runs. Additive (issue #3324). |
+| `layout_differs` | boolean | `true` when the files match only after `--check` ignored `+` continuation layout, whitespace runs, or the port order of the `**.subckt` comment line (issue #3743). Additive (issue #3324). |
 | `diff` | array\<string\> | Unified diff lines, committed → regenerated. `[]` on `"match"`. Capped at 200 lines. |
 | `diff_truncated` | boolean | Whether `diff` was cut off at the cap. |
 | `reason` | string \| null | Human-readable explanation of the verdict; `null` on `"match"`. |

@@ -899,7 +899,7 @@ from typing import (
     get_type_hints,
 )
 
-from ._provenance import INPUT_ROLE_LAYOUT, sha256_file
+from ._provenance import INPUT_ROLE_LAYOUT, layout_geometry_digest, sha256_file
 from ._report_verify import (
     LIST_ITEM,
     build_rerun_result,
@@ -1836,6 +1836,11 @@ _ITEMS_ACCEPTING_REGENERATION_CLAIMS: frozenset[int] = frozenset({1, 2})
 #: so a placeholder or differently-encoded digest is refused as malformed
 #: instead of reading as a stale artifact.
 _REGENERATED_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+#: ``provenance.regeneration.hash_kind`` values: raw bytes (default) or the
+#: decoded-geometry digest, which ignores GDS/OASIS write timestamps.
+_HASH_KIND_BYTES = "bytes"
+_HASH_KIND_GEOMETRY = "geometry"
 
 #: Issue #2342: the evidence entry carried a ``"pointer"`` (an RFC 6901 JSON
 #: Pointer naming where inside the cited document the envelope lives -- see
@@ -6408,11 +6413,19 @@ def _bind_anchored_citation(
     binding = _generic_artifact_binding(resolution["envelope"], resolution)
     if item_id in _ITEMS_ACCEPTING_REGENERATION_CLAIMS:
         regeneration, refusal = _regeneration_claim(
-            resolution["envelope"], resolution["content_hash"]
+            resolution["envelope"],
+            resolution["content_hash"],
+            lambda: _bound_geometry_digest(resolution, repo_root),
         )
         if refusal is not None:
             return refusal
-        if regeneration is not None and generator_exec is not None:
+        # Approved execution compares output *bytes*; a geometry-kind claim is
+        # graded on geometry alone, so it stays the non-executing attestation.
+        if (
+            regeneration is not None
+            and generator_exec is not None
+            and regeneration.get("hash_kind", _HASH_KIND_BYTES) == _HASH_KIND_BYTES
+        ):
             regeneration, refusal, detail = _execute_regeneration(
                 generator_exec, resolution, regeneration, repo_root
             )
@@ -6457,6 +6470,19 @@ def _bound_artifact(
             return None
         return str(root), relative.replace(os.sep, "/")
     return None
+
+
+def _bound_geometry_digest(
+    resolution: Mapping[str, Any], repo_root: str | Path | None
+) -> str | None:
+    """:func:`~._provenance.layout_geometry_digest` of the single artifact a
+    ``"generic"`` citation is bound to, or ``None`` when that artifact cannot
+    be pinned down (a set binding included) or is not a readable GDS/OASIS."""
+    bound = _bound_artifact(resolution, repo_root)
+    if bound is None:
+        return None
+    root, relative = bound
+    return layout_geometry_digest(os.path.join(root, relative))
 
 
 def _execute_regeneration(
@@ -6515,8 +6541,24 @@ def _execute_regeneration(
     return None, _REASON_CHECK_ERRORED, detail
 
 
+def _regeneration_comparand(
+    hash_kind: Any,
+    bound_hash: Any,
+    bound_geometry_digest: Callable[[], str | None] | None,
+) -> Any:
+    """The hash a regeneration claim of ``hash_kind`` is compared with, or
+    ``None`` when the kind is unknown or its digest cannot be computed."""
+    if hash_kind == _HASH_KIND_BYTES:
+        return bound_hash
+    if hash_kind == _HASH_KIND_GEOMETRY and bound_geometry_digest is not None:
+        return bound_geometry_digest()
+    return None
+
+
 def _regeneration_claim(
-    envelope: Mapping[str, Any], bound_hash: Any
+    envelope: Mapping[str, Any],
+    bound_hash: Any,
+    bound_geometry_digest: Callable[[], str | None] | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     """Grade an item-1/2 attestation's optional ``provenance.regeneration``
     claim (issue #2887) against ``bound_hash`` -- the hash the bound
@@ -6532,6 +6574,15 @@ def _regeneration_claim(
       silently dropped, or a typo would read as "not claimed".
     - :data:`_REASON_STALE_ARTIFACT` when ``regenerated_hash`` differs from
       ``bound_hash``.
+
+    Optional ``hash_kind`` (default ``"bytes"``, the behaviour above) may be
+    ``"geometry"``: ``regenerated_hash`` is then compared to
+    ``bound_geometry_digest()`` -- the timestamp- and order-independent
+    :func:`~._provenance.layout_geometry_digest` of the bound artifact -- so a
+    GDS/OASIS stream that embeds a write time can still be claimed. An unknown
+    ``hash_kind``, or a digest that cannot be computed (not a readable
+    GDS/OASIS, set binding), is :data:`_REASON_UNANCHORED_EVIDENCE`. The
+    bytes-binding gate has already run by the time this is called.
 
     ``generator`` is **never executed** -- it is the attester's description
     of how they regenerated the artifact, echoed verbatim so a reader can
@@ -6553,13 +6604,20 @@ def _regeneration_claim(
         regenerated_hash
     ):
         return None, _REASON_UNANCHORED_EVIDENCE
-    if regenerated_hash != bound_hash:
+    hash_kind = claim.get("hash_kind", _HASH_KIND_BYTES)
+    compared = _regeneration_comparand(hash_kind, bound_hash, bound_geometry_digest)
+    if compared is None:
+        return None, _REASON_UNANCHORED_EVIDENCE
+    if regenerated_hash != compared:
         return None, _REASON_STALE_ARTIFACT
-    return {
+    disclosure: dict[str, Any] = {
         "generator": generator,
         "regenerated_hash": regenerated_hash,
         "executed_by_klt": False,
-    }, None
+    }
+    if hash_kind != _HASH_KIND_BYTES:
+        disclosure["hash_kind"] = hash_kind
+    return disclosure, None
 
 
 def _generic_binding_path(envelope: Mapping[str, Any]) -> Any:

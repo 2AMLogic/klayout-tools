@@ -647,7 +647,17 @@ claim the citation's `artifact_binding` gains a `regeneration` object
 (`{generator, regenerated_hash, executed_by_klt: false}`). A mismatched
 claim renders the new `reason` value `stale_artifact`, and a malformed one
 renders the existing `unanchored_evidence`. An envelope that makes no
-claim grades and renders exactly as before. No `schema_version` bump. See
+claim grades and renders exactly as before. No `schema_version` bump.
+
+Issue #3743 adds three additive, optional fields (no `schema_version`
+bump; absent they change nothing): `provenance.regeneration.hash_kind`
+(`"bytes"` default, or `"geometry"` to compare `regenerated_hash` with the
+timestamp-independent layout geometry digest; echoed in the disclosure only
+when `"geometry"`; unknown values are `unanchored_evidence`); `local_only`
+(boolean) on an attestation-inventory command, also echoed on the emitted
+`attestation.checks[]` entry; and `skipped_checks[]` in the
+`klt signoff --attest --check` response, listing `local_only` commands that
+were not run. See
 [`docs/cli/signoff.md`](cli/signoff.md)'s "Items 1 and 2: attesting that
 the artifact was regenerated".
 
