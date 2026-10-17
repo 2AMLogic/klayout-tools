@@ -150,13 +150,13 @@
     },
     {
       "file": "src/klayout_tools/drc.py",
-      "function": "_parse_klayout_rdb_report",
-      "complexity": 13
-    },
-    {
-      "file": "src/klayout_tools/drc.py",
       "function": "run_drc",
       "complexity": 47
+    },
+    {
+      "file": "src/klayout_tools/drc_klayout_engine.py",
+      "function": "_parse_klayout_rdb_report",
+      "complexity": 13
     },
     {
       "file": "src/klayout_tools/economy.py",
