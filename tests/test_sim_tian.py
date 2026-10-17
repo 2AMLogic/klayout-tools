@@ -422,12 +422,3 @@ def test_tian_without_passes_is_refused(tmp_path):
     path.write_text(json.dumps(doc))
     with pytest.raises(sim.SimError, match="requires analysis.passes"):
         sim.run_sim(str(path))
-
-
-@pytest.mark.parametrize("backend", ["remote", "batch"])
-def test_tian_offhost_is_still_refused(tmp_path, backend):
-    request = _write_request(
-        tmp_path, [{"name": "pm", "tian": {**_TIAN, "metric": "phase_margin_deg"}}]
-    )
-    with pytest.raises(sim.SimError, match="analysis.passes is not supported"):
-        sim.run_sim(str(request), backend=backend)

@@ -1595,6 +1595,7 @@ release segment:
 | `analysis_steps` ([#2482](https://github.com/2AMLogic/klayout-tools/issues/2482)) | `analysis_steps` is present | `0.7.1` |
 | `transfer` ([#2924](https://github.com/2AMLogic/klayout-tools/issues/2924)) | any `measurements[]` entry declares `transfer` | `0.7.1` (**mandatory**, see below) |
 | `stimulus` ([#2977](https://github.com/2AMLogic/klayout-tools/issues/2977)) | `stimulus` is present | `0.7.1` (**mandatory**, see below) |
+| `dual_injection` ([#3161](https://github.com/2AMLogic/klayout-tools/issues/3161)) | `analysis.passes` is present or any `measurements[]` entry declares `tian` | `0.7.1` (**mandatory**, see below) |
 | `measurements[].expr` | any `measurements[]` entry has `expr` | `0.7.0` |
 | `corners.process[].sections[]` | a `corners.process[]` bundle has an object-form `sections[]` entry | `0.7.0` |
 | `options.ngspice_init` | `options.ngspice_init` is set and non-empty | `0.7.0` |
@@ -1636,7 +1637,7 @@ the next registry entry.
 - Limit: a `0.7.1.devN` runner built before a feature landed looks the same as
   one built after, so it counts as supporting it.
 
-**Mandatory features (`transfer`, [#2924](https://github.com/2AMLogic/klayout-tools/issues/2924); `stimulus`, [#2977](https://github.com/2AMLogic/klayout-tools/issues/2977)).**
+**Mandatory features (`transfer`, [#2924](https://github.com/2AMLogic/klayout-tools/issues/2924); `stimulus`, [#2977](https://github.com/2AMLogic/klayout-tools/issues/2977); `dual_injection`, [#3161](https://github.com/2AMLogic/klayout-tools/issues/3161)).**
 A runner that predates `measurements[].transfer` would drop the metric (and one
 that predates `stimulus` would simulate with the digital control lines
 undriven), so
@@ -3766,8 +3767,12 @@ injection source active in each, and both complex result sets kept. An `ac`
 - Refused before any engine launch: duplicate/malformed passes, a non-`ac`
   analysis, any `measurements[]` entry other than `tian` (see "Dual-injection
   stability metrics" below), `options.waveforms` / `--plot`, `engine: "xyce"`,
-  and `backend: "remote"` / `"batch"` (transport is #3161). Requests without
-  `passes` are unchanged.
+  and an off-host runner older than `0.7.1` or of unknown version (the
+  `dual_injection` mandatory gate, #3161, enforced even under
+  `runner_version_check: "warn"`). Requests without `passes` are unchanged.
+  On `backend: "remote"` / `"batch"` the worker runs the whole request and
+  returns only the reduced scalar results; **rollout requires a runner image
+  rebaked from `klt >= 0.7.1`** (deployment is not performed by this tool).
 
 Each pass's complex result is written to `<corner_dir>/ac_pass_<k>.raw` and
 decoded privately by `klayout_tools.sim_raw`; the public waveform JSON stays
@@ -3809,8 +3814,8 @@ request:
   name entries of it (case-insensitive). Unknown keys, a malformed selector or
   an unknown `metric` are refused up front (exit 1). Measurement names must be
   unique. The pre-existing refusal of `measurements[]` beside `passes` still
-  applies to every other form, and `backend: "remote"` / `"batch"` stays
-  refused (#3161).
+  applies to every other form. Off-host (`remote` / `batch`) it is gated by
+  `dual_injection` (minimum runner `0.7.1`; see "Mandatory features").
 - **Selectors.** `tv` is read from the `voltage_pass` result and `ti` from the
   `current_pass` result. Each is a single-ended `v(node)` or `i(source)`
   (independent source current, as ngspice saves it) with one non-empty token

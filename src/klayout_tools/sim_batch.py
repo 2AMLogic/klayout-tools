@@ -624,7 +624,9 @@ def _runner_gate_release(version: str) -> str | None:
 #: indistinguishable from one built after, so it counts as supporting it.
 #: ``transfer`` (``measurements[].transfer``, #2923/#2924) was merged after
 #: ``v0.7.0`` too, so ``0.7.1`` is likewise its first release segment, as is
-#: ``stimulus`` (the declarative timed stimulus block, #2977).
+#: ``stimulus`` (the declarative timed stimulus block, #2977), and
+#: ``dual_injection`` (``analysis.passes`` / ``measurements[].tian``,
+#: #3159/#3160/#3161).
 _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
     "analysis_steps": (
         (0, 7, 1),
@@ -640,6 +642,10 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
         (0, 7, 1),
         lambda request: request.get("stimulus") is not None,
     ),
+    "dual_injection": (
+        (0, 7, 1),
+        lambda request: _uses_dual_injection(request),
+    ),
 }
 
 #: Registry features a runner must be *known* to support (issue #2924): a
@@ -649,8 +655,20 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
 #: feature keeps the warn-and-run behaviour of #3249. ``stimulus`` is
 #: mandatory for the same reason: an older runner would ignore the key and
 #: simulate with the digital control lines undriven, exiting 0 with
-#: plausible-looking numbers (#2977).
-_MANDATORY_RUNNER_FEATURES = frozenset({"transfer", "stimulus"})
+#: plausible-looking numbers (#2977). ``dual_injection`` is mandatory because
+#: an older runner would ignore ``analysis.passes`` and run a single AC pass,
+#: or drop the ``tian`` metrics (#3161).
+_MANDATORY_RUNNER_FEATURES = frozenset({"transfer", "stimulus", "dual_injection"})
+
+
+def _uses_dual_injection(request: dict[str, Any]) -> bool:
+    analysis = request.get("analysis")
+    if isinstance(analysis, dict) and analysis.get("passes") is not None:
+        return True
+    return any(
+        isinstance(spec, dict) and spec.get("tian") is not None
+        for spec in request.get("measurements") or []
+    )
 
 
 def _uses_measurement_expr(request: dict[str, Any]) -> bool:

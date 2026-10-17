@@ -176,13 +176,6 @@ def test_unsupported_combinations_are_rejected(tmp_path, monkeypatch, patch, mes
         sim.run_sim(str(request))
 
 
-@pytest.mark.parametrize("backend", ["remote", "batch"])
-def test_offhost_backends_are_rejected_before_provisioning(tmp_path, backend):
-    request = _request(tmp_path, [_PASS_A, _PASS_B])
-    with pytest.raises(sim.SimError, match="analysis.passes is not supported"):
-        sim.run_sim(str(request), backend=backend)
-
-
 def test_alter_target_on_a_supply_axis_is_rejected(tmp_path):
     request = _request(
         tmp_path, [_PASS_A, _PASS_B], corners={"supply_v": {"VA": [1.0, 2.0]}}

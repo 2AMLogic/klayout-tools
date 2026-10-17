@@ -265,16 +265,6 @@ def refuse_unsupported(
         )
 
 
-def refuse_offhost_backend(analysis: dict[str, Any], backend: str) -> None:
-    if is_passes_analysis(analysis) and backend in ("remote", "batch"):
-        raise SimError(
-            f"analysis.passes is not supported for backend {backend!r}: the "
-            "off-host worker does not return the per-pass complex rawfiles "
-            "(transport is tracked in #3161). Run it with backend 'local' or "
-            "'local-parallel' (a single corner may use `--backend local`)"
-        )
-
-
 def refuse_xyce(analysis: dict[str, Any], engine: str) -> None:
     if is_passes_analysis(analysis) and engine == "xyce":
         raise SimError(
