@@ -3031,6 +3031,15 @@ def _cmd_validate_layout(args: argparse.Namespace) -> int:
     run_set_result = layout.validate_run_set(runs) if runs else None
     ok = ok and (run_set_result is None or run_set_result["valid"])
 
+    corpus_result = None
+    if args.corpus:
+        # Issue #3025: DRC/LVS/provenance gate over the frozen corpus.
+        repo_root = Path(args.repo_root)
+        corpus_result = layout.check_corpus(
+            repo_root / "benchmarks" / "design-agent" / "layout-corpus", repo_root
+        )
+        ok = ok and corpus_result["valid"]
+
     print(
         json.dumps(
             {
@@ -3038,6 +3047,7 @@ def _cmd_validate_layout(args: argparse.Namespace) -> int:
                 "tasks": task_results,
                 "runs": run_results,
                 "run_set": run_set_result,
+                "corpus": corpus_result,
             },
             indent=2,
         )
@@ -3207,6 +3217,14 @@ def main(argv: list[str] | None = None) -> int:
         "--check-task-files",
         action="store_true",
         help="also require each task's frozen files to exist and match their sha256",
+    )
+    layout_parser.add_argument(
+        "--corpus",
+        action="store_true",
+        help=(
+            "also run the frozen corpus gate (issue #3025): reference DRC/LVS/"
+            "provenance, recipe reachability, negative controls, exclusions"
+        ),
     )
     layout_parser.set_defaults(func=_cmd_validate_layout)
 
