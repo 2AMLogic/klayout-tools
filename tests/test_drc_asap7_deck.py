@@ -378,6 +378,35 @@ def test_cli_envelope_clean_device(tmp_path, capsys):
 
 
 @_needs_klayout
+@pytest.mark.parametrize(
+    "shapes",
+    [
+        pytest.param([fx.box("LIG", 0, 0, 100, 20)], id="lig-only"),
+        pytest.param(
+            [fx.box("LIG", 0, 0, 100, 20), fx.box("M1", 0, 0, 100, 36)],
+            id="lig-m1-tap-or-filler",
+        ),
+        pytest.param(
+            [fx.box("LIG", 0, 0, 100, 20), fx.box("GATE", 40, -10, 60, 30)],
+            id="lig-gate-no-active",
+        ),
+    ],
+)
+def test_cli_lig_without_lisd_returns_a_verdict(tmp_path, capsys, shapes):
+    """#3811: LIG with no LISD/SDT (a tap or filler cell) used to SIGSEGV
+    KLayout in the props_ne net separation; it must give a verdict, with the
+    full rule set still declared."""
+    gds = tmp_path / "lig_only.gds"
+    fx.write_shapes(str(gds), shapes)
+    code, payload = _run_cli(
+        capsys, gds, "--expect-rule-categories", str(len(RULE_IDS))
+    )
+    assert code in (0, 3), payload
+    assert payload["status"] in ("clean", "violations")
+    assert payload["coverage_assertion"]["satisfied"] is True
+
+
+@_needs_klayout
 def test_cli_envelope_reports_rule_id(tmp_path, capsys):
     gds = tmp_path / "narrow_gate.gds"
     fx.write_shapes(str(gds), fx.device(gate_y0=27 - 4 + fx.D))
