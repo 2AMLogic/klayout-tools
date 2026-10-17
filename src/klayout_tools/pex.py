@@ -1898,6 +1898,33 @@ def _run_measure_command(
     )
 
 
+def _reject_extract_only_conflicts(conflicts: Sequence[tuple[bool, str]]) -> None:
+    """Raise :class:`PexError` naming the first ``--extract-only`` conflict
+    (issue #3739): ``conflicts`` is ``(present, flag-description)`` pairs."""
+    for present, name in conflicts:
+        if present:
+            raise PexError(
+                f"--extract-only cannot be combined with {name}: it "
+                "extracts and reports only, so there is no measurement "
+                "leg for that to apply to"
+            )
+
+
+def _resolve_reference_netlist_path(
+    extract_only: bool,
+    measured_reference_netlist: str | None,
+    dut_paths: Sequence[str],
+) -> str | None:
+    """The one ``reference_netlist`` for the run (issue #3739): ``None`` for
+    ``--extract-only`` (no schematic side), the caller's own
+    ``--reference-netlist`` in ``--measure-command`` mode, else the DUT."""
+    if extract_only:
+        return None
+    if measured_reference_netlist is not None:
+        return measured_reference_netlist
+    return dut_paths[0]
+
+
 def _validate_measure_mode(
     measure_command: Sequence[str] | None,
     testbench_paths: Sequence[str],
@@ -1922,21 +1949,16 @@ def _validate_measure_mode(
     that case says much less than these do).
     """
     if extract_only:
-        conflicts = [
-            (bool(testbench_paths), "a testbench request"),
-            (measure_command is not None, "--measure-command"),
-            (reference_netlist is not None, "--reference-netlist"),
-            (measure_timeout_s is not None, "--measure-timeout-s"),
-            (device_only_leg, "--device-only-leg"),
-            (flatten_schematic, "--flatten-schematic"),
-        ]
-        for present, name in conflicts:
-            if present:
-                raise PexError(
-                    f"--extract-only cannot be combined with {name}: it "
-                    "extracts and reports only, so there is no measurement "
-                    "leg for that to apply to"
-                )
+        _reject_extract_only_conflicts(
+            [
+                (bool(testbench_paths), "a testbench request"),
+                (measure_command is not None, "--measure-command"),
+                (reference_netlist is not None, "--reference-netlist"),
+                (measure_timeout_s is not None, "--measure-timeout-s"),
+                (device_only_leg, "--device-only-leg"),
+                (flatten_schematic, "--flatten-schematic"),
+            ]
+        )
         return None
 
     if measure_command is None:
@@ -2975,20 +2997,13 @@ def run_pex(
     # Issue #3739: `--extract-only` has no schematic side at all -- the
     # reference netlist is `None` and the three netlist diagnostics below
     # have nothing to compare, so they are skipped rather than faked.
-    reference_netlist_path: str | None
-    if extract_only:
-        reference_netlist_path = None
-    elif measured_reference_netlist is not None:
-        reference_netlist_path = measured_reference_netlist
-    else:
-        reference_netlist_path = dut_paths[0]
-
-    # Issue #2875: hashed at the resolution point, before either side runs.
-    reference_netlist_sha256 = (
-        _content_id(reference_netlist_path)
-        if reference_netlist_path is not None
-        else None
+    reference_netlist_path = _resolve_reference_netlist_path(
+        extract_only, measured_reference_netlist, dut_paths
     )
+
+    # Issue #2875: hashed at the resolution point, before either side runs
+    # (`None` for `--extract-only`, which has no reference netlist).
+    reference_netlist_sha256 = _content_id(reference_netlist_path)
 
     # Issue #2889: `--flatten-schematic` -- the netlist the schematic leg
     # actually runs (and every diagnostic below compares) is a flattened
