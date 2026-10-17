@@ -1477,6 +1477,33 @@ UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {
     ),
 }
 
+#: Official ``sg13g2_maximal.drc`` rule ids this curated deck does not
+#: transcribe (issue #3854): the pad rules (``Pad.*``) and the latch-up rules
+#: (``LU.*``). They need layers outside the curated set (``dfpad``, EdgeSeal)
+#: and compound expressions ``DrcRule`` cannot evaluate. The ``*R`` pad ids
+#: are the runset's recommended-only rules (``$recommendedRules``); the
+#: ``LU.*`` ids are gated by ``$latchUpRules``. ESD structures have no rule id
+#: in the runset (only ``Recog.esd`` device recognition, absent from
+#: ``EXTRACTION_DECK``), so nothing ESD-related can be listed here.
+#: ``coverage.unmodeled_rules`` lists these so a clean verdict is not read as
+#: covering pads or latch-up. Remove an id here when its rule is added.
+UNMODELED_RULES: tuple[str, ...] = (
+    "LU.a",
+    "LU.c",
+    "LU.c1",
+    "LU.d",
+    "LU.d1",
+    "Pad.a1",
+    "Pad.aR",
+    "Pad.bR",
+    "Pad.d",
+    "Pad.d1R",
+    "Pad.dR",
+    "Pad.gR",
+    "Pad.jR",
+    "Pad.kR",
+)
+
 # --------------------------------------------------------------------------- #
 # `klt extract` connectivity + device-extraction deck
 # --------------------------------------------------------------------------- #
