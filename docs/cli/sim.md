@@ -3983,6 +3983,34 @@ request:
   for negative feedback, e.g. through a `-1` VCVS). Arbitrary expressions and
   differential selectors are not supported. With `options.save_mode:
   "netlist"` only vectors the netlist saves are available.
+- **Series injection** (`series_injection` in place of `tv`/`ti`, issue
+  [#3737](https://github.com/2AMLogic/klayout-tools/issues/3737)). The
+  conventional Middlebrook/Tian bench does not save `Tv`/`Ti`: each is a
+  quotient of two phasors, which no linear element or `B` source can build in an
+  AC analysis. Declare the bench instead and klt forms `T` itself:
+
+  ```json
+  "tian": {"voltage_pass": "inj_v", "current_pass": "inj_i",
+           "series_injection": {"load_node": "b", "source": "vinj"},
+           "metric": "phase_margin_deg"}
+  ```
+
+  Required bench: a 0 V series source `Vinj a b` (`+` on the driver node `a`,
+  `-` on the load node `b`; `load_node` is `b`, `source` is `Vinj`) and a shunt
+  current source `Iinj 0 b` driving the load node (current *into* `b`), both
+  with `AC 0` in the netlist. The voltage pass alters `Vinj` to unit `ac` and
+  `Iinj` to `0`; the current pass the reverse (non-unit stimulus magnitudes are
+  not supported). klt reads `v(b)` from `voltage_pass` and `i(vinj)` from
+  `current_pass` and forms, per sample, `x = -v(b)`, `y = i(vinj) + 1`,
+  `T = 1/(x + y) - 1`. Identity: `Tv = -v(a)/v(b)`, `Ti = -i(vinj)/(i(vinj)+1)`
+  give `x = 1/(1+Tv)`, `y = 1/(1+Ti)` and
+  `1 + T = (1+Tv)(1+Ti)/(Tv+Ti+2) = 1/(x+y)`, so nothing is divided by `v(b)`.
+  `series_injection` takes exactly `load_node` and `source` (one token each,
+  case-insensitive); it is mutually exclusive with `tv`/`ti`, and an entry with
+  neither form is refused. The same metrics, error codes and numerics apply;
+  `tian_singular_denominator` here means `|x + y| <= 1e-9 * (|x| + |y|)`. The
+  runner gate is unchanged (`dual_injection`, `0.7.1`): an older runner rejects
+  the unknown key outright rather than ignoring it.
 - **Formula.** Per frequency sample `T = (Tv*Ti - 1) / (Tv + Ti + 2)`. `T` is
   then reduced with the same numerics as `transfer` (#2922): the
   negative-feedback convention, log-frequency interpolation, first falling
@@ -4013,12 +4041,14 @@ request:
   `max_gain_above_crossover_db`, an invalid sample above the crossover; the
   reason follows in parentheses).
 - **Cache.** Within a corner, `T` is formed and reduced once per
-  `(voltage_pass, current_pass, tv, ti)` tuple (selectors case-folded) and
-  shared by every entry using it.
+  `(voltage_pass, current_pass, tv, ti)` tuple (selectors case-folded; a
+  `series_injection` entry is a different tuple even when its names coincide)
+  and shared by every entry using it.
 
 The response entry is an ordinary `corners[].measurements[]` object plus an
 additive `tian` member echoing `{voltage_pass, current_pass, tv, ti, metric}`
-(no `schema_version` bump). Limits, `plausible_range`, rollups and Monte Carlo
+(`series_injection` in place of `tv`/`ti` for that form; no `schema_version`
+bump). Limits, `plausible_range`, rollups and Monte Carlo
 statistics apply to `value` as for any scalar.
 
 ## Source energy over a transient window (`measurements[].energy`)
