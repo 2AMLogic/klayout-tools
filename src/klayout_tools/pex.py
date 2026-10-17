@@ -452,7 +452,7 @@ def _report_path(path: str | None, *, repo_root: str | None) -> dict[str, Any]:
     out of this issue's confirmed scope (tracked separately if it turns out
     to matter) and stay raw strings, unchanged.
     """
-    return env_provenance.repo_relative_path(path, repo_root=repo_root)
+    return env_provenance.repo_relative_path(path or None, repo_root=repo_root)
 
 
 def _content_id(path: str | None) -> str | None:
@@ -1914,12 +1914,14 @@ def _resolve_reference_netlist_path(
     extract_only: bool,
     measured_reference_netlist: str | None,
     dut_paths: Sequence[str],
-) -> str | None:
-    """The one ``reference_netlist`` for the run (issue #3739): ``None`` for
-    ``--extract-only`` (no schematic side), the caller's own
-    ``--reference-netlist`` in ``--measure-command`` mode, else the DUT."""
+) -> str:
+    """The one ``reference_netlist`` for the run (issue #3739): ``""`` for
+    ``--extract-only`` (no schematic side; every consumer of the path is
+    skipped and :func:`_report_path` / :func:`_content_id` read it as
+    ``null``), the caller's own ``--reference-netlist`` in
+    ``--measure-command`` mode, else the DUT."""
     if extract_only:
-        return None
+        return ""
     if measured_reference_netlist is not None:
         return measured_reference_netlist
     return dut_paths[0]
@@ -3010,7 +3012,7 @@ def run_pex(
     # copy of the DUT; `reference_netlist` keeps naming the caller's file.
     schematic_flatten: dict[str, Any] | None = None
     schematic_netlist_path = reference_netlist_path
-    if flatten_schematic and reference_netlist_path is not None:
+    if flatten_schematic:
         schematic_netlist_path, schematic_flatten = _flatten_schematic_dut(
             reference_netlist_path,
             work_dir=work_dir,
