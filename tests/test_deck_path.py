@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 
 import pytest
 
@@ -35,6 +36,10 @@ def test_path_errors_exit_1(deck, capsys):
     assert out["error"]["command"] == "deck path"
 
 
+@pytest.mark.skipif(
+    shutil.which("klayout") is None,
+    reason="klayout binary is not installed on this machine",
+)
 def test_printed_path_is_accepted_by_drc(tmp_path, capsys):
     import klayout.db as kdb
 
@@ -58,7 +63,9 @@ def test_printed_path_is_accepted_by_drc(tmp_path, capsys):
     )
     # An empty layout exits non-zero (coverage_unknown); what matters is that
     # klt loaded the printed deck and ran it rather than rejecting the path.
-    report = json.loads(capsys.readouterr().out)
+    captured = capsys.readouterr()
+    assert captured.out.strip(), f"drc printed no JSON (rc={rc}): {captured.err}"
+    report = json.loads(captured.out)
     assert report["deck"] == deck
     assert report["engine"] == "klayout"
     assert report["coverage"]["rule_categories"]
