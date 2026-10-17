@@ -45,7 +45,7 @@ import jsonschema
 import pytest
 
 from helpers.subprocess_fakes import fake_completed
-from klayout_tools import _provenance, lvs, lvs_netgen, pdk
+from klayout_tools import _provenance, lvs, lvs_netgen, lvs_power, pdk
 from klayout_tools.cli import main
 from klayout_tools.lvs import LvsError, run_lvs
 
@@ -9164,14 +9164,14 @@ def test_power_pins_derivation_discloses_uncorroborated_evidence():
     explicit argument, computed by `_gate_level_power_pin_evidence` from the
     masters' actual declared-pin shapes, not re-derived here from
     `len(masters)`."""
-    two = lvs._power_pins_derivation(["MYLIB__CLKBUF_1", "MYLIB__INV_1"], True)
+    two = lvs_power._power_pins_derivation(["MYLIB__CLKBUF_1", "MYLIB__INV_1"], True)
     assert two["rule"] == lvs.POWER_PINS_RULE_EVERY_INSTANTIATED_MASTER
     assert two["masters"] == ["MYLIB__CLKBUF_1", "MYLIB__INV_1"]
     assert two["master_count"] == 2
     assert two["corroborated"] is True
     assert two["reason"] is None
 
-    one = lvs._power_pins_derivation(["MYLIB__INV_1"], False)
+    one = lvs_power._power_pins_derivation(["MYLIB__INV_1"], False)
     assert one["master_count"] == 1
     assert one["corroborated"] is False
     assert "single standard-cell master" in one["reason"]
@@ -9180,7 +9180,7 @@ def test_power_pins_derivation_discloses_uncorroborated_evidence():
     # PR #2105's Judge rejection: two masters is not, by itself, proof of
     # corroboration -- drive-strength variants of one logical cell declare
     # the same shape, so the caller passes `corroborated=False` for them too.
-    duplicate_shape = lvs._power_pins_derivation(
+    duplicate_shape = lvs_power._power_pins_derivation(
         ["MYLIB__INV_1", "MYLIB__INV_2"], False
     )
     assert duplicate_shape["master_count"] == 2
@@ -9189,7 +9189,7 @@ def test_power_pins_derivation_discloses_uncorroborated_evidence():
     assert "MYLIB__INV_1" in duplicate_shape["reason"]
     assert "MYLIB__INV_2" in duplicate_shape["reason"]
 
-    none = lvs._power_pins_derivation([], False)
+    none = lvs_power._power_pins_derivation([], False)
     assert none["master_count"] == 0
     assert none["corroborated"] is False
     assert "instantiates no cell" in none["reason"]

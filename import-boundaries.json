@@ -261,6 +261,7 @@
         "klayout_tools.lvs_finfet",
         "klayout_tools.lvs_mismatch",
         "klayout_tools.lvs_netgen",
+        "klayout_tools.lvs_power",
         "klayout_tools.lvs_supply"
       ]
     },
