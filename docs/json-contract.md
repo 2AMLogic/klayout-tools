@@ -117,7 +117,10 @@ No `schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s
 already-shipped `klt sim` `analysis.kind`, with its own `ports`/`freq` fields.
 Every request valid before is unchanged; the *response* gains only an optional
 per-corner `twoport` object and an optional `artifacts.twoport_s2p` path,
-present only for a two-port request. No `schema_version` bump. See
+present only for a two-port request. Issue #3339 adds, inside that `twoport`
+object, `stability` (`k`, `delta_abs`, `mu` arrays) and, only when the request
+carries `analysis.noise`, a `noise` object (`source_port`, `t0_k`,
+`noise_representation`, `nf_db`). Additive; no `schema_version` bump. See
 [`docs/cli/sim.md`](cli/sim.md)'s "Two-port S-parameters".
 
 `measurements[].transfer` (issues #2923, #3088) gains three `metric` tokens —

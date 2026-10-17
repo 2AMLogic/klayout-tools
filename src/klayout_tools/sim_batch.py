@@ -633,7 +633,8 @@ def _runner_gate_release(version: str) -> str | None:
 #: ``stimulus`` (the declarative timed stimulus block, #2977), and
 #: ``dual_injection`` (``analysis.passes`` / ``measurements[].tian``,
 #: #3159/#3160/#3161), ``complex_vectors`` (``options.complex_vectors``,
-#: #3337), and ``twoport`` (``analysis.kind: "twoport"``, #3338).
+#: #3337), ``twoport`` (``analysis.kind: "twoport"``, #3338), and
+#: ``twoport_noise`` (``analysis.noise``, #3339).
 _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
     "analysis_steps": (
         (0, 7, 1),
@@ -663,6 +664,10 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
         (0, 7, 1),
         lambda request: sim_twoport.is_twoport_request(request.get("analysis")),
     ),
+    "twoport_noise": (
+        (0, 7, 1),
+        lambda request: sim_twoport.has_noise_request(request.get("analysis")),
+    ),
 }
 
 #: Registry features a runner must be *known* to support (issue #2924): a
@@ -678,9 +683,18 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
 #: because an older runner would ignore the option and return no sidecar
 #: (#3337). ``twoport`` is mandatory because an older runner would reject the
 #: unknown analysis kind or, worse, run it as a plain AC with no S-parameters
-#: (#3338).
+#: (#3338). ``twoport_noise`` is mandatory because an older runner would reject
+#: ``analysis.noise`` as an unknown key or omit ``nf_db`` and the stability
+#: factors (#3339).
 _MANDATORY_RUNNER_FEATURES = frozenset(
-    {"transfer", "stimulus", "dual_injection", "complex_vectors", "twoport"}
+    {
+        "transfer",
+        "stimulus",
+        "dual_injection",
+        "complex_vectors",
+        "twoport",
+        "twoport_noise",
+    }
 )
 
 
