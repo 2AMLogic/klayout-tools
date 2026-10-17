@@ -21078,6 +21078,46 @@ def test_run_lvs_gate_level_verilog_library_with_no_pin_order_source_errors(tmp_
         run_lvs(request)
 
 
+def _pin_order_source_request(tmp_path: Path, root: str, library: str) -> str:
+    # No `pdk`: the default variant is whichever sorts first under `root`.
+    return _macro_request(tmp_path, {"library": library, "pdk_root": root})
+
+
+def test_pin_order_source_error_names_variant_selector_and_sibling_variant(tmp_path):
+    """Issue #3748: with `reference.pdk` unset the alphabetically first variant
+    wins; when it lacks the library the error names the remedy and the
+    installed variant that does ship it."""
+    root = _make_fake_macro_pdk(tmp_path)
+    (Path(root) / "gf180mcuA" / "libs.tech").mkdir(parents=True)
+    (Path(root) / "gf180mcuA" / "libs.ref").mkdir(parents=True)
+    with pytest.raises(LvsError) as excinfo:
+        run_lvs(_pin_order_source_request(tmp_path, root, "sky130_fd_sc_hd"))
+    message = str(excinfo.value)
+    assert "has no pin-order source under PDK variant 'gf180mcuA'" in message
+    assert "request.reference.pdk" in message
+    assert "$PDK" in message
+    assert "installed variant(s) that ship it: sky130A" in message
+
+
+def test_pin_order_source_error_has_no_sibling_hint_when_none_ships_library(tmp_path):
+    root = _make_fake_macro_pdk(tmp_path)
+    (Path(root) / "gf180mcuA" / "libs.tech").mkdir(parents=True)
+    (Path(root) / "gf180mcuA" / "libs.ref").mkdir(parents=True)
+    with pytest.raises(LvsError) as excinfo:
+        run_lvs(_pin_order_source_request(tmp_path, root, "no_such_library"))
+    message = str(excinfo.value)
+    assert "has no pin-order source under PDK variant" in message
+    assert "request.reference.pdk" in message
+    assert "installed variant(s)" not in message
+
+
+def test_pin_order_source_error_has_no_sibling_hint_for_single_variant(tmp_path):
+    root = _make_fake_macro_pdk(tmp_path)
+    with pytest.raises(LvsError) as excinfo:
+        run_lvs(_pin_order_source_request(tmp_path, root, "no_such_library"))
+    assert "installed variant(s)" not in str(excinfo.value)
+
+
 @pytest.mark.parametrize(
     "library",
     [42, ["sky130_fd_sc_hd", ""], ["sky130_fd_sc_hd", 7], {"name": "x"}],
