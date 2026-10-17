@@ -11735,6 +11735,110 @@ def test_run_sim_osdi_preload_steps_a_host_default_offhost_backend_back_to_local
     assert all(f"pre_osdi {osdi}" in deck for deck in decks)
 
 
+@pytest.mark.parametrize("backend", ["remote", "batch"])
+@pytest.mark.parametrize(
+    "entry", ["$PDK_ROOT/ihp/osdi/psp103.osdi", "${PDK_ROOT}/ihp/osdi/psp103.osdi"]
+)
+def test_run_sim_runner_resolved_osdi_preload_goes_offhost_unchecked(
+    tmp_path, monkeypatch, backend, entry
+):
+    """Issue #3819: an image-baked `.osdi` need not exist on the submitter."""
+    monkeypatch.delenv("PDK_ROOT", raising=False)
+    seen: dict = {}
+
+    def fake_backend(**kwargs):
+        seen.update(kwargs)
+        return [], "46", None
+
+    monkeypatch.setitem(sim._BACKENDS, backend, fake_backend)
+    request = _osdi_request(
+        tmp_path, [entry], corners={"temperature_c": [-40, 27, 125]}
+    )
+
+    report = sim.run_sim(str(request), backend=backend)
+
+    assert seen["request_dir"] == str(tmp_path)
+    environment = report["environment"]
+    assert "osdi_preload" not in environment  # nothing hashed on this host
+    assert environment["osdi_preload_runner_resolved"] == [
+        {"entry": entry, "reason": "env_var"}
+    ]
+
+
+def test_run_sim_osdi_preload_under_models_pdk_root_goes_offhost(tmp_path, monkeypatch):
+    seen: dict = {}
+
+    def fake_backend(**kwargs):
+        seen.update(kwargs)
+        return [], "46", None
+
+    monkeypatch.setitem(sim._BACKENDS, "batch", fake_backend)
+    entry = "/opt/pdk/ihp/osdi/psp103.osdi"
+    request = _osdi_request(
+        tmp_path,
+        [entry],
+        corners={"temperature_c": [-40, 27]},
+        models={"pdk_root": "/opt/pdk"},
+    )
+
+    report = sim.run_sim(str(request), backend="batch")
+
+    assert report["environment"]["osdi_preload_runner_resolved"] == [
+        {"entry": entry, "reason": "pdk_root"}
+    ]
+
+
+def test_run_sim_runner_resolved_osdi_keeps_a_host_default_batch_backend(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv(sim.BACKEND_ENV, "batch")
+    monkeypatch.delenv("PDK_ROOT", raising=False)
+    seen: dict = {}
+
+    def fake_backend(**kwargs):
+        seen.update(kwargs)
+        return [], "46", None
+
+    monkeypatch.setitem(sim._BACKENDS, "batch", fake_backend)
+    request = _osdi_request(
+        tmp_path,
+        ["$PDK_ROOT/ihp/osdi/psp103.osdi"],
+        corners={"temperature_c": [-40, 27, 125]},
+    )
+
+    sim.run_sim(str(request))
+
+    assert seen  # dispatched to batch rather than stepping aside to local
+
+
+def test_run_sim_mixed_osdi_preload_still_refuses_the_host_local_entry(
+    tmp_path, monkeypatch
+):
+    def must_not_dispatch(*args, **kwargs):
+        raise AssertionError("the batch backend must not be reached")
+
+    monkeypatch.setitem(sim._BACKENDS, "batch", must_not_dispatch)
+    _write_osdi(tmp_path)
+    request = _osdi_request(
+        tmp_path,
+        ["$PDK_ROOT/ihp/osdi/a.osdi", "psp103.osdi"],
+        corners={"temperature_c": [-40, 27, 125]},
+    )
+    with pytest.raises(
+        sim.SimError, match="options.osdi_preload is not supported for backend 'batch'"
+    ):
+        sim.run_sim(str(request), backend="batch")
+
+
+def test_run_sim_runner_resolved_osdi_is_still_checked_on_the_local_backend(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("PDK_ROOT", str(tmp_path / "pdkroot"))
+    request = _osdi_request(tmp_path, ["$PDK_ROOT/ihp/osdi/psp103.osdi"])
+    with pytest.raises(sim.SimError, match="osdi_preload file not found"):
+        sim.run_sim(str(request), backend="local")
+
+
 def test_run_sim_osdi_preload_is_refused_for_the_xyce_engine(tmp_path, monkeypatch):
     def must_not_run(*args, **kwargs):
         raise AssertionError("no corner may be dispatched")
