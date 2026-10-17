@@ -2832,17 +2832,9 @@ def _prepare_sim_request(
             "image-baked `.osdi` as `$PDK_ROOT/<rel>` (or under "
             "models.pdk_root) so the runner resolves it"
         )
-    if backend in _OFFHOST_BACKENDS:
-        osdi_runner_environment = [
-            {"entry": request_entry, "reason": reason}
-            for index, reason in sorted(osdi_runner_resolved.items())
-            for request_entry in [options["osdi_preload"][index]]
-        ]
-    else:
-        # A run that stays on this host reads every entry here, so the full
-        # existence check and expansion apply, exactly as before.
-        osdi_preload = _resolve_osdi_preload(options, request_dir)
-        osdi_runner_environment = []
+    osdi_preload, osdi_runner_environment = _finalize_osdi_preload(
+        options, request_dir, backend, osdi_preload, osdi_runner_resolved
+    )
     # Issue #3041: an `engine_version` pin is checked before any corner runs
     # where this process can see the engine (local backends); off-host
     # backends are checked against the report's `engine_version` afterwards.
@@ -3821,11 +3813,10 @@ def _run_sim_corners(
             repo_root=repo_root,
         )
     )
-    if osdi_runner_environment:
-        # Additive/optional (issue #3819): `.osdi` entries the executing host
-        # resolved itself -- named, never hashed; the worker's own report is
-        # the source of what actually loaded.
-        environment["osdi_preload_runner_resolved"] = osdi_runner_environment
+    # Additive/optional (issue #3819): `.osdi` entries the executing host
+    # resolved itself -- named, never hashed; the worker's own report is
+    # the source of what actually loaded.
+    environment.update(_osdi_runner_environment_fields(osdi_runner_environment))
     # Additive/optional (issue #2668): `staged_model_inputs`, only present
     # when `options.stage_model_inputs` staged model inputs for an off-host
     # backend -- see `_preflight_staged_model_inputs`.
@@ -4478,6 +4469,37 @@ def _needs_models_lib(point: CornerPoint) -> bool:
     if declared is None:
         return True
     return any(lib is None for lib in declared)
+
+
+def _finalize_osdi_preload(
+    options: dict[str, Any],
+    request_dir: str,
+    backend: str,
+    osdi_preload: tuple[str, ...],
+    osdi_runner_resolved: dict[int, str],
+) -> tuple[tuple[str, ...], list[dict[str, str]]]:
+    """Settle ``osdi_preload`` once the backend is known (issue #3819).
+
+    Off-host, the runner-resolved entries are reported by name in
+    ``environment.osdi_preload_runner_resolved`` and the already-resolved
+    host-local ones stand. A run that stays on this host reads every entry
+    here, so the full existence check and expansion apply, exactly as before.
+    """
+    if backend not in _OFFHOST_BACKENDS:
+        return _resolve_osdi_preload(options, request_dir), []
+    return osdi_preload, [
+        {"entry": options["osdi_preload"][index], "reason": reason}
+        for index, reason in sorted(osdi_runner_resolved.items())
+    ]
+
+
+def _osdi_runner_environment_fields(
+    osdi_runner_environment: list[dict[str, str]],
+) -> dict[str, Any]:
+    """The ``environment`` fragment for runner-resolved ``.osdi`` entries."""
+    if not osdi_runner_environment:
+        return {}
+    return {"osdi_preload_runner_resolved": osdi_runner_environment}
 
 
 def _resolve_osdi_preload(
