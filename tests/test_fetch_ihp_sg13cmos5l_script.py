@@ -35,7 +35,9 @@ def _tree(tmp_path: Path, dangling: int, lvs_dangling: bool = False) -> Path:
     if lvs_dangling:
         lvs = dest / "libs.tech" / "klayout" / "tech" / "lvs" / "rule_decks"
         lvs.mkdir(parents=True)
-        (lvs / "cap_cmomi_derivations.lvs").symlink_to("../../../../../../ihp-sg13g2/missing")
+        (lvs / "cap_cmomi_derivations.lvs").symlink_to(
+            "../../../../../../ihp-sg13g2/missing"
+        )
     (dest / "libs.ref" / "dangling_dir").symlink_to("nowhere/")
     (dest / "libs.ref" / "loop").symlink_to("loop")
     return tmp_path

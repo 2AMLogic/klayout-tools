@@ -88,7 +88,8 @@
 # the missing targets) unless `--strict` is given, which exits 3 when any
 # link dangles. If any dangling link is under libs.tech/klayout/tech/lvs/, the
 # warning also says the PDK-native LVS runset is unrunnable. Repinning the
-# sibling is a separate, human decision: it changes a checksummed pin used by CI. `klt pdk check` also reports these.
+# sibling is a separate, human decision: it changes a checksummed pin used by
+# CI. `klt pdk check` also reports these.
 #
 # Usage: scripts/fetch-ihp-sg13cmos5l.sh [--force] [--strict]
 
