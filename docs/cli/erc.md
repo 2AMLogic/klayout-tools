@@ -463,6 +463,19 @@ draws that the spec never declared" below.
     every other spec layer — but the resulting tie is recorded as skipped
     work rather than a clean pass (`empty_well_region`, issue #2377; see
     "A well layer with no geometry at all" below).
+  - `well_complement_of` (optional `"<layer>/<datatype>"` string or non-empty
+    array of them, issue #3750) — the substrate half of a tie for a process
+    whose bulk has no drawn well/tub shape (a p-type bulk with n-wells on a
+    separate layer): the tie's region is the top-cell extent **minus** the
+    merged union of the named layers, derived from the stream, so it follows
+    the layout instead of going stale like a `well_boxes` list. Valid **only**
+    with `well_layer: null` and mutually exclusive with `well_boxes` (either
+    combination, or a drawn `well_layer`, is a spec error naming both keys).
+    Graded like `well_boxes`: listed in `erc_coverage.checked_by_well_assertion`,
+    and skipped as `degenerate_well_assertion` when the named layers draw
+    nothing (the "substrate" would be the whole die) or cover the whole die
+    (nothing left to check). It emits no `well_assertion_coverage` entry, as
+    the region cannot go stale. Additive: no `schema_version` bump.
   - `well_boxes` (optional array of `[left, bottom, right, top]` micrometre
     boxes, default `[]`, issue #2255) — a caller **assertion** of the
     substrate region this tie covers, for a block that draws no well/tub
