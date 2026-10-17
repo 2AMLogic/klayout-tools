@@ -280,6 +280,7 @@ Every field name is the flag's own `dest`, so the mapping is one-for-one:
 | `parasitic_variants` | array\<string\> \| string | repeatable `--parasitic-variant` |
 | `parasitics_top_cell_only` | bool | `--parasitics-top-cell-only` |
 | `resistance_graph` | bool | `--resistance-graph` (issue #2982) |
+| `resistance_graph_r_cut` | number | `--resistance-graph-r-cut` (issue #2983); finite, `>= 0`, requires `resistance_graph` |
 | `distributed_rc` | bool | `--distributed-rc` |
 | `substrate_tie_ohms` | number | `--substrate-tie-ohms` (issue #3089) |
 | `resistance_paths` | array\<object\> | repeatable `--resistance-path NET_ID FROM TO` (issue #2765). Each entry is exactly `{"net_id": <int>, "from": <string>, "to": <string>}`; any other shape (a missing/extra key, a non-integer `net_id`, a bare array) is rejected. |
@@ -7130,7 +7131,10 @@ without the flag — output is byte-identical to a run that never had it):
   "legacy_resistance_ohm": 376.47,
   "nodes": 3,
   "edges": 2,
-  "diagnostics": []
+  "diagnostics": [],
+  "selected_resistance_ohm": 376.47,
+  "resistance_source": "graph",
+  "resistance_source_reason": "two_terminal_graph"
 }
 ```
 
@@ -7140,6 +7144,7 @@ without the flag — output is byte-identical to a run that never had it):
 | `terminals` | Terminal names, sorted. `via@x,y` is a contact/via where current leaves the modelled conductor (µm, centre of the cut); `device@x,y` is a device-body cut edge (a fragment edge strictly inside the role's drawn layer). `[]` when `unsupported`. |
 | `pair_resistance_ohm` | `T x T` symmetric effective resistance between terminals, ohms, `0.0` diagonal, `null` for two terminals in different connected components (with `terminals_disconnected`). `[]` unless `ok`. |
 | `legacy_resistance_ohm` | The unchanged series-sum `resistance_ohm` of the same net, as a cross-check. |
+| `selected_resistance_ohm` / `resistance_source` / `resistance_source_reason` | Scalar selection (issue #2983, see below). `resistance_source` is `"graph"` or `"legacy"`; `selected_resistance_ohm` is the number a caller wanting the topology-aware scalar should read (never `null`). |
 | `nodes` / `edges` | Counts only; full node/edge lists are not part of this output. |
 | `diagnostics` | `{code, message, detail}` as produced by the builder/solver: `sheet_resistance_unknown`, `via_resistance_unknown`, `unsupported_geometry`, `graph_too_large`, `singular_system`, `terminals_disconnected`, `floating_component`, `too_few_terminals`, `unattached_port`. |
 
@@ -7162,8 +7167,35 @@ without the flag — output is byte-identical to a run that never had it):
 - Both the builder's size caps (nodes, edges, 64 terminals) and non-Manhattan
   geometry yield `unsupported`, never an exception.
 
-Replacing `resistance_ohm` with a graph-derived value is a separate change
-(issue #2458), not a side effect of this flag.
+**Scalar selection (issue #2983).** `resistance_ohm` is *never* replaced, by
+this flag or any other: it stays the legacy series sum, byte-identical by
+default. The selected value is reported only in the additive
+`selected_resistance_ohm`, with `resistance_source` saying where it came from:
+
+- `"graph"` when the net has **exactly two** entries in `terminals`, `status`
+  is `ok` and `pair_resistance_ohm[0][1]` is a number. "Specified" means those
+  geometry-derived terminals; there is no name-based terminal selector.
+  `resistance_source_reason` is `two_terminal_graph`.
+- `"legacy"` otherwise, with `selected_resistance_ohm == legacy_resistance_ohm`
+  and the reason one of `graph_status_unsupported`, `graph_status_skipped`
+  (fewer than two terminals), `terminal_count_not_two` (three or more terminals:
+  keep the full `pair_resistance_ohm` matrix rather than a unique scalar) or
+  `pair_resistance_unavailable` (disconnected pair). The graph's own
+  `diagnostics` still say why the graph was unsupported or disconnected.
+
+Because the shipped decks give no per-cut via resistance, a cross-level net
+falls back to `legacy` by default, never to an assumed ideal via. The value is
+supplied explicitly with `--resistance-graph-r-cut OHM` (request key
+`resistance_graph_r_cut`; `0` is an ideal via, must be finite and `>= 0`,
+requires `--resistance-graph`). With it, a strapped conductor (two levels
+joined at both ends) selects a resistance no larger than the single level
+alone, and a single-landing series conductor selects the sum of the two levels
+plus the via; overlap without a landing adds no path.
+
+**Ladder.** `--distributed-rc` keeps redistributing the legacy
+`resistance_ohm` total; it does not consume `selected_resistance_ohm`, so the
+ladder is not topology-correct for a strapped net. Graph-aware ladders are out
+of scope here.
 
 ### Curated-coefficient gaps: `metals_without_coefficient` (issue #547)
 

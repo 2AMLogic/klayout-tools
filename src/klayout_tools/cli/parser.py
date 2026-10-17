@@ -2402,6 +2402,21 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     extract_parser.add_argument(
+        "--resistance-graph-r-cut",
+        dest="resistance_graph_r_cut",
+        type=float,
+        default=None,
+        metavar="OHM",
+        help=(
+            "per-cut via/contact resistance for --resistance-graph (issue "
+            "#2983); 0 is an ideal via. The shipped decks curate none, so "
+            "without this a net with a cross-level landing is `unsupported` "
+            "and `resistance_graph.selected_resistance_ohm` falls back to the "
+            "legacy scalar. Must be >= 0. Requires --resistance-graph. See "
+            "docs/cli/extract.md's '--resistance-graph' section."
+        ),
+    )
+    extract_parser.add_argument(
         "--distributed-rc",
         dest="distributed_rc",
         action="store_true",
