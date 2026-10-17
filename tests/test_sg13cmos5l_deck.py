@@ -2495,3 +2495,11 @@ def test_sg13cmos5l_cap_cmomf_never_gains_a_feed_token(tmp_path: Path, feed: str
     assert "feed" not in device
     (card,) = [line for line in _device_cards(report) if " cap_cmomf " in line]
     assert "feed=" not in card.lower()
+
+
+def test_digibnd_is_a_named_cmos5l_layer():
+    """DigiBnd (16/0) is read by the NW.c1/e1.dig rules (#3682), so it must
+    carry a display name like every other layer the deck reads."""
+    from klayout_tools.decks import sg13cmos5l
+
+    assert sg13cmos5l.LAYER_NAMES[(16, 0)] == "DigiBnd.drawing"
