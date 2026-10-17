@@ -76,9 +76,12 @@ scraping ``report_*`` text output was needed for these fields -- see
 :func:`_extract_stage_metrics` for the exact key mapping. The one exception:
 OpenROAD has **no** ``*_metric`` proc for setup/hold timing-*violation
 counts* (only the scalar WNS/TNS) -- :func:`_count_violations` falls back to
-counting ``"(VIOLATED)"`` lines in ``report_check_types -max_delay/-min_delay
--violators -format end``'s own stdout, exactly the fallback the contract
-spike's build/wrap section authorises. Issue #1709's post-route
+counting ``"(VIOLATED)"`` lines in ``report_check_types ... -violators
+-format end``'s own stdout, exactly the fallback the contract spike's
+build/wrap section authorises (setup side ``-max_delay -recovery
+-clock_gating_setup``, hold side ``-min_delay -removal -clock_gating_hold``
+-- the same check families the WNS/TNS metrics measure, issue #2741; see
+:func:`_violation_count_lines`). Issue #1709's post-route
 max-transition/max-capacitance verdict
 (:func:`_design_rule_check_lines`, ``max_transition_violation_count``/
 ``max_capacitance_violation_count``) reuses that same fallback for the same
@@ -169,9 +172,12 @@ module shells out to, reads, or requires an ORFS checkout.
 Deliberately out of scope for this v1 (a core-only block, matching the
 contract's own IO-ring/footprint exclusion): metal fill (density fill, not
 gap-filler cells -- see "Power delivery" below for those) and a
-``DONT_USE_CELLS``-style cell exclusion list -- neither is part of the
-request/response contract this phase implements, and each can be added later
-as an additive request field without a contract-shape change. Tapcell
+*caller-supplied* ``DONT_USE_CELLS``-style cell exclusion field -- neither is
+part of the request/response contract this phase implements, and each can be
+added later as an additive request field without a contract-shape change.
+(The built-in per-``cell_library`` exclusions ``klt synthesize`` already
+applies *are* emitted as ``set_dont_use`` in every post-floorplan stage script,
+before placement/repair/CTS -- issue #2378 -- with no request-contract change.) Tapcell
 insertion and power-grid generation (PDN) were also originally scoped out
 here; see "Power delivery" below for the additive field that closes that gap
 (issue #1091), exactly per this same note's own precedent (the "Hard-macro
@@ -533,6 +539,14 @@ echoes exactly what was applied (``power.straps[].spacing_um``,
 caller's ``connects[]`` tuned (see :func:`_pdn_connect_spec`/
 :func:`_pdn_connects_applied`).
 
+``tapcell.distance_um`` (issue #3051, optional) overrides the per-library
+``tapcell -distance`` pitch in :data:`_TAPCELL_CELLS`; omitted, the Tcl is
+byte-identical to before. It is a placement input, **not** evidence of any
+diffusion-to-tap boundary distance -- measure the resulting stream. The
+effective pitch is echoed as ``power.tapcell_distance_um``. A
+:data:`_NO_TAPCELL_LIBRARIES` library emits no ``tapcell`` call, so an
+override there is rejected rather than silently ignored.
+
 ``preset`` (issue #2123) closes the gap those two fields left open from the
 other side. Being *able* to express a platform's PDN config is not the same
 as not having to transcribe it: the working blocks callers arrived at were
@@ -584,18 +598,22 @@ the full request/response contract.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import math
 import os
 import re
 import subprocess  # noqa: F401 -- tests patch place_and_route.subprocess.run
 from typing import Any
 
+from . import output_lock
 from ._openroad_engine import (
     _count_violations,
     _openroad_version,
     _OpenRoadResult,
     _run_openroad,
     _timing_status,
+    _timing_violation_report_lines,
 )
 
 # `_count_spef_nets_annotated`/`_tcl_net_list` are `_paths.py`-hosted helpers
@@ -669,12 +687,18 @@ from .place_and_route_power_audit import (
     row_rail_fallback_warning as row_rail_fallback_warning,
 )
 from .place_and_route_reports import (
-    count_route_drc_violations as _count_route_drc_violations,
+    build_congestion,
+    detailed_route_convergence,
+    detailed_route_lines,
+    parse_global_route_congestion,
+    parse_placement_routability,
+    parse_routing_completeness,
+    route_metrics_object,
+    routing_completeness_lines,
+    write_route_metrics,
 )
 from .place_and_route_reports import (
-    detailed_route_lines,
-    route_metrics_object,
-    write_route_metrics,
+    count_route_drc_violations as _count_route_drc_violations,
 )
 
 # The post-route multi-corner sweep + SPEF-annotated STA subsystem (issues
@@ -1696,6 +1720,34 @@ _SPEF_NET_CHECK_BEGIN = "===KLT_SPEF_NET_CHECK_BEGIN==="
 _SPEF_NET_CHECK_END = "===KLT_SPEF_NET_CHECK_END==="
 _SPEF_NET_CHECK_RE = re.compile(r"(\d+)\s+(\d+)\s+(\d+)\s+(\d+)")
 
+
+def _coverage_declaration():
+    """Issue #2781: fixed declaration of metal-density coverage.
+
+    Standard-cell gap fillers (`filler_placement`) are not metal density
+    fill, and a zero routing-DRC count is not density compliance.
+    """
+    return {
+        "metal_density_fill": {
+            "status": "unsupported",
+            "inserted": False,
+            "reason": (
+                "no metal density fill is inserted at any stage; "
+                "standard-cell gap fillers are not metal fill"
+            ),
+        },
+        "density_compliance": {
+            "status": "unsupported",
+            "evaluated": False,
+            "reason": (
+                "metal density rules are not evaluated by place-and-route; "
+                "a zero route_drc_violation_count does not imply density "
+                "compliance"
+            ),
+        },
+    }
+
+
 #: Response fields whose value is always "the last completed stage's own
 #: value, restated at top level" -- see the contract spike section 5's
 #: `stages` field description. Built once via `dict.get` so a field a stage
@@ -1740,6 +1792,12 @@ _TOP_LEVEL_METRIC_KEYS = (
     # `[]`) on any stage before `"route"`, matching `worst_setup_slack_ns`'s
     # own convention.
     "corners",
+    # Additive (issue #2994): routability/congestion figures -- global-route
+    # overflow and layer usage, detailed-route convergence, unrouted-net
+    # count and routability-driven placement congestion. `null` on any stage
+    # before `"route"`; fields the engine cannot produce are `null` inside
+    # the block, named in its `null_reasons`.
+    "congestion",
     # Additive (issue #1709): the design-rule-check verdict measured at the
     # same swept corners as `worst_setup_slack_ns`/`worst_hold_slack_ns`
     # above, and `null` on the same pre-`"route"` stages for the same reason
@@ -1780,7 +1838,24 @@ class PlaceAndRouteError(Exception):
     stopped short of a *later* stage the request never asked for -- this
     exception is raised only when a run fails to reach the stage it was
     actually asked to reach.
+
+    ``code``, ``job_id`` and ``details`` are optional and set only by the
+    ``batch`` backend (issue #3518, mirroring ``NetlistError``): a
+    machine-readable ``error.code`` for the CLI's error envelope, the batch
+    job id, and extra structured envelope fields.
     """
+
+    def __init__(
+        self,
+        *args: object,
+        code: str | None = None,
+        job_id: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(*args)
+        self.code = code
+        self.job_id = job_id
+        self.details = details
 
 
 def load_request(request_path: str) -> dict[str, Any]:
@@ -1881,11 +1956,27 @@ def _response_warnings(
     return warnings
 
 
+def _own_stage_root(ownership: contextlib.ExitStack, request_path: str) -> None:
+    """Own the fixed ``.klt/place-and-route/`` stage root (#2770)."""
+    ownership.enter_context(
+        output_lock.hold_output_dir(
+            os.path.join(
+                os.path.dirname(os.path.abspath(request_path)),
+                ".klt",
+                "place-and-route",
+            )
+        )
+    )
+
+
+@output_lock.owns_run
 def run_place_and_route(
     request_path: str,
     *,
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
+    backend: str | None = None,
+    _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """Run the OpenROAD place-and-route flow declared by the request at
     ``request_path``, through the requested (or default, ``"route"``)
@@ -1911,108 +2002,74 @@ def run_place_and_route(
     ``.klt/place-and-route/`` next to the request file (the same
     "next to the input" convention ``klt synthesize``'s ``.klt/synthesize/``
     already uses) and kept as debuggable artifacts, never deleted.
+
+    **Output-directory ownership (issue #2770).** That fixed
+    ``.klt/place-and-route/`` directory is owned for the whole run through
+    :func:`klayout_tools.output_lock.hold_output_dir`: a competing cooperating
+    run on the same request directory (or any alias of it) raises
+    :class:`~klayout_tools.output_lock.OutputDirLockedError` instead of
+    interleaving stage artifacts. ``_ownership`` is internal: the exit stack
+    that releases the lock when the run ends.
+
+    **Physical rebuild per corner (issue #3507).** A request carrying
+    ``pdk.rebuild_corners`` runs the whole flow once per named corner, each
+    into its own ``.klt/place-and-route/<corner>/`` directory, and returns
+    one aggregated report (:func:`_run_rebuild_corners`). Without the field
+    the request takes the single-run path, byte-for-byte unchanged.
+
+    **Batch dispatch (issue #3518).** ``backend`` (the CLI's ``--backend``) >
+    ``request.backend`` > ``$KLT_SIM_BACKEND`` > ``local`` selects where the
+    ``pdk.rebuild_corners`` units run; ``batch`` submits one job per corner
+    to the Spot batch fleet (:mod:`klayout_tools.place_and_route_batch`) and
+    never falls back to running a unit on this host. A single-unit request
+    stays local under a host-default ``batch``.
     """
+    _own_stage_root(_ownership, request_path)
     request = load_request(request_path)
-    request_dir = os.path.dirname(os.path.abspath(request_path))
+    rebuild_corners = _validate_rebuild_corners(request)
 
-    engine = request.get("engine", "openroad")
-    if engine not in SUPPORTED_ENGINES:
-        raise PlaceAndRouteError(
-            f"unsupported engine '{engine}' (supported: {', '.join(SUPPORTED_ENGINES)})"
+    from . import place_and_route_batch
+
+    selected = place_and_route_batch.resolve_backend(
+        backend, request, units=len(rebuild_corners) if rebuild_corners else 1
+    )
+    if selected == "batch":
+        assert rebuild_corners is not None and _ownership is not None
+        return place_and_route_batch.run_rebuild_corners_batch(
+            request_path,
+            request,
+            rebuild_corners,
+            pdk_variant=pdk_variant,
+            ownership=_ownership,
         )
-
-    netlist_path = _resolve_netlist(request["netlist"], request_dir)
-    # Issue #1973: fail here, naming the construct and its line, rather than
-    # letting a `signed` qualifier surface as OpenSTA's raw `STA-0171` syntax
-    # error at the floorplan stage or a bare `x` constant as TritonRoute's
-    # `DRT-0305` a full route attempt later. See this module's docstring
-    # "Netlist pre-flight" section.
-    _reject_unsupported_netlist_constructs(netlist_path)
-
-    hdl_toplevel = request["hdl_toplevel"]
-    if not isinstance(hdl_toplevel, str) or not hdl_toplevel:
-        raise PlaceAndRouteError("request.hdl_toplevel must be a non-empty string")
-
-    pdk_spec = request["pdk"]
-    if not isinstance(pdk_spec, dict):
-        raise PlaceAndRouteError("request.pdk must be a JSON object")
-    cell_library = pdk_spec.get("cell_library")
-    if not isinstance(cell_library, str) or not cell_library:
-        raise PlaceAndRouteError("request.pdk.cell_library is required")
-    requested_corner = pdk_spec.get("corner")
-    if requested_corner is not None and not (
-        isinstance(requested_corner, str) and requested_corner
-    ):
-        raise PlaceAndRouteError(
-            "request.pdk.corner must be a non-empty string when given"
+    if rebuild_corners is not None:
+        assert _ownership is not None  # supplied by `owns_run`
+        return _run_rebuild_corners(
+            request_path,
+            request,
+            rebuild_corners,
+            pdk_variant=pdk_variant,
+            pdk_root=pdk_root,
+            ownership=_ownership,
         )
-    # `request.pdk.interconnect_corner` (issue #1100): the tech LEF's own
-    # parasitic-extraction corner -- open_pdks stages exactly three
-    # (`"min"`/`"nom"`/`"max"`, `lef_files`'s own docstring in `pdk.py`), a
-    # fixed convention unlike the dynamic, per-installed-file liberty
-    # corner set `_resolve_liberty` resolves below, so this is a plain
-    # enum-check rather than file-existence-driven resolution. `None`
-    # (the default, field omitted) preserves this module's original
-    # behaviour byte-for-byte: `_resolve_lef` resolves the same `"nom"`
-    # tech LEF it always has.
-    interconnect_corner = pdk_spec.get("interconnect_corner", "nom")
-    if interconnect_corner not in _TECH_LEF_CORNERS:
-        raise PlaceAndRouteError(
-            "request.pdk.interconnect_corner must be one of: "
-            + ", ".join(sorted(_TECH_LEF_CORNERS))
-        )
-    # Issue #1092: scopes the post-route multi-corner sweep to a named
-    # subset of the shipped corners -- shape-validated here, membership-
-    # validated once `cell_library`'s corner set is resolved below (the
-    # "route" stage branch).
-    sweep_corners = _validate_sweep_corners(pdk_spec.get("sweep_corners"))
-
-    floorplan = _validate_floorplan(request["floorplan"])
-    io_spec = _validate_io(request.get("io"), cell_library)
-    macros = _validate_macros(request.get("macros"), request_dir, netlist_path)
-    power = _validate_power(request.get("power"), cell_library)
-    (
-        clock_port,
-        clock_period_ns,
-        max_transition_ns,
-        max_capacitance_pf,
-        max_fanout,
-        input_delay_ns,
-        output_delay_ns,
-    ) = _validate_constraints(request.get("constraints"))
-    seed = _validate_seed(request["seed"])
-    target_stage = _validate_target_stage(request.get("target_stage", "route"))
-    route_critical_nets_percentage = _validate_route_critical_nets_percentage(
-        request.get("route_critical_nets_percentage")
-    )
-    max_antenna_repair_iterations = _validate_max_antenna_repair_iterations(
-        request.get("max_antenna_repair_iterations")
-    )
-    post_route_spef = _validate_post_route_spef(request.get("post_route_spef"))
-    post_route_sdf = _validate_post_route_sdf(
-        request.get("post_route_sdf"), post_route_spef=post_route_spef
+    return _run_single_corner(
+        request_path, request, pdk_variant=pdk_variant, pdk_root=pdk_root
     )
 
-    liberty_path, corner, pdk_info = _resolve_liberty(
-        cell_library, requested_corner, variant=pdk_variant, root=pdk_root
-    )
-    tech_lef, cell_lef = _resolve_lef(cell_library, pdk_info, interconnect_corner)
 
-    # Issue #2170: the joint floorplan/PDN pre-flight -- see
-    # `_validate_pdn_core_fit`'s own docstring for why it lives outside this
-    # function and why it runs here, after `_resolve_lef`.
-    _validate_pdn_core_fit(
-        floorplan=floorplan,
-        power=power,
-        tech_lef=tech_lef,
-        cell_lefs=[cell_lef, *(macro["lef"] for macro in macros)],
-        netlist_path=netlist_path,
-        hdl_toplevel=hdl_toplevel,
-    )
-
-    stage_index = STAGE_ORDER.index(target_stage)
-    stages_to_run = STAGE_ORDER[: stage_index + 1]
-
+def _validate_stage_prerequisites(
+    *,
+    stage_index: int,
+    target_stage: str,
+    cell_library: str,
+    clock_port: str | None,
+    io_spec: dict[str, Any] | None,
+    power: dict[str, Any] | None,
+) -> None:
+    """Fail with a clear request error when ``target_stage`` (or
+    ``request.power``) needs inputs or per-library tables this request lacks
+    (extracted from :func:`_run_single_corner`, issue #3507, to keep its
+    cyclomatic complexity from growing)."""
     # Stages beyond "floorplan" need a clock -- P&R signoff (CTS, routing,
     # timing-driven repair) has no meaning without one, and STA/`-metrics`
     # would otherwise report an unconstrained-design sentinel instead of a
@@ -2114,7 +2171,141 @@ def run_place_and_route(
             f"(issue #1442) at target_stage '{target_stage}'"
         )
 
+
+def _run_single_corner(
+    request_path: str,
+    request: dict[str, Any],
+    *,
+    pdk_variant: str | None,
+    pdk_root: str | None,
+    corner_override: str | None = None,
+    output_subdir: str | None = None,
+) -> dict[str, Any]:
+    """One full floorplan-through-``target_stage`` flow for an already-loaded
+    ``request`` (issue #3507: the unit :func:`run_place_and_route` runs once,
+    or once per ``pdk.rebuild_corners`` entry).
+
+    ``corner_override`` stands in for ``request.pdk.corner`` and
+    ``output_subdir`` names a directory under ``.klt/place-and-route/`` to
+    write into instead of the stage root itself. Both default to ``None``,
+    which is the original single-run behaviour. The caller owns the output
+    directory lock; this function is pure of CLI and transport so a remote
+    dispatcher can call it per corner too.
+    """
+    request_dir = os.path.dirname(os.path.abspath(request_path))
+
+    engine = request.get("engine", "openroad")
+    if engine not in SUPPORTED_ENGINES:
+        raise PlaceAndRouteError(
+            f"unsupported engine '{engine}' (supported: {', '.join(SUPPORTED_ENGINES)})"
+        )
+
+    netlist_path = _resolve_netlist(request["netlist"], request_dir)
+    # Issue #1973: fail here, naming the construct and its line, rather than
+    # letting a `signed` qualifier surface as OpenSTA's raw `STA-0171` syntax
+    # error at the floorplan stage or a bare `x` constant as TritonRoute's
+    # `DRT-0305` a full route attempt later. See this module's docstring
+    # "Netlist pre-flight" section.
+    _reject_unsupported_netlist_constructs(netlist_path)
+
+    hdl_toplevel = request["hdl_toplevel"]
+    if not isinstance(hdl_toplevel, str) or not hdl_toplevel:
+        raise PlaceAndRouteError("request.hdl_toplevel must be a non-empty string")
+
+    pdk_spec = request["pdk"]
+    if not isinstance(pdk_spec, dict):
+        raise PlaceAndRouteError("request.pdk must be a JSON object")
+    cell_library = pdk_spec.get("cell_library")
+    if not isinstance(cell_library, str) or not cell_library:
+        raise PlaceAndRouteError("request.pdk.cell_library is required")
+    requested_corner = (
+        corner_override if corner_override is not None else pdk_spec.get("corner")
+    )
+    if requested_corner is not None and not (
+        isinstance(requested_corner, str) and requested_corner
+    ):
+        raise PlaceAndRouteError(
+            "request.pdk.corner must be a non-empty string when given"
+        )
+    # `request.pdk.interconnect_corner` (issue #1100): the tech LEF's own
+    # parasitic-extraction corner -- open_pdks stages exactly three
+    # (`"min"`/`"nom"`/`"max"`, `lef_files`'s own docstring in `pdk.py`), a
+    # fixed convention unlike the dynamic, per-installed-file liberty
+    # corner set `_resolve_liberty` resolves below, so this is a plain
+    # enum-check rather than file-existence-driven resolution. `None`
+    # (the default, field omitted) preserves this module's original
+    # behaviour byte-for-byte: `_resolve_lef` resolves the same `"nom"`
+    # tech LEF it always has.
+    interconnect_corner = pdk_spec.get("interconnect_corner", "nom")
+    if interconnect_corner not in _TECH_LEF_CORNERS:
+        raise PlaceAndRouteError(
+            "request.pdk.interconnect_corner must be one of: "
+            + ", ".join(sorted(_TECH_LEF_CORNERS))
+        )
+    # Issue #1092: scopes the post-route multi-corner sweep to a named
+    # subset of the shipped corners -- shape-validated here, membership-
+    # validated once `cell_library`'s corner set is resolved below (the
+    # "route" stage branch).
+    sweep_corners = _validate_sweep_corners(pdk_spec.get("sweep_corners"))
+
+    floorplan = _validate_floorplan(request["floorplan"])
+    io_spec = _validate_io(request.get("io"), cell_library)
+    macros = _validate_macros(request.get("macros"), request_dir, netlist_path)
+    power = _validate_power(request.get("power"), cell_library)
+    (
+        clock_port,
+        clock_period_ns,
+        max_transition_ns,
+        max_capacitance_pf,
+        max_fanout,
+        input_delay_ns,
+        output_delay_ns,
+    ) = _validate_constraints(request.get("constraints"))
+    seed = _validate_seed(request["seed"])
+    target_stage = _validate_target_stage(request.get("target_stage", "route"))
+    route_critical_nets_percentage = _validate_route_critical_nets_percentage(
+        request.get("route_critical_nets_percentage")
+    )
+    max_antenna_repair_iterations = _validate_max_antenna_repair_iterations(
+        request.get("max_antenna_repair_iterations")
+    )
+    post_route_spef = _validate_post_route_spef(request.get("post_route_spef"))
+    post_route_sdf = _validate_post_route_sdf(
+        request.get("post_route_sdf"), post_route_spef=post_route_spef
+    )
+
+    liberty_path, corner, pdk_info = _resolve_liberty(
+        cell_library, requested_corner, variant=pdk_variant, root=pdk_root
+    )
+    tech_lef, cell_lef = _resolve_lef(cell_library, pdk_info, interconnect_corner)
+
+    # Issue #2170: the joint floorplan/PDN pre-flight -- see
+    # `_validate_pdn_core_fit`'s own docstring for why it lives outside this
+    # function and why it runs here, after `_resolve_lef`.
+    _validate_pdn_core_fit(
+        floorplan=floorplan,
+        power=power,
+        tech_lef=tech_lef,
+        cell_lefs=[cell_lef, *(macro["lef"] for macro in macros)],
+        netlist_path=netlist_path,
+        hdl_toplevel=hdl_toplevel,
+    )
+
+    stage_index = STAGE_ORDER.index(target_stage)
+    stages_to_run = STAGE_ORDER[: stage_index + 1]
+
+    _validate_stage_prerequisites(
+        stage_index=stage_index,
+        target_stage=target_stage,
+        cell_library=cell_library,
+        clock_port=clock_port,
+        io_spec=io_spec,
+        power=power,
+    )
+
     output_dir = os.path.join(request_dir, ".klt", "place-and-route")
+    if output_subdir is not None:
+        output_dir = os.path.join(output_dir, output_subdir)
     try:
         os.makedirs(output_dir, exist_ok=True)
     except OSError as exc:
@@ -2122,6 +2313,7 @@ def run_place_and_route(
             f"could not create output directory '{output_dir}': {exc}"
         ) from exc
 
+    placement_routability: dict[str, Any] = {}
     stages: list[dict[str, Any]] = []
     engine_logs: list[dict[str, Any]] = []
     checkpoint_path: str | None = None
@@ -2180,6 +2372,10 @@ def run_place_and_route(
             hold_count = _count_violations(
                 completed.stdout, _HOLD_VIOLATIONS_BEGIN, _HOLD_VIOLATIONS_END
             )
+        placement_routability = _placement_routability_after(
+            stage, completed.stdout, placement_routability
+        )
+        congestion: dict[str, Any] | None = None
         antenna_count = None
         route_drc_count = None
         worst_setup_slack_ns = None
@@ -2202,6 +2398,12 @@ def run_place_and_route(
             route_drc_count = _count_route_drc_violations(drc_report_path)
             write_route_metrics(
                 metrics_path, metrics, route_drc_count, error_cls=PlaceAndRouteError
+            )
+            congestion = build_congestion(
+                global_route=parse_global_route_congestion(completed.stdout),
+                completeness=parse_routing_completeness(completed.stdout),
+                placement=placement_routability,
+                detailed=detailed_route_convergence(metrics),
             )
 
             # Issue #949: sweep every corner `cell_library` ships for
@@ -2281,6 +2483,7 @@ def run_place_and_route(
                 max_capacitance_violation_count_vs_library=(
                     max_capacitance_violation_count_vs_library
                 ),
+                congestion=congestion,
             )
         )
         checkpoint_path = next_checkpoint
@@ -2460,13 +2663,15 @@ def run_place_and_route(
             "ground_net": None,
             "tapcell_master": None,
             "endcap_master": None,
+            "tapcell_distance_um": None,
             "filler_masters": [],
             "straps": [],
             "connects": [],
             "row_rail": row_rail_info,
         }
     else:
-        tap_master, endcap_master, _distance_um = _tapcell_masters(cell_library)
+        tap_master, endcap_master, table_distance_um = _tapcell_masters(cell_library)
+        tapcell_distance_um = _effective_tapcell_distance(power, table_distance_um)
         power_info = {
             "preset": power["preset"],
             "pdn": True,
@@ -2475,6 +2680,7 @@ def run_place_and_route(
             "ground_net": power["ground_net"],
             "tapcell_master": tap_master,
             "endcap_master": endcap_master,
+            "tapcell_distance_um": tapcell_distance_um,
             "filler_masters": (
                 list(_FILLER_CELLS[cell_library]) if target_stage == "route" else []
             ),
@@ -2578,6 +2784,8 @@ def run_place_and_route(
         "status": "ok",
         "stage_reached": target_stage,
         "seed": seed,
+        # Additive field (issue #2781): see `_coverage_declaration`.
+        "coverage": _coverage_declaration(),
         # Additive field (issue #1100): the tech-LEF parasitic-extraction
         # corner actually resolved (`"min"`/`"nom"`/`"max"`,
         # `request.pdk.interconnect_corner`, default `"nom"`) -- distinct
@@ -2668,6 +2876,118 @@ def run_place_and_route(
         # PDN), so `status`/exit codes are unchanged.
         "warnings": warnings,
         "provenance": provenance,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Physical rebuild per corner (issue #3507)
+# --------------------------------------------------------------------------- #
+
+
+def _validate_rebuild_corners(request: dict[str, Any]) -> list[str] | None:
+    """Optional ``request.pdk.rebuild_corners`` (issue #3507) -- shape and
+    exclusivity only; each name is resolved against the cell library's
+    shipped corners by :func:`_run_rebuild_corners`.
+
+    Unlike ``pdk.sweep_corners`` (a post-route STA scope), this re-runs the
+    whole flow per corner, so it is mutually exclusive with the single
+    ``pdk.corner`` selector, must be non-empty, and must not repeat a name
+    (two units would share one output directory). ``None`` when omitted.
+    """
+    pdk_spec = request.get("pdk")
+    if not isinstance(pdk_spec, dict) or "rebuild_corners" not in pdk_spec:
+        return None
+    value = pdk_spec["rebuild_corners"]
+    if (
+        not isinstance(value, list)
+        or not value
+        or not all(isinstance(item, str) and item for item in value)
+    ):
+        raise PlaceAndRouteError(
+            "request.pdk.rebuild_corners must be a non-empty list of non-empty strings"
+        )
+    if pdk_spec.get("corner") is not None:
+        raise PlaceAndRouteError(
+            "request.pdk.rebuild_corners and request.pdk.corner are mutually exclusive"
+        )
+    duplicates = sorted({name for name in value if value.count(name) > 1})
+    if duplicates:
+        raise PlaceAndRouteError(
+            "request.pdk.rebuild_corners names corner(s) more than once: "
+            + ", ".join(duplicates)
+        )
+    return value
+
+
+def _run_rebuild_corners(
+    request_path: str,
+    request: dict[str, Any],
+    corners: list[str],
+    *,
+    pdk_variant: str | None,
+    pdk_root: str | None,
+    ownership: contextlib.ExitStack,
+) -> dict[str, Any]:
+    """Run :func:`_run_single_corner` serially once per ``corners`` entry and
+    aggregate the results into one ``corner_runs`` report (issue #3507).
+
+    Request-level problems (an unreadable netlist, an unknown corner name)
+    raise before any unit starts. A unit that then fails is recorded in its
+    own entry and does not stop the others; the top-level ``status`` is
+    ``"failed"`` if any did.
+    """
+    request_dir = os.path.dirname(os.path.abspath(request_path))
+    netlist_path = _resolve_netlist(request["netlist"], request_dir)
+    input_hash = _content_hash(netlist_path)
+    cell_library = request["pdk"].get("cell_library")
+    if not isinstance(cell_library, str) or not cell_library:
+        raise PlaceAndRouteError("request.pdk.cell_library is required")
+
+    deck_hashes: dict[str, str | None] = {}
+    for name in corners:
+        liberty_path, _corner, _info = _resolve_liberty(
+            cell_library, name, variant=pdk_variant, root=pdk_root
+        )
+        deck_hashes[name] = _content_hash(liberty_path)
+
+    stage_root = os.path.join(request_dir, ".klt", "place-and-route")
+    corner_runs: list[dict[str, Any]] = []
+    for name in corners:
+        unit_dir = os.path.join(stage_root, name)
+        ownership.enter_context(output_lock.hold_output_dir(unit_dir))
+        entry: dict[str, Any] = {
+            "corner": name,
+            "output_dir": unit_dir,
+            "input_content_hash": input_hash,
+            "deck_content_hash": deck_hashes[name],
+        }
+        try:
+            report = _run_single_corner(
+                request_path,
+                request,
+                pdk_variant=pdk_variant,
+                pdk_root=pdk_root,
+                corner_override=name,
+                output_subdir=name,
+            )
+        except PlaceAndRouteError as exc:
+            entry.update({"status": "failed", "error": str(exc)})
+        else:
+            entry.update(report)
+        corner_runs.append(entry)
+
+    failed = [run["corner"] for run in corner_runs if run["status"] != "ok"]
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "engine": request.get("engine", "openroad"),
+        "engine_version": _openroad_version(),
+        "hdl_toplevel": request.get("hdl_toplevel"),
+        "status": "failed" if failed else "ok",
+        "target_stage": request.get("target_stage", "route"),
+        "seed": request.get("seed"),
+        "rebuild_corners": list(corners),
+        "failed_corners": failed,
+        "corner_runs": corner_runs,
     }
 
 
@@ -3131,13 +3451,68 @@ def _validate_power(
                 }
             )
 
+    # `tapcell.distance_um` (issue #3051) -> `tapcell -distance` -- overrides
+    # the per-library pitch in `_TAPCELL_CELLS`. Optional; omitted (the
+    # default, `None`) falls back to the table value, so the emitted Tcl is
+    # byte-for-byte unchanged. It is a placement input, not evidence of any
+    # diffusion-to-tap distance. A `_NO_TAPCELL_LIBRARIES` library emits no
+    # `tapcell` line, so an override there is rejected rather than silently
+    # ignored.
+    tapcell_distance_um = _validate_tapcell(power.get("tapcell"), cell_library)
+
     return {
         "preset": preset_name,
         "power_net": power_net,
         "ground_net": ground_net,
+        "tapcell_distance_um": tapcell_distance_um,
         "straps": validated_straps,
         "connects": validated_connects,
     }
+
+
+def _validate_tapcell(tapcell: Any, cell_library: str | None) -> int | float | None:
+    """Validate ``request.power.tapcell`` (issue #3051); return its
+    ``distance_um`` override, or ``None`` when ``tapcell`` is omitted."""
+    if tapcell is None:
+        return None
+    if not isinstance(tapcell, dict):
+        raise PlaceAndRouteError(
+            "request.power.tapcell must be a JSON object when given "
+            "(request.power.tapcell.distance_um is its only field)"
+        )
+    unknown = sorted(set(tapcell) - {"distance_um"})
+    if unknown:
+        raise PlaceAndRouteError(
+            f"request.power.tapcell has unknown key(s) {unknown}; "
+            "only distance_um is supported"
+        )
+    distance_um = tapcell.get("distance_um")
+    if (
+        not isinstance(distance_um, (int, float))
+        or isinstance(distance_um, bool)
+        or not math.isfinite(distance_um)
+        or distance_um <= 0
+    ):
+        raise PlaceAndRouteError(
+            "request.power.tapcell.distance_um is required and must be a "
+            "positive number"
+        )
+    if cell_library in _NO_TAPCELL_LIBRARIES:
+        raise PlaceAndRouteError(
+            f"request.power.tapcell.distance_um cannot be honored: "
+            f"standard-cell library '{cell_library}' has no tap/endcap "
+            "cells, so no tapcell call is emitted"
+        )
+    return distance_um
+
+
+def _effective_tapcell_distance(
+    power: dict[str, Any], table_distance_um: int | None
+) -> int | float | None:
+    """The ``tapcell -distance`` pitch: the validated override, else the
+    per-library table value."""
+    override = power.get("tapcell_distance_um")
+    return table_distance_um if override is None else override
 
 
 def _validate_macros(
@@ -3903,6 +4278,12 @@ def _resolve_layer_map(pdk_info: dict[str, Any]) -> tuple[str | None, str]:
     family = variant
     if len(family) > 1 and family[-1].isupper():
         family = family[:-1]
+    # IHP-Open-PDK (issue #2444): the install variant is ``ihp-sg13g2`` but
+    # the shipped map is named after the process, ``sg13g2.map`` -- without
+    # this the DEF->GDS merge silently fell back to KLayout's sequential
+    # default layer numbering (Via1 cuts on 8/0, Metal2 pads on 9/0, ...).
+    if family.startswith("ihp-"):
+        family = family[len("ihp-") :]
     if family != variant:
         family_candidate = os.path.join(tech_dir, f"{family}.map")
         if os.path.isfile(family_candidate):
@@ -4086,14 +4467,26 @@ def _metrics_report_lines(
 
 
 def _violation_count_lines() -> list[str]:
-    return [
-        f'puts "{_SETUP_VIOLATIONS_BEGIN}"',
-        "report_check_types -max_delay -violators -format end",
-        f'puts "{_SETUP_VIOLATIONS_END}"',
-        f'puts "{_HOLD_VIOLATIONS_BEGIN}"',
-        "report_check_types -min_delay -violators -format end",
-        f'puts "{_HOLD_VIOLATIONS_END}"',
-    ]
+    """Marker-delimited setup/hold violator reports for this module's
+    nominal-stage report (and, via
+    ``place_and_route_sta._spef_sta_script_lines``, the post-route SPEF
+    re-time).
+
+    Delegates the check-family policy to
+    :func:`~klayout_tools._openroad_engine._timing_violation_report_lines`
+    (issue #2741): the setup side counts data setup + recovery + clock-gating
+    setup and the hold side data hold + removal + clock-gating hold -- the
+    same populations ``report_worst_slack_metric``/``report_tns_metric``
+    measure -- so ``setup_violation_count``/``hold_violation_count`` agree
+    with the WNS/TNS fields next to them. Unit: violating endpoints (one
+    ``-format end`` row per endpoint per path group), not enumerated paths.
+    """
+    return _timing_violation_report_lines(
+        setup_begin=_SETUP_VIOLATIONS_BEGIN,
+        setup_end=_SETUP_VIOLATIONS_END,
+        hold_begin=_HOLD_VIOLATIONS_BEGIN,
+        hold_end=_HOLD_VIOLATIONS_END,
+    )
 
 
 def _design_rule_check_lines(
@@ -4231,16 +4624,21 @@ def _tapcell_masters(cell_library: str) -> tuple[str | None, str | None, int | N
     return _TAPCELL_CELLS[cell_library]
 
 
-def _tapcell_lines(cell_library: str) -> list[str]:
+def _tapcell_lines(
+    cell_library: str, distance_um: int | float | None = None
+) -> list[str]:
     """The ``request.power`` ``tapcell`` Tcl for ``cell_library`` -- one
     line, or **none at all** for a library in
     :data:`_NO_TAPCELL_LIBRARIES` (issue #2441), which has no tap/endcap
     masters to place. ``-endcap_master`` is appended only for a library
-    whose :data:`_TAPCELL_CELLS` entry names one.
+    whose :data:`_TAPCELL_CELLS` entry names one. ``distance_um`` (issue
+    #3051) overrides the table pitch; ``None`` keeps the table value.
     """
-    tap_master, endcap_master, distance_um = _tapcell_masters(cell_library)
+    tap_master, endcap_master, table_distance_um = _tapcell_masters(cell_library)
     if tap_master is None:
         return []
+    if distance_um is None:
+        distance_um = table_distance_um
     call = f"tapcell -distance {distance_um} -tapcell_master {tap_master}"
     if endcap_master is not None:
         call += f" -endcap_master {endcap_master}"
@@ -4299,7 +4697,7 @@ def _power_delivery_lines(power: dict[str, Any], cell_library: str) -> list[str]
     # No `tapcell` line at all on a library that ships no tap/endcap cells
     # (issue #2441) -- everything below is unchanged for it, since nothing
     # in the global-connect/PDN sequence depends on `tapcell` having run.
-    lines: list[str] = _tapcell_lines(cell_library)
+    lines: list[str] = _tapcell_lines(cell_library, power.get("tapcell_distance_um"))
 
     for net_role, pin_pattern, is_primary in _POWER_PIN_PATTERNS[cell_library]:
         net = power_net if net_role == "power" else ground_net
@@ -4440,6 +4838,22 @@ def _row_rail_lines(cell_library: str) -> list[str]:
     ]
 
 
+def _dont_use_lines(cell_library: str) -> list[str]:
+    """``set_dont_use`` lines for ``cell_library`` (issue #2378).
+
+    Reuses the same per-library table ``klt synthesize`` hands to ABC
+    (:data:`~klayout_tools.synthesize._ABC_DONT_USE_GLOBS`) so both commands
+    agree on the usable cell set. Each glob is brace-quoted (Tcl-safe: the
+    ``*``/``?``/``[]`` metacharacters reach OpenROAD's own pattern matcher
+    unexpanded). A library with no entry emits nothing.
+    """
+    from .synthesize import _ABC_DONT_USE_GLOBS
+
+    return [
+        f"set_dont_use {{{glob}}}" for glob in _ABC_DONT_USE_GLOBS.get(cell_library, ())
+    ]
+
+
 def _stage_script_lines(
     *,
     stage: str,
@@ -4521,6 +4935,11 @@ def _stage_script_lines(
     # stage's own `link_design`), so `create_clock` may safely follow
     # `read_liberty` directly here -- unlike the floorplan stage above.
     lines = [f"read_db {checkpoint_in}", f"read_liberty {liberty_path}"]
+    # Issue #2378: `set_dont_use` must come after liberty is loaded and before
+    # the first resizer-driven step (`global_placement -timing_driven`,
+    # `repair_*`, CTS, hold repair), and is re-emitted in every fresh OpenROAD
+    # process rather than relying on any checkpoint to carry it.
+    lines += _dont_use_lines(cell_library)
     lines += _clock_lines(clock_port, clock_period_ns)
     lines += _design_rule_constraint_lines(
         max_transition_ns, max_capacitance_pf, max_fanout
@@ -4640,14 +5059,15 @@ def _stage_script_lines(
         # antenna-repair iteration" -- that weights the given percentage of
         # worst-slack nets as timing-critical during congestion-removal
         # iterations. `0` (unset, `request.route_critical_nets_percentage`
-        # omitted) reproduces `global_route`'s own default and this
-        # module's prior generated Tcl byte-for-byte -- the explicit A/B
-        # disable path.
-        global_route_call = "global_route"
+        # omitted) reproduces `global_route`'s own default -- the explicit
+        # A/B disable path.
+        # `-verbose` (issue #2994) makes the global router print its
+        # per-layer "Final congestion report" table, which the response's
+        # `congestion` block scrapes; routing results are unchanged.
+        global_route_call = "global_route -verbose"
         if route_critical_nets_percentage:
-            global_route_call = (
-                "global_route "
-                f"-critical_nets_percentage {route_critical_nets_percentage}"
+            global_route_call += (
+                f" -critical_nets_percentage {route_critical_nets_percentage}"
             )
         # Row-rail fallback (issue #1442): only when `request.power` was
         # *not* given -- a `request.power`-bearing run already got a real
@@ -4699,6 +5119,9 @@ def _stage_script_lines(
                 max_antenna_repair_iterations,
             )
         lines += _antenna_check_lines()
+        # Issue #2994: unrouted-net count, over the routing the antenna
+        # check above just reported on.
+        lines += routing_completeness_lines()
         # `request.power` (issue #1091): gap-filler cell insertion, right
         # after the antenna-repair loop above (mirroring ORFS's own
         # `flow/scripts/fillcell.tcl`, which likewise runs immediately
@@ -5126,6 +5549,21 @@ def _read_metrics(metrics_path: str, stage: str) -> dict[str, Any]:
     return data
 
 
+def _placement_routability_after(
+    stage: str, stdout: str, previous: dict[str, Any]
+) -> dict[str, Any]:
+    """Issue #2994: the routability-driven placement figures to carry forward
+    once ``stage`` has run -- parsed fresh from the ``place`` stage's log,
+    unchanged for every other stage."""
+    return parse_placement_routability(stdout) if stage == "place" else previous
+
+
+def _congestion_entry(congestion: dict[str, Any] | None) -> dict[str, Any]:
+    """Issue #2994: the route-stage-only ``congestion`` key for a stage entry
+    (empty when the stage produced no congestion block)."""
+    return {} if congestion is None else {"congestion": congestion}
+
+
 def _extract_stage_metrics(
     stage: str,
     metrics: dict[str, Any],
@@ -5140,6 +5578,7 @@ def _extract_stage_metrics(
     max_capacitance_violation_count: int | None = None,
     max_transition_violation_count_vs_library: int | None = None,
     max_capacitance_violation_count_vs_library: int | None = None,
+    congestion: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Map one stage's raw OpenROAD ``-metrics`` JSON dump onto this
     contract's field names -- see this module's docstring
@@ -5250,6 +5689,8 @@ def _extract_stage_metrics(
             entry["max_capacitance_violation_count_vs_library"] = (
                 max_capacitance_violation_count_vs_library
             )
+        # Issue #2994: route-stage-only, absent elsewhere like the fields above.
+        entry.update(_congestion_entry(congestion))
 
     # Issue #1865: whether the slack fields above are measurements at all.
     # OpenSTA reports the worst slack of a design with no constrained
@@ -5317,6 +5758,7 @@ def _place_and_route_provenance_hashes(
     *,
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
+    corner: str | None = None,
 ) -> tuple[str | None, str | None]:
     """Re-derive ``(input_content_hash, deck_content_hash)`` for the request
     at ``request_path`` **without invoking OpenROAD** -- the cheap half of
@@ -5341,7 +5783,7 @@ def _place_and_route_provenance_hashes(
         raise PlaceAndRouteError("request.pdk.cell_library is required")
     liberty_path, _corner, _pdk_info = _resolve_liberty(
         cell_library,
-        pdk_spec.get("corner"),
+        corner if corner is not None else pdk_spec.get("corner"),
         variant=pdk_variant,
         root=pdk_root,
     )
@@ -5374,6 +5816,36 @@ def check_place_and_route_report(
     report or an unresolvable request -- never a traceback.
     """
     committed = load_committed_report(report_path, PlaceAndRouteError)
+    rebuild_corners = _validate_rebuild_corners(load_request(request_path))
+    if rebuild_corners is not None:
+        # Issue #3507: a multi-corner request is verified per unit -- each
+        # corner's recorded input/deck digests against a fresh re-hash.
+        by_corner = {
+            run.get("corner"): run
+            for run in committed.get("corner_runs") or []
+            if isinstance(run, dict)
+        }
+        unit_checks = []
+        for name in rebuild_corners:
+            input_hash, deck_hash = _place_and_route_provenance_hashes(
+                request_path, pdk_variant=pdk_variant, pdk_root=pdk_root, corner=name
+            )
+            recorded = by_corner.get(name, {})
+            unit_checks.append(
+                hash_check(
+                    f"corner_runs[{name}].input_content_hash",
+                    recorded.get("input_content_hash"),
+                    input_hash,
+                )
+            )
+            unit_checks.append(
+                hash_check(
+                    f"corner_runs[{name}].deck_content_hash",
+                    recorded.get("deck_content_hash"),
+                    deck_hash,
+                )
+            )
+        return build_check_result(report_path=report_path, checks=unit_checks)
     input_hash, deck_hash = _place_and_route_provenance_hashes(
         request_path, pdk_variant=pdk_variant, pdk_root=pdk_root
     )
@@ -5398,6 +5870,7 @@ def rerun_place_and_route_report(
     *,
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
+    backend: str | None = None,
 ) -> dict[str, Any]:
     """``klt place-and-route <request> --check <report> --rerun`` (full mode,
     issue #2224): verify a committed report by actually re-running the
@@ -5425,7 +5898,7 @@ def rerun_place_and_route_report(
     """
     committed = load_committed_report(report_path, PlaceAndRouteError)
     fresh = run_place_and_route(
-        request_path, pdk_variant=pdk_variant, pdk_root=pdk_root
+        request_path, pdk_variant=pdk_variant, pdk_root=pdk_root, backend=backend
     )
     return build_rerun_result(
         report_path=report_path,

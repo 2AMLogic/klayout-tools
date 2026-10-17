@@ -7,7 +7,7 @@ every other ``klt`` subcommand -- see ``docs/json-contract.md``.
 Exit codes (see ``docs/cli/ring-check.md`` for the full table):
     0 - ring is continuous (one closed annulus per checked top cell)
     1 - failed to run (bad file, empty/invalid --layers, unknown --top,
-        malformed --region) -- returned by ``emit_error`` as
+        empty/unknown --cells, malformed --region) -- returned by ``emit_error`` as
         ``output.ERROR_EXIT_CODE``
     3 - ran successfully, the ring is broken
 (2 is reserved for argparse usage errors, as with every other ``klt`` subcommand.)
@@ -35,6 +35,7 @@ def run(args: argparse.Namespace) -> int:
             region_um=region_um,
             top=args.top,
             ignore_enclosed=args.ignore_enclosed,
+            cells=args.cells,
         )
     except RingCheckError as exc:
         return emit_error("ring-check", str(exc), args.format)
@@ -78,6 +79,8 @@ def _print_text(report: dict) -> None:
     if report["region_um"] is not None:
         left, bottom, right, top = report["region_um"]
         print(f"region_um: ({left},{bottom})-({right},{top})")
+    if report.get("cells") is not None:
+        print(f"cells: {', '.join(report['cells'])}")
     print(f"dbu_um: {report['dbu_um']}")
     print(f"status: {report['status']}")
     print(f"violations: {report['violation_count']}")

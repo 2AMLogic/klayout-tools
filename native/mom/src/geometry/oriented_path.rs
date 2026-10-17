@@ -12,11 +12,11 @@
 //! `classify_bars`, whose single-length / single-equivalent-wire assumptions
 //! the current PEEC and full-wave consumers still depend on.
 //!
-//! **Geometry only.** No public solve consumes an [`OrientedPath`] yet: series
-//! L/R aggregation (#2729) and retarded coupling (#2730) own that. Until they
-//! land, a single mixed-axis winding is still rejected by `classify_bars` on
-//! every public `compute_inductance`/`frequencies_hz` request, so accepting the
-//! geometry here cannot produce numbers on its own.
+//! **Consumers.** The static PEEC solve (`geometry::discretize_bars` ->
+//! `peec`, issue #2729) consumes an [`OrientedPath`] as a series L/R model.
+//! The retarded full-wave sweep (#2730,
+//! `classify_full_wave_bars` -> `fullwave`) meshes the path's legs with
+//! segment-local direction, length and radius.
 //!
 //! The full contract -- contact rules, tolerance, corner-volume ownership,
 //! canonical orientation, collinear subdivision, and every rejected case -- is
@@ -46,10 +46,9 @@
 //!   [`OrientedPath::orientation`], so it can never be confused with an input
 //!   permutation.
 
-// Every item here is exercised by this module's tests, but no production
-// consumer exists until #2729 (series L/R) / #2730 (retarded coupling) land --
-// see the module docs. Without this, `cargo clippy -- -D warnings` would fail
-// on the not-yet-consumed API.
+// Some items (`reversed`, `vertices_um`, ...) are exercised only by this
+// module's tests. Without this, `cargo clippy -- -D warnings` would fail on
+// the not-otherwise-consumed API.
 #![allow(dead_code)]
 
 use super::{
@@ -1366,7 +1365,7 @@ mod tests {
     }
 
     #[test]
-    fn winding_is_an_oriented_path_but_public_solves_still_reject_it() {
+    fn winding_is_an_oriented_path_accepted_statically_but_full_wave_still_rejects_it() {
         let (boxes, _): (Vec<BoxRequest>, Vec<f64>) = spiral_boxes_and_signs().into_iter().unzip();
         let spiral = conductor(boxes);
         match classify_conductor_topology(3, &spiral).unwrap() {
@@ -1376,14 +1375,14 @@ mod tests {
             }
             other => panic!("expected an oriented path, got {other:?}"),
         }
-        // Geometry acceptance alone enables no numbers: the PEEC and
-        // full-wave consumers keep their explicit mixed-axis rejection until
-        // #2729 / #2730 land.
+        // Both the static PEEC discretisation (#2729) and the full-wave
+        // classification (#2730) accept it as a series winding.
         let conductors = [spiral];
-        let e = discretize_bars(&conductors, 1.0).unwrap_err();
-        assert!(e.contains("same current-flow axis"), "{e}");
-        let e = classify_full_wave_bars(&conductors).err().unwrap();
-        assert!(e.contains("same current-flow axis"), "{e}");
+        let layout = discretize_bars(&conductors, 1.0).unwrap();
+        assert_eq!(layout.series_segments.len(), 8);
+        let fw = classify_full_wave_bars(&conductors).unwrap();
+        assert_eq!(fw.windings[0].as_ref().unwrap().segments.len(), 8);
+        assert!(fw.shared_axial_span.is_none());
     }
 
     #[test]

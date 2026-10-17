@@ -36,6 +36,7 @@ docs/
     deck.md
     design-centering.md
     draw.md
+    diff.md
     drc.md
     economy.md
     env-provenance.md
@@ -62,6 +63,7 @@ docs/
     precheck.md
     render.md
     report.md
+    reset-coverage.md
     ring-check.md
     signoff.md
     sim.md
@@ -70,12 +72,16 @@ docs/
     sta.md
     stats.md
     synthesize.md
+    tap-distance.md
     techmap.md
     trajectory.md
     version.md
     wave.md
     yield-campaign.md
+    yield-csv.md
+    yield-samples.md
     yield-sensitivity.md
+    yield-threshold.md
     yield.md
   design/                # design notes, spikes, and upstream surveys
     analog-resource-survey.md
@@ -157,6 +163,7 @@ docs/
   guides/                # how-to guides
     building-klayout-macos.md
     ci-wall-clock-budget.md
+    mcp-server.md
     digital-review/      # RTL / testbench review guides (ported, Apache-2.0 — see its NOTICE)
       README.md
       NOTICE

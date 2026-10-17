@@ -5,6 +5,7 @@ from dataclasses import replace
 import klayout.db as kdb
 import pytest
 
+from klayout_tools import decks
 from klayout_tools import gen_compose_routing as routing
 from klayout_tools.decks import DerivedLayer, get_deck
 from klayout_tools.drc import run_drc
@@ -137,15 +138,26 @@ def test_met5_enclosure_controls_size_when_via_is_upsized(
     tmp_path, pdk_root, monkeypatch
 ):
     # With the current 0.8um cut, met5's 2um area floor masks a missing
-    # enclosure term. Enlarge only the width rule to exercise that term.
+    # enclosure term. Enlarge only the width rule (both bounds: via4.width.1
+    # is fixed-size since issue #2443) to exercise that term.
     rules = [
-        replace(rule, threshold_dbu=1800) if rule.id == "via4.width.1" else rule
+        (
+            replace(rule, threshold_dbu=1800, threshold_max_dbu=1800)
+            if rule.id == "via4.width.1"
+            else rule
+        )
         for rule in get_deck("sky130")
     ]
     monkeypatch.setattr(routing, "get_deck", lambda _: rules)
+    # The generator also clamps cuts to the deck's `threshold_max_dbu`
+    # (issue #2585), read through `decks.get_deck` -- patch that too.
+    monkeypatch.setattr(decks, "get_deck", lambda _: rules)
     output = _compose_ladder(tmp_path, pdk_root, bond_pad=False)
     drc = run_drc(str(output), "sky130")
-    assert not (_CHECKED_RULES & drc["rule_counts"].keys()), drc["rule_counts"]
+    # The real deck's fixed 0.8um via4.width.1 (issue #2443) rightly flags
+    # the deliberately upsized cut; this test only guards the enclosure term.
+    checked = _CHECKED_RULES - {"via4.width.1"}
+    assert not (checked & drc["rule_counts"].keys()), drc["rule_counts"]
     layout = kdb.Layout()
     layout.read(str(output))
     top = layout.top_cell()
@@ -198,4 +210,8 @@ def test_enclosure_floor_survives_rounding_to_the_output_grid(tmp_path, dbu):
     # At 0.006um/dbu, nearest rounding shrinks the 1.18um floor to
     # 1.176um and leaves four enclosure violations around the actual cut.
     drc = run_drc(output, "sky130")
-    assert not (_CHECKED_RULES & drc["rule_counts"].keys()), drc["rule_counts"]
+    # via4.width.1 is a fixed 0.8um size (issue #2443); 0.8um is not
+    # representable on the 0.006um grid (rounds to 0.804um), so exclude it:
+    # this test only guards the enclosure floor.
+    checked = _CHECKED_RULES - {"via4.width.1"}
+    assert not (checked & drc["rule_counts"].keys()), drc["rule_counts"]

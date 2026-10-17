@@ -347,9 +347,11 @@ def test_deck_rules_value_um_is_threshold_times_nominal_dbu_for_every_rule():
     the spot-checked rules above -- a distance rule always reports
     ``threshold_dbu * nominal_dbu``, and a non-distance rule never reports a
     distance at all."""
-    from klayout_tools.decks import deck_names, get_deck, get_nominal_dbu
+    from klayout_tools.decks import _registry, deck_names, get_deck, get_nominal_dbu
 
-    for deck in deck_names():
+    # Only decks with DRC rules: an extraction-only deck (asap7, issue
+    # #2761) is in `deck_names()` but has no rule table to convert.
+    for deck in (name for name in deck_names() if name in _registry()):
         nominal = get_nominal_dbu(deck)
         source = {rule.id: rule for rule in get_deck(deck)}
         for entry in history.deck_rules(deck)["rules"]:
@@ -676,6 +678,61 @@ def test_deck_devices_reports_the_full_diode_predicate_set_without_the_deck_sour
     assert entry["provenance"]["rule_id"] == "gf180mcu_fd_pr__diode_pd2nw_06v0"
 
 
+def test_deck_devices_drawn_bipolar_markers_report_no_expression():
+    """sky130/gf180mcu bipolars keep their single drawn `marker` layer; the
+    `marker_expression` field (issue #2860) is `null` for them."""
+    for deck, name, pair in (
+        ("sky130", "pnp", (82, 44)),
+        ("gf180mcu", "bjt", (127, 5)),
+    ):
+        entry = _device_class(deck, name)
+        assert (entry["marker"]["layer"], entry["marker"]["datatype"]) == pair
+        assert entry["marker_expression"] is None
+        assert entry["marker_gated"] is True
+
+
+def test_deck_devices_projects_a_derived_bipolar_marker_expression(capsys):
+    """A `LayerExpr` marker (issue #2860) reports as `marker_expression`, with
+    its leaves folded into `required_layers`/`excluded_layers` by polarity."""
+    import dataclasses
+
+    from klayout_tools.cli.deck_cmd import _print_devices_text
+    from klayout_tools.decks import LayerExpr, get_extraction_deck
+
+    pwell = LayerExpr.not_((240, 0), (31, 0), (241, 0), name="pwell")
+    npn_mk = LayerExpr.and_((26, 0), pwell, (242, 0), name="npn_mk")
+    deck = get_extraction_deck("sky130")
+    (pnp,) = deck.bipolars
+    deck = dataclasses.replace(
+        deck, bipolars=(dataclasses.replace(pnp, marker=npn_mk),)
+    )
+
+    (entry,) = [
+        e for e in history._project_device_classes(deck, {}) if e["kind"] == "bipolar"
+    ]
+    assert entry["marker"] is None
+    assert entry["marker_gated"] is True
+    expr = entry["marker_expression"]
+    assert expr["op"] == "and" and expr["name"] == "npn_mk"
+    assert expr["operands"][0] == {"layer": 26, "datatype": 0, "name": None}
+    assert expr["operands"][1]["op"] == "not"
+    assert expr["operands"][1]["name"] == "pwell"
+    assert _layer_pairs(expr["operands"][1]["operands"]) == [
+        (240, 0),
+        (31, 0),
+        (241, 0),
+    ]
+    assert _layer_pairs(entry["required_layers"])[:3] == [(26, 0), (240, 0), (242, 0)]
+    assert _layer_pairs(entry["excluded_layers"]) == [(31, 0), (241, 0)]
+    json.dumps(entry)  # JSON-serialisable as-is
+
+    _print_devices_text({"deck": "x", "content_hash": None, "device_classes": [entry]})
+    assert (
+        "marker: npn_mk = (26/0 & pwell = (240/0 - 31/0 - 241/0) & 242/0)"
+        in capsys.readouterr().out
+    )
+
+
 def test_deck_devices_reports_the_deck_content_hash_and_declaration_order():
     report = history.deck_devices("gf180mcu")
 
@@ -726,6 +783,22 @@ def test_deck_devices_marks_markerless_classes_as_such():
     assert _layer_pairs([flavour["marker"] for flavour in nfet["flavours"]]) == [
         (55, 0)
     ]
+
+
+def test_deck_devices_reports_resistor_topology():
+    """Issue #2679: each resistor class reports how its `body` layer relates
+    to its `marker` -- sg13g2's poly resistors are `abutting_heads` (the
+    marker *is* the body, GatPoly only the two heads); every other resistor
+    keeps the default `overlap`. Non-resistor classes carry no such key."""
+    for name in ("rsil", "rppd", "rhigh"):
+        assert _device_class("sg13g2", name)["topology"] == "abutting_heads"
+    assert _device_class("sg13g2", "res_metal1")["topology"] == "overlap"
+    assert _device_class("gf180mcu", "ppolyf_u")["topology"] == "overlap"
+    for entry in history.deck_devices("sky130")["device_classes"]:
+        if entry["kind"] == "resistor":
+            assert entry["topology"] == "overlap"
+        else:
+            assert "topology" not in entry
 
 
 def test_deck_devices_narrows_to_a_single_class():
@@ -871,3 +944,195 @@ def test_checked_in_history_table_covers_every_release():
             "checked-in _history.json is stale relative to `git tag` -- "
             "rerun scripts/generate_deck_history.py and commit the result"
         )
+
+
+# --------------------------------------------------------------------------- #
+# issue #2451: a release build resolves its own deck hash
+# --------------------------------------------------------------------------- #
+
+
+def _own_hash(name: str) -> str:
+    from klayout_tools._provenance import sha256_file
+    from klayout_tools.decks import deck_source_path
+
+    return f"sha256:{sha256_file(deck_source_path(name))}"
+
+
+def _fake_identity(monkeypatch, is_release):
+    from klayout_tools import build_identity
+
+    monkeypatch.setattr(
+        build_identity,
+        "identity",
+        lambda: {
+            "git_commit": "c" * 40,
+            "git_tag": "v9.9.9",
+            "dirty": False,
+            "is_release": is_release,
+        },
+    )
+
+
+def test_release_build_resolves_own_deck_hash(_history_table, monkeypatch):
+    from klayout_tools import __version__
+
+    _fake_identity(monkeypatch, True)
+    h = _own_hash("sky130")
+    report = history.resolve_deck(content_hash=h, deck="sky130")
+    assert report["package_version"] == __version__
+    assert report["git_tag"] == "v9.9.9"
+    assert report["self_identified"] is True
+    assert history.is_deck_hash_released("sky130", h) is True
+
+
+def test_non_release_build_does_not_self_identify(_history_table, monkeypatch):
+    _fake_identity(monkeypatch, False)
+    h = _own_hash("sky130")
+    with pytest.raises(history.DeckHistoryError):
+        history.resolve_deck(content_hash=h, deck="sky130")
+    assert history.is_deck_hash_released("sky130", h) is False
+
+
+def test_release_build_foreign_hash_still_unreleased(_history_table, monkeypatch):
+    _fake_identity(monkeypatch, True)
+    foreign = "sha256:" + "f" * 64
+    assert history.is_deck_hash_released("sky130", foreign) is False
+    with pytest.raises(history.DeckHistoryError):
+        history.resolve_deck(content_hash=foreign)
+
+
+def test_table_match_takes_precedence_over_self(_history_table, monkeypatch):
+    _fake_identity(monkeypatch, True)
+    report = history.resolve_deck(content_hash="sha256:" + "a" * 64)
+    expected = [e for e in _ENTRIES if e["content_hash"] == "sha256:" + "a" * 64]
+    assert report["package_version"] == expected[-1]["package_version"]
+    assert "self_identified" not in report
+
+
+def _fake_build_info(monkeypatch, deck_hashes=..., present=True):
+    import sys
+
+    if not present:
+        monkeypatch.delitem(sys.modules, "klayout_tools._build_info", raising=False)
+        return
+    module = type(sys)("klayout_tools._build_info")
+    if deck_hashes is not ...:
+        module.DECK_HASHES = deck_hashes
+    monkeypatch.setitem(sys.modules, "klayout_tools._build_info", module)
+
+
+def test_installed_release_matches_recorded_deck_hash(_history_table, monkeypatch):
+    _fake_identity(monkeypatch, True)
+    recorded = "sha256:" + "d" * 64
+    _fake_build_info(monkeypatch, {"sky130": recorded})
+    report = history.resolve_deck(content_hash=recorded, deck="sky130")
+    assert report["self_identified"] is True
+    assert history.is_deck_hash_released("sky130", recorded) is True
+
+
+def test_installed_release_edited_deck_does_not_self_identify(
+    _history_table, monkeypatch
+):
+    """A deck module hand-edited after a wheel install hashes differently from
+    the hash recorded at build time, so it must not be reported as released
+    even though the frozen build identity still says "clean release"."""
+    _fake_identity(monkeypatch, True)
+    _fake_build_info(monkeypatch, {"sky130": "sha256:" + "d" * 64})
+    on_disk = _own_hash("sky130")
+    assert history.is_deck_hash_released("sky130", on_disk) is False
+    with pytest.raises(history.DeckHistoryError):
+        history.resolve_deck(content_hash=on_disk, deck="sky130")
+
+
+def test_installed_release_without_recorded_hashes_does_not_self_identify(
+    _history_table, monkeypatch
+):
+    """A distribution built before deck hashes were recorded fails closed."""
+    _fake_identity(monkeypatch, True)
+    _fake_build_info(monkeypatch)
+    assert history.is_deck_hash_released("sky130", _own_hash("sky130")) is False
+
+
+def test_release_tag_with_unknown_dirty_state_does_not_self_identify(
+    _history_table, monkeypatch
+):
+    from klayout_tools import __version__, build_identity
+
+    ident = build_identity._resolve("c" * 40, f"v{__version__}", None, __version__)
+    monkeypatch.setattr(build_identity, "identity", lambda: ident)
+    _fake_build_info(monkeypatch, present=False)
+    assert history.is_deck_hash_released("sky130", _own_hash("sky130")) is False
+
+
+# --- layer_refs / layer_table (issue #3092) -----------------------------------
+
+
+@pytest.mark.parametrize("deck", ["sky130", "gf180mcu", "sg13g2", "sg13cmos5l"])
+def test_deck_rules_layer_refs_parallel_layers_and_resolve_through_layer_table(deck):
+    report = history.deck_rules(deck)
+    table = {(e["layer"], e["datatype"]): e["name"] for e in report["layer_table"]}
+    assert report["layer_table"] == sorted(
+        report["layer_table"], key=lambda e: (e["layer"], e["datatype"])
+    )
+
+    for rule in report["rules"]:
+        assert len(rule["layer_refs"]) == len(rule["layers"])
+        for label, ref in zip(rule["layers"], rule["layer_refs"], strict=True):
+            pair = (ref["layer"], ref["datatype"])
+            if ref["name"] is None:
+                assert label == f"{pair[0]}/{pair[1]}"
+                assert pair not in table
+            else:
+                assert label == ref["name"]
+                assert table[pair] == ref["name"]
+
+    unresolved = {(u["layer"], u["datatype"]) for u in report["unresolved"]}
+    expected = {
+        (ref["layer"], ref["datatype"])
+        for rule in report["rules"]
+        for ref in rule["layer_refs"]
+        if ref["name"] is None
+    }
+    assert unresolved == expected
+
+
+def test_deck_rules_layer_refs_match_the_deck_pair_for_every_rule():
+    from klayout_tools.decks import get_deck
+
+    report = history.deck_rules("sky130")
+    for rule, entry in zip(get_deck("sky130"), report["rules"], strict=True):
+        pairs = [rule.layer] + ([rule.other_layer] if rule.other_layer else [])
+        assert [(r["layer"], r["datatype"]) for r in entry["layer_refs"]] == pairs
+
+
+def test_deck_rules_reports_ambiguous_and_unresolved_explicitly(monkeypatch):
+    from klayout_tools import decks
+
+    names = {(1, 0): "dup.drawing", (2, 0): "dup.drawing", (3, 0): "solo.drawing"}
+    monkeypatch.setattr(decks, "get_layer_names", lambda _name: names)
+
+    report = history.deck_rules("sky130")
+
+    assert report["ambiguous_names"] == [
+        {
+            "name": "dup.drawing",
+            "pairs": [
+                {"layer": 1, "datatype": 0},
+                {"layer": 2, "datatype": 0},
+            ],
+        }
+    ]
+    # Both pairs of the ambiguous name stay in the table (nothing dropped).
+    assert [e["name"] for e in report["layer_table"]] == [
+        "dup.drawing",
+        "dup.drawing",
+        "solo.drawing",
+    ]
+    assert report["unresolved"], "rule layers absent from the patched table"
+    assert all(u["rules"] for u in report["unresolved"])
+    assert all(
+        ref["name"] is None
+        for rule in report["rules"]
+        for ref in rule["layer_refs"]
+        if (ref["layer"], ref["datatype"]) not in names
+    )

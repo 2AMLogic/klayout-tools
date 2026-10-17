@@ -60,7 +60,10 @@ extension"](yield.md#building-the-native-extension) (same crate, same
 `monte_carlo` block — a spec without one is just a `klt sim` request; run
 `klt sim` directly instead. Every other field is exactly `klt sim`'s own
 schema (`netlist`, `analysis`, `measurements[]` with each measurement's
-`limits.min`/`max`/`target_yield`, `corners`, `monte_carlo.vary`, `backend`,
+`limits.min`/`max`/`target_yield` (plus the yield-only `target_sigma` and
+`min_converged_samples`, issue #2873 — stripped before dispatch and restored
+for the analysis, like `target_yield`; see
+[`yield.md`](yield.md#sigma-target-and-converged-n)), `corners`, `monte_carlo.vary`, `backend`,
 `remote`). Three additional top-level fields are `klt yield`'s own run-level
 defaults — there is no separate `--limits` file in this flow, so they live on
 the campaign spec's own top level:
@@ -178,10 +181,11 @@ an empty set is likewise an error.
 
 | Exit code | Meaning |
 | --- | --- |
-| `0` | The campaign ran and every measurement's declared `target_yield` was met (or none declared one). |
+| `0` | The campaign ran and every declared criterion (`target_yield`, `target_sigma`, `min_converged_samples`) was met (or none declared one). |
 | `1` | The campaign could not be dispatched or analysed — see "Errors" above. |
 | `2` | Usage error (argparse) — missing/invalid arguments. |
-| `3` | The campaign ran; at least one measurement's yield claim was not met at the stated confidence. |
+| `3` | The campaign ran; at least one measurement's yield or sigma claim was not met at the stated confidence. |
+| `4` | The campaign ran; nothing failed but the evidence is insufficient (`status: "insufficient_evidence"`, issue #2873). |
 
 Exit codes mirror `klt yield`'s own — see
 [`docs/cli/yield.md`'s "Exit codes"](yield.md#exit-codes) — including that

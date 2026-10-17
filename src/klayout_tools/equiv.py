@@ -339,6 +339,7 @@ from ._report_verify import (
     load_committed_report,
     strip_keys,
 )
+from ._verilog_params import chparam_lines, validate_parameters
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
@@ -614,7 +615,7 @@ def _stage_fingerprint(
     ``resume_stage_record_discarded`` diagnostic, never silently), exactly
     like ``sim._load_checkpoint``'s mismatched checkpoint.
     """
-    payload = {
+    payload: dict[str, Any] = {
         "engine": engine,
         "gold": {
             "top": gold["top"],
@@ -635,6 +636,10 @@ def _stage_fingerprint(
         "induction_depth": induction_depth,
         "sim_backend": sim_backend,
     }
+    # Issue #3466: only fingerprinted when set, so existing records stay valid.
+    for label, side in (("gold", gold), ("gate", gate)):
+        if side.get("parameters"):
+            payload[label]["parameters"] = side["parameters"]
     blob = json.dumps(payload, sort_keys=True).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()
 
@@ -1175,8 +1180,9 @@ def _resolve_side(spec: Any, request_dir: str, label: str) -> dict[str, Any]:
     ``{"top": str, "sources": [absolute paths], "liberty": absolute path or None}``.
 
     Raises :class:`EquivError` naming ``label`` for every failure mode:
-    not an object, missing/empty ``sources``/``top``, or an unreadable
-    source/liberty file.
+    not an object, missing/empty ``sources``/``top``, a malformed optional
+    ``parameters`` override (Verilog top-level ``chparam``, issue #3466), or an
+    unreadable source/liberty file.
 
     ``liberty`` (optional) is a standard-cell liberty file, read via
     Yosys's ``read_liberty`` *without* ``-lib`` -- i.e. with each cell's
@@ -1233,7 +1239,15 @@ def _resolve_side(spec: Any, request_dir: str, label: str) -> dict[str, Any]:
             raise EquivError(f"{label} liberty file not found: {liberty}")
         resolved_liberty = os.path.abspath(liberty_path)
 
-    return {"top": top, "sources": resolved, "liberty": resolved_liberty}
+    parameters = validate_parameters(
+        spec.get("parameters"), EquivError, f"request.{label}.parameters"
+    )
+    return {
+        "top": top,
+        "sources": resolved,
+        "liberty": resolved_liberty,
+        "parameters": parameters,
+    }
 
 
 def _side_prep_lines(
@@ -1295,6 +1309,8 @@ def _side_prep_lines(
         lines.append(f"read_liberty -ignore_miss_func {side['liberty']}")
     for path in side["sources"]:
         lines.append(f"read_verilog {path}")
+    # Issue #3466: optional top-level parameter overrides for this side.
+    lines += chparam_lines(side.get("parameters") or {}, side["top"])
     lines += [
         "proc",
         "opt_clean",
@@ -1395,7 +1411,9 @@ def _yosys_error_message(stdout: str, stderr: str, returncode: int | None) -> st
     reading: No such file or directory`` shape *and* ``<path>`` verifiably
     exists on the host filesystem, appends a hint that the ``yosys`` on
     ``$PATH`` is likely a WASI-sandboxed build (e.g. ``yowasp-yosys``) whose
-    sandbox does not preopen that path -- see issue #1368/#1755. A script
+    sandbox does not preopen that path -- see issue #1368/#1755; for a path under
+    the host temp dir the hint instead names the sandbox's private ``/tmp``
+    mount and leads with relocating the request (issue #2453). A script
     path that genuinely does not exist is a different failure and is left
     unchanged.
     """

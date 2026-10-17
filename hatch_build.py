@@ -1,20 +1,38 @@
-"""Hatchling build hook: record the git identity of the checkout a
-distribution was built from (issue #1202).
+"""Hatchling build plugins: compute the distribution version (issue #2823)
+and record the git identity of the checkout a distribution was built from
+(issue #1202).
 
-An installed wheel has no ``.git`` directory, so once it is built, the commit
-it came from is unrecoverable at runtime. That is exactly what made
-``klt --version`` unable to distinguish a PyPI release from a
-``pip install git+...@<sha>`` build of the same version number: both declare
-the static ``version`` from ``pyproject.toml``, and nothing else on the CLI
-surface separates them.
+**Version.** ``pyproject.toml``'s ``[tool.hatch.version]`` table points
+hatchling's built-in ``code`` version source at this file and evaluates
+:func:`version_from_pyproject`, which applies
+``src/klayout_tools/_version_scheme.py`` (loaded by path -- the same module
+the runtime uses) to the table's ``base-version`` and the checkout's git
+facts. Only a clean build exactly on the release tag declares the bare
+``X.Y.Z``; every other build declares a distinct public version
+(``X.Y.(Z+1).devN+g<sha>`` and friends), so a resolver can never satisfy
+``klayout-tools==X.Y.Z`` with it. A build from an unpacked sdist (no
+``.git``) keeps the version the sdist was built with: hatchling reuses
+``PKG-INFO``'s version, and :func:`distribution_version` falls back to the
+``VERSION`` the sdist's carried ``_build_info.py`` records.
 
-This hook closes that by writing a tiny generated module,
-``klayout_tools/_build_info.py``, into the distribution:
+**Identity.** An installed wheel has no ``.git`` directory, so once it is
+built, the commit it came from is unrecoverable at runtime. This hook writes
+a tiny generated module, ``klayout_tools/_build_info.py``, into the
+distribution:
 
     GIT_COMMIT = "<40-hex sha>"   # or None
     GIT_TAG = "v0.2.0"            # exact-match tag, or None
     GIT_DIRTY = False             # uncommitted changes to *tracked* files at build time
     KLAYOUT_VERSION_EXPECTED = "0.30.10"  # or None
+    DECK_HASHES = {"sky130": "sha256:<hex>", ...}  # or None
+    VERSION = "0.2.1.dev3+g<sha>"  # the distribution version chosen above
+
+``DECK_HASHES`` (issue #2451) records the content hash of every built-in deck
+module (``src/klayout_tools/decks/*.py``, keyed by module stem) *as built*.
+:mod:`klayout_tools.decks.history` lets a release build vouch for its own
+decks only when a queried hash equals the hash recorded here -- never the
+current on-disk bytes, which a post-install edit could change while the
+frozen ``GIT_TAG``/``GIT_DIRTY`` record still says "clean release".
 
 ``KLAYOUT_VERSION_EXPECTED`` (issue #1490) records the ``klayout`` engine
 version this checkout's ``uv.lock`` pins at build time -- the version CI
@@ -29,10 +47,11 @@ and ``klayout_version``/``klayout_version_expected`` on ``klt version
 --format json``. See ``docs/design/klayout-engine-version-pin.md`` for the
 full rationale.
 
-:mod:`klayout_tools.build_identity` reads those three facts and derives the
-reported version/``is_release`` from them -- the *policy* (what counts as a
-release) deliberately lives there, in the package, not here in the build
-hook, so it can be tested and changed without rebuilding anything.
+:mod:`klayout_tools.build_identity` reads the git facts and derives
+``is_release`` from them. The *policy* (what counts as a release, which
+version a build declares) deliberately lives in the package --
+``build_identity`` and ``_version_scheme`` -- not here, so it is unit-tested
+as ordinary package code and the build and runtime share one implementation.
 
 Design notes:
 
@@ -48,9 +67,9 @@ Design notes:
   real PyPI release wheel would report an unknown identity. When git facts
   are unavailable the hook writes nothing at all rather than overwriting a
   record the sdist already carries.
-- **Never fails the build.** Any git problem degrades to "no record", which
-  ``build_identity`` reports as ``+unknown`` -- honest, and never mistakable
-  for a release.
+- **Never fails the build.** Any git problem degrades to "no record" and a
+  ``X.Y.Z.dev0+unknown`` version -- honest, and never mistakable for a
+  release.
 - **Untracked files never count as dirty (issue #2248).** ``git_identity()``'s
   ``dirty`` probe ignores untracked files on purpose -- a package manager
   building a ``git+...@<sha>`` install clones into a scratch checkout that it
@@ -63,6 +82,7 @@ Design notes:
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
@@ -112,6 +132,38 @@ def klayout_version_expected(root: str) -> str | None:
         return None
     match = _UV_LOCK_KLAYOUT_RE.search(content)
     return match.group(1) if match else None
+
+
+#: Source directory of the built-in deck modules, relative to the build root.
+_DECKS_DIR = os.path.join("src", "klayout_tools", "decks")
+
+
+def deck_hashes(root: str) -> dict[str, str] | None:
+    """``{module_stem: "sha256:<hex>"}`` for every ``*.py`` module in
+    ``<root>/src/klayout_tools/decks``, or ``None`` when that directory is
+    missing/unreadable (issue #2451).
+
+    Hashes every module rather than importing the package to ask which are
+    decks: the build hook must not import the package it is building, and a
+    surplus entry (``rules.py``) is harmless because the runtime only ever
+    looks up real deck names.
+    """
+    directory = os.path.join(root, _DECKS_DIR)
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError:
+        return None
+    hashes: dict[str, str] = {}
+    for filename in names:
+        if not filename.endswith(".py"):
+            continue
+        try:
+            with open(os.path.join(directory, filename), "rb") as handle:
+                digest = hashlib.sha256(handle.read()).hexdigest()
+        except OSError:
+            return None
+        hashes[filename[: -len(".py")]] = f"sha256:{digest}"
+    return hashes or None
 
 
 def _git(root: str, *args: str) -> str | None:
@@ -167,12 +219,18 @@ def git_identity(root: str) -> dict[str, Any] | None:
 
 
 def render_build_info(
-    identity: dict[str, Any], klayout_version_expected: str | None = None
+    identity: dict[str, Any],
+    klayout_version_expected: str | None = None,
+    deck_hashes: dict[str, str] | None = None,
+    version: str | None = None,
 ) -> str:
     """The source text of the generated ``_build_info.py`` module.
 
-    ``klayout_version_expected`` (issue #1490) defaults to ``None`` so
-    existing callers passing only ``identity`` keep working unchanged.
+    ``klayout_version_expected`` (issue #1490), ``deck_hashes`` (issue
+    #2451) and ``version`` (issue #2823 -- the distribution version this
+    build declared, so a wheel rebuilt from the sdist can carry it forward)
+    default to ``None`` so existing callers passing only ``identity`` keep
+    working unchanged.
     """
     return (
         '"""Generated at build time by ``hatch_build.py`` -- do not edit.\n'
@@ -185,7 +243,87 @@ def render_build_info(
         f"GIT_TAG = {identity['tag']!r}\n"
         f"GIT_DIRTY = {identity['dirty']!r}\n"
         f"KLAYOUT_VERSION_EXPECTED = {klayout_version_expected!r}\n"
+        f"DECK_HASHES = {deck_hashes!r}\n"
+        f"VERSION = {version!r}\n"
     )
+
+
+#: The shared version-scheme module, relative to the build root. Loaded by
+#: path so the build never imports the package it is building.
+_VERSION_SCHEME_PATH = os.path.join("src", "klayout_tools", "_version_scheme.py")
+
+#: Matches the ``VERSION = "..."`` line of a previously generated
+#: ``_build_info.py`` (the record an sdist carries).
+_RECORDED_VERSION_RE = re.compile(r'(?m)^VERSION = [\'"]([^\'"]+)[\'"]')
+
+
+def load_version_scheme(root: str) -> Any:
+    """``src/klayout_tools/_version_scheme.py`` under ``root``, loaded by
+    path -- the single implementation of the version scheme shared with the
+    runtime (issue #2823)."""
+    import importlib.util
+
+    path = os.path.join(root, _VERSION_SCHEME_PATH)
+    spec = importlib.util.spec_from_file_location("_klt_version_scheme", path)
+    if spec is None or spec.loader is None:  # pragma: no cover - defensive
+        raise RuntimeError(f"cannot load the version scheme from {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def recorded_version(root: str) -> str | None:
+    """The ``VERSION`` an sdist's carried ``_build_info.py`` record declares,
+    or ``None`` when there is no such record (or it predates the field)."""
+    path = os.path.join(root, _RELATIVE_PATHS["sdist"])
+    try:
+        with open(path, encoding="utf-8") as handle:
+            content = handle.read()
+    except OSError:
+        return None
+    match = _RECORDED_VERSION_RE.search(content)
+    return match.group(1) if match else None
+
+
+def distribution_version(root: str, base: str) -> str:
+    """The PEP 440 version a build of ``root`` declares (issue #2823).
+
+    From a git checkout: the shared scheme applied to its git facts. From an
+    unpacked sdist (no ``.git``): the version the sdist's own record carries
+    forward, so the sdist-to-wheel path preserves the originating checkout's
+    version (hatchling also reuses ``PKG-INFO``'s version in that case; this
+    is the belt to that brace). Neither: ``<base>.dev0+unknown`` -- never the
+    bare release.
+    """
+    scheme = load_version_scheme(root)
+    facts = scheme.probe(root, base)
+    if facts is None:
+        carried = recorded_version(root)
+        if carried:
+            return carried
+        return scheme.render(base, None, None, None, None, None)
+    return scheme.render(base, **facts)
+
+
+def version_from_pyproject(root: str | None = None) -> str:
+    """The distribution version for the checkout (or unpacked sdist) at
+    ``root`` -- this file's directory by default -- using ``pyproject.toml``'s
+    ``[tool.hatch.version]`` ``base-version`` (issue #2823).
+
+    This is the expression hatchling's built-in ``code`` version source
+    evaluates (``pyproject.toml``'s ``[tool.hatch.version]`` table): hatchling
+    offers no ``custom`` version-source plugin, so the ``code`` source loads
+    this file by path and calls this function.
+    """
+    root = root or os.path.dirname(os.path.abspath(__file__))
+    scheme = load_version_scheme(root)
+    with open(os.path.join(root, "pyproject.toml"), encoding="utf-8") as handle:
+        base = scheme.read_base_version(handle.read())
+    if not base:
+        raise ValueError(
+            '[tool.hatch.version] in pyproject.toml must set `base-version = "X.Y.Z"`'
+        )
+    return distribution_version(root, base)
 
 
 class BuildIdentityHook(BuildHookInterface):  # type: ignore[misc,valid-type]
@@ -210,7 +348,12 @@ class BuildIdentityHook(BuildHookInterface):  # type: ignore[misc,valid-type]
         generated = os.path.join(self._tmp_dir, "_build_info.py")
         with open(generated, "w", encoding="utf-8") as handle:
             handle.write(
-                render_build_info(identity, klayout_version_expected(self.root))
+                render_build_info(
+                    identity,
+                    klayout_version_expected(self.root),
+                    deck_hashes(self.root),
+                    self.metadata.version,
+                )
             )
 
         build_data.setdefault("force_include", {})[generated] = relative_path

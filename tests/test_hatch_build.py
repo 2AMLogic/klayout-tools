@@ -190,7 +190,6 @@ def test_generated_module_is_consumed_by_build_identity(tmp_path, monkeypatch):
     identity = build_identity._recorded_identity("9.9.9")
     assert identity["git_commit"] == "c" * 40
     assert identity["is_release"] is True
-    assert build_identity.format_build_version("9.9.9", identity) == "9.9.9"
 
 
 # --------------------------------------------------------------------------- #
@@ -283,8 +282,118 @@ def test_pyproject_registers_the_build_hook():
     pyproject = (_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     assert "[tool.hatch.build.hooks.custom]" in pyproject
     assert 'path = "hatch_build.py"' in pyproject
-    # The package version stays static: this adds a build identity beside it,
-    # it does not make the package version dynamic (a real
-    # `pip install klayout-tools==X.Y.Z` must keep reporting bare `X.Y.Z`).
-    assert re.search(r'(?m)^version = "\d', pyproject)
-    assert not re.search(r'(?m)^dynamic = .*"version"', pyproject)
+
+
+def test_pyproject_computes_the_version_at_build_time():
+    """Issue #2823: the distribution version must be computed, not static --
+    a static `version` is exactly what let a post-tag build declare `X.Y.Z`
+    and satisfy a `==X.Y.Z` pin."""
+    pyproject = (_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert not re.search(r'(?m)^version = "', pyproject)
+    assert re.search(r'(?m)^dynamic = \[.*"version"', pyproject)
+    table = pyproject.split("\n[tool.hatch.version]\n", 1)[1].split("\n[", 1)[0]
+    assert 'source = "code"' in table
+    assert 'path = "hatch_build.py"' in table
+    assert 'expression = "version_from_pyproject()"' in table
+    assert re.search(r'(?m)^base-version = "\d+\.\d+\.\d+"', table)
+
+
+def test_render_build_info_records_the_version(tmp_path):
+    module = _load_hatch_build()
+    generated = tmp_path / "_build_info.py"
+    generated.write_text(
+        module.render_build_info(
+            {"commit": "a" * 40, "tag": None, "dirty": False},
+            None,
+            None,
+            "9.9.10.dev1+gaaaaaaaaaaaa",
+        )
+    )
+    spec = importlib.util.spec_from_file_location("klt_generated_version", generated)
+    loaded = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(loaded)
+    assert loaded.VERSION == "9.9.10.dev1+gaaaaaaaaaaaa"
+
+
+def test_distribution_version_from_a_checkout(tmp_path):
+    module = _load_hatch_build()
+    repo = tmp_path / "repo"
+    _make_repo(repo)
+    _git(repo, "tag", "v9.9.9")
+    _copy_version_scheme(repo)
+    # The scheme module is untracked here; untracked files never count as
+    # dirty, so this is still the clean release.
+    assert module.distribution_version(str(repo), "9.9.9") == "9.9.9"
+
+
+def test_distribution_version_carries_the_sdist_record_forward(tmp_path):
+    """An unpacked sdist has no `.git`; the version its record carries wins
+    over anything the missing git state could suggest."""
+    module = _load_hatch_build()
+    root = tmp_path / "sdist"
+    _copy_version_scheme(root)
+    (root / "src" / "klayout_tools" / "_build_info.py").write_text(
+        module.render_build_info(
+            {"commit": "a" * 40, "tag": None, "dirty": False},
+            version="9.9.10.dev4+gaaaaaaaaaaaa",
+        )
+    )
+    assert module.recorded_version(str(root)) == "9.9.10.dev4+gaaaaaaaaaaaa"
+    assert module.distribution_version(str(root), "9.9.9") == (
+        "9.9.10.dev4+gaaaaaaaaaaaa"
+    )
+
+
+def test_distribution_version_without_git_or_record_is_never_the_release(tmp_path):
+    module = _load_hatch_build()
+    root = tmp_path / "tarball"
+    _copy_version_scheme(root)
+    assert module.recorded_version(str(root)) is None
+    assert module.distribution_version(str(root), "9.9.9") == "9.9.9.dev0+unknown"
+
+
+def test_version_from_pyproject_for_this_repo():
+    """The exact expression hatchling evaluates, against this checkout."""
+    packaging_version = __import__("pytest").importorskip("packaging.version")
+    module = _load_hatch_build()
+    version = module.version_from_pyproject(str(_ROOT))
+    assert str(packaging_version.Version(version)) == version
+
+
+def _copy_version_scheme(root: Path) -> None:
+    package = root / "src" / "klayout_tools"
+    package.mkdir(parents=True, exist_ok=True)
+    source = _ROOT / "src" / "klayout_tools" / "_version_scheme.py"
+    (package / "_version_scheme.py").write_text(source.read_text(encoding="utf-8"))
+
+
+def test_deck_hashes_records_each_deck_module(tmp_path):
+    import hashlib
+
+    module = _load_hatch_build()
+    decks = tmp_path / "src" / "klayout_tools" / "decks"
+    decks.mkdir(parents=True)
+    (decks / "sky130.py").write_bytes(b"DECK = []\n")
+    (decks / "notes.txt").write_text("ignored")
+
+    assert module.deck_hashes(str(tmp_path)) == {
+        "sky130": "sha256:" + hashlib.sha256(b"DECK = []\n").hexdigest()
+    }
+    assert module.deck_hashes(str(tmp_path / "missing")) is None
+
+
+def test_render_build_info_includes_deck_hashes(tmp_path):
+    module = _load_hatch_build()
+    generated = tmp_path / "_build_info.py"
+    hashes = {"sky130": "sha256:" + "e" * 64}
+    generated.write_text(
+        module.render_build_info(
+            {"commit": "a" * 40, "tag": "v9.9.9", "dirty": False}, None, hashes
+        )
+    )
+    spec = importlib.util.spec_from_file_location(
+        "klt_generated_deck_hashes", generated
+    )
+    loaded = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(loaded)
+    assert loaded.DECK_HASHES == hashes

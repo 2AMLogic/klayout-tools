@@ -1071,7 +1071,10 @@ def _drop_sdf_zero_delay_alias_port_interconnects(
     source feeding a *physical-only*, modpath-free destination instance --
     and handles it in its own separate pass,
     :func:`_drop_sdf_zero_delay_physical_only_interconnects`, precisely so
-    the general shape (b) case here stays untouched and still fails loudly.)
+    the general shape (b) case here stays untouched and still fails loudly.
+    Issue #2984 later added the zero-delay remainder of shape (b) in
+    :func:`_drop_sdf_zero_delay_bus_port_source_interconnects`; non-zero
+    shape (b) entries are still left alone.)
     """
     if not alias_port_bits:
         return None
@@ -1122,12 +1125,14 @@ def _drop_sdf_zero_delay_alias_port_interconnects(
 # could ever annotate, and no logic anywhere that observes the annotated
 # pin. The general shape (b) case -- a bit-selected-port source feeding an
 # ordinary `specify`-bearing standard cell -- is emphatically *not* covered
-# here: that destination has real modpaths, dropping its entry would change
-# simulated timing, and it must keep failing loudly exactly as
+# here: that destination has real modpaths, so dropping a NON-zero entry
+# would change simulated timing and it must keep failing loudly exactly as
 # `test_integration_real_icarus_sdf_bus_port_input_fanout_stays_
 # unresolvable` documents. Verified live, not merely asserted: on a net
 # carrying both a diode entry and a `specify`-bearing entry, dropping the
 # diode entry leaves the ordinary entry behind and the run still raises.
+# (That holds for non-zero entries; issue #2984 below drops the zero-delay
+# ones, which cannot change timing.)
 #
 # The exemption carries #2285's own bound verbatim, and for the same reason:
 # an entry is dropped only when *every* delay member it carries (all three
@@ -1371,6 +1376,524 @@ def _drop_sdf_zero_delay_physical_only_interconnects(
 
 
 # --------------------------------------------------------------------------- #
+# Issue #2984: the remaining zero-delay sub-shape of #1619 shape (b) -- a
+# bit-selected top-level **input** port as the entry's source, with a
+# destination that is *not* physical-only (an ordinary `specify`-bearing
+# cell, so #2363's pass leaves it alone):
+#
+#     (INTERCONNECT ui_in[3] u1.A (0.000:0.000:0.000))
+#
+# A real post-route SDF can carry such entries and Icarus fails the run with
+# `SDF ERROR: ... Could not find intermodpath!` on some of them (the
+# order/race behaviour characterised above for shape (b)). The failure
+# mechanism is not what this pass depends on: it removes only entries whose
+# every `min:typ:max` member is zero, which model no delay at any corner, so
+# dropping one cannot change simulated timing -- the same bound #2285 and
+# #2363 use. The "dropping its entry would change simulated timing" argument
+# for leaving shape (b) failing therefore holds only for NON-zero entries,
+# and those are still left in place (and still raise), as
+# `test_integration_real_icarus_sdf_bus_port_input_fanout_stays_unresolvable`
+# pins with its non-zero delays.
+# --------------------------------------------------------------------------- #
+
+
+def _sdf_interconnect_is_zero_delay_bus_port_source(
+    entry_text: str, bus_input_ports: set[str]
+) -> bool:
+    """``True`` when ``entry_text`` is an ``INTERCONNECT`` entry whose
+    *source* is a bit-selected top-level input port in ``bus_input_ports``
+    and whose every delay member is zero -- the condition
+    :func:`_drop_sdf_zero_delay_bus_port_source_interconnects` removes an
+    entry on (issue #2984). The destination is unconstrained: it is the
+    #2363 predicate minus its physical-only destination test."""
+    head = _SDF_INTERCONNECT_HEAD_RE.match(entry_text)
+    if head is None:
+        return False
+    source_match = _SDF_BUS_PORT_TOKEN_RE.match(head.group(1))
+    if source_match is None or source_match.group(1) not in bus_input_ports:
+        return False
+    return _sdf_interconnect_is_zero_delay(entry_text)
+
+
+def _drop_sdf_zero_delay_bus_port_source_interconnects(
+    sdf_path: str, bus_input_ports: set[str]
+) -> tuple[str, int] | None:
+    """Remove every zero-delay ``INTERCONNECT`` entry in ``sdf_path`` whose
+    source is a bit-selected top-level input port in ``bus_input_ports``,
+    returning ``(text with those entries removed, how many were removed)``
+    -- or ``None`` when there is nothing to remove, in which case the caller
+    keeps handing ``sdf_path`` itself to ``$sdf_annotate`` unchanged.
+
+    Meant to run *after* :func:`_drop_sdf_zero_delay_physical_only_
+    interconnects`, so entries that pass already claimed keep their own
+    class and are not double counted. See the comment block above for why
+    the zero-delay bound makes this safe while the non-zero shape (b) case
+    keeps failing loudly.
+
+    An empty ``bus_input_ports`` makes this a no-op that returns ``None``
+    without reading the file.
+    """
+    if not bus_input_ports:
+        return None
+    text = _read_sdf_text(sdf_path)
+    if text is None:
+        return None
+    return _drop_sdf_interconnect_entries(
+        text,
+        lambda entry_text: _sdf_interconnect_is_zero_delay_bus_port_source(
+            entry_text, bus_input_ports
+        ),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Issue #2885: an `IOPATH` entry onto a cell arc whose *only* module paths in
+# the cell's Verilog model are `ifnone` + edge-sensitive -- the shape the
+# gf180mcu standard-cell models give every non-unate arc (XOR/XNOR inputs,
+# MUX select):
+#
+#     ifnone
+#      (posedge A1 => (Z:A1)) = (1.0,1.0);
+#     ifnone
+#      (negedge A1 => (Z:A1)) = (1.0,1.0);
+#
+# OpenSTA's `write_sdf` writes that arc as two unqualified entries, one per
+# unateness sense (`(IOPATH A1 Z (r) (f))` twice), and Icarus 13.0 reports
+# each as `SDF ERROR: ...: Unable to match ModPath A1 -> Z in <instance>`.
+#
+# Reproduced live against Icarus 13.0, which pinned down the mechanism the
+# issue's write-up could only guess at: the mismatch is **not** an edge-
+# qualifier mismatch between the SDF and the model. Icarus does not support
+# `ifnone` on an edge-sensitive path at all -- it prints `sorry: ifnone with
+# an edge-sensitive path is not supported.` at elaboration and *discards the
+# path*, so the elaborated cell has no `A1 -> Z` modpath whatsoever. That
+# rules out both rewrite directions the issue floated:
+#
+# - Rewriting the SDF entry to `(IOPATH (posedge A1) Z ...)` /
+#   `(IOPATH (negedge A1) Z ...)` still fails (`Unable to match ModPath
+#   posedge A1 -> Z`), because there is no modpath of either edge to match --
+#   verified live. The same holds for direction 1 (emitting edge-qualified
+#   entries from `klt place-and-route`): no SDF spelling can annotate a path
+#   the simulator never elaborated.
+# - Stripping `ifnone` from the *model* would make the paths elaborate, but
+#   it would also make the annotation a timing assumption rather than a
+#   transcription: the two SDF entries are the arc's two unateness senses
+#   (output rise/fall when the arc acts as a buffer vs. as an inverter), and
+#   one Icarus edge-sensitive modpath can carry only one (rise, fall) pair --
+#   whichever entry landed last would silently time the other sense too.
+#
+# So this is a counted, honestly-reported drop (the issue's direction 3),
+# with the same justification #2363's physical-only drop rests on: the
+# entry's target modpath does not exist in the elaborated design, so there is
+# nothing the entry could ever annotate, and removing it cannot change
+# simulated timing relative to what Icarus does with it anyway. What the
+# caller loses is real, though, and it is reported as such: those arcs run
+# with **no** module-path delay at all (Icarus discarded the model's own
+# placeholder delay along with the path), and `environment.sdf.dropped`
+# names every dropped arc by cell type so a consumer can see exactly which
+# cells were not timed.
+#
+# The exemption is decided structurally from the run's own cell models,
+# never from the diagnostic text, and every ambiguity resolves toward *not*
+# dropping:
+#
+# - only a bare `(IOPATH ...)` entry is eligible (a `COND`-wrapped one is
+#   left alone);
+# - only when the `CELLTYPE`'s model is found among the request's sources;
+# - only when that arc has at least one `ifnone` edge-sensitive path **and no
+#   other path Icarus keeps** (a plain, `if (...)`-conditional, or
+#   non-`ifnone` edge-sensitive path all elaborate and annotate normally --
+#   gf180mcu's MUX data inputs carry both, and are untouched);
+# - never for a cell whose `specify` block contains a path statement this
+#   module cannot parse (it might be the supported path that would have
+#   matched).
+#
+# A genuine `IOPATH` mismatch onto any other arc -- a misnamed pin, a stale
+# SDF -- is left in place and still fails the diagnostic gate loudly.
+# --------------------------------------------------------------------------- #
+
+#: A ``specify ... endspecify`` block's body, matched non-greedily.
+_VERILOG_SPECIFY_BLOCK_RE = re.compile(r"\bspecify\b(.*?)\bendspecify\b", re.DOTALL)
+
+#: A Verilog preprocessor directive line (`` `ifdef``/`` `else``/...), stripped
+#: before a ``specify`` body is split into statements.
+_VERILOG_DIRECTIVE_RE = re.compile(r"`[A-Za-z_]\w*[^\n]*")
+
+#: A module-path connection operator: parallel ``=>`` or full ``*>``, each
+#: optionally preceded by a ``+``/``-`` polarity.
+_VERILOG_PATH_ARROW_RE = re.compile(r"[+-]?(?:=>|\*>)")
+
+#: The edge keyword (and optional ``edge [01, 10]`` descriptor) that makes a
+#: module path edge-sensitive.
+_VERILOG_PATH_EDGE_RE = re.compile(r"\s*(?:posedge|negedge|edge)\b(?:\s*\[[^\]]*\])?")
+
+#: A simple Verilog identifier -- the only port-name shape the arc matcher
+#: compares (an escaped identifier is never matched, so never dropped).
+_VERILOG_SIMPLE_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
+
+#: A bare ``IOPATH`` entry's two port specs: an optionally edge-qualified
+#: input port and the output port.
+_SDF_IOPATH_HEAD_RE = re.compile(
+    r"\(IOPATH\s+(?:\(\s*(?:posedge|negedge)\s+(?P<edge_src>[^()\s]+)\s*\)"
+    r"|(?P<src>[^()\s]+))\s+(?P<dst>[^()\s]+)"
+)
+
+#: An SDF ``(CELLTYPE "<name>")`` clause.
+_SDF_CELLTYPE_RE = re.compile(r'\(CELLTYPE\s+"([^"]*)"\s*\)')
+
+#: Sentinel :func:`_parse_specify_path` returns for a statement that carries
+#: a path operator but could not be parsed -- distinct from ``None`` (not a
+#: path statement at all), because an unparseable path disqualifies the whole
+#: cell from the #2885 drop.
+_UNPARSEABLE_PATH = "unparseable"
+
+
+def _verilog_port_names(text: str) -> list[str]:
+    """Every simple identifier in a comma-separated module-path terminal list
+    (``A1``, ``A, B``, ``D[0]``), with any bit-select stripped. A terminal
+    that is not a simple identifier is skipped, so it can never match."""
+    names = []
+    for token in text.split(","):
+        name = re.sub(r"\[[^\]]*\]", "", token).strip()
+        if _VERILOG_SIMPLE_IDENT_RE.match(name):
+            names.append(name)
+    return names
+
+
+def _strip_specify_condition(statement: str) -> tuple[bool, str] | None:
+    """``(is_ifnone, statement with its leading ifnone/if (...) removed)``,
+    or ``None`` when an ``if (`` condition's parens do not balance."""
+    ifnone = re.match(r"ifnone\b", statement)
+    if ifnone is not None:
+        return True, statement[ifnone.end() :].lstrip()
+    if re.match(r"if\s*\(", statement):
+        open_index = statement.index("(")
+        try:
+            close = _sdf_matching_paren(statement, open_index)
+        except Exception:
+            return None
+        return False, statement[close + 1 :].lstrip()
+    return False, statement
+
+
+def _parse_specify_path(
+    statement: str,
+) -> tuple[bool, bool, list[str], list[str]] | str | None:
+    """``(is_ifnone, is_edge_sensitive, sources, destinations)`` for one
+    ``specify``-block statement that declares a module path; ``None`` for a
+    statement that is not a path at all (a ``specparam``, a ``$setup`` timing
+    check, ...); :data:`_UNPARSEABLE_PATH` for one that carries a path
+    operator but could not be parsed."""
+    stripped = _strip_specify_condition(statement.strip())
+    if stripped is None:
+        return _UNPARSEABLE_PATH
+    ifnone, rest = stripped
+    if not rest.startswith("("):
+        return _UNPARSEABLE_PATH if _VERILOG_PATH_ARROW_RE.search(rest) else None
+    try:
+        body = rest[1 : _sdf_matching_paren(rest, 0)]
+    except Exception:
+        return _UNPARSEABLE_PATH
+    arrow = _VERILOG_PATH_ARROW_RE.search(body)
+    if arrow is None:
+        return None
+    left, right = body[: arrow.start()], body[arrow.end() :].strip()
+    edge = _VERILOG_PATH_EDGE_RE.match(left)
+    if edge is not None:
+        left = left[edge.end() :]
+    # An edge-sensitive path's destination is `(Z:A1)` / `(Q+:D)` -- the
+    # output terminal(s) before the `:` data source, polarity dropped.
+    right = right.strip("()").split(":")[0].rstrip("+- ")
+    sources, destinations = _verilog_port_names(left), _verilog_port_names(right)
+    if not sources or not destinations:
+        return _UNPARSEABLE_PATH
+    return ifnone, edge is not None, sources, destinations
+
+
+def _verilog_cell_discarded_arcs(
+    cell: str, source_texts: list[str]
+) -> set[tuple[str, str]]:
+    """Every ``(input, output)`` arc of Verilog module ``cell`` whose only
+    module paths are ``ifnone`` + edge-sensitive -- the paths Icarus discards
+    at elaboration (``sorry: ifnone with an edge-sensitive path is not
+    supported``), leaving that arc with no modpath at all (issue #2885).
+
+    Empty -- so nothing is dropped -- when no definition of ``cell`` is found,
+    and when any path statement in any of its ``specify`` blocks cannot be
+    parsed: every uncertainty resolves toward leaving the SDF entry in place,
+    where it fails loudly rather than silently disappearing.
+    """
+    pattern = re.compile(
+        _VERILOG_MODULE_CHUNK_TEMPLATE.format(name=re.escape(cell)), re.DOTALL
+    )
+    discarded: set[tuple[str, str]] = set()
+    kept: set[tuple[str, str]] = set()
+    for text in source_texts:
+        for chunk_match in pattern.finditer(text):
+            chunk = _VERILOG_COMMENT_RE.sub(" ", chunk_match.group(0))
+            chunk = _VERILOG_DIRECTIVE_RE.sub(" ", chunk)
+            for block in _VERILOG_SPECIFY_BLOCK_RE.findall(chunk):
+                for statement in block.split(";"):
+                    path = _parse_specify_path(statement)
+                    if path == _UNPARSEABLE_PATH:
+                        return set()
+                    if path is None:
+                        continue
+                    ifnone, edge, sources, destinations = path  # type: ignore[misc, str-unpack]
+                    target = discarded if ifnone and edge else kept
+                    target.update((s, d) for s in sources for d in destinations)
+    return discarded - kept
+
+
+def _sdf_iopath_arc(entry_text: str) -> tuple[str, str] | None:
+    """``(input port, output port)`` of a bare ``IOPATH`` entry (input edge
+    qualifier and bit-select dropped), or ``None`` for any other entry --
+    including a ``COND``-wrapped ``IOPATH``, which the #2885 drop never
+    touches."""
+    head = _SDF_IOPATH_HEAD_RE.match(entry_text.lstrip())
+    if head is None:
+        return None
+    source = head.group("edge_src") or head.group("src")
+    return (
+        re.sub(r"\[[^\]]*\]", "", source),
+        re.sub(r"\[[^\]]*\]", "", head.group("dst")),
+    )
+
+
+def _sdf_cell_celltype(text: str, cell_start: int) -> str | None:
+    """The ``CELLTYPE`` of the ``(CELL ...)`` opening at ``cell_start``, or
+    ``None`` when it has none (or the cell is malformed)."""
+    try:
+        cell_end = _sdf_matching_paren(text, cell_start) + 1
+    except Exception:
+        return None
+    match = _SDF_CELLTYPE_RE.search(text, cell_start, cell_end)
+    return match.group(1) if match else None
+
+
+def _drop_sdf_unsupported_edge_modpath_iopaths(
+    sdf_path: str, source_paths: list[str]
+) -> tuple[str, int, list[dict[str, str]]] | None:
+    """Remove every bare ``IOPATH`` entry in ``sdf_path`` onto a cell arc
+    whose only module paths in the request's own cell models are ``ifnone``
+    + edge-sensitive (issue #2885), returning ``(text with those entries
+    removed, how many were removed, the distinct dropped arcs)`` -- or
+    ``None`` when there is nothing to remove, in which case the caller keeps
+    handing ``sdf_path`` itself to ``$sdf_annotate`` unchanged.
+
+    Each dropped arc is ``{"celltype", "from", "to"}``, sorted, so the
+    response can name exactly which cells' arcs run without a module-path
+    delay. See the module-level comment above for why the entry is dropped
+    rather than rewritten, and why that is decided from the elaborated model
+    rather than from Icarus's diagnostic.
+
+    Returns ``None`` immediately -- without reading the SDF -- when no source
+    contains ``ifnone`` at all, the overwhelmingly common case (sky130's
+    models, every behavioural RTL source).
+    """
+    source_texts = [
+        text for text in _read_verilog_source_texts(source_paths) if "ifnone" in text
+    ]
+    if not source_texts:
+        return None
+    text = _read_sdf_text(sdf_path)
+    if text is None or "IOPATH" not in text:
+        return None
+
+    discarded_by_cell: dict[str, set[tuple[str, str]]] = {}
+    arcs: set[tuple[str, str, str]] = set()
+    removed_spans: list[tuple[int, int]] = []
+    dropped = 0
+    for cell_match in re.finditer(r"\(CELL\b", text):
+        celltype = _sdf_cell_celltype(text, cell_match.start())
+        if celltype is None:
+            continue
+        if celltype not in discarded_by_cell:
+            discarded_by_cell[celltype] = _verilog_cell_discarded_arcs(
+                celltype, source_texts
+            )
+        discarded = discarded_by_cell[celltype]
+        if not discarded:
+            continue
+
+        def _droppable(entry_text: str, _discarded=discarded, _cell=celltype) -> bool:
+            arc = _sdf_iopath_arc(entry_text)
+            if arc is None or arc not in _discarded:
+                return False
+            arcs.add((_cell, *arc))
+            return True
+
+        spans, count = _sdf_cell_entry_removals(text, cell_match.start(), _droppable)
+        removed_spans.extend(spans)
+        dropped += count
+
+    if not dropped:
+        return None
+    return (
+        _cut_sdf_spans(text, removed_spans),
+        dropped,
+        [{"celltype": c, "from": s, "to": d} for c, s, d in sorted(arcs)],
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Issue #2958: a bit-selected `IOPATH` onto a bus output of a hard macro.
+#
+# OpenSTA's `write_sdf` emits one `IOPATH` per bit of a macro's bus output
+# (`IOPATH A_CLK A_DOUT[0] ...`), but a vendor macro model usually declares a
+# single whole-vector module path (`(A_CLK *> A_DOUT)`). Icarus resolves an
+# SDF `IOPATH` destination by exact terminal name against the modpaths it
+# elaborated, and a whole-vector path registers no per-bit modpath: the
+# unescaped spelling is an `SDF ERROR ... Invalid/malformed IOPATH` syntax
+# error, the escaped one (`A_DOUT\[0\]`) `Unable to match ModPath` (both
+# reproduced live against Icarus 13.0). No caller input can make those entries
+# annotate, so -- like #2885's `ifnone` arcs -- they are dropped, counted, and
+# the affected `{celltype, from, to}` arcs named.
+#
+# Rewriting the entry to the whole-vector spelling is rejected: it would
+# attribute one bit's delay to the whole bus. Fail-safe: the drop only fires
+# when the model declares the destination as a bus *and* every path onto it is
+# whole-vector and parseable, and the entry's own arc is one of those paths.
+# --------------------------------------------------------------------------- #
+
+#: A bus ``output``/``inout`` declaration (ANSI or not): the keyword, optional
+#: net/signedness keywords, a ``[msb:lsb]`` range, then the declared name(s).
+_VERILOG_BUS_OUTPUT_RE = re.compile(
+    r"\b(?:output|inout)\s+(?:(?:reg|wire|logic|signed)\s+)*\[[^\]]*\]\s*"
+    r"([A-Za-z_][A-Za-z0-9_$]*(?:\s*,\s*[A-Za-z_][A-Za-z0-9_$]*)*)"
+)
+
+#: Words that can follow a comma in an ANSI port list without being a name.
+_VERILOG_DECL_KEYWORDS = frozenset(
+    {"input", "output", "inout", "reg", "wire", "logic", "signed"}
+)
+
+#: A bit-select suffix on an SDF port, plain (``[0]``) or escaped (``\\[0\\]``).
+_SDF_BIT_SELECT_RE = re.compile(r"\\?\[")
+
+
+def _verilog_bus_output_names(chunk: str) -> set[str]:
+    """Names declared as bus ``output``/``inout`` ports in a module chunk."""
+    names: set[str] = set()
+    for match in _VERILOG_BUS_OUTPUT_RE.finditer(chunk):
+        for name in re.split(r"\s*,\s*", match.group(1)):
+            if name not in _VERILOG_DECL_KEYWORDS:
+                names.add(name)
+    return names
+
+
+def _verilog_cell_whole_vector_arcs(
+    cell: str, source_texts: list[str]
+) -> set[tuple[str, str]]:
+    """Every ``(input, output)`` arc of Verilog module ``cell`` whose output
+    is a declared bus and whose module paths onto it are all whole-vector
+    (no bit-select on the destination terminal) -- the arcs a per-bit SDF
+    ``IOPATH`` can never match (issue #2958).
+
+    Empty -- so nothing is dropped -- when no definition of ``cell`` is found,
+    when any path statement cannot be parsed, or for an output that has any
+    bit-indexed module path (its per-bit entries may then match).
+    """
+    pattern = re.compile(
+        _VERILOG_MODULE_CHUNK_TEMPLATE.format(name=re.escape(cell)), re.DOTALL
+    )
+    buses: set[str] = set()
+    whole: set[tuple[str, str]] = set()
+    indexed: set[str] = set()
+    for text in source_texts:
+        for chunk_match in pattern.finditer(text):
+            chunk = _VERILOG_COMMENT_RE.sub(" ", chunk_match.group(0))
+            chunk = _VERILOG_DIRECTIVE_RE.sub(" ", chunk)
+            buses |= _verilog_bus_output_names(chunk)
+            for block in _VERILOG_SPECIFY_BLOCK_RE.findall(chunk):
+                for statement in block.split(";"):
+                    path = _parse_specify_path(statement)
+                    if path == _UNPARSEABLE_PATH:
+                        return set()
+                    if path is None:
+                        continue
+                    _, _, sources, destinations = path  # type: ignore[misc, str-unpack]
+                    raw = _strip_specify_condition(statement.strip())
+                    if raw is not None and re.search(r"(?:=>|\*>)[^;]*\[", raw[1]):
+                        indexed.update(destinations)
+                    whole.update((s, d) for s in sources for d in destinations)
+    return {(s, d) for s, d in whole if d in buses and d not in indexed}
+
+
+def _sdf_bit_selected_iopath_arc(entry_text: str) -> tuple[str, str] | None:
+    """``(input port, output bus)`` of a bare ``IOPATH`` entry whose output
+    carries a bit-select (plain or escaped), or ``None`` for any other entry."""
+    head = _SDF_IOPATH_HEAD_RE.match(entry_text.lstrip())
+    if head is None:
+        return None
+    destination = head.group("dst")
+    base = _SDF_BIT_SELECT_RE.split(destination, maxsplit=1)[0]
+    if base == destination:
+        return None
+    return head.group("edge_src") or head.group("src"), base
+
+
+def _drop_sdf_bit_selected_bus_iopaths(
+    sdf_path: str, source_paths: list[str]
+) -> tuple[str, int, list[dict[str, str]]] | None:
+    """Remove every bare ``IOPATH`` entry in ``sdf_path`` whose bit-selected
+    output is a bus the cell model reaches only through a whole-vector module
+    path (issue #2958), returning ``(text with those entries removed, how many
+    were removed, the distinct dropped arcs)`` -- or ``None`` when there is
+    nothing to remove. Each arc is ``{"celltype", "from", "to"}`` (``to`` is
+    the bus name, bit-select dropped), sorted.
+
+    Returns ``None`` immediately -- without reading the SDF -- when no source
+    declares a bus output next to a ``specify`` block.
+    """
+    source_texts = [
+        text
+        for text in _read_verilog_source_texts(source_paths)
+        if "specify" in text and _VERILOG_BUS_OUTPUT_RE.search(text)
+    ]
+    if not source_texts:
+        return None
+    text = _read_sdf_text(sdf_path)
+    if text is None or "IOPATH" not in text or "[" not in text:
+        return None
+
+    arcs_by_cell: dict[str, set[tuple[str, str]]] = {}
+    arcs: set[tuple[str, str, str]] = set()
+    removed_spans: list[tuple[int, int]] = []
+    dropped = 0
+    for cell_match in re.finditer(r"\(CELL\b", text):
+        celltype = _sdf_cell_celltype(text, cell_match.start())
+        if celltype is None:
+            continue
+        if celltype not in arcs_by_cell:
+            arcs_by_cell[celltype] = _verilog_cell_whole_vector_arcs(
+                celltype, source_texts
+            )
+        whole = arcs_by_cell[celltype]
+        if not whole:
+            continue
+
+        def _droppable(entry_text: str, _whole=whole, _cell=celltype) -> bool:
+            arc = _sdf_bit_selected_iopath_arc(entry_text)
+            if arc is None or arc not in _whole:
+                return False
+            arcs.add((_cell, *arc))
+            return True
+
+        spans, count = _sdf_cell_entry_removals(text, cell_match.start(), _droppable)
+        removed_spans.extend(spans)
+        dropped += count
+
+    if not dropped:
+        return None
+    return (
+        _cut_sdf_spans(text, removed_spans),
+        dropped,
+        [{"celltype": c, "from": s, "to": d} for c, s, d in sorted(arcs)],
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Issue #1890: an `INTERCONNECT` entry whose endpoint is an escaped Verilog
 # identifier containing a literal occurrence of the SDF file's own `DIVIDER`
 # character (e.g. `g\[0\]\.sub\/x.a` with `DIVIDER .` -- exactly what a
@@ -1579,6 +2102,14 @@ def _scan_sdf_diagnostics(*log_paths: str) -> tuple[list[str], dict[str, int]]:
     line an interleaved flush lands in, leaving every sibling intact and the
     gate firing on those.
 
+    The same applies to a line that matches the shape but also contains an
+    embedded cocotb log-line header (:data:`SDF_SPLICED_LOG_HEADER_RE`,
+    issue #2996): the splice landed after the locator -- inside the message,
+    or inside the path with the spliced-in line's own locator -- so the
+    message is cut (``TIM`` rather than ``TIMINGCHECK``) and equally
+    untrustworthy. Its orphaned tail (``INGCHECK not supported.``) carries no
+    marker and is already ignored.
+
     Every supplied transcript must be successfully read. Missing, unreadable,
     or incompletely read logs raise ``FunctionalVerificationError``: this scan
     gates affirmative annotation credit, so unavailable observation cannot be
@@ -1591,6 +2122,7 @@ def _scan_sdf_diagnostics(*log_paths: str) -> tuple[list[str], dict[str, int]]:
         SDF_DIAGNOSTIC_LINE_RE,
         SDF_DIAGNOSTIC_MARKERS,
         SDF_OMITTED_ANNOTATION_MARKER,
+        SDF_SPLICED_LOG_HEADER_RE,
         FunctionalVerificationError,
     )
 
@@ -1617,6 +2149,11 @@ def _scan_sdf_diagnostics(*log_paths: str) -> tuple[list[str], dict[str, int]]:
                 # Marker present, Icarus's own shape absent: a stdout splice,
                 # not a diagnostic (issue #1136). Untrustworthy in both
                 # directions, so it is counted in neither.
+                continue
+            if SDF_SPLICED_LOG_HEADER_RE.search(stripped):
+                # Well-formed head, but a cocotb log header is embedded in
+                # it: the same splice landing after the locator (issue
+                # #2996). Dropped from both buckets, as above.
                 continue
             benign_class = next(
                 (

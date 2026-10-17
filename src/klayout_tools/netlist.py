@@ -132,7 +132,29 @@ STATUS_DRIFTED = "drifted"
 
 class NetlistError(Exception):
     """A netlist export could not be completed (bad input, xschem missing,
-    xschem hung, or no fresh output file produced)."""
+    xschem hung, or no fresh output file produced).
+
+    ``code`` is an optional machine-readable classification the CLI emits as
+    the error envelope's ``error.code`` (``docs/json-contract.md``). It is
+    ``None`` for every local failure; the ``batch`` backend sets it so a
+    caller can tell a retryable capacity refusal or a runner-version mismatch
+    from a bad schematic (see :mod:`klayout_tools.netlist_batch`).
+    ``job_id`` names the batch job, when one was allocated. ``details`` holds
+    extra structured fields the CLI merges into the error envelope's
+    ``error`` object (e.g. a failed batch job's ``remote_stderr_tail``).
+    """
+
+    def __init__(
+        self,
+        *args: object,
+        code: str | None = None,
+        job_id: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(*args)
+        self.code = code
+        self.job_id = job_id
+        self.details = details
 
 
 def _sha256_file_hash(data: bytes) -> str:
@@ -416,6 +438,64 @@ def _unified_diff(
     return lines, False
 
 
+#: xschem writes the absolute path of every schematic and symbol it expands
+#: into a SPICE export as a comment line (``** sch_path: /abs/x.sch``,
+#: ``** sym_path: /abs/x.sym``). Those lines name the *checkout*, not the
+#: circuit, so they differ between any two checkouts of the same schematic
+#: (issue #3010). Group 1 is the line up to the path, group 2 the path.
+_PATH_COMMENT_RE = re.compile(
+    rb"^(\*\*[ \t]*(?:sch_path|sym_path):[ \t]*)(.*?)[ \t]*\r?$", re.MULTILINE
+)
+
+
+def _normalize_path_comments(data: bytes) -> bytes:
+    """``data`` with every xschem ``** sch_path:`` / ``** sym_path:`` comment
+    reduced to the file's basename (issue #3010).
+
+    This is the comparison form ``--check`` uses, so a committed netlist
+    generated in one checkout still matches the same schematic regenerated
+    in another. The basename is kept, rather than the whole line being
+    dropped, so the comparison stays sensitive to *which* file a subcircuit
+    came from; only the directory part, which is host-specific, is ignored.
+    The lines are comments, so ignoring their directories cannot hide an
+    electrical change.
+    """
+
+    def _basename(match: re.Match[bytes]) -> bytes:
+        path = match.group(2).rstrip(b"/\\")
+        base = re.split(rb"[/\\]", path)[-1] if path else path
+        return match.group(1) + base
+
+    return _PATH_COMMENT_RE.sub(_basename, data)
+
+
+def _normalize_layout(data: bytes) -> bytes:
+    """``data`` with ``+`` continuation lines joined onto their predecessor and
+    whitespace runs collapsed, so a netlist re-wrapped by a post-processor
+    compares equal to the original (issue #3324).
+
+    Comment lines (``*``) are kept as their own lines with only trailing
+    whitespace (and any CR) dropped; a ``+`` line is never joined onto a
+    comment. Only line layout changes, never a token, so an electrical
+    change (device card, parameter, node or pin order) still compares unequal.
+    """
+    lines: list[bytes] = []
+    prev_joinable = False
+    for raw in data.split(b"\n"):
+        if raw.lstrip().startswith(b"*"):
+            lines.append(raw.rstrip())
+            prev_joinable = False
+            continue
+        tokens = raw.split()
+        if tokens and tokens[0].startswith(b"+") and prev_joinable:
+            rest = [tokens[0][1:]] + tokens[1:]
+            lines[-1] = b" ".join([lines[-1]] + [t for t in rest if t])
+            continue
+        lines.append(b" ".join(tokens))
+        prev_joinable = bool(tokens)
+    return b"\n".join(lines)
+
+
 def _check_result(output: str, fresh_data: bytes) -> tuple[str, dict[str, Any]]:
     """``check=True``'s verdict: does the committed netlist at ``output``
     still match what the schematics produce?
@@ -424,12 +504,25 @@ def _check_result(output: str, fresh_data: bytes) -> tuple[str, dict[str, Any]]:
     artifact is not what the schematics produce" is exactly true of a netlist
     that was never committed, and a CI gate wants the same non-zero exit for
     both rather than having to distinguish them.
+
+    The comparison ignores the directory part of xschem's ``** sch_path:`` /
+    ``** sym_path:`` comment lines (:func:`_normalize_path_comments`, issue
+    #3010): those name the checkout the netlist was generated in, so without
+    this a committed netlist would report ``"drifted"`` from every checkout
+    path but the one that produced it -- including a batch runner's.
+    ``path_comments_differ`` says when the two files differ *only* there.
+
+    It also ignores ``+`` continuation layout and whitespace runs
+    (:func:`_normalize_layout`, issue #3324); ``layout_differs`` is true when
+    the files match only after that normalization.
     """
     if not os.path.isfile(output):
         return STATUS_DRIFTED, {
             "committed_present": False,
             "committed_bytes": None,
             "committed_content_hash": None,
+            "path_comments_differ": False,
+            "layout_differs": False,
             "diff": [],
             "diff_truncated": False,
             "reason": "no committed netlist at the output path",
@@ -437,11 +530,16 @@ def _check_result(output: str, fresh_data: bytes) -> tuple[str, dict[str, Any]]:
 
     with open(output, "rb") as handle:
         committed = handle.read()
-    if committed == fresh_data:
+    committed_paths = _normalize_path_comments(committed)
+    fresh_paths = _normalize_path_comments(fresh_data)
+    if _normalize_layout(committed_paths) == _normalize_layout(fresh_paths):
         return STATUS_MATCH, {
             "committed_present": True,
             "committed_bytes": len(committed),
             "committed_content_hash": _sha256_file_hash(committed),
+            "path_comments_differ": _normalize_layout(committed)
+            != _normalize_layout(fresh_data),
+            "layout_differs": committed_paths != fresh_paths,
             "diff": [],
             "diff_truncated": False,
             "reason": None,
@@ -452,6 +550,8 @@ def _check_result(output: str, fresh_data: bytes) -> tuple[str, dict[str, Any]]:
         "committed_present": True,
         "committed_bytes": len(committed),
         "committed_content_hash": _sha256_file_hash(committed),
+        "path_comments_differ": False,
+        "layout_differs": False,
         "diff": diff,
         "diff_truncated": truncated,
         "reason": (
@@ -459,6 +559,61 @@ def _check_result(output: str, fresh_data: bytes) -> tuple[str, dict[str, Any]]:
             "produce now -- re-run without --check to refresh it"
         ),
     }
+
+
+#: Seconds the ``xschem --version`` probe may take. Short on purpose: the probe
+#: is a courtesy, and a version that cannot be read quickly is reported as
+#: ``null`` rather than waited for.
+VERSION_PROBE_TIMEOUT_S = 10.0
+
+#: ``error.code`` of the content gate (:func:`_check_no_unevaluated_expr`).
+UNEVALUATED_EXPR_CODE = "unevaluated_expr"
+
+#: Oldest xschem reported (issue #3482; not verified against xschem's release
+#: notes) to evaluate a symbol's ``expr()`` attributes while netlisting.
+MIN_EXPR_XSCHEM_VERSION = "3.4.5"
+
+_UNEVALUATED_EXPR_RE = re.compile(rb"\bexpr\s*\(")
+_XSCHEM_VERSION_RE = re.compile(r"\d+\.\d+\.\d+")
+
+
+def _probe_xschem_version(xschem_binary: str) -> str | None:
+    """xschem's version (``"3.4.7"``), or ``None`` when it cannot be read.
+
+    Runs through :func:`_launch_xschem` (own process group, bounded, SIGKILL
+    escalation) because xschem can hang. Any failure -- missing binary,
+    timeout, unparseable output -- is ``None``, never an error.
+    """
+    try:
+        _, stdout, stderr, _ = _launch_xschem(
+            [xschem_binary, "--version"], VERSION_PROBE_TIMEOUT_S
+        )
+    except NetlistError:
+        return None
+    match = _XSCHEM_VERSION_RE.search(stdout or stderr)
+    return match.group(0) if match else None
+
+
+def _check_no_unevaluated_expr(data: bytes, version: str | None) -> None:
+    """Fail when the netlist still holds a literal ``expr(...)`` (issue #3482).
+
+    xschem releases that do not evaluate a symbol's ``expr()`` attributes
+    still write a "fresh" ``.spice`` file, which ngspice then cannot load.
+    Comment lines (``*``) are ignored, and ``\b`` keeps longer identifiers such
+    as ``myexpr(`` from matching.
+    """
+    for number, line in enumerate(data.split(b"\n"), start=1):
+        if line.lstrip().startswith(b"*") or not _UNEVALUATED_EXPR_RE.search(line):
+            continue
+        snippet = line.decode("utf-8", errors="replace").strip()
+        raise NetlistError(
+            f"the netlist has an unevaluated expr(...) at line {number}: "
+            f"{snippet!r}. xschem version: {version or 'unknown'}; releases "
+            f"older than {MIN_EXPR_XSCHEM_VERSION} are reported not to "
+            "evaluate expr() (unverified). ngspice cannot load this netlist, "
+            "so none was written; use a newer xschem.",
+            code=UNEVALUATED_EXPR_CODE,
+        )
 
 
 def _write_output(output: str, data: bytes) -> None:
@@ -708,6 +863,9 @@ def run_netlist(
         if block:
             fresh_data, block_info = _apply_block_mode(fresh_data)
 
+        version = _probe_xschem_version(xschem_binary)
+        _check_no_unevaluated_expr(fresh_data, version)
+
         payload: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
             "schematic": schematic,
@@ -715,6 +873,7 @@ def run_netlist(
             "mode": "check" if check else "generate",
             "xschem": {
                 "binary": xschem_binary,
+                "version": version,
                 "argv": argv,
                 "forced_flags": list(FORCED_XSCHEM_FLAGS),
                 "exit_status": exit_status,

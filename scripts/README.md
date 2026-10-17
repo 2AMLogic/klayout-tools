@@ -11,8 +11,9 @@ scripts/
   deploy-site.sh                # build site/ (Vite + React) and deploy site/dist/ to Cloudflare Pages
   fetch-pdks.sh                  # pinned fetch of lambdapdk open PDK data into pdks/
   fetch-ihp-sg13g2.sh            # pinned fetch of IHP-Open-PDK into pdks/ so `klt pdk` resolves a real SG13G2 install (#522)
-  fetch-ihp-sg13cmos5l.sh        # pinned, checksum-verified fetch of IHP ihp-sg13cmos5l into pdks/ so `klt pdk` resolves a real sg13cmos5l install (#1929)
+  fetch-ihp-sg13cmos5l.sh        # pinned, checksum-verified fetch of the IHP-Open-PDK ihp-sg13cmos5l/ subtree into pdks/ so `klt pdk` resolves a real sg13cmos5l install (#1929)
   fetch-sg13g2-sim-toolchain.sh  # provision the ngspice/OSDI half of an SG13G2 sim flow that fetch-ihp-sg13g2.sh does not (#1628)
+  fetch-asap7-sim-toolchain.sh   # compile the pinned CMC BSIM-CMG Verilog-A source to an OSDI module + load-verify it in ngspice, for ASAP7 FinFET simulation (#2814)
   fetch-cell-netlists.sh         # pinned, checksum-verified fetch of real gallery-cell SPICE netlists/models
   fetch-sky130-liberty.sh        # pinned, checksum-verified fetch of the real sky130_fd_sc_hd liberty klt synthesize needs
   install-yosys.sh               # build + install a pinned, checksum-verified Yosys from source (CI provisioning)
@@ -23,6 +24,7 @@ scripts/
   fetch-magic-tech.sh            # generate the open_pdks magic decks (sky130A, gf180mcuC) that oracle runs against, from pinned open_pdks source (#2014)
   _install_common.sh             # shared fetch/checksum/build boilerplate sourced by the install-*.sh scripts (#687)
   ci-apt-install.sh              # mirror-resilient `apt-get update && apt-get install` for CI's package steps
+  bootstrap-auditor-python.sh    # pinned, checksum-verified uv + managed CPython + host-local .venv + `klt` startup smoke for a Python-less Linux audit host (#2829)
   check-release-lag.sh           # report how far main has drifted ahead of the latest tagged release (#1020)
   native_source_fingerprint.py   # content fingerprint of a native crate's Rust sources; CI gates native-engine legs on it (#1889)
   install-openroad-docker.sh     # install an `openroad` Docker-wrapper onto $PATH (CI provisioning, #1328)
@@ -249,6 +251,86 @@ evidence; [`tests/test_ci_apt_install.py`](../tests/test_ci_apt_install.py)
 exercises every retry/timeout/fatal path against a fake `apt-get` and pins
 the workflow wiring.
 
+## `bootstrap-auditor-python.sh`
+
+Gives a Linux audit host that has a POSIX shell, `curl`, `tar` and
+`sha256sum`/`shasum` -- but **no Python and no `uv`** -- a working, host-local
+`klt` for the current checkout, then runs the startup smoke an Auditor needs
+(issue #2829). One command, no `sudo`:
+
+```
+scripts/bootstrap-auditor-python.sh
+```
+
+What it does, in order:
+
+1. Refuses a foreign `.venv` (see below) before downloading anything.
+2. Downloads the pinned `uv` release artifact for this CPU (`x86_64` or
+   `aarch64`, glibc Linux) from `github.com/astral-sh/uv/releases` and checks
+   it against the SHA-256 pinned in the script; a mismatch installs nothing.
+3. Installs a uv-managed CPython (default `3.12`; `--python X.Y` to choose,
+   refused if below `pyproject.toml`'s `requires-python` floor) into the
+   prefix. uv runs with `UV_PYTHON_PREFERENCE=only-managed`, so no system
+   interpreter is ever picked up, and with `--no-bin`, so nothing is written
+   to `~/.local/bin`.
+4. Runs `uv sync --locked --extra dev` into the checkout's `.venv`. `uv.lock`
+   is consumed, never rewritten -- a stale lock fails the run.
+5. Runs `klt --help`, `klt version --format json` and
+   `klt kb validate --format json` from that `.venv` (`--no-smoke` to skip).
+6. Prints a `KEY=value` summary on stdout -- `uv_version`, `uv_sha256`,
+   `python_version`, `python_path`, `environment`, `source_revision` (the
+   checkout's `HEAD`, `-dirty` if tracked files are modified), `smoke` -- for
+   the Auditor to record. Progress and command output go to stderr.
+
+**Ownership.** Everything except the `.venv` lives under one prefix, default
+`${XDG_CACHE_HOME:-$HOME/.cache}/klayout-tools-auditor` (`--prefix DIR` or
+`$KLT_AUDITOR_PREFIX` to choose; paths with spaces are fine):
+`uv-<version>-<target>/` (the verified `uv`), `python/` (managed CPython),
+`cache/` (uv's download/wheel cache). Delete the prefix to start over. Any
+`uv`/Python already on `PATH` is left alone and never used.
+
+**Idempotent.** Re-running with the same prefix reuses the verified `uv` (no
+download), lets `uv python install`/`uv sync --locked` no-op, and prints the
+same summary (`uv_action=reused`, `environment_action=synced`).
+
+**Foreign `.venv`.** An existing `.venv` is reused only if its `bin/python`
+resolves inside the prefix's `python/` directory. A dangling symlink (e.g. a
+`.venv` created on macOS pointing at `/Users/.../cpython-3.12.11-macos-aarch64-none/...`),
+an interpreter anywhere else on the host, a Windows-layout or non-venv
+directory is refused **without being executed** (exit 16). To recover,
+re-run with `--replace-venv`: the old directory is moved aside to
+`.venv.foreign-<UTC timestamp>` (gitignored, never deleted) and a fresh
+host-local `.venv` is built. Note this also applies to a `.venv` a developer
+made with their own `uv`; that is deliberate -- the bootstrap only vouches
+for environments it built.
+
+**Failures** exit non-zero with a distinct code and an actionable message:
+
+| Exit | Cause | Recovery |
+|------|-------|----------|
+| 2  | bad arguments | see `--help` |
+| 10 | not Linux, or CPU not `x86_64`/`aarch64` | run on a supported host |
+| 11 | `curl`, `tar` or a SHA-256 tool missing | provide the tool |
+| 12 | prefix cannot be created or written | pass a user-writable `--prefix` |
+| 13 | `uv` download failed / interrupted | check connectivity, re-run (nothing was installed) |
+| 14 | checksum mismatch, or unpacked `uv` is not the pinned version | do not override; investigate the mirror/proxy |
+| 15 | managed CPython install failed, or below the `requires-python` floor | check connectivity / `--python` |
+| 16 | `.venv` provenance mismatch | `--replace-venv` |
+| 17 | `uv sync --locked` failed (e.g. stale `uv.lock`) | fix the lock in the repo |
+| 18 | a `klt` smoke command failed | the message names the command and source revision |
+| 19 | no `pyproject.toml`/`uv.lock`, or uninterpretable `requires-python` | run from a full checkout |
+
+**Scope.** Repository-scoped only: no fleet image changes, no system
+packages, no credentials, no Rust toolchain (the default sync builds none of
+the `native/` crates), no change to the Python floor. A passing exact-commit
+CI run is not a substitute for this local startup check.
+
+**Re-pinning `uv`.** Update `UV_VERSION` and both `UV_SHA256_*` constants
+together from the release's own `uv-<target>.tar.gz.sha256` files (the
+script's header has the commands), and the matching constants in
+[`tests/test_bootstrap_auditor_python.py`](../tests/test_bootstrap_auditor_python.py),
+which exercises every path above offline against fake `curl`/`sha256sum`/`uv`.
+
 ## `install-openroad-docker.sh` / `place-and-route-smoke.sh`
 
 CI provisioning + pipeline for
@@ -266,7 +348,10 @@ mounting `$PDK_ROOT` alongside `$PWD` so a real PDK install resolves inside
 the container too — falling back to `klt pdk find`'s own resolved root when
 `$PDK_ROOT` is unset, so the mount always matches what `klt
 place-and-route` will actually reference (issue #1868) — see the script's
-own header comment for why that matters.
+own header comment for why that matters. The container runs as the caller's
+uid:gid (`--user "$(id -u):$(id -g)"`, with `HOME` set to `$TMPDIR`) so files it
+writes into the mounted `$PWD`/`$TMPDIR` are not root-owned on Linux (issue
+#3151); re-run the installer to upgrade an older wrapper.
 
 The image is **pinned by digest** (`ORFS_IMAGE_DIGEST` near the top of the
 script), not by the moving `:latest` tag: both the `docker pull` and the
@@ -332,3 +417,46 @@ python scripts/ingest-canary.py --repo 2AMLogic/some-block --pdk sg13g2
 slug doesn't follow the `<pdk>-<name>` convention the script otherwise
 guesses from; an unknown name exits `1`, and an unguessable slug with no
 `--pdk` simply omits the field.
+
+## `check_import_boundaries.py`
+
+Static CI gate (issue #2767) for `docs/ARCHITECTURE.md`'s "verb modules stay
+self-contained, except PDK resolution" rule. Pure stdlib AST analysis of
+`src/klayout_tools/**/*.py` -- it never imports the package, so it needs no
+KLayout or EDA tooling, and runs as a non-`continue-on-error` step of the
+`lint` job. Policy lives in [`import-boundaries.json`](../import-boundaries.json).
+
+```
+python scripts/check_import_boundaries.py                # check (read-only)
+python scripts/check_import_boundaries.py --strict-stale # also fail on unused entries
+python scripts/check_import_boundaries.py --inventory    # list internal imports as JSON
+```
+
+Exit `0` clean, `1` boundary violations, `2` invalid policy or unparseable
+source. Diagnostics are `path:line: [rule] message`, sorted deterministically.
+
+**Policy sections.** `groups` classify every module (a new, unclassified
+module fails with instructions); a `verb` group is a verb's core modules plus
+its `cli/*_cmd.py` adapter, so same-verb helper imports are free. Name
+mismatches are explicit (`sta` -> `post_route_sta`, `yield` ->
+`yield_analysis`, `gen` vs `gen_compose`, `sta`/`stats`). `shared` groups
+(`shared-core`, `pdk`) may be imported publicly by anyone. Cross-group public
+imports need `allowed_group_edges`. Importing a *private* (leading underscore)
+symbol across groups needs an exact `(consumer, exporter, symbol)` entry in
+`shared_private_permissions` (intended) or `legacy_exceptions.private_symbols`
+(grandfathered debt); `legacy_exceptions.module_edges` is the equivalent for
+module-edge debt. Privacy follows the original name, never the alias.
+Line numbers are not part of an exception's identity.
+
+**Maintenance.** Edit the JSON by hand and review it; CI never regenerates
+it. When a legacy import is cleaned up, delete its entry (`--strict-stale`
+lists entries that no longer match anything). Adding a new exception is a
+policy change that needs explicit review.
+
+**Limits.** Static and best-effort, not a sandbox or runtime dependency
+proof: `importlib`/`__import__`/`getattr`, values copied through variables
+(`m = alias; m._x`), re-export chains, and string annotations are not
+followed; a name bound more than once in a scope is not resolved for
+`alias._x` access; internal `from x import *` is rejected outright.
+`import-linter` 2.15 was evaluated and rejected: it models module-to-module
+edges only and cannot allow `_a` but forbid `_b` from the same module.

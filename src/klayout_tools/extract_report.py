@@ -96,6 +96,7 @@ def _describe_devices(
         _PARAM_PRECISION_FARAD,
         _PARAM_PRECISION_OHM,
         _PARAM_PRECISION_UM,
+        MOM_FEED_TOKENS,
     )
 
     devices: list[dict[str, Any]] = []
@@ -114,8 +115,19 @@ def _describe_devices(
             )
 
         params: dict[str, float] = {}
+        feed_token: str | None = None
         for param in device_class.parameter_definitions():
-            if param.name == "W":
+            if param.name == "FEED":
+                # Issue #2445, `cap_cmomi` only: the feed variant is a
+                # *string* token (`none`/`same`/`double`), which `params` (an
+                # object of numbers) cannot carry without breaking typed
+                # consumers, so it is reported as an additive optional
+                # top-level device field instead -- present only when
+                # measured (the integer code `0` is "unmeasured").
+                feed_token = MOM_FEED_TOKENS.get(
+                    int(round(device.parameter(param.id())))
+                )
+            elif param.name == "W":
                 params["w_um"] = round(
                     device.parameter(param.id()), _PARAM_PRECISION_UM
                 )
@@ -173,7 +185,11 @@ def _describe_devices(
                 params["r_ohm"] = round(
                     device.parameter(param.id()), _PARAM_PRECISION_OHM
                 )
-            elif param.name in _MOS_JUNCTION_PARAM_JSON_KEYS:
+            elif param.name in _MOS_JUNCTION_PARAM_JSON_KEYS and not (
+                # FinFET classes (issue #2761) do not measure junction
+                # geometry; omit the keys rather than report fake zeros.
+                device_class.has_parameter("NFIN")
+            ):
                 # MOS source/drain junction geometry (issue #695), all four
                 # rounded to the same micrometre-domain precision, so one
                 # name->key table replaces four identical branches:
@@ -191,6 +207,13 @@ def _describe_devices(
                 params[_MOS_JUNCTION_PARAM_JSON_KEYS[param.name]] = round(
                     device.parameter(param.id()), _PARAM_PRECISION_UM
                 )
+            elif param.name in ("NFIN", "FINGERS"):
+                # FinFET device classes only (issue #2761, see
+                # `extract_finfet`): `nfin` is the geometry-counted fin total
+                # over this device's merged parallel fingers -- the PDK
+                # reference netlist's own `nfin` -- and `fingers` how many
+                # gate fingers were merged. Integers, like `mmin`/`mmax`.
+                params[param.name.lower()] = int(round(device.parameter(param.id())))
             elif param.name in ("MMIN", "MMAX"):
                 # MoM-capacitor device classes only (issue #2435,
                 # `mom_capacitor_device_class` in `extract.py`): the
@@ -209,6 +232,7 @@ def _describe_devices(
                 # both (see `docs/json-contract.md`).
                 params[param.name.lower()] = int(round(device.parameter(param.id())))
 
+        feed_field = {"feed": feed_token} if feed_token is not None else {}
         devices.append(
             {
                 # expanded_name() yields a bare $<n> for anonymous devices:
@@ -227,6 +251,7 @@ def _describe_devices(
                 # docstrings. `[]` when it resolved to none (drawn directly
                 # in the top cell) or `device_instance_paths` was not given.
                 "instance_path": instance_paths.get(device.id(), []),
+                **feed_field,
             }
         )
         device_counts[class_name] = device_counts.get(class_name, 0) + 1

@@ -61,7 +61,11 @@ HISTORY_PATH = DECKS_DIR / "_history.json"
 #: hashed and recorded as a bogus "history" deck (see issue #1338).
 _SKIP_MODULES = {"__init__.py", "history.py"}
 
-_VERSION_RE = re.compile(r'^version\s*=\s*"([^"]+)"', re.MULTILINE)
+#: A release tag's ``pyproject.toml`` declares its version either as the
+#: static ``[project]`` ``version = "X.Y.Z"`` (tags before issue #2823) or as
+#: ``[tool.hatch.version]``'s ``base-version = "X.Y.Z"`` (after it -- at the
+#: release tag, the clean build's version *is* that base).
+_VERSION_RE = re.compile(r'^(?:base-)?version\s*=\s*"([^"]+)"', re.MULTILINE)
 
 
 def _run(*args: str) -> str:
@@ -103,7 +107,8 @@ def _package_version_at(tag: str) -> str:
     match = _VERSION_RE.search(text)
     if not match:
         raise SystemExit(
-            f'could not find a `version = "..."` line in {tag}:pyproject.toml'
+            f'could not find a `version = "..."` or `base-version = "..."` '
+            f"line in {tag}:pyproject.toml"
         )
     return match.group(1)
 

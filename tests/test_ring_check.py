@@ -441,3 +441,274 @@ def test_cli_bad_region_exit_one(tmp_path):
     )
 
     assert exit_code == 1
+
+
+# --- Cell inclusion scope (--cells, issue #2690) ------------------------------
+
+_L = (8, 0)
+# Ring of four bars around a 0..100 um box (dbu 0.005 -> 20000 units); each bar
+# is its own cell instance. Bars: bottom/top span full width, left/right fit
+# between them, so the union is one annulus with a single hole.
+_W = 4000
+_S = 20000
+
+
+def _bar_cells(layout, index):
+    horiz = layout.create_cell("HBAR")
+    horiz.shapes(index).insert(kdb.Box(0, 0, _S, _W))
+    vert = layout.create_cell("VBAR")
+    vert.shapes(index).insert(kdb.Box(0, 0, _W, _S - 2 * _W))
+    return horiz, vert
+
+
+def _hierarchical(path, *, drop_right=False, core_bridge=True):
+    """TOP -> RING (HBAR bottom, HBAR rotated top, VBAR left, VBAR right) + CORE.
+
+    CORE holds same-layer routing that, together with the ring bars, forms an
+    annulus even when the right bar is dropped: a frame bridging the gap.
+    """
+    layout = kdb.Layout()
+    layout.dbu = _DBU
+    index = layout.layer(*_L)
+    horiz, vert = _bar_cells(layout, index)
+    ring = layout.create_cell("RING")
+    ring.insert(kdb.CellInstArray(horiz.cell_index(), kdb.Trans(0, 0)))
+    # Top bar: reflected about x axis then moved (reflection + translation).
+    ring.insert(kdb.CellInstArray(horiz.cell_index(), kdb.Trans(0, True, 0, _S)))
+    ring.insert(kdb.CellInstArray(vert.cell_index(), kdb.Trans(0, _W)))
+    if not drop_right:
+        ring.insert(kdb.CellInstArray(vert.cell_index(), kdb.Trans(_S - _W, _W)))
+    core = layout.create_cell("CORE")
+    if core_bridge:
+        # Fill the missing right bar position from the core side.
+        core.shapes(index).insert(kdb.Box(_S - _W, _W, _S, _S - _W))
+    top = layout.create_cell("TOP")
+    top.insert(kdb.CellInstArray(ring.cell_index(), kdb.Trans(1000, 1000)))
+    top.insert(kdb.CellInstArray(core.cell_index(), kdb.Trans(1000, 1000)))
+    top.shapes(index).insert(kdb.Box(-500, -500, -400, -400))  # TOP-owned stray
+    layout.write(str(path))
+
+
+def test_unscoped_check_is_not_discriminating_on_shared_layer(tmp_path):
+    intact, broken = tmp_path / "i.gds", tmp_path / "b.gds"
+    _hierarchical(intact)
+    _hierarchical(broken, drop_right=True)
+
+    # The stray TOP shape fragments both unscoped runs equally; with
+    # ignore_enclosed it is still outside the hole.  Clip it away instead.
+    clip = (0.0, 0.0, 120.0, 120.0)
+    a = run_ring_check(str(intact), [_L], region_um=clip, ignore_enclosed=True)
+    b = run_ring_check(str(broken), [_L], region_um=clip, ignore_enclosed=True)
+    assert a["status"] == b["status"] == "continuous"
+    assert a["cells"] is None
+
+
+def test_scoped_ring_discriminates(tmp_path):
+    intact, broken = tmp_path / "i.gds", tmp_path / "b.gds"
+    _hierarchical(intact)
+    _hierarchical(broken, drop_right=True)
+
+    good = run_ring_check(str(intact), [_L], cells=["RING"], ignore_enclosed=True)
+    bad = run_ring_check(str(broken), [_L], cells=["RING"], ignore_enclosed=True)
+    assert good["status"] == "continuous"
+    assert good["cells"] == ["RING"]
+    assert bad["status"] == "broken"
+    # Violation box is in TOP's coordinates (RING placed at 1000,1000): the
+    # C-shaped remainder spans 1000..(1000+_S) in x and y.
+    assert bad["violations"][0]["bbox"] == {
+        "left": 1000,
+        "bottom": 1000,
+        "right": 1000 + _S,
+        "top": 1000 + _S,
+    }
+
+
+def test_scope_with_leaf_cells_gathers_repeated_reflected_instances(tmp_path):
+    path = tmp_path / "i.gds"
+    _hierarchical(path)
+    r = run_ring_check(str(path), [_L], cells=["HBAR", "VBAR"], ignore_enclosed=True)
+    assert r["status"] == "continuous"
+    # Dropping one leaf cell from the scope opens the ring.
+    r = run_ring_check(str(path), [_L], cells=["HBAR"])
+    assert r["status"] == "broken"
+
+
+def test_overlapping_ancestor_and_descendant_do_not_duplicate(tmp_path):
+    path = tmp_path / "i.gds"
+    _hierarchical(path)
+    only = run_ring_check(str(path), [_L], cells=["RING"])
+    both = run_ring_check(str(path), [_L], cells=["RING", "HBAR"])
+    assert only["status"] == both["status"] == "continuous"
+    assert only["violations"] == both["violations"] == []
+
+
+def test_selected_ancestor_excludes_unselected_ancestor_shapes(tmp_path):
+    path = tmp_path / "i.gds"
+    _hierarchical(path)
+    # TOP's own stray shape must not appear: selecting RING gives exactly one
+    # polygon (no 'fragmented'); selecting TOP includes it.
+    assert run_ring_check(str(path), [_L], cells=["RING"])["status"] == "continuous"
+    r = run_ring_check(str(path), [_L], cells=["TOP"])
+    assert r["status"] == "broken"
+    assert {v["kind"] for v in r["violations"]} == {"fragmented"}
+
+
+def test_array_occurrences_are_included(tmp_path):
+    layout = kdb.Layout()
+    layout.dbu = _DBU
+    index = layout.layer(*_L)
+    bar = layout.create_cell("BAR")
+    bar.shapes(index).insert(kdb.Box(0, 0, 4000, 4000))
+    top = layout.create_cell("TOP")
+    # 4x4 array of touching squares, minus nothing: solid plate -> no_hole.
+    top.insert(
+        kdb.CellInstArray(
+            bar.cell_index(),
+            kdb.Trans(0, 0),
+            kdb.Vector(4000, 0),
+            kdb.Vector(0, 4000),
+            4,
+            4,
+        )
+    )
+    path = tmp_path / "arr.gds"
+    layout.write(str(path))
+    r = run_ring_check(str(path), [_L], cells=["BAR"])
+    assert r["violations"][0]["kind"] == "no_hole"
+    assert r["violations"][0]["bbox"] == {
+        "left": 0,
+        "bottom": 0,
+        "right": 16000,
+        "top": 16000,
+    }
+
+
+def test_rotated_instance_transform(tmp_path):
+    layout = kdb.Layout()
+    layout.dbu = _DBU
+    index = layout.layer(*_L)
+    bar = layout.create_cell("BAR")
+    bar.shapes(index).insert(kdb.Box(0, 0, 1000, 5000))
+    mid = layout.create_cell("MID")
+    mid.insert(kdb.CellInstArray(bar.cell_index(), kdb.Trans(1, False, 0, 0)))
+    top = layout.create_cell("TOP")
+    top.insert(kdb.CellInstArray(mid.cell_index(), kdb.Trans(100, 200)))
+    path = tmp_path / "rot.gds"
+    layout.write(str(path))
+    r = run_ring_check(str(path), [_L], cells=["BAR"])
+    # R90 maps (x,y)->(-y,x): box -5000..0 x 0..1000, then +(100,200).
+    assert r["violations"][0]["bbox"] == {
+        "left": -4900,
+        "bottom": 200,
+        "right": 100,
+        "top": 1200,
+    }
+
+
+def test_multiple_roots_and_selector_absent_from_one_root(tmp_path):
+    layout = kdb.Layout()
+    layout.dbu = _DBU
+    index = layout.layer(*_L)
+    ring = layout.create_cell("RINGC")
+    for polygon in _ring_region().each():
+        ring.shapes(index).insert(polygon)
+    other = layout.create_cell("OTHERC")
+    other.shapes(index).insert(kdb.Box(0, 0, 100, 100))
+    a = layout.create_cell("A")
+    a.insert(kdb.CellInstArray(ring.cell_index(), kdb.Trans()))
+    b = layout.create_cell("B")
+    b.insert(kdb.CellInstArray(other.cell_index(), kdb.Trans()))
+    path = tmp_path / "multi.gds"
+    layout.write(str(path))
+
+    r = run_ring_check(str(path), [_L], cells=["RINGC"])
+    assert r["status"] == "broken"
+    assert {v["cell"] for v in r["violations"]} == {"B"}
+    assert r["violations"][0]["kind"] == "empty"  # never a vacuous pass
+
+
+def test_scope_with_clip_and_absent_layer(tmp_path):
+    path = tmp_path / "i.gds"
+    _hierarchical(path)
+    clipped = run_ring_check(
+        str(path), [_L], cells=["RING"], region_um=(0.0, 0.0, 1.0, 1.0)
+    )
+    assert clipped["violations"][0]["kind"] == "empty"
+    absent = run_ring_check(str(path), [(99, 0)], cells=["RING"])
+    assert absent["violations"][0]["kind"] == "empty"
+    inside = run_ring_check(
+        str(path), [_L], cells=["RING"], region_um=(0.0, 0.0, 120.0, 120.0)
+    )
+    assert inside["status"] == "continuous"
+
+
+@pytest.mark.parametrize("bad", [[], [""], ["  "], [3], "RING", ["RING", ""]])
+def test_malformed_cells_raise(tmp_path, bad):
+    path = tmp_path / "i.gds"
+    _hierarchical(path)
+    with pytest.raises(RingCheckError):
+        run_ring_check(str(path), [_L], cells=bad)
+
+
+def test_unknown_cell_raises(tmp_path):
+    path = tmp_path / "i.gds"
+    _hierarchical(path)
+    with pytest.raises(RingCheckError, match="NOPE"):
+        run_ring_check(str(path), [_L], cells=["RING", "NOPE"])
+
+
+def test_cells_echo_dedups_and_preserves_order(tmp_path):
+    path = tmp_path / "i.gds"
+    _hierarchical(path)
+    r = run_ring_check(str(path), [_L], cells=["VBAR", "HBAR", "VBAR"])
+    assert r["cells"] == ["VBAR", "HBAR"]
+
+
+def test_cli_cells_exit_codes_and_json_echo(tmp_path, capsys):
+    intact, broken = tmp_path / "i.gds", tmp_path / "b.gds"
+    _hierarchical(intact)
+    _hierarchical(broken, drop_right=True)
+    base = ["--layers", "[[8,0]]", "--ignore-enclosed", "--format", "json"]
+
+    assert main(["ring-check", str(intact), *base, "--cells", "RING"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["cells"] == ["RING"]
+
+    assert main(["ring-check", str(broken), *base, "--cells", "RING"]) == 3
+    capsys.readouterr()
+
+    assert main(["ring-check", str(intact), *base, "--cells", "NOPE"]) == 1
+    assert json.loads(capsys.readouterr().err)["error"]["command"] == "ring-check"
+    assert main(["ring-check", str(intact), *base, "--cells", ""]) == 1
+    capsys.readouterr()
+
+    # Text output shows the scope; omitted scope echoes null in JSON.
+    assert (
+        main(
+            [
+                "ring-check",
+                str(intact),
+                "--layers",
+                "[[8,0]]",
+                "--cells",
+                "HBAR",
+                "--cells",
+                "VBAR",
+            ]
+        )
+        == 0
+    )
+    assert "cells: HBAR, VBAR" in capsys.readouterr().out
+    main(
+        [
+            "ring-check",
+            str(intact),
+            "--layers",
+            "[[8,0]]",
+            "--format",
+            "json",
+            "--region",
+            "[0,0,120,120]",
+        ]
+    )
+    assert json.loads(capsys.readouterr().out)["cells"] is None

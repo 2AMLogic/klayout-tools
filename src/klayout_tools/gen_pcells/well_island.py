@@ -75,6 +75,10 @@ def _build_well_island_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         :func:`_well_island_isolation`.
         """
 
+        # Declared via ``self.param("mfg_grid_um", ...)`` below; the
+        # PCellDeclarationHelper stubs cannot see it, so annotate for mypy.
+        mfg_grid_um: float
+
         def __init__(self) -> None:
             super().__init__()
             self.param(
@@ -258,6 +262,14 @@ def _build_well_island_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "generator's own cut size unchanged",
                 default=0.0,
             )
+            self.param(
+                "mfg_grid_um",
+                self.TypeDouble,
+                "Manufacturing grid (um) every cut on contact_layer is "
+                "snapped onto (issue #2648) -- 0.0 leaves cut positions "
+                "unchanged",
+                default=0.0,
+            )
 
         def display_text_impl(self) -> str:
             return f"well_island({self.net or 'unnamed'})"
@@ -286,6 +298,7 @@ def _build_well_island_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 info["outer_box_um"],
                 info["inner_box_um"],
                 gap_box,
+                self.mfg_grid_um,
             )
             _insert_ring(
                 self.cell,
@@ -294,6 +307,7 @@ def _build_well_island_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 info["outer_box_um"],
                 info["inner_box_um"],
                 gap_box,
+                self.mfg_grid_um,
             )
             _insert_boxes(self.cell, li_contact, dbu, info["contact_boxes_um"])
             if self.well_tap_implant_present:
@@ -313,6 +327,7 @@ def _build_well_island_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     gap_box,
                     info["gap"]["side"] if info["gap"] is not None else None,
                     self.ring_implant_margin_um,
+                    self.mfg_grid_um,
                 )
             if self.well_present:
                 _insert_boxes(
@@ -338,6 +353,12 @@ def _build_well_island_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
 
             # Issue #2585: clamp every cut on a fixed-size cut/via layer down
             # to that size, inside the unchanged generic-budget layout.
-            _clamp_cut_boxes(self.cell, li_contact, dbu, self.contact_fixed_size_um)
+            _clamp_cut_boxes(
+                self.cell,
+                li_contact,
+                dbu,
+                self.contact_fixed_size_um,
+                self.mfg_grid_um,
+            )
 
     return {"well_island": _WellIslandPCell}

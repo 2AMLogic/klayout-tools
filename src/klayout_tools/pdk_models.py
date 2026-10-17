@@ -396,13 +396,16 @@ MOS_FLAVOUR_PROPERTY = "mos_flavour"
 #: -- the derivation `decks/sg13g2.py`'s `mos_flavours` entry transcribes.
 #:
 #: sky130's 5V-gate/10.5V-drain thick-oxide pair (issue #1369) is confirmed in
-#: the same real fetched sky130A install (volare,
-#: `c6d73a35f524070e85faff4a6a9eef49553ebc2b`) the module docstring's `01v8`
-#: entry above cites -- `libs.tech/combined/continuous/models_fet.spice:15382`
-#: (`.subckt  sky130_fd_pr__nfet_g5v0d10v5  d g s b  mult=1`) and `:36917`
-#: (the `pfet` analogue), each followed by the identical
+#: the same real fetched sky130A install (ciel,
+#: `f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7`) the module docstring's `01v8`
+#: entry above cites --
+#: `libs.tech/combined/continuous/models_fet/sky130_fd_pr__nfet_g5v0d10v5.spice:29`
+#: (`.subckt  sky130_fd_pr__nfet_g5v0d10v5  d g s b  mult=1`) and
+#: `.../sky130_fd_pr__pfet_g5v0d10v5.spice:30` (the `pfet` analogue), each
+#: followed by the identical
 #: `.param  l = 1 w = 1 nf = 1 ad = 0 as = 0 pd = 0 ps = 0 ...` line the
-#: `01v8` pair carries at `:10037`, i.e. the same `d g s b` terminal order
+#: `01v8` pair carries at `.../sky130_fd_pr__nfet_01v8.spice:34`, i.e. the
+#: same `d g s b` terminal order
 #: and `l`/`w`/`as`/`ad`/`ps`/`pd` call-site convention
 #: :func:`create_model_binding_delegate` already writes for the default pair.
 #: Extracted under exactly those names by the PDK's own
@@ -420,7 +423,7 @@ MOS_FLAVOUR_PROPERTY = "mos_flavour"
 #: independent sources in the same install: the KLayout layer-properties
 #: file `libs.tech/klayout/tech/sky130A.lyp:3127`
 #: (`<name>hvi.drawing - 75/20</name>`) and the magic technology file
-#: `libs.tech/magic/sky130A.tech:3980` (`calma HVI 75 20`).
+#: `libs.tech/magic/sky130A.tech:3975` (`calma HVI 75 20`).
 _MOS_MODEL_FLAVOURS: dict[tuple[str, str], dict[str, dict[str, str]]] = {
     ("gf180mcu", "gf180mcu"): {
         "06v0": {
@@ -457,6 +460,11 @@ _MOS_MODEL_FLAVOURS: dict[tuple[str, str], dict[str, dict[str, str]]] = {
         },
     },
     ("sky130", "sky130"): {
+        # Native-Vt NMOS only (issue #3599, `sky130.lvs` L1214/1226/2081);
+        # deliberately no "pfet" entry -- there is no native PMOS.
+        "nvt": {
+            "nfet": "sky130_fd_pr__nfet_05v0_nvt",
+        },
         "hvi": {
             "nfet": "sky130_fd_pr__nfet_g5v0d10v5",
             "pfet": "sky130_fd_pr__pfet_g5v0d10v5",
@@ -594,6 +602,10 @@ def _unbound_resistor_card(
 #: own ``PARAMS:`` default writer -- the #2355 bug).
 _MOM_CAPACITOR_TERMINAL_NAMES = frozenset({"A", "B"})
 _MOM_CAPACITOR_PARAMETER_NAMES = frozenset({"W", "L", "MMIN", "MMAX"})
+#: ``cap_cmomi``'s parameter set: the shared one plus ``FEED`` (issue #2445).
+#: ``cap_cmomf`` keeps :data:`_MOM_CAPACITOR_PARAMETER_NAMES` -- its upstream
+#: ``.subckt`` declares no ``feed``, so its class never registers it.
+_MOM_CAPACITOR_FEED_PARAMETER_NAMES = _MOM_CAPACITOR_PARAMETER_NAMES | {"FEED"}
 
 
 def _unbound_mom_capacitor_card(
@@ -604,6 +616,7 @@ def _unbound_mom_capacitor_card(
     length_um: float,
     mmin: int | None = None,
     mmax: int | None = None,
+    feed: str | None = None,
 ) -> str:
     """The plain-element ``X`` card for one *unbound* MoM-capacitor device
     (``cap_cmomi``/``cap_cmomf``), with its measured ``W``/``L`` geometry
@@ -629,9 +642,19 @@ def _unbound_mom_capacitor_card(
     cards, so both geometry parameters parse as microns regardless of the
     caller's ``.option scale``.
 
-    **Four of the upstream subcircuit's parameters are written, three are
-    not.** The subcircuit this card's trailing class-name token binds onto
-    declares (``IHP-GmbH/ihp-sg13cmos5l`` at
+    **Issue #2445 -- ``feed`` is written when measured.** ``feed`` (``cap_cmomi``
+    only) is the token ``none``/``same``/``double`` the extractor recovered
+    from the drawn port placement (``extract._mom_feed_variant``); it is
+    written as ``FEED=<token>`` after ``MMAX=`` and omitted entirely when
+    ``None`` (a layout matching no PCell signature, or a ``cap_cmomf``), so an
+    unmeasured feed still falls to the ``.subckt`` default instead of being
+    guessed. See ``extract._mom_feed_variant`` for the settled mapping.
+
+    **Four of the upstream subcircuit's parameters are always written, plus
+    ``feed`` when measured; ``subblock``/``mm_ok`` are never.** The
+    subcircuit this card's trailing class-name token binds onto
+    declares (archived ``IHP-GmbH/ihp-sg13cmos5l``,
+    now IHP-Open-PDK ``ihp-sg13cmos5l/``, at
     ``607e18d4bd9214a52575c194b4181ef449f9252f``,
     ``libs.tech/ngspice/models/cap_cmomi.lib:60`` /
     ``cap_cmomf.lib:53``)::
@@ -658,22 +681,9 @@ def _unbound_mom_capacitor_card(
     tokens rather than writing a fabricated ``0``: the #2408 rule still
     holds for a value that was not measured.
 
-    ``feed``/``subblock``/``mm_ok`` are still left off, taking those
-    ``.subckt`` defaults:
+    ``subblock``/``mm_ok`` are still left off, taking those ``.subckt``
+    defaults:
 
-    - ``feed`` (``cap_cmomi`` only -- ``none``/``same``/``double``) is only
-      *partly* recoverable and is tracked separately rather than guessed
-      at here. The PCell's ``same`` variant is distinguishable (it stacks
-      its two pins on adjacent metals, so the two recognised ports carry
-      different metal indices), but ``double`` and ``none`` both place two
-      ports on the top metal and are told apart only by where those ports
-      sit relative to the core -- which this recognition step, reading one
-      marker plus two port polygons, does not know. Emitting ``double`` for
-      a ``none`` layout would be exactly the invisible wrong answer #2408
-      rejected, and ``none`` is upstream's own documented *not a standalone
-      2-terminal device* configuration. Split out as issue #2445, which
-      settles the question against the PCell generator itself rather than
-      guessing here.
     - ``subblock`` is a PCell layout switch (substrate isolation block) with
       no counterpart in the recognition geometry at all.
     - ``mm_ok`` is a documented no-op in this release ("accepted for
@@ -691,6 +701,8 @@ def _unbound_mom_capacitor_card(
     )
     if mmin is not None and mmax is not None and mmin >= 1 and mmax >= 1:
         card += f" MMIN={mmin} MMAX={mmax}"
+    if feed is not None:
+        card += f" FEED={feed}"
     return card
 
 
@@ -775,6 +787,32 @@ def build_subckt_to_class_map(deck_name: str) -> dict[str, str]:
         for device_class, subckt in flavour_table.items():
             result.setdefault(subckt, device_class)
     return result
+
+
+def mos_flavour_for_subckt(subckt_name: str) -> str | None:
+    """The ``_MOS_MODEL_FLAVOURS`` flavour key (e.g. ``"nvt"``, ``"hvi"``,
+    ``"06v0"``) a MOS subcircuit name belongs to, or ``None`` for a
+    default-flavour model or an unknown name (issue #3650).
+
+    The inverse of the flavour tables :func:`build_subckt_to_class_map`
+    deliberately collapses: it is what ``options.compare_mos_flavour`` uses to
+    tell a reference ``X`` call of a flavoured model apart from a default one.
+    A name shared by several decks (``sg13_hv_nmos`` in sg13g2 and
+    sg13cmos5l) resolves to the same key in each.
+    """
+    for flavours in _MOS_MODEL_FLAVOURS.values():
+        for flavour, table in flavours.items():
+            if subckt_name in table.values():
+                return flavour
+    return None
+
+
+def flavoured_mos_class_name(device_class: str, flavour: str) -> str:
+    """The device-class name a flavoured MOS device is compared under when
+    ``options.compare_mos_flavour`` is on (issue #3650), e.g. ``nfet`` +
+    ``nvt`` -> ``nfet__nvt``. Both the reference conversion and the layout-side
+    split derive the name here, so the two sides cannot disagree."""
+    return f"{device_class}__{flavour}"
 
 
 def known_mos_subckt_names() -> dict[str, tuple[str, str]]:
@@ -1445,7 +1483,15 @@ _CAPACITOR_MODEL_TABLE: dict[tuple[str, str], dict[str, str]] = {
         "sky130_fd_pr__model__cap_mim": "sky130_fd_pr__cap_mim_m3_1",
         "sky130_fd_pr__model__cap_mim_m4": "sky130_fd_pr__cap_mim_m3_2",
     },
+    # The `1f0`/`1f5` densities (selectable via `--deck-option mim_cap=`,
+    # issue #1151) are bound too (issue #3090): the PDK ships
+    # `.subckt cap_mim_1f0_m4m5_noshield` / `cap_mim_1f5_m4m5_noshield`
+    # (`libs.tech/ngspice/sm141064_mim.ngspice`, same `c_length`/`c_width`
+    # parameters as `2f0`), whose `mim_corner_*` params the process-corner
+    # sections scale -- a bare `C` card cannot follow those corners.
     ("gf180mcu", "gf180mcu"): {
+        "cap_mim_1f0_m4m5_noshield": "cap_mim_1f0_m4m5_noshield",
+        "cap_mim_1f5_m4m5_noshield": "cap_mim_1f5_m4m5_noshield",
         "cap_mim_2f0_m4m5_noshield": "cap_mim_2f0_m4m5_noshield",
     },
     # sg13g2's two declared MIM capacitor classes (issue #1470; classes
@@ -1923,7 +1969,10 @@ def create_model_binding_delegate(
             parameter_names = {
                 param.name for param in device_class.parameter_definitions()
             }
-            if parameter_names != _MOM_CAPACITOR_PARAMETER_NAMES:
+            if parameter_names not in (
+                _MOM_CAPACITOR_PARAMETER_NAMES,
+                _MOM_CAPACITOR_FEED_PARAMETER_NAMES,
+            ):
                 return False
 
             terminal_ids = [terminal.id() for terminal in terminal_defs]
@@ -1947,6 +1996,20 @@ def create_model_binding_delegate(
             mmin = self._device_param(device, "MMIN")
             mmax = self._device_param(device, "MMAX")
 
+            # Issue #2445: `cap_cmomi`'s measured feed variant. The class
+            # carries an integer enum (`extract.MOM_FEED_*`); only a measured
+            # code (1..3) is mapped back to the `.subckt`'s string token, and
+            # `0`/absent (`cap_cmomf`, an unmeasured or pre-#2445 device)
+            # writes nothing.
+            from .extract import MOM_FEED_TOKENS
+
+            feed_code = self._device_param(device, "FEED")
+            feed_token = (
+                MOM_FEED_TOKENS.get(int(round(feed_code)))
+                if feed_code is not None
+                else None
+            )
+
             name = self.format_name(device.expanded_name())
             pins = " ".join(self.net_to_string(net) for net in nets)
             self.emit_line(
@@ -1958,6 +2021,7 @@ def create_model_binding_delegate(
                     length_um,
                     int(round(mmin)) if mmin is not None else None,
                     int(round(mmax)) if mmax is not None else None,
+                    feed_token,
                 )
             )
             return True

@@ -82,7 +82,7 @@ def test_concurrent_same_top_runs_keep_their_own_outputs(prepared, monkeypatch):
 
     def interleaved(cmd, **kwargs):
         result = original(cmd, **kwargs)
-        if cmd[:2] == ["yosys", "-s"]:
+        if cmd[:2] == ["yosys", "-s"] and not cmd[2].endswith("_memory_evidence.ys"):
             stats, netlist = _script_output_paths(cmd[2], cwd=kwargs.get("cwd"))
             data = json.loads(Path(stats).read_text())
             data["modules"]["\\gcd"]["area"] = local.area

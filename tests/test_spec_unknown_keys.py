@@ -279,3 +279,189 @@ def test_mom_stackup_from_pdk_with_every_key_passes_key_validation(tmp_path, mut
     with pytest.raises(MomError) as excinfo:
         run_mom(gds, spec)
     assert "unknown field" not in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# `_comment` inert annotation (issue #2822)
+# ---------------------------------------------------------------------------
+
+_ANNOTATION_VALUES = [
+    pytest.param("why", id="string"),
+    pytest.param(["a", "b"], id="array"),
+    pytest.param({"colour": 1, "nested": {"x": [1]}}, id="object"),
+    pytest.param(3.5, id="number"),
+    pytest.param(True, id="bool"),
+    pytest.param(None, id="null"),
+    pytest.param([], id="empty-array"),
+]
+
+
+def _at(*path: Any) -> Callable[[Any], Mutator]:
+    """Mutator factory: annotate the object at ``path`` with ``_comment``."""
+    return _set(*path, "_comment")
+
+
+# (id, path to the annotated object); [] is the top level.
+ANNOTATION_SITES = {
+    "erc": [
+        ("top-level", ()),
+        ("stackup", ("stackup", 1)),
+        ("vias", ("vias", 0)),
+        ("nets", ("nets", 0)),
+        ("ties", ("ties", 0)),
+        ("ties_disclosure", ("ties_disclosure",)),
+        ("devices", ("devices", 0)),
+    ],
+    "power": [
+        ("top-level", ()),
+        ("power_nets", ("power_nets", 1)),
+        ("stackup", ("stackup", 1)),
+        ("vias", ("vias", 0)),
+        ("devices", ("devices", 0)),
+        ("pads", ("pads", 0)),
+        ("current_model", ("current_model",)),
+        ("instances", ("current_model", "instances", 0)),
+        ("activity", ("current_model", "instances", 1, "activity")),
+    ],
+    "mom": [
+        ("top-level", ()),
+        ("stackup", ("stackup", 1)),
+        ("ports", ("ports", 1)),
+    ],
+}
+
+ANNOTATION_PARAMS = [
+    pytest.param(verb, path, id=f"{verb}-{site}")
+    for verb, sites in ANNOTATION_SITES.items()
+    for site, path in sites
+]
+
+
+def _annotated(tmp_path, verb: str, path: tuple, value: Any, pre=None):
+    build, *_ = VERBS[verb]
+    spec = copy.deepcopy(build(tmp_path))
+    if pre is not None:
+        pre(spec)
+    node: Any = spec
+    for part in path:
+        node = node[part]
+    node["_comment"] = value
+    spec_path = tmp_path / f"{verb}-annotated.json"
+    spec_path.write_text(json.dumps(spec))
+    return str(tmp_path / "does-not-exist.gds"), str(spec_path)
+
+
+def _passes_key_validation(verb: str, gds: str, spec: str) -> None:
+    """The run gets past spec key validation and fails only on the missing
+    layout (or a later, non-key reason)."""
+    _b, error_cls, run, _c = VERBS[verb]
+    with pytest.raises(error_cls) as excinfo:
+        run(gds, spec)
+    assert "unknown field" not in str(excinfo.value)
+
+
+@pytest.mark.parametrize(("verb", "path"), ANNOTATION_PARAMS)
+@pytest.mark.parametrize("value", _ANNOTATION_VALUES)
+def test_comment_annotation_accepted_everywhere(tmp_path, verb, path, value):
+    gds, spec = _annotated(tmp_path, verb, path, value)
+    _passes_key_validation(verb, gds, spec)
+
+
+@pytest.mark.parametrize("derived", [False, True], ids=["explicit", "pdk-derived"])
+def test_mom_stackup_from_pdk_comment_accepted(tmp_path, derived):
+    request = {"pdk": "sky130A", "layers": ["met1"]}
+    pre = _derived(request) if derived else _set("stackup_from_pdk")(request)
+    gds, spec = _annotated(tmp_path, "mom", ("stackup_from_pdk",), ["note"], pre=pre)
+    _passes_key_validation("mom", gds, spec)
+
+
+@pytest.mark.parametrize(("verb", "mutate", "path"), ALL_CASES)
+def test_comment_beside_operational_typo_still_rejected(tmp_path, verb, mutate, path):
+    def both(spec: dict[str, Any]) -> None:
+        mutate(spec)
+        spec["_comment"] = ["fine"]
+
+    _b, error_cls, run, _c = VERBS[verb]
+    gds, spec = _write(tmp_path, verb, both)
+    with pytest.raises(error_cls) as excinfo:
+        run(gds, spec)
+    message = str(excinfo.value)
+    assert f"'{path}'" in message
+    assert "'_comment'" not in message.split("--")[0]
+
+
+@pytest.mark.parametrize("verb", ["erc", "power", "mom"])
+@pytest.mark.parametrize("key", ["_commment", "_other", "$comment", "comment", "_"])
+def test_other_underscore_spellings_still_rejected(tmp_path, verb, key):
+    _b, error_cls, run, _c = VERBS[verb]
+    gds, spec = _write(tmp_path, verb, _set(key)("x"))
+    with pytest.raises(error_cls) as excinfo:
+        run(gds, spec)
+    assert f"'{key}'" in str(excinfo.value)
+    assert "unknown field" in str(excinfo.value)
+
+
+def test_cli_annotation_plus_typo_exits_nonzero_no_report(tmp_path, capsys):
+    def both(spec: dict[str, Any]) -> None:
+        spec["_comment"] = "ok"
+        spec["ties"][0]["_comment"] = "ok"
+        spec["ties"][0]["well_boxess"] = []
+
+    gds, spec = _write(tmp_path, "erc", both)
+    code = main(["erc", gds, spec, "--format", "json"])
+    captured = capsys.readouterr()
+    assert code != 0
+    assert captured.out.strip() == ""
+    assert "ties[0].well_boxess" in captured.err
+
+
+def test_annotation_only_object_does_not_satisfy_required_fields(tmp_path):
+    gds, spec = _write(
+        tmp_path, "erc", _set("ties", 0)({"_comment": "no operational fields"})
+    )
+    with pytest.raises(ErcError) as excinfo:
+        run_erc(gds, spec)
+    assert "unknown field" not in str(excinfo.value)
+    assert "does-not-exist" not in str(excinfo.value)
+
+
+def _strip_paths(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            k: _strip_paths(v)
+            for k, v in value.items()
+            if k not in {"spec", "spec_path", "layout", "gds", "provenance", "inputs"}
+        }
+    if isinstance(value, list):
+        return [_strip_paths(v) for v in value]
+    return value
+
+
+@pytest.mark.parametrize("verb", ["erc", "power"])
+def test_annotation_preserves_semantic_results(tmp_path, verb):
+    fixture, basic, run = {
+        "erc": (_erc_fixture, _erc_basic_spec, run_erc),
+        "power": (_power_fixture, _power_basic_spec, run_power),
+    }[verb]
+    gds = tmp_path / f"{verb}.gds"
+    fixture(gds)
+    plain = tmp_path / "plain.json"
+    basic(plain)
+    annotated = tmp_path / "annotated.json"
+    spec = json.loads(plain.read_text())
+    annotated.write_text(json.dumps(_top_and_entries(spec)))
+    a = _strip_paths(run(str(gds), str(plain)))
+    b = _strip_paths(run(str(gds), str(annotated)))
+    assert a == b
+
+
+def _top_and_entries(spec: dict[str, Any]) -> dict[str, Any]:
+    """Annotate the top level and every dict that sits in a list (per-entry
+    objects); user-defined maps are left untouched."""
+    spec["_comment"] = ["top"]
+    for value in spec.values():
+        if isinstance(value, list):
+            for entry in value:
+                if isinstance(entry, dict):
+                    entry["_comment"] = "entry"
+    return spec

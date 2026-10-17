@@ -239,6 +239,9 @@ def _load_spec_json(spec_path: str, error_cls: type[Exception]) -> dict[str, Any
     return spec
 
 
+ANNOTATION_KEY = "_comment"
+
+
 def _reject_unknown_keys(
     obj: dict[str, Any],
     allowed: Iterable[str],
@@ -261,16 +264,26 @@ def _reject_unknown_keys(
     message names the complete unknown path (``ties[0].well_boxess``) plus the
     spec filename. Only the *keys* of ``obj`` are checked -- a user-defined
     map's own names are the caller's to treat as data, not pass here.
+
+    Exactly one key is exempt everywhere: ``_comment`` (issue #2822), an inert
+    human annotation that may hold any JSON value. Its contents are opaque
+    -- never validated or interpreted -- and the source file is never
+    rewritten, so provenance hashes still bind the actual input bytes. It is
+    deliberately not a prefix rule: ``_commment``, ``_other`` and
+    ``$comment`` are still rejected.
     """
     allowed_set = set(allowed)
-    unknown = sorted(str(key) for key in obj if key not in allowed_set)
+    unknown = sorted(
+        str(key) for key in obj if key not in allowed_set and key != ANNOTATION_KEY
+    )
     if not unknown:
         return
     paths = ", ".join(repr(f"{field}.{key}" if field else key) for key in unknown)
     noun = "field" if len(unknown) == 1 else "fields"
     raise error_cls(
         f"spec '{spec_path}': unknown {noun} {paths} -- this klt does not "
-        f"recognise it (allowed here: {', '.join(sorted(allowed_set))}); a "
+        f"recognise it (allowed here: {', '.join(sorted(allowed_set))}, plus the "
+        f"'{ANNOTATION_KEY}' annotation); a "
         "misspelt key, a key from a newer klt release, or a key that belongs "
         "to a different section"
     )
@@ -443,6 +456,11 @@ def _fold_spice_continuations(lines: list[str]) -> list[str]:
         else:
             folded.append(line)
     return folded
+
+
+def fold_spice_continuations(lines: list[str]) -> list[str]:
+    """Public alias of :func:`_fold_spice_continuations` for cross-group callers."""
+    return _fold_spice_continuations(lines)
 
 
 def validate_request_shape(

@@ -102,13 +102,13 @@ def test_sky130_mos_provenance_cites_sky130_lvs():
         source_repo="efabless/sky130_klayout_pdk",
         source_path="libs.tech/klayout/lvs/sky130.lvs",
         rule_id="sky130_fd_pr__nfet_01v8",
-        commit="c6d73a35f524070e85faff4a6a9eef49553ebc2b",
+        commit="f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7",
     )
     assert EXTRACTION_DECK.pfet_provenance == RuleProvenance(
         source_repo="efabless/sky130_klayout_pdk",
         source_path="libs.tech/klayout/lvs/sky130.lvs",
         rule_id="sky130_fd_pr__pfet_01v8",
-        commit="c6d73a35f524070e85faff4a6a9eef49553ebc2b",
+        commit="f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7",
     )
 
 
@@ -180,18 +180,21 @@ def test_gf180mcu_mos_provenance_cites_lvs_deck():
     device-class names the module docstring's own `UNMODELED_VOLTAGE_
     MARKERS` note already states MOS recognition always binds
     (`gf180mcu_fd_pr__nfet_03v3`/`...pfet_03v3`) -- issue #904, the
-    gf180mcu counterpart of #868's sky130 backfill."""
+    gf180mcu counterpart of #868's sky130 backfill.
+
+    The gf180mcu LVS pin is open_pdks ``f6eeac7`` (re-verified in #3540 after
+    the LVS rule decks moved in the #3429 re-pin)."""
     assert GF180MCU_DECK.nfet_provenance == RuleProvenance(
         source_repo="google/globalfoundries-pdk-libs-gf180mcu_fd_pv",
-        source_path="libs.tech/klayout/lvs/rule_decks/mos_extraction.lvs",
+        source_path="libs.tech/klayout/tech/lvs/rule_decks/mos_extraction.lvs",
         rule_id="gf180mcu_fd_pr__nfet_03v3",
-        commit="c6d73a35f524070e85faff4a6a9eef49553ebc2b",
+        commit="f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7",
     )
     assert GF180MCU_DECK.pfet_provenance == RuleProvenance(
         source_repo="google/globalfoundries-pdk-libs-gf180mcu_fd_pv",
-        source_path="libs.tech/klayout/lvs/rule_decks/mos_extraction.lvs",
+        source_path="libs.tech/klayout/tech/lvs/rule_decks/mos_extraction.lvs",
         rule_id="gf180mcu_fd_pr__pfet_03v3",
-        commit="c6d73a35f524070e85faff4a6a9eef49553ebc2b",
+        commit="f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7",
     )
 
 
@@ -219,7 +222,7 @@ def test_gf180mcu_resistor_provenance_cites_lvs_deck():
         )
         assert (
             resistor.provenance.source_path
-            == "libs.tech/klayout/lvs/rule_decks/res_extraction.lvs"
+            == "libs.tech/klayout/tech/lvs/rule_decks/res_extraction.lvs"
         )
 
     assert by_name["ppolyf_u"].provenance.rule_id == "gf180mcu_fd_pr__ppolyf_u"
@@ -237,14 +240,14 @@ def test_gf180mcu_capacitor_provenance_cites_lvs_deck():
     #904)."""
     (capacitor,) = GF180MCU_DECK.capacitors
     assert capacitor.provenance is not None
-    assert capacitor.provenance.rule_id == "cap_mim_2f0_m4m5_noshield"
+    assert capacitor.provenance.rule_id == "cap_mim_2f0fF"
     assert (
         capacitor.provenance.source_repo
         == "google/globalfoundries-pdk-libs-gf180mcu_fd_pv"
     )
     assert (
         capacitor.provenance.source_path
-        == "libs.tech/klayout/lvs/rule_decks/mimcap_extraction.lvs"
+        == "libs.tech/klayout/tech/lvs/rule_decks/mimcap_extraction.lvs"
     )
 
 
@@ -278,7 +281,7 @@ def test_gf180mcu_diode_provenance_cites_lvs_deck():
         )
         assert (
             diode.provenance.source_path
-            == "libs.tech/klayout/lvs/rule_decks/diode_extraction.lvs"
+            == "libs.tech/klayout/tech/lvs/rule_decks/diode_extraction.lvs"
         )
 
 
@@ -506,9 +509,9 @@ def test_golden_pair_sky130_res_high_po_r_ohm_matches_provenance_coefficient(
 ):
     """A drawn 6-square poly bar additionally marked with `psdm`/`rpm`
     extracts as `res_high_po` with `R = squares * sheet_rho_ohm_sq +
-    fixed_offset_ohm` -- the fixed head/end-effect correction issue #518
-    measured against the real PDK model -- computed directly from the
-    deck's own provenance-cited `res_high_po` entry (issue #867)."""
+    end_term_ohm_um / W + fixed_offset_ohm` -- the fixed head/end-effect
+    correction issue #518 measured against the real PDK model -- computed
+    directly from the deck's own provenance-cited `res_high_po` entry (issue #867)."""
     resistor = next(r for r in EXTRACTION_DECK.resistors if r.name == "res_high_po")
     assert resistor.provenance.rule_id == "sky130_fd_pr__res_high_po_0p35"
 
@@ -520,7 +523,9 @@ def test_golden_pair_sky130_res_high_po_r_ohm_matches_provenance_coefficient(
     (device,) = report["devices"]
     assert device["class"] == "res_high_po"
     assert device["params"]["r_ohm"] == pytest.approx(
-        _RES_SQUARES * resistor.sheet_rho_ohm_sq + resistor.fixed_offset_ohm
+        _RES_SQUARES * resistor.sheet_rho_ohm_sq
+        + resistor.end_term_ohm_um  # W=1um, so `end_term_ohm_um / W` (#3049)
+        + resistor.fixed_offset_ohm
     )
 
 
@@ -1045,7 +1050,7 @@ def test_golden_pair_gf180mcu_capacitor_c_f_matches_provenance_coefficients(
     + perimeter * perim_cap_f_um`, computed directly from the deck's own
     provenance-cited `cap_mim_2f0_m4m5_noshield` entry (issue #904)."""
     (capacitor,) = GF180MCU_DECK.capacitors
-    assert capacitor.provenance.rule_id == "cap_mim_2f0_m4m5_noshield"
+    assert capacitor.provenance.rule_id == "cap_mim_2f0fF"
 
     layout = kdb.Layout()
     top = layout.create_cell("TOP")
@@ -1276,7 +1281,7 @@ _GOLDEN_PAIR_TESTED_RULE_IDS: dict[str, frozenset[str]] = {
             "gf180mcu_fd_pr__rm2",
             "gf180mcu_fd_pr__rm3",
             "gf180mcu_fd_pr__tm9k",
-            "cap_mim_2f0_m4m5_noshield",
+            "cap_mim_2f0fF",
             "BJT.3",
             "gf180mcu_fd_pr__diode_nd2ps_06v0",
             "gf180mcu_fd_pr__diode_pd2nw_06v0",

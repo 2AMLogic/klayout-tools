@@ -29,11 +29,22 @@ format the canary blocks' MC harnesses already produce, so `klt yield` runs
 against real canary output with nothing in between.
 
 See ``docs/cli/yield.md`` for the full input/output schema.
+
+This module also backs ``klt yield-samples`` (:func:`derive_sample_set`,
+issue #2563), which turns a nominal and a known-bad `klt sim` report into a
+sample-set document carrying a ``negative_control``. It lives here, not in a
+module of its own, so both inputs go through the same sim-report reader
+``klt yield`` uses -- the draw-screening rules are never duplicated.
 """
 
 from __future__ import annotations
 
+import csv
+import gzip
+import hashlib
+import io
 import json
+import math
 import os
 from typing import Any
 
@@ -86,9 +97,12 @@ def _load_json(path: str, what: str) -> Any:
     if os.path.isdir(path):
         raise YieldError(f"not a file: {path}")
     try:
-        with open(path) as f:
+        with open(path, "rb") as raw:
+            gzipped = raw.read(2) == b"\x1f\x8b"
+        opener = gzip.open if gzipped else open
+        with opener(path, "rt", encoding="utf-8") as f:
             return json.load(f)
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, EOFError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise YieldError(f"could not read {what} '{path}': {exc}") from exc
 
 
@@ -113,6 +127,7 @@ def _limits_from(raw: Any, name: str, where: str) -> dict[str, Any]:
                 f"{where}: measurement '{name}' limits.{key} must be a number"
             )
         limits[key] = float(value)
+    _read_qualification_keys(raw, limits, f"{where}: measurement '{name}' limits.")
     # issue #1083: optional strict-inequality flags -- `exclusive_min` /
     # `exclusive_max` make the corresponding `min`/`max` a strict bound
     # (`>`/`<` instead of `>=`/`<=`). Booleans only; the native extension is
@@ -127,6 +142,45 @@ def _limits_from(raw: Any, name: str, where: str) -> dict[str, Any]:
             )
         limits[key] = value
     return limits
+
+
+def _read_qualification_keys(
+    raw: dict[str, Any], out: dict[str, Any], prefix: str
+) -> None:
+    """Validate the issue-#2873 keys ``target_sigma`` (a number ``> 0``) and
+    ``min_converged_samples`` (a non-negative integer) found in ``raw`` and
+    copy them into ``out``. Absent/``null`` keys are skipped, so a spec that
+    declares neither is unchanged."""
+    k = raw.get("target_sigma")
+    if k is not None:
+        if isinstance(k, bool) or not isinstance(k, (int, float)):
+            raise YieldError(f"{prefix}target_sigma must be a number")
+        if not math.isfinite(k) or k <= 0:
+            raise YieldError(f"{prefix}target_sigma must be > 0 (got {k})")
+        out["target_sigma"] = float(k)
+    n = raw.get("min_converged_samples")
+    if n is not None:
+        if isinstance(n, bool) or not isinstance(n, int):
+            raise YieldError(
+                f"{prefix}min_converged_samples must be a non-negative integer"
+            )
+        if n < 0:
+            raise YieldError(
+                f"{prefix}min_converged_samples must be a non-negative integer "
+                f"(got {n})"
+            )
+        out["min_converged_samples"] = n
+
+
+def _apply_qualification_defaults(
+    limits: dict[str, Any], spec_defaults: dict[str, Any]
+) -> None:
+    """Fill run-level defaults for the issue-#2873 qualification keys into one
+    measurement's ``limits``; a per-measurement value wins, exactly like
+    ``target_yield``."""
+    for key in ("target_sigma", "min_converged_samples"):
+        if key in spec_defaults and key not in limits:
+            limits[key] = spec_defaults[key]
 
 
 def _failed_unmeasurable_from(raw: Any, name: str, where: str) -> int:
@@ -646,6 +700,7 @@ def _read_spec(path: str) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     for key in ("confidence", "target_ci_halfwidth", "min_samples", "target_yield"):
         if doc.get(key) is not None:
             defaults[key] = doc[key]
+    _read_qualification_keys(doc, defaults, f"limits '{path}': ")
 
     raw = doc.get("measurements")
     if raw is None:
@@ -720,6 +775,7 @@ def run_yield(
         limits.update(spec_limits.get(name, {}))
         if run_target_yield is not None and "target_yield" not in limits:
             limits["target_yield"] = run_target_yield
+        _apply_qualification_defaults(limits, spec_defaults)
         if limits.get("min") is None and limits.get("max") is None:
             if measurements is not None:
                 raise YieldError(
@@ -794,3 +850,433 @@ def _resolve(explicit: Any, from_spec: Any, fallback: Any) -> Any:
     if from_spec is not None:
         return from_spec
     return fallback
+
+
+# --------------------------------------------------------------------------- #
+# Sample-set derivation (`klt yield-samples`, issue #2563)
+# --------------------------------------------------------------------------- #
+
+#: ``klt yield-samples``' own payload version -- versioned per command, as
+#: ``docs/json-contract.md`` requires, independently of ``SCHEMA_VERSION``
+#: above (which mirrors the native crate's ``klt yield`` report shape).
+SAMPLE_SET_SCHEMA_VERSION = 1
+
+
+def _load_sim_report_bytes(path: str, role: str) -> tuple[dict[str, Any], str]:
+    """Read one ``klt sim`` report for derivation, as ``(report, content_hash)``.
+
+    The bytes are read **once**: the same buffer is both hashed and parsed,
+    so the recorded ``sha256:`` hash can never describe a different version
+    of the file than the one the samples were taken from (a file rewritten
+    between a hash pass and a parse pass would otherwise be misattributed).
+    The file is opened read-only; nothing here ever writes to it.
+    """
+    if not os.path.exists(path):
+        raise YieldError(f"{role} sim report not found: {path}")
+    if os.path.isdir(path):
+        raise YieldError(f"{role} sim report is not a file: {path}")
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except OSError as exc:
+        raise YieldError(f"could not read {role} sim report '{path}': {exc}") from exc
+    content_hash = "sha256:" + hashlib.sha256(raw).hexdigest()
+    try:
+        doc = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise YieldError(f"could not read {role} sim report '{path}': {exc}") from exc
+    if not isinstance(doc, dict) or not isinstance(doc.get("corners"), list):
+        raise YieldError(
+            f"{role} '{path}' is not a `klt sim --format json` report (no "
+            "'corners' array) -- `klt yield-samples` derives a sample set from "
+            "two Monte Carlo sim reports only"
+        )
+    return doc, content_hash
+
+
+def _sim_report_entries(
+    report: dict[str, Any], path: str, role: str
+) -> list[dict[str, Any]]:
+    """Run `klt yield`'s own sim-report reader over one report -- the single
+    place the draw-screening rules live -- naming the offending file on any
+    error so a two-input command's diagnostics stay actionable."""
+    try:
+        return _measurements_from_sim_report(report)
+    except YieldError as exc:
+        raise YieldError(f"{role} '{path}': {exc}") from exc
+
+
+def _draw_count(entry: dict[str, Any]) -> int:
+    """Every draw a measurement entry accounts for, across all five
+    categories (``docs/cli/yield.md``'s "the full draw is always accounted
+    for" identity)."""
+    return (
+        len(entry["samples"])
+        + entry["errored"]
+        + entry["inconclusive"]
+        + entry["failed_unmeasurable"]
+        + entry["censored"]
+    )
+
+
+def _index_by_name(entries: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """Group rollup entries by name, keeping duplicates visible so the caller
+    can reject an ambiguous match instead of silently taking the last one."""
+    by_name: dict[str, list[dict[str, Any]]] = {}
+    for entry in entries:
+        by_name.setdefault(entry["name"], []).append(entry)
+    return by_name
+
+
+def _selected_names(
+    nominal_entries: list[dict[str, Any]],
+    nominal_by_name: dict[str, list[dict[str, Any]]],
+    measurements: list[str] | None,
+    nominal_path: str,
+) -> list[str]:
+    """The nominal measurement names to derive, in output order: the
+    ``--measurement`` order when given (first occurrence wins), else the
+    nominal rollup's own order. An unknown requested name is an error."""
+    source = (
+        measurements
+        if measurements is not None
+        else [e["name"] for e in nominal_entries]
+    )
+    names = list(dict.fromkeys(source))
+    missing = [n for n in names if n not in nominal_by_name]
+    if missing:
+        raise YieldError(
+            f"no such measurement in nominal '{nominal_path}': "
+            f"{', '.join(sorted(missing))} (available: "
+            f"{', '.join(sorted(nominal_by_name)) or 'none'})"
+        )
+    return names
+
+
+def _unique_match(
+    matches: list[dict[str, Any]], name: str, path: str, role: str
+) -> dict[str, Any]:
+    if len(matches) > 1:
+        raise YieldError(
+            f"{role} '{path}' declares measurement '{name}' {len(matches)} times "
+            "in its 'measurements' rollup -- names must be unique to match a "
+            "negative control by name"
+        )
+    entry = matches[0]
+    if _draw_count(entry) == 0:
+        raise YieldError(
+            f"{role} '{path}' has no Monte Carlo draws for measurement "
+            f"'{name}' -- no sampled corner reports it"
+        )
+    return entry
+
+
+def _matched_pair(
+    name: str,
+    nominal_by_name: dict[str, list[dict[str, Any]]],
+    control_by_name: dict[str, list[dict[str, Any]]],
+    nominal_path: str,
+    control_path: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Match one nominal measurement to its companion by exact name,
+    enforcing the uniqueness/unit/no-existing-control/non-empty rules."""
+    nominal = _unique_match(nominal_by_name[name], name, nominal_path, "nominal")
+    if nominal["negative_control"] is not None:
+        raise YieldError(
+            f"nominal '{nominal_path}' measurement '{name}' already declares a "
+            "negative_control -- refusing to replace it silently; remove it "
+            "from the report's rollup entry or exclude the measurement with "
+            "--measurement"
+        )
+    if name not in control_by_name:
+        raise YieldError(
+            f"negative-control '{control_path}' has no measurement named "
+            f"'{name}' (available: "
+            f"{', '.join(sorted(control_by_name)) or 'none'}) -- measurements "
+            "are matched by exact name; restrict the derivation with "
+            "--measurement to skip one the control does not measure"
+        )
+    control = _unique_match(
+        control_by_name[name], name, control_path, "negative-control"
+    )
+    if nominal["unit"] != control["unit"]:
+        raise YieldError(
+            f"measurement '{name}' unit mismatch: nominal '{nominal_path}' "
+            f"reports {nominal['unit']!r}, negative-control '{control_path}' "
+            f"reports {control['unit']!r} -- the control is graded against the "
+            "nominal limits, so the units must agree"
+        )
+    return nominal, control
+
+
+def _derived_entry(
+    nominal: dict[str, Any], control: dict[str, Any], description: str | None
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """One sample-set entry (the nominal draw, carrying the companion's draw
+    as its ``negative_control``) plus its ``derivation`` disclosure."""
+    # The negative-control schema has no `inconclusive` field; folding it
+    # into `errored` gives a distrusted draw the same exclusion from both
+    # numerator and denominator it gets everywhere else -- never counted as
+    # a design failure. Both originals are disclosed below.
+    control_errored = control["errored"] + control["inconclusive"]
+    entry = {
+        "name": nominal["name"],
+        "unit": nominal["unit"],
+        "samples": nominal["samples"],
+        "errored": nominal["errored"],
+        "inconclusive": nominal["inconclusive"],
+        "failed_unmeasurable": nominal["failed_unmeasurable"],
+        "censored": nominal["censored"],
+        "limits": nominal["limits"],
+        "source_corners": nominal["source_corners"],
+        "negative_control": {
+            "samples": control["samples"],
+            "errored": control_errored,
+            "failed_unmeasurable": control["failed_unmeasurable"],
+            "censored": control["censored"],
+            "description": description,
+        },
+        "analytic_cross_check": nominal["analytic_cross_check"],
+        "sampling": nominal["sampling"],
+    }
+    disclosure = {
+        "name": nominal["name"],
+        "negative_control": {
+            "source_corners": control["source_corners"],
+            "errored": control["errored"],
+            "inconclusive": control["inconclusive"],
+            "errored_reported": control_errored,
+        },
+    }
+    return entry, disclosure
+
+
+def derive_sample_set(
+    nominal_path: str,
+    control_path: str,
+    *,
+    description: str | None = None,
+    measurements: list[str] | None = None,
+) -> dict[str, Any]:
+    """Derive a sample-set document from two `klt sim` Monte Carlo reports:
+    the nominal campaign, and a seeded known-bad variant whose draw becomes
+    each selected measurement's ``negative_control`` (issue #2563).
+
+    The returned dict is ``klt yield-samples``' flat JSON payload: a
+    sample-set document (``docs/cli/yield.md``'s "Sample-set document") that
+    ``klt yield`` reads unchanged, plus ``schema_version`` and an additive
+    ``derivation`` audit block the sample-set reader ignores.
+
+    Rules (see ``docs/cli/yield.md``'s "Deriving a sample set from two `klt
+    sim` reports"):
+
+    - Both inputs go through :func:`_measurements_from_sim_report`, the same
+      reader ``klt yield`` applies to a sim report directly, so which corners
+      count as draws, how a ``null`` maps to ``errored`` and how
+      ``inconclusive`` is screened are decided in exactly one place.
+    - Measurements match by exact name, never by position. Every selected
+      nominal measurement needs exactly one companion measurement with the
+      same ``unit`` (both absent counts as equal); extra companion
+      measurements are ignored.
+    - A selected nominal measurement that already declares a
+      ``negative_control`` is rejected rather than silently replaced.
+    - The negative control has no ``inconclusive`` field, so the companion's
+      screened ``inconclusive`` count is **added to** its ``errored`` (the
+      same denominator treatment), and both original counts are disclosed in
+      ``derivation``. Companion limits are never used: a negative control is
+      always graded against the nominal measurement's limits.
+
+    Raises :class:`YieldError` for anything that makes the derivation
+    unrunnable. Never writes to either input.
+    """
+    nominal_report, nominal_hash = _load_sim_report_bytes(nominal_path, "nominal")
+    control_report, control_hash = _load_sim_report_bytes(
+        control_path, "negative-control"
+    )
+    nominal_entries = _sim_report_entries(nominal_report, nominal_path, "nominal")
+    control_entries = _sim_report_entries(
+        control_report, control_path, "negative-control"
+    )
+
+    nominal_by_name = _index_by_name(nominal_entries)
+    control_by_name = _index_by_name(control_entries)
+    selected_names = _selected_names(
+        nominal_entries, nominal_by_name, measurements, nominal_path
+    )
+
+    out_measurements: list[dict[str, Any]] = []
+    disclosures: list[dict[str, Any]] = []
+    for name in selected_names:
+        nominal, control = _matched_pair(
+            name, nominal_by_name, control_by_name, nominal_path, control_path
+        )
+        entry, disclosure = _derived_entry(nominal, control, description)
+        out_measurements.append(entry)
+        disclosures.append(disclosure)
+
+    return {
+        "schema_version": SAMPLE_SET_SCHEMA_VERSION,
+        "measurements": out_measurements,
+        "derivation": {
+            "nominal": {"path": nominal_path, "content_hash": nominal_hash},
+            "negative_control": {
+                "path": control_path,
+                "content_hash": control_hash,
+                "description": description,
+            },
+            "measurements": disclosures,
+        },
+    }
+
+
+def _read_csv_bytes(csv_path: str) -> tuple[str, str]:
+    """Read the CSV once, as ``(text, content_hash)``; the same bytes are
+    hashed and parsed. A UTF-8 BOM is dropped."""
+    if not os.path.exists(csv_path):
+        raise YieldError(f"CSV not found: {csv_path}")
+    if os.path.isdir(csv_path):
+        raise YieldError(f"CSV is not a file: {csv_path}")
+    try:
+        with open(csv_path, "rb") as f:
+            raw = f.read()
+        text = raw.decode("utf-8-sig")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise YieldError(f"could not read CSV '{csv_path}': {exc}") from exc
+    return text, "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def _csv_reader(text: str, csv_path: str, wanted: list[str]) -> csv.DictReader:
+    reader = csv.DictReader(io.StringIO(text, newline=""))
+    header = reader.fieldnames
+    if not header:
+        raise YieldError(f"CSV '{csv_path}' is empty (no header row)")
+    missing = [c for c in wanted if c not in header]
+    if missing:
+        raise YieldError(
+            f"CSV '{csv_path}' has no column(s) {', '.join(missing)}; "
+            f"header is: {', '.join(header)}"
+        )
+    return reader
+
+
+def _csv_row_group(
+    row: dict[str, Any], where: str, group_by: str, draw_col: str | None, seen: set
+) -> str:
+    """The row's group key; rejects a missing group or a repeated draw."""
+    if None in row:
+        raise YieldError(f"{where} has more cells than the header")
+    group = (row[group_by] or "").strip()
+    if not group:
+        raise YieldError(f"{where}: empty '{group_by}'")
+    if draw_col is not None:
+        key = (group, (row[draw_col] or "").strip())
+        if key in seen:
+            raise YieldError(f"{where}: duplicate draw '{key[1]}' in group '{group}'")
+        seen.add(key)
+    return group
+
+
+def _csv_row_sample(
+    row: dict[str, Any], value: str, status_col: str | None, pass_value: str | None
+) -> float | None:
+    """The row's finite sample, or ``None`` when it counts ``errored``."""
+    if status_col is not None and (row[status_col] or "").strip() != pass_value:
+        return None
+    try:
+        number = float((row[value] or "").strip())
+    except ValueError:
+        return None
+    return number if math.isfinite(number) else None
+
+
+def derive_sample_set_from_csv(
+    csv_path: str,
+    *,
+    group_by: str,
+    value: str,
+    status_col: str | None = None,
+    pass_value: str | None = None,
+    draw_col: str | None = None,
+    unit: str | None = None,
+    limits: dict[str, float] | None = None,
+) -> dict[str, Any]:
+    """Derive a sample-set document from a long-format per-draw Monte Carlo
+    CSV (issue #2931): one row per draw, one measurement per distinct
+    ``group_by`` value.
+
+    The result has the same shape as :func:`derive_sample_set`'s -- a
+    sample-set document ``klt yield`` reads unchanged, plus ``schema_version``
+    and an additive ``derivation`` block -- so there is no parallel path into
+    the estimator.
+
+    Rules (see ``docs/cli/yield.md``'s "Deriving a sample set from a
+    per-draw CSV"):
+
+    - The file is read once; the same bytes are hashed and parsed. A UTF-8
+      BOM and CRLF line endings are accepted.
+    - With ``status_col``, a row whose status differs from ``pass_value``
+      is counted ``errored`` and its ``value`` cell is not read.
+    - A passing row whose value cell is empty, non-numeric or non-finite is
+      also counted ``errored`` -- never dropped, never a sample.
+    - Samples keep file order; the grading counts do not depend on it. With
+      ``draw_col``, a repeated (group, draw) pair is rejected.
+    - A group with no usable sample is an error, not an empty measurement.
+    """
+    if (status_col is None) != (pass_value is None):
+        raise YieldError("--status-col and --pass-value must be given together")
+    text, content_hash = _read_csv_bytes(csv_path)
+    wanted = [group_by, value] + [c for c in (status_col, draw_col) if c]
+    reader = _csv_reader(text, csv_path, wanted)
+
+    groups: dict[str, dict[str, Any]] = {}
+    seen: set[tuple[str, str]] = set()
+    rows = 0
+    try:
+        for row in reader:
+            rows += 1
+            where = f"CSV '{csv_path}' row {rows + 1}"
+            group = _csv_row_group(row, where, group_by, draw_col, seen)
+            slot = groups.setdefault(group, {"samples": [], "errored": 0, "rows": 0})
+            slot["rows"] += 1
+            sample = _csv_row_sample(row, value, status_col, pass_value)
+            if sample is None:
+                slot["errored"] += 1
+            else:
+                slot["samples"].append(sample)
+    except csv.Error as exc:
+        raise YieldError(f"could not parse CSV '{csv_path}': {exc}") from exc
+    if not groups:
+        raise YieldError(f"CSV '{csv_path}' has a header but no data rows")
+
+    out_measurements: list[dict[str, Any]] = []
+    for name, slot in groups.items():
+        if not slot["samples"]:
+            raise YieldError(
+                f"group '{name}' in '{csv_path}' has no usable draws "
+                f"({slot['errored']} errored of {slot['rows']} rows)"
+            )
+        out_measurements.append(
+            {
+                "name": name,
+                "unit": unit,
+                "samples": slot["samples"],
+                "errored": slot["errored"],
+                "limits": dict(limits) if limits else None,
+            }
+        )
+    return {
+        "schema_version": SAMPLE_SET_SCHEMA_VERSION,
+        "measurements": out_measurements,
+        "derivation": {
+            "csv": {
+                "path": csv_path,
+                "content_hash": content_hash,
+                "rows": rows,
+                "group_by": group_by,
+                "value": value,
+                "status_col": status_col,
+                "pass_value": pass_value,
+                "draw_col": draw_col,
+            },
+        },
+    }

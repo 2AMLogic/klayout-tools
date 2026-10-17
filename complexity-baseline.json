@@ -4,6 +4,16 @@
   "generated_by": "scripts/check_complexity_baseline.py --update-baseline (ruff 0.16.2)",
   "violations": [
     {
+      "file": "scripts/check_import_boundaries.py",
+      "function": "evaluate",
+      "complexity": 19
+    },
+    {
+      "file": "scripts/check_import_boundaries.py",
+      "function": "load_policy",
+      "complexity": 31
+    },
+    {
       "file": "scripts/derive-module-ownership.py",
       "function": "find_related_modules",
       "complexity": 21
@@ -71,7 +81,7 @@
     {
       "file": "src/klayout_tools/cli/extract_cmd.py",
       "function": "_print_text",
-      "complexity": 24
+      "complexity": 25
     },
     {
       "file": "src/klayout_tools/cli/functional_verification_cmd.py",
@@ -195,11 +205,6 @@
     },
     {
       "file": "src/klayout_tools/extract.py",
-      "function": "_build_mom_capacitor_extractor",
-      "complexity": 11
-    },
-    {
-      "file": "src/klayout_tools/extract.py",
       "function": "_detect_diode_substrate_label_divergence",
       "complexity": 19
     },
@@ -210,13 +215,8 @@
     },
     {
       "file": "src/klayout_tools/extract.py",
-      "function": "_resolve_resistors",
-      "complexity": 15
-    },
-    {
-      "file": "src/klayout_tools/extract.py",
       "function": "run_extract",
-      "complexity": 63
+      "complexity": 67
     },
     {
       "file": "src/klayout_tools/extract.py",
@@ -246,7 +246,17 @@
     {
       "file": "src/klayout_tools/extract_parasitics.py",
       "function": "_inject_parasitics",
-      "complexity": 17
+      "complexity": 20
+    },
+    {
+      "file": "src/klayout_tools/extract_passive_regions.py",
+      "function": "_build_mom_capacitor_extractor",
+      "complexity": 11
+    },
+    {
+      "file": "src/klayout_tools/extract_passive_regions.py",
+      "function": "_resolve_resistors",
+      "complexity": 15
     },
     {
       "file": "src/klayout_tools/extract_report.py",
@@ -635,6 +645,11 @@
     },
     {
       "file": "src/klayout_tools/place_and_route.py",
+      "function": "_run_single_corner",
+      "complexity": 19
+    },
+    {
+      "file": "src/klayout_tools/place_and_route.py",
       "function": "_stage_script_lines",
       "complexity": 15
     },
@@ -652,11 +667,6 @@
       "file": "src/klayout_tools/place_and_route.py",
       "function": "_validate_power",
       "complexity": 28
-    },
-    {
-      "file": "src/klayout_tools/place_and_route.py",
-      "function": "run_place_and_route",
-      "complexity": 27
     },
     {
       "file": "src/klayout_tools/place_and_route_gds_merge.py",
@@ -755,13 +765,13 @@
     },
     {
       "file": "src/klayout_tools/sim.py",
-      "function": "parse_ascii_rawfile",
-      "complexity": 15
+      "function": "_run_sim_corners",
+      "complexity": 55
     },
     {
       "file": "src/klayout_tools/sim.py",
-      "function": "run_sim",
-      "complexity": 54
+      "function": "parse_ascii_rawfile",
+      "complexity": 15
     },
     {
       "file": "src/klayout_tools/sim_plot.py",

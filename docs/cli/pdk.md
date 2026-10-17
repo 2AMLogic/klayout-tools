@@ -103,11 +103,37 @@ branch was needed for `find`/`list`/`env` themselves. Verified against a
 real fleet-host install (commit `607e18d`, 2026-08-25); no dedicated fetch
 script exists for it yet the way `fetch-ihp-sg13g2.sh` does for SG13G2.
 
+**3. ASAP7 process tree (issue #2759)** — one narrowly scoped, structurally
+probed shape, the lambdapdk ASAP7 layout:
+
+```
+<root>/asap7/base/setup/klayout/    # all three directories must exist
+<root>/asap7/base/apr/
+<root>/asap7/libs/
+```
+
+The same tree passed directly as `--pdk-root`/`$PDK_ROOT` also resolves (flat
+form, variant named after the basename). The directory name alone never
+qualifies a tree — an unrelated directory called `asap7` is rejected — and a
+tree with `libs.tech/` is treated as open_pdks-shaped. Only existing assets
+are mapped: `assets.klayout` -> `base/setup/klayout`, `assets.libs_ref` ->
+`libs`; every other asset key is `null`. **Discovery does not imply DRC, LVS
+or PCell support.** Other lambdapdk processes (including `ihp130`, which is
+not SG13G2) are not discovered.
+
+**ASAP7 note (#2758)**: the ASAP7 KLayout technology validated by
+`tests/test_pdk.py -k asap7` is reached through explicit
+`pdks/lambdapdk/lambdapdk/asap7/...` paths rather than through resolver
+discovery; see
+[`pdks/README.md`](../../pdks/README.md#asap7-klayout-technology-issue-2758)
+for the pinned version, license and headless command. The resolver (#2759)
+discovers the ASAP7 process tree but maps only the `klayout` and `libs_ref`
+asset directories, so this validation is separate from that discovery.
+
 **Out of scope**: the repo-local lambdapdk store fetched by
-[`scripts/fetch-pdks.sh`](../../pdks/README.md) into `pdks/lambdapdk/` — a
-third, distinct tree shape (`lambdapdk/<process>/{libs,base}`, no
-`libs.tech`/`libs.ref` marker at all) this resolver deliberately does not
-probe for — and any siliconcompiler `PathSchema` integration (see
+[`scripts/fetch-pdks.sh`](../../pdks/README.md) into `pdks/lambdapdk/` as a
+whole — its `lambdapdk/<process>` nesting is not probed recursively (point
+`--pdk-root` at a single supported ASAP7 process tree instead) — and any siliconcompiler `PathSchema` integration (see
 [`docs/design/siliconcompiler-core-survey.md`](../design/siliconcompiler-core-survey.md)
 section 3 for why: a different problem, solved more simply by this module
 already).
@@ -123,13 +149,14 @@ this list are kept identical** (`src/klayout_tools/pdk.py`).
 | 1 | `--pdk-root <dir>` flag (library: `root=`) | `--pdk-root flag` |
 | 2 | `$PDK_ROOT` environment variable | `PDK_ROOT environment variable` |
 | 3 | ciel/volare stores: `~/.ciel`, then `~/.volare` | `search root: ~/.ciel` (or `~/.volare`) |
-| 4 | `/usr/local/share/pdk`, `/usr/share/pdk`, `~/share/pdk` | `search root: <path>` |
+| 4 | shared PDK root `~/pdks` (the public pdks repo bootstrap, issue #2759) | `search root: ~/pdks` |
+| 5 | `/usr/local/share/pdk`, `/usr/share/pdk`, `~/share/pdk` | `search root: <path>` |
 
 - `--pdk-root` disables the search: it is the *only* candidate, and a root that
   holds no install is an error (it is not silently second-guessed).
 - `$PDK_ROOT` is a *prepended* candidate, not a short-circuit: if it is unset,
   missing, or holds no supported-layout install, resolution **falls through** to
-  steps 3–4. The failure message (when nothing resolves at all) names every
+  steps 3–5. The failure message (when nothing resolves at all) names every
   candidate that was tried, including `$PDK_ROOT`, so a stale `$PDK_ROOT` is
   visible rather than mysterious.
 
@@ -204,7 +231,14 @@ SG13G2's own LVS deck extracts them through a custom Ruby
 terminal pins distinguished by drawn bounding-box/area filters — that this
 engine's `BipolarDevice`/stock-`DeviceExtractorBJT3Transistor` model cannot
 faithfully express. See `src/klayout_tools/decks/sg13g2.py`'s "SiGe HBTs —
-investigated, declined" docstring section for the full finding.
+investigated, declined" docstring section for the full finding. The marker
+gap alone is closed: `BipolarDevice.marker` accepts a derived `LayerExpr`
+(AND/NOT of drawn layers, nestable) since issue #2860.
+Operator ruling 2026-10-08 (#2864): the PDK's own KLayout LVS runset (#2849)
+is the accepted route for SG13G2 bipolars — runset-backed LVS recognises
+them, the curated deck does not declare bipolars yet. Of the native gaps,
+#2860, #2862 and #2863 have landed and only #2861 remains open, as a general
+improvement; evidence acceptance conditions live in #2870.
 
 ² The remaining metal resistors (`res_metal3` and up) are a different kind
 of gap from the rest of this row: their own recognition (populating
@@ -235,7 +269,9 @@ it extracts upstream through the same stock `DeviceExtractorBJT3Transistor`
 extractor `BipolarDevice` wires up, but its emitter terminal is a fixed-size
 box synthesized from a bounding-box-size-filtered region and its collector
 terminal a dynamic per-instance `.covering(...)` derivation — neither
-expressible by `BipolarDevice`'s plain layer-intersection fields. See
+expressible by `BipolarDevice`'s plain layer-intersection fields. (A size
+filter now exists as `BipolarDevice.emitter_size`, #2861, but the
+collector-derivation and synthesized-emitter gaps remain.) See
 `src/klayout_tools/decks/sg13g2.py`'s "Schottky diode (schottky_nbl1) —
 investigated, declined" docstring section for the full finding.
 
@@ -355,6 +391,57 @@ Resolves one install/variant.
 | `broken_symlinks` | array | Dangling symlinks found under any resolved `assets` directory (issue #1406). `[]` when the install is clean. |
 | `has_pcell_library` | boolean | The variant ships at least one Python package under `libs.tech/klayout/python/` (issue #1535) — the PDK's own KLayout PCell library. See below. |
 | `ambiguous_roots` | array | Later candidate roots in the search order that **also** hold a variant of the resolved name (issue #2564) — `[{"root", "resolved_via"}]`, in search order. `[]` for the common single-install case, and always `[]` when `--pdk-root` pinned the root (the search is disabled). See below. |
+| `compatibility` | object | Additive (issue #2759): whether the install's version identity matches the one a klt technology package declares. See "Package compatibility" below. |
+
+### Package compatibility (`compatibility`, issue #2759)
+
+```json
+"compatibility": {
+  "status": "mismatch",
+  "package": "lambdapdk-asap7",
+  "variant": "asap7",
+  "expected": {"namespace": "lambdapdk-release", "value": "0.2.17"},
+  "installed": {"namespace": "lambdapdk-release", "value": "0.2.16"},
+  "source": "scripts/fetch-pdks.sh LAMBDAPDK_VERSION",
+  "installed_source": ".fetched-version"
+}
+```
+
+`status` is one of `match`, `mismatch`, `unknown` (the installed identity is
+missing/empty/unreadable, or lives in a different namespace than the pin) and
+`not_declared` (no verified pin exists for this variant — `expected` and
+`installed` are `null`). Only identities in the **same namespace** are
+compared; an open_pdks `SOURCES` stamp is never compared with a lambdapdk
+release tag. Paths are not embedded; `source`/`installed_source` are labels.
+
+Declared pins today:
+
+- `lambdapdk-asap7`, expecting lambdapdk release `0.2.17` (the tag
+  `scripts/fetch-pdks.sh` fetches), read from a `.fetched-version` file in the
+  variant directory or up to two parent directories. **That is a
+  wrapper-release identity, not an upstream ASAP7 revision.**
+- `open_pdks-sky130` (`sky130A`) and `open_pdks-gf180mcu` (`gf180mcuD`)
+  (issue #3427, epic #3420), expecting the `SOURCES` stamp
+  `open_pdks f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7` — the single line a
+  `ciel`-installed tree carries. A `volare` tree at the older `c6d73a3` build
+  reports `mismatch`; a variant with no `SOURCES` file reports `unknown`. A
+  short commit hash (7+ hex) in the stamp matches by prefix, and the
+  `open_pdks <hash>` segment is found inside a multi-line stamp.
+
+The pin's single source of truth is `pdks.families.*.open_pdks_commit` in
+`docker/eda-sim/pdk-versions.json`. That manifest is not shipped in the wheel,
+so `klayout_tools.pdk_compat.OPEN_PDKS_PIN` mirrors it and
+`tests/test_pdk_compat_open_pdks.py` fails if the two diverge. A `mismatch` is
+also recorded in the `provenance.pdk` block (`compatibility`, see
+`docs/json-contract.md`). IHP has no verified pin and reports `not_declared`;
+no pins are invented.
+
+**Warning policy: warning-only.** `mismatch` and `unknown` appear in the JSON
+and as a `compatibility:` line plus a stderr warning in `find`/`check` text
+output; they never change discovery success or exit codes, and `pdk env`
+output is unchanged. The comparison lives in
+`klayout_tools.pdk_compat` (`check_compatibility`, `compare_identities`) for
+later consumers that want to enforce.
 
 ### Several installs of one variant (`ambiguous_roots`, issue #2564)
 
@@ -1275,7 +1362,7 @@ The stack is emitted top-down in text (the way a cross-section is drawn) and
 `klt pdk em-limits` (above) is a pure live parse and deliberately owns no
 table — the install's own files are the only place its data is stated. That
 is **not** true here. Verified against a real volare-fetched `sky130A`
-(`open_pdks c6d73a3`): the tech LEFs carry `THICKNESS`, `RESISTANCE RPERSQ`
+(`open_pdks f6eeac7`): the tech LEFs carry `THICKNESS`, `RESISTANCE RPERSQ`
 and (on cut layers) a per-cut `RESISTANCE`, but carry **no elevation and no
 dielectric constant at all**. The `CAPACITANCE CPERSQDIST`/`EDGECAPACITANCE`
 values they do carry already bake geometry and permittivity together into

@@ -5,13 +5,16 @@ Output goes through the shared envelope helpers in :mod:`.output`, as with
 every other ``klt`` subcommand -- see ``docs/json-contract.md``.
 
 Exit codes (see ``docs/cli/yield.md`` for the full table):
-    0 - analysis ran; every measurement with a declared target_yield met it
-        (or none declared one)
+    0 - analysis ran; every declared criterion (target_yield, target_sigma,
+        min_converged_samples) was met (or none was declared)
     1 - failed to run (bad/missing input, no spec limits, a sample set too
         small to carry a confidence interval, native extension not built) --
         returned by ``emit_error`` as ``output.ERROR_EXIT_CODE``
-    3 - analysis ran; at least one measurement's yield claim was not met at
-        the stated confidence
+    3 - analysis ran; at least one measurement's yield or sigma claim was not
+        met at the stated confidence (status "fail")
+    4 - analysis ran; nothing failed but the evidence is insufficient to
+        decide (status "insufficient_evidence": fewer converged samples than
+        min_converged_samples, or a target_sigma that is not evaluable)
 (2 is reserved for argparse usage errors, as with every other ``klt``
 subcommand.)
 
@@ -26,6 +29,7 @@ from .output import emit_error, emit_success
 
 EXIT_PASS = 0
 EXIT_TARGET_MISSED = 3
+EXIT_INSUFFICIENT_EVIDENCE = 4
 
 
 def run(args: argparse.Namespace) -> int:
@@ -52,11 +56,33 @@ def run(args: argparse.Namespace) -> int:
 
     if report["status"] == "fail":
         return EXIT_TARGET_MISSED
+    if report["status"] == "insufficient_evidence":
+        return EXIT_INSUFFICIENT_EVIDENCE
     return EXIT_PASS
 
 
 def _fmt(value, spec: str = ".6g") -> str:
     return "-" if value is None else format(value, spec)
+
+
+def _print_qualification(m: dict) -> None:
+    """Print the issue-#2873 ``sigma_target`` / ``converged_n`` lines for one
+    measurement (each only when present)."""
+    st = m.get("sigma_target")
+    if st is not None:
+        met = {True: "met", False: "NOT met", None: "not evaluable"}[st["met"]]
+        print(
+            f"  sigma target: k={_fmt(st['k'])} "
+            f"sigma_to_spec={_fmt(st['sigma_to_spec'], '.4f')} "
+            f"lower_bound={_fmt(st['lower_bound'], '.4f')} -> {met}"
+            + (f" ({st['reason']})" if st.get("reason") else "")
+        )
+    cn = m.get("converged_n")
+    if cn is not None:
+        print(
+            f"  converged N: {cn['n_converged']} of {cn['n_requested']} "
+            f"requested (min {cn['min_converged_samples']}) -> {cn['verdict']}"
+        )
 
 
 def _print_text(report: dict) -> None:
@@ -136,6 +162,7 @@ def _print_text(report: dict) -> None:
             f"sigma_to_spec={_fmt(cap['sigma_to_spec'], '.4f')} "
             f"limiting={cap['limiting_side'] or '-'}"
         )
+        _print_qualification(m)
         ss = m["sample_size"]
         print(
             f"  sample size: {ss['verdict']} (N={ss['n']}, "

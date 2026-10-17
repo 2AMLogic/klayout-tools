@@ -31,6 +31,7 @@ back-reference into ``extract.py``).
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 from ._provenance import sha256_file
@@ -142,13 +143,79 @@ _REASON_SUPPLY_NOT_CONTINUOUS = "supply_not_continuous"
 _REASON_LVS_SUPPLY_UNPROVEN = "lvs_supply_unproven"
 _REASON_LVS_DID_NOT_PASS = "lvs_did_not_pass"
 
-#: The three :func:`~klayout_tools.signoff._classify` kinds T1 item 11's
+#: Issue #2839: T1 item 11's **port-accessibility** sub-checks -- the
+#: provisional amendment (2AMLogic/product#134, drafted in product PR #168)
+#: requiring every declared supply to be published as an edge-accessible
+#: boundary port *and* as a matching LEF ``PIN`` with ``USE POWER``/``USE
+#: GROUND``. Graded only when the requirement is in force for the block
+#: (:func:`_power_port_policy_active`: the manifest's ``power_ports.required``
+#: or a cited ``socket-check``/``lef-abstract`` part), and only after the
+#: ERC/LVS(/PDN) half above is already proven -- so every pre-existing
+#: reason, and every block that does not opt in, grades exactly as before.
+#: Six reasons, one per independently-actionable gap:
+#:
+#: - :data:`_REASON_POWER_PORT_UNPROVEN` -- the requirement is in force but
+#:   no `klt socket-check` envelope carrying ``power_ports`` facts is cited
+#:   (none at all, or one produced before #2839). Fix: cite one.
+#: - :data:`_REASON_NO_EDGE_POWER_PORT` -- a declared supply has no port at
+#:   all: no ``POWER``/``GROUND`` pin of that name in the socket descriptor,
+#:   its label is not where the descriptor says, or no drawn conductor sits
+#:   under it. Fix: declare and draw the port.
+#: - :data:`_REASON_POWER_PORT_INTERIOR_ONLY` -- the supply has drawn
+#:   port(s), but none reaches the edge band of a counted outline edge with
+#:   a clear approach channel. Fix: bring the port to the boundary.
+#: - :data:`_REASON_POWER_PORT_LAYER_DISALLOWED` -- the supply's
+#:   edge-accessible port is on a layer the policy does not allow (by
+#:   default: one that does not resolve to a LEF routing layer, so the LEF
+#:   pin has no layer). Fix: move the port to an allowed metal.
+#: - :data:`_REASON_LEF_POWER_PIN_MISSING` -- no `klt lef-abstract` part is
+#:   cited, or its abstract has no ``PIN`` named for the supply.
+#: - :data:`_REASON_LEF_POWER_PIN_MISMATCH` -- the LEF pin exists but does
+#:   not agree with the GDS port: ``USE`` is not ``POWER``/``GROUND`` or
+#:   differs from the port's, its ``PORT`` is not drawn geometry, its GDS
+#:   layer differs, its ``PORT`` rectangles do not touch the
+#:   edge-accessible port, or the macro ``SIZE`` differs from the outline.
+_REASON_POWER_PORT_UNPROVEN = "power_port_unproven"
+_REASON_NO_EDGE_POWER_PORT = "no_edge_power_port"
+_REASON_POWER_PORT_INTERIOR_ONLY = "power_port_interior_only"
+_REASON_POWER_PORT_LAYER_DISALLOWED = "power_port_layer_disallowed"
+_REASON_LEF_POWER_PIN_MISSING = "lef_power_pin_missing"
+_REASON_LEF_POWER_PIN_MISMATCH = "lef_power_pin_mismatch"
+
+#: `klt socket-check`'s per-port reasons (``socket_check.grade_power_ports``)
+#: mapped onto item 11's reasons (issue #2839).
+_SOCKET_PORT_REASONS: dict[str, str] = {
+    "missing": _REASON_NO_EDGE_POWER_PORT,
+    "missing_label": _REASON_NO_EDGE_POWER_PORT,
+    "no_drawn_geometry": _REASON_NO_EDGE_POWER_PORT,
+    "interior_only": _REASON_POWER_PORT_INTERIOR_ONLY,
+    "channel_blocked": _REASON_POWER_PORT_INTERIOR_ONLY,
+    "layer_disallowed": _REASON_POWER_PORT_LAYER_DISALLOWED,
+}
+
+#: The outline edges a port may be accessible from (issue #2839) -- the
+#: same vocabulary as ``socket_check.POWER_PORT_EDGES``.
+_POWER_PORT_EDGES: tuple[str, ...] = ("left", "bottom", "right", "top")
+
+#: The :func:`~klayout_tools.signoff._classify` kinds T1 item 11's
 #: compound evidence list may
-#: cite (issue #2025). A cited part of any other recognised kind renders
+#: cite (issue #2025; ``socket-check``/``lef-abstract`` added by #2839 for
+#: the port-accessibility half). A cited part of any other recognised kind renders
 #: :data:`~klayout_tools.signoff._REASON_WRONG_KIND` -- it proves nothing
 #: about power delivery, and
 #: item 11 must never reach ``"met"`` by borrowing an unrelated check's pass.
-_POWER_DELIVERY_KINDS: frozenset[str] = frozenset({"erc", "lvs", "place-and-route"})
+_POWER_DELIVERY_KINDS: frozenset[str] = frozenset(
+    {"erc", "lvs", "place-and-route", "socket-check", "lef-abstract"}
+)
+
+#: Citation order of item 11's parts (the leading ``erc`` part first).
+_POWER_DELIVERY_PART_ORDER: tuple[str, ...] = (
+    "erc",
+    "lvs",
+    "place-and-route",
+    "socket-check",
+    "lef-abstract",
+)
 
 
 def _erc_supply_spec_hash_reason(
@@ -557,6 +624,7 @@ def _lvs_reference_carries_supplies(
 
 def _resolve_power_delivery_parts(
     specs: list[dict[str, Any]],
+    repo_root: str | Path | None = None,
 ) -> tuple[dict[str, dict[str, Any]] | None, str | None]:
     """Resolve every part of T1 item 11's compound citation (issue #2025) and
     index the resolutions by :func:`~klayout_tools.signoff._classify` kind --
@@ -593,7 +661,7 @@ def _resolve_power_delivery_parts(
 
     by_kind: dict[str, dict[str, Any]] = {}
     for spec in specs:
-        resolution, reason = _resolve_evidence(spec)
+        resolution, reason = _resolve_evidence(spec, repo_root)
         if resolution is None:
             return None, reason
         kind = resolution["kind"]
@@ -1066,8 +1134,500 @@ def _failed_lvs_verdict(
     }
 
 
+#: Issue #2839: the port-accessibility policy every block is graded under
+#: unless its manifest's ``power_ports`` object overrides a field.
+#: **Provisional** until 2AMLogic/product#134 ratifies the T1 item 11
+#: amendment: ``required`` is ``False`` (the amendment is not in force, so
+#: no existing block's verdict changes), the edge band is ``0`` um (the
+#: port must touch the outline -- the strictest, PDK-independent reading of
+#: the draft's open "edge band"), every outline edge counts, and any layer
+#: that resolves to a LEF routing layer is allowed (the draft's own
+#: recommendation: "any routing metal the PDK stackup declares").
+_DEFAULT_POWER_PORT_POLICY: dict[str, Any] = {
+    "required": False,
+    "edge_band_um": 0.0,
+    "edges": list(_POWER_PORT_EDGES),
+    "allowed_layers": None,
+}
+
+
+def _policy_required(value: Any) -> bool | None:
+    return value if isinstance(value, bool) else None
+
+
+def _policy_edge_band(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        return None
+    return float(value)
+
+
+def _policy_edges(value: Any) -> list[str] | None:
+    if not isinstance(value, list) or not value:
+        return None
+    if any(edge not in _POWER_PORT_EDGES for edge in value):
+        return None
+    return list(value)
+
+
+def _policy_allowed_layers(value: Any) -> list[str] | None:
+    if not isinstance(value, list):
+        return None
+    if not all(isinstance(layer, str) and layer for layer in value):
+        return None
+    return list(value)
+
+
+#: Per-field validators for a manifest ``power_ports`` object: each returns
+#: the normalized value, or ``None`` for a malformed one (issue #2839).
+_POLICY_FIELDS: dict[str, tuple[Any, str]] = {
+    "required": (_policy_required, "a boolean"),
+    "edge_band_um": (_policy_edge_band, "a non-negative number"),
+    "edges": (
+        _policy_edges,
+        "a non-empty list of: " + ", ".join(_POWER_PORT_EDGES),
+    ),
+    "allowed_layers": (
+        _policy_allowed_layers,
+        'a list of layer names (LEF names like "met4" or GDS "layer/datatype" '
+        "strings) or null",
+    ),
+}
+
+
+def _read_power_port_policy(raw: Any) -> dict[str, Any]:
+    """Validate a block manifest's optional ``power_ports`` object (issue
+    #2839) and merge it over :data:`_DEFAULT_POWER_PORT_POLICY`. Raises
+    :class:`~klayout_tools.signoff.SignoffError` for a malformed one -- a
+    manifest-level error, like a malformed ``partition_boundary``. A field
+    given as ``null`` keeps its default.
+
+    The returned policy also carries ``source`` (``"manifest"`` when the
+    manifest declared the object, else ``"default"``) and ``provisional:
+    true`` so a report states which parameters it was graded under."""
+    from .signoff import SignoffError
+
+    policy = {
+        **_DEFAULT_POWER_PORT_POLICY,
+        "edges": list(_DEFAULT_POWER_PORT_POLICY["edges"]),
+        "source": "default",
+        "provisional": True,
+    }
+    if raw is None:
+        return policy
+    if not isinstance(raw, dict):
+        raise SignoffError(
+            "block manifest 'power_ports' must be a JSON object, got "
+            f"{type(raw).__name__}"
+        )
+    unknown = set(raw) - set(_POLICY_FIELDS)
+    if unknown:
+        raise SignoffError(
+            "block manifest 'power_ports' has unknown field(s): "
+            + ", ".join(sorted(unknown))
+        )
+    for field, value in raw.items():
+        if value is None:
+            continue
+        validate, expected = _POLICY_FIELDS[field]
+        normalized = validate(value)
+        if normalized is None:
+            raise SignoffError(
+                f"block manifest 'power_ports.{field}' must be {expected}"
+            )
+        policy[field] = normalized
+    policy["source"] = "manifest"
+    return policy
+
+
+def _power_port_policy_active(
+    policy: dict[str, Any], by_kind: dict[str, dict[str, Any]]
+) -> bool:
+    """Whether item 11's port-accessibility half is graded for this block
+    (issue #2839): the manifest requires it, or the cited set includes a
+    ``socket-check``/``lef-abstract`` part -- citing port evidence is opting
+    in, and cited evidence is never silently ignored."""
+    return bool(policy.get("required")) or any(
+        kind in by_kind for kind in ("socket-check", "lef-abstract")
+    )
+
+
+def _policy_echo(policy: dict[str, Any]) -> dict[str, Any]:
+    allowed = policy["allowed_layers"]
+    return {
+        "required": policy["required"],
+        "edge_band_um": policy["edge_band_um"],
+        "edges": list(policy["edges"]),
+        "allowed_layers": list(allowed) if allowed is not None else None,
+        "source": policy["source"],
+        "provisional": policy["provisional"],
+    }
+
+
+def _port_finding(
+    net: str | None, reason: str, aspect: str, message: str
+) -> dict[str, Any]:
+    return {"net": net, "reason": reason, "aspect": aspect, "message": message}
+
+
+def _rects_touch(a: list[float], b: dict[str, float]) -> bool:
+    """Whether LEF rectangle ``a`` (``[x0, y0, x1, y1]``) and box ``b``
+    (``{x0, y0, x1, y1}``) overlap or touch."""
+    tol = 1e-6
+    return not (
+        a[2] < b["x0"] - tol
+        or b["x1"] < a[0] - tol
+        or a[3] < b["y0"] - tol
+        or b["y1"] < a[1] - tol
+    )
+
+
+def _ports_on_allowed_layer(
+    lef_layer: Any, ports: list[dict[str, Any]], allowed: list[str] | None
+) -> list[dict[str, Any]]:
+    """The ports whose layer the policy allows: by default any port whose
+    LEF pin resolved to a (routing) LEF layer; with ``allowed``, a port
+    whose LEF layer name or GDS ``layer/datatype`` is listed."""
+    if allowed is None:
+        return ports if isinstance(lef_layer, str) and lef_layer else []
+    return [
+        port
+        for port in ports
+        if lef_layer in allowed
+        or port.get("metal_layer") in allowed
+        or port.get("layer") in allowed
+    ]
+
+
+def _ports_on_lef_gds_layer(
+    lef_pin: dict[str, Any], ports: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """The ports labelled on the GDS layer the LEF pin was emitted from --
+    every port when the LEF envelope predates the ``gds_layer`` echo."""
+    gds_layer = lef_pin.get("gds_layer")
+    if not (isinstance(gds_layer, list) and len(gds_layer) == 2):
+        return ports
+    label = f"{gds_layer[0]}/{gds_layer[1]}"
+    return [port for port in ports if port.get("layer") == label]
+
+
+def _ports_touching_lef_rects(
+    lef_pin: dict[str, Any], ports: list[dict[str, Any]], outline: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """The ports some LEF ``PORT`` rectangle (macro-local, origin at the
+    outline's lower-left) overlaps or touches."""
+    rects = [
+        rect
+        for rect in lef_pin.get("rects_um") or []
+        if isinstance(rect, list) and len(rect) == 4
+    ]
+    origin_x = outline.get("x0", 0.0)
+    origin_y = outline.get("y0", 0.0)
+    touching = []
+    for port in ports:
+        bbox = port.get("bbox_um") or {}
+        local = {
+            "x0": bbox.get("x0", 0.0) - origin_x,
+            "y0": bbox.get("y0", 0.0) - origin_y,
+            "x1": bbox.get("x1", 0.0) - origin_x,
+            "y1": bbox.get("y1", 0.0) - origin_y,
+        }
+        if any(_rects_touch(rect, local) for rect in rects):
+            touching.append(port)
+    return touching
+
+
+def _lef_pin_findings(
+    net: str,
+    lef_pin: dict[str, Any],
+    use: str | None,
+    ports: list[dict[str, Any]],
+    outline: dict[str, Any],
+    policy: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Compare one supply's LEF pin (written ``USE`` ``use``) against its
+    edge-accessible GDS ``ports`` (issue #2839). Returns ``(findings,
+    agreeing_ports)`` -- the first failing aspect only, so a reader fixes
+    one thing at a time."""
+    name = lef_pin.get("name")
+    same_use = [port for port in ports if port.get("use") == use]
+    if use not in ("POWER", "GROUND") or not same_use:
+        message = f"LEF PIN {name} is USE {use}, the GDS port is {ports[0].get('use')}"
+        return [_port_finding(net, _REASON_LEF_POWER_PIN_MISMATCH, "use", message)], []
+
+    lef_layer = lef_pin.get("layer")
+    allowed = policy["allowed_layers"]
+    on_allowed = _ports_on_allowed_layer(lef_layer, same_use, allowed)
+    if not on_allowed:
+        rule = "a LEF routing layer" if allowed is None else f"one of {allowed}"
+        message = (
+            f"port layer {same_use[0].get('metal_layer')} (LEF {lef_layer!r}) "
+            f"is not {rule}"
+        )
+        return [
+            _port_finding(net, _REASON_POWER_PORT_LAYER_DISALLOWED, "layer", message)
+        ], []
+
+    checks = (
+        (
+            "geometry",
+            lambda candidates: (
+                candidates if lef_pin.get("geometry_source") == "drawn" else []
+            ),
+            f"LEF PIN {name} PORT is {lef_pin.get('geometry_source')!r}, not drawn "
+            "layout geometry",
+        ),
+        (
+            "layer",
+            lambda candidates: _ports_on_lef_gds_layer(lef_pin, candidates),
+            f"LEF PIN {name} was emitted from GDS layer {lef_pin.get('gds_layer')}, "
+            "not the edge-accessible port's",
+        ),
+        (
+            "location",
+            lambda candidates: _ports_touching_lef_rects(lef_pin, candidates, outline),
+            f"LEF PIN {name} PORT rectangles do not touch the edge-accessible GDS port",
+        ),
+    )
+    candidates = on_allowed
+    for aspect, narrow, message in checks:
+        candidates = narrow(candidates)
+        if not candidates:
+            return [
+                _port_finding(net, _REASON_LEF_POWER_PIN_MISMATCH, aspect, message)
+            ], []
+    return [], candidates
+
+
+def _socket_port_facts(
+    socket: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]] | None, dict[str, Any], dict[str, Any] | None]:
+    """``(ports, outline, finding)`` from a cited `klt socket-check`
+    resolution -- ``ports`` is ``None`` (with a ``power_port_unproven``
+    finding) when there is none, or it predates the ``power_ports`` block."""
+    facts = socket["envelope"].get("power_ports") if socket is not None else None
+    if not isinstance(facts, dict) or not isinstance(facts.get("ports"), list):
+        message = (
+            "no klt socket-check citation"
+            if socket is None
+            else "the cited klt socket-check envelope carries no power_ports "
+            "facts (produced before #2839)"
+        )
+        finding = _port_finding(None, _REASON_POWER_PORT_UNPROVEN, "evidence", message)
+        return None, {}, finding
+    outline = facts.get("outline_um")
+    ports = [port for port in facts["ports"] if isinstance(port, dict)]
+    return ports, outline if isinstance(outline, dict) else {}, None
+
+
+def _gds_port_findings(
+    ports: list[dict[str, Any]], supply_nets: list[str], policy: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """The GDS half: every declared supply has an edge-accessible port,
+    graded with `klt socket-check`'s own grader under *this* policy."""
+    from .socket_check import grade_power_ports
+
+    return [
+        _port_finding(
+            violation["pin"],
+            _SOCKET_PORT_REASONS[violation["reason"]],
+            violation["reason"],
+            f"supply {violation['pin']}: {violation['reason']}",
+        )
+        for violation in grade_power_ports(
+            ports,
+            edge_band_um=policy["edge_band_um"],
+            edges=policy["edges"],
+            required_names=supply_nets,
+            require_power_and_ground=False,
+        )
+    ]
+
+
+def _lef_size_finding(
+    lef_envelope: dict[str, Any], outline: dict[str, Any]
+) -> dict[str, Any] | None:
+    """A ``size`` mismatch when the LEF ``SIZE`` differs from the outline."""
+    size = lef_envelope.get("size_um")
+    if not isinstance(size, dict) or not outline:
+        return None
+    width = outline.get("x1", 0.0) - outline.get("x0", 0.0)
+    height = outline.get("y1", 0.0) - outline.get("y0", 0.0)
+    if (
+        abs((size.get("width") or 0.0) - width) <= 1e-6
+        and abs((size.get("height") or 0.0) - height) <= 1e-6
+    ):
+        return None
+    message = (
+        f"LEF SIZE {size.get('width')} BY {size.get('height')} differs from the "
+        f"socket outline {width} BY {height}"
+    )
+    return _port_finding(None, _REASON_LEF_POWER_PIN_MISMATCH, "size", message)
+
+
+def _accessible_ports(
+    ports: list[dict[str, Any]], net: str, policy: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """``net``'s edge-accessible supply ports, each with its
+    ``accessible_edges``."""
+    from .socket_check import SUPPLY_PIN_USES, assess_power_port
+
+    accessible = []
+    for port in ports:
+        if str(port.get("name", "")).upper() != net.upper():
+            continue
+        if port.get("use") not in SUPPLY_PIN_USES:
+            continue
+        reason, edges = assess_power_port(
+            port, edge_band_um=policy["edge_band_um"], edges=policy["edges"]
+        )
+        if reason is None:
+            accessible.append({**port, "accessible_edges": edges})
+    return accessible
+
+
+def _matched_port(
+    net: str, port: dict[str, Any], lef_pin: dict[str, Any], use: str | None
+) -> dict[str, Any]:
+    return {
+        "net": net,
+        "use": port.get("use"),
+        "port": {
+            "name": port.get("name"),
+            "layer": port.get("layer"),
+            "metal_layer": port.get("metal_layer"),
+            "bbox_um": port.get("bbox_um"),
+            "accessible_edges": port["accessible_edges"],
+        },
+        "lef_pin": {
+            "name": lef_pin.get("name"),
+            "use": use,
+            "layer": lef_pin.get("layer"),
+            "geometry_source": lef_pin.get("geometry_source"),
+        },
+    }
+
+
+def _lef_pin_matches(
+    lef_envelope: dict[str, Any],
+    ports: list[dict[str, Any]],
+    outline: dict[str, Any],
+    supply_nets: list[str],
+    policy: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """The LEF half, per supply: ``(findings, matched)``. A pin's ``USE`` is
+    the one read back from the written file (``power_pins.pins[]``) when the
+    envelope reports it, else the envelope's own ``pins[].use``."""
+    lef_pins = {
+        str(pin.get("name", "")).upper(): pin
+        for pin in lef_envelope.get("pins") or []
+        if isinstance(pin, dict)
+    }
+    read_back = {
+        str(pin.get("name", "")).upper(): pin.get("use_read_back")
+        for pin in (lef_envelope.get("power_pins") or {}).get("pins") or []
+        if isinstance(pin, dict)
+    }
+    findings: list[dict[str, Any]] = []
+    matched: list[dict[str, Any]] = []
+    for net in supply_nets:
+        lef_pin = lef_pins.get(net.upper())
+        if lef_pin is None:
+            message = f"the LEF abstract has no PIN {net}"
+            findings.append(
+                _port_finding(net, _REASON_LEF_POWER_PIN_MISSING, "pin", message)
+            )
+            continue
+        use = read_back.get(net.upper()) or lef_pin.get("use")
+        pin_findings, agreeing = _lef_pin_findings(
+            net, lef_pin, use, _accessible_ports(ports, net, policy), outline, policy
+        )
+        findings.extend(pin_findings)
+        if agreeing:
+            matched.append(_matched_port(net, agreeing[0], lef_pin, use))
+    return findings, matched
+
+
+def _grade_power_ports(
+    socket: dict[str, Any] | None,
+    lef: dict[str, Any] | None,
+    supply_nets: list[str],
+    policy: dict[str, Any],
+) -> tuple[str | None, dict[str, Any]]:
+    """Grade T1 item 11's port-accessibility half (issue #2839) -- ``(None,
+    block)`` when every declared supply has an edge-accessible port with a
+    matching LEF pin, else ``(<reason>, block)``.
+
+    ``block`` always carries the ``policy`` graded under and ``findings``
+    (``{"net", "reason", "aspect", "message"}``, ``net: null`` for a
+    set-level finding); when met, ``ports`` names, per supply, the agreeing
+    GDS port and LEF pin. The item's ``reason`` is the first finding's.
+
+    The GDS half re-grades the cited `klt socket-check` envelope's
+    ``power_ports`` **facts** under *this* policy (via the verb's own
+    :func:`~klayout_tools.socket_check.grade_power_ports`), never the verb's
+    own verdict, so one envelope grades reproducibly under whatever
+    band/edges the block's manifest declares. The supplies are the cited
+    ERC spec's declared ``kind: "supply"`` nets -- the same names the rest
+    of item 11 grades. The LEF half runs only once the GDS half holds.
+    """
+    from .signoff import _REASON_CHECK_FAILED, _check_passed
+
+    block: dict[str, Any] = {"policy": _policy_echo(policy), "findings": []}
+    ports, outline, evidence_finding = _socket_port_facts(socket)
+    if ports is None:
+        block["findings"].append(evidence_finding)
+    else:
+        block["findings"].extend(_gds_port_findings(ports, supply_nets, policy))
+    if not block["findings"] and lef is None:
+        block["findings"].append(
+            _port_finding(
+                None,
+                _REASON_LEF_POWER_PIN_MISSING,
+                "evidence",
+                "no klt lef-abstract citation",
+            )
+        )
+    if block["findings"]:
+        return block["findings"][0]["reason"], block
+    if not _check_passed("lef-abstract", lef["envelope"]):
+        return _REASON_CHECK_FAILED, block
+
+    size_finding = _lef_size_finding(lef["envelope"], outline)
+    findings, matched = (
+        ([size_finding], [])
+        if size_finding is not None
+        else _lef_pin_matches(lef["envelope"], ports, outline, supply_nets, policy)
+    )
+    block["findings"].extend(findings)
+    if block["findings"]:
+        return block["findings"][0]["reason"], block
+    block["ports"] = matched
+    return None, block
+
+
+def _port_accessibility_verdict(
+    by_kind: dict[str, dict[str, Any]],
+    supply_nets: list[str],
+    policy: dict[str, Any] | None,
+) -> tuple[str | None, dict[str, Any] | None]:
+    """``(reason, block)`` for item 11's port-accessibility half (issue
+    #2839) -- ``(None, None)`` when it is not in force for this block
+    (:func:`_power_port_policy_active`), so the item grades exactly as it
+    did before #2839."""
+    policy = policy or _read_power_port_policy(None)
+    if not _power_port_policy_active(policy, by_kind):
+        return None, None
+    return _grade_power_ports(
+        by_kind.get("socket-check"), by_kind.get("lef-abstract"), supply_nets, policy
+    )
+
+
 def _grade_power_delivery(
-    specs: list[dict[str, Any]], *, partition_kind: str
+    specs: list[dict[str, Any]],
+    *,
+    partition_kind: str,
+    power_port_policy: dict[str, Any] | None = None,
+    repo_root: str | Path | None = None,
 ) -> tuple[str, str | None, dict[str, Any] | None, dict[str, Any]]:
     """Grade T1 item 11 ("Power delivery (structural)", issue #2025) against
     the **set** of evidence entries cited for it, and return ``(status,
@@ -1187,7 +1747,7 @@ def _grade_power_delivery(
     """
     from .signoff import _REASON_WRONG_KIND, _check_passed, _citation
 
-    by_kind, reason = _resolve_power_delivery_parts(specs)
+    by_kind, reason = _resolve_power_delivery_parts(specs, repo_root)
     if by_kind is None:
         return "unmet", reason, None, {}
 
@@ -1221,6 +1781,16 @@ def _grade_power_delivery(
     if reason is not None:
         return "unmet", reason, None, {}
 
+    # Issue #2839: the port-accessibility half, graded only once everything
+    # above is proven and only when the requirement is in force for this
+    # block -- so no pre-existing reason or verdict changes for a block that
+    # does not opt in. See `_grade_power_ports`.
+    port_reason, power_ports_block = _port_accessibility_verdict(
+        by_kind, supply_spec["supply_nets"], power_port_policy
+    )
+    if port_reason is not None:
+        return "unmet", port_reason, None, {"power_ports": power_ports_block}
+
     # The compound citation keeps the single-citation contract every existing
     # consumer reads (`file`/`command`/`kind`/`check_status`/`content_hash`/
     # `exit_status` -- signoff_cmd.py's text rendering, the fleet roll-up's
@@ -1231,7 +1801,7 @@ def _grade_power_delivery(
     citation = _citation(erc)
     citation["parts"] = [
         _citation(by_kind[kind])
-        for kind in ("erc", "lvs", "place-and-route")
+        for kind in _POWER_DELIVERY_PART_ORDER
         if kind in by_kind
     ]
     citation["power_delivery"] = {
@@ -1287,6 +1857,11 @@ def _grade_power_delivery(
         citation["power_delivery"]["disclosed_undeclared_tie_classes"] = (
             disclosed_undeclared_tie_classes
         )
+    # Issue #2839: present only when the port-accessibility half was graded,
+    # so a block that does not opt in renders this citation exactly as before.
+    citation["power_delivery"].update(
+        {"power_ports": power_ports_block} if power_ports_block is not None else {}
+    )
     return "met", None, citation, {}
 
 
@@ -1302,6 +1877,8 @@ def _build_power_delivery_item(
     partition_boundary: str | None = None,
     evidence: dict[str, Any],
     graded_by_build: bool = True,
+    power_port_policy: dict[str, Any] | None = None,
+    repo_root: str | Path | None = None,
 ) -> dict[str, Any]:
     """Render T1 item 11's report entry (issue #2025) -- the compound
     counterpart of :func:`~klayout_tools.signoff._build_tier_item`, which
@@ -1355,7 +1932,10 @@ def _build_power_delivery_item(
             reason = _REASON_INVALID_EVIDENCE
         else:
             status, reason, citation, failure_detail = _grade_power_delivery(
-                specs, partition_kind=partition_kind
+                specs,
+                partition_kind=partition_kind,
+                power_port_policy=power_port_policy,
+                repo_root=repo_root,
             )
 
     return {

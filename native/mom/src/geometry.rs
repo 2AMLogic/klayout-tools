@@ -367,9 +367,31 @@ impl Filament {
 #[derive(Debug)]
 pub struct BarLayout {
     pub filaments: Vec<Filament>,
+    /// Each filament's share of its conductor's unit terminal current,
+    /// parallel to `filaments` (issue #2729). A parallel-bundle conductor's
+    /// filaments each carry `1 / N` of the current (the plain bundle
+    /// average); a series winding's filaments each carry their cross-section
+    /// area fraction of their *own leg's* current (every leg carries the full
+    /// terminal current, because legs are in series). `peec` weights every
+    /// partial-inductance pair term by `w_i * w_j`.
+    pub filament_weight: Vec<f64>,
     /// Each conductor's own bar length (um), indexed by the same conductor
-    /// index `Filament::conductor_index` carries.
+    /// index `Filament::conductor_index` carries. For a series winding this
+    /// is its total electrical centreline length.
     pub conductor_length_um: Vec<f64>,
+    /// The series legs of every winding conductor (empty for a layout with
+    /// only parallel bundles), in conductor then traversal order. Resistance
+    /// of a winding is the sum over its legs (`peec::resistance_ohm`).
+    pub series_segments: Vec<SeriesSegment>,
+}
+
+/// One series leg of a winding conductor, as far as DC resistance needs it:
+/// electrical centreline length and conducting cross-section area.
+#[derive(Debug, Clone, Copy)]
+pub struct SeriesSegment {
+    pub conductor_index: usize,
+    pub length_um: f64,
+    pub area_um2: f64,
 }
 
 /// One box (of a conductor, which may contribute more than one -- see the
@@ -463,9 +485,11 @@ pub(crate) fn classify_bar(name: &str, b: &BoxRequest) -> Result<Bar, String> {
 ///
 /// Increment (iii) (#2728) classifies an open mixed-axis *winding* into an
 /// explicit series path in [`oriented_path`] instead of relaxing this
-/// function: its parallel-bundle checks stay exactly as they are, and a
-/// winding keeps failing here (so every public PEEC/full-wave request for it
-/// keeps rejecting) until a series-path consumer lands (#2729/#2730).
+/// function: its parallel-bundle checks stay exactly as they are. The static
+/// PEEC solve (`discretize_bars`, #2729) routes such a conductor to the
+/// series-path model, and so does the full-wave sweep
+/// (`classify_full_wave_bars`, #2730); a winding therefore never reaches this
+/// function.
 ///
 /// Returns one entry **per box** (not per conductor, now that a conductor
 /// may contribute more than one), in request order (conductor order, then
@@ -610,23 +634,62 @@ pub fn discretize_bars(
             "filament_size_um must be positive, got {filament_size_um}"
         ));
     }
+    if conductors.is_empty() {
+        return Err("at least one conductor is required".to_string());
+    }
 
-    let bars = classify_bars(conductors)?;
+    // Decide each conductor's topology first (parallel bundle vs series
+    // winding, issue #2729). A conductor that is neither keeps the legacy
+    // `classify_bars` rejection message (so existing diagnostics and tests
+    // are unchanged), extended with the reason it is not a winding either.
+    enum Plan<'a> {
+        Bundle(Vec<(usize, &'a str, Bar)>),
+        Path(oriented_path::OrientedPath),
+    }
+    let mut plans: Vec<Plan> = Vec::with_capacity(conductors.len());
+    for (conductor_index, c) in conductors.iter().enumerate() {
+        match oriented_path::classify_conductor_topology(conductor_index, c) {
+            Ok(oriented_path::ConductorTopology::ParallelBundle) => {
+                let mut bars = classify_bars(std::slice::from_ref(c))?;
+                for entry in &mut bars {
+                    entry.0 = conductor_index;
+                }
+                plans.push(Plan::Bundle(bars));
+            }
+            Ok(oriented_path::ConductorTopology::OrientedPath(path)) => {
+                plans.push(Plan::Path(path));
+            }
+            Err(path_err) => {
+                return Err(match classify_bars(std::slice::from_ref(c)) {
+                    Err(legacy) => format!(
+                        "{legacy} (it is not a supported series winding either: {path_err})"
+                    ),
+                    Ok(_) => path_err,
+                });
+            }
+        }
+    }
 
-    // Pre-count filaments before generating any of them, mirroring
+    // Pre-count bundle filaments before generating any of them, mirroring
     // `discretize`'s panel guard -- fail fast on a scale-mismatched request
-    // rather than materialise an astronomical filament count.
+    // rather than materialise an astronomical filament count. (Windings are
+    // guarded by `discretize_oriented_path` itself; the total is re-checked
+    // below.)
     let mut estimated_total: u64 = 0;
-    for (_, _, bar) in &bars {
-        let n0 = face_segment_count(
-            bar.transverse_um[0].1 - bar.transverse_um[0].0,
-            filament_size_um,
-        );
-        let n1 = face_segment_count(
-            bar.transverse_um[1].1 - bar.transverse_um[1].0,
-            filament_size_um,
-        );
-        estimated_total = estimated_total.saturating_add(n0.saturating_mul(n1));
+    for plan in &plans {
+        if let Plan::Bundle(bars) = plan {
+            for (_, _, bar) in bars {
+                let n0 = face_segment_count(
+                    bar.transverse_um[0].1 - bar.transverse_um[0].0,
+                    filament_size_um,
+                );
+                let n1 = face_segment_count(
+                    bar.transverse_um[1].1 - bar.transverse_um[1].0,
+                    filament_size_um,
+                );
+                estimated_total = estimated_total.saturating_add(n0.saturating_mul(n1));
+            }
+        }
     }
     if estimated_total > MAX_FILAMENTS as u64 {
         return Err(format!(
@@ -637,36 +700,143 @@ pub fn discretize_bars(
     }
 
     let mut filaments = Vec::new();
+    let mut filament_weight = Vec::new();
+    let mut series_segments = Vec::new();
     let mut conductor_length_um = vec![0.0; conductors.len()];
-    for (conductor_index, name, bar) in &bars {
-        let before = filaments.len();
-        let (u0, u1) = bar.transverse_um[0];
-        let (v0, v1) = bar.transverse_um[1];
-        // A multi-box conductor's boxes are guaranteed co-spanning by
-        // `classify_bars`, so any one of them gives the conductor's bar
-        // length.
-        conductor_length_um[*conductor_index] = bar.axis_hi_um - bar.axis_lo_um;
-        for (uc, ulen) in subdivide_1d(u0, u1, filament_size_um) {
-            for (vc, vlen) in subdivide_1d(v0, v1, filament_size_um) {
-                filaments.push(Filament {
-                    conductor_index: *conductor_index,
-                    start_um: to_xyz_on_axis(bar.axis, bar.axis_lo_um, uc, vc),
-                    end_um: to_xyz_on_axis(bar.axis, bar.axis_hi_um, uc, vc),
-                    area_um2: ulen * vlen,
-                    extent_um: [ulen, vlen],
-                });
+    for plan in &plans {
+        match plan {
+            Plan::Bundle(bars) => {
+                let first = filaments.len();
+                for (conductor_index, name, bar) in bars {
+                    let before = filaments.len();
+                    let (u0, u1) = bar.transverse_um[0];
+                    let (v0, v1) = bar.transverse_um[1];
+                    // A multi-box conductor's boxes are guaranteed co-spanning
+                    // by `classify_bars`, so any one of them gives the
+                    // conductor's bar length.
+                    conductor_length_um[*conductor_index] = bar.axis_hi_um - bar.axis_lo_um;
+                    for (uc, ulen) in subdivide_1d(u0, u1, filament_size_um) {
+                        for (vc, vlen) in subdivide_1d(v0, v1, filament_size_um) {
+                            filaments.push(Filament {
+                                conductor_index: *conductor_index,
+                                start_um: to_xyz_on_axis(bar.axis, bar.axis_lo_um, uc, vc),
+                                end_um: to_xyz_on_axis(bar.axis, bar.axis_hi_um, uc, vc),
+                                area_um2: ulen * vlen,
+                                extent_um: [ulen, vlen],
+                            });
+                        }
+                    }
+                    if filaments.len() == before {
+                        return Err(format!(
+                            "conductor {name:?} produced zero PEEC filaments (degenerate \
+                             cross-section)"
+                        ));
+                    }
+                }
+                // Equal-current bundle: every filament carries 1/N.
+                let n = (filaments.len() - first) as f64;
+                filament_weight.extend(std::iter::repeat_n(1.0 / n, filaments.len() - first));
             }
+            Plan::Path(path) => append_series_path(
+                path,
+                filament_size_um,
+                &mut filaments,
+                &mut filament_weight,
+                &mut series_segments,
+                &mut conductor_length_um,
+            )?,
         }
-        if filaments.len() == before {
-            return Err(format!(
-                "conductor {name:?} produced zero PEEC filaments (degenerate cross-section)"
-            ));
-        }
+    }
+    if filaments.len() > MAX_FILAMENTS {
+        return Err(format!(
+            "PEEC cross-section discretisation would produce more than {MAX_FILAMENTS} \
+             filaments -- increase filament_size_um, or check for a scale mismatch between \
+             conductors in this request"
+        ));
     }
 
     Ok(BarLayout {
         filaments,
+        filament_weight,
         conductor_length_um,
+        series_segments,
+    })
+}
+
+/// Discretise one series winding and append its filaments, current weights
+/// and resistance legs. Every leg carries the full terminal current (legs are
+/// in series); within a leg the current splits over the cross-section
+/// filaments in proportion to their area (uniform current density). A
+/// filament's direction already follows the traversal, so the signed Neumann
+/// interaction between legs needs no further per-leg sign.
+fn append_series_path(
+    path: &oriented_path::OrientedPath,
+    filament_size_um: f64,
+    filaments: &mut Vec<Filament>,
+    filament_weight: &mut Vec<f64>,
+    series_segments: &mut Vec<SeriesSegment>,
+    conductor_length_um: &mut [f64],
+) -> Result<(), String> {
+    let path_filaments = oriented_path::discretize_oriented_path(path, filament_size_um)?;
+    for seg in &path.segments {
+        let mine: Vec<&oriented_path::PathFilament> = path_filaments
+            .iter()
+            .filter(|f| f.segment_index == seg.segment_index)
+            .collect();
+        let area: f64 = mine.iter().map(|f| f.filament.area_um2).sum();
+        if mine.is_empty() || area <= 0.0 {
+            return Err(format!(
+                "winding conductor index {} produced zero PEEC filaments (degenerate \
+                 cross-section)",
+                seg.conductor_index
+            ));
+        }
+        for f in mine {
+            filaments.push(f.filament);
+            filament_weight.push(f.filament.area_um2 / area);
+        }
+        series_segments.push(SeriesSegment {
+            conductor_index: seg.conductor_index,
+            length_um: seg.length_um(),
+            area_um2: area,
+        });
+    }
+    conductor_length_um[path.conductor_index] = path.total_length_um();
+    Ok(())
+}
+
+/// Build a [`BarLayout`] of series windings only (one per path, each path's
+/// `conductor_index` its slot) -- used by the solver's unit tests to exercise
+/// `OrientedPath::reversed` and hand-built paths directly.
+#[cfg(test)]
+pub(crate) fn layout_from_paths(
+    paths: &[oriented_path::OrientedPath],
+    filament_size_um: f64,
+) -> Result<BarLayout, String> {
+    let mut filaments = Vec::new();
+    let mut filament_weight = Vec::new();
+    let mut series_segments = Vec::new();
+    let count = paths
+        .iter()
+        .map(|p| p.conductor_index + 1)
+        .max()
+        .unwrap_or(0);
+    let mut conductor_length_um = vec![0.0; count];
+    for p in paths {
+        append_series_path(
+            p,
+            filament_size_um,
+            &mut filaments,
+            &mut filament_weight,
+            &mut series_segments,
+            &mut conductor_length_um,
+        )?;
+    }
+    Ok(BarLayout {
+        filaments,
+        filament_weight,
+        conductor_length_um,
+        series_segments,
     })
 }
 
@@ -758,51 +928,87 @@ pub struct FullWaveConductorGeom {
     pub area_um2: f64,
 }
 
-impl FullWaveConductorGeom {
-    /// Centreline length (um).
-    pub fn length_um(&self) -> f64 {
-        let mut acc = 0.0;
-        for k in 0..3 {
-            let d = self.end_um[k] - self.start_um[k];
-            acc += d * d;
-        }
-        acc.sqrt()
-    }
-}
-
 /// The bar geometry the full-wave solve discretises every conductor into:
 /// each conductor's [`FullWaveConductorGeom`], in the same order as the
 /// request's `conductors`, plus the `[lo, hi]` axial span they all share
 /// **if** they share one.
 ///
-/// `shared_axial_span` is `None` for cross-axis or axially-offset requests.
-/// The retarded impedance fill itself does not need it (issue #1842), but
-/// the derived transmission-line quantities and port de-embedding do -- see
+/// `shared_axial_span` is `None` for cross-axis or axially-offset requests,
+/// and always for a request containing a series winding. The retarded
+/// impedance fill itself does not need it (issue #1842), but the derived
+/// transmission-line quantities and port de-embedding do -- see
 /// `fullwave::solve_full_wave_sweep`.
+///
+/// `windings[i]` is `Some` exactly when conductor `i` is a series winding
+/// (issue #2730): the solve then meshes the path's legs individually instead
+/// of the one equivalent straight wire `conductors[i]` describes (for a
+/// winding that entry only records the terminal-to-terminal chord and the
+/// volume-equivalent area, for diagnostics).
 pub struct FullWaveBarLayout {
     pub shared_axial_span: Option<(f64, f64)>,
     pub conductors: Vec<FullWaveConductorGeom>,
+    pub windings: Vec<Option<oriented_path::OrientedPath>>,
 }
 
 /// Classify every conductor's box(es) into the bar geometry the full-wave
-/// retarded solve needs -- see `classify_bars` for the validation this
-/// shares with PEEC's `discretize_bars` (every box individually bar-shaped;
-/// a multi-box conductor's own boxes co-axis and co-spanning). A multi-box
-/// conductor's several boxes are combined into the single equivalent thin
-/// wire this module's docs describe: total cross-sectional area is the sum
-/// of each box's transverse rectangle area, and the transverse centroid is
-/// that same area-weighted average -- the natural generalisation of "one
-/// equivalent wire per conductor" from one box to several (e.g. a coax
-/// shield's wall segments combine into one effective shield wire). The
-/// shared axis index itself is not part of [`FullWaveBarLayout`] -- unlike
-/// PEEC's `BarLayout`, `fullwave.rs` never needs to name it (its error
-/// messages only reference axial positions/distances, already
-/// axis-agnostic).
+/// retarded solve needs. Each conductor is first routed by
+/// [`oriented_path::classify_conductor_topology`], exactly as the static PEEC
+/// solve does (`discretize_bars`): a parallel bundle goes through
+/// `classify_bars` (every box individually bar-shaped; a multi-box
+/// conductor's own boxes co-axis and co-spanning) and is combined into the
+/// single equivalent thin wire this module's docs describe -- total
+/// cross-sectional area is the sum of each box's transverse rectangle area,
+/// and the transverse centroid is that same area-weighted average, the
+/// natural generalisation of "one equivalent wire per conductor" from one
+/// box to several (e.g. a coax shield's wall segments combine into one
+/// effective shield wire); a connected non-branching mixed-axis chain is kept
+/// as its [`oriented_path::OrientedPath`] (issue #2730). The shared axis index
+/// itself is not part of [`FullWaveBarLayout`] -- unlike PEEC's `BarLayout`,
+/// `fullwave.rs` never needs to name it (its error messages only reference
+/// axial positions/distances, already axis-agnostic).
 pub fn classify_full_wave_bars(
     conductors: &[ConductorRequest],
 ) -> Result<FullWaveBarLayout, String> {
-    let bars = classify_bars(conductors)?;
-    let shared_axial_span = shared_axial_span(&bars).map(|(_axis, lo, hi)| (lo, hi));
+    if conductors.is_empty() {
+        return Err("at least one conductor is required".to_string());
+    }
+
+    // Per-conductor routing. `bars` collects the bundle conductors' per-box
+    // bars with `Bar` entries re-tagged by their request-level conductor
+    // index (`classify_bars` sees one conductor at a time here, so its own
+    // index is always 0).
+    let mut bars: Vec<(usize, &str, Bar)> = Vec::new();
+    let mut windings: Vec<Option<oriented_path::OrientedPath>> =
+        Vec::with_capacity(conductors.len());
+    for (conductor_index, c) in conductors.iter().enumerate() {
+        match oriented_path::classify_conductor_topology(conductor_index, c) {
+            Ok(oriented_path::ConductorTopology::ParallelBundle) => {
+                let mut one = classify_bars(std::slice::from_ref(c))?;
+                for entry in &mut one {
+                    entry.0 = conductor_index;
+                }
+                bars.extend(one);
+                windings.push(None);
+            }
+            Ok(oriented_path::ConductorTopology::OrientedPath(path)) => {
+                windings.push(Some(path));
+            }
+            Err(path_err) => {
+                return Err(match classify_bars(std::slice::from_ref(c)) {
+                    Err(legacy) => format!(
+                        "{legacy} (it is not a supported series winding either: {path_err})"
+                    ),
+                    Ok(_) => path_err,
+                });
+            }
+        }
+    }
+    let any_winding = windings.iter().any(Option::is_some);
+    let shared_axial_span = if any_winding {
+        None
+    } else {
+        shared_axial_span(&bars).map(|(_axis, lo, hi)| (lo, hi))
+    };
 
     // Per-conductor aggregation over the per-box bars. `classify_bars`
     // guarantees a conductor's boxes share one axis and axial span, so their
@@ -823,12 +1029,25 @@ pub fn classify_full_wave_bars(
         weighted_centroid_um[*conductor_index][1] += area * 0.5 * (v0 + v1);
     }
 
-    // `area_um2[i]` is a sum of strictly-positive per-box areas (every box
-    // passed `classify_bar`'s non-zero-extent check), and every conductor
-    // contributed at least one box (`classify_bars` rejects zero boxes) --
-    // so this division is never by zero.
-    let conductors: Vec<FullWaveConductorGeom> = (0..conductors.len())
+    // For a bundle conductor `area_um2[i]` is a sum of strictly-positive
+    // per-box areas (every box passed `classify_bar`'s non-zero-extent
+    // check), and it contributed at least one box (`classify_bars` rejects
+    // zero boxes) -- so this division is never by zero.
+    let geoms: Vec<FullWaveConductorGeom> = (0..conductors.len())
         .map(|i| {
+            if let Some(path) = &windings[i] {
+                let length_um = path.total_length_um();
+                let volume_um3: f64 = path
+                    .segments
+                    .iter()
+                    .map(|s| s.length_um() * s.area_um2())
+                    .sum();
+                return FullWaveConductorGeom {
+                    start_um: path.start_terminal_um(),
+                    end_um: path.end_terminal_um(),
+                    area_um2: volume_um3 / length_um,
+                };
+            }
             let bar = first_bar[i].expect("classify_bars rejects zero-box conductors");
             let uc = weighted_centroid_um[i][0] / area_um2[i];
             let vc = weighted_centroid_um[i][1] / area_um2[i];
@@ -842,7 +1061,8 @@ pub fn classify_full_wave_bars(
 
     Ok(FullWaveBarLayout {
         shared_axial_span,
-        conductors,
+        conductors: geoms,
+        windings,
     })
 }
 

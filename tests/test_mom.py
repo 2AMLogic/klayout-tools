@@ -870,27 +870,128 @@ def _u_winding_spec(path, **extra) -> None:
     )
 
 
-@pytest.mark.parametrize(
-    "extra",
-    [
-        pytest.param({"compute_inductance": True}, id="static-peec"),
-        pytest.param(
-            {"frequencies_hz": [1.0e9], "segment_size_um": 5.0}, id="full-wave"
-        ),
-    ],
-)
-def test_run_mom_single_mixed_axis_winding_still_rejects_public_solves(tmp_path, extra):
-    """Issue #2728 (increment (iii)) only *classifies* an open mixed-axis
-    winding into an oriented series path inside the native geometry module.
-    No public consumer uses that path yet -- series L/R (#2729) and retarded
-    coupling (#2730) own that -- so a single-conductor winding must keep
-    failing explicitly on both the static PEEC and the full-wave surface
-    rather than being silently treated as parallel bars."""
+def test_run_mom_single_mixed_axis_winding_full_wave_sweep_is_a_series_path(tmp_path):
+    """Issue #2730: the retarded sweep consumes the same winding as an oriented
+    series path (it used to reject it as non-parallel bars). The 1x1 matrix is
+    the winding's terminal-to-terminal partial impedance; there is no uniform
+    line, so no Z0/gamma, and the mesh covers every leg."""
     gds = tmp_path / "u.gds"
     spec = tmp_path / "u.mom.json"
     _tiled_u_winding_fixture(gds)
-    _u_winding_spec(spec, **extra)
+    _u_winding_spec(spec, frequencies_hz=[1.0e9, 2.0e9], segment_size_um=5.0)
 
+    report = run_mom(str(gds), str(spec))
+    assert report["conductors"] == ["winding"]
+    # 40 + 50 + 40 um of centreline at 5 um cells (8 + 10 + 8).
+    assert report["full_wave_segment_count"] == 26
+    first, second = report["full_wave_sweep"]
+    x1 = first["impedance_matrix_imag_ohm"][0][0]
+    x2 = second["impedance_matrix_imag_ohm"][0][0]
+    assert x1 > 0
+    assert x2 / x1 == pytest.approx(2.0, rel=1e-3)
+    assert "characteristic_impedance_real_ohm" not in first
+    assert "s_parameters" not in first
+
+
+def test_run_mom_winding_with_ports_is_rejected(tmp_path):
+    """S-parameter/de-embedding requests have no validated path-port contract
+    (#2730): a winding together with `ports` fails with an explicit message
+    rather than de-embedding against a straight span."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    for x0, y0, x1, y1 in ((1, -1, 51, 1), (49, 1, 51, 40), (-1, -1, 1, 40)):
+        top.shapes(layout.layer(1, 0)).insert(
+            kdb.Box.new(_um(x0), _um(y0), _um(x1), _um(y1))
+        )
+    top.shapes(layout.layer(2, 0)).insert(
+        kdb.Box.new(_um(-1), _um(60), _um(51), _um(62))
+    )
+    gds = tmp_path / "u-bar.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "u-bar.mom.json"
+    spec.write_text(
+        json.dumps(
+            {
+                "background_permittivity": 1.0,
+                "panel_size_um": 2.0,
+                "frequencies_hz": [1.0e9],
+                "segment_size_um": 5.0,
+                "ports": [{"position_um": 0.0}, {"position_um": 50.0}],
+                "stackup": [
+                    {
+                        "layer": "1/0",
+                        "conductor": "winding",
+                        "z0_um": 0.0,
+                        "z1_um": 2.0,
+                    },
+                    {"layer": "2/0", "conductor": "bar", "z0_um": 0.0, "z1_um": 2.0},
+                ],
+            }
+        )
+    )
+    with pytest.raises(MomError, match="series winding"):
+        run_mom(str(gds), str(spec))
+
+
+def test_run_mom_branched_winding_still_rejects_full_wave(tmp_path):
+    """A branched conductor is not a series path, so the frequency sweep keeps
+    the explicit mixed-axis rejection (now naming why it is no winding)."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    for x0, y0, x1, y1 in ((0, -1, 60, 1), (29, 1, 31, 40)):
+        top.shapes(layout.layer(1, 0)).insert(
+            kdb.Box.new(_um(x0), _um(y0), _um(x1), _um(y1))
+        )
+    gds = tmp_path / "t.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "t.mom.json"
+    _u_winding_spec(spec, frequencies_hz=[1.0e9], segment_size_um=5.0)
+    with pytest.raises(MomError, match="current-flow axis"):
+        run_mom(str(gds), str(spec))
+
+
+def test_run_mom_single_mixed_axis_winding_static_peec_is_a_series_path(tmp_path):
+    """Issue #2729: one open U winding (centreline (0,40) -> (0,0) -> (50,0)
+    -> (50,40), 2x2 um copper-ish section) is accepted as ONE conductor with
+    `compute_inductance: true`, and solved as a SERIES path: its resistance is
+    the analytic centreline sum (130 um through 4 um^2), and its inductance
+    is the signed series sum of the three legs, not a bundle average."""
+    gds = tmp_path / "u.gds"
+    spec = tmp_path / "u.mom.json"
+    _tiled_u_winding_fixture(gds)
+    _u_winding_spec(spec, compute_inductance=True)
+
+    report = run_mom(str(gds), str(spec))
+    assert report["conductors"] == ["winding"]
+    sigma = 5.96e7
+    # 40 + 50 + 40 um of electrical centreline; every leg is 2 x 2 um.
+    assert report["resistance_ohm"][0] == pytest.approx(
+        130e-6 / (sigma * 4e-12), rel=1e-9
+    )
+    l_nh = report["inductance_matrix_nh"][0][0]
+    assert l_nh > 0
+    # Regression pin on the measured series value (0.087620 nH at the default
+    # filament size). A bundle average would land far below it; the exact
+    # equality with the signed-leg reduction is pinned in
+    # native/mom/src/peec.rs and tests/test_mom_pypeec_cross_validation.py.
+    assert l_nh == pytest.approx(0.08762, rel=1e-3)
+
+
+def test_run_mom_branched_winding_still_rejects_static_peec(tmp_path):
+    """A T-junction (a branch off the middle of a bar) is not a series path
+    and keeps its explicit rejection."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    shapes = top.shapes(layout.layer(1, 0))
+    for x0, y0, x1, y1 in ((0, -1, 60, 1), (29, 1, 31, 40)):
+        shapes.insert(kdb.Box.new(_um(x0), _um(y0), _um(x1), _um(y1)))
+    gds = tmp_path / "t.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "t.mom.json"
+    _u_winding_spec(spec, compute_inductance=True)
     with pytest.raises(MomError, match="current-flow axis"):
         run_mom(str(gds), str(spec))
 

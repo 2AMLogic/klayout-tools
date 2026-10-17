@@ -178,45 +178,21 @@ Your review authority extends past the PR to its **underlying issue**: an issue 
 
 **Guardrails (safety — do NOT skip these):**
 - **Always comment the rationale BEFORE closing.** `--reason "not planned"` marks a judgment call, not a fix.
-- **Never close an issue that encodes a still-pending human decision.** If the right call needs a human (policy, a controversial trade-off, security/access), route it — `loom:blocked` or `loom:operator-only` **plus exactly one sub-kind label**, per "Applying `loom:operator-only`" immediately below, with a comment — do **not** close it.
+- **Never close an issue that encodes a still-pending human decision.** If the right call needs a human (policy, a controversial trade-off, security/access), route it per "Routing to a human" immediately below, with a comment — do **not** close it.
 - **Never invent new labels.** Use only the existing label set.
 - **A closed issue leaves the queue automatically** (the autonomous work-finder only polls *open* `loom:issue` items); a **rescoped** issue must have `loom:issue` removed so it is not re-dispatched with a stale scope.
 
-### Applying `loom:operator-only`: a sub-kind label is REQUIRED (#5819)
+### Routing to a human
 
-**Never apply `loom:operator-only` on its own** — on an issue *or* a PR (an
-unanswerable review question you are not entitled to settle routes the same
-way). Choose exactly one sub-kind and apply both labels in the **same** command.
-This is purely additive — the base label is never removed or replaced, so every
-filter/skip keyed on it (sweep pre-flight, `warn-operator-gated.sh`, Doctor's
-operator-hold exclusion, Champion's queue exclusions) behaves exactly as before:
-
-| Sub-kind | Apply when |
-|---|---|
-| `loom:operator-blocked` | Waiting on a **named** issue/PR/piece of infrastructure that does not exist yet — self-clearing once that lands |
-| `loom:operator-mechanical` | Needs host or admin access, a credential, or another mechanical action — no judgement required |
-| `loom:operator-decision` | A genuine human ruling is needed (policy, trade-off, security/access, "which side ships first"). **Safe default whenever the kind is not obvious** |
-
-```bash
-# Issue that encodes a still-pending human decision, surfaced during review:
-gh issue edit <issue-number> --add-label "loom:operator-only,loom:operator-decision"
-
-# PR whose review raises a question only a human can answer:
-gh pr edit <pr-number> --add-label "loom:operator-only,loom:operator-decision"
-```
-
-Being unsure which sub-kind applies is **never** a reason to emit the bare
-label — `loom:operator-decision` is always safe to over-apply.
-
-**If you chose `loom:operator-blocked`**, the same comment MUST name the blocker
-in machine-readable form: a literal `Blocked by #N` / `Depends on #N` /
-`Requires #N` line (the exact phrasings `detect-dependency-cycle.sh` and
-`warn-operator-gated.sh` parse by regex). A backtick-quoted reference in prose
-does not satisfy this — the phrase itself must be present so a later automated
-pass can tell when the blocker clears.
-
-Full taxonomy and rationale: `.loom/docs/label-state-machine.md` →
-"`loom:operator-only` sub-kinds".
+Park only a PO-level question you are not entitled to settle, or a
+human-hands step — not a hard or uncertain review (#10001). The rule is
+`.loom/docs/label-state-machine.md` → "Routing to a human": a ruling, on an
+issue or a PR → `loom-daemon operator-decision apply <number> --input d.json`
+(2-4 ranked options; adds `loom:operator`); a human's hands → `loom:operator`
++ a comment naming the step (+ `Blocked by #N` if it waits on something named);
+automation-resolvable waiting → `loom:blocked` with a park record. (The
+base-plus-sub-kind labels this section used to require are retired into
+`loom:operator`, 2am#4345 / rjwalters/loom#11795.)
 
 ## Argument Handling
 
@@ -869,7 +845,7 @@ The guard removes the stale verdict label (plus its per-tree companions
 `loom:ci-failure` / `loom:merge-conflict`), adds `loom:review-requested`, and
 posts a comment naming the old and new SHAs so the transition is auditable
 rather than a silent label flip. It refuses to clear a PR carrying
-`loom:blocked` / `loom:operator` / `loom:operator-only` — those are deliberate
+`loom:blocked` / `loom:operator` — those are deliberate
 holds, and un-parking them is not yours (or the guard's) to do; it still
 reports `STALE` so you know not to trust the verdict.
 

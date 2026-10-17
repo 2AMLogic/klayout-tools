@@ -144,7 +144,7 @@ runs:
   using: "composite"
   steps:
     - name: Set up Python
-      uses: actions/setup-python@v7
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
       with:
         python-version: ${{ inputs.python-version }}
 
@@ -165,8 +165,8 @@ runs:
         klt --help > /dev/null
         # `klt --version` (not `klayout_tools.__version__`) so the log
         # distinguishes a real PyPI release from a build of this action's own
-        # source checkout, which declares the same package version: a
-        # non-release build reports `klt X.Y.Z+g<sha>` (issue #1202).
+        # source checkout: a non-release build reports a dev version such as
+        # `klt X.Y.(Z+1).devN+g<sha>` (issues #1202, #2823).
         echo "klt installed: $(klt --version 2>/dev/null || echo unknown)"
 
     - name: Determine pinned lambdapdk version
@@ -183,7 +183,7 @@ runs:
 
     - name: Cache lambdapdk
       if: ${{ inputs.fetch-pdk == 'true' }}
-      uses: actions/cache@v6
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
       with:
         path: ${{ steps.pdk-version.outputs.dir }}
         key: lambdapdk-${{ steps.pdk-version.outputs.version }}

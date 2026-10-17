@@ -677,6 +677,32 @@ above would pass just as happily if the oracle ignored the geometry it was
 handed and re-solved a cached or default spiral, making "they agree" a
 tautology rather than a falsifiable claim.
 
+#### Single-conductor series winding (issue #2729)
+
+The same two-turn spiral requested as **one** conductor (all eight tiled
+boxes on one layer, `compute_inductance: true`) now solves directly as a
+series path. Measured (`tests/test_mom_pypeec_cross_validation.py`, filament
+1 µm, PyPEEC 5.8.0, 2640 conductor voxels, `scripts/mom_pypeec_reference.py`
+run as its own subprocess; the module is asserted to run, not skip):
+
+| Quantity | klt mom, one conductor | Comparison | rel. diff | Budget |
+|---|---|---|---|---|
+| L | 0.637718 nH | signed-leg reduction 0.637886 nH | 0.026% | 2% |
+| L | 0.637718 nH | PyPEEC 0.635732 nH | 0.312% | 2% (unchanged) |
+| R | 2.8875 ohm | PyPEEC 2.865452 ohm | 0.769% | 10% (unchanged) |
+
+The one-conductor value equals the Rust-only overlapping-box fixture's
+0.637718 nH to the printed digits (centreline legs, volume-conserving
+corners); the 0.026% difference to the eight-conductor reduction is only the
+legacy legs' drawn-box lengths versus vertex-to-vertex electrical lengths.
+Native unit tests (`peec.rs`) add: analytic series resistance of an L and of
+a U with unequal widths (exact), `L(L-path) = L_a + L_b` (perpendicular legs,
+1e-12), a U with unequal leg widths equal to the signed-leg reduction
+(1e-12), invariance to box order, collinear subdivision and whole-path
+reversal (1e-12), mutual-sign agreement with the signed-leg reduction, and
+refinement convergence within 1% (1 µm -> 0.5 µm filaments). FastHenry stays
+excluded (#1886).
+
 ## Full-wave frequency sweep
 
 Phase 2a of the Method-of-Moments epic, delivered by
@@ -768,6 +794,44 @@ worth the added CI time for a signal the four levels above already
 establish); the remaining gap to the oracle is expected to keep shrinking
 the same way `docs/design/mom-iterative-solver.md`'s own refinement
 discussion frames the tradeoff for the capacitance solve.
+
+### 3. Series-path winding (issue #2730)
+
+A single open U winding (centreline (0,100) → (0,0) → (120,0) → (120,100) µm,
+2×2 µm section, three tiled legs) swept as **one** conductor: the retarded
+fill meshes each leg with its own direction, length and radius instead of
+collapsing the turns to one straight wire. The oracle for the low-frequency
+limit is the static series-path PEEC solve of
+[#2729](https://github.com/2AMLogic/klayout-tools/issues/2729) on the same
+request; the independent full-wave oracle is NEC2++ (see
+[`mom-cross-validation.md`](mom-cross-validation.md#bent-path-driving-point-mode)).
+PyPEEC is a *static* oracle and is not used for any full-wave number.
+
+| Check | Measured | Bound |
+|---|---|---|
+| `Im(Z)/ω` at 1 kHz (0.5 µm cells) vs static PEEC `L` (0.271445 nH) | 0.256567 nH, **5.48%** below | 7% |
+| …after the analytic self-term offset (+0.014894 nH) | **0.0058%** | 1% |
+| `Z` at 5 GHz, cells 4 → 2 → 1 → 0.5 µm | 8.7755 → 8.1426 → 8.0630 → 8.0603 `j` Ω | steps 0.633 → 0.0796 → 0.00265 strictly shrinking; last step < 0.5% of `|Z|` (0.033%) |
+| L-path vs sum of its two perpendicular legs (Rust) | equal to 1e-9 | exact structure |
+| U-path vs signed-leg reduction `Σ s_i s_j Z_ij` (Rust) | equal to 1e-9 | exact structure |
+| Mutual to a parallel bar vs signed-leg sum (Rust) | equal to 1e-9 | exact structure |
+
+**The 5.48% is a kernel convention, not discretisation error.** The retarded
+fill's reduced thin-wire kernel is a *surface-current* wire of the equal-area
+radius `a` (self term `ln(2l/a) − 1`); PEEC's filament bundle is the
+uniform-current square bar (`ln(2l/GMD) − 1`, `GMD = 0.44705 w`). Per leg the
+static value therefore exceeds the full-wave limit by
+`µ0/(2π) · l · ln(a/GMD)`; over the 320 µm of centreline that is 14.894 pH,
+and adding it closes the gap to 0.0058%. Inter-leg mutuals agree between the
+two solvers. The same offset is present for straight bars, so winding results should
+be read as thin-wire-kernel numbers: for static-accurate inductance use
+`compute_inductance`.
+
+**Cell size must resolve the wire.** The point-collocation self term
+overestimates by roughly `cell / a` until cells are comparable to the
+equivalent radius (4 µm cells on `a = 1.13 µm`: 8.9% off the converged value;
+1 µm: 0.033%). The default `segment_size_um` is therefore too coarse for a
+narrow winding; choose it near the trace width.
 
 ## What is *not* validated here
 

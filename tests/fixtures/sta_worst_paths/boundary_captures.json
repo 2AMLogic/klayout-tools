@@ -1,0 +1,195 @@
+{
+  "engine": "openroad/orfs:latest image sha256:0f1f4f03792e4825a917f1802cb415da6c4a372f6b24bee0b403f7efe62f6d30 (created 2026-10-08; `openroad -version` prints 'unknown')",
+  "liberty": "sky130_fd_sc_hd (volare open_pdks c6d73a35)",
+  "netlist": "module top (clk, rst_n, a_in, b_in, bus, q_a, q_b, q_bus);\n  input clk, rst_n, a_in, b_in;\n  input [1:0] bus;\n  output q_a, q_b;\n  output [1:0] q_bus;\n  sky130_fd_sc_hd__dfrtp_1 ff_a (.CLK(clk), .D(a_in), .RESET_B(rst_n), .Q(q_a));\n  sky130_fd_sc_hd__dfxtp_1 ff_b (.CLK(clk), .D(b_in), .Q(q_b));\n  sky130_fd_sc_hd__dfxtp_1 ff_bus0 (.CLK(clk), .D(bus[0]), .Q(q_bus[0]));\n  sky130_fd_sc_hd__dfxtp_1 ff_bus1 (.CLK(clk), .D(bus[1]), .Q(q_bus[1]));\nendmodule\n",
+  "constraints": {
+    "clock_port": "clk",
+    "clock_period_ns": 2.0,
+    "input_delay_ns": 0.0,
+    "output_delay_ns": 0.1,
+    "input_delays": {
+      "a_in": {
+        "min_ns": 0.3,
+        "max_ns": 0.6
+      },
+      "b_in": {
+        "min_ns": 0.05,
+        "max_ns": 1.2
+      },
+      "bus[1]": {
+        "min_ns": -0.2
+      }
+    },
+    "output_delays": {
+      "q_a": {
+        "max_ns": 0.5
+      }
+    }
+  },
+  "worst_path_tcl": [
+    "puts \"===KLT_STA_WORST_PATHS_BEGIN===\"",
+    "if {[catch {",
+    "    foreach klt_path_side {max min} {",
+    "        foreach klt_pe [find_timing_paths -path_delay $klt_path_side -group_path_count 1 -endpoint_path_count 1] {",
+    "            puts \"PATH\\t$klt_path_side\\t[$klt_pe check_role]\\t[$klt_pe slack]\\t[get_full_name [get_property $klt_pe startpoint]]\\t[get_full_name [get_property $klt_pe endpoint]]\"",
+    "        }",
+    "    }",
+    "} klt_worst_path_error]} {",
+    "    puts \"ERROR\\t[string map [list \\n { } \\t { }] $klt_worst_path_error]\"",
+    "}",
+    "puts \"===KLT_STA_WORST_PATHS_END===\""
+  ],
+  "note": "stdout reduced to the klt marker blocks only (engine banner/LEF lines carry host paths). Metrics files are the real -metrics dumps of the same sessions.",
+  "scenarios": {
+    "boundary_tt_025C_1v80": {
+      "metrics": {
+        "timing__setup__ws": 0.698751,
+        "timing__hold__ws": -0.295591,
+        "timing__setup__tns": 0,
+        "timing__hold__tns": -0.467874,
+        "timing__fmax__clock:clk": 768493000.0,
+        "timing__fmax": 768493000.0,
+        "power__internal__total": 8.57902e-05,
+        "power__switching__total": 0,
+        "power__leakage__total": 3.69681e-11,
+        "power__total": 8.57902e-05,
+        "clock__skew__setup": 0,
+        "flow__warnings__count": 1,
+        "flow__errors__count": 0,
+        "flow__warnings__count:ODB-0220": 1,
+        "flow__warnings__type_count": 1
+      },
+      "stdout": "===KLT_STA_PORT_CHECK_BEGIN===\n===KLT_STA_PORT_CHECK_END===\n===KLT_STA_SETUP_VIOLATIONS_BEGIN===\nNo paths found.\n\n===KLT_STA_SETUP_VIOLATIONS_END===\n===KLT_STA_HOLD_VIOLATIONS_BEGIN===\nmin_delay/hold group asynchronous\n\n                                     Required  Actual\nEndpoint                               Delay   Delay   Slack\n------------------------------------------------------------\nff_a/RESET_B (sky130_fd_sc_hd__dfrtp_1)    0.30    0.00   -0.30 (VIOLATED)\n\nmin_delay/hold group clk\n\n                                     Required  Actual\nEndpoint                               Delay   Delay   Slack\n------------------------------------------------------------\nff_bus1/D (sky130_fd_sc_hd__dfxtp_1)   -0.03   -0.20   -0.17 (VIOLATED)\n\n===KLT_STA_HOLD_VIOLATIONS_END===\n===KLT_STA_WORST_PATHS_BEGIN===\nPATH\tmax\trecovery\t2.228268458637217e-9\trst_n\tff_a/RESET_B\nPATH\tmax\tsetup\t6.987513900824638e-10\tb_in\tff_b/D\nPATH\tmin\tremoval\t-2.9559105163556865e-10\trst_n\tff_a/RESET_B\nPATH\tmin\thold\t-1.722826326044924e-10\tbus[1]\tff_bus1/D\n===KLT_STA_WORST_PATHS_END===\n"
+    },
+    "boundary_ss_100C_1v60": {
+      "metrics": {
+        "timing__setup__ws": 0.541293,
+        "timing__hold__ws": -0.6148,
+        "timing__setup__tns": 0,
+        "timing__hold__tns": -0.747963,
+        "timing__fmax__clock:clk": 685539000.0,
+        "timing__fmax": 685539000.0,
+        "power__internal__total": 6.91391e-05,
+        "power__switching__total": 0,
+        "power__leakage__total": 6.28023e-08,
+        "power__total": 6.92019e-05,
+        "clock__skew__setup": 0,
+        "flow__warnings__count": 1,
+        "flow__errors__count": 0,
+        "flow__warnings__count:ODB-0220": 1,
+        "flow__warnings__type_count": 1
+      },
+      "stdout": "===KLT_STA_PORT_CHECK_BEGIN===\n===KLT_STA_PORT_CHECK_END===\n===KLT_STA_SETUP_VIOLATIONS_BEGIN===\nNo paths found.\n\n===KLT_STA_SETUP_VIOLATIONS_END===\n===KLT_STA_HOLD_VIOLATIONS_BEGIN===\nmin_delay/hold group asynchronous\n\n                                     Required  Actual\nEndpoint                               Delay   Delay   Slack\n------------------------------------------------------------\nff_a/RESET_B (sky130_fd_sc_hd__dfrtp_1)    0.61    0.00   -0.61 (VIOLATED)\n\nmin_delay/hold group clk\n\n                                     Required  Actual\nEndpoint                               Delay   Delay   Slack\n------------------------------------------------------------\nff_bus1/D (sky130_fd_sc_hd__dfxtp_1)   -0.07   -0.20   -0.13 (VIOLATED)\n\n===KLT_STA_HOLD_VIOLATIONS_END===\n===KLT_STA_WORST_PATHS_BEGIN===\nPATH\tmax\trecovery\t2.4653257213458346e-9\trst_n\tff_a/RESET_B\nPATH\tmax\tsetup\t5.412926773473714e-10\tb_in\tff_b/D\nPATH\tmin\tremoval\t-6.14799822162837e-10\trst_n\tff_a/RESET_B\nPATH\tmin\thold\t-1.3316306390898092e-10\tbus[1]\tff_bus1/D\n===KLT_STA_WORST_PATHS_END===\n"
+    },
+    "unconstrained_tt_025C_1v80": {
+      "metrics": {
+        "timing__setup__ws": 1e+39,
+        "timing__hold__ws": 1e+39,
+        "timing__setup__tns": 0,
+        "timing__hold__tns": 0,
+        "timing__fmax": 3204040000.0,
+        "power__internal__total": 8.57902e-05,
+        "power__switching__total": 0,
+        "power__leakage__total": 3.69681e-11,
+        "power__total": 8.57902e-05,
+        "clock__skew__setup": 0,
+        "flow__warnings__count": 1,
+        "flow__errors__count": 0,
+        "flow__warnings__count:ODB-0220": 1,
+        "flow__warnings__type_count": 1
+      },
+      "stdout": "===KLT_STA_SETUP_VIOLATIONS_BEGIN===\nNo paths found.\n\n===KLT_STA_SETUP_VIOLATIONS_END===\n===KLT_STA_HOLD_VIOLATIONS_BEGIN===\nNo paths found.\n\n===KLT_STA_HOLD_VIOLATIONS_END===\n===KLT_STA_WORST_PATHS_BEGIN===\n===KLT_STA_WORST_PATHS_END===\n"
+    },
+    "bad_ports_tt_025C_1v80": {
+      "metrics": null,
+      "stdout": "===KLT_STA_PORT_CHECK_BEGIN===\ninput\tnope\tnot_found\ninput\tbus\tmatches_2_ports\ninput\tq_a\tdirection_output\ninput\tb*\tmatches_3_ports\noutput\ta_in\tdirection_input\n===KLT_STA_PORT_CHECK_END===\n",
+      "input_delays": {
+        "nope": {
+          "min_ns": 0.1
+        },
+        "bus": {
+          "max_ns": 0.2
+        },
+        "q_a": {
+          "min_ns": 0.0
+        },
+        "b*": {
+          "max_ns": 1
+        },
+        "a_in": {
+          "min_ns": 0.1
+        }
+      },
+      "output_delays": {
+        "a_in": {
+          "max_ns": 0.1
+        }
+      }
+    }
+  },
+  "direct_queries": {
+    "tcl": "find_timing_paths -from [get_ports <p>] -path_delay <max|min> with the same constraints written as plain SDC (no klt helpers); sta::worst_slack_cmd max/min",
+    "tt_025C_1v80": {
+      "worst_slack_max_s": 6.987513900824638e-10,
+      "worst_slack_min_s": -2.9559105163556865e-10,
+      "from": {
+        "a_in": {
+          "max": [
+            "setup",
+            1.2951144601203168e-09,
+            "ff_a/D"
+          ],
+          "min": [
+            "hold",
+            3.314297725154347e-10,
+            "ff_a/D"
+          ]
+        },
+        "b_in": {
+          "max": [
+            "setup",
+            6.987513900824638e-10,
+            "ff_b/D"
+          ],
+          "min": [
+            "hold",
+            7.771735338613084e-11,
+            "ff_b/D"
+          ]
+        },
+        "bus[0]": {
+          "max": [
+            "setup",
+            1.8987513783486065e-09,
+            "ff_bus0/D"
+          ],
+          "min": [
+            "hold",
+            2.771735792272967e-11,
+            "ff_bus0/D"
+          ]
+        },
+        "bus[1]": {
+          "max": null,
+          "min": [
+            "hold",
+            -1.722826326044924e-10,
+            "ff_bus1/D"
+          ]
+        },
+        "rst_n": {
+          "max": [
+            "recovery",
+            2.228268458637217e-09,
+            "ff_a/RESET_B"
+          ],
+          "min": [
+            "removal",
+            -2.9559105163556865e-10,
+            "ff_a/RESET_B"
+          ]
+        }
+      }
+    }
+  }
+}

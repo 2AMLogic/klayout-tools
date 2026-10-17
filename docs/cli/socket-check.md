@@ -6,7 +6,8 @@ numeric interface budgets a block's layout must fit -- and report each
 mechanically-checkable class of violation as structured data.
 
 ```
-klt socket-check <file> --socket <descriptor.json> [--top <cell>] [--format text|json]
+klt socket-check <file> --socket <descriptor.json> [--top <cell>]
+                 [--require-power-ports] [--edge-band-um UM] [--format text|json]
 ```
 
 - `<file>` -- path to a GDSII (`.gds`) or OASIS (`.oas`) file. KLayout
@@ -21,6 +22,10 @@ klt socket-check <file> --socket <descriptor.json> [--top <cell>] [--format text
   or indirectly -- including `reserved_layers`, which otherwise walks the
   whole stream regardless of top cell. A named cell absent from the stream
   exits `1` with a clean error.
+- `--require-power-ports` -- run the [`power_ports`](#power_ports) check
+  even when the descriptor declares no `power_ports` object (issue #2839).
+- `--edge-band-um` -- the `power_ports` edge band in micrometres,
+  overriding the descriptor's `power_ports.edge_band_um`.
 - `--format` -- `text` (default, a human-readable summary) or `json`.
 
 ## Why this is a separate verb from `klt precheck`
@@ -98,16 +103,27 @@ A socket descriptor is a JSON document validated against
   (`direction` in `INPUT`/`OUTPUT`/`INOUT`/`FEEDTHRU`, `use` in
   `SIGNAL`/`ANALOG`/`POWER`/`GROUND`/`CLOCK`), consumed by
   [`klt lef-abstract`](#lef-translation) when present.
+  A pin may also name `metal_layer` (`[layer, datatype]`, issue #2839): the
+  layer carrying its drawn conductor when that differs from the label
+  `layer` (sky130 labels met1 on `68/5` over conductor on `68/20`). Used only
+  by the `power_ports` check; defaults to `layer`.
 - `reserved_layers` -- optional (default `[]`). A list of `[layer,
   datatype]` pairs forbidden to this block.
 - `budgets` -- optional (default `[]`). Arbitrary named numeric interface
   budgets: `{name, value, unit, notes?}`. **Never mechanically verified** --
   see [Scope](#scope-what-is-and-isnt-mechanically-checked).
+- `power_ports` -- optional (issue #2839). Requests the
+  [`power_ports`](#power_ports) check and sets its parameters:
+  `{edge_band_um?, edges?, allowed_layers?}`. Present (even `{}`) means
+  "run it"; omitted or `null` leaves it skipped unless
+  `--require-power-ports` is given.
 
 ## Scope: what is (and isn't) mechanically checked
 
-Of a socket descriptor's four fields, three are geometric and genuinely
-checked -- `pins`, `outline`, `reserved_layers`. The fourth, `budgets`, is
+Of a socket descriptor's four original fields, three are geometric and genuinely
+checked -- `pins`, `outline`, `reserved_layers`. (A pin's `use` is also
+consumed by the opt-in `power_ports` check, issue #2839, to decide which
+pins are supplies.) The fourth, `budgets`, is
 **not**: verifying a signal path's maximum resistance/capacitance/current
 against a drawn layout needs parasitic-extraction or simulation data this
 checker does not have (`klt extract --parasitics` produces a first-order
@@ -146,8 +162,9 @@ documents from scratch.
 
 ## Checks
 
-Every run reports exactly three checks, in this order, each with its own
-`status` of `"pass"`, `"fail"`, or `"skipped"`:
+Every run reports exactly four checks, in this order, each with its own
+`status` of `"pass"`, `"fail"`, or `"skipped"` (`power_ports` was appended
+by issue #2839; the first three keep their positions):
 
 ### `pins`
 
@@ -182,6 +199,43 @@ No shape is drawn on a `(layer, datatype)` pair listed in the descriptor's
 zero shapes is not a violation -- only actual usage is flagged. **Skipped
 when the descriptor declares no `reserved_layers`.**
 
+### `power_ports`
+
+**Provisional** (issue #2839): the GDS half of the proposed T1 item 11
+port-accessibility amendment (2AMLogic/product#134, unratified). A
+**supply pin** is a declared pin whose `use` is `POWER` or `GROUND` --
+declared, else [`klt lef-abstract`](lef-abstract.md)'s own name heuristic
+(`VDD`/`VPWR`/`VCC`/`VPB` -> `POWER`, `VSS`/`VGND`/`GND`/`VNB` -> `GROUND`),
+so this check and the emitted LEF never disagree about which pins are
+supplies. For each supply pin the port is the merged, connected drawn
+conductor on its `metal_layer` (else `layer`) that touches the declared
+position. The port is **edge-accessible** when, on at least one counted
+edge, its bounding box lies within `edge_band_um` of the outline (inclusive)
+**and** the approach channel -- the strip from the port to that edge, as
+wide as the port -- holds no other conductor on the same layer, so an
+integrator can land a wire from outside the outline without crossing
+another net's metal.
+
+The check fails with one violation per supply **name** that has no
+edge-accessible port (`{"pin", "reason", "use"}`; `reason` is that name's
+furthest-progressing port's: `missing_label`, `no_drawn_geometry`,
+`interior_only`, `channel_blocked`, or `layer_disallowed`), plus
+`{"pin": null, "reason": "no_power_pin" | "no_ground_pin"}` when no supply
+pin has that `use`.
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `edge_band_um` | `0` | Max distance (um) from the port's shape to an outline edge. `0` = must touch the outline: the strictest, PDK-independent choice while the amendment's band is open (its draft proposes one minimum metal pitch). **Provisional.** |
+| `edges` | all four | Which edges count: `left`/`bottom`/`right`/`top`. |
+| `allowed_layers` | `null` | `[layer, datatype]` pairs the port may be on (matched against `metal_layer` or `layer`); `null` allows any. |
+
+**Skipped unless requested** (descriptor `power_ports` object, or
+`--require-power-ports`), so no existing descriptor changes verdict. The
+facts behind it are reported in the top-level [`power_ports`](#power_ports-block)
+block either way; `klt signoff`'s T1 item 11 re-grades those facts under the
+block manifest's own policy (see [`klt signoff`](signoff.md)'s "Item 11 port
+accessibility").
+
 ## JSON schema (the contract)
 
 **JSON is the API.** Human-readable text output is a courtesy; the JSON
@@ -204,15 +258,31 @@ units), `klt socket-check` reports positions/bounding boxes in
   "socket_name": "example_block",
   "dbu_um": 0.001,
   "status": "pass",
-  "check_count": 3,
+  "check_count": 4,
   "checks": [
     { "name": "pins", "status": "pass", "violation_count": 0, "violations": [], "skip_reason": null },
     { "name": "outline", "status": "pass", "violation_count": 0, "violations": [], "skip_reason": null },
-    { "name": "reserved_layers", "status": "skipped", "violation_count": 0, "violations": [], "skip_reason": "socket descriptor declares no reserved layers" }
+    { "name": "reserved_layers", "status": "skipped", "violation_count": 0, "violations": [], "skip_reason": "socket descriptor declares no reserved layers" },
+    { "name": "power_ports", "status": "skipped", "violation_count": 0, "violations": [], "skip_reason": "power-port edge accessibility not requested (no descriptor 'power_ports' object, no --require-power-ports)" }
   ],
   "budgets": [
     { "name": "signal_r_max", "value": 500, "unit": "ohm", "notes": "worst-case corner", "status": "declared_unverified" }
-  ]
+  ],
+  "power_ports": {
+    "requested": false,
+    "parameters": { "edge_band_um": 0.0, "edges": ["left", "bottom", "right", "top"], "allowed_layers": null, "provisional": true },
+    "outline_um": { "x0": 0.0, "y0": 0.0, "x1": 10.0, "y1": 10.0 },
+    "ports": [
+      {
+        "name": "VDD", "use": "POWER", "use_source": "declared",
+        "layer": "67/20", "metal_layer": "67/20", "x_um": 1.0, "y_um": 1.0,
+        "label_found": true, "label_reason": null, "geometry_source": "drawn",
+        "bbox_um": { "x0": 0.0, "y0": 0.5, "x1": 2.0, "y1": 1.5 },
+        "edge_distance_um": { "left": 0.0, "bottom": 0.5, "right": 8.0, "top": 8.5 },
+        "channel_clear": { "left": true, "bottom": true, "right": true, "top": true }
+      }
+    ]
+  }
 }
 ```
 
@@ -226,15 +296,16 @@ units), `klt socket-check` reports positions/bounding boxes in
 | `socket_name`     | string \| null      | The descriptor's own `name` field, or `null`.                               |
 | `dbu_um`          | number (float)      | The input layout's database unit in micrometres, same semantics as `klt layers`. |
 | `status`          | `"pass"` \| `"fail"`| `"fail"` iff any check's own `status` is `"fail"`. A `"skipped"` check never causes an overall failure. `budgets` never affects this field. |
-| `check_count`     | integer              | Always `3` today -- `len(checks)`.                                          |
+| `check_count`     | integer              | Always `4` today -- `len(checks)` (`3` before issue #2839 appended `power_ports`). |
 | `checks`          | array\<object\>      | One entry per check, always in the order documented above, see below.       |
 | `budgets`         | array\<object\>      | One entry per descriptor `budgets[]` item, see below. `[]` when the descriptor declares none. |
+| `power_ports`     | object               | Issue #2839 (additive): the parameters in force and per-supply-pin port facts, present whether or not the `power_ports` check ran -- see [below](#power_ports-block). |
 
 ### `checks[]` entries
 
 | Field             | Type                                | Description                                                             |
 | ----------------- | ----------------------------------- | ---------------------------------------------------------------------- |
-| `name`            | string                               | Check name (`"pins"`, `"outline"`, `"reserved_layers"`).                |
+| `name`            | string                               | Check name (`"pins"`, `"outline"`, `"reserved_layers"`, `"power_ports"`). |
 | `status`          | `"pass"` \| `"fail"` \| `"skipped"`  | `"skipped"` means the descriptor declared no input for this check.      |
 | `violation_count` | integer                              | `len(violations)`.                                                     |
 | `violations`      | array\<object\>                      | One entry per finding; shape is check-specific, see below. Always `[]` when `status` is `"pass"` or `"skipped"`. |
@@ -264,6 +335,23 @@ units), `klt socket-check` reports positions/bounding boxes in
 | `layer`  | string        | `"<layer>/<datatype>"` of the reserved layer that has shapes drawn on it. |
 | `name`   | string \| null | The layer's own GDS layer-name property, or `null` (GDSII carries no layer-name field, so this is almost always `null` after a write/read round trip -- unlike a `.lyp` file). |
 | `shapes` | integer       | Shape count on this layer, summed across all cell definitions.   |
+
+#### `power_ports` violations
+
+| Field    | Type           | Description |
+| -------- | -------------- | ----------- |
+| `pin`    | string \| null | The supply pin name, or `null` for `no_power_pin`/`no_ground_pin`. |
+| `reason` | string         | `"missing_label"`, `"no_drawn_geometry"`, `"interior_only"`, `"channel_blocked"`, `"layer_disallowed"`, `"no_power_pin"`, or `"no_ground_pin"` -- see [`power_ports`](#power_ports). |
+| `use`    | string \| null | The supply's `use`. |
+
+### `power_ports` block
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `requested` | boolean | Whether the `power_ports` check ran. |
+| `parameters` | object | `{"edge_band_um", "edges", "allowed_layers" ("layer/datatype" strings or null), "provisional": true}` -- what the check graded with. |
+| `outline_um` | object | The descriptor's outline, echoed so a consumer can map ports into LEF macro-local coordinates. |
+| `ports` | array\<object\> | One entry per **supply** pin, sorted by `(name, x_um, y_um)`: `name`, `use`, `use_source` (`"declared"`/`"heuristic"`), `layer` and `metal_layer` (`"layer/datatype"`), `x_um`/`y_um` (declared position), `label_found` + `label_reason` (the `pins` check's own reason, or `null`), `geometry_source` (`"drawn"`, or `"none"` when no conductor touches the position), `bbox_um` (port bounding box, or `null`), `edge_distance_um` (`{"left","bottom","right","top"}`, distance from the port to each outline edge, negative when it crosses it; `null` without geometry), `channel_clear` (per edge, whether the approach channel is free of other same-layer conductor; `null` without geometry). Pure facts: no parameter is applied to them. |
 
 ### `budgets[]` entries
 

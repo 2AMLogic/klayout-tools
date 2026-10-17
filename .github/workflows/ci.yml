@@ -12,9 +12,12 @@ on:
 permissions:
   contents: read
 
+# PRs: one group per PR number; a newer push cancels the superseded run.
+# main: one shared group (github.ref) that never cancels a started run; the
+# default single pending slot still lets a newer merge replace a waiting run.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # uv caches (issue #2559): every `astral-sh/setup-uv` step below RESTORES on any
 # ref but SAVES only on pushes to main (`save-cache`). The repo's Actions cache
@@ -60,10 +63,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
           # Restore anywhere, save only on main -- see the uv-cache note above
@@ -105,6 +108,24 @@ jobs:
         # before merging rather than trusting a snapshot taken earlier in the
         # review cycle.
         run: uv run --frozen --extra dev python scripts/check_complexity_baseline.py
+
+      - name: Type-check ratchet (mypy)
+        # scripts/check_type_baseline.py (issue #3221): mypy over src/ against
+        # type-baseline.json, keyed on (file, error code, message). Fails on a
+        # new diagnostic or a baselined one occurring more often; decreases
+        # never fail. Runs on this job's single Python version only. Refresh
+        # procedure: docs/type-checking.md. GATES -- do not add
+        # continue-on-error.
+        run: uv run --frozen --extra dev python scripts/check_type_baseline.py
+
+      - name: Verb-module import boundaries
+        # scripts/check_import_boundaries.py (issue #2767): static AST gate
+        # for docs/ARCHITECTURE.md's "verb modules stay self-contained"
+        # rule. Fails on an unclassified module, a cross-group private-symbol
+        # import, or an undeclared cross-group edge, against the policy and
+        # seeded legacy exceptions in import-boundaries.json. Never imports
+        # klayout_tools. GATES -- do not add continue-on-error.
+        run: uv run --frozen --extra dev python scripts/check_import_boundaries.py
 
       - name: Committed examples/ carry no absolute host paths
         # `klt env-provenance lint-envelope` (issue #2224) over every
@@ -224,23 +245,24 @@ jobs:
             group: yield
             timeout_minutes: 20
             cargo_test_args: ""
-            # Both files share this one crate (issue #923, Phase 3 of the
+            # All three files share this one crate (issue #923, Phase 3 of the
             # statistical/yield epic #710, added `klt yield-sensitivity` to
-            # the same `klt_yield_native` extension `klt yield` uses).
-            test_paths: tests/test_yield.py tests/test_yield_sensitivity.py
+            # the same `klt_yield_native` extension `klt yield` uses; issue
+            # #2675 added the `klt yield-campaign` native end-to-end tests).
+            test_paths: tests/test_yield.py tests/test_yield_campaign.py tests/test_yield_sensitivity.py
             extension_module: klt_yield_native
-            no_skip_message: "klt_yield_native did not install -- tests/test_yield.py's and tests/test_yield_sensitivity.py's statistics tiers would have skipped"
+            no_skip_message: "klt_yield_native did not install -- tests/test_yield.py's, tests/test_yield_campaign.py's and tests/test_yield_sensitivity.py's statistics tiers would have skipped"
     defaults:
       run:
         working-directory: ${{ matrix.dir }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: cargo --version
         run: cargo --version && rustc --version
 
       - name: Cache cargo registry + build output
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry
@@ -265,7 +287,7 @@ jobs:
         run: cargo test ${{ matrix.cargo_test_args }}
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
           # Restore anywhere, save only on main -- see the uv-cache note above
@@ -539,13 +561,13 @@ jobs:
       run:
         working-directory: native/statime
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: cargo --version
         run: cargo --version && rustc --version
 
       - name: Cache cargo registry + build output
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry
@@ -572,7 +594,7 @@ jobs:
         run: cargo test
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
           # Restore anywhere, save only on main -- see the uv-cache note above
@@ -675,13 +697,13 @@ jobs:
       run:
         working-directory: native/techmap
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: cargo --version
         run: cargo --version && rustc --version
 
       - name: Cache cargo registry + build output
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry
@@ -707,7 +729,7 @@ jobs:
         # above only runs *its own* package's tests, never a path
         # dependency's, so the shared crate's own union-of-both-forks test
         # suite needs its own explicit invocation below.
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry
@@ -747,13 +769,13 @@ jobs:
       run:
         working-directory: native/wave
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: cargo --version
         run: cargo --version && rustc --version
 
       - name: Cache cargo registry + build output
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry
@@ -798,10 +820,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
           # Restore anywhere, save only on main -- see the uv-cache note above
@@ -832,7 +854,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # Full history so the diff below can compare against the PR base
           # / pre-push commit -- the default shallow (depth-1) checkout
@@ -866,7 +888,7 @@ jobs:
         with:
           # Node 22+ per site/README.md / site's @types/node -- matches
           # deploy-site.yml's own Node setup.
-          node-version: "22"
+          node-version: "24"
           cache: npm
           cache-dependency-path: site/package-lock.json
 
@@ -915,10 +937,10 @@ jobs:
         # one per interpreter that exists.
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
           # Restore anywhere, save only on main -- see the uv-cache note above
@@ -1049,7 +1071,7 @@ jobs:
 
       - name: Cache pinned Yosys build
         id: yosys-cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/yosys-0.67
           key: yosys-0.67-${{ runner.os }}-${{ hashFiles('scripts/install-yosys.sh', 'scripts/_install_common.sh') }}
@@ -1095,7 +1117,7 @@ jobs:
 
       - name: Cache pinned SymbiYosys + Bitwuzla install
         id: symbiyosys-cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/symbiyosys-0.67
           key: symbiyosys-0.67-bitwuzla-0.9.1-${{ runner.os }}-${{ hashFiles('scripts/install-symbiyosys.sh', 'scripts/_install_common.sh') }}
@@ -1121,7 +1143,7 @@ jobs:
 
       - name: Cache pinned sky130_fd_sc_hd liberty
         id: sky130-liberty-cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: pdks/sky130-liberty
           key: sky130-liberty-${{ hashFiles('scripts/fetch-sky130-liberty.sh') }}
@@ -1164,7 +1186,7 @@ jobs:
 
       - name: Cache pinned Icarus Verilog build
         id: icarus-cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/icarus-13.0
           key: icarus-13.0-${{ runner.os }}-${{ hashFiles('scripts/install-icarus-verilog.sh', 'scripts/_install_common.sh') }}
@@ -1181,7 +1203,7 @@ jobs:
 
       - name: Cache pinned Verilator build
         id: verilator-cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/verilator-5.050
           key: verilator-5.050-${{ runner.os }}-${{ hashFiles('scripts/install-verilator.sh', 'scripts/_install_common.sh') }}
@@ -1197,7 +1219,7 @@ jobs:
         run: verilator --version
 
       - name: Cache native/techmap cargo build (debug)
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry
@@ -1313,7 +1335,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Check out the primary copy
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           path: primary
 
@@ -1322,12 +1344,12 @@ jobs:
         # different prefix AND a different path length, so a generator that
         # embeds its own absolute path produces different bytes here --
         # precisely what the byte-compare below is looking for.
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           path: second-checkout/nested/deeper-than-the-primary
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
           # Restore anywhere, save only on main -- see the uv-cache note above
@@ -1437,7 +1459,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Prepare fixture block directories
         # `layout-metrics` expects a block *directory* (docs/cli/layout-metrics.md),
@@ -1555,7 +1577,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Check out the primary copy
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           path: primary
 
@@ -1563,12 +1585,12 @@ jobs:
         # A different prefix AND a different path length: a generator that
         # embeds its own absolute path produces different bytes here, which
         # is precisely what the byte-compare below is looking for.
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           path: second-checkout/nested/deeper-than-the-primary
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
           # Restore anywhere, save only on main -- see the uv-cache note above
@@ -1623,6 +1645,55 @@ jobs:
           retention-days: 90
           if-no-files-found: ignore
 
+  asap7-drc-deck:
+    name: ASAP7 DRC deck fixtures (klayout binary)
+    # The in-repo ASAP7 deck (src/klayout_tools/decks/asap7.drc, issue #2760)
+    # is a KLayout DRC-DSL script, which only the standalone `klayout`
+    # application binary can run -- the pip `klayout` wheel the `test` job
+    # installs has no DSL runner, so there tests/test_drc_asap7_deck.py's
+    # per-rule fixture tier skips. This job installs the binary (Ubuntu
+    # 24.04's apt package, KLayout 0.28.16, the version the deck was
+    # validated against) and runs only that module, so every rule's failing
+    # and boundary-passing fixture is checked in CI. The shipped-cell clean
+    # run in the same module still skips here: it needs scripts/fetch-pdks.sh's
+    # lambdapdk payload, which CI does not fetch.
+    #
+    # Its own job rather than an apt step in `test`: installing the binary
+    # there would also switch on every other real-binary tier of the suite
+    # across the whole matrix.
+    #
+    # No row in .github/ci-wall-clock-budget.json yet: an unbudgeted job
+    # falls back to `default_job_budget_seconds` (600 s), the documented path
+    # for a job with no measured baseline (docs/guides/ci-wall-clock-budget.md).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+          # Restore anywhere, save only on main -- see the uv-cache note above
+          # the `jobs:` key (issue #2559).
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install dependencies (includes the klayout wheel)
+        run: uv sync --locked --extra dev
+
+      - name: Install the klayout binary
+        # Same bounded, mirror-tolerant apt wrapper as the `test` job's
+        # ngspice step (issues #1204, #1219).
+        timeout-minutes: 5
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: scripts/ci-apt-install.sh klayout
+
+      - name: ASAP7 deck fixtures
+        run: |
+          klayout -v
+          uv run --frozen --extra dev pytest tests/test_drc_asap7_deck.py -q -rs
+
   wall-clock-budget:
     name: CI wall-clock budget
     # Issue #1971 measured CI wall clock across the 2AM Logic repos and found
@@ -1647,6 +1718,7 @@ jobs:
       - native-techmap
       - native-wave
       - signoff-example
+      - asap7-drc-deck
       - site
       - test
       - test-numerical
@@ -1662,7 +1734,7 @@ jobs:
       # The Actions API call below reads this run's own job timings.
       actions: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Fetch this run's job and run timings
         env:

@@ -11,7 +11,8 @@ Capability A of [Epic #393](https://github.com/2AMLogic/klayout-tools/issues/393
 klt lef-abstract <file> --socket <descriptor.json> --macro-name <name>
                   --cell-library <library> [--top <cell>] [--class <CLASS>]
                   [--symmetry "<axes>"] [--pdk <variant>] [--pdk-root <root>]
-                  [-o/--output <path.lef>] [--format text|json]
+                  [-o/--output <path.lef>] [--require-power-pins]
+                  [--format text|json]
 ```
 
 - `<file>` — path to a GDSII (`.gds`) or OASIS (`.oas`) file. KLayout
@@ -35,6 +36,8 @@ klt lef-abstract <file> --socket <descriptor.json> --macro-name <name>
 - `--pdk` / `--pdk-root` — PDK variant/root overrides, same semantics as
   every other `klt` verb's PDK flags.
 - `-o` / `--output` — output LEF path (default: `<macro-name>.lef`).
+- `--require-power-pins` — exit `3` when the supply-pin verdict
+  (`power_pins`, issue #2839) fails. Without it the verdict is reported only.
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
 ## Engine
@@ -165,14 +168,20 @@ view rather than a hole-aware multi-`RECT` decomposition).
   "cell_library": "sky130_fd_sc_hd",
   "tech_lef": "/abs/path/sky130_fd_sc_hd__nom.tlef",
   "pins": [
-    { "name": "VDD", "direction": "INOUT", "use": "POWER", "layer": "met1", "geometry_source": "drawn", "rects_um": [[0.0, 2.0, 0.2, 3.0]] },
-    { "name": "VOUT", "direction": "INOUT", "use": "ANALOG", "layer": "li1", "geometry_source": "drawn", "rects_um": [[2.0, 0.0, 3.0, 0.2]] }
+    { "name": "VDD", "direction": "INOUT", "use": "POWER", "layer": "met1", "gds_layer": [68, 20], "geometry_source": "drawn", "rects_um": [[0.0, 2.0, 0.2, 3.0]] },
+    { "name": "VOUT", "direction": "INOUT", "use": "ANALOG", "layer": "li1", "gds_layer": [67, 20], "geometry_source": "drawn", "rects_um": [[2.0, 0.0, 3.0, 0.2]] }
   ],
   "pin_count": 2,
   "unroutable_pins": [],
   "obs": [{ "layer": "met1", "shape_count": 1 }],
   "obs_shape_count": 1,
   "warnings": [],
+  "self_check": { "status": "pass", "findings": [], "missing_macros": [], "unexpected_macros": [] },
+  "power_pins": {
+    "status": "fail",
+    "findings": [{ "code": "no_ground_pin", "pin": null, "message": "no PIN with USE GROUND in the abstract" }],
+    "pins": [{ "name": "VDD", "use": "POWER", "use_read_back": "POWER", "layer": "met1", "geometry_source": "drawn" }]
+  },
   "provenance": {
     "klt_version": "0.1.0",
     "klayout_version": "0.30.10",
@@ -195,25 +204,117 @@ view rather than a hole-aware multi-`RECT` decomposition).
 | `size_um` | object | `{width, height}` — the outline's own extent. |
 | `cell_library` | string | Echo of `--cell-library`. |
 | `tech_lef` | string | The resolved tech LEF path this run's routing-layer/`SITE` header came from. |
-| `pins` | array\<object\> | One entry per descriptor pin, in name-sorted order: `{name, direction, use, layer, geometry_source, rects_um}`. `layer` is the resolved LEF layer name, or `null` when unresolvable. `rects_um` is `[]` for `geometry_source: "none"`. |
+| `pins` | array\<object\> | One entry per descriptor pin, in name-sorted order: `{name, direction, use, layer, gds_layer, geometry_source, rects_um}`. `layer` is the resolved LEF layer name, or `null` when unresolvable. `gds_layer` (issue #2839, additive) is the descriptor's declared `[layer, datatype]` for the pin, so a consumer can match the PIN to the same pin's `klt socket-check` port facts. `rects_um` is `[]` for `geometry_source: "none"`. |
 | `pin_count` | integer | `len(pins)`. |
 | `unroutable_pins` | array\<object\> | `{name, layer: [gds_layer, gds_datatype]}` for every pin with `geometry_source: "none"` — a programmatically-checkable echo of the same condition (issue #464), so a caller composing this command's output into `klt place-and-route`'s `request.macros` can check it directly instead of grepping `warnings[]`. `[]` on a run with no such pins. |
 | `obs` | array\<object\> | `{layer, shape_count}` per LEF layer with obstruction geometry, layer-name sorted. |
 | `obs_shape_count` | integer | Sum of every `obs[].shape_count`. |
 | `warnings` | array\<string\> | Non-fatal notes: a pin fell back to synthesized geometry, or a pin's layer did not resolve to a known routing LEF layer. `[]` on a run with no such notes. |
+| `self_check` | object | Structural self-check of the LEF file **read back from disk** after writing (issue #2769) — see "Structural self-check" below. `{status, findings, missing_macros, unexpected_macros}`; `status` is `"pass"` or `"fail"` and is the verdict of record for whether `output` may be consumed. |
+| `power_pins` | object | Issue #2839 (additive): the supply-pin verdict over the same read-back bytes — see "Supply-pin verdict" below. Affects the exit code only with `--require-power-pins`. |
 | `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names `--cell-library` and hashes the resolved tech LEF; `pdk` is `find_pdk()`'s resolved triple; `input` is the content hash of `<file>`. |
+
+## Structural self-check
+
+After writing the LEF, the command reads the file back from disk and runs a
+small structural validator over **the bytes actually written** — not over
+its own in-memory pin data — against exactly one expected macro
+(`--macro-name`) whose expected pins are the socket descriptor's own
+declared `pins[].name`s. The result is the additive `self_check` object:
+
+```json
+"self_check": {
+  "status": "fail",
+  "findings": [
+    { "code": "missing_pin", "message": "declared pin VOUT is missing from MACRO analog_block", "line": 5, "macro": "analog_block", "pin": "VOUT" }
+  ],
+  "missing_macros": [],
+  "unexpected_macros": []
+}
+```
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `status` | string | `"pass"` iff `findings` is empty, else `"fail"`. |
+| `findings` | array\<object\> | Every defect found — all checks run, so one fault never hides another. Each entry always has the same five keys: `code` (stable, machine-readable; table below), `message` (prose, not part of the contract), `line` (1-based line in the emitted file, or `null`), `macro` / `pin` (the affected names, or `null` when not applicable). |
+| `missing_macros` | array\<string\> | Expected macro names not declared in the file, sorted. |
+| `unexpected_macros` | array\<string\> | Declared macro names that were not expected, sorted. |
+
+| `code` | Meaning |
+| --- | --- |
+| `missing_version` | No library-level `VERSION <value> ;` statement. |
+| `missing_end_library` | No `END LIBRARY`. |
+| `content_after_end_library` | Non-comment content after `END LIBRARY`. |
+| `unclosed_block` | A `MACRO`/`PIN`/`PORT`/`OBS` block never closed — at end of file (truncation), at `END LIBRARY`, or skipped over by an `END` naming an outer block. |
+| `end_name_mismatch` | `END <name>` that does not match the innermost open block (a `MACRO`/`PIN` with a different name, or an anonymous `PORT`/`OBS`). |
+| `unnamed_end` | Anonymous `END` where `END <name>` was required to close a `MACRO`/`PIN`. |
+| `orphan_end` | `END` with no open block. |
+| `misplaced_block` | Block in the wrong parent: a nested `MACRO`, a `PIN`/`OBS` not directly inside a `MACRO`, a `PORT` not directly inside a `PIN`. |
+| `missing_name` | `MACRO`/`PIN` with no name on its line. |
+| `unterminated_statement` | A statement with no `;` before end of file or before the next line starting with a block keyword. |
+| `duplicate_macro` / `duplicate_pin` | A macro, or a pin within one macro, declared more than once. |
+| `missing_macro` / `unexpected_macro` | Macro name set differs from the expected set (exact, case-sensitive comparison). |
+| `missing_pin` | A declared pin is not inside its macro (`macro` names the containing macro; `line` is that macro's `MACRO` line). |
+| `unexpected_pin` | A pin inside an expected macro that is not one of its declared pins (with `missing_pin`, this is how a pin placed in the wrong macro surfaces). |
+
+Codes are additive: a consumer must tolerate codes it does not recognise
+and gate on `status`.
+
+**Scope and limits.** The validator understands only the LEF subset this
+command emits: library-level `;`-terminated statements, `MACRO <name>` …
+`END <name>`, `PIN <name>` … `END <name>`, anonymous `PORT` … `END` and
+`OBS` … `END`, and a final `END LIBRARY`. `#` comments and ordinary
+whitespace (indentation, tabs, blank lines, a `;` glued to a token) are
+tolerated; identifiers are compared exactly, never case-folded. A name
+after `MACRO`/`PIN`/`END` must sit on the keyword's line. It is not a
+general LEF parser and checks no geometry, layer names or statement
+semantics. **A structural pass does not prove routability or P&R
+acceptance.** A `PORT`-less pin (`geometry_source: "none"`, listed in
+`unroutable_pins`) and a synthesized pin are structurally present and keep
+their `warnings` — neither is a structural failure.
+
+On `"fail"` the LEF is **left on disk** for diagnosis and the normal report
+is still emitted; callers must gate consumption of `output` on
+`self_check.status` (or the exit code below). Failing to read the written
+file back at all is an application error (exit `1`), not a finding.
+
+## Supply-pin verdict (`power_pins`, issue #2839)
+
+**Provisional** — the abstract half of the proposed T1 item 11
+port-accessibility amendment (2AMLogic/product#134, unratified). Graded on
+the LEF **read back from disk**, like `self_check`: each supply pin's `USE`
+is taken from the written file's own `USE` statement, not from in-memory
+data.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `status` | string | `"pass"` iff `findings` is empty. |
+| `findings` | array\<object\> | `{code, pin, message}`; `pin` is `null` for a set-level finding. |
+| `pins` | array\<object\> | Every supply pin (`use` `POWER`/`GROUND`): `{name, use, use_read_back, layer, geometry_source}`. |
+
+| `code` | Meaning |
+| --- | --- |
+| `no_power_pin` / `no_ground_pin` | No pin is `USE POWER` / `USE GROUND`. |
+| `use_not_written` | The written file's `USE` for a supply pin is absent or differs. |
+| `port_not_drawn` | A supply pin's `PORT` is a synthesized placeholder or missing (`geometry_source` not `"drawn"`) — the amendment requires the abstract's power `PORT` to be drawn layout geometry. |
+
+`klt signoff`'s T1 item 11 consumes this envelope (with a `klt socket-check`
+envelope for the GDS side) to check that every declared supply has a LEF
+`PIN` that agrees with an edge-accessible GDS port — see
+[`klt signoff`](signoff.md)'s "Item 11 port accessibility".
 
 ## Exit codes
 
 | Code | Meaning |
 | --- | --- |
-| `0` | The LEF abstract was written successfully. |
-| `1` | Failed to run — bad layout/socket descriptor, an ambiguous/missing top cell, an unresolvable PDK/tech-LEF/layer-map for `--cell-library`, or an unwritable output path. |
+| `0` | The LEF abstract was written and `self_check.status` is `"pass"`. |
+| `1` | Failed to run — bad layout/socket descriptor, an ambiguous/missing top cell, an unresolvable PDK/tech-LEF/layer-map for `--cell-library`, an unwritable output path, or the written file could not be read back for its self-check. Error envelope on stderr; no report. |
 | `2` | Usage error (missing argument, bad `--format` value) — from argparse. |
+| `3` | The LEF abstract was written and the full report emitted, but `self_check.status` is `"fail"` (issue #2769). Do not consume the file. Also returned, with `--require-power-pins` only, when `power_pins.status` is `"fail"` (issue #2839). |
 
-**No exit code `3`.** Unlike `klt socket-check`, this command has no
-pass/fail concept of its own — a pin resolving to synthesized (rather than
-drawn) geometry is reported in `warnings`, never treated as a failure.
+A pin resolving to synthesized (rather than drawn) geometry, or to no
+`PORT` at all, is reported in `warnings`/`unroutable_pins` and never by
+itself produces exit `3`.
 
 Per [`docs/json-contract.md`](../json-contract.md#exit-codes)'s additive
 contract, a future release may still add a code above `2`; a consumer

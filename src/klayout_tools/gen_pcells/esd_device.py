@@ -73,6 +73,10 @@ def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         `_bjt_unit_layout` already documents for its own device).
         """
 
+        # Declared via ``self.param("mfg_grid_um", ...)`` below; the
+        # PCellDeclarationHelper stubs cannot see it, so annotate for mypy.
+        mfg_grid_um: float
+
         def __init__(self) -> None:
             super().__init__()
             self.param(
@@ -209,6 +213,13 @@ def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default=0.0,
             )
             self.param(
+                "top_endcap_um",
+                self.TypeDouble,
+                "Harness-resolved gate-stripe top-edge endcap neck "
+                "(see _PDK_GATE_TOP_ENDCAP_UM)",
+                default=0.0,
+            )
+            self.param(
                 "sd_implant_layer",
                 self.TypeLayer,
                 "Source/drain implant drawing layer (only used when "
@@ -266,6 +277,14 @@ def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "generator's own cut size unchanged",
                 default=0.0,
             )
+            self.param(
+                "mfg_grid_um",
+                self.TypeDouble,
+                "Manufacturing grid (um) every cut on contact_layer is "
+                "snapped onto (issue #2648) -- 0.0 leaves cut positions "
+                "unchanged",
+                default=0.0,
+            )
 
         def display_text_impl(self) -> str:
             return (
@@ -292,6 +311,7 @@ def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.contact_gate_offset_um,
                 self.bottom_endcap_um,
                 self.sd_implant_margin_um if self.sd_implant_present else 0.0,
+                top_endcap_um=self.top_endcap_um,
             )
             unit_boxes = info["unit"]["boxes_um"]
             for role, li in (
@@ -337,6 +357,7 @@ def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     _shift_box(ring["outer_box_um"], ox, oy),
                     _shift_box(ring["inner_box_um"], ox, oy),
                     gap_box,
+                    self.mfg_grid_um,
                 )
                 _insert_ring(
                     self.cell,
@@ -345,6 +366,7 @@ def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     _shift_box(ring["outer_box_um"], ox, oy),
                     _shift_box(ring["inner_box_um"], ox, oy),
                     gap_box,
+                    self.mfg_grid_um,
                 )
                 _insert_boxes(
                     self.cell, li_contact, dbu, ring["contact_boxes_um"], ox, oy
@@ -372,10 +394,17 @@ def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                         gap_box,
                         ring["gap"]["side"] if ring["gap"] is not None else None,
                         self.ring_implant_margin_um,
+                        self.mfg_grid_um,
                     )
 
             # Issue #2585: clamp every cut on a fixed-size cut/via layer down
             # to that size, inside the unchanged generic-budget layout.
-            _clamp_cut_boxes(self.cell, li_contact, dbu, self.contact_fixed_size_um)
+            _clamp_cut_boxes(
+                self.cell,
+                li_contact,
+                dbu,
+                self.contact_fixed_size_um,
+                self.mfg_grid_um,
+            )
 
     return {"esd_device": _EsdDevicePCell}

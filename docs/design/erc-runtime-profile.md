@@ -160,7 +160,9 @@ reports only `merged` and `area`, with the `&` time charged to the
 caller's `tottime`). Instead, `--attribute-walk` re-runs the primary
 extraction through `erc`'s own helpers and times each statement of the
 walk's per-net prologue separately. This replica is used for measurement
-only and is never compared with or fed back into a report.
+only and is never compared with or fed back into a report. With
+`--repeat 0` it runs on its own, with no `run_erc` call at all
+(issue #2753) -- the recipe the attribution commands below use.
 
 Tool versions: `klt 0.6.0+g7e047a5df68f` (worktree at `7e047a5d`;
 `src/klayout_tools/erc.py` is unchanged from `origin/main`
@@ -226,19 +228,39 @@ order as the measured walk of 2,156 s CPU / 3,890 s wall. `w255np` was
 not run end to end with `active_layer`; by the same arithmetic it would
 take about 40,443 x 0.42 s, roughly 4.7 h.
 
-Attribution commands (`--attribute-walk-limit` bounds the replica;
-`w16` timed all candidates):
+Attribution commands (issue #2753 recipe). `--repeat 0` skips every
+`run_erc` call -- the output carries `runs: []` and only
+`walk_attribution` -- so a sampled attribution costs no full ERC run on
+top of the replica; `w16` timed all candidates:
 
 ```bash
 python scripts/research/profile_erc.py /tmp/erc2229/w16/.klt/place-and-route/modexp.gds \
-    scripts/research/erc_profile_specs/sky130_stack_nets_ties.json --attribute-walk
+    scripts/research/erc_profile_specs/sky130_stack_nets_ties.json \
+    --repeat 0 --attribute-walk
 python scripts/research/profile_erc.py /tmp/erc2229/w128/.klt/place-and-route/modexp.gds \
     scripts/research/erc_profile_specs/sky130_stack_nets_ties.json \
-    --attribute-walk --attribute-walk-limit 500
+    --repeat 0 --attribute-walk --attribute-walk-limit 500
 python scripts/research/profile_erc.py /tmp/erc2229/w255np/.klt/place-and-route/modexp.gds \
     scripts/research/erc_profile_specs/sky130_stack_nets_ties.json \
-    --attribute-walk --attribute-walk-limit 300
+    --repeat 0 --attribute-walk --attribute-walk-limit 300
 ```
+
+`--attribute-walk-limit` bounds only the timed per-candidate loop
+(cluster-id order). Layout loading, the primary extraction, and the
+active-region build still run once at full size before the first
+candidate is timed, so a sample does not bound those setup costs.
+`--check-identical` performs an additional uninstrumented full ERC run
+and needs a profiled baseline (`--repeat >= 1`), and `--cprofile` runs
+another full ERC pass under cProfile; neither belongs in this recipe.
+Specs declaring `devices[]` (or a `--deck`) are rejected.
+
+As originally recorded, these commands relied on the `--repeat 1`
+default, which runs one full profiled ERC pass before the attribution
+sample -- so the `w255np` command as written would include exactly the
+~4.7 h end-to-end `active_layer` run the text above says was not
+performed. `--repeat 0` is the supported recipe from issue #2753 on.
+The attribution table itself is unaffected either way: its numbers come
+from the replica's own timers, not from the profiled run.
 
 ### 2. Without `active_layer`
 
@@ -283,6 +305,78 @@ An unprofiled CLI run of the same configuration took 54.7 s wall / 26.6 s
 user (`/usr/bin/time -p klt erc GDS sky130_stack_noactive.json --pdk
 sky130 --format json`). Its user time matches the profiled run's 27.2 s
 CPU, so the wrappers add no material overhead.
+
+## After #2751: bounded per-net active lookup
+
+**Change.** `run_erc` no longer evaluates `(gate_poly_region & active_region).merged()`
+against the whole-layout active region once per candidate net. The active
+region is loaded once into a scratch cell (`erc._ActiveIndex`), and each
+net is intersected only with the active polygons whose bounding box
+touches the net's own poly bbox (a spatial query on the shape tree). Active
+polygons outside that window cannot intersect the net, so the merged
+result and its area are identical to the whole-layout boolean.
+
+The first attempt registered `poly & active` as an extra connected layer in
+the primary `LayoutToNetlist`. It was rejected: the extra layer changes
+KLayout's cluster numbering, so `gates[]` came out in a different order
+(same multiset of nets and areas, but not byte-identical). The bounded
+lookup does not touch the connectivity graph at all.
+
+**Method and provenance (partial).** Only the `WIDTH=16` fixture was
+re-measured. It was regenerated for this change with
+`python scripts/research/regenerate_erc_profile_fixture.py 16 /tmp/erc2751/w16`
+(2,466 nets; the routed GDS differs slightly from the `w16` above, which
+had 2,470), on the shared 8-vCPU dispatch host with other sweeps running.
+"Before" is `HEAD~1` of the change (the pre-change `src/` run through
+`PYTHONPATH`); "after" is this branch's change on top of it. Both ran
+`klt erc GDS scripts/research/erc_profile_specs/sky130_stack_nets_ties.json --pdk sky130 --format json`.
+
+| `w16`, `active_layer` + `ties[]`, full mode | before | after |
+| --- | --- | --- |
+| `klt erc` end to end (wall / user CPU) | 17.3 s / 17.3 s | 2.4 s / 2.4 s |
+| `& active` per candidate (`--attribute-walk`, all 2,466 candidates) | 15.4 ms (table above) | 0.057 ms |
+
+- Output check: the two JSON reports are identical (parsed-JSON equality after
+  masking `provenance.klt_version`, which embeds the git revision):
+  `gates[]` (all 1,854, including every `gate_area_um2` and the order),
+  `erc_findings`, `status`, and `erc_status`.
+- The "before" `per candidate` figure is the earlier measurement on the
+  earlier fixture, not a same-run comparison; the end-to-end row is.
+- Timings are single runs on a loaded host, so only the order of magnitude
+  is meaningful.
+
+**`w128` measurement (issue #3122).** The fixture was regenerated with
+`python scripts/research/regenerate_erc_profile_fixture.py 128 /tmp/erc-w128`
+(synth 4 s + P&R 1,639 s). The routed GDS differs slightly from the `w128`
+above: 19,979 candidate nets / 15,105 gate nets (was 20,053 / 15,200), as
+with `w16`, so the baseline column below is a different fixture. The "same
+GDS" column is a same-run control: `src/` with only `_ActiveIndex.intersect`
+reverted to the whole-layout `(poly & active).merged()`, run on the new GDS.
+Commit `0e8009f0` (`main`), the shared dispatch worker (16 visible CPUs,
+load average 2-4 from other sweeps, runs at `nice -n 10`), one run each, so
+only the order of magnitude is meaningful.
+
+| `w128`, `active_layer` + `ties[]`, full mode | baseline (#2229 fixture, before) | same GDS, whole-layout boolean | after (bounded lookup) |
+| --- | --- | --- | --- |
+| candidate walk (`profile_erc.py`) | 3,890.0 s wall / 2,156.4 s CPU | not profiled | 3.63 s wall / 3.63 s CPU |
+| `profile_erc.py` end to end | 3,940.4 s wall / 2,194.2 s CPU | not profiled | 22.6 s wall / 22.5 s CPU |
+| `klt erc` end to end (wall / user CPU) | not run | 1,058.1 s / 1,057.3 s | 22.5 s / 22.2 s |
+| `& active` per candidate (`--attribute-walk --attribute-walk-limit 500`) | 167.9 ms (table above) | not run | 0.462 ms (500 candidates, 375 gate nets, 20,179 active polygons) |
+
+- Output check: `profile_erc.py ... --check-identical` reports
+  `identical_to_uninstrumented: true`. Against the whole-layout control, the
+  two `klt erc --format json` reports are equal key by key apart from the
+  `spec` path as typed on the command line: `gates[]` (all 15,105, including
+  every `gate_area_um2` and the order), `erc_findings` (0), `status` and
+  `erc_status` (`clean_partial`).
+- The walk is 3.6 s, the same order as the no-`active_layer` walk (4.2-4.3 s
+  in the table above), so the expectation from the `w16` ratio holds. The
+  walk is no longer the dominant phase: primary extraction (8.6 s) and tie
+  extraction (9.7 s) are.
+- The control on the new GDS took about 1,058 s, not the 3,940 s baseline.
+  The baseline was measured on a different fixture and a more loaded host,
+  so do not read 3,940 s -> 22.5 s as the speed-up; the same-GDS ratio is
+  about 47x end to end.
 
 ## Comparison with #2219 and with #2229's synthetic table
 

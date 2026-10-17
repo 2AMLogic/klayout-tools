@@ -306,7 +306,7 @@ gh issue list --state=open --limit 500 --json number,title,labels \
     ([.labels[].name] | contains(["loom:auditor"]) | not) and
     ([.labels[].name] | contains(["loom:epic"]) | not) and
     ([.labels[].name] | contains(["loom:blocked"]) | not) and
-    ([.labels[].name] | contains(["loom:operator-only"]) | not) and
+    ([.labels[].name] | contains(["loom:operator"]) | not) and
     ([.labels[].name] | contains(["external"]) | not)
   ) | "#\(.number) \(.title)"'
 ```
@@ -314,8 +314,8 @@ gh issue list --state=open --limit 500 --json number,title,labels \
 Note: `loom:blocked` stays excluded here but is *not* dropped entirely from
 Curator's purview — the "Checking Dependencies" section below handles
 `loom:blocked` issues separately (dependency re-checks, unblock-on-resolve).
-`loom:operator-only` (host/cert/secret provisioning meant for a human, not a
-Builder) has no such re-check workflow, so it is excluded outright.
+`loom:operator` (a human must act or decide — host/cert/secret provisioning,
+a ruling — not a Builder) has no such re-check workflow, so it is excluded outright.
 
 **Workflow**:
 1. Try Priority 1 search first
@@ -661,7 +661,6 @@ The Builder's complexity-assessment path (`defaults/.claude/commands/loom/builde
 - Link to relevant code, docs, or discussions
 - Document implementation options and trade-offs
 - Add planning details (architecture, dependencies, risks)
-- Assess and add `loom:urgent` label if issue is time-sensitive or critical
 
 ### Verify enumerations
 
@@ -783,7 +782,7 @@ Issues about agent behavior or workflow failures need special curation to preven
 - **Specify a verification method**: Include a concrete test that can distinguish a superficial fix from a real one. Example: "The next PR created by the builder after this change must have sections: Summary, Changes, Test Plan."
 
 ### Organization
-- Apply the real Loom vocabulary: `loom:urgent` for priority, and a tier label (`tier:goal-advancing`, `tier:goal-supporting`, or `tier:maintenance`) for classification — see `.github/labels.yml` for the authoritative set. Do not invent labels (`bug`, `enhancement`, `P0/P1/P2`, and milestones are not part of Loom's label set).
+- Apply the real Loom vocabulary — see `.github/labels.yml` for the authoritative set. Priority (`loom:important` / `loom:very-important`) is set by the operator, Guide and Champion, not the Curator, and the tier labels are retired (rjwalters/loom#11103; see `.loom/docs/priority-model.md`). Do not invent labels (`bug`, `enhancement`, `P0/P1/P2`, and milestones are not part of Loom's label set).
 - Group related issues with `loom:epic` / `loom:epic-phase` tracking issues
 - Update issue templates based on patterns
 
@@ -816,43 +815,23 @@ gh issue close <number> --reason "not planned"
 
 **Guardrails (safety — do NOT skip these):**
 - **Always comment the rationale BEFORE closing.** A silent close destroys context. `--reason "not planned"` distinguishes a judgment-call close from a fix.
-- **Never close an issue that encodes a still-pending human decision.** If the right call requires a human (a policy choice, a controversial trade-off, a security/access decision, anything you are not authorized to settle), route it instead — add `loom:blocked` (automatable but waiting on a dependency/clarification) or `loom:operator-only` **plus exactly one sub-kind label**, per "Applying `loom:operator-only`" immediately below — do **not** close it.
+- **Never close an issue that encodes a still-pending human decision.** If the right call requires a human (a policy choice, a controversial trade-off, a security/access decision, anything you are not authorized to settle), route it instead per "Routing to a human" immediately below — do **not** close it.
 - **Never invent new labels.** Use only the existing label set.
 - **Do not close an issue another agent is actively building** (`loom:building`) unless you are that agent — coordinate via a comment instead.
 - **Stand down on operator-session-lane issues.** An issue an operator filed with a command-verifiable acceptance criterion and a non-executing-file-only diff (`.md`/`.txt`; see CLAUDE.md § "Sweep Lifecycle" → operator-session lane) is routed straight to `loom:building` with Curator intentionally skipped. If you encounter one already labeled `loom:building`, do **not** re-curate it, re-label it, or post a no-op "already implementation-ready" comment — leave it exactly as found and move on. Re-deriving the same one-line diff and commenting to say so is the repeat-no-op-pass anti-pattern (#4736), not a clean-slate curation.
 
-#### Applying `loom:operator-only`: a sub-kind label is REQUIRED (#5819)
+#### Routing to a human
 
-**Never apply `loom:operator-only` on its own.** Choose exactly one sub-kind and
-apply both labels in the **same** command. This is purely additive — the base
-label is never removed or replaced, so every filter/skip keyed on it (sweep
-pre-flight, `warn-operator-gated.sh`, Champion's promotion-queue exclusions, the
-Priority-2 query above) behaves exactly as before:
-
-| Sub-kind | Apply when |
-|---|---|
-| `loom:operator-blocked` | Waiting on a **named** issue/PR/piece of infrastructure that does not exist yet — self-clearing once that lands |
-| `loom:operator-mechanical` | Needs host or admin access, a credential, or another mechanical action — no judgement required |
-| `loom:operator-decision` | A genuine human ruling is needed (policy, trade-off, security/access). **Safe default whenever the kind is not obvious** |
-
-```bash
-# Curator routing an issue that encodes a still-pending human decision:
-gh issue comment <number> --body "Routing to the operator: <why a human must decide>."
-gh issue edit <number> --add-label "loom:operator-only,loom:operator-decision"
-```
-
-Being unsure which sub-kind applies is **never** a reason to emit the bare
-label — `loom:operator-decision` is always safe to over-apply.
-
-**If you chose `loom:operator-blocked`**, the same comment MUST name the blocker
-in machine-readable form: a literal `Blocked by #N` / `Depends on #N` /
-`Requires #N` line (the exact phrasings `detect-dependency-cycle.sh` and
-`warn-operator-gated.sh` parse by regex). A backtick-quoted reference in prose
-does not satisfy this — the phrase itself must be present so a later automated
-pass can tell when the blocker clears.
-
-Full taxonomy and rationale: `.loom/docs/label-state-machine.md` →
-"`loom:operator-only` sub-kinds".
+Park only for a PO-level decision or a human-hands step (#10001), never as
+the default for "hard" or "uncertain". The rule, its falsifiability test and
+the comment each route needs are `.loom/docs/label-state-machine.md` →
+"Routing to a human": a ruling → `loom-daemon operator-decision apply <number>
+--input d.json` (2-4 ranked options; adds `loom:operator`); a human's hands →
+`loom:operator` + a comment naming the step (+ a `Blocked by #N` line if
+that waits on something named); waiting on something automation resolves →
+`loom:blocked` with a park record, including a missing capability. (The
+base-plus-sub-kind labels this section used to require are retired into
+`loom:operator`, 2am#4345 / rjwalters/loom#11795.)
 
 **Composes with the work-finder**: a **closed** issue leaves the queue automatically (the autonomous work-finder only polls *open* `loom:issue` items), so a well-reasoned close will not be re-picked-up. A **rescoped** issue must have its labels reset (per above) so it is not re-dispatched in a loop with a stale scope.
 
@@ -1424,7 +1403,8 @@ The same one-time re-post applies to markers written before the canonical
 canonical hash for the identical state, so the first pass after this change
 reads `CHANGED` and posts once. E.g. #528's prose-era marker was
 `bb3b15b9f3db0761`; its canonical fingerprint for the same unchanged state
-(`378:OPEN:loom:architect,loom:epic-phase,loom:operator-only`) is
+(issue #378 open, labelled `loom:architect`, `loom:epic-phase` and the
+then-current operator escalation label) is
 `7004d3c3258ab254`. After that single re-post the hash is stable by
 construction. Do not "fix" this by reverse-engineering an old prose hash.
 
@@ -1473,7 +1453,6 @@ Before marking an issue as `loom:curated`, ensure it has:
 - ✅ **Affected Files section** (see Required Sections below)
 - ✅ **Dependencies verified**: All task list items checked (or no Dependencies section)
 - ✅ **Not a duplicate**: Verified no similar open issues exist (use `check-duplicate.sh`)
-- ✅ Priority label (`loom:urgent` if critical, otherwise none)
 - ✅ Labeled as `loom:curated` when complete (NOT `loom:issue` — promotion is never the Curator's call)
 
 ### Required Sections

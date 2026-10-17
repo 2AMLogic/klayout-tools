@@ -23,6 +23,7 @@ import json
 import os
 import re
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -30,17 +31,23 @@ import klayout.db as kdb
 import pytest
 
 from klayout_tools import extract_abstract, pdk
+from klayout_tools._layout import region_expr as _region_expr
 from klayout_tools.cli import main
 from klayout_tools.decks import (
+    BipolarDevice,
     DiodeDevice,
     ExtractionDeck,
     InvalidLabelLayerError,
+    LayerExpr,
+    SizeFilter,
     get_extraction_deck,
     get_unmodeled_voltage_markers,
 )
+from klayout_tools.decks.extraction import layer_operand_leaves
 from klayout_tools.extract import (
     PARASITIC_MODEL_SCOPE,
     ExtractError,
+    _apply_size_filter,
     _describe_devices,
     _describe_matched_device_groups,
     _detect_single_terminal_nets,
@@ -1785,6 +1792,7 @@ def test_gf180mcu_nmos_body_isolation_scoping_is_opt_in(tmp_path):
         _device_instance_paths,
         _def_pin_promotion,
         _substrate_spreading,
+        _pin_renames,
     ) = _extract_netlist(layout, layout.top_cell(), disabled_deck)
     circuit = netlist.circuit_by_name(layout.top_cell().name)
     devices, _device_counts = _describe_devices(circuit)
@@ -2374,6 +2382,344 @@ def test_declared_pins_no_duplicate_label_warning_on_ordinary_fixture(tmp_path):
         def_pins=frozenset({"VGND", "VPWR", "VPB", "A"}),
     )
     assert not any("physically disconnected nets" in w for w in report["warnings"])
+
+
+# --------------------------------------------------------------------------- #
+# `--rename-declared-pins`: rename a surviving multi-label pin net to its
+# declared name (issue #2854)
+#
+# `--pins`/`--def-pins` reconciliation (above) only *demotes* -- a surviving
+# pin net whose conductor carries several drawn labels keeps KLayout's
+# comma-joined `Net.name` (`Y,clk`, written `Y|clk`), so the declared name is
+# only one component of the string. Every pin-name consumer (notably `klt
+# lvs`'s `options.anchor_top_level_pins`, #2692) matches names exactly, so
+# such a pin can never pair with a reference pin named `clk`. The rename pass
+# closes that: exactly one declared component -> rename to it; 2+ declared
+# components -> report, never repair (a short between interface pins); a
+# rename colliding with an existing net name -> skip and report.
+# --------------------------------------------------------------------------- #
+
+
+def test_rename_declared_pins_default_is_unchanged(tmp_path):
+    """The flag off (the default) is byte-for-byte identical to a run with no
+    rename at all -- same invariant `--pins`'s own default preserves."""
+    path = _write_gds(
+        _make_inverter_layout(extra_y_label="clk"), tmp_path / "multi_label.gds"
+    )
+    declared = frozenset({"clk", "VGND", "VPWR", "VPB", "A"})
+    base = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "base.spice"),
+        declared_pins=declared,
+    )
+    explicit_off = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "off.spice"),
+        declared_pins=declared,
+        rename_declared_pins=False,
+    )
+
+    assert base["pin_renames"] is None
+    assert base["rename_declared_pins"] is False
+    assert explicit_off["pin_renames"] is None
+    assert explicit_off["rename_declared_pins"] is False
+    assert {n["name"] for n in base["nets"] if n["pin"]} == {
+        n["name"] for n in explicit_off["nets"] if n["pin"]
+    }
+    assert not any("--rename-declared-pins" in w for w in base["warnings"])
+
+
+def test_rename_declared_pins_renames_multi_label_net_to_declared_name(tmp_path):
+    """The core regression (issue #2854): a promoted net whose `Net.name` is
+    KLayout's comma-joined multi-label form (`Y,clk`, rendered `Y|clk`) is
+    renamed to the declared name (`clk`) when exactly one of its component
+    labels is declared -- the `.SUBCKT` header, `nets[]`, the `pin_renames`
+    block and a `warnings[]` entry all carry the declared name."""
+    path = _write_gds(
+        _make_inverter_layout(extra_y_label="clk"), tmp_path / "multi_label.gds"
+    )
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "renamed.spice"),
+        declared_pins=frozenset({"clk", "VGND", "VPWR", "VPB", "A"}),
+        rename_declared_pins=True,
+    )
+
+    pins = {n["name"] for n in report["nets"] if n["pin"]}
+    assert "clk" in pins
+    assert "Y|clk" not in pins
+    assert {"VGND", "VPWR", "VPB", "A"}.issubset(pins)
+
+    # The written netlist's `.SUBCKT` header -- the artifact `klt lvs` and a
+    # testbench consume -- carries the declared name.
+    written = Path(report["netlist_path"]).read_text()
+    [header] = (line for line in written.splitlines() if line.startswith(".SUBCKT"))
+    assert header.endswith(" clk")
+    assert "Y|clk" not in header
+
+    assert report["rename_declared_pins"] is True
+    assert report["pin_renames"]["renamed"] == [{"from": "Y|clk", "to": "clk"}]
+    assert report["pin_renames"]["findings"] == []
+    assert report["pin_renames"]["declared"] == [
+        "A",
+        "VGND",
+        "VPB",
+        "VPWR",
+        "clk",
+    ]
+    warning = next(
+        (w for w in report["warnings"] if "--rename-declared-pins" in w), None
+    )
+    assert warning is not None
+    assert "'Y|clk' -> 'clk'" in warning
+
+
+def test_rename_declared_pins_requires_a_declared_pin_set(tmp_path):
+    """The flag with neither `--pins` nor `--def-pins` is a clean error, not a
+    silent no-op: there is no declared set to rename to."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    with pytest.raises(ExtractError, match="--rename-declared-pins requires"):
+        run_extract(
+            path,
+            "sky130",
+            output=str(tmp_path / "inv.spice"),
+            rename_declared_pins=True,
+        )
+
+
+def test_rename_declared_pins_reports_a_short_between_two_declared_pins(tmp_path):
+    """A net matching 2+ declared names is *reported, never repaired* (issue
+    #2854): one conductor carrying two declared interface pins is a short
+    between interface pins, a layout defect -- the net keeps its joined name
+    and a structured `declared_pin_short` finding is emitted, mirrored into
+    `warnings` with the `ERROR:` prefix."""
+    # The PMOS-side Y pad carries labels {Y, A} while the gate keeps its own
+    # separate "A" net -- so the drain-side net's component set intersects
+    # the declared set {A, Y} twice.
+    path = _write_gds(_make_inverter_layout(extra_y_label="A"), tmp_path / "short.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "short.spice"),
+        declared_pins=frozenset({"A", "Y", "VGND", "VPWR", "VPB"}),
+        rename_declared_pins=True,
+    )
+
+    pins = {n["name"] for n in report["nets"] if n["pin"]}
+    assert "A|Y" in pins  # not renamed, still a pin
+
+    [finding] = report["pin_renames"]["findings"]
+    assert finding["severity"] == "error"
+    assert finding["code"] == "declared_pin_short"
+    assert finding["net"] == "A|Y"
+    assert finding["declared_pins"] == ["A", "Y"]
+    assert report["pin_renames"]["renamed"] == []
+    assert any(
+        w.startswith("ERROR:") and "'A|Y'" in w and "--rename-declared-pins" in w
+        for w in report["warnings"]
+    )
+
+
+def test_rename_declared_pins_skips_and_reports_a_colliding_rename(tmp_path):
+    """A rename whose target another net already carries is skipped and
+    reported (issue #2854) -- never a silent merge and never two same-named
+    nets: the Y-side and A-side nets each carry `clk` as their only declared
+    component, so exactly one renames and the loser keeps its joined name
+    with a `declared_pin_rename_collision` finding."""
+    path = _write_gds(
+        _make_inverter_layout(extra_y_label="clk", extra_a_label="clk"),
+        tmp_path / "collision.gds",
+    )
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "collision.spice"),
+        declared_pins=frozenset({"clk", "VGND", "VPWR", "VPB"}),
+        rename_declared_pins=True,
+    )
+
+    pins = {n["name"] for n in report["nets"] if n["pin"]}
+    # Exactly one net now carries the declared name, and the loser keeps its
+    # joined name -- no duplicate name was produced either way.
+    assert "clk" in pins
+    assert len(report["pin_renames"]["renamed"]) == 1
+    [renamed] = report["pin_renames"]["renamed"]
+    assert renamed["to"] == "clk"
+
+    [finding] = report["pin_renames"]["findings"]
+    assert finding["severity"] == "warning"
+    assert finding["code"] == "declared_pin_rename_collision"
+    assert finding["declared_pin"] == "clk"
+    # The skipped net keeps its joined name as a still-promoted pin, and is
+    # the one the successful rename did *not* come from.
+    assert finding["net"] in pins
+    assert finding["net"] != renamed["from"]
+    assert any(
+        "rename skipped" in w and finding["net"] in w for w in report["warnings"]
+    )
+
+
+def test_rerun_extract_report_replays_the_declared_pin_rename(tmp_path):
+    """Issue #2854: `--check --rerun` reconstructs the declared-pin rename
+    from the committed report's own echoes (`rename_declared_pins` + the
+    `pin_renames` declared-set echoes), so a rename run reproduces -- without
+    the replay the fresh run would rename nothing and drift on every renamed
+    pin field."""
+    path = _write_gds(
+        _make_inverter_layout(extra_y_label="clk"), tmp_path / "multi_label.gds"
+    )
+    report_path = tmp_path / "multi_label.extract.json"
+    _write_report(
+        report_path,
+        run_extract(
+            path,
+            "sky130",
+            output=str(tmp_path / "multi_label.spice"),
+            declared_pins=frozenset({"clk", "VGND", "VPWR", "VPB", "A"}),
+            rename_declared_pins=True,
+        ),
+    )
+
+    result = rerun_extract_report(str(report_path))
+
+    assert result["status"] == "match"
+    assert result["drift"] == []
+    assert result["fresh"]["pin_renames"]["renamed"] == [{"from": "Y|clk", "to": "clk"}]
+
+
+def test_rerun_extract_report_replays_def_pins_separately(tmp_path):
+    """PR #3224 review: a DEF-only rename run replays `def_pins` as
+    `def_pins`, not its union with `declared_pins` folded into `--pins`. The
+    two filters are not interchangeable: only the `--def-pins` pass runs the
+    `def_pin_promotion` report, so a union-as-`--pins` replay demotes the
+    same nets but drops that block (and rewords the demotion warning), and
+    the rerun drifts."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "def_only.gds")
+    report_path = tmp_path / "def_only.extract.json"
+    committed = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "def_only.spice"),
+        def_pins=frozenset({"A", "VGND", "VPWR", "VPB"}),
+        rename_declared_pins=True,
+    )
+    _write_report(report_path, committed)
+
+    # Each original argument is echoed on its own: `null` for the flag not
+    # given, the given set as a list, the union retained as `declared`.
+    assert committed["pin_renames"]["declared_pins"] is None
+    assert committed["pin_renames"]["def_pins"] == ["A", "VGND", "VPB", "VPWR"]
+    assert committed["pin_renames"]["declared"] == ["A", "VGND", "VPB", "VPWR"]
+    # Y is demoted by the DEF reconciliation, and that reconciliation's own
+    # report block is present.
+    assert {n["name"] for n in committed["nets"] if n["pin"]} == {
+        "A",
+        "VGND",
+        "VPB",
+        "VPWR",
+    }
+    assert committed["def_pin_promotion"] is not None
+
+    result = rerun_extract_report(str(report_path))
+
+    assert result["status"] == "match"
+    assert result["drift"] == []
+    # The DEF promotion report ran on the replay too -- the clearest signal
+    # the replay used `def_pins`, not a `declared_pins` union.
+    assert result["fresh"]["def_pin_promotion"] is not None
+
+
+def test_rerun_extract_report_replays_differing_declared_and_def_sets(tmp_path):
+    """PR #3224 review: when `--pins` and `--def-pins` were both given and
+    differ, the rerun replays *both* original sets. The original run applies
+    `--pins`'s demotion and then `--def-pins`'s own, which only further
+    restricts the survivors -- here Y survives `--pins` but is demoted by
+    `--def-pins`. Replaying the union as `--pins` alone (the pre-review
+    behavior) re-promotes Y and drifts on every pin field."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "both_sets.gds")
+    report_path = tmp_path / "both_sets.extract.json"
+    committed = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "both_sets.spice"),
+        declared_pins=frozenset({"A", "Y", "VGND", "VPWR", "VPB"}),
+        def_pins=frozenset({"A", "VGND", "VPWR", "VPB"}),
+        rename_declared_pins=True,
+    )
+    _write_report(report_path, committed)
+
+    # The echoes carry each original set separately; the union `declared`
+    # (the rename pass's matching set) is strictly larger than `def_pins`.
+    assert committed["pin_renames"]["declared_pins"] == [
+        "A",
+        "VGND",
+        "VPB",
+        "VPWR",
+        "Y",
+    ]
+    assert committed["pin_renames"]["def_pins"] == ["A", "VGND", "VPB", "VPWR"]
+    assert committed["pin_renames"]["declared"] == [
+        "A",
+        "VGND",
+        "VPB",
+        "VPWR",
+        "Y",
+    ]
+    # Y survived the `--pins` pass but was demoted by `--def-pins`'s.
+    assert {n["name"] for n in committed["nets"] if n["pin"]} == {
+        "A",
+        "VGND",
+        "VPB",
+        "VPWR",
+    }
+
+    result = rerun_extract_report(str(report_path))
+
+    assert result["status"] == "match"
+    assert result["drift"] == []
+    assert result["fresh"]["pin_renames"]["def_pins"] == [
+        "A",
+        "VGND",
+        "VPB",
+        "VPWR",
+    ]
+
+
+def test_rerun_extract_report_union_echo_still_replays_a_legacy_block(tmp_path):
+    """A `pin_renames` block without the separate `declared_pins`/`def_pins`
+    echoes -- an earlier build of this unreleased feature, or a hand-edited
+    report -- still replays through its union `declared` echo, as it did
+    before. For a `--pins`-only run that union *is* the original argument,
+    so the replay reproduces the rename exactly; the only drift is the
+    schema evolution itself (the fresh report carries the separate echoes
+    the committed block predates)."""
+    path = _write_gds(
+        _make_inverter_layout(extra_y_label="clk"), tmp_path / "legacy.gds"
+    )
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "legacy.spice"),
+        declared_pins=frozenset({"clk", "VGND", "VPWR", "VPB", "A"}),
+        rename_declared_pins=True,
+    )
+    # Simulate the pre-echo block shape: the union `declared` only.
+    del report["pin_renames"]["declared_pins"]
+    del report["pin_renames"]["def_pins"]
+    report_path = _write_report(tmp_path / "legacy.extract.json", report)
+
+    result = rerun_extract_report(str(report_path))
+
+    # The replay reconstructed the rename -- and drifted on nothing except
+    # the two echo keys the simulated legacy block lacks.
+    assert result["fresh"]["pin_renames"]["renamed"] == [{"from": "Y|clk", "to": "clk"}]
+    assert [entry["field"] for entry in result["drift"]] == [
+        "pin_renames.declared_pins",
+        "pin_renames.def_pins",
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -3315,6 +3661,275 @@ def test_gf180mcu_bjt_base_contact_ring_extracts_one_device(tmp_path):
     (device,) = report["devices"]
     assert device["class"] == "bjt"
     assert device["nets"]["e"] == "EMIT"  # the p+ emitter, not the base ring
+
+
+# --------------------------------------------------------------------------- #
+# Four-terminal bipolar (substrate terminal, issue #2862)
+# --------------------------------------------------------------------------- #
+
+_BJT4_BASE = (200, 0)
+_BJT4_MARKER = (201, 0)
+_BJT4_EMITTER = (202, 0)
+_BJT4_COLLECTOR = (203, 0)
+_BJT4_SUBSTRATE = (204, 0)
+_BJT4_CONTACT = (205, 0)
+_BJT4_METAL = (206, 0)
+_BJT4_METAL_LABEL = (206, 5)
+_BJT4_DUMMY = (207, 0)
+
+
+def _make_bjt4_layout(*, with_substrate: bool = True) -> kdb.Layout:
+    """A synthetic four-terminal NPN on a private layer set (no curated deck
+    reuses these layers): a marked base well, a drawn collector ring and a
+    drawn substrate ring inside it, each contacted up to its own labelled
+    net -- plus the emitter, contacted and labelled like the sky130/gf180mcu
+    fixtures above. No poly is drawn, so the deck's MOS recognisers find
+    nothing and every reported device is the bipolar.
+
+    With ``with_substrate=False`` the identical layout loses only its
+    substrate ring and contact -- the three-terminal control for the
+    unchanged-output regression below."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    draw(*_BJT4_BASE, kdb.Box(0, 0, 4000, 4000))
+    draw(*_BJT4_MARKER, kdb.Box(0, 0, 4000, 4000))
+    draw(*_BJT4_EMITTER, kdb.Box(1600, 1600, 2400, 2400))
+    # Name the base well directly (the deck declares `well_label`; no tap
+    # mechanism is needed for the label to name the `nwell` node).
+    label(208, 5, "BASE", 2000, 700)
+    for box in (
+        kdb.Box(800, 800, 3200, 1000),
+        kdb.Box(800, 3000, 3200, 3200),
+        kdb.Box(800, 1000, 1000, 3000),
+        kdb.Box(3000, 1000, 3200, 3000),
+    ):
+        draw(*_BJT4_COLLECTOR, box)
+    if with_substrate:
+        for box in (
+            kdb.Box(200, 200, 3800, 400),
+            kdb.Box(200, 3600, 3800, 3800),
+            kdb.Box(200, 400, 400, 3600),
+            kdb.Box(3600, 400, 3800, 3600),
+        ):
+            draw(*_BJT4_SUBSTRATE, box)
+
+    # Contact + metal + label over each drawn terminal, so each one names
+    # its own net: emitter pad at the emitter's centre, collector pad on the
+    # collector ring's bottom-left corner, substrate pad on the ring's top
+    # strip.
+    contacted = [("EMIT", 2000, 2000), ("COLL", 950, 950)]
+    if with_substrate:
+        contacted.append(("SUBS", 3650, 3650))
+    for name, x, y in contacted:
+        draw(*_BJT4_CONTACT, kdb.Box(x - 50, y - 50, x + 50, y + 50))
+        draw(*_BJT4_METAL, kdb.Box(x - 150, y - 150, x + 150, y + 150))
+        label(*_BJT4_METAL_LABEL, name, x, y)
+
+    return layout
+
+
+def _bjt4_deck() -> ExtractionDeck:
+    """The minimal deck the four-terminal fixture extracts under: MOS-core
+    layers only, plus one four-terminal `bipolars` entry and the `well_label`
+    that names the base well."""
+    return ExtractionDeck(
+        active=_BJT4_EMITTER,
+        poly=(210, 0),
+        nwell=_BJT4_BASE,
+        contact=_BJT4_CONTACT,
+        metals=(_BJT4_METAL,),
+        metal_labels=(_BJT4_METAL_LABEL,),
+        well_label=(208, 5),
+        bipolars=(
+            BipolarDevice(
+                base=_BJT4_BASE,
+                emitter=_BJT4_EMITTER,
+                marker=_BJT4_MARKER,
+                collector=_BJT4_COLLECTOR,
+                substrate=_BJT4_SUBSTRATE,
+                class_name="npn4",
+            ),
+        ),
+    )
+
+
+def _use_deck(monkeypatch: Any, deck: ExtractionDeck) -> None:
+    """Point `klt extract`'s deck resolution at ``deck`` (the same
+    monkeypatch idiom the dummy-suppression tests use)."""
+    monkeypatch.setattr(
+        "klayout_tools.extract.get_extraction_deck",
+        lambda name, deck_options=None, label_layers=None: deck,
+    )
+
+
+def test_four_terminal_bipolar_extracts_distinct_c_b_e_s_nets(tmp_path, monkeypatch):
+    """A deck entry declaring `substrate` extracts through KLayout's
+    `DeviceExtractorBJT4Transistor`: the four terminals resolve to four
+    *distinct* nets when the layout separates them (issue #2862's core risk
+    is an `S` silently merged into another terminal's net), and
+    `devices[].nets` carries the additive `"s"` key."""
+    _use_deck(monkeypatch, _bjt4_deck())
+    path = _write_gds(_make_bjt4_layout(), tmp_path / "bjt4.gds")
+    report = run_extract(path, "synthetic", output=str(tmp_path / "bjt4.spice"))
+
+    assert report["device_counts"] == {"npn4": 1}
+    (device,) = report["devices"]
+    assert device["class"] == "npn4"
+    assert set(device["nets"]) == {"c", "b", "e", "s"}
+    assert len(set(device["nets"].values())) == 4
+    assert device["nets"]["e"] == "EMIT"
+    assert device["nets"]["c"] == "COLL"
+    assert device["nets"]["s"] == "SUBS"
+    # The written netlist carries the four-node Q card shape too.
+    spice = (tmp_path / "bjt4.spice").read_text()
+    q_line = next(line for line in spice.splitlines() if line.startswith("Q"))
+    assert len(q_line.split()) >= 6  # Q<name> c b e s <model> [...]
+
+
+def test_four_terminal_bipolar_collector_less_s_ties_substrate_global(
+    tmp_path, monkeypatch
+):
+    """A four-terminal entry whose `collector` stays `None` keeps the
+    three-terminal collector semantics: KLayout's BJT4 extractor outputs the
+    base footprint onto the empty `C` input, which stays tied to the deck's
+    `substrate_net` global, while the drawn `S` terminal resolves to its own
+    real net -- the collector-formed-by-the-substrate + drawn-substrate-
+    contact combination `BipolarDevice.substrate`'s docstring promises."""
+    deck = dataclasses.replace(
+        _bjt4_deck(),
+        bipolars=(dataclasses.replace(_bjt4_deck().bipolars[0], collector=None),),
+    )
+    _use_deck(monkeypatch, deck)
+    path = _write_gds(_make_bjt4_layout(), tmp_path / "bjt4c.gds")
+    report = run_extract(path, "synthetic", output=str(tmp_path / "bjt4c.spice"))
+
+    assert report["device_counts"] == {"npn4": 1}
+    (device,) = report["devices"]
+    assert device["nets"]["c"] == "vsubs"
+    assert device["nets"]["s"] == "SUBS"
+    assert device["nets"]["e"] == "EMIT"
+
+
+def test_three_terminal_default_output_unchanged_by_field(tmp_path, monkeypatch):
+    """The `substrate` field is additive/optional: a three-terminal control
+    layout (identical geometry minus the substrate ring) extracts exactly as
+    it did before the field existed -- `"c"/"b"/"e"` keys only, no `"s"` --
+    and the deck-level role reports (`device_recognition_layers`,
+    `device_classes`) are unchanged."""
+    deck = dataclasses.replace(
+        _bjt4_deck(),
+        bipolars=(dataclasses.replace(_bjt4_deck().bipolars[0], substrate=None),),
+    )
+    assert deck.device_classes == ("nfet", "pfet", "npn4")
+    assert _BJT4_COLLECTOR in deck.device_recognition_layers
+    assert _BJT4_SUBSTRATE not in deck.device_recognition_layers
+
+    _use_deck(monkeypatch, deck)
+    path = _write_gds(_make_bjt4_layout(with_substrate=False), tmp_path / "bjt3.gds")
+    report = run_extract(path, "synthetic", output=str(tmp_path / "bjt3.spice"))
+
+    assert report["device_counts"] == {"npn4": 1}
+    (device,) = report["devices"]
+    assert device["class"] == "npn4"
+    assert set(device["nets"]) == {"c", "b", "e"}
+    assert device["nets"]["c"] == "COLL"
+    assert device["nets"]["e"] == "EMIT"
+
+
+def test_bjt4_deck_history_reports_substrate_terminal():
+    """`klt deck devices`' device-class report carries the substrate
+    terminal as a fourth entry only when the bipolar declares it (the
+    deck-diff view of issue #2862's field)."""
+    from klayout_tools.decks.history import _project_device_classes
+
+    deck = _bjt4_deck()
+    (entry,) = [e for e in _project_device_classes(deck, {}) if e["name"] == "npn4"]
+    assert [t["name"] for t in entry["terminals"]] == [
+        "base",
+        "emitter",
+        "collector",
+        "substrate",
+    ]
+    assert entry["terminals"][3]["layer"] == {
+        "layer": _BJT4_SUBSTRATE[0],
+        "datatype": _BJT4_SUBSTRATE[1],
+        "name": None,
+    }
+    assert entry["required_layers"] == [
+        {"layer": _BJT4_MARKER[0], "datatype": _BJT4_MARKER[1], "name": None},
+        {"layer": _BJT4_BASE[0], "datatype": _BJT4_BASE[1], "name": None},
+        {"layer": _BJT4_EMITTER[0], "datatype": _BJT4_EMITTER[1], "name": None},
+        {"layer": _BJT4_COLLECTOR[0], "datatype": _BJT4_COLLECTOR[1], "name": None},
+        {"layer": _BJT4_SUBSTRATE[0], "datatype": _BJT4_SUBSTRATE[1], "name": None},
+    ]
+
+    three_terminal = dataclasses.replace(
+        deck, bipolars=(dataclasses.replace(deck.bipolars[0], substrate=None),)
+    )
+    (entry,) = [
+        e for e in _project_device_classes(three_terminal, {}) if e["name"] == "npn4"
+    ]
+    assert [t["name"] for t in entry["terminals"]] == [
+        "base",
+        "emitter",
+        "collector",
+    ]
+
+
+def test_bjt4_dummy_marker_drops_whole_four_terminal_unit(tmp_path, monkeypatch):
+    """Dummy suppression covers the four-terminal flavour the same way it
+    covers the three-terminal one (#295/#462): a dummy marker fully covering
+    the marked base drops the whole unit -- the cut propagates to the `S`
+    region for free because it is derived from the (already cut) base."""
+    deck = dataclasses.replace(_bjt4_deck(), dummy=_BJT4_DUMMY)
+    layout = _make_bjt4_layout()
+    layout.top_cell().shapes(layout.layer(*_BJT4_DUMMY)).insert(
+        kdb.Box(0, 0, 4000, 4000)
+    )
+    _use_deck(monkeypatch, deck)
+    path = _write_gds(layout, tmp_path / "bjt4_dummy.gds")
+    report = run_extract(path, "synthetic", output=str(tmp_path / "bjt4_dummy.spice"))
+
+    assert report["device_counts"] == {}
+    assert report["dummy_devices_dropped"] == 1
+
+
+def test_bjt4_extracted_netlist_lvs_matches_four_terminal_reference(
+    tmp_path, monkeypatch
+):
+    """The full closed loop (issue #2862's acceptance shape): the fixture's
+    *actual* `klt extract` output -- not a hand-copied card -- compares
+    against a plain-element four-terminal reference and matches, substrate
+    tie included. Pins the extracted card's exact shape so the LVS-side
+    fixture in `tests/test_lvs.py` cannot silently drift from it."""
+    from klayout_tools.lvs import run_lvs
+
+    _use_deck(monkeypatch, _bjt4_deck())
+    path = _write_gds(_make_bjt4_layout(), tmp_path / "bjt4.gds")
+    spice_path = str(tmp_path / "bjt4.spice")
+    run_extract(path, "synthetic", output=spice_path)
+
+    reference_path = tmp_path / "ref.spice"
+    reference_path.write_text(
+        ".SUBCKT TOP BASE COLL EMIT SUBS\n"
+        "Q1 COLL BASE EMIT SUBS npn4 AE=0.64P NE=1\n"
+        ".ENDS TOP\n"
+    )
+    request = {
+        "layout": {"netlist": spice_path, "top": "TOP"},
+        "reference": {"netlist": str(reference_path), "top": "TOP"},
+    }
+    report = run_lvs(json.dumps(request))
+    assert report["status"] == "match"
 
 
 def test_bjt_array_sky130_extracts_nonzero_devices(tmp_path):
@@ -4830,6 +5445,36 @@ def test_sky130_capacitor_drm_legal_top_via_does_not_short_plates(
     assert device["nets"]["a"] != device["nets"]["b"]
 
 
+def test_sky130_via_on_bottom_plate_outside_top_plate_stays_connected(tmp_path):
+    """Issue #3020: `bottom_region.interacting(top_region)` keeps the *whole*
+    bottom-plate polygon, so an ordinary via3 landing on that met3 polygon
+    well outside the `capm` footprint used to be cut from connectivity too,
+    leaving the met4 pad above it a floating anonymous net. Only the via
+    that lands on the top plate may be excluded."""
+    layout = _make_sky130_mim_layout_with_drm_legal_top_via()
+    top = layout.top_cell()
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    # Ordinary via3 + met4 pad on the bottom plate, far from capm.
+    draw(70, 44, _box_um(-12, -12, -10, -10))  # via3.drawing
+    draw(71, 20, _box_um(-13, -13, -9, -9))  # met4.drawing pad
+    label = top.shapes(layout.layer(71, 5))
+    label.insert(kdb.Text("BOT", kdb.Trans(kdb.Vector(-11000, -11000))))
+
+    path = _write_gds(layout, tmp_path / "mim_outside_via.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "mim_outside_via.spice"))
+
+    assert report["device_counts"] == {"sky130_fd_pr__model__cap_mim": 1}
+    # Bottom plate (+ the routed pad) and the top plate: two nets, no
+    # floating anonymous net for the pad.
+    assert report["net_count"] == 2
+    (device,) = report["devices"]
+    bot_net = next(n for n in report["nets"] if n["name"] == "BOT")
+    assert bot_net["name"] in device["nets"].values()
+
+
 def _make_gf180mcu_mim_square_layout(side_um: float) -> kdb.Layout:
     """A `side_um`x`side_um` `FuseTop`-over-`Metal4` MiM cap, marked with
     `CAP_MK`/`MIM_L_MK` and drawn well clear of `Metal4`'s own edges so the
@@ -4934,6 +5579,7 @@ def test_capacitor_default_perim_cap_f_um_reports_area_only_c_f(tmp_path):
         _device_instance_paths,
         _def_pin_promotion,
         _substrate_spreading,
+        _pin_renames,
     ) = _extract_netlist(layout, layout.top_cell(), uncorrected_deck)
     circuit = netlist.circuit_by_name(layout.top_cell().name)
     devices, _device_counts = _describe_devices(circuit)
@@ -5685,7 +6331,9 @@ def test_pdk_binding_reports_no_warnings_for_pure_mos_layout(tmp_path):
         pdk_root=root,
         output=str(tmp_path / "inv.spice"),
     )
-    assert report["warnings"] == []
+    # The layout draws no `hvi` marker, so the issue #2417 missing-marker
+    # warning is expected; this test is about "parameter dropped" warnings.
+    assert [w for w in report["warnings"] if "no shapes in the layout" not in w] == []
 
 
 def test_pdk_binding_warns_when_bipolar_geometry_params_are_dropped(tmp_path):
@@ -5702,7 +6350,7 @@ def test_pdk_binding_warns_when_bipolar_geometry_params_are_dropped(tmp_path):
         pdk_root=_make_pdk_install(tmp_path, "sky130A"),
         output=str(tmp_path / "bjt.spice"),
     )
-    (warning,) = report["warnings"]
+    (warning,) = [w for w in report["warnings"] if "no shapes in the layout" not in w]
     assert "'pnp'" in warning
     assert "PE" in warning and "AB" in warning and "NE" in warning
 
@@ -7235,16 +7883,16 @@ def _parasitic_cards(netlist_path: str) -> list[str]:
 def test_pdk_unbound_mim_flavour_writes_bare_value_only_capacitor_card(
     tmp_path, flavour, expected_c_f
 ):
-    """Issue #1558, Gap 2: `--pdk <variant> --parasitics` on a layout whose
+    """Issue #1558, Gap 2: `--parasitics` without `--pdk` on a layout whose
     MiM cap uses one of gf180mcu's non-default densities emits a bare,
     value-only `C` card -- **no** trailing `cap_mim_1f0_m4m5_noshield`-style
     token, which ngspice would reject as an unresolvable `.model` reference
     (`unknown parameter (...)`/`could not find a valid modelname`).
 
-    Neither flavour has a `_CAPACITOR_MODEL_TABLE` row (only the default
-    `cap_mim_2f0_m4m5_noshield` does), so the device falls through to
-    KLayout's own default primitive-card writer -- the path that used to
-    append the class name. The flavour identity is still recorded, in the
+    With no `--pdk` there are no bindings at all (under `--pdk` the `1f0`/`1f5`
+    flavours bind to their `X` subcircuit since issue #3090), so the device
+    falls through to KLayout's own default primitive-card writer -- the path
+    that used to append the class name. The flavour identity is still recorded, in the
     writer's own preceding `* device instance ...` comment and in
     `devices[].class`."""
     path = _write_gds(_make_gf180mcu_mim_layout(), tmp_path / f"{flavour}.gds")
@@ -7252,8 +7900,6 @@ def test_pdk_unbound_mim_flavour_writes_bare_value_only_capacitor_card(
     report = run_extract(
         path,
         "gf180mcu",
-        pdk_variant="gf180mcuA",
-        pdk_root=_make_pdk_install(tmp_path, "gf180mcuA"),
         output=out,
         parasitics=True,
         deck_options={"mim_cap": flavour},
@@ -7331,6 +7977,92 @@ def test_pdk_bound_default_mim_flavour_still_writes_x_card(tmp_path):
     assert " cap_mim_2f0_m4m5_noshield " in card
 
 
+@pytest.mark.parametrize("parasitics", [False, True])
+@pytest.mark.parametrize(
+    "flavour",
+    [
+        "cap_mim_1f0_m4m5_noshield",
+        "cap_mim_1f5_m4m5_noshield",
+        "cap_mim_2f0_m4m5_noshield",
+    ],
+)
+def test_pdk_binds_every_gf180mcu_mim_density_to_subckt(tmp_path, flavour, parasitics):
+    """Issue #3090: `--pdk` binds all three selectable gf180mcu MiM densities
+    to their PDK `cap_mim_*` subcircuit (`c_length`/`c_width`), with and
+    without `--parasitics`, so PDK process-corner sections can move the
+    capacitor. No fixed-value-capacitor warning is raised for a bound class."""
+    path = _write_gds(_make_gf180mcu_mim_layout(), tmp_path / f"{flavour}.gds")
+    out = str(tmp_path / f"{flavour}.spice")
+    report = run_extract(
+        path,
+        "gf180mcu",
+        pdk_variant="gf180mcuA",
+        pdk_root=_make_pdk_install(tmp_path, "gf180mcuA"),
+        output=out,
+        parasitics=parasitics,
+        deck_options={"mim_cap": flavour},
+    )
+
+    card = _capacitor_device_card(out)
+    assert card.startswith("X"), card
+    assert f" {flavour} " in card
+    assert "c_length=" in card and "c_width=" in card
+    assert not any("fixed-value" in w for w in report["warnings"])
+
+
+def test_pdk_parasitics_sky130_mim_writes_subckt_card(tmp_path):
+    """Issue #3090: `--pdk` + `--parasitics` + a sky130 MiM reaches the
+    binding writer (an `X` subcircuit call, not a bare `C` card)."""
+    path = _write_gds(_make_sky130_mim_layout(), tmp_path / "sky130_mim.gds")
+    out = str(tmp_path / "sky130_mim.spice")
+    report = run_extract(
+        path,
+        "sky130",
+        pdk_variant="sky130A",
+        pdk_root=_make_pdk_install(tmp_path, "sky130A"),
+        output=out,
+        parasitics=True,
+    )
+
+    card = _capacitor_device_card(out)
+    assert card.startswith("X"), card
+    assert "sky130_fd_pr__cap_mim_m3_1" in card
+    assert not any("fixed-value" in w for w in report["warnings"])
+
+
+@pytest.mark.parametrize(
+    ("deck_name", "layout_factory"),
+    [
+        ("gf180mcu", _make_gf180mcu_mim_layout),
+        ("sky130", _make_sky130_mim_layout),
+    ],
+)
+def test_fixed_value_capacitor_warns_and_documents_in_header(
+    tmp_path, deck_name, layout_factory
+):
+    """Issue #3090: a capacitor written as a fixed-value `C` card (no
+    `--pdk`) is flagged in one aggregate `warnings[]` line, and under
+    `--parasitics` the same fact lands in the netlist header comment."""
+    path = _write_gds(layout_factory(), tmp_path / f"{deck_name}_fixed.gds")
+    out = str(tmp_path / f"{deck_name}_fixed.spice")
+    report = run_extract(path, deck_name, output=out, parasitics=True)
+
+    notes = [w for w in report["warnings"] if "fixed-value" in w]
+    assert len(notes) == 1, report["warnings"]
+    assert "process corners" in notes[0] and "--pdk" in notes[0]
+
+    header = [
+        line
+        for line in Path(out).read_text().splitlines()
+        if line.startswith("*") and "fixed-value" in line
+    ]
+    assert len(header) == 1, header
+
+    no_parasitics_out = str(tmp_path / f"{deck_name}_fixed_np.spice")
+    run_extract(path, deck_name, output=no_parasitics_out)
+    assert "fixed-value" not in Path(no_parasitics_out).read_text()
+
+
 @pytest.mark.parametrize(
     ("deck_name", "layout_factory"),
     [
@@ -7370,8 +8102,6 @@ def test_unbound_mim_capacitor_netlist_simulates_in_ngspice(tmp_path):
     run_extract(
         path,
         "gf180mcu",
-        pdk_variant="gf180mcuA",
-        pdk_root=_make_pdk_install(tmp_path, "gf180mcuA"),
         output=out,
         parasitics=True,
         deck_options={"mim_cap": flavour},
@@ -7600,8 +8330,8 @@ def test_sky130_precision_implant_mask_extracts_own_flavour(
     assert device["nets"]["w"] == get_extraction_deck("sky130").substrate_net
 
 
-def _make_sky130_res_high_po_layout(l_um: float) -> kdb.Layout:
-    """A `w=1um` `res_high_po`-marked poly bar with a `l_um`-long marked
+def _make_sky130_res_high_po_layout(l_um: float, w_um: float = 1.0) -> kdb.Layout:
+    """A `w_um` (default 1um) `res_high_po`-marked poly bar with a `l_um`-long marked
     (resistive) segment and a contacted, labelled 3um head at each end --
     the parametrised sibling of `_make_poly_resistor_layout`'s fixed 6um
     marked segment, used by
@@ -7624,17 +8354,19 @@ def _make_sky130_res_high_po_layout(l_um: float) -> kdb.Layout:
     l_nm = int(round(l_um * 1000))
     head_nm = int(round(head_um * 1000))
     total_nm = int(round(total_um * 1000))
+    w_nm = int(round(w_um * 1000))
+    mid_nm = w_nm // 2
 
-    draw(66, 20, kdb.Box(0, 0, total_nm, 1000))  # poly.drawing
-    marked = kdb.Box(head_nm, 0, head_nm + l_nm, 1000)
+    draw(66, 20, kdb.Box(0, 0, total_nm, w_nm))  # poly.drawing
+    marked = kdb.Box(head_nm, 0, head_nm + l_nm, w_nm)
     draw(66, 13, marked)  # poly.res
     draw(86, 20, marked.enlarged(200, 200))  # rpm
     draw(94, 20, marked.enlarged(200, 200))  # psdm
 
     for x, name in ((head_nm // 2, "RA"), (total_nm - head_nm // 2, "RB")):
-        draw(66, 44, kdb.Box(x - 100, 400, x + 100, 600))  # licon1.drawing
-        draw(67, 20, kdb.Box(x - 400, 200, x + 400, 800))  # li1.drawing
-        label(67, 5, name, x, 500)  # li1.pin
+        draw(66, 44, kdb.Box(x - 100, mid_nm - 100, x + 100, mid_nm + 100))  # licon1
+        draw(67, 20, kdb.Box(x - 400, mid_nm - 300, x + 400, mid_nm + 300))  # li1
+        label(67, 5, name, x, mid_nm)  # li1.pin
 
     return layout
 
@@ -7673,6 +8405,55 @@ def test_sky130_res_high_po_fixed_offset_matches_pdk_model_card(tmp_path, l_um):
     assert device["params"]["r_ohm"] > l_um / 1.0 * 319.8
 
 
+# ngspice `sky130_fd_pr__res_high_po` (tt, 27 C) total resistance, measured
+# for issue #3049 -- see `decks/sky130.py`'s provenance note.
+_RES_HIGH_PO_MODEL_OHM = {
+    (0.69, 5.0): 2880.58,
+    (0.69, 35.0): 17009.9,
+    (1.41, 1.0): 508.199,
+    (1.41, 10.0): 2580.96,
+    (1.41, 35.0): 8338.63,
+    (2.85, 10.0): 1282.23,
+    (5.73, 5.0): 355.968,
+}
+
+
+@pytest.mark.parametrize(("w_um", "l_um"), sorted(_RES_HIGH_PO_MODEL_OHM))
+def test_sky130_res_high_po_tracks_pdk_model_at_other_widths(tmp_path, w_um, l_um):
+    """Issue #3049: at `w != 1um` the head term is width-normalized
+    (`end_term_ohm_um / w`), so `r_ohm` stays near the PDK model value the
+    old constant `379.7` ohm offset overstated by ~4-5 % at `w=1.41um`. The
+    curated `ResistorDevice` fields cannot match the model exactly across
+    widths; the residual documented in `decks/sky130.py` is under 2.1 %."""
+    path = _write_gds(
+        _make_sky130_res_high_po_layout(l_um, w_um),
+        tmp_path / f"res_high_po_{w_um}_{l_um}.gds",
+    )
+    report = run_extract(
+        path, "sky130", output=str(tmp_path / f"res_high_po_{w_um}_{l_um}.spice")
+    )
+
+    (device,) = report["devices"]
+    assert device["params"]["w_um"] == pytest.approx(w_um)
+    r_ohm = device["params"]["r_ohm"]
+    (res_high_po,) = [
+        r for r in get_extraction_deck("sky130").resistors if r.name == "res_high_po"
+    ]
+    expected = (
+        res_high_po.sheet_rho_ohm_sq * l_um / w_um
+        + res_high_po.end_term_ohm_um / w_um
+        + res_high_po.fixed_offset_ohm
+    )
+    assert r_ohm == pytest.approx(expected, rel=1e-6)
+    assert r_ohm == pytest.approx(_RES_HIGH_PO_MODEL_OHM[(w_um, l_um)], rel=0.021)
+    # Regression for the issue's own case: the pre-#3049 constant offset gave
+    # a `w=1.41um`, `l=10um` value ~4 % above the model.
+    old_r_ohm = 324.827244 * l_um / w_um + 379.705147
+    assert abs(r_ohm / _RES_HIGH_PO_MODEL_OHM[(w_um, l_um)] - 1) < abs(
+        old_r_ohm / _RES_HIGH_PO_MODEL_OHM[(w_um, l_um)] - 1
+    )
+
+
 def test_resistor_default_fixed_offset_ohm_reports_unchanged_r_ohm(tmp_path):
     """`ResistorDevice.fixed_offset_ohm` defaults to `0.0` (issue #518): a
     deck entry that does not set it (mirroring every deck's own field before
@@ -7687,7 +8468,7 @@ def test_resistor_default_fixed_offset_ohm_reports_unchanged_r_ohm(tmp_path):
     uncorrected_deck = dataclasses.replace(
         deck,
         resistors=tuple(
-            dataclasses.replace(r, fixed_offset_ohm=0.0)
+            dataclasses.replace(r, fixed_offset_ohm=0.0, end_term_ohm_um=0.0)
             if r.name == "res_high_po"
             else r
             for r in deck.resistors
@@ -7715,6 +8496,7 @@ def test_resistor_default_fixed_offset_ohm_reports_unchanged_r_ohm(tmp_path):
         _device_instance_paths,
         _def_pin_promotion,
         _substrate_spreading,
+        _pin_renames,
     ) = _extract_netlist(layout, layout.top_cell(), uncorrected_deck)
     circuit = netlist.circuit_by_name(layout.top_cell().name)
     devices, _device_counts = _describe_devices(circuit)
@@ -7875,6 +8657,7 @@ def test_sg13g2_poly_resistor_default_end_term_and_width_offset_report_unchanged
         _device_instance_paths,
         _def_pin_promotion,
         _substrate_spreading,
+        _pin_renames,
     ) = _extract_netlist(layout, layout.top_cell(), uncorrected_deck)
     circuit = netlist.circuit_by_name(layout.top_cell().name)
     devices, _device_counts = _describe_devices(circuit)
@@ -8405,10 +9188,15 @@ def test_sky130_precision_implant_mask_is_not_extracted_as_generic_poly_res(tmp_
         # heads (`RA`/`RB`) merge onto one continuous, device-less net that
         # survives extraction instead of purging away -- see
         # `test_unmarked_poly_bar_is_not_a_resistor`.
-        assert len(report["warnings"]) == 2
+        # A third (issue #3138): the declared `poly.res` marker is claimed by
+        # no resistor class, so the unclaimed-marker warning fires too.
+        assert len(report["warnings"]) == 3
         assert "deck-coverage gap" in report["warnings"][0]
         assert "carry no resistor-marker layer at all" not in report["warnings"][0]
-        assert "merges 2 distinct labels (RA, RB)" in report["warnings"][1]
+        assert any(
+            "claimed by no declared resistor class" in w for w in report["warnings"]
+        )
+        assert any("merges 2 distinct labels (RA, RB)" in w for w in report["warnings"])
 
 
 def test_gf180mcu_salicided_poly_is_not_extracted_as_unsalicided_resistor(tmp_path):
@@ -8428,10 +9216,13 @@ def test_gf180mcu_salicided_poly_is_not_extracted_as_unsalicided_resistor(tmp_pa
     # A second warning (issue #539's `net 'RA,RB' merges ...` collision note)
     # now also fires -- see the matching comment in
     # `test_sky130_precision_implant_mask_is_not_extracted_as_generic_poly_res`.
-    assert len(report["warnings"]) == 2
+    # A third (issue #3138): the declared `RES_MK` marker is claimed by no
+    # resistor class, so the unclaimed-marker warning fires too.
+    assert len(report["warnings"]) == 3
     assert "deck-coverage gap" in report["warnings"][0]
     assert "carry no resistor-marker layer at all" not in report["warnings"][0]
-    assert "merges 2 distinct labels (RA, RB)" in report["warnings"][1]
+    assert any("claimed by no declared resistor class" in w for w in report["warnings"])
+    assert any("merges 2 distinct labels (RA, RB)" in w for w in report["warnings"])
 
 
 def test_marked_gate_poly_over_diffusion_stays_a_transistor(tmp_path):
@@ -8613,7 +9404,8 @@ def test_unmodelled_poly_warning_distinguishes_marked_from_unmarked(tmp_path):
     # device-less net that survives extraction instead of purging away --
     # see the matching comment in
     # `test_sky130_precision_implant_mask_is_not_extracted_as_generic_poly_res`.
-    assert len(report["warnings"]) == 4
+    # Plus one unclaimed-marker warning (issue #3138) for the marked bar.
+    assert len(report["warnings"]) == 5
     unmarked = [
         w for w in report["warnings"] if "carry no resistor-marker layer at all" in w
     ]
@@ -9673,10 +10465,94 @@ def test_sky130_deck_declares_hvi_mos_flavour():
     """The sky130 extraction deck declares one `mos_flavours` entry keyed on
     `hvi` (75/20) -- the deck-data half of issue #1369."""
     deck = get_extraction_deck("sky130")
-    assert len(deck.mos_flavours) == 1
-    flavour = deck.mos_flavours[0]
+    # Issue #3599 adds the native-Vt combination flavour *before* `hvi`.
+    assert [f.flavour for f in deck.mos_flavours] == ["nvt", "hvi"]
+    flavour = deck.mos_flavours[1]
     assert flavour.marker == (75, 20)
     assert flavour.flavour == "hvi"
+    assert flavour.and_markers == ()
+    assert flavour.not_markers == ((125, 44),)
+
+
+def _sky130_flavour_layout(markers, *, pmos=False) -> kdb.Layout:
+    """One sky130 NMOS (or, with ``pmos``, the same device inside an nwell)
+    with every ``(layer, datatype)`` in ``markers`` drawn over it."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    _draw_sky130_nmos(top, layout, 0, "S", drain_label="D")
+    if pmos:
+        top.shapes(layout.layer(64, 20)).insert(kdb.Box(-1000, -1000, 3000, 2000))
+    for layer, datatype in markers:
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Box(-500, -500, 2500, 1500)
+        )
+    return layout
+
+
+def _sky130_bound_models(tmp_path, name, markers, *, pmos=False):
+    path = _write_gds(
+        _sky130_flavour_layout(markers, pmos=pmos), tmp_path / f"{name}.gds"
+    )
+    root = _make_pdk_install(tmp_path, "sky130A")
+    report = run_extract(
+        path,
+        "sky130",
+        pdk_variant="sky130A",
+        pdk_root=root,
+        output=str(tmp_path / f"{name}.spice"),
+    )
+    lines = [
+        line
+        for line in Path(report["netlist_path"]).read_text().splitlines()
+        if line and line[0] in ("M", "X")
+    ]
+    return report, lines
+
+
+def test_sky130_hvi_lvtn_binds_native_vt_nfet(tmp_path):
+    report, lines = _sky130_bound_models(tmp_path, "nvt", [(75, 20), (125, 44)])
+    assert report["device_counts"] == {"nfet": 1}
+    (line,) = lines
+    assert "sky130_fd_pr__nfet_05v0_nvt" in line
+    assert "g5v0d10v5" not in line
+
+
+def test_sky130_hvi_only_still_binds_g5v0d10v5(tmp_path):
+    _report, lines = _sky130_bound_models(tmp_path, "hvi", [(75, 20)])
+    (line,) = lines
+    assert "sky130_fd_pr__nfet_g5v0d10v5" in line
+
+
+def test_sky130_plain_nfet_binds_default_model(tmp_path):
+    _report, lines = _sky130_bound_models(tmp_path, "plain", [])
+    (line,) = lines
+    assert "sky130_fd_pr__nfet_01v8" in line
+
+
+def test_sky130_lvtn_only_is_not_native_5v(tmp_path):
+    _report, lines = _sky130_bound_models(tmp_path, "lvtn", [(125, 44)])
+    (line,) = lines
+    assert "nvt" not in line
+
+
+def test_sky130_hvi_lvtn_areaid_le_is_not_bound_as_5v_native(tmp_path):
+    """3v3 native (areaid_le) is out of scope but must not be mis-bound as
+    the 5v0 native model or as g5v0d10v5."""
+    _report, lines = _sky130_bound_models(
+        tmp_path, "le", [(75, 20), (125, 44), (81, 60)]
+    )
+    (line,) = lines
+    assert "nfet_05v0_nvt" not in line
+    assert "g5v0d10v5" not in line
+
+
+def test_sky130_hvi_lvtn_in_nwell_is_not_claimed_as_native(tmp_path):
+    """No native PMOS: a pfet island with hvi+lvtn never binds the nvt model."""
+    _report, lines = _sky130_bound_models(
+        tmp_path, "pnvt", [(75, 20), (125, 44)], pmos=True
+    )
+    assert lines
+    assert not any("nvt" in line for line in lines)
 
 
 def _make_sky130_straddling_hvi_mos_layout() -> kdb.Layout:
@@ -12354,10 +13230,198 @@ def test_extraction_deck_connectivity_layers_covers_all_role_layers():
     # Bipolar + capacitor recognition layers
     for bipolar in deck.bipolars:
         assert bipolar.base in conn
-        assert bipolar.marker in conn
+        assert set(layer_operand_leaves(bipolar.marker)) <= conn
     for capacitor in deck.capacitors:
         assert capacitor.top_plate in conn
         assert capacitor.bottom_plate in conn
+
+
+# --------------------------------------------------------------------------- #
+# Derived bipolar markers (issue #2860): `BipolarDevice.marker` may be a
+# `LayerExpr` boolean of several drawn layers, not only one drawn layer.
+# --------------------------------------------------------------------------- #
+
+# Synthetic stand-ins for SG13G2's NPN-marker operands. The real
+# `pwell_allowed`/`ptap_holes`/`digisub_gap` are themselves derived upstream
+# (from extents/holes/sizing this model does not express); here each is one
+# drawn layer so the boolean structure alone is under test.
+_NPN_TRANS = (26, 0)
+_NPN_PWELL_ALLOWED = (240, 0)
+_NPN_NWELL = (31, 0)
+_NPN_DIGISUB_GAP = (241, 0)
+_NPN_PTAP_HOLES = (242, 0)
+
+
+def _sg13g2_npn_marker_expr() -> LayerExpr:
+    """`npn_mk = trans & pwell & ptap_holes`, `pwell = pwell_allowed - nwell -
+    digisub_gap` -- the shape of SG13G2's `bjt_derivations.lvs` /
+    `general_derivations.lvs` NPN marker."""
+    pwell = LayerExpr.not_(
+        _NPN_PWELL_ALLOWED, _NPN_NWELL, _NPN_DIGISUB_GAP, name="pwell"
+    )
+    return LayerExpr.and_(_NPN_TRANS, pwell, _NPN_PTAP_HOLES, name="npn_mk")
+
+
+def _npn_marker_layout(*, omit: tuple[int, int] | None = None, extra=()):
+    """Every positive operand drawn as the same 0..1000 square, plus any
+    ``extra`` ``(layer, box)`` shapes; ``omit`` leaves one operand undrawn."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    for layer in (_NPN_TRANS, _NPN_PWELL_ALLOWED, _NPN_PTAP_HOLES):
+        if layer != omit:
+            top.shapes(layout.layer(*layer)).insert(kdb.Box(0, 0, 1000, 1000))
+    for layer, box in extra:
+        top.shapes(layout.layer(*layer)).insert(box)
+    return layout, top
+
+
+def test_layer_expr_sg13g2_npn_marker_full_overlap_is_the_whole_square():
+    layout, top = _npn_marker_layout()
+    region = _region_expr(layout, top, _sg13g2_npn_marker_expr())
+    assert region.area() == 1000 * 1000
+
+
+@pytest.mark.parametrize("subtracted", [_NPN_NWELL, _NPN_DIGISUB_GAP])
+def test_layer_expr_sg13g2_npn_marker_not_operands_remove_area(subtracted):
+    """Each nested NOT operand (`nwell`, `digisub_gap`) actually cuts the
+    marker: a 400-wide strip of it leaves 600x1000 of marker."""
+    layout, top = _npn_marker_layout(extra=[(subtracted, kdb.Box(0, 0, 400, 1000))])
+    region = _region_expr(layout, top, _sg13g2_npn_marker_expr())
+    assert region.area() == 600 * 1000
+    assert region.bbox() == kdb.Box(400, 0, 1000, 1000)
+
+
+@pytest.mark.parametrize("subtracted", [_NPN_NWELL, _NPN_DIGISUB_GAP])
+def test_layer_expr_sg13g2_npn_marker_fully_subtracted_is_empty(subtracted):
+    layout, top = _npn_marker_layout(extra=[(subtracted, kdb.Box(0, 0, 1000, 1000))])
+    assert _region_expr(layout, top, _sg13g2_npn_marker_expr()).is_empty()
+
+
+@pytest.mark.parametrize("missing", [_NPN_TRANS, _NPN_PWELL_ALLOWED, _NPN_PTAP_HOLES])
+def test_layer_expr_sg13g2_npn_marker_missing_and_operand_is_empty(missing):
+    """A leaf absent from the stream reads as empty -- no crash -- so a
+    missing AND operand empties the marker."""
+    layout, top = _npn_marker_layout(omit=missing)
+    assert _region_expr(layout, top, _sg13g2_npn_marker_expr()).is_empty()
+
+
+def test_layer_expr_leaf_and_polarity_accessors():
+    expr = _sg13g2_npn_marker_expr()
+    assert expr.leaf_layers() == (
+        _NPN_TRANS,
+        _NPN_PWELL_ALLOWED,
+        _NPN_NWELL,
+        _NPN_DIGISUB_GAP,
+        _NPN_PTAP_HOLES,
+    )
+    assert expr.required_layers() == (_NPN_TRANS, _NPN_PWELL_ALLOWED, _NPN_PTAP_HOLES)
+    assert expr.excluded_layers() == (_NPN_NWELL, _NPN_DIGISUB_GAP)
+    # Double negation flips back: c in `a - (b - c)` is required.
+    nested = LayerExpr.not_((1, 0), LayerExpr.not_((2, 0), (3, 0)))
+    assert nested.required_layers() == ((1, 0), (3, 0))
+    assert nested.excluded_layers() == ((2, 0),)
+    # Frozen, hashable, comparable -- like every other deck dataclass.
+    assert hash(expr) == hash(_sg13g2_npn_marker_expr())
+    assert expr == _sg13g2_npn_marker_expr()
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: LayerExpr("or", ((1, 0), (2, 0))),
+        lambda: LayerExpr("and", ()),
+        lambda: LayerExpr("and", ((1, 0, 0),)),
+        lambda: LayerExpr("and", ([1, 0],)),
+        lambda: LayerExpr("and", ((True, 0),)),
+    ],
+)
+def test_layer_expr_rejects_malformed_nodes(build):
+    with pytest.raises(ValueError):
+        build()
+
+
+def _sky130_deck_with_pnp_marker(marker):
+    """The registered sky130 extraction deck with its one `pnp` entry's
+    `marker` swapped for ``marker``; everything else unchanged."""
+
+    def factory(name="sky130", deck_options=None, label_layers=None):
+        deck = get_extraction_deck(name, deck_options, label_layers)
+        (pnp,) = deck.bipolars
+        return dataclasses.replace(
+            deck, bipolars=(dataclasses.replace(pnp, marker=marker),)
+        )
+
+    return factory
+
+
+def test_derived_bipolar_marker_single_leaf_matches_bare_pair(tmp_path, monkeypatch):
+    """`LayerExpr.and_(pnp.drawing)` recognises exactly what the bare
+    `pnp.drawing` pair does on the sky130 PNP fixture."""
+    path = _write_gds(_make_sky130_bjt_layout(), tmp_path / "bjt.gds")
+    baseline = run_extract(path, "sky130", output=str(tmp_path / "base.spice"))
+
+    monkeypatch.setattr(
+        "klayout_tools.extract.get_extraction_deck",
+        _sky130_deck_with_pnp_marker(LayerExpr.and_((82, 44))),
+    )
+    report = run_extract(path, "sky130", output=str(tmp_path / "expr.spice"))
+
+    assert baseline["device_counts"] == {"pnp": 1}
+    assert report["device_counts"] == baseline["device_counts"]
+    assert report["devices"] == baseline["devices"]
+    assert report["ignored_layers"] == baseline["ignored_layers"]
+
+
+def test_derived_bipolar_marker_not_operand_suppresses_the_device(
+    tmp_path, monkeypatch
+):
+    """`pnp.drawing - X`: drawing X over the whole device empties the derived
+    marker, so no PNP is recognised; with X undrawn the device extracts."""
+    exclude = (243, 0)
+    expr = LayerExpr.not_((82, 44), exclude)
+    monkeypatch.setattr(
+        "klayout_tools.extract.get_extraction_deck",
+        _sky130_deck_with_pnp_marker(expr),
+    )
+
+    clean = _write_gds(_make_sky130_bjt_layout(), tmp_path / "clean.gds")
+    assert run_extract(clean, "sky130", output=str(tmp_path / "a.spice"))[
+        "device_counts"
+    ] == {"pnp": 1}
+
+    layout = _make_sky130_bjt_layout()
+    layout.top_cell().shapes(layout.layer(*exclude)).insert(
+        kdb.Box(-100, -100, 2100, 2100)
+    )
+    covered = _write_gds(layout, tmp_path / "covered.gds")
+    report = run_extract(covered, "sky130", output=str(tmp_path / "b.spice"))
+    assert report["device_counts"].get("pnp", 0) == 0
+
+
+def test_derived_bipolar_marker_leaf_is_registered_as_read(tmp_path, monkeypatch):
+    """A layer reachable only through the expression (here an extra AND
+    operand) counts as read: it is in `device_recognition_layers`, extraction
+    honours it, and `ignored_layers` does not report it."""
+    extra = (244, 0)
+    expr = LayerExpr.and_((82, 44), extra)
+    factory = _sky130_deck_with_pnp_marker(expr)
+    assert extra in factory().device_recognition_layers
+    assert extra in factory().connectivity_layers
+    monkeypatch.setattr("klayout_tools.extract.get_extraction_deck", factory)
+
+    layout = _make_sky130_bjt_layout()
+    layout.top_cell().shapes(layout.layer(*extra)).insert(kdb.Box(0, 0, 2000, 2000))
+    path = _write_gds(layout, tmp_path / "bjt_extra.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "out.spice"))
+    assert report["device_counts"] == {"pnp": 1}
+    ignored = {(e["layer"], e["datatype"]) for e in report["ignored_layers"]}
+    assert extra not in ignored
+
+    # Without the extra operand drawn, the AND is empty and nothing is
+    # recognised -- the leaf genuinely gates recognition.
+    bare = _write_gds(_make_sky130_bjt_layout(), tmp_path / "bjt_bare.gds")
+    report = run_extract(bare, "sky130", output=str(tmp_path / "bare.spice"))
+    assert report["device_counts"].get("pnp", 0) == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -12665,6 +13729,7 @@ def test_parasitics_summary_block_shape(tmp_path):
     para = report["parasitics"]
     assert para is not None
     assert set(para) == {
+        "model_revision",
         "r_count",
         "c_count",
         "cc_count",
@@ -12685,6 +13750,28 @@ def test_parasitics_summary_block_shape(tmp_path):
         "mom_rlc_override",
         "substrate_dc_tie",
         "substrate_spreading",
+        # Additive field (issue #2764): the emitted-network integrity
+        # summary -- present on every `--parasitics` run for schema
+        # stability, exactly like the blocks above.
+        "integrity",
+    }
+    # `integrity` (issue #2764): a healthy extraction trips nothing. The
+    # summary carries the knob values the per-net checks ran with (echoed
+    # verbatim from `parasitic_integrity`'s documented defaults) and
+    # aggregate counts only -- no net names, so rerun canonicalization has
+    # nothing to reorder.
+    assert para["integrity"] == {
+        "short_threshold_ohm": 1.0,
+        "cap_tolerance": {"absolute_ff": 1e-06, "relative": 1e-09},
+        "max_detail_items": 20,
+        "nets_checked": len(para["nets"]),
+        "nets_with_findings": 0,
+        "open_nets": 0,
+        "island_components": 0,
+        "orphan_nodes": 0,
+        "suspicious_resistors": 0,
+        "short_candidates": 0,
+        "capacitance_mismatches": 0,
     }
     # `substrate_spreading` (issue #2561): `None` unless
     # `--substrate-spreading <net>` was given -- present in every
@@ -12699,6 +13786,7 @@ def test_parasitics_summary_block_shape(tmp_path):
     # reference" in `docs/cli/extract.md`.
     assert para["substrate_dc_tie"] == {
         "resistance_ohm": 1e12,
+        "mode": "shunt",
         "nets": [{"net": "vsubs", "device": "Rvsubs_dctie"}],
         "node_scope": "global",
     }
@@ -12716,6 +13804,9 @@ def test_parasitics_summary_block_shape(tmp_path):
     # static across every extraction, so it must match the module constant
     # exactly, not just be present.
     assert para["model"] == PARASITIC_MODEL_SCOPE
+    # `model_revision` (issue #2957): bump PARASITICS_MODEL_REVISION (and the
+    # CHANGELOG) whenever R/C extraction semantics change.
+    assert para["model_revision"] == 2
     assert set(para["model"]) == {"capacitance", "coupling", "resistance", "frequency"}
     # sky130's PARASITICS.metals/metal_overlaps are fully populated (issue
     # #547's regression target was gf180mcu, not sky130) -- no gap for this
@@ -12757,6 +13848,9 @@ def test_parasitics_summary_block_shape(tmp_path):
             "by_layer",
             "resistance_ohm_top_cell",
             "capacitance_ff_top_cell",
+            # Additive field (issue #2764): this net's emitted-network
+            # integrity diagnostics -- see the per-net assertions below.
+            "integrity",
         }
         # `resistance_ohm_top_cell`/`capacitance_ff_top_cell` (issue #1704):
         # `None` unless `--parasitics-top-cell-only` was given -- additive,
@@ -12773,6 +13867,35 @@ def test_parasitics_summary_block_shape(tmp_path):
         assert entry["coupled"] == []
         assert entry["capacitance_ff"] > 0.0
         assert entry["resistance_ohm"] >= 0.0
+        # `integrity` (issue #2764): every check runs on every net; a
+        # healthy lumped net reports a vacuous-open `not_applicable` (the
+        # star model carries no measurable terminal-connectivity evidence),
+        # zero findings everywhere else, and a capacitance reconciliation
+        # that passes against the net's own declared total.
+        integrity = entry["integrity"]
+        assert set(integrity) == {
+            "open",
+            "islands",
+            "orphan_nodes",
+            "suspicious_resistors",
+            "short_candidates",
+            "capacitance",
+        }
+        assert integrity["open"]["status"] == "not_applicable"
+        assert integrity["open"]["reason"]
+        assert integrity["islands"]["count"] == 0
+        assert integrity["orphan_nodes"]["count"] == 0
+        assert integrity["suspicious_resistors"]["count"] == 0
+        assert integrity["short_candidates"]["count"] == 0
+        assert integrity["capacitance"]["status"] == "pass"
+        assert integrity["capacitance"]["declared_ff"] == pytest.approx(
+            entry["capacitance_ff"], abs=1e-6
+        )
+        assert integrity["capacitance"]["computed_ff"] == pytest.approx(
+            entry["capacitance_ff"], abs=1e-6
+        )
+        assert integrity["capacitance"]["delta_ff"] is not None
+        assert abs(integrity["capacitance"]["delta_ff"]) <= 1e-6
         # `by_layer` (issue #1701): per-role/per-metal-level breakdown of the
         # scalar totals above -- non-empty whenever the net's totals are
         # non-zero (every net in this fixture), one entry per shape, and each
@@ -13311,13 +14434,11 @@ def test_gf180mcu_parasitics_metals_covers_full_stack():
     assert m2.cap_perim_ff_um == pytest.approx(0.033298)
 
     # Metal5 (index 4, top metal of this 5-level stack): sheet from the
-    # resolved, pre-built gf180mcuD.tech for the pinned PDK commit
-    # (`resist (allm5)/metal5    60`, 60 milliohm/sq), the non-thick-metal
-    # `else` branch -- not the generic templated gf180mcu.tech's
-    # THICKMET1P1 row (40 milliohm/sq), which a prior curation (#571)
-    # mistakenly used (corrected by #572).
+    # resolved, pre-built gf180mcuD.tech for the pinned PDK commit f6eeac7
+    # (`resist (allm5)/metal5    40`, 40 milliohm/sq; it read 60 at the
+    # earlier c6d73a3 pin -- issue #3540).
     m5 = gf180mcu.PARASITICS.metals[4]
-    assert m5.sheet_res_ohm_sq == pytest.approx(0.06)
+    assert m5.sheet_res_ohm_sq == pytest.approx(0.04)
     assert m5.cap_area_ff_um2 == pytest.approx(0.005798)
     assert m5.cap_perim_ff_um == pytest.approx(0.030386)
 
@@ -13827,6 +14948,105 @@ def test_critical_net_requires_parasitics():
 
 
 # ---------------------------------------------------------------------------
+# Glob / all-nets selectors for --critical-net / --parasitics-net (issue #2974)
+# ---------------------------------------------------------------------------
+
+
+def _lateral_run(tmp_path, **kwargs):
+    path = _write_gds(_make_lateral_coupling_layout(), tmp_path / "lateral.gds")
+    return run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "lateral.spice"),
+        parasitics=True,
+        **kwargs,
+    )
+
+
+def test_critical_net_pattern_matches_explicit_names(tmp_path):
+    explicit = _lateral_run(tmp_path, critical_nets=["VIC"])["parasitics"]
+    pattern = _lateral_run(tmp_path, critical_net_patterns=["V*"])["parasitics"]
+    assert pattern["critical_nets"] == ["VIC"]
+    assert pattern["critical_net_patterns"] == ["V*"]
+    assert pattern["cc_count"] == explicit["cc_count"] == 1
+    assert pattern["total_coupling_capacitance_ff"] == pytest.approx(
+        explicit["total_coupling_capacitance_ff"]
+    )
+
+
+def test_critical_net_pattern_merges_with_exact_names(tmp_path):
+    para = _lateral_run(tmp_path, critical_nets=["FAR"], critical_net_patterns=["V*"])[
+        "parasitics"
+    ]
+    assert para["critical_nets"] == ["FAR", "VIC"]
+
+
+def test_no_selector_leaves_report_fields_absent(tmp_path):
+    para = _lateral_run(tmp_path, critical_nets=["VIC"])["parasitics"]
+    assert "critical_net_patterns" not in para
+    assert "critical_net_all" not in para
+    assert "parasitics_net_patterns" not in para
+
+
+def test_critical_net_pattern_zero_match_warns_distinctly(tmp_path):
+    report = _lateral_run(tmp_path, critical_net_patterns=["bl_*"])
+    assert any(
+        "--critical-net-pattern pattern(s) 'bl_*' match no net" in w
+        for w in report["warnings"]
+    )
+    assert report["parasitics"]["critical_nets"] == []
+
+
+def test_critical_net_pattern_zero_match_is_error_when_strict(tmp_path):
+    with pytest.raises(ExtractError, match="'bl_\\*' match no net.*strict-net"):
+        _lateral_run(tmp_path, critical_net_patterns=["bl_*"], strict_net_patterns=True)
+
+
+def test_critical_net_all_with_exclude(tmp_path):
+    para = _lateral_run(tmp_path, critical_net_all=True, critical_net_excludes=["FAR"])[
+        "parasitics"
+    ]
+    assert para["critical_nets"] == ["AGR", "VIC"]
+    assert para["critical_net_all"] is True
+    assert para["critical_net_excludes"] == ["FAR"]
+
+
+def test_parasitics_net_pattern_scopes_ground_pass(tmp_path):
+    para = _lateral_run(tmp_path, parasitics_net_patterns=["[AV]*"])["parasitics"]
+    assert para["parasitics_nets"] == ["AGR", "VIC"]
+    assert {entry["net"] for entry in para["nets"]} == {"AGR", "VIC"}
+
+
+def test_net_selector_flag_validation(tmp_path):
+    with pytest.raises(ExtractError, match="require --parasitics"):
+        run_extract("/nonexistent.gds", "sky130", critical_net_patterns=["V*"])
+    with pytest.raises(ExtractError, match="requires --critical-net-all"):
+        run_extract(
+            "/nonexistent.gds", "sky130", parasitics=True, critical_net_excludes=["x"]
+        )
+    with pytest.raises(ExtractError, match="--strict-net-patterns requires"):
+        run_extract(
+            "/nonexistent.gds", "sky130", parasitics=True, strict_net_patterns=True
+        )
+
+
+def test_distributed_rc_with_empty_resolving_pattern_errors(tmp_path):
+    with pytest.raises(ExtractError, match="resolved to no net"):
+        _lateral_run(tmp_path, critical_net_patterns=["bl_*"], distributed_rc=True)
+
+
+def test_net_selector_anonymous_nets_only_match_explicit_dollar_glob():
+    from klayout_tools.extract_netselect import NetSelectors
+
+    selectors = NetSelectors(error=ExtractError)
+    named = ["bl_0", "bl_1", "VSS"]
+    anonymous = ["\\$3"]
+    assert selectors._select("f", ["*"], named, anonymous) == set(named)
+    assert selectors._select("f", ["\\$*"], named, anonymous) == {"\\$3"}
+    assert selectors._select("f", [], named, anonymous, select_all=True) == set(named)
+
+
+# ---------------------------------------------------------------------------
 # Scoping the ground R/C pass to named nets (--parasitics-net, issue #1700 --
 # the cost half of friction report #1699)
 # ---------------------------------------------------------------------------
@@ -14013,6 +15233,152 @@ def test_cli_parasitics_net_flag_json(tmp_path, capsys):
     out = json.loads(capsys.readouterr().out)
     assert out["parasitics"]["parasitics_nets"] == ["VIC", "AGR"]
     assert {entry["net"] for entry in out["parasitics"]["nets"]} == {"VIC", "AGR"}
+
+
+# ---------------------------------------------------------------------------
+# --parasitic-variant (issue #3056)
+# ---------------------------------------------------------------------------
+
+
+def _cards(report):
+    return [
+        ln.split()[0]
+        for ln in Path(report["netlist_path"]).read_text().splitlines()
+        if ln and ln[0] in "RCL"
+    ]
+
+
+def _variant_run(tmp_path, variants, *, layout=None, name="v", **kwargs):
+    path = _write_gds(layout or _make_inverter_layout(), tmp_path / f"{name}.gds")
+    return run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / f"{name}.spice"),
+        parasitics=True,
+        parasitic_variants=variants,
+        **kwargs,
+    )
+
+
+def test_parasitic_variant_absent_is_byte_identical(tmp_path):
+    base = _variant_run(tmp_path, None, name="a")
+    empty = _variant_run(tmp_path, [], name="b")
+    assert "parasitic_variant" not in base["parasitics"]
+    assert Path(base["netlist_path"]).read_text().replace("a.", "x.") == Path(
+        empty["netlist_path"]
+    ).read_text().replace("b.", "x.")
+    assert base["parasitics"] == empty["parasitics"]
+
+
+def test_parasitic_variant_drop_r_net_shorts_legs_into_hub(tmp_path):
+    base = _variant_run(tmp_path, None, name="a")
+    dropped = _variant_run(tmp_path, ["drop-r:Y"], name="b")
+    base_cards, cards = _cards(base), _cards(dropped)
+    y_legs = re.compile(r"RY(_dup\d+)?_t\d+")
+    assert any(y_legs.fullmatch(c) for c in base_cards)
+    assert not any(y_legs.fullmatch(c) for c in cards)
+    # Ground C and every other net's cards are untouched.
+    assert "CY" in cards
+    assert [c for c in base_cards if not y_legs.fullmatch(c)] == cards
+    by_net = {n["net"]: n for n in dropped["parasitics"]["nets"]}
+    assert all(t["leg_net"] == "Y" for t in by_net["Y"]["terminals"])
+    assert dropped["parasitics"]["parasitic_variant"] == ["drop-r:Y"]
+    assert dropped["warnings"] == base["warnings"]
+
+
+def test_parasitic_variant_drop_c_ground_and_wildcards_compose(tmp_path):
+    base = _variant_run(tmp_path, None, name="a")
+    one = _variant_run(tmp_path, ["drop-c-ground:Y"], name="b")
+    assert "CY" not in _cards(one)
+    assert any(c.startswith("RY_t") for c in _cards(one))
+    none_r = _variant_run(tmp_path, ["drop-r:*"], name="c")
+    assert not any(c.startswith("R") and "_t" in c for c in _cards(none_r))
+    assert none_r["parasitics"]["r_count"] == 0
+    both = _variant_run(tmp_path, ["drop-r:*", "drop-c-ground:*"], name="d")
+    assert both["parasitics"]["c_count"] == 0
+    assert both["parasitics"]["total_capacitance_ff"] == 0
+    assert base["parasitics"]["c_count"] > 0
+
+
+def test_parasitic_variant_drop_c_coupling(tmp_path):
+    layout = _make_lateral_coupling_layout()
+    base = _variant_run(tmp_path, None, layout=layout, name="a", critical_nets=["VIC"])
+    dropped = _variant_run(
+        tmp_path,
+        ["drop-c-coupling"],
+        layout=layout,
+        name="b",
+        critical_nets=["VIC"],
+    )
+    assert any(c.startswith("Ccc_") for c in _cards(base))
+    assert not any(c.startswith("Ccc_") for c in _cards(dropped))
+    assert dropped["parasitics"]["cc_count"] == 0
+    assert dropped["parasitics"]["total_coupling_capacitance_ff"] == 0
+
+
+def test_parasitic_variant_gamma_shunt_drop_r(tmp_path):
+    layout = _make_lateral_coupling_layout()
+    base = _variant_run(tmp_path, None, layout=layout, name="a")
+    dropped = _variant_run(tmp_path, ["drop-r:VIC"], layout=layout, name="b")
+    assert "RVIC" in _cards(base)
+    assert "RVIC" not in _cards(dropped)
+    assert "CVIC" in _cards(dropped)
+
+
+def test_parasitic_variant_keeps_network_integrity_clean(tmp_path):
+    for variants in (
+        ["drop-r:*"],
+        ["drop-c-ground:*"],
+        ["drop-r:*", "drop-c-ground:*", "drop-c-coupling"],
+    ):
+        report = _variant_run(tmp_path, variants, name="b")
+        integrity = report["parasitics"]["integrity"]
+        assert integrity["nets_with_findings"] == 0, variants
+        assert integrity["orphan_nodes"] == 0, variants
+        assert integrity["capacitance_mismatches"] == 0, variants
+
+
+def test_parasitic_variant_unmatched_net_is_a_warning(tmp_path):
+    report = _variant_run(tmp_path, ["drop-r:NOPE"], name="a")
+    assert any("NOPE" in w and "--parasitic-variant" in w for w in report["warnings"])
+
+
+def test_parasitic_variant_rejects_unknown_verb_and_missing_parasitics():
+    with pytest.raises(ExtractError, match="unknown --parasitic-variant"):
+        run_extract(
+            "/nonexistent.gds",
+            "sky130",
+            parasitics=True,
+            parasitic_variants=["drop-l:Y"],
+        )
+    with pytest.raises(ExtractError, match="--parasitic-variant requires"):
+        run_extract("/nonexistent.gds", "sky130", parasitic_variants=["drop-r:Y"])
+
+
+def test_cli_parasitic_variant_usage_errors_exit_2(tmp_path, capsys):
+    path = str(_write_gds(_make_inverter_layout(), tmp_path / "inv.gds"))
+    with pytest.raises(SystemExit) as excinfo:
+        main(
+            ["extract", path, "--deck", "sky130", "--parasitics"]
+            + ["--parasitic-variant", "bogus"]
+        )
+    assert excinfo.value.code == 2
+    code = main(
+        ["extract", path, "--deck", "sky130", "--parasitic-variant", "drop-r:*"]
+        + ["--format", "json"]
+    )
+    assert code == 2
+
+
+def test_cli_parasitic_variant_json(tmp_path, capsys):
+    path = str(_write_gds(_make_inverter_layout(), tmp_path / "inv.gds"))
+    code = main(
+        ["extract", path, "--deck", "sky130", "--parasitics", "--format", "json"]
+        + ["--parasitic-variant", "drop-r:Y", "--parasitic-variant", "drop-c-coupling"]
+    )
+    assert code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["parasitics"]["parasitic_variant"] == ["drop-r:Y", "drop-c-coupling"]
 
 
 # ---------------------------------------------------------------------------
@@ -15656,6 +17022,341 @@ def test_distributed_rc_falls_back_to_star_below_two_terminals(tmp_path):
     )
 
 
+# --------------------------------------------------------------------------- #
+# Emitted-network integrity (--parasitics, issue #2764)
+# --------------------------------------------------------------------------- #
+
+
+def _integrity_summary(report: dict) -> dict:
+    return report["parasitics"]["integrity"]
+
+
+def test_distributed_ladder_integrity_reports_pass(tmp_path):
+    """A healthy `--distributed-rc` ladder passes the open check over its
+    own emitted segments, while every lumped net stays `not_applicable` --
+    the two models report different evidence, in the same run."""
+    path = _write_gds(_make_series_nmos_layout(), tmp_path / "series.gds")
+    baseline = run_extract(
+        path, "sky130", output=str(tmp_path / "series_baseline.spice"), parasitics=True
+    )
+    net_name = _distributed_rc_internal_net_name(baseline)
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "series_distributed.spice"),
+        parasitics=True,
+        critical_nets=[net_name],
+        distributed_rc=True,
+    )
+    entry = next(n for n in report["parasitics"]["nets"] if n["net"] == net_name)
+    assert entry["rc_model"] == "distributed"
+    assert entry["integrity"]["open"]["status"] == "pass"
+    lumped = next(
+        n
+        for n in report["parasitics"]["nets"]
+        if n["net"] != net_name and n["rc_model"] == "lumped"
+    )
+    assert lumped["integrity"]["open"]["status"] == "not_applicable"
+    assert _integrity_summary(report)["nets_with_findings"] == 0
+
+
+def test_parasitic_integrity_corrupted_ladder_trips_open(tmp_path, monkeypatch):
+    """The canary (issue #2764): a deliberately corrupted network -- the
+    distributed ladder built with its segment resistor dropped -- trips the
+    `open` status end to end, naming the disconnected terminal, with the
+    summary counters agreeing."""
+    from klayout_tools import extract_parasitics
+
+    original = extract_parasitics._distributed_rc_segments
+
+    def drop_last_segment(positions, r_total_ohm, c_total_ff):
+        order, segment_r_ohm, node_c_ff = original(positions, r_total_ohm, c_total_ff)
+        return order, segment_r_ohm[:-1], node_c_ff
+
+    monkeypatch.setattr(
+        extract_parasitics, "_distributed_rc_segments", drop_last_segment
+    )
+
+    path = _write_gds(_make_series_nmos_layout(), tmp_path / "series.gds")
+    baseline = run_extract(
+        path, "sky130", output=str(tmp_path / "series_baseline.spice"), parasitics=True
+    )
+    net_name = _distributed_rc_internal_net_name(baseline)
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "series_broken.spice"),
+        parasitics=True,
+        critical_nets=[net_name],
+        distributed_rc=True,
+    )
+    entry = next(n for n in report["parasitics"]["nets"] if n["net"] == net_name)
+    open_block = entry["integrity"]["open"]
+    assert open_block["status"] == "open"
+    assert open_block["disconnected_count"] == 1
+    # The ladder's middle position reuses the net object itself (issue
+    # #977), so with the single segment dropped, the *net* node is the
+    # disconnected required terminal -- not the fresh `__t0` leg.
+    assert open_block["disconnected_terminals"] == [net_name]
+    summary = _integrity_summary(report)
+    assert summary["nets_with_findings"] == 1
+    assert summary["open_nets"] == 1
+    # Everything else on this run stays clean.
+    assert summary["island_components"] == 0
+    assert summary["orphan_nodes"] == 0
+    assert summary["suspicious_resistors"] == 0
+    assert summary["short_candidates"] == 0
+    assert summary["capacitance_mismatches"] == 0
+
+
+def test_parasitic_integrity_corrupted_record_trips_every_status(tmp_path, monkeypatch):
+    """One deliberately-corrupted record trips all six diagnostics through
+    the real `run_extract` wiring: an open ladder, an island, an orphan
+    node, a malformed resistor, a cross-net short candidate and an
+    altered ground capacitor -- while the rest of the report still
+    serializes as strict finite JSON."""
+    from dataclasses import replace as dc_replace
+
+    from klayout_tools import extract_parasitics
+    from klayout_tools.parasitic_integrity import (
+        IntegrityCapacitor,
+        IntegrityNode,
+        IntegrityResistor,
+    )
+
+    real_check = extract_parasitics.check_parasitic_network
+
+    def corrupt_and_check(
+        record,
+    ):  # 1. open: drop the distributed ladder's segment resistors (star
+        #    legs and DC ties are untouched -- only `_seg` names them).
+        record.resistors[:] = [r for r in record.resistors if "_seg" not in r.name]
+        distributed_net = next(n for n in record.nets if n.rc_model == "distributed")
+        other_net = next(n for n in record.nets if n.net_id != distributed_net.net_id)
+        dist_node = next(
+            n.uid for n in record.nodes if n.owner_net_id == distributed_net.net_id
+        )
+        other_node = next(
+            n.uid for n in record.nodes if n.owner_net_id == other_net.net_id
+        )
+        # 2. short candidate: cross-net resistor at/below the threshold.
+        record.resistors.append(
+            IntegrityResistor(
+                "bug_short", dist_node, other_node, 0.5, distributed_net.net_id
+            )
+        )
+        # 3. suspicious resistor: zero-valued self-loop.
+        record.resistors.append(
+            IntegrityResistor(
+                "bug_zero", dist_node, dist_node, 0.0, distributed_net.net_id
+            )
+        )
+        # 4. orphan: a registered node with no element attached.
+        orphan_uid = len(record.nodes)
+        record.nodes.append(
+            IntegrityNode(
+                uid=orphan_uid, name="bug_orphan", owner_net_id=distributed_net.net_id
+            )
+        )
+        # 5. island: a floating node that *is* attached (a ground cap), so
+        #    it is an island and not a second orphan.
+        island_uid = len(record.nodes)
+        record.nodes.append(
+            IntegrityNode(
+                uid=island_uid, name="bug_island", owner_net_id=distributed_net.net_id
+            )
+        )
+        ground_uid = next(n.uid for n in record.nodes if n.owner_net_id is None)
+        record.capacitors.append(
+            IntegrityCapacitor(
+                name="bug_island_cap",
+                node_a=island_uid,
+                node_b=ground_uid,
+                capacitance_ff=0.1,
+                kind="ground",
+                owner_net_id=distributed_net.net_id,
+            )
+        )
+        # 6. capacitance mismatch: alter one emitted ground capacitor while
+        #    the declared total stays fixed.
+        first_ground = next(
+            i
+            for i, c in enumerate(record.capacitors)
+            if c.kind == "ground" and c.owner_net_id == distributed_net.net_id
+        )
+        record.capacitors[first_ground] = dc_replace(
+            record.capacitors[first_ground],
+            capacitance_ff=record.capacitors[first_ground].capacitance_ff / 2.0,
+        )
+        return real_check(record)
+
+    path = _write_gds(_make_series_nmos_layout(), tmp_path / "series.gds")
+    baseline = run_extract(
+        path, "sky130", output=str(tmp_path / "series_baseline.spice"), parasitics=True
+    )
+    net_name = _distributed_rc_internal_net_name(baseline)
+    # Patch only now: the baseline run above must flow through uncorrupted
+    # (its record carries no distributed net to corrupt).
+    monkeypatch.setattr(
+        extract_parasitics, "check_parasitic_network", corrupt_and_check
+    )
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "series_corrupted.spice"),
+        parasitics=True,
+        critical_nets=[net_name],
+        distributed_rc=True,
+    )
+
+    summary = _integrity_summary(report)
+    assert summary["open_nets"] == 1
+    # Both injected defect nodes are islands (a component without a required
+    # terminal): the cap-attached bug_island node and the fully detached
+    # bug_orphan node -- the island and orphan definitions genuinely
+    # overlap for a detached node, by design (documented in
+    # docs/cli/extract.md).
+    assert summary["island_components"] == 2
+    assert summary["orphan_nodes"] == 1
+    assert summary["suspicious_resistors"] == 1
+    assert summary["short_candidates"] == 1
+    assert summary["capacitance_mismatches"] == 1
+    assert summary["nets_with_findings"] == 1
+
+    entry = next(n for n in report["parasitics"]["nets"] if n["net"] == net_name)
+    integrity = entry["integrity"]
+    assert integrity["open"]["status"] == "open"
+    assert integrity["islands"]["count"] == 2
+    assert integrity["islands"]["details"] == [
+        {"nodes": ["bug_island"]},
+        {"nodes": ["bug_orphan"]},
+    ]
+    assert integrity["orphan_nodes"]["details"] == [{"node": "bug_orphan"}]
+    assert integrity["suspicious_resistors"]["details"][0]["device"] == "bug_zero"
+    assert integrity["suspicious_resistors"]["details"][0]["issues"] == [
+        "self_loop",
+        "zero",
+    ]
+    (short,) = integrity["short_candidates"]["details"]
+    assert short["device"] == "bug_short"
+    assert short["resistance_ohm"] == 0.5
+    assert integrity["capacitance"]["status"] == "mismatch"
+
+    # Strict finite JSON: the full report (integrity blocks included)
+    # round-trips with the encoder's non-finite ban in force.
+    assert "NaN" not in json.dumps(report, allow_nan=False)
+    assert "Infinity" not in json.dumps(report, allow_nan=False)
+
+
+def test_parasitic_integrity_corrupted_lumped_capacitor_trips_mismatch(
+    tmp_path, monkeypatch
+):
+    """The lumped reconciliation checks the value the device actually
+    carries (PR #3127 review): corrupting one emitted lumped ground
+    capacitor's `C` parameter after it is set -- the declared total
+    untouched -- trips `capacitance.status == "mismatch"` on exactly that
+    net, with `computed_ff` reflecting the corrupted device value."""
+    from klayout_tools import extract_parasitics
+
+    real_readback = extract_parasitics._emitted_capacitance_ff
+    corrupted: list[str] = []
+
+    def corrupt_first_lumped_cap(cap_device):
+        # Every net of this layout is lumped (no `--distributed-rc`), so
+        # the first capacitor seen is a lumped hub cap; corrupt only it.
+        if not corrupted:
+            cap_device.set_parameter("C", cap_device.parameter("C") * 2.0)
+            corrupted.append(cap_device.name)
+        return real_readback(cap_device)
+
+    monkeypatch.setattr(
+        extract_parasitics, "_emitted_capacitance_ff", corrupt_first_lumped_cap
+    )
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(
+        path, "sky130", output=str(tmp_path / "inv.spice"), parasitics=True
+    )
+    assert len(corrupted) == 1
+    summary = _integrity_summary(report)
+    assert summary["capacitance_mismatches"] == 1
+    assert summary["nets_with_findings"] == 1
+    (bad,) = [
+        n
+        for n in report["parasitics"]["nets"]
+        if n["integrity"]["capacitance"]["status"] == "mismatch"
+    ]
+    assert bad["rc_model"] == "lumped"
+    cap = bad["integrity"]["capacitance"]
+    assert cap["declared_ff"] > 0
+    assert cap["computed_ff"] == pytest.approx(2.0 * cap["declared_ff"], rel=1e-6)
+    assert cap["delta_ff"] == pytest.approx(cap["declared_ff"], rel=1e-6)
+
+
+def test_parasitic_integrity_healthy_report_is_strict_finite_json(tmp_path):
+    """A healthy extraction's whole report -- integrity blocks included --
+    serializes under `allow_nan=False` with no NaN/Infinity literals."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(
+        path, "sky130", output=str(tmp_path / "inv.spice"), parasitics=True
+    )
+    text = json.dumps(report, allow_nan=False)
+    assert "NaN" not in text
+    assert "Infinity" not in text
+
+
+def test_parasitic_integrity_same_label_nets_keep_distinct_identities(tmp_path):
+    """Issue #765's two same-named `VGND` islands each get their own
+    integrity diagnostics under their own `net_id` -- neither absorbs the
+    other's findings, and neither invents a cross-net short against its
+    name-twin."""
+    layout = _make_two_disjoint_nmos_shared_label_layout()
+    path = _write_gds(layout, tmp_path / "two_vgnd.gds")
+    report = run_extract(
+        path, "sky130", output=str(tmp_path / "two_vgnd.spice"), parasitics=True
+    )
+    para_nets = [n for n in report["parasitics"]["nets"] if n["net"] == "VGND"]
+    assert len(para_nets) == 2
+    assert len({n["net_id"] for n in para_nets}) == 2
+    for entry in para_nets:
+        integrity = entry["integrity"]
+        assert integrity["open"]["status"] == "not_applicable"
+        assert integrity["short_candidates"]["count"] == 0
+        assert integrity["capacitance"]["status"] == "pass"
+    assert _integrity_summary(report)["nets_with_findings"] == 0
+
+
+def test_rerun_extract_report_clean_pass_with_parasitics(tmp_path):
+    """Rerun comparison (issue #2764): the integrity fields ride inline on
+    `parasitics.nets[]` (so canonicalization re-sorts them with their
+    entry) and the summary is net-name-free, so they introduce no drift
+    paths of their own.
+
+    `--rerun`'s documented known limitation (see `rerun_extract_report`)
+    already shows a parasitics report as `drifted` -- the `--parasitics`
+    flag is not replayed, so the fresh run is a schematic-equivalent
+    extraction and the whole `parasitics`/parasitics-metrics half drifts.
+    What issue #2764 must not add is drift *attributable to the integrity
+    fields*: none of the reported drift paths may name them."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report_path = tmp_path / "inv.extract.json"
+    _write_report(
+        report_path,
+        run_extract(
+            path, "sky130", output=str(tmp_path / "inv.spice"), parasitics=True
+        ),
+    )
+
+    result = rerun_extract_report(str(report_path))
+
+    assert result["status"] == "drifted"  # the pre-existing --parasitics gap
+    integrity_drift = [
+        d
+        for d in result["drift"]
+        if "integrity" in d["field"] and d["field"] != "parasitics"
+    ]
+    assert integrity_drift == []
+
+
 def test_distributed_rc_requires_critical_net(tmp_path):
     path = _write_gds(_make_series_nmos_layout(), tmp_path / "series.gds")
     with pytest.raises(ExtractError, match="--distributed-rc requires --critical-net"):
@@ -16164,6 +17865,79 @@ def _make_floating_substrate_layout() -> kdb.Layout:
     return layout
 
 
+def test_substrate_tie_ohms_default_header_states_floating(tmp_path):
+    """Issue #3089: the default tie is announced in the netlist header."""
+    path = _write_gds(_make_floating_substrate_layout(), tmp_path / "floating.gds")
+    para = run_extract(
+        path, "sky130", output=str(tmp_path / "para.spice"), parasitics=True
+    )
+    text = Path(para["netlist_path"]).read_text()
+    assert "* - substrate tie: 1e+12 ohm to ground" in text
+    assert "capacitively floating in transient" in text
+
+
+def test_substrate_tie_ohms_custom_value(tmp_path):
+    """Issue #3089: a positive value is written verbatim and reported."""
+    path = _write_gds(_make_floating_substrate_layout(), tmp_path / "floating.gds")
+    para = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "para.spice"),
+        parasitics=True,
+        substrate_tie_ohms=1e-3,
+    )
+    text = Path(para["netlist_path"]).read_text()
+    assert "Rvsubs_dctie vsubs 0 0.001" in text
+    assert "* - substrate tie: 0.001 ohm to ground" in text
+    tie = para["parasitics"]["substrate_dc_tie"]
+    assert tie["resistance_ohm"] == 1e-3
+    assert tie["mode"] == "shunt"
+    assert para["parasitics"]["integrity"]["short_candidates"] == 0
+
+
+def test_substrate_tie_ohms_zero_is_hard_tie(tmp_path):
+    """Issue #3089: 0 is a hard tie, written as a legal (1 mohm) resistor."""
+    path = _write_gds(_make_floating_substrate_layout(), tmp_path / "floating.gds")
+    para = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "para.spice"),
+        parasitics=True,
+        substrate_tie_ohms=0,
+    )
+    text = Path(para["netlist_path"]).read_text()
+    assert "Rvsubs_dctie vsubs 0 0.001" in text
+    assert "hard tie to ground" in text
+    tie = para["parasitics"]["substrate_dc_tie"]
+    assert tie["mode"] == "hard"
+    assert tie["resistance_ohm"] == 1e-3
+    assert para["parasitics"]["integrity"]["short_candidates"] == 0
+
+
+@pytest.mark.parametrize("bad", [-1.0, float("nan"), float("inf")])
+def test_substrate_tie_ohms_rejects_invalid(tmp_path, bad):
+    path = _write_gds(_make_floating_substrate_layout(), tmp_path / "floating.gds")
+    with pytest.raises(ExtractError, match="--substrate-tie-ohms"):
+        run_extract(
+            path,
+            "sky130",
+            output=str(tmp_path / "x.spice"),
+            parasitics=True,
+            substrate_tie_ohms=bad,
+        )
+
+
+def test_substrate_tie_ohms_requires_parasitics(tmp_path):
+    path = _write_gds(_make_floating_substrate_layout(), tmp_path / "floating.gds")
+    with pytest.raises(ExtractError, match="--substrate-tie-ohms requires"):
+        run_extract(
+            path,
+            "sky130",
+            output=str(tmp_path / "x.spice"),
+            substrate_tie_ohms=1e3,
+        )
+
+
 def test_parasitics_writes_substrate_dc_tie_inside_subckt_body(tmp_path):
     """The structural half of issue #1263 (DC convergence) plus issue #1503
     (node scope): `--parasitics` writes one large shunt resistor from the
@@ -16203,6 +17977,7 @@ def test_parasitics_writes_substrate_dc_tie_inside_subckt_body(tmp_path):
 
     assert para["parasitics"]["substrate_dc_tie"] == {
         "resistance_ohm": 1e12,
+        "mode": "shunt",
         "nets": [{"net": "vsubs", "device": "Rvsubs_dctie"}],
         "node_scope": "global",
     }
@@ -18668,6 +20443,81 @@ def test_def_net_instance_pins_empty_when_file_missing(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
+def _divider_report(net):
+    return {
+        "nets": [
+            {
+                "net": net,
+                "hub_net": net,
+                "capacitance_ff": 1.5,
+                "resistance_ohm": 0.0,
+                "terminals": [{"leg_net": "leg_$1_G", "resistance_ohm": 5.0}],
+                "coupled": [],
+            },
+        ]
+    }
+
+
+def test_spef_preserves_def_hierarchy_divider_and_escaped_slash(tmp_path):
+    """Issue #2969: a bare `/` in the DEF (hierarchy divider) is emitted bare
+    in `*I`/`*RES`/`*D_NET`; an escaped `\\/` (literal slash, the #1623 shape)
+    keeps its backslash; escaped brackets keep theirs."""
+    from klayout_tools.extract_spef import _write_spef
+
+    def_path = tmp_path / "h.def"
+    def_path.write_text(
+        "NETS 2 ;\n"
+        "- sub/n1 ( sub/_001_ A ) ( g_slice\\[0\\].u\\/_08_ Y ) ;\n"
+        "- flat\\/n2 ( u3 A ) ;\n"
+        "END NETS\n"
+    )
+    pins = def_net_instance_pins(str(def_path))
+    # Equality against plain str is unchanged by the spelling carrier.
+    assert pins["sub/n1"] == (("sub/_001_", "A"), ("g_slice[0].u/_08_", "Y"))
+
+    report = {
+        "nets": [
+            _divider_report("sub/n1")["nets"][0],
+            _divider_report("flat/n2")["nets"][0],
+        ]
+    }
+    out = tmp_path / "h.spef"
+    _write_spef(
+        str(out),
+        design_name="top",
+        klt_version="0.0.0",
+        parasitics_report=report,
+        port_names=[],
+        net_instance_pins=pins,
+    )
+    text = out.read_text()
+    assert "*D_NET sub/n1 " in text
+    assert "*I sub/_001_:A B" in text
+    assert "1 sub/n1:1 sub/n1:2 5.000000" in text
+    assert "2 sub/n1:1 sub/_001_:A 0.000000" in text
+    assert "*I g_slice\\[0\\]\\.u\\/_08_:Y B" in text
+    assert "*D_NET flat\\/n2 " in text
+
+
+def test_spef_names_without_def_origin_are_unchanged(tmp_path):
+    """Issue #2969 regression: plain-str names keep `_spef_name` escaping,
+    including `/`."""
+    from klayout_tools.extract_spef import _write_spef
+
+    out = tmp_path / "p.spef"
+    _write_spef(
+        str(out),
+        design_name="top",
+        klt_version="0.0.0",
+        parasitics_report=_divider_report("a/b"),
+        port_names=[],
+        net_instance_pins={"a/b": (("sub/u", "A"),)},
+    )
+    text = out.read_text()
+    assert "*D_NET a\\/b " in text
+    assert "*I sub\\/u:A B" in text
+
+
 def test_spef_conn_emits_instance_pin_entries_and_zero_ohm_legs(tmp_path):
     """`net_instance_pins` adds one `*I <inst>:<pin> B` `*CONN` entry per
     connection (alongside any `*P` port entry) and wires each into the RC
@@ -18769,6 +20619,164 @@ def test_spef_conn_skips_duplicate_named_nets(tmp_path):
 
     assert "*I " not in text.split("*D_NET sig ")[0]  # neither VGND block
     assert "*I u2:A B" in text  # the unambiguous `sig` net is unaffected
+
+
+def _plain_net(net, *, coupled=()):
+    return {
+        "net": net,
+        "hub_net": net,
+        "capacitance_ff": 1.0,
+        "resistance_ohm": 0.0,
+        "terminals": [{"leg_net": f"{net}_leg", "resistance_ohm": 2.0}],
+        "coupled": list(coupled),
+    }
+
+
+def test_spef_port_pin_name_differs_from_net_name(tmp_path):
+    """Issue #3257 gap B: `- PortA + NET netA` -- `*PORTS`/`*P` carry the PIN
+    name and the net's RC hub is `<net>:1`, never the bare net name. A port
+    whose pin and net names agree keeps the bare-name hub."""
+    from klayout_tools.extract_spef import _write_spef
+
+    def_path = tmp_path / "pins.def"
+    def_path.write_text(
+        "PINS 2 ;\n"
+        "- PortA + NET netA + DIRECTION INPUT ;\n"
+        "- clk + NET clk + DIRECTION INPUT ;\n"
+        "END PINS\n"
+        "NETS 2 ;\n"
+        "- netA ( PIN PortA ) ( u1 A ) ;\n"
+        "- clk ( PIN clk ) ( u1 CLK ) ;\n"
+        "END NETS\n"
+    )
+    pins = def_net_instance_pins(str(def_path))
+    assert pins.port_pins == {"netA": ("PortA",), "clk": ("clk",)}
+    out = tmp_path / "pins.spef"
+    _write_spef(
+        str(out),
+        design_name="top",
+        klt_version="0.0.0",
+        parasitics_report={"nets": [_plain_net("netA"), _plain_net("clk")]},
+        port_names=["netA", "clk"],
+        net_instance_pins=pins,
+    )
+    text = out.read_text()
+    lines = text.splitlines()
+    assert "PortA B" in lines  # *PORTS
+    assert "netA B" not in lines
+    block = text[text.index("*D_NET netA ") : text.index("*END")]
+    assert "*P PortA B" in block
+    assert "*P netA B" not in block
+    assert "1 netA:1 " in block  # hub is the internal node, not bare `netA`
+    assert "1 netA " not in block
+    # Pin == net: unchanged bare-name port hub.
+    clk_block = text[text.index("*D_NET clk ") :]
+    assert "*P clk B" in clk_block
+    assert "1 clk clk:" in clk_block or "1 clk " in clk_block
+
+
+def test_spef_floating_duplicate_named_outputs_are_skipped(tmp_path):
+    """Issue #3257 gap C: two floating cell outputs sharing a pin label and
+    absent from the DEF produce no same-named `*D_NET` blocks (STA-1650); a
+    coupling to them is dropped, and the skipped names are returned."""
+    from klayout_tools.extract_spef import _write_spef
+
+    report = {
+        "nets": [
+            _plain_net(
+                "sig",
+                coupled=[{"net": "X", "capacitance_ff": 0.3}],
+            ),
+            _plain_net("X", coupled=[{"net": "sig", "capacitance_ff": 0.3}]),
+            _plain_net("X"),
+        ]
+    }
+    out = tmp_path / "float.spef"
+    skipped = _write_spef(
+        str(out),
+        design_name="top",
+        klt_version="0.0.0",
+        parasitics_report=report,
+        port_names=[],
+        net_instance_pins={"sig": (("u1", "A"),)},
+    )
+    text = out.read_text()
+    assert skipped == ["X"]
+    assert "*D_NET X " not in text
+    assert text.count("*D_NET ") == 1
+    assert "*D_NET sig 1.000000" in text  # coupling cap not folded in
+    assert "X:" not in text
+
+
+def test_spef_unlabelled_dollar_nets_absent_from_def_are_skipped(tmp_path):
+    """Issue #3580: a unique-named unlabelled `$N` net with no DEF net (and not
+    a port) gets no `*D_NET` (STA-1650) and its coupling is dropped; a `$N`
+    that the DEF names and a port are untouched. Issue #3662: a labelled net
+    (e.g. a sub-cell label `Z`/`ZN`) with no DEF net is skipped the same way."""
+    from klayout_tools.extract_spef import _write_spef
+
+    def run(name, **kwargs):
+        report = {
+            "nets": [
+                _plain_net("sig", coupled=[{"net": "$7", "capacitance_ff": 0.3}]),
+                _plain_net("$7", coupled=[{"net": "sig", "capacitance_ff": 0.3}]),
+                _plain_net("$12"),
+                _plain_net("lab"),
+                _plain_net("p"),
+            ]
+        }
+        out = tmp_path / f"{name}.spef"
+        skipped = _write_spef(
+            str(out),
+            design_name="top",
+            klt_version="0.0.0",
+            parasitics_report=report,
+            port_names=["p"],
+            **kwargs,
+        )
+        return skipped, out.read_text()
+
+    skipped, text = run(
+        "on", net_instance_pins={"sig": (("u1", "A"),), "$12": (("u2", "A"),)}
+    )
+    assert skipped == ["$7", "lab"]
+    assert "*D_NET \\$7 " not in text
+    assert "*D_NET \\$12 " in text
+    assert "*D_NET lab " not in text
+    assert "*D_NET sig 1.000000" in text  # coupling cap not folded in
+
+    skipped, _ = run("empty", net_instance_pins={})
+    assert skipped == []
+    skipped, text = run("none")
+    assert skipped == []
+    assert "*D_NET \\$7 " in text
+
+
+def test_spef_def_net_connections_without_def_pins_warns(tmp_path):
+    """Issue #3257 gap A: structured warning, SPEF bytes unchanged by it."""
+    layout_path = str(CORPUS_DIR / "sky130" / "sky130_fd_sc_hd__inv_1.gds")
+    def_path = tmp_path / "top.def"
+    def_path.write_text("NETS 1 ;\n    - Y ( u1 X ) + USE SIGNAL ;\nEND NETS\n")
+    pins_def = tmp_path / "pins.def"
+    pins_def.write_text("PINS 1 ;\n- Y + NET Y ;\nEND PINS\n")
+
+    def run(name, **kwargs):
+        return run_extract(
+            layout_path,
+            "sky130",
+            parasitics=True,
+            output=str(tmp_path / f"{name}.spice"),
+            spef_output=str(tmp_path / f"{name}.spef"),
+            def_net_connections=def_net_instance_pins(str(def_path)),
+            **kwargs,
+        )
+
+    warned = run("a")
+    assert any(
+        "--def-net-connections without --def-pins" in w for w in warned["warnings"]
+    )
+    quiet = run("b", def_pins=frozenset({"Y"}))
+    assert not any("without --def-pins" in w for w in quiet["warnings"])
 
 
 def test_spef_coupling_cap_references_coupled_net_hub_not_bare_name(tmp_path):
@@ -19928,6 +21936,101 @@ def test_rerun_extract_report_clean_pass(tmp_path):
     assert result["fresh"]["status"] == "extracted"
 
 
+def test_extract_report_echoes_pins_and_def_pins_sets(tmp_path):
+    """Issue #3061: `declared_pins`/`def_pins` are always present -- a sorted
+    list, or `null` for "flag not given" (`[]` stays distinct)."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "echo.gds")
+    plain = run_extract(path, "sky130", output=str(tmp_path / "a.spice"))
+    assert plain["declared_pins"] is None
+    assert plain["def_pins"] is None
+    given = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "b.spice"),
+        declared_pins=frozenset({"VPWR", "A"}),
+        def_pins=frozenset(),
+    )
+    assert given["declared_pins"] == ["A", "VPWR"]
+    assert given["def_pins"] == []
+
+
+def test_rerun_extract_report_replays_plain_pins_without_rename(tmp_path):
+    """Issue #3061: a plain `--pins`/`--def-pins` run (no
+    `--rename-declared-pins`) replays from the top-level echoes and matches."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "plain_pins.gds")
+    report_path = tmp_path / "plain_pins.extract.json"
+    committed = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "plain_pins.spice"),
+        declared_pins=frozenset({"A", "VGND", "VPWR", "VPB", "Y"}),
+        def_pins=frozenset({"A", "VGND", "VPWR", "VPB"}),
+    )
+    _write_report(report_path, committed)
+    assert committed["pin_renames"] is None
+
+    result = rerun_extract_report(str(report_path))
+
+    assert result["status"] == "match"
+    assert result["drift"] == []
+    assert result["fresh"]["declared_pins"] == committed["declared_pins"]
+    assert result["fresh"]["def_pins"] == committed["def_pins"]
+    assert result["fresh"]["def_pin_promotion"] is not None
+
+
+def test_rerun_extract_report_legacy_report_without_pin_echoes(tmp_path):
+    """Issue #3061: a report predating the top-level echoes still replays via
+    the `pin_renames` fallback."""
+    path = _write_gds(
+        _make_inverter_layout(extra_y_label="clk"), tmp_path / "legacy.gds"
+    )
+    report_path = tmp_path / "legacy.extract.json"
+    committed = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "legacy.spice"),
+        declared_pins=frozenset({"clk", "VGND", "VPWR", "VPB", "A"}),
+        rename_declared_pins=True,
+    )
+    del committed["declared_pins"]
+    del committed["def_pins"]
+    _write_report(report_path, committed)
+
+    result = rerun_extract_report(str(report_path))
+
+    # The only drift is the additive fields the legacy report lacks; the pin
+    # fields themselves reproduce through the `pin_renames` fallback.
+    assert {d["field"] for d in result["drift"]} <= {"declared_pins", "def_pins"}
+    assert result["fresh"]["pin_renames"]["renamed"] == [{"from": "Y|clk", "to": "clk"}]
+
+
+def test_rerun_extract_report_never_modifies_committed_netlist(tmp_path):
+    """Issue #3061: `--rerun` leaves the committed netlist bytes alone, even
+    when it reports drift (here a tampered netlist -> `netlist_sha256`
+    drift), leaves no stray temp netlist, and reports the committed path."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "keep.gds")
+    report_path = tmp_path / "keep.extract.json"
+    netlist_path = tmp_path / "keep.spice"
+    committed = run_extract(path, "sky130", output=str(netlist_path))
+    _write_report(report_path, committed)
+    netlist_path.write_text(netlist_path.read_text() + "* tampered\n")
+    tampered = netlist_path.read_bytes()
+    before = set(os.listdir(tempfile.gettempdir()))
+
+    result = rerun_extract_report(str(report_path))
+
+    assert netlist_path.read_bytes() == tampered
+    assert result["fresh"]["netlist_path"] == str(netlist_path)
+    assert not [
+        n
+        for n in set(os.listdir(tempfile.gettempdir())) - before
+        if n.startswith("klt-extract-rerun-")
+    ]
+    # The hash compared is the freshly regenerated netlist's, not the file on
+    # disk's, so the tampered file is neither read as truth nor overwritten.
+    assert result["status"] == "match"
+
+
 def test_rerun_extract_report_detects_device_recognition_change(tmp_path):
     """A layout mutated to add a drawn substrate tie after the report was
     committed changes the NMOS body terminal's resolved net (issue #1084's
@@ -20184,6 +22287,57 @@ def test_canonicalize_extract_report_still_detects_content_drift(tmp_path):
     assert drift  # not swallowed
     drifted_fields = {entry["field"] for entry in drift}
     assert any(field.endswith("resistance_ohm") for field in drifted_fields)
+
+
+def test_canonicalize_integrity_fields_ride_parasitics_net_reorder(tmp_path):
+    """Issue #2764's integrity fields under rerun comparison: each net's
+    inline `integrity` block must (a) travel *with* its `parasitics.nets[]`
+    entry through the canonicalization re-sort -- reordering the list,
+    permuting `net_id`s and renaming anonymous nets silences bookkeeping
+    churn exactly as before -- while (b) a genuine change inside an
+    integrity block (an `open` status flipping) still diffs as drifted,
+    naming the integrity path."""
+    from klayout_tools._report_verify import (
+        VOLATILE_PROVENANCE_PATHS,
+        diff_verdict_fields,
+    )
+    from klayout_tools.extract import _canonicalize_extract_report_for_rerun_diff
+
+    path = _write_gds(_make_gf180mcu_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(
+        str(path), "gf180mcu", output=str(tmp_path / "inv.spice"), parasitics=True
+    )
+    assert report["parasitics"]["nets"]
+    pfet = next(d for d in report["devices"] if d["class"] == "pfet")
+    anon_name = pfet["nets"]["b"]
+
+    mutated = _mutate_bookkeeping_fields(
+        report, old_name=anon_name, new_name="\\$999", net_id_offset=1000
+    )
+    # The inline integrity blocks ride their entries through the reversal.
+    mutated["parasitics"]["nets"] = list(reversed(mutated["parasitics"]["nets"]))
+
+    normalized_committed = _canonicalize_extract_report_for_rerun_diff(mutated)
+    normalized_fresh = _canonicalize_extract_report_for_rerun_diff(report)
+    assert (
+        diff_verdict_fields(
+            normalized_committed, normalized_fresh, exclude=VOLATILE_PROVENANCE_PATHS
+        )
+        == []
+    )
+
+    # Genuine integrity-content drift is not swallowed: flip one entry's
+    # capacitance verdict on the (reordered) committed side.
+    mutated["parasitics"]["nets"][0]["integrity"]["capacitance"]["status"] = "mismatch"
+    normalized_committed = _canonicalize_extract_report_for_rerun_diff(mutated)
+    drift = diff_verdict_fields(
+        normalized_committed, normalized_fresh, exclude=VOLATILE_PROVENANCE_PATHS
+    )
+    assert drift
+    assert any(
+        "integrity" in entry["field"] and "capacitance" in entry["field"]
+        for entry in drift
+    )
 
 
 def test_rerun_extract_report_missing_deck_field_raises(tmp_path):
@@ -20551,6 +22705,8 @@ def test_extract_request_document_file_form_matches_argv(tmp_path, capsys):
     request_code, request_report = _run_extract_json(capsys, [str(request_path)])
 
     assert argv_code == request_code == 0
+    # `timing` is a wall-clock measurement of the run (issue #3181), not content.
+    argv_report.pop("timing"), request_report.pop("timing")
     assert request_report == argv_report
 
 
@@ -20739,6 +22895,7 @@ def test_extract_request_document_maps_every_field_onto_its_flag(tmp_path):
                 "top_cell_pins": True,
                 "pins": ["A", "Y"],
                 "def_pins": "routed.def",
+                "rename_declared_pins": True,
                 "pin_source_cells": "macro_a,macro_b",
                 "deck_options": {"poly_res": "2k"},
                 "defer_resistor_fixed_offset": True,
@@ -20746,6 +22903,7 @@ def test_extract_request_document_maps_every_field_onto_its_flag(tmp_path):
                 "abstract_cell_lef": ["lib/cells.lef"],
                 "subcircuit": "delaywin_hv",
                 "subcircuit_output": "design.delaywin_hv.spice",
+                "hierarchical_cells": ["stage_a", "stage_b"],
                 "matched_groups": {"mirror": ["$1", "$2"]},
             }
         )
@@ -20777,6 +22935,7 @@ def test_extract_request_document_maps_every_field_onto_its_flag(tmp_path):
     assert resolved.top_cell_pins is True
     assert resolved.pins == "A,Y"
     assert resolved.def_pins == str(tmp_path / "routed.def")
+    assert resolved.rename_declared_pins is True
     assert resolved.pin_source_cells == "macro_a,macro_b"
     assert resolved.deck_options == ["poly_res=2k"]
     assert resolved.defer_resistor_fixed_offset is True
@@ -20784,6 +22943,7 @@ def test_extract_request_document_maps_every_field_onto_its_flag(tmp_path):
     assert resolved.abstract_cell_lef == [str(tmp_path / "lib" / "cells.lef")]
     assert resolved.subcircuit == "delaywin_hv"
     assert resolved.subcircuit_output == str(tmp_path / "design.delaywin_hv.spice")
+    assert resolved.hierarchical_cells == "stage_a,stage_b"
     assert resolved.matched_groups == ["mirror=$1,$2"]
 
 
@@ -21064,7 +23224,7 @@ def test_subcircuit_leaves_the_flat_extraction_byte_identical(tmp_path):
     assert plain["netlist_sha256"] == sliced["netlist_sha256"]
     assert plain["subcircuit"] is None
 
-    volatile = {"netlist_path", "subcircuit", "warnings", "provenance"}
+    volatile = {"netlist_path", "subcircuit", "warnings", "provenance", "timing"}
     assert {k: v for k, v in plain.items() if k not in volatile} == {
         k: v for k, v in sliced.items() if k not in volatile
     }
@@ -22108,3 +24268,2373 @@ def test_rerun_of_a_report_predating_the_field_replays_no_override(tmp_path):
     assert [entry["field"] for entry in result["drift"]] == ["label_layers"]
     assert result["fresh"]["label_layers"] is None
     assert result["fresh"]["pin_count"] == committed["pin_count"]
+
+
+def _make_mos_layout_without_flavour_marker(draw_nmos) -> kdb.Layout:
+    """One NMOS and *no* shape on the flavour marker layer at all (issue
+    #2417) -- distinct from ``*_overlap=False``, which still draws the
+    marker far from the device."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    draw_nmos(top, layout, 0, "S", drain_label="D")
+    return layout
+
+
+def test_sky130_extract_warns_when_hvi_marker_has_no_shapes(tmp_path):
+    """Issue #2417: zero `hvi` shapes in the whole layout is flagged in both
+    `warnings[]` and the structured `missing_flavour_markers[]`."""
+    path = _write_gds(
+        _make_mos_layout_without_flavour_marker(_draw_sky130_nmos),
+        tmp_path / "no_hvi.gds",
+    )
+    root = _make_pdk_install(tmp_path, "sky130A")
+    report = run_extract(
+        path,
+        "sky130",
+        pdk_variant="sky130A",
+        pdk_root=root,
+        output=str(tmp_path / "no_hvi.spice"),
+    )
+
+    assert report["device_counts"] == {"nfet": 1}
+    (entry,) = report["missing_flavour_markers"]
+    assert entry["marker"] == "75/20"
+    assert entry["deck"] == "sky130"
+    assert entry["flavour"]
+    assert any("75/20" in w and entry["flavour"] in w for w in report["warnings"])
+
+
+def test_gf180mcu_extract_warns_when_dualgate_marker_has_no_shapes(tmp_path):
+    """Issue #2417: same for gf180mcu's `Dualgate` (55/0)."""
+    path = _write_gds(
+        _make_mos_layout_without_flavour_marker(_draw_gf180mcu_nmos),
+        tmp_path / "no_dualgate.gds",
+    )
+    root = _make_pdk_install(tmp_path, "gf180mcuA")
+    report = run_extract(
+        path,
+        "gf180mcu",
+        pdk_variant="gf180mcuA",
+        pdk_root=root,
+        output=str(tmp_path / "no_dualgate.spice"),
+    )
+
+    (entry,) = report["missing_flavour_markers"]
+    assert entry["deck"] == "gf180mcu"
+    assert entry["marker"] == "55/0"
+    assert any("55/0" in w and entry["flavour"] in w for w in report["warnings"])
+
+
+def test_missing_flavour_marker_not_flagged_without_pdk(tmp_path):
+    """Without `--pdk` the flavour never changes a bound model name, so the
+    diagnostic stays empty (no noise on core-only layouts)."""
+    path = _write_gds(
+        _make_mos_layout_without_flavour_marker(_draw_sky130_nmos),
+        tmp_path / "nopdk.gds",
+    )
+    report = run_extract(path, "sky130", output=str(tmp_path / "nopdk.spice"))
+    assert report["missing_flavour_markers"] == []
+
+
+@pytest.mark.parametrize("overlap", [True, False])
+def test_flavour_marker_present_does_not_warn_missing(tmp_path, overlap):
+    """Marker present (overlapping or not the active area) is not flagged."""
+    path = _write_gds(
+        _make_sky130_hvi_mos_layout(hvi_overlap=overlap), tmp_path / "m.gds"
+    )
+    root = _make_pdk_install(tmp_path, "sky130A")
+    report = run_extract(
+        path,
+        "sky130",
+        pdk_variant="sky130A",
+        pdk_root=root,
+        output=str(tmp_path / "m.spice"),
+    )
+    assert report["missing_flavour_markers"] == []
+    path = _write_gds(
+        _make_gf180mcu_dualgate_mos_layout(dualgate_overlap=overlap),
+        tmp_path / "g.gds",
+    )
+    root = _make_pdk_install(tmp_path, "gf180mcuA")
+    report = run_extract(
+        path,
+        "gf180mcu",
+        pdk_variant="gf180mcuA",
+        pdk_root=root,
+        output=str(tmp_path / "g.spice"),
+    )
+    assert report["missing_flavour_markers"] == []
+
+
+# --------------------------------------------------------------------------- #
+# `--hierarchical-cells`: opt-in hierarchical .SUBCKT emission (issue #2722)
+# --------------------------------------------------------------------------- #
+
+#: right-head centre of the second series resistor inside a `STAGE`-shaped
+#: cell (`_make_subcircuit_slice_layout`'s geometry): used to land a top-cell
+#: pad on it.
+_HIER_OUT_HEAD_X_DBU = round((_STAGE_R2_X_UM + 12.0 - 1.5) * 1000)
+
+
+def _draw_hier_stage(layout: kdb.Layout, name: str, mid_label: str) -> kdb.Cell:
+    """A `STAGE`-shaped cell: two series sky130 poly resistors joined by an
+    in-cell li1 bridge labelled ``mid_label`` (an internal node)."""
+    cell = layout.create_cell(name)
+    bar_um = _draw_sky130_poly_resistor_at(layout, cell, head_b_label=mid_label)
+    _draw_sky130_poly_resistor_at(layout, cell, x_um=_STAGE_R2_X_UM)
+    cell.shapes(layout.layer(67, 20)).insert(
+        kdb.Box(
+            round((bar_um - 1.9) * 1000), 200, round((_STAGE_R2_X_UM + 1.9) * 1000), 800
+        )
+    )
+    return cell
+
+
+def _make_hier_two_children_layout() -> kdb.Layout:
+    """``TOP`` places two *distinct* cells, ``STAGE_A`` and ``STAGE_B`` (same
+    drawing, different names), each pad-labelled in the top cell:
+    ``IN_A``/``OUT_A`` and ``IN_B``/``OUT_B``. The top cell draws no device."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    li1 = layout.layer(67, 20)
+    li1_label = layout.layer(67, 5)
+    for suffix, y in (("A", 0), ("B", 40000)):
+        stage = _draw_hier_stage(layout, f"STAGE_{suffix}", f"MID_{suffix}")
+        top.insert(kdb.CellInstArray(stage.cell_index(), kdb.Trans(0, y)))
+        top.shapes(li1).insert(kdb.Box(1100, 200 + y, 1900, 800 + y))
+        top.shapes(li1_label).insert(kdb.Text(f"IN_{suffix}", kdb.Trans(1500, 500 + y)))
+        top.shapes(li1).insert(
+            kdb.Box(
+                _HIER_OUT_HEAD_X_DBU - 800, 200 + y, _HIER_OUT_HEAD_X_DBU + 800, 800 + y
+            )
+        )
+        top.shapes(li1_label).insert(
+            kdb.Text(f"OUT_{suffix}", kdb.Trans(_HIER_OUT_HEAD_X_DBU, 500 + y))
+        )
+    return layout
+
+
+def _spice_circuits(path: str) -> dict[str, dict[str, Any]]:
+    """Parse a written deck into ``{circuit: {"pins": [...], "cards": [...]}}``
+    (comments dropped; each card is its whitespace-split tokens)."""
+    circuits: dict[str, dict[str, Any]] = {}
+    current: dict[str, Any] | None = None
+    for line in Path(path).read_text().splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("*"):
+            continue
+        tokens = stripped.split()
+        head = tokens[0].upper()
+        if head == ".SUBCKT":
+            current = {"pins": tokens[2:], "cards": []}
+            circuits[tokens[1]] = current
+        elif head == ".ENDS":
+            current = None
+        elif current is not None and head == "+" and current["cards"]:
+            current["cards"][-1].extend(tokens[1:])  # continuation line
+        elif current is not None and not head.startswith("."):
+            current["cards"].append(tokens)
+    return circuits
+
+
+def _run_hier(tmp_path: Path, layout: kdb.Layout, cells: tuple[str, ...], **kwargs):
+    path = _write_gds(layout, tmp_path / "block.gds")
+    output = tmp_path / "block.spice"
+    kwargs.setdefault("top_cell_pins_only", True)
+    report = run_extract(
+        path, "sky130", output=str(output), hierarchical_cells=cells, **kwargs
+    )
+    return report, output
+
+
+def test_hierarchical_cells_two_distinct_children_emit_two_subckts_plus_top(tmp_path):
+    report, output = _run_hier(
+        tmp_path, _make_hier_two_children_layout(), ("STAGE_A", "STAGE_B")
+    )
+    circuits = _spice_circuits(str(output))
+
+    assert set(circuits) == {"TOP", "STAGE_A", "STAGE_B"}
+    for suffix in ("A", "B"):
+        child = circuits[f"STAGE_{suffix}"]
+        assert len(child["cards"]) == 2  # the cell's own two resistors
+        assert all(card[0].startswith("R") for card in child["cards"])
+        assert sorted(child["pins"]) == sorted([f"IN_{suffix}", f"OUT_{suffix}"])
+    # The top holds no selected-child device, only the two X instances,
+    # wired to the top pad nets by name.
+    top_cards = circuits["TOP"]["cards"]
+    assert [card[0] for card in top_cards] == ["XSTAGE_A_1", "XSTAGE_B_1"]
+    assert top_cards[0][1:] == [*_pins_in_order(circuits, "STAGE_A"), "STAGE_A"]
+    assert top_cards[1][1:] == [*_pins_in_order(circuits, "STAGE_B"), "STAGE_B"]
+    # The flat view in the response is unchanged; the hierarchy block says
+    # what was emitted.
+    assert report["device_count"] == 4
+    hierarchy = report["hierarchy"]
+    assert [entry["cell"] for entry in hierarchy["cells"]] == ["STAGE_A", "STAGE_B"]
+    assert hierarchy["top_device_count"] == 0
+    assert hierarchy["top_instance_count"] == 2
+    assert hierarchy["circuits"] == ["TOP", "STAGE_A", "STAGE_B"]
+    from klayout_tools._provenance import sha256_file
+
+    assert report["netlist_sha256"] == sha256_file(str(output))
+
+
+def _pins_in_order(circuits: dict[str, dict[str, Any]], name: str) -> list[str]:
+    """Parent-side net names, in the child's pin order, for a child whose pin
+    names equal the parent's pad-net names (true for the pad-labelled
+    fixtures above)."""
+    return list(circuits[name]["pins"])
+
+
+def test_hierarchical_cells_repeated_placement_is_one_definition_two_instances(
+    tmp_path,
+):
+    layout = _make_subcircuit_slice_layout(
+        second_placement=kdb.Trans(kdb.Vector(0, 80000))
+    )
+    report, output = _run_hier(tmp_path, layout, ("STAGE",))
+    circuits = _spice_circuits(str(output))
+
+    assert list(circuits).count("STAGE") == 1
+    assert set(circuits) == {"TOP", "STAGE"}
+    assert len(circuits["STAGE"]["cards"]) == 2
+    instances = [c for c in circuits["TOP"]["cards"] if c[0].startswith("X")]
+    assert [card[0] for card in instances] == ["XSTAGE_1", "XSTAGE_2"]
+    first, second = instances[0][1:-1], instances[1][1:-1]
+    assert len(first) == len(second) == 2
+    # Independent connections: no net is shared between the two placements.
+    assert not set(first) & set(second)
+    # The one parent-side device (R3, flat in TOP) is still there, and its
+    # `OUT` net is the first placement's OUT pin connection.
+    top_resistors = [c for c in circuits["TOP"]["cards"] if c[0].startswith("R")]
+    assert len(top_resistors) == 1
+    assert top_resistors[0][1] in first
+    assert report["device_count"] == 5  # 2 + 2 (STAGE x2) + 1 (R3)
+    assert report["hierarchy"]["cells"][0]["placements"] == 2
+
+
+def test_hierarchical_cells_conserves_every_device(tmp_path):
+    flat = run_extract(
+        _write_gds(
+            _make_subcircuit_slice_layout(
+                second_placement=kdb.Trans(kdb.Vector(0, 80000))
+            ),
+            tmp_path / "flat.gds",
+        ),
+        "sky130",
+        output=str(tmp_path / "flat.spice"),
+        top_cell_pins_only=True,
+    )
+    report, output = _run_hier(
+        tmp_path,
+        _make_subcircuit_slice_layout(second_placement=kdb.Trans(kdb.Vector(0, 80000))),
+        ("STAGE",),
+    )
+    circuits = _spice_circuits(str(output))
+    top_devices = sum(1 for c in circuits["TOP"]["cards"] if c[0].startswith("R"))
+    child_devices = sum(1 for c in circuits["STAGE"]["cards"] if c[0].startswith("R"))
+    instances = sum(1 for c in circuits["TOP"]["cards"] if c[0].startswith("X"))
+    assert top_devices + child_devices * instances == flat["device_count"]
+
+
+def test_hierarchical_cells_conservation_failure_is_refused_before_output(
+    tmp_path, monkeypatch
+):
+    """Negative control: a transform that loses a device must fail the
+    conservation check rather than write a netlist missing it."""
+    from klayout_tools import extract_hierarchy
+
+    real = extract_hierarchy._build_child
+
+    def lossy(netlist, cell, group, *args, **kwargs):
+        child, pin_sigs = real(netlist, cell, group, *args, **kwargs)
+        child.remove_device(next(iter(child.each_device())))
+        return child, pin_sigs
+
+    monkeypatch.setattr(extract_hierarchy, "_build_child", lossy)
+    path = _write_gds(_make_subcircuit_slice_layout(), tmp_path / "block.gds")
+    output = tmp_path / "block.spice"
+    with pytest.raises(ExtractError, match="conservation check failed"):
+        run_extract(
+            path,
+            "sky130",
+            output=str(output),
+            top_cell_pins_only=True,
+            hierarchical_cells=("STAGE",),
+        )
+    assert not output.exists()
+
+
+def _make_hier_nested_layout() -> kdb.Layout:
+    """``TOP`` places ``OUTER`` twice; each ``OUTER`` holds two ``STAGE``
+    placements. Every ``STAGE`` input head carries a pad labelled in the top
+    cell (``IN_1`` .. ``IN_4``), so each is a pin of the flat deck."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    stage = _draw_hier_stage(layout, "STAGE", "MID")
+    outer = layout.create_cell("OUTER")
+    li1 = layout.layer(67, 20)
+    li1_label = layout.layer(67, 5)
+    stage_ys = (0, 40000)
+    for y in stage_ys:
+        outer.insert(kdb.CellInstArray(stage.cell_index(), kdb.Trans(0, y)))
+    count = 0
+    for outer_y in (0, 100000):
+        top.insert(kdb.CellInstArray(outer.cell_index(), kdb.Trans(0, outer_y)))
+        for y in stage_ys:
+            count += 1
+            top.shapes(li1).insert(
+                kdb.Box(1100, 200 + outer_y + y, 1900, 800 + outer_y + y)
+            )
+            top.shapes(li1_label).insert(
+                kdb.Text(f"IN_{count}", kdb.Trans(1500, 500 + outer_y + y))
+            )
+    return layout
+
+
+def _flat_device_count(tmp_path: Path, layout: kdb.Layout) -> int:
+    return run_extract(
+        _write_gds(layout, tmp_path / "flat.gds"),
+        "sky130",
+        output=str(tmp_path / "flat.spice"),
+        top_cell_pins_only=True,
+    )["device_count"]
+
+
+def test_hierarchical_cells_nested_selection_emits_nested_subckt_tree(tmp_path):
+    report, output = _run_hier(tmp_path, _make_hier_nested_layout(), ("OUTER", "STAGE"))
+    circuits = _spice_circuits(str(output))
+    assert set(circuits) == {"TOP", "OUTER", "STAGE"}
+
+    def instances(circuit: str) -> list[list[str]]:
+        return [c for c in circuits[circuit]["cards"] if c[0].startswith("X")]
+
+    def devices(circuit: str) -> list[list[str]]:
+        return [c for c in circuits[circuit]["cards"] if c[0].startswith("R")]
+
+    assert [c[-1] for c in instances("TOP")] == ["OUTER", "OUTER"]
+    assert [c[-1] for c in instances("OUTER")] == ["STAGE", "STAGE"]
+    assert instances("STAGE") == []
+    assert devices("TOP") == [] and devices("OUTER") == []
+    assert len(devices("STAGE")) == 2
+    # Nested instances connect to the parent's own pins: every STAGE input
+    # is a distinct OUTER pin, and every OUTER pin is wired from the top.
+    assert len(circuits["OUTER"]["pins"]) == 2
+    assert {c[1] for c in instances("OUTER")} == set(circuits["OUTER"]["pins"])
+    assert {n for c in instances("TOP") for n in c[1:-1]} == {
+        "IN_1",
+        "IN_2",
+        "IN_3",
+        "IN_4",
+    }
+    cells = {entry["cell"]: entry for entry in report["hierarchy"]["cells"]}
+    assert cells["OUTER"]["placements"] == 2
+    assert cells["STAGE"]["placements"] == 4
+    assert cells["OUTER"]["children"] == [
+        {"cell": "STAGE", "instances": ["XSTAGE_1", "XSTAGE_2"]}
+    ]
+    assert "children" not in cells["STAGE"]
+    assert cells["STAGE"]["instances"] == []
+    assert report["hierarchy"]["top_device_count"] == 0
+
+
+def test_hierarchical_cells_nested_selection_conserves_every_device(tmp_path):
+    layout = _make_hier_nested_layout()
+    flat = _flat_device_count(tmp_path, layout)
+    _report, output = _run_hier(tmp_path, layout, ("OUTER", "STAGE"))
+    circuits = _spice_circuits(str(output))
+    # 1 STAGE definition (2 R) x 2 per OUTER x 2 OUTER placements
+    stage_devices = sum(1 for c in circuits["STAGE"]["cards"] if c[0].startswith("R"))
+    assert flat == 8
+    assert stage_devices * 2 * 2 == flat
+
+
+def test_hierarchical_cells_nested_conservation_failure_is_refused(
+    tmp_path, monkeypatch
+):
+    """Negative control across levels: losing a device from the *inner*
+    definition must fail the conservation check at the top."""
+    from klayout_tools import extract_hierarchy
+
+    real = extract_hierarchy._build_child
+
+    def lossy(netlist, cell, group, *args, **kwargs):
+        child, pin_sigs = real(netlist, cell, group, *args, **kwargs)
+        if cell == "STAGE":
+            child.remove_device(next(iter(child.each_device())))
+        return child, pin_sigs
+
+    monkeypatch.setattr(extract_hierarchy, "_build_child", lossy)
+    path = _write_gds(_make_hier_nested_layout(), tmp_path / "block.gds")
+    output = tmp_path / "block.spice"
+    with pytest.raises(ExtractError, match="conservation check failed"):
+        run_extract(
+            path,
+            "sky130",
+            output=str(output),
+            top_cell_pins_only=True,
+            hierarchical_cells=("OUTER", "STAGE"),
+        )
+    assert not output.exists()
+
+
+def test_hierarchical_cells_nested_and_top_level_placements_of_one_cell(tmp_path):
+    """``STAGE`` is placed under ``WRAP`` and directly in ``TOP``: one
+    definition, one instance in each parent circuit, numbered per parent."""
+
+    def layout() -> kdb.Layout:
+        return _make_subcircuit_slice_layout(
+            wrapper_cell="WRAP", second_placement=kdb.Trans(kdb.Vector(0, 80000))
+        )
+
+    flat = _flat_device_count(tmp_path, layout())
+    report, output = _run_hier(tmp_path, layout(), ("WRAP", "STAGE"))
+    circuits = _spice_circuits(str(output))
+    assert set(circuits) == {"TOP", "WRAP", "STAGE"}
+    assert sorted(c[-1] for c in circuits["TOP"]["cards"] if c[0].startswith("X")) == [
+        "STAGE",
+        "WRAP",
+    ]
+    assert [c[-1] for c in circuits["WRAP"]["cards"] if c[0].startswith("X")] == [
+        "STAGE"
+    ]
+    cells = {entry["cell"]: entry for entry in report["hierarchy"]["cells"]}
+    assert cells["STAGE"]["placements"] == 2
+    assert cells["STAGE"]["instances"] == ["XSTAGE_1"]  # the top-level one
+    assert cells["WRAP"]["children"] == [{"cell": "STAGE", "instances": ["XSTAGE_1"]}]
+    top_r = sum(1 for c in circuits["TOP"]["cards"] if c[0].startswith("R"))
+    stage_r = sum(1 for c in circuits["STAGE"]["cards"] if c[0].startswith("R"))
+    assert top_r + stage_r * 2 == flat  # R3 in TOP + STAGE (2 R) in both parents
+
+
+def test_hierarchical_cells_single_wrapper_selection_keeps_inner_cell_inline(
+    tmp_path,
+):
+    """Selecting only the outer cell keeps the inner placement's devices
+    inside the outer definition (no nested ``.SUBCKT``)."""
+    _report, output = _run_hier(
+        tmp_path, _make_subcircuit_slice_layout(wrapper_cell="WRAP"), ("WRAP",)
+    )
+    circuits = _spice_circuits(str(output))
+    assert set(circuits) == {"TOP", "WRAP"}
+    assert sum(1 for c in circuits["WRAP"]["cards"] if c[0].startswith("R")) == 2
+
+
+def test_hierarchical_cells_flat_mode_is_byte_identical(tmp_path):
+    layout = _make_subcircuit_slice_layout()
+    outputs = {}
+    reports = {}
+    for label, kwargs in (
+        ("omitted", {}),
+        ("empty", {"hierarchical_cells": ()}),
+        ("empty_list", {"hierarchical_cells": []}),
+    ):
+        path = _write_gds(layout, tmp_path / f"{label}.gds")
+        output = tmp_path / f"{label}.spice"
+        reports[label] = run_extract(
+            path, "sky130", output=str(output), top_cell_pins_only=True, **kwargs
+        )
+        outputs[label] = output.read_bytes()
+    assert outputs["omitted"] == outputs["empty"] == outputs["empty_list"]
+    for report in reports.values():
+        assert "hierarchy" not in report
+    keys = {frozenset(report) for report in reports.values()}
+    assert len(keys) == 1
+
+
+@pytest.mark.parametrize(
+    ("cells", "layout_kwargs", "match"),
+    [
+        (("NOPE",), {}, "names no cell in this layout"),
+        (("TOP",), {}, "names the top cell itself"),
+    ],
+)
+def test_hierarchical_cells_rejects_bad_selection_before_output(
+    tmp_path, cells, layout_kwargs, match
+):
+    path = _write_gds(
+        _make_subcircuit_slice_layout(**layout_kwargs), tmp_path / "b.gds"
+    )
+    output = tmp_path / "b.spice"
+    with pytest.raises(ExtractError, match=match):
+        run_extract(
+            path,
+            "sky130",
+            output=str(output),
+            top_cell_pins_only=True,
+            hierarchical_cells=cells,
+        )
+    assert not output.exists()
+
+
+def test_hierarchical_cells_rejects_unreachable_cell_before_output(tmp_path):
+    layout = _make_subcircuit_slice_layout()
+    layout.create_cell("ORPHAN")
+    layout.cell("ORPHAN").shapes(layout.layer(1, 0)).insert(kdb.Box(0, 0, 10, 10))
+    path = _write_gds(layout, tmp_path / "b.gds")
+    output = tmp_path / "b.spice"
+    with pytest.raises(ExtractError, match="no reachable placement"):
+        run_extract(
+            path,
+            "sky130",
+            output=str(output),
+            top="TOP",
+            top_cell_pins_only=True,
+            hierarchical_cells=("ORPHAN",),
+        )
+    assert not output.exists()
+
+
+def test_hierarchical_cells_rejects_a_cell_with_no_extracted_device(tmp_path):
+    layout = _make_subcircuit_slice_layout()
+    empty = layout.create_cell("EMPTY")
+    empty.shapes(layout.layer(1, 0)).insert(kdb.Box(0, 0, 10, 10))
+    layout.cell("TOP").insert(
+        kdb.CellInstArray(empty.cell_index(), kdb.Trans(0, 90000))
+    )
+    path = _write_gds(layout, tmp_path / "b.gds")
+    output = tmp_path / "b.spice"
+    with pytest.raises(ExtractError, match="matched no extracted device"):
+        run_extract(
+            path,
+            "sky130",
+            output=str(output),
+            top_cell_pins_only=True,
+            hierarchical_cells=("EMPTY",),
+        )
+    assert not output.exists()
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "flag"),
+    [
+        ({"parasitics": True}, "--parasitics"),
+        ({"subcircuit_cell": "STAGE"}, "--subcircuit"),
+        ({"abstract_cell_patterns": ("SC_*",)}, "--abstract-cells"),
+    ],
+)
+def test_hierarchical_cells_rejects_unsupported_option_combinations(
+    tmp_path, kwargs, flag
+):
+    path = _write_gds(_make_subcircuit_slice_layout(), tmp_path / "b.gds")
+    output = tmp_path / "b.spice"
+    with pytest.raises(ExtractError, match=rf"cannot be combined with {flag}.*#2916"):
+        run_extract(
+            path, "sky130", output=str(output), hierarchical_cells=("STAGE",), **kwargs
+        )
+    assert not output.exists()
+    assert not list(tmp_path.glob("*.spice"))
+
+
+def test_hierarchical_cells_refuses_non_identical_placements(tmp_path):
+    """A top-cell wire shorting one placement's IN to its OUT makes the two
+    placements' net partitions differ: one shared definition would be wrong
+    for one of them, so it is refused rather than guessed."""
+    layout = _make_subcircuit_slice_layout(
+        second_placement=kdb.Trans(kdb.Vector(0, 80000))
+    )
+    layout.cell("TOP").shapes(layout.layer(67, 20)).insert(
+        kdb.Box(1100, 80200, _HIER_OUT_HEAD_X_DBU + 800, 80800)
+    )
+    path = _write_gds(layout, tmp_path / "b.gds")
+    output = tmp_path / "b.spice"
+    with pytest.raises(ExtractError, match="not electrically identical"):
+        run_extract(
+            path,
+            "sky130",
+            output=str(output),
+            top_cell_pins_only=True,
+            hierarchical_cells=("STAGE",),
+        )
+    assert not output.exists()
+
+
+def test_hierarchical_cells_cli_json_text_and_request(tmp_path, capsys):
+    path = _write_gds(_make_subcircuit_slice_layout(), tmp_path / "b.gds")
+    output = tmp_path / "b.spice"
+    argv = [
+        "extract",
+        path,
+        "--deck",
+        "sky130",
+        "--output",
+        str(output),
+        "--top-cell-pins",
+        "--hierarchical-cells",
+        "STAGE",
+    ]
+    assert main([*argv, "--format", "json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["hierarchy"]["cells"][0]["cell"] == "STAGE"
+    assert "STAGE" in _spice_circuits(str(output))
+
+    assert main(argv) == 0
+    text = capsys.readouterr().out
+    assert "hierarchy: 1 cell(s)" in text
+    assert "STAGE: 1 placement(s)" in text
+
+    request = tmp_path / "extract.request.json"
+    request.write_text(
+        json.dumps(
+            {
+                "schema": "klt.extract.request/1",
+                "file": path,
+                "deck": "sky130",
+                "output": str(tmp_path / "r.spice"),
+                "top_cell_pins": True,
+                "hierarchical_cells": ["STAGE"],
+            }
+        )
+    )
+    assert main(["extract", str(request), "--format", "json"]) == 0
+    assert (
+        json.loads(capsys.readouterr().out)["hierarchy"]["cells"][0]["cell"] == "STAGE"
+    )
+    assert (tmp_path / "r.spice").read_bytes() == output.read_bytes()
+
+
+def test_hierarchical_cells_blank_flag_is_a_usage_error(tmp_path, capsys):
+    path = _write_gds(_make_subcircuit_slice_layout(), tmp_path / "b.gds")
+    message = _extract_error_message(
+        capsys, [path, "--deck", "sky130", "--hierarchical-cells", ","]
+    )
+    assert "--hierarchical-cells" in message
+
+
+def test_hierarchical_cells_preserves_model_binding_and_mos_flavour(tmp_path):
+    """`--pdk` model binding is preserved inside the emitted child circuits:
+    a NMOS drawn under sky130's `hvi` marker in cell ``HV`` still binds
+    `nfet_g5v0d10v5` (the MOS flavour device property survives the move
+    into the child circuit), while the plain NMOS in ``LV`` binds
+    `nfet_01v8` -- exactly the cards the flat run writes for the same
+    devices."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    hv = layout.create_cell("HV")
+    _draw_sky130_nmos(hv, layout, 0, "S_HV", drain_label="D_HV")
+    hv.shapes(layout.layer(75, 20)).insert(kdb.Box(-500, -500, 2500, 1500))
+    lv = layout.create_cell("LV")
+    _draw_sky130_nmos(lv, layout, 0, "S_LV", drain_label="D_LV")
+    top.insert(kdb.CellInstArray(hv.cell_index(), kdb.Trans(0, 0)))
+    top.insert(kdb.CellInstArray(lv.cell_index(), kdb.Trans(0, 20000)))
+    path = _write_gds(layout, tmp_path / "mixed.gds")
+    root = _make_pdk_install(tmp_path, "sky130A")
+
+    def extract(output: Path, **kwargs):
+        return run_extract(
+            path,
+            "sky130",
+            pdk_variant="sky130A",
+            pdk_root=root,
+            output=str(output),
+            **kwargs,
+        )
+
+    flat_report = extract(tmp_path / "flat.spice")
+    report = extract(tmp_path / "hier.spice", hierarchical_cells=("HV", "LV"))
+    circuits = _spice_circuits(str(tmp_path / "hier.spice"))
+
+    assert set(circuits) == {"TOP", "HV", "LV"}
+    hv_cards = circuits["HV"]["cards"]
+    lv_cards = circuits["LV"]["cards"]
+    assert len(hv_cards) == len(lv_cards) == 1
+    assert hv_cards[0][0].startswith("X")
+    assert "sky130_fd_pr__nfet_g5v0d10v5" in hv_cards[0]
+    assert "sky130_fd_pr__nfet_01v8" in lv_cards[0]
+    top_cards = circuits["TOP"]["cards"]
+    assert sorted(card[0] for card in top_cards) == ["XHV_1", "XLV_1"]
+    # The flat view in the response is unchanged by the option.
+    assert report["device_counts"] == flat_report["device_counts"] == {"nfet": 2}
+    flat_text = (tmp_path / "flat.spice").read_text()
+    assert flat_text.count("sky130_fd_pr__nfet_g5v0d10v5") == 1
+    assert flat_text.count("sky130_fd_pr__nfet_01v8") == 1
+
+
+# --------------------------------------------------------------------------- #
+# Point-to-point shortest series path resistance (--resistance-path, issue
+# #2765)
+# --------------------------------------------------------------------------- #
+
+
+def _resistance_path_ladder_run(tmp_path, **kwargs) -> tuple[dict, dict]:
+    """`OUT` on :func:`_make_subcircuit_slice_layout`'s fan-out variant has
+    four device terminals, so `--distributed-rc` emits a 4-node, 3-segment
+    ladder -- returns ``(report, OUT's parasitics.nets[] entry)``."""
+    path = _write_gds(
+        _make_subcircuit_slice_layout(out_fanout=True), tmp_path / "block.gds"
+    )
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / f"block{len(kwargs)}.spice"),
+        parasitics=True,
+        critical_nets=["OUT"],
+        distributed_rc=True,
+        **kwargs,
+    )
+    entry = next(n for n in report["parasitics"]["nets"] if n["net"] == "OUT")
+    assert entry["rc_model"] == "distributed"
+    return report, entry
+
+
+def test_resistance_path_queries_real_ladder_terminals(tmp_path):
+    """End to end over the actual emitted ladder: endpoints are real
+    `terminals[].leg_net` values, the returned path walks `segments[]`, and
+    the reported value equals the independent sum of those segments."""
+    _, baseline_entry = _resistance_path_ladder_run(tmp_path)
+    legs = [t["leg_net"] for t in baseline_entry["terminals"]]
+    net_id = baseline_entry["net_id"]
+
+    report, entry = _resistance_path_ladder_run(
+        tmp_path,
+        resistance_paths=[
+            (net_id, legs[0], legs[-1]),
+            (net_id, legs[-1], legs[1]),
+            (net_id, legs[2], legs[2]),
+        ],
+    )
+    end_to_end, partial, same = report["parasitics"]["resistance_paths"]
+
+    assert end_to_end["status"] == "ok"
+    assert end_to_end["quantity"] == "shortest_series_path_resistance"
+    assert (end_to_end["net_id"], end_to_end["net"]) == (net_id, "OUT")
+    assert end_to_end["rc_model"] == "distributed"
+    assert end_to_end["path_nodes"] == legs
+    assert end_to_end["path_resistors"] == ["seg0", "seg1", "seg2"]
+    segments = entry["segments"]
+    independent = sum(
+        segments[int(rid[3:])]["resistance_ohm"] for rid in end_to_end["path_resistors"]
+    )
+    assert end_to_end["resistance_ohm"] == pytest.approx(independent, abs=1e-9)
+    # Every segment's resistance is part of this net's own total -- the end
+    # to end series path of a ladder is the whole net's resistance.
+    assert end_to_end["resistance_ohm"] == pytest.approx(
+        entry["resistance_ohm"], rel=1e-5
+    )
+
+    assert partial["status"] == "ok"
+    assert partial["path_nodes"] == [legs[3], legs[2], legs[1]]
+    assert partial["path_resistors"] == ["seg2", "seg1"]
+    assert partial["resistance_ohm"] == pytest.approx(
+        segments[1]["resistance_ohm"] + segments[2]["resistance_ohm"]
+    )
+
+    assert (same["status"], same["resistance_ohm"], same["path_nodes"]) == (
+        "ok",
+        0.0,
+        [legs[2]],
+    )
+
+    # The written netlist's own segment cards carry the unrounded values the
+    # report rounds to 4 decimals -- the documented <= 5e-5 ohm/segment gap.
+    netlist = Path(report["netlist_path"]).read_text()
+    card_values = [
+        float(line.split()[3])
+        for line in netlist.splitlines()
+        if line.startswith("ROUT_seg")
+    ]
+    assert len(card_values) == 3
+    assert end_to_end["resistance_ohm"] == pytest.approx(
+        sum(card_values), abs=3 * 5e-5 + 1e-9
+    )
+    json.dumps(report["parasitics"]["resistance_paths"], allow_nan=False)
+
+
+def test_resistance_path_non_success_statuses_end_to_end(tmp_path):
+    _, baseline_entry = _resistance_path_ladder_run(tmp_path)
+    legs = [t["leg_net"] for t in baseline_entry["terminals"]]
+    net_id = baseline_entry["net_id"]
+    report, _ = _resistance_path_ladder_run(tmp_path)
+    lumped = next(n for n in report["parasitics"]["nets"] if n["rc_model"] == "lumped")
+    missing_id = max(n["net_id"] for n in report["parasitics"]["nets"]) + 1000
+
+    report, _ = _resistance_path_ladder_run(
+        tmp_path,
+        resistance_paths=[
+            (net_id, legs[0], "NOT_A_NODE"),
+            (missing_id, legs[0], legs[1]),
+            (lumped["net_id"], lumped["terminals"][0]["leg_net"], lumped["hub_net"]),
+            (net_id, legs[0], legs[-1]),
+        ],
+        resistance_path_max_nodes=4,
+        resistance_path_max_resistors=3,
+    )
+    absent, unknown_net, lumped_result, at_cap = report["parasitics"][
+        "resistance_paths"
+    ]
+    for result in (absent, unknown_net, lumped_result):
+        assert result["status"] == "node_not_found"
+        assert result["resistance_ohm"] is None
+        assert result["path_nodes"] == [] and result["path_resistors"] == []
+        assert result["reason"]
+    assert lumped_result["rc_model"] == "lumped"
+    assert unknown_net["net"] is None
+    # Exactly at both caps (4 nodes, 3 resistors) is still answered.
+    assert at_cap["status"] == "ok"
+    assert (at_cap["max_nodes"], at_cap["max_resistors"]) == (4, 3)
+
+    report, _ = _resistance_path_ladder_run(
+        tmp_path,
+        resistance_paths=[(net_id, legs[0], legs[-1])],
+        resistance_path_max_resistors=2,
+    )
+    (over,) = report["parasitics"]["resistance_paths"]
+    assert over["status"] == "limit_exceeded"
+    assert over["resistance_ohm"] is None
+    assert over["path_nodes"] == [] and over["path_resistors"] == []
+    assert (over["node_count"], over["resistor_count"]) == (4, 3)
+
+
+def test_resistance_path_is_additive_and_default_output_unchanged(tmp_path):
+    baseline, entry = _resistance_path_ladder_run(tmp_path)
+    assert "resistance_paths" not in baseline["parasitics"]
+    legs = [t["leg_net"] for t in entry["terminals"]]
+    queried, _ = _resistance_path_ladder_run(
+        tmp_path, resistance_paths=[(entry["net_id"], legs[0], legs[-1])]
+    )
+    queried_parasitics = dict(queried["parasitics"])
+    queried_parasitics.pop("resistance_paths")
+    assert queried_parasitics == baseline["parasitics"]
+    assert queried["warnings"] == baseline["warnings"]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"resistance_paths": [(1, "a", "b")]}, "requires --parasitics"),
+        (
+            {"parasitics": True, "resistance_paths": [(1, "a", "b")]},
+            "requires --distributed-rc",
+        ),
+        (
+            {"parasitics": True, "resistance_path_max_nodes": 5},
+            "require --resistance-path",
+        ),
+        (
+            {
+                "parasitics": True,
+                "critical_nets": ["OUT"],
+                "distributed_rc": True,
+                "resistance_paths": [(1, "a", "b")],
+                "resistance_path_max_nodes": 0,
+            },
+            "max_nodes must be a positive integer",
+        ),
+        (
+            {
+                "parasitics": True,
+                "critical_nets": ["OUT"],
+                "distributed_rc": True,
+                "resistance_paths": [(1, "a", "b")],
+                "resistance_path_max_resistors": -3,
+            },
+            "max_resistors must be a positive integer",
+        ),
+        (
+            {
+                "parasitics": True,
+                "critical_nets": ["OUT"],
+                "distributed_rc": True,
+                "resistance_paths": [("1", "a", "b")],
+            },
+            "NET_ID must be an integer",
+        ),
+    ],
+)
+def test_resistance_path_argument_validation(tmp_path, kwargs, match):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    with pytest.raises(ExtractError, match=match):
+        run_extract(path, "sky130", output=str(tmp_path / "inv.spice"), **kwargs)
+
+
+def test_resistance_path_cli_json_and_text(tmp_path, capsys):
+    _, entry = _resistance_path_ladder_run(tmp_path)
+    legs = [t["leg_net"] for t in entry["terminals"]]
+    gds = str(tmp_path / "block.gds")
+    argv = [
+        "extract",
+        gds,
+        "--deck",
+        "sky130",
+        "--output",
+        str(tmp_path / "cli.spice"),
+        "--parasitics",
+        "--critical-net",
+        "OUT",
+        "--distributed-rc",
+        "--resistance-path",
+        str(entry["net_id"]),
+        legs[0],
+        legs[-1],
+        "--resistance-path",
+        str(entry["net_id"]),
+        legs[0],
+        "NOPE",
+    ]
+    capsys.readouterr()
+    assert main([*argv, "--format", "json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    ok, missing = payload["parasitics"]["resistance_paths"]
+    assert ok["status"] == "ok" and ok["path_nodes"] == legs
+    assert missing["status"] == "node_not_found"
+    # Existing fields keep their place next to the additive one.
+    assert payload["parasitics"]["distributed_rc"] is True
+
+    assert main(argv) == 0
+    text = capsys.readouterr().out
+    assert (
+        f"resistance_path: net_id={entry['net_id']} {legs[0]} -> {legs[-1]}  status=ok"
+        in text
+    )
+    assert "status=node_not_found" in text
+
+    assert (
+        main([*argv[:6], "--resistance-path", "x", "a", "b", "--format", "json"]) == 1
+    )
+    error = json.loads(capsys.readouterr().err)
+    assert "NET_ID must be an integer" in error["error"]["message"]
+
+
+def test_resistance_path_request_document_round_trip(tmp_path):
+    from klayout_tools.cli.extract_cmd import _apply_request, _parse_resistance_paths
+    from klayout_tools.cli.parser import create_parser
+
+    request_path = tmp_path / "extract.request.json"
+    request_path.write_text(
+        json.dumps(
+            {
+                "schema": "klt.extract.request/1",
+                "file": "design.gds",
+                "deck": "sky130",
+                "resistance_paths": [{"net_id": 3, "from": "OUT__t0", "to": "OUT"}],
+                "resistance_path_max_nodes": 50,
+                "resistance_path_max_resistors": 60,
+            }
+        )
+    )
+    resolved = _apply_request(
+        create_parser().parse_args(["extract", str(request_path)])
+    )
+    assert resolved.resistance_paths == [["3", "OUT__t0", "OUT"]]
+    assert _parse_resistance_paths(resolved.resistance_paths) == [(3, "OUT__t0", "OUT")]
+    assert resolved.resistance_path_max_nodes == 50
+    assert resolved.resistance_path_max_resistors == 60
+
+    argv_form = create_parser().parse_args(
+        ["extract", "x.gds", "--resistance-path", "3", "OUT__t0", "OUT"]
+    )
+    assert argv_form.resistance_paths == resolved.resistance_paths
+
+    for bad in (
+        {"resistance_paths": [{"net_id": "3", "from": "a", "to": "b"}]},
+        {"resistance_paths": [["3", "a", "b"]]},
+        {"resistance_path_max_nodes": 2.5},
+    ):
+        request_path.write_text(
+            json.dumps({"schema": "klt.extract.request/1", "file": "d.gds", **bad})
+        )
+        with pytest.raises(ExtractError):
+            _apply_request(create_parser().parse_args(["extract", str(request_path)]))
+
+
+# --no-netlist (issue #2850) -------------------------------------------------
+
+
+def _extract_json(capsys, *argv):
+    code = main(["extract", *argv, "--format", "json"])
+    return code, capsys.readouterr()
+
+
+def test_no_netlist_writes_nothing_and_reports_null(tmp_path):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    normal = run_extract(path, "sky130", output=str(tmp_path / "ref.spice"))
+    before = sorted(os.listdir(tmp_path))
+
+    result = run_extract(path, "sky130", no_netlist=True)
+
+    assert sorted(os.listdir(tmp_path)) == before
+    assert not (tmp_path / "inv.spice").exists()
+    assert result["netlist_path"] is None
+    assert result["netlist_sha256"] is None
+    assert result["netlist_normalized_sha256"] is None
+    for key in ("status", "device_count", "net_count", "device_counts"):
+        assert result[key] == normal[key]
+
+
+def test_default_still_writes_next_to_input(tmp_path):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    result = run_extract(path, "sky130")
+    assert result["netlist_path"] == str(tmp_path / "inv.spice")
+    assert (tmp_path / "inv.spice").is_file()
+    assert isinstance(result["netlist_sha256"], str)
+    assert isinstance(result["netlist_normalized_sha256"], str)
+
+
+def test_no_netlist_cli_json_and_text(tmp_path, capsys):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    code, out = _extract_json(capsys, path, "--deck", "sky130", "--no-netlist")
+    assert code == 0
+    assert json.loads(out.out)["netlist_path"] is None
+    assert not (tmp_path / "inv.spice").exists()
+
+    code = main(["extract", path, "--deck", "sky130", "--no-netlist"])
+    assert code == 0
+    assert "netlist_path: None" in capsys.readouterr().out
+    assert not (tmp_path / "inv.spice").exists()
+
+
+def test_no_netlist_with_output_is_rejected(tmp_path, capsys):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    out = tmp_path / "o.spice"
+    code, cap = _extract_json(
+        capsys, path, "--deck", "sky130", "--no-netlist", "-o", str(out)
+    )
+    assert code == 1
+    assert "--no-netlist" in cap.out + cap.err
+    assert not out.exists()
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--subcircuit", "INV"],
+        ["--subcircuit", "INV", "--subcircuit-output", "x.spice"],
+    ],
+)
+def test_no_netlist_with_subcircuit_is_rejected(tmp_path, capsys, extra):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    code, cap = _extract_json(capsys, path, "--deck", "sky130", "--no-netlist", *extra)
+    assert code == 1
+    assert "--no-netlist" in cap.out + cap.err
+    assert not (tmp_path / "inv.spice").exists()
+
+
+def test_no_netlist_with_spef_still_works(tmp_path):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    spef = tmp_path / "o.spef"
+    result = run_extract(
+        path, "sky130", no_netlist=True, parasitics=True, spef_output=str(spef)
+    )
+    assert result["netlist_path"] is None
+    assert not (tmp_path / "inv.spice").exists()
+
+
+def _make_gf180mcu_mos_cap_layout(*, with_marker: bool) -> kdb.Layout:
+    """One gf180mcu NMOS plus, optionally, a MOS-capacitor stack (Comp + Poly2
+    under ``MOS_CAP_MK`` 166/5) -- issue #2919."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    _draw_gf180mcu_nmos(top, layout, 0, "S", drain_label="D")
+    top.shapes(layout.layer(22, 0)).insert(kdb.Box(10000, 0, 14000, 4000))
+    top.shapes(layout.layer(30, 0)).insert(kdb.Box(10500, -300, 13500, 4300))
+    if with_marker:
+        top.shapes(layout.layer(166, 5)).insert(kdb.Box(10000, 0, 14000, 4000))
+    return layout
+
+
+def test_gf180mcu_extract_flags_mos_cap_marker_as_unsupported(tmp_path):
+    """Issue #2919: shapes on `MOS_CAP_MK` (166/5) are reported in
+    `unsupported_devices[]` and `warnings[]` instead of a silent clean run."""
+    path = _write_gds(
+        _make_gf180mcu_mos_cap_layout(with_marker=True), tmp_path / "moscap.gds"
+    )
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "moscap.spice"))
+
+    assert report["status"] == "extracted"
+    (entry,) = report["unsupported_devices"]
+    assert entry["kind"] == "mos_capacitor"
+    assert entry["marker"] == "166/5"
+    assert entry["count"] == 1
+    assert entry["bbox_um"] == {"left": 10.0, "bottom": 0.0, "right": 14.0, "top": 4.0}
+    assert any(
+        "mos_capacitor" in w and "166/5" in w and "absent" in w
+        for w in report["warnings"]
+    )
+
+
+def test_gf180mcu_extract_unsupported_devices_empty_without_marker(tmp_path):
+    """Issue #2919: no 166/5 shapes -> empty field, no extra warning."""
+    path = _write_gds(
+        _make_gf180mcu_mos_cap_layout(with_marker=False), tmp_path / "nomarker.gds"
+    )
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "nomarker.spice"))
+
+    assert report["unsupported_devices"] == []
+    assert not any("unsupported device" in w for w in report["warnings"])
+
+
+def test_sky130_extract_unsupported_devices_always_present_and_empty(tmp_path):
+    """Issue #2919: a deck declaring no unsupported-device marker still emits
+    the (empty) additive field."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    _draw_sky130_nmos(top, layout, 0, "S", drain_label="D")
+    path = _write_gds(layout, tmp_path / "sky.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "sky.spice"))
+    assert report["unsupported_devices"] == []
+
+
+# --- BipolarDevice.emitter_size / SizeFilter (issue #2861) -------------------
+#
+# Source for the npn13G2 window: IHP SG13G2 LVS runset,
+#   npn13G2_e_pin = npn13G2_e_.with_bbox_min(0.07.um).with_bbox_max(0.9.um)
+#                              .with_area(0.063.um)
+# (quoted in issue #2861). The issue cites NO numbers for npn13G2l / npn13G2v,
+# so the ranges for those two flavours below are SYNTHETIC (0.07 um wide, 1.8
+# and 2.7 um long) chosen only to be disjoint from npn13G2 -- not IHP data.
+
+_SIZED_NPN = SizeFilter(
+    bbox_min_um=(0.07, 0.07), bbox_max_um=(0.9, 0.9), area_um2=(0.063, 0.063)
+)
+_SIZED_NPN_L = SizeFilter(  # synthetic, see above
+    bbox_min_um=(0.07, 0.07), bbox_max_um=(1.8, 1.8), area_um2=(0.126, 0.126)
+)
+_SIZED_NPN_V = SizeFilter(  # synthetic, see above
+    bbox_min_um=(0.07, 0.07), bbox_max_um=(2.7, 2.7), area_um2=(0.189, 0.189)
+)
+
+
+def _sized_bjt_deck(*filters_by_class):
+    base = get_extraction_deck("sky130")
+    entries = tuple(
+        BipolarDevice(
+            base=(64, 20),
+            emitter=(65, 20),
+            marker=(82, 44),
+            class_name=name,
+            emitter_size=size,
+        )
+        for name, size in filters_by_class
+    )
+    return dataclasses.replace(base, bipolars=entries)
+
+
+def _sized_bjt_layout(windows_dbu):
+    """A marked base with one emitter window per (w, h) in dbu, 5000 apart."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer, box):
+        top.shapes(layout.layer(layer, 20 if layer == 64 else 44)).insert(box)
+
+    x = 500
+    for w, h in windows_dbu:
+        top.shapes(layout.layer(65, 20)).insert(kdb.Box(x, 500, x + w, 500 + h))
+        x += 5000
+    top.shapes(layout.layer(64, 20)).insert(kdb.Box(0, 0, x, 4000))
+    top.shapes(layout.layer(82, 44)).insert(kdb.Box(0, 0, x, 4000))
+    return layout
+
+
+def _sized_bjt_run(deck, windows_dbu):
+    layout = _sized_bjt_layout(windows_dbu)
+    result = _extract_netlist(layout, layout.top_cell(), deck, None)
+    netlist, warnings = result[0], result[1]
+    classes = sorted(
+        d.device_class().name
+        for c in netlist.each_circuit()
+        for d in c.each_device()
+        if d.device_class().name.startswith("npn")
+    )
+    return classes, [w for w in warnings if "emitter_size" in w]
+
+
+def test_emitter_size_three_windows_give_three_classes():
+    deck = _sized_bjt_deck(
+        ("npn13G2", _SIZED_NPN),
+        ("npn13G2l", _SIZED_NPN_L),
+        ("npn13G2v", _SIZED_NPN_V),
+    )
+    classes, warns = _sized_bjt_run(deck, [(70, 900), (70, 1800), (70, 2700)])
+    assert classes == ["npn13G2", "npn13G2l", "npn13G2v"]
+    assert warns == []
+
+
+def test_emitter_size_unrecognised_window_warns_and_makes_no_device():
+    deck = _sized_bjt_deck(("npn13G2", _SIZED_NPN), ("npn13G2l", _SIZED_NPN_L))
+    classes, warns = _sized_bjt_run(deck, [(70, 900), (300, 300)])
+    assert classes == ["npn13G2"]
+    assert len(warns) == 1
+    assert "0.3 x 0.3 um" in warns[0] and "bbox" in warns[0]
+
+
+def test_emitter_size_unrecognised_when_only_oversize_of_three():
+    deck = _sized_bjt_deck(("npn13G2", _SIZED_NPN))
+    # one dbu wider than the exact 0.07 x 0.9 window: area/bbox_min differ.
+    classes, warns = _sized_bjt_run(deck, [(71, 900)])
+    assert classes == [] and len(warns) == 1
+
+
+def test_emitter_size_merges_before_measuring():
+    """An emitter split into two abutting boxes is measured as one window."""
+    deck = _sized_bjt_deck(("npn13G2", _SIZED_NPN))
+    layout = _sized_bjt_layout([(70, 450)])
+    top = layout.top_cell()
+    top.shapes(layout.layer(65, 20)).insert(kdb.Box(500, 950, 570, 1400))
+    result = _extract_netlist(layout, top, deck, None)
+    names = [
+        d.device_class().name for c in result[0].each_circuit() for d in c.each_device()
+    ]
+    assert names.count("npn13G2") == 1
+
+
+def test_emitter_size_overlapping_ranges_rejected():
+    deck = _sized_bjt_deck(("a", _SIZED_NPN), ("b", _SIZED_NPN))
+    with pytest.raises(ExtractError, match="overlapping emitter_size"):
+        _sized_bjt_run(deck, [(70, 900)])
+
+
+def test_emitter_size_quantized_overlap_rejected():
+    """Physically distinct ranges that round to the same integer dbu bounds
+    (0.0701 um and 0.0702 um both round to 70 dbu at dbu=0.001) are rejected:
+    without this, one 70 x 900 dbu window extracted as both devices."""
+    quantized_a = SizeFilter(
+        bbox_min_um=(0.0701, 0.0701), bbox_max_um=(0.9, 0.9), area_um2=(0.063, 0.063)
+    )
+    quantized_b = SizeFilter(
+        bbox_min_um=(0.0702, 0.0702), bbox_max_um=(0.9, 0.9), area_um2=(0.063, 0.063)
+    )
+    assert not quantized_a.overlaps(quantized_b)  # disjoint in physical um
+    deck = _sized_bjt_deck(("npn_a", quantized_a), ("npn_b", quantized_b))
+    with pytest.raises(ExtractError, match="overlapping emitter_size"):
+        _sized_bjt_run(deck, [(70, 900)])
+
+
+def test_emitter_size_unsized_sibling_rejected():
+    """An emitter_size=None entry sharing base/marker/emitter with a sized
+    one matches every window the sized one claims: it would extract the same
+    window twice and suppress/misreport the unclaimed-window warning."""
+    deck = _sized_bjt_deck(("npn_a", _SIZED_NPN), ("npn_fallback", None))
+    with pytest.raises(ExtractError, match="no emitter_size"):
+        _sized_bjt_run(deck, [(70, 900), (300, 300)])
+
+
+def test_emitter_size_disjoint_ranges_not_rejected_and_overlap_logic():
+    assert not _SIZED_NPN.overlaps(_SIZED_NPN_L)
+    assert SizeFilter(area_um2=(0, 1)).overlaps(SizeFilter(bbox_min_um=(5, 6)))
+    assert SizeFilter(area_um2=(0, 1)).overlaps(SizeFilter(area_um2=(1, 2)))
+    assert not SizeFilter(area_um2=(0, 1)).overlaps(SizeFilter(area_um2=(1.1, 2)))
+
+
+def test_size_filter_validation():
+    with pytest.raises(ValueError, match="at least one"):
+        SizeFilter()
+    with pytest.raises(ValueError, match="lo > hi"):
+        SizeFilter(area_um2=(2.0, 1.0))
+    with pytest.raises(ValueError, match="non-negative"):
+        SizeFilter(bbox_min_um=(-0.1, 1.0))
+
+
+def test_emitter_size_default_is_none():
+    assert (
+        BipolarDevice(base=(1, 0), emitter=(2, 0), marker=(3, 0)).emitter_size is None
+    )
+
+
+@pytest.mark.parametrize("dbu", [0.001, 0.005, 0.0005])
+def test_size_filter_bbox_boundaries(dbu):
+    """Inclusive at lo and hi; one dbu outside either end does not match."""
+    size = SizeFilter(bbox_min_um=(0.1, 0.2))
+    one = lambda w: round(w / dbu)  # noqa: E731
+
+    def matches(width_um):
+        r = kdb.Region(kdb.Box(0, 0, one(width_um), one(1.0)))
+        return not _apply_size_filter(r, size, dbu).is_empty()
+
+    assert matches(0.1)
+    assert matches(0.2)
+    assert matches(0.15)
+    assert _apply_size_filter(
+        kdb.Region(kdb.Box(0, 0, one(0.1) - 1, one(1.0))), size, dbu
+    ).is_empty()
+    assert _apply_size_filter(
+        kdb.Region(kdb.Box(0, 0, one(0.2) + 1, one(1.0))), size, dbu
+    ).is_empty()
+
+
+@pytest.mark.parametrize("dbu", [0.001, 0.005])
+def test_size_filter_area_and_bbox_max_boundaries(dbu):
+    size = SizeFilter(bbox_max_um=(0.5, 1.0), area_um2=(0.25, 0.5))
+    n = lambda v: round(v / dbu)  # noqa: E731
+
+    def matches(w, h):
+        r = kdb.Region(kdb.Box(0, 0, n(w), n(h)))
+        return not _apply_size_filter(r, size, dbu).is_empty()
+
+    assert matches(0.5, 0.5)  # bbox_max and area both at lo
+    assert matches(0.5, 1.0)  # bbox_max at hi, area at hi
+    assert not matches(0.5, 1.0 + dbu)  # one dbu past hi
+    assert not matches(0.5 - dbu, 0.5)  # bbox_max one dbu below lo
+    assert not matches(0.5, 0.5 - dbu)  # area below lo (bbox_max too)
+
+
+def _make_gf180mcu_mim_option_a_layout() -> kdb.Layout:
+    """A gf180mcu MIM *option A* cap (issue #2920): `Metal2` bottom plate,
+    `FuseTop` top plate, a sea of `Via2` inside `FuseTop` strapped by a
+    `Metal3` labelled `VTOP`, and the bottom plate labelled `VBOT` through a
+    `Via2`/`Metal3` pad *outside* `FuseTop` (ordinary routing)."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    draw(36, 0, _box_um(-20, -20, 20, 20))  # Metal2 (bottom plate conductor)
+    draw(75, 0, _box_um(0, 0, 10, 10))  # FuseTop (top plate)
+    draw(117, 5, _box_um(-5, -5, 15, 15))  # CAP_MK
+    draw(117, 10, _box_um(-5, -5, 15, 15))  # MIM_L_MK
+    draw(38, 0, _box_um(2, 2, 3, 3))  # Via2 inside FuseTop
+    draw(38, 0, _box_um(6, 6, 7, 7))  # Via2 inside FuseTop
+    draw(42, 0, _box_um(1, 1, 8, 8))  # Metal3 strap
+    top.shapes(layout.layer(42, 10)).insert(kdb.Text("VTOP", _trans_um(4, 4)))
+    draw(38, 0, _box_um(-15, -15, -14, -14))  # Via2 outside FuseTop
+    draw(42, 0, _box_um(-16, -16, -13, -13))  # Metal3 pad
+    top.shapes(layout.layer(42, 10)).insert(kdb.Text("VBOT", _trans_um(-14.5, -14.5)))
+    return layout
+
+
+def test_gf180mcu_mim_option_a_extracts_cap_with_distinct_plate_nets(tmp_path):
+    """Issue #2920: `mim_option=A` recognises the Metal2/FuseTop/Via2/Metal3
+    MIM as one `m2m3` capacitor; the top-plate Via2s do not join the plates,
+    while the Via2 outside FuseTop is still ordinary Metal2-Metal3 routing."""
+    path = _write_gds(_make_gf180mcu_mim_option_a_layout(), tmp_path / "a.gds")
+    report = run_extract(
+        path,
+        "gf180mcu",
+        output=str(tmp_path / "a.spice"),
+        deck_options={"mim_option": "A"},
+    )
+
+    assert report["device_counts"] == {"cap_mim_2f0_m2m3_noshield": 1}
+    (device,) = report["devices"]
+    assert device["nets"]["a"] == "VBOT"
+    assert device["nets"]["b"] == "VTOP"
+    assert not any("merges" in w for w in report["warnings"])
+    assert report["provenance"]["deck"]["options"]["mim_option"] == "A"
+
+
+def test_gf180mcu_mim_option_a_density_flavour(tmp_path):
+    path = _write_gds(_make_gf180mcu_mim_option_a_layout(), tmp_path / "a.gds")
+    report = run_extract(
+        path,
+        "gf180mcu",
+        output=str(tmp_path / "a.spice"),
+        deck_options={"mim_option": "A", "mim_cap": "cap_mim_1f0_m2m3_noshield"},
+    )
+    assert report["device_counts"] == {"cap_mim_1f0_m2m3_noshield": 1}
+
+
+def test_gf180mcu_mim_option_b_flavour_rejected_under_option_a(tmp_path):
+    path = _write_gds(_make_gf180mcu_mim_option_a_layout(), tmp_path / "a.gds")
+    with pytest.raises(ExtractError, match="cap_mim_1f0_m4m5_noshield"):
+        run_extract(
+            path,
+            "gf180mcu",
+            output=str(tmp_path / "a.spice"),
+            deck_options={"mim_option": "A", "mim_cap": "cap_mim_1f0_m4m5_noshield"},
+        )
+
+
+def test_gf180mcu_mim_option_rejects_unknown_value(tmp_path):
+    path = _write_gds(_make_gf180mcu_mim_option_a_layout(), tmp_path / "a.gds")
+    with pytest.raises(ExtractError, match="mim_option=C"):
+        run_extract(
+            path,
+            "gf180mcu",
+            output=str(tmp_path / "a.spice"),
+            deck_options={"mim_option": "C"},
+        )
+
+
+def test_gf180mcu_mim_option_a_layout_under_default_warns(tmp_path):
+    """Issue #2920 item 3: an option-A cap under the default option B is not
+    silently extracted as one net -- a warning names the option to select."""
+    path = _write_gds(_make_gf180mcu_mim_option_a_layout(), tmp_path / "a.gds")
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "a.spice"))
+
+    assert report["device_counts"] == {}
+    (warning,) = [w for w in report["warnings"] if "mim_option=A" in w]
+    assert "--deck-option mim_option=A" in warning
+    assert "mim_option" not in report["provenance"]["deck"]["options"]
+
+
+def test_gf180mcu_mim_option_b_layout_has_no_variant_warning(tmp_path):
+    path = _write_gds(_make_gf180mcu_mim_layout(), tmp_path / "b.gds")
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "b.spice"))
+    assert report["device_counts"] == {"cap_mim_2f0_m4m5_noshield": 1}
+    assert not any("mim_option" in w for w in report["warnings"])
+
+
+def _anon_connectivity(first: int, second: int):
+    """A two-device report fragment whose two anonymous nets are numbered
+    ``first``/``second`` -- the only thing varied between builds (#3407)."""
+    a, b = f"\\${first}", f"\\${second}"
+    devices = [
+        {"name": "M1", "nets": {"D": a, "G": "IN", "S": "VSS"}},
+        {"name": "M2", "nets": {"D": b, "G": a, "S": "VSS"}},
+    ]
+    nets = [
+        {"name": "IN", "net_id": 1},
+        {"name": a, "net_id": first},
+        {"name": b, "net_id": second},
+        {"name": "VSS", "net_id": 4},
+    ]
+    return devices, nets
+
+
+def test_normalized_netlist_hash_ignores_anonymous_net_numbering():
+    from klayout_tools.extract import _normalized_netlist_sha256
+
+    base = _normalized_netlist_sha256(*_anon_connectivity(3, 7))
+    renumbered = _normalized_netlist_sha256(*_anon_connectivity(81, 12))
+    assert base == renumbered
+
+
+def test_normalized_netlist_hash_detects_connectivity_change():
+    from klayout_tools.extract import _normalized_netlist_sha256
+
+    devices, nets = _anon_connectivity(3, 7)
+    base = _normalized_netlist_sha256(devices, nets)
+    devices[1]["nets"]["G"] = "IN"  # rewire M2's gate off the anonymous net
+    assert _normalized_netlist_sha256(devices, nets) != base
+
+
+def test_normalized_netlist_hash_is_stable_across_reruns(tmp_path):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    a = run_extract(path, "sky130", output=str(tmp_path / "a.spice"))
+    b = run_extract(path, "sky130", output=str(tmp_path / "b.spice"))
+    assert a["netlist_normalized_sha256"] == b["netlist_normalized_sha256"]
+    assert len(a["netlist_normalized_sha256"]) == 64
+    other = _write_gds(_make_series_resistor_chain_layout(), tmp_path / "chain.gds")
+    c = run_extract(other, "sky130", output=str(tmp_path / "c.spice"))
+    assert c["netlist_normalized_sha256"] != a["netlist_normalized_sha256"]
+
+
+# Issue #3568: the digest path was quadratic in net count. These pin the digest
+# value and check the linear implementation against the old simple scans.
+
+
+def _digest_fixture(n_devices: int = 300) -> tuple[list[Any], list[Any]]:
+    """Deterministic multi-hundred-device / multi-hundred-anonymous-net
+    connectivity (issue #3568): suffix-style and prefix-colliding names, a
+    device with two terminals on one net, a floating anonymous net, and
+    non-dict entries."""
+    devices: list[Any] = []
+    nets: list[Any] = [{"name": "VDD", "net_id": 1}, {"name": "VSS", "net_id": 2}]
+    for i in range(n_devices):
+        # Anonymous numbers are deliberately not in device order, and span
+        # one, two and three digits so `\$3` / `\$31` / `\$310` all occur.
+        a = f"\\${(i * 7919) % 1009}"
+        b = f"\\${(i * 104729 + 5) % 1009}"
+        devices.append(
+            {
+                "name": f"M{i}",
+                "type": "nmos",
+                "params": {"w": 1 + i % 5, "label": f"{a}__t0"},
+                "nets": {"D": a, "G": b, "S": "VSS", "B": "VSS" if i % 2 else a},
+            }
+        )
+        nets.append({"name": a, "net_id": 10 + i})
+    nets.append({"name": "\\$3", "net_id": 5000})
+    nets.append({"name": "\\$31", "net_id": 5001})
+    nets.append({"name": "\\$9999", "net_id": 5002})  # floating: no attachments
+    devices.append({"name": "Mx", "nets": {"D": "\\$3", "S": "\\$31"}})
+    devices.append("not-a-device")
+    devices.append({"name": "Mnone", "nets": None})
+    nets.append("not-a-net")
+    nets.append({"net_id": 5003})
+    return devices, nets
+
+
+# Digest computed with the pre-#3568 (quadratic) implementation.
+_DIGEST_FIXTURE_SHA256 = (
+    "942a05bcdac16c10cebaecdb5b9b68ebe275556f6bf603f87667c6deae38affc"
+)
+
+
+def _ref_net_attachment_key(net_name, devices):
+    return ",".join(
+        sorted(
+            f"{device.get('name')}.{terminal}"
+            for device in devices
+            if isinstance(device, dict)
+            for terminal, terminal_net in (device.get("nets") or {}).items()
+            if terminal_net == net_name
+        )
+    )
+
+
+def _ref_anonymous_net_name_map(report):
+    nets = report.get("nets")
+    devices = report.get("devices")
+    if not isinstance(nets, list) or not isinstance(devices, list):
+        return {}
+    name_map = {}
+    for entry in nets:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        if not isinstance(name, str) or not re.match(r"^\\\$\d+$", name):
+            continue
+        key = _ref_net_attachment_key(name, devices)
+        if key:
+            name_map[name] = f"$anon<{key}>"
+    return name_map
+
+
+def _ref_rewrite_net_name(value, name_map):
+    if not isinstance(value, str):
+        return value
+    canonical = name_map.get(value)
+    if canonical is not None:
+        return canonical
+    for raw_name, canonical_name in name_map.items():
+        if not value.startswith(raw_name):
+            continue
+        boundary = value[len(raw_name) : len(raw_name) + 1]
+        if boundary and boundary.isalnum():
+            continue
+        return canonical_name + value[len(raw_name) :]
+    return value
+
+
+def test_normalized_netlist_hash_golden_digest_unchanged():
+    from klayout_tools.extract import _normalized_netlist_sha256
+
+    devices, nets = _digest_fixture()
+    assert _normalized_netlist_sha256(devices, nets) == _DIGEST_FIXTURE_SHA256
+
+
+def test_anonymous_net_name_map_matches_reference():
+    from klayout_tools.extract import _anonymous_net_name_map
+
+    devices, nets = _digest_fixture()
+    report = {"devices": devices, "nets": nets}
+    got = _anonymous_net_name_map(report)
+    assert got == _ref_anonymous_net_name_map(report)
+    assert "\\$9999" not in got  # floating anonymous net stays unmapped
+    assert len(got) > 300
+
+
+def test_rewrite_net_name_matches_reference_on_probe_strings():
+    from klayout_tools.extract import _rewrite_net_name
+
+    devices, nets = _digest_fixture()
+    name_map = _ref_anonymous_net_name_map({"devices": devices, "nets": nets})
+    probes = [
+        "\\$3",
+        "\\$3__t0",
+        "\\$31",
+        "\\$31__t0",
+        "\\$310",
+        "\\$3x",
+        "\\$3 ",
+        "\\$3_",
+        "\\$",
+        "\\$x",
+        "\\$99999",
+        "\\$9999__t1",
+        "$3",
+        "\\\\$3",
+        " \\$3",
+        "M1",
+        "",
+        "\\$\u0663",
+        "\\$3\u0663",
+        "\\$3\u00e9",
+        7,
+        None,
+        ["\\$3"],
+    ]
+    probes += list(name_map)[:50] + [k + "__seg0" for k in list(name_map)[:50]]
+    probes += [k + "9" for k in list(name_map)[:50]]
+    for probe in probes:
+        assert _rewrite_net_name(probe, name_map) == _ref_rewrite_net_name(
+            probe, name_map
+        ), probe
+    assert _rewrite_net_name("\\$3__t0", name_map) == name_map["\\$3"] + "__t0"
+
+
+def test_canonicalize_matches_reference_for_shuffled_reports():
+    import random
+
+    from klayout_tools.extract import (
+        _canonicalize_extract_report_for_rerun_diff,
+        _strip_net_id_and_rewrite_names,
+    )
+
+    rng = random.Random(3568)
+    for _ in range(5):
+        devices, nets = _digest_fixture(60)
+        rng.shuffle(devices)
+        rng.shuffle(nets)
+        report = {"devices": devices, "nets": nets}
+        got = _canonicalize_extract_report_for_rerun_diff(report)
+
+        ref_map = _ref_anonymous_net_name_map(report)
+        expected = _strip_net_id_and_rewrite_names(report, ref_map)
+        expected["nets"] = sorted(
+            expected["nets"],
+            key=lambda entry: (
+                (
+                    entry.get("name", ""),
+                    _ref_net_attachment_key(entry.get("name", ""), expected["devices"]),
+                )
+                if isinstance(entry, dict)
+                else ("", "")
+            ),
+        )
+        assert got == expected
+
+
+def test_normalized_netlist_hash_scales_roughly_linearly():
+    import time
+
+    from klayout_tools.extract import _normalized_netlist_sha256
+
+    def timed(n_nets: int) -> float:
+        devices = [
+            {"name": f"M{i}", "nets": {"D": f"\\${i}", "G": f"\\${(i + 1) % n_nets}"}}
+            for i in range(n_nets)
+        ]
+        nets = [{"name": f"\\${i}", "net_id": i} for i in range(n_nets)]
+        start = time.perf_counter()
+        _normalized_netlist_sha256(devices, nets)
+        return time.perf_counter() - start
+
+    small = min(timed(3000) for _ in range(5))
+    large = min(timed(12000) for _ in range(5))
+    # 4x the nets: ~4x when linear, ~16x when quadratic. The bound sits between
+    # the two, loose enough to absorb shared-runner noise (issue #3610).
+    assert large < small * 12, (small, large)
+
+
+# --progress / `timing` (issue #3181) ----------------------------------------
+
+
+def test_report_carries_additive_timing_object(tmp_path):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    result = run_extract(path, "sky130")
+    timing = result["timing"]
+    assert timing["total_seconds"] >= 0
+    stages = timing["stages"]
+    assert {"read_layout", "device_extraction", "netlist_write"} <= set(stages)
+    assert all(seconds >= 0 for seconds in stages.values())
+    assert timing["unattributed_seconds"] >= 0
+    assert sum(stages.values()) + timing["unattributed_seconds"] == pytest.approx(
+        timing["total_seconds"], abs=0.01
+    )
+
+
+def test_normalized_hash_has_its_own_stage_only_when_netlist_written(tmp_path):
+    # Issue #3408: the numbering-independent hash dominates a large block's
+    # run, so it must be attributed to a stage, not left in
+    # `unattributed_seconds`.
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    written = run_extract(path, "sky130")
+    assert "netlist_normalized_hash" in written["timing"]["stages"]
+    skipped = run_extract(path, "sky130", no_netlist=True)
+    assert skipped["netlist_normalized_sha256"] is None
+    assert "netlist_normalized_hash" not in skipped["timing"]["stages"]
+
+
+def test_progress_lines_go_to_stderr_and_stdout_stays_json(tmp_path, capsys):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    code = main(["extract", path, "--deck", "sky130", "--progress", "--format", "json"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "timing" in json.loads(captured.out)
+    assert "read_layout started" in captured.err
+    assert "device_extraction finished" in captured.err
+    assert "klt extract:" not in captured.out
+
+
+def test_no_progress_is_silent_even_off_a_tty(tmp_path, capsys):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    code = main(
+        ["extract", path, "--deck", "sky130", "--no-progress", "--format", "json"]
+    )
+    assert code == 0
+    assert capsys.readouterr().err == ""
+
+
+def test_default_off_a_tty_is_heartbeat_only_so_short_runs_stay_clean(tmp_path, capsys):
+    # pytest's captured stderr is not a TTY, so the unset default is the
+    # heartbeat-only mode: a short run writes nothing to stderr.
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    assert main(["extract", path, "--deck", "sky130", "--format", "json"]) == 0
+    assert capsys.readouterr().err == ""
+
+
+def test_progress_request_document_key(tmp_path, capsys):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    request = tmp_path / "req.json"
+    request.write_text(
+        json.dumps(
+            {
+                "schema": "klt.extract.request/1",
+                "file": path,
+                "deck": "sky130",
+                "progress": False,
+            }
+        )
+    )
+    assert main(["extract", str(request), "--format", "json"]) == 0
+    assert capsys.readouterr().err == ""
+
+
+def test_short_run_emits_no_heartbeat(tmp_path, capsys):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    run_extract(path, "sky130", progress=True)
+    assert "still running" not in capsys.readouterr().err
+
+
+def test_stage_timer_heartbeat_fires_during_a_long_stage():
+    import io
+    import time
+
+    from klayout_tools.extract_progress import StageTimer, active_timer, stage
+
+    stream = io.StringIO()
+    timer = StageTimer(progress=True, stream=stream, heartbeat_s=0.05)
+    with active_timer(timer), stage("slow"):
+        time.sleep(0.3)
+    assert "slow still running" in stream.getvalue()
+    assert "slow started" in stream.getvalue()
+    assert timer.report()["stages"]["slow"] >= 0.25
+
+
+def test_heartbeat_mode_omits_stage_lines():
+    import io
+    import time
+
+    from klayout_tools.extract_progress import StageTimer, active_timer, stage
+
+    stream = io.StringIO()
+    timer = StageTimer(progress="heartbeat", stream=stream, heartbeat_s=0.05)
+    with active_timer(timer), stage("slow"):
+        time.sleep(0.2)
+    assert "slow still running" in stream.getvalue()
+    assert "started" not in stream.getvalue()
+    assert "finished" not in stream.getvalue()
+
+
+def test_stage_is_a_noop_without_an_active_timer():
+    from klayout_tools.extract_progress import stage
+
+    with stage("nothing"):
+        pass
+
+
+def test_timing_is_ignored_by_rerun_drift(tmp_path):
+    from klayout_tools._report_verify import VOLATILE_PROVENANCE_PATHS
+
+    assert ("timing",) in VOLATILE_PROVENANCE_PATHS
+
+
+def test_consecutive_runs_give_identical_netlist_sha256(tmp_path):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    first = run_extract(path, "sky130", output=str(tmp_path / "a.spice"))
+    second = run_extract(path, "sky130", output=str(tmp_path / "b.spice"))
+    assert first["netlist_sha256"] == second["netlist_sha256"]
+
+
+# --------------------------------------------------------------------------- #
+# `--probe`: point-to-net queries on the run's own extraction (issue #2986)
+# --------------------------------------------------------------------------- #
+
+
+def _probe(name, layer, x, y):
+    return {"name": name, "layer": layer, "x": x, "y": y}
+
+
+def _probe_by_name(report):
+    return {entry["name"]: entry for entry in report["probes"]}
+
+
+def test_probes_absent_reports_an_empty_array(tmp_path):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+
+    report = run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
+
+    assert report["probes"] == []
+
+
+def test_probe_same_net_shares_cluster_id_and_different_net_differs(tmp_path):
+    """The two drain pads both carry the label `Y` but are distinct nets, so
+    only `cluster_id` -- the `nets[].net_id` -- tells them apart."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "inv.spice"),
+        probes=[
+            _probe("nmos_drain", "metal0", 1.8, 0.5),
+            _probe("nmos_drain_edge", "metal0", 2.0, 0.5),
+            _probe("pmos_drain", "metal0", 1.8, 2.5),
+            _probe("gate", "poly", 1.0, 1.0),
+        ],
+    )
+
+    probes = _probe_by_name(report)
+    assert [entry["name"] for entry in report["probes"]] == [
+        "nmos_drain",
+        "nmos_drain_edge",
+        "pmos_drain",
+        "gate",
+    ]
+    assert probes["nmos_drain"] == {
+        "name": "nmos_drain",
+        "layer": "metal0",
+        "x_um": 1.8,
+        "y_um": 0.5,
+        "found": True,
+        "net": "Y",
+        "cluster_id": probes["nmos_drain"]["cluster_id"],
+    }
+    assert probes["nmos_drain_edge"]["cluster_id"] == probes["nmos_drain"]["cluster_id"]
+    assert probes["pmos_drain"]["net"] == "Y"
+    assert probes["pmos_drain"]["cluster_id"] != probes["nmos_drain"]["cluster_id"]
+    assert probes["gate"]["net"] == "A"
+    # Every reported cluster_id is a real nets[].net_id carrying that name.
+    by_id = {net["net_id"]: net["name"] for net in report["nets"]}
+    for entry in report["probes"]:
+        assert by_id[entry["cluster_id"]] == entry["net"]
+
+
+def test_probe_on_empty_space_is_not_found_not_an_error(tmp_path):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "inv.spice"),
+        probes=[
+            _probe("void", "metal0", 50.0, 50.0),
+            _probe("neg", "metal0", -5, -4.0),
+        ],
+    )
+
+    for entry in report["probes"]:
+        assert entry["found"] is False
+        assert entry["net"] is None
+        assert entry["cluster_id"] is None
+
+
+def test_probe_inside_a_black_box_region_is_not_found(tmp_path):
+    layout = _make_inverter_layout()
+    # Reserved annotation layer (issue #289) over the NMOS drain pad.
+    layout.cell("TOP").shapes(layout.layer(990, 0)).insert(
+        kdb.Box(1500, 100, 2100, 900)
+    )
+    path = _write_gds(layout, tmp_path / "bb.gds")
+
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "bb.spice"),
+        probes=[
+            _probe("masked", "metal0", 1.8, 0.5),
+            _probe("open", "metal0", 1.8, 2.5),
+        ],
+    )
+
+    probes = _probe_by_name(report)
+    assert probes["masked"]["found"] is False
+    assert probes["open"]["net"] == "Y"
+
+
+def test_probe_under_def_net_names_reports_the_def_name(tmp_path):
+    """The issue's case: the DEF name replaces the label, so a wire joined to
+    the renamed net and one that is not give different `cluster_id`s and the
+    renamed one reports the DEF name."""
+    layout_path = _inverter_with_def_net_property(tmp_path)
+
+    report = run_extract(
+        layout_path,
+        "sky130",
+        output=str(tmp_path / "def.spice"),
+        def_net_names=True,
+        probes=[
+            _probe("joined", "metal0", 1.8, 0.5),
+            _probe("other", "metal0", 1.8, 2.5),
+        ],
+    )
+
+    probes = _probe_by_name(report)
+    assert probes["joined"]["net"] == "_019_"
+    assert probes["other"]["net"] == "Y"
+    assert probes["joined"]["cluster_id"] != probes["other"]["cluster_id"]
+
+
+def test_probe_with_abstract_cells_does_not_crash(tmp_path):
+    path = _write_gds(_make_abstract_cells_layout(), tmp_path / "abstract.gds")
+
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "abstract.spice"),
+        abstract_cell_patterns=("SC_BUF",),
+        probes=[_probe("a1", "metal1", 1.8, 0.5), _probe("a2", "metal1", 6.8, 0.5)],
+    )
+
+    probes = _probe_by_name(report)
+    assert probes["a1"]["net"] == "INST1_A"
+    assert probes["a2"]["net"] == "INST2_A"
+
+
+def test_probe_with_declared_pins_reports_the_final_net_name(tmp_path):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "inv.spice"),
+        declared_pins=frozenset({"A", "Y"}),
+        probes=[_probe("gate", "poly", 1.0, 1.0)],
+    )
+
+    by_id = {net["net_id"]: net["name"] for net in report["nets"]}
+    (entry,) = report["probes"]
+    assert by_id[entry["cluster_id"]] == entry["net"] == "A"
+
+
+def test_probe_unknown_role_lists_available_roles(tmp_path):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+
+    with pytest.raises(ExtractError) as excinfo:
+        run_extract(
+            path,
+            "sky130",
+            output=str(tmp_path / "inv.spice"),
+            probes=[_probe("bad", "metal99", 0.0, 0.0)],
+        )
+
+    message = str(excinfo.value)
+    assert "metal99" in message
+    assert "available:" in message
+    assert "metal0" in message
+
+
+def test_probe_cli_flag_emits_probes_and_request_document_matches(tmp_path, capsys):
+    path = str(_write_gds(_make_inverter_layout(), tmp_path / "inv.gds"))
+    output = tmp_path / "inv.spice"
+
+    argv_code, argv_report = _run_extract_json(
+        capsys,
+        [
+            path,
+            "--deck",
+            "sky130",
+            "-o",
+            str(output),
+            "--probe",
+            "name=nd,layer=metal0,x=1.8,y=0.5",
+            "--probe",
+            "name=void,layer=metal0,x=50,y=-4.0",
+        ],
+    )
+    request = _extract_request_document(path, output)
+    request["probes"] = [
+        {"name": "nd", "layer": "metal0", "x": 1.8, "y": 0.5},
+        "name=void,layer=metal0,x=50,y=-4.0",
+    ]
+    request_path = tmp_path / "extract.request.json"
+    request_path.write_text(json.dumps(request))
+    request_code, request_report = _run_extract_json(capsys, [str(request_path)])
+
+    assert argv_code == request_code == 0
+    assert [entry["name"] for entry in argv_report["probes"]] == ["nd", "void"]
+    assert argv_report["probes"][0]["net"] == "Y"
+    assert argv_report["probes"][1]["found"] is False
+    argv_report.pop("timing"), request_report.pop("timing")
+    assert request_report == argv_report
+
+
+@pytest.mark.parametrize(
+    "specs",
+    [
+        ["layer=metal0,x=1,y=1"],  # missing name
+        ["name=a,layer=metal0,x=1"],  # missing y
+        ["name=a,layer=metal0,x=one,y=1"],  # non-numeric
+        ["name=a,layer=metal0,x=1,y=1,z=3"],  # unknown key
+        ["name=a,layer=metal0,x=1,x=2,y=1"],  # repeated key
+        ["nonsense"],
+        ["name=a,layer=metal0,x=1,y=1", "name=a,layer=poly,x=2,y=2"],  # duplicate name
+    ],
+)
+def test_probe_malformed_spec_is_an_application_error(tmp_path, capsys, specs):
+    path = str(_write_gds(_make_inverter_layout(), tmp_path / "inv.gds"))
+    argv = [path, "--deck", "sky130"]
+    for spec in specs:
+        argv += ["--probe", spec]
+
+    message = _extract_error_message(capsys, argv)
+
+    assert "--probe" in message
+
+
+def test_probe_bad_role_via_cli_exits_one(tmp_path, capsys):
+    path = str(_write_gds(_make_inverter_layout(), tmp_path / "inv.gds"))
+
+    message = _extract_error_message(
+        capsys,
+        [path, "--deck", "sky130", "--probe", "name=a,layer=bogus,x=0,y=0"],
+    )
+
+    assert "bogus" in message and "available:" in message
+
+
+# ---------------------------------------------------------------------------
+# Terminal-aware resistance graph (--resistance-graph, issue #2982 -- Stage
+# 3.D5 increment 3 of docs/design/extract-fidelity-roadmap.md)
+# ---------------------------------------------------------------------------
+
+_LI1_RS_OHM_SQ = 12.8  # sky130 PARASITICS li1 sheet resistance
+
+
+def _make_li1_strip_layout(length: int = 5000, width: int = 170) -> kdb.Layout:
+    """One labelled li1 strip, ``length`` x ``width`` dbu, with a full-width
+    licon1 square at each end: the Stage 3.D4 F1 row drawn as a layout. No
+    diffusion/poly role is modelled for the licon landings, so each is where
+    current leaves the net -- one terminal per end."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(67, 20)).insert(kdb.Box(0, 0, length, width))
+    top.shapes(layout.layer(67, 5)).insert(
+        kdb.Text("S", kdb.Trans(length // 2, width // 2))
+    )
+    cut = layout.layer(66, 44)
+    top.shapes(cut).insert(kdb.Box(0, 0, width, width))
+    top.shapes(cut).insert(kdb.Box(length - width, 0, length, width))
+    return layout
+
+
+def test_resistance_graph_requires_parasitics():
+    with pytest.raises(ExtractError, match="--resistance-graph requires --parasitics"):
+        run_extract("/nonexistent.gds", "sky130", resistance_graph=True)
+
+
+def test_resistance_graph_off_adds_no_key_and_on_changes_nothing_else(tmp_path):
+    """Default output carries no `resistance_graph` key; turning the flag on
+    changes only that additive key (and not the written netlist)."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    base = run_extract(
+        path, "sky130", output=str(tmp_path / "base.spice"), parasitics=True
+    )
+    graph = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "graph.spice"),
+        parasitics=True,
+        resistance_graph=True,
+    )
+    assert all("resistance_graph" not in e for e in base["parasitics"]["nets"])
+    assert base["netlist_sha256"] == graph["netlist_sha256"]
+    stripped = json.loads(json.dumps(graph["parasitics"]))
+    for entry in stripped["nets"]:
+        assert "resistance_graph" in entry
+        del entry["resistance_graph"]
+    assert stripped == base["parasitics"]
+
+
+def test_resistance_graph_two_terminal_strip_matches_analytic(tmp_path):
+    """F1: the graph's terminal-pair resistance is the strip's `Rs * L / W`
+    between its two end edges, while the legacy scalar keeps its meaning."""
+    path = _write_gds(_make_li1_strip_layout(), tmp_path / "strip.gds")
+    base = run_extract(
+        path, "sky130", output=str(tmp_path / "b.spice"), parasitics=True
+    )
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "g.spice"),
+        parasitics=True,
+        resistance_graph=True,
+    )
+    (entry,) = report["parasitics"]["nets"]
+    (base_entry,) = base["parasitics"]["nets"]
+    graph = entry["resistance_graph"]
+    assert graph["status"] == "ok"
+    assert len(graph["terminals"]) == 2
+    expected = _LI1_RS_OHM_SQ * 5000 / 170
+    matrix = graph["pair_resistance_ohm"]
+    assert matrix[0][0] == matrix[1][1] == 0.0
+    assert matrix[0][1] == matrix[1][0] == pytest.approx(expected, rel=1e-6)
+    assert graph["legacy_resistance_ohm"] == entry["resistance_ohm"]
+    assert entry["resistance_ohm"] == base_entry["resistance_ohm"]
+    assert graph["nodes"] > 0 and graph["edges"] > 0
+    assert graph["diagnostics"] == []
+
+
+def test_resistance_graph_unsupported_net_keeps_the_legacy_scalar(tmp_path):
+    """The deck curates no per-cut resistance, so a net containing a
+    poly->li1 landing reports `unsupported` (with an explicit
+    `unsupported_geometry` diagnostic) and the legacy scalar stays exactly
+    as it was."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    base = run_extract(
+        path, "sky130", output=str(tmp_path / "b.spice"), parasitics=True
+    )
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "g.spice"),
+        parasitics=True,
+        resistance_graph=True,
+    )
+    unsupported = [
+        e
+        for e in report["parasitics"]["nets"]
+        if e["resistance_graph"]["status"] == "unsupported"
+    ]
+    assert unsupported
+    for entry in unsupported:
+        graph = entry["resistance_graph"]
+        assert [d["code"] for d in graph["diagnostics"]] == ["unsupported_geometry"]
+        assert graph["terminals"] == [] and graph["pair_resistance_ohm"] == []
+        assert graph["nodes"] == 0 and graph["edges"] == 0
+        assert graph["legacy_resistance_ohm"] == entry["resistance_ohm"]
+    assert [e["resistance_ohm"] for e in report["parasitics"]["nets"]] == [
+        e["resistance_ohm"] for e in base["parasitics"]["nets"]
+    ]
+
+
+def test_resistance_graph_single_terminal_net_is_skipped(tmp_path):
+    path = _write_gds(_make_hierarchy_layout(), tmp_path / "hier.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "h.spice"),
+        parasitics=True,
+        resistance_graph=True,
+    )
+    for entry in report["parasitics"]["nets"]:
+        graph = entry["resistance_graph"]
+        assert graph["status"] == "skipped"
+        assert [d["code"] for d in graph["diagnostics"]] == ["too_few_terminals"]
+        assert graph["legacy_resistance_ohm"] == entry["resistance_ohm"]
+
+
+def test_resistance_graph_is_deterministic_across_repeated_requests(tmp_path):
+    path = _write_gds(_make_li1_strip_layout(), tmp_path / "strip.gds")
+    dumps = []
+    for run in range(2):
+        report = run_extract(
+            path,
+            "sky130",
+            output=str(tmp_path / f"r{run}.spice"),
+            parasitics=True,
+            resistance_graph=True,
+        )
+        dumps.append(json.dumps(report["parasitics"]["nets"], sort_keys=True))
+    assert dumps[0] == dumps[1]
+
+
+def test_resistance_graph_with_distributed_rc_leaves_the_ladder_unchanged(tmp_path):
+    """`resistance_ohm` and the `--distributed-rc` ladder conserve the legacy
+    scalar whether or not the graph is attached."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    kwargs = {"parasitics": True, "critical_nets": ["Y"], "distributed_rc": True}
+    base = run_extract(path, "sky130", output=str(tmp_path / "b.spice"), **kwargs)
+    graph = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "g.spice"),
+        resistance_graph=True,
+        **kwargs,
+    )
+    assert base["netlist_sha256"] == graph["netlist_sha256"]
+    for b, g in zip(
+        base["parasitics"]["nets"], graph["parasitics"]["nets"], strict=True
+    ):
+        assert b["resistance_ohm"] == g["resistance_ohm"]
+        assert b["rc_model"] == g["rc_model"]
+        assert b["segments"] == g["segments"]
+
+
+def _graph_report_regions():
+    um = 1000
+
+    def region(*boxes):
+        return kdb.Region([kdb.Box(*b) for b in boxes])
+
+    return um, region
+
+
+@pytest.mark.parametrize(
+    ("r_cut", "expected"), [(0.0, 150.0), (10.0, 160.0), (None, None)]
+)
+def test_resistance_graph_report_two_level_series_matches_analytic(r_cut, expected):
+    """F5/F5v at adapter level: a metal0 strip (Rs = 10, 20 x 2 um) and a
+    metal1 strip (10 x 2 um) joined by one landing at their shared end edge
+    (x = 20 um), terminals at the two far ends: `Rs * 20 / 2` on level 0, the
+    single cut, `Rs * 10 / 2` on level 1."""
+    from klayout_tools.extract_parasitics import _resistance_graph_report
+
+    um, region = _graph_report_regions()
+    roles = [
+        ("metal0", 10.0, region((0, 0, 20 * um, 2 * um)), None),
+        ("metal1", 10.0, region((10 * um, 0, 20 * um, 2 * um)), None),
+    ]
+    contacts = region((0, 0, um // 2, 2 * um))  # metal0 far-end terminal
+    vias = [
+        region((19 * um, 0, 20 * um, 2 * um)),  # metal0 <-> metal1 landing
+        region((10 * um, 0, 10 * um + um // 2, 2 * um)),  # metal1 terminal
+    ]
+    report = _resistance_graph_report(roles, contacts, vias, 0.001, 123.0, r_cut)
+    assert report["legacy_resistance_ohm"] == 123.0
+    if expected is None:
+        assert report["status"] == "unsupported"
+        assert [d["code"] for d in report["diagnostics"]] == ["via_resistance_unknown"]
+        return
+    assert report["status"] == "ok"
+    assert report["pair_resistance_ohm"][0][1] == pytest.approx(expected, rel=1e-9)
+
+
+def test_resistance_graph_report_interior_contact_is_unsupported_geometry():
+    """A contact wholly inside the conductor has no boundary side to attach
+    to; it is reported, not solved with an attachment that doubles the
+    conductance across it."""
+    from klayout_tools.extract_parasitics import _resistance_graph_report
+
+    um, region = _graph_report_regions()
+    roles = [("metal0", 10.0, region((0, 0, 20 * um, 2 * um)), None)]
+    contacts = region((0, 0, um // 2, 2 * um), (10 * um, 500, 10 * um + 500, 1500))
+    report = _resistance_graph_report(roles, contacts, [], 0.001, 7.0)
+    assert report["status"] == "unsupported"
+    assert report["legacy_resistance_ohm"] == 7.0
+    (diag,) = report["diagnostics"]
+    assert diag["code"] == "unsupported_geometry"
+    assert diag["detail"]["interior_landings"][0]["x_um"] == pytest.approx(10.25)
+    assert report["terminals"] == [] and report["nodes"] == 0
+
+
+def test_cli_resistance_graph_json(tmp_path, capsys):
+    path = str(_write_gds(_make_li1_strip_layout(), tmp_path / "strip.gds"))
+    code = main(
+        ["extract", path, "--deck", "sky130", "--parasitics", "--resistance-graph"]
+        + ["--format", "json"]
+    )
+    assert code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["parasitics"]["nets"][0]["resistance_graph"]["status"] == "ok"
+    code = main(["extract", path, "--deck", "sky130", "--resistance-graph"])
+    assert code != 0
+
+
+def test_def_net_connections_dotted_net_gets_conn_block(tmp_path):
+    """Regression (issue #2903): a DEF net whose name carries `.` is renamed by
+    the extractor (#2145) before the SPEF is written, so its `--def-net-
+    connections` entry must follow the rename and still yield `*CONN` pins."""
+    path = _write_gds(
+        _make_inverter_layout(substrate_tap_label="XTAP.vsub"), tmp_path / "d.gds"
+    )
+    spef_path = tmp_path / "d.spef"
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "d.spice"),
+        parasitics=True,
+        spef_output=str(spef_path),
+        def_net_connections={"XTAP.vsub": (("u1", "VPB"),)},
+    )
+    text = spef_path.read_text()
+    block = text.split("*D_NET XTAP_vsub ", 1)[1].split("*D_NET", 1)[0]
+    assert "*I u1:VPB B" in block
+    assert not any("without instance *CONN" in w for w in report["warnings"])
+
+
+def test_remap_def_net_connections_follows_collision_suffix():
+    """`a.b` alongside an existing `a_b` lands on `a_b_1`; each DEF net's pins
+    stay on its own distinct rewritten net (issue #2903)."""
+    from klayout_tools.extract import (
+        _remap_def_net_connections,
+        _rewrite_dotted_net_names,
+    )
+
+    netlist = kdb.Netlist()
+    circuit = kdb.Circuit()
+    circuit.name = "TOP"
+    netlist.add(circuit)
+    for name in ("a_b", "a.b"):
+        circuit.create_net(name)
+    renames = _rewrite_dotted_net_names(netlist)
+    assert [(b, a) for _c, b, a in renames] == [("a.b", "a_b_1")]
+
+    remapped = _remap_def_net_connections(
+        {"a_b": (("u1", "A"),), "a.b": (("u2", "B"),), "plain": (("u3", "C"),)},
+        renames,
+    )
+    assert remapped == {
+        "a_b": (("u1", "A"),),
+        "a_b_1": (("u2", "B"),),
+        "plain": (("u3", "C"),),
+    }
+    # No renames / no map: returned untouched (byte-identical path).
+    original = {"x": (("u", "p"),)}
+    assert _remap_def_net_connections(original, []) is original
+    assert _remap_def_net_connections(None, renames) is None
+
+
+def test_spef_missing_conn_warning_names_unmatched_and_duplicate_nets():
+    """Issue #2903 ask 2: a written `*D_NET` that matches a DEF net but gets
+    no instance `*CONN` is disclosed in `warnings[]`."""
+    from klayout_tools.extract import _spef_missing_conn_warnings
+
+    report = {"nets": [{"net": "a_b"}, {"net": "dup"}, {"net": "dup"}, {"net": "ok"}]}
+    original = {
+        "a.b": (("u1", "A"),),
+        "dup": (("u2", "B"),),
+        "ok": (("u3", "C"),),
+    }
+    # Stale: dotted key never remapped, so `a_b` has no pins.
+    warns = _spef_missing_conn_warnings(report, original, original)
+    assert len(warns) == 1
+    assert "2 *D_NET" in warns[0] and "a_b" in warns[0] and "dup" in warns[0]
+    assert "ok" not in warns[0].split("(", 1)[1].split(")", 1)[0]
+    # Clean case: no warning.
+    assert (
+        _spef_missing_conn_warnings({"nets": [{"net": "ok"}]}, original, original) == []
+    )
+    assert _spef_missing_conn_warnings(report, None, None) == []
+
+
+# --- Unclaimed resistor-marker warning (issue #3138) -----------------------
+
+
+def _unclaimed_marker_warnings(report):
+    return [w for w in report["warnings"] if "claimed by no declared resistor" in w]
+
+
+def test_resistor_marker_beside_body_warns_unclaimed(tmp_path):
+    """A declared marker drawn *beside* (not over) the poly body yields no
+    device and, previously, no diagnostic (issue #3138)."""
+    layout = _make_poly_resistor_layout("sky130")
+    marker = layout.layer(66, 13)
+    layout.clear_layer(marker)
+    # Marker far above the bar: poly & marker is empty.
+    layout.top_cell().shapes(marker).insert(kdb.Box(3000, 5000, 4000, 6000))
+    path = _write_gds(layout, tmp_path / "beside.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "beside.spice"))
+
+    assert report["device_counts"] == {}
+    found = _unclaimed_marker_warnings(report)
+    assert len(found) == 1
+    assert "1 resistor-marker shape on layer 66/13" in found[0]
+    assert "res_generic_po" in found[0]
+
+
+def test_claimed_resistor_marker_is_quiet(tmp_path):
+    path = _write_gds(_make_poly_resistor_layout("sky130"), tmp_path / "ok.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "ok.spice"))
+    assert report["device_counts"] != {}
+    assert _unclaimed_marker_warnings(report) == []
+
+
+def test_resistor_free_layout_has_no_unclaimed_marker_warning(tmp_path):
+    path = _write_gds(
+        _make_poly_resistor_layout("sky130", marked=False), tmp_path / "nomark.gds"
+    )
+    report = run_extract(path, "sky130", output=str(tmp_path / "nomark.spice"))
+    assert _unclaimed_marker_warnings(report) == []

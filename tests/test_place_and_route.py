@@ -1276,6 +1276,86 @@ def test_power_net_fields_default_to_vdd_vss():
     assert validated["ground_net"] == "VSS"
 
 
+def test_power_tapcell_distance_defaults_to_none():
+    validated = place_and_route._validate_power({"straps": _BASE_STRAPS})
+    assert validated["tapcell_distance_um"] is None
+
+
+def test_power_tapcell_distance_accepted():
+    validated = place_and_route._validate_power(
+        {"straps": _BASE_STRAPS, "tapcell": {"distance_um": 50}}
+    )
+    assert validated["tapcell_distance_um"] == 50
+
+
+@pytest.mark.parametrize(
+    "tapcell",
+    [
+        {"distance_um": 0},
+        {"distance_um": -5},
+        {"distance_um": True},
+        {"distance_um": "50"},
+        {"distance_um": float("nan")},
+        {"distance_um": float("inf")},
+        {},
+        {"distance_um": 50, "halo": 1},
+        "50",
+    ],
+)
+def test_power_tapcell_rejects_invalid(tapcell):
+    with pytest.raises(PlaceAndRouteError, match=r"request\.power\.tapcell"):
+        place_and_route._validate_power({"straps": _BASE_STRAPS, "tapcell": tapcell})
+
+
+def test_power_tapcell_override_rejected_without_tapcell_library():
+    with pytest.raises(PlaceAndRouteError, match="no tap/endcap"):
+        place_and_route._validate_power(
+            {"straps": _BASE_STRAPS, "tapcell": {"distance_um": 50}},
+            "sg13g2_stdcell",
+        )
+
+
+def test_tapcell_lines_default_and_override():
+    default = "tapcell -distance 14 -tapcell_master sky130_fd_sc_hd__tapvpwrvgnd_1"
+    assert place_and_route._tapcell_lines("sky130_fd_sc_hd") == [default]
+    assert place_and_route._tapcell_lines("sky130_fd_sc_hd", None) == [default]
+    assert place_and_route._tapcell_lines("sky130_fd_sc_hd", 50) == [
+        "tapcell -distance 50 -tapcell_master sky130_fd_sc_hd__tapvpwrvgnd_1"
+    ]
+    assert place_and_route._tapcell_lines("sky130_fd_sc_hd", 12.5)[0].startswith(
+        "tapcell -distance 12.5 "
+    )
+
+
+def test_stubbed_route_tapcell_distance_override_in_tcl_and_report(
+    tmp_path, monkeypatch
+):
+    """Issue #3051: `request.power.tapcell.distance_um` reaches the Tcl and
+    the report's `power` block."""
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        power={"straps": _BASE_STRAPS, "tapcell": {"distance_um": 50}},
+    )
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert report["status"] == "ok"
+    assert report["power"]["tapcell_distance_um"] == 50
+    floorplan_script = os.path.join(
+        os.path.dirname(request_path),
+        ".klt",
+        "place-and-route",
+        "pnr_gcd_floorplan.tcl",
+    )
+    lines = _script_lines(floorplan_script)
+    assert (
+        "tapcell -distance 50 -tapcell_master sky130_fd_sc_hd__tapvpwrvgnd_1" in lines
+    )
+
+
 def test_power_normalizes_strap_numbers_and_defaults():
     validated = place_and_route._validate_power(
         {"straps": [{"layer": "met1", "width_um": 1, "pitch_um": 5}]}
@@ -2732,6 +2812,7 @@ def test_stubbed_full_route_success(tmp_path, monkeypatch):
         "ground_net": None,
         "tapcell_master": None,
         "endcap_master": None,
+        "tapcell_distance_um": None,
         "filler_masters": [],
         "straps": [],
         "connects": [],
@@ -2791,13 +2872,13 @@ def test_stubbed_full_route_success(tmp_path, monkeypatch):
     # see `_row_rail_lines`'s own docstring).
     assert "pdngen -dont_add_pins" in route_lines
     assert route_lines.index("pdngen -dont_add_pins") < route_lines.index(
-        "global_route"
+        "global_route -verbose"
     )
     assert (
         "filler_placement {sky130_fd_sc_hd__fill_1 sky130_fd_sc_hd__fill_2 "
         "sky130_fd_sc_hd__fill_4 sky130_fd_sc_hd__fill_8}" in route_lines
     )
-    assert route_lines.index("global_route") < route_lines.index(
+    assert route_lines.index("global_route -verbose") < route_lines.index(
         "filler_placement {sky130_fd_sc_hd__fill_1 sky130_fd_sc_hd__fill_2 "
         "sky130_fd_sc_hd__fill_4 sky130_fd_sc_hd__fill_8}"
     )
@@ -2955,6 +3036,7 @@ def test_stubbed_full_route_with_power_emits_pdn_tapcell_and_filler_tcl(
         "ground_net": "VSS",
         "tapcell_master": "sky130_fd_sc_hd__tapvpwrvgnd_1",
         "endcap_master": None,
+        "tapcell_distance_um": 14,
         "filler_masters": [
             "sky130_fd_sc_hd__fill_1",
             "sky130_fd_sc_hd__fill_2",
@@ -3562,6 +3644,168 @@ def test_post_route_spef_reports_spef_sta_block(tmp_path, monkeypatch):
     assert extract_calls[0]["path"] == report["gds_path"]
     assert extract_calls[0]["parasitics"] is True
     assert extract_calls[0]["spef_output"] == spef_sta["spef_path"]
+
+
+# --------------------------------------------------------------------------- #
+# Violation-count check families (issue #2741): the nominal-stage report and
+# the post-route SPEF re-time share `place_and_route._violation_count_lines`,
+# so both count recovery/removal and clock-gating violators alongside data
+# setup/hold -- the same populations their WNS/TNS fields measure. Replayed
+# from the real OpenROAD `26Q3-1510-g6cb3f2b704` captures
+# `tests/test_post_route_sta.py` also parses.
+# --------------------------------------------------------------------------- #
+
+_CHECK_FAMILY_CAPTURES = json.loads(
+    (
+        Path(__file__).parent
+        / "fixtures"
+        / "sta_check_families"
+        / "openroad_26Q3-1510_captures.json"
+    ).read_text(encoding="utf-8")
+)
+
+_COMBINED_SETUP_REPORT = (
+    "report_check_types -max_delay -recovery -clock_gating_setup -violators -format end"
+)
+_COMBINED_HOLD_REPORT = (
+    "report_check_types -min_delay -removal -clock_gating_hold -violators -format end"
+)
+
+
+def _replayed_violation_region(scenario: str, script_text: str) -> list[str]:
+    """The real captured setup/hold violator region for `scenario`,
+    re-delimited with this module's markers -- the combined-command capture
+    when the generated script requests the combined commands, else the
+    legacy data-only capture (what the pinned engine prints for that Tcl)."""
+    captured = _CHECK_FAMILY_CAPTURES["scenarios"][scenario]
+    script_lines = script_text.splitlines()
+    if _COMBINED_SETUP_REPORT in script_lines and _COMBINED_HOLD_REPORT in script_lines:
+        text = (
+            captured["stdout"]
+            .replace("===KLT_STA_SETUP", "===KLT_SETUP")
+            .replace("===KLT_STA_HOLD", "===KLT_HOLD")
+        )
+    else:
+        text = (
+            captured["legacy_stdout"]
+            .replace(
+                "===LEGACY_SETUP_BEGIN===", place_and_route._SETUP_VIOLATIONS_BEGIN
+            )
+            .replace("===LEGACY_SETUP_END===", place_and_route._SETUP_VIOLATIONS_END)
+            .replace("===LEGACY_HOLD_BEGIN===", place_and_route._HOLD_VIOLATIONS_BEGIN)
+            .replace("===LEGACY_HOLD_END===", place_and_route._HOLD_VIOLATIONS_END)
+        )
+    return text.splitlines()
+
+
+def _with_replayed_violations(stdout: str, region: list[str]) -> str:
+    """Swap the stub's own (empty) setup/hold marker region for `region`,
+    leaving every other marker block the base stub emitted untouched."""
+    lines = stdout.splitlines()
+    begin = lines.index(place_and_route._SETUP_VIOLATIONS_BEGIN)
+    end = lines.index(place_and_route._HOLD_VIOLATIONS_END)
+    return "\n".join(lines[:begin] + region + lines[end + 1 :])
+
+
+def _replay_check_family_capture(monkeypatch, scenario: str, *, script_suffix: str):
+    """Wrap whatever `openroad` fake is already installed: for scripts
+    ending in `script_suffix`, replace the setup/hold violator region with
+    the real captured engine output for `scenario`."""
+    base_fake_run = place_and_route.subprocess.run
+
+    def fake_run(cmd, **kwargs):
+        completed = base_fake_run(cmd, **kwargs)
+        if cmd[:2] == ["openroad", "-version"] or not cmd[5].endswith(script_suffix):
+            return completed
+        region = _replayed_violation_region(scenario, Path(cmd[5]).read_text())
+        return fake_completed(
+            returncode=completed.returncode,
+            stdout=_with_replayed_violations(completed.stdout, region),
+            stderr=completed.stderr,
+        )
+
+    monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
+
+
+def test_pnr_violation_count_lines_request_every_check_family():
+    assert place_and_route._violation_count_lines() == [
+        f'puts "{place_and_route._SETUP_VIOLATIONS_BEGIN}"',
+        _COMBINED_SETUP_REPORT,
+        f'puts "{place_and_route._SETUP_VIOLATIONS_END}"',
+        f'puts "{place_and_route._HOLD_VIOLATIONS_BEGIN}"',
+        _COMBINED_HOLD_REPORT,
+        f'puts "{place_and_route._HOLD_VIOLATIONS_END}"',
+    ]
+
+
+def test_spef_sta_script_reuses_check_family_violation_report():
+    """The post-route SPEF re-time reuses the P&R helper rather than a
+    third implementation, so it carries the same check families."""
+    lines = place_and_route._spef_sta_script_lines(
+        checkpoint_in="/tmp/x.odb",
+        liberty_path="/tmp/x.lib",
+        clock_port="clk",
+        clock_period_ns=1.1,
+        spef_path="/tmp/x.spef",
+        net_names=["_019_"],
+    )
+    region = place_and_route._violation_count_lines()
+    start = lines.index(region[0])
+    assert lines[start : start + len(region)] == region
+
+
+def test_nominal_stage_counts_removal_violations(tmp_path, monkeypatch):
+    """Nominal-stage scope is unchanged (floorplan still reports no counts)
+    but each place/cts/route stage's hold count now includes asynchronous
+    removal violators."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _replay_check_family_capture(
+        monkeypatch, "removal_only", script_suffix="_route.tcl"
+    )
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert report["hold_violation_count"] == 2
+    assert report["setup_violation_count"] == 0
+    assert "hold_violation_count" not in report["stages"][0]
+    # place/cts were not replayed: their counts stay the stub's own zeros.
+    assert report["stages"][1]["hold_violation_count"] == 0
+    assert report["stages"][3]["hold_violation_count"] == 2
+
+
+def test_nominal_stage_counts_recovery_and_data_without_duplication(
+    tmp_path, monkeypatch
+):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _replay_check_family_capture(monkeypatch, "mixed_setup", script_suffix="_route.tcl")
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    # 3 data setup endpoints + 2 recovery endpoints, each counted once.
+    assert report["setup_violation_count"] == 5
+    assert report["hold_violation_count"] == 0
+
+
+def test_post_route_spef_counts_removal_violations(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch, post_route_spef=True)
+    _stub_openroad_success_with_post_route_spef(monkeypatch)
+    _replay_check_family_capture(
+        monkeypatch, "removal_only", script_suffix="_route_spef.tcl"
+    )
+    _stub_merge_def_to_gds(monkeypatch)
+    _stub_run_extract_for_post_route_spef(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    spef_sta = report["spef_sta"]
+    assert spef_sta["hold_violation_count"] == 2
+    assert spef_sta["setup_violation_count"] == 0
+    # The nominal route stage (not replayed here) keeps its own count.
+    assert report["hold_violation_count"] == 0
 
 
 def test_post_route_spef_flags_unmatched_nets(tmp_path, monkeypatch):
@@ -7133,7 +7377,8 @@ def test_route_stage_omits_critical_nets_percentage_flag_by_default(
     tmp_path, monkeypatch
 ):
     """Issue #939: `request.route_critical_nets_percentage` omitted must
-    reproduce the original `global_route` call exactly -- no flag emitted,
+    reproduce the original `global_route` call apart from the `-verbose` flag
+    (issue #2994) -- no critical-nets flag emitted,
     the A/B disable path."""
     request_path = _setup_success_env(tmp_path, monkeypatch)
     _stub_openroad_success(monkeypatch)
@@ -7142,7 +7387,7 @@ def test_route_stage_omits_critical_nets_percentage_flag_by_default(
     run_place_and_route(request_path)
 
     route_lines = _script_lines(_stage_script(request_path, "route"))
-    assert "global_route" in route_lines
+    assert "global_route -verbose" in route_lines
     assert not any("critical_nets_percentage" in line for line in route_lines)
 
 
@@ -7164,7 +7409,7 @@ def test_route_stage_passes_critical_nets_percentage_flag_when_requested(
     run_place_and_route(request_path)
 
     route_lines = _script_lines(_stage_script(request_path, "route"))
-    assert "global_route -critical_nets_percentage 30" in route_lines
+    assert "global_route -verbose -critical_nets_percentage 30" in route_lines
 
 
 @pytest.mark.parametrize("value", [-1, 101, 1.5, "30", True])
@@ -8020,6 +8265,24 @@ def test_resolve_layer_map_falls_back_to_family_level_file(tmp_path):
     path, resolution = place_and_route._resolve_layer_map(pdk_info)
 
     assert path == str(tech_dir / "gf180mcu.map")
+    assert resolution == "family"
+
+
+def test_resolve_layer_map_strips_ihp_prefix_for_family_file(tmp_path):
+    """IHP-Open-PDK shape (issue #2444): the variant is `ihp-sg13g2` but the
+    shipped map is named after the process, `sg13g2.map`. Missing it made the
+    DEF->GDS merge use KLayout's sequential default layer numbers."""
+    klayout_dir = tmp_path / "klayout"
+    tech_dir = klayout_dir / "tech"
+    tech_dir.mkdir(parents=True)
+    (tech_dir / "sg13g2.map").write_text("family\n", encoding="utf-8")
+
+    pdk_info = _fake_pdk_info(tmp_path, variant="ihp-sg13g2")
+    pdk_info["assets"]["klayout"] = str(klayout_dir)
+
+    path, resolution = place_and_route._resolve_layer_map(pdk_info)
+
+    assert path == str(tech_dir / "sg13g2.map")
     assert resolution == "family"
 
 
@@ -10680,3 +10943,76 @@ def test_envelope_lint_finds_the_plain_string_path_fields(tmp_path, monkeypatch)
         finding["field"] for finding in env_provenance.find_absolute_path_fields(report)
     }
     assert {"def_path", "gds_path", "verilog_path"} <= flagged
+
+
+# --- Issue #2378: set_dont_use parity with `klt synthesize` -----------------
+
+
+def _dont_use_stage_lines(cell_library, stage):
+    return place_and_route._stage_script_lines(
+        stage=stage,
+        checkpoint_in="/tmp/in.odb",
+        checkpoint_out="/tmp/out.odb",
+        tech_lef="t.lef",
+        cell_lef="c.lef",
+        liberty_path="c.lib",
+        netlist_path="n.v",
+        hdl_toplevel="top",
+        floorplan={},
+        io_spec={"layer_h": "met3", "layer_v": "met2"},
+        macros=[],
+        power=None,
+        clock_port="clk",
+        clock_period_ns=10.0,
+        max_transition_ns=None,
+        max_capacitance_pf=None,
+        max_fanout=None,
+        input_delay_ns=None,
+        output_delay_ns=None,
+        cell_library=cell_library,
+        seed=1,
+        output_dir="/tmp",
+        route_critical_nets_percentage=0,
+        max_antenna_repair_iterations=0,
+    )
+
+
+def test_dont_use_emitted_before_placement_cts_and_hold_repair():
+    expected = [
+        "set_dont_use {sky130_fd_sc_hd__lpflow_*}",
+        "set_dont_use {sky130_fd_sc_hd__probe*}",
+    ]
+    for stage, first_resizer in (
+        ("place", "global_placement"),
+        ("cts", "clock_tree_synthesis"),
+        ("route", None),
+    ):
+        lines = _dont_use_stage_lines("sky130_fd_sc_hd", stage)
+        assert [ln for ln in lines if ln.startswith("set_dont_use")] == expected
+        idx = lines.index(expected[-1])
+        assert lines.index("read_liberty c.lib") < lines.index(expected[0])
+        for i, ln in enumerate(lines):
+            if ln.startswith(("global_placement", "repair_", "clock_tree_synthesis")):
+                assert idx < i, (stage, ln)
+        if first_resizer:
+            assert any(ln.startswith(first_resizer) for ln in lines)
+        if stage == "cts":
+            assert idx < lines.index("repair_timing -hold")
+
+
+def test_dont_use_matches_shared_synthesis_table():
+    from klayout_tools.synthesize import _ABC_DONT_USE_GLOBS
+
+    for lib, globs in _ABC_DONT_USE_GLOBS.items():
+        got = [
+            ln
+            for ln in _dont_use_stage_lines(lib, "place")
+            if ln.startswith("set_dont_use")
+        ]
+        assert got == [f"set_dont_use {{{g}}}" for g in globs]
+
+
+def test_dont_use_absent_for_library_without_entry():
+    assert place_and_route._dont_use_lines("gf180mcu_fd_sc_mcu7t5v0") == []
+    lines = _dont_use_stage_lines("gf180mcu_fd_sc_mcu7t5v0", "place")
+    assert not any("set_dont_use" in ln for ln in lines)

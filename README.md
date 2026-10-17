@@ -38,7 +38,9 @@ an agent needs instead:
 - **Machine-readable output** — every CLI command supports `--format json`
 - **Programmatic layout writing** — generate and edit layouts without a GUI
   (`klt gen`, `klt gen-compose`, `klt draw`)
-- **MCP server** (planned) — expose the toolkit directly to agent frameworks
+- **MCP server** — `klt mcp serve` exposes every verb to agent frameworks over
+  stdio, generated from the CLI registry (`pip install 'klayout-tools[mcp]'`;
+  see [the guide](docs/guides/mcp-server.md))
 - **LLM reasoning interface** (planned) — purpose-built module for layout
   decisions, with geometric execution handled by tools, not tokens
 
@@ -105,6 +107,7 @@ klt cells design.gds --top               # cell hierarchy
 klt drc design.gds --deck sky130        # run a DRC deck, structured results
 klt precheck design.gds --grid-um 0.005  # off-grid/zero-area/naming hygiene checks
 klt ring-check design.gds --layers '[[22,0],[34,0]]'  # guard/tap ring is a closed annulus
+klt tap-distance design.gds --subject '65/20' --taps '65/44' --max-distance-um 15  # every diffusion point within a Euclidean distance of a tap
 klt components design.gds --conductors '[{"name":"m1","layer":[68,20]}]'  # connected components, no deck
 klt clip design.gds --cell SUBCELL -o subcell.gds  # write a bbox region or named cell's subtree out as its own stream
 klt stats design.gds --per-layer         # densities, bbox, polygon counts
@@ -114,8 +117,11 @@ klt render design.gds                    # per-layer PNGs, headless
 klt sim request.json                     # SPICE PVT corner sweep (ngspice), JSON out
 klt size request.json                    # gm/Id sizing (single device or coupled diff-pair+mirror+tail), ngspice-scored
 klt yield mc.json --limits spec.json     # MC sample set + spec limits -> yield estimate with CIs, Cpk, sample-size verdict (Rust core)
+klt yield-samples mc.json --negative-control bad.json --format json  # two MC sim reports -> yield sample set carrying a negative control
+klt yield-csv trials.csv --group-by metric --value result --format json  # per-draw MC CSV -> yield sample set (hash-citable)
 klt yield-campaign spec.json             # launch + manage the MC campaign itself, sharded via klt sim, then yield's own pipeline unmodified
 klt yield-sensitivity campaign.json      # campaign parameter draws + output values -> ranked contribution to the spread (Rust core)
+klt yield-threshold records.json         # comparator/latch (stimulus, binary outcome) records -> probit threshold mu/sigma with CIs, per corner
 klt design-centering request.json        # yield-sensitivity ranking + sized device -> re-centering candidates
 klt layout-metrics design.gds            # normalized layout.json per block
 klt kb search bandgap                    # query the circuit-design knowledge base
@@ -202,6 +208,9 @@ full inputs/outputs reference and a complete worked example.
 - [The `klt verify` GitHub Action](docs/guides/github-action.md) — reusable
   composite Action wrapping `klt` for downstream block repo CI: inputs,
   outputs, and a worked example.
+- [The `klt mcp serve` MCP server](docs/guides/mcp-server.md) — stdio bridge
+  generating one tool per verb from the CLI registry; client config, exit-code
+  mapping, safety defaults (#2830).
 - [Tagged remote compute](docs/guides/remote-compute.md) — provisioning and
   operating a tagged EC2 box for heavy agent workloads (sim sweeps, renders,
   evidence runs) while git/forge operations stay local (#2277).

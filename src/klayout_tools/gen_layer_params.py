@@ -51,8 +51,9 @@ from .pdk_families import pdk_variant_family
 #: this is deliberately *not* applied universally, because lifting the pad
 #: also lifts the reported ``U<i>_G`` port (its ``y``, and with
 #: ``gate_contact`` the drawn contact/local-metal stack too), which would move
-#: every existing sky130/gf180mcu caller's gate port for no DRC benefit on
-#: those families (issues #461/#492/#781 pin that contract).
+#: every existing caller's gate port for no DRC benefit on families whose real
+#: deck does not need it (issues #461/#492/#781 pinned that contract; sky130
+#: and gf180mcu have since been moved deliberately, see their entries below).
 #:
 #: - ``sg13g2``: 0.1um, comfortably above ``klayout_tools.decks.sg13g2``'s
 #:   ``gatpoly.separation.activ.1`` (`5_8_gatpoly.drc` rule ``Gat.d``,
@@ -63,6 +64,15 @@ from .pdk_families import pdk_variant_family
 #:   constants keep over theirs. Landing the pad this way is also closer to
 #:   how a real device is drawn: the gate poly extends past the channel
 #:   (an endcap) rather than stopping dead on the diffusion edge.
+#: - ``sky130`` (issue #3115): 0.15um, above the PDK's own ``poly.4`` (poly
+#:   space to unrelated diffusion, 0.075um -- which this repo's curated
+#:   ``sky130`` deck does not transcribe, so ``klt drc --deck sky130`` never
+#:   saw the zero-distance pad overhang that Magic ``drc(full)`` flags for
+#:   every gate length below the 0.42um pad width) and above ``poly.8``'s
+#:   0.13um gate endcap (the stem now supplies it on the top edge, see
+#:   #2936). A real, deliberate geometry change like gf180mcu's: the landing
+#:   pad and the reported ``U<i>_G`` port move up by this amount; see
+#:   ``docs/cli/gen.md``.
 #: - ``gf180mcu`` (issue #1577): 0.35um, above gf180mcu's own real signoff
 #:   deck's ``PL.5a_LV``/``PL.5b_LV`` ("Space from field Poly2 to
 #:   unrelated/related COMP", 0.1um each) *and* their ``_MV`` (``Dualgate``
@@ -92,6 +102,7 @@ from .pdk_families import pdk_variant_family
 #:   pinned; see ``docs/cli/gen.md``'s ``mos_array`` gf180mcu note for the
 #:   full before/after.
 _PDK_GATE_PAD_ACTIVE_CLEARANCE_UM: dict[str, float] = {
+    "sky130": 0.15,  # poly.4 (poly to unrelated diff) is 0.075um; poly.8 endcap 0.13um
     "sg13g2": 0.1,  # Gat.d (GatPoly space to Activ) is 0.07um
     "gf180mcu": 0.35,  # PL.5a_MV/PL.5b_MV (field Poly2 to COMP, MV) are 0.3um
 }
@@ -158,11 +169,15 @@ def _contact_gate_extra_offset_um(family: str) -> float:
 #:   thresholds.
 #:
 #: A family absent from this table gets ``0.0`` (see
-#: :func:`_gate_bottom_endcap_um`): sky130's/sg13g2's/sg13cmos5l's curated
-#: decks transcribe neither rule, so every existing caller there keeps
+#: :func:`_gate_bottom_endcap_um`): sg13g2's/sg13cmos5l's curated
+#: decks transcribe neither rule (sky130's gained its own endcap rule, so it
+#: has an entry above, issue #2936), so every existing caller there keeps
 #: byte-for-byte identical geometry.
 _PDK_GATE_BOTTOM_ENDCAP_UM: dict[str, float] = {
     "gf180mcu": 0.25,  # PL.4_LV (0.22um) / DF.6_LV (0.24um)
+    # poly.8 (0.13um, issue #2936), with margin; the curated deck's
+    # `poly.endcap.diff.1` checks it.
+    "sky130": 0.15,
 }
 
 
@@ -171,6 +186,24 @@ def _gate_bottom_endcap_um(family: str) -> float:
     :data:`_PDK_GATE_BOTTOM_ENDCAP_UM`), or ``0.0`` for a family that
     declares none -- byte-for-byte unchanged geometry there."""
     return _PDK_GATE_BOTTOM_ENDCAP_UM.get(family, 0.0)
+
+
+#: Gate-stripe *top*-edge endcap (um) the series ``_mos_unit_layout`` draws
+#: as a stripe-width poly neck before the landing pad (issue #2936). Distinct
+#: from :data:`_PDK_GATE_BOTTOM_ENDCAP_UM` because the top edge already has
+#: the #461 landing pad, which clears the diffusion for ``L`` up to the pad
+#: width only; a family whose pad already satisfies its deck (gf180mcu) is
+#: left out so its geometry stays byte-for-byte unchanged.
+_PDK_GATE_TOP_ENDCAP_UM: dict[str, float] = {
+    "sky130": 0.15,  # poly.8 (0.13um) with margin
+}
+
+
+def _gate_top_endcap_um(family: str) -> float:
+    """Return ``family``'s gate-stripe top-edge endcap neck length (see
+    :data:`_PDK_GATE_TOP_ENDCAP_UM`), or ``0.0`` for a family that declares
+    none -- byte-for-byte unchanged geometry there."""
+    return _PDK_GATE_TOP_ENDCAP_UM.get(family, 0.0)
 
 
 #: Margin (um) :func:`_mos_unit_layout`/:func:`_mos_unit_strapped_layout`
@@ -198,13 +231,32 @@ def _gate_bottom_endcap_um(family: str) -> float:
 #: A family absent from this table gets ``0.0`` (see
 #: :func:`_sd_implant_margin_um`), and :func:`_device_layer_params` never
 #: resolves a ``sd_implant_layer`` for one either (no family besides
-#: gf180mcu declares the ``"nplus"``/``"pplus"`` roles) -- sky130's/
-#: sg13g2's/sg13cmos5l's curated decks all recognise a MOS device from
+#: gf180mcu and, since issue #2934, sky130 declare the ``"nplus"``/``"pplus"``
+#: roles) -- sg13g2's/sg13cmos5l's curated decks recognise a MOS device from
 #: ``active``/``well`` alone, with no implant mask at all, so every existing
 #: caller there keeps byte-for-byte identical geometry (no implant drawn).
 _PDK_SD_IMPLANT_MARGIN_UM: dict[str, float] = {
     "gf180mcu": 0.25,  # NP.5a/PP.5a (gate overlap) are 0.23um
+    # sky130 (issue #2934): n/psdm.5a, "min. n/psdm enclosure diff except
+    # butting edge", 0.125um (sky130A.lydrc, PDK c6d73a35).
+    "sky130": 0.125,
 }
+
+
+#: Minimum same-layer spacing (um) between two separate source/drain implant
+#: shapes, for a family whose implant boxes can land closer than that
+#: between adjacent unit devices (issue #2934): sky130's ``nsdm.2``/``psdm.2``
+#: is 0.38um, while the per-unit boxes (diff + 0.125um margin) sit only
+#: ~0.15um apart in a ``mos_array``/``diff_pair`` row. Gaps below this are
+#: closed (the shapes merge) in :func:`~klayout_tools.gen._close_implant_gaps`.
+#: A family absent from this table is left untouched (``0.0``).
+_PDK_SD_IMPLANT_MIN_SPACE_UM: dict[str, float] = {
+    "sky130": 0.38,  # nsdm.2/psdm.2 (sky130A_mr.drc)
+}
+
+
+def _sd_implant_min_space_um(family: str) -> float:
+    return _PDK_SD_IMPLANT_MIN_SPACE_UM.get(family, 0.0)
 
 
 def _sd_implant_margin_um(family: str) -> float:
@@ -247,7 +299,45 @@ def _sd_implant_margin_um(family: str) -> float:
 #: byte-for-byte unchanged.
 _PDK_RING_IMPLANT_MARGIN_UM: dict[str, float] = {
     "gf180mcu": 0.16,  # NP.5b/PP.5b (extension beyond COMP) are 0.16um
+    # sky130 (issue #2934): n/psdm.5b, "min. n/psdm enclosure tap except
+    # butting edge", 0.125um (sky130A.lydrc, PDK c6d73a35).
+    "sky130": 0.125,
 }
+
+
+#: Families whose tap ring needs an implant even though their ``"tap"`` role
+#: is a *distinct* mask from ``"active"`` (so the collision test in
+#: :func:`_ring_tap_implant_layer` does not apply): sky130 draws ``tap``
+#: (65/44) separately from ``diff`` (65/20), but ``n/psdm.5b`` still requires
+#: ``nsdm``/``psdm`` around it and ``difftap.10``/``n/psdm.8`` tie the
+#: implant type to the well underneath (issue #2934).
+_DISTINCT_TAP_IMPLANT_FAMILIES = frozenset({"sky130"})
+
+
+#: Margin (um) the ``npc`` box grows beyond each poly-contact licon (issue
+#: #2934): 0.095um, the amount ``sky130A.tech``'s own ``cifoutput`` grows NPC
+#: around ``xpc`` (the same figure :data:`_PDK_RES_FLAVOR_MASK_ENCLOSURE_UM`
+#: uses for resistor heads). The official ``sky130A_mr.drc`` carries no
+#: npc-enclosure-of-licon rule. A family absent here draws no ``npc``.
+_PDK_NPC_MARGIN_UM: dict[str, float] = {"sky130": 0.095}
+
+#: ``npc.2`` same-layer spacing (um); closer ``npc`` shapes are merged
+#: (``sky130A_mr.drc`` marks it "should be manually merged").
+_PDK_NPC_MIN_SPACE_UM: dict[str, float] = {"sky130": 0.27}
+
+
+def _bjt_unit_implant_margin_um(family: str) -> float:
+    """``bjt_array``'s per-unit emitter (Pplus) / base-tie (Nplus) implant
+    margin (issue #3587), or ``0.0`` for a family without both implant roles
+    -- byte-for-byte unchanged geometry there. Uses the ring's minimal
+    NP.5b/PP.5b margin, not the wider S/D one, which would put each implant
+    within NP.3/PP.3 range of the facing opposite-type pad."""
+    if (
+        _role_layer_info(family, "pplus") is None
+        or _role_layer_info(family, "nplus") is None
+    ):
+        return 0.0
+    return _ring_implant_margin_um(family)
 
 
 def _ring_implant_margin_um(family: str) -> float:
@@ -305,6 +395,25 @@ def _voltage_flavor_mark_margin_um(family: str) -> float:
     from .gen import WELL_ENCLOSURE_MARGIN_UM
 
     return _PDK_VOLTAGE_FLAVOR_MARK_MARGIN_UM.get(family, WELL_ENCLOSURE_MARGIN_UM)
+
+
+#: Per-family nwell enclosure margin (um) of the n-tap guard ring
+#: (:data:`WELL_ENCLOSURE_MARGIN_UM` for a family absent here, byte-for-byte).
+#:
+#: ``sky130`` only (issue #3115): the PDK's ``diff/tap.10`` (nwell overlap of
+#: n-tap) is 0.18um, which this repo's curated sky130 deck does not
+#: transcribe; 0.2um clears it with headroom.
+_PDK_RING_WELL_MARGIN_UM: dict[str, float] = {
+    "sky130": 0.2,  # diff/tap.10 (nwell overlap of n-tap) is 0.18um
+}
+
+
+def _ring_well_margin_um(family: str) -> float:
+    """Return ``family``'s n-tap ring nwell enclosure margin (see
+    :data:`_PDK_RING_WELL_MARGIN_UM`), or :data:`WELL_ENCLOSURE_MARGIN_UM`."""
+    from .gen import WELL_ENCLOSURE_MARGIN_UM
+
+    return _PDK_RING_WELL_MARGIN_UM.get(family, WELL_ENCLOSURE_MARGIN_UM)
 
 
 #: A contact-to-contact edge gap (um) below this is *legal* under sky130's
@@ -489,6 +598,11 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         "poly": (66, 20),  # poly.drawing
         "contact": (66, 44),  # licon1.drawing
         "metal": (67, 20),  # li1.drawing
+        "nplus": (93, 44),  # nsdm.drawing -- n+ S/D implant (nfet flavor),
+        # issue #2934; margin in :data:`_PDK_SD_IMPLANT_MARGIN_UM`.
+        "pplus": (94, 20),  # psdm.drawing -- p+ S/D implant (pfet flavor)
+        "npc": (95, 20),  # npc.drawing -- over poly-contact licons (issue #2934);
+        # margin/spacing in :data:`_PDK_NPC_MARGIN_UM`/:data:`_PDK_NPC_MIN_SPACE_UM`.
         "well": (64, 20),  # nwell.drawing -- matches
         # `klayout_tools.decks.sky130.EXTRACTION_DECK.nwell`; no curated DRC
         # rule checks this layer, but it is real and extraction already
@@ -571,6 +685,19 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         # `"via2"` ladder, with a landing pad on met1 in between.
         "metal3": (69, 20),  # met2.drawing -- EXTRACTION_DECK.metals[2]
         "via2": (68, 44),  # via.drawing -- EXTRACTION_DECK.vias[1] (met1<->met2)
+        # Upper routing planes (issue #2738, mirroring gf180mcu's #1670): the
+        # role numbering counts li1 as `"metal"`, so `"metalN"` is physical
+        # met(N-2) from `"metal3"` up -- `"metal4"` is met3, `"metal5"` is
+        # met4, `"metal6"` is met5 -- and `"viaN"` joins `"metalN"` to the
+        # plane below it (`"via3"` is via2, met2<->met3). These match
+        # EXTRACTION_DECK.metals[3:6]/.vias[2:5] (issue #619). `"top_metal"`
+        # below is an unchanged alias of `"metal6"` (met5).
+        "metal4": (70, 20),  # met3.drawing -- EXTRACTION_DECK.metals[3]
+        "via3": (69, 44),  # via2.drawing -- EXTRACTION_DECK.vias[2] (met2<->met3)
+        "metal5": (71, 20),  # met4.drawing -- EXTRACTION_DECK.metals[4]
+        "via4": (70, 44),  # via3.drawing -- EXTRACTION_DECK.vias[3] (met3<->met4)
+        "metal6": (72, 20),  # met5.drawing -- EXTRACTION_DECK.metals[5]
+        "via5": (71, 44),  # via4.drawing -- EXTRACTION_DECK.vias[4] (met4<->met5)
         # Label/pin purpose of the *base* routing metal role above (`metal`,
         # li1) -- the same pair `klayout_tools.decks.sky130`'s
         # `EXTRACTION_DECK.metal_labels[0]` declares, never a second private
@@ -610,11 +737,9 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         # fossi-foundation/open-pdks source as `LAYER_NAMES`):
         # `pad.drawing : 76/20`, `met5.drawing : 72/20`.
         "pad": (76, 20),  # pad.drawing -- passivation opening (bond pad)
-        "top_metal": (72, 20),  # met5.drawing -- this curated deck models no
-        # via role between this and `metal3` (met2) above -- sky130.lyt also
-        # defines met3/met4/via3/via4, none of which this deck curates -- so
-        # `bond_pad`'s own `down_to` param only ever supports `"top_metal"`
-        # today (see `_bond_pad_validate`).
+        "top_metal": (72, 20),  # met5.drawing -- same layer as `metal6` above
+        # (kept as the bond-pad-facing name). `bond_pad`'s own `down_to`
+        # param still only supports `"top_metal"` (see `_bond_pad_validate`).
         #
         # No `"esd_mark"`/`"salicide_block"` entry (issue #569, `esd_device`):
         # this repo's curated sky130 deck cites no numbered layer for either
@@ -1427,17 +1552,23 @@ _PDK_RES_FLAVOR_LAYERS: dict[str, dict[str, tuple[tuple[int, int], ...]]] = {
         "generic": (),
         # sky130_fd_pr__res_high_po_* (319.8 ohm/sq): psdm P+ implant + rpm
         # precision-resistor mask (EXTRACTION_DECK.resistors["res_high_po"].
-        # requires).
+        # requires), plus npc (issue #3077): not in that `requires` -- the
+        # curated deck never keys off it -- but the open_pdks Magic tech
+        # forms `xhrpoly` only where `RPM & POLYRES & POLY & PSDM & NPC`, so
+        # without it Magic sees no resistor at all.
         "high": (
             (94, 20),  # psdm -- P+ implant
             (86, 20),  # rpm  -- 300 ohm precision-resistor mask
+            (95, 20),  # npc  -- Magic's `xhrpoly` needs it
         ),
         # sky130_fd_pr__res_xhigh_po_* (2 kohm/sq): psdm P+ implant + urpm
         # (EXTRACTION_DECK.resistors["res_xhigh_po"].requires). rpm/urpm are
-        # mutually exclusive, so drawing urpm (not rpm) selects xhigh.
+        # mutually exclusive, so drawing urpm (not rpm) selects xhigh. npc
+        # as for "high" (Magic's `uhrpoly`, issue #3077).
         "xhigh": (
             (94, 20),  # psdm -- P+ implant
             (79, 20),  # urpm -- 2 kohm precision-resistor mask
+            (95, 20),  # npc  -- Magic's `uhrpoly` needs it
         ),
     },
     "gf180mcu": {
@@ -1643,6 +1774,112 @@ _PDK_RES_FLAVOR_MIN_W_UM: dict[str, dict[str, float]] = {
         "xhigh": 0.35,
     },
 }
+
+
+#: Context-dependent **rectangular** end-contact size per ``(family, flavor)``
+#: for ``res_array``'s poly-body path (issue #2449), as ``(w_um, h_um)`` --
+#: ``w_um`` along the current-flow axis, ``h_um`` across it.
+#:
+#: sky130's precision poly resistors (``flavor="high"``/``"xhigh"``, the only
+#: ones drawn under ``rpm``/``urpm``) are exempt from the ordinary 0.17um licon
+#: rule: ``sky130.lydrc`` ``licon.1b/c`` ("minimum/maximum width/length of
+#: licon inside poly resistor : 2.0/0.19um") demands every such licon have
+#: edges of exactly 0.19um and 2.0um, i.e. a 0.19um x 2.0um slot. The rule
+#: constrains the edge lengths only, not which axis is long; the generator
+#: draws the 2.0um edge across the current flow (y), so the slot spans the
+#: full resistor head -- matching the foundry's own ``res_high_po``/
+#: ``res_xhigh_po`` dogbone-head cells -- and the pitch to a neighbouring
+#: contact (``licon.2b``/``licon.2c``: 0.35um / 0.51um) stays met by the
+#: unit pitch. An empty/absent entry means the ordinary layer-keyed cut size
+#: applies.
+_PDK_RES_FLAVOR_END_CONTACT_UM: dict[str, dict[str, tuple[float, float]]] = {
+    "sky130": {
+        "high": (0.19, 2.0),
+        "xhigh": (0.19, 2.0),
+    },
+}
+
+
+#: Enclosure (um) of the whole poly resistor -- body *and* contacted end
+#: heads -- by each precision-resistor requires-mask, keyed by family then
+#: mask layer (issue #2449). Only applied when the request draws
+#: :data:`_PDK_RES_FLAVOR_END_CONTACT_UM`'s rectangular contact: upstream
+#: ``sky130A_mr.drc`` exempts a licon from ``licon.1`` only inside
+#: ``(rpm | urpm) & psdm & poly.interacting(poly_rs)``, so the masks must
+#: cover the end-pad licons. Values are the sky130 periphery rules
+#: ``rpm.3`` (rpm/urpm enclosure of the poly resistor, 0.2um) and ``rpm.4``
+#: (psdm enclosure, 0.11um); npc (issue #3077) takes the 0.095um with which
+#: ``sky130A.tech``'s own ``cifoutput`` grows NPC around ``xpc`` / ``xhrpoly``
+#: / ``uhrpoly`` (``npc.1``/``npc.2``'s 0.27um width/space are met because
+#: neighbouring units' boxes abut, as for rpm/psdm). The resistor-ID marker
+#: (``poly.res`` 66/13) stays on the body only. A mask absent here keeps the
+#: body-only box.
+_PDK_RES_FLAVOR_MASK_ENCLOSURE_UM: dict[str, dict[tuple[int, int], float]] = {
+    "sky130": {
+        (86, 20): 0.2,  # rpm  -- rpm.3
+        (79, 20): 0.2,  # urpm -- rpm.3
+        (94, 20): 0.11,  # psdm -- rpm.4
+        (95, 20): 0.095,  # npc  -- sky130A.tech cifoutput "xpc surrounds ... 0.095um"
+    },
+}
+
+
+#: gf180mcu salicide-block (SAB) geometry for ``res_array``'s poly body (issue
+#: #3000), keyed by family. The runset's ``sab.drc`` constrains an unsalicided
+#: poly resistor in two directions the body-only marker box violated:
+#:
+#: - ``contact_space_um``: ``SB.4``, SAB-to-contact space >= 0.15um. The SAB is
+#:   drawn on the body segment, so the end head is lengthened until the
+#:   contact edge sits this far from the body (the generic enclosure margin
+#:   left 0.10um). Body length, and so the extracted ``L``, is unchanged.
+#: - ``side_extension_um``: ``SB.9``/``SB.10`` -- the SAB must run >= 0.22um
+#:   past the poly body's long edges (a SAB edge flush with the poly edge is
+#:   what ``SB.10`` flagged). Folded rows are 0.4um apart, so the extended
+#:   SABs of adjacent rows overlap and merge instead of tripping ``SB.2``.
+#:
+#: Values are from the open GF180MCU DRM / ``sab.drc`` (SB.4: 0.15um,
+#: SB.9/SB.10: 0.22um). A family absent here draws the body-only SAB.
+_PDK_RES_SAB_UM: dict[str, dict[str, Any]] = {
+    "gf180mcu": {
+        "layer": (49, 0),
+        "contact_space_um": 0.15,
+        "side_extension_um": 0.22,
+    },
+}
+
+
+def _res_sab_geometry_um(
+    family: str, flavor: str, metal_level: int = 0
+) -> tuple[float, float]:
+    """``(contact_space_um, side_extension_um)`` of the poly-body salicide
+    block for ``family`` (see :data:`_PDK_RES_SAB_UM`), or ``(0.0, 0.0)`` for
+    a family without one or a ``metal_level`` (metal-body) request."""
+    entry = _PDK_RES_SAB_UM.get(family)
+    if entry is None or metal_level:
+        return (0.0, 0.0)
+    if entry["layer"] not in _PDK_RES_FLAVOR_LAYERS[family].get(flavor, ()):
+        return (0.0, 0.0)
+    return (entry["contact_space_um"], entry["side_extension_um"])
+
+
+#: PDK families whose poly resistors follow the ``abutting_heads`` topology
+#: (issue #2679): ``polyres`` is the whole resistive body and the poly layer
+#: is only the two abutting contact heads. Must match the families whose
+#: extraction-deck poly ``ResistorDevice`` entries declare
+#: ``topology="abutting_heads"`` (asserted in ``tests/test_sg13g2_deck.py``).
+_PDK_RES_POLY_HEADS_ONLY: frozenset[str] = frozenset({"sg13g2"})
+
+
+def _res_end_contact_um(
+    family: str, flavor: str, metal_level: int = 0
+) -> tuple[float, float]:
+    """``(w_um, h_um)`` of ``res_array``'s rectangular precision-poly end
+    contact for this request (see :data:`_PDK_RES_FLAVOR_END_CONTACT_UM`), or
+    ``(0.0, 0.0)`` when the ordinary square cut applies -- always for
+    ``metal_level != 0`` (metal resistors ignore ``flavor``)."""
+    if metal_level:
+        return (0.0, 0.0)
+    return _PDK_RES_FLAVOR_END_CONTACT_UM.get(family, {}).get(flavor, (0.0, 0.0))
 
 
 def _res_flavor_min_width_um(family: str, flavor: str) -> float:
@@ -2049,13 +2286,13 @@ def _metal_res_geometry_min_um(family: str, level: int) -> dict[str, float]:
 #: :func:`~klayout_tools.gen._fixed_cut_side_um`).
 #:
 #: This table only carries the fixed-size rules the curated decks do **not**
-#: yet encode as ``DrcRule.threshold_max_dbu`` (issue #2370) -- the six rules
-#: issue #2388 deferred behind this issue. :func:`_cut_fixed_size_um` reads a
-#: deck-declared ``threshold_max_dbu`` directly, so gf180mcu's
-#: ``contact``/``via1``-``via4`` (and any rule a later backfill adds) need no
-#: entry here; ``tests/test_gen.py`` asserts that any layer present in *both*
-#: sources agrees, so an entry can be deleted once its deck rule carries the
-#: bound.
+#: yet encode as ``DrcRule.threshold_max_dbu`` (issue #2370) -- the rules
+#: issue #2388 still defers (sky130 ``licon1``/``mcon``).
+#: :func:`_cut_fixed_size_um` reads a deck-declared ``threshold_max_dbu``
+#: directly, so gf180mcu's ``contact``/``via1``-``via4`` (and any rule a later
+#: backfill adds) need no entry here; ``tests/test_gen.py`` asserts that any
+#: layer present in *both* sources agrees, so an entry can be deleted once its
+#: deck rule carries the bound.
 #:
 #: - ``sky130`` ``licon1`` (66/44) 0.17um -- ``sky130A_mr.drc`` ``licon.1``
 #:   ("min/max. licon length : 0.17um",
@@ -2071,8 +2308,10 @@ def _metal_res_geometry_min_um(family: str, level: int) -> dict[str, float]:
 #:   (:data:`_PDK_RES_FLAVOR_LAYERS`), and their end contacts were already
 #:   drawn at neither exempt size (0.22um) before this entry, so clamping to
 #:   0.17um neither introduces nor fixes that case -- it is a context-
-#:   dependent size this layer-keyed table structurally cannot express, left
-#:   to the broader tracking issue #2449.
+#:   dependent size this layer-keyed table structurally cannot express;
+#:   issue #2449 resolves it per request via
+#:   :data:`_PDK_RES_FLAVOR_END_CONTACT_UM` (and zeroes this clamp for those
+#:   requests in :func:`_resistor_layer_params`).
 #: - ``sky130`` ``mcon`` (67/44) 0.17um -- ``sky130.lydrc`` ``ct.1``
 #:   (``mcon.edges.without_length(0.17)``, "minimum/maximum width of mcon :
 #:   0.17um"), split in ``sky130A_mr.drc`` into ``ct.1_a`` ("minimum width of
@@ -2082,27 +2321,14 @@ def _metal_res_geometry_min_um(family: str, level: int) -> dict[str, float]:
 #:   handles ring-shaped mcon separately (``ct.3``/``ct.3_a``); ``sky130.lydrc``
 #:   applies the same 0.17um unconditionally, and no generator draws an
 #:   ``areaid`` layer or a ring-shaped cut, so the clamp is unconditional here.
-#: - ``sky130`` ``via`` (68/44) 0.15um -- ``sky130A_mr.drc`` ``via.1a_b``
-#:   ("maximum length of via : 0.15um"), alongside ``via.1a_a``'s 0.15um
-#:   minimum (this deck's ``via.width.1``).
-#: - ``sg13g2`` ``Cont`` (6/0) 0.16um -- ``5_14_cont.drc`` ``Cnt.a``
-#:   (``cont_sq.without_bbox_width(0.16um)``, "Min. and max. Cont width").
-#: - ``sg13g2`` ``Via1`` (19/0) 0.19um -- ``5_19_via1.drc`` ``V1.a``
-#:   (``without_bbox_min/max(0.19um)``).
-#: - ``sg13g2`` ``Via2``/``Via3``/``Via4`` (29/0, 49/0, 66/0) 0.19um --
-#:   ``5_20_vian.drc`` ``V2.a``/``V3.a``/``V4.a`` (the templated ``Vn.a``).
+#: - sky130 ``via`` (68/44) 0.15um and sg13g2 ``Cont``/``Via1``-``Via4``
+#:   (``Cnt.a``, ``V1.a``-``V4.a``) used to be listed here; issue #2388's
+#:   backfill moved them into the deck as ``threshold_max_dbu``, which
+#:   :func:`_cut_fixed_size_um` reads directly.
 _PDK_CUT_FIXED_SIZE_UM: dict[str, dict[tuple[int, int], float]] = {
     "sky130": {
         (66, 44): 0.17,  # licon1.drawing -- licon.1 (issue #2594)
         (67, 44): 0.17,  # mcon.drawing -- ct.1 / ct.1_a+ct.1_b (issue #2594)
-        (68, 44): 0.15,  # via.drawing -- via.1a_a/via.1a_b
-    },
-    "sg13g2": {
-        (6, 0): 0.16,  # Cont.drawing -- Cnt.a
-        (19, 0): 0.19,  # Via1.drawing -- V1.a
-        (29, 0): 0.19,  # Via2.drawing -- V2.a (Vn.a)
-        (49, 0): 0.19,  # Via3.drawing -- V3.a (Vn.a)
-        (66, 0): 0.19,  # Via4.drawing -- V4.a (Vn.a)
     },
 }
 
@@ -2156,6 +2382,37 @@ def _cut_fixed_size_um(family: str, layer: Any) -> float:
         if bound is not None
     ]
     return min(bounds) if bounds else 0.0
+
+
+def mfg_grid_um(family: str, layer: Any) -> float:
+    """The manufacturing grid (um) ``family``'s curated deck requires vertices
+    on ``layer`` to sit on (issue #2648), or ``0.0`` when the deck declares no
+    ``"ongrid"`` rule there (or ``family`` has no registered deck) -- "draw the
+    generator's own coordinates unchanged".
+
+    Read from the deck's own ``check="ongrid"`` rule (issue #2642) rather than
+    restated here, so the generator and ``klt drc`` cannot disagree. ``layer``
+    is a ``(layer, datatype)`` pair or a ``kdb.LayerInfo``; the coarsest
+    declared grid wins."""
+    if layer is None:
+        return 0.0
+    from .decks import UnknownDeckError, get_deck
+
+    pair = (
+        (layer.layer, layer.datatype)
+        if hasattr(layer, "datatype")
+        else (int(layer[0]), int(layer[1]))
+    )
+    try:
+        rules = get_deck(family)
+    except UnknownDeckError:
+        return 0.0
+    grids = [
+        rule.grid_um
+        for rule in rules
+        if rule.check == "ongrid" and rule.layer == pair and rule.grid_um
+    ]
+    return max(grids) if grids else 0.0
 
 
 #: Per-PDK-family ``res_array`` ``metal_level`` -> the exact ``klt extract``
@@ -2436,6 +2693,11 @@ _PDK_VOLTAGE_FLAVOR_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
     "sky130": {
         "hvi": (75, 20),  # hvi.drawing -- same citation as
         # decks.sky130.EXTRACTION_DECK.mos_flavours' MOSFlavour(flavour="hvi").
+        # Native-Vt NMOS (issue #3600): hvi AND lvtn. This is the primary
+        # (hvi) half; the lvtn half lives in
+        # :data:`_PDK_VOLTAGE_FLAVOR_EXTRA_LAYERS`.
+        "native": (75, 20),
+        "nvt": (75, 20),
     },
     "sg13g2": {
         "hv": (44, 0),  # ThickGateOx.drawing -- same citation as
@@ -2446,6 +2708,34 @@ _PDK_VOLTAGE_FLAVOR_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         # decks.sg13cmos5l.EXTRACTION_DECK.mos_flavours' MOSFlavour(flavour="hv").
     },
 }
+
+
+#: Second marker layer a ``voltage_flavor`` needs drawn *in addition to* its
+#: :data:`_PDK_VOLTAGE_FLAVOR_LAYERS` entry (issue #3600). sky130's native-Vt
+#: NMOS (``sky130_fd_pr__nfet_05v0_nvt``) is hvi AND lvtn
+#: (``decks.sky130.EXTRACTION_DECK.mos_flavours``' ``MOSFlavour(flavour="nvt",
+#: and_markers=((125, 44),))``), so the hvi box alone would extract as
+#: ``nfet_g5v0d10v5``. ``areaid_le`` (81/60), which upstream subtracts for the
+#: 5V native device, is simply never drawn.
+_PDK_VOLTAGE_FLAVOR_EXTRA_LAYERS: dict[str, dict[str, tuple[int, int]]] = {
+    "sky130": {
+        "native": (125, 44),  # lvtn.drawing
+        "nvt": (125, 44),
+    },
+}
+
+#: ``(family, voltage_flavor)`` pairs with no PMOS counterpart: requesting one
+#: with ``flavor="pfet"`` is a hard ``GenError`` (issue #3600).
+_NFET_ONLY_VOLTAGE_FLAVORS = frozenset({("sky130", "native"), ("sky130", "nvt")})
+
+
+def _voltage_flavor_extra_mark_layer(family: str, voltage_flavor: str) -> Any:
+    """The ``kdb.LayerInfo`` of ``voltage_flavor``'s second marker layer in
+    :data:`_PDK_VOLTAGE_FLAVOR_EXTRA_LAYERS`, or ``None`` when it needs none."""
+    import klayout.db as kdb
+
+    pair = _PDK_VOLTAGE_FLAVOR_EXTRA_LAYERS.get(family, {}).get(voltage_flavor)
+    return kdb.LayerInfo(*pair) if pair is not None else None
 
 
 def _voltage_flavor_mark_layer(family: str, voltage_flavor: str) -> Any:
@@ -2466,6 +2756,63 @@ def _voltage_flavor_mark_layer(family: str, voltage_flavor: str) -> Any:
 
     pair = _PDK_VOLTAGE_FLAVOR_LAYERS.get(family, {}).get(voltage_flavor)
     return kdb.LayerInfo(*pair) if pair is not None else None
+
+
+#: Per-PDK-family MOS-capacitor marker layer drawn over a ``mos_array`` built
+#: with ``params.mos_cap`` (issue #3283): the layer that lets a deck recognise
+#: the gate-over-diffusion structure as a capacitor rather than a transistor.
+#: gf180mcu's is ``MOS_CAP_MK`` (166/5), the same ``*_MK`` marker family as the
+#: ``RES_MK`` (110/5), ``diode_mk`` (115/5), ``DRC_BJT`` (127/5) and
+#: ``efuse_mk`` (80/5) layers this repo's gf180mcu deck already cites (the
+#: deck's own ``res_exclude`` note lists ``mos_cap_mk`` by name). The 166/5
+#: number matches the official gf180mcu DRC deck's own
+#: ``mos_cap_mk = get_polygons(166, 5)``. A family with no entry
+#: is rejected with a ``GenError`` rather than drawing an unmarked cap.
+_PDK_MOS_CAP_MARK_LAYERS: dict[str, tuple[int, int]] = {
+    "gf180mcu": (166, 5),  # MOS_CAP_MK
+}
+
+
+def _mos_cap_min_width_um(
+    family: str, voltage_flavor_mark: Any
+) -> tuple[float, str] | None:
+    """``(min COMP width in um, deck rule id)`` that applies to a MOS
+    capacitor's diffusion in ``family``'s curated deck, or ``None`` when the
+    deck has no such rule. ``voltage_flavor_mark`` is the resolved
+    ``voltage_flavor`` marker ``kdb.LayerInfo`` (``None`` for the default
+    thin-oxide device): with one, the voltage-scoped rule that overlaps that
+    marker is selected; without, the rule that excludes it (or the plain
+    undifferentiated width rule on a family with no oxide split)."""
+    from .decks import UnknownDeckError, get_deck, get_nominal_dbu
+
+    active = _PDK_ROLE_LAYERS[family]["active"]
+    try:
+        rules = get_deck(family)
+        nominal_dbu_um = get_nominal_dbu(family)
+    except UnknownDeckError:
+        return None
+    mark = (
+        (voltage_flavor_mark.layer, voltage_flavor_mark.datatype)
+        if voltage_flavor_mark is not None
+        else None
+    )
+    candidates = []
+    for rule in rules:
+        if rule.check != "width" or rule.layer != active or rule.other_layer:
+            continue
+        derived = rule.derived_layer
+        if derived is None:
+            candidates.append(rule)
+        elif mark is not None and (
+            derived.intersect_with == mark and derived.mode == "overlapping"
+        ):
+            candidates.append(rule)
+        elif derived.mode == "not_interacting" and mark is None:
+            candidates.append(rule)
+    if not candidates:
+        return None
+    rule = max(candidates, key=lambda r: r.threshold_dbu)
+    return round(rule.threshold_dbu * nominal_dbu_um, 6), rule.id
 
 
 def _resistor_strip_layer_params(
@@ -2560,6 +2907,21 @@ def _device_layer_params(
     voltage_flavor_mark = (
         _voltage_flavor_mark_layer(family, voltage_flavor) if voltage_flavor else None
     )
+    voltage_flavor_extra_mark = (
+        _voltage_flavor_extra_mark_layer(family, voltage_flavor)
+        if voltage_flavor
+        else None
+    )
+    if (family, voltage_flavor) in _NFET_ONLY_VOLTAGE_FLAVORS and (
+        params.get("flavor", "nfet") != "nfet"
+    ):
+        from .gen import GenError
+
+        raise GenError(
+            f"params.voltage_flavor '{voltage_flavor}' is an NMOS-only device "
+            f"on PDK family '{family}' (no PMOS counterpart); use "
+            "flavor='nfet'"
+        )
     # Source/drain implant (issue #1577): the family's `"nplus"`/`"pplus"`
     # role, selected by `flavor` (`esd_device`'s own params never carry a
     # `flavor` key at all -- that generator is always NMOS-style, so the
@@ -2572,11 +2934,37 @@ def _device_layer_params(
     flavor = params.get("flavor", "nfet")
     sd_implant_role = "nplus" if flavor == "nfet" else "pplus"
     sd_implant = _role_layer_info(family, sd_implant_role)
+    npc = _role_layer_info(family, "npc")
+    npc_margin = _PDK_NPC_MARGIN_UM.get(family, 0.0)
     sd_implant_margin = _sd_implant_margin_um(family)
-    return {
+    # MOS capacitor (issue #3283): the marker layer must resolve and `w_um`
+    # must clear the deck's own COMP min-width rule for the selected oxide,
+    # else the request fails here rather than drawing an unmarked or
+    # sub-rule capacitor.
+    mos_cap_mark = None
+    if params.get("mos_cap"):
+        from .gen import GenError
+
+        pair = _PDK_MOS_CAP_MARK_LAYERS.get(family)
+        if pair is None:
+            raise GenError(
+                f"generator 'mos_array': params.mos_cap is not supported on "
+                f"PDK family '{family}' (no MOS-capacitor marker layer is "
+                "declared for it)"
+            )
+        mos_cap_mark = kdb.LayerInfo(*pair)
+        floor = _mos_cap_min_width_um(family, voltage_flavor_mark)
+        if floor is not None and params["w_um"] < floor[0]:
+            raise GenError(
+                f"generator 'mos_array': params.w_um must be >= {floor[0]} for "
+                f"a MOS capacitor on '{family}' (deck rule '{floor[1]}', the "
+                "minimum COMP width for the selected oxide)"
+            )
+    layer_params = {
         "active_layer": _role_layer_info(family, "active"),
         "poly_layer": _role_layer_info(family, "poly"),
         "contact_layer": _role_layer_info(family, "contact"),
+        "mfg_grid_um": mfg_grid_um(family, _PDK_ROLE_LAYERS[family].get("contact")),
         "contact_fixed_size_um": _cut_fixed_size_um(
             family, _PDK_ROLE_LAYERS[family].get("contact")
         ),
@@ -2610,16 +2998,33 @@ def _device_layer_params(
             else kdb.LayerInfo(0, 0)
         ),
         "voltage_flavor_mark_present": voltage_flavor_mark is not None,
+        "voltage_flavor_extra_mark_layer": (
+            voltage_flavor_extra_mark
+            if voltage_flavor_extra_mark is not None
+            else kdb.LayerInfo(0, 0)
+        ),
+        "voltage_flavor_extra_mark_present": voltage_flavor_extra_mark is not None,
         "voltage_flavor_mark_margin_um": _voltage_flavor_mark_margin_um(family),
         "gate_pad_clearance_um": _gate_pad_clearance_um(family),
         "contact_gate_offset_um": _contact_gate_extra_offset_um(family),
         "bottom_endcap_um": _gate_bottom_endcap_um(family),
+        "top_endcap_um": _gate_top_endcap_um(family),
         "sd_implant_layer": (
             sd_implant if sd_implant is not None else kdb.LayerInfo(0, 0)
         ),
         "sd_implant_present": sd_implant is not None and sd_implant_margin > 0,
         "sd_implant_margin_um": sd_implant_margin if sd_implant is not None else 0.0,
+        "npc_layer": npc if npc is not None else kdb.LayerInfo(0, 0),
+        "npc_present": npc is not None and npc_margin > 0,
+        "npc_margin_um": npc_margin if npc is not None else 0.0,
+        "npc_min_space_um": _PDK_NPC_MIN_SPACE_UM.get(family, 0.0),
+        "sd_implant_min_space_um": _sd_implant_min_space_um(family),
     }
+    if mos_cap_mark is not None:
+        # Only `mos_array` declares these PCell params (`diff_pair` shares this
+        # resolver), so they are added only for a `mos_cap` request.
+        layer_params["mos_cap_mark_layer"] = mos_cap_mark
+    return layer_params
 
 
 def _resistor_layer_params(
@@ -2686,6 +3091,7 @@ def _resistor_layer_params(
         resolved: dict[str, Any] = {
             "poly_layer": kdb.LayerInfo(*levels["body"]),
             "contact_layer": kdb.LayerInfo(*levels["via"]),
+            "mfg_grid_um": mfg_grid_um(family, levels["via"]),
             "contact_fixed_size_um": _cut_fixed_size_um(family, levels["via"]),
             "metal_layer": kdb.LayerInfo(*levels["landing"]),
             "res_mark_layer": kdb.LayerInfo(*levels["marker"]),
@@ -2695,6 +3101,8 @@ def _resistor_layer_params(
         for i in range(_MAX_RES_FLAVOR_LAYERS):
             resolved[f"res_flavor_{i}_layer"] = kdb.LayerInfo(0, 0)
             resolved[f"res_flavor_{i}_present"] = False
+            resolved[f"res_flavor_{i}_head_enclosure_um"] = 0.0
+            resolved[f"res_flavor_{i}_side_extension_um"] = 0.0
         floors = _metal_res_geometry_min_um(family, metal_level)
         resolved["metal_res_via_min_w_um"] = floors["via_min_w_um"]
         resolved["metal_res_via_enclosure_min_um"] = floors["via_enclosure_min_um"]
@@ -2712,15 +3120,25 @@ def _resistor_layer_params(
             f"for flavor '{flavor}' on PDK family '{family}'"
         )
     mark = _role_layer_info(family, "res_mark")
+    # Issue #2449: a precision-poly flavour draws its own rectangular cut, so
+    # the layer-keyed ordinary fixed-size clamp (0.17um) must not shrink it.
+    end_w_um, end_h_um = _res_end_contact_um(family, flavor)
+    sab_contact_space_um, sab_side_ext_um = _res_sab_geometry_um(family, flavor)
     resolved = {
         "poly_layer": _role_layer_info(family, "poly"),
         "contact_layer": _role_layer_info(family, "contact"),
-        "contact_fixed_size_um": _cut_fixed_size_um(
-            family, _PDK_ROLE_LAYERS[family].get("contact")
+        "mfg_grid_um": mfg_grid_um(family, _PDK_ROLE_LAYERS[family].get("contact")),
+        "contact_fixed_size_um": (
+            0.0
+            if end_w_um > 0.0
+            else _cut_fixed_size_um(family, _PDK_ROLE_LAYERS[family].get("contact"))
         ),
+        "end_contact_w_um": end_w_um,
+        "end_contact_h_um": end_h_um,
         "metal_layer": _role_layer_info(family, "metal"),
         "res_mark_layer": mark if mark is not None else kdb.LayerInfo(0, 0),
         "res_mark_present": mark is not None,
+        "res_poly_heads_only": family in _PDK_RES_POLY_HEADS_ONLY,
         **dummy_params,
     }
     for i in range(_MAX_RES_FLAVOR_LAYERS):
@@ -2729,6 +3147,19 @@ def _resistor_layer_params(
             kdb.LayerInfo(*pair) if pair is not None else kdb.LayerInfo(0, 0)
         )
         resolved[f"res_flavor_{i}_present"] = pair is not None
+        # Issue #2449: precision-resistor masks cover the end heads too.
+        resolved[f"res_flavor_{i}_head_enclosure_um"] = (
+            _PDK_RES_FLAVOR_MASK_ENCLOSURE_UM.get(family, {}).get(pair, 0.0)
+            if pair is not None and end_w_um > 0.0
+            else 0.0
+        )
+        # Issue #3000: the SAB runs past the poly body's long edges.
+        resolved[f"res_flavor_{i}_side_extension_um"] = (
+            sab_side_ext_um
+            if pair is not None and pair == _PDK_RES_SAB_UM.get(family, {}).get("layer")
+            else 0.0
+        )
+    resolved["res_contact_space_um"] = sab_contact_space_um
     return resolved
 
 
@@ -2895,6 +3326,9 @@ def _ring_tap_implant_layer(family: str, well_tie: bool) -> Any:
     roles = _PDK_ROLE_LAYERS[family]
     tap_pair = roles.get("tap")
     active_pair = roles.get("active")
+    if family in _DISTINCT_TAP_IMPLANT_FAMILIES:
+        # n-tap inside the well -> nsdm; p-tap tying the substrate -> psdm.
+        return _role_layer_info(family, "nplus" if well_tie else "pplus")
     if tap_pair is None or active_pair is None or tap_pair != active_pair:
         return None
     role = "well_tap_implant" if well_tie else "pplus"
@@ -2934,12 +3368,14 @@ def _ring_layer_params(
     return {
         "tap_layer": _role_layer_info(family, "tap"),
         "contact_layer": _role_layer_info(family, "contact"),
+        "mfg_grid_um": mfg_grid_um(family, _PDK_ROLE_LAYERS[family].get("contact")),
         "contact_fixed_size_um": _cut_fixed_size_um(
             family, _PDK_ROLE_LAYERS[family].get("contact")
         ),
         "metal_layer": _role_layer_info(family, "metal"),
         "well_layer": well if well is not None else kdb.LayerInfo(0, 0),
         "well_present": well is not None,
+        "ring_well_margin_um": _ring_well_margin_um(family),
         "ring_implant_layer": (
             ring_implant if ring_implant is not None else kdb.LayerInfo(0, 0)
         ),
@@ -3039,13 +3475,12 @@ def _bjt_layer_params(
     it always ties the p-type substrate directly -- the real, physical
     collector terminal of a vertical PNP (P+ emitter / N+ base tie inside an
     Nwell / P+ collector = substrate, per ``docs/design/gen-bjt-array-spike.md``),
-    never a well tie. This intentionally does **not** extend implant coverage
-    to the emitter/base-tie unit body itself, a separate, pre-existing,
-    documented limitation (that same design doc: "curated decks check no
-    implant layer ... a process-exact device would distinguish P+ emitter, N+
-    base tie, and P+ collector by implant") predating both #1577 and this
-    issue -- out of #1580's own scope, which is the tap/collector *ring*
-    only.
+    never a well tie. The emitter/base-tie unit body is covered separately
+    (issue #3587, once ``comp.coverage.1`` / ``DF.12`` started flagging bare
+    ``Comp``): a P+ implant over each emitter pad and an N+ implant over each
+    base-tie pad, resolved as ``unit_emitter_implant_layer``,
+    ``unit_base_implant_layer`` and ``unit_implant_margin_um`` (``0.0`` = none
+    drawn).
     """
     import klayout.db as kdb
 
@@ -3055,9 +3490,13 @@ def _bjt_layer_params(
     mark = _role_layer_info(family, "bjt_mark")
     dummy = _role_layer_info(family, "dummy")
     ring_implant = _ring_tap_implant_layer(family, well_tie=False)
+    emitter_implant = _role_layer_info(family, "pplus")
+    base_implant = _role_layer_info(family, "nplus")
+    unit_implant_margin = _bjt_unit_implant_margin_um(family)
     return {
         "active_layer": _role_layer_info(family, "active"),
         "contact_layer": _role_layer_info(family, "contact"),
+        "mfg_grid_um": mfg_grid_um(family, _PDK_ROLE_LAYERS[family].get("contact")),
         "contact_fixed_size_um": _cut_fixed_size_um(
             family, _PDK_ROLE_LAYERS[family].get("contact")
         ),
@@ -3065,6 +3504,18 @@ def _bjt_layer_params(
         "tap_layer": _role_layer_info(family, "tap"),
         "well_layer": well if well is not None else kdb.LayerInfo(0, 0),
         "well_present": well is not None,
+        # Per-unit emitter (P+) / base-tie (N+) implants -- the unit-body
+        # counterpart of the ring implant below, closing `DF.12` for the
+        # unit's own `Comp` (issue #3587). Uses the ring's minimal NP.5b/PP.5b
+        # margin, not `sd_implant_margin_um`: the wider S/D margin would push
+        # each implant within NP.3/PP.3 range of the facing opposite-type pad.
+        "unit_emitter_implant_layer": (
+            emitter_implant if emitter_implant is not None else kdb.LayerInfo(0, 0)
+        ),
+        "unit_base_implant_layer": (
+            base_implant if base_implant is not None else kdb.LayerInfo(0, 0)
+        ),
+        "unit_implant_margin_um": unit_implant_margin,
         "bjt_mark_layer": mark if mark is not None else kdb.LayerInfo(0, 0),
         "bjt_mark_present": mark is not None,
         "ring_implant_layer": (
@@ -3176,6 +3627,7 @@ def _esd_device_layer_params(
         "active_layer": _role_layer_info(family, "active"),
         "poly_layer": _role_layer_info(family, "poly"),
         "contact_layer": _role_layer_info(family, "contact"),
+        "mfg_grid_um": mfg_grid_um(family, _PDK_ROLE_LAYERS[family].get("contact")),
         "contact_fixed_size_um": _cut_fixed_size_um(
             family, _PDK_ROLE_LAYERS[family].get("contact")
         ),
@@ -3189,6 +3641,7 @@ def _esd_device_layer_params(
         "salicide_block_present": salicide_block is not None,
         "contact_gate_offset_um": _contact_gate_extra_offset_um(family),
         "bottom_endcap_um": _gate_bottom_endcap_um(family),
+        "top_endcap_um": _gate_top_endcap_um(family),
         "sd_implant_layer": (
             sd_implant if sd_implant is not None else kdb.LayerInfo(0, 0)
         ),

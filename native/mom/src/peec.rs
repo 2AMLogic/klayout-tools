@@ -167,11 +167,45 @@
 //! aspect ratios is what's exercised instead (see
 //! `docs/design/mom-validation.md`).
 //!
+//! ## Series windings (issue #2729)
+//!
+//! The bundle average above models *parallel* branches. A winding (L/U
+//! trace, square spiral; `geometry::oriented_path`) is the opposite: its
+//! legs are in *series*, so one terminal current `I` flows through every leg
+//! in turn. Within a leg the current splits over that leg's cross-section
+//! filaments in proportion to their area (`BarLayout::filament_weight`);
+//! each leg contributes with full weight. With `w_i` the filament's current
+//! share and filament directions following the traversal:
+//!
+//! ```text
+//! L = sum_i sum_j w_i * w_j * M_ij          (M_ij signed, i == j self term)
+//! ```
+//!
+//! which is the energy `W = (1/2) L I^2` of the whole path. Averaging the
+//! whole path as if it were one bundle (dividing by the total filament-pair
+//! count) would instead report a fraction of the true series inductance.
+//! Perpendicular legs have exactly zero mutual inductance, antiparallel legs
+//! a negative one; reversing the whole path flips every filament direction,
+//! which leaves every pair term -- hence self `L` and `R` -- unchanged, while
+//! the mutual term to *another* conductor changes sign (each conductor's
+//! positive current direction is its canonical traversal, from the
+//! lexicographically smaller terminal; see `oriented_path`). The legacy
+//! signed-leg reduction used as an oracle (separately named leg conductors,
+//! `sum s_i s_j L_ij`) is this same sum.
+//!
 //! ## Resistance needs no approximation
 //!
 //! `R = length / (conductivity * cross_sectional_area)` is Ohm's law for a
 //! uniform bar -- exact, not asymptotic, and independent of the inductance
-//! formulation above.
+//! formulation above. A winding's resistance is the series sum of its legs'
+//! Ohm's-law resistances over their *electrical centreline* lengths. Corner
+//! volume convention (inherited from `oriented_path`): each corner square is
+//! owned by exactly one physical box, while the electrical legs run
+//! centreline to centreline through the corner vertex, so total metal volume
+//! is conserved exactly and a corner is charged as `w_a/2` of leg a plus
+//! `w_b/2` of leg b. This is a 1-D model of the corner; a 3-D current model
+//! (e.g. PyPEEC's) differs by a small corner-crowding term, which is why the
+//! cross-validation keeps its looser resistance budget.
 
 use crate::contract::ConductorRequest;
 use crate::geometry::{BarLayout, Filament};
@@ -608,15 +642,24 @@ fn axial_antiderivative(t: f64, rho: f64) -> f64 {
 }
 
 /// Fill the partial-inductance matrix, in nanohenries, from `layout`'s
-/// filaments (see module docs for the bundle-of-filaments method).
+/// filaments (see module docs for the bundle-of-filaments method and the
+/// series-path extension).
 /// `conductor_count` is the number of electrical conductors (not filaments);
 /// `layout.filaments[..].conductor_index` indexes into it.
+///
+/// Every pair term is weighted by the two filaments' current shares
+/// (`layout.filament_weight`): `L_ab = sum_{i in a, j in b} w_i * w_j * M_ij`.
+/// For a parallel bundle `w = 1/N` (reproducing the plain pair average); for
+/// a series winding `w` is the filament's area share of its own leg's
+/// current, so every leg contributes with full weight -- legs add in series
+/// rather than being averaged as parallel branches. `M_ij` is signed (the
+/// Neumann integrand carries `dl_i . dl_j`), so a filament directed against
+/// the current's traversal direction contributes with the right sign.
 pub fn solve_inductance_matrix_nh(
     layout: &BarLayout,
     conductor_count: usize,
 ) -> Result<Vec<Vec<f64>>, String> {
-    let mut sum_nh = vec![vec![0.0_f64; conductor_count]; conductor_count];
-    let mut pair_count = vec![vec![0.0_f64; conductor_count]; conductor_count];
+    let mut inductance_nh = vec![vec![0.0_f64; conductor_count]; conductor_count];
 
     for (i, fi) in layout.filaments.iter().enumerate() {
         for (j, fj) in layout.filaments.iter().enumerate() {
@@ -625,20 +668,8 @@ pub fn solve_inductance_matrix_nh(
             } else {
                 GEOM_UM_TO_NH * mutual_geom_um(fi, fj)?
             };
-            sum_nh[fi.conductor_index][fj.conductor_index] += term_nh;
-            pair_count[fi.conductor_index][fj.conductor_index] += 1.0;
-        }
-    }
-
-    let mut inductance_nh = vec![vec![0.0_f64; conductor_count]; conductor_count];
-    for (row_sum, (row_count, row_out)) in sum_nh
-        .iter()
-        .zip(pair_count.iter().zip(inductance_nh.iter_mut()))
-    {
-        for ((&s, &n), out) in row_sum.iter().zip(row_count.iter()).zip(row_out.iter_mut()) {
-            if n > 0.0 {
-                *out = s / n;
-            }
+            inductance_nh[fi.conductor_index][fj.conductor_index] +=
+                layout.filament_weight[i] * layout.filament_weight[j] * term_nh;
         }
     }
 
@@ -666,9 +697,18 @@ pub fn resistance_ohm(
     conductors: &[ConductorRequest],
     conductor_count: usize,
 ) -> Result<Vec<f64>, String> {
+    // Series windings: their filaments are cross-section samples of each leg,
+    // not parallel branches of the whole conductor, so they are excluded from
+    // the bundle area sum and the conductor's R is summed leg by leg.
+    let mut is_series = vec![false; conductor_count];
+    for s in &layout.series_segments {
+        is_series[s.conductor_index] = true;
+    }
     let mut area_um2 = vec![0.0_f64; conductor_count];
     for f in &layout.filaments {
-        area_um2[f.conductor_index] += f.area_um2;
+        if !is_series[f.conductor_index] {
+            area_um2[f.conductor_index] += f.area_um2;
+        }
     }
 
     let mut resistance = vec![0.0_f64; conductor_count];
@@ -687,9 +727,18 @@ pub fn resistance_ohm(
                 conductor.name
             ));
         }
-        let area_m2 = area_um2[index] * 1e-12;
-        let length_m = layout.conductor_length_um[index] * 1e-6;
-        resistance[index] = length_m / (sigma * area_m2);
+        if is_series[index] {
+            resistance[index] = layout
+                .series_segments
+                .iter()
+                .filter(|s| s.conductor_index == index)
+                .map(|s| (s.length_um * 1e-6) / (sigma * s.area_um2 * 1e-12))
+                .sum();
+        } else {
+            let area_m2 = area_um2[index] * 1e-12;
+            let length_m = layout.conductor_length_um[index] * 1e-6;
+            resistance[index] = length_m / (sigma * area_m2);
+        }
     }
     Ok(resistance)
 }
@@ -1566,5 +1615,217 @@ mod tests {
              single-filament-per-segment approximation, no cross-section bundle averaging)",
             rel_err * 100.0
         );
+    }
+
+    // --- series-path windings (issue #2729) --------------------------------
+
+    fn bx(x0: f64, y0: f64, x1: f64, y1: f64) -> BoxRequest {
+        BoxRequest {
+            x0_um: x0,
+            y0_um: y0,
+            x1_um: x1,
+            y1_um: y1,
+            z0_um: 0.0,
+            z1_um: 2.0,
+        }
+    }
+
+    fn winding(name: &str, sigma: f64, boxes: Vec<BoxRequest>) -> ConductorRequest {
+        ConductorRequest {
+            name: name.to_string(),
+            boxes,
+            conductivity_s_per_m: Some(sigma),
+        }
+    }
+
+    /// Open U with unequal leg widths (2, 4, 3 um): leg 2 owns both corner
+    /// squares. Centrelines (0,40) -> (0,0) -> (51,0) -> (51,40).
+    fn u_boxes() -> Vec<BoxRequest> {
+        vec![
+            bx(-1.0, 2.0, 1.0, 40.0),
+            bx(-1.0, -2.0, 52.5, 2.0),
+            bx(49.5, 2.0, 52.5, 40.0),
+        ]
+    }
+
+    /// The same U's three legs as separate straight-bar conductors spanning
+    /// their electrical centrelines (the legacy signed-leg reduction's
+    /// inputs), with the path's traversal signs (-y, +x, +y).
+    fn u_legs_reference() -> (Vec<ConductorRequest>, [f64; 3]) {
+        let legs = vec![
+            bar_conductor("l1", Some(5.8e7), bx(-1.0, 0.0, 1.0, 40.0)),
+            bar_conductor("l2", Some(5.8e7), bx(0.0, -2.0, 51.0, 2.0)),
+            bar_conductor("l3", Some(5.8e7), bx(49.5, 0.0, 52.5, 40.0)),
+        ];
+        (legs, [-1.0, 1.0, 1.0])
+    }
+
+    fn reduce_signed(l: &[Vec<f64>], signs: &[f64]) -> f64 {
+        let mut acc = 0.0;
+        for i in 0..signs.len() {
+            for j in 0..signs.len() {
+                acc += signs[i] * signs[j] * l[i][j];
+            }
+        }
+        acc
+    }
+
+    #[test]
+    fn l_shaped_series_resistance_is_the_analytic_centreline_sum() {
+        // Centreline (0,0) -> (50,0) -> (50,40), 2x2 um, leg A owns the corner.
+        let sigma = 5.8e7;
+        let c = winding(
+            "l",
+            sigma,
+            vec![bx(0.0, -1.0, 51.0, 1.0), bx(49.0, 1.0, 51.0, 40.0)],
+        );
+        let layout = discretize_bars(std::slice::from_ref(&c), 1.0).unwrap();
+        let r = resistance_ohm(&layout, std::slice::from_ref(&c), 1).unwrap();
+        // 90 um of centreline through a 4 um^2 section; metal volume 360 um^3
+        // is conserved exactly, so this equals volume / (sigma * area^2).
+        let expected = 90e-6 / (sigma * 4e-12);
+        assert_relative_eq!(r[0], expected, max_relative = 1e-12);
+        assert_relative_eq!(layout.conductor_length_um[0], 90.0, max_relative = 1e-12);
+    }
+
+    #[test]
+    fn unequal_section_series_resistance_adds_leg_by_leg() {
+        let sigma = 5.8e7;
+        let c = winding("u", sigma, u_boxes());
+        let layout = discretize_bars(std::slice::from_ref(&c), 1.0).unwrap();
+        let r = resistance_ohm(&layout, std::slice::from_ref(&c), 1).unwrap();
+        // Legs: 40 um x (2x2), 51 um x (4x2), 40 um x (3x2).
+        let expected =
+            (40e-6 / (sigma * 4e-12)) + (51e-6 / (sigma * 8e-12)) + (40e-6 / (sigma * 6e-12));
+        assert_relative_eq!(r[0], expected, max_relative = 1e-12);
+    }
+
+    #[test]
+    fn l_path_inductance_is_the_sum_of_its_perpendicular_legs() {
+        let c = winding(
+            "l",
+            5.8e7,
+            vec![bx(0.0, -1.0, 51.0, 1.0), bx(49.0, 1.0, 51.0, 40.0)],
+        );
+        let one = discretize_bars(std::slice::from_ref(&c), 1.0).unwrap();
+        let l_path = solve_inductance_matrix_nh(&one, 1).unwrap()[0][0];
+
+        let legs = [
+            bar_conductor("a", None, bx(0.0, -1.0, 50.0, 1.0)),
+            bar_conductor("b", None, bx(49.0, 0.0, 51.0, 40.0)),
+        ];
+        let sep = discretize_bars(&legs, 1.0).unwrap();
+        let m = solve_inductance_matrix_nh(&sep, 2).unwrap();
+        assert_eq!(m[0][1], 0.0, "perpendicular legs have zero mutual");
+        // A series path is the SUM of its legs' self terms; the old bundle
+        // average would have reported roughly a third of this.
+        assert_relative_eq!(l_path, m[0][0] + m[1][1], max_relative = 1e-12);
+    }
+
+    #[test]
+    fn u_path_matches_the_signed_leg_reduction_with_unequal_legs() {
+        let c = winding("u", 5.8e7, u_boxes());
+        let layout = discretize_bars(std::slice::from_ref(&c), 1.0).unwrap();
+        let l_path = solve_inductance_matrix_nh(&layout, 1).unwrap()[0][0];
+
+        let (legs, signs) = u_legs_reference();
+        let sep = discretize_bars(&legs, 1.0).unwrap();
+        let m = solve_inductance_matrix_nh(&sep, 3).unwrap();
+        let reduced = reduce_signed(&m, &signs);
+        assert!(m[0][2] > 0.0, "the two vertical legs are parallel bars");
+        assert_relative_eq!(l_path, reduced, max_relative = 1e-12);
+        // And the antiparallel coupling is genuinely in the sum.
+        assert!(l_path < m[0][0] + m[1][1] + m[2][2]);
+    }
+
+    #[test]
+    fn winding_is_invariant_to_box_order_and_collinear_subdivision() {
+        let reference = {
+            let c = winding("u", 5.8e7, u_boxes());
+            let layout = discretize_bars(std::slice::from_ref(&c), 1.0).unwrap();
+            solve_inductance_matrix_nh(&layout, 1).unwrap()[0][0]
+        };
+        let mut shuffled = u_boxes();
+        shuffled.reverse();
+        // Split the long (leg 2) box into collinear pieces.
+        let long = shuffled.remove(1);
+        shuffled.push(bx(long.x0_um, long.y0_um, 20.0, long.y1_um));
+        shuffled.push(bx(20.0, long.y0_um, long.x1_um, long.y1_um));
+        let c = winding("u", 5.8e7, shuffled);
+        let layout = discretize_bars(std::slice::from_ref(&c), 1.0).unwrap();
+        let l = solve_inductance_matrix_nh(&layout, 1).unwrap()[0][0];
+        assert_relative_eq!(l, reference, max_relative = 1e-12);
+    }
+
+    #[test]
+    fn entire_path_reversal_preserves_self_inductance_and_resistance() {
+        use crate::geometry::layout_from_paths;
+        use crate::geometry::oriented_path::{classify_oriented_path, PathOrientation};
+        let c = winding("u", 5.8e7, u_boxes());
+        let path = classify_oriented_path(0, &c).unwrap();
+        let rev = path.reversed();
+        assert_eq!(rev.orientation, PathOrientation::Reversed);
+        let a = layout_from_paths(&[path], 1.0).unwrap();
+        let b = layout_from_paths(&[rev], 1.0).unwrap();
+        let la = solve_inductance_matrix_nh(&a, 1).unwrap()[0][0];
+        let lb = solve_inductance_matrix_nh(&b, 1).unwrap()[0][0];
+        assert_relative_eq!(la, lb, max_relative = 1e-12);
+        let ra = resistance_ohm(&a, std::slice::from_ref(&c), 1).unwrap()[0];
+        let rb = resistance_ohm(&b, std::slice::from_ref(&c), 1).unwrap()[0];
+        assert_relative_eq!(ra, rb, max_relative = 1e-12);
+    }
+
+    #[test]
+    fn mutual_to_another_conductor_follows_the_canonical_traversal_sign() {
+        // A bar running +y beside the U's third leg (which also runs +y in
+        // the canonical traversal, from the smaller terminal (0,40)): the
+        // mutual is positive and equals the signed-leg reduction. Beside the
+        // first leg (which runs -y) it flips sign.
+        let bar_box = bx(55.0, 0.0, 57.0, 40.0);
+        let c = winding("u", 5.8e7, u_boxes());
+        let layout =
+            discretize_bars(&[c, bar_conductor("bar", Some(5.8e7), bar_box)], 1.0).unwrap();
+        let m = solve_inductance_matrix_nh(&layout, 2).unwrap();
+
+        let (mut legs, signs) = u_legs_reference();
+        legs.push(bar_conductor("bar", Some(5.8e7), bar_box));
+        let sep = discretize_bars(&legs, 1.0).unwrap();
+        let ms = solve_inductance_matrix_nh(&sep, 4).unwrap();
+        let reduced: f64 = (0..3).map(|i| signs[i] * ms[i][3]).sum();
+        assert_relative_eq!(m[0][1], reduced, max_relative = 1e-12);
+        assert_relative_eq!(m[1][0], m[0][1], max_relative = 1e-12);
+        assert!(m[0][1] > 0.0);
+        // The bar's own self term is untouched by sharing a request.
+        assert_relative_eq!(m[1][1], ms[3][3], max_relative = 1e-12);
+    }
+
+    #[test]
+    fn winding_inductance_converges_under_filament_refinement() {
+        let c = winding("u", 5.8e7, u_boxes());
+        let coarse = discretize_bars(std::slice::from_ref(&c), 1.0).unwrap();
+        let fine = discretize_bars(std::slice::from_ref(&c), 0.5).unwrap();
+        let lc = solve_inductance_matrix_nh(&coarse, 1).unwrap()[0][0];
+        let lf = solve_inductance_matrix_nh(&fine, 1).unwrap()[0][0];
+        assert!(fine.filaments.len() > 2 * coarse.filaments.len());
+        assert!((lc - lf).abs() / lf < 0.01, "coarse {lc} vs fine {lf}");
+    }
+
+    #[test]
+    fn branched_and_disconnected_windings_are_still_rejected() {
+        // T junction: a third leg meeting the middle of a bar.
+        let t = winding(
+            "t",
+            5.8e7,
+            vec![bx(0.0, -1.0, 60.0, 1.0), bx(29.0, 1.0, 31.0, 40.0)],
+        );
+        assert!(discretize_bars(&[t], 1.0).is_err());
+        // Two perpendicular legs with a gap.
+        let gap = winding(
+            "g",
+            5.8e7,
+            vec![bx(0.0, -1.0, 50.0, 1.0), bx(60.0, 1.0, 62.0, 40.0)],
+        );
+        let err = discretize_bars(&[gap], 1.0).unwrap_err();
+        assert!(err.contains("current-flow axis"), "{err}");
     }
 }

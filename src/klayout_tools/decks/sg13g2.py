@@ -95,12 +95,24 @@ arbitrary boolean/derived expression):
   NWell, and the thick-gate-oxide marker) and ``Gat.g`` (45-degree bent
   GatPoly width) -- ``Act.a``/``Gat.a`` above already cover the
   layer-general minimum-width floor these refine.
-- ``Cnt.c``/``Cnt.c.digibnd``/``Cnt.c.SRAM``/``Cnt.e``/``Cnt.g1``/``Cnt.g2``
-  -- each scoped to a compound derivation (``act_nsram.join(activ_mask)
-  .not(digibnd_drw)``, SRAM/DigiBnd-region carve-outs, pSD-vs-nSD Activ
-  splits) this curated deck does not otherwise model; ``Cnt.c``/``Cnt.d``
-  below transcribe the *general-case* Activ/GatPoly enclosure-of-Cont floor
-  each of those refines.
+- ``Cnt.c.digibnd``/``Cnt.c.SRAM``/``Cnt.e``/``Cnt.g1``/``Cnt.g2``
+  -- each scoped to a compound derivation (SRAM/DigiBnd-region carve-outs,
+  pSD-vs-nSD Activ splits) this curated deck does not otherwise model;
+  ``Cnt.c``/``Cnt.d`` below transcribe the *general-case* Activ/GatPoly
+  enclosure-of-Cont floor each of those refines. ``Cnt.c`` itself
+  (``activ.enclosing.cont.1``) is a *corrected subset* since issue #2688: its
+  ``.join(activ_mask)`` enclosing-region term and square-contact
+  (``cont_sq``) selection are modelled, but its ``.not(digibnd_drw)``,
+  SRAM, ``svaricap`` and ``EdgeSeal`` carve-outs are not -- so inside those
+  regions it can over-report against the official deck (never under-report).
+
+  A general transcription rule this deck learned the hard way (#2688): when
+  approximating a compound official rule, dropping a ``.not(X)`` carve-out
+  is conservative, but dropping a ``.join(X)`` from an enclosing/overlap
+  region is **not** -- it shrinks the region the rule measures against, so
+  correct geometry (here, every HBT contact in IHP's own ``npn13G2`` PCell)
+  reports as violating. Model ``join`` terms (``DerivedLayer(mode="union")``)
+  rather than dropping them.
 - ``M1.e``/``M1.f``/``M1.g``/``M1.i`` and their per-metal-level ``Mn.*``
   analogues (wide-line/45-degree-bend spacing refinements, ``Metal2``
   through ``Metal5``) and ``TopMetal2``'s own ``TM2.bR`` (a
@@ -375,7 +387,11 @@ fetched IHP-Open-PDK v0.3.0 install (``bjt_derivations.lvs``/
   pwell_allowed.not(nwell_drw).not(digisub_gap)`` in
   ``general_derivations.lvs`` -- the same "sg13g2 draws no separate
   PWell layer" gap this module's MOS-recognition note above already
-  documents for the NMOS body/``substrate_net`` fallback).
+  documents for the NMOS body/``substrate_net`` fallback). Issue #2860 has
+  since let ``marker`` be a derived :class:`~klayout_tools.decks.LayerExpr`
+  (AND/NOT of drawn layers, nestable), which can express this boolean; the
+  remaining bullets here are still open (#2861-#2863), so no ``npn13G2``
+  entry is declared.
 - **Collector/base/emitter pins are shape-filtered, not boolean-filtered.**
   E.g. ``npn13G2_e_pin = npn13G2_e_.with_bbox_min(0.07.um)
   .with_bbox_max(0.9.um).with_area(0.063.um)`` -- ``npn13G2``,
@@ -412,6 +428,13 @@ this engine grows a size-filtered/dynamic-relationship device-recognition
 primitive general enough for SG13G2's own custom extractor, or a future
 issue revisits this with a narrower, explicitly-approximate scope.
 
+Operator ruling 2026-10-08 (#2864): the PDK's own KLayout LVS runset (#2849) is
+the accepted route for SG13G2 bipolars -- runset-backed LVS recognises them,
+the curated deck does not declare bipolars yet. Of the four native gaps above
+(#2860-#2863), #2860, #2862 and #2863 have landed and only #2861 remains open,
+as a general improvement. The evidence acceptance conditions for runset-backed
+results live in #2870.
+
 ## No #524 cross-check
 
 Epic #711's Phase 1 (sky130, #747) and the sky130 LVS phases (#867-#869)
@@ -442,6 +465,7 @@ from __future__ import annotations
 
 from . import (
     CapacitorDevice,
+    DerivedLayer,
     DiodeDevice,
     DrcRule,
     ExtractionDeck,
@@ -607,31 +631,29 @@ DECK: list[DrcRule] = [
     # --- 5.14 Cont (feol/5_14_cont.drc) -------------------------------
     DrcRule(
         id="cont.width.1",
-        description=(
-            "minimum (and, on the real rule, maximum) Cont width -- "
-            "approximated here as a minimum-width floor only, pending the "
-            "generator fix issue #2585 tracks"
-        ),
+        description="min/max Cont size (fixed 0.16 x 0.16 um square)",
         layer=(6, 0),  # Cont.drawing
         check="width",
         threshold_dbu=160,  # 0.16 um
+        threshold_max_dbu=160,  # 0.16 um -- same value: a *fixed*-size rule
+        # Square-contact selection (issues #2943, #3139): only `cont_sq` is
+        # measured; contact bars and rows of abutting contacts (the PDK's own
+        # npn13G2/rsil cells) are `CntB.*`'s, not `Cnt.a`'s.
+        layer_selection="squares",
         # 5_14_cont.drc rule "Cnt.a":
         # cont_sq.without_bbox_width(0.16um)  (min AND max bbox width)
         # -> "5.14. Cnt.a : Min. and max. Cont width : 0.16 um"
         # (sg13g2_tech_default.json: drc_rules.Cnt_a == 0.16)
         #
-        # No `threshold_max_dbu` yet, and that is a *deferral*, not a
-        # judgement that the max half is unenforceable (issue #2388). The
-        # upstream rule is literally bounding-box shaped
-        # (`without_bbox_width`), which is exactly what
-        # `DrcRule.threshold_max_dbu` (issue #2370) measures -- the same
-        # field `topvia1.width.1`/`topvia2.width.1` below already set. It is
-        # held back only because every `klt gen` generator draws this cut at
-        # the PDK-generic `gen.CONTACT_SIZE_UM` (0.22um, 0.06um over the
-        # foundry maximum), so enforcing the max half turns twenty
-        # currently-green sg13g2 generator tests red -- correctly, since that
-        # geometry genuinely violates "Cnt.a". Fixing the generator is issue
-        # #2585; this rule gets its `threshold_max_dbu` once that lands.
+        # Both halves are enforced (issue #2388): `threshold_dbu` is the
+        # minimum-width lower bound (`Region.width_check`) and the equal
+        # `threshold_max_dbu` is the fixed-size upper bound, measured as a
+        # bounding-box size (`Region.with_bbox_max`, see
+        # `_run_width_max_check` in `drc.py`) -- exactly the
+        # `without_bbox_width` semantics upstream uses. The max half was
+        # deferred behind issue #2585 (every `klt gen` generator drew this
+        # cut at the PDK-generic 0.22um); that generator clamp has landed.
+        # Threshold value unmodified.
         scope="Cnt",
         provenance=_sg13g2_drc_provenance(f"{_FEOL}/5_14_cont.drc", "Cnt.a"),
     ),
@@ -641,6 +663,7 @@ DECK: list[DrcRule] = [
         layer=(6, 0),  # Cont.drawing
         check="space",
         threshold_dbu=180,  # 0.18 um
+        layer_selection="squares",  # cont_sq only (issues #2943, #3139)
         # 5_14_cont.drc rule "Cnt.b": cont_sq.space(0.18um, euclidian)
         # -> "5.14. Cnt.b : Min. Cont space : 0.18 um"
         # (sg13g2_tech_default.json: drc_rules.Cnt_b == 0.18)
@@ -650,24 +673,56 @@ DECK: list[DrcRule] = [
     DrcRule(
         id="activ.enclosing.cont.1",
         description=(
-            "minimum Activ enclosure of Cont (approximates the official "
-            "rule's SRAM/DigiBnd-scoped compound-layer derivation as a "
-            "plain, unconditional Activ-encloses-Cont floor -- the same "
-            "class of approximation sky130.py's diff.enclosing.licon.1 "
-            "makes for its own compound-layer official rule)"
+            "minimum Activ enclosure of square Cont (Activ.drawing joined "
+            "with Activ.mask, as the official rule's enclosing region is; "
+            "approximates the official rule's SRAM/DigiBnd/svaricap/"
+            "EdgeSeal carve-outs as an unconditional 0.07 um floor)"
         ),
-        layer=(1, 0),  # Activ.drawing
+        layer=(1, 0),  # Activ.drawing -- reporting identity only, see below
         other_layer=(6, 0),  # Cont.drawing
         check="enclosing",
         threshold_dbu=70,  # 0.07 um
         # 5_14_cont.drc rule "Cnt.c":
-        # cont_nsvaricap.enclosed(act_nsram.join(activ_mask).not(digibnd_drw),
-        #                         0.07um, euclidian)
-        # -> "5.14. Cnt.c : Min. Activ enclosure of Cont : 0.07 um"
-        # (sg13g2_tech_default.json: drc_rules.Cnt_c == 0.07; the SRAM
-        # (0.006um)/DigiBnd (0.05um) region-specific refinements -- Cnt.c.SRAM/
-        # Cnt.c.digibnd -- are not modelled here, see the module docstring's
-        # "Scope guard" section)
+        #   cnt_c_act = act_nsram.join(activ_mask).not(digibnd_drw)
+        #   cnt_c_l   = cont_nsvaricap.enclosed(cnt_c_act, 0.07um, euclidian)
+        # -> "5.14. Cnt.c Min. Activ enclosure of Cont is 0.07 um"
+        # (sg13g2_tech_default.json: drc_rules.Cnt_c == 0.07), with, from
+        # the same pinned v0.3.0 tree: `activ_mask = get_polygons(1, 20)`
+        # (`layers_def.drc`), `act_nsram = activ_drw.not(sram_drw)`,
+        # `cont_nsvaricap = cont_sq.not(svaricap)` (`5_14_cont.drc`), and
+        # `cont_nseal = cont_drw.not(edgeseal_drw)`, `contbar =
+        # cont_nseal.non_squares`, `cont_sq = cont_nseal.not(contbar)`
+        # (`ihp-sg13g2.drc`'s "cont/contbar general derivations").
+        #
+        # Modelled (issue #2688):
+        # - the `.join(activ_mask)` term, via `DerivedLayer(mode="union")`
+        #   over Activ.drawing (1/0) + Activ.mask (1/20). This term *enlarges*
+        #   the enclosing region, so dropping it (as this rule did before
+        #   #2688) was not a conservative approximation: every contact whose
+        #   enclosure IHP's own HBT PCell (`npn13G2`) supplies on Activ.mask
+        #   reported a false positive the caller could not fix. The rule runs
+        #   whenever *either* Activ layer is present.
+        # - the square-contact selection (`cont_sq`), via
+        #   `other_layer_selection="squares"`: contact bars are `CntB.*`'s
+        #   business, never `Cnt.c`'s.
+        #
+        # Not modelled -- each is a `.not(...)` carve-out that only *narrows*
+        # which geometry the official rule applies 0.07 um to, so omitting
+        # it can over-report (never under-report) inside that region:
+        # - `.not(digibnd_drw)` / `sram_drw` (16/0, 25/0): inside DigiBnd/
+        #   SRAM the official deck applies `Cnt.c.digibnd` (0.05 um) /
+        #   `Cnt.c.SRAM` (0.006 um) instead; this rule still applies 0.07 um
+        #   there (see the module docstring's "Scope guard" section).
+        # - `.not(svaricap)` (contacts inside the sg13_hv_svaricap device)
+        #   and `.not(edgeseal_drw)` (seal-ring contacts): still checked.
+        # So this is a corrected subset of `Cnt.c`, not an equivalent of it.
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ.drawing
+            intersect_with=(1, 20),  # Activ.mask
+            sized_by_um=0.0,
+            mode="union",
+        ),
+        other_layer_selection="squares",
         scope="Cnt",
         provenance=_sg13g2_drc_provenance(f"{_FEOL}/5_14_cont.drc", "Cnt.c"),
     ),
@@ -712,19 +767,16 @@ DECK: list[DrcRule] = [
     # --- 5.19 Via1 (beol/5_19_via1.drc) --------------------------------
     DrcRule(
         id="via1.width.1",
-        description=(
-            "minimum (and, on the real rule, maximum) Via1 width -- "
-            "approximated as a minimum-width floor only, the same "
-            "#2585-deferred approximation cont.width.1 above makes"
-        ),
+        description="min/max Via1 size (fixed 0.19 x 0.19 um square)",
         layer=(19, 0),  # Via1.drawing
         check="width",
         threshold_dbu=190,  # 0.19 um
+        threshold_max_dbu=190,  # 0.19 um -- same value: a *fixed*-size rule
         # 5_19_via1.drc rule "V1.a": via1_nseal.without_bbox_min/max(0.19um)
         # -> "5.19. V1.a : Min. and max. Via1 width: 0.19 um"
-        # (sg13g2_tech_default.json: drc_rules.V1_a == 0.19). No
-        # `threshold_max_dbu` yet for the same, deferred reason
-        # cont.width.1's note above gives in full (issue #2388/#2585).
+        # (sg13g2_tech_default.json: drc_rules.V1_a == 0.19).
+        # Both halves enforced (issue #2388, after the #2585 generator clamp);
+        # see cont.width.1 above for the min/max-half mechanics.
         scope="V1",
         provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_19_via1.drc", "V1.a"),
     ),
@@ -783,20 +835,18 @@ DECK: list[DrcRule] = [
     # --- 5.20 Vian, Via2 instance (beol/5_20_vian.drc) ------------------
     DrcRule(
         id="via2.width.1",
-        description=(
-            "minimum (and, on the real rule, maximum) Via2 width -- "
-            "approximated as a minimum-width floor only, the same "
-            "#2585-deferred approximation via1.width.1 above makes"
-        ),
+        description="min/max Via2 size (fixed 0.19 x 0.19 um square)",
         layer=(29, 0),  # Via2.drawing
         check="width",
         threshold_dbu=190,  # 0.19 um
+        threshold_max_dbu=190,  # 0.19 um -- same value: a *fixed*-size rule
         # 5_20_vian.drc rule "V2.a" (via_no=2 instance of the templated
         # "Vn.a" rule): via2_nseal.without_bbox_min/max(0.19um)
         # -> "5.20. V2.a : Min. and max. Via2 width: 0.19 um"
         # (sg13g2_tech_default.json: drc_rules.Vn_a == 0.19, shared by
-        # Via2-Via4). No `threshold_max_dbu` yet: see cont.width.1's note
-        # above (issue #2388/#2585).
+        # Via2-Via4)
+        # Both halves enforced (issue #2388, after the #2585 generator clamp);
+        # see cont.width.1 above for the min/max-half mechanics.
         scope="V2",
         provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_20_vian.drc", "V2.a"),
     ),
@@ -871,21 +921,17 @@ DECK: list[DrcRule] = [
     # below it, exactly like Via1/Via2 above).
     DrcRule(
         id="via3.width.1",
-        description=(
-            "minimum (and, on the real rule, maximum) Via3 width -- "
-            "approximated as a minimum-width floor only, the same "
-            "#2585-deferred approximation via1.width.1/via2.width.1 above "
-            "make"
-        ),
+        description="min/max Via3 size (fixed 0.19 x 0.19 um square)",
         layer=(49, 0),  # Via3.drawing
         check="width",
         threshold_dbu=190,  # 0.19 um
+        threshold_max_dbu=190,  # 0.19 um -- same value: a *fixed*-size rule
         # 5_20_vian.drc rule "V3.a" (via_no=3 instance of "Vn.a"):
         # via3_nseal.without_bbox_min/max(0.19um)
         # -> "5.20. V3.a : Min. and max. Via3 width: 0.19 um"
-        # (sg13g2_tech_default.json: drc_rules.Vn_a == 0.19). No
-        # `threshold_max_dbu` yet: see cont.width.1's note above (issue
-        # #2388/#2585).
+        # (sg13g2_tech_default.json: drc_rules.Vn_a == 0.19).
+        # Both halves enforced (issue #2388, after the #2585 generator clamp);
+        # see cont.width.1 above for the min/max-half mechanics.
         scope="V3",
         provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_20_vian.drc", "V3.a"),
     ),
@@ -943,21 +989,17 @@ DECK: list[DrcRule] = [
     # --- 5.20 Vian, Via4 instance (beol/5_20_vian.drc) ------------------
     DrcRule(
         id="via4.width.1",
-        description=(
-            "minimum (and, on the real rule, maximum) Via4 width -- "
-            "approximated as a minimum-width floor only, the same "
-            "#2585-deferred approximation via1.width.1/via2.width.1/"
-            "via3.width.1 above make"
-        ),
+        description="min/max Via4 size (fixed 0.19 x 0.19 um square)",
         layer=(66, 0),  # Via4.drawing
         check="width",
         threshold_dbu=190,  # 0.19 um
+        threshold_max_dbu=190,  # 0.19 um -- same value: a *fixed*-size rule
         # 5_20_vian.drc rule "V4.a" (via_no=4 instance of "Vn.a"):
         # via4_nseal.without_bbox_min/max(0.19um)
         # -> "5.20. V4.a : Min. and max. Via4 width: 0.19 um"
-        # (sg13g2_tech_default.json: drc_rules.Vn_a == 0.19). No
-        # `threshold_max_dbu` yet: see cont.width.1's note above (issue
-        # #2388/#2585).
+        # (sg13g2_tech_default.json: drc_rules.Vn_a == 0.19).
+        # Both halves enforced (issue #2388, after the #2585 generator clamp);
+        # see cont.width.1 above for the min/max-half mechanics.
         scope="V4",
         provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_20_vian.drc", "V4.a"),
     ),
@@ -1324,6 +1366,9 @@ DECK: list[DrcRule] = [
 
 LAYER_NAMES: dict[tuple[int, int], str] = {
     (1, 0): "Activ.drawing",
+    # `layers_def.drc`'s `activ_mask = get_polygons(1, 20)` -- read by
+    # `activ.enclosing.cont.1`'s `Cnt.c` enclosing-region union (#2688).
+    (1, 20): "Activ.mask",
     (5, 0): "GatPoly.drawing",
     (6, 0): "Cont.drawing",
     (8, 0): "Metal1.drawing",
@@ -1949,22 +1994,28 @@ EXTRACTION_DECK = ExtractionDeck(
     #   extract_devices(GeneralNTerminalExtractor.new('rsil', 2),
     #     { 'core' => rsil_res, 'ports' => rsil_ports, ... })   (ditto rppd)
     #
-    # Mapping onto this engine's `ResistorDevice` model (`body & marker &
-    # requires - excludes`, terminals = `body - segment`): `body` is GatPoly,
-    # `marker` is `polyres` (128/0), and each flavour's distinguishing
-    # implant/block masks become `requires`/`excludes`. This reproduces
-    # upstream's own terminal derivation exactly -- `rsil_ports`/`rppd_ports`
-    # are `gatpoly.interacting(core).not(core)`, i.e. the drawn poly heads on
-    # either side of the marked segment, which is what `terminal=None`
-    # (default: `body` minus the segment) already yields.
+    # Mapping onto this engine's `ResistorDevice` model (issue #2679,
+    # `topology="abutting_heads"`): IHP's own `SG13_dev/rsil|rppd|rhigh`
+    # PCells draw `polyres` (128/0) as the whole resistive body and `GatPoly`
+    # (5/0) only as the two head pads that *abut* it (zero overlap area), so
+    # the segment is `marker & requires - excludes` -- upstream's `core`,
+    # `polyres_mk` narrowed per flavour -- not `body & marker`. It is kept
+    # only where it touches the GatPoly heads in two separate regions
+    # (upstream's `polyres_mk.interacting(gatpoly)`, strengthened to both
+    # ends so a missing head is not a resistor). Terminals are the touching
+    # GatPoly heads (`gatpoly.interacting(core).not(core)`, i.e. what
+    # `terminal=None` -- `body` minus the segment -- yields), attached by
+    # KLayout's native resistor extractor directly across the shared edge
+    # (no upstream-style 5 nm port growth is needed). A layout that instead
+    # draws one continuous GatPoly bar under `polyres` still extracts the
+    # same way, since the segment is also cut out of GatPoly.
     #
     # Documented approximations, in this deck's usual "known-unmodelled beats
     # silently wrong" style:
     #
     # - Upstream's `core` is the *marker* region (`polyres & extblock`, merely
-    #   `interacting` GatPoly); this engine intersects it with the body layer.
-    #   For a real device cell -- where `polyres` is drawn coincident with the
-    #   poly bar it marks -- the two are the same region.
+    #   `interacting` GatPoly); so is this engine's segment in
+    #   `abutting_heads` mode -- it is never intersected with GatPoly.
     # - `polyres_exclude` is a 14-layer join. Only its two members this deck
     #   otherwise declares layers for are subtracted below (`Activ`, so a
     #   marked *gate* is never mistaken for a resistor -- the same guard
@@ -2018,7 +2069,8 @@ EXTRACTION_DECK = ExtractionDeck(
         ResistorDevice(
             name="rsil",  # upstream LVS device-class name
             body=(5, 0),  # GatPoly.drawing
-            marker=(128, 0),  # polyres.drawing
+            marker=(128, 0),  # polyres.drawing -- the resistive body itself
+            topology="abutting_heads",  # GatPoly is only the two abutting heads
             # `rsilG2_rspec` in sg13g2_tech.json (`techName == "SG13G2"`;
             # `rsil_code.py` reads the `G2` key unconditionally, and the
             # non-G2 key carries the same 7.0 value).
@@ -2050,7 +2102,8 @@ EXTRACTION_DECK = ExtractionDeck(
         ResistorDevice(
             name="rppd",  # upstream LVS device-class name
             body=(5, 0),  # GatPoly.drawing
-            marker=(128, 0),  # polyres.drawing
+            marker=(128, 0),  # polyres.drawing -- the resistive body itself
+            topology="abutting_heads",  # GatPoly is only the two abutting heads
             # `rppdG2_rspec` in sg13g2_tech.json -- `rppd_code.py` selects the
             # `G2` suffix for `techName == "SG13G2"` (260.0, vs the non-G2
             # 250.0 of the older SG13 flavour).
@@ -2082,7 +2135,8 @@ EXTRACTION_DECK = ExtractionDeck(
         ResistorDevice(
             name="rhigh",  # upstream LVS device-class name
             body=(5, 0),  # GatPoly.drawing
-            marker=(128, 0),  # polyres.drawing
+            marker=(128, 0),  # polyres.drawing -- the resistive body itself
+            topology="abutting_heads",  # GatPoly is only the two abutting heads
             # See the "sheet-rho ambiguity" note above: `rhighG2_rspec` in
             # sg13g2_tech.json, corroborated by `cornerRES.lib`'s
             # `res_typ` corner (`rsh_rhigh = 1360`) over `rhigh_code.py`'s

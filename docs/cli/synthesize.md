@@ -73,14 +73,20 @@ install --user` and installed to `~/.local/bin/yosys`, shadowing a native
 distro-packaged `yosys` later on `$PATH` — the run fails with a confusing
 `Can't open script file '<path>' for reading: No such file or directory`
 error for the generated `.ys` script even though the file demonstrably
-exists on disk. This is because the WASI sandbox only preopens a fixed set
-of directories and rejects the absolute paths `klt synthesize` always
-writes into its generated script, regardless of the invoking process's
-cwd. `klt synthesize` detects this exact shape (an existing script path
-reported as missing) and appends a hint naming the WASI sandbox as the
-likely cause; the fix is to ensure a native `yosys` build precedes the
-WASI-sandboxed one on `$PATH` (e.g. `PATH=/usr/bin:$PATH klt synthesize
-...`).
+exists on disk. The likely cause is that the WASI runtime mounts its own
+private scratch directory over `/tmp`, shadowing the host temp directory —
+so the failure appears when the request file (and therefore its
+request-relative `.klt/synthesize/` run tree) lives under the host temp dir
+(a `tempfile.mkdtemp()` scratch area, a pytest `tmp_path`, a CI harness
+staging requests in `/tmp`). `klt synthesize` (and `klt equiv`) detects this
+exact shape (an existing script path reported as missing) and appends a hint
+naming the WASI sandbox as the likely cause. When the script is under the
+host temp dir, the hint leads with moving the request file outside it (e.g.
+into your checkout or under `$HOME`), which keeps a deliberately pinned
+engine; ensuring a native `yosys` build precedes the WASI-sandboxed one on
+`$PATH` (e.g. `PATH=/usr/bin:$PATH klt synthesize ...`) is only the fallback,
+since it swaps out the engine build. For a script outside the host temp dir
+the hint keeps the generic native-`yosys` advice.
 
 One post-processing stage is **not** Yosys: after `write_verilog` produces
 the mapped netlist, `klt-statime-native` (a compiled Rust extension, called
@@ -246,6 +252,9 @@ retained directory next to that request.
 | `<top>_abc.constr` | The generated two-line ABC constraint file (`set_driving_cell` / `set_load`) — present only for a `cell_library` with a constraint-table entry (see below). |
 | `synth_<top>.run.log` | Captured stdout and stderr for the executed script, retained on success, nonzero exit, and timeout. Named `synth_<top>.log` when no rehydrated script is needed; trial/probe/baseline scripts have their own sibling logs. Abrupt process interruption preserves files already written. |
 | `<top>_abc.log` | The captured `abc` pass output, including ABC's own `stime -p` summary line this command parses into `timing` — same file, same `tee -q -o` discipline as the stats capture. |
+| `<top>_memory_evidence.ys` / `.log` | The side memory-evidence script (`memory_mapping.script_path`) and its captured log (issue #2745). Never the production script; see "`memory_mapping`" below. |
+| `<top>_blackboxes.txt` | The evidence script's `select -list =A:blackbox =A:whitebox` output, read for `blackbox_modules`. |
+| `<top>_memory_elaborated.json` / `<top>_memory_pre_lowering.json` | The evidence script's two `stat -json` captures — the `elaborated` and `pre_lowering` stages `memory_mapping` is derived from. |
 
 ### ABC constraints, delay target, and cell exclusions
 
@@ -1199,10 +1208,12 @@ separately if it turns out to matter for evidence-record committing.
 | `engine` | string | `"yosys"` (default; only value implemented). |
 | `sources` | array\<string\> | RTL source file paths (`read_verilog` inputs), resolved relative to the request file's own directory. Required, non-empty. |
 | `hdl_toplevel` | string | The design's top module name. Required; must not contain path separators. |
+| `parameters` | object \| omitted | Top-level Verilog `parameter` overrides, `name -> value` (issue #3466), applied with Yosys `chparam -set` after the `read_verilog` lines and before `hierarchy`, so one committed RTL file can be synthesised at several parameterisations without per-point source rewrites. Keys must be Verilog identifiers; values must be integers or plain strings (booleans, floats, and strings containing quotes, backslashes, `;`, `#` or control characters are rejected — values land in a generated `.ys` script). A name the top module does not declare fails the run (`yosys synthesis failed: … Can't find object for defparam`). Only parameters of `hdl_toplevel` itself are reachable; a sub-module's parameter cannot be overridden this way. The same override is applied to every pass that re-elaborates the sources (arithmetic probe and trial runs, the memory-mapping evidence pass, and the `--verify-equivalence` gold side), so all reported numbers describe one elaboration. Echoed as the response's `parameters` and `provenance.parameters`. |
 | `run_id` | string \| omitted | Optional safe identifier for an exclusively created invocation directory; see "Artifacts". Omit to allocate a new ID automatically. Reusing an existing ID fails. |
 | `pdk.cell_library` | string | Standard-cell library name. Required. |
 | `pdk.corner` | string \| omitted | Liberty corner selector; defaults to the nominal corner when omitted. |
 | `constraints.clock_period_ns` | number \| null | The target clock period in nanoseconds, consumed as ABC's own delay target: passed as `abc -D <clock_period_ns × 1000>` picoseconds, and echoed in the response as `timing.delay_target_ps`. Must be a positive number when given (a non-numeric or non-positive value is an error, never silently ignored). Yosys still has no SDC-reading step — this is the request field translated into the one delay knob the engine does expose. Also the target `--restructure-timing` restructures the `sta` stage's `worst_path` against — required (not `null`) whenever that flag is given. |
+| `constraints.clocks` | array\<{port, period_ns}\> \| null | Per-clock periods for a multi-clock design (issue #2883). Each entry needs a unique non-empty `port` and a positive `period_ns`; unknown keys, an empty list, or a malformed entry are errors. `abc -D` takes a single global number, so per-clock periods are **not** individually enforced: when `clock_period_ns` is omitted the **smallest** listed `period_ns` becomes the ABC delay target (and the `--restructure-timing` target); an explicit `clock_period_ns` always takes precedence. The response's `clock_targets` states exactly what was applied. |
 | `constraints.dont_use` | array\<string\> \| omitted | Standard cells this run must not map to, as ABC `-dont_use` cell names/globs (issue #2382) — **merged with** the built-in per-library exclusion table by default, see "ABC constraints, delay target, and cell exclusions" above for the merge semantics and `constraints.dont_use_mode`. Each entry must be a non-empty string of cell-name/glob characters (`[A-Za-z0-9_.*?!\[\]-]`) and must match **at least one** cell in the resolved liberty — a pattern matching nothing is an error, never a silent no-op. The fully-resolved list is echoed back as the response's `cell_exclusions.effective`. |
 | `constraints.dont_use_mode` | string \| omitted | How `constraints.dont_use` combines with the built-in per-library table: `"additive"` (default — both), `"replace"` (only the request's, requires a non-empty `dont_use`), `"none"` (no exclusion at all, rejects a non-empty `dont_use`). An unknown value is an error. |
 | `structural.expected_latches` | integer \| omitted | The number of latches this design intentionally infers (default `0`). Subtracted from the response's `structural.latches` to produce `structural.unexpected_latches` — see "`structural`" below. Must be a non-negative integer when given. |
@@ -1224,6 +1235,17 @@ note below on build-platform sensitivity): untargeted maps to 3238.11 µm² at
 2485.93 ps; `clock_period_ns: 10` maps to 3001.63 µm² at 3072.40 ps — a
 relaxed target buys area back at the cost of delay, so the value is a real
 caller decision rather than something this command should pick.
+
+### Unknown request keys are errors (issue #3466)
+
+An unrecognised **top-level** request key is rejected with an error naming it
+(`unknown field 'paramters'`), instead of being dropped in silence — a misspelt
+or unsupported field can no longer produce a plausible default-configuration
+result. Recognised keys: `schema`, `engine`, `sources`, `hdl_toplevel`, `pdk`,
+`constraints`, `structural`, `baseline`, `arithmetic`, `run_id`, `parameters`;
+the `_comment` annotation is also accepted (its contents are never read). The
+same check applies to `--check` and `--rerun`. Nested objects (`pdk`,
+`constraints`, …) are not yet checked for unknown keys.
 
 ## Response
 
@@ -1285,7 +1307,15 @@ caller decision rather than something this command should pick.
     "by_category": {},
     "representatives": []
   },
+  "memory_mapping": {
+    "status": "none_detected",
+    "reason": null,
+    "modules": [],
+    "script_path": { "path": ".klt/synthesize/run-example/gcd_memory_evidence.ys", "scope": "repo" }
+  },
+  "blackbox_modules": [],
   "netlist_path": { "path": ".klt/synthesize/run-example/gcd_synth.v", "scope": "repo" },
+  "netlist_sha256": "<64 lowercase hex chars>",
   "script_path": { "path": ".klt/synthesize/run-example/synth_gcd.ys", "scope": "repo" },
   "run_script_path": { "path": ".klt/synthesize/run-example/synth_gcd.run.ys", "scope": "repo" },
   "provenance": {
@@ -1307,6 +1337,7 @@ caller decision rather than something this command should pick.
 | `schema_version` | integer | Per-command version, per `docs/json-contract.md`. |
 | `engine` / `engine_version` | string | Echo of the request's engine, plus the resolved Yosys build string (`yosys -V`'s own version token). `engine_version` is `null` if unresolvable. |
 | `hdl_toplevel` | string | Echo of the request. |
+| `parameters` | object | The top-level parameter overrides this run elaborated with (`{}` when none; issue #3466). Additive; no `schema_version` bump. Also recorded as `provenance.parameters`. |
 | `run_id` | string | Identifier of this invocation's retained directory, relative to `<request_dir>/.klt/synthesize/`. Additive; includes failed-run collision protection when supplied in a request. |
 | `status` | string | Always `"ok"` — synthesis has no pass/fail concept of its own from *this field's* point of view; a failed run never emits this envelope at all. The response-level pass/fail signal issue #1588 adds is `structural.has_critical`/exit code `3` below — `status` itself is unaffected and stays `"ok"` either way. |
 | `instance_count` | integer | Total standard-cell instances after liberty mapping, rolled up over the **whole design hierarchy** — `stat -json`'s per-module `num_cells` aggregated recursively across every sub-module Yosys left un-flattened, each level scaled by its instance count (issue #821; the top module's own `num_cells` alone is `0` for a design whose top is a pure wrapper). Matches `stat -json`'s own `design.num_cells` rollup. **Deliberately not named `cell_count`**: `klt layout-metrics`'s existing `cell_count` field counts *distinct cell definitions* in a GDS hierarchy, a different concept. |
@@ -1315,13 +1346,17 @@ caller decision rather than something this command should pick.
 | `instance_counts_by_type` | object\<string, int\> | `stat -json`'s `num_cells_by_type`, rolled up over the whole hierarchy the same way `instance_count` is, keys sorted for determinism — the synthesis analogue of `klt drc`'s `rule_counts` / `klt extract`'s `device_counts`. Keys are always real leaf standard-cell types; a sub-module *name* (which `stat -json` reports as a pseudo cell type in the parent module's own block) is never reported as one, it is expanded into the cells it instantiates (issue #821). |
 | `leakage_power_nw` | number \| null | Static leakage power, in nanowatts — issue #1626. `sum(cell_leakage_power[cell_type] * instance_count[cell_type])` over `instance_counts_by_type`, read from the same resolved liberty already loaded for `dfflibmap`/`abc -liberty` (no second liberty fetch). **Not** switching/dynamic power — that needs an activity factor this command has no vectors to supply, and is out of scope. `null` when the resolved liberty reports no `cell_leakage_power` for *any* instantiated cell type — see "`leakage_power_nw`/`leakage_by_type_nw`" below. |
 | `leakage_by_type_nw` | object\<string, number\> \| null | Per-cell-type leakage, in nanowatts — the liberty `cell_leakage_power` entry `leakage_power_nw` was summed from, one entry per instantiated cell type that had one. Keys sorted for determinism. A caller can diff this object's keys against `instance_counts_by_type`'s to spot an instantiated cell type with no leakage data (e.g. a `-dont_use`d or otherwise-unmapped type) for free. `null` exactly when `leakage_power_nw` is `null`. |
+| `clock_targets` | object | Always present (issue #2883). `{clocks, delay_target_ps, delay_target_basis, per_clock_enforced}`: `clocks` echoes the validated `constraints.clocks` (`[]` when none); `delay_target_ps` equals `timing.delay_target_ps`; `delay_target_basis` is `"none"`, `"clock_period_ns"` (single global shorthand), or `"min_clocks_period_ns"` (tightest listed clock); `per_clock_enforced` is always `false` — only one global ABC target is used, so `timing.critical_path_ps` vs `delay_target_ps` is not a per-domain result for a multi-clock design. |
 | `timing` | object \| null | ABC's own `stime -p` critical-path estimate: `{source, wire_load, critical_path_ps, delay_target_ps}`. `source` is `"abc_stime"`; `wire_load` is ABC's own `WireLoad` echo, `null` for its `"none"`; `critical_path_ps` is picoseconds; `delay_target_ps` echoes the `-D` value derived from `constraints.clock_period_ns` (`null` when none was given). `null` when no `stime` number is available at all. **Pre-layout and wire-free, never signoff STA** — see "`timing`" above. **`critical_path_ps` contains no register content at all**: no clk-to-Q launch and no setup/hold — `dfflibmap` maps every flip-flop to a liberty cell *before* `abc` runs, so registers bound the cone ABC times rather than appearing in it. See "Registers, clk-to-Q, and setup/hold" above. |
 | `sta` | object \| null | `klt-statime-native`'s gate-level critical-path report over the whole mapped netlist: `{source, input_transition_ns, output_load_pf, top, num_cells, num_nets, worst_path, worst_reg_to_reg_path}`. `source` is `"klt_statime_native"`; `input_transition_ns`/`output_load_pf` echo the uniform boundary condition this run used. `worst_path` is the globally worst path — `{startpoint, startpoint_kind, endpoint, endpoint_kind, delay_ns, hops}`, where `hops` is the per-cell breakdown (`{point, cell, edge, arrival_ns, slew_ns}`) — and `worst_reg_to_reg_path` is the same shape for the worst *pure* register-to-register path (`null` for a purely combinational design). `null` when the optional `klt_statime_native` extension is not installed or the engine could not analyze this netlist/liberty pair — `sta_unavailable_reason` below says which. **A path delay, never slack, and never signoff STA** — no SDC/`create_clock`, still wire-free; see "`sta`" above. **`worst_reg_to_reg_path.delay_ns` models the launching register's clk-to-Q but excludes setup/hold**, which are parsed and then dropped from delay propagation; see "Registers, clk-to-Q, and setup/hold" above. Additive as of issue #925 — `timing` is unaffected. |
 | `sta_unavailable_reason` | string \| null | **Always present** (issue #2628) — why `sta` is `null`, so "STA unavailable here" and "STA not applicable to this netlist" are not the same value. `null` **exactly when** `sta` is non-`null`; a non-`null` string exactly when `sta` is `null`. Two cases are distinguished: the optional `klt_statime_native` extension is not installed (the reason names the install path — `uv sync --group statime`; a caller can act on this one and retry), or the engine ran and raised `StaError` while analyzing this netlist/liberty pair (the reason carries `StaError`'s own message, e.g. a mapped cell type with no liberty entry). **Free text for humans, not a fixed vocabulary** — match on `sta`'s own `null`-ness for control flow, matching the `unavailable_reason` precedent in `klt place-and-route`'s `power.placed` block. Additive field, no `schema_version` bump. |
 | `structural` | object | **Always present** (issue #1588) — a pass/fail verdict over the three unambiguously-wrong synchronous-design conditions Yosys's own `synth`/`stat` already know about: `{latches, expected_latches, unexpected_latches, comb_loops, multi_driven, has_critical}`. `latches` is the total instance count of every `stat -json` cell type whose name contains `"dlatch"` (case-insensitive) — `dfflibmap` maps only flip-flops, so an inferred latch survives, unmapped, as a bare gate-level primitive (`$_DLATCH_P_` and siblings). `expected_latches` echoes the request's `structural.expected_latches` (default `0`); `unexpected_latches` is `max(0, latches - expected_latches)`. `comb_loops`/`multi_driven` count the **distinct** `Warning: found logic loop` / `Warning: multiple conflicting drivers` lines `synth -top <top>`'s own internal `check` sub-stages print. `has_critical` is `true` iff `comb_loops > 0 \|\| multi_driven > 0 \|\| unexpected_latches > 0` — see "`structural`" below and "Exit codes". |
 | `cell_exclusions` | object | **Always present** (issue #2382) — the standard-cell exclusion this run actually applied, and how it was arrived at: `{mode, requested, library_defaults, effective, validated, engine_supports_dont_use}`. `mode` is the resolved `constraints.dont_use_mode` (`"additive"` by default); `requested` is the request's own `constraints.dont_use`, normalized and deduplicated; `library_defaults` is the built-in per-library table's entry for the resolved `pdk.cell_library` (always reported, even when `mode` suppressed it, so a report says what was *not* excluded too); **`effective` is exactly the `-dont_use` glob list handed to ABC**, deduplicated and order-preserved. `validated` is `true` when every `requested` pattern was matched against the resolved liberty's cell names, or `null` when there was nothing to check or that cell list could not be established. `engine_supports_dont_use` is the `yosys -p 'help abc'` probe result, or `null` when there was nothing to exclude and no probe was made — `false` with a non-empty `requested` and an empty `effective` is the "older Yosys build dropped it" case, also surfaced as a `dont_use_unsupported` warning. Additive field, no `schema_version` bump. See "Request-level cell exclusion" above. |
 | `warnings` | object | **Always present** (issue #1588) — a bounded, deterministic summary of every `Warning: ` line in the captured Yosys run log plus missing-library-capability warnings, never the raw log itself: `{total, by_category, representatives}`. `total` counts engine warning lines plus capability warnings (Yosys can reprint an unresolved problem's identical warning text at more than one of `synth`'s internal `check` calls, so this is "how noisy was this run", not a distinct-problem count — see `structural`'s own dedup discipline above for that). `by_category` is `{category: count}`, keys sorted for determinism, grouped into a small taxonomy (`latch_inferred`, `logic_loop`, `multiple_drivers`, `undriven_wire`, `other`, `unsupported_cell_library`, `dont_use_unsupported`). `representatives` is `[{category, count, text}]`, one entry per category (the first message text seen), sorted by category and capped at 10 entries. |
+| `memory_mapping` | object | **Always present** (issue #2745) — bounded evidence of what happened to inferred memories: `{status, reason, modules, script_path}`. `status` is one of `"none_detected"`, `"lowered_to_logic"`, `"optimized_away"`, `"surviving"`, `"mixed"`, `"indeterminate"`; `reason` is a free-text explanation, non-`null` only when something is `"indeterminate"`. `modules` is one row per module definition with at least one memory at any stage, sorted by name: `{module, status, elaborated_memories, elaborated_memory_bits, pre_lowering_memories, final_memories}`. `script_path` is the side evidence script, the same `{path, scope}` shape as `script_path`. See "`memory_mapping`" below for the stages, the classification rules, overhead, and limitations. Additive field, no `schema_version` bump. |
+| `blackbox_modules` | array\<string\> \| null | **Always present** (issue #2745) — sorted names of modules declared `(* blackbox *)`/`(* whitebox *)` that still have at least one instance in the final mapped design. **Their area is not included in `area_um2`** (Yosys's `stat -liberty` has no area for them) and they are never counted as memories. `[]` when there are none; `null` when the evidence invocation failed and the list could not be established. Additive field, no `schema_version` bump. |
 | `netlist_path` | object | The mapped gate-level netlist (`write_verilog -noattr`'s output), normalized to the `{path, scope}` shape `env_provenance.repo_relative_path()` defines (issue #1844, matching the precedent `klt pex`/`klt sim` set in issue #1261): `path` is repo-relative and `scope` is `"repo"` when the netlist resolves inside the invocation's repo, else `{"path": null, "scope": "external"}` — the absolute path is never echoed, so a committed evidence record never leaks it. Never re-derive `instance_count`/`area_um2` by parsing this file. |
+| `netlist_sha256` | string | Lowercase 64-character SHA-256 of the exact bytes of the file `netlist_path` refers to, computed after signed-qualifier stripping (issue #2452). It is computed from the real file even when `netlist_path` is redacted as `external`, so two runs' outputs can be compared from their envelopes alone. It identifies output *bytes* only: it does not prove engine identity or semantic equivalence, and any byte difference (comments, ordering, a different Yosys/abc build) changes it. Additive field; `schema_version` stays 2. |
 | `script_path` | object | The generated `.ys` script, the same `{path, scope}` shape as `netlist_path` — kept as a debuggable artifact. This is the **commit-safe** form: every embedded path is either repo-relative or `$PDK_ROOT`-relative (issue #1870), so `klt env-provenance scan` on it is clean. Because Yosys does not expand environment variables, it is not the file Yosys was run on — see `run_script_path`. |
 | `run_script_path` | object | The `.ys` script Yosys was actually handed (issue #1870), same `{path, scope}` shape — the rehydrated `synth_<top>.run.ys` sibling with the real absolute liberty path substituted for `$PDK_ROOT`, or exactly `script_path` when no token was written (a liberty resolving outside the PDK install root). Additive field, no `schema_version` bump. Machine-specific by construction: commit `script_path`, not this. |
 | `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names the resolved liberty file (`<cell_library>__<corner>`); `pdk` is `find_pdk()`'s resolved triple; `input` is the pre-execution content hash of declared `sources` (a combined, order-independent hash when more than one source file is given), with `input.role: "source"` (issue #2027 — RTL source, not a layout stream or a netlist); mutation of declared inputs before return is an error. Transitive includes are not snapshotted. |
@@ -1373,6 +1408,86 @@ heuristic and Yosys's own optimization already resolve these structurally
 (the loop no longer exists in the mapped netlist by the time `write_verilog`
 runs) — `structural` only *reports* that the design carried the condition,
 it does not gate netlist production.
+
+## `memory_mapping`: inferred-memory evidence
+
+[Issue #2745](https://github.com/2AMLogic/klayout-tools/issues/2745) (part of
+#2281). `area_um2` and `instance_count` come from the final `stat`, after
+`synth` has already run `memory_map`, so they alone cannot say whether the RTL
+inferred a memory, whether it became flip-flops and muxes, or whether
+optimization removed it first. `memory_mapping` records what Yosys's own
+statistics show at three stages:
+
+| Stage | Where it is captured | What is counted |
+| --- | --- | --- |
+| `elaborated` | Side invocation, after `hierarchy -check -top <top>` and `proc` | `stat`'s `num_memories` (unconsolidated memories) plus `$mem`/`$mem_v2` cells; `num_memory_bits` is reported as `elaborated_memory_bits` |
+| `pre_lowering` | Side invocation, after `synth -top <top> -run :fine` — `synth`'s `begin` and `coarse` labels, every pass the production `synth` runs before `fine`'s `memory_map` | `$mem`/`$mem_v2` cells (plus any `num_memories`) |
+| `final` | The production run's own `<top>_stats.json` — no extra work | `$mem`/`$mem_v2` cells (plus any `num_memories`) left after mapping |
+
+Each module definition with a memory at any stage gets one `modules` row,
+classified from its three counts `e`, `p` and `f`:
+
+| `status` | Rule | Meaning |
+| --- | --- | --- |
+| `none_detected` | `e = p = f = 0` | No inferred memory (such modules have no row). |
+| `optimized_away` | `e > 0`, `p = 0`, `f = 0` | Every detected memory was gone before lowering. Optimization removed it: dead (never read), or folded into constants or logic by a `coarse` pass. It was **not** lowered by `memory_map`. |
+| `lowered_to_logic` | `p = e > 0`, `f = 0` | Every detected memory reached `memory_map` and none survived mapping. Its function is now in ordinary cells counted in `area_um2`. |
+| `surviving` | `f = p = e > 0` | Every detected memory is still an unmapped memory cell after mapping. |
+| `mixed` | Any other non-increasing combination | For example, one memory optimized away and another lowered (`e = 2`, `p = 1`, `f = 0`). |
+| `indeterminate` | `p > e` or `f > p` | A later stage has more memories than an earlier one, such as a memory inferred by a `coarse` pass. Its earlier state was never observed. |
+
+The top-level `status` folds the rows. It is `none_detected` with no rows, the
+shared status when every row agrees, and `mixed` when rows differ. It is
+`indeterminate` when any row is indeterminate, with that row's reason in
+`reason`.
+
+**Incomplete evidence is never classified.** If the side invocation fails or
+times out, a stage file is missing or unreadable, or the production stats
+cannot be re-read, `status` is `"indeterminate"`. `reason` names the failure
+and `modules` is `[]`. A partial chain never yields a guessed outcome.
+
+### Overhead and failure behaviour
+
+The evidence comes from **one extra Yosys invocation**,
+`<top>_memory_evidence.ys`. It runs only after the production run has
+succeeded. It uses the same sources, `hdl_toplevel` and arithmetic `techmap`
+insertion, and stops before `fine`. It reads no liberty and runs no
+`dfflibmap`/`abc`. The cost is roughly one RTL front end plus `synth`'s
+coarse passes, which is usually a small fraction of a full mapping run. It
+shares the per-invocation Yosys timeout. The production script (`script_path`
+/ `run_script_path`), netlist, stats and every existing metric are byte-for-byte
+what they were before this field existed. A production failure keeps its
+existing error, and the evidence invocation never runs. An evidence failure
+never fails the run: it yields `indeterminate`, `blackbox_modules: null` and
+the usual `status: "ok"` envelope.
+
+### `blackbox_modules`
+
+`blackbox_modules` lists modules carrying a `blackbox` or `whitebox`
+attribute (from the evidence script's `select -list`, read after `hierarchy`)
+that still have instances in the production run's final stats. Membership
+comes from the attribute, never the name, so a macro named `sram_*` is not a
+memory. A declared blackbox that optimization disconnected and removed is not
+listed. **Blackbox area is excluded from `area_um2`.** This command does not
+account for it, and an undefined, non-blackbox module is still the existing
+hard `hierarchy -check` error. Macro inputs and generic missing-area
+accounting belong to #2635.
+
+### Limitations
+
+- Counts are per module **definition**, not scaled by instance count. A
+  module instantiated twice reports its memories once.
+- No ROM/RAM identity is reported. A memory with no write port is not called
+  a ROM, and mapped cells are never attributed to a particular memory. Final
+  counts cannot support either claim.
+- `elaborated_memory_bits` is the only bit count. `stat` reports none for a
+  consolidated `$mem_v2` cell.
+- The `pre_lowering` stage relies on `synth`'s documented label layout, with
+  `memory -nomap` in `coarse` and `memory_map` in `fine`. This was verified
+  against Yosys 0.69 with the ROM, RAM, unused-memory, mixed and blackbox
+  fixtures in `tests/test_synthesize_memory.py`. A Yosys build that lowered
+  memories before `fine` would report them as `optimized_away`. Re-run those
+  fixtures when changing the pinned Yosys.
 
 ## `warnings`: engine diagnostics and missing library capabilities
 
@@ -1502,6 +1617,11 @@ never disagree about what gets hashed — re-hashes both, and compares against
 **No Yosys invocation.** Response shape is the shared `--check` payload
 (`schema_version`, `mode: "check"`, `report`, `status`, `checks[]`) documented
 under [`klt drc`](drc.md#cheap-mode-default).
+
+A third check, `parameters`, compares the request's `parameters` override
+against the report's recorded `parameters` (a report predating the field counts
+as `{}`), so the same sources elaborated with different overrides report
+`drifted` rather than `match`.
 
 `status` is `"match"` only when every `checks[]` entry matches. A recorded
 hash that is itself `null` (a report predating the field) always renders
@@ -1758,6 +1878,27 @@ same request against its own just-produced response instead (`baseline.json
 area_um2: 0.0, critical_path_ns: 0.0}` — see
 `tests/test_synthesize.py::test_run_synthesize_baseline_response_path_zero_delta`.
 
+## Pinned golden: gf180 operator probe (issue #3069)
+
+`tests/test_synth_gf180_operator_probe.py` pins a `klt synthesize` area /
+cell / `dffq_1` regression on the vendored gf180-dx7 operator probe
+(`tests/corpus/synth_gf180_operator_probe/`, Apache-2.0, pinned to upstream
+commit `eb74e94f`). The fixture hashes are checked offline; the synthesis test
+needs `yosys` plus the gf180mcu `gf180mcu_fd_sc_mcu7t5v0` / `tt_025C_5v00`
+liberty (e.g. `volare enable --pdk gf180mcu`, `PDK_ROOT`/`PDK=gf180mcuD`) and
+**skips with that reason otherwise** -- default CI does not provision it.
+
+Reading the baseline: the historical reference (46,939.96 um2, 2,407 cells, 99
+`dffq_1`) is *not* the assert target. The golden is today's `klt synthesize`
+result (50,968.15 um2, 2,686 cells, 99 `dffq_1`). It is ~9% above the upstream
+script's plain `abc -liberty` result (46,766.54 um2, 2,381 cells) because klt
+adds the ABC driving-cell/load constraints for this library and the post-ABC
+`clean`/`setundef -zero`/`hilomap` passes; the flop count is unchanged. The
+step-by-step measurements, tolerance rationale and the unexplained residual
+against the historical number are in that directory's `README.md`. Note that
+the RTL `$readmemh`s its ROM tables relative to the synthesis cwd, which
+`klt synthesize` sets to the request's repo root.
+
 ## Out of scope
 
 - **Switching/dynamic power.** `leakage_power_nw`/`leakage_by_type_nw`
@@ -1815,6 +1956,25 @@ area_um2: 0.0, critical_path_ns: 0.0}` — see
   composes this command with `klt place-and-route`/`klt eval` into one
   fleet-scheduled candidate job; this command itself takes no `--backend`/
   `--hosts` flag.
+- **Observability stripping and negative controls.** This command has no
+  flag, request field or pre-pass that removes debug or probe logic, and it
+  does not report a "before and after" flop delta. Synthesis is never
+  flattened: the generated script runs `synth -top` and leaves the
+  hierarchy intact.
+  One consequence matters for anyone building an observability negative
+  control. Suppose you write a wrapper top that leaves a module's debug
+  outputs unconnected and synthesize it here. The probe-only state inside
+  that module is **not** removed, because the module is still optimized
+  on its own with every output live. The run shows no collapse, which is
+  a false negative.
+  The design spike
+  [`docs/design/synthesize-observability-spike.md`](../design/synthesize-observability-spike.md)
+  (issue #2746) records reproducible experiments. It rejects a
+  general-purpose pre-pass driven by signal names or by attributes, and
+  proposes a bounded alternative: a caller-authored wrapper, measured as a
+  flatten-matched pair. Any production change, such as an opt-in flatten
+  control, needs a separately reviewed follow-up issue. The spike is not
+  a shipped feature.
 - **A second synthesis engine.** `request.engine` exists from day one so a
   later backend (e.g. a Siemens tool) is an additive enum value and a new
   glue module, never a contract-shape change — but only `"yosys"` is

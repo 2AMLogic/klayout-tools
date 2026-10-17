@@ -28,12 +28,26 @@ A caller that wants only
 the connectivity/structural read reads the payload's own ``erc_status``
 (issue #2179) instead of the exit code; it is ``"clean"``/``"violations"``
 regardless of whether an antenna table exists.
+
+``--check <report>`` (issue #3060) switches ``klt erc`` from running a fresh
+check into *verifying a previously committed* ``--format json`` report still
+reproduces, as ``klt drc``/``klt lvs`` do -- see ``docs/cli/erc.md``,
+"--check / --rerun". It is mutually exclusive with the positional ``file``/
+``spec``. Cheap mode re-hashes the recorded layout and spec; ``--rerun``
+re-runs ERC from the echoed inputs and diffs verdict-bearing fields. Both
+report ``status: "match"`` (exit 0) or ``"drifted"`` (exit 3).
 """
 
 import argparse
 
-from ..erc import DISCLOSURE_KIND_UNEXPRESSIBLE, ErcError, run_erc
-from .output import emit_error, emit_success
+from ..erc import (
+    DISCLOSURE_KIND_UNEXPRESSIBLE,
+    ErcError,
+    check_erc_report,
+    rerun_erc_report,
+    run_erc,
+)
+from .output import emit_error, emit_success, render_rerun_drift
 
 #: `status` -> exit code (issue #2115, applying the common rollup rule's
 #: exit codes, #2109). `"clean_partial"` reports the same exit `0` as
@@ -50,6 +64,19 @@ _EXIT_CODE_BY_STATUS = {
 
 
 def run(args: argparse.Namespace) -> int:
+    if args.check is not None:
+        # `file` is in `--check`'s mutually exclusive argparse group
+        # (parser.py), and `spec` cannot be given without it -- so
+        # file/spec alongside --check is already a usage error (exit 2).
+        return _run_check(args)
+
+    if args.rerun:
+        return emit_error("erc", "--rerun requires --check <report>", args.format)
+    if args.file is None or args.spec is None:
+        return emit_error(
+            "erc", "file and spec are required unless --check is given", args.format
+        )
+
     try:
         report = run_erc(
             args.file,
@@ -58,12 +85,56 @@ def run(args: argparse.Namespace) -> int:
             pdk=args.pdk,
             deck=args.deck,
             findings_only=args.findings_only,
+            omit_antenna_tables=args.omit_antenna_tables,
+            compact=args.compact,
         )
     except ErcError as exc:
         return emit_error("erc", str(exc), args.format)
 
     emit_success(report, args.format, _print_text)
     return _EXIT_CODE_BY_STATUS[report["status"]]
+
+
+def _run_check(args: argparse.Namespace) -> int:
+    try:
+        if args.rerun:
+            result = rerun_erc_report(args.check)
+        else:
+            result = check_erc_report(args.check)
+    except ErcError as exc:
+        return emit_error("erc", str(exc), args.format)
+
+    text_renderer = render_rerun_drift if args.rerun else _print_check_text
+    emit_success(result, args.format, text_renderer)
+
+    return 0 if result["status"] == "match" else 3
+
+
+def _print_check_text(result: dict) -> None:
+    print(f"report: {result['report']}")
+    print(f"status: {result['status']}")
+    for check in result["checks"]:
+        mark = "OK" if check["match"] else "DRIFTED"
+        print(f"  [{mark}] {check['field']}")
+        if not check["match"]:
+            print(f"      expected: {check['expected']}")
+            missing = check.get("input_not_found")
+            if missing is None:
+                print(f"      actual:   {check['actual']}")
+            else:
+                print(f"      actual:   None (input not found: {missing['resolved']})")
+                if missing["found_relative_to_report"] is not None:
+                    print(
+                        "      note:     it exists relative to the report's own "
+                        f"directory ({missing['found_relative_to_report']}); "
+                        "--check resolves relative paths against the current "
+                        "working directory -- re-run from there"
+                    )
+    for advisory in result.get("advisories", ()):
+        print(
+            f"  [DRIFT] {advisory['field']}: {advisory['report']} (report) "
+            f"vs {advisory['current']} (current)"
+        )
 
 
 def _print_declared_nets(report: dict) -> None:
@@ -107,6 +178,36 @@ def _print_declared_nets(report: dict) -> None:
             )
 
 
+def _print_gate_count(report: dict) -> None:
+    """The gate count line, plus a note when it is zero (issue #2896).
+
+    A passive-only cell has no transistor gate, so the antenna half has
+    nothing to grade; say so rather than leaving a bare ``gates: 0``.
+    """
+    print(f"gates: {report['gate_count']}")
+    if not report["gate_count"]:
+        print("  (no transistor gate in this cell; antenna checks not applicable)")
+
+
+def _print_antenna_tables_omitted(report: dict) -> None:
+    """The ``--omit-antenna-tables`` note, printed only when the flag was used."""
+    if report.get("antenna_tables_omitted"):
+        print("antenna_tables_omitted: True (--omit-antenna-tables)")
+
+
+def _print_compact_note(report: dict) -> None:
+    """The ``--compact`` note (issue #2965), printed only when the payload
+    carries the top-level ``compact`` block."""
+    compact = report.get("compact")
+    if compact is None:
+        return
+    print(
+        f"  (--compact: per-gate rows omitted; "
+        f"{compact['antenna_levels_skipped']} antenna levels skipped "
+        f"for {compact['skipped_reason']})"
+    )
+
+
 def _print_text(report: dict) -> None:
     print(f"file: {report['file']}")
     print(f"spec: {report['spec']}")
@@ -119,9 +220,11 @@ def _print_text(report: dict) -> None:
     if deck_provenance is not None:
         print(f"deck: {deck_provenance['name']}")
     print(f"findings_only: {report['findings_only']}")
+    _print_antenna_tables_omitted(report)
     print(f"status: {report['status']}")
     print(f"gate_role: {report['gate_role']}")
-    print(f"gates: {report['gate_count']}")
+    _print_gate_count(report)
+    _print_compact_note(report)
 
     for gate in report["gates"]:
         print()

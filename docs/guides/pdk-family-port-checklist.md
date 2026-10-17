@@ -74,8 +74,9 @@ for any family whose install may be assembled this way:
   install validation, not just `klt pdk find`.
 - Make the fetch script reproduce the sibling layout the vendor's own CI
   builds — for CMOS5L that means honouring `.github/ihp-sg13g2.ref`
-  rather than cloning the family alone (this repo has no
-  `scripts/fetch-ihp-sg13cmos5l.sh` yet; see #1400).
+  rather than cloning the family alone (`scripts/fetch-ihp-sg13cmos5l.sh` now exists
+  and relies on the sibling `ihp-sg13g2` from `fetch-ihp-sg13g2.sh`; see
+  #1400/#1929/#2720).
 - Smoke-test by actually *reading a rule file through a symlink*, not by
   `stat`ing the top-level deck.
 
@@ -256,6 +257,26 @@ Add the new family to:
 - This guide's Part 2, if the family reveals differences worth recording
   for whoever ports the *next* one.
 
+### Extraction-only and FinFET families (ASAP7, issue #2761)
+
+A family can be registered for **extraction only**: `asap7` appears in
+`KNOWN_PDK_FAMILIES` and `_extraction_registry()`, and nowhere else. Every
+other capability is declared `unsupported` in `pdk_capabilities.DECISIONS`
+with its own reason (ASAP7's DRC ships separately as a DRC-DSL deck file,
+#2760, not as a curated rule table). That is the
+capability catalog working as designed, not a half-finished port. Do not add
+empty DRC/parasitics registrations just to fill the table.
+
+A FinFET family registers a `decks.FinFETExtractionDeck` (an
+`ExtractionDeck` subclass), which `extract.py` hands to
+`extract_finfet.py` instead of the planar recogniser. Fin counts are
+counted from the fin layer, never derived from `W`. Check the family's
+contact and local-interconnect semantics against the real standard-cell
+corpus before trusting the layer names. ASAP7's `LISD` contacts diffusion
+only through `SDT`, and its `LIG`/`LISD` overlaps conduct; neither fact is
+stated in the pinned `.lyt`/`.lyp`, and both were decided by net-level
+comparison against the reference CDL (see `decks/asap7.py`).
+
 ### Pitfall A: the DRC-deck vs. LVS-deck filename asymmetry
 
 A flat IHP-shaped install's DRC deck and LVS deck do not necessarily
@@ -314,8 +335,9 @@ ones that matter to you.
 
 IHP publishes SG13G2 (this repo's first IHP-family curated deck,
 `src/klayout_tools/decks/sg13g2.py`) and CMOS5L
-([IHP-GmbH/ihp-sg13cmos5l](https://github.com/IHP-GmbH/ihp-sg13cmos5l),
-Apache-2.0, v0.2.0) as two open PDKs on the same underlying 130nm-class
+([IHP-GmbH/IHP-Open-PDK](https://github.com/IHP-GmbH/IHP-Open-PDK)
+`ihp-sg13cmos5l/`; formerly the standalone `IHP-GmbH/ihp-sg13cmos5l` repo,
+archived 2026-09-23; Apache-2.0, v0.2.0) as two open PDKs on the same underlying 130nm-class
 process. CMOS5L is not a drop-in variant of SG13G2 — it forbids several
 layer classes SG13G2 uses, and rather than duplicating G2's rule decks it
 *consumes them by symlink* and layers its own DRC/LVS content on top (see
@@ -331,13 +353,11 @@ relative path its symlinks expect, so those symlinks are dangling on that
 host and the G2-side files were read from the separate `ihp-sg13g2`
 install instead.
 
-**No `scripts/fetch-ihp-sg13cmos5l.sh` exists in this repo yet** (unlike
-`scripts/fetch-ihp-sg13g2.sh` for SG13G2, see `pdks/README.md`) — a real
-gap for a future CI-reproducible CMOS5L fixture, out of this issue's scope
-to fill but worth flagging for whoever builds the curated deck (#1400).
-Whoever writes it must place a sibling `ihp-sg13g2` checkout at the
-commit `.github/ihp-sg13g2.ref` pins, the way CMOS5L's own
-`.github/actions/setup-pdk` action does, or the fixture will be a pile of
+**`scripts/fetch-ihp-sg13cmos5l.sh` now exists** (issues #1929, #2720; see
+`pdks/README.md`). It fetches the `ihp-sg13cmos5l/` subtree of
+IHP-Open-PDK `dev` at a pinned SHA with a fail-closed tarball sha256, and
+refuses to run unless a sibling `ihp-sg13g2` checkout (from
+`scripts/fetch-ihp-sg13g2.sh`) is present, or the tree is a pile of
 dangling symlinks.
 
 ### Metal stack — **[verified]**

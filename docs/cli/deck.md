@@ -297,7 +297,7 @@ could re-check mechanically.
         "source_repo": "fossi-foundation/open-pdks",
         "source_path": "sky130/klayout/sky130.lydrc",
         "rule_id": "poly.1a",
-        "commit": "c6d73a35f524070e85faff4a6a9eef49553ebc2b"
+        "commit": "f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7"
       }
     }
   ]
@@ -333,6 +333,20 @@ could re-check mechanically.
 - `layers` — the drawn layer name(s) the rule reads, in `layer`/`other_layer`
   order (`"poly.drawing"`; the raw `"<layer>/<datatype>"` pair when the deck
   publishes no name for it).
+- `layer_refs` — parallel to `layers` (same length and order): one
+  `{"name": str | null, "layer": int, "datatype": int}` per entry, so a rule's
+  layers map to stream layer/datatype pairs from CLI JSON alone. `name` is
+  `null` when the deck publishes none (the `layers` entry is then the raw
+  `"<layer>/<datatype>"` string). Additive: `layers` is unchanged, so no
+  `schema_version` bump.
+- `layer_table` (top-level) — every `{"name", "layer", "datatype"}` the deck
+  names, sorted by `(layer, datatype)`; pinned by the report's `content_hash`.
+- `ambiguous_names` (top-level) — `[{"name", "pairs": [{"layer", "datatype"}]}]`
+  for each name the deck gives to more than one pair (those pairs also appear
+  individually in `layer_table`); `[]` when every name is unique.
+- `unresolved` (top-level) — `[{"layer", "datatype", "rules": [id, ...]}]` for
+  each pair the reported rules read that has no deck name (their `layer_refs`
+  entries carry `name: null`), so nothing is silently dropped.
 - `scope` — the DRM section or rule-id family this rule implements
   (`coverage.deck_scope`'s per-rule source), or `null` when unscoped.
 - `provenance` — the rule's structured upstream citation, or `null` when the
@@ -398,6 +412,7 @@ field by field, which two separate passes on a real design had to do
       "name": "diode_pd2nw_06v0",
       "kind": "diode",
       "marker": { "layer": 115, "datatype": 5, "name": "diode_mk" },
+      "marker_expression": null,
       "marker_gated": true,
       "predicate_gated": true,
       "terminals": [
@@ -408,13 +423,15 @@ field by field, which two separate passes on a real design had to do
             { "layer": 31, "datatype": 0, "name": "Pplus" },
             { "layer": 55, "datatype": 0, "name": "Dualgate" }
           ],
-          "excludes": [ { "layer": 12, "datatype": 0, "name": "DNWELL" } ]
+          "excludes": [ { "layer": 12, "datatype": 0, "name": "DNWELL" } ],
+          "relation": null
         },
         {
           "name": "cathode",
           "layer": { "layer": 21, "datatype": 0, "name": "Nwell" },
           "requires": [],
-          "excludes": [ { "layer": 12, "datatype": 0, "name": "DNWELL" } ]
+          "excludes": [ { "layer": 12, "datatype": 0, "name": "DNWELL" } ],
+          "relation": null
         }
       ],
       "required_layers": [ … ],
@@ -439,7 +456,15 @@ field by field, which two separate passes on a real design had to do
 - `kind` — the recognition family: `mos`, `bipolar`, `capacitor`,
   `mom_capacitor`, `resistor`, `diode`.
 - `marker` — the class's device-recognition marker layer, or `null` for a
-  markerless (drawn-geometry-only) class.
+  markerless (drawn-geometry-only) class or one whose marker is derived.
+- `marker_expression` — `null` unless the marker is a derived `LayerExpr`
+  (issue #2860; today only `BipolarDevice.marker` accepts one, and no
+  built-in deck uses it). Then it is `{op, name, operands}`: `op` is `"and"`
+  or `"not"` (first operand minus the rest), `name` is the derived layer's
+  label or `null`, and each operand is a layer object or another node of the
+  same shape. Its leaves are folded into `required_layers` (leaves under an
+  even number of `"not"` subtractions) and `excluded_layers` (an odd
+  number), and `marker_gated` is `true`.
 - `marker_gated` / `predicate_gated` — booleans, so "which classes need
   something beyond their own conductor/diffusion geometry" is answerable by
   filtering rather than by reading prose. **Marker- and predicate-gated
@@ -450,15 +475,38 @@ field by field, which two separate passes on a real design had to do
   non-empty `requires` — note this is honestly `true` for `pfet` (a PMOS is
   not recognised outside `nwell`) and `false` for `nfet`.
 - `terminals` — one entry per recognised terminal:
-  `{name, layer, requires, excludes}`. `layer` is `null` for a terminal
-  formed by the substrate rather than by a drawn mask (gf180mcu's
+  `{name, layer, requires, excludes, relation}`. `layer` is `null` for a
+  terminal formed by the substrate rather than by a drawn mask (gf180mcu's
   `diode_nd2ps_06v0` anode). Every layer in `requires` must **also** cover
-  the region; every layer in `excludes` is subtracted from it.
+  the region; every layer in `excludes` is subtracted from it. A bipolar
+  entry that declares the optional four-terminal `substrate` layer (issue
+  #2862) reports a fourth `substrate` terminal after `collector`; entries
+  that leave it `None` — every deck shipped today — report the
+  three-terminal shape only. `relation` (issue #2863) is `null` for a
+  terminal defined by those static layer sets alone — every terminal of
+  every shipped class today — and otherwise
+  `{"source": <terminal>, "op": "interacting", "extents": <bool>}`: the
+  terminal is only the part of its layer that interacts with the same
+  device's already-resolved `source` terminal (with `extents: true`, the
+  part whose own bounding box does — how a base ring surrounding its
+  emitter is attributed to that one device). Bipolar classes only; see
+  `TerminalRelation` in `decks/extraction.py`.
 - `required_layers` / `excluded_layers` — the flattened union in
   first-mention order (marker first, then each terminal's own layer and its
   `requires`). `required_layers` is the "what am I missing?" list — every
   one of these has to be drawn over the same geometry, and missing any one
   of them fails identically and silently.
+- `topology` — `resistor` entries only (issue #2679): how the `body`
+  terminal's layer relates to the `marker`. `"overlap"` (the default, and
+  every resistor class except sg13g2's poly resistors) means the marker is drawn *on* the
+  body conductor and the resistor is their overlap, narrowed by `requires`/
+  `excludes`. `"abutting_heads"` (sg13g2's `rsil`/`rppd`/`rhigh`) means the
+  marker layer *is* the resistive body — `requires`/`excludes` narrow the
+  marker region — and the `body` layer is only the contact heads: it must
+  touch that body in two separate head regions (abutting with zero overlap,
+  as IHP's own PCells draw it, or the two ends of a continuous bar the
+  marker covers). A body with a missing head, or a gap to one, is not a
+  resistor.
 - `provenance` — the entry's structured upstream PDK-LVS citation, or `null`
   when it carries none yet (the same shape `klt deck rules` reports).
 - Every layer is `{"layer": <int>, "datatype": <int>, "name": <str|null>}` —

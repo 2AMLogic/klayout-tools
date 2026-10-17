@@ -844,3 +844,759 @@ def test_default_output_path_is_macro_name_lef(tmp_path, monkeypatch):
     )
     assert exit_code == 0
     assert (tmp_path / "analog_block.lef").is_file()
+
+
+# --------------------------------------------------------------------------- #
+# structural self-check of the emitted LEF (issue #2769)
+# --------------------------------------------------------------------------- #
+
+_CLEAN_LEF = """\
+VERSION 5.7 ;
+BUSBITCHARS "[]" ;
+DIVIDERCHAR "/" ;
+
+MACRO blk
+  CLASS BLOCK ;
+  FOREIGN blk 0 0 ;
+  ORIGIN 0 0 ;
+  SIZE 5.0000 BY 5.0000 ;
+  PIN A
+    DIRECTION INOUT ;
+    USE ANALOG ;
+    PORT
+      LAYER met1 ;
+        RECT 0.0000 0.0000 1.0000 1.0000 ;
+    END
+  END A
+  PIN B
+    DIRECTION INOUT ;
+    USE ANALOG ;
+  END B
+  OBS
+    LAYER met1 ;
+        RECT 2.0000 2.0000 3.0000 3.0000 ;
+  END
+END blk
+END LIBRARY
+"""
+
+_EXPECTED = {"blk": ["A", "B"]}
+
+
+def _codes(result: dict) -> list[str]:
+    return [finding["code"] for finding in result["findings"]]
+
+
+def _replace(old: str, new: str, text: str = _CLEAN_LEF) -> str:
+    assert old in text, old
+    return text.replace(old, new, 1)
+
+
+def test_self_check_clean_fixture_passes():
+    from klayout_tools.lef_abstract import check_lef_structure
+
+    result = check_lef_structure(_CLEAN_LEF, _EXPECTED)
+    assert result == {
+        "status": "pass",
+        "findings": [],
+        "missing_macros": [],
+        "unexpected_macros": [],
+    }
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        pytest.param(
+            "VERSION 5.7 ;\nMACRO blk\nEND blk\nEND LIBRARY\n",
+            {"blk": []},
+            id="zero-declared-pins",
+        ),
+        pytest.param(
+            "VERSION 5.7 ;\nMACRO blk\n"
+            + "".join(f"  PIN P{i}\n  END P{i}\n" for i in range(5))
+            + "END blk\nEND LIBRARY\n",
+            {"blk": [f"P{i}" for i in range(5)]},
+            id="multiple-pins",
+        ),
+        pytest.param(
+            "# header comment\n\tVERSION   5.7;   # trailing\n\n"
+            "MACRO   blk   # the macro\n   PIN a_b[0]\n\t\tPORT\n"
+            "LAYER met1 ;\nRECT 0 0 1 1;\n  END\n  END a_b[0]\n"
+            "END blk\n  \nEND LIBRARY   # done\n# trailing comment\n",
+            {"blk": ["a_b[0]"]},
+            id="whitespace-and-comments",
+        ),
+        pytest.param(
+            "VERSION 5.7 ;\nMACRO blk\n  PIN A\n    PORT\n      LAYER li1 ;\n"
+            "      RECT 0 0 1 1 ;\n    END\n    PORT\n      LAYER met1 ;\n"
+            "      RECT 0 0 1 1 ;\n    END\n  END A\n  OBS\n    LAYER li1 ;\n"
+            "  END\n  OBS\n    LAYER met1 ;\n  END\nEND blk\nEND LIBRARY\n",
+            {"blk": ["A"]},
+            id="port-and-obs-nesting",
+        ),
+        pytest.param(
+            "VERSION 5.7 ;\nMACRO Blk\n  PIN vdd\n  END vdd\nEND Blk\nEND LIBRARY\n",
+            {"Blk": ["vdd"]},
+            id="identifier-case-preserved",
+        ),
+    ],
+)
+def test_self_check_valid_variants_pass(text, expected):
+    from klayout_tools.lef_abstract import check_lef_structure
+
+    result = check_lef_structure(text, expected)
+    assert result["status"] == "pass", result["findings"]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected", "must_include"),
+    [
+        pytest.param(
+            _replace("VERSION 5.7 ;\n", ""),
+            _EXPECTED,
+            {"missing_version"},
+            id="missing-version",
+        ),
+        pytest.param(
+            _replace("VERSION 5.7 ;", "VERSION ;"),
+            _EXPECTED,
+            {"missing_version"},
+            id="version-without-value",
+        ),
+        pytest.param(
+            _replace("  END A\n", ""),
+            _EXPECTED,
+            {"unclosed_block", "misplaced_block"},
+            id="pin-end-missing",
+        ),
+        pytest.param(
+            _replace("  END A\n", "  END B\n"),
+            _EXPECTED,
+            {"end_name_mismatch"},
+            id="pin-end-wrong-name",
+        ),
+        pytest.param(
+            _replace("END blk\n", "END other\n"),
+            _EXPECTED,
+            {"end_name_mismatch"},
+            id="macro-end-wrong-name",
+        ),
+        pytest.param(
+            _replace("  END A\n", "  END\n"),
+            _EXPECTED,
+            {"unnamed_end"},
+            id="anonymous-end-for-pin",
+        ),
+        pytest.param(
+            _replace("END blk\n", "END\n"),
+            _EXPECTED,
+            {"unnamed_end"},
+            id="anonymous-end-for-macro",
+        ),
+        pytest.param(
+            _replace("    END\n  END A\n", "  END A\n"),
+            _EXPECTED,
+            {"unclosed_block"},
+            id="port-end-missing",
+        ),
+        pytest.param(
+            _replace("END blk\nEND LIBRARY\n", "END blk\nEND blk\nEND LIBRARY\n"),
+            _EXPECTED,
+            {"orphan_end"},
+            id="orphan-end",
+        ),
+        pytest.param(
+            _replace("END LIBRARY\n", ""),
+            _EXPECTED,
+            {"missing_end_library"},
+            id="missing-end-library",
+        ),
+        pytest.param(
+            _replace("END blk\n", ""),
+            _EXPECTED,
+            {"unclosed_block"},
+            id="end-library-with-open-macro",
+        ),
+        pytest.param(
+            _CLEAN_LEF[: _CLEAN_LEF.index("  PIN B")],
+            _EXPECTED,
+            {"unclosed_block", "missing_end_library", "missing_pin"},
+            id="truncated-eof",
+        ),
+        pytest.param(
+            _CLEAN_LEF[: _CLEAN_LEF.index("RECT 0.0000") + 10],
+            _EXPECTED,
+            {"unterminated_statement", "unclosed_block", "missing_end_library"},
+            id="truncated-mid-statement",
+        ),
+        pytest.param(
+            _replace("    USE ANALOG ;\n  END B", "    USE ANALOG\n  END B"),
+            _EXPECTED,
+            {"unterminated_statement"},
+            id="missing-semicolon-does-not-swallow-end",
+        ),
+        pytest.param(
+            _CLEAN_LEF + "MACRO extra\nEND extra\n",
+            _EXPECTED,
+            {"content_after_end_library"},
+            id="content-after-end-library",
+        ),
+        pytest.param(
+            _replace("MACRO blk", "MACRO other").replace("END blk", "END other"),
+            _EXPECTED,
+            {"missing_macro", "unexpected_macro"},
+            id="equal-count-wrong-macro-name",
+        ),
+        pytest.param(
+            _replace(
+                "END blk\nEND LIBRARY\n", "END blk\nMACRO more\nEND more\nEND LIBRARY\n"
+            ),
+            _EXPECTED,
+            {"unexpected_macro"},
+            id="unexpected-extra-macro",
+        ),
+        pytest.param(
+            _replace(
+                "END blk\nEND LIBRARY\n", "END blk\nMACRO blk\nEND blk\nEND LIBRARY\n"
+            ),
+            _EXPECTED,
+            {"duplicate_macro"},
+            id="duplicate-macro",
+        ),
+        pytest.param(
+            _replace("  PIN B\n", "  PIN A\n").replace("  END B\n", "  END A\n"),
+            _EXPECTED,
+            {"duplicate_pin", "missing_pin"},
+            id="duplicate-pin-equal-count",
+        ),
+        pytest.param(
+            _replace("  PIN B\n", "  PIN C\n").replace("  END B\n", "  END C\n"),
+            _EXPECTED,
+            {"missing_pin", "unexpected_pin"},
+            id="equal-count-wrong-pin-name",
+        ),
+        pytest.param(
+            _replace("  PIN B\n    DIRECTION INOUT ;\n    USE ANALOG ;\n  END B\n", ""),
+            _EXPECTED,
+            {"missing_pin"},
+            id="missing-declared-pin",
+        ),
+        pytest.param(
+            _replace("MACRO blk\n", "MACRO blk\n  MACRO inner\n  END inner\n"),
+            _EXPECTED,
+            {"misplaced_block"},
+            id="nested-macro",
+        ),
+        pytest.param(
+            _replace("END LIBRARY\n", "PIN loose\nEND loose\nEND LIBRARY\n"),
+            _EXPECTED,
+            {"misplaced_block"},
+            id="pin-outside-macro",
+        ),
+        pytest.param(
+            _replace("  OBS\n", "  PIN Z\n  OBS\n").replace(
+                "END blk\n", "  END Z\nEND blk\n"
+            ),
+            _EXPECTED,
+            {"misplaced_block"},
+            id="obs-inside-pin",
+        ),
+    ],
+)
+def test_self_check_fault_injection_fails(text, expected, must_include):
+    from klayout_tools.lef_abstract import check_lef_structure
+
+    result = check_lef_structure(text, expected)
+    assert result["status"] == "fail"
+    assert must_include <= set(_codes(result)), result["findings"]
+    for finding in result["findings"]:
+        assert set(finding) == {"code", "message", "line", "macro", "pin"}
+
+
+def test_self_check_missing_pin_identifies_macro():
+    from klayout_tools.lef_abstract import check_lef_structure
+
+    result = check_lef_structure(_CLEAN_LEF, {"blk": ["A", "B", "C"]})
+    (finding,) = result["findings"]
+    assert finding["code"] == "missing_pin"
+    assert finding["macro"] == "blk"
+    assert finding["pin"] == "C"
+
+
+def test_self_check_pin_in_wrong_macro_is_caught():
+    from klayout_tools.lef_abstract import check_lef_structure
+
+    text = (
+        "VERSION 5.7 ;\n"
+        "MACRO m1\n  PIN Y\n  END Y\nEND m1\n"
+        "MACRO m2\n  PIN X\n  END X\nEND m2\n"
+        "END LIBRARY\n"
+    )
+    result = check_lef_structure(text, {"m1": ["X"], "m2": ["Y"]})
+    assert result["status"] == "fail"
+    pairs = {(f["code"], f["macro"], f["pin"]) for f in result["findings"]}
+    assert ("missing_pin", "m1", "X") in pairs
+    assert ("missing_pin", "m2", "Y") in pairs
+    assert ("unexpected_pin", "m1", "Y") in pairs
+    assert ("unexpected_pin", "m2", "X") in pairs
+
+
+def test_self_check_missing_and_unexpected_macros_are_sorted():
+    from klayout_tools.lef_abstract import check_lef_structure
+
+    text = "VERSION 5.7 ;\nMACRO zz\nEND zz\nMACRO aa\nEND aa\nEND LIBRARY\n"
+    result = check_lef_structure(text, {"q": [], "b": []})
+    assert result["missing_macros"] == ["b", "q"]
+    assert result["unexpected_macros"] == ["aa", "zz"]
+
+
+def test_self_check_case_mismatch_is_not_a_match():
+    from klayout_tools.lef_abstract import check_lef_structure
+
+    result = check_lef_structure(_CLEAN_LEF, {"BLK": ["A", "B"]})
+    assert result["missing_macros"] == ["BLK"]
+    assert result["unexpected_macros"] == ["blk"]
+
+
+def test_self_check_reports_independent_faults_together():
+    """One fault must not conceal another: VERSION missing, a wrong pin END
+    and a missing pin all show up in the same report."""
+    from klayout_tools.lef_abstract import check_lef_structure
+
+    text = _replace("VERSION 5.7 ;\n", "")
+    text = _replace("  END A\n", "  END Q\n", text)
+    result = check_lef_structure(text, {"blk": ["A", "B", "C"]})
+    codes = set(_codes(result))
+    assert {"missing_version", "end_name_mismatch", "missing_pin"} <= codes
+
+
+def test_self_check_finding_lines_point_at_defect():
+    from klayout_tools.lef_abstract import check_lef_structure
+
+    text = _replace("  END A\n", "  END B\n")
+    result = check_lef_structure(text, _EXPECTED)
+    mismatch = next(f for f in result["findings"] if f["code"] == "end_name_mismatch")
+    expected_line = text.splitlines().index("  END B") + 1
+    assert mismatch["line"] == expected_line
+    assert mismatch["pin"] == "A"
+    assert mismatch["macro"] == "blk"
+
+
+# -- library integration -----------------------------------------------------
+
+
+def test_run_reports_self_check_pass_on_clean_output(tmp_path, monkeypatch):
+    report = _run(tmp_path, monkeypatch)
+    assert report["self_check"] == {
+        "status": "pass",
+        "findings": [],
+        "missing_macros": [],
+        "unexpected_macros": [],
+    }
+
+
+def test_synthesized_and_portless_pins_pass_self_check(tmp_path, monkeypatch):
+    descriptor = _basic_descriptor(
+        pins=[
+            {"name": "VSS", "layer": list(MET1_NET), "x": 4.9, "y": 4.9},
+            {"name": "WEIRD", "layer": [99, 99], "x": 1.0, "y": 1.0},
+        ]
+    )
+    report = _run(tmp_path, monkeypatch, descriptor=descriptor)
+    sources = {pin["name"]: pin["geometry_source"] for pin in report["pins"]}
+    assert sources == {"VSS": "synthesized", "WEIRD": "none"}
+    assert report["unroutable_pins"] == [{"name": "WEIRD", "layer": [99, 99]}]
+    assert len(report["warnings"]) == 2
+    assert report["self_check"]["status"] == "pass"
+
+
+def test_non_rectangular_obs_passes_self_check(tmp_path, monkeypatch):
+    report = _run(
+        tmp_path,
+        monkeypatch,
+        layout=_l_shaped_layout(),
+        descriptor=_basic_descriptor(pins=[]),
+    )
+    assert report["self_check"]["status"] == "pass"
+
+
+def _corrupting_writer(monkeypatch, mutate):
+    """Wrap the real `_write_lef` so the on-disk file is corrupted after a
+    normal write -- the in-memory pin metadata stays untouched."""
+    from klayout_tools import lef_abstract
+
+    real_write = lef_abstract._write_lef
+
+    def write(**kwargs):
+        real_write(**kwargs)
+        path = Path(kwargs["output_path"])
+        path.write_text(mutate(path.read_text(encoding="utf-8")), encoding="utf-8")
+
+    monkeypatch.setattr(lef_abstract, "_write_lef", write)
+
+
+def _drop_pin(name: str):
+    def mutate(text: str) -> str:
+        lines = text.splitlines(keepends=True)
+        start = lines.index(f"  PIN {name}\n")
+        end = lines.index(f"  END {name}\n")
+        return "".join(lines[:start] + lines[end + 1 :])
+
+    return mutate
+
+
+def test_run_self_check_catches_on_disk_defect(tmp_path, monkeypatch):
+    _corrupting_writer(monkeypatch, _drop_pin("VOUT"))
+    report = _run(tmp_path, monkeypatch)
+
+    # In-memory metadata still claims both pins...
+    assert {pin["name"] for pin in report["pins"]} == {"VDD", "VOUT"}
+    # ...but the check read the file and found the dropped one.
+    check = report["self_check"]
+    assert check["status"] == "fail"
+    assert [(f["code"], f["macro"], f["pin"]) for f in check["findings"]] == [
+        ("missing_pin", "analog_block", "VOUT")
+    ]
+    assert Path(report["output"]).is_file()  # left on disk for diagnosis
+
+
+def test_run_self_check_catches_truncation(tmp_path, monkeypatch):
+    _corrupting_writer(monkeypatch, lambda text: text[: len(text) // 2])
+    report = _run(tmp_path, monkeypatch)
+    codes = {f["code"] for f in report["self_check"]["findings"]}
+    assert report["self_check"]["status"] == "fail"
+    assert {"unclosed_block", "missing_end_library"} <= codes
+
+
+def test_run_readback_failure_raises_lef_abstract_error(tmp_path, monkeypatch):
+    from klayout_tools import lef_abstract
+
+    real_write = lef_abstract._write_lef
+
+    def write(**kwargs):
+        real_write(**kwargs)
+        Path(kwargs["output_path"]).unlink()
+
+    monkeypatch.setattr(lef_abstract, "_write_lef", write)
+    with pytest.raises(LefAbstractError, match="could not read back"):
+        _run(tmp_path, monkeypatch)
+
+
+# -- CLI contract --------------------------------------------------------------
+
+
+def _cli_args(tmp_path: Path, monkeypatch, *extra: str) -> list[str]:
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    layout_path = _write_layout(_basic_layout(), tmp_path / "block.gds")
+    socket_path = _write_socket(_basic_descriptor(), tmp_path / "socket.json")
+    return [
+        "lef-abstract",
+        layout_path,
+        "--socket",
+        socket_path,
+        "--macro-name",
+        "analog_block",
+        "--cell-library",
+        "sky130_fd_sc_hd",
+        "-o",
+        str(tmp_path / "out.lef"),
+        *extra,
+    ]
+
+
+def test_cli_self_check_pass_json_exit_0(tmp_path, monkeypatch, capsys):
+    exit_code = main(_cli_args(tmp_path, monkeypatch, "--format", "json"))
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["self_check"]["status"] == "pass"
+
+
+def test_cli_self_check_pass_text(tmp_path, monkeypatch, capsys):
+    exit_code = main(_cli_args(tmp_path, monkeypatch))
+    assert exit_code == 0
+    assert "self_check: pass" in capsys.readouterr().out
+
+
+def test_cli_self_check_fail_json_exit_3(tmp_path, monkeypatch, capsys):
+    _corrupting_writer(monkeypatch, _drop_pin("VOUT"))
+    exit_code = main(_cli_args(tmp_path, monkeypatch, "--format", "json"))
+    assert exit_code == 3
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["self_check"]["status"] == "fail"
+    assert payload["self_check"]["findings"][0]["code"] == "missing_pin"
+    assert payload["macro_name"] == "analog_block"  # regular report fields intact
+    assert (tmp_path / "out.lef").is_file()
+
+
+def test_cli_self_check_fail_text_exit_3(tmp_path, monkeypatch, capsys):
+    _corrupting_writer(monkeypatch, lambda text: text.replace("VERSION 5.7 ;\n", ""))
+    exit_code = main(_cli_args(tmp_path, monkeypatch))
+    assert exit_code == 3
+    out = capsys.readouterr().out
+    assert "self_check: FAIL (1 finding(s))" in out
+    assert "[missing_version]" in out
+
+
+def test_cli_readback_failure_is_error_envelope_exit_1(tmp_path, monkeypatch, capsys):
+    from klayout_tools import lef_abstract
+
+    real_write = lef_abstract._write_lef
+
+    def write(**kwargs):
+        real_write(**kwargs)
+        Path(kwargs["output_path"]).unlink()
+
+    monkeypatch.setattr(lef_abstract, "_write_lef", write)
+    exit_code = main(_cli_args(tmp_path, monkeypatch, "--format", "json"))
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    payload = json.loads(captured.err)
+    assert payload["error"]["command"] == "lef-abstract"
+    assert "could not read back" in payload["error"]["message"]
+
+
+# --------------------------------------------------------------------------- #
+# power_pins verdict + T1 item 11 port accessibility end to end (issue #2839)
+# --------------------------------------------------------------------------- #
+
+
+def _supply_block(
+    *,
+    vdd_box: tuple[float, float, float, float] = (0.0, 2.0, 0.2, 3.0),
+    vdd_layer: tuple[int, int] = MET1_NET,
+    draw_vss: bool = True,
+) -> kdb.Layout:
+    """A 5x5 um block with a VDD port (left edge by default) and a VSS port
+    on the right edge, each a drawn met1 box labelled at its centre -- so
+    `klt socket-check` (which needs the labels) and `klt lef-abstract`
+    (which needs the metal) can both run on the same stream."""
+    layout = kdb.Layout()
+    layout.dbu = DBU_UM
+    top = layout.create_cell("ANALOG_BLOCK")
+    ports = [("VDD", vdd_box, vdd_layer)]
+    vss_box = (4.8, 2.0, 5.0, 3.0)
+    ports.append(("VSS", vss_box, MET1_NET))
+    for name, (x0, y0, x1, y1), layer in ports:
+        index = layout.layer(*layer)
+        if name != "VSS" or draw_vss:
+            top.shapes(index).insert(_box_um(x0, y0, x1, y1))
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        top.shapes(index).insert(
+            kdb.Text(
+                name, kdb.Trans(kdb.Vector(round(cx / DBU_UM), round(cy / DBU_UM)))
+            )
+        )
+    return layout
+
+
+def _supply_socket(
+    *,
+    vdd_box: tuple[float, float, float, float] = (0.0, 2.0, 0.2, 3.0),
+    vdd_layer: tuple[int, int] = MET1_NET,
+    vdd_use: str = "POWER",
+    with_vss: bool = True,
+) -> dict:
+    pins = [
+        {
+            "name": "VDD",
+            "layer": list(vdd_layer),
+            "x": (vdd_box[0] + vdd_box[2]) / 2,
+            "y": (vdd_box[1] + vdd_box[3]) / 2,
+            "use": vdd_use,
+            "direction": "INOUT",
+        }
+    ]
+    if with_vss:
+        pins.append(
+            {
+                "name": "VSS",
+                "layer": list(MET1_NET),
+                "x": 4.9,
+                "y": 2.5,
+                "use": "GROUND",
+                "direction": "INOUT",
+            }
+        )
+    return _basic_descriptor(pins=pins)
+
+
+def test_power_pins_pass_for_drawn_power_and_ground(tmp_path, monkeypatch):
+    report = _run(
+        tmp_path, monkeypatch, layout=_supply_block(), descriptor=_supply_socket()
+    )
+
+    assert report["power_pins"]["status"] == "pass", report["power_pins"]
+    assert report["power_pins"]["pins"] == [
+        {
+            "name": "VDD",
+            "use": "POWER",
+            "use_read_back": "POWER",
+            "layer": "met1",
+            "geometry_source": "drawn",
+        },
+        {
+            "name": "VSS",
+            "use": "GROUND",
+            "use_read_back": "GROUND",
+            "layer": "met1",
+            "geometry_source": "drawn",
+        },
+    ]
+    # Additive per-pin echo of the descriptor's declared GDS layer.
+    assert {pin["name"]: pin["gds_layer"] for pin in report["pins"]} == {
+        "VDD": [68, 20],
+        "VSS": [68, 20],
+    }
+
+
+def test_power_pins_fail_without_ground_and_for_synthesized_port(tmp_path, monkeypatch):
+    no_ground = _run(
+        tmp_path,
+        monkeypatch,
+        layout=_supply_block(),
+        descriptor=_supply_socket(with_vss=False),
+    )
+    assert [f["code"] for f in no_ground["power_pins"]["findings"]] == ["no_ground_pin"]
+
+    synthesized = _run(
+        tmp_path,
+        monkeypatch,
+        layout=_supply_block(draw_vss=False),
+        descriptor=_supply_socket(),
+    )
+    findings = synthesized["power_pins"]["findings"]
+    assert [(f["code"], f["pin"]) for f in findings] == [("port_not_drawn", "VSS")]
+    assert synthesized["power_pins"]["status"] == "fail"
+    # The structural self-check is unaffected -- a synthesized PORT is not a
+    # structural defect.
+    assert synthesized["self_check"]["status"] == "pass"
+
+
+def test_read_back_pin_uses_reads_the_written_use():
+    from klayout_tools.lef_abstract import _read_back_pin_uses, check_power_pins
+
+    text = (
+        "VERSION 5.7 ;\nMACRO m\n  PIN VDD\n    DIRECTION INOUT ;\n    USE SIGNAL ;\n"
+        "  END VDD\n  PIN VSS\n    USE GROUND ;\n  END VSS\nEND m\nEND LIBRARY\n"
+    )
+    assert _read_back_pin_uses(text) == {"VDD": "SIGNAL", "VSS": "GROUND"}
+    verdict = check_power_pins(
+        [
+            {
+                "name": "VDD",
+                "use": "POWER",
+                "lef_layer": "met1",
+                "geometry_source": "drawn",
+            },
+            {
+                "name": "VSS",
+                "use": "GROUND",
+                "lef_layer": "met1",
+                "geometry_source": "drawn",
+            },
+        ],
+        text,
+    )
+    assert [(f["code"], f["pin"]) for f in verdict["findings"]] == [
+        ("use_not_written", "VDD")
+    ]
+
+
+def test_cli_require_power_pins_exit_code(tmp_path, monkeypatch, capsys):
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    layout_path = _write_layout(_supply_block(draw_vss=False), tmp_path / "block.gds")
+    socket_path = _write_socket(_supply_socket(), tmp_path / "socket.json")
+    argv = [
+        "lef-abstract",
+        layout_path,
+        "--socket",
+        socket_path,
+        "--macro-name",
+        "analog_block",
+        "--cell-library",
+        "sky130_fd_sc_hd",
+        "--output",
+        str(tmp_path / "out.lef"),
+        "--format",
+        "json",
+    ]
+
+    assert main(argv) == 0
+    capsys.readouterr()
+    assert main([*argv, "--require-power-pins"]) == 3
+    assert json.loads(capsys.readouterr().out)["power_pins"]["status"] == "fail"
+
+
+def _real_port_evidence(tmp_path, monkeypatch, *, layout, descriptor):
+    """Real `klt socket-check` + `klt lef-abstract` envelopes for one block,
+    shaped as the resolutions `klt signoff`'s item 11 grades."""
+    from klayout_tools.socket_check import run_socket_check
+
+    lef_report = _run(tmp_path, monkeypatch, layout=layout, descriptor=descriptor)
+    socket_report = run_socket_check(
+        str(tmp_path / "block.gds"), str(tmp_path / "socket.json")
+    )
+    return {"envelope": socket_report}, {"envelope": lef_report}
+
+
+@pytest.mark.parametrize(
+    ("layout_kwargs", "socket_kwargs", "expected"),
+    [
+        # Both supplies on the boundary, on a routing layer: met.
+        ({}, {}, None),
+        # VDD moved to the block interior.
+        (
+            {"vdd_box": (2.0, 2.0, 2.2, 3.0)},
+            {"vdd_box": (2.0, 2.0, 2.2, 3.0)},
+            "power_port_interior_only",
+        ),
+        # VDD on nwell: drawn and on the edge, but no LEF routing layer.
+        (
+            {"vdd_layer": NWELL},
+            {"vdd_layer": NWELL},
+            "power_port_layer_disallowed",
+        ),
+        # Descriptor declares VDD as a signal: the LEF says USE SIGNAL, so
+        # no supply port of that name exists on the GDS side either.
+        ({}, {"vdd_use": "SIGNAL"}, "no_edge_power_port"),
+    ],
+)
+def test_item_11_port_accessibility_end_to_end(
+    tmp_path, monkeypatch, layout_kwargs, socket_kwargs, expected
+):
+    """Issue #2839: item 11's port-accessibility half graded from envelopes
+    the real verbs produced, not hand-written fixtures."""
+    from klayout_tools.signoff_power_delivery import (
+        _grade_power_ports,
+        _read_power_port_policy,
+    )
+
+    socket, lef = _real_port_evidence(
+        tmp_path,
+        monkeypatch,
+        layout=_supply_block(**layout_kwargs),
+        descriptor=_supply_socket(**socket_kwargs),
+    )
+    reason, block = _grade_power_ports(
+        socket, lef, ["VDD", "VSS"], _read_power_port_policy({"required": True})
+    )
+
+    assert reason == expected, block
+    if expected is None:
+        assert [entry["net"] for entry in block["ports"]] == ["VDD", "VSS"]
+        assert block["ports"][0]["port"]["accessible_edges"] == ["left"]
+        assert block["ports"][0]["lef_pin"] == {
+            "name": "VDD",
+            "use": "POWER",
+            "layer": "met1",
+            "geometry_source": "drawn",
+        }

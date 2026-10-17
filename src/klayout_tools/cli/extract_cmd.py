@@ -40,6 +40,8 @@ and diff verdict-bearing fields. Both reuse ``status: "match"`` /
 """
 
 import argparse
+import sys
+from typing import Any
 
 from .._paths import looks_like_request_document
 from ..extract import (
@@ -52,8 +54,13 @@ from ..extract import (
     run_extract,
 )
 from . import _request_document as reqdoc
-from ._parsing import parse_deck_options, parse_declared_pins, parse_label_layers
-from .output import emit_error, emit_success, render_rerun_drift
+from ._parsing import (
+    parse_deck_options,
+    parse_declared_pins,
+    parse_label_layers,
+    parse_probes,
+)
+from .output import EXIT_USAGE_ERROR, emit_error, emit_success, render_rerun_drift
 
 EXIT_OK = 0
 EXIT_DRIFTED = 3
@@ -111,6 +118,21 @@ def _parse_pin_source_cells(raw: str | None) -> frozenset[str] | None:
     return names
 
 
+def _parse_hierarchical_cells(raw: str | None) -> tuple[str, ...]:
+    """Parse the ``--hierarchical-cells`` flag's comma-separated value (issue
+    #2722) into a tuple of cell names, ``()`` when the flag was omitted."""
+    if raw is None:
+        return ()
+    names = tuple(name.strip() for name in raw.split(",") if name.strip())
+    if not names:
+        raise ExtractError(
+            "--hierarchical-cells was given but contains no non-empty name "
+            f"(got {raw!r}) -- pass a comma-separated list of cell names, "
+            "e.g. --hierarchical-cells stage_a,stage_b"
+        )
+    return names
+
+
 def _parse_matched_groups(raw: list[str] | None) -> dict[str, tuple[str, ...]] | None:
     """Parse the ``--matched-group`` flag's ``NAME=INST1,INST2[,...]``
     entries (issue #1018, repeatable) into a ``dict``, or ``None`` when the
@@ -153,6 +175,108 @@ def _parse_matched_groups(raw: list[str] | None) -> dict[str, tuple[str, ...]] |
             )
         groups[name] = instances
     return groups
+
+
+def _parse_resistance_paths(
+    raw: list[list[str]] | None,
+) -> list[tuple[int, str, str]] | None:
+    """Parse the repeatable ``--resistance-path NET_ID FROM TO`` triples
+    (issue #2765) into ``(net_id, from, to)`` tuples, or ``None`` when the
+    flag was never given. ``NET_ID`` must be an integer
+    ``parasitics.nets[].net_id``; ``FROM``/``TO`` are exact emitted node IDs
+    (``terminals[].leg_net``), passed through verbatim.
+    """
+    if raw is None:
+        return None
+    queries: list[tuple[int, str, str]] = []
+    for net_id_raw, source, target in raw:
+        try:
+            net_id = int(net_id_raw)
+        except ValueError:
+            raise ExtractError(
+                f"--resistance-path NET_ID must be an integer "
+                f"parasitics.nets[].net_id (got {net_id_raw!r})"
+            ) from None
+        queries.append((net_id, source, target))
+    return queries
+
+
+def _request_probes(request: dict) -> list[Any] | None:
+    """The request document's ``probes`` -- an array of ``--probe`` spec
+    strings and/or ``{"name", "layer", "x", "y"}`` objects (issue #2986),
+    handed to the shared :func:`.._parsing.parse_probes` unchanged."""
+    value = request.get("probes")
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise ExtractError(
+            "`klt extract` request field 'probes' must be an array of probe "
+            f"objects or spec strings (got {type(value).__name__})"
+        )
+    return value
+
+
+def _request_resistance_paths(request: dict) -> list[list[str]] | None:
+    """The request document's ``resistance_paths`` -- an array of
+    ``{"net_id": <int>, "from": <str>, "to": <str>}`` objects -- normalized
+    into the ``[[NET_ID, FROM, TO], ...]`` argv encoding the repeatable
+    ``--resistance-path`` flag accumulates (issue #2765), so both forms run
+    through :func:`_parse_resistance_paths` unchanged."""
+    value = request.get("resistance_paths")
+    if value is None:
+        return None
+    expected = 'an array of {"net_id": int, "from": str, "to": str} objects'
+    if not isinstance(value, list):
+        raise ExtractError(
+            f"`klt extract` request field 'resistance_paths' must be {expected}"
+        )
+    triples: list[list[str]] = []
+    for entry in value:
+        if (
+            not isinstance(entry, dict)
+            or set(entry) != {"net_id", "from", "to"}
+            or isinstance(entry["net_id"], bool)
+            or not isinstance(entry["net_id"], int)
+            or not isinstance(entry["from"], str)
+            or not isinstance(entry["to"], str)
+        ):
+            raise ExtractError(
+                f"`klt extract` request field 'resistance_paths' must be "
+                f"{expected} (got entry {entry!r})"
+            )
+        triples.append([str(entry["net_id"]), entry["from"], entry["to"]])
+    return triples
+
+
+def _request_int(request: dict, key: str) -> int | None:
+    """``request[key]`` as an integer, or ``None`` when absent/``null``
+    (``bool`` and non-integral numbers are rejected)."""
+    value = request.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ExtractError(
+            f"`klt extract` request field {key!r} must be an integer (got "
+            f"{type(value).__name__}: {value!r})"
+        )
+    return value
+
+
+def _print_resistance_paths(parasitics: dict) -> None:
+    """Text-mode lines for ``parasitics.resistance_paths[]`` (issue #2765);
+    prints nothing when no ``--resistance-path`` was given."""
+    for query in parasitics.get("resistance_paths") or ():
+        head = (
+            f"resistance_path: net_id={query['net_id']} "
+            f"{query['from']} -> {query['to']}  status={query['status']}"
+        )
+        if query["status"] == "ok":
+            print(
+                f"{head}  series_R={query['resistance_ohm']} ohm  "
+                f"via {' -> '.join(query['path_nodes'])}"
+            )
+        else:
+            print(f"{head}  ({query['reason']})")
 
 
 def _parse_def_net_connections(
@@ -223,6 +347,8 @@ _REQUEST_FIELD_DESTS = {
         "file",
         "deck",
         "output",
+        "no_netlist",
+        "progress",
         "top",
         "pdk",
         "pdk_root",
@@ -232,8 +358,19 @@ _REQUEST_FIELD_DESTS = {
         "spef",
         "critical_nets",
         "parasitics_nets",
+        "critical_net_patterns",
+        "critical_net_all",
+        "critical_net_excludes",
+        "parasitics_net_patterns",
+        "strict_net_patterns",
+        "parasitic_variants",
         "parasitics_top_cell_only",
+        "resistance_graph",
         "distributed_rc",
+        "substrate_tie_ohms",
+        "resistance_paths",
+        "resistance_path_max_nodes",
+        "resistance_path_max_resistors",
         "mom_rlc_net",
         "mom_rlc_resistance_ohm",
         "mom_rlc_capacitance_ff",
@@ -243,14 +380,17 @@ _REQUEST_FIELD_DESTS = {
         "top_cell_pins",
         "pins",
         "def_pins",
+        "rename_declared_pins",
         "pin_source_cells",
         "deck_options",
         "label_layers",
+        "probes",
         "defer_resistor_fixed_offset",
         "abstract_cells",
         "abstract_cell_lef",
         "subcircuit",
         "subcircuit_output",
+        "hierarchical_cells",
         "matched_groups",
     )
 }
@@ -317,6 +457,10 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             "file": _path("file"),
             "deck": _str("deck"),
             "output": _path("output"),
+            "no_netlist": _bool("no_netlist"),
+            # Tri-state like the flag: absent keeps the stderr-is-not-a-TTY
+            # auto default (issue #3181).
+            "progress": _bool("progress") if "progress" in request else None,
             "top": _str("top"),
             "pdk": _str("pdk"),
             "pdk_root": _path("pdk_root"),
@@ -326,8 +470,23 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             "spef": _path("spef"),
             "critical_nets": _str_list("critical_nets"),
             "parasitics_nets": _str_list("parasitics_nets"),
+            "critical_net_patterns": _str_list("critical_net_patterns"),
+            "critical_net_all": _bool("critical_net_all"),
+            "critical_net_excludes": _str_list("critical_net_excludes"),
+            "parasitics_net_patterns": _str_list("parasitics_net_patterns"),
+            "strict_net_patterns": _bool("strict_net_patterns"),
+            "parasitic_variants": _str_list("parasitic_variants"),
             "parasitics_top_cell_only": _bool("parasitics_top_cell_only"),
+            "resistance_graph": _bool("resistance_graph"),
             "distributed_rc": _bool("distributed_rc"),
+            "substrate_tie_ohms": _number("substrate_tie_ohms"),
+            "resistance_paths": _request_resistance_paths(request),
+            "resistance_path_max_nodes": _request_int(
+                request, "resistance_path_max_nodes"
+            ),
+            "resistance_path_max_resistors": _request_int(
+                request, "resistance_path_max_resistors"
+            ),
             "mom_rlc_net": _str("mom_rlc_net"),
             "mom_rlc_resistance_ohm": _number("mom_rlc_resistance_ohm"),
             "mom_rlc_capacitance_ff": _number("mom_rlc_capacitance_ff"),
@@ -337,6 +496,7 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             "top_cell_pins": _bool("top_cell_pins"),
             "pins": _comma_joined("pins"),
             "def_pins": _path("def_pins"),
+            "rename_declared_pins": _bool("rename_declared_pins"),
             "pin_source_cells": _comma_joined("pin_source_cells"),
             "deck_options": reqdoc.get_str_map_as_pairs(
                 request,
@@ -352,11 +512,13 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
                 flag="--label-layer",
                 error_cls=ExtractError,
             ),
+            "probes": _request_probes(request),
             "defer_resistor_fixed_offset": _bool("defer_resistor_fixed_offset"),
             "abstract_cells": _str_list("abstract_cells"),
             "abstract_cell_lef": _str_list("abstract_cell_lef", paths=True),
             "subcircuit": _str("subcircuit"),
             "subcircuit_output": _path("subcircuit_output"),
+            "hierarchical_cells": _comma_joined("hierarchical_cells"),
             "matched_groups": reqdoc.get_group_map_as_pairs(
                 request,
                 "matched_groups",
@@ -387,19 +549,42 @@ def run(args: argparse.Namespace) -> int:
             args = _apply_request(args)
         if not args.deck:
             raise ExtractError("argument --deck is required")
+        if args.parasitic_variants and not args.parasitics:
+            # Usage error (exit 2), caught here rather than in `run_extract`
+            # so a request document gets the same exit code as argv.
+            return emit_error(
+                "extract",
+                "--parasitic-variant requires --parasitics",
+                args.format,
+                exit_code=EXIT_USAGE_ERROR,
+            )
         declared_pins = _parse_declared_pins(args.pins)
         def_pins = _parse_def_pins(args.def_pins)
         pin_source_cells = _parse_pin_source_cells(args.pin_source_cells)
+        hierarchical_cells = _parse_hierarchical_cells(args.hierarchical_cells)
         deck_options = _parse_deck_options(args.deck_options)
         label_layers = _parse_label_layers(args.label_layers)
+        probes = parse_probes(args.probes, ExtractError)
         def_net_connections = _parse_def_net_connections(
             args.def_net_connections, spef_output=args.spef
         )
         matched_device_groups = _parse_matched_groups(args.matched_groups)
+        resistance_paths = _parse_resistance_paths(args.resistance_paths)
         report = run_extract(
             args.file,
             args.deck,
             output=args.output,
+            no_netlist=args.no_netlist,
+            # `--progress` (issue #3181): stage lines + heartbeat on stderr.
+            # Unset means "heartbeat only, and only when stderr is not a
+            # TTY": an agent or CI run gets liveness on a long extraction,
+            # while a short run keeps stderr clean (the error envelope lives
+            # there) and an interactive shell stays quiet.
+            progress=(
+                args.progress
+                if args.progress is not None
+                else ("heartbeat" if not sys.stderr.isatty() else False)
+            ),
             top=args.top,
             pdk_variant=args.pdk,
             pdk_root=args.pdk_root,
@@ -422,6 +607,9 @@ def run(args: argparse.Namespace) -> int:
             # curated default. `None` when the flag was never given,
             # unchanged from every call site that predates it.
             label_layers=label_layers,
+            # `--probe` (issue #2986): point-to-net queries answered on this
+            # run's own extraction. `[]` when the flag was never given.
+            probes=probes,
             # `--abstract-cells`/`--abstract-cell-lef` (issue #620): cell-
             # level black-box abstraction. `()` when the flag(s) were never
             # given, unchanged from every call site that predates them.
@@ -456,16 +644,41 @@ def run(args: argparse.Namespace) -> int:
             # every net in the design. `None` when the flag was never given,
             # unchanged from every call site that predates it.
             parasitics_nets=args.parasitics_nets,
+            # Issue #2974: glob / all-nets selectors resolved against the
+            # extracted nets. Defaults leave every earlier call unchanged.
+            critical_net_patterns=args.critical_net_patterns,
+            critical_net_all=args.critical_net_all,
+            critical_net_excludes=args.critical_net_excludes,
+            parasitics_net_patterns=args.parasitics_net_patterns,
+            strict_net_patterns=args.strict_net_patterns,
+            # `--parasitic-variant` (issue #3056): drops R/C elements at
+            # injection time. `None` when the flag was never given,
+            # unchanged from every call site that predates it.
+            parasitic_variants=args.parasitic_variants,
             # `--parasitics-top-cell-only` (issue #1704): additionally
             # splits each net's ground R/C into a top-cell-drawn/instance-
             # drawn share. `False` when the flag was never given, unchanged
             # from every call site that predates it.
             parasitics_top_cell_only=args.parasitics_top_cell_only,
+            # `--resistance-graph` (issue #2982): additive opt-in
+            # `parasitics.nets[].resistance_graph`. `False` when the flag
+            # was never given, unchanged from every call site before it.
+            resistance_graph=args.resistance_graph,
             # `--distributed-rc` (issue #977, Epic #709 Phase 2b): replaces
             # the star/Gamma-shunt R/C model with a distributed ladder for
             # every `--critical-net`-named net. `False` when the flag was
             # never given, unchanged from every call site that predates it.
             distributed_rc=args.distributed_rc,
+            # `--substrate-tie-ohms` (issue #3089): `None` when the flag was
+            # never given -- the default 1e12 tie.
+            substrate_tie_ohms=args.substrate_tie_ohms,
+            # `--resistance-path` (issue #2765): shortest series path
+            # resistance queries over --distributed-rc ladders. `None` when
+            # the flags were never given, unchanged from every call site
+            # that predates them.
+            resistance_paths=resistance_paths,
+            resistance_path_max_nodes=args.resistance_path_max_nodes,
+            resistance_path_max_resistors=args.resistance_path_max_resistors,
             # `--def-net-connections` (issue #961): real cell-instance
             # `*CONN`/`*RES` correlation for --spef, parsed from a routed
             # DEF's own `NETS` section. `None` when the flag was never
@@ -493,6 +706,12 @@ def run(args: argparse.Namespace) -> int:
             # was never given, unchanged from every call site that
             # predates it.
             def_pins=def_pins,
+            # `--rename-declared-pins` (issue #2854): renames each
+            # surviving promoted pin net to its declared name, so the
+            # written `.SUBCKT` header carries canonical interface names.
+            # `False` when the flag was never given, unchanged from every
+            # call site that predates it.
+            rename_declared_pins=args.rename_declared_pins,
             # `--pin-source-cells` (issue #1513): the positional, probe-based
             # declared-pin mechanism for a `klt gen-compose`d assembly with
             # no governing top-level DEF -- derives the declared top-level
@@ -508,9 +727,17 @@ def run(args: argparse.Namespace) -> int:
             # never given, unchanged from every call site that predates them.
             subcircuit_cell=args.subcircuit,
             subcircuit_output=args.subcircuit_output,
+            # `--hierarchical-cells` (issue #2722): opt-in hierarchical
+            # `.SUBCKT` emission. `()` when the flag was never given.
+            hierarchical_cells=hierarchical_cells,
         )
     except ExtractError as exc:
-        return emit_error("extract", str(exc), args.format)
+        # `error.code` is set only for classified failures (issue #2761's
+        # FinFET geometry refusals); every other error keeps the two-field
+        # envelope byte-for-byte.
+        return emit_error(
+            "extract", str(exc), args.format, code=getattr(exc, "code", None)
+        )
 
     emit_success(report, args.format, _print_text)
 
@@ -550,6 +777,17 @@ def _print_label_layers(label_layers: dict | None) -> None:
         for role, layer in sorted(label_layers.items())
     )
     print(f"label_layers: {rendered}")
+
+
+def _print_probes(probes: list | None) -> None:
+    """One human-readable line per ``--probe`` result (issue #2986), or
+    nothing when none was given."""
+    for probe in probes or []:
+        where = f"{probe['layer']} ({probe['x_um']}, {probe['y_um']})"
+        if probe["found"]:
+            print(f"probe {probe['name']}: {where} -> {probe['net']}")
+        else:
+            print(f"probe {probe['name']}: {where} -> not found")
 
 
 def _print_substrate_spreading(block: dict | None) -> None:
@@ -604,11 +842,14 @@ def _print_text(report: dict) -> None:
     # this line adds no branch to an already long function -- the same shape
     # `_print_substrate_spreading` below already uses.
     _print_label_layers(report.get("label_layers"))
+    _print_probes(report.get("probes"))
     print(f"top: {report['top']}")
     print(f"dbu_um: {report['dbu_um']}")
     print(f"status: {report['status']}")
+    # Both are None under `--no-netlist` (issue #2850).
     print(f"netlist_path: {report['netlist_path']}")
     print(f"netlist_sha256: {report['netlist_sha256']}")
+    print(f"netlist_normalized_sha256: {report['netlist_normalized_sha256']}")
     print(
         f"devices: {report['device_count']}  "
         f"nets: {report['net_count']}  "
@@ -646,12 +887,17 @@ def _print_text(report: dict) -> None:
         parasitics_nets = parasitics.get("parasitics_nets")
         if parasitics_nets:
             print(f"parasitics_nets: {', '.join(parasitics_nets)}")
+        # Additive (issue #3056): only printed when --parasitic-variant was given.
+        if parasitics.get("parasitic_variant"):
+            print(f"parasitic_variant: {', '.join(parasitics['parasitic_variant'])}")
         # Additive (issue #977): only printed when --distributed-rc was given.
         if parasitics.get("distributed_rc"):
             distributed_count = sum(
                 1 for n in parasitics["nets"] if n.get("rc_model") == "distributed"
             )
             print(f"distributed_rc: {distributed_count} net(s)")
+        # Additive (issue #2765): only prints when --resistance-path was given.
+        _print_resistance_paths(parasitics)
         # Additive (issue #1704): only printed when --parasitics-top-cell-only
         # was given -- each `parasitics.nets[]` entry's
         # `resistance_ohm_top_cell`/`capacitance_ff_top_cell` otherwise stay
@@ -733,6 +979,8 @@ def _print_text(report: dict) -> None:
 
     # Additive (issue #2245): a no-op unless --subcircuit was given.
     _print_subcircuit_text(report.get("subcircuit"))
+    # Additive (issue #2722): a no-op unless --hierarchical-cells was given.
+    _print_hierarchy_text(report.get("hierarchy"))
 
     # Additive (issue #2473): a no-op unless --def-pins was given and its
     # declared-vs-promoted reconciliation raised an error-severity finding.
@@ -765,6 +1013,24 @@ def _print_def_pin_promotion_text(promotion: dict | None) -> None:
             f"  [{finding['severity']}] {finding['layer']}/"
             f"{finding['datatype']} (outside this deck's connectivity "
             f"graph): {', '.join(finding['pins'])}"
+        )
+
+
+def _print_hierarchy_text(hierarchy: dict | None) -> None:
+    """Render the `hierarchy` block (issue #2722) -- nothing at all when
+    `--hierarchical-cells` was never given."""
+    if hierarchy is None:
+        return
+    print(
+        f"hierarchy: {len(hierarchy['cells'])} cell(s)  "
+        f"top devices: {hierarchy['top_device_count']}  "
+        f"top instances: {hierarchy['top_instance_count']}"
+    )
+    for entry in hierarchy["cells"]:
+        print(
+            f"  {entry['cell']}: {entry['placements']} placement(s)  "
+            f"devices: {entry['device_count']}  "
+            f"pins: {' '.join(entry['pins'])}"
         )
 
 

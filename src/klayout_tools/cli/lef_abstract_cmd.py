@@ -4,17 +4,23 @@ socket descriptor and serialise the report as text or JSON.
 Output goes through the shared envelope helpers in :mod:`.output`, as with
 every other ``klt`` subcommand -- see ``docs/json-contract.md``.
 
-Exit codes (see ``docs/cli/socket-check.md``'s LEF translation section for
-the full table):
-    0 - the LEF abstract was written successfully
+Exit codes (see ``docs/cli/lef-abstract.md`` for the full table):
+    0 - the LEF abstract was written and its structural self-check passed
+        (``self_check.status == "pass"``)
     1 - failed to run (bad layout/socket descriptor, unresolvable top cell,
-        unresolvable PDK/tech-LEF, or an unwritable output path) --
-        returned by ``emit_error`` as ``output.ERROR_EXIT_CODE``
+        unresolvable PDK/tech-LEF, an unwritable output path, or the written
+        file could not be read back for the self-check) -- returned by
+        ``emit_error`` as ``output.ERROR_EXIT_CODE``; no report is emitted
+    3 - the LEF abstract was written and the report emitted, but the
+        structural self-check of the file read back from disk found defects
+        (``self_check.status == "fail"``, issue #2769); the file is left on
+        disk for diagnosis and must not be consumed -- or, with
+        ``--require-power-pins`` (issue #2839), the supply-pin verdict
+        failed (``power_pins.status == "fail"``)
 (2 is reserved for argparse usage errors, as with every other ``klt``
-subcommand. There is no exit code 3 -- unlike ``klt socket-check``,
-``klt lef-abstract`` has no pass/fail concept of its own; a pin resolving to
-synthesized (rather than drawn) geometry is reported in ``warnings``, not
-treated as a failure.)
+subcommand. A pin resolving to synthesized geometry, or to no PORT at all
+(``unroutable_pins``), is reported in ``warnings`` and is not a structural
+failure.)
 """
 
 from __future__ import annotations
@@ -23,6 +29,9 @@ import argparse
 
 from ..lef_abstract import LefAbstractError, run_lef_abstract
 from .output import emit_error, emit_success
+
+#: The LEF was written and reported, but its structural self-check failed.
+EXIT_SELF_CHECK_FAILED = 3
 
 
 def run(args: argparse.Namespace) -> int:
@@ -45,6 +54,13 @@ def run(args: argparse.Namespace) -> int:
 
     emit_success(report, args.format, _print_text)
 
+    if report["self_check"]["status"] != "pass":
+        return EXIT_SELF_CHECK_FAILED
+    # Issue #2839: opt-in gate on the supply-pin verdict.
+    if getattr(args, "require_power_pins", False) and (
+        report["power_pins"]["status"] != "pass"
+    ):
+        return EXIT_SELF_CHECK_FAILED
     return 0
 
 
@@ -82,6 +98,30 @@ def _print_text(report: dict) -> None:
         print("warnings:")
         for warning in report["warnings"]:
             print(f"  {warning}")
+
+    _print_self_check(report["self_check"])
+    _print_power_pins(report["power_pins"])
+
+
+def _print_power_pins(power_pins: dict) -> None:
+    print()
+    if power_pins["status"] == "pass":
+        print("power_pins: pass")
+        return
+    print(f"power_pins: FAIL ({len(power_pins['findings'])} finding(s))")
+    for finding in power_pins["findings"]:
+        print(f"  [{finding['code']}] {finding['message']}")
+
+
+def _print_self_check(self_check: dict) -> None:
+    print()
+    if self_check["status"] == "pass":
+        print("self_check: pass")
+        return
+    print(f"self_check: FAIL ({len(self_check['findings'])} finding(s))")
+    for finding in self_check["findings"]:
+        where = f"line {finding['line']}: " if finding["line"] is not None else ""
+        print(f"  [{finding['code']}] {where}{finding['message']}")
 
 
 __all__ = ["run"]

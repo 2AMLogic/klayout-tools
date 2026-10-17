@@ -89,6 +89,15 @@ recognition; it has since grown three follow-on increments the way
 - **Added by #2113**: nominal first-order metal parasitics for all five
   levels and four adjacent vertical-overlap pairs. See ``PARASITICS`` for
   SG13CMOS5L-specific source values and the uncalibrated model's limits.
+- **Added by #3645** (PR b of #3573): NW.d/d1/f/f1 (NWell space to external
+  N+ / substrate-tie P+ Activ) as ``nwell.space.{nactiv,pactiv}[.hv].1``.
+- **Added by #3573**: NW.c/NW.c1/NW.e/NW.e1 (NWell enclosure of P+/N+
+  Activ, LV/HV split by ThickGateOx) as ``nwell.enclosing.{pactiv,nactiv}
+  [.hv].1``; approximations are listed at the rules. Not yet modelled, and
+  reported via ``UNCHECKED_RULES``: the DigiBnd variants NW.d1/f1.dig.
+- **Added by #3682**: NW.c1.dig / NW.e1.dig as ``nwell.enclosing.{pactiv,
+  nactiv}.dig.1`` through the second ``DerivedLayer`` context stage (HV Activ
+  inside DigiBnd 16/0); ``.hv.1`` now covers only HV Activ outside DigiBnd.
 - **Still out of scope**, left for follow-on issues: the
   ``res_metal1``..``res_topmetal1`` metal-resistor family (now reachable
   in principle now that #1417 lands the metal stack those bodies sit on,
@@ -96,7 +105,8 @@ recognition; it has since grown three follow-on increments the way
   diodes and non-metal parasitics.
 
 Source, read directly from a real ``ihp-sg13cmos5l`` install (standalone
-clone of https://github.com/IHP-GmbH/ihp-sg13cmos5l, Apache-2.0), **not**
+clone of https://github.com/IHP-GmbH/ihp-sg13cmos5l, Apache-2.0; archived
+2026-09-23, now the ``ihp-sg13cmos5l/`` subtree of IHP-GmbH/IHP-Open-PDK), **not**
 inherited from ``sg13g2.py`` by analogy, per #1400's own Background note --
 every value below was independently re-verified against this deck's own
 on-disk source:
@@ -189,7 +199,7 @@ on-disk source:
   ``5_21_topvia1.drc``: "TopVia1 connects Metal4 to TopMetal1" -- cmos5l's
   own TopVia1 lands on Metal4, not sg13g2's Metal5, since cmos5l's stack
   has no Metal5). ``RuleProvenance`` for these four rule families therefore
-  cites ``IHP-GmbH/ihp-sg13cmos5l`` (this repo's own commit, via
+  cites ``IHP-GmbH/ihp-sg13cmos5l`` (archived; this repo's own commit, via
   ``_cmos5l_provenance``) rather than the shared-sibling
   ``_cmos5l_shared_g2_provenance`` every other DRC rule in this deck uses.
   Every threshold value transcribed below (``Mn_a``/``Mn_b`` 0.20/0.21um,
@@ -321,11 +331,13 @@ device classes below carry golden layout->netlist pair tests in
 from __future__ import annotations
 
 from . import (
+    DerivedLayer,
     DrcRule,
     ExtractionDeck,
     LayerRC,
     MomCapacitorDevice,
     MOSFlavour,
+    NetSpaceSpec,
     ParasiticsDeck,
     ResistorDevice,
     RuleProvenance,
@@ -334,6 +346,12 @@ from . import (
 # `RuleProvenance.source_repo`/`.commit` for cmos5l's own (non-symlinked)
 # files -- the JSON threshold-value table and the .lyp/.lyt layer
 # definitions (see the module docstring's first source bullet).
+# Deliberately still the (archived 2026-09-23) standalone repo: the values
+# below were derived and verified at this exact commit, which only exists
+# there. `scripts/fetch-ihp-sg13cmos5l.sh` now fetches the `ihp-sg13cmos5l/`
+# subtree of IHP-Open-PDK `dev` (#2720); the pin here is NOT moved until the
+# values are re-verified against it (known upstream deltas since: .lyp
+# line 2170 colour, `rf[n|p]mos_minW` 0.15u -> 0.39u in sg13cmos5l_tech.json).
 _IHP_SG13CMOS5L_REPO = "IHP-GmbH/ihp-sg13cmos5l"
 _IHP_SG13CMOS5L_COMMIT = "607e18d4bd9214a52575c194b4181ef449f9252f"  # main, 2026-08-25
 
@@ -563,12 +581,27 @@ DECK: list[DrcRule] = [
         layer=(8, 0),  # Metal1.drawing
         other_layer=(19, 0),  # Via1.drawing
         check="enclosing",
+        require_containment=True,  # #2726: every cut must land on this conductor
         threshold_dbu=10,  # 0.01 um
         # 5_19_via1.drc rule "V1.c": via1_nseal.enclosed(metal1_drw, 0.01um,
         # euclidian) -> "5.19.  V1.c Min. Metal1 enclosure of Via1 is 0.01 um"
         # (drc_rules['V1_c'] == 0.01)
         scope="5.19 Via1",
         provenance=_cmos5l_provenance(f"{_DRC_BEOL_OWN}/5_19_via1.drc", "V1.c"),
+    ),
+    DrcRule(
+        id="metal2.enclosing.via1.1",
+        description="every Via1 must lie fully inside Metal2 (upper landing)",
+        layer=(10, 0),  # Metal2.drawing
+        other_layer=(19, 0),  # Via1.drawing
+        check="enclosing",
+        threshold_dbu=0,  # pure geometric containment, no margin
+        require_containment=True,
+        # Curated topology assertion (#2726): a Via1 cut connects Metal1
+        # to Metal2, so it must always sit on both. No upstream enclosure margin
+        # for the Metal2 side was verified, so none is invented here --
+        # threshold 0 means containment only, and no provenance is cited.
+        scope="Via1 upper-landing containment (curated)",
     ),
     # --- 5.17 Metaln, Metal2 instance (beol/5_17_metaln.drc) -- cmos5l's
     # own, non-symlinked local copy, scoped "M2-M4 only (no M5)" -----------
@@ -632,12 +665,27 @@ DECK: list[DrcRule] = [
         layer=(10, 0),  # Metal2.drawing
         other_layer=(29, 0),  # Via2.drawing
         check="enclosing",
+        require_containment=True,  # #2726: every cut must land on this conductor
         threshold_dbu=5,  # 0.005 um
         # 5_20_vian.drc rule "V2.c": via_lay.enclosed(metal_lay, 0.005um,
         # euclidian) -> "5.20. V2.c : Min. Metal2 enclosure of Via2 is
         # 0.005 um" (drc_rules['Vn_c'] == 0.005)
         scope="5.20 Vian",
         provenance=_cmos5l_provenance(f"{_DRC_BEOL_OWN}/5_20_vian.drc", "V2.c"),
+    ),
+    DrcRule(
+        id="metal3.enclosing.via2.1",
+        description="every Via2 must lie fully inside Metal3 (upper landing)",
+        layer=(30, 0),  # Metal3.drawing
+        other_layer=(29, 0),  # Via2.drawing
+        check="enclosing",
+        threshold_dbu=0,  # pure geometric containment, no margin
+        require_containment=True,
+        # Curated topology assertion (#2726): a Via2 cut connects Metal2
+        # to Metal3, so it must always sit on both. No upstream enclosure margin
+        # for the Metal3 side was verified, so none is invented here --
+        # threshold 0 means containment only, and no provenance is cited.
+        scope="Via2 upper-landing containment (curated)",
     ),
     # --- 5.17 Metaln, Metal3 instance (beol/5_17_metaln.drc) ---------------
     DrcRule(
@@ -699,12 +747,27 @@ DECK: list[DrcRule] = [
         layer=(30, 0),  # Metal3.drawing
         other_layer=(49, 0),  # Via3.drawing
         check="enclosing",
+        require_containment=True,  # #2726: every cut must land on this conductor
         threshold_dbu=5,  # 0.005 um
         # 5_20_vian.drc rule "V3.c": via_lay.enclosed(metal_lay, 0.005um,
         # euclidian) -> "5.20. V3.c : Min. Metal3 enclosure of Via3 is
         # 0.005 um" (drc_rules['Vn_c'] == 0.005)
         scope="5.20 Vian",
         provenance=_cmos5l_provenance(f"{_DRC_BEOL_OWN}/5_20_vian.drc", "V3.c"),
+    ),
+    DrcRule(
+        id="metal4.enclosing.via3.1",
+        description="every Via3 must lie fully inside Metal4 (upper landing)",
+        layer=(50, 0),  # Metal4.drawing
+        other_layer=(49, 0),  # Via3.drawing
+        check="enclosing",
+        threshold_dbu=0,  # pure geometric containment, no margin
+        require_containment=True,
+        # Curated topology assertion (#2726): a Via3 cut connects Metal3
+        # to Metal4, so it must always sit on both. No upstream enclosure margin
+        # for the Metal4 side was verified, so none is invented here --
+        # threshold 0 means containment only, and no provenance is cited.
+        scope="Via3 upper-landing containment (curated)",
     ),
     # --- 5.17 Metaln, Metal4 instance (beol/5_17_metaln.drc) -- the top of
     # this file's own templated table (cmos5l has no Metal5) ---------------
@@ -774,6 +837,7 @@ DECK: list[DrcRule] = [
         layer=(50, 0),  # Metal4.drawing
         other_layer=(125, 0),  # TopVia1.drawing
         check="enclosing",
+        require_containment=True,  # #2726: every cut must land on this conductor
         threshold_dbu=100,  # 0.10 um
         # 5_21_topvia1.drc rule "TV1.c": topvia1_nseal.enclosed(metal4_drw,
         # 0.10um, euclidian) -- "SG13CMOS5L: M4 is below TV1" (this file's
@@ -788,6 +852,7 @@ DECK: list[DrcRule] = [
         layer=(126, 0),  # TopMetal1.drawing
         other_layer=(125, 0),  # TopVia1.drawing
         check="enclosing",
+        require_containment=True,  # #2726: every cut must land on this conductor
         threshold_dbu=420,  # 0.42 um
         # 5_21_topvia1.drc rule "TV1.d": topvia1_nseal.enclosed(
         # topmetal1_drw, 0.42um, euclidian) -> "5.21. TV1.d : Min.
@@ -832,7 +897,381 @@ DECK: list[DrcRule] = [
             f"{_DRC_BEOL}/5_22_topmetal1.drc", "TM1.b"
         ),
     ),
+    # --- NWell (issue #3012), rule_decks/feol/5_1_nwell.drc + the maximal
+    # deck. Before this the deck had no NWell rule at all, so `31/0` was
+    # reported under `coverage.layers_in_stream_without_rules` and a
+    # multi-well layout got a vacuous `clean`. Only the two geometry-only
+    # rules are transcribed; NW.b1 (different-net spacing) is net-aware and
+    # is `nwell.space.2` (check="net_space", #3572). Values are
+    # sg13cmos5l_tech_default.json's NW_a / NW_b. -------------------------
+    DrcRule(
+        id="nwell.width.1",
+        description="minimum NWell width",
+        layer=(31, 0),  # NWell.drawing
+        check="width",
+        threshold_dbu=620,  # 0.62 um
+        # sg13cmos5l_maximal.drc rule "NW.a": NWell.ext_width(0.62.um) ->
+        # "Min. NWell width = 0.62" (drc_rules['NW_a'] == 0.62). NW.a is NOT
+        # in the modular 5_1_nwell.drc this deck's other FEOL rules cite --
+        # only the maximal deck implements it.
+        scope="5.1 NWell",
+        provenance=_cmos5l_provenance(
+            "libs.tech/klayout/tech/drc/rule_decks/sg13cmos5l_maximal.drc",
+            "NW.a",
+        ),
+    ),
+    DrcRule(
+        id="nwell.space.1",
+        description="minimum NWell space or notch",
+        layer=(31, 0),  # NWell.drawing
+        check="space",
+        threshold_dbu=620,  # 0.62 um
+        # 5_1_nwell.drc rule "NW.b": "Min. NWell space or notch (same net).
+        # NWell regions separated by less than this value will be merged"
+        # (drc_rules['NW_b'] == 0.62). Approximation: the foundry rule is
+        # same-net and *merges* closer same-net wells; this geometric check
+        # has no net identity, so it flags any two wells closer than 0.62 um
+        # (stricter than the foundry deck for same-net pairs; for
+        # different-net pairs it is implied by the stricter NW.b1, 1.80 um,
+        # so it adds no false positive there). Same-net pairs are still
+        # over-flagged: nwell.space.2 (net-aware, #3572) covers NW.b1 only.
+        scope="5.1 NWell",
+        provenance=_cmos5l_provenance(
+            "libs.tech/klayout/tech/drc/rule_decks/feol/5_1_nwell.drc",
+            "NW.b",
+        ),
+    ),
+    DrcRule(
+        id="nwell.space.2",
+        description="minimum NWell space between different nets",
+        layer=(31, 0),  # NWell.drawing
+        check="net_space",
+        threshold_dbu=1800,  # 1.80 um
+        # 5_1_nwell.drc rule "NW.b1": "Min. PWell width between NWell
+        # regions of different nets" (drc_rules['NW_b1'] == 1.80), issue
+        # #3572. Net identity comes from `net_spec`, the minimum conductor
+        # model for NWell nets: an NWell is tied by an n+ tap (Activ & nSD
+        # inside it) -> Cont -> Metal1, and two wells touching the same
+        # Metal1 net share a net. NOT modelled (so wells joined only
+        # through them read as different nets, i.e. may be over-flagged,
+        # never silently passed): Metal2+/Via*, TopMetal*, GatPoly/Activ
+        # jumpers, NWell.pin labels and substrate (PWell) connectivity.
+        # A well with no tap is its own net.
+        scope="5.1 NWell",
+        provenance=_cmos5l_provenance(
+            "libs.tech/klayout/tech/drc/rule_decks/feol/5_1_nwell.drc",
+            "NW.b1",
+        ),
+        net_spec=NetSpaceSpec(
+            tap_and=((1, 0), (7, 0)),  # Activ.drawing & nSD.drawing
+            chain=((6, 0), (8, 0)),  # Cont.drawing -> Metal1.drawing
+        ),
+    ),
+    # --- NWell enclosure of P+/N+ Activ (issue #3573, NW.c/NW.c1/NW.e/NW.e1),
+    # sg13cmos5l_maximal.drc. Each is an `"enclosed"` check of a *derived*
+    # implanted-Activ region by NWell: Activ shapes lying wholly outside NWell
+    # (substrate taps, NMOS source/drain) are not flagged, but one that
+    # straddles or sits too close to a well edge is. The LV/HV pair is split
+    # by the ThickGateOx marker (44/0) through the near/far well-context
+    # partition (#3484), the same whole-polygon selection the other voltage-
+    # paired decks use. Shared approximations versus the upstream operand
+    # derivations (each documented, none silently dropped):
+    #   * P+/N+ Activ is `Activ & pSD` / `Activ & nSD` (drawn implants); the
+    #     upstream operand is `Activ - nSD_drv` for P+ (any Activ not N+).
+    #     Activ with neither implant drawn is not checked here.
+    #   * ThickGateOx scoping selects whole Activ polygons (a polygon
+    #     touching the marker is HV); upstream clips with a boolean NOT. Only
+    #     an Activ polygon straddling the marker edge can differ.
+    #   * Upstream excludes SVaricap, schottky_nbl1/nw1 and scr1 regions
+    #     (text-marker derived) and NWell inside SRAM (`NWell_Nsram`); none
+    #     of these are modelled, so varicap/schottky Activ is held to the
+    #     ordinary threshold (stricter) and SRAM-marked NWell is not removed.
+    #   * Inside DigiBnd (16/0) upstream relaxes the HV 0.62 / 0.62 um to
+    #     0.31 / 0.24 um (NW.c1.dig / NW.e1.dig): `.hv.1` keeps HV Activ
+    #     outside DigiBnd (second context stage `far`) and `.dig.1` is the
+    #     exact whole-polygon complement (`near`). ----
+    DrcRule(
+        id="nwell.enclosing.pactiv.1",
+        description="minimum NWell enclosure of P+ Activ outside ThickGateOx",
+        layer=(1, 0),  # Activ.drawing (reporting identity; region is derived)
+        other_layer=(31, 0),  # NWell.drawing
+        check="enclosed",
+        threshold_dbu=310,  # 0.31 um
+        # sg13cmos5l_maximal.drc rule "NW.c": lNw_c.ext_enclosed(NWell_Nsram,
+        # 0.31.um, consider_overlaps_as_errors: true) -> "Min. NWell
+        # enclosure of P+Activ not inside ThickGateOx = 0.31"
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ
+            sized_by_um=0.0,
+            intersect_with=(14, 0),  # pSD -> P+ Activ
+            context_layers=((44, 0),),  # ThickGateOx
+            context="far",
+        ),
+        scope="5.1 NWell",
+        provenance=_cmos5l_provenance(
+            "libs.tech/klayout/tech/drc/rule_decks/sg13cmos5l_maximal.drc",
+            "NW.c",
+        ),
+    ),
+    DrcRule(
+        id="nwell.enclosing.pactiv.hv.1",
+        description="minimum NWell enclosure of P+ Activ inside ThickGateOx",
+        layer=(1, 0),  # Activ.drawing (reporting identity; region is derived)
+        other_layer=(31, 0),  # NWell.drawing
+        check="enclosed",
+        threshold_dbu=620,  # 0.62 um
+        # sg13cmos5l_maximal.drc rule "NW.c1": PActHV_ana.ext_outside(
+        # SVaricap_or_schottky_nbl1).ext_enclosed(NWell, 0.62.um, ...) ->
+        # "Min. NWell enclosure of P+Activ inside ThickGateOx = 0.62"
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ
+            sized_by_um=0.0,
+            intersect_with=(14, 0),  # pSD -> P+ Activ
+            context_layers=((44, 0),),  # ThickGateOx
+            context="near",
+            context2_layers=((16, 0),),  # DigiBnd
+            context2="far",
+        ),
+        scope="5.1 NWell",
+        provenance=_cmos5l_provenance(
+            "libs.tech/klayout/tech/drc/rule_decks/sg13cmos5l_maximal.drc",
+            "NW.c1",
+        ),
+    ),
+    DrcRule(
+        id="nwell.enclosing.nactiv.1",
+        description=(
+            "minimum NWell enclosure of N+ Activ (well tie) outside ThickGateOx"
+        ),
+        layer=(1, 0),  # Activ.drawing (reporting identity; region is derived)
+        other_layer=(31, 0),  # NWell.drawing
+        check="enclosed",
+        threshold_dbu=240,  # 0.24 um
+        # sg13cmos5l_maximal.drc rule "NW.e": NAct_NWellLV.ext_not(nw_outDev)
+        # .ext_enclosed(NWell, 0.24.um, ...) -> "Min. NWell enclosure of
+        # NWell tie surrounded entirely by NWell in N+Activ not inside
+        # ThickGateOx = 0.24". `nw_outDev` is an HV-only subtraction, so it
+        # is empty for this LV operand. An N+ Activ shape wholly outside
+        # NWell (an NMOS source/drain) is not an NWell tie and is not
+        # flagged; one straddling a well edge is.
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ
+            sized_by_um=0.0,
+            intersect_with=(7, 0),  # nSD -> N+ Activ
+            context_layers=((44, 0),),  # ThickGateOx
+            context="far",
+        ),
+        scope="5.1 NWell",
+        provenance=_cmos5l_provenance(
+            "libs.tech/klayout/tech/drc/rule_decks/sg13cmos5l_maximal.drc",
+            "NW.e",
+        ),
+    ),
+    DrcRule(
+        id="nwell.enclosing.nactiv.hv.1",
+        description=(
+            "minimum NWell enclosure of N+ Activ (well tie) inside ThickGateOx"
+        ),
+        layer=(1, 0),  # Activ.drawing (reporting identity; region is derived)
+        other_layer=(31, 0),  # NWell.drawing
+        check="enclosed",
+        threshold_dbu=620,  # 0.62 um
+        # sg13cmos5l_maximal.drc rule "NW.e1": NAct_NWellHV_ana.ext_outside(
+        # SVaricap.ext_or(schottky_nbl1, schottky_nw1, scr1)).ext_enclosed(
+        # NWell, 0.62.um, ...) -> "Min. NWell enclosure of NWell tie
+        # surrounded entirely by NWell in N+Activ inside ThickGateOx = 0.62"
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ
+            sized_by_um=0.0,
+            intersect_with=(7, 0),  # nSD -> N+ Activ
+            context_layers=((44, 0),),  # ThickGateOx
+            context="near",
+            context2_layers=((16, 0),),  # DigiBnd
+            context2="far",
+        ),
+        scope="5.1 NWell",
+        provenance=_cmos5l_provenance(
+            "libs.tech/klayout/tech/drc/rule_decks/sg13cmos5l_maximal.drc",
+            "NW.e1",
+        ),
+    ),
+    # --- NWell space to Activ (issue #3645, PR b of #3573). NW.d/d1 are
+    # NWell to external N+ Activ, NW.f/f1 NWell to substrate-tie P+ Activ,
+    # each split LV/HV by ThickGateOx like the enclosure rules above. The
+    # operand is the implanted Activ (`Activ & nSD` / `Activ & pSD`)
+    # measured against NWell with a separation check: Activ inside the well
+    # (a well tie / P+ in NWell) is the enclosure rules' job (NW.c/NW.e)
+    # and is not reported here. Approximations: SVaricap (text-marker
+    # derived, not modelled) coincident edges that upstream exempts from
+    # NW.f are held to the ordinary 0.24 um (stricter); the DigiBnd
+    # variants NW.d1.dig/NW.f1.dig stay in UNCHECKED_RULES. ----
+    DrcRule(
+        id="nwell.space.nactiv.1",
+        description="minimum NWell space to external N+ Activ outside ThickGateOx",
+        layer=(1, 0),  # Activ.drawing (reporting identity; region is derived)
+        other_layer=(31, 0),  # NWell.drawing
+        check="separation",
+        threshold_dbu=310,  # 0.31 um
+        # sg13cmos5l_maximal.drc rule "NW.d": "Min. NWell space to external
+        # N+Activ not inside ThickGateOx = 0.31"
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ
+            sized_by_um=0.0,
+            intersect_with=(7, 0),  # nSD -> N+ Activ
+            context_layers=((44, 0),),  # ThickGateOx
+            context="far",
+        ),
+        scope="5.1 NWell",
+        provenance=_cmos5l_provenance(
+            "libs.tech/klayout/tech/drc/rule_decks/sg13cmos5l_maximal.drc",
+            "NW.d",
+        ),
+    ),
+    DrcRule(
+        id="nwell.space.nactiv.hv.1",
+        description="minimum NWell space to external N+ Activ inside ThickGateOx",
+        layer=(1, 0),  # Activ.drawing (reporting identity; region is derived)
+        other_layer=(31, 0),  # NWell.drawing
+        check="separation",
+        threshold_dbu=620,  # 0.62 um
+        # sg13cmos5l_maximal.drc rule "NW.d1": "Min. NWell space to external
+        # N+Activ inside ThickGateOx = 0.62"
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ
+            sized_by_um=0.0,
+            intersect_with=(7, 0),  # nSD -> N+ Activ
+            context_layers=((44, 0),),  # ThickGateOx
+            context="near",
+        ),
+        scope="5.1 NWell",
+        provenance=_cmos5l_provenance(
+            "libs.tech/klayout/tech/drc/rule_decks/sg13cmos5l_maximal.drc",
+            "NW.d1",
+        ),
+    ),
+    DrcRule(
+        id="nwell.space.pactiv.1",
+        description="minimum NWell space to substrate-tie P+ Activ outside ThickGateOx",
+        layer=(1, 0),  # Activ.drawing (reporting identity; region is derived)
+        other_layer=(31, 0),  # NWell.drawing
+        check="separation",
+        threshold_dbu=240,  # 0.24 um
+        # sg13cmos5l_maximal.drc rule "NW.f": "Min. NWell space to
+        # substrate tie P+Activ not inside ThickGateOx = 0.24". SVaricap
+        # coincident edges are not exempted (stricter; see note above).
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ
+            sized_by_um=0.0,
+            intersect_with=(14, 0),  # pSD -> P+ Activ
+            context_layers=((44, 0),),  # ThickGateOx
+            context="far",
+        ),
+        scope="5.1 NWell",
+        provenance=_cmos5l_provenance(
+            "libs.tech/klayout/tech/drc/rule_decks/sg13cmos5l_maximal.drc",
+            "NW.f",
+        ),
+    ),
+    DrcRule(
+        id="nwell.space.pactiv.hv.1",
+        description="minimum NWell space to substrate-tie P+ Activ inside ThickGateOx",
+        layer=(1, 0),  # Activ.drawing (reporting identity; region is derived)
+        other_layer=(31, 0),  # NWell.drawing
+        check="separation",
+        threshold_dbu=620,  # 0.62 um
+        # sg13cmos5l_maximal.drc rule "NW.f1": "Min. NWell space to
+        # substrate tie P+Activ inside ThickGateOx = 0.62"
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ
+            sized_by_um=0.0,
+            intersect_with=(14, 0),  # pSD -> P+ Activ
+            context_layers=((44, 0),),  # ThickGateOx
+            context="near",
+        ),
+        scope="5.1 NWell",
+        provenance=_cmos5l_provenance(
+            "libs.tech/klayout/tech/drc/rule_decks/sg13cmos5l_maximal.drc",
+            "NW.f1",
+        ),
+    ),
+    DrcRule(
+        id="nwell.enclosing.pactiv.dig.1",
+        description=(
+            "minimum NWell enclosure of P+ Activ inside ThickGateOx and DigiBnd"
+        ),
+        layer=(1, 0),  # Activ.drawing (reporting identity; region is derived)
+        other_layer=(31, 0),  # NWell.drawing
+        check="enclosed",
+        threshold_dbu=310,  # 0.31 um
+        # sg13cmos5l_maximal.drc rule "NW.c1.dig" (lines 2714-2725): the
+        # DigiBnd-relaxed counterpart of the HV rule, the exact whole-polygon
+        # complement of nwell.enclosing.pactiv.hv.1.
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ
+            sized_by_um=0.0,
+            intersect_with=(14, 0),  # pSD -> P+ Activ
+            context_layers=((44, 0),),  # ThickGateOx
+            context="near",
+            context2_layers=((16, 0),),  # DigiBnd
+            context2="near",
+        ),
+        scope="5.1 NWell",
+        provenance=_cmos5l_provenance(
+            "libs.tech/klayout/tech/drc/rule_decks/sg13cmos5l_maximal.drc",
+            "NW.c1.dig",
+        ),
+    ),
+    DrcRule(
+        id="nwell.enclosing.nactiv.dig.1",
+        description=(
+            "minimum NWell enclosure of N+ Activ (well tie) inside ThickGateOx "
+            "and DigiBnd"
+        ),
+        layer=(1, 0),  # Activ.drawing (reporting identity; region is derived)
+        other_layer=(31, 0),  # NWell.drawing
+        check="enclosed",
+        threshold_dbu=240,  # 0.24 um
+        # sg13cmos5l_maximal.drc rule "NW.e1.dig" (lines 2714-2725): the
+        # DigiBnd-relaxed counterpart of the HV rule, the exact whole-polygon
+        # complement of nwell.enclosing.nactiv.hv.1.
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ
+            sized_by_um=0.0,
+            intersect_with=(7, 0),  # nSD -> N+ Activ
+            context_layers=((44, 0),),  # ThickGateOx
+            context="near",
+            context2_layers=((16, 0),),  # DigiBnd
+            context2="near",
+        ),
+        scope="5.1 NWell",
+        provenance=_cmos5l_provenance(
+            "libs.tech/klayout/tech/drc/rule_decks/sg13cmos5l_maximal.drc",
+            "NW.e1.dig",
+        ),
+    ),
 ]
+
+# Foundry rules this curated deck knows about but cannot evaluate (issue
+# #3012): `{rule id: (layer, description)}`. `drc.py` reports each one under
+# `coverage.unchecked_rules` whenever its layer is present in the stream, so
+# a `clean` verdict cannot be read as "this rule was checked".
+UNCHECKED_RULES: dict[str, tuple[tuple[int, int], str]] = {
+    "NW.d1.dig": (
+        (31, 0),
+        "NW.d1.dig (NWell space to external N+ Activ inside ThickGateOx "
+        "and DigiBnd, 0.31 um) is not modelled yet: the DigiBnd context "
+        "engine exists (issue #3682), only the base NWell space rules "
+        "NW.d/d1 are missing; a violation of it is not flagged.",
+    ),
+    "NW.f1.dig": (
+        (31, 0),
+        "NW.f1.dig (NWell space to substrate-tie P+ Activ inside "
+        "ThickGateOx and DigiBnd, 0.24 um) is not modelled yet: the "
+        "DigiBnd context engine exists (issue #3682), only the base NWell "
+        "space rules NW.f/f1 are missing; a violation of it is not "
+        "flagged.",
+    ),
+}
 
 # `(layer, datatype) -> "name.purpose"` display names for every layer this
 # deck's DECK/EXTRACTION_DECK reads, cross-checked against
@@ -851,6 +1290,7 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
     (10, 0): "Metal2.drawing",
     (10, 2): "Metal2.pin",
     (14, 0): "pSD.drawing",
+    (16, 0): "DigiBnd.drawing",
     (19, 0): "Via1.drawing",
     (24, 0): "RES.drawing",
     (28, 0): "SalBlock.drawing",
@@ -1440,6 +1880,7 @@ EXTRACTION_DECK = ExtractionDeck(
 # Source: this PDK's own non-symlinked, Apache-2.0 file
 # `libs.tech/magic/ihp-sg13cmos5l-extract.tech`, at
 # `_IHP_SG13CMOS5L_REPO` / `_IHP_SG13CMOS5L_COMMIT` above:
+# (archived repo; permalink still resolves; now IHP-Open-PDK ihp-sg13cmos5l/)
 # https://github.com/IHP-GmbH/ihp-sg13cmos5l/blob/607e18d4bd9214a52575c194b4181ef449f9252f/libs.tech/magic/ihp-sg13cmos5l-extract.tech
 # Resistances: `variants (),(lvs)`, lines 68-88, milliohms/square (line 59).
 # Capacitances: `variants ()`, lines 170-370, aF/um² for area/overlap and
