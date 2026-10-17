@@ -260,6 +260,7 @@
       "modules": [
         "klayout_tools.cli.lvs_cmd",
         "klayout_tools.lvs",
+        "klayout_tools.lvs_combine",
         "klayout_tools.lvs_finfet",
         "klayout_tools.lvs_mismatch",
         "klayout_tools.lvs_netgen",
@@ -344,6 +345,7 @@
         "klayout_tools.place_and_route_pdn_fit",
         "klayout_tools.place_and_route_power_audit",
         "klayout_tools.place_and_route_reports",
+        "klayout_tools.place_and_route_request",
         "klayout_tools.place_and_route_sta"
       ]
     },
