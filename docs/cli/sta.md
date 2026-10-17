@@ -96,7 +96,10 @@ A request naming both, or neither, is a request error.
   other tool's routed DEF).
 - **Not `klayout_tools.sta`** (`klt synthesize`'s integrated, *pre-layout*,
   gate-level `sta` report backed by the `klt_statime_native` Rust
-  extension — see `docs/cli/synthesize.md`'s `sta` section). That module
+  extension — see `docs/cli/synthesize.md`'s `sta` section; that extension
+  is not shipped with the published package, so there `klt synthesize`
+  reports `"sta": null` and this command's `verilog` mode is the
+  installed-package route to a netlist timing estimate). That module
   times a structural netlist against a uniform input-transition/output-load
   boundary condition with no floorplan/placement/routing at all; this
   command instead times real, already-placed-and-routed geometry against

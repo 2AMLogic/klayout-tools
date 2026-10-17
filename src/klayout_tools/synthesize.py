@@ -2885,10 +2885,13 @@ def _read_abc_timing(
 #: absence. Kept as a module constant so the test suite pins the exact
 #: string a consumer branches on.
 STA_UNAVAILABLE_EXTENSION_NOT_INSTALLED = (
-    "the optional klt_statime_native extension is not installed, so no "
-    "gate-level static timing analysis was attempted -- from a repo "
-    "checkout, run `uv sync --group statime` (or `maturin develop "
-    "--release` inside native/statime/) and re-run to populate `sta`"
+    "the optional klt_statime_native extension is not installed (it is not "
+    "shipped with the published klayout-tools package), so no gate-level "
+    "static timing analysis was attempted -- from a repo checkout, run "
+    "`uv sync --group statime` (or `maturin develop --release` inside "
+    "native/statime/) and re-run to populate `sta`; from an installed "
+    "package, `klt sta` with a `verilog` request gives a netlist-level "
+    "timing estimate (needs OpenSTA)"
 )
 
 
