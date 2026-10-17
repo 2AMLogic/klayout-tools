@@ -21083,7 +21083,9 @@ def _pin_order_source_request(tmp_path: Path, root: str, library: str) -> str:
     return _macro_request(tmp_path, {"library": library, "pdk_root": root})
 
 
-def test_pin_order_source_error_names_variant_selector_and_sibling_variant(tmp_path, monkeypatch):
+def test_pin_order_source_error_names_variant_selector_and_sibling_variant(
+    tmp_path, monkeypatch
+):
     """Issue #3748: with `reference.pdk` unset the alphabetically first variant
     wins; when it lacks the library the error names the remedy and the
     installed variant that does ship it."""
@@ -21100,7 +21102,9 @@ def test_pin_order_source_error_names_variant_selector_and_sibling_variant(tmp_p
     assert "installed variant(s) that ship it: sky130A" in message
 
 
-def test_pin_order_source_error_has_no_sibling_hint_when_none_ships_library(tmp_path, monkeypatch):
+def test_pin_order_source_error_has_no_sibling_hint_when_none_ships_library(
+    tmp_path, monkeypatch
+):
     monkeypatch.delenv("PDK", raising=False)  # default variant must not come from $PDK
     root = _make_fake_macro_pdk(tmp_path)
     (Path(root) / "gf180mcuA" / "libs.tech").mkdir(parents=True)
@@ -21113,7 +21117,9 @@ def test_pin_order_source_error_has_no_sibling_hint_when_none_ships_library(tmp_
     assert "installed variant(s)" not in message
 
 
-def test_pin_order_source_error_has_no_sibling_hint_for_single_variant(tmp_path, monkeypatch):
+def test_pin_order_source_error_has_no_sibling_hint_for_single_variant(
+    tmp_path, monkeypatch
+):
     monkeypatch.delenv("PDK", raising=False)  # default variant must not come from $PDK
     root = _make_fake_macro_pdk(tmp_path)
     with pytest.raises(LvsError) as excinfo:
