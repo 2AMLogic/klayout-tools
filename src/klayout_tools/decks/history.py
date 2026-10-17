@@ -312,6 +312,10 @@ def deck_info(name: str | None = None) -> dict[str, Any]:
       ``{git_tag, git_commit, package_version}`` of the (newest) matching
       release, the same information :func:`resolve_deck` would return for
       this hash; ``None`` otherwise.
+    - ``unmodeled_rules`` -- the official foundry rule ids the deck
+      knowingly does not transcribe (issue #3796; the same static list as
+      ``klt drc``'s ``coverage.unmodeled_rules``). Empty for a deck that
+      declares none.
     """
     # Imported lazily, not at module scope: `_provenance` itself imports
     # `is_deck_hash_released` from this module, so a module-level import here
@@ -322,6 +326,7 @@ def deck_info(name: str | None = None) -> dict[str, Any]:
         UnknownExtractionDeckError,
         deck_source_path,
         get_extraction_deck,
+        get_unmodeled_rules,
         known_extraction_deck_names,
     )
 
@@ -358,6 +363,7 @@ def deck_info(name: str | None = None) -> dict[str, Any]:
                 "device_classes": list(deck.device_classes),
                 "released": released,
                 "release": release,
+                "unmodeled_rules": get_unmodeled_rules(deck_name),
             }
         )
 
@@ -445,6 +451,10 @@ def deck_rules(name: str, rule_id: str | None = None) -> dict[str, Any]:
 
     Top-level, pinned by ``content_hash`` like the rules:
 
+    - ``unmodeled_rules`` -- official foundry rule ids the deck knowingly
+      does not transcribe (issue #3796), kept apart from ``rules``; the same
+      static list as ``klt drc``'s ``coverage.unmodeled_rules``. Not narrowed
+      by ``rule_id``.
     - ``layer_table`` -- every ``{"name", "layer", "datatype"}`` the deck
       names, sorted by ``(layer, datatype)``.
     - ``ambiguous_names`` -- ``[{"name", "pairs": [{"layer", "datatype"}]}]``
@@ -462,6 +472,7 @@ def deck_rules(name: str, rule_id: str | None = None) -> dict[str, Any]:
         get_deck,
         get_layer_names,
         get_nominal_dbu,
+        get_unmodeled_rules,
     )
 
     try:
@@ -489,6 +500,7 @@ def deck_rules(name: str, rule_id: str | None = None) -> dict[str, Any]:
         "content_hash": f"sha256:{digest}" if digest is not None else None,
         "nominal_dbu_um": nominal_dbu,
         "rules": [_project_rule(rule, nominal_dbu, layer_names) for rule in rules],
+        "unmodeled_rules": get_unmodeled_rules(name),
         **_layer_table_fields(rules, layer_names),
     }
 

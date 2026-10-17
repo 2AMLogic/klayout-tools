@@ -1136,3 +1136,29 @@ def test_deck_rules_reports_ambiguous_and_unresolved_explicitly(monkeypatch):
         for ref in rule["layer_refs"]
         if (ref["layer"], ref["datatype"]) not in names
     )
+
+
+# ---------------------------------------------------------------------------
+# library: unmodeled_rules disclosure (issue #3796)
+# ---------------------------------------------------------------------------
+
+
+def test_deck_rules_gf180mcu_lists_unmodeled_thick_metal_families_apart_from_rules():
+    report = history.deck_rules("gf180mcu")
+
+    unmodeled = report["unmodeled_rules"]
+    assert {"MT30.1a", "MT30.4", "MT.2b", "MT.3", "MT.4", "MSLOT.1", "MSLOT.8"} <= set(
+        unmodeled
+    )
+    # Disclosed rules are not enforced ones: nothing is listed in both.
+    assert not set(unmodeled) & {entry["id"] for entry in report["rules"]}
+    # A single-rule query does not narrow the disclosure.
+    one = history.deck_rules("gf180mcu", rule_id="metaltop.width.1")
+    assert one["unmodeled_rules"] == unmodeled
+
+
+def test_deck_info_reports_unmodeled_rules_per_deck(_history_table):
+    entry = history.deck_info(name="gf180mcu")["decks"][0]
+    assert "MT30.1a" in entry["unmodeled_rules"]
+    assert "MSLOT.1" in entry["unmodeled_rules"]
+    assert "unmodeled_rules" in history.deck_info(name="sg13g2")["decks"][0]

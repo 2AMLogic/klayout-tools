@@ -483,6 +483,15 @@ def _print_coverage_gaps(coverage: dict) -> None:
     if unchecked_layers:
         print(f"unchecked layers in stream: {len(unchecked_layers)}")
 
+    # Issue #3796: deck-static foundry rules this deck knowingly omits, so a
+    # text-mode "clean" is not read as full runset coverage.
+    unmodeled = coverage.get("unmodeled_rules") or []
+    if unmodeled:
+        print(
+            f"warning: {len(unmodeled)} foundry rule(s) not enforced by this "
+            f"deck: {_abbreviate(unmodeled)} (see coverage.unmodeled_rules)"
+        )
+
 
 def _print_coverage_assertion(assertion: dict | None) -> None:
     """One line summarizing a caller-vouched rule-category assertion

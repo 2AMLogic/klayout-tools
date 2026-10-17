@@ -227,7 +227,8 @@ klt deck info --deck gf180mcu # one deck only
         "diode_nd2ps_06v0", "diode_pd2nw_06v0"
       ],
       "released": false,
-      "release": null
+      "release": null,
+      "unmodeled_rules": ["MSLOT.1", "MT.2b", "MT30.1a"]
     }
   ]
 }
@@ -249,6 +250,13 @@ klt deck info --deck gf180mcu # one deck only
   `provenance.deck.released` (`true`/`false`/`null`; see above), plus, when
   `true`, the `{git_tag, git_commit, package_version}` of the release that
   shipped this exact hash (the same shape `klt deck resolve` returns).
+
+- `unmodeled_rules` — official foundry rule ids the deck knowingly does **not**
+  transcribe (issue #3796), the same static list `klt drc` reports as
+  `coverage.unmodeled_rules`; `[]` for a deck that declares none. For gf180mcu
+  this is the thick-MetalTop `MT30.*`, `MT.2b`/`MT.3`/`MT.4` and `MSLOT.*`
+  families (the example above is abbreviated). Additive and optional for
+  consumers.
 
 Omitting `--deck` reports every registered deck in one call — useful for a
 "what does this install actually ship" sanity check right after `pip
@@ -378,6 +386,11 @@ executable deck — coverage is the set of rules klt implements, not the full
 DRM. `provenance` is what ties each value back to the upstream source it came
 from; `klt drc`'s `coverage.deck_scope` answers the complementary "what
 sections does this deck claim" question.
+
+`klt deck rules` also carries a top-level `unmodeled_rules` array (issue #3796):
+the official foundry rule ids the deck does not enforce, kept apart from the
+enforced `rules` list and not narrowed by `--rule`. Text output ends with a
+`NOT ENFORCED by this deck` line when it is non-empty.
 
 ## `klt deck devices`
 
