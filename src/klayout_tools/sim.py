@@ -3310,8 +3310,8 @@ def _run_sim_corners(
     # only the scalar results (the AC rawfile never leaves the worker), so the
     # `transfer` form is gated by the mandatory runner-feature check in
     # `sim_batch`/`sim_remote` rather than refused here.
-    # Issue #3159: per-pass complex rawfiles are corner-local too.
-    sim_passes.refuse_offhost_backend(analysis, backend)
+    # Issues #3159/#3161: `analysis.passes` / `measurements[].tian` are gated
+    # the same way (the `dual_injection` mandatory runner feature).
 
     # Two-pass fail-fast probe (issue #1694, opt-in via `fail_fast_probe`/
     # `options.fail_fast_probe`): run once per grid, before any real corner

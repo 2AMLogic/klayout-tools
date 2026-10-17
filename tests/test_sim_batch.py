@@ -5871,6 +5871,79 @@ def test_stimulus_on_a_supporting_runner_runs(tmp_path, runner):
     assert marker.exists()
 
 
+# --- mandatory `dual_injection` worker gate (issue #3161) --------------------
+
+_PASSES_REQUEST = {
+    "models": {"pdk": "sky130A"},
+    "options": {},
+    "analysis": {"kind": "ac", "passes": [{"name": "v", "alter": []}]},
+}
+_TIAN_REQUEST = {
+    "models": {"pdk": "sky130A"},
+    "options": {},
+    "measurements": [{"name": "pm", "tian": {"metric": "phase_margin_deg"}}],
+}
+
+
+@pytest.mark.parametrize("request_", [_PASSES_REQUEST, _TIAN_REQUEST])
+def test_dual_injection_is_a_registered_mandatory_runner_feature(request_):
+    assert sb._request_features(request_) == ["dual_injection"]
+    assert "dual_injection" in sb._MANDATORY_RUNNER_FEATURES
+
+
+@pytest.mark.parametrize(
+    "request_",
+    [
+        {"models": {}, "options": {}},
+        {"analysis": {"kind": "ac"}, "measurements": [{"name": "x", "spice": ".m"}]},
+    ],
+)
+def test_requests_without_passes_or_tian_do_not_trigger_the_gate(request_):
+    assert sb._request_features(request_) == []
+
+
+@pytest.mark.parametrize("request_", [_PASSES_REQUEST, _TIAN_REQUEST])
+@pytest.mark.parametrize("version_check", ["enforce", "warn"])
+@pytest.mark.parametrize("runner", ["klt 0.7.0", "klt dirty", "klt"])
+def test_dual_injection_on_an_old_or_unknown_runner_is_rejected(
+    tmp_path, runner, version_check, request_
+):
+    spec = _feature_spec(tmp_path, request_, version_check=version_check)
+    proc, out_dir, marker = _run_job_cmd_with_fake_klt(
+        tmp_path, spec, _fake_klt(runner)
+    )
+    assert proc.returncode == sb._BATCH_PREFLIGHT_REJECT_EXIT
+    assert not marker.exists()  # klt sim never ran
+    error = json.loads((out_dir / "report.json").read_text())["error"]
+    assert error["code"] == sb.BATCH_RUNNER_FEATURE_CODE
+    assert "dual_injection" in error["message"]
+
+
+@pytest.mark.parametrize("request_", [_PASSES_REQUEST, _TIAN_REQUEST])
+@pytest.mark.parametrize("runner", ["0.7.1", "0.7.1.dev5+gabc", "0.7.3"])
+def test_dual_injection_on_a_supporting_runner_runs(tmp_path, runner, request_):
+    spec = _feature_spec(tmp_path, request_, version_check="warn")
+    proc, _, marker = _run_job_cmd_with_fake_klt(
+        tmp_path, spec, _fake_klt(f"klt {runner}")
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert marker.exists()
+
+
+def test_prelaunch_refuses_dual_injection_on_an_old_image_even_under_warn(
+    tmp_path, monkeypatch
+):
+    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
+    _publish_manifest(tmp_path, monkeypatch, [_image(klt_version="0.7.0")])
+    assessment = sb._assess_published_runner(
+        _PASSES_REQUEST, _config(tmp_path, runner_version_check="warn")
+    )
+    with pytest.raises(sim.SimError) as raised:
+        sb._enforce_published_runner_features(_PASSES_REQUEST, assessment)
+    assert raised.value.code == sb.BATCH_RUNNER_FEATURE_CODE
+    assert "dual_injection" in str(raised.value)
+
+
 # --------------------------------------------------------------------------- #
 # Whole-job ceiling: opt-in auto-split (issue #3446)
 # --------------------------------------------------------------------------- #
