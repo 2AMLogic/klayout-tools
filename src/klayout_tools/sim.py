@@ -107,6 +107,7 @@ from . import (
     sim_steps,
     sim_stimulus,
     sim_supply_waveform,
+    sim_tian,
     sim_transfer_meas,
 )
 
@@ -1368,6 +1369,8 @@ def _resolve_analysis_and_measurements(
     sim_cycle_mean.validate_cycle_mean_context(measurements_spec, analysis)
     # Issue #2923: and a transfer metric is an AC-sweep quantity.
     sim_transfer_meas.validate_transfer_context(measurements_spec, analysis)
+    # Issue #3160: a tian metric combines the named passes of `analysis.passes`.
+    sim_tian.validate_tian_context(measurements_spec, analysis)
     # Issue #2938: a `noise` entry is lowered to an `expr` (plus helper
     # lines) so everything downstream treats it as one.
     sim_noise.validate_noise_context(measurements_spec, analysis)
@@ -8887,6 +8890,14 @@ def _run_corner(
     transfers = sim_transfer_meas.extract_corner_transfers(
         measurements_spec, corner_dir
     )
+    # Issue #3160: each pass's rawfile is decoded once, shared by the tian
+    # reduction below and the corner's `passes` field.
+    pass_results = (
+        sim_passes.extract_corner_passes(analysis, corner_dir)
+        if sim_passes.is_passes_analysis(analysis)
+        else []
+    )
+    tians = sim_tian.extract_corner_tians(measurements_spec, pass_results)
     measurement_results, measurement_diagnostics, step_fields = (
         _corner_measurement_results(
             measurement_values,
@@ -8899,6 +8910,7 @@ def _run_corner(
             energy=energy,
             cycle_means=cycle_means,
             transfers=transfers,
+            tians=tians,
             engine_diagnostics=diagnostics,
         )
     )
@@ -8907,7 +8919,7 @@ def _run_corner(
     )
     diagnostics.extend(measurement_diagnostics)
     pass_fields, pass_diagnostics = sim_passes.corner_fields(
-        analysis, corner_dir, keep_artifacts=keep_artifacts
+        analysis, corner_dir, keep_artifacts=keep_artifacts, results=pass_results
     )
     diagnostics.extend(pass_diagnostics)
 
@@ -9187,6 +9199,7 @@ def _corner_measurement_results(
     energy: dict[int, sim_energy.EnergyOutcome] | None = None,
     cycle_means: dict[int, sim_cycle_mean.CycleMeanOutcome] | None = None,
     transfers: dict[int, sim_transfer_meas.TransferOutcome] | None = None,
+    tians: dict[int, sim_tian.TianOutcome] | None = None,
     engine_diagnostics: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     """One corner's ``(measurement_results, diagnostics, extra_corner_fields)``
@@ -9239,6 +9252,7 @@ def _corner_measurement_results(
         (sim_energy.is_energy, _energy_measurement_result, energy),
         (sim_cycle_mean.is_cycle_mean, _cycle_mean_measurement_result, cycle_means),
         (sim_transfer_meas.is_transfer, _transfer_measurement_result, transfers),
+        (sim_tian.is_tian, _tian_measurement_result, tians),
     )
     for position, spec in enumerate(measurements_spec):
         sidecar = next(
@@ -9565,6 +9579,62 @@ def _transfer_measurement_result(
         "status": m_status,
         "margin": margin,
         "transfer": outcome.report(spec),
+    }
+    return result, grading_diagnostics
+
+
+def _tian_measurement_result(
+    spec: dict[str, Any],
+    outcome: sim_tian.TianOutcome | None,
+    *,
+    save_mode: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """One ``tian`` measurement's response entry (issue #3160).
+
+    ``value`` is the metric, graded through :func:`_grade_measurement_value`
+    like any scalar; the request echo rides the additive ``tian`` sibling. A
+    failure is ``status: "error"``, ``value: null`` (so it can never pass a
+    limit) with a ``code: "measurement"`` diagnostic whose message starts with
+    a ``[<reason>]`` token from :data:`klayout_tools.sim_tian.ERROR_CODES`."""
+    name = spec["name"]
+    unit = spec.get("unit")
+    if outcome is None or outcome.value is None:
+        message = (
+            outcome.error
+            if outcome is not None and outcome.error is not None
+            else f"measurement '{name}' produced no tian value"
+        )
+        reason = (
+            outcome.code
+            if outcome is not None and outcome.code is not None
+            else "tian_pass_missing"
+        )
+        if save_mode == "netlist" and reason == "tian_vector_missing":
+            message += SAVE_MODE_NETLIST_NO_VALUE_HINT
+        result = {
+            "name": name,
+            "value": None,
+            "unit": unit,
+            "status": "error",
+            "margin": None,
+        }
+        return result, [
+            {
+                "severity": "error",
+                "code": "measurement",
+                "message": f"[{reason}] {message}",
+            }
+        ]
+    m_status, margin, grading_diagnostics = _grade_measurement_value(
+        spec, outcome.value
+    )
+    result = {
+        "name": name,
+        "value": outcome.value,
+        "unit": unit,
+        "status": m_status,
+        "margin": margin,
+        "tian": outcome.report(spec),
     }
     return result, grading_diagnostics
 

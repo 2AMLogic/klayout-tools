@@ -250,11 +250,12 @@ def refuse_unsupported(
     """Refuse, by name, what multi-pass acquisition does not implement."""
     if not is_passes_analysis(analysis):
         return
-    if measurements_spec:
+    other = next((m for m in measurements_spec if m.get("tian") is None), None)
+    if other is not None:
         raise SimError(
-            "analysis.passes only acquires complex AC results; "
-            "request.measurements[] is not supported with it yet (the "
-            "scalar-metric increment is tracked in #3160)"
+            "analysis.passes only supports measurements[] entries declared "
+            f"with 'tian' (the dual-injection stability metrics); measurement "
+            f"{other.get('name')!r} uses another form"
         )
     if want_waveforms or plot_requested:
         raise SimError(
@@ -392,14 +393,18 @@ def corner_report(
 
 
 def corner_fields(
-    analysis: dict[str, Any], corner_dir: str, *, keep_artifacts: bool
+    analysis: dict[str, Any],
+    corner_dir: str,
+    *,
+    keep_artifacts: bool,
+    results: list[PassResult] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, str]]]:
     """``(extra corner fields, diagnostics)`` for one finished corner: the
     additive ``passes`` field for an ``analysis.passes`` request, ``({}, [])``
     for every other one."""
     if not is_passes_analysis(analysis):
         return {}, []
-    field, diagnostics = corner_report(
-        extract_corner_passes(analysis, corner_dir), keep_artifacts=keep_artifacts
-    )
+    if results is None:
+        results = extract_corner_passes(analysis, corner_dir)
+    field, diagnostics = corner_report(results, keep_artifacts=keep_artifacts)
     return {"passes": field}, diagnostics

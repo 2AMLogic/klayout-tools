@@ -3764,9 +3764,10 @@ injection source active in each, and both complex result sets kept. An `ac`
   one corner job, each in a fresh plot (`setplot new`). No operating-point
   reuse between passes is promised.
 - Refused before any engine launch: duplicate/malformed passes, a non-`ac`
-  analysis, `measurements[]` (scalar metrics are #3160), `options.waveforms`
-  / `--plot`, `engine: "xyce"`, and `backend: "remote"` / `"batch"` (transport
-  is #3161). Requests without `passes` are unchanged.
+  analysis, any `measurements[]` entry other than `tian` (see "Dual-injection
+  stability metrics" below), `options.waveforms` / `--plot`, `engine: "xyce"`,
+  and `backend: "remote"` / `"batch"` (transport is #3161). Requests without
+  `passes` are unchanged.
 
 Each pass's complex result is written to `<corner_dir>/ac_pass_<k>.raw` and
 decoded privately by `klayout_tools.sim_raw`; the public waveform JSON stays
@@ -3775,6 +3776,87 @@ magnitude-only. The corner gains an additive `passes` list of
 `options.keep_artifacts` is set, else `null`). A pass whose analysis did not
 produce an AC plot is `status: "error"` with a `pass_failed` diagnostic, and
 the corner grades `error`.
+
+## Dual-injection stability metrics (`measurements[].tian`)
+
+Issue [#3160](https://github.com/2AMLogic/klayout-tools/issues/3160), increment
+2 of the dual-injection bench ([#2847](https://github.com/2AMLogic/klayout-tools/issues/2847)).
+`tian` combines the complex results of two named `analysis.passes` into the
+Tian return ratio and grades one scalar stability metric of it. A complete
+request:
+
+```json
+{
+  "netlist": "bench.spice",
+  "analysis": {"kind": "ac", "args": "dec 50 10 1e8",
+    "passes": [
+      {"name": "inj_v", "alter": [{"target": "VINJ", "value": 1}, {"target": "IINJ", "value": 0}]},
+      {"name": "inj_i", "alter": [{"target": "VINJ", "value": 0}, {"target": "IINJ", "value": 1}]}]},
+  "measurements": [
+    {"name": "pm", "unit": "deg", "limits": {"min": 45},
+     "tian": {"voltage_pass": "inj_v", "current_pass": "inj_i",
+              "tv": "v(tv)", "ti": "v(ti)", "metric": "phase_margin_deg"}},
+    {"name": "peak", "unit": "dB", "limits": {"max": 3},
+     "tian": {"voltage_pass": "inj_v", "current_pass": "inj_i",
+              "tv": "v(tv)", "ti": "v(ti)", "metric": "max_gain_above_crossover_db"}}
+  ]
+}
+```
+
+- `tian` is a further measurement form: an entry declares **exactly one** of
+  `spice`, `expr`, `crossings`, `cycle_mean`, `energy`, `noise`, `transfer` or
+  `tian`. It requires `analysis.passes`; `voltage_pass` / `current_pass` must
+  name entries of it (case-insensitive). Unknown keys, a malformed selector or
+  an unknown `metric` are refused up front (exit 1). Measurement names must be
+  unique. The pre-existing refusal of `measurements[]` beside `passes` still
+  applies to every other form, and `backend: "remote"` / `"batch"` stays
+  refused (#3161).
+- **Selectors.** `tv` is read from the `voltage_pass` result and `ti` from the
+  `current_pass` result. Each is a single-ended `v(node)` or `i(source)`
+  (independent source current, as ngspice saves it) with one non-empty token
+  and no whitespace, comma or parenthesis; matching is case-insensitive. The
+  selected complex vector is taken **as is**: the bench must already deliver
+  the return ratio of each injection (unit-magnitude stimulus, sign arranged
+  for negative feedback, e.g. through a `-1` VCVS). Arbitrary expressions and
+  differential selectors are not supported. With `options.save_mode:
+  "netlist"` only vectors the netlist saves are available.
+- **Formula.** Per frequency sample `T = (Tv*Ti - 1) / (Tv + Ti + 2)`. `T` is
+  then reduced with the same numerics as `transfer` (#2922): the
+  negative-feedback convention, log-frequency interpolation, first falling
+  0 dB crossing, unwrapped phase.
+- **Metrics** (`value` is graded like any scalar):
+
+  | `metric` | Unit | Definition |
+  | -------- | ---- | ---------- |
+  | `unity_crossing_hz` | Hz | First falling 0 dB crossing of `T`. |
+  | `phase_at_unity_deg` | deg | Unwrapped phase of `T` there. |
+  | `phase_margin_deg` | deg | `180 + phase_at_unity_deg`. |
+  | `gain_margin_db` | dB | Minus the dB magnitude where the unwrapped phase first crosses -180 deg downward. |
+  | `max_gain_above_crossover_db` | dB | Largest sampled `20*log10 \|T\|` over the closed interval `[unity_crossing_hz, f_max]`: the crossover itself counts (0 dB), so the value is never negative; `0` means the gain never climbs back above 0 dB past the crossover. |
+
+  All-crossing margins and Nyquist encirclement (#3088) are not offered for
+  `tian`.
+- **Errors never pass a limit.** Each is `status: "error"`, `value: null`, no
+  `tian` member, and a `code: "measurement"` diagnostic starting with a
+  `[<reason>]` token: `tian_pass_missing` (a named pass failed or is absent),
+  `tian_vector_missing` (selector not in that pass's saved vectors),
+  `tian_grid_invalid` (frequencies not finite, positive and strictly
+  increasing), `tian_grid_mismatch` (the two passes' grids differ in length or
+  in any value -- compared exactly, **never resampled**),
+  `tian_invalid_samples` (a non-finite `Tv`/`Ti`/`T` sample),
+  `tian_singular_denominator` (`|Tv + Ti + 2| <= 1e-9 * (|Tv| + |Ti| + 2)` at
+  any sample; the first index is reported) and `tian_metric_unavailable` (no
+  falling crossing / no -180 deg crossing, or, for
+  `max_gain_above_crossover_db`, an invalid sample above the crossover; the
+  reason follows in parentheses).
+- **Cache.** Within a corner, `T` is formed and reduced once per
+  `(voltage_pass, current_pass, tv, ti)` tuple (selectors case-folded) and
+  shared by every entry using it.
+
+The response entry is an ordinary `corners[].measurements[]` object plus an
+additive `tian` member echoing `{voltage_pass, current_pass, tv, ti, metric}`
+(no `schema_version` bump). Limits, `plausible_range`, rollups and Monte Carlo
+statistics apply to `value` as for any scalar.
 
 ## Source energy over a transient window (`measurements[].energy`)
 
@@ -5813,7 +5895,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `step_failed`      | An `analysis_steps[]` step's analysis produced no plot of its own (it failed, or the run ended before it) — read from `klt`'s own step markers in the log, never inferred from measurements. The step's own measurements are reported `value: null`/`status: "error"` under this one diagnostic (issue #2482). See "Several solves per corner" above. |
 | `derived_input_unavailable` | A measurement computed from other results (a derived measurement, or a step `expr` reading an earlier step) was **not graded** because at least one of its inputs produced no value in this corner (issue #2482). Distinguishes "an input was missing" from a derived expression that itself failed, which is an ordinary `measurement` diagnostic. |
 | `waveform_too_large` | `waveform.raw` exceeded `options.waveform_max_bytes`, so the `waveform.raw.json` conversion was skipped (issue #3211). Always `severity: "warning"`; measurements and `status` are unaffected. See "Waveform size guard" above. |
-| `pass_failed` | An `analysis.passes` pass left no AC-analysis rawfile (the solve failed or never ran); the corner grades `error` (issue #3159). See "Multi-pass AC acquisition" above. |
+| `pass_failed` | An `analysis.passes` pass left no AC-analysis rawfile (the solve failed or never ran); the corner grades `error` (issue #3159). See "Multi-pass AC acquisition" above. A `tian` measurement naming that pass reports `[tian_pass_missing]` (issue #3160). |
 | `unknown`          | Anything else that prevented a trustworthy result (e.g. ngspice not installed/spawnable). |
 | `budget_exceeded`  | The corner never started: the sweep's own `options.wall_clock_budget_s` was exceeded first. See "Wall-clock budget, orphan safety, and resume" above. |
 | `orphaned`         | The corner never started: the launching process exited before its turn. See "Wall-clock budget, orphan safety, and resume" above. |

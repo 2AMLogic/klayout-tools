@@ -14,7 +14,14 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from . import sim_crossings, sim_cycle_mean, sim_energy, sim_noise, sim_transfer_meas
+from . import (
+    sim_crossings,
+    sim_cycle_mean,
+    sim_energy,
+    sim_noise,
+    sim_tian,
+    sim_transfer_meas,
+)
 from .sim_errors import SimError
 
 #: A `.meas` card's declared analysis type (the token right after
@@ -281,7 +288,8 @@ def _require_measurement_form(name: Any, has_form: bool) -> None:
             "'cycle_mean' (a mean over whole reference cycles), "
             "'energy' (a source's energy over a transient window), "
             "'noise' (a spot/band-integrated noise-spectrum value) or "
-            "'transfer' (an AC return-ratio metric)"
+            "'transfer' (an AC return-ratio metric) or "
+            "'tian' (a dual-injection AC stability metric)"
         )
 
 
@@ -290,6 +298,9 @@ def _validate_measurement_form(spec: dict[str, Any]) -> None:
     one of ``spice``/``expr``, and -- for an ``expr`` -- a name that survives
     the round trip through the deck and back out of the log. See
     :func:`_validate_measurement_forms` for why each rule exists."""
+    if sim_tian.validate_form_exclusive(spec):
+        # Issue #3160: a sixth, mutually exclusive form.
+        return
     if sim_transfer_meas.validate_form_exclusive(spec):
         # Issue #2923: a fifth, mutually exclusive form.
         return

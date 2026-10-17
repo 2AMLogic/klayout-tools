@@ -819,3 +819,41 @@ def grade_margins(
     if report.ambiguity:
         return "ambiguous"
     return "pass"
+
+
+# ---------------------------------------------------------------------------
+# Maximum gain above crossover (issue #3160)
+# ---------------------------------------------------------------------------
+
+
+def max_gain_above_crossover_db(
+    freq_hz: Sequence[float], metrics: TransferMetrics
+) -> tuple[float | None, str | None]:
+    """``(value, reason)``: the peak of ``20 log10 |T|`` above the crossover.
+
+    "Above crossover" is the closed frequency interval
+    ``[unity_crossing_hz, f_max]``: the first falling 0 dB crossing itself
+    (exactly 0 dB) plus every sampled point strictly above it. The value is
+    therefore never negative -- ``0.0`` means the gain never climbs back above
+    0 dB past the crossover, a positive value is the height of the largest
+    re-peak (a conditional-stability hint). It is the sampled maximum, not an
+    interpolated one.
+
+    Unavailable (``value is None``, ``reason`` set) when the first-crossing
+    unity metric is unavailable -- with that metric's own reason -- or when an
+    invalid sample lies above the crossover, since a gap could hide a peak
+    (``invalid_samples``).
+    """
+    crossover = metrics.unity_crossing_hz
+    if crossover is None:
+        return None, metrics.reasons.get(
+            "unity_crossing_hz", REASON_NO_FALLING_UNITY_CROSSING
+        )
+    peak = 0.0
+    for freq, level in zip(freq_hz, metrics.magnitude_db, strict=False):
+        if freq <= crossover:
+            continue
+        if level is None:
+            return None, REASON_INVALID_SAMPLES
+        peak = max(peak, level)
+    return peak, None
