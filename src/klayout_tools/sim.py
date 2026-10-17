@@ -2766,10 +2766,9 @@ def _prepare_sim_request(
             _validate_k_sigma(
                 spec["k_sigma"], f"request.measurements[{spec['name']!r}].k_sigma"
             )
-        if spec.get("spec_row") is not None:
-            _validate_spec_row(
-                spec["spec_row"], f"request.measurements[{spec['name']!r}].spec_row"
-            )
+        _validate_spec_row(
+            spec.get("spec_row"), f"request.measurements[{spec['name']!r}].spec_row"
+        )
 
     options = request.get("options") or {}
     # Issue #2493: validates and resolves both plausibility declarations into
@@ -6195,11 +6194,14 @@ def _validate_k_sigma(value: Any, field: str) -> float:
     return float(value)
 
 
-def _validate_spec_row(value: Any, field: str) -> str:
+def _validate_spec_row(value: Any, field: str) -> str | None:
     """Validate ``request.measurements[].spec_row`` (issue #3778): the id of
-    the spec row this measurement grades, a non-empty string. Echoed onto the
+    the spec row this measurement grades, a non-empty string (``None`` when
+    undeclared). Echoed onto the
     report's per-measurement rollup so `klt signoff` can derive which spec
     rows a citation covers instead of trusting the manifest."""
+    if value is None:
+        return None
     if not isinstance(value, str) or not value.strip():
         raise SimError(f"{field} must be a non-empty string (got {value!r})")
     return value

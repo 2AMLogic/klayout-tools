@@ -6321,8 +6321,7 @@ def _grade_evidence(
             None,
             {**_input_members_detail(resolution), **execution_detail},
         )
-    if envelope_sink is not None:
-        envelope_sink.append(envelope)
+    _record_envelope(envelope_sink, envelope)
     return "met", None, citation, {}
 
 
@@ -7277,8 +7276,7 @@ def _build_tier_item(
             generator_exec=generator_exec,
             envelope_sink=sink,
         )
-        if sink:
-            met_envelopes[id(spec)] = sink[0]
+        _remember_envelope(met_envelopes, spec, sink)
         opt_in_items = (
             _OPT_IN_KIND_ITEMS.get(spec_citation["kind"])
             if spec_status == "met"
@@ -7543,6 +7541,24 @@ def _members_rows_declared(
         for _, rows in members
         for row_id in rows or []
     )
+
+
+def _record_envelope(
+    sink: list[dict[str, Any]] | None, envelope: dict[str, Any]
+) -> None:
+    """Append ``envelope`` to ``sink`` when one was given (issue #3778)."""
+    if sink is not None:
+        sink.append(envelope)
+
+
+def _remember_envelope(
+    met_envelopes: dict[int, dict[str, Any]],
+    spec: dict[str, Any],
+    sink: list[dict[str, Any]],
+) -> None:
+    """Key the envelope a ``met`` grading captured by ``spec``'s identity."""
+    if sink:
+        met_envelopes[id(spec)] = sink[0]
 
 
 def _envelope_tagged_rows(envelope: dict[str, Any]) -> tuple[bool, set[str]]:
