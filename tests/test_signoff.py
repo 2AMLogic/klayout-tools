@@ -5778,28 +5778,82 @@ def test_genuine_evidence_for_items_5_6_and_8_still_renders_met(tmp_path):
     assert by_id[8]["citation"]["kind"] == "generic"
 
 
-@pytest.mark.parametrize(
-    "envelope,expected_kind",
-    [
-        (STA_MULTI_CORNER_CLEAN_ENVELOPE, "sta"),
-        (FUNCTIONAL_VERIFICATION_PASS_ENVELOPE, "functional-verification"),
-        (SIM_PASS_ENVELOPE, "sim"),
-    ],
-)
-def test_digital_item_5_still_accepts_every_kind_the_doc_names(
-    tmp_path, envelope, expected_kind
-):
-    """A digital partition's item 5 accepts all three artifacts the doc
-    names for it: `klt sta` and `klt functional-verification` for the RTL
-    flow (#1959), and `klt sim` for the full-custom sub-case, which
-    satisfies item 5 "instead by PVT corner-matrix SPICE simulation"."""
-    path = _write(tmp_path, "evidence.json", envelope)
+def test_digital_item_5_sim_alone_satisfies_the_full_custom_sub_case(tmp_path):
+    """`klt sim` alone keeps satisfying a digital partition's item 5: the
+    full-custom sub-case satisfies it "instead by PVT corner-matrix SPICE
+    simulation" (#3741 exempts it from the both-kinds rule)."""
+    path = _write(tmp_path, "evidence.json", SIM_PASS_ENVELOPE)
 
     result = build_tier_report(_manifest(kind="digital", evidence={"5": path}))
 
     item_5 = next(i for i in result["items"] if i["id"] == 5)
     assert item_5["status"] == "met"
-    assert item_5["citation"]["kind"] == expected_kind
+    assert item_5["citation"]["kind"] == "sim"
+
+
+def _digital_item_5(tmp_path, entry):
+    result = build_tier_report(_manifest(kind="digital", evidence={"5.digital": entry}))
+    return next(i for i in result["items"] if i["id"] == 5)
+
+
+def _sta_fv_paths(tmp_path):
+    return (
+        _write(tmp_path, "sta.json", STA_MULTI_CORNER_CLEAN_ENVELOPE),
+        _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE),
+    )
+
+
+def test_digital_item_5_sta_and_fv_together_grade_met(tmp_path):
+    """Issue #3741: the RTL-flow route is STA *plus* a functional suite."""
+    sta_path, fv_path = _sta_fv_paths(tmp_path)
+
+    item_5 = _digital_item_5(tmp_path, [sta_path, fv_path])
+
+    assert item_5["status"] == "met"
+    assert [c["status"] for c in item_5["citations_graded"]] == ["met", "met"]
+    assert len(item_5["citations_graded"]) == 2
+
+
+@pytest.mark.parametrize("list_form", [False, True], ids=["single", "list"])
+@pytest.mark.parametrize(
+    "which,missing",
+    [("sta", ["functional-verification"]), ("fv", ["sta"])],
+)
+def test_digital_item_5_one_rtl_kind_alone_is_partial_coverage(
+    tmp_path, which, missing, list_form
+):
+    sta_path, fv_path = _sta_fv_paths(tmp_path)
+    path = sta_path if which == "sta" else fv_path
+
+    item_5 = _digital_item_5(tmp_path, [path] if list_form else path)
+
+    assert item_5["status"] == "unmet"
+    assert item_5["reason"] == "partial_coverage"
+    assert item_5["detail"]["missing_kinds"] == missing
+    assert item_5["citation"] is None
+
+
+def test_digital_item_5_failing_member_reports_its_own_reason_first(tmp_path):
+    _, fv_path = _sta_fv_paths(tmp_path)
+    bad_sta = _write(
+        tmp_path, "bad-sta.json", STA_MULTI_CORNER_SETUP_VIOLATION_ENVELOPE
+    )
+
+    item_5 = _digital_item_5(tmp_path, [bad_sta, fv_path])
+
+    assert item_5["status"] == "unmet"
+    assert item_5["reason"] == "check_failed"
+    assert "missing_kinds" not in item_5["detail"]
+
+
+def test_digital_item_5_sim_alongside_one_rtl_kind_still_needs_the_pair(tmp_path):
+    sta_path, _ = _sta_fv_paths(tmp_path)
+    sim_path = _write(tmp_path, "sim.json", SIM_PASS_ENVELOPE)
+
+    item_5 = _digital_item_5(tmp_path, [sta_path, sim_path])
+
+    assert item_5["reason"] == "partial_coverage"
+    assert item_5["detail"]["missing_kinds"] == ["functional-verification"]
 
 
 def test_analog_item_5_rejects_the_digital_column_artifacts(tmp_path):
@@ -5824,11 +5878,12 @@ def test_mixed_signal_partitions_apply_their_own_item_5_rule(tmp_path):
     key."""
     sim_path = _write(tmp_path, "sim.json", SIM_PASS_ENVELOPE)
     sta_path = _write(tmp_path, "sta.json", STA_MULTI_CORNER_CLEAN_ENVELOPE)
+    fv_path = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE)
 
     result = build_tier_report(
         _manifest(
             kind="mixed-signal",
-            evidence={"5.analog": sim_path, "5.digital": sta_path},
+            evidence={"5.analog": sim_path, "5.digital": [sta_path, fv_path]},
         )
     )
 
@@ -9814,8 +9869,11 @@ def test_sta_evidence_satisfies_item_5_for_a_digital_manifest(tmp_path):
     multi-corner `klt sta` run, not a `klt sim` corner sweep it has no reason
     to produce."""
     sta_path = _write(tmp_path, "sta.json", STA_MULTI_CORNER_CLEAN_ENVELOPE)
+    fv_path = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE)
 
-    result = build_tier_report(_manifest(kind="digital", evidence={"5": sta_path}))
+    result = build_tier_report(
+        _manifest(kind="digital", evidence={"5": [sta_path, fv_path]})
+    )
 
     item_5 = next(item for item in result["items"] if item["id"] == 5)
     assert item_5["status"] == "met"
@@ -9828,7 +9886,11 @@ def test_sta_evidence_satisfies_item_5_for_a_digital_manifest(tmp_path):
 def test_functional_verification_evidence_satisfies_item_5_for_digital(tmp_path):
     fv_path = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE)
 
-    result = build_tier_report(_manifest(kind="digital", evidence={"5": fv_path}))
+    sta_path = _write(tmp_path, "sta.json", STA_MULTI_CORNER_CLEAN_ENVELOPE)
+
+    result = build_tier_report(
+        _manifest(kind="digital", evidence={"5": [fv_path, sta_path]})
+    )
 
     item_5 = next(item for item in result["items"] if item["id"] == 5)
     assert item_5["status"] == "met"
@@ -10073,7 +10135,7 @@ def test_generic_citation_still_rejected_on_items_5_and_7_for_digital(tmp_path):
         assert item["citation"] is None
 
 
-def test_command_backed_sta_evidence_satisfies_item_5(monkeypatch):
+def test_command_backed_sta_evidence_satisfies_item_5(monkeypatch, tmp_path):
     """The new kinds work through the command-backed evidence path exactly
     like the file-backed one -- no separate wiring."""
 
@@ -10084,10 +10146,12 @@ def test_command_backed_sta_evidence_satisfies_item_5(monkeypatch):
 
     monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)
 
+    fv_path = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE)
+
     result = build_tier_report(
         _manifest(
             kind="digital",
-            evidence={"5": {"command": ["klt", "sta", "request.json"]}},
+            evidence={"5": [{"command": ["klt", "sta", "request.json"]}, fv_path]},
         )
     )
 
@@ -10118,7 +10182,7 @@ def test_realistic_digital_envelope_set_reaches_eight_of_ten_items(tmp_path):
                 "2": drc_path,
                 "3": drc_path,
                 "4": lvs_path,
-                "5": sta_path,
+                "5": [sta_path, fv_sdf_path],
                 "7": fv_sdf_path,
                 "8": generic_path,
                 "9": _attested_entry(tmp_path, 9),
@@ -10151,7 +10215,7 @@ def test_fleet_rollup_blocking_item_reflects_the_new_digital_kinds(tmp_path):
                 {
                     "block": "digital-canary",
                     "kind": "digital",
-                    "evidence": {"5": sta_path, "7": fv_sdf_path},
+                    "evidence": {"5": [sta_path, fv_sdf_path], "7": fv_sdf_path},
                 }
             ]
         }
@@ -15925,7 +15989,12 @@ def _sta_checkout(root: Path, *, verilog: bool = False) -> Path:
 
 
 def _sta_item_5(evidence: Path) -> dict:
-    result = build_tier_report(_manifest(kind="digital", evidence={"5": str(evidence)}))
+    # Item 5 digital needs STA *and* a functional suite (#3741); the STA
+    # citation is listed first so it stays the item's reported citation.
+    fv_path = _write(evidence.parent, "fv.json", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE)
+    result = build_tier_report(
+        _manifest(kind="digital", evidence={"5": [str(evidence), fv_path]})
+    )
     return next(item for item in result["items"] if item["id"] == 5)
 
 
@@ -16408,10 +16477,11 @@ def _sta_with_annotation(corner_blocks: list) -> dict:
 
 def _grade_sta_item_5(tmp_path, envelope: dict, **entry_extra):
     path = _write(tmp_path, "sta.json", envelope)
+    fv_path = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE)
     result = build_tier_report(
         _manifest(
             kind="digital",
-            evidence={"5.digital": {"file": path, **entry_extra}},
+            evidence={"5.digital": [{"file": path, **entry_extra}, fv_path]},
         )
     )
     return next(item for item in result["items"] if item["id"] == 5)
