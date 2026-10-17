@@ -229,15 +229,10 @@ from .extract_parasitics import spice_safe_net_name as spice_safe_net_name
 # Passive-device geometry and MoM-capacitor extraction live in their own
 # module (issue #2419, split out of this one at ~10,000 lines). The
 # un-aliased block is called directly by `_extract_netlist`; the `X as X` re-exports
-# keep `from klayout_tools.extract import ...` working for the other moved
-# names (`erc.py`, `extract_report.py`, `netlist_capacitor_recovery.py`,
-# `pdk_models.py`, and the test suite import them from here).
-from .extract_passive_regions import _MOM_FEED_CLASS_NAMES as _MOM_FEED_CLASS_NAMES
-from .extract_passive_regions import MOM_FEED_DOUBLE as MOM_FEED_DOUBLE
-from .extract_passive_regions import MOM_FEED_NONE as MOM_FEED_NONE
-from .extract_passive_regions import MOM_FEED_SAME as MOM_FEED_SAME
+# keep `from klayout_tools.extract import ...` working for the moved names
+# that still have importers (`erc.py`, `extract_report.py`,
+# `netlist_capacitor_recovery.py`, `pdk_models.py`, `tests/test_sg13g2_deck.py`).
 from .extract_passive_regions import MOM_FEED_TOKENS as MOM_FEED_TOKENS
-from .extract_passive_regions import MOM_FEED_UNMEASURED as MOM_FEED_UNMEASURED
 from .extract_passive_regions import (
     _build_mom_capacitor_extractor,
     _capacitor_plate_regions,
@@ -251,19 +246,10 @@ from .extract_passive_regions import (
 from .extract_passive_regions import (
     _capacitor_top_via_overlap_region as _capacitor_top_via_overlap_region,
 )
-from .extract_passive_regions import (
-    _mom_extractor_metal_layer_specs as _mom_extractor_metal_layer_specs,
-)
-from .extract_passive_regions import _mom_feed_variant as _mom_feed_variant
-from .extract_passive_regions import (
-    _mom_finger_stack_metal_range as _mom_finger_stack_metal_range,
-)
 from .extract_passive_regions import _resistor_body_region as _resistor_body_region
-from .extract_passive_regions import _set_mom_feed_parameter as _set_mom_feed_parameter
 from .extract_passive_regions import (
     mom_capacitor_device_class as mom_capacitor_device_class,
 )
-from .extract_passive_regions import mom_capacitor_has_feed as mom_capacitor_has_feed
 from .extract_progress import StageTimer, active_timer, stage
 
 # The netlist-report-description subsystem lives in its own module (issue
