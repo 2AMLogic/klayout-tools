@@ -257,12 +257,6 @@
     {
       "file": "src/klayout_tools/drc.py",
       "code": "assignment",
-      "message": "Incompatible types in assignment (expression has type \"Element[str] | None\", variable has type \"Element[str]\")",
-      "count": 1
-    },
-    {
-      "file": "src/klayout_tools/drc.py",
-      "code": "assignment",
       "message": "Incompatible types in assignment (expression has type \"list[list[int]] | None\", variable has type \"list[list[Any]]\")",
       "count": 1
     },
@@ -270,6 +264,12 @@
       "file": "src/klayout_tools/drc.py",
       "code": "union-attr",
       "message": "Item \"None\" of \"DerivedLayer | None\" has no attribute \"mode\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/drc_klayout_engine.py",
+      "code": "assignment",
+      "message": "Incompatible types in assignment (expression has type \"Element[str] | None\", variable has type \"Element[str]\")",
       "count": 1
     },
     {

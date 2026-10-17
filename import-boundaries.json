@@ -104,7 +104,8 @@
       "description": "`klt drc` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.drc_cmd",
-        "klayout_tools.drc"
+        "klayout_tools.drc",
+        "klayout_tools.drc_klayout_engine"
       ]
     },
     "economy": {

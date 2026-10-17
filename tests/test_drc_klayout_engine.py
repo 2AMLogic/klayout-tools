@@ -23,6 +23,7 @@ import klayout.db as kdb
 import pytest
 
 import klayout_tools.drc as drc_module
+import klayout_tools.drc_klayout_engine as engine_module
 from helpers.subprocess_fakes import fake_completed
 from klayout_tools import pdk
 from klayout_tools.cli import main
@@ -221,7 +222,7 @@ def _stub_klayout_drc_subprocess(
                 handle.write(rdb_xml)
         return fake_completed(stdout=stdout, stderr=stderr, returncode=returncode)
 
-    monkeypatch.setattr(drc_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(engine_module.subprocess, "run", fake_run)
 
 
 # --------------------------------------------------------------------------- #
@@ -944,14 +945,14 @@ def test_klayout_engine_missing_input_file_raises_before_launching_subprocess(
 
 def test_klayout_engine_cleans_up_work_dir(tmp_path, monkeypatch):
     work_dirs: list = []
-    real_mkdtemp = drc_module.tempfile.mkdtemp
+    real_mkdtemp = engine_module.tempfile.mkdtemp
 
     def spy_mkdtemp(*args, **kwargs):
         created = real_mkdtemp(*args, **kwargs)
         work_dirs.append(created)
         return created
 
-    monkeypatch.setattr(drc_module.tempfile, "mkdtemp", spy_mkdtemp)
+    monkeypatch.setattr(engine_module.tempfile, "mkdtemp", spy_mkdtemp)
     _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_EDGE_PAIR_RDB)
     gds = _write_gds(tmp_path / "test.gds")
     deck_file = _write_deck_file(tmp_path / "deck.lydrc")
@@ -967,14 +968,14 @@ def test_klayout_engine_cleans_up_work_dir_on_error(tmp_path, monkeypatch):
     just the success path -- mirrors `_cleanup_netgen_work_dir`'s own
     `finally` placement in `lvs.py`."""
     work_dirs: list = []
-    real_mkdtemp = drc_module.tempfile.mkdtemp
+    real_mkdtemp = engine_module.tempfile.mkdtemp
 
     def spy_mkdtemp(*args, **kwargs):
         created = real_mkdtemp(*args, **kwargs)
         work_dirs.append(created)
         return created
 
-    monkeypatch.setattr(drc_module.tempfile, "mkdtemp", spy_mkdtemp)
+    monkeypatch.setattr(engine_module.tempfile, "mkdtemp", spy_mkdtemp)
     _stub_klayout_drc_subprocess(monkeypatch, write_report=False)
     gds = _write_gds(tmp_path / "test.gds")
     deck_file = _write_deck_file(tmp_path / "deck.lydrc")
@@ -1087,7 +1088,7 @@ def test_klayout_engine_deck_error_message_truncation_keeps_the_error_lines(
     lines themselves, even when they scrolled off the head."""
     noise = "\n".join(
         f"Executing rule R{index}"
-        for index in range(2 * drc_module._KLAYOUT_DECK_ERROR_DETAIL_MAX_LINES)
+        for index in range(2 * engine_module._KLAYOUT_DECK_ERROR_DETAIL_MAX_LINES)
     )
     _stub_klayout_drc_subprocess(
         monkeypatch,
@@ -1107,7 +1108,7 @@ def test_klayout_engine_deck_error_message_truncation_keeps_the_error_lines(
     # The tail -- where the abort is -- survives; the head does not.
     assert "Executing rule R0\n" not in message
     assert (
-        f"Executing rule R{2 * drc_module._KLAYOUT_DECK_ERROR_DETAIL_MAX_LINES - 1}"
+        f"Executing rule R{2 * engine_module._KLAYOUT_DECK_ERROR_DETAIL_MAX_LINES - 1}"
         in message
     )
 
@@ -1159,7 +1160,7 @@ def test_scan_deck_host_commands_finds_the_real_pmap_logger_formatter(tmp_path):
         "end\n",
     )
 
-    found = drc_module._scan_deck_host_commands(deck_file)
+    found = engine_module._scan_deck_host_commands(deck_file)
 
     assert set(found) == {"pmap", "tail"}
     assert found["pmap"].endswith("main.drc:2")
@@ -1177,7 +1178,7 @@ def test_scan_deck_host_commands_skips_what_it_cannot_be_sure_about(tmp_path):
         'system("true")\n',
     )
 
-    assert drc_module._scan_deck_host_commands(deck_file) == {}
+    assert engine_module._scan_deck_host_commands(deck_file) == {}
 
 
 def test_scan_deck_host_commands_follows_require_relative_includes(tmp_path):
@@ -1192,7 +1193,7 @@ def test_scan_deck_host_commands_follows_require_relative_includes(tmp_path):
         'require_relative "util"\nsource($input)\n',
     )
 
-    found = drc_module._scan_deck_host_commands(deck_file)
+    found = engine_module._scan_deck_host_commands(deck_file)
 
     assert set(found) == {"pmap"}
     assert found["pmap"].endswith("util.rb:2")
@@ -2173,7 +2174,7 @@ def test_load_manifest_trims_dedups_and_keeps_literal_names(tmp_path):
         "﻿  B \n\nA\n\t\n# not a comment\nM*.a\nA\nwith space\r\n",
     )
 
-    assert drc_module.load_rule_category_manifest(path) == [
+    assert engine_module.load_rule_category_manifest(path) == [
         "# not a comment",
         "A",
         "B",
@@ -2193,14 +2194,14 @@ def test_load_manifest_trims_dedups_and_keeps_literal_names(tmp_path):
 def test_load_manifest_rejects_empty_and_invalid(tmp_path, text, raw, match):
     path = _manifest(tmp_path, text, raw=raw)
     with pytest.raises(DrcError, match=match):
-        drc_module.load_rule_category_manifest(path)
+        engine_module.load_rule_category_manifest(path)
 
 
 def test_load_manifest_rejects_unreadable(tmp_path):
     with pytest.raises(DrcError, match="could not read rule-category manifest"):
-        drc_module.load_rule_category_manifest(str(tmp_path / "missing.txt"))
+        engine_module.load_rule_category_manifest(str(tmp_path / "missing.txt"))
     with pytest.raises(DrcError, match="could not read rule-category manifest"):
-        drc_module.load_rule_category_manifest(str(tmp_path))
+        engine_module.load_rule_category_manifest(str(tmp_path))
 
 
 def test_cli_set_assertion_clean_exit_zero(tmp_path, monkeypatch, capsys):
@@ -2522,7 +2523,7 @@ def _stub_versioned_klayout(
             handle.write(_EMPTY_RDB)
         return fake_completed()
 
-    monkeypatch.setattr(drc_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(engine_module.subprocess, "run", fake_run)
     return calls
 
 
@@ -2802,10 +2803,10 @@ def test_single_file_deck_has_no_tree_identity(tmp_path, monkeypatch):
 def test_directory_deck_records_tree_identity_that_tracks_includes(tmp_path):
     deck = _tree_deck(tmp_path)
 
-    first = drc_module._deck_tree_identity(deck)
-    again = drc_module._deck_tree_identity(deck)
+    first = engine_module._deck_tree_identity(deck)
+    again = engine_module._deck_tree_identity(deck)
     (tmp_path / "rules" / "helper.rb").write_text("# changed\n", encoding="utf-8")
-    changed = drc_module._deck_tree_identity(deck)
+    changed = engine_module._deck_tree_identity(deck)
 
     assert first == again
     assert first["file_count"] == 2
@@ -2829,7 +2830,7 @@ def test_directory_deck_provenance_and_check_detect_helper_drift(
         Path(report_path).write_text(_CLEAN_WITH_CATEGORIES_RDB, encoding="utf-8")
         return fake_completed()
 
-    monkeypatch.setattr(drc_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(engine_module.subprocess, "run", fake_run)
     report = run_drc_klayout_engine(gds, deck)
     tree = report["provenance"]["deck"]["tree"]
     assert tree["file_count"] == 2
@@ -2857,7 +2858,7 @@ def _stub_by_input(monkeypatch, rdb_by_input_name: dict[str, str]):
         )
         return fake_completed()
 
-    monkeypatch.setattr(drc_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(engine_module.subprocess, "run", fake_run)
 
 
 def test_negative_control_passes_and_is_reported(tmp_path, monkeypatch):
