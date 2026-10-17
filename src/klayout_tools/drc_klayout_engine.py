@@ -543,6 +543,28 @@ def _ruby_literal(value: str) -> str:
     return value
 
 
+def _record_deck_default(
+    line: str, guarded: str | None, defaults: dict[str, str | None]
+) -> str | None:
+    """Fold one deck line into ``defaults`` (see :func:`scan_deck_globals`);
+    returns the ``defined?``-guarded global whose block is still open."""
+    block = _DECK_DEFAULT_BLOCK_RE.match(line)
+    if block:
+        guarded = block.group(1) or block.group(2)
+        defaults.setdefault(guarded, None)
+        return guarded
+    inline = _DECK_DEFAULT_INLINE_RE.match(line) or _DECK_OR_ASSIGN_RE.match(line)
+    if inline:
+        defaults.setdefault(inline.group(1), _ruby_literal(inline.group("value")))
+        return guarded
+    assign = _DECK_ASSIGN_RE.match(line)
+    if guarded and assign and assign.group(1) == guarded:
+        if defaults.get(guarded) is None:
+            defaults[guarded] = _ruby_literal(assign.group("value"))
+        return None
+    return guarded
+
+
 def scan_deck_globals(deck_file: str) -> list[dict[str, Any]]:
     """Best-effort static scan of the ``-rd`` globals a KLayout DRC deck
     consumes (issue #3816), following literal includes as
@@ -570,28 +592,8 @@ def scan_deck_globals(deck_file: str) -> list[dict[str, Any]]:
         for line in lines:
             if line.lstrip().startswith("#"):
                 continue
-            block = _DECK_DEFAULT_BLOCK_RE.match(line)
-            if block:
-                guarded = block.group(1) or block.group(2)
-                defaults.setdefault(guarded, None)
-                continue
-            inline = _DECK_DEFAULT_INLINE_RE.match(line)
-            or_assign = _DECK_OR_ASSIGN_RE.match(line)
-            assign = _DECK_ASSIGN_RE.match(line)
-            if inline:
-                defaults.setdefault(
-                    inline.group(1), _ruby_literal(inline.group("value"))
-                )
-            elif or_assign:
-                defaults.setdefault(
-                    or_assign.group(1), _ruby_literal(or_assign.group("value"))
-                )
-            elif guarded and assign and assign.group(1) == guarded:
-                if defaults.get(guarded) is None:
-                    defaults[guarded] = _ruby_literal(assign.group("value"))
-                guarded = None
-            for name in _DECK_GLOBAL_RE.findall(line):
-                seen.add(name)
+            guarded = _record_deck_default(line, guarded, defaults)
+            seen.update(_DECK_GLOBAL_RE.findall(line))
     names = {n for n in seen | set(defaults) if n not in _DECK_GLOBAL_IGNORED}
     # A name only ever assigned (never read, never default-guarded) is deck
     # internal state, not an input; but we cannot tell reads from writes

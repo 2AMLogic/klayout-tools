@@ -358,7 +358,7 @@ def _print_decks_text(report: dict) -> None:
         return
 
     headers = ("deck", "kind", "default", "globals")
-    rows = []
+    rows: list[tuple[str, ...]] = []
     for deck in decks:
         names = [
             g["name"] if not g["required_by_caller"] else f"{g['name']}*"

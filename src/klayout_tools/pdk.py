@@ -895,7 +895,7 @@ def drc_decks(variant: str | None = None, root: str | None = None) -> dict[str, 
 
     decks: list[dict[str, Any]] = []
     for name in sorted(os.listdir(drc_dir)) if drc_dir is not None else []:
-        path = os.path.join(drc_dir, name)
+        path = os.path.join(drc_dir or "", name)
         ext = os.path.splitext(name)[1]
         if ext not in _DRC_DECK_KINDS or not os.path.isfile(path):
             continue
