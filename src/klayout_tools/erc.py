@@ -470,6 +470,11 @@ from .extract import (
 #: (``checked_by_well_assertion``, empty unless used). Additive in exactly
 #: the sense every entry above is: a spec that declares no ``well_boxes``
 #: produces byte-identical output except for that new empty list. No bump.
+#: Issue #3750 adds one more optional spec key (``ties[].well_complement_of``,
+#: valid only with ``well_layer: null``): a pure widening that reuses the
+#: ``well_boxes`` grading (``REASON_DEGENERATE_WELL_ASSERTION``,
+#: ``checked_by_well_assertion``) and emits no staleness entry, since it is
+#: derived from the stream. A spec without it is byte-identical. No bump.
 #: Issue #2339 adds two more optional spec keys (``ties[].well_requires``
 #: and ``ties[].well_excludes`` -- the well-side class selectors, see
 #: :func:`_select_well_class`) and one new ``erc_coverage.skipped[].reason``
@@ -2756,6 +2761,11 @@ def _tie_well_region(
     - a drawn ``well_layer`` (every tie before issue #2255) -- the merged
       layer region, exactly as before, never degenerate (see
       :func:`_degenerate_tie_reasons`);
+    - ``well_complement_of`` (issue #3750) -- the top-cell extent minus the
+      named drawn layers, for a bulk substrate with no drawn well shape.
+      Degenerate by the same test as ``well_boxes`` (the named layers draw
+      nothing, so the "substrate" is the whole die) and also when they
+      cover the whole die (nothing left to check);
     - ``well_boxes`` (issue #2255) -- the union of the caller's asserted
       micrometre boxes, for a native-substrate block that draws no well/tub
       layer at all. Degenerate when it covers the top cell's own extent to
@@ -2771,11 +2781,23 @@ def _tie_well_region(
     Split out of :func:`_extract_connectivity` to keep that function under
     the repo's C901 complexity ratchet.
     """
-    if not tie["well_boxes"]:
+    if tie["well_complement_of"]:
+        # Issue #3750: the substrate is everything outside the named well
+        # layers. Derived from the stream, so it follows the layout.
+        extent = kdb.Region(top_cell.bbox())
+        wells = kdb.Region()
+        for well_layer in tie["well_complement_of"]:
+            wells += _region(layout, top_cell, well_layer)
+        asserted = (extent - wells.merged()).merged()
+        if asserted.is_empty():
+            # Wells cover the whole die: no substrate left to check.
+            return asserted, True
+    elif tie["well_boxes"]:
+        asserted = _boxes_region(kdb, layout, tie["well_boxes"])
+        extent = kdb.Region(top_cell.bbox())
+    else:
         return _region(layout, top_cell, tie["well_layer"]).merged(), False
 
-    asserted = _boxes_region(kdb, layout, tie["well_boxes"])
-    extent = kdb.Region(top_cell.bbox())
     extent_area = extent.area()
     if extent_area <= 0:
         # A top cell with no geometry at all: there is no extent to be
@@ -3115,7 +3137,11 @@ def _extract_connectivity(
         # `_select_well_class` narrows the region further, so it is
         # distinct from `well_selection_degenerate` below -- see
         # `_degenerate_tie_reasons`.
-        well_region_empty = not tie["well_boxes"] and well_region.is_empty()
+        well_region_empty = (
+            not tie["well_boxes"]
+            and not tie["well_complement_of"]
+            and well_region.is_empty()
+        )
         # `well_requires`/`well_excludes` (issue #2339) and their
         # literal-geometry counterparts `well_requires_boxes`/
         # `well_excludes_boxes` (issue #2540): keep only the merged well
@@ -3172,6 +3198,7 @@ def _extract_connectivity(
                 # partition, so it is an ordinary geometrically-derived pass.
                 "well_asserted": bool(
                     tie["well_boxes"]
+                    or tie["well_complement_of"]
                     or tie["well_requires_boxes"]
                     or tie["well_excludes_boxes"]
                 ),

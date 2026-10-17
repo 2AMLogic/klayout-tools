@@ -110,6 +110,7 @@ _TIE_KEYS = (
     "tap_is_dedicated",
     "tap_boxes",
     "well_boxes",
+    "well_complement_of",
     "well_requires",
     "well_excludes",
     "well_requires_boxes",
@@ -681,6 +682,36 @@ def _parse_well_boxes(
     return _parse_um_boxes(entry, "well_boxes", spec_path, index)
 
 
+def _parse_well_complement_of(
+    entry: dict[str, Any], spec_path: str, index: int
+) -> list[tuple[int, int]]:
+    """``ties[].well_complement_of`` (optional, issue #3750): the substrate
+    half of a tie for a process whose bulk has no drawn well/tub shape -- a
+    ``"<layer>/<datatype>"`` string or a non-empty array of them. The tie's
+    region is the top-cell extent minus the merged union of those layers
+    (see :func:`~klayout_tools.erc._tie_well_region`), so it follows the
+    layout instead of going stale like a hand-kept ``well_boxes`` list.
+
+    Omitted/``null`` -> ``[]``. Valid only with ``well_layer: null``
+    (:func:`_parse_well_declaration`).
+    """
+    raw = entry.get("well_complement_of")
+    if raw is None:
+        return []
+    values = [raw] if isinstance(raw, str) else raw
+    if not isinstance(values, list) or not values:
+        raise ErcError(
+            f"spec '{spec_path}': ties[{index}].well_complement_of must be a "
+            "'<layer>/<datatype>' string or a non-empty array of them"
+        )
+    return [
+        _parse_layer_datatype(
+            str(value), spec_path, f"ties[{index}].well_complement_of[{j}]", ErcError
+        )
+        for j, value in enumerate(values)
+    ]
+
+
 def _parse_well_selection(
     entry: dict[str, Any], spec_path: str, index: int, drawn_well: bool
 ) -> dict[str, Any]:
@@ -749,7 +780,8 @@ def _parse_well_selection(
             f"spec '{spec_path}': ties[{index}].{named} selects among the "
             f"drawn shapes of a well layer, so ties[{index}].well_layer must "
             "name one (got null); an asserted substrate region already names "
-            "exactly the region it claims, box by box, in 'well_boxes'"
+            "exactly the region it claims, in 'well_boxes' or "
+            "'well_complement_of'"
         )
     return selection
 
@@ -803,21 +835,38 @@ def _parse_well_declaration(
     repo's C901 complexity ratchet, as :func:`_parse_tap_requires` is.
     """
     well_boxes = _parse_well_boxes(entry, spec_path, index)
+    complement = _parse_well_complement_of(entry, spec_path, index)
     raw = entry["well_layer"]
     declaration: dict[str, Any] = {
         "well_boxes": well_boxes,
+        "well_complement_of": complement,
         **_parse_well_selection(entry, spec_path, index, raw is not None),
     }
     if raw is None:
-        if not well_boxes:
+        if well_boxes and complement:
+            raise ErcError(
+                f"spec '{spec_path}': ties[{index}] declares both well_boxes "
+                "and well_complement_of; they are alternative ways to name "
+                "the substrate region, so give exactly one"
+            )
+        if not well_boxes and not complement:
             raise ErcError(
                 f"spec '{spec_path}': ties[{index}].well_layer is null, so "
                 f"ties[{index}].well_boxes must assert the substrate region "
                 "this tie covers (a non-empty array of [left, bottom, right, "
-                "top] micrometre boxes); to declare no tie at all, omit the "
+                f"top] micrometre boxes) or ties[{index}].well_complement_of "
+                "must name the well layer(s) the substrate is the complement "
+                "of; to declare no tie at all, omit the "
                 "entry and state why in the top-level 'ties_disclosure'"
             )
         return {"well_layer": None, **declaration}
+    if complement:
+        raise ErcError(
+            f"spec '{spec_path}': ties[{index}].well_complement_of derives a "
+            f"substrate region for a tie with no drawn well, so "
+            f"ties[{index}].well_layer must be null (got {str(raw)!r}); it "
+            "cannot be combined with a drawn well_layer or with well_boxes"
+        )
     if well_boxes:
         raise ErcError(
             f"spec '{spec_path}': ties[{index}].well_boxes asserts a substrate "
