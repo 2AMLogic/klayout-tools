@@ -1794,6 +1794,20 @@ also does not report SAB drawn *over* a contact (`Region.separation_check`
 reports nothing for overlapping shapes; the runset reports it under `SB.4`
 and `SB.8`).
 
+**ESD implant (`ESD.*`) and guard-ring marker (`GR.*`) rules (issue #3792).**
+The deck transcribes the `esd.rb` / `guard_ring.rb` rules the existing check
+kinds express exactly, under scopes `ESD` and `GR`: `ESD.1`/`ESD.2` (ESD
+width / space, 0.6 um), `ESD.4b` (overlap of COMP, 0.45 um), `ESD.5a`/`ESD.5b`
+(ESD area / enclosed-hole area, 0.49 um^2), `ESD.8` (space to Nplus / Pplus,
+0.3 um, one rule per implant) and `GR.2` (COMP, Nwell, Poly2, Metal1-5 and
+MetalTop at least 10 um from `GUARD_RING_MK`, 167/5). The remaining upstream
+rules (`ESD.3a`/`3b`/`4a`/`6`/`7`/`9`/`10`/`pl`, `GR.1`/`3`/`4`/`6`/`11`) need
+derived layers (NCOMP/PCOMP), gate recognition, `LVS_IO` or polygon selectors
+the check kinds lack. They are listed in the deck's `UNTRANSCRIBED_RULES` with
+a reason each, and every `klt drc --deck gf180mcu` report carries them in
+`coverage.skipped` with reason `not_transcribed` (whatever the stream draws),
+so a violation-free run is `clean_partial`, never an unconditional `clean`.
+
 The conductor *above* a cut is checked as well as the layers below it
 (issue #551). `Contact` previously had `CO.3` (Poly2) and `CO.4` (Comp) —
 both *below* the cut — and nothing above it, so a contact whose Metal1 strap
@@ -3175,6 +3189,11 @@ geometry *can* exist there — the engine simply has no integral grid to
 measure it with (see the check kind's own section above). Tested after the
 vacuity question, so a rule whose layer is also absent stays `inapplicable`:
 with no geometry at all, the absent layer is the more informative reason.
+
+A rule the selected deck knowingly never transcribed (issue #3792; today
+gf180mcu's `ESD.*`/`GR.*` remainder, see the deck's `UNTRANSCRIBED_RULES`) is
+always `skipped` with reason `not_transcribed`, whatever the stream draws: no
+check of it exists to be inapplicable. The run is `clean_partial`.
 
 Every check kind this engine dispatches measures drawn geometry and reports
 nothing when the geometry it measures is empty: `width`/`space`/`notch`/

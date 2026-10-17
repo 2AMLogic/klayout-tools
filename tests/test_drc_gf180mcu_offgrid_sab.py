@@ -53,7 +53,9 @@ def test_offgrid_contact_vertex_is_flagged(tmp_path):
     assert {v["layer"] for v in flagged} == {"Contact"}
 
     clean = run_drc(on, "gf180mcu")
-    assert clean["status"] == "clean"
+    # Issue #3792: the deck discloses its untranscribed ESD.*/GR.* rules as
+    # skipped, so a violation-free run is `clean_partial`, never `clean`.
+    assert clean["status"] == "clean_partial"
     assert "contact.ongrid.1" in clean["coverage"]["rules_checked"]
 
 
@@ -102,7 +104,7 @@ def test_sab_to_contact_spacing_sb4(tmp_path):
     far = _sb_report(tmp_path, "far", {**sab, CONTACT: [kdb.Box(1200, 400, 1420, 620)]})
 
     assert near["rule_counts"] == {"sab.separation.contact.1": 1}
-    assert far["status"] == "clean"
+    assert far["status"] == "clean_partial"
     assert "sab.separation.contact.1" in far["coverage"]["rules_checked"]
 
 
@@ -119,7 +121,7 @@ def test_poly_extension_beyond_sab_sb10(tmp_path):
     ok = _sb_report(tmp_path, "ok", {**sab, POLY2: [kdb.Box(-300, 300, 1300, 700)]})
 
     assert short["rule_counts"] == {"poly2.enclosing.sab.1": 2}
-    assert ok["status"] == "clean"
+    assert ok["status"] == "clean_partial"
 
 
 def test_sab_width_and_space(tmp_path):
@@ -137,7 +139,7 @@ def test_sab_width_and_space(tmp_path):
 def test_stream_without_sab_is_clean_with_sb_rules_inapplicable(tmp_path):
     report = _sb_report(tmp_path, "nosab", {POLY2: [kdb.Box(0, 0, 1400, 400)]})
 
-    assert report["status"] == "clean"
+    assert report["status"] == "clean_partial"
     assert "poly2.enclosing.sab.1" in report["coverage"]["rules_skipped"]
     assert "sab.width.1" in report["coverage"]["rules_skipped"]
 

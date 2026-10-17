@@ -330,6 +330,11 @@ could re-check mechanically.
   `grid_um` is already a physical micrometre distance on the rule (a
   manufacturing grid, not a deck-nominal-dbu count), so unlike every other
   entry here it is reported unconverted.
+- **Rules a deck never transcribed are not listed here.** gf180mcu's `ESD.*` /
+  `GR.*` rules (scopes `ESD`, `GR`; issue #3792) appear when transcribed; the
+  upstream ids it does not transcribe (`ESD.3a`, `GR.1`, ...) are reported by
+  `klt drc` as `coverage.skipped` entries with reason `not_transcribed`
+  (see [`drc.md`](drc.md)).
 - `layers` — the drawn layer name(s) the rule reads, in `layer`/`other_layer`
   order (`"poly.drawing"`; the raw `"<layer>/<datatype>"` pair when the deck
   publishes no name for it).

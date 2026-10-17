@@ -69,6 +69,7 @@ from .decks import (
     get_unchecked_rules,
     get_unmodeled_rules,
     get_unmodeled_voltage_markers,
+    get_untranscribed_rules,
 )
 from .layers import layers_report
 from .metrics import is_registered
@@ -894,6 +895,12 @@ def _curated_nothing_checked_reasons(
 #: naturally inapplicable (:data:`INAPPLICABLE_REASON_NO_APPLICABLE_GEOMETRY`)
 #: or skipped for an absent layer (:data:`SKIP_REASON_ABSENT_INPUT_LAYER`).
 SKIP_REASON_NOT_SELECTED = "not_selected"
+
+#: The curated engine's ``coverage.skipped[].reason`` for an upstream foundry
+#: rule the selected deck knowingly does not transcribe (issue #3792, e.g.
+#: gf180mcu's ``ESD.6``/``GR.1``). Requested work no check ran, so any such
+#: rule makes the run partial -- a ``clean`` is not read as covering it.
+SKIP_REASON_NOT_TRANSCRIBED = "not_transcribed"
 
 #: Characters that make a ``--rules`` token a shell-style glob rather than an
 #: exact rule id (``fnmatch`` syntax). Used only to word the "matched no
@@ -1883,6 +1890,12 @@ def _build_coverage(setup: _DrcSetup, state: _DrcState) -> dict[str, Any]:
     skipped_records += [
         {"id": rule_id, "reason": SKIP_REASON_NOT_SELECTED}
         for rule_id in sorted(omitted_ids)
+    ]
+    # Issue #3792: upstream rules the deck knows it never transcribed, listed
+    # whatever the stream draws.
+    skipped_records += [
+        {"id": rule_id, "reason": SKIP_REASON_NOT_TRANSCRIBED}
+        for rule_id in sorted(get_untranscribed_rules(deck_name))
     ]
     return {
         "deck_layers": [_layer_str(t) for t in sorted(deck_layer_tuples)],
