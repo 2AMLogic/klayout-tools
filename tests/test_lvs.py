@@ -586,6 +586,76 @@ def test_reference_netlist_with_extra_subckt_and_explicit_top_matches_cleanly(
     assert report["mismatch_count"] == 0
 
 
+_LEAF_WRAPPER_REF = """\
+.subckt leaf a b g vss
+M1 a g b vss nfet w=1u l=0.13u
+.ends
+.subckt wrapper a b g vss
+x1 a b g vss leaf
+.ends
+.subckt wrapper2 a b g vss
+x1 a b g vss wrapper
+x2 a b g vss leaf
+.ends
+"""
+_LEAF_LAYOUT = """\
+.SUBCKT leaf a b g vss
+M$1 a g b vss nfet L=0.13U W=1U
+.ENDS leaf
+"""
+
+
+def test_interior_top_with_wrapper_matches_issue_2852(tmp_path):
+    """reference.top / layout.top naming a circuit instantiated by wrappers
+    must not crash with a destroyed-handle RuntimeError."""
+    ref = _write(tmp_path / "ref.spice", _LEAF_WRAPPER_REF)
+    lay = _write(tmp_path / "lay.spice", _LEAF_WRAPPER_REF)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": lay, "top": "leaf"},
+            "reference": {"netlist": ref, "top": "leaf"},
+        },
+    )
+    report = run_lvs(path)
+    assert report["status"] == "match"
+    assert report["mismatch_count"] == 0
+
+
+def test_interior_top_mismatch_still_detected_issue_2852(tmp_path):
+    ref = _write(
+        tmp_path / "ref.spice",
+        _LEAF_WRAPPER_REF.replace("w=1u", "w=2u", 1),
+    )
+    lay = _write(tmp_path / "lay.spice", _LEAF_LAYOUT)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": lay, "top": "leaf"},
+            "reference": {"netlist": ref, "top": "leaf"},
+        },
+    )
+    report = run_lvs(path)
+    assert report["status"] != "match"
+
+
+def test_prune_keeps_descendants_shared_with_wrapper_issue_2852(tmp_path):
+    import klayout.db as kdb
+
+    spice = _write(
+        tmp_path / "n.spice",
+        ".subckt leaf a b\nR1 a b 1k\n.ends\n"
+        ".subckt mid a b\nx1 a b leaf\n.ends\n"
+        ".subckt wrap a b\nx1 a b mid\nx2 a b leaf\n.ends\n",
+    )
+    netlist = kdb.Netlist()
+    netlist.read(spice, kdb.NetlistSpiceReader())
+    keep = netlist.circuit_by_name("MID") or netlist.circuit_by_name("mid")
+    lvs._prune_extra_top_circuits(netlist, keep)
+    assert sorted(c.name.lower() for c in netlist.each_circuit()) == ["leaf", "mid"]
+    assert keep.name.lower() == "mid"
+
+
 # --------------------------------------------------------------------------- #
 # Clean match (synthetic self-compare)
 # --------------------------------------------------------------------------- #

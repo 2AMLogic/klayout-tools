@@ -4709,7 +4709,9 @@ def _prune_extra_top_circuits(netlist: kdb.Netlist, keep: kdb.Circuit) -> None:
     is the design under comparison). Left in place, each would surface as
     its own spurious top-level circuit mismatch. Safe to prune: by
     definition, a *top* circuit is not referenced by anything else in the
-    netlist, so removing one never affects ``keep``'s own hierarchy.
+    netlist. ``keep`` may also be an interior circuit (instantiated by a
+    wrapper); wrappers and unrelated circuits are dropped, while ``keep`` and
+    its descendants survive (issue #2852).
 
     Compares circuits by identity (``is not``) rather than ``cell_index``:
     a netlist read directly from SPICE/Verilog text (``kdb.NetlistSpiceReader``
@@ -4718,9 +4720,25 @@ def _prune_extra_top_circuits(netlist: kdb.Netlist, keep: kdb.Circuit) -> None:
     -- making a ``cell_index`` comparison always false and silently pruning
     nothing (issue #1657).
     """
-    for circuit in list(netlist.top_circuits()):
-        if circuit is not keep:
-            netlist.purge_circuit(circuit)
+    # Issue #2852: ``keep`` may itself be instantiated by another circuit
+    # (a leaf plus a wrapper in one file). ``purge_circuit`` on that wrapper
+    # recursively deletes its children -- including ``keep`` -- leaving a
+    # destroyed handle. Instead, keep ``keep`` plus everything reachable from
+    # it, and non-recursively ``remove`` every other circuit.
+    reachable: set[int] = set()
+    stack = [keep]
+    while stack:
+        current = stack.pop()
+        for subcircuit in current.each_subcircuit():
+            child = subcircuit.circuit_ref()
+            if child is not None and child.name not in reachable:
+                reachable.add(child.name)
+                stack.append(child)
+    reachable.add(keep.name)
+    for circuit in list(netlist.each_circuit()):
+        if circuit is keep or circuit.name in reachable:
+            continue
+        netlist.remove(circuit)
 
 
 # --------------------------------------------------------------------------- #
