@@ -531,14 +531,15 @@ def deck_devices(name: str, device_class: str | None = None) -> dict[str, Any]:
     - ``device_classes`` -- one entry per declared device class, in the
       deck's own declaration order: the two MOS classes first (they are
       declared by every deck), then bipolars, MiM capacitors, MoM
-      capacitors, drawn resistors and junction diodes -- the same order
+      capacitors, MOS capacitors, drawn resistors and junction diodes -- the same order
       :attr:`~klayout_tools.decks.ExtractionDeck.device_classes` lists.
 
     Each entry carries:
 
     - ``name`` -- the ``devices[].class`` label this class extracts as.
     - ``kind`` -- the recognition family (``"mos"``, ``"bipolar"``,
-      ``"capacitor"``, ``"mom_capacitor"``, ``"resistor"``, ``"diode"``).
+      ``"capacitor"``, ``"mom_capacitor"``, ``"mos_capacitor"``, ``"resistor"``,
+      ``"diode"``).
     - ``marker`` -- the class's device-recognition marker layer, or ``None``
       for a markerless (geometry-driven) class or one whose marker is a
       derived expression.
@@ -768,8 +769,8 @@ def _project_device_classes(
     :func:`deck_devices`' ``device_classes[]`` shape.
 
     Ordered exactly as :attr:`ExtractionDeck.device_classes` orders its own
-    role tokens (MOS, bipolars, capacitors, MoM capacitors, resistors,
-    diodes) so the two lists read against each other without re-sorting.
+    role tokens (MOS, bipolars, capacitors, MoM capacitors, MOS capacitors,
+    resistors, diodes) so the two lists read against each other without re-sorting.
     """
     entries: list[dict[str, Any]] = []
 
@@ -903,6 +904,31 @@ def _project_device_classes(
                 ],
                 layer_names=layer_names,
                 provenance=mom.provenance,
+            )
+        )
+
+    # MOS capacitors (issue #2919): marker-gated, recognised on the active
+    # island (implant/well/voltage predicates) and its poly gate.
+    for mos_cap in deck.mos_capacitors:
+        well_requires = (deck.nwell,) if mos_cap.in_well else ()
+        well_excludes = () if mos_cap.in_well else (deck.nwell,)
+        entries.append(
+            _device_class_entry(
+                name=mos_cap.name,
+                kind="mos_capacitor",
+                marker=mos_cap.marker,
+                terminals=[
+                    _terminal_entry(
+                        "source_drain",
+                        deck.active,
+                        (mos_cap.implant, *well_requires, *mos_cap.requires),
+                        (*well_excludes, *mos_cap.excludes),
+                        layer_names,
+                    ),
+                    _terminal_entry("gate", deck.poly, (), (), layer_names),
+                ],
+                layer_names=layer_names,
+                provenance=mos_cap.provenance,
             )
         )
 

@@ -171,6 +171,7 @@ from .decks import (
     ExtractionDeck,
     InvalidDeckOptionError,
     InvalidLabelLayerError,
+    MosCapacitorDevice,
     ParasiticsDeck,
     SizeFilter,
     UnknownExtractionDeckError,
@@ -7815,6 +7816,165 @@ def _detect_missing_flavour_markers(
     return warnings, entries
 
 
+def _mos_capacitor_gates(
+    mos_capacitors: list[tuple[MosCapacitorDevice, kdb.Region, kdb.Region]],
+) -> kdb.Region:
+    """Union of every recognised MOS-capacitor gate region."""
+    import klayout.db as kdb
+
+    gates = kdb.Region()
+    for _cap, gate, _sd in mos_capacitors:
+        gates += gate
+    return gates
+
+
+def _register_mos_capacitors(
+    l2n: kdb.LayoutToNetlist,
+    mos_capacitors: list[tuple[MosCapacitorDevice, kdb.Region, kdb.Region]],
+    layer_index: dict[str, int],
+) -> None:
+    """Register each recognised capacitor's gate/diffusion regions under the
+    entry's own name (issue #2919) and record their layer indices."""
+    for cap, gate, sd in mos_capacitors:
+        layer_index[f"{cap.name}_gate"] = l2n.register(gate, f"{cap.name}_gate")
+        layer_index[f"{cap.name}_sd"] = l2n.register(sd, f"{cap.name}_sd")
+
+
+def _extract_mos_capacitors(
+    l2n: kdb.LayoutToNetlist,
+    mos_capacitors: list[tuple[MosCapacitorDevice, kdb.Region, kdb.Region]],
+) -> None:
+    """Extract each recognised MOS capacitor (issue #2919): a two-terminal
+    device whose plates are the gate region (P1/P2 -- the same region, so the
+    reported ``A``/``P`` are the gate's own area/perimeter, as the PDK runset
+    reports) and whose terminals are the gate poly (tA) and the source/drain
+    diffusion (tB)."""
+    import klayout.db as kdb
+
+    for cap, gate, sd in mos_capacitors:
+        l2n.extract_devices(
+            kdb.DeviceExtractorCapacitor(cap.name, cap.area_cap_f_um2),
+            {"P1": gate, "P2": gate, "tA": gate, "tB": sd},
+        )
+
+
+def _connect_mos_capacitors(
+    l2n: kdb.LayoutToNetlist,
+    mos_capacitors: list[tuple[MosCapacitorDevice, kdb.Region, kdb.Region]],
+    poly: kdb.Region,
+    contact: kdb.Region,
+) -> None:
+    """Wire each capacitor's gate into ``poly`` and its diffusion into
+    ``contact`` (issue #2919), as the MOS gate/SD regions are."""
+    for _cap, gate, sd in mos_capacitors:
+        l2n.connect(sd)
+        l2n.connect(gate)
+        l2n.connect(gate, poly)
+        l2n.connect(sd, contact)
+
+
+def _mos_capacitor_entry_index(
+    island: kdb.Region,
+    deck: ExtractionDeck,
+    poly: kdb.Region,
+    nwell: kdb.Region,
+    region_of: Callable[[tuple[int, int]], kdb.Region],
+) -> int | None:
+    """Index into ``deck.mos_capacitors`` of the first entry that claims
+    ``island`` (see :class:`~klayout_tools.decks.MosCapacitorDevice` for the
+    tests), or ``None`` when none does."""
+    in_well = not island.interacting(nwell).is_empty()
+
+    def touches(layer: tuple[int, int]) -> bool:
+        return not island.interacting(region_of(layer)).is_empty()
+
+    for index, entry in enumerate(deck.mos_capacitors):
+        if (
+            entry.in_well == in_well
+            and touches(entry.marker)
+            and touches(entry.implant)
+            and all(touches(layer) for layer in entry.requires)
+            and not any(touches(layer) for layer in entry.excludes)
+        ):
+            return index
+    return None
+
+
+def _resolve_mos_capacitors(
+    layout: kdb.Layout,
+    top_cell: kdb.Cell,
+    deck: ExtractionDeck,
+    active: kdb.Region,
+    poly: kdb.Region,
+    nwell: kdb.Region,
+    dummy: kdb.Region,
+) -> tuple[
+    list[tuple[MosCapacitorDevice, kdb.Region, kdb.Region]],
+    kdb.Region,
+    kdb.Region,
+    int,
+]:
+    """Recognise the deck's marker-scoped MOS capacitors (issue #2919).
+
+    Each connected component ("island") of ``active`` that carries a poly
+    gate is offered to ``deck.mos_capacitors`` in declaration order; the
+    first entry whose marker/implant/well/``requires``/``excludes`` tests all
+    hold (see :class:`~klayout_tools.decks.MosCapacitorDevice`) claims it. A
+    claimed island is removed from the returned ``active`` so the MOS
+    source/drain/gate split never sees it -- the PDK likewise excludes
+    ``mos_cap_mk`` from its MOS derivations -- and a capacitor with no
+    claiming entry stays an ordinary MOS device (the unsupported-marker
+    residue still reports it).
+
+    Returns ``(capacitors, active_without_capacitors, recognised, dropped)``:
+    ``capacitors`` is one ``(entry, gate, source_drain)`` triple per entry
+    that claimed at least one island (``gate`` = ``island & poly``,
+    ``source_drain`` = ``island - poly``, both minus the ``dummy`` marker for
+    the gate), ``recognised`` is the union of the claimed islands, and
+    ``dropped`` counts gate components fully covered by ``dummy``. Everything
+    is empty/``0`` for a deck declaring no ``mos_capacitors``.
+    """
+    import klayout.db as kdb
+
+    if not deck.mos_capacitors or active.is_empty():
+        return [], active, kdb.Region(), 0
+    layers: dict[tuple[int, int], kdb.Region] = {}
+
+    def region_of(layer: tuple[int, int]) -> kdb.Region:
+        if layer not in layers:
+            layers[layer] = _region(layout, top_cell, layer)
+        return layers[layer]
+
+    claimed: dict[int, kdb.Region] = {}
+    remaining = kdb.Region()
+    for component in active.merged().each():
+        island = kdb.Region(component)
+        chosen = (
+            _mos_capacitor_entry_index(island, deck, poly, nwell, region_of)
+            if not (island & poly).is_empty()
+            else None
+        )
+        if chosen is None:
+            remaining += island
+        else:
+            claimed[chosen] = claimed.get(chosen, kdb.Region()) + island
+
+    capacitors: list[tuple[MosCapacitorDevice, kdb.Region, kdb.Region]] = []
+    recognised = kdb.Region()
+    dropped = 0
+    for index in sorted(claimed):
+        island_region = claimed[index]
+        recognised += island_region
+        gate = island_region & poly
+        if not dummy.is_empty():
+            for gate_component in gate.merged().each():
+                if (kdb.Region(gate_component) - dummy).is_empty():
+                    dropped += 1
+            gate = gate - dummy
+        capacitors.append((deck.mos_capacitors[index], gate, island_region - poly))
+    return capacitors, remaining, recognised, dropped
+
+
 def _detect_unsupported_devices(
     layout: kdb.Layout,
     top_cell: kdb.Cell,
@@ -7833,11 +7993,31 @@ def _detect_unsupported_devices(
     str}`` where ``count`` is the number of connected marker components and
     ``bbox_um`` bounds all of them. Nothing is returned or appended when the
     deck declares no such marker or none has shapes.
+
+    A marker component that touches an island ``deck.mos_capacitors``
+    recognises (:func:`_resolve_mos_capacitors`, re-run here on the drawn
+    layers) is a device the netlist *does* hold, so it is not reported --
+    only the residue the deck could not classify stays loud.
     """
+    import klayout.db as kdb
+
     warnings: list[str] = []
     entries: list[dict[str, Any]] = []
+    recognised = kdb.Region()
+    if deck.mos_capacitors and deck.unsupported_device_markers:
+        recognised = _resolve_mos_capacitors(
+            layout,
+            top_cell,
+            deck,
+            _region(layout, top_cell, deck.active),
+            _region(layout, top_cell, deck.poly),
+            _region(layout, top_cell, deck.nwell),
+            kdb.Region(),
+        )[2]
     for spec in deck.unsupported_device_markers:
         region = _region(layout, top_cell, spec.marker).merged()
+        if not recognised.is_empty():
+            region = region.not_interacting(recognised)
         if region.is_empty():
             continue
         count = region.count()
@@ -8879,6 +9059,19 @@ def _extract_netlist(
         pre_erasure_exclusions=abstract_capacitor_top_via_exclusions,
     )
 
+    # Marker-scoped MOS capacitors (issue #2919), resolved before the tap
+    # derivation and the MOS split below: a recognised capacitor island must
+    # reach neither -- an Nplus gate inside Nwell would otherwise be read as a
+    # well tie (leaving a gate "touching no diffusion"), and a plain
+    # NMOS-style capacitor would extract as a transistor.
+    (
+        mos_capacitors,
+        active,
+        _,
+        mos_capacitor_dummy_dropped,
+    ) = _resolve_mos_capacitors(layout, top_cell, deck, active, poly, nwell, dummy)
+    dummy_devices_dropped += mos_capacitor_dummy_dropped
+
     # Derived tap for a PDK family with no distinct tap layer (issue #1084):
     # when the deck declares no `tap` but does declare one or both of
     # `tap_nplus`/`tap_pplus`, derive an equivalent tap region from the
@@ -9105,6 +9298,8 @@ def _extract_netlist(
     all_pfet_gate = pfet_gate
     for gate in flavour_pfet_gate:
         all_pfet_gate = all_pfet_gate + gate
+    # A recognised MOS-capacitor gate (issue #2919) is likewise a real device.
+    all_nfet_gate = all_nfet_gate + _mos_capacitor_gates(mos_capacitors)
     unmodelled_device_warnings, unmodelled_poly = _detect_unmodelled_poly_bodies(
         poly,
         contact,
@@ -9191,6 +9386,9 @@ def _extract_netlist(
             (f"pfet_gate_{flavour.flavour}", f_pfet_gate),
         ]:
             layer_index[name] = l2n.register(region, name)
+    # MOS-capacitor gate/diffusion regions (issue #2919), one pair per entry
+    # that claimed an island, registered under the entry's own name.
+    _register_mos_capacitors(l2n, mos_capacitors, layer_index)
     metal_index: list[int] = []
     for index, region in enumerate(metals):
         metal_index.append(l2n.register(region, f"metal{index}"))
@@ -9310,6 +9508,8 @@ def _extract_netlist(
             nfet_extractor, {"SD": nfet_sd, "G": nfet_gate, "W": nfet_body}
         )
     l2n.extract_devices(pfet_extractor, {"SD": pfet_sd, "G": pfet_gate, "W": nwell})
+
+    _extract_mos_capacitors(l2n, mos_capacitors)
 
     # One additional `nfet` extraction pass per isolated region (issue
     # #1128), mirroring the `mos_flavours` "additional pass, same device
@@ -9914,6 +10114,7 @@ def _extract_netlist(
     l2n.connect(contact)
     l2n.connect(nfet_sd, contact)
     l2n.connect(pfet_sd, contact)
+    _connect_mos_capacitors(l2n, mos_capacitors, poly, contact)
     for f_nfet_sd, f_pfet_sd in zip(flavour_nfet_sd, flavour_pfet_sd, strict=True):
         l2n.connect(f_nfet_sd, contact)
         l2n.connect(f_pfet_sd, contact)
