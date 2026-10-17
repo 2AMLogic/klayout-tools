@@ -2356,6 +2356,78 @@ def test_sim_empty_corner_matrix_never_counts_as_a_passing_check(tmp_path):
     assert check["detail"]["nothing_checked_reasons"] == ["empty_corner_matrix"]
 
 
+def _sim_with_counts(declared, limited, **extra):
+    coverage = {
+        "corners_simulated": 1,
+        "measurements_declared": declared,
+        "measurements_with_limits": limited,
+        "unrecognized_limit_keys": [],
+        "nothing_checked": False,
+        "nothing_checked_reasons": [],
+    }
+    return {**SIM_PASS_ENVELOPE, "coverage": coverage, **extra}
+
+
+def test_sim_with_no_limited_measurement_never_counts_as_a_passing_check(tmp_path):
+    """Issue #3769: an all-observation sim envelope applied no spec bound."""
+    path = _write(tmp_path, "sim.json", _sim_with_counts(3, 0))
+
+    check = build_signoff([path])["checks"][0]
+
+    assert check["status"] == "pass"
+    assert check["passed"] is False
+    assert check["detail"]["no_limits_checked"] == {
+        "measurements_declared": 3,
+        "measurements_with_limits": 0,
+    }
+
+
+def test_sim_with_one_limited_measurement_still_passes(tmp_path):
+    path = _write(tmp_path, "sim.json", _sim_with_counts(3, 1))
+
+    check = build_signoff([path])["checks"][0]
+
+    assert check["passed"] is True
+    assert "no_limits_checked" not in check["detail"]
+
+
+def test_tier_report_refuses_a_no_limits_item_5_citation(tmp_path):
+    """Issue #3769: item 5 cannot cite an all-observation sim envelope. It
+    renders `unmet` with the dedicated reason, and a limited one still meets."""
+    path = _write(tmp_path, "sim.json", _sim_with_counts(3, 0))
+
+    result = build_tier_report(_manifest(evidence={"5": path}))
+
+    item_5 = next(item for item in result["items"] if item["id"] == 5)
+    assert item_5["status"] == "unmet"
+    assert item_5["reason"] == "no_limits_checked"
+    assert item_5["citation"] is None
+
+
+def test_tier_report_still_meets_item_5_for_a_limited_sim(tmp_path):
+    path = _write(tmp_path, "sim.json", _sim_with_counts(3, 1))
+
+    result = build_tier_report(_manifest(evidence={"5": path}))
+
+    item_5 = next(item for item in result["items"] if item["id"] == 5)
+    assert item_5["status"] == "met"
+
+
+def test_sim_without_coverage_block_grades_as_before(tmp_path):
+    envelope = {k: v for k, v in SIM_PASS_ENVELOPE.items() if k != "coverage"}
+    path = _write(tmp_path, "sim.json", envelope)
+
+    assert build_signoff([path])["checks"][0]["passed"] is True
+
+
+def test_sim_capture_only_with_no_measurements_declared_not_newly_refused(tmp_path):
+    path = _write(tmp_path, "sim.json", _sim_with_counts(0, 0))
+
+    check = build_signoff([path])["checks"][0]
+
+    assert "no_limits_checked" not in check["detail"]
+
+
 def test_pex_empty_delta_never_counts_as_a_passing_check(tmp_path):
     path = _write(tmp_path, "pex.json", PEX_NOTHING_CHECKED_ENVELOPE)
 
@@ -16392,6 +16464,95 @@ def test_item5_stale_content_hash_on_one_member_is_unmet(tmp_path):
 
     assert item["status"] == "unmet"
     assert item["detail"]["failed_citations"] == [other]
+
+
+def _ms_item5(tmp_path, spec_rows, analog_entry=None):
+    """Mixed-signal item-5 entries by partition (issue #3768)."""
+    sim = _write(tmp_path, "sim.json", SIM_PASS_ENVELOPE)
+    sta = _write(tmp_path, "sta.json", STA_MULTI_CORNER_CLEAN_ENVELOPE)
+    manifest = _manifest(
+        kind="mixed-signal",
+        evidence={
+            "5.analog": analog_entry or [{"file": sim, "rows": ["tdec"]}],
+            "5.digital": sta,
+        },
+        spec_rows=spec_rows,
+    )
+    return {
+        i["partition"]: i
+        for i in build_tier_report(manifest)["items"]
+        if i["id"] == 5 and i["tier"] == "T1"
+    }
+
+
+def test_item5_qualified_spec_rows_do_not_regress_other_partition(tmp_path):
+    items = _ms_item5(tmp_path, {"5.analog": [{"id": "tdec"}]})
+
+    assert items["digital"]["status"] == "met"
+    assert items["analog"]["status"] == "met"
+    assert items["analog"]["row_coverage"]["uncovered_rows"] == []
+
+
+def test_item5_qualified_spec_rows_grade_their_own_partition(tmp_path):
+    items = _ms_item5(tmp_path, {"5.analog": [{"id": "tdec"}, {"id": "zin"}]})
+
+    assert items["digital"]["status"] == "met"
+    assert items["analog"]["status"] == "unmet"
+    assert items["analog"]["reason"] == "partial_coverage"
+    assert items["analog"]["detail"]["uncovered_rows"] == ["zin"]
+
+
+def test_item5_qualified_spec_rows_win_over_bare_for_their_partition(tmp_path):
+    items = _ms_item5(
+        tmp_path,
+        {"5": [{"id": "other"}], "5.analog": [{"id": "tdec"}]},
+    )
+
+    assert items["analog"]["status"] == "met"
+    # Bare "5" still applies to the partition with no qualified key.
+    assert items["digital"]["status"] == "unmet"
+    assert items["digital"]["reason"] == "partial_coverage"
+
+
+def test_item5_bare_spec_rows_key_still_applies_to_every_partition(tmp_path):
+    items = _ms_item5(tmp_path, {"5": [{"id": "tdec"}]})
+
+    assert items["analog"]["status"] == "met"
+    assert items["digital"]["status"] == "unmet"
+    assert items["digital"]["reason"] == "partial_coverage"
+
+
+def test_item5_bad_qualified_suffix_is_invalid_evidence_for_the_item_only(tmp_path):
+    items = _ms_item5(tmp_path, {"5.mixed": [{"id": "tdec"}]})
+
+    assert items["analog"]["status"] == "unmet"
+    assert items["analog"]["reason"] == "invalid_evidence"
+    assert items["digital"]["reason"] == "invalid_evidence"
+
+
+def test_item5_malformed_qualified_rows_degrade_only_that_partition(tmp_path):
+    items = _ms_item5(tmp_path, {"5.analog": []})
+
+    assert items["analog"]["reason"] == "invalid_evidence"
+    assert items["digital"]["status"] == "met"
+
+
+def test_item5_analog_kind_manifest_resolves_qualified_key(tmp_path):
+    sim = _write(tmp_path, "sim.json", SIM_PASS_ENVELOPE)
+    evidence = {"5": [{"file": sim, "rows": ["tdec"]}]}
+
+    manifest = _manifest(
+        kind="analog", evidence=evidence, spec_rows={"5.analog": [{"id": "tdec"}]}
+    )
+    item = next(i for i in build_tier_report(manifest)["items"] if i["id"] == 5)
+    assert item["status"] == "met"
+    assert "row_coverage" in item
+
+    manifest["spec_rows"] = {"5.digital": [{"id": "zin"}]}
+    item = next(i for i in build_tier_report(manifest)["items"] if i["id"] == 5)
+    # A mismatched-partition key is ignored (falls to the absent bare key).
+    assert item["status"] == "met"
+    assert "row_coverage" not in item
 
 
 def test_item5_single_citation_report_is_unchanged(tmp_path):
