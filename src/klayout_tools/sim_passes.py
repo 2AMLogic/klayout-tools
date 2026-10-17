@@ -49,18 +49,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import sim_raw, sim_steps
+from .sim_errors import SimError
 
 #: What an ``alter`` entry changes.
 FIELDS = ("ac", "dc")
 
 _ENTRY_KEYS = frozenset({"target", "value", "field"})
 _PASS_KEYS = frozenset({"name", "alter"})
-
-
-def _error(message: str) -> Exception:
-    from .sim import SimError
-
-    return SimError(message)
 
 
 def is_passes_analysis(analysis: dict[str, Any]) -> bool:
@@ -80,13 +75,13 @@ def resolve_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
         return analysis
     kind = str(analysis.get("kind"))
     if kind.lower() != "ac":
-        raise _error(
+        raise SimError(
             f'analysis.passes requires analysis.kind "ac" (got {kind!r}): '
             "multi-pass acquisition retains complex AC results"
         )
     raw = analysis["passes"]
     if not isinstance(raw, list) or not raw:
-        raise _error(
+        raise SimError(
             "analysis.passes must be a non-empty array of "
             '{"name", "alter": [{"target", "value"}, ...]} objects'
         )
@@ -96,7 +91,7 @@ def resolve_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
         resolved = _resolve_pass(entry, index)
         key = resolved["name"].lower()
         if key in seen:
-            raise _error(
+            raise SimError(
                 f"analysis.passes[{index}] reuses pass name "
                 f"{resolved['name']!r} (compared case-insensitively): pass "
                 "names must be unique"
@@ -110,18 +105,18 @@ def resolve_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
 def _resolve_pass(entry: Any, index: int) -> dict[str, Any]:
     where = f"analysis.passes[{index}]"
     if not isinstance(entry, dict):
-        raise _error(f"{where} must be an object")
+        raise SimError(f"{where} must be an object")
     unknown = sorted(set(entry) - _PASS_KEYS)
     if unknown:
-        raise _error(
+        raise SimError(
             f"{where}: unknown key(s) {unknown}; allowed: {sorted(_PASS_KEYS)}"
         )
     name = entry.get("name")
     if not isinstance(name, str) or not sim_steps._NAME_RE.match(name):
-        raise _error(f"{where}.name must match [A-Za-z_][A-Za-z0-9_]* (got {name!r})")
+        raise SimError(f"{where}.name must match [A-Za-z_][A-Za-z0-9_]* (got {name!r})")
     alter = entry.get("alter")
     if not isinstance(alter, list) or not alter:
-        raise _error(
+        raise SimError(
             f"pass {name!r}: alter must be a non-empty array of "
             '{"target": "<source>", "value": <number>} objects -- every pass '
             "states its complete alter set so no state leaks from the "
@@ -133,7 +128,7 @@ def _resolve_pass(entry: Any, index: int) -> dict[str, Any]:
         target, value, field = _resolve_alter_entry(item, name)
         key = (target.lower(), field)
         if key in seen:
-            raise _error(
+            raise SimError(
                 f"pass {name!r}: alter target {target!r} ({field}) is repeated"
             )
         seen.add(key)
@@ -143,19 +138,19 @@ def _resolve_pass(entry: Any, index: int) -> dict[str, Any]:
 
 def _resolve_alter_entry(item: Any, name: str) -> tuple[str, Any, str]:
     if not isinstance(item, dict):
-        raise _error(
+        raise SimError(
             f"pass {name!r}: each alter entry must be an object "
             '{"target", "value", "field"?}'
         )
     unknown = sorted(set(item) - _ENTRY_KEYS)
     if unknown:
-        raise _error(
+        raise SimError(
             f"pass {name!r}: unknown alter key(s) {unknown}; "
             f"allowed: {sorted(_ENTRY_KEYS)}"
         )
     target = item.get("target")
     if not isinstance(target, str) or not sim_steps._ALTER_TARGET_RE.match(target):
-        raise _error(
+        raise SimError(
             f"pass {name!r}: alter target {target!r} is not a top-level "
             "independent source or passive element name (V/I/R/C/L followed "
             "by [A-Za-z0-9_]); hierarchical and device-parameter targets are "
@@ -167,18 +162,18 @@ def _resolve_alter_entry(item: Any, name: str) -> tuple[str, Any, str]:
         or not isinstance(value, (int, float))
         or not math.isfinite(value)
     ):
-        raise _error(
+        raise SimError(
             f"pass {name!r}: alter value for {target!r} must be a finite "
             f"number (got {value!r})"
         )
     field = item.get("field", "ac")
     if field not in FIELDS:
-        raise _error(
+        raise SimError(
             f"pass {name!r}: alter field for {target!r} must be one of "
             f"{list(FIELDS)} (got {field!r})"
         )
     if field == "ac" and target[0].upper() not in "VI":
-        raise _error(
+        raise SimError(
             f"pass {name!r}: alter target {target!r} has no AC magnitude -- "
             'only an independent source (V/I) does; use "field": "dc" to '
             "change a passive element's value"
@@ -195,7 +190,7 @@ def _require_complete_alter_sets(passes: list[dict[str, Any]]) -> None:
         missing = sorted(union - keys)
         if missing:
             listed = ", ".join(f"{spelled[key]} ({key[1]})" for key in missing)
-            raise _error(
+            raise SimError(
                 f"pass {passed['name']!r} does not alter {listed}, which "
                 "another pass alters: `alter` persists, so it would inherit "
                 "the previous pass's value and its result would depend on "
@@ -238,7 +233,7 @@ def validate_alter_targets(
     for passed in analysis["passes"]:
         for target, _value, field in passed["alter"]:
             if field == "dc" and target in params:
-                raise _error(
+                raise SimError(
                     f"pass {passed['name']!r}: alter target {target!r} names "
                     "a .param, not an element: ngspice's alter cannot change "
                     "a parameter -- alter the source or element itself"
@@ -256,13 +251,13 @@ def refuse_unsupported(
     if not is_passes_analysis(analysis):
         return
     if measurements_spec:
-        raise _error(
+        raise SimError(
             "analysis.passes only acquires complex AC results; "
             "request.measurements[] is not supported with it yet (the "
             "scalar-metric increment is tracked in #3160)"
         )
     if want_waveforms or plot_requested:
-        raise _error(
+        raise SimError(
             "options.waveforms / --plot are not supported with "
             "analysis.passes: the waveform artifact captures one analysis "
             "per corner, and a multi-pass corner runs several"
@@ -271,7 +266,7 @@ def refuse_unsupported(
 
 def refuse_offhost_backend(analysis: dict[str, Any], backend: str) -> None:
     if is_passes_analysis(analysis) and backend in ("remote", "batch"):
-        raise _error(
+        raise SimError(
             f"analysis.passes is not supported for backend {backend!r}: the "
             "off-host worker does not return the per-pass complex rawfiles "
             "(transport is tracked in #3161). Run it with backend 'local' or "
@@ -281,7 +276,7 @@ def refuse_offhost_backend(analysis: dict[str, Any], backend: str) -> None:
 
 def refuse_xyce(analysis: dict[str, Any], engine: str) -> None:
     if is_passes_analysis(analysis) and engine == "xyce":
-        raise _error(
+        raise SimError(
             "analysis.passes is not supported for engine 'xyce': the passes "
             "are ngspice `alter`/`ac`/`write` commands in a `.control` "
             "block, which the Xyce deck does not have; use engine 'ngspice'"

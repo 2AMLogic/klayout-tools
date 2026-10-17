@@ -40,6 +40,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import sim_raw, sim_transfer
+from .sim_errors import SimError
 
 #: The six first-crossing metric tokens, exactly
 #: :mod:`klayout_tools.sim_transfer`'s names. Unchanged by issue #3088.
@@ -85,12 +86,6 @@ _SELECTOR_RE = re.compile(r"^[vV]\(([^\s\x00-\x1f\x7f,()]+)\)$")
 _VECTOR_PREFIX = "__klt_xfer_"
 
 _FORMS = ("spice", "expr", "crossings", "cycle_mean", "energy")
-
-
-def _error(message: str) -> Exception:
-    from .sim import SimError
-
-    return SimError(message)
 
 
 def is_transfer(spec: dict[str, Any]) -> bool:
@@ -140,10 +135,10 @@ def validate_form_exclusive(spec: dict[str, Any]) -> bool:
         return False
     name = spec.get("name")
     if name is None:
-        raise _error("each request.measurements[] entry requires 'name'")
+        raise SimError("each request.measurements[] entry requires 'name'")
     others = [form for form in _FORMS if spec.get(form) is not None]
     if others:
-        raise _error(
+        raise SimError(
             f"measurement '{name}' declares 'transfer' together with "
             f"'{others[0]}': they are alternative forms of a measurement -- "
             "declare exactly one (use a separate measurements[] entry for "
@@ -155,25 +150,25 @@ def validate_form_exclusive(spec: dict[str, Any]) -> bool:
 
 def validate_transfer_spec(name: Any, body: Any) -> None:
     if not isinstance(body, dict):
-        raise _error(
+        raise SimError(
             f"measurement '{name}': 'transfer' must be an object, e.g. "
             '{"num": "v(out)", "den": "v(in)", "metric": "phase_margin_deg"}'
         )
     unknown = sorted(set(body) - _ALLOWED_KEYS)
     if unknown:
-        raise _error(
+        raise SimError(
             f"measurement '{name}': unknown transfer key(s) {unknown}; "
             f"allowed: {sorted(_ALLOWED_KEYS)}"
         )
     for key in ("num", "den"):
         if normalize_selector(body.get(key)) is None:
-            raise _error(
+            raise SimError(
                 f"measurement '{name}': transfer.{key} must be a single-ended "
                 f'"v(node)" selector with one node token (no whitespace, '
                 f"comma or parenthesis); got {body.get(key)!r}"
             )
     if body.get("metric") not in ALL_METRICS:
-        raise _error(
+        raise SimError(
             f"measurement '{name}': transfer.metric must be one of "
             f"{list(ALL_METRICS)} (got {body.get('metric')!r})"
         )
@@ -189,7 +184,7 @@ def validate_transfer_context(
         return
     kind = str(analysis.get("kind", "")).lower()
     if kind != "ac":
-        raise _error(
+        raise SimError(
             f"measurement '{declared[0]['name']}' declares 'transfer', which "
             f'needs an AC sweep and so requires analysis.kind "ac" (got '
             f"{analysis.get('kind')!r})"
@@ -198,7 +193,7 @@ def validate_transfer_context(
     for spec in measurements_spec:
         key = str(spec.get("name")).lower()
         if key in seen:
-            raise _error(
+            raise SimError(
                 f"duplicate measurement name '{spec.get('name')}': names must "
                 "be unique when measurements[] declares a transfer entry"
             )
