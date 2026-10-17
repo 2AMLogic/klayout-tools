@@ -94,7 +94,11 @@ from typing import Any
 
 from .lef_header import parse_lef_header
 from .pdk_compat import check_compatibility, read_fetched_marker
-from .pdk_families import family_subset, pdk_variant_family
+from .pdk_families import (
+    family_subset,
+    pdk_variant_family,
+    pdk_variant_install_names,
+)
 
 #: The ciel/volare stores, in resolution order (step 3). ``~`` is expanded at
 #: call time against ``$HOME``. Exposed at module scope so tests can override
@@ -231,6 +235,17 @@ def find_pdk(variant: str | None = None, root: str | None = None) -> dict[str, A
         by_name = {entry["name"]: entry for entry in variants}
         if effective_variant is not None:
             chosen = by_name.get(effective_variant)
+            if chosen is None:
+                # An exact directory-name match always wins; otherwise accept
+                # the deck/family spelling (`sg13g2` -> `ihp-sg13g2`).
+                chosen = next(
+                    (
+                        by_name[alias]
+                        for alias in pdk_variant_install_names(effective_variant)
+                        if alias in by_name
+                    ),
+                    None,
+                )
             if chosen is None:
                 continue
         else:
@@ -1620,6 +1635,10 @@ def _read_text(path: str) -> str | None:
 #: surface them -- see docs/cli/pdk.md "klt pdk macros".
 _HARD_MACRO_LIB_MARKER = "_fd_ip_"
 
+#: Name suffixes of I/O-pad libraries (`sky130_fd_io`, `gf180mcu_fd_io`,
+#: `sg13g2_io`), which ship `lef`+`lib` views but are not hard macros.
+_IO_PAD_LIB_SUFFIXES = ("_fd_io", "_io")
+
 #: View subdirectories under a `libs_ref/<lib>` entry that
 #: :func:`list_hard_macro_libraries` reports presence of, keyed by the name
 #: surfaced in the JSON ``views`` object. Presence is a plain
@@ -1648,7 +1667,9 @@ def list_hard_macro_libraries(
     Resolves one PDK install/variant exactly as :func:`find_pdk` does (same
     ``variant``/``root`` args, same :class:`PdkNotFoundError` on no match),
     then scans its ``libs_ref`` asset for hard-macro IP libraries -- entries
-    whose name contains ``_fd_ip_`` (see :data:`_HARD_MACRO_LIB_MARKER`).
+    whose name contains ``_fd_ip_`` (see :data:`_HARD_MACRO_LIB_MARKER`) or
+    that structurally ship ``lef`` + ``lib`` views and are not standard-cell
+    or I/O-pad libraries (e.g. IHP's ``sg13g2_sram``).
     This is the sibling command to `klt pdk cells`, not an alternate mode of
     it (see docs/cli/pdk.md "klt pdk macros" for why): `klt pdk cells`
     deliberately excludes hard-macro IP libraries, and this command's own
@@ -1688,7 +1709,7 @@ def list_hard_macro_libraries(
         }
 
     An empty ``macros`` list is a successful result (the variant ships no
-    `_fd_ip_`-named library), not an error.
+    hard-macro library), not an error.
 
     Raises :class:`PdkNotFoundError` when no PDK install resolves.
     """
@@ -1705,13 +1726,29 @@ def list_hard_macro_libraries(
 
 
 def _scan_hard_macro_libraries(libs_ref: str) -> list[dict[str, Any]]:
-    """Enumerate `_fd_ip_`-named entries under ``libs_ref``, name-sorted."""
+    """Enumerate hard-macro IP libraries under ``libs_ref``, name-sorted.
+
+    A library is a hard macro when its name contains ``_fd_ip_`` (open_pdks
+    convention) or, structurally, when it ships both ``lef/`` and ``lib/``
+    views and is neither a standard-cell library nor an I/O-pad library
+    (IHP's ``sg13g2_sram``).
+    """
+    from .pdk_cells import _STD_CELL_LIB_MARKERS
+
     if not os.path.isdir(libs_ref):
         return []
     macros: list[dict[str, Any]] = []
     for name in sorted(os.listdir(libs_ref)):
         lib_dir = os.path.join(libs_ref, name)
-        if not os.path.isdir(lib_dir) or _HARD_MACRO_LIB_MARKER not in name:
+        if not os.path.isdir(lib_dir):
+            continue
+        structural = (
+            os.path.isdir(os.path.join(lib_dir, "lef"))
+            and os.path.isdir(os.path.join(lib_dir, "lib"))
+            and not any(marker in name for marker in _STD_CELL_LIB_MARKERS)
+            and not name.endswith(_IO_PAD_LIB_SUFFIXES)
+        )
+        if _HARD_MACRO_LIB_MARKER not in name and not structural:
             continue
         macros.append(
             {

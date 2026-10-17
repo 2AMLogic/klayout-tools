@@ -11,7 +11,7 @@ Ten subcommands, all emitting through the shared envelope helpers in
   CI gate for the "install looks complete but part of it cannot actually be
   opened" failure mode ``find``/``env`` also report but do not gate on.
 - ``cells`` — per standard-cell library device flavor(s) and nominal supply.
-- ``macros`` — per hard-macro IP library (`*_fd_ip_*`), which views it ships.
+- ``macros`` — per hard-macro IP library (`*_fd_ip_*` or lef+lib), which views it ships.
 - ``corners`` — per SPICE process corner, which device families skew vs.
   resolve to typical.
 - ``em-limits`` — per-layer electromigration current-density limits declared
@@ -324,7 +324,10 @@ def _print_macros_text(report: dict) -> None:
 
     print(f"pdk: {report['pdk']}")
     if not macros:
-        print("no hard-macro IP libraries found (no `_fd_ip_` entry under libs.ref)")
+        print(
+            "no hard-macro IP libraries found (no `_fd_ip_` entry or lef+lib "
+            "macro library under libs.ref)"
+        )
         return
 
     headers = ("library", "views")
