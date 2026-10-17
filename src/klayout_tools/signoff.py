@@ -5247,11 +5247,7 @@ def build_tier_report(
                     ),
                     graded_by_build=graded_by_build,
                     repo_root=repo_root,
-                    spec_rows=spec_rows_by_item.get(t1_item["id"]),
-                    spec_rows_invalid=(
-                        t1_item["id"] in spec_rows_by_item
-                        and spec_rows_by_item[t1_item["id"]] is None
-                    ),
+                    **_resolve_spec_rows(spec_rows_by_item, t1_item["id"], partition),
                     generator_exec=generator_exec,
                 )
             total += 1
@@ -7344,16 +7340,21 @@ def _build_tier_item(
 _ITEMS_ACCEPTING_MULTI_CITATION: frozenset[int] = frozenset({5, 6})
 
 
+_SpecRowsKey = tuple[int, "str | None"]
+
+
 def _read_spec_rows(
     manifest: dict[str, Any],
-) -> dict[int, list[dict[str, Any]] | None]:
+) -> dict[_SpecRowsKey, list[dict[str, Any]] | None]:
     """Read the manifest's optional ``spec_rows`` declaration (issue #2959):
     ``{"<item id>": [{"id": "<row>", "gap": "<reason>"?, "ratified": bool?},
-    ...]}``.
+    ...]}``. A key may be partition-qualified (``"5.analog"``, issue #3768),
+    mirroring the evidence-key convention of :func:`_lookup_evidence`; see
+    :func:`_resolve_spec_rows`.
 
-    Returns ``item id -> rows``; a malformed declaration for an item maps to
-    ``None`` so only that item degrades to ``invalid_evidence``, never the
-    whole report. A ``gap`` row is one no producible envelope can cover; it
+    Returns ``(item id, partition | None) -> rows``; a malformed declaration
+    maps to ``None`` so only that item degrades to ``invalid_evidence``, never
+    the whole report. A ``gap`` row is one no producible envelope can cover; it
     is reported as a declared gap and never counts as covered. ``ratified``
     (default ``true``, issue #2908) is ``false`` for a row whose target is a
     proposed, unratified limit: evidence against it is provisional and never
@@ -7363,13 +7364,15 @@ def _read_spec_rows(
     if raw is None:
         return {}
     if not isinstance(raw, dict):
-        return {item_id: None for item_id in _ITEMS_ACCEPTING_MULTI_CITATION}
-    out: dict[int, list[dict[str, Any]] | None] = {}
+        return {(item_id, None): None for item_id in _ITEMS_ACCEPTING_MULTI_CITATION}
+    out: dict[_SpecRowsKey, list[dict[str, Any]] | None] = {}
     for key, rows in raw.items():
+        head, sep, suffix = str(key).partition(".")
         try:
-            item_id = int(key)
-        except (TypeError, ValueError):
+            item_id = int(head)
+        except ValueError:
             continue
+        slot: _SpecRowsKey = (item_id, suffix if sep else None)
         parsed: list[dict[str, Any]] | None = []
         if not isinstance(rows, list) or not rows:
             parsed = None
@@ -7392,8 +7395,30 @@ def _read_spec_rows(
                 seen.add(row_id)
                 valid.append({"id": row_id, "gap": gap, "ratified": ratified})
             parsed = valid or None
-        out[item_id] = parsed
+        out[slot] = parsed
     return out
+
+
+def _resolve_spec_rows(
+    spec_rows_by_item: dict[_SpecRowsKey, list[dict[str, Any]] | None],
+    item_id: int,
+    partition: str,
+) -> dict[str, Any]:
+    """Resolve the ``spec_rows`` kwargs for one graded partition (issue
+    #3768): the qualified ``"<item>.<partition>"`` key first, then the bare
+    item id. A qualified key whose suffix is not a known partition makes the
+    item ``invalid_evidence`` rather than being silently ignored."""
+    bad_suffix = any(
+        key_item == item_id
+        and key_part is not None
+        and key_part not in _MIXED_SIGNAL_PARTITIONS
+        for key_item, key_part in spec_rows_by_item
+    )
+    for slot in ((item_id, partition), (item_id, None)):
+        if slot in spec_rows_by_item:
+            rows = spec_rows_by_item[slot]
+            return {"spec_rows": rows, "spec_rows_invalid": rows is None or bad_suffix}
+    return {"spec_rows": None, "spec_rows_invalid": bad_suffix}
 
 
 def _citation_label(spec: dict[str, Any]) -> str:

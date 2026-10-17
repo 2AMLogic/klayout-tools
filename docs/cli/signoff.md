@@ -2628,6 +2628,30 @@ their verdicts. A single string/dict entry with no `spec_rows` renders
 exactly as before. The list form applies to items 5 and 6 (item 6:
 #2908, below).
 
+#### Partition-qualified `spec_rows` keys (issue #3768)
+
+On a `mixed-signal` block the bare key `"5"` (or `"6"`) imposes one row set on
+**both** partitions. Use `"<item>.analog"` / `"<item>.digital"` to scope a
+declaration to one partition, the same spelling `evidence` uses. Each
+partition resolves its rows by the qualified key first, then the bare item
+id, so declaring analog rows does not change the digital verdict:
+
+```json
+{
+  "evidence": {
+    "5.analog": [{"file": "sim/decision_time.json", "rows": ["t_dec"]}],
+    "5.digital": {"file": "sta/envelope.json"}
+  },
+  "spec_rows": {"5.analog": [{"id": "t_dec"}]}
+}
+```
+
+A bare-only manifest behaves exactly as before. A suffix other than `analog` /
+`digital`, or malformed rows under a qualified key, degrades to
+`invalid_evidence` (a bad suffix for the item; malformed rows for that
+partition only), never the whole report. Items 5 and 6 share the reader.
+`schema_version`: no bump.
+
 #### Item 6 with several statistical rows (issue #2908)
 
 Item 6 reuses the item-5 list form and `spec_rows` schema above, with
