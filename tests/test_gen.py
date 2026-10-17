@@ -1300,6 +1300,47 @@ def test_mos_array_guard_ring_flavor_pfet_draws_well_and_is_drc_clean(
     assert drc_report["status"] == "clean"
 
 
+@pytest.mark.parametrize("generator", ["mos_array", "diff_pair", "esd_device"])
+@pytest.mark.parametrize("ring_padding_um", [None, 0.4, 0.52, 0.6, 1.0])
+def test_gf180mcu_guard_ring_contacts_are_on_the_mfg_grid(
+    tmp_path, both_pdk_root, generator, ring_padding_um
+):
+    """Issue #2999: the evenly spaced guard-ring tap contacts must land on
+    gf180mcu's 0.005 um manufacturing grid (the PDK runset's `contact_OFFGRID`
+    check) -- the deck's `ongrid` rule (issue #3001) is what lets
+    `_clamp_cut_boxes` snap them."""
+    import klayout.db as kdb
+
+    params = {"add_guard_ring": True}
+    if ring_padding_um is not None:
+        params["ring_padding_um"] = ring_padding_um
+    output = tmp_path / f"{generator}_ring_grid.gds"
+    generate(
+        {
+            "generator": generator,
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": params,
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    grid_dbu = round(0.005 / layout.dbu)
+    contact = layout.find_layer(33, 0)
+    boxes = [
+        shape.bbox()
+        for cell in layout.each_cell()
+        for shape in cell.shapes(contact).each()
+    ]
+    assert boxes
+    off_grid = [
+        str(b)
+        for b in boxes
+        if any(v % grid_dbu for v in (b.left, b.right, b.bottom, b.top))
+    ]
+    assert not off_grid
+
+
 @pytest.mark.parametrize(
     ("variant", "well_pair"),
     [
