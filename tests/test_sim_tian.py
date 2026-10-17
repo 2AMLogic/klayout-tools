@@ -13,7 +13,9 @@ from __future__ import annotations
 import cmath
 import json
 import math
+import re
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -144,7 +146,9 @@ def test_formula_matches_hand_computation_at_a_point():
     #                       den = 3 + 0j + 2 = 5  ->  T = 0.4 + 0.2j.
     pv = _pass("pv", [1.0, 2.0], [[1 + 1j, 1 + 1j], [0j, 0j]])
     pi = _pass("pi", [1.0, 2.0], [[0j, 0j], [2 - 1j, 2 - 1j]])
-    vec = sim_tian.tian_vector({"pv": pv, "pi": pi}, ("pv", "pi", "v(tv)", "i(vi)"))
+    vec = sim_tian.tian_vector(
+        {"pv": pv, "pi": pi}, ("pv", "pi", "v(tv)", "i(vi)", "ratio")
+    )
     assert not isinstance(vec, sim_tian._Failure)
     assert vec[1][0] == pytest.approx(0.4 + 0.2j, abs=1e-15)
 
@@ -422,3 +426,284 @@ def test_tian_without_passes_is_refused(tmp_path):
     path.write_text(json.dumps(doc))
     with pytest.raises(sim.SimError, match="requires analysis.passes"):
         sim.run_sim(str(path))
+
+
+# --------------------------------------------------------------------------- #
+# series_injection (issue #3737)
+# --------------------------------------------------------------------------- #
+
+_SERIES = {"load_node": "b", "source": "vinj"}
+
+
+def _series_spec(metric="phase_margin_deg", **body):
+    return {
+        "name": "m",
+        "tian": {
+            "voltage_pass": "pv",
+            "current_pass": "pi",
+            "series_injection": _SERIES,
+            "metric": metric,
+            **body,
+        },
+        "limits": {"min": 0},
+    }
+
+
+_SERIES_NAMES = ("frequency", "v(b)", "i(vinj)")
+
+
+def _series_passes(ts, split=0.4):
+    """Passes whose ``x = -v(b)`` and ``y = i(vinj) + 1`` satisfy
+    ``x + y == 1/(1+T)`` with ``x = split/(1+T)``."""
+    xs = [split / (1 + t) for t in ts]
+    ys = [(1 - split) / (1 + t) for t in ts]
+    zeros = [0j] * len(ts)
+    return (
+        _pass("pv", _FREQS, [[-x for x in xs], zeros], names=_SERIES_NAMES),
+        _pass("pi", _FREQS, [zeros, [y - 1 for y in ys]], names=_SERIES_NAMES),
+    )
+
+
+@pytest.mark.parametrize(
+    ("patch", "message"),
+    [
+        ({"tv": "v(a)"}, "alternative forms"),
+        ({"ti": "i(v1)"}, "alternative forms"),
+        ({"series_injection": {"load_node": "b"}}, "series_injection must be"),
+        ({"series_injection": {**_SERIES, "extra": 1}}, "series_injection must be"),
+        ({"series_injection": {**_SERIES, "source": "v inj"}}, "series_injection"),
+        ({"series_injection": {**_SERIES, "load_node": "b,c"}}, "series_injection"),
+        ({"series_injection": {**_SERIES, "load_node": 3}}, "series_injection"),
+        ({"series_injection": "b"}, "series_injection must be"),
+    ],
+)
+def test_malformed_series_injection_is_rejected(patch, message):
+    with pytest.raises(sim.SimError, match=message):
+        sim_tian.validate_form_exclusive(_series_spec(**patch))
+
+
+def test_neither_injection_form_is_rejected():
+    spec = _series_spec()
+    del spec["tian"]["series_injection"]
+    with pytest.raises(sim.SimError, match="either series_injection or both tv and ti"):
+        sim_tian.validate_form_exclusive(spec)
+
+
+def test_valid_series_injection_is_accepted_and_echoed():
+    spec = _series_spec(
+        "gain_margin_db", series_injection={"load_node": "B", "source": "VInj"}
+    )
+    assert sim_tian.validate_form_exclusive(spec) is True
+    report = sim_tian.TianOutcome().report(spec)
+    assert report == {
+        "voltage_pass": "pv",
+        "current_pass": "pi",
+        "series_injection": {"load_node": "B", "source": "VInj"},
+        "metric": "gain_margin_db",
+    }
+    assert "tv" not in report and "ti" not in report
+
+
+def test_series_ratio_recovers_t_from_x_and_y():
+    ts = [_three_pole(f) for f in _FREQS]
+    pv, pi = _series_passes(ts, split=0.3)
+    vec = sim_tian.tian_vector(
+        {"pv": pv, "pi": pi}, ("pv", "pi", "v(b)", "i(vinj)", "series")
+    )
+    assert not isinstance(vec, sim_tian._Failure)
+    assert vec[1] == pytest.approx(ts, rel=1e-12)
+    out = _run(_series_spec(), pv, pi)
+    assert out.error is None
+    assert out.value == pytest.approx(
+        _run(_spec(), *_three_pole_passes()).value, abs=1e-9
+    )
+
+
+def test_series_selectors_are_case_insensitive():
+    pv, pi = _series_passes([_three_pole(f) for f in _FREQS])
+    spec = _series_spec(
+        series_injection={"load_node": "B", "source": "VINJ"}, voltage_pass="PV"
+    )
+    assert _run(spec, pv, pi).error is None
+
+
+def test_series_missing_current_vector():
+    pv, pi = _series_passes([_three_pole(f) for f in _FREQS])
+    pi = _pass("pi", _FREQS, [[0j] * len(_FREQS)], names=("frequency", "v(b)"))
+    assert _code(_series_spec(), pv, pi) == "tian_vector_missing"
+
+
+def test_series_singular_sum_and_invalid_samples():
+    # x + y == 0 at the middle sample: v(b) = 1, i(vinj) + 1 = 1 -> i = 0.
+    pv = _pass("pv", _G, [[-1 + 0j, 1 + 0j, -1 + 0j], [0j] * 3], names=_SERIES_NAMES)
+    pi = _pass("pi", _G, [[0j] * 3, [0j, 0j, 0j]], names=_SERIES_NAMES)
+    out = _run(_series_spec(), pv, pi)
+    assert out.code == "tian_singular_denominator" and "index 1" in out.error
+    nan = complex(float("nan"), 0)
+    pv = _pass("pv", _G, [[-1 + 0j, nan, -1 + 0j], [0j] * 3], names=_SERIES_NAMES)
+    assert _code(_series_spec(), pv, pi) == "tian_invalid_samples"
+
+
+def test_series_grid_mismatch_is_not_resampled():
+    pv = _pass("pv", _G, [_ONE, _ONE], names=_SERIES_NAMES)
+    pi = _pass("pi", [1.0, 2.0, 4.0000001], [_ONE, _ONE], names=_SERIES_NAMES)
+    assert _code(_series_spec(), pv, pi) == "tian_grid_mismatch"
+
+
+def test_series_and_ratio_forms_with_same_selectors_do_not_share_a_tuple(monkeypatch):
+    pv, pi = _series_passes([_three_pole(f) for f in _FREQS])
+    calls = []
+    real = sim_tian.tian_vector
+    monkeypatch.setattr(
+        sim_tian, "tian_vector", lambda *a, **k: calls.append(a[1]) or real(*a, **k)
+    )
+    ratio = {**_spec(tv="v(b)", ti="i(vinj)"), "name": "ratio"}
+    series = {**_series_spec(), "name": "series"}
+    sim_tian.extract_corner_tians(
+        [ratio, series, {**series, "name": "again"}], [pv, pi]
+    )
+    assert [key[4] for key in calls] == ["ratio", "series"]
+
+
+def test_context_checks_series_pass_names():
+    analysis = {"kind": "ac", "passes": [{"name": "pv"}, {"name": "pi"}]}
+    sim_tian.validate_tian_context([_series_spec()], analysis)
+    with pytest.raises(sim.SimError, match="not an analysis.passes name"):
+        sim_tian.validate_tian_context([_series_spec(current_pass="zz")], analysis)
+
+
+# A real series-injection bench around a three-pole loop with known source /
+# load impedance ratio at the break: the driver's Thevenin source ``Ee`` (gain
+# -_SI_GAIN, behind _SI_RS) drives node a; Vinj (+ on a, - on b) breaks the
+# loop into the load _SI_RL at b, which the buffered RC chain senses. The true
+# loop gain is T(s) = _SI_GAIN * RL/(RS+RL) / prod(1 + s/wk).
+_SI_GAIN, _SI_RS, _SI_RL = 10.0, 1e3, 3e3
+_SI_POLES_HZ = (1e3, 3e3, 1e4)
+_SI_ARGS = "dec 100 10 1e6"
+_SI_BODY = (
+    "Vinj a b DC 0 AC 0\n"
+    "Iinj 0 b DC 0 AC 0\n"
+    "Eb0 f0 0 b 0 1\n"
+    "R1 f0 f1 1k\n"
+    "C1 f1 0 159.155n\n"
+    "Eb1 f2 0 f1 0 1\n"
+    "R2 f2 f3 1k\n"
+    "C2 f3 0 53.0516n\n"
+    "Eb2 f4 0 f3 0 1\n"
+    "R3 f4 f5 1k\n"
+    "C3 f5 0 15.9155n\n"
+    f"Ee e 0 f5 0 -{_SI_GAIN}\n"
+    f"Rs e a {_SI_RS}\n"
+    f"RL b 0 {_SI_RL}\n"
+)
+_SI_PASSES = [
+    {
+        "name": "inj_v",
+        "alter": [{"target": "VINJ", "value": 1}, {"target": "IINJ", "value": 0}],
+    },
+    {
+        "name": "inj_i",
+        "alter": [{"target": "VINJ", "value": 0}, {"target": "IINJ", "value": 1}],
+    },
+]
+
+
+def _si_t(freq):
+    t = _SI_GAIN * _SI_RL / (_SI_RS + _SI_RL)
+    for pole in _SI_POLES_HZ:
+        t /= 1 + 1j * freq / pole
+    return t
+
+
+def _si_closed_form():
+    lo, hi = 10.0, 1e6
+    for _ in range(80):
+        mid = math.sqrt(lo * hi)
+        lo, hi = (mid, hi) if abs(_si_t(mid)) > 1 else (lo, mid)
+    ugf = lo
+    pm = 180 + math.degrees(cmath.phase(_si_t(ugf)))
+
+    # Phase crosses -180 deg: bisect on the (monotone) unwrapped phase.
+    def phase(f):
+        return -sum(math.degrees(math.atan(f / p)) for p in _SI_POLES_HZ)
+
+    lo, hi = 10.0, 1e6
+    for _ in range(80):
+        mid = math.sqrt(lo * hi)
+        lo, hi = (mid, hi) if phase(mid) > -180 else (lo, mid)
+    gm = -20 * math.log10(abs(_si_t(lo)))
+    return ugf, pm, gm
+
+
+def _si_control_deck(tmp_path: Path) -> dict[str, float]:
+    """The same bench graded by an ngspice ``.control`` script with ``meas``."""
+    deck = tmp_path / "control.cir"
+    deck.write_text(
+        "series injection control\n" + _SI_BODY + ".control\n"
+        "alter vinj ac = 1\nalter iinj ac = 0\n"
+        f"ac {_SI_ARGS}\n"
+        "let x = -v(b)\n"
+        "alter vinj ac = 0\nalter iinj ac = 1\n"
+        f"ac {_SI_ARGS}\n"
+        "let y = i(vinj) + 1\n"
+        "let t = 1/(ac1.x + y) - 1\n"
+        "let tdb = db(t)\nlet tph = cph(t)*180/pi\n"
+        "meas ac ugf when tdb=0 fall=1\n"
+        "meas ac phu find tph when tdb=0 fall=1\n"
+        "meas ac gmv find tdb when tph=-180 fall=1\n"
+        ".endc\n.end\n"
+    )
+    out = subprocess.run(
+        ["ngspice", "-b", str(deck)], capture_output=True, text=True, check=True
+    ).stdout
+    found = {
+        m.group(1): float(m.group(2))
+        for m in re.finditer(r"^(ugf|phu|gmv)\s*=\s*(\S+)", out, re.MULTILINE)
+    }
+    return {"ugf": found["ugf"], "pm": 180 + found["phu"], "gm": -found["gmv"]}
+
+
+@real_ngspice
+def test_real_ngspice_series_injection_matches_closed_form_and_control_meas(tmp_path):
+    ugf, pm, gm = _si_closed_form()
+    (tmp_path / "body.spice").write_text(_SI_BODY)
+    series = {
+        "voltage_pass": "inj_v",
+        "current_pass": "inj_i",
+        "series_injection": {"load_node": "b", "source": "vinj"},
+    }
+    measurements = [
+        {"name": "ugf", "tian": {**series, "metric": "unity_crossing_hz"}},
+        {"name": "pm", "tian": {**series, "metric": "phase_margin_deg"}},
+        {"name": "gm", "tian": {**series, "metric": "gain_margin_db"}},
+        {
+            "name": "peak",
+            "tian": {**series, "metric": "max_gain_above_crossover_db"},
+            "limits": {"max": 1.0},
+        },
+    ]
+    request = tmp_path / "request.json"
+    request.write_text(
+        json.dumps(
+            {
+                "netlist": "body.spice",
+                "analysis": {"kind": "ac", "args": _SI_ARGS, "passes": _SI_PASSES},
+                "measurements": measurements,
+            }
+        )
+    )
+    report = sim.run_sim(str(request), backend="local")
+    corner = report["corners"][0]
+    by_name = {m["name"]: m for m in corner["measurements"]}
+    assert [p["status"] for p in corner["passes"]] == ["ok", "ok"]
+    assert by_name["ugf"]["value"] == pytest.approx(ugf, rel=0.005)
+    assert by_name["pm"]["value"] == pytest.approx(pm, abs=0.3)
+    assert by_name["gm"]["value"] == pytest.approx(gm, abs=0.1)
+    assert by_name["peak"]["value"] == 0.0 and by_name["peak"]["status"] == "pass"
+    assert by_name["pm"]["tian"]["series_injection"] == series["series_injection"]
+    # Agreement with the ngspice `.control` + `meas` extraction of the same deck
+    # (meas interpolates linearly, klt in log-frequency: 0.5 % / 0.3 deg / 0.1 dB).
+    control = _si_control_deck(tmp_path)
+    assert by_name["ugf"]["value"] == pytest.approx(control["ugf"], rel=0.005)
+    assert by_name["pm"]["value"] == pytest.approx(control["pm"], abs=0.3)
+    assert by_name["gm"]["value"] == pytest.approx(control["gm"], abs=0.1)
