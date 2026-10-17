@@ -2944,6 +2944,50 @@ def _bounded_model_inputs(doc: dict[str, Any]) -> list[dict[str, str | None]] | 
     ]
 
 
+def _compare_engine_builds(
+    worker_simulator: dict[str, Any] | None, client_build: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Compare the worker's ``--version`` banner with the client's local
+    ``environment.engine_build`` banner (issue #3095). ``not_comparable``
+    unless both sides captured one -- never a proven mismatch. Whitespace is
+    normalised; a match proves the same banner, not the same build options."""
+    worker = (worker_simulator or {}).get("version_banner")
+    client = (client_build or {}).get("version_banner")
+    if not isinstance(worker, str) or not isinstance(client, str):
+        return {"status": "not_comparable"}
+    if not worker.strip() or not client.strip():
+        return {"status": "not_comparable"}
+    if " ".join(worker.split()) == " ".join(client.split()):
+        return {"status": "match"}
+    return {
+        "status": "mismatch",
+        "warning": (
+            "the worker's ngspice --version banner differs from the local "
+            "binary's; build options (e.g. FFT linkage) may differ, so "
+            "results derived from them can differ from a local run"
+        ),
+    }
+
+
+def attach_engine_build_comparison(
+    remote_environment: dict[str, Any] | None, client_build: dict[str, Any] | None
+) -> None:
+    """Add ``engine_build_comparison`` to each ``worker_environment`` block of
+    a batch ``environment.remote`` (single job or ``fleet[]``), in place."""
+    if not isinstance(remote_environment, dict):
+        return
+    entries = [remote_environment]
+    fleet = remote_environment.get("fleet")
+    if isinstance(fleet, list):
+        entries = [entry for entry in fleet if isinstance(entry, dict)]
+    for entry in entries:
+        worker_env = entry.get("worker_environment")
+        if isinstance(worker_env, dict):
+            worker_env["engine_build_comparison"] = _compare_engine_builds(
+                worker_env.get("simulator"), client_build
+            )
+
+
 def _read_worker_environment(
     local_dir: str | None, request: dict[str, Any] | None = None
 ) -> dict[str, Any]:

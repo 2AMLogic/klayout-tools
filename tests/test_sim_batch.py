@@ -6364,6 +6364,52 @@ def test_pdk_variant_check_absent_manifest_and_any_candidate_match(
         sb._validate_batch_pdk_variant(request, "us-east-1")
 
 
+# --- engine_build_comparison (issue #3095) ---------------------------------
+
+
+def _build(banner):
+    return {"version_banner": banner, "probe": "ok" if banner else "error"}
+
+
+def test_engine_build_comparison_match_mismatch_not_comparable():
+    simulator = {"version_banner": "ngspice-46  build A\nfeatures: osdi"}
+    cmp = sb._compare_engine_builds
+    assert cmp(simulator, _build("ngspice-46 build A features: osdi")) == {
+        "status": "match"
+    }
+    mismatch = cmp(simulator, _build("ngspice-46 build B (fftw)"))
+    assert mismatch["status"] == "mismatch" and mismatch["warning"]
+    assert cmp(simulator, _build(None)) == {"status": "not_comparable"}
+    assert cmp(simulator, None) == {"status": "not_comparable"}
+    assert cmp({"version_banner": None}, _build("x")) == {"status": "not_comparable"}
+    assert cmp(None, _build("x")) == {"status": "not_comparable"}
+
+
+def test_attach_engine_build_comparison_single_and_fleet_entries():
+    def worker(banner):
+        return {"worker_environment": {"simulator": {"version_banner": banner}}}
+
+    single = worker("ngspice-46 A")
+    sb.attach_engine_build_comparison(single, _build("ngspice-46 A"))
+    assert single["worker_environment"]["engine_build_comparison"]["status"] == "match"
+
+    fleet = {"fleet": [worker("ngspice-46 A"), None, worker("ngspice-46 B")]}
+    sb.attach_engine_build_comparison(fleet, _build("ngspice-46 A"))
+    statuses = [
+        e["worker_environment"]["engine_build_comparison"]["status"]
+        for e in fleet["fleet"]
+        if e
+    ]
+    assert statuses == ["match", "mismatch"]  # each shard compared individually
+
+    absent = {"worker_environment": {"simulator": None}}
+    sb.attach_engine_build_comparison(absent, _build("ngspice-46 A"))
+    assert absent["worker_environment"]["engine_build_comparison"] == {
+        "status": "not_comparable"
+    }
+    sb.attach_engine_build_comparison(None, None)  # remote/SSH: no-op
+
+
 def test_batch_and_remote_requests_carry_supply_waveforms(tmp_path):
     """#2902: the batch/remote worker re-runs ``run_sim`` on the pushed
     request, so the whole-request form keeps ``corners.supply_waveforms`` and

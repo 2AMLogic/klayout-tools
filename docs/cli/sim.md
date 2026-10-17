@@ -155,6 +155,25 @@ whose members disagree). The submitting host's resolved path is kept under
 `environment.client_ngspice_binary` — present only for off-host reports. A
 local report is unchanged apart from `engine_host: "local"`.
 
+**`engine_version` is the major version only; `engine_build` records the
+build (issue #3095).** `environment.engine_version` (e.g. `"46"`) says nothing
+about how the binary was built, and two ngspice binaries of one major version
+can differ in build options that change results — the observed example is FFT
+linkage: one build zero-pads `fft` input to the next power of two, an
+FFTW-linked build does not, so bin spacing and every value read from a fixed
+bin differ. The `local` and `batch` backends can run different builds. So for
+`engine: "ngspice"` the report also carries `environment.engine_build`,
+probed once per sweep (not per corner) from the resolved binary:
+`{version_banner, binary_sha256, probe, reason}`. `version_banner` is the
+`<ngspice_binary> --version` output, control characters replaced and clipped
+to 2000 characters (the worker capture's cap). A failed or timed-out probe
+(10 s) never changes `status` or the exit code: `version_banner` is `null`,
+`probe` is `"timeout"` or `"error"`, and `reason` says why. `engine_build` is
+`null` for `engine: "xyce"`. Additive; `engine_version` and `ngspice_binary`
+are unchanged. For the `batch` backend, compare it with the worker's own
+`environment.remote.worker_environment.simulator.version_banner`
+(below) — `worker_environment.engine_build_comparison` does that for you.
+
 **ngspice's working directory, and `.spiceinit` compatibility mode (issue
 #2520).** Every `ngspice`/`Xyce` subprocess this command spawns — per
 corner, and for the two-pass fail-fast probe's own calibration slice — now
@@ -1758,6 +1777,7 @@ contents), size-capped, serialised with a JSON encoder, errors recorded as
 | `image_manifest` | Allowlisted fields of a worker-local manifest (`$KLT_IMAGE_MANIFEST`, `/etc/klt-image-manifest.json`, `/opt/klt/image-manifest.json`), or `null` when none exists. This is the worker's own file, not the submitter's AMI selection metadata (`ami_id`, `data/remote-sim-ami-manifest.json`); a selected image is not evidence of the model bytes executed. Whether an image pins its PDK revision is reported only if the worker manifest says so (`pdk_pinned`); otherwise unknown. |
 | `diagnostics` | Bounded list of capture problems (missing binary, unreadable stamp, ...). |
 | `pdk_stamp_comparison` | `status` of `match`, `mismatch` (with `warning`) or `not_comparable`. |
+| `engine_build_comparison` | Issue #3095. `status` of `match`, `mismatch` (with `warning`) or `not_comparable`: the worker's `simulator.version_banner` against the local `environment.engine_build.version_banner` (whitespace-normalised). `not_comparable` when either side has no banner — never a proven mismatch. A match proves the same banner, not identical build options. |
 
 `pdk_stamp_comparison` compares the worker's stamp with the `SOURCES` stamp the
 submitter resolves locally (`models.pdk_root` or `$PDK_ROOT`) and reports a
@@ -1766,7 +1786,8 @@ scheme**; a missing stamp or an unlike scheme is `not_comparable`, never a
 proven mismatch. A matching stamp does not prove model-closure equality
 (see #3071), and a matching major version (`engine_version`, the top-level
 simulator version) does not imply the same build: compare `version_banner`
-and `selected_path` for build identity.
+and `selected_path` for build identity (`engine_build_comparison` does this
+against the client's own `environment.engine_build`).
 
 Coverage: the `batch` backend only, single jobs and every sharded member
 (mixed worker identities stay individually visible; recovered failed-job

@@ -3282,6 +3282,9 @@ def test_parse_ascii_rawfile_missing_file_raises(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
+_STUB_VERSION_BANNER = "ngspice-99 : stub banner\n"
+
+
 def _stub_subprocess_run(
     monkeypatch,
     *,
@@ -3290,7 +3293,9 @@ def _stub_subprocess_run(
     side_effect=None,
     returncode: int = 0,
 ):
-    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None, **_kw):
+        if "--version" in cmd:  # the once-per-sweep engine_build probe (#3095)
+            return fake_completed(_STUB_VERSION_BANNER)
         log_path = cmd[cmd.index("-o") + 1]
         if side_effect is not None:
             raise side_effect
@@ -3797,7 +3802,9 @@ def _stub_ngspice_subprocess(monkeypatch, *, captured_cmds: list | None = None):
     """Like `_stub_subprocess_run` above, but also records every invoked
     `cmd` so a test can assert which binary was actually spawned."""
 
-    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None, **_kw):
+        if "--version" in cmd:  # engine_build probe (#3095), not a corner
+            return fake_completed(_STUB_VERSION_BANNER)
         if captured_cmds is not None:
             captured_cmds.append(cmd)
         log_path = cmd[cmd.index("-o") + 1]
@@ -4377,7 +4384,12 @@ def test_run_sim_fail_fast_probe_aborts_grid_before_any_corner_runs(
     monkeypatch.setattr(
         sim.subprocess,
         "run",
-        lambda *a, **k: real_corner_calls.append(1),
+        # The once-per-sweep `--version` engine_build probe (#3095) is not a corner.
+        lambda cmd, *a, **k: (
+            fake_completed("ngspice-99\n")
+            if "--version" in cmd
+            else real_corner_calls.append(1)
+        ),
     )
 
     report = sim.run_sim(str(request))
@@ -11252,7 +11264,9 @@ def _stub_subprocess_run_capturing_cwd(
     real code passed, so a test can assert which directory ngspice was
     actually launched from (issue #2520)."""
 
-    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None, **_kw):
+        if "--version" in cmd:  # engine_build probe (#3095), not a corner
+            return fake_completed(_STUB_VERSION_BANNER)
         if captured_cwds is not None:
             captured_cwds.append(cwd)
         log_path = cmd[cmd.index("-o") + 1]
@@ -13724,7 +13738,9 @@ def test_engine_version_unset_does_not_probe(tmp_path, monkeypatch):
 
     monkeypatch.setattr(sim.subprocess, "run", fake_run)
     sim.run_sim(str(_pin_request(tmp_path)), backend="local")
-    assert not any("--version" in c for c in calls)
+    # The only ``--version`` call is the once-per-sweep engine_build probe;
+    # the engine_version probe (same argv) must not add a second one.
+    assert sum("--version" in c for c in calls) == 1
 
 
 @pytest.mark.parametrize("kind", ["pss", "pnoise", "PAC"])
@@ -14569,6 +14585,98 @@ def test_capture_only_non_tran_stays_error(tmp_path, monkeypatch):
     assert corner["status"] == "error"
 
 
+# --------------------------------------------------------------------------- #
+# environment.engine_build (issue #3095)
+# --------------------------------------------------------------------------- #
+
+
+def _engine_build_request(tmp_path, **extra):
+    _write_body(tmp_path)
+    return _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            **extra,
+        },
+    )
+
+
+def test_engine_build_records_version_banner_once_per_sweep(tmp_path, monkeypatch):
+    request = _engine_build_request(tmp_path, corners={"temperature": [0, 27, 85]})
+    probes: list = []
+    inner = None
+
+    def fake_run(cmd, **kwargs):
+        if "--version" in cmd:
+            probes.append(cmd)
+            return fake_completed(_STUB_VERSION_BANNER)
+        return inner(cmd, **kwargs)
+
+    _stub_subprocess_run(monkeypatch)
+    inner = sim.subprocess.run
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+
+    report = sim.run_sim(str(request))
+
+    build = report["environment"]["engine_build"]
+    assert build["version_banner"] == _STUB_VERSION_BANNER.strip()
+    assert build["probe"] == "ok" and build["reason"] is None
+    assert len(probes) == 1  # once per sweep, not per corner
+    assert report["environment"]["engine_version"] == "99"  # unchanged
+
+
+@pytest.mark.parametrize(
+    ("effect", "probe"),
+    [
+        (subprocess.TimeoutExpired(cmd="ngspice", timeout=10), "timeout"),
+        (FileNotFoundError("gone"), "error"),
+    ],
+)
+def test_engine_build_probe_failure_is_null_with_reason_and_not_fatal(
+    tmp_path, monkeypatch, effect, probe
+):
+    request = _engine_build_request(tmp_path)
+    inner = None
+
+    def fake_run(cmd, **kwargs):
+        if "--version" in cmd:
+            raise effect
+        return inner(cmd, **kwargs)
+
+    _stub_subprocess_run(monkeypatch)
+    inner = sim.subprocess.run
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+
+    report = sim.run_sim(str(request))
+
+    build = report["environment"]["engine_build"]
+    assert build["version_banner"] is None
+    assert build["probe"] == probe and build["reason"]
+    assert report["status"] != "error"
+
+
+def test_engine_build_banner_is_sanitised_and_clipped(monkeypatch):
+    noisy = "ngspice-46\x00\x07 " + "x" * 5000
+    monkeypatch.setattr(sim.subprocess, "run", lambda cmd, **kw: fake_completed(noisy))
+    build = sim._probe_engine_build("/opt/ngspice")
+    assert len(build["version_banner"]) == sim._ENGINE_BANNER_MAX
+    assert "\x00" not in build["version_banner"]
+    assert build["version_banner"].startswith("ngspice-46??")
+
+
+def test_engine_build_nonzero_exit_or_empty_banner_is_error(monkeypatch):
+    monkeypatch.setattr(
+        sim.subprocess, "run", lambda cmd, **kw: fake_completed("", returncode=1)
+    )
+    build = sim._probe_engine_build("/opt/ngspice")
+    assert build["version_banner"] is None and build["probe"] == "error"
+
+
+def test_engine_build_is_null_for_xyce():
+    assert sim._probe_engine_build(None) is None
+
+
 # --- measurements[].on_unreached (issue #3108) -------------------------------
 
 _UNREACHED_LOG = (
@@ -14783,6 +14891,8 @@ def _capture_worker_env(monkeypatch):
     seen: list[str | None] = []
 
     def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None):
+        if "--version" in cmd:  # engine_build probe (#3095), not a corner
+            return fake_completed(_STUB_VERSION_BANNER)
         seen.append(None if env is None else env.get("OMP_NUM_THREADS"))
         log_path = cmd[cmd.index("-o") + 1]
         with open(log_path, "w", encoding="utf-8") as handle:
