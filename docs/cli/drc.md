@@ -2229,6 +2229,31 @@ it is installed with the package, next to its declared rule-id list
 [`asap7_rules.py`](../../src/klayout_tools/decks/asap7_rules.py)
 (`klayout_tools.decks.asap7_rules.DECK_PATH`).
 
+### ASAP7 capability by release
+
+What each published `klayout-tools` release ships for ASAP7, derived from
+`CHANGELOG.md` and the tagged tree (`git show vX.Y.Z:src/klayout_tools/decks/asap7.drc`).
+Pick a pin from this table, not from the unreleased examples in this page.
+
+| Release | DRC deck (`asap7.drc`) | FinFET LVS | Extraction |
+|---|---|---|---|
+| `0.5.0` | none (no ASAP7 deck) | no | none |
+| `0.6.0` | none (no ASAP7 deck) | no | none |
+| `0.7.0` | 106 rule categories, FEOL + MOL only (no M1-M9 / V1-V9) | refused: `klt lvs` with `layout.deck: asap7` errors "does not yet compare FinFET devices" (#2813) | `asap7` FinFET extraction deck |
+| Unreleased (`main`) | 263 rule categories, FEOL + MOL + BEOL M1-M9 / V0-V9 | supported (`options.finfet_bulk`) | `asap7` FinFET extraction deck |
+
+`--expect-rule-categories 263` in the example below, and FinFET LVS, apply
+to the **unreleased tree only**. A user on `0.7.0` needs a git pin until the
+next release ships them:
+
+```bash
+uvx --from "git+https://github.com/2AMLogic/klayout-tools@<sha>" klt drc ...
+```
+
+`klt deck info --deck asap7` reports the extraction deck module and the
+packaged `asap7.drc` as separate artifacts (`content_hash` vs
+`drc_deck.content_hash`); see [`deck.md`](deck.md#klt-deck-info).
+
 ```bash
 klt drc layout.gds --engine klayout \
     --deck-file src/klayout_tools/decks/asap7.drc \
