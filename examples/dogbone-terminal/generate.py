@@ -38,10 +38,10 @@ Regenerates `examples/dogbone-terminal/example_sky130.gds`/
 `example_<family>.drc.json` (`run_drc`'s report against the matching
 curated deck, violation-free (`"status": "clean"` on sky130,
 `"clean_partial"` on gf180mcu, whose untranscribed rules are disclosed) --
-verified by this script itself before it writes them; the `"provenance"` block is stripped before writing,
-matching `examples/drc/example.drc.json`'s own convention, since its
-`klt_version`/`klayout_version` fields are environment-dependent, not part
-of the fixture's contract).
+verified by this script itself before it writes them; the `"provenance"` block
+is stripped before writing, matching `examples/drc/example.drc.json`'s own
+convention, since its `klt_version`/`klayout_version` fields are
+environment-dependent, not part of the fixture's contract).
 """
 
 import json
