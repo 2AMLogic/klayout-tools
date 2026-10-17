@@ -164,7 +164,7 @@
       "complexity": 14
     },
     {
-      "file": "src/klayout_tools/equiv.py",
+      "file": "src/klayout_tools/equiv_sequential.py",
       "function": "_confirm_sequential_counterexample",
       "complexity": 11
     },
@@ -174,7 +174,7 @@
       "complexity": 11
     },
     {
-      "file": "src/klayout_tools/equiv.py",
+      "file": "src/klayout_tools/equiv_sequential.py",
       "function": "_run_sequential",
       "complexity": 18
     },
