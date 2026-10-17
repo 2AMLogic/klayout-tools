@@ -654,21 +654,6 @@
       "complexity": 15
     },
     {
-      "file": "src/klayout_tools/place_and_route.py",
-      "function": "_validate_constraints",
-      "complexity": 13
-    },
-    {
-      "file": "src/klayout_tools/place_and_route.py",
-      "function": "_validate_macros",
-      "complexity": 17
-    },
-    {
-      "file": "src/klayout_tools/place_and_route.py",
-      "function": "_validate_power",
-      "complexity": 28
-    },
-    {
       "file": "src/klayout_tools/place_and_route_gds_merge.py",
       "function": "_merge_def_to_gds",
       "complexity": 17
@@ -677,6 +662,21 @@
       "file": "src/klayout_tools/place_and_route_gds_merge.py",
       "function": "_stamp_single_pin_def_net_names",
       "complexity": 17
+    },
+    {
+      "file": "src/klayout_tools/place_and_route_request.py",
+      "function": "_validate_constraints",
+      "complexity": 13
+    },
+    {
+      "file": "src/klayout_tools/place_and_route_request.py",
+      "function": "_validate_macros",
+      "complexity": 17
+    },
+    {
+      "file": "src/klayout_tools/place_and_route_request.py",
+      "function": "_validate_power",
+      "complexity": 28
     },
     {
       "file": "src/klayout_tools/place_and_route_sta.py",
