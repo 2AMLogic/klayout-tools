@@ -2077,6 +2077,33 @@ def _sdf_split_unescaped(path: str, divider: str) -> list[str]:
     return parts
 
 
+def _sdf_unresolvable_interconnect_endpoints(
+    text: str, names: set[str], divider: str
+) -> list[tuple[int, str]]:
+    """``(line, token)`` for each top-cell ``INTERCONNECT`` endpoint whose
+    path names no instance in ``names`` (see
+    :func:`_reject_sdf_unresolvable_interconnect_instances`)."""
+
+    def resolves(parts: list[str]) -> bool:
+        return any(
+            divider.join(parts[:count]) in names for count in range(1, len(parts))
+        )
+
+    offenders: list[tuple[int, str]] = []
+    for cell_instance, entry_start, entry_text in _sdf_interconnect_entries(text):
+        if cell_instance not in ("", "*"):
+            continue
+        match = re.match(r"\(INTERCONNECT\s+(\S+)\s+(\S+)", entry_text)
+        if match is None:
+            continue
+        for token in match.groups():
+            parts = _sdf_split_unescaped(token, divider)
+            if len(parts) > 1 and not resolves(parts):
+                line = text.count("\n", 0, entry_start) + 1
+                offenders.append((line, token))
+    return offenders
+
+
 def _reject_sdf_unresolvable_interconnect_instances(
     sdf_path: str, source_paths: list[str], hdl_toplevel: str
 ) -> None:
@@ -2125,23 +2152,7 @@ def _reject_sdf_unresolvable_interconnect_instances(
     if divider not in (".", "/"):
         return
 
-    def resolves(parts: list[str]) -> bool:
-        return any(
-            divider.join(parts[:count]) in names for count in range(1, len(parts))
-        )
-
-    offenders: list[tuple[int, str]] = []
-    for cell_instance, entry_start, entry_text in _sdf_interconnect_entries(text):
-        if cell_instance not in ("", "*"):
-            continue
-        match = re.match(r"\(INTERCONNECT\s+(\S+)\s+(\S+)", entry_text)
-        if match is None:
-            continue
-        for token in match.groups():
-            parts = _sdf_split_unescaped(token, divider)
-            if len(parts) > 1 and not resolves(parts):
-                line = text.count("\n", 0, entry_start) + 1
-                offenders.append((line, token))
+    offenders = _sdf_unresolvable_interconnect_endpoints(text, names, divider)
     if not offenders:
         return
 
