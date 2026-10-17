@@ -8709,3 +8709,92 @@ def test_well_complement_of_spec_errors(tmp_path, overrides, match):
     )
     with pytest.raises(ErcError, match=match):
         run_erc(str(gds), str(spec))
+
+
+# --- ihp-sg13g2 antenna-ratio limits (issue #3784) ---------------------------
+
+
+def _sg13g2_fixture(path, *, metal1_um2: float) -> None:
+    """1 um^2 GatPoly gate strapped through Cont to a Metal1 bar whose area is
+    ``metal1_um2`` (1 um tall, so width == area)."""
+    layout = kdb.Layout()
+    layout.dbu = DBU
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(1, 0)).insert(kdb.Box.new(_um(0), _um(0), _um(1), _um(1)))
+    top.shapes(layout.layer(2, 0)).insert(
+        kdb.Box.new(_um(0.1), _um(0.1), _um(0.3), _um(0.3))
+    )
+    top.shapes(layout.layer(3, 0)).insert(
+        kdb.Box.new(_um(0), _um(0), _um(metal1_um2), _um(1))
+    )
+    layout.write(str(path))
+
+
+def _sg13g2_spec(path, metal_name: str = "Metal1") -> None:
+    _write_spec(
+        path,
+        {
+            "stackup": [
+                {"name": "GatPoly", "layer": "1/0", "role": "gate"},
+                {"name": metal_name, "layer": "3/0"},
+            ],
+            "vias": [
+                {"name": "Cont", "layer": "2/0", "between": ["GatPoly", metal_name]}
+            ],
+        },
+    )
+
+
+@pytest.mark.parametrize(("area", "verdict"), [(250.0, "violate"), (150.0, "pass")])
+def test_sg13g2_antenna_ratio_verdict(tmp_path, area, verdict):
+    gds = tmp_path / "sg13g2.gds"
+    spec = tmp_path / "sg13g2.erc.json"
+    _sg13g2_fixture(gds, metal1_um2=area)
+    _sg13g2_spec(spec)
+
+    report = run_erc(str(gds), str(spec), pdk="ihp-sg13g2")
+
+    assert report["pdk"] == "ihp-sg13g2"
+    level = next(
+        lvl for lvl in report["gates"][0]["levels"] if lvl["layer"] == "Metal1"
+    )
+    assert level["antenna_ratio_max"] == pytest.approx(200.0)
+    assert level["verdict"] == verdict
+    assert "IHP-Open-PDK/blob/v0.3.0" in level["antenna_ratio_source"]
+    assert "sg13g2_tech_default.json" in level["antenna_ratio_source"]
+    assert "'Ant_b'" in level["antenna_ratio_source"]
+
+
+def test_sg13g2_unlisted_role_stays_unchecked_and_partial(tmp_path):
+    gds = tmp_path / "sg13g2.gds"
+    spec = tmp_path / "sg13g2.erc.json"
+    _sg13g2_fixture(gds, metal1_um2=10.0)
+    _sg13g2_spec(spec, metal_name="met1")
+
+    report = run_erc(str(gds), str(spec), pdk="ihp-sg13g2")
+
+    level = next(lvl for lvl in report["gates"][0]["levels"] if lvl["layer"] == "met1")
+    assert level["verdict"] == "unchecked"
+    assert report["status"] == "not_checked"
+
+
+def test_unknown_pdk_error_lists_both_supported_pdks(tmp_path):
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    with pytest.raises(ErcError, match=r"supported: ihp-sg13g2, sky130"):
+        run_erc(str(gds), str(spec), pdk="nope")
+
+
+def test_cli_accepts_pdk_ihp_sg13g2(tmp_path, capsys):
+    gds = tmp_path / "sg13g2.gds"
+    spec = tmp_path / "sg13g2.erc.json"
+    _sg13g2_fixture(gds, metal1_um2=10.0)
+    _sg13g2_spec(spec)
+
+    code = main(["erc", str(gds), str(spec), "--pdk", "ihp-sg13g2", "--format", "json"])
+
+    assert code in (0, 3)
+    assert json.loads(capsys.readouterr().out)["pdk"] == "ihp-sg13g2"
