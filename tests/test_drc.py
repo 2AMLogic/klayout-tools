@@ -7211,7 +7211,8 @@ def test_run_drc_sg13g2_every_rule_has_provenance():
     """Every one of sg13g2's 48 curated `DrcRule` entries carries a populated
     `provenance` citation (issue #905's own acceptance criterion: "every
     compiled rule cites its SG13G2 PDK source line", extended by issue #1243's
-    Metal3-TopMetal2 stack, issue #2581's 6.11 MIM group and issue #3787's pSD group) -- not just the
+    Metal3-TopMetal2 stack, issue #2581's 6.11 MIM group and issue #3787's pSD
+    group) -- not just the
     32 width/space rules `tests/test_golden_deck.py`'s generic check already
     covers."""
     deck = get_deck("sg13g2")
