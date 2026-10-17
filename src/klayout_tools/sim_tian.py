@@ -44,7 +44,11 @@ The array ``T`` is then reduced with :func:`klayout_tools.sim_transfer.
 analyze_transfer` (denominator ``1``), so the sign, interpolation and
 first-crossing conventions are exactly those of ``measurements[].transfer``
 (#2922) -- see that module's docstring. ``max_gain_above_crossover_db`` is the
-one extra token (:func:`klayout_tools.sim_transfer.max_gain_above_crossover_db`).
+extra token (:func:`klayout_tools.sim_transfer.max_gain_above_crossover_db`);
+``phase_crossover_hz``, ``rising_unity_crossing_hz``, ``peak_above_crossover_db``
+(signed, start chosen by ``from_ratio`` / ``from_hz``) and
+``low_frequency_gain_db`` (issue #3771) are further reductions of the same
+``analyze_transfer`` result.
 
 Strictness: both passes must carry the identical, finite, positive, strictly
 increasing frequency grid (compared exactly -- never resampled); a non-finite
@@ -76,6 +80,10 @@ METRICS = (
     "phase_margin_deg",
     "gain_margin_db",
     "max_gain_above_crossover_db",
+    "phase_crossover_hz",
+    "rising_unity_crossing_hz",
+    "peak_above_crossover_db",
+    "low_frequency_gain_db",
 )
 
 #: Reason tokens a failed ``tian`` entry's diagnostic message leads with.
@@ -95,7 +103,16 @@ ERROR_CODES = (
 SINGULAR_RELATIVE_TOLERANCE = 1e-9
 
 _ALLOWED_KEYS = frozenset(
-    {"voltage_pass", "current_pass", "tv", "ti", "series_injection", "metric"}
+    {
+        "voltage_pass",
+        "current_pass",
+        "tv",
+        "ti",
+        "series_injection",
+        "metric",
+        "from_ratio",
+        "from_hz",
+    }
 )
 _SERIES_KEYS = frozenset({"load_node", "source"})
 
@@ -218,6 +235,36 @@ def validate_tian_spec(name: Any, body: Any) -> None:
         raise SimError(
             f"measurement '{name}': tian.metric must be one of "
             f"{list(METRICS)} (got {body.get('metric')!r})"
+        )
+    _validate_from(name, body)
+
+
+def _validate_from(name: Any, body: dict[str, Any]) -> None:
+    """``from_ratio`` / ``from_hz``: only with ``peak_above_crossover_db``,
+    at most one, each a finite positive number."""
+    given = [key for key in ("from_ratio", "from_hz") if key in body]
+    if not given:
+        return
+    if body["metric"] != "peak_above_crossover_db":
+        raise SimError(
+            f"measurement '{name}': tian.{given[0]} is only accepted with "
+            f"metric 'peak_above_crossover_db' (got {body['metric']!r})"
+        )
+    if len(given) == 2:
+        raise SimError(
+            f"measurement '{name}': tian.from_ratio and tian.from_hz are "
+            "alternative ways to choose the start: declare one"
+        )
+    value = body[given[0]]
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value <= 0
+    ):
+        raise SimError(
+            f"measurement '{name}': tian.{given[0]} must be a finite number "
+            f"> 0 (got {value!r})"
         )
 
 
@@ -472,6 +519,22 @@ def _outcome_for(spec: dict[str, Any], reduced: _Reduced | _Failure) -> TianOutc
         value, reason = sim_transfer.max_gain_above_crossover_db(
             reduced.freqs, reduced.metrics
         )
+    elif metric == "peak_above_crossover_db":
+        value, reason = sim_transfer.peak_above_crossover_db(
+            reduced.freqs,
+            reduced.metrics,
+            from_ratio=spec["tian"].get("from_ratio"),
+            from_hz=spec["tian"].get("from_hz"),
+        )
+    elif metric == "rising_unity_crossing_hz":
+        value, reason = sim_transfer.rising_unity_crossing_hz(
+            reduced.freqs, reduced.metrics
+        )
+    elif metric == "low_frequency_gain_db":
+        value, reason = sim_transfer.low_frequency_gain_db(reduced.metrics)
+    elif metric == "phase_crossover_hz":
+        value = reduced.metrics.phase_crossover_hz
+        reason = reduced.metrics.reasons.get("gain_margin_db", "unavailable")
     else:
         value = getattr(reduced.metrics, metric)
         reason = reduced.metrics.reasons.get(metric, "unavailable")
