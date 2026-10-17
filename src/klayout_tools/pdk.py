@@ -214,6 +214,15 @@ def find_pdk(variant: str | None = None, root: str | None = None) -> dict[str, A
     explicit ``root=`` disables the search entirely, so it is always ``[]``.
     Additive field; see ``docs/json-contract.md``.
 
+    ``alternative_variants`` (issue #3814) lists the sorted names of the
+    *other* variants in the chosen root when the variant was **not**
+    explicitly selected (no ``variant=`` and no ``$PDK``) -- the "silent
+    default" case, where ``variants[0]`` was picked and e.g.
+    ``gf180mcuB``-``D`` sat unmentioned beside ``gf180mcuA``. ``[]`` when the
+    variant was pinned or the root holds a single variant. Resolution is
+    unchanged; render :func:`alternative_variants_warning` to surface it.
+    Additive field; see ``docs/json-contract.md``.
+
     ``compatibility`` (issue #2759) compares the install's version identity
     with the one a klt technology package declares it was built for
     (:mod:`klayout_tools.pdk_compat`). Warning-only: ``mismatch``/``unknown``
@@ -248,6 +257,11 @@ def find_pdk(variant: str | None = None, root: str | None = None) -> dict[str, A
             "has_pcell_library": bool(_pcell_packages_for_assets(assets)),
             "ambiguous_roots": _ambiguous_roots(
                 candidates[index + 1 :], chosen["name"], root_path
+            ),
+            "alternative_variants": (
+                []
+                if effective_variant is not None
+                else [v["name"] for v in variants if v["name"] != chosen["name"]]
             ),
             "compatibility": _compatibility_for(chosen),
         }
@@ -307,6 +321,23 @@ def ambiguity_warning(report: dict[str, Any]) -> str | None:
         "first-match-wins, so a pinned open_pdks build may not be the one "
         "this run read -- pin the root explicitly (--pdk-root, or a "
         "request's models.pdk_root) to disable the search and choose "
+        "deliberately."
+    )
+
+
+def alternative_variants_warning(report: dict[str, Any]) -> str | None:
+    """Render a one-line warning for a :func:`find_pdk` report whose
+    ``alternative_variants`` is non-empty, or ``None`` otherwise (issue #3814).
+
+    Pure formatter, like :func:`ambiguity_warning`: the caller prints it.
+    """
+    others = report.get("alternative_variants") or []
+    if not others:
+        return None
+    return (
+        f"klt: warning: no PDK variant selected; defaulted to "
+        f"{report['variant']!r} but {report['root']} also holds "
+        f"{', '.join(others)}. Set $PDK or pass --pdk to choose "
         "deliberately."
     )
 

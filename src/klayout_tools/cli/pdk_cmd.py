@@ -47,6 +47,7 @@ import sys
 
 from ..pdk import (
     PdkNotFoundError,
+    alternative_variants_warning,
     em_limits,
     find_pdk,
     list_corners,
@@ -214,6 +215,9 @@ def _print_find_text(report: dict) -> None:
     if broken:
         print(f"broken_symlinks: {len(broken)} (see `klt pdk check` for detail)")
     _print_compatibility_text(report)
+    alternatives = alternative_variants_warning(report)
+    if alternatives:
+        print(alternatives, file=sys.stderr)
 
 
 def _print_check_text(report: dict) -> None:

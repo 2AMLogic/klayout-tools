@@ -832,6 +832,11 @@ stability statement, concrete precedents, and drift-detection guidance, and
     Populated by `klt sim` today; the underlying detection lives in
     `klayout_tools.pdk.find_pdk` (`ambiguous_roots`) and is available to
     every verb that resolves a PDK — see `docs/cli/pdk.md`.
+  - `alternative_variants` (issue #3814) — additive field on `klt pdk find`'s
+    payload (not part of `provenance`): sorted names of the other variants in
+    the chosen root when no variant was selected (`--pdk`/`$PDK` unset);
+    `[]` otherwise. Resolution and exit code are unchanged; text mode warns on
+    stderr. See `docs/cli/pdk.md`.
   - `version` (issue #3070) is a self-describing stamp, or `null` when no
     revision can be read mechanically (never guessed): an open_pdks `SOURCES`
     file (the lines joined with `"; "`, unchanged), else `fetched:<marker>`
