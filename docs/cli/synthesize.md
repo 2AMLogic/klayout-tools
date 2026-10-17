@@ -220,6 +220,17 @@ letter or digit. An existing directory is an error, even after failure; retry
 with a new ID. Exclusive directory creation also rejects concurrent callers
 that supply the same ID, while automatically allocated runs remain isolated.
 
+A request may instead choose the directory with `outputs.dir` (a non-empty
+string, relative to the request file's directory unless absolute). It *is* the
+run directory: every artifact that would go to `.klt/synthesize/<run_id>/` is
+written there and the `{path, scope}` fields report it, so the netlist lands at
+a stable, caller-chosen path (an absolute path outside the repo reports
+`scope: "external"`). The directory is claimed exclusively: it must not exist
+or must be an empty directory; a non-empty one is an error and nothing in it is
+overwritten. `outputs.dir` together with `run_id` is an error, unknown keys
+inside `outputs` are rejected, and the response `run_id` is the directory's
+basename. Requests without `outputs` behave exactly as above.
+
 A zero engine exit is insufficient: the current run must contain a readable,
 nonempty netlist, parseable synthesis statistics, and its ABC log when the
 library enables ABC constraints. Missing artifacts fail explicitly. A current

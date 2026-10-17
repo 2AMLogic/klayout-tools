@@ -919,9 +919,13 @@ _ALLOWED_REQUEST_KEYS = frozenset(
         "baseline",
         "arithmetic",
         "run_id",
+        "outputs",
         "parameters",
     }
 )
+
+#: Keys allowed inside the optional request ``outputs`` object (issue #3795).
+_ALLOWED_OUTPUTS_KEYS = frozenset({"dir"})
 
 
 def load_request(request_path: str) -> dict[str, Any]:
@@ -946,7 +950,29 @@ def load_request(request_path: str) -> dict[str, Any]:
     _reject_unknown_keys(
         request, _ALLOWED_REQUEST_KEYS, request_path, "", SynthesizeError
     )
+    _validate_outputs(request, request_path)
     return request
+
+
+def _validate_outputs(request: dict[str, Any], request_path: str) -> None:
+    """Reject a malformed ``outputs`` object before any engine work (issue #3795)."""
+    if "outputs" not in request:
+        return
+    outputs = request["outputs"]
+    if not isinstance(outputs, dict):
+        raise SynthesizeError("request.outputs must be an object")
+    _reject_unknown_keys(
+        outputs, _ALLOWED_OUTPUTS_KEYS, request_path, "outputs", SynthesizeError
+    )
+    if "dir" in outputs:
+        out_dir = outputs["dir"]
+        if not isinstance(out_dir, str) or not out_dir.strip():
+            raise SynthesizeError("request.outputs.dir must be a non-empty string")
+        if "run_id" in request:
+            raise SynthesizeError(
+                "request.outputs.dir and request.run_id both name the run "
+                "directory; give only one"
+            )
 
 
 def run_synthesize(
@@ -1394,7 +1420,30 @@ def run_synthesize(
 
 
 def _create_run_directory(request_dir: str, request: dict[str, Any]) -> str:
-    """Exclusively claim a retained directory; an existing ID is never reused."""
+    """Exclusively claim a retained directory; an existing ID is never reused.
+
+    ``outputs.dir`` (issue #3795) names the run directory itself, relative to
+    the request file's directory; it may be absent or an existing *empty*
+    directory, never a populated one.
+    """
+    _validate_outputs(request, "request")
+    out_dir = request.get("outputs", {}).get("dir")
+    if out_dir is not None:
+        output_dir = os.path.normpath(os.path.join(request_dir, out_dir))
+        try:
+            os.makedirs(os.path.dirname(output_dir), exist_ok=True)
+            try:
+                os.mkdir(output_dir)
+            except FileExistsError:
+                # Only an existing empty directory may be reused.
+                if not os.path.isdir(output_dir) or os.listdir(output_dir):
+                    raise
+        except OSError as exc:
+            raise SynthesizeError(
+                f"could not claim outputs.dir '{output_dir}': {exc}; it must "
+                "not exist or be an empty directory (prior evidence is retained)"
+            ) from exc
+        return output_dir
     run_id = request.get("run_id", f"run-{uuid.uuid4().hex}")
     if not isinstance(run_id, str) or not re.fullmatch(
         r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", run_id
