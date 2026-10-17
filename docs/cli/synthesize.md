@@ -220,6 +220,17 @@ letter or digit. An existing directory is an error, even after failure; retry
 with a new ID. Exclusive directory creation also rejects concurrent callers
 that supply the same ID, while automatically allocated runs remain isolated.
 
+A request may instead choose the directory with `outputs.dir` (a non-empty
+string, relative to the request file's directory unless absolute). It *is* the
+run directory: every artifact that would go to `.klt/synthesize/<run_id>/` is
+written there and the `{path, scope}` fields report it, so the netlist lands at
+a stable, caller-chosen path (an absolute path outside the repo reports
+`scope: "external"`). The directory is claimed exclusively: it must not exist
+or must be an empty directory; a non-empty one is an error and nothing in it is
+overwritten. `outputs.dir` together with `run_id` is an error, unknown keys
+inside `outputs` are rejected, and the response `run_id` is the directory's
+basename. Requests without `outputs` behave exactly as above.
+
 A zero engine exit is insufficient: the current run must contain a readable,
 nonempty netlist, parseable synthesis statistics, and its ABC log when the
 library enables ABC constraints. Missing artifacts fail explicitly. A current
@@ -1656,7 +1667,10 @@ recovered from the committed report; the CLI passes whatever flags you give
 this invocation, and the corresponding blocks legitimately drift if they
 differ. A request pinning an explicit `run_id` cannot be re-run at all — the
 run directory is retained and never reused — and that refusal surfaces as a
-clean exit `1` ("could not verify"), never a false `"match"`.
+clean exit `1` ("could not verify"), never a false `"match"`. A request using
+`outputs.dir` *can* be re-run: `--rerun` ignores that stable directory (already
+populated by the first run) and writes to a fresh `.klt/synthesize/run-<uuid>/`
+scratch directory, leaving the committed artifacts untouched.
 
 ### Exit codes for `--check` / `--rerun`
 
