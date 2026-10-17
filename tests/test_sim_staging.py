@@ -361,26 +361,6 @@ def test_host_resolved_roots_reads_the_request_then_the_environment(monkeypatch)
     assert st.host_resolved_roots({}) == ()
 
 
-def test_stage_sim_netlist_reraises_as_a_sim_error_naming_the_backend(tmp_path):
-    """Both backends surface a staging failure as `klt sim`'s own documented
-    "could not run" error (exit 1), never as a submitted job that comes back
-    undiagnosable."""
-    from klayout_tools.sim import SimError
-
-    netlist = _write(tmp_path, "tb.spice", '.include "missing.spice"\n')
-
-    with pytest.raises(SimError) as excinfo:
-        st.stage_sim_netlist(
-            {"models": {"pdk": "sky130A"}},
-            str(netlist),
-            netlist_staged_name="netlist.cir",
-            reserved_names=("request.json",),
-            backend="batch",
-        )
-    assert "backend 'batch'" in str(excinfo.value)
-    assert "missing.spice" in str(excinfo.value)
-
-
 # --------------------------------------------------------------------------- #
 # Opt-in model staging: `options.stage_model_inputs` (issue #2668)
 # --------------------------------------------------------------------------- #
@@ -395,6 +375,20 @@ def _job(request, netlist_path, request_dir, **overrides):
     )
     fields.update(overrides)
     return st.stage_sim_job(request, str(netlist_path), **fields)
+
+
+def test_stage_sim_job_reraises_as_a_sim_error_naming_the_backend(tmp_path):
+    """Both backends surface a staging failure as `klt sim`'s own documented
+    "could not run" error (exit 1), never as a submitted job that comes back
+    undiagnosable -- with model staging off (the default)."""
+    from klayout_tools.sim import SimError
+
+    netlist = _write(tmp_path, "tb.spice", '.include "missing.spice"\n')
+
+    with pytest.raises(SimError) as excinfo:
+        _job({"models": {"pdk": "sky130A"}}, netlist, tmp_path)
+    assert "backend 'batch'" in str(excinfo.value)
+    assert "missing.spice" in str(excinfo.value)
 
 
 def _model_request(**overrides):
