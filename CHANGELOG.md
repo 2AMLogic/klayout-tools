@@ -14,6 +14,14 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sta` driving cell / output load, and `*NAME_MAP` SPEFs** (issue
+  #3742): `constraints.driving_cell` / `.driving_cells` emit
+  `set_driving_cell` and `constraints.output_load_pf` / `.output_loads` emit
+  `set_load` (additive; omitted fields leave the generated Tcl unchanged).
+  The `spef_annotation` name check now resolves `*NAME_MAP` indices (and a
+  non-`/` `*DIVIDER`), so a name-mapped OpenROAD SPEF no longer reports 0
+  design nets annotated. `propagated_clock` already existed (issue #2739).
+
 - **`klt synthesize --restructure` now finds upsizes on libraries that quote
   cell names** (issue #3709): `restructure`'s and `synthesize`'s private
   regex Liberty readers are replaced by `liberty_compare.parse_liberty_text`.
