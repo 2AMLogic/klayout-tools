@@ -374,9 +374,10 @@ are always the real, unmodified DRM values:
   is an empty region, so unimplanted COMP is reported rather than skipped.
   The well/voltage partitions of ``DF.13``/``DF.14`` are not involved. The rule
   is not voltage-split in the DRM, hence ``voltage_independent``.
-- ``comp.tap_distance.nwell.lv.1`` / ``comp.tap_distance.psub.lv.1`` (DRM
-  ``DF.13_LV`` / ``DF.14_LV``, ``check="tap_distance"``, issue #3607): the
-  3.3 V columns only (``DF.13_MV`` / ``DF.14_MV`` are not declared), evaluated
+- ``comp.tap_distance.nwell.{lv,mv}.1`` / ``comp.tap_distance.psub.{lv,mv}.1``
+  (DRM ``DF.13_LV``/``DF.13_MV`` and ``DF.14_LV``/``DF.14_MV``,
+  ``check="tap_distance"``, issues #3607, #3793): the 3.3 V (20 um) and 5 V/6 V
+  (15 um) columns; the ``latchup_mk`` marker rules are not declared. Evaluated
   flat on merged regions as a ``klayout.db.Region`` translation of the
   upstream ``comp.rb`` operation sequence
   (``docs/design/gf180mcu-comp-checks-spike.md``). Recorded approximations:
@@ -1408,6 +1409,67 @@ DECK: list[DrcRule] = [
         provenance=_gf180mcu_klayout_deck_provenance("comp", "DF.14_LV"),
     ),
     DrcRule(
+        id="comp.tap_distance.nwell.mv.1",
+        description=(
+            "Max distance of an Nwell tap (NCOMP inside Nwell) from PCOMP inside "
+            "Nwell: 15um (5V/6V)"
+        ),
+        layer=(22, 0),  # Comp -- the checked layer
+        check="tap_distance",
+        threshold_dbu=0,  # no dbu threshold: the distance is in the spec
+        region_spec=TapDistanceSpec(
+            well_domain="inside",
+            voltage="mv",
+            max_distance_um=15.0,
+            nwell=(21, 0),
+            dnwell=(12, 0),
+            lvpwell=(204, 0),
+            nplus=(32, 0),
+            pplus=(31, 0),
+            res_mk=(110, 5),
+            dualgate=(55, 0),
+            v5_xtor=(112, 1),
+        ),
+        # DRM 7.5 Comp, rule "DF.13": "Max distance of Nwell tap (NCOMP inside
+        # Nwell) from (PCOMP inside Nwell)" (5V/6V column, 15 um). Re-derived
+        # from the PDK's executable `comp.rb` (pactive overlapping dualgate and
+        # not interacting the 15um tap reach); see the module docstring's
+        # "Known approximations" note on `comp.tap_distance.nwell.mv.1`.
+        scope="7.5 Comp",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_klayout_deck_provenance("comp", "DF.13_MV"),
+    ),
+    DrcRule(
+        id="comp.tap_distance.psub.mv.1",
+        description=(
+            "Max distance of a substrate tap (PCOMP outside Nwell) from NCOMP "
+            "outside Nwell: 15um (5V/6V)"
+        ),
+        layer=(22, 0),  # Comp -- the checked layer
+        check="tap_distance",
+        threshold_dbu=0,  # no dbu threshold: the distance is in the spec
+        region_spec=TapDistanceSpec(
+            well_domain="outside",
+            voltage="mv",
+            max_distance_um=15.0,
+            nwell=(21, 0),
+            dnwell=(12, 0),
+            lvpwell=(204, 0),
+            nplus=(32, 0),
+            pplus=(31, 0),
+            res_mk=(110, 5),
+            dualgate=(55, 0),
+            v5_xtor=(112, 1),
+        ),
+        # DRM 7.5 Comp, rule "DF.14": "Max distance of substrate tap (PCOMP
+        # outside Nwell) from (NCOMP outside Nwell)" (5V/6V column, 15 um).
+        # Re-derived from the PDK's executable `comp.rb` (nactive overlapping
+        # dualgate minus a diamond 15um ptap filter, refined by sep(ptap,
+        # 15um)); see the module docstring's "Known approximations" note on
+        # `comp.tap_distance.psub.mv.1`.
+        scope="7.5 Comp",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_klayout_deck_provenance("comp", "DF.14_MV"),
+    ),
+    DrcRule(
         id="nplus.width.1",
         description="minimum Nplus implant width",
         layer=(32, 0),  # Nplus
@@ -2123,7 +2185,8 @@ UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {
         "applies the 3.3V/_LV thresholds regardless of Dualgate's presence "
         "(e.g. DF.6 COMP extend beyond gate 0.24 vs. 0.40, PL.5a/PL.5b field "
         "poly to COMP 0.10 vs. 0.30 -- all in um, and neither transcribed in "
-        "this deck yet)."
+        "this deck yet). The DF.13/DF.14 tap-distance rules read it as the "
+        "MV (15 um) selector (comp.tap_distance.{nwell,psub}.mv.1)."
     ),
 }
 
