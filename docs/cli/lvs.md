@@ -245,6 +245,13 @@ Request fields (in addition to `layout.file` [+ `layout.top`] and
 reference must already be in the runset's SPICE dialect); no field is silently
 ignored.
 
+The application runs with its working directory set to klt's temporary work
+dir, so runset side files (e.g. `<top>_extracted.cir`) never land in the
+caller's tree; relative `deck_vars` values resolve against that dir, so pass
+absolute paths. On a non-zero exit, `error.message` leads with the runset's
+last `ERROR` line, names the `klayout` application and pip module versions
+(a mismatch is a common cause), then carries the full runset log.
+
 **The verdict is taken from the `.lvsdb`, not the process.** The database is
 read back with `klayout.db.LayoutVsSchematic.read()` + `xref()`. A PDK driver
 may exit `0` on a non-matching pair, so exit status is only used to detect a

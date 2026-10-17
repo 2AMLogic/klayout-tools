@@ -9,6 +9,7 @@ A real-binary smoke test is skipped when ``klayout`` is not on PATH.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 
@@ -158,6 +159,57 @@ def test_nonzero_exit_is_an_error(tmp_path, fake_klayout):
     fake_klayout["stdout"] = "boom"
     with pytest.raises(LvsError, match="exited with status 1"):
         run_lvs(_request(tmp_path, 1))
+
+
+def test_nonzero_exit_leads_with_last_error_line(tmp_path, fake_klayout):
+    fake_klayout["returncode"] = 1
+    fake_klayout["stdout"] = (
+        "extracting...\nERROR: undefined method `purge_devices' for RBA::Netlist\n"
+    )
+    with pytest.raises(LvsError) as ei:
+        run_lvs(_request(tmp_path, 1))
+    msg = str(ei.value)
+    assert msg.startswith("last error: ERROR: undefined method `purge_devices'")
+    assert "no trustworthy verdict" in msg
+    assert "klayout application 0.30.12" in msg
+    assert "extracting..." in msg  # full log still present
+
+
+def test_nonzero_exit_without_error_lines_has_no_cause_prefix(tmp_path, fake_klayout):
+    fake_klayout["returncode"] = 1
+    fake_klayout["stdout"] = "boom"
+    with pytest.raises(LvsError) as ei:
+        run_lvs(_request(tmp_path, 1))
+    assert str(ei.value).startswith("klayout exited with status 1")
+
+
+def test_unreadable_app_version_does_not_mask_error(
+    tmp_path, monkeypatch, fake_klayout
+):
+    fake_klayout["returncode"] = 1
+    fake_klayout["stdout"] = "ERROR: bad"
+    monkeypatch.setattr(lvs_runset, "_application_version", lambda binary: None)
+    with pytest.raises(LvsError, match="klayout application unknown"):
+        run_lvs(_request(tmp_path, 1))
+
+
+def test_runset_runs_in_temp_work_dir(tmp_path, monkeypatch, fake_klayout):
+    seen = {}
+    inner = lvs_runset.subprocess.run
+
+    def spy(cmd, *a, **kw):
+        if "-b" in cmd[1:]:
+            seen["cwd"] = kw.get("cwd")
+        return inner(cmd, *a, **kw)
+
+    monkeypatch.setattr(lvs_runset.subprocess, "run", spy)
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    monkeypatch.chdir(caller)
+    run_lvs(_request(tmp_path, 1))
+    assert seen["cwd"] and os.path.basename(seen["cwd"]).startswith("klt-lvs-runset-")
+    assert seen["cwd"] != str(caller)
+    assert not os.path.exists(seen["cwd"])  # cleaned up with the work dir
 
 
 def test_no_database_is_an_error(tmp_path, fake_klayout):
