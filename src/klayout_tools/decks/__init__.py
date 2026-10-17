@@ -304,9 +304,12 @@ def get_unchecked_rules(name: str) -> dict[str, tuple[tuple[int, int], str]]:
     in the stream, so a ``clean`` verdict is not misread as covering it.
     Decks that declare none (and unregistered names) return an empty map.
     """
-    from . import sg13cmos5l
+    from . import sg13cmos5l, sg13g2
 
-    return {"sg13cmos5l": sg13cmos5l.UNCHECKED_RULES}.get(name, {})
+    return {
+        "sg13cmos5l": sg13cmos5l.UNCHECKED_RULES,
+        "sg13g2": sg13g2.UNCHECKED_RULES,
+    }.get(name, {})
 
 
 def _nominal_dbu_registry() -> dict[str, float]:

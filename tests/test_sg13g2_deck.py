@@ -46,6 +46,7 @@ import pytest
 from klayout_tools.decks import RuleProvenance
 from klayout_tools.decks import sg13g2 as sg13g2_deck_module
 from klayout_tools.decks.sg13g2 import EXTRACTION_DECK
+from klayout_tools.drc import run_drc
 from klayout_tools.extract import run_extract
 
 _DBU_UM = 0.001
@@ -67,6 +68,62 @@ def _box_um(x0: float, y0: float, x1: float, y1: float) -> kdb.Box:
 def _write_gds(layout: kdb.Layout, path: Path) -> str:
     layout.write(str(path))
     return str(path)
+
+
+# --------------------------------------------------------------------------- #
+# NWell width/space + NW.b1 unchecked marker (issue #3571)
+# --------------------------------------------------------------------------- #
+
+
+def _nwell_layout(tmp_path: Path, name: str, boxes) -> str:
+    layout = kdb.Layout()
+    layout.dbu = _DBU_UM
+    top = layout.create_cell("TOP")
+    for box in boxes:
+        top.shapes(layout.layer(31, 0)).insert(_box_um(*box))
+    return _write_gds(layout, tmp_path / name)
+
+
+def test_run_drc_sg13g2_nwell_width_clean_and_violation(tmp_path: Path):
+    """A 3x3 um NWell is clean; a 0.5 um-wide one trips `nwell.width.1`
+    (NW.a, 0.62 um). `31/0` is no longer unruled."""
+    ok = run_drc(_nwell_layout(tmp_path, "nw_ok.gds", [(0, 0, 3, 3)]), "sg13g2")
+    assert ok["status"] == "clean"
+    assert "nwell.width.1" in ok["coverage"]["rules_checked"]
+    assert "31/0" not in ok["coverage"]["layers_in_stream_without_rules"]
+
+    bad = run_drc(_nwell_layout(tmp_path, "nw_bad.gds", [(0, 0, 0.5, 3)]), "sg13g2")
+    assert bad["status"] == "violations"
+    assert bad["rule_counts"].get("nwell.width.1", 0) >= 1
+
+
+def test_run_drc_sg13g2_nwell_space_violation(tmp_path: Path):
+    """Two wells 0.4 um apart (< NW.b's 0.62 um) trip `nwell.space.1`."""
+    path = _nwell_layout(tmp_path, "nw_sp.gds", [(0, 0, 3, 3), (3.4, 0, 6.4, 3)])
+    report = run_drc(path, "sg13g2")
+    assert report["rule_counts"].get("nwell.space.1", 0) >= 1
+
+
+def test_run_drc_sg13g2_two_wells_report_nw_b1_unchecked(tmp_path: Path):
+    """Issue #3571 repro: two 3x3 um wells 1.0 um apart pass the geometric
+    rules, but the net-aware NW.b1 (1.80 um) is named in
+    `coverage.unchecked_rules` so the `clean` is not read as covering it."""
+    path = _nwell_layout(tmp_path, "nw_b1.gds", [(0, 0, 3, 3), (4, 0, 7, 3)])
+    report = run_drc(path, "sg13g2")
+    assert report["status"] == "clean"
+    unchecked = report["coverage"]["unchecked_rules"]
+    assert [u["rule"] for u in unchecked] == ["NW.b1"]
+    assert unchecked[0]["layer"] == "31/0"
+
+
+def test_run_drc_sg13g2_no_nwell_no_unchecked_marker(tmp_path: Path):
+    """No NWell in the stream -> no NW.b1 marker."""
+    layout = kdb.Layout()
+    layout.dbu = _DBU_UM
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(8, 0)).insert(_box_um(0, 0, 0.21, 4))
+    report = run_drc(_write_gds(layout, tmp_path / "no_nw.gds"), "sg13g2")
+    assert report["coverage"]["unchecked_rules"] == []
 
 
 # --------------------------------------------------------------------------- #
