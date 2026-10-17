@@ -3923,8 +3923,8 @@ injection source active in each, and both complex result sets kept. An `ac`
   one corner job, each in a fresh plot (`setplot new`). No operating-point
   reuse between passes is promised.
 - Refused before any engine launch: duplicate/malformed passes, a non-`ac`
-  analysis, any `measurements[]` entry other than `tian` (see "Dual-injection
-  stability metrics" below), `options.waveforms` / `--plot`, `engine: "xyce"`,
+  analysis, any `measurements[]` entry other than `tian` or a plain `expr`
+  (see "DC operating-point scalar" below), `options.waveforms` / `--plot`, `engine: "xyce"`,
   and an off-host runner older than `0.7.1` or of unknown version (the
   `dual_injection` mandatory gate, #3161, enforced even under
   `runner_version_check: "warn"`). Requests without `passes` are unchanged.
@@ -3939,6 +3939,16 @@ magnitude-only. The corner gains an additive `passes` list of
 `options.keep_artifacts` is set, else `null`). A pass whose analysis did not
 produce an AC plot is `status: "error"` with a `pass_failed` diagnostic, and
 the corner grades `error`.
+
+**DC operating-point scalar** ([#3771](https://github.com/2AMLogic/klayout-tools/issues/3771)).
+Beside `tian` entries, a `measurements[]` entry with `expr` (the ordinary form:
+one scalar ngspice expression, e.g. `"expr": "v(out)"`) is accepted under
+`analysis.passes`. klt emits `op` before the first pass's `alter` set and
+evaluates the expression in that operating-point plot, so it grades like any
+`expr` scalar (`limits`, `plausible_range`, rollups, Monte Carlo statistics).
+It reports the corner's bias **before any pass `alter`**: a pass that alters a
+DC value (`field: "dc"`) does not move it. Every other form (`spice`,
+`crossings`, `energy`, `cycle_mean`, `transfer`, `noise`) stays refused.
 
 ## Dual-injection stability metrics (`measurements[].tian`)
 
@@ -4025,6 +4035,20 @@ request:
   | `gain_margin_db` | dB | Minus the dB magnitude where the unwrapped phase first crosses -180 deg downward. |
   | `max_gain_above_crossover_db` | dB | Largest sampled `20*log10 \|T\|` over the closed interval `[unity_crossing_hz, f_max]`: the crossover itself counts (0 dB), so the value is never negative; `0` means the gain never climbs back above 0 dB past the crossover. |
 
+  Four further reductions of the same `T` vector
+  ([#3771](https://github.com/2AMLogic/klayout-tools/issues/3771)):
+
+  | `metric` | Unit | Definition |
+  | -------- | ---- | ---------- |
+  | `phase_crossover_hz` | Hz | Frequency of the first downward -180 deg crossing of the unwrapped phase, the crossing `gain_margin_db` is read at (same unavailable reasons as `gain_margin_db`). |
+  | `rising_unity_crossing_hz` | Hz | First *rising* 0 dB crossing above the first falling one (the unity crossing). Unavailable as `no_rising_unity_crossing` when the loop only rolls off, with the unity metric's own reason when there is no unity crossing, and as `invalid_samples` when a gap precedes it. Existence alone: use the entry's available/unavailable status. |
+  | `peak_above_crossover_db` | dB | **Signed** largest sampled `20*log10 \|T\|` over the samples in `[start, f_max]`, with no zero floor and no injected crossover sample: negative for a monotonic roll-off. `start` is `from_hz`, else `from_ratio * unity_crossing_hz`, else `unity_crossing_hz`. Unavailable when `start` needs the unity crossing and it is unavailable, when no sample is at or above `start` (`no_samples_in_range`), or for an invalid sample in the interval (`invalid_samples`). |
+  | `low_frequency_gain_db` | dB | `20*log10 \|T\|` of the first **valid** sample (the DC-gain proxy; `no_valid_samples` when there is none). |
+
+  `from_ratio` / `from_hz` (a finite number `> 0`, not a boolean) are accepted
+  only with `peak_above_crossover_db`; declaring both is a request error.
+  `max_gain_above_crossover_db` and the five earlier metrics are unchanged.
+
   All-crossing margins and Nyquist encirclement (#3088) are not offered for
   `tian`.
 - **Errors never pass a limit.** Each is `status: "error"`, `value: null`, no
@@ -4047,8 +4071,10 @@ request:
 
 The response entry is an ordinary `corners[].measurements[]` object plus an
 additive `tian` member echoing `{voltage_pass, current_pass, tv, ti, metric}`
-(`series_injection` in place of `tv`/`ti` for that form; no `schema_version`
-bump). Limits, `plausible_range`, rollups and Monte Carlo
+(`series_injection` in place of `tv`/`ti` for that form; plus `from_ratio` /
+`from_hz` when given; no `schema_version` bump -- new tokens and echo keys are
+additive per `docs/json-contract.md`). An off-host runner older than the
+release carrying the new tokens rejects them as an unknown `tian.metric`. Limits, `plausible_range`, rollups and Monte Carlo
 statistics apply to `value` as for any scalar.
 
 ## Source energy over a transient window (`measurements[].energy`)
