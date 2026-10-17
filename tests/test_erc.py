@@ -8709,3 +8709,190 @@ def test_well_complement_of_spec_errors(tmp_path, overrides, match):
     )
     with pytest.raises(ErcError, match=match):
         run_erc(str(gds), str(spec))
+
+
+# --- recipe: supply-rail continuity + well ties across abutting cells (#3804) -
+#
+# No dedicated verb: `nets[]` (kind "supply") plus `ties[]` already express
+# "the rail is one island through every abutted cell, on one net name" and
+# "every well has a tap on the rail". The fixture is a row of three abutting
+# cells, each drawing a 10 um ``li1`` rail segment labelled with its rail name
+# and an ``nwell`` with a tap strapped to the rail; each case perturbs one
+# thing. `docs/cli/erc.md` § "Recipe: supply-rail continuity ..." quotes this
+# spec.
+
+_RAIL_CELL_W_UM = 10.0
+
+
+def _rail_spec(rail_nets=("VDD",), roles=None):
+    spec = _nets_spec(
+        nets=[
+            {"name": n, "kind": "supply", **({"roles": roles} if roles else {})}
+            for n in rail_nets
+        ],
+        ties=[
+            {
+                "name": "nwell_tie",
+                "well_layer": "10/0",
+                "tap_layer": "11/0",
+                "tap_is_dedicated": True,
+                "connect_to": "li1",
+                "net": "VDD",
+            }
+        ],
+    )
+    return spec
+
+
+def _rail_row_report(
+    tmp_path,
+    name,
+    *,
+    gap_before=None,
+    rail_names=("VDD", "VDD", "VDD"),
+    tap_in=(True, True, True),
+    rail_nets=("VDD",),
+    roles=None,
+):
+    """Three abutted rail cells. ``gap_before`` = index of a cell that is
+    shifted right by 0.5 um (a rail cut at that abutment); ``rail_names``
+    = the label each cell's rail segment carries; ``tap_in`` = whether each
+    cell's well gets a tap."""
+    layout = kdb.Layout()
+    layout.dbu = DBU
+    poly = layout.layer(1, 0)
+    li1 = layout.layer(3, 0)
+    label = layout.layer(3, 5)
+    nwell = layout.layer(10, 0)
+    tap = layout.layer(11, 0)
+    top = layout.create_cell("TOP")
+    # No gate geometry: a passive-only cell that declares `nets[]`/`ties[]`
+    # is a valid run (issue #2896), so the recipe needs no gate at all.
+    del poly  # noqa: F841
+    for i in range(3):
+        cell = layout.create_cell(f"RAILCELL{i}")
+        w = _RAIL_CELL_W_UM
+        cell.shapes(li1).insert(kdb.Box.new(_um(0), _um(0), _um(w), _um(1)))
+        if rail_names[i] is not None:
+            cell.shapes(label).insert(
+                kdb.Text(rail_names[i], kdb.Trans(_um(w / 2), _um(0.5)))
+            )
+        cell.shapes(nwell).insert(kdb.Box.new(_um(1), _um(2), _um(w - 1), _um(4)))
+        if tap_in[i]:
+            cell.shapes(tap).insert(kdb.Box.new(_um(4), _um(2.5), _um(5), _um(3.5)))
+            # Strap from the tap down to the rail.
+            cell.shapes(li1).insert(kdb.Box.new(_um(4), _um(0), _um(5), _um(3.5)))
+        shift = 0.5 if gap_before is not None and i >= gap_before else 0.0
+        top.insert(
+            kdb.CellInstArray(cell.cell_index(), kdb.Trans(_um(20 + i * w + shift), 0))
+        )
+
+    gds = tmp_path / f"{name}.gds"
+    layout.write(str(gds))
+    spec = tmp_path / f"{name}.erc.json"
+    _write_spec(spec, _rail_spec(rail_nets, roles))
+    return run_erc(str(gds), str(spec), top="TOP")
+
+
+def _rules(report):
+    return sorted({f["rule"] for f in report["erc_findings"]})
+
+
+def _rail_findings(report, rule):
+    return [f for f in report["erc_findings"] if f["rule"] == rule]
+
+
+def test_rail_recipe_clean_row(tmp_path):
+    """(a) Rail continuous, one net name, every well tapped: `erc_status`
+    is plain `clean` (the tie is checked, not skipped) and the CLI exits 0
+    on the connectivity half (no `--pdk`, so the antenna `status` is
+    `not_checked`)."""
+    report = _rail_row_report(tmp_path, "rail_clean")
+
+    assert report["erc_findings"] == []
+    assert report["erc_status"] == "clean"
+    assert report["erc_coverage"]["skipped"] == []
+    assert 'erc.missing_tie:["nwell_tie"]' in report["erc_coverage"]["checked"]
+    assert report["nets"][0]["matched_islands"] == 1
+
+
+def test_rail_recipe_rail_cut_at_abutment(tmp_path):
+    """(b) A 0.5 um gap at the cell1|cell2 abutment cuts the rail: one
+    `erc.unconnected_net` for VDD whose `islands[]` boxes put the break
+    between x=40.0 and x=40.5 um."""
+    report = _rail_row_report(tmp_path, "rail_cut", gap_before=2)
+
+    assert _rules(report) == ["erc.unconnected_net"]
+    (finding,) = report["erc_findings"]
+    assert finding["net"] == "VDD"
+    assert "2 disconnected electrical islands" in finding["description"]
+    rights = sorted((i["bbox"]["left"], i["bbox"]["right"]) for i in finding["islands"])
+    assert rights == [(_um(20), _um(40)), (_um(40.5), _um(50.5))]
+    assert report["erc_status"] == "violations"
+
+
+def test_rail_recipe_different_rail_net_at_abutment(tmp_path):
+    """(c) The last cell's rail is labelled VSS but is drawn continuous with
+    the VDD rail: the two declared supplies share an island, so
+    `erc.supply_short` (not `erc.unconnected_net` -- the rail is not cut)."""
+    report = _rail_row_report(
+        tmp_path,
+        "rail_swap",
+        rail_names=("VDD", "VDD", "VSS"),
+        rail_nets=("VDD", "VSS"),
+    )
+
+    assert _rules(report) == ["erc.supply_short"]
+    (finding,) = report["erc_findings"]
+    assert {finding["net"], finding["other_net"]} == {"VDD", "VSS"}
+    assert report["erc_status"] == "violations"
+
+
+def test_rail_recipe_well_without_tap(tmp_path):
+    """(d) The middle cell's well has no tap: one `erc.missing_tie`, the
+    rail itself still continuous."""
+    report = _rail_row_report(tmp_path, "rail_notap", tap_in=(True, False, True))
+
+    assert _rules(report) == ["erc.missing_tie"]
+    (finding,) = report["erc_findings"]
+    assert finding["net"] == "VDD"
+    assert "no 'nwell_tie' tap contact drawn" in finding["description"]
+    assert report["erc_status"] == "violations"
+
+
+def test_rail_recipe_cli_exit_code_on_connectivity_break(tmp_path):
+    """The CLI exits 3 on a connectivity finding (and the recipe gates on
+    `erc_status`, not the code -- exit 4 is the antenna half's
+    `not_checked`, not a failure)."""
+    _rail_row_report(tmp_path, "rail_cli", gap_before=2)
+
+    code = main(
+        [
+            "erc",
+            str(tmp_path / "rail_cli.gds"),
+            str(tmp_path / "rail_cli.erc.json"),
+            "--top",
+            "TOP",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert code == 3
+
+
+def test_rail_recipe_cut_with_unlabelled_cell_needs_roles(tmp_path):
+    """Edge case: the cut cell carries no rail label. Plain `nets[]` counts
+    only *labelled* islands (issue #2497), so the cut is invisible and the
+    rail check reads clean (only the unlabelled cell's now-unreachable tap
+    trips `erc.missing_tie`); declaring `roles` on the net makes the unlabelled
+    orphan an `erc.unlabelled_conductor` finding. This is the recipe's
+    stated blind spot, pinned so the doc cannot overclaim."""
+    kwargs = dict(gap_before=2, rail_names=("VDD", "VDD", None))
+
+    blind = _rail_row_report(tmp_path, "rail_blind", **kwargs)
+    assert _rules(blind) == ["erc.missing_tie"]
+
+    seen = _rail_row_report(tmp_path, "rail_roles", roles=["li1"], **kwargs)
+    assert _rules(seen) == ["erc.missing_tie", "erc.unlabelled_conductor"]
+    assert seen["erc_status"] == "violations"
