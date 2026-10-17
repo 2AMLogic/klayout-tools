@@ -45,7 +45,7 @@ import jsonschema
 import pytest
 
 from helpers.subprocess_fakes import fake_completed
-from klayout_tools import _provenance, lvs, lvs_netgen, lvs_power, pdk
+from klayout_tools import _provenance, lvs, lvs_combine, lvs_netgen, lvs_power, pdk
 from klayout_tools.cli import main
 from klayout_tools.lvs import LvsError, run_lvs
 
@@ -6656,10 +6656,10 @@ def test_combine_devices_safely_exhausts_bounded_retry_budget(monkeypatch):
     warning = lvs._combine_devices_safely(kdb.Netlist(), "layout")
 
     assert warning is not None
-    assert call_count == lvs._COMBINE_DEVICES_MAX_ATTEMPTS
+    assert call_count == lvs_combine._COMBINE_DEVICES_MAX_ATTEMPTS
     assert warning["category"] == lvs.CATEGORY_DEVICE_COMBINE_INCOMPLETE
     assert warning["severity"] == "warning"
-    assert str(lvs._COMBINE_DEVICES_MAX_ATTEMPTS) in warning["description"]
+    assert str(lvs_combine._COMBINE_DEVICES_MAX_ATTEMPTS) in warning["description"]
     assert "attempts" in warning["description"]
 
 
@@ -7480,7 +7480,8 @@ def test_parse_combine_devices_max_attempts_defaults_to_module_constant():
     """Omitting `options.combine_devices_max_attempts` resolves to the
     unchanged pre-#1412 default (`_COMBINE_DEVICES_MAX_ATTEMPTS`, `5`)."""
     assert (
-        lvs._parse_combine_devices_max_attempts({}) == lvs._COMBINE_DEVICES_MAX_ATTEMPTS
+        lvs._parse_combine_devices_max_attempts({})
+        == lvs_combine._COMBINE_DEVICES_MAX_ATTEMPTS
     )
     assert lvs._parse_combine_devices_max_attempts({"combine_devices": True}) == 5
 
@@ -15970,7 +15971,7 @@ def test_run_lvs_echoes_reference_top_and_options(tmp_path):
     assert report["options"] == {
         "combine_devices": True,
         "combine_devices_per_circuit": None,
-        "combine_devices_max_attempts": lvs._COMBINE_DEVICES_MAX_ATTEMPTS,
+        "combine_devices_max_attempts": lvs_combine._COMBINE_DEVICES_MAX_ATTEMPTS,
         "flatten_layout": False,
         "flatten_reference": False,
         "netgen_setup": None,
@@ -16122,7 +16123,7 @@ def test_run_lvs_echoes_resolved_combine_devices_max_attempts(
     if budget is not None:
         request["options"]["combine_devices_max_attempts"] = budget
     report = run_lvs(json.dumps(request))
-    expected = lvs._COMBINE_DEVICES_MAX_ATTEMPTS if budget is None else budget
+    expected = lvs_combine._COMBINE_DEVICES_MAX_ATTEMPTS if budget is None else budget
     assert report["options"]["combine_devices_max_attempts"] == expected
     assert all(value == expected for value in seen)
     assert bool(seen) == combine
@@ -23631,12 +23632,15 @@ def test_cross_class_folds_ignores_a_same_class_parallel_fold():
     """A genuine parallel fold keeps one survivor of each class on the
     group's nets, so it is not mistaken for a cross-class fold."""
     netlist = _two_parallel_capacitor_classes_netlist()
-    before = lvs._device_class_net_signatures(netlist)
+    before = lvs_combine._device_class_net_signatures(netlist)
     netlist.combine_devices()
 
     assert _device_class_names(netlist) == ["cap_one", "cap_two"]
     assert (
-        lvs._cross_class_folds(before, lvs._device_class_net_signatures(netlist)) == []
+        lvs_combine._cross_class_folds(
+            before, lvs_combine._device_class_net_signatures(netlist)
+        )
+        == []
     )
 
 
