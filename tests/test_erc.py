@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 
 import klayout.db as kdb
@@ -2287,6 +2288,118 @@ def test_unconnected_net_does_not_flag_single_island(tmp_path):
     findings = [f for f in report["erc_findings"] if f["rule"] == "erc.unconnected_net"]
 
     assert findings == []
+
+
+def test_extractor_global_net_is_not_reported_unconnected_and_is_disclosed(tmp_path):
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    top.shapes(li1).insert(kdb.Box.new(_um(5), _um(0), _um(6), _um(1)))
+    top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(5.5), _um(0.5))))
+    gds = tmp_path / "global.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "global.erc.json"
+    _write_spec(
+        spec,
+        _nets_spec(
+            nets=[
+                {"name": "VDD", "kind": "supply"},
+                {"name": "SUB", "kind": "supply", "extractor_global": True},
+            ]
+        ),
+    )
+
+    report = run_erc(str(gds), str(spec))
+
+    assert [
+        f for f in report["erc_findings"] if f["rule"] == "erc.unconnected_net"
+    ] == []
+    coverage = report["erc_coverage"]
+    assert {"id": 'erc.net_connectivity:["SUB"]', "reason": "extractor_global_net"} in (
+        coverage["inapplicable"]
+    )
+    assert 'erc.net_connectivity:["VDD"]' in coverage["checked"]
+    assert 'erc.net_connectivity:["SUB"]' not in coverage["checked"]
+    assert [n["name"] for n in report["nets"]] == ["VDD"]
+    assert all(f["net"] != "SUB" for f in report["erc_findings"])
+
+
+def test_same_net_without_extractor_global_is_still_reported(tmp_path):
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    gds = tmp_path / "notglobal.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "notglobal.erc.json"
+    _write_spec(spec, _nets_spec(nets=[{"name": "SUB", "kind": "supply"}]))
+
+    report = run_erc(str(gds), str(spec))
+
+    assert [
+        f["net"] for f in report["erc_findings"] if f["rule"] == "erc.unconnected_net"
+    ] == ["SUB"]
+
+
+@pytest.mark.parametrize(
+    "entry, fragment",
+    [
+        ({"extractor_global": "yes"}, "must be a boolean"),
+        ({"extractor_global": True, "islands": 2}, "conflicts with nets[0].islands"),
+        ({"extractor_global": True, "roles": ["li1"]}, "conflicts with nets[0].roles"),
+        (
+            {"extractor_global": True, "same_net_as": "OTHER"},
+            "conflicts with nets[0].same_net_as",
+        ),
+    ],
+)
+def test_extractor_global_spec_errors(tmp_path, entry, fragment):
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    gds = tmp_path / "bad.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "bad.erc.json"
+    _write_spec(
+        spec,
+        _nets_spec(nets=[{"name": "SUB", **entry}, {"name": "OTHER"}]),
+    )
+
+    with pytest.raises(ErcError, match=re.escape(fragment)):
+        run_erc(str(gds), str(spec))
+
+
+def test_same_net_as_naming_an_extractor_global_net_is_a_spec_error(tmp_path):
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    gds = tmp_path / "ref.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "ref.erc.json"
+    _write_spec(
+        spec,
+        _nets_spec(
+            nets=[
+                {"name": "SUB", "extractor_global": True},
+                {"name": "VSS", "same_net_as": "SUB"},
+            ]
+        ),
+    )
+
+    with pytest.raises(ErcError, match="extractor_global"):
+        run_erc(str(gds), str(spec))
+
+
+def test_text_output_names_skipped_coverage_entries(capsys):
+    from klayout_tools.cli.erc_cmd import _print_skipped_coverage
+
+    _print_skipped_coverage({"erc_coverage": {"skipped": []}})
+    assert capsys.readouterr().out == ""
+    _print_skipped_coverage(
+        {
+            "erc_coverage": {
+                "skipped": [
+                    {
+                        "id": 'erc.missing_tie:["nwell_tie"]',
+                        "reason": "degenerate_tap_declaration",
+                    }
+                ]
+            }
+        }
+    )
+    out = capsys.readouterr().out
+    assert 'erc.missing_tie:["nwell_tie"]: degenerate_tap_declaration' in out
 
 
 def test_multiply_driven_net_flags_shorted_signal_nets(tmp_path):

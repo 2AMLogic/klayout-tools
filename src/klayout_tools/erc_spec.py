@@ -98,6 +98,7 @@ _NET_KEYS = (
     "same_net_as",
     "roles",
     "unlabelled_allowed_boxes",
+    "extractor_global",
 )
 _TIE_KEYS = (
     "name",
@@ -321,9 +322,12 @@ def _validate_nets(
             )
 
         roles = _parse_net_roles(entry, spec_path, i, stackup_names)
+        extractor_global = _parse_extractor_global(entry, spec_path, i)
         entries.append(
             {
                 "name": name,
+                # Issue #3745: a net named by the extractor, not by GDS text.
+                "extractor_global": extractor_global,
                 "kind": kind,
                 "islands": _parse_net_islands(entry, spec_path, i),
                 # Issue #2463: the declared intentional tie, cross-checked
@@ -341,6 +345,31 @@ def _validate_nets(
 
     _validate_same_net_refs(entries, names, spec_path)
     return entries
+
+
+def _parse_extractor_global(entry: dict[str, Any], spec_path: str, index: int) -> bool:
+    """``nets[].extractor_global`` (optional, issue #3745): the net is named
+    by the extractor (a PDK deck's global substrate net), not by label text,
+    so it is never label-resolved and ``erc.unconnected_net`` cannot grade
+    it. Disclosed as ``inapplicable`` in ``erc_coverage`` rather than
+    omitted from the spec. Meaningless with any key that presupposes label
+    resolution, so those combinations are spec errors."""
+    value = entry.get("extractor_global", False)
+    if not isinstance(value, bool):
+        raise ErcError(
+            f"spec '{spec_path}': nets[{index}].extractor_global must be a "
+            f"boolean (got {value!r})"
+        )
+    if value:
+        for key in ("islands", "same_net_as", "roles", "unlabelled_allowed_boxes"):
+            if entry.get(key) not in (None, [], {}):
+                raise ErcError(
+                    f"spec '{spec_path}': nets[{index}].extractor_global "
+                    f"conflicts with nets[{index}].{key}: an extractor-global "
+                    "net is not label-resolved, so it has no islands to count "
+                    "or tie"
+                )
+    return value
 
 
 def _parse_net_islands(entry: dict[str, Any], spec_path: str, index: int) -> int:
@@ -475,6 +504,11 @@ def _validate_same_net_refs(
             raise ErcError(
                 f"spec '{spec_path}': nets[{i}].same_net_as names {other!r}, "
                 "which is not a declared nets[] entry"
+            )
+        if other is not None and entries[names.index(other)]["extractor_global"]:
+            raise ErcError(
+                f"spec '{spec_path}': nets[{i}].same_net_as names {other!r}, "
+                "which is declared extractor_global (not label-resolved)"
             )
 
 
