@@ -10703,3 +10703,121 @@ def test_enclosing_adjacent_requires_other_layer():
     )
     assert rule.check == "enclosing_adjacent"
     assert rule.other_layer is not None
+
+
+def _context2_rule(rule_id, context2, context2_layers=((32, 0),), context="near"):
+    """Width rule on layer 30 (100 dbu < 200 threshold) scoped by a stage-1
+    context on layer 31 and, optionally, a stage-2 context on layer 32."""
+    from klayout_tools.decks import DerivedLayer, DrcRule
+
+    return DrcRule(
+        id=rule_id,
+        description="synthetic: two-stage context",
+        layer=(30, 0),
+        check="width",
+        threshold_dbu=200,
+        derived_layer=DerivedLayer(
+            base=(30, 0),
+            sized_by_um=0.0,
+            intersect_with=(30, 0),
+            context_layers=((31, 0),),
+            context=context,
+            context2_layers=context2_layers,
+            context2=context2,
+        ),
+    )
+
+
+def _context2_layout(tmp_path, name, stage2_boxes):
+    """Three thin (100 dbu wide) layer-30 strips, all inside the layer-31
+    context; `stage2_boxes` is drawn on layer 32."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    for x in (0, 1000, 2000):
+        top.shapes(layout.layer(30, 0)).insert(kdb.Box(x, 0, x + 100, 1000))
+    top.shapes(layout.layer(31, 0)).insert(kdb.Box(-100, -100, 3000, 1100))
+    for box in stage2_boxes:
+        top.shapes(layout.layer(32, 0)).insert(kdb.Box(*box))
+    path = tmp_path / name
+    layout.write(str(path))
+    return str(path)
+
+
+def test_run_drc_derived_context2_far_and_near_are_exact_complements(
+    tmp_path, monkeypatch
+):
+    """Stage-2 `far` / `near` split the stage-1 population by whole polygon:
+    the strip under layer 32 goes to `near`, the other two to `far`; none is
+    checked by both or neither (issue #3682). A strip only partly covered by
+    layer 32 is entirely `near`."""
+    path = _context2_layout(
+        tmp_path,
+        "ctx2.gds",
+        [(-50, -50, 50, 50)],  # partly covers strip 0
+    )
+    _patch_synthetic_deck(
+        monkeypatch,
+        [_context2_rule("far.1", "far"), _context2_rule("near.1", "near")],
+    )
+    counts = run_drc(path, "synthetic")["rule_counts"]
+    assert counts == {"far.1": 2, "near.1": 1}
+
+
+def test_run_drc_derived_context2_absent_layer_is_empty_not_skipped(
+    tmp_path, monkeypatch
+):
+    """Layer 32 absent: stage-2 `far` keeps everything, `near` yields nothing,
+    and neither rule is skipped."""
+    path = _context2_layout(tmp_path, "ctx2_absent.gds", [])
+    _patch_synthetic_deck(
+        monkeypatch,
+        [_context2_rule("far.1", "far"), _context2_rule("near.1", "near")],
+    )
+    report = run_drc(path, "synthetic")
+    assert report["rule_counts"] == {"far.1": 3}
+    assert {"far.1", "near.1"} <= set(report["coverage"]["rules_checked"])
+
+
+def test_run_drc_derived_context2_validation(tmp_path, monkeypatch):
+    """Mismatched `context2`/`context2_layers`, an unknown `context2`, and
+    stage 2 without stage 1 raise `DrcError` naming the rule."""
+    from klayout_tools.decks import DerivedLayer, DrcRule
+
+    path = _context2_layout(tmp_path, "ctx2_bad.gds", [])
+    no_stage1 = DrcRule(
+        id="bad.nostage1",
+        description="synthetic",
+        layer=(30, 0),
+        check="width",
+        threshold_dbu=200,
+        derived_layer=DerivedLayer(
+            base=(30, 0),
+            sized_by_um=0.0,
+            context2_layers=((32, 0),),
+            context2="near",
+        ),
+    )
+    bad_rules = [
+        _context2_rule("bad.nolayers", "near", context2_layers=()),
+        _context2_rule("bad.nomode", None),
+        _context2_rule("bad.unknown", "inside"),
+        no_stage1,
+    ]
+    for rule in bad_rules:
+        _patch_synthetic_deck(monkeypatch, [rule])
+        with pytest.raises(DrcError, match=rule.id):
+            run_drc(path, "synthetic")
+
+
+def test_list_deck_rules_context2_keys_only_when_set():
+    """`context2*` keys appear in the `derived_layer` JSON block only for
+    rules that set them; every other rule's block is unchanged."""
+    from klayout_tools.drc import list_deck_rules
+
+    rules = {r["id"]: r for r in list_deck_rules("sg13cmos5l")["rules"]}
+    dig = rules["nwell.enclosing.pactiv.dig.1"]["derived_layer"]
+    assert (dig["context2"], dig["context2_layers"]) == ("near", ["16/0"])
+    assert dig["context2_sized_by_um"] == 0.0
+    plain = rules["nwell.enclosing.pactiv.1"]["derived_layer"]
+    assert not any(k.startswith("context2") for k in plain)

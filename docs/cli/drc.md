@@ -1879,6 +1879,19 @@ branches (`NP.3bii`, `PP.5ci`) are **not** relaxed -- anything within reach of
 a `Dnwell` stays on the strict near rule. The mirrored `pplus.space.ncomp.1`
 and `nplus.enclosing.comp.1` keep the flat strict value.
 
+`DerivedLayer` also takes an optional **second context stage**
+(`context2_layers`, `context2_sized_by_um`, `context2`, issue #3682): the same
+near/far whole-polygon partition applied *sequentially* to the stage-1
+result, so the stages AND together (`near` then `far` = inside the first
+context but outside the second; `near` then `near` = inside both). Stage 2
+requires stage 1, and `context2`/`context2_layers` must be set together
+(`DrcError` naming the rule id otherwise). A context layer absent from the
+stream is empty: stage-2 `near` yields nothing, `far` keeps everything, and
+the rule is not skipped. `klt drc --format json` emits the `context2*` keys
+under a rule's `derived_layer` block only when set, so other rules' JSON is
+unchanged. The sg13cmos5l `nwell.enclosing.{pactiv,nactiv}.hv.1` /
+`.dig.1` pairs use it (ThickGateOx `near`, then DigiBnd `far` / `near`).
+
 The DRM's two MiM capacitor rules scoped to the "virtual bottom plate" —
 `MIMTM.1` (minimum bottom-plate spacing to other bottom-plate-or-routing
 metal, transcribed as `mim.space.1`) and `MIMTM.2` (minimum bottom-plate

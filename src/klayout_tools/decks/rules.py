@@ -207,6 +207,16 @@ class DerivedLayer:
     polygon is then ``"far"``) and never cause the rule to be skipped.
     Whole-polygon selection errs strict: a polygon that is only partly
     within reach of the context is entirely ``"near"``.
+
+    **Second context stage (issue #3682).** ``context2_layers`` /
+    ``context2_sized_by_um`` / ``context2`` repeat the same partition as a
+    *sequential* stage applied to the stage-1 result, so the two stages AND
+    together and every combination is expressible: ``near`` then ``far`` is
+    "inside ThickGateOx but outside DigiBnd", and ``near`` then ``near`` its
+    exact complement within ``near``. Stage 2 requires stage 1, and is
+    validated like it (``context2`` and ``context2_layers`` set together).
+    Absent layers contribute an empty region (``near`` yields nothing,
+    ``far`` keeps everything) and never cause the rule to be skipped.
     """
 
     base: tuple[int, int]
@@ -216,6 +226,9 @@ class DerivedLayer:
     context_layers: tuple[tuple[int, int], ...] = ()
     context_sized_by_um: float = 0.0
     context: str | None = None
+    context2_layers: tuple[tuple[int, int], ...] = ()
+    context2_sized_by_um: float = 0.0
+    context2: str | None = None
 
 
 @dataclass(frozen=True)

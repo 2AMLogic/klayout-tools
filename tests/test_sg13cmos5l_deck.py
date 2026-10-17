@@ -129,9 +129,11 @@ def test_sg13cmos5l_deck_has_41_rules_after_nwell_space_rules():
     `nwell.space.2` (NW.b1): 33. Issue #3573 adds the four derived-region
     `"enclosed"` NWell-enclosure rules (NW.c/c1/e/e1), which report on
     Activ (1/0): 37 rules, same 12 layers. Issue #3645 adds the four
-    derived-region `"separation"` NWell-to-Activ rules (NW.d/d1/f/f1): 41."""
+    derived-region `"separation"` NWell-to-Activ rules (NW.d/d1/f/f1): 41.
+    Issue #3682 adds the two DigiBnd `.dig.1` variants
+    (NW.c1.dig/NW.e1.dig): 43."""
     deck = get_deck("sg13cmos5l")
-    assert len(deck) == 41
+    assert len(deck) == 43
     assert {rule.check for rule in deck} == {
         "width",
         "space",
@@ -320,9 +322,7 @@ def test_run_drc_sg13cmos5l_nwell_reports_remaining_unchecked(tmp_path: Path):
     assert report["status"] == "clean"
     unchecked = report["coverage"]["unchecked_rules"]
     assert {u["rule"] for u in unchecked} == {
-        "NW.c1.dig",
         "NW.d1.dig",
-        "NW.e1.dig",
         "NW.f1.dig",
     }
     assert {u["layer"] for u in unchecked} == {"31/0"}
@@ -389,6 +389,54 @@ def test_run_drc_sg13cmos5l_nwell_enclosure_threshold_edges(
     ok = run(enclosure)
     assert ok["status"] == "clean", ok["rule_counts"]
     assert rule_id in ok["coverage"]["rules_checked"]
+
+
+_NW_DIG_RULES = {
+    # implant layer -> (hv rule id, dig rule id, hv um, dig um)
+    (14, 0): (
+        "nwell.enclosing.pactiv.hv.1",
+        "nwell.enclosing.pactiv.dig.1",
+        0.62,
+        0.31,
+    ),
+    (7, 0): ("nwell.enclosing.nactiv.hv.1", "nwell.enclosing.nactiv.dig.1", 0.62, 0.24),
+}
+
+
+@pytest.mark.parametrize("implant", list(_NW_DIG_RULES))
+def test_run_drc_sg13cmos5l_nwell_enclosure_digbnd_split(tmp_path: Path, implant):
+    """Issue #3682 (NW.c1.dig / NW.e1.dig): HV Activ inside DigiBnd is held to
+    the relaxed value by the `.dig.1` rule only (at threshold clean, 0.01 um
+    short flagged); outside DigiBnd the 0.62 um `.hv.1` rule applies to the
+    same geometry and `.dig.1` is silent. DigiBnd covering only part of the
+    Activ still selects the whole polygon as digital."""
+    hv_id, dig_id, hv_um, dig_um = _NW_DIG_RULES[implant]
+
+    def run(margin: float, digbnd) -> dict:
+        layout = kdb.Layout()
+        layout.dbu = _DBU_UM
+        top = layout.create_cell("TOP")
+        top.shapes(layout.layer(31, 0)).insert(_box_um(0, 0, 4, 4))
+        activ = _box_um(margin, margin, 4 - margin, 4 - margin)
+        top.shapes(layout.layer(1, 0)).insert(activ)
+        top.shapes(layout.layer(*implant)).insert(activ)
+        top.shapes(layout.layer(44, 0)).insert(_box_um(-1, -1, 5, 5))
+        if digbnd is not None:
+            top.shapes(layout.layer(16, 0)).insert(_box_um(*digbnd))
+        path = _write_gds(layout, tmp_path / f"dig_{dig_id}_{margin}_{digbnd}.gds")
+        return run_drc(path, "sg13cmos5l")["rule_counts"]
+
+    def fired(counts):
+        return {k for k in counts if k.startswith("nwell.enclosing.")}
+
+    whole = (-1, -1, 5, 5)
+    partial = (0, 0, 1.5, 1.5)
+    for digbnd in (whole, partial):
+        assert fired(run(round(dig_um - 0.01, 3), digbnd)) == {dig_id}
+        assert fired(run(dig_um, digbnd)) == set()
+    # No DigiBnd: the 0.62 um HV rule applies and `.dig.1` never fires.
+    assert fired(run(dig_um, None)) == {hv_id}
+    assert fired(run(hv_um, None)) == set()
 
 
 def test_run_drc_sg13cmos5l_pactiv_under_enclosed_by_0_20_um(tmp_path: Path):
