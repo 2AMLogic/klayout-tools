@@ -458,6 +458,7 @@
         "klayout_tools.sim",
         "klayout_tools.sim_batch",
         "klayout_tools.sim_batch_async",
+        "klayout_tools.sim_complex_vectors",
         "klayout_tools.sim_crossings",
         "klayout_tools.sim_cycle_mean",
         "klayout_tools.sim_decks",

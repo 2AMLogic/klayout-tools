@@ -626,7 +626,8 @@ def _runner_gate_release(version: str) -> str | None:
 #: ``v0.7.0`` too, so ``0.7.1`` is likewise its first release segment, as is
 #: ``stimulus`` (the declarative timed stimulus block, #2977), and
 #: ``dual_injection`` (``analysis.passes`` / ``measurements[].tian``,
-#: #3159/#3160/#3161).
+#: #3159/#3160/#3161), and ``complex_vectors`` (``options.complex_vectors``,
+#: #3337).
 _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
     "analysis_steps": (
         (0, 7, 1),
@@ -646,6 +647,12 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
         (0, 7, 1),
         lambda request: _uses_dual_injection(request),
     ),
+    "complex_vectors": (
+        (0, 7, 1),
+        lambda request: (
+            (request.get("options") or {}).get("complex_vectors") is not None
+        ),
+    ),
 }
 
 #: Registry features a runner must be *known* to support (issue #2924): a
@@ -657,8 +664,12 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
 #: simulate with the digital control lines undriven, exiting 0 with
 #: plausible-looking numbers (#2977). ``dual_injection`` is mandatory because
 #: an older runner would ignore ``analysis.passes`` and run a single AC pass,
-#: or drop the ``tian`` metrics (#3161).
-_MANDATORY_RUNNER_FEATURES = frozenset({"transfer", "stimulus", "dual_injection"})
+#: or drop the ``tian`` metrics (#3161). ``complex_vectors`` is mandatory
+#: because an older runner would ignore the option and return no sidecar
+#: (#3337).
+_MANDATORY_RUNNER_FEATURES = frozenset(
+    {"transfer", "stimulus", "dual_injection", "complex_vectors"}
+)
 
 
 def _uses_dual_injection(request: dict[str, Any]) -> bool:
