@@ -277,6 +277,7 @@ from .extract_report import (
     _detect_split_net_labels,
     _detect_unbiased_pmos_body_nets,
     _net_label_positions,
+    _split_net_label_warnings,
 )
 
 # The SPEF-export subsystem lives in its own module (issue #1195). Two of its
@@ -3050,16 +3051,7 @@ def run_extract(
     # two unstrapped `VDD` rails. Same two-way surfacing as above; see
     # docs/cli/extract.md's "Split net labels" section.
     split_net_labels = _detect_split_net_labels(nets)
-    for split_entry in split_net_labels:
-        warnings.append(
-            f"label '{split_entry['label']}' is drawn on "
-            f"{split_entry['count']} separate nets (net_id "
-            f"{', '.join(str(i) for i in split_entry['nets'])}) -- the "
-            "same-named nets are not connected in the layout (e.g. "
-            "unstrapped supply rails), so the written netlist names them "
-            f"'{split_entry['label']}', '{split_entry['label']}$1', ... -- "
-            "see docs/cli/extract.md's 'Split net labels' section."
-        )
+    warnings.extend(_split_net_label_warnings(split_net_labels))
 
     # PMOS body terminals tied to an anonymous, unbiased net (issue #555):
     # a PMOS body extracts onto a KLayout-synthesized `$<n>` net with no DC

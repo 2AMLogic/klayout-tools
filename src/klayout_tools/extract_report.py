@@ -569,6 +569,23 @@ def _detect_split_net_labels(nets: list[dict[str, Any]]) -> list[dict[str, Any]]
     ]
 
 
+def _split_net_label_warnings(split_net_labels: list[dict[str, Any]]) -> list[str]:
+    """One warning string per ``split_net_labels[]`` entry (issue #3920).
+
+    Kept out of ``run_extract`` so the cyclomatic-complexity ratchet
+    (``scripts/check_complexity_baseline.py``) does not see the loop.
+    """
+    return [
+        f"label '{entry['label']}' is drawn on {entry['count']} separate nets "
+        f"(net_id {', '.join(str(i) for i in entry['nets'])}) -- the "
+        "same-named nets are not connected in the layout (e.g. unstrapped "
+        "supply rails), so the written netlist names them "
+        f"'{entry['label']}', '{entry['label']}$1', ... -- "
+        "see docs/cli/extract.md's 'Split net labels' section."
+        for entry in split_net_labels
+    ]
+
+
 #: Every anonymous KLayout-synthesized net name reported anywhere in this
 #: module's JSON (``devices[].nets[...]``, ``nets[].name``, etc.) has already
 #: passed through :func:`spice_safe_net_name`, which backslash-escapes a
