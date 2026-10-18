@@ -2095,6 +2095,40 @@ DECK += [
     ),
 ]
 
+#: Official gf180mcu DRM rule ids this curated deck knowingly does *not*
+#: transcribe (issue #3796): the thick-MetalTop (30 kA / "MT30") option, the
+#: wide-metal/die-level MetalTop rules, and the metal-slotting rules
+#: (DRM sections 7.15, 7.16, 14.6.3; the PDK's native
+#: `metaltop_30k.rb`/`mslot.rb`/`density.rb` decks encode them). This deck
+#: models only standard-thickness MetalTop (`metaltop.width.1` = MT.1,
+#: `metaltop.space.1` = MT.2a) and has no PDK-variant selection, so a layout
+#: that is `klt drc --deck gf180mcu` clean can still fail these on a 30K
+#: variant such as `gf180mcuA`. `coverage.unmodeled_rules` (and `klt deck
+#: info`/`klt deck rules`) list them rather than let a clean verdict read as
+#: full coverage. Remove an id here when its rule is added.
+UNMODELED_RULES: tuple[str, ...] = (
+    "MSLOT.1",
+    "MSLOT.2",
+    "MSLOT.3",
+    "MSLOT.4",
+    "MSLOT.5",
+    "MSLOT.6",
+    "MSLOT.7",
+    "MSLOT.8",
+    "MT.2b",
+    "MT.3",
+    "MT.4",
+    "MT30.1a",
+    "MT30.1b",
+    "MT30.2",
+    "MT30.3",
+    "MT30.4",
+    "MT30.5",
+    "MT30.6",
+    "MT30.7",
+    "MT30.8",
+)
+
 # (layer, datatype) -> upstream layer name, from gf180mcu.lyp's layer-map
 # (google/globalfoundries-pdk-libs-gf180mcu_fd_pv), used only to render
 # violations[].layer as e.g. "Poly2" instead of the bare "30/0" fallback --

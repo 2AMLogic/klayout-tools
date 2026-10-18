@@ -241,6 +241,7 @@ from .netlist_capacitor_recovery import (
 )
 from .pdk import PdkNotFoundError, find_pdk, list_pdks
 from .pdk_models import MOS_FLAVOUR_PROPERTY, flavoured_mos_class_name
+from .place_and_route_portable import portable_response
 from .verilog_netlist import (
     VerilogNetlistError,
     collect_gate_level_port_aliases,
@@ -999,6 +1000,7 @@ def run_lvs(
             f"unsupported engine '{engine}' (supported: {', '.join(SUPPORTED_ENGINES)})"
         )
     _merge_deck_flags(loaded, engine, deck_file, deck_vars)
+    portable_paths = _validate_portable_paths(loaded.get("portable_paths"))
 
     layout_spec = request["layout"]
     if not isinstance(layout_spec, dict):
@@ -1010,7 +1012,11 @@ def run_lvs(
     if engine == RUNSET_ENGINE:
         # Issue #2849: the PDK's own runset does extraction and compare; the
         # verdict is read back from its .lvsdb (see lvs_runset.py).
-        return run_lvs_klayout_runset(request, request_dir)
+        return _finish_response(
+            run_lvs_klayout_runset(request, request_dir),
+            portable=portable_paths,
+            request_dir=request_dir,
+        )
 
     # `layout.deck_options` (issue #600) mirrors `klt extract --deck-option`'s
     # resolved `{key: value}` mapping, one layer down: this is a JSON object
@@ -2567,7 +2573,7 @@ def run_lvs(
         # all -- never a spuriously present empty list.
         provenance["pin_order_sources"] = reference_pin_order_sources
 
-    return {
+    report = {
         "schema_version": SCHEMA_VERSION,
         "engine": engine,
         "layout": layout_echo,
@@ -2747,6 +2753,40 @@ def run_lvs(
         "mismatches": mismatches,
         "net_correspondence": net_correspondence,
     }
+    return _finish_response(
+        report,
+        portable=portable_paths,
+        request_dir=request_dir,
+        pdk_root=(reference_pdk_info or {}).get("root"),
+    )
+
+
+def _validate_portable_paths(value: Any) -> bool:
+    """Optional ``request.portable_paths`` (issue #3798, mirroring
+    ``klt place-and-route``'s from #3820): rewrite every absolute host path in
+    the response to a committable form (see
+    :mod:`klayout_tools.place_and_route_portable`). Omitted/``None`` is
+    ``False``: the default response is unchanged."""
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise LvsError("request.portable_paths must be a boolean")
+    return value
+
+
+def _finish_response(
+    report: dict[str, Any],
+    *,
+    portable: bool,
+    request_dir: str,
+    pdk_root: str | None = None,
+) -> dict[str, Any]:
+    """Apply the opt-in ``portable_paths`` rewrite to the returned report
+    only (the compare itself ran on the real paths); no-op when not
+    requested."""
+    if portable:
+        return portable_response(report, request_dir=request_dir, pdk_root=pdk_root)
+    return report
 
 
 # --------------------------------------------------------------------------- #

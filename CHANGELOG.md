@@ -21,7 +21,11 @@ not `klt --version`, if you need to detect this kind of drift. See
   `environment.remote.max_concurrent_jobs` records the value only when set; a
   non-positive-integer value is rejected with
   `error.code: "batch_max_concurrent_jobs_invalid"`. No `schema_version` bump.
-
+- 2026-10-18 — **`klt place-and-route` pin placement** (issue #3885): new
+  optional `io.pin_constraints` (edge, optional `range_um`, optional `ordered`
+  per port group) emits `set_io_pin_constraint` before `place_pins`, and the
+  response gains a `pins[]` array (name, edge, `x_um`, `y_um`, layer) read from
+  the written DEF. Additive: without constraints the Tcl is unchanged.
 - **`klt pdk find|check --expect-version <stamp-or-sha>`** (issue #3810):
   asserts the installed PDK identity against a caller-supplied pin (open_pdks
   SHA of 7+ hex or `SOURCES` stamp; lambdapdk marker by exact string). With the

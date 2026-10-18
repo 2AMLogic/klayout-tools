@@ -2725,6 +2725,7 @@ class _ResolvedSimRequest:
     stage_model_inputs: Any
     stimulus_lines: Any
     stimulus_signals: Any
+    stimulus_by_corner: Any
     sweep_started: Any
     threads_per_worker: Any
     timeout_s: Any
@@ -3166,6 +3167,11 @@ def _prepare_sim_request(
     _validate_supply_override_targets(netlist_path, corner_points)
     # Issue #3035: the same for a `corners.params` name no `.param` declares.
     _validate_param_targets(netlist_path, corner_points)
+    # Issue #3918: a supply-relative `crossings.level` needs its `frac_of`
+    # key in every corner's supply map -- refused here, not mid-sweep.
+    sim_crossings.validate_supply_relative_levels(
+        measurements_spec, [point.supply_v for point in corner_points]
+    )
     # Issue #2482: the same pre-dispatch check for a step's own `alter`
     # overrides (plus a clash with the corner's own supply axis).
     sim_steps.validate_alter_targets(analysis, netlist_path, corner_points)
@@ -3173,10 +3179,21 @@ def _prepare_sim_request(
     # Issue #2977: the declarative timed stimulus, validated and expanded
     # before any corner is dispatched (an off-host worker re-expands it
     # from the forwarded request).
-    stimulus_signals = _resolve_stimulus(
+    stimulus_signals, stimulus_by_corner = _resolve_stimulus(
         request, analysis, engine, netlist_path, corner_points
     )
-    stimulus_lines = sim_stimulus.deck_lines(stimulus_signals)
+    stimulus_lines = (
+        sim_stimulus.corner_deck_lines(
+            {
+                sim_stimulus.supply_key(point.supply_v): stimulus_by_corner[
+                    point.corner_id
+                ]
+                for point in corner_points
+            }
+        )
+        if stimulus_by_corner
+        else sim_stimulus.deck_lines(stimulus_signals)
+    )
 
     # Issue #2522: a `corners.process` bundle may name its own model library
     # per section. Resolved (and existence-checked) per host, from the refs
@@ -3272,6 +3289,7 @@ def _prepare_sim_request(
         stage_model_inputs=stage_model_inputs,
         stimulus_lines=stimulus_lines,
         stimulus_signals=stimulus_signals,
+        stimulus_by_corner=stimulus_by_corner,
         sweep_started=sweep_started,
         threads_per_worker=threads_per_worker,
         timeout_s=timeout_s,
@@ -3367,6 +3385,7 @@ def _run_sim_corners(
     stage_model_inputs = resolved.stage_model_inputs
     stimulus_lines = resolved.stimulus_lines
     stimulus_signals = resolved.stimulus_signals
+    stimulus_by_corner = resolved.stimulus_by_corner
     sweep_started = resolved.sweep_started
     threads_per_worker = resolved.threads_per_worker
     timeout_s = resolved.timeout_s
@@ -3942,7 +3961,9 @@ def _run_sim_corners(
     environment["backend"] = backend_provenance
     # Issue #2977: additive, only when declared; the schedule as applied (skew
     # and transition times resolved, PWL points included) -- see docs/cli/sim.md.
-    environment.update(sim_stimulus.environment_entry(stimulus_signals))
+    environment.update(
+        sim_stimulus.environment_entry(stimulus_signals, stimulus_by_corner)
+    )
     if monte_carlo_info is not None:
         # Additive/optional: only present when the request declares
         # `monte_carlo` -- the seed contract's request-level echo, per
@@ -8168,13 +8189,28 @@ def _resolve_stimulus(
     engine: str,
     netlist_path: str,
     corner_points: list[CornerPoint],
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, list[dict[str, Any]]] | None]:
     """The request's resolved ``stimulus`` signals (issue #2977), every
-    problem raised as a coded :class:`SimError` before any corner runs."""
+    problem raised as a coded :class:`SimError` before any corner runs.
+
+    The second item is ``{corner_id: signals}`` when a level is written
+    supply-relative (issue #3918, resolved against each corner's
+    ``supply_v``), else ``None`` -- the first item is then the one schedule
+    every corner shares."""
+    by_corner: dict[str, list[dict[str, Any]]] | None = None
     try:
-        signals = sim_stimulus.resolve_stimulus(request, analysis)
+        if sim_stimulus.has_supply_relative(request):
+            by_corner = {
+                point.corner_id: sim_stimulus.resolve_stimulus(
+                    request, analysis, point.supply_v
+                )
+                for point in corner_points
+            }
+            signals = next(iter(by_corner.values()), [])
+        else:
+            signals = sim_stimulus.resolve_stimulus(request, analysis)
         if not signals:
-            return []
+            return [], None
         if engine != "ngspice":
             raise sim_stimulus.StimulusError(
                 f"request.stimulus is not supported for engine {engine!r}; "
@@ -8189,7 +8225,7 @@ def _resolve_stimulus(
         )
     except sim_stimulus.StimulusError as exc:
         raise SimError(str(exc), code=exc.code) from exc
-    return signals
+    return signals, by_corner
 
 
 def _stimulus_existing_elements(netlist_path: str) -> set[str]:
@@ -9127,7 +9163,9 @@ def _run_corner(
     # Issue #2868: crossings series are read from this corner's own working
     # directory now, before it is cleaned up below -- so the reduced array is
     # what leaves the corner, on every backend, whatever `keep_artifacts` is.
-    crossings = sim_crossings.extract_corner_crossings(measurements_spec, corner_dir)
+    crossings = sim_crossings.extract_corner_crossings(
+        measurements_spec, corner_dir, point.supply_v
+    )
     # Issue #3033: same for the energy reduction.
     energy = sim_energy.extract_corner_energy(measurements_spec, corner_dir)
     cycle_means = sim_cycle_mean.extract_corner_cycle_means(
@@ -10395,7 +10433,7 @@ def _write_corner_deck(
     lines.extend(_corner_lib_lines(point, models_lib))
     lines.append(f".include {netlist_path}")
     # Issue #2977: the request's declared `stimulus`, expanded to PWL sources.
-    lines.extend(stimulus_lines)
+    lines.extend(sim_stimulus.lines_for_corner(stimulus_lines, point.supply_v))
     # Issue #3338: the two-port's per-port z0 + AC-source cards.
     lines.extend(sim_twoport.deck_lines(analysis))
     lines.append(f".temp {point.temperature_c}")
