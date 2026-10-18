@@ -1956,7 +1956,7 @@ _OFFGRID_ROWS: tuple[tuple[str, tuple[int, int], str], ...] = (
 #: undrawn here.
 OFFGRID_UNCHECKED_LAYERS: dict[str, str] = {
     "lvpwell": "LVPWELL (204/0) -- not in this deck's curated layer set",
-    "esd": "ESD (24/0) -- not in this deck's curated layer set",
+    "esd": "ESD (24/0) -- drawn for ESD.* rules; no ongrid rule emitted for it",
     "fhres": "FHRES (227/0) -- not in this deck's curated layer set",
     "mvsd": "MVSD (210/0) -- not in this deck's curated layer set",
     "mvpsd": "MVPSD (11/39) -- not in this deck's curated layer set",
@@ -2095,6 +2095,182 @@ DECK += [
     ),
 ]
 
+# ---------------------------------------------------------------------------
+# ESD implant (`ESD.*`) and guard-ring marker (`GR.*`) rules -- `esd.rb`,
+# `guard_ring.rb` (issue #3792)
+# ---------------------------------------------------------------------------
+#
+# Until issue #3792 this deck carried neither group, so a grounded-gate NMOS
+# clamp with a sub-0.6um ESD implant, or a COMP closer than 10um to a
+# GUARD_RING_MK marker, read `clean` with those rules never evaluated.
+#
+# Transcribed (the check kinds that express them exactly, from the drawn
+# layers ESD 24/0 and GUARD_RING_MK 167/5):
+#
+# - `ESD.1`/`ESD.2`: ESD width / space, 0.6um.
+# - `ESD.4b`: `esd.overlap(comp, 0.45)`.
+# - `ESD.5a`/`ESD.5b`: min ESD area / min area of a hole in ESD, 0.49um^2.
+# - `ESD.8`: `esd.separation(nplus.or(pplus), 0.3)`, one rule per implant
+#   (a union of two layers has no single-layer spelling; the violating
+#   distances are the same).
+# - `GR.2`: `<layer>.separation(guard_ring_mk, 10)` for COMP, Nwell, Poly2 and
+#   Metal1-5/MetalTop (the runset gates the metal levels on the stack depth;
+#   an absent level is simply inapplicable here).
+#
+# Everything else in the two files is in `UNTRANSCRIBED_RULES` below, with the
+# reason, and `klt drc` lists each in `coverage.unmodeled_rules` so a clean
+# report cannot be read as covering them (informational; `status` is unchanged).
+_ESD = (24, 0)  # ESD
+_GUARD_RING_MK = (167, 5)  # GUARD_RING_MK
+_ESD_PROVENANCE_FILE = "esd"
+_GR_PROVENANCE_FILE = "guard_ring"
+
+DECK += [
+    DrcRule(
+        id="esd.width.1",
+        description="minimum ESD implant width",
+        layer=_ESD,
+        check="width",
+        threshold_dbu=600,  # 0.6 um
+        # esd.rb "ESD.1": `esd.width(0.6.um, euclidian)`
+        scope="ESD",
+        provenance=_gf180mcu_klayout_deck_provenance(_ESD_PROVENANCE_FILE, "ESD.1"),
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="esd.space.1",
+        description="minimum ESD implant spacing",
+        layer=_ESD,
+        check="space",
+        threshold_dbu=600,  # 0.6 um
+        # esd.rb "ESD.2": `esd.space(0.6.um, euclidian)`
+        scope="ESD",
+        provenance=_gf180mcu_klayout_deck_provenance(_ESD_PROVENANCE_FILE, "ESD.2"),
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="esd.overlap.comp.1",
+        description="minimum overlap of an ESD implant edge to a COMP",
+        layer=_ESD,
+        other_layer=(22, 0),  # Comp
+        check="overlap",
+        threshold_dbu=450,  # 0.45 um
+        # esd.rb "ESD.4b": `esd.overlap(comp, 0.45.um, euclidian)`
+        scope="ESD",
+        provenance=_gf180mcu_klayout_deck_provenance(_ESD_PROVENANCE_FILE, "ESD.4b"),
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="esd.area.1",
+        description="minimum ESD implant area",
+        layer=_ESD,
+        check="area",
+        threshold_dbu=0,  # unused by "area" -- see area_min_dbu2
+        area_min_dbu2=490_000,  # 0.49 um^2
+        # esd.rb "ESD.5a": `esd.with_area(nil, 0.49.um)`
+        scope="ESD",
+        provenance=_gf180mcu_klayout_deck_provenance(_ESD_PROVENANCE_FILE, "ESD.5a"),
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="esd.holes_area.1",
+        description="minimum field area enclosed by ESD implant",
+        layer=_ESD,
+        check="area",
+        threshold_dbu=0,  # unused by "area" -- see area_min_dbu2
+        area_min_dbu2=490_000,  # 0.49 um^2
+        derived_layer=DerivedLayer(
+            base=_ESD,
+            sized_by_um=0.0,  # unused by "holes" mode
+            mode="holes",
+        ),
+        # esd.rb "ESD.5b": `esd.holes.with_area(nil, 0.49.um)`
+        scope="ESD",
+        provenance=_gf180mcu_klayout_deck_provenance(_ESD_PROVENANCE_FILE, "ESD.5b"),
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="esd.separation.nplus.1",
+        description="minimum ESD implant spacing to Nplus",
+        layer=_ESD,
+        other_layer=(32, 0),  # Nplus
+        check="separation",
+        threshold_dbu=300,  # 0.3 um
+        # esd.rb "ESD.8": `esd.separation(nplus.or(pplus), 0.3.um)` (Nplus half)
+        scope="ESD",
+        provenance=_gf180mcu_klayout_deck_provenance(_ESD_PROVENANCE_FILE, "ESD.8"),
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="esd.separation.pplus.1",
+        description="minimum ESD implant spacing to Pplus",
+        layer=_ESD,
+        other_layer=(31, 0),  # Pplus
+        check="separation",
+        threshold_dbu=300,  # 0.3 um
+        # esd.rb "ESD.8": `esd.separation(nplus.or(pplus), 0.3.um)` (Pplus half)
+        scope="ESD",
+        provenance=_gf180mcu_klayout_deck_provenance(_ESD_PROVENANCE_FILE, "ESD.8"),
+        voltage_independent=True,
+    ),
+]
+
+DECK += [
+    DrcRule(
+        id=f"{stem}.separation.guard_ring_mk.1",
+        description=f"minimum {name} spacing to GUARD_RING_MK",
+        layer=layer,
+        other_layer=_GUARD_RING_MK,
+        check="separation",
+        threshold_dbu=10_000,  # 10 um
+        # guard_ring.rb "GR.2": `<layer>.separation(guard_ring_mk, 10.um)`
+        scope="GR",
+        provenance=_gf180mcu_klayout_deck_provenance(_GR_PROVENANCE_FILE, "GR.2"),
+        voltage_independent=True,
+    )
+    for stem, name, layer in (
+        ("comp", "Comp", (22, 0)),
+        ("nwell", "Nwell", (21, 0)),
+        ("poly2", "Poly2", (30, 0)),
+        ("metal1", "Metal1", (34, 0)),
+        ("metal2", "Metal2", (36, 0)),
+        ("metal3", "Metal3", (42, 0)),
+        ("metal4", "Metal4", (46, 0)),
+        ("metal5", "Metal5", (81, 0)),
+        ("metaltop", "MetalTop", (53, 0)),
+    )
+]
+
+#: Upstream `esd.rb` / `guard_ring.rb` rule ids this deck knowingly does not
+#: transcribe, with the reason each is out of reach of the existing check kinds
+#: (issue #3792). `UNMODELED_RULES` below surfaces every key (plus the MT30/MSLOT
+#: ids) as `coverage.unmodeled_rules` (informational, not graded, so `status` stays
+#: `clean`). Remove an id when its rule is added.
+UNTRANSCRIBED_RULES: dict[str, str] = {
+    "ESD.3a": "measured to NCOMP, a derived layer (COMP inside Nplus), not a drawn one",
+    "ESD.3b": (
+        "`esd.not_outside(pcomp)`: PCOMP is derived and the rule is a "
+        "min/max-space polygon selector"
+    ),
+    "ESD.4a": (
+        "edge-to-edge enclosure of NCOMP edges filtered by `not_interacting(pcomp)`"
+    ),
+    "ESD.6": "needs `tgate` edges (MOS gate recognition) and a projection check",
+    "ESD.7": "`esd.not_outside(pcomp)`: PCOMP is derived",
+    "ESD.9": "`esd.not_overlapping(dualgate)`: no polygon-selector check kind",
+    "ESD.10": "needs LVS_IO (119/5) and a COMP & ESD derivation",
+    "ESD.pl": "needs `tgate` edges (MOS gate recognition) on Dualgate poly",
+    "GR.1": (
+        "`guard_ring_mk.not_in(comp.interacting(guard_ring_mk))`: no "
+        "polygon-selector check kind"
+    ),
+    "GR.3": "`guard_ring_comp.not_in(pplus)`: no polygon-selector check kind",
+    "GR.4": "metal width restricted to `not_outside(guard_ring_mk)` shapes",
+    "GR.6": "COMP width restricted to `not_outside(guard_ring_mk)` shapes",
+    "GR.11": "`guard_ring_mk.not_interacting(pad)`: no polygon-selector check kind",
+}
+
+
 #: Official gf180mcu DRM rule ids this curated deck knowingly does *not*
 #: transcribe (issue #3796): the thick-MetalTop (30 kA / "MT30") option, the
 #: wide-metal/die-level MetalTop rules, and the metal-slotting rules
@@ -2106,7 +2282,7 @@ DECK += [
 #: variant such as `gf180mcuA`. `coverage.unmodeled_rules` (and `klt deck
 #: info`/`klt deck rules`) list them rather than let a clean verdict read as
 #: full coverage. Remove an id here when its rule is added.
-UNMODELED_RULES: tuple[str, ...] = (
+_MT_MSLOT_UNMODELED_RULES: tuple[str, ...] = (
     "MSLOT.1",
     "MSLOT.2",
     "MSLOT.3",
@@ -2127,6 +2303,10 @@ UNMODELED_RULES: tuple[str, ...] = (
     "MT30.6",
     "MT30.7",
     "MT30.8",
+)
+
+UNMODELED_RULES: tuple[str, ...] = tuple(
+    sorted((*UNTRANSCRIBED_RULES, *_MT_MSLOT_UNMODELED_RULES))
 )
 
 # (layer, datatype) -> upstream layer name, from gf180mcu.lyp's layer-map
@@ -2175,6 +2355,8 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
     (80, 5): "efuse_mk",
     (125, 5): "plfuse",
     (241, 0): "Schottky_diode",
+    (24, 0): "ESD",
+    (167, 5): "GUARD_RING_MK",
 }
 
 # Voltage-domain marker layers this deck draws but does not *fully* model the
