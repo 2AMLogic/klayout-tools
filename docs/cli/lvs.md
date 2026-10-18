@@ -535,6 +535,12 @@ To convert the simulation form automatically, set the reference's `form` to
 }
 ```
 
+With `reference.deck` set, plain `M` cards that name the deck's simulation
+model (e.g. sg13g2's `MX1 y a vss vss sg13_lv_nmos w=.. l=..`) are also mapped:
+the model token is rewritten to the deck's device class (`nfet`/`pfet`), so a
+PDK-shipped CDL reference compares like its `X`-call form. An `M` card naming
+any other model passes through unchanged (issue #3882).
+
 Device subcircuit names resolve through the same curated table `klt extract
 --pdk` uses (`klayout_tools.pdk_models`), so the common case needs no map.
 When a device name is not one of the curated devices, supply it explicitly:
