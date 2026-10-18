@@ -14,6 +14,16 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Breaking (field removal): batch reports no longer carry
+  `environment.remote.bucket`** (issue #3777): the bucket name embeds the
+  fleet's AWS account number, and `--report-out` evidence is committed to
+  public repos. Removed from `klt sim`, `klt netlist`, place-and-route,
+  signoff-generator and deck batch reports (success, poll-timeout and
+  interrupted paths, and each `fleet[]` member); report-bound messages and
+  `harness_log` print `s3://<bucket>/...` literally. `job_id` and `region`
+  remain, so `--attach` still works; the receipt and `--submit-only`/`--status`
+  outputs keep `bucket`.
+
 - **`klt deck info` reports the DRC deck as its own artifact** (issue #3826):
   an entry for a deck that ships a standalone KLayout DRC deck file (`asap7`)
   gains an additive `drc_deck` object (`{path_kind, content_hash, released,
