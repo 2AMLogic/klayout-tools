@@ -152,6 +152,20 @@ cannot run (use `--strict` when fetching for LVS). `klt pdk check` reports the
 same condition. Repinning the sibling is a separate human decision (it changes a
 checksummed pin used by CI).
 
+**Relocating the install and pinning from a consumer repo (issue #3809).**
+`scripts/fetch-ihp-sg13g2.sh` takes two optional environment knobs, for
+consumers whose tool checkout is shared or read-only:
+
+- `IHP_PDKS_DIR=<dir>` installs into `<dir>/ihp-open-pdk` (marker and the
+  "already present" check follow it). Same name and meaning as in
+  `fetch-ihp-sg13cmos5l.sh`. Unset keeps `<checkout>/pdks`.
+- `IHP_OPEN_PDK_PIN_FILE=<file>` reads `IHP_OPEN_PDK_VERSION=X.Y.Z` and
+  `IHP_OPEN_PDK_SHA256=<64 hex>` from a `KEY=VALUE` file (parsed, never
+  sourced; `#` comments, blank lines, CRLF and unknown keys are tolerated,
+  duplicate keys are rejected), so the consumer's recorded pin is the one
+  fetched. A missing, unreadable, incomplete or malformed file exits non-zero
+  before any download; the SHA-256 check still fails closed.
+
 **Fetching the PDK alone does not make it simulatable.** `fetch-ihp-sg13g2.sh`
 ships the PDK's Verilog-A compact-model *sources*
 (`libs.tech/verilog-a/{psp103,psp103_nqs,r3_cmc,mosvar}`) but no compiled

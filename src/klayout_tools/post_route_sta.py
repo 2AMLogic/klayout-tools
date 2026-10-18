@@ -1004,6 +1004,7 @@ def _dispatch_sta(
     provenance = build_provenance(
         deck_name=deck_name,
         deck_path=resolution["liberty_path"],
+        deck_path_envelope=report_paths.output_envelope(resolution["liberty_path"]),
         pdk=resolution["pdk_info"],
         input_path=input_path,
         # Issue #2027: `input_path` is the DEF (a layout stream) when
@@ -1478,7 +1479,13 @@ def _run_multi_corner(
                 "corner": resolution["corner"],
                 **axis_fields,
                 **corner_fields,
-                "deck": _deck_block(deck_name, resolution["liberty_path"]),
+                "deck": _deck_block(
+                    deck_name,
+                    resolution["liberty_path"],
+                    path_envelope=report_paths.output_envelope(
+                        resolution["liberty_path"]
+                    ),
+                ),
             }
         )
 

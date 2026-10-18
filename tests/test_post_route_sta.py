@@ -1457,6 +1457,11 @@ def test_run_sta_response_envelope(tmp_path, monkeypatch):
     assert provenance["pdk"]["name"] == "sky130A"
     assert provenance["deck"]["name"] == "sky130_fd_sc_hd__tt_025C_1v80"
     assert provenance["input"]["content_hash"] is not None
+    # Issue #3785: the Liberty behind `deck.content_hash` is located by the
+    # `{path, scope}` envelope -- never an absolute host path.
+    assert set(provenance["deck"]["path"]) == {"path", "scope"}
+    assert provenance["deck"]["path"]["scope"] in {"repo", "external"}
+    assert str(tmp_path) not in json.dumps(provenance["deck"])
 
 
 # --------------------------------------------------------------------------- #
@@ -1584,6 +1589,10 @@ def test_run_sta_corners_produces_per_corner_array(tmp_path, monkeypatch):
     assert tt_entry["fmax_mhz"] == 500.0
     assert tt_entry["spef_annotation"] is None
     assert tt_entry["deck"]["name"] == "sky130_fd_sc_hd__tt_025C_1v80"
+    # Issue #3785: each corner's deck block locates its own Liberty.
+    for entry in corners:
+        assert set(entry["deck"]["path"]) == {"path", "scope"}
+        assert str(tmp_path) not in json.dumps(entry["deck"])
 
     assert ss_entry["worst_slack_ns"] == -0.42
     assert ss_entry["total_negative_slack_ns"] == -3.5
