@@ -1941,9 +1941,21 @@ including failed corners and exit-3/4 jobs.
 
 Limitations: if the job failed before ngspice ran (a validation error, a
 failed upload) no deck or log exists, so there is nothing to retrieve. In that
-case the diagnostic and `environment.remote` give `job_id` and `bucket`;
+case the diagnostic and `environment.remote` give `job_id` and `region`;
 the remaining evidence (`status.json`, `harness.log`, `outputs/`) lives at
-`s3://<bucket>/<jobs prefix>/<job_id>/`.
+`s3://<bucket>/<jobs prefix>/<job_id>/` (the bucket is your configured
+`batch.bucket`; reports never print it, see "Reports omit the bucket" below).
+
+### Reports omit the bucket
+
+`environment.remote.bucket` is no longer emitted (issue #3777). The batch
+bucket name embeds the fleet's AWS account number, and `--report-out` reports
+are meant to be committed unmodified as evidence, so emitting it published
+that number from any public repo. `job_id` and `region` stay, which is enough
+to `--attach`; the receipt file in the artifacts directory and the
+`--submit-only` / `--status` outputs still carry `bucket` (operational, not
+committed evidence). Report-bound text (poll-timeout and interrupt messages,
+`harness_log`) shows `s3://<bucket>/...` literally in place of the name.
 
 ### Post-processing waveforms from a batch run locally
 
@@ -2133,7 +2145,7 @@ directory of the request is left alone.
 | `unit_count` / `passed` / `errored` / `timed_out` | Counts over `units[]`. |
 | `units[]` | One entry per deck, in request order: `id`, `status` (`"pass"` / `"error"` / `"timeout"`), `exit_code` (`null` when the engine never launched), `timed_out`, `duration_s`, `engine_version` (best-effort from the engine's own stdout banner — recorded per unit and top-level as engine identity), `deck` (unit-relative name as run), `deck_sha256`, `stdout`, `stderr`, `outputs`, `missing_outputs`, `host_resolved` (include targets left to the executing host), `diagnostics[]` (`timeout`, `engine_exit`, `engine_not_found`; off-host job failures carry `batch_job_failed` / `batch_job_timeout` / `batch_poll_timeout`, with the job's own klt error envelope attached where one was recoverable, or `remote_job_failed` when the `remote` backend's SSH run fails — the unit trees already written on the instance are pulled back before teardown, so `stdout`/`stderr`/`outputs` point at whatever evidence was recovered and the message says which streams came back). |
 | `outdir` | Absolute path of the artifacts directory on the reporting host. |
-| `environment` | `engine`, `engine_version`, `ngspice_binary`, `engine_host` (`"local"`/`"worker"`; off-host runs also `client_ngspice_binary`, and `ngspice_binary` is then the worker's, see "Which machine ran it"), `klt_version`, `max_workers`; off-host runs add `remote` — the same block corner reports carry (`provider`, `instance_id`/`instance_type`, `job_id`/`bucket` for batch, `runner_klt_version` identity, ...). |
+| `environment` | `engine`, `engine_version`, `ngspice_binary`, `engine_host` (`"local"`/`"worker"`; off-host runs also `client_ngspice_binary`, and `ngspice_binary` is then the worker's, see "Which machine ran it"), `klt_version`, `max_workers`; off-host runs add `remote` — the same block corner reports carry (`provider`, `instance_id`/`instance_type`, `job_id`/`region` for batch, `runner_klt_version` identity, ...). |
 
 ### Runner support for `decks[]` on the batch backend (issue #3303)
 
@@ -4730,7 +4742,9 @@ them with the job
   (including a library that `.lib`-references itself) terminate.
 - **Binaries are opaque.** `.osdi` files are uploaded byte-for-byte, never
   parsed or re-encoded, and `options.osdi_preload` keeps its declared order
-  (repeated entries stay repeated). A text file that needs a rewrite must be
+  (repeated entries stay repeated). Runner-resolved entries (`$PDK_ROOT/...`, or under
+  `models.pdk_root`; see "OSDI (Verilog-A) model preload") are not staged and
+  ride along unexpanded at their declared position. A text file that needs a rewrite must be
   UTF-8; unmodified files ship byte-for-byte from their own path.
 - **The caller's request is not modified.** The worker receives a rewritten
   *copy*: model references become job-relative staged names, and an
@@ -4840,6 +4854,25 @@ fails with `Unable to find definition of model …` and every corner errors.
   off-host backend came from the host default (`$KLT_SIM_BACKEND`), the run
   steps back to `local` instead, like every other "this run cannot leave
   this host" case. Run OSDI-model sweeps on `local`/`local-parallel`.
+- **Image-baked `.osdi` resolve on the runner.** An entry written as a
+  literal `$PDK_ROOT/<rel>` (or `${PDK_ROOT}/<rel>`), or an absolute path
+  under `models.pdk_root`, names a file the fleet image already carries, so
+  on `remote`/`batch` it is *runner-resolved* — the same two reasons the
+  `.include` rule uses (`env_var`, `pdk_root`). It is not existence-checked,
+  staged or hashed on the submitting host, is forwarded to the worker
+  unexpanded in declared order, and neither triggers the refusal above nor
+  makes a host-default off-host backend step back to `local`. The worker's
+  own `ngspice` decides whether the module loads, so a real OSDI ABI
+  mismatch there still surfaces as the per-corner `osdi_abi_mismatch`
+  diagnostic; no client-side ABI check exists.
+  `environment.osdi_preload_runner_resolved`
+  lists them as `{entry, reason}` (no sha256; additive, present only when
+  such entries ran off-host). A mixed list keeps today's behavior for its
+  host-local entries (refused, or staged under `stage_model_inputs`).
+  `local`/`local-parallel` are unchanged: every entry is expanded and
+  existence-checked on this host. No new runner-version row is needed: a
+  runner that predates this loads the same image-baked file through
+  `options.osdi_preload`'s existing 0.7.0 support.
 - **Xyce refuses it.** `pre_osdi` is an ngspice control command, and Xyce
   loads Verilog-A as its own compiled plugins (`-plugin`), not OSDI
   libraries — `engine: "xyce"` with `options.osdi_preload` is an application
@@ -6830,7 +6863,7 @@ the *response* echoes back.
 | `options.resume`         | boolean           | Resume from a matching on-disk checkpoint under `--outdir`, skipping corners already completed by a prior interrupted run of this same request. Defaults to `false`. Overridable with the `--resume` CLI flag. Not supported with `backend: "remote"` (application error, exit 1). See "Wall-clock budget, orphan safety, and resume" above. |
 | `options.fail_fast_probe` | boolean          | Two-pass fail-fast probe (issue #1694): run a bounded calibration `tran` slice on the grid's first corner before dispatching any real corner, and abort the whole grid if the measured rate implies `options.timeout_s` cannot plausibly cover the full analysis window. Defaults to `false`. Overridable with the `--fail-fast-probe` CLI flag. Only applies to `kind: "tran"` analyses on the `local`/`local-parallel` backends. See "Timeout-budget preflight" above. |
 | `options.fail_on_diagnostic` | array\<string\> | Issue #2492. Diagnostic `code`s whose presence makes a corner `status: "inconclusive"` rather than `pass`/`fail` — matched on the code *before* the recovered-stepping severity downgrade, so it is how a caller says they do not trust a solve that needed gmin/source stepping to converge. Defaults to unset/`[]` (no behavior change: every count, status and statistic is exactly as before). An unrecognized code is an application error (exit 1); a valid code this run never emits is a no-op. Repeatable `--fail-on-diagnostic <code>` CLI flag overrides it. See "Grading a recovered diagnostic as inconclusive" above. |
-| `options.osdi_preload`   | array\<string\>   | Issue #2513. Compiled OSDI (Verilog-A) shared libraries to load with `pre_osdi`, emitted in declared order at the top of the generated `.control` block. `$VAR`/`~` expand; relative paths resolve against the request file's directory. Each must exist (checked before any corner runs; exit 1 otherwise). Refused for `backend: "remote"`/`"batch"` unless `options.stage_model_inputs` is `true`, and always for `engine: "xyce"`. Defaults to unset (no `pre_osdi` lines — the deck is unchanged). See "OSDI (Verilog-A) model preload" above. |
+| `options.osdi_preload`   | array\<string\>   | Issue #2513. Compiled OSDI (Verilog-A) shared libraries to load with `pre_osdi`, emitted in declared order at the top of the generated `.control` block. `$VAR`/`~` expand; relative paths resolve against the request file's directory. Each must exist (checked before any corner runs; exit 1 otherwise). Refused for `backend: "remote"`/`"batch"` unless `options.stage_model_inputs` is `true` — except runner-resolved entries (literal `$PDK_ROOT/<rel>` or under `models.pdk_root`, issue #3819), which are forwarded unchecked — and always for `engine: "xyce"`. Defaults to unset (no `pre_osdi` lines — the deck is unchanged). See "OSDI (Verilog-A) model preload" above. |
 | `options.stage_model_inputs` | boolean       | Issue #2668. For `backend: "remote"`/`"batch"`, upload `models.lib`, per-section corner libraries and `options.osdi_preload` binaries — with their full `.include`/file-bearing `.lib` closure — and point the worker request at the staged copies. Defaults to `false` (models resolve on the runner image, unchanged). A non-boolean is an application error (exit 1); no effect on `local`/`local-parallel`. See "Staging the request's model inputs" above. |
 | `options.ngspice_binary` | string            | Issue #2423. Explicit `ngspice` binary name or path, overriding `$KLT_NGSPICE_BINARY` and the bare `ngspice` name on `$PATH`. A path containing a separator resolves relative to the request file's own directory. Only read for `engine: "ngspice"` (the default) — see "Which ngspice binary is run" above. |
 | `options.save_mode`      | string            | Issue #2732. `"all"` (default; omitted means the same) keeps the generated `save all`; `"netlist"` suppresses it so the netlist's own `.save` cards decide the resident vector set, and the caller owns measurement/waveform coverage. Any other value (including `null`) is an application error (exit 1); an explicit value is refused for `engine: "xyce"`. Off-host workers must include this implementation. See "Opting out: `options.save_mode`" above. |

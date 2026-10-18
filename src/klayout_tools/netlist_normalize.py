@@ -147,6 +147,7 @@ from .pdk_models import (
     _format_um,
     _format_um2,
     build_device_binding_map,
+    build_subckt_to_class_map,
     flavoured_mos_class_name,
     geometry_style_for_family,
     known_device_subckt_names,
@@ -1796,6 +1797,37 @@ class ReferenceConversion(NamedTuple):
     placeholder_value_classes: dict[str, str]
 
 
+def _sim_model_classes(deck: str | None) -> dict[str, str]:
+    """``deck``'s lower-cased simulation-model name -> device class map, used
+    to rewrite plain ``M`` cards that name the PDK model (issue #3882).
+    Empty without ``deck`` or for a deck with no curated MOS table."""
+    if deck is None:
+        return {}
+    try:
+        table = build_subckt_to_class_map(deck)
+    except ModelBindingError:
+        return {}
+    return {name.lower(): device_class for name, device_class in table.items()}
+
+
+def _rewrite_m_card_model(line: str, sim_model_classes: dict[str, str]) -> str:
+    """Rewrite a plain ``M`` card's model token (the last positional token,
+    ``M<name> d g s b <model> [k=v ...]``) to the deck's device class when it
+    names a known simulation model; any other card is returned unchanged."""
+    tokens = _tokenize(line.strip())
+    positional, _ = _split_params(tokens)
+    if len(positional) < 6:
+        return line
+    device_class = sim_model_classes.get(positional[-1].lower())
+    if device_class is None:
+        return line
+    model_index = len(positional) - 1
+    if tokens[model_index] != positional[-1]:
+        return line
+    tokens[model_index] = device_class
+    return " ".join(tokens)
+
+
 def convert_reference_netlist(
     text: str,
     *,
@@ -1869,6 +1901,7 @@ def convert_reference_netlist(
     subckt_to_binding, device_map_names = _build_subckt_map(deck, device_map)
     geometry_style = geometry_style_for_family(deck) if deck is not None else None
     custom_device_classes = _resolve_custom_device_classes(deck)
+    sim_model_classes = _sim_model_classes(deck)
     logical_lines = _fold_spice_continuations(text.splitlines())
     param_scopes = _collect_param_scopes(logical_lines)
     subckt_scope = ""
@@ -1908,6 +1941,8 @@ def convert_reference_netlist(
             except _UnknownSubcircuitError as exc:
                 unknown_subckts.append(exc)
                 out.append(line)
+        elif sim_model_classes and first and first[0] in "Mm":
+            out.append(_rewrite_m_card_model(line, sim_model_classes))
         else:
             out.append(line)
     if unknown_subckts:

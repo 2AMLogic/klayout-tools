@@ -1717,7 +1717,8 @@ def test_run_sim_batch_backend_end_to_end(tmp_path, monkeypatch):
     remote_block = report["environment"]["remote"]
     assert remote_block["provider"] == "aws-batch-fleet"
     assert remote_block["instance_id"] == "i-0fake"
-    assert remote_block["bucket"] == FAKE_BUCKET
+    assert "bucket" not in remote_block
+    assert FAKE_BUCKET not in json.dumps(report)
     assert remote_block["job_id"].startswith("klt-sim-")
 
     # Exactly one launch, and the uploaded request is a `local-parallel`
@@ -2519,6 +2520,9 @@ def test_poll_timeout_reports_submitted_and_launched_only(tmp_path, monkeypatch)
     assert environment["client_launched_at"] == "2026-10-15T17:00:01.000000Z"
     assert environment["client_status_terminal_at"] is None
     assert environment["client_collected_at"] is None
+    # #3777: the bucket embeds an AWS account number; reports are committable.
+    assert "bucket" not in environment
+    assert FAKE_BUCKET not in json.dumps(environment)
 
 
 def test_successful_job_reports_ordered_client_timestamps(tmp_path, monkeypatch):
@@ -3193,6 +3197,54 @@ def test_default_runner_is_the_only_subprocess_seam(monkeypatch):
     )
     sb._run_subprocess(["true"], 1.0)
     assert calls == [["true"]]
+
+
+def test_default_runner_caps_concurrent_spawns(monkeypatch):
+    """96 shard threads going through the default runner never have more than
+    the spawn cap of CLI processes in flight, but still run concurrently."""
+    import threading
+    import time
+
+    cap = 4
+    monkeypatch.setattr(sb, "_SPAWN_SEMAPHORE", threading.BoundedSemaphore(cap))
+    lock = threading.Lock()
+    state = {"now": 0, "max": 0}
+
+    def fake_run(argv, **kwargs):
+        with lock:
+            state["now"] += 1
+            state["max"] = max(state["max"], state["now"])
+        time.sleep(0.01)
+        with lock:
+            state["now"] -= 1
+        return fake_completed()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    threads = [
+        threading.Thread(target=sb._run_subprocess, args=(["aws"], 1.0))
+        for _ in range(96)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert 1 < state["max"] <= cap
+
+
+def test_default_runner_releases_slot_on_exception(monkeypatch):
+    import threading
+
+    sem = threading.BoundedSemaphore(1)
+    monkeypatch.setattr(sb, "_SPAWN_SEMAPHORE", sem)
+
+    def boom(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, 1.0)
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    for _ in range(2):
+        with pytest.raises(subprocess.TimeoutExpired):
+            sb._run_subprocess(["aws"], 1.0)
+    assert sem.acquire(blocking=False)
 
 
 # --------------------------------------------------------------------------- #

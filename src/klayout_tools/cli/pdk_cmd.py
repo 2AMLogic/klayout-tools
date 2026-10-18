@@ -90,15 +90,40 @@ EXIT_BROKEN_SYMLINKS = 4
 #: unavailable. See docs/cli/pdk.md.
 EXIT_PCELL_UNAVAILABLE = 5
 
+#: `klt pdk find`/`check --expect-version` exit code when the installed
+#: identity is a `mismatch` or `unknown` (fail closed) against the caller's
+#: pin (issue #3810). The normal payload is still emitted. Lower codes win:
+#: `check`'s EXIT_BROKEN_SYMLINKS (4) is returned in preference. See
+#: docs/cli/pdk.md.
+EXIT_VERSION_MISMATCH = 6
+
+
+def _version_expectation_exit(report: dict) -> int:
+    """Exit code (0 or EXIT_VERSION_MISMATCH) for ``--expect-version``; on a
+    failure writes one stderr line naming both revisions."""
+    result = report.get("version_expectation")
+    if not result or result["status"] == "match":
+        return 0
+    installed = result["installed"]
+    print(
+        f"klt: PDK version expectation {result['status']}: expected "
+        f"{result['expected']!r}, installed "
+        f"{installed if installed is not None else 'unknown'!r}",
+        file=sys.stderr,
+    )
+    return EXIT_VERSION_MISMATCH
+
 
 def run_find(args: argparse.Namespace) -> int:
     try:
-        report = find_pdk(variant=args.pdk, root=args.pdk_root)
+        report = find_pdk(
+            variant=args.pdk, root=args.pdk_root, expect_version=args.expect_version
+        )
     except PdkNotFoundError as exc:
         return emit_error("pdk find", str(exc), args.format)
 
     emit_success(report, args.format, _print_find_text)
-    return 0
+    return _version_expectation_exit(report)
 
 
 def run_list(args: argparse.Namespace) -> int:
@@ -119,15 +144,18 @@ def run_env(args: argparse.Namespace) -> int:
 
 def run_check(args: argparse.Namespace) -> int:
     try:
-        report = find_pdk(variant=args.pdk, root=args.pdk_root)
+        report = find_pdk(
+            variant=args.pdk, root=args.pdk_root, expect_version=args.expect_version
+        )
     except PdkNotFoundError as exc:
         return emit_error("pdk check", str(exc), args.format)
 
     emit_success(report, args.format, _print_check_text)
 
+    expectation_exit = _version_expectation_exit(report)
     if report["broken_symlinks"]:
         return EXIT_BROKEN_SYMLINKS
-    return 0
+    return expectation_exit
 
 
 def run_cells(args: argparse.Namespace) -> int:
@@ -249,6 +277,9 @@ def _print_check_text(report: dict) -> None:
 def _print_compatibility_text(report: dict) -> None:
     """Render the ``compatibility`` status; warn on stderr for mismatch or
     unknown (warning-only, issue #2759 -- never changes the exit code)."""
+    expectation = report.get("version_expectation")
+    if expectation:
+        print(f"version_expectation: {expectation['status']}")
     compat = report.get("compatibility")
     if not compat:
         return

@@ -668,6 +668,7 @@ from .place_and_route_gds_merge import _merge_def_to_gds as _merge_def_to_gds
 # PDN-0185. Same "self-contained subsystem in its own module" split as the
 # power audit below.
 from .place_and_route_pdn_fit import check_request as check_pdn_core_fit
+from .place_and_route_portable import portable_response
 
 # The power-delivery audit (issue #2086): reads the DEF this run wrote and
 # reports what was actually *placed* (tapcells/endcaps/fillers, PDN
@@ -796,6 +797,9 @@ from .place_and_route_request import (
 )
 from .place_and_route_request import (
     _validate_max_antenna_repair_iterations as _validate_max_antenna_repair_iterations,
+)
+from .place_and_route_request import (
+    _validate_portable_paths as _validate_portable_paths,
 )
 from .place_and_route_request import (
     _validate_post_route_sdf as _validate_post_route_sdf,
@@ -2007,6 +2011,7 @@ def _run_single_corner(
         request.get("max_antenna_repair_iterations")
     )
     post_route_spef = _validate_post_route_spef(request.get("post_route_spef"))
+    portable_paths = _validate_portable_paths(request.get("portable_paths"))
     post_route_sdf = _validate_post_route_sdf(
         request.get("post_route_sdf"), post_route_spef=post_route_spef
     )
@@ -2515,7 +2520,7 @@ def _run_single_corner(
         input_role=INPUT_ROLE_NETLIST,
     )
 
-    return {
+    response: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "engine": engine,
         "engine_version": engine_version,
@@ -2623,6 +2628,25 @@ def _run_single_corner(
         "warnings": warnings,
         "provenance": provenance,
     }
+    return _finish_response(
+        response,
+        portable=portable_paths,
+        request_dir=os.path.dirname(os.path.abspath(request_path)),
+        pdk_root=pdk_info["root"],
+    )
+
+
+def _finish_response(
+    response: dict[str, Any],
+    *,
+    portable: bool,
+    request_dir: str,
+    pdk_root: str | None = None,
+) -> dict[str, Any]:
+    """Apply the opt-in `portable_paths` rewrite; no-op when not requested."""
+    if portable:
+        return portable_response(response, request_dir=request_dir, pdk_root=pdk_root)
+    return response
 
 
 # --------------------------------------------------------------------------- #
@@ -2723,7 +2747,7 @@ def _run_rebuild_corners(
         corner_runs.append(entry)
 
     failed = [run["corner"] for run in corner_runs if run["status"] != "ok"]
-    return {
+    response: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "engine": request.get("engine", "openroad"),
         "engine_version": _openroad_version(),
@@ -2735,6 +2759,11 @@ def _run_rebuild_corners(
         "failed_corners": failed,
         "corner_runs": corner_runs,
     }
+    return _finish_response(
+        response,
+        portable=_validate_portable_paths(request.get("portable_paths")),
+        request_dir=request_dir,
+    )
 
 
 # --------------------------------------------------------------------------- #

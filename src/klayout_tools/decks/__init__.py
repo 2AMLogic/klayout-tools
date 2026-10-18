@@ -52,11 +52,13 @@ from .extraction import (
     InvalidLabelLayerError,
     LayerExpr,
     MomCapacitorDevice,
+    MosCapacitorDevice,
     MOSFlavour,
     ResistorDevice,
     ResistorFlavour,
     SizeFilter,
     TerminalRelation,
+    UnmodelledDeviceFamily,
     UnsupportedDeviceMarker,
 )
 from .finfet import FinFETExtractionDeck, FinFETFlavour
@@ -115,6 +117,8 @@ __all__ = [
     "TapDistanceSpec",
     "UnknownDeckError",
     "UnknownExtractionDeckError",
+    "UnmodelledDeviceFamily",
+    "MosCapacitorDevice",
     "UnsupportedDeviceMarker",
     "deck_names",
     "describe_cut_resistance_gaps",
