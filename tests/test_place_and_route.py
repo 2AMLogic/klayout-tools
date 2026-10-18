@@ -11056,3 +11056,102 @@ def test_dont_use_absent_for_library_without_entry():
     assert place_and_route._dont_use_lines("gf180mcu_fd_sc_mcu7t5v0") == []
     lines = _dont_use_stage_lines("gf180mcu_fd_sc_mcu7t5v0", "place")
     assert not any("set_dont_use" in ln for ln in lines)
+
+
+# --------------------------------------------------------------------------- #
+# `request.portable_paths` (issue #3820): opt-in committable response paths
+# --------------------------------------------------------------------------- #
+
+
+def _stub_merge_with_pdk_layer_map(monkeypatch) -> None:
+    """`_stub_merge_def_to_gds`, but reporting a layer-map file under the
+    installed PDK root (the always-`external` path the real merge returns)."""
+
+    def fake_merge(**kwargs):
+        Path(kwargs["out_path"]).write_text("fake gds\n")
+        return {
+            "path": os.path.join(
+                os.environ["PDK_ROOT"], "sky130A", "libs.tech", "klayout", "m.map"
+            ),
+            "resolution": "family",
+            "def_net_names": {
+                "single_pin_markers": 0,
+                "unresolved_single_pin_nets": [],
+            },
+            "min_area_repair": {"status": "skipped", "reason": "stub", "rules": []},
+        }
+
+    monkeypatch.setattr(place_and_route, "_merge_def_to_gds", fake_merge)
+
+
+def test_portable_paths_default_response_keeps_absolute_paths(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_with_pdk_layer_map(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert os.path.isabs(report["def_path"])
+    assert os.path.isabs(report["gds_path"])
+    assert os.path.isabs(report["layer_map"]["path"])
+
+
+def test_portable_paths_true_leaves_no_absolute_host_path(tmp_path, monkeypatch):
+    from klayout_tools.env_provenance import find_absolute_path_fields
+
+    # An outside-the-repo run: every artifact is `external`, the PDK layer map
+    # is a `$PDK_ROOT/...` string.
+    request_path = _setup_success_env(tmp_path, monkeypatch, portable_paths=True)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_with_pdk_layer_map(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert find_absolute_path_fields(report) == []
+    assert report["def_path"] == {"path": None, "scope": "external"}
+    assert report["gds_path"] == {"path": None, "scope": "external"}
+    assert report["verilog_path"] == {"path": None, "scope": "external"}
+    assert report["unrouted_def_path"] is None
+    assert report["layer_map"]["path"] == "$PDK_ROOT/sky130A/libs.tech/klayout/m.map"
+    assert report["power"]["placed"]["def_path"] == {"path": None, "scope": "external"}
+
+
+def test_portable_paths_repo_internal_outputs_are_repo_relative(tmp_path, monkeypatch):
+    (tmp_path / ".git").mkdir()
+    request_path = _setup_success_env(tmp_path, monkeypatch, portable_paths=True)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_with_pdk_layer_map(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert report["def_path"] == {
+        "path": ".klt/place-and-route/gcd.def",
+        "scope": "repo",
+    }
+    assert report["gds_path"]["scope"] == "repo"
+    assert all(
+        stage["def_path"] is None or stage["def_path"]["scope"] == "repo"
+        for stage in report["stages"]
+        if "def_path" in stage
+    )
+
+
+def test_portable_paths_pre_route_stage_nulls_stay_null(tmp_path, monkeypatch):
+    request_path = _setup_success_env(
+        tmp_path, monkeypatch, target_stage="place", portable_paths=True
+    )
+    _stub_openroad_success(monkeypatch, stages=("floorplan", "place"))
+
+    report = run_place_and_route(request_path)
+
+    assert report["def_path"] is None
+    assert report["gds_path"] is None
+    assert report["verilog_path"] is None
+    assert report["unrouted_def_path"] == {"path": None, "scope": "external"}
+
+
+def test_portable_paths_must_be_boolean(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch, portable_paths="yes")
+
+    with pytest.raises(PlaceAndRouteError, match="portable_paths must be a boolean"):
+        run_place_and_route(request_path)
