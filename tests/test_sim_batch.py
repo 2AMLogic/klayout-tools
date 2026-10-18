@@ -6825,6 +6825,143 @@ def test_without_resume_an_existing_shard_map_is_overwritten(tmp_path, monkeypat
     assert [e["resumed"] for e in environment["fleet"]] == [False, False]
 
 
+def test_shard_map_records_every_shard_before_the_first_submit(tmp_path, monkeypatch):
+    _, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
+    seen: list[list[dict]] = []
+
+    def _first_submit(config, job_id, spec, *, runner=None):
+        seen.append(json.loads(manifest_path.read_text())["shards"])
+        raise sb.BatchError("client died")
+
+    monkeypatch.setattr(sb, "submit_job", _first_submit)
+    fleet()
+    assert [e["state"] for e in seen[0]] == ["pending", "pending"]
+    assert all(e["submitted_at"] is None for e in seen[0])
+
+
+def test_shard_map_tracks_launch_state_and_is_self_describing(tmp_path, monkeypatch):
+    _, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
+    fleet()
+    document = json.loads(manifest_path.read_text())
+    assert document["bucket"] == FAKE_BUCKET
+    for entry in document["shards"]:
+        assert entry["state"] == "collected"
+        assert all(entry[k] for k in ("submitted_at", "launched_at", "collected_at"))
+
+
+def test_failed_launch_leaves_the_shard_unlaunched_and_says_so(
+    tmp_path, monkeypatch, capsys
+):
+    _, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
+    real_launch = sb.launch_job
+    launched: list[str] = []
+
+    def _launch(config, job_id, **kwargs):
+        if launched:
+            raise sb.BatchError("client died")
+        launched.append(job_id)
+        return real_launch(config, job_id, **kwargs)
+
+    monkeypatch.setattr(sb, "launch_job", _launch)
+    fleet()
+    states = sorted(e["state"] for e in json.loads(manifest_path.read_text())["shards"])
+    assert states == ["collected", "launching"]
+    # "launching" (outcome unknown) is not counted as never-launched.
+    assert "never launched" not in capsys.readouterr().err
+
+
+def _unlaunch(manifest_path, index, state):
+    document = json.loads(manifest_path.read_text())
+    entry = document["shards"][index]
+    entry.update(state=state, launched_at=None, collected_at=None)
+    manifest_path.write_text(json.dumps(document))
+    return entry["job_id"]
+
+
+def test_resume_launches_a_submitted_never_launched_shard_once(tmp_path, monkeypatch):
+    runner, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
+    fleet()
+    job_id = _unlaunch(manifest_path, 1, "submitted")
+    launches_before = len(_launches(runner))
+    runner.queue(f"{job_id}/status.json", fake_completed(returncode=1))
+
+    _, _, environment = fleet(resume=True)
+
+    new_launches = _launches(runner)[launches_before:]
+    assert [argv[3] for argv in new_launches] == [job_id]
+    assert [e["resumed"] for e in environment["fleet"]] == [True, True]
+    assert environment["fleet"][1]["client_launched_at"]
+    assert json.loads(manifest_path.read_text())["shards"][1]["state"] == "collected"
+
+
+@pytest.mark.parametrize(
+    ("state", "status_published"),
+    [("launching", False), ("launched", False), ("submitted", True)],
+    ids=["launch-outcome-unknown", "already-launched", "fleet-published-status"],
+)
+def test_resume_never_relaunches_a_possibly_launched_shard(
+    tmp_path, monkeypatch, state, status_published
+):
+    runner, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
+    fleet()
+    job_id = _unlaunch(manifest_path, 1, state)
+    launches_before = len(_launches(runner))
+    if not status_published:
+        runner.queue(f"{job_id}/status.json", fake_completed(returncode=1))
+
+    fleet(resume=True)
+
+    assert len(_launches(runner)) == launches_before
+
+
+def test_stderr_names_the_map_when_shards_were_never_launched(
+    tmp_path, monkeypatch, capsys
+):
+    _, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
+    real_mark = sb._ShardManifest.mark
+
+    def _stop_before_launch(self, index, state):
+        if state == "launching" and index == 1:
+            raise KeyboardInterrupt
+        return real_mark(self, index, state)
+
+    monkeypatch.setattr(sb._ShardManifest, "mark", _stop_before_launch)
+    with pytest.raises(KeyboardInterrupt):
+        fleet()
+    err = capsys.readouterr().err
+    assert "1 of 2 batch job(s) were submitted but never launched" in err
+    assert str(manifest_path) in err
+    states = sorted(e["state"] for e in json.loads(manifest_path.read_text())["shards"])
+    assert "submitted" in states
+
+
+def test_split_reroute_without_a_checkpoint_writes_the_shard_map(tmp_path, monkeypatch):
+    """Issue #3896: a `max_units_per_job` split with no --resume (so no
+    checkpoint) still keeps a shard map when handed a fingerprint."""
+    _split_runner(monkeypatch)
+    monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
+    artifacts = tmp_path / "artifacts"
+
+    sb._run_batch(
+        corner_points=_corner_points(10),
+        netlist_path=str(_write_body(tmp_path)),
+        models_lib=None,
+        analysis={"kind": "tran", "args": "1n 1u"},
+        measurements_spec=_measurements_spec(),
+        timeout_s=120.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        artifacts_dir=str(artifacts),
+        max_workers=None,
+        request=_ceiling_request(tmp_path, max_units_per_job=4),
+        shard_fingerprint="fp-split",
+    )
+
+    document = json.loads((artifacts / sb.BATCH_SHARDS_FILENAME).read_text())
+    assert document["fingerprint"] == "fp-split"
+    assert [e["state"] for e in document["shards"]] == ["collected"] * 3
+
+
 @pytest.mark.parametrize("lose_a_corner", [False, True])
 def test_shard_map_is_removed_only_when_the_sweep_finishes(
     tmp_path, monkeypatch, lose_a_corner
