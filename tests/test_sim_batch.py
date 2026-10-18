@@ -2471,6 +2471,65 @@ def test_collection_failure_on_a_done_job_still_raises(tmp_path, monkeypatch):
         _run_failed_job(tmp_path, monkeypatch, runner)
 
 
+_LEAKY_STDERR = (
+    f"An error occurred (AccessDenied): arn:aws:s3:::{FAKE_BUCKET}/x; {FAKE_BUCKET}"
+)
+
+
+def test_run_checked_redacts_the_bucket_from_the_error_message():
+    runner = _FakeRunner()
+    runner.default = fake_completed(returncode=1, stderr=_LEAKY_STDERR)
+
+    with pytest.raises(sb.BatchError) as excinfo:
+        sb._run_checked(runner, ["aws"], 1.0, "step", redact=FAKE_BUCKET)
+
+    assert FAKE_BUCKET not in str(excinfo.value)
+    assert str(excinfo.value).count("<bucket>") == 2
+
+
+def test_run_checked_classifies_on_the_unredacted_stderr():
+    runner = _FakeRunner()
+    runner.default = fake_completed(returncode=1, stderr=_LEAKY_STDERR)
+
+    with pytest.raises(sb.BatchError) as excinfo:
+        sb._run_checked(
+            runner,
+            ["aws"],
+            1.0,
+            "step",
+            classify=lambda detail: "seen" if FAKE_BUCKET in detail else None,
+            redact=FAKE_BUCKET,
+        )
+
+    assert excinfo.value.code == "seen"
+
+
+@pytest.mark.parametrize("redact", [None, ""])
+def test_run_checked_without_a_bucket_leaves_the_message_alone(redact):
+    runner = _FakeRunner()
+    runner.default = fake_completed(returncode=1, stderr="AccessDenied boom")
+
+    with pytest.raises(sb.BatchError, match="failed \\(exit 1\\): AccessDenied boom"):
+        sb._run_checked(runner, ["aws"], 1.0, "step", redact=redact)
+
+
+def test_collection_failure_note_in_the_deck_report_omits_the_bucket(
+    tmp_path, monkeypatch
+):
+    runner = _FakeRunner()
+    runner.default = fake_completed(
+        _status("failed", exit_code="1", detail="job command exited 1")
+    )
+    runner.queue("outputs/", fake_completed(returncode=1, stderr=_LEAKY_STDERR))
+
+    corners, _, _ = _run_failed_job(tmp_path, monkeypatch, runner)
+
+    for corner in corners:
+        message = corner["diagnostics"][0]["message"]
+        assert "output recovery" in message
+        assert FAKE_BUCKET not in message
+
+
 def test_timed_out_job_recovers_an_envelope_but_keeps_its_code(tmp_path, monkeypatch):
     runner = _FakeRunner()
     runner.default = fake_completed(_status("timeout", exit_code="124"))
