@@ -191,6 +191,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   `engine: "xyce"` fail visibly; an off-host worker that does not echo the maps
   fails with `nodeset_unsupported_worker`. Omitting the option changes nothing.
   Additive; no `schema_version` bump.
+- **`klt sim` transient start states: `options.initial_conditions`** (issue
+  #3881): the `options.nodeset` rule grammar, applied as file-scope `.ic` cards
+  plus `uic` on a single `tran` analysis, echoed as `initial_conditions` on each
+  affected corner report and keyed into the `options.resume` fingerprint. Bad
+  rules, non-`tran` analyses and `engine: "xyce"` fail before any run; an
+  off-host worker that does not echo the maps fails with
+  `initial_conditions_unsupported_worker`. Omitting the option changes nothing.
+  Additive; no `schema_version` bump.
 - **`klt sim`: solver-tolerance corner axis `corners.options`** (issue #3125):
   numeric ngspice `.options` names (`reltol`, `abstol`, `vntol`, `itl1`..`itl4`,
   `gmin`, ...) mapped to equal-length arrays, zipped by index and expanded
