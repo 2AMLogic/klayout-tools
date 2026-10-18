@@ -6989,6 +6989,20 @@ def test_unprovenanced_generic_evidence_cannot_satisfy_a_pinned_content_hash(tmp
     assert item_8["status"] == "unmet"
     assert item_8["reason"] == "unverifiable_provenance"
     assert item_8["citation"] is None
+    assert item_8["detail"]["content_hash_pin"] == "unverifiable"
+    assert "generic" in item_8["detail"]["content_hash_pin_note"]
+
+
+def test_unpinned_unprovenanced_evidence_carries_no_pin_detail(tmp_path):
+    """Issue #3747: no pin in the manifest -> no `content_hash_pin` disclosure."""
+    fv_path = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE)
+
+    result = build_tier_report(
+        _manifest(kind="digital", evidence={"5": {"file": fv_path}})
+    )
+
+    item_5 = next(item for item in result["items"] if item["id"] == 5)
+    assert "content_hash_pin" not in (item_5.get("detail") or {})
 
 
 def test_unprovenanced_functional_verification_cannot_satisfy_pinned_content_hash(
@@ -7012,6 +7026,11 @@ def test_unprovenanced_functional_verification_cannot_satisfy_pinned_content_has
     assert item_5["status"] == "unmet"
     assert item_5["reason"] == "unverifiable_provenance"
     assert item_5["citation"] is None
+    # Issue #3747: the pin itself is disclosed as the cause.
+    assert item_5["detail"]["content_hash_pin"] == "unverifiable"
+    note = item_5["detail"]["content_hash_pin_note"]
+    assert "functional-verification" in note
+    assert "provenance.input.content_hash" in note
 
 
 # --------------------------------------------------------------------------- #

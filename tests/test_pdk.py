@@ -1807,6 +1807,55 @@ def test_macros_excludes_std_cell_and_other_libraries(tmp_path):
     assert [macro["name"] for macro in report["macros"]] == ["sky130_fd_ip_sram_1k"]
 
 
+def test_macros_reports_structural_lef_lib_library_without_fd_ip(tmp_path):
+    """IHP's `sg13g2_sram` has no `_fd_ip_` in its name but ships lef+lib."""
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "ihp-sg13g2", assets=("libs_ref",))
+    _make_macro_library(variant_dir, "sg13g2_sram", views=("cdl", "gds", "lef", "lib"))
+    _make_macro_library(variant_dir, "sg13g2_stdcell")
+    _make_macro_library(variant_dir, "sg13g2_io")
+    (variant_dir / "libs.ref" / "sg13g2_pr").mkdir(parents=True)
+
+    report = pdk.list_hard_macro_libraries(root=str(root))
+
+    assert [m["name"] for m in report["macros"]] == ["sg13g2_sram"]
+
+
+def test_macros_fd_ip_library_without_lib_view_still_reported(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    _make_macro_library(variant_dir, "sky130_fd_ip_sram_1k", views=("gds",))
+
+    report = pdk.list_hard_macro_libraries(root=str(root))
+
+    assert [m["name"] for m in report["macros"]] == ["sky130_fd_ip_sram_1k"]
+
+
+def test_variant_family_alias_resolves_ihp_install(tmp_path):
+    root = tmp_path / "install"
+    _make_install(root, "ihp-sg13g2")
+
+    info = pdk.find_pdk(variant="sg13g2", root=str(root))
+
+    assert info["variant"] == "ihp-sg13g2"
+
+
+def test_variant_family_alias_exact_name_wins(tmp_path):
+    root = tmp_path / "install"
+    _make_install(root, "ihp-sg13g2")
+    _make_install(root, "sg13g2")
+
+    assert pdk.find_pdk(variant="sg13g2", root=str(root))["variant"] == "sg13g2"
+
+
+def test_variant_family_alias_does_not_guess_sky130(tmp_path):
+    root = tmp_path / "install"
+    _make_install(root, "sky130A")
+
+    with pytest.raises(pdk.PdkNotFoundError):
+        pdk.find_pdk(variant="sky130", root=str(root))
+
+
 def test_macros_only_hard_macro_ip_present_no_std_cell(tmp_path):
     """A variant shipping only hard-macro IP (no `_fd_sc_` standard-cell
     library at all) is not an error for either command -- `klt pdk macros`

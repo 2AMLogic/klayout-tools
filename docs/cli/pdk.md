@@ -20,6 +20,9 @@ klt pdk stackup     [--pdk <variant>] [--pdk-root <dir>] [--corner <name>] [--th
 ```
 
 - `find` — resolve **one** install/variant and emit its paths.
+  `--pdk` accepts the deck/family spelling for IHP installs (`sg13g2` →
+  `ihp-sg13g2`, `sg13cmos5l` → `ihp-sg13cmos5l`); an exact directory-name match
+  always wins and the reported `pdk`/`variant` is the resolved directory name.
 - `list` — enumerate **every** install/variant discovered across the search order.
 - `env` — the resolved paths as eval-able shell `export` lines.
 - `check` — resolve one install/variant and exit non-zero if any of its
@@ -31,7 +34,7 @@ klt pdk stackup     [--pdk <variant>] [--pdk-root <dir>] [--corner <name>] [--th
 - `cells` — per standard-cell digital library, its device flavor(s) and the
   nominal supply its `.lib` timing views are characterised at.
 - `macros` — per hard-macro IP library (`libs.ref` entries named
-  `*_fd_ip_*`, e.g. an SRAM/ROM compiler output), which views it ships.
+  `*_fd_ip_*` or `lef`+`lib`, e.g. an SRAM/ROM compiler output), which views it ships.
 - `corners` — per SPICE process corner, which curated device families skew
   vs. resolve to typical, and whether the corner is complete.
 - `em-limits` — per routing/cut layer, the electromigration current-density
@@ -496,6 +499,39 @@ output; they never change discovery success or exit codes, and `pdk env`
 output is unchanged. The comparison lives in
 `klayout_tools.pdk_compat` (`check_compatibility`, `compare_identities`) for
 later consumers that want to enforce.
+
+### Asserting a pin (`--expect-version`, issue #3810)
+
+`compatibility` only compares against the pins klt itself declares and never
+changes an exit code. A downstream repo pinning its own open_pdks commit can
+instead assert it on `find` and `check`:
+
+```bash
+klt pdk check --pdk sky130A --expect-version f6eeac7 --format json || exit 1
+```
+
+`--expect-version` takes an open_pdks commit (a bare hex SHA of 7+ chars,
+matched by prefix, or an `open_pdks <sha>` stamp) compared with the installed
+`SOURCES` stamp, or any other string compared exactly with a lambdapdk
+`.fetched-version` marker. Identities in different namespaces (a SHA against a
+lambdapdk tree) are `unknown`. With the flag, `--format json` adds an additive
+`version_expectation` object (absent otherwise; no paths, no `schema_version`
+change):
+
+```json
+"version_expectation": {
+  "status": "mismatch",
+  "expected": "c6d73a3",
+  "installed": "open_pdks f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7"
+}
+```
+
+`status` is `match`, `mismatch` or `unknown` (the installed identity is
+unreadable or in another namespace; `installed` is `null` when unreadable).
+**Fail closed:** on `mismatch` or `unknown` the normal payload is still
+emitted, one stderr line names both revisions, and the verb exits `6`. If
+`check` also finds dangling symlinks, the lower code `4` wins. Without the
+flag nothing changes.
 
 ### Several installs of one variant (`ambiguous_roots`, issue #2564)
 
@@ -966,16 +1002,15 @@ sky130_fd_ip_sram_1k  gds/lef/lib/spice/verilog
 
 ### Which libraries are reported
 
-Only `libs_ref` entries whose name contains `_fd_ip_` — the open_pdks
-"foundry digital, IP" (hard-macro) naming convention — are reported. Like
-`klt pdk cells`, this is a **deliberate** name-convention filter, not an
-accident of the glob used to walk `libs_ref`: standard-cell digital
-libraries (`*_fd_sc_*`), primitive-device libraries (`*_fd_pr`), I/O-pad
-libraries (`*_fd_io`), and other macro libraries that don't match the
-`*_fd_ip_*` convention are all excluded — they are `klt pdk cells`'s domain
-(or neither command's), not this one's.
+A `libs_ref` entry is reported when its name contains `_fd_ip_` (the
+open_pdks "foundry digital, IP" hard-macro convention) **or** it structurally
+ships both `lef/` and `lib/` views (e.g. IHP's `sg13g2_sram`). Standard-cell
+digital libraries (`*_fd_sc_*`, `*_stdcell`), primitive-device libraries
+(`*_fd_pr`, `sg13g2_pr`) and I/O-pad libraries (`*_fd_io`, `sg13g2_io`) are
+excluded — they are `klt pdk cells`'s domain (or neither command's), not
+this one's.
 
-An empty `macros` list (a variant with no `_fd_ip_`-named `libs_ref` entry)
+An empty `macros` list (a variant with no hard-macro `libs_ref` entry)
 is a **successful result**, not an error — mirroring `klt pdk cells`'s
 empty-`libraries` convention.
 
@@ -1811,6 +1846,7 @@ libraries ship no `techlef/` directory at all, returns an empty
 | `3` | `cells --supply <volts>` ran fine, but no library is compatible with the stated supply (see "Compatibility verdict" above). |
 | `4` | `check` resolved an install, but one or more of its asset directories contain a dangling symlink (see "Dangling symlinks" above). |
 | `5` | `pcell-check` resolved an install, but one or more of its KLayout PyCell packages could not be imported here (see "`klt pdk pcell-check`" above). |
+| `6` | `find`/`check --expect-version` ran fine, but the installed PDK identity is a `mismatch` or `unknown` against the supplied value (see "Asserting a pin"). `check`'s `4` takes precedence. |
 
 On a `find`/`env` failure the error names the search order tried and points at
 a concrete way to install a PDK, so a downstream tool never crashes deep in a
@@ -1829,7 +1865,7 @@ log with a mysterious path error:
 See [`docs/json-contract.md`](../json-contract.md) for the envelope shared
 across all `klt` commands. **Gate on the payload's own verdict, not the
 exit code** — these codes are additive (a future release may add a new one
-above `5`), and the exit code is only a shortcut derived from the payload's
+above `6`), and the exit code is only a shortcut derived from the payload's
 own fields, which are authoritative; see that document's "Exit codes"
 section.
 
