@@ -22,6 +22,19 @@ not `klt --version`, if you need to detect this kind of drift. See
   still emitted and the verb exits **6** (fail closed; `check`'s 4 wins).
   Without the flag nothing changes.
 
+- **`klt deck info` reports the DRC deck as its own artifact** (issue #3826):
+  an entry for a deck that ships a standalone KLayout DRC deck file (`asap7`)
+  gains an additive `drc_deck` object (`{path_kind, content_hash, released,
+  release}`) hashed from `asap7.drc`, distinct from the extraction deck
+  module's `content_hash`; text output labels them `extraction deck` /
+  `drc deck`. `scripts/generate_deck_history.py` now records the `.drc` hash
+  per release (entries marked `"artifact": "drc_deck"`), so
+  `provenance.deck.released` is `true` for a DRC run on a released build; the
+  `0.7.0` `.drc` hash (`a14ce43a...`) now resolves. `docs/cli/drc.md` gains an
+  "ASAP7 capability by release" table and the git-pin note for `0.7.0`
+  users. Decks with no `.drc` file omit `drc_deck`; `schema_version` stays
+  `1`.
+
 - **`provenance.input.paths` set binding for `klt signoff`** (issue #3044,
   documented in `docs/cli/signoff.md` "Binding a set of artifacts"): additive.
   Not in `klt 0.7.0` — a `0.7.0` build grades a `paths`-only envelope

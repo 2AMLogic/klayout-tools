@@ -295,12 +295,20 @@ def _provenance_text(provenance: dict | None) -> str:
 def _print_info_text(report: dict) -> None:
     for entry in report["decks"]:
         print(f"deck: {entry['deck']}")
-        print(f"  content_hash: {entry['content_hash']}")
+        print(f"  extraction deck content_hash: {entry['content_hash']}")
         print(f"  device_classes: {', '.join(entry['device_classes'])}")
-        print(f"  released: {entry['released']}")
-        release = entry["release"]
-        if release is not None:
-            print(
-                f"  release: {release['package_version']} "
-                f"({release['git_tag']}, {release['git_commit']})"
-            )
+        _print_info_artifact(entry, indent="  ")
+        drc_deck = entry.get("drc_deck")
+        if drc_deck is not None:
+            print(f"  drc deck content_hash: {drc_deck['content_hash']}")
+            _print_info_artifact(drc_deck, indent="  drc deck ")
+
+
+def _print_info_artifact(artifact: dict, *, indent: str) -> None:
+    print(f"{indent}released: {artifact['released']}")
+    release = artifact["release"]
+    if release is not None:
+        print(
+            f"{indent}release: {release['package_version']} "
+            f"({release['git_tag']}, {release['git_commit']})"
+        )
