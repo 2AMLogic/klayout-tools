@@ -16520,11 +16520,12 @@ def _ms_item5(tmp_path, spec_rows, analog_entry=None):
     """Mixed-signal item-5 entries by partition (issue #3768)."""
     sim = _write(tmp_path, "sim.json", SIM_PASS_ENVELOPE)
     sta = _write(tmp_path, "sta.json", STA_MULTI_CORNER_CLEAN_ENVELOPE)
+    fv = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE)
     manifest = _manifest(
         kind="mixed-signal",
         evidence={
             "5.analog": analog_entry or [{"file": sim, "rows": ["tdec"]}],
-            "5.digital": sta,
+            "5.digital": [sta, fv],
         },
         spec_rows=spec_rows,
     )

@@ -36,6 +36,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   [8, 25]}`; without it the verdict is `match` with `device.body_unverified`
   warnings and one pin.
 
+- **`openroad` Docker wrapper forwards `PLATFORM_DIR` and `OPENROAD_*`**
+  (issue #3821): `scripts/install-openroad-docker.sh` now writes a wrapper that
+  passes `-e PLATFORM_DIR` (when set) and `-e <name>` for each caller variable
+  starting with `OPENROAD_` to `docker run`, so Tcl reading
+  `$::env(PLATFORM_DIR)` no longer fails. Nothing else in the argv changes.
+  Hosts with an older wrapper should re-run
+  `scripts/install-openroad-docker.sh` to upgrade it in place.
+
 - **`klt sta` driving cell / output load, and `*NAME_MAP` SPEFs** (issue
   #3742): `constraints.driving_cell` / `.driving_cells` emit
   `set_driving_cell` and `constraints.output_load_pf` / `.output_loads` emit
@@ -173,6 +181,16 @@ not `klt --version`, if you need to detect this kind of drift. See
   null`, `error` blames the absent side) instead of a silent `pass`; absent on
   both sides stays `pass`. `schematic_status` / `extracted_status` may now be
   `"absent"`. Additive: `delta[].status` stays `pass|fail|error`.
+- **`klt extract --deck gf180mcu` recognises MOS capacitors** (issue #2919,
+  deliverable B): a `Comp` island with a poly gate under `MOS_CAP_MK` (166/5)
+  extracts as one of twelve `cap_{nmos,pmos}_{03v3,06v0}[_dn|_b]` capacitor
+  devices (`a` = gate, `b` = source/drain, `A`/`P` on the gate region) instead
+  of vanishing (`_b` forms) or being read as a transistor (the rest). New
+  `MosCapacitorDevice` deck entry; `klt deck devices` lists the classes
+  (`kind: "mos_capacitor"`) and `device_classes` grows by the same twelve names.
+  `unsupported_devices[]` now reports only marker components the recogniser could
+  not classify. Model name, nets, `C`, `A` and `P` cross-checked against the PDK's
+  own LVS runset. Additive; no `schema_version` bump.
 - **`klt extract --resistance-graph`: opt-in terminal-aware resistance graph**
   (issue #2982, Stage 3.D5 increment 3): adds `parasitics.nets[].resistance_graph`
   (`status`, `terminals`, `pair_resistance_ohm`, `legacy_resistance_ohm`,

@@ -161,7 +161,9 @@ class AgentSessionResult:
 InteractiveAgentInvoker = Callable[[AgentSessionRequest], AgentSessionResult]
 
 
-def _write_sandbox_klt_shim(workdir: Path, repo_root: Path) -> Path:
+def _write_sandbox_klt_shim(
+    workdir: Path, repo_root: Path, *, policy_path: Path | None = None
+) -> Path:
     """Put a ``klt`` on the session's ``PATH`` that is guaranteed to be *this
     checkout's*.
 
@@ -172,15 +174,27 @@ def _write_sandbox_klt_shim(workdir: Path, repo_root: Path) -> Path:
     query flow is dead on arrival. The shim runs the benchmark process's own
     interpreter against ``<repo_root>/src``, so `klt kb`/`klt sim` behave
     exactly as they do from a repo checkout regardless of cwd.
+
+    With ``policy_path`` (layout-flow benchmark, issue #3026) the shim is the
+    arm's tool-surface wall instead: every call goes through
+    ``design_agent_benchmark_layout_exec.shim_main``, which reads the policy
+    from that path (kept *outside* the sandbox), refuses verbs the arm may not
+    use with exit 126, and records each call to the run's tool log.
     """
     bin_dir = workdir / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
     entry = bin_dir / "_klt_entry.py"
+    if policy_path is None:
+        body = "from klayout_tools.cli import main\nraise SystemExit(main())\n"
+    else:
+        body = (
+            f"sys.path.insert(0, {str(Path(__file__).resolve().parent)!r})\n"
+            "from design_agent_benchmark_layout_exec import shim_main\n"
+            "raise SystemExit(shim_main(sys.argv[1:], "
+            f"{str(policy_path.resolve())!r}))\n"
+        )
     entry.write_text(
-        "import sys\n"
-        f"sys.path.insert(0, {str(repo_root / 'src')!r})\n"
-        "from klayout_tools.cli import main\n"
-        "raise SystemExit(main())\n"
+        f"import sys\nsys.path.insert(0, {str(repo_root / 'src')!r})\n" + body
     )
     shim = bin_dir / "klt"
     shim.write_text(
