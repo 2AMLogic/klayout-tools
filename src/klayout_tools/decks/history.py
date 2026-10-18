@@ -357,6 +357,10 @@ def deck_info(name: str | None = None) -> dict[str, Any]:
       ``{git_tag, git_commit, package_version}`` of the (newest) matching
       release, the same information :func:`resolve_deck` would return for
       this hash; ``None`` otherwise.
+    - ``unmodeled_rules`` -- the official foundry rule ids the deck
+      knowingly does not transcribe (issue #3796; the same static list as
+      ``klt drc``'s ``coverage.unmodeled_rules``). Empty for a deck that
+      declares none.
     - ``drc_deck`` -- present only for a deck that ships a standalone KLayout
       DRC deck file (``asap7.drc``; omitted otherwise, never ``null``)
       (issue #3826). That file is a different artifact from the deck module
@@ -374,6 +378,7 @@ def deck_info(name: str | None = None) -> dict[str, Any]:
         deck_provides,
         deck_source_path,
         get_extraction_deck,
+        get_unmodeled_rules,
         known_extraction_deck_names,
     )
 
@@ -397,6 +402,7 @@ def deck_info(name: str | None = None) -> dict[str, Any]:
             "provides": deck_provides(deck_name),
             "released": released,
             "release": release,
+            "unmodeled_rules": get_unmodeled_rules(deck_name),
         }
         drc_path = _drc_deck_path(deck_name)
         if drc_path is not None:
@@ -495,11 +501,14 @@ def deck_rules(name: str, rule_id: str | None = None) -> dict[str, Any]:
 
     Top-level, pinned by ``content_hash`` like the rules:
 
+    - ``unmodeled_rules`` -- official foundry rule ids the deck knowingly
+      does not transcribe (issue #3796), kept apart from ``rules``; the same
+      static list as ``klt drc``'s ``coverage.unmodeled_rules``. Not narrowed
+      by ``rule_id``.
     - ``marker_blind_layers`` -- ``["<layer>/<datatype>", ...]`` area-marker
       layers (sky130: ``81/2`` ``areaid.ce``) the deck accepts but does not
       model rule-switching for (issue #3815); ``[]`` for a deck declaring
       none. Deck-static, so it is not narrowed by ``rule_id``.
-
     - ``layer_table`` -- every ``{"name", "layer", "datatype"}`` the deck
       names, sorted by ``(layer, datatype)``.
     - ``ambiguous_names`` -- ``[{"name", "pairs": [{"layer", "datatype"}]}]``
@@ -518,6 +527,7 @@ def deck_rules(name: str, rule_id: str | None = None) -> dict[str, Any]:
         get_layer_names,
         get_marker_blind_layers,
         get_nominal_dbu,
+        get_unmodeled_rules,
     )
 
     try:
@@ -545,6 +555,7 @@ def deck_rules(name: str, rule_id: str | None = None) -> dict[str, Any]:
         "content_hash": f"sha256:{digest}" if digest is not None else None,
         "nominal_dbu_um": nominal_dbu,
         "rules": [_project_rule(rule, nominal_dbu, layer_names) for rule in rules],
+        "unmodeled_rules": get_unmodeled_rules(name),
         "marker_blind_layers": [
             f"{layer}/{datatype}" for layer, datatype in get_marker_blind_layers(name)
         ],

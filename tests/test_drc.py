@@ -1465,12 +1465,13 @@ def test_run_drc_sg13g2_coverage_lists_unmodeled_pad_and_latchup_rules(tmp_path)
     assert unmodeled == sorted(unmodeled)
     assert {"Pad.a1", "Pad.d", "Pad.jR", "LU.a", "LU.d1"} <= set(unmodeled)
     assert all(r.startswith(("Pad.", "LU.")) for r in unmodeled)
-    # gf180mcu now discloses its own untranscribed ESD.*/GR.* remainder
-    # (issue #3792); a deck with no recorded remainder still reports none.
+    # gf180mcu discloses its own untranscribed remainder (MT30/MSLOT, issue
+    # #3796; ESD.*/GR.*, issue #3792); a deck with no recorded remainder still
+    # reports none.
     gf = get_unmodeled_rules("gf180mcu")
     assert gf == sorted(gf)
-    assert {"ESD.7", "ESD.10"} <= set(gf)
-    assert all(r.startswith(("ESD.", "GR.")) for r in gf)
+    assert {"ESD.7", "ESD.10", "MT30.1a", "MSLOT.1"} <= set(gf)
+    assert not any(r.startswith(("Pad.", "LU.")) for r in gf)
     assert get_unmodeled_rules("no-such-deck") == []
 
 
@@ -7270,15 +7271,16 @@ def test_run_drc_threshold_max_dbu_validated_even_when_layer_absent(
 
 
 def test_run_drc_sg13g2_every_rule_has_provenance():
-    """Every one of sg13g2's 50 curated `DrcRule` entries carries a populated
+    """Every one of sg13g2's 62 curated `DrcRule` entries carries a populated
     `provenance` citation (issue #905's own acceptance criterion: "every
     compiled rule cites its SG13G2 PDK source line", extended by issue #1243's
     Metal3-TopMetal2 stack, issue #2581's 6.11 MIM group, issue #3787's pSD
-    group and issue #3571's NWell rules) -- not just the
+    group, issue #3571's NWell rules and issue #3585's NW.c/d/e/f* NWell
+    enclosure/space rules) -- not just the
     36 width/space rules `tests/test_golden_deck.py`'s generic check already
     covers."""
     deck = get_deck("sg13g2")
-    assert len(deck) == 50
+    assert len(deck) == 62
     for rule in deck:
         assert rule.provenance is not None, f"sg13g2/{rule.id}: no provenance"
         assert rule.provenance.source_repo == "IHP-GmbH/IHP-Open-PDK"
@@ -8428,11 +8430,28 @@ def test_run_drc_sg13g2_mim_rules_cite_the_6_11_mim_group():
     for rule in mim_rules.values():
         assert rule.check == "enclosing"
         assert rule.provenance.source_path.endswith("beol/6_11_mim.drc")
-    # `nwell.width.1` (issue #3571) legitimately cites the maximal runset:
-    # `NW.a` is not implemented in the modular `5_1_nwell.drc`.
+    # `nwell.width.1` (issue #3571) and the NW.c/c1/d/d1/e/e1 (+ `.dig`) rules
+    # (issue #3585) legitimately cite the maximal runset: they are not
+    # implemented in the modular `5_1_nwell.drc`. Only NW.f1 / NW.f1.digibnd
+    # (`nwell.space.pactiv.hv.1` and `nwell.space.pactiv.dig.1`) cite the modular deck.
     assert {
         rule.id for rule in deck if "maximal" in (rule.provenance.source_path or "")
-    } == {"psd.width.1", "psd.space.1", "psd.area.1", "nwell.width.1"}  # #3787, #3571
+    } == {
+        "psd.width.1",  # #3787
+        "psd.space.1",
+        "psd.area.1",
+        "nwell.width.1",  # #3571
+        "nwell.enclosing.pactiv.1",  # #3585
+        "nwell.enclosing.pactiv.hv.1",
+        "nwell.enclosing.pactiv.dig.1",
+        "nwell.enclosing.nactiv.1",
+        "nwell.enclosing.nactiv.hv.1",
+        "nwell.enclosing.nactiv.dig.1",
+        "nwell.space.nactiv.1",
+        "nwell.space.nactiv.hv.1",
+        "nwell.space.nactiv.dig.1",
+        "nwell.space.pactiv.1",
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -10899,6 +10918,23 @@ def test_list_deck_rules_context2_keys_only_when_set():
     assert dig["context2_sized_by_um"] == 0.0
     plain = rules["nwell.enclosing.pactiv.1"]["derived_layer"]
     assert not any(k.startswith("context2") for k in plain)
+
+
+def test_run_drc_gf180mcu_coverage_names_unmodeled_thick_metal_families(tmp_path):
+    """Issue #3796: a clean gf180mcu verdict must say the MT30.*/MSLOT.*
+    families were never enforced; decks declaring none stay unaffected."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    # 1.0 um wide Metal3 line (42/0): fine for the modeled rules, would fail MT30.1a.
+    top.shapes(layout.layer(42, 0)).insert(kdb.Box(0, 0, 1000, 5000))
+    path = tmp_path / "thick_metal_probe.gds"
+    layout.write(str(path))
+
+    unmodeled = run_drc(str(path), "gf180mcu")["coverage"]["unmodeled_rules"]
+
+    assert {"MT30.1a", "MT30.2", "MT30.3", "MT30.4", "MSLOT.1"} <= set(unmodeled)
+    assert "MT30.1a" not in run_drc(str(path), "sky130")["coverage"]["unmodeled_rules"]
 
 
 def _make_sky130_marker_layout(*, marker: bool) -> kdb.Layout:

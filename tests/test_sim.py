@@ -41,37 +41,9 @@ from klayout_tools import pdk, remote_transport, sim, sim_batch, sim_remote, sim
 from klayout_tools import remote_launcher as rl
 from klayout_tools.cli import main
 
-pytestmark = pytest.mark.usefixtures("real_build_identity_git")
-
-
-@pytest.fixture(autouse=True)
-def _bare_name_ngspice_resolution(monkeypatch):
-    """Issue #2423: ``sim.py`` now resolves the ``ngspice`` binary via
-    :func:`klayout_tools._paths.resolve_tool_binary` (``shutil.which``)
-    *before* dispatching any corner, rather than hardcoding the bare name
-    ``ngspice`` in ``argv[0]`` -- and, since ``ngspice`` is `klt sim`'s
-    *default* engine, that resolution now runs for every mocked-
-    ``subprocess.run`` test in this module too (not just ones that opt into
-    an ``engine: "netgen"``-style non-default engine, as `klt lvs`'s
-    analogous #2373 stub only had to cover). Several tests below are
-    explicitly designed to need "no binary required" (this module's own
-    ``# run_sim with a stubbed ngspice subprocess (no binary required)``
-    section header) -- this autouse fixture keeps that promise true even on
-    a host with no real ``ngspice`` install, by stubbing resolution to
-    return the bare name unchanged (mirrors ``test_equiv.py``'s identically-
-    named fixture, issue #2423). A real ``subprocess.run(["ngspice", ...])``
-    still resolves via the OS's own ``PATH`` search exactly as before this
-    issue, so tests that genuinely need a real ``ngspice`` (already gated on
-    their own ``shutil.which("ngspice")``-based skip) are unaffected.
-    """
-    real_which = shutil.which
-
-    def fake_which(cmd, *args, **kwargs):
-        if cmd == "ngspice":
-            return cmd
-        return real_which(cmd, *args, **kwargs)
-
-    monkeypatch.setattr(paths_module.shutil, "which", fake_which)
+pytestmark = pytest.mark.usefixtures(
+    "real_build_identity_git", "bare_name_ngspice_resolution"
+)
 
 
 #: `KLT_SKIP_NGSPICE_TESTS=1` (local-only, set by `npm run check:ci` -- never
