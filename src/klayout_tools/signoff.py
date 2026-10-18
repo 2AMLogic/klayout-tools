@@ -1131,13 +1131,15 @@ _MIXED_SIGNAL_PARTITIONS = ("analog", "digital")
 #: - **item 5, analog** (and a mixed-signal block's analog partition): a
 #:   ``"sim"``-kind citation only -- the doc's "PVT corner-matrix simulation
 #:   results covering every spec row at its bound corners".
-#: - **item 5, digital**: ``"sta"`` or ``"functional-verification"`` (the
+#: - **item 5, digital**: ``"sta"`` *and* ``"functional-verification"`` (the
 #:   doc's Digital column, "multi-corner static timing analysis ... plus a
 #:   bit-exact functional test suite", recognised as first-class evidence
-#:   kinds by issue #1959) *or* ``"sim"``, which keeps the full-custom
-#:   digital sub-case working: that partition declares ``kind: "digital"``
-#:   but satisfies item 5 "instead by PVT corner-matrix SPICE simulation",
-#:   i.e. exactly an analog partition's artifact.
+#:   kinds by issue #1959; citing only one grades ``partial_coverage`` with
+#:   ``detail.missing_kinds``, issue #3741) *or* ``"sim"`` alone, which
+#:   keeps the full-custom digital sub-case working: that partition
+#:   declares ``kind: "digital"`` but satisfies item 5 "instead by PVT
+#:   corner-matrix SPICE simulation", i.e. exactly an analog partition's
+#:   artifact.
 #: - **item 7, analog** (and a mixed-signal block's analog partition): a
 #:   ``"pex"``-kind citation only -- the `klt pex`
 #:   schematic-vs-extracted-netlist delta report (see this module's
@@ -1940,6 +1942,16 @@ _REASON_NOT_POST_LAYOUT = "not_post_layout"
 #: check did not fail on its own terms, it simply measured nothing -- and the
 #: fix is to re-run it with something to check, not to fix a defect it found.
 _REASON_NOTHING_CHECKED = "nothing_checked"
+
+#: Issue #3769: a recognised `klt sim` envelope whose own ``coverage`` block
+#: declares measurements (``measurements_declared > 0``) but applied no spec
+#: bound to any of them (``measurements_with_limits == 0``). Its per-corner
+#: ``status: pass`` only means "every measurement produced a value", so
+#: citing it for corner verification would satisfy the item with no bound
+#: ever checked. Grouped with :data:`_REASON_NOTHING_CHECKED` per issue
+#: #826's invariant: the fix is to copy the spec bounds into the request's
+#: ``measurements[].limits`` and re-run, not to fix a defect it found.
+_REASON_NO_LIMITS_CHECKED = "no_limits_checked"
 
 #: Issue #2467: the evidence resolved to a readable, recognised, *passing*
 #: `klt yield` envelope, but at least one of its own measurements reports
@@ -3419,9 +3431,35 @@ def _coverage_refusal(kind: str, envelope: dict[str, Any]) -> str | None:
     :func:`~klayout_tools.coverage.coverage_refusal_reason`.
     """
     refusal = coverage_refusal_reason(envelope)
+    if kind == "sim" and refusal is None:
+        # Issue #3769: sim coverage counts an unlimited measurement as a
+        # checked observation, so `nothing_checked` stays false for an
+        # all-observation request. For item 5 that is still no bound applied.
+        return _REASON_NO_LIMITS_CHECKED if _sim_no_limits_applied(envelope) else None
     if refusal is None or kind != "erc":
         return refusal
     return None if _erc_connectivity_state(envelope) is not None else refusal
+
+
+def _sim_coverage_counts(envelope: Mapping[str, Any]) -> tuple[int, int] | None:
+    """``(measurements_declared, measurements_with_limits)`` off a `klt sim`
+    envelope's ``coverage`` block, or ``None`` when absent or non-integer
+    (pre-coverage evidence keeps grading exactly as before)."""
+    block = envelope.get("coverage")
+    if not isinstance(block, dict):
+        return None
+    declared = block.get("measurements_declared")
+    limited = block.get("measurements_with_limits")
+    if type(declared) is not int or type(limited) is not int:
+        return None
+    return declared, limited
+
+
+def _sim_no_limits_applied(envelope: Mapping[str, Any]) -> bool:
+    """Whether a `klt sim` envelope declares measurements yet none carry a
+    ``limits`` bound (issue #3769). ``capture_only`` runs declare none."""
+    counts = _sim_coverage_counts(envelope)
+    return counts is not None and counts[0] > 0 and counts[1] == 0
 
 
 def _drc_rule_subset(envelope: Mapping[str, Any]) -> bool:
@@ -4341,6 +4379,12 @@ def _detail(kind: str, envelope: _EvidenceEnvelope) -> dict[str, Any]:
     # the reader-facing half of the `passed: False` `_build_check` applies
     # for the same condition; see "Vacuous-verdict refusal" above.
     detail.update(_nothing_checked_detail(envelope))
+    counts = _sim_coverage_counts(envelope) if kind == "sim" else None
+    if counts is not None and _sim_no_limits_applied(envelope):
+        detail["no_limits_checked"] = {
+            "measurements_declared": counts[0],
+            "measurements_with_limits": counts[1],
+        }
     return detail
 
 
@@ -7334,6 +7378,13 @@ def _build_tier_item(
         return spec_status, spec_reason, spec_citation, spec_detail
 
     raw_entry = _lookup_evidence(evidence, item_id, partition_kind)
+    # Issue #3741: item 5 digital's RTL-flow route needs STA *and* a
+    # functional suite; a single sta/fv-only entry is aggregated too.
+    required_kind_pair = (
+        _ITEM5_DIGITAL_RTL_KINDS
+        if item_id == 5 and partition_kind == "digital"
+        else None
+    )
     if raw_entry is not None and not graded_by_build:
         reason = _REASON_UNGRADEABLE_BY_BUILD
     elif (
@@ -7353,7 +7404,12 @@ def _build_tier_item(
     elif (
         raw_entry is not None
         and item_id in _ITEMS_ACCEPTING_MULTI_CITATION
-        and (isinstance(raw_entry, list) or spec_rows is not None or spec_rows_invalid)
+        and (
+            isinstance(raw_entry, list)
+            or spec_rows is not None
+            or spec_rows_invalid
+            or required_kind_pair is not None
+        )
     ):
         # Issue #2959: item 5 may cite several envelopes (and declare the
         # spec rows they must cover) -- graded per citation, then aggregated.
@@ -7362,6 +7418,7 @@ def _build_tier_item(
             grade_spec,
             spec_rows=spec_rows,
             spec_rows_invalid=spec_rows_invalid,
+            required_kind_pair=required_kind_pair,
         )
     elif raw_entry is not None:
         spec = _normalize_evidence_entry(raw_entry)
@@ -7396,6 +7453,12 @@ def _build_tier_item(
 #: ``spec_rows`` coverage (issue #2959). Item 5, and item 6 (issue #2908: a
 #: block whose spec has several statistical rows, only some evidenced).
 _ITEMS_ACCEPTING_MULTI_CITATION: frozenset[int] = frozenset({5, 6})
+
+#: Issue #3741: the RTL-flow evidence kinds of T1 item 5, digital -- the tier
+#: doc's "multi-corner STA **plus** a bit-exact functional test suite". A
+#: digital entry citing either must cite both; a ``sim``-only entry (the
+#: full-custom digital sub-case) is exempt.
+_ITEM5_DIGITAL_RTL_KINDS: tuple[str, ...] = ("sta", "functional-verification")
 
 
 _SpecRowsKey = tuple[int, "str | None"]
@@ -7491,6 +7554,7 @@ def _grade_multi_citation(
     *,
     spec_rows: list[dict[str, Any]] | None,
     spec_rows_invalid: bool,
+    required_kind_pair: tuple[str, ...] | None = None,
 ) -> tuple[str, str | None, dict[str, Any] | None, dict[str, Any], dict[str, Any]]:
     """Grade a list-form (or ``spec_rows``-bearing) evidence entry (issue
     #2959). Each member goes through the ordinary per-envelope path
@@ -7505,6 +7569,10 @@ def _grade_multi_citation(
       and ``declared_gaps`` listed separately under ``detail``; a declared
       row with ``ratified: false`` (``unratified_rows``) is likewise
       provisional and never ``met`` (issue #2908);
+    - ``required_kind_pair`` (issue #3741): when every member passed and the
+      passing kinds include any kind of the pair, all of them must be
+      present, else ``unmet``/``partial_coverage`` with
+      ``detail.missing_kinds``; a set with none of them (``sim``) is exempt;
     - otherwise ``met``; ``citation`` is the first member's and ``citations``
       carries all of them.
 
@@ -7552,6 +7620,18 @@ def _grade_multi_citation(
         or row_info["unratified_rows"]
     ):
         return "unmet", _REASON_PARTIAL_COVERAGE, None, row_info, extra
+    if required_kind_pair is not None:
+        kinds = {g[2]["kind"] for _, _, g in graded if g[2] is not None}
+        if kinds & set(required_kind_pair):
+            missing = [k for k in required_kind_pair if k not in kinds]
+            if missing:
+                return (
+                    "unmet",
+                    _REASON_PARTIAL_COVERAGE,
+                    None,
+                    {**row_info, "missing_kinds": missing},
+                    extra,
+                )
     if row_info:
         extra["row_coverage"] = row_info
     extra["citations"] = [g[2] for _, _, g in graded]

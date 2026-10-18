@@ -68,6 +68,8 @@ from klayout_tools.decks import sg13cmos5l as sg13cmos5l_deck_module
 from klayout_tools.decks.sg13cmos5l import EXTRACTION_DECK
 from klayout_tools.drc import run_drc
 from klayout_tools.extract import run_extract
+from klayout_tools.lvs import run_lvs
+from klayout_tools.pdk import PdkNotFoundError, find_pdk
 
 _DBU_UM = 0.001
 _IHP_OPEN_PDK_COMMIT = "d2cc0355f26235c777dfcc6867b390fa1e78083f"
@@ -2547,3 +2549,70 @@ def test_run_drc_sg13cmos5l_nwell_space_digbnd_split(tmp_path: Path, implant):
         assert fired(run(dig_um, digbnd)) == set()
     assert fired(run(dig_um, None)) == {hv_id}
     assert fired(run(hv_um, None)) == set()
+
+
+def _stdcell_inv_1(tmp_path: Path) -> tuple[Path, Path]:
+    """Clip the PDK's own ``sg13cmos5l_inv_1`` and its ``.subckt`` into
+    ``tmp_path``; skips when the sg13cmos5l PDK is not fetched."""
+    try:
+        libs_ref = find_pdk("ihp-sg13cmos5l")["assets"]["libs_ref"]
+    except PdkNotFoundError:
+        pytest.skip("ihp-sg13cmos5l PDK not fetched")
+    stdcell = Path(libs_ref or "") / "sg13cmos5l_stdcell"
+    gds = stdcell / "gds" / "sg13cmos5l_stdcell.gds"
+    spice = stdcell / "spice" / "sg13cmos5l_stdcell.spice"
+    if not (gds.is_file() and spice.is_file()):
+        pytest.skip("sg13cmos5l_stdcell not present in the fetched PDK")
+    src = kdb.Layout()
+    src.read(str(gds))
+    cell = src.cell("sg13cmos5l_inv_1")
+    out = kdb.Layout()
+    out.dbu = src.dbu
+    top = out.create_cell("sg13cmos5l_inv_1")
+    top.copy_tree(cell)
+    gds_out = tmp_path / "inv_1.gds"
+    out.write(str(gds_out))
+    lines = spice.read_text().splitlines()
+    start = next(
+        i
+        for i, ln in enumerate(lines)
+        if ln.lower().startswith(".subckt sg13cmos5l_inv_1 ")
+    )
+    end = next(
+        i for i in range(start, len(lines)) if lines[i].lower().startswith(".ends")
+    )
+    sp_out = tmp_path / "inv_1.spice"
+    sp_out.write_text("\n".join(lines[start : end + 1]) + "\n")
+    return gds_out, sp_out
+
+
+@pytest.mark.parametrize(
+    ("label_layers", "pins"),
+    [(None, 1), ({"metal0": [8, 25]}, 4)],
+)
+def test_lvs_sg13cmos5l_stdcell_inv_1_matches_own_subckt(tmp_path, label_layers, pins):
+    """Issue #3831: the PDK's own inverter draws no `nSD` (n+ is implicit), so
+    the well tie is unimplanted Activ in NWell -- `tap_nplus_complement`
+    (`pSD` absence) must derive it, or the PMOS body floats and the compare
+    reports device.unmatched / net.merged / net.split. The stdcell writes its
+    pin names on Metal1.text (8/25), not the deck's default Metal1.pin (8/2),
+    so pins only promote with the `label_layers` override."""
+    gds, spice = _stdcell_inv_1(tmp_path)
+    layout = {"file": str(gds), "deck": "sg13cmos5l"}
+    if label_layers is not None:
+        layout["label_layers"] = label_layers
+    request = {
+        "layout": layout,
+        "reference": {
+            "netlist": str(spice),
+            "cell": "sg13cmos5l_inv_1",
+            "form": "subckt-call",
+        },
+        "engine": "klayout",
+    }
+    report = run_lvs(json.dumps(request))
+    assert report["status"] == "match"
+    assert report["counts"]["devices"] == {"layout": 2, "reference": 2, "matched": 2}
+    assert report["counts"]["pins"]["layout"] == pins
+    errors = [m for m in report["mismatches"] if m["severity"] == "error"]
+    assert errors == []

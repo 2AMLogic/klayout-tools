@@ -183,7 +183,12 @@ Let `X.Y.Z` be the new version.
    The workflow builds the tagged commit with `uv build` and publishes the
    resulting sdist/wheel with `uv publish` under PyPI trusted publishing.
 
-4. **Regenerate the deck history table** now that the new tag exists (the
+4. **Fill in availability notes.** Replace "the next release after 0.7.0"
+   in the `--attest` / `--inventory` availability notes in
+   `docs/cli/signoff.md` with `X.Y.Z` (and likewise for any later "not in
+   release" note), in the same release PR or a follow-up.
+
+5. **Regenerate the deck history table** now that the new tag exists (the
    generator can only see tags that have already been pushed — see
    `docs/cli/deck.md`'s "Regenerating" section):
 

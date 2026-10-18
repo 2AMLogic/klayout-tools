@@ -46,6 +46,7 @@ import pytest
 from klayout_tools.decks import RuleProvenance
 from klayout_tools.decks import sg13g2 as sg13g2_deck_module
 from klayout_tools.decks.sg13g2 import EXTRACTION_DECK
+from klayout_tools.drc import run_drc
 from klayout_tools.extract import run_extract
 
 _DBU_UM = 0.001
@@ -67,6 +68,62 @@ def _box_um(x0: float, y0: float, x1: float, y1: float) -> kdb.Box:
 def _write_gds(layout: kdb.Layout, path: Path) -> str:
     layout.write(str(path))
     return str(path)
+
+
+# --------------------------------------------------------------------------- #
+# NWell width/space + NW.b1 unchecked marker (issue #3571)
+# --------------------------------------------------------------------------- #
+
+
+def _nwell_layout(tmp_path: Path, name: str, boxes) -> str:
+    layout = kdb.Layout()
+    layout.dbu = _DBU_UM
+    top = layout.create_cell("TOP")
+    for box in boxes:
+        top.shapes(layout.layer(31, 0)).insert(_box_um(*box))
+    return _write_gds(layout, tmp_path / name)
+
+
+def test_run_drc_sg13g2_nwell_width_clean_and_violation(tmp_path: Path):
+    """A 3x3 um NWell is clean; a 0.5 um-wide one trips `nwell.width.1`
+    (NW.a, 0.62 um). `31/0` is no longer unruled."""
+    ok = run_drc(_nwell_layout(tmp_path, "nw_ok.gds", [(0, 0, 3, 3)]), "sg13g2")
+    assert ok["status"] == "clean"
+    assert "nwell.width.1" in ok["coverage"]["rules_checked"]
+    assert "31/0" not in ok["coverage"]["layers_in_stream_without_rules"]
+
+    bad = run_drc(_nwell_layout(tmp_path, "nw_bad.gds", [(0, 0, 0.5, 3)]), "sg13g2")
+    assert bad["status"] == "violations"
+    assert bad["rule_counts"].get("nwell.width.1", 0) >= 1
+
+
+def test_run_drc_sg13g2_nwell_space_violation(tmp_path: Path):
+    """Two wells 0.4 um apart (< NW.b's 0.62 um) trip `nwell.space.1`."""
+    path = _nwell_layout(tmp_path, "nw_sp.gds", [(0, 0, 3, 3), (3.4, 0, 6.4, 3)])
+    report = run_drc(path, "sg13g2")
+    assert report["rule_counts"].get("nwell.space.1", 0) >= 1
+
+
+def test_run_drc_sg13g2_two_wells_report_nw_b1_unchecked(tmp_path: Path):
+    """Issue #3571 repro: two 3x3 um wells 1.0 um apart pass the geometric
+    rules, but the net-aware NW.b1 (1.80 um) is named in
+    `coverage.unchecked_rules` so the `clean` is not read as covering it."""
+    path = _nwell_layout(tmp_path, "nw_b1.gds", [(0, 0, 3, 3), (4, 0, 7, 3)])
+    report = run_drc(path, "sg13g2")
+    assert report["status"] == "clean"
+    unchecked = report["coverage"]["unchecked_rules"]
+    assert [u["rule"] for u in unchecked] == ["NW.b1"]
+    assert unchecked[0]["layer"] == "31/0"
+
+
+def test_run_drc_sg13g2_no_nwell_no_unchecked_marker(tmp_path: Path):
+    """No NWell in the stream -> no NW.b1 marker."""
+    layout = kdb.Layout()
+    layout.dbu = _DBU_UM
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(8, 0)).insert(_box_um(0, 0, 0.21, 4))
+    report = run_drc(_write_gds(layout, tmp_path / "no_nw.gds"), "sg13g2")
+    assert report["coverage"]["unchecked_rules"] == []
 
 
 # --------------------------------------------------------------------------- #
@@ -2116,3 +2173,69 @@ def test_golden_pairs_cover_every_provenanced_sg13g2_device_rule():
     entry) added without a matching golden-pair test fails this assertion
     loudly instead of silently under-covering."""
     assert _provenanced_device_rule_ids() == _GOLDEN_PAIR_TESTED_RULE_IDS
+
+
+# --------------------------------------------------------------------------- #
+# pSD width/space/area (issue #3787)
+# --------------------------------------------------------------------------- #
+
+
+def _psd_gds(tmp_path: Path, boxes_um: list[tuple[float, float, float, float]]) -> str:
+    layout = kdb.Layout()
+    layout.dbu = _DBU_UM
+    top = layout.create_cell("TOP")
+    layer = layout.layer(14, 0)
+    for box in boxes_um:
+        top.shapes(layer).insert(_box_um(*box))
+    return _write_gds(layout, tmp_path / "psd.gds")
+
+
+def _psd_rule_ids(report: dict) -> set[str]:
+    return {v["rule"] for v in report["violations"]}
+
+
+def test_sg13g2_psd_rules_cite_the_maximal_runset():
+    rules = {r.id: r for r in sg13g2_deck_module.DECK if r.scope == "pSD"}
+    assert {k: r.provenance.rule_id for k, r in rules.items()} == {
+        "psd.width.1": "pSD.a",
+        "psd.space.1": "pSD.b",
+        "psd.area.1": "pSD.k",
+    }
+    for rule in rules.values():
+        assert rule.provenance.source_path.endswith("rule_decks/sg13g2_maximal.drc")
+
+
+def test_run_drc_sg13g2_psd_width_violation(tmp_path: Path):
+    report = run_drc(_psd_gds(tmp_path, [(0, 0, 0.2, 2.0)]), "sg13g2")
+    assert "psd.width.1" in _psd_rule_ids(report)
+
+
+def test_run_drc_sg13g2_psd_space_violation(tmp_path: Path):
+    report = run_drc(
+        _psd_gds(tmp_path, [(0, 0, 1.0, 1.0), (1.2, 0, 2.2, 1.0)]), "sg13g2"
+    )
+    assert _psd_rule_ids(report) == {"psd.space.1"}
+
+
+def test_run_drc_sg13g2_psd_area_violation(tmp_path: Path):
+    report = run_drc(_psd_gds(tmp_path, [(0, 0, 0.1, 0.1)]), "sg13g2")
+    assert "psd.area.1" in _psd_rule_ids(report)
+
+
+def test_run_drc_sg13g2_psd_clean_and_no_longer_uncovered(tmp_path: Path):
+    report = run_drc(_psd_gds(tmp_path, [(0, 0, 1.0, 1.0)]), "sg13g2")
+    assert report["status"] == "clean", report["violations"]
+    assert [14, 0] not in [
+        list(layer) for layer in report["coverage"]["layers_in_stream_without_rules"]
+    ]
+
+
+def test_run_drc_sg13g2_psd_subminimum_area_inside_merged_shape_is_clean(
+    tmp_path: Path,
+):
+    """Area is per merged polygon: a small box fused into a larger pSD shape
+    must not be flagged on its own."""
+    report = run_drc(
+        _psd_gds(tmp_path, [(0, 0, 1.0, 1.0), (1.0, 0.0, 1.1, 0.4)]), "sg13g2"
+    )
+    assert "psd.area.1" not in _psd_rule_ids(report)
