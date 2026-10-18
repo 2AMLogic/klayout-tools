@@ -3199,6 +3199,54 @@ def test_default_runner_is_the_only_subprocess_seam(monkeypatch):
     assert calls == [["true"]]
 
 
+def test_default_runner_caps_concurrent_spawns(monkeypatch):
+    """96 shard threads going through the default runner never have more than
+    the spawn cap of CLI processes in flight, but still run concurrently."""
+    import threading
+    import time
+
+    cap = 4
+    monkeypatch.setattr(sb, "_SPAWN_SEMAPHORE", threading.BoundedSemaphore(cap))
+    lock = threading.Lock()
+    state = {"now": 0, "max": 0}
+
+    def fake_run(argv, **kwargs):
+        with lock:
+            state["now"] += 1
+            state["max"] = max(state["max"], state["now"])
+        time.sleep(0.01)
+        with lock:
+            state["now"] -= 1
+        return fake_completed()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    threads = [
+        threading.Thread(target=sb._run_subprocess, args=(["aws"], 1.0))
+        for _ in range(96)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert 1 < state["max"] <= cap
+
+
+def test_default_runner_releases_slot_on_exception(monkeypatch):
+    import threading
+
+    sem = threading.BoundedSemaphore(1)
+    monkeypatch.setattr(sb, "_SPAWN_SEMAPHORE", sem)
+
+    def boom(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, 1.0)
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    for _ in range(2):
+        with pytest.raises(subprocess.TimeoutExpired):
+            sb._run_subprocess(["aws"], 1.0)
+    assert sem.acquire(blocking=False)
+
+
 # --------------------------------------------------------------------------- #
 # Worked example (examples/sim-batch/) -- CI-checkable without AWS: the
 # request is validated through the same `sim.load_request()` path `klt sim`

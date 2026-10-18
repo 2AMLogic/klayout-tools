@@ -2344,10 +2344,19 @@ def _resolve_interrupted_grace_s(batch_spec: dict[str, Any]) -> float:
 # --------------------------------------------------------------------------- #
 
 
+# One slot per concurrent CLI spawn across every shard thread. A hosts=96 run
+# otherwise keeps ~96 ``aws`` processes alive on the submitting host (each poll
+# is a fresh CLI start-up), which saturates a small worker. Held only around the
+# spawn, never around poll sleeps, so threads queue for a slot instead.
+_SPAWN_SLOTS = min(os.cpu_count() or 1, 8)
+_SPAWN_SEMAPHORE = threading.BoundedSemaphore(_SPAWN_SLOTS)
+
+
 def _run_subprocess(
     argv: list[str], timeout_s: float
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout_s)
+    with _SPAWN_SEMAPHORE:
+        return subprocess.run(argv, capture_output=True, text=True, timeout=timeout_s)
 
 
 def job_uri(config: BatchConfig, job_id: str) -> str:
