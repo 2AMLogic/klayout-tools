@@ -5474,7 +5474,7 @@ def _errored_report_without_include_code(artifact_log: str | None = None) -> str
     ],
 )
 def test_log_with_missing_include_classifies_naming_the_file(target):
-    found = sb._missing_include_diagnostic(_include_error_log(target))
+    found = sb._fatal_log_diagnostic(_include_error_log(target))
     assert found is not None
     assert found["code"] == "missing_include"
     assert target in found["message"]
@@ -5510,6 +5510,45 @@ def test_exit_4_batch_job_surfaces_missing_include_from_retrieved_log(
     codes = [d["code"] for d in corners[0]["diagnostics"]]
     assert codes == ["measurement", "missing_include"]
     assert _PDK_INCLUDE in corners[0]["diagnostics"][1]["message"]
+
+
+def test_exit_4_batch_job_surfaces_generic_fatal_from_retrieved_log(
+    tmp_path, monkeypatch
+):
+    """Issue #3879: the log back-fill covers any ngspice deck abort, not only
+    ``missing_include``, and notes that no analysis started."""
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("failed", exit_code="4"))
+    remote_log = "/var/tmp/eda-job-1/outputs/artifacts/tt_1.800_27/ngspice.log"
+    runner.outputs = {
+        "report.json": _errored_report_without_include_code(remote_log),
+        "artifacts/tt_1.800_27/ngspice.log": (
+            "Circuit: * deck\nError on line 7 : bad card\n"
+            "Simulation interrupted due to error!\n"
+        ),
+    }
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+
+    corners, _, _ = sb._run_batch_job(
+        config=_config(tmp_path),
+        job_id="job-1",
+        corner_points=_corner_points(1),
+        netlist_path=str(_write_body(tmp_path)),
+        timeout_s=30.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        artifacts_dir=str(tmp_path / "artifacts"),
+        request={"netlist": "body.spice"},
+        measurements_spec=_measurements_spec(),
+        runner=runner,
+        sleep=runner.sleep,
+    )
+
+    diagnostics = corners[0]["diagnostics"]
+    assert [d["code"] for d in diagnostics] == ["measurement", "ngspice_fatal"]
+    assert diagnostics[1]["message"].startswith("Error on line 7")
+    assert diagnostics[1]["analysis_started"] is False
+    assert "wall-clock" in diagnostics[1]["message"]
 
 
 def test_report_already_carrying_missing_include_is_not_duplicated(
