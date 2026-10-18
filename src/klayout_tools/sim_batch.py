@@ -107,6 +107,7 @@ from typing import TYPE_CHECKING, Any
 from . import (
     _provenance,
     remote_transport,
+    sim_snm_meas,
     sim_staging,
     sim_transfer_meas,
     sim_twoport,
@@ -646,7 +647,8 @@ def _runner_gate_release(version: str) -> str | None:
 #: ``dual_injection`` (``analysis.passes`` / ``measurements[].tian``,
 #: #3159/#3160/#3161), ``complex_vectors`` (``options.complex_vectors``,
 #: #3337), ``twoport`` (``analysis.kind: "twoport"``, #3338), and
-#: ``twoport_noise`` (``analysis.noise``, #3339).
+#: ``twoport_noise`` (``analysis.noise``, #3339), and ``snm``
+#: (``measurements[].snm``, #3895).
 _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
     "analysis_steps": (
         (0, 7, 1),
@@ -656,6 +658,12 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
         (0, 7, 1),
         lambda request: bool(
             sim_transfer_meas.transfer_measurements(request.get("measurements") or [])
+        ),
+    ),
+    "snm": (
+        (0, 7, 1),
+        lambda request: bool(
+            sim_snm_meas.snm_measurements(request.get("measurements") or [])
         ),
     ),
     "stimulus": (
@@ -701,6 +709,7 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
 _MANDATORY_RUNNER_FEATURES = frozenset(
     {
         "transfer",
+        "snm",
         "stimulus",
         "dual_injection",
         "complex_vectors",
@@ -2394,10 +2403,14 @@ def _run_checked(
     label: str,
     *,
     classify: Callable[[str], str | None] | None = None,
+    redact: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run one transport command; any non-zero exit becomes a
     :class:`BatchError`. ``classify``, when given, maps the failed command's
     stderr to the error's machine-readable ``code`` (``None`` = unclassified).
+    ``redact`` (the bucket name) is replaced by ``<bucket>`` in the error
+    message -- after classification, so ``classify`` sees the raw stderr --
+    because the message can reach committed reports (issue #3890).
     """
     try:
         result = runner(argv, timeout_s)
@@ -2407,9 +2420,12 @@ def _run_checked(
         raise BatchError(f"{label} could not be spawned: {exc}") from exc
     if result.returncode != 0:
         detail = (result.stderr or "").strip()
+        code = classify(detail) if classify is not None else None
+        if redact:
+            detail = detail.replace(redact, "<bucket>")
         raise BatchError(
             f"{label} failed (exit {result.returncode}): {detail}",
-            code=classify(detail) if classify is not None else None,
+            code=code,
         )
     return result
 
@@ -2512,6 +2528,7 @@ def submit_job(
                 ),
                 _BATCH_AWS_TIMEOUT_S,
                 f"aws s3 cp ({item.label} input)",
+                redact=config.bucket,
             )
         job_json_path = os.path.join(staging, "job.json")
         with open(job_json_path, "w", encoding="utf-8") as handle:
@@ -2528,6 +2545,7 @@ def submit_job(
             ),
             _BATCH_AWS_TIMEOUT_S,
             "aws s3 cp (job.json)",
+            redact=config.bucket,
         )
 
 
@@ -2602,6 +2620,7 @@ def launch_job(
                 _BATCH_LAUNCH_TIMEOUT_S,
                 "batch-fleet-provision.sh launch",
                 classify=_classify_launch_failure,
+                redact=config.bucket,
             )
             return
         except BatchError as exc:
@@ -2891,6 +2910,7 @@ def collect_outputs(
         ),
         _BATCH_AWS_TIMEOUT_S,
         "aws s3 cp (outputs)",
+        redact=config.bucket,
     )
     return local_dir
 

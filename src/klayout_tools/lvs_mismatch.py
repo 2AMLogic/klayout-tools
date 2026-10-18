@@ -8,7 +8,7 @@ construction (:func:`_build_net_correspondence`, :func:`_make_compare_logger`,
 mismatch + tolerance handling (:func:`_classify_param_mismatch`,
 :func:`_parse_parameter_tolerance`, :func:`_collect_tolerance_snaps`,
 :func:`_apply_tolerance_snaps`), and net-mismatch pooling/classification
-(:class:`_UnionFind`, :func:`_net_mismatch_pools`,
+(:class:`UnionFind`, :func:`_net_mismatch_pools`,
 :func:`_classify_net_mismatches`). This mirrors the shape of the earlier
 ``gen_compose.py``/``gen_compose_routing.py`` (#1717), ``_paths.py`` (#1715),
 and ``gen.py``/``gen_pcells`` (#1713) splits: a cohesive, low-coupling
@@ -42,6 +42,8 @@ from __future__ import annotations
 from collections.abc import Iterator, Sequence
 from collections.abc import Set as AbstractSet
 from typing import Any, NamedTuple
+
+from ._unionfind import UnionFind
 
 #: Issue #2461: the ``(device-class name, parameter name)`` pairs -- both
 #: lower-cased -- that a **request-side hook took out of this particular
@@ -2067,31 +2069,6 @@ def _tolerance_disclosure(snap: _ToleratedParam, tolerance: float) -> dict[str, 
 _NetNode = tuple[str, int, str]
 
 
-class _UnionFind:
-    """Minimal union-find over hashable nodes, for the merge/split locality
-    grouping in :func:`_net_mismatch_pools` (issue #1533)."""
-
-    def __init__(self) -> None:
-        self._parent: dict[Any, Any] = {}
-
-    def find(self, node: Any) -> Any:
-        parent = self._parent
-        if node not in parent:
-            parent[node] = node
-            return node
-        root = node
-        while parent[root] != root:
-            root = parent[root]
-        while parent[node] != root:
-            parent[node], node = root, parent[node]
-        return root
-
-    def union(self, a: Any, b: Any) -> None:
-        root_a, root_b = self.find(a), self.find(b)
-        if root_a != root_b:
-            self._parent[root_b] = root_a
-
-
 def _adjacent_nets(net: Any) -> list[Any]:
     """Every net that shares a device terminal or a subcircuit-instance pin
     with ``net`` -- one hop in the netlist's own connectivity graph.
@@ -2119,7 +2096,7 @@ def _adjacent_nets(net: Any) -> list[Any]:
 
 
 def _explore_net_component(
-    groups: _UnionFind, visited: set[_NetNode], side: str, scope: int, net: Any
+    groups: UnionFind, visited: set[_NetNode], side: str, scope: int, net: Any
 ) -> None:
     """Union every net reachable from ``net`` (within its own circuit and its
     own side's netlist) into one component."""
@@ -2197,7 +2174,7 @@ def _net_mismatch_pools(
     ):
         return [tagged]
 
-    groups = _UnionFind()
+    groups = UnionFind()
     visited: set[_NetNode] = set()
     try:
         for (a, b), key in tagged:

@@ -355,6 +355,7 @@
         "klayout_tools.place_and_route_gds_merge",
         "klayout_tools.place_and_route_min_area",
         "klayout_tools.place_and_route_pdn_fit",
+        "klayout_tools.place_and_route_pins",
         "klayout_tools.place_and_route_portable",
         "klayout_tools.place_and_route_power_audit",
         "klayout_tools.place_and_route_reports",
@@ -426,6 +427,7 @@
         "klayout_tools._provenance",
         "klayout_tools._report_verify",
         "klayout_tools._text",
+        "klayout_tools._unionfind",
         "klayout_tools._vendor",
         "klayout_tools._vendor.mutation_variants",
         "klayout_tools._version_scheme",
@@ -487,10 +489,13 @@
         "klayout_tools.sim_raw",
         "klayout_tools.sim_remote",
         "klayout_tools.sim_set",
+        "klayout_tools.sim_snm",
+        "klayout_tools.sim_snm_meas",
         "klayout_tools.sim_staging",
         "klayout_tools.sim_steps",
         "klayout_tools.sim_stimulus",
         "klayout_tools.sim_subckt_override",
+        "klayout_tools.sim_supply_relative",
         "klayout_tools.sim_supply_waveform",
         "klayout_tools.sim_tian",
         "klayout_tools.sim_transfer",
@@ -914,6 +919,11 @@
       "consumer": "lvs",
       "exporter": "netlist",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "lvs",
+      "exporter": "place_and_route",
+      "reason": "Issue #3798: klt lvs reuses place_and_route_portable.portable_response for its opt-in portable_paths rewrite rather than a second path walker."
     },
     {
       "consumer": "lvs",

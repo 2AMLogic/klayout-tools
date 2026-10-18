@@ -20,10 +20,11 @@ from pathlib import Path
 import pytest
 
 from helpers.subprocess_fakes import fake_completed
-from klayout_tools import _paths as paths_module
 from klayout_tools import sim, sim_remote, sim_steps
 
-pytestmark = pytest.mark.usefixtures("real_build_identity_git")
+pytestmark = pytest.mark.usefixtures(
+    "real_build_identity_git", "bare_name_ngspice_resolution"
+)
 
 HAVE_NGSPICE = shutil.which("ngspice") is not None and (
     os.environ.get("KLT_SKIP_NGSPICE_TESTS") != "1"
@@ -35,20 +36,6 @@ _SKIP_NO_NGSPICE = pytest.mark.skipif(
 #: A resistive divider: v(out) = vin * 2/3 with no load, so every number
 #: below is exact by construction (3.0 V -> 2.0 V, 3.3 V -> 2.2 V).
 _BODY = "VIN in 0 3.0\nR1 in out 1k\nR2 out 0 2k\nILOAD out 0 0\n"
-
-
-@pytest.fixture(autouse=True)
-def _bare_name_ngspice_resolution(monkeypatch):
-    """Same stub as `tests/test_sim.py`'s identically-named fixture: the
-    mocked-`subprocess.run` tests below need no real ngspice binary."""
-    real_which = shutil.which
-
-    def fake_which(cmd, *args, **kwargs):
-        if cmd == "ngspice":
-            return cmd
-        return real_which(cmd, *args, **kwargs)
-
-    monkeypatch.setattr(paths_module.shutil, "which", fake_which)
 
 
 def _write_body(tmp_path: Path, text: str = _BODY) -> Path:

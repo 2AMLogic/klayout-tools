@@ -526,7 +526,7 @@ def _signal_routing_layers(cell_library: str) -> tuple[str, ...] | None:
     return stack[low_index : high_index + 1]
 
 
-def _validate_io(io_spec: Any, cell_library: str) -> dict[str, str] | None:
+def _validate_io(io_spec: Any, cell_library: str) -> dict[str, Any] | None:
 
     # Deferred: defined in `place_and_route.py`, which imports this module at
     # its own module scope (same pattern as `place_and_route_sta.py`).
@@ -582,7 +582,74 @@ def _validate_io(io_spec: Any, cell_library: str) -> dict[str, str] | None:
                 f"{', '.join(routable)}"
             )
 
-    return {"layer_h": layer_h, "layer_v": layer_v}
+    result: dict[str, Any] = {"layer_h": layer_h, "layer_v": layer_v}
+    pin_constraints = _validate_pin_constraints(io_spec.get("pin_constraints"))
+    if pin_constraints:
+        result["pin_constraints"] = pin_constraints
+    return result
+
+
+_PIN_EDGES = ("north", "east", "south", "west")
+
+
+def _validate_pin_constraints(raw: Any) -> list[dict[str, Any]]:
+    """Shape-validate ``request.io.pin_constraints`` (issue #3885). Whether a
+    pattern matches a real port is checked later, against the netlist."""
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise PlaceAndRouteError("request.io.pin_constraints must be an array")
+    return [
+        _validate_pin_constraint(entry, f"request.io.pin_constraints[{index}]")
+        for index, entry in enumerate(raw)
+    ]
+
+
+def _validate_pin_constraint(entry: Any, where: str) -> dict[str, Any]:
+    if not isinstance(entry, dict):
+        raise PlaceAndRouteError(f"{where} must be a JSON object")
+    unknown = sorted(set(entry) - {"pins", "edge", "range_um", "ordered"})
+    if unknown:
+        raise PlaceAndRouteError(f"{where} has unknown key(s): {', '.join(unknown)}")
+    pins = entry.get("pins")
+    if not (
+        isinstance(pins, list)
+        and pins
+        and all(isinstance(p, str) and p.strip() for p in pins)
+    ):
+        raise PlaceAndRouteError(f"{where}.pins must be a non-empty array of strings")
+    edge = entry.get("edge")
+    if edge not in _PIN_EDGES:
+        raise PlaceAndRouteError(
+            f"{where}.edge must be one of: {', '.join(_PIN_EDGES)}"
+        )
+    item: dict[str, Any] = {"pins": list(pins), "edge": edge}
+    span = entry.get("range_um")
+    if span is not None:
+        item["range_um"] = _validate_pin_range(span, where)
+    ordered = entry.get("ordered", False)
+    if not isinstance(ordered, bool):
+        raise PlaceAndRouteError(f"{where}.ordered must be a boolean")
+    if ordered:
+        item["ordered"] = True
+    return item
+
+
+def _validate_pin_range(span: Any, where: str) -> list[Any]:
+    if not (
+        isinstance(span, list)
+        and len(span) == 2
+        and all(
+            isinstance(v, (int, float))
+            and not isinstance(v, bool)
+            and math.isfinite(v)
+            and v >= 0
+            for v in span
+        )
+        and span[0] < span[1]
+    ):
+        raise PlaceAndRouteError(f"{where}.range_um must be [lo, hi] with 0 <= lo < hi")
+    return [span[0], span[1]]
 
 
 def _resolve_pdn_preset(

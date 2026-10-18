@@ -14,12 +14,14 @@ the controller only.
 """
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from klayout_tools import _paths as paths_module
 from klayout_tools import _version_scheme, build_identity
 
 
@@ -38,6 +40,26 @@ def real_build_identity_git(monkeypatch):
     # editable install (issue #2823), so it needs the same protection.
     for module in (build_identity, _version_scheme):
         monkeypatch.setattr(module, "subprocess", real)
+
+
+@pytest.fixture
+def bare_name_ngspice_resolution(monkeypatch):
+    """Resolve ``ngspice`` to its bare name, without needing a real install.
+
+    ``sim.py`` resolves the binary via
+    :func:`klayout_tools._paths.resolve_tool_binary` (``shutil.which``) before
+    dispatching any corner (issue #2423), so a mocked-``subprocess.run`` test
+    would otherwise fail on a host with no ``ngspice``. Opt in per module with
+    ``pytestmark = pytest.mark.usefixtures("bare_name_ngspice_resolution")``.
+    Every other name still goes through the real ``which``, so tests gated on
+    their own ``shutil.which("ngspice")`` skip are unaffected.
+    """
+    real_which = shutil.which
+
+    def fake_which(cmd, *args, **kwargs):
+        return cmd if cmd == "ngspice" else real_which(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(paths_module.shutil, "which", fake_which)
 
 
 @pytest.fixture(autouse=True)
