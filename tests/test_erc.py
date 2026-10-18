@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 
 import klayout.db as kdb
@@ -2287,6 +2288,118 @@ def test_unconnected_net_does_not_flag_single_island(tmp_path):
     findings = [f for f in report["erc_findings"] if f["rule"] == "erc.unconnected_net"]
 
     assert findings == []
+
+
+def test_extractor_global_net_is_not_reported_unconnected_and_is_disclosed(tmp_path):
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    top.shapes(li1).insert(kdb.Box.new(_um(5), _um(0), _um(6), _um(1)))
+    top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(5.5), _um(0.5))))
+    gds = tmp_path / "global.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "global.erc.json"
+    _write_spec(
+        spec,
+        _nets_spec(
+            nets=[
+                {"name": "VDD", "kind": "supply"},
+                {"name": "SUB", "kind": "supply", "extractor_global": True},
+            ]
+        ),
+    )
+
+    report = run_erc(str(gds), str(spec))
+
+    assert [
+        f for f in report["erc_findings"] if f["rule"] == "erc.unconnected_net"
+    ] == []
+    coverage = report["erc_coverage"]
+    assert {"id": 'erc.net_connectivity:["SUB"]', "reason": "extractor_global_net"} in (
+        coverage["inapplicable"]
+    )
+    assert 'erc.net_connectivity:["VDD"]' in coverage["checked"]
+    assert 'erc.net_connectivity:["SUB"]' not in coverage["checked"]
+    assert [n["name"] for n in report["nets"]] == ["VDD"]
+    assert all(f["net"] != "SUB" for f in report["erc_findings"])
+
+
+def test_same_net_without_extractor_global_is_still_reported(tmp_path):
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    gds = tmp_path / "notglobal.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "notglobal.erc.json"
+    _write_spec(spec, _nets_spec(nets=[{"name": "SUB", "kind": "supply"}]))
+
+    report = run_erc(str(gds), str(spec))
+
+    assert [
+        f["net"] for f in report["erc_findings"] if f["rule"] == "erc.unconnected_net"
+    ] == ["SUB"]
+
+
+@pytest.mark.parametrize(
+    "entry, fragment",
+    [
+        ({"extractor_global": "yes"}, "must be a boolean"),
+        ({"extractor_global": True, "islands": 2}, "conflicts with nets[0].islands"),
+        ({"extractor_global": True, "roles": ["li1"]}, "conflicts with nets[0].roles"),
+        (
+            {"extractor_global": True, "same_net_as": "OTHER"},
+            "conflicts with nets[0].same_net_as",
+        ),
+    ],
+)
+def test_extractor_global_spec_errors(tmp_path, entry, fragment):
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    gds = tmp_path / "bad.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "bad.erc.json"
+    _write_spec(
+        spec,
+        _nets_spec(nets=[{"name": "SUB", **entry}, {"name": "OTHER"}]),
+    )
+
+    with pytest.raises(ErcError, match=re.escape(fragment)):
+        run_erc(str(gds), str(spec))
+
+
+def test_same_net_as_naming_an_extractor_global_net_is_a_spec_error(tmp_path):
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    gds = tmp_path / "ref.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "ref.erc.json"
+    _write_spec(
+        spec,
+        _nets_spec(
+            nets=[
+                {"name": "SUB", "extractor_global": True},
+                {"name": "VSS", "same_net_as": "SUB"},
+            ]
+        ),
+    )
+
+    with pytest.raises(ErcError, match="extractor_global"):
+        run_erc(str(gds), str(spec))
+
+
+def test_text_output_names_skipped_coverage_entries(capsys):
+    from klayout_tools.cli.erc_cmd import _print_skipped_coverage
+
+    _print_skipped_coverage({"erc_coverage": {"skipped": []}})
+    assert capsys.readouterr().out == ""
+    _print_skipped_coverage(
+        {
+            "erc_coverage": {
+                "skipped": [
+                    {
+                        "id": 'erc.missing_tie:["nwell_tie"]',
+                        "reason": "degenerate_tap_declaration",
+                    }
+                ]
+            }
+        }
+    )
+    out = capsys.readouterr().out
+    assert 'erc.missing_tie:["nwell_tie"]: degenerate_tap_declaration' in out
 
 
 def test_multiply_driven_net_flags_shorted_signal_nets(tmp_path):
@@ -8277,3 +8390,598 @@ def test_omit_antenna_tables_no_gates_entry_survives(tmp_path):
             "no_gates"
         ]
     assert omitted["status"] == full["status"]
+
+
+# --- `klt erc --check` / `--rerun` (issue #3060) --------------------------
+
+
+def _committed_erc_report(tmp_path, *, name="chk", **run_kwargs):
+    """Run ERC on the basic fixture and commit its JSON report; returns
+    ``(gds, spec, report_path)``."""
+    gds = tmp_path / f"{name}.gds"
+    spec = tmp_path / f"{name}.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+    report_path = tmp_path / f"{name}.report.json"
+    report_path.write_text(json.dumps(run_erc(str(gds), str(spec), **run_kwargs)))
+    return gds, spec, report_path
+
+
+def test_check_erc_report_clean_pass(tmp_path):
+    _, _, report_path = _committed_erc_report(tmp_path)
+
+    result = erc.check_erc_report(str(report_path))
+
+    assert result["schema_version"] == 1
+    assert result["mode"] == "check"
+    assert result["status"] == "match"
+    assert {c["field"] for c in result["checks"]} == {
+        "provenance.input.content_hash",
+        "provenance.spec.content_hash",
+    }
+    assert all(c["match"] for c in result["checks"])
+    assert result["advisories"] == []
+
+
+def test_check_erc_report_detects_layout_drift(tmp_path):
+    gds, _, report_path = _committed_erc_report(tmp_path)
+    gds.write_bytes(gds.read_bytes() + b"\0\0")
+
+    result = erc.check_erc_report(str(report_path))
+
+    assert result["status"] == "drifted"
+    by_field = {c["field"]: c for c in result["checks"]}
+    assert by_field["provenance.input.content_hash"]["match"] is False
+    assert by_field["provenance.spec.content_hash"]["match"] is True
+
+
+def test_check_erc_report_detects_spec_drift(tmp_path):
+    _, spec, report_path = _committed_erc_report(tmp_path)
+    spec.write_text(spec.read_text() + "\n")
+
+    result = erc.check_erc_report(str(report_path))
+
+    assert result["status"] == "drifted"
+    by_field = {c["field"]: c for c in result["checks"]}
+    assert by_field["provenance.spec.content_hash"]["match"] is False
+    assert by_field["provenance.input.content_hash"]["match"] is True
+
+
+def test_check_erc_report_missing_recorded_hash_is_drifted(tmp_path):
+    _, _, report_path = _committed_erc_report(tmp_path)
+    report = json.loads(report_path.read_text())
+    del report["provenance"]["spec"]
+    report_path.write_text(json.dumps(report))
+
+    result = erc.check_erc_report(str(report_path))
+
+    assert result["status"] == "drifted"
+    by_field = {c["field"]: c for c in result["checks"]}
+    assert by_field["provenance.spec.content_hash"]["expected"] is None
+    assert by_field["provenance.spec.content_hash"]["match"] is False
+
+
+def test_check_erc_report_flags_input_not_found(tmp_path):
+    gds, _, report_path = _committed_erc_report(tmp_path)
+    gds.unlink()
+
+    result = erc.check_erc_report(str(report_path))
+
+    assert result["status"] == "drifted"
+    by_field = {c["field"]: c for c in result["checks"]}
+    assert "input_not_found" in by_field["provenance.input.content_hash"]
+
+
+def test_check_erc_report_version_drift_is_an_advisory_only(tmp_path):
+    _, _, report_path = _committed_erc_report(tmp_path)
+    report = json.loads(report_path.read_text())
+    report["provenance"]["klt_version"] = "0.0.0-not-this-build"
+    report_path.write_text(json.dumps(report))
+
+    result = erc.check_erc_report(str(report_path))
+
+    assert result["status"] == "match"
+    assert [a["field"] for a in result["advisories"]] == ["provenance.klt_version"]
+
+
+def test_check_erc_report_missing_or_invalid_report_is_a_clean_error(tmp_path):
+    with pytest.raises(ErcError, match="committed report not found"):
+        erc.check_erc_report(str(tmp_path / "nope.json"))
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json")
+    with pytest.raises(ErcError, match="not valid JSON"):
+        erc.check_erc_report(str(bad))
+
+
+def test_rerun_erc_report_match(tmp_path):
+    _, _, report_path = _committed_erc_report(tmp_path)
+
+    result = erc.rerun_erc_report(str(report_path))
+
+    assert result["mode"] == "rerun"
+    assert result["status"] == "match"
+    assert result["drift"] == []
+
+
+def test_rerun_erc_report_replays_findings_only_and_pdk(tmp_path):
+    _, _, findings_only = _committed_erc_report(tmp_path, name="fo", findings_only=True)
+    _, _, with_pdk = _committed_erc_report(tmp_path, name="pk", pdk="sky130")
+
+    assert erc.rerun_erc_report(str(findings_only))["status"] == "match"
+    assert erc.rerun_erc_report(str(with_pdk))["status"] == "match"
+
+
+def test_rerun_erc_report_replays_omit_antenna_tables(tmp_path):
+    _, _, report = _committed_erc_report(
+        tmp_path, findings_only=True, omit_antenna_tables=True
+    )
+
+    result = erc.rerun_erc_report(str(report))
+
+    assert result["status"] == "match"
+    assert result["drift"] == []
+
+
+def test_rerun_erc_report_names_verdict_drift(tmp_path):
+    _, _, report_path = _committed_erc_report(tmp_path)
+    report = json.loads(report_path.read_text())
+    report["gate_count"] = 99
+    report_path.write_text(json.dumps(report))
+
+    result = erc.rerun_erc_report(str(report_path))
+
+    assert result["status"] == "drifted"
+    assert "gate_count" in {d["field"] for d in result["drift"]}
+
+
+def test_rerun_erc_report_without_file_field_is_a_clean_error(tmp_path):
+    _, _, report_path = _committed_erc_report(tmp_path)
+    report = json.loads(report_path.read_text())
+    del report["file"]
+    report_path.write_text(json.dumps(report))
+
+    with pytest.raises(ErcError, match="no 'file' field to rerun"):
+        erc.rerun_erc_report(str(report_path))
+
+
+def test_cli_check_exit_codes_and_json(tmp_path, capsys):
+    gds, _, report_path = _committed_erc_report(tmp_path)
+
+    assert main(["erc", "--check", str(report_path), "--format", "json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["status"] == "match"
+    assert data["mode"] == "check"
+
+    gds.write_bytes(gds.read_bytes() + b"\0\0")
+    assert main(["erc", "--check", str(report_path), "--format", "json"]) == 3
+    assert json.loads(capsys.readouterr().out)["status"] == "drifted"
+
+    assert main(["erc", "--check", str(report_path)]) == 3
+    out = capsys.readouterr().out
+    assert "[DRIFTED] provenance.input.content_hash" in out
+
+
+def test_cli_check_rerun_text_and_json(tmp_path, capsys):
+    _, _, report_path = _committed_erc_report(tmp_path)
+
+    assert main(["erc", "--check", str(report_path), "--rerun"]) == 0
+    capsys.readouterr()
+    assert (
+        main(["erc", "--check", str(report_path), "--rerun", "--format", "json"]) == 0
+    )
+    assert json.loads(capsys.readouterr().out)["mode"] == "rerun"
+
+
+def test_cli_check_is_exclusive_with_file_and_spec(tmp_path):
+    gds, spec, report_path = _committed_erc_report(tmp_path)
+
+    for extra in ([str(gds)], [str(gds), str(spec)]):
+        with pytest.raises(SystemExit) as excinfo:
+            main(["erc", *extra, "--check", str(report_path)])
+        assert excinfo.value.code == 2
+
+
+def test_cli_rerun_without_check_and_missing_inputs_are_clean_errors(tmp_path, capsys):
+    gds, spec, _ = _committed_erc_report(tmp_path)
+
+    assert main(["erc", str(gds), str(spec), "--rerun"]) == 1
+    assert "--rerun requires --check" in capsys.readouterr().err
+    assert main(["erc"]) == 1
+    assert main(["erc", str(gds)]) == 1
+
+
+def test_cli_check_missing_report_is_a_clean_error(tmp_path, capsys):
+    assert main(["erc", "--check", str(tmp_path / "nope.json")]) == 1
+    assert "committed report not found" in capsys.readouterr().err
+
+
+# --- ties[].well_complement_of (issue #3750) --------------------------------
+# The substrate of a p-bulk process is "everything outside the n-well shapes":
+# no layer draws it. `well_complement_of` derives it from the stream (extent
+# minus the named layers) so it neither degrades to the whole die nor goes
+# stale like a hand-kept `well_boxes` list.
+
+
+def _complement_tie(complement="10/0", **overrides):
+    return {
+        "name": "substrate_tie",
+        "well_layer": None,
+        "well_complement_of": complement,
+        "tap_layer": "11/0",
+        "tap_requires": ["12/0"],
+        "connect_to": "li1",
+        "net": "VSS",
+        **overrides,
+    }
+
+
+def _run_complement(tmp_path, stem, tie, *, vss_tap=True, edit=None):
+    layout, top = _routed_tie_layout(vss_tap=vss_tap, draw_pwell=False)
+    if edit is not None:
+        edit(layout, top)
+    gds = tmp_path / f"{stem}.gds"
+    layout.write(str(gds))
+    spec = tmp_path / f"{stem}.erc.json"
+    _write_spec(spec, _routed_tie_spec(ties=[tie]))
+    return run_erc(str(gds), str(spec), pdk="sky130")
+
+
+_COMPLEMENT_ID = 'erc.missing_tie:["substrate_tie"]'
+
+
+def test_well_complement_of_grades_the_substrate_outside_the_nwell(tmp_path):
+    report = _run_complement(tmp_path, "comp_clean", _complement_tie())
+
+    assert [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"] == []
+    assert _COMPLEMENT_ID in report["erc_coverage"]["checked"]
+    assert report["erc_coverage"]["skipped"] == []
+    assert report["erc_coverage"]["checked_by_well_assertion"] == [_COMPLEMENT_ID]
+    assert report["erc_coverage"]["well_assertion_coverage"] == []
+
+
+def test_well_complement_of_list_form_matches_the_string_form(tmp_path):
+    report = _run_complement(tmp_path, "comp_list", _complement_tie(["10/0", "98/0"]))
+
+    assert _COMPLEMENT_ID in report["erc_coverage"]["checked"]
+    assert [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"] == []
+
+
+def test_a_tap_in_the_nwell_does_not_satisfy_the_substrate_tie(tmp_path):
+    """Only the VDD tap (inside the n-well) is drawn; the VSS one is gone."""
+    report = _run_complement(tmp_path, "comp_missing", _complement_tie(), vss_tap=False)
+
+    missing = [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"]
+    assert len(missing) == 1
+    assert missing[0]["net"] == "VSS"
+    assert report["erc_status"] == "violations"
+
+
+def test_moving_the_nwell_changes_the_graded_region_without_a_spec_edit(tmp_path):
+    """Same spec, same VSS tap: once the n-well is redrawn over the tap, the
+    tap is no longer in the substrate and the tie is reported."""
+
+    def cover_the_tap(layout, top):
+        nwell = layout.layer(10, 0)
+        top.shapes(nwell).clear()
+        top.shapes(nwell).insert(kdb.Box.new(_um(0), _um(0), _um(20), _um(6)))
+
+    report = _run_complement(
+        tmp_path, "comp_moved", _complement_tie(), edit=cover_the_tap
+    )
+
+    missing = [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"]
+    assert len(missing) == 1
+
+
+def test_well_complement_of_a_layer_with_no_geometry_is_degenerate(tmp_path):
+    report = _run_complement(tmp_path, "comp_empty", _complement_tie("98/0"))
+
+    assert _tie_skips(report) == {_COMPLEMENT_ID: "degenerate_well_assertion"}
+    assert _COMPLEMENT_ID not in report["erc_coverage"]["checked"]
+    assert report["erc_status"] == "clean_partial"
+
+
+def test_a_well_covering_the_whole_die_leaves_no_substrate_to_grade(tmp_path):
+    def blanket(layout, top):
+        top.shapes(layout.layer(10, 0)).insert(
+            kdb.Box.new(_um(0), _um(0), _um(20), _um(12))
+        )
+
+    report = _run_complement(tmp_path, "comp_blanket", _complement_tie(), edit=blanket)
+
+    assert _tie_skips(report) == {_COMPLEMENT_ID: "degenerate_well_assertion"}
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        ({"well_boxes": [[0.0, 0.0, 4.0, 4.0]]}, "well_boxes and well_complement_of"),
+        ({"well_layer": "10/0"}, r"well_layer must be null"),
+        ({"well_complement_of": []}, "non-empty array"),
+        ({"well_complement_of": 5}, "non-empty array"),
+        ({"well_complement_of": ["10-0"]}, r"well_complement_of\[0\]"),
+        ({"well_requires": ["12/0"]}, "must name one"),
+    ],
+)
+def test_well_complement_of_spec_errors(tmp_path, overrides, match):
+    gds, spec = _native_substrate_spec_error(
+        tmp_path, "comp_err", _complement_tie(**overrides)
+    )
+    with pytest.raises(ErcError, match=match):
+        run_erc(str(gds), str(spec))
+
+
+# --- recipe: supply-rail continuity + well ties across abutting cells (#3804) -
+#
+# No dedicated verb: `nets[]` (kind "supply") plus `ties[]` already express
+# "the rail is one island through every abutted cell, on one net name" and
+# "every well has a tap on the rail". The fixture is a row of three abutting
+# cells, each drawing a 10 um ``li1`` rail segment labelled with its rail name
+# and an ``nwell`` with a tap strapped to the rail; each case perturbs one
+# thing. `docs/cli/erc.md` § "Recipe: supply-rail continuity ..." quotes this
+# spec.
+
+_RAIL_CELL_W_UM = 10.0
+
+
+def _rail_spec(rail_nets=("VDD",), roles=None):
+    spec = _nets_spec(
+        nets=[
+            {"name": n, "kind": "supply", **({"roles": roles} if roles else {})}
+            for n in rail_nets
+        ],
+        ties=[
+            {
+                "name": "nwell_tie",
+                "well_layer": "10/0",
+                "tap_layer": "11/0",
+                "tap_is_dedicated": True,
+                "connect_to": "li1",
+                "net": "VDD",
+            }
+        ],
+    )
+    return spec
+
+
+def _rail_row_report(
+    tmp_path,
+    name,
+    *,
+    gap_before=None,
+    rail_names=("VDD", "VDD", "VDD"),
+    tap_in=(True, True, True),
+    rail_nets=("VDD",),
+    roles=None,
+):
+    """Three abutted rail cells. ``gap_before`` = index of a cell that is
+    shifted right by 0.5 um (a rail cut at that abutment); ``rail_names``
+    = the label each cell's rail segment carries; ``tap_in`` = whether each
+    cell's well gets a tap."""
+    layout = kdb.Layout()
+    layout.dbu = DBU
+    poly = layout.layer(1, 0)
+    li1 = layout.layer(3, 0)
+    label = layout.layer(3, 5)
+    nwell = layout.layer(10, 0)
+    tap = layout.layer(11, 0)
+    top = layout.create_cell("TOP")
+    # No gate geometry: a passive-only cell that declares `nets[]`/`ties[]`
+    # is a valid run (issue #2896), so the recipe needs no gate at all.
+    del poly  # noqa: F841
+    for i in range(3):
+        cell = layout.create_cell(f"RAILCELL{i}")
+        w = _RAIL_CELL_W_UM
+        cell.shapes(li1).insert(kdb.Box.new(_um(0), _um(0), _um(w), _um(1)))
+        if rail_names[i] is not None:
+            cell.shapes(label).insert(
+                kdb.Text(rail_names[i], kdb.Trans(_um(w / 2), _um(0.5)))
+            )
+        cell.shapes(nwell).insert(kdb.Box.new(_um(1), _um(2), _um(w - 1), _um(4)))
+        if tap_in[i]:
+            cell.shapes(tap).insert(kdb.Box.new(_um(4), _um(2.5), _um(5), _um(3.5)))
+            # Strap from the tap down to the rail.
+            cell.shapes(li1).insert(kdb.Box.new(_um(4), _um(0), _um(5), _um(3.5)))
+        shift = 0.5 if gap_before is not None and i >= gap_before else 0.0
+        top.insert(
+            kdb.CellInstArray(cell.cell_index(), kdb.Trans(_um(20 + i * w + shift), 0))
+        )
+
+    gds = tmp_path / f"{name}.gds"
+    layout.write(str(gds))
+    spec = tmp_path / f"{name}.erc.json"
+    _write_spec(spec, _rail_spec(rail_nets, roles))
+    return run_erc(str(gds), str(spec), top="TOP")
+
+
+def _rules(report):
+    return sorted({f["rule"] for f in report["erc_findings"]})
+
+
+def _rail_findings(report, rule):
+    return [f for f in report["erc_findings"] if f["rule"] == rule]
+
+
+def test_rail_recipe_clean_row(tmp_path):
+    """(a) Rail continuous, one net name, every well tapped: `erc_status`
+    is plain `clean` (the tie is checked, not skipped) and the CLI exits 0
+    on the connectivity half (no `--pdk`, so the antenna `status` is
+    `not_checked`)."""
+    report = _rail_row_report(tmp_path, "rail_clean")
+
+    assert report["erc_findings"] == []
+    assert report["erc_status"] == "clean"
+    assert report["erc_coverage"]["skipped"] == []
+    assert 'erc.missing_tie:["nwell_tie"]' in report["erc_coverage"]["checked"]
+    assert report["nets"][0]["matched_islands"] == 1
+
+
+def test_rail_recipe_rail_cut_at_abutment(tmp_path):
+    """(b) A 0.5 um gap at the cell1|cell2 abutment cuts the rail: one
+    `erc.unconnected_net` for VDD whose `islands[]` boxes put the break
+    between x=40.0 and x=40.5 um."""
+    report = _rail_row_report(tmp_path, "rail_cut", gap_before=2)
+
+    assert _rules(report) == ["erc.unconnected_net"]
+    (finding,) = report["erc_findings"]
+    assert finding["net"] == "VDD"
+    assert "2 disconnected electrical islands" in finding["description"]
+    rights = sorted((i["bbox"]["left"], i["bbox"]["right"]) for i in finding["islands"])
+    assert rights == [(_um(20), _um(40)), (_um(40.5), _um(50.5))]
+    assert report["erc_status"] == "violations"
+
+
+def test_rail_recipe_different_rail_net_at_abutment(tmp_path):
+    """(c) The last cell's rail is labelled VSS but is drawn continuous with
+    the VDD rail: the two declared supplies share an island, so
+    `erc.supply_short` (not `erc.unconnected_net` -- the rail is not cut)."""
+    report = _rail_row_report(
+        tmp_path,
+        "rail_swap",
+        rail_names=("VDD", "VDD", "VSS"),
+        rail_nets=("VDD", "VSS"),
+    )
+
+    assert _rules(report) == ["erc.supply_short"]
+    (finding,) = report["erc_findings"]
+    assert {finding["net"], finding["other_net"]} == {"VDD", "VSS"}
+    assert report["erc_status"] == "violations"
+
+
+def test_rail_recipe_well_without_tap(tmp_path):
+    """(d) The middle cell's well has no tap: one `erc.missing_tie`, the
+    rail itself still continuous."""
+    report = _rail_row_report(tmp_path, "rail_notap", tap_in=(True, False, True))
+
+    assert _rules(report) == ["erc.missing_tie"]
+    (finding,) = report["erc_findings"]
+    assert finding["net"] == "VDD"
+    assert "no 'nwell_tie' tap contact drawn" in finding["description"]
+    assert report["erc_status"] == "violations"
+
+
+def test_rail_recipe_cli_exit_code_on_connectivity_break(tmp_path):
+    """The CLI exits 3 on a connectivity finding (and the recipe gates on
+    `erc_status`, not the code -- exit 4 is the antenna half's
+    `not_checked`, not a failure)."""
+    _rail_row_report(tmp_path, "rail_cli", gap_before=2)
+
+    code = main(
+        [
+            "erc",
+            str(tmp_path / "rail_cli.gds"),
+            str(tmp_path / "rail_cli.erc.json"),
+            "--top",
+            "TOP",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert code == 3
+
+
+def test_rail_recipe_cut_with_unlabelled_cell_needs_roles(tmp_path):
+    """Edge case: the cut cell carries no rail label. Plain `nets[]` counts
+    only *labelled* islands (issue #2497), so the cut is invisible and the
+    rail check reads clean (only the unlabelled cell's now-unreachable tap
+    trips `erc.missing_tie`); declaring `roles` on the net makes the unlabelled
+    orphan an `erc.unlabelled_conductor` finding. This is the recipe's
+    stated blind spot, pinned so the doc cannot overclaim."""
+    kwargs = dict(gap_before=2, rail_names=("VDD", "VDD", None))
+
+    blind = _rail_row_report(tmp_path, "rail_blind", **kwargs)
+    assert _rules(blind) == ["erc.missing_tie"]
+
+    seen = _rail_row_report(tmp_path, "rail_roles", roles=["li1"], **kwargs)
+    assert _rules(seen) == ["erc.missing_tie", "erc.unlabelled_conductor"]
+    assert seen["erc_status"] == "violations"
+
+
+# --- ihp-sg13g2 antenna-ratio limits (issue #3784) ---------------------------
+
+
+def _sg13g2_fixture(path, *, metal1_um2: float) -> None:
+    """1 um^2 GatPoly gate strapped through Cont to a Metal1 bar whose area is
+    ``metal1_um2`` (1 um tall, so width == area)."""
+    layout = kdb.Layout()
+    layout.dbu = DBU
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(1, 0)).insert(kdb.Box.new(_um(0), _um(0), _um(1), _um(1)))
+    top.shapes(layout.layer(2, 0)).insert(
+        kdb.Box.new(_um(0.1), _um(0.1), _um(0.3), _um(0.3))
+    )
+    top.shapes(layout.layer(3, 0)).insert(
+        kdb.Box.new(_um(0), _um(0), _um(metal1_um2), _um(1))
+    )
+    layout.write(str(path))
+
+
+def _sg13g2_spec(path, metal_name: str = "Metal1") -> None:
+    _write_spec(
+        path,
+        {
+            "stackup": [
+                {"name": "GatPoly", "layer": "1/0", "role": "gate"},
+                {"name": metal_name, "layer": "3/0"},
+            ],
+            "vias": [
+                {"name": "Cont", "layer": "2/0", "between": ["GatPoly", metal_name]}
+            ],
+        },
+    )
+
+
+@pytest.mark.parametrize(("area", "verdict"), [(250.0, "violate"), (150.0, "pass")])
+def test_sg13g2_antenna_ratio_verdict(tmp_path, area, verdict):
+    gds = tmp_path / "sg13g2.gds"
+    spec = tmp_path / "sg13g2.erc.json"
+    _sg13g2_fixture(gds, metal1_um2=area)
+    _sg13g2_spec(spec)
+
+    report = run_erc(str(gds), str(spec), pdk="ihp-sg13g2")
+
+    assert report["pdk"] == "ihp-sg13g2"
+    level = next(
+        lvl for lvl in report["gates"][0]["levels"] if lvl["layer"] == "Metal1"
+    )
+    assert level["antenna_ratio_max"] == pytest.approx(200.0)
+    assert level["verdict"] == verdict
+    assert "IHP-Open-PDK/blob/v0.3.0" in level["antenna_ratio_source"]
+    assert "sg13g2_tech_default.json" in level["antenna_ratio_source"]
+    assert "'Ant_b'" in level["antenna_ratio_source"]
+
+
+def test_sg13g2_unlisted_role_stays_unchecked_and_partial(tmp_path):
+    gds = tmp_path / "sg13g2.gds"
+    spec = tmp_path / "sg13g2.erc.json"
+    _sg13g2_fixture(gds, metal1_um2=10.0)
+    _sg13g2_spec(spec, metal_name="met1")
+
+    report = run_erc(str(gds), str(spec), pdk="ihp-sg13g2")
+
+    level = next(lvl for lvl in report["gates"][0]["levels"] if lvl["layer"] == "met1")
+    assert level["verdict"] == "unchecked"
+    assert report["status"] == "not_checked"
+
+
+def test_unknown_pdk_error_lists_both_supported_pdks(tmp_path):
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    with pytest.raises(ErcError, match=r"supported: ihp-sg13g2, sky130"):
+        run_erc(str(gds), str(spec), pdk="nope")
+
+
+def test_cli_accepts_pdk_ihp_sg13g2(tmp_path, capsys):
+    gds = tmp_path / "sg13g2.gds"
+    spec = tmp_path / "sg13g2.erc.json"
+    _sg13g2_fixture(gds, metal1_um2=10.0)
+    _sg13g2_spec(spec)
+
+    code = main(["erc", str(gds), str(spec), "--pdk", "ihp-sg13g2", "--format", "json"])
+
+    assert code in (0, 3)
+    assert json.loads(capsys.readouterr().out)["pdk"] == "ihp-sg13g2"

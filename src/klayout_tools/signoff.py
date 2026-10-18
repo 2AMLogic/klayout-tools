@@ -419,7 +419,8 @@ its device/net-count reporting -- exactly as issue #1987 left them. What
 changes is only whether an `extract` citation (or any other wrong-kind one)
 can satisfy a *numbered tier item*.
 
-**Items 1, 2, 9 and 10 are deliberately left unrestricted.** Unlike items
+**Items 1, 2, 9 and 10 were deliberately left unrestricted** (issue #2844
+later restricted 1, 9 and 10 -- see "Attested evidence" below). Unlike items
 3-8 they name no `klt` verb at all, and ``docs/cli/signoff.md``'s "Items
 1, 2, 9, and 10" section states the grading consequence plainly: any
 recognised, passing native kind satisfies them, topical relevance
@@ -441,13 +442,52 @@ documents the four conditions; :func:`_generic_item_binding_refusal` and
 :func:`_grade_evidence` enforce them, and the ``"met"`` citation carries an
 ``artifact_binding`` block disclosing the bound artifact.
 
-Strictly additive: a native citation for these items grades exactly as it
-did before (and carries no ``artifact_binding``, which is how a reader tells
-"a passing envelope was cited" apart from "the item is bound to an audited
-artifact"); items 3-7 and 11 still reject ``"generic"``; item 8 accepts a
-generic envelope with no ``t1_item`` exactly as before, and refuses one that
-declares a different item (:data:`_REASON_WRONG_ITEM`), so an anchored
-attestation for item 9 cannot be replayed onto item 8 either.
+As shipped by issue #2718 this was strictly additive: a native citation for
+these items graded exactly as before (and carried no ``artifact_binding``,
+which is how a reader tells "a passing envelope was cited" apart from "the
+item is bound to an audited artifact"); items 3-7 and 11 still reject
+``"generic"``; item 8 accepts a generic envelope with no ``t1_item`` exactly
+as before, and refuses one that declares a different item
+(:data:`_REASON_WRONG_ITEM`), so an anchored attestation for item 9 cannot
+be replayed onto item 8 either.
+
+## Attested evidence for items 1, 9 and 10 (issue #2844)
+
+Issue #2718 gave these items something to bind to, but no producer: the
+inventory, its hash, the envelope and its ``status: "pass"`` were all
+hand-written. :mod:`.signoff_attest` (``klt signoff --attest {1,9,10}
+--inventory FILE``) is that producer -- it runs item-specific mechanical
+checks over a versioned inventory and emits the same anchored generic
+envelope, graded here with no special path. With a real producer in place,
+:data:`_ITEMS_REQUIRING_ATTESTED_EVIDENCE` restricts items 1, 9 and 10 to
+``{"generic"}`` (:func:`_allowed_kinds_for`), so an unrelated native pass
+no longer turns them green. Item 2 is unchanged.
+
+### Regeneration claims on items 1 and 2 (issue #2887)
+
+An anchored item-1/2 attestation may also carry an optional
+``provenance.regeneration`` object, ``{"generator": <str>,
+"regenerated_hash": "sha256:<hex>"}``: the attester's statement that running
+``generator`` reproduced bytes hashing to ``regenerated_hash``. ``klt
+signoff`` **never executes** ``generator`` -- it is echoed only. What is
+graded is hash equality: ``regenerated_hash`` must equal the hash the bound
+artifact re-hashed to, or the row renders :data:`_REASON_STALE_ARTIFACT`; a
+malformed block renders :data:`_REASON_UNANCHORED_EVIDENCE`. A matching
+claim is disclosed as ``artifact_binding.regeneration`` with
+``executed_by_klt: false``. Absent (or ``null``), the row grades exactly as
+before. Items 9 and 10 neither grade nor echo the block. See
+:func:`_regeneration_claim`.
+
+### Operator-approved generator execution (issue #3289)
+
+``klt signoff --allow-generator-exec --generator-approvals FILE`` (default
+off) lets ``klt`` itself run the claimed ``generator`` -- only if trusted
+approvals **outside the manifest** bind that exact interpreter, script
+(content hash), arguments and artifact -- on the existing Spot batch lifecycle,
+and byte-compare the collected output with the committed artifact. See
+:mod:`.signoff_generator_batch` and :func:`_execute_regeneration`. Without the
+opt-in, or without a matching approval, nothing is submitted and the row is
+the nonexecuting attestation above (``executed_by_klt: false``).
 
 ## Power delivery (structural): item 11 <- `klt erc` + `klt lvs` (+ P&R) (issue #2025)
 
@@ -859,7 +899,7 @@ from typing import (
     get_type_hints,
 )
 
-from ._provenance import INPUT_ROLE_LAYOUT, sha256_file
+from ._provenance import INPUT_ROLE_LAYOUT, layout_geometry_digest, sha256_file
 from ._report_verify import (
     LIST_ITEM,
     build_rerun_result,
@@ -931,6 +971,11 @@ from .signoff_envelopes import _StaEnvelope as _StaEnvelope
 from .signoff_envelopes import _StaRequired as _StaRequired
 from .signoff_envelopes import _YieldEnvelope as _YieldEnvelope
 from .signoff_envelopes import _YieldRequired as _YieldRequired
+from .signoff_generator_batch import (
+    GeneratorExecution,
+    match_approval,
+    run_approved_generator,
+)
 
 # T1 item 11's ("Power delivery (structural)") grading subsystem lives in its
 # own module (issue #2626, split out of this one at ~7600 lines), following
@@ -944,6 +989,14 @@ from .signoff_power_delivery import (
     _build_power_delivery_item,
     _read_power_port_policy,
     _strap_layers,
+)
+from .signoff_runset import (
+    REASON_RUNSET_UNRECOGNISED_DEVICE as _REASON_RUNSET_UNRECOGNISED_DEVICE,
+)
+from .signoff_runset import (
+    runset_disclosure,
+    runset_refusal,
+    unrecognised_device_gaps,
 )
 
 __all__ = [
@@ -1050,7 +1103,10 @@ _MIXED_SIGNAL_PARTITIONS = ("analog", "digital")
 #: and passed as :func:`_build_tier_item`'s ``allowed_kinds`` parameter. An
 #: item id absent from this map (items 1, 2, 9 and 10, today) is
 #: unrestricted (``None``), preserving the original Phase 0/1 behaviour where
-#: any recognised, passing envelope kind satisfies any item.
+#: any recognised, passing envelope kind satisfies any item -- except that
+#: :func:`_allowed_kinds_for` restricts items 1, 9 and 10 to ``"generic"``
+#: through the separate :data:`_ITEMS_REQUIRING_ATTESTED_EVIDENCE` (issue
+#: #2844; see that constant for why it is not an entry here).
 #:
 #: **Every T1 item that names evidence is restricted here** (issue #2044):
 #: items 3-8. The four absent ids are exactly the four
@@ -1175,15 +1231,35 @@ _ITEMS_ACCEPTING_GENERIC_EVIDENCE: frozenset[int] = frozenset({1, 2, 8, 9, 10})
 #: :data:`_REASON_UNANCHORED_EVIDENCE`. The met citation then carries an
 #: ``artifact_binding`` block disclosing what was bound.
 #:
-#: Deliberately **not** in :data:`_ITEM_ALLOWED_KINDS`: these four still
-#: accept any passing native envelope exactly as before (no verdict any
-#: existing manifest renders changes), and so stay "structurally
-#: ungradeable" for the fleet roll-up's blocker reduction
-#: (:func:`_is_structurally_ungradeable_item`). The absence of
-#: ``artifact_binding`` on such a citation is what tells a reader the row
-#: was satisfied by a passing envelope the grader could not judge for
-#: relevance, rather than by an item-bound artifact.
+#: Deliberately **not** in :data:`_ITEM_ALLOWED_KINDS`, and so still
+#: "structurally ungradeable" for the fleet roll-up's blocker reduction
+#: (:func:`_is_structurally_ungradeable_item`). Item 2 still accepts any
+#: passing native envelope exactly as before; items 1, 9 and 10 no longer do
+#: (issue #2844, :data:`_ITEMS_REQUIRING_ATTESTED_EVIDENCE`). The absence of
+#: ``artifact_binding`` on an item-2 native citation is what tells a reader
+#: the row was satisfied by a passing envelope the grader could not judge
+#: for relevance, rather than by an item-bound artifact.
 _ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE: frozenset[int] = frozenset({1, 2, 9, 10})
+
+#: T1 item ids whose **only** accepted evidence is an artifact-anchored
+#: ``"generic"`` envelope (issue #2844) -- items 1 (Design sources), 9
+#: (Testbenches shipped) and 10 (Repo hygiene). Before that issue a passing
+#: native envelope of any recognised kind satisfied them, topical relevance
+#: notwithstanding (a clean `klt drc` report "proved" repo hygiene). Now that
+#: ``klt signoff --attest`` (:mod:`.signoff_attest`) produces a mechanically
+#: derived envelope for exactly these three, :func:`_allowed_kinds_for`
+#: restricts them to ``{"generic"}``, so a native citation renders
+#: ``"unmet"``/:data:`_REASON_WRONG_KIND`.
+#:
+#: Item 2 (Layout) is deliberately absent: it is outside issue #2844's scope
+#: and keeps accepting any passing native envelope as before.
+#:
+#: Kept separate from :data:`_ITEM_ALLOWED_KINDS` on purpose: that table also
+#: decides :func:`_is_structurally_ungradeable_item` and
+#: :func:`_is_graded_by_build`, and moving these ids into it would silently
+#: re-rank the fleet roll-up's ``blocking_item`` (issue #2178) -- a separate
+#: behaviour change this tightening does not make.
+_ITEMS_REQUIRING_ATTESTED_EVIDENCE: frozenset[int] = frozenset({1, 9, 10})
 
 #: T1 item ids a ``"power"``-kind citation (issue #1321, see this module's
 #: "`klt power` (IR-drop/EM) evidence ingestion" docstring section) may
@@ -1734,6 +1810,38 @@ _REASON_UNANCHORED_EVIDENCE = "unanchored_evidence"
 #: unaffected, exactly as before.
 _REASON_WRONG_ITEM = "wrong_item"
 
+#: Issue #2887: an artifact-anchored ``"generic"`` citation for T1 item 1 or
+#: 2 (:data:`_ITEMS_ACCEPTING_REGENERATION_CLAIMS`) whose
+#: ``provenance.regeneration.regenerated_hash`` -- the hash the attester's
+#: own CI recorded after re-running the generator -- differs from the hash
+#: the bound artifact re-hashes to here. The committed artifact is not what
+#: its generator produces: the netlist/stream is out of date with its
+#: sources (or the generator is nondeterministic, which this cannot tell
+#: apart). Distinct from :data:`_REASON_STALE_EVIDENCE`, which says the
+#: artifact changed *after* it was attested; here the attested bytes are
+#: intact but were never fresh. Grouped with the "a check ran and did not
+#: pass" reasons: the remedy is to regenerate and commit the artifact, then
+#: re-attest. ``klt signoff`` never runs the generator itself.
+_REASON_STALE_ARTIFACT = "stale_artifact"
+
+#: T1 item ids whose artifact-anchored ``"generic"`` citation may carry a
+#: ``provenance.regeneration`` claim (issue #2887): items 1 (Design sources:
+#: the netlist is derived from the schematic) and 2 (Layout: the stream may
+#: be generated). Items 9 and 10 bind inventories/records that have no
+#: generator, so the block is neither graded nor echoed for them.
+_ITEMS_ACCEPTING_REGENERATION_CLAIMS: frozenset[int] = frozenset({1, 2})
+
+#: The only ``regenerated_hash`` shape accepted: the ``sha256:<64 lowercase
+#: hex>`` form every `klt` re-hash produces (``_provenance.sha256_file``),
+#: so a placeholder or differently-encoded digest is refused as malformed
+#: instead of reading as a stale artifact.
+_REGENERATED_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+#: ``provenance.regeneration.hash_kind`` values: raw bytes (default) or the
+#: decoded-geometry digest, which ignores GDS/OASIS write timestamps.
+_HASH_KIND_BYTES = "bytes"
+_HASH_KIND_GEOMETRY = "geometry"
+
 #: Issue #2342: the evidence entry carried a ``"pointer"`` (an RFC 6901 JSON
 #: Pointer naming where inside the cited document the envelope lives -- see
 #: :func:`_resolve_json_pointer`), and that pointer did not resolve to a JSON
@@ -1832,6 +1940,16 @@ _REASON_NOT_POST_LAYOUT = "not_post_layout"
 #: check did not fail on its own terms, it simply measured nothing -- and the
 #: fix is to re-run it with something to check, not to fix a defect it found.
 _REASON_NOTHING_CHECKED = "nothing_checked"
+
+#: Issue #3769: a recognised `klt sim` envelope whose own ``coverage`` block
+#: declares measurements (``measurements_declared > 0``) but applied no spec
+#: bound to any of them (``measurements_with_limits == 0``). Its per-corner
+#: ``status: pass`` only means "every measurement produced a value", so
+#: citing it for corner verification would satisfy the item with no bound
+#: ever checked. Grouped with :data:`_REASON_NOTHING_CHECKED` per issue
+#: #826's invariant: the fix is to copy the spec bounds into the request's
+#: ``measurements[].limits`` and re-run, not to fix a defect it found.
+_REASON_NO_LIMITS_CHECKED = "no_limits_checked"
 
 #: Issue #2467: the evidence resolved to a readable, recognised, *passing*
 #: `klt yield` envelope, but at least one of its own measurements reports
@@ -3311,9 +3429,35 @@ def _coverage_refusal(kind: str, envelope: dict[str, Any]) -> str | None:
     :func:`~klayout_tools.coverage.coverage_refusal_reason`.
     """
     refusal = coverage_refusal_reason(envelope)
+    if kind == "sim" and refusal is None:
+        # Issue #3769: sim coverage counts an unlimited measurement as a
+        # checked observation, so `nothing_checked` stays false for an
+        # all-observation request. For item 5 that is still no bound applied.
+        return _REASON_NO_LIMITS_CHECKED if _sim_no_limits_applied(envelope) else None
     if refusal is None or kind != "erc":
         return refusal
     return None if _erc_connectivity_state(envelope) is not None else refusal
+
+
+def _sim_coverage_counts(envelope: Mapping[str, Any]) -> tuple[int, int] | None:
+    """``(measurements_declared, measurements_with_limits)`` off a `klt sim`
+    envelope's ``coverage`` block, or ``None`` when absent or non-integer
+    (pre-coverage evidence keeps grading exactly as before)."""
+    block = envelope.get("coverage")
+    if not isinstance(block, dict):
+        return None
+    declared = block.get("measurements_declared")
+    limited = block.get("measurements_with_limits")
+    if type(declared) is not int or type(limited) is not int:
+        return None
+    return declared, limited
+
+
+def _sim_no_limits_applied(envelope: Mapping[str, Any]) -> bool:
+    """Whether a `klt sim` envelope declares measurements yet none carry a
+    ``limits`` bound (issue #3769). ``capture_only`` runs declare none."""
+    counts = _sim_coverage_counts(envelope)
+    return counts is not None and counts[0] > 0 and counts[1] == 0
 
 
 def _drc_rule_subset(envelope: Mapping[str, Any]) -> bool:
@@ -3518,6 +3662,12 @@ def _check_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
         passed = (
             envelope.get("status") == "match"
             and power_connectivity.get("status") != "mismatch"
+            # Issue #2870: a runset report reads "match" when the devices it
+            # recognised agree; one it did not recognise is a failure here.
+            and not (
+                envelope.get("engine") == "klayout-runset"
+                and unrecognised_device_gaps(cast(dict[str, Any], envelope))
+            )
         )
     elif kind in _PASSING_STATUS_BY_KIND:
         # sim/pex/place-and-route/socket-check/generic: one passing token.
@@ -3734,6 +3884,14 @@ def _non_passing_reason(kind: str, envelope: dict[str, Any]) -> str:
     """
     if _critical_metric_blockers(envelope):
         return _REASON_CHECK_FAILED
+    # Issue #2870: a runset report that matched only the devices it knew.
+    if (
+        kind == "lvs"
+        and envelope.get("status") == "match"
+        and unrecognised_device_gaps(envelope)
+        and envelope.get("engine") == "klayout-runset"
+    ):
+        return _REASON_RUNSET_UNRECOGNISED_DEVICE
     # Issue #2873: a `klt yield` run whose only shortfall is evidence
     # (`min_converged_samples` unmet, or a `target_sigma` that could not be
     # evaluated) is "draw more / fix the sample set", not a design defect.
@@ -3807,6 +3965,11 @@ def _kind_gated_refusal(
     refusal = _coverage_refusal(check_kind, envelope)
     if refusal is not None:
         return refusal
+    if check_kind == "lvs":
+        # Issue #2870: pin and re-hash of a PDK-runset report; None for curated.
+        refusal = runset_refusal(envelope)
+        if refusal is not None:
+            return refusal
     if require_post_layout and not _is_post_layout_evidence(check_kind, envelope):
         return _REASON_NOT_POST_LAYOUT
     return _yield_campaign_refusal(check_kind, envelope)
@@ -4090,6 +4253,8 @@ def _detail(kind: str, envelope: _EvidenceEnvelope) -> dict[str, Any]:
                 "status"
             ),
         }
+        # Issue #2870: engine + runset hash, only for a PDK-runset report.
+        detail.update(runset_disclosure(cast(dict[str, Any], envelope)) or {})
     elif kind == "sim":
         detail = {
             "netlist": envelope.get("netlist"),
@@ -4212,6 +4377,12 @@ def _detail(kind: str, envelope: _EvidenceEnvelope) -> dict[str, Any]:
     # the reader-facing half of the `passed: False` `_build_check` applies
     # for the same condition; see "Vacuous-verdict refusal" above.
     detail.update(_nothing_checked_detail(envelope))
+    counts = _sim_coverage_counts(envelope) if kind == "sim" else None
+    if counts is not None and _sim_no_limits_applied(envelope):
+        detail["no_limits_checked"] = {
+            "measurements_declared": counts[0],
+            "measurements_with_limits": counts[1],
+        }
     return detail
 
 
@@ -4494,6 +4665,7 @@ def build_tier_report(
     *,
     tiers_doc: str | Path | None = None,
     repo_root: str | Path | None = None,
+    generator_exec: GeneratorExecution | None = None,
 ) -> dict[str, Any]:
     """Grade a block manifest against the T1-T4 evidence-tier item skeleton
     mechanically parsed from ``docs/design-evidence-tiers.md``
@@ -4529,6 +4701,11 @@ def build_tier_report(
     unpacked CI artifact) needs this to resolve repo-scoped citations at
     all; with it absent, behaviour is exactly as before this parameter
     existed. The caller validates the directory exists.
+
+    ``generator_exec`` (``klt signoff --allow-generator-exec``, issue #3289)
+    opts in to running an operator-approved item-1/2 regeneration generator
+    on the batch runner; ``None`` (the default) keeps the nonexecuting
+    attestation grading byte-identical. See :func:`_execute_regeneration`.
 
     ``manifest`` (JSON in)::
 
@@ -5117,11 +5294,8 @@ def build_tier_report(
                     ),
                     graded_by_build=graded_by_build,
                     repo_root=repo_root,
-                    spec_rows=spec_rows_by_item.get(t1_item["id"]),
-                    spec_rows_invalid=(
-                        t1_item["id"] in spec_rows_by_item
-                        and spec_rows_by_item[t1_item["id"]] is None
-                    ),
+                    **_resolve_spec_rows(spec_rows_by_item, t1_item["id"], partition),
+                    generator_exec=generator_exec,
                 )
             total += 1
             met_count += entry["status"] == "met"
@@ -5281,14 +5455,17 @@ def _allowed_kinds_for(item_id: int, partition_kind: str) -> set[str] | None:
     mixed-signal block's digital partition as to a pure ``"digital"`` block,
     with no separate wiring.
 
-    ``None`` means unrestricted (items 1, 2, 9 and 10 today -- every item
-    that names no evidence at all, issue #2044). An item
+    ``None`` means unrestricted (item 2 today -- issue #2044 left items 1,
+    2, 9 and 10 unrestricted; issue #2844 restricted 1, 9 and 10 to
+    ``{"generic"}`` via :data:`_ITEMS_REQUIRING_ATTESTED_EVIDENCE`). An item
     present in
     :data:`_ITEM_ALLOWED_KINDS` but with no entry for this partition kind
     falls back to the ``"analog"`` (strictest) set rather than becoming
     silently unrestricted -- an unrecognised partition kind must never
     *loosen* an item's evidence requirement.
     """
+    if item_id in _ITEMS_REQUIRING_ATTESTED_EVIDENCE:
+        return {"generic"}
     by_partition_kind = _ITEM_ALLOWED_KINDS.get(item_id)
     if by_partition_kind is None:
         return None
@@ -6001,6 +6178,7 @@ def _grade_evidence(
     allowed_kinds: set[str] | None = None,
     item_id: int | None = None,
     repo_root: str | Path | None = None,
+    generator_exec: GeneratorExecution | None = None,
 ) -> tuple[str, str | None, dict[str, Any] | None, dict[str, Any]]:
     """Grade one resolved evidence ``spec`` (:func:`_normalize_evidence_entry`)
     and return ``(status, reason, citation, failure_detail)``.
@@ -6011,6 +6189,11 @@ def _grade_evidence(
     ``repo_root`` (``klt signoff --repo-root``, issue #2878) is forwarded to
     :func:`_resolve_evidence` -- an explicitly named repo root replaces the
     ``.git``-ancestor discovery for ``scope: "repo"`` input echoes.
+
+    ``generator_exec`` (``klt signoff --allow-generator-exec``, issue #3289)
+    is the opt-in for running an *operator-approved* item-1/2 generator on the
+    batch runner; ``None`` (the default) leaves grading exactly as before. See
+    :func:`_execute_regeneration`.
 
     ``status`` is ``"met"`` or ``"unmet"``. ``reason`` is ``None`` when
     ``status == "met"``, otherwise one of the ``_REASON_*`` constants
@@ -6158,11 +6341,23 @@ def _grade_evidence(
         return "unmet", _REASON_STALE_EVIDENCE, None, {}
 
     citation = _citation(resolution)
+    execution_detail: dict[str, Any] = {}
     anchored_refusal = _bind_anchored_citation(
-        check_kind, item_id, resolution, citation
+        check_kind,
+        item_id,
+        resolution,
+        citation,
+        repo_root=repo_root,
+        generator_exec=generator_exec,
+        execution_detail=execution_detail,
     )
     if anchored_refusal is not None:
-        return "unmet", anchored_refusal, None, _input_members_detail(resolution)
+        return (
+            "unmet",
+            anchored_refusal,
+            None,
+            {**_input_members_detail(resolution), **execution_detail},
+        )
     return "met", None, citation, {}
 
 
@@ -6227,6 +6422,10 @@ def _bind_anchored_citation(
     item_id: int | None,
     resolution: Mapping[str, Any],
     citation: dict[str, Any],
+    *,
+    repo_root: str | Path | None = None,
+    generator_exec: GeneratorExecution | None = None,
+    execution_detail: dict[str, Any] | None = None,
 ) -> str | None:
     """For a ``"generic"`` citation of an artifact-anchored item (issue
     #2718), require the bound artifact to re-hash to the recorded hash and
@@ -6249,10 +6448,214 @@ def _bind_anchored_citation(
         return _REASON_STALE_EVIDENCE
     if input_verified is not True:
         return _REASON_UNVERIFIABLE_PROVENANCE
-    citation["artifact_binding"] = _generic_artifact_binding(
-        resolution["envelope"], resolution
-    )
+    binding = _generic_artifact_binding(resolution["envelope"], resolution)
+    if item_id in _ITEMS_ACCEPTING_REGENERATION_CLAIMS:
+        regeneration, refusal = _regeneration_claim(
+            resolution["envelope"],
+            resolution["content_hash"],
+            lambda: _bound_geometry_digest(resolution, repo_root),
+        )
+        if refusal is not None:
+            return refusal
+        # Approved execution compares output *bytes*; a geometry-kind claim is
+        # graded on geometry alone, so it stays the non-executing attestation.
+        if (
+            regeneration is not None
+            and generator_exec is not None
+            and regeneration.get("hash_kind", _HASH_KIND_BYTES) == _HASH_KIND_BYTES
+        ):
+            regeneration, refusal, detail = _execute_regeneration(
+                generator_exec, resolution, regeneration, repo_root
+            )
+            if execution_detail is not None:
+                execution_detail.update(detail)
+            if refusal is not None:
+                return refusal
+        if regeneration is not None:
+            binding["regeneration"] = regeneration
+    citation["artifact_binding"] = binding
     return None
+
+
+def _bound_artifact(
+    resolution: Mapping[str, Any], repo_root: str | Path | None
+) -> tuple[str, str] | None:
+    """``(root, repo-relative path)`` of the single artifact a ``"generic"``
+    citation is bound to, or ``None`` when it cannot be pinned down: a
+    multi-member binding, no candidate that re-hashes to the bound hash, no
+    repo root, or an artifact outside that root."""
+    if resolution.get("input_members"):
+        return None
+    spec = resolution["spec"]
+    evidence_file = resolution.get("file")
+    evidence_dir = (
+        os.path.dirname(os.path.abspath(evidence_file)) if evidence_file else None
+    )
+    root = (
+        repo_root
+        if repo_root is not None
+        else find_repo_root(evidence_dir or spec.get("cwd") or os.getcwd())
+    )
+    if root is None:
+        return None
+    for candidate in _input_artifact_candidates(
+        "generic", resolution["envelope"], spec, evidence_file, repo_root
+    ):
+        if f"sha256:{sha256_file(candidate)}" != resolution["content_hash"]:
+            continue
+        relative = os.path.relpath(os.path.realpath(candidate), os.path.realpath(root))
+        if relative == os.pardir or relative.startswith(os.pardir + os.sep):
+            return None
+        return str(root), relative.replace(os.sep, "/")
+    return None
+
+
+def _bound_geometry_digest(
+    resolution: Mapping[str, Any], repo_root: str | Path | None
+) -> str | None:
+    """:func:`~._provenance.layout_geometry_digest` of the single artifact a
+    ``"generic"`` citation is bound to, or ``None`` when that artifact cannot
+    be pinned down (a set binding included) or is not a readable GDS/OASIS."""
+    bound = _bound_artifact(resolution, repo_root)
+    if bound is None:
+        return None
+    root, relative = bound
+    return layout_geometry_digest(os.path.join(root, relative))
+
+
+def _execute_regeneration(
+    generator_exec: GeneratorExecution,
+    resolution: Mapping[str, Any],
+    regeneration: dict[str, Any],
+    repo_root: str | Path | None,
+) -> tuple[dict[str, Any] | None, str | None, dict[str, Any]]:
+    """Run an operator-approved item-1/2 generator on the batch runner and
+    grade the collected output (issue #3289; opt-in, see
+    :mod:`.signoff_generator_batch`).
+
+    Returns ``(regeneration, reason, detail)``. The manifest only *requests* a
+    generator; :func:`~.signoff_generator_batch.match_approval` decides, against
+    approvals from outside the manifest, whether it may run. No match (or a
+    binding that cannot be pinned to one repo artifact) returns
+    ``regeneration`` untouched -- the nonexecuting attestation, with its
+    ``executed_by_klt: false`` -- and submits nothing. A match runs; then:
+
+    - byte-identical output -> the disclosure gains ``executed_by_klt: true``
+      and an ``execution`` block (recipe, command, script hash, input tree,
+      output hash, remote job);
+    - a byte difference -> :data:`_REASON_STALE_ARTIFACT`;
+    - any failure, timeout, missing/incomplete output, incompatible runner or
+      failed collection -> :data:`_REASON_CHECK_ERRORED`, never ``met``.
+
+    ``detail`` carries ``generator_execution`` for either refusal.
+    """
+    bound = _bound_artifact(resolution, repo_root)
+    if bound is None:
+        return regeneration, None, {}
+    root, artifact = bound
+    matched = match_approval(
+        generator_exec.approvals, regeneration["generator"], artifact
+    )
+    if matched is None:
+        return regeneration, None, {}
+    approval, arguments = matched
+    outcome = run_approved_generator(
+        generator_exec,
+        approval,
+        arguments,
+        root=root,
+        committed_hash=resolution["content_hash"],
+        artifact=artifact,
+    )
+    if outcome.state == "fresh":
+        return (
+            {**regeneration, "executed_by_klt": True, "execution": outcome.evidence},
+            None,
+            {},
+        )
+    detail = {"generator_execution": outcome.evidence}
+    if outcome.state == "stale":
+        return None, _REASON_STALE_ARTIFACT, detail
+    return None, _REASON_CHECK_ERRORED, detail
+
+
+def _regeneration_comparand(
+    hash_kind: Any,
+    bound_hash: Any,
+    bound_geometry_digest: Callable[[], str | None] | None,
+) -> Any:
+    """The hash a regeneration claim of ``hash_kind`` is compared with, or
+    ``None`` when the kind is unknown or its digest cannot be computed."""
+    if hash_kind == _HASH_KIND_BYTES:
+        return bound_hash
+    if hash_kind == _HASH_KIND_GEOMETRY and bound_geometry_digest is not None:
+        return bound_geometry_digest()
+    return None
+
+
+def _regeneration_claim(
+    envelope: Mapping[str, Any],
+    bound_hash: Any,
+    bound_geometry_digest: Callable[[], str | None] | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Grade an item-1/2 attestation's optional ``provenance.regeneration``
+    claim (issue #2887) against ``bound_hash`` -- the hash the bound
+    artifact has just re-hashed to (``input_verified is True`` by now).
+
+    Returns ``(disclosure, None)`` for a matching claim, ``(None, None)``
+    when no claim is made (the key is absent or ``null``: grading unchanged
+    from issue #2718), or ``(None, reason)`` to refuse:
+
+    - :data:`_REASON_UNANCHORED_EVIDENCE` for a malformed block -- not an
+      object, ``generator`` not a non-empty string, or ``regenerated_hash``
+      not a ``sha256:<hex>`` digest. A claim that cannot be read is not
+      silently dropped, or a typo would read as "not claimed".
+    - :data:`_REASON_STALE_ARTIFACT` when ``regenerated_hash`` differs from
+      ``bound_hash``.
+
+    Optional ``hash_kind`` (default ``"bytes"``, the behaviour above) may be
+    ``"geometry"``: ``regenerated_hash`` is then compared to
+    ``bound_geometry_digest()`` -- the timestamp- and order-independent
+    :func:`~._provenance.layout_geometry_digest` of the bound artifact -- so a
+    GDS/OASIS stream that embeds a write time can still be claimed. An unknown
+    ``hash_kind``, or a digest that cannot be computed (not a readable
+    GDS/OASIS, set binding), is :data:`_REASON_UNANCHORED_EVIDENCE`. The
+    bytes-binding gate has already run by the time this is called.
+
+    ``generator`` is **never executed** -- it is the attester's description
+    of how they regenerated the artifact, echoed verbatim so a reader can
+    reproduce it. ``executed_by_klt: false`` says so in the JSON itself.
+    """
+    provenance = envelope.get("provenance")
+    if not isinstance(provenance, Mapping):
+        return None, None
+    claim = provenance.get("regeneration")
+    if claim is None:
+        return None, None
+    if not isinstance(claim, Mapping):
+        return None, _REASON_UNANCHORED_EVIDENCE
+    generator = claim.get("generator")
+    regenerated_hash = claim.get("regenerated_hash")
+    if not isinstance(generator, str) or not generator.strip():
+        return None, _REASON_UNANCHORED_EVIDENCE
+    if not isinstance(regenerated_hash, str) or not _REGENERATED_HASH_RE.match(
+        regenerated_hash
+    ):
+        return None, _REASON_UNANCHORED_EVIDENCE
+    hash_kind = claim.get("hash_kind", _HASH_KIND_BYTES)
+    compared = _regeneration_comparand(hash_kind, bound_hash, bound_geometry_digest)
+    if compared is None:
+        return None, _REASON_UNANCHORED_EVIDENCE
+    if regenerated_hash != compared:
+        return None, _REASON_STALE_ARTIFACT
+    disclosure: dict[str, Any] = {
+        "generator": generator,
+        "regenerated_hash": regenerated_hash,
+        "executed_by_klt": False,
+    }
+    if hash_kind != _HASH_KIND_BYTES:
+        disclosure["hash_kind"] = hash_kind
+    return disclosure, None
 
 
 def _generic_binding_path(envelope: Mapping[str, Any]) -> Any:
@@ -6480,7 +6883,9 @@ def _generic_artifact_binding(
     the envelope names it -- a string or a ``{path, scope}`` object), and the
     hash that artifact re-hashed to. ``summary``/``source`` are echoed when
     the envelope carries them, so a reader sees what was audited without
-    opening the envelope; they are never graded.
+    opening the envelope; they are never graded. A graded, matching
+    regeneration claim (items 1/2, issue #2887) is added by
+    :func:`_bind_anchored_citation`, not here.
     """
     provenance = envelope.get("provenance") or {}
     input_block = provenance.get("input") or {}
@@ -6496,6 +6901,21 @@ def _generic_artifact_binding(
         value = envelope.get(field)
         if isinstance(value, str):
             binding[field] = value
+    # Issue #2844: an envelope produced by `klt signoff --attest` names the
+    # producer and how many item-specific checks backed its status, so a
+    # reader (or a fleet roll-up) can tell a derived pass from a hand-written
+    # one. Disclosure only -- never graded, and absent for any envelope that
+    # carries no `attestation` block.
+    attestation = envelope.get("attestation")
+    if isinstance(attestation, Mapping) and isinstance(
+        attestation.get("producer"), str
+    ):
+        binding["attestation"] = {
+            "producer": attestation["producer"],
+            "inventory_schema_version": attestation.get("inventory_schema_version"),
+            "check_count": attestation.get("check_count"),
+            "passed_count": attestation.get("passed_count"),
+        }
     return binding
 
 
@@ -6744,6 +7164,9 @@ def _citation(resolution: dict[str, Any]) -> dict[str, Any]:
     # cited envelope records those digests; legacy envelopes omit it.
     if resolution.get("pex_inputs"):
         citation["pex_inputs"] = resolution["pex_inputs"]
+    # Issue #2870: a PDK-runset LVS citation says which engine produced it.
+    if resolution["kind"] == "lvs":
+        citation.update(runset_disclosure(resolution["envelope"]) or {})
     # Issue #2002: a `drc` citation also carries the three `coverage` fields
     # item 3's doc text requires the claim to disclose -- so the disclosure a
     # claim owes and the numbers it owes it about are in the same artifact.
@@ -6839,6 +7262,7 @@ def _build_tier_item(
     repo_root: str | Path | None = None,
     spec_rows: list[dict[str, Any]] | None = None,
     spec_rows_invalid: bool = False,
+    generator_exec: GeneratorExecution | None = None,
 ) -> dict[str, Any]:
     """Grade one T1 checklist item against ``evidence`` -- see
     :func:`build_tier_report`'s docstring for the full met/unmet rule and
@@ -6853,7 +7277,9 @@ def _build_tier_item(
     restriction, preserving Phase 0/1's original behaviour where any
     recognised, passing envelope kind satisfies any item -- since issue
     #2044 only T1 items 1, 2, 9 and 10 (the four naming no evidence at all)
-    still pass ``None`` (see :data:`_ITEM_ALLOWED_KINDS` and
+    passed ``None``, and since issue #2844 only item 2 does -- items 1, 9
+    and 10 get ``{"generic"}`` (see :data:`_ITEM_ALLOWED_KINDS`,
+    :data:`_ITEMS_REQUIRING_ATTESTED_EVIDENCE` and
     :func:`_allowed_kinds_for`).
 
     ``partition_kind`` (issue #2362) is the partition this row grades --
@@ -6932,6 +7358,7 @@ def _build_tier_item(
             allowed_kinds=allowed_kinds,
             item_id=item_id,
             repo_root=repo_root,
+            generator_exec=generator_exec,
         )
         opt_in_items = (
             _OPT_IN_KIND_ITEMS.get(spec_citation["kind"])
@@ -6956,10 +7383,15 @@ def _build_tier_item(
         and isinstance(raw_entry, dict)
         and "not_applicable" in raw_entry
     ):
-        # Issue #2865: item 6's recorded "not applicable" outcome.
-        status, reason, not_applicable, failure_detail = _grade_not_applicable(
-            raw_entry["not_applicable"], partition_kind
-        )
+        # Issue #2865: item 6's recorded "not applicable" outcome. Issue
+        # #2908: it asserts zero statistical rows, so it contradicts a
+        # declared row set -- invalid, never silently preferred.
+        if spec_rows is not None or spec_rows_invalid:
+            reason = _REASON_INVALID_EVIDENCE
+        else:
+            status, reason, not_applicable, failure_detail = _grade_not_applicable(
+                raw_entry["not_applicable"], partition_kind
+            )
     elif (
         raw_entry is not None
         and item_id in _ITEMS_ACCEPTING_MULTI_CITATION
@@ -7003,33 +7435,44 @@ def _build_tier_item(
 
 
 #: T1 items whose manifest entry may be a **list** of citations with optional
-#: ``spec_rows`` coverage (issue #2959). Item 5 today; item 6 (#2908) reuses
-#: :func:`_grade_multi_citation` by joining this set.
-_ITEMS_ACCEPTING_MULTI_CITATION: frozenset[int] = frozenset({5})
+#: ``spec_rows`` coverage (issue #2959). Item 5, and item 6 (issue #2908: a
+#: block whose spec has several statistical rows, only some evidenced).
+_ITEMS_ACCEPTING_MULTI_CITATION: frozenset[int] = frozenset({5, 6})
+
+
+_SpecRowsKey = tuple[int, "str | None"]
 
 
 def _read_spec_rows(
     manifest: dict[str, Any],
-) -> dict[int, list[dict[str, Any]] | None]:
+) -> dict[_SpecRowsKey, list[dict[str, Any]] | None]:
     """Read the manifest's optional ``spec_rows`` declaration (issue #2959):
-    ``{"<item id>": [{"id": "<row>", "gap": "<reason>"?}, ...]}``.
+    ``{"<item id>": [{"id": "<row>", "gap": "<reason>"?, "ratified": bool?},
+    ...]}``. A key may be partition-qualified (``"5.analog"``, issue #3768),
+    mirroring the evidence-key convention of :func:`_lookup_evidence`; see
+    :func:`_resolve_spec_rows`.
 
-    Returns ``item id -> rows``; a malformed declaration for an item maps to
-    ``None`` so only that item degrades to ``invalid_evidence``, never the
-    whole report. A ``gap`` row is one no producible envelope can cover; it
-    is reported as a declared gap and never counts as covered.
+    Returns ``(item id, partition | None) -> rows``; a malformed declaration
+    maps to ``None`` so only that item degrades to ``invalid_evidence``, never
+    the whole report. A ``gap`` row is one no producible envelope can cover; it
+    is reported as a declared gap and never counts as covered. ``ratified``
+    (default ``true``, issue #2908) is ``false`` for a row whose target is a
+    proposed, unratified limit: evidence against it is provisional and never
+    grades ``met``.
     """
     raw = manifest.get("spec_rows")
     if raw is None:
         return {}
     if not isinstance(raw, dict):
-        return {item_id: None for item_id in _ITEMS_ACCEPTING_MULTI_CITATION}
-    out: dict[int, list[dict[str, Any]] | None] = {}
+        return {(item_id, None): None for item_id in _ITEMS_ACCEPTING_MULTI_CITATION}
+    out: dict[_SpecRowsKey, list[dict[str, Any]] | None] = {}
     for key, rows in raw.items():
+        head, sep, suffix = str(key).partition(".")
         try:
-            item_id = int(key)
-        except (TypeError, ValueError):
+            item_id = int(head)
+        except ValueError:
             continue
+        slot: _SpecRowsKey = (item_id, suffix if sep else None)
         parsed: list[dict[str, Any]] | None = []
         if not isinstance(rows, list) or not rows:
             parsed = None
@@ -7039,19 +7482,43 @@ def _read_spec_rows(
             for row in rows:
                 row_id = row.get("id") if isinstance(row, dict) else None
                 gap = row.get("gap") if isinstance(row, dict) else None
+                ratified = row.get("ratified", True) if isinstance(row, dict) else True
                 if (
                     not isinstance(row_id, str)
                     or not row_id
                     or row_id in seen
                     or (gap is not None and (not isinstance(gap, str) or not gap))
+                    or not isinstance(ratified, bool)
                 ):
                     valid = []
                     break
                 seen.add(row_id)
-                valid.append({"id": row_id, "gap": gap})
+                valid.append({"id": row_id, "gap": gap, "ratified": ratified})
             parsed = valid or None
-        out[item_id] = parsed
+        out[slot] = parsed
     return out
+
+
+def _resolve_spec_rows(
+    spec_rows_by_item: dict[_SpecRowsKey, list[dict[str, Any]] | None],
+    item_id: int,
+    partition: str,
+) -> dict[str, Any]:
+    """Resolve the ``spec_rows`` kwargs for one graded partition (issue
+    #3768): the qualified ``"<item>.<partition>"`` key first, then the bare
+    item id. A qualified key whose suffix is not a known partition makes the
+    item ``invalid_evidence`` rather than being silently ignored."""
+    bad_suffix = any(
+        key_item == item_id
+        and key_part is not None
+        and key_part not in _MIXED_SIGNAL_PARTITIONS
+        for key_item, key_part in spec_rows_by_item
+    )
+    for slot in ((item_id, partition), (item_id, None)):
+        if slot in spec_rows_by_item:
+            rows = spec_rows_by_item[slot]
+            return {"spec_rows": rows, "spec_rows_invalid": rows is None or bad_suffix}
+    return {"spec_rows": None, "spec_rows_invalid": bad_suffix}
 
 
 def _citation_label(spec: dict[str, Any]) -> str:
@@ -7077,7 +7544,9 @@ def _grade_multi_citation(
       envelopes named under ``detail.failed_citations``;
     - all members pass but a declared row is uncovered or a declared gap ->
       ``unmet``/``partial_coverage`` with ``failed_rows``, ``uncovered_rows``
-      and ``declared_gaps`` listed separately under ``detail``;
+      and ``declared_gaps`` listed separately under ``detail``; a declared
+      row with ``ratified: false`` (``unratified_rows``) is likewise
+      provisional and never ``met`` (issue #2908);
     - otherwise ``met``; ``citation`` is the first member's and ``citations``
       carries all of them.
 
@@ -7119,7 +7588,11 @@ def _grade_multi_citation(
             **row_info,
         }
         return "unmet", first[1], None, detail, extra
-    if row_info and (row_info["uncovered_rows"] or row_info["declared_gaps"]):
+    if row_info and (
+        row_info["uncovered_rows"]
+        or row_info["declared_gaps"]
+        or row_info["unratified_rows"]
+    ):
         return "unmet", _REASON_PARTIAL_COVERAGE, None, row_info, extra
     if row_info:
         extra["row_coverage"] = row_info
@@ -7171,8 +7644,10 @@ def _members_rows_declared(
 def _multi_row_info(
     graded: list[Any], failed: list[Any], spec_rows: list[dict[str, Any]] | None
 ) -> dict[str, Any]:
-    """``failed_rows`` / ``uncovered_rows`` / ``declared_gaps`` for the
-    declared ``spec_rows`` (empty when none were declared)."""
+    """``failed_rows`` / ``uncovered_rows`` / ``declared_gaps`` /
+    ``unratified_rows`` for the declared ``spec_rows`` (empty when none were
+    declared). ``unratified_rows`` lists every non-gap row declared
+    ``ratified: false``, covered or not."""
     if spec_rows is None:
         return {}
     covered = {r for _, rows, g in graded if g[0] == "met" for r in rows or []}
@@ -7191,6 +7666,9 @@ def _multi_row_info(
             for row in spec_rows
             if row["gap"] is not None
         ],
+        "unratified_rows": [
+            row["id"] for row in spec_rows if row["gap"] is None and not row["ratified"]
+        ],
     }
 
 
@@ -7204,6 +7682,7 @@ def build_fleet_report(
     *,
     tiers_doc: str | Path | None = None,
     repo_root: str | Path | None = None,
+    generator_exec: GeneratorExecution | None = None,
 ) -> dict[str, Any]:
     """Grade every block in a **fleet manifest** against the T1-T4 item
     skeleton (:func:`build_tier_report`, called once per block) and reduce
@@ -7432,7 +7911,10 @@ def build_fleet_report(
             )
 
         tier_report = build_tier_report(
-            manifest, tiers_doc=tiers_doc, repo_root=repo_root
+            manifest,
+            tiers_doc=tiers_doc,
+            repo_root=repo_root,
+            generator_exec=generator_exec,
         )
         blocking_item = _blocking_t1_item(tier_report["items"])
         if tier_report["tier"] == "T1":
@@ -7594,6 +8076,38 @@ DOC_PROSE_REPORT_PATHS: frozenset[tuple[str, ...]] = frozenset(
 )
 
 
+#: The tier-report paths ``--check`` drops from **both** the verdict diff and
+#: the ``doc_drift`` diff because they identify one Spot run, not the evidence
+#: (issue #3690): the ``remote`` block of an operator-approved generator
+#: execution (issue #3289) -- ``job_id`` (a fresh ``uuid4`` per run),
+#: instance id/type/AZ, ``lifecycle``, ``elapsed_seconds`` and the rest of
+#: :func:`~.sim_batch._batch_environment`. Re-grading submits a *new* job, so
+#: every one of these differs between any two runs of an unchanged manifest
+#: and a self-``--check`` of an executed report could never match.
+#:
+#: Spelled as one whole-``remote`` subtree per location rather than a key
+#: list, so a field the batch environment gains later is volatile too. What
+#: stays compared is everything the grade depends on: ``executed_by_klt``,
+#: ``execution.recipe``/``command``/``script_sha256``/``input_tree``/
+#: ``committed_hash``/``output_hash``. The second path is the same block on a
+#: refused or failed run (``detail.generator_execution``). ``--fleet`` reports
+#: carry only reduced per-block views, never these rows, so one shape suffices.
+RUN_IDENTITY_REPORT_PATHS: frozenset[tuple[str, ...]] = frozenset(
+    {
+        (
+            "items",
+            LIST_ITEM,
+            "citation",
+            "artifact_binding",
+            "regeneration",
+            "execution",
+            "remote",
+        ),
+        ("items", LIST_ITEM, "detail", "generator_execution", "remote"),
+    }
+)
+
+
 def _check_signoff_report(
     report_path: str, committed: dict[str, Any], fresh: dict[str, Any]
 ) -> dict[str, Any]:
@@ -7621,20 +8135,25 @@ def _check_signoff_report(
     ``fresh`` is embedded un-stripped, exactly as before -- the exclusion
     applies to the comparison, never to what the response shows.
     """
+    # Run identity is dropped from both diffs (and so is never doc drift).
+    committed_graded = strip_path_patterns(committed, RUN_IDENTITY_REPORT_PATHS)
+    fresh_graded = strip_path_patterns(fresh, RUN_IDENTITY_REPORT_PATHS)
     result = build_rerun_result(
         report_path=report_path,
         committed=committed,
         fresh=fresh,
         exclude=VOLATILE_REPORT_PATHS,
-        committed_for_diff=strip_path_patterns(committed, DOC_PROSE_REPORT_PATHS),
-        fresh_for_diff=strip_path_patterns(fresh, DOC_PROSE_REPORT_PATHS),
+        committed_for_diff=strip_path_patterns(
+            committed_graded, DOC_PROSE_REPORT_PATHS
+        ),
+        fresh_for_diff=strip_path_patterns(fresh_graded, DOC_PROSE_REPORT_PATHS),
         mode="check",
     )
     verdict_fields = {entry["field"] for entry in result["drift"]}
     doc_drift_fields = [
         entry
         for entry in diff_verdict_fields(
-            committed, fresh, exclude=VOLATILE_REPORT_PATHS
+            committed_graded, fresh_graded, exclude=VOLATILE_REPORT_PATHS
         )
         if entry["field"] not in verdict_fields
     ]
@@ -7653,6 +8172,7 @@ def check_tier_report(
     *,
     tiers_doc: str | None = None,
     repo_root: str | Path | None = None,
+    generator_exec: GeneratorExecution | None = None,
 ) -> dict[str, Any]:
     """``klt signoff --manifest M --check REPORT`` (issue #2249): verify that
     a previously committed tier report at ``report_path`` still reproduces
@@ -7684,7 +8204,12 @@ def check_tier_report(
     or one that is not a tier report at all -- never a traceback.
     """
     committed = _load_committed_signoff_report(report_path, "items", "--manifest")
-    fresh = build_tier_report(manifest, tiers_doc=tiers_doc, repo_root=repo_root)
+    fresh = build_tier_report(
+        manifest,
+        tiers_doc=tiers_doc,
+        repo_root=repo_root,
+        generator_exec=generator_exec,
+    )
     return _check_signoff_report(report_path, committed, fresh)
 
 
@@ -7694,6 +8219,7 @@ def check_fleet_report(
     *,
     tiers_doc: str | None = None,
     repo_root: str | Path | None = None,
+    generator_exec: GeneratorExecution | None = None,
 ) -> dict[str, Any]:
     """``klt signoff --fleet F --check REPORT`` (issue #2249): the
     :func:`check_tier_report` contract, one level up -- verify a committed
@@ -7710,7 +8236,12 @@ def check_fleet_report(
     as at the top level, and the ``title`` its reduced item views carry.
     """
     committed = _load_committed_signoff_report(report_path, "blocks", "--fleet")
-    fresh = build_fleet_report(fleet, tiers_doc=tiers_doc, repo_root=repo_root)
+    fresh = build_fleet_report(
+        fleet,
+        tiers_doc=tiers_doc,
+        repo_root=repo_root,
+        generator_exec=generator_exec,
+    )
     return _check_signoff_report(report_path, committed, fresh)
 
 

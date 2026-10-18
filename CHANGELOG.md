@@ -14,6 +14,115 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- 2026-10-17 — **`klt signoff --attest` / `--inventory` are not installable
+  from 0.7.0** (issue #3805): the attestation producer for T1 items 1, 9 and
+  10 (#2844) is on `main` but in no tagged release, so
+  `klt signoff --attest 10 ...` fails with `unrecognized arguments` on the
+  PyPI 0.7.0 build. `docs/cli/signoff.md` now says so; until the next release
+  after 0.7.0 ships, release-pinned consumers must pin a git commit.
+
+- **gf180mcu `DF.13_MV` / `DF.14_MV` tap-distance rules declared** (issue
+  #3793): `comp.tap_distance.nwell.mv.1` and `comp.tap_distance.psub.mv.1`
+  (15 um reach, active overlapping `Dualgate`) join the 20 um `.lv.1` pair, so a
+  layout with a 5V/6V active more than 15 um from a tap no longer reports
+  `clean`. Additive: two new rule ids; LV results are unchanged. The
+  `latchup_mk` marker rules remain undeclared.
+
+- **`klt synthesize --restructure` now finds upsizes on libraries that quote
+  cell names** (issue #3709): `restructure`'s and `synthesize`'s private
+  regex Liberty readers are replaced by `liberty_compare.parse_liberty_text`.
+  The old `restructure` reader matched no cells on a real volare
+  `sky130_fd_sc_hd` liberty (`cell ("...") {`), so it never proposed a
+  pin-compatible upsize there; `leakage_power_nw` and the `dont_use` cell list
+  are unchanged on that library. A liberty with no `library()` group or an
+  unclosed group is now a `RestructureError` in the restructure loop rather
+  than an empty cell list. Parsing is slower: ~0.17 s -> ~1.8 s and ~62 MiB
+  peak per read of a 12.8 MB `sky130_fd_sc_hd__tt_025C_1v80.lib`; the
+  parse is cached per distinct text, so repeat reads of one library in a run
+  parse once.
+
+- **`klt lvs` runset engine gaps closed** (issue #3206): `klt lvs --deck-file
+  PATH` / repeatable `--deck-var NAME=VALUE` fill `request.deck_file` /
+  `deck_vars` (setting both flag and request field, or using another engine,
+  is a clean error); `engine: klayout-runset` now computes
+  `power_connectivity` from the runset's extracted netlist (same JSON shape;
+  `power_pins_derivation.rule` gains
+  `named-power-ground-pin-of-extracted-subcircuit`) and stays `unchecked`
+  with a reason when there is no instance-level supply pin to walk;
+  `reference.device_map` objects accept `kind: "inductor"` (3 terminals) and
+  `kind: "varactor"` (4 terminals), normalized to `X<name> <nodes> <class>`
+  cards; and a subckt-call conversion with several unknown subcircuits now
+  names all of them in one refusal instead of the first.
+
+- **`klt signoff` grades PDK-runset LVS reports** (issue #2870, building on
+  #2849): a `klt lvs` report with `"engine": "klayout-runset"` can satisfy T1
+  item 4 and item 11's LVS half when its runset hash is in the signoff-side
+  allowlist `signoff_runset.PINNED_RUNSETS` (shipped empty as of 2026-10-17),
+  the runset file still re-hashes, and every device was recognised. New reason
+  codes `runset_not_pinned`, `runset_hash_mismatch`, `runset_unrecognised_device`;
+  `engine` and `runset_content_hash` appear in the check detail and `met`
+  citation of such reports only. The runset engine now fills
+  `net_correspondence` from its matched nets. Curated-deck grading is unchanged.
+- **sky130 deck checks the implant and npc masks `klt gen` now draws**
+  (issue #2934, phase C): `--deck sky130` gains `npc.width.1`/`npc.space.1`
+  (`npc.1`/`npc.2`, 0.27 µm) and `nsdm`/`psdm` `width.1`/`space.1`
+  (`nsdm.1`/`psdm.1`/`n/psdm.1`, 0.38 µm), all from `sky130.lydrc`. The
+  compound implant rules the engine cannot evaluate (`n/psdm.5a`/`5b`/`6`/`7`/
+  `8`/`10a`/`10b`, `difftap.8`-`difftap.11`, `npc.4`) are listed in
+  `coverage.unmodeled_rules`. Deck content hash changes; `rule_count` is now 150.
+
+- **`klt lvs` opt-in `options.compare_mos_flavour`** (issue #3650): `true`
+  compares a MOS device's flavour (sky130 `nvt`/`hvi`, gf180mcu `06v0`, ...)
+  as well as its base `nfet`/`pfet` class, so a native-Vt layout device
+  against an `nfet_g5v0d10v5` reference is a `device.unmatched` mismatch
+  instead of a `match`. Default (`false`) unchanged, no `devices[].class`
+  change on that path. `true` needs `engine: "klayout"`, an inline
+  `layout.file` and `reference.form: "subckt-call"`; any other combination is
+  a request error (exit 1). Additive `options` echo key, replayed by `--check
+  --rerun`, no `schema_version` bump.
+
+- **`klt gen mos_array` / `diff_pair` draw tap pads on gf180mcu** (issue
+  #3648): with `add_guard_ring` off, gf180mcu output now carries 0.42 µm
+  well (pfet) or substrate (nfet) tap pads at the footprint's top and bottom
+  corners (plus interior pads on sides over 20 µm), so default output and
+  `gen-compose` of it pass the whole deck including `DF.13_LV`/`DF.14_LV`
+  (`comp.tap_distance.*`). `bbox_um` grows to enclose the pads (the band,
+  `ring_padding_um` + 0.42 µm, at the top and bottom); no ports are added.
+  sky130 and the other families are unchanged, GDS included. **Additive geometry change**; no
+  JSON field changes.
+- **`klt signoff` regeneration claims for T1 items 1 and 2** (issue #2887):
+  an artifact-anchored `generic` attestation for item 1 or 2 may carry
+  `provenance.regeneration: {generator, regenerated_hash}`, the hash the
+  consumer's CI got by re-running the generator. `klt signoff` never runs
+  the generator. It checks that the hash equals the bound artifact's
+  re-hash. A mismatch renders the new reason `stale_artifact`, and a
+  malformed block renders `unanchored_evidence`. A matching claim is
+  disclosed as `citation.artifact_binding.regeneration` with
+  `executed_by_klt: false`, and text output adds a `regeneration:` line.
+  **Additive contract change**; `schema_version` is unchanged.
+- **`klt sim` declarative timed stimulus and resolved-backend provenance**
+  (issue #2977): a request may declare `stimulus.signals[]` (per-signal
+  event lists with level, optional transition time and skew). `klt sim`
+  validates them up front (coded errors `stimulus_*`), expands them into
+  PWL sources in every corner deck, and echoes the schedule as applied in
+  `environment.stimulus`. Every corner-sweep report also gains
+  `environment.backend` (`resolved`, `source`, `requested`) so a `local`
+  run under `KLT_SIM_BACKEND=batch` is detectable. **Additive contract
+  change:** two new optional `environment` members, no `schema_version`
+  bump. A runner older than this change ignores the `stimulus` key (client
+  capability check tracked in #2877). `docs/cli/sim.md` also names `klt
+  0.7.0` as the first release that reads `$KLT_SIM_BACKEND`.
+- **`klt sim --op-lint` caps total subcircuit expansion** (issue #3595): the
+  hierarchy walk stops after 20 000 expanded subcircuit instances (a 7-level
+  fan-out-8 hierarchy previously expanded to ~2M devices and took ~29 s) and
+  emits one `unsupported_hierarchy` warning naming the cap; devices reached
+  before it are still linted. Additive; no `schema_version` bump.
+- **`klt drc`: new `violations[].check` kind `net_space`** (issue #3572): a
+  net-aware spacing check (`DrcRule.net_spec`, `NetSpaceSpec`) reporting only
+  facing edges of polygons on different nets. `sg13cmos5l` gains
+  `nwell.space.2` (`NW.b1`, 1.80 um between NWells of different nets) and
+  `NW.b1` leaves `coverage.unchecked_rules`. Additive; no `schema_version`
+  change. See `docs/cli/drc.md`.
 - **`klt lvs`: new `mismatches[].category` `device.series_fold_offset_absorbed`**
   (issue #3017): when `options.combine_devices` folds N>1 series primitives of
   a resistor class with a nonzero head term (`fixed_offset_ohm` +
@@ -76,6 +185,13 @@ not `klt --version`, if you need to detect this kind of drift. See
   The aggregated report gains `environment.{backend,remote.fleet[]}` and
   `corner_runs[].job_id`/`error_code` (batch runs only). Additive; no
   `schema_version` bump.
+- **`klt sim` multi-pass AC acquisition** (issue #3159): an `ac` analysis may
+  declare `analysis.passes` (named passes, each stating its complete `alter`
+  set) to run several AC solves per corner and retain each pass's complex
+  result privately; corners gain an additive `passes` list and the
+  `pass_failed` diagnostic code. Local/local-parallel ngspice only; Xyce,
+  `remote`/`batch`, `measurements[]` and `options.waveforms` are refused.
+  Additive; no `schema_version` bump.
 - **`klt extract --spef --def-net-connections` omits unlabelled `$N` nets absent
   from the DEF** (issue #3580): generalises the #3257 gap C omission from
   duplicate-named nets to unique-named `$<digits>` nets (and coupling to them),
@@ -92,6 +208,23 @@ not `klt --version`, if you need to detect this kind of drift. See
   `engine: "xyce"` fail visibly; an off-host worker that does not echo the maps
   fails with `nodeset_unsupported_worker`. Omitting the option changes nothing.
   Additive; no `schema_version` bump.
+- **`klt sim`: solver-tolerance corner axis `corners.options`** (issue #3125):
+  numeric ngspice `.options` names (`reltol`, `abstol`, `vntol`, `itl1`..`itl4`,
+  `gmin`, ...) mapped to equal-length arrays, zipped by index and expanded
+  innermost after `params`. Each point emits one `.options` card ahead of the
+  body (ngspice honors the first card that sets a name), its corner report
+  gains an `options` field and its `corner_id` a `/options:<pairs>` suffix;
+  `exclude[].options` selects rungs. Additive: a request without the field is
+  byte-identical. Off-host workers must echo it (`options_unsupported_worker`);
+  Xyce and `--op-lint` refuse it.
+- **`klt sim-plan` plans mergeable shards** (issue #3423): splits one `klt sim`
+  request by `corners.process` entry and writes the per-shard requests plus the
+  `klt sim-merge` manifest next to it. Manifest `corners` come from the same
+  `_expand_corners` expansion `klt sim` runs, output is byte-deterministic, and
+  Monte Carlo, deck-list and `corners.units` requests, a missing or
+  single-entry process axis, and a shard emptied by `exclude` are refused
+  (exit `1`). Additive: new verb, no `schema_version` bump. See
+  `docs/cli/sim.md` "Planning shards".
 - **`klt sim` batch: opt-in auto-split of a request that cannot fit the fleet's
   whole-job ceiling** (issue #3446): `batch.job_ceiling_check: "split"`,
   `batch.max_units_per_job` and `--max-units-per-job N` reroute a
@@ -113,8 +246,8 @@ not `klt --version`, if you need to detect this kind of drift. See
   duplicate, unexpected or mismatching report, or a changed request, is
   refused with its own exit code (`5`-`10`, `status: "refused"` payload).
   Additive: new verb, new `merge` block, no `schema_version` bump. See
-  `docs/cli/sim.md` "Merging per-request reports". Shard planning is not
-  included.
+  `docs/cli/sim.md` "Merging per-request reports". Shard planning is
+  `klt sim-plan`.
 - **ASAP7 DRC deck checks the four net-aware spacings `ACTIVE.S.2A`,
   `LIG.LISD.S.6`, `LIG.LISD.S.7` and `LIG.SDT.S.8`** (issue #3084): DRM Tables
   3.5.1 and 3.10.1 apply these only to shapes on different nets, so the deck
@@ -124,6 +257,17 @@ not `klt --version`, if you need to detect this kind of drift. See
   grows from 234 to 238 rule categories (`--expect-rule-categories 238`); the
   four ids leave the "Not implemented" list. The pinned shipped-cell
   regression needed no new deviation. Additive; no `schema_version` bump.
+- **`options.sdf` drops zero-delay `INTERCONNECT` entries from bit-selected
+  top-level input ports** (issue #2984): an entry such as
+  `INTERCONNECT ui_in[3] u1.A (0.000:0.000:0.000)` whose source is a bus input
+  port bit and whose destination is an ordinary cell made Icarus fail with
+  `Could not find intermodpath!`. Entries whose every `min:typ:max` value is
+  zero are now removed before annotation and counted under the new
+  `environment.sdf.dropped` class `zero_delay_bus_port_source_interconnect`
+  (entries claimed by `zero_delay_physical_only_interconnect` keep that class);
+  non-zero entries of the same shape still fail loudly. Also documents the
+  reported `value_change`-on-combinational-outputs limitation. Additive; no
+  `schema_version` bump.
 - **`klt extract` / `klt pex`: glob and all-nets selectors for
   `--critical-net` / `--parasitics-net`** (issue #2974): new repeatable
   `--critical-net-pattern GLOB` and `--parasitics-net-pattern GLOB`
@@ -139,6 +283,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   unchanged. `klt pex` forwards the `--critical-net-*` forms. Documented
   that the request document already accepts a list for exact names. See
   `docs/cli/extract.md`.
+- **`klt sim` `measurements[].on_unreached`** (issue #3108): opt-in
+  `"null"` grades a `.meas` card whose `WHEN`/`AT` target the completed
+  analysis never reached (ngspice `out of interval`) as the new measurement
+  status `not_reached` (`value: null`, `info` diagnostic
+  `measurement_not_reached`) instead of `error`/exit 4; such results are not
+  graded against `limits`, and a top-level `not_reached` count appears only
+  for requests that declare the field. Default (`"error"`) output is
+  byte-identical. Additive; no `schema_version` bump.
 - **`klt drc --deck sky130`: `nwell.9` and `coverage.unmodeled_rules`**
   (issue #3031): new rule `nwell.enclosed.hvi.1` (runset `nwell.9`, HVnwell
   must be enclosed by `hvi` 75/20; only `hvi` of the runset's
@@ -199,6 +351,44 @@ not `klt --version`, if you need to detect this kind of drift. See
   `intrinsic_device_noise: false`, `intrinsic_resistor_noise: false`); absent
   otherwise and for `engine: "xyce"`, so existing reports are unchanged. No
   `schema_version` bump. Documented in `docs/cli/sim.md`.
+- **`klt sim --op-lint` follows user subcircuits and counts `B` sources**
+  (issue #3101): `.subckt` blocks in the netlist (and its `.include`s) are
+  expanded at their `X` instances, so a wrapped DUT's MOS devices are linted
+  under hierarchical names (`Xdut.M1`) instead of `device_count: 0`; an
+  unresolvable `X` instance emits an `unsupported_hierarchy` diagnostic and
+  an empty device list no longer reports `clean`. `B` sources (and the
+  `v(<node>)` they read) now count as element terminals, ending false
+  `floating_node` warnings on behaviourally driven nodes. Additive; no
+  `schema_version` bump.
+- **New `klt diff A B [--top CELL]`** (issue #3093): compares two GDSII/OASIS
+  streams for equal geometry, labels and hierarchy. Ignores stream timestamps,
+  element order and library name; never ignores coordinates, path widths, text,
+  instance transforms, dbu or cell names. Reports `stream_sha256` and
+  `canonical_hash` separately. Exit `0` equivalent, `3` layouts differ, `1`
+  unreadable file or unknown `--top`. Additive; new verb.
+- **sky130 `mos_array`/`diff_pair` draw the S/D implant** (issue #2934, phase
+  A): `nsdm` (93/44) over n-type and `psdm` (94/20) over p-type unit devices,
+  0.125 µm beyond the diffusion (`n/psdm.5a`, `sky130A.lydrc`), merged where
+  adjacent units sit closer than `nsdm.2`/`psdm.2`'s 0.38 µm. Block bounding
+  boxes grow by that margin, so `gen-compose` placements shift accordingly;
+  `klt extract` device lists are unchanged and `sky130A_mr.drc` reports no new
+  violations. `diff_pair` now reports `drc_hints.sd_implant_present`, and both
+  generators list the sky130 masks still omitted (ring tap implant, `npc`) in
+  `drc_hints.notes` (additive). Tap-ring implants, `npc` and the deck rules
+  remain open on #2934.
+- **sky130 guard/tap rings draw their implant and gate contacts get `npc`**
+  (issue #2934, phase B): the tap ring of `guard_ring`, `mos_array`,
+  `diff_pair`, `esd_device` and `bjt_array` is now covered by `nsdm` (93/44,
+  well-tie ring of a pfet) or `psdm` (94/20, substrate-tie ring), 0.125 µm past
+  the tap (`n/psdm.5b`, `sky130A.lydrc`), and `mos_array`/`diff_pair` with
+  `gate_contact` draw `npc` (95/20) 0.095 µm around each poly-contact licon
+  (the margin `sky130A.tech` uses for `xpc`; the official `sky130A_mr.drc` has
+  no npc-enclosure rule), merged where closer than `npc.2`'s 0.27 µm.
+  `klt extract` results on the generated cells are unchanged and
+  `sky130A_mr.drc` reports no violations. The sky130 "ring tap implant" and
+  "npc" entries of phase A's `drc_hints.notes` are gone (additive JSON
+  contract: no field removed). The curated `--deck sky130` rules remain open
+  on #2934 (phase C).
 - **ASAP7 DRC deck checks `ACTIVE.W.2` and `SDT.W.3`** (issue #3085): the
   vertical-width-is-an-integer-multiple-of-27-nm rules (DRM Tables 3.5.1 /
   3.8.1) are now measured per local vertical width of each merged rectilinear
@@ -434,12 +624,68 @@ not `klt --version`, if you need to detect this kind of drift. See
   layer instead of extracting silently device-less. Additive; no schema,
   exit-code or `status` change.
 
+- **`klt sim` native noise measurements** (issue #2938): a
+  `measurements[]` entry may declare `noise: {quantity: "inoise"|"onoise",
+  at_hz | band_hz}` to read a spot density or a band-integrated rms value
+  from a `noise` analysis without `expr` or the `noise1.` plot prefix.
+  **Additive contract change:** a new optional measurement form; runners
+  older than this release reject it (see `docs/cli/sim.md`).
 - **New verb `klt tap-distance`** (issue #3009): asserts every point of a
   subject region is within a Euclidean distance of a qualifying tap (latch-up /
   tie spacing), optionally per island and filtered to taps wired to named
   nets. Reports a proven `lower_bound_um`/`measured_max_distance_um` bracket;
   exits `0` pass, `3` fail, `4` `unsupported` (rule not evaluable, never a
   pass). See `docs/cli/tap-distance.md`.
+- **`klt sim` can sweep a ramped (PWL/PULSE) supply** (issue #2902): new
+  `corners.supply_waveforms` lists `corners.supply_v` keys whose PWL/PULSE
+  source is rescaled per corner (peak level = the swept supply value) instead
+  of `alter`ed. Additive corner field `supply_waveforms` discloses the
+  nominal and effective levels. The #2706 rejection stays for unlisted
+  sources and now names the option.
+
+- **Added** (#3001, `klt drc --deck gf180mcu`; additive — `schema_version`
+  unchanged, but **a layout that reported `clean` before can now report
+  `violations`**): the gf180mcu curated deck now carries the PDK runset's
+  manufacturing-grid group and four salicide-block rules, closing a
+  false-`clean` where `klt gen mos_array` guard-ring cells and `res_array`
+  cells that the runset (`run_drc.py --variant=D`) fails read `clean` here.
+  29 `<layer>.ongrid.1` rules (0.005 um, `geom.drc`'s `if OFFGRID` group;
+  grid only — the runset has no `with_angle` call) and `sab.width.1` /
+  `sab.space.1` / `sab.separation.contact.1` / `poly2.enclosing.sab.1`
+  (`SB.1`/`SB.2`/`SB.4`/`SB.10`), taking the deck from 56 to 89 rules, each
+  with a `RuleProvenance` citation. The remaining `SB.*` rules and the
+  uncurated runset layers are listed, with reasons, in `decks/gf180mcu.py`.
+  New `DrcRule.report_escapes` field (default `True`, no behaviour change for
+  any existing rule) lets an extension rule such as `SB.10` skip the #318
+  zero-overlap escape term. Because `klt gen` reads its manufacturing grid
+  from the deck, gf180mcu cut centres now snap onto 0.005 um as sky130's do
+  (#2648), which changes the committed `examples/dogbone-terminal`
+  gf180mcu stream. Two generator defects the new rules expose are tracked
+  separately: `res_array` SAB geometry (#3000) and off-grid guard-ring
+  bodies at a non-multiple `ring_padding_um` (#3364). See
+  [`docs/cli/drc.md`](docs/cli/drc.md).
+- **`klt gen-compose` derives ports from in-cell labels** (issue #2927):
+  `blocks[].cell.ports_from_labels` resolves named text labels to nets via
+  `LayoutToNetlist` and, with an `access` block, searches the port net for a
+  rule-legal via-stack landing (clearance to other nets, via spacing,
+  keep-out layers). Opt-in and additive: the response gains
+  `blocks[].derived_ports[]` only when used; `schema_version` is unchanged.
+  `access.via_array` (`[rows, cols]`, up to 16 per side) lands a cut array at
+  the chosen point: the router draws every hop as that array at the deck's via
+  pitch, pads grow to enclose it, and the landing search checks the larger
+  footprint. `landing` gains `via_array`, and `via_count` counts all cuts.
+- **`klt extract --parasitics` model revision, and 0.7.0 series-R disclosure**
+  (issue #2957): `parasitics` gains an integer `model_revision` (currently
+  `2`), bumped whenever R or C extraction semantics change. Additive;
+  `schema_version` is unchanged. **Back-reference for 0.7.0:** #2392 changed
+  how series R is counted, from squares per merged net to squares per
+  conductor fragment, so series R reported by `--parasitics` differs from
+  0.6.0 on identical input while C is unchanged. Individual nets moved by up
+  to roughly 2x in the reporter's layout, and total series R there fell about
+  16% (17.52 to 14.696 kohm). The direction depends on net shape: disjoint
+  fragments no longer fuse into one long, thin rectangle, and short, wide
+  fragments no longer read as the reciprocal. 0.6.0-style results are
+  revision `1`, 0.7.0-style revision `2`.
 - **Bipolar markers can be derived layer expressions** (issue #2860):
   `BipolarDevice.marker` now accepts a `LayerExpr`, a frozen AND/NOT tree
   of drawn layers that can nest, as well as a bare `(layer, datatype)`
@@ -639,6 +885,8 @@ not `klt --version`, if you need to detect this kind of drift. See
   always the source. S/D interchange stays electrically legal for LVS; only
   the reported orientation changes, and only on hosts that were iterating in
   the other order.
+- `klt lvs`: new `"engine": "klayout-runset"` runs a PDK's own KLayout LVS runset (`deck_file`, `deck_vars`) and takes the verdict from its `.lvsdb` cross-reference, with `device_census`, a `coverage` block and `provenance.runset` (issue #2849). Additive; no `schema_version` bump.
+
 - **Dev builds no longer satisfy `klayout-tools==X.Y.Z` pins** (issue #2823,
   absorbing #2888): the distribution version is now computed at build time
   from `pyproject.toml`'s `[tool.hatch.version]` `base-version` plus the
@@ -675,6 +923,19 @@ not `klt --version`, if you need to detect this kind of drift. See
   compare). New additive `drift.path_comments_differ` field. Generation is
   unchanged.
 
+- **`klt lvs` `layout.abstract_cells`/`layout.abstract_cell_lef`** (issue
+  #2853). Inline extraction now forwards `klt extract --abstract-cells`/
+  `--abstract-cell-lef`, so a mixed-level compare (a transistor-level region
+  plus pin-only black-box cells against a reference with pin-only stubs) runs
+  in one request, and `body_verification` is evaluated for the transistor
+  region. Given with `layout.netlist`, either field is an application error.
+  The response gains top-level `abstract_cells`, `abstract_cell_lef` and
+  `abstracted_cells`, present only when abstraction was requested; `--check
+  --rerun` replays them. For a non-`gate-level-verilog` reference whose
+  layout instantiates pin-only cells, `power_connectivity` stays
+  `"unchecked"`, and its `reason` now names those cells and says their pins
+  were compared by name as ordinary connectivity. This is an additive request
+  and response change, so there is no `schema_version` bump.
 - **`klt lvs` opt-in `options.strict_top_level_pin_count`** (issue #2845):
   unequal top-circuit pin counts yield `status: mismatch` with a new
   `pin.count` error finding (both counts in `details`). Default unchanged;
@@ -700,6 +961,23 @@ not `klt --version`, if you need to detect this kind of drift. See
   a read-back `power_pins` verdict and `--require-power-pins`; `klt signoff`
   recognises both envelopes as opt-in kinds scoped to item 11.
 
+- **`klt signoff --attest {1,9,10}`: tool-produced evidence for T1 items 1,
+  9 and 10** (issue #2844): reads a versioned attestation inventory
+  (`"kind": "t1-attestation-inventory"`, `schema_version: 1`), runs
+  item-specific checks (item 1: sources and derived netlists exist and each
+  netlist passes its declared freshness command; item 9: testbenches exist,
+  the cold-start invocation succeeds, PDK revision and tool versions are
+  pinned; item 10: hygiene files exist and declared CI/audit commands
+  succeed) and emits the artifact-anchored `generic` envelope with
+  `status` derived from those checks and an `attestation.checks[]` record.
+  `-o` writes only a passing envelope, only when its bytes change;
+  `--check <committed>` re-attests and exits `3` on any drift or failure.
+  **Behaviour change:** items 1, 9 and 10 now accept only an anchored
+  `generic` envelope, so a passing but unrelated native envelope (e.g. a
+  clean `klt drc` report) renders `unmet`/`wrong_kind` for them. Item 2 is
+  unchanged. A met anchored citation's `artifact_binding` gains an additive
+  `attestation` block when the envelope came from `--attest`. See
+  `docs/cli/signoff.md` "Attesting items 1, 9 and 10".
 - **Output-directory ownership for `klt pex` / `sim` / `place-and-route`**
   (issue #2770): each run takes a non-blocking OS-backed advisory lock on its
   persistent artifact root; a competing cooperating run fails fast with the

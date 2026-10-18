@@ -20,6 +20,7 @@ from . import (
     components_cmd,
     deck_cmd,
     design_centering_cmd,
+    diff_cmd,
     draw_cmd,
     drc_cmd,
     economy_cmd,
@@ -32,6 +33,7 @@ from . import (
     gen_cmd,
     gen_compose_cmd,
     kb_cmd,
+    keepout_check_cmd,
     layers_cmd,
     layout_metrics_cmd,
     lef_abstract_cmd,
@@ -51,6 +53,7 @@ from . import (
     signoff_cmd,
     sim_cmd,
     sim_merge_cmd,
+    sim_plan_cmd,
     size_cmd,
     socket_check_cmd,
     sta_cmd,
@@ -63,6 +66,7 @@ from . import (
     wave_cmd,
     yield_campaign_cmd,
     yield_cmd,
+    yield_csv_cmd,
     yield_samples_cmd,
     yield_sensitivity_cmd,
     yield_threshold_cmd,
@@ -222,6 +226,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_layers_parser(subparsers)
 
     _add_stats_parser(subparsers)
+    _add_diff_parser(subparsers)
 
     _add_economy_parser(subparsers)
 
@@ -241,6 +246,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_lef_abstract_parser(subparsers)
 
     _add_ring_check_parser(subparsers)
+    _add_keepout_check_parser(subparsers)
     _add_tap_distance_parser(subparsers)
 
     _add_layout_metrics_parser(subparsers)
@@ -286,6 +292,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_sim_parser(subparsers)
 
     _add_sim_merge_parser(subparsers)
+    _add_sim_plan_parser(subparsers)
 
     _add_pex_parser(subparsers)
 
@@ -306,6 +313,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_yield_parser(subparsers)
 
     _add_yield_samples_parser(subparsers)
+    _add_yield_csv_parser(subparsers)
 
     _add_yield_campaign_parser(subparsers)
 
@@ -909,6 +917,35 @@ def _add_sim_merge_parser(subparsers: argparse._SubParsersAction) -> None:
     merge_parser.set_defaults(func=sim_merge_cmd.run)
 
 
+def _add_sim_plan_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``sim-plan`` verb (issue #3423).
+
+    The producer side of ``sim-merge``: splits one request by process corner
+    into shard requests plus the manifest ``sim-merge`` consumes. See
+    docs/cli/sim.md "Planning shards".
+    """
+    plan_parser = subparsers.add_parser(
+        "sim-plan",
+        help="split a klt sim request into per-process shards and a sim-merge manifest",
+        description=(
+            "Write one request per corners.process entry plus the shard "
+            "manifest for `klt sim-merge`, next to the source request. The "
+            "manifest's corner ids come from the same expansion `klt sim` "
+            "runs. Monte Carlo and deck-list requests are refused. See "
+            "docs/cli/sim.md 'Planning shards'."
+        ),
+    )
+    plan_parser.add_argument("request", help="klt sim request JSON to split")
+    plan_parser.add_argument(
+        "--axis",
+        choices=["process"],
+        default="process",
+        help="axis to shard by (default: process)",
+    )
+    _add_format_arg(plan_parser)
+    plan_parser.set_defaults(func=sim_plan_cmd.run)
+
+
 def _add_size_parser(subparsers: argparse._SubParsersAction) -> None:
     """Register the ``size`` verb for single-device gm/Id operating-point sizing.
 
@@ -1148,6 +1185,26 @@ def _add_power_parser(subparsers: argparse._SubParsersAction) -> None:
             "top cell to analyse when the stream has more than one "
             "(required in that case -- klt power operates on exactly one "
             "top cell, unlike klt layers' default of summing across all)"
+        ),
+    )
+    power_parser.add_argument(
+        "--deck",
+        default=None,
+        help=(
+            f"parasitics deck (currently: {_deck_names_str()}) that supplies "
+            "'vias[].resistance_ohm' for any via whose spec entry omits it "
+            "(issue #3400); an explicit spec value always wins. Also "
+            "populates provenance.deck"
+        ),
+    )
+    power_parser.add_argument(
+        "--resistance-corner",
+        default=None,
+        choices=("nominal", "high", "low"),
+        help=(
+            "which of --deck's published interconnect-resistance corners "
+            "defaults a via's resistance (default: nominal). Distinct from "
+            "`klt stackup --corner`'s tech-LEF min/nom/max; requires --deck"
         ),
     )
     _add_format_arg(power_parser)
@@ -1394,6 +1451,79 @@ def _add_yield_threshold_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(parser)
     parser.set_defaults(func=yield_threshold_cmd.run)
+
+
+def _add_yield_csv_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``yield-csv`` verb (issue #2931).
+
+    Derives a `klt yield` sample-set document from a long-format per-draw
+    Monte Carlo CSV (one row per draw) so a non-`klt sim` harness needs no
+    bespoke converter. Pure transformation; needs no native extension.
+    """
+    parser = subparsers.add_parser(
+        "yield-csv",
+        help="per-draw Monte Carlo CSV -> a `klt yield` sample-set document",
+        description=(
+            "Derive a `klt yield` sample-set document from a long-format "
+            "per-draw Monte Carlo CSV: one measurement per --group-by value, "
+            "samples from --value. Rows whose --status-col is not --pass-value, "
+            "and passing rows with an empty/non-numeric/non-finite value, count "
+            "as errored. The --format json output is the sample-set document "
+            "(plus a `derivation` block with the CSV path and SHA-256 hash); "
+            "redirect it to a file and pass that to `klt yield`. See "
+            "docs/cli/yield.md's 'Deriving a sample set from a per-draw CSV'."
+        ),
+    )
+    parser.add_argument("csv", help="path to the per-draw CSV (UTF-8, header row)")
+    parser.add_argument(
+        "--group-by",
+        dest="group_by",
+        required=True,
+        metavar="COL",
+        help="column whose distinct values each become one measurement",
+    )
+    parser.add_argument(
+        "--value", required=True, metavar="COL", help="column holding the draw's value"
+    )
+    parser.add_argument(
+        "--status-col",
+        dest="status_col",
+        default=None,
+        metavar="COL",
+        help="column holding the draw's status (requires --pass-value)",
+    )
+    parser.add_argument(
+        "--pass-value",
+        dest="pass_value",
+        default=None,
+        metavar="V",
+        help="status value marking a good draw; any other value counts errored",
+    )
+    parser.add_argument(
+        "--draw-col",
+        dest="draw_col",
+        default=None,
+        metavar="COL",
+        help="draw-index column; a repeated (group, draw) pair is rejected",
+    )
+    parser.add_argument(
+        "--unit", default=None, help="unit recorded on each measurement"
+    )
+    parser.add_argument(
+        "--min", type=float, default=None, help="limits.min per measurement"
+    )
+    parser.add_argument(
+        "--max", type=float, default=None, help="limits.max per measurement"
+    )
+    parser.add_argument(
+        "--target-yield",
+        dest="target_yield",
+        type=float,
+        default=None,
+        help="limits.target_yield per measurement",
+    )
+    _add_format_arg(parser)
+    parser.set_defaults(func=yield_csv_cmd.run)
 
 
 def _add_yield_campaign_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -2912,6 +3042,32 @@ def _add_lvs_parser(subparsers: argparse._SubParsersAction) -> None:
             "(exit 1) otherwise"
         ),
     )
+    lvs_parser.add_argument(
+        "--deck-file",
+        dest="deck_file",
+        default=None,
+        metavar="PATH",
+        help=(
+            "path to the PDK's KLayout LVS runset for request.engine "
+            "'klayout-runset' (issue #3206); fills request.deck_file, and "
+            "is a clean error (exit 1) if the request already sets it or "
+            "uses another engine. A relative PATH resolves against the "
+            "current directory"
+        ),
+    )
+    lvs_parser.add_argument(
+        "--deck-var",
+        dest="deck_var",
+        action="append",
+        metavar="NAME=VALUE",
+        default=None,
+        help=(
+            "extra '-rd NAME=VALUE' global passed to the runset (engine "
+            "'klayout-runset' only; issue #3206). Repeatable; fills "
+            "request.deck_vars, and is a clean error (exit 1) if the "
+            "request already sets it or uses another engine"
+        ),
+    )
     _add_format_arg(lvs_parser)
     lvs_parser.set_defaults(func=lvs_cmd.run)
 
@@ -3179,6 +3335,22 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "splitting device-representation effects from parasitics. Not "
             "supported with --measure-command. Off by default -- "
             "byte-identical to today's behavior."
+        ),
+    )
+    pex_parser.add_argument(
+        "--extract-only",
+        dest="extract_only",
+        action="store_true",
+        default=False,
+        help=(
+            "extract and report without any measurement leg (issue #3739): "
+            "no testbench or --measure-command is needed, so no placeholder "
+            "measurement lands in delta[]. The response carries "
+            "extraction/body_bias/provenance as usual, testbenches and delta "
+            'are empty, measurement.mode is "extract-only" and status is '
+            "not_checked (exit 4). Cannot be combined with testbenches, "
+            "--measure-command, --reference-netlist, --measure-timeout-s, "
+            "--device-only-leg or --flatten-schematic. Off by default."
         ),
     )
     pex_parser.add_argument(
@@ -3554,6 +3726,30 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     signoff_parser.add_argument(
+        "--allow-generator-exec",
+        action="store_true",
+        help=(
+            "opt in (default off) to running an operator-approved T1 item "
+            "1/2 regeneration generator on the batch runner and "
+            "byte-comparing its output with the committed artifact. Needs "
+            "--generator-approvals (or $KLT_SIGNOFF_GENERATOR_APPROVALS): "
+            "a manifest can never approve its own generator. Trusted-code "
+            "policy, not isolation. Only meaningful with --manifest/--fleet. "
+            "See docs/cli/signoff.md's 'Executing approved generators' "
+            "section."
+        ),
+    )
+    signoff_parser.add_argument(
+        "--generator-approvals",
+        metavar="FILE",
+        help=(
+            "trusted approvals JSON binding each runnable generator's "
+            "interpreter, script content hash, allowed arguments and "
+            "artifact -- operator configuration outside the manifest. Only "
+            "valid with --allow-generator-exec."
+        ),
+    )
+    signoff_parser.add_argument(
         "--tiers-doc",
         metavar="PATH",
         help=(
@@ -3579,7 +3775,45 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
             "of the same pinned commit report different ones (issue #2249). "
             "Use this rather than byte-comparing the committed file against "
             "a fresh render. Only meaningful with --manifest/--fleet; see "
-            "docs/cli/signoff.md's '--check' section."
+            "docs/cli/signoff.md's '--check' section. With --attest, REPORT "
+            "is a committed attestation envelope instead: re-attests and "
+            "exits 0 only if it still reproduces and still passes, 3 "
+            "otherwise -- never rewriting it."
+        ),
+    )
+    signoff_parser.add_argument(
+        "--attest",
+        metavar="ITEM",
+        type=int,
+        choices=[1, 9, 10],
+        help=(
+            "produce the artifact-anchored generic envelope for T1 item 1 "
+            "(Design sources), 9 (Testbenches shipped) or 10 (Repo hygiene) "
+            "from --inventory, by running the item-specific checks the "
+            "inventory declares (issue #2844). Status is derived from those "
+            "checks: exit 0 pass, 3 fail (nothing written), 1 malformed "
+            "inventory. Mutually exclusive with <file>/--manifest/--fleet/"
+            "--describe-grader/--tiers-doc. See docs/cli/signoff.md's "
+            "'Attesting items 1, 9 and 10' section."
+        ),
+    )
+    signoff_parser.add_argument(
+        "--inventory",
+        metavar="FILE",
+        help=(
+            "with --attest: path to the versioned attestation inventory "
+            "(schema_version 1, kind 't1-attestation-inventory') inside a "
+            "git repository; the envelope pins this file's raw-byte sha256."
+        ),
+    )
+    signoff_parser.add_argument(
+        "-o",
+        "--output",
+        metavar="FILE",
+        help=(
+            "with --attest: also write the envelope to FILE when it passes, "
+            "only if its bytes changed (an unchanged attestation leaves the "
+            "committed file untouched)."
         ),
     )
     signoff_parser.add_argument(
@@ -3589,7 +3823,8 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
             "print which T1 checklist item ids this build has grading "
             "rules for, plus the content hash identifying the grading code "
             "itself, without reading source or running any check -- "
-            "mutually exclusive with <file>/--manifest/--fleet/--tiers-doc "
+            "mutually exclusive with <file>/--manifest/--fleet/--tiers-doc/"
+            "--attest "
             "(this always reports the build's own shipped grading rules, "
             "never an overridden doc's item list). See docs/cli/signoff.md's "
             "'Identifying the grading build' section."
@@ -4279,7 +4514,7 @@ def _add_wave_parser(subparsers: argparse._SubParsersAction) -> None:
 
 def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
     """Register the ``pdk`` verb with nested ``find``/``list``/``env``/
-    ``cells``/``macros``/``corners``/``em-limits``/``pcell-check``/``stackup``
+    ``cells``/``macros``/``decks``/``corners``/``em-limits``/``pcell-check``/``stackup``
     subcommands.
 
     The other verbs are flat; ``pdk`` groups discovery operations under one
@@ -4427,6 +4662,26 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(macros_parser)
     macros_parser.set_defaults(func=pdk_cmd.run_macros)
+
+    decks_parser = pdk_sub.add_parser(
+        "decks",
+        help="list the KLayout DRC decks a PDK ships and the -rd globals each reads",
+        description=(
+            "List the `.lydrc`/`.drc` KLayout DRC deck files under the "
+            "resolved variant's libs.tech/klayout/drc, which one `klt drc "
+            "--pdk` runs (`is_default`), and a best-effort static scan of the "
+            "`-rd` globals each consumes (`required_by_caller`, `default`). "
+            "Use it to pick a sibling deck for `klt drc --deck-file` and the "
+            "`--deck-var` flags it needs."
+        ),
+    )
+    _add_pdk_args(
+        decks_parser,
+        pdk_help="variant to resolve (e.g. sky130A); overrides $PDK",
+        pdk_root_help="explicit install root; overrides $PDK_ROOT and the search order",
+    )
+    _add_format_arg(decks_parser)
+    decks_parser.set_defaults(func=pdk_cmd.run_decks)
 
     corners_parser = pdk_sub.add_parser(
         "corners",
@@ -5185,6 +5440,36 @@ def _add_stats_parser(subparsers: argparse._SubParsersAction) -> None:
     stats_parser.set_defaults(func=stats_cmd.run)
 
 
+def _add_diff_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``diff`` verb: compare two layout streams for equal geometry."""
+    diff_parser = subparsers.add_parser(
+        "diff",
+        help="compare two GDSII/OASIS streams for equal geometry, labels and hierarchy",
+        description=(
+            "Compare two layout streams shape-for-shape. Ignores stream "
+            "timestamps, element order and library name; never ignores "
+            "coordinates, path widths, text, instance transforms, the "
+            "database unit or cell names. Exit 0 = equivalent, 3 = layouts "
+            "differ, 1 = unreadable file or unknown --top."
+        ),
+    )
+    diff_parser.add_argument("file_a", help="first GDSII or OASIS layout file")
+    diff_parser.add_argument("file_b", help="second GDSII or OASIS layout file")
+    diff_parser.add_argument(
+        "--top",
+        default=None,
+        help="compare only this cell's hierarchy (must exist in both streams)",
+    )
+    diff_parser.add_argument(
+        "--max-items",
+        type=int,
+        default=50,
+        help="cap on listed differences per list (counts stay exact; default 50)",
+    )
+    _add_format_arg(diff_parser)
+    diff_parser.set_defaults(func=diff_cmd.run)
+
+
 def _add_economy_parser(subparsers: argparse._SubParsersAction) -> None:
     """Register the ``economy`` verb: quantitative layout-density report (#1012)."""
     economy_parser = subparsers.add_parser(
@@ -5430,7 +5715,9 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
         default=None,
         help=(
             "top cell to check when the stream has more than one; omit to "
-            "check every top cell. Not supported yet for --engine klayout."
+            "check every top cell. With --engine klayout, a stream with "
+            "several top cells requires --top (the deck runs against that "
+            "cell's subtree only)."
         ),
     )
     drc_parser.add_argument(
@@ -6028,6 +6315,76 @@ def _add_ring_check_parser(subparsers: argparse._SubParsersAction) -> None:
     ring_check_parser.set_defaults(func=ring_check_cmd.run)
 
 
+def _add_keepout_check_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``keepout-check`` verb: no forbidden shapes near a guard."""
+    keepout_parser = subparsers.add_parser(
+        "keepout-check",
+        help="assert no forbidden-layer shape lies within a margin of a cell/region",
+        description=(
+            "Assert that no shape on a forbidden layer set lies within a "
+            "margin of a guarded cell or region (a keep-out around a spiral "
+            "inductor, a sensitive analog block, ...) and report each "
+            "intruding shape with its layer and micrometre coordinates. The "
+            "guard is the bounding box of every placement of the --cells "
+            "names and/or the --region window, sized outward by --margin; "
+            "the guarded cells' own shapes are never counted. Purely "
+            "geometric; fully headless via KLayout's batch database API. "
+            "See docs/cli/keepout-check.md."
+        ),
+    )
+    keepout_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
+    keepout_parser.add_argument(
+        "--forbidden",
+        "--layers",
+        dest="forbidden",
+        required=True,
+        help=(
+            "forbidden layer set as a path to a JSON file, or an inline JSON "
+            "array of [layer, datatype] pairs (e.g. '[[67, 20]]'). Not "
+            "validated by argparse -- an empty/malformed value exits 1."
+        ),
+    )
+    keepout_parser.add_argument(
+        "--margin",
+        required=True,
+        help=(
+            "keep-out margin in micrometres (>= 0); a shape at distance "
+            "exactly the margin is clear. Not validated by argparse -- a "
+            "non-numeric or negative value exits 1."
+        ),
+    )
+    keepout_parser.add_argument(
+        "--cells",
+        action="append",
+        default=None,
+        metavar="CELL",
+        help=(
+            "repeatable exact cell name to guard (every placement under each "
+            "checked top cell, by bounding box). At least one of --cells / "
+            "--region is required."
+        ),
+    )
+    keepout_parser.add_argument(
+        "--region",
+        default=None,
+        help=(
+            "guarded window as an inline JSON array of four micrometre "
+            "coordinates [left, bottom, right, top]; may be combined with "
+            "--cells"
+        ),
+    )
+    keepout_parser.add_argument(
+        "--top",
+        default=None,
+        help=(
+            "top cell to check when the stream has more than one; omit to "
+            "check every top cell"
+        ),
+    )
+    _add_format_arg(keepout_parser)
+    keepout_parser.set_defaults(func=keepout_check_cmd.run)
+
+
 def _add_netlist_parser(subparsers: argparse._SubParsersAction) -> None:
     """Register the ``netlist`` verb: xschem schematic -> SPICE netlist, and
     the ``--check`` staleness gate over a committed netlist (issue #55)."""
@@ -6212,15 +6569,31 @@ def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
             "the JSON contract."
         ),
     )
-    erc_parser.add_argument("file", help="path to a routed GDSII or OASIS layout file")
+    # `file`/`spec` (positional) and `--check` (issue #3060) are mutually
+    # exclusive input sources, as in `klt lvs`. `file` and `spec` are optional
+    # positionals, so "neither given" is enforced in `erc_cmd.run` (exit 1)
+    # rather than here.
+    erc_input_group = erc_parser.add_mutually_exclusive_group()
+    erc_input_group.add_argument(
+        "file",
+        nargs="?",
+        default=None,
+        help=(
+            "path to a routed GDSII or OASIS layout file. Required unless "
+            "--check is given (the input paths are then read from the "
+            "committed report instead)"
+        ),
+    )
     erc_parser.add_argument(
         "spec",
+        nargs="?",
+        default=None,
         help=(
             "path to a JSON spec file: a 'stackup' array (>= 2 entries) "
             "mapping GDS layer/datatype pairs to fabrication-order "
             'conductor roles -- stackup[0] sets "role": "gate" -- and '
             "an optional 'vias' array -- see docs/cli/erc.md's 'Spec file' "
-            "section"
+            "section. Required unless --check is given"
         ),
     )
     erc_parser.add_argument(
@@ -6237,7 +6610,7 @@ def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
         default=None,
         help=(
             "PDK antenna-ratio limit table to check each level's "
-            "antenna_ratio against (currently: sky130). Optional -- omit "
+            "antenna_ratio against (currently: sky130, ihp-sg13g2). Optional -- omit "
             "to still report every level's antenna_ratio, just with "
             "verdict 'unchecked' everywhere. Not validated by argparse -- "
             "an unknown name exits 1 with a clean error, per "
@@ -6311,6 +6684,35 @@ def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
             "erc_status and the tie entries of erc_coverage are unchanged. "
             "Requires --findings-only -- passing it alone exits 1. Omitted, "
             "output is byte-identical."
+        ),
+    )
+    erc_input_group.add_argument(
+        "--check",
+        default=None,
+        metavar="REPORT",
+        help=(
+            "verify a previously committed 'klt erc --format json' report "
+            "(REPORT) instead of running a fresh check: mutually exclusive "
+            "with the positional 'file'/'spec' arguments, since inputs are "
+            "read from REPORT itself (issue #3060). Cheap mode (default): "
+            "re-hash REPORT's layout and spec (and --deck source, when one "
+            "was used) and compare against the recorded "
+            "provenance.input/spec/deck content_hash values, no ERC re-run. "
+            "Combine with --rerun for full mode. Exits 0 if still "
+            "consistent, 3 if drifted -- see docs/cli/erc.md, "
+            "'--check / --rerun'"
+        ),
+    )
+    erc_parser.add_argument(
+        "--rerun",
+        action="store_true",
+        help=(
+            "full mode for --check (issue #3060): re-run ERC from REPORT's "
+            "echoed file/spec/pdk/findings_only (and provenance.deck) and "
+            "diff verdict-bearing fields against the committed report, "
+            "excluding provenance.klt_version/klayout_version/pdk.version. "
+            "--top is not echoed in the report, so it is not replayed. "
+            "Requires --check; a clean error (exit 1) otherwise"
         ),
     )
     _add_format_arg(erc_parser)

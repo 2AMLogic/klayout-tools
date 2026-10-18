@@ -503,6 +503,14 @@ def test_layout_with_no_devices_succeeds_with_zero_count(tmp_path):
         "sky130_fd_pr__model__cap_mim",
         "sky130_fd_pr__model__cap_mim_m4",
         "resistor",
+        "diode_pw2nd_05v5",
+        "diode_pw2nd_05v5_lvt",
+        "diode_pw2nd_05v5_nvt",
+        "diode_pw2nd_11v0",
+        "diode_pd2nw_05v5",
+        "diode_pd2nw_05v5_lvt",
+        "diode_pd2nw_05v5_hvt",
+        "diode_pd2nw_11v0",
     ]
 
 
@@ -599,6 +607,14 @@ def test_synthetic_inverter_extracts_two_devices(tmp_path):
         "sky130_fd_pr__model__cap_mim",
         "sky130_fd_pr__model__cap_mim_m4",
         "resistor",
+        "diode_pw2nd_05v5",
+        "diode_pw2nd_05v5_lvt",
+        "diode_pw2nd_05v5_nvt",
+        "diode_pw2nd_11v0",
+        "diode_pd2nw_05v5",
+        "diode_pd2nw_05v5_lvt",
+        "diode_pd2nw_05v5_hvt",
+        "diode_pd2nw_11v0",
     ]
     assert report["pdk"] is None
     assert report["warnings"] == []
@@ -3586,6 +3602,14 @@ def test_sky130_synthetic_bjt_extracts_one_pnp_device(tmp_path):
         "sky130_fd_pr__model__cap_mim",
         "sky130_fd_pr__model__cap_mim_m4",
         "resistor",
+        "diode_pw2nd_05v5",
+        "diode_pw2nd_05v5_lvt",
+        "diode_pw2nd_05v5_nvt",
+        "diode_pw2nd_11v0",
+        "diode_pd2nw_05v5",
+        "diode_pd2nw_05v5_lvt",
+        "diode_pd2nw_05v5_hvt",
+        "diode_pd2nw_11v0",
     ]
 
     (device,) = report["devices"]
@@ -4589,7 +4613,16 @@ def test_diodes_field_defaults_empty_and_is_a_no_op():
     )
     assert deck.diodes == ()
     assert deck.device_classes == ("nfet", "pfet")
-    assert get_extraction_deck("sky130").diodes == ()
+    assert {d.name for d in get_extraction_deck("sky130").diodes} == {
+        "diode_pw2nd_05v5",
+        "diode_pw2nd_05v5_lvt",
+        "diode_pw2nd_05v5_nvt",
+        "diode_pw2nd_11v0",
+        "diode_pd2nw_05v5",
+        "diode_pd2nw_05v5_lvt",
+        "diode_pd2nw_05v5_hvt",
+        "diode_pd2nw_11v0",
+    }
 
 
 def test_diode_with_no_drawn_terminal_is_a_deck_authoring_error(tmp_path):
@@ -6751,6 +6784,14 @@ def test_cli_missing_deck_flag_is_a_clean_error(tmp_path, capsys):
                 "sky130_fd_pr__model__cap_mim",
                 "sky130_fd_pr__model__cap_mim_m4",
                 "resistor",
+                "diode_pw2nd_05v5",
+                "diode_pw2nd_05v5_lvt",
+                "diode_pw2nd_05v5_nvt",
+                "diode_pw2nd_11v0",
+                "diode_pd2nw_05v5",
+                "diode_pd2nw_05v5_lvt",
+                "diode_pd2nw_05v5_hvt",
+                "diode_pd2nw_11v0",
             ),
         ),
         # gf180mcu declares one bipolar entry, generic `bjt` (issue #223 --
@@ -9874,6 +9915,14 @@ def test_sky130_inv_1_spot_check(tmp_path):
         "sky130_fd_pr__model__cap_mim",
         "sky130_fd_pr__model__cap_mim_m4",
         "resistor",
+        "diode_pw2nd_05v5",
+        "diode_pw2nd_05v5_lvt",
+        "diode_pw2nd_05v5_nvt",
+        "diode_pw2nd_11v0",
+        "diode_pd2nw_05v5",
+        "diode_pd2nw_05v5_lvt",
+        "diode_pd2nw_05v5_hvt",
+        "diode_pd2nw_11v0",
     ]
 
     devices = {d["class"]: d for d in report["devices"]}
@@ -13766,6 +13815,7 @@ def test_parasitics_summary_block_shape(tmp_path):
     para = report["parasitics"]
     assert para is not None
     assert set(para) == {
+        "model_revision",
         "r_count",
         "c_count",
         "cc_count",
@@ -13840,6 +13890,9 @@ def test_parasitics_summary_block_shape(tmp_path):
     # static across every extraction, so it must match the module constant
     # exactly, not just be present.
     assert para["model"] == PARASITIC_MODEL_SCOPE
+    # `model_revision` (issue #2957): bump PARASITICS_MODEL_REVISION (and the
+    # CHANGELOG) whenever R/C extraction semantics change.
+    assert para["model_revision"] == 2
     assert set(para["model"]) == {"capacitance", "coupling", "resistance", "frequency"}
     # sky130's PARASITICS.metals/metal_overlaps are fully populated (issue
     # #547's regression target was gf180mcu, not sky130) -- no gap for this
@@ -20744,7 +20797,8 @@ def test_spef_floating_duplicate_named_outputs_are_skipped(tmp_path):
 def test_spef_unlabelled_dollar_nets_absent_from_def_are_skipped(tmp_path):
     """Issue #3580: a unique-named unlabelled `$N` net with no DEF net (and not
     a port) gets no `*D_NET` (STA-1650) and its coupling is dropped; a `$N`
-    that the DEF names, a port, and a labelled non-DEF net are untouched."""
+    that the DEF names and a port are untouched. Issue #3662: a labelled net
+    (e.g. a sub-cell label `Z`/`ZN`) with no DEF net is skipped the same way."""
     from klayout_tools.extract_spef import _write_spef
 
     def run(name, **kwargs):
@@ -20771,10 +20825,10 @@ def test_spef_unlabelled_dollar_nets_absent_from_def_are_skipped(tmp_path):
     skipped, text = run(
         "on", net_instance_pins={"sig": (("u1", "A"),), "$12": (("u2", "A"),)}
     )
-    assert skipped == ["$7"]
+    assert skipped == ["$7", "lab"]
     assert "*D_NET \\$7 " not in text
     assert "*D_NET \\$12 " in text
-    assert "*D_NET lab " in text
+    assert "*D_NET lab " not in text
     assert "*D_NET sig 1.000000" in text  # coupling cap not folded in
 
     skipped, _ = run("empty", net_instance_pins={})

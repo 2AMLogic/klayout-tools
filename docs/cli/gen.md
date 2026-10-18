@@ -626,6 +626,9 @@ extracted netlist instead of reporting it as a spurious unmatched device
 under `klt lvs`. Those are all three families `mos_array` runs on
 (sg13cmos5l is deferred — see "PDK-family support" above), so every
 `mos_array` dummy column is suppressed this way.
+Dummy units report no ports by default, so their pads float and `klt extract`
+lists them under `dead_metal`; set `dummy_ports: true` (issue #2904) to report
+them as `D<k>_S`/`D<k>_D`/`D<k>_G` and tie them off through `klt gen-compose`.
 For a single-finger unit device the (one) gate
 finger carries a **poly landing pad** that extends one
 `CONTACT_SIZE_UM + 2*ENCLOSURE_MARGIN_UM` (0.42 µm) square past the
@@ -812,16 +815,16 @@ silently dropped. `voltage_flavor` is independent of `flavor`: requesting
 both `flavor="pfet"` and `voltage_flavor="medium_voltage"`/`"hv"`/`"hvi"`
 draws both the well and the marker with no conflict.
 
-**sky130's native-Vt NMOS (`sky130_fd_pr__nfet_05v0_nvt`) is unsupported
-(issue #2912).** `voltage_flavor="native"`/`"nvt"` on `sky130` draws no marker
-and the device extracts as a plain `nfet`; `drc_hints.notes` names the flavour
-as unsupported. The upstream `sky130.lvs` does not key it on one marker layer:
-`ngate_nvt = ngate_high_voltage.and(lvtn).not(areaid_ed).not(areaid_ce)`
-(`hvi` 75/20 AND `lvtn` 125/44), then `ngate_5p0v_nvt = ngate_nvt.not(areaid_le)
-.not_interacting(vpp)` → `nfet_05v0_nvt` (the `areaid_le` 3v3 variant is
-`nfet_03v3_nvt`), whereas `voltage_flavor` and the deck's `mos_flavours`
-express a single marker. Plan an explicit exclusion of such a device from the
-LVS comparison (see `lvs.md`, "Native-Vt NMOS is not supported on sky130").
+**sky130's native-Vt NMOS (`sky130_fd_pr__nfet_05v0_nvt`, issue #3600).**
+`voltage_flavor="native"`/`"nvt"` on `sky130` draws **two** marker boxes over
+the same footprint: `hvi` (75/20) and `lvtn` (125/44) — the pair the deck's
+`nvt` flavour keys on (`ngate_nvt = ngate_high_voltage.and(lvtn)…`). A unit
+device drawn this way extracts as `sky130_fd_pr__nfet_05v0_nvt`, and `klt lvs`
+accepts that name in a `form: "subckt-call"` reference. `areaid_le` (81/60),
+which upstream subtracts for the 5V native device, is never drawn; the 3v3
+variant (`nfet_03v3_nvt`) is not supported. The device is NMOS-only:
+`flavor="pfet"` with a native `voltage_flavor` fails with a `GenError`
+(`mos_array` and `diff_pair`).
 
 **Source/drain implant (issue #2580).** Only `gf180mcu`'s role-layer table
 declares the S/D implant roles (`"nplus"` 32/0 / `"pplus"` 31/0, issue
@@ -871,6 +874,21 @@ same-block self-net — no `gen-compose`-level change was needed for this
 ring around a *separately*-generated block is an explicit non-goal, tracked
 as a future follow-up if still needed).
 
+**Tap pads on gf180mcu (issue #3648).** gf180mcu's default deck enforces
+`DF.13_LV`/`DF.14_LV` (every active within 20 µm of a well/substrate tap), so
+on that family a `mos_array` or `diff_pair` with `add_guard_ring: false` still
+draws tap pads: 0.42 µm square tap/metal pads with one contact and the tap
+implant each (Nplus inside the pfet well, Pplus for nfet), in the band a ring
+would occupy (`ring_padding_um` outside the footprint). They sit at the
+footprint's top and bottom corners, plus evenly spaced interior pads on any
+side longer than 20 µm, so the band stays open where routes leave the block.
+The pads add no ports; `bbox_um` grows to enclose them (the pad band,
+`ring_padding_um` + 0.42 µm, at the top and bottom). A footprint
+deeper than about 17 µm from every side is out of reach of perimeter pads, as
+it is of the ring, and still reports `comp.tap_distance.*`. With
+`add_guard_ring: true` the ring is the tap and no pads are drawn. sky130 and
+the other families draw no pads and are byte-for-byte unchanged.
+
 **Below `UNIT_MIN_W_UM`: dog-bone terminals drawn by hand (issue #1574).**
 `w_um` below `0.42` µm is rejected outright, with no override — that floor is
 about the *contact*, not the target PDK's own diffusion-width minimum (sky130
@@ -905,6 +923,7 @@ with their `.drc.json` reports checked in alongside).
 | `rows`/`cols`  | int    | `2`/`2`            | Array shape. Must each be `>= 1`. |
 | `topology`     | string | `"common_centroid"`| `"array"` or `"common_centroid"` — see above. |
 | `dummy`        | int    | `1`                | Dummy unit-device columns added on each side. Must be `>= 0`. |
+| `dummy_ports`  | bool   | `false`            | Also report each dummy unit's terminals (issue #2904) as `D<k>_S`/`D<k>_D`/`D<k>_G` (`finger_topology: "series"` with `fingers > 1`: `D<k>_S<n>`/`D<k>_D<n>`/`D<k>_G<n>`, matching the real units' naming), appended after every real-unit port. `k` counts dummies row by row, left to right (`D0` is row 0's leftmost dummy). Same layers, positions and directions as a real unit's ports, so `klt gen-compose` `connectivity[]` can tie dummy gates and S/D to a rail instead of leaving them floating (which `klt extract` reports as `dead_metal`). `false` (the default) leaves `ports[]` byte-for-byte unchanged. |
 | `flavor`       | string | `"nfet"`           | Device flavor: `"nfet"` (no well drawn) or `"pfet"` (unit devices enclosed in a well on PDK families that check one, plus a `WELL_TAP` well-tie tap-pad port on `sg13cmos5l` — see above). Must be `"nfet"` or `"pfet"`. |
 | `voltage_flavor` | string | `""`             | Optional medium-voltage/thick-oxide device-class marker: `""` (default, no marker drawn) or a name the resolved PDK family's role-layer table recognises — `"medium_voltage"` on `gf180mcu` (its `Dualgate` layer), `"hv"` on `ihp-sg13g2`/`ihp-sg13cmos5l` (their shared `ThickGateOx` layer), or `"hvi"` on `sky130` (its `hvi.drawing` layer). Any other value on any family draws nothing and is flagged via `drc_hints.notes`, never rejected outright. |
 | `gate_contact` | bool   | `false`            | Draw a contact + local-metal pad on each gate landing pad and report `U<i>_G` on the `metal` role instead of `poly` — see above. Grows the unit device by `0.4` µm to keep the gate metal clear of the S/D pads. |
@@ -915,12 +934,14 @@ with their `.drc.json` reports checked in alongside).
 | `ring_padding_um` | double | `0.5`            | Padding between the array's own shared-footprint box (`well_box_um`) and the guard ring's inner edge (µm), when `add_guard_ring` is set. Must be `>= 0`. |
 | `interior_channel_um` | double | `0.0`         | Extra gap (µm) reserved between adjacent rows/columns, on top of the fixed inter-device spacing, so an interior unit device's pin has a navigable path to the array's edge (issue #1531). Must be `>= 0`. `0.0` (the default) is a strict no-op — byte-for-byte identical geometry to every request that predates this param. A positive value widens `row_pitch`/`col_pitch` by that amount and reports the resulting inter-row/inter-column gap bands in the response's `navigable_regions` field (`{"x0_um", "y0_um", "x1_um", "y1_um"}` rectangles). `klt gen-compose` (issue #1835) subtracts a block's own declared `navigable_regions` from its obstacle bbox before its own overlap check runs, so a `waypoints_um` backbone that stays inside the declared channel is no longer rejected as crossing its own block. |
 | `pitch_x_um`/`pitch_y_um` | double | `0.0`      | Override the column/row pitch (µm) between adjacent unit devices (issue #3299). Must be `>= 0`. `0.0` (the default) means no override — byte-for-byte identical geometry to every request that predates these params. The default pitch is already the legal minimum (unit extent + the fixed `0.4` µm same-layer spacing), so an override can only *widen* it: a value below that minimum is **clamped up** to it, never emitted as DRC-violating geometry. When either is set, `drc_hints.pitch` reports `col_pitch_um`/`row_pitch_um` (effective), `min_col_pitch_um`/`min_row_pitch_um` and `pitch_x_clamped`/`pitch_y_clamped`, and a clamp adds a `warnings` entry. Composes with `interior_channel_um`: the channel is added on top of the effective pitch. |
+| `share_sd` | boolean | `false` | Abut horizontally adjacent unit devices so each pair shares one contacted S/D segment (issue #3551, Phase 2 of #3299): column pitch drops from `unit extent + 0.4` µm to `unit extent − one contact region`, and unit *c*'s drain segment **is** unit *c+1*'s source segment (identical drawn coordinates). **This changes electrical topology** — each row extracts as a series chain with `cols + 1` S/D nets instead of `2 × cols`. `U<i>_D`/`U<i+1>_S` stay reported, at the same position; `drc_hints.shared_sd_nodes` lists each shared pair. Dummy columns stay isolated at the normal pitch. Requires `topology: "array"` and `fingers: 1`, and is exclusive with `pitch_x_um`/`interior_channel_um`; any other combination is rejected with `GenError`. `false` (the default) is byte-for-byte identical to every request that predates it. |
+| `mirror` | boolean | `false` | Mirror every odd real column about its vertical axis (issue #3552, Phase 3 of #3299) so facing terminals alternate S\|S / D\|D; the pitch and device count are unchanged. `U<i>_S`/`U<i>_D` ports follow the flipped geometry (a mirrored unit has D on its left, S on its right, with `direction_deg` swapped), and `drc_hints.mirror` reports `mirrored_columns` and each unit's `terminal_sides`. With `share_sd`, `drc_hints.shared_sd_nodes` lists the abutted pairs as `U0_D`/`U1_D`, `U1_S`/`U2_S`, … instead of `D`/`S`. Dummy columns stay unmirrored; columns only (no row mirroring). **Unrelated to `diff_pair`'s `params.mirror`** (current-mirror device labels). Requires `topology: "array"`, `fingers: 1` and no `mos_cap`; `common_centroid` is rejected with `GenError`. `false` (the default) is byte-for-byte identical to every request that predates it. |
 
 #### Tighter than the generator allows: draw your own primitives
 
 `mos_array` places every unit device as a fully isolated cell, so its pitch
-cannot go below the legal minimum above (no shared source/drain abutment or
-mirroring yet — tracked separately from #3299). When a design needs a denser
+cannot go below the legal minimum above (no row mirroring yet — tracked
+separately from #3299). When a design needs a denser
 array than that, hand-draw the devices with `klayout.db` (the same Python API
 `klt` uses), then run the same headless gates on the result:
 

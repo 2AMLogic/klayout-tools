@@ -297,6 +297,173 @@ def test_parse_netlist_ignores_devices_inside_a_subckt_definition():
     assert [device.name for device in parsed.devices] == ["XTOP"]
 
 
+def test_parse_netlist_expands_an_instantiated_subckt_with_hierarchical_names():
+    parsed = op_sanity.parse_netlist(
+        ".model nch nmos level=1\n"
+        ".subckt dut in out vdd\n"
+        "M1 out in 0 0 nch w=10u l=1u\n"
+        "Rl vdd out 10k\n"
+        ".ends dut\n"
+        "Vdd vdd 0 DC 1.8\n"
+        "Vin in 0 DC 1\n"
+        "Xdut in out vdd dut\n",
+        {},
+    )
+
+    assert [device.name for device in parsed.devices] == ["Xdut.M1"]
+    device = parsed.devices[0]
+    assert device.kind == "nmos"
+    assert device.nodes["drain"] == "out"
+    assert device.nodes["gate"] == "in"
+    assert device.op_candidates == ["m.xdut.m1"]
+    # `out` has the Rl and M1 terminals plus nothing floating.
+    assert parsed.node_degree["out"] == 2
+    assert not parsed.unexpanded
+
+
+def test_parse_netlist_maps_internal_nodes_and_nested_subckts():
+    parsed = op_sanity.parse_netlist(
+        ".model nch nmos level=1\n"
+        ".subckt inner a b\n"
+        "M1 a b 0 0 nch\n"
+        ".ends\n"
+        ".subckt outer p\n"
+        "Xi p mid inner\n"
+        "R1 mid 0 1k\n"
+        ".ends\n"
+        "Xo top outer\n",
+        {},
+    )
+
+    assert [device.name for device in parsed.devices] == ["Xo.Xi.M1"]
+    assert parsed.devices[0].nodes["drain"] == "top"
+    assert parsed.devices[0].nodes["gate"] == "xo.mid"
+    assert parsed.devices[0].op_candidates == ["m.xo.xi.m1"]
+
+
+def test_parse_netlist_follows_includes_inside_a_subckt(tmp_path):
+    (tmp_path / "flat.spice").write_text(
+        ".model nch nmos level=1\nM1 out in 0 0 nch w=10u l=1u\nRl vdd out 10k\n"
+    )
+    parsed = op_sanity.parse_netlist(
+        '.subckt dut in out vdd\n.include "flat.spice"\n.ends dut\n'
+        "Xdut in out vdd dut\n",
+        {},
+        str(tmp_path),
+    )
+
+    assert [device.name for device in parsed.devices] == ["Xdut.M1"]
+    assert parsed.devices[0].kind == "nmos"
+
+
+def test_parse_netlist_flags_an_unresolvable_subckt_instance():
+    parsed = op_sanity.parse_netlist(
+        '.include "missing.spice"\nXdut in out vdd dut\nR1 in out 1k\n',
+        {},
+        "/nonexistent",
+    )
+
+    assert parsed.devices == []
+    assert parsed.unexpanded == ["Xdut"]
+
+
+def test_parse_netlist_survives_a_recursive_subckt():
+    parsed = op_sanity.parse_netlist(
+        ".subckt loop a\nXl a loop\n.ends\nX1 n loop\n",
+        {},
+    )
+
+    assert parsed.devices == []
+    assert parsed.unexpanded == ["X1.Xl"]
+
+
+def _fan_out_netlist(levels: int, fan_out: int) -> str:
+    """A `levels`-deep hierarchy where every level instantiates the next
+    `fan_out` times and the last level holds one MOS."""
+    lines = [".subckt lvl0 a b\nM1 a b 0 0 nmos\n.ends"]
+    for level in range(1, levels):
+        calls = "\n".join(f"X{i} a b lvl{level - 1}" for i in range(fan_out))
+        lines.append(f".subckt lvl{level} a b\n{calls}\n.ends")
+    lines.append(f"Xtop in out lvl{levels - 1}")
+    return "\n".join(lines) + "\n"
+
+
+def test_parse_netlist_caps_total_expanded_instances(monkeypatch):
+    monkeypatch.setattr(op_sanity, "_MAX_EXPANDED_INSTANCES", 50)
+
+    parsed = op_sanity.parse_netlist(_fan_out_netlist(7, 8), {})
+
+    assert parsed.expansion_truncated
+    assert parsed.expanded_instances == 50
+    # Devices reached before the cap are still reported.
+    assert parsed.devices
+
+
+def test_parse_netlist_below_the_expansion_cap_is_untouched(monkeypatch):
+    monkeypatch.setattr(op_sanity, "_MAX_EXPANDED_INSTANCES", 50)
+
+    parsed = op_sanity.parse_netlist(_fan_out_netlist(2, 4), {})
+
+    assert not parsed.expansion_truncated
+    assert len(parsed.devices) == 4
+
+
+def test_parse_netlist_expansion_cap_boundary_is_exact(monkeypatch):
+    # lvl1 -> 4x lvl0: 1 top call + 4 leaf calls = 5 expansions.
+    monkeypatch.setattr(op_sanity, "_MAX_EXPANDED_INSTANCES", 5)
+    exact = op_sanity.parse_netlist(_fan_out_netlist(2, 4), {})
+    assert not exact.expansion_truncated
+    assert len(exact.devices) == 4
+
+    monkeypatch.setattr(op_sanity, "_MAX_EXPANDED_INSTANCES", 4)
+    over = op_sanity.parse_netlist(_fan_out_netlist(2, 4), {})
+    assert over.expansion_truncated
+    assert len(over.devices) == 3
+
+
+def test_parse_netlist_fan_out_case_returns_quickly_at_the_default_cap():
+    import time
+
+    start = time.monotonic()
+    parsed = op_sanity.parse_netlist(_fan_out_netlist(7, 8), {})
+
+    assert parsed.expansion_truncated
+    assert parsed.expanded_instances == op_sanity._MAX_EXPANDED_INSTANCES
+    assert time.monotonic() - start < 2.0
+
+
+def test_expansion_cap_emits_one_unsupported_hierarchy_warning(tmp_path, monkeypatch):
+    monkeypatch.setattr(op_sanity, "_MAX_EXPANDED_INSTANCES", 50)
+    request = _write_request(tmp_path, _fan_out_netlist(7, 8) + "Vdd vdd 0 1.8\n")
+    _install_fake_ngspice(monkeypatch, {})
+
+    report = op_sanity.run_op_sanity(str(request))
+
+    capped = [
+        entry
+        for entry in report["diagnostics"]
+        if entry["code"] == "unsupported_hierarchy" and "cap" in entry["message"]
+    ]
+    assert len(capped) == 1
+    assert capped[0]["severity"] == "warning"
+    assert "50" in capped[0]["message"]
+
+
+def test_behavioural_source_terminals_count_for_the_floating_node_check():
+    parsed = op_sanity.parse_netlist(
+        "Vs vs 0 DC 1\n"
+        "Bdrv n1 0 V = v(vs) * 2\n"
+        "Brd n2 0 V = v(n1) + 1\n"
+        "Bdangling n3 0 V = 1\n",
+        {},
+    )
+
+    findings = op_sanity._hygiene_findings(parsed, [], {"0"}, set())
+    assert [finding["node"] for finding in findings] == ["n2", "n3"]
+    # n1 is driven by one B and read by another -> two terminals, not floating.
+    assert parsed.node_degree["n1"] == 2
+
+
 def test_parse_netlist_joins_continuation_lines_and_strips_params():
     parsed = op_sanity.parse_netlist(
         "XM1 out in 0 0 sky130_fd_pr__pfet_01v8\n+ L = 0.15 W={2*wu} nf=1\n", {}
@@ -935,6 +1102,33 @@ def test_unrecovered_singular_matrix_is_an_error_status(tmp_path, monkeypatch):
     report = op_sanity.run_op_sanity(str(request))
 
     assert report["status"] == "error"
+
+
+def test_unexpanded_instance_with_no_devices_is_not_clean(tmp_path, monkeypatch):
+    """An empty device list caused by an unexpandable `X` instance must
+    never read as `clean` (i.e. "every device is saturated")."""
+    netlist = "Xdut in out vdd missing_cell\nVdd vdd 0 1.8\nR1 in out 1k\n"
+    request = _write_request(tmp_path, netlist)
+    _install_fake_ngspice(monkeypatch, {})
+
+    report = op_sanity.run_op_sanity(str(request))
+
+    assert report["device_count"] == 0
+    assert report["status"] == "findings"
+    assert any(
+        entry["code"] == "unsupported_hierarchy" for entry in report["diagnostics"]
+    )
+
+
+def test_op_status_precedence():
+    parsed = op_sanity.ParsedNetlist()
+    error = [{"severity": "error", "code": "timeout", "message": "x"}]
+
+    assert op_sanity._op_status(error, parsed, False, True) == "error"
+    assert op_sanity._op_status([], parsed, False, True) == "findings"
+    assert op_sanity._op_status([], parsed, False, False) == "clean"
+    parsed.unexpanded.append("Xdut")
+    assert op_sanity._op_status([], parsed, False, False) == "findings"
 
 
 def test_unknown_corner_is_a_request_error(tmp_path, monkeypatch):

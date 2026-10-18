@@ -36,6 +36,7 @@ docs/
     deck.md
     design-centering.md
     draw.md
+    diff.md
     drc.md
     economy.md
     env-provenance.md
@@ -47,6 +48,7 @@ docs/
     gen-compose.md
     gen.md
     kb.md
+    keepout-check.md
     layers.md
     layout-metrics.md
     layout-plan.md
@@ -77,6 +79,7 @@ docs/
     version.md
     wave.md
     yield-campaign.md
+    yield-csv.md
     yield-samples.md
     yield-sensitivity.md
     yield-threshold.md
@@ -132,6 +135,7 @@ docs/
     scgallery-zerosoc-survey.md
     sdf-annotate-feasibility-spike.md
     sequential-equivalence-survey.md
+    sico-survey.md
     siliconcompiler-core-survey.md
     sim-corner-reached-s.md
     sim-evidence-discipline-spike.md

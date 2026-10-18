@@ -1071,7 +1071,10 @@ def _drop_sdf_zero_delay_alias_port_interconnects(
     source feeding a *physical-only*, modpath-free destination instance --
     and handles it in its own separate pass,
     :func:`_drop_sdf_zero_delay_physical_only_interconnects`, precisely so
-    the general shape (b) case here stays untouched and still fails loudly.)
+    the general shape (b) case here stays untouched and still fails loudly.
+    Issue #2984 later added the zero-delay remainder of shape (b) in
+    :func:`_drop_sdf_zero_delay_bus_port_source_interconnects`; non-zero
+    shape (b) entries are still left alone.)
     """
     if not alias_port_bits:
         return None
@@ -1122,12 +1125,14 @@ def _drop_sdf_zero_delay_alias_port_interconnects(
 # could ever annotate, and no logic anywhere that observes the annotated
 # pin. The general shape (b) case -- a bit-selected-port source feeding an
 # ordinary `specify`-bearing standard cell -- is emphatically *not* covered
-# here: that destination has real modpaths, dropping its entry would change
-# simulated timing, and it must keep failing loudly exactly as
+# here: that destination has real modpaths, so dropping a NON-zero entry
+# would change simulated timing and it must keep failing loudly exactly as
 # `test_integration_real_icarus_sdf_bus_port_input_fanout_stays_
 # unresolvable` documents. Verified live, not merely asserted: on a net
 # carrying both a diode entry and a `specify`-bearing entry, dropping the
 # diode entry leaves the ordinary entry behind and the run still raises.
+# (That holds for non-zero entries; issue #2984 below drops the zero-delay
+# ones, which cannot change timing.)
 #
 # The exemption carries #2285's own bound verbatim, and for the same reason:
 # an entry is dropped only when *every* delay member it carries (all three
@@ -1366,6 +1371,77 @@ def _drop_sdf_zero_delay_physical_only_interconnects(
         text,
         lambda entry_text: _sdf_interconnect_is_physical_only_droppable(
             entry_text, bus_input_ports, physical_only_instances, divider
+        ),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Issue #2984: the remaining zero-delay sub-shape of #1619 shape (b) -- a
+# bit-selected top-level **input** port as the entry's source, with a
+# destination that is *not* physical-only (an ordinary `specify`-bearing
+# cell, so #2363's pass leaves it alone):
+#
+#     (INTERCONNECT ui_in[3] u1.A (0.000:0.000:0.000))
+#
+# A real post-route SDF can carry such entries and Icarus fails the run with
+# `SDF ERROR: ... Could not find intermodpath!` on some of them (the
+# order/race behaviour characterised above for shape (b)). The failure
+# mechanism is not what this pass depends on: it removes only entries whose
+# every `min:typ:max` member is zero, which model no delay at any corner, so
+# dropping one cannot change simulated timing -- the same bound #2285 and
+# #2363 use. The "dropping its entry would change simulated timing" argument
+# for leaving shape (b) failing therefore holds only for NON-zero entries,
+# and those are still left in place (and still raise), as
+# `test_integration_real_icarus_sdf_bus_port_input_fanout_stays_unresolvable`
+# pins with its non-zero delays.
+# --------------------------------------------------------------------------- #
+
+
+def _sdf_interconnect_is_zero_delay_bus_port_source(
+    entry_text: str, bus_input_ports: set[str]
+) -> bool:
+    """``True`` when ``entry_text`` is an ``INTERCONNECT`` entry whose
+    *source* is a bit-selected top-level input port in ``bus_input_ports``
+    and whose every delay member is zero -- the condition
+    :func:`_drop_sdf_zero_delay_bus_port_source_interconnects` removes an
+    entry on (issue #2984). The destination is unconstrained: it is the
+    #2363 predicate minus its physical-only destination test."""
+    head = _SDF_INTERCONNECT_HEAD_RE.match(entry_text)
+    if head is None:
+        return False
+    source_match = _SDF_BUS_PORT_TOKEN_RE.match(head.group(1))
+    if source_match is None or source_match.group(1) not in bus_input_ports:
+        return False
+    return _sdf_interconnect_is_zero_delay(entry_text)
+
+
+def _drop_sdf_zero_delay_bus_port_source_interconnects(
+    sdf_path: str, bus_input_ports: set[str]
+) -> tuple[str, int] | None:
+    """Remove every zero-delay ``INTERCONNECT`` entry in ``sdf_path`` whose
+    source is a bit-selected top-level input port in ``bus_input_ports``,
+    returning ``(text with those entries removed, how many were removed)``
+    -- or ``None`` when there is nothing to remove, in which case the caller
+    keeps handing ``sdf_path`` itself to ``$sdf_annotate`` unchanged.
+
+    Meant to run *after* :func:`_drop_sdf_zero_delay_physical_only_
+    interconnects`, so entries that pass already claimed keep their own
+    class and are not double counted. See the comment block above for why
+    the zero-delay bound makes this safe while the non-zero shape (b) case
+    keeps failing loudly.
+
+    An empty ``bus_input_ports`` makes this a no-op that returns ``None``
+    without reading the file.
+    """
+    if not bus_input_ports:
+        return None
+    text = _read_sdf_text(sdf_path)
+    if text is None:
+        return None
+    return _drop_sdf_interconnect_entries(
+        text,
+        lambda entry_text: _sdf_interconnect_is_zero_delay_bus_port_source(
+            entry_text, bus_input_ports
         ),
     )
 
@@ -1942,6 +2018,154 @@ def _reject_sdf_escaped_divider_interconnects(sdf_path: str) -> None:
         "before generating the SDF this option consumes, or annotate a "
         "netlist whose corresponding generate-block instances are not "
         "collapsed into one escaped identifier"
+    )
+
+
+def _sdf_interconnect_entries(text: str) -> list[tuple[str, int, str]]:
+    """Every ``INTERCONNECT`` entry of ``text`` as ``(cell instance path,
+    start offset, entry text)``, where the instance path is the enclosing
+    ``CELL``'s ``(INSTANCE ...)`` field (empty for the design's own top
+    cell). A ``CELL``/``DELAY`` block that does not balance is skipped --
+    parse failures are the simulator's own parser's job to report.
+    """
+    entries: list[tuple[str, int, str]] = []
+    for cell_match in re.finditer(r"\(CELL\b", text):
+        try:
+            cell_end = _sdf_matching_paren(text, cell_match.start()) + 1
+        except Exception:
+            continue
+        cell_text = text[cell_match.start() : cell_end]
+        instance_match = re.search(r"\(INSTANCE\b\s*([^)\s]*)\s*\)", cell_text)
+        delay_match = re.search(r"\(DELAY\b", cell_text)
+        if instance_match is None or delay_match is None:
+            continue
+        delay_start = cell_match.start() + delay_match.start()
+        try:
+            delay_end = _sdf_matching_paren(text, delay_start) + 1
+            type_spans = _sdf_top_level_clauses(text, delay_start + 1, delay_end - 1)
+        except Exception:
+            continue
+        for type_start, type_end in type_spans:
+            for entry_start, entry_end in _sdf_top_level_clauses(
+                text, type_start + 1, type_end - 1
+            ):
+                entry_text = text[entry_start:entry_end]
+                if re.match(r"\(INTERCONNECT\b", entry_text):
+                    entries.append((instance_match.group(1), entry_start, entry_text))
+    return entries
+
+
+def _sdf_split_unescaped(path: str, divider: str) -> list[str]:
+    """``path`` split at every ``divider`` not preceded by a backslash, with
+    the remaining backslash escapes removed from each part."""
+    parts: list[str] = []
+    current: list[str] = []
+    index = 0
+    while index < len(path):
+        char = path[index]
+        if char == "\\" and index + 1 < len(path):
+            current.append(path[index + 1])
+            index += 2
+            continue
+        if char == divider:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+        index += 1
+    parts.append("".join(current))
+    return parts
+
+
+def _sdf_unresolvable_interconnect_endpoints(
+    text: str, names: set[str], divider: str
+) -> list[tuple[int, str]]:
+    """``(line, token)`` for each top-cell ``INTERCONNECT`` endpoint whose
+    path names no instance in ``names`` (see
+    :func:`_reject_sdf_unresolvable_interconnect_instances`)."""
+
+    def resolves(parts: list[str]) -> bool:
+        return any(
+            divider.join(parts[:count]) in names for count in range(1, len(parts))
+        )
+
+    offenders: list[tuple[int, str]] = []
+    for cell_instance, entry_start, entry_text in _sdf_interconnect_entries(text):
+        if cell_instance not in ("", "*"):
+            continue
+        match = re.match(r"\(INTERCONNECT\s+(\S+)\s+(\S+)", entry_text)
+        if match is None:
+            continue
+        for token in match.groups():
+            parts = _sdf_split_unescaped(token, divider)
+            if len(parts) > 1 and not resolves(parts):
+                line = text.count("\n", 0, entry_start) + 1
+                offenders.append((line, token))
+    return offenders
+
+
+def _reject_sdf_unresolvable_interconnect_instances(
+    sdf_path: str, source_paths: list[str], hdl_toplevel: str
+) -> None:
+    """Fail loud, before ``vvp`` starts, when an ``INTERCONNECT`` entry of
+    the design's top cell names ``<instance><DIVIDER><pin>`` where
+    ``<instance>`` is not an instance of ``hdl_toplevel`` (issue #3740).
+
+    Icarus 13.0's ``$sdf_annotate`` does not report such an endpoint: its
+    INTERCONNECT path resolver walks off the end of the scope's item list and
+    ``vvp`` dies with ``ERROR: NULL handle passed to vpi_scan.`` /
+    ``Assertion `0' failed`` (SIGABRT). Measured live on raw
+    ``iverilog -ginterconnect``/``vvp`` -- same abort for either endpoint, for
+    scalar or bus ports, and for both ``DIVIDER`` characters -- while a bare
+    name with no divider (an unknown net or port) fails soft with ``Could not
+    find handles for both ports!``. Typical producers: the design name used
+    as a path prefix on a port (``top/a``), or a cell the netlist no longer
+    has (the SDF and the netlist come from different runs or stages).
+
+    The check is deliberately conservative -- it can only turn a ``vvp``
+    abort into a named error, never reject a run that would have worked:
+
+    * a no-op when the top module's instance list cannot be derived
+      (:func:`_find_gate_level_instances`, e.g. an ANSI header or RTL top);
+    * only the design's own top ``CELL`` (empty ``(INSTANCE)``) is checked --
+      a ``CELL`` scoped to a sub-instance has endpoints relative to it;
+    * an endpoint with no unescaped ``DIVIDER`` is never flagged;
+    * an endpoint resolves when its path before the final divider equals an
+      instance name or begins with ``<instance><DIVIDER>`` (hierarchy below a
+      top-level instance is not inspected).
+    """
+    from .functional_verification import FunctionalVerificationError
+
+    try:
+        with open(sdf_path, encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return
+    instances = _find_gate_level_instances(
+        _read_verilog_source_texts(source_paths), hdl_toplevel
+    )
+    names = {str(instance["name"]) for instance in instances}
+    if not names:
+        return
+    divider_match = re.search(r"\(DIVIDER\s+(\S+?)\)", text)
+    divider = divider_match.group(1) if divider_match else "."
+    if divider not in (".", "/"):
+        return
+
+    offenders = _sdf_unresolvable_interconnect_endpoints(text, names, divider)
+    if not offenders:
+        return
+
+    shown = "; ".join(f"line {line}: {token}" for line, token in offenders[:3])
+    raise FunctionalVerificationError(
+        "options.sdf: this SDF has an INTERCONNECT entry whose endpoint "
+        f"names an instance that is not in '{hdl_toplevel}' ({shown}"
+        f"{'; ...' if len(offenders) > 3 else ''}; {len(offenders)} "
+        "unresolvable endpoint(s)). Icarus Verilog cannot report such an "
+        "endpoint: its $sdf_annotate INTERCONNECT resolver aborts vvp "
+        "outright ('ERROR: NULL handle passed to vpi_scan.', SIGABRT). "
+        "Regenerate the SDF from the same netlist the simulation reads, and "
+        "write top-level ports as bare names (no design-name prefix)"
     )
 
 

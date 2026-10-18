@@ -196,7 +196,7 @@ A request naming both, or neither, is a request error.
     "klt_version": "0.2.0",
     "klayout_version": "0.30.10",
     "pdk": { "name": "sky130A", "source": "PDK_ROOT environment variable", "version": "<stamp>" },
-    "deck": { "name": "sky130_fd_sc_hd__tt_025C_1v80", "content_hash": "sha256:<hex>" },
+    "deck": { "name": "sky130_fd_sc_hd__tt_025C_1v80", "content_hash": "sha256:<hex>", "path": { "path": null, "scope": "external" } },
     "input": { "content_hash": "sha256:<hex>", "role": "layout" }
   }
 }
@@ -237,6 +237,15 @@ guessed host prefix — regenerate the evidence with schema-2 `klt sta` to make
 it verifiable from other checkouts. The text format renders a repo path as
 the path itself, an external one as `<outside repo>`, and an unused input as
 `None`.
+
+**Liberty location (issue #3785).** `provenance.deck` (and each
+`corners[].deck` in the multi-corner shape) additionally carries `path`, the
+same `{path, scope}` envelope for the resolved Liberty file whose bytes
+`deck.content_hash` pins. An out-of-repo Liberty (the usual PDK-under-`$PDK_ROOT`
+case) is `{"path": null, "scope": "external"}`: the hash and `deck.name`
+identify the file, the location is withheld. Additive; no `schema_version`
+bump. Reports without the field still verify, and `--check` treats
+`content_hash` as authoritative, never `path`.
 
 | Field | Type | Description |
 | --- | --- | --- |
@@ -530,7 +539,7 @@ closes that gap natively:
       "clock_skew_ns": 0.0512,
       "estimated_power_mw": 13.2,
       "spef_annotation": null,
-      "deck": { "name": "sky130_fd_sc_hd__ss_100C_1v60", "content_hash": "sha256:<hex>", "released": true }
+      "deck": { "name": "sky130_fd_sc_hd__ss_100C_1v60", "content_hash": "sha256:<hex>", "released": true, "path": { "path": null, "scope": "external" } }
     },
     { "corner": "tt_025C_1v80", "...": "..." },
     { "corner": "ff_n40C_1v95", "...": "..." }
@@ -720,6 +729,10 @@ accepted anything:
   "reader_warning_sample": [],
   "unannotated_driver_count": 0,
   "partially_unannotated_driver_count": 4,
+  "floating_driver_count": 0,
+  "floating_driver_sample": [],
+  "unannotated_driver_sample": [],
+  "partially_unannotated_driver_sample": ["u3/Y"],
   "delay_changed": true,
   "annotation_complete": true,
   "annotation_warning": null
@@ -787,8 +800,10 @@ reader's own. It answers "does the SPEF name the nets this design has", not
 ### 4. Post-`read_spef` accounting
 
 - `unannotated_driver_count` — `report_parasitic_annotation`'s own count of
-  driver pins OpenSTA holds *no* parasitics for after `read_spef`. Non-zero
-  forces `annotation_complete: false`; `null` when the running OpenSTA build
+  driver pins OpenSTA holds *no* parasitics for after `read_spef`. This is
+  OpenSTA's raw count and includes floating no-net drivers (below); the count
+  **less** `floating_driver_count` forces `annotation_complete: false`.
+  `null` when the running OpenSTA build
   has no `report_parasitic_annotation` (the call is `catch`-guarded and the
   field degrades to `null` rather than failing the run).
 - `partially_unannotated_driver_count` — the companion "partially
@@ -796,13 +811,50 @@ reader's own. It answers "does the SPEF name the nets this design has", not
   correctly-read SPEF routinely reports a non-zero partial count (load pins
   with no distinct RC node of their own), so gating on it would fail honest
   runs.
+- `floating_driver_count` / `floating_driver_sample` (issue #3662) — how many
+  of the unannotated drivers sit on **no net at all** or on a **driver-only
+  dangling net** (no other pin, no top-level port) — e.g. the outputs of CTS
+  dummy-load cells: `clkloadN/Z` (issue #3669) — with a capped sample (at most 20) of their
+  pin names. They carry no load and are on no timed path, so they are
+  **excluded from the completeness predicate**; a strict gate can thereby tell
+  "floating, untimed" from "timed driver missing parasitics". `null` when the
+  OpenSTA build cannot list the offending pins
+  (`report_parasitic_annotation -report_unannotated`), in which case the raw
+  `unannotated_driver_count` keeps gating.
+- `unannotated_driver_sample` — capped sample (at most 20) of the unannotated
+  drivers that are *not* floating, i.e. the ones that gate. `null` when pins
+  cannot be listed.
+- `unannotated_driver_detail` (issue #3668) — one `{pin, net_status, net}`
+  entry per pin in `unannotated_driver_sample`, saying *why* it lacks
+  parasitics as far as the netlist shows: `net_status` is `single_pin_net`
+  (the pin's net has no other instance pin — an unconnected stub or a net
+  that only reaches a port; `net` names it) or `net_with_other_pins` (a real
+  net the SPEF failed to cover; `net` is `null`). Evidence only: a
+  `single_pin_net` driver still gates, because its net may reach a timed
+  port. `null` when pins cannot be listed. Pin names are matched
+  spelling-insensitively (escape backslashes ignored) between OpenSTA's
+  unannotated listing and the floating-pin query.
+  Measured on OpenROAD 26Q3 (issue #3668, reduced DEF): an output pin on no
+  net and one on a single-pin net are both classified floating; the
+  evidence query tolerates the NULL net OpenSTA returns for a no-net pin.
+- `partially_unannotated_driver_sample` — capped sample (at most 20) of the
+  partially unannotated driver pins, so a caller can judge whether the count
+  is real missing parasitics or a counting artefact. `null` when pins cannot
+  be listed. Measured on OpenROAD 26Q3 (issue #3668, reduced DEF): a flop `Q`
+  whose net also reaches a top-level port with a different name (net
+  `c0_r`, port `c0`) is listed as partially unannotated together with that
+  port, and clock-net sinks are listed under their driver. Partial drivers
+  never gate `annotation_complete`.
+
+All the fields above are additive; none of the existing fields changed meaning
+except that `unannotated_driver_count` now gates net of the floating drivers.
 
 ### Verdict
 
 - `annotation_complete` — `true` only when *all* of: the design-side name
   pair is equal and non-zero, `reader_warning_count` is 0,
-  `delay_changed` is not `false`, and `unannotated_driver_count` is not
-  greater than 0. A `null` (unknown) piece of evidence never forces `false`
+  `delay_changed` is not `false`, and `unannotated_driver_count` minus
+  `floating_driver_count` is not greater than 0. A `null` (unknown) piece of evidence never forces `false`
   on its own — but it never manufactures a `true` either, because the
   name-correlation gate still applies.
 - `annotation_warning` — `null` when complete, otherwise a sentence naming
