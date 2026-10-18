@@ -7008,9 +7008,11 @@ def _expand_monte_carlo(
     ``.options seed=<rndseed>``, derived from both components, so it still
     changes per sample under ``vary: "process"``. For such decks, request
     ``monte_carlo.mismatch_scale: 0`` (issue #3942; sky130/gf180mcu) to
-    switch the deck's own mismatch off and get a sigma=0 control. Requesting the *same* ``mc_spec["seed"]`` again
-    (same process, different process, doesn't matter) reproduces the exact same sequence
-    of derived seeds -- see :func:`_derive_mc_seed`.
+    switch the deck's own mismatch off and get a sigma=0 control.
+
+    Requesting the *same* ``mc_spec["seed"]`` again (same process, different
+    process, doesn't matter) reproduces the exact same sequence of derived
+    seeds -- see :func:`_derive_mc_seed`.
 
     ``injected`` (issue #2911) is ``(resolved, scale)`` from
     :func:`_resolve_injected`: each sample then also records its design-owned
@@ -7145,6 +7147,23 @@ def _key_in_initial_conditions(
         payload["initial_conditions"] = ics
 
 
+def _key_in_mc_mismatch_scale(
+    payload: dict[str, Any], corner_points: Sequence[CornerPoint]
+) -> None:
+    """Issue #3942: corner IDs carry neither seeds nor the sigma scale, so a
+    resume under another ``monte_carlo.mismatch_scale`` would reuse samples
+    drawn at the old scale. Keyed in only when declared."""
+    mc_scales = sorted(
+        {
+            (point.mc_seed["mismatch_param"], point.mc_seed["mismatch_scale"])
+            for point in corner_points
+            if point.mc_seed and "mismatch_scale" in point.mc_seed
+        }
+    )
+    if mc_scales:
+        payload["mc_mismatch_scale"] = mc_scales
+
+
 def _checkpoint_fingerprint(
     *,
     netlist_path: str,
@@ -7178,7 +7197,7 @@ def _checkpoint_fingerprint(
     as if it did not exist, never silently reused against a since-modified
     matrix (see ``run_sim``'s docstring).
     """
-    payload = {
+    payload: dict[str, Any] = {
         "netlist_sha256": sha256_file(netlist_path),
         "models_lib_sha256": sha256_file(models_lib),
         "analysis": analysis,
@@ -7221,18 +7240,7 @@ def _checkpoint_fingerprint(
         # drawn from other seeds. Only keyed in off the default, so an
         # existing checkpoint stays valid for a request that omits the field.
         payload["mc_seed_scope"] = sorted(mc_scopes)
-    mc_scales = sorted(
-        {
-            (point.mc_seed["mismatch_param"], point.mc_seed["mismatch_scale"])
-            for point in corner_points
-            if point.mc_seed and "mismatch_scale" in point.mc_seed
-        }
-    )
-    if mc_scales:
-        # Issue #3942: corner IDs carry neither seeds nor the sigma scale, so
-        # a resume under another `monte_carlo.mismatch_scale` would reuse
-        # samples drawn at the old scale. Keyed in only when declared.
-        payload["mc_mismatch_scale"] = mc_scales
+    _key_in_mc_mismatch_scale(payload, corner_points)
     if stimulus_lines:
         # Issue #2977: the declared stimulus decides every corner's drive, so
         # an edited schedule must invalidate the checkpoint. Only keyed in
@@ -9224,6 +9232,15 @@ def _write_corner_manifest(corner_dir: str, point: CornerPoint) -> None:
         )
 
 
+def _mc_seed_optional_echo(mc_seed: dict[str, Any]) -> dict[str, Any]:
+    """The per-sample ``monte_carlo`` fields that are echoed only when the
+    request declared them: ``seed_scope`` (issue #2899) and ``mismatch_scale``
+    (issue #3942)."""
+    return {
+        key: mc_seed[key] for key in ("seed_scope", "mismatch_scale") if key in mc_seed
+    }
+
+
 def _run_corner(
     *,
     extra_options_card: str | None = None,
@@ -9640,10 +9657,7 @@ def _run_corner(
             "process_seed": point.mc_seed["process_seed"],
             "mismatch_seed": point.mc_seed["mismatch_seed"],
         }
-        if "seed_scope" in point.mc_seed:
-            monte_carlo["seed_scope"] = point.mc_seed["seed_scope"]
-        if "mismatch_scale" in point.mc_seed:
-            monte_carlo["mismatch_scale"] = point.mc_seed["mismatch_scale"]
+        monte_carlo.update(_mc_seed_optional_echo(point.mc_seed))
         if point.mc_injected is not None:
             monte_carlo["injected"] = [
                 {k: v for k, v in item.items() if k not in ("param", "scale")}
