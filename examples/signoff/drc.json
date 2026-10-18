@@ -217,6 +217,7 @@
     ],
     "voltage_domain_warnings": [],
     "unchecked_rules": [],
+    "marker_blind_layers_in_stream": [],
     "deck_scope": [
       "cap2m",
       "capm",
@@ -827,7 +828,7 @@
     "pdk": null,
     "deck": {
       "name": "sky130",
-      "content_hash": "sha256:f3e6a304b5d7e02301b14643fab17e3a455e145b4ba684dc66b645c2016e5865",
+      "content_hash": "sha256:0748ade2cb2e0ec2a727fc130be361a1394d88214762d59e87e583eb2c8bba94",
       "released": null
     },
     "input": {

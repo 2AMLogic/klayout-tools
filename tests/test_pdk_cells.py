@@ -987,3 +987,64 @@ def test_resolve_liberty_not_found_without_lib_dir_says_none_found(tmp_path):
         pdk_cells.resolve_liberty_for_cell_library(
             "sky130_fd_sc_hd", "tt_025C_1v80", ValueError, root=str(root)
         )
+
+
+# --------------------------------------------------------------------------- #
+# resolve_liberty_for_cell_library -- not-found error hints at other variants
+# (issue #3801).
+# --------------------------------------------------------------------------- #
+
+
+class _LibErr(Exception):
+    pass
+
+
+def _two_variants(tmp_path, monkeypatch, *, lib_in="sky130B"):
+    root = tmp_path / "pdks"
+    for name in ("sky130A", "sky130B"):
+        variant_dir = _make_install(root, name, assets=("libs_ref",))
+        if name == lib_in:
+            _make_cell_library(variant_dir, "sky130_fd_sc_hd")
+    monkeypatch.setattr(pdk, "CONVENTIONAL_PREFIXES", [str(root)])
+    return root
+
+
+def test_resolve_liberty_missing_lists_other_variants_and_pdk_hint(
+    tmp_path, monkeypatch
+):
+    _two_variants(tmp_path, monkeypatch)
+    with pytest.raises(_LibErr) as excinfo:
+        pdk_cells.resolve_liberty_for_cell_library(
+            "sky130_fd_sc_hd", None, _LibErr, variant="sky130A"
+        )
+    msg = str(excinfo.value)
+    assert re.search(
+        r"liberty not found for deck.*sky130_fd_sc_hd.*not found under", msg
+    )
+    assert "'sky130B'" in msg
+    assert "--pdk <variant>" in msg
+
+
+def test_resolve_liberty_missing_no_other_variant_message_unchanged(
+    tmp_path, monkeypatch
+):
+    _two_variants(tmp_path, monkeypatch, lib_in="none")
+    with pytest.raises(_LibErr) as excinfo:
+        pdk_cells.resolve_liberty_for_cell_library(
+            "sky130_fd_sc_hd", None, _LibErr, variant="sky130A"
+        )
+    assert str(excinfo.value).endswith("sky130A' at '" + str(tmp_path / "pdks") + "'")
+    assert "--pdk" not in str(excinfo.value)
+
+
+def test_resolve_liberty_hint_failure_does_not_mask_error(tmp_path, monkeypatch):
+    _two_variants(tmp_path, monkeypatch)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("discovery broke")
+
+    monkeypatch.setattr(pdk_cells, "list_pdks", boom)
+    with pytest.raises(_LibErr, match="not found under resolved PDK install"):
+        pdk_cells.resolve_liberty_for_cell_library(
+            "sky130_fd_sc_hd", None, _LibErr, variant="sky130A"
+        )

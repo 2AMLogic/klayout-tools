@@ -445,6 +445,11 @@ def deck_rules(name: str, rule_id: str | None = None) -> dict[str, Any]:
 
     Top-level, pinned by ``content_hash`` like the rules:
 
+    - ``marker_blind_layers`` -- ``["<layer>/<datatype>", ...]`` area-marker
+      layers (sky130: ``81/2`` ``areaid.ce``) the deck accepts but does not
+      model rule-switching for (issue #3815); ``[]`` for a deck declaring
+      none. Deck-static, so it is not narrowed by ``rule_id``.
+
     - ``layer_table`` -- every ``{"name", "layer", "datatype"}`` the deck
       names, sorted by ``(layer, datatype)``.
     - ``ambiguous_names`` -- ``[{"name", "pairs": [{"layer", "datatype"}]}]``
@@ -461,6 +466,7 @@ def deck_rules(name: str, rule_id: str | None = None) -> dict[str, Any]:
         deck_source_path,
         get_deck,
         get_layer_names,
+        get_marker_blind_layers,
         get_nominal_dbu,
     )
 
@@ -489,6 +495,9 @@ def deck_rules(name: str, rule_id: str | None = None) -> dict[str, Any]:
         "content_hash": f"sha256:{digest}" if digest is not None else None,
         "nominal_dbu_um": nominal_dbu,
         "rules": [_project_rule(rule, nominal_dbu, layer_names) for rule in rules],
+        "marker_blind_layers": [
+            f"{layer}/{datatype}" for layer, datatype in get_marker_blind_layers(name)
+        ],
         **_layer_table_fields(rules, layer_names),
     }
 
