@@ -4,6 +4,12 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-18
 
+- **PR #3760**: feat(sta): add power_activity request field and power_basis response block
+- **Issue #3744** (closed): klt sta: power estimate has no caller-supplied activity input (and no way to state its assumption)
+- **PR #3886**: feat(drc): add gf180mcu Dualgate width/space rules and unmodeled-rule list
+- **Issue #3791** (closed): gf180mcu deck: no Dualgate (5V/6V) rule coverage beyond COMP width/space
+- **PR #3923**: fix: refuse unresolvable $PDK in batch models.lib at submit and dry-run
+- **Issue #3917** (closed): klt sim batch: $PDK in models.lib is left unexpanded on the worker and fails every unit after a clean dry-run
 - **Issue #3919** (closed): klt sim: no way to override a subcircuit of an included netlist, nor to host a post-run grading step
 - **PR #3925**: feat: add netlist_overrides.subckt to replace an included subcircuit in klt sim
 - **Issue #3792** (closed): gf180mcu deck: ESD implant rules (ESD.*) and guard-ring marker rules (GR.*) not checked
