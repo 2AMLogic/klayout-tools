@@ -141,6 +141,7 @@ A request naming both, or neither, is a request error.
 | `constraints.output_delay_ns` | number \| omitted | Additive field (issue #1865) → `set_output_delay <ns> -clock <clock_port> [all_outputs]`. Same validation and omitted-default behavior as `input_delay_ns`; the two are independently optional. |
 | `constraints.input_delays` / `.output_delays` | object \| omitted | Additive fields (issue #2740). Per-port maps `{"<port>": {"min_ns": n, "max_ns": n}}` → `set_input_delay -min/-max` / `set_output_delay -min/-max` on exactly that port. Each bound is independently optional (at least one per entry); a missing bound is left **unconstrained**, never copied from the other. Values are finite numbers and may be negative; `min_ns <= max_ns` when both are given. Keys are literal names of one scalar port or one bus bit (`data[3]`) — no wildcards, no whole buses, no Tcl. The scalar `input_delay_ns`/`output_delay_ns` above become the **default for ports absent from the map**. Missing, ambiguous and wrong-direction keys, and the clock port, are request errors. See "Per-port I/O delays and worst-path identity" below. |
 | `constraints.input_transition_ns` / `.input_transitions` | number / object \| omitted | Additive fields (issue #3227). `input_transition_ns` is the default input slew (ns) → `set_input_transition` on every **non-clock** input not named in `input_transitions`; `input_transitions` is a literal `{"<port>": ns}` map (one scalar port or one bus bit, e.g. `data[3]`) whose values **override** the scalar for that port. Every value is a finite, non-boolean number `>= 0` (`0` is valid). Keys follow the per-port delay rules: no wildcards, no whole buses, no Tcl; the clock port, a missing/ambiguous port or an output-only port is a request error. Omitted fields (and an empty map) emit no Tcl — the generated script stays byte-identical. See "Input transitions" below. |
+| `constraints.driving_cell` / `.driving_cells` / `.output_load_pf` / `.output_loads` | object / number \| omitted | Additive fields (issue #3742). `driving_cell` is `{"cell": "<lib cell>", "pin": "<out pin>"}` (optional `"input_pin"`) → `set_driving_cell -lib_cell … -pin … [-from_pin …]` on every non-clock input not named in `driving_cells` or `input_transitions`; `driving_cells` is a literal `{"<port>": {…}}` override map. `output_load_pf` (pF, `>= 0`) → `set_load` on every output not named in `output_loads`, a literal `{"<port>": pF}` map. Same literal-port rules as `input_transitions`; a port in both `driving_cells` and `input_transitions`, or `input_transition_ns` together with a driving-cell field, is a request error. Omitted fields emit no Tcl. See "Driving cell and output load" below. |
 | `constraints.report_ports` | list of strings \| omitted | Additive field (issue #3042). Literal port names (one scalar port or one bus bit such as `data[3]`) whose **own** worst setup and hold path is reported as `port_paths`, alongside the global `worst_*_path`. Same key rules as the per-port delay maps: no wildcards, whole buses or Tcl. Entries must be unique non-empty strings; the clock port, unknown and ambiguous names are request errors. Any direction is allowed. Omitted or `[]` emits nothing. See "Per-port path queries" below. |
 | `constraints.false_path_from` | list of strings \| omitted | Additive field (issue #2968). Literal **input** port names (one scalar port or one bus bit such as `cfg[3]`) excluded from timing with `set_false_path -from [get_ports <port>]`, emitted after the I/O-delay lines in every analysed corner. Use it for quasi-static configuration inputs whose paths are not real datapaths and would otherwise dominate WNS/TNS and the `worst_*_path` records. Same key rules as the per-port delay maps: no wildcards, whole buses or Tcl. Entries must be unique non-empty strings; the clock port, unknown, ambiguous and output-only names are request errors (`constraints.false_path_from rejected: ...`). `inout` ports are allowed. Omitted or `[]` emits nothing and the generated Tcl is byte-identical to before. The applied list is echoed as `false_path_from`. See "Timing exceptions" below. |
 | `constraints.wire_load_model` / `.wire_load_mode` | string \| omitted | (Issue #1825.) **Only valid in `verilog` mode** — a request error otherwise. Drives OpenSTA's own `set_wire_load_model`/`set_wire_load_mode`, the parasitics-estimate mechanism for a from-scratch netlist session that has no placement or routing to estimate from. See "From-scratch netlist input" below. |
@@ -695,6 +696,15 @@ per interconnect corner. In `def` mode, give `spef` as an object:
 The string form of `spef` (and omitting it) is unchanged.
 
 ## Annotation evidence (`spef_annotation`)
+
+**Name-mapped SPEFs (issue #3742).** A SPEF written with a `*NAME_MAP` (e.g.
+OpenROAD's `write_spef`, which declares `*D_NET *12 <cap>`) is resolved
+through the map before its net names are compared with the design: `*<n>`
+indices are replaced by the mapped names, backslash escapes are removed, and a
+header `*DIVIDER` other than `/` is translated to the `/` OpenSTA uses. Before
+this, such a file reported `design_nets_annotated: 0` because the `*12` indices
+matched no design net. `design_nets_annotated` is this name correlation, not
+OpenSTA's own annotation count; `annotation_complete` rules are unchanged.
 
 A caller-supplied `spef` has the same name-mismatch risk `klt
 place-and-route`'s own `post_route_spef` in-flow pass documents: a SPEF
@@ -1286,7 +1296,8 @@ set with `set_input_transition`:
 ```
 
 - **Scope is transition-only.** Nothing else about input drive changes: there
-  is no driving-cell model and no max-transition/max-capacitance limit check.
+  is no max-transition/max-capacitance limit check (for a driving-cell model see
+  "Driving cell and output load" below).
 - **Override semantics.** The scalar is the default for every non-clock input
   that is not a key of `input_transitions`; a mapped port gets exactly its own
   value. Bus bits are matched individually, so mapping `din[0]` leaves
@@ -1302,6 +1313,43 @@ set with `set_input_transition`:
 - **Contract.** The response schema is unchanged (additive request fields only).
   Omitting both fields, or giving an empty map, leaves the generated Tcl
   byte-for-byte as before.
+
+
+## Driving cell and output load (issue #3742)
+
+`constraints.driving_cell` / `.driving_cells` and `constraints.output_load_pf`
+/ `.output_loads` express the boundary conditions an SDC flow writes with
+`set_driving_cell` and `set_load`:
+
+```json
+"constraints": {
+  "clock_port": "clk",
+  "clock_period_ns": 2.0,
+  "driving_cell": {"cell": "sky130_fd_sc_hd__buf_2", "pin": "X"},
+  "driving_cells": {"rst_n": {"cell": "sky130_fd_sc_hd__inv_1", "pin": "Y", "input_pin": "A"}},
+  "output_load_pf": 0.02,
+  "output_loads": {"tmds[0]": 0.05}
+}
+```
+
+- **Override semantics** are the same as `input_transitions`: the scalar-style
+  default (`driving_cell`, `output_load_pf`) covers every non-clock input /
+  every output not named in the map; a mapped port gets exactly its own entry.
+- **Driving cell vs. input transition.** A driving cell sets the input slew
+  itself, so a port may carry one or the other. A port named in both
+  `driving_cells` and `input_transitions`, or `input_transition_ns` combined
+  with a driving-cell field, is a request error naming the keys; the default
+  `driving_cell` skips ports named in `input_transitions`.
+- **Validation.** `cell` / `pin` / `input_pin` are literal liberty names
+  (`[A-Za-z0-9_$.]+`, never Tcl or a pattern); loads are finite, non-boolean
+  numbers `>= 0`. Port existence and direction (inputs for driving cells,
+  outputs for loads) are checked in the engine-session port check, naming
+  `constraints.driving_cells[...]` / `constraints.output_loads[...]`.
+- **Propagated clock is not new.** `constraints.propagated_clock` already
+  exists (issue #2739); there is no `sdc` file passthrough (arbitrary Tcl
+  would defeat the JSON contract and the constraint-completeness accounting).
+- **Contract.** Additive request fields only; omitting them leaves the
+  generated Tcl byte-for-byte as before.
 
 
 ## Pre-route DEFs (`geometry_source`, issue #1826)

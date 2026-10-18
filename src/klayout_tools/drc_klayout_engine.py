@@ -21,7 +21,7 @@ import tempfile
 import xml.etree.ElementTree as ET
 from typing import Any
 
-from ._layout import load_layout
+from ._layout import load_layout, select_top_cells
 from ._provenance import build_provenance, sha256_file
 from .coverage import (
     build_check_coverage,
@@ -32,6 +32,7 @@ from .coverage import (
 from .drc import (
     CODE_KLAYOUT_UNAVAILABLE,
     CODE_KLAYOUT_VERSION_TOO_OLD,
+    CODE_MULTIPLE_TOP_CELLS,
     CODE_NEGATIVE_CONTROL_FAILED,
     DrcError,
 )
@@ -362,6 +363,65 @@ def _klayout_deck_error_detail(
         head.extend(dropped_errors)
         head.append("... (end of ERROR lines recovered from the omitted section)")
     return "\n".join(head + kept)
+
+
+def _check_klayout_run(
+    completed: subprocess.CompletedProcess[str],
+    report_path: str,
+    *,
+    allow_deck_errors: bool,
+) -> tuple[list[str], bool]:
+    """Judge a finished ``klayout -b -r`` run; raise :class:`DrcError` when its
+    report cannot be trusted, else return ``(error_lines, deck_errored)``.
+
+    ``deck_errored`` is true only when the run failed but ``allow_deck_errors``
+    let the partial report through.
+    """
+    if not os.path.isfile(report_path):
+        # klayout -b -r can exit 0 even when the deck script errored out
+        # before reaching report(...) -- never trust the exit code alone
+        # (see :func:`run_drc_klayout_engine`'s docstring). No report file at
+        # all means no trustworthy verdict is possible; surface klayout's own
+        # stdout/stderr rather than a bare "no report" message. Not
+        # tolerable via allow_deck_errors: there is no partial report to
+        # accept here, only nothing at all.
+        output = (completed.stdout or completed.stderr or "").strip()
+        crash = _klayout_crash_signal(completed.returncode, output)
+        if crash is not None:
+            # A crash (#3811) is a klayout/deck bug, not a deck script
+            # error: name it so it is not mistaken for a mistyped deck.
+            raise DrcError(
+                f"klayout crashed ({crash}) before producing a report "
+                f"file. klayout's own output:\n{output}"
+            )
+        raise DrcError(
+            "klayout did not produce a report file -- the deck script "
+            "likely failed before completing. klayout's own output:\n" + output
+        )
+
+    # ...and the report file's presence is not a completion signal either
+    # (issue #1941): a deck that called report(...) early and then aborted
+    # leaves a partial report behind. Either of klayout's own failure
+    # signals -- a non-zero exit status, or an ERROR-prefixed line in its
+    # output -- means the rules after the abort never ran, so the partial
+    # report's zero violations must not be reported as "clean".
+    error_lines = _klayout_deck_error_lines(completed.stdout, completed.stderr)
+    deck_errored = completed.returncode != 0 or bool(error_lines)
+    if deck_errored and not allow_deck_errors:
+        # Issue #2333: the *whole* captured output, not `error_lines`
+        # alone -- the causal line is routinely not ERROR-prefixed.
+        detail = _klayout_deck_error_detail(
+            completed.stdout, completed.stderr, error_lines
+        )
+        raise DrcError(
+            "klayout reported an error while running the deck script "
+            f"(exit status {completed.returncode}) -- the deck likely "
+            "aborted part-way through, so the report file it did write "
+            "covers only the rules that ran before the abort, and its "
+            "verdict cannot be trusted. Pass --allow-deck-errors to "
+            "accept a partial report anyway. klayout's own output:\n" + detail
+        )
+    return error_lines, deck_errored
 
 
 #: Ruby's shell-out forms, as they appear in a KLayout DRC-DSL driver script
@@ -1351,15 +1411,13 @@ def run_drc_klayout_engine(
     always did, now with the causal ``sh: ...: command not found`` line
     quoted in the deck-abort error (see below).
 
-    ``top`` is not yet supported for this engine (unlike :func:`run_drc`'s
-    curated engine, issue #554): an arbitrary PDK-native DRC-DSL script has
-    no standard ``-rd``-settable "restrict to this one top cell" variable
-    this module can rely on generically (`sky130A.lydrc`, e.g., always reads
-    the whole ``$input`` stream). Passing ``top`` raises :class:`DrcError`
-    rather than silently ignoring the caller's stated scope request --
-    mirroring how the ``"netgen"`` LVS engine rejects request fields it has
-    no equivalent hook for (``lvs.py``'s ``hints``/``reference.device_bulk``/
-    ``options.parameter_tolerance`` checks).
+    ``top`` (issue #3788) names the one top cell to check. A deck reads the
+    whole ``$input`` stream as a single-top layout, so when the stream has
+    more than one top cell and ``top`` is given, the deck is run against a
+    temporary stream holding only that cell's subtree (the input file is not
+    modified). A multi-top stream without ``top`` raises :class:`DrcError`
+    (``code="multiple_top_cells"``) before KLayout is launched; a single-top
+    stream is passed through unchanged.
 
     The returned dict matches :func:`run_drc`'s documented top-level shape
     (``schema_version``, ``file``, ``deck``, ``dbu_um``, ``status``,
@@ -1462,12 +1520,6 @@ def run_drc_klayout_engine(
     expected_names = _validate_expected_rule_category_names(
         expected_rule_category_names, expected_rule_categories
     )
-    if top is not None:
-        raise DrcError(
-            "the klayout engine does not support --top yet -- omit --top, "
-            "or use the curated deck engine (the default) instead"
-        )
-
     # Resolved only when `--pdk`/`--pdk-root` was given -- purely for
     # `provenance.pdk` (issue #1901); this engine's own rules come from
     # `deck_file`, resolved separately (possibly using the same flags, one
@@ -1511,16 +1563,35 @@ def run_drc_klayout_engine(
     layout = load_layout(path, DrcError)
     dbu = layout.dbu
 
+    # Issue #3788: a deck reads `$input` as a single-top layout, so the
+    # stream handed to it must have exactly one top cell. Resolve that before
+    # launching KLayout rather than let the deck die with a generic message.
+    top_cells = select_top_cells(layout, top, DrcError)
+    if top is None and len(top_cells) > 1:
+        names = ", ".join(sorted(cell.name for cell in top_cells))
+        raise DrcError(
+            f"'{path}' has {len(top_cells)} top cells ({names}); the klayout "
+            "engine needs a single top cell -- pass --top to select one",
+            code=CODE_MULTIPLE_TOP_CELLS,
+        )
+
     work_dir = tempfile.mkdtemp(prefix="klt-drc-klayout-")
     try:
         report_path = os.path.join(work_dir, "report.lyrdb")
+        input_path = path
+        if top is not None and [c.name for c in layout.top_cells()] != [top]:
+            # `top` names a cell other than the stream's sole top cell (one of
+            # several tops, or a child of a single top): only its subtree
+            # reaches the deck; the caller's file is untouched.
+            input_path = os.path.join(work_dir, "input-top.gds")
+            top_cells[0].write(input_path)
         cmd = [
             _KLAYOUT_EXECUTABLE,
             "-b",
             "-r",
             deck_file,
             "-rd",
-            f"input={path}",
+            f"input={input_path}",
             "-rd",
             f"report={report_path}",
         ]
@@ -1544,50 +1615,9 @@ def run_drc_klayout_engine(
                 "--timeout-s to allow more time)"
             ) from exc
 
-        if not os.path.isfile(report_path):
-            # klayout -b -r can exit 0 even when the deck script errored out
-            # before reaching report(...) -- never trust the exit code alone
-            # (see this function's docstring). No report file at all means no
-            # trustworthy verdict is possible; surface klayout's own
-            # stdout/stderr rather than a bare "no report" message. Not
-            # tolerable via allow_deck_errors: there is no partial report to
-            # accept here, only nothing at all.
-            output = (completed.stdout or completed.stderr or "").strip()
-            crash = _klayout_crash_signal(completed.returncode, output)
-            if crash is not None:
-                # A crash (#3811) is a klayout/deck bug, not a deck script
-                # error: name it so it is not mistaken for a mistyped deck.
-                raise DrcError(
-                    f"klayout crashed ({crash}) before producing a report "
-                    f"file. klayout's own output:\n{output}"
-                )
-            raise DrcError(
-                "klayout did not produce a report file -- the deck script "
-                "likely failed before completing. klayout's own output:\n" + output
-            )
-
-        # ...and the report file's presence is not a completion signal either
-        # (issue #1941): a deck that called report(...) early and then aborted
-        # leaves a partial report behind. Either of klayout's own failure
-        # signals -- a non-zero exit status, or an ERROR-prefixed line in its
-        # output -- means the rules after the abort never ran, so the partial
-        # report's zero violations must not be reported as "clean".
-        error_lines = _klayout_deck_error_lines(completed.stdout, completed.stderr)
-        deck_errored = completed.returncode != 0 or bool(error_lines)
-        if deck_errored and not allow_deck_errors:
-            # Issue #2333: the *whole* captured output, not `error_lines`
-            # alone -- the causal line is routinely not ERROR-prefixed.
-            detail = _klayout_deck_error_detail(
-                completed.stdout, completed.stderr, error_lines
-            )
-            raise DrcError(
-                "klayout reported an error while running the deck script "
-                f"(exit status {completed.returncode}) -- the deck likely "
-                "aborted part-way through, so the report file it did write "
-                "covers only the rules that ran before the abort, and its "
-                "verdict cannot be trusted. Pass --allow-deck-errors to "
-                "accept a partial report anyway. klayout's own output:\n" + detail
-            )
+        error_lines, deck_errored = _check_klayout_run(
+            completed, report_path, allow_deck_errors=allow_deck_errors
+        )
 
         violations, rule_counts, rule_categories = _parse_klayout_rdb_report(
             report_path, dbu
