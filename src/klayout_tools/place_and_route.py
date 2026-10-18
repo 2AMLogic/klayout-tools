@@ -668,6 +668,12 @@ from .place_and_route_gds_merge import _merge_def_to_gds as _merge_def_to_gds
 # PDN-0185. Same "self-contained subsystem in its own module" split as the
 # power audit below.
 from .place_and_route_pdn_fit import check_request as check_pdn_core_fit
+from .place_and_route_pins import (
+    check_pin_constraints,
+    netlist_top_ports,
+    pin_constraint_lines,
+    read_def_pins,
+)
 
 # The power-delivery audit (issue #2086): reads the DEF this run wrote and
 # reports what was actually *placed* (tapcells/endcaps/fillers, PDN
@@ -1987,6 +1993,12 @@ def _run_single_corner(
 
     floorplan = _validate_floorplan(request["floorplan"])
     io_spec = _validate_io(request.get("io"), cell_library)
+    if io_spec is not None and io_spec.get("pin_constraints"):
+        # Issue #3885: a pattern naming no real port is an error, never a
+        # silent no-op.
+        check_pin_constraints(
+            io_spec["pin_constraints"], netlist_top_ports(netlist_path, hdl_toplevel)
+        )
     macros = _validate_macros(request.get("macros"), request_dir, netlist_path)
     power = _validate_power(request.get("power"), cell_library)
     (
@@ -2554,6 +2566,9 @@ def _run_single_corner(
             for macro in macros
         ],
         "def_path": def_path,
+        # Additive field (issue #3885): final edge/coordinates of every
+        # top-level pin, read from the DEF above (`null` at "floorplan").
+        "pins": read_def_pins(audited_def_path) if audited_def_path else None,
         # Additive field (issue #1826): see this function's own comment
         # above (right before `unrouted_def_path` is computed) for the
         # "when is this populated" contract.
@@ -3315,7 +3330,7 @@ def _stage_script_lines(
     netlist_path: str,
     hdl_toplevel: str,
     floorplan: dict[str, Any],
-    io_spec: dict[str, str] | None,
+    io_spec: dict[str, Any] | None,
     macros: list[dict[str, Any]],
     power: dict[str, Any] | None,
     clock_port: str | None,
@@ -3398,6 +3413,7 @@ def _stage_script_lines(
 
     if stage == "place":
         assert io_spec is not None
+        lines += pin_constraint_lines(io_spec.get("pin_constraints", []))
         lines += [
             f"place_pins -hor_layers {io_spec['layer_h']} "
             f"-ver_layers {io_spec['layer_v']}",

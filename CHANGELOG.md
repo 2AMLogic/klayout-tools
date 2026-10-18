@@ -14,6 +14,12 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- 2026-10-18 — **`klt place-and-route` pin placement** (issue #3885): new
+  optional `io.pin_constraints` (edge, optional `range_um`, optional `ordered`
+  per port group) emits `set_io_pin_constraint` before `place_pins`, and the
+  response gains a `pins[]` array (name, edge, `x_um`, `y_um`, layer) read from
+  the written DEF. Additive: without constraints the Tcl is unchanged.
+
 - 2026-10-17 — **`klt signoff --attest` / `--inventory` are not installable
   from 0.7.0** (issue #3805): the attestation producer for T1 items 1, 9 and
   10 (#2844) is on `main` but in no tagged release, so
