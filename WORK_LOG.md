@@ -4,6 +4,8 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-18
 
+- **PR #3641**: fix(op-lint): scale supply_waveforms sources instead of altering them
+- **Issue #3624** (closed): sim --op-lint: alter of a corners.supply_waveforms PWL/PULSE source is a silent no-op
 - **PR #3943**: feat: add monte_carlo.mismatch_scale for mismatch sigma scaling and determinism control
 - **Issue #3942** (closed): Friction: klt sim monte_carlo has no mismatch-sigma scale, so a negative control needs hand-edited model parameters
 - **PR #3938**: feat(extract): report pin_order for distributed-RC nets and document pin-is-middle rule
