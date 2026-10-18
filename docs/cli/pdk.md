@@ -12,6 +12,7 @@ klt pdk env         [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
 klt pdk check       [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
 klt pdk cells       [--pdk <variant>] [--pdk-root <dir>] [--supply <volts>] [--format text|json]
 klt pdk macros      [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
+klt pdk decks       [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
 klt pdk corners     [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
 klt pdk em-limits   [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
 klt pdk pcell-check [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
@@ -965,6 +966,65 @@ views: there is no PDK-wide-consistent convention across hard-macro IP
 library's) to extract from the way `klt pdk cells` extracts from
 `spice/<lib>.spice`/`lib/*.lib`.
 
+## `klt pdk decks`
+
+Lists the KLayout DRC deck files a variant ships under
+`libs.tech/klayout/drc/` (or the flat-install `tech/drc/`) and the `-rd`
+globals each one consumes. `klt drc --engine klayout --pdk <variant>` runs
+exactly one of them (`is_default`); the siblings (for sky130A,
+`sky130A_mr.drc`, the "maximal rules" runset) are otherwise invisible, and a
+sibling passed via `--deck-file` without the globals it gates on silently
+runs zero rules (`coverage_unknown`, issue #1302).
+
+```
+$ klt pdk decks --pdk sky130A
+pdk: sky130A
+
+deck             kind   default  globals
+---------------  -----  -------  -------------------------------------------------------
+sky130A.lydrc    lydrc  yes      -
+sky130A_mr.drc   drc             beol, feol, floating_met, offgrid, seal*, sram_exclude, thr*
+...
+* = no default detected; supply with `klt drc --deck-var name=value`
+```
+
+```json
+{
+  "schema_version": 1,
+  "pdk": "sky130A",
+  "root": "/usr/share/pdk",
+  "decks": [
+    {
+      "path": "/usr/share/pdk/sky130A/libs.tech/klayout/drc/sky130A_mr.drc",
+      "name": "sky130A_mr.drc",
+      "kind": "drc",
+      "is_default": false,
+      "globals": [
+        {"name": "feol", "required_by_caller": false, "default": "false"},
+        {"name": "thr", "required_by_caller": true, "default": null}
+      ]
+    }
+  ]
+}
+```
+
+- `kind` — `lydrc` (`*.lydrc`), `drc` (`*.drc`), or `helper` (`*.rb.drc`,
+  Ruby helper scripts that merely carry the `.drc` extension; listed but not
+  scanned, `globals: []`). Other files in the directory (e.g. Python drivers)
+  are not listed.
+- `globals` — name-sorted. `$input`, `$report` (supplied by `klt`) and
+  `$top_cell` (read under `if $input`) are never listed, nor are Ruby's own
+  globals. A global assigned under `if not defined? $x`, `... unless defined?
+  $x` or `||=` is `required_by_caller: false` with its literal `default`;
+  any other `$name` mentioned outside a comment is `required_by_caller: true`.
+  Literal `require`/`load` includes are followed.
+- **This is a heuristic line scan, not a Ruby parser.** A missing entry is not
+  proof a deck ignores a variable, and a defaulted global (e.g. `feol`
+  defaulting to `"false"`) can still silently disable whole rule groups —
+  read the defaults, not just the `required_by_caller` flag.
+- A variant with no `drc/` directory is a successful empty `decks` list.
+  Library: `klayout_tools.pdk.drc_decks(variant, root)`.
+
 ## `klt pdk corners`
 
 `klt pdk find` resolves the `ngspice` asset directory but stops there —
@@ -1003,7 +1063,12 @@ sf        no        mos=skewed bjt=- diode=- resistor=- mim_cap=- mos_cap=-
     {
       "corner": "ss",
       "sections": [
-        { "family": "mos", "section": "ss", "skew": "skewed" },
+        { "family": "mos", "section": "ss", "skew": "skewed",
+          "devices": [
+            { "flavour": "03v3", "section": "ss", "skew": "skewed" },
+            { "flavour": "06v0", "section": "ss", "skew": "typical" },
+            { "flavour": "06v0_nvt", "section": "ss", "skew": "typical" }
+          ] },
         { "family": "bjt", "section": "bjt_ss", "skew": "param" },
         { "family": "diode", "section": "diode_ss", "skew": "param" },
         { "family": "resistor", "section": "res_ss", "skew": "param" },
@@ -1094,17 +1159,24 @@ values) — so this half of the answer never drifts silently against an
 upgraded PDK. A CI-validation harness that checks the curated grouping
 itself against a release (the spike's own open question) is not built here.
 
-Skew is classified **per curated family**, not per individual device flavor.
-A family reported `"skewed"` means *some* of its devices moved off the
-typical section for that corner — not that *every* device did. gf180mcu's
-own deck, for example, leaves its `nfet_06v0`/`pfet_06v0` MOSFET flavors
-bound to the same `_t`-suffixed (typical) model inside every corner while
-its `nfet_03v3`/`pfet_03v3` flavors do skew, both inside the single curated
-`mos` family — this command correctly reports `mos` as `"skewed"` for that
-corner, but does not itself flag the 06v0 sub-flavor as unmoved. Resolving
-that finer, per-flavor question is the spike's own proposed `klt pdk device`/
-`klt pdk corner --pdk <variant> --corner <name>` follow-up (section 2.2), a
-natural next issue, not this command's scope.
+Family-level skew is classified **per curated family**: a family reported
+`"skewed"` means *some* of its devices moved off the typical section for that
+corner — not that *every* device did. gf180mcu's own deck, for example, leaves
+its `nfet_06v0`/`pfet_06v0` MOSFET flavors bound to the same `_t`-suffixed
+(typical) model inside every corner while its `nfet_03v3`/`pfet_03v3` flavors
+do skew, both inside the single curated `mos` family.
+
+To resolve that finer question, gf180mcu's `mos` section entries carry an
+additive `devices` list (issue #3794) — one `{flavour, section, skew}` per
+device flavour (`03v3`, `06v0`, `06v0_nvt`, …, derived from the section's
+`.lib '<file>' <model>_<flavour>_<suffix>` include tokens), each classified
+against that flavour's own typical-corner include set (`"skewed"`/`"typical"`;
+`section`/`skew` are `null` for a flavour the typical corner has but the
+section does not). For gf180mcuD, `ff`/`ss`/`fs`/`sf` report `03v3` as
+`"skewed"` and `06v0`/`06v0_nvt` as `"typical"`. Family-level `skew` and
+`complete` keep their meaning; other families and sky130 carry no `devices`.
+`klt sim` surfaces the unmoved flavours as
+[`environment.corner_coverage`](sim.md#environmentcorner_coverage-issue-3794).
 
 ## `klt pdk em-limits`
 

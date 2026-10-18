@@ -842,12 +842,9 @@ def drc_deck_file(variant: str | None = None, root: str | None = None) -> str | 
     if klayout_dir is None:
         return None
 
-    drc_dir = os.path.join(klayout_dir, "drc")
-    if not os.path.isdir(drc_dir):
-        nested_drc_dir = os.path.join(klayout_dir, "tech", "drc")
-        if not os.path.isdir(nested_drc_dir):
-            return None
-        drc_dir = nested_drc_dir
+    drc_dir = _klayout_drc_dir(klayout_dir)
+    if drc_dir is None:
+        return None
 
     for name in (f"{info['variant']}.lydrc", f"{info['variant']}.drc"):
         candidate = os.path.join(drc_dir, name)
@@ -855,6 +852,92 @@ def drc_deck_file(variant: str | None = None, root: str | None = None) -> str | 
             return candidate
 
     return None
+
+
+def _klayout_drc_dir(klayout_dir: str) -> str | None:
+    """The ``drc/`` directory under a ``libs.tech/klayout`` asset dir, trying
+    the open_pdks-shaped ``drc/`` before the flat-install ``tech/drc/``."""
+    drc_dir = os.path.join(klayout_dir, "drc")
+    if os.path.isdir(drc_dir):
+        return drc_dir
+    nested_drc_dir = os.path.join(klayout_dir, "tech", "drc")
+    if os.path.isdir(nested_drc_dir):
+        return nested_drc_dir
+    return None
+
+
+#: File extensions `klt pdk decks` treats as KLayout DRC decks; anything
+#: else in the ``drc/`` directory (Python drivers, ...) is not listed.
+_DRC_DECK_KINDS = {".lydrc": "lydrc", ".drc": "drc"}
+
+#: A ``*.rb.drc`` file is a Ruby helper that merely carries the ``.drc``
+#: extension (e.g. sky130's ``zeroarea.rb.drc``); it is reported with
+#: ``kind: "helper"`` rather than hidden.
+_DRC_HELPER_SUFFIX = ".rb.drc"
+
+
+def drc_decks(variant: str | None = None, root: str | None = None) -> dict[str, Any]:
+    """List the KLayout DRC deck files a variant ships, with the ``-rd``
+    globals each consumes (issue #3816).
+
+    Scans ``libs.tech/klayout/drc/`` (or the flat-install ``tech/drc/``) for
+    ``.lydrc`` / ``.drc`` files, name-sorted. ``*.rb.drc`` files are listed
+    with ``kind: "helper"`` and no globals scan; other extensions (Python
+    drivers etc.) are not listed. ``is_default`` marks the file
+    :func:`drc_deck_file` resolves, which is what ``klt drc --pdk`` runs.
+    ``globals`` is the best-effort static scan of
+    :func:`klayout_tools.drc_klayout_engine.scan_deck_globals` -- a heuristic;
+    a missing entry is not proof the deck ignores a variable.
+
+    Returns::
+
+        {
+            "schema_version": 1,
+            "pdk": <variant>,
+            "root": <absolute install root>,
+            "decks": [
+                {"path": str, "name": str, "kind": "lydrc"|"drc"|"helper",
+                 "is_default": bool,
+                 "globals": [{"name": str, "required_by_caller": bool,
+                              "default": str | None}, ...]},
+                ...
+            ],
+        }
+
+    A variant with no ``drc/`` directory yields an empty ``decks`` list.
+    Raises :class:`PdkNotFoundError` when no PDK install resolves.
+    """
+    # Imported lazily: the engine module imports this one.
+    from .drc_klayout_engine import scan_deck_globals
+
+    info = find_pdk(variant=variant, root=root)
+    klayout_dir = info["assets"]["klayout"]
+    drc_dir = _klayout_drc_dir(klayout_dir) if klayout_dir is not None else None
+    default = drc_deck_file(variant=variant, root=root)
+
+    decks: list[dict[str, Any]] = []
+    for name in sorted(os.listdir(drc_dir)) if drc_dir is not None else []:
+        path = os.path.join(drc_dir or "", name)
+        ext = os.path.splitext(name)[1]
+        if ext not in _DRC_DECK_KINDS or not os.path.isfile(path):
+            continue
+        helper = name.endswith(_DRC_HELPER_SUFFIX)
+        decks.append(
+            {
+                "path": path,
+                "name": name,
+                "kind": "helper" if helper else _DRC_DECK_KINDS[ext],
+                "is_default": default is not None and os.path.samefile(path, default),
+                "globals": [] if helper else scan_deck_globals(path),
+            }
+        )
+
+    return {
+        "schema_version": 1,
+        "pdk": info["variant"],
+        "root": info["root"],
+        "decks": decks,
+    }
 
 
 def lvs_deck_file(variant: str | None = None, root: str | None = None) -> str | None:
@@ -1813,6 +1896,10 @@ _GF180MCU_FAMILY_PREFIXES: tuple[tuple[str, str], ...] = (
     ("mos_cap", "moscap_"),
 )
 
+#: The one gf180mcu family whose section mixes device flavours (3.3V vs 5/6V)
+#: that the deck skews independently; it gets the additive ``devices`` list.
+_GF180MCU_FLAVOUR_FAMILY = "mos"
+
 #: sky130's per-corner device-family split, keyed by the leading path
 #: component of the `.include` lines a `.lib <corner> ... .endl` block
 #: carries (``"corners/tt.spice"`` -> family ``mos``, ``"r+c/..."`` ->
@@ -1941,9 +2028,12 @@ def list_corners(variant: str | None = None, root: str | None = None) -> dict[st
     its 03v3 flavor does skew, both inside the single curated "mos" family
     (the issue's own worked example) -- this command correctly reports
     "mos" as ``"skewed"`` for that corner (some devices moved), but does
-    not itself flag the 06v0 sub-flavor as unmoved. Resolving that finer,
-    per-flavor question is the spike's own proposed ``klt pdk corner --pdk
-    <variant> --corner <name>`` follow-up (section 2.2), not this command.
+    not itself flag the 06v0 sub-flavor as unmoved in the family-level
+    ``skew``. The finer question is answered by the additive ``devices``
+    list (issue #3794) on gf180mcu's ``mos`` section entries: one
+    ``{flavour, section, skew}`` per device flavour (``03v3``, ``06v0``,
+    ``06v0_nvt``, ...), each classified against its own typical-corner
+    include set. Family-level ``skew`` and ``complete`` are unchanged.
 
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/pdk.md``)::
@@ -1960,7 +2050,10 @@ def list_corners(variant: str | None = None, root: str | None = None) -> dict[st
                     "corner": str,
                     "sections": [
                         {"family": str, "section": str | None,
-                         "skew": "typical" | "skewed" | "param" | None},
+                         "skew": "typical" | "skewed" | "param" | None,
+                         # gf180mcu "mos" only (issue #3794):
+                         "devices": [{"flavour": str, "section": str | None,
+                                      "skew": "typical" | "skewed" | None}]},
                         ...
                     ],
                     "family_count": int,
@@ -2092,6 +2185,7 @@ def _scan_gf180mcu_corners(model_path: str) -> list[dict[str, Any]]:
 
     typical_tokens: dict[str, set[tuple[str, str]]] = {}
     typical_params: dict[str, frozenset[str]] = {}
+    typical_flavours: dict[str, set[tuple[str, str]]] = {}
     corners: list[dict[str, Any]] = []
     for corner in _GF180MCU_CORNER_NAMES:
         sections: list[dict[str, Any]] = []
@@ -2115,9 +2209,64 @@ def _scan_gf180mcu_corners(model_path: str) -> list[dict[str, Any]]:
                     skew = "param"
                 else:
                     skew = "typical"
-            sections.append({"family": family, "section": section_name, "skew": skew})
+            entry: dict[str, Any] = {
+                "family": family,
+                "section": section_name,
+                "skew": skew,
+            }
+            if family == _GF180MCU_FLAVOUR_FAMILY:
+                flavours = _gf180mcu_flavour_tokens(tokens)
+                if corner == "typical":
+                    typical_flavours = flavours
+                entry["devices"] = _flavour_devices(
+                    section_name, flavours, typical_flavours, corner == "typical"
+                )
+            sections.append(entry)
         corners.append(_finish_corner(corner, sections, corner == "typical"))
     return corners
+
+
+def _gf180mcu_flavour_tokens(
+    tokens: set[tuple[str, str]],
+) -> dict[str, set[tuple[str, str]]]:
+    """Group a gf180mcu section's ``.lib '<file>' <token>`` includes by device
+    flavour: ``nfet_06v0_nvt_t`` -> ``06v0_nvt`` (drop the leading device
+    token and the trailing per-corner suffix). A token with fewer than three
+    ``_`` parts has no separable flavour and is keyed by its whole name."""
+    grouped: dict[str, set[tuple[str, str]]] = {}
+    for path, name in tokens:
+        parts = name.split("_")
+        flavour = "_".join(parts[1:-1]) if len(parts) >= 3 else name
+        grouped.setdefault(flavour, set()).add((path, name))
+    return grouped
+
+
+def _flavour_devices(
+    section: str,
+    flavours: dict[str, set[tuple[str, str]]],
+    typical: dict[str, set[tuple[str, str]]],
+    is_typical_corner: bool,
+) -> list[dict[str, Any]]:
+    """Per-flavour ``{flavour, section, skew}`` list, each flavour classified
+    against its own typical-corner include set (``skewed`` when it differs,
+    else ``typical``; ``None`` for a flavour the typical corner has but this
+    section does not)."""
+    devices: list[dict[str, Any]] = []
+    for flavour in sorted(set(flavours) | set(typical)):
+        if flavour not in flavours:
+            skew = None
+        elif is_typical_corner or flavours[flavour] == typical.get(flavour):
+            skew = "typical"
+        else:
+            skew = "skewed"
+        devices.append(
+            {
+                "flavour": flavour,
+                "section": section if skew is not None else None,
+                "skew": skew,
+            }
+        )
+    return devices
 
 
 def _scan_sky130_corners(model_path: str) -> list[dict[str, Any]]:

@@ -4529,7 +4529,7 @@ def _add_wave_parser(subparsers: argparse._SubParsersAction) -> None:
 
 def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
     """Register the ``pdk`` verb with nested ``find``/``list``/``env``/
-    ``cells``/``macros``/``corners``/``em-limits``/``pcell-check``/``stackup``
+    ``cells``/``macros``/``decks``/``corners``/``em-limits``/``pcell-check``/``stackup``
     subcommands.
 
     The other verbs are flat; ``pdk`` groups discovery operations under one
@@ -4679,6 +4679,26 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(macros_parser)
     macros_parser.set_defaults(func=pdk_cmd.run_macros)
+
+    decks_parser = pdk_sub.add_parser(
+        "decks",
+        help="list the KLayout DRC decks a PDK ships and the -rd globals each reads",
+        description=(
+            "List the `.lydrc`/`.drc` KLayout DRC deck files under the "
+            "resolved variant's libs.tech/klayout/drc, which one `klt drc "
+            "--pdk` runs (`is_default`), and a best-effort static scan of the "
+            "`-rd` globals each consumes (`required_by_caller`, `default`). "
+            "Use it to pick a sibling deck for `klt drc --deck-file` and the "
+            "`--deck-var` flags it needs."
+        ),
+    )
+    _add_pdk_args(
+        decks_parser,
+        pdk_help="variant to resolve (e.g. sky130A); overrides $PDK",
+        pdk_root_help="explicit install root; overrides $PDK_ROOT and the search order",
+    )
+    _add_format_arg(decks_parser)
+    decks_parser.set_defaults(func=pdk_cmd.run_decks)
 
     corners_parser = pdk_sub.add_parser(
         "corners",
