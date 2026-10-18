@@ -109,13 +109,15 @@ klt signoff --attest {1,9,10} --inventory <file> --check <committed-envelope> [-
   for, plus its grading-code content hash. Mutually exclusive with
   `<file>...`/`--manifest`/`--fleet`/`--tiers-doc`/`--check`. See
   "Identifying the grading build" below.
-- `--attest` — `1`, `9` or `10`: produce the attestation envelope for that
+- `--attest` — **not in `klt` 0.7.0 (PyPI); ships in the next release after
+  0.7.0, until then pin a git commit.** `1`, `9` or `10`: produce the attestation envelope for that
   T1 item from `--inventory` (issue #2844). Any other value is a usage error
   (exit `2`). Mutually exclusive with
   `<file>...`/`--manifest`/`--fleet`/`--describe-grader`/`--tiers-doc`.
   With `--check <committed-envelope>`, re-attests and diffs instead of
   writing. See "Attesting items 1, 9 and 10" below.
-- `--inventory` — with `--attest`: path to the attestation inventory (a
+- `--inventory` — **not in `klt` 0.7.0 (PyPI); ships in the next release
+  after 0.7.0.** With `--attest`: path to the attestation inventory (a
   file inside a git repository, not `-`). Refused without `--attest`.
 - `-o`/`--output` — with `--attest`: also write the envelope to this path,
   only when it passes and only if its bytes changed. Refused without
@@ -679,6 +681,27 @@ its own terms, it simply measured nothing, and the fix is to re-run it with
 something to check. Where both apply, the more actionable reason wins:
 `check_failed` (the run did fail) and `wrong_kind` ("cite a different
 artifact") both take precedence over `nothing_checked`.
+
+### A sim envelope that applied no bound (`no_limits_checked`)
+
+Issue #3769: `klt sim` counts a produced measurement with no `limits` as a
+deliberate observation, so an all-observation request is not
+`nothing_checked` and rolls up to `status: "pass"`. For T1 item 5 (corner
+verification against the ratified spec) that pass means only "every
+measurement produced a value". A `sim` envelope whose `coverage` block has
+`measurements_declared > 0` and `measurements_with_limits == 0` is therefore
+refused through the same path as `nothing_checked`:
+
+| Entry point | Result |
+|---|---|
+| Envelope aggregation | `passed: false`; `detail.no_limits_checked` carries `measurements_declared` / `measurements_with_limits` |
+| Tier-verdict report (`--manifest`) | The item renders `"unmet"` with `reason: "no_limits_checked"` |
+
+An envelope with at least one limited measurement, one with no `coverage`
+block (pre-coverage evidence), and a `capture_only` run that declares no
+measurements all grade as before. The `klt sim` output is unchanged; the fix
+is to copy the spec bounds into the request's `measurements[].limits` and
+re-run. The key and reason are additive.
 
 ### Partial coverage is qualified, not inferred
 
@@ -1526,6 +1549,12 @@ uncited, and a block still reaches `tier: "T1"` only once every T1 item —
 these four included — is `"met"`.
 
 ### Attesting items 1, 9 and 10 (`--attest`, issue #2844)
+
+> **Availability:** `--attest` and `--inventory` are **not in `klt` 0.7.0**
+> (PyPI). They are on `main` and will ship in the next release after 0.7.0;
+> until then, pin a git commit (e.g. `uvx --from
+> "git+https://github.com/2AMLogic/klayout-tools@<commit>" klt signoff ...`).
+> Release-pinned installs of 0.7.0 fail with `unrecognized arguments`.
 
 `klt signoff --attest {1,9,10} --inventory FILE` is the producer for the
 artifact-anchored envelope above. It reads a versioned **attestation
@@ -2560,7 +2589,7 @@ envelope graded all three `met`. Issue #2044 closes that:
 | Item | Partition graded | Accepted kinds | The artifact the doc names |
 |---|---|---|---|
 | **5** — Full corner verification vs a ratified spec | `analog` | `sim` | "PVT corner-matrix simulation results covering every spec row at its bound corners" |
-| **5** | `digital` | `sta`, `functional-verification`, **or** `sim` | Multi-corner STA plus a bit-exact functional regression for the RTL flow (both first-class evidence kinds since #1959); `sim` for the full-custom sub-case, which satisfies item 5 "instead by PVT corner-matrix SPICE simulation" |
+| **5** | `digital` | `sta` **and** `functional-verification`, **or** `sim` alone | Multi-corner STA plus a bit-exact functional regression for the RTL flow (both first-class evidence kinds since #1959); `sim` for the full-custom sub-case, which satisfies item 5 "instead by PVT corner-matrix SPICE simulation" |
 | **6** — Statistical claims carry Monte Carlo evidence | both | `yield` | "A `klt yield` JSON report … is the machine-checkable evidence for this item" (kind-independent — item 6 applies to whichever spec rows are statistical, regardless of block kind) |
 | **8** — Characterization report | both | `generic` | The purpose-built generic evidence envelope (issue #1152): "`klt signoff --manifest` grades it via an opt-in generic evidence envelope" — the doc's substitute for the `klt` verb this item does not have |
 
@@ -2655,11 +2684,47 @@ new. Outcomes:
   or a citation naming an undeclared or `gap` row -> `unmet` /
   `invalid_evidence` for item 5 only.
 
+**Digital item 5 needs both RTL-flow kinds (issue #3741).** The tier text
+reads "multi-corner STA **plus** a bit-exact functional test suite", so on a
+digital partition a passing citation set that includes `sta` or
+`functional-verification` must include both: a set missing one grades `unmet` /
+`partial_coverage` with `detail.missing_kinds` (e.g.
+`["functional-verification"]`). This applies to a single string/dict entry
+too, which is aggregated like a one-member list. A failing member still reports
+its own reason first. A `sim`-only entry (the full-custom digital sub-case) is
+exempt, and analog item 5 is unchanged. `detail.missing_kinds` is additive, so
+there is no `schema_version` bump; note that a digital manifest citing only
+`sta` (or only `functional-verification`) for item 5 now grades `unmet`.
+
 Every list-form item also carries `citations_graded` (per-citation status).
 Without `spec_rows`, several passing citations grade `met` as the union of
 their verdicts. A single string/dict entry with no `spec_rows` renders
 exactly as before. The list form applies to items 5 and 6 (item 6:
 #2908, below).
+
+#### Partition-qualified `spec_rows` keys (issue #3768)
+
+On a `mixed-signal` block the bare key `"5"` (or `"6"`) imposes one row set on
+**both** partitions. Use `"<item>.analog"` / `"<item>.digital"` to scope a
+declaration to one partition, the same spelling `evidence` uses. Each
+partition resolves its rows by the qualified key first, then the bare item
+id, so declaring analog rows does not change the digital verdict:
+
+```json
+{
+  "evidence": {
+    "5.analog": [{"file": "sim/decision_time.json", "rows": ["t_dec"]}],
+    "5.digital": {"file": "sta/envelope.json"}
+  },
+  "spec_rows": {"5.analog": [{"id": "t_dec"}]}
+}
+```
+
+A bare-only manifest behaves exactly as before. A suffix other than `analog` /
+`digital`, or malformed rows under a qualified key, degrades to
+`invalid_evidence` (a bad suffix for the item; malformed rows for that
+partition only), never the whole report. Items 5 and 6 share the reader.
+`schema_version`: no bump.
 
 #### Item 6 with several statistical rows (issue #2908)
 

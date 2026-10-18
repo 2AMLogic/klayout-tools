@@ -698,6 +698,47 @@ _DERIVED_LAYER_FIXTURES: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
             ]
         },
     ),
+    # `comp.tap_distance.{nwell,psub}.mv.1` (DF.13_MV / DF.14_MV, issue #3793):
+    # the same cases as the LV pair with the active drawn inside `Dualgate`
+    # (the MV selector) and a 15 um reach; the clean tap is 9 um away.
+    "comp.tap_distance.nwell.mv.1": (
+        {  # violate: PCOMP inside Nwell, no NCOMP tap anywhere
+            "shapes": [
+                {"layer": [55, 0], "box": [-500, -500, 12000, 2000]},  # Dualgate
+                {"layer": [21, 0], "box": [-1000, -1000, 31000, 4000]},  # Nwell
+                {"layer": [22, 0], "box": [10000, 0, 11000, 1000]},  # Comp (PCOMP)
+                {"layer": [31, 0], "box": [9700, -300, 11300, 1300]},  # Pplus
+            ]
+        },
+        {  # clean: NCOMP tap 9 um from the PCOMP
+            "shapes": [
+                {"layer": [55, 0], "box": [-500, -500, 12000, 2000]},  # Dualgate
+                {"layer": [21, 0], "box": [-1000, -1000, 31000, 4000]},  # Nwell
+                {"layer": [22, 0], "box": [0, 0, 1000, 1000]},  # Comp (NCOMP tap)
+                {"layer": [32, 0], "box": [-300, -300, 1300, 1300]},  # Nplus
+                {"layer": [22, 0], "box": [10000, 0, 11000, 1000]},  # Comp (PCOMP)
+                {"layer": [31, 0], "box": [9700, -300, 11300, 1300]},  # Pplus
+            ]
+        },
+    ),
+    "comp.tap_distance.psub.mv.1": (
+        {  # violate: NCOMP outside any well, no PCOMP substrate tap anywhere
+            "shapes": [
+                {"layer": [55, 0], "box": [-500, -500, 12000, 2000]},  # Dualgate
+                {"layer": [22, 0], "box": [10000, 0, 11000, 1000]},  # Comp (NCOMP)
+                {"layer": [32, 0], "box": [9700, -300, 11300, 1300]},  # Nplus
+            ]
+        },
+        {  # clean: PCOMP substrate tap 9 um from the NCOMP
+            "shapes": [
+                {"layer": [55, 0], "box": [-500, -500, 12000, 2000]},  # Dualgate
+                {"layer": [22, 0], "box": [10000, 0, 11000, 1000]},  # Comp (NCOMP)
+                {"layer": [32, 0], "box": [9700, -300, 11300, 1300]},  # Nplus
+                {"layer": [22, 0], "box": [0, 0, 1000, 1000]},  # Comp (PCOMP tap)
+                {"layer": [31, 0], "box": [-300, -300, 1300, 1300]},  # Pplus
+            ]
+        },
+    ),
     # `nplus.enclosing.comp.1` (NP.5b, 160 dbu): one `Comp` box fully covered
     # by `Nplus`, with the implant extending 110 dbu (violate) / 210 dbu
     # (clean) beyond it on every side. No `Pplus`/`Poly2` is drawn, so every
