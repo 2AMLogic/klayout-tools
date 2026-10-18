@@ -1717,7 +1717,8 @@ def test_run_sim_batch_backend_end_to_end(tmp_path, monkeypatch):
     remote_block = report["environment"]["remote"]
     assert remote_block["provider"] == "aws-batch-fleet"
     assert remote_block["instance_id"] == "i-0fake"
-    assert remote_block["bucket"] == FAKE_BUCKET
+    assert "bucket" not in remote_block
+    assert FAKE_BUCKET not in json.dumps(report)
     assert remote_block["job_id"].startswith("klt-sim-")
 
     # Exactly one launch, and the uploaded request is a `local-parallel`
@@ -2471,6 +2472,65 @@ def test_collection_failure_on_a_done_job_still_raises(tmp_path, monkeypatch):
         _run_failed_job(tmp_path, monkeypatch, runner)
 
 
+_LEAKY_STDERR = (
+    f"An error occurred (AccessDenied): arn:aws:s3:::{FAKE_BUCKET}/x; {FAKE_BUCKET}"
+)
+
+
+def test_run_checked_redacts_the_bucket_from_the_error_message():
+    runner = _FakeRunner()
+    runner.default = fake_completed(returncode=1, stderr=_LEAKY_STDERR)
+
+    with pytest.raises(sb.BatchError) as excinfo:
+        sb._run_checked(runner, ["aws"], 1.0, "step", redact=FAKE_BUCKET)
+
+    assert FAKE_BUCKET not in str(excinfo.value)
+    assert str(excinfo.value).count("<bucket>") == 2
+
+
+def test_run_checked_classifies_on_the_unredacted_stderr():
+    runner = _FakeRunner()
+    runner.default = fake_completed(returncode=1, stderr=_LEAKY_STDERR)
+
+    with pytest.raises(sb.BatchError) as excinfo:
+        sb._run_checked(
+            runner,
+            ["aws"],
+            1.0,
+            "step",
+            classify=lambda detail: "seen" if FAKE_BUCKET in detail else None,
+            redact=FAKE_BUCKET,
+        )
+
+    assert excinfo.value.code == "seen"
+
+
+@pytest.mark.parametrize("redact", [None, ""])
+def test_run_checked_without_a_bucket_leaves_the_message_alone(redact):
+    runner = _FakeRunner()
+    runner.default = fake_completed(returncode=1, stderr="AccessDenied boom")
+
+    with pytest.raises(sb.BatchError, match="failed \\(exit 1\\): AccessDenied boom"):
+        sb._run_checked(runner, ["aws"], 1.0, "step", redact=redact)
+
+
+def test_collection_failure_note_in_the_deck_report_omits_the_bucket(
+    tmp_path, monkeypatch
+):
+    runner = _FakeRunner()
+    runner.default = fake_completed(
+        _status("failed", exit_code="1", detail="job command exited 1")
+    )
+    runner.queue("outputs/", fake_completed(returncode=1, stderr=_LEAKY_STDERR))
+
+    corners, _, _ = _run_failed_job(tmp_path, monkeypatch, runner)
+
+    for corner in corners:
+        message = corner["diagnostics"][0]["message"]
+        assert "output recovery" in message
+        assert FAKE_BUCKET not in message
+
+
 def test_timed_out_job_recovers_an_envelope_but_keeps_its_code(tmp_path, monkeypatch):
     runner = _FakeRunner()
     runner.default = fake_completed(_status("timeout", exit_code="124"))
@@ -2519,6 +2579,9 @@ def test_poll_timeout_reports_submitted_and_launched_only(tmp_path, monkeypatch)
     assert environment["client_launched_at"] == "2026-10-15T17:00:01.000000Z"
     assert environment["client_status_terminal_at"] is None
     assert environment["client_collected_at"] is None
+    # #3777: the bucket embeds an AWS account number; reports are committable.
+    assert "bucket" not in environment
+    assert FAKE_BUCKET not in json.dumps(environment)
 
 
 def test_successful_job_reports_ordered_client_timestamps(tmp_path, monkeypatch):
@@ -3193,6 +3256,54 @@ def test_default_runner_is_the_only_subprocess_seam(monkeypatch):
     )
     sb._run_subprocess(["true"], 1.0)
     assert calls == [["true"]]
+
+
+def test_default_runner_caps_concurrent_spawns(monkeypatch):
+    """96 shard threads going through the default runner never have more than
+    the spawn cap of CLI processes in flight, but still run concurrently."""
+    import threading
+    import time
+
+    cap = 4
+    monkeypatch.setattr(sb, "_SPAWN_SEMAPHORE", threading.BoundedSemaphore(cap))
+    lock = threading.Lock()
+    state = {"now": 0, "max": 0}
+
+    def fake_run(argv, **kwargs):
+        with lock:
+            state["now"] += 1
+            state["max"] = max(state["max"], state["now"])
+        time.sleep(0.01)
+        with lock:
+            state["now"] -= 1
+        return fake_completed()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    threads = [
+        threading.Thread(target=sb._run_subprocess, args=(["aws"], 1.0))
+        for _ in range(96)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert 1 < state["max"] <= cap
+
+
+def test_default_runner_releases_slot_on_exception(monkeypatch):
+    import threading
+
+    sem = threading.BoundedSemaphore(1)
+    monkeypatch.setattr(sb, "_SPAWN_SEMAPHORE", sem)
+
+    def boom(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, 1.0)
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    for _ in range(2):
+        with pytest.raises(subprocess.TimeoutExpired):
+            sb._run_subprocess(["aws"], 1.0)
+    assert sem.acquire(blocking=False)
 
 
 # --------------------------------------------------------------------------- #

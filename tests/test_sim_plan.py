@@ -17,14 +17,15 @@ import pytest
 from klayout_tools import sim, sim_merge, sim_plan
 from klayout_tools.cli import main
 
-# Fixtures (stub_ngspice, ngspice name resolution) and request writer.
+# Fixture (stub_ngspice) and request writer.
 from test_sim_merge import (  # noqa: F401
-    _bare_name_ngspice_resolution,
     _write_grid_request,
     stub_ngspice,  # noqa: F401
 )
 
-pytestmark = pytest.mark.usefixtures("real_build_identity_git")
+pytestmark = pytest.mark.usefixtures(
+    "real_build_identity_git", "bare_name_ngspice_resolution"
+)
 
 
 def _plan(tmp_path: Path, processes: list[str], name: str = "all.json") -> dict:

@@ -12132,6 +12132,29 @@ def test_normalize_gf180_capacitor_derives_area_perimeter_from_si_metres():
     assert out.strip() == "C1 1 2 0 cap_mim_2f0_m4m5_noshield A=4P P=8U"
 
 
+@pytest.mark.parametrize(
+    "model",
+    [
+        "cap_nmos_03v3",
+        "cap_pmos_03v3",
+        "cap_nmos_06v0",
+        "cap_pmos_06v0",
+        "cap_nmos_03v3_b",
+        "cap_pmos_03v3_b",
+        "cap_nmos_06v0_b",
+        "cap_pmos_06v0_b",
+    ],
+)
+def test_normalize_gf180_mos_capacitor_derives_area_perimeter(model):
+    # Issue #2919: the PDK's MOS-cap subcircuits (`c_length`/`c_width`, metres)
+    # convert to the same `A`/`P` card the extractor reports for a 2.0 x 0.8 um
+    # gate (A=1.6 um^2, P=5.6 um), so a MOS-cap reference compares.
+    out = normalize_reference_netlist(
+        f"XC1 1 2 {model} c_length=2e-6 c_width=0.8e-6\n", deck="gf180mcu"
+    )
+    assert out.strip() == f"C1 1 2 0 {model} A=1.6P P=5.6U"
+
+
 def test_normalize_capacitor_wrong_terminal_count_fails():
     with pytest.raises(NormalizeError, match="expected 2 terminals"):
         normalize_reference_netlist(
@@ -12472,6 +12495,15 @@ def test_build_device_binding_map_derived_fallback_shape():
         "cap_mim_1f0_m4m5_noshield",
         "cap_mim_1f5_m4m5_noshield",
         "cap_mim_2f0_m4m5_noshield",
+        # MOS capacitors (issue #2919) -- curated in `_CAPACITOR_MODEL_TABLE`.
+        "cap_nmos_03v3",
+        "cap_pmos_03v3",
+        "cap_nmos_06v0",
+        "cap_pmos_06v0",
+        "cap_nmos_03v3_b",
+        "cap_pmos_03v3_b",
+        "cap_nmos_06v0_b",
+        "cap_pmos_06v0_b",
     }
     assert set(build_device_binding_map("sky130")) == {
         "sky130_fd_pr__nfet_01v8",
@@ -20879,6 +20911,59 @@ def test_run_lvs_gate_level_verilog_records_every_pin_order_source(tmp_path):
         "sky130_sram_2kbyte_1rw1r_32x512_8.spice",
     ]
     assert [entry["cells"] for entry in sources] == [2, 1, 1]
+
+
+def _portable_macro_request(tmp_path: Path, **extra) -> tuple[str, str]:
+    root = _make_fake_macro_pdk(tmp_path)
+    request = json.loads(
+        _macro_request(
+            tmp_path,
+            {
+                "library": ["sky130_fd_sc_hd", "sky130_sram_macros"],
+                "pdk": "sky130A",
+                "pdk_root": root,
+            },
+        )
+    )
+    request.update(extra)
+    return json.dumps(request), root
+
+
+def test_run_lvs_portable_paths_default_keeps_absolute_paths(tmp_path):
+    """Omitting `portable_paths` leaves the report as it was (issue #3798)."""
+    request, _ = _portable_macro_request(tmp_path)
+    explicit_false, _ = _portable_macro_request(tmp_path, portable_paths=False)
+    sources = run_lvs(request)["provenance"]["pin_order_sources"]
+    assert all(os.path.isabs(entry["path"]) for entry in sources)
+    assert run_lvs(explicit_false)["provenance"]["pin_order_sources"] == sources
+
+
+def test_run_lvs_portable_paths_true_leaves_no_absolute_host_path(tmp_path):
+    """`portable_paths: true` makes the envelope pass the env-provenance scan:
+    PDK files become `$PDK_ROOT/...`, nothing absolute remains, and the
+    verdict is unchanged (issue #3798)."""
+    from klayout_tools.env_provenance import find_absolute_path_fields
+
+    request, _ = _portable_macro_request(tmp_path, portable_paths=True)
+    baseline, _ = _portable_macro_request(tmp_path)
+    report = run_lvs(request)
+
+    assert find_absolute_path_fields(report) == []
+    sources = report["provenance"]["pin_order_sources"]
+    assert [entry["path"] for entry in sources] == [
+        entry["path"]
+        for entry in sources
+        if isinstance(entry["path"], str) and entry["path"].startswith("$PDK_ROOT/")
+    ]
+    assert len(sources) == 3
+    assert report["status"] == run_lvs(baseline)["status"]
+    jsonschema.validate(report, _LVS_SCHEMA)
+
+
+def test_run_lvs_portable_paths_must_be_boolean(tmp_path):
+    request, _ = _portable_macro_request(tmp_path, portable_paths="yes")
+    with pytest.raises(LvsError, match="portable_paths must be a boolean"):
+        run_lvs(request)
 
 
 def test_run_lvs_gate_level_verilog_multi_library_power_universe_is_per_library(
