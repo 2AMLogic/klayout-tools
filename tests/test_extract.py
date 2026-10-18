@@ -17068,6 +17068,7 @@ def test_distributed_rc_replaces_star_with_two_segment_ladder(tmp_path):
     )
     assert baseline_entry["rc_model"] == "lumped"
     assert baseline_entry["segments"] == []
+    assert baseline_entry["pin_order"] is None
 
     report = run_extract(
         path,
@@ -17083,6 +17084,10 @@ def test_distributed_rc_replaces_star_with_two_segment_ladder(tmp_path):
 
     entry = next(n for n in para["nets"] if n["net"] == net_name)
     assert entry["rc_model"] == "distributed"
+
+    # Issue #3937: `pin_order` names the terminal whose leg is the pin.
+    (pin_terminal,) = [t for t in entry["terminals"] if t["leg_net"] == net_name]
+    assert entry["pin_order"] == pin_terminal["order"] == len(entry["terminals"]) // 2
 
     # Net-level totals are unaffected by which model represents them --
     # `--distributed-rc` redistributes the *same* total R/C, it does not
