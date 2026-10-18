@@ -31,10 +31,13 @@ EDGE_TO_REGION = {
 
 _MODULE_START_RE = re.compile(r"^\s*module\s+(\\?\S+?)\s*[\s(;]")
 _MODULE_END_RE = re.compile(r"^\s*endmodule\b")
+_PORT_NAME = r"(?:\\\S+|(?!(?:input|output|inout)\b)[A-Za-z_][\w$]*)"
 _PORT_DECL_RE = re.compile(
     r"\b(?:input|output|inout)\b\s*(?:wire\s+|reg\s+)?"
-    r"(?:\[\s*(\d+)\s*:\s*(\d+)\s*\]\s*)?(\\\S+|[A-Za-z_][\w$]*)"
+    r"(?:\[\s*(\d+)\s*:\s*(\d+)\s*\]\s*)?"
+    rf"({_PORT_NAME}(?:\s*,\s*{_PORT_NAME})*)"
 )
+_PORT_NAME_RE = re.compile(_PORT_NAME)
 _UNITS_RE = re.compile(r"UNITS\s+DISTANCE\s+MICRONS\s+(\d+)\s*;")
 _DIEAREA_RE = re.compile(
     r"DIEAREA\s+\(\s*(-?\d+)\s+(-?\d+)\s*\)\s*\(\s*(-?\d+)\s+(-?\d+)\s*\)"
@@ -69,17 +72,18 @@ def netlist_top_ports(netlist_path: str, module_name: str) -> list[str] | None:
                 continue
         elif _MODULE_END_RE.match(line):
             break
-        for msb, lsb, name in _PORT_DECL_RE.findall(line):
-            name = name.lstrip("\\")
-            if msb == "":
-                bits = [name]
-            else:
-                hi, lo = int(msb), int(lsb)
-                step = -1 if hi >= lo else 1
-                bits = [f"{name}[{i}]" for i in range(hi, lo + step, step)]
-            for bit in bits:
-                if bit not in ports:
-                    ports.append(bit)
+        for msb, lsb, names in _PORT_DECL_RE.findall(line):
+            for name in _PORT_NAME_RE.findall(names):
+                name = name.lstrip("\\")
+                if msb == "":
+                    bits = [name]
+                else:
+                    hi, lo = int(msb), int(lsb)
+                    step = -1 if hi >= lo else 1
+                    bits = [f"{name}[{i}]" for i in range(hi, lo + step, step)]
+                for bit in bits:
+                    if bit not in ports:
+                        ports.append(bit)
     return ports if found else None
 
 
