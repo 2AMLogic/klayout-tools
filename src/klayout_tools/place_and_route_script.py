@@ -14,6 +14,7 @@ import os
 from typing import Any
 
 from ._openroad_engine import _timing_violation_report_lines
+from .place_and_route_pins import pin_constraint_lines
 from .place_and_route_reports import detailed_route_lines, routing_completeness_lines
 from .place_and_route_request import PlaceAndRouteError
 
@@ -639,7 +640,7 @@ def _stage_script_lines(
     netlist_path: str,
     hdl_toplevel: str,
     floorplan: dict[str, Any],
-    io_spec: dict[str, str] | None,
+    io_spec: dict[str, Any] | None,
     macros: list[dict[str, Any]],
     power: dict[str, Any] | None,
     clock_port: str | None,
@@ -731,6 +732,7 @@ def _stage_script_lines(
 
     if stage == "place":
         assert io_spec is not None
+        lines += pin_constraint_lines(io_spec.get("pin_constraints", []))
         lines += [
             f"place_pins -hor_layers {io_spec['layer_h']} "
             f"-ver_layers {io_spec['layer_v']}",

@@ -47,6 +47,7 @@ from __future__ import annotations
 import math
 from typing import Any, NamedTuple
 
+from ._unionfind import UnionFind
 from .decks import (
     ExtractionDeck,
     UnknownDeckError,
@@ -4620,20 +4621,7 @@ def route_bundle(
         )
 
     pin_count = len(pins)
-    parent = list(range(pin_count))
-
-    def _find(index: int) -> int:
-        while parent[index] != index:
-            parent[index] = parent[parent[index]]
-            index = parent[index]
-        return index
-
-    def _union(left: int, right: int) -> bool:
-        root_left, root_right = _find(left), _find(right)
-        if root_left == root_right:
-            return False
-        parent[max(root_left, root_right)] = min(root_left, root_right)
-        return True
+    uf = UnionFind(range(pin_count), min_root=True)
 
     components = pin_count
 
@@ -4644,7 +4632,7 @@ def route_bundle(
     for index, pin in enumerate(pins):
         key = (pin["block"], pin["port"])
         if key in first_seen:
-            if _union(first_seen[key], index):
+            if uf.union(first_seen[key], index):
                 components -= 1
         else:
             first_seen[key] = index
@@ -4914,7 +4902,7 @@ def route_bundle(
                     result = retry
                     reason = None
         if reason is None and result["routed"]:
-            if _union(i, j):
+            if uf.union(i, j):
                 components -= 1
             total_length_um += result["route_length_um"]
             legs.append(
@@ -4952,7 +4940,7 @@ def route_bundle(
     for i, j in candidates:
         if components == 1:
             break
-        if _find(i) == _find(j):
+        if uf.find(i) == uf.find(j):
             continue  # already connected through other legs -- no leg needed
         if (
             frozenset(
@@ -5009,7 +4997,7 @@ def route_bundle(
                     reason = None
 
         if reason is None and result["routed"]:
-            _union(i, j)
+            uf.union(i, j)
             components -= 1
             total_length_um += result["route_length_um"]
             legs.append(
@@ -5064,7 +5052,7 @@ def route_bundle(
     # --- Unroutable: report which pins were stranded and why ----------------
     groups: dict[int, list[int]] = {}
     for index in range(pin_count):
-        groups.setdefault(_find(index), []).append(index)
+        groups.setdefault(uf.find(index), []).append(index)
     # The largest component is "the net"; every pin outside it is stranded.
     main_root = max(groups, key=lambda root: (len(groups[root]), -root))
     stranded = sorted(
@@ -5153,27 +5141,14 @@ def _declare_only_bundle_result(pins: list[dict[str, Any]]) -> dict[str, Any]:
     byte-reproducible leg list run to run.
     """
     pin_count = len(pins)
-    parent = list(range(pin_count))
-
-    def _find(index: int) -> int:
-        while parent[index] != index:
-            parent[index] = parent[parent[index]]
-            index = parent[index]
-        return index
-
-    def _union(left: int, right: int) -> bool:
-        root_left, root_right = _find(left), _find(right)
-        if root_left == root_right:
-            return False
-        parent[max(root_left, root_right)] = min(root_left, root_right)
-        return True
+    uf = UnionFind(range(pin_count), min_root=True)
 
     components = pin_count
     first_seen: dict[tuple[str, str], int] = {}
     for index, pin in enumerate(pins):
         key = (pin["block"], pin["port"])
         if key in first_seen:
-            if _union(first_seen[key], index):
+            if uf.union(first_seen[key], index):
                 components -= 1
         else:
             first_seen[key] = index
@@ -5185,9 +5160,9 @@ def _declare_only_bundle_result(pins: list[dict[str, Any]]) -> dict[str, Any]:
         for j in range(i + 1, pin_count):
             if components == 1:
                 break
-            if _find(i) == _find(j):
+            if uf.find(i) == uf.find(j):
                 continue
-            _union(i, j)
+            uf.union(i, j)
             components -= 1
             legs.append(
                 {
