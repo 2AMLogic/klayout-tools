@@ -355,6 +355,7 @@
         "klayout_tools.place_and_route_gds_merge",
         "klayout_tools.place_and_route_min_area",
         "klayout_tools.place_and_route_pdn_fit",
+        "klayout_tools.place_and_route_portable",
         "klayout_tools.place_and_route_power_audit",
         "klayout_tools.place_and_route_reports",
         "klayout_tools.place_and_route_request",
@@ -486,6 +487,8 @@
         "klayout_tools.sim_raw",
         "klayout_tools.sim_remote",
         "klayout_tools.sim_set",
+        "klayout_tools.sim_snm",
+        "klayout_tools.sim_snm_meas",
         "klayout_tools.sim_staging",
         "klayout_tools.sim_steps",
         "klayout_tools.sim_stimulus",
@@ -1250,6 +1253,12 @@
     }
   ],
   "shared_private_permissions": [
+    {
+      "consumer": "klayout_tools.place_and_route_portable",
+      "exporter": "klayout_tools.env_provenance",
+      "symbol": "_absolute_paths_in",
+      "reason": "Issue #3820: portable_paths reuses env_provenance's absolute-path scanner so response rewriting matches the provenance scrub exactly rather than duplicating the regex."
+    },
     {
       "consumer": "klayout_tools.tap_distance",
       "exporter": "klayout_tools.erc",

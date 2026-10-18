@@ -1539,6 +1539,18 @@ def _validate_sweep_corners(value: Any) -> list[str] | None:
     return value
 
 
+def _validate_portable_paths(value: Any) -> bool:
+    """Optional ``request.portable_paths`` (issue #3820): rewrite every
+    absolute host path in the response to a committable form (see
+    :mod:`klayout_tools.place_and_route_portable`). Omitted/``None`` is
+    ``False``: the default response is unchanged."""
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise PlaceAndRouteError("request.portable_paths must be a boolean")
+    return value
+
+
 def _validate_post_route_spef(value: Any) -> bool:
     """Optional ``request.post_route_spef`` (issue #948, Epic #700 Phase 3,
     ``docs/design/post-route-sta-survey.md`` §4.1) -- opts in to a real

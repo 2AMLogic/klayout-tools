@@ -141,7 +141,9 @@ _DECKS_DIR = os.path.join("src", "klayout_tools", "decks")
 def deck_hashes(root: str) -> dict[str, str] | None:
     """``{module_stem: "sha256:<hex>"}`` for every ``*.py`` module in
     ``<root>/src/klayout_tools/decks``, or ``None`` when that directory is
-    missing/unreadable (issue #2451).
+    missing/unreadable (issue #2451). A standalone KLayout DRC deck file is
+    recorded under its full filename (``"asap7.drc"``) -- a separate artifact
+    from the ``asap7`` module (issue #3826).
 
     Hashes every module rather than importing the package to ask which are
     decks: the build hook must not import the package it is building, and a
@@ -155,14 +157,15 @@ def deck_hashes(root: str) -> dict[str, str] | None:
         return None
     hashes: dict[str, str] = {}
     for filename in names:
-        if not filename.endswith(".py"):
+        if not filename.endswith((".py", ".drc")):
             continue
         try:
             with open(os.path.join(directory, filename), "rb") as handle:
                 digest = hashlib.sha256(handle.read()).hexdigest()
         except OSError:
             return None
-        hashes[filename[: -len(".py")]] = f"sha256:{digest}"
+        key = filename[: -len(".py")] if filename.endswith(".py") else filename
+        hashes[key] = f"sha256:{digest}"
     return hashes or None
 
 

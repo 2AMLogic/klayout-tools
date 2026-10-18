@@ -105,6 +105,7 @@ from . import (
     sim_noise,
     sim_passes,
     sim_portable,
+    sim_snm_meas,
     sim_steps,
     sim_stimulus,
     sim_supply_waveform,
@@ -1434,6 +1435,8 @@ def _resolve_analysis_and_measurements(
     sim_transfer_meas.validate_transfer_context(measurements_spec, analysis)
     # Issue #3160: a tian metric combines the named passes of `analysis.passes`.
     sim_tian.validate_tian_context(measurements_spec, analysis)
+    # Issue #3895: and an snm margin is a DC-sweep quantity.
+    sim_snm_meas.validate_snm_context(measurements_spec, analysis)
     # Issue #2938: a `noise` entry is lowered to an `expr` (plus helper
     # lines) so everything downstream treats it as one.
     sim_noise.validate_noise_context(measurements_spec, analysis)
@@ -3067,6 +3070,7 @@ def _prepare_sim_request(
         transfer_declared=bool(
             sim_transfer_meas.transfer_measurements(measurements_spec)
         ),
+        snm_declared=bool(sim_snm_meas.snm_measurements(measurements_spec)),
     )
     monte_carlo_info: dict[str, Any] | None = None
     monte_carlo_stats: dict[str, Any] | None = None
@@ -7034,6 +7038,7 @@ def _refuse_xyce_control_block_measurements(
     cycle_mean_declared: bool,
     energy_declared: bool,
     transfer_declared: bool = False,
+    snm_declared: bool = False,
 ) -> None:
     """The ``engine: "xyce"`` refusals for measurement forms that exist only
     as commands in klt's generated ngspice ``.control`` block (``expr``,
@@ -7088,6 +7093,14 @@ def _refuse_xyce_control_block_measurements(
         raise SimError(
             "measurements[].transfer is not supported for engine 'xyce': the "
             "AC vectors are dumped by ngspice `let`/`write` commands inside a "
+            "`.control` block, and the Xyce deck has none; use engine "
+            "'ngspice'"
+        )
+    if snm_declared:
+        # Issue #3895: same `.control` let/write boundary as `transfer`.
+        raise SimError(
+            "measurements[].snm is not supported for engine 'xyce': the sweep "
+            "vectors are dumped by ngspice `let`/`write` commands inside a "
             "`.control` block, and the Xyce deck has none; use engine "
             "'ngspice'"
         )
@@ -7171,6 +7184,7 @@ def _enforce_xyce_support_boundary(
     cycle_mean_declared: bool = False,
     energy_declared: bool = False,
     transfer_declared: bool = False,
+    snm_declared: bool = False,
 ) -> None:
     """Refuse the ``engine: "xyce"`` combinations the v1 path does not
     implement (issue #2016) -- up front, with the same clean
@@ -7237,6 +7251,7 @@ def _enforce_xyce_support_boundary(
         cycle_mean_declared=cycle_mean_declared,
         energy_declared=energy_declared,
         transfer_declared=transfer_declared,
+        snm_declared=snm_declared,
     )
     for declared, message in (
         # Issue #2732: `save_mode` selects whether klt's generated ngspice
@@ -9099,6 +9114,7 @@ def _run_corner(
     transfers = sim_transfer_meas.extract_corner_transfers(
         measurements_spec, corner_dir
     )
+    snms = sim_snm_meas.extract_corner_snms(measurements_spec, corner_dir)
     # Issue #3160: each pass's rawfile is decoded once, shared by the tian
     # reduction below and the corner's `passes` field.
     pass_results = (
@@ -9119,6 +9135,7 @@ def _run_corner(
             energy=energy,
             cycle_means=cycle_means,
             transfers=transfers,
+            snms=snms,
             tians=tians,
             engine_diagnostics=diagnostics,
         )
@@ -9427,6 +9444,7 @@ def _corner_measurement_results(
     energy: dict[int, sim_energy.EnergyOutcome] | None = None,
     cycle_means: dict[int, sim_cycle_mean.CycleMeanOutcome] | None = None,
     transfers: dict[int, sim_transfer_meas.TransferOutcome] | None = None,
+    snms: dict[int, sim_snm_meas.SnmOutcome] | None = None,
     tians: dict[int, sim_tian.TianOutcome] | None = None,
     engine_diagnostics: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
@@ -9481,6 +9499,7 @@ def _corner_measurement_results(
         (sim_cycle_mean.is_cycle_mean, _cycle_mean_measurement_result, cycle_means),
         (sim_transfer_meas.is_transfer, _transfer_measurement_result, transfers),
         (sim_tian.is_tian, _tian_measurement_result, tians),
+        (sim_snm_meas.is_snm, _snm_measurement_result, snms),
     )
     for position, spec in enumerate(measurements_spec):
         sidecar = next(
@@ -9807,6 +9826,63 @@ def _transfer_measurement_result(
         "status": m_status,
         "margin": margin,
         "transfer": outcome.report(spec),
+    }
+    return result, grading_diagnostics
+
+
+def _snm_measurement_result(
+    spec: dict[str, Any],
+    outcome: sim_snm_meas.SnmOutcome | None,
+    *,
+    save_mode: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """One ``snm`` measurement's response entry (issue #3895).
+
+    ``value`` is the butterfly SNM in volts, graded through
+    :func:`_grade_measurement_value` like any scalar; the request echo and the
+    two per-eye sides ride the additive ``snm`` sibling. A failure is
+    ``status: "error"``, ``value: null`` (so it can never pass a limit) with a
+    ``code: "measurement"`` diagnostic whose message starts with a
+    ``[<reason>]`` token from :data:`klayout_tools.sim_snm_meas.ERROR_CODES`."""
+    name = spec["name"]
+    unit = spec.get("unit")
+    if outcome is None or outcome.value is None:
+        message = (
+            outcome.error
+            if outcome is not None and outcome.error is not None
+            else f"measurement '{name}' produced no snm value"
+        )
+        reason = (
+            outcome.code
+            if outcome is not None and outcome.code is not None
+            else "snm_vector_missing"
+        )
+        if save_mode == "netlist" and reason == "snm_vector_missing":
+            message += SAVE_MODE_NETLIST_NO_VALUE_HINT
+        result = {
+            "name": name,
+            "value": None,
+            "unit": unit,
+            "status": "error",
+            "margin": None,
+        }
+        return result, [
+            {
+                "severity": "error",
+                "code": "measurement",
+                "message": f"[{reason}] {message}",
+            }
+        ]
+    m_status, margin, grading_diagnostics = _grade_measurement_value(
+        spec, outcome.value
+    )
+    result = {
+        "name": name,
+        "value": outcome.value,
+        "unit": unit,
+        "status": m_status,
+        "margin": margin,
+        "snm": outcome.report(spec),
     }
     return result, grading_diagnostics
 
@@ -10487,6 +10563,11 @@ def _corner_deck_control_lines(
        (:func:`klayout_tools.sim_transfer_meas.control_lines`), after the
        cycle_mean lines; same ``set filetype=ascii`` rule. None of this
        appears without a transfer entry.
+    9. Per unique ``measurements[].snm`` ``x``/``y1``/``y2`` triple (issue
+       #3895), three ``let`` lines and one ``write`` of the vectors
+       (:func:`klayout_tools.sim_snm_meas.control_lines`), after the transfer
+       lines; same ``set filetype=ascii`` rule. None of this appears without
+       an snm entry.
 
     An ``analysis_steps[]`` request (issue #2482) replaces step 3's analysis
     and 4's ``expr`` lines with the ordered step sequence
@@ -10530,6 +10611,7 @@ def _corner_deck_control_lines(
     energy_lines = sim_energy.control_lines(measurements_spec, corner_dir)
     cycle_mean_lines = sim_cycle_mean.control_lines(measurements_spec, corner_dir)
     transfer_lines = sim_transfer_meas.control_lines(measurements_spec, corner_dir)
+    snm_lines = sim_snm_meas.control_lines(measurements_spec, corner_dir)
     complex_vector_lines = sim_complex_vectors.control_lines(
         complex_vectors, corner_dir
     )
@@ -10539,6 +10621,7 @@ def _corner_deck_control_lines(
         or energy_lines
         or cycle_mean_lines
         or transfer_lines
+        or snm_lines
         or complex_vector_lines
     ):
         lines.append("set filetype=ascii")
@@ -10560,6 +10643,7 @@ def _corner_deck_control_lines(
     lines.extend(energy_lines)
     lines.extend(cycle_mean_lines)
     lines.extend(transfer_lines)
+    lines.extend(snm_lines)
     lines.extend(complex_vector_lines)
     lines.append("quit")
     lines.append(".endc")
