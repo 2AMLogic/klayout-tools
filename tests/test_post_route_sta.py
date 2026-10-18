@@ -6833,3 +6833,136 @@ def test_live_engine_spef_map_distinguishes_interconnect_corners(tmp_path):
     assert nom["corner"] == heavy_entry["corner"] == "tt_025C_1v80"
     assert nom["worst_hold_slack_ns"] != heavy_entry["worst_hold_slack_ns"]
     assert report["provenance"]["input"]["content_hash"] is not None
+
+
+# -- constraints.power_activity / power_basis (issue #3744) -------------------#
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        (None, None),
+        ({"activity": 0.1}, {"activity": 0.1}),
+        ({"duty": 0.5}, {"duty": 0.5}),
+        ({"activity": 0, "duty": 1}, {"activity": 0.0, "duty": 1.0}),
+    ],
+)
+def test_validate_power_activity_accepts(value, expected):
+    constraints = {} if value is None else {"power_activity": value}
+    assert post_route_sta._validate_power_activity(constraints) == expected
+
+
+@pytest.mark.parametrize(
+    "value, match",
+    [
+        ({}, "at least one"),
+        ([], "must be an object"),
+        ("0.1", "must be an object"),
+        ({"activity": True}, "activity must be a finite number"),
+        ({"activity": -0.1}, "activity must be >= 0"),
+        ({"activity": float("nan")}, "activity must be a finite number"),
+        ({"activity": float("inf")}, "activity must be a finite number"),
+        ({"duty": 1.5}, r"duty must be in \[0, 1\]"),
+        ({"duty": "0.5"}, "duty must be a finite number"),
+        ({"activity": 0.1, "density": 1}, "unknown key"),
+    ],
+)
+def test_validate_power_activity_rejects(value, match):
+    with pytest.raises(PostRouteStaError, match=match):
+        post_route_sta._validate_power_activity({"power_activity": value})
+
+
+def test_run_sta_power_activity_validation_runs_before_engine(tmp_path, monkeypatch):
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        constraints=_propagated_constraints(power_activity={"duty": 2}),
+    )
+    calls: list = []
+    monkeypatch.setattr(
+        post_route_sta.subprocess, "run", lambda *a, **k: calls.append(a)
+    )
+    with pytest.raises(PostRouteStaError, match="power_activity.duty"):
+        run_sta(request_path)
+    assert calls == []
+
+
+def test_power_activity_lines_empty_without_request():
+    assert post_route_sta._power_activity_lines(None) == []
+
+
+def test_sta_script_lines_power_activity_before_report_power_metric():
+    kwargs = dict(
+        tech_lef="/pdk/tech.lef",
+        cell_lef="/pdk/cells.lef",
+        liberty_path="/pdk/lib.lib",
+        clock_port="clk",
+        clock_period_ns=2.5,
+    )
+    baseline = post_route_sta._sta_script_lines(def_path="/d/top.def", **kwargs)
+    assert not any("set_power_activity" in line for line in baseline)
+    lines = post_route_sta._sta_script_lines(
+        def_path="/d/top.def", power_activity={"duty": 0.5, "activity": 0.1}, **kwargs
+    )
+    assert lines.index("set_power_activity -global -activity 0.1 -duty 0.5") < (
+        lines.index("report_power_metric")
+    )
+    assert [x for x in lines if "set_power_activity" not in x] == baseline
+
+    net_kwargs = dict(verilog_path="/d/top.v", hdl_toplevel="top", **kwargs)
+    net_base = post_route_sta._sta_netlist_script_lines(**net_kwargs)
+    net = post_route_sta._sta_netlist_script_lines(
+        power_activity={"duty": 0.25}, **net_kwargs
+    )
+    assert net.index("set_power_activity -global -duty 0.25") < net.index(
+        "report_power_metric"
+    )
+    assert [x for x in net if "set_power_activity" not in x] == net_base
+
+
+def test_run_sta_power_basis_engine_default_and_global(tmp_path, monkeypatch):
+    request_path = _setup_success_env(
+        tmp_path, monkeypatch, constraints=_propagated_constraints()
+    )
+    scripts = _stub_openroad_clock_capture(monkeypatch, {None: "propagated_buffered"})
+    report = run_sta(request_path)
+    assert report["power_basis"] == {
+        "activity_source": "engine_default",
+        "activity": None,
+        "duty": None,
+        "parasitics": "estimate_only",
+    }
+    assert "set_power_activity" not in scripts[0]
+
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        constraints=_propagated_constraints(power_activity={"activity": 0.2}),
+    )
+    scripts = _stub_openroad_clock_capture(monkeypatch, {None: "propagated_buffered"})
+    report = run_sta(request_path)
+    assert report["power_basis"] == {
+        "activity_source": "global",
+        "activity": 0.2,
+        "duty": None,
+        "parasitics": "estimate_only",
+    }
+    assert "set_power_activity -global -activity 0.2" in scripts[0]
+
+
+def test_run_sta_power_basis_per_corner_entry(tmp_path, monkeypatch):
+    request_path = _setup_multi_corner_env(
+        tmp_path,
+        monkeypatch,
+        constraints=_propagated_constraints(power_activity={"activity": 0.1}),
+    )
+    scripts = _stub_openroad_clock_capture(
+        monkeypatch,
+        {None: "propagated_buffered", "ss_100C_1v60": "propagated_buffered"},
+    )
+    report = run_sta(request_path)
+    assert len(scripts) == 2
+    assert all("set_power_activity -global -activity 0.1" in s for s in scripts)
+    for entry in report["corners"]:
+        assert entry["power_basis"]["activity_source"] == "global"
+        assert entry["power_basis"]["activity"] == 0.1

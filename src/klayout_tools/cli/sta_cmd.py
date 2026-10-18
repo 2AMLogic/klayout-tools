@@ -126,6 +126,13 @@ def _print_slack_fields(fields: dict, *, indent: str) -> None:
                 f"{', '.join(propagation['clock_sinks_sample'])}"
             )
     print(f"{indent}estimated_power_mw: {fields['estimated_power_mw']}")
+    basis = fields.get("power_basis")
+    if basis is not None:
+        print(
+            f"{indent}power_basis: activity_source={basis['activity_source']} "
+            f"activity={basis['activity']} duty={basis['duty']} "
+            f"parasitics={basis['parasitics']}"
+        )
     # Issue #2886: the per-corner SDF, only when `request.sdf` asked for one
     # (text output for a request without it stays unchanged).
     sdf = fields.get("sdf")

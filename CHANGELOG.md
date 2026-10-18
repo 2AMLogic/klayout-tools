@@ -14,6 +14,13 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sta` power figures state their basis** (issue #3744): new optional
+  `constraints.power_activity` (`{activity, duty}`) emits
+  `set_power_activity -global` before `report_power_metric` in every corner,
+  and every single-corner response and `corners[]` entry carries an additive
+  `power_basis` block (`activity_source`, `activity`, `duty`, `parasitics`).
+  Requests without the field generate an unchanged Tcl script;
+  `schema_version` is unchanged (additive).
 - **`klt sim` can replace a named `.subckt` of the include closure** (issue
   #3919): the additive request field `netlist_overrides.subckt[]`
   (`{name, replacement}`) strips that definition from a per-run copy of the
@@ -27,7 +34,6 @@ not `klt --version`, if you need to detect this kind of drift. See
   limited, tagged measurement grades; untagged envelopes keep the
   manifest-asserted rows. `row_coverage.row_sources` marks each row
   `derived` or `asserted`. Additive; no `schema_version` bump.
-
 - 2026-10-18 — **`klt place-and-route` pin placement** (issue #3885): new
   optional `io.pin_constraints` (edge, optional `range_um`, optional `ordered`
   per port group) emits `set_io_pin_constraint` before `place_pins`, and the
