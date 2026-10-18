@@ -581,6 +581,17 @@ flag — passing it alongside `--engine curated` (the default) is silently
 ignored, not rejected, the same treatment `--deck-file`/`--timeout-s`
 already get for that engine mismatch.
 
+**Discovering a deck's globals, and the `deck_globals_not_supplied` warning
+(issue #3816).** `klt pdk decks --pdk <variant>` lists the sibling decks a PDK
+ships and the `-rd` globals each reads. When the deck handed to the klayout
+engine reads a global with no default (`required_by_caller`) and the run
+supplied none via `--deck-var`, the report gains an additive top-level
+`warnings` array of shared-contract entries
+(`{"category": "deck_globals_not_supplied", "count": 1, "text": ...}`). It never
+changes `status`, `violation_count` or the exit code, and does not fire for a
+self-contained deck such as `sky130A.lydrc`. The scan is the same static
+heuristic `klt pdk decks` uses.
+
 **Deck resolution.** `<deck_file>` is resolved, in order: `--deck-file` (an
 explicit path) if given; otherwise `klayout_tools.pdk.drc_deck_file(variant=
 --pdk, root=--pdk-root)` (issue #565), which resolves a PDK-native,
@@ -1234,7 +1245,11 @@ that does not lie within `max_distance_um` of a tap. gf180mcu's
 `comp.tap_distance.nwell.lv.1` (DRM `DF.13_LV`: PCOMP inside a well, taps are
 NCOMP inside the well) and `comp.tap_distance.psub.lv.1` (DRM `DF.14_LV`:
 NCOMP outside any well, taps are PCOMP outside the well) are the first users,
-both at 20 µm for the 3.3 V column. The `_MV` variants are not declared.
+both at 20 µm for the 3.3 V column. Their 5 V/6 V siblings
+`comp.tap_distance.nwell.mv.1` (`DF.13_MV`) and
+`comp.tap_distance.psub.mv.1` (`DF.14_MV`) apply a 15 µm reach to active
+overlapping `Dualgate` (issue #3793). The `latchup_mk` marker rules are not
+declared.
 
 The descriptor carries `well_domain` (`"inside"` / `"outside"`), `voltage`
 (`"lv"` / `"mv"`), `max_distance_um`, `step_um` (default 0.5) and the
@@ -2757,7 +2772,7 @@ The gate has two parts, run for each library:
    ```bash
    klt drc <cells.gds> --engine klayout \
        --deck-file src/klayout_tools/decks/asap7.drc \
-       --expect-rule-categories 232 --format json
+       --expect-rule-categories 263 --format json
    ```
 
    and requires exit 0, `status: "clean"`, no violations, a satisfied
@@ -3131,6 +3146,7 @@ for which skipped rules make a run partial and which do not.
 | `rules_skipped`                    | array\<string\> | Rule ids silently skipped because a layer they read was absent from this stream — `layer`/`other_layer`, or a `derived_layer` input (with one documented exception: a `"not_interacting"` derived rule still runs when its marker layer is absent, see "Voltage-domain rule pairs" above). Sorted alphabetically. |
 | `voltage_domain_warnings`          | array\<object\> | `{"marker": "<layer>/<datatype>", "description": string}` — see below. Sorted by marker `(layer, datatype)`. |
 | `unchecked_rules`                  | array\<object\> | `{"rule": string, "layer": "<layer>/<datatype>", "description": string}` — foundry rules the deck knows about but cannot evaluate (issue #3012; `sg13cmos5l`'s net-aware `NW.b1` was the first, now checked by `net_space`, #3572, so the map is currently empty), listed only when the rule's layer is in the stream, so a `clean` is not read as covering them. Purely informational: does not change `status`. Sorted by rule id. Additive; `[]` for decks that declare none. |
+| `marker_blind_layers_in_stream`    | array\<string\> | `"<layer>/<datatype>"` area-marker layers present in the stream that the selected deck declares it does **not** model rule-switching for (issue #3815; sky130: `81/2` `areaid.ce`). The curated deck evaluates every rule uniformly, so the marker changes no result — a `clean` or an identical violation set with and without the marker is not marker-aware evidence. Purely informational: does not change `status`, violations or the exit code. Sorted; `[]` when none is present or the deck declares none. Curated engine only. Additive. Deck-static counterpart: `klt deck rules` `marker_blind_layers`. |
 | `deck_scope`                       | array\<string\> | Every distinct DRM section / official rule-id prefix the selected deck's rules claim to implement — a static property of the deck, independent of the input stream (issue #566). Sorted alphabetically. |
 | `unmodeled_rules`                  | array\<string\> | Curated engine only: official foundry-runset rule ids the selected deck knowingly does **not** transcribe (issue #3031) — a static property of the deck. sky130: `m1.5`, `m2.5`, `via.5a`, `via2.5`, `via3.5`. See below. Sorted alphabetically; empty for a deck that declares none. |
 | `rule_categories`                  | array\<string\> | KLayout engine only: declared RDB categories, never execution proof. |

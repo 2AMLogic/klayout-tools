@@ -3136,3 +3136,61 @@ def test_asap7_stdcell_gds_opens_with_klayout_binary_headless(tmp_path):
     )
     assert proc.returncode == 0, proc.stderr
     assert "OK ASAP7" in proc.stdout
+
+
+_GF180MCU_FLAVOUR_DECK = """\
+.LIB typical
+ .lib 'sm141064.ngspice' nfet_03v3_t
+ .lib 'sm141064.ngspice' nfet_06v0_t
+ .lib 'sm141064.ngspice' nfet_06v0_nvt_t
+.ENDL
+*
+.LIB ss
+ .lib 'sm141064.ngspice' nfet_03v3_s
+ .lib 'sm141064.ngspice' nfet_06v0_t
+ .lib 'sm141064.ngspice' nfet_06v0_nvt_t
+.ENDL
+*
+.LIB fs
+ .lib 'sm141064.ngspice' nfet_03v3_fs
+.ENDL
+"""
+
+
+def test_corners_gf180mcu_reports_per_flavour_devices(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "gf180mcuD", assets=("ngspice",))
+    _make_corner_deck(variant_dir, "sm141064.ngspice", _GF180MCU_FLAVOUR_DECK)
+
+    report = pdk.list_corners(root=str(root), variant="gf180mcuD")
+    by_corner = {c["corner"]: c for c in report["corners"]}
+
+    def devices(corner):
+        mos = next(s for s in by_corner[corner]["sections"] if s["family"] == "mos")
+        return {d["flavour"]: d["skew"] for d in mos["devices"]}
+
+    assert devices("typical") == {
+        "03v3": "typical",
+        "06v0": "typical",
+        "06v0_nvt": "typical",
+    }
+    assert devices("ss") == {
+        "03v3": "skewed",
+        "06v0": "typical",
+        "06v0_nvt": "typical",
+    }
+    # Flavours the deck omits at a corner are unlisted, not guessed.
+    assert devices("fs") == {"03v3": "skewed", "06v0": None, "06v0_nvt": None}
+    # Family-level skew keeps its meaning; non-mos sections carry no devices.
+    ss_sections = {s["family"]: s for s in by_corner["ss"]["sections"]}
+    assert ss_sections["mos"]["skew"] == "skewed"
+    assert all("devices" not in s for f, s in ss_sections.items() if f != "mos")
+
+
+def test_corners_sky130_has_no_devices(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("ngspice",))
+    _make_corner_deck(variant_dir, "sky130.lib.spice", _SKY130_FIXTURE_DECK)
+
+    report = pdk.list_corners(root=str(root), variant="sky130A")
+    assert all("devices" not in s for c in report["corners"] for s in c["sections"])
