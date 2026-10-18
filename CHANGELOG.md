@@ -14,6 +14,14 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt signoff` item 5 derives spec-row coverage from the cited envelope**
+  (issue #3778): `klt sim` measurements accept an optional `spec_row` string
+  (echoed on the rollup entry only when declared). A citation with `rows`
+  whose envelope carries `spec_row` tags covers only the rows a passing,
+  limited, tagged measurement grades; untagged envelopes keep the
+  manifest-asserted rows. `row_coverage.row_sources` marks each row
+  `derived` or `asserted`. Additive; no `schema_version` bump.
+
 - 2026-10-18 — **`klt place-and-route` pin placement** (issue #3885): new
   optional `io.pin_constraints` (edge, optional `range_um`, optional `ordered`
   per port group) emits `set_io_pin_constraint` before `place_pins`, and the
@@ -277,6 +285,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   rules, unsupported node spellings, an unknown node (an `error` diagnostic) and
   `engine: "xyce"` fail visibly; an off-host worker that does not echo the maps
   fails with `nodeset_unsupported_worker`. Omitting the option changes nothing.
+  Additive; no `schema_version` bump.
+- **`klt sim` transient start states: `options.initial_conditions`** (issue
+  #3881): the `options.nodeset` rule grammar, applied as file-scope `.ic` cards
+  plus `uic` on a single `tran` analysis, echoed as `initial_conditions` on each
+  affected corner report and keyed into the `options.resume` fingerprint. Bad
+  rules, non-`tran` analyses and `engine: "xyce"` fail before any run; an
+  off-host worker that does not echo the maps fails with
+  `initial_conditions_unsupported_worker`. Omitting the option changes nothing.
   Additive; no `schema_version` bump.
 - **`klt sim`: solver-tolerance corner axis `corners.options`** (issue #3125):
   numeric ngspice `.options` names (`reltol`, `abstol`, `vntol`, `itl1`..`itl4`,
@@ -706,6 +722,20 @@ not `klt --version`, if you need to detect this kind of drift. See
   nets. Reports a proven `lower_bound_um`/`measured_max_distance_um` bracket;
   exits `0` pass, `3` fail, `4` `unsupported` (rule not evaluable, never a
   pass). See `docs/cli/tap-distance.md`.
+
+- **Flat post-route SDFs with escaped-divider instance names now annotate**
+  (issue #2897, following #1890): `klt functional-verification
+  --options.sdf` used to reject an SDF whose `INTERCONNECT` entries named
+  a flattened `generate` array's escaped instance (`g\[0\]\.sub\.u1`),
+  because Icarus aborts `vvp` on it. `klt` now renames those instances to
+  plain identifiers in build-dir copies of the SDF and netlist, so the run
+  annotates and simulates. The caller's files are untouched. This also
+  fixes an escaped `.` under `(DIVIDER /)`, which the #1890 guard missed
+  and which aborted `vvp`. Only an escaped-divider *pin or top-level
+  port* is still rejected up front. **Additive contract change:**
+  `environment.sdf` gains `renamed` (`[{from, to}]`), present only when
+  something was renamed. `schema_version` is unchanged.
+
 - **`klt sim` can sweep a ramped (PWL/PULSE) supply** (issue #2902): new
   `corners.supply_waveforms` lists `corners.supply_v` keys whose PWL/PULSE
   source is rescaled per corner (peak level = the swept supply value) instead

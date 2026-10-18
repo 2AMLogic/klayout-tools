@@ -1521,9 +1521,14 @@ def test_run_drc_sg13g2_coverage_lists_unmodeled_pad_and_latchup_rules(tmp_path)
     assert unmodeled == sorted(unmodeled)
     assert {"Pad.a1", "Pad.d", "Pad.jR", "LU.a", "LU.d1"} <= set(unmodeled)
     assert all(r.startswith(("Pad.", "LU.")) for r in unmodeled)
-    assert not any(
-        r.startswith(("Pad.", "LU.")) for r in get_unmodeled_rules("gf180mcu")
-    )
+    # gf180mcu discloses its own untranscribed remainder (MT30/MSLOT, issue
+    # #3796; ESD.*/GR.*, issue #3792); a deck with no recorded remainder still
+    # reports none.
+    gf = get_unmodeled_rules("gf180mcu")
+    assert gf == sorted(gf)
+    assert {"ESD.7", "ESD.10", "MT30.1a", "MSLOT.1"} <= set(gf)
+    assert not any(r.startswith(("Pad.", "LU.")) for r in gf)
+    assert get_unmodeled_rules("no-such-deck") == []
 
 
 def test_run_drc_sky130_hvi_marker_no_warning_without_overlap(tmp_path):

@@ -15,6 +15,7 @@
       "12/0",
       "21/0",
       "22/0",
+      "24/0",
       "30/0",
       "31/0",
       "32/0",
@@ -42,6 +43,7 @@
       "117/10",
       "125/5",
       "127/5",
+      "167/5",
       "204/0",
       "241/0"
     ],
@@ -89,6 +91,7 @@
     "rules_skipped": [
       "bjt.separation.comp.1",
       "cap_mk.ongrid.1",
+      "comp.separation.guard_ring_mk.1",
       "comp.space.mv.1",
       "comp.tap_distance.nwell.lv.1",
       "comp.tap_distance.nwell.mv.1",
@@ -101,28 +104,41 @@
       "dualgate.space.1",
       "dualgate.width.1",
       "efuse_mk.ongrid.1",
+      "esd.area.1",
+      "esd.holes_area.1",
+      "esd.overlap.comp.1",
+      "esd.separation.nplus.1",
+      "esd.separation.pplus.1",
+      "esd.space.1",
+      "esd.width.1",
       "fusetop.ongrid.1",
       "metal1.enclosing.via1.1",
+      "metal1.separation.guard_ring_mk.1",
       "metal2.enclosing.via1.1",
       "metal2.enclosing.via2.1",
       "metal2.ongrid.1",
+      "metal2.separation.guard_ring_mk.1",
       "metal2.space.1",
       "metal2.width.1",
       "metal3.enclosing.via2.1",
       "metal3.enclosing.via3.1",
       "metal3.ongrid.1",
+      "metal3.separation.guard_ring_mk.1",
       "metal3.space.1",
       "metal3.width.1",
       "metal4.enclosing.via3.1",
       "metal4.enclosing.via4.1",
       "metal4.ongrid.1",
+      "metal4.separation.guard_ring_mk.1",
       "metal4.space.1",
       "metal4.width.1",
       "metal5.enclosing.via4.1",
       "metal5.ongrid.1",
+      "metal5.separation.guard_ring_mk.1",
       "metal5.space.1",
       "metal5.width.1",
       "metaltop.ongrid.1",
+      "metaltop.separation.guard_ring_mk.1",
       "metaltop.space.1",
       "metaltop.width.1",
       "mim.enclosing.fusetop.1",
@@ -131,11 +147,13 @@
       "mim_l_mk.ongrid.1",
       "nwell.enclosing.comp.1",
       "nwell.ongrid.1",
+      "nwell.separation.guard_ring_mk.1",
       "nwell.space.1",
       "pad.enclosing.metal5.1",
       "pad.ongrid.1",
       "plfuse.ongrid.1",
       "poly2.enclosing.sab.1",
+      "poly2.separation.guard_ring_mk.1",
       "pplus.enclosing.comp.1",
       "res_mk.ongrid.1",
       "resistor.ongrid.1",
@@ -172,6 +190,8 @@
       "7.8 Nplus",
       "7.9 Pplus",
       "9.1 Bond Pad",
+      "ESD",
+      "GR",
       "OFFGRID",
       "SB"
     ],
@@ -199,6 +219,19 @@
       "DV.7",
       "DV.8",
       "DV.9",
+      "ESD.10",
+      "ESD.3a",
+      "ESD.3b",
+      "ESD.4a",
+      "ESD.6",
+      "ESD.7",
+      "ESD.9",
+      "ESD.pl",
+      "GR.1",
+      "GR.11",
+      "GR.3",
+      "GR.4",
+      "GR.6",
       "LPW.1_MV",
       "LPW.2a_MV",
       "LPW.2b_MV",
@@ -283,6 +316,10 @@
         "reason": "no_applicable_geometry"
       },
       {
+        "id": "comp.separation.guard_ring_mk.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
         "id": "comp.space.mv.1",
         "reason": "no_applicable_geometry"
       },
@@ -331,11 +368,43 @@
         "reason": "no_applicable_geometry"
       },
       {
+        "id": "esd.area.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "esd.holes_area.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "esd.overlap.comp.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "esd.separation.nplus.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "esd.separation.pplus.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "esd.space.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "esd.width.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
         "id": "fusetop.ongrid.1",
         "reason": "no_applicable_geometry"
       },
       {
         "id": "metal1.enclosing.via1.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "metal1.separation.guard_ring_mk.1",
         "reason": "no_applicable_geometry"
       },
       {
@@ -348,6 +417,10 @@
       },
       {
         "id": "metal2.ongrid.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "metal2.separation.guard_ring_mk.1",
         "reason": "no_applicable_geometry"
       },
       {
@@ -371,6 +444,10 @@
         "reason": "no_applicable_geometry"
       },
       {
+        "id": "metal3.separation.guard_ring_mk.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
         "id": "metal3.space.1",
         "reason": "no_applicable_geometry"
       },
@@ -391,6 +468,10 @@
         "reason": "no_applicable_geometry"
       },
       {
+        "id": "metal4.separation.guard_ring_mk.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
         "id": "metal4.space.1",
         "reason": "no_applicable_geometry"
       },
@@ -407,6 +488,10 @@
         "reason": "no_applicable_geometry"
       },
       {
+        "id": "metal5.separation.guard_ring_mk.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
         "id": "metal5.space.1",
         "reason": "no_applicable_geometry"
       },
@@ -416,6 +501,10 @@
       },
       {
         "id": "metaltop.ongrid.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "metaltop.separation.guard_ring_mk.1",
         "reason": "no_applicable_geometry"
       },
       {
@@ -451,6 +540,10 @@
         "reason": "no_applicable_geometry"
       },
       {
+        "id": "nwell.separation.guard_ring_mk.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
         "id": "nwell.space.1",
         "reason": "no_applicable_geometry"
       },
@@ -468,6 +561,10 @@
       },
       {
         "id": "poly2.enclosing.sab.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "poly2.separation.guard_ring_mk.1",
         "reason": "no_applicable_geometry"
       },
       {
