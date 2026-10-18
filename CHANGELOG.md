@@ -19,8 +19,6 @@ not `klt --version`, if you need to detect this kind of drift. See
   per port group) emits `set_io_pin_constraint` before `place_pins`, and the
   response gains a `pins[]` array (name, edge, `x_um`, `y_um`, layer) read from
   the written DEF. Additive: without constraints the Tcl is unchanged.
-
-
 - **`klt pdk find|check --expect-version <stamp-or-sha>`** (issue #3810):
   asserts the installed PDK identity against a caller-supplied pin (open_pdks
   SHA of 7+ hex or `SOURCES` stamp; lambdapdk marker by exact string). With the
