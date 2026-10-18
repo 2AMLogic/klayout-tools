@@ -2689,6 +2689,7 @@ class _ResolvedSimRequest:
     ngspice_init_lines: Any
     ngspice_options: Any
     osdi_preload: Any
+    osdi_runner_environment: Any
     portable_artifacts: Any
     preflight_warning: Any
     provenance_pdk: Any
@@ -2851,7 +2852,14 @@ def _prepare_sim_request(
     # so a typo'd path is always named; `engine: "xyce"` then refuses the
     # option outright in `_enforce_xyce_support_boundary` below rather than
     # silently dropping it.
-    osdi_preload = _resolve_osdi_preload(options, request_dir)
+    # Issue #3819: entries the executing host resolves for itself (a literal
+    # `$PDK_ROOT/<rel>`, or a path under `models.pdk_root`) name an
+    # image-baked `.osdi`; they are existence-checked here only when the run
+    # stays on this host (see below).
+    osdi_runner_resolved = sim_staging.runner_resolved_osdi(request, request_dir)
+    osdi_preload = _resolve_osdi_preload(
+        options, request_dir, skip_indices=frozenset(osdi_runner_resolved)
+    )
     # Issue #2668: opt-in staging of the request's own model inputs for the
     # off-host backends. Validated for every backend (a typo'd value is
     # always named) but only *acts* off-host -- `local`/`local-parallel`
@@ -2866,6 +2874,8 @@ def _prepare_sim_request(
     # instead. Otherwise a host-default off-host backend steps aside to
     # `local`, like every other "this run cannot leave this host" case; an
     # explicit choice is never second-guessed, so it is refused by name.
+    # Runner-resolved entries (issue #3819) need neither staging nor a local
+    # file, so only the host-local ones count here.
     backend = _yield_host_default_backend(
         backend,
         backend_from_host_default,
@@ -2879,8 +2889,13 @@ def _prepare_sim_request(
             "resolved on the off-host instance -- run OSDI-model sweeps with "
             "backend 'local' or 'local-parallel', or set "
             "options.stage_model_inputs: true to upload binaries built for "
-            "the runner's platform and ngspice OSDI ABI"
+            "the runner's platform and ngspice OSDI ABI, or name an "
+            "image-baked `.osdi` as `$PDK_ROOT/<rel>` (or under "
+            "models.pdk_root) so the runner resolves it"
         )
+    osdi_preload, osdi_runner_environment = _finalize_osdi_preload(
+        options, request_dir, backend, osdi_preload, osdi_runner_resolved
+    )
     # Issue #3041: an `engine_version` pin is checked before any corner runs
     # where this process can see the engine (local backends); off-host
     # backends are checked against the report's `engine_version` afterwards.
@@ -3038,7 +3053,7 @@ def _prepare_sim_request(
         corners_spec=corners_spec,
         monte_carlo_declared=monte_carlo_spec is not None,
         fail_fast_probe=fail_fast_probe,
-        osdi_preload_declared=bool(osdi_preload),
+        osdi_preload_declared=bool(osdi_preload or osdi_runner_resolved),
         expr_measurements_declared=bool(_expr_measurements(measurements_spec)),
         save_mode_declared=save_mode_declared,
         save_vectors_declared=save_vectors_declared,
@@ -3221,6 +3236,7 @@ def _prepare_sim_request(
         ngspice_init_lines=ngspice_init_lines,
         ngspice_options=ngspice_options,
         osdi_preload=osdi_preload,
+        osdi_runner_environment=osdi_runner_environment,
         portable_artifacts=portable_artifacts,
         preflight_warning=preflight_warning,
         provenance_pdk=provenance_pdk,
@@ -3313,6 +3329,7 @@ def _run_sim_corners(
     ngspice_init_lines = resolved.ngspice_init_lines
     ngspice_options = resolved.ngspice_options
     osdi_preload = resolved.osdi_preload
+    osdi_runner_environment = resolved.osdi_runner_environment
     portable_artifacts = resolved.portable_artifacts
     preflight_warning = resolved.preflight_warning
     provenance_pdk = resolved.provenance_pdk
@@ -3865,6 +3882,10 @@ def _run_sim_corners(
             repo_root=repo_root,
         )
     )
+    # Additive/optional (issue #3819): `.osdi` entries the executing host
+    # resolved itself -- named, never hashed; the worker's own report is
+    # the source of what actually loaded.
+    environment.update(_osdi_runner_environment_fields(osdi_runner_environment))
     # Additive/optional (issue #2668): `staged_model_inputs`, only present
     # when `options.stage_model_inputs` staged model inputs for an off-host
     # backend -- see `_preflight_staged_model_inputs`.
@@ -4519,7 +4540,42 @@ def _needs_models_lib(point: CornerPoint) -> bool:
     return any(lib is None for lib in declared)
 
 
-def _resolve_osdi_preload(options: dict[str, Any], request_dir: str) -> tuple[str, ...]:
+def _finalize_osdi_preload(
+    options: dict[str, Any],
+    request_dir: str,
+    backend: str,
+    osdi_preload: tuple[str, ...],
+    osdi_runner_resolved: dict[int, str],
+) -> tuple[tuple[str, ...], list[dict[str, str]]]:
+    """Settle ``osdi_preload`` once the backend is known (issue #3819).
+
+    Off-host, the runner-resolved entries are reported by name in
+    ``environment.osdi_preload_runner_resolved`` and the already-resolved
+    host-local ones stand. A run that stays on this host reads every entry
+    here, so the full existence check and expansion apply, exactly as before.
+    """
+    if backend not in _OFFHOST_BACKENDS:
+        return _resolve_osdi_preload(options, request_dir), []
+    return osdi_preload, [
+        {"entry": options["osdi_preload"][index], "reason": reason}
+        for index, reason in sorted(osdi_runner_resolved.items())
+    ]
+
+
+def _osdi_runner_environment_fields(
+    osdi_runner_environment: list[dict[str, str]],
+) -> dict[str, Any]:
+    """The ``environment`` fragment for runner-resolved ``.osdi`` entries."""
+    if not osdi_runner_environment:
+        return {}
+    return {"osdi_preload_runner_resolved": osdi_runner_environment}
+
+
+def _resolve_osdi_preload(
+    options: dict[str, Any],
+    request_dir: str,
+    skip_indices: frozenset[int] = frozenset(),
+) -> tuple[str, ...]:
     """Resolve ``options.osdi_preload`` (issue #2513) to absolute paths of
     compiled OSDI shared libraries the generated deck must ``pre_osdi``.
 
@@ -4543,6 +4599,11 @@ def _resolve_osdi_preload(options: dict[str, Any], request_dir: str) -> tuple[st
     :func:`_resolve_models_lib`'s ``model library not found`` -- rather than
     left to surface as a per-corner ngspice error deep inside the run.
 
+    ``skip_indices`` (issue #3819) are entries the executing host resolves
+    itself (see :func:`sim_staging.runner_resolved_osdi`): validated as
+    paths but neither expanded nor existence-checked, and omitted from the
+    result.
+
     Returns ``()`` when the option is absent or an empty list, which leaves
     every generated deck byte-identical to before this issue.
     """
@@ -4560,6 +4621,8 @@ def _resolve_osdi_preload(options: dict[str, Any], request_dir: str) -> tuple[st
             raise SimError(
                 f"request.options.osdi_preload[{index}] must be a non-empty path"
             )
+        if index in skip_indices:
+            continue
         path = _resolve_relative(entry, request_dir)
         if not os.path.isfile(path):
             raise SimError(f"osdi_preload file not found: {path}")
