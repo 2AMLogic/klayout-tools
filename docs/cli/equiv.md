@@ -265,7 +265,7 @@ Nothing is fabricated and nothing silently substitutes for it:
     "top": "adder4"
   },
   "gate": {
-    "sources": [".klt/synthesize/adder4_synth.v"],
+    "sources": [".klt/synthesize/adder4-v1/adder4_synth.v"],
     "top": "adder4",
     "liberty": "/path/to/sky130_fd_sc_hd__tt_025C_1v80.lib"
   },
@@ -275,6 +275,8 @@ Nothing is fabricated and nothing silently substitutes for it:
   "timeout_s": 60
 }
 ```
+
+`gate.sources` here assumes the synthesize request pinned `"run_id": "adder4-v1"`; without a pinned `run_id` the directory is a generated `run-<UUID hex>`, so use the `netlist_path` from the synthesize response instead (see [`synthesize.md`](synthesize.md#artifacts-written-to-kltsynthesizerun_id)).
 
 | Field | Type | Description |
 | --- | --- | --- |

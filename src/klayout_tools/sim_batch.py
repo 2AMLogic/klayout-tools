@@ -56,9 +56,11 @@ collected ``outputs/`` tree.
 
 klt writes its ``--format json`` *error* envelope to **stderr**, not stdout
 (``cli.output.emit_error``), so the same ``cmd`` also tees stderr into
-``$EDA_OUTPUT_DIR/stderr.log`` -- still forwarding it to the harness's
-stderr, so ``harness.log`` is unchanged. A failed job's own error envelope
-is recovered from that file (see :func:`_recover_failed_job_corners`).
+``$EDA_OUTPUT_DIR/stderr.log`` from its first line -- still forwarding it to
+the harness's stderr, so ``harness.log`` is unchanged. A failed job's own
+error envelope is recovered from that file (see
+:func:`_recover_failed_job_corners`); an EXIT trap writes a fallback envelope
+to ``report.json`` when the job died with neither (issue #3818).
 
 Credentials, buckets, and the launch script
 -------------------------------------------
@@ -174,6 +176,10 @@ BATCH_RUNNER_IDENTITY_FILENAME = "runner_identity.json"
 BATCH_RUNNER_MISMATCH_CODE = "batch_runner_version_mismatch"
 BATCH_RUNNER_UNKNOWN_CODE = "batch_runner_version_unknown"
 BATCH_RUNNER_FEATURE_CODE = "batch_runner_feature_unsupported"
+#: ``error.code`` of the envelope the job command's EXIT trap writes to
+#: ``report.json`` when the command exits non-zero having left neither a
+#: report nor a klt error envelope (issue #3818).
+BATCH_JOB_COMMAND_FAILED_CODE = "batch_job_command_failed"
 #: Top-level report diagnostic under ``runner_version_check: "warn"`` naming
 #: the request features the runner predates (issue #2901).
 BATCH_RUNNER_FEATURE_PREDATED_CODE = "batch_runner_request_feature_predated"
@@ -216,6 +222,8 @@ REQUEST_FEATURE_MIN_RUNNER_VERSION: dict[str, str | None] = {
     "options.ngspice_init": "0.7.0",
     # 8296828c options.osdi_preload (#2534); first in v0.7.0.
     "options.osdi_preload": "0.7.0",
+    # 07440b8f options.stage_model_inputs (#2668); first in v0.7.0.
+    "options.stage_model_inputs": "0.7.0",
     # d4d497ee ordered analysis_steps[] (#2482), 2026-10-09, after v0.7.0:
     # the only route to .meas cards on a noise analysis. Untagged.
     "analysis_steps[].measurements[] (noise analysis .meas cards)": None,
@@ -225,6 +233,10 @@ REQUEST_FEATURE_MIN_RUNNER_VERSION: dict[str, str | None] = {
 #: tail). The envelope is the last thing klt writes; anything earlier is
 #: progress/warning noise that is never parsed or copied into the JSON.
 _BATCH_STDERR_TAIL_BYTES = 64 * 1024
+
+#: Bytes of ``stderr.log`` the job command's EXIT trap quotes into the
+#: ``report.json`` envelope it writes when nothing else did (issue #3818).
+_BATCH_JOB_FAILURE_TAIL_BYTES = 1500
 
 #: ``$EDA_OUTPUT_DIR``-relative directory the job command points `klt sim`'s
 #: ``--outdir`` at when ``options.keep_artifacts`` is set, so per-corner
@@ -739,6 +751,7 @@ _RELEASED_FEATURE_DETECTORS: dict[str, Any] = {
     "corners.process[].sections[]": _uses_process_section_objects,
     "options.ngspice_init": _uses_option("ngspice_init"),
     "options.osdi_preload": _uses_option("osdi_preload"),
+    "options.stage_model_inputs": _uses_option("stage_model_inputs"),
 }
 
 # One registry, not two: the #3232 minimum versions feed the same table the
@@ -1310,6 +1323,48 @@ def _feature_gate_shell(features: tuple[str, ...], client_version: str) -> str:
     )
 
 
+def _job_stderr_capture_prefix() -> str:
+    """The first line(s) of the batch job command (issue #3818): tee the whole
+    job's stderr into ``$EDA_OUTPUT_DIR/stderr.log`` -- forwarding it too, so
+    ``harness.log`` still sees it -- and install an EXIT trap.
+
+    Teeing from the first line (not only from the ``klt sim`` line) means a
+    failure *before* ``klt sim`` -- the generated preflight, a shell error --
+    leaves ``stderr.log`` behind. The harness runs ``bash -c "$JOB_CMD"``, so
+    process substitution is available.
+
+    The trap closes the shell's stderr so the tee drains (``wait``) before the
+    harness uploads ``outputs/``, then -- only when the command exited
+    non-zero, ``report.json`` is absent/empty and ``stderr.log`` holds no klt
+    error envelope (``"schema_version"``) -- writes one itself, carrying the
+    exit code and a bounded, JSON-safe tail of ``stderr.log``. So the
+    submitter's ``batch_job_failed`` message names the reason without S3
+    listing access. An existing envelope (the preflight's, klt's own) is never
+    overwritten, and the job's exit code is unchanged. Redirects here have no
+    space before ``>`` so the main command's ``> "$EDA_OUTPUT_DIR/report.json"``
+    stays the first such occurrence.
+    """
+    out = '"$EDA_OUTPUT_DIR/{}"'
+    stderr_path = out.format(BATCH_STDERR_FILENAME)
+    report_path = out.format(BATCH_REPORT_FILENAME)
+    body = (
+        "rc=$?; exec 2>&-; wait $tp 2>/dev/null; "
+        f'if [ "$rc" -ne 0 ] && [ ! -s {report_path} ] '
+        f"&& ! grep -q schema_version {stderr_path} 2>/dev/null; then "
+        f"tl=$(tail -c {_BATCH_JOB_FAILURE_TAIL_BYTES} {stderr_path} 2>/dev/null "
+        "| tr -c 'A-Za-z0-9._+:/=,() -' ' ' | tr -s ' '); "
+        'printf \'{"schema_version": 1, "error": {"command": "sim", '
+        f'"code": "{BATCH_JOB_COMMAND_FAILED_CODE}", '
+        '"message": "the job command exited %s before klt sim produced a '
+        "report; stderr tail: %s\"}}\\n' "
+        f'"$rc" "$tl" >{report_path}; fi'
+    )
+    return (
+        f"exec 2> >(tee {stderr_path} >&2); tp=$!; "
+        f"_klt_job_exit() {{ {body}; }}; trap _klt_job_exit EXIT; "
+    )
+
+
 def _build_batch_job_spec(
     remote_request: dict[str, Any],
     netlist_path: str,
@@ -1369,16 +1424,22 @@ def _build_batch_job_spec(
         reserved_names=(BATCH_REQUEST_FILENAME,),
         backend="batch",
     )
-    command = _runner_preflight_script(
-        client_version if client_version is not None else _provenance._klt_version(),
-        enforce=version_check == "enforce",
-        capture=_worker_capture_command(
-            remote_request, [asset.name for asset in staged.model_assets]
-        ),
-        required_features=tuple(_request_features(remote_request)),
-    ) + (
-        f'klt sim "$EDA_INPUT_DIR/{BATCH_REQUEST_FILENAME}" '
-        "--backend local-parallel --format json"
+    command = (
+        _job_stderr_capture_prefix()
+        + _runner_preflight_script(
+            client_version
+            if client_version is not None
+            else _provenance._klt_version(),
+            enforce=version_check == "enforce",
+            capture=_worker_capture_command(
+                remote_request, [asset.name for asset in staged.model_assets]
+            ),
+            required_features=tuple(_request_features(remote_request)),
+        )
+        + (
+            f'klt sim "$EDA_INPUT_DIR/{BATCH_REQUEST_FILENAME}" '
+            "--backend local-parallel --format json"
+        )
     )
     # One ngspice per PHYSICAL core on the job instance. `local-parallel`'s
     # own default divides os.cpu_count() by _ASSUMED_THREADS_PER_NGSPICE (8),
@@ -1393,17 +1454,10 @@ def _build_batch_job_spec(
         command += ' ${EDA_PHYSICAL_CORES:+--max-workers "$EDA_PHYSICAL_CORES"}'
     if keep_artifacts:
         command += f' --outdir "$EDA_OUTPUT_DIR/{BATCH_ARTIFACTS_DIRNAME}"'
-    # stdout -> report.json (the success channel); stderr is teed into
-    # stderr.log (klt's error envelope lands there) *and* forwarded, so
-    # harness.log still sees it. The harness runs `bash -c "$JOB_CMD"`, so
-    # process substitution is available; `wait $!` lets the tee drain before
-    # the harness uploads outputs/, and `exit $rc` keeps klt's own exit code
-    # (0/3/4/...) as the job's.
-    command += (
-        f' > "$EDA_OUTPUT_DIR/{BATCH_REPORT_FILENAME}"'
-        f' 2> >(tee "$EDA_OUTPUT_DIR/{BATCH_STDERR_FILENAME}" >&2)'
-        "; rc=$?; wait $! 2>/dev/null; exit $rc"
-    )
+    # stdout -> report.json (the success channel); stderr was teed into
+    # stderr.log from the job command's first line (see
+    # _job_stderr_capture_prefix), so it also covers the preflight.
+    command += f' > "$EDA_OUTPUT_DIR/{BATCH_REPORT_FILENAME}"'
     return BatchJobSpec(
         cmd=command,
         tool=_batch_job_tool_label(remote_request),
@@ -3283,25 +3337,36 @@ def _read_log_head(path: str) -> str:
         return ""
 
 
-def _missing_include_diagnostic(log_text: str) -> dict[str, Any] | None:
-    """The ``missing_include`` diagnostic the local classifier would emit for
-    ``log_text`` (naming the file ngspice could not find), or ``None``."""
-    from .sim import _classify_diagnostics
+def _fatal_log_diagnostic(log_text: str) -> dict[str, Any] | None:
+    """The ngspice deck-abort diagnostic (``missing_include``, ``netlist``,
+    ``model_bin_range`` or ``ngspice_fatal``) the local classifier would emit
+    for ``log_text``, tagged ``analysis_started: false`` when the log shows no
+    analysis began (issue #3879), or ``None``."""
+    from .sim import (
+        _NGSPICE_FATAL_CODES,
+        _classify_diagnostics,
+        _mark_analysis_not_started,
+    )
 
     for diagnostic in _classify_diagnostics(log_text):
-        if diagnostic.get("code") == "missing_include":
+        if diagnostic.get("code") in _NGSPICE_FATAL_CODES:
+            _mark_analysis_not_started([diagnostic], log_text)
             return diagnostic
     return None
 
 
-def _surface_missing_include(corners: list[dict[str, Any]], collected: str) -> None:
-    """Add a ``missing_include`` diagnostic to every errored corner whose
-    retrieved engine log shows ngspice failing on a ``.include`` but whose
-    report (written by the runner's own, possibly older, ``klt``) carries no
-    such code -- otherwise the caller sees only ``measurement ... produced no
-    value``. Corners are matched to logs through ``artifacts.log``
-    (``<$EDA_OUTPUT_DIR>/artifacts/<rel>``); with exactly one log in the tree
-    it applies to every such corner. A no-op when no log was collected."""
+def _surface_log_fatal(corners: list[dict[str, Any]], collected: str) -> None:
+    """Add the ngspice deck-abort diagnostic (``missing_include``,
+    ``netlist``, ``model_bin_range``, ``ngspice_fatal``) to every errored
+    corner whose retrieved engine log shows ngspice failing while reading the
+    deck but whose report (written by the runner's own, possibly older,
+    ``klt``) carries no such code -- otherwise the caller sees only
+    ``measurement ... produced no value``. Corners are matched to logs through
+    ``artifacts.log`` (``<$EDA_OUTPUT_DIR>/artifacts/<rel>``); with exactly one
+    log in the tree it applies to every such corner. A no-op when no log was
+    collected."""
+    from .sim import _NGSPICE_FATAL_CODES
+
     logs = _find_engine_logs(collected)
     if not logs:
         return
@@ -3310,7 +3375,7 @@ def _surface_missing_include(corners: list[dict[str, Any]], collected: str) -> N
         if corner.get("status") != "error":
             continue
         diagnostics = corner.setdefault("diagnostics", [])
-        if any(d.get("code") == "missing_include" for d in diagnostics):
+        if any(d.get("code") in _NGSPICE_FATAL_CODES for d in diagnostics):
             continue
         log_path = None
         remote = (corner.get("artifacts") or {}).get("log")
@@ -3326,7 +3391,7 @@ def _surface_missing_include(corners: list[dict[str, Any]], collected: str) -> N
             log_path = logs[0]
         if log_path is None:
             continue
-        found = _missing_include_diagnostic(_read_log_head(log_path))
+        found = _fatal_log_diagnostic(_read_log_head(log_path))
         if found is not None:
             diagnostics.append(found)
 
@@ -3347,9 +3412,7 @@ def _engine_log_note(collected: str) -> tuple[str, dict[str, Any] | None]:
     lines = [line.rstrip() for line in text.splitlines() if line.strip()]
     tail = "\n".join(lines[-_BATCH_ENGINE_LOG_TAIL_LINES:])
     tail = tail[-_BATCH_ENGINE_LOG_TAIL_CHARS:]
-    return f"{os.path.basename(logs[0])} tail: {tail}", _missing_include_diagnostic(
-        text
-    )
+    return f"{os.path.basename(logs[0])} tail: {tail}", _fatal_log_diagnostic(text)
 
 
 def _job_failure_corners(
@@ -4048,7 +4111,7 @@ def _poll_and_collect(
         check_ngspice_options_echo(request, report)
         environment = {**environment, **_read_job_identity(collected, request)}
         corners = report.get("corners") or []
-        _surface_missing_include(corners, collected)
+        _surface_log_fatal(corners, collected)
         if keep_artifacts:
             _install_batch_artifacts(
                 corners, collected_dir=collected, artifacts_dir=artifacts_dir
