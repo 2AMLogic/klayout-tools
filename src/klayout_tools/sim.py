@@ -277,6 +277,7 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "missing_include",
         "netlist",
         "model_bin_range",
+        "ngspice_fatal",
         "no_such_vector",
         # Missing-capability prerequisites (issue #2814).
         "unsupported_model_level",
@@ -1067,7 +1068,64 @@ _DIAGNOSTIC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             r"^Error:\s*could not find a valid modelname", re.IGNORECASE | re.MULTILINE
         ),
     ),
+    (
+        # The generic shapes of an ngspice deck abort (issue #3879): `Error
+        # on line N ...` followed by `Simulation interrupted due to error!`,
+        # or `fatal error in ngspice`. Last on purpose: every specific
+        # pattern above names a cause, so this one is only the fallback cause
+        # (`_classify_diagnostics` drops it when a specific fatal code was
+        # already classified). The message is the first matching log line.
+        "ngspice_fatal",
+        re.compile(
+            r"^\s*Error on line \d+"
+            r"|Simulation interrupted due to error"
+            r"|fatal error in ngspice",
+            re.IGNORECASE | re.MULTILINE,
+        ),
+    ),
 )
+
+#: Codes that mean ngspice aborted while reading the deck (issue #3879). When
+#: one of them is classified and the log shows no analysis banner, the run
+#: never started: its per-measurement "produced no value" errors are
+#: consequences and are collapsed (`_demote_abort_cascade`).
+_NGSPICE_FATAL_CODES: frozenset[str] = frozenset(
+    {"missing_include", "netlist", "model_bin_range", "ngspice_fatal"}
+)
+
+#: What ngspice prints once an analysis actually begins (or has produced
+#: data); absent from a run that died in the deck parser.
+_ANALYSIS_STARTED_RE = re.compile(
+    r"Doing analysis at TEMP|No\. of Data Rows|Initial Transient Solution",
+    re.IGNORECASE,
+)
+
+#: Appended to the cause diagnostic of a run that never started analysis.
+_NO_ANALYSIS_NOTE = (
+    "; no analysis started (the run's runtime_s is wall-clock before the "
+    "failure, not simulation time)"
+)
+
+
+def _mark_analysis_not_started(
+    diagnostics: list[dict[str, Any]], log_text: str
+) -> bool:
+    """Issue #3879: when ``diagnostics`` hold an ngspice deck-abort code and
+    ``log_text`` shows no analysis ever began, tag every such diagnostic with
+    the additive ``analysis_started: false`` field and a message note, and
+    return ``True``. A failure mid-analysis returns ``False`` untouched."""
+    fatal = [
+        d
+        for d in diagnostics
+        if d.get("code") in _NGSPICE_FATAL_CODES and d.get("severity") == "error"
+    ]
+    if not fatal or _ANALYSIS_STARTED_RE.search(log_text):
+        return False
+    for diagnostic in fatal:
+        diagnostic["analysis_started"] = False
+        if _NO_ANALYSIS_NOTE not in diagnostic["message"]:
+            diagnostic["message"] += _NO_ANALYSIS_NOTE
+    return True
 
 
 #: Prerequisite messages (issue #2814) for the capability diagnostics: they
@@ -8805,6 +8863,7 @@ def _run_corner(
     started = time.monotonic()
     timed_out = False
     engine_aborted = False
+    analysis_never_started = False
     engine_version: str | None = None
     stdout_text = ""
     stderr_text = ""
@@ -8875,6 +8934,9 @@ def _run_corner(
             engine_aborted = True
         classified = _classify_engine_diagnostics(log_text, netlist_path, engine)
         diagnostics.extend(classified)
+        analysis_never_started = not is_xyce and _mark_analysis_not_started(
+            classified, log_text
+        )
         no_log_reported = False
         diagnostics.extend(_alterparam_failures(point, log_text + "\n" + stdout_text))
         diagnostics.extend(_nodeset_failures(point, log_text + "\n" + stdout_text))
@@ -8951,7 +9013,7 @@ def _run_corner(
         )
     )
     measurement_diagnostics = _demote_abort_cascade(
-        measurement_diagnostics, engine_aborted
+        measurement_diagnostics, engine_aborted or analysis_never_started
     )
     diagnostics.extend(measurement_diagnostics)
     pass_fields, pass_diagnostics = sim_passes.corner_fields(
@@ -9181,7 +9243,8 @@ def _engine_aborted_diagnostic(
 def _demote_abort_cascade(
     measurement_diagnostics: list[dict], engine_aborted: bool
 ) -> list[dict]:
-    """After an ``engine_aborted`` the per-measurement "produced no value"
+    """After an ``engine_aborted`` -- or an ngspice deck-abort cause with no
+    analysis ever started (#3879) -- the per-measurement "produced no value"
     errors are consequences of the abort (the measurement results themselves
     stay ``error``), so drop them rather than crowd ``diagnostics[0]``
     (#3067)."""
@@ -11236,6 +11299,10 @@ def _classify_diagnostics(
             message = _diagnose_modelname_error(netlist_path) or message
         elif code in _PREREQUISITE_MESSAGES:
             message = _PREREQUISITE_MESSAGES[code].format(raw=message.strip())
+        if code == "ngspice_fatal" and any(
+            d["code"] in _NGSPICE_FATAL_CODES for d in diagnostics
+        ):
+            continue
         diagnostics.append({"severity": "error", "code": code, "message": message})
     return diagnostics
 

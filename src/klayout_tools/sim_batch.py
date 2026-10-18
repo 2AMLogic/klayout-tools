@@ -3277,25 +3277,36 @@ def _read_log_head(path: str) -> str:
         return ""
 
 
-def _missing_include_diagnostic(log_text: str) -> dict[str, Any] | None:
-    """The ``missing_include`` diagnostic the local classifier would emit for
-    ``log_text`` (naming the file ngspice could not find), or ``None``."""
-    from .sim import _classify_diagnostics
+def _fatal_log_diagnostic(log_text: str) -> dict[str, Any] | None:
+    """The ngspice deck-abort diagnostic (``missing_include``, ``netlist``,
+    ``model_bin_range`` or ``ngspice_fatal``) the local classifier would emit
+    for ``log_text``, tagged ``analysis_started: false`` when the log shows no
+    analysis began (issue #3879), or ``None``."""
+    from .sim import (
+        _NGSPICE_FATAL_CODES,
+        _classify_diagnostics,
+        _mark_analysis_not_started,
+    )
 
     for diagnostic in _classify_diagnostics(log_text):
-        if diagnostic.get("code") == "missing_include":
+        if diagnostic.get("code") in _NGSPICE_FATAL_CODES:
+            _mark_analysis_not_started([diagnostic], log_text)
             return diagnostic
     return None
 
 
-def _surface_missing_include(corners: list[dict[str, Any]], collected: str) -> None:
-    """Add a ``missing_include`` diagnostic to every errored corner whose
-    retrieved engine log shows ngspice failing on a ``.include`` but whose
-    report (written by the runner's own, possibly older, ``klt``) carries no
-    such code -- otherwise the caller sees only ``measurement ... produced no
-    value``. Corners are matched to logs through ``artifacts.log``
-    (``<$EDA_OUTPUT_DIR>/artifacts/<rel>``); with exactly one log in the tree
-    it applies to every such corner. A no-op when no log was collected."""
+def _surface_log_fatal(corners: list[dict[str, Any]], collected: str) -> None:
+    """Add the ngspice deck-abort diagnostic (``missing_include``,
+    ``netlist``, ``model_bin_range``, ``ngspice_fatal``) to every errored
+    corner whose retrieved engine log shows ngspice failing while reading the
+    deck but whose report (written by the runner's own, possibly older,
+    ``klt``) carries no such code -- otherwise the caller sees only
+    ``measurement ... produced no value``. Corners are matched to logs through
+    ``artifacts.log`` (``<$EDA_OUTPUT_DIR>/artifacts/<rel>``); with exactly one
+    log in the tree it applies to every such corner. A no-op when no log was
+    collected."""
+    from .sim import _NGSPICE_FATAL_CODES
+
     logs = _find_engine_logs(collected)
     if not logs:
         return
@@ -3304,7 +3315,7 @@ def _surface_missing_include(corners: list[dict[str, Any]], collected: str) -> N
         if corner.get("status") != "error":
             continue
         diagnostics = corner.setdefault("diagnostics", [])
-        if any(d.get("code") == "missing_include" for d in diagnostics):
+        if any(d.get("code") in _NGSPICE_FATAL_CODES for d in diagnostics):
             continue
         log_path = None
         remote = (corner.get("artifacts") or {}).get("log")
@@ -3320,7 +3331,7 @@ def _surface_missing_include(corners: list[dict[str, Any]], collected: str) -> N
             log_path = logs[0]
         if log_path is None:
             continue
-        found = _missing_include_diagnostic(_read_log_head(log_path))
+        found = _fatal_log_diagnostic(_read_log_head(log_path))
         if found is not None:
             diagnostics.append(found)
 
@@ -3341,9 +3352,7 @@ def _engine_log_note(collected: str) -> tuple[str, dict[str, Any] | None]:
     lines = [line.rstrip() for line in text.splitlines() if line.strip()]
     tail = "\n".join(lines[-_BATCH_ENGINE_LOG_TAIL_LINES:])
     tail = tail[-_BATCH_ENGINE_LOG_TAIL_CHARS:]
-    return f"{os.path.basename(logs[0])} tail: {tail}", _missing_include_diagnostic(
-        text
-    )
+    return f"{os.path.basename(logs[0])} tail: {tail}", _fatal_log_diagnostic(text)
 
 
 def _job_failure_corners(
@@ -4043,7 +4052,7 @@ def _poll_and_collect(
         check_ngspice_options_echo(request, report)
         environment = {**environment, **_read_job_identity(collected, request)}
         corners = report.get("corners") or []
-        _surface_missing_include(corners, collected)
+        _surface_log_fatal(corners, collected)
         if keep_artifacts:
             _install_batch_artifacts(
                 corners, collected_dir=collected, artifacts_dir=artifacts_dir
