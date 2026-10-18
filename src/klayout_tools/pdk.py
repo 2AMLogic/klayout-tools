@@ -93,7 +93,11 @@ import subprocess
 from typing import Any
 
 from .lef_header import parse_lef_header
-from .pdk_compat import check_compatibility, read_fetched_marker
+from .pdk_compat import (
+    check_compatibility,
+    read_fetched_commit,
+    read_fetched_marker,
+)
 from .pdk_families import family_subset, pdk_variant_family
 
 #: The ciel/volare stores, in resolution order (step 3). ``~`` is expanded at
@@ -163,6 +167,7 @@ def find_pdk(variant: str | None = None, root: str | None = None) -> dict[str, A
             "root": <absolute install root>,
             "variant": <variant name>,
             "version": <str | None>,
+            "commit": <str | None>,  # 40-hex upstream commit, fetched installs only
             "resolved_via": <how the install was found>,
             "assets": {
                 "ngspice": <abs dir | None>, "xschem": ..., "klayout": ...,
@@ -242,6 +247,7 @@ def find_pdk(variant: str | None = None, root: str | None = None) -> dict[str, A
             "root": root_path,
             "variant": chosen["name"],
             "version": chosen["version"],
+            "commit": chosen["_commit"],
             "resolved_via": resolved_via,
             "assets": assets,
             "broken_symlinks": _broken_symlinks_in_assets(assets),
@@ -436,6 +442,7 @@ def _probe_root(root_path: str) -> list[dict[str, Any]]:
             {
                 "name": name,
                 "version": read_version(variant_dir),
+                "_commit": read_fetched_commit(variant_dir),
                 "_sources": read_sources(variant_dir),
                 "_dir": variant_dir,
                 "_layout": layout,
@@ -476,6 +483,7 @@ def _probe_flat_variant(root_path: str) -> list[dict[str, Any]]:
         {
             "name": name,
             "version": read_version(root_path),
+            "_commit": read_fetched_commit(root_path),
             "_sources": read_sources(root_path),
             "_dir": root_path,
             "_layout": layout,
