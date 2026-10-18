@@ -285,8 +285,13 @@ from .extract_report import (
 # `cli/extract_cmd.py`, `place_and_route.py`, and the test suite). The
 # redundant `X as X` aliases mark them explicit re-exports, so neither reads as
 # an unused import in a module that never calls them itself.
+from .extract_spef import (
+    DefNetConnections,
+    _renamed_def_name,
+    _unescape_spice_safe_net_name,
+    _write_spef,
+)
 from .extract_spef import ExtractError as ExtractError
-from .extract_spef import _unescape_spice_safe_net_name, _write_spef
 from .extract_spef import def_net_instance_pins as def_net_instance_pins
 from .metrics import is_registered
 from .parasitic_integrity import empty_integrity_summary
@@ -6591,10 +6596,20 @@ def _remap_def_net_connections(
         if target is None:
             remapped[key] = pins
         else:
-            renamed_items[target] = pins
+            # Issue #3900: the key carries the DEF's own SPEF spelling, so
+            # the SPEF a linked design reads still names the net as the DEF
+            # does; only the SPICE/JSON spelling is the renamed one.
+            renamed_items[_renamed_def_name(target, key)] = pins
     # The renamed net is what actually exists, so it wins any key clash.
     remapped.update(renamed_items)
-    return remapped
+    # Keep the DEF's renamed-port map (issue #3257 gap B), re-keyed the same way.
+    port_pins = getattr(def_net_connections, "port_pins", None)
+    if port_pins is None:
+        return remapped
+    return DefNetConnections(
+        remapped,
+        {after_by_before.get(net, net): pins for net, pins in port_pins.items()},
+    )
 
 
 def _spef_missing_conn_warnings(
