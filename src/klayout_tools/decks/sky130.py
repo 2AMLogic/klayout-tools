@@ -2046,6 +2046,16 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
 # 0.15um column here, which is why registering this marker still produces
 # `klt drc`'s `voltage_domain_warnings` diagnostic (issue #552) even though
 # the *extraction*-side binding gap is now closed.
+#: Process area-marker layers (``areaid.*``) whose rule-switching this deck
+#: does not model (issue #3815): the deck evaluates every rule uniformly, so a
+#: marker such as ``areaid.ce`` (81/2) -- which the foundry runsets use to
+#: narrow or relax rules inside/outside the marked area -- changes nothing
+#: here. ``klt drc`` lists those present in the stream as
+#: ``coverage.marker_blind_layers_in_stream`` and ``klt deck rules`` as
+#: ``marker_blind_layers``, so identical results with and without the marker
+#: are not misread as marker-aware behaviour.
+MARKER_BLIND_LAYERS: tuple[tuple[int, int], ...] = ((81, 2),)
+
 #: Official sky130A_mr.drc rule ids this curated deck knowingly does *not*
 #: transcribe (issue #3031): the "2-adjacent-edges-relaxed" enclosure
 #: refinements, which need a per-edge-pair primitive ``DrcRule`` does not have

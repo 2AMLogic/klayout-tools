@@ -1,5 +1,6 @@
 """Production-path tests for gf180mcu ``DF.13_LV`` / ``DF.14_LV``
-(``comp.tap_distance.{nwell,psub}.lv.1``), issue #3607.
+(``comp.tap_distance.{nwell,psub}.lv.1``), issue #3607, and their ``_MV``
+siblings (``comp.tap_distance.{nwell,psub}.mv.1``, 15 um), issue #3793.
 
 Runs ``run_drc(..., "gf180mcu")`` and pins the ``tap_distance`` descriptor
 validation, the zero-tap / boundary / well-island semantics derived from the
@@ -17,9 +18,12 @@ from klayout_tools.drc import run_drc
 
 NWELL_RULE = "comp.tap_distance.nwell.lv.1"
 PSUB_RULE = "comp.tap_distance.psub.lv.1"
+NWELL_MV_RULE = "comp.tap_distance.nwell.mv.1"
+PSUB_MV_RULE = "comp.tap_distance.psub.mv.1"
 COMP, NWELL, DNWELL, NPLUS, PPLUS = (22, 0), (21, 0), (12, 0), (32, 0), (31, 0)
 DUALGATE, V5_XTOR, RES_MK = (55, 0), (112, 1), (110, 5)
 D = 20000  # 20 um at the deck's 1 nm dbu
+D_MV = 15000  # 15 um (5V/6V column)
 PAD = 300
 
 
@@ -139,7 +143,7 @@ def test_resistor_marker_over_the_only_tap_removes_it(tmp_path):
 
 @pytest.mark.parametrize("marker", [DUALGATE, V5_XTOR])
 def test_lv_rule_ignores_active_touching_a_voltage_marker(tmp_path, marker):
-    # Spike D3: marked active is out of the LV column (and MV is not declared).
+    # Spike D3: marked active is out of the LV column (MV rules take it instead).
     shapes = _nwell_layout(0, tap=False) + [(marker, [-500, -500, 1500, 1500])]
     report = _run(tmp_path, shapes)
     assert _found(report, NWELL_RULE) == []
@@ -148,6 +152,58 @@ def test_lv_rule_ignores_active_touching_a_voltage_marker(tmp_path, marker):
         "id": NWELL_RULE,
         "reason": "inapplicable_empty_checked_region",
     } in report["coverage"]["inapplicable"]
+
+
+MV_LAYOUTS = [(NWELL_MV_RULE, _nwell_layout), (PSUB_MV_RULE, _psub_layout)]
+
+
+def _under_dualgate(shapes):
+    return shapes + [(DUALGATE, [-500, -500, 90000, 7000])]
+
+
+@pytest.mark.parametrize("rule,build", MV_LAYOUTS)
+def test_mv_zero_taps_inside_dualgate_is_a_violation(tmp_path, rule, build):
+    report = _run(tmp_path, _under_dualgate(build(0, tap=False)))
+    assert len(_found(report, rule)) == 1
+    assert rule in report["coverage"]["rules_checked"]
+
+
+@pytest.mark.parametrize("rule,build", MV_LAYOUTS)
+def test_mv_axial_gap_boundary(tmp_path, rule, build):
+    legal = _run(tmp_path, _under_dualgate(build(1000 + D_MV)))
+    assert _found(legal, rule) == []
+    over = _run(tmp_path, _under_dualgate(build(1000 + D_MV + 1)))
+    assert len(_found(over, rule)) == 1
+
+
+@pytest.mark.parametrize(
+    "mv_rule,lv_rule,build",
+    [
+        (NWELL_MV_RULE, NWELL_RULE, _nwell_layout),
+        (PSUB_MV_RULE, PSUB_RULE, _psub_layout),
+    ],
+)
+def test_between_15_and_20_um_flags_mv_but_not_lv(tmp_path, mv_rule, lv_rule, build):
+    gap = 1000 + 17000  # tap edge 17 um from the active
+    mv = _run(tmp_path, _under_dualgate(build(gap)))
+    assert len(_found(mv, mv_rule)) == 1
+    assert _found(mv, lv_rule) == []
+    lv = _run(tmp_path, build(gap))  # same geometry without Dualgate
+    assert _found(lv, lv_rule) == []
+    assert _found(lv, mv_rule) == []
+
+
+@pytest.mark.parametrize("rule,build", MV_LAYOUTS)
+def test_mv_rule_ignores_active_outside_dualgate(tmp_path, rule, build):
+    report = _run(tmp_path, build(0, tap=False))
+    assert _found(report, rule) == []
+
+
+def test_mv_rules_do_not_trigger_wrong_column_warnings(tmp_path):
+    report = _run(tmp_path, _under_dualgate(_nwell_layout(5000)))
+    for warning in report["coverage"]["voltage_domain_warnings"]:
+        assert NWELL_MV_RULE not in str(warning)
+        assert PSUB_MV_RULE not in str(warning)
 
 
 def test_voltage_markers_do_not_trigger_wrong_column_warnings(tmp_path):
