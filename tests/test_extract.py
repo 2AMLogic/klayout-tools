@@ -26993,3 +26993,52 @@ def test_resistor_free_layout_has_no_unclaimed_marker_warning(tmp_path):
     )
     report = run_extract(path, "sky130", output=str(tmp_path / "nomark.spice"))
     assert _unclaimed_marker_warnings(report) == []
+
+
+# --- Unmodelled device markers: sg13g2 Recog.esd (issue #3858) -------------
+
+
+def _esd_marker_layout(*, in_child: bool = False) -> kdb.Layout:
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    holder = top
+    if in_child:
+        holder = layout.create_cell("CHILD")
+        top.insert(kdb.CellInstArray(holder.cell_index(), kdb.Trans()))
+    holder.shapes(layout.layer(99, 30)).insert(kdb.Box(0, 0, 5000, 5000))
+    return layout
+
+
+def _esd_warnings(report: dict[str, Any]) -> list[str]:
+    return [w for w in report["warnings"] if "Recog.esd" in w]
+
+
+@pytest.mark.parametrize("in_child", [False, True])
+def test_sg13g2_recog_esd_shape_warns_not_recognised(tmp_path, in_child):
+    path = _write_gds(_esd_marker_layout(in_child=in_child), tmp_path / "esd.gds")
+    report = run_extract(path, "sg13g2", output=str(tmp_path / "esd.spice"))
+
+    (warning,) = _esd_warnings(report)
+    assert "99/30" in warning
+    assert "klayout-runset" in warning
+
+
+def test_sg13g2_without_recog_esd_shape_has_no_esd_warning(tmp_path):
+    layout = _esd_marker_layout()
+    layout.top_cell().shapes(layout.layer(99, 30)).clear()
+    layout.top_cell().shapes(layout.layer(1, 0)).insert(kdb.Box(0, 0, 5000, 5000))
+    path = _write_gds(layout, tmp_path / "noesd.gds")
+    report = run_extract(path, "sg13g2", output=str(tmp_path / "noesd.spice"))
+
+    assert _esd_warnings(report) == []
+
+
+def test_other_decks_do_not_register_unmodeled_device_markers(tmp_path):
+    from klayout_tools.decks import get_unmodeled_device_markers
+
+    assert get_unmodeled_device_markers("sky130") == {}
+    assert (99, 30) in get_unmodeled_device_markers("sg13g2")
+    path = _write_gds(_esd_marker_layout(), tmp_path / "esd.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "esd.spice"))
+    assert _esd_warnings(report) == []

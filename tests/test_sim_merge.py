@@ -11,31 +11,21 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-import shutil
 from pathlib import Path
 
 import pytest
 
 from helpers.subprocess_fakes import fake_completed
-from klayout_tools import _paths as paths_module
 from klayout_tools import sim, sim_merge
 from klayout_tools.cli import main
 
-pytestmark = pytest.mark.usefixtures("real_build_identity_git")
+pytestmark = pytest.mark.usefixtures(
+    "real_build_identity_git", "bare_name_ngspice_resolution"
+)
 
 #: What the stub "ngspice" measures per process section.
 _VOUT = {"tt": 1.0, "ss": 0.9, "ff": 1.1}
 _LIMITS = {"min": 0.95, "max": 1.2}
-
-
-@pytest.fixture(autouse=True)
-def _bare_name_ngspice_resolution(monkeypatch):
-    real_which = shutil.which
-
-    def fake_which(cmd, *args, **kwargs):
-        return cmd if cmd == "ngspice" else real_which(cmd, *args, **kwargs)
-
-    monkeypatch.setattr(paths_module.shutil, "which", fake_which)
 
 
 @pytest.fixture
