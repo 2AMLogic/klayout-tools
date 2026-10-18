@@ -2253,6 +2253,11 @@ klt drc layout.gds --engine klayout \
     --expect-rule-categories 263 --format json
 ```
 
+`asap7` is deliberately not a curated DRC deck, so it is absent from
+`klt drc --help`'s `--deck` list and `klt drc --deck asap7` exits 1 with an
+error naming this route; `klt deck info` reports it as
+`provides: ["extraction", "klayout_drc"]`.
+
 `--pdk asap7` does not resolve this deck: `klt pdk` finds an ASAP7 process
 tree (#2759) but not a deck inside it, so pass `--deck-file`. The output is
 the standard `--engine klayout` envelope described in "Engine" above.
