@@ -9808,6 +9808,25 @@ def test_sdf_annotated_functional_verification_is_marked_in_detail(tmp_path):
     assert result["checks"][0]["detail"]["sdf_corner"] == "typ"
 
 
+def test_portable_place_and_route_envelope_is_accepted(tmp_path):
+    """A `portable_paths: true` response (issue #3820) carries `{path, scope}`
+    objects where the default one has strings; it must still classify as
+    `place-and-route` and pass."""
+    envelope = {
+        **PLACE_AND_ROUTE_ENVELOPE,
+        "def_path": {"path": "out/gcd.def", "scope": "repo"},
+        "gds_path": {"path": None, "scope": "external"},
+        "verilog_path": {"path": "out/gcd.v", "scope": "repo"},
+    }
+    pnr_path = _write(tmp_path, "pnr.json", envelope)
+
+    result = build_signoff([pnr_path])
+
+    assert result["checks"][0]["kind"] == "place-and-route"
+    assert result["checks"][0]["passed"] is True
+    assert result["checks"][0]["detail"]["power_pdn"] is True
+
+
 def test_place_and_route_envelope_is_never_classified_as_sta(tmp_path):
     """`klt place-and-route`'s response overlaps `klt sta`'s timing fields
     (`worst_slack_ns`/`timing_status`/`corners`) but is a different verb with
@@ -16520,11 +16539,12 @@ def _ms_item5(tmp_path, spec_rows, analog_entry=None):
     """Mixed-signal item-5 entries by partition (issue #3768)."""
     sim = _write(tmp_path, "sim.json", SIM_PASS_ENVELOPE)
     sta = _write(tmp_path, "sta.json", STA_MULTI_CORNER_CLEAN_ENVELOPE)
+    fv = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE)
     manifest = _manifest(
         kind="mixed-signal",
         evidence={
             "5.analog": analog_entry or [{"file": sim, "rows": ["tdec"]}],
-            "5.digital": sta,
+            "5.digital": [sta, fv],
         },
         spec_rows=spec_rows,
     )

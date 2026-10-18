@@ -619,6 +619,34 @@ def test_section_libraries_and_explicit_points_share_staged_names(tmp_path):
     assert fields["mos.lib"] == "corners.process[0].sections[0].lib"
 
 
+def test_runner_resolved_osdi_is_not_staged_and_is_forwarded_in_order(tmp_path):
+    """Issue #3819: image-baked entries ride along verbatim, in declared order,
+    around the one host-local binary that is staged."""
+    netlist = _model_tree(tmp_path)
+    local = tmp_path / "local.osdi"
+    local.write_bytes(b"\x7fELFlocal")
+    request = _model_request(
+        options={
+            "stage_model_inputs": True,
+            "osdi_preload": [
+                "$PDK_ROOT/ihp/a.osdi",
+                "local.osdi",
+                "${PDK_ROOT}/ihp/b.osdi",
+            ],
+        }
+    )
+
+    job = _job(request, netlist, tmp_path)
+
+    assert job.request["options"]["osdi_preload"] == [
+        "$PDK_ROOT/ihp/a.osdi",
+        "local.osdi",
+        "${PDK_ROOT}/ihp/b.osdi",
+    ]
+    osdi_assets = [a for a in job.model_assets if a.kind == "osdi"]
+    assert [a.field for a in osdi_assets] == ["options.osdi_preload[1]"]
+
+
 def test_osdi_binaries_keep_bytes_order_and_get_collision_safe_names(tmp_path):
     netlist = _model_tree(tmp_path)
     first = tmp_path / "a" / "psp103.osdi"
