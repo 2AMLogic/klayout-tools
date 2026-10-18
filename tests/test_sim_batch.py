@@ -7036,6 +7036,25 @@ def test_max_concurrent_jobs_bounds_in_flight_shards(tmp_path, monkeypatch):
     assert environment["max_concurrent_jobs"] == 3
 
 
+def test_max_concurrent_jobs_interrupt_cancels_queued_shards(tmp_path, monkeypatch):
+    from klayout_tools import sim_remote
+
+    state = _concurrency_probe(monkeypatch)
+    real_as_completed = sim_remote.as_completed
+
+    def _interrupting(futures):
+        for future in real_as_completed(futures):
+            yield future
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(sim_remote, "as_completed", _interrupting)
+
+    with pytest.raises(KeyboardInterrupt):
+        _run_capped_fleet(tmp_path, units=10, hosts=10, max_concurrent_jobs=1)
+
+    assert state["calls"] < 10
+
+
 def test_max_concurrent_jobs_one_is_serial(tmp_path, monkeypatch):
     state = _concurrency_probe(monkeypatch)
 

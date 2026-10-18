@@ -325,12 +325,18 @@ def _run_sharded(
         future_to_index = {
             pool.submit(_run_one, shard): index for index, shard in enumerate(shards)
         }
-        for future in as_completed(future_to_index):
-            index = future_to_index[future]
-            try:
-                results[index] = future.result()
-            except Exception as exc:  # noqa: BLE001 - "shard never returned"
-                lost_reasons[index] = str(exc)
+        try:
+            for future in as_completed(future_to_index):
+                index = future_to_index[future]
+                try:
+                    results[index] = future.result()
+                except Exception as exc:  # noqa: BLE001 - "shard never returned"
+                    lost_reasons[index] = str(exc)
+        except BaseException:
+            # An interrupt must not let the pool's implicit shutdown(wait=True)
+            # launch every still-queued (capped) shard as a new billable job.
+            pool.shutdown(wait=False, cancel_futures=True)
+            raise
 
     corners: list[dict[str, Any]] = []
     engine_version: str | None = None
