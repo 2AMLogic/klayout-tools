@@ -152,6 +152,14 @@ jobs:
           uv run --frozen python scripts/design_agent_benchmark.py validate \
             | tee design-agent-benchmark-validate.json
 
+      - name: Validate the layout-flow protocol and fixtures (issue #3024)
+        # Credential-free and simulation-free; see benchmarks/design-agent/
+        # README.md "Layout-flow protocol".
+        run: |
+          uv run --frozen python scripts/design_agent_benchmark.py validate-layout \
+            --task benchmarks/design-agent/fixtures/layout/task-five-transistor-ota-layout.json \
+            --runs benchmarks/design-agent/fixtures/layout/runs-valid.json
+
       - name: Run the harness (reference candidate provider, pass@1/pass@5)
         # Deterministic reference-provider proof-of-concept -- see
         # benchmarks/design-agent/README.md "Known limitations". Always

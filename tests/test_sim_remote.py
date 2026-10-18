@@ -144,3 +144,38 @@ def test_prelaunch_ignores_a_request_without_transfer(tmp_path):
     sim_remote._assess_remote_runner_features(
         _PLAIN_REQUEST, "sky130A", {"region": "us-east-1", "ami_manifest": manifest}
     )
+
+
+_PASSES_REQUEST = {
+    **_PLAIN_REQUEST,
+    "analysis": {"kind": "ac", "passes": [{"name": "v", "alter": []}]},
+}
+
+
+@pytest.mark.parametrize("version", ["klt 0.7.0", "klt dirty", "klt"])
+def test_host_preflight_refuses_dual_injection_on_an_old_or_unknown_klt(
+    tmp_path, version
+):
+    proc, ran = _run_command(tmp_path, _PASSES_REQUEST, version)
+    assert proc.returncode == sim_batch._BATCH_PREFLIGHT_REJECT_EXIT
+    assert not ran
+    assert "dual_injection" in proc.stderr
+
+
+def test_host_preflight_runs_dual_injection_on_a_supporting_klt(tmp_path):
+    proc, ran = _run_command(tmp_path, _PASSES_REQUEST, "klt 0.7.1")
+    assert proc.returncode == 0, proc.stderr
+    assert ran
+
+
+def test_prelaunch_refuses_dual_injection_when_the_manifest_image_predates_it(
+    tmp_path,
+):
+    manifest = _manifest(tmp_path, [_image(klt_version="0.7.0")])
+    with pytest.raises(sim.SimError) as raised:
+        sim_remote._assess_remote_runner_features(
+            _PASSES_REQUEST,
+            "sky130A",
+            {"region": "us-east-1", "ami_manifest": manifest},
+        )
+    assert raised.value.code == sim_batch.BATCH_RUNNER_FEATURE_CODE

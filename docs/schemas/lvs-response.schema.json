@@ -1,0 +1,448 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://2amlogic.com/klayout-tools/schemas/lvs-response.schema.json",
+  "title": "klt lvs --format json success response, version 1",
+  "description": "Success payload of `klt lvs` for every non-error result (status match, mismatch or inconclusive; engine klayout or netgen; layout.file or layout.netlist; plain-element, subckt-call or gate-level-verilog reference). The shared error envelope is out of scope. Fields documented as optional (label_layers, reference_conversion) are not required; unknown additive fields are accepted everywhere. See docs/cli/lvs.md.",
+  "type": "object",
+  "required": [
+    "schema_version", "engine", "layout", "reference", "top", "reference_top",
+    "parameter_tolerance", "options", "hints_applied", "status",
+    "power_connectivity", "body_verification", "device_parameter_coverage",
+    "mismatch_count", "error_count", "category_counts", "category_error_counts",
+    "counts", "device_classes", "environment", "provenance", "mismatches",
+    "net_correspondence"
+  ],
+  "properties": {
+    "schema_version": {"type": "integer", "const": 1},
+    "engine": {"enum": ["klayout", "netgen"], "description": "Echo of the request's engine (default klayout)."},
+    "layout": {"$ref": "#/$defs/path_value", "description": "Echo of layout.file or layout.netlist."},
+    "label_layers": {
+      "type": "object",
+      "description": "Present only when a non-empty layout.label_layers override was applied: {role: [layer, datatype] | null}.",
+      "additionalProperties": {
+        "oneOf": [
+          {"type": "null"},
+          {"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2}
+        ]
+      }
+    },
+    "reference": {"$ref": "#/$defs/path_value", "description": "Echo of reference.netlist."},
+    "top": {"type": "string", "description": "Layout side's resolved top circuit name."},
+    "reference_top": {"type": "string", "description": "Reference side's resolved top circuit name."},
+    "reference_conversion": {
+      "type": "object",
+      "description": "Present only for reference.form 'subckt-call'.",
+      "required": ["form", "deck", "device_map"],
+      "properties": {
+        "form": {"const": "subckt-call"},
+        "deck": {"type": ["string", "null"]},
+        "device_map": {"type": ["object", "null"]}
+      },
+      "additionalProperties": true
+    },
+    "parameter_tolerance": {"type": ["number", "null"]},
+    "options": {"$ref": "#/$defs/options"},
+    "hints_applied": {
+      "type": ["object", "null"],
+      "description": "hints.equivalent_pins groupings applied, keyed by subcircuit name; null when none.",
+      "additionalProperties": {
+        "type": "array",
+        "items": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "status": {"$ref": "#/$defs/status"},
+    "power_connectivity": {"$ref": "#/$defs/power_connectivity"},
+    "body_verification": {"$ref": "#/$defs/body_verification"},
+    "device_parameter_coverage": {
+      "type": ["array", "null"],
+      "description": "Per resistor/capacitor class parameter coverage; null for the netgen engine.",
+      "items": {"$ref": "#/$defs/device_parameter_coverage_entry"}
+    },
+    "mismatch_count": {"type": "integer", "minimum": 0},
+    "error_count": {"type": "integer", "minimum": 0},
+    "category_counts": {"$ref": "#/$defs/count_map"},
+    "category_error_counts": {"$ref": "#/$defs/count_map"},
+    "counts": {
+      "type": "object",
+      "required": ["nets", "devices", "pins"],
+      "properties": {
+        "nets": {"$ref": "#/$defs/count_triple"},
+        "devices": {"$ref": "#/$defs/count_triple"},
+        "pins": {"$ref": "#/$defs/count_triple"}
+      },
+      "additionalProperties": true
+    },
+    "device_classes": {
+      "type": ["array", "null"],
+      "description": "The layout-side deck's device classes; null when no layout.deck was given.",
+      "items": {"type": "string"}
+    },
+    "environment": {"$ref": "#/$defs/environment"},
+    "provenance": {"$ref": "#/$defs/provenance"},
+    "mismatches": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/mismatch"}
+    },
+    "net_correspondence": {
+      "type": "array",
+      "description": "Layout-to-reference net pairing; always [] for the netgen engine.",
+      "items": {"$ref": "#/$defs/net_correspondence_entry"}
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "path_value": {
+      "description": "A path string, or under request.portable_paths (issue #3798) a {path, scope} object (scope 'repo' or 'external'); PDK files become '$PDK_ROOT/...' strings.",
+      "oneOf": [
+        {"type": "string"},
+        {
+          "type": "object",
+          "required": ["path", "scope"],
+          "properties": {
+            "path": {"type": ["string", "null"]},
+            "scope": {"enum": ["repo", "external"]}
+          }
+        }
+      ]
+    },
+    "status": {
+      "enum": ["match", "mismatch", "inconclusive"],
+      "description": "match / mismatch are the engine's verdict; inconclusive means the requested compare could not be performed (combine_devices retry budget exhausted)."
+    },
+    "count_map": {
+      "type": "object",
+      "additionalProperties": {"type": "integer", "minimum": 0}
+    },
+    "count_triple": {
+      "type": "object",
+      "required": ["layout", "reference", "matched"],
+      "properties": {
+        "layout": {"type": "integer", "minimum": 0},
+        "reference": {"type": "integer", "minimum": 0},
+        "matched": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": true
+    },
+    "name_pair": {
+      "type": ["object", "null"],
+      "description": "{layout, reference} names; either side may be null.",
+      "required": ["layout", "reference"],
+      "properties": {
+        "layout": {"type": ["string", "null"]},
+        "reference": {"type": ["string", "null"]}
+      },
+      "additionalProperties": true
+    },
+    "options": {
+      "type": "object",
+      "description": "Resolved request options that shape what was compared. Keys are always present.",
+      "required": [
+        "combine_devices", "combine_devices_per_circuit",
+        "combine_devices_max_attempts", "flatten_layout", "flatten_reference",
+        "netgen_setup", "parameter_tolerance", "compare_parameters",
+        "power_connectivity", "anchor_top_level_pins",
+        "strict_top_level_pin_count", "supply_nets", "finfet_bulk"
+      ],
+      "properties": {
+        "combine_devices": {
+          "oneOf": [
+            {"type": "boolean"},
+            {"type": "array", "items": {"type": "string"}}
+          ]
+        },
+        "combine_devices_per_circuit": {
+          "type": ["object", "null"],
+          "additionalProperties": {"type": "boolean"}
+        },
+        "combine_devices_max_attempts": {"type": "integer", "minimum": 1},
+        "flatten_layout": {"type": "boolean"},
+        "flatten_reference": {"type": "boolean"},
+        "netgen_setup": {"type": ["string", "null"]},
+        "parameter_tolerance": {"type": ["number", "null"]},
+        "compare_parameters": {
+          "type": ["object", "null"],
+          "additionalProperties": {"type": "array", "items": {"type": "string"}}
+        },
+        "power_connectivity": {
+          "description": "The caller's own options.power_connectivity value verbatim, or null when omitted.",
+          "type": ["boolean", "object", "null"]
+        },
+        "anchor_top_level_pins": {"type": ["boolean", "null"]},
+        "strict_top_level_pin_count": {"type": "boolean"},
+        "compare_mos_flavour": {"type": "boolean"},
+        "supply_nets": {"type": "array", "items": {"type": "string"}},
+        "finfet_bulk": {"type": ["object", "null"]}
+      },
+      "additionalProperties": true
+    },
+    "environment": {
+      "type": "object",
+      "required": [
+        "engine", "engine_version", "netgen_binary", "layout_sha256",
+        "reference_sha256", "extracted_netlist"
+      ],
+      "properties": {
+        "engine": {"enum": ["klayout", "netgen"]},
+        "engine_version": {"type": ["string", "null"]},
+        "netgen_binary": {"oneOf": [{"$ref": "#/$defs/path_value"}, {"type": "null"}], "description": "Resolved netgen executable; null for the klayout engine."},
+        "layout_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "reference_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "extracted_netlist": {"oneOf": [{"$ref": "#/$defs/path_value"}, {"type": "null"}]}
+      },
+      "additionalProperties": true
+    },
+    "provenance": {
+      "type": "object",
+      "description": "Shared reproducibility block (docs/json-contract.md) plus LVS-specific pin_order_sources.",
+      "required": ["klt_version", "klayout_version", "pdk", "deck", "input"],
+      "properties": {
+        "klt_version": {"type": ["string", "null"]},
+        "klayout_version": {"type": ["string", "null"]},
+        "klayout_version_mismatch": {"type": "boolean"},
+        "pdk": {
+          "type": ["object", "null"],
+          "description": "Set for a gate-level-verilog reference whose PDK resolved; null otherwise.",
+          "additionalProperties": true
+        },
+        "deck": {
+          "type": ["object", "null"],
+          "description": "Layout-side extraction deck pin; null when no layout.deck was given.",
+          "properties": {
+            "name": {"type": "string"},
+            "content_hash": {"type": "string"},
+            "released": {"type": ["boolean", "null"]},
+            "options": {"type": "object"},
+            "options_explicit": {"type": ["array", "object"]},
+            "options_hash": {"type": "string"}
+          },
+          "additionalProperties": true
+        },
+        "input": {
+          "type": ["object", "null"],
+          "properties": {
+            "content_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "role": {"enum": ["layout", "netlist"]}
+          },
+          "additionalProperties": true
+        },
+        "pin_order_sources": {
+          "type": "array",
+          "description": "Present only for reference.form 'gate-level-verilog'.",
+          "items": {
+            "type": "object",
+            "required": ["library", "path", "cells"],
+            "properties": {
+              "library": {"type": ["string", "null"]},
+              "path": {"$ref": "#/$defs/path_value"},
+              "cells": {"type": "integer", "minimum": 0}
+            },
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "power_connectivity": {
+      "type": "object",
+      "description": "Power/ground half of the verdict, reported beside (never folded into) status. 'unchecked' carries a reason.",
+      "required": [
+        "status", "reason", "power_pins", "power_pins_derivation",
+        "instance_count", "expected_nets", "unchecked_expected_pins",
+        "findings", "finding_count"
+      ],
+      "properties": {
+        "status": {"enum": ["match", "mismatch", "unchecked"]},
+        "reason": {"type": ["string", "null"]},
+        "power_pins": {"type": "array", "items": {"type": "string"}},
+        "power_pins_derivation": {
+          "type": ["object", "null"],
+          "required": ["rule", "masters", "master_count", "corroborated", "reason"],
+          "properties": {
+            "rule": {"type": "string"},
+            "masters": {"type": "array", "items": {"type": "string"}},
+            "master_count": {"type": "integer", "minimum": 0},
+            "corroborated": {"type": "boolean"},
+            "reason": {"type": ["string", "null"]},
+            "libraries": {
+              "type": "array",
+              "description": "Present only under the per-library derivation rule.",
+              "items": {
+                "type": "object",
+                "required": ["library", "masters", "master_count", "corroborated", "power_pins"],
+                "properties": {
+                  "library": {"type": ["string", "null"]},
+                  "masters": {"type": "array", "items": {"type": "string"}},
+                  "master_count": {"type": "integer", "minimum": 0},
+                  "corroborated": {"type": "boolean"},
+                  "power_pins": {"type": "array", "items": {"type": "string"}}
+                },
+                "additionalProperties": true
+              }
+            }
+          },
+          "additionalProperties": true
+        },
+        "instance_count": {"type": "integer", "minimum": 0},
+        "expected_nets": {
+          "type": ["object", "null"],
+          "additionalProperties": {"type": "string"}
+        },
+        "unchecked_expected_pins": {"type": "array", "items": {"type": "string"}},
+        "findings": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/power_finding"}
+        },
+        "finding_count": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": true
+    },
+    "power_finding": {
+      "type": "object",
+      "description": "One entry per offending power/ground pin name.",
+      "required": ["rule", "severity", "pin", "expected_net", "description", "instance_count", "nets"],
+      "properties": {
+        "rule": {"type": "string"},
+        "severity": {"enum": ["error", "warning"]},
+        "pin": {"type": "string"},
+        "expected_net": {"type": ["string", "null"]},
+        "description": {"type": "string"},
+        "instance_count": {"type": "integer", "minimum": 0},
+        "nets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["net", "instance_count", "instances", "instances_truncated"],
+            "properties": {
+              "net": {"type": ["string", "null"], "description": "null is an unconnected pin."},
+              "instance_count": {"type": "integer", "minimum": 0},
+              "instances": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["circuit", "instance", "cell"],
+                  "properties": {
+                    "circuit": {"type": "string"},
+                    "instance": {"type": "string"},
+                    "cell": {"type": "string"}
+                  },
+                  "additionalProperties": true
+                }
+              },
+              "instances_truncated": {"type": "boolean"}
+            },
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "body_verification": {
+      "type": "object",
+      "description": "Whether MOS body terminals were resolved from real tap geometry; reported beside (never folded into) status.",
+      "required": ["status", "reason", "device_classes", "device_count", "findings", "finding_count"],
+      "properties": {
+        "status": {"enum": ["verified", "unverified", "unchecked"]},
+        "reason": {"type": ["string", "null"]},
+        "device_classes": {"type": "array", "items": {"type": "string"}},
+        "device_count": {"type": "integer", "minimum": 0},
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["class", "device_count"],
+            "properties": {
+              "class": {"type": "string"},
+              "device_count": {"type": "integer", "minimum": 0}
+            },
+            "additionalProperties": true
+          }
+        },
+        "finding_count": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": true
+    },
+    "device_parameter_coverage_entry": {
+      "type": "object",
+      "required": ["class", "device_kind", "layout_devices", "reference_devices", "compared", "not_compared"],
+      "properties": {
+        "class": {"type": "string"},
+        "device_kind": {"enum": ["resistor", "capacitor"]},
+        "layout_devices": {"type": "integer", "minimum": 0},
+        "reference_devices": {"type": "integer", "minimum": 0},
+        "compared": {"type": "array", "items": {"type": "string"}},
+        "not_compared": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["parameter", "reason"],
+            "properties": {
+              "parameter": {"type": "string"},
+              "reason": {"enum": ["secondary", "placeholder_value", "compare_parameters"]}
+            },
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "mismatch": {
+      "type": "object",
+      "description": "One structured finding; the LVS counterpart of klt drc violations[]. Variant-only data lives in the nullable fields (details, circuit, instance, subcircuit) and is deliberately not required.",
+      "required": [
+        "category", "severity", "description", "side", "net", "device",
+        "property", "details", "circuit", "instance", "subcircuit"
+      ],
+      "properties": {
+        "category": {
+          "type": "string",
+          "description": "Stable category id. Documented values: net.unmatched, net.merged, net.split, net.supply_fragmented, device.unmatched, device.class, device.class_arity, device.class_family_unsatisfiable, device.bulk_reconciled, device.finfet_bulk_tied, device.placeholder_value, device.property, device.parameter_tolerated, device.parameter_excluded, device.geometry_not_compared, device.body_unverified, device.combine_incomplete, device.combine_parameter_corrected, pin.unmatched, pin.count, pin.declared_short, topology, topology.flattened, topology.power_only_pruned, topology.reference_port_alias_joined, topology.top_level_pins_anchored, hints.rejected, hints.short_nets_applied, combine_devices_per_circuit.unmatched. Not an enum: new categories are additive."
+        },
+        "severity": {"enum": ["error", "warning"]},
+        "description": {"type": "string"},
+        "side": {"enum": ["layout", "reference", "both"]},
+        "net": {"$ref": "#/$defs/name_pair"},
+        "device": {
+          "type": ["object", "null"],
+          "required": ["layout", "reference", "class"],
+          "properties": {
+            "layout": {"type": ["string", "null"]},
+            "reference": {"type": ["string", "null"]},
+            "class": {"type": ["string", "null"]}
+          },
+          "additionalProperties": true
+        },
+        "property": {
+          "type": ["object", "null"],
+          "description": "device.property / device.parameter_tolerated. Values are numbers from the klayout engine and strings from the netgen engine.",
+          "required": ["name", "layout", "reference"],
+          "properties": {
+            "name": {"type": "string"},
+            "layout": {},
+            "reference": {}
+          },
+          "additionalProperties": true
+        },
+        "details": {
+          "type": ["object", "null"],
+          "description": "Category-specific data (e.g. device.class_arity terminals, device.bulk_reconciled, netgen {raw}, net.supply_fragmented {supply, fragment_count}, topology.top_level_pins_anchored {pins, pin_count, pins_truncated}). Shape varies by category and is additive.",
+          "additionalProperties": true
+        },
+        "circuit": {"$ref": "#/$defs/name_pair"},
+        "instance": {"$ref": "#/$defs/name_pair"},
+        "subcircuit": {"$ref": "#/$defs/name_pair"}
+      },
+      "additionalProperties": true
+    },
+    "net_correspondence_entry": {
+      "type": "object",
+      "required": ["layout", "reference", "pin"],
+      "properties": {
+        "layout": {"type": ["string", "null"], "description": "Layout net name; aliases are |-joined and anonymous nets backslash-escaped."},
+        "reference": {"type": ["string", "null"], "description": "Paired reference net; null for e.g. layout-only supply pins of a gate-level-verilog run."},
+        "pin": {"type": "boolean"},
+        "heuristic": {"type": "boolean", "description": "Present only for gate-level-verilog runs with a derivable supply universe."}
+      },
+      "additionalProperties": true
+    }
+  }
+}

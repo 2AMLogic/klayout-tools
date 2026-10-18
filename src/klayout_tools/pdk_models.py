@@ -644,11 +644,13 @@ def _unbound_mom_capacitor_card(
 
     **Issue #2445 -- ``feed`` is written when measured.** ``feed`` (``cap_cmomi``
     only) is the token ``none``/``same``/``double`` the extractor recovered
-    from the drawn port placement (``extract._mom_feed_variant``); it is
+    from the drawn port placement
+    (``extract_passive_regions._mom_feed_variant``); it is
     written as ``FEED=<token>`` after ``MMAX=`` and omitted entirely when
     ``None`` (a layout matching no PCell signature, or a ``cap_cmomf``), so an
     unmeasured feed still falls to the ``.subckt`` default instead of being
-    guessed. See ``extract._mom_feed_variant`` for the settled mapping.
+    guessed. See ``extract_passive_regions._mom_feed_variant`` for the settled
+    mapping.
 
     **Four of the upstream subcircuit's parameters are always written, plus
     ``feed`` when measured; ``subblock``/``mm_ok`` are never.** The
@@ -787,6 +789,32 @@ def build_subckt_to_class_map(deck_name: str) -> dict[str, str]:
         for device_class, subckt in flavour_table.items():
             result.setdefault(subckt, device_class)
     return result
+
+
+def mos_flavour_for_subckt(subckt_name: str) -> str | None:
+    """The ``_MOS_MODEL_FLAVOURS`` flavour key (e.g. ``"nvt"``, ``"hvi"``,
+    ``"06v0"``) a MOS subcircuit name belongs to, or ``None`` for a
+    default-flavour model or an unknown name (issue #3650).
+
+    The inverse of the flavour tables :func:`build_subckt_to_class_map`
+    deliberately collapses: it is what ``options.compare_mos_flavour`` uses to
+    tell a reference ``X`` call of a flavoured model apart from a default one.
+    A name shared by several decks (``sg13_hv_nmos`` in sg13g2 and
+    sg13cmos5l) resolves to the same key in each.
+    """
+    for flavours in _MOS_MODEL_FLAVOURS.values():
+        for flavour, table in flavours.items():
+            if subckt_name in table.values():
+                return flavour
+    return None
+
+
+def flavoured_mos_class_name(device_class: str, flavour: str) -> str:
+    """The device-class name a flavoured MOS device is compared under when
+    ``options.compare_mos_flavour`` is on (issue #3650), e.g. ``nfet`` +
+    ``nvt`` -> ``nfet__nvt``. Both the reference conversion and the layout-side
+    split derive the name here, so the two sides cannot disagree."""
+    return f"{device_class}__{flavour}"
 
 
 def known_mos_subckt_names() -> dict[str, tuple[str, str]]:
@@ -1467,6 +1495,20 @@ _CAPACITOR_MODEL_TABLE: dict[tuple[str, str], dict[str, str]] = {
         "cap_mim_1f0_m4m5_noshield": "cap_mim_1f0_m4m5_noshield",
         "cap_mim_1f5_m4m5_noshield": "cap_mim_1f5_m4m5_noshield",
         "cap_mim_2f0_m4m5_noshield": "cap_mim_2f0_m4m5_noshield",
+        # MOS capacitors (issue #2919): the PDK ships `.subckt cap_nmos_03v3
+        # 1 2 c_length=l c_width=w dtemp=0` (and the pmos/06v0/`_b` forms) in
+        # `libs.tech/ngspice/sm141064.ngspice`, same `c_` spellings as the
+        # MiM. The `_dn` classes have no subcircuit of their own (the runset
+        # folds them onto the plain name unless CONSIDER_DN_DW_FEATURES), so
+        # they stay unbound.
+        "cap_nmos_03v3": "cap_nmos_03v3",
+        "cap_pmos_03v3": "cap_pmos_03v3",
+        "cap_nmos_06v0": "cap_nmos_06v0",
+        "cap_pmos_06v0": "cap_pmos_06v0",
+        "cap_nmos_03v3_b": "cap_nmos_03v3_b",
+        "cap_pmos_03v3_b": "cap_pmos_03v3_b",
+        "cap_nmos_06v0_b": "cap_nmos_06v0_b",
+        "cap_pmos_06v0_b": "cap_pmos_06v0_b",
     },
     # sg13g2's two declared MIM capacitor classes (issue #1470; classes
     # recognised by issue #1456). Confirmed against a real fetched

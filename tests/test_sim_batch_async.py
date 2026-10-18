@@ -18,6 +18,7 @@ from test_sim_batch import (
     _batch_request,
     _FakeRunner,
     _install_fake_batch_transport,
+    _sim_report,
     _status,
     _write_body,
     _write_request,
@@ -184,6 +185,48 @@ def test_submit_then_status_round_trip_through_the_cli(tmp_path, monkeypatch, ca
     assert status["state"] == "interrupted"
     # Reading an interrupted job re-launches nothing.
     assert len(runner.argvs_matching("launch")) == launches_before
+
+
+def test_submit_only_writes_the_submit_receipt(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    path = _setup(tmp_path, monkeypatch, runner)
+
+    result = _submit(path)
+
+    receipt = json.loads((tmp_path / ".klt" / "sim" / "batch-receipt.json").read_text())
+    assert receipt["job_id"] == result["job_id"]
+    assert receipt["bucket"] == FAKE_BUCKET
+    assert receipt["request_sha256"] == result["request_sha256"]
+    # state stays null: the client does not know the job's terminal state.
+    assert receipt["state"] is None
+
+
+def test_submit_status_attach_round_trip(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    path = _setup(tmp_path, monkeypatch, runner)
+
+    job_id = _submit(path)["job_id"]
+    launches = len(runner.argvs_matching("launch"))
+    uploads = [a for a in runner.argvs_matching("s3", "cp") if "inputs/" in " ".join(a)]
+    assert uploads
+
+    # An interrupted job is reported, and nothing re-launches or re-uploads.
+    runner.default = fake_completed(_status("interrupted", job_id=job_id))
+    status = sba.read_job_status(_batch_request(tmp_path), job_id)
+    assert status["state"] == "interrupted"
+    assert len(runner.argvs_matching("launch")) == launches
+
+    # Once the fleet finishes, status says done and --attach collects.
+    runner.default = fake_completed(_status("done", job_id=job_id))
+    assert sba.read_job_status(_batch_request(tmp_path), job_id)["state"] == "done"
+    runner.outputs = {"report.json": _sim_report()}
+    report = sim.run_sim(str(path), attach_job_id=job_id)
+
+    assert report["environment"]["remote"]["job_id"] == job_id
+    assert len(runner.argvs_matching("launch")) == launches
+    assert [
+        a for a in runner.argvs_matching("s3", "cp") if "inputs/" in " ".join(a)
+    ] == uploads
 
 
 def test_cli_job_status_unknown_job_exits_1_with_code(tmp_path, monkeypatch, capsys):
