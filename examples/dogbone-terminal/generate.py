@@ -36,12 +36,11 @@ Run from the repo root:
 Regenerates `examples/dogbone-terminal/example_sky130.gds`/
 `example_gf180mcu.gds` deterministically, plus their companion
 `example_<family>.drc.json` (`run_drc`'s report against the matching
-curated deck, violation-free (`"status": "clean"` on sky130,
-`"clean_partial"` on gf180mcu, whose untranscribed rules are disclosed) --
-verified by this script itself before it writes them; the `"provenance"` block
-is stripped before writing, matching `examples/drc/example.drc.json`'s own
-convention, since its `klt_version`/`klayout_version` fields are
-environment-dependent, not part of the fixture's contract).
+curated deck, both `"status": "clean"` -- verified by this script itself
+before it writes them; the `"provenance"` block is stripped before writing,
+matching `examples/drc/example.drc.json`'s own convention, since its
+`klt_version`/`klayout_version` fields are environment-dependent, not part
+of the fixture's contract).
 """
 
 import json
@@ -291,9 +290,7 @@ def build_example(family: str, out_dir: str) -> tuple[str, str]:
     report = run_drc(gds_rel_path, family)
     report.pop("provenance", None)  # environment-dependent, stripped (see
     # examples/drc/example.drc.json's own convention)
-    # gf180mcu discloses its untranscribed ESD/GR rules, so a violation-free
-    # run is `clean_partial` there (#3792); only `violations` is a failure.
-    if report["status"] not in ("clean", "clean_partial"):
+    if report["status"] != "clean":
         raise SystemExit(
             f"generated {gds_rel_path} is not DRC-clean on '{family}': "
             f"{report['violation_count']} violation(s): {report['rule_counts']}"

@@ -1808,9 +1808,11 @@ MetalTop at least 10 um from `GUARD_RING_MK`, 167/5). The remaining upstream
 rules (`ESD.3a`/`3b`/`4a`/`6`/`7`/`9`/`10`/`pl`, `GR.1`/`3`/`4`/`6`/`11`) need
 derived layers (NCOMP/PCOMP), gate recognition, `LVS_IO` or polygon selectors
 the check kinds lack. They are listed in the deck's `UNTRANSCRIBED_RULES` with
-a reason each, and every `klt drc --deck gf180mcu` report carries them in
-`coverage.skipped` with reason `not_transcribed` (whatever the stream draws),
-so a violation-free run is `clean_partial`, never an unconditional `clean`.
+a reason each, and every `klt drc --deck gf180mcu` report names them in
+`coverage.unmodeled_rules` (whatever the stream draws). That field is
+informational and not graded, so a violation-free run stays `clean` and still
+passes `klt eval` / `klt signoff`; read `unmodeled_rules` to see what a `clean`
+does not cover.
 
 The conductor *above* a cut is checked as well as the layers below it
 (issue #551). `Contact` previously had `CO.3` (Poly2) and `CO.4` (Comp) —
@@ -3151,7 +3153,7 @@ for which skipped rules make a run partial and which do not.
 | `unchecked_rules`                  | array\<object\> | `{"rule": string, "layer": "<layer>/<datatype>", "description": string}` — foundry rules the deck knows about but cannot evaluate (issue #3012; `sg13cmos5l`'s net-aware `NW.b1` was the first, now checked by `net_space`, #3572, so the map is currently empty), listed only when the rule's layer is in the stream, so a `clean` is not read as covering them. Purely informational: does not change `status`. Sorted by rule id. Additive; `[]` for decks that declare none. |
 | `marker_blind_layers_in_stream`    | array\<string\> | `"<layer>/<datatype>"` area-marker layers present in the stream that the selected deck declares it does **not** model rule-switching for (issue #3815; sky130: `81/2` `areaid.ce`). The curated deck evaluates every rule uniformly, so the marker changes no result — a `clean` or an identical violation set with and without the marker is not marker-aware evidence. Purely informational: does not change `status`, violations or the exit code. Sorted; `[]` when none is present or the deck declares none. Curated engine only. Additive. Deck-static counterpart: `klt deck rules` `marker_blind_layers`. |
 | `deck_scope`                       | array\<string\> | Every distinct DRM section / official rule-id prefix the selected deck's rules claim to implement — a static property of the deck, independent of the input stream (issue #566). Sorted alphabetically. |
-| `unmodeled_rules`                  | array\<string\> | Curated engine only: official foundry-runset rule ids the selected deck knowingly does **not** transcribe (issue #3031) — a static property of the deck. sky130: `m1.5`, `m2.5`, `via.5a`, `via2.5`, `via3.5`. See below. Sorted alphabetically; empty for a deck that declares none. |
+| `unmodeled_rules`                  | array\<string\> | Curated engine only: official foundry-runset rule ids the selected deck knowingly does **not** transcribe (issue #3031) — a static property of the deck. sky130: `m1.5`, `m2.5`, `via.5a`, `via2.5`, `via3.5`; gf180mcu: the untranscribed `ESD.*`/`GR.*` remainder (issue #3792). See below. Sorted alphabetically; empty for a deck that declares none. |
 | `rule_categories`                  | array\<string\> | KLayout engine only: declared RDB categories, never execution proof. |
 | `nothing_checked`                  | boolean         | Whether this run checked *nothing at all*, so its `status` says nothing about the layout — the shared convention in [`../json-contract.md`](../json-contract.md). See below. |
 | `nothing_checked_reasons`          | array\<string\> | Why, using the shared reason codes. Empty exactly when `nothing_checked` is `false`. |
@@ -3194,11 +3196,6 @@ geometry *can* exist there — the engine simply has no integral grid to
 measure it with (see the check kind's own section above). Tested after the
 vacuity question, so a rule whose layer is also absent stays `inapplicable`:
 with no geometry at all, the absent layer is the more informative reason.
-
-A rule the selected deck knowingly never transcribed (issue #3792; today
-gf180mcu's `ESD.*`/`GR.*` remainder, see the deck's `UNTRANSCRIBED_RULES`) is
-always `skipped` with reason `not_transcribed`, whatever the stream draws: no
-check of it exists to be inapplicable. The run is `clean_partial`.
 
 Every check kind this engine dispatches measures drawn geometry and reports
 nothing when the geometry it measures is empty: `width`/`space`/`notch`/
@@ -3323,6 +3320,9 @@ each family's primary (stricter-margin, all-edges) rule. A layout can
 therefore pass `klt drc --deck sky130` and still fail the runset on exactly
 these. The field is purely additive and deck-static (identical across inputs);
 re-check those enclosures with the PDK's own `sky130A_mr.drc` before signoff.
+For gf180mcu the field lists the `ESD.*`/`GR.*` rules in the deck's
+`UNTRANSCRIBED_RULES` (issue #3792); like sky130's it is informational and a
+violation-free run stays `clean`.
 
 #### `coverage.deck_scope`
 

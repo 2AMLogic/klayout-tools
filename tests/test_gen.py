@@ -723,7 +723,7 @@ def test_phase2_generator_default_params_are_drc_clean(
     assert output.is_file()
 
     drc_report = run_drc(str(output), deck)
-    assert drc_report["status"] in {"clean", "clean_partial"}
+    assert drc_report["status"] == "clean"
 
     # bbox_um and ports[] are populated (acceptance criterion #3).
     bbox = report["bbox_um"]
@@ -1198,7 +1198,7 @@ def test_mos_array_flavor_pfet_draws_well_and_is_drc_clean(
     assert report["drc_hints"]["notes"] == expected_notes
 
     drc_report = run_drc(str(output), deck)
-    assert drc_report["status"] in {"clean", "clean_partial"}, drc_report["violations"]
+    assert drc_report["status"] == "clean", drc_report["violations"]
 
 
 # --------------------------------------------------------------------------- #
@@ -1296,7 +1296,7 @@ def test_mos_array_guard_ring_flavor_pfet_draws_well_and_is_drc_clean(
     assert report["drc_hints"]["notes"] == []
 
     drc_report = run_drc(str(output), deck)
-    assert drc_report["status"] in {"clean", "clean_partial"}
+    assert drc_report["status"] == "clean"
 
 
 @pytest.mark.parametrize("generator", ["mos_array", "diff_pair", "esd_device"])
@@ -1508,7 +1508,7 @@ def test_mos_array_minimum_gate_length_is_drc_clean(
     assert report["drc_hints"]["notes"], "expected an advisory note below the default"
 
     drc_report = run_drc(str(output), deck)
-    assert drc_report["status"] in {"clean", "clean_partial"}, drc_report["violations"]
+    assert drc_report["status"] == "clean", drc_report["violations"]
     assert drc_report["rule_counts"] == {}
 
 
@@ -1536,7 +1536,7 @@ def test_diff_pair_minimum_gate_length_is_drc_clean(
     )
 
     drc_report = run_drc(str(output), deck)
-    assert drc_report["status"] in {"clean", "clean_partial"}
+    assert drc_report["status"] == "clean"
     assert drc_report["rule_counts"] == {}
 
 
@@ -1627,7 +1627,7 @@ def test_mos_array_voltage_flavor_medium_voltage_draws_marker_and_is_drc_clean(
     assert report["drc_hints"]["notes"] == []
 
     drc_report = run_drc(str(output), "gf180mcu")
-    assert drc_report["status"] in {"clean", "clean_partial"}, drc_report["violations"]
+    assert drc_report["status"] == "clean", drc_report["violations"]
 
 
 def test_mos_array_voltage_flavor_unsupported_on_sky130_notes_not_drawn(
@@ -1874,7 +1874,7 @@ def test_mos_array_voltage_flavor_and_flavor_pfet_both_drawn_and_drc_clean(
     assert report["drc_hints"]["notes"] == []
 
     drc_report = run_drc(str(output), "gf180mcu")
-    assert drc_report["status"] in {"clean", "clean_partial"}, drc_report["violations"]
+    assert drc_report["status"] == "clean", drc_report["violations"]
 
 
 #: sky130's thick-oxide ("hvi") marker (issue #1912) -- the same `(75, 20)`
@@ -2154,7 +2154,7 @@ def test_mos_gate_contact_reports_metal_port_and_is_drc_clean(
     assert gate_metal != source_metal
 
     drc_report = run_drc(str(output), deck)
-    assert drc_report["status"] in {"clean", "clean_partial"}
+    assert drc_report["status"] == "clean"
 
 
 def test_mos_gate_contact_defaults_off_and_leaves_geometry_unchanged(
@@ -2299,7 +2299,7 @@ def test_mos_array_parallel_fingers_are_drc_clean(
     )
 
     drc_report = run_drc(str(output), deck)
-    assert drc_report["status"] in {"clean", "clean_partial"}, drc_report["violations"]
+    assert drc_report["status"] == "clean", drc_report["violations"]
 
 
 def test_mos_array_series_finger_topology_reports_notes_not_warnings(
@@ -2660,9 +2660,7 @@ def test_mos_array_interior_channel_is_drc_clean(tmp_path, both_pdk_root):
                 }
             )
             drc_report = run_drc(str(output), deck)
-            assert drc_report["status"] in {"clean", "clean_partial"}, drc_report[
-                "violations"
-            ]
+            assert drc_report["status"] == "clean", drc_report["violations"]
 
 
 # `pitch_x_um`/`pitch_y_um` (issue #3299, Phase 1): explicit pitch override,
@@ -3300,7 +3298,7 @@ def test_gf180mcu_res_array_metal_level_draws_expected_device_class(
     assert report["drc_hints"]["matched_group_id"] == "res_array:1"
 
     drc_report = run_drc(str(output), "gf180mcu")
-    assert drc_report["status"] in {"clean", "clean_partial"}, drc_report["violations"]
+    assert drc_report["status"] == "clean", drc_report["violations"]
 
     extract_report = run_extract(str(output), "gf180mcu")
     assert extract_report["device_counts"] == {device_class: 1}
@@ -3520,7 +3518,7 @@ def test_res_array_rows_folded_is_drc_clean(tmp_path, both_pdk_root, deck):
     )
     assert output.is_file()
     drc_report = run_drc(str(output), deck)
-    assert drc_report["status"] in {"clean", "clean_partial"}, drc_report["violations"]
+    assert drc_report["status"] == "clean", drc_report["violations"]
     assert report["device_count"] == 9
 
 
@@ -3821,7 +3819,7 @@ def test_gf180mcu_diff_pair_off_grid_ring_padding_is_drc_clean(
         assert (x1 - x0, y1 - y0) == (expected_dbu, expected_dbu)
 
     drc_report = run_drc(str(output), "gf180mcu")
-    assert drc_report["status"] in {"clean", "clean_partial"}, drc_report["violations"]
+    assert drc_report["status"] == "clean", drc_report["violations"]
     assert not any(rule.startswith("contact.") for rule in drc_report["rule_counts"])
 
 
@@ -3865,7 +3863,7 @@ def test_gf180mcu_sibling_guard_ring_generators_off_grid_padding_drc_clean(
         }
     )
     drc_report = run_drc(str(output), "gf180mcu")
-    assert drc_report["status"] in {"clean", "clean_partial"}, drc_report["violations"]
+    assert drc_report["status"] == "clean", drc_report["violations"]
     assert not any(rule.startswith("contact.") for rule in drc_report["rule_counts"])
 
 
@@ -3913,7 +3911,7 @@ def test_gf180mcu_off_grid_ring_padding_ring_vertices_on_mfg_grid(
                 assert pt.x % grid_dbu == 0 and pt.y % grid_dbu == 0, (layer, pt)
 
     drc_report = run_drc(str(output), "gf180mcu")
-    assert drc_report["status"] in {"clean", "clean_partial"}, drc_report["violations"]
+    assert drc_report["status"] == "clean", drc_report["violations"]
 
 
 def test_snap_ring_box_um_grows_outer_and_shrinks_inner_onto_grid():
@@ -5010,7 +5008,7 @@ def test_cap_array_gf180mcu_default_params_are_drc_clean(tmp_path, both_pdk_root
 
     report = run_drc(str(gds_path), "gf180mcu")
 
-    assert report["status"] in {"clean", "clean_partial"}, report["violations"]
+    assert report["status"] == "clean", report["violations"]
 
 
 def test_cap_array_gf180mcu_spacing_is_floored_to_the_mim_space_rule(
@@ -5034,7 +5032,7 @@ def test_cap_array_gf180mcu_spacing_is_floored_to_the_mim_space_rule(
     assert any("widened" in note for note in gf180_report["drc_hints"]["notes"]), (
         gf180_report["drc_hints"]["notes"]
     )
-    assert run_drc(str(gf180_out), "gf180mcu")["status"] in {"clean", "clean_partial"}
+    assert run_drc(str(gf180_out), "gf180mcu")["status"] == "clean"
 
     sky130_report = generate(
         {
@@ -5304,9 +5302,7 @@ def test_guard_ring_contacts_per_side_sweep_matches_drc_on_elongated_region(
     )
     drc_report = run_drc(str(output), "gf180mcu")
     if n <= 9:
-        assert drc_report["status"] in {"clean", "clean_partial"}, drc_report[
-            "violations"
-        ]
+        assert drc_report["status"] == "clean", drc_report["violations"]
     else:
         assert drc_report["status"] == "violations"
         assert "contact.space.1" in drc_report["rule_counts"]
@@ -5331,7 +5327,7 @@ def test_guard_ring_gap_margin_note_does_not_fire_for_a_comfortable_gap(
         }
     )
     drc_report = run_drc(str(output), "gf180mcu")
-    assert drc_report["status"] in {"clean", "clean_partial"}, drc_report["violations"]
+    assert drc_report["status"] == "clean", drc_report["violations"]
     assert any(
         "leaves less than 0.3um" in note for note in report["drc_hints"]["notes"]
     )
@@ -5371,7 +5367,7 @@ def test_guard_ring_per_axis_contacts_targets_independent_pitch(
     )
     assert report["device_count"] == 2 * 30 + 2 * 4
     drc_report = run_drc(str(output), "gf180mcu")
-    assert drc_report["status"] in {"clean", "clean_partial"}, drc_report["violations"]
+    assert drc_report["status"] == "clean", drc_report["violations"]
 
 
 def test_guard_ring_per_axis_override_too_tight_is_flagged_not_silent(
@@ -5830,7 +5826,7 @@ def test_well_island_default_params_are_drc_clean(
     output, report = _well_island(
         tmp_path, both_pdk_root, variant, f"island_{deck}", net="VB"
     )
-    assert run_drc(str(output), deck)["status"] in {"clean", "clean_partial"}
+    assert run_drc(str(output), deck)["status"] == "clean"
     assert report["drc_hints"]["well_separation_um"] == pytest.approx(separation_um)
 
 
@@ -5896,7 +5892,7 @@ def test_well_island_round_trip_two_named_body_nets(
     )
 
     drc_report = run_drc(str(assembled), deck)
-    assert drc_report["status"] in {"clean", "clean_partial"}, drc_report["violations"]
+    assert drc_report["status"] == "clean", drc_report["violations"]
 
     extract_report = run_extract(str(assembled), deck)
     pfets = [d for d in extract_report["devices"] if d["class"].endswith("fet")]
@@ -6341,7 +6337,7 @@ def test_diff_pair_flavor_pfet_draws_well_and_is_drc_clean(
     assert report["drc_hints"]["notes"] == []
 
     drc_report = run_drc(str(output), deck)
-    assert drc_report["status"] in {"clean", "clean_partial"}
+    assert drc_report["status"] == "clean"
 
 
 def test_diff_pair_flavor_pfet_no_guard_ring_still_draws_device_well(
@@ -6427,7 +6423,7 @@ def test_diff_pair_voltage_flavor_medium_voltage_draws_marker_and_is_drc_clean(
     assert report["drc_hints"]["notes"] == []
 
     drc_report = run_drc(str(output), "gf180mcu")
-    assert drc_report["status"] in {"clean", "clean_partial"}, drc_report["violations"]
+    assert drc_report["status"] == "clean", drc_report["violations"]
 
 
 def test_diff_pair_voltage_flavor_hvi_draws_marker_and_is_drc_clean(
@@ -8005,7 +8001,7 @@ def test_gf180mcu_mos_array_pfet_flavor_still_omits_well_tap_port(
     assert "WELL_TAP" not in {p["name"] for p in response["ports"]}
 
     drc_report = run_drc(str(output), "gf180mcu")
-    assert drc_report["status"] in {"clean", "clean_partial"}, drc_report["violations"]
+    assert drc_report["status"] == "clean", drc_report["violations"]
 
 
 #: cmos5l's thick-gate-oxide ("-HV") marker (issue #1472) -- the same
@@ -8422,7 +8418,7 @@ def test_bjt_array_default_params_are_drc_clean(deck, tmp_path, both_pdk_root):
     assert output.is_file()
 
     drc_report = run_drc(str(output), deck)
-    assert drc_report["status"] in {"clean", "clean_partial"}, drc_report["violations"]
+    assert drc_report["status"] == "clean", drc_report["violations"]
 
     bbox = report["bbox_um"]
     assert bbox["x1"] > bbox["x0"]
@@ -8679,7 +8675,7 @@ def test_bjt_array_single_device_is_drc_clean(tmp_path, both_pdk_root):
     )
     assert report["device_count"] == 1
     drc_report = run_drc(str(output), "gf180mcu")
-    assert drc_report["status"] in {"clean", "clean_partial"}, drc_report["violations"]
+    assert drc_report["status"] == "clean", drc_report["violations"]
 
 
 def test_bjt_array_without_collector_ring_notes_it(tmp_path, both_pdk_root):
@@ -8696,7 +8692,7 @@ def test_bjt_array_without_collector_ring_notes_it(tmp_path, both_pdk_root):
     names = {p["name"] for p in report["ports"]}
     assert not {"COLL_N", "COLL_S", "COLL_E", "COLL_W"} & names
     drc_report = run_drc(str(output), "gf180mcu")
-    assert drc_report["status"] in {"clean", "clean_partial"}, drc_report["violations"]
+    assert drc_report["status"] == "clean", drc_report["violations"]
 
 
 @pytest.mark.parametrize(
@@ -9012,7 +9008,7 @@ def test_bjt_array_collector_ring_gap_reports_gap_port_and_stays_drc_clean(
     assert "COLL_N" not in port_names
     assert any("routing opening" in n for n in report["drc_hints"]["notes"])
     drc_report = run_drc(str(output), "gf180mcu")
-    assert drc_report["status"] in {"clean", "clean_partial"}, drc_report["violations"]
+    assert drc_report["status"] == "clean", drc_report["violations"]
 
 
 @pytest.mark.parametrize("generator", ["diff_pair", "bjt_array", "esd_device"])
@@ -9066,7 +9062,7 @@ def test_bond_pad_default_params_are_drc_clean(deck, tmp_path, both_pdk_root):
     assert output.is_file()
 
     drc_report = run_drc(str(output), deck)
-    assert drc_report["status"] in {"clean", "clean_partial"}, drc_report["violations"]
+    assert drc_report["status"] == "clean", drc_report["violations"]
 
     bbox = report["bbox_um"]
     assert bbox["x1"] > bbox["x0"]
@@ -9367,7 +9363,7 @@ def test_esd_device_default_params_are_drc_clean(deck, tmp_path, both_pdk_root):
     assert output.is_file()
 
     drc_report = run_drc(str(output), deck)
-    assert drc_report["status"] in {"clean", "clean_partial"}
+    assert drc_report["status"] == "clean"
 
     bbox = report["bbox_um"]
     assert bbox["x1"] > bbox["x0"]
@@ -9518,9 +9514,7 @@ def test_esd_device_salicide_block_option(
     assert (_GF180_SALICIDE_BLOCK_LAYER in present) == expect_layer
     if expect_layer:
         drc_report = run_drc(str(output), deck)
-        assert drc_report["status"] in {"clean", "clean_partial"}, drc_report[
-            "violations"
-        ]
+        assert drc_report["status"] == "clean", drc_report["violations"]
     else:
         assert any("salicide_block" in n for n in report["drc_hints"]["notes"])
 
@@ -9673,7 +9667,7 @@ def test_esd_device_ring_gap_reports_gap_port_and_stays_drc_clean(
     assert gap["width_um"] == 1.0
     assert any("routing opening" in n for n in report["drc_hints"]["notes"])
     drc_report = run_drc(str(output), "gf180mcu")
-    assert drc_report["status"] in {"clean", "clean_partial"}, drc_report["violations"]
+    assert drc_report["status"] == "clean", drc_report["violations"]
 
 
 @pytest.mark.parametrize(
@@ -9935,7 +9929,7 @@ def test_phase2_generator_stays_drc_clean_at_pdk_resolved_finer_dbu(
     assert report["dbu_um"] == pytest.approx(0.0005)
 
     drc_report = run_drc(str(fine), "gf180mcu")
-    assert drc_report["status"] in {"clean", "clean_partial"}, drc_report["violations"]
+    assert drc_report["status"] == "clean", drc_report["violations"]
 
     assert _merged_geometry_um(coarse) == _merged_geometry_um(fine), (
         f"{generator_name}: drawn geometry differs between 0.001 and 0.0005 dbu"
@@ -9976,7 +9970,7 @@ def test_dogbone_terminal_example_matches_committed_json(family):
     actual = run_drc(gds_rel_path, family)
     actual.pop("provenance", None)
 
-    assert actual["status"] in {"clean", "clean_partial"}
+    assert actual["status"] == "clean"
     assert actual == expected
 
 
@@ -10140,7 +10134,7 @@ def test_gf180mcu_mos_array_bottom_edge_gate_endcap_matches_top_edge_pad_clearan
     assert poly_bbox["bottom"] == pytest.approx(device_bottom - endcap_um)
 
     drc_report = run_drc(str(output), "gf180mcu")
-    assert drc_report["status"] in {"clean", "clean_partial"}, drc_report["violations"]
+    assert drc_report["status"] == "clean", drc_report["violations"]
 
 
 @pytest.mark.parametrize(
@@ -10241,7 +10235,7 @@ def test_gf180mcu_mos_array_pfet_flavor_draws_pplus_not_nplus_implant(
     assert (active_region - implant_region).is_empty()
 
     drc_report = run_drc(str(output), "gf180mcu")
-    assert drc_report["status"] in {"clean", "clean_partial"}, drc_report["violations"]
+    assert drc_report["status"] == "clean", drc_report["violations"]
 
 
 def _sd_implant_absence_note(family: str, flavor: str) -> str:
@@ -10539,7 +10533,7 @@ def test_gf180mcu_mos_array_voltage_flavor_marker_grows_past_well_margin(
         assert reach_um > well_margin, side
 
     drc_report = run_drc(str(output), "gf180mcu")
-    assert drc_report["status"] in {"clean", "clean_partial"}, drc_report["violations"]
+    assert drc_report["status"] == "clean", drc_report["violations"]
 
 
 # --------------------------------------------------------------------------- #
@@ -10622,7 +10616,7 @@ def test_gf180mcu_guard_ring_default_tap_ring_covered_by_well_tie_implant(
     assert (31, 0) not in present  # no Pplus drawn for a well-tied ring
 
     drc_report = run_drc(str(output), "gf180mcu")
-    assert drc_report["status"] in {"clean", "clean_partial"}, drc_report["violations"]
+    assert drc_report["status"] == "clean", drc_report["violations"]
 
 
 def test_gf180mcu_guard_ring_no_well_tap_ring_covered_by_pplus_implant(
@@ -10663,7 +10657,7 @@ def test_gf180mcu_guard_ring_no_well_tap_ring_covered_by_pplus_implant(
     assert (21, 0) not in present  # no Nwell drawn either (add_well=False)
 
     drc_report = run_drc(str(output), "gf180mcu")
-    assert drc_report["status"] in {"clean", "clean_partial"}, drc_report["violations"]
+    assert drc_report["status"] == "clean", drc_report["violations"]
 
 
 def test_gf180mcu_guard_ring_gap_implant_ring_matches_gap_cut_tap_ring(
@@ -10851,7 +10845,7 @@ def test_gf180mcu_guard_ring_off_grid_implant_still_extends_exactly_margin(
     _assert_ring_implant_tracks_comp(active_region, nplus_region, layout.dbu)
 
     drc_report = run_drc(str(output), "gf180mcu")
-    assert drc_report["status"] in {"clean", "clean_partial"}, drc_report["violations"]
+    assert drc_report["status"] == "clean", drc_report["violations"]
 
 
 #: `diff_pair` paddings that put the automatically-sized ring's own box edges on
@@ -10980,7 +10974,7 @@ def test_gf180mcu_ring_implant_completes_comp_coverage_with_guard_ring_enabled(
     assert (active_region - (nplus_region + pplus_region)).is_empty()
 
     drc_report = run_drc(str(output), "gf180mcu")
-    assert drc_report["status"] in {"clean", "clean_partial"}, drc_report["violations"]
+    assert drc_report["status"] == "clean", drc_report["violations"]
 
 
 def test_gf180mcu_bjt_array_collector_ring_covered_by_pplus_implant(
@@ -11045,7 +11039,7 @@ def test_gf180mcu_bjt_array_collector_ring_covered_by_pplus_implant(
     assert (nplus_region & ring_region).is_empty()
 
     drc_report = run_drc(str(with_ring_output), "gf180mcu")
-    assert drc_report["status"] in {"clean", "clean_partial"}, drc_report["violations"]
+    assert drc_report["status"] == "clean", drc_report["violations"]
 
 
 @pytest.mark.parametrize(
@@ -11572,7 +11566,7 @@ def test_mos_cap_gf180mcu_is_marked_ported_and_drc_clean(
     # S and D are one tied terminal, not two, and the body tie is the ring.
     assert "U0_S" not in names and "U0_D" not in names
     assert any(n.startswith("TAP_") for n in names)
-    assert run_drc(str(output), "gf180mcu")["status"] in {"clean", "clean_partial"}
+    assert run_drc(str(output), "gf180mcu")["status"] == "clean"
 
 
 def test_mos_cap_ties_every_source_drain_segment(tmp_path, both_pdk_root):

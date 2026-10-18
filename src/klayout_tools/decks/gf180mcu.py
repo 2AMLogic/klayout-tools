@@ -2117,8 +2117,8 @@ DECK += [
 #   an absent level is simply inapplicable here).
 #
 # Everything else in the two files is in `UNTRANSCRIBED_RULES` below, with the
-# reason, and `klt drc` reports each as a `not_transcribed` entry in
-# `coverage.skipped` so a clean report cannot be read as covering them.
+# reason, and `klt drc` lists each in `coverage.unmodeled_rules` so a clean
+# report cannot be read as covering them (informational; `status` is unchanged).
 _ESD = (24, 0)  # ESD
 _GUARD_RING_MK = (167, 5)  # GUARD_RING_MK
 _ESD_PROVENANCE_FILE = "esd"
@@ -2242,9 +2242,9 @@ DECK += [
 
 #: Upstream `esd.rb` / `guard_ring.rb` rule ids this deck knowingly does not
 #: transcribe, with the reason each is out of reach of the existing check kinds
-#: (issue #3792). `klt drc` lists every key in `coverage.skipped` with reason
-#: `not_transcribed`, whatever the stream draws. Remove an id when its rule is
-#: added.
+#: (issue #3792). `UNMODELED_RULES` below surfaces every key as
+#: `coverage.unmodeled_rules` (informational, not graded, so `status` stays
+#: `clean`). Remove an id when its rule is added.
 UNTRANSCRIBED_RULES: dict[str, str] = {
     "ESD.3a": "measured to NCOMP, a derived layer (COMP inside Nplus), not a drawn one",
     "ESD.3b": (
@@ -2268,6 +2268,8 @@ UNTRANSCRIBED_RULES: dict[str, str] = {
     "GR.6": "COMP width restricted to `not_outside(guard_ring_mk)` shapes",
     "GR.11": "`guard_ring_mk.not_interacting(pad)`: no polygon-selector check kind",
 }
+
+UNMODELED_RULES: tuple[str, ...] = tuple(UNTRANSCRIBED_RULES)
 
 # (layer, datatype) -> upstream layer name, from gf180mcu.lyp's layer-map
 # (google/globalfoundries-pdk-libs-gf180mcu_fd_pv), used only to render

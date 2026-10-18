@@ -52,7 +52,7 @@ def _gen(root, tmp_path, generator, params, name, variant="gf180mcuD"):
 
 def _assert_deck_clean_and_in_reach(output, flavor):
     drc_report = run_drc(str(output), "gf180mcu")
-    assert drc_report["status"] in {"clean", "clean_partial"}, drc_report["violations"]
+    assert drc_report["status"] == "clean", drc_report["violations"]
     # Independent of the deck rule: every gate region is within 20 um of a tap
     # whose implant matches the flavor's tie (Pplus substrate / Nplus well).
     tap_implant = NPLUS if flavor == "pfet" else PPLUS

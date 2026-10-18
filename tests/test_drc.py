@@ -1031,7 +1031,7 @@ def test_run_drc_gf180mcu_clean(tmp_path):
 
     report = run_drc(str(path), "gf180mcu")
 
-    assert report["status"] in {"clean", "clean_partial"}
+    assert report["status"] == "clean"
     assert report["violation_count"] == 0
     assert report["rule_counts"] == {}
     assert report["violations"] == []
@@ -1054,7 +1054,7 @@ def test_run_drc_gf180mcu_missing_layer_does_not_crash(tmp_path):
 
     assert report["schema_version"] == 2
     assert report["deck"] == "gf180mcu"
-    assert report["status"] in {"clean", "clean_partial"}
+    assert report["status"] == "clean"
     assert report["violation_count"] == 0
 
 
@@ -1140,7 +1140,7 @@ def test_run_drc_gf180mcu_dualgate_marker_no_warning_without_overlap(tmp_path):
 
     report = run_drc(str(path), "gf180mcu")
 
-    assert report["status"] in {"clean", "clean_partial"}
+    assert report["status"] == "clean"
     assert report["coverage"]["voltage_domain_warnings"] == []
 
 
@@ -1230,7 +1230,7 @@ def test_run_drc_gf180mcu_comp_width_lv_mv_split(
     report = run_drc(str(path), "gf180mcu")
 
     if expected_rule is None:
-        assert report["status"] in {"clean", "clean_partial"}, report["rule_counts"]
+        assert report["status"] == "clean", report["rule_counts"]
     else:
         assert report["rule_counts"].get(expected_rule, 0) >= 1, report["rule_counts"]
         other = (
@@ -1267,7 +1267,7 @@ def test_run_drc_gf180mcu_comp_space_lv_mv_split(
     report = run_drc(str(path), "gf180mcu")
 
     if expected_rule is None:
-        assert report["status"] in {"clean", "clean_partial"}, report["rule_counts"]
+        assert report["status"] == "clean", report["rule_counts"]
     else:
         assert report["rule_counts"].get(expected_rule, 0) >= 1, report["rule_counts"]
         other = (
@@ -1477,7 +1477,7 @@ def test_gf180mcu_corpus_layout_produces_well_formed_report(layout_path: Path):
     assert report["file"] == str(layout_path)
     assert report["deck"] == "gf180mcu"
     assert report["dbu_um"] == 0.001
-    assert report["status"] in {"clean", "clean_partial", "violations"}
+    assert report["status"] in {"clean", "violations"}
     assert isinstance(report["violation_count"], int)
     assert report["violation_count"] == sum(report["rule_counts"].values())
     assert len(report["violations"]) == report["violation_count"]
@@ -1634,7 +1634,7 @@ def test_run_drc_gf180mcu_four_layer_layout_still_clean(tmp_path):
 
     report = run_drc(str(path), "gf180mcu")
 
-    assert report["status"] in {"clean", "clean_partial"}
+    assert report["status"] == "clean"
     assert report["violation_count"] == 0
     assert report["rule_counts"] == {}
     assert report["violations"] == []
@@ -1679,7 +1679,7 @@ def test_run_drc_gf180mcu_nwell_space_clean(tmp_path):
 
     report = run_drc(str(path), "gf180mcu")
 
-    assert report["status"] in {"clean", "clean_partial"}
+    assert report["status"] == "clean"
     assert report["violation_count"] == 0
 
 
@@ -1730,7 +1730,7 @@ def test_run_drc_gf180mcu_nwell_enclosing_comp_clean(tmp_path):
 
     report = run_drc(str(path), "gf180mcu")
 
-    assert report["status"] in {"clean", "clean_partial"}
+    assert report["status"] == "clean"
     assert report["violation_count"] == 0
 
 
@@ -1780,7 +1780,7 @@ def test_run_drc_gf180mcu_bjt_separation_clean(tmp_path):
 
     report = run_drc(str(path), "gf180mcu")
 
-    assert report["status"] in {"clean", "clean_partial"}
+    assert report["status"] == "clean"
     assert report["violation_count"] == 0
 
 
@@ -1842,7 +1842,7 @@ def test_run_drc_gf180mcu_metal2_clean(tmp_path):
 
     report = run_drc(str(path), "gf180mcu")
 
-    assert report["status"] in {"clean", "clean_partial"}
+    assert report["status"] == "clean"
     assert report["violation_count"] == 0
 
 
@@ -1904,7 +1904,7 @@ def test_run_drc_gf180mcu_metal3_clean(tmp_path):
 
     report = run_drc(str(path), "gf180mcu")
 
-    assert report["status"] in {"clean", "clean_partial"}
+    assert report["status"] == "clean"
     assert report["violation_count"] == 0
 
 
@@ -1966,7 +1966,7 @@ def test_run_drc_gf180mcu_metal4_clean(tmp_path):
 
     report = run_drc(str(path), "gf180mcu")
 
-    assert report["status"] in {"clean", "clean_partial"}
+    assert report["status"] == "clean"
     assert report["violation_count"] == 0
 
 
@@ -1984,7 +1984,7 @@ def test_run_drc_gf180mcu_metal4_at_threshold_clean(tmp_path):
 
     report = run_drc(str(path), "gf180mcu")
 
-    assert report["status"] in {"clean", "clean_partial"}
+    assert report["status"] == "clean"
     assert report["violation_count"] == 0
 
 
@@ -2046,7 +2046,7 @@ def test_run_drc_gf180mcu_metal5_clean(tmp_path):
 
     report = run_drc(str(path), "gf180mcu")
 
-    assert report["status"] in {"clean", "clean_partial"}
+    assert report["status"] == "clean"
     assert report["violation_count"] == 0
 
 
@@ -2108,7 +2108,7 @@ def test_run_drc_gf180mcu_metaltop_clean(tmp_path):
 
     report = run_drc(str(path), "gf180mcu")
 
-    assert report["status"] in {"clean", "clean_partial"}
+    assert report["status"] == "clean"
     assert report["violation_count"] == 0
 
 
@@ -2386,7 +2386,7 @@ def test_run_drc_gf180mcu_mim_enclosing_fusetop_clean(tmp_path):
 
     report = run_drc(str(path), "gf180mcu")
 
-    assert report["status"] in {"clean", "clean_partial"}
+    assert report["status"] == "clean"
     assert report["violation_count"] == 0
 
 
@@ -2460,7 +2460,7 @@ def test_run_drc_gf180mcu_mim_enclosing_via4_clean(tmp_path):
 
     report = run_drc(str(path), "gf180mcu")
 
-    assert report["status"] in {"clean", "clean_partial"}
+    assert report["status"] == "clean"
     assert report["violation_count"] == 0
 
 
@@ -2614,7 +2614,7 @@ def test_run_drc_gf180mcu_via_clean(rule_prefix, layer_tuple, layer_name, tmp_pa
 
     report = run_drc(str(path), "gf180mcu")
 
-    assert report["status"] in {"clean", "clean_partial"}
+    assert report["status"] == "clean"
     assert report["violation_count"] == 0
 
 
@@ -2652,7 +2652,7 @@ def test_run_drc_gf180mcu_via_layers_now_covered_by_their_own_rules(tmp_path):
 
     report = run_drc(str(path), "gf180mcu")
 
-    assert report["status"] in {"clean", "clean_partial"}
+    assert report["status"] == "clean"
     for _rule_prefix, layer_tuple, _layer_name in _GF180MCU_VIA_LAYERS:
         formatted = f"{layer_tuple[0]}/{layer_tuple[1]}"
         assert formatted in report["coverage"]["layers_checked"]
@@ -2780,7 +2780,7 @@ def test_run_drc_gf180mcu_contact_fixed_size_boundaries(
 
     assert report["rule_counts"].get("contact.width.1", 0) == expected_count
     if expected_count == 0:
-        assert report["status"] in {"clean", "clean_partial"}
+        assert report["status"] == "clean"
         return
     assert report["status"] == "violations"
     reported = [v for v in report["violations"] if v["rule"] == "contact.width.1"]
@@ -3062,7 +3062,7 @@ def test_run_drc_gf180mcu_cut_enclosure_clean(
 
     report = run_drc(str(path), "gf180mcu")
 
-    assert report["status"] in {"clean", "clean_partial"}
+    assert report["status"] == "clean"
     assert report["violation_count"] == 0
 
 
@@ -3845,7 +3845,7 @@ def test_gf180mcu_corpus_cli_json_matches_run_drc(capsys):
     )
     actual = json.loads(capsys.readouterr().out)
 
-    assert exit_code == (0 if expected["status"] != "violations" else 3)
+    assert exit_code == (0 if expected["status"] == "clean" else 3)
     assert actual == expected
 
 
@@ -4333,7 +4333,7 @@ def test_run_drc_gf180mcu_pad_enclosing_metal5_clean(tmp_path):
 
     report = run_drc(str(path), "gf180mcu")
 
-    assert report["status"] in {"clean", "clean_partial"}
+    assert report["status"] == "clean"
     assert report["violation_count"] == 0
 
 
@@ -4355,7 +4355,7 @@ def test_run_drc_gf180mcu_pad_layer_now_covered(tmp_path):
 
     report = run_drc(str(path), "gf180mcu")
 
-    assert report["status"] in {"clean", "clean_partial"}
+    assert report["status"] == "clean"
     assert "37/0" in report["coverage"]["layers_checked"]
     assert "37/0" not in report["coverage"]["layers_in_stream_without_rules"]
 
@@ -4458,7 +4458,7 @@ def test_run_drc_gf180mcu_implant_width_boundary_clean(tmp_path, implant):
 
     report = run_drc(str(path), "gf180mcu")
 
-    assert report["status"] in {"clean", "clean_partial"}, report["rule_counts"]
+    assert report["status"] == "clean", report["rule_counts"]
 
 
 @pytest.mark.parametrize("implant", ["nplus", "pplus"])
@@ -4489,7 +4489,7 @@ def test_run_drc_gf180mcu_implant_space_violation(tmp_path, implant):
     clean_path = tmp_path / f"{implant}_space_clean.gds"
     clean.write(str(clean_path))
 
-    assert run_drc(str(clean_path), "gf180mcu")["status"] in {"clean", "clean_partial"}
+    assert run_drc(str(clean_path), "gf180mcu")["status"] == "clean"
 
 
 @pytest.mark.parametrize(
@@ -4553,7 +4553,7 @@ def test_run_drc_gf180mcu_implant_space_to_opposite_comp(
 
     clean_path = tmp_path / f"{rule_id}.clean.gds"
     build(210).write(str(clean_path))
-    assert run_drc(str(clean_path), "gf180mcu")["status"] in {"clean", "clean_partial"}
+    assert run_drc(str(clean_path), "gf180mcu")["status"] == "clean"
 
 
 @pytest.mark.parametrize("implant", ["nplus", "pplus"])
@@ -4599,7 +4599,7 @@ def test_run_drc_gf180mcu_implant_enclosing_comp(tmp_path, implant):
 
     clean_path = tmp_path / f"{rule_id}.clean.gds"
     build(160).write(str(clean_path))
-    assert run_drc(str(clean_path), "gf180mcu")["status"] in {"clean", "clean_partial"}
+    assert run_drc(str(clean_path), "gf180mcu")["status"] == "clean"
 
 
 @pytest.mark.parametrize("implant", ["nplus", "pplus"])
@@ -4644,7 +4644,7 @@ def test_run_drc_gf180mcu_implant_enclosing_gate_boundary_clean(tmp_path, implan
 
     report = run_drc(str(path), "gf180mcu")
 
-    assert report["status"] in {"clean", "clean_partial"}, report["rule_counts"]
+    assert report["status"] == "clean", report["rule_counts"]
 
 
 def test_run_drc_gf180mcu_implant_rules_ignore_opposite_type_diffusion(tmp_path):
@@ -4666,7 +4666,7 @@ def test_run_drc_gf180mcu_implant_rules_ignore_opposite_type_diffusion(tmp_path)
 
     report = run_drc(str(path), "gf180mcu")
 
-    assert report["status"] in {"clean", "clean_partial"}, report["rule_counts"]
+    assert report["status"] == "clean", report["rule_counts"]
 
 
 def test_run_drc_gf180mcu_pplus_enclosing_comp_skips_without_well_context(tmp_path):
@@ -4695,7 +4695,7 @@ def test_run_drc_gf180mcu_pplus_enclosing_comp_skips_without_well_context(tmp_pa
 
     report = run_drc(str(path), "gf180mcu")
 
-    assert report["status"] in {"clean", "clean_partial"}, report["rule_counts"]
+    assert report["status"] == "clean", report["rule_counts"]
     assert "pplus.enclosing.comp.1" in report["coverage"]["rules_skipped"]
 
     mirror = _gf180mcu_implant_layout(

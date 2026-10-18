@@ -9,12 +9,20 @@ rule for the ESD (24/0) or GUARD_RING_MK (167/5) layers and did not say so.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import klayout.db as kdb
 
-from klayout_tools.decks import get_deck, get_untranscribed_rules
+from klayout_tools.decks import get_deck, get_unmodeled_rules
 from klayout_tools.decks.gf180mcu import LAYER_NAMES, UNTRANSCRIBED_RULES
-from klayout_tools.drc import SKIP_REASON_NOT_TRANSCRIBED, run_drc
+from klayout_tools.drc import run_drc
 
+DOGBONE_GF180MCU = (
+    Path(__file__).resolve().parent.parent
+    / "examples"
+    / "dogbone-terminal"
+    / "example_gf180mcu.gds"
+)
 ESD = (24, 0)
 COMP = (22, 0)
 GUARD_RING_MK = (167, 5)
@@ -96,17 +104,12 @@ def test_conforming_esd_is_clean_of_esd_rules(tmp_path):
     assert "esd.width.1" in report["coverage"]["rules_checked"]
 
 
-def test_untranscribed_rules_are_disclosed_even_with_no_esd_shapes(tmp_path):
-    path = _write(tmp_path / "plain.gds", {COMP: [kdb.Box(0, 0, 1000, 1000)]})
-    report = run_drc(path, "gf180mcu")
-    skipped = {r["id"]: r["reason"] for r in report["coverage"]["skipped"]}
-    for rule_id in UNTRANSCRIBED_RULES:
-        assert skipped[rule_id] == SKIP_REASON_NOT_TRANSCRIBED
-    assert set(get_untranscribed_rules("gf180mcu")) == set(UNTRANSCRIBED_RULES)
-    # A clean stream is therefore a qualified one, never an unconditional clean.
-    assert report["status"] != "clean"
-
-
-def test_other_decks_declare_no_untranscribed_rules():
-    assert get_untranscribed_rules("sky130") == {}
-    assert get_untranscribed_rules("nonexistent") == {}
+def test_untranscribed_rules_are_disclosed_without_degrading_status():
+    report = run_drc(str(DOGBONE_GF180MCU), "gf180mcu")
+    coverage = report["coverage"]
+    assert coverage["unmodeled_rules"] == sorted(UNTRANSCRIBED_RULES)
+    assert get_unmodeled_rules("gf180mcu") == sorted(UNTRANSCRIBED_RULES)
+    # Disclosed, not graded (like `unchecked_rules`): a violation-free
+    # gf180mcu layout stays `clean`, so `klt eval` / `klt signoff` can pass it.
+    assert report["status"] == "clean"
+    assert not coverage["skipped"]

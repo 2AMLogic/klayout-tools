@@ -127,7 +127,6 @@ __all__ = [
     "get_unmodeled_rules",
     "get_marker_blind_layers",
     "get_unchecked_rules",
-    "get_untranscribed_rules",
     "get_unmodeled_voltage_markers",
     "known_extraction_deck_names",
     "resolve_deck_option_values",
@@ -296,19 +295,6 @@ def get_unmodeled_rules(name: str) -> list[str]:
     }
     module = modules.get(name)
     return sorted(getattr(module, "UNMODELED_RULES", ())) if module else []
-
-
-def get_untranscribed_rules(name: str) -> dict[str, str]:
-    """Return ``{rule id: reason}`` for upstream foundry rules ``name``'s deck
-    knowingly does not transcribe and that ``klt drc`` must report as
-    ``not_transcribed`` entries of ``coverage.skipped`` (issue #3792). Decks
-    that declare none (and unregistered names) return an empty map.
-    """
-    from . import gf180mcu
-
-    return dict(
-        {"gf180mcu": getattr(gf180mcu, "UNTRANSCRIBED_RULES", {})}.get(name, {})
-    )
 
 
 def get_unchecked_rules(name: str) -> dict[str, tuple[tuple[int, int], str]]:

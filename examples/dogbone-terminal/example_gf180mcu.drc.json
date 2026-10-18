@@ -3,7 +3,7 @@
   "file": "examples/dogbone-terminal/example_gf180mcu.gds",
   "deck": "gf180mcu",
   "dbu_um": 0.001,
-  "status": "clean_partial",
+  "status": "clean",
   "violation_count": 0,
   "rule_counts": {},
   "metrics": {
@@ -193,7 +193,21 @@
       "OFFGRID",
       "SB"
     ],
-    "unmodeled_rules": [],
+    "unmodeled_rules": [
+      "ESD.10",
+      "ESD.3a",
+      "ESD.3b",
+      "ESD.4a",
+      "ESD.6",
+      "ESD.7",
+      "ESD.9",
+      "ESD.pl",
+      "GR.1",
+      "GR.11",
+      "GR.3",
+      "GR.4",
+      "GR.6"
+    ],
     "schema_version": 1,
     "known": true,
     "checked": [
@@ -228,60 +242,7 @@
       "pplus.space.ncomp.1",
       "pplus.width.1"
     ],
-    "skipped": [
-      {
-        "id": "ESD.10",
-        "reason": "not_transcribed"
-      },
-      {
-        "id": "ESD.3a",
-        "reason": "not_transcribed"
-      },
-      {
-        "id": "ESD.3b",
-        "reason": "not_transcribed"
-      },
-      {
-        "id": "ESD.4a",
-        "reason": "not_transcribed"
-      },
-      {
-        "id": "ESD.6",
-        "reason": "not_transcribed"
-      },
-      {
-        "id": "ESD.7",
-        "reason": "not_transcribed"
-      },
-      {
-        "id": "ESD.9",
-        "reason": "not_transcribed"
-      },
-      {
-        "id": "ESD.pl",
-        "reason": "not_transcribed"
-      },
-      {
-        "id": "GR.1",
-        "reason": "not_transcribed"
-      },
-      {
-        "id": "GR.11",
-        "reason": "not_transcribed"
-      },
-      {
-        "id": "GR.3",
-        "reason": "not_transcribed"
-      },
-      {
-        "id": "GR.4",
-        "reason": "not_transcribed"
-      },
-      {
-        "id": "GR.6",
-        "reason": "not_transcribed"
-      }
-    ],
+    "skipped": [],
     "inapplicable": [
       {
         "id": "bjt.separation.comp.1",

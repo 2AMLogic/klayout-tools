@@ -183,9 +183,7 @@ def test_golden_pair_curated_engine_agrees(
         entry["clean"]["shapes"], tmp_path / f"{rule_id}.clean.gds"
     )
     clean_report = run_drc(clean_path, deck_name)
-    # `clean_partial` counts: gf180mcu discloses its untranscribed ESD.*/GR.*
-    # rules as skipped (issue #3792), which is not a violation.
-    assert clean_report["status"] in ("clean", "clean_partial"), (
+    assert clean_report["status"] == "clean", (
         f"{deck_name}/{rule_id}: clean fixture reported violations "
         f"({clean_report['rule_counts']})"
     )
