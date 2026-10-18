@@ -14392,6 +14392,17 @@ def test_run_sim_dry_run_missing_netlist_raises(tmp_path):
         sim.run_sim(str(request), dry_run=True)
 
 
+def test_run_sim_dry_run_batch_refuses_unresolved_pdk_var(tmp_path, monkeypatch):
+    """Issue #3917: the dry-run reports the refusal a real batch submit raises."""
+    monkeypatch.delenv(sim.BACKEND_ENV, raising=False)
+    request = _dry_run_mc_request(
+        tmp_path, models={"lib": "$PDK_ROOT/$PDK/libs.tech/ngspice/sm.ngspice"}
+    )
+    with pytest.raises(sim.SimError) as excinfo:
+        sim.run_sim(str(request), backend="batch", dry_run=True)
+    assert excinfo.value.code == "models_lib_pdk_unresolved"
+
+
 def test_run_sim_dry_run_refuses_deck_requests(tmp_path):
     request = _write_request(tmp_path, {"decks": [{"name": "a", "deck": "x"}]})
     with pytest.raises(sim.SimError, match="--dry-run"):

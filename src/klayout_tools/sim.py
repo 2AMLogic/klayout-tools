@@ -158,6 +158,7 @@ from .sim_batch import (
     _remove_shard_manifest,
     _run_batch,
     _run_batch_fleet,
+    _validate_batch_models_lib,
     attach_engine_build_comparison,
 )
 from .sim_batch import _resolve_batch_config as _resolve_batch_config
@@ -3546,6 +3547,11 @@ def _run_sim_corners(
         backend=backend,
         enabled=stage_model_inputs,
     )
+
+    if dry_run and backend == "batch":
+        # Issue #3917: a real batch submit refuses an unresolvable model
+        # library before any S3 write; the dry-run must say the same.
+        _validate_batch_models_lib(request)
 
     if dry_run:
         return _build_dry_run_report(

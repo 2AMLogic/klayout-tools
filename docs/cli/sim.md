@@ -5990,6 +5990,17 @@ in a `<variant>/libs.tech/...` tree, the replacement
 `options.stage_model_inputs: true` (the library ships with the job).
 `local`/`local-parallel` accept absolute paths unchanged.
 
+A `$PDK` / `${PDK}` reference in `models.lib` (or a per-section `lib`) is
+refused the same way when the request declares no `models.pdk`
+([#3917](https://github.com/2AMLogic/klayout-tools/issues/3917)): the runner
+always exports `PDK_ROOT` but defines `PDK` only from the declared variant, so
+the reference would reach ngspice unexpanded and fail every unit. Exit `1`,
+`error.code` `models_lib_pdk_unresolved`, naming each ref; fix it by declaring
+`models.pdk` or writing the variant literally. `klt sim --dry-run --backend
+batch` raises the same error instead of a clean pass. `$PDK_ROOT/...` refs, a
+request that declares `models.pdk`, and `options.stage_model_inputs: true` are
+unchanged.
+
 Either way, the resolved library is reported in the response's
 `environment.models_lib` as the `{path, scope}` shape (`schema_version` `3`,
 issue [#1274](https://github.com/2AMLogic/klayout-tools/issues/1274)) — never
