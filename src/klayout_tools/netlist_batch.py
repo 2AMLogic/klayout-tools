@@ -814,7 +814,8 @@ def _collect(
         runner_error=runner_error,
         note=note,
         stderr_tail=stderr_tail,
-        harness_log=sim_batch.job_uri(config, job_id).rstrip("/") + "/harness.log",
+        harness_log=sim_batch.report_job_uri(config, job_id).rstrip("/")
+        + "/harness.log",
     )
 
 
