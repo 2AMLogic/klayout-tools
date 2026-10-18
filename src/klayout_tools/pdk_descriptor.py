@@ -79,6 +79,19 @@ def load_descriptor(directory: str) -> dict[str, Any]:
     target raises :class:`DescriptorError` naming the file and field.
     """
     path = os.path.join(directory, DESCRIPTOR_FILENAME)
+    data = _read_descriptor(path)
+    variant = data.get("variant")
+    if variant is not None and (not isinstance(variant, str) or not variant):
+        raise DescriptorError(f"{path}: field 'variant' must be a non-empty string")
+    return {
+        "variant": variant,
+        "assets": _resolve_assets(directory, path, data.get("assets", {})),
+        "liberty": _resolve_liberty(directory, path, data.get("liberty", {})),
+    }
+
+
+def _read_descriptor(path: str) -> dict[str, Any]:
+    """Read ``path`` and check the top-level object and ``schema_version``."""
     try:
         with open(path, encoding="utf-8") as handle:
             data = json.load(handle)
@@ -91,11 +104,13 @@ def load_descriptor(directory: str) -> dict[str, Any]:
             f"{path}: field 'schema_version' must be {SCHEMA_VERSION}, "
             f"got {data.get('schema_version')!r}"
         )
-    variant = data.get("variant")
-    if variant is not None and (not isinstance(variant, str) or not variant):
-        raise DescriptorError(f"{path}: field 'variant' must be a non-empty string")
+    return data
 
-    raw_assets = data.get("assets", {})
+
+def _resolve_assets(
+    directory: str, path: str, raw_assets: Any
+) -> dict[str, str | None]:
+    """Resolve the ``assets`` object to ``{key: abs dir | None}``."""
     if not isinstance(raw_assets, dict):
         raise DescriptorError(f"{path}: field 'assets' must be an object")
     assets: dict[str, str | None] = {key: None for key in ASSET_KEYS}
@@ -109,8 +124,13 @@ def load_descriptor(directory: str) -> dict[str, Any]:
             continue
         resolved = resolve_under_root(directory, rel, f"{path}: field 'assets.{key}'")
         assets[key] = resolved if os.path.isdir(resolved) else None
+    return assets
 
-    raw_liberty = data.get("liberty", {})
+
+def _resolve_liberty(
+    directory: str, path: str, raw_liberty: Any
+) -> dict[str, dict[str, str]]:
+    """Resolve the ``liberty`` object to ``{cell_library: {corner: abs path}}``."""
     if not isinstance(raw_liberty, dict):
         raise DescriptorError(f"{path}: field 'liberty' must be an object")
     liberty: dict[str, dict[str, str]] = {}
@@ -120,19 +140,26 @@ def load_descriptor(directory: str) -> dict[str, Any]:
                 f"{path}: field 'liberty.{cell_library}' must be a non-empty "
                 "object mapping corner -> path"
             )
-        liberty[cell_library] = {}
-        for corner, rel in corners.items():
-            where = f"{path}: field 'liberty.{cell_library}.{corner}'"
-            resolved = resolve_under_root(directory, rel, where)
-            if not os.path.isfile(resolved):
-                hint = ""
-                if os.path.isfile(resolved + ".7z") or os.path.isfile(
-                    os.path.splitext(resolved)[0] + ".7z"
-                ):
-                    hint = (
-                        " -- Liberty ships only as .7z; extract it and "
-                        "re-point the descriptor (klt never unpacks archives)"
-                    )
-                raise DescriptorError(f"{where}: '{rel}' does not exist{hint}")
-            liberty[cell_library][corner] = resolved
-    return {"variant": variant, "assets": assets, "liberty": liberty}
+        liberty[cell_library] = {
+            corner: _resolve_liberty_file(
+                directory, rel, f"{path}: field 'liberty.{cell_library}.{corner}'"
+            )
+            for corner, rel in corners.items()
+        }
+    return liberty
+
+
+def _resolve_liberty_file(directory: str, rel: Any, where: str) -> str:
+    """Resolve one Liberty path; it must exist as a file."""
+    resolved = resolve_under_root(directory, rel, where)
+    if os.path.isfile(resolved):
+        return resolved
+    hint = ""
+    if os.path.isfile(resolved + ".7z") or os.path.isfile(
+        os.path.splitext(resolved)[0] + ".7z"
+    ):
+        hint = (
+            " -- Liberty ships only as .7z; extract it and "
+            "re-point the descriptor (klt never unpacks archives)"
+        )
+    raise DescriptorError(f"{where}: '{rel}' does not exist{hint}")
