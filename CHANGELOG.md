@@ -14,6 +14,14 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`batch.max_concurrent_jobs` / `klt sim --max-concurrent-jobs`** (issue
+  #3914, documented in `docs/cli/sim.md`): additive, opt-in bound on the shard
+  jobs a sharded `batch` run keeps in flight at once, so a large split no
+  longer exceeds the fleet's instance cap and comes back as `lost_shard`.
+  `environment.remote.max_concurrent_jobs` records the value only when set; a
+  non-positive-integer value is rejected with
+  `error.code: "batch_max_concurrent_jobs_invalid"`. No `schema_version` bump.
+
 - **`provenance.input.paths` set binding for `klt signoff`** (issue #3044,
   documented in `docs/cli/signoff.md` "Binding a set of artifacts"): additive.
   Not in `klt 0.7.0` — a `0.7.0` build grades a `paths`-only envelope

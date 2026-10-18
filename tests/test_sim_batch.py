@@ -6975,3 +6975,128 @@ def test_shard_map_is_removed_only_when_the_sweep_finishes(
         _install_fake_batch(monkeypatch, lost_ids={lost}, fleet=True)
         _run(path, tmp_path, hosts=2)
     assert manifest_path.exists() is lose_a_corner
+
+
+# --------------------------------------------------------------------------- #
+# batch.max_concurrent_jobs / --max-concurrent-jobs (issue #3914)
+# --------------------------------------------------------------------------- #
+
+
+def _concurrency_probe(monkeypatch):
+    """Replace ``_run_batch_job`` with a fake that records how many shard
+    jobs are in flight at once; returns the peak/total recorder."""
+    import threading
+    import time
+
+    state = {"active": 0, "peak": 0, "calls": 0}
+    lock = threading.Lock()
+
+    def _fake(**kwargs):
+        points = kwargs["explicit_points"]
+        with lock:
+            state["active"] += 1
+            state["calls"] += 1
+            state["peak"] = max(state["peak"], state["active"])
+        time.sleep(0.02)
+        with lock:
+            state["active"] -= 1
+        corners = [{"corner_id": f"t{int(p.temperature_c)}"} for p in points]
+        return corners, None, {"job_id": kwargs["job_id"]}
+
+    monkeypatch.setattr(sb, "_run_batch_job", _fake)
+    return state
+
+
+def _run_capped_fleet(tmp_path, *, units, hosts, **batch):
+    return sb._run_batch_fleet(
+        corner_points=_corner_points(units),
+        netlist_path=str(_write_body(tmp_path)),
+        timeout_s=60.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        artifacts_dir=str(tmp_path / "artifacts"),
+        request=_ceiling_request(tmp_path, **batch),
+        hosts=hosts,
+        measurements_spec=_measurements_spec(),
+        request_dir=str(tmp_path),
+    )
+
+
+def test_max_concurrent_jobs_bounds_in_flight_shards(tmp_path, monkeypatch):
+    state = _concurrency_probe(monkeypatch)
+
+    corners, _, environment = _run_capped_fleet(
+        tmp_path, units=10, hosts=10, max_concurrent_jobs=3
+    )
+
+    assert state["calls"] == 10
+    assert state["peak"] <= 3
+    assert [c["corner_id"] for c in corners] == [f"t{i}" for i in range(10)]
+    assert len(environment["fleet"]) == 10
+    assert environment["max_concurrent_jobs"] == 3
+
+
+def test_max_concurrent_jobs_one_is_serial(tmp_path, monkeypatch):
+    state = _concurrency_probe(monkeypatch)
+
+    _run_capped_fleet(tmp_path, units=4, hosts=4, max_concurrent_jobs=1)
+
+    assert state["peak"] == 1
+
+
+def test_max_concurrent_jobs_unset_is_unchanged(tmp_path, monkeypatch):
+    state = _concurrency_probe(monkeypatch)
+
+    _, _, environment = _run_capped_fleet(tmp_path, units=4, hosts=4)
+
+    assert state["calls"] == 4
+    assert "max_concurrent_jobs" not in environment
+
+
+def test_max_concurrent_jobs_above_shard_count_has_no_effect(tmp_path, monkeypatch):
+    state = _concurrency_probe(monkeypatch)
+
+    corners, _, _ = _run_capped_fleet(
+        tmp_path, units=3, hosts=3, max_concurrent_jobs=50
+    )
+
+    assert state["calls"] == 3
+    assert len(corners) == 3
+
+
+@pytest.mark.parametrize("bad", [0, -3, 2.5, "8", True])
+def test_max_concurrent_jobs_bad_value_is_rejected_before_s3(
+    tmp_path, monkeypatch, bad
+):
+    runner = _FakeRunner()
+    with pytest.raises(sim.SimError) as excinfo:
+        _run_one_batch(
+            tmp_path,
+            monkeypatch,
+            runner,
+            units=3,
+            timeout_s=30.0,
+            max_concurrent_jobs=bad,
+        )
+
+    assert runner.calls == []
+    assert excinfo.value.code == sb.BATCH_MAX_CONCURRENT_CODE
+
+
+def test_cli_max_concurrent_jobs_flag_overrides_the_request(tmp_path, monkeypatch):
+    from klayout_tools.cli import main
+
+    seen: list[dict] = []
+
+    def _capture(**kwargs):
+        seen.append(kwargs["request"])
+        raise sim.SimError("stop here")
+
+    monkeypatch.setitem(sim._BACKENDS, "batch", _capture)
+    _write_body(tmp_path)
+    path = _write_request(tmp_path, _ceiling_request(tmp_path, max_concurrent_jobs=5))
+
+    main(["sim", str(path), "--max-concurrent-jobs", "2", "--format", "json"])
+
+    assert seen[0]["batch"]["max_concurrent_jobs"] == 2
+    assert seen[0]["batch"]["bucket"] == FAKE_BUCKET

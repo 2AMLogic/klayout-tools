@@ -1436,6 +1436,7 @@ def argparse_namespace(request: str):
         fail_fast_probe=None,
         fail_on_diagnostic=None,
         max_units_per_job=None,
+        max_concurrent_jobs=None,
         op_lint=False,
         op_lint_corner=None,
         format="text",

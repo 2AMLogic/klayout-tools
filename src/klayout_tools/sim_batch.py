@@ -326,6 +326,10 @@ BATCH_JOB_CEILING_CODE = "batch_job_ceiling_exceeded"
 #: ceiling cannot honor (issue #3446).
 BATCH_MAX_UNITS_CODE = "batch_max_units_per_job_invalid"
 
+#: Machine-readable ``error.code`` of an invalid
+#: ``request.batch.max_concurrent_jobs`` (issue #3914).
+BATCH_MAX_CONCURRENT_CODE = "batch_max_concurrent_jobs_invalid"
+
 #: The ``environment.remote.job_ceiling.basis`` value: the assessment is the
 #: request-derived fully-serial upper bound, never a measured runtime.
 JOB_CEILING_BASIS = "conservative_serial_bound"
@@ -1554,6 +1558,9 @@ class BatchConfig:
     #: units of one job; ``None`` -- the default -- leaves the split to
     #: ``job_ceiling_check: "split"`` (or to no split at all).
     max_units_per_job: int | None = None
+    #: ``request.batch.max_concurrent_jobs`` (issue #3914): opt-in bound on
+    #: the shard jobs in flight at once; ``None`` submits every shard at once.
+    max_concurrent_jobs: int | None = None
     #: ``request.batch.interrupted_grace_s`` (issue #2992); ``0`` disables.
     interrupted_grace_s: float = DEFAULT_INTERRUPTED_GRACE_S
     #: Pre-launch ``warn`` diagnostic for request features the manifest's
@@ -1830,6 +1837,7 @@ def _resolve_batch_config(
     )
     job_ceiling_check = _resolve_job_ceiling_check(batch_spec)
     max_units_per_job = _resolve_max_units_per_job(batch_spec, job_ceiling_check)
+    max_concurrent_jobs = _resolve_max_concurrent_jobs(batch_spec)
     config = BatchConfig(
         provision_script=provision_script,
         bucket=bucket,
@@ -1865,6 +1873,7 @@ def _resolve_batch_config(
         max_job_seconds_source=max_job_seconds_source,
         job_ceiling_check=job_ceiling_check,
         max_units_per_job=max_units_per_job,
+        max_concurrent_jobs=max_concurrent_jobs,
         interrupted_grace_s=_resolve_interrupted_grace_s(batch_spec),
     )
     # Issue #2851: compare the runner klt the AMI manifest publishes with
@@ -2106,6 +2115,24 @@ def _resolve_job_ceiling_check(batch_spec: dict[str, Any]) -> str:
             "request.batch.job_ceiling_check must be one of "
             f"{', '.join(repr(m) for m in JOB_CEILING_CHECK_MODES)} "
             f"(got {value!r})"
+        )
+    return value
+
+
+def _resolve_max_concurrent_jobs(batch_spec: dict[str, Any]) -> int | None:
+    """``request.batch.max_concurrent_jobs`` (issue #3914): a positive integer
+    bound on the shard jobs in flight at once, else
+    :class:`~klayout_tools.sim.SimError` before any S3 write."""
+    from .sim import SimError
+
+    value = batch_spec.get("max_concurrent_jobs")
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise SimError(
+            "request.batch.max_concurrent_jobs must be a positive integer "
+            f"(got {value!r})",
+            code=BATCH_MAX_CONCURRENT_CODE,
         )
     return value
 
@@ -4625,12 +4652,19 @@ def _run_batch_fleet(
         return _mark_resumed(result, False)
 
     try:
-        return _run_sharded(
+        corners, engine_version, environment = _run_sharded(
             shard_runner=_shard_runner,
             corner_points=corner_points,
             hosts=hosts,
             measurements_spec=measurements_spec,
+            max_concurrent=config.max_concurrent_jobs,
         )
+        if environment is not None and config.max_concurrent_jobs is not None:
+            environment = {
+                **environment,
+                "max_concurrent_jobs": config.max_concurrent_jobs,
+            }
+        return corners, engine_version, environment
     finally:
         _warn_unlaunched(manifest, hosts)
 
@@ -4705,6 +4739,7 @@ __all__ = [
     "BATCH_ARTIFACTS_DIRNAME",
     "BATCH_INTERRUPTED_CODE",
     "BATCH_JOB_CEILING_CODE",
+    "BATCH_MAX_CONCURRENT_CODE",
     "BATCH_MAX_UNITS_CODE",
     "BATCH_JOB_TOOL",
     "BATCH_CONCURRENCY_CAP_CODE",

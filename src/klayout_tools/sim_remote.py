@@ -263,6 +263,7 @@ def _run_sharded(
     corner_points: list[CornerPoint],
     hosts: int,
     measurements_spec: list[dict[str, Any]],
+    max_concurrent: int | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The fleet shard/merge engine: slice ``corner_points`` into ``hosts``
     contiguous shards (:func:`_shard_corner_points`), run each shard through
@@ -281,6 +282,11 @@ def _run_sharded(
     never aborts a sibling shard, mirroring `local-parallel`'s per-corner
     failure isolation one level up. An empty shard (``hosts`` exceeds the
     unit count) is never handed to ``shard_runner`` at all.
+
+    ``max_concurrent`` (issue #3914) bounds how many shards are in flight at
+    once -- the pool size becomes ``min(hosts, max_concurrent)`` and the
+    remaining shards start as earlier ones finish; ``None`` runs every shard
+    at once, as before.
 
     ``engine_version`` is derived the same "last non-``None`` wins, in
     corner-list order" way every backend already computes it -- shards are
@@ -312,7 +318,10 @@ def _run_sharded(
     ] = [None] * len(shards)
     lost_reasons: list[str | None] = [None] * len(shards)
 
-    with ThreadPoolExecutor(max_workers=max(1, hosts)) as pool:
+    workers = max(1, hosts)
+    if max_concurrent is not None:
+        workers = min(workers, max(1, max_concurrent))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
         future_to_index = {
             pool.submit(_run_one, shard): index for index, shard in enumerate(shards)
         }
