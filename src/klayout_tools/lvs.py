@@ -1000,7 +1000,7 @@ def run_lvs(
             f"unsupported engine '{engine}' (supported: {', '.join(SUPPORTED_ENGINES)})"
         )
     _merge_deck_flags(loaded, engine, deck_file, deck_vars)
-    portable_paths = _validate_portable_paths(request.get("portable_paths"))
+    portable_paths = _validate_portable_paths(loaded.get("portable_paths"))
 
     layout_spec = request["layout"]
     if not isinstance(layout_spec, dict):
