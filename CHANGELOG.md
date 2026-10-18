@@ -22,6 +22,13 @@ not `klt --version`, if you need to detect this kind of drift. See
   non-positive-integer value is rejected with
   `error.code: "batch_max_concurrent_jobs_invalid"`. No `schema_version` bump.
 
+- **`klt pdk find|check --expect-version <stamp-or-sha>`** (issue #3810):
+  asserts the installed PDK identity against a caller-supplied pin (open_pdks
+  SHA of 7+ hex or `SOURCES` stamp; lambdapdk marker by exact string). With the
+  flag, JSON gains an additive `version_expectation` object
+  (`status`/`expected`/`installed`); on `mismatch` or `unknown` the payload is
+  still emitted and the verb exits **6** (fail closed; `check`'s 4 wins).
+  Without the flag nothing changes.
 - **Breaking (field removal): batch reports no longer carry
   `environment.remote.bucket`** (issue #3777): the bucket name embeds the
   fleet's AWS account number, and `--report-out` evidence is committed to
@@ -214,6 +221,11 @@ not `klt --version`, if you need to detect this kind of drift. See
   `unsupported_devices[]` now reports only marker components the recogniser could
   not classify. Model name, nets, `C`, `A` and `P` cross-checked against the PDK's
   own LVS runset. Additive; no `schema_version` bump.
+- **`klt lvs` reference conversion knows the gf180mcu MOS-capacitor subcircuits**
+  (issue #2919): `X... cap_{nmos,pmos}_{03v3,06v0}[_b] c_length= c_width=` cards
+  convert to a `C` card with `A`/`P` (e.g. `A=1.6P P=5.6U` for a 2.0 x 0.8 um
+  gate, equal to what `klt extract` reports) instead of failing as "not a known
+  device". The `_dn` classes have no PDK subcircuit and stay unbound. Additive.
 - **`klt extract --resistance-graph`: opt-in terminal-aware resistance graph**
   (issue #2982, Stage 3.D5 increment 3): adds `parasitics.nets[].resistance_graph`
   (`status`, `terminals`, `pair_resistance_ohm`, `legacy_resistance_ohm`,
