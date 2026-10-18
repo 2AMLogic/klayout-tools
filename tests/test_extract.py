@@ -13978,6 +13978,7 @@ def test_parasitics_summary_block_shape(tmp_path):
             "rc_model",
             "terminals",
             "segments",
+            "pin_order",
             "coupled",
             "by_layer",
             "resistance_ohm_top_cell",
