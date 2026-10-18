@@ -797,6 +797,7 @@ class ExtractionDeck:
     mom_capacitors: tuple[MomCapacitorDevice, ...] = ()
     resistors: tuple[ResistorDevice, ...] = ()
     diodes: tuple[DiodeDevice, ...] = ()
+    unmodelled_families: tuple[UnmodelledDeviceFamily, ...] = ()
     mos_flavours: tuple[MOSFlavour, ...] = ()
     unsupported_device_markers: tuple[UnsupportedDeviceMarker, ...] = ()
     mos_capacitors: tuple[MosCapacitorDevice, ...] = ()
@@ -2100,6 +2101,26 @@ class MomCapacitorDevice:
     marker: tuple[int, int]
     metal_pins: tuple[tuple[int, int] | None, ...]
     provenance: RuleProvenance | None = None
+
+
+@dataclass(frozen=True)
+class UnmodelledDeviceFamily:
+    """A device family this deck deliberately does **not** recognise (issue
+    #3137), declared so a diagnostic can say so.
+
+    Purely informational: it never changes connectivity or ``device_count``.
+    ``extract.py``'s diode near-miss warning appends a one-sentence note
+    naming ``name`` when a candidate region overlaps ``signature`` -- the
+    geometry looks like a diode one marker short, but is really this family
+    (e.g. SG13G2's SiGe HBT diffusion matches the antenna-diode predicates).
+
+    ``signature`` is the drawn layer (or :class:`LayerExpr`) that identifies
+    the family; ``reference`` is the pointer text the note ends with.
+    """
+
+    name: str
+    signature: tuple[int, int] | LayerExpr
+    reference: str
 
 
 @dataclass(frozen=True)

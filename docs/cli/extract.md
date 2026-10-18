@@ -2328,6 +2328,12 @@ Points worth knowing:
   the search.** Geometry an `excludes` layer removes was disqualified on
   purpose, and a dummy-marked device is suppressed on purpose; neither is a
   near miss.
+- **A deck-declared unmodelled family is named.** When a candidate region
+  also overlaps a family the deck lists in `unmodelled_families` (today: the
+  sg13g2 SiGe HBT, keyed on its `TRANS` 26/0 layer), the warning ends with a
+  note that the geometry is probably that family, which the deck does not
+  model, rather than a diode awaiting its marker. Text only; no JSON field
+  changes.
 - **Diode classes only, for now.** The diagnostic is wired for
   `ExtractionDeck.diodes`, the family the reported failure took. The same
   silent-zero shape exists in principle for the marker-gated

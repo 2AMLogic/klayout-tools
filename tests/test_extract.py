@@ -4849,6 +4849,44 @@ def test_gf180mcu_dual_diode_clamp_reports_no_near_miss(tmp_path):
     assert _near_miss_warnings(report) == []
 
 
+def _make_sg13g2_bare_activ_layout(*, hbt_trans: bool) -> kdb.Layout:
+    """A lone `Activ` island on sg13g2 -- the `dantenna` predicates minus the
+    `Recog.diode` marker -- optionally under the SiGe HBT's `TRANS` (26/0)."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(1, 0)).insert(kdb.Box(0, 0, 1000, 1000))  # Activ
+    if hbt_trans:
+        top.shapes(layout.layer(26, 0)).insert(kdb.Box(-500, -500, 1500, 1500))
+    return layout
+
+
+def test_sg13g2_hbt_geometry_diode_near_miss_names_the_unmodelled_family(tmp_path):
+    """Issue #3137: the PDK's `npn13G2` Activ matches the `dantenna`
+    predicates minus `Recog.diode`; the near-miss warning must also say the
+    geometry is an HBT the deck does not model, not only "draw the marker"."""
+    path = _write_gds(
+        _make_sg13g2_bare_activ_layout(hbt_trans=True), tmp_path / "hbt.gds"
+    )
+    report = run_extract(path, "sg13g2", output=str(tmp_path / "hbt.spice"))
+
+    assert report["device_counts"] == {}
+    dantenna = [w for w in _near_miss_warnings(report) if "'dantenna'" in w]
+    assert len(dantenna) == 1
+    assert "Recog.diode (99/31)" in dantenna[0]
+    assert "SiGe HBT" in dantenna[0] and "does not model" in dantenna[0]
+
+
+def test_sg13g2_diode_near_miss_without_hbt_geometry_has_no_unmodelled_note(tmp_path):
+    path = _write_gds(
+        _make_sg13g2_bare_activ_layout(hbt_trans=False), tmp_path / "activ.gds"
+    )
+    report = run_extract(path, "sg13g2", output=str(tmp_path / "activ.spice"))
+
+    dantenna = [w for w in _near_miss_warnings(report) if "'dantenna'" in w]
+    assert len(dantenna) == 1
+    assert "does not model" not in dantenna[0]
+
+
 def test_diode_near_miss_names_layers_from_the_same_set_deck_devices_reports(tmp_path):
     """The diagnostic and the discovery path must never drift: every layer
     the near-miss search can report as missing is a member of the

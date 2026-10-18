@@ -174,6 +174,7 @@ from .decks import (
     ParasiticsDeck,
     SizeFilter,
     UnknownExtractionDeckError,
+    UnmodelledDeviceFamily,
     deck_source_path,
     get_extraction_deck,
     get_parasitics_deck,
@@ -6974,7 +6975,7 @@ def _diode_near_miss(
     diode: DiodeDevice,
     claimed: kdb.Region,
     dummy: kdb.Region,
-) -> tuple[list[tuple[str, tuple[int, int]]], int]:
+) -> tuple[list[tuple[str, tuple[int, int]]], int, kdb.Region]:
     """Which member(s) of ``diode``'s drawn-layer predicate set a layout is
     missing, when that entry recognised **no** junction at all (issue #2365).
 
@@ -7022,9 +7023,11 @@ def _diode_near_miss(
     predicate but the marker, so without this filter every such device would
     be reported as a missing-marker near miss on every layout.
 
-    Returns ``(missing, candidates)`` -- the missing predicates as
-    ``(role, (layer, datatype))`` pairs in declaration order, and how many
-    connected candidate regions survived. ``([], 0)`` when nothing survives
+    Returns ``(missing, candidates, region)`` -- the missing predicates as
+    ``(role, (layer, datatype))`` pairs in declaration order, how many
+    connected candidate regions survived, and those regions' geometry (so
+    :func:`_collect_diode_near_miss_warnings` can test it against the deck's
+    ``unmodelled_families``). ``([], 0, <empty>)`` when nothing survives
     (the ordinary "this layout really has no diode there" case), which is
     also what a layout drawing none of the predicate layers returns.
     """
@@ -7063,12 +7066,13 @@ def _diode_near_miss(
             # A near miss is geometry that *is* device-shaped and is one
             # narrowing predicate short, which is exactly the shape the
             # reported failures took.
-            return [], 0
+            return [], 0, kdb.Region()
         missing.append((role, pair))
 
     if region is None or not missing:
-        return [], 0
-    return missing, survivors(region).count()
+        return [], 0, kdb.Region()
+    candidate_region = survivors(region)
+    return missing, candidate_region.count(), candidate_region
 
 
 #: How each :func:`_diode_required_terms` role reads in a ``warnings[]``
@@ -7088,6 +7092,7 @@ def _diode_near_miss_warning(
     diode: DiodeDevice,
     missing: list[tuple[str, tuple[int, int]]],
     candidates: int,
+    unmodelled: UnmodelledDeviceFamily | None = None,
 ) -> str:
     """The ``warnings[]`` line for one :func:`_diode_near_miss` result
     (issue #2365).
@@ -7103,6 +7108,11 @@ def _diode_near_miss_warning(
     actually draws against -- and points at ``klt deck devices`` for the
     class's complete predicate set, so the answer scales past the one layer
     this particular layout happened to be missing.
+
+    ``unmodelled`` is a deck-declared family the candidate geometry also
+    overlaps (issue #3137); when given, one sentence is appended saying the
+    geometry is really that family, which the deck does not model, so the
+    advice to draw the missing layer does not mislead.
     """
     from .decks import get_layer_names
 
@@ -7124,6 +7134,13 @@ def _diode_near_miss_warning(
         if deck_name is not None
         else f"`klt deck devices --class {diode.name}`"
     )
+    note = (
+        f" Note: this geometry also matches {unmodelled.name}, a device "
+        f"family this deck does not model, so it is probably not a diode "
+        f"at all -- see {unmodelled.reference}."
+        if unmodelled is not None
+        else ""
+    )
     return (
         f"{candidates} candidate '{diode.name}' {region_word} {match_word} "
         f"every other drawn-layer predicate of that device class but "
@@ -7134,6 +7151,7 @@ def _diode_near_miss_warning(
         f"missing layer(s), or run {hint} for the class's complete "
         "marker/requires/excludes set. See docs/cli/extract.md's "
         "'Marker-gated and predicate-gated device classes' section."
+        f"{note}"
     )
 
 
@@ -7334,9 +7352,23 @@ def _collect_diode_near_miss_warnings(
 
     warnings: list[str] = []
     for diode, _anode, _cathode in unrecognised:
-        missing, candidates = _diode_near_miss(layout, top_cell, diode, claimed, dummy)
+        missing, candidates, candidate_region = _diode_near_miss(
+            layout, top_cell, diode, claimed, dummy
+        )
         if missing:
-            warnings.append(_diode_near_miss_warning(deck, diode, missing, candidates))
+            unmodelled = next(
+                (
+                    family
+                    for family in deck.unmodelled_families
+                    if candidate_region.interacting(
+                        _region_expr(layout, top_cell, family.signature)
+                    ).count()
+                ),
+                None,
+            )
+            warnings.append(
+                _diode_near_miss_warning(deck, diode, missing, candidates, unmodelled)
+            )
     return warnings
 
 
