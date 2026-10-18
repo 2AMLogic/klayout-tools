@@ -876,8 +876,18 @@ nameable by an ordinary in-cell label (step 1) and reachable by the parent's
 routing, so it goes through the normal resolution path.
 
 To carry such a terminal into the black box, either draw and label a
-substrate tie inside the cell, or declare the port via `--abstract-cell-lef`
-with `PORT` geometry that lands on drawn conductor.
+substrate tie inside the cell, or declare the port via `--abstract-cell-lef`.
+
+**LEF merge (issue #3749).** A LEF `MACRO` of the matched cell's name is
+consulted even when the cell *does* draw labels: every LEF `PIN` whose name
+the labels did not supply is appended to the label-derived pin list (labels
+win on any name present in both; `abstracted_cells[].lef_path` names the LEF
+when at least one pin was merged, `resolution_source` stays
+`in_cell_labels`). This is how a std cell's `VNB` — drawn on a label layer
+the deck does not read — reaches the `.SUBCKT`. A merged pin on a
+`pwell`/`psub` LEF layer that lands on no conductor connects to the deck's
+substrate global net (`vsubs`) instead of an isolated per-instance net, and
+the warning above is not emitted for that cell. No new flag or JSON field.
 
 Dropping the port only loses *that terminal's* connectivity on *that*
 instance. It must not perturb anything else, and since issue #1911 it does
