@@ -19,6 +19,8 @@ benchmarks/design-agent/
   schema/ledger.schema.json     # JSON Schema for one --rounds ledger.jsonl line
   schema/layout-*.schema.json   # layout-flow protocol / task / run schemas (see "Layout-flow protocol")
   layout-protocol.json          # the frozen, versioned layout-flow protocol
+  layout-corpus/<task>/         # frozen layout tasks: task.json, netlist, recipe, reference + negative-control GDS (see "Layout task corpus")
+  layout-corpus/exclusions.json # candidates rejected, with a machine-readable eligibility reason
   fixtures/layout/              # synthetic layout task + run fixtures (placeholder hashes)
   tasks/*.json                  # task descriptors (see "Task shape" below)
   tasks/*.mutations.json        # per-task mutation gates (see "Mutation gates" below)
@@ -694,3 +696,49 @@ push" posture for an ngspice-per-corner-heavy job):
   several 18-corner sweeps of its own. It answers "does the tool-using loop
   still work end to end", and uploads each attempt's
   `agent-session.json`/`agent-transcript.jsonl`/netlist as the artifact.
+
+## Layout task corpus
+
+Phase 2 (issue #3025) of the layout-flow benchmark: the frozen task corpus and
+the validity gate that scores it. Four bounded sky130 cells live under
+`layout-corpus/<task>/` — `nfet-unit`, `pfet-unit`, `diff-pair` and
+`five-transistor-ota` — each shipping:
+
+| File | Role | Shown to an agent? |
+| --- | --- | --- |
+| `netlist.spice` | frozen schematic; the LVS reference | yes (`agent_inputs`) |
+| `task.json` | `layout-task.schema.json` descriptor with the per-rule / per-arm `eligibility` record | spec only |
+| `recipe.json` | `klt gen` / `gen-compose` steps that reach a valid layout (proves `gen-only` satisfiable) | no |
+| `reference.gds` | the recipe's output; DRC- and LVS-clean | no |
+| `neg-drc.gds`, `neg-lvs.gds` | known-bad layouts: a sub-min-width met1 sliver, and a resized device | no |
+
+No task ships a scored candidate layout: `agent_inputs` is the netlist alone, and
+the gate rejects a descriptor that lists a layout stream or any scorer-only file.
+
+`python scripts/design_agent_benchmark.py validate-layout --corpus` (no
+credentials, no `ngspice`; JSON on stdout, exit 1 on any failure) runs, per task:
+
+1. descriptor schema, hash binding of every frozen file, eligibility record;
+2. the reference through `klt drc` (sky130 deck: `clean`) and `klt lvs`
+   (`match`), on a private copy of the stream, plus the **provenance** rule —
+   the scored GDS hash equals the hash both reports checked, and the LVS
+   reference hash equals the frozen netlist's;
+3. `recipe.json` re-run in-process, its output passing the same gate;
+4. each negative control rejected by *its* check and passing the other, so DRC
+   and LVS are each shown to fire independently;
+5. provenance controls: reports recorded for the reference must not vouch for a
+   GDS swapped in afterwards, or for a different netlist.
+
+A candidate that fails an eligibility rule is excluded from **all** arms and
+recorded in `layout-corpus/exclusions.json` (`layout-exclusions.schema.json`),
+whose `reason` is the protocol's own rule id. `current-mirror` is excluded as
+`generator_reachable`: `klt gen-compose` cannot route a diode-connected mirror
+from `mos_array` blocks today. Its failing recipe is stored and the gate re-runs
+it, so the exclusion is flagged stale once the composer can wire it.
+
+Regenerate the corpus (byte-reproducible; needs a resolvable sky130A PDK) with
+`uv run python scripts/build_design_agent_layout_corpus.py`.
+
+Known limit: the generators draw label-free cells, so the frozen netlists
+expose only the nets `gen-compose` routes plus the substrate as top-level pins;
+gate/source/drain nets are internal and LVS compares topology and device W/L.

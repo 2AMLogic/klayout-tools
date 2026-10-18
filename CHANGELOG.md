@@ -27,6 +27,28 @@ not `klt --version`, if you need to detect this kind of drift. See
   users. Decks with no `.drc` file omit `drc_deck`; `schema_version` stays
   `1`.
 
+- **`klt sta` driving cell / output load, and `*NAME_MAP` SPEFs** (issue
+  #3742): `constraints.driving_cell` / `.driving_cells` emit
+  `set_driving_cell` and `constraints.output_load_pf` / `.output_loads` emit
+  `set_load` (additive; omitted fields leave the generated Tcl unchanged).
+  The `spef_annotation` name check now resolves `*NAME_MAP` indices (and a
+  non-`/` `*DIVIDER`), so a name-mapped OpenROAD SPEF no longer reports 0
+  design nets annotated. `propagated_clock` already existed (issue #2739).
+
+- 2026-10-17 — **`klt signoff --attest` / `--inventory` are not installable
+  from 0.7.0** (issue #3805): the attestation producer for T1 items 1, 9 and
+  10 (#2844) is on `main` but in no tagged release, so
+  `klt signoff --attest 10 ...` fails with `unrecognized arguments` on the
+  PyPI 0.7.0 build. `docs/cli/signoff.md` now says so; until the next release
+  after 0.7.0 ships, release-pinned consumers must pin a git commit.
+
+- **gf180mcu `DF.13_MV` / `DF.14_MV` tap-distance rules declared** (issue
+  #3793): `comp.tap_distance.nwell.mv.1` and `comp.tap_distance.psub.mv.1`
+  (15 um reach, active overlapping `Dualgate`) join the 20 um `.lv.1` pair, so a
+  layout with a 5V/6V active more than 15 um from a tap no longer reports
+  `clean`. Additive: two new rule ids; LV results are unchanged. The
+  `latchup_mk` marker rules remain undeclared.
+
 - **`klt synthesize --restructure` now finds upsizes on libraries that quote
   cell names** (issue #3709): `restructure`'s and `synthesize`'s private
   regex Liberty readers are replaced by `liberty_compare.parse_liberty_text`.

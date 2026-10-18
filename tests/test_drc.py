@@ -21,6 +21,7 @@ from klayout_tools.cli import main
 from klayout_tools.decks import (
     get_deck,
     get_extraction_deck,
+    get_marker_blind_layers,
     get_unmodeled_rules,
     get_unmodeled_voltage_markers,
 )
@@ -687,6 +688,7 @@ def test_json_contract(tmp_path, capsys):
         "rules_skipped",
         "voltage_domain_warnings",
         "unchecked_rules",
+        "marker_blind_layers_in_stream",
         "deck_scope",
         "unmodeled_rules",
         # Issue #1996: the shared vacuous-verdict convention
@@ -3630,6 +3632,27 @@ def _gf180mcu_and2_corpus_file() -> Path:
     return matches[0]
 
 
+def _without_tap_distance_findings(report):
+    """`(rule_counts, violations)` of a gf180mcu report minus the
+    `comp.tap_distance.*` findings (issues #3607, #3793).
+
+    The row-abutment fixtures are bare 5V standard cells (they carry
+    `Dualgate`) with no tap inside the cell -- well/substrate taps live in
+    separate tap cells -- so the `DF.13_MV`/`DF.14_MV` rules correctly flag
+    them. These tests pin the abutment-sensitive rules, not tap reach."""
+    counts = {
+        rule: n
+        for rule, n in report["rule_counts"].items()
+        if not rule.startswith("comp.tap_distance.")
+    }
+    violations = [
+        v
+        for v in report["violations"]
+        if not v["rule"].startswith("comp.tap_distance.")
+    ]
+    return counts, violations
+
+
 def _gf180mcu_and2_row(tmp_path, name: str, pitch_delta_dbu: int, count: int = 3):
     """Build a GDS with `count` instances of the real `and2_1` standard-cell
     corpus GDS placed in a horizontal row, in a new top cell
@@ -3693,8 +3716,8 @@ def test_run_drc_gf180mcu_row_abutment_real_pitch_clean(tmp_path):
         "poly2.space.1",
     ):
         assert rule_id not in report["coverage"]["rules_skipped"]
-    assert report["status"] == "clean"
-    assert report["violation_count"] == 0
+    _counts, violations = _without_tap_distance_findings(report)
+    assert violations == []
 
 
 def test_run_drc_gf180mcu_row_abutment_issue_reported_pitch_is_real_overlap(tmp_path):
@@ -3720,8 +3743,10 @@ def test_run_drc_gf180mcu_row_abutment_issue_reported_pitch_is_real_overlap(tmp_
 
     report = run_drc(str(path), "gf180mcu", top="ROW_ABUTMENT_TEST")
 
+    rule_counts, _violations = _without_tap_distance_findings(report)
+
     assert report["status"] == "violations"
-    assert report["rule_counts"] == {
+    assert rule_counts == {
         "comp.enclosing.contact.1": 2,
         "contact.space.1": 4,
         "metal1.space.1": 4,
@@ -3750,6 +3775,11 @@ def test_run_drc_gf180mcu_row_abutment_subdbu_gap_real_shortfall(tmp_path):
     # The 1 dbu offset also puts the shifted instance off the 0.005um grid
     # (issue #3001); this test pins the spacing rule, not the grid.
     rule_counts, _violations = _without_grid_findings(report)
+    rule_counts = {
+        rule: n
+        for rule, n in rule_counts.items()
+        if not rule.startswith("comp.tap_distance.")
+    }
 
     assert report["status"] == "violations"
     assert rule_counts == {"metal1.space.1": 4}
@@ -7208,14 +7238,15 @@ def test_run_drc_threshold_max_dbu_validated_even_when_layer_absent(
 
 
 def test_run_drc_sg13g2_every_rule_has_provenance():
-    """Every one of sg13g2's 45 curated `DrcRule` entries carries a populated
+    """Every one of sg13g2's 50 curated `DrcRule` entries carries a populated
     `provenance` citation (issue #905's own acceptance criterion: "every
     compiled rule cites its SG13G2 PDK source line", extended by issue #1243's
-    Metal3-TopMetal2 stack and issue #2581's 6.11 MIM group) -- not just the
-    32 width/space rules `tests/test_golden_deck.py`'s generic check already
+    Metal3-TopMetal2 stack, issue #2581's 6.11 MIM group, issue #3787's pSD
+    group and issue #3571's NWell rules) -- not just the
+    36 width/space rules `tests/test_golden_deck.py`'s generic check already
     covers."""
     deck = get_deck("sg13g2")
-    assert len(deck) == 45
+    assert len(deck) == 50
     for rule in deck:
         assert rule.provenance is not None, f"sg13g2/{rule.id}: no provenance"
         assert rule.provenance.source_repo == "IHP-GmbH/IHP-Open-PDK"
@@ -8354,7 +8385,7 @@ def test_run_drc_sg13g2_mim_rules_cite_the_6_11_mim_group():
     """Structural half: both new rules carry the `MIM` scope and cite
     `6_11_mim.drc`'s own official rule ids -- and nothing in this deck cites
     the `maximal`-only runset `MIM.a`/`MIM.b`/`MIM.e`/`MIM.f` live in (see
-    `sg13g2.py`'s "Scope guard")."""
+    `sg13g2.py`'s "Scope guard"; only the three pSD rules of #3787 do)."""
     deck = get_deck("sg13g2")
     mim_rules = {rule.id: rule for rule in deck if rule.scope == "MIM"}
     assert set(mim_rules) == {"metal5.enclosing.mim.1", "mim.enclosing.topvia1.1"}
@@ -8365,9 +8396,11 @@ def test_run_drc_sg13g2_mim_rules_cite_the_6_11_mim_group():
     for rule in mim_rules.values():
         assert rule.check == "enclosing"
         assert rule.provenance.source_path.endswith("beol/6_11_mim.drc")
-    assert not [
+    # `nwell.width.1` (issue #3571) legitimately cites the maximal runset:
+    # `NW.a` is not implemented in the modular `5_1_nwell.drc`.
+    assert {
         rule.id for rule in deck if "maximal" in (rule.provenance.source_path or "")
-    ]
+    } == {"psd.width.1", "psd.space.1", "psd.area.1", "nwell.width.1"}  # #3787, #3571
 
 
 # --------------------------------------------------------------------------- #
@@ -10834,3 +10867,46 @@ def test_list_deck_rules_context2_keys_only_when_set():
     assert dig["context2_sized_by_um"] == 0.0
     plain = rules["nwell.enclosing.pactiv.1"]["derived_layer"]
     assert not any(k.startswith("context2") for k in plain)
+
+
+def _make_sky130_marker_layout(*, marker: bool) -> kdb.Layout:
+    """Two narrow `li` bars (a seeded width violation each), optionally with
+    an `areaid.ce` (81/2) marker drawn over them."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    li = layout.layer(67, 20)
+    top.shapes(li).insert(kdb.Box(0, 0, 50, 2000))
+    top.shapes(li).insert(kdb.Box(1000, 0, 1050, 2000))
+    if marker:
+        top.shapes(layout.layer(81, 2)).insert(kdb.Box(-500, -500, 1500, 2500))
+    return layout
+
+
+def test_run_drc_sky130_discloses_marker_blind_layer_without_changing_result(tmp_path):
+    """Issue #3815: 81/2 is accepted but unmodelled; the disclosure is
+    informational and leaves violations/status untouched."""
+    plain = tmp_path / "plain.gds"
+    marked = tmp_path / "marked.gds"
+    _make_sky130_marker_layout(marker=False).write(str(plain))
+    _make_sky130_marker_layout(marker=True).write(str(marked))
+
+    plain_report = run_drc(str(plain), "sky130")
+    marked_report = run_drc(str(marked), "sky130")
+
+    assert plain_report["coverage"]["marker_blind_layers_in_stream"] == []
+    assert marked_report["coverage"]["marker_blind_layers_in_stream"] == ["81/2"]
+    assert marked_report["status"] == plain_report["status"]
+    assert marked_report["violation_count"] == plain_report["violation_count"] > 0
+    assert marked_report["rule_counts"] == plain_report["rule_counts"]
+
+
+def test_run_drc_deck_without_marker_declaration_reports_empty(tmp_path):
+    path = tmp_path / "marked.gds"
+    _make_sky130_marker_layout(marker=True).write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["coverage"]["marker_blind_layers_in_stream"] == []
+    assert get_marker_blind_layers("gf180mcu") == []
+    assert get_marker_blind_layers("no-such-deck") == []
+    assert get_marker_blind_layers("sky130") == [(81, 2)]

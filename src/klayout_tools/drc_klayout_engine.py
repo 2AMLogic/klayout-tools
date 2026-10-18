@@ -15,12 +15,13 @@ import hashlib
 import json
 import os
 import re
+import signal
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
 from typing import Any
 
-from ._layout import load_layout
+from ._layout import load_layout, select_top_cells
 from ._provenance import build_provenance, sha256_file
 from .coverage import (
     build_check_coverage,
@@ -31,6 +32,7 @@ from .coverage import (
 from .drc import (
     CODE_KLAYOUT_UNAVAILABLE,
     CODE_KLAYOUT_VERSION_TOO_OLD,
+    CODE_MULTIPLE_TOP_CELLS,
     CODE_NEGATIVE_CONTROL_FAILED,
     DrcError,
 )
@@ -261,6 +263,27 @@ def _parse_klayout_rdb_report(
 _KLAYOUT_ERROR_LINE_RE = re.compile(r"^ERROR\b.*$", re.MULTILINE)
 
 
+_SIGNAL_NUMBER_RE = re.compile(r"Signal number:\s*(\d+)")
+
+
+def _klayout_crash_signal(returncode: int, output: str) -> str | None:
+    """Name the signal that killed klayout, or None when it did not crash.
+
+    POSIX reports death by signal as a negative return code; klayout's own
+    crash handler instead prints ``Signal number: N`` and exits normally.
+    """
+    number = -returncode if returncode < 0 else None
+    if number is None:
+        match = _SIGNAL_NUMBER_RE.search(output)
+        number = int(match.group(1)) if match else None
+    if number is None:
+        return None
+    try:
+        return signal.Signals(number).name
+    except ValueError:
+        return f"signal {number}"
+
+
 def _klayout_deck_error_lines(*streams: str | None) -> list[str]:
     """Every ``ERROR``-prefixed line in the given ``klayout`` output streams
     (issue #1941), in order, stdout before stderr.
@@ -340,6 +363,65 @@ def _klayout_deck_error_detail(
         head.extend(dropped_errors)
         head.append("... (end of ERROR lines recovered from the omitted section)")
     return "\n".join(head + kept)
+
+
+def _check_klayout_run(
+    completed: subprocess.CompletedProcess[str],
+    report_path: str,
+    *,
+    allow_deck_errors: bool,
+) -> tuple[list[str], bool]:
+    """Judge a finished ``klayout -b -r`` run; raise :class:`DrcError` when its
+    report cannot be trusted, else return ``(error_lines, deck_errored)``.
+
+    ``deck_errored`` is true only when the run failed but ``allow_deck_errors``
+    let the partial report through.
+    """
+    if not os.path.isfile(report_path):
+        # klayout -b -r can exit 0 even when the deck script errored out
+        # before reaching report(...) -- never trust the exit code alone
+        # (see :func:`run_drc_klayout_engine`'s docstring). No report file at
+        # all means no trustworthy verdict is possible; surface klayout's own
+        # stdout/stderr rather than a bare "no report" message. Not
+        # tolerable via allow_deck_errors: there is no partial report to
+        # accept here, only nothing at all.
+        output = (completed.stdout or completed.stderr or "").strip()
+        crash = _klayout_crash_signal(completed.returncode, output)
+        if crash is not None:
+            # A crash (#3811) is a klayout/deck bug, not a deck script
+            # error: name it so it is not mistaken for a mistyped deck.
+            raise DrcError(
+                f"klayout crashed ({crash}) before producing a report "
+                f"file. klayout's own output:\n{output}"
+            )
+        raise DrcError(
+            "klayout did not produce a report file -- the deck script "
+            "likely failed before completing. klayout's own output:\n" + output
+        )
+
+    # ...and the report file's presence is not a completion signal either
+    # (issue #1941): a deck that called report(...) early and then aborted
+    # leaves a partial report behind. Either of klayout's own failure
+    # signals -- a non-zero exit status, or an ERROR-prefixed line in its
+    # output -- means the rules after the abort never ran, so the partial
+    # report's zero violations must not be reported as "clean".
+    error_lines = _klayout_deck_error_lines(completed.stdout, completed.stderr)
+    deck_errored = completed.returncode != 0 or bool(error_lines)
+    if deck_errored and not allow_deck_errors:
+        # Issue #2333: the *whole* captured output, not `error_lines`
+        # alone -- the causal line is routinely not ERROR-prefixed.
+        detail = _klayout_deck_error_detail(
+            completed.stdout, completed.stderr, error_lines
+        )
+        raise DrcError(
+            "klayout reported an error while running the deck script "
+            f"(exit status {completed.returncode}) -- the deck likely "
+            "aborted part-way through, so the report file it did write "
+            "covers only the rules that ran before the abort, and its "
+            "verdict cannot be trusted. Pass --allow-deck-errors to "
+            "accept a partial report anyway. klayout's own output:\n" + detail
+        )
+    return error_lines, deck_errored
 
 
 #: Ruby's shell-out forms, as they appear in a KLayout DRC-DSL driver script
@@ -504,6 +586,140 @@ def _deck_script_files(deck_file: str) -> list[str]:
                     pending.append(os.path.abspath(resolved))
                     break
     return ordered
+
+
+#: Ruby ``$name`` global reads. A leading letter/underscore excludes the
+#: special ``$0``/``$1``/``$!`` forms.
+_DECK_GLOBAL_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
+
+#: Globals that are never a caller-tunable deck variable: ``klt`` supplies
+#: ``input``/``report`` itself, ``top_cell`` is the optional cell name the
+#: PDK decks read under ``if $input``, and the rest are Ruby's own.
+_DECK_GLOBAL_IGNORED = frozenset(
+    {
+        "input", "report", "top_cell",
+        "stdout", "stderr", "stdin", "PROGRAM_NAME", "LOAD_PATH",
+        "LOADED_FEATURES", "DEBUG", "VERBOSE", "FILENAME",
+    }
+)  # fmt: skip
+
+#: ``if not defined? $x`` / ``unless defined? $x`` opening a default block.
+_DECK_DEFAULT_BLOCK_RE = re.compile(
+    r"^\s*(?:if\s+(?:not|!)\s*defined\?\s*\(?\s*\$(\w+)\s*\)?|"
+    r"unless\s+defined\?\s*\(?\s*\$(\w+)\s*\)?)\s*$"
+)
+#: ``$x = <value> unless defined? $x`` / ``... if not defined? $x``.
+_DECK_DEFAULT_INLINE_RE = re.compile(
+    r"^\s*\$(\w+)\s*=\s*(?P<value>.+?)\s+"
+    r"(?:unless\s+defined\?|if\s+(?:not|!)\s*defined\?)\s*\(?\s*\$(\w+)\s*\)?\s*$"
+)
+_DECK_ASSIGN_RE = re.compile(r"^\s*\$(\w+)\s*(?:\|\|)?=\s*(?P<value>.+?)\s*$")
+_DECK_OR_ASSIGN_RE = re.compile(r"^\s*\$(\w+)\s*\|\|=\s*(?P<value>.+?)\s*$")
+
+
+def _ruby_literal(value: str) -> str:
+    """``"false"``/``'3'`` -> ``false``/``3``; anything else is kept verbatim."""
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        return value[1:-1]
+    return value
+
+
+def _record_deck_default(
+    line: str, guarded: str | None, defaults: dict[str, str | None]
+) -> str | None:
+    """Fold one deck line into ``defaults`` (see :func:`scan_deck_globals`);
+    returns the ``defined?``-guarded global whose block is still open."""
+    block = _DECK_DEFAULT_BLOCK_RE.match(line)
+    if block:
+        guarded = block.group(1) or block.group(2)
+        defaults.setdefault(guarded, None)
+        return guarded
+    inline = _DECK_DEFAULT_INLINE_RE.match(line) or _DECK_OR_ASSIGN_RE.match(line)
+    if inline:
+        defaults.setdefault(inline.group(1), _ruby_literal(inline.group("value")))
+        return guarded
+    assign = _DECK_ASSIGN_RE.match(line)
+    if guarded and assign and assign.group(1) == guarded:
+        if defaults.get(guarded) is None:
+            defaults[guarded] = _ruby_literal(assign.group("value"))
+        return None
+    return guarded
+
+
+def scan_deck_globals(deck_file: str) -> list[dict[str, Any]]:
+    """Best-effort static scan of the ``-rd`` globals a KLayout DRC deck
+    consumes (issue #3816), following literal includes as
+    :func:`_deck_script_files` does.
+
+    Returns a name-sorted list of ``{"name", "required_by_caller",
+    "default"}``. A global whose first assignment is guarded by ``defined?``
+    (block, trailing modifier, or ``||=``) is ``required_by_caller: False``
+    with that assignment's literal as ``default``; every other ``$name``
+    mentioned outside a comment is ``required_by_caller: True`` with
+    ``default: None``. See :data:`_DECK_GLOBAL_IGNORED` for what is skipped.
+
+    A heuristic, not a Ruby parser: a missing entry is not proof the deck
+    ignores a variable, and an unreadable file contributes nothing.
+    """
+    defaults: dict[str, str | None] = {}
+    seen: set[str] = set()
+    for source in _deck_script_files(deck_file):
+        try:
+            with open(source, encoding="utf-8", errors="replace") as handle:
+                lines = handle.read().splitlines()
+        except OSError:
+            continue
+        guarded: str | None = None
+        for line in lines:
+            if line.lstrip().startswith("#"):
+                continue
+            guarded = _record_deck_default(line, guarded, defaults)
+            seen.update(_DECK_GLOBAL_RE.findall(line))
+    names = {n for n in seen | set(defaults) if n not in _DECK_GLOBAL_IGNORED}
+    # A name only ever assigned (never read, never default-guarded) is deck
+    # internal state, not an input; but we cannot tell reads from writes
+    # line-wise beyond the default forms, so every mentioned name is listed.
+    return [
+        {
+            "name": name,
+            "required_by_caller": name not in defaults,
+            "default": defaults.get(name),
+        }
+        for name in sorted(names)
+    ]
+
+
+def _missing_deck_globals_warning(
+    deck_file: str, deck_vars: dict[str, str] | None
+) -> list[dict[str, Any]]:
+    """The ``warnings[]`` entry (issue #3816) for a deck that reads
+    ``required_by_caller`` globals while the run supplied none of them.
+
+    Empty list (no warning) when the deck needs none, or when any
+    ``--deck-var`` covers a required one. Never affects status/exit code.
+    """
+    supplied = set(deck_vars or {})
+    required = [
+        g["name"] for g in scan_deck_globals(deck_file) if g["required_by_caller"]
+    ]
+    if not required or supplied & set(required):
+        return []
+    names = ", ".join(required)
+    return [
+        {
+            "category": "deck_globals_not_supplied",
+            "count": 1,
+            "text": (
+                f"deck {os.path.basename(deck_file)} reads -rd global(s) "
+                f"[{names}] and no --deck-var supplied any of them; rule "
+                "groups gated on them may silently not run (coverage can be "
+                "reported as unknown, as in issue #1302). Run `klt pdk decks` "
+                "to see each deck's globals and defaults. Static heuristic "
+                "scan: a listed global may be harmless."
+            ),
+        }
+    ]
 
 
 def _scan_deck_host_commands(deck_file: str) -> dict[str, str]:
@@ -1195,15 +1411,13 @@ def run_drc_klayout_engine(
     always did, now with the causal ``sh: ...: command not found`` line
     quoted in the deck-abort error (see below).
 
-    ``top`` is not yet supported for this engine (unlike :func:`run_drc`'s
-    curated engine, issue #554): an arbitrary PDK-native DRC-DSL script has
-    no standard ``-rd``-settable "restrict to this one top cell" variable
-    this module can rely on generically (`sky130A.lydrc`, e.g., always reads
-    the whole ``$input`` stream). Passing ``top`` raises :class:`DrcError`
-    rather than silently ignoring the caller's stated scope request --
-    mirroring how the ``"netgen"`` LVS engine rejects request fields it has
-    no equivalent hook for (``lvs.py``'s ``hints``/``reference.device_bulk``/
-    ``options.parameter_tolerance`` checks).
+    ``top`` (issue #3788) names the one top cell to check. A deck reads the
+    whole ``$input`` stream as a single-top layout, so when the stream has
+    more than one top cell and ``top`` is given, the deck is run against a
+    temporary stream holding only that cell's subtree (the input file is not
+    modified). A multi-top stream without ``top`` raises :class:`DrcError`
+    (``code="multiple_top_cells"``) before KLayout is launched; a single-top
+    stream is passed through unchanged.
 
     The returned dict matches :func:`run_drc`'s documented top-level shape
     (``schema_version``, ``file``, ``deck``, ``dbu_um``, ``status``,
@@ -1306,12 +1520,6 @@ def run_drc_klayout_engine(
     expected_names = _validate_expected_rule_category_names(
         expected_rule_category_names, expected_rule_categories
     )
-    if top is not None:
-        raise DrcError(
-            "the klayout engine does not support --top yet -- omit --top, "
-            "or use the curated deck engine (the default) instead"
-        )
-
     # Resolved only when `--pdk`/`--pdk-root` was given -- purely for
     # `provenance.pdk` (issue #1901); this engine's own rules come from
     # `deck_file`, resolved separately (possibly using the same flags, one
@@ -1355,16 +1563,35 @@ def run_drc_klayout_engine(
     layout = load_layout(path, DrcError)
     dbu = layout.dbu
 
+    # Issue #3788: a deck reads `$input` as a single-top layout, so the
+    # stream handed to it must have exactly one top cell. Resolve that before
+    # launching KLayout rather than let the deck die with a generic message.
+    top_cells = select_top_cells(layout, top, DrcError)
+    if top is None and len(top_cells) > 1:
+        names = ", ".join(sorted(cell.name for cell in top_cells))
+        raise DrcError(
+            f"'{path}' has {len(top_cells)} top cells ({names}); the klayout "
+            "engine needs a single top cell -- pass --top to select one",
+            code=CODE_MULTIPLE_TOP_CELLS,
+        )
+
     work_dir = tempfile.mkdtemp(prefix="klt-drc-klayout-")
     try:
         report_path = os.path.join(work_dir, "report.lyrdb")
+        input_path = path
+        if top is not None and [c.name for c in layout.top_cells()] != [top]:
+            # `top` names a cell other than the stream's sole top cell (one of
+            # several tops, or a child of a single top): only its subtree
+            # reaches the deck; the caller's file is untouched.
+            input_path = os.path.join(work_dir, "input-top.gds")
+            top_cells[0].write(input_path)
         cmd = [
             _KLAYOUT_EXECUTABLE,
             "-b",
             "-r",
             deck_file,
             "-rd",
-            f"input={path}",
+            f"input={input_path}",
             "-rd",
             f"report={report_path}",
         ]
@@ -1388,42 +1615,9 @@ def run_drc_klayout_engine(
                 "--timeout-s to allow more time)"
             ) from exc
 
-        if not os.path.isfile(report_path):
-            # klayout -b -r can exit 0 even when the deck script errored out
-            # before reaching report(...) -- never trust the exit code alone
-            # (see this function's docstring). No report file at all means no
-            # trustworthy verdict is possible; surface klayout's own
-            # stdout/stderr rather than a bare "no report" message. Not
-            # tolerable via allow_deck_errors: there is no partial report to
-            # accept here, only nothing at all.
-            raise DrcError(
-                "klayout did not produce a report file -- the deck script "
-                "likely failed before completing. klayout's own output:\n"
-                + (completed.stdout or completed.stderr or "").strip()
-            )
-
-        # ...and the report file's presence is not a completion signal either
-        # (issue #1941): a deck that called report(...) early and then aborted
-        # leaves a partial report behind. Either of klayout's own failure
-        # signals -- a non-zero exit status, or an ERROR-prefixed line in its
-        # output -- means the rules after the abort never ran, so the partial
-        # report's zero violations must not be reported as "clean".
-        error_lines = _klayout_deck_error_lines(completed.stdout, completed.stderr)
-        deck_errored = completed.returncode != 0 or bool(error_lines)
-        if deck_errored and not allow_deck_errors:
-            # Issue #2333: the *whole* captured output, not `error_lines`
-            # alone -- the causal line is routinely not ERROR-prefixed.
-            detail = _klayout_deck_error_detail(
-                completed.stdout, completed.stderr, error_lines
-            )
-            raise DrcError(
-                "klayout reported an error while running the deck script "
-                f"(exit status {completed.returncode}) -- the deck likely "
-                "aborted part-way through, so the report file it did write "
-                "covers only the rules that ran before the abort, and its "
-                "verdict cannot be trusted. Pass --allow-deck-errors to "
-                "accept a partial report anyway. klayout's own output:\n" + detail
-            )
+        error_lines, deck_errored = _check_klayout_run(
+            completed, report_path, allow_deck_errors=allow_deck_errors
+        )
 
         violations, rule_counts, rule_categories = _parse_klayout_rdb_report(
             report_path, dbu
@@ -1448,6 +1642,7 @@ def run_drc_klayout_engine(
     coverage = _klayout_engine_coverage(
         rule_counts, rule_categories, coverage_assertion
     )
+    deck_global_warnings = _missing_deck_globals_warning(deck_file, deck_vars)
     rollup = coverage_rollup({"coverage": coverage}, failed=bool(violations))
     return {
         "schema_version": 2,
@@ -1474,6 +1669,9 @@ def run_drc_klayout_engine(
         "rule_counts": dict(sorted(rule_counts.items())),
         "violations": violations,
         "coverage": coverage,
+        # Additive (issue #3816): only present when the deck reads globals a
+        # caller must supply and the run supplied none. Never alters status.
+        **({"warnings": deck_global_warnings} if deck_global_warnings else {}),
         **(
             {"coverage_assertion": coverage_assertion}
             if coverage_assertion is not None

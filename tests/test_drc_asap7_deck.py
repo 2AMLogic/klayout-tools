@@ -221,7 +221,9 @@ def test_docs_list_every_rule_and_gap():
         assert f"`{gap.id}`" in section, gap.id
     for cell in SHIPPED_CELL_DEVIATIONS:
         assert f"`{cell}`" in section, cell
-    assert f"--expect-rule-categories {len(RULE_IDS)}" in section
+    counts = re.findall(r"--expect-rule-categories (\d+)", section)
+    assert counts, "no --expect-rule-categories example in the ASAP7 section"
+    assert {int(n) for n in counts} == {len(RULE_IDS)}, counts
     assert f"--expect-rule-categories {len(RULE_IDS)}" in _deck_text()
 
 
@@ -374,6 +376,35 @@ def test_cli_envelope_clean_device(tmp_path, capsys):
     assert payload["engine"] == "klayout"
     assert payload["status"] == "clean"
     assert payload["violation_count"] == 0
+    assert payload["coverage_assertion"]["satisfied"] is True
+
+
+@_needs_klayout
+@pytest.mark.parametrize(
+    "shapes",
+    [
+        pytest.param([fx.box("LIG", 0, 0, 100, 20)], id="lig-only"),
+        pytest.param(
+            [fx.box("LIG", 0, 0, 100, 20), fx.box("M1", 0, 0, 100, 36)],
+            id="lig-m1-tap-or-filler",
+        ),
+        pytest.param(
+            [fx.box("LIG", 0, 0, 100, 20), fx.box("GATE", 40, -10, 60, 30)],
+            id="lig-gate-no-active",
+        ),
+    ],
+)
+def test_cli_lig_without_lisd_returns_a_verdict(tmp_path, capsys, shapes):
+    """#3811: LIG with no LISD/SDT (a tap or filler cell) used to SIGSEGV
+    KLayout in the props_ne net separation; it must give a verdict, with the
+    full rule set still declared."""
+    gds = tmp_path / "lig_only.gds"
+    fx.write_shapes(str(gds), shapes)
+    code, payload = _run_cli(
+        capsys, gds, "--expect-rule-categories", str(len(RULE_IDS))
+    )
+    assert code in (0, 3), payload
+    assert payload["status"] in ("clean", "violations")
     assert payload["coverage_assertion"]["satisfied"] is True
 
 
