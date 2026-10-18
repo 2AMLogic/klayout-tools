@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
@@ -259,6 +260,27 @@ def _parse_klayout_rdb_report(
 #: ERROR_CHECK.1``) never starts a line with the bare prefix -- so the anchor
 #: is what keeps this from misreading ordinary deck output as a failure.
 _KLAYOUT_ERROR_LINE_RE = re.compile(r"^ERROR\b.*$", re.MULTILINE)
+
+
+_SIGNAL_NUMBER_RE = re.compile(r"Signal number:\s*(\d+)")
+
+
+def _klayout_crash_signal(returncode: int, output: str) -> str | None:
+    """Name the signal that killed klayout, or None when it did not crash.
+
+    POSIX reports death by signal as a negative return code; klayout's own
+    crash handler instead prints ``Signal number: N`` and exits normally.
+    """
+    number = -returncode if returncode < 0 else None
+    if number is None:
+        match = _SIGNAL_NUMBER_RE.search(output)
+        number = int(match.group(1)) if match else None
+    if number is None:
+        return None
+    try:
+        return signal.Signals(number).name
+    except ValueError:
+        return f"signal {number}"
 
 
 def _klayout_deck_error_lines(*streams: str | None) -> list[str]:
@@ -1530,10 +1552,18 @@ def run_drc_klayout_engine(
             # stdout/stderr rather than a bare "no report" message. Not
             # tolerable via allow_deck_errors: there is no partial report to
             # accept here, only nothing at all.
+            output = (completed.stdout or completed.stderr or "").strip()
+            crash = _klayout_crash_signal(completed.returncode, output)
+            if crash is not None:
+                # A crash (#3811) is a klayout/deck bug, not a deck script
+                # error: name it so it is not mistaken for a mistyped deck.
+                raise DrcError(
+                    f"klayout crashed ({crash}) before producing a report "
+                    f"file. klayout's own output:\n{output}"
+                )
             raise DrcError(
                 "klayout did not produce a report file -- the deck script "
-                "likely failed before completing. klayout's own output:\n"
-                + (completed.stdout or completed.stderr or "").strip()
+                "likely failed before completing. klayout's own output:\n" + output
             )
 
         # ...and the report file's presence is not a completion signal either

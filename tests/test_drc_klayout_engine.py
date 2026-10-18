@@ -625,6 +625,28 @@ def test_klayout_engine_no_report_file_raises(tmp_path, monkeypatch):
         run_drc_klayout_engine(gds, deck_file)
 
 
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "expected"),
+    [
+        (-11, "", "SIGSEGV"),
+        (0, "ERROR: Signal number: 11\nAddress: 0x0\n", "SIGSEGV"),
+    ],
+)
+def test_klayout_engine_no_report_names_crash_signal(
+    tmp_path, monkeypatch, returncode, stdout, expected
+):
+    """A klayout crash (#3811) is named as such, with klayout's output kept."""
+    _stub_klayout_drc_subprocess(
+        monkeypatch, write_report=False, returncode=returncode, stdout=stdout
+    )
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    with pytest.raises(DrcError, match=rf"klayout crashed \({expected}\)") as info:
+        run_drc_klayout_engine(gds, deck_file)
+    assert stdout.strip() in str(info.value)
+
+
 # --------------------------------------------------------------------------- #
 # A partially-executed deck must never read as clean (issue #1941)
 #
