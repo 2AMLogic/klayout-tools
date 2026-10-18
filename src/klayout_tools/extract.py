@@ -275,8 +275,10 @@ from .extract_report import (
     _describe_parasitics_overlap_gaps,
     _detect_merged_net_labels,
     _detect_single_terminal_nets,
+    _detect_split_net_labels,
     _detect_unbiased_pmos_body_nets,
     _net_label_positions,
+    _split_net_label_warnings,
 )
 
 # The SPEF-export subsystem lives in its own module (issue #1195). Two of its
@@ -2085,6 +2087,9 @@ def run_extract(
             "merged_net_labels": [
                 {"net": str, "labels": [str, ...]}, ...
             ],
+            "split_net_labels": [
+                {"label": str, "nets": [net_id, ...], "count": int}, ...
+            ],
             "unbiased_pmos_body_nets": [
                 {"device": str, "net": str}, ...
             ],
@@ -3043,6 +3048,12 @@ def run_extract(
             "'Merged net labels' section."
         )
 
+    # The inverse (issue #3920): one drawn label on 2+ distinct nets, e.g.
+    # two unstrapped `VDD` rails. Same two-way surfacing as above; see
+    # docs/cli/extract.md's "Split net labels" section.
+    split_net_labels = _detect_split_net_labels(nets)
+    warnings.extend(_split_net_label_warnings(split_net_labels))
+
     # PMOS body terminals tied to an anonymous, unbiased net (issue #555):
     # a PMOS body extracts onto a KLayout-synthesized `$<n>` net with no DC
     # bias path whenever no well tie -- drawn on a distinct `tap` layer, or
@@ -3787,6 +3798,10 @@ def run_extract(
         # `_detect_merged_net_labels` and the comment above where it is
         # computed for the field's full meaning.
         "merged_net_labels": merged_net_labels,
+        # Additive field (issue #3920): always a list, empty when no drawn
+        # label text names more than one net -- see
+        # `_detect_split_net_labels`.
+        "split_net_labels": split_net_labels,
         # Additive field (issue #552): always a list, empty when this deck
         # registers no voltage-domain marker or none of it overlaps
         # extracted MOS geometry -- see run_extract's docstring and
