@@ -2075,6 +2075,7 @@ def run_sim(
     fail_fast_probe: bool | None = None,
     fail_on_diagnostic: list[str] | tuple[str, ...] | None = None,
     max_units_per_job: int | None = None,
+    max_concurrent_jobs: int | None = None,
     dry_run: bool = False,
     submit_only: bool = False,
     attach_job_id: str | None = None,
@@ -2369,6 +2370,7 @@ def run_sim(
         fail_fast_probe=fail_fast_probe,
         fail_on_diagnostic=fail_on_diagnostic,
         max_units_per_job=max_units_per_job,
+        max_concurrent_jobs=max_concurrent_jobs,
         dry_run=dry_run,
         submit_only=submit_only,
         attach_job_id=attach_job_id,
@@ -2560,6 +2562,22 @@ def _with_max_units_override(
     }
 
 
+def _with_max_concurrent_override(
+    request: dict[str, Any], max_concurrent_jobs: int | None
+) -> dict[str, Any]:
+    """Fold the ``--max-concurrent-jobs`` CLI override into ``request.batch``
+    (issue #3914), leaving the loaded request untouched."""
+    if max_concurrent_jobs is None:
+        return request
+    return {
+        **request,
+        "batch": {
+            **(request.get("batch") or {}),
+            "max_concurrent_jobs": max_concurrent_jobs,
+        },
+    }
+
+
 def _with_capacity_wait_override(
     request: dict[str, Any], capacity_wait_s: float | None
 ) -> dict[str, Any]:
@@ -2731,6 +2749,7 @@ def _prepare_sim_request(
     fail_fast_probe: bool | None,
     fail_on_diagnostic: list[str] | tuple[str, ...] | None,
     max_units_per_job: int | None,
+    max_concurrent_jobs: int | None,
     capacity_wait_s: float | None,
     dry_run: bool,
 ) -> _ResolvedSimRequest:
@@ -2740,6 +2759,7 @@ def _prepare_sim_request(
     the order of the checks is the error precedence the JSON reports, so it
     must not be reordered."""
     request = _with_max_units_override(load_request(request_path), max_units_per_job)
+    request = _with_max_concurrent_override(request, max_concurrent_jobs)
     request = _with_capacity_wait_override(request, capacity_wait_s)
     request_dir = os.path.dirname(os.path.abspath(request_path))
     # Issue #1261 (and #1274 for `environment.models_lib`): every input-path
@@ -3325,6 +3345,7 @@ def _run_sim_corners(
     fail_fast_probe: bool | None = None,
     fail_on_diagnostic: list[str] | tuple[str, ...] | None = None,
     max_units_per_job: int | None = None,
+    max_concurrent_jobs: int | None = None,
     dry_run: bool = False,
     submit_only: bool = False,
     attach_job_id: str | None = None,
@@ -3347,6 +3368,7 @@ def _run_sim_corners(
         fail_fast_probe=fail_fast_probe,
         fail_on_diagnostic=fail_on_diagnostic,
         max_units_per_job=max_units_per_job,
+        max_concurrent_jobs=max_concurrent_jobs,
         capacity_wait_s=capacity_wait_s,
         dry_run=dry_run,
     )

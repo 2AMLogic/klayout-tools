@@ -775,6 +775,20 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     sim_parser.add_argument(
+        "--max-concurrent-jobs",
+        dest="max_concurrent_jobs",
+        type=int,
+        default=None,
+        help=(
+            "backend `batch`, sharded runs: keep at most this many shard "
+            "jobs in flight at once and start the rest as earlier ones "
+            "finish, so a large split does not exceed the fleet's instance "
+            "cap (default: the request's `batch.max_concurrent_jobs`, else "
+            "every shard is submitted at once); overrides the request "
+            "field when given. See docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
         "--budget-s",
         dest="budget_s",
         type=float,
