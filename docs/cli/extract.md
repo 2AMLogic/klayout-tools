@@ -2568,6 +2568,29 @@ no server-side fix for this today: a caller that intentionally uses
 `merged_net_labels[]` entry whose `labels` do not actually correspond to
 independent naming intents.
 
+### Split net labels (issue #3920)
+
+The inverse of a merged label: the same drawn label text (e.g. `VDD`) sits on
+two or more electrically separate nets — typically two supply rails nobody
+strapped together. KLayout keeps them as distinct nets, so `nets[]` carries
+several entries with the same `name`, and the written netlist can only tell
+them apart as `VDD`, `VDD$1`, … pins. Fed to `klt lvs` as a pre-extracted
+netlist, that surfaces only as anonymous `net.merged`/`net.split`/
+`device.unmatched` errors (the `net.supply_fragmented` finding needs drawn-label
+geometry, which only inline extraction has). `klt extract` therefore names the
+root cause itself:
+
+- A structured entry in `split_net_labels[]`:
+  `{ "label": "VDD", "nets": [4, 7], "count": 2 }` — `nets` are `nets[].net_id`
+  values, the only field that distinguishes the same-named nets.
+- A matching prose entry in `warnings[]` naming the label and the net count.
+
+The check is label-text based (any label, not only supply names) and uses
+`nets[].label_positions_um`, so a label repeated several times on one connected
+net is not reported, and a net carrying several different labels is reported
+only under `merged_net_labels[]`. `status`, `nets[]` and `pin_count` are
+unaffected. `klt lvs` output is unchanged.
+
 ### Voltage-domain markers (issue #552) and per-flavour MOS binding (issue #1111)
 
 Some PDKs draw **two gate-oxide/voltage domains** on the same wafer, selected
@@ -7777,6 +7800,7 @@ exit codes).
 | `abstracted_cells` | array\<object\>            | One entry per distinct cell type matched by `--abstract-cells` (issue #620 — see "Cell-level (black-box + pins) abstraction" above), each `{ "cell": string, "instance_count": int, "pin_count": int, "resolution_source": "in_cell_labels" \| "lef_abstract", "lef_path": string \| null }` (`lef_path` names the specific `--abstract-cell-lef` file for `"lef_abstract"`, `null` for `"in_cell_labels"`). Always present, empty unless `--abstract-cells` matched at least one instantiated cell. |
 | `unmodelled_poly`  | array\<object\>           | One entry per `poly` shape the unmodelled-device diagnostic flagged (issue #324 — see "Known limitation: unmodelled device geometry" below), each `{ "bbox_um": {"left", "bottom", "right", "top"}, "reason": "unmarked" \| "marked_unrecognised" }`. `reason` mirrors the two `warnings[]` cases below without requiring a consumer to parse the prose string. Sorted by `(left, bottom)` for deterministic output. Always present, empty whenever `warnings[]` carries no unmodelled-device entry. A deliberate poly underpass lands here too unless the deck declares `poly_interconnect` and the shape is marked with it — see "Declaring intentional poly interconnect" below (issue #1425). |
 | `merged_net_labels` | array\<object\>          | One entry per net whose name is a merge of 2+ distinct labels (issue #470 — see "Merged net labels" below), each `{ "net": "<full joined name>", "labels": [str, ...] }` (`net` uses the same `\|`-joined spelling as `nets[].name` and the written netlist, issue #696; `labels` is `net` split on `\|`). A matching prose entry is also appended to `warnings[]` for every affected net. Always present, empty when no net carries multiple labels. |
+| `split_net_labels` | array\<object\> | One entry per drawn label text carried by 2+ distinct extracted nets (issue #3920 — the inverse of `merged_net_labels`; see "Split net labels" below), each `{ "label": str, "nets": [int, ...], "count": int }` — `nets` lists the `net_id`s of `nets[]` (not names, which are identical across the split nets), `count` is `len(nets)`. A matching prose entry is appended to `warnings[]` per label. Always present, empty when every label names exactly one net. |
 | `voltage_domain_warnings` | array\<object\>     | One entry per voltage-domain marker layer with **no** matching `mos_flavours` coverage (issue #552, narrowed by issue #1111 — see "Voltage-domain markers and per-flavour MOS binding" below) whose geometry overlaps extracted MOS device geometry, each `{ "marker": "<layer>/<datatype>", "description": str }`. A matching prose entry is also appended to `warnings[]`. Always present, empty for a deck that registers no such marker, a marker fully covered by `mos_flavours` (e.g. gf180mcu's `Dualgate` as of issue #1111 — see the linked section for what "covered" means), or a layout that draws none of the remainder overlapping MOS geometry. |
 | `missing_flavour_markers` | array\<object\> | One entry per `mos_flavours` marker layer the deck declares that has **zero shapes anywhere in the layout** (issue #2417), each `{ "deck": str, "flavour": str, "marker": "<layer>/<datatype>" }`. With no marker geometry flavour selection never fires and every MOS device silently binds the deck's default flavour. A matching prose entry is appended to `warnings[]`. Only evaluated under `--pdk` (flavour selection changes the bound model name only when a PDK resolves the binding). Not raised when the marker is present but overlaps no MOS active area. Always present, empty for a deck with no `mos_flavours` or whose markers all have geometry. |
 | `unsupported_devices` | array\<object\> | One entry per deck `unsupported_device_markers` layer that carries shapes in the extracted cell (issue #2919), each `{ "kind": str, "marker": "<layer>/<datatype>", "count": int, "bbox_um": {"left", "bottom", "right", "top"}, "description": str }`. `count` is the number of merged marker shapes and `bbox_um` bounds all of them. The deck cannot extract that device class, so those devices are **absent from the netlist** although `status` stays `"extracted"`; a matching prose entry is appended to `warnings[]`. Today only `gf180mcu` declares one: `MOS_CAP_MK` (166/5) with `kind: "mos_capacitor"` (`cap_nmos_*`/`cap_pmos_*`), and only for marker components the deck's MOS-capacitor recogniser could not classify (a recognised capacitor is in `devices[]`, not here). Treat a non-empty field as an incomplete netlist. Always present, empty for a deck that declares no such marker or a layout with no shapes on it. |

@@ -542,6 +542,33 @@ def _detect_merged_net_labels(nets: list[dict[str, Any]]) -> list[dict[str, Any]
     return merged
 
 
+def _detect_split_net_labels(nets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Build the response's ``split_net_labels[]`` array (issue #3920).
+
+    The inverse of :func:`_detect_merged_net_labels`: one drawn label text
+    carried by 2+ distinct extracted nets, e.g. two unstrapped ``VDD``
+    rails. Such nets share one ``name`` in ``nets[]`` and surface downstream
+    only as ``VDD``/``VDD$1`` pins in the written netlist, which then show
+    up in ``klt lvs`` as anonymous ``net.merged``/``net.split`` errors.
+
+    Scans the already-built ``nets[]`` array, grouping ``net_id`` by each
+    ``label_positions_um[].text`` (a label repeated on one net counts once).
+    Returns one entry per label, sorted by label: ``{"label": str, "nets":
+    [net_id, ...], "count": int}``. ``nets`` lists ``net_id`` (not ``name``,
+    which is identical across the split nets). Always a list; empty when
+    every label names exactly one net.
+    """
+    ids_by_label: dict[str, list[int]] = {}
+    for net in nets:
+        for text in {entry["text"] for entry in net["label_positions_um"]}:
+            ids_by_label.setdefault(text, []).append(net["net_id"])
+    return [
+        {"label": label, "nets": sorted(ids), "count": len(ids)}
+        for label, ids in sorted(ids_by_label.items())
+        if len(ids) >= 2
+    ]
+
+
 #: Every anonymous KLayout-synthesized net name reported anywhere in this
 #: module's JSON (``devices[].nets[...]``, ``nets[].name``, etc.) has already
 #: passed through :func:`spice_safe_net_name`, which backslash-escapes a
