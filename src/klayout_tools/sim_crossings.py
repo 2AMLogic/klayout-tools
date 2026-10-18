@@ -50,6 +50,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
+from . import sim_supply_relative
 from .sim_errors import SimError
 
 #: The ``crossings.edge`` values: a rising crossing, a falling one, or both.
@@ -102,7 +103,7 @@ def validate_crossings_spec(name: Any, body: Any) -> None:
             f"allowed: {sorted(_ALLOWED_KEYS)}"
         )
     _validate_signal(name, body.get("signal"))
-    _validate_level(name, body.get("level"))
+    _validate_crossings_level(name, body.get("level"))
     edge = body.get("edge", "rise")
     if edge not in CROSSING_EDGES:
         raise SimError(
@@ -144,6 +145,37 @@ def _validate_level(name: Any, level: Any) -> None:
             f"measurement '{name}': crossings.level is required and must be "
             f"a finite number in the signal's own unit (got {level!r})"
         )
+
+
+def _validate_crossings_level(name: Any, level: Any) -> None:
+    """``crossings.level``: a finite number, or (issue #3918) a
+    ``{frac_of, fraction}`` fraction of a ``corners.supply_v`` key resolved per
+    corner. Whether the key exists is checked once the corners are known."""
+    if not sim_supply_relative.is_supply_relative(level):
+        _validate_level(name, level)
+        return
+    try:
+        sim_supply_relative.validate(level, f"measurement '{name}': crossings.level")
+    except sim_supply_relative.SupplyRelativeError as exc:
+        raise SimError(str(exc)) from exc
+
+
+def validate_supply_relative_levels(
+    measurements_spec: list[dict[str, Any]], supply_maps: list[dict[str, Any]]
+) -> None:
+    """Refuse, before any run, a supply-relative ``crossings.level`` whose
+    ``frac_of`` key one of the corners' ``supply_v`` maps does not carry."""
+    for spec in crossings_measurements(measurements_spec):
+        level = spec["crossings"].get("level")
+        if not sim_supply_relative.is_supply_relative(level):
+            continue
+        for supply_v in supply_maps:
+            try:
+                sim_supply_relative.resolve(
+                    level, f"measurement '{spec['name']}': crossings.level", supply_v
+                )
+            except sim_supply_relative.SupplyRelativeError as exc:
+                raise SimError(str(exc)) from exc
 
 
 def _validate_max(name: Any, value: Any) -> None:
@@ -238,14 +270,19 @@ class CrossingsOutcome:
     total: int = 0
     truncated: bool = False
     error: str | None = None
+    #: The threshold in volts, set only when ``level`` was supply-relative.
+    resolved_level: float | None = None
 
     def report(self) -> dict[str, Any]:
         """The response's ``crossings`` object for this measurement."""
-        return {
+        out: dict[str, Any] = {
             "times": list(self.times),
             "edges": list(self.edges),
             "truncated": self.truncated,
         }
+        if self.resolved_level is not None:
+            out["level"] = self.resolved_level
+        return out
 
 
 def find_crossings(
@@ -303,23 +340,30 @@ def _interpolate(
 
 
 def extract_corner_crossings(
-    measurements_spec: list[dict[str, Any]], corner_dir: str
+    measurements_spec: list[dict[str, Any]],
+    corner_dir: str,
+    supply_v: dict[str, Any] | None = None,
 ) -> dict[int, CrossingsOutcome]:
     """``{position in measurements_spec: outcome}`` for every crossings entry
-    of one finished corner, read from the rawfiles :func:`control_lines`
-    asked ngspice to write. Never raises: an unreadable or missing rawfile
-    becomes that measurement's own ``error``."""
+    of one finished corner (``supply_v``: its supply map, which a
+    supply-relative ``level`` is resolved against), read from the rawfiles
+    :func:`control_lines` asked ngspice to write. Never raises: an unreadable
+    or missing rawfile becomes that measurement's own ``error``."""
     outcomes: dict[int, CrossingsOutcome] = {}
     index = 0
     for position, spec in enumerate(measurements_spec):
         if not is_crossings(spec):
             continue
-        outcomes[position] = _extract_one(spec, rawfile_path(corner_dir, index))
+        outcomes[position] = _extract_one(
+            spec, rawfile_path(corner_dir, index), supply_v
+        )
         index += 1
     return outcomes
 
 
-def _extract_one(spec: dict[str, Any], raw_path: str) -> CrossingsOutcome:
+def _extract_one(
+    spec: dict[str, Any], raw_path: str, supply_v: dict[str, Any] | None = None
+) -> CrossingsOutcome:
     from .sim import SimError, parse_ascii_rawfile
 
     body = spec["crossings"]
@@ -349,12 +393,23 @@ def _extract_one(spec: dict[str, Any], raw_path: str) -> CrossingsOutcome:
             )
         )
     name = spec["name"]
-    return find_crossings(
+    raw_level = body["level"]
+    resolved_level: float | None = None
+    if sim_supply_relative.is_supply_relative(raw_level):
+        try:
+            resolved_level = sim_supply_relative.resolve(
+                raw_level, f"measurement '{name}': crossings.level", supply_v
+            )
+        except sim_supply_relative.SupplyRelativeError as exc:
+            return CrossingsOutcome(error=str(exc))
+    outcome = find_crossings(
         [point[0] for point in points],
         [point[1] for point in points],
-        float(body["level"]),
+        resolved_level if resolved_level is not None else float(raw_level),
         edge=body.get("edge", "rise"),
         start=_window_bound(name, body, "from"),
         stop=_window_bound(name, body, "to"),
         max_count=body.get("max") or DEFAULT_MAX_CROSSINGS,
     )
+    outcome.resolved_level = resolved_level
+    return outcome

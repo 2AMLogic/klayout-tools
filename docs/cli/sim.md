@@ -3322,6 +3322,11 @@ available without `keep_artifacts`. An engine `.meas` error that cannot be
 matched to a missing measurement is reported once as a corner-level
 `measurement` diagnostic with severity `warning`; grading is unchanged.
 
+A `spice` `.meas ... when v(x)=<val>` card therefore cannot follow
+`corners.supply_v`: write the literal for each corner's supply, or declare the
+threshold as `measurements[].crossings` with a supply-relative `level`
+(`{"frac_of": "vdd", "fraction": 0.5}`), which `klt sim` resolves per corner.
+
 `FIND ... AT=` does not accept an arithmetic expression either. On ngspice-46,
 `at=0.5*2.5u` fails with the misleading `find(AT) : out of interval`. Use a
 literal time or a `.param` reference. This error follows the same
@@ -3619,10 +3624,19 @@ declaration returns the whole ordered list instead:
 | Key      | Required | Meaning |
 | -------- | -------- | ------- |
 | `signal` | yes      | One-line ngspice vector expression (`"v(ro1)"`, `"v(outp) - v(outn)"`, `"i(vdd)"`), evaluated against the transient's saved vectors. |
-| `level`  | yes      | Finite number, in the signal's own unit. |
+| `level`  | yes      | Finite number, in the signal's own unit — or a supply-relative `{"frac_of": "<supply_v key>", "fraction": 0.5}` (issue #3918, see below). |
 | `edge`   | no       | `"rise"` (default), `"fall"`, or `"either"`. |
 | `from`/`to` | no    | Window, inclusive, in seconds: a number or a SPICE time literal (`"10n"`). A crossing outside it is not counted. |
 | `max`    | no       | Cap on the returned times, integer in `[1, 100000]`; default `1000`. |
+
+**Supply-relative `level`.** `{"frac_of": "vdd", "fraction": 0.5}` is
+`fraction × corners.supply_v["vdd"]` for the corner being measured, so a
+mid-rail threshold follows the supply sweep. The resolved threshold is echoed as
+`level` (volts) inside that corner's `crossings` object; a literal-number
+`level` leaves the report unchanged. `frac_of` must be a `corners.supply_v`
+key of every corner and `fraction` a finite number `>= 0`; otherwise the
+request is refused before any corner runs. (This is the supply-relative path;
+see the `.meas` note under *`WHEN` thresholds must be literal numbers*.)
 
 `crossings` is a third measurement form: an entry declares **exactly one** of
 `spice`, `expr`, or `crossings` (declaring two is exit 1). It requires
@@ -4622,6 +4636,14 @@ sync by convention. Declare the schedule in the request instead
 | `signals[].skew_s` | Shift applied to every event of this signal (default `0`; may be negative while `t_s + skew_s >= 0`). |
 | `signals[].events[]` | `t_s` (edge start, strictly increasing, `>= 0`), `level`, optional `transition_s` overriding the signal default for that edge. |
 
+`initial` and `events[].level` are volts, or (issue #3918) a supply-relative
+`{"frac_of": "<corners.supply_v key>", "fraction": <number >= 0>}` resolved
+per corner as `fraction × supply`. That makes a stimulus amplitude follow
+`corners.supply_v` (e.g. a clock swinging to `{"frac_of": "vdd", "fraction": 1.0}`).
+An unknown `frac_of` key, a bad `fraction`, or use without `corners.supply_v`
+fails before any run with `stimulus_invalid`. Edge direction, and so which of
+`rise_s`/`fall_s` applies, is decided per corner on the resolved volts.
+
 An event at `t_s` (plus `skew_s`) is when the edge **starts**; the level is
 reached one transition later. A transition of `0` cannot be written as a PWL
 (time points must increase), so it is applied as 1 fs (`1e-15`); the report
@@ -4657,6 +4679,11 @@ report, not from a side-car file:
 ```
 
 `edge` is `rise`, `fall` or `hold`; `t_applied_s` is `t_s + skew_s`.
+
+When any level is supply-relative the block is instead
+`{"supply_relative": true, "corners": [{"corner_id": ..., "signals": [...]}]}`:
+each corner's signals carry the resolved volts, and a supply-relative event also
+carries `level_spec` (the declared `{frac_of, fraction}`).
 Additive: absent when the request declares no `stimulus`. No `schema_version`
 bump (see `docs/json-contract.md`).
 

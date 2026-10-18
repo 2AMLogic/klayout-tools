@@ -20913,6 +20913,59 @@ def test_run_lvs_gate_level_verilog_records_every_pin_order_source(tmp_path):
     assert [entry["cells"] for entry in sources] == [2, 1, 1]
 
 
+def _portable_macro_request(tmp_path: Path, **extra) -> tuple[str, str]:
+    root = _make_fake_macro_pdk(tmp_path)
+    request = json.loads(
+        _macro_request(
+            tmp_path,
+            {
+                "library": ["sky130_fd_sc_hd", "sky130_sram_macros"],
+                "pdk": "sky130A",
+                "pdk_root": root,
+            },
+        )
+    )
+    request.update(extra)
+    return json.dumps(request), root
+
+
+def test_run_lvs_portable_paths_default_keeps_absolute_paths(tmp_path):
+    """Omitting `portable_paths` leaves the report as it was (issue #3798)."""
+    request, _ = _portable_macro_request(tmp_path)
+    explicit_false, _ = _portable_macro_request(tmp_path, portable_paths=False)
+    sources = run_lvs(request)["provenance"]["pin_order_sources"]
+    assert all(os.path.isabs(entry["path"]) for entry in sources)
+    assert run_lvs(explicit_false)["provenance"]["pin_order_sources"] == sources
+
+
+def test_run_lvs_portable_paths_true_leaves_no_absolute_host_path(tmp_path):
+    """`portable_paths: true` makes the envelope pass the env-provenance scan:
+    PDK files become `$PDK_ROOT/...`, nothing absolute remains, and the
+    verdict is unchanged (issue #3798)."""
+    from klayout_tools.env_provenance import find_absolute_path_fields
+
+    request, _ = _portable_macro_request(tmp_path, portable_paths=True)
+    baseline, _ = _portable_macro_request(tmp_path)
+    report = run_lvs(request)
+
+    assert find_absolute_path_fields(report) == []
+    sources = report["provenance"]["pin_order_sources"]
+    assert [entry["path"] for entry in sources] == [
+        entry["path"]
+        for entry in sources
+        if isinstance(entry["path"], str) and entry["path"].startswith("$PDK_ROOT/")
+    ]
+    assert len(sources) == 3
+    assert report["status"] == run_lvs(baseline)["status"]
+    jsonschema.validate(report, _LVS_SCHEMA)
+
+
+def test_run_lvs_portable_paths_must_be_boolean(tmp_path):
+    request, _ = _portable_macro_request(tmp_path, portable_paths="yes")
+    with pytest.raises(LvsError, match="portable_paths must be a boolean"):
+        run_lvs(request)
+
+
 def test_run_lvs_gate_level_verilog_multi_library_power_universe_is_per_library(
     tmp_path,
 ):

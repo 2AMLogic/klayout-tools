@@ -273,6 +273,106 @@ def test_stimulus_lines_land_after_the_netlist_include(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# Supply-relative levels (issue #3918)
+# --------------------------------------------------------------------------- #
+
+
+def _frac(rail="vdd", fraction=0.5):
+    return {"frac_of": rail, "fraction": fraction}
+
+
+def _supply_request():
+    return _stim(initial=_frac(fraction=0.0), events=[{"t_s": 1e-9, "level": _frac()}])
+
+
+def _supply_points():
+    return [
+        sim.CornerPoint(process=None, supply_v={"vdd": v}, temperature_c=27)
+        for v in (1.6, 2.0)
+    ]
+
+
+def test_fraction_levels_follow_each_corners_supply():
+    request, points = _supply_request(), _supply_points()
+    signals, by_corner = sim._resolve_stimulus(
+        request, _TRAN, "ngspice", "/dev/null", points
+    )
+    assert by_corner is not None
+    levels = [by_corner[p.corner_id][0]["events"][0]["level"] for p in points]
+    assert levels == pytest.approx([0.8, 1.0])
+    assert by_corner[points[0].corner_id][0]["events"][0]["level_spec"] == _frac()
+    assert signals == by_corner[points[0].corner_id]
+
+
+def test_supply_relative_deck_lines_differ_per_corner(tmp_path):
+    request, points = _supply_request(), _supply_points()
+    _, by_corner = sim._resolve_stimulus(request, _TRAN, "ngspice", "/dev/null", points)
+    lines = sim_stimulus.corner_deck_lines(
+        {sim_stimulus.supply_key(p.supply_v): by_corner[p.corner_id] for p in points}
+    )
+    decks = []
+    for point in points:
+        deck = tmp_path / f"{len(decks)}.cir"
+        sim._write_corner_deck(
+            deck_path=str(deck),
+            netlist_path="/n.cir",
+            models_lib=None,
+            point=point,
+            analysis=_TRAN,
+            measurements_spec=[],
+            raw_path=None,
+            stimulus_lines=lines,
+        )
+        decks.append(deck.read_text())
+    assert "0.8" in decks[0] and "0.8" not in decks[1]
+    assert "1.0" in decks[1]
+    assert len(lines) == 2  # distinct lines are what a checkpoint fingerprints
+
+
+def test_supply_relative_echo_is_per_corner():
+    request, points = _supply_request(), _supply_points()
+    signals, by_corner = sim._resolve_stimulus(
+        request, _TRAN, "ngspice", "/dev/null", points
+    )
+    entry = sim_stimulus.environment_entry(signals, by_corner)["stimulus"]
+    assert entry["supply_relative"] is True
+    assert [c["corner_id"] for c in entry["corners"]] == [p.corner_id for p in points]
+
+
+def test_literal_levels_are_unchanged():
+    points = _supply_points()
+    signals, by_corner = sim._resolve_stimulus(
+        _stim(), _TRAN, "ngspice", "/dev/null", points
+    )
+    assert by_corner is None
+    assert isinstance(sim_stimulus.deck_lines(signals), tuple)
+    assert not hasattr(sim_stimulus.deck_lines(signals), "by_supply")
+    assert sim_stimulus.environment_entry(signals) == {"stimulus": {"signals": signals}}
+
+
+@pytest.mark.parametrize(
+    ("level", "supply", "match"),
+    [
+        (_frac("vcc"), {"vdd": 1.8}, "not a corners.supply_v key"),
+        (_frac(fraction=-0.1), {"vdd": 1.8}, "fraction must be a finite number"),
+        (
+            _frac(fraction=float("inf")),
+            {"vdd": 1.8},
+            "fraction must be a finite number",
+        ),
+        ({"frac_of": "vdd"}, {"vdd": 1.8}, "fraction must be"),
+        ({"frac_of": "vdd", "fraction": 0.5, "x": 1}, {"vdd": 1.8}, "unknown key"),
+        (_frac(), {}, "no corners.supply_v"),
+    ],
+)
+def test_bad_supply_relative_level_is_refused_before_any_run(level, supply, match):
+    request = _stim(events=[{"t_s": 1e-9, "level": level}])
+    points = [sim.CornerPoint(process=None, supply_v=supply, temperature_c=27)]
+    with pytest.raises(sim.SimError, match=match):
+        sim._resolve_stimulus(request, _TRAN, "ngspice", "/dev/null", points)
+
+
+# --------------------------------------------------------------------------- #
 # Backend provenance
 # --------------------------------------------------------------------------- #
 
