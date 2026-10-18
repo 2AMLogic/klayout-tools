@@ -2344,16 +2344,32 @@ def _resolve_interrupted_grace_s(batch_spec: dict[str, Any]) -> float:
 # --------------------------------------------------------------------------- #
 
 
+# One slot per concurrent CLI spawn across every shard thread. A hosts=96 run
+# otherwise keeps ~96 ``aws`` processes alive on the submitting host (each poll
+# is a fresh CLI start-up), which saturates a small worker. Held only around the
+# spawn, never around poll sleeps, so threads queue for a slot instead.
+_SPAWN_SLOTS = min(os.cpu_count() or 1, 8)
+_SPAWN_SEMAPHORE = threading.BoundedSemaphore(_SPAWN_SLOTS)
+
+
 def _run_subprocess(
     argv: list[str], timeout_s: float
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout_s)
+    with _SPAWN_SEMAPHORE:
+        return subprocess.run(argv, capture_output=True, text=True, timeout=timeout_s)
 
 
 def job_uri(config: BatchConfig, job_id: str) -> str:
     """``s3://<bucket>/<jobs-prefix>/<job-id>`` -- the one prefix every key
     this module reads or writes lives under."""
     return f"s3://{config.bucket}/{config.jobs_prefix}/{job_id}"
+
+
+def report_job_uri(config: BatchConfig, job_id: str) -> str:
+    """:func:`job_uri` with the bucket elided, for text that lands in a
+    committable report (#3777): the bucket name embeds the fleet's AWS
+    account number, so it must never reach ``--report-out`` evidence."""
+    return job_uri(config, job_id).replace(config.bucket, "<bucket>", 1)
 
 
 def new_job_id() -> str:
@@ -2712,7 +2728,7 @@ def _check_interrupted_grace(
         f"{interrupted_s:.0f}s, past batch.interrupted_grace_s="
         f"{config.interrupted_grace_s:g}s, with no re-launch observed; "
         "it may still be recoverable on the fleet (check "
-        f"{job_uri(config, job_id)}/status.json) -- the client does "
+        f"{report_job_uri(config, job_id)}/status.json) -- the client does "
         "not re-launch it itself",
         interrupted_s=interrupted_s,
     )
@@ -2957,7 +2973,6 @@ def _batch_environment(
     return {
         "provider": "aws-batch-fleet",
         "job_id": job_id,
-        "bucket": config.bucket,
         "region": status.get("region") or config.region,
         "instance_id": status.get("instance_id"),
         "instance_type": status.get("instance_type"),
@@ -3918,7 +3933,7 @@ def _poll_status_interruptibly(
     def _handle(signum: int, _frame: Any) -> None:
         raise BatchClientInterrupted(
             f"client terminated by {signal.Signals(signum).name} while waiting "
-            f"on job {job_id} (bucket {config.bucket}, region {config.region}); "
+            f"on job {job_id} (region {config.region}); "
             "the remote job is left running -- the fleet has no cancel",
             job_id=job_id,
             signum=signum,
@@ -4036,7 +4051,7 @@ def _run_batch_job(
     if attach:
         if not job_exists(config, job_id, runner=runner):
             raise BatchError(
-                f"no batch job {job_id!r} in bucket {config.bucket!r} under "
+                f"no batch job {job_id!r} in the configured bucket under "
                 f"prefix {config.jobs_prefix!r} (never submitted, wrong "
                 "bucket/profile/region, or expired)",
                 code=BATCH_UNKNOWN_JOB_CODE,
@@ -4176,7 +4191,6 @@ def _poll_and_collect(
             {
                 "provider": "aws-batch-fleet",
                 "job_id": job_id,
-                "bucket": config.bucket,
                 "region": config.region,
                 "state": exc.last_state,
                 **(
@@ -4734,6 +4748,7 @@ __all__ = [
     "collect_outputs",
     "job_exists",
     "job_uri",
+    "report_job_uri",
     "launch_job",
     "new_job_id",
     "poll_status",
