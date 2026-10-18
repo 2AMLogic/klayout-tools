@@ -469,6 +469,17 @@ def _normalize_path_comments(data: bytes) -> bytes:
     return _PATH_COMMENT_RE.sub(_basename, data)
 
 
+def _sort_subckt_comment_ports(line: bytes) -> bytes:
+    """``line`` with the port tokens of a ``**.subckt <name> <ports...>``
+    comment sorted; any other comment is returned unchanged. The comment is
+    informational (the electrical ``.subckt`` card is compared strictly), and
+    different xschem versions list its ports in different orders."""
+    tokens = line.split()
+    if len(tokens) > 2 and tokens[0] == b"**.subckt":
+        return b" ".join(tokens[:2] + sorted(tokens[2:]))
+    return line
+
+
 def _normalize_layout(data: bytes) -> bytes:
     """``data`` with ``+`` continuation lines joined onto their predecessor and
     whitespace runs collapsed, so a netlist re-wrapped by a post-processor
@@ -476,14 +487,17 @@ def _normalize_layout(data: bytes) -> bytes:
 
     Comment lines (``*``) are kept as their own lines with only trailing
     whitespace (and any CR) dropped; a ``+`` line is never joined onto a
-    comment. Only line layout changes, never a token, so an electrical
-    change (device card, parameter, node or pin order) still compares unequal.
+    comment. Only line layout changes, never a token of a non-comment line,
+    so an electrical change (device card, parameter, node or pin order) still
+    compares unequal. The one comment-token normalization is the port order of
+    xschem's ``**.subckt <name> <ports...>`` comment, which varies across
+    xschem versions (:func:`_sort_subckt_comment_ports`).
     """
     lines: list[bytes] = []
     prev_joinable = False
     for raw in data.split(b"\n"):
         if raw.lstrip().startswith(b"*"):
-            lines.append(raw.rstrip())
+            lines.append(_sort_subckt_comment_ports(raw.rstrip()))
             prev_joinable = False
             continue
         tokens = raw.split()
@@ -514,7 +528,8 @@ def _check_result(output: str, fresh_data: bytes) -> tuple[str, dict[str, Any]]:
 
     It also ignores ``+`` continuation layout and whitespace runs
     (:func:`_normalize_layout`, issue #3324); ``layout_differs`` is true when
-    the files match only after that normalization.
+    the files match only after that normalization -- which includes a
+    different port order in the ``**.subckt`` comment line only.
     """
     if not os.path.isfile(output):
         return STATUS_DRIFTED, {

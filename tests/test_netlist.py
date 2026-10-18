@@ -1234,3 +1234,38 @@ def test_version_is_null_when_probe_hangs(tmp_path, argv_log, monkeypatch):
 
     assert report["status"] == "generated"
     assert report["xschem"]["version"] is None
+
+
+def test_check_ignores_subckt_comment_port_order(tmp_path, argv_log, monkeypatch):
+    """Issue #3743: xschem versions list the ``**.subckt`` comment's ports in
+    different orders; that comment alone is not drift."""
+    monkeypatch.setenv(
+        "NETLIST_BODY", "**.subckt ota inp inn out\n.subckt ota inp inn out\n.end"
+    )
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "block.spice"
+    output.write_text(
+        "**.subckt ota out inn inp\n.subckt ota inp inn out\n.end\n", encoding="utf-8"
+    )
+
+    report = run_netlist(schematic, str(output), check=True, xschem_binary=binary)
+
+    assert report["status"] == "match"
+    assert report["drift"]["layout_differs"] is True
+
+
+def test_check_still_drifts_on_subckt_card_port_order(tmp_path, argv_log, monkeypatch):
+    monkeypatch.setenv(
+        "NETLIST_BODY", "**.subckt ota inp inn out\n.subckt ota inp inn out\n.end"
+    )
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "block.spice"
+    output.write_text(
+        "**.subckt ota inp inn out\n.subckt ota out inn inp\n.end\n", encoding="utf-8"
+    )
+
+    report = run_netlist(schematic, str(output), check=True, xschem_binary=binary)
+
+    assert report["status"] == "drifted"

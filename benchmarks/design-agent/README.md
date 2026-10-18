@@ -17,6 +17,9 @@ benchmarks/design-agent/
   schema/task.schema.json       # JSON Schema every tasks/*.json must satisfy
   schema/mutations.schema.json  # JSON Schema every tasks/*.mutations.json must satisfy
   schema/ledger.schema.json     # JSON Schema for one --rounds ledger.jsonl line
+  schema/layout-*.schema.json   # layout-flow protocol / task / run schemas (see "Layout-flow protocol")
+  layout-protocol.json          # the frozen, versioned layout-flow protocol
+  fixtures/layout/              # synthetic layout task + run fixtures (placeholder hashes)
   tasks/*.json                  # task descriptors (see "Task shape" below)
   tasks/*.mutations.json        # per-task mutation gates (see "Mutation gates" below)
   reference/<task-id>/          # each task's known-good reference solution
@@ -296,6 +299,95 @@ methodology reference only, no code reuse), not reused code:
 **Known gaps in this first cut** (tracked as follow-ups, not silently
 missing): resuming a killed sweep from an existing ledger (AHRR's own
 `resume.py`) is a deliberately deferred nice-to-have.
+
+## Layout-flow protocol
+
+Phase 1 (issue #3024) of the layout-flow benchmark (epic #2252): a **frozen,
+versioned protocol** comparing three ways an agent can produce a sky130
+layout from a frozen schematic netlist. It defines contracts only — no live
+run, no task corpus (#3025), no executor (#3026), no report (#3027). The
+methodology follows Ding, Zou, Sun, Cong, *Can Agents Design Better Chips with
+a Higher Level Abstraction?* (ICCAD'26; artifact
+[github.com/ZijD/AHRR](https://github.com/ZijD/AHRR), MIT) — methodology
+only, no code reuse.
+
+The protocol is `layout-protocol.json`
+(`klt.design_agent_benchmark.layout_protocol/1`); any change to a decision in
+it is a `protocol_version` bump, and results are only comparable within one
+version. It extends — rather than forks — the task, mutation-gate and round
+ledger contracts above: `layout-task.schema.json` reuses `task.schema.json`'s
+`block_spec`, run records carry the ledger's `usage` object, and the budget
+constants are checked against the interactive provider's.
+
+| Arm | Analog | Tool surface (classes) |
+|---|---|---|
+| `draw-only` | direct RTL | `inspect`, `verify`, `draw` (`klt draw`, `klt clip`) |
+| `gen-only` | HLS | `inspect`, `verify`, `generate` (`klt gen`, `klt gen-compose`) |
+| `gen+refine` | HLS + RTL refinement | all four classes, in one `refine` phase, seeded as below |
+
+- **Mechanical tool surface.** Every call goes through the benchmark's `bin/klt`
+  shim, which records `{seq, phase, verb, class, exit_code}` into the run and
+  refuses a verb outside the phase's allowed classes (exit 126 →
+  `invalid_tool_surface`). `validate-layout` re-checks every recorded call, so a
+  `gen-only` run that called `draw` (or a `draw-only` run that called `gen`) is
+  rejected as cross-arm contamination.
+- **Seeding.** `gen+refine` is seeded from the **same (task, agent, replicate)'s
+  best valid `gen-only` run**. The seed is a hashed, immutable GDS recorded as
+  `seed_from`, is part of the run's seed identity, and is round zero of the
+  refine phase, so `gen+refine` can never score worse than its seed. With no
+  valid `gen-only` seed the run is `not_run_no_seed` (unscored, counted).
+- **Refinement sufficiency (measured).** `klt draw` has a read-modify-write
+  mode (`base_gds` plus `erase_um` windows, #3378), so refinement can trim or
+  replace seeded geometry as well as add to it (seed placed as a `gen-compose`
+  `blocks[].cell` plus a `draw` patch). The verdict is `sufficient` and reports
+  need no additive-only disclosure.
+  `tests/test_design_agent_benchmark_layout.py` pins the measurement.
+- **Eligibility.** A task is in or out for all three arms: frozen netlist, a
+  DRC+LVS-clean reference layout, a generator recipe reaching a valid layout,
+  negative controls, open PDK.
+- **Validity.** `drc` clean **and** `lvs` match against the frozen netlist
+  **and** provenance (the scored GDS hash equals the DRC report's, the LVS
+  report's and the artifact's). Checks are re-derived by the scorer from
+  repo-frozen decks and netlists, never trusted from the agent sandbox.
+- **Score.** `area_um2` (`klt layout-metrics` bbox), lower is better; optional
+  `utilization`; `sim_margin` stays `null` until RC extraction (#217). Reported
+  as the per-arm geomean area ratio vs `draw-only` over comparable pairs.
+- **Failure semantics.** Only `valid` runs carry a score; every other status
+  (`invalid_drc`, `invalid_lvs`, `invalid_provenance`, `invalid_tool_surface`,
+  `timeout`, `budget_exhausted`, `agent_error`, `not_run_no_seed`) is recorded,
+  unscored and counted in the denominator; `interrupted` is resumable and not
+  counted.
+- **Seed identity and repeatability.** `seed_sha256` hashes `{protocol_version,
+  task_id, task_sha256, arm, agent_id, replicate}` (plus the seed artifact hash
+  for `gen+refine`); `validate-layout` recomputes it. Everything after the agent
+  — re-scoring a stored artifact, regenerating a report from ledgers — must be
+  exactly reproducible; agent output is not, so ≥3 replicates measure spread.
+- **Budget.** Deterministic validation needs no credentials. Live runs reuse the
+  interactive provider's 1800 s / 80 tool-call per-run ceilings, account cost
+  through the ledger's `usage`, are off by default in CI (one-task smoke only,
+  skipped without credentials, never failing the workflow) and end as
+  `budget_exhausted`.
+
+Validate the protocol, and optionally task / run documents (no `ngspice`, no
+agent, no credentials):
+
+```
+uv run python scripts/design_agent_benchmark.py validate-layout \
+  --task benchmarks/design-agent/fixtures/layout/task-five-transistor-ota-layout.json \
+  --runs benchmarks/design-agent/fixtures/layout/runs-valid.json
+```
+
+The fixtures under `fixtures/layout/` are synthetic (hashes are placeholders);
+the real corpus arrives with #3025. The legacy `validate` / `run` modes are
+unchanged and never read any `layout-*` file.
+
+**Open questions from #2252 → decisions.**
+
+| Question | Outcome |
+|---|---|
+| Seed `gen+refine` from the agent's own `gen-only` best, or a fixed reference composition? | Own best valid `gen-only` (`seeding_decision`); a fixed-reference seed is a later ablation, not a protocol change. |
+| Does `klt draw` expose enough edit primitives for a fair refinement arm? | Yes: `klt draw` `base_gds` + `erase_um` (#3378) covers subtractive edits (`refinement_sufficiency`). |
+| Cost envelope for live-agent CI (cf. #1781)? | `budget` block: existing per-run ceilings, `usage` accounting, live off by default, one-task smoke. |
 
 ## Current task set
 

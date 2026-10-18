@@ -775,15 +775,16 @@ same on `local` and `batch`. An include that cannot be found yields a
 "no value" errors.
 
 **PDK-root includes resolve on the runner.** A `.include` in the
-netlist body that resolves under the PDK root (`models.pdk_root`, else
-`$PDK_ROOT`) is **not** staged or rewritten: the PDK is baked into the
-runner image, so the same path must exist at the same PDK root *on the
-runner*. A body that includes
-`/home/<you>/.volare/<pdk>/libs.tech/ngspice/design.ngspice` fails on a
-runner whose image keeps that PDK elsewhere (or lacks it) with ngspice's
-`Could not find include file ...`. Prefer a PDK-root-relative include
-(`$PDK_ROOT/...`) or a path under the runner's PDK root. Includes *outside*
-the PDK root are staged from the submitting host. When the runner cannot
+netlist body that resolves under the forwarded `models.pdk_root` is **not**
+staged or rewritten: the PDK is baked into the runner image, so the same
+path must exist at the same PDK root *on the runner*. The submitting
+host's own `$PDK_ROOT` is not forwarded, so an absolute include under it
+(and not under `models.pdk_root`) is rewritten to the literal
+`$PDK_ROOT/<relative path>`, which the runner expands against its own PDK
+root, and is reported in `host_resolved_detail` with the `env_var` reason.
+Any other absolute path under a PDK install the runner may not share fails
+with ngspice's `Could not find include file ...`. Includes *outside* both
+roots are staged from the submitting host. When the runner cannot
 resolve an include, the per-corner `diagnostics[]` carries a
 `missing_include` entry naming the file (when the engine log is retrieved,
 which needs `keep_artifacts`), not only `measurement ... produced no value`.
@@ -3923,8 +3924,8 @@ injection source active in each, and both complex result sets kept. An `ac`
   one corner job, each in a fresh plot (`setplot new`). No operating-point
   reuse between passes is promised.
 - Refused before any engine launch: duplicate/malformed passes, a non-`ac`
-  analysis, any `measurements[]` entry other than `tian` (see "Dual-injection
-  stability metrics" below), `options.waveforms` / `--plot`, `engine: "xyce"`,
+  analysis, any `measurements[]` entry other than `tian` or a plain `expr`
+  (see "DC operating-point scalar" below), `options.waveforms` / `--plot`, `engine: "xyce"`,
   and an off-host runner older than `0.7.1` or of unknown version (the
   `dual_injection` mandatory gate, #3161, enforced even under
   `runner_version_check: "warn"`). Requests without `passes` are unchanged.
@@ -3939,6 +3940,16 @@ magnitude-only. The corner gains an additive `passes` list of
 `options.keep_artifacts` is set, else `null`). A pass whose analysis did not
 produce an AC plot is `status: "error"` with a `pass_failed` diagnostic, and
 the corner grades `error`.
+
+**DC operating-point scalar** ([#3771](https://github.com/2AMLogic/klayout-tools/issues/3771)).
+Beside `tian` entries, a `measurements[]` entry with `expr` (the ordinary form:
+one scalar ngspice expression, e.g. `"expr": "v(out)"`) is accepted under
+`analysis.passes`. klt emits `op` before the first pass's `alter` set and
+evaluates the expression in that operating-point plot, so it grades like any
+`expr` scalar (`limits`, `plausible_range`, rollups, Monte Carlo statistics).
+It reports the corner's bias **before any pass `alter`**: a pass that alters a
+DC value (`field: "dc"`) does not move it. Every other form (`spice`,
+`crossings`, `energy`, `cycle_mean`, `transfer`, `noise`) stays refused.
 
 ## Dual-injection stability metrics (`measurements[].tian`)
 
@@ -3983,6 +3994,34 @@ request:
   for negative feedback, e.g. through a `-1` VCVS). Arbitrary expressions and
   differential selectors are not supported. With `options.save_mode:
   "netlist"` only vectors the netlist saves are available.
+- **Series injection** (`series_injection` in place of `tv`/`ti`, issue
+  [#3737](https://github.com/2AMLogic/klayout-tools/issues/3737)). The
+  conventional Middlebrook/Tian bench does not save `Tv`/`Ti`: each is a
+  quotient of two phasors, which no linear element or `B` source can build in an
+  AC analysis. Declare the bench instead and klt forms `T` itself:
+
+  ```json
+  "tian": {"voltage_pass": "inj_v", "current_pass": "inj_i",
+           "series_injection": {"load_node": "b", "source": "vinj"},
+           "metric": "phase_margin_deg"}
+  ```
+
+  Required bench: a 0 V series source `Vinj a b` (`+` on the driver node `a`,
+  `-` on the load node `b`; `load_node` is `b`, `source` is `Vinj`) and a shunt
+  current source `Iinj 0 b` driving the load node (current *into* `b`), both
+  with `AC 0` in the netlist. The voltage pass alters `Vinj` to unit `ac` and
+  `Iinj` to `0`; the current pass the reverse (non-unit stimulus magnitudes are
+  not supported). klt reads `v(b)` from `voltage_pass` and `i(vinj)` from
+  `current_pass` and forms, per sample, `x = -v(b)`, `y = i(vinj) + 1`,
+  `T = 1/(x + y) - 1`. Identity: `Tv = -v(a)/v(b)`, `Ti = -i(vinj)/(i(vinj)+1)`
+  give `x = 1/(1+Tv)`, `y = 1/(1+Ti)` and
+  `1 + T = (1+Tv)(1+Ti)/(Tv+Ti+2) = 1/(x+y)`, so nothing is divided by `v(b)`.
+  `series_injection` takes exactly `load_node` and `source` (one token each,
+  case-insensitive); it is mutually exclusive with `tv`/`ti`, and an entry with
+  neither form is refused. The same metrics, error codes and numerics apply;
+  `tian_singular_denominator` here means `|x + y| <= 1e-9 * (|x| + |y|)`. The
+  runner gate is unchanged (`dual_injection`, `0.7.1`): an older runner rejects
+  the unknown key outright rather than ignoring it.
 - **Formula.** Per frequency sample `T = (Tv*Ti - 1) / (Tv + Ti + 2)`. `T` is
   then reduced with the same numerics as `transfer` (#2922): the
   negative-feedback convention, log-frequency interpolation, first falling
@@ -3996,6 +4035,20 @@ request:
   | `phase_margin_deg` | deg | `180 + phase_at_unity_deg`. |
   | `gain_margin_db` | dB | Minus the dB magnitude where the unwrapped phase first crosses -180 deg downward. |
   | `max_gain_above_crossover_db` | dB | Largest sampled `20*log10 \|T\|` over the closed interval `[unity_crossing_hz, f_max]`: the crossover itself counts (0 dB), so the value is never negative; `0` means the gain never climbs back above 0 dB past the crossover. |
+
+  Four further reductions of the same `T` vector
+  ([#3771](https://github.com/2AMLogic/klayout-tools/issues/3771)):
+
+  | `metric` | Unit | Definition |
+  | -------- | ---- | ---------- |
+  | `phase_crossover_hz` | Hz | Frequency of the first downward -180 deg crossing of the unwrapped phase, the crossing `gain_margin_db` is read at (same unavailable reasons as `gain_margin_db`). |
+  | `rising_unity_crossing_hz` | Hz | First *rising* 0 dB crossing above the first falling one (the unity crossing). Unavailable as `no_rising_unity_crossing` when the loop only rolls off, with the unity metric's own reason when there is no unity crossing, and as `invalid_samples` when a gap precedes it. Existence alone: use the entry's available/unavailable status. |
+  | `peak_above_crossover_db` | dB | **Signed** largest sampled `20*log10 \|T\|` over the samples in `[start, f_max]`, with no zero floor and no injected crossover sample: negative for a monotonic roll-off. `start` is `from_hz`, else `from_ratio * unity_crossing_hz`, else `unity_crossing_hz`. Unavailable when `start` needs the unity crossing and it is unavailable, when no sample is at or above `start` (`no_samples_in_range`), or for an invalid sample in the interval (`invalid_samples`). |
+  | `low_frequency_gain_db` | dB | `20*log10 \|T\|` of the first **valid** sample (the DC-gain proxy; `no_valid_samples` when there is none). |
+
+  `from_ratio` / `from_hz` (a finite number `> 0`, not a boolean) are accepted
+  only with `peak_above_crossover_db`; declaring both is a request error.
+  `max_gain_above_crossover_db` and the five earlier metrics are unchanged.
 
   All-crossing margins and Nyquist encirclement (#3088) are not offered for
   `tian`.
@@ -4013,12 +4066,16 @@ request:
   `max_gain_above_crossover_db`, an invalid sample above the crossover; the
   reason follows in parentheses).
 - **Cache.** Within a corner, `T` is formed and reduced once per
-  `(voltage_pass, current_pass, tv, ti)` tuple (selectors case-folded) and
-  shared by every entry using it.
+  `(voltage_pass, current_pass, tv, ti)` tuple (selectors case-folded; a
+  `series_injection` entry is a different tuple even when its names coincide)
+  and shared by every entry using it.
 
 The response entry is an ordinary `corners[].measurements[]` object plus an
 additive `tian` member echoing `{voltage_pass, current_pass, tv, ti, metric}`
-(no `schema_version` bump). Limits, `plausible_range`, rollups and Monte Carlo
+(`series_injection` in place of `tv`/`ti` for that form; plus `from_ratio` /
+`from_hz` when given; no `schema_version` bump -- new tokens and echo keys are
+additive per `docs/json-contract.md`). An off-host runner older than the
+release carrying the new tokens rejects them as an unknown `tian.metric`. Limits, `plausible_range`, rollups and Monte Carlo
 statistics apply to `value` as for any scalar.
 
 ## Source energy over a transient window (`measurements[].energy`)
@@ -4559,7 +4616,8 @@ netlist's resolved include closure**, not just the netlist file
 - Two classes of include are deliberately **left verbatim** when staging,
   because the *executing* host owns their resolution: a target naming an
   environment variable (`$PDK_ROOT/...`), and a target resolving under the PDK root the
-  request already forwards (`models.pdk_root`, else this host's `$PDK_ROOT`)
+  request already forwards (`models.pdk_root`; this host's own `$PDK_ROOT`
+  is not forwarded, so a path under it is rewritten to `$PDK_ROOT/<rel>`)
   — the model library is baked into the fleet image and is never pushed per
   job (see "Remote backend" above).
 - **`$VAR`/`~` in `.include`/`.inc` targets are expanded on the executing
@@ -6950,6 +7008,11 @@ unavailable measurement values, null bounds, and unrecognized limit keys
 are explicit skips. Only `min` and `max` are applied. A typo such as
 `{"maximum": 1.8}` cannot count as an applied bound. Partial valid bounds
 and skipped bounds remain distinguishable by identity.
+
+`klt signoff` does not count an envelope with `measurements_declared > 0` and
+`measurements_with_limits == 0` as passing corner-verification evidence
+(reason `no_limits_checked`, issue #3769); the `klt sim` status and
+`coverage` are unchanged.
 
 A deliberate no-limit characterization counts a produced measurement as
 checked and its omitted limit as inapplicable. A launched corner alone does

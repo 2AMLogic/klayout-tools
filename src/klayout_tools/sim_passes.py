@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import math
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -240,6 +241,12 @@ def validate_alter_targets(
                 )
 
 
+def _passes_form(spec: dict[str, Any]) -> bool:
+    return spec.get("tian") is not None or (
+        spec.get("expr") is not None and spec.get("noise") is None
+    )
+
+
 def refuse_unsupported(
     analysis: dict[str, Any],
     measurements_spec: list[dict[str, Any]],
@@ -250,12 +257,13 @@ def refuse_unsupported(
     """Refuse, by name, what multi-pass acquisition does not implement."""
     if not is_passes_analysis(analysis):
         return
-    other = next((m for m in measurements_spec if m.get("tian") is None), None)
+    other = next((m for m in measurements_spec if not _passes_form(m)), None)
     if other is not None:
         raise SimError(
             "analysis.passes only supports measurements[] entries declared "
-            f"with 'tian' (the dual-injection stability metrics); measurement "
-            f"{other.get('name')!r} uses another form"
+            "with 'tian' (the dual-injection stability metrics) or 'expr' (a "
+            "DC operating-point scalar evaluated before the first pass); "
+            f"measurement {other.get('name')!r} uses another form"
         )
     if want_waveforms or plot_requested:
         raise SimError(
@@ -287,11 +295,27 @@ def _format_value(value: float) -> str:
     return str(value) if isinstance(value, int) else repr(float(value))
 
 
-def control_lines(analysis: dict[str, Any], corner_dir: str) -> list[str]:
+def control_lines(
+    analysis: dict[str, Any],
+    corner_dir: str,
+    measurements_spec: Sequence[dict[str, Any]] = (),
+) -> list[str]:
     """The pass sequence for the generated ``.control`` block (after the
     corner prefix, before ``quit``): each pass's complete alter set, a fresh
-    plot, the shared AC analysis, and a ``write`` of that plot."""
+    plot, the shared AC analysis, and a ``write`` of that plot.
+
+    Each ``expr`` measurement (issue #3771) is evaluated in an ``op`` plot
+    solved **before** the first pass's ``alter`` set, so it reports the
+    corner's bias with no pass alteration applied (a pass that ``alter``s a DC
+    value does not move it); the ``let``/``print`` pair is the one the plain
+    ``expr`` path emits, so the same log harvest reads it."""
     lines = ["set filetype=ascii"]
+    exprs = [m for m in measurements_spec if m.get("tian") is None]
+    if exprs:
+        lines.append("op")
+        for spec in exprs:
+            lines.append(f"let {spec['name']} = {spec['expr']}")
+            lines.append(f"print {spec['name']}")
     for index, passed in enumerate(analysis["passes"]):
         for target, value, field in passed["alter"]:
             suffix = " ac" if field == "ac" else ""
