@@ -842,6 +842,10 @@ def test_golden_pair_sky130_diode_extracts_with_provenance_cited_device(
         assert device["nets"] == {"a": EXTRACTION_DECK.substrate_net, "c": "TERM"}
     else:
         assert device["nets"]["a"] == "TERM"
+        # The cathode is the (unlabelled) nwell node: present, and neither the
+        # anode net nor the substrate.
+        cathode = device["nets"]["c"]
+        assert cathode and cathode not in ("TERM", EXTRACTION_DECK.substrate_net)
 
     bare = _write_gds(
         _make_sky130_diode_layout(name, marked=False), tmp_path / "bare.gds"

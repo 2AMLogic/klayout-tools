@@ -24867,3 +24867,58 @@ def test_lvs_response_schema_rejects_wrong_schema_version_and_mismatch_entry(tmp
     del bad_entry["mismatches"][0]["category"]
     with pytest.raises(jsonschema.ValidationError):
         _assert_lvs_report_conforms(bad_entry)
+
+
+# --------------------------------------------------------------------------- #
+# sky130 junction diodes (issue #3803): the extracted `D` card must pair with
+# a schematic diode, and removing the diode on either side must mismatch.
+# --------------------------------------------------------------------------- #
+
+
+def _sky130_diode_lvs_report(tmp_path, flavour, *, layout_diode, reference_diode):
+    from klayout_tools.extract import run_extract
+    from test_lvs_device_provenance import _make_sky130_diode_layout, _write_gds
+
+    n_plus = flavour.startswith("diode_pw2nd")
+    gds = _write_gds(_make_sky130_diode_layout(flavour), tmp_path / "diode.gds")
+    extracted = tmp_path / "extracted.spice"
+    run_extract(gds, "sky130", output=str(extracted))
+    layout_text = extracted.read_text()
+    if not layout_diode:
+        layout_text = "\n".join(
+            line for line in layout_text.splitlines() if not line.startswith("D$")
+        )
+    # n+/p-substrate: anode is the substrate pin; p+/nwell: cathode is the
+    # (unnamed) well node.
+    ports, card = (
+        ("TERM VSUBS", f"D1 VSUBS TERM {flavour} A=1P P=4U")
+        if n_plus
+        else ("TERM", f"D1 TERM WELL {flavour} A=1P P=4U")
+    )
+    reference = f".subckt TOP {ports}\n{card if reference_diode else ''}\n.ends\n"
+    request = {
+        "layout": {
+            "netlist": _write(tmp_path / "layout.spice", layout_text),
+            "top": "TOP",
+        },
+        "reference": {
+            "netlist": _write(tmp_path / "ref.spice", reference),
+            "top": "TOP",
+        },
+    }
+    return run_lvs(json.dumps(request))
+
+
+@pytest.mark.parametrize("flavour", ["diode_pw2nd_05v5", "diode_pd2nw_05v5"])
+def test_run_lvs_sky130_diode_matches_and_mismatches_on_removal(tmp_path, flavour):
+    match = _sky130_diode_lvs_report(
+        tmp_path, flavour, layout_diode=True, reference_diode=True
+    )
+    assert match["status"] == "match", match
+    for layout_diode, reference_diode in ((True, False), (False, True)):
+        sub = tmp_path / f"l{layout_diode}r{reference_diode}"
+        sub.mkdir()
+        report = _sky130_diode_lvs_report(
+            sub, flavour, layout_diode=layout_diode, reference_diode=reference_diode
+        )
+        assert report["status"] != "match", (layout_diode, reference_diode)
