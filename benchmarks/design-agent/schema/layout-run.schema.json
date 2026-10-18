@@ -160,7 +160,21 @@
       "description": "Verbatim ledger `usage` shape (ledger.schema.json); null when nothing is known (e.g. the reference provider).",
       "additionalProperties": { "type": ["integer", "number"] }
     },
-    "notes": { "type": ["string", "null"] }
+    "notes": { "type": ["string", "null"] },
+    "runtime_s": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Optional (executor, #3026). Wall-clock seconds of the whole run: sandbox seeding, the agent session, and scoring."
+    },
+    "versions": {
+      "type": "object",
+      "description": "Optional (executor, #3026). Tool versions the run was produced and scored with: `protocol` (protocol_version) and `klt`.",
+      "additionalProperties": { "type": "string" }
+    },
+    "diagnostics": {
+      "type": "object",
+      "description": "Optional (executor, #3026). Machine-readable audit detail that is not part of the score: the tool-log file name, the scorer's per-check verdict, and for a gen+refine run superseded by its seed the refined artifact's hash and area."
+    }
   },
   "allOf": [
     {
