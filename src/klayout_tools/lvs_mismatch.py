@@ -545,7 +545,7 @@ def _body_unverified_counts(layout_circuit: Any, deck: Any) -> dict[str, int]:
 
     The single source of truth for that determination: :func:`_body_net_warnings`
     renders these counts as its ``device.body_unverified`` ``mismatches[]``
-    prose, and :func:`~klayout_tools.lvs._body_verification_report` renders the
+    prose, and :func:`~klayout_tools.lvs_power._body_verification_report` renders the
     same counts as the machine-checkable ``body_verification`` block (issue
     #1983) -- so the warning a reader sees and the field a grader reads can
     never disagree. See :func:`_body_net_warnings` for the full rationale on

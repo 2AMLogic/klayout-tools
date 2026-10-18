@@ -280,6 +280,80 @@ def test_deck_info_reports_released_true_with_release_details(tmp_path, monkeypa
     }
 
 
+def _drc_file_hash() -> str:
+    import hashlib
+
+    from klayout_tools.decks import history as _h
+
+    path = _h._drc_deck_path("asap7")
+    return "sha256:" + hashlib.sha256(open(path, "rb").read()).hexdigest()
+
+
+def test_deck_info_reports_drc_deck_as_its_own_artifact(_history_table):
+    """Issue #3826: the packaged ``asap7.drc`` is hashed separately from the
+    ``asap7`` extraction deck module."""
+    entry = history.deck_info(name="asap7")["decks"][0]
+
+    drc = entry["drc_deck"]
+    assert drc["path_kind"] == "packaged"
+    assert drc["content_hash"] == _drc_file_hash()
+    assert drc["content_hash"] != entry["content_hash"]
+    assert drc["released"] is False
+    assert drc["release"] is None
+
+
+def test_deck_info_drc_deck_released_when_history_has_its_hash(tmp_path, monkeypatch):
+    drc_hash = _drc_file_hash()
+    entries = [
+        {
+            "deck": "asap7",
+            "artifact": "drc_deck",
+            "content_hash": drc_hash,
+            "git_tag": "v9.9.9",
+            "git_commit": "f" * 40,
+            "package_version": "9.9.9",
+        }
+    ]
+    path = tmp_path / "_history.json"
+    path.write_text(json.dumps({"entries": entries}))
+    monkeypatch.setattr(history, "_HISTORY_PATH", path)
+
+    entry = history.deck_info(name="asap7")["decks"][0]
+
+    assert entry["drc_deck"]["released"] is True
+    assert entry["drc_deck"]["release"]["package_version"] == "9.9.9"
+    assert entry["released"] is False  # the extraction module is unrecorded
+    assert history.resolve_deck(content_hash=drc_hash)["artifact"] == "drc_deck"
+
+
+def test_resolve_by_version_prefers_deck_module_over_drc_artifact(
+    tmp_path, monkeypatch
+):
+    base = {"deck": "asap7", "git_tag": "v1", "git_commit": "a" * 40}
+    entries = [
+        {**base, "content_hash": "sha256:" + "1" * 64, "package_version": "1.0.0"},
+        {
+            **base,
+            "artifact": "drc_deck",
+            "content_hash": "sha256:" + "2" * 64,
+            "package_version": "1.0.0",
+        },
+    ]
+    path = tmp_path / "_history.json"
+    path.write_text(json.dumps({"entries": entries}))
+    monkeypatch.setattr(history, "_HISTORY_PATH", path)
+
+    report = history.resolve_deck(deck="asap7", version="1.0.0")
+
+    assert report["content_hash"] == "sha256:" + "1" * 64
+    assert "artifact" not in report
+
+
+def test_deck_info_omits_drc_deck_for_decks_without_a_drc_file(_history_table):
+    entry = history.deck_info(name="sky130")["decks"][0]
+    assert "drc_deck" not in entry
+
+
 def test_deck_info_defaults_to_every_registered_deck(_history_table):
     from klayout_tools.decks import known_extraction_deck_names
 
@@ -761,6 +835,7 @@ def test_deck_devices_covers_every_declared_device_class_of_every_deck():
         declared |= {entry.class_name for entry in deck.bipolars}
         declared |= {entry.name for entry in deck.capacitors}
         declared |= {entry.name for entry in deck.mom_capacitors}
+        declared |= {entry.name for entry in deck.mos_capacitors}
         declared |= {entry.name for entry in deck.resistors}
         declared |= {entry.name for entry in deck.diodes}
         assert reported == declared, name
@@ -1030,6 +1105,25 @@ def test_installed_release_matches_recorded_deck_hash(_history_table, monkeypatc
     assert history.is_deck_hash_released("sky130", recorded) is True
 
 
+def test_installed_release_vouches_for_recorded_drc_deck_hash(
+    _history_table, monkeypatch
+):
+    """Issue #3826: a clean release build vouches for its packaged ``.drc``
+    file, recorded under ``"<name>.drc"`` in ``DECK_HASHES``."""
+    _fake_identity(monkeypatch, True)
+    drc_hash = "sha256:" + "e" * 64
+    _fake_build_info(
+        monkeypatch, {"asap7": "sha256:" + "d" * 64, "asap7.drc": drc_hash}
+    )
+    assert history.is_deck_hash_released("asap7", drc_hash) is True
+
+
+def test_dev_build_does_not_vouch_for_drc_deck(_history_table, monkeypatch):
+    _fake_identity(monkeypatch, False)
+    _fake_build_info(monkeypatch, present=False)
+    assert history.is_deck_hash_released("asap7", _drc_file_hash()) is False
+
+
 def test_installed_release_edited_deck_does_not_self_identify(
     _history_table, monkeypatch
 ):
@@ -1136,3 +1230,11 @@ def test_deck_rules_reports_ambiguous_and_unresolved_explicitly(monkeypatch):
         for ref in rule["layer_refs"]
         if (ref["layer"], ref["datatype"]) not in names
     )
+
+
+def test_deck_rules_reports_marker_blind_layers():
+    """Issue #3815: deck-static, discoverable pre-layout, not narrowed by rule."""
+    assert history.deck_rules("sky130")["marker_blind_layers"] == ["81/2"]
+    one = history.deck_rules("sky130", rule_id="poly.width.1")
+    assert one["marker_blind_layers"] == ["81/2"]
+    assert history.deck_rules("gf180mcu")["marker_blind_layers"] == []

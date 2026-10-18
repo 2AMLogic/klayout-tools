@@ -1665,7 +1665,6 @@ def _run_decks_batch(
                 environment={
                     "provider": "aws-batch-fleet",
                     "job_id": job_id,
-                    "bucket": config.bucket,
                     "region": config.region,
                     "state": exc.last_state,
                     **(

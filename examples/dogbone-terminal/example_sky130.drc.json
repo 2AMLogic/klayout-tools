@@ -58,7 +58,8 @@
       "65/20",
       "66/20",
       "66/44",
-      "67/20"
+      "67/20",
+      "93/44"
     ],
     "layers_in_stream_without_rules": [],
     "rules_checked": [
@@ -74,6 +75,10 @@
       "licon1.angle.1",
       "licon1.ongrid.1",
       "licon1.width.1",
+      "nsdm.angle.1",
+      "nsdm.ongrid.1",
+      "nsdm.space.1",
+      "nsdm.width.1",
       "poly.angle.1",
       "poly.enclosing.licon.1",
       "poly.endcap.diff.1",
@@ -157,8 +162,8 @@
       "ncm.ongrid.1",
       "npc.angle.1",
       "npc.ongrid.1",
-      "nsdm.angle.1",
-      "nsdm.ongrid.1",
+      "npc.space.1",
+      "npc.width.1",
       "nsm.angle.1",
       "nsm.ongrid.1",
       "nwell.angle.1",
@@ -170,6 +175,8 @@
       "pad.ongrid.1",
       "psdm.angle.1",
       "psdm.ongrid.1",
+      "psdm.space.1",
+      "psdm.width.1",
       "pwbm.angle.1",
       "pwbm.ongrid.1",
       "pwde.angle.1",
@@ -211,6 +218,7 @@
     ],
     "voltage_domain_warnings": [],
     "unchecked_rules": [],
+    "marker_blind_layers_in_stream": [],
     "deck_scope": [
       "cap2m",
       "capm",
@@ -223,8 +231,11 @@
       "m3",
       "m4",
       "m5",
+      "npc",
+      "nsdm",
       "nwell",
       "poly",
+      "psdm",
       "rpm",
       "urpm",
       "via",
@@ -234,8 +245,32 @@
       "x"
     ],
     "unmodeled_rules": [
+      "difftap.10",
+      "difftap.11",
+      "difftap.8",
+      "difftap.9",
+      "hvi.1",
+      "hvi.2a",
+      "hvntm.1",
+      "hvntm.2",
+      "hvtp.1",
+      "hvtp.2",
+      "hvtr.1",
+      "hvtr.2",
+      "hvtr.2_a",
       "m1.5",
       "m2.5",
+      "n/psdm.10a",
+      "n/psdm.10b",
+      "n/psdm.5a",
+      "n/psdm.5b",
+      "n/psdm.6",
+      "n/psdm.7",
+      "n/psdm.8",
+      "npc.4",
+      "pad.2",
+      "rdl.1",
+      "rdl.2",
       "via.5a",
       "via2.5",
       "via3.5"
@@ -255,6 +290,10 @@
       "licon1.angle.1",
       "licon1.ongrid.1",
       "licon1.width.1",
+      "nsdm.angle.1",
+      "nsdm.ongrid.1",
+      "nsdm.space.1",
+      "nsdm.width.1",
       "poly.angle.1",
       "poly.enclosing.licon.1",
       "poly.endcap.diff.1",
@@ -568,11 +607,11 @@
         "reason": "no_applicable_geometry"
       },
       {
-        "id": "nsdm.angle.1",
+        "id": "npc.space.1",
         "reason": "no_applicable_geometry"
       },
       {
-        "id": "nsdm.ongrid.1",
+        "id": "npc.width.1",
         "reason": "no_applicable_geometry"
       },
       {
@@ -617,6 +656,14 @@
       },
       {
         "id": "psdm.ongrid.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "psdm.space.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "psdm.width.1",
         "reason": "no_applicable_geometry"
       },
       {

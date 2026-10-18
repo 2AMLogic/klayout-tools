@@ -521,14 +521,23 @@ s2a_pairs.polygons.raw.not_overlapping(active)
 
 # LIG.LISD.S.6 / LIG.SDT.S.8: spacing in any direction between a LIG polygon
 # and a LISD (SDT) polygon on a different net.
-lig_nets.separation(lisd_nets, 14.nm, euclidian, props_ne)
+#
+# A two-layer net separation with props_ne SIGSEGVs KLayout 0.28 when the
+# second operand has no shapes (#3811: a tap or filler cell draws LIG but no
+# LISD or SDT). With an empty second layer there is nothing to separate LIG
+# from, so the result is the (empty) edge pairs of that layer. The rule is
+# still declared via output(), so the coverage count is unchanged.
+lig_net_separation = lambda do |other, other_nets, *args|
+  other.is_empty? ? other.space(1.nm) : lig_nets.separation(other_nets, *args, props_ne)
+end
+lig_net_separation.call(lisd, lisd_nets, 14.nm, euclidian)
   .output("LIG.LISD.S.6", "Table 3.10.1: min spacing between LIG and LISD not on the same net 14 nm")
-lig_nets.separation(sdt_nets, 14.nm, euclidian, props_ne)
+lig_net_separation.call(sdt, sdt_nets, 14.nm, euclidian)
   .output("LIG.SDT.S.8", "Table 3.10.1: min spacing between LIG and SDT not on the same net 14 nm")
 # LIG.LISD.S.7: the corner-to-corner case, with the longer 15 nm distance.
 # As for M1.S.6, "corner-to-corner" is Euclidean spacing between edges whose
 # projections onto each other overlap by less than one database unit.
-lig_nets.separation(lisd_nets, 15.nm, euclidian, projection_limits(nil, 0.25.nm), props_ne)
+lig_net_separation.call(lisd, lisd_nets, 15.nm, euclidian, projection_limits(nil, 0.25.nm))
   .output("LIG.LISD.S.7", "Table 3.10.1: min corner-to-corner spacing between LISD and LIG not on the same net 15 nm")
 
 # --------------------------------------------------------------------------
@@ -764,7 +773,9 @@ end
 # --------------------------------------------------------------------------
 # Section 3.19: rules for V8 (with M8 / M9) apply to V9 (with M9 / PAD).
 # PAD (DRM mask 96, Table 2.3.1) is not in the pinned asap7.lyp, so it is read
-# by number, like every other layer here; the V8.M9.EN.2 / V8.AUX.1 rules
+# by number, like every other layer here. The DRM has no rule for PAD itself, so
+# shapes on PAD are unchecked beyond the V9 rules below and `klt drc` reports
+# that in coverage.unchecked_rules (asap7_rules.PAD_DISPOSITION, #3807); the V8.M9.EN.2 / V8.AUX.1 rules
 # for "V8 in conjunction with M9" carry over to "V9 in conjunction with PAD".
 { "V8" => [v8, m8], "V9" => [v9, m9] }.each do |name, (via, lower)|
   r = via.rectangles

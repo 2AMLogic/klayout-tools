@@ -235,6 +235,7 @@ from .functional_verification_sdf import (
     _normalize_sdf_header_triples,
     _parse_toplevel_ports,
     _reject_sdf_escaped_divider_interconnects,
+    _reject_sdf_unresolvable_interconnect_instances,
     _reject_sdf_with_functional_models,
     _resolve_sdf_option,
     _scan_sdf_diagnostics,
@@ -2950,6 +2951,11 @@ def run_functional_verification(
         # by issue #2897 to a *pin/port* of that shape: an *instance* of
         # that shape is renamed below instead.
         _reject_sdf_escaped_divider_interconnects(sdf["file"])
+        # Issue #3740: an INTERCONNECT endpoint naming an instance the
+        # netlist does not have aborts vvp the same way -- caught here too.
+        _reject_sdf_unresolvable_interconnect_instances(
+            sdf["file"], sources, hdl_toplevel
+        )
         if parameters:
             # cocotb's own Icarus parameter-override syntax is always
             # `-P<hdl_toplevel>.<name>=<value>` (its Runner, not this

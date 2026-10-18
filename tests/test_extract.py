@@ -503,6 +503,14 @@ def test_layout_with_no_devices_succeeds_with_zero_count(tmp_path):
         "sky130_fd_pr__model__cap_mim",
         "sky130_fd_pr__model__cap_mim_m4",
         "resistor",
+        "diode_pw2nd_05v5",
+        "diode_pw2nd_05v5_lvt",
+        "diode_pw2nd_05v5_nvt",
+        "diode_pw2nd_11v0",
+        "diode_pd2nw_05v5",
+        "diode_pd2nw_05v5_lvt",
+        "diode_pd2nw_05v5_hvt",
+        "diode_pd2nw_11v0",
     ]
 
 
@@ -599,6 +607,14 @@ def test_synthetic_inverter_extracts_two_devices(tmp_path):
         "sky130_fd_pr__model__cap_mim",
         "sky130_fd_pr__model__cap_mim_m4",
         "resistor",
+        "diode_pw2nd_05v5",
+        "diode_pw2nd_05v5_lvt",
+        "diode_pw2nd_05v5_nvt",
+        "diode_pw2nd_11v0",
+        "diode_pd2nw_05v5",
+        "diode_pd2nw_05v5_lvt",
+        "diode_pd2nw_05v5_hvt",
+        "diode_pd2nw_11v0",
     ]
     assert report["pdk"] is None
     assert report["warnings"] == []
@@ -3586,6 +3602,14 @@ def test_sky130_synthetic_bjt_extracts_one_pnp_device(tmp_path):
         "sky130_fd_pr__model__cap_mim",
         "sky130_fd_pr__model__cap_mim_m4",
         "resistor",
+        "diode_pw2nd_05v5",
+        "diode_pw2nd_05v5_lvt",
+        "diode_pw2nd_05v5_nvt",
+        "diode_pw2nd_11v0",
+        "diode_pd2nw_05v5",
+        "diode_pd2nw_05v5_lvt",
+        "diode_pd2nw_05v5_hvt",
+        "diode_pd2nw_11v0",
     ]
 
     (device,) = report["devices"]
@@ -3631,6 +3655,18 @@ def test_gf180mcu_synthetic_bjt_extracts_one_bjt_device(tmp_path):
         "pfet",
         "bjt",
         "cap_mim_2f0_m4m5_noshield",
+        "cap_nmos_03v3",
+        "cap_nmos_03v3_dn",
+        "cap_pmos_03v3",
+        "cap_pmos_03v3_dn",
+        "cap_nmos_06v0",
+        "cap_nmos_06v0_dn",
+        "cap_pmos_06v0",
+        "cap_pmos_06v0_dn",
+        "cap_nmos_03v3_b",
+        "cap_pmos_03v3_b",
+        "cap_nmos_06v0_b",
+        "cap_pmos_06v0_b",
         "resistor",
         "diode_nd2ps_06v0",
         "diode_pd2nw_06v0",
@@ -4577,7 +4613,16 @@ def test_diodes_field_defaults_empty_and_is_a_no_op():
     )
     assert deck.diodes == ()
     assert deck.device_classes == ("nfet", "pfet")
-    assert get_extraction_deck("sky130").diodes == ()
+    assert {d.name for d in get_extraction_deck("sky130").diodes} == {
+        "diode_pw2nd_05v5",
+        "diode_pw2nd_05v5_lvt",
+        "diode_pw2nd_05v5_nvt",
+        "diode_pw2nd_11v0",
+        "diode_pd2nw_05v5",
+        "diode_pd2nw_05v5_lvt",
+        "diode_pd2nw_05v5_hvt",
+        "diode_pd2nw_11v0",
+    }
 
 
 def test_diode_with_no_drawn_terminal_is_a_deck_authoring_error(tmp_path):
@@ -4800,6 +4845,44 @@ def test_gf180mcu_dual_diode_clamp_reports_no_near_miss(tmp_path):
     report = run_extract(path, "gf180mcu", output=str(tmp_path / "diode.spice"))
 
     assert _near_miss_warnings(report) == []
+
+
+def _make_sg13g2_bare_activ_layout(*, hbt_trans: bool) -> kdb.Layout:
+    """A lone `Activ` island on sg13g2 -- the `dantenna` predicates minus the
+    `Recog.diode` marker -- optionally under the SiGe HBT's `TRANS` (26/0)."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(1, 0)).insert(kdb.Box(0, 0, 1000, 1000))  # Activ
+    if hbt_trans:
+        top.shapes(layout.layer(26, 0)).insert(kdb.Box(-500, -500, 1500, 1500))
+    return layout
+
+
+def test_sg13g2_hbt_geometry_diode_near_miss_names_the_unmodelled_family(tmp_path):
+    """Issue #3137: the PDK's `npn13G2` Activ matches the `dantenna`
+    predicates minus `Recog.diode`; the near-miss warning must also say the
+    geometry is an HBT the deck does not model, not only "draw the marker"."""
+    path = _write_gds(
+        _make_sg13g2_bare_activ_layout(hbt_trans=True), tmp_path / "hbt.gds"
+    )
+    report = run_extract(path, "sg13g2", output=str(tmp_path / "hbt.spice"))
+
+    assert report["device_counts"] == {}
+    dantenna = [w for w in _near_miss_warnings(report) if "'dantenna'" in w]
+    assert len(dantenna) == 1
+    assert "Recog.diode (99/31)" in dantenna[0]
+    assert "SiGe HBT" in dantenna[0] and "does not model" in dantenna[0]
+
+
+def test_sg13g2_diode_near_miss_without_hbt_geometry_has_no_unmodelled_note(tmp_path):
+    path = _write_gds(
+        _make_sg13g2_bare_activ_layout(hbt_trans=False), tmp_path / "activ.gds"
+    )
+    report = run_extract(path, "sg13g2", output=str(tmp_path / "activ.spice"))
+
+    dantenna = [w for w in _near_miss_warnings(report) if "'dantenna'" in w]
+    assert len(dantenna) == 1
+    assert "does not model" not in dantenna[0]
 
 
 def test_diode_near_miss_names_layers_from_the_same_set_deck_devices_reports(tmp_path):
@@ -6739,6 +6822,14 @@ def test_cli_missing_deck_flag_is_a_clean_error(tmp_path, capsys):
                 "sky130_fd_pr__model__cap_mim",
                 "sky130_fd_pr__model__cap_mim_m4",
                 "resistor",
+                "diode_pw2nd_05v5",
+                "diode_pw2nd_05v5_lvt",
+                "diode_pw2nd_05v5_nvt",
+                "diode_pw2nd_11v0",
+                "diode_pd2nw_05v5",
+                "diode_pd2nw_05v5_lvt",
+                "diode_pd2nw_05v5_hvt",
+                "diode_pd2nw_11v0",
             ),
         ),
         # gf180mcu declares one bipolar entry, generic `bjt` (issue #223 --
@@ -6746,7 +6837,8 @@ def test_cli_missing_deck_flag_is_a_clean_error(tmp_path, capsys):
         # with no single named device cell to attribute one to; see
         # `decks/gf180mcu.py`'s `EXTRACTION_DECK` note), one MiM-capacitor
         # entry (issue #225, its own official LVS device name for the deck's
-        # Metal4/Metal5 MiM stack), a drawn poly resistor (issue #222), and
+        # Metal4/Metal5 MiM stack), twelve MOS-capacitor classes (issue
+        # #2919), a drawn poly resistor (issue #222), and
         # the two 6V junction-diode flavours its own I/O library's ESD clamps
         # are built from (issue #542) -- which trail the `"resistor"` role.
         (
@@ -6756,6 +6848,18 @@ def test_cli_missing_deck_flag_is_a_clean_error(tmp_path, capsys):
                 "pfet",
                 "bjt",
                 "cap_mim_2f0_m4m5_noshield",
+                "cap_nmos_03v3",
+                "cap_nmos_03v3_dn",
+                "cap_pmos_03v3",
+                "cap_pmos_03v3_dn",
+                "cap_nmos_06v0",
+                "cap_nmos_06v0_dn",
+                "cap_pmos_06v0",
+                "cap_pmos_06v0_dn",
+                "cap_nmos_03v3_b",
+                "cap_pmos_03v3_b",
+                "cap_nmos_06v0_b",
+                "cap_pmos_06v0_b",
                 "resistor",
                 "diode_nd2ps_06v0",
                 "diode_pd2nw_06v0",
@@ -9849,6 +9953,14 @@ def test_sky130_inv_1_spot_check(tmp_path):
         "sky130_fd_pr__model__cap_mim",
         "sky130_fd_pr__model__cap_mim_m4",
         "resistor",
+        "diode_pw2nd_05v5",
+        "diode_pw2nd_05v5_lvt",
+        "diode_pw2nd_05v5_nvt",
+        "diode_pw2nd_11v0",
+        "diode_pd2nw_05v5",
+        "diode_pd2nw_05v5_lvt",
+        "diode_pd2nw_05v5_hvt",
+        "diode_pd2nw_11v0",
     ]
 
     devices = {d["class"]: d for d in report["devices"]}
@@ -9878,6 +9990,18 @@ def test_gf180mcu_clkinv_1_spot_check(tmp_path):
         "pfet",
         "bjt",
         "cap_mim_2f0_m4m5_noshield",
+        "cap_nmos_03v3",
+        "cap_nmos_03v3_dn",
+        "cap_pmos_03v3",
+        "cap_pmos_03v3_dn",
+        "cap_nmos_06v0",
+        "cap_nmos_06v0_dn",
+        "cap_pmos_06v0",
+        "cap_pmos_06v0_dn",
+        "cap_nmos_03v3_b",
+        "cap_pmos_03v3_b",
+        "cap_nmos_06v0_b",
+        "cap_pmos_06v0_b",
         "resistor",
         "diode_nd2ps_06v0",
         "diode_pd2nw_06v0",
@@ -13729,6 +13853,7 @@ def test_parasitics_summary_block_shape(tmp_path):
     para = report["parasitics"]
     assert para is not None
     assert set(para) == {
+        "model_revision",
         "r_count",
         "c_count",
         "cc_count",
@@ -13803,6 +13928,9 @@ def test_parasitics_summary_block_shape(tmp_path):
     # static across every extraction, so it must match the module constant
     # exactly, not just be present.
     assert para["model"] == PARASITIC_MODEL_SCOPE
+    # `model_revision` (issue #2957): bump PARASITICS_MODEL_REVISION (and the
+    # CHANGELOG) whenever R/C extraction semantics change.
+    assert para["model_revision"] == 2
     assert set(para["model"]) == {"capacitance", "coupling", "resistance", "frequency"}
     # sky130's PARASITICS.metals/metal_overlaps are fully populated (issue
     # #547's regression target was gf180mcu, not sky130) -- no gap for this
@@ -20707,7 +20835,8 @@ def test_spef_floating_duplicate_named_outputs_are_skipped(tmp_path):
 def test_spef_unlabelled_dollar_nets_absent_from_def_are_skipped(tmp_path):
     """Issue #3580: a unique-named unlabelled `$N` net with no DEF net (and not
     a port) gets no `*D_NET` (STA-1650) and its coupling is dropped; a `$N`
-    that the DEF names, a port, and a labelled non-DEF net are untouched."""
+    that the DEF names and a port are untouched. Issue #3662: a labelled net
+    (e.g. a sub-cell label `Z`/`ZN`) with no DEF net is skipped the same way."""
     from klayout_tools.extract_spef import _write_spef
 
     def run(name, **kwargs):
@@ -20734,10 +20863,10 @@ def test_spef_unlabelled_dollar_nets_absent_from_def_are_skipped(tmp_path):
     skipped, text = run(
         "on", net_instance_pins={"sig": (("u1", "A"),), "$12": (("u2", "A"),)}
     )
-    assert skipped == ["$7"]
+    assert skipped == ["$7", "lab"]
     assert "*D_NET \\$7 " not in text
     assert "*D_NET \\$12 " in text
-    assert "*D_NET lab " in text
+    assert "*D_NET lab " not in text
     assert "*D_NET sig 1.000000" in text  # coupling cap not folded in
 
     skipped, _ = run("empty", net_instance_pins={})
@@ -25314,8 +25443,9 @@ def test_no_netlist_with_spef_still_works(tmp_path):
 
 
 def _make_gf180mcu_mos_cap_layout(*, with_marker: bool) -> kdb.Layout:
-    """One gf180mcu NMOS plus, optionally, a MOS-capacitor stack (Comp + Poly2
-    under ``MOS_CAP_MK`` 166/5) -- issue #2919."""
+    """One gf180mcu NMOS plus, optionally, an *unclassifiable* MOS-capacitor
+    stack (Comp + Poly2 under ``MOS_CAP_MK`` 166/5, no Nplus/Pplus implant, so
+    no ``mos_capacitors`` entry claims it) -- issue #2919."""
     layout = kdb.Layout()
     top = layout.create_cell("TOP")
     _draw_gf180mcu_nmos(top, layout, 0, "S", drain_label="D")
@@ -25327,8 +25457,9 @@ def _make_gf180mcu_mos_cap_layout(*, with_marker: bool) -> kdb.Layout:
 
 
 def test_gf180mcu_extract_flags_mos_cap_marker_as_unsupported(tmp_path):
-    """Issue #2919: shapes on `MOS_CAP_MK` (166/5) are reported in
-    `unsupported_devices[]` and `warnings[]` instead of a silent clean run."""
+    """Issue #2919 (deliverable A): marker shapes the deck cannot classify are
+    reported in `unsupported_devices[]` and `warnings[]` instead of a silent
+    clean run."""
     path = _write_gds(
         _make_gf180mcu_mos_cap_layout(with_marker=True), tmp_path / "moscap.gds"
     )
@@ -25355,6 +25486,183 @@ def test_gf180mcu_extract_unsupported_devices_empty_without_marker(tmp_path):
 
     assert report["unsupported_devices"] == []
     assert not any("unsupported device" in w for w in report["warnings"])
+
+
+def _draw_gf180mcu_mos_cap(
+    top,
+    layout,
+    x0,
+    *,
+    implant,
+    nwell=False,
+    lvpwell=False,
+    dualgate=False,
+    dnwell=False,
+    extra=(),
+    gate_label="G",
+    sd_label="SD",
+):
+    """Draw one PDK-style (`draw_cap_mos.py`) gf180mcu MOS capacitor at ``x0``:
+    one 2.0x2.0um Comp under ``MOS_CAP_MK`` (166/5), a 0.8um Poly2 gate across
+    it (S/D on both sides, strapped in Metal1), gate contact below, implant
+    (Nplus 32/0 / Pplus 31/0) over the Comp, and the optional well/voltage
+    layers. Gate region = 0.8 x 2.0um -> A=1.6um2, P=5.6um."""
+
+    def d(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    d(22, 0, kdb.Box(x0, 0, x0 + 2000, 2000))
+    d(166, 5, kdb.Box(x0, 0, x0 + 2000, 2000))
+    d(30, 0, kdb.Box(x0 + 600, -300, x0 + 1400, 2300))
+    for x in (200, 1700):
+        d(33, 0, kdb.Box(x0 + x, 800, x0 + x + 100, 1200))
+        d(34, 0, kdb.Box(x0 + x - 100, 600, x0 + x + 300, 1400))
+    d(34, 0, kdb.Box(x0 - 100, 600, x0 + 2100, 700))
+    d(33, 0, kdb.Box(x0 + 900, -250, x0 + 1100, -50))
+    d(34, 0, kdb.Box(x0 + 800, -300, x0 + 1200, 0))
+    top.shapes(layout.layer(34, 10)).insert(
+        kdb.Text(sd_label, kdb.Trans(x0 + 1000, 650))
+    )
+    top.shapes(layout.layer(34, 10)).insert(
+        kdb.Text(gate_label, kdb.Trans(x0 + 1000, -150))
+    )
+    d(*implant, kdb.Box(x0 - 160, -230, x0 + 2160, 2230))
+    if nwell:
+        d(21, 0, kdb.Box(x0 - 500, -500, x0 + 2500, 2500))
+    if lvpwell:
+        d(204, 0, kdb.Box(x0 - 500, -500, x0 + 2500, 2500))
+    if dualgate:
+        d(55, 0, kdb.Box(x0 - 300, -400, x0 + 2300, 2400))
+    if dnwell:
+        d(12, 0, kdb.Box(x0 - 1500, -1500, x0 + 3500, 3500))
+    for layer, datatype, box in extra:
+        d(layer, datatype, box)
+
+
+_NPLUS_DRAW = (32, 0)
+_PPLUS_DRAW = (31, 0)
+
+# Every case below is cross-checked against the PDK's own LVS runset
+# (`gf180mcu.lvs` at open_pdks f6eeac7, `net_only=true`, `consider_dn_dw_features`
+# for the `_dn` rows) run on the very same GDS -- it reports
+# `C$1 G SD 7.04e-15 <model> A=1.6P P=5.6U` (3.3V) / `3.68e-15 ... A=1.6P P=5.6U`
+# (6V), i.e. the model name, nets, C, A and P asserted here.
+_MOS_CAP_CASES = [
+    pytest.param(
+        dict(implant=_NPLUS_DRAW, lvpwell=True), "cap_nmos_03v3", 7.04e-15, id="nmos"
+    ),
+    pytest.param(
+        dict(implant=_NPLUS_DRAW, nwell=True), "cap_nmos_03v3_b", 7.04e-15, id="nmos_b"
+    ),
+    pytest.param(
+        dict(implant=_PPLUS_DRAW, nwell=True), "cap_pmos_03v3", 7.04e-15, id="pmos"
+    ),
+    pytest.param(dict(implant=_PPLUS_DRAW), "cap_pmos_03v3_b", 7.04e-15, id="pmos_b"),
+    pytest.param(
+        dict(implant=_NPLUS_DRAW, lvpwell=True, dualgate=True),
+        "cap_nmos_06v0",
+        3.68e-15,
+        id="nmos_6v",
+    ),
+    pytest.param(
+        dict(implant=_PPLUS_DRAW, nwell=True, dualgate=True, dnwell=True),
+        "cap_pmos_06v0_dn",
+        3.68e-15,
+        id="pmos_6v_dn",
+    ),
+]
+
+
+@pytest.mark.parametrize(("draw", "model", "c_f"), _MOS_CAP_CASES)
+def test_gf180mcu_extract_recognises_mos_capacitor(tmp_path, draw, model, c_f):
+    """Issue #2919 (deliverable B): a MOS capacitor extracts as a two-terminal
+    capacitor under the PDK model name with `A`/`P` on the gate region -- no
+    "touches no diffusion" warning, no `unsupported_devices[]` entry, and
+    never as a transistor."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    _draw_gf180mcu_mos_cap(top, layout, 0, **draw)
+    path = _write_gds(layout, tmp_path / "cap.gds")
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "cap.spice"))
+
+    assert report["status"] == "extracted"
+    assert report["device_counts"] == {model: 1}
+    (device,) = report["devices"]
+    assert device["class"] == model
+    assert {device["nets"]["a"], device["nets"]["b"]} == {"G", "SD"}
+    assert device["params"]["area_um2"] == pytest.approx(1.6)
+    assert device["params"]["perimeter_um"] == pytest.approx(5.6)
+    assert device["params"]["c_f"] == pytest.approx(c_f)
+    assert report["unsupported_devices"] == []
+    assert not any("touches no diffusion" in w for w in report["warnings"])
+    assert not any("unsupported device" in w for w in report["warnings"])
+    assert model in report["device_classes"]
+
+
+def test_gf180mcu_mos_capacitor_next_to_ordinary_mos(tmp_path):
+    """A capacitor beside a transistor in one cell: each extracts as its own
+    class, and the capacitor's island does not leak into the MOS split."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    _draw_gf180mcu_nmos(top, layout, 0, "S", drain_label="D")
+    _draw_gf180mcu_mos_cap(top, layout, 10000, implant=_NPLUS_DRAW, nwell=True)
+    path = _write_gds(layout, tmp_path / "mixed.gds")
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "mixed.spice"))
+
+    assert report["device_counts"] == {"nfet": 1, "cap_nmos_03v3_b": 1}
+    assert report["unsupported_devices"] == []
+
+
+def test_gf180mcu_mos_capacitor_excluded_marker_stays_unsupported(tmp_path):
+    """An island under a `moscap_exclude` marker (here SAB 49/0) is not a
+    capacitor; the 166/5 marker is still reported, so the gap stays loud."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    _draw_gf180mcu_mos_cap(
+        top,
+        layout,
+        0,
+        implant=_NPLUS_DRAW,
+        nwell=True,
+        extra=[(49, 0, kdb.Box(600, 0, 1400, 2000))],
+    )
+    path = _write_gds(layout, tmp_path / "excl.gds")
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "excl.spice"))
+
+    assert not any(name.startswith("cap_") for name in report["device_counts"])
+    (entry,) = report["unsupported_devices"]
+    assert entry["kind"] == "mos_capacitor"
+
+
+def test_gf180mcu_mos_capacitor_without_implant_stays_unsupported(tmp_path):
+    """No Nplus/Pplus -> no entry claims the island: still reported loudly."""
+    path = _write_gds(
+        _make_gf180mcu_mos_cap_layout(with_marker=True), tmp_path / "bare.gds"
+    )
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "bare.spice"))
+
+    assert not any(name.startswith("cap_") for name in report["device_counts"])
+    assert len(report["unsupported_devices"]) == 1
+
+
+def test_gf180mcu_deck_devices_lists_mos_capacitors():
+    """`klt deck devices` publishes the twelve MOS-capacitor classes with
+    their marker, and `device_classes` carries the same names."""
+    from klayout_tools.decks import get_extraction_deck
+    from klayout_tools.decks.history import deck_devices
+
+    entries = [
+        e
+        for e in deck_devices("gf180mcu")["device_classes"]
+        if e["kind"] == "mos_capacitor"
+    ]
+    names = {e["name"] for e in entries}
+    assert len(entries) == 12
+    assert {"cap_nmos_03v3", "cap_nmos_03v3_b", "cap_pmos_06v0_dn"} <= names
+    assert all(
+        e["marker"]["layer"] == 166 and e["marker"]["datatype"] == 5 for e in entries
+    )
+    assert names <= set(get_extraction_deck("gf180mcu").device_classes)
 
 
 def test_sky130_extract_unsupported_devices_always_present_and_empty(tmp_path):
@@ -26570,6 +26878,58 @@ def test_remap_def_net_connections_follows_collision_suffix():
     original = {"x": (("u", "p"),)}
     assert _remap_def_net_connections(original, []) is original
     assert _remap_def_net_connections(None, renames) is None
+
+
+def test_remap_def_net_connections_keeps_def_spef_spelling_and_port_pins():
+    """Issue #3900: the renamed key keeps the DEF's own SPEF spelling (so
+    `*D_NET` matches the linked design's net) while comparing equal to the
+    rewritten SPICE name; `port_pins` survives the rename, and a collision
+    still maps each DEF net to its own distinct SPEF name."""
+    from klayout_tools.extract import (
+        _remap_def_net_connections,
+        _rewrite_dotted_net_names,
+    )
+    from klayout_tools.extract_spef import (
+        DefName,
+        DefNetConnections,
+        _def_net_spellings,
+    )
+
+    netlist = kdb.Netlist()
+    circuit = kdb.Circuit()
+    circuit.name = "TOP"
+    netlist.add(circuit)
+    for name in ("a_b", "g[0].u_slice/_00_", "a.b"):
+        circuit.create_net(name)
+    renames = _rewrite_dotted_net_names(netlist)
+    after = {before: new for _c, before, new in renames}
+    assert after["g[0].u_slice/_00_"] == "g[0]_u_slice/_00_"
+
+    def_name = DefName(r"g\[0\].u_slice/_00_")
+    original = DefNetConnections(
+        {
+            def_name: (("u1", "A"),),
+            DefName("a.b"): (("u2", "B"),),
+            DefName("a_b"): (("u3", "C"),),
+            DefName("plain"): (("u4", "D"),),
+        },
+        {"a_b": ("PORT",)},
+    )
+    remapped = _remap_def_net_connections(original, renames)
+    assert "g[0]_u_slice/_00_" in remapped
+    assert remapped.port_pins == {"a_b": ("PORT",)}
+    spellings = _def_net_spellings(remapped, frozenset())
+    assert spellings["g[0]_u_slice/_00_"] == def_name.spef
+    assert "u_slice" in def_name.spef and "[0]_u" not in def_name.spef
+    # Collision: `a.b` -> `a_b_1` spells like the DEF's `a.b`, `a_b` its own.
+    assert spellings["a_b_1"] != spellings["a_b"]
+    assert spellings["a_b_1"] == DefName("a.b").spef
+    # Un-renamed nets are untouched.
+    assert spellings["plain"] == "plain"
+    # A plain-str key (no DEF origin) stays a plain str.
+    plain = _remap_def_net_connections({"a.b": (("u", "p"),)}, renames)
+    assert plain == {"a_b_1": (("u", "p"),)}
+    assert not any(isinstance(key, DefName) for key in plain)
 
 
 def test_spef_missing_conn_warning_names_unmatched_and_duplicate_nets():
