@@ -1486,6 +1486,53 @@ def test_absolute_per_section_lib_is_refused(tmp_path):
 
 
 @pytest.mark.parametrize(
+    "lib", ["$PDK_ROOT/$PDK/libs.tech/ngspice/sm.ngspice", "${PDK_ROOT}/${PDK}/x.lib"]
+)
+def test_unresolved_pdk_var_is_refused_before_submit(tmp_path, lib):
+    request = _lib_request(tmp_path, models={"lib": lib})
+    with pytest.raises(sim.SimError) as excinfo:
+        sb._resolve_batch_config(request, corner_count=1, timeout_s=30.0)
+    assert excinfo.value.code == "models_lib_pdk_unresolved"
+    assert "$PDK" in str(excinfo.value)
+    assert "models.pdk" in str(excinfo.value)
+
+
+def test_unresolved_pdk_var_in_section_lib_is_refused(tmp_path):
+    request = _lib_request(
+        tmp_path,
+        corners={
+            "process": [
+                {
+                    "name": "tt",
+                    "sections": [{"lib": "$PDK_ROOT/$PDK/m.lib", "section": "tt"}],
+                }
+            ]
+        },
+    )
+    with pytest.raises(sim.SimError) as excinfo:
+        sb._resolve_batch_config(request, corner_count=1, timeout_s=30.0)
+    assert excinfo.value.code == "models_lib_pdk_unresolved"
+    assert "corners.process[0].sections[0].lib" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"models": {"pdk": "gf180mcuD", "lib": "$PDK_ROOT/$PDK/libs.tech/x.lib"}},
+        {"models": {"lib": "$PDK_ROOT/gf180mcuD/libs.tech/x.lib"}},
+        {"models": {"lib": "$PDKS/x.lib"}},
+        {
+            "models": {"lib": "$PDK_ROOT/$PDK/x.lib"},
+            "options": {"stage_model_inputs": True},
+        },
+    ],
+)
+def test_pdk_var_check_leaves_other_forms_alone(tmp_path, extra):
+    request = _lib_request(tmp_path, **extra)
+    assert sb._resolve_batch_config(request, corner_count=1, timeout_s=30.0).bucket
+
+
+@pytest.mark.parametrize(
     "extra",
     [
         {"models": {"pdk": "gf180mcuD", "lib": "libs.tech/ngspice/sm141064.ngspice"}},
