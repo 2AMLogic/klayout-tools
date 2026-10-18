@@ -27,7 +27,14 @@ import os
 import re
 from typing import Any
 
-from .pdk import PdkNotFoundError, _read_text, find_pdk, list_pdks
+from .pdk import (
+    PdkNotFoundError,
+    _read_text,
+    find_pdk,
+    list_pdks,
+    variant_dir_of,
+)
+from .pdk_descriptor import DescriptorError, has_descriptor, load_descriptor
 
 #: Marker substrings identifying a `libs_ref` entry as a "foundry digital,
 #: standard cell" library, as opposed to primitive-device libraries
@@ -301,6 +308,10 @@ def resolve_liberty_for_cell_library(
     except PdkNotFoundError as exc:
         raise error_cls(str(exc)) from exc
 
+    mapped = _descriptor_liberty(info, cell_library, requested_corner, error_cls)
+    if mapped is not None:
+        return mapped[0], mapped[1], info
+
     libs_ref = info["assets"]["libs_ref"]
     if libs_ref is None:
         raise error_cls(
@@ -360,6 +371,41 @@ def resolve_liberty_for_cell_library(
             f"({available})"
         )
     return liberty_path, corner, info
+
+
+def _descriptor_liberty(
+    info: dict[str, Any],
+    cell_library: str,
+    requested_corner: str | None,
+    error_cls: type[Exception],
+) -> tuple[str, str] | None:
+    """Explicit `klt-pdk.json` `liberty` mapping for `cell_library` (issue
+    #3782), or `None` to fall through to the open_pdks naming convention."""
+    variant_dir = variant_dir_of(info)
+    if variant_dir is None or not has_descriptor(variant_dir):
+        return None
+    try:
+        corners = load_descriptor(variant_dir)["liberty"].get(cell_library)
+    except DescriptorError as exc:
+        raise error_cls(str(exc)) from exc
+    if corners is None:
+        return None
+    corner = requested_corner
+    if corner is None:
+        if len(corners) != 1:
+            raise error_cls(
+                f"liberty not found for deck: descriptor maps {len(corners)} "
+                f"corners for '{cell_library}' ({', '.join(sorted(corners))}) "
+                "-- pass request.pdk.corner explicitly"
+            )
+        corner = next(iter(corners))
+    if corner not in corners:
+        raise error_cls(
+            f"liberty not found for deck: no '{corner}' corner mapped for "
+            f"'{cell_library}' in the PDK descriptor "
+            f"(mapped: {', '.join(sorted(corners))})"
+        )
+    return corners[corner], corner
 
 
 def _scan_cell_libraries(libs_ref: str) -> list[dict[str, Any]]:

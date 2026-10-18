@@ -98,6 +98,7 @@ from .pdk_compat import (
     read_fetched_commit,
     read_fetched_marker,
 )
+from .pdk_descriptor import DescriptorError, has_descriptor, load_descriptor
 from .pdk_families import family_subset, pdk_variant_family
 
 #: The ciel/volare stores, in resolution order (step 3). ``~`` is expanded at
@@ -256,6 +257,7 @@ def find_pdk(variant: str | None = None, root: str | None = None) -> dict[str, A
             "root": root_path,
             "variant": chosen["name"],
             "version": chosen["version"],
+            "layout": chosen["_layout"],
             "commit": chosen["_commit"],
             "resolved_via": resolved_via,
             "assets": assets,
@@ -442,6 +444,19 @@ def _abspath(path: str) -> str:
     return os.path.abspath(os.path.expanduser(path))
 
 
+def _descriptor_load(directory: str) -> dict[str, Any]:
+    """:func:`load_descriptor`, surfacing a bad descriptor as ``PdkNotFoundError``
+    (issue #3782) so it is never silently skipped in favour of another layout."""
+    try:
+        return load_descriptor(directory)
+    except DescriptorError as exc:
+        raise PdkNotFoundError(str(exc)) from exc
+
+
+def _descriptor_variant(directory: str) -> str | None:
+    return _descriptor_load(directory)["variant"]
+
+
 def _probe_root(root_path: str) -> list[dict[str, Any]]:
     """Return the variants under ``root_path``, trying the nested (open_pdks)
     layout first and falling back to the flat, single-PDK layout (issue
@@ -463,7 +478,9 @@ def _probe_root(root_path: str) -> list[dict[str, Any]]:
     variants: list[dict[str, Any]] = []
     for name in sorted(os.listdir(root_path)):
         variant_dir = os.path.join(root_path, name)
-        if os.path.isdir(os.path.join(variant_dir, "libs.tech")):
+        if has_descriptor(variant_dir):
+            layout = "descriptor"
+        elif os.path.isdir(os.path.join(variant_dir, "libs.tech")):
             layout = "open_pdks"
         elif _is_asap7_tree(variant_dir):
             layout = "asap7"
@@ -503,13 +520,19 @@ def _probe_flat_variant(root_path: str) -> list[dict[str, Any]]:
     read directly off its directory name) -- when ``root_path`` itself ships
     a ``libs.tech/`` directory, or ``[]`` otherwise.
     """
-    if os.path.isdir(os.path.join(root_path, "libs.tech")):
+    if has_descriptor(root_path):
+        layout = "descriptor"
+    elif os.path.isdir(os.path.join(root_path, "libs.tech")):
         layout = "open_pdks"
     elif _is_asap7_tree(root_path):
         layout = "asap7"
     else:
         return []
-    name = os.path.basename(root_path.rstrip(os.sep)) or root_path
+    name = (
+        (_descriptor_variant(root_path) if layout == "descriptor" else None)
+        or os.path.basename(root_path.rstrip(os.sep))
+        or root_path
+    )
     return [
         {
             "name": name,
@@ -660,7 +683,11 @@ def variant_dir_of(pdk: dict[str, Any]) -> str | None:
     if (
         nested
         and os.path.isdir(nested)
-        and (os.path.isdir(os.path.join(nested, "libs.tech")) or _is_asap7_tree(nested))
+        and (
+            has_descriptor(nested)
+            or os.path.isdir(os.path.join(nested, "libs.tech"))
+            or _is_asap7_tree(nested)
+        )
     ):
         return nested
     return root
@@ -671,7 +698,11 @@ def tree_of(path: str) -> str | None:
     (open_pdks ``libs.tech`` or ASAP7 shape), or ``None``."""
     current = os.path.dirname(os.path.realpath(path))
     while True:
-        if os.path.isdir(os.path.join(current, "libs.tech")) or _is_asap7_tree(current):
+        if (
+            has_descriptor(current)
+            or os.path.isdir(os.path.join(current, "libs.tech"))
+            or _is_asap7_tree(current)
+        ):
             return current
         parent = os.path.dirname(current)
         if parent == current:
@@ -682,6 +713,8 @@ def tree_of(path: str) -> str | None:
 def _asset_dirs(variant_dir: str) -> dict[str, str | None]:
     """Map each tool area to its absolute directory, or ``None`` if absent."""
     assets: dict[str, str | None] = {}
+    if has_descriptor(variant_dir):
+        return _descriptor_load(variant_dir)["assets"]
     layout = _ASSET_LAYOUT
     if _is_asap7_tree(variant_dir):
         layout = _ASAP7_ASSET_LAYOUT
