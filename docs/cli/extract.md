@@ -5451,6 +5451,16 @@ klt extract cell.gds --deck sky130 --parasitics --critical-net MID --distributed
   to one exact point on a real routed net. A net with both `--distributed-rc`
   and an inter-net coupling capacitor still gets exactly one coupling `C`
   card, attached to that middle node instead of the star's single hub.
+- **The net's own name (the subcircuit pin) is also the middle node**
+  (`order == N // 2`), not an end. A testbench that drives the pin drives
+  the line from its centre, so a far-end delay measured that way is that of
+  a half-length line (roughly 4x smaller RC for a uniform line). The ladder's
+  direction is a geometric proxy (projection onto the axis between the two
+  most distant terminals, ties broken by terminal index) with no relation to
+  where the port label is drawn. To model a delay from an end, drive the
+  `order` 0 or `order` N-1 node: find its name in `terminals[].leg_net` (the
+  end nodes are internal `<net>__t<i>` nodes, not ports). `pin_order` reports
+  which `order` is the pin.
 
 Output, additive:
 
@@ -5459,6 +5469,7 @@ Output, additive:
 | `parasitics.distributed_rc` | `true` only when `--distributed-rc` was given. `false` for a plain `--critical-net`-only run (Phase 2a's own baseline) and whenever the flag was never given. |
 | `parasitics.nets[].rc_model` | `"lumped"` (the star/Gamma-shunt model, every net unless this feature applies) or `"distributed"` (the ladder above). |
 | `parasitics.nets[].segments[]` | The ladder's per-segment resistors, in node order: `{"net_a", "net_b", "resistance_ohm"}`. `[]` unless `rc_model == "distributed"`. |
+| `parasitics.nets[].pin_order` | The `order` of the terminal whose `leg_net` is the net's own name (the subcircuit pin) — the ladder's middle node, `N // 2`. `null` unless `rc_model == "distributed"`. |
 | `parasitics.nets[].terminals[]` (distributed) | Same array as the star's, but each entry's shape differs for a distributed net: `{"device", "terminal", "leg_net", "order", "capacitance_ff"}` — `order` is the terminal's 0-based position in the ladder's node sequence, `capacitance_ff` its own per-node ground capacitance (there is no per-leg `resistance_ohm` here; resistance lives on `segments[]` instead, between adjacent nodes, not per terminal). |
 
 `c_count`/`r_count` reflect actual emitted device counts either way: a
@@ -7079,6 +7090,7 @@ Each `nets[]` entry:
 | `hub_net`        | string          | The star's hub node name (or, for a distributed net, the ladder's middle leg — see "Distributed (multi-segment) RC ladder for critical nets" above). Equal to `net` itself whenever the net has at least one device terminal (the common case — the pin/subcircuit connectivity that already lived on `net` stays there, at zero resistance from the hub). Only a fresh `<net>__par`-style node (or a collision-suffixed variant) when the net has **no** device terminal to fan a star out to. |
 | `rc_model`       | string          | Additive field (issue #977). `"lumped"` (the star/Gamma-shunt model above, every net unless the next field applies) or `"distributed"` (the `--distributed-rc` ladder — see "Distributed (multi-segment) RC ladder for critical nets" above). |
 | `segments`       | array\<object\> | Additive field (issue #977). The ladder's per-segment resistors, in node order: `{"net_a", "net_b", "resistance_ohm"}`. `[]` unless `rc_model == "distributed"`. |
+| `pin_order`      | integer \| null | Additive field (issue #3937). For `rc_model == "distributed"`, the `order` of the terminal whose `leg_net` is the net's own name (the subcircuit pin) — the ladder's middle node, `N // 2`; the ends are `order` 0 and N-1. `null` for `"lumped"`. |
 | `terminals`      | array\<object\> | One entry per device terminal moved onto its own leg net. For `rc_model == "lumped"`: `{"device", "terminal", "leg_net", "resistance_ohm"}` — `device` is the owning device's `expanded_name()`, `terminal` its terminal name (e.g. `"D"`, `"G"`, `"A"`), `leg_net` the fresh internal node that terminal now connects to (`<net>__t<i>`, or a collision-suffixed variant), and `resistance_ohm` that leg's own series resistance back to `hub_net`. For `rc_model == "distributed"` the shape differs (issue #977): `{"device", "terminal", "leg_net", "order", "capacitance_ff"}` — `order` is the terminal's 0-based position in the ladder's node sequence and `capacitance_ff` its own per-node ground capacitance; resistance lives on `segments[]` instead (between adjacent nodes), not per terminal. **Empty** for the no-device-terminal fallback case above. |
 | `coupled`        | array\<object\> | This net's vertical-overlap coupling counterparts (issue #760), `{"net", "capacitance_ff", "levels"}`, sorted by counterpart `net`. `capacitance_ff` is the pair's total coupling capacitance summed over every contributing level pair; `levels` lists the contributing `[lower_metal_index, upper_metal_index]` deck-`metals` index pairs. **Empty** when the net has no inter-net crossover. Each pair appears on both endpoints' lists — see `total_coupling_capacitance_ff`. |
 | `by_layer`       | array\<object\> | Additive field (issue #1701). This net's `resistance_ohm`/`capacitance_ff` totals broken down by contributing conductor: `{"layer", "resistance_ohm", "capacitance_ff"}` per role/level with non-zero geometry on this net. See below. |
