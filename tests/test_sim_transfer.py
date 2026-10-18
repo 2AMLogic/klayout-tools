@@ -482,3 +482,45 @@ def test_margins_edge_cases():
     with pytest.raises(TransferInputError):
         analyze_margins([1.0, 1.0], [1.0, 1.0], [1.0, 1.0])
     json.dumps(analyze_margins(*_split(COND)).to_dict(), allow_nan=False)
+
+
+# --- max_gain_above_crossover_db (#3160) -----------------------------------
+
+from klayout_tools.sim_transfer import max_gain_above_crossover_db  # noqa: E402
+
+
+def test_max_gain_above_crossover_is_the_sampled_repeak():
+    # 12.04 dB @ 1 Hz, -6.02 dB @ 2 Hz: first falling crossing between them.
+    # The gain climbs back to +6.0206 dB (T = 2) at 4 Hz: that is the peak.
+    freqs = [1.0, 2.0, 4.0, 8.0, 16.0]
+    ts = [4.0, 0.5, 2.0, 0.25, 0.1]
+    metrics = analyze_transfer(freqs, ts, [1.0] * 5)
+    value, reason = max_gain_above_crossover_db(freqs, metrics)
+    assert reason is None
+    assert value == pytest.approx(20 * math.log10(2.0), abs=TOL)
+
+
+def test_max_gain_above_crossover_is_zero_for_a_monotone_roll_off():
+    # The crossover itself (exactly 0 dB) is in the closed interval.
+    freqs = [1.0, 10.0, 100.0]
+    metrics = analyze_transfer(freqs, [10.0, 1.0, 0.1], [1.0] * 3)
+    assert max_gain_above_crossover_db(freqs, metrics) == (0.0, None)
+
+
+def test_max_gain_above_crossover_unavailable_without_a_crossing():
+    freqs = [1.0, 10.0]
+    metrics = analyze_transfer(freqs, [0.5, 0.1], [1.0] * 2)
+    assert max_gain_above_crossover_db(freqs, metrics) == (
+        None,
+        REASON_NO_FALLING_UNITY_CROSSING,
+    )
+
+
+def test_max_gain_above_crossover_unavailable_with_a_gap_above_it():
+    # An invalid (zero) sample above the crossover could hide a peak.
+    freqs = [1.0, 2.0, 4.0, 8.0]
+    metrics = analyze_transfer(freqs, [4.0, 0.5, 0.0, 0.1], [1.0] * 4)
+    assert max_gain_above_crossover_db(freqs, metrics) == (
+        None,
+        REASON_INVALID_SAMPLES,
+    )

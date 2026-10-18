@@ -47,6 +47,7 @@ from __future__ import annotations
 import math
 from typing import Any, NamedTuple
 
+from ._unionfind import UnionFind
 from .decks import (
     ExtractionDeck,
     UnknownDeckError,
@@ -2017,8 +2018,10 @@ def _drawn_leg_footprint_region(
 
     region = _drawn_route_region(points_um, width_um, dbu)
 
-    landing_half_dbu = int(round((_VIA_LANDING_SIZE_UM / 2.0) / dbu))
     for drop in via_drops:
+        landing_half_dbu = int(
+            round((_VIA_LANDING_SIZE_UM + _drop_array_extra_um(drop)) / 2.0 / dbu)
+        )
         landing_layers = drop.get("landing_layers")
         if (
             route_layer is not None
@@ -2088,11 +2091,13 @@ def _drawn_leg_intermediate_pad_regions(
     if route_layer is None:
         return regions
 
-    landing_half_dbu = int(round((_VIA_LANDING_SIZE_UM / 2.0) / dbu))
     for drop in via_drops:
         landing_layers = drop.get("landing_layers")
         if not landing_layers:
             continue
+        landing_half_dbu = int(
+            round((_VIA_LANDING_SIZE_UM + _drop_array_extra_um(drop)) / 2.0 / dbu)
+        )
         cx = int(round(drop["x_um"] / dbu))
         cy = int(round(drop["y_um"] / dbu))
         box = kdb.Box(
@@ -3770,12 +3775,14 @@ def route_two_pin(
                 # per entry, so a multi-level drop is just N single-level
                 # drops stacked at the identical (x, y).
                 for via_layer, metal_a, metal_b in ladder:
+                    drop_array = _drop_array(port, via_layer)
                     via_drops.append(
                         {
                             "x_um": pos[0],
                             "y_um": pos[1],
                             "via_layer": via_layer,
                             "landing_layers": (metal_a, metal_b),
+                            **({"array": drop_array} if drop_array else {}),
                             # block_id (#1520): which endpoint's own block
                             # this drop's landing pad lands on -- lets a
                             # caller-side conflict check (compose()'s own
@@ -4614,20 +4621,7 @@ def route_bundle(
         )
 
     pin_count = len(pins)
-    parent = list(range(pin_count))
-
-    def _find(index: int) -> int:
-        while parent[index] != index:
-            parent[index] = parent[parent[index]]
-            index = parent[index]
-        return index
-
-    def _union(left: int, right: int) -> bool:
-        root_left, root_right = _find(left), _find(right)
-        if root_left == root_right:
-            return False
-        parent[max(root_left, root_right)] = min(root_left, root_right)
-        return True
+    uf = UnionFind(range(pin_count), min_root=True)
 
     components = pin_count
 
@@ -4638,7 +4632,7 @@ def route_bundle(
     for index, pin in enumerate(pins):
         key = (pin["block"], pin["port"])
         if key in first_seen:
-            if _union(first_seen[key], index):
+            if uf.union(first_seen[key], index):
                 components -= 1
         else:
             first_seen[key] = index
@@ -4908,7 +4902,7 @@ def route_bundle(
                     result = retry
                     reason = None
         if reason is None and result["routed"]:
-            if _union(i, j):
+            if uf.union(i, j):
                 components -= 1
             total_length_um += result["route_length_um"]
             legs.append(
@@ -4946,7 +4940,7 @@ def route_bundle(
     for i, j in candidates:
         if components == 1:
             break
-        if _find(i) == _find(j):
+        if uf.find(i) == uf.find(j):
             continue  # already connected through other legs -- no leg needed
         if (
             frozenset(
@@ -5003,7 +4997,7 @@ def route_bundle(
                     reason = None
 
         if reason is None and result["routed"]:
-            _union(i, j)
+            uf.union(i, j)
             components -= 1
             total_length_um += result["route_length_um"]
             legs.append(
@@ -5058,7 +5052,7 @@ def route_bundle(
     # --- Unroutable: report which pins were stranded and why ----------------
     groups: dict[int, list[int]] = {}
     for index in range(pin_count):
-        groups.setdefault(_find(index), []).append(index)
+        groups.setdefault(uf.find(index), []).append(index)
     # The largest component is "the net"; every pin outside it is stranded.
     main_root = max(groups, key=lambda root: (len(groups[root]), -root))
     stranded = sorted(
@@ -5147,27 +5141,14 @@ def _declare_only_bundle_result(pins: list[dict[str, Any]]) -> dict[str, Any]:
     byte-reproducible leg list run to run.
     """
     pin_count = len(pins)
-    parent = list(range(pin_count))
-
-    def _find(index: int) -> int:
-        while parent[index] != index:
-            parent[index] = parent[parent[index]]
-            index = parent[index]
-        return index
-
-    def _union(left: int, right: int) -> bool:
-        root_left, root_right = _find(left), _find(right)
-        if root_left == root_right:
-            return False
-        parent[max(root_left, root_right)] = min(root_left, root_right)
-        return True
+    uf = UnionFind(range(pin_count), min_root=True)
 
     components = pin_count
     first_seen: dict[tuple[str, str], int] = {}
     for index, pin in enumerate(pins):
         key = (pin["block"], pin["port"])
         if key in first_seen:
-            if _union(first_seen[key], index):
+            if uf.union(first_seen[key], index):
                 components -= 1
         else:
             first_seen[key] = index
@@ -5179,9 +5160,9 @@ def _declare_only_bundle_result(pins: list[dict[str, Any]]) -> dict[str, Any]:
         for j in range(i + 1, pin_count):
             if components == 1:
                 break
-            if _find(i) == _find(j):
+            if uf.find(i) == uf.find(j):
                 continue
-            _union(i, j)
+            uf.union(i, j)
             components -= 1
             legs.append(
                 {
@@ -5202,3 +5183,27 @@ def _declare_only_bundle_result(pins: list[dict[str, Any]]) -> dict[str, Any]:
         "reason": _DECLARE_ONLY_REASON,
         "status": "unrouted",
     }
+
+
+def _drop_array(
+    port: dict[str, Any], via_layer: tuple[int, int]
+) -> dict[str, Any] | None:
+    """The ``{"rows", "cols", "pitch_um"}`` cut array a port asks for on
+    ``via_layer`` (a label-derived port with ``access.via_array``, #2927), or
+    ``None`` for the ordinary single-cut drop."""
+    spec = port.get("via_array")
+    if not isinstance(spec, dict):
+        return None
+    pitch = (spec.get("pitch_um") or {}).get(f"{via_layer[0]}/{via_layer[1]}")
+    if pitch is None:
+        return None
+    return {"rows": spec["rows"], "cols": spec["cols"], "pitch_um": pitch}
+
+
+def _drop_array_extra_um(drop: dict[str, Any]) -> float:
+    """Extra side length (um) a drop's cut array adds to its landing pad over
+    the single-cut pad: ``(max(rows, cols) - 1) * pitch``; ``0.0`` without one."""
+    array = drop.get("array")
+    if not array:
+        return 0.0
+    return (max(array["rows"], array["cols"]) - 1) * array["pitch_um"]

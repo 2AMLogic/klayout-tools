@@ -302,6 +302,8 @@ class ParsedNetlist:
         "params",
         "unresolved",
         "unexpanded",
+        "expanded_instances",
+        "expansion_truncated",
     )
 
     def __init__(self) -> None:
@@ -320,6 +322,11 @@ class ParsedNetlist:
         #: ``X`` instances that are neither a recognised MOS model nor a
         #: resolvable user subcircuit -- their contents are not linted
         self.unexpanded: list[str] = []
+        #: user-subcircuit instances expanded so far (bounded by
+        #: ``_MAX_EXPANDED_INSTANCES``)
+        self.expanded_instances = 0
+        #: set once the expansion cap was hit; later subckt calls are skipped
+        self.expansion_truncated = False
 
 
 def _strip_comment(line: str) -> str:
@@ -424,10 +431,13 @@ def _op_candidates(instance: str, model: str, override: str | None) -> list[str]
     return [f"m.{lowered}" if "." in lowered else lowered]
 
 
-#: Hard caps on the hierarchy walk: nesting depth of user subcircuit calls and
-#: the number of files one netlist may pull in through ``.include``.
+#: Hard caps on the hierarchy walk: nesting depth of user subcircuit calls,
+#: the number of files one netlist may pull in through ``.include``, and the
+#: total number of subcircuit instances expanded (a deep fan-out hierarchy
+#: grows exponentially even within the depth cap).
 _MAX_SUBCKT_DEPTH = 16
 _MAX_INCLUDE_FILES = 64
+_MAX_EXPANDED_INSTANCES = 20000
 
 _SUBCKT_CARD_RE = re.compile(r"^\.subckt\b", re.IGNORECASE)
 _ENDS_CARD_RE = re.compile(r"^\.(ends|eom)\b", re.IGNORECASE)
@@ -683,6 +693,11 @@ def _walk_instance(
         and model.lower() not in stack
         and len(stack) < _MAX_SUBCKT_DEPTH
     ):
+        if parsed.expanded_instances >= _MAX_EXPANDED_INSTANCES:
+            parsed.expansion_truncated = True
+            _record_nodes(parsed, nodes)
+            return
+        parsed.expanded_instances += 1
         _walk_lines(
             parsed,
             definition.lines,
@@ -1328,6 +1343,13 @@ def _refuse_param_axis(point: Any) -> None:
             "operating-point lint does not apply; lint a request without a "
             "parameter axis"
         )
+    if point.options:
+        # Issue #3125: the lint's deck carries no corner `.options` card.
+        raise OpSanityError(
+            f"corner '{point.corner_id}' carries corners.options, which the "
+            "operating-point lint does not apply; lint a request without an "
+            "options axis"
+        )
 
 
 def run_op_sanity(
@@ -1504,6 +1526,20 @@ def run_op_sanity(
                     "definition was not found in the netlist or its "
                     "`.include`d files and it is not a recognised MOS model, "
                     "so any devices inside it were not linted."
+                ),
+            }
+        )
+
+    if parsed.expansion_truncated:
+        diagnostics.append(
+            {
+                "severity": "warning",
+                "code": "unsupported_hierarchy",
+                "message": (
+                    "subcircuit expansion stopped after "
+                    f"{_MAX_EXPANDED_INSTANCES} instances (hierarchy "
+                    "expansion cap); devices inside the remaining "
+                    "subcircuit instances were not linted."
                 ),
             }
         )

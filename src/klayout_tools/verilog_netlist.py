@@ -1172,10 +1172,10 @@ def parse_subckt_pin_orders(text: str) -> dict[str, list[str]]:
     join-continuations convention :mod:`klayout_tools.netlist_normalize`
     already uses.
     """
-    from .netlist_normalize import _merge_continuations
+    from ._paths import _fold_spice_continuations
 
     pin_orders: dict[str, list[str]] = {}
-    for line in _merge_continuations(text.splitlines()):
+    for line in _fold_spice_continuations(text.splitlines()):
         stripped = line.strip()
         if not stripped or stripped.startswith("*"):
             continue
