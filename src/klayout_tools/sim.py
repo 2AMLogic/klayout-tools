@@ -3136,7 +3136,10 @@ def _prepare_sim_request(
     elif monte_carlo_spec is not None:
         injected = _resolve_injected(monte_carlo_spec, netlist_path, request, repo_root)
         corner_points, monte_carlo_info = _expand_monte_carlo(
-            corner_points, monte_carlo_spec, injected
+            corner_points,
+            monte_carlo_spec,
+            injected,
+            mismatch_scale=_resolve_mismatch_scale(monte_carlo_spec, models.get("pdk")),
         )
         monte_carlo_info = _with_family_mismatch(
             monte_carlo_info,
@@ -6584,6 +6587,38 @@ def _validate_k_sigma(value: Any, field: str) -> float:
     return float(value)
 
 
+def _resolve_mismatch_scale(
+    mc_spec: dict[str, Any], pdk: Any
+) -> tuple[float, str] | None:
+    """Validate the optional ``request.monte_carlo.mismatch_scale`` (issue
+    #3942) and return ``(scale, param)`` -- the factor and the PDK family's
+    mismatch ``.param`` it sets -- or ``None`` when the request omits it.
+
+    The scale is applied by writing the family's multiplicative mismatch
+    switch (:data:`sim_mismatch_gate.MISMATCH_SWITCH`), so only a family
+    whose switch is verified to scale the ``AGAUSS``/``delvto`` terms
+    linearly is supported; any other family (or an undeterminable PDK) is
+    refused rather than approximated."""
+    if "mismatch_scale" not in mc_spec:
+        return None
+    value = mc_spec["mismatch_scale"]
+    field = "request.monte_carlo.mismatch_scale"
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise SimError(f"{field} must be a finite non-negative number (got {value!r})")
+    if not math.isfinite(value) or value < 0:
+        raise SimError(f"{field} must be a finite non-negative number (got {value!r})")
+    family = pdk_variant_family(pdk) if pdk else None
+    param = sim_mismatch_gate.MISMATCH_SWITCH.get(family or "")
+    if param is None:
+        known = ", ".join(sorted(sim_mismatch_gate.MISMATCH_SWITCH))
+        raise SimError(
+            f"{field} is only supported for PDK families with a verified "
+            f"multiplicative mismatch switch ({known}); models.pdk "
+            f"{pdk!r} resolves to family {family!r}"
+        )
+    return float(value), param
+
+
 def _validate_spec_row(value: Any, field: str) -> str | None:
     """Validate ``request.measurements[].spec_row`` (issue #3778): the id of
     the spec row this measurement grades, a non-empty string (``None`` when
@@ -6966,6 +7001,7 @@ def _expand_monte_carlo(
     corner_points: list[CornerPoint],
     mc_spec: dict[str, Any],
     injected: tuple[list[dict[str, Any]], float] | None = None,
+    mismatch_scale: tuple[float, str] | None = None,
 ) -> tuple[list[CornerPoint], dict[str, Any]]:
     """Expand each point in ``corner_points`` into ``mc_spec["n"]`` sample
     points, returning ``(sampled_points, monte_carlo_info)``.
@@ -6992,11 +7028,13 @@ def _expand_monte_carlo(
     that draws mismatch from ngspice's own RNG (``agauss``/``gauss`` in
     ``.param`` expressions): ngspice receives only the combined
     ``.options seed=<rndseed>``, derived from both components, so it still
-    changes per sample under ``vary: "process"``. For such decks, switch
-    the deck's own mismatch off (e.g. gf180mcu ``sw_stat_mismatch=0``) to
-    get a sigma=0 control. Requesting the *same* ``mc_spec["seed"]`` again
-    (same process, different process, doesn't matter) reproduces the exact same sequence
-    of derived seeds -- see :func:`_derive_mc_seed`.
+    changes per sample under ``vary: "process"``. For such decks, request
+    ``monte_carlo.mismatch_scale: 0`` (issue #3942; sky130/gf180mcu) to
+    switch the deck's own mismatch off and get a sigma=0 control.
+
+    Requesting the *same* ``mc_spec["seed"]`` again (same process, different
+    process, doesn't matter) reproduces the exact same sequence of derived
+    seeds -- see :func:`_derive_mc_seed`.
 
     ``injected`` (issue #2911) is ``(resolved, scale)`` from
     :func:`_resolve_injected`: each sample then also records its design-owned
@@ -7043,6 +7081,10 @@ def _expand_monte_carlo(
                 # `quantiles`/`k_sigma`, so a request that omits the field
                 # keeps its pre-#2899 response shape.
                 mc_seed["seed_scope"] = seed_scope
+            if mismatch_scale is not None:
+                # Rides the point (and so the fleet wire and the deck
+                # writer); echoed only when declared (issue #3942).
+                mc_seed["mismatch_scale"], mc_seed["mismatch_param"] = mismatch_scale
             sampled.append(
                 CornerPoint(
                     base.process,
@@ -7069,6 +7111,8 @@ def _expand_monte_carlo(
         info["injected_scale"] = injected[1]
     if "seed_scope" in mc_spec:
         info["seed_scope"] = seed_scope
+    if mismatch_scale is not None:
+        info["mismatch_scale"], info["mismatch_param"] = mismatch_scale
     return sampled, info
 
 
@@ -7125,6 +7169,23 @@ def _key_in_initial_conditions(
         payload["initial_conditions"] = ics
 
 
+def _key_in_mc_mismatch_scale(
+    payload: dict[str, Any], corner_points: Sequence[CornerPoint]
+) -> None:
+    """Issue #3942: corner IDs carry neither seeds nor the sigma scale, so a
+    resume under another ``monte_carlo.mismatch_scale`` would reuse samples
+    drawn at the old scale. Keyed in only when declared."""
+    mc_scales = sorted(
+        {
+            (point.mc_seed["mismatch_param"], point.mc_seed["mismatch_scale"])
+            for point in corner_points
+            if point.mc_seed and "mismatch_scale" in point.mc_seed
+        }
+    )
+    if mc_scales:
+        payload["mc_mismatch_scale"] = mc_scales
+
+
 def _checkpoint_fingerprint(
     *,
     netlist_path: str,
@@ -7158,7 +7219,7 @@ def _checkpoint_fingerprint(
     as if it did not exist, never silently reused against a since-modified
     matrix (see ``run_sim``'s docstring).
     """
-    payload = {
+    payload: dict[str, Any] = {
         "netlist_sha256": sha256_file(netlist_path),
         "models_lib_sha256": sha256_file(models_lib),
         "analysis": analysis,
@@ -7201,6 +7262,7 @@ def _checkpoint_fingerprint(
         # drawn from other seeds. Only keyed in off the default, so an
         # existing checkpoint stays valid for a request that omits the field.
         payload["mc_seed_scope"] = sorted(mc_scopes)
+    _key_in_mc_mismatch_scale(payload, corner_points)
     if stimulus_lines:
         # Issue #2977: the declared stimulus decides every corner's drive, so
         # an edited schedule must invalidate the checkpoint. Only keyed in
@@ -9192,6 +9254,15 @@ def _write_corner_manifest(corner_dir: str, point: CornerPoint) -> None:
         )
 
 
+def _mc_seed_optional_echo(mc_seed: dict[str, Any]) -> dict[str, Any]:
+    """The per-sample ``monte_carlo`` fields that are echoed only when the
+    request declared them: ``seed_scope`` (issue #2899) and ``mismatch_scale``
+    (issue #3942)."""
+    return {
+        key: mc_seed[key] for key in ("seed_scope", "mismatch_scale") if key in mc_seed
+    }
+
+
 def _run_corner(
     *,
     extra_options_card: str | None = None,
@@ -9608,8 +9679,7 @@ def _run_corner(
             "process_seed": point.mc_seed["process_seed"],
             "mismatch_seed": point.mc_seed["mismatch_seed"],
         }
-        if "seed_scope" in point.mc_seed:
-            monte_carlo["seed_scope"] = point.mc_seed["seed_scope"]
+        monte_carlo.update(_mc_seed_optional_echo(point.mc_seed))
         if point.mc_injected is not None:
             monte_carlo["injected"] = [
                 {k: v for k, v in item.items() if k not in ("param", "scale")}
@@ -10687,6 +10757,15 @@ def _write_corner_deck(
     # process corner, none without a process axis. See `_corner_lib_lines`.
     lines.extend(_corner_lib_lines(point, models_lib))
     lines.append(f".include {netlist_path}")
+    if point.mc_seed is not None and "mismatch_scale" in point.mc_seed:
+        # Issue #3942: the sigma scale. Must come after the `.lib` (whose
+        # section sets the switch itself, e.g. sky130 `.param mc_mm_switch=0`
+        # or `=1` in the `_mm` sections) so the request's value is the last
+        # definition and wins.
+        lines.append(
+            f".param {point.mc_seed['mismatch_param']}="
+            f"{_format_param_value(point.mc_seed['mismatch_scale'])}"
+        )
     # Issue #2977: the request's declared `stimulus`, expanded to PWL sources.
     lines.extend(sim_stimulus.lines_for_corner(stimulus_lines, point.supply_v))
     # Issue #3338: the two-port's per-port z0 + AC-source cards.

@@ -1814,6 +1814,125 @@ def test_points_to_push_resolves_non_default_scope_client_side():
     assert sim_remote._points_to_push(base, points, explicit) is explicit
 
 
+# --------------------------------------------------------------------------- #
+# monte_carlo.mismatch_scale (issue #3942)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("value", [True, -1, -0.5, float("nan"), float("inf"), "2"])
+def test_mismatch_scale_rejects_bad_values(value):
+    with pytest.raises(sim.SimError, match="monte_carlo.mismatch_scale"):
+        sim._resolve_mismatch_scale({"mismatch_scale": value}, "sky130A")
+
+
+@pytest.mark.parametrize("pdk", ["sg13g2", None, "bogus"])
+def test_mismatch_scale_refuses_unsupported_family(pdk):
+    with pytest.raises(sim.SimError, match="mismatch_scale.*family"):
+        sim._resolve_mismatch_scale({"mismatch_scale": 2}, pdk)
+
+
+def test_mismatch_scale_resolves_per_family_param():
+    assert sim._resolve_mismatch_scale({}, "sky130A") is None
+    assert sim._resolve_mismatch_scale({"mismatch_scale": 0}, "sky130A") == (
+        0.0,
+        "mc_mm_switch",
+    )
+    assert sim._resolve_mismatch_scale({"mismatch_scale": 2.5}, "gf180mcuD") == (
+        2.5,
+        "sw_stat_mismatch",
+    )
+
+
+def test_mismatch_scale_default_shape_is_unchanged():
+    points = sim._expand_corners({"process": ["tt"]}, [])
+    sampled, info = sim._expand_monte_carlo(
+        points, {"n": 2, "seed": 1, "vary": "mismatch"}
+    )
+    assert "mismatch_scale" not in info and "mismatch_param" not in info
+    assert all("mismatch_scale" not in p.mc_seed for p in sampled)
+
+
+def test_mismatch_scale_echo_and_deck_card_follows_the_lib(tmp_path):
+    points = sim._expand_corners({"process": ["tt_mm"]}, [])
+    sampled, info = sim._expand_monte_carlo(
+        points,
+        {"n": 2, "seed": 1, "vary": "mismatch"},
+        mismatch_scale=(2.5, "mc_mm_switch"),
+    )
+    assert info["mismatch_scale"] == 2.5
+    assert info["mismatch_param"] == "mc_mm_switch"
+    lines = _write_deck(tmp_path, sampled[0])
+    card = ".param mc_mm_switch=2.5"
+    assert lines.count(card) == 1
+    # Last definition wins, so it must follow the `.lib` that sets the switch
+    # (and the body `.include`, which may too).
+    lib = next(i for i, ln in enumerate(lines) if ln.startswith(".lib"))
+    body = next(i for i, ln in enumerate(lines) if ln.startswith(".include"))
+    assert lines.index(card) > max(lib, body)
+
+
+def test_mismatch_scale_zero_deck_card_is_integral(tmp_path):
+    points = sim._expand_corners({"process": ["typical"]}, [])
+    sampled, _ = sim._expand_monte_carlo(
+        points,
+        {"n": 1, "seed": 1, "vary": "mismatch"},
+        mismatch_scale=(0.0, "sw_stat_mismatch"),
+    )
+    assert ".param sw_stat_mismatch=0" in _write_deck(tmp_path, sampled[0])
+
+
+def test_mismatch_scale_without_declaration_adds_no_deck_card(tmp_path):
+    points = sim._expand_corners({"process": ["tt_mm"]}, [])
+    sampled, _ = sim._expand_monte_carlo(
+        points, {"n": 1, "seed": 1, "vary": "mismatch"}
+    )
+    assert not any("mc_mm_switch" in ln for ln in _write_deck(tmp_path, sampled[0]))
+
+
+def test_mismatch_scale_rides_the_fleet_wire():
+    points = sim._expand_corners({"process": ["tt_mm"]}, [])
+    sampled, _ = sim._expand_monte_carlo(
+        points,
+        {"n": 1, "seed": 1, "vary": "mismatch"},
+        mismatch_scale=(3.0, "mc_mm_switch"),
+    )
+    back = sim._corner_points_from_wire(sim._corner_points_to_wire(sampled))
+    assert back[0].mc_seed["mismatch_scale"] == 3.0
+    assert back[0].mc_seed["mismatch_param"] == "mc_mm_switch"
+
+
+def test_mismatch_scale_changes_checkpoint_fingerprint(tmp_path):
+    netlist = tmp_path / "n.cir"
+    netlist.write_text("* x\n.end\n")
+    points = sim._expand_corners({"process": ["tt_mm"]}, [])
+
+    def fp(scale):
+        sampled, _ = sim._expand_monte_carlo(
+            points,
+            {"n": 2, "seed": 1, "vary": "mismatch"},
+            mismatch_scale=None if scale is None else (scale, "mc_mm_switch"),
+        )
+        return sim._checkpoint_fingerprint(
+            netlist_path=str(netlist),
+            models_lib=None,
+            analysis={"type": "op"},
+            measurements_spec=[],
+            corner_points=sampled,
+            timeout_s=1.0,
+            engine="ngspice",
+        )
+
+    assert len({fp(None), fp(0.0), fp(3.0)}) == 3
+
+
+def test_points_to_push_resolves_mismatch_scale_client_side():
+    from klayout_tools import sim_remote
+
+    points = sim._expand_corners({"process": ["tt_mm"]}, [])
+    mc = {"n": 1, "seed": 1, "vary": "mismatch", "mismatch_scale": 0}
+    assert sim_remote._points_to_push({"monte_carlo": mc}, points, None) is points
+
+
 def test_expand_monte_carlo_is_reproducible_given_the_same_seed():
     corner_points = sim._expand_corners({"process": ["tt"]}, [])
     mc_spec = {"n": 5, "seed": 20260801, "vary": "both"}
