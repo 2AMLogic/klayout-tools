@@ -2660,7 +2660,9 @@ def test_mos_array_interior_channel_is_drc_clean(tmp_path, both_pdk_root):
                 }
             )
             drc_report = run_drc(str(output), deck)
-            assert drc_report["status"] in {"clean", "clean_partial"}, drc_report["violations"]
+            assert drc_report["status"] in {"clean", "clean_partial"}, drc_report[
+                "violations"
+            ]
 
 
 # `pitch_x_um`/`pitch_y_um` (issue #3299, Phase 1): explicit pitch override,
@@ -5302,7 +5304,9 @@ def test_guard_ring_contacts_per_side_sweep_matches_drc_on_elongated_region(
     )
     drc_report = run_drc(str(output), "gf180mcu")
     if n <= 9:
-        assert drc_report["status"] in {"clean", "clean_partial"}, drc_report["violations"]
+        assert drc_report["status"] in {"clean", "clean_partial"}, drc_report[
+            "violations"
+        ]
     else:
         assert drc_report["status"] == "violations"
         assert "contact.space.1" in drc_report["rule_counts"]
