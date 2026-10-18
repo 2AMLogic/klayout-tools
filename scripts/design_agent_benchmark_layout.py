@@ -24,13 +24,18 @@ plus the cross-field rules a schema cannot express, enforced here:
   ``gen+refine`` run is seeded from a ``valid`` ``gen-only`` run of the same
   (task, agent, replicate) and never scores worse than that seed.
 
-Nothing here runs ``klt``, ``ngspice`` or an agent.
+The protocol, task and run validators above run nothing. The corpus gate at the
+bottom (:func:`check_corpus`, issue #3025) calls ``klt``'s ``drc`` / ``lvs`` /
+``gen`` / ``gen-compose`` library entry points in-process on the frozen corpus;
+it needs no credentials, no network, and never ``ngspice`` or an agent.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import shutil
+import tempfile
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -47,6 +52,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 BENCHMARK_DIR = REPO_ROOT / "benchmarks" / "design-agent"
 SCHEMA_DIR = BENCHMARK_DIR / "schema"
 DEFAULT_PROTOCOL_PATH = BENCHMARK_DIR / "layout-protocol.json"
+CORPUS_DIR = BENCHMARK_DIR / "layout-corpus"
 
 PROTOCOL_SCHEMA_NAME = "layout-protocol.schema.json"
 TASK_SCHEMA_NAME = "layout-task.schema.json"
@@ -756,3 +762,456 @@ def validate_run_set(
         if run["arm"] == SEEDED_ARM and run["seed_from"] is not None:
             errors += _seed_linkage_errors(run, by_id)
     return {"valid": not errors, "errors": errors}
+
+
+# --------------------------------------------------------------------------
+# Corpus gate (issue #3025)
+# --------------------------------------------------------------------------
+
+EXCLUSIONS_SCHEMA_NAME = "layout-exclusions.schema.json"
+RECIPE_SCHEMA = "klt.design_agent_benchmark.layout_recipe/1"
+CORPUS_REPORT_SCHEMA = "klt.design_agent_benchmark.layout_corpus_report/1"
+GATE_DECK = "sky130"
+CORPUS_TASKS_MIN = 4
+CORPUS_TASKS_MAX = 6
+_TASK_FILE = "task.json"
+_EXCLUSIONS_FILE = "exclusions.json"
+
+
+class RecipeError(Exception):
+    """A generator recipe did not reach a layout (the recipe is the evidence)."""
+
+
+def _sha256_path(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _run_recipe_step(
+    step: dict[str, Any], variant: str, workdir: Path, seen: set[str], gds: Path
+) -> dict[str, Any]:
+    """Run one recipe step and return its generator/compose report."""
+    from klayout_tools.gen import GenError, generate
+    from klayout_tools.gen_compose import GenComposeError, compose
+
+    step_id = step["id"]
+    options = {"cell_name": step["cell_name"], "output": str(gds)}
+    try:
+        if step["verb"] == "gen":
+            return generate(
+                {
+                    "schema": "klt.gen.request/1",
+                    "generator": step["generator"],
+                    "pdk": {"variant": variant},
+                    "params": step["params"],
+                    "options": options,
+                }
+            )
+        if step["verb"] != "gen-compose":
+            raise RecipeError(f"{step_id}: unknown verb {step['verb']!r}")
+        request = json.loads(json.dumps(step["request"]))
+        request["pdk"] = {"variant": variant}
+        request["options"] = options
+        for block in request["blocks"]:
+            ref = block.pop("step")
+            if ref not in seen:
+                raise RecipeError(
+                    f"{step_id}: block step {ref!r} is not an earlier step"
+                )
+            block["generator_report"] = str(workdir / f"{ref}.json")
+        report = compose(request, request_dir=str(workdir))
+        if report["unrouted_nets"]:
+            raise RecipeError(
+                f"{step_id}: gen-compose left nets unrouted: "
+                f"{sorted(map(str, report['unrouted_nets']))}"
+            )
+        return report
+    except (GenError, GenComposeError) as exc:
+        raise RecipeError(f"{step_id}: {exc}") from exc
+
+
+def run_recipe(recipe: dict[str, Any], workdir: Path) -> Path:
+    """Execute a frozen generator recipe with ``klt``'s ``gen`` / ``gen-compose``
+    library entry points and return the path of the layout the last step wrote.
+
+    A recipe is ``{"schema", "pdk", "steps": [...]}``. A ``gen`` step carries
+    ``generator``/``params``; a ``gen-compose`` step carries a ``request`` whose
+    ``blocks[].step`` names an earlier step (rewritten to that step's generator
+    report). Every step takes an explicit ``cell_name``. ``gen-compose`` with any
+    ``unrouted_nets`` is a :class:`RecipeError` -- a recipe is only evidence of
+    reachability if it produced a fully wired layout.
+    """
+    if recipe.get("schema") != RECIPE_SCHEMA:
+        raise RecipeError(f"recipe schema must be {RECIPE_SCHEMA!r}")
+    workdir.mkdir(parents=True, exist_ok=True)
+    variant = recipe["pdk"]
+    last: Path | None = None
+    seen: set[str] = set()
+    for step in recipe["steps"]:
+        step_id = step["id"]
+        if step_id in seen:
+            raise RecipeError(f"duplicate step id {step_id!r}")
+        gds = workdir / f"{step_id}.gds"
+        report = _run_recipe_step(step, variant, workdir, seen, gds)
+        (workdir / f"{step_id}.json").write_text(json.dumps(report, indent=2))
+        seen.add(step_id)
+        last = gds
+    if last is None or not last.is_file():
+        raise RecipeError("recipe produced no layout")
+    return last
+
+
+def run_checks(gds: Path, netlist: Path, top: str, workdir: Path) -> dict[str, Any]:
+    """The scorer's own DRC + LVS of ``gds`` against the frozen ``netlist``, run
+    on a private copy of the artifact (never the agent's file). Returns the two
+    reports and the sha256 of the copy that was actually checked."""
+    from klayout_tools.drc import run_drc
+    from klayout_tools.lvs import run_lvs
+
+    workdir.mkdir(parents=True, exist_ok=True)
+    private = workdir / "scored.gds"
+    shutil.copyfile(gds, private)
+    drc_report = run_drc(str(private), GATE_DECK)
+    lvs_report = run_lvs(
+        json.dumps(
+            {
+                "schema": "klt.lvs.request/1",
+                "layout": {"file": str(private), "deck": GATE_DECK, "top": top},
+                "reference": {"netlist": str(netlist), "top": top},
+            }
+        )
+    )
+    return {
+        "drc_report": drc_report,
+        "lvs_report": lvs_report,
+        "checked_sha256": _sha256_path(private),
+    }
+
+
+def provenance_errors(
+    scored_sha256: str,
+    drc_report: dict[str, Any],
+    lvs_report: dict[str, Any],
+    netlist_sha256: str,
+) -> list[str]:
+    """The protocol's provenance rule: the scored GDS is the artifact both
+    reports checked, and the LVS reference is the task's frozen netlist."""
+    errors = []
+    drc_hash = str(drc_report["provenance"]["input"]["content_hash"]).removeprefix(
+        "sha256:"
+    )
+    env = lvs_report["environment"]
+    if drc_hash != scored_sha256:
+        errors.append("scored GDS sha256 does not match the DRC report's checked input")
+    if env["layout_sha256"] != scored_sha256:
+        errors.append(
+            "scored GDS sha256 does not match the LVS report's checked layout"
+        )
+    if env["reference_sha256"] != netlist_sha256:
+        errors.append("LVS reference is not the task's frozen netlist")
+    return errors
+
+
+def gate_verdict(
+    scored_sha256: str, checks: dict[str, Any], netlist_sha256: str
+) -> dict[str, Any]:
+    """Per-check booleans for the three required checks, plus ``failed``."""
+    drc_ok = checks["drc_report"]["status"] == "clean"
+    lvs_ok = checks["lvs_report"]["status"] == "match"
+    prov_errors = provenance_errors(
+        scored_sha256, checks["drc_report"], checks["lvs_report"], netlist_sha256
+    )
+    verdict = {"drc": drc_ok, "lvs": lvs_ok, "provenance": not prov_errors}
+    return {
+        **verdict,
+        "failed": [name for name, ok in verdict.items() if not ok],
+        "provenance_errors": prov_errors,
+    }
+
+
+def top_cell_errors(gds: Path, top: str) -> list[str]:
+    """``top`` must be the stream's one top cell: a generator PCell sharing the
+    requested name makes KLayout rename the wrapper (``name$1``), after which a
+    check or a mutation aimed at ``top`` silently hits the wrong cell."""
+    import klayout.db as pya
+
+    lay = pya.Layout()
+    lay.read(str(gds))
+    tops = [cell.name for cell in lay.top_cells()]
+    if tops != [top]:
+        return [f"{gds.name}: expected the single top cell {top!r}, found {tops}"]
+    return []
+
+
+def _agent_input_errors(task: dict[str, Any]) -> list[str]:
+    inputs = task.get("agent_inputs")
+    if not inputs:
+        return ["agent_inputs: missing (the corpus gate requires the shown inputs)"]
+    errors = []
+    scorer_only = {
+        task["reference_layout"]["path"],
+        task["generator_recipe"]["path"],
+        *(control["path"] for control in task["negative_controls"]),
+    }
+    for path in inputs:
+        if path in scorer_only:
+            errors.append(f"agent_inputs: {path} is scorer-only and must not be shown")
+        if Path(path).suffix.lower() in {".gds", ".oas", ".gdsii", ".oasis"}:
+            errors.append(
+                f"agent_inputs: {path} is a layout stream (no candidate layout ships)"
+            )
+    if task["frozen_netlist"]["path"] not in inputs:
+        errors.append("agent_inputs: must include the frozen netlist")
+    return errors
+
+
+def _control_coverage_errors(task: dict[str, Any]) -> list[str]:
+    seen = {control["expected_failure"] for control in task["negative_controls"]}
+    return [
+        f"negative_controls: no {check} control "
+        "(each failing check needs a known-bad layout)"
+        for check in ("drc", "lvs")
+        if check not in seen
+    ]
+
+
+def _negative_control_results(
+    task: dict[str, Any],
+    repo_root: Path,
+    netlist: Path,
+    top: str,
+    workdir: Path,
+    errors: list[str],
+) -> list[dict[str, Any]]:
+    """Run every negative control; append to ``errors`` any not isolating its check."""
+    controls = []
+    for control in task["negative_controls"]:
+        path = repo_root / control["path"]
+        verdict = gate_verdict(
+            control["sha256"],
+            run_checks(path, netlist, top, workdir / f"control-{control['id']}"),
+            task["frozen_netlist"]["sha256"],
+        )
+        expected = control["expected_failure"]
+        other = "lvs" if expected == "drc" else "drc"
+        controls.append({"id": control["id"], "expected_failure": expected, **verdict})
+        if verdict[expected]:
+            errors.append(
+                f"negative control {control['id']!r} is not rejected by {expected}"
+            )
+        if not verdict[other]:
+            errors.append(
+                f"negative control {control['id']!r} also fails {other}: "
+                f"it must isolate the {expected} check"
+            )
+    return controls
+
+
+def _provenance_control_results(
+    task: dict[str, Any],
+    repo_root: Path,
+    ref_checks: dict[str, Any],
+    netlist_sha: str,
+    errors: list[str],
+) -> dict[str, bool]:
+    """Provenance controls: checks recorded for the reference must not vouch for
+    another file (GDS swapped after the checks) or another netlist."""
+    swapped = _sha256_path(repo_root / task["negative_controls"][0]["path"])
+    swap = provenance_errors(
+        swapped, ref_checks["drc_report"], ref_checks["lvs_report"], netlist_sha
+    )
+    wrong_netlist = provenance_errors(
+        task["reference_layout"]["sha256"],
+        ref_checks["drc_report"],
+        ref_checks["lvs_report"],
+        "0" * 64,
+    )
+    if not swap:
+        errors.append("provenance: a GDS swapped after the checks was not rejected")
+    if not wrong_netlist:
+        errors.append("provenance: a non-frozen LVS reference was not rejected")
+    return {
+        "swapped_gds_rejected": bool(swap),
+        "wrong_netlist_rejected": bool(wrong_netlist),
+    }
+
+
+def check_task_gate(
+    task: dict[str, Any], repo_root: Path, workdir: Path
+) -> dict[str, Any]:
+    """Run every frozen-gate requirement for one corpus task (issue #3025).
+
+    * the descriptor validates, its frozen files exist and hash as recorded, the
+      eligibility record covers every rule and arm, and agent inputs carry no
+      layout or scorer-only file;
+    * the reference layout is DRC-clean, LVS-clean and provenance-bound;
+    * the generator recipe, re-run, reaches a layout that passes the same gate;
+    * each negative control is rejected by *its* check and passes the other one
+      (so each check is shown to fire independently);
+    * a recorded check set does not vouch for a different file or netlist
+      (the provenance control: swap the GDS after the checks ran).
+    """
+    errors: list[str] = []
+    base = validate_task(task, repo_root=repo_root)
+    errors += base["errors"]
+    result: dict[str, Any] = {
+        "task_id": task.get("id"),
+        "valid": False,
+        "errors": errors,
+    }
+    if errors:
+        return result
+    errors += _agent_input_errors(task)
+    errors += _control_coverage_errors(task)
+    if "eligibility" not in task:
+        errors.append(
+            "eligibility: missing (record why the task is eligible for all arms)"
+        )
+    netlist = repo_root / task["frozen_netlist"]["path"]
+    netlist_sha = task["frozen_netlist"]["sha256"]
+    top = task["reference_layout"]["cell_name"]
+
+    reference = repo_root / task["reference_layout"]["path"]
+    for rel in [
+        task["reference_layout"]["path"],
+        *(control["path"] for control in task["negative_controls"]),
+    ]:
+        errors += top_cell_errors(repo_root / rel, top)
+    ref_checks = run_checks(reference, netlist, top, workdir / "reference")
+    ref_verdict = gate_verdict(
+        task["reference_layout"]["sha256"], ref_checks, netlist_sha
+    )
+    result["reference"] = ref_verdict
+    if ref_verdict["failed"]:
+        errors.append(f"reference_layout: fails {ref_verdict['failed']}")
+
+    try:
+        built = run_recipe(
+            json.loads((repo_root / task["generator_recipe"]["path"]).read_text()),
+            workdir / "recipe",
+        )
+    except (RecipeError, KeyError) as exc:
+        errors.append(f"generator_recipe: {exc}")
+    else:
+        built_sha = _sha256_path(built)
+        built_verdict = gate_verdict(
+            built_sha,
+            run_checks(built, netlist, top, workdir / "recipe-check"),
+            netlist_sha,
+        )
+        result["recipe"] = {
+            **built_verdict,
+            "matches_reference": built_sha == task["reference_layout"]["sha256"],
+        }
+        if built_verdict["failed"]:
+            errors.append(f"generator_recipe: result fails {built_verdict['failed']}")
+
+    result["negative_controls"] = _negative_control_results(
+        task, repo_root, netlist, top, workdir, errors
+    )
+    result["provenance_controls"] = _provenance_control_results(
+        task, repo_root, ref_checks, netlist_sha, errors
+    )
+
+    result["valid"] = not errors
+    return result
+
+
+def _exclusion_recipe_errors(
+    item: dict[str, Any], repo_root: Path, workdir: Path
+) -> list[str]:
+    """Recipe rules for one exclusion: a ``generator_reachable`` exclusion needs a
+    hash-bound recipe that still fails; no other reason may carry a recipe."""
+    recipe = item.get("recipe")
+    if item["reason"] != "generator_reachable":
+        if recipe is None:
+            return []
+        return [f"exclusions/{item['id']}: recipe only applies to generator_reachable"]
+    if recipe is None:
+        return [f"exclusions/{item['id']}: generator_reachable needs a failing recipe"]
+    path = repo_root / recipe["path"]
+    if ".." in Path(recipe["path"]).parts or not path.is_file():
+        return [f"exclusions/{item['id']}: recipe path missing: {recipe['path']}"]
+    if _sha256_path(path) != recipe["sha256"]:
+        return [f"exclusions/{item['id']}: recipe sha256 does not match"]
+    try:
+        run_recipe(json.loads(path.read_text()), workdir / f"exclusion-{item['id']}")
+    except RecipeError:
+        return []
+    return [
+        f"exclusions/{item['id']}: recipe now reaches a layout; "
+        "the exclusion is stale -- promote it to a task"
+    ]
+
+
+def _exclusion_errors(
+    document: Any, task_ids: set[str], repo_root: Path, workdir: Path, schema_dir: Path
+) -> list[str]:
+    errors = _schema_errors(_validator(EXCLUSIONS_SCHEMA_NAME, schema_dir), document)
+    if errors:
+        return errors
+    seen: set[str] = set()
+    for item in document["exclusions"]:
+        if item["id"] in seen:
+            errors.append(f"exclusions: duplicate id {item['id']!r}")
+        seen.add(item["id"])
+        if item["id"] in task_ids:
+            errors.append(
+                f"exclusions: {item['id']!r} is also a scored task (all arms or none)"
+            )
+        errors += _exclusion_recipe_errors(item, repo_root, workdir)
+    return errors
+
+
+def check_corpus(
+    corpus_dir: Path = CORPUS_DIR,
+    repo_root: Path = REPO_ROOT,
+    *,
+    schema_dir: Path = SCHEMA_DIR,
+    only: Iterable[str] | None = None,
+) -> dict[str, Any]:
+    """Gate the whole frozen corpus. ``only`` limits which task ids run the
+    (slow) layout checks; the descriptor/count/exclusion rules always apply."""
+    errors: list[str] = []
+    task_dirs = sorted(p for p in corpus_dir.iterdir() if (p / _TASK_FILE).is_file())
+    if not CORPUS_TASKS_MIN <= len(task_dirs) <= CORPUS_TASKS_MAX:
+        errors.append(
+            f"corpus has {len(task_dirs)} tasks; "
+            f"expected {CORPUS_TASKS_MIN}-{CORPUS_TASKS_MAX}"
+        )
+    wanted = None if only is None else set(only)
+    reports = []
+    task_ids: set[str] = set()
+    with tempfile.TemporaryDirectory(prefix="layout-corpus-gate-") as tmp:
+        scratch = Path(tmp)
+        for task_dir in task_dirs:
+            task = json.loads((task_dir / _TASK_FILE).read_text())
+            task_ids.add(task_dir.name)
+            if task.get("id") != task_dir.name:
+                errors.append(
+                    f"{task_dir.name}: id {task.get('id')!r} does not match directory"
+                )
+                continue
+            if wanted is not None and task_dir.name not in wanted:
+                continue
+            report = check_task_gate(task, repo_root, scratch / task_dir.name)
+            reports.append(report)
+            errors += [f"{task_dir.name}: {e}" for e in report["errors"]]
+        exclusions_path = corpus_dir / _EXCLUSIONS_FILE
+        exclusions: list[dict[str, Any]] = []
+        if not exclusions_path.is_file():
+            errors.append(f"{_EXCLUSIONS_FILE}: missing")
+        else:
+            document = json.loads(exclusions_path.read_text())
+            errors += _exclusion_errors(
+                document, task_ids, repo_root, scratch, schema_dir
+            )
+            exclusions = (
+                document.get("exclusions", []) if isinstance(document, dict) else []
+            )
+    return {
+        "schema": CORPUS_REPORT_SCHEMA,
+        "valid": not errors,
+        "errors": errors,
+        "tasks": reports,
+        "exclusions": [{"id": e["id"], "reason": e["reason"]} for e in exclusions],
+    }

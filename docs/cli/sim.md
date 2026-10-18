@@ -1384,9 +1384,13 @@ stdout/stderr — its own log lines and the job command's — into one
 `outputs/**` and `status.json` are). The generated `job.json` therefore
 redirects stdout with `> "$EDA_OUTPUT_DIR/report.json"`. Because klt writes its
 `--format json` *error* envelope to stderr, the command also tees stderr into
-`$EDA_OUTPUT_DIR/stderr.log` (`2> >(tee ... >&2)`, which still forwards it to
-`harness.log`) and ends with `; rc=$?; wait $! 2>/dev/null; exit $rc` so the
-tee drains before upload and the job keeps klt's own exit code.
+`$EDA_OUTPUT_DIR/stderr.log` (`exec 2> >(tee ... >&2)` as the command's first
+statement, so the runner preflight is covered too; it still forwards stderr to
+`harness.log`). An `EXIT` trap drains the tee before upload, keeps the job's
+exit code, and — only when the command exited non-zero with an empty
+`report.json` and no klt envelope in `stderr.log` — writes a
+`batch_job_command_failed` error envelope into `report.json` carrying the exit
+code and a bounded, sanitized tail of `stderr.log` ([#3818](https://github.com/2AMLogic/klayout-tools/issues/3818)).
 `--outdir "$EDA_OUTPUT_DIR/artifacts"`
 is added when `options.keep_artifacts` is set so per-corner logs/rawfiles
 land inside the one tree the harness collects. The generated document's
@@ -1403,21 +1407,38 @@ that ran and errored are checkpointed like on `local`.
 Works for `hosts == 1` and `hosts > 1`.
 
 **Sharded resume re-attaches to jobs that already ran** (`hosts > 1`, or a
-`max_units_per_job` split under `--resume`). Each shard's job id is recorded in
-`<artifacts-dir>/batch-shards.json` (schema_version 1: the request
-fingerprint, the shard count, and per shard its `index`, `job_id` and a digest
-of its corner ids) *before* the shard is submitted. A re-run with `--resume`
-and the same `--outdir` re-attaches to every recorded shard through the
-`--attach` path: a `done` job is collected, a live one is polled, and only a
+`max_units_per_job` / `job_ceiling_check: "split"` split). Every sharded run
+-- with or without `--resume` -- records its shards in
+`<artifacts-dir>/batch-shards.json` (schema_version 1) *before* the first
+shard is submitted: the request fingerprint, the shard count, where the jobs
+live (`bucket`, `jobs_prefix`, `region`, `profile`) and per shard its `index`,
+`job_id`, a digest of its corner ids and its client-side lifecycle:
+
+| field | meaning |
+| --- | --- |
+| `state` | `pending` (id minted, not submitted), `submitted`, `launching` (`launch` started, outcome unknown), `launched`, `collected` |
+| `submitted_at`, `launch_started_at`, `launched_at`, `collected_at` | ISO-8601 UTC, `null` until that step is reached |
+
+A client stopped mid-run (terminal timeout, session end) therefore leaves a
+durable record of which jobs were never launched; the end-of-run stderr line
+names the map and how many shards are `submitted` but not launched. A re-run
+with `--resume` and the same `--outdir` re-attaches to every recorded shard
+through the `--attach` path: a `done` job is collected, a live one is polled,
+a shard still in `state: "submitted"` is **launched** first -- but only while
+the fleet has published no `status.json` for it, and never from `launching` or
+`launched` (a possibly-launched job is polled, not launched again) -- and only a
 shard with no usable job (never submitted, outputs gone, or a terminally
 `failed` job) is submitted again under a new id, overwriting its entry. Each
-`environment.remote.fleet[]` entry carries `resumed: true|false`.
+`environment.remote.fleet[]` entry carries `resumed: true|false`. A map
+written before these fields existed carries no `state` and is only ever polled.
 
 The fingerprint is the resume checkpoint's own, so a changed request (units,
 seed, `hosts`, netlist) or an unreadable `batch-shards.json` is refused with
 exit 1 and error code `resume_fingerprint_mismatch` before any S3 write; delete
 the file or drop `--resume`. Without `--resume` an existing map is ignored and
 overwritten. The map is removed when the sweep finishes with no unrun corner.
+`--attach` still takes a single job id; recover a split request with
+`--resume`.
 
 The dispatch-time fail-fast probe is skipped for `batch` —
 probing *this* host's ngspice says nothing about the fleet instance's
@@ -1492,6 +1513,7 @@ but no tagged release contains it yet.
 | `corners.process[].sections[]` (object form) | 0.7.0 |
 | `options.ngspice_init` | 0.7.0 |
 | `options.osdi_preload` | 0.7.0 |
+| `options.stage_model_inputs` | 0.7.0 |
 | `analysis_steps[].measurements[]` (noise analysis `.meas` cards) | unreleased |
 
 Safe on an old runner: a plain `measurements[]` `{name, spice}` `.meas` card
@@ -1603,8 +1625,9 @@ release segment:
 | `corners.process[].sections[]` | a `corners.process[]` bundle has an object-form `sections[]` entry | `0.7.0` |
 | `options.ngspice_init` | `options.ngspice_init` is set and non-empty | `0.7.0` |
 | `options.osdi_preload` | `options.osdi_preload` is set and non-empty | `0.7.0` |
+| `options.stage_model_inputs` | `options.stage_model_inputs` is set | `0.7.0` |
 
-The last four rows are the released entries of
+The last five rows are the released entries of
 `REQUEST_FEATURE_MIN_RUNNER_VERSION` ([#2877](https://github.com/2AMLogic/klayout-tools/issues/2877)),
 the same table the checks below read ([#2901](https://github.com/2AMLogic/klayout-tools/issues/2901)).
 An entry whose minimum is `unreleased` has no detector and never counts as
@@ -1857,8 +1880,10 @@ infers that a unit completed from status timing. To avoid this, size the job
 before submitting it; see "Three budgets, and the fleet's whole-job ceiling"
 above.
 
-**Note.** Only the envelope's structured `message`/`code` reach the JSON;
-raw `stderr.log` text never does. The stderr capture is part of the command
+**Note.** Only an envelope's structured `message`/`code` reach the JSON; raw
+`stderr.log` text never does, except the bounded, character-sanitized tail
+(1500 bytes) the job's own `batch_job_command_failed` envelope quotes when the
+job died without producing any envelope. The stderr capture is part of the command
 the *submitting* client generates, so it works whatever klt version the fleet
 image runs. When neither file yields an envelope, the reason is in
 `harness.log` (and `stderr.log`) under the job's S3 prefix.
@@ -6104,6 +6129,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `missing_include`  | ngspice's own `Error: Could not find include file ...` — a `.include`/`.inc` target that did not resolve. Everything downstream of it (missing devices, then `.meas` cards finding no vector) reads like a broken circuit, so it gets its own code rather than surfacing only as measurement failures ([#2485](https://github.com/2AMLogic/klayout-tools/issues/2485)). For an off-host backend this is now unreachable by construction — the include closure is staged, or the submit is refused (see "Off-host backends stage the netlist's `.include` closure" above). |
 | `netlist`          | A top-level `Error:` line naming a syntax/unknown/undefined/parse/subckt problem. |
 | `model_bin_range`  | ngspice's own `Error: could not find a valid modelname` — undiagnostic on its own; enriched with the netlist's likely culprit instance (largest `w`, or `w * nf` when fingered, without `m=`) when one is found. See "Model bin-range diagnostic" below. |
+| `ngspice_fatal`    | The generic shape of an ngspice deck abort — `Error on line N ...`, `Simulation interrupted due to error!` or `fatal error in ngspice` — when no more specific code above (`missing_include`, `netlist`, `model_bin_range`) matched. The message carries the first matching log line verbatim. When the log shows no analysis ever began, the cause diagnostic (this code or one of those three) also carries `analysis_started: false` and notes that `runtime_s` is wall-clock before the failure, and the per-measurement `produced no value` diagnostics are collapsed (the measurement results stay `status: error`). Batch runs back-fill it from the retrieved `ngspice.log` ([#3879](https://github.com/2AMLogic/klayout-tools/issues/3879)). |
 | `unsupported_model_level` | ngspice's `Only MOS device levels ... are supported in this binary` (e.g. ASAP7 BSIM-CMG `level = 72` without an OSDI module); reported as `prerequisite missing: ...` and suppresses the follow-on `model_bin_range`. See "ASAP7 FinFET (BSIM-CMG) simulation". |
 | `osdi_abi_mismatch` | `NGSPICE only supports OSDI v0.N but ...` — ngspice too old for the compiled module's OSDI ABI. |
 | `osdi_load_failed` | `Error: Library <x>.osdi couldn't be loaded!` — the module is unreadable or not loadable by this ngspice. |
@@ -7009,6 +7035,11 @@ are explicit skips. Only `min` and `max` are applied. A typo such as
 `{"maximum": 1.8}` cannot count as an applied bound. Partial valid bounds
 and skipped bounds remain distinguishable by identity.
 
+`klt signoff` does not count an envelope with `measurements_declared > 0` and
+`measurements_with_limits == 0` as passing corner-verification evidence
+(reason `no_limits_checked`, issue #3769); the `klt sim` status and
+`coverage` are unchanged.
+
 A deliberate no-limit characterization counts a produced measurement as
 checked and its omitted limit as inapplicable. A launched corner alone does
 not count. With no failure/error, `klt sim` derives the top-level `status`
@@ -7210,6 +7241,26 @@ of the file's on-disk bytes). A directive left to the executing host is
 `pdk_root`. If the closure cannot be resolved (e.g. a missing include),
 `environment.netlist_closure_error` carries the message instead and the report
 is otherwise unchanged.
+
+### `environment.corner_coverage` (issue #3794)
+
+A multi-corner sweep can look complete while some device flavours never move:
+gf180mcu's deck binds its 5/6V MOSFETs (`06v0`, `06v0_nvt`) to the typical
+model in every process section. When `models.pdk` resolves to a PDK whose
+corner data is per-flavour (see [`klt pdk corners`](pdk.md#klt-pdk-corners))
+and the request has non-typical process corners, `environment.corner_coverage`
+lists, per requested process section, the flavours that do **not** move:
+
+```json
+"corner_coverage": {
+  "pdk": "gf180mcuD",
+  "sections": [{"process": "ss", "unmoved_devices": ["06v0", "06v0_nvt"]}]
+}
+```
+
+Additive: absent when there is no `models.pdk`, the PDK is not found, it has
+no per-flavour corner data (e.g. sky130), or nothing is unmoved. No
+`schema_version` bump (docs/json-contract.md: new fields are additive).
 
 ### `environment.netlist_identity` (issue #3074)
 

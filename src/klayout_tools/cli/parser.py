@@ -33,6 +33,7 @@ from . import (
     gen_cmd,
     gen_compose_cmd,
     kb_cmd,
+    keepout_check_cmd,
     layers_cmd,
     layout_metrics_cmd,
     lef_abstract_cmd,
@@ -92,6 +93,14 @@ def _parasitic_variant_arg(value: str) -> str:
     outside the closed grammar is a usage error (exit 2)."""
     parse_parasitic_variants([value], argparse.ArgumentTypeError)
     return value
+
+
+def _drc_deck_names_str() -> str:
+    """Like :func:`_deck_names_str` but only the curated-DRC decks -- the
+    names ``get_deck`` accepts (issue #3783); ``asap7`` is extraction-only."""
+    from ..decks import drc_deck_names
+
+    return ", ".join(drc_deck_names())
 
 
 def _deck_names_str() -> str:
@@ -245,6 +254,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_lef_abstract_parser(subparsers)
 
     _add_ring_check_parser(subparsers)
+    _add_keepout_check_parser(subparsers)
     _add_tap_distance_parser(subparsers)
 
     _add_layout_metrics_parser(subparsers)
@@ -4512,7 +4522,7 @@ def _add_wave_parser(subparsers: argparse._SubParsersAction) -> None:
 
 def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
     """Register the ``pdk`` verb with nested ``find``/``list``/``env``/
-    ``cells``/``macros``/``corners``/``em-limits``/``pcell-check``/``stackup``
+    ``cells``/``macros``/``decks``/``corners``/``em-limits``/``pcell-check``/``stackup``
     subcommands.
 
     The other verbs are flat; ``pdk`` groups discovery operations under one
@@ -4660,6 +4670,26 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(macros_parser)
     macros_parser.set_defaults(func=pdk_cmd.run_macros)
+
+    decks_parser = pdk_sub.add_parser(
+        "decks",
+        help="list the KLayout DRC decks a PDK ships and the -rd globals each reads",
+        description=(
+            "List the `.lydrc`/`.drc` KLayout DRC deck files under the "
+            "resolved variant's libs.tech/klayout/drc, which one `klt drc "
+            "--pdk` runs (`is_default`), and a best-effort static scan of the "
+            "`-rd` globals each consumes (`required_by_caller`, `default`). "
+            "Use it to pick a sibling deck for `klt drc --deck-file` and the "
+            "`--deck-var` flags it needs."
+        ),
+    )
+    _add_pdk_args(
+        decks_parser,
+        pdk_help="variant to resolve (e.g. sky130A); overrides $PDK",
+        pdk_root_help="explicit install root; overrides $PDK_ROOT and the search order",
+    )
+    _add_format_arg(decks_parser)
+    decks_parser.set_defaults(func=pdk_cmd.run_decks)
 
     corners_parser = pdk_sub.add_parser(
         "corners",
@@ -4942,7 +4972,10 @@ def _add_deck_parser(subparsers: argparse._SubParsersAction) -> None:
     rules_parser.add_argument(
         "--deck",
         required=True,
-        help=f"built-in deck name whose rules to list (e.g. {_deck_names_str()})",
+        help=(
+            "built-in curated-DRC deck name whose rules to list "
+            f"(e.g. {_drc_deck_names_str()})"
+        ),
     )
     rules_parser.add_argument(
         "--rule",
@@ -5604,7 +5637,7 @@ def _add_layout_metrics_parser(subparsers: argparse._SubParsersAction) -> None:
         default=None,
         help=(
             "DRC deck to run for the drc.violation_count field (currently: "
-            f"{_deck_names_str()}). Omit to skip DRC entirely."
+            f"{_drc_deck_names_str()}). Omit to skip DRC entirely."
         ),
     )
     layout_metrics_parser.add_argument(
@@ -5681,8 +5714,11 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
         "--deck",
         default=None,
         help=(
-            f"DRC deck to run (currently: {_deck_names_str()}). Required for "
-            "--engine curated (the default); ignored for --engine klayout. "
+            f"DRC deck to run (currently: {_drc_deck_names_str()}). Required "
+            "for --engine curated (the default); ignored for --engine "
+            "klayout. ASAP7 DRC is a KLayout script, not a curated deck: "
+            "run it with --engine klayout --deck-file "
+            "src/klayout_tools/decks/asap7.drc (docs/cli/drc.md, 'ASAP7 deck'). "
             "Not validated by argparse -- an unknown deck name exits 1 with "
             "a clean error, per docs/cli/drc.md's exit-code contract, "
             "rather than argparse's usage-error exit 2."
@@ -5693,7 +5729,9 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
         default=None,
         help=(
             "top cell to check when the stream has more than one; omit to "
-            "check every top cell. Not supported yet for --engine klayout."
+            "check every top cell. With --engine klayout, a stream with "
+            "several top cells requires --top (the deck runs against that "
+            "cell's subtree only)."
         ),
     )
     drc_parser.add_argument(
@@ -6291,6 +6329,76 @@ def _add_ring_check_parser(subparsers: argparse._SubParsersAction) -> None:
     ring_check_parser.set_defaults(func=ring_check_cmd.run)
 
 
+def _add_keepout_check_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``keepout-check`` verb: no forbidden shapes near a guard."""
+    keepout_parser = subparsers.add_parser(
+        "keepout-check",
+        help="assert no forbidden-layer shape lies within a margin of a cell/region",
+        description=(
+            "Assert that no shape on a forbidden layer set lies within a "
+            "margin of a guarded cell or region (a keep-out around a spiral "
+            "inductor, a sensitive analog block, ...) and report each "
+            "intruding shape with its layer and micrometre coordinates. The "
+            "guard is the bounding box of every placement of the --cells "
+            "names and/or the --region window, sized outward by --margin; "
+            "the guarded cells' own shapes are never counted. Purely "
+            "geometric; fully headless via KLayout's batch database API. "
+            "See docs/cli/keepout-check.md."
+        ),
+    )
+    keepout_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
+    keepout_parser.add_argument(
+        "--forbidden",
+        "--layers",
+        dest="forbidden",
+        required=True,
+        help=(
+            "forbidden layer set as a path to a JSON file, or an inline JSON "
+            "array of [layer, datatype] pairs (e.g. '[[67, 20]]'). Not "
+            "validated by argparse -- an empty/malformed value exits 1."
+        ),
+    )
+    keepout_parser.add_argument(
+        "--margin",
+        required=True,
+        help=(
+            "keep-out margin in micrometres (>= 0); a shape at distance "
+            "exactly the margin is clear. Not validated by argparse -- a "
+            "non-numeric or negative value exits 1."
+        ),
+    )
+    keepout_parser.add_argument(
+        "--cells",
+        action="append",
+        default=None,
+        metavar="CELL",
+        help=(
+            "repeatable exact cell name to guard (every placement under each "
+            "checked top cell, by bounding box). At least one of --cells / "
+            "--region is required."
+        ),
+    )
+    keepout_parser.add_argument(
+        "--region",
+        default=None,
+        help=(
+            "guarded window as an inline JSON array of four micrometre "
+            "coordinates [left, bottom, right, top]; may be combined with "
+            "--cells"
+        ),
+    )
+    keepout_parser.add_argument(
+        "--top",
+        default=None,
+        help=(
+            "top cell to check when the stream has more than one; omit to "
+            "check every top cell"
+        ),
+    )
+    _add_format_arg(keepout_parser)
+    keepout_parser.set_defaults(func=keepout_check_cmd.run)
+
+
 def _add_netlist_parser(subparsers: argparse._SubParsersAction) -> None:
     """Register the ``netlist`` verb: xschem schematic -> SPICE netlist, and
     the ``--check`` staleness gate over a committed netlist (issue #55)."""
@@ -6516,7 +6624,7 @@ def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
         default=None,
         help=(
             "PDK antenna-ratio limit table to check each level's "
-            "antenna_ratio against (currently: sky130). Optional -- omit "
+            "antenna_ratio against (currently: sky130, ihp-sg13g2). Optional -- omit "
             "to still report every level's antenna_ratio, just with "
             "verdict 'unchecked' everywhere. Not validated by argparse -- "
             "an unknown name exits 1 with a clean error, per "
