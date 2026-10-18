@@ -125,7 +125,9 @@ arbitrary boolean/derived expression):
   ``MIM.gR`` (issue #2581's own group's third rule) falls here too: a
   ``RECOMMENDED``-gated *whole-chip* total-``MIM``-area budget, which is a
   sum over the layout rather than the per-polygon bound ``check="area"``
-  expresses.
+  expresses. The one exception is ``pSD.k`` (``psd.area.1``, issue #3787), a
+  per-polygon minimum area; ``pSD.a``/``pSD.b``/``pSD.k`` are also the deck's
+  only transcriptions from ``sg13g2_maximal.drc``.
 - ``MIM.a``/``MIM.b``/``MIM.e``/``MIM.f`` (issue #2581) -- a different kind
   of omission from everything above: these are not approximated, they are
   not in the ``main`` tables at all. Despite reading like siblings of
@@ -549,6 +551,7 @@ def _sg13g2_mom_provenance(source_file: str, rule_id: str) -> RuleProvenance:
 
 
 _FEOL = "ihp-sg13g2/libs.tech/klayout/tech/drc/rule_decks/feol"
+_MAXIMAL_RUNSET = "ihp-sg13g2/libs.tech/klayout/tech/drc/rule_decks/sg13g2_maximal.drc"
 _BEOL = "ihp-sg13g2/libs.tech/klayout/tech/drc/rule_decks/beol"
 
 # This deck's rule thresholds below are authored assuming database units are
@@ -558,6 +561,45 @@ _BEOL = "ihp-sg13g2/libs.tech/klayout/tech/drc/rule_decks/beol"
 NOMINAL_DBU_UM = 0.001
 
 DECK: list[DrcRule] = [
+    # --- NWell (issue #3571), rule_decks/feol/5_1_nwell.drc + the maximal
+    # deck. Before this the deck had no NWell rule at all, so `31/0` was
+    # reported under `coverage.layers_in_stream_without_rules` and a
+    # multi-well layout got a vacuous `clean`. Only the two geometry-only
+    # rules are transcribed; NW.b1 (different-net spacing) is net-aware and
+    # is surfaced via `UNCHECKED_RULES` below instead. Values are
+    # sg13g2_tech_default.json's NW_a / NW_b. ----------------------------
+    DrcRule(
+        id="nwell.width.1",
+        description="minimum NWell width",
+        layer=(31, 0),  # NWell.drawing
+        check="width",
+        threshold_dbu=620,  # 0.62 um
+        # sg13g2_maximal.drc rule "NW.a": NWell.ext_width(0.62.um) ->
+        # "Min. NWell width = 0.62" (drc_rules['NW_a'] == 0.62). NW.a is NOT
+        # in the modular 5_1_nwell.drc -- only the maximal deck implements it.
+        scope="NW",
+        provenance=_sg13g2_drc_provenance(
+            "ihp-sg13g2/libs.tech/klayout/tech/drc/rule_decks/sg13g2_maximal.drc",
+            "NW.a",
+        ),
+    ),
+    DrcRule(
+        id="nwell.space.1",
+        description="minimum NWell space or notch",
+        layer=(31, 0),  # NWell.drawing
+        check="space",
+        threshold_dbu=620,  # 0.62 um
+        # 5_1_nwell.drc rule "NW.b": "Min. NWell space or notch (same net).
+        # NWell regions separated by less than this value will be merged"
+        # (drc_rules['NW_b'] == 0.62). Approximation: the foundry rule is
+        # same-net and *merges* closer same-net wells; this geometric check
+        # has no net identity, so it flags any two wells closer than 0.62 um
+        # (stricter than the foundry deck for same-net pairs; for
+        # different-net pairs it is implied by the stricter NW.b1, 1.80 um,
+        # so it adds no false positive there).
+        scope="NW",
+        provenance=_sg13g2_drc_provenance(f"{_FEOL}/5_1_nwell.drc", "NW.b"),
+    ),
     # --- 5.5 Activ (feol/5_5_activ.drc) -------------------------------
     DrcRule(
         id="activ.width.1",
@@ -627,6 +669,54 @@ DECK: list[DrcRule] = [
         # (sg13g2_tech_default.json: drc_rules.Gat_d == 0.07)
         scope="Gat",
         provenance=_sg13g2_drc_provenance(f"{_FEOL}/5_8_gatpoly.drc", "Gat.d"),
+    ),
+    # --- pSD (sg13g2_maximal.drc; issue #3787) -----------------------
+    # Unlike every other group here, pSD's width/space/area rules are
+    # defined only in the stricter top-level `sg13g2_maximal.drc` runset
+    # (`feol/5_10_psd.drc` implements just `pSD.c1`). They are transcribed
+    # so a stream drawing pSD (14/0) is not reported as a vacuous `clean`
+    # with `14/0` under `coverage.layers_in_stream_without_rules`.
+    #
+    # Not transcribed (out of scope, need multi-layer derived regions):
+    # `pSD.c`/`c1`/`d`/`d1` (enclosure/separation vs Activ/NWell/PWell) and
+    # `pSD.e`/`f`/`g`/`h` (abutted-tie rules). `UNCHECKED_RULES` is wired
+    # only for `sg13cmos5l` (`get_unchecked_rules`), so they are named here
+    # rather than registered.
+    DrcRule(
+        id="psd.width.1",
+        description="minimum pSD width",
+        layer=(14, 0),  # pSD.drawing
+        check="width",
+        threshold_dbu=310,  # 0.31 um
+        # sg13g2_maximal.drc rule "pSD.a": pSD.ext_width(0.31.um)
+        # -> "Min. pSD width = 0.31"
+        # (sg13g2_tech_default.json: drc_rules.pSD_a == 0.31)
+        scope="pSD",
+        provenance=_sg13g2_drc_provenance(_MAXIMAL_RUNSET, "pSD.a"),
+    ),
+    DrcRule(
+        id="psd.space.1",
+        description="minimum pSD space or notch",
+        layer=(14, 0),  # pSD.drawing
+        check="space",
+        threshold_dbu=310,  # 0.31 um
+        # sg13g2_maximal.drc rule "pSD.b": pSD.ext_space(0.31.um)
+        # -> "Min. pSD space or notch ... = 0.31"
+        # (sg13g2_tech_default.json: drc_rules.pSD_b == 0.31)
+        scope="pSD",
+        provenance=_sg13g2_drc_provenance(_MAXIMAL_RUNSET, "pSD.b"),
+    ),
+    DrcRule(
+        id="psd.area.1",
+        description="minimum pSD area",
+        layer=(14, 0),  # pSD.drawing
+        check="area",
+        threshold_dbu=0,  # unused by "area" -- see area_min_dbu2 below
+        area_min_dbu2=250_000,  # 0.25 um^2 (250000 dbu^2 at dbu_um = 0.001)
+        # sg13g2_maximal.drc rule "pSD.k":
+        # pSD.ext_with_area([["<", 0.25.um2]]) -> "Min. pSD area = 0.25"
+        scope="pSD",
+        provenance=_sg13g2_drc_provenance(_MAXIMAL_RUNSET, "pSD.k"),
     ),
     # --- 5.14 Cont (feol/5_14_cont.drc) -------------------------------
     DrcRule(
@@ -1364,6 +1454,21 @@ DECK: list[DrcRule] = [
     ),
 ]
 
+# Foundry rules this curated deck knows about but cannot evaluate (issue
+# #3571, mirroring #3012): `{rule id: (layer, description)}`. `drc.py`
+# reports each one under `coverage.unchecked_rules` whenever its layer is
+# present in the stream, so a `clean` verdict cannot be read as "this rule
+# was checked".
+UNCHECKED_RULES: dict[str, tuple[tuple[int, int], str]] = {
+    "NW.b1": (
+        (31, 0),
+        "NW.b1 (min. PWell width between NWell regions of different nets, "
+        "1.80 um) is net-aware and this engine has no net-aware spacing "
+        "check; wells on different nets closer than 1.80 um are not "
+        "flagged. Only the geometric nwell.space.1 (0.62 um) ran.",
+    ),
+}
+
 LAYER_NAMES: dict[tuple[int, int], str] = {
     (1, 0): "Activ.drawing",
     # `layers_def.drc`'s `activ_mask = get_polygons(1, 20)` -- read by
@@ -1476,6 +1581,33 @@ UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {
         "specific GatPoly widths, not transcribed in this deck yet)."
     ),
 }
+
+#: Official ``sg13g2_maximal.drc`` rule ids this curated deck does not
+#: transcribe (issue #3854): the pad rules (``Pad.*``) and the latch-up rules
+#: (``LU.*``). They need layers outside the curated set (``dfpad``, EdgeSeal)
+#: and compound expressions ``DrcRule`` cannot evaluate. The ``*R`` pad ids
+#: are the runset's recommended-only rules (``$recommendedRules``); the
+#: ``LU.*`` ids are gated by ``$latchUpRules``. ESD structures have no rule id
+#: in the runset (only ``Recog.esd`` device recognition, absent from
+#: ``EXTRACTION_DECK``), so nothing ESD-related can be listed here.
+#: ``coverage.unmodeled_rules`` lists these so a clean verdict is not read as
+#: covering pads or latch-up. Remove an id here when its rule is added.
+UNMODELED_RULES: tuple[str, ...] = (
+    "LU.a",
+    "LU.c",
+    "LU.c1",
+    "LU.d",
+    "LU.d1",
+    "Pad.a1",
+    "Pad.aR",
+    "Pad.bR",
+    "Pad.d",
+    "Pad.d1R",
+    "Pad.dR",
+    "Pad.gR",
+    "Pad.jR",
+    "Pad.kR",
+)
 
 # --------------------------------------------------------------------------- #
 # `klt extract` connectivity + device-extraction deck

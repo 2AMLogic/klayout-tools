@@ -838,6 +838,11 @@ stability statement, concrete precedents, and drift-detection guidance, and
     Populated by `klt sim` today; the underlying detection lives in
     `klayout_tools.pdk.find_pdk` (`ambiguous_roots`) and is available to
     every verb that resolves a PDK — see `docs/cli/pdk.md`.
+  - `alternative_variants` (issue #3814) — additive field on `klt pdk find`'s
+    payload (not part of `provenance`): sorted names of the other variants in
+    the chosen root when no variant was selected (`--pdk`/`$PDK` unset);
+    `[]` otherwise. Resolution and exit code are unchanged; text mode warns on
+    stderr. See `docs/cli/pdk.md`.
   - `commit` (issue #3786) — present **only** when the install carries a
     `.fetched-commit` record (40-hex upstream commit, written by
     `scripts/fetch-*.sh` from the tarball's pax header); absent otherwise, so
@@ -867,6 +872,12 @@ stability statement, concrete precedents, and drift-detection guidance, and
   hex digest of the deck file actually used, so "clean against *this exact*
   rule set" is a checkable claim. The whole block is `null` when no deck was
   involved (e.g. `lvs` against a pre-extracted netlist).
+  - `path` (issue #3785, optional, additive) — the `{path, scope}` envelope
+    (`env_provenance.repo_relative_path`) of the resolved deck file, emitted
+    only by `klt sta` and `klt place-and-route` (whose Liberty is a resolved
+    file). An out-of-repo file is `{"path": null, "scope": "external"}`; an
+    absolute host path is never emitted. `content_hash` stays authoritative;
+    no `schema_version` bump, and reports lacking it still verify.
   - `options` / `options_explicit` / `options_hash` (issues #595, #2394) —
     the deck-option flavour selection a run resolved, present together
     **whenever the deck declares at least one caller-selectable option**,

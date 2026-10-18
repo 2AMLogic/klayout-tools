@@ -1905,7 +1905,7 @@ live re-measurement above.
 | --- | --- | --- |
 | `schema` | string | Request contract identifier + major version. Not validated — user-authored input, never emitted by this tool. |
 | `engine` | string | `"openroad"` (default; only value implemented). |
-| `netlist` | string | The gate-level netlist path — typically `klt synthesize`'s own `netlist_path` output. Required. Resolved relative to the request file's own directory. |
+| `netlist` | string | The gate-level netlist path — typically `klt synthesize`'s own `netlist_path` output. Required. Resolved relative to the request file's own directory. **Scripted flow:** set `run_id` (e.g. `"gcd-v1"`) in the `klt synthesize` request, then point `netlist` at `.klt/synthesize/<run_id>/<top>_synth.v` (e.g. `.klt/synthesize/gcd-v1/gcd_synth.v`) without waiting for the synthesize response — see [`synthesize.md`](synthesize.md#artifacts-written-to-kltsynthesizerun_id). There is no "latest" alias, and a `run_id` whose directory already exists is an error, so a re-run needs a fresh ID. |
 | `hdl_toplevel` | string | The design's top module name. Required. |
 | `pdk.cell_library` | string | Standard-cell library name. Required. |
 | `pdk.corner` | string \| omitted | Liberty (device) corner selector; defaults to the nominal corner when omitted. This single deck is the **only** liberty the `place`/`cts`/`route` stages' `repair_design`/`repair_timing`/`repair_timing -hold`/`repair_antennas` passes see; the other corners in the post-route sweep (`pdk.sweep_corners`) are analysed afterwards and never feed back into repair. To aim repair at a low-voltage deck, name it here. A tight `constraints.max_transition_ns`/`.max_capacitance_pf` is one absolute value for every corner and, at a slow corner, can grow the design sharply without meeting it (see `docs/design/place-and-route-improvements-survey.md` section 3.7); check `corners[]` and the `..._vs_library` counts afterwards. |
@@ -2162,11 +2162,16 @@ be within the target `--deck`'s own label-layer coverage (cross-check with
     "klt_version": "0.1.0",
     "klayout_version": "0.30.10",
     "pdk": { "name": "sky130A", "source": "PDK_ROOT environment variable", "version": "<stamp>" },
-    "deck": { "name": "sky130_fd_sc_hd__tt_025C_1v80", "content_hash": "sha256:<hex>" },
+    "deck": { "name": "sky130_fd_sc_hd__tt_025C_1v80", "content_hash": "sha256:<hex>", "path": { "path": null, "scope": "external" } },
     "input": { "content_hash": "sha256:<hex>", "role": "netlist" }
   }
 }
 ```
+
+**Liberty location (issue #3785).** `provenance.deck.path` is the
+`{path, scope}` envelope for the resolved Liberty file `deck.content_hash`
+pins (`{"path": null, "scope": "external"}` for an out-of-repo file, never an
+absolute host path). Additive; `content_hash` remains authoritative.
 
 **Path field shape (issue #2073).** `def_path`/`unrouted_def_path`/
 `gds_path`/`verilog_path` below (and the nested `spef_sta.{spef_path,sdf_path}`)
@@ -2639,6 +2644,38 @@ platform at all:
 row's own `Metal1` rail width/pitch. `platforms/gf180/config.mk`'s
 `PDN_TCL ?= …/pdn_grid_strategy_$(TRACK_OPTION)_6M.cfg` is what selects
 between them per `TRACK_OPTION`.)
+
+**Minimum core size per preset.** The pre-flight fit check ("Minimum core
+width for a PDN grid", issue #2170, above) rejects a core smaller than
+`offset_um + 2 × width_um + spacing_um` for any strap layer, where `spacing_um`
+defaults to `pitch_um / 2 − width_um` snapped down to the tech LEF's
+manufacturing grid. Each strap is measured against the core dimension
+perpendicular to its routing direction (a `VERTICAL` layer against core
+width, a `HORIZONTAL` one against core height), so the largest value per
+dimension governs. The `followpins` rails (`Metal1`/`met1`) are not measured by
+this check.
+
+| `preset` | Strap layer (direction) | Minimum core dimension | Governs |
+| --- | --- | --- | --- |
+| `"gf180mcu_7t_6M"` | `Metal4` (vertical) | 31.92 µm (width) | |
+| | `Metal5` (horizontal) | 94.08 µm (height) | height ≥ 94.08 µm |
+| `"gf180mcu_9t_6M"` | `Metal4` (vertical) | 31.92 µm (width) | |
+| | `Metal5` (horizontal) | 94.08 µm (height) | height ≥ 94.08 µm |
+| `"sg13g2"` | `TopMetal1` (vertical) | 22.0 µm (width) | |
+| | `TopMetal2` (horizontal) | 22.0 µm (height) | width and height ≥ 22.0 µm |
+| `"sky130hd"` | `met4` (vertical) | 28.74 µm (width) | |
+| | `met5` (horizontal) | 28.8 µm (height) | width ≥ 28.74 µm, height ≥ 28.8 µm |
+
+The `Metal5` row matches the `PDN-0185` example above (94.08 µm). A small
+block should choose `floorplan.method: "explicit"` with a `core_area_um`
+at least this large, rather than `"utilization"`, whose derived core can fall
+below it and is then rejected up front. These values were produced by calling
+`strap_min_core_um` over `_PDN_PRESETS` (manufacturing grid 0.005 µm for
+`sky130hd` and both `gf180mcu_*` presets, read from the installed tech LEFs;
+`sg13g2` pins an explicit 4.0 µm `spacing_um`, so its value does not depend on
+the grid). Layer directions for `sky130hd` and `gf180mcu_*` were read from
+the tech LEFs; `sg13g2`'s from this document's `PDN_VERTICAL_LAYER
+TopMetal1` transcription, `TopMetal2` being its horizontal partner.
 
 **One number in the `"sg13g2"` row is derived, not cited.** Every other
 value in the table above appears literally in the file its row names. The

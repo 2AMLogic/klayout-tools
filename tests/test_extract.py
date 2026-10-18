@@ -503,6 +503,14 @@ def test_layout_with_no_devices_succeeds_with_zero_count(tmp_path):
         "sky130_fd_pr__model__cap_mim",
         "sky130_fd_pr__model__cap_mim_m4",
         "resistor",
+        "diode_pw2nd_05v5",
+        "diode_pw2nd_05v5_lvt",
+        "diode_pw2nd_05v5_nvt",
+        "diode_pw2nd_11v0",
+        "diode_pd2nw_05v5",
+        "diode_pd2nw_05v5_lvt",
+        "diode_pd2nw_05v5_hvt",
+        "diode_pd2nw_11v0",
     ]
 
 
@@ -599,6 +607,14 @@ def test_synthetic_inverter_extracts_two_devices(tmp_path):
         "sky130_fd_pr__model__cap_mim",
         "sky130_fd_pr__model__cap_mim_m4",
         "resistor",
+        "diode_pw2nd_05v5",
+        "diode_pw2nd_05v5_lvt",
+        "diode_pw2nd_05v5_nvt",
+        "diode_pw2nd_11v0",
+        "diode_pd2nw_05v5",
+        "diode_pd2nw_05v5_lvt",
+        "diode_pd2nw_05v5_hvt",
+        "diode_pd2nw_11v0",
     ]
     assert report["pdk"] is None
     assert report["warnings"] == []
@@ -3586,6 +3602,14 @@ def test_sky130_synthetic_bjt_extracts_one_pnp_device(tmp_path):
         "sky130_fd_pr__model__cap_mim",
         "sky130_fd_pr__model__cap_mim_m4",
         "resistor",
+        "diode_pw2nd_05v5",
+        "diode_pw2nd_05v5_lvt",
+        "diode_pw2nd_05v5_nvt",
+        "diode_pw2nd_11v0",
+        "diode_pd2nw_05v5",
+        "diode_pd2nw_05v5_lvt",
+        "diode_pd2nw_05v5_hvt",
+        "diode_pd2nw_11v0",
     ]
 
     (device,) = report["devices"]
@@ -4577,7 +4601,16 @@ def test_diodes_field_defaults_empty_and_is_a_no_op():
     )
     assert deck.diodes == ()
     assert deck.device_classes == ("nfet", "pfet")
-    assert get_extraction_deck("sky130").diodes == ()
+    assert {d.name for d in get_extraction_deck("sky130").diodes} == {
+        "diode_pw2nd_05v5",
+        "diode_pw2nd_05v5_lvt",
+        "diode_pw2nd_05v5_nvt",
+        "diode_pw2nd_11v0",
+        "diode_pd2nw_05v5",
+        "diode_pd2nw_05v5_lvt",
+        "diode_pd2nw_05v5_hvt",
+        "diode_pd2nw_11v0",
+    }
 
 
 def test_diode_with_no_drawn_terminal_is_a_deck_authoring_error(tmp_path):
@@ -6739,6 +6772,14 @@ def test_cli_missing_deck_flag_is_a_clean_error(tmp_path, capsys):
                 "sky130_fd_pr__model__cap_mim",
                 "sky130_fd_pr__model__cap_mim_m4",
                 "resistor",
+                "diode_pw2nd_05v5",
+                "diode_pw2nd_05v5_lvt",
+                "diode_pw2nd_05v5_nvt",
+                "diode_pw2nd_11v0",
+                "diode_pd2nw_05v5",
+                "diode_pd2nw_05v5_lvt",
+                "diode_pd2nw_05v5_hvt",
+                "diode_pd2nw_11v0",
             ),
         ),
         # gf180mcu declares one bipolar entry, generic `bjt` (issue #223 --
@@ -9849,6 +9890,14 @@ def test_sky130_inv_1_spot_check(tmp_path):
         "sky130_fd_pr__model__cap_mim",
         "sky130_fd_pr__model__cap_mim_m4",
         "resistor",
+        "diode_pw2nd_05v5",
+        "diode_pw2nd_05v5_lvt",
+        "diode_pw2nd_05v5_nvt",
+        "diode_pw2nd_11v0",
+        "diode_pd2nw_05v5",
+        "diode_pd2nw_05v5_lvt",
+        "diode_pd2nw_05v5_hvt",
+        "diode_pd2nw_11v0",
     ]
 
     devices = {d["class"]: d for d in report["devices"]}
@@ -26575,6 +26624,58 @@ def test_remap_def_net_connections_follows_collision_suffix():
     original = {"x": (("u", "p"),)}
     assert _remap_def_net_connections(original, []) is original
     assert _remap_def_net_connections(None, renames) is None
+
+
+def test_remap_def_net_connections_keeps_def_spef_spelling_and_port_pins():
+    """Issue #3900: the renamed key keeps the DEF's own SPEF spelling (so
+    `*D_NET` matches the linked design's net) while comparing equal to the
+    rewritten SPICE name; `port_pins` survives the rename, and a collision
+    still maps each DEF net to its own distinct SPEF name."""
+    from klayout_tools.extract import (
+        _remap_def_net_connections,
+        _rewrite_dotted_net_names,
+    )
+    from klayout_tools.extract_spef import (
+        DefName,
+        DefNetConnections,
+        _def_net_spellings,
+    )
+
+    netlist = kdb.Netlist()
+    circuit = kdb.Circuit()
+    circuit.name = "TOP"
+    netlist.add(circuit)
+    for name in ("a_b", "g[0].u_slice/_00_", "a.b"):
+        circuit.create_net(name)
+    renames = _rewrite_dotted_net_names(netlist)
+    after = {before: new for _c, before, new in renames}
+    assert after["g[0].u_slice/_00_"] == "g[0]_u_slice/_00_"
+
+    def_name = DefName(r"g\[0\].u_slice/_00_")
+    original = DefNetConnections(
+        {
+            def_name: (("u1", "A"),),
+            DefName("a.b"): (("u2", "B"),),
+            DefName("a_b"): (("u3", "C"),),
+            DefName("plain"): (("u4", "D"),),
+        },
+        {"a_b": ("PORT",)},
+    )
+    remapped = _remap_def_net_connections(original, renames)
+    assert "g[0]_u_slice/_00_" in remapped
+    assert remapped.port_pins == {"a_b": ("PORT",)}
+    spellings = _def_net_spellings(remapped, frozenset())
+    assert spellings["g[0]_u_slice/_00_"] == def_name.spef
+    assert "u_slice" in def_name.spef and "[0]_u" not in def_name.spef
+    # Collision: `a.b` -> `a_b_1` spells like the DEF's `a.b`, `a_b` its own.
+    assert spellings["a_b_1"] != spellings["a_b"]
+    assert spellings["a_b_1"] == DefName("a.b").spef
+    # Un-renamed nets are untouched.
+    assert spellings["plain"] == "plain"
+    # A plain-str key (no DEF origin) stays a plain str.
+    plain = _remap_def_net_connections({"a.b": (("u", "p"),)}, renames)
+    assert plain == {"a_b_1": (("u", "p"),)}
+    assert not any(isinstance(key, DefName) for key in plain)
 
 
 def test_spef_missing_conn_warning_names_unmatched_and_duplicate_nets():

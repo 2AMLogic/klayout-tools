@@ -95,6 +95,14 @@ def _parasitic_variant_arg(value: str) -> str:
     return value
 
 
+def _drc_deck_names_str() -> str:
+    """Like :func:`_deck_names_str` but only the curated-DRC decks -- the
+    names ``get_deck`` accepts (issue #3783); ``asap7`` is extraction-only."""
+    from ..decks import drc_deck_names
+
+    return ", ".join(drc_deck_names())
+
+
 def _deck_names_str() -> str:
     """Comma-joined, sorted list of every built-in deck name this build ships.
 
@@ -4514,7 +4522,7 @@ def _add_wave_parser(subparsers: argparse._SubParsersAction) -> None:
 
 def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
     """Register the ``pdk`` verb with nested ``find``/``list``/``env``/
-    ``cells``/``macros``/``corners``/``em-limits``/``pcell-check``/``stackup``
+    ``cells``/``macros``/``decks``/``corners``/``em-limits``/``pcell-check``/``stackup``
     subcommands.
 
     The other verbs are flat; ``pdk`` groups discovery operations under one
@@ -4662,6 +4670,26 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(macros_parser)
     macros_parser.set_defaults(func=pdk_cmd.run_macros)
+
+    decks_parser = pdk_sub.add_parser(
+        "decks",
+        help="list the KLayout DRC decks a PDK ships and the -rd globals each reads",
+        description=(
+            "List the `.lydrc`/`.drc` KLayout DRC deck files under the "
+            "resolved variant's libs.tech/klayout/drc, which one `klt drc "
+            "--pdk` runs (`is_default`), and a best-effort static scan of the "
+            "`-rd` globals each consumes (`required_by_caller`, `default`). "
+            "Use it to pick a sibling deck for `klt drc --deck-file` and the "
+            "`--deck-var` flags it needs."
+        ),
+    )
+    _add_pdk_args(
+        decks_parser,
+        pdk_help="variant to resolve (e.g. sky130A); overrides $PDK",
+        pdk_root_help="explicit install root; overrides $PDK_ROOT and the search order",
+    )
+    _add_format_arg(decks_parser)
+    decks_parser.set_defaults(func=pdk_cmd.run_decks)
 
     corners_parser = pdk_sub.add_parser(
         "corners",
@@ -4944,7 +4972,10 @@ def _add_deck_parser(subparsers: argparse._SubParsersAction) -> None:
     rules_parser.add_argument(
         "--deck",
         required=True,
-        help=f"built-in deck name whose rules to list (e.g. {_deck_names_str()})",
+        help=(
+            "built-in curated-DRC deck name whose rules to list "
+            f"(e.g. {_drc_deck_names_str()})"
+        ),
     )
     rules_parser.add_argument(
         "--rule",
@@ -5606,7 +5637,7 @@ def _add_layout_metrics_parser(subparsers: argparse._SubParsersAction) -> None:
         default=None,
         help=(
             "DRC deck to run for the drc.violation_count field (currently: "
-            f"{_deck_names_str()}). Omit to skip DRC entirely."
+            f"{_drc_deck_names_str()}). Omit to skip DRC entirely."
         ),
     )
     layout_metrics_parser.add_argument(
@@ -5683,8 +5714,11 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
         "--deck",
         default=None,
         help=(
-            f"DRC deck to run (currently: {_deck_names_str()}). Required for "
-            "--engine curated (the default); ignored for --engine klayout. "
+            f"DRC deck to run (currently: {_drc_deck_names_str()}). Required "
+            "for --engine curated (the default); ignored for --engine "
+            "klayout. ASAP7 DRC is a KLayout script, not a curated deck: "
+            "run it with --engine klayout --deck-file "
+            "src/klayout_tools/decks/asap7.drc (docs/cli/drc.md, 'ASAP7 deck'). "
             "Not validated by argparse -- an unknown deck name exits 1 with "
             "a clean error, per docs/cli/drc.md's exit-code contract, "
             "rather than argparse's usage-error exit 2."
@@ -5695,7 +5729,9 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
         default=None,
         help=(
             "top cell to check when the stream has more than one; omit to "
-            "check every top cell. Not supported yet for --engine klayout."
+            "check every top cell. With --engine klayout, a stream with "
+            "several top cells requires --top (the deck runs against that "
+            "cell's subtree only)."
         ),
     )
     drc_parser.add_argument(
