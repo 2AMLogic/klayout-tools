@@ -275,6 +275,16 @@ def _print_rules_text(report: dict) -> None:
         if rule["scope"]:
             print(f"  scope: {rule['scope']}")
         print(f"  provenance: {_provenance_text(rule['provenance'])}")
+    _print_unmodeled(report["unmodeled_rules"], indent="")
+
+
+def _print_unmodeled(unmodeled: list, indent: str) -> None:
+    if unmodeled:
+        print()
+        print(
+            f"{indent}NOT ENFORCED by this deck: {len(unmodeled)} rule(s) -- "
+            f"{', '.join(unmodeled)}"
+        )
 
 
 def _provenance_text(provenance: dict | None) -> str:
@@ -298,6 +308,12 @@ def _print_info_text(report: dict) -> None:
         print(f"  extraction deck content_hash: {entry['content_hash']}")
         print(f"  device_classes: {', '.join(entry['device_classes'])}")
         _print_info_artifact(entry, indent="  ")
+        unmodeled = entry.get("unmodeled_rules") or []
+        if unmodeled:
+            print(
+                f"  NOT ENFORCED by this deck: {len(unmodeled)} rule(s) -- "
+                f"{', '.join(unmodeled)}"
+            )
         drc_deck = entry.get("drc_deck")
         if drc_deck is not None:
             print(f"  drc deck content_hash: {drc_deck['content_hash']}")
