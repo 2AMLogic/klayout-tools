@@ -116,6 +116,16 @@ def check_pin_constraints(
                     )
 
 
+def check_io_pin_constraints(
+    io_spec: dict[str, Any] | None, netlist_path: str, hdl_toplevel: str
+) -> None:
+    """:func:`check_pin_constraints` for a validated ``request.io`` (or none)."""
+    if io_spec and io_spec.get("pin_constraints"):
+        check_pin_constraints(
+            io_spec["pin_constraints"], netlist_top_ports(netlist_path, hdl_toplevel)
+        )
+
+
 def pin_constraint_lines(constraints: list[dict[str, Any]]) -> list[str]:
     """``set_io_pin_constraint`` Tcl, one command per entry; ``[]`` for none."""
     lines: list[str] = []

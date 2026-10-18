@@ -669,8 +669,7 @@ from .place_and_route_gds_merge import _merge_def_to_gds as _merge_def_to_gds
 # power audit below.
 from .place_and_route_pdn_fit import check_request as check_pdn_core_fit
 from .place_and_route_pins import (
-    check_pin_constraints,
-    netlist_top_ports,
+    check_io_pin_constraints,
     pin_constraint_lines,
     read_def_pins,
 )
@@ -1997,12 +1996,9 @@ def _run_single_corner(
 
     floorplan = _validate_floorplan(request["floorplan"])
     io_spec = _validate_io(request.get("io"), cell_library)
-    if io_spec is not None and io_spec.get("pin_constraints"):
-        # Issue #3885: a pattern naming no real port is an error, never a
-        # silent no-op.
-        check_pin_constraints(
-            io_spec["pin_constraints"], netlist_top_ports(netlist_path, hdl_toplevel)
-        )
+    # Issue #3885: a pattern naming no real port is an error, never a silent
+    # no-op.
+    check_io_pin_constraints(io_spec, netlist_path, hdl_toplevel)
     macros = _validate_macros(request.get("macros"), request_dir, netlist_path)
     power = _validate_power(request.get("power"), cell_library)
     (

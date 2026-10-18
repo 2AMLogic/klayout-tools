@@ -599,56 +599,57 @@ def _validate_pin_constraints(raw: Any) -> list[dict[str, Any]]:
         return []
     if not isinstance(raw, list):
         raise PlaceAndRouteError("request.io.pin_constraints must be an array")
-    out: list[dict[str, Any]] = []
-    for index, entry in enumerate(raw):
-        where = f"request.io.pin_constraints[{index}]"
-        if not isinstance(entry, dict):
-            raise PlaceAndRouteError(f"{where} must be a JSON object")
-        unknown = sorted(set(entry) - {"pins", "edge", "range_um", "ordered"})
-        if unknown:
-            raise PlaceAndRouteError(
-                f"{where} has unknown key(s): {', '.join(unknown)}"
-            )
-        pins = entry.get("pins")
-        if not (
-            isinstance(pins, list)
-            and pins
-            and all(isinstance(p, str) and p.strip() for p in pins)
-        ):
-            raise PlaceAndRouteError(
-                f"{where}.pins must be a non-empty array of strings"
-            )
-        edge = entry.get("edge")
-        if edge not in _PIN_EDGES:
-            raise PlaceAndRouteError(
-                f"{where}.edge must be one of: {', '.join(_PIN_EDGES)}"
-            )
-        item: dict[str, Any] = {"pins": list(pins), "edge": edge}
-        span = entry.get("range_um")
-        if span is not None:
-            if not (
-                isinstance(span, list)
-                and len(span) == 2
-                and all(
-                    isinstance(v, (int, float))
-                    and not isinstance(v, bool)
-                    and math.isfinite(v)
-                    and v >= 0
-                    for v in span
-                )
-                and span[0] < span[1]
-            ):
-                raise PlaceAndRouteError(
-                    f"{where}.range_um must be [lo, hi] with 0 <= lo < hi"
-                )
-            item["range_um"] = [span[0], span[1]]
-        ordered = entry.get("ordered", False)
-        if not isinstance(ordered, bool):
-            raise PlaceAndRouteError(f"{where}.ordered must be a boolean")
-        if ordered:
-            item["ordered"] = True
-        out.append(item)
-    return out
+    return [
+        _validate_pin_constraint(entry, f"request.io.pin_constraints[{index}]")
+        for index, entry in enumerate(raw)
+    ]
+
+
+def _validate_pin_constraint(entry: Any, where: str) -> dict[str, Any]:
+    if not isinstance(entry, dict):
+        raise PlaceAndRouteError(f"{where} must be a JSON object")
+    unknown = sorted(set(entry) - {"pins", "edge", "range_um", "ordered"})
+    if unknown:
+        raise PlaceAndRouteError(f"{where} has unknown key(s): {', '.join(unknown)}")
+    pins = entry.get("pins")
+    if not (
+        isinstance(pins, list)
+        and pins
+        and all(isinstance(p, str) and p.strip() for p in pins)
+    ):
+        raise PlaceAndRouteError(f"{where}.pins must be a non-empty array of strings")
+    edge = entry.get("edge")
+    if edge not in _PIN_EDGES:
+        raise PlaceAndRouteError(
+            f"{where}.edge must be one of: {', '.join(_PIN_EDGES)}"
+        )
+    item: dict[str, Any] = {"pins": list(pins), "edge": edge}
+    span = entry.get("range_um")
+    if span is not None:
+        item["range_um"] = _validate_pin_range(span, where)
+    ordered = entry.get("ordered", False)
+    if not isinstance(ordered, bool):
+        raise PlaceAndRouteError(f"{where}.ordered must be a boolean")
+    if ordered:
+        item["ordered"] = True
+    return item
+
+
+def _validate_pin_range(span: Any, where: str) -> list[Any]:
+    if not (
+        isinstance(span, list)
+        and len(span) == 2
+        and all(
+            isinstance(v, (int, float))
+            and not isinstance(v, bool)
+            and math.isfinite(v)
+            and v >= 0
+            for v in span
+        )
+        and span[0] < span[1]
+    ):
+        raise PlaceAndRouteError(f"{where}.range_um must be [lo, hi] with 0 <= lo < hi")
+    return [span[0], span[1]]
 
 
 def _resolve_pdn_preset(
