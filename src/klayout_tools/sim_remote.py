@@ -569,14 +569,17 @@ def _points_to_push(
     A non-default ``monte_carlo.seed_scope`` (issue #2899) is resolved
     client-side: a runner older than the field would silently drop it and
     re-derive ``per_corner`` seeds, so the already-derived seeds are shipped
-    instead (the same wire a fleet shard uses). The default forwards the
-    request unchanged.
+    instead (the same wire a fleet shard uses). A declared
+    ``monte_carlo.mismatch_scale`` (issue #3942) is resolved the same way, so
+    an older runner cannot silently run an unscaled sweep. The default
+    forwards the request unchanged.
     """
     if explicit_points is not None:
         return explicit_points
     mc_spec = request.get("monte_carlo")
-    if isinstance(mc_spec, dict) and mc_spec.get("seed_scope", "per_corner") != (
-        "per_corner"
+    if isinstance(mc_spec, dict) and (
+        mc_spec.get("seed_scope", "per_corner") != "per_corner"
+        or "mismatch_scale" in mc_spec
     ):
         return corner_points
     return None
