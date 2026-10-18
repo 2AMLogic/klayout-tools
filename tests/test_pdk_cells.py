@@ -931,6 +931,64 @@ def test_resolve_liberty_three_verb_wrappers_agree_and_raise_their_own_error(
         )
 
 
+def test_list_lib_corners_strips_single_underscore_prefix_for_ihp(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "ihp-sg13g2", assets=("libs_ref",))
+    _make_ihp_stdcell_library(variant_dir, "sg13g2_stdcell", with_spice=False)
+    pdk_info = pdk.find_pdk(root=str(root))
+
+    names = [c["name"] for c in pdk_cells.list_lib_corners("sg13g2_stdcell", pdk_info)]
+
+    assert names == ["typ_1p20V_25C"]
+
+
+def test_list_cell_libraries_reports_shipped_corners(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    _make_cell_library(
+        variant_dir,
+        "sky130_fd_sc_hd",
+        corners=(
+            ("tt_025C_1v80", 1.0, 25.0, 1.8),
+            ("ss_100C_1v60", 1.0, 100.0, 1.6),
+        ),
+    )
+    ihp_dir = _make_install(root, "ihp-sg13g2", assets=("libs_ref",))
+    _make_ihp_stdcell_library(ihp_dir, "sg13g2_stdcell", with_spice=False)
+
+    sky = pdk_cells.list_cell_libraries(variant="sky130A", root=str(root))
+    ihp = pdk_cells.list_cell_libraries(variant="ihp-sg13g2", root=str(root))
+
+    assert sky["libraries"][0]["corners"] == ["ss_100C_1v60", "tt_025C_1v80"]
+    assert ihp["libraries"][0]["corners"] == ["typ_1p20V_25C"]
+
+
+def test_resolve_liberty_not_found_lists_available_corners(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "ihp-sg13g2", assets=("libs_ref",))
+    _make_ihp_stdcell_library(variant_dir, "sg13g2_stdcell", with_spice=False)
+
+    with pytest.raises(ValueError) as excinfo:
+        pdk_cells.resolve_liberty_for_cell_library(
+            "sg13g2_stdcell", "bogus", ValueError, root=str(root)
+        )
+
+    message = str(excinfo.value)
+    assert "available corners: typ_1p20V_25C" in message
+    assert "sg13g2_stdcell__bogus" not in message
+
+
+def test_resolve_liberty_not_found_without_lib_dir_says_none_found(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    (variant_dir / "libs.ref" / "sky130_fd_sc_hd").mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="no liberty corners found"):
+        pdk_cells.resolve_liberty_for_cell_library(
+            "sky130_fd_sc_hd", "tt_025C_1v80", ValueError, root=str(root)
+        )
+
+
 # --------------------------------------------------------------------------- #
 # resolve_liberty_for_cell_library -- not-found error hints at other variants
 # (issue #3801).

@@ -27,7 +27,14 @@ import os
 import re
 from typing import Any
 
-from .pdk import PdkNotFoundError, _read_text, find_pdk, list_pdks
+from .pdk import (
+    PdkNotFoundError,
+    _read_text,
+    find_pdk,
+    list_pdks,
+    variant_dir_of,
+)
+from .pdk_descriptor import DescriptorError, has_descriptor, load_descriptor
 
 #: Marker substrings identifying a `libs_ref` entry as a "foundry digital,
 #: standard cell" library, as opposed to primitive-device libraries
@@ -191,6 +198,7 @@ def list_cell_libraries(
                     "nominal_corner": str | None,
                     "supplies_v": [float, ...],
                     "voltage_class": "core" | "io" | None,
+                    "corners": [str, ...],   # shipped liberty corner names
                     # "compatible": bool,   -- present only when supply= is given
                 },
                 ...
@@ -300,6 +308,10 @@ def resolve_liberty_for_cell_library(
     except PdkNotFoundError as exc:
         raise error_cls(str(exc)) from exc
 
+    mapped = _descriptor_liberty(info, cell_library, requested_corner, error_cls)
+    if mapped is not None:
+        return mapped[0], mapped[1], info
+
     libs_ref = info["assets"]["libs_ref"]
     if libs_ref is None:
         raise error_cls(
@@ -347,12 +359,53 @@ def resolve_liberty_for_cell_library(
         if os.path.isfile(single_underscore_path):
             liberty_path = single_underscore_path
     if not os.path.isfile(liberty_path):
+        shipped = [c["name"] for c in list_lib_corners(cell_library, info)]
+        available = (
+            f"available corners: {', '.join(shipped)}"
+            if shipped
+            else "no liberty corners found in its lib/ directory"
+        )
         raise error_cls(
             f"liberty not found for deck: no '{corner}' corner for "
             f"'{cell_library}' under resolved PDK install '{info['variant']}' "
-            f"(expected '{liberty_path}')"
+            f"({available})"
         )
     return liberty_path, corner, info
+
+
+def _descriptor_liberty(
+    info: dict[str, Any],
+    cell_library: str,
+    requested_corner: str | None,
+    error_cls: type[Exception],
+) -> tuple[str, str] | None:
+    """Explicit `klt-pdk.json` `liberty` mapping for `cell_library` (issue
+    #3782), or `None` to fall through to the open_pdks naming convention."""
+    variant_dir = variant_dir_of(info)
+    if variant_dir is None or not has_descriptor(variant_dir):
+        return None
+    try:
+        corners = load_descriptor(variant_dir)["liberty"].get(cell_library)
+    except DescriptorError as exc:
+        raise error_cls(str(exc)) from exc
+    if corners is None:
+        return None
+    corner = requested_corner
+    if corner is None:
+        if len(corners) != 1:
+            raise error_cls(
+                f"liberty not found for deck: descriptor maps {len(corners)} "
+                f"corners for '{cell_library}' ({', '.join(sorted(corners))}) "
+                "-- pass request.pdk.corner explicitly"
+            )
+        corner = next(iter(corners))
+    if corner not in corners:
+        raise error_cls(
+            f"liberty not found for deck: no '{corner}' corner mapped for "
+            f"'{cell_library}' in the PDK descriptor "
+            f"(mapped: {', '.join(sorted(corners))})"
+        )
+    return corners[corner], corner
 
 
 def _scan_cell_libraries(libs_ref: str) -> list[dict[str, Any]]:
@@ -369,6 +422,10 @@ def _scan_cell_libraries(libs_ref: str) -> list[dict[str, Any]]:
             continue
         nominal = _nominal_supply(lib_dir)
         flavors, flavors_status = _device_flavors(name, lib_dir)
+        corners = sorted(
+            c["name"]
+            for c in list_lib_corners(name, {"assets": {"libs_ref": libs_ref}})
+        )
         libraries.append(
             {
                 "name": name,
@@ -378,6 +435,7 @@ def _scan_cell_libraries(libs_ref: str) -> list[dict[str, Any]]:
                 "nominal_corner": nominal["corner"],
                 "supplies_v": nominal["supplies_v"],
                 "voltage_class": _voltage_class(nominal["voltage"]),
+                "corners": corners,
             }
         )
     return libraries
@@ -569,7 +627,9 @@ def list_lib_corners(
     - ``name`` -- a unique, Tcl-safe corner tag for OpenSTA's own
       ``define_corners``/``read_liberty -corner`` pair, derived from the
       ``.lib`` file's own **filename** (stripping the leading
-      ``f"{cell_library}__"`` prefix and the ``.lib`` suffix) -- deliberately
+      ``f"{cell_library}__"`` prefix -- or, failing that, IHP's single-underscore
+      ``f"{cell_library}_"`` -- and the ``.lib`` suffix, so the name is the
+      one :func:`resolve_liberty_for_cell_library` accepts) -- deliberately
       **never** the file's own ``default_operating_conditions`` Liberty
       attribute :func:`_parse_lib_corner` reads for ``nominal_corner``: that
       attribute is not guaranteed unique across a library's own shipped
@@ -593,6 +653,7 @@ def list_lib_corners(
         return []
 
     prefix = f"{cell_library}__"
+    single_prefix = f"{cell_library}_"
     corners: list[dict[str, str]] = []
     for filename in sorted(os.listdir(lib_views_dir)):
         if not filename.endswith(".lib"):
@@ -600,7 +661,11 @@ def list_lib_corners(
         stem = filename[: -len(".lib")]
         if stem.endswith(_CCSNOISE_LIB_SUFFIX):
             continue
-        name = stem[len(prefix) :] if stem.startswith(prefix) else stem
+        name = stem
+        for candidate in (prefix, single_prefix):
+            if stem.startswith(candidate):
+                name = stem[len(candidate) :]
+                break
         corners.append({"name": name, "path": os.path.join(lib_views_dir, filename)})
     return corners
 
