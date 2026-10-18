@@ -158,6 +158,7 @@ from ._paths import (
     _validate_via_entries,
 )
 from ._provenance import INPUT_ROLE_LAYOUT, _content_hash, build_provenance
+from ._unionfind import UnionFind
 from .coverage import build_check_coverage, coverage_rollup, rollup_status, work_id
 from .ir_solver import solve_ir_drop, worst_deviation
 from .resistor_mesh import _decompose_manhattan_polygon, _rails_under_via
@@ -901,21 +902,11 @@ def _connected_component_count(
     is silent and one-directional toward "looks fine", because orphaned nodes
     drop out of ``worst_case_droop_mv`` and carry no current for the EM
     verdict."""
-    parent = {node["id"]: node["id"] for node in nodes}
-
-    def find(node_id: str) -> str:
-        root = node_id
-        while parent[root] != root:
-            root = parent[root]
-        while parent[node_id] != root:
-            parent[node_id], node_id = root, parent[node_id]
-        return root
-
-    components = len(parent)
+    node_ids = {node["id"] for node in nodes}
+    groups = UnionFind(node_ids)
+    components = len(node_ids)
     for edge in edges:
-        a, b = find(edge["from"]), find(edge["to"])
-        if a != b:
-            parent[a] = b
+        if groups.union(edge["from"], edge["to"]):
             components -= 1
     return components
 
