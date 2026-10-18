@@ -235,6 +235,19 @@ class DefName(str):
         return obj
 
 
+def _renamed_def_name(name: str, original: str) -> str:
+    """``name`` as a :class:`DefName` that keeps ``original``'s SPEF spelling
+    (issue #3900). The extractor's dotted-net rename changes the net's
+    SPICE/JSON name, but the SPEF a linked design reads must still spell the
+    net the way the DEF does. A plain-``str`` ``original`` has no DEF spelling
+    to carry, so ``name`` is returned unchanged."""
+    if not isinstance(original, DefName):
+        return name
+    obj = str.__new__(DefName, name)
+    obj.spef = original.spef
+    return obj
+
+
 def _def_name_to_spef(raw: str) -> str:
     """``raw`` (a DEF identifier as spelled in the file) rendered as a SPEF
     identifier: identical to ``_spef_name(_unescape_def_name(raw))`` except a

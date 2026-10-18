@@ -561,6 +561,45 @@ _BEOL = "ihp-sg13g2/libs.tech/klayout/tech/drc/rule_decks/beol"
 NOMINAL_DBU_UM = 0.001
 
 DECK: list[DrcRule] = [
+    # --- NWell (issue #3571), rule_decks/feol/5_1_nwell.drc + the maximal
+    # deck. Before this the deck had no NWell rule at all, so `31/0` was
+    # reported under `coverage.layers_in_stream_without_rules` and a
+    # multi-well layout got a vacuous `clean`. Only the two geometry-only
+    # rules are transcribed; NW.b1 (different-net spacing) is net-aware and
+    # is surfaced via `UNCHECKED_RULES` below instead. Values are
+    # sg13g2_tech_default.json's NW_a / NW_b. ----------------------------
+    DrcRule(
+        id="nwell.width.1",
+        description="minimum NWell width",
+        layer=(31, 0),  # NWell.drawing
+        check="width",
+        threshold_dbu=620,  # 0.62 um
+        # sg13g2_maximal.drc rule "NW.a": NWell.ext_width(0.62.um) ->
+        # "Min. NWell width = 0.62" (drc_rules['NW_a'] == 0.62). NW.a is NOT
+        # in the modular 5_1_nwell.drc -- only the maximal deck implements it.
+        scope="NW",
+        provenance=_sg13g2_drc_provenance(
+            "ihp-sg13g2/libs.tech/klayout/tech/drc/rule_decks/sg13g2_maximal.drc",
+            "NW.a",
+        ),
+    ),
+    DrcRule(
+        id="nwell.space.1",
+        description="minimum NWell space or notch",
+        layer=(31, 0),  # NWell.drawing
+        check="space",
+        threshold_dbu=620,  # 0.62 um
+        # 5_1_nwell.drc rule "NW.b": "Min. NWell space or notch (same net).
+        # NWell regions separated by less than this value will be merged"
+        # (drc_rules['NW_b'] == 0.62). Approximation: the foundry rule is
+        # same-net and *merges* closer same-net wells; this geometric check
+        # has no net identity, so it flags any two wells closer than 0.62 um
+        # (stricter than the foundry deck for same-net pairs; for
+        # different-net pairs it is implied by the stricter NW.b1, 1.80 um,
+        # so it adds no false positive there).
+        scope="NW",
+        provenance=_sg13g2_drc_provenance(f"{_FEOL}/5_1_nwell.drc", "NW.b"),
+    ),
     # --- 5.5 Activ (feol/5_5_activ.drc) -------------------------------
     DrcRule(
         id="activ.width.1",
@@ -1414,6 +1453,21 @@ DECK: list[DrcRule] = [
         provenance=_sg13g2_drc_provenance(f"{_BEOL}/6_11_mim.drc", "MIM.d"),
     ),
 ]
+
+# Foundry rules this curated deck knows about but cannot evaluate (issue
+# #3571, mirroring #3012): `{rule id: (layer, description)}`. `drc.py`
+# reports each one under `coverage.unchecked_rules` whenever its layer is
+# present in the stream, so a `clean` verdict cannot be read as "this rule
+# was checked".
+UNCHECKED_RULES: dict[str, tuple[tuple[int, int], str]] = {
+    "NW.b1": (
+        (31, 0),
+        "NW.b1 (min. PWell width between NWell regions of different nets, "
+        "1.80 um) is net-aware and this engine has no net-aware spacing "
+        "check; wells on different nets closer than 1.80 um are not "
+        "flagged. Only the geometric nwell.space.1 (0.62 um) ran.",
+    ),
+}
 
 LAYER_NAMES: dict[tuple[int, int], str] = {
     (1, 0): "Activ.drawing",
