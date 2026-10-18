@@ -326,6 +326,12 @@ a `deck: {name, content_hash}` block; without it the output is byte-identical.
 No `schema_version` bump on either command. See `docs/cli/deck.md` and
 `docs/cli/layers.md`.
 
+Issue #3815 likewise adds, with no `schema_version` bump, `klt drc`'s
+`coverage.marker_blind_layers_in_stream` and `klt deck rules`' top-level
+`marker_blind_layers`: area-marker layers (sky130 `81/2`) the curated deck does
+not model rule-switching for. Informational only; `status` and the exit code
+are unchanged. See `docs/cli/drc.md` and `docs/cli/deck.md`.
+
 Issue #2952's `klt lvs` category `reference.unresolved_subckt_call` is
 likewise additive (no `schema_version` bump), but unlike the diagnostic-only
 `pin.declared_short` it **forces** `status: "mismatch"`, so a request whose
@@ -647,7 +653,17 @@ claim the citation's `artifact_binding` gains a `regeneration` object
 (`{generator, regenerated_hash, executed_by_klt: false}`). A mismatched
 claim renders the new `reason` value `stale_artifact`, and a malformed one
 renders the existing `unanchored_evidence`. An envelope that makes no
-claim grades and renders exactly as before. No `schema_version` bump. See
+claim grades and renders exactly as before. No `schema_version` bump.
+
+Issue #3743 adds three additive, optional fields (no `schema_version`
+bump; absent they change nothing): `provenance.regeneration.hash_kind`
+(`"bytes"` default, or `"geometry"` to compare `regenerated_hash` with the
+timestamp-independent layout geometry digest; echoed in the disclosure only
+when `"geometry"`; unknown values are `unanchored_evidence`); `local_only`
+(boolean) on an attestation-inventory command, also echoed on the emitted
+`attestation.checks[]` entry; and `skipped_checks[]` in the
+`klt signoff --attest --check` response, listing `local_only` commands that
+were not run. See
 [`docs/cli/signoff.md`](cli/signoff.md)'s "Items 1 and 2: attesting that
 the artifact was regenerated".
 
@@ -1236,11 +1252,12 @@ probing the value's Python type at runtime.
 | Command | Field(s) | `SCHEMA_VERSION` | Originating issue |
 |---|---|---|---|
 | `synthesize` | `netlist_path`, `script_path`, `run_script_path`, `restructuring.restructured_netlist_path`, `arithmetic.candidates[].measured.{netlist_path,script_path}` | 2 | #1844 |
-| `pex` | `layout`, `netlist`, `reference_netlist`, `testbenches[].{request,netlist,schematic_netlist}` | 2 | #1261 (`testbenches[].netlist` additionally #2875) |
+| `pex` | `layout`, `netlist`, `reference_netlist`, `testbenches[].{request,netlist,schematic_netlist}` | 2 | #1261 (`testbenches[].netlist` additionally #2875); additive `measurement.mode: "extract-only"` (`--extract-only`, #3739) carries `reference_netlist: {path: null, scope: "absent"}` and empty `testbenches[]`/`delta[]` |
 | `sim` | `netlist`, `environment.models_lib`, `environment.resume.checkpoint_path` | 3 | #1261 (`models_lib` additionally #1274) |
 | `size` | `models_lib` | 2 | #1274 |
 | `place-and-route`, `sta` | New OpenROAD log fields `engine_logs[]` (P&R), `engine_log` / `corners[].engine_log` (STA): `script_path`, `metrics_path`, `directory`, `stdout_path`, `stderr_path`, `metadata_path` | 1 | #2124 |
 | `characterize` | `cell.netlist`, `cells[].cell.netlist` | 1 | #2502 (`cells[]` #2503) |
+| `place-and-route` | `netlist` — the input netlist `provenance.input.content_hash` pins (additive, no bump) | 1 | #3751 |
 | `sta` | `def_path`, `verilog_path`, `spef_path` (`null` when the request does not use that input) | 2 | #2879 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
 | `sta` | `sdf` / `corners[].sdf` — a written output: the envelope plus `content_hash` (`null` unless `request.sdf: true`; additive, no bump) | 2 | #2886 |
 

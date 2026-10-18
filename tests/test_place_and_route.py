@@ -59,6 +59,7 @@ Four tiers, mirroring `tests/test_synthesize.py`'s own structure:
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import re
@@ -2649,6 +2650,40 @@ def _stub_merge_def_to_gds(monkeypatch) -> list[dict]:
 
     monkeypatch.setattr(place_and_route, "_merge_def_to_gds", fake_merge)
     return calls
+
+
+def _netlist_field_report(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+    return run_place_and_route(request_path)
+
+
+def test_response_names_input_netlist_in_repo(tmp_path, monkeypatch):
+    """Issue #3751: `netlist` is the `{path, scope}` of the file whose bytes
+    `provenance.input.content_hash` digests, so a consumer can re-hash it."""
+    (tmp_path / ".git").mkdir()
+    report = _netlist_field_report(tmp_path, monkeypatch)
+
+    assert report["netlist"] == {"path": "gcd_synth.v", "scope": "repo"}
+    digest = hashlib.sha256((tmp_path / report["netlist"]["path"]).read_bytes())
+    assert (
+        report["provenance"]["input"]["content_hash"] == f"sha256:{digest.hexdigest()}"
+    )
+    assert report["provenance"]["input"]["role"] == "netlist"
+
+
+def test_response_netlist_outside_repo_is_external(tmp_path, monkeypatch):
+    """Issue #3751: a netlist outside the repo never leaks an absolute path."""
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    report = _netlist_field_report(repo, monkeypatch)
+    assert report["netlist"]["scope"] == "repo"
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    report = _netlist_field_report(outside, monkeypatch)
+    assert report["netlist"] == {"path": None, "scope": "external"}
 
 
 def test_stubbed_full_route_success(tmp_path, monkeypatch):

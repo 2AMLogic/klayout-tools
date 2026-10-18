@@ -637,6 +637,7 @@ from ._report_verify import (
     load_committed_report,
     strip_keys,
 )
+from .env_provenance import find_repo_root, repo_relative_path
 from .lef_header import read_lef_header as read_lef_header
 from .pdk_cells import list_lib_corners
 
@@ -2517,6 +2518,12 @@ def _run_single_corner(
         "engine_version": engine_version,
         "engine_logs": engine_logs,
         "hdl_toplevel": hdl_toplevel,
+        # Additive field (issue #3751): the netlist `provenance.input.
+        # content_hash` pins, as the `{path, scope}` envelope (never an
+        # absolute path: an out-of-repo netlist is `scope: "external"`).
+        "netlist": repo_relative_path(
+            netlist_path, repo_root=find_repo_root(request_dir)
+        ),
         "status": "ok",
         "stage_reached": target_stage,
         "seed": seed,

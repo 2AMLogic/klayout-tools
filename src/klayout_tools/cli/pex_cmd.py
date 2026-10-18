@@ -140,6 +140,9 @@ def run(args: argparse.Namespace) -> int:
             # splitting `delta[]` into representation and parasitic parts.
             # `False` when the flag was never given.
             device_only_leg=args.device_only_leg,
+            # `--extract-only` (issue #3739): extract and report, no
+            # measurement leg. `False` when the flag was never given.
+            extract_only=args.extract_only,
         )
     except PexError as exc:
         # Issue #2889: a classified error (today: `schematic_flatten_*`)
@@ -260,6 +263,22 @@ def _device_only_desc(row: dict) -> str:
     )
 
 
+def _print_measurement(measurement: dict) -> None:
+    """The text report's ``measurement:`` line(s): ``--extract-only``
+    (issue #3739) and ``--measure-command`` runs only."""
+    if measurement.get("mode") == "extract-only":
+        print("measurement: extract-only  (nothing measured; no delta rows)")
+    if measurement.get("mode") == "command":
+        print(f"measurement: command  {shlex.join(measurement['command'])}")
+        for side, entry in (measurement.get("sides") or {}).items():
+            print(
+                f"  {side}: {render_path_field(entry['netlist'])}  "
+                f"exit={entry['exit_status']}  "
+                f"corners={entry['corner_count']}  "
+                f"measurements={', '.join(entry['measurement_names'])}"
+            )
+
+
 def _print_text(report: dict) -> None:
     # Issue #1261: `layout`/`netlist`/`reference_netlist` are the
     # `{path, scope}` shape `env_provenance.repo_relative_path` defines --
@@ -310,15 +329,7 @@ def _print_text(report: dict) -> None:
     # a testbench-mode report's `measurement` block carries no information
     # the `testbenches:` section below does not already show.
     measurement = report.get("measurement") or {}
-    if measurement.get("mode") == "command":
-        print(f"measurement: command  {shlex.join(measurement['command'])}")
-        for side, entry in (measurement.get("sides") or {}).items():
-            print(
-                f"  {side}: {render_path_field(entry['netlist'])}  "
-                f"exit={entry['exit_status']}  "
-                f"corners={entry['corner_count']}  "
-                f"measurements={', '.join(entry['measurement_names'])}"
-            )
+    _print_measurement(measurement)
 
     # Additive (issue #1030): only printed when the extracted-side deck was
     # rejected for a schematic/extracted top-level pin-list mismatch.
