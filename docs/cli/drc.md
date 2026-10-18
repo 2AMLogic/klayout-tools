@@ -2249,9 +2249,13 @@ it is installed with the package, next to its declared rule-id list
 
 ```bash
 klt drc layout.gds --engine klayout \
-    --deck-file src/klayout_tools/decks/asap7.drc \
+    --deck-file "$(klt deck path --deck asap7 --format json | jq -r .path)" \
     --expect-rule-categories 263 --format json
 ```
+
+`klt deck path --deck asap7` ([`docs/cli/deck.md`](deck.md)) prints the
+installed script's absolute path, so the invocation works from a wheel /
+`uv tool` install, not only a source checkout.
 
 `asap7` is deliberately not a curated DRC deck, so it is absent from
 `klt drc --help`'s `--deck` list and `klt drc --deck asap7` exits 1 with an

@@ -17,6 +17,7 @@ klt deck resolve --deck <name> --version <X.Y.Z>            [--format text|json]
 klt deck info    [--deck <name>]                             [--format text|json]
 klt deck rules   --deck <name> [--rule <id>]                 [--format text|json]
 klt deck devices --deck <name> [--class <name>]              [--format text|json]
+klt deck path    --deck asap7                                [--format text|json]
 ```
 
 The five are complements: `hash` answers "which deck revision will this
@@ -207,6 +208,34 @@ A hash that predates the table's start, was never released, or a
   }
 }
 ```
+
+## `klt deck path`
+
+Print the absolute path of a deck's **standalone KLayout DRC-DSL script**
+(issue #3789), so an installed `klt` (wheel / `uv tool`) can pass it to
+`klt drc --engine klayout --deck-file` without a source checkout:
+
+```
+klt drc layout.gds --engine klayout \
+    --deck-file "$(klt deck path --deck asap7)"
+```
+
+Text output is the bare path. JSON:
+
+```json
+{
+  "schema_version": 1,
+  "deck": "asap7",
+  "path": "/abs/.../klayout_tools/decks/asap7.drc",
+  "content_hash": "sha256:..."
+}
+```
+
+`content_hash` is the hash of the `.drc` script itself (not the extraction
+module `klt deck hash` / `info` report), so a consumer can pin what it
+passes to `--deck-file`. Only `asap7` ships such a script today; a
+registered Python rule-table deck (e.g. `sky130`) and an unknown name each
+exit 1 with an error.
 
 ## `klt deck info`
 
