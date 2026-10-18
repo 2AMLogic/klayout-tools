@@ -4670,10 +4670,11 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
 
     macros_parser = pdk_sub.add_parser(
         "macros",
-        help="report hard-macro IP libraries (`*_fd_ip_*`) and their views",
+        help="report hard-macro IP libraries (`*_fd_ip_*` or lef+lib) and their views",
         description=(
             "Report, per hard-macro IP library (libs.ref entries named "
-            "`*_fd_ip_*`, e.g. an SRAM/ROM compiler output) under the "
+            "`*_fd_ip_*`, or ones shipping both `lef` and `lib` views such as "
+            "IHP's `sg13g2_sram`; e.g. an SRAM/ROM compiler output) under the "
             "resolved variant: which views it ships (GDS, LEF, Liberty "
             "(`lib`), CDL, SPICE, Verilog). This is the sibling command to "
             "`klt pdk cells`, which deliberately excludes these libraries -- "
