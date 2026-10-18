@@ -18,6 +18,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   documented in `docs/cli/signoff.md` "Binding a set of artifacts"): additive.
   Not in `klt 0.7.0` — a `0.7.0` build grades a `paths`-only envelope
   `unanchored_evidence`; it first ships in the first release after `v0.7.0`.
+
+- **gf180mcu `DF.13_MV` / `DF.14_MV` tap-distance rules declared** (issue
+  #3793): `comp.tap_distance.nwell.mv.1` and `comp.tap_distance.psub.mv.1`
+  (15 um reach, active overlapping `Dualgate`) join the 20 um `.lv.1` pair, so a
+  layout with a 5V/6V active more than 15 um from a tap no longer reports
+  `clean`. Additive: two new rule ids; LV results are unchanged. The
+  `latchup_mk` marker rules remain undeclared.
+
 - **`klt synthesize --restructure` now finds upsizes on libraries that quote
   cell names** (issue #3709): `restructure`'s and `synthesize`'s private
   regex Liberty readers are replaced by `liberty_compare.parse_liberty_text`.

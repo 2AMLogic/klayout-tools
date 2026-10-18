@@ -603,6 +603,24 @@ is unaffected and resolves normally — avoid flattening a `generate` block's
 hierarchy before generating the SDF this option consumes if this limitation
 is hit.
 
+**An `INTERCONNECT` endpoint naming an instance the netlist does not have is
+rejected up front** (issue #3740). Icarus 13.0 aborts `vvp` the same way
+(`ERROR: NULL handle passed to vpi_scan.`, `Assertion 0 failed`, return code
+-6) for any `<instance><DIVIDER><pin>` endpoint whose `<instance>` is not in
+the DUT's scope — on either side of the entry, for scalar or bus ports and
+for both `DIVIDER` characters. The usual producers are the design name used
+as a port prefix (`top/a` instead of a bare `a`) and an SDF generated from a
+different netlist than the one being simulated. `klt` checks the top cell's
+`INTERCONNECT` endpoints against the top module's instance list before
+launching `vvp` and fails with a `FunctionalVerificationError` naming the SDF
+line and endpoint. Supported: top-level ports as bare names, and instance
+pins as `<instance><DIVIDER><pin>` with `<instance>` declared in the top
+module. A bare unknown name (no divider) is not an abort — Icarus reports it
+as `Could not find handles for both ports!`, which the diagnostic gate
+already surfaces. The check is skipped when the top module's instance list
+cannot be derived (ANSI header, RTL top) and does not inspect hierarchy
+below a top-level instance.
+
 **A zero-delay `INTERCONNECT` onto an `assign`-aliased top-level port bit is
 dropped before annotation, and counted** (issue #2285). A P&R backend drives
 a constant output through a tie cell plus a Verilog `assign` alias rather

@@ -470,6 +470,11 @@ from .extract import (
 #: (``checked_by_well_assertion``, empty unless used). Additive in exactly
 #: the sense every entry above is: a spec that declares no ``well_boxes``
 #: produces byte-identical output except for that new empty list. No bump.
+#: Issue #3750 adds one more optional spec key (``ties[].well_complement_of``,
+#: valid only with ``well_layer: null``): a pure widening that reuses the
+#: ``well_boxes`` grading (``REASON_DEGENERATE_WELL_ASSERTION``,
+#: ``checked_by_well_assertion``) and emits no staleness entry, since it is
+#: derived from the stream. A spec without it is byte-identical. No bump.
 #: Issue #2339 adds two more optional spec keys (``ties[].well_requires``
 #: and ``ties[].well_excludes`` -- the well-side class selectors, see
 #: :func:`_select_well_class`) and one new ``erc_coverage.skipped[].reason``
@@ -573,6 +578,11 @@ REASON_FINDINGS_ONLY = "findings_only"
 #: ``coverage.inapplicable`` reason (issue #2896): the cell has no transistor
 #: gate, so the antenna half has nothing to grade.
 REASON_NO_GATES = "no_gates"
+#: ``erc_coverage.inapplicable[].reason`` (issue #3745) for a ``nets[]`` entry
+#: declared ``extractor_global``: named by the extractor, not label text, so
+#: ``erc.net_connectivity`` cannot resolve it. Additive; leaves
+#: ``erc_status`` untouched like every other ``inapplicable`` entry.
+REASON_EXTRACTOR_GLOBAL_NET = "extractor_global_net"
 
 #: The skip reason for a level that could have been graded had ``--pdk``
 #: named a PDK with an antenna-ratio table (or named one at all).
@@ -897,6 +907,29 @@ def _undeclared_stream_layers(
     return [f"{layer}/{datatype}" for layer, datatype in sorted(undeclared)]
 
 
+def _net_connectivity_work(
+    nets_decl: list[dict[str, Any]],
+) -> tuple[list[str], list[dict[str, str]]]:
+    """Split declared nets into ``erc.net_connectivity`` checked ids and
+    inapplicable entries (issue #3745).
+
+    An `extractor_global` net is never label-resolved, so
+    `erc.net_connectivity` cannot grade it: disclosed as inapplicable
+    (never silent). Like every other inapplicable entry it leaves
+    `erc_status` alone -- it is work this run was told it cannot do, not
+    requested work that failed to run.
+    """
+    checked: list[str] = []
+    inapplicable: list[dict[str, str]] = []
+    for decl in nets_decl:
+        identity = work_id("erc.net_connectivity", decl["name"])
+        if decl["extractor_global"]:
+            inapplicable.append({"id": identity, "reason": REASON_EXTRACTOR_GLOBAL_NET})
+        else:
+            checked.append(identity)
+    return checked, inapplicable
+
+
 def _connectivity_coverage(
     gates: list[dict[str, Any]],
     nets_decl: list[dict[str, Any]],
@@ -1060,7 +1093,9 @@ def _connectivity_coverage(
     checked_by_assertion: list[str] = []
     checked_by_well_assertion: list[str] = []
 
-    checked.extend(work_id("erc.net_connectivity", decl["name"]) for decl in nets_decl)
+    net_checked, net_inapplicable = _net_connectivity_work(nets_decl)
+    checked.extend(net_checked)
+    inapplicable.extend(net_inapplicable)
     if not nets_decl:
         inapplicable.append(
             {"id": work_id("erc.net_connectivity"), "reason": "no_nets_declared"}
@@ -1156,16 +1191,53 @@ _SKY130_ANTENNA_SOURCE_URL = (
     "table-Ia-antenna-rules-s8d.csv"
 )
 
+#: IHP SG13G2 antenna-ratio limit (maximum cumulative metal area / gate area
+#: *without* a protection diode), from IHP-Open-PDK v0.3.0
+#: `ihp-sg13g2/libs.tech/klayout/tech/drc/rule_decks/sg13g2_tech_default.json`
+#: key `Ant_b` (= 200; the runset is `rule_decks/antenna.drc`, which checks
+#: it cumulatively at Metal1..Metal5, TopMetal1 and TopMetal2). Fetched
+#: 2026-10-17 from the local v0.3.0 snapshot.
+#:
+#: Only Ant.b is representable as a `levels[]` verdict. Ant.a (GatPoly over
+#: field oxide), Ant.c (Cont/gate) and Ant.d (cumulative via/gate) are not:
+#: the gate role is never graded and cont/via are `vias[]` roles, not
+#: `stackup` roles (same reason sky130's licon1/mcon/via1 never get a
+#: verdict). Ant.e/Ant.f (the with-diode limits, 20000 and 500) are not used
+#: because `klt erc` does not model protection diodes, so the conservative
+#: "w/o diode" limit applies, as for sky130.
+_SG13G2_ANTENNA_RATIO_MAX_EGAR: dict[str, tuple[float, str]] = {
+    "Metal1": (200.0, "Ant_b"),
+    "Metal2": (200.0, "Ant_b"),
+    "Metal3": (200.0, "Ant_b"),
+    "Metal4": (200.0, "Ant_b"),
+    "Metal5": (200.0, "Ant_b"),
+    "TopMetal1": (200.0, "Ant_b"),
+    "TopMetal2": (200.0, "Ant_b"),
+}
+
+_SG13G2_ANTENNA_SOURCE_URL = (
+    "https://github.com/IHP-GmbH/IHP-Open-PDK/blob/v0.3.0/ihp-sg13g2/"
+    "libs.tech/klayout/tech/drc/rule_decks/sg13g2_tech_default.json"
+)
+
 #: PDK name -> (role name -> (limit, source rule id)) lookup for `--pdk`.
-#: sky130 only, per this repo's "open PDKs, sky130 first" scope (see
-#: CLAUDE.md) -- gf180mcu antenna limits are a candidate follow-on, not
-#: silently dropped.
+#: sky130 and ihp-sg13g2; gf180mcu/sg13cmos5l/asap7 antenna limits are
+#: candidate follow-ons, not silently dropped.
 _ANTENNA_LIMITS_BY_PDK: dict[str, dict[str, tuple[float, str]]] = {
     "sky130": _SKY130_ANTENNA_RATIO_MAX_EGAR,
+    "ihp-sg13g2": _SG13G2_ANTENNA_RATIO_MAX_EGAR,
 }
 
 _ANTENNA_SOURCE_URL_BY_PDK: dict[str, str] = {
     "sky130": _SKY130_ANTENNA_SOURCE_URL,
+    "ihp-sg13g2": _SG13G2_ANTENNA_SOURCE_URL,
+}
+
+#: Tail of `levels[].antenna_ratio_source`, naming which limit of the cited
+#: source was used (always the no-diode one).
+_ANTENNA_SOURCE_NOTE_BY_PDK: dict[str, str] = {
+    "sky130": "'Max EA/A w/o diode' column",
+    "ihp-sg13g2": "IHP-Open-PDK v0.3.0, w/o-diode limit",
 }
 
 
@@ -1647,12 +1719,12 @@ def _accumulated_levels(
             if i == 0 or antenna_limits is None
             else antenna_limits.get(entry["name"])
         )
-        if limit_entry is not None:
+        if limit_entry is not None and pdk is not None:
             limit_value, rule_id = limit_entry
             antenna_ratio_max: float | None = limit_value
             antenna_ratio_source: str | None = (
                 f"{_ANTENNA_SOURCE_URL_BY_PDK[pdk]} rule {rule_id!r}, "
-                "'Max EA/A w/o diode' column"
+                f"{_ANTENNA_SOURCE_NOTE_BY_PDK[pdk]}"
             )
             verdict = "violate" if antenna_ratio > limit_value else "pass"
         else:
@@ -2319,6 +2391,12 @@ def _net_connectivity_findings(
         {role for decl in nets_decl for role in decl["roles"]},
     )
     for decl in nets_decl:
+        if decl["extractor_global"]:
+            # Issue #3745: named by the extractor, not label text -- nothing
+            # to resolve, count or tie; disclosed in `erc_coverage`.
+            matches[decl["name"]] = []
+            clusters_by_name[decl["name"]] = set()
+            continue
         matched = _match_net_clusters(circuit, decl["name"])
         matches[decl["name"]] = matched
         clusters_by_name[decl["name"]] = {net.cluster_id for net in matched}
@@ -2720,6 +2798,11 @@ def _tie_well_region(
     - a drawn ``well_layer`` (every tie before issue #2255) -- the merged
       layer region, exactly as before, never degenerate (see
       :func:`_degenerate_tie_reasons`);
+    - ``well_complement_of`` (issue #3750) -- the top-cell extent minus the
+      named drawn layers, for a bulk substrate with no drawn well shape.
+      Degenerate by the same test as ``well_boxes`` (the named layers draw
+      nothing, so the "substrate" is the whole die) and also when they
+      cover the whole die (nothing left to check);
     - ``well_boxes`` (issue #2255) -- the union of the caller's asserted
       micrometre boxes, for a native-substrate block that draws no well/tub
       layer at all. Degenerate when it covers the top cell's own extent to
@@ -2735,11 +2818,23 @@ def _tie_well_region(
     Split out of :func:`_extract_connectivity` to keep that function under
     the repo's C901 complexity ratchet.
     """
-    if not tie["well_boxes"]:
+    if tie["well_complement_of"]:
+        # Issue #3750: the substrate is everything outside the named well
+        # layers. Derived from the stream, so it follows the layout.
+        extent = kdb.Region(top_cell.bbox())
+        wells = kdb.Region()
+        for well_layer in tie["well_complement_of"]:
+            wells += _region(layout, top_cell, well_layer)
+        asserted = (extent - wells.merged()).merged()
+        if asserted.is_empty():
+            # Wells cover the whole die: no substrate left to check.
+            return asserted, True
+    elif tie["well_boxes"]:
+        asserted = _boxes_region(kdb, layout, tie["well_boxes"])
+        extent = kdb.Region(top_cell.bbox())
+    else:
         return _region(layout, top_cell, tie["well_layer"]).merged(), False
 
-    asserted = _boxes_region(kdb, layout, tie["well_boxes"])
-    extent = kdb.Region(top_cell.bbox())
     extent_area = extent.area()
     if extent_area <= 0:
         # A top cell with no geometry at all: there is no extent to be
@@ -3079,7 +3174,11 @@ def _extract_connectivity(
         # `_select_well_class` narrows the region further, so it is
         # distinct from `well_selection_degenerate` below -- see
         # `_degenerate_tie_reasons`.
-        well_region_empty = not tie["well_boxes"] and well_region.is_empty()
+        well_region_empty = (
+            not tie["well_boxes"]
+            and not tie["well_complement_of"]
+            and well_region.is_empty()
+        )
         # `well_requires`/`well_excludes` (issue #2339) and their
         # literal-geometry counterparts `well_requires_boxes`/
         # `well_excludes_boxes` (issue #2540): keep only the merged well
@@ -3136,6 +3235,7 @@ def _extract_connectivity(
                 # partition, so it is an ordinary geometrically-derived pass.
                 "well_asserted": bool(
                     tie["well_boxes"]
+                    or tie["well_complement_of"]
                     or tie["well_requires_boxes"]
                     or tie["well_excludes_boxes"]
                 ),
@@ -3713,8 +3813,9 @@ def run_erc(
     # roll-up, beside the antenna-driven `status` rather than folded into it.
     #
     # `status` above is a roll-up of *both* questions, and its coverage input
-    # is antenna-only, so on a PDK with no antenna-ratio table (every PDK but
-    # sky130 today, or `--pdk` omitted entirely) it is `"not_checked"`/exit 4
+    # is antenna-only, so on a PDK with no antenna-ratio table (any PDK other
+    # than sky130 and ihp-sg13g2, or `--pdk` omitted entirely) it is
+    # `"not_checked"`/exit 4
     # no matter what the connectivity rules found: a run whose connectivity
     # rules all passed is then indistinguishable, by `status` and by exit
     # code, from a run that checked nothing at all. That is the right answer

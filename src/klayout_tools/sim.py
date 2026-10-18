@@ -10344,7 +10344,7 @@ def _corner_deck_control_lines(
     if sim_passes.is_passes_analysis(analysis):
         # Issue #3159: one `alter`/`setplot new`/`ac`/`write` group per
         # pass; the corner prefix above already set the corner up.
-        lines.extend(sim_passes.control_lines(analysis, corner_dir))
+        lines.extend(sim_passes.control_lines(analysis, corner_dir, measurements_spec))
         lines.extend(["quit", ".endc"])
         return lines
     if sim_twoport.is_twoport(analysis):

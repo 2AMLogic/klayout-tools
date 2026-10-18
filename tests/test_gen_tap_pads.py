@@ -72,10 +72,12 @@ def _region(layout, spec):
 
 
 def test_tap_pad_reach_matches_the_deck_rules():
+    # The generators size pads for the 3.3V (LV) column; the 5V/6V `.mv.1`
+    # rules (15 um, issue #3793) are a separate column and are not pinned here.
     reaches = {
         r.region_spec.max_distance_um
         for r in gf180mcu.DECK
-        if r.check == "tap_distance"
+        if r.check == "tap_distance" and r.region_spec.voltage == "lv"
     }
     assert reaches == {gen_layer_params.TAP_PAD_REACH_UM}
 

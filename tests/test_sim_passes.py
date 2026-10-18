@@ -158,7 +158,10 @@ def test_non_ac_analysis_is_rejected(tmp_path):
 @pytest.mark.parametrize(
     ("patch", "message"),
     [
-        ({"measurements": [{"name": "m", "expr": "v(o)"}]}, "measurements"),
+        (
+            {"measurements": [{"name": "m", "spice": ".meas ac m max vm(o)"}]},
+            "only supports measurements",
+        ),
         ({"engine": "xyce"}, "xyce"),
         ({"options": {"waveforms": True}}, "waveforms"),
     ],
@@ -222,6 +225,20 @@ def test_deck_applies_each_complete_alter_set_in_a_fresh_plot_per_pass(tmp_path)
     assert lines[second + 1] == f"write {tmp_path / 'ac_pass_1.raw'}"
     assert lines.index("set filetype=ascii") < first
     assert lines[-3:-1] == ["quit", ".endc"]
+
+
+def test_expr_scalar_is_solved_in_an_op_plot_before_the_first_pass(tmp_path):
+    _write_body(tmp_path)
+    analysis = sim_passes.resolve_analysis(
+        {"kind": "ac", "args": _ARGS, "passes": [_PASS_A, _PASS_B]}
+    )
+    lines = sim_passes.control_lines(
+        analysis, str(tmp_path), [{"name": "vbias", "expr": "v(o)"}]
+    )
+    assert lines[:4] == ["set filetype=ascii", "op", "let vbias = v(o)", "print vbias"]
+    assert lines.index("op") < lines.index("alter VA ac = 1")
+    # No scalar declared: the deck is exactly the pre-#3771 one.
+    assert "op" not in sim_passes.control_lines(analysis, str(tmp_path))
 
 
 def test_dc_field_emits_a_plain_alter(tmp_path):
@@ -290,6 +307,41 @@ def test_two_passes_run_at_every_corner_and_stay_distinguishable(tmp_path):
         col_b = decoded["inj_b"].column(decoded["inj_b"].names.index("v(o)"))
         assert col_a != col_b
         assert any(abs(cmath.phase(z)) > 1e-3 for z in col_a)
+
+
+@real_ngspice
+def test_dc_op_scalar_beside_passes_reports_the_pre_alter_bias(tmp_path):
+    passes = [
+        {
+            "name": "a",
+            "alter": [*_alter(1, 0), {"target": "VA", "value": 2, "field": "dc"}],
+        },
+        {
+            "name": "b",
+            "alter": [*_alter(0, 1), {"target": "VA", "value": 3, "field": "dc"}],
+        },
+    ]
+    request = _request(
+        tmp_path,
+        passes,
+        measurements=[
+            {
+                "name": "vbias",
+                "expr": "v(o)",
+                "limits": {"min": 0.39, "max": 0.41},
+            }
+        ],
+    )
+    (tmp_path / "body.spice").write_text(
+        (tmp_path / "body.spice").read_text().replace("VA a 0 DC 0", "VA a 0 DC 1")
+    )
+    report = sim.run_sim(str(request))
+    corner = report["corners"][0]
+    assert corner["status"] == "pass", corner["diagnostics"]
+    (meas,) = corner["measurements"]
+    # (1/R1) / (1/R1 + 1/R2 + 1/R3) with VA = 1 V, VB = 0 V, before any alter.
+    assert meas["value"] == pytest.approx(0.4, rel=1e-6)
+    assert all(p["status"] == "ok" for p in corner["passes"])
 
 
 @real_ngspice

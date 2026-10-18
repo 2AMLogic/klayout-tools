@@ -51,7 +51,7 @@ import hashlib
 import json
 import os
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from ._provenance import sha256_file
@@ -283,7 +283,9 @@ def _command_spec(raw: Any, field: str, root: str) -> dict[str, Any]:
     """Validate one declared command: ``{"argv": [str, ...], "cwd"?: path}``.
 
     ``argv`` is run directly (never through a shell) with ``cwd`` resolved
-    against the repository root."""
+    against the repository root. Optional ``local_only: true`` marks a check
+    that needs a toolchain the ``--check`` runner may lack: ``--attest`` runs
+    it, ``--attest --check`` skips it and carries the committed outcome."""
     if not isinstance(raw, Mapping):
         raise AttestationError(f"'{field}' must be an object with an 'argv' list")
     argv = raw.get("argv")
@@ -300,7 +302,13 @@ def _command_spec(raw: Any, field: str, root: str) -> dict[str, Any]:
         cwd = "."
     else:
         cwd = _normalize_repo_path(cwd_raw, f"{field}.cwd", root)
-    return {"argv": list(argv), "cwd": cwd}
+    spec: dict[str, Any] = {"argv": list(argv), "cwd": cwd}
+    local_only = raw.get("local_only", False)
+    if not isinstance(local_only, bool):
+        raise AttestationError(f"'{field}.local_only' must be a boolean")
+    if local_only:
+        spec["local_only"] = True
+    return spec
 
 
 def _validated_inventory(
@@ -453,7 +461,40 @@ def _command_check(
     }
     if error is not None:
         check["error"] = error
+    if spec.get("local_only"):
+        check["local_only"] = True
     return check
+
+
+def _skipped_check(
+    spec: Mapping[str, Any],
+    role: str,
+    committed_checks: Sequence[Mapping[str, Any]],
+    **identity: Any,
+) -> dict[str, Any]:
+    """A ``local_only`` command that ``--check`` did not run: the committed
+    check with the same identity is carried through (its outcome is the
+    attest-time one, never a result of this run) and marked ``skipped``. With
+    no committed counterpart the check is a failure -- nothing vouches for it."""
+    for committed in committed_checks:
+        if (
+            committed.get("check") == "command"
+            and committed.get("role") == role
+            and list(committed.get("argv") or []) == list(spec["argv"])
+            and all(committed.get(key) == value for key, value in identity.items())
+        ):
+            return {**committed, "local_only": True, "skipped": True}
+    return {
+        "check": "command",
+        "role": role,
+        **identity,
+        "argv": list(spec["argv"]),
+        "cwd": spec["cwd"],
+        "exit_status": None,
+        "passed": False,
+        "local_only": True,
+        "skipped": True,
+    }
 
 
 def _pin_checks(pins: Any) -> list[dict[str, Any]]:
@@ -496,12 +537,22 @@ def _pin_checks(pins: Any) -> list[dict[str, Any]]:
 
 
 def _run_checks(
-    item: int, root: str, normalized: Mapping[str, Any]
+    item: int,
+    root: str,
+    normalized: Mapping[str, Any],
+    committed_checks: Sequence[Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Every check for ``item``, in a deterministic order: file-presence
     checks sorted by path (independent of inventory listing order), then
-    the item's command and pin checks."""
+    the item's command and pin checks. With ``committed_checks`` (the
+    ``--check`` path) every ``local_only`` command is skipped, not run."""
     checks: list[dict[str, Any]] = []
+
+    def command(spec: Mapping[str, Any], role: str, **identity: Any) -> dict[str, Any]:
+        if committed_checks is not None and spec.get("local_only"):
+            return _skipped_check(spec, role, committed_checks, **identity)
+        return _command_check(root, spec, role, **identity)
+
     for field, role in _PATH_LISTS[item]:
         checks.extend(
             _file_check(root, path, role) for path in sorted(normalized[field])
@@ -511,8 +562,7 @@ def _run_checks(
             checks.append(_file_check(root, entry["path"], "derived"))
         for entry in normalized["derived"]:
             checks.append(
-                _command_check(
-                    root,
+                command(
                     entry["check"],
                     "freshness",
                     target=entry["path"],
@@ -520,14 +570,13 @@ def _run_checks(
                 )
             )
     elif item == 9:
-        checks.append(_command_check(root, normalized["cold_start"], "cold_start"))
+        checks.append(command(normalized["cold_start"], "cold_start"))
         checks.extend(_pin_checks(normalized["pins"]))
     else:
         for spec in normalized["checks"]:
             checks.append(
-                _command_check(
-                    root,
-                    {"argv": spec["argv"], "cwd": spec["cwd"]},
+                command(
+                    {k: v for k, v in spec.items() if k != "name"},
                     "audit",
                     name=spec["name"],
                 )
@@ -540,7 +589,11 @@ def _run_checks(
 # --------------------------------------------------------------------------- #
 
 
-def build_attestation(item: int, inventory_path: str) -> dict[str, Any]:
+def build_attestation(
+    item: int,
+    inventory_path: str,
+    committed_checks: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
     """``klt signoff --attest ITEM --inventory PATH``: run every check
     ``PATH`` declares for T1 item ``item`` and return the artifact-anchored
     generic envelope (``status`` ``"pass"`` iff every check passed).
@@ -549,7 +602,11 @@ def build_attestation(item: int, inventory_path: str) -> dict[str, Any]:
     producer does not attest, or an inventory outside any git repository
     (inventory paths are repository-relative, and the envelope pins the
     inventory as a ``{"path", "scope": "repo"}`` object the grader resolves
-    against the repository root)."""
+    against the repository root).
+
+    ``committed_checks`` is passed only by :func:`check_attestation`: it makes
+    ``local_only`` commands skip (carrying the committed outcome, marked
+    ``skipped``) instead of run."""
     if item not in _ITEMS_REQUIRING_ATTESTED_EVIDENCE:
         raise AttestationError(
             f"--attest supports T1 items {', '.join(map(str, ATTESTABLE_ITEMS))}; "
@@ -565,7 +622,7 @@ def build_attestation(item: int, inventory_path: str) -> dict[str, Any]:
         )
     inventory_rel = os.path.relpath(absolute, root).replace(os.sep, "/")
     normalized = _validated_inventory(inventory, item, root, inventory_path)
-    checks = _run_checks(item, root, normalized)
+    checks = _run_checks(item, root, normalized, committed_checks)
     passed_count = sum(1 for check in checks if check["passed"])
     status = "pass" if passed_count == len(checks) else "fail"
     envelope: dict[str, Any] = {
@@ -658,7 +715,11 @@ def check_attestation(
     passing gate. Only the producing build's version strings are excluded
     from the diff (:data:`VOLATILE_ATTESTATION_PATHS`); a change to the
     inventory, to any inventoried file, to a check's outcome, or to the
-    committed envelope itself is drift."""
+    committed envelope itself is drift.
+
+    A ``local_only`` command is not run: it is listed in ``skipped_checks``
+    (never counted as passed by this run) and its committed outcome is carried
+    into ``fresh_status``, so a committed failure still fails the gate."""
     committed = load_committed_report(committed_path, AttestationError)
     if committed.get("kind") != "generic" or "attestation" not in committed:
         raise AttestationError(
@@ -666,7 +727,25 @@ def check_attestation(
             'envelope (no "kind": "generic" with an \'attestation\' block) -- '
             "check the path"
         )
-    fresh = build_attestation(item, inventory_path)
+    committed_checks = (committed.get("attestation") or {}).get("checks")
+    fresh = build_attestation(
+        item,
+        inventory_path,
+        committed_checks if isinstance(committed_checks, list) else [],
+    )
+    # ``skipped`` marks a local_only check this run did not execute; its
+    # (carried-through) outcome is the committed one, so it is reported beside
+    # the diff rather than as a difference from the committed envelope.
+    skipped = []
+    for check in fresh["attestation"]["checks"]:
+        if check.pop("skipped", False):
+            skipped.append(
+                {
+                    key: check[key]
+                    for key in ("role", "name", "target", "argv", "cwd", "passed")
+                    if key in check
+                }
+            )
     result = build_rerun_result(
         report_path=committed_path,
         committed=committed,
@@ -676,5 +755,6 @@ def check_attestation(
     )
     fresh_payload = result.pop("fresh")
     result["fresh_status"] = fresh_payload["status"]
+    result["skipped_checks"] = skipped
     result["fresh"] = fresh_payload
     return result

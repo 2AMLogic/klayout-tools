@@ -284,26 +284,30 @@ class StagedSimJob:
 def host_resolved_roots(request: dict[str, Any]) -> tuple[str, ...]:
     """Directory roots whose contents the *executing* host resolves for
     itself, so an ``.include`` landing under one is left verbatim:
-    ``request.models.pdk_root`` (forwarded to the job instance -- the
-    ``batch`` backend writes it straight into ``job.json``'s ``pdk_root``)
-    and this host's own ``$PDK_ROOT``.
+    ``request.models.pdk_root``, which is forwarded to the job instance (the
+    ``batch`` backend writes it straight into ``job.json``'s ``pdk_root``).
+
+    This host's own ``$PDK_ROOT`` is deliberately *not* a root: it is not
+    forwarded, so an absolute path under it is a submitting-host path the
+    runner may not have. :class:`_Stager` rewrites such an include to the
+    literal ``$PDK_ROOT/<rel>`` instead (see :func:`client_pdk_root`).
 
     A path that does not exist locally is still honored as a root: the
     question is "does this target *belong to* the PDK", which is a prefix
     question, not an existence one.
     """
-    roots: list[str] = []
-    candidates = [
-        (request.get("models") or {}).get("pdk_root"),
-        os.environ.get("PDK_ROOT"),
-    ]
-    for candidate in candidates:
-        if not isinstance(candidate, str) or not candidate:
-            continue
-        resolved = os.path.abspath(os.path.expanduser(candidate))
-        if resolved not in roots:
-            roots.append(resolved)
-    return tuple(roots)
+    candidate = (request.get("models") or {}).get("pdk_root")
+    if not isinstance(candidate, str) or not candidate:
+        return ()
+    return (os.path.abspath(os.path.expanduser(candidate)),)
+
+
+def client_pdk_root() -> str | None:
+    """This (submitting) host's own ``$PDK_ROOT``, absolute, or ``None``."""
+    candidate = os.environ.get("PDK_ROOT")
+    if not candidate:
+        return None
+    return os.path.abspath(os.path.expanduser(candidate))
 
 
 def stage_netlist(
@@ -932,6 +936,12 @@ class _Stager:
                     target, item=item, index=index, directive="`.include`"
                 )
             else:
+                env_form = self._client_pdk_root_form(target, origin=local_path)
+                if env_form is not None:
+                    self._require_decodable(item, index, decodable)
+                    self.host_resolved.append(env_form)
+                    self.host_resolved_detail.append((env_form, "env_var"))
+                    return f'{match.group("prefix")}"{env_form}"'
                 resolved = self._resolve(target, origin=local_path)
                 if resolved is None:
                     self.host_resolved.append(target)
@@ -1049,6 +1059,28 @@ class _Stager:
                 "here"
             )
         return resolved
+
+    def _client_pdk_root_form(self, target: str, *, origin: str) -> str | None:
+        """``$PDK_ROOT/<rel>`` when ``target`` is an absolute path under this
+        host's own ``$PDK_ROOT`` and not under a forwarded root, else
+        ``None``. The submitting host's ``$PDK_ROOT`` is not forwarded to the
+        runner, so the literal env form (which the executing host expands
+        against its own root) replaces the submitter-local absolute path."""
+        client = client_pdk_root()
+        if client is None or not target or "$" in target:
+            return None
+        expanded = os.path.expanduser(target)
+        if not os.path.isabs(expanded):
+            expanded = os.path.join(os.path.dirname(os.path.abspath(origin)), expanded)
+        resolved = os.path.abspath(expanded)
+        if any(_is_under(resolved, root) for root in self.roots):
+            return None
+        if not _is_under(resolved, client):
+            return None
+        rel = os.path.relpath(resolved, client)
+        if rel == ".":
+            return None
+        return "$PDK_ROOT/" + rel.replace(os.sep, "/")
 
     def _resolve(self, target: str, *, origin: str) -> str | None:
         """Absolute local path ``target`` names, or ``None`` when the
