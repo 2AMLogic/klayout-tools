@@ -14,6 +14,12 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Batch transport failures no longer quote the bucket name** (issue #3927):
+  a `BatchError` from `sim_batch._run_checked` replaces the configured bucket
+  (which embeds the fleet's cloud account number) with `<bucket>` in the
+  quoted stderr, so it cannot reach a committable `--report-out` report.
+  `error.code` classification still runs on the raw stderr.
+
 - **`klt deck info` reports the DRC deck as its own artifact** (issue #3826):
   an entry for a deck that ships a standalone KLayout DRC deck file (`asap7`)
   gains an additive `drc_deck` object (`{path_kind, content_hash, released,

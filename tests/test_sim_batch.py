@@ -730,6 +730,41 @@ def test_submit_failure_raises_batch_error(tmp_path):
         sb.submit_job(_config(tmp_path), "job-1", spec, runner=runner)
 
 
+def test_submit_failure_message_elides_the_bucket(tmp_path):
+    stderr = (
+        f"upload failed: s3://{FAKE_BUCKET}/jobs/x/job.json "
+        f"(bucket {FAKE_BUCKET}): AccessDenied"
+    )
+    runner = _FakeRunner()
+    runner.queue("inputs/netlist.cir", fake_completed(returncode=1, stderr=stderr))
+    spec = sb._build_batch_job_spec(
+        {"models": {}},
+        str(_write_body(tmp_path)),
+        corner_count=1,
+        timeout_s=30.0,
+        keep_artifacts=False,
+    )
+    with pytest.raises(sb.BatchError) as excinfo:
+        sb.submit_job(
+            _config(tmp_path, bucket=FAKE_BUCKET), "job-1", spec, runner=runner
+        )
+    message = str(excinfo.value)
+    assert FAKE_BUCKET not in message
+    assert "s3://<bucket>/jobs/x/job.json" in message
+    assert "AccessDenied" in message
+
+
+def test_launch_failure_classifies_raw_stderr_before_eliding_the_bucket(tmp_path):
+    stderr = f"{_CAPACITY_REFUSAL} ({FAKE_BUCKET})"
+    runner = _FakeRunner()
+    runner.queue("launch", fake_completed(returncode=1, stderr=stderr))
+    config = _config(tmp_path, bucket=FAKE_BUCKET, capacity_wait_s=0)
+    with pytest.raises(sb.BatchError) as excinfo:
+        sb.launch_job(config, "job-1", runner=runner)
+    assert excinfo.value.code == "batch_no_capacity"
+    assert FAKE_BUCKET not in str(excinfo.value)
+
+
 def test_launch_shells_out_once_with_apply_and_profile(tmp_path):
     runner = _FakeRunner()
     config = _config(tmp_path)

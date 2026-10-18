@@ -2378,10 +2378,14 @@ def _run_checked(
     label: str,
     *,
     classify: Callable[[str], str | None] | None = None,
+    redact: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run one transport command; any non-zero exit becomes a
     :class:`BatchError`. ``classify``, when given, maps the failed command's
     stderr to the error's machine-readable ``code`` (``None`` = unclassified).
+    ``redact``, when given (the batch bucket name, which embeds the fleet's
+    cloud account number), is replaced with ``<bucket>`` in the message so it
+    never reaches a committable report; ``classify`` sees the raw stderr.
     """
     try:
         result = runner(argv, timeout_s)
@@ -2391,9 +2395,11 @@ def _run_checked(
         raise BatchError(f"{label} could not be spawned: {exc}") from exc
     if result.returncode != 0:
         detail = (result.stderr or "").strip()
+        code = classify(detail) if classify is not None else None
+        if redact:
+            detail = detail.replace(redact, "<bucket>")
         raise BatchError(
-            f"{label} failed (exit {result.returncode}): {detail}",
-            code=classify(detail) if classify is not None else None,
+            f"{label} failed (exit {result.returncode}): {detail}", code=code
         )
     return result
 
@@ -2496,6 +2502,7 @@ def submit_job(
                 ),
                 _BATCH_AWS_TIMEOUT_S,
                 f"aws s3 cp ({item.label} input)",
+                redact=config.bucket,
             )
         job_json_path = os.path.join(staging, "job.json")
         with open(job_json_path, "w", encoding="utf-8") as handle:
@@ -2512,6 +2519,7 @@ def submit_job(
             ),
             _BATCH_AWS_TIMEOUT_S,
             "aws s3 cp (job.json)",
+            redact=config.bucket,
         )
 
 
@@ -2586,6 +2594,7 @@ def launch_job(
                 _BATCH_LAUNCH_TIMEOUT_S,
                 "batch-fleet-provision.sh launch",
                 classify=_classify_launch_failure,
+                redact=config.bucket,
             )
             return
         except BatchError as exc:
@@ -2875,6 +2884,7 @@ def collect_outputs(
         ),
         _BATCH_AWS_TIMEOUT_S,
         "aws s3 cp (outputs)",
+        redact=config.bucket,
     )
     return local_dir
 
