@@ -9,7 +9,11 @@ import subprocess
 import pytest
 
 from klayout_tools import equiv
-from klayout_tools._verilog_params import chparam_lines, validate_parameters
+from klayout_tools._verilog_params import (
+    chparam_lines,
+    read_verilog_line,
+    validate_parameters,
+)
 
 
 def test_chparam_lines_empty_when_no_parameters():
@@ -68,3 +72,42 @@ def test_chparam_script_changes_elaboration_in_real_yosys(tmp_path):
         )
 
     assert wire_bits({}) < wire_bits({"W": 16, "M": "b"})
+
+
+@pytest.mark.parametrize(
+    "path, expected",
+    [
+        ("a.sv", "read_verilog -sv a.sv"),
+        ("dir/A.SV", "read_verilog -sv dir/A.SV"),
+        ("defs.svh", "read_verilog -sv defs.svh"),
+        ("a.v", "read_verilog a.v"),
+        ("noext", "read_verilog noext"),
+    ],
+)
+def test_read_verilog_line_picks_front_end_by_extension(path, expected):
+    assert read_verilog_line(path) == expected
+
+
+def test_equiv_side_reads_sv_with_sv_front_end_and_v_plain(tmp_path):
+    sv = tmp_path / "t.sv"
+    v = tmp_path / "u.v"
+    sv.write_text("module t(input logic a); endmodule\n")
+    v.write_text("module u(input a); endmodule\n")
+    side = equiv._resolve_side(
+        {"sources": [str(sv), str(v)], "top": "t"}, str(tmp_path), "gold"
+    )
+    lines = equiv._side_prep_lines("gold", side, {})
+    assert f"read_verilog -sv {sv}" in lines
+    assert f"read_verilog {v}" in lines
+
+
+@pytest.mark.skipif(shutil.which("yosys") is None, reason="yosys not installed")
+def test_sv_source_parses_in_real_yosys_with_sv_front_end(tmp_path):
+    rtl = tmp_path / "c.sv"
+    rtl.write_text(
+        "module c(\n  input  logic clk,\n  input  logic d,\n"
+        "  output logic q\n);\n  always_ff @(posedge clk) q <= d;\nendmodule\n"
+    )
+    script = tmp_path / "s.ys"
+    script.write_text(f"{read_verilog_line(rtl)}\nhierarchy -check -top c\n")
+    subprocess.run(["yosys", "-q", "-s", str(script)], check=True)
