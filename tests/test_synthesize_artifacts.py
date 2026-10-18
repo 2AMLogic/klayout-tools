@@ -12,6 +12,7 @@ from klayout_tools import synthesize
 from klayout_tools.synthesize import SynthesizeError, run_synthesize
 from test_synthesize import (
     _ABC_STIME_LINE,
+    _FAKE_EQUIV_EQUIVALENT,
     _GCD_MODULE_STATS,
     _GCD_RTL,
     _abs_path,
@@ -309,6 +310,57 @@ def test_outputs_dir_absolute_path_is_external(prepared, tmp_path_factory):
     report = run_synthesize(request)
     assert report["netlist_path"]["scope"] == "external"
     assert any(target.glob("*_synth.v"))
+
+
+def test_outputs_dir_with_dotdot_segment_is_normalized(prepared):
+    root, request = prepared
+    _set_outputs(request, {"dir": "../elsewhere/syn"})
+    report = run_synthesize(request)
+    target = root.parent / "elsewhere" / "syn"
+    assert report["netlist_path"]["scope"] == "external"
+    assert any(target.glob("*_synth.v"))
+    assert report["run_id"] == "syn"
+    assert not (root / ".klt/synthesize").exists()
+
+
+def test_outputs_dir_with_inner_dotdot_stays_in_repo(prepared):
+    root, request = prepared
+    _set_outputs(request, {"dir": "a/../out"})
+    report = run_synthesize(request)
+    netlist = Path(_abs_path(report["netlist_path"], root))
+    assert netlist.parent == root / "out"
+
+
+def test_outputs_dir_equivalence_artifacts_stay_in_custom_dir(prepared, monkeypatch):
+    root, request = prepared
+    _set_outputs(request, {"dir": "build/syn"})
+    captured = []
+
+    def fake_run_equiv(equiv_request, *, timeout_s=None):
+        captured.append(equiv_request)
+        return _FAKE_EQUIV_EQUIVALENT
+
+    monkeypatch.setattr(synthesize, "run_equiv", fake_run_equiv)
+    report = run_synthesize(request, verify_equivalence=True)
+    assert report["equivalence"]["status"] == "equivalent"
+    assert len(captured) == 1
+    assert Path(captured[0]).parent == root / "build/syn"
+    assert not (root / ".klt/synthesize").exists()
+    assert not (root / ".klt/equiv").exists()
+
+
+def test_outputs_dir_inside_sources_tree_passes_input_mutation_check(
+    prepared, monkeypatch
+):
+    root, request = prepared
+    (root / "rtl").mkdir()
+    (root / "gcd.v").rename(root / "rtl/gcd.v")
+    data = _set_outputs(request, {"dir": "rtl/out"})
+    data["sources"] = ["rtl/gcd.v"]
+    Path(request).write_text(json.dumps(data))
+    report = run_synthesize(request)
+    assert Path(_abs_path(report["netlist_path"], root)).parent == root / "rtl/out"
+    assert (root / "rtl/gcd.v").read_text() == _GCD_RTL
 
 
 def test_outputs_dir_with_run_id_rejected(prepared):

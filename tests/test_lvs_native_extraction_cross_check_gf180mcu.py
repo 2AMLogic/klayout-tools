@@ -10,7 +10,7 @@ reported (not asserted)."
 This module is the gf180mcu sibling of
 ``tests/test_lvs_native_extraction_cross_check.py`` (issue #869, Epic #711
 Phase 2c) -- same infrastructure
-(:func:`klayout_tools.extract.run_extract_klayout_engine`), same
+(:func:`helpers.extract_klayout_oracle.run_extract_klayout_engine`), same
 "synthesized golden layout as corpus stand-in" convention (issue #520's own
 Tiny Tapeout corpus is still unbuilt -- see that module's own "The #520
 corpus" section), same reporting discipline (agree / documented
@@ -94,9 +94,10 @@ from pathlib import Path
 import klayout.db as kdb
 import pytest
 
+from helpers.extract_klayout_oracle import run_extract_klayout_engine
 from klayout_tools import pdk
 from klayout_tools.decks.gf180mcu import EXTRACTION_DECK
-from klayout_tools.extract import ExtractError, run_extract, run_extract_klayout_engine
+from klayout_tools.extract import ExtractError, run_extract
 
 _DBU_UM = 0.001
 
