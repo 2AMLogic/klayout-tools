@@ -4,6 +4,14 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-18
 
+- **PR #3943**: feat: add monte_carlo.mismatch_scale for mismatch sigma scaling and determinism control
+- **Issue #3942** (closed): Friction: klt sim monte_carlo has no mismatch-sigma scale, so a negative control needs hand-edited model parameters
+- **PR #3938**: feat(extract): report pin_order for distributed-RC nets and document pin-is-middle rule
+- **Issue #3937** (closed): extract --distributed-rc: net's pin node lands on a mid-ladder terminal, undocumented, so driving the pin feeds the middle of the line
+- **PR #3915**: feat: bound in-flight batch shard jobs with max_concurrent_jobs
+- **Issue #3914** (closed): klt sim --backend batch: no client-side cap on concurrent jobs; large MC splits lose units to fleet instance limits
+- **PR #3642**: fix: end OpenSTA redirect on electrical-check error; add hand-run fixture test
+- **Issue #3621** (closed): sta: fast-corner fixture comparing electrical_checks counts to hand-run OpenSTA over routed DEF/SPEF
 - **PR #3760**: feat(sta): add power_activity request field and power_basis response block
 - **Issue #3744** (closed): klt sta: power estimate has no caller-supplied activity input (and no way to state its assumption)
 - **PR #3886**: feat(drc): add gf180mcu Dualgate width/space rules and unmodeled-rule list
