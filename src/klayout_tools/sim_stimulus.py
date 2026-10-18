@@ -238,6 +238,19 @@ def _resolve_event(
         pwl.append([start + applied, target])
         state["busy_until"] = start + applied
     state["level"] = target
+    return _event_record(event, t_s, start, target, edge, applied)
+
+
+def _event_record(
+    event: dict[str, Any],
+    t_s: float,
+    start: float,
+    target: float,
+    edge: str,
+    applied: float,
+) -> dict[str, Any]:
+    """Build the resolved event record, echoing a supply-relative ``level``
+    spec as ``level_spec``."""
     record = {
         "t_s": t_s,
         "t_applied_s": start,
