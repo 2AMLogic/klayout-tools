@@ -63,21 +63,16 @@ Issues currently being built (`loom:building`).
 - **#2912**: Friction: sky130 native-Vt NMOS (nfet_05v0_nvt) cannot be drawn by klt gen or compared by klt lvs
 - **#2983**: extract resistance graph increment 4: substitute the two-terminal cross-level scalar
 - **#3027**: Layout-flow benchmark phase 4: comparison reporting and bounded CI
-- **#3621**: sta: fast-corner fixture comparing electrical_checks counts to hand-run OpenSTA over routed DEF/SPEF
 - **#3624**: sim --op-lint: alter of a corners.supply_waveforms PWL/PULSE source is a silent no-op
 - **#3625**: klt sim: engine_version pin is silently ignored on deck-list (decks) requests
 - **#3655**: Reconcile epic #1519 acceptance and documentation criteria before closing
-- **#3744**: klt sta: power estimate has no caller-supplied activity input (and no way to state its assumption)
 - **#3776**: Live-verify klt sta set_driving_cell/set_load syntax and *NAME_MAP SPEF annotation against OpenROAD/OpenSTA
-- **#3914**: klt sim --backend batch: no client-side cap on concurrent jobs; large MC splits lose units to fleet instance limits
-- **#3937**: extract --distributed-rc: net's pin node lands on a mid-ladder terminal, undocumented, so driving the pin feeds the middle of the line
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#3760**: feat(sta): add power_activity request field and power_basis response block
-- **#3915**: feat: bound in-flight batch shard jobs with max_concurrent_jobs
+_None._
 
 ## Approved (Awaiting Merge)
 
@@ -99,11 +94,9 @@ PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 - **#3467**: ci: fetch the PDK with ciel pinned to open_pdks f6eeac7
 - **#3635**: feat: select graph-derived two-terminal resistance as an additive extract field
 - **#3641**: fix(op-lint): scale supply_waveforms sources instead of altering them
-- **#3642**: fix: end OpenSTA redirect on electrical-check error; add hand-run fixture test
 - **#3658**: docs: reconcile mom CLI and validation docs with shipped winding support
 - **#3903**: test: add live OpenROAD klt sta tests for write_spef NAME_MAP and driving cell/load
 - **#3913**: feat(benchmark): add report-layout for ledger-only layout comparison reports
-- **#3938**: feat(extract): report pin_order for distributed-RC nets and document pin-is-middle rule
 
 ## Proposed
 
@@ -141,17 +134,13 @@ Issues carrying `loom:curated`.
 - **#3462**: klt sim batch: no way to require the worker PDK revision match a pin *(curated)*
 - **#3516**: klt sim batch: runner reported as 'match' still rejects analysis_steps[] requests (recurrence of #3249) *(curated)*
 - **#3522**: Verify OMP_NUM_THREADS pinning on the batch fleet (follow-up to #3502) *(curated)*
-- **#3621**: sta: fast-corner fixture comparing electrical_checks counts to hand-run OpenSTA over routed DEF/SPEF *(curated)*
 - **#3624**: sim --op-lint: alter of a corners.supply_waveforms PWL/PULSE source is a silent no-op *(curated)*
 - **#3625**: klt sim: engine_version pin is silently ignored on deck-list (decks) requests *(curated)*
 - **#3655**: Reconcile epic #1519 acceptance and documentation criteria before closing *(curated)*
-- **#3744**: klt sta: power estimate has no caller-supplied activity input (and no way to state its assumption) *(curated)*
 - **#3776**: Live-verify klt sta set_driving_cell/set_load syntax and *NAME_MAP SPEF annotation against OpenROAD/OpenSTA *(curated)*
 - **#3805**: release: `klt signoff --attest` (#2844) is not in any PyPI release; latest 0.7.0 rejects it *(curated)*
 - **#3871**: Live batch-fleet verification of runner-resolved osdi_preload (PR #3853) *(curated)*
-- **#3914**: klt sim --backend batch: no client-side cap on concurrent jobs; large MC splits lose units to fleet instance limits *(curated)*
 - **#3930**: Live-verify klt place-and-route io.pin_constraints against real OpenROAD (N/E/S/W) *(curated)*
-- **#3937**: extract --distributed-rc: net's pin node lands on a mid-ladder terminal, undocumented, so driving the pin feeds the middle of the line *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -175,10 +164,10 @@ Issues carrying `loom:curated`.
 | Very important | 0 |
 | Important | 2 |
 | Ready (`loom:issue`) | 14 |
-| In Progress (`loom:building`) | 11 |
-| PRs awaiting review | 2 |
-| Approved PRs awaiting merge | 21 |
-| Curated | 43 |
+| In Progress (`loom:building`) | 7 |
+| PRs awaiting review | 0 |
+| Approved PRs awaiting merge | 19 |
+| Curated | 39 |
 | Architect / Hermit proposals | 4 |
 | Active epics | 4 |
 <!-- guide:plan-body:end -->
