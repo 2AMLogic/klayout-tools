@@ -224,6 +224,14 @@
         "klayout_tools.kb"
       ]
     },
+    "keepout_check": {
+      "kind": "verb",
+      "description": "`klt keepout_check` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.keepout_check_cmd",
+        "klayout_tools.keepout_check"
+      ]
+    },
     "layers": {
       "kind": "verb",
       "description": "`klt layers` implementation: core modules plus CLI adapter.",
@@ -619,6 +627,11 @@
     }
   },
   "allowed_group_edges": [
+    {
+      "consumer": "keepout_check",
+      "exporter": "cli-infra",
+      "reason": "CLI adapter uses the shared output envelope and --region/--layers parsers, as every verb does."
+    },
     {
       "consumer": "tap_distance",
       "exporter": "cli-infra",

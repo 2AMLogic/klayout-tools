@@ -146,8 +146,10 @@ symlink targets may exist only on `dev`, so on a clean install 262 of 530
 links dangled (as of `159527a5`, 2026-10; re-measure). The fetcher now counts
 dangling links after extraction and on the cached re-run, prints a sample and
 the sibling version, and warns loudly; it still exits 0 (models-only use
-works) unless `--strict` is passed (exit 3). `klt pdk check` reports the same
-condition. Repinning the sibling is a separate human decision (it changes a
+works) unless `--strict` is passed (exit 3). When a dangling link is under
+`libs.tech/klayout/tech/lvs/`, the warning also says the PDK-native LVS runset
+cannot run (use `--strict` when fetching for LVS). `klt pdk check` reports the
+same condition. Repinning the sibling is a separate human decision (it changes a
 checksummed pin used by CI).
 
 **Fetching the PDK alone does not make it simulatable.** `fetch-ihp-sg13g2.sh`

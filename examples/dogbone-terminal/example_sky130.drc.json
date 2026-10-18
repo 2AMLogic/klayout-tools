@@ -218,6 +218,7 @@
     ],
     "voltage_domain_warnings": [],
     "unchecked_rules": [],
+    "marker_blind_layers_in_stream": [],
     "deck_scope": [
       "cap2m",
       "capm",

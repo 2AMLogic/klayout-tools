@@ -21,7 +21,7 @@ subcommand.)
 
 The exit code answers the *antenna* question, because ``status`` does (see
 ``_EXIT_CODE_BY_STATUS`` below). On a PDK with no antenna-ratio table --
-every PDK but sky130 today, any run that omits ``--pdk``, and every
+every PDK but sky130 and ihp-sg13g2 today, any run that omits ``--pdk``, and every
 ``--findings-only`` run (issue #2219, which skips the antenna accumulation
 outright) -- that answer is permanently ``4``, however clean the design is.
 A caller that wants only
