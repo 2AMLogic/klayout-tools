@@ -19,6 +19,7 @@ from . import (
     sim_cycle_mean,
     sim_energy,
     sim_noise,
+    sim_snm_meas,
     sim_tian,
     sim_transfer_meas,
 )
@@ -288,8 +289,9 @@ def _require_measurement_form(name: Any, has_form: bool) -> None:
             "'cycle_mean' (a mean over whole reference cycles), "
             "'energy' (a source's energy over a transient window), "
             "'noise' (a spot/band-integrated noise-spectrum value) or "
-            "'transfer' (an AC return-ratio metric) or "
-            "'tian' (a dual-injection AC stability metric)"
+            "'transfer' (an AC return-ratio metric), "
+            "'tian' (a dual-injection AC stability metric) or "
+            "'snm' (a butterfly static noise margin of a DC sweep)"
         )
 
 
@@ -298,6 +300,9 @@ def _validate_measurement_form(spec: dict[str, Any]) -> None:
     one of ``spice``/``expr``, and -- for an ``expr`` -- a name that survives
     the round trip through the deck and back out of the log. See
     :func:`_validate_measurement_forms` for why each rule exists."""
+    if sim_snm_meas.validate_form_exclusive(spec):
+        # Issue #3895: a seventh, mutually exclusive form.
+        return
     if sim_tian.validate_form_exclusive(spec):
         # Issue #3160: a sixth, mutually exclusive form.
         return

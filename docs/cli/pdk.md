@@ -20,6 +20,9 @@ klt pdk stackup     [--pdk <variant>] [--pdk-root <dir>] [--corner <name>] [--th
 ```
 
 - `find` — resolve **one** install/variant and emit its paths.
+  `--pdk` accepts the deck/family spelling for IHP installs (`sg13g2` →
+  `ihp-sg13g2`, `sg13cmos5l` → `ihp-sg13cmos5l`); an exact directory-name match
+  always wins and the reported `pdk`/`variant` is the resolved directory name.
 - `list` — enumerate **every** install/variant discovered across the search order.
 - `env` — the resolved paths as eval-able shell `export` lines.
 - `check` — resolve one install/variant and exit non-zero if any of its
@@ -31,7 +34,7 @@ klt pdk stackup     [--pdk <variant>] [--pdk-root <dir>] [--corner <name>] [--th
 - `cells` — per standard-cell digital library, its device flavor(s) and the
   nominal supply its `.lib` timing views are characterised at.
 - `macros` — per hard-macro IP library (`libs.ref` entries named
-  `*_fd_ip_*`, e.g. an SRAM/ROM compiler output), which views it ships.
+  `*_fd_ip_*` or `lef`+`lib`, e.g. an SRAM/ROM compiler output), which views it ships.
 - `corners` — per SPICE process corner, which curated device families skew
   vs. resolve to typical, and whether the corner is complete.
 - `em-limits` — per routing/cut layer, the electromigration current-density
@@ -999,16 +1002,15 @@ sky130_fd_ip_sram_1k  gds/lef/lib/spice/verilog
 
 ### Which libraries are reported
 
-Only `libs_ref` entries whose name contains `_fd_ip_` — the open_pdks
-"foundry digital, IP" (hard-macro) naming convention — are reported. Like
-`klt pdk cells`, this is a **deliberate** name-convention filter, not an
-accident of the glob used to walk `libs_ref`: standard-cell digital
-libraries (`*_fd_sc_*`), primitive-device libraries (`*_fd_pr`), I/O-pad
-libraries (`*_fd_io`), and other macro libraries that don't match the
-`*_fd_ip_*` convention are all excluded — they are `klt pdk cells`'s domain
-(or neither command's), not this one's.
+A `libs_ref` entry is reported when its name contains `_fd_ip_` (the
+open_pdks "foundry digital, IP" hard-macro convention) **or** it structurally
+ships both `lef/` and `lib/` views (e.g. IHP's `sg13g2_sram`). Standard-cell
+digital libraries (`*_fd_sc_*`, `*_stdcell`), primitive-device libraries
+(`*_fd_pr`, `sg13g2_pr`) and I/O-pad libraries (`*_fd_io`, `sg13g2_io`) are
+excluded — they are `klt pdk cells`'s domain (or neither command's), not
+this one's.
 
-An empty `macros` list (a variant with no `_fd_ip_`-named `libs_ref` entry)
+An empty `macros` list (a variant with no hard-macro `libs_ref` entry)
 is a **successful result**, not an error — mirroring `klt pdk cells`'s
 empty-`libraries` convention.
 

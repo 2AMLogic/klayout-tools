@@ -1663,7 +1663,7 @@ the next registry entry.
 - Limit: a `0.7.1.devN` runner built before a feature landed looks the same as
   one built after, so it counts as supporting it.
 
-**Mandatory features (`transfer`, [#2924](https://github.com/2AMLogic/klayout-tools/issues/2924); `stimulus`, [#2977](https://github.com/2AMLogic/klayout-tools/issues/2977); `dual_injection`, [#3161](https://github.com/2AMLogic/klayout-tools/issues/3161); `complex_vectors`, [#3337](https://github.com/2AMLogic/klayout-tools/issues/3337); `twoport`, [#3338](https://github.com/2AMLogic/klayout-tools/issues/3338)).**
+**Mandatory features (`transfer`, [#2924](https://github.com/2AMLogic/klayout-tools/issues/2924); `stimulus`, [#2977](https://github.com/2AMLogic/klayout-tools/issues/2977); `dual_injection`, [#3161](https://github.com/2AMLogic/klayout-tools/issues/3161); `complex_vectors`, [#3337](https://github.com/2AMLogic/klayout-tools/issues/3337); `twoport`, [#3338](https://github.com/2AMLogic/klayout-tools/issues/3338); `snm`, [#3895](https://github.com/2AMLogic/klayout-tools/issues/3895)).**
 A runner that predates `measurements[].transfer` would drop the metric (and one
 that predates `stimulus` would simulate with the digital control lines
 undriven), so
@@ -3322,6 +3322,11 @@ available without `keep_artifacts`. An engine `.meas` error that cannot be
 matched to a missing measurement is reported once as a corner-level
 `measurement` diagnostic with severity `warning`; grading is unchanged.
 
+A `spice` `.meas ... when v(x)=<val>` card therefore cannot follow
+`corners.supply_v`: write the literal for each corner's supply, or declare the
+threshold as `measurements[].crossings` with a supply-relative `level`
+(`{"frac_of": "vdd", "fraction": 0.5}`), which `klt sim` resolves per corner.
+
 `FIND ... AT=` does not accept an arithmetic expression either. On ngspice-46,
 `at=0.5*2.5u` fails with the misleading `find(AT) : out of interval`. Use a
 literal time or a `.param` reference. This error follows the same
@@ -3619,10 +3624,19 @@ declaration returns the whole ordered list instead:
 | Key      | Required | Meaning |
 | -------- | -------- | ------- |
 | `signal` | yes      | One-line ngspice vector expression (`"v(ro1)"`, `"v(outp) - v(outn)"`, `"i(vdd)"`), evaluated against the transient's saved vectors. |
-| `level`  | yes      | Finite number, in the signal's own unit. |
+| `level`  | yes      | Finite number, in the signal's own unit — or a supply-relative `{"frac_of": "<supply_v key>", "fraction": 0.5}` (issue #3918, see below). |
 | `edge`   | no       | `"rise"` (default), `"fall"`, or `"either"`. |
 | `from`/`to` | no    | Window, inclusive, in seconds: a number or a SPICE time literal (`"10n"`). A crossing outside it is not counted. |
 | `max`    | no       | Cap on the returned times, integer in `[1, 100000]`; default `1000`. |
+
+**Supply-relative `level`.** `{"frac_of": "vdd", "fraction": 0.5}` is
+`fraction × corners.supply_v["vdd"]` for the corner being measured, so a
+mid-rail threshold follows the supply sweep. The resolved threshold is echoed as
+`level` (volts) inside that corner's `crossings` object; a literal-number
+`level` leaves the report unchanged. `frac_of` must be a `corners.supply_v`
+key of every corner and `fraction` a finite number `>= 0`; otherwise the
+request is refused before any corner runs. (This is the supply-relative path;
+see the `.meas` note under *`WHEN` thresholds must be literal numbers*.)
 
 `crossings` is a third measurement form: an entry declares **exactly one** of
 `spice`, `expr`, or `crossings` (declaring two is exit 1). It requires
@@ -3933,6 +3947,63 @@ and update any pinned image reference; fleet publication and paid cloud runs
 are outside this repository. `engine: "xyce"` is refused. After the analysis, each unique pair adds
 `let __klt_xfer_<k>_num = <num>`, `let __klt_xfer_<k>_den = <den>` and
 `write <corner_dir>/transfer_<k>.raw ...` to the generated `.control` block.
+
+## Butterfly static noise margin (`measurements[].snm`)
+
+Issue [#3895](https://github.com/2AMLogic/klayout-tools/issues/3895). A bistable
+margin (SRAM hold/read SNM, a latch's cross-coupled pair) is one graded scalar,
+so `limits`, `monte_carlo` statistics and `klt yield` consume it like any other
+measurement, with no out-of-tool waveform post-processing:
+
+```json
+{"analysis": {"kind": "dc", "args": "Vin 0 1 0.0025"},
+ "measurements": [
+   {"name": "snm_hold",
+    "snm": {"x": "v(in)", "y1": "v(out_a)", "y2": "v(out_b)"},
+    "limits": {"min": 0.1}}]}
+```
+
+- **Form.** `snm` is an object `{x, y1, y2}` of single-ended `v(node)` selectors
+  (one node token, no whitespace, comma or parenthesis; case-insensitive).
+  Unknown keys and non-string selectors are refused up front (exit 1), as is
+  declaring `snm` beside any other value form (`spice`, `expr`, `crossings`,
+  `cycle_mean`, `energy`, `noise`, `transfer`, `tian`) on the same entry.
+  Measurement names must be unique. `engine: "xyce"` is refused.
+- **Analysis.** Requires `analysis.kind: "dc"`; the sweep axis is `x`. Any other
+  kind is refused up front.
+- **Method.** The butterfly is the curve `(x, y1(x))` and the second curve
+  mirrored, `(y2(x), x)`. Both are rotated by 45 degrees
+  (`u = (x - y)/sqrt(2)`, `v = (x + y)/sqrt(2)`); the vertical gap
+  `v1(u) - v2(u)` between them is the diagonal of an inscribed square, so the
+  per-eye extreme of that gap divided by `sqrt(2)` is the largest square's side.
+  The gap is piecewise linear in `u`, so its extremes sit at the knots of either
+  curve: the result is exact for the sampled polylines and needs no shared
+  sweep grid. It is deliberately **not** the vertical-gap shortcut
+  (`max |y1 - C2(x)|`), which reads a chord along `y` and over-reads the margin.
+- **Value.** `value` is the minimum over the two eyes, in volts, graded against
+  `limits` like any scalar (`status`, `margin`). An additive `snm` sibling echoes
+  `{x, y1, y2}` and adds `eye_upper_left` / `eye_lower_right` (the per-eye
+  sides, volts). The vectors are dumped to a small corner-local rawfile
+  (`snm_<k>.raw`) after the analysis, independent of `options.waveforms`; one
+  computation per unique `x`/`y1`/`y2` triple.
+- **Errors.** A failure is `status: "error"`, `value: null`, and a
+  `code: "measurement"` diagnostic whose message starts with a reason token --
+  never a silent substitute or a pass:
+
+  | Token | Meaning |
+  |---|---|
+  | `[snm_vector_missing]` | an `x`/`y1`/`y2` vector did not resolve (no rawfile written; check node names and `options.save_mode`) |
+  | `[snm_raw_invalid]` | the rawfile could not be read or has the wrong shape |
+  | `[snm_invalid_data]` | mismatched lengths, fewer than three points, or non-finite samples |
+  | `[snm_non_monotonic]` | `x` is not strictly monotonic, or a curve is not a non-increasing transfer curve |
+  | `[snm_no_second_eye]` | the curves enclose fewer than two eyes (not bistable) |
+- **Backends.** `local`, `local-parallel`, `remote` and `batch` all run `snm`; the
+  worker computes it. It is a mandatory runner feature (`snm`, first `klt`
+  release segment `0.7.1`): see "Mandatory features" under "Runner/client `klt`
+  version skew". An older or unreadable runner refuses the request instead of
+  omitting the margin.
+- **Out of scope.** A bounded bisection / `analysis_steps[]` search mode, and
+  read/write-margin wrappers or cell templates.
 
 ## Multi-pass AC acquisition (`analysis.passes`)
 
@@ -4565,6 +4636,14 @@ sync by convention. Declare the schedule in the request instead
 | `signals[].skew_s` | Shift applied to every event of this signal (default `0`; may be negative while `t_s + skew_s >= 0`). |
 | `signals[].events[]` | `t_s` (edge start, strictly increasing, `>= 0`), `level`, optional `transition_s` overriding the signal default for that edge. |
 
+`initial` and `events[].level` are volts, or (issue #3918) a supply-relative
+`{"frac_of": "<corners.supply_v key>", "fraction": <number >= 0>}` resolved
+per corner as `fraction × supply`. That makes a stimulus amplitude follow
+`corners.supply_v` (e.g. a clock swinging to `{"frac_of": "vdd", "fraction": 1.0}`).
+An unknown `frac_of` key, a bad `fraction`, or use without `corners.supply_v`
+fails before any run with `stimulus_invalid`. Edge direction, and so which of
+`rise_s`/`fall_s` applies, is decided per corner on the resolved volts.
+
 An event at `t_s` (plus `skew_s`) is when the edge **starts**; the level is
 reached one transition later. A transition of `0` cannot be written as a PWL
 (time points must increase), so it is applied as 1 fs (`1e-15`); the report
@@ -4600,6 +4679,11 @@ report, not from a side-car file:
 ```
 
 `edge` is `rise`, `fall` or `hold`; `t_applied_s` is `t_s + skew_s`.
+
+When any level is supply-relative the block is instead
+`{"supply_relative": true, "corners": [{"corner_id": ..., "signals": [...]}]}`:
+each corner's signals carry the resolved volts, and a supply-relative event also
+carries `level_spec` (the declared `{frac_of, fraction}`).
 Additive: absent when the request declares no `stimulus`. No `schema_version`
 bump (see `docs/json-contract.md`).
 
@@ -6852,7 +6936,7 @@ the *response* echoes back.
 | `monte_carlo.window_scope` | string          | `"pooled"` (default) or `"per_corner"`: which `mean ± k*stddev` window gates status. `"per_corner"` fails a measurement if any `by_corner[]` window fails and adds `failing_corners` to its `monte_carlo` block; see "Pooled vs. per corner". |
 | `analysis`               | object            | `kind` (e.g. `"op"`, `"dc"`, `"ac"`, `"tran"`) and `args`, the engine-syntax analysis-card arguments. One analysis per corner. `"op"` is a valid `kind`, but see `measurements[]` below — it cannot be paired with a `.meas op` card; measure an operating-point quantity with `measurements[].expr` instead. Required unless the request declares `analysis_steps` instead; declaring both is an application error (exit 1). |
 | `analysis_steps[]`       | array\<object\>   | Issue #2482. Additive alternative to `analysis`: an ordered, non-empty sequence of named solves run inside each corner's one deck — each step `{name, analysis: {kind, args}, alter?, reset?, measurements?}` (`alter` values are a finite number, or `{"pwl": [t0, v0, ...]}` for a `pwl`-declared source). With it, the top-level `measurements[]` are **derived** `expr`s over `<step>.<measurement>` results. ngspice only (refused for `engine: "xyce"`); refuses `options.waveforms`/`--plot`. See "Several solves per corner (`analysis_steps[]`)" above for the full rules. |
-| `measurements[]`         | array\<object\>   | `name` (stable response key) plus **exactly one** of `spice` (a verbatim `.meas` card), `expr` (issue #2533 — a single-line ngspice expression evaluated after the analysis inside `klt sim`'s own `.control` block; see "Measurements that are not `.meas` cards" above), `crossings` (issue #2868 — `{signal, level, edge?, from?, to?, max?}`, a threshold-crossing time series, `tran` only; see "Threshold-crossing time series" above), `cycle_mean` (issue #2947 — `{signal, align, level, cycles, edge?, from?}`, a time-weighted mean over whole reference cycles, `tran` only; see "Cycle-aligned mean" above), `energy` (issue #3033 — `{source, voltage, from?, to?}`, a source's net/gross/recovered energy and charge over a transient window, `tran` only; see "Source energy over a transient window" above), or `transfer` (issue #2923 — `{num, den, metric}`, an AC return-ratio metric, `ac` and local backends only; see "AC return-ratio metrics" above), plus optional `unit`, `optional` (issue #2925 — boolean, default `false`; `true` grades a value-less result `status: "absent"` instead of `error`, `spice`/`expr` on the scalar `analysis` only — see "Optional measurements" above), `limits` (`min`/`max`, either optional), `k_sigma` (per-measurement override of `monte_carlo.k_sigma`), and `plausible_range` (issue #2493 — `min`/`max`, either optional but at least one required; per-measurement plausibility bound, unscoped by `unit`; overrides `options.node_voltage_bounds` when both apply). Optional `on_unreached` (issue #3108 — `"error"` (default) or `"null"`, `spice` only; see "Unreached `.meas` targets" below). No `limits` -> reported, never fails; no `plausible_range` (and no applicable `options.node_voltage_bounds`) -> plausibility check never runs, exactly as before this issue. Declaring both `spice` and `expr`, or neither, is an application error (exit 1). `spice`'s declared analysis type must be one ngspice's own `.MEASURE` implements (`dc`/`ac`/`tran`/`sp`) — there is no `.MEASURE OP`; a `.meas op` card is rejected up front (`SimError`), regardless of the request's own `analysis.kind`. `expr` must reduce to a single real scalar, must be one line, must have a name matching `[A-Za-z_][A-Za-z0-9_]*` unique across `measurements[]`, and is refused for `engine: "xyce"`. |
+| `measurements[]`         | array\<object\>   | `name` (stable response key) plus **exactly one** of `spice` (a verbatim `.meas` card), `expr` (issue #2533 — a single-line ngspice expression evaluated after the analysis inside `klt sim`'s own `.control` block; see "Measurements that are not `.meas` cards" above), `crossings` (issue #2868 — `{signal, level, edge?, from?, to?, max?}`, a threshold-crossing time series, `tran` only; see "Threshold-crossing time series" above), `cycle_mean` (issue #2947 — `{signal, align, level, cycles, edge?, from?}`, a time-weighted mean over whole reference cycles, `tran` only; see "Cycle-aligned mean" above), `energy` (issue #3033 — `{source, voltage, from?, to?}`, a source's net/gross/recovered energy and charge over a transient window, `tran` only; see "Source energy over a transient window" above), or `transfer` (issue #2923 — `{num, den, metric}`, an AC return-ratio metric, `ac` and local backends only; see "AC return-ratio metrics" above), or `snm` (issue #3895 — `{x, y1, y2}`, a butterfly static noise margin of two voltage-transfer curves, `dc` only; see "Butterfly static noise margin" above), plus optional `unit`, `optional` (issue #2925 — boolean, default `false`; `true` grades a value-less result `status: "absent"` instead of `error`, `spice`/`expr` on the scalar `analysis` only — see "Optional measurements" above), `limits` (`min`/`max`, either optional), `k_sigma` (per-measurement override of `monte_carlo.k_sigma`), and `plausible_range` (issue #2493 — `min`/`max`, either optional but at least one required; per-measurement plausibility bound, unscoped by `unit`; overrides `options.node_voltage_bounds` when both apply). Optional `on_unreached` (issue #3108 — `"error"` (default) or `"null"`, `spice` only; see "Unreached `.meas` targets" below). No `limits` -> reported, never fails; no `plausible_range` (and no applicable `options.node_voltage_bounds`) -> plausibility check never runs, exactly as before this issue. Declaring both `spice` and `expr`, or neither, is an application error (exit 1). `spice`'s declared analysis type must be one ngspice's own `.MEASURE` implements (`dc`/`ac`/`tran`/`sp`) — there is no `.MEASURE OP`; a `.meas op` card is rejected up front (`SimError`), regardless of the request's own `analysis.kind`. `expr` must reduce to a single real scalar, must be one line, must have a name matching `[A-Za-z_][A-Za-z0-9_]*` unique across `measurements[]`, and is refused for `engine: "xyce"`. |
 | `options.node_voltage_bounds` | object       | Issue #2493. Run-wide plausibility default (`min`/`max`, either optional but at least one required) — see "Plausibility bounds" above. **Voltage-scoped**: only auto-applies to a measurement declaring `unit: "V"` that has no own `plausible_range`. Omit for no default (today's behaviour, unchanged). |
 | `options.timeout_s`      | number            | Per-corner wall-clock budget. Defaults to `120`. Exceeding it kills the process and yields an `error`-status corner.                                                    |
 | `options.keep_artifacts` | boolean           | Retain per-corner logs/rawfiles on disk under `--outdir` (or its default) and reference them from the response. Defaults to `false`.                                   |
