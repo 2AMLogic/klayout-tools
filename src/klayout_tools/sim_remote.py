@@ -257,6 +257,30 @@ def _lost_shard_corner(
     return report
 
 
+def _await_shards(
+    pool: ThreadPoolExecutor,
+    future_to_index: dict[Any, int],
+    results: list[Any],
+    lost_reasons: list[str | None],
+) -> None:
+    """Collect shard futures into ``results`` / ``lost_reasons`` as they finish.
+
+    An interrupt while waiting cancels the not-yet-started futures first: with
+    a ``max_concurrent_jobs`` cap, the pool's implicit ``shutdown(wait=True)``
+    would otherwise launch every still-queued shard as a new billable job.
+    """
+    try:
+        for future in as_completed(future_to_index):
+            index = future_to_index[future]
+            try:
+                results[index] = future.result()
+            except Exception as exc:  # noqa: BLE001 - "shard never returned"
+                lost_reasons[index] = str(exc)
+    except BaseException:
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+
+
 def _run_sharded(
     *,
     shard_runner: ShardRunner,
@@ -325,18 +349,7 @@ def _run_sharded(
         future_to_index = {
             pool.submit(_run_one, shard): index for index, shard in enumerate(shards)
         }
-        try:
-            for future in as_completed(future_to_index):
-                index = future_to_index[future]
-                try:
-                    results[index] = future.result()
-                except Exception as exc:  # noqa: BLE001 - "shard never returned"
-                    lost_reasons[index] = str(exc)
-        except BaseException:
-            # An interrupt must not let the pool's implicit shutdown(wait=True)
-            # launch every still-queued (capped) shard as a new billable job.
-            pool.shutdown(wait=False, cancel_futures=True)
-            raise
+        _await_shards(pool, future_to_index, results, lost_reasons)
 
     corners: list[dict[str, Any]] = []
     engine_version: str | None = None
