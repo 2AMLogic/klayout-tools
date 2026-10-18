@@ -281,7 +281,7 @@ def _abstract_cell_body_identity_cover(
 
     Returns ``(nwell cover, substrate-isolation cover)``. Must be computed
     **before** :func:`_erase_abstracted_cell_geometry` mutates ``layout``
-    (the caller -- :func:`~klayout_tools.extract.run_extract_klayout_engine`
+    (the caller -- ``tests/helpers/extract_klayout_oracle.py``
     -- already guarantees this, alongside
     :func:`_local_pin_candidate_points`).
 
