@@ -14,7 +14,11 @@ from pathlib import Path
 import klayout.db as kdb
 
 from klayout_tools.decks import get_deck, get_unmodeled_rules
-from klayout_tools.decks.gf180mcu import LAYER_NAMES, UNTRANSCRIBED_RULES
+from klayout_tools.decks.gf180mcu import (
+    LAYER_NAMES,
+    UNMODELED_RULES,
+    UNTRANSCRIBED_RULES,
+)
 from klayout_tools.drc import run_drc
 
 DOGBONE_GF180MCU = (
@@ -107,8 +111,10 @@ def test_conforming_esd_is_clean_of_esd_rules(tmp_path):
 def test_untranscribed_rules_are_disclosed_without_degrading_status():
     report = run_drc(str(DOGBONE_GF180MCU), "gf180mcu")
     coverage = report["coverage"]
-    assert coverage["unmodeled_rules"] == sorted(UNTRANSCRIBED_RULES)
-    assert get_unmodeled_rules("gf180mcu") == sorted(UNTRANSCRIBED_RULES)
+    assert coverage["unmodeled_rules"] == sorted(UNMODELED_RULES)
+    assert get_unmodeled_rules("gf180mcu") == sorted(UNMODELED_RULES)
+    # The ESD/GR remainder is disclosed alongside the MT30/MSLOT ids (#3796).
+    assert set(UNTRANSCRIBED_RULES) <= set(UNMODELED_RULES)
     # Disclosed, not graded (like `unchecked_rules`): a violation-free
     # gf180mcu layout stays `clean`, so `klt eval` / `klt signoff` can pass it.
     assert report["status"] == "clean"
