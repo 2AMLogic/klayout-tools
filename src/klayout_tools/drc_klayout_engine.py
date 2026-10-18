@@ -365,6 +365,65 @@ def _klayout_deck_error_detail(
     return "\n".join(head + kept)
 
 
+def _check_klayout_run(
+    completed: subprocess.CompletedProcess[str],
+    report_path: str,
+    *,
+    allow_deck_errors: bool,
+) -> tuple[list[str], bool]:
+    """Judge a finished ``klayout -b -r`` run; raise :class:`DrcError` when its
+    report cannot be trusted, else return ``(error_lines, deck_errored)``.
+
+    ``deck_errored`` is true only when the run failed but ``allow_deck_errors``
+    let the partial report through.
+    """
+    if not os.path.isfile(report_path):
+        # klayout -b -r can exit 0 even when the deck script errored out
+        # before reaching report(...) -- never trust the exit code alone
+        # (see :func:`run_drc_klayout_engine`'s docstring). No report file at
+        # all means no trustworthy verdict is possible; surface klayout's own
+        # stdout/stderr rather than a bare "no report" message. Not
+        # tolerable via allow_deck_errors: there is no partial report to
+        # accept here, only nothing at all.
+        output = (completed.stdout or completed.stderr or "").strip()
+        crash = _klayout_crash_signal(completed.returncode, output)
+        if crash is not None:
+            # A crash (#3811) is a klayout/deck bug, not a deck script
+            # error: name it so it is not mistaken for a mistyped deck.
+            raise DrcError(
+                f"klayout crashed ({crash}) before producing a report "
+                f"file. klayout's own output:\n{output}"
+            )
+        raise DrcError(
+            "klayout did not produce a report file -- the deck script "
+            "likely failed before completing. klayout's own output:\n" + output
+        )
+
+    # ...and the report file's presence is not a completion signal either
+    # (issue #1941): a deck that called report(...) early and then aborted
+    # leaves a partial report behind. Either of klayout's own failure
+    # signals -- a non-zero exit status, or an ERROR-prefixed line in its
+    # output -- means the rules after the abort never ran, so the partial
+    # report's zero violations must not be reported as "clean".
+    error_lines = _klayout_deck_error_lines(completed.stdout, completed.stderr)
+    deck_errored = completed.returncode != 0 or bool(error_lines)
+    if deck_errored and not allow_deck_errors:
+        # Issue #2333: the *whole* captured output, not `error_lines`
+        # alone -- the causal line is routinely not ERROR-prefixed.
+        detail = _klayout_deck_error_detail(
+            completed.stdout, completed.stderr, error_lines
+        )
+        raise DrcError(
+            "klayout reported an error while running the deck script "
+            f"(exit status {completed.returncode}) -- the deck likely "
+            "aborted part-way through, so the report file it did write "
+            "covers only the rules that ran before the abort, and its "
+            "verdict cannot be trusted. Pass --allow-deck-errors to "
+            "accept a partial report anyway. klayout's own output:\n" + detail
+        )
+    return error_lines, deck_errored
+
+
 #: Ruby's shell-out forms, as they appear in a KLayout DRC-DSL driver script
 #: (issue #2333). Each alternative captures the *command string* the host
 #: shell would run, which :func:`_shell_command_words` then reduces to the
@@ -1034,10 +1093,39 @@ def _evaluate_category_set_assertion(
     }
 
 
+def _packaged_asap7_unchecked_rules(
+    deck_file: str, layout: Any
+) -> list[dict[str, str]]:
+    """``coverage.unchecked_rules`` for a run of the packaged ASAP7 deck
+    (issue #3807): areas the deck knowingly does not check (PAD), named only
+    when the layout has shapes on the layer, like the curated engine's
+    ``unchecked_rules``. A different deck file yields none -- its content
+    must match the packaged deck byte for byte."""
+    from .decks import asap7_rules
+
+    if sha256_file(deck_file) != sha256_file(str(asap7_rules.DECK_PATH)):
+        return []
+    present = {
+        (info.layer, info.datatype)
+        for index, info in zip(
+            layout.layer_indexes(), layout.layer_infos(), strict=True
+        )
+        if any(not cell.shapes(index).is_empty() for cell in layout.each_cell())
+    }
+    return [
+        {"rule": rule, "layer": f"{layer}/{datatype}", "description": description}
+        for rule, (layer, datatype, description) in sorted(
+            asap7_rules.UNCHECKED_AREAS.items()
+        )
+        if (layer, datatype) in present
+    ]
+
+
 def _klayout_engine_coverage(
     rule_counts: dict[str, int],
     rule_categories: list[str],
     coverage_assertion: dict[str, Any] | None,
+    unchecked_rules: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """The klayout engine's ``coverage`` block. Categories are declarations,
     not execution instrumentation, unless the caller's satisfied
@@ -1070,7 +1158,7 @@ def _klayout_engine_coverage(
         "layers_in_stream_without_rules": [],
         "rules_skipped": [],
         "voltage_domain_warnings": [],
-        "unchecked_rules": [],
+        "unchecked_rules": unchecked_rules or [],
         "deck_scope": [],
         **build_check_coverage(checked=checked, unknown=unknown),
     }
@@ -1556,50 +1644,9 @@ def run_drc_klayout_engine(
                 "--timeout-s to allow more time)"
             ) from exc
 
-        if not os.path.isfile(report_path):
-            # klayout -b -r can exit 0 even when the deck script errored out
-            # before reaching report(...) -- never trust the exit code alone
-            # (see this function's docstring). No report file at all means no
-            # trustworthy verdict is possible; surface klayout's own
-            # stdout/stderr rather than a bare "no report" message. Not
-            # tolerable via allow_deck_errors: there is no partial report to
-            # accept here, only nothing at all.
-            output = (completed.stdout or completed.stderr or "").strip()
-            crash = _klayout_crash_signal(completed.returncode, output)
-            if crash is not None:
-                # A crash (#3811) is a klayout/deck bug, not a deck script
-                # error: name it so it is not mistaken for a mistyped deck.
-                raise DrcError(
-                    f"klayout crashed ({crash}) before producing a report "
-                    f"file. klayout's own output:\n{output}"
-                )
-            raise DrcError(
-                "klayout did not produce a report file -- the deck script "
-                "likely failed before completing. klayout's own output:\n" + output
-            )
-
-        # ...and the report file's presence is not a completion signal either
-        # (issue #1941): a deck that called report(...) early and then aborted
-        # leaves a partial report behind. Either of klayout's own failure
-        # signals -- a non-zero exit status, or an ERROR-prefixed line in its
-        # output -- means the rules after the abort never ran, so the partial
-        # report's zero violations must not be reported as "clean".
-        error_lines = _klayout_deck_error_lines(completed.stdout, completed.stderr)
-        deck_errored = completed.returncode != 0 or bool(error_lines)
-        if deck_errored and not allow_deck_errors:
-            # Issue #2333: the *whole* captured output, not `error_lines`
-            # alone -- the causal line is routinely not ERROR-prefixed.
-            detail = _klayout_deck_error_detail(
-                completed.stdout, completed.stderr, error_lines
-            )
-            raise DrcError(
-                "klayout reported an error while running the deck script "
-                f"(exit status {completed.returncode}) -- the deck likely "
-                "aborted part-way through, so the report file it did write "
-                "covers only the rules that ran before the abort, and its "
-                "verdict cannot be trusted. Pass --allow-deck-errors to "
-                "accept a partial report anyway. klayout's own output:\n" + detail
-            )
+        error_lines, deck_errored = _check_klayout_run(
+            completed, report_path, allow_deck_errors=allow_deck_errors
+        )
 
         violations, rule_counts, rule_categories = _parse_klayout_rdb_report(
             report_path, dbu
@@ -1622,7 +1669,10 @@ def run_drc_klayout_engine(
     )
 
     coverage = _klayout_engine_coverage(
-        rule_counts, rule_categories, coverage_assertion
+        rule_counts,
+        rule_categories,
+        coverage_assertion,
+        _packaged_asap7_unchecked_rules(deck_file, layout),
     )
     deck_global_warnings = _missing_deck_globals_warning(deck_file, deck_vars)
     rollup = coverage_rollup({"coverage": coverage}, failed=bool(violations))

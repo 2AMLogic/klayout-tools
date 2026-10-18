@@ -1442,6 +1442,20 @@ def test_run_drc_sky130_coverage_lists_unmodeled_rules(tmp_path):
     assert get_unmodeled_rules("no-such-deck") == []
 
 
+def test_run_drc_sg13g2_coverage_lists_unmodeled_pad_and_latchup_rules(tmp_path):
+    """A clean sg13g2 verdict must disclose the un-transcribed `Pad.*` and
+    `LU.*` runset rules (issue #3854); sorted, and other decks unaffected."""
+    path = tmp_path / "sg13g2_unmodeled.gds"
+    _make_sky130_nwell_hvi_layout(None).write(str(path))
+
+    unmodeled = run_drc(str(path), "sg13g2")["coverage"]["unmodeled_rules"]
+
+    assert unmodeled == sorted(unmodeled)
+    assert {"Pad.a1", "Pad.d", "Pad.jR", "LU.a", "LU.d1"} <= set(unmodeled)
+    assert all(r.startswith(("Pad.", "LU.")) for r in unmodeled)
+    assert get_unmodeled_rules("gf180mcu") == []
+
+
 def test_run_drc_sky130_hvi_marker_no_warning_without_overlap(tmp_path):
     """Counterfactual for the test above: `hvi` present in the stream but
     never interacting with geometry an unscoped rule checked produces no
@@ -7238,15 +7252,15 @@ def test_run_drc_threshold_max_dbu_validated_even_when_layer_absent(
 
 
 def test_run_drc_sg13g2_every_rule_has_provenance():
-    """Every one of sg13g2's 48 curated `DrcRule` entries carries a populated
+    """Every one of sg13g2's 50 curated `DrcRule` entries carries a populated
     `provenance` citation (issue #905's own acceptance criterion: "every
     compiled rule cites its SG13G2 PDK source line", extended by issue #1243's
-    Metal3-TopMetal2 stack, issue #2581's 6.11 MIM group and issue #3787's pSD
-    group) -- not just the
-    32 width/space rules `tests/test_golden_deck.py`'s generic check already
+    Metal3-TopMetal2 stack, issue #2581's 6.11 MIM group, issue #3787's pSD
+    group and issue #3571's NWell rules) -- not just the
+    36 width/space rules `tests/test_golden_deck.py`'s generic check already
     covers."""
     deck = get_deck("sg13g2")
-    assert len(deck) == 48
+    assert len(deck) == 50
     for rule in deck:
         assert rule.provenance is not None, f"sg13g2/{rule.id}: no provenance"
         assert rule.provenance.source_repo == "IHP-GmbH/IHP-Open-PDK"
@@ -8396,9 +8410,11 @@ def test_run_drc_sg13g2_mim_rules_cite_the_6_11_mim_group():
     for rule in mim_rules.values():
         assert rule.check == "enclosing"
         assert rule.provenance.source_path.endswith("beol/6_11_mim.drc")
+    # `nwell.width.1` (issue #3571) legitimately cites the maximal runset:
+    # `NW.a` is not implemented in the modular `5_1_nwell.drc`.
     assert {
         rule.id for rule in deck if "maximal" in (rule.provenance.source_path or "")
-    } == {"psd.width.1", "psd.space.1", "psd.area.1"}  # issue #3787
+    } == {"psd.width.1", "psd.space.1", "psd.area.1", "nwell.width.1"}  # #3787, #3571
 
 
 # --------------------------------------------------------------------------- #
