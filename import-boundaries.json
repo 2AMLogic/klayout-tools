@@ -490,6 +490,7 @@
         "klayout_tools.sim_staging",
         "klayout_tools.sim_steps",
         "klayout_tools.sim_stimulus",
+        "klayout_tools.sim_subckt_override",
         "klayout_tools.sim_supply_waveform",
         "klayout_tools.sim_tian",
         "klayout_tools.sim_transfer",

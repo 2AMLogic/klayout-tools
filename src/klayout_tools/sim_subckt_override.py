@@ -161,57 +161,55 @@ def _quote(path: str) -> str:
     return f'"{path}"'
 
 
-def apply_overrides(
-    netlist_path: str,
+def _locate(
+    item: SubcktOverride, files: list[str], current: dict[str, str]
+) -> tuple[str, tuple[int, int]]:
+    """The one ``(file, block)`` defining ``item.name``; raises for none/many or
+    a replacement that does not define it."""
+    hits = [
+        (path, blocks)
+        for path in files
+        if (blocks := find_blocks(current[path], item.name))
+    ]
+    count = sum(len(blocks) for _, blocks in hits)
+    if count == 0:
+        raise OverrideError(
+            f".subckt {item.name} is not defined in the netlist or its "
+            "resolved .include closure (includes under $VAR or the PDK "
+            "root are left to the executing host and are not searched)"
+        )
+    if count > 1:
+        where = ", ".join(path for path, _ in hits)
+        raise OverrideError(
+            f".subckt {item.name} is ambiguous: {count} definitions in {where}"
+        )
+    if not find_blocks(_read(item.replacement), item.name):
+        raise OverrideError(
+            f"replacement '{item.replacement}' does not define .subckt {item.name}"
+        )
+    return hits[0][0], hits[0][1][0]
+
+
+def _collect_edits(
+    files: list[str],
+    texts: dict[str, str],
     overrides: list[SubcktOverride],
     *,
-    work_dir: str,
-    roots: tuple[str, ...] = (),
-    repo_root: str | None = None,
-) -> tuple[str, list[dict[str, Any]]]:
-    """Return ``(netlist_to_dispatch, report_entries)``; raises
-    :class:`OverrideError` before anything is written for an unknown or
-    ambiguous name or a replacement that does not define the subcircuit."""
+    repo_root: str | None,
+) -> tuple[dict[str, str], list[dict[str, Any]]]:
+    """path -> new text (each override edits the possibly already edited file),
+    plus the report entries (``stripped_sha256`` filled in later)."""
     from . import env_provenance
 
-    try:
-        staged = sim_staging.stage_netlist(
-            netlist_path, netlist_staged_name="netlist.cir", roots=roots
-        )
-    except sim_staging.IncludeStagingError as exc:
-        raise OverrideError(str(exc)) from exc
-    files = [os.path.abspath(f.source_path or f.local_path or "") for f in staged.files]
-    texts = {path: _read(path) for path in files}
-
-    # path -> new text; each override edits the (possibly already edited) file.
-    edits: dict[str, str] = {}
+    current = dict(texts)
+    edited: set[str] = set()
     report: list[dict[str, Any]] = []
     for item in overrides:
-        hits = [
-            (path, blocks)
-            for path in files
-            if (blocks := find_blocks(edits.get(path, texts[path]), item.name))
-        ]
-        count = sum(len(blocks) for _, blocks in hits)
-        if count == 0:
-            raise OverrideError(
-                f".subckt {item.name} is not defined in the netlist or its "
-                "resolved .include closure (includes under $VAR or the PDK "
-                "root are left to the executing host and are not searched)"
-            )
-        if count > 1:
-            where = ", ".join(path for path, _ in hits)
-            raise OverrideError(
-                f".subckt {item.name} is ambiguous: {count} definitions in {where}"
-            )
-        if not find_blocks(_read(item.replacement), item.name):
-            raise OverrideError(
-                f"replacement '{item.replacement}' does not define .subckt {item.name}"
-            )
-        path, (block,) = hits[0][0], hits[0][1]
-        edits[path] = _strip(
-            edits.get(path, texts[path]), block, f".include {_quote(item.replacement)}"
+        path, block = _locate(item, files, current)
+        current[path] = _strip(
+            current[path], block, f".include {_quote(item.replacement)}"
         )
+        edited.add(path)
         report.append(
             {
                 "name": item.name,
@@ -225,8 +223,16 @@ def apply_overrides(
                 "_path": path,
             }
         )
+    return {path: current[path] for path in edited}, report
 
-    # Include graph over the closure, to re-point every ancestor of an edited file.
+
+def _changed_closure(
+    files: list[str],
+    texts: dict[str, str],
+    edits: dict[str, str],
+    roots: tuple[str, ...],
+) -> set[str]:
+    """Edited files plus every ancestor in the include graph (to re-point)."""
     graph = {path: _include_targets(texts[path], path, roots) for path in files}
     changed = set(edits)
     grew = True
@@ -236,7 +242,58 @@ def apply_overrides(
             if path not in changed and any(t in changed for _, t in targets):
                 changed.add(path)
                 grew = True
+    return changed
 
+
+def _repoint(
+    text: str, origin: str, copy_of: dict[str, str], roots: tuple[str, ...]
+) -> str:
+    """Absolutize each resolvable include in ``text``; edited children point at
+    their copies. Positions are taken from the edited text (a block removal
+    shifts lines)."""
+    lines = text.splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        body = line.rstrip("\r\n")
+        match = _INCLUDE_RE.match(body)
+        if match is None:
+            continue
+        raw = match.group("target")
+        target = raw[1:-1] if raw[0] in "\"'" else raw
+        resolved = sim_staging.resolve_include_target(
+            target, origin=origin, roots=roots
+        )
+        if resolved is None or not os.path.isfile(resolved):
+            continue
+        resolved = copy_of.get(resolved, resolved)
+        lines[index] = (
+            f"{match.group('lead')}{_quote(resolved)}{match.group('tail')}"
+            + line[len(body) :]
+        )
+    return "".join(lines)
+
+
+def apply_overrides(
+    netlist_path: str,
+    overrides: list[SubcktOverride],
+    *,
+    work_dir: str,
+    roots: tuple[str, ...] = (),
+    repo_root: str | None = None,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Return ``(netlist_to_dispatch, report_entries)``; raises
+    :class:`OverrideError` before anything is written for an unknown or
+    ambiguous name or a replacement that does not define the subcircuit."""
+    try:
+        staged = sim_staging.stage_netlist(
+            netlist_path, netlist_staged_name="netlist.cir", roots=roots
+        )
+    except sim_staging.IncludeStagingError as exc:
+        raise OverrideError(str(exc)) from exc
+    files = [os.path.abspath(f.source_path or f.local_path or "") for f in staged.files]
+    texts = {path: _read(path) for path in files}
+
+    edits, report = _collect_edits(files, texts, overrides, repo_root=repo_root)
+    changed = _changed_closure(files, texts, edits, roots)
     copy_of = {
         path: os.path.join(work_dir, f"{index}_{os.path.basename(path)}")
         for index, path in enumerate(sorted(changed))
@@ -246,30 +303,9 @@ def apply_overrides(
     if top in copy_of:
         copy_of[top] = os.path.join(work_dir, "netlist.subckt-override.cir")
     for path in sorted(changed):
-        text = edits.get(path, texts[path])
-        # Recompute include positions on the edited text (a block removal
-        # shifts lines), absolutizing each include; edited children point at
-        # their copies.
-        lines = text.splitlines(keepends=True)
-        for index, line in enumerate(lines):
-            body = line.rstrip("\r\n")
-            match = _INCLUDE_RE.match(body)
-            if match is None:
-                continue
-            raw = match.group("target")
-            target = raw[1:-1] if raw[0] in "\"'" else raw
-            resolved = sim_staging.resolve_include_target(
-                target, origin=path, roots=roots
-            )
-            if resolved is None or not os.path.isfile(resolved):
-                continue
-            resolved = copy_of.get(resolved, resolved)
-            lines[index] = (
-                f"{match.group('lead')}{_quote(resolved)}{match.group('tail')}"
-                + line[len(body) :]
-            )
+        text = _repoint(edits.get(path, texts[path]), path, copy_of, roots)
         with open(copy_of[path], "w", encoding="utf-8", newline="") as fh:
-            fh.write("".join(lines))
+            fh.write(text)
 
     for entry in report:
         entry["stripped_sha256"] = sha256_file(copy_of[entry.pop("_path")])

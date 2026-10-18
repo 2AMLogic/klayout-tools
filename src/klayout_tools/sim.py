@@ -3409,19 +3409,12 @@ def _run_sim_corners(
         if resume
         else corner_points
     )
-    if (
-        netlist_overrides_report is not None
-        and backend_from_host_default
-        and backend in _OFFHOST_BACKENDS
-        and len(dispatch_points) > 1
-    ):
-        raise SimError(
-            "request.netlist_overrides cannot run on the host-default "
-            f"{backend!r} backend (the rewritten include closure is not "
-            "forwarded to remote/batch workers) and this request has "
-            f"{len(dispatch_points)} corners; run a single corner, or pass "
-            "--backend local explicitly"
-        )
+    _refuse_override_on_host_default(
+        netlist_overrides_report,
+        backend=backend,
+        backend_from_host_default=backend_from_host_default,
+        n_points=len(dispatch_points),
+    )
     # A single-unit run under a host default stays here: one corner does not
     # repay a Spot instance's minutes of boot, and it is exactly the "probe
     # one corner locally" case 2am#1004's ruling keeps local.
@@ -3949,10 +3942,9 @@ def _run_sim_corners(
     # Issue #2977: additive, only when declared; the schedule as applied (skew
     # and transition times resolved, PWL points included) -- see docs/cli/sim.md.
     environment.update(sim_stimulus.environment_entry(stimulus_signals))
-    if netlist_overrides_report is not None:
-        # Additive/optional (issue #3919): only present when the request
-        # declares `netlist_overrides` -- see docs/cli/sim.md.
-        environment["netlist_overrides"] = netlist_overrides_report
+    # Additive/optional (issue #3919): only present when the request declares
+    # `netlist_overrides` -- see docs/cli/sim.md.
+    environment.update(_netlist_overrides_environment(netlist_overrides_report))
     if monte_carlo_info is not None:
         # Additive/optional: only present when the request declares
         # `monte_carlo` -- the seed contract's request-level echo, per
@@ -6282,6 +6274,34 @@ def _apply_mismatch_instance_gating(
         "negative_control": not any(r["randomised"] for r in rows),
     }
     return gated_path, report
+
+
+def _netlist_overrides_environment(report: Any) -> dict[str, Any]:
+    return {} if report is None else {"netlist_overrides": report}
+
+
+def _refuse_override_on_host_default(
+    report: Any,
+    *,
+    backend: str,
+    backend_from_host_default: bool,
+    n_points: int,
+) -> None:
+    """Issue #3919: a multi-corner request with ``netlist_overrides`` cannot
+    follow a host-default off-host backend (the rewritten closure stays here)."""
+    if (
+        report is not None
+        and backend_from_host_default
+        and backend in _OFFHOST_BACKENDS
+        and n_points > 1
+    ):
+        raise SimError(
+            "request.netlist_overrides cannot run on the host-default "
+            f"{backend!r} backend (the rewritten include closure is not "
+            "forwarded to remote/batch workers) and this request has "
+            f"{n_points} corners; run a single corner, or pass "
+            "--backend local explicitly"
+        )
 
 
 def _maybe_override_subckts(
