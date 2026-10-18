@@ -7224,6 +7224,26 @@ of the file's on-disk bytes). A directive left to the executing host is
 `environment.netlist_closure_error` carries the message instead and the report
 is otherwise unchanged.
 
+### `environment.corner_coverage` (issue #3794)
+
+A multi-corner sweep can look complete while some device flavours never move:
+gf180mcu's deck binds its 5/6V MOSFETs (`06v0`, `06v0_nvt`) to the typical
+model in every process section. When `models.pdk` resolves to a PDK whose
+corner data is per-flavour (see [`klt pdk corners`](pdk.md#klt-pdk-corners))
+and the request has non-typical process corners, `environment.corner_coverage`
+lists, per requested process section, the flavours that do **not** move:
+
+```json
+"corner_coverage": {
+  "pdk": "gf180mcuD",
+  "sections": [{"process": "ss", "unmoved_devices": ["06v0", "06v0_nvt"]}]
+}
+```
+
+Additive: absent when there is no `models.pdk`, the PDK is not found, it has
+no per-flavour corner data (e.g. sky130), or nothing is unmoved. No
+`schema_version` bump (docs/json-contract.md: new fields are additive).
+
 ### `environment.netlist_identity` (issue #3074)
 
 `environment.netlist_sha256` and `netlist_closure` hash raw bytes, so a comment

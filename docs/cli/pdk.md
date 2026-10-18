@@ -1030,7 +1030,12 @@ sf        no        mos=skewed bjt=- diode=- resistor=- mim_cap=- mos_cap=-
     {
       "corner": "ss",
       "sections": [
-        { "family": "mos", "section": "ss", "skew": "skewed" },
+        { "family": "mos", "section": "ss", "skew": "skewed",
+          "devices": [
+            { "flavour": "03v3", "section": "ss", "skew": "skewed" },
+            { "flavour": "06v0", "section": "ss", "skew": "typical" },
+            { "flavour": "06v0_nvt", "section": "ss", "skew": "typical" }
+          ] },
         { "family": "bjt", "section": "bjt_ss", "skew": "param" },
         { "family": "diode", "section": "diode_ss", "skew": "param" },
         { "family": "resistor", "section": "res_ss", "skew": "param" },
@@ -1121,17 +1126,24 @@ values) — so this half of the answer never drifts silently against an
 upgraded PDK. A CI-validation harness that checks the curated grouping
 itself against a release (the spike's own open question) is not built here.
 
-Skew is classified **per curated family**, not per individual device flavor.
-A family reported `"skewed"` means *some* of its devices moved off the
-typical section for that corner — not that *every* device did. gf180mcu's
-own deck, for example, leaves its `nfet_06v0`/`pfet_06v0` MOSFET flavors
-bound to the same `_t`-suffixed (typical) model inside every corner while
-its `nfet_03v3`/`pfet_03v3` flavors do skew, both inside the single curated
-`mos` family — this command correctly reports `mos` as `"skewed"` for that
-corner, but does not itself flag the 06v0 sub-flavor as unmoved. Resolving
-that finer, per-flavor question is the spike's own proposed `klt pdk device`/
-`klt pdk corner --pdk <variant> --corner <name>` follow-up (section 2.2), a
-natural next issue, not this command's scope.
+Family-level skew is classified **per curated family**: a family reported
+`"skewed"` means *some* of its devices moved off the typical section for that
+corner — not that *every* device did. gf180mcu's own deck, for example, leaves
+its `nfet_06v0`/`pfet_06v0` MOSFET flavors bound to the same `_t`-suffixed
+(typical) model inside every corner while its `nfet_03v3`/`pfet_03v3` flavors
+do skew, both inside the single curated `mos` family.
+
+To resolve that finer question, gf180mcu's `mos` section entries carry an
+additive `devices` list (issue #3794) — one `{flavour, section, skew}` per
+device flavour (`03v3`, `06v0`, `06v0_nvt`, …, derived from the section's
+`.lib '<file>' <model>_<flavour>_<suffix>` include tokens), each classified
+against that flavour's own typical-corner include set (`"skewed"`/`"typical"`;
+`section`/`skew` are `null` for a flavour the typical corner has but the
+section does not). For gf180mcuD, `ff`/`ss`/`fs`/`sf` report `03v3` as
+`"skewed"` and `06v0`/`06v0_nvt` as `"typical"`. Family-level `skew` and
+`complete` keep their meaning; other families and sky130 carry no `devices`.
+`klt sim` surfaces the unmoved flavours as
+[`environment.corner_coverage`](sim.md#environmentcorner_coverage-issue-3794).
 
 ## `klt pdk em-limits`
 
