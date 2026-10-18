@@ -12,6 +12,7 @@ klt pdk env         [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
 klt pdk check       [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
 klt pdk cells       [--pdk <variant>] [--pdk-root <dir>] [--supply <volts>] [--format text|json]
 klt pdk macros      [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
+klt pdk decks       [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
 klt pdk corners     [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
 klt pdk em-limits   [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
 klt pdk pcell-check [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
@@ -968,6 +969,65 @@ views: there is no PDK-wide-consistent convention across hard-macro IP
 (an SRAM compiler's `.lib`/`.spice` shape differs from a standard-cell
 library's) to extract from the way `klt pdk cells` extracts from
 `spice/<lib>.spice`/`lib/*.lib`.
+
+## `klt pdk decks`
+
+Lists the KLayout DRC deck files a variant ships under
+`libs.tech/klayout/drc/` (or the flat-install `tech/drc/`) and the `-rd`
+globals each one consumes. `klt drc --engine klayout --pdk <variant>` runs
+exactly one of them (`is_default`); the siblings (for sky130A,
+`sky130A_mr.drc`, the "maximal rules" runset) are otherwise invisible, and a
+sibling passed via `--deck-file` without the globals it gates on silently
+runs zero rules (`coverage_unknown`, issue #1302).
+
+```
+$ klt pdk decks --pdk sky130A
+pdk: sky130A
+
+deck             kind   default  globals
+---------------  -----  -------  -------------------------------------------------------
+sky130A.lydrc    lydrc  yes      -
+sky130A_mr.drc   drc             beol, feol, floating_met, offgrid, seal*, sram_exclude, thr*
+...
+* = no default detected; supply with `klt drc --deck-var name=value`
+```
+
+```json
+{
+  "schema_version": 1,
+  "pdk": "sky130A",
+  "root": "/usr/share/pdk",
+  "decks": [
+    {
+      "path": "/usr/share/pdk/sky130A/libs.tech/klayout/drc/sky130A_mr.drc",
+      "name": "sky130A_mr.drc",
+      "kind": "drc",
+      "is_default": false,
+      "globals": [
+        {"name": "feol", "required_by_caller": false, "default": "false"},
+        {"name": "thr", "required_by_caller": true, "default": null}
+      ]
+    }
+  ]
+}
+```
+
+- `kind` — `lydrc` (`*.lydrc`), `drc` (`*.drc`), or `helper` (`*.rb.drc`,
+  Ruby helper scripts that merely carry the `.drc` extension; listed but not
+  scanned, `globals: []`). Other files in the directory (e.g. Python drivers)
+  are not listed.
+- `globals` — name-sorted. `$input`, `$report` (supplied by `klt`) and
+  `$top_cell` (read under `if $input`) are never listed, nor are Ruby's own
+  globals. A global assigned under `if not defined? $x`, `... unless defined?
+  $x` or `||=` is `required_by_caller: false` with its literal `default`;
+  any other `$name` mentioned outside a comment is `required_by_caller: true`.
+  Literal `require`/`load` includes are followed.
+- **This is a heuristic line scan, not a Ruby parser.** A missing entry is not
+  proof a deck ignores a variable, and a defaulted global (e.g. `feol`
+  defaulting to `"false"`) can still silently disable whole rule groups —
+  read the defaults, not just the `required_by_caller` flag.
+- A variant with no `drc/` directory is a successful empty `decks` list.
+  Library: `klayout_tools.pdk.drc_decks(variant, root)`.
 
 ## `klt pdk corners`
 

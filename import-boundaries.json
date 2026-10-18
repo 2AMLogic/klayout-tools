@@ -955,6 +955,11 @@
     },
     {
       "consumer": "pdk",
+      "exporter": "drc",
+      "reason": "Issue #3816: `klt pdk decks` reuses the DRC engine's deck-global scanner (scan_deck_globals) instead of a second Ruby scan; imported lazily."
+    },
+    {
+      "consumer": "pdk",
       "exporter": "extract",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
     },
