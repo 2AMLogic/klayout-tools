@@ -4,6 +4,8 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-18
 
+- **PR #3947**: feat(sim): explain not_comparable PDK stamps and show them in batch text summary
+- **Issue #3946** (closed): klt sim batch: runner PDK stamp differing from client's is reported only as not_comparable; no way to stage client models or require a match
 - **PR #3641**: fix(op-lint): scale supply_waveforms sources instead of altering them
 - **Issue #3624** (closed): sim --op-lint: alter of a corners.supply_waveforms PWL/PULSE source is a silent no-op
 - **PR #3943**: feat: add monte_carlo.mismatch_scale for mismatch sigma scaling and determinism control
