@@ -1947,9 +1947,21 @@ including failed corners and exit-3/4 jobs.
 
 Limitations: if the job failed before ngspice ran (a validation error, a
 failed upload) no deck or log exists, so there is nothing to retrieve. In that
-case the diagnostic and `environment.remote` give `job_id` and `bucket`;
+case the diagnostic and `environment.remote` give `job_id` and `region`;
 the remaining evidence (`status.json`, `harness.log`, `outputs/`) lives at
-`s3://<bucket>/<jobs prefix>/<job_id>/`.
+`s3://<bucket>/<jobs prefix>/<job_id>/` (the bucket is your configured
+`batch.bucket`; reports never print it, see "Reports omit the bucket" below).
+
+### Reports omit the bucket
+
+`environment.remote.bucket` is no longer emitted (issue #3777). The batch
+bucket name embeds the fleet's AWS account number, and `--report-out` reports
+are meant to be committed unmodified as evidence, so emitting it published
+that number from any public repo. `job_id` and `region` stay, which is enough
+to `--attach`; the receipt file in the artifacts directory and the
+`--submit-only` / `--status` outputs still carry `bucket` (operational, not
+committed evidence). Report-bound text (poll-timeout and interrupt messages,
+`harness_log`) shows `s3://<bucket>/...` literally in place of the name.
 
 ### Post-processing waveforms from a batch run locally
 
@@ -2139,7 +2151,7 @@ directory of the request is left alone.
 | `unit_count` / `passed` / `errored` / `timed_out` | Counts over `units[]`. |
 | `units[]` | One entry per deck, in request order: `id`, `status` (`"pass"` / `"error"` / `"timeout"`), `exit_code` (`null` when the engine never launched), `timed_out`, `duration_s`, `engine_version` (best-effort from the engine's own stdout banner — recorded per unit and top-level as engine identity), `deck` (unit-relative name as run), `deck_sha256`, `stdout`, `stderr`, `outputs`, `missing_outputs`, `host_resolved` (include targets left to the executing host), `diagnostics[]` (`timeout`, `engine_exit`, `engine_not_found`; off-host job failures carry `batch_job_failed` / `batch_job_timeout` / `batch_poll_timeout`, with the job's own klt error envelope attached where one was recoverable, or `remote_job_failed` when the `remote` backend's SSH run fails — the unit trees already written on the instance are pulled back before teardown, so `stdout`/`stderr`/`outputs` point at whatever evidence was recovered and the message says which streams came back). |
 | `outdir` | Absolute path of the artifacts directory on the reporting host. |
-| `environment` | `engine`, `engine_version`, `ngspice_binary`, `engine_host` (`"local"`/`"worker"`; off-host runs also `client_ngspice_binary`, and `ngspice_binary` is then the worker's, see "Which machine ran it"), `klt_version`, `max_workers`; off-host runs add `remote` — the same block corner reports carry (`provider`, `instance_id`/`instance_type`, `job_id`/`bucket` for batch, `runner_klt_version` identity, ...). |
+| `environment` | `engine`, `engine_version`, `ngspice_binary`, `engine_host` (`"local"`/`"worker"`; off-host runs also `client_ngspice_binary`, and `ngspice_binary` is then the worker's, see "Which machine ran it"), `klt_version`, `max_workers`; off-host runs add `remote` — the same block corner reports carry (`provider`, `instance_id`/`instance_type`, `job_id`/`region` for batch, `runner_klt_version` identity, ...). |
 
 ### Runner support for `decks[]` on the batch backend (issue #3303)
 
