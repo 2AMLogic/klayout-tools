@@ -380,6 +380,67 @@ def test_ambiguity_warning_is_none_when_unambiguous(tmp_path, monkeypatch):
     assert pdk.ambiguity_warning(pdk.find_pdk(variant="sky130A")) is None
 
 
+def _make_gf180_root(tmp_path):
+    root = tmp_path / "gf"
+    for name in ("gf180mcuA", "gf180mcuB", "gf180mcuC", "gf180mcuD"):
+        _make_install(root, name)
+    return root
+
+
+def test_find_lists_alternative_variants_when_unselected(tmp_path):
+    root = _make_gf180_root(tmp_path)
+
+    report = pdk.find_pdk(root=str(root))
+
+    assert report["variant"] == "gf180mcuA"
+    assert report["alternative_variants"] == ["gf180mcuB", "gf180mcuC", "gf180mcuD"]
+    warning = pdk.alternative_variants_warning(report)
+    assert warning is not None
+    assert "gf180mcuA" in warning and "gf180mcuB" in warning
+    assert "$PDK" in warning and "--pdk" in warning
+
+
+def test_find_alternative_variants_empty_when_pinned(tmp_path, monkeypatch):
+    root = _make_gf180_root(tmp_path)
+
+    explicit = pdk.find_pdk(root=str(root), variant="gf180mcuB")
+    assert explicit["alternative_variants"] == []
+    assert pdk.alternative_variants_warning(explicit) is None
+
+    monkeypatch.setenv("PDK", "gf180mcuC")
+    via_env = pdk.find_pdk(root=str(root))
+    assert via_env["variant"] == "gf180mcuC"
+    assert via_env["alternative_variants"] == []
+
+
+def test_find_alternative_variants_empty_for_single_variant(tmp_path):
+    root = tmp_path / "one"
+    _make_install(root, "sky130A")
+
+    report = pdk.find_pdk(root=str(root))
+
+    assert report["alternative_variants"] == []
+    assert pdk.alternative_variants_warning(report) is None
+
+
+def test_cli_find_warns_on_stderr_for_alternative_variants(tmp_path, capsys):
+    root = _make_gf180_root(tmp_path)
+
+    exit_code = main(["pdk", "find", "--pdk-root", str(root)])
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "klt: warning: no PDK variant selected" in captured.err
+
+    exit_code = main(["pdk", "find", "--pdk-root", str(root), "--format", "json"])
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert json.loads(captured.out)["alternative_variants"] == [
+        "gf180mcuB",
+        "gf180mcuC",
+        "gf180mcuD",
+    ]
+
+
 def test_pdk_root_nonexistent_falls_through(tmp_path, monkeypatch):
     # $PDK_ROOT set but pointing at a nonexistent dir: skip to the store.
     monkeypatch.setenv("PDK_ROOT", str(tmp_path / "does-not-exist"))

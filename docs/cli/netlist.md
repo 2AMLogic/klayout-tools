@@ -367,7 +367,10 @@ is a reusable block meant to be `.include`d elsewhere: the including deck
 already has its own `.end`, so a second one would terminate it early.
 
 `--block` post-processes the export: the first commented `.subckt`/`.ends`
-pair is uncommented, and the trailing `.end` is dropped. The result carries a
+pair is uncommented, and the trailing `.end` is dropped. When xschem wrapped a
+long port list onto commented continuation lines (`*+ ...`) directly after the
+header, those lines are rewritten to real `+` continuations so the `.subckt`
+card carries the whole port list. The result carries a
 `block` object in the JSON payload:
 
 | Field | Type | Description |
