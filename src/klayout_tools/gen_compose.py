@@ -199,6 +199,7 @@ from .gen import (
     _fixed_cut_side_um,
     _pdk_family,
 )
+from .gen_compose_port_access import derive_label_ports, parse_ports_from_labels
 
 # The rest of this module never calls these directly -- they are re-exported
 # purely so `klayout_tools.gen_compose.<name>` keeps working (the test suite
@@ -215,6 +216,7 @@ from .gen_compose_routing import (
     _declare_only_bundle_result,
     _drawn_leg_footprint_region,
     _drawn_leg_intermediate_pad_regions,
+    _drop_array_extra_um,
     _leg_block_spacing_violation_um,
     _min_width_um_for_layer,
     _pad_self_notch_violation_um,
@@ -1245,7 +1247,11 @@ def _parse_cell_block(
     ``navigable_regions`` (#1531/#1835) is likewise optional and defaults to
     ``[]`` -- see :func:`_require_navigable_regions`.
 
-    Returns ``{"cell_name", "gds_path", "bbox_um", "ports", "navigable_regions"}``.
+    ``ports_from_labels`` (#2927) is an opt-in option deriving ports from text
+    labels inside the cell (see :mod:`.gen_compose_port_access`).
+
+    Returns ``{"cell_name", "gds_path", "bbox_um", "ports", "navigable_regions",
+    "ports_from_labels"}``.
     """
     if not isinstance(raw_cell, dict):
         raise GenComposeError(f"{where} must be a JSON object")
@@ -1280,11 +1286,44 @@ def _parse_cell_block(
         "bbox_um": bbox_um,
         "ports": ports,
         "navigable_regions": navigable_regions,
+        "ports_from_labels": parse_ports_from_labels(
+            raw_cell.get("ports_from_labels"), where
+        ),
     }
 
 
+def _merge_label_ports(
+    block_id: str,
+    parsed_cell: dict[str, Any],
+    pdk_variant: str | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    """``(ports, derived_port_reports, warnings)`` for a ``cell`` block:
+    its hand-declared ``ports[]`` plus any ``ports_from_labels`` (#2927)
+    derived ports. A name in both is rejected as ambiguous."""
+    spec = parsed_cell["ports_from_labels"]
+    declared = parsed_cell["ports"]
+    if spec is None:
+        return declared, [], []
+    if pdk_variant is None:
+        raise GenComposeError(
+            f"block '{block_id}': ports_from_labels needs a resolved PDK"
+        )
+    ambiguous = {p["name"] for p in declared} & {n["name"] for n in spec["names"]}
+    if ambiguous:
+        raise GenComposeError(
+            f"block '{block_id}': port name(s) {', '.join(sorted(ambiguous))} "
+            "declared in both ports[] and ports_from_labels -- ambiguous"
+        )
+    derived, reports, warnings = derive_label_ports(
+        block_id, parsed_cell["gds_path"], parsed_cell["cell_name"], spec, pdk_variant
+    )
+    return declared + derived, reports, warnings
+
+
 def _parse_blocks(
-    raw_blocks: Any, request_dir: str | None = None
+    raw_blocks: Any,
+    request_dir: str | None = None,
+    pdk_variant: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     if not isinstance(raw_blocks, list) or not raw_blocks:
         raise GenComposeError("request.blocks must be a non-empty array")
@@ -1335,7 +1374,9 @@ def _parse_blocks(
             gds_path = parsed_cell["gds_path"]
             spelled_gds_path = parsed_cell["spelled_gds_path"]
             bbox_um = parsed_cell["bbox_um"]
-            ports = parsed_cell["ports"]
+            ports, derived_reports, derived_warnings = _merge_label_ports(
+                block_id, parsed_cell, pdk_variant
+            )
             navigable_regions = parsed_cell["navigable_regions"]
             report: dict[str, Any] = {}
         else:
@@ -1371,6 +1412,7 @@ def _parse_blocks(
                 where=f"blocks[{index}] (id '{block_id}').generator_report",
             )
             ports = report.get("ports") or []
+            derived_reports, derived_warnings = [], []
             navigable_regions = _require_navigable_regions(
                 report.get("navigable_regions"),
                 where=f"blocks[{index}] (id '{block_id}').generator_report",
@@ -1432,6 +1474,8 @@ def _parse_blocks(
             "navigable_regions": navigable_regions,
             # blocks[].abuts (#2638) -- parsed below, once every id is known.
             "abuts": _parse_abuts(raw_block, index, block_id),
+            "derived_ports": derived_reports,
+            "derived_port_warnings": derived_warnings,
         }
 
     _validate_abuts(blocks)
@@ -2993,7 +3037,9 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     except PdkNotFoundError as exc:
         raise GenComposeError(str(exc)) from exc
 
-    blocks = _parse_blocks(request.get("blocks"), request_dir or os.getcwd())
+    blocks = _parse_blocks(
+        request.get("blocks"), request_dir or os.getcwd(), pdk_info["variant"]
+    )
     strategy, order, spacing_um, origins_um, target_bbox_um, array_params = (
         _parse_placement(request.get("placement"), set(blocks))
     )
@@ -3043,6 +3089,8 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
 
     warnings: list[str] = []
     notes: list[str] = []
+    for _block in blocks.values():
+        warnings.extend(_block["derived_port_warnings"])
 
     # #692: "explicit" placement performs no overlap validation of its own
     # (resolve_explicit_offsets's docstring) -- but a caller that places a
@@ -3863,11 +3911,13 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             pad_boxes: list[
                 tuple[tuple[int, int], str, tuple[float, float, float, float]]
             ] = []
-            landing_half_um = _VIA_LANDING_SIZE_UM / 2.0
             for drop in via_drops:
                 block_id = drop.get("block_id")
                 if block_id is None:
                     continue  # pre-#1520 caller-built via_drops -- skip, not an error
+                landing_half_um = (
+                    _VIA_LANDING_SIZE_UM + _drop_array_extra_um(drop)
+                ) / 2.0
                 cx, cy = drop["x_um"], drop["y_um"]
                 box = (
                     cx - landing_half_um,
@@ -4333,6 +4383,13 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             # advisory must stay visible in the response, not only in the
             # request that declared it.
             "abuts": sorted(blocks[block_id]["abuts"]),
+            # #2927: additive -- only present for blocks that used
+            # `cell.ports_from_labels`.
+            **(
+                {"derived_ports": blocks[block_id]["derived_ports"]}
+                if blocks[block_id]["derived_ports"]
+                else {}
+            ),
         }
         for block_id in order
     ]
@@ -4463,6 +4520,29 @@ def _integer_dbu_ratio(coarse_dbu: float, fine_dbu: float) -> int | None:
     if abs(ratio - nearest) > _DBU_RATIO_TOLERANCE * max(1, nearest):
         return None
     return int(nearest)
+
+
+def _insert_via_cuts(
+    shapes: Any, drop: dict[str, Any], cx: int, cy: int, half: int, dbu: float
+) -> None:
+    """Draw a via-drop's cut(s) centred on ``(cx, cy)`` (dbu): one square, or
+    -- when ``drop["array"]`` is set by a label-derived port's
+    ``access.via_array`` (#2927) -- the rows x cols array at its deck pitch."""
+    import klayout.db as kdb
+
+    array = drop.get("array")
+    if not array:
+        shapes.insert(kdb.Box(cx - half, cy - half, cx + half, cy + half))
+        return
+    pitch = int(round(array["pitch_um"] / dbu))
+
+    def axis(count: int) -> list[int]:
+        return [int(round((i - (count - 1) / 2.0) * pitch)) for i in range(count)]
+
+    for dy in axis(array["rows"]):
+        for dx in axis(array["cols"]):
+            x, y = cx + dx, cy + dy
+            shapes.insert(kdb.Box(x - half, y - half, x + half, y + half))
 
 
 def _write_composed_gds(
@@ -4805,18 +4885,17 @@ def _write_composed_gds(
                 cy = int(round(drop["y_um"] / dbu))
                 via_size_um = (via_drop_size_um or {}).get(via_pair, _VIA_DROP_SIZE_UM)
                 via_half_dbu = int(round((via_size_um / 2.0) / dbu))
-                top.shapes(via_layer_index).insert(
-                    kdb.Box(
-                        cx - via_half_dbu,
-                        cy - via_half_dbu,
-                        cx + via_half_dbu,
-                        cy + via_half_dbu,
-                    )
+                # #2927: a label-derived port's `access.via_array` draws a
+                # rows x cols cut array centred on the pin; pads below grow
+                # to enclose it.
+                _insert_via_cuts(
+                    top.shapes(via_layer_index), drop, cx, cy, via_half_dbu, dbu
                 )
+                array_extra_um = _drop_array_extra_um(drop)
                 for landing_pair in drop.get("landing_layers", ()):
                     landing_size_um = (landing_pad_size_um or {}).get(
                         (landing_pair, via_pair), _VIA_LANDING_SIZE_UM
-                    )
+                    ) + array_extra_um
                     # Round minimum sizes outward, preserving the margin
                     # against the *rounded* via too. The epsilon only removes
                     # floating-point noise at an integer grid coordinate.

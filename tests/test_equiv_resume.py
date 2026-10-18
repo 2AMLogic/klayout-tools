@@ -47,7 +47,7 @@ import pytest
 
 from helpers.subprocess_fakes import fake_completed
 from klayout_tools import _paths as paths_module
-from klayout_tools import equiv
+from klayout_tools import equiv, equiv_sequential
 from klayout_tools.cli import main
 from klayout_tools.equiv import (
     EquivError,
@@ -741,7 +741,7 @@ def test_killed_run_resumes_from_committed_stage_artifacts(tmp_path):
     # session does: stage 1 completes and commits, then the process vanishes
     # (SystemExit standing in for SIGKILL -- nothing after it runs, so no
     # envelope is ever emitted for this "session").
-    real_runner = equiv._run_yosys_subprocess
+    real_runner = equiv_sequential._run_yosys_subprocess
 
     def killed_mid_stage2(script_path, timeout_s, binary="yosys"):
         if "stage2" in script_path:
@@ -752,12 +752,12 @@ def test_killed_run_resumes_from_committed_stage_artifacts(tmp_path):
     # instance is shared with the autouse `_bare_name_binary_resolution`
     # fixture, so a monkeypatch.undo() here would revert that fixture's
     # shutil.which stub too, not just this patch.
-    equiv._run_yosys_subprocess = killed_mid_stage2
+    equiv_sequential._run_yosys_subprocess = killed_mid_stage2
     try:
         with pytest.raises(SystemExit):
             run_equiv(request_path, resume=True)
     finally:
-        equiv._run_yosys_subprocess = real_runner
+        equiv_sequential._run_yosys_subprocess = real_runner
 
     with open(_record_path(tmp_path), encoding="utf-8") as handle:
         record = json.load(handle)

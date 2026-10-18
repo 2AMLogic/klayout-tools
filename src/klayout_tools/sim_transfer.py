@@ -115,6 +115,10 @@ class TransferMetrics:
     phase_margin_deg: float | None = None
     gain_margin_db: float | None = None
     unity_crossing_count: int | None = None
+    #: frequency of the first downward -180 degree phase crossing (the one
+    #: ``gain_margin_db`` is read at); not part of :meth:`to_dict`. Its
+    #: unavailable reason is ``reasons["gain_margin_db"]``.
+    phase_crossover_hz: float | None = None
     #: metric name -> reason code, present exactly for the ``None`` metrics.
     reasons: dict[str, str] = field(default_factory=dict)
     #: indices of invalid samples.
@@ -353,6 +357,7 @@ def _fill_unity_metrics(
 
 def _fill_gain_margin(
     res: TransferMetrics,
+    freqs: list[float],
     mag_db: list[float | None],
     phase: list[float | None],
     invalid: list[int],
@@ -373,6 +378,7 @@ def _fill_gain_margin(
     )
     if first_down is not None and not any(j < first_down.index for j in invalid):
         res.gain_margin_db = -_at(mag_db, first_down)
+        res.phase_crossover_hz = _event_freq(freqs, first_down)
     else:
         res.reasons["gain_margin_db"] = (
             REASON_INVALID_SAMPLES if invalid else REASON_NO_PHASE_CROSSING
@@ -412,7 +418,7 @@ def analyze_transfer(
     res.low_frequency_magnitude = abs(first_ratio)
 
     _fill_unity_metrics(res, freqs, mag_db, phase, invalid)
-    _fill_gain_margin(res, mag_db, phase, invalid)
+    _fill_gain_margin(res, freqs, mag_db, phase, invalid)
     return res
 
 
@@ -819,3 +825,124 @@ def grade_margins(
     if report.ambiguity:
         return "ambiguous"
     return "pass"
+
+
+# ---------------------------------------------------------------------------
+# Maximum gain above crossover (issue #3160)
+# ---------------------------------------------------------------------------
+
+
+def max_gain_above_crossover_db(
+    freq_hz: Sequence[float], metrics: TransferMetrics
+) -> tuple[float | None, str | None]:
+    """``(value, reason)``: the peak of ``20 log10 |T|`` above the crossover.
+
+    "Above crossover" is the closed frequency interval
+    ``[unity_crossing_hz, f_max]``: the first falling 0 dB crossing itself
+    (exactly 0 dB) plus every sampled point strictly above it. The value is
+    therefore never negative -- ``0.0`` means the gain never climbs back above
+    0 dB past the crossover, a positive value is the height of the largest
+    re-peak (a conditional-stability hint). It is the sampled maximum, not an
+    interpolated one.
+
+    Unavailable (``value is None``, ``reason`` set) when the first-crossing
+    unity metric is unavailable -- with that metric's own reason -- or when an
+    invalid sample lies above the crossover, since a gap could hide a peak
+    (``invalid_samples``).
+    """
+    crossover = metrics.unity_crossing_hz
+    if crossover is None:
+        return None, metrics.reasons.get(
+            "unity_crossing_hz", REASON_NO_FALLING_UNITY_CROSSING
+        )
+    peak = 0.0
+    for freq, level in zip(freq_hz, metrics.magnitude_db, strict=False):
+        if freq <= crossover:
+            continue
+        if level is None:
+            return None, REASON_INVALID_SAMPLES
+        peak = max(peak, level)
+    return peak, None
+
+
+REASON_NO_RISING_UNITY_CROSSING = "no_rising_unity_crossing"
+REASON_NO_SAMPLES_IN_RANGE = "no_samples_in_range"
+
+
+def rising_unity_crossing_hz(
+    freq_hz: Sequence[float], metrics: TransferMetrics
+) -> tuple[float | None, str | None]:
+    """``(value, reason)``: the first *rising* 0 dB crossing above the first
+    falling one (the unity crossing), interpolated like the other crossings.
+
+    Unavailable when the unity crossing itself is (with that metric's own
+    reason), when none follows it (``no_rising_unity_crossing``), or when an
+    invalid sample lies between the unity crossing and the rising crossing --
+    or anywhere above it when none was found -- since a gap could conceal an
+    earlier crossing (``invalid_samples``).
+    """
+    if metrics.unity_crossing_hz is None:
+        return None, metrics.reasons.get(
+            "unity_crossing_hz", REASON_NO_FALLING_UNITY_CROSSING
+        )
+    events = _level_events(metrics.magnitude_db, 0.0)
+    fall_pos = next((k for k, e in enumerate(events) if e.direction == "fall"), None)
+    if fall_pos is None:
+        return None, REASON_NO_FALLING_UNITY_CROSSING
+    fall_index = events[fall_pos].index
+    rise = next((e for e in events[fall_pos + 1 :] if e.direction == "rise"), None)
+    bound = len(metrics.magnitude_db) if rise is None else rise.index
+    if any(fall_index < j <= bound for j in metrics.invalid_samples):
+        return None, REASON_INVALID_SAMPLES
+    if rise is None:
+        return None, REASON_NO_RISING_UNITY_CROSSING
+    return _event_freq(freq_hz, rise), None
+
+
+def peak_above_crossover_db(
+    freq_hz: Sequence[float],
+    metrics: TransferMetrics,
+    *,
+    from_ratio: float | None = None,
+    from_hz: float | None = None,
+) -> tuple[float | None, str | None]:
+    """``(value, reason)``: the *signed* sampled maximum of ``20 log10 |T|``
+    over the samples in ``[start, f_max]`` -- negative for a monotonic
+    roll-off, no zero floor, no injected crossover sample.
+
+    ``start`` is ``from_hz``, else ``from_ratio * unity_crossing_hz``, else
+    ``unity_crossing_hz``. Unavailable when ``start`` needs the unity crossing
+    and it is unavailable (that metric's reason), when no sample lies in the
+    interval (``no_samples_in_range``), or when an invalid sample does
+    (``invalid_samples``).
+    """
+    if from_hz is not None:
+        start = from_hz
+    else:
+        crossover = metrics.unity_crossing_hz
+        if crossover is None:
+            return None, metrics.reasons.get(
+                "unity_crossing_hz", REASON_NO_FALLING_UNITY_CROSSING
+            )
+        start = crossover if from_ratio is None else from_ratio * crossover
+    peak: float | None = None
+    for freq, level in zip(freq_hz, metrics.magnitude_db, strict=False):
+        if freq < start:
+            continue
+        if level is None:
+            return None, REASON_INVALID_SAMPLES
+        peak = level if peak is None else max(peak, level)
+    if peak is None:
+        return None, REASON_NO_SAMPLES_IN_RANGE
+    return peak, None
+
+
+def low_frequency_gain_db(metrics: TransferMetrics) -> tuple[float | None, str | None]:
+    """``(value, reason)``: ``20 log10 |T|`` of the first *valid* sample (the
+    DC-gain proxy; reuses ``low_frequency_magnitude``)."""
+    magnitude = metrics.low_frequency_magnitude
+    if magnitude is None:
+        return None, metrics.reasons.get(
+            "low_frequency_magnitude", REASON_NO_VALID_SAMPLES
+        )
+    return 20.0 * math.log10(magnitude), None

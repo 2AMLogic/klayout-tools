@@ -225,6 +225,7 @@ def _unrun_corner_report(
         "temperature_c": point.temperature_c,
         **({"params": dict(point.params)} if point.params else {}),
         **({"nodeset": dict(point.nodeset)} if point.nodeset else {}),
+        **({"options": dict(point.options)} if point.options else {}),
         "status": "error",
         "runtime_s": 0.0,
         "engine_exit_code": None,
@@ -964,7 +965,7 @@ def _build_remote_job_description(
     collected artifacts directory.
 
     The include closure (issue #2485) is resolved by
-    :func:`sim_staging.stage_sim_netlist` -- the *same* call
+    :func:`sim_staging.stage_sim_job` -- the *same* call
     ``sim_batch._build_batch_job_spec`` makes, so the two independently
     built input lists cannot drift apart on include handling. Each staged
     file lands beside ``netlist.cir`` in the job directory under a flat

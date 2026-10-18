@@ -2735,6 +2735,87 @@ alternate rows so adjacent rows share a power rail; expressing that today
 means one `blocks[]` entry per row, each with its own `orientation`, rather
 than one array. That is a placement question, tracked separately.
 
+## Ports derived from in-cell labels (`ports_from_labels`, #2927)
+
+A hand-drawn macro usually names its ports only by text labels sitting on its
+own routing, not by a caller-written `ports[]` table. `blocks[].cell` accepts
+an opt-in `ports_from_labels` object that derives those ports (and, optionally,
+finds a legal via-stack landing for each one):
+
+```json
+{
+  "id": "adc",
+  "cell": {
+    "gds_path": "adc.gds",
+    "cell_name": "adc_core",
+    "ports_from_labels": {
+      "layers": [{"layer": 68, "datatype": 5}],
+      "names": ["VIN", {"name": "VREF", "access": {"up_to": "metal4"}}],
+      "access": {
+        "up_to": "metal3",
+        "keepout_layers": [{"layer": 89, "datatype": 44}]
+      }
+    }
+  }
+}
+```
+
+- `layers[]` -- the label layers (pin- or drawing-purpose) whose text shapes
+  are searched. A name found only on an unlisted layer is an error.
+- `names[]` -- label strings, or `{name, access}` objects whose `access`
+  overrides the shared top-level `access`.
+- A name that is also declared in `ports[]` is rejected as ambiguous; derived
+  and hand-declared ports otherwise mix freely. Omitting the option changes
+  nothing.
+
+**Label to net.** The macro is extracted with `LayoutToNetlist` over the
+resolved PDK extraction deck's `metals`/`vias` stack (the connectivity model
+`klt extract` and `landed_on_block` use). The port takes the metal the label
+sits on (a label on the deck's `metal_labels` purpose maps to its metal), its
+`net` is the label name, and `layer` is that metal. A name matching no text,
+a label on no conductor, or one name on two different nets is a hard error
+naming the label.
+
+**Landing search (`access`).** Without `access` the port sits at the label
+position. With it, the port net's own shapes on the label's metal are searched
+for the nearest grid point where the via ladder up to `access.up_to` (a
+routing layer role such as `metal4`, as in `routing.layer_role`) is legal. The
+ladder and every pad/cut size are exactly what the router draws at a pin
+(the via-drop ladder of #454/#1567 and its #1501/#2072/#2074/#2585 sizing),
+and the rules come from the active deck:
+
+| Check | Rejection category |
+|---|---|
+| any footprint overlaps a `keepout_layers` shape | `keep_out` |
+| a cut is closer than the via layer's `space` rule to an existing cut | `via_spacing` |
+| a pad is closer than its metal's `space` rule to a *different* net | `clearance` |
+
+The port is reported on the net's own layer at the chosen point, so the
+router's existing via-drop draws the stack there. Candidates are ranked by
+distance to the label (ties by `x`, then `y`), so the result is deterministic.
+`access` keys: `up_to` (required), `via_array` (`[rows, cols]`, default
+`[1, 1]`, each side at most 16), `keepout_layers`, `grid_um` (default a quarter of the pad side,
+snapped to the manufacturing grid) and `max_candidates` (default 20000; a hit
+cap adds a `warnings[]` entry and `truncated: true`). When no point is legal
+the request fails (exit 1) with the per-category rejection counts and example
+candidates.
+
+**Cut arrays (`via_array`).** `[rows, cols]` makes every hop of the ladder a
+rows x cols cut array centred on the landing point, at a pitch of the cut side
+plus the via layer's `space` rule (rounded up to twice the manufacturing grid so
+the cuts stay on grid). Every pad grows by `(max(rows, cols) - 1) * pitch` so it
+still encloses the outer cuts, and the search checks that larger, square-bounded
+footprint, so a tight spot that fits one cut can be rejected for an array. The
+pitch is carried on the port (`ports[].via_array = {rows, cols, pitch_um}`, keyed
+by via layer `"layer/datatype"`) and the router draws the same array.
+
+**Response (additive).** Blocks that used the option carry
+`blocks[].derived_ports[]`:
+`{name, label_um: {x, y}, layer, landing: null | {x_um, y_um, layer, up_to,
+via_count, via_array, candidates_evaluated, truncated}}` (`via_count` is the
+total number of cuts: hops x rows x cols; `via_array` is `[rows, cols]`).
+`schema_version` is unchanged.
+
 ## Worked example
 
 **Verified end to end (#196, phase 3 canary bring-up; re-verified after
