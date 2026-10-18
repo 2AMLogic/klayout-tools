@@ -1705,7 +1705,8 @@ def _unresolved_pdk_var_refs(request: dict[str, Any]) -> list[tuple[str, str]]:
     """Model-library refs naming ``$PDK`` / ``${PDK}`` when the request declares
     no ``models.pdk``: the runner exports ``PDK_ROOT`` always but ``PDK`` only
     from the declared variant, so the reference would reach ngspice unexpanded."""
-    if (request.get("models") or {}).get("pdk"):
+    models = request.get("models")
+    if isinstance(models, dict) and models.get("pdk"):
         return []
     return [(w, r) for w, r in _all_lib_refs(request) if _PDK_VAR_RE.search(r)]
 
