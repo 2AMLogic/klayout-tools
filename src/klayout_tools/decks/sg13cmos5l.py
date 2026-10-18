@@ -1470,6 +1470,13 @@ EXTRACTION_DECK = ExtractionDeck(
     tap=None,
     tap_nplus=(7, 0),  # nSD.drawing -- well-tie implant (n+ Activ inside NWell)
     tap_pplus=(14, 0),  # pSD.drawing -- substrate-tie implant (p+ Activ outside NWell)
+    # Issue #3831: the PDK's own stdcells (`sg13cmos5l_inv_1`, ...) draw no
+    # `nSD` (7/0) at all -- n+ is the family's default doping, so the well
+    # tie is an Activ inside NWell with no `pSD` over it. Same upstream form
+    # (`nactiv = activ.not(psd_drw...)`) and same shared-symlink derivation
+    # sg13g2.py's #2591 `tap_nplus_complement` already accepts; `tap_nplus`
+    # above stays so a layout drawing an explicit `nSD` extracts unchanged.
+    tap_nplus_complement=(14, 0),  # pSD.drawing -- absence marks an n+ well tie
     well_label=(31, 2),  # NWell.pin
     # Issue #1476 (the cmos5l sibling of sg13g2.py's own poly_label fix, same
     # gap shape: a bare `GatPoly` gate with no Metal1 landing pad extracted

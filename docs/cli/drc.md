@@ -28,8 +28,9 @@ klt drc --check <report.json> [--rerun] [--format text|json]
   check every top cell (today's default, unchanged). `coverage` (see below)
   is scoped along with it — `layers_in_stream_without_rules`/`layers_checked`
   reflect only `<cell>`'s own hierarchy, not the whole stream. A named cell
-  absent from the stream exits `1` with a clean error. **Not supported yet
-  for `--engine klayout`** (see "Engine" → "klayout" below).
+  absent from the stream exits `1` with a clean error. With `--engine
+  klayout`, a multi-top stream **requires** `--top` (see "Engine" →
+  "klayout" below).
 - `--engine` — `curated` (default) or `klayout` (issue #565, opt-in). See
   "Engine" below.
 - `--deck-file` — explicit path to a KLayout DRC-DSL script (`.lydrc`/`.drc`)
@@ -622,11 +623,13 @@ real open_pdks install never pays for the extra probe.
 
 **Known limitations, relative to the curated engine:**
 
-- **No `--top` support yet.** An arbitrary PDK-native DRC-DSL script has no
-  standard `-rd`-settable "restrict to this one top cell" variable this
-  engine can rely on generically — `sky130A.lydrc`, e.g., always reads the
-  whole `$input` stream. Passing `--top` alongside `--engine klayout` is a
-  clean error rather than a silently-ignored request.
+- **`--top` selects a single top cell.** A PDK-native DRC-DSL script reads
+  the whole `$input` stream as one single-top layout, so with `--top <cell>`
+  klt runs the deck against a temporary stream holding only `<cell>` and its
+  subtree (your input file is untouched). A stream with more than one top
+  cell and no `--top` exits `1` before KLayout is launched, with
+  `error.code` `multiple_top_cells` and a message listing the top cells.
+  Single-top streams are passed to the deck as-is.
 - **External rule execution is unknown without instrumentation.** A deck
   gated by `--deck-var` can produce an empty RDB, but neither an empty report
   nor nonempty category declarations proves which checks executed. DRC v2
@@ -2244,11 +2247,45 @@ it is installed with the package, next to its declared rule-id list
 [`asap7_rules.py`](../../src/klayout_tools/decks/asap7_rules.py)
 (`klayout_tools.decks.asap7_rules.DECK_PATH`).
 
+### ASAP7 capability by release
+
+What each published `klayout-tools` release ships for ASAP7, derived from
+`CHANGELOG.md` and the tagged tree (`git show vX.Y.Z:src/klayout_tools/decks/asap7.drc`).
+Pick a pin from this table, not from the unreleased examples in this page.
+
+| Release | DRC deck (`asap7.drc`) | FinFET LVS | Extraction |
+|---|---|---|---|
+| `0.5.0` | none (no ASAP7 deck) | no | none |
+| `0.6.0` | none (no ASAP7 deck) | no | none |
+| `0.7.0` | 106 rule categories, FEOL + MOL only (no M1-M9 / V1-V9) | refused: `klt lvs` with `layout.deck: asap7` errors "does not yet compare FinFET devices" (#2813) | `asap7` FinFET extraction deck |
+| Unreleased (`main`) | 263 rule categories, FEOL + MOL + BEOL M1-M9 / V0-V9 | supported (`options.finfet_bulk`) | `asap7` FinFET extraction deck |
+
+`--expect-rule-categories 263` in the example below, and FinFET LVS, apply
+to the **unreleased tree only**. A user on `0.7.0` needs a git pin until the
+next release ships them:
+
+```bash
+uvx --from "git+https://github.com/2AMLogic/klayout-tools@<sha>" klt drc ...
+```
+
+`klt deck info --deck asap7` reports the extraction deck module and the
+packaged `asap7.drc` as separate artifacts (`content_hash` vs
+`drc_deck.content_hash`); see [`deck.md`](deck.md#klt-deck-info).
+
 ```bash
 klt drc layout.gds --engine klayout \
-    --deck-file src/klayout_tools/decks/asap7.drc \
+    --deck-file "$(klt deck path --deck asap7 --format json | jq -r .path)" \
     --expect-rule-categories 263 --format json
 ```
+
+`klt deck path --deck asap7` ([`docs/cli/deck.md`](deck.md)) prints the
+installed script's absolute path, so the invocation works from a wheel /
+`uv tool` install, not only a source checkout.
+
+`asap7` is deliberately not a curated DRC deck, so it is absent from
+`klt drc --help`'s `--deck` list and `klt drc --deck asap7` exits 1 with an
+error naming this route; `klt deck info` reports it as
+`provides: ["extraction", "klayout_drc"]`.
 
 `--pdk asap7` does not resolve this deck: `klt pdk` finds an ASAP7 process
 tree (#2759) but not a deck inside it, so pass `--deck-file`. The output is
@@ -2288,6 +2325,30 @@ The 0.00025 um dbu from `asap7.lyt` represents every DRM value.
 **Layers.** GDS numbers are those the pinned `asap7.lyp` names (`fin
 drawing - 2/0`, ...), which equal the DRM mask IDs (Tables 2.1.1-2.4.1). A
 test cross-checks the deck against the fetched `.lyp`.
+
+**PAD (`96/0`) and the PAD layer's rules (#3807).** PAD is the one layer the
+deck reads that `asap7.lyp` does not name. The deck reads it as DRM mask `96`
+(Table 2.3.1, cited from the deck; not re-read against the PDF for #3807),
+and the DRM is the authoritative source because the deck is transcribed from
+it. The pinned lambdapdk v0.2.17 files do not agree and do not settle it:
+`asap7.layermap` names `Pad` only as `Pad/SPNET|PIN|LEFPIN 95/251` (its
+`Pad/NET 95/1` line is commented out), which puts it on V9's number `95`;
+`asap7.lyp` has no PAD entry; `asap7_tech.lef` defines a `Pad` routing layer
+with no stream number. The deck is not renumbered to `95`, which would collide
+with V9. A test pins these file facts so a pin bump that changes them fails.
+
+**The deck has no rule for the PAD layer itself.** The DRM states none (no
+width, spacing, area, enclosure-by-V9 or density rule for PAD); the only PAD
+rules are `V9.PAD.EN.2` and `V9.AUX.1` (Table 3.19.1). The tech LEF's `Pad`
+width (0.04 um), spacing table and 20 % / 80 % density are router settings,
+not DRM rules (see "Density"), so no threshold is taken from them. A `clean`
+verdict therefore says nothing about shapes on PAD, and a pad pitch or array
+constraint cannot be stated. `klt drc --engine klayout` with the packaged
+`asap7.drc` reports this in `coverage.unchecked_rules` as
+`{"rule": "PAD.*", "layer": "96/0", "description": ...}` whenever the layout
+has shapes on `96/0`; a layout without them reports `[]` as before. The
+declaration is `asap7_rules.UNCHECKED_AREAS`, and the rule-category contract
+(`--expect-rule-categories`) is unchanged.
 
 ### Rule ids (the contract)
 
@@ -3148,7 +3209,7 @@ for which skipped rules make a run partial and which do not.
 | `unchecked_rules`                  | array\<object\> | `{"rule": string, "layer": "<layer>/<datatype>", "description": string}` — foundry rules the deck knows about but cannot evaluate (issue #3012; `sg13cmos5l`'s net-aware `NW.b1` was the first, now checked by `net_space`, #3572, so the map is currently empty), listed only when the rule's layer is in the stream, so a `clean` is not read as covering them. Purely informational: does not change `status`. Sorted by rule id. Additive; `[]` for decks that declare none. |
 | `marker_blind_layers_in_stream`    | array\<string\> | `"<layer>/<datatype>"` area-marker layers present in the stream that the selected deck declares it does **not** model rule-switching for (issue #3815; sky130: `81/2` `areaid.ce`). The curated deck evaluates every rule uniformly, so the marker changes no result — a `clean` or an identical violation set with and without the marker is not marker-aware evidence. Purely informational: does not change `status`, violations or the exit code. Sorted; `[]` when none is present or the deck declares none. Curated engine only. Additive. Deck-static counterpart: `klt deck rules` `marker_blind_layers`. |
 | `deck_scope`                       | array\<string\> | Every distinct DRM section / official rule-id prefix the selected deck's rules claim to implement — a static property of the deck, independent of the input stream (issue #566). Sorted alphabetically. |
-| `unmodeled_rules`                  | array\<string\> | Curated engine only: official foundry-runset rule ids the selected deck knowingly does **not** transcribe (issue #3031) — a static property of the deck. sky130: `m1.5`, `m2.5`, `via.5a`, `via2.5`, `via3.5`. See below. Sorted alphabetically; empty for a deck that declares none. |
+| `unmodeled_rules`                  | array\<string\> | Curated engine only: official foundry-runset rule ids the selected deck knowingly does **not** transcribe (issue #3031) — a static property of the deck. sky130: `m1.5`, `m2.5`, `via.5a`, `via2.5`, `via3.5`; sg13g2: the `Pad.*` and `LU.*` ids. See below. Sorted alphabetically; empty for a deck that declares none. |
 | `rule_categories`                  | array\<string\> | KLayout engine only: declared RDB categories, never execution proof. |
 | `nothing_checked`                  | boolean         | Whether this run checked *nothing at all*, so its `status` says nothing about the layout — the shared convention in [`../json-contract.md`](../json-contract.md). See below. |
 | `nothing_checked_reasons`          | array\<string\> | Why, using the shared reason codes. Empty exactly when `nothing_checked` is `false`. |
@@ -3315,6 +3376,16 @@ each family's primary (stricter-margin, all-edges) rule. A layout can
 therefore pass `klt drc --deck sky130` and still fail the runset on exactly
 these. The field is purely additive and deck-static (identical across inputs);
 re-check those enclosures with the PDK's own `sky130A_mr.drc` before signoff.
+
+For sg13g2 the list is the runset's pad rules (`Pad.a1`, `Pad.aR`, `Pad.bR`,
+`Pad.d`, `Pad.dR`, `Pad.d1R`, `Pad.gR`, `Pad.jR`, `Pad.kR`; the `*R` ids are
+recommended-only) and latch-up rules (`LU.a`, `LU.c`, `LU.c1`, `LU.d`,
+`LU.d1`; gated by `$latchUpRules`) from `sg13g2_maximal.drc` (issue #3854), so
+a `clean` sg13g2 verdict says nothing about pads or latch-up. ESD structures
+are not in this list because the runset has no ESD rule id to name: the deck
+also has no ESD device class (protection diodes and clamps extract as nothing;
+see `device_classes` in `klt deck info --deck sg13g2`), so a clean verdict says
+nothing about them either.
 
 #### `coverage.deck_scope`
 

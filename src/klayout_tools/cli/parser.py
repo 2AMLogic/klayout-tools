@@ -95,6 +95,14 @@ def _parasitic_variant_arg(value: str) -> str:
     return value
 
 
+def _drc_deck_names_str() -> str:
+    """Like :func:`_deck_names_str` but only the curated-DRC decks -- the
+    names ``get_deck`` accepts (issue #3783); ``asap7`` is extraction-only."""
+    from ..decks import drc_deck_names
+
+    return ", ".join(drc_deck_names())
+
+
 def _deck_names_str() -> str:
     """Comma-joined, sorted list of every built-in deck name this build ships.
 
@@ -4911,6 +4919,25 @@ def _add_deck_parser(subparsers: argparse._SubParsersAction) -> None:
     _add_format_arg(hash_parser)
     hash_parser.set_defaults(func=deck_cmd.run_hash)
 
+    path_parser = deck_sub.add_parser(
+        "path",
+        help="print the installed path of a deck's standalone DRC script",
+        description=(
+            "Print the absolute path of a built-in deck's standalone KLayout "
+            "DRC-DSL script (issue #3789) -- a file usable as `klt drc "
+            "--engine klayout --deck-file <path>` from a wheel / `uv tool` "
+            "install, where the repo-relative src/ path does not exist. Only "
+            "asap7 ships such a script; the Python rule-table decks exit 1."
+        ),
+    )
+    path_parser.add_argument(
+        "--deck",
+        required=True,
+        help="built-in deck name whose script path to print (asap7)",
+    )
+    _add_format_arg(path_parser)
+    path_parser.set_defaults(func=deck_cmd.run_path)
+
     info_parser = deck_sub.add_parser(
         "info",
         help="report the installed build's own deck content hash, device "
@@ -4964,7 +4991,10 @@ def _add_deck_parser(subparsers: argparse._SubParsersAction) -> None:
     rules_parser.add_argument(
         "--deck",
         required=True,
-        help=f"built-in deck name whose rules to list (e.g. {_deck_names_str()})",
+        help=(
+            "built-in curated-DRC deck name whose rules to list "
+            f"(e.g. {_drc_deck_names_str()})"
+        ),
     )
     rules_parser.add_argument(
         "--rule",
@@ -5626,7 +5656,7 @@ def _add_layout_metrics_parser(subparsers: argparse._SubParsersAction) -> None:
         default=None,
         help=(
             "DRC deck to run for the drc.violation_count field (currently: "
-            f"{_deck_names_str()}). Omit to skip DRC entirely."
+            f"{_drc_deck_names_str()}). Omit to skip DRC entirely."
         ),
     )
     layout_metrics_parser.add_argument(
@@ -5703,8 +5733,11 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
         "--deck",
         default=None,
         help=(
-            f"DRC deck to run (currently: {_deck_names_str()}). Required for "
-            "--engine curated (the default); ignored for --engine klayout. "
+            f"DRC deck to run (currently: {_drc_deck_names_str()}). Required "
+            "for --engine curated (the default); ignored for --engine "
+            "klayout. ASAP7 DRC is a KLayout script, not a curated deck: "
+            "run it with --engine klayout --deck-file "
+            "src/klayout_tools/decks/asap7.drc (docs/cli/drc.md, 'ASAP7 deck'). "
             "Not validated by argparse -- an unknown deck name exits 1 with "
             "a clean error, per docs/cli/drc.md's exit-code contract, "
             "rather than argparse's usage-error exit 2."
@@ -5715,7 +5748,9 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
         default=None,
         help=(
             "top cell to check when the stream has more than one; omit to "
-            "check every top cell. Not supported yet for --engine klayout."
+            "check every top cell. With --engine klayout, a stream with "
+            "several top cells requires --top (the deck runs against that "
+            "cell's subtree only)."
         ),
     )
     drc_parser.add_argument(

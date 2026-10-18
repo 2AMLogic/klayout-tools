@@ -2243,10 +2243,16 @@ Points worth knowing:
   rather than being extracted as the wrong device. See
   `decks/gf180mcu.py`'s provenance note for the full list.
 
-**sky130 gap**: sky130's own `diode_pw2nd`/`diode_pd2nw` families are not
-modelled — out of scope for this first cut, consistent with how the
-bipolar/capacitor/resistor families each landed with one deck first, not a
-silent omission.
+**sky130** (issue #3803): eight diode classes transcribed from `sky130.lvs`'s
+diode derivations -- `diode_pw2nd_05v5`, `..._05v5_lvt`, `..._05v5_nvt`,
+`..._11v0` (n+/p-substrate; the substrate side is tied to `substrate_net`)
+and `diode_pd2nw_05v5`, `..._05v5_lvt`, `..._05v5_hvt`, `..._11v0` (p+/nwell).
+Every class needs the `areaid.diode` mark (81/23) over the junction plus
+`nsdm` (93/44) or `psdm` (94/20) on the diffusion; the `hvi`/`lvtn`/`hvtp`
+implants pick the flavour. Diffusion under `areaid.ed` (81/19) or inside
+`dnwell`, and a vertical PNP's emitter (`pnp.drawing`, 82/44), are excluded.
+Not modelled: the `photodiode` and the RF diode (`areaid.rfdiode`). Query
+the exact set with `klt deck devices --deck sky130 --class diode_pd2nw_05v5`.
 
 ### Marker-gated and predicate-gated device classes (issue #2365)
 
@@ -2259,8 +2265,8 @@ a prerequisite the others do not:
 
 | Deck | Markerless *and* predicate-free | Marker-gated and/or predicate-gated |
 | ---- | ------------------------------- | ----------------------------------- |
-| `gf180mcu` | `nfet` only | `pfet` (`Nwell`), `bjt` (`DRC_BJT` 127/5), the two `ppolyf_*` poly resistors (`RES_MK` 110/5 **plus** `SAB` 49/0, and `Pplus` 31/0 or `Resistor` 62/0), the `rm*`/`tm9k` metal resistors (a per-level marker, 110/11…110/15), `cap_mim_2f0_m4m5_noshield` (plate predicates, markerless), `diode_nd2ps_06v0`/`diode_pd2nw_06v0` (`diode_mk` 115/5 **plus** `Nplus`/`Pplus` + `Dualgate` 55/0) |
-| `sky130` | `nfet`, both `cap_mim` classes | `pfet`, `pnp`, every `res_*` resistor (marker-gated — one shared 66/13 marker for the three `res_*_po`, a per-level 68/13…72/13 one for each `res_generic_m*`; `res_high_po`/`res_xhigh_po` also carry implant `requires`) |
+| `gf180mcu` | `nfet` only | `pfet` (`Nwell`), `bjt` (`DRC_BJT` 127/5), the two `ppolyf_*` poly resistors (`RES_MK` 110/5 **plus** `SAB` 49/0, and `Pplus` 31/0 or `Resistor` 62/0), the `rm*`/`tm9k` metal resistors (a per-level marker, 110/11…110/15), `cap_mim_2f0_m4m5_noshield` (plate predicates, markerless), the twelve `cap_{nmos,pmos}_*` MOS capacitors (`MOS_CAP_MK` 166/5 **plus** implant/well/`Dualgate`/`DNWELL` predicates), `diode_nd2ps_06v0`/`diode_pd2nw_06v0` (`diode_mk` 115/5 **plus** `Nplus`/`Pplus` + `Dualgate` 55/0) |
+| `sky130` | `nfet`, both `cap_mim` classes | `pfet`, `pnp`, the eight `diode_pw2nd_*`/`diode_pd2nw_*` diodes (`areaid.diode` 81/23 **plus** `nsdm`/`psdm` and an `hvi`/`lvtn`/`hvtp` flavour predicate), every `res_*` resistor (marker-gated — one shared 66/13 marker for the three `res_*_po`, a per-level 68/13…72/13 one for each `res_generic_m*`; `res_high_po`/`res_xhigh_po` also carry implant `requires`) |
 | `sg13g2` | `nfet`, `cap_cmim` | `pfet`, `rfcmim`, both `cap_cmom*` MoM caps, every resistor, `dantenna`/`dpantenna` |
 | `sg13cmos5l` | `nfet` | `pfet`, both `cap_cmom*` MoM caps, every resistor |
 
@@ -2620,15 +2626,55 @@ marker. The check runs only under `--pdk`, where the flavour decides the bound m
 name. A marker that is present but does not overlap MOS active geometry is a
 legitimate layout and is not flagged.
 
+**MOS capacitors (issue #2919)**: gf180mcu recognises its `cap_nmos_*`/
+`cap_pmos_*` family (twelve classes: `cap_{nmos,pmos}_{03v3,06v0}` and their
+`_dn` variants, plus the `_b` forms `cap_{nmos,pmos}_{03v3,06v0}_b`) the way the
+PDK's own LVS runset does (`moscap_derivations.lvs`/`moscap_extraction.lvs`): an
+active (`Comp`) island carrying a poly gate and covered by `MOS_CAP_MK`
+(166/5) is a capacitor, **not** a transistor. The model comes from the island's
+implant (`Nplus` 32/0 / `Pplus` 31/0), whether it sits in `Nwell`, `DNWELL`
+(12/0, the `_dn` variants) and `Dualgate` (55/0, `06v0` vs `03v3`):
+
+| Implant | In `Nwell` | Model |
+| --- | --- | --- |
+| `Nplus` | no | `cap_nmos_<v>` (`_dn` inside `DNWELL`) |
+| `Pplus` | yes | `cap_pmos_<v>` (`_dn` inside `DNWELL`) |
+| `Nplus` | yes | `cap_nmos_<v>_b` |
+| `Pplus` | no | `cap_pmos_<v>_b` |
+
+The device has two terminals, `a` = the gate poly net and `b` = the merged
+source/drain diffusion net (both diffusion sides are one terminal; the well/body
+is not a terminal, as in the runset). `params` are the gate region's `area_um2`
+(`A`) and `perimeter_um` (`P`) and `c_f = area x 4.4 fF/µm²` (`03v3`) or
+`x 2.3 fF/µm²` (`06v0`). They were cross-checked against the PDK runset
+(`libs.tech/klayout/tech/lvs/rule_decks/gf180mcu.lvs` at open_pdks `f6eeac7`,
+`net_only=true`, `consider_dn_dw_features=true`) run on the same GDS: for a
+0.8 × 2.0 µm gate it reports `C$1 G SD 7.04e-15 cap_nmos_03v3_b A=1.6P P=5.6U`
+(`cap_nmos_03v3`, `cap_pmos_03v3`, `cap_pmos_03v3_b` identical; 6V rows
+`3.68e-15`, `cap_nmos_06v0`, `cap_pmos_06v0_dn`) — the same model, nets, `C`,
+`A` and `P` as `klt extract`. `klt deck devices --deck gf180mcu` lists the
+twelve classes (`kind: "mos_capacitor"`).
+
+Approximations versus the runset: an island overlapping any `moscap_exclude`
+marker (resistor, ESD, SAB, `RES_MK`, `DIODE_MK`, `DRC_BJT`, native, `efuse_mk`,
+`plfuse`, `mvsd`/`mvpsd`, LDMOS, Schottky; the runset's `lvs_source` is not
+modelled) is not a capacitor — the runset subtracts them from the gate
+geometrically; and, unlike the runset, a plain `cap_nmos_*` is recognised
+without a drawn `LVPWELL`. `--parasitics` still treats the capacitor's gate
+poly as ordinary poly interconnect. `klt lvs` reference conversion of the PDK's
+`cap_nmos_03v3` etc. `X` cards (a `c_length`/`c_width` call, not `A`/`P`) is not
+wired up yet.
+
 **Unsupported devices (issue #2919)**: a deck may name marker layers that flag
-a device class it cannot extract yet. gf180mcu's `MOS_CAP_MK` (166/5) marks MOS
-capacitors, which have no device class, so a layout holding `cap_nmos_*`/
-`cap_pmos_*` would otherwise extract with `status: "extracted"` and exit 0 while
-the capacitors are missing. Each such layer with shapes yields one
-`unsupported_devices[]` entry (`kind`, `marker`, `count`, `bbox_um`,
-`description`) plus a prose line in `warnings[]`. `status` and the exit code are
-unchanged, so a caller must check the field. It is removed per marker once the
-deck extracts that device.
+a device class it cannot extract (or cannot classify). gf180mcu's `MOS_CAP_MK`
+(166/5) marks MOS capacitors; a marker component the recogniser above could
+**not** classify (no poly gate, no or mixed implant, or an excluded marker)
+would otherwise vanish from the netlist with `status: "extracted"` and exit 0.
+Each such layer with unclassified shapes yields one `unsupported_devices[]`
+entry (`kind`, `marker`, `count`, `bbox_um`, `description`) plus a prose line in
+`warnings[]`. `status` and the exit code are unchanged, so a caller must check
+the field. A marker component that *was* recognised as a capacitor is not
+reported.
 
 **What this field does and does not guarantee**: for a marker with no
 `mos_flavours` coverage, it only flags that the bound model name may be
@@ -5948,8 +5994,11 @@ A DEF net whose name contains `.` (a flattened hierarchical name such as
 `top.sub/_n1_`) is renamed by the extractor to its dot-free spelling
 (`top_sub/_n1_`, or a collision-suffixed `_1`, `_2`, ... — see
 "Hierarchical net names are dot-free"). `--def-net-connections` keys follow
-that same rename, so the net keeps its `*CONN` block under the rewritten
-`*D_NET` name (issue #2903). When a written `*D_NET` that corresponds to a
+that same rename, so the net keeps its `*CONN` block (issue #2903), and the
+SPEF `*D_NET`/`*CONN`/coupling references keep the **DEF's own** spelling
+(`top.sub/_n1_`) so a linked design's `read_spef` matches the net (issue
+#3900); only `nets[].name` and the SPICE netlist carry the dot-free spelling.
+When a written `*D_NET` that corresponds to a
 DEF net still ends up without instance `*CONN` pins (a duplicated net name
 stays port-only, or a dotted DEF name could not be matched), one
 `warnings[]` entry names the affected nets. The warning is additive; the
@@ -7720,7 +7769,7 @@ exit codes).
 | `dummy_devices_dropped` | integer               | Number of devices suppressed by the deck's optional `dummy` marker layer — MOS gates (issue #295), drawn resistors and bipolars (both issue #462), and junction diodes (issue #542) alike — deliberately non-functional dummy devices excluded from `devices[]`/`device_counts` before recognition. `0` when the deck declares no `dummy` layer or the layout draws none. See "Dummy devices: the `dummy` marker layer". |
 | `ignored_layers`   | array\<object\>            | `(layer, datatype)` pairs carrying shapes in the input stream that this `--deck`'s connectivity graph does **not** read, each `{ "layer": int, "datatype": int, "shapes": int }` with its stream shape count, sorted by `(layer, datatype)`. Empty when every shape-bearing layer is one the deck reads. Geometry on such a layer is invisible to extraction, so a block routed on an undeclared metal level silently extracts as disconnected nets — a non-empty list with a material shape count is the signal that a downstream `klt lvs` mismatch is a deck-coverage gap, not a layout bug. The extraction-side analogue of `klt drc`'s `coverage.layers_in_stream_without_rules`. Does **not** catch a layer that is read for device recognition only, never as a `metals`/`vias` connectivity level — see `device_recognition_only_layers` below (issue #619). Every entry here already carries a material (`shapes > 0`) count — empty-layer entries are dropped before they reach this field — so a non-empty `ignored_layers` also appends a single aggregate prose entry to `warnings[]` (issue #666), naming the affected layer(s) and their total shape count, so a caller checking only `warnings[]` still sees it. |
 | `device_recognition_only_layers` | array\<object\> | `(layer, datatype)` pairs carrying shapes in the input stream that this `--deck` **does** read (so they never appear in `ignored_layers` above) but only for a bipolar/capacitor/resistor/diode device-recognition role, never as a `metals`/`vias` connectivity level and never one of the deck's own MOS-core layers either (issue #619 — see "Device-recognition-only layers" below), each `{ "layer": int, "datatype": int, "shapes": int }` with its stream shape count, sorted by `(layer, datatype)`. Two nets joined only through such a layer will not merge, and — unlike a layer the deck never reads at all — this gap is invisible to `ignored_layers`, which can only tell "read" from "not read," not "read for connectivity" from "read for device recognition only." This is diagnostic context, not a warning: unlike `ignored_layers`, a non-empty list does **not** append to `warnings[]` (a deck's own marker/mask geometry is expected to be device-recognition-only by PDK design, not a coverage gap). Empty when every device-recognition layer is also a `metals`/`vias` level or one of the deck's own MOS-core layers, or the deck declares no `bipolars`/`capacitors`/`mom_capacitors`/`resistors`/`diodes` entries at all. |
-| `device_classes`   | array\<string\>            | The device-class roles this `--deck` is structurally capable of recognising (`["nfet", "pfet"]` for a MOS-only deck; a deck that also declares a bipolar entry appends its class name, e.g. sky130's `[..., "pnp", ...]` or gf180mcu's `[..., "bjt", ...]` — see "Bipolar (BJT) device recognition" above; a deck that declares one or more MiM-capacitor entries likewise appends each one's class name, e.g. sky130's two `"sky130_fd_pr__model__cap_mim"`/`"sky130_fd_pr__model__cap_mim_m4"` or gf180mcu's one `"cap_mim_2f0_m4m5_noshield"` — see "MiM capacitor device recognition" above; a deck that declares one or more drawn resistors appends the single `"resistor"` role after those — see "Drawn resistors" above; and a deck that declares one or more junction diodes appends each one's class name last, e.g. gf180mcu's `"diode_nd2ps_06v0"`/`"diode_pd2nw_06v0"` — see "Junction diodes" above), independent of what this layout happens to contain. sky130 currently reports `["nfet", "pfet", <bipolar>, <capacitor…>, "resistor"]` and gf180mcu `["nfet", "pfet", <bipolar>, <capacitor>, "resistor", <diode…>]`. Note the `"resistor"` role token is not a `devices[].class` label string (a deck's resistor class is named after the PDK device it models). What the deck **can find**, not what it found — see `device_counts` for that. A consumer that needs to know ahead of time whether a deck supports a given device class (e.g. before pairing it with a reference netlist for `klt lvs`) reads this instead of inferring "unsupported" from a zero count. It says what the deck can recognise, **not** what a layout must draw for one to be recognised — a minority of classes additionally need a device-recognition marker layer and/or per-terminal implant predicates; `klt deck devices` reports that set per class, and a layout one layer short of it now earns a `warnings[]` entry naming what is missing (see "Marker-gated and predicate-gated device classes" above). |
+| `device_classes`   | array\<string\>            | The device-class roles this `--deck` is structurally capable of recognising (`["nfet", "pfet"]` for a MOS-only deck; a deck that also declares a bipolar entry appends its class name, e.g. sky130's `[..., "pnp", ...]` or gf180mcu's `[..., "bjt", ...]` — see "Bipolar (BJT) device recognition" above; a deck that declares one or more MiM-capacitor entries likewise appends each one's class name, e.g. sky130's two `"sky130_fd_pr__model__cap_mim"`/`"sky130_fd_pr__model__cap_mim_m4"` or gf180mcu's one `"cap_mim_2f0_m4m5_noshield"` — see "MiM capacitor device recognition" above; a deck that declares one or more drawn resistors appends the single `"resistor"` role after those — see "Drawn resistors" above; and a deck that declares one or more junction diodes appends each one's class name last, e.g. gf180mcu's `"diode_nd2ps_06v0"`/`"diode_pd2nw_06v0"` — see "Junction diodes" above), independent of what this layout happens to contain. sky130 currently reports `["nfet", "pfet", <bipolar>, <capacitor…>, "resistor", <diode…>]` and gf180mcu `["nfet", "pfet", <bipolar>, <capacitor>, "resistor", <diode…>]`. Note the `"resistor"` role token is not a `devices[].class` label string (a deck's resistor class is named after the PDK device it models). What the deck **can find**, not what it found — see `device_counts` for that. A consumer that needs to know ahead of time whether a deck supports a given device class (e.g. before pairing it with a reference netlist for `klt lvs`) reads this instead of inferring "unsupported" from a zero count. It says what the deck can recognise, **not** what a layout must draw for one to be recognised — a minority of classes additionally need a device-recognition marker layer and/or per-terminal implant predicates; `klt deck devices` reports that set per class, and a layout one layer short of it now earns a `warnings[]` entry naming what is missing (see "Marker-gated and predicate-gated device classes" above). |
 | `devices`          | array\<object\>            | One entry per extracted device, see below.                                                             |
 | `nets`             | array\<object\>            | One entry per extracted net, see below.                                                                |
 | `warnings`         | array\<string\>            | Non-fatal extraction notes (e.g. a gate shape touching no diffusion, the unmodelled-device-geometry heuristic below, or a top-level pin promoted from a label found below the top cell — see "Top-cell-only pin promotion"). Always present, empty when clean. |
@@ -7730,7 +7779,7 @@ exit codes).
 | `merged_net_labels` | array\<object\>          | One entry per net whose name is a merge of 2+ distinct labels (issue #470 — see "Merged net labels" below), each `{ "net": "<full joined name>", "labels": [str, ...] }` (`net` uses the same `\|`-joined spelling as `nets[].name` and the written netlist, issue #696; `labels` is `net` split on `\|`). A matching prose entry is also appended to `warnings[]` for every affected net. Always present, empty when no net carries multiple labels. |
 | `voltage_domain_warnings` | array\<object\>     | One entry per voltage-domain marker layer with **no** matching `mos_flavours` coverage (issue #552, narrowed by issue #1111 — see "Voltage-domain markers and per-flavour MOS binding" below) whose geometry overlaps extracted MOS device geometry, each `{ "marker": "<layer>/<datatype>", "description": str }`. A matching prose entry is also appended to `warnings[]`. Always present, empty for a deck that registers no such marker, a marker fully covered by `mos_flavours` (e.g. gf180mcu's `Dualgate` as of issue #1111 — see the linked section for what "covered" means), or a layout that draws none of the remainder overlapping MOS geometry. |
 | `missing_flavour_markers` | array\<object\> | One entry per `mos_flavours` marker layer the deck declares that has **zero shapes anywhere in the layout** (issue #2417), each `{ "deck": str, "flavour": str, "marker": "<layer>/<datatype>" }`. With no marker geometry flavour selection never fires and every MOS device silently binds the deck's default flavour. A matching prose entry is appended to `warnings[]`. Only evaluated under `--pdk` (flavour selection changes the bound model name only when a PDK resolves the binding). Not raised when the marker is present but overlaps no MOS active area. Always present, empty for a deck with no `mos_flavours` or whose markers all have geometry. |
-| `unsupported_devices` | array\<object\> | One entry per deck `unsupported_device_markers` layer that carries shapes in the extracted cell (issue #2919), each `{ "kind": str, "marker": "<layer>/<datatype>", "count": int, "bbox_um": {"left", "bottom", "right", "top"}, "description": str }`. `count` is the number of merged marker shapes and `bbox_um` bounds all of them. The deck cannot extract that device class, so those devices are **absent from the netlist** although `status` stays `"extracted"`; a matching prose entry is appended to `warnings[]`. Today only `gf180mcu` declares one: `MOS_CAP_MK` (166/5) with `kind: "mos_capacitor"` (`cap_nmos_*`/`cap_pmos_*`). Treat a non-empty field as an incomplete netlist. Always present, empty for a deck that declares no such marker or a layout with no shapes on it. |
+| `unsupported_devices` | array\<object\> | One entry per deck `unsupported_device_markers` layer that carries shapes in the extracted cell (issue #2919), each `{ "kind": str, "marker": "<layer>/<datatype>", "count": int, "bbox_um": {"left", "bottom", "right", "top"}, "description": str }`. `count` is the number of merged marker shapes and `bbox_um` bounds all of them. The deck cannot extract that device class, so those devices are **absent from the netlist** although `status` stays `"extracted"`; a matching prose entry is appended to `warnings[]`. Today only `gf180mcu` declares one: `MOS_CAP_MK` (166/5) with `kind: "mos_capacitor"` (`cap_nmos_*`/`cap_pmos_*`), and only for marker components the deck's MOS-capacitor recogniser could not classify (a recognised capacitor is in `devices[]`, not here). Treat a non-empty field as an incomplete netlist. Always present, empty for a deck that declares no such marker or a layout with no shapes on it. |
 | `unbiased_pmos_body_nets` | array\<object\>  | One entry per extracted PMOS device whose body (`"b"`) terminal ties to an anonymous, KLayout-synthesized net rather than a real, named one (issue #555 — see "Known gap: an anonymous PMOS body net has no DC bias path" above), each `{ "device": "<device name>", "net": "<anonymous net name>" }`. A single aggregate prose entry (count baked in, e.g. `"148 PMOS devices tie their body to..."`) is also appended to `warnings[]` when this field is non-empty — not one line per device (issue #599). Always present, empty when no PMOS device's body net is anonymous — i.e. every device whose `nwell` island a drawn or derived well tie reaches (issue #1084). Present regardless of `--parasitics`/`--pdk`. |
 | `single_terminal_nets` | array\<object\>    | One entry per net with `device_count == 1` and `pin: false` (issue #596 — see "Single-device-terminal nets" above), each `{ "net": "<net name>", "device": "<owning device name>", "terminal": "<lower-cased terminal key>", "terminal_kind": "gate" \| "source" \| "drain" \| "body" \| "<literal terminal key>" }`. Up to two aggregate prose entries (one per `terminal_kind` bucket — `"gate"` vs. everything else — each with its bucket's count baked in) are also appended to `warnings[]`, phrased more strongly for the `"gate"` bucket — not one line per net (issue #599). Always present, empty when every net either has zero or 2+ device terminals, or is a declared pin. |
 | `dead_metal`       | array\<object\>            | One entry per connected cluster of routing-stack (`metals`/`vias`) geometry that joins no extracted net (issue #676 — see "Dead metal" above), each `{ "role": "metal<i>" \| "via<i>", "layer": int, "datatype": int, "bbox_um": {"left", "bottom", "right", "top"}, "shapes": int, "area_um2": number }`, sorted by `(layer, datatype, left, bottom)`. `role`'s `<i>` indexes the deck's own `metals`/`vias` tuple (`0` = bottom-most level); `shapes` counts the drawn shapes on that stream layer the cluster covers (one entry per *cluster*, not per polygon). XY overlap between adjacent metal levels is **not** connection — only a same-layer touch or a via landing joins two shapes, so a wire passing over another with no via between them is still dead. A labelled floating cluster (power strap, seal ring, bond pad) survives as a real named net and never appears here. A non-empty list also appends a single aggregate prose entry to `warnings[]` (count baked in, issue #599). Always present, empty when every metal/via shape joins a net. |

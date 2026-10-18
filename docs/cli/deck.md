@@ -17,6 +17,7 @@ klt deck resolve --deck <name> --version <X.Y.Z>            [--format text|json]
 klt deck info    [--deck <name>]                             [--format text|json]
 klt deck rules   --deck <name> [--rule <id>]                 [--format text|json]
 klt deck devices --deck <name> [--class <name>]              [--format text|json]
+klt deck path    --deck asap7                                [--format text|json]
 ```
 
 The five are complements: `hash` answers "which deck revision will this
@@ -208,6 +209,34 @@ A hash that predates the table's start, was never released, or a
 }
 ```
 
+## `klt deck path`
+
+Print the absolute path of a deck's **standalone KLayout DRC-DSL script**
+(issue #3789), so an installed `klt` (wheel / `uv tool`) can pass it to
+`klt drc --engine klayout --deck-file` without a source checkout:
+
+```
+klt drc layout.gds --engine klayout \
+    --deck-file "$(klt deck path --deck asap7)"
+```
+
+Text output is the bare path. JSON:
+
+```json
+{
+  "schema_version": 1,
+  "deck": "asap7",
+  "path": "/abs/.../klayout_tools/decks/asap7.drc",
+  "content_hash": "sha256:..."
+}
+```
+
+`content_hash` is the hash of the `.drc` script itself (not the extraction
+module `klt deck hash` / `info` report), so a consumer can pin what it
+passes to `--deck-file`. Only `asap7` ships such a script today; a
+registered Python rule-table deck (e.g. `sky130`) and an unknown name each
+exit 1 with an error.
+
 ## `klt deck info`
 
 ```
@@ -226,6 +255,7 @@ klt deck info --deck gf180mcu # one deck only
         "nfet", "pfet", "bjt", "cap_mim_2f0_m4m5_noshield", "resistor",
         "diode_nd2ps_06v0", "diode_pd2nw_06v0"
       ],
+      "provides": ["curated_drc", "extraction"],
       "released": false,
       "release": null
     }
@@ -245,10 +275,30 @@ klt deck info --deck gf180mcu # one deck only
   predates diode support entirely. It says what the deck **can find**; it
   does not say what a layout must **draw** for one to be found — that is
   [`klt deck devices`](#klt-deck-devices) below.
+- `provides` — which capabilities the deck supplies (issue #3783), any of
+  `curated_drc` (runnable by `klt drc --deck` and `klt deck rules`),
+  `klayout_drc` (a shipped KLayout DRC script, run with `klt drc --engine
+  klayout --deck-file`) and `extraction`. `asap7` reports
+  `["extraction", "klayout_drc"]`: it has no curated DRC rule table, so
+  `klt drc --deck asap7` and `klt deck rules --deck asap7` exit 1 (never a
+  false `clean`) and point at the KLayout-script route. The field is
+  additive; `schema_version` stays 1.
 - `released` / `release` — the same tri-state signal as
   `provenance.deck.released` (`true`/`false`/`null`; see above), plus, when
   `true`, the `{git_tag, git_commit, package_version}` of the release that
   shipped this exact hash (the same shape `klt deck resolve` returns).
+
+- `drc_deck` — present only for a deck that ships a standalone KLayout DRC
+  deck file (today `asap7`, `asap7.drc`); omitted, never `null`, for the
+  others (issue #3826). It is a different artifact from the deck module that
+  `content_hash` hashes, so it carries its own identity:
+  `{path_kind, content_hash, released, release}` with the same meaning as the
+  top-level fields of those names. `path_kind` is `"packaged"` (the file
+  inside this install). `content_hash` is the value
+  `provenance.deck.content_hash` reports for a DRC run of that deck, so
+  `klt deck resolve --content-hash` resolves it. Additive: `schema_version`
+  stays `1`. In text output the two artifacts print on separate lines
+  labelled `extraction deck` / `drc deck`.
 
 Omitting `--deck` reports every registered deck in one call — useful for a
 "what does this install actually ship" sanity check right after `pip
@@ -461,7 +511,7 @@ field by field, which two separate passes on a real design had to do
 - `name` — the `devices[].class` label this class extracts as (the same
   strings `klt deck info`'s `device_classes` lists).
 - `kind` — the recognition family: `mos`, `bipolar`, `capacitor`,
-  `mom_capacitor`, `resistor`, `diode`.
+  `mom_capacitor`, `mos_capacitor`, `resistor`, `diode`.
 - `marker` — the class's device-recognition marker layer, or `null` for a
   markerless (drawn-geometry-only) class or one whose marker is derived.
 - `marker_expression` — `null` unless the marker is a derived `LayerExpr`
@@ -574,7 +624,13 @@ git commit -m "chore(decks): regenerate deck history table for vX.Y.Z"
 ```
 
 Idempotent — re-running it against unchanged tag history reproduces
-byte-identical output, so it is safe to run speculatively.
+byte-identical output, so it is safe to run speculatively. A standalone
+`<name>.drc` deck file at a tag gets its own entry marked
+`"artifact": "drc_deck"` (issue #3826), so a DRC run's
+`provenance.deck.released` is `true` for a released `.drc` hash; the
+`--deck`/`--version` lookup still returns the deck module's entry. The
+already-published `0.7.0` wheel's own history table predates this, so its
+`.drc` hash reports `released: false` there.
 
 Coverage is **released** revisions only: an unreleased dev checkout's deck
 hash will not resolve until it has shipped in a tagged release — expected,
