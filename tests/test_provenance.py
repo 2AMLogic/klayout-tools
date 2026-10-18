@@ -799,3 +799,16 @@ def test_deck_source_path_feeds_a_stable_content_hash():
     prov = _provenance.build_provenance(deck_name="sky130", deck_path=source)
     assert prov["deck"]["content_hash"].startswith("sha256:")
     assert len(prov["deck"]["content_hash"]) == len("sha256:") + 64
+
+
+def test_deck_block_path_envelope_is_opt_in():
+    """Issue #3785: `path` appears only when a caller passes the envelope, so
+    every other verb's deck block stays byte-identical."""
+    from klayout_tools._provenance import _deck_block
+
+    plain = _deck_block("d", None)
+    assert "path" not in plain
+    envelope = {"path": None, "scope": "external"}
+    with_path = _deck_block("d", None, path_envelope=envelope)
+    assert with_path["path"] == envelope
+    assert {k: v for k, v in with_path.items() if k != "path"} == plain

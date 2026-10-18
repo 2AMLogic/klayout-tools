@@ -197,7 +197,7 @@ A request naming both, or neither, is a request error.
     "klt_version": "0.2.0",
     "klayout_version": "0.30.10",
     "pdk": { "name": "sky130A", "source": "PDK_ROOT environment variable", "version": "<stamp>" },
-    "deck": { "name": "sky130_fd_sc_hd__tt_025C_1v80", "content_hash": "sha256:<hex>" },
+    "deck": { "name": "sky130_fd_sc_hd__tt_025C_1v80", "content_hash": "sha256:<hex>", "path": { "path": null, "scope": "external" } },
     "input": { "content_hash": "sha256:<hex>", "role": "layout" }
   }
 }
@@ -238,6 +238,15 @@ guessed host prefix — regenerate the evidence with schema-2 `klt sta` to make
 it verifiable from other checkouts. The text format renders a repo path as
 the path itself, an external one as `<outside repo>`, and an unused input as
 `None`.
+
+**Liberty location (issue #3785).** `provenance.deck` (and each
+`corners[].deck` in the multi-corner shape) additionally carries `path`, the
+same `{path, scope}` envelope for the resolved Liberty file whose bytes
+`deck.content_hash` pins. An out-of-repo Liberty (the usual PDK-under-`$PDK_ROOT`
+case) is `{"path": null, "scope": "external"}`: the hash and `deck.name`
+identify the file, the location is withheld. Additive; no `schema_version`
+bump. Reports without the field still verify, and `--check` treats
+`content_hash` as authoritative, never `path`.
 
 | Field | Type | Description |
 | --- | --- | --- |
@@ -532,7 +541,7 @@ closes that gap natively:
       "clock_skew_ns": 0.0512,
       "estimated_power_mw": 13.2,
       "spef_annotation": null,
-      "deck": { "name": "sky130_fd_sc_hd__ss_100C_1v60", "content_hash": "sha256:<hex>", "released": true }
+      "deck": { "name": "sky130_fd_sc_hd__ss_100C_1v60", "content_hash": "sha256:<hex>", "released": true, "path": { "path": null, "scope": "external" } }
     },
     { "corner": "tt_025C_1v80", "...": "..." },
     { "corner": "ff_n40C_1v95", "...": "..." }

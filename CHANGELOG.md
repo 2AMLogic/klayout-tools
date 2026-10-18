@@ -22,6 +22,13 @@ not `klt --version`, if you need to detect this kind of drift. See
   Requests without the field generate an unchanged Tcl script;
   `schema_version` is unchanged (additive).
 
+- 2026-10-17 — **`klt signoff --attest` / `--inventory` are not installable
+  from 0.7.0** (issue #3805): the attestation producer for T1 items 1, 9 and
+  10 (#2844) is on `main` but in no tagged release, so
+  `klt signoff --attest 10 ...` fails with `unrecognized arguments` on the
+  PyPI 0.7.0 build. `docs/cli/signoff.md` now says so; until the next release
+  after 0.7.0 ships, release-pinned consumers must pin a git commit.
+
 - **gf180mcu `DF.13_MV` / `DF.14_MV` tap-distance rules declared** (issue
   #3793): `comp.tap_distance.nwell.mv.1` and `comp.tap_distance.psub.mv.1`
   (15 um reach, active overlapping `Dualgate`) join the 20 um `.lv.1` pair, so a
