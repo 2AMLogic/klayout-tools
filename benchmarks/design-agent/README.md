@@ -796,3 +796,60 @@ run through the existing `InteractiveAgentInvoker`; tests stub the invoker or th
 
 Known limit: `area_um2` is the top cell's bounding-box area from `klayout.db`;
 `utilization` stays `null` (optional) and `sim_margin` waits on #217.
+
+## Layout reporting (`report-layout`)
+
+Phase 4 (issue #3027): the comparison report is regenerated from the durable
+ledgers alone (`scripts/design_agent_benchmark_layout_report.py`).
+
+```
+uv run python scripts/design_agent_benchmark.py report-layout --out-dir /tmp/layout-run \
+  [--format json|markdown] [-o report.json]
+```
+
+Only `runs.jsonl` and (optionally) `journal.jsonl` are read -- no sandbox,
+artifact, simulator or credential -- and nothing reads the clock, so the same
+ledgers always give a byte-identical report (`schema:
+klt.design_agent_benchmark.layout_report/1`; JSON is the contract, markdown a
+rendering of it). The exit code is non-zero if the ledger has integrity errors.
+
+- **Tables.** One row per (task, agent, arm): runs counted, `valid` runs, a
+  per-status failure breakdown, best/mean `area_um2` over valid runs only, and
+  `utilization` / `sim_margin` means when present. `sim_margin` is reported only
+  once some valid run carries one; until then the report names its prerequisite
+  (#217) instead of printing a blank column.
+- **Comparison.** Per arm and agent, the geometric mean of
+  `area(arm) / area(draw-only)` over *comparable pairs*: the same (task, agent,
+  replicate), both runs `valid`, same protocol and task fingerprint. The
+  denominator is always printed (`comparable_pairs`, `excluded_pairs`,
+  `attempted_pairs`) and each excluded pair is listed with its reason
+  (`arm_agent_error`, `missing_draw-only`, `fingerprint_mismatch`, ...). An
+  invalid or missing run is never imputed or given partial credit; no comparable
+  pair gives `geomean_ratio: null`, not `1.0`.
+- **Provenance.** Protocol sha256, a task-set fingerprint (sha256 over
+  `{task_id: task_sha256}`, so a changed/added/removed task changes it;
+  `mixed_fingerprints` flags ledgers that span more than one), the `versions`
+  each record carries (protocol, `klt`, `pdk`), agents/providers/models, every
+  run's `seed_sha256` / `seed_from`, and start/finish timestamps from the journal.
+  Ledgers written before `versions.pdk` existed simply omit it.
+- **Integrity.** Every record is re-checked with `validate_run` (and the set
+  with `validate_run_set`); a failing record is listed under
+  `integrity.rejected_records` and never scored. `interrupted` attempts are
+  history, not outcomes. Two finished records for one run key are reported and
+  that key left out.
+- **Compatibility.** Report fields are additive: it adds no field to
+  `layout_run/1` beyond the optional `versions.pdk`, and the round ledger and
+  pass@k outputs are untouched.
+
+CI (`design-agent-benchmark.yml`): the deterministic job runs the reference
+provider on one task (`nfet-unit`, `gen-only` + `gen+refine`, one replicate),
+reports it, deletes the sandboxes, regenerates the report from the ledgers and
+requires `cmp` equality. The live job (`design-agent-benchmark-layout-live`) is
+`workflow_dispatch`/`schedule` only, skipped without `CLAUDE_CODE_OAUTH_TOKEN`,
+never fails the workflow, and stays inside the protocol's phase-1 budget (one
+task, three arms, one replicate, 1800 s / 80 tool calls per run).
+
+Methodology after Ding, Zou, Sun, Cong, *Can Agents Design Better Chips with a
+Higher Level Abstraction?* (ICCAD'26; artifact
+[github.com/ZijD/AHRR](https://github.com/ZijD/AHRR), MIT). Methodology only:
+no AHRR implementation code is copied.

@@ -610,7 +610,11 @@ def _record_tool_calls(log: Path) -> list[dict[str, Any]]:
 def _versions(protocol: dict[str, Any]) -> dict[str, Any]:
     from klayout_tools import __version__
 
-    return {"protocol": protocol["protocol_version"], "klt": __version__}
+    return {
+        "protocol": protocol["protocol_version"],
+        "klt": __version__,
+        "pdk": layout.GATE_DECK,
+    }
 
 
 # --------------------------------------------------------------------------
