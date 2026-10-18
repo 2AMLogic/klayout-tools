@@ -38,7 +38,7 @@ import math
 import re
 from typing import Any
 
-from . import sim_steps
+from . import sim_steps, sim_supply_relative
 
 #: Request key that carries the declaration, and the report key that echoes it.
 REQUEST_KEY = "stimulus"
@@ -87,6 +87,38 @@ def _number(value: Any, field: str, *, minimum: float | None = None) -> float:
     return number
 
 
+def _level(value: Any, field: str, supply_v: dict[str, Any] | None) -> float:
+    """A voltage level: a plain number, or a supply-relative
+    ``{frac_of, fraction}`` object resolved against this corner's supply
+    (issue #3918)."""
+    if sim_supply_relative.is_supply_relative(value):
+        try:
+            return sim_supply_relative.resolve(value, field, supply_v)
+        except sim_supply_relative.SupplyRelativeError as exc:
+            raise StimulusError(str(exc)) from exc
+    return _number(value, field)
+
+
+def has_supply_relative(request: dict[str, Any]) -> bool:
+    """Whether any ``stimulus`` level is written in the ``{frac_of, fraction}``
+    form (so the schedule must be resolved once per corner)."""
+    spec = request.get(REQUEST_KEY)
+    signals = spec.get("signals") if isinstance(spec, dict) else None
+    for signal in signals if isinstance(signals, list) else []:
+        if not isinstance(signal, dict):
+            continue
+        levels = [signal.get("initial")]
+        events = signal.get("events")
+        levels += (
+            [event.get("level") for event in events if isinstance(event, dict)]
+            if isinstance(events, list)
+            else []
+        )
+        if any(sim_supply_relative.is_supply_relative(level) for level in levels):
+            return True
+    return False
+
+
 def _reject_unknown(obj: dict[str, Any], allowed: frozenset[str], where: str) -> None:
     unknown = sorted(set(obj) - allowed)
     if unknown:
@@ -128,7 +160,9 @@ def _tstop_s(analysis: dict[str, Any]) -> float | None:
     return float(match.group(1)) * scale[match.group(2)]
 
 
-def _signal_header(raw: dict[str, Any], where: str) -> dict[str, Any]:
+def _signal_header(
+    raw: dict[str, Any], where: str, supply_v: dict[str, Any] | None
+) -> dict[str, Any]:
     """The validated per-signal fields other than ``events``."""
     ref = raw.get("ref", "0")
     if not isinstance(ref, str) or not _NODE_RE.match(ref):
@@ -137,7 +171,8 @@ def _signal_header(raw: dict[str, Any], where: str) -> dict[str, Any]:
         "source": _name(raw, "source", _SOURCE_RE, where),
         "node": _name(raw, "node", _NODE_RE, where),
         "ref": ref,
-        "initial": _number(raw.get("initial", 0.0), f"{where}.initial"),
+        "initial": _level(raw.get("initial", 0.0), f"{where}.initial", supply_v),
+        "supply_v": supply_v,
         "rise": _number(raw.get("rise_s", 0.0), f"{where}.rise_s", minimum=0.0),
         "fall": _number(raw.get("fall_s", 0.0), f"{where}.fall_s", minimum=0.0),
         "skew": _number(raw.get("skew_s", 0.0), f"{where}.skew_s"),
@@ -160,7 +195,7 @@ def _resolve_event(
     if "t_s" not in event or "level" not in event:
         raise StimulusError(f"{ewhere} requires 't_s' and 'level'")
     t_s = _number(event["t_s"], f"{ewhere}.t_s", minimum=0.0)
-    target = _number(event["level"], f"{ewhere}.level")
+    target = _level(event["level"], f"{ewhere}.level", head["supply_v"])
     previous_t = state["previous_t"]
     if previous_t is not None and t_s <= previous_t:
         raise StimulusError(
@@ -203,21 +238,26 @@ def _resolve_event(
         pwl.append([start + applied, target])
         state["busy_until"] = start + applied
     state["level"] = target
-    return {
+    record = {
         "t_s": t_s,
         "t_applied_s": start,
         "level": target,
         "edge": edge,
         "transition_s": applied if edge != "hold" else 0.0,
     }
+    if sim_supply_relative.is_supply_relative(event["level"]):
+        record["level_spec"] = dict(event["level"])
+    return record
 
 
-def _resolve_signal(raw: Any, index: int, tstop: float | None) -> dict[str, Any]:
+def _resolve_signal(
+    raw: Any, index: int, tstop: float | None, supply_v: dict[str, Any] | None
+) -> dict[str, Any]:
     where = f"request.stimulus.signals[{index}]"
     if not isinstance(raw, dict):
         raise StimulusError(f"{where} must be an object")
     _reject_unknown(raw, _SIGNAL_KEYS, where)
-    head = _signal_header(raw, where)
+    head = _signal_header(raw, where, supply_v)
     events = raw.get("events")
     if not isinstance(events, list) or not events:
         raise StimulusError(f"{where}.events must be a non-empty list")
@@ -244,14 +284,18 @@ def _resolve_signal(raw: Any, index: int, tstop: float | None) -> dict[str, Any]
 
 
 def resolve_stimulus(
-    request: dict[str, Any], analysis: dict[str, Any]
+    request: dict[str, Any],
+    analysis: dict[str, Any],
+    supply_v: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """The request's resolved signal list (empty when it declares none).
 
     Raises :class:`StimulusError` for any structural problem before a corner is
     dispatched. ``analysis`` is the resolved analysis object: a scalar
     non-``tran`` analysis is refused, and a readable ``tran`` stop time bounds
-    the (skewed) edge times.
+    the (skewed) edge times. ``supply_v`` is the corner's ``corners.supply_v``
+    map, against which a ``{frac_of, fraction}`` level is resolved (issue
+    #3918); a request with literal levels ignores it.
     """
     spec = request.get(REQUEST_KEY)
     if spec is None:
@@ -270,7 +314,9 @@ def resolve_stimulus(
             CODE_UNSUPPORTED,
         )
     tstop = _tstop_s(analysis) if kind == "tran" else None
-    resolved = [_resolve_signal(raw, i, tstop) for i, raw in enumerate(signals)]
+    resolved = [
+        _resolve_signal(raw, i, tstop, supply_v) for i, raw in enumerate(signals)
+    ]
     seen: set[str] = set()
     for signal in resolved:
         key = signal["source"].lower()
@@ -329,12 +375,65 @@ def deck_lines(signals: list[dict[str, Any]]) -> tuple[str, ...]:
     return tuple(lines)
 
 
+def supply_key(supply_v: dict[str, Any] | None) -> tuple[tuple[str, float], ...]:
+    """A hashable identity for a corner's supply map: a supply-relative
+    schedule depends on nothing else, so Monte Carlo samples drawn from one
+    corner (whose ``corner_id`` gains a suffix) share its lines."""
+    return tuple(sorted((str(k), float(v)) for k, v in (supply_v or {}).items()))
+
+
+class CornerStimulusLines(tuple):  # type: ignore[type-arg]
+    """Deck lines of a supply-relative schedule (issue #3918).
+
+    As a tuple it holds the distinct lines across corners (so a checkpoint
+    fingerprint over ``list(lines)`` changes with the schedule); the lines a
+    deck gets are ``by_supply[supply_key(point.supply_v)]``. A request with
+    literal levels never builds one -- it keeps a plain tuple."""
+
+    by_supply: dict[tuple[tuple[str, float], ...], tuple[str, ...]]
+
+
+def corner_deck_lines(
+    signals_by_supply: dict[tuple[tuple[str, float], ...], list[dict[str, Any]]],
+) -> CornerStimulusLines:
+    """Per-supply deck lines for ``{supply_key: resolved signals}``."""
+    by_supply = {key: deck_lines(sigs) for key, sigs in signals_by_supply.items()}
+    distinct = list(
+        dict.fromkeys(line for lines in by_supply.values() for line in lines)
+    )
+    out = CornerStimulusLines(distinct)
+    out.by_supply = by_supply
+    return out
+
+
+def lines_for_corner(
+    lines: tuple[str, ...], supply_v: dict[str, Any] | None
+) -> tuple[str, ...]:
+    """The stimulus cards for one corner's deck."""
+    by_supply = getattr(lines, "by_supply", None)
+    return by_supply[supply_key(supply_v)] if by_supply is not None else lines
+
+
 def report_echo(signals: list[dict[str, Any]]) -> dict[str, Any]:
     """The ``environment.stimulus`` block: the schedule as applied."""
     return {"signals": signals}
 
 
-def environment_entry(signals: list[dict[str, Any]]) -> dict[str, Any]:
+def environment_entry(
+    signals: list[dict[str, Any]],
+    signals_by_corner: dict[str, list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
     """The additive ``environment`` fragment for a run: ``{"stimulus": ...}``
-    when signals were declared, else empty."""
+    when signals were declared, else empty. A supply-relative schedule
+    (``signals_by_corner``, issue #3918) is echoed per corner, as applied."""
+    if signals_by_corner:
+        return {
+            "stimulus": {
+                "supply_relative": True,
+                "corners": [
+                    {"corner_id": cid, "signals": sigs}
+                    for cid, sigs in signals_by_corner.items()
+                ],
+            }
+        }
     return {"stimulus": report_echo(signals)} if signals else {}
