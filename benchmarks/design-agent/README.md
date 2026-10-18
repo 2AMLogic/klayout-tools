@@ -742,3 +742,57 @@ Regenerate the corpus (byte-reproducible; needs a resolvable sky130A PDK) with
 Known limit: the generators draw label-free cells, so the frozen netlists
 expose only the nets `gen-compose` routes plus the substrate as top-level pins;
 gate/source/drain nets are internal and LVS compares topology and device W/L.
+
+## Layout executor (`run-layout`)
+
+Phase 3 (issue #3026): one executor runs `draw-only`, `gen-only` and
+`gen+refine` over the corpus through the same isolation, budget, scoring and
+ledger path (`scripts/design_agent_benchmark_layout_exec.py`). It implements
+`layout-protocol.json`; arm definitions, tool classes and statuses are read from
+it, never hard-coded.
+
+```
+uv run python scripts/design_agent_benchmark.py run-layout --out-dir /tmp/layout-run \
+  [--provider reference|interactive-agent] [--task nfet-unit] [--arm gen-only] \
+  [--replicates 3] [--agent-id my-agent] [--agent-timeout-s 1800] [--agent-tool-budget 80]
+```
+
+`--provider reference` is credential-free plumbing (it replays the frozen
+single-step `klt gen` recipe; `draw-only` is an `agent_error`, there is no
+reference drawing). `interactive-agent` drives one bounded `claude` session per
+run through the existing `InteractiveAgentInvoker`; tests stub the invoker or the
+`LayoutProvider` and need neither.
+
+- **Tool surface.** Each sandbox's `bin/klt` is the interactive provider's shim
+  with a policy attached (kept outside the sandbox). A verb outside the arm's
+  allowed classes is refused with exit 126 and recorded; a verb in no class is
+  refused; either ends the run as `invalid_tool_surface` with no score. Calls past
+  `tool_call_budget` end it as `budget_exhausted`. The scored GDS must also be the
+  output of a recorded `draw`/`generate` call (or the untouched seed), so a stream
+  written any other way is `invalid_tool_surface` too.
+- **Isolation.** A fresh sandbox per run holds only the task's `agent_inputs`
+  (the netlist), the shim, the brief and, for `gen+refine`, that agent's own seed.
+  The reference layout, recipe, negative controls and other arms' output are never
+  copied in. The scorer re-runs `klt drc` / `klt lvs` on a private copy under
+  `runs/<run_id>/score/`, against the repo-frozen netlist.
+- **Seeding.** `gen+refine` starts from the same (task, agent, replicate)'s best
+  `valid` `gen-only` run, whose stored artifact must still hash to the ledger
+  value; otherwise it is `not_run_no_seed` (no tool calls, no score). `seed_from`
+  and the seed-extended `seed_sha256` bind the seed into the record. The seed is
+  round zero: a refinement that scores worse is superseded by the seed
+  (`artifact.selected_round: 0`, refined area kept in `diagnostics`); a refinement
+  that is itself invalid stays an `invalid_*` run.
+- **Ledger.** `runs.jsonl` is append-only, one fsync'd `layout_run/1` record per
+  finished run (provider/model, task, arm, seeds, `versions`, artifact hash,
+  per-check gate results, `usage` verbatim, `runtime_s`, `diagnostics`), each
+  checked with `validate-layout`'s own `validate_run` before it is written.
+  `validate-layout --runs runs.jsonl` accepts the file. The round ledger
+  (`ledger.schema.json`, `--rounds` mode) is unchanged.
+- **Resume.** `journal.jsonl` logs a `start` before each run. Re-running with the
+  same `--out-dir` appends an `interrupted` record (unscored, not in the
+  denominator) for any start without a record, then re-runs it as attempt `.aN`.
+  A torn final line is ignored; corruption elsewhere is an error. Finished runs,
+  including failed ones, are never retried.
+
+Known limit: `area_um2` is the top cell's bounding-box area from `klayout.db`;
+`utilization` stays `null` (optional) and `sim_margin` waits on #217.

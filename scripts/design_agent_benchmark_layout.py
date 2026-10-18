@@ -62,6 +62,8 @@ ARM_IDS = ("draw-only", "gen-only", "gen+refine")
 SEED_ARM = "gen-only"
 SEEDED_ARM = "gen+refine"
 SCORED_STATUS = "valid"
+#: Exit code the klt-shim records for a call it refused (protocol tool_recording).
+REFUSED_EXIT_CODE = 126
 #: Statuses that are legitimate without any recorded validity checks (the run
 #: never reached the scorer).
 _NO_VALIDITY_STATUSES = frozenset(
@@ -169,6 +171,15 @@ def run_seed_sha256(
     if seed_artifact_sha256 is not None:
         payload[spec["seeded_arm_extra_fields"][0]] = seed_artifact_sha256
     return hashlib.sha256(canonical_json(payload).encode("ascii")).hexdigest()
+
+
+def load_run_records(path: Path) -> list[dict[str, Any]]:
+    """Run records from a JSON array file, or from an executor ``runs.jsonl``
+    ledger (one record per line, issue #3026)."""
+    text = path.read_text()
+    if path.suffix == ".jsonl":
+        return [json.loads(line) for line in text.splitlines() if line.strip()]
+    return json.loads(text)
 
 
 def _file_sha256(path: Path) -> str:
@@ -505,7 +516,13 @@ def _tool_call_errors(protocol: dict[str, Any], run: dict[str, Any]) -> list[str
                 f"{where}: phase {call['phase']!r} does not exist in arm "
                 f"{run['arm']!r} (cross-arm contamination)"
             )
-        elif expected_class not in phase["allowed_classes"]:
+        elif (
+            expected_class not in phase["allowed_classes"]
+            # A refused call (exit 126) is the shim *recording* the violation
+            # (protocol tool_recording): it is evidence for invalid_tool_surface,
+            # not contamination of the scored artifact.
+            and call["exit_code"] != REFUSED_EXIT_CODE
+        ):
             errors.append(
                 f"{where}: verb {call['verb']!r} (class {expected_class!r}) "
                 f"is not allowed "
@@ -669,7 +686,7 @@ def _seed_identity_errors(protocol: dict[str, Any], run: dict[str, Any]) -> list
 
 def _refusal_errors(run: dict[str, Any]) -> list[str]:
     if run["status"] != "invalid_tool_surface" and any(
-        call["exit_code"] == 126 for call in run["tool_calls"]
+        call["exit_code"] == REFUSED_EXIT_CODE for call in run["tool_calls"]
     ):
         return [
             "a tool call was refused (exit 126) but status is not invalid_tool_surface"
