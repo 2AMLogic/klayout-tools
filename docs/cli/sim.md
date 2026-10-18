@@ -2792,8 +2792,63 @@ byte-identical to before.
 the rules); a worker built before this field would ignore the hints, so the
 client compares each returned corner's `nodeset` with what it dispatched and
 fails with `error.code: "nodeset_unsupported_worker"` on any difference. This
-does not add raw-card injection, `.ic`/`uic`, stimulus rewriting or any runner
-negotiation.
+does not add raw-card injection, stimulus rewriting or any runner
+negotiation; for a transient start state see `options.initial_conditions` below.
+
+### Transient start states: `options.initial_conditions` (issue #3881)
+
+"Passes from every start state at every corner" is a claim the report should
+carry. `options.initial_conditions` takes the **same rule array as
+`options.nodeset`** (`[{"match": {process?, temperature_c?, supply_v?, params?},
+"values": {node: volts}}]`, same selectors, same validation, same
+one-rule-per-point resolution) and applies the selected map as a transient
+*start state*:
+
+```json
+{"analysis": {"kind": "tran", "args": "10u 1m"},
+ "corners": {"temperature_c": [27, 85]},
+ "options": {"initial_conditions": [
+   {"match": {"temperature_c": 27}, "values": {"out": 0.25}},
+   {"match": {"temperature_c": 85}, "values": {"out": 1.5}}]}}
+```
+
+Field location: it is an `options` field (a rule list, like `nodeset`), not a
+`corners` axis, so it reuses the nodeset selector instead of adding a second
+matching engine. Start states are therefore chosen *per* existing corner point
+rather than crossed with the other axes; to cover several start states at one
+PVT point, sweep a `corners.params` value and select on it.
+
+**`.ic` is not `.nodeset`.** A `.nodeset` only seeds the DC operating-point
+solve and is dropped once `uic` skips that solve; `.ic` + `uic` *is* the
+transient's `t = 0` state, even when it is not an equilibrium. Use
+`options.nodeset` to choose among DC solutions and `options.initial_conditions`
+to start a transient from a named state.
+
+**What klt generates.** One file-scope `.ic v(<node>)=<volts>` card per node,
+after the netlist `.include`, and `uic` appended to the `tran` arguments of
+each point that carries a map (not added twice if the request already spells
+it). A request value beats a body-level `.ic` on the same node; body-level
+`.ic` cards on other nodes still apply on those points. A point with no map
+gets no card and no `uic`, so a body-level `.ic` is inert there exactly as
+before. ngspice does not warn about an `.ic` on a node the circuit lacks, so a
+misspelled node is not detected by the engine; check the corner's measurements.
+
+**Analysis.** Requires a single `analysis` of kind `tran`; `op`, `ac`, other
+kinds and `analysis_steps` are refused before anything runs.
+
+**Reporting and identity.** Each corner report (and `--dry-run` unit) that has
+a start state carries `initial_conditions`, the applied `{node: volts}` map;
+other corners have no such field. Corner IDs and slugs are unchanged, the
+selected maps are part of the `options.resume` fingerprint, and omitting the
+option leaves decks, IDs and fingerprints byte-identical. Overlapping rules, a
+rule matching no retained point, a bad node spelling or a non-finite value are
+application errors (exit 1) before any run.
+
+**Engines and workers.** `engine: "ngspice"` only (`xyce` is refused). The
+selected maps travel in each `_explicit_points` entry to `remote`/`batch`
+workers; the client compares each returned corner's `initial_conditions` with
+what it dispatched and fails with
+`error.code: "initial_conditions_unsupported_worker"` on any difference.
 
 ### Opting out: `options.save_mode` (issue #2732)
 
@@ -6936,7 +6991,7 @@ the *response* echoes back.
 | `monte_carlo.window_scope` | string          | `"pooled"` (default) or `"per_corner"`: which `mean ± k*stddev` window gates status. `"per_corner"` fails a measurement if any `by_corner[]` window fails and adds `failing_corners` to its `monte_carlo` block; see "Pooled vs. per corner". |
 | `analysis`               | object            | `kind` (e.g. `"op"`, `"dc"`, `"ac"`, `"tran"`) and `args`, the engine-syntax analysis-card arguments. One analysis per corner. `"op"` is a valid `kind`, but see `measurements[]` below — it cannot be paired with a `.meas op` card; measure an operating-point quantity with `measurements[].expr` instead. Required unless the request declares `analysis_steps` instead; declaring both is an application error (exit 1). |
 | `analysis_steps[]`       | array\<object\>   | Issue #2482. Additive alternative to `analysis`: an ordered, non-empty sequence of named solves run inside each corner's one deck — each step `{name, analysis: {kind, args}, alter?, reset?, measurements?}` (`alter` values are a finite number, or `{"pwl": [t0, v0, ...]}` for a `pwl`-declared source). With it, the top-level `measurements[]` are **derived** `expr`s over `<step>.<measurement>` results. ngspice only (refused for `engine: "xyce"`); refuses `options.waveforms`/`--plot`. See "Several solves per corner (`analysis_steps[]`)" above for the full rules. |
-| `measurements[]`         | array\<object\>   | `name` (stable response key) plus **exactly one** of `spice` (a verbatim `.meas` card), `expr` (issue #2533 — a single-line ngspice expression evaluated after the analysis inside `klt sim`'s own `.control` block; see "Measurements that are not `.meas` cards" above), `crossings` (issue #2868 — `{signal, level, edge?, from?, to?, max?}`, a threshold-crossing time series, `tran` only; see "Threshold-crossing time series" above), `cycle_mean` (issue #2947 — `{signal, align, level, cycles, edge?, from?}`, a time-weighted mean over whole reference cycles, `tran` only; see "Cycle-aligned mean" above), `energy` (issue #3033 — `{source, voltage, from?, to?}`, a source's net/gross/recovered energy and charge over a transient window, `tran` only; see "Source energy over a transient window" above), or `transfer` (issue #2923 — `{num, den, metric}`, an AC return-ratio metric, `ac` and local backends only; see "AC return-ratio metrics" above), or `snm` (issue #3895 — `{x, y1, y2}`, a butterfly static noise margin of two voltage-transfer curves, `dc` only; see "Butterfly static noise margin" above), plus optional `unit`, `optional` (issue #2925 — boolean, default `false`; `true` grades a value-less result `status: "absent"` instead of `error`, `spice`/`expr` on the scalar `analysis` only — see "Optional measurements" above), `limits` (`min`/`max`, either optional), `k_sigma` (per-measurement override of `monte_carlo.k_sigma`), and `plausible_range` (issue #2493 — `min`/`max`, either optional but at least one required; per-measurement plausibility bound, unscoped by `unit`; overrides `options.node_voltage_bounds` when both apply). Optional `on_unreached` (issue #3108 — `"error"` (default) or `"null"`, `spice` only; see "Unreached `.meas` targets" below). No `limits` -> reported, never fails; no `plausible_range` (and no applicable `options.node_voltage_bounds`) -> plausibility check never runs, exactly as before this issue. Declaring both `spice` and `expr`, or neither, is an application error (exit 1). `spice`'s declared analysis type must be one ngspice's own `.MEASURE` implements (`dc`/`ac`/`tran`/`sp`) — there is no `.MEASURE OP`; a `.meas op` card is rejected up front (`SimError`), regardless of the request's own `analysis.kind`. `expr` must reduce to a single real scalar, must be one line, must have a name matching `[A-Za-z_][A-Za-z0-9_]*` unique across `measurements[]`, and is refused for `engine: "xyce"`. |
+| `measurements[]`         | array\<object\>   | `name` (stable response key) plus **exactly one** of `spice` (a verbatim `.meas` card), `expr` (issue #2533 — a single-line ngspice expression evaluated after the analysis inside `klt sim`'s own `.control` block; see "Measurements that are not `.meas` cards" above), `crossings` (issue #2868 — `{signal, level, edge?, from?, to?, max?}`, a threshold-crossing time series, `tran` only; see "Threshold-crossing time series" above), `cycle_mean` (issue #2947 — `{signal, align, level, cycles, edge?, from?}`, a time-weighted mean over whole reference cycles, `tran` only; see "Cycle-aligned mean" above), `energy` (issue #3033 — `{source, voltage, from?, to?}`, a source's net/gross/recovered energy and charge over a transient window, `tran` only; see "Source energy over a transient window" above), or `transfer` (issue #2923 — `{num, den, metric}`, an AC return-ratio metric, `ac` and local backends only; see "AC return-ratio metrics" above), or `snm` (issue #3895 — `{x, y1, y2}`, a butterfly static noise margin of two voltage-transfer curves, `dc` only; see "Butterfly static noise margin" above), plus optional `unit`, `optional` (issue #2925 — boolean, default `false`; `true` grades a value-less result `status: "absent"` instead of `error`, `spice`/`expr` on the scalar `analysis` only — see "Optional measurements" above), `limits` (`min`/`max`, either optional), `k_sigma` (per-measurement override of `monte_carlo.k_sigma`), and `plausible_range` (issue #2493 — `min`/`max`, either optional but at least one required; per-measurement plausibility bound, unscoped by `unit`; overrides `options.node_voltage_bounds` when both apply), and `spec_row` (issue #3778 — non-empty string, the spec row this measurement grades, echoed on the rollup entry only when declared; `klt signoff` item 5 derives a citation's row coverage from it, see `docs/cli/signoff.md` "Derived coverage". Same meaning as `spec_row` in `klt pex` delta rows). Optional `on_unreached` (issue #3108 — `"error"` (default) or `"null"`, `spice` only; see "Unreached `.meas` targets" below). No `limits` -> reported, never fails; no `plausible_range` (and no applicable `options.node_voltage_bounds`) -> plausibility check never runs, exactly as before this issue. Declaring both `spice` and `expr`, or neither, is an application error (exit 1). `spice`'s declared analysis type must be one ngspice's own `.MEASURE` implements (`dc`/`ac`/`tran`/`sp`) — there is no `.MEASURE OP`; a `.meas op` card is rejected up front (`SimError`), regardless of the request's own `analysis.kind`. `expr` must reduce to a single real scalar, must be one line, must have a name matching `[A-Za-z_][A-Za-z0-9_]*` unique across `measurements[]`, and is refused for `engine: "xyce"`. |
 | `options.node_voltage_bounds` | object       | Issue #2493. Run-wide plausibility default (`min`/`max`, either optional but at least one required) — see "Plausibility bounds" above. **Voltage-scoped**: only auto-applies to a measurement declaring `unit: "V"` that has no own `plausible_range`. Omit for no default (today's behaviour, unchanged). |
 | `options.timeout_s`      | number            | Per-corner wall-clock budget. Defaults to `120`. Exceeding it kills the process and yields an `error`-status corner.                                                    |
 | `options.keep_artifacts` | boolean           | Retain per-corner logs/rawfiles on disk under `--outdir` (or its default) and reference them from the response. Defaults to `false`.                                   |
@@ -6953,6 +7008,7 @@ the *response* echoes back.
 | `options.save_mode`      | string            | Issue #2732. `"all"` (default; omitted means the same) keeps the generated `save all`; `"netlist"` suppresses it so the netlist's own `.save` cards decide the resident vector set, and the caller owns measurement/waveform coverage. Any other value (including `null`) is an application error (exit 1); an explicit value is refused for `engine: "xyce"`. Off-host workers must include this implementation. See "Opting out: `options.save_mode`" above. |
 | `options.ngspice_options` | object | Issue #3111. Solver/convergence `.options` (`gmin`, `gminsteps`, `srcsteps`, `itl1`, `itl2`, `itl4`, `noopiter`, `method`, `reltol`, `abstol`, `vntol`, `pivtol`) rendered as one `.options` card after `.temp` in every corner deck and echoed verbatim as `environment.ngspice_options`. Values are numbers, booleans or bare-token strings; an unknown key or other value is an application error (exit 1) naming it; refused for `engine: "xyce"`. Unset: no card, no echo. See "Solver options: `options.ngspice_options`" above. |
 | `options.nodeset`        | array\<object\>  | Issue #3036. Initial-guess rules `[{"match": {process?, temperature_c?, supply_v?, params?}, "values": {node: volts}}]` selected per retained corner point and rendered as file-scope `.nodeset v(node)=volts` cards after the netlist `.include`; echoed as `nodeset` on each hinted corner report. Overlapping rules, a rule matching no retained point, an unsupported node spelling or a non-finite value are application errors (exit 1) before any run; an unknown node fails its corner with an `error` diagnostic; refused for `engine: "xyce"`; an off-host worker that does not echo the maps fails with `nodeset_unsupported_worker`. Unset or `[]`: no change. See "Initial-guess hints: `options.nodeset`" above. |
+| `options.initial_conditions` | array\<object\> | Issue #3881. Transient start states, same `[{match, values}]` rules as `options.nodeset`, rendered as file-scope `.ic v(node)=volts` cards plus `uic` on the `tran` command; echoed as `initial_conditions` on each affected corner report. Requires a single `tran` analysis; refused for `engine: "xyce"`; an off-host worker that does not echo the maps fails with `initial_conditions_unsupported_worker`. Unset or `[]`: no change. See "Transient start states" above. |
 | `options.ngspice_init`   | array\<string\>   | Issue #2520. Lines materialized as a `.spiceinit` file inside each corner's own artifact directory (`cwd=` for that corner's `ngspice` invocation), most commonly `["set ngbehavior=hsa"]` to select a compatibility mode for vendor decks written in HSPICE style. Defaults to unset — no `.spiceinit` is written (no behavior change). `engine: "ngspice"` only; accepted-and-ignored for `"xyce"`. See "ngspice's working directory, and `.spiceinit` compatibility mode" above. |
 | *(CLI-only)* `--plot <dir>` | string         | No request-document equivalent (like `trajectory --plot`) — writes one waveform SVG per non-sweep signal per corner to `<dir>`, forcing `options.waveforms`/`keep_artifacts` on for this run. See "Waveform plots" above. |
 | `expect_netlist_identity` | string           | Optional (issue #3074). The `environment.netlist_identity` stamp of the record this run is compared against. When present and different from the identity computed for this request, `klt sim` refuses before simulating (application error, exit 1) with a message naming both stamps. Absent or matching changes nothing. Also refused if the identity cannot be computed (see `netlist_identity_error`). |

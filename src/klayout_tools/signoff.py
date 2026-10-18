@@ -6181,9 +6181,15 @@ def _grade_evidence(
     item_id: int | None = None,
     repo_root: str | Path | None = None,
     generator_exec: GeneratorExecution | None = None,
+    envelope_sink: list[dict[str, Any]] | None = None,
 ) -> tuple[str, str | None, dict[str, Any] | None, dict[str, Any]]:
     """Grade one resolved evidence ``spec`` (:func:`_normalize_evidence_entry`)
     and return ``(status, reason, citation, failure_detail)``.
+
+    ``envelope_sink`` (issue #3778): when given, the resolved envelope of a
+    ``met`` grading is appended to it, so the multi-citation path can read
+    the envelope's ``spec_row`` tags without resolving (or re-running) the
+    citation a second time.
 
     ``failure_detail`` names any critical metrics that invalidated evidence;
     the citation remains absent for every unmet item.
@@ -6372,6 +6378,7 @@ def _grade_evidence(
             None,
             {**_input_members_detail(resolution), **execution_detail},
         )
+    _record_envelope(envelope_sink, envelope)
     return "met", None, citation, {}
 
 
@@ -7362,10 +7369,14 @@ def _build_tier_item(
     reason: str | None = _REASON_NO_EVIDENCE
 
     not_applicable: dict[str, Any] | None = None
+    # Issue #3778: the envelope of every ``met`` citation graded below, keyed
+    # by the spec's identity, for `_grade_multi_citation`'s `spec_row` check.
+    met_envelopes: dict[int, dict[str, Any]] = {}
 
     def grade_spec(
         spec: dict[str, Any],
     ) -> tuple[str, str | None, dict[str, Any] | None, dict[str, Any]]:
+        sink: list[dict[str, Any]] = []
         spec_status, spec_reason, spec_citation, spec_detail = _grade_evidence(
             spec,
             require_post_layout=require_post_layout,
@@ -7373,7 +7384,9 @@ def _build_tier_item(
             item_id=item_id,
             repo_root=repo_root,
             generator_exec=generator_exec,
+            envelope_sink=sink,
         )
+        _remember_envelope(met_envelopes, spec, sink)
         opt_in_items = (
             _OPT_IN_KIND_ITEMS.get(spec_citation["kind"])
             if spec_status == "met"
@@ -7430,6 +7443,7 @@ def _build_tier_item(
             grade_spec,
             spec_rows=spec_rows,
             spec_rows_invalid=spec_rows_invalid,
+            met_envelopes=met_envelopes,
             required_kind_pair=required_kind_pair,
         )
     elif raw_entry is not None:
@@ -7566,6 +7580,7 @@ def _grade_multi_citation(
     *,
     spec_rows: list[dict[str, Any]] | None,
     spec_rows_invalid: bool,
+    met_envelopes: dict[int, dict[str, Any]] | None = None,
     required_kind_pair: tuple[str, ...] | None = None,
 ) -> tuple[str, str | None, dict[str, Any] | None, dict[str, Any], dict[str, Any]]:
     """Grade a list-form (or ``spec_rows``-bearing) evidence entry (issue
@@ -7588,6 +7603,13 @@ def _grade_multi_citation(
     - otherwise ``met``; ``citation`` is the first member's and ``citations``
       carries all of them.
 
+    **Derived row coverage** (issue #3778): a ``met`` member whose envelope
+    carries ``spec_row`` tags on its ``measurements[]`` (``klt sim``) covers
+    only the named rows some tagged, limited, passing measurement grades --
+    a named row with none is uncovered. A member with no tags keeps the
+    manifest-asserted ``rows``. ``row_coverage.row_sources`` marks each
+    covered row ``derived`` or ``asserted``.
+
     Returns ``(status, reason, citation, failure_detail, extra_item_keys)``.
     """
     invalid: tuple[str, str | None, None, dict[str, Any], dict[str, Any]] = (
@@ -7605,7 +7627,12 @@ def _grade_multi_citation(
 
     graded = [(spec, rows, grade_spec(spec)) for spec, rows in members]
     failed = [g for g in graded if g[2][0] != "met"]
-    row_info = _multi_row_info(graded, failed, spec_rows)
+    # Rows each member is credited with, and whether that was machine-derived.
+    credited: dict[int, tuple[list[str] | None, bool]] = {
+        id(spec): _credited_rows(rows, (met_envelopes or {}).get(id(spec)))
+        for spec, rows, _ in graded
+    }
+    row_info = _multi_row_info(graded, failed, spec_rows, credited)
     extra: dict[str, Any] = {
         "citations_graded": [
             {
@@ -7691,8 +7718,59 @@ def _members_rows_declared(
     )
 
 
+def _record_envelope(
+    sink: list[dict[str, Any]] | None, envelope: dict[str, Any]
+) -> None:
+    """Append ``envelope`` to ``sink`` when one was given (issue #3778)."""
+    if sink is not None:
+        sink.append(envelope)
+
+
+def _remember_envelope(
+    met_envelopes: dict[int, dict[str, Any]],
+    spec: dict[str, Any],
+    sink: list[dict[str, Any]],
+) -> None:
+    """Key the envelope a ``met`` grading captured by ``spec``'s identity."""
+    if sink:
+        met_envelopes[id(spec)] = sink[0]
+
+
+def _envelope_tagged_rows(envelope: dict[str, Any]) -> tuple[bool, set[str]]:
+    """``(has_tags, covering)`` for a ``klt sim`` envelope (issue #3778):
+    whether any ``measurements[]`` entry declares a ``spec_row``, and the
+    rows with a passing measurement that is tagged with them and has
+    ``limits`` (a tag without limits grades nothing)."""
+    raw = envelope.get("measurements")
+    entries = [m for m in raw if isinstance(m, dict)] if isinstance(raw, list) else []
+    tagged = [
+        m for m in entries if isinstance(m.get("spec_row"), str) and m["spec_row"]
+    ]
+    covering = {
+        m["spec_row"] for m in tagged if m.get("status") == "pass" and m.get("limits")
+    }
+    return bool(tagged), covering
+
+
+def _credited_rows(
+    rows: list[str] | None, envelope: dict[str, Any] | None
+) -> tuple[list[str] | None, bool]:
+    """The rows a ``met`` member is credited with and whether they were
+    ``derived`` from its envelope's ``spec_row`` tags (issue #3778). Untagged
+    (or unavailable) envelopes keep the manifest-asserted ``rows``."""
+    if not rows or envelope is None:
+        return rows, False
+    has_tags, covering = _envelope_tagged_rows(envelope)
+    if not has_tags:
+        return rows, False
+    return [r for r in rows if r in covering], True
+
+
 def _multi_row_info(
-    graded: list[Any], failed: list[Any], spec_rows: list[dict[str, Any]] | None
+    graded: list[Any],
+    failed: list[Any],
+    spec_rows: list[dict[str, Any]] | None,
+    credited: dict[int, tuple[list[str] | None, bool]] | None = None,
 ) -> dict[str, Any]:
     """``failed_rows`` / ``uncovered_rows`` / ``declared_gaps`` /
     ``unratified_rows`` for the declared ``spec_rows`` (empty when none were
@@ -7700,7 +7778,18 @@ def _multi_row_info(
     ``ratified: false``, covered or not."""
     if spec_rows is None:
         return {}
-    covered = {r for _, rows, g in graded if g[0] == "met" for r in rows or []}
+    credited = credited or {}
+    covered: set[str] = set()
+    row_sources: dict[str, str] = {}
+    for spec, rows, g in graded:
+        if g[0] != "met":
+            continue
+        credited_rows, derived = credited.get(id(spec), (rows, False))
+        for r in credited_rows or []:
+            covered.add(r)
+            # A row covered by any derived citation is machine-checked.
+            if derived or r not in row_sources:
+                row_sources[r] = "derived" if derived else "asserted"
     failed_rows = sorted({r for _, rows, _ in failed for r in rows or []} - covered)
     return {
         "failed_rows": failed_rows,
@@ -7719,6 +7808,7 @@ def _multi_row_info(
         "unratified_rows": [
             row["id"] for row in spec_rows if row["gap"] is None and not row["ratified"]
         ],
+        "row_sources": {r: row_sources[r] for r in sorted(row_sources)},
     }
 
 
