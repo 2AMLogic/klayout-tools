@@ -2162,11 +2162,16 @@ be within the target `--deck`'s own label-layer coverage (cross-check with
     "klt_version": "0.1.0",
     "klayout_version": "0.30.10",
     "pdk": { "name": "sky130A", "source": "PDK_ROOT environment variable", "version": "<stamp>" },
-    "deck": { "name": "sky130_fd_sc_hd__tt_025C_1v80", "content_hash": "sha256:<hex>" },
+    "deck": { "name": "sky130_fd_sc_hd__tt_025C_1v80", "content_hash": "sha256:<hex>", "path": { "path": null, "scope": "external" } },
     "input": { "content_hash": "sha256:<hex>", "role": "netlist" }
   }
 }
 ```
+
+**Liberty location (issue #3785).** `provenance.deck.path` is the
+`{path, scope}` envelope for the resolved Liberty file `deck.content_hash`
+pins (`{"path": null, "scope": "external"}` for an out-of-repo file, never an
+absolute host path). Additive; `content_hash` remains authoritative.
 
 **Path field shape (issue #2073).** `def_path`/`unrouted_def_path`/
 `gds_path`/`verilog_path` below (and the nested `spef_sta.{spef_path,sdf_path}`)

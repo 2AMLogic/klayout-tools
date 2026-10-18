@@ -867,6 +867,12 @@ stability statement, concrete precedents, and drift-detection guidance, and
   hex digest of the deck file actually used, so "clean against *this exact*
   rule set" is a checkable claim. The whole block is `null` when no deck was
   involved (e.g. `lvs` against a pre-extracted netlist).
+  - `path` (issue #3785, optional, additive) — the `{path, scope}` envelope
+    (`env_provenance.repo_relative_path`) of the resolved deck file, emitted
+    only by `klt sta` and `klt place-and-route` (whose Liberty is a resolved
+    file). An out-of-repo file is `{"path": null, "scope": "external"}`; an
+    absolute host path is never emitted. `content_hash` stays authoritative;
+    no `schema_version` bump, and reports lacking it still verify.
   - `options` / `options_explicit` / `options_hash` (issues #595, #2394) —
     the deck-option flavour selection a run resolved, present together
     **whenever the deck declares at least one caller-selectable option**,
