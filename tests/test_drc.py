@@ -7238,14 +7238,15 @@ def test_run_drc_threshold_max_dbu_validated_even_when_layer_absent(
 
 
 def test_run_drc_sg13g2_every_rule_has_provenance():
-    """Every one of sg13g2's 45 curated `DrcRule` entries carries a populated
+    """Every one of sg13g2's 48 curated `DrcRule` entries carries a populated
     `provenance` citation (issue #905's own acceptance criterion: "every
     compiled rule cites its SG13G2 PDK source line", extended by issue #1243's
-    Metal3-TopMetal2 stack and issue #2581's 6.11 MIM group) -- not just the
+    Metal3-TopMetal2 stack, issue #2581's 6.11 MIM group and issue #3787's pSD
+    group) -- not just the
     32 width/space rules `tests/test_golden_deck.py`'s generic check already
     covers."""
     deck = get_deck("sg13g2")
-    assert len(deck) == 45
+    assert len(deck) == 48
     for rule in deck:
         assert rule.provenance is not None, f"sg13g2/{rule.id}: no provenance"
         assert rule.provenance.source_repo == "IHP-GmbH/IHP-Open-PDK"
@@ -8384,7 +8385,7 @@ def test_run_drc_sg13g2_mim_rules_cite_the_6_11_mim_group():
     """Structural half: both new rules carry the `MIM` scope and cite
     `6_11_mim.drc`'s own official rule ids -- and nothing in this deck cites
     the `maximal`-only runset `MIM.a`/`MIM.b`/`MIM.e`/`MIM.f` live in (see
-    `sg13g2.py`'s "Scope guard")."""
+    `sg13g2.py`'s "Scope guard"; only the three pSD rules of #3787 do)."""
     deck = get_deck("sg13g2")
     mim_rules = {rule.id: rule for rule in deck if rule.scope == "MIM"}
     assert set(mim_rules) == {"metal5.enclosing.mim.1", "mim.enclosing.topvia1.1"}
@@ -8395,9 +8396,9 @@ def test_run_drc_sg13g2_mim_rules_cite_the_6_11_mim_group():
     for rule in mim_rules.values():
         assert rule.check == "enclosing"
         assert rule.provenance.source_path.endswith("beol/6_11_mim.drc")
-    assert not [
+    assert {
         rule.id for rule in deck if "maximal" in (rule.provenance.source_path or "")
-    ]
+    } == {"psd.width.1", "psd.space.1", "psd.area.1"}  # issue #3787
 
 
 # --------------------------------------------------------------------------- #

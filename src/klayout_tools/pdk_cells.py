@@ -27,7 +27,7 @@ import os
 import re
 from typing import Any
 
-from .pdk import PdkNotFoundError, _read_text, find_pdk
+from .pdk import PdkNotFoundError, _read_text, find_pdk, list_pdks
 
 #: Marker substrings identifying a `libs_ref` entry as a "foundry digital,
 #: standard cell" library, as opposed to primitive-device libraries
@@ -227,6 +227,39 @@ def list_cell_libraries(
     return result
 
 
+def _other_variants_hint(cell_library: str, resolved: dict[str, Any]) -> str:
+    """Suffix naming other installed variants that ship ``cell_library``.
+
+    Appended to the not-found error so a headless agent can self-correct with
+    ``--pdk``. Returns ``""`` when no other variant ships the library, and on
+    any discovery failure -- the hint must never mask the original error.
+    """
+    try:
+        candidates: list[str] = []
+        for install in list_pdks()["installs"]:
+            for variant in install["variants"]:
+                name = variant["name"]
+                if name == resolved["variant"] and install["root"] == resolved["root"]:
+                    continue
+                try:
+                    other = find_pdk(variant=name, root=install["root"])
+                except PdkNotFoundError:
+                    continue
+                libs_ref = other["assets"]["libs_ref"]
+                if libs_ref and os.path.isdir(os.path.join(libs_ref, cell_library)):
+                    entry = f"'{name}' at '{install['root']}'"
+                    if entry not in candidates:
+                        candidates.append(entry)
+        if not candidates:
+            return ""
+        return (
+            f"; other installed variants ship it: {', '.join(candidates)} -- "
+            "pass --pdk <variant> (and --pdk-root <root> if needed) to select one"
+        )
+    except Exception:  # noqa: BLE001 -- best-effort hint only
+        return ""
+
+
 def resolve_liberty_for_cell_library(
     cell_library: str,
     requested_corner: str | None,
@@ -280,6 +313,7 @@ def resolve_liberty_for_cell_library(
             f"liberty not found for deck: standard-cell library "
             f"'{cell_library}' not found under resolved PDK install "
             f"'{info['variant']}' at '{info['root']}'"
+            + _other_variants_hint(cell_library, info)
         )
 
     corner = requested_corner

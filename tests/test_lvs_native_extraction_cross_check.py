@@ -20,7 +20,7 @@ directly-runnable ``libs.tech/klayout/lvs/sky130.lvs`` (verified against a
 real ``volare``-fetched sky130A/sky130B install for this issue --
 :func:`klayout_tools.pdk.lvs_deck_file` resolves it), so a real native-deck
 oracle *is* available here, unlike gf180mcu's fragments-only DRC deck. See
-:func:`klayout_tools.extract.run_extract_klayout_engine`'s own docstring for
+:func:`helpers.extract_klayout_oracle.run_extract_klayout_engine`'s own docstring for
 exactly how this module drives that script to get a comparable extracted
 netlist out of it (it is not really an "LVS" run in the compare sense --
 there is no independent reference schematic to compare against here, only a
@@ -94,9 +94,10 @@ from pathlib import Path
 import klayout.db as kdb
 import pytest
 
+from helpers.extract_klayout_oracle import run_extract_klayout_engine
 from klayout_tools import pdk
 from klayout_tools.decks.sky130 import EXTRACTION_DECK
-from klayout_tools.extract import ExtractError, run_extract, run_extract_klayout_engine
+from klayout_tools.extract import ExtractError, run_extract
 
 _DBU_UM = 0.001
 

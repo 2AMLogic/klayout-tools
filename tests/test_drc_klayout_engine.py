@@ -625,6 +625,28 @@ def test_klayout_engine_no_report_file_raises(tmp_path, monkeypatch):
         run_drc_klayout_engine(gds, deck_file)
 
 
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "expected"),
+    [
+        (-11, "", "SIGSEGV"),
+        (0, "ERROR: Signal number: 11\nAddress: 0x0\n", "SIGSEGV"),
+    ],
+)
+def test_klayout_engine_no_report_names_crash_signal(
+    tmp_path, monkeypatch, returncode, stdout, expected
+):
+    """A klayout crash (#3811) is named as such, with klayout's output kept."""
+    _stub_klayout_drc_subprocess(
+        monkeypatch, write_report=False, returncode=returncode, stdout=stdout
+    )
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    with pytest.raises(DrcError, match=rf"klayout crashed \({expected}\)") as info:
+        run_drc_klayout_engine(gds, deck_file)
+    assert stdout.strip() in str(info.value)
+
+
 # --------------------------------------------------------------------------- #
 # A partially-executed deck must never read as clean (issue #1941)
 #
@@ -2945,3 +2967,54 @@ def test_request_document_negative_control(tmp_path, monkeypatch, capsys):
     assert main(["drc", str(request), "--format", "json"]) != 1
     data = json.loads(capsys.readouterr().out)
     assert data["negative_control"]["status"] == "passed"
+
+
+# --------------------------------------------------------------------------- #
+# issue #3816: missing-deck-globals warning
+# --------------------------------------------------------------------------- #
+
+_GATED_DECK_TEXT = (
+    'if not defined? $feol\n  $feol = "false"\nend\nthreads($thr) if $thr\n'
+)
+
+
+def test_klayout_engine_warns_when_required_deck_globals_not_supplied(
+    tmp_path, monkeypatch
+):
+    _stub_klayout_drc_subprocess(monkeypatch)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.drc", _GATED_DECK_TEXT)
+    baseline = run_drc_klayout_engine(
+        gds, _write_deck_file(tmp_path / "plain.drc"), deck_vars=None
+    )
+
+    report = run_drc_klayout_engine(gds, deck_file)
+
+    assert "warnings" not in baseline
+    (warning,) = report["warnings"]
+    assert warning["category"] == "deck_globals_not_supplied"
+    assert warning["count"] == 1
+    assert "thr" in warning["text"] and "klt pdk decks" in warning["text"]
+    # Additive only: verdict fields match a run that has no warning.
+    assert report["status"] == baseline["status"]
+    assert report["violation_count"] == baseline["violation_count"]
+
+
+def test_klayout_engine_no_warning_when_deck_var_supplied(tmp_path, monkeypatch):
+    _stub_klayout_drc_subprocess(monkeypatch)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.drc", _GATED_DECK_TEXT)
+
+    report = run_drc_klayout_engine(gds, deck_file, deck_vars={"thr": "2"})
+
+    assert "warnings" not in report
+
+
+def test_klayout_engine_no_warning_for_self_contained_deck(tmp_path, monkeypatch):
+    _stub_klayout_drc_subprocess(monkeypatch)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(
+        tmp_path / "deck.lydrc", "source($input)\nreport('x', $report)\n"
+    )
+
+    assert "warnings" not in run_drc_klayout_engine(gds, deck_file)
