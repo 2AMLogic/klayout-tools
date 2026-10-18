@@ -96,7 +96,10 @@ A request naming both, or neither, is a request error.
   other tool's routed DEF).
 - **Not `klayout_tools.sta`** (`klt synthesize`'s integrated, *pre-layout*,
   gate-level `sta` report backed by the `klt_statime_native` Rust
-  extension — see `docs/cli/synthesize.md`'s `sta` section). That module
+  extension — see `docs/cli/synthesize.md`'s `sta` section; that extension
+  is not shipped with the published package, so there `klt synthesize`
+  reports `"sta": null` and this command's `verilog` mode is the
+  installed-package route to a netlist timing estimate). That module
   times a structural netlist against a uniform input-transition/output-load
   boundary condition with no floorplan/placement/routing at all; this
   command instead times real, already-placed-and-routed geometry against
@@ -141,6 +144,7 @@ A request naming both, or neither, is a request error.
 | `constraints.output_delay_ns` | number \| omitted | Additive field (issue #1865) → `set_output_delay <ns> -clock <clock_port> [all_outputs]`. Same validation and omitted-default behavior as `input_delay_ns`; the two are independently optional. |
 | `constraints.input_delays` / `.output_delays` | object \| omitted | Additive fields (issue #2740). Per-port maps `{"<port>": {"min_ns": n, "max_ns": n}}` → `set_input_delay -min/-max` / `set_output_delay -min/-max` on exactly that port. Each bound is independently optional (at least one per entry); a missing bound is left **unconstrained**, never copied from the other. Values are finite numbers and may be negative; `min_ns <= max_ns` when both are given. Keys are literal names of one scalar port or one bus bit (`data[3]`) — no wildcards, no whole buses, no Tcl. The scalar `input_delay_ns`/`output_delay_ns` above become the **default for ports absent from the map**. Missing, ambiguous and wrong-direction keys, and the clock port, are request errors. See "Per-port I/O delays and worst-path identity" below. |
 | `constraints.input_transition_ns` / `.input_transitions` | number / object \| omitted | Additive fields (issue #3227). `input_transition_ns` is the default input slew (ns) → `set_input_transition` on every **non-clock** input not named in `input_transitions`; `input_transitions` is a literal `{"<port>": ns}` map (one scalar port or one bus bit, e.g. `data[3]`) whose values **override** the scalar for that port. Every value is a finite, non-boolean number `>= 0` (`0` is valid). Keys follow the per-port delay rules: no wildcards, no whole buses, no Tcl; the clock port, a missing/ambiguous port or an output-only port is a request error. Omitted fields (and an empty map) emit no Tcl — the generated script stays byte-identical. See "Input transitions" below. |
+| `constraints.driving_cell` / `.driving_cells` / `.output_load_pf` / `.output_loads` | object / number \| omitted | Additive fields (issue #3742). `driving_cell` is `{"cell": "<lib cell>", "pin": "<out pin>"}` (optional `"input_pin"`) → `set_driving_cell -lib_cell … -pin … [-from_pin …]` on every non-clock input not named in `driving_cells` or `input_transitions`; `driving_cells` is a literal `{"<port>": {…}}` override map. `output_load_pf` (pF, `>= 0`) → `set_load` on every output not named in `output_loads`, a literal `{"<port>": pF}` map. Same literal-port rules as `input_transitions`; a port in both `driving_cells` and `input_transitions`, or `input_transition_ns` together with a driving-cell field, is a request error. Omitted fields emit no Tcl. See "Driving cell and output load" below. |
 | `constraints.report_ports` | list of strings \| omitted | Additive field (issue #3042). Literal port names (one scalar port or one bus bit such as `data[3]`) whose **own** worst setup and hold path is reported as `port_paths`, alongside the global `worst_*_path`. Same key rules as the per-port delay maps: no wildcards, whole buses or Tcl. Entries must be unique non-empty strings; the clock port, unknown and ambiguous names are request errors. Any direction is allowed. Omitted or `[]` emits nothing. See "Per-port path queries" below. |
 | `constraints.false_path_from` | list of strings \| omitted | Additive field (issue #2968). Literal **input** port names (one scalar port or one bus bit such as `cfg[3]`) excluded from timing with `set_false_path -from [get_ports <port>]`, emitted after the I/O-delay lines in every analysed corner. Use it for quasi-static configuration inputs whose paths are not real datapaths and would otherwise dominate WNS/TNS and the `worst_*_path` records. Same key rules as the per-port delay maps: no wildcards, whole buses or Tcl. Entries must be unique non-empty strings; the clock port, unknown, ambiguous and output-only names are request errors (`constraints.false_path_from rejected: ...`). `inout` ports are allowed. Omitted or `[]` emits nothing and the generated Tcl is byte-identical to before. The applied list is echoed as `false_path_from`. See "Timing exceptions" below. |
 | `constraints.wire_load_model` / `.wire_load_mode` | string \| omitted | (Issue #1825.) **Only valid in `verilog` mode** — a request error otherwise. Drives OpenSTA's own `set_wire_load_model`/`set_wire_load_mode`, the parasitics-estimate mechanism for a from-scratch netlist session that has no placement or routing to estimate from. See "From-scratch netlist input" below. |
@@ -196,7 +200,7 @@ A request naming both, or neither, is a request error.
     "klt_version": "0.2.0",
     "klayout_version": "0.30.10",
     "pdk": { "name": "sky130A", "source": "PDK_ROOT environment variable", "version": "<stamp>" },
-    "deck": { "name": "sky130_fd_sc_hd__tt_025C_1v80", "content_hash": "sha256:<hex>" },
+    "deck": { "name": "sky130_fd_sc_hd__tt_025C_1v80", "content_hash": "sha256:<hex>", "path": { "path": null, "scope": "external" } },
     "input": { "content_hash": "sha256:<hex>", "role": "layout" }
   }
 }
@@ -237,6 +241,15 @@ guessed host prefix — regenerate the evidence with schema-2 `klt sta` to make
 it verifiable from other checkouts. The text format renders a repo path as
 the path itself, an external one as `<outside repo>`, and an unused input as
 `None`.
+
+**Liberty location (issue #3785).** `provenance.deck` (and each
+`corners[].deck` in the multi-corner shape) additionally carries `path`, the
+same `{path, scope}` envelope for the resolved Liberty file whose bytes
+`deck.content_hash` pins. An out-of-repo Liberty (the usual PDK-under-`$PDK_ROOT`
+case) is `{"path": null, "scope": "external"}`: the hash and `deck.name`
+identify the file, the location is withheld. Additive; no `schema_version`
+bump. Reports without the field still verify, and `--check` treats
+`content_hash` as authoritative, never `path`.
 
 | Field | Type | Description |
 | --- | --- | --- |
@@ -530,7 +543,7 @@ closes that gap natively:
       "clock_skew_ns": 0.0512,
       "estimated_power_mw": 13.2,
       "spef_annotation": null,
-      "deck": { "name": "sky130_fd_sc_hd__ss_100C_1v60", "content_hash": "sha256:<hex>", "released": true }
+      "deck": { "name": "sky130_fd_sc_hd__ss_100C_1v60", "content_hash": "sha256:<hex>", "released": true, "path": { "path": null, "scope": "external" } }
     },
     { "corner": "tt_025C_1v80", "...": "..." },
     { "corner": "ff_n40C_1v95", "...": "..." }
@@ -685,6 +698,15 @@ The string form of `spef` (and omitting it) is unchanged.
 
 ## Annotation evidence (`spef_annotation`)
 
+**Name-mapped SPEFs (issue #3742).** A SPEF written with a `*NAME_MAP` (e.g.
+OpenROAD's `write_spef`, which declares `*D_NET *12 <cap>`) is resolved
+through the map before its net names are compared with the design: `*<n>`
+indices are replaced by the mapped names, backslash escapes are removed, and a
+header `*DIVIDER` other than `/` is translated to the `/` OpenSTA uses. Before
+this, such a file reported `design_nets_annotated: 0` because the `*12` indices
+matched no design net. `design_nets_annotated` is this name correlation, not
+OpenSTA's own annotation count; `annotation_complete` rules are unchanged.
+
 A caller-supplied `spef` has the same name-mismatch risk `klt
 place-and-route`'s own `post_route_spef` in-flow pass documents: a SPEF
 written by a different tool (or a different net-naming convention) can
@@ -720,6 +742,10 @@ accepted anything:
   "reader_warning_sample": [],
   "unannotated_driver_count": 0,
   "partially_unannotated_driver_count": 4,
+  "floating_driver_count": 0,
+  "floating_driver_sample": [],
+  "unannotated_driver_sample": [],
+  "partially_unannotated_driver_sample": ["u3/Y"],
   "delay_changed": true,
   "annotation_complete": true,
   "annotation_warning": null
@@ -787,8 +813,10 @@ reader's own. It answers "does the SPEF name the nets this design has", not
 ### 4. Post-`read_spef` accounting
 
 - `unannotated_driver_count` — `report_parasitic_annotation`'s own count of
-  driver pins OpenSTA holds *no* parasitics for after `read_spef`. Non-zero
-  forces `annotation_complete: false`; `null` when the running OpenSTA build
+  driver pins OpenSTA holds *no* parasitics for after `read_spef`. This is
+  OpenSTA's raw count and includes floating no-net drivers (below); the count
+  **less** `floating_driver_count` forces `annotation_complete: false`.
+  `null` when the running OpenSTA build
   has no `report_parasitic_annotation` (the call is `catch`-guarded and the
   field degrades to `null` rather than failing the run).
 - `partially_unannotated_driver_count` — the companion "partially
@@ -796,13 +824,50 @@ reader's own. It answers "does the SPEF name the nets this design has", not
   correctly-read SPEF routinely reports a non-zero partial count (load pins
   with no distinct RC node of their own), so gating on it would fail honest
   runs.
+- `floating_driver_count` / `floating_driver_sample` (issue #3662) — how many
+  of the unannotated drivers sit on **no net at all** or on a **driver-only
+  dangling net** (no other pin, no top-level port) — e.g. the outputs of CTS
+  dummy-load cells: `clkloadN/Z` (issue #3669) — with a capped sample (at most 20) of their
+  pin names. They carry no load and are on no timed path, so they are
+  **excluded from the completeness predicate**; a strict gate can thereby tell
+  "floating, untimed" from "timed driver missing parasitics". `null` when the
+  OpenSTA build cannot list the offending pins
+  (`report_parasitic_annotation -report_unannotated`), in which case the raw
+  `unannotated_driver_count` keeps gating.
+- `unannotated_driver_sample` — capped sample (at most 20) of the unannotated
+  drivers that are *not* floating, i.e. the ones that gate. `null` when pins
+  cannot be listed.
+- `unannotated_driver_detail` (issue #3668) — one `{pin, net_status, net}`
+  entry per pin in `unannotated_driver_sample`, saying *why* it lacks
+  parasitics as far as the netlist shows: `net_status` is `single_pin_net`
+  (the pin's net has no other instance pin — an unconnected stub or a net
+  that only reaches a port; `net` names it) or `net_with_other_pins` (a real
+  net the SPEF failed to cover; `net` is `null`). Evidence only: a
+  `single_pin_net` driver still gates, because its net may reach a timed
+  port. `null` when pins cannot be listed. Pin names are matched
+  spelling-insensitively (escape backslashes ignored) between OpenSTA's
+  unannotated listing and the floating-pin query.
+  Measured on OpenROAD 26Q3 (issue #3668, reduced DEF): an output pin on no
+  net and one on a single-pin net are both classified floating; the
+  evidence query tolerates the NULL net OpenSTA returns for a no-net pin.
+- `partially_unannotated_driver_sample` — capped sample (at most 20) of the
+  partially unannotated driver pins, so a caller can judge whether the count
+  is real missing parasitics or a counting artefact. `null` when pins cannot
+  be listed. Measured on OpenROAD 26Q3 (issue #3668, reduced DEF): a flop `Q`
+  whose net also reaches a top-level port with a different name (net
+  `c0_r`, port `c0`) is listed as partially unannotated together with that
+  port, and clock-net sinks are listed under their driver. Partial drivers
+  never gate `annotation_complete`.
+
+All the fields above are additive; none of the existing fields changed meaning
+except that `unannotated_driver_count` now gates net of the floating drivers.
 
 ### Verdict
 
 - `annotation_complete` — `true` only when *all* of: the design-side name
   pair is equal and non-zero, `reader_warning_count` is 0,
-  `delay_changed` is not `false`, and `unannotated_driver_count` is not
-  greater than 0. A `null` (unknown) piece of evidence never forces `false`
+  `delay_changed` is not `false`, and `unannotated_driver_count` minus
+  `floating_driver_count` is not greater than 0. A `null` (unknown) piece of evidence never forces `false`
   on its own — but it never manufactures a `true` either, because the
   name-correlation gate still applies.
 - `annotation_warning` — `null` when complete, otherwise a sentence naming
@@ -1232,7 +1297,8 @@ set with `set_input_transition`:
 ```
 
 - **Scope is transition-only.** Nothing else about input drive changes: there
-  is no driving-cell model and no max-transition/max-capacitance limit check.
+  is no max-transition/max-capacitance limit check (for a driving-cell model see
+  "Driving cell and output load" below).
 - **Override semantics.** The scalar is the default for every non-clock input
   that is not a key of `input_transitions`; a mapped port gets exactly its own
   value. Bus bits are matched individually, so mapping `din[0]` leaves
@@ -1248,6 +1314,43 @@ set with `set_input_transition`:
 - **Contract.** The response schema is unchanged (additive request fields only).
   Omitting both fields, or giving an empty map, leaves the generated Tcl
   byte-for-byte as before.
+
+
+## Driving cell and output load (issue #3742)
+
+`constraints.driving_cell` / `.driving_cells` and `constraints.output_load_pf`
+/ `.output_loads` express the boundary conditions an SDC flow writes with
+`set_driving_cell` and `set_load`:
+
+```json
+"constraints": {
+  "clock_port": "clk",
+  "clock_period_ns": 2.0,
+  "driving_cell": {"cell": "sky130_fd_sc_hd__buf_2", "pin": "X"},
+  "driving_cells": {"rst_n": {"cell": "sky130_fd_sc_hd__inv_1", "pin": "Y", "input_pin": "A"}},
+  "output_load_pf": 0.02,
+  "output_loads": {"tmds[0]": 0.05}
+}
+```
+
+- **Override semantics** are the same as `input_transitions`: the scalar-style
+  default (`driving_cell`, `output_load_pf`) covers every non-clock input /
+  every output not named in the map; a mapped port gets exactly its own entry.
+- **Driving cell vs. input transition.** A driving cell sets the input slew
+  itself, so a port may carry one or the other. A port named in both
+  `driving_cells` and `input_transitions`, or `input_transition_ns` combined
+  with a driving-cell field, is a request error naming the keys; the default
+  `driving_cell` skips ports named in `input_transitions`.
+- **Validation.** `cell` / `pin` / `input_pin` are literal liberty names
+  (`[A-Za-z0-9_$.]+`, never Tcl or a pattern); loads are finite, non-boolean
+  numbers `>= 0`. Port existence and direction (inputs for driving cells,
+  outputs for loads) are checked in the engine-session port check, naming
+  `constraints.driving_cells[...]` / `constraints.output_loads[...]`.
+- **Propagated clock is not new.** `constraints.propagated_clock` already
+  exists (issue #2739); there is no `sdc` file passthrough (arbitrary Tcl
+  would defeat the JSON contract and the constraint-completeness accounting).
+- **Contract.** Additive request fields only; omitting them leaves the
+  generated Tcl byte-for-byte as before.
 
 
 ## Pre-route DEFs (`geometry_source`, issue #1826)

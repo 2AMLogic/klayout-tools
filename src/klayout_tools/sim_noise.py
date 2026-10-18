@@ -34,6 +34,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .sim_errors import SimError
+
 #: The ``noise.quantity`` values: input- or output-referred.
 NOISE_QUANTITIES = ("inoise", "onoise")
 
@@ -55,12 +57,6 @@ _SUFFIX = {
     "p": 1e-12,
     "f": 1e-15,
 }
-
-
-def _error(message: str) -> Exception:
-    from .sim import SimError
-
-    return SimError(message)
 
 
 def is_noise(spec: dict[str, Any]) -> bool:
@@ -100,29 +96,29 @@ def _positive_number(value: Any) -> bool:
 def validate_noise_spec(name: Any, body: Any) -> None:
     """Validate one ``measurements[].noise`` object's shape."""
     if not isinstance(body, dict):
-        raise _error(
+        raise SimError(
             f"measurement '{name}': 'noise' must be an object, e.g. "
             '{"quantity": "inoise", "at_hz": 1000}'
         )
     unknown = sorted(set(body) - _ALLOWED_KEYS)
     if unknown:
-        raise _error(
+        raise SimError(
             f"measurement '{name}': unknown noise key(s) {unknown}; "
             f"allowed: {sorted(_ALLOWED_KEYS)}"
         )
     if body.get("quantity") not in NOISE_QUANTITIES:
-        raise _error(
+        raise SimError(
             f"measurement '{name}': noise.quantity must be one of "
             f"{list(NOISE_QUANTITIES)} (got {body.get('quantity')!r})"
         )
     has_at, has_band = "at_hz" in body, "band_hz" in body
     if has_at == has_band:
-        raise _error(
+        raise SimError(
             f"measurement '{name}': noise needs exactly one of 'at_hz' (spot "
             "density) or 'band_hz' ([lo, hi], band-integrated rms)"
         )
     if has_at and not _positive_number(body["at_hz"]):
-        raise _error(
+        raise SimError(
             f"measurement '{name}': noise.at_hz must be a positive finite "
             f"number of Hz (got {body['at_hz']!r})"
         )
@@ -133,12 +129,12 @@ def validate_noise_spec(name: Any, body: Any) -> None:
             and len(band) == 2
             and all(_positive_number(edge) for edge in band)
         ):
-            raise _error(
+            raise SimError(
                 f"measurement '{name}': noise.band_hz must be [lo, hi], two "
                 f"positive finite numbers of Hz (got {band!r})"
             )
         if band[0] >= band[1]:
-            raise _error(
+            raise SimError(
                 f"measurement '{name}': noise.band_hz needs lo < hi (got {band!r})"
             )
 
@@ -152,7 +148,7 @@ def validate_noise_context(
     if not declared:
         return
     if str(analysis.get("kind", "")).lower() != "noise":
-        raise _error(
+        raise SimError(
             f"measurement '{declared[0]['name']}' declares 'noise', which "
             'reads the noise spectrum and so requires analysis.kind "noise" '
             f"(got {analysis.get('kind')!r})"
@@ -166,7 +162,7 @@ def validate_noise_context(
         points = [body["at_hz"]] if "at_hz" in body else list(body["band_hz"])
         for hz in points:
             if not fmin <= hz <= fmax:
-                raise _error(
+                raise SimError(
                     f"measurement '{spec['name']}': noise frequency {hz:g} Hz "
                     f"is outside the swept range [{fmin:g}, {fmax:g}] Hz "
                     "of analysis.args"

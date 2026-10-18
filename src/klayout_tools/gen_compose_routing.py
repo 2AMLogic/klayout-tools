@@ -2017,8 +2017,10 @@ def _drawn_leg_footprint_region(
 
     region = _drawn_route_region(points_um, width_um, dbu)
 
-    landing_half_dbu = int(round((_VIA_LANDING_SIZE_UM / 2.0) / dbu))
     for drop in via_drops:
+        landing_half_dbu = int(
+            round((_VIA_LANDING_SIZE_UM + _drop_array_extra_um(drop)) / 2.0 / dbu)
+        )
         landing_layers = drop.get("landing_layers")
         if (
             route_layer is not None
@@ -2088,11 +2090,13 @@ def _drawn_leg_intermediate_pad_regions(
     if route_layer is None:
         return regions
 
-    landing_half_dbu = int(round((_VIA_LANDING_SIZE_UM / 2.0) / dbu))
     for drop in via_drops:
         landing_layers = drop.get("landing_layers")
         if not landing_layers:
             continue
+        landing_half_dbu = int(
+            round((_VIA_LANDING_SIZE_UM + _drop_array_extra_um(drop)) / 2.0 / dbu)
+        )
         cx = int(round(drop["x_um"] / dbu))
         cy = int(round(drop["y_um"] / dbu))
         box = kdb.Box(
@@ -3770,12 +3774,14 @@ def route_two_pin(
                 # per entry, so a multi-level drop is just N single-level
                 # drops stacked at the identical (x, y).
                 for via_layer, metal_a, metal_b in ladder:
+                    drop_array = _drop_array(port, via_layer)
                     via_drops.append(
                         {
                             "x_um": pos[0],
                             "y_um": pos[1],
                             "via_layer": via_layer,
                             "landing_layers": (metal_a, metal_b),
+                            **({"array": drop_array} if drop_array else {}),
                             # block_id (#1520): which endpoint's own block
                             # this drop's landing pad lands on -- lets a
                             # caller-side conflict check (compose()'s own
@@ -5202,3 +5208,27 @@ def _declare_only_bundle_result(pins: list[dict[str, Any]]) -> dict[str, Any]:
         "reason": _DECLARE_ONLY_REASON,
         "status": "unrouted",
     }
+
+
+def _drop_array(
+    port: dict[str, Any], via_layer: tuple[int, int]
+) -> dict[str, Any] | None:
+    """The ``{"rows", "cols", "pitch_um"}`` cut array a port asks for on
+    ``via_layer`` (a label-derived port with ``access.via_array``, #2927), or
+    ``None`` for the ordinary single-cut drop."""
+    spec = port.get("via_array")
+    if not isinstance(spec, dict):
+        return None
+    pitch = (spec.get("pitch_um") or {}).get(f"{via_layer[0]}/{via_layer[1]}")
+    if pitch is None:
+        return None
+    return {"rows": spec["rows"], "cols": spec["cols"], "pitch_um": pitch}
+
+
+def _drop_array_extra_um(drop: dict[str, Any]) -> float:
+    """Extra side length (um) a drop's cut array adds to its landing pad over
+    the single-cut pad: ``(max(rows, cols) - 1) * pitch``; ``0.0`` without one."""
+    array = drop.get("array")
+    if not array:
+        return 0.0
+    return (max(array["rows"], array["cols"]) - 1) * array["pitch_um"]

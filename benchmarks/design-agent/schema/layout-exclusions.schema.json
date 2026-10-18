@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://klayout-tools.org/benchmarks/design-agent/schema/layout-exclusions.schema.json",
+  "title": "Layout-flow benchmark corpus exclusions (klt.design_agent_benchmark.layout_exclusions/1)",
+  "description": "Candidates considered for the layout corpus (#3025) and rejected. A candidate failing any protocol `task_eligibility` rule is excluded from all three arms and recorded here with a machine-readable reason -- never silently scored on fewer arms. `reason` is the closed set of protocol rule ids, so there is one eligibility vocabulary across tasks and exclusions.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "exclusions"],
+  "properties": {
+    "schema": { "const": "klt.design_agent_benchmark.layout_exclusions/1" },
+    "exclusions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "title", "reason", "detail"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$" },
+          "title": { "type": "string", "minLength": 1 },
+          "reason": {
+            "enum": ["frozen_netlist", "reference_layout_valid", "generator_reachable", "negative_controls", "open_pdk"]
+          },
+          "detail": { "type": "string", "minLength": 1 },
+          "recipe": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "sha256"],
+            "description": "For `generator_reachable` exclusions: the recipe that fails to reach a valid layout. The corpus gate re-runs it and requires it to still fail, so the exclusion cannot go stale silently.",
+            "properties": {
+              "path": { "type": "string", "minLength": 1, "pattern": "^[^/\\\\][^\\\\]*$" },
+              "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

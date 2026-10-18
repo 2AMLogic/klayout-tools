@@ -81,13 +81,18 @@ mapping.
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from ._layout import load_layout, resolve_top_cell
 from ._provenance import build_provenance
 from .lef_header import read_lef_header
-from .pdk import PdkNotFoundError, find_pdk, lef_files
+from .pdk import (
+    PdkNotFoundError,
+    find_pdk,
+    lef_files,
+    load_gds_to_lef_layer_map,
+    resolve_klayout_layer_map,
+)
 from .socket_check import (
     GROUND_NAME_TOKENS,
     POWER_NAME_TOKENS,
@@ -246,14 +251,14 @@ def run_lef_abstract(
         if layer["type"] == "ROUTING"
     }
 
-    layer_map_path, _layer_map_resolution = _resolve_layer_map(pdk_info)
+    layer_map_path, _layer_map_resolution = resolve_klayout_layer_map(pdk_info)
     if layer_map_path is None:
         raise LefAbstractError(
             f"no KLayout GDS<->LEF layer map found for resolved PDK install "
             f"'{pdk_info['variant']}' -- cannot translate socket descriptor "
             "layers into LEF layer names"
         )
-    gds_to_lef = _load_gds_to_lef_layer_map(layer_map_path)
+    gds_to_lef = load_gds_to_lef_layer_map(layer_map_path)
 
     dbu_um = layout.dbu
     outline = descriptor["outline"]
@@ -373,81 +378,6 @@ def _classify_pin(name: str) -> tuple[str, str]:
 # --------------------------------------------------------------------------- #
 # GDS (layer, datatype) -> LEF layer name (open_pdks KLayout map file)
 # --------------------------------------------------------------------------- #
-
-
-def _resolve_layer_map(pdk_info: dict[str, Any]) -> tuple[str | None, str]:
-    """The same open_pdks KLayout LEF/DEF layer-map file
-    ``place_and_route.py``'s own DEF->GDS merge resolves
-    (``libs.tech/klayout/tech/<variant>.map``) -- this module's own copy of
-    that resolution (each verb module in this repo is self-contained,
-    matching the existing precedent noted in ``place_and_route.py``).
-
-    Prefers the variant-named file (``<variant>.map``, ``resolution=
-    "exact"``); falls back to a family-level file (``<family>.map``,
-    ``resolution="family"``) when the variant-named file is absent -- some
-    open_pdks families (gf180mcu, unlike sky130) ship a single
-    ``klayout.tech`` map file shared across every variant rather than one
-    per variant (issue #1029). Returns ``(None, "none")`` when neither
-    exists (or the variant ships no ``klayout`` asset at all)."""
-    klayout_dir = pdk_info["assets"].get("klayout")
-    if klayout_dir is None:
-        return None, "none"
-    tech_dir = os.path.join(klayout_dir, "tech")
-    variant = pdk_info["variant"]
-    exact = os.path.join(tech_dir, f"{variant}.map")
-    if os.path.isfile(exact):
-        return exact, "exact"
-
-    family = variant
-    if len(family) > 1 and family[-1].isupper():
-        family = family[:-1]
-    # IHP-Open-PDK (issue #2444): the install variant is ``ihp-sg13g2`` but
-    # the shipped map is named after the process, ``sg13g2.map`` -- without
-    # this the DEF->GDS merge silently fell back to KLayout's sequential
-    # default layer numbering (Via1 cuts on 8/0, Metal2 pads on 9/0, ...).
-    if family.startswith("ihp-"):
-        family = family[len("ihp-") :]
-    if family != variant:
-        family_candidate = os.path.join(tech_dir, f"{family}.map")
-        if os.path.isfile(family_candidate):
-            return family_candidate, "family"
-
-    return None, "none"
-
-
-def _load_gds_to_lef_layer_map(map_path: str) -> dict[tuple[int, int], str]:
-    """Parse an open_pdks KLayout ``.map`` file into a ``{(gds_layer,
-    gds_datatype): lef_layer_name}`` dict.
-
-    File shape (whitespace-delimited, one entry per line):
-    ``<lef_layer_name> <comma-separated purposes> <gds_layer> <gds_datatype>``.
-    ``NAME``/``DIEAREA`` pseudo-entries (annotation purposes, not a real
-    drawn layer) are skipped. A ``(layer, datatype)`` pair with more than
-    one purpose entry for the same LEF layer name (e.g. sky130's ``met1``
-    ``NET``/``LEFPIN`` purposes at different datatypes) simply contributes
-    multiple dict entries mapping to the same name -- never a conflict,
-    since distinct purposes always use distinct datatypes in a real
-    open_pdks map file.
-    """
-    mapping: dict[tuple[int, int], str] = {}
-    with open(map_path, encoding="utf-8") as handle:
-        for line in handle:
-            stripped = line.split("#", 1)[0].strip()
-            if not stripped:
-                continue
-            parts = stripped.split()
-            if len(parts) < 4:
-                continue
-            lef_name = parts[0]
-            if lef_name in ("NAME", "DIEAREA"):
-                continue
-            try:
-                gds_layer = int(parts[-2])
-                gds_datatype = int(parts[-1])
-            except ValueError:
-                continue
-            mapping[(gds_layer, gds_datatype)] = lef_name
-    return mapping
 
 
 def _invert_gds_to_lef(

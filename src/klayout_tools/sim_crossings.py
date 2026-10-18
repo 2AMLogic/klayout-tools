@@ -50,6 +50,8 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
+from .sim_errors import SimError
+
 #: The ``crossings.edge`` values: a rising crossing, a falling one, or both.
 CROSSING_EDGES = ("rise", "fall", "either")
 
@@ -65,12 +67,6 @@ _ALLOWED_KEYS = frozenset({"signal", "level", "edge", "from", "to", "max"})
 #: Prefix of the ngspice vector each crossings measurement is bound to in the
 #: generated deck -- never a caller-visible name.
 _VECTOR_PREFIX = "__klt_xing_"
-
-
-def _error(message: str) -> Exception:
-    from .sim import SimError
-
-    return SimError(message)
 
 
 def is_crossings(spec: dict[str, Any]) -> bool:
@@ -95,13 +91,13 @@ def validate_crossings_spec(name: Any, body: Any) -> None:
     """Validate one ``measurements[].crossings`` object, raising
     :class:`~klayout_tools.sim.SimError` with a corrective message."""
     if not isinstance(body, dict):
-        raise _error(
+        raise SimError(
             f"measurement '{name}': 'crossings' must be an object, e.g. "
             '{"signal": "v(out)", "level": 0.9, "edge": "rise"}'
         )
     unknown = sorted(set(body) - _ALLOWED_KEYS)
     if unknown:
-        raise _error(
+        raise SimError(
             f"measurement '{name}': unknown crossings key(s) {unknown}; "
             f"allowed: {sorted(_ALLOWED_KEYS)}"
         )
@@ -109,7 +105,7 @@ def validate_crossings_spec(name: Any, body: Any) -> None:
     _validate_level(name, body.get("level"))
     edge = body.get("edge", "rise")
     if edge not in CROSSING_EDGES:
-        raise _error(
+        raise SimError(
             f"measurement '{name}': crossings.edge must be one of "
             f"{list(CROSSING_EDGES)} (got {edge!r})"
         )
@@ -117,7 +113,7 @@ def validate_crossings_spec(name: Any, body: Any) -> None:
     start = _window_bound(name, body, "from")
     stop = _window_bound(name, body, "to")
     if start is not None and stop is not None and stop < start:
-        raise _error(
+        raise SimError(
             f"measurement '{name}': crossings.to ({stop!r} s) is before "
             f"crossings.from ({start!r} s)"
         )
@@ -125,13 +121,13 @@ def validate_crossings_spec(name: Any, body: Any) -> None:
 
 def _validate_signal(name: Any, signal: Any) -> None:
     if not isinstance(signal, str) or not signal.strip():
-        raise _error(
+        raise SimError(
             f"measurement '{name}': crossings.signal is required -- a "
             'single-line ngspice vector expression such as "v(out)" or '
             '"v(outp) - v(outn)"'
         )
     if "\n" in signal or "\r" in signal:
-        raise _error(
+        raise SimError(
             f"measurement '{name}': crossings.signal must be a single line "
             "(it is spliced into one `let` command of the generated "
             ".control block)"
@@ -144,7 +140,7 @@ def _validate_level(name: Any, level: Any) -> None:
         or isinstance(level, bool)
         or not math.isfinite(level)
     ):
-        raise _error(
+        raise SimError(
             f"measurement '{name}': crossings.level is required and must be "
             f"a finite number in the signal's own unit (got {level!r})"
         )
@@ -158,7 +154,7 @@ def _validate_max(name: Any, value: Any) -> None:
         or isinstance(value, bool)
         or not 1 <= value <= MAX_CROSSINGS_CAP
     ):
-        raise _error(
+        raise SimError(
             f"measurement '{name}': crossings.max must be an integer in "
             f"[1, {MAX_CROSSINGS_CAP}] (got {value!r}); omit it for the "
             f"default of {DEFAULT_MAX_CROSSINGS}"
@@ -179,7 +175,7 @@ def _window_bound(name: Any, body: dict[str, Any], key: str) -> float | None:
     elif isinstance(raw, str):
         seconds = _parse_spice_seconds(raw)
     if seconds is None or not math.isfinite(seconds):
-        raise _error(
+        raise SimError(
             f"measurement '{name}': crossings.{key} must be a time in seconds "
             f'-- a number or a SPICE time literal such as "10n" (got {raw!r})'
         )
@@ -196,7 +192,7 @@ def validate_crossings_context(
         return
     kind = str(analysis.get("kind", "")).lower()
     if kind != "tran":
-        raise _error(
+        raise SimError(
             f"measurement '{declared[0]['name']}' declares 'crossings', which "
             "returns threshold-crossing *times* and so requires "
             f'analysis.kind "tran" (got {analysis.get("kind")!r})'

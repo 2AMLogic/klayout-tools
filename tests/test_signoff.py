@@ -30,6 +30,7 @@ import pytest
 from helpers.subprocess_fakes import fake_completed
 from klayout_tools import signoff as signoff_module
 from klayout_tools import signoff_attest as attest_module
+from klayout_tools._provenance import layout_geometry_digest
 from klayout_tools._report_verify import strip_path_patterns
 from klayout_tools.cli import main
 from klayout_tools.cli.output import render_rerun_drift
@@ -2353,6 +2354,78 @@ def test_sim_empty_corner_matrix_never_counts_as_a_passing_check(tmp_path):
     assert check["status"] == "pass"
     assert check["passed"] is False
     assert check["detail"]["nothing_checked_reasons"] == ["empty_corner_matrix"]
+
+
+def _sim_with_counts(declared, limited, **extra):
+    coverage = {
+        "corners_simulated": 1,
+        "measurements_declared": declared,
+        "measurements_with_limits": limited,
+        "unrecognized_limit_keys": [],
+        "nothing_checked": False,
+        "nothing_checked_reasons": [],
+    }
+    return {**SIM_PASS_ENVELOPE, "coverage": coverage, **extra}
+
+
+def test_sim_with_no_limited_measurement_never_counts_as_a_passing_check(tmp_path):
+    """Issue #3769: an all-observation sim envelope applied no spec bound."""
+    path = _write(tmp_path, "sim.json", _sim_with_counts(3, 0))
+
+    check = build_signoff([path])["checks"][0]
+
+    assert check["status"] == "pass"
+    assert check["passed"] is False
+    assert check["detail"]["no_limits_checked"] == {
+        "measurements_declared": 3,
+        "measurements_with_limits": 0,
+    }
+
+
+def test_sim_with_one_limited_measurement_still_passes(tmp_path):
+    path = _write(tmp_path, "sim.json", _sim_with_counts(3, 1))
+
+    check = build_signoff([path])["checks"][0]
+
+    assert check["passed"] is True
+    assert "no_limits_checked" not in check["detail"]
+
+
+def test_tier_report_refuses_a_no_limits_item_5_citation(tmp_path):
+    """Issue #3769: item 5 cannot cite an all-observation sim envelope. It
+    renders `unmet` with the dedicated reason, and a limited one still meets."""
+    path = _write(tmp_path, "sim.json", _sim_with_counts(3, 0))
+
+    result = build_tier_report(_manifest(evidence={"5": path}))
+
+    item_5 = next(item for item in result["items"] if item["id"] == 5)
+    assert item_5["status"] == "unmet"
+    assert item_5["reason"] == "no_limits_checked"
+    assert item_5["citation"] is None
+
+
+def test_tier_report_still_meets_item_5_for_a_limited_sim(tmp_path):
+    path = _write(tmp_path, "sim.json", _sim_with_counts(3, 1))
+
+    result = build_tier_report(_manifest(evidence={"5": path}))
+
+    item_5 = next(item for item in result["items"] if item["id"] == 5)
+    assert item_5["status"] == "met"
+
+
+def test_sim_without_coverage_block_grades_as_before(tmp_path):
+    envelope = {k: v for k, v in SIM_PASS_ENVELOPE.items() if k != "coverage"}
+    path = _write(tmp_path, "sim.json", envelope)
+
+    assert build_signoff([path])["checks"][0]["passed"] is True
+
+
+def test_sim_capture_only_with_no_measurements_declared_not_newly_refused(tmp_path):
+    path = _write(tmp_path, "sim.json", _sim_with_counts(0, 0))
+
+    check = build_signoff([path])["checks"][0]
+
+    assert "no_limits_checked" not in check["detail"]
 
 
 def test_pex_empty_delta_never_counts_as_a_passing_check(tmp_path):
@@ -5778,28 +5851,82 @@ def test_genuine_evidence_for_items_5_6_and_8_still_renders_met(tmp_path):
     assert by_id[8]["citation"]["kind"] == "generic"
 
 
-@pytest.mark.parametrize(
-    "envelope,expected_kind",
-    [
-        (STA_MULTI_CORNER_CLEAN_ENVELOPE, "sta"),
-        (FUNCTIONAL_VERIFICATION_PASS_ENVELOPE, "functional-verification"),
-        (SIM_PASS_ENVELOPE, "sim"),
-    ],
-)
-def test_digital_item_5_still_accepts_every_kind_the_doc_names(
-    tmp_path, envelope, expected_kind
-):
-    """A digital partition's item 5 accepts all three artifacts the doc
-    names for it: `klt sta` and `klt functional-verification` for the RTL
-    flow (#1959), and `klt sim` for the full-custom sub-case, which
-    satisfies item 5 "instead by PVT corner-matrix SPICE simulation"."""
-    path = _write(tmp_path, "evidence.json", envelope)
+def test_digital_item_5_sim_alone_satisfies_the_full_custom_sub_case(tmp_path):
+    """`klt sim` alone keeps satisfying a digital partition's item 5: the
+    full-custom sub-case satisfies it "instead by PVT corner-matrix SPICE
+    simulation" (#3741 exempts it from the both-kinds rule)."""
+    path = _write(tmp_path, "evidence.json", SIM_PASS_ENVELOPE)
 
     result = build_tier_report(_manifest(kind="digital", evidence={"5": path}))
 
     item_5 = next(i for i in result["items"] if i["id"] == 5)
     assert item_5["status"] == "met"
-    assert item_5["citation"]["kind"] == expected_kind
+    assert item_5["citation"]["kind"] == "sim"
+
+
+def _digital_item_5(tmp_path, entry):
+    result = build_tier_report(_manifest(kind="digital", evidence={"5.digital": entry}))
+    return next(i for i in result["items"] if i["id"] == 5)
+
+
+def _sta_fv_paths(tmp_path):
+    return (
+        _write(tmp_path, "sta.json", STA_MULTI_CORNER_CLEAN_ENVELOPE),
+        _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE),
+    )
+
+
+def test_digital_item_5_sta_and_fv_together_grade_met(tmp_path):
+    """Issue #3741: the RTL-flow route is STA *plus* a functional suite."""
+    sta_path, fv_path = _sta_fv_paths(tmp_path)
+
+    item_5 = _digital_item_5(tmp_path, [sta_path, fv_path])
+
+    assert item_5["status"] == "met"
+    assert [c["status"] for c in item_5["citations_graded"]] == ["met", "met"]
+    assert len(item_5["citations_graded"]) == 2
+
+
+@pytest.mark.parametrize("list_form", [False, True], ids=["single", "list"])
+@pytest.mark.parametrize(
+    "which,missing",
+    [("sta", ["functional-verification"]), ("fv", ["sta"])],
+)
+def test_digital_item_5_one_rtl_kind_alone_is_partial_coverage(
+    tmp_path, which, missing, list_form
+):
+    sta_path, fv_path = _sta_fv_paths(tmp_path)
+    path = sta_path if which == "sta" else fv_path
+
+    item_5 = _digital_item_5(tmp_path, [path] if list_form else path)
+
+    assert item_5["status"] == "unmet"
+    assert item_5["reason"] == "partial_coverage"
+    assert item_5["detail"]["missing_kinds"] == missing
+    assert item_5["citation"] is None
+
+
+def test_digital_item_5_failing_member_reports_its_own_reason_first(tmp_path):
+    _, fv_path = _sta_fv_paths(tmp_path)
+    bad_sta = _write(
+        tmp_path, "bad-sta.json", STA_MULTI_CORNER_SETUP_VIOLATION_ENVELOPE
+    )
+
+    item_5 = _digital_item_5(tmp_path, [bad_sta, fv_path])
+
+    assert item_5["status"] == "unmet"
+    assert item_5["reason"] == "check_failed"
+    assert "missing_kinds" not in item_5["detail"]
+
+
+def test_digital_item_5_sim_alongside_one_rtl_kind_still_needs_the_pair(tmp_path):
+    sta_path, _ = _sta_fv_paths(tmp_path)
+    sim_path = _write(tmp_path, "sim.json", SIM_PASS_ENVELOPE)
+
+    item_5 = _digital_item_5(tmp_path, [sta_path, sim_path])
+
+    assert item_5["reason"] == "partial_coverage"
+    assert item_5["detail"]["missing_kinds"] == ["functional-verification"]
 
 
 def test_analog_item_5_rejects_the_digital_column_artifacts(tmp_path):
@@ -5824,11 +5951,12 @@ def test_mixed_signal_partitions_apply_their_own_item_5_rule(tmp_path):
     key."""
     sim_path = _write(tmp_path, "sim.json", SIM_PASS_ENVELOPE)
     sta_path = _write(tmp_path, "sta.json", STA_MULTI_CORNER_CLEAN_ENVELOPE)
+    fv_path = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE)
 
     result = build_tier_report(
         _manifest(
             kind="mixed-signal",
-            evidence={"5.analog": sim_path, "5.digital": sta_path},
+            evidence={"5.analog": sim_path, "5.digital": [sta_path, fv_path]},
         )
     )
 
@@ -6183,6 +6311,7 @@ def test_unpinned_manifest_entry_renders_unanchored(tmp_path):
 
 
 def test_pin_mismatch_renders_stale(tmp_path):
+    (tmp_path / ".git").mkdir(exist_ok=True)  # a repo root for the geometry digest
     envelope_path, _ = _anchored_generic(tmp_path, 2)
 
     result = build_tier_report(
@@ -6344,6 +6473,252 @@ def test_anchored_binding_is_shown_in_text_output(tmp_path, capsys):
     assert exit_code in (0, 3)
     assert "bound: T1 item #9 -> testbenches.txt" in out
     assert "topic: not bound" in out
+
+
+# --------------------------------------------------------------------------- #
+# Regeneration claims on items 1 and 2 (issue #2887)
+# --------------------------------------------------------------------------- #
+
+_GENERATOR = "klt netlist schematic/ota.sch -o netlist/ota.spice"
+
+
+def _with_regeneration(envelope_path: str, block: object) -> str:
+    """Rewrite an anchored envelope with ``provenance.regeneration = block``."""
+    envelope = json.loads(Path(envelope_path).read_text())
+    envelope["provenance"]["regeneration"] = block
+    Path(envelope_path).write_text(json.dumps(envelope))
+    return envelope_path
+
+
+def _anchored_manifest(item_id: int, envelope_path: str, digest: str) -> dict:
+    return _manifest(
+        evidence={str(item_id): {"file": envelope_path, "content_hash": digest}}
+    )
+
+
+@pytest.mark.parametrize("item_id", [1, 2])
+def test_matching_regeneration_claim_is_met_and_disclosed(tmp_path, item_id):
+    envelope_path, digest = _anchored_generic(tmp_path, item_id)
+    _with_regeneration(
+        envelope_path, {"generator": _GENERATOR, "regenerated_hash": digest}
+    )
+
+    item = _item(
+        build_tier_report(_anchored_manifest(item_id, envelope_path, digest)), item_id
+    )
+
+    assert item["status"] == "met"
+    binding = item["citation"]["artifact_binding"]
+    assert binding["regeneration"] == {
+        "generator": _GENERATOR,
+        "regenerated_hash": digest,
+        "executed_by_klt": False,
+    }
+    assert binding["content_hash"] == digest
+
+
+@pytest.mark.parametrize("item_id", [1, 2])
+def test_mismatched_regeneration_claim_renders_stale_artifact(tmp_path, item_id):
+    """The attested bytes are intact (the pin and re-hash agree), but the
+    attester's own regeneration produced different bytes: the committed
+    artifact is out of date with its generator."""
+    envelope_path, digest = _anchored_generic(tmp_path, item_id)
+    _with_regeneration(
+        envelope_path,
+        {"generator": _GENERATOR, "regenerated_hash": "sha256:" + "0" * 64},
+    )
+
+    item = _item(
+        build_tier_report(_anchored_manifest(item_id, envelope_path, digest)), item_id
+    )
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "stale_artifact"
+    assert item["citation"] is None
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        "make netlist",
+        [],
+        {},
+        {"regenerated_hash": "sha256:" + "0" * 64},
+        {"generator": "", "regenerated_hash": "sha256:" + "0" * 64},
+        {"generator": 7, "regenerated_hash": "sha256:" + "0" * 64},
+        {"generator": _GENERATOR},
+        {"generator": _GENERATOR, "regenerated_hash": 12},
+        {"generator": _GENERATOR, "regenerated_hash": "sha256:3f1c..."},
+        {"generator": _GENERATOR, "regenerated_hash": "0" * 64},
+    ],
+    ids=[
+        "string-block",
+        "list-block",
+        "empty-block",
+        "no-generator",
+        "empty-generator",
+        "int-generator",
+        "no-hash",
+        "int-hash",
+        "placeholder-hash",
+        "unprefixed-hash",
+    ],
+)
+def test_malformed_regeneration_claim_renders_unanchored(tmp_path, block):
+    envelope_path, digest = _anchored_generic(tmp_path, 1)
+    _with_regeneration(envelope_path, block)
+
+    item = _item(build_tier_report(_anchored_manifest(1, envelope_path, digest)), 1)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "unanchored_evidence"
+
+
+@pytest.mark.parametrize("block", ["absent", None])
+def test_absent_regeneration_claim_is_unchanged(tmp_path, block):
+    envelope_path, digest = _anchored_generic(tmp_path, 2)
+    if block != "absent":
+        _with_regeneration(envelope_path, block)
+
+    item = _item(build_tier_report(_anchored_manifest(2, envelope_path, digest)), 2)
+
+    assert item["status"] == "met"
+    assert "regeneration" not in item["citation"]["artifact_binding"]
+
+
+@pytest.mark.parametrize("item_id", [9, 10])
+def test_regeneration_claim_is_not_graded_for_items_9_and_10(tmp_path, item_id):
+    """Items 9/10 bind inventories with no generator: the block is ignored,
+    neither refusing the row nor appearing in the disclosure."""
+    envelope_path, digest = _anchored_generic(tmp_path, item_id)
+    _with_regeneration(
+        envelope_path,
+        {"generator": _GENERATOR, "regenerated_hash": "sha256:" + "0" * 64},
+    )
+
+    item = _item(
+        build_tier_report(_anchored_manifest(item_id, envelope_path, digest)), item_id
+    )
+
+    assert item["status"] == "met"
+    assert "regeneration" not in item["citation"]["artifact_binding"]
+
+
+def test_regenerated_item_1_attestation_cited_elsewhere_is_unchanged(tmp_path):
+    """A regeneration claim unlocks nothing: cited for item 3 it is still
+    `wrong_kind`, for item 9 still `wrong_item`."""
+    envelope_path, digest = _anchored_generic(tmp_path, 1)
+    _with_regeneration(
+        envelope_path, {"generator": _GENERATOR, "regenerated_hash": digest}
+    )
+    evidence = {
+        key: {"file": envelope_path, "content_hash": digest} for key in ("3", "9")
+    }
+
+    result = build_tier_report(_manifest(evidence=evidence))
+
+    assert _item(result, 3)["reason"] == "wrong_kind"
+    assert _item(result, 9)["reason"] == "wrong_item"
+
+
+def test_bound_file_drift_wins_over_a_matching_regeneration_claim(tmp_path):
+    """Editing the committed artifact after attesting is `stale_evidence`
+    (#2718), checked before the regeneration claim."""
+    envelope_path, digest = _anchored_generic(tmp_path, 1)
+    _with_regeneration(
+        envelope_path, {"generator": _GENERATOR, "regenerated_hash": digest}
+    )
+    (tmp_path / "design-sources.txt").write_text("schematic/other.sch\n")
+
+    item = _item(build_tier_report(_anchored_manifest(1, envelope_path, digest)), 1)
+
+    assert item["reason"] == "stale_evidence"
+
+
+def test_regeneration_claim_on_a_repo_scoped_path(tmp_path):
+    """The `{path, scope: "repo"}` input form and `repo_root` grade the claim
+    exactly like a plain path; the disclosure echoes the path object."""
+    envelope_path, digest = _repo_scoped_anchored_generic(tmp_path, 1)
+    _with_regeneration(
+        envelope_path, {"generator": _GENERATOR, "regenerated_hash": digest}
+    )
+
+    item = _item(
+        build_tier_report(
+            _anchored_manifest(1, envelope_path, digest), repo_root=str(tmp_path)
+        ),
+        1,
+    )
+
+    assert item["status"] == "met"
+    binding = item["citation"]["artifact_binding"]
+    assert binding["path"] == {"path": "audited/design-sources.txt", "scope": "repo"}
+    assert binding["regeneration"]["executed_by_klt"] is False
+
+
+def test_check_reports_a_changed_regeneration_claim_as_drift(tmp_path):
+    envelope_path, digest = _anchored_generic(tmp_path, 1)
+    _with_regeneration(
+        envelope_path, {"generator": _GENERATOR, "regenerated_hash": digest}
+    )
+    manifest = _anchored_manifest(1, envelope_path, digest)
+    committed_path = _write(tmp_path, "committed.json", build_tier_report(manifest))
+    assert check_tier_report(committed_path, manifest)["status"] == "match"
+
+    _with_regeneration(
+        envelope_path,
+        {"generator": _GENERATOR, "regenerated_hash": "sha256:" + "1" * 64},
+    )
+    result = check_tier_report(committed_path, manifest)
+
+    assert result["status"] == "drifted"
+    assert any(entry["field"].endswith("reason") for entry in result["drift"])
+
+
+def test_generator_is_never_executed(tmp_path, monkeypatch):
+    """The generator string is echoed, never run: no subprocess is spawned
+    for a file-backed attestation that carries one."""
+    envelope_path, digest = _anchored_generic(tmp_path, 1)
+    _with_regeneration(
+        envelope_path, {"generator": "touch PWNED", "regenerated_hash": digest}
+    )
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("klt signoff must not execute the generator")
+
+    monkeypatch.setattr(signoff_module.subprocess, "run", refuse)
+    monkeypatch.setattr(signoff_module.subprocess, "Popen", refuse)
+
+    item = _item(build_tier_report(_anchored_manifest(1, envelope_path, digest)), 1)
+
+    assert item["status"] == "met"
+    assert not (tmp_path / "PWNED").exists()
+
+
+def test_regeneration_line_is_shown_in_text_output(tmp_path, capsys):
+    claimed_path, claimed_digest = _anchored_generic(tmp_path, 1)
+    _with_regeneration(
+        claimed_path, {"generator": _GENERATOR, "regenerated_hash": claimed_digest}
+    )
+    plain_path, plain_digest = _anchored_generic(tmp_path, 2)
+    manifest_path = _write(
+        tmp_path,
+        "manifest.json",
+        _manifest(
+            evidence={
+                "1": {"file": claimed_path, "content_hash": claimed_digest},
+                "2": {"file": plain_path, "content_hash": plain_digest},
+            }
+        ),
+    )
+
+    exit_code = main(["signoff", "--manifest", manifest_path, "--format", "text"])
+
+    out = capsys.readouterr().out
+    assert exit_code in (0, 3)
+    assert f"regeneration: {claimed_digest} matches the bound artifact" in out
+    assert "not run by klt" in out
+    assert "regeneration: not claimed" in out
 
 
 # --------------------------------------------------------------------------- #
@@ -9568,8 +9943,11 @@ def test_sta_evidence_satisfies_item_5_for_a_digital_manifest(tmp_path):
     multi-corner `klt sta` run, not a `klt sim` corner sweep it has no reason
     to produce."""
     sta_path = _write(tmp_path, "sta.json", STA_MULTI_CORNER_CLEAN_ENVELOPE)
+    fv_path = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE)
 
-    result = build_tier_report(_manifest(kind="digital", evidence={"5": sta_path}))
+    result = build_tier_report(
+        _manifest(kind="digital", evidence={"5": [sta_path, fv_path]})
+    )
 
     item_5 = next(item for item in result["items"] if item["id"] == 5)
     assert item_5["status"] == "met"
@@ -9582,7 +9960,11 @@ def test_sta_evidence_satisfies_item_5_for_a_digital_manifest(tmp_path):
 def test_functional_verification_evidence_satisfies_item_5_for_digital(tmp_path):
     fv_path = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE)
 
-    result = build_tier_report(_manifest(kind="digital", evidence={"5": fv_path}))
+    sta_path = _write(tmp_path, "sta.json", STA_MULTI_CORNER_CLEAN_ENVELOPE)
+
+    result = build_tier_report(
+        _manifest(kind="digital", evidence={"5": [fv_path, sta_path]})
+    )
 
     item_5 = next(item for item in result["items"] if item["id"] == 5)
     assert item_5["status"] == "met"
@@ -9827,7 +10209,7 @@ def test_generic_citation_still_rejected_on_items_5_and_7_for_digital(tmp_path):
         assert item["citation"] is None
 
 
-def test_command_backed_sta_evidence_satisfies_item_5(monkeypatch):
+def test_command_backed_sta_evidence_satisfies_item_5(monkeypatch, tmp_path):
     """The new kinds work through the command-backed evidence path exactly
     like the file-backed one -- no separate wiring."""
 
@@ -9838,10 +10220,12 @@ def test_command_backed_sta_evidence_satisfies_item_5(monkeypatch):
 
     monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)
 
+    fv_path = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE)
+
     result = build_tier_report(
         _manifest(
             kind="digital",
-            evidence={"5": {"command": ["klt", "sta", "request.json"]}},
+            evidence={"5": [{"command": ["klt", "sta", "request.json"]}, fv_path]},
         )
     )
 
@@ -9872,7 +10256,7 @@ def test_realistic_digital_envelope_set_reaches_eight_of_ten_items(tmp_path):
                 "2": drc_path,
                 "3": drc_path,
                 "4": lvs_path,
-                "5": sta_path,
+                "5": [sta_path, fv_sdf_path],
                 "7": fv_sdf_path,
                 "8": generic_path,
                 "9": _attested_entry(tmp_path, 9),
@@ -9905,7 +10289,7 @@ def test_fleet_rollup_blocking_item_reflects_the_new_digital_kinds(tmp_path):
                 {
                     "block": "digital-canary",
                     "kind": "digital",
-                    "evidence": {"5": sta_path, "7": fv_sdf_path},
+                    "evidence": {"5": [sta_path, fv_sdf_path], "7": fv_sdf_path},
                 }
             ]
         }
@@ -15679,7 +16063,12 @@ def _sta_checkout(root: Path, *, verilog: bool = False) -> Path:
 
 
 def _sta_item_5(evidence: Path) -> dict:
-    result = build_tier_report(_manifest(kind="digital", evidence={"5": str(evidence)}))
+    # Item 5 digital needs STA *and* a functional suite (#3741); the STA
+    # citation is listed first so it stays the item's reported citation.
+    fv_path = _write(evidence.parent, "fv.json", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE)
+    result = build_tier_report(
+        _manifest(kind="digital", evidence={"5": [str(evidence), fv_path]})
+    )
     return next(item for item in result["items"] if item["id"] == 5)
 
 
@@ -16127,6 +16516,96 @@ def test_item5_stale_content_hash_on_one_member_is_unmet(tmp_path):
     assert item["detail"]["failed_citations"] == [other]
 
 
+def _ms_item5(tmp_path, spec_rows, analog_entry=None):
+    """Mixed-signal item-5 entries by partition (issue #3768)."""
+    sim = _write(tmp_path, "sim.json", SIM_PASS_ENVELOPE)
+    sta = _write(tmp_path, "sta.json", STA_MULTI_CORNER_CLEAN_ENVELOPE)
+    fv = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE)
+    manifest = _manifest(
+        kind="mixed-signal",
+        evidence={
+            "5.analog": analog_entry or [{"file": sim, "rows": ["tdec"]}],
+            "5.digital": [sta, fv],
+        },
+        spec_rows=spec_rows,
+    )
+    return {
+        i["partition"]: i
+        for i in build_tier_report(manifest)["items"]
+        if i["id"] == 5 and i["tier"] == "T1"
+    }
+
+
+def test_item5_qualified_spec_rows_do_not_regress_other_partition(tmp_path):
+    items = _ms_item5(tmp_path, {"5.analog": [{"id": "tdec"}]})
+
+    assert items["digital"]["status"] == "met"
+    assert items["analog"]["status"] == "met"
+    assert items["analog"]["row_coverage"]["uncovered_rows"] == []
+
+
+def test_item5_qualified_spec_rows_grade_their_own_partition(tmp_path):
+    items = _ms_item5(tmp_path, {"5.analog": [{"id": "tdec"}, {"id": "zin"}]})
+
+    assert items["digital"]["status"] == "met"
+    assert items["analog"]["status"] == "unmet"
+    assert items["analog"]["reason"] == "partial_coverage"
+    assert items["analog"]["detail"]["uncovered_rows"] == ["zin"]
+
+
+def test_item5_qualified_spec_rows_win_over_bare_for_their_partition(tmp_path):
+    items = _ms_item5(
+        tmp_path,
+        {"5": [{"id": "other"}], "5.analog": [{"id": "tdec"}]},
+    )
+
+    assert items["analog"]["status"] == "met"
+    # Bare "5" still applies to the partition with no qualified key.
+    assert items["digital"]["status"] == "unmet"
+    assert items["digital"]["reason"] == "partial_coverage"
+
+
+def test_item5_bare_spec_rows_key_still_applies_to_every_partition(tmp_path):
+    items = _ms_item5(tmp_path, {"5": [{"id": "tdec"}]})
+
+    assert items["analog"]["status"] == "met"
+    assert items["digital"]["status"] == "unmet"
+    assert items["digital"]["reason"] == "partial_coverage"
+
+
+def test_item5_bad_qualified_suffix_is_invalid_evidence_for_the_item_only(tmp_path):
+    items = _ms_item5(tmp_path, {"5.mixed": [{"id": "tdec"}]})
+
+    assert items["analog"]["status"] == "unmet"
+    assert items["analog"]["reason"] == "invalid_evidence"
+    assert items["digital"]["reason"] == "invalid_evidence"
+
+
+def test_item5_malformed_qualified_rows_degrade_only_that_partition(tmp_path):
+    items = _ms_item5(tmp_path, {"5.analog": []})
+
+    assert items["analog"]["reason"] == "invalid_evidence"
+    assert items["digital"]["status"] == "met"
+
+
+def test_item5_analog_kind_manifest_resolves_qualified_key(tmp_path):
+    sim = _write(tmp_path, "sim.json", SIM_PASS_ENVELOPE)
+    evidence = {"5": [{"file": sim, "rows": ["tdec"]}]}
+
+    manifest = _manifest(
+        kind="analog", evidence=evidence, spec_rows={"5.analog": [{"id": "tdec"}]}
+    )
+    item = next(i for i in build_tier_report(manifest)["items"] if i["id"] == 5)
+    assert item["status"] == "met"
+    assert "row_coverage" in item
+
+    manifest["spec_rows"] = {"5.digital": [{"id": "zin"}]}
+    item = next(i for i in build_tier_report(manifest)["items"] if i["id"] == 5)
+    # A mismatched-partition key is ignored (falls to the absent bare key).
+    assert item["status"] == "met"
+    assert "row_coverage" not in item
+
+
 def test_item5_single_citation_report_is_unchanged(tmp_path):
     sim = _write(tmp_path, "sim.json", SIM_PASS_ENVELOPE)
 
@@ -16162,10 +16641,11 @@ def _sta_with_annotation(corner_blocks: list) -> dict:
 
 def _grade_sta_item_5(tmp_path, envelope: dict, **entry_extra):
     path = _write(tmp_path, "sta.json", envelope)
+    fv_path = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE)
     result = build_tier_report(
         _manifest(
             kind="digital",
-            evidence={"5.digital": {"file": path, **entry_extra}},
+            evidence={"5.digital": [{"file": path, **entry_extra}, fv_path]},
         )
     )
     return next(item for item in result["items"] if item["id"] == 5)
@@ -16234,3 +16714,351 @@ def test_require_annotation_complete_non_boolean_entry_is_invalid_evidence(tmp_p
     item = _grade_sta_item_5(tmp_path, envelope, require_annotation_complete="true")
     assert item["status"] == "unmet"
     assert item["reason"] == "invalid_evidence"
+
+
+# --------------------------------------------------------------------------- #
+# Item 6: several citations + declared statistical rows (issue #2908)
+# --------------------------------------------------------------------------- #
+
+
+def _item6_rows(tmp_path, entry, rows=None, kind="digital"):
+    evidence = _full_t1_evidence(tmp_path, kind=kind)
+    evidence["6"] = entry
+    manifest = _manifest(kind=kind, evidence=evidence)
+    if rows is not None:
+        manifest["spec_rows"] = {"6": rows}
+    return build_tier_report(manifest), _item6(build_tier_report(manifest))
+
+
+def test_item6_two_declared_rows_one_cited_is_partial_coverage(tmp_path):
+    a = _write(tmp_path, "mc_a.json", YIELD_PASS_ENVELOPE)
+    rows = [{"id": "offset"}, {"id": "gain_err", "gap": "function not implemented"}]
+
+    report, item = _item6_rows(tmp_path, [{"file": a, "rows": ["offset"]}], rows)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "partial_coverage"
+    assert item["detail"]["uncovered_rows"] == []
+    assert item["detail"]["declared_gaps"] == [
+        {"id": "gain_err", "gap": "function not implemented"}
+    ]
+    assert report["tier"] is None
+
+
+def test_item6_second_row_without_a_citation_is_named_uncovered(tmp_path):
+    a = _write(tmp_path, "mc_a.json", YIELD_PASS_ENVELOPE)
+    rows = [{"id": "offset"}, {"id": "gain_err"}]
+
+    _, item = _item6_rows(tmp_path, [{"file": a, "rows": ["offset"]}], rows)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "partial_coverage"
+    assert item["detail"]["uncovered_rows"] == ["gain_err"]
+
+
+def test_item6_unratified_row_is_provisional_not_met(tmp_path):
+    a = _write(tmp_path, "mc_a.json", YIELD_PASS_ENVELOPE)
+    rows = [{"id": "offset", "ratified": False}]
+
+    _, item = _item6_rows(tmp_path, [{"file": a, "rows": ["offset"]}], rows)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "partial_coverage"
+    assert item["detail"]["unratified_rows"] == ["offset"]
+    assert item["detail"]["uncovered_rows"] == []
+
+
+def test_item6_all_declared_rows_covered_and_ratified_is_met(tmp_path):
+    a = _write(tmp_path, "mc_a.json", YIELD_PASS_ENVELOPE)
+    b = _write(tmp_path, "mc_b.json", YIELD_PASS_ENVELOPE)
+    rows = [{"id": "offset"}, {"id": "gain_err", "ratified": True}]
+
+    report, item = _item6_rows(
+        tmp_path,
+        [{"file": a, "rows": ["offset"]}, {"file": b, "rows": ["gain_err"]}],
+        rows,
+    )
+
+    assert item["status"] == "met"
+    assert item["row_coverage"]["unratified_rows"] == []
+    assert report["tier"] == "T1"
+
+
+def test_item6_failing_citation_names_its_row_while_another_passes(tmp_path):
+    a = _write(tmp_path, "mc_a.json", YIELD_PASS_ENVELOPE)
+    bad = _write(tmp_path, "mc_bad.json", YIELD_FAIL_ENVELOPE)
+    rows = [{"id": "offset"}, {"id": "gain_err"}]
+
+    _, item = _item6_rows(
+        tmp_path,
+        [{"file": a, "rows": ["offset"]}, {"file": bad, "rows": ["gain_err"]}],
+        rows,
+    )
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "check_failed"
+    assert item["detail"]["failed_rows"] == ["gain_err"]
+
+
+@pytest.mark.parametrize(
+    "entry_rows, rows",
+    [
+        (["undeclared"], [{"id": "offset"}]),
+        (["gain_err"], [{"id": "gain_err", "gap": "not implemented"}]),
+        (["offset"], [{"id": "offset"}, {"id": "offset"}]),
+        (["offset"], [{"id": "offset", "ratified": "no"}]),
+    ],
+)
+def test_item6_malformed_row_declaration_is_invalid_evidence(
+    tmp_path, entry_rows, rows
+):
+    a = _write(tmp_path, "mc_a.json", YIELD_PASS_ENVELOPE)
+
+    _, item = _item6_rows(tmp_path, [{"file": a, "rows": entry_rows}], rows)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "invalid_evidence"
+
+
+def test_item6_not_applicable_with_declared_rows_is_invalid(tmp_path):
+    _, item = _item6_rows(tmp_path, _na_entry(tmp_path), [{"id": "offset"}])
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "invalid_evidence"
+
+
+def test_item6_without_declaration_grades_as_before(tmp_path):
+    a = _write(tmp_path, "mc_a.json", YIELD_PASS_ENVELOPE)
+
+    _, item = _item6_rows(tmp_path, a)
+
+    assert item["status"] == "met"
+    assert "citations" not in item
+    assert "row_coverage" not in item
+
+
+# --------------------------------------------------------------------------- #
+# Regeneration claims on a set binding (issues #2887 and #3044)
+# --------------------------------------------------------------------------- #
+
+
+def _set_with_regeneration(tmp_path, regenerated_hash):
+    envelope_path, digest = _set_generic(tmp_path, 1)
+    _with_regeneration(
+        envelope_path, {"generator": _GENERATOR, "regenerated_hash": regenerated_hash}
+    )
+    return envelope_path, digest
+
+
+def test_regeneration_claim_on_a_set_binding_compares_the_combined_digest(tmp_path):
+    envelope_path, digest = _set_generic(tmp_path, 1)
+    _with_regeneration(
+        envelope_path, {"generator": _GENERATOR, "regenerated_hash": digest}
+    )
+
+    item = _grade_set(envelope_path, digest)
+
+    assert item["status"] == "met"
+    binding = item["citation"]["artifact_binding"]
+    assert binding["members"]
+    assert binding["regeneration"]["regenerated_hash"] == digest
+
+
+def test_mismatched_regeneration_claim_on_a_set_binding_is_stale_artifact(tmp_path):
+    envelope_path, digest = _set_with_regeneration(tmp_path, "sha256:" + "0" * 64)
+
+    item = _grade_set(envelope_path, digest)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "stale_artifact"
+
+
+# --------------------------------------------------------------------------- #
+# `local_only` attest checks, `hash_kind: geometry` regeneration (issue #3743)
+# --------------------------------------------------------------------------- #
+
+
+def _local_only_inventory(repo: Path, **extra) -> str:
+    inventory = _inventory(1)
+    inventory["derived"][0]["check"] = {"argv": _OK, **extra}
+    return _write_inventory(repo, 1, inventory)
+
+
+def _commit_attestation(repo: Path, inventory: str) -> Path:
+    committed = repo / "evidence" / "item1.json"
+    committed.write_text(attest_module.render_envelope(build_attestation(1, inventory)))
+    return committed
+
+
+def test_attest_check_does_not_run_local_only_command(tmp_path):
+    repo = _attest_repo(tmp_path)
+    marker = repo / "ran.txt"
+    script = f"open({str(marker)!r}, 'w').write('x')"
+    argv = [sys.executable, "-c", script]
+    inventory = _local_only_inventory(repo, argv=argv, local_only=True)
+    committed = _commit_attestation(repo, inventory)
+    assert marker.exists()  # attest (produce) ran it
+    marker.unlink()
+
+    result = check_attestation(1, inventory, str(committed))
+
+    assert not marker.exists()
+    assert result["status"] == "match"
+    assert result["fresh_status"] == "pass"
+    assert [c["role"] for c in result["skipped_checks"]] == ["freshness"]
+    assert result["skipped_checks"][0]["argv"] == argv
+    assert "skipped" not in json.dumps(result["fresh"]["attestation"])
+
+
+def test_attest_check_still_detects_hash_drift_with_local_only(tmp_path):
+    repo = _attest_repo(tmp_path)
+    inventory = _local_only_inventory(repo, local_only=True)
+    committed = _commit_attestation(repo, inventory)
+    (repo / "design" / "ota.sch").write_text("v {xschem edited}\n")
+
+    result = check_attestation(1, inventory, str(committed))
+
+    assert result["status"] == "drifted"
+    assert result["skipped_checks"]
+
+
+def test_attest_check_committed_local_only_failure_fails_gate(tmp_path):
+    repo = _attest_repo(tmp_path)
+    inventory = _local_only_inventory(repo, argv=_STALE, local_only=True)
+    committed = _commit_attestation(repo, inventory)
+    assert json.loads(committed.read_text())["status"] == "fail"
+
+    result = check_attestation(1, inventory, str(committed))
+
+    assert result["status"] == "match"
+    assert result["fresh_status"] == "fail"
+    assert result["skipped_checks"][0]["passed"] is False
+
+
+def test_attest_check_cli_exit_codes_with_local_only(tmp_path, capsys):
+    repo = _attest_repo(tmp_path)
+    inventory = _local_only_inventory(repo, local_only=True)
+    committed = _commit_attestation(repo, inventory)
+
+    code = _attest_cli(1, inventory, "--check", str(committed), "--format", "text")
+
+    assert code == 0
+    assert "[SKIP]" in capsys.readouterr().out
+
+
+def test_attest_without_local_only_still_runs_every_command(tmp_path):
+    repo = _attest_repo(tmp_path)
+    inventory = _local_only_inventory(repo)
+    committed = _commit_attestation(repo, inventory)
+    assert check_attestation(1, inventory, str(committed))["skipped_checks"] == []
+
+
+@pytest.mark.parametrize("value", ["yes", 1, None])
+def test_attest_rejects_non_boolean_local_only(tmp_path, value):
+    repo = _attest_repo(tmp_path)
+    inventory = _local_only_inventory(repo, local_only=value)
+    with pytest.raises(AttestationError, match="local_only"):
+        build_attestation(1, inventory)
+
+
+def _write_gds(path: Path, *, extra_box: bool = False, year: int = 2020) -> None:
+    kdb = pytest.importorskip("klayout.db")
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(1, 0)).insert(kdb.Box(0, 0, 1000, 1000))
+    if extra_box:
+        top.shapes(layout.layer(2, 0)).insert(kdb.Box(0, 0, 500, 500))
+    options = kdb.SaveLayoutOptions()
+    options.format = "GDS2"
+    # Pin different write timestamps so the bytes differ run to run.
+    layout.write(str(path), options)
+    data = bytearray(path.read_bytes())
+    data[10:12] = year.to_bytes(2, "big")  # BGNLIB modification year
+    path.write_bytes(bytes(data))
+
+
+def _geometry_envelope(tmp_path, claim_gds: Path, **claim) -> tuple[str, str]:
+    (tmp_path / ".git").mkdir(exist_ok=True)  # a repo root for the geometry digest
+    envelope_path, _ = _anchored_generic(tmp_path, 2)
+    artifact = tmp_path / "ota.gds"
+    _write_gds(artifact)
+    digest = _hash_of(artifact)
+    envelope = json.loads(Path(envelope_path).read_text())
+    envelope["provenance"]["input"]["content_hash"] = digest
+    regenerated = layout_geometry_digest(str(claim_gds))
+    envelope["provenance"]["regeneration"] = {
+        "generator": _GENERATOR,
+        "regenerated_hash": regenerated,
+        "hash_kind": "geometry",
+        **claim,
+    }
+    Path(envelope_path).write_text(json.dumps(envelope))
+    return envelope_path, digest
+
+
+def test_geometry_regeneration_survives_a_rewrite_with_new_timestamps(tmp_path):
+    other = tmp_path / "regen.gds"
+    _write_gds(other, year=2031)
+    envelope_path, digest = _geometry_envelope(tmp_path, other)
+    assert _hash_of(tmp_path / "ota.gds") != _hash_of(other)
+
+    item = _item(build_tier_report(_anchored_manifest(2, envelope_path, digest)), 2)
+
+    assert item["status"] == "met"
+    regeneration = item["citation"]["artifact_binding"]["regeneration"]
+    assert regeneration["hash_kind"] == "geometry"
+    assert regeneration["executed_by_klt"] is False
+
+
+def test_geometry_regeneration_real_change_is_stale_artifact(tmp_path):
+    other = tmp_path / "regen.gds"
+    _write_gds(other, extra_box=True)
+    envelope_path, digest = _geometry_envelope(tmp_path, other)
+
+    item = _item(build_tier_report(_anchored_manifest(2, envelope_path, digest)), 2)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "stale_artifact"
+
+
+def test_geometry_regeneration_on_non_layout_is_unanchored(tmp_path):
+    envelope_path, digest = _anchored_generic(tmp_path, 1)
+    _with_regeneration(
+        envelope_path,
+        {
+            "generator": _GENERATOR,
+            "regenerated_hash": digest,
+            "hash_kind": "geometry",
+        },
+    )
+
+    item = _item(build_tier_report(_anchored_manifest(1, envelope_path, digest)), 1)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "unanchored_evidence"
+
+
+@pytest.mark.parametrize("kind", ["sha1", "", 3, None])
+def test_unknown_hash_kind_is_unanchored(tmp_path, kind):
+    envelope_path, digest = _anchored_generic(tmp_path, 1)
+    _with_regeneration(
+        envelope_path,
+        {"generator": _GENERATOR, "regenerated_hash": digest, "hash_kind": kind},
+    )
+
+    item = _item(build_tier_report(_anchored_manifest(1, envelope_path, digest)), 1)
+
+    assert item["reason"] == "unanchored_evidence"
+
+
+def test_explicit_bytes_hash_kind_matches_default(tmp_path):
+    envelope_path, digest = _anchored_generic(tmp_path, 1)
+    _with_regeneration(
+        envelope_path,
+        {"generator": _GENERATOR, "regenerated_hash": digest, "hash_kind": "bytes"},
+    )
+
+    item = _item(build_tier_report(_anchored_manifest(1, envelope_path, digest)), 1)
+
+    assert item["status"] == "met"

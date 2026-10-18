@@ -761,6 +761,7 @@ def test_deck_devices_covers_every_declared_device_class_of_every_deck():
         declared |= {entry.class_name for entry in deck.bipolars}
         declared |= {entry.name for entry in deck.capacitors}
         declared |= {entry.name for entry in deck.mom_capacitors}
+        declared |= {entry.name for entry in deck.mos_capacitors}
         declared |= {entry.name for entry in deck.resistors}
         declared |= {entry.name for entry in deck.diodes}
         assert reported == declared, name
@@ -1136,3 +1137,11 @@ def test_deck_rules_reports_ambiguous_and_unresolved_explicitly(monkeypatch):
         for ref in rule["layer_refs"]
         if (ref["layer"], ref["datatype"]) not in names
     )
+
+
+def test_deck_rules_reports_marker_blind_layers():
+    """Issue #3815: deck-static, discoverable pre-layout, not narrowed by rule."""
+    assert history.deck_rules("sky130")["marker_blind_layers"] == ["81/2"]
+    one = history.deck_rules("sky130", rule_id="poly.width.1")
+    assert one["marker_blind_layers"] == ["81/2"]
+    assert history.deck_rules("gf180mcu")["marker_blind_layers"] == []
