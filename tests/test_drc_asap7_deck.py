@@ -479,6 +479,32 @@ def test_cli_envelope_clean_device(tmp_path, capsys):
     assert payload["coverage_assertion"]["satisfied"] is True
 
 
+def _docs_not_implemented_ids() -> set[str]:
+    section = _docs_asap7_section()
+    start = section.index("### Not implemented")
+    end = section.find("\n### ", start + 1)
+    ids: set[str] = set()
+    for line in section[start : end if end != -1 else None].splitlines():
+        if line.startswith("| `"):
+            ids.update(re.findall(r"`([^`]+)`", line.split("|")[1]))
+    return ids
+
+
+@_needs_klayout
+def test_cli_envelope_unmodeled_rules_match_gaps_and_docs(tmp_path, capsys):
+    gds = tmp_path / "device.gds"
+    fx.write_shapes(str(gds), fx.device())
+    code, payload = _run_cli(
+        capsys, gds, "--expect-rule-categories", str(len(RULE_IDS))
+    )
+    assert code == 0
+    assert payload["status"] == "clean"
+    unmodeled = payload["coverage"]["unmodeled_rules"]
+    assert unmodeled == sorted(g.id for g in NOT_IMPLEMENTED)
+    # Both directions: the docs table and the envelope list the same ids.
+    assert set(unmodeled) == _docs_not_implemented_ids()
+
+
 @_needs_klayout
 @pytest.mark.parametrize(
     "shapes",
