@@ -28,6 +28,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   [8, 25]}`; without it the verdict is `match` with `device.body_unverified`
   warnings and one pin.
 
+- **`openroad` Docker wrapper forwards `PLATFORM_DIR` and `OPENROAD_*`**
+  (issue #3821): `scripts/install-openroad-docker.sh` now writes a wrapper that
+  passes `-e PLATFORM_DIR` (when set) and `-e <name>` for each caller variable
+  starting with `OPENROAD_` to `docker run`, so Tcl reading
+  `$::env(PLATFORM_DIR)` no longer fails. Nothing else in the argv changes.
+  Hosts with an older wrapper should re-run
+  `scripts/install-openroad-docker.sh` to upgrade it in place.
+
 - **`klt sta` driving cell / output load, and `*NAME_MAP` SPEFs** (issue
   #3742): `constraints.driving_cell` / `.driving_cells` emit
   `set_driving_cell` and `constraints.output_load_pf` / `.output_loads` emit
