@@ -350,15 +350,62 @@ def test_pdk_rooted_includes_are_left_verbatim(tmp_path):
     assert str(models) in staged.netlist.content
 
 
-def test_host_resolved_roots_reads_the_request_then_the_environment(monkeypatch):
+def test_host_resolved_roots_is_only_the_forwarded_request_root(monkeypatch):
+    """The client's own `$PDK_ROOT` is not forwarded to the runner, so it is
+    not a verbatim root (#3770)."""
     monkeypatch.setenv("PDK_ROOT", "/env/pdks")
     assert st.host_resolved_roots({"models": {"pdk_root": "/req/pdks"}}) == (
         "/req/pdks",
-        "/env/pdks",
     )
-    assert st.host_resolved_roots({}) == ("/env/pdks",)
+    assert st.host_resolved_roots({}) == ()
+    assert st.client_pdk_root() == "/env/pdks"
     monkeypatch.delenv("PDK_ROOT")
     assert st.host_resolved_roots({}) == ()
+    assert st.client_pdk_root() is None
+
+
+def test_client_pdk_root_include_is_rewritten_to_env_form(tmp_path, monkeypatch):
+    """An absolute include under the submitter's own `$PDK_ROOT` (not
+    forwarded) becomes `$PDK_ROOT/<rel>`, which the runner expands (#3770)."""
+    pdk_root = tmp_path / "pdks"
+    models = _write(pdk_root / "sky130A", "design.ngspice", "* models\n")
+    monkeypatch.setenv("PDK_ROOT", str(pdk_root))
+    netlist = _write(tmp_path, "tb.spice", f'.include "{models}"\nR1 a b 1k\n')
+
+    staged = _stage(netlist)
+
+    assert staged.includes == ()
+    assert staged.host_resolved == ("$PDK_ROOT/sky130A/design.ngspice",)
+    assert staged.host_resolved_detail == (
+        ("$PDK_ROOT/sky130A/design.ngspice", "env_var"),
+    )
+    assert staged.netlist.content is not None
+    assert '.include "$PDK_ROOT/sky130A/design.ngspice"' in staged.netlist.content
+    assert str(pdk_root) not in staged.netlist.content
+
+
+def test_forwarded_root_wins_over_client_pdk_root(tmp_path, monkeypatch):
+    """Under both roots, the forwarded `models.pdk_root` keeps it verbatim."""
+    pdk_root = tmp_path / "pdks"
+    models = _write(pdk_root / "sky130A", "models.spice", "* models\n")
+    monkeypatch.setenv("PDK_ROOT", str(pdk_root))
+    netlist = _write(tmp_path, "tb.spice", f'.include "{models}"\n')
+
+    staged = _stage(netlist, roots=(str(pdk_root),))
+
+    assert staged.host_resolved == (str(models),)
+    assert staged.host_resolved_detail == ((str(models), "pdk_root"),)
+
+
+def test_include_outside_client_pdk_root_is_still_staged(tmp_path, monkeypatch):
+    monkeypatch.setenv("PDK_ROOT", str(tmp_path / "pdks"))
+    _write(tmp_path, "dut.spice", "* dut\n")
+    netlist = _write(tmp_path, "tb.spice", '.include "dut.spice"\n')
+
+    staged = _stage(netlist)
+
+    assert [item.staged_name for item in staged.includes] == ["dut.spice"]
+    assert staged.host_resolved == ()
 
 
 # --------------------------------------------------------------------------- #

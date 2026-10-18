@@ -23,6 +23,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   `harness_log` print `s3://<bucket>/...` literally. `job_id` and `region`
   remain, so `--attach` still works; the receipt and `--submit-only`/`--status`
   outputs keep `bucket`.
+
+- **gf180mcu `DF.13_MV` / `DF.14_MV` tap-distance rules declared** (issue
+  #3793): `comp.tap_distance.nwell.mv.1` and `comp.tap_distance.psub.mv.1`
+  (15 um reach, active overlapping `Dualgate`) join the 20 um `.lv.1` pair, so a
+  layout with a 5V/6V active more than 15 um from a tap no longer reports
+  `clean`. Additive: two new rule ids; LV results are unchanged. The
+  `latchup_mk` marker rules remain undeclared.
+
 - **`klt synthesize --restructure` now finds upsizes on libraries that quote
   cell names** (issue #3709): `restructure`'s and `synthesize`'s private
   regex Liberty readers are replaced by `liberty_compare.parse_liberty_text`.

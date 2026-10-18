@@ -26,8 +26,11 @@ klt erc --check <report> [--rerun] [--format text|json]
   exactly one root to analyse, unlike `klt layers`, which defaults to
   summing across every top cell).
 - `--pdk` — PDK antenna-ratio limit table each non-gate `stackup` level's
-  `antenna_ratio` is compared against (currently: `sky130`). Optional — see
-  "Antenna-ratio verdict" below for what happens when it's omitted. Not
+  `antenna_ratio` is compared against (currently: `sky130`, `ihp-sg13g2`). Optional — see
+  "Antenna-ratio verdict" below for what happens when it's omitted. Omitted
+  or unsupported-for-antenna (e.g. `gf180mcu`) means `status: "not_checked"`
+  and exit 4 **by design**, not a tool failure: gate on `erc_status` instead
+  (see "Two verdicts"). Not
   validated by argparse: an unrecognised name is a clean exit-1 error, like
   `klt drc`'s own `--deck`.
 - `--deck` (issue #2204) — a curated extraction deck (currently: `gf180mcu`,
@@ -2183,7 +2186,27 @@ convention of calling out every deliberately-uncovered rule.
 are `klt erc` *via* roles (the spec's `vias[]` array), not `stackup`
 roles, so they have no `levels[]` entry to attach one to.
 
-An unrecognised `--pdk` name (anything other than `sky130`) is a clean
+### SG13G2 antenna-ratio limits
+
+`--pdk ihp-sg13g2` uses the IHP-Open-PDK v0.3.0 antenna limit `Ant_b` from
+[`ihp-sg13g2/libs.tech/klayout/tech/drc/rule_decks/sg13g2_tech_default.json`](https://github.com/IHP-GmbH/IHP-Open-PDK/blob/v0.3.0/ihp-sg13g2/libs.tech/klayout/tech/drc/rule_decks/sg13g2_tech_default.json)
+(cumulative metal area / gate area, *without* a protection diode; fetched
+2026-10-17). The `stackup` role names are the IHP layer names:
+
+| `stackup` role name | Limit | Source rule id |
+| -------------------- | ----: | --------------- |
+| `Metal1` … `Metal5`   | 200   | `Ant_b` |
+| `TopMetal1`            | 200   | `Ant_b` |
+| `TopMetal2`            | 200   | `Ant_b` |
+
+Scope notes: `Ant.a` (GatPoly over field oxide), `Ant.c` (Cont/gate) and
+`Ant.d` (cumulative via/gate) cannot produce a `levels[]` verdict — the gate
+role is never graded and cont/via are `vias[]` roles. `Ant.e`/`Ant.f` (the
+with-diode limits) are not used because `klt erc` does not model protection
+diodes. A spec that names its layers differently (e.g. `met1`) leaves those
+levels `unchecked` and rolls up to `clean_partial`.
+
+An unrecognised `--pdk` name (anything other than `sky130` or `ihp-sg13g2`) is a clean
 exit-1 error, checked eagerly before the layout is even loaded — see "Exit
 codes" below.
 
@@ -2239,8 +2262,9 @@ issue #2179 each carries its own roll-up:
 | `erc_status` | The `erc_findings` rules alone: `erc.unconnected_net`, `erc.multiply_driven_net`, `erc.supply_short`, `erc.expected_short_missing`, `erc.unlabelled_conductor`, `erc.floating_gate`, `erc.missing_tie` | No |
 
 The distinction is not academic. `--pdk` resolves against a limit table
-**this command carries for sky130 only** (see "Sky130 antenna-ratio limits"
-above); any other PDK name is an exit-1 error, so a non-sky130 design is run
+**this command carries for sky130 and ihp-sg13g2 only** (see "Sky130
+antenna-ratio limits" and "SG13G2 antenna-ratio limits" above); any other PDK
+name is an exit-1 error, so a design on another PDK is run
 with `--pdk` omitted. Every level then comes back `verdict: "unchecked"`,
 the antenna scope's checked work is known-zero, and the
 [common rollup rule](../coverage-contract.md) correctly refuses to call that
@@ -2910,7 +2934,7 @@ authoritative. See [`docs/json-contract.md`](../json-contract.md#exit-codes)'s
 "Exit codes" section.
 
 **The exit code answers the *antenna* question**, because `status` does. On
-a PDK with no antenna-ratio table — every PDK but sky130 today, any run
+a PDK with no antenna-ratio table — every PDK but sky130 and ihp-sg13g2 today, any run
 that omits `--pdk`, and every `--findings-only` run — it is therefore `4`
 for every layout, however clean the design is. That is not a signal that the run failed or that nothing was
 checked: the connectivity rules ran, and their verdict is `erc_status` in

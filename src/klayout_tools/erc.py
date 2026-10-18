@@ -1191,16 +1191,53 @@ _SKY130_ANTENNA_SOURCE_URL = (
     "table-Ia-antenna-rules-s8d.csv"
 )
 
+#: IHP SG13G2 antenna-ratio limit (maximum cumulative metal area / gate area
+#: *without* a protection diode), from IHP-Open-PDK v0.3.0
+#: `ihp-sg13g2/libs.tech/klayout/tech/drc/rule_decks/sg13g2_tech_default.json`
+#: key `Ant_b` (= 200; the runset is `rule_decks/antenna.drc`, which checks
+#: it cumulatively at Metal1..Metal5, TopMetal1 and TopMetal2). Fetched
+#: 2026-10-17 from the local v0.3.0 snapshot.
+#:
+#: Only Ant.b is representable as a `levels[]` verdict. Ant.a (GatPoly over
+#: field oxide), Ant.c (Cont/gate) and Ant.d (cumulative via/gate) are not:
+#: the gate role is never graded and cont/via are `vias[]` roles, not
+#: `stackup` roles (same reason sky130's licon1/mcon/via1 never get a
+#: verdict). Ant.e/Ant.f (the with-diode limits, 20000 and 500) are not used
+#: because `klt erc` does not model protection diodes, so the conservative
+#: "w/o diode" limit applies, as for sky130.
+_SG13G2_ANTENNA_RATIO_MAX_EGAR: dict[str, tuple[float, str]] = {
+    "Metal1": (200.0, "Ant_b"),
+    "Metal2": (200.0, "Ant_b"),
+    "Metal3": (200.0, "Ant_b"),
+    "Metal4": (200.0, "Ant_b"),
+    "Metal5": (200.0, "Ant_b"),
+    "TopMetal1": (200.0, "Ant_b"),
+    "TopMetal2": (200.0, "Ant_b"),
+}
+
+_SG13G2_ANTENNA_SOURCE_URL = (
+    "https://github.com/IHP-GmbH/IHP-Open-PDK/blob/v0.3.0/ihp-sg13g2/"
+    "libs.tech/klayout/tech/drc/rule_decks/sg13g2_tech_default.json"
+)
+
 #: PDK name -> (role name -> (limit, source rule id)) lookup for `--pdk`.
-#: sky130 only, per this repo's "open PDKs, sky130 first" scope (see
-#: CLAUDE.md) -- gf180mcu antenna limits are a candidate follow-on, not
-#: silently dropped.
+#: sky130 and ihp-sg13g2; gf180mcu/sg13cmos5l/asap7 antenna limits are
+#: candidate follow-ons, not silently dropped.
 _ANTENNA_LIMITS_BY_PDK: dict[str, dict[str, tuple[float, str]]] = {
     "sky130": _SKY130_ANTENNA_RATIO_MAX_EGAR,
+    "ihp-sg13g2": _SG13G2_ANTENNA_RATIO_MAX_EGAR,
 }
 
 _ANTENNA_SOURCE_URL_BY_PDK: dict[str, str] = {
     "sky130": _SKY130_ANTENNA_SOURCE_URL,
+    "ihp-sg13g2": _SG13G2_ANTENNA_SOURCE_URL,
+}
+
+#: Tail of `levels[].antenna_ratio_source`, naming which limit of the cited
+#: source was used (always the no-diode one).
+_ANTENNA_SOURCE_NOTE_BY_PDK: dict[str, str] = {
+    "sky130": "'Max EA/A w/o diode' column",
+    "ihp-sg13g2": "IHP-Open-PDK v0.3.0, w/o-diode limit",
 }
 
 
@@ -1682,12 +1719,12 @@ def _accumulated_levels(
             if i == 0 or antenna_limits is None
             else antenna_limits.get(entry["name"])
         )
-        if limit_entry is not None:
+        if limit_entry is not None and pdk is not None:
             limit_value, rule_id = limit_entry
             antenna_ratio_max: float | None = limit_value
             antenna_ratio_source: str | None = (
                 f"{_ANTENNA_SOURCE_URL_BY_PDK[pdk]} rule {rule_id!r}, "
-                "'Max EA/A w/o diode' column"
+                f"{_ANTENNA_SOURCE_NOTE_BY_PDK[pdk]}"
             )
             verdict = "violate" if antenna_ratio > limit_value else "pass"
         else:
@@ -3776,8 +3813,9 @@ def run_erc(
     # roll-up, beside the antenna-driven `status` rather than folded into it.
     #
     # `status` above is a roll-up of *both* questions, and its coverage input
-    # is antenna-only, so on a PDK with no antenna-ratio table (every PDK but
-    # sky130 today, or `--pdk` omitted entirely) it is `"not_checked"`/exit 4
+    # is antenna-only, so on a PDK with no antenna-ratio table (any PDK other
+    # than sky130 and ihp-sg13g2, or `--pdk` omitted entirely) it is
+    # `"not_checked"`/exit 4
     # no matter what the connectivity rules found: a run whose connectivity
     # rules all passed is then indistinguishable, by `status` and by exit
     # code, from a run that checked nothing at all. That is the right answer

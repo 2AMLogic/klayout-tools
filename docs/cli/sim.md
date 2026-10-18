@@ -775,15 +775,16 @@ same on `local` and `batch`. An include that cannot be found yields a
 "no value" errors.
 
 **PDK-root includes resolve on the runner.** A `.include` in the
-netlist body that resolves under the PDK root (`models.pdk_root`, else
-`$PDK_ROOT`) is **not** staged or rewritten: the PDK is baked into the
-runner image, so the same path must exist at the same PDK root *on the
-runner*. A body that includes
-`/home/<you>/.volare/<pdk>/libs.tech/ngspice/design.ngspice` fails on a
-runner whose image keeps that PDK elsewhere (or lacks it) with ngspice's
-`Could not find include file ...`. Prefer a PDK-root-relative include
-(`$PDK_ROOT/...`) or a path under the runner's PDK root. Includes *outside*
-the PDK root are staged from the submitting host. When the runner cannot
+netlist body that resolves under the forwarded `models.pdk_root` is **not**
+staged or rewritten: the PDK is baked into the runner image, so the same
+path must exist at the same PDK root *on the runner*. The submitting
+host's own `$PDK_ROOT` is not forwarded, so an absolute include under it
+(and not under `models.pdk_root`) is rewritten to the literal
+`$PDK_ROOT/<relative path>`, which the runner expands against its own PDK
+root, and is reported in `host_resolved_detail` with the `env_var` reason.
+Any other absolute path under a PDK install the runner may not share fails
+with ngspice's `Could not find include file ...`. Includes *outside* both
+roots are staged from the submitting host. When the runner cannot
 resolve an include, the per-corner `diagnostics[]` carries a
 `missing_include` entry naming the file (when the engine log is retrieved,
 which needs `keep_artifacts`), not only `measurement ... produced no value`.
@@ -4627,7 +4628,8 @@ netlist's resolved include closure**, not just the netlist file
 - Two classes of include are deliberately **left verbatim** when staging,
   because the *executing* host owns their resolution: a target naming an
   environment variable (`$PDK_ROOT/...`), and a target resolving under the PDK root the
-  request already forwards (`models.pdk_root`, else this host's `$PDK_ROOT`)
+  request already forwards (`models.pdk_root`; this host's own `$PDK_ROOT`
+  is not forwarded, so a path under it is rewritten to `$PDK_ROOT/<rel>`)
   — the model library is baked into the fleet image and is never pushed per
   job (see "Remote backend" above).
 - **`$VAR`/`~` in `.include`/`.inc` targets are expanded on the executing
@@ -7018,6 +7020,11 @@ unavailable measurement values, null bounds, and unrecognized limit keys
 are explicit skips. Only `min` and `max` are applied. A typo such as
 `{"maximum": 1.8}` cannot count as an applied bound. Partial valid bounds
 and skipped bounds remain distinguishable by identity.
+
+`klt signoff` does not count an envelope with `measurements_declared > 0` and
+`measurements_with_limits == 0` as passing corner-verification evidence
+(reason `no_limits_checked`, issue #3769); the `klt sim` status and
+`coverage` are unchanged.
 
 A deliberate no-limit characterization counts a produced measurement as
 checked and its omitted limit as inapplicable. A launched corner alone does
