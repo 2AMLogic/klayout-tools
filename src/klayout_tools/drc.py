@@ -65,6 +65,7 @@ from .decks import (
     deck_source_path,
     get_deck,
     get_layer_names,
+    get_marker_blind_layers,
     get_nominal_dbu,
     get_unchecked_rules,
     get_unmodeled_rules,
@@ -1876,6 +1877,15 @@ def _build_coverage(setup: _DrcSetup, state: _DrcState) -> dict[str, Any]:
         if layer in stream_layer_tuples
     ]
 
+    # Issue #3815: area-marker layers the deck accepts but does not model, so
+    # a result identical with and without the marker is not read as
+    # marker-aware. Informational only, like `unchecked_rules`.
+    marker_blind_layers_in_stream = sorted(
+        _layer_str(layer)
+        for layer in get_marker_blind_layers(deck_name)
+        if layer in stream_layer_tuples
+    )
+
     # Issue #2110: the two common-coverage categories this engine's single
     # "a layer it reads is absent" skip splits into -- see
     # `_classify_skipped_rules` for why an empty assessment domain is
@@ -1907,6 +1917,7 @@ def _build_coverage(setup: _DrcSetup, state: _DrcState) -> dict[str, Any]:
         "rules_skipped": sorted(rules_skipped),
         "voltage_domain_warnings": voltage_domain_warnings,
         "unchecked_rules": unchecked_rules,
+        "marker_blind_layers_in_stream": marker_blind_layers_in_stream,
         "deck_scope": deck_scope,
         # Issue #3031: deck-static, like `deck_scope` -- official rule ids the
         # deck knowingly does not transcribe.
@@ -2040,6 +2051,7 @@ def run_drc(
                     {"rule": str, "layer": "<layer>/<datatype>",
                      "description": str}, ...
                 ],
+                "marker_blind_layers_in_stream": ["<layer>/<datatype>", ...],
                 "deck_scope": [<scope identifier>, ...],
                 "unmodeled_rules": [<official rule id>, ...],
                 "nothing_checked": bool,

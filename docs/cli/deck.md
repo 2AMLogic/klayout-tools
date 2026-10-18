@@ -344,6 +344,13 @@ could re-check mechanically.
   `null` when the deck publishes none (the `layers` entry is then the raw
   `"<layer>/<datatype>"` string). Additive: `layers` is unchanged, so no
   `schema_version` bump.
+- `marker_blind_layers` (top-level) — `["<layer>/<datatype>", ...]` area-marker
+  layers (sky130: `81/2`, `areaid.ce`) the deck accepts but does **not** model
+  rule-switching for (issue #3815), so a result identical with and without the
+  marker is not mistaken for marker-aware behaviour. Deck-static (not narrowed
+  by `--rule`); `[]` for a deck that declares none. `klt drc` reports the subset
+  present in a stream as `coverage.marker_blind_layers_in_stream`. Additive: no
+  `schema_version` bump.
 - `layer_table` (top-level) — every `{"name", "layer", "datatype"}` the deck
   names, sorted by `(layer, datatype)`; pinned by the report's `content_hash`.
 - `ambiguous_names` (top-level) — `[{"name", "pairs": [{"layer", "datatype"}]}]`

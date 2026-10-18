@@ -125,6 +125,7 @@ __all__ = [
     "get_nominal_dbu",
     "get_parasitics_deck",
     "get_unmodeled_rules",
+    "get_marker_blind_layers",
     "get_unchecked_rules",
     "get_untranscribed_rules",
     "get_unmodeled_voltage_markers",
@@ -321,6 +322,20 @@ def get_unchecked_rules(name: str) -> dict[str, tuple[tuple[int, int], str]]:
     from . import sg13cmos5l
 
     return {"sg13cmos5l": sg13cmos5l.UNCHECKED_RULES}.get(name, {})
+
+
+def get_marker_blind_layers(name: str) -> list[tuple[int, int]]:
+    """Return the sorted ``(layer, datatype)`` area-marker layers whose
+    rule-switching ``name``'s deck does not model (issue #3815).
+
+    A marker such as sky130's ``areaid.ce`` (81/2) is accepted in a stream but
+    changes no rule's result; ``drc.py`` and ``klt deck rules`` surface the
+    declaration so that is discoverable. Decks that declare none (and
+    unregistered names) return an empty list.
+    """
+    from . import sky130
+
+    return {"sky130": sorted(sky130.MARKER_BLIND_LAYERS)}.get(name, [])
 
 
 def _nominal_dbu_registry() -> dict[str, float]:

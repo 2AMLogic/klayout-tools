@@ -64,7 +64,7 @@ import json
 import os
 from typing import Any
 
-from ._verilog_params import chparam_lines
+from ._verilog_params import chparam_lines, read_verilog_line
 from .arith_gen import (
     ARCHITECTURES as ADDER_ARCHITECTURES,
 )
@@ -474,7 +474,7 @@ def _probe_add_widths(
 
     script_path = os.path.join(output_dir, f"probe_{hdl_toplevel}.ys")
     json_path = os.path.join(output_dir, f"probe_{hdl_toplevel}.json")
-    lines = [f"read_verilog {path}" for path in resolved_sources]
+    lines = [read_verilog_line(path) for path in resolved_sources]
     lines += chparam_lines(parameters or {}, hdl_toplevel)
     lines += [
         f"hierarchy -check -top {hdl_toplevel}",

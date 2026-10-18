@@ -339,7 +339,7 @@ from ._report_verify import (
     load_committed_report,
     strip_keys,
 )
-from ._verilog_params import chparam_lines, validate_parameters
+from ._verilog_params import chparam_lines, read_verilog_line, validate_parameters
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
@@ -1268,7 +1268,7 @@ def _side_prep_lines(
         # it.
         lines.append(f"read_liberty -ignore_miss_func {side['liberty']}")
     for path in side["sources"]:
-        lines.append(f"read_verilog {path}")
+        lines.append(read_verilog_line(path))
     # Issue #3466: optional top-level parameter overrides for this side.
     lines += chparam_lines(side.get("parameters") or {}, side["top"])
     lines += [
