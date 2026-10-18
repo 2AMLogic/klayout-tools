@@ -58,6 +58,7 @@ from .extraction import (
     ResistorFlavour,
     SizeFilter,
     TerminalRelation,
+    UnmodelledDeviceFamily,
     UnsupportedDeviceMarker,
 )
 from .finfet import FinFETExtractionDeck, FinFETFlavour
@@ -116,6 +117,7 @@ __all__ = [
     "TapDistanceSpec",
     "UnknownDeckError",
     "UnknownExtractionDeckError",
+    "UnmodelledDeviceFamily",
     "MosCapacitorDevice",
     "UnsupportedDeviceMarker",
     "deck_names",

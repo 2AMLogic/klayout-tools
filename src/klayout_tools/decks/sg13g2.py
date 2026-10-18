@@ -477,6 +477,7 @@ from . import (
     ParasiticsDeck,
     ResistorDevice,
     RuleProvenance,
+    UnmodelledDeviceFamily,
 )
 
 # `RuleProvenance.source_repo`/`.commit` shared by every rule in this module
@@ -2457,6 +2458,23 @@ EXTRACTION_DECK = ExtractionDeck(
             ),
             cathode=(31, 0),  # NWell.drawing -- shares this deck's well node
             provenance=_sg13g2_lvs_provenance("diode_extraction.lvs", "dpantenna"),
+        ),
+    ),
+    # Device families this deck deliberately does not recognise (issue
+    # #3137): the SiGe HBT (see "SiGe HBTs -- investigated, declined" in the
+    # module docstring). A drawn HBT's Activ matches the `dantenna` predicates
+    # minus `Recog.diode`; this lets that near-miss warning say so. The
+    # signature is the HBT's `TRANS` (26/0) device layer alone -- upstream's
+    # `npn_mk = trans_drw.and(pwell).and(ptap_holes)` also needs `pwell`/
+    # `ptap_holes`, which are derived layers this deck does not draw.
+    unmodelled_families=(
+        UnmodelledDeviceFamily(
+            name="SiGe HBT (npn13G2/npn13G2l/npn13G2v)",
+            signature=(26, 0),  # TRANS.drawing
+            reference=(
+                "the sg13g2.py docstring section 'SiGe HBTs -- investigated, "
+                "declined (issue #1232)'"
+            ),
         ),
     ),
 )
