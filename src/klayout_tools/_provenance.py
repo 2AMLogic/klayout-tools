@@ -494,6 +494,10 @@ def _pdk_block(
     ``docs/json-contract.md``). The absolute roots are named in the
     stderr warning instead (:func:`klayout_tools.pdk.ambiguity_warning`).
 
+    ``commit`` (issue #3786) is added **only** when the install carries a
+    ``.fetched-commit`` record (the 40-hex upstream commit); ``version``
+    stays ``fetched:<tag>``.
+
     ``compatibility`` (issue #3427) is likewise added **only** on a
     ``mismatch`` -- the resolved tree's ``SOURCES`` stamp differs from the
     declared open_pdks pin (:mod:`klayout_tools.pdk_compat`); ``version``
@@ -513,6 +517,11 @@ def _pdk_block(
         "source": pdk.get("resolved_via"),
         "version": pdk.get("version"),
     }
+    if pdk.get("commit"):
+        # Issue #3786: the upstream commit a fetched install was built from;
+        # only when known, so an install without ``.fetched-commit`` keeps
+        # byte-identical provenance.
+        block["commit"] = pdk["commit"]
     ambiguous = pdk.get("ambiguous_roots") or []
     if ambiguous:
         block["ambiguous_sources"] = [entry["resolved_via"] for entry in ambiguous]

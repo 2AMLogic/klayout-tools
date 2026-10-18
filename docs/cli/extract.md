@@ -2913,7 +2913,7 @@ running KLayout's own native rule-deck runner (`run_drc_klayout_engine`,
 script and diffing its violations against the compiled `DrcRule` deck's own
 results on the same golden layouts — see [`docs/cli/drc.md`](drc.md) →
 "Engine" → `"klayout"`. This section is the LVS-device-extraction
-counterpart: `klayout_tools.extract.run_extract_klayout_engine` (a Python
+counterpart: `tests/helpers/extract_klayout_oracle.py`'s `run_extract_klayout_engine` (a Python
 helper, not yet a `klt extract --engine` CLI flag — see "Scope" below) drives
 `sky130.lvs` — sky130's single, directly-runnable native LVS/device-
 extraction deck, resolved via `klayout_tools.pdk.lvs_deck_file` from the
