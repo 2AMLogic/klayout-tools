@@ -24,6 +24,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   remain, so `--attach` still works; the receipt and `--submit-only`/`--status`
   outputs keep `bucket`.
 
+- **`klt sta` driving cell / output load, and `*NAME_MAP` SPEFs** (issue
+  #3742): `constraints.driving_cell` / `.driving_cells` emit
+  `set_driving_cell` and `constraints.output_load_pf` / `.output_loads` emit
+  `set_load` (additive; omitted fields leave the generated Tcl unchanged).
+  The `spef_annotation` name check now resolves `*NAME_MAP` indices (and a
+  non-`/` `*DIVIDER`), so a name-mapped OpenROAD SPEF no longer reports 0
+  design nets annotated. `propagated_clock` already existed (issue #2739).
+
 - 2026-10-17 — **`klt signoff --attest` / `--inventory` are not installable
   from 0.7.0** (issue #3805): the attestation producer for T1 items 1, 9 and
   10 (#2844) is on `main` but in no tagged release, so
