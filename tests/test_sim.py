@@ -3595,6 +3595,62 @@ def test_corner_genuine_measurement_failure_is_not_engine_aborted(
     assert "measurement" in codes
 
 
+_PARSE_ABORT_LOG = (
+    "Circuit: * big flat deck\n"
+    "Error on line 42 :\n"
+    "  m1 d g s b nfet_bad w=1u l=1u\n"
+    "Simulation interrupted due to error!\n"
+)
+
+
+def test_corner_deck_parse_abort_gets_one_ngspice_fatal_cause(tmp_path, monkeypatch):
+    """Issue #3879: a generic deck abort is classified, quotes the first error
+    line verbatim, says no analysis started, and collapses the measurement
+    cascade (and with it the save_mode hint)."""
+    corner = _abort_corner(
+        tmp_path,
+        monkeypatch,
+        keep_artifacts=False,
+        returncode=1,
+        log_text=_PARSE_ABORT_LOG,
+    )
+    assert [d["code"] for d in corner["diagnostics"]] == ["ngspice_fatal"]
+    cause = corner["diagnostics"][0]
+    assert cause["severity"] == "error"
+    assert cause["message"].startswith("Error on line 42")
+    assert cause["analysis_started"] is False
+    assert "no analysis started" in cause["message"]
+    assert corner["status"] == "error"
+    assert corner["measurements"][0]["status"] == "error"
+    assert "ngspice_fatal" in sim.DIAGNOSTIC_CODES
+
+
+def test_corner_specific_fatal_code_wins_over_generic(tmp_path, monkeypatch):
+    log = (
+        "Circuit: x\nError on line 3 :\nError: could not find a valid modelname\n"
+        "Simulation interrupted due to error!\n"
+    )
+    corner = _abort_corner(
+        tmp_path, monkeypatch, keep_artifacts=False, returncode=1, log_text=log
+    )
+    assert [d["code"] for d in corner["diagnostics"]] == ["model_bin_range"]
+    assert corner["diagnostics"][0]["analysis_started"] is False
+
+
+def test_corner_fatal_mid_analysis_keeps_measurement_diagnostics(tmp_path, monkeypatch):
+    log = (
+        "Circuit: x\nDoing analysis at TEMP = 27.000000 and TNOM = 27.000000\n"
+        + _PARSE_ABORT_LOG
+    )
+    corner = _abort_corner(
+        tmp_path, monkeypatch, keep_artifacts=False, returncode=1, log_text=log
+    )
+    codes = [d["code"] for d in corner["diagnostics"]]
+    assert codes == ["ngspice_fatal", "measurement"]
+    assert "analysis_started" not in corner["diagnostics"][0]
+    assert "no analysis started" not in corner["diagnostics"][0]["message"]
+
+
 def test_split_returncode_unnamed_signal_falls_back():
     assert sim._split_returncode(-250) == (None, "SIG250")
     assert sim._split_returncode(3) == (3, None)

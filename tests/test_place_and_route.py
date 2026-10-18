@@ -2819,6 +2819,11 @@ def test_stubbed_full_route_success(tmp_path, monkeypatch):
     assert provenance["klt_version"]
     assert provenance["pdk"]["name"] == "sky130A"
     assert provenance["deck"]["name"] == "sky130_fd_sc_hd__tt_025C_1v80"
+    # Issue #3785: the Liberty is located by the `{path, scope}` envelope,
+    # never an absolute host path.
+    assert set(provenance["deck"]["path"]) == {"path", "scope"}
+    assert provenance["deck"]["path"]["scope"] in {"repo", "external"}
+    assert not os.path.isabs(provenance["deck"]["path"]["path"] or "")
 
     # Issue #1091: `request.power` omitted (the default here) preserves
     # today's exact prior behavior for the *full, caller-configured* PDN --

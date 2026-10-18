@@ -899,7 +899,7 @@ from typing import (
     get_type_hints,
 )
 
-from ._provenance import INPUT_ROLE_LAYOUT, sha256_file
+from ._provenance import INPUT_ROLE_LAYOUT, layout_geometry_digest, sha256_file
 from ._report_verify import (
     LIST_ITEM,
     build_rerun_result,
@@ -1131,13 +1131,15 @@ _MIXED_SIGNAL_PARTITIONS = ("analog", "digital")
 #: - **item 5, analog** (and a mixed-signal block's analog partition): a
 #:   ``"sim"``-kind citation only -- the doc's "PVT corner-matrix simulation
 #:   results covering every spec row at its bound corners".
-#: - **item 5, digital**: ``"sta"`` or ``"functional-verification"`` (the
+#: - **item 5, digital**: ``"sta"`` *and* ``"functional-verification"`` (the
 #:   doc's Digital column, "multi-corner static timing analysis ... plus a
 #:   bit-exact functional test suite", recognised as first-class evidence
-#:   kinds by issue #1959) *or* ``"sim"``, which keeps the full-custom
-#:   digital sub-case working: that partition declares ``kind: "digital"``
-#:   but satisfies item 5 "instead by PVT corner-matrix SPICE simulation",
-#:   i.e. exactly an analog partition's artifact.
+#:   kinds by issue #1959; citing only one grades ``partial_coverage`` with
+#:   ``detail.missing_kinds``, issue #3741) *or* ``"sim"`` alone, which
+#:   keeps the full-custom digital sub-case working: that partition
+#:   declares ``kind: "digital"`` but satisfies item 5 "instead by PVT
+#:   corner-matrix SPICE simulation", i.e. exactly an analog partition's
+#:   artifact.
 #: - **item 7, analog** (and a mixed-signal block's analog partition): a
 #:   ``"pex"``-kind citation only -- the `klt pex`
 #:   schematic-vs-extracted-netlist delta report (see this module's
@@ -1837,6 +1839,11 @@ _ITEMS_ACCEPTING_REGENERATION_CLAIMS: frozenset[int] = frozenset({1, 2})
 #: instead of reading as a stale artifact.
 _REGENERATED_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
+#: ``provenance.regeneration.hash_kind`` values: raw bytes (default) or the
+#: decoded-geometry digest, which ignores GDS/OASIS write timestamps.
+_HASH_KIND_BYTES = "bytes"
+_HASH_KIND_GEOMETRY = "geometry"
+
 #: Issue #2342: the evidence entry carried a ``"pointer"`` (an RFC 6901 JSON
 #: Pointer naming where inside the cited document the envelope lives -- see
 #: :func:`_resolve_json_pointer`), and that pointer did not resolve to a JSON
@@ -1935,6 +1942,16 @@ _REASON_NOT_POST_LAYOUT = "not_post_layout"
 #: check did not fail on its own terms, it simply measured nothing -- and the
 #: fix is to re-run it with something to check, not to fix a defect it found.
 _REASON_NOTHING_CHECKED = "nothing_checked"
+
+#: Issue #3769: a recognised `klt sim` envelope whose own ``coverage`` block
+#: declares measurements (``measurements_declared > 0``) but applied no spec
+#: bound to any of them (``measurements_with_limits == 0``). Its per-corner
+#: ``status: pass`` only means "every measurement produced a value", so
+#: citing it for corner verification would satisfy the item with no bound
+#: ever checked. Grouped with :data:`_REASON_NOTHING_CHECKED` per issue
+#: #826's invariant: the fix is to copy the spec bounds into the request's
+#: ``measurements[].limits`` and re-run, not to fix a defect it found.
+_REASON_NO_LIMITS_CHECKED = "no_limits_checked"
 
 #: Issue #2467: the evidence resolved to a readable, recognised, *passing*
 #: `klt yield` envelope, but at least one of its own measurements reports
@@ -3414,9 +3431,35 @@ def _coverage_refusal(kind: str, envelope: dict[str, Any]) -> str | None:
     :func:`~klayout_tools.coverage.coverage_refusal_reason`.
     """
     refusal = coverage_refusal_reason(envelope)
+    if kind == "sim" and refusal is None:
+        # Issue #3769: sim coverage counts an unlimited measurement as a
+        # checked observation, so `nothing_checked` stays false for an
+        # all-observation request. For item 5 that is still no bound applied.
+        return _REASON_NO_LIMITS_CHECKED if _sim_no_limits_applied(envelope) else None
     if refusal is None or kind != "erc":
         return refusal
     return None if _erc_connectivity_state(envelope) is not None else refusal
+
+
+def _sim_coverage_counts(envelope: Mapping[str, Any]) -> tuple[int, int] | None:
+    """``(measurements_declared, measurements_with_limits)`` off a `klt sim`
+    envelope's ``coverage`` block, or ``None`` when absent or non-integer
+    (pre-coverage evidence keeps grading exactly as before)."""
+    block = envelope.get("coverage")
+    if not isinstance(block, dict):
+        return None
+    declared = block.get("measurements_declared")
+    limited = block.get("measurements_with_limits")
+    if type(declared) is not int or type(limited) is not int:
+        return None
+    return declared, limited
+
+
+def _sim_no_limits_applied(envelope: Mapping[str, Any]) -> bool:
+    """Whether a `klt sim` envelope declares measurements yet none carry a
+    ``limits`` bound (issue #3769). ``capture_only`` runs declare none."""
+    counts = _sim_coverage_counts(envelope)
+    return counts is not None and counts[0] > 0 and counts[1] == 0
 
 
 def _drc_rule_subset(envelope: Mapping[str, Any]) -> bool:
@@ -4336,6 +4379,12 @@ def _detail(kind: str, envelope: _EvidenceEnvelope) -> dict[str, Any]:
     # the reader-facing half of the `passed: False` `_build_check` applies
     # for the same condition; see "Vacuous-verdict refusal" above.
     detail.update(_nothing_checked_detail(envelope))
+    counts = _sim_coverage_counts(envelope) if kind == "sim" else None
+    if counts is not None and _sim_no_limits_applied(envelope):
+        detail["no_limits_checked"] = {
+            "measurements_declared": counts[0],
+            "measurements_with_limits": counts[1],
+        }
     return detail
 
 
@@ -5247,11 +5296,7 @@ def build_tier_report(
                     ),
                     graded_by_build=graded_by_build,
                     repo_root=repo_root,
-                    spec_rows=spec_rows_by_item.get(t1_item["id"]),
-                    spec_rows_invalid=(
-                        t1_item["id"] in spec_rows_by_item
-                        and spec_rows_by_item[t1_item["id"]] is None
-                    ),
+                    **_resolve_spec_rows(spec_rows_by_item, t1_item["id"], partition),
                     generator_exec=generator_exec,
                 )
             total += 1
@@ -6415,11 +6460,19 @@ def _bind_anchored_citation(
     binding = _generic_artifact_binding(resolution["envelope"], resolution)
     if item_id in _ITEMS_ACCEPTING_REGENERATION_CLAIMS:
         regeneration, refusal = _regeneration_claim(
-            resolution["envelope"], resolution["content_hash"]
+            resolution["envelope"],
+            resolution["content_hash"],
+            lambda: _bound_geometry_digest(resolution, repo_root),
         )
         if refusal is not None:
             return refusal
-        if regeneration is not None and generator_exec is not None:
+        # Approved execution compares output *bytes*; a geometry-kind claim is
+        # graded on geometry alone, so it stays the non-executing attestation.
+        if (
+            regeneration is not None
+            and generator_exec is not None
+            and regeneration.get("hash_kind", _HASH_KIND_BYTES) == _HASH_KIND_BYTES
+        ):
             regeneration, refusal, detail = _execute_regeneration(
                 generator_exec, resolution, regeneration, repo_root
             )
@@ -6464,6 +6517,19 @@ def _bound_artifact(
             return None
         return str(root), relative.replace(os.sep, "/")
     return None
+
+
+def _bound_geometry_digest(
+    resolution: Mapping[str, Any], repo_root: str | Path | None
+) -> str | None:
+    """:func:`~._provenance.layout_geometry_digest` of the single artifact a
+    ``"generic"`` citation is bound to, or ``None`` when that artifact cannot
+    be pinned down (a set binding included) or is not a readable GDS/OASIS."""
+    bound = _bound_artifact(resolution, repo_root)
+    if bound is None:
+        return None
+    root, relative = bound
+    return layout_geometry_digest(os.path.join(root, relative))
 
 
 def _execute_regeneration(
@@ -6522,8 +6588,24 @@ def _execute_regeneration(
     return None, _REASON_CHECK_ERRORED, detail
 
 
+def _regeneration_comparand(
+    hash_kind: Any,
+    bound_hash: Any,
+    bound_geometry_digest: Callable[[], str | None] | None,
+) -> Any:
+    """The hash a regeneration claim of ``hash_kind`` is compared with, or
+    ``None`` when the kind is unknown or its digest cannot be computed."""
+    if hash_kind == _HASH_KIND_BYTES:
+        return bound_hash
+    if hash_kind == _HASH_KIND_GEOMETRY and bound_geometry_digest is not None:
+        return bound_geometry_digest()
+    return None
+
+
 def _regeneration_claim(
-    envelope: Mapping[str, Any], bound_hash: Any
+    envelope: Mapping[str, Any],
+    bound_hash: Any,
+    bound_geometry_digest: Callable[[], str | None] | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     """Grade an item-1/2 attestation's optional ``provenance.regeneration``
     claim (issue #2887) against ``bound_hash`` -- the hash the bound
@@ -6539,6 +6621,15 @@ def _regeneration_claim(
       silently dropped, or a typo would read as "not claimed".
     - :data:`_REASON_STALE_ARTIFACT` when ``regenerated_hash`` differs from
       ``bound_hash``.
+
+    Optional ``hash_kind`` (default ``"bytes"``, the behaviour above) may be
+    ``"geometry"``: ``regenerated_hash`` is then compared to
+    ``bound_geometry_digest()`` -- the timestamp- and order-independent
+    :func:`~._provenance.layout_geometry_digest` of the bound artifact -- so a
+    GDS/OASIS stream that embeds a write time can still be claimed. An unknown
+    ``hash_kind``, or a digest that cannot be computed (not a readable
+    GDS/OASIS, set binding), is :data:`_REASON_UNANCHORED_EVIDENCE`. The
+    bytes-binding gate has already run by the time this is called.
 
     ``generator`` is **never executed** -- it is the attester's description
     of how they regenerated the artifact, echoed verbatim so a reader can
@@ -6560,13 +6651,20 @@ def _regeneration_claim(
         regenerated_hash
     ):
         return None, _REASON_UNANCHORED_EVIDENCE
-    if regenerated_hash != bound_hash:
+    hash_kind = claim.get("hash_kind", _HASH_KIND_BYTES)
+    compared = _regeneration_comparand(hash_kind, bound_hash, bound_geometry_digest)
+    if compared is None:
+        return None, _REASON_UNANCHORED_EVIDENCE
+    if regenerated_hash != compared:
         return None, _REASON_STALE_ARTIFACT
-    return {
+    disclosure: dict[str, Any] = {
         "generator": generator,
         "regenerated_hash": regenerated_hash,
         "executed_by_klt": False,
-    }, None
+    }
+    if hash_kind != _HASH_KIND_BYTES:
+        disclosure["hash_kind"] = hash_kind
+    return disclosure, None
 
 
 def _generic_binding_path(envelope: Mapping[str, Any]) -> Any:
@@ -7293,6 +7391,13 @@ def _build_tier_item(
         return spec_status, spec_reason, spec_citation, spec_detail
 
     raw_entry = _lookup_evidence(evidence, item_id, partition_kind)
+    # Issue #3741: item 5 digital's RTL-flow route needs STA *and* a
+    # functional suite; a single sta/fv-only entry is aggregated too.
+    required_kind_pair = (
+        _ITEM5_DIGITAL_RTL_KINDS
+        if item_id == 5 and partition_kind == "digital"
+        else None
+    )
     if raw_entry is not None and not graded_by_build:
         reason = _REASON_UNGRADEABLE_BY_BUILD
     elif (
@@ -7312,7 +7417,12 @@ def _build_tier_item(
     elif (
         raw_entry is not None
         and item_id in _ITEMS_ACCEPTING_MULTI_CITATION
-        and (isinstance(raw_entry, list) or spec_rows is not None or spec_rows_invalid)
+        and (
+            isinstance(raw_entry, list)
+            or spec_rows is not None
+            or spec_rows_invalid
+            or required_kind_pair is not None
+        )
     ):
         # Issue #2959: item 5 may cite several envelopes (and declare the
         # spec rows they must cover) -- graded per citation, then aggregated.
@@ -7322,6 +7432,7 @@ def _build_tier_item(
             spec_rows=spec_rows,
             spec_rows_invalid=spec_rows_invalid,
             met_envelopes=met_envelopes,
+            required_kind_pair=required_kind_pair,
         )
     elif raw_entry is not None:
         spec = _normalize_evidence_entry(raw_entry)
@@ -7357,17 +7468,28 @@ def _build_tier_item(
 #: block whose spec has several statistical rows, only some evidenced).
 _ITEMS_ACCEPTING_MULTI_CITATION: frozenset[int] = frozenset({5, 6})
 
+#: Issue #3741: the RTL-flow evidence kinds of T1 item 5, digital -- the tier
+#: doc's "multi-corner STA **plus** a bit-exact functional test suite". A
+#: digital entry citing either must cite both; a ``sim``-only entry (the
+#: full-custom digital sub-case) is exempt.
+_ITEM5_DIGITAL_RTL_KINDS: tuple[str, ...] = ("sta", "functional-verification")
+
+
+_SpecRowsKey = tuple[int, "str | None"]
+
 
 def _read_spec_rows(
     manifest: dict[str, Any],
-) -> dict[int, list[dict[str, Any]] | None]:
+) -> dict[_SpecRowsKey, list[dict[str, Any]] | None]:
     """Read the manifest's optional ``spec_rows`` declaration (issue #2959):
     ``{"<item id>": [{"id": "<row>", "gap": "<reason>"?, "ratified": bool?},
-    ...]}``.
+    ...]}``. A key may be partition-qualified (``"5.analog"``, issue #3768),
+    mirroring the evidence-key convention of :func:`_lookup_evidence`; see
+    :func:`_resolve_spec_rows`.
 
-    Returns ``item id -> rows``; a malformed declaration for an item maps to
-    ``None`` so only that item degrades to ``invalid_evidence``, never the
-    whole report. A ``gap`` row is one no producible envelope can cover; it
+    Returns ``(item id, partition | None) -> rows``; a malformed declaration
+    maps to ``None`` so only that item degrades to ``invalid_evidence``, never
+    the whole report. A ``gap`` row is one no producible envelope can cover; it
     is reported as a declared gap and never counts as covered. ``ratified``
     (default ``true``, issue #2908) is ``false`` for a row whose target is a
     proposed, unratified limit: evidence against it is provisional and never
@@ -7377,13 +7499,15 @@ def _read_spec_rows(
     if raw is None:
         return {}
     if not isinstance(raw, dict):
-        return {item_id: None for item_id in _ITEMS_ACCEPTING_MULTI_CITATION}
-    out: dict[int, list[dict[str, Any]] | None] = {}
+        return {(item_id, None): None for item_id in _ITEMS_ACCEPTING_MULTI_CITATION}
+    out: dict[_SpecRowsKey, list[dict[str, Any]] | None] = {}
     for key, rows in raw.items():
+        head, sep, suffix = str(key).partition(".")
         try:
-            item_id = int(key)
-        except (TypeError, ValueError):
+            item_id = int(head)
+        except ValueError:
             continue
+        slot: _SpecRowsKey = (item_id, suffix if sep else None)
         parsed: list[dict[str, Any]] | None = []
         if not isinstance(rows, list) or not rows:
             parsed = None
@@ -7406,8 +7530,30 @@ def _read_spec_rows(
                 seen.add(row_id)
                 valid.append({"id": row_id, "gap": gap, "ratified": ratified})
             parsed = valid or None
-        out[item_id] = parsed
+        out[slot] = parsed
     return out
+
+
+def _resolve_spec_rows(
+    spec_rows_by_item: dict[_SpecRowsKey, list[dict[str, Any]] | None],
+    item_id: int,
+    partition: str,
+) -> dict[str, Any]:
+    """Resolve the ``spec_rows`` kwargs for one graded partition (issue
+    #3768): the qualified ``"<item>.<partition>"`` key first, then the bare
+    item id. A qualified key whose suffix is not a known partition makes the
+    item ``invalid_evidence`` rather than being silently ignored."""
+    bad_suffix = any(
+        key_item == item_id
+        and key_part is not None
+        and key_part not in _MIXED_SIGNAL_PARTITIONS
+        for key_item, key_part in spec_rows_by_item
+    )
+    for slot in ((item_id, partition), (item_id, None)):
+        if slot in spec_rows_by_item:
+            rows = spec_rows_by_item[slot]
+            return {"spec_rows": rows, "spec_rows_invalid": rows is None or bad_suffix}
+    return {"spec_rows": None, "spec_rows_invalid": bad_suffix}
 
 
 def _citation_label(spec: dict[str, Any]) -> str:
@@ -7423,6 +7569,7 @@ def _grade_multi_citation(
     spec_rows: list[dict[str, Any]] | None,
     spec_rows_invalid: bool,
     met_envelopes: dict[int, dict[str, Any]] | None = None,
+    required_kind_pair: tuple[str, ...] | None = None,
 ) -> tuple[str, str | None, dict[str, Any] | None, dict[str, Any], dict[str, Any]]:
     """Grade a list-form (or ``spec_rows``-bearing) evidence entry (issue
     #2959). Each member goes through the ordinary per-envelope path
@@ -7437,6 +7584,10 @@ def _grade_multi_citation(
       and ``declared_gaps`` listed separately under ``detail``; a declared
       row with ``ratified: false`` (``unratified_rows``) is likewise
       provisional and never ``met`` (issue #2908);
+    - ``required_kind_pair`` (issue #3741): when every member passed and the
+      passing kinds include any kind of the pair, all of them must be
+      present, else ``unmet``/``partial_coverage`` with
+      ``detail.missing_kinds``; a set with none of them (``sim``) is exempt;
     - otherwise ``met``; ``citation`` is the first member's and ``citations``
       carries all of them.
 
@@ -7496,6 +7647,18 @@ def _grade_multi_citation(
         or row_info["unratified_rows"]
     ):
         return "unmet", _REASON_PARTIAL_COVERAGE, None, row_info, extra
+    if required_kind_pair is not None:
+        kinds = {g[2]["kind"] for _, _, g in graded if g[2] is not None}
+        if kinds & set(required_kind_pair):
+            missing = [k for k in required_kind_pair if k not in kinds]
+            if missing:
+                return (
+                    "unmet",
+                    _REASON_PARTIAL_COVERAGE,
+                    None,
+                    {**row_info, "missing_kinds": missing},
+                    extra,
+                )
     if row_info:
         extra["row_coverage"] = row_info
     extra["citations"] = [g[2] for _, _, g in graded]

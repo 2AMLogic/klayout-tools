@@ -3212,6 +3212,14 @@ def test_inline_extraction_composes_extract_and_compare(tmp_path):
         "sky130_fd_pr__model__cap_mim",
         "sky130_fd_pr__model__cap_mim_m4",
         "resistor",
+        "diode_pw2nd_05v5",
+        "diode_pw2nd_05v5_lvt",
+        "diode_pw2nd_05v5_nvt",
+        "diode_pw2nd_11v0",
+        "diode_pd2nw_05v5",
+        "diode_pd2nw_05v5_lvt",
+        "diode_pd2nw_05v5_hvt",
+        "diode_pd2nw_11v0",
     ]
     assert (
         report["environment"]["extracted_netlist"] is None
@@ -21078,6 +21086,55 @@ def test_run_lvs_gate_level_verilog_library_with_no_pin_order_source_errors(tmp_
         run_lvs(request)
 
 
+def _pin_order_source_request(tmp_path: Path, root: str, library: str) -> str:
+    # No `pdk`: the default variant is whichever sorts first under `root`.
+    return _macro_request(tmp_path, {"library": library, "pdk_root": root})
+
+
+def test_pin_order_source_error_names_variant_selector_and_sibling_variant(
+    tmp_path, monkeypatch
+):
+    """Issue #3748: with `reference.pdk` unset the alphabetically first variant
+    wins; when it lacks the library the error names the remedy and the
+    installed variant that does ship it."""
+    monkeypatch.delenv("PDK", raising=False)  # default variant must not come from $PDK
+    root = _make_fake_macro_pdk(tmp_path)
+    (Path(root) / "gf180mcuA" / "libs.tech").mkdir(parents=True)
+    (Path(root) / "gf180mcuA" / "libs.ref").mkdir(parents=True)
+    with pytest.raises(LvsError) as excinfo:
+        run_lvs(_pin_order_source_request(tmp_path, root, "sky130_fd_sc_hd"))
+    message = str(excinfo.value)
+    assert "has no pin-order source under PDK variant 'gf180mcuA'" in message
+    assert "request.reference.pdk" in message
+    assert "$PDK" in message
+    assert "installed variant(s) that ship it: sky130A" in message
+
+
+def test_pin_order_source_error_has_no_sibling_hint_when_none_ships_library(
+    tmp_path, monkeypatch
+):
+    monkeypatch.delenv("PDK", raising=False)  # default variant must not come from $PDK
+    root = _make_fake_macro_pdk(tmp_path)
+    (Path(root) / "gf180mcuA" / "libs.tech").mkdir(parents=True)
+    (Path(root) / "gf180mcuA" / "libs.ref").mkdir(parents=True)
+    with pytest.raises(LvsError) as excinfo:
+        run_lvs(_pin_order_source_request(tmp_path, root, "no_such_library"))
+    message = str(excinfo.value)
+    assert "has no pin-order source under PDK variant" in message
+    assert "request.reference.pdk" in message
+    assert "installed variant(s)" not in message
+
+
+def test_pin_order_source_error_has_no_sibling_hint_for_single_variant(
+    tmp_path, monkeypatch
+):
+    monkeypatch.delenv("PDK", raising=False)  # default variant must not come from $PDK
+    root = _make_fake_macro_pdk(tmp_path)
+    with pytest.raises(LvsError) as excinfo:
+        run_lvs(_pin_order_source_request(tmp_path, root, "no_such_library"))
+    assert "installed variant(s)" not in str(excinfo.value)
+
+
 @pytest.mark.parametrize(
     "library",
     [42, ["sky130_fd_sc_hd", ""], ["sky130_fd_sc_hd", 7], {"name": "x"}],
@@ -24810,3 +24867,58 @@ def test_lvs_response_schema_rejects_wrong_schema_version_and_mismatch_entry(tmp
     del bad_entry["mismatches"][0]["category"]
     with pytest.raises(jsonschema.ValidationError):
         _assert_lvs_report_conforms(bad_entry)
+
+
+# --------------------------------------------------------------------------- #
+# sky130 junction diodes (issue #3803): the extracted `D` card must pair with
+# a schematic diode, and removing the diode on either side must mismatch.
+# --------------------------------------------------------------------------- #
+
+
+def _sky130_diode_lvs_report(tmp_path, flavour, *, layout_diode, reference_diode):
+    from klayout_tools.extract import run_extract
+    from test_lvs_device_provenance import _make_sky130_diode_layout, _write_gds
+
+    n_plus = flavour.startswith("diode_pw2nd")
+    gds = _write_gds(_make_sky130_diode_layout(flavour), tmp_path / "diode.gds")
+    extracted = tmp_path / "extracted.spice"
+    run_extract(gds, "sky130", output=str(extracted))
+    layout_text = extracted.read_text()
+    if not layout_diode:
+        layout_text = "\n".join(
+            line for line in layout_text.splitlines() if not line.startswith("D$")
+        )
+    # n+/p-substrate: anode is the substrate pin; p+/nwell: cathode is the
+    # (unnamed) well node.
+    ports, card = (
+        ("TERM VSUBS", f"D1 VSUBS TERM {flavour} A=1P P=4U")
+        if n_plus
+        else ("TERM", f"D1 TERM WELL {flavour} A=1P P=4U")
+    )
+    reference = f".subckt TOP {ports}\n{card if reference_diode else ''}\n.ends\n"
+    request = {
+        "layout": {
+            "netlist": _write(tmp_path / "layout.spice", layout_text),
+            "top": "TOP",
+        },
+        "reference": {
+            "netlist": _write(tmp_path / "ref.spice", reference),
+            "top": "TOP",
+        },
+    }
+    return run_lvs(json.dumps(request))
+
+
+@pytest.mark.parametrize("flavour", ["diode_pw2nd_05v5", "diode_pd2nw_05v5"])
+def test_run_lvs_sky130_diode_matches_and_mismatches_on_removal(tmp_path, flavour):
+    match = _sky130_diode_lvs_report(
+        tmp_path, flavour, layout_diode=True, reference_diode=True
+    )
+    assert match["status"] == "match", match
+    for layout_diode, reference_diode in ((True, False), (False, True)):
+        sub = tmp_path / f"l{layout_diode}r{reference_diode}"
+        sub.mkdir()
+        report = _sky130_diode_lvs_report(
+            sub, flavour, layout_diode=layout_diode, reference_diode=reference_diode
+        )
+        assert report["status"] != "match", (layout_diode, reference_diode)

@@ -224,6 +224,14 @@
         "klayout_tools.kb"
       ]
     },
+    "keepout_check": {
+      "kind": "verb",
+      "description": "`klt keepout_check` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.keepout_check_cmd",
+        "klayout_tools.keepout_check"
+      ]
+    },
     "layers": {
       "kind": "verb",
       "description": "`klt layers` implementation: core modules plus CLI adapter.",
@@ -321,6 +329,7 @@
         "klayout_tools.pdk_capabilities",
         "klayout_tools.pdk_cells",
         "klayout_tools.pdk_compat",
+        "klayout_tools.pdk_descriptor",
         "klayout_tools.pdk_families",
         "klayout_tools.pdk_models",
         "klayout_tools.pdk_pcell",
@@ -619,6 +628,11 @@
     }
   },
   "allowed_group_edges": [
+    {
+      "consumer": "keepout_check",
+      "exporter": "cli-infra",
+      "reason": "CLI adapter uses the shared output envelope and --region/--layers parsers, as every verb does."
+    },
     {
       "consumer": "tap_distance",
       "exporter": "cli-infra",
@@ -938,6 +952,11 @@
       "consumer": "pdk",
       "exporter": "cli-infra",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "pdk",
+      "exporter": "drc",
+      "reason": "Issue #3816: `klt pdk decks` reuses the DRC engine's deck-global scanner (scan_deck_globals) instead of a second Ruby scan; imported lazily."
     },
     {
       "consumer": "pdk",

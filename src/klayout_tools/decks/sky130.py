@@ -367,6 +367,7 @@ from . import (
     CapacitorDevice,
     CutRC,
     DerivedLayer,
+    DiodeDevice,
     DrcRule,
     ExtractionDeck,
     LayerRC,
@@ -431,6 +432,67 @@ def _sky130_lvs_provenance(rule_id: str) -> RuleProvenance:
         source_path=_LVS_SOURCE_PATH,
         rule_id=rule_id,
         commit=_OPEN_PDKS_COMMIT,
+    )
+
+
+# Junction-diode device recognition (issue #3803), transcribed from
+# `sky130.lvs`'s "DIODE DERIVATIONS" / "DIODE EXTRACTION" sections. The
+# recognition mark is `areaid.diode` (81/23, `areaid_de` upstream); a diff
+# region that also touches `areaid.ed` (81/19, `areaid_ed`) is an ESD-flagged
+# device upstream excludes, and `pnp.drawing` (82/44) keeps a vertical PNP's
+# p+ emitter (also a diff-in-nwell region) from reading as a diode, as
+# upstream's `ptap_conn` excludes `pnpid`. The oxide/threshold flavour is
+# keyed by `hvi` (75/20), `lvtn` (125/44) and `hvtp` (78/44), exactly as
+# upstream splits `*_05v5`, `*_05v5_lvt`, `*_05v5_nvt`, `*_05v5_hvt` and
+# `*_11v0`.
+_DIODE_MARK = (81, 23)  # areaid.diode
+_DIODE_ESD_MARK = (81, 19)  # areaid.ed
+_PNP_MARK = (82, 44)  # pnp.drawing
+_NWELL = (64, 20)
+_DNWELL = (64, 18)
+_DIFF = (65, 20)
+_NSDM = (93, 44)
+_PSDM = (94, 20)
+_HVI = (75, 20)
+_LVTN = (125, 44)
+_HVTP = (78, 44)
+
+
+def _sky130_diode(
+    name: str,
+    *,
+    n_plus: bool,
+    requires: tuple[tuple[int, int], ...] = (),
+    excludes: tuple[tuple[int, int], ...] = (),
+) -> DiodeDevice:
+    """One sky130 flavour of the n+/p-substrate (``n_plus``) or p+/nwell
+    diode, as upstream derives it: ``requires``/``excludes`` carry the
+    ``hvi``/``lvtn``/``hvtp`` flavour terms and apply to the diffusion
+    terminal."""
+    if n_plus:
+        # `ndiode_terminal_n = ncomp.outside(dnwell)...`; the p side
+        # (`ptap_conn.holes`) is the native substrate, so it is the marker
+        # footprint kept outside every well and tied to `substrate_net`.
+        return DiodeDevice(
+            name=name,
+            marker=_DIODE_MARK,
+            anode=None,
+            anode_excludes=(_NWELL, _DNWELL),
+            cathode=_DIFF,
+            cathode_requires=(_NSDM, *requires),
+            cathode_excludes=(_NWELL, _DNWELL, _DIODE_ESD_MARK, _PNP_MARK, *excludes),
+            provenance=_sky130_lvs_provenance(f"sky130_fd_pr__{name}"),
+        )
+    # `pdiode_terminal_n = pcomp.outside(dnwell)...` is the p+ (anode) side;
+    # `pdiode_terminal_p = nwell...` is the cathode.
+    return DiodeDevice(
+        name=name,
+        marker=_DIODE_MARK,
+        anode=_DIFF,
+        anode_requires=(_PSDM, *requires),
+        anode_excludes=(_DNWELL, _DIODE_ESD_MARK, _PNP_MARK, *excludes),
+        cathode=_NWELL,
+        provenance=_sky130_lvs_provenance(f"sky130_fd_pr__{name}"),
     )
 
 
@@ -1984,6 +2046,16 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
 # 0.15um column here, which is why registering this marker still produces
 # `klt drc`'s `voltage_domain_warnings` diagnostic (issue #552) even though
 # the *extraction*-side binding gap is now closed.
+#: Process area-marker layers (``areaid.*``) whose rule-switching this deck
+#: does not model (issue #3815): the deck evaluates every rule uniformly, so a
+#: marker such as ``areaid.ce`` (81/2) -- which the foundry runsets use to
+#: narrow or relax rules inside/outside the marked area -- changes nothing
+#: here. ``klt drc`` lists those present in the stream as
+#: ``coverage.marker_blind_layers_in_stream`` and ``klt deck rules`` as
+#: ``marker_blind_layers``, so identical results with and without the marker
+#: are not misread as marker-aware behaviour.
+MARKER_BLIND_LAYERS: tuple[tuple[int, int], ...] = ((81, 2),)
+
 #: Official sky130A_mr.drc rule ids this curated deck knowingly does *not*
 #: transcribe (issue #3031): the "2-adjacent-edges-relaxed" enclosure
 #: refinements, which need a per-edge-pair primitive ``DrcRule`` does not have
@@ -2378,8 +2450,9 @@ EXTRACTION_DECK = ExtractionDeck(
     # No `emitter_excludes`/`emitter_requires` narrowing (issue #302):
     # unlike gf180mcu (whose p+ emitter carries `Pplus` and whose n+ base
     # tie carries `Nplus`, so an `emitter_excludes=(Nplus,)` cleanly drops
-    # the base-contact ring), this curated deck models **no implant layers**
-    # (see this module's docstring, the #183/#223 negative finding). The real
+    # the base-contact ring), this bipolar entry models **no implant layers**
+    # (only the `diodes` entries below use `nsdm`/`psdm`; see this module's
+    # docstring, the #183/#223 negative finding). The real
     # `sky130_fd_pr__pnp` draws its base tie on the *distinct* `tap.drawing`
     # (65/44) layer, not the `diff.drawing` (65/20) emitter layer, so no
     # same-layer collision occurs in practice -- a base tie on `tap.drawing`
@@ -2387,7 +2460,7 @@ EXTRACTION_DECK = ExtractionDeck(
     # were a base tie drawn on the *literal* `diff.drawing` emitter layer,
     # no already-modelled layer could distinguish it from the emitter, so it
     # would still double-count. Resolving that would require modelling
-    # sky130's implant (`nsdm`/`psdm`) masks, which this starter deck does
+    # sky130's implant (`nsdm`/`psdm`) masks on this entry, which it does
     # not -- documented rather than partially/incorrectly worked around.
     bipolars=(
         BipolarDevice(
@@ -2405,6 +2478,84 @@ EXTRACTION_DECK = ExtractionDeck(
             # `res_high_po`/`res_xhigh_po`); cites the smaller variant as
             # representative.
             provenance=_sky130_lvs_provenance("sky130_fd_pr__pnp_05v5_W0p68L0p68"),
+        ),
+    ),
+    # Junction diodes (issue #3803) -- see `_sky130_diode` above for the
+    # `sky130.lvs` derivations these transcribe. Not modelled: the
+    # `photodiode` (needs `areaid.po` and a fixed-area filter) and the RF
+    # diode (`areaid.rfdiode`).
+    diodes=(
+        _sky130_diode(
+            "diode_pw2nd_05v5",
+            n_plus=True,
+            excludes=(
+                _HVTP,
+                _HVI,
+                _LVTN,
+            ),
+        ),
+        _sky130_diode(
+            "diode_pw2nd_05v5_lvt",
+            n_plus=True,
+            requires=(_LVTN,),
+            excludes=(
+                _HVTP,
+                _HVI,
+            ),
+        ),
+        _sky130_diode(
+            "diode_pw2nd_05v5_nvt",
+            n_plus=True,
+            requires=(
+                _HVI,
+                _LVTN,
+            ),
+            excludes=(_HVTP,),
+        ),
+        _sky130_diode(
+            "diode_pw2nd_11v0",
+            n_plus=True,
+            requires=(_HVI,),
+            excludes=(
+                _HVTP,
+                _LVTN,
+            ),
+        ),
+        _sky130_diode(
+            "diode_pd2nw_05v5",
+            n_plus=False,
+            excludes=(
+                _HVTP,
+                _HVI,
+                _LVTN,
+            ),
+        ),
+        _sky130_diode(
+            "diode_pd2nw_05v5_lvt",
+            n_plus=False,
+            requires=(_LVTN,),
+            excludes=(
+                _HVTP,
+                _HVI,
+            ),
+        ),
+        _sky130_diode(
+            "diode_pd2nw_05v5_hvt",
+            n_plus=False,
+            requires=(_HVTP,),
+            excludes=(
+                _HVI,
+                _LVTN,
+            ),
+        ),
+        _sky130_diode(
+            "diode_pd2nw_11v0",
+            n_plus=False,
+            requires=(_HVI,),
+            excludes=(
+                _HVTP,
+                _LVTN,
+            ),
         ),
     ),
     # MiM capacitors (issue #225, see the module docstring's provenance note

@@ -326,6 +326,12 @@ a `deck: {name, content_hash}` block; without it the output is byte-identical.
 No `schema_version` bump on either command. See `docs/cli/deck.md` and
 `docs/cli/layers.md`.
 
+Issue #3815 likewise adds, with no `schema_version` bump, `klt drc`'s
+`coverage.marker_blind_layers_in_stream` and `klt deck rules`' top-level
+`marker_blind_layers`: area-marker layers (sky130 `81/2`) the curated deck does
+not model rule-switching for. Informational only; `status` and the exit code
+are unchanged. See `docs/cli/drc.md` and `docs/cli/deck.md`.
+
 Issue #2952's `klt lvs` category `reference.unresolved_subckt_call` is
 likewise additive (no `schema_version` bump), but unlike the diagnostic-only
 `pin.declared_short` it **forces** `status: "mismatch"`, so a request whose
@@ -647,7 +653,17 @@ claim the citation's `artifact_binding` gains a `regeneration` object
 (`{generator, regenerated_hash, executed_by_klt: false}`). A mismatched
 claim renders the new `reason` value `stale_artifact`, and a malformed one
 renders the existing `unanchored_evidence`. An envelope that makes no
-claim grades and renders exactly as before. No `schema_version` bump. See
+claim grades and renders exactly as before. No `schema_version` bump.
+
+Issue #3743 adds three additive, optional fields (no `schema_version`
+bump; absent they change nothing): `provenance.regeneration.hash_kind`
+(`"bytes"` default, or `"geometry"` to compare `regenerated_hash` with the
+timestamp-independent layout geometry digest; echoed in the disclosure only
+when `"geometry"`; unknown values are `unanchored_evidence`); `local_only`
+(boolean) on an attestation-inventory command, also echoed on the emitted
+`attestation.checks[]` entry; and `skipped_checks[]` in the
+`klt signoff --attest --check` response, listing `local_only` commands that
+were not run. See
 [`docs/cli/signoff.md`](cli/signoff.md)'s "Items 1 and 2: attesting that
 the artifact was regenerated".
 
@@ -822,6 +838,18 @@ stability statement, concrete precedents, and drift-detection guidance, and
     Populated by `klt sim` today; the underlying detection lives in
     `klayout_tools.pdk.find_pdk` (`ambiguous_roots`) and is available to
     every verb that resolves a PDK — see `docs/cli/pdk.md`.
+  - `alternative_variants` (issue #3814) — additive field on `klt pdk find`'s
+    payload (not part of `provenance`): sorted names of the other variants in
+    the chosen root when no variant was selected (`--pdk`/`$PDK` unset);
+    `[]` otherwise. Resolution and exit code are unchanged; text mode warns on
+    stderr. See `docs/cli/pdk.md`.
+  - `commit` (issue #3786) — present **only** when the install carries a
+    `.fetched-commit` record (40-hex upstream commit, written by
+    `scripts/fetch-*.sh` from the tarball's pax header); absent otherwise, so
+    provenance for any other install is byte-identical to before. `version`
+    stays `fetched:<tag>`. Like `version`, excluded from `--rerun` drift
+    comparison. Additive; no `schema_version` bump. The fleet-bundle
+    `.pdk-store.json` is written outside this repo.
   - `version` (issue #3070) is a self-describing stamp, or `null` when no
     revision can be read mechanically (never guessed): an open_pdks `SOURCES`
     file (the lines joined with `"; "`, unchanged), else `fetched:<marker>`
@@ -844,6 +872,12 @@ stability statement, concrete precedents, and drift-detection guidance, and
   hex digest of the deck file actually used, so "clean against *this exact*
   rule set" is a checkable claim. The whole block is `null` when no deck was
   involved (e.g. `lvs` against a pre-extracted netlist).
+  - `path` (issue #3785, optional, additive) — the `{path, scope}` envelope
+    (`env_provenance.repo_relative_path`) of the resolved deck file, emitted
+    only by `klt sta` and `klt place-and-route` (whose Liberty is a resolved
+    file). An out-of-repo file is `{"path": null, "scope": "external"}`; an
+    absolute host path is never emitted. `content_hash` stays authoritative;
+    no `schema_version` bump, and reports lacking it still verify.
   - `options` / `options_explicit` / `options_hash` (issues #595, #2394) —
     the deck-option flavour selection a run resolved, present together
     **whenever the deck declares at least one caller-selectable option**,
@@ -1236,7 +1270,7 @@ probing the value's Python type at runtime.
 | Command | Field(s) | `SCHEMA_VERSION` | Originating issue |
 |---|---|---|---|
 | `synthesize` | `netlist_path`, `script_path`, `run_script_path`, `restructuring.restructured_netlist_path`, `arithmetic.candidates[].measured.{netlist_path,script_path}` | 2 | #1844 |
-| `pex` | `layout`, `netlist`, `reference_netlist`, `testbenches[].{request,netlist,schematic_netlist}` | 2 | #1261 (`testbenches[].netlist` additionally #2875) |
+| `pex` | `layout`, `netlist`, `reference_netlist`, `testbenches[].{request,netlist,schematic_netlist}` | 2 | #1261 (`testbenches[].netlist` additionally #2875); additive `measurement.mode: "extract-only"` (`--extract-only`, #3739) carries `reference_netlist: {path: null, scope: "absent"}` and empty `testbenches[]`/`delta[]` |
 | `sim` | `netlist`, `environment.models_lib`, `environment.resume.checkpoint_path` | 3 | #1261 (`models_lib` additionally #1274) |
 | `size` | `models_lib` | 2 | #1274 |
 | `place-and-route`, `sta` | New OpenROAD log fields `engine_logs[]` (P&R), `engine_log` / `corners[].engine_log` (STA): `script_path`, `metrics_path`, `directory`, `stdout_path`, `stderr_path`, `metadata_path` | 1 | #2124 |
