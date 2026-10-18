@@ -1162,3 +1162,11 @@ def test_deck_info_reports_unmodeled_rules_per_deck(_history_table):
     assert "MT30.1a" in entry["unmodeled_rules"]
     assert "MSLOT.1" in entry["unmodeled_rules"]
     assert "unmodeled_rules" in history.deck_info(name="sg13g2")["decks"][0]
+
+
+def test_deck_rules_reports_marker_blind_layers():
+    """Issue #3815: deck-static, discoverable pre-layout, not narrowed by rule."""
+    assert history.deck_rules("sky130")["marker_blind_layers"] == ["81/2"]
+    one = history.deck_rules("sky130", rule_id="poly.width.1")
+    assert one["marker_blind_layers"] == ["81/2"]
+    assert history.deck_rules("gf180mcu")["marker_blind_layers"] == []

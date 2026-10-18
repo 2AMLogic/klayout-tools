@@ -48,6 +48,7 @@ docs/
     gen-compose.md
     gen.md
     kb.md
+    keepout-check.md
     layers.md
     layout-metrics.md
     layout-plan.md

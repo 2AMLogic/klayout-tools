@@ -325,8 +325,12 @@ def test_job_cmd_tees_stderr_into_outputs(tmp_path):
     # klt's --format json error envelope goes to stderr, so it must reach a
     # collected file -- while still being forwarded to harness.log.
     assert sb.BATCH_STDERR_FILENAME == "stderr.log"
-    assert '2> >(tee "$EDA_OUTPUT_DIR/stderr.log" >&2)' in spec.cmd
-    assert spec.cmd.endswith("; rc=$?; wait $! 2>/dev/null; exit $rc")
+    # Issue #3818: the tee is the job command's first statement, so it also
+    # covers the preflight, and an EXIT trap drains it and fills in report.json.
+    assert spec.cmd.startswith('exec 2> >(tee "$EDA_OUTPUT_DIR/stderr.log" >&2); ')
+    assert "trap _klt_job_exit EXIT" in spec.cmd
+    assert spec.cmd.endswith(' > "$EDA_OUTPUT_DIR/report.json"')
+    assert spec.cmd.count(' > "$EDA_OUTPUT_DIR/report.json"') == 1
 
 
 def test_job_cmd_stderr_capture_runs_under_bash_c(tmp_path):
@@ -334,33 +338,126 @@ def test_job_cmd_stderr_capture_runs_under_bash_c(tmp_path):
     harness does (with a stand-in for `klt`): stdout lands in report.json,
     stderr lands in stderr.log *and* on the outer stderr, and the job's
     exit code is klt's own."""
-    import shutil
-    import subprocess
-
-    bash = shutil.which("bash")
-    if bash is None:
-        pytest.skip("bash not available")
     spec = sb._build_batch_job_spec(
         {"models": {}, "options": {"max_workers": 1}},
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
         keep_artifacts=False,
+        client_version="0.7.0",
     )
-    tail = spec.cmd[spec.cmd.index(' > "$EDA_OUTPUT_DIR/') :]
-    fake_klt = 'printf "{}\\n"; printf "warn\\n{\\n}\\n" >&2; exit 4'
-    out_dir = tmp_path / "out"
-    out_dir.mkdir()
-    proc = subprocess.run(
-        [bash, "-c", "{ " + fake_klt + "; }" + tail],
-        env={"EDA_OUTPUT_DIR": str(out_dir), "PATH": os.environ.get("PATH", "")},
-        capture_output=True,
-        text=True,
+    klt = (
+        "#!/bin/bash\n"
+        'if [ "$1" = "--version" ]; then echo "klt 0.7.0"; exit 0; fi\n'
+        'printf "{}\\n"; printf "warn\\n{\\n}\\n" >&2; exit 4\n'
     )
+    proc, out_dir, _ = _run_job_cmd_with_fake_klt(tmp_path, spec, klt)
     assert proc.returncode == 4
     assert (out_dir / "report.json").read_text() == "{}\n"
     assert (out_dir / "stderr.log").read_text() == "warn\n{\n}\n"
     assert "warn" in proc.stderr
+
+
+def _exit_trap_spec(tmp_path, **request_extra):
+    return sb._build_batch_job_spec(
+        {"models": {}, "options": {"max_workers": 1}, **request_extra},
+        str(_write_body(tmp_path)),
+        corner_count=1,
+        timeout_s=30.0,
+        keep_artifacts=False,
+        client_version="0.7.0",
+    )
+
+
+_FAKE_KLT_HEAD = (
+    '#!/bin/bash\nif [ "$1" = "--version" ]; then echo "klt 0.7.0"; exit 0; fi\n'
+)
+
+
+def test_job_cmd_is_valid_bash_syntax(tmp_path):
+    import shutil
+
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash not available")
+    for keep in (False, True):
+        spec = sb._build_batch_job_spec(
+            {"models": {}},
+            str(_write_body(tmp_path)),
+            corner_count=1,
+            timeout_s=30.0,
+            keep_artifacts=keep,
+            client_version="0.7.0",
+        )
+        proc = subprocess.run(
+            [bash, "-n", "-c", spec.cmd], capture_output=True, text=True
+        )
+        assert proc.returncode == 0, proc.stderr
+
+
+def test_job_cmd_exit_trap_writes_envelope_when_klt_leaves_no_report(tmp_path):
+    """Issue #3818: a job that exits non-zero with an empty report.json and no
+    klt envelope still tells the submitter why, in report.json."""
+    klt = _FAKE_KLT_HEAD + ('echo "Traceback: boom \\"quoted\\" {x}" >&2; exit 2\n')
+    proc, out_dir, _ = _run_job_cmd_with_fake_klt(
+        tmp_path, _exit_trap_spec(tmp_path), klt
+    )
+    assert proc.returncode == 2
+    report = json.loads((out_dir / "report.json").read_text())
+    assert report["schema_version"] == 1
+    assert report["error"]["command"] == "sim"
+    assert report["error"]["code"] == sb.BATCH_JOB_COMMAND_FAILED_CODE
+    assert "exited 2" in report["error"]["message"]
+    assert "Traceback" in report["error"]["message"]
+    assert "Traceback" in (out_dir / "stderr.log").read_text()
+    kind, error = sb._classify_collected_report(report)
+    assert kind == "error" and error["code"] == sb.BATCH_JOB_COMMAND_FAILED_CODE
+
+
+def test_job_cmd_exit_trap_keeps_stderr_log_for_a_pre_klt_sim_failure(tmp_path):
+    """The tee starts on the first line, so stderr from before `klt sim` (here
+    the runner preflight rejecting a mismatched runner) reaches stderr.log, and
+    the preflight's own envelope is not overwritten."""
+    klt = '#!/bin/bash\nif [ "$1" = "--version" ]; then echo "klt 0.8.1"; exit 0; fi\n'
+    proc, out_dir, marker = _run_job_cmd_with_fake_klt(
+        tmp_path, _exit_trap_spec(tmp_path), klt
+    )
+    assert proc.returncode == sb._BATCH_PREFLIGHT_REJECT_EXIT
+    assert not marker.exists()
+    assert "fleet runner runs klt" in (out_dir / "stderr.log").read_text()
+    error = json.loads((out_dir / "report.json").read_text())["error"]
+    assert error["code"] == sb.BATCH_RUNNER_MISMATCH_CODE
+
+
+def test_job_cmd_exit_trap_preserves_existing_report_and_klt_envelope(tmp_path):
+    envelope = '{"schema_version": 1, "error": {"command": "sim", "message": "m"}}'
+    # klt's own envelope on stdout (report.json): kept as is.
+    klt = _FAKE_KLT_HEAD + f"echo '{envelope}'; exit 3\n"
+    proc, out_dir, _ = _run_job_cmd_with_fake_klt(
+        tmp_path, _exit_trap_spec(tmp_path), klt
+    )
+    assert proc.returncode == 3
+    assert (out_dir / "report.json").read_text() == envelope + "\n"
+    # klt's own envelope on stderr (empty report.json): recovery reads it from
+    # stderr.log, so the trap must not mask it.
+    klt = _FAKE_KLT_HEAD + f"echo '{envelope}' >&2; exit 3\n"
+    (tmp_path / "second").mkdir()
+    proc, out_dir, _ = _run_job_cmd_with_fake_klt(
+        tmp_path / "second", _exit_trap_spec(tmp_path), klt
+    )
+    assert proc.returncode == 3
+    assert (out_dir / "report.json").read_text() == ""
+    assert envelope in (out_dir / "stderr.log").read_text()
+
+
+def test_job_cmd_exit_trap_leaves_a_successful_run_unchanged(tmp_path):
+    klt = _FAKE_KLT_HEAD + "echo '{\"corners\": [{}]}'; echo note >&2; exit 0\n"
+    proc, out_dir, _ = _run_job_cmd_with_fake_klt(
+        tmp_path, _exit_trap_spec(tmp_path), klt
+    )
+    assert proc.returncode == 0
+    assert (out_dir / "report.json").read_text() == '{"corners": [{}]}\n'
+    assert (out_dir / "stderr.log").read_text() == "note\n"
 
 
 def test_job_cmd_runs_one_worker_per_physical_core_on_the_job_instance(tmp_path):
@@ -373,7 +470,9 @@ def test_job_cmd_runs_one_worker_per_physical_core_on_the_job_instance(tmp_path)
     )
     assert '${EDA_PHYSICAL_CORES:+--max-workers "$EDA_PHYSICAL_CORES"}' in spec.cmd
     # ...and it lands before the redirect, as a klt argument.
-    assert spec.cmd.index("--max-workers") < spec.cmd.index("> ")
+    assert spec.cmd.index("--max-workers") < spec.cmd.index(
+        ' > "$EDA_OUTPUT_DIR/report.json"'
+    )
 
 
 def test_job_cmd_physical_core_workers_expand_as_intended_in_a_shell(tmp_path):
@@ -5375,7 +5474,7 @@ def _errored_report_without_include_code(artifact_log: str | None = None) -> str
     ],
 )
 def test_log_with_missing_include_classifies_naming_the_file(target):
-    found = sb._missing_include_diagnostic(_include_error_log(target))
+    found = sb._fatal_log_diagnostic(_include_error_log(target))
     assert found is not None
     assert found["code"] == "missing_include"
     assert target in found["message"]
@@ -5411,6 +5510,45 @@ def test_exit_4_batch_job_surfaces_missing_include_from_retrieved_log(
     codes = [d["code"] for d in corners[0]["diagnostics"]]
     assert codes == ["measurement", "missing_include"]
     assert _PDK_INCLUDE in corners[0]["diagnostics"][1]["message"]
+
+
+def test_exit_4_batch_job_surfaces_generic_fatal_from_retrieved_log(
+    tmp_path, monkeypatch
+):
+    """Issue #3879: the log back-fill covers any ngspice deck abort, not only
+    ``missing_include``, and notes that no analysis started."""
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("failed", exit_code="4"))
+    remote_log = "/var/tmp/eda-job-1/outputs/artifacts/tt_1.800_27/ngspice.log"
+    runner.outputs = {
+        "report.json": _errored_report_without_include_code(remote_log),
+        "artifacts/tt_1.800_27/ngspice.log": (
+            "Circuit: * deck\nError on line 7 : bad card\n"
+            "Simulation interrupted due to error!\n"
+        ),
+    }
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+
+    corners, _, _ = sb._run_batch_job(
+        config=_config(tmp_path),
+        job_id="job-1",
+        corner_points=_corner_points(1),
+        netlist_path=str(_write_body(tmp_path)),
+        timeout_s=30.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        artifacts_dir=str(tmp_path / "artifacts"),
+        request={"netlist": "body.spice"},
+        measurements_spec=_measurements_spec(),
+        runner=runner,
+        sleep=runner.sleep,
+    )
+
+    diagnostics = corners[0]["diagnostics"]
+    assert [d["code"] for d in diagnostics] == ["measurement", "ngspice_fatal"]
+    assert diagnostics[1]["message"].startswith("Error on line 7")
+    assert diagnostics[1]["analysis_started"] is False
+    assert "wall-clock" in diagnostics[1]["message"]
 
 
 def test_report_already_carrying_missing_include_is_not_duplicated(
@@ -6681,6 +6819,143 @@ def test_without_resume_an_existing_shard_map_is_overwritten(tmp_path, monkeypat
     new_jobs = {e["job_id"] for e in json.loads(manifest_path.read_text())["shards"]}
     assert old_jobs.isdisjoint(new_jobs)
     assert [e["resumed"] for e in environment["fleet"]] == [False, False]
+
+
+def test_shard_map_records_every_shard_before_the_first_submit(tmp_path, monkeypatch):
+    _, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
+    seen: list[list[dict]] = []
+
+    def _first_submit(config, job_id, spec, *, runner=None):
+        seen.append(json.loads(manifest_path.read_text())["shards"])
+        raise sb.BatchError("client died")
+
+    monkeypatch.setattr(sb, "submit_job", _first_submit)
+    fleet()
+    assert [e["state"] for e in seen[0]] == ["pending", "pending"]
+    assert all(e["submitted_at"] is None for e in seen[0])
+
+
+def test_shard_map_tracks_launch_state_and_is_self_describing(tmp_path, monkeypatch):
+    _, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
+    fleet()
+    document = json.loads(manifest_path.read_text())
+    assert document["bucket"] == FAKE_BUCKET
+    for entry in document["shards"]:
+        assert entry["state"] == "collected"
+        assert all(entry[k] for k in ("submitted_at", "launched_at", "collected_at"))
+
+
+def test_failed_launch_leaves_the_shard_unlaunched_and_says_so(
+    tmp_path, monkeypatch, capsys
+):
+    _, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
+    real_launch = sb.launch_job
+    launched: list[str] = []
+
+    def _launch(config, job_id, **kwargs):
+        if launched:
+            raise sb.BatchError("client died")
+        launched.append(job_id)
+        return real_launch(config, job_id, **kwargs)
+
+    monkeypatch.setattr(sb, "launch_job", _launch)
+    fleet()
+    states = sorted(e["state"] for e in json.loads(manifest_path.read_text())["shards"])
+    assert states == ["collected", "launching"]
+    # "launching" (outcome unknown) is not counted as never-launched.
+    assert "never launched" not in capsys.readouterr().err
+
+
+def _unlaunch(manifest_path, index, state):
+    document = json.loads(manifest_path.read_text())
+    entry = document["shards"][index]
+    entry.update(state=state, launched_at=None, collected_at=None)
+    manifest_path.write_text(json.dumps(document))
+    return entry["job_id"]
+
+
+def test_resume_launches_a_submitted_never_launched_shard_once(tmp_path, monkeypatch):
+    runner, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
+    fleet()
+    job_id = _unlaunch(manifest_path, 1, "submitted")
+    launches_before = len(_launches(runner))
+    runner.queue(f"{job_id}/status.json", fake_completed(returncode=1))
+
+    _, _, environment = fleet(resume=True)
+
+    new_launches = _launches(runner)[launches_before:]
+    assert [argv[3] for argv in new_launches] == [job_id]
+    assert [e["resumed"] for e in environment["fleet"]] == [True, True]
+    assert environment["fleet"][1]["client_launched_at"]
+    assert json.loads(manifest_path.read_text())["shards"][1]["state"] == "collected"
+
+
+@pytest.mark.parametrize(
+    ("state", "status_published"),
+    [("launching", False), ("launched", False), ("submitted", True)],
+    ids=["launch-outcome-unknown", "already-launched", "fleet-published-status"],
+)
+def test_resume_never_relaunches_a_possibly_launched_shard(
+    tmp_path, monkeypatch, state, status_published
+):
+    runner, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
+    fleet()
+    job_id = _unlaunch(manifest_path, 1, state)
+    launches_before = len(_launches(runner))
+    if not status_published:
+        runner.queue(f"{job_id}/status.json", fake_completed(returncode=1))
+
+    fleet(resume=True)
+
+    assert len(_launches(runner)) == launches_before
+
+
+def test_stderr_names_the_map_when_shards_were_never_launched(
+    tmp_path, monkeypatch, capsys
+):
+    _, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
+    real_mark = sb._ShardManifest.mark
+
+    def _stop_before_launch(self, index, state):
+        if state == "launching" and index == 1:
+            raise KeyboardInterrupt
+        return real_mark(self, index, state)
+
+    monkeypatch.setattr(sb._ShardManifest, "mark", _stop_before_launch)
+    with pytest.raises(KeyboardInterrupt):
+        fleet()
+    err = capsys.readouterr().err
+    assert "1 of 2 batch job(s) were submitted but never launched" in err
+    assert str(manifest_path) in err
+    states = sorted(e["state"] for e in json.loads(manifest_path.read_text())["shards"])
+    assert "submitted" in states
+
+
+def test_split_reroute_without_a_checkpoint_writes_the_shard_map(tmp_path, monkeypatch):
+    """Issue #3896: a `max_units_per_job` split with no --resume (so no
+    checkpoint) still keeps a shard map when handed a fingerprint."""
+    _split_runner(monkeypatch)
+    monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
+    artifacts = tmp_path / "artifacts"
+
+    sb._run_batch(
+        corner_points=_corner_points(10),
+        netlist_path=str(_write_body(tmp_path)),
+        models_lib=None,
+        analysis={"kind": "tran", "args": "1n 1u"},
+        measurements_spec=_measurements_spec(),
+        timeout_s=120.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        artifacts_dir=str(artifacts),
+        max_workers=None,
+        request=_ceiling_request(tmp_path, max_units_per_job=4),
+        shard_fingerprint="fp-split",
+    )
+
+    document = json.loads((artifacts / sb.BATCH_SHARDS_FILENAME).read_text())
+    assert document["fingerprint"] == "fp-split"
+    assert [e["state"] for e in document["shards"]] == ["collected"] * 3
 
 
 @pytest.mark.parametrize("lose_a_corner", [False, True])

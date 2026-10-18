@@ -12,6 +12,7 @@ from klayout_tools import synthesize
 from klayout_tools.synthesize import SynthesizeError, run_synthesize
 from test_synthesize import (
     _ABC_STIME_LINE,
+    _FAKE_EQUIV_EQUIVALENT,
     _GCD_MODULE_STATS,
     _GCD_RTL,
     _abs_path,
@@ -242,6 +243,151 @@ def test_caller_run_id_is_exclusive_and_returned(prepared):
     with pytest.raises(SynthesizeError, match="(already exists|File exists)"):
         run_synthesize(request)
     assert _evidence(netlist.parent) == prior
+
+
+def _set_outputs(request, outputs):
+    data = json.loads(Path(request).read_text())
+    data["outputs"] = outputs
+    Path(request).write_text(json.dumps(data))
+    return data
+
+
+def test_outputs_dir_is_the_run_directory(prepared):
+    root, request = prepared
+    _set_outputs(request, {"dir": "build/syn"})
+    report = run_synthesize(request)
+    netlist = Path(_abs_path(report["netlist_path"], root))
+    assert netlist.parent == root / "build/syn"
+    assert netlist.is_file()
+    assert report["run_id"] == "syn"
+    assert not (root / ".klt/synthesize").exists()
+
+
+def test_outputs_dir_accepts_existing_empty_dir(prepared):
+    root, request = prepared
+    (root / "out").mkdir()
+    _set_outputs(request, {"dir": "out"})
+    report = run_synthesize(request)
+    assert Path(_abs_path(report["netlist_path"], root)).parent == root / "out"
+
+
+def test_outputs_dir_rejects_non_empty_dir(prepared):
+    root, request = prepared
+    (root / "out").mkdir()
+    (root / "out/keep.txt").write_text("prior evidence")
+    _set_outputs(request, {"dir": "out"})
+    with pytest.raises(SynthesizeError, match="outputs.dir"):
+        run_synthesize(request)
+    assert (root / "out/keep.txt").read_text() == "prior evidence"
+    assert [p.name for p in (root / "out").iterdir()] == ["keep.txt"]
+
+
+def test_outputs_dir_second_run_refused(prepared):
+    root, request = prepared
+    _set_outputs(request, {"dir": "out"})
+    run_synthesize(request)
+    with pytest.raises(SynthesizeError, match="outputs.dir"):
+        run_synthesize(request)
+
+
+def test_outputs_dir_rerun_matches_in_scratch_dir(prepared):
+    root, request = prepared
+    _set_outputs(request, {"dir": "out"})
+    report = run_synthesize(request)
+    report_path = root / "committed.json"
+    report_path.write_text(json.dumps(report))
+    before = _evidence(root / "out")
+    result = synthesize.rerun_synthesize_report(str(report_path), request)
+    assert result["status"] == "match"
+    assert _evidence(root / "out") == before
+    assert result["fresh"]["run_id"].startswith("run-")
+
+
+def test_outputs_dir_absolute_path_is_external(prepared, tmp_path_factory):
+    root, request = prepared
+    target = tmp_path_factory.mktemp("elsewhere") / "syn"
+    _set_outputs(request, {"dir": str(target)})
+    report = run_synthesize(request)
+    assert report["netlist_path"]["scope"] == "external"
+    assert any(target.glob("*_synth.v"))
+
+
+def test_outputs_dir_with_dotdot_segment_is_normalized(prepared):
+    root, request = prepared
+    _set_outputs(request, {"dir": "../elsewhere/syn"})
+    report = run_synthesize(request)
+    target = root.parent / "elsewhere" / "syn"
+    assert report["netlist_path"]["scope"] == "external"
+    assert any(target.glob("*_synth.v"))
+    assert report["run_id"] == "syn"
+    assert not (root / ".klt/synthesize").exists()
+
+
+def test_outputs_dir_with_inner_dotdot_stays_in_repo(prepared):
+    root, request = prepared
+    _set_outputs(request, {"dir": "a/../out"})
+    report = run_synthesize(request)
+    netlist = Path(_abs_path(report["netlist_path"], root))
+    assert netlist.parent == root / "out"
+
+
+def test_outputs_dir_equivalence_artifacts_stay_in_custom_dir(prepared, monkeypatch):
+    root, request = prepared
+    _set_outputs(request, {"dir": "build/syn"})
+    captured = []
+
+    def fake_run_equiv(equiv_request, *, timeout_s=None):
+        captured.append(equiv_request)
+        return _FAKE_EQUIV_EQUIVALENT
+
+    monkeypatch.setattr(synthesize, "run_equiv", fake_run_equiv)
+    report = run_synthesize(request, verify_equivalence=True)
+    assert report["equivalence"]["status"] == "equivalent"
+    assert len(captured) == 1
+    assert Path(captured[0]).parent == root / "build/syn"
+    assert not (root / ".klt/synthesize").exists()
+    assert not (root / ".klt/equiv").exists()
+
+
+def test_outputs_dir_inside_sources_tree_passes_input_mutation_check(
+    prepared, monkeypatch
+):
+    root, request = prepared
+    (root / "rtl").mkdir()
+    (root / "gcd.v").rename(root / "rtl/gcd.v")
+    data = _set_outputs(request, {"dir": "rtl/out"})
+    data["sources"] = ["rtl/gcd.v"]
+    Path(request).write_text(json.dumps(data))
+    report = run_synthesize(request)
+    assert Path(_abs_path(report["netlist_path"], root)).parent == root / "rtl/out"
+    assert (root / "rtl/gcd.v").read_text() == _GCD_RTL
+
+
+def test_outputs_dir_with_run_id_rejected(prepared):
+    _, request = prepared
+    data = _set_outputs(request, {"dir": "out"})
+    data["run_id"] = "job-1"
+    Path(request).write_text(json.dumps(data))
+    with pytest.raises(SynthesizeError, match="run_id"):
+        run_synthesize(request)
+
+
+@pytest.mark.parametrize(
+    "outputs, match",
+    [
+        ("out", "outputs must be an object"),
+        ({"dir": 1}, "non-empty string"),
+        ({"dir": ""}, "non-empty string"),
+        ({"dir": "  "}, "non-empty string"),
+        ({"dir": "x", "extra": 1}, "extra"),
+    ],
+)
+def test_outputs_validation_rejects_bad_shapes(prepared, outputs, match):
+    root, request = prepared
+    _set_outputs(request, outputs)
+    with pytest.raises(SynthesizeError, match=match):
+        run_synthesize(request)
+    assert not (root / ".klt").exists()
 
 
 def test_concurrent_explicit_run_id_refuses_second_engine(prepared, monkeypatch):

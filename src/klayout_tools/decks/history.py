@@ -302,6 +302,10 @@ def deck_info(name: str | None = None) -> dict[str, Any]:
       capable of recognising (``ExtractionDeck.device_classes``), e.g.
       whether ``diode_nd2ps_06v0``/``diode_pd2nw_06v0`` are wired up at all --
       independent of whether any given layout actually contains one.
+    - ``provides`` -- which capabilities this deck supplies (issue #3783),
+      any of ``curated_drc`` (``klt drc --deck`` / ``klt deck rules``),
+      ``klayout_drc`` (a shipped KLayout DRC script run via ``--engine
+      klayout --deck-file``) and ``extraction``.
     - ``released`` -- the same tri-state signal as
       ``provenance.deck.released`` (:func:`is_deck_hash_released`): ``True``
       when this exact content hash shipped in a tagged release, ``False``
@@ -324,6 +328,7 @@ def deck_info(name: str | None = None) -> dict[str, Any]:
     from .._provenance import sha256_file
     from . import (
         UnknownExtractionDeckError,
+        deck_provides,
         deck_source_path,
         get_extraction_deck,
         get_unmodeled_rules,
@@ -361,6 +366,7 @@ def deck_info(name: str | None = None) -> dict[str, Any]:
                 "deck": deck_name,
                 "content_hash": content_hash,
                 "device_classes": list(deck.device_classes),
+                "provides": deck_provides(deck_name),
                 "released": released,
                 "release": release,
                 "unmodeled_rules": get_unmodeled_rules(deck_name),
@@ -455,6 +461,10 @@ def deck_rules(name: str, rule_id: str | None = None) -> dict[str, Any]:
       does not transcribe (issue #3796), kept apart from ``rules``; the same
       static list as ``klt drc``'s ``coverage.unmodeled_rules``. Not narrowed
       by ``rule_id``.
+    - ``marker_blind_layers`` -- ``["<layer>/<datatype>", ...]`` area-marker
+      layers (sky130: ``81/2`` ``areaid.ce``) the deck accepts but does not
+      model rule-switching for (issue #3815); ``[]`` for a deck declaring
+      none. Deck-static, so it is not narrowed by ``rule_id``.
     - ``layer_table`` -- every ``{"name", "layer", "datatype"}`` the deck
       names, sorted by ``(layer, datatype)``.
     - ``ambiguous_names`` -- ``[{"name", "pairs": [{"layer", "datatype"}]}]``
@@ -471,6 +481,7 @@ def deck_rules(name: str, rule_id: str | None = None) -> dict[str, Any]:
         deck_source_path,
         get_deck,
         get_layer_names,
+        get_marker_blind_layers,
         get_nominal_dbu,
         get_unmodeled_rules,
     )
@@ -501,6 +512,9 @@ def deck_rules(name: str, rule_id: str | None = None) -> dict[str, Any]:
         "nominal_dbu_um": nominal_dbu,
         "rules": [_project_rule(rule, nominal_dbu, layer_names) for rule in rules],
         "unmodeled_rules": get_unmodeled_rules(name),
+        "marker_blind_layers": [
+            f"{layer}/{datatype}" for layer, datatype in get_marker_blind_layers(name)
+        ],
         **_layer_table_fields(rules, layer_names),
     }
 
