@@ -575,9 +575,9 @@ DECK: list[DrcRule] = [
         layer=(31, 0),  # NWell.drawing
         check="width",
         threshold_dbu=620,  # 0.62 um
-        # sg13g2_maximal.drc rule "NW.a": NWell.ext_width(0.62.um) ->
-        # "Min. NWell width = 0.62" (drc_rules['NW_a'] == 0.62). NW.a is NOT
-        # in the modular 5_1_nwell.drc -- only the maximal deck implements it.
+        # sg13g2_maximal.drc rule "NW.a": NWell.ext_width(0.62.um) -> "Min. NWell width
+        # = 0.62" (drc_rules['NW_a'] == 0.62). NW.a is NOT in the modular 5_1_nwell.drc
+        # -- only the maximal deck implements it.
         scope="NW",
         provenance=_sg13g2_drc_provenance(
             "ihp-sg13g2/libs.tech/klayout/tech/drc/rule_decks/sg13g2_maximal.drc",
@@ -590,16 +590,311 @@ DECK: list[DrcRule] = [
         layer=(31, 0),  # NWell.drawing
         check="space",
         threshold_dbu=620,  # 0.62 um
-        # 5_1_nwell.drc rule "NW.b": "Min. NWell space or notch (same net).
-        # NWell regions separated by less than this value will be merged"
-        # (drc_rules['NW_b'] == 0.62). Approximation: the foundry rule is
-        # same-net and *merges* closer same-net wells; this geometric check
-        # has no net identity, so it flags any two wells closer than 0.62 um
-        # (stricter than the foundry deck for same-net pairs; for
-        # different-net pairs it is implied by the stricter NW.b1, 1.80 um,
-        # so it adds no false positive there).
+        # 5_1_nwell.drc rule "NW.b": "Min. NWell space or notch (same net). NWell
+        # regions separated by less than this value will be merged" (drc_rules['NW_b']
+        # == 0.62). Approximation: the foundry rule is same-net and *merges* closer
+        # same-net wells; this geometric check has no net identity, so it flags any two
+        # wells closer than 0.62 um (stricter than the foundry deck for same-net pairs;
+        # for different-net pairs it is implied by the stricter NW.b1, 1.80 um, so it
+        # adds no false positive there).
         scope="NW",
         provenance=_sg13g2_drc_provenance(f"{_FEOL}/5_1_nwell.drc", "NW.b"),
+    ),
+    # --- NWell enclosure/space to implanted Activ (issue #3585): NW.c/c1/e/e1
+    # (enclosure of P+/N+ Activ), NW.d/d1/f/f1 (space to external N+ / substrate
+    # tie P+) and their DigiBnd-relaxed `.dig`/`.digibnd` variants. Mirrors the
+    # sg13cmos5l transcription (#3573/#3645/#3646/#3682); values are this
+    # deck's own (sg13g2_tech_default.json NW_c..NW_f1_digibnd), read from its
+    # own pinned PDK. Each rule checks a *derived* implanted-Activ region
+    # (`Activ & pSD` / `Activ & nSD`) against NWell, split LV/HV by the
+    # ThickGateOx marker (44/0) and HV/digital by DigiBnd (16/0) through the
+    # near/far well-context partition (whole-polygon selection).
+    # Approximations versus the upstream operand derivations (none dropped):
+    #   * P+/N+ Activ is the drawn implant overlap; the upstream operand is
+    #     `Activ - nSD_drv` for P+. Activ with neither implant drawn is not
+    #     checked here.
+    #   * ThickGateOx/DigiBnd scoping selects whole Activ polygons; upstream
+    #     clips with a boolean NOT. Only a polygon straddling a marker edge
+    #     can differ.
+    #   * SVaricap, schottky_nbl1/nw1, scr1 (text-marker derived) exclusions
+    #     and `NWell_Nsram` (SRAM-marked NWell) are not modelled: those
+    #     structures are held to the ordinary threshold (stricter).
+    #   * NW.e "tie surrounded entirely by NWell" is the enclosed check on
+    #     N+ Activ: N+ Activ wholly outside NWell (NMOS S/D) is not flagged,
+    #     one straddling a well edge is. Activ inside the well is the
+    #     enclosure rules' job and is not reported by the space rules. ----
+    DrcRule(
+        id="nwell.enclosing.pactiv.1",
+        description="minimum NWell enclosure of P+ Activ outside ThickGateOx",
+        layer=(1, 0),  # Activ.drawing (reporting identity; region is derived)
+        other_layer=(31, 0),  # NWell.drawing
+        check="enclosed",
+        threshold_dbu=310,  # 0.31 um
+        # sg13g2_maximal.drc rule "NW.c": lNw_c.ext_enclosed(NWell_Nsram, 0.31.um,
+        # consider_overlaps_as_errors: true) -> "Min. NWell enclosure of P+Activ not
+        # inside ThickGateOx = 0.31"
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ
+            sized_by_um=0.0,
+            intersect_with=(14, 0),  # pSD -> P+ Activ
+            context_layers=((44, 0),),  # ThickGateOx
+            context="far",
+        ),
+        scope="NW",
+        provenance=_sg13g2_drc_provenance(_MAXIMAL_RUNSET, "NW.c"),
+    ),
+    DrcRule(
+        id="nwell.enclosing.pactiv.hv.1",
+        description="minimum NWell enclosure of P+ Activ inside ThickGateOx",
+        layer=(1, 0),  # Activ.drawing (reporting identity; region is derived)
+        other_layer=(31, 0),  # NWell.drawing
+        check="enclosed",
+        threshold_dbu=620,  # 0.62 um
+        # sg13g2_maximal.drc rule "NW.c1":
+        # PActHV_ana.ext_outside(SVaricap_or_schottky_nbl1).ext_enclosed(NWell, 0.62.um,
+        # ...) -> "Min. NWell enclosure of P+Activ inside ThickGateOx = 0.62"
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ
+            sized_by_um=0.0,
+            intersect_with=(14, 0),  # pSD -> P+ Activ
+            context_layers=((44, 0),),  # ThickGateOx
+            context="near",
+            context2_layers=((16, 0),),  # DigiBnd
+            context2="far",
+        ),
+        scope="NW",
+        provenance=_sg13g2_drc_provenance(_MAXIMAL_RUNSET, "NW.c1"),
+    ),
+    DrcRule(
+        id="nwell.enclosing.nactiv.1",
+        description=(
+            "minimum NWell enclosure of N+ Activ (well tie) outside ThickGateOx"
+        ),
+        layer=(1, 0),  # Activ.drawing (reporting identity; region is derived)
+        other_layer=(31, 0),  # NWell.drawing
+        check="enclosed",
+        threshold_dbu=240,  # 0.24 um
+        # sg13g2_maximal.drc rule "NW.e":
+        # NAct_NWellLV.ext_not(nw_outDev).ext_enclosed(NWell, 0.24.um, ...) -> "Min.
+        # NWell enclosure of NWell tie surrounded entirely by NWell in N+Activ not
+        # inside ThickGateOx = 0.24". `nw_outDev` is an HV-only subtraction, so it is
+        # empty for this LV operand. N+ Activ wholly outside NWell (an NMOS
+        # source/drain) is not an NWell tie and is not flagged; one straddling a well
+        # edge is
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ
+            sized_by_um=0.0,
+            intersect_with=(7, 0),  # nSD -> N+ Activ
+            context_layers=((44, 0),),  # ThickGateOx
+            context="far",
+        ),
+        scope="NW",
+        provenance=_sg13g2_drc_provenance(_MAXIMAL_RUNSET, "NW.e"),
+    ),
+    DrcRule(
+        id="nwell.enclosing.nactiv.hv.1",
+        description="minimum NWell enclosure of N+ Activ (well tie) inside ThickGateOx",
+        layer=(1, 0),  # Activ.drawing (reporting identity; region is derived)
+        other_layer=(31, 0),  # NWell.drawing
+        check="enclosed",
+        threshold_dbu=620,  # 0.62 um
+        # sg13g2_maximal.drc rule "NW.e1":
+        # NAct_NWellHV_ana.ext_outside(SVaricap.ext_or(schottky_nbl1, schottky_nw1,
+        # scr1)).ext_enclosed(NWell, 0.62.um, ...) -> "Min. NWell enclosure of NWell tie
+        # surrounded entirely by NWell in N+Activ inside ThickGateOx = 0.62"
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ
+            sized_by_um=0.0,
+            intersect_with=(7, 0),  # nSD -> N+ Activ
+            context_layers=((44, 0),),  # ThickGateOx
+            context="near",
+            context2_layers=((16, 0),),  # DigiBnd
+            context2="far",
+        ),
+        scope="NW",
+        provenance=_sg13g2_drc_provenance(_MAXIMAL_RUNSET, "NW.e1"),
+    ),
+    DrcRule(
+        id="nwell.space.nactiv.1",
+        description="minimum NWell space to external N+ Activ outside ThickGateOx",
+        layer=(1, 0),  # Activ.drawing (reporting identity; region is derived)
+        other_layer=(31, 0),  # NWell.drawing
+        check="separation",
+        threshold_dbu=310,  # 0.31 um
+        # sg13g2_maximal.drc rule "NW.d": NWell_Nsram.ext_separation(NActLV, 0.31.um,
+        # ...) -> "Min. NWell space to external N+Activ not inside ThickGateOx = 0.31"
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ
+            sized_by_um=0.0,
+            intersect_with=(7, 0),  # nSD -> N+ Activ
+            context_layers=((44, 0),),  # ThickGateOx
+            context="far",
+        ),
+        scope="NW",
+        provenance=_sg13g2_drc_provenance(_MAXIMAL_RUNSET, "NW.d"),
+    ),
+    DrcRule(
+        id="nwell.space.nactiv.hv.1",
+        description="minimum NWell space to external N+ Activ inside ThickGateOx",
+        layer=(1, 0),  # Activ.drawing (reporting identity; region is derived)
+        other_layer=(31, 0),  # NWell.drawing
+        check="separation",
+        threshold_dbu=620,  # 0.62 um
+        # sg13g2_maximal.drc rule "NW.d1": NWell.ext_separation(NActHV_ana, 0.62.um) ->
+        # "Min. NWell space to external N+Activ inside ThickGateOx = 0.62"
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ
+            sized_by_um=0.0,
+            intersect_with=(7, 0),  # nSD -> N+ Activ
+            context_layers=((44, 0),),  # ThickGateOx
+            context="near",
+            context2_layers=((16, 0),),  # DigiBnd
+            context2="far",
+        ),
+        scope="NW",
+        provenance=_sg13g2_drc_provenance(_MAXIMAL_RUNSET, "NW.d1"),
+    ),
+    DrcRule(
+        id="nwell.space.pactiv.1",
+        description="minimum NWell space to substrate-tie P+ Activ outside ThickGateOx",
+        layer=(1, 0),  # Activ.drawing (reporting identity; region is derived)
+        other_layer=(31, 0),  # NWell.drawing
+        check="separation",
+        threshold_dbu=240,  # 0.24 um
+        # sg13g2_maximal.drc rule "NW.f": NWell.ext_separation(PAct_PWellLV minus
+        # SVaricap-coincident edges, 0.24.um) -> "Min. NWell space to substrate tie in
+        # P+Activ not inside ThickGateOx = 0.24". SVaricap coincident edges are not
+        # exempted (stricter)
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ
+            sized_by_um=0.0,
+            intersect_with=(14, 0),  # pSD -> P+ Activ
+            context_layers=((44, 0),),  # ThickGateOx
+            context="far",
+        ),
+        scope="NW",
+        provenance=_sg13g2_drc_provenance(_MAXIMAL_RUNSET, "NW.f"),
+    ),
+    DrcRule(
+        id="nwell.space.pactiv.hv.1",
+        description="minimum NWell space to substrate-tie P+ Activ inside ThickGateOx",
+        layer=(1, 0),  # Activ.drawing (reporting identity; region is derived)
+        other_layer=(31, 0),  # NWell.drawing
+        check="separation",
+        threshold_dbu=620,  # 0.62 um
+        # 5_1_nwell.drc rule "NW.f1": feol/5_1_nwell.drc (modular deck only; the maximal
+        # deck has no NW.f1): `ptap & thickgateox_drw` minus DigiBnd, separated from
+        # `nwell_drw - svaricap` by drc_rules["NW_f1"] -> "Min. NWell space to substrate
+        # tie in P+Activ inside ThickGateOx = 0.62". SVaricap is not modelled (stricter)
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ
+            sized_by_um=0.0,
+            intersect_with=(14, 0),  # pSD -> P+ Activ
+            context_layers=((44, 0),),  # ThickGateOx
+            context="near",
+            context2_layers=((16, 0),),  # DigiBnd
+            context2="far",
+        ),
+        scope="NW",
+        provenance=_sg13g2_drc_provenance(f"{_FEOL}/5_1_nwell.drc", "NW.f1"),
+    ),
+    DrcRule(
+        id="nwell.enclosing.pactiv.dig.1",
+        description=(
+            "minimum NWell enclosure of P+ Activ inside ThickGateOx and DigiBnd"
+        ),
+        layer=(1, 0),  # Activ.drawing (reporting identity; region is derived)
+        other_layer=(31, 0),  # NWell.drawing
+        check="enclosed",
+        threshold_dbu=310,  # 0.31 um
+        # sg13g2_maximal.drc rule "NW.c1.dig":
+        # PActHV_digi.ext_outside(SVaricap_or_schottky_nbl1).ext_enclosed(NWell,
+        # 0.31.um, ...) -> "... inside ThickGateOx inside DigiBnd = 0.31"
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ
+            sized_by_um=0.0,
+            intersect_with=(14, 0),  # pSD -> P+ Activ
+            context_layers=((44, 0),),  # ThickGateOx
+            context="near",
+            context2_layers=((16, 0),),  # DigiBnd
+            context2="near",
+        ),
+        scope="NW",
+        provenance=_sg13g2_drc_provenance(_MAXIMAL_RUNSET, "NW.c1.dig"),
+    ),
+    DrcRule(
+        id="nwell.enclosing.nactiv.dig.1",
+        description=(
+            "minimum NWell enclosure of N+ Activ "
+            "(well tie) inside ThickGateOx and DigiBnd"
+        ),
+        layer=(1, 0),  # Activ.drawing (reporting identity; region is derived)
+        other_layer=(31, 0),  # NWell.drawing
+        check="enclosed",
+        threshold_dbu=240,  # 0.24 um
+        # sg13g2_maximal.drc rule "NW.e1.dig": NAct_NWellHV_digi.ext_enclosed(NWell,
+        # 0.24.um, ...) -> "... inside ThickGateOx inside DigiBnd = 0.24"
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ
+            sized_by_um=0.0,
+            intersect_with=(7, 0),  # nSD -> N+ Activ
+            context_layers=((44, 0),),  # ThickGateOx
+            context="near",
+            context2_layers=((16, 0),),  # DigiBnd
+            context2="near",
+        ),
+        scope="NW",
+        provenance=_sg13g2_drc_provenance(_MAXIMAL_RUNSET, "NW.e1.dig"),
+    ),
+    DrcRule(
+        id="nwell.space.nactiv.dig.1",
+        description=(
+            "minimum NWell space to external N+ Activ inside ThickGateOx and DigiBnd"
+        ),
+        layer=(1, 0),  # Activ.drawing (reporting identity; region is derived)
+        other_layer=(31, 0),  # NWell.drawing
+        check="separation",
+        threshold_dbu=310,  # 0.31 um
+        # sg13g2_maximal.drc rule "NW.d1.dig": NWell.ext_separation(NActHV_digi,
+        # 0.31.um) -> "... inside ThickGateOx inside DigiBnd = 0.31"
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ
+            sized_by_um=0.0,
+            intersect_with=(7, 0),  # nSD -> N+ Activ
+            context_layers=((44, 0),),  # ThickGateOx
+            context="near",
+            context2_layers=((16, 0),),  # DigiBnd
+            context2="near",
+        ),
+        scope="NW",
+        provenance=_sg13g2_drc_provenance(_MAXIMAL_RUNSET, "NW.d1.dig"),
+    ),
+    DrcRule(
+        id="nwell.space.pactiv.dig.1",
+        description=(
+            "minimum NWell space to substrate-tie "
+            "P+ Activ inside ThickGateOx and DigiBnd"
+        ),
+        layer=(1, 0),  # Activ.drawing (reporting identity; region is derived)
+        other_layer=(31, 0),  # NWell.drawing
+        check="separation",
+        threshold_dbu=240,  # 0.24 um
+        # 5_1_nwell.drc rule "NW.f1.digibnd": feol/5_1_nwell.drc (modular deck only):
+        # `ptap & thickgateox_drw & digibnd_drw` separated from `nwell_drw - svaricap`
+        # by drc_rules["NW_f1_digibnd"] -> "Min. NWell space to substrate tie in P+Activ
+        # inside ThickGateOx (Inside DigiBnd) = 0.24". SVaricap is not modelled
+        # (stricter)
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ
+            sized_by_um=0.0,
+            intersect_with=(14, 0),  # pSD -> P+ Activ
+            context_layers=((44, 0),),  # ThickGateOx
+            context="near",
+            context2_layers=((16, 0),),  # DigiBnd
+            context2="near",
+        ),
+        scope="NW",
+        provenance=_sg13g2_drc_provenance(f"{_FEOL}/5_1_nwell.drc", "NW.f1.digibnd"),
     ),
     # --- 5.5 Activ (feol/5_5_activ.drc) -------------------------------
     DrcRule(
