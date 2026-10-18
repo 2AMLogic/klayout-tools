@@ -22,6 +22,11 @@ not `klt --version`, if you need to detect this kind of drift. See
   Requests without the field generate an unchanged Tcl script;
   `schema_version` is unchanged (additive).
 
+- **`provenance.input.paths` set binding for `klt signoff`** (issue #3044,
+  documented in `docs/cli/signoff.md` "Binding a set of artifacts"): additive.
+  Not in `klt 0.7.0` — a `0.7.0` build grades a `paths`-only envelope
+  `unanchored_evidence`; it first ships in the first release after `v0.7.0`.
+
 - **`klt lvs --deck sg13cmos5l` now matches the PDK's own stdcells** (issue
   #3831): `sg13cmos5l_inv_1` draws no `nSD`, so its well tie (unimplanted
   Activ in NWell) was not recognised and the compare reported

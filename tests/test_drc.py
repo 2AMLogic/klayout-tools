@@ -1442,6 +1442,20 @@ def test_run_drc_sky130_coverage_lists_unmodeled_rules(tmp_path):
     assert get_unmodeled_rules("no-such-deck") == []
 
 
+def test_run_drc_sg13g2_coverage_lists_unmodeled_pad_and_latchup_rules(tmp_path):
+    """A clean sg13g2 verdict must disclose the un-transcribed `Pad.*` and
+    `LU.*` runset rules (issue #3854); sorted, and other decks unaffected."""
+    path = tmp_path / "sg13g2_unmodeled.gds"
+    _make_sky130_nwell_hvi_layout(None).write(str(path))
+
+    unmodeled = run_drc(str(path), "sg13g2")["coverage"]["unmodeled_rules"]
+
+    assert unmodeled == sorted(unmodeled)
+    assert {"Pad.a1", "Pad.d", "Pad.jR", "LU.a", "LU.d1"} <= set(unmodeled)
+    assert all(r.startswith(("Pad.", "LU.")) for r in unmodeled)
+    assert get_unmodeled_rules("gf180mcu") == []
+
+
 def test_run_drc_sky130_hvi_marker_no_warning_without_overlap(tmp_path):
     """Counterfactual for the test above: `hvi` present in the stream but
     never interacting with geometry an unscoped rule checked produces no

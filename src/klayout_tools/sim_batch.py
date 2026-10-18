@@ -3711,14 +3711,21 @@ def _write_batch_receipt(path: str, receipt: dict[str, Any]) -> None:
 
 
 class _ShardManifest:
-    """The persisted shard-to-job-id map of a sharded batch run (issue #3300).
+    """The persisted shard-to-job-id map of a sharded batch run (issues #3300,
+    #3896).
 
     ``<artifacts_dir>/batch-shards.json`` holds the request fingerprint (the
     resume checkpoint's own, :func:`sim._checkpoint_fingerprint`), the shard
-    count, and one entry per shard: its index, the job id it was submitted
-    as, and a digest of the corner ids it carries. An entry is written
-    *before* the shard's ``submit_job``, so a client killed between minting
-    the id and submitting still leaves a mapping (the re-attach then finds no
+    count, where the jobs live (``bucket``/``jobs_prefix``/``region``/
+    ``profile``, like ``batch-receipt.json``), and one entry per shard: its
+    index, the job id it was submitted as, a digest of the corner ids it
+    carries, and its client-side lifecycle -- ``state`` is ``pending`` (id
+    minted, not yet submitted), ``submitted``, ``launching`` (``launch_job``
+    started, outcome unknown), ``launched`` or ``collected``, with the
+    matching ``submitted_at`` / ``launch_started_at`` / ``launched_at`` /
+    ``collected_at`` (``null`` until reached). An entry is written *before*
+    the shard's ``submit_job``, so a client killed between minting the id and
+    submitting still leaves a mapping (the re-attach then finds no
     ``job.json`` and falls back to a fresh submit). Writes are atomic
     (temp + rename) and serialized: shard threads record concurrently.
     """
@@ -3729,17 +3736,25 @@ class _ShardManifest:
         fingerprint: str,
         hosts: int,
         prior: dict[str, dict[str, Any]] | None = None,
+        location: dict[str, Any] | None = None,
     ) -> None:
         self._path = path
         self._fingerprint = fingerprint
         self._hosts = hosts
+        self._location = location or {}
         self._lock = threading.Lock()
         self.prior: dict[str, dict[str, Any]] = prior or {}
         self._entries: dict[str, dict[str, Any]] = {}
 
     @classmethod
     def open(
-        cls, artifacts_dir: str, fingerprint: str, hosts: int, *, resume: bool
+        cls,
+        artifacts_dir: str,
+        fingerprint: str,
+        hosts: int,
+        *,
+        resume: bool,
+        location: dict[str, Any] | None = None,
     ) -> _ShardManifest:
         """Open the manifest for this run. Without ``resume`` any existing
         file is ignored (and overwritten by the first write). With ``resume``
@@ -3750,7 +3765,7 @@ class _ShardManifest:
         from .sim import SimError
 
         path = os.path.join(artifacts_dir, BATCH_SHARDS_FILENAME)
-        manifest = cls(path, fingerprint, hosts)
+        manifest = cls(path, fingerprint, hosts, location=location)
         if not resume or not os.path.isfile(path):
             return manifest
         try:
@@ -3781,14 +3796,65 @@ class _ShardManifest:
         manifest.prior = shards
         return manifest
 
+    @property
+    def path(self) -> str:
+        return self._path
+
     def record(self, index: int, job_id: str, units_sha256: str) -> None:
         with self._lock:
             self._entries[str(index)] = {
                 "index": index,
                 "job_id": job_id,
                 "units_sha256": units_sha256,
+                "state": "pending",
+                "submitted_at": None,
+                "launch_started_at": None,
+                "launched_at": None,
+                "collected_at": None,
             }
             self._flush_locked()
+
+    def planned_job_id(self, index: int) -> str | None:
+        """The job id :meth:`record` minted for ``index`` this run, if any."""
+        with self._lock:
+            entry = self._entries.get(str(index))
+            return None if entry is None else str(entry["job_id"])
+
+    #: lifecycle state -> the timestamp field it stamps.
+    _STATE_FIELDS = {
+        "submitted": "submitted_at",
+        "launching": "launch_started_at",
+        "launched": "launched_at",
+        "collected": "collected_at",
+    }
+
+    def mark(self, index: int, state: str) -> None:
+        """Advance shard ``index`` to ``state`` and stamp its timestamp. A
+        field already stamped (a re-attach to a shard the prior run took
+        further) is left as it was, and the state never moves backwards."""
+        key = str(index)
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                prior = self.prior.get(key)
+                if prior is None:
+                    return
+                entry = self._entries[key] = dict(prior)
+            order = list(self._STATE_FIELDS)
+            current = entry.get("state")
+            if current in order and order.index(current) >= order.index(state):
+                return
+            entry["state"] = state
+            field = self._STATE_FIELDS[state]
+            if entry.get(field) is None:
+                entry[field] = datetime.now(timezone.utc).isoformat()
+            self._flush_locked()
+
+    def unlaunched(self) -> int:
+        """Shards this run left submitted but never launched."""
+        with self._lock:
+            entries = {**self.prior, **self._entries}
+            return sum(1 for e in entries.values() if e.get("state") == "submitted")
 
     def flush(self) -> None:
         with self._lock:
@@ -3802,6 +3868,7 @@ class _ShardManifest:
             "schema_version": 1,
             "fingerprint": self._fingerprint,
             "hosts": self._hosts,
+            **self._location,
             "shards": [entries[key] for key in sorted(entries, key=int)],
         }
         _write_batch_receipt(self._path, document)
@@ -3876,6 +3943,39 @@ def _poll_status_interruptibly(
         _signal_handlers_restore(prev_handlers)
 
 
+def _ignore_phase(state: str) -> None:
+    """The ``on_phase`` default: no shard map to tell."""
+
+
+def _launch_attached_if_unlaunched(
+    config: BatchConfig,
+    job_id: str,
+    *,
+    runner: remote_transport.CommandRunner | None,
+    now: Callable[[], str],
+    notify: Callable[[str], None],
+) -> str | None:
+    """Launch a re-attached job the shard map says was never launched (issue
+    #3896), but only while the fleet has published no ``status.json`` -- one
+    that exists means a launch already happened, and a second would
+    double-bill. Returns the launch timestamp, or ``None`` when no launch was
+    needed."""
+    run = runner if runner is not None else _run_subprocess
+    if _read_status(config, job_id, run) is not None:
+        notify("launched")
+        return None
+    notify("launching")
+    launch_job(config, job_id, runner=runner)
+    launched_at = now()
+    notify("launched")
+    sys.stderr.write(
+        f"klt sim: batch job {job_id} had been submitted but never "
+        "launched; launched it\n"
+    )
+    sys.stderr.flush()
+    return launched_at
+
+
 def _run_batch_job(
     *,
     config: BatchConfig,
@@ -3895,6 +3995,8 @@ def _run_batch_job(
     attach: bool = False,
     now: Callable[[], str] = _utc_now,
     receipt_name: str | None = None,
+    on_phase: Callable[[str], None] | None = None,
+    launch_if_unlaunched: bool = False,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """Submit, wait for, and collect **one** batch job's worth of corners --
     the shared body of the single-job ``batch`` backend (:func:`_run_batch`)
@@ -3918,12 +4020,19 @@ def _run_batch_job(
     ``job.json`` (else :data:`BATCH_UNKNOWN_JOB_CODE`) and the call goes
     straight to polling and collecting. A job Spot-reclaimed mid-run is
     still waited on, never re-launched (see :func:`poll_status`).
+    ``launch_if_unlaunched`` (issue #3896; attach only) is for a job the
+    shard map records as submitted but never launched: it is launched first,
+    but only while the fleet has published no ``status.json`` -- one that
+    exists means a launch already happened, and a second would double-bill.
+    ``on_phase`` is told ``"submitted"``, ``"launching"`` and ``"launched"``
+    as the job reaches each, so a shard map can record them durably.
 
     The returned environment also carries client-observed wall-clock
     timestamps (``client_submitted_at``, ``client_launched_at``,
     ``client_status_terminal_at``, ``client_collected_at``; ``now`` is the
     clock seam). A phase that was not reached is ``None``, never fabricated.
     """
+    notify = on_phase if on_phase is not None else _ignore_phase
     if attach:
         if not job_exists(config, job_id, runner=runner):
             raise BatchError(
@@ -3931,6 +4040,16 @@ def _run_batch_job(
                 f"prefix {config.jobs_prefix!r} (never submitted, wrong "
                 "bucket/profile/region, or expired)",
                 code=BATCH_UNKNOWN_JOB_CODE,
+            )
+        attach_timestamps: dict[str, str | None] = {
+            "client_submitted_at": None,
+            "client_launched_at": None,
+            "client_status_terminal_at": None,
+            "client_collected_at": None,
+        }
+        if launch_if_unlaunched:
+            attach_timestamps["client_launched_at"] = _launch_attached_if_unlaunched(
+                config, job_id, runner=runner, now=now, notify=notify
             )
         return _poll_and_collect(
             config=config,
@@ -3942,12 +4061,7 @@ def _run_batch_job(
             measurements_spec=measurements_spec,
             runner=runner,
             sleep=sleep,
-            timestamps={
-                "client_submitted_at": None,
-                "client_launched_at": None,
-                "client_status_terminal_at": None,
-                "client_collected_at": None,
-            },
+            timestamps=attach_timestamps,
             now=now,
         )
     spec = _prepare_batch_job_spec(
@@ -3968,9 +4082,12 @@ def _run_batch_job(
         "client_collected_at": None,
     }
     submit_job(config, job_id, spec, runner=runner)
+    notify("submitted")
     _report_progress(job_id, "submitted")
+    notify("launching")
     launch_job(config, job_id, runner=runner)
     timestamps["client_launched_at"] = now()
+    notify("launched")
     # Issue #2978: name the job on stderr the moment it exists, so a caller
     # killed by an outer wall-clock limit knows what it orphaned.
     sys.stderr.write(
@@ -4139,6 +4256,7 @@ def _run_batch(
     probe_abort: dict[str, Any] | None = None,
     request_dir: str | None = None,
     attach_job_id: str | None = None,
+    shard_fingerprint: str | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``batch`` backend: submit the whole corner matrix to 2am's EDA
     batch fleet as one job and collect its report back out of S3.
@@ -4176,6 +4294,11 @@ def _run_batch(
     the default ``"warn"`` submits it with a stderr warning, and either way
     the assessment is reported as ``environment.remote.job_ceiling``. The
     ``hosts > 1`` path (:func:`_run_batch_fleet`) is unchanged.
+
+    ``shard_fingerprint`` (issue #3896) is the request's resume fingerprint for
+    a split reroute that has no checkpoint (a run without ``--resume``): it
+    makes the split write its shard map anyway, so a stopped client leaves
+    a record of which jobs were submitted and which launched.
 
     ``attach_job_id`` (issue #2978) re-attaches to that already-submitted job
     instead of submitting a new one: no job-ceiling assessment, no upload, no
@@ -4246,9 +4369,8 @@ def _run_batch(
                 measurements_spec=measurements_spec,
                 request_dir=request_dir,
                 config=config,
-                shard_fingerprint=None
-                if checkpoint is None
-                else checkpoint.fingerprint,
+                shard_fingerprint=shard_fingerprint
+                or (None if checkpoint is None else checkpoint.fingerprint),
                 resume=checkpoint is not None,
             )
         except BatchError as exc:
@@ -4295,6 +4417,59 @@ def _feature_diagnostic_field(config: BatchConfig) -> dict[str, Any]:
     if config.feature_diagnostic is None:
         return {}
     return {"request_feature_diagnostic": config.feature_diagnostic}
+
+
+def _open_shard_manifest(
+    artifacts_dir: str,
+    shard_fingerprint: str | None,
+    hosts: int,
+    *,
+    resume: bool,
+    config: BatchConfig,
+) -> _ShardManifest | None:
+    """Open the run's shard map, recording where the jobs live (issue #3896);
+    ``None`` when the request has no fingerprint to key it by."""
+    if shard_fingerprint is None:
+        return None
+    return _ShardManifest.open(
+        artifacts_dir,
+        shard_fingerprint,
+        hosts,
+        resume=resume,
+        location={
+            "bucket": getattr(config, "bucket", None),
+            "jobs_prefix": getattr(config, "jobs_prefix", None),
+            "region": getattr(config, "region", None),
+            "profile": getattr(config, "profile", None),
+        },
+    )
+
+
+def _prerecord_shards(
+    manifest: _ShardManifest | None, shard_indexes: dict[str, int]
+) -> None:
+    """Give every shard an entry before the first one is submitted (issue
+    #3896), so a client stopped mid-run leaves a record of the shards it
+    never reached, not only of those it got to."""
+    if manifest is None:
+        return
+    for digest, index in shard_indexes.items():
+        prior = manifest.prior.get(str(index))
+        if prior is None or prior["units_sha256"] != digest:
+            manifest.record(index, new_job_id(), digest)
+
+
+def _warn_unlaunched(manifest: _ShardManifest | None, hosts: int) -> None:
+    """Tell the caller about shards left submitted but never launched, and how
+    to launch them (issue #3896)."""
+    if manifest is None or not manifest.unlaunched():
+        return
+    print(
+        f"klt sim: {manifest.unlaunched()} of {hosts} batch job(s) were "
+        f"submitted but never launched; rerun with --resume and the "
+        f"same outdir to launch them (shard map: {manifest.path})",
+        file=sys.stderr,
+    )
 
 
 def _run_batch_fleet(
@@ -4355,21 +4530,18 @@ def _run_batch_fleet(
             "still be billed; use hosts <= corner/sample count"
         )
 
-    manifest = (
-        _ShardManifest.open(artifacts_dir, shard_fingerprint, hosts, resume=resume)
-        if shard_fingerprint is not None
-        else None
+    if config is None:
+        config = _resolve_batch_config(
+            request, corner_count=len(corner_points), timeout_s=timeout_s
+        )
+    manifest = _open_shard_manifest(
+        artifacts_dir, shard_fingerprint, hosts, resume=resume, config=config
     )
     shard_indexes = {
         _units_digest(points): index
         for index, points in enumerate(_shard_corner_points(corner_points, hosts))
         if points
     }
-
-    if config is None:
-        config = _resolve_batch_config(
-            request, corner_count=len(corner_points), timeout_s=timeout_s
-        )
     # Stage (and discard) the whole job closure once, before any shard's
     # first S3 write: an unstageable include or model input (issue #2668)
     # must refuse the submit, not surface as K lost shards after some of
@@ -4383,8 +4555,15 @@ def _run_batch_fleet(
         backend="batch",
     )
 
+    _prerecord_shards(manifest, shard_indexes)
+
     def _run_shard(
-        shard_points: list[CornerPoint], job_id: str, *, attach: bool
+        shard_points: list[CornerPoint],
+        job_id: str,
+        *,
+        attach: bool,
+        index: int | None = None,
+        launch_if_unlaunched: bool = False,
     ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
         # The job id doubles as the shard's artifacts subdirectory, so
         # per-shard artifact trees never collide and each one is traceable
@@ -4407,6 +4586,10 @@ def _run_batch_fleet(
             request_dir=request_dir,
             receipt_name=f"batch-receipt-{job_id}.json",
             attach=attach,
+            launch_if_unlaunched=launch_if_unlaunched,
+            on_phase=None
+            if manifest is None or index is None
+            else lambda state: manifest.mark(index, state),
         )
 
     def _shard_runner(
@@ -4415,24 +4598,53 @@ def _run_batch_fleet(
         digest = _units_digest(shard_points)
         index = shard_indexes[digest]
         prior = manifest.prior.get(str(index)) if manifest is not None else None
+        job_id = None if manifest is None else manifest.planned_job_id(index)
         if prior is not None and prior["units_sha256"] == digest:
             result = _try_reattach_shard(
-                lambda: _run_shard(shard_points, str(prior["job_id"]), attach=True),
+                lambda: _run_shard(
+                    shard_points,
+                    str(prior["job_id"]),
+                    attach=True,
+                    index=index,
+                    # Only an entry that says "submitted" (launch never
+                    # started) is launched; older maps carry no state.
+                    launch_if_unlaunched=prior.get("state") == "submitted",
+                ),
                 job_id=str(prior["job_id"]),
             )
             if result is not None:
+                _mark_collected(manifest, index, result)
                 return _mark_resumed(result, True)
-        job_id = new_job_id()
-        if manifest is not None:
-            manifest.record(index, job_id, digest)
-        return _mark_resumed(_run_shard(shard_points, job_id, attach=False), False)
+            job_id = None
+        if job_id is None:
+            job_id = new_job_id()
+            if manifest is not None:
+                manifest.record(index, job_id, digest)
+        result = _run_shard(shard_points, job_id, attach=False, index=index)
+        _mark_collected(manifest, index, result)
+        return _mark_resumed(result, False)
 
-    return _run_sharded(
-        shard_runner=_shard_runner,
-        corner_points=corner_points,
-        hosts=hosts,
-        measurements_spec=measurements_spec,
-    )
+    try:
+        return _run_sharded(
+            shard_runner=_shard_runner,
+            corner_points=corner_points,
+            hosts=hosts,
+            measurements_spec=measurements_spec,
+        )
+    finally:
+        _warn_unlaunched(manifest, hosts)
+
+
+def _mark_collected(
+    manifest: _ShardManifest | None,
+    index: int,
+    result: tuple[list[dict[str, Any]], str | None, dict[str, Any] | None],
+) -> None:
+    """Record a shard whose outputs were actually collected (issue #3896);
+    a failed or timed-out job returns unrun corners and stays ``launched``."""
+    environment = result[2]
+    if manifest is not None and environment and environment.get("client_collected_at"):
+        manifest.mark(index, "collected")
 
 
 def _try_reattach_shard(
