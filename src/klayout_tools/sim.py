@@ -87,7 +87,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from typing import IO, Any, NamedTuple
@@ -3018,6 +3018,11 @@ def _prepare_sim_request(
     # Issue #3036: the rule grammar is validated up front; the rules are
     # resolved onto points after expansion, before any dispatch.
     nodeset_rules = _validate_nodeset_rules(options.get("nodeset"))
+    # Issue #3881: same grammar, applied as `.ic` + `uic` on a transient.
+    ic_rules = _validate_nodeset_rules(
+        options.get("initial_conditions"), label=_IC_LABEL
+    )
+    _require_plain_tran_for_ic(bool(ic_rules), analysis)
 
     # Timeout budget preflight (issue #1686): a coarse, pre-grid sanity
     # check -- never blocks the sweep, only surfaces an advisory string. See
@@ -3063,6 +3068,7 @@ def _prepare_sim_request(
         save_vectors_declared=save_vectors_declared,
         ngspice_options_declared=bool(ngspice_options),
         nodeset_declared=bool(nodeset_rules),
+        initial_conditions_declared=bool(ic_rules),
         analysis_steps_declared=sim_steps.is_steps_analysis(analysis),
         crossings_declared=bool(
             sim_crossings.crossings_measurements(measurements_spec)
@@ -3085,6 +3091,12 @@ def _prepare_sim_request(
     # against its subset of the points.
     _apply_nodeset_rules(
         corner_points, nodeset_rules if explicit_points_wire is None else []
+    )
+    _apply_nodeset_rules(
+        corner_points,
+        ic_rules if explicit_points_wire is None else [],
+        label=_IC_LABEL,
+        attr="initial_conditions",
     )
     if explicit_points_wire is not None:
         # Internal-only escape hatch: never set by an external caller or the
@@ -3699,6 +3711,14 @@ def _run_sim_corners(
 
     _require_params_echo(dispatch_points, corners_new, backend=backend)
     _require_nodeset_echo(dispatch_points, corners_new, backend=backend)
+    _require_nodeset_echo(
+        dispatch_points,
+        corners_new,
+        backend=backend,
+        label=_IC_LABEL,
+        attr="initial_conditions",
+        code=IC_UNSUPPORTED_WORKER_CODE,
+    )
     _require_options_echo(dispatch_points, corners_new, backend=backend)
     _record_batch_checkpoint(checkpoint, backend, corners_new, backend_engine_version)
 
@@ -4365,6 +4385,7 @@ def _build_dry_run_report(
     for point in corner_points:
         unit: dict[str, Any] = {"corner_id": point.corner_id}
         unit.update(_nodeset_report_field(point))
+        unit.update(_ic_report_field(point))
         if point.sample_index is not None:
             unit["sample_index"] = point.sample_index
         if point.mc_seed is not None:
@@ -4732,6 +4753,11 @@ class CornerPoint:
     ``{}`` for a point no ``options.nodeset`` rule matched. It is a solver
     hint, not part of the point's identity: it never changes :attr:`corner_id`.
 
+    ``initial_conditions`` (issue #3881) is the same shape for
+    ``options.initial_conditions``: the ``{lowercase node: volts}`` transient
+    start state, rendered as ``.ic`` cards plus ``uic`` on the analysis.
+    Like ``nodeset`` it never changes :attr:`corner_id`.
+
     ``options`` (issue #3125) is the same for the ``corners.options`` axis: the
     normalized ``{solver option: number}`` row, ``{}`` when the request has
     no such axis (and then the IDs/slugs are untouched).
@@ -4773,6 +4799,7 @@ class CornerPoint:
         "temperature_c",
         "params",
         "nodeset",
+        "initial_conditions",
         "options",
         "sample_index",
         "mc_seed",
@@ -4792,6 +4819,7 @@ class CornerPoint:
         process_section_libs_resolved: list[str | None] | None = None,
         params: dict[str, int | float] | None = None,
         nodeset: dict[str, float] | None = None,
+        initial_conditions: dict[str, float] | None = None,
         options: dict[str, int | float] | None = None,
         sample_index: int | None = None,
         mc_seed: dict[str, Any] | None = None,
@@ -4803,6 +4831,7 @@ class CornerPoint:
         self.process = process
         self.params: dict[str, int | float] = params or {}
         self.nodeset: dict[str, float] = nodeset or {}
+        self.initial_conditions: dict[str, float] = initial_conditions or {}
         self.options: dict[str, int | float] = options or {}
         self.process_sections = process_sections
         self.process_section_libs = process_section_libs
@@ -4887,6 +4916,15 @@ def _params_report_field(point: CornerPoint) -> dict[str, Any]:
     """The additive ``params`` field of a corner report: present only for a
     point on a ``corners.params`` axis, so every other report is unchanged."""
     return {"params": dict(point.params)} if point.params else {}
+
+
+def _ic_report_field(point: CornerPoint) -> dict[str, Any]:
+    """The additive ``initial_conditions`` field of a corner report (issue
+    #3881): present only for a point an ``options.initial_conditions`` rule
+    selected."""
+    if not point.initial_conditions:
+        return {}
+    return {"initial_conditions": dict(point.initial_conditions)}
 
 
 def _nodeset_report_field(point: CornerPoint) -> dict[str, Any]:
@@ -5284,6 +5322,9 @@ def _corner_points_to_wire(points: list[CornerPoint]) -> list[dict[str, Any]]:
             # Issue #3036: the already-selected map, never the rules -- a
             # shard holds a subset of the points and could not re-resolve them.
             entry["nodeset"] = point.nodeset
+        if point.initial_conditions:
+            # Issue #3881: likewise the selected map, never the rules.
+            entry["initial_conditions"] = point.initial_conditions
         if point.options:
             # Issue #3125: likewise additive, only for an options point.
             entry["options"] = point.options
@@ -5336,6 +5377,14 @@ def _corner_points_from_wire(data: Any) -> list[CornerPoint]:
             if raw_nodeset is not None
             else {}
         )
+        raw_ic = entry.get("initial_conditions")
+        initial_conditions = (
+            _normalize_nodeset_values(
+                raw_ic, "request._explicit_points[].initial_conditions"
+            )
+            if raw_ic is not None
+            else {}
+        )
         raw_options = entry.get("options")
         options = (
             _normalize_option_row(raw_options, "request._explicit_points[].options")
@@ -5351,6 +5400,7 @@ def _corner_points_from_wire(data: Any) -> list[CornerPoint]:
                 process_section_libs=section_libs,
                 params=params,
                 nodeset=nodeset,
+                initial_conditions=initial_conditions,
                 options=options,
                 sample_index=entry.get("sample_index"),
                 mc_seed=entry.get("mc_seed"),
@@ -5979,7 +6029,9 @@ def _validate_nodeset_match(raw: Any, where: str) -> dict[str, Any]:
     }
 
 
-def _validate_nodeset_rules(value: Any) -> list[dict[str, Any]]:
+def _validate_nodeset_rules(
+    value: Any, *, label: str = "options.nodeset"
+) -> list[dict[str, Any]]:
     """Validate ``options.nodeset`` (issue #3036) into normalized rules
     ``[{"match": {...}, "values": {node: volts}}]``; ``[]`` when omitted or
     empty, so a legacy request is untouched."""
@@ -5987,12 +6039,12 @@ def _validate_nodeset_rules(value: Any) -> list[dict[str, Any]]:
         return []
     if not isinstance(value, list):
         raise SimError(
-            "options.nodeset must be an array of {match, values} rules "
+            f"{label} must be an array of {{match, values}} rules "
             f"(got {json.dumps(value, default=repr)})"
         )
     rules: list[dict[str, Any]] = []
     for index, rule in enumerate(value):
-        where = f"options.nodeset[{index}]"
+        where = f"{label}[{index}]"
         if not isinstance(rule, dict) or set(rule) != set(_NODESET_RULE_KEYS):
             raise SimError(
                 f"{where} must be an object with exactly the keys "
@@ -6008,7 +6060,9 @@ def _validate_nodeset_rules(value: Any) -> list[dict[str, Any]]:
 
 
 def _check_nodeset_selector_names(
-    points: list[CornerPoint], rules: list[dict[str, Any]]
+    points: list[CornerPoint],
+    rules: list[dict[str, Any]],
+    label: str = "options.nodeset",
 ) -> None:
     """A selector naming a parameter or supply rail no point carries could
     never match, so it is refused by name rather than as an unused rule."""
@@ -6019,19 +6073,23 @@ def _check_nodeset_selector_names(
         for name in match.get("params", {}):
             if name not in declared_params:
                 raise SimError(
-                    f"options.nodeset[{index}].match.params names {name!r}, "
+                    f"{label}[{index}].match.params names {name!r}, "
                     "which is not a corners.params parameter of this request"
                 )
         for rail in match.get("supply_v", {}):
             if str(rail) not in declared_rails:
                 raise SimError(
-                    f"options.nodeset[{index}].match.supply_v names rail "
+                    f"{label}[{index}].match.supply_v names rail "
                     f"{rail!r}, which no corner of this request sets"
                 )
 
 
 def _apply_nodeset_rules(
-    points: list[CornerPoint], rules: list[dict[str, Any]]
+    points: list[CornerPoint],
+    rules: list[dict[str, Any]],
+    *,
+    label: str = "options.nodeset",
+    attr: str = "nodeset",
 ) -> None:
     """Resolve ``options.nodeset`` rules onto ``points`` in place (issue
     #3036). Runs once, after corner expansion and exclusions and before Monte
@@ -6044,7 +6102,7 @@ def _apply_nodeset_rules(
     """
     if not rules:
         return
-    _check_nodeset_selector_names(points, rules)
+    _check_nodeset_selector_names(points, rules, label)
     used = [False] * len(rules)
     for point in points:
         hits = [
@@ -6052,16 +6110,16 @@ def _apply_nodeset_rules(
         ]
         if len(hits) > 1:
             raise SimError(
-                f"options.nodeset rules {hits[0]} and {hits[1]} both match "
+                f"{label} rules {hits[0]} and {hits[1]} both match "
                 f"corner {point.corner_id!r}; overlapping rules are never "
                 "merged -- make the selectors disjoint"
             )
         if hits:
             used[hits[0]] = True
-            point.nodeset = dict(rules[hits[0]]["values"])
+            setattr(point, attr, dict(rules[hits[0]]["values"]))
     if not all(used):
         raise SimError(
-            f"options.nodeset[{used.index(False)}] matches no retained corner "
+            f"{label}[{used.index(False)}] matches no retained corner "
             "of this request (every declared rule must apply somewhere)"
         )
 
@@ -6119,9 +6177,13 @@ def _require_nodeset_echo(
     corners: list[dict[str, Any]],
     *,
     backend: str = "remote",
+    label: str = "options.nodeset",
+    attr: str = "nodeset",
+    code: str = NODESET_UNSUPPORTED_WORKER_CODE,
 ) -> None:
     """Fail the request when an off-host worker did not honor
-    ``options.nodeset`` (issue #3036).
+    ``options.nodeset`` (issue #3036) -- or, with ``label``/``attr``/``code``
+    of ``options.initial_conditions``, that field (issue #3881).
 
     A worker built before the field ignores the hints and would report a
     passing, unhinted solve; one that supports it echoes each point's
@@ -6129,7 +6191,7 @@ def _require_nodeset_echo(
     dispatched. Independent of any version check, so it also catches a
     same-release runner image built before the feature landed.
     """
-    if backend not in _OFFHOST_BACKENDS or not any(p.nodeset for p in points):
+    if backend not in _OFFHOST_BACKENDS or not any(getattr(p, attr) for p in points):
         return
     problem: str | None = None
     if len(corners) != len(points):
@@ -6139,21 +6201,71 @@ def _require_nodeset_echo(
         )
     else:
         for point, corner in zip(points, corners, strict=True):
-            if (corner.get("nodeset") or {}) != point.nodeset:
+            expected = getattr(point, attr)
+            if (corner.get(attr) or {}) != expected:
                 problem = (
-                    f"corner {point.corner_id!r} came back with nodeset "
-                    f"{corner.get('nodeset')!r}, expected {point.nodeset!r}"
+                    f"corner {point.corner_id!r} came back with {attr} "
+                    f"{corner.get(attr)!r}, expected {expected!r}"
                 )
                 break
     if problem is not None:
         raise SimError(
-            "the remote/batch worker did not honor options.nodeset -- "
-            f"{problem}. A worker built before the field (issue #3036) "
-            "ignores it and would solve without the requested initial "
-            "guesses; update the runner image to this klt release, or use a "
-            "local backend. No result was reported",
-            code=NODESET_UNSUPPORTED_WORKER_CODE,
+            f"the remote/batch worker did not honor {label} -- "
+            f"{problem}. A worker built before the field ignores it and "
+            "would solve without the requested initial values; update the "
+            "runner image to this klt release, or use a local backend. No "
+            "result was reported",
+            code=code,
         )
+
+
+# --------------------------------------------------------------------------- #
+# Transient start states: `options.initial_conditions` (issue #3881)
+# --------------------------------------------------------------------------- #
+#
+# Same rule grammar and per-point resolution as `options.nodeset`, but the
+# map is a transient *start state*: `.ic v(node)=volts` cards plus `uic` on
+# the `tran` command (a `.nodeset` is only a DC-solve guess and is dropped
+# once `uic` skips the operating point).
+
+_IC_LABEL = "options.initial_conditions"
+IC_UNSUPPORTED_WORKER_CODE = "initial_conditions_unsupported_worker"
+
+
+def _require_plain_tran_for_ic(declared: bool, analysis: dict[str, Any]) -> None:
+    """``uic`` is a ``tran`` flag, so a start state needs a plain transient
+    analysis; step/pass/two-port sequences and other kinds are refused up
+    front rather than silently run without it."""
+    if not declared:
+        return
+    if (
+        sim_steps.is_steps_analysis(analysis)
+        or str(analysis.get("kind", "")).lower() != "tran"
+    ):
+        raise SimError(
+            f"{_IC_LABEL} requires a single analysis of kind 'tran' "
+            "(`.ic` is applied with the `uic` flag of the transient command)"
+        )
+
+
+def _ic_cards(point: CornerPoint) -> list[str]:
+    """One file-scope ``.ic`` card per node of the point's start state."""
+    return [
+        f".ic v({node})={volts!r}"
+        for node, volts in sorted(
+            (getattr(point, "initial_conditions", None) or {}).items()
+        )
+    ]
+
+
+def _ic_analysis_args(point: CornerPoint, args: str) -> str:
+    """``args`` with ``uic`` appended for a point carrying a start state,
+    unless the request already spells it; untouched otherwise."""
+    if not getattr(point, "initial_conditions", None):
+        return args
+    if "uic" in str(args).lower().split():
+        return args
+    return f"{args} uic".strip()
 
 
 # --------------------------------------------------------------------------- #
@@ -6817,6 +6929,7 @@ def _expand_monte_carlo(
                     params=base.params,
                     variant=base.variant,
                     nodeset=base.nodeset,
+                    initial_conditions=base.initial_conditions,
                     options=base.options,
                     sample_index=sample_index,
                     mc_seed=mc_seed,
@@ -6871,6 +6984,21 @@ def _open_resume_checkpoint(
     checkpoint.completed = dict(pre_completed)
     checkpoint.engine_version = loaded_engine_version
     return pre_completed, loaded_engine_version, checkpoint
+
+
+def _key_in_initial_conditions(
+    payload: dict[str, Any], corner_points: Sequence[CornerPoint]
+) -> None:
+    """Issue #3881: a start state changes the transient result, so a changed
+    map must not reuse a stored one. Keyed in only when present, leaving every
+    legacy fingerprint untouched."""
+    ics = {
+        point.corner_id: point.initial_conditions
+        for point in corner_points
+        if point.initial_conditions
+    }
+    if ics:
+        payload["initial_conditions"] = ics
 
 
 def _checkpoint_fingerprint(
@@ -6962,6 +7090,7 @@ def _checkpoint_fingerprint(
         payload["nodeset"] = {
             point.corner_id: point.nodeset for point in corner_points if point.nodeset
         }
+    _key_in_initial_conditions(payload, corner_points)
     if corner_section_libs:
         # Issue #2522: a corner's per-section libraries determine its device
         # models exactly as `models.lib` does, so editing one must invalidate
@@ -7216,6 +7345,7 @@ def _enforce_xyce_support_boundary(
     save_vectors_declared: bool = False,
     ngspice_options_declared: bool = False,
     nodeset_declared: bool = False,
+    initial_conditions_declared: bool = False,
     analysis_steps_declared: bool = False,
     crossings_declared: bool = False,
     cycle_mean_declared: bool = False,
@@ -7323,6 +7453,12 @@ def _enforce_xyce_support_boundary(
         if declared:
             raise SimError(message)
     _refuse_xyce_nodeset(nodeset_declared)
+    if initial_conditions_declared:
+        raise SimError(
+            "options.initial_conditions is not supported for engine 'xyce': "
+            "start states are applied as ngspice `.ic` cards with `uic`; use "
+            "engine 'ngspice' or omit options.initial_conditions"
+        )
 
 
 def _run_local(
@@ -9363,6 +9499,7 @@ def _run_corner(
         "temperature_c": point.temperature_c,
         **_params_report_field(point),
         **_nodeset_report_field(point),
+        **_ic_report_field(point),
         **_options_report_field(point),
         "status": status,
         "runtime_s": runtime_s,
@@ -10446,6 +10583,10 @@ def _write_corner_deck(
     # Issue #3036: after the `.include`, so a request hint beats a body-level
     # `.nodeset` on the same node; nothing is emitted for a legacy point.
     lines.extend(_nodeset_cards(point))
+    # Issue #3881: file-scope `.ic` cards, after the `.include` so a request
+    # start state beats a body-level `.ic` on the same node; the matching
+    # `uic` is added to the analysis command in `_corner_deck_control_lines`.
+    lines.extend(_ic_cards(point))
 
     for spec in measurements_spec:
         if spec.get("spice") is not None:
@@ -10679,7 +10820,7 @@ def _corner_deck_control_lines(
         or complex_vector_lines
     ):
         lines.append("set filetype=ascii")
-    lines.append(f"{analysis['kind']} {analysis['args']}")
+    lines.append(f"{analysis['kind']} {_ic_analysis_args(point, analysis['args'])}")
     if raw_path is not None:
         lines.append(f"write {raw_path}")
     expr_specs = _expr_measurements(measurements_spec)
