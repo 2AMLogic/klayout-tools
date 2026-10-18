@@ -20,6 +20,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   file defining it and includes the replacement in its place; the report gains
   an additive `environment.netlist_overrides` record. Local backends only.
   See `docs/cli/sim.md`.
+- **`klt signoff` item 5 derives spec-row coverage from the cited envelope**
+  (issue #3778): `klt sim` measurements accept an optional `spec_row` string
+  (echoed on the rollup entry only when declared). A citation with `rows`
+  whose envelope carries `spec_row` tags covers only the rows a passing,
+  limited, tagged measurement grades; untagged envelopes keep the
+  manifest-asserted rows. `row_coverage.row_sources` marks each row
+  `derived` or `asserted`. Additive; no `schema_version` bump.
+
 - 2026-10-18 — **`klt place-and-route` pin placement** (issue #3885): new
   optional `io.pin_constraints` (edge, optional `range_um`, optional `ordered`
   per port group) emits `set_io_pin_constraint` before `place_pins`, and the
