@@ -226,6 +226,7 @@ class DrcError(Exception):
 CODE_KLAYOUT_UNAVAILABLE = "klayout_unavailable"
 CODE_KLAYOUT_VERSION_TOO_OLD = "klayout_version_too_old"
 CODE_NEGATIVE_CONTROL_FAILED = "negative_control_failed"
+CODE_MULTIPLE_TOP_CELLS = "multiple_top_cells"
 
 
 #: The one top-level field a ``klt drc`` request document must carry (issue

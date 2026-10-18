@@ -623,3 +623,218 @@ def test_validate_layout_cli_rejects_a_contaminated_run(
     assert any(
         "cross-arm contamination" in e for r in payload["runs"] for e in r["errors"]
     )
+
+
+# --------------------------------------------------------------------------
+# Frozen task corpus and validity gate (issue #3025)
+# --------------------------------------------------------------------------
+
+CORPUS = layout.CORPUS_DIR
+CORPUS_TASK_IDS = sorted(
+    p.name for p in CORPUS.iterdir() if (p / "task.json").is_file()
+)
+
+
+def _pdk_available() -> bool:
+    from klayout_tools import pdk
+
+    try:
+        pdk.find_pdk("sky130A")
+    except pdk.PdkNotFoundError:
+        return False
+    return True
+
+
+needs_pdk = pytest.mark.skipif(
+    not _pdk_available(), reason="sky130A PDK not resolvable (klt gen needs it)"
+)
+
+
+def _corpus_task(task_id: str) -> dict[str, Any]:
+    return _load(CORPUS / task_id / "task.json")
+
+
+def test_corpus_has_four_to_six_tasks() -> None:
+    assert layout.CORPUS_TASKS_MIN <= len(CORPUS_TASK_IDS) <= layout.CORPUS_TASKS_MAX
+
+
+@pytest.mark.parametrize("task_id", CORPUS_TASK_IDS)
+def test_corpus_task_descriptor_is_bound_and_complete(task_id: str) -> None:
+    task = _corpus_task(task_id)
+    result = layout.validate_task(
+        task, filename_stem=task_id, repo_root=layout.REPO_ROOT
+    )
+    assert result["valid"], result["errors"]
+    assert not layout._agent_input_errors(task)
+    assert not layout._control_coverage_errors(task)
+    # Eligibility is recorded for every protocol rule and every arm.
+    protocol = layout.load_protocol()
+    rule_ids = {r["id"] for r in protocol["task_eligibility"]["rules"]}
+    assert set(task["eligibility"]["rules"]) == rule_ids
+    assert set(task["eligibility"]["arms"]) == {a["id"] for a in protocol["arms"]}
+
+
+@pytest.mark.parametrize("task_id", CORPUS_TASK_IDS)
+def test_corpus_ships_no_scored_candidate_layout(task_id: str) -> None:
+    task = _corpus_task(task_id)
+    assert all(not p.endswith((".gds", ".oas")) for p in task["agent_inputs"])
+    assert task["agent_inputs"] == [task["frozen_netlist"]["path"]]
+
+
+def test_agent_inputs_reject_layout_and_scorer_only_files() -> None:
+    task = _corpus_task(CORPUS_TASK_IDS[0])
+    for leaked in (task["reference_layout"]["path"], task["generator_recipe"]["path"]):
+        bad = copy.deepcopy(task)
+        bad["agent_inputs"].append(leaked)
+        assert any(leaked in e for e in layout._agent_input_errors(bad))
+    bad = copy.deepcopy(task)
+    bad["agent_inputs"] = ["somewhere/candidate.gds"]
+    assert any("layout stream" in e for e in layout._agent_input_errors(bad))
+    bad = copy.deepcopy(task)
+    del bad["agent_inputs"]
+    assert layout._agent_input_errors(bad)
+
+
+def test_task_needs_a_control_for_each_failing_check() -> None:
+    task = _corpus_task(CORPUS_TASK_IDS[0])
+    task["negative_controls"] = [
+        c for c in task["negative_controls"] if c["expected_failure"] == "drc"
+    ]
+    assert any("no lvs control" in e for e in layout._control_coverage_errors(task))
+
+
+def test_corpus_exclusions_are_machine_readable() -> None:
+    document = _load(CORPUS / "exclusions.json")
+    protocol = layout.load_protocol()
+    rule_ids = {r["id"] for r in protocol["task_eligibility"]["rules"]}
+    assert document["exclusions"]
+    assert {e["reason"] for e in document["exclusions"]} <= rule_ids
+    assert not layout._schema_errors(
+        layout._validator(layout.EXCLUSIONS_SCHEMA_NAME), document
+    )
+
+
+def test_exclusion_cannot_also_be_a_scored_task(tmp_path: Path) -> None:
+    document = _load(CORPUS / "exclusions.json")
+    document["exclusions"][0]["id"] = CORPUS_TASK_IDS[0]
+    errors = layout._exclusion_errors(
+        document, set(CORPUS_TASK_IDS), layout.REPO_ROOT, tmp_path, layout.SCHEMA_DIR
+    )
+    assert any("all arms or none" in e for e in errors)
+
+
+def test_exclusion_rejects_unknown_reason(tmp_path: Path) -> None:
+    document = _load(CORPUS / "exclusions.json")
+    document["exclusions"][0]["reason"] = "too_hard"
+    errors = layout._exclusion_errors(
+        document, set(), layout.REPO_ROOT, tmp_path, layout.SCHEMA_DIR
+    )
+    assert errors
+
+
+@needs_pdk
+def test_generator_reachable_exclusion_is_still_unreachable(tmp_path: Path) -> None:
+    document = _load(CORPUS / "exclusions.json")
+    errors = layout._exclusion_errors(
+        document, set(CORPUS_TASK_IDS), layout.REPO_ROOT, tmp_path, layout.SCHEMA_DIR
+    )
+    assert errors == []
+    # Pointing the exclusion at a recipe that does reach a layout makes it stale.
+    reachable = CORPUS / CORPUS_TASK_IDS[0] / "recipe.json"
+    document["exclusions"][0]["recipe"] = {
+        "path": str(reachable.relative_to(layout.REPO_ROOT)),
+        "sha256": layout._sha256_path(reachable),
+    }
+    stale = layout._exclusion_errors(
+        document, set(CORPUS_TASK_IDS), layout.REPO_ROOT, tmp_path, layout.SCHEMA_DIR
+    )
+    assert any("stale" in e for e in stale)
+
+
+@needs_pdk
+@pytest.mark.parametrize("task_id", CORPUS_TASK_IDS)
+def test_every_reference_passes_its_frozen_gate(task_id: str, tmp_path: Path) -> None:
+    result = layout.check_task_gate(_corpus_task(task_id), layout.REPO_ROOT, tmp_path)
+    assert result["valid"], result["errors"]
+    assert result["reference"]["failed"] == []
+    assert result["recipe"]["failed"] == []
+
+
+@needs_pdk
+@pytest.mark.parametrize("task_id", CORPUS_TASK_IDS)
+def test_negative_controls_are_killed_by_their_own_check(
+    task_id: str, tmp_path: Path
+) -> None:
+    result = layout.check_task_gate(_corpus_task(task_id), layout.REPO_ROOT, tmp_path)
+    by_check = {c["expected_failure"]: c for c in result["negative_controls"]}
+    assert by_check["drc"]["failed"] == ["drc"]
+    assert by_check["lvs"]["failed"] == ["lvs"]
+    assert result["provenance_controls"] == {
+        "swapped_gds_rejected": True,
+        "wrong_netlist_rejected": True,
+    }
+
+
+@needs_pdk
+def test_replacing_the_scored_gds_after_the_checks_is_rejected(tmp_path: Path) -> None:
+    task = _corpus_task(CORPUS_TASK_IDS[0])
+    netlist = layout.REPO_ROOT / task["frozen_netlist"]["path"]
+    reference = layout.REPO_ROOT / task["reference_layout"]["path"]
+    checks = layout.run_checks(
+        reference, netlist, task["reference_layout"]["cell_name"], tmp_path
+    )
+    honest = layout.gate_verdict(
+        task["reference_layout"]["sha256"], checks, task["frozen_netlist"]["sha256"]
+    )
+    assert honest["failed"] == []
+    # The recorded reports vouch for the reference, not for a different stream.
+    other = task["negative_controls"][0]["sha256"]
+    swapped = layout.gate_verdict(other, checks, task["frozen_netlist"]["sha256"])
+    assert swapped["failed"] == ["provenance"]
+    assert len(swapped["provenance_errors"]) == 2
+    # ...nor for a different netlist.
+    wrong = layout.gate_verdict(task["reference_layout"]["sha256"], checks, "0" * 64)
+    assert wrong["failed"] == ["provenance"]
+
+
+@needs_pdk
+def test_drc_dirty_layout_is_rejected_by_the_gate(tmp_path: Path) -> None:
+    task = _corpus_task(CORPUS_TASK_IDS[0])
+    control = next(
+        c for c in task["negative_controls"] if c["expected_failure"] == "drc"
+    )
+    checks = layout.run_checks(
+        layout.REPO_ROOT / control["path"],
+        layout.REPO_ROOT / task["frozen_netlist"]["path"],
+        task["reference_layout"]["cell_name"],
+        tmp_path,
+    )
+    verdict = layout.gate_verdict(
+        control["sha256"], checks, task["frozen_netlist"]["sha256"]
+    )
+    assert verdict["failed"] == ["drc"]
+
+
+def test_top_cell_check_catches_a_renamed_wrapper(tmp_path: Path) -> None:
+    import klayout.db as pya
+
+    lay = pya.Layout()
+    inner = lay.create_cell("blk")
+    top = lay.create_cell("blk$1")
+    top.insert(pya.CellInstArray(inner.cell_index(), pya.Trans()))
+    path = tmp_path / "x.gds"
+    lay.write(str(path))
+    assert layout.top_cell_errors(path, "blk$1") == []
+    assert layout.top_cell_errors(path, "blk")
+
+
+@needs_pdk
+def test_validate_layout_corpus_cli_emits_json(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code = dab.main(["validate-layout", "--corpus"])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["corpus"]["schema"] == layout.CORPUS_REPORT_SCHEMA
+    assert payload["corpus"]["valid"] is True
+    assert sorted(t["task_id"] for t in payload["corpus"]["tasks"]) == CORPUS_TASK_IDS
