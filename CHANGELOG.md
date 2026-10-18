@@ -21,6 +21,16 @@ not `klt --version`, if you need to detect this kind of drift. See
   `power_basis` block (`activity_source`, `activity`, `duty`, `parasitics`).
   Requests without the field generate an unchanged Tcl script;
   `schema_version` is unchanged (additive).
+
+- **`klt lvs --deck sg13cmos5l` now matches the PDK's own stdcells** (issue
+  #3831): `sg13cmos5l_inv_1` draws no `nSD`, so its well tie (unimplanted
+  Activ in NWell) was not recognised and the compare reported
+  `device.unmatched`/`net.merged`/`net.split`. The deck now declares
+  `tap_nplus_complement=(14, 0)` (the sg13g2 #2591 form). Its pin names sit
+  on Metal1.text (8/25), so promote them with `label_layers: {"metal0":
+  [8, 25]}`; without it the verdict is `match` with `device.body_unverified`
+  warnings and one pin.
+
 - **`klt sta` driving cell / output load, and `*NAME_MAP` SPEFs** (issue
   #3742): `constraints.driving_cell` / `.driving_cells` emit
   `set_driving_cell` and `constraints.output_load_pf` / `.output_loads` emit

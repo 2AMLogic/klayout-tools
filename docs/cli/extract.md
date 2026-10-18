@@ -5954,8 +5954,11 @@ A DEF net whose name contains `.` (a flattened hierarchical name such as
 `top.sub/_n1_`) is renamed by the extractor to its dot-free spelling
 (`top_sub/_n1_`, or a collision-suffixed `_1`, `_2`, ... — see
 "Hierarchical net names are dot-free"). `--def-net-connections` keys follow
-that same rename, so the net keeps its `*CONN` block under the rewritten
-`*D_NET` name (issue #2903). When a written `*D_NET` that corresponds to a
+that same rename, so the net keeps its `*CONN` block (issue #2903), and the
+SPEF `*D_NET`/`*CONN`/coupling references keep the **DEF's own** spelling
+(`top.sub/_n1_`) so a linked design's `read_spef` matches the net (issue
+#3900); only `nets[].name` and the SPICE netlist carry the dot-free spelling.
+When a written `*D_NET` that corresponds to a
 DEF net still ends up without instance `*CONN` pins (a duplicated net name
 stays port-only, or a dotted DEF name could not be matched), one
 `warnings[]` entry names the affected nets. The warning is additive; the

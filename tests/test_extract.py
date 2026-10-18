@@ -26626,6 +26626,58 @@ def test_remap_def_net_connections_follows_collision_suffix():
     assert _remap_def_net_connections(None, renames) is None
 
 
+def test_remap_def_net_connections_keeps_def_spef_spelling_and_port_pins():
+    """Issue #3900: the renamed key keeps the DEF's own SPEF spelling (so
+    `*D_NET` matches the linked design's net) while comparing equal to the
+    rewritten SPICE name; `port_pins` survives the rename, and a collision
+    still maps each DEF net to its own distinct SPEF name."""
+    from klayout_tools.extract import (
+        _remap_def_net_connections,
+        _rewrite_dotted_net_names,
+    )
+    from klayout_tools.extract_spef import (
+        DefName,
+        DefNetConnections,
+        _def_net_spellings,
+    )
+
+    netlist = kdb.Netlist()
+    circuit = kdb.Circuit()
+    circuit.name = "TOP"
+    netlist.add(circuit)
+    for name in ("a_b", "g[0].u_slice/_00_", "a.b"):
+        circuit.create_net(name)
+    renames = _rewrite_dotted_net_names(netlist)
+    after = {before: new for _c, before, new in renames}
+    assert after["g[0].u_slice/_00_"] == "g[0]_u_slice/_00_"
+
+    def_name = DefName(r"g\[0\].u_slice/_00_")
+    original = DefNetConnections(
+        {
+            def_name: (("u1", "A"),),
+            DefName("a.b"): (("u2", "B"),),
+            DefName("a_b"): (("u3", "C"),),
+            DefName("plain"): (("u4", "D"),),
+        },
+        {"a_b": ("PORT",)},
+    )
+    remapped = _remap_def_net_connections(original, renames)
+    assert "g[0]_u_slice/_00_" in remapped
+    assert remapped.port_pins == {"a_b": ("PORT",)}
+    spellings = _def_net_spellings(remapped, frozenset())
+    assert spellings["g[0]_u_slice/_00_"] == def_name.spef
+    assert "u_slice" in def_name.spef and "[0]_u" not in def_name.spef
+    # Collision: `a.b` -> `a_b_1` spells like the DEF's `a.b`, `a_b` its own.
+    assert spellings["a_b_1"] != spellings["a_b"]
+    assert spellings["a_b_1"] == DefName("a.b").spef
+    # Un-renamed nets are untouched.
+    assert spellings["plain"] == "plain"
+    # A plain-str key (no DEF origin) stays a plain str.
+    plain = _remap_def_net_connections({"a.b": (("u", "p"),)}, renames)
+    assert plain == {"a_b_1": (("u", "p"),)}
+    assert not any(isinstance(key, DefName) for key in plain)
+
+
 def test_spef_missing_conn_warning_names_unmatched_and_duplicate_nets():
     """Issue #2903 ask 2: a written `*D_NET` that matches a DEF net but gets
     no instance `*CONN` is disclosed in `warnings[]`."""
