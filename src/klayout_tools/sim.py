@@ -160,6 +160,7 @@ from .sim_batch import (
     _remove_shard_manifest,
     _run_batch,
     _run_batch_fleet,
+    _validate_batch_models_lib,
     attach_engine_build_comparison,
 )
 from .sim_batch import _resolve_batch_config as _resolve_batch_config
@@ -4410,6 +4411,10 @@ def _build_dry_run_report(
     Built from the same ``corner_points`` / ``monte_carlo_info`` the real run
     dispatches, so the per-sample seeds are exactly the ones a real run uses.
     """
+    if backend == "batch":
+        # Issue #3917: a real batch submit refuses an unresolvable model
+        # library before any S3 write; the dry-run must say the same.
+        _validate_batch_models_lib(request)
     units: list[dict[str, Any]] = []
     for point in corner_points:
         unit: dict[str, Any] = {"corner_id": point.corner_id}

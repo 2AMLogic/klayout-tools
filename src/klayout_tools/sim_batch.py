@@ -1672,31 +1672,52 @@ def _validate_batch_pdk(request: dict[str, Any]) -> None:
 BATCH_MODELS_LIB_HOST_PATH_CODE = "models_lib_host_path"
 
 
-def _host_path_lib_refs(request: dict[str, Any]) -> list[tuple[str, str]]:
-    """Every ``(where, ref)`` model-library ref in ``request`` that is an
-    absolute host path: ``models.lib`` and each ``corners.process[].sections[]``
-    object's ``lib``. A ref that names an environment variable (``$PDK_ROOT/...``)
-    is left alone -- the runner expands it against its own environment -- but a
-    ``~`` is expanded on *this* host, so ``~/...`` is a host path too."""
+def _all_lib_refs(request: dict[str, Any]) -> list[tuple[str, str]]:
+    """Every ``(where, ref)`` string model-library ref in ``request``:
+    ``models.lib`` and each ``corners.process[].sections[]`` object's ``lib``."""
     refs: list[tuple[str, str]] = []
-
-    def check(where: str, ref: Any) -> None:
-        if not isinstance(ref, str) or "$" in ref:
-            return
-        if os.path.isabs(os.path.expanduser(ref)):
-            refs.append((where, ref))
-
     models = request.get("models")
-    if isinstance(models, dict):
-        check("models.lib", models.get("lib"))
+    if isinstance(models, dict) and isinstance(models.get("lib"), str):
+        refs.append(("models.lib", models["lib"]))
     corners = request.get("corners")
     process = corners.get("process") if isinstance(corners, dict) else None
     for i, entry in enumerate(process if isinstance(process, list) else []):
         sections = entry.get("sections") if isinstance(entry, dict) else None
         for j, section in enumerate(sections if isinstance(sections, list) else []):
-            if isinstance(section, dict):
-                check(f"corners.process[{i}].sections[{j}].lib", section.get("lib"))
+            if isinstance(section, dict) and isinstance(section.get("lib"), str):
+                refs.append((f"corners.process[{i}].sections[{j}].lib", section["lib"]))
     return refs
+
+
+def _host_path_lib_refs(request: dict[str, Any]) -> list[tuple[str, str]]:
+    """Every ``(where, ref)`` model-library ref in ``request`` that is an
+    absolute host path. A ref that names an environment variable
+    (``$PDK_ROOT/...``) is left alone -- the runner expands it against its own
+    environment (but see :func:`_unresolved_pdk_var_refs` for ``$PDK``) -- while
+    a ``~`` is expanded on *this* host, so ``~/...`` is a host path too."""
+    return [
+        (where, ref)
+        for where, ref in _all_lib_refs(request)
+        if "$" not in ref and os.path.isabs(os.path.expanduser(ref))
+    ]
+
+
+#: ``$PDK`` / ``${PDK}`` but not ``$PDK_ROOT`` or ``$PDKS``.
+_PDK_VAR_RE = re.compile(r"\$(?:PDK(?![A-Za-z0-9_])|\{PDK\})")
+
+#: ``SimError.code`` for a ``$PDK`` model-library ref the runner cannot expand
+#: (issue #3917).
+BATCH_MODELS_LIB_PDK_VAR_CODE = "models_lib_pdk_unresolved"
+
+
+def _unresolved_pdk_var_refs(request: dict[str, Any]) -> list[tuple[str, str]]:
+    """Model-library refs naming ``$PDK`` / ``${PDK}`` when the request declares
+    no ``models.pdk``: the runner exports ``PDK_ROOT`` always but ``PDK`` only
+    from the declared variant, so the reference would reach ngspice unexpanded."""
+    models = request.get("models")
+    if isinstance(models, dict) and models.get("pdk"):
+        return []
+    return [(w, r) for w, r in _all_lib_refs(request) if _PDK_VAR_RE.search(r)]
 
 
 def _pdk_relative_form(ref: str) -> str | None:
@@ -1714,20 +1735,32 @@ def _pdk_relative_form(ref: str) -> str | None:
 
 def _validate_batch_models_lib(request: dict[str, Any]) -> None:
     """Refuse an absolute host-path model library **before** any S3 write
-    (issue #3296).
+    (issue #3296), and an unexpandable ``$PDK`` ref (issue #3917).
 
     The runner resolves ``models.lib`` on its own box, where this host's
     ``/home/<user>/.volare/...`` does not exist, so the job would pay for an
     instance launch and then fail with ``model library not found``. Not
-    refused: PDK-relative libs, ``$VAR`` forms (the runner expands them), and
-    any request with ``options.stage_model_inputs: true`` (the library ships
-    with the job).
+    refused: PDK-relative libs, ``$VAR`` forms (the runner expands them, except
+    ``$PDK`` with no ``models.pdk``), and any request with
+    ``options.stage_model_inputs: true`` (the library ships with the job).
     """
     from . import sim_staging
     from .sim import SimError
 
     if sim_staging.stage_model_inputs_requested(request):
         return
+    pdk_var_refs = _unresolved_pdk_var_refs(request)
+    if pdk_var_refs:
+        raise SimError(
+            "backend 'batch': the runner does not define $PDK unless the request "
+            "declares models.pdk, so the model library would reach ngspice "
+            "unexpanded ("
+            + "; ".join(f"{where}={ref!r}" for where, ref in pdk_var_refs)
+            + "). Declare models.pdk, or write the variant literally "
+            '(or use {"pdk": "<variant>", "lib": "<path under the variant dir>"}); '
+            "nothing was submitted",
+            code=BATCH_MODELS_LIB_PDK_VAR_CODE,
+        )
     refs = _host_path_lib_refs(request)
     if not refs:
         return
