@@ -3282,6 +3282,9 @@ def test_parse_ascii_rawfile_missing_file_raises(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
+_STUB_VERSION_BANNER = "ngspice-99 : stub banner\n"
+
+
 def _stub_subprocess_run(
     monkeypatch,
     *,
@@ -3290,7 +3293,9 @@ def _stub_subprocess_run(
     side_effect=None,
     returncode: int = 0,
 ):
-    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None, **_kw):
+        if "--version" in cmd:  # the once-per-sweep engine_build probe (#3095)
+            return fake_completed(_STUB_VERSION_BANNER)
         log_path = cmd[cmd.index("-o") + 1]
         if side_effect is not None:
             raise side_effect
@@ -3558,6 +3563,62 @@ def test_corner_genuine_measurement_failure_is_not_engine_aborted(
     assert "measurement" in codes
 
 
+_PARSE_ABORT_LOG = (
+    "Circuit: * big flat deck\n"
+    "Error on line 42 :\n"
+    "  m1 d g s b nfet_bad w=1u l=1u\n"
+    "Simulation interrupted due to error!\n"
+)
+
+
+def test_corner_deck_parse_abort_gets_one_ngspice_fatal_cause(tmp_path, monkeypatch):
+    """Issue #3879: a generic deck abort is classified, quotes the first error
+    line verbatim, says no analysis started, and collapses the measurement
+    cascade (and with it the save_mode hint)."""
+    corner = _abort_corner(
+        tmp_path,
+        monkeypatch,
+        keep_artifacts=False,
+        returncode=1,
+        log_text=_PARSE_ABORT_LOG,
+    )
+    assert [d["code"] for d in corner["diagnostics"]] == ["ngspice_fatal"]
+    cause = corner["diagnostics"][0]
+    assert cause["severity"] == "error"
+    assert cause["message"].startswith("Error on line 42")
+    assert cause["analysis_started"] is False
+    assert "no analysis started" in cause["message"]
+    assert corner["status"] == "error"
+    assert corner["measurements"][0]["status"] == "error"
+    assert "ngspice_fatal" in sim.DIAGNOSTIC_CODES
+
+
+def test_corner_specific_fatal_code_wins_over_generic(tmp_path, monkeypatch):
+    log = (
+        "Circuit: x\nError on line 3 :\nError: could not find a valid modelname\n"
+        "Simulation interrupted due to error!\n"
+    )
+    corner = _abort_corner(
+        tmp_path, monkeypatch, keep_artifacts=False, returncode=1, log_text=log
+    )
+    assert [d["code"] for d in corner["diagnostics"]] == ["model_bin_range"]
+    assert corner["diagnostics"][0]["analysis_started"] is False
+
+
+def test_corner_fatal_mid_analysis_keeps_measurement_diagnostics(tmp_path, monkeypatch):
+    log = (
+        "Circuit: x\nDoing analysis at TEMP = 27.000000 and TNOM = 27.000000\n"
+        + _PARSE_ABORT_LOG
+    )
+    corner = _abort_corner(
+        tmp_path, monkeypatch, keep_artifacts=False, returncode=1, log_text=log
+    )
+    codes = [d["code"] for d in corner["diagnostics"]]
+    assert codes == ["ngspice_fatal", "measurement"]
+    assert "analysis_started" not in corner["diagnostics"][0]
+    assert "no analysis started" not in corner["diagnostics"][0]["message"]
+
+
 def test_split_returncode_unnamed_signal_falls_back():
     assert sim._split_returncode(-250) == (None, "SIG250")
     assert sim._split_returncode(3) == (3, None)
@@ -3797,7 +3858,9 @@ def _stub_ngspice_subprocess(monkeypatch, *, captured_cmds: list | None = None):
     """Like `_stub_subprocess_run` above, but also records every invoked
     `cmd` so a test can assert which binary was actually spawned."""
 
-    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None, **_kw):
+        if "--version" in cmd:  # engine_build probe (#3095), not a corner
+            return fake_completed(_STUB_VERSION_BANNER)
         if captured_cmds is not None:
             captured_cmds.append(cmd)
         log_path = cmd[cmd.index("-o") + 1]
@@ -4377,7 +4440,12 @@ def test_run_sim_fail_fast_probe_aborts_grid_before_any_corner_runs(
     monkeypatch.setattr(
         sim.subprocess,
         "run",
-        lambda *a, **k: real_corner_calls.append(1),
+        # The once-per-sweep `--version` engine_build probe (#3095) is not a corner.
+        lambda cmd, *a, **k: (
+            fake_completed("ngspice-99\n")
+            if "--version" in cmd
+            else real_corner_calls.append(1)
+        ),
     )
 
     report = sim.run_sim(str(request))
@@ -5960,6 +6028,10 @@ def _stripped_report(report: dict) -> dict:
     byte-exact-fixture caveat)."""
     clone = json.loads(json.dumps(report))
     clone["environment"].pop("engine_version", None)
+    # `environment.backend.source` (issue #2977) records how the backend was
+    # chosen (flag/request/default), which differs by design between runs
+    # that otherwise execute identically.
+    clone["environment"].pop("backend", None)
     # Issue #2970: legitimately differs between `local` and `local-parallel`.
     clone["environment"].pop("threads_per_worker", None)
     for corner in clone["corners"]:
@@ -11248,7 +11320,9 @@ def _stub_subprocess_run_capturing_cwd(
     real code passed, so a test can assert which directory ngspice was
     actually launched from (issue #2520)."""
 
-    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None, **_kw):
+        if "--version" in cmd:  # engine_build probe (#3095), not a corner
+            return fake_completed(_STUB_VERSION_BANNER)
         if captured_cwds is not None:
             captured_cwds.append(cwd)
         log_path = cmd[cmd.index("-o") + 1]
@@ -13720,7 +13794,9 @@ def test_engine_version_unset_does_not_probe(tmp_path, monkeypatch):
 
     monkeypatch.setattr(sim.subprocess, "run", fake_run)
     sim.run_sim(str(_pin_request(tmp_path)), backend="local")
-    assert not any("--version" in c for c in calls)
+    # The only ``--version`` call is the once-per-sweep engine_build probe;
+    # the engine_version probe (same argv) must not add a second one.
+    assert sum("--version" in c for c in calls) == 1
 
 
 @pytest.mark.parametrize("kind", ["pss", "pnoise", "PAC"])
@@ -14565,6 +14641,244 @@ def test_capture_only_non_tran_stays_error(tmp_path, monkeypatch):
     assert corner["status"] == "error"
 
 
+# --------------------------------------------------------------------------- #
+# environment.engine_build (issue #3095)
+# --------------------------------------------------------------------------- #
+
+
+def _engine_build_request(tmp_path, **extra):
+    _write_body(tmp_path)
+    return _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            **extra,
+        },
+    )
+
+
+def test_engine_build_records_version_banner_once_per_sweep(tmp_path, monkeypatch):
+    request = _engine_build_request(tmp_path, corners={"temperature": [0, 27, 85]})
+    probes: list = []
+    inner = None
+
+    def fake_run(cmd, **kwargs):
+        if "--version" in cmd:
+            probes.append(cmd)
+            return fake_completed(_STUB_VERSION_BANNER)
+        return inner(cmd, **kwargs)
+
+    _stub_subprocess_run(monkeypatch)
+    inner = sim.subprocess.run
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+
+    report = sim.run_sim(str(request))
+
+    build = report["environment"]["engine_build"]
+    assert build["version_banner"] == _STUB_VERSION_BANNER.strip()
+    assert build["probe"] == "ok" and build["reason"] is None
+    assert len(probes) == 1  # once per sweep, not per corner
+    assert report["environment"]["engine_version"] == "99"  # unchanged
+
+
+@pytest.mark.parametrize(
+    ("effect", "probe"),
+    [
+        (subprocess.TimeoutExpired(cmd="ngspice", timeout=10), "timeout"),
+        (FileNotFoundError("gone"), "error"),
+    ],
+)
+def test_engine_build_probe_failure_is_null_with_reason_and_not_fatal(
+    tmp_path, monkeypatch, effect, probe
+):
+    request = _engine_build_request(tmp_path)
+    inner = None
+
+    def fake_run(cmd, **kwargs):
+        if "--version" in cmd:
+            raise effect
+        return inner(cmd, **kwargs)
+
+    _stub_subprocess_run(monkeypatch)
+    inner = sim.subprocess.run
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+
+    report = sim.run_sim(str(request))
+
+    build = report["environment"]["engine_build"]
+    assert build["version_banner"] is None
+    assert build["probe"] == probe and build["reason"]
+    assert report["status"] != "error"
+
+
+def test_engine_build_banner_is_sanitised_and_clipped(monkeypatch):
+    noisy = "ngspice-46\x00\x07 " + "x" * 5000
+    monkeypatch.setattr(sim.subprocess, "run", lambda cmd, **kw: fake_completed(noisy))
+    build = sim._probe_engine_build("/opt/ngspice")
+    assert len(build["version_banner"]) == sim._ENGINE_BANNER_MAX
+    assert "\x00" not in build["version_banner"]
+    assert build["version_banner"].startswith("ngspice-46??")
+
+
+def test_engine_build_nonzero_exit_or_empty_banner_is_error(monkeypatch):
+    monkeypatch.setattr(
+        sim.subprocess, "run", lambda cmd, **kw: fake_completed("", returncode=1)
+    )
+    build = sim._probe_engine_build("/opt/ngspice")
+    assert build["version_banner"] is None and build["probe"] == "error"
+
+
+def test_engine_build_is_null_for_xyce():
+    assert sim._probe_engine_build(None) is None
+
+
+# --- measurements[].on_unreached (issue #3108) -------------------------------
+
+_UNREACHED_LOG = (
+    "Error: measure  far  when(WHEN) : out of interval\n"
+    " .meas dc far when v(o)=5 failed!\n"
+    "Error: measure  also_far  find(AT) : out of interval\n"
+    " .meas dc also_far find v(o) at=9 failed!\n"
+    "good                =   1.5e-01\n"
+)
+
+
+def _unreached_report(tmp_path, monkeypatch, log_text, extra=None, names=("far",)):
+    _write_body(tmp_path)
+    measurements = [
+        {
+            "name": n,
+            "spice": f".meas dc {n} when v(o)=5",
+            **(extra if extra is not None else {}),
+        }
+        for n in names
+    ]
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "dc", "args": "V1 0 1 0.1"},
+            "measurements": measurements,
+        },
+    )
+    _stub_subprocess_run(monkeypatch, log_text=log_text)
+    return sim.run_sim(str(request))
+
+
+def test_on_unreached_null_grades_not_reached_not_error(tmp_path, monkeypatch):
+    report = _unreached_report(
+        tmp_path,
+        monkeypatch,
+        _UNREACHED_LOG,
+        extra={"on_unreached": "null"},
+        names=("far", "also_far", "good"),
+    )
+    (corner,) = report["corners"]
+    by_name = {m["name"]: m for m in corner["measurements"]}
+    assert by_name["far"]["status"] == "not_reached"
+    assert by_name["far"]["value"] is None and by_name["far"]["margin"] is None
+    assert by_name["also_far"]["status"] == "not_reached"
+    assert by_name["good"]["status"] == "pass"
+    assert corner["status"] == "pass"
+    codes = [(d["severity"], d["code"]) for d in corner["diagnostics"]]
+    assert ("info", "measurement_not_reached") in codes
+    assert not any(c == "measurement" for _, c in codes)
+    assert report["not_reached"] == 2
+    assert report["errored"] == 0
+    assert report["status"] != "error"
+
+
+def test_on_unreached_absent_is_unchanged_error(tmp_path, monkeypatch):
+    report = _unreached_report(tmp_path, monkeypatch, _UNREACHED_LOG)
+    (corner,) = report["corners"]
+    assert corner["measurements"][0]["status"] == "error"
+    assert corner["status"] == "error"
+    assert "not_reached" not in report
+    assert any(
+        d["message"].startswith("measurement 'far' produced no value")
+        for d in corner["diagnostics"]
+    )
+
+
+def test_on_unreached_error_value_is_unchanged_error(tmp_path, monkeypatch):
+    report = _unreached_report(
+        tmp_path, monkeypatch, _UNREACHED_LOG, extra={"on_unreached": "error"}
+    )
+    assert report["corners"][0]["measurements"][0]["status"] == "error"
+    assert report["status"] == "error"
+
+
+def test_on_unreached_null_still_errors_on_other_meas_reason(tmp_path, monkeypatch):
+    log = (
+        "Error: measure  far  when(WHEN) : Expressions like 0.5*1.62 are not "
+        "supported.\n .meas dc far when v(o)=5 failed!\n"
+    )
+    report = _unreached_report(
+        tmp_path, monkeypatch, log, extra={"on_unreached": "null"}
+    )
+    assert report["corners"][0]["measurements"][0]["status"] == "error"
+    assert report["status"] == "error"
+
+
+def test_on_unreached_null_still_errors_on_solver_error(tmp_path, monkeypatch):
+    log = (
+        "Error: Timestep too small; run aborted\n"
+        "doAnalyses: iteration limit reached\n" + _UNREACHED_LOG
+    )
+    report = _unreached_report(
+        tmp_path, monkeypatch, log, extra={"on_unreached": "null"}
+    )
+    corner = report["corners"][0]
+    assert any(d["severity"] == "error" for d in corner["diagnostics"])
+    assert corner["measurements"][0]["status"] == "error"
+    assert corner["status"] == "error"
+
+
+def test_on_unreached_limits_not_evaluated_and_not_claimed(tmp_path, monkeypatch):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "dc", "args": "V1 0 1 0.1"},
+            "measurements": [
+                {
+                    "name": "far",
+                    "spice": ".meas dc far when v(o)=5",
+                    "on_unreached": "null",
+                    "limits": {"min": 1.0},
+                },
+                {"name": "good", "spice": ".meas dc good max v(o)"},
+            ],
+        },
+    )
+    _stub_subprocess_run(monkeypatch, log_text=_UNREACHED_LOG)
+    report = sim.run_sim(str(request))
+    by_name = {m["name"]: m for m in report["measurements"]}
+    assert by_name["far"]["status"] == "not_reached"
+    assert by_name["good"]["status"] == "pass"
+    assert report["corners"][0]["status"] == "pass"
+    skipped = report["coverage"]["skipped"]
+    assert any(item["reason"] == "not_reached" for item in skipped)
+    assert report["status"] == "pass_partial"  # no full pass for an unmeasured bound
+
+
+@pytest.mark.parametrize(
+    "spec, fragment",
+    [
+        (
+            {"name": "a", "spice": ".meas dc a when v(o)=1", "on_unreached": "x"},
+            "must be one of",
+        ),
+        ({"name": "a", "expr": "v(o)", "on_unreached": "null"}, "without 'spice'"),
+    ],
+)
+def test_on_unreached_validation(tmp_path, spec, fragment):
+    with pytest.raises(sim.SimError, match=fragment):
+        sim._validate_measurement_forms([spec])
+
+
 # Issue #3520: pre-submit lint for a literal `AT=` that cannot resolve.
 def _at_lint(args: str, spice: str, kind: str = "dc") -> list[dict[str, str]]:
     return sim._meas_at_lint(
@@ -14633,6 +14947,8 @@ def _capture_worker_env(monkeypatch):
     seen: list[str | None] = []
 
     def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None):
+        if "--version" in cmd:  # engine_build probe (#3095), not a corner
+            return fake_completed(_STUB_VERSION_BANNER)
         seen.append(None if env is None else env.get("OMP_NUM_THREADS"))
         log_path = cmd[cmd.index("-o") + 1]
         with open(log_path, "w", encoding="utf-8") as handle:

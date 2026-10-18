@@ -391,7 +391,7 @@ own route DRC said `0`:
 The `sg13g2` deck's `M1.b`/`M2.a`/`V1.c` transcriptions match IHP's own
 `beol/5_16_metal1.drc`, `5_17_metaln.drc` and `5_19_via1.drc` line for line,
 and the IHP tech LEF's Via1/Via2 pads are all >= 0.20 um wide. The defect
-was in this repo's DEF->GDS merge: `_resolve_layer_map` looked for
+was in this repo's DEF->GDS merge: `_resolve_layer_map` (now `pdk.resolve_klayout_layer_map`) looked for
 `libs.tech/klayout/tech/<variant>.map`, and for IHP the variant is
 `ihp-sg13g2` while the shipped map is `sg13g2.map` (named after the process).
 It found nothing (`layer_map: {"path": null, "resolution": "none"}`), so
@@ -404,8 +404,8 @@ Metal2 pad on `9/0` and Metal3 on `11/0`; `VIA_Via1_YY` put the Via1 cut on
 same cause (cut/pad shapes on mis-numbered layers next to the standard cells'
 real Metal1), and both went to 0 with the map fix alone; the per-shape
 mechanism for those two was inferred from the 0 re-measurement, not
-separately inspected. The fix teaches `_resolve_layer_map` (in `place_and_route.py`,
-`lef_abstract.py` and `extract_abstract.py`) to strip an `ihp-` prefix when
+separately inspected. The fix teaches `resolve_klayout_layer_map` (in `pdk.py`, formerly one copy in
+`place_and_route.py`, `lef_abstract.py` and `extract_abstract.py`) to strip an `ihp-` prefix when
 looking for the family-level map file, so IHP's `sg13g2.map` is used
 (`resolution: "family"`).
 
@@ -2162,11 +2162,16 @@ be within the target `--deck`'s own label-layer coverage (cross-check with
     "klt_version": "0.1.0",
     "klayout_version": "0.30.10",
     "pdk": { "name": "sky130A", "source": "PDK_ROOT environment variable", "version": "<stamp>" },
-    "deck": { "name": "sky130_fd_sc_hd__tt_025C_1v80", "content_hash": "sha256:<hex>" },
+    "deck": { "name": "sky130_fd_sc_hd__tt_025C_1v80", "content_hash": "sha256:<hex>", "path": { "path": null, "scope": "external" } },
     "input": { "content_hash": "sha256:<hex>", "role": "netlist" }
   }
 }
 ```
+
+**Liberty location (issue #3785).** `provenance.deck.path` is the
+`{path, scope}` envelope for the resolved Liberty file `deck.content_hash`
+pins (`{"path": null, "scope": "external"}` for an out-of-repo file, never an
+absolute host path). Additive; `content_hash` remains authoritative.
 
 **Path field shape (issue #2073).** `def_path`/`unrouted_def_path`/
 `gds_path`/`verilog_path` below (and the nested `spef_sta.{spef_path,sdf_path}`)
@@ -2184,6 +2189,7 @@ plain string" for the full enumeration and rationale.
 | `status` | string | Always `"ok"` — place-and-route has no pass/fail concept of its own; a failed run never emits this envelope. |
 | `stage_reached` | string | The last stage this run actually completed. Always equal to or beyond the request's own `target_stage` in a successful response. |
 | `seed` | integer | Echo of the request. |
+| `netlist` | `{path, scope}` | Additive field (issue #3751). The gate-level netlist the run placed — the file `request.netlist` names — as the `{path, scope}` envelope (`docs/json-contract.md`): `{"path": "<repo-relative POSIX path>", "scope": "repo"}`, or `{"path": null, "scope": "external"}` when it lies outside the repo (an absolute path is never emitted). `provenance.input.content_hash` is the `sha256:` digest of the **raw bytes of this file**, with no transform, concatenation or temp copy, so `sha256sum <path>` reproduces it offline. In a `--backend batch` report each `corner_runs[]` entry carries the field as the runner emitted it (that unit's own netlist). |
 | `interconnect_corner` | string | Additive field (issue #1100). The tech-LEF parasitic-extraction corner actually resolved (`"min"`/`"nom"`/`"max"`) — echo of `request.pdk.interconnect_corner`, or `"nom"` when omitted. Distinct from the liberty (device) corner, which `provenance.deck.name` encodes; the two can differ in the same response (e.g. `interconnect_corner: "max"` alongside a `deck.name` ending in `__ss_125C_3v00`). |
 | `die_area_um2` / `core_area_um2` / `utilization_pct` | number | From `initialize_floorplan`/`report_design_area_metrics`, at `stage_reached`. |
 | `wirelength_um` | number \| null | HPWL at `stage_reached`; `null` before placement. |

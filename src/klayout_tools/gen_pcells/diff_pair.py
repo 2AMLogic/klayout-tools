@@ -10,10 +10,25 @@ submodule only imports it, never the reverse).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import klayout.db as kdb
+
+
+def _insert_voltage_flavor_marks(
+    pcell: Any, dbu: float, mark_box: tuple[float, float, float, float]
+) -> None:
+    """Draw ``mark_box`` on the primary ``voltage_flavor`` marker layer and,
+    when the PDK flavour resolves one (sky130 native-Vt: lvtn alongside
+    hvi), on the extra marker layer too."""
+    from klayout_tools.gen import _insert_boxes
+
+    layers = [pcell.voltage_flavor_mark_layer]
+    if pcell.voltage_flavor_extra_mark_present:
+        layers.append(pcell.voltage_flavor_extra_mark_layer)
+    for layer in layers:
+        _insert_boxes(pcell.cell, pcell.layout.layer(layer), dbu, [mark_box])
 
 
 def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
@@ -35,10 +50,14 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         MIN_SAME_LAYER_SPACING_UM,
         WELL_ENCLOSURE_MARGIN_UM,
         _clamp_cut_boxes,
+        _close_implant_gaps,
         _diff_pair_layout,
+        _draw_pcell_npc,
+        _draw_pcell_tap_pads,
         _insert_boxes,
         _insert_implant_ring,
         _insert_ring,
+        _pcell_tap_reach_um,
         _shift_box,
     )
 
@@ -89,6 +108,45 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "for why this is inherent to the common-centroid interleave, "
                 "and for the routing styles that do work",
                 default=2,
+            )
+            # getattr: keeps this new hidden param out of the mypy type
+            # baseline (PCellDeclarationHelper's dynamic attrs are untyped).
+            self.param(
+                "sd_implant_min_space_um",
+                getattr(self, "TypeDouble"),  # noqa: B009
+                "Harness-resolved minimum spacing between separate source/"
+                "drain implant shapes; closer ones are merged (only used "
+                "when sd_implant_present)",
+                default=0.0,
+            )
+            # getattr: keeps these new hidden params out of the mypy type
+            # baseline (PCellDeclarationHelper's dynamic attrs are untyped).
+            self.param(
+                "npc_layer",
+                getattr(self, "TypeLayer"),  # noqa: B009
+                "npc drawing layer (only used when npc_present)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "npc_present",
+                getattr(self, "TypeBoolean"),  # noqa: B009
+                "Whether npc_layer is a real layer this PDK family needs "
+                "over each poly-contact licon",
+                default=False,
+            )
+            self.param(
+                "npc_margin_um",
+                getattr(self, "TypeDouble"),  # noqa: B009
+                "Harness-resolved margin npc grows beyond each poly-contact "
+                "licon (only used when npc_present)",
+                default=0.0,
+            )
+            self.param(
+                "npc_min_space_um",
+                getattr(self, "TypeDouble"),  # noqa: B009
+                "Harness-resolved minimum npc spacing; closer shapes merge "
+                "(only used when npc_present)",
+                default=0.0,
             )
             self.param(
                 "add_guard_ring",
@@ -247,6 +305,21 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default=False,
             )
             self.param(
+                "voltage_flavor_extra_mark_layer",
+                self.TypeLayer,
+                "Second voltage_flavor marker layer drawn over the same box "
+                "(sky130 native-Vt: lvtn alongside hvi; only used when "
+                "voltage_flavor_extra_mark_present)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "voltage_flavor_extra_mark_present",
+                self.TypeBoolean,
+                "Whether voltage_flavor_extra_mark_layer is a real layer "
+                "resolved for params.voltage_flavor on this PDK family",
+                default=False,
+            )
+            self.param(
                 "voltage_flavor_mark_margin_um",
                 self.TypeDouble,
                 "Harness-resolved margin the voltage_flavor marker box grows "
@@ -357,6 +430,7 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.bottom_endcap_um,
                 self.sd_implant_margin_um if self.sd_implant_present else 0.0,
                 top_endcap_um=self.top_endcap_um,
+                tap_reach_um=_pcell_tap_reach_um(self),
             )
             unit_boxes = info["unit"]["boxes_um"]
             for c in info["cells"]:
@@ -383,6 +457,12 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                         c["x0_um"],
                         c["y0_um"],
                     )
+                _close_implant_gaps(
+                    self.cell,
+                    li_sd_implant,
+                    dbu,
+                    getattr(self, "sd_implant_min_space_um"),  # noqa: B009
+                )
 
             # Shared device-pair-footprint box (well margin), used by the
             # `flavor="pfet"` well shape below -- computed once, independent
@@ -411,9 +491,6 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             # well's own margin does, see
             # `_PDK_VOLTAGE_FLAVOR_MARK_MARGIN_UM`'s own docstring.
             if self.voltage_flavor_mark_present:
-                li_voltage_flavor_mark = self.layout.layer(
-                    self.voltage_flavor_mark_layer
-                )
                 mark_margin = self.voltage_flavor_mark_margin_um
                 mark_box = (
                     -mark_margin,
@@ -421,7 +498,7 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     info["core_w_um"] + mark_margin,
                     info["core_h_um"] + mark_margin,
                 )
-                _insert_boxes(self.cell, li_voltage_flavor_mark, dbu, [mark_box])
+                _insert_voltage_flavor_marks(self, dbu, mark_box)
 
             if info["ring"] is not None and self.add_guard_ring:
                 li_tap = self.layout.layer(self.tap_layer)
@@ -484,6 +561,9 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                         self.mfg_grid_um,
                     )
 
+            # Tap pads (issue #3648): see `_MosArrayPCell.produce_impl`.
+            _draw_pcell_tap_pads(self, info["tap_pads"], li_metal, li_contact)
+
             # Issue #2585: clamp every cut on a fixed-size cut/via layer down
             # to that size, inside the unchanged generic-budget layout.
             _clamp_cut_boxes(
@@ -493,5 +573,7 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.contact_fixed_size_um,
                 self.mfg_grid_um,
             )
+
+            _draw_pcell_npc(self, li_contact, li_poly, dbu)
 
     return {"diff_pair": _DiffPairPCell}

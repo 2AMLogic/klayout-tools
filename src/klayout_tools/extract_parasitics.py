@@ -155,6 +155,15 @@ def parse_parasitic_variants(
 #: are never routed through :func:`spice_safe_net_name`.
 SPICE_HIERARCHY_SEPARATOR = "."
 
+#: Integer revision of the ``--parasitics`` R/C extraction model (issue #2957).
+#: Emitted as ``parasitics.model_revision``. Bump it whenever a change alters
+#: the R or C values extracted from identical input, so a consumer comparing
+#: two klt versions can tell "tool bumped, model unchanged" from "model
+#: changed". ``1`` is the 0.6.0-and-earlier model (series-R squares counted
+#: per merged net); ``2`` is 0.7.0's (squares counted per conductor fragment,
+#: #2392).
+PARASITICS_MODEL_REVISION = 2
+
 #: What :data:`SPICE_HIERARCHY_SEPARATOR` is rewritten to (issue #2145).
 #: ``_`` is an ordinary identifier character in every SPICE dialect and is
 #: the join several other extractors already use; ``/`` was rejected because

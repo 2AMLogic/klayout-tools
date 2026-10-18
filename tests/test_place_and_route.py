@@ -59,6 +59,7 @@ Four tiers, mirroring `tests/test_synthesize.py`'s own structure:
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import re
@@ -2651,6 +2652,40 @@ def _stub_merge_def_to_gds(monkeypatch) -> list[dict]:
     return calls
 
 
+def _netlist_field_report(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+    return run_place_and_route(request_path)
+
+
+def test_response_names_input_netlist_in_repo(tmp_path, monkeypatch):
+    """Issue #3751: `netlist` is the `{path, scope}` of the file whose bytes
+    `provenance.input.content_hash` digests, so a consumer can re-hash it."""
+    (tmp_path / ".git").mkdir()
+    report = _netlist_field_report(tmp_path, monkeypatch)
+
+    assert report["netlist"] == {"path": "gcd_synth.v", "scope": "repo"}
+    digest = hashlib.sha256((tmp_path / report["netlist"]["path"]).read_bytes())
+    assert (
+        report["provenance"]["input"]["content_hash"] == f"sha256:{digest.hexdigest()}"
+    )
+    assert report["provenance"]["input"]["role"] == "netlist"
+
+
+def test_response_netlist_outside_repo_is_external(tmp_path, monkeypatch):
+    """Issue #3751: a netlist outside the repo never leaks an absolute path."""
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    report = _netlist_field_report(repo, monkeypatch)
+    assert report["netlist"]["scope"] == "repo"
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    report = _netlist_field_report(outside, monkeypatch)
+    assert report["netlist"] == {"path": None, "scope": "external"}
+
+
 def test_stubbed_full_route_success(tmp_path, monkeypatch):
     request_path = _setup_success_env(tmp_path, monkeypatch)
     _stub_openroad_success(
@@ -2784,6 +2819,11 @@ def test_stubbed_full_route_success(tmp_path, monkeypatch):
     assert provenance["klt_version"]
     assert provenance["pdk"]["name"] == "sky130A"
     assert provenance["deck"]["name"] == "sky130_fd_sc_hd__tt_025C_1v80"
+    # Issue #3785: the Liberty is located by the `{path, scope}` envelope,
+    # never an absolute host path.
+    assert set(provenance["deck"]["path"]) == {"path", "scope"}
+    assert provenance["deck"]["path"]["scope"] in {"repo", "external"}
+    assert not os.path.isabs(provenance["deck"]["path"]["path"] or "")
 
     # Issue #1091: `request.power` omitted (the default here) preserves
     # today's exact prior behavior for the *full, caller-configured* PDN --
@@ -8227,7 +8267,7 @@ def _fake_pdk_info(root: Path, variant: str = "sky130A") -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# `_resolve_layer_map` -- variant-exact vs. family-fallback vs. none found
+# `resolve_klayout_layer_map` -- variant-exact vs. family-fallback vs. none found
 # (issue #1029: gf180mcu ships a single family-level `gf180mcu.map` shared
 # across every variant rather than a `<variant>.map` per variant, unlike
 # sky130).
@@ -8244,7 +8284,7 @@ def test_resolve_layer_map_prefers_exact_variant_match(tmp_path):
     pdk_info = _fake_pdk_info(tmp_path, variant="sky130A")
     pdk_info["assets"]["klayout"] = str(klayout_dir)
 
-    path, resolution = place_and_route._resolve_layer_map(pdk_info)
+    path, resolution = pdk_module.resolve_klayout_layer_map(pdk_info)
 
     assert path == str(tech_dir / "sky130A.map")
     assert resolution == "exact"
@@ -8262,7 +8302,7 @@ def test_resolve_layer_map_falls_back_to_family_level_file(tmp_path):
     pdk_info = _fake_pdk_info(tmp_path, variant="gf180mcuC")
     pdk_info["assets"]["klayout"] = str(klayout_dir)
 
-    path, resolution = place_and_route._resolve_layer_map(pdk_info)
+    path, resolution = pdk_module.resolve_klayout_layer_map(pdk_info)
 
     assert path == str(tech_dir / "gf180mcu.map")
     assert resolution == "family"
@@ -8280,7 +8320,7 @@ def test_resolve_layer_map_strips_ihp_prefix_for_family_file(tmp_path):
     pdk_info = _fake_pdk_info(tmp_path, variant="ihp-sg13g2")
     pdk_info["assets"]["klayout"] = str(klayout_dir)
 
-    path, resolution = place_and_route._resolve_layer_map(pdk_info)
+    path, resolution = pdk_module.resolve_klayout_layer_map(pdk_info)
 
     assert path == str(tech_dir / "sg13g2.map")
     assert resolution == "family"
@@ -8294,7 +8334,7 @@ def test_resolve_layer_map_returns_none_when_neither_file_exists(tmp_path):
     pdk_info = _fake_pdk_info(tmp_path, variant="gf180mcuC")
     pdk_info["assets"]["klayout"] = str(klayout_dir)
 
-    path, resolution = place_and_route._resolve_layer_map(pdk_info)
+    path, resolution = pdk_module.resolve_klayout_layer_map(pdk_info)
 
     assert path is None
     assert resolution == "none"
@@ -8304,7 +8344,7 @@ def test_resolve_layer_map_returns_none_when_no_klayout_asset(tmp_path):
     pdk_info = _fake_pdk_info(tmp_path, variant="sky130A")
     assert pdk_info["assets"]["klayout"] is None
 
-    path, resolution = place_and_route._resolve_layer_map(pdk_info)
+    path, resolution = pdk_module.resolve_klayout_layer_map(pdk_info)
 
     assert path is None
     assert resolution == "none"
@@ -9437,7 +9477,7 @@ def _write_tie_cell_def(path: Path, *, nets: str) -> None:
 def _tie_cell_merge_inputs(tmp_path: Path, *, layer_map: bool = True) -> dict:
     """Every `_merge_def_to_gds` keyword the tie-cell fixture needs, with the
     standard-cell GDS view (and, optionally, the `li1` layer map) written to
-    the open_pdks-shaped locations `_resolve_gds_view`/`_resolve_layer_map`
+    the open_pdks-shaped locations `_resolve_gds_view`/`resolve_klayout_layer_map`
     look in."""
     root = tmp_path / "install"
     tech_lef = tmp_path / "tech.tlef"
@@ -9727,7 +9767,7 @@ def test_merge_reports_unresolved_single_pin_nets_without_a_layer_map(tmp_path):
     """No open_pdks layer-map file means no way to resolve a LEF `PORT`'s own
     layer name to the GDS layer the cell's view actually draws that pin on,
     so every single-pin net is reported unresolved rather than guessed at --
-    the same "degrade gracefully, never fabricate" posture `_resolve_layer_map`
+    the same "degrade gracefully, never fabricate" posture `resolve_klayout_layer_map`
     itself takes (`resolution: "none"`)."""
     inputs = _tie_cell_merge_inputs(tmp_path, layer_map=False)
     def_path = tmp_path / "design.def"

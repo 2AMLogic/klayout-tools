@@ -13729,6 +13729,7 @@ def test_parasitics_summary_block_shape(tmp_path):
     para = report["parasitics"]
     assert para is not None
     assert set(para) == {
+        "model_revision",
         "r_count",
         "c_count",
         "cc_count",
@@ -13803,6 +13804,9 @@ def test_parasitics_summary_block_shape(tmp_path):
     # static across every extraction, so it must match the module constant
     # exactly, not just be present.
     assert para["model"] == PARASITIC_MODEL_SCOPE
+    # `model_revision` (issue #2957): bump PARASITICS_MODEL_REVISION (and the
+    # CHANGELOG) whenever R/C extraction semantics change.
+    assert para["model_revision"] == 2
     assert set(para["model"]) == {"capacitance", "coupling", "resistance", "frequency"}
     # sky130's PARASITICS.metals/metal_overlaps are fully populated (issue
     # #547's regression target was gf180mcu, not sky130) -- no gap for this
@@ -20707,7 +20711,8 @@ def test_spef_floating_duplicate_named_outputs_are_skipped(tmp_path):
 def test_spef_unlabelled_dollar_nets_absent_from_def_are_skipped(tmp_path):
     """Issue #3580: a unique-named unlabelled `$N` net with no DEF net (and not
     a port) gets no `*D_NET` (STA-1650) and its coupling is dropped; a `$N`
-    that the DEF names, a port, and a labelled non-DEF net are untouched."""
+    that the DEF names and a port are untouched. Issue #3662: a labelled net
+    (e.g. a sub-cell label `Z`/`ZN`) with no DEF net is skipped the same way."""
     from klayout_tools.extract_spef import _write_spef
 
     def run(name, **kwargs):
@@ -20734,10 +20739,10 @@ def test_spef_unlabelled_dollar_nets_absent_from_def_are_skipped(tmp_path):
     skipped, text = run(
         "on", net_instance_pins={"sig": (("u1", "A"),), "$12": (("u2", "A"),)}
     )
-    assert skipped == ["$7"]
+    assert skipped == ["$7", "lab"]
     assert "*D_NET \\$7 " not in text
     assert "*D_NET \\$12 " in text
-    assert "*D_NET lab " in text
+    assert "*D_NET lab " not in text
     assert "*D_NET sig 1.000000" in text  # coupling cap not folded in
 
     skipped, _ = run("empty", net_instance_pins={})

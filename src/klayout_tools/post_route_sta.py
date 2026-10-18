@@ -39,7 +39,7 @@ one and only geometry analysed.
 Deliberately duplicates a couple of small helpers already defined in
 ``place_and_route.py`` (``_clock_lines``, ``_read_metrics``) rather than
 importing them -- this repo's own stated convention (see
-``place_and_route.py``'s ``_resolve_layer_map`` docstring) is that each verb
+``place_and_route.py``'s own helper docstrings) is that each verb
 module stays self-contained. Every existing cross-module import between verb
 modules in this repo is of a *public* name (``run_place_and_route``,
 ``PlaceAndRouteError``, ``run_extract``, ...), never a private one.
@@ -320,6 +320,23 @@ _DELAY_POST_END = "===KLT_STA_DELAY_POST_END==="
 #: :func:`_parasitic_annotation_lines` / :func:`_parse_parasitic_annotation`.
 _PARASITIC_ANNOTATION_BEGIN = "===KLT_STA_PARASITIC_ANNOTATION_BEGIN==="
 _PARASITIC_ANNOTATION_END = "===KLT_STA_PARASITIC_ANNOTATION_END==="
+#: Brackets the leaf output pins that sit on no net at all (issue #3662) --
+#: the "floating, untimed" drivers (CTS dummy-load cells' outputs) that
+#: ``report_parasitic_annotation`` counts as unannotated but that can never
+#: carry parasitics. See :func:`_parasitic_annotation_lines` /
+#: :func:`_parse_floating_drivers`.
+_FLOATING_DRIVERS_BEGIN = "===KLT_STA_FLOATING_DRIVERS_BEGIN==="
+_FLOATING_DRIVERS_END = "===KLT_STA_FLOATING_DRIVERS_END==="
+_FLOATING_DRIVER_PREFIX = "KLT_FLOATING_DRIVER"
+#: Brackets the leaf output pins whose net carries no other instance pin
+#: (issue #3668) -- evidence only, never a gate: such a net may still reach a
+#: port, so a driver on it is not "floating". See :func:`_parse_driver_nets`.
+_DRIVER_NETS_BEGIN = "===KLT_STA_DRIVER_NETS_BEGIN==="
+_DRIVER_NETS_END = "===KLT_STA_DRIVER_NETS_END==="
+_DRIVER_NET_PREFIX = "KLT_DRIVER_NET"
+#: Upper bound on how many driver pins each ``*_driver_sample`` field echoes
+#: -- a diagnostic sample, same style as ``design_nets_missing_sample``.
+_DRIVER_SAMPLE_LIMIT = 20
 #: Marker pairs and sentinels for the per-corner ``electrical_checks`` block
 #: (issue #3005): one ``report_check_types -violators`` region per limit class.
 #: See :func:`_electrical_check_lines` / :func:`_parse_electrical_check`.
@@ -975,6 +992,7 @@ def _dispatch_sta(
     provenance = build_provenance(
         deck_name=deck_name,
         deck_path=resolution["liberty_path"],
+        deck_path_envelope=report_paths.output_envelope(resolution["liberty_path"]),
         pdk=resolution["pdk_info"],
         input_path=input_path,
         # Issue #2027: `input_path` is the DEF (a layout stream) when
@@ -1444,7 +1462,13 @@ def _run_multi_corner(
                 "corner": resolution["corner"],
                 **axis_fields,
                 **corner_fields,
-                "deck": _deck_block(deck_name, resolution["liberty_path"]),
+                "deck": _deck_block(
+                    deck_name,
+                    resolution["liberty_path"],
+                    path_envelope=report_paths.output_envelope(
+                        resolution["liberty_path"]
+                    ),
+                ),
             }
         )
 
@@ -1530,7 +1554,8 @@ def _spef_annotation_block(
        Gates (only when both fingerprints actually carry a path).
     4. **Post-``read_spef`` accounting** (:func:`_parse_parasitic_annotation`)
        -- ``report_parasitic_annotation``'s own count of drivers OpenSTA
-       holds no parasitics for. ``unannotated_driver_count`` gates;
+       holds no parasitics for. ``unannotated_driver_count`` gates, minus the
+       floating no-net drivers (``floating_driver_count``, issue #3662);
        ``partially_unannotated_driver_count`` is reported but deliberately
        does **not** gate: a complete, correctly-read SPEF routinely reports
        a non-zero partial count (load pins with no distinct RC node of their
@@ -1554,6 +1579,34 @@ def _spef_annotation_block(
     reader_warning_count, reader_warning_sample = _spef_reader_warnings(stdout, stderr)
     delay_changed = _parse_delay_changed(stdout)
     unannotated_drivers, partial_drivers = _parse_parasitic_annotation(stdout)
+    unannotated_pins, partial_pins = _parse_parasitic_driver_pins(stdout)
+    floating_pins = _parse_floating_drivers(stdout)
+    # Issue #3662: a driver pin on no net can never carry parasitics and is on
+    # no timed path, so it is split out of the gating count -- but only when
+    # the pin listing is trustworthy (it accounts for every reported driver);
+    # otherwise the raw OpenSTA count keeps gating, as before.
+    floating_unannotated: list[str] | None = None
+    if (
+        unannotated_drivers is not None
+        and floating_pins is not None
+        and unannotated_pins is not None
+        and len(unannotated_pins) == unannotated_drivers
+    ):
+        floating_set = {_pin_key(p) for p in floating_pins}
+        floating_unannotated = [
+            p for p in unannotated_pins if _pin_key(p) in floating_set
+        ]
+    gating_unannotated = unannotated_drivers
+    if unannotated_drivers is not None and floating_unannotated is not None:
+        gating_unannotated = unannotated_drivers - len(floating_unannotated)
+    driver_detail = (
+        _driver_detail(
+            _timed_sample(unannotated_pins, floating_unannotated),
+            _parse_driver_nets(stdout),
+        )
+        if floating_unannotated is not None
+        else None
+    )
 
     reasons: list[str] = []
     design_nets_missing_sample: list[str] = []
@@ -1575,11 +1628,15 @@ def _spef_annotation_block(
             "the same report taken before it, so this run's delays are the "
             "unannotated ones"
         )
-    if unannotated_drivers:
-        reasons.append(
-            f"report_parasitic_annotation found {unannotated_drivers} driver(s) "
+    if gating_unannotated:
+        reason = (
+            f"report_parasitic_annotation found {gating_unannotated} driver(s) "
             "with no parasitics attached after read_spef"
         )
+        if driver_detail:
+            first = driver_detail[0]
+            reason += f" (first: {first['pin']}, {first['net_status']})"
+        reasons.append(reason)
 
     annotation_complete = not reasons
     annotation_warning = None
@@ -1600,6 +1657,21 @@ def _spef_annotation_block(
         "reader_warning_sample": reader_warning_sample,
         "unannotated_driver_count": unannotated_drivers,
         "partially_unannotated_driver_count": partial_drivers,
+        "floating_driver_count": (
+            len(floating_unannotated) if floating_unannotated is not None else None
+        ),
+        "floating_driver_sample": (
+            floating_unannotated[:_DRIVER_SAMPLE_LIMIT]
+            if floating_unannotated is not None
+            else None
+        ),
+        "unannotated_driver_sample": (
+            _timed_sample(unannotated_pins, floating_unannotated)
+        ),
+        "unannotated_driver_detail": driver_detail,
+        "partially_unannotated_driver_sample": (
+            partial_pins[:_DRIVER_SAMPLE_LIMIT] if partial_pins is not None else None
+        ),
         "delay_changed": delay_changed,
         "annotation_complete": annotation_complete,
         "annotation_warning": annotation_warning,
@@ -2848,8 +2920,53 @@ def _parasitic_annotation_lines() -> list[str]:
     ``catch`` only swallows a Tcl-level error)."""
     return [
         f'puts "{_PARASITIC_ANNOTATION_BEGIN}"',
-        "catch {report_parasitic_annotation} klt_parasitic_annotation_msg",
+        # `-report_unannotated` lists the offending pins (issue #3662); a build
+        # without the flag falls back to the counts-only form.
+        "if {[catch {report_parasitic_annotation -report_unannotated} "
+        "klt_parasitic_annotation_msg]} {",
+        "  catch {report_parasitic_annotation} klt_parasitic_annotation_msg",
+        "}",
         f'puts "{_PARASITIC_ANNOTATION_END}"',
+        f'puts "{_FLOATING_DRIVERS_BEGIN}"',
+        # Floating = no net, or a driver-only dangling net (no other pin, no
+        # port): either way the DEF/SPEF has nothing to annotate (issue #3669).
+        "catch {",
+        "  foreach klt_pin [get_pins -hierarchical *] {",
+        '    if {[get_property $klt_pin direction] ne "output"} {continue}',
+        "    set klt_nets [get_nets -quiet -of_objects $klt_pin]",
+        "    set klt_floating [expr {[llength $klt_nets] == 0}]",
+        "    if {!$klt_floating} {",
+        "      set klt_net [lindex $klt_nets 0]",
+        "      set klt_floating [expr {"
+        "[llength [get_pins -quiet -of_objects $klt_net]] <= 1 "
+        "&& [llength [get_ports -quiet -of_objects $klt_net]] == 0}]",
+        "    }",
+        "    if {$klt_floating} {",
+        f'      puts "{_FLOATING_DRIVER_PREFIX} [get_full_name $klt_pin]"',
+        "    }",
+        "  }",
+        "} klt_floating_drivers_msg",
+        f'puts "{_FLOATING_DRIVERS_END}"',
+        f'puts "{_DRIVER_NETS_BEGIN}"',
+        # A pin on no net yields a one-element list holding a NULL net in
+        # OpenSTA 26Q3 (measured, #3668): `get_full_name` on it raises and,
+        # uncaught, aborted the loop and dropped every later pin's evidence.
+        # Catch per pin; such a pin is already listed as floating above.
+        "foreach klt_pin [get_pins -hierarchical *] {",
+        "  catch {",
+        '    if {[get_property $klt_pin direction] eq "output"} {',
+        "      set klt_nets [get_nets -quiet -of_objects $klt_pin]",
+        "      if {[llength $klt_nets] == 1} {",
+        "        set klt_n [llength [get_pins -quiet -of_objects $klt_nets]]",
+        "        if {$klt_n <= 1} {",
+        f'          puts "{_DRIVER_NET_PREFIX} [get_full_name $klt_pin] $klt_n '
+        '[get_full_name $klt_nets]"',
+        "        }",
+        "      }",
+        "    }",
+        "  } klt_driver_nets_msg",
+        "}",
+        f'puts "{_DRIVER_NETS_END}"',
     ]
 
 
@@ -3450,6 +3567,113 @@ def _parse_parasitic_annotation(stdout: str) -> tuple[int | None, int | None]:
         int(unannotated_match.group(1)) if unannotated_match else None,
         int(partial_match.group(1)) if partial_match else None,
     )
+
+
+def _parse_parasitic_driver_pins(
+    stdout: str,
+) -> tuple[list[str] | None, list[str] | None]:
+    """``(unannotated_pins, partially_unannotated_pins)`` listed by
+    ``report_parasitic_annotation -report_unannotated`` (issue #3662): the
+    pin-name lines that follow each ``Found <n> ... drivers.`` summary line.
+    ``None`` for a list whose summary line is absent; an empty list when the
+    summary is present with no pins listed (an OpenSTA build without the
+    flag -- the caller then sees a length mismatch against the count and
+    degrades)."""
+    block = _extract_block(
+        stdout, _PARASITIC_ANNOTATION_BEGIN, _PARASITIC_ANNOTATION_END
+    )
+    if block is None:
+        return (None, None)
+    unannotated: list[str] | None = None
+    partial: list[str] | None = None
+    current: list[str] | None = None
+    for raw in block.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if _PARTIAL_DRIVERS_RE.search(line):
+            partial = current = []
+        elif _UNANNOTATED_DRIVERS_RE.search(line):
+            unannotated = current = []
+        elif current is not None and " " not in line:
+            current.append(line)
+    return (unannotated, partial)
+
+
+def _parse_floating_drivers(stdout: str) -> list[str] | None:
+    """Output pins that sit on no net, from the
+    :data:`_FLOATING_DRIVERS_BEGIN` block, or ``None`` when the block is
+    absent (an older script / a run that never reached it)."""
+    block = _extract_block(stdout, _FLOATING_DRIVERS_BEGIN, _FLOATING_DRIVERS_END)
+    if block is None:
+        return None
+    prefix = _FLOATING_DRIVER_PREFIX + " "
+    return [
+        line.strip()[len(prefix) :]
+        for line in block.splitlines()
+        if line.strip().startswith(prefix)
+    ]
+
+
+def _pin_key(pin: str) -> str:
+    """Spelling-insensitive pin key: ``report_parasitic_annotation`` may print
+    escaped bus brackets (``a\\[0\\]/Z``) where ``get_full_name`` does not."""
+    return pin.replace("\\", "")
+
+
+def _parse_driver_nets(stdout: str) -> dict[str, tuple[int, str]] | None:
+    """``{pin_key: (net_pin_count, net_name)}`` for output pins on a net with
+    at most one instance pin (issue #3668), or ``None`` when the block is
+    absent."""
+    block = _extract_block(stdout, _DRIVER_NETS_BEGIN, _DRIVER_NETS_END)
+    if block is None:
+        return None
+    prefix = _DRIVER_NET_PREFIX + " "
+    rows: dict[str, tuple[int, str]] = {}
+    for line in block.splitlines():
+        line = line.strip()
+        if not line.startswith(prefix):
+            continue
+        parts = line[len(prefix) :].split(" ", 2)
+        if len(parts) == 3 and parts[1].isdigit():
+            rows[_pin_key(parts[0])] = (int(parts[1]), parts[2])
+    return rows
+
+
+def _timed_sample(
+    unannotated_pins: list[str] | None, floating: list[str] | None
+) -> list[str] | None:
+    """Capped sample of the unannotated drivers that are *not* floating -- the
+    ones that gate. ``None`` when the pin listing is unavailable."""
+    if unannotated_pins is None:
+        return None
+    skip = {_pin_key(p) for p in floating or []}
+    return [p for p in unannotated_pins if _pin_key(p) not in skip][
+        :_DRIVER_SAMPLE_LIMIT
+    ]
+
+
+def _driver_detail(
+    sample: list[str] | None, driver_nets: dict[str, tuple[int, str]] | None
+) -> list[dict[str, Any]] | None:
+    """Per-pin account of the gating unannotated drivers: which pin, and what
+    its net looks like (``single_pin_net`` = no other instance pin on it, so
+    an unconnected or port-only net; otherwise ``net_with_other_pins``).
+    ``None`` when the pin listing is unavailable."""
+    if sample is None:
+        return None
+    nets = driver_nets or {}
+    detail: list[dict[str, Any]] = []
+    for pin in sample:
+        found = nets.get(_pin_key(pin))
+        detail.append(
+            {
+                "pin": pin,
+                "net_status": "single_pin_net" if found else "net_with_other_pins",
+                "net": found[1] if found else None,
+            }
+        )
+    return detail
 
 
 def _electrical_class(

@@ -494,6 +494,10 @@ def _pdk_block(
     ``docs/json-contract.md``). The absolute roots are named in the
     stderr warning instead (:func:`klayout_tools.pdk.ambiguity_warning`).
 
+    ``commit`` (issue #3786) is added **only** when the install carries a
+    ``.fetched-commit`` record (the 40-hex upstream commit); ``version``
+    stays ``fetched:<tag>``.
+
     ``compatibility`` (issue #3427) is likewise added **only** on a
     ``mismatch`` -- the resolved tree's ``SOURCES`` stamp differs from the
     declared open_pdks pin (:mod:`klayout_tools.pdk_compat`); ``version``
@@ -513,6 +517,11 @@ def _pdk_block(
         "source": pdk.get("resolved_via"),
         "version": pdk.get("version"),
     }
+    if pdk.get("commit"):
+        # Issue #3786: the upstream commit a fetched install was built from;
+        # only when known, so an install without ``.fetched-commit`` keeps
+        # byte-identical provenance.
+        block["commit"] = pdk["commit"]
     ambiguous = pdk.get("ambiguous_roots") or []
     if ambiguous:
         block["ambiguous_sources"] = [entry["resolved_via"] for entry in ambiguous]
@@ -653,6 +662,7 @@ def _deck_block(
     path: str | None,
     deck_options: Mapping[str, str] | None = None,
     resolve_deck_options: bool = False,
+    path_envelope: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """The provenance ``deck`` shape ``{name, content_hash, released}``;
     ``None`` when no rule/model deck was involved (e.g. LVS against a
@@ -710,6 +720,14 @@ def _deck_block(
     enumerate, so there are no defaults to resolve and that path stays
     byte-identical (caller-passed keys only, no siblings).
 
+    ``path_envelope`` (issue #3785, opt-in) is the ``{path, scope}`` locator
+    of the deck file (:func:`klayout_tools.env_provenance.repo_relative_path`,
+    never an absolute host path), recorded under ``path``. Passed only by
+    ``klt sta``/``klt place-and-route``, whose Liberty is a resolved file
+    rather than a built-in deck; ``content_hash`` stays the authoritative
+    identity. Omitted when ``None``, so every other verb's block is
+    byte-identical.
+
     All three keys are omitted entirely when there is nothing to record --
     a deck that declares no selectable option and a caller that passed none
     -- keeping the block byte-identical to before these parameters existed
@@ -731,6 +749,8 @@ def _deck_block(
             block["options_hash"] = _deck_options_hash(options)
     elif deck_options:
         block["options"] = dict(deck_options)
+    if path_envelope is not None:
+        block["path"] = dict(path_envelope)
     return block
 
 
@@ -814,6 +834,7 @@ def build_provenance(
     deck_options: Mapping[str, str] | None = None,
     resolve_deck_options: bool = False,
     include_klayout_version_mismatch: bool = False,
+    deck_path_envelope: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the shared ``provenance`` envelope block.
 
@@ -860,6 +881,9 @@ def build_provenance(
     (``options_explicit``/``options_hash``) -- see that function's docstring
     for both. ``klt_version``/``klayout_version`` are read at call time.
 
+    ``deck_path_envelope`` (issue #3785, opt-in) adds ``provenance.deck.path``
+    -- see :func:`_deck_block`.
+
     ``include_klayout_version_mismatch`` (issue #1490, opt-in and ``False``
     by default) adds ``provenance.klayout_version_mismatch``: ``True`` when
     the resolved ``klayout_version`` differs from
@@ -881,7 +905,13 @@ def build_provenance(
         "klt_version": _klt_version(),
         "klayout_version": actual_klayout_version,
         "pdk": _pdk_block(pdk, deck_path),
-        "deck": _deck_block(deck_name, deck_path, deck_options, resolve_deck_options),
+        "deck": _deck_block(
+            deck_name,
+            deck_path,
+            deck_options,
+            resolve_deck_options,
+            deck_path_envelope,
+        ),
         "input": _input_block(input_path, input_role),
     }
     if include_klayout_version_mismatch:

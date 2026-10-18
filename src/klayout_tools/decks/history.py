@@ -373,7 +373,7 @@ def deck_info(name: str | None = None) -> dict[str, Any]:
 #: in micrometres and a minimum interior corner angle in degrees, neither of
 #: them a ``threshold_dbu`` distance either.
 _NON_DISTANCE_CHECKS = frozenset(
-    {"area", "density", "antenna", "ongrid", "angle", "comp_coverage"}
+    {"area", "density", "antenna", "ongrid", "angle", "comp_coverage", "tap_distance"}
 )
 
 
@@ -445,6 +445,11 @@ def deck_rules(name: str, rule_id: str | None = None) -> dict[str, Any]:
 
     Top-level, pinned by ``content_hash`` like the rules:
 
+    - ``marker_blind_layers`` -- ``["<layer>/<datatype>", ...]`` area-marker
+      layers (sky130: ``81/2`` ``areaid.ce``) the deck accepts but does not
+      model rule-switching for (issue #3815); ``[]`` for a deck declaring
+      none. Deck-static, so it is not narrowed by ``rule_id``.
+
     - ``layer_table`` -- every ``{"name", "layer", "datatype"}`` the deck
       names, sorted by ``(layer, datatype)``.
     - ``ambiguous_names`` -- ``[{"name", "pairs": [{"layer", "datatype"}]}]``
@@ -461,6 +466,7 @@ def deck_rules(name: str, rule_id: str | None = None) -> dict[str, Any]:
         deck_source_path,
         get_deck,
         get_layer_names,
+        get_marker_blind_layers,
         get_nominal_dbu,
     )
 
@@ -489,6 +495,9 @@ def deck_rules(name: str, rule_id: str | None = None) -> dict[str, Any]:
         "content_hash": f"sha256:{digest}" if digest is not None else None,
         "nominal_dbu_um": nominal_dbu,
         "rules": [_project_rule(rule, nominal_dbu, layer_names) for rule in rules],
+        "marker_blind_layers": [
+            f"{layer}/{datatype}" for layer, datatype in get_marker_blind_layers(name)
+        ],
         **_layer_table_fields(rules, layer_names),
     }
 
@@ -1018,6 +1027,8 @@ def _rule_pairs(rule: DrcRule) -> list[tuple[int, int]]:
         pairs.append(rule.other_layer)
     if rule.region_spec is not None:
         pairs.extend(rule.region_spec.layers())
+    if rule.net_spec is not None:
+        pairs.extend(rule.net_spec.layers())
     return pairs
 
 
@@ -1086,6 +1097,15 @@ def _rule_limits(rule: DrcRule, nominal_dbu: float) -> dict[str, Any]:
         return {"grid_um": rule.grid_um}
     if rule.check == "angle":
         return {"angle_limit_deg": rule.angle_limit_deg}
+    if rule.check == "tap_distance" and rule.region_spec is not None:
+        spec: Any = rule.region_spec
+        # Physical micrometres already, like `grid_um` -- no dbu conversion.
+        return {
+            "well_domain": spec.well_domain,
+            "voltage": spec.voltage,
+            "max_distance_um": spec.max_distance_um,
+            "step_um": spec.step_um,
+        }
     return {}
 
 

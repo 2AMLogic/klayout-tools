@@ -28,7 +28,7 @@ provenance fields:
   :class:`DiodeDevice`, :class:`LayerExpr`, :class:`SizeFilter`,
   :class:`InvalidLabelLayerError`).
 - :mod:`klayout_tools.decks.parasitics` -- the parasitics domain
-  (:class:`LayerRC`, :class:`ParasiticsDeck`,
+  (:class:`LayerRC`, :class:`CutRC`, :class:`ParasiticsDeck`,
   :class:`UnknownExtractionDeckError`, :class:`InvalidDeckOptionError`).
 
 Every public name from those three modules is re-exported below, so
@@ -61,16 +61,24 @@ from .extraction import (
 )
 from .finfet import FinFETExtractionDeck, FinFETFlavour
 from .parasitics import (
+    HIGH_CORNER,
+    LOW_CORNER,
+    NOMINAL_CORNER,
+    RESISTANCE_CORNERS,
+    CutRC,
     InvalidDeckOptionError,
     LayerRC,
     ParasiticsDeck,
     UnknownExtractionDeckError,
+    describe_cut_resistance_gaps,
 )
 from .rules import (
     CompCoverageSpec,
     DerivedLayer,
     DrcRule,
+    NetSpaceSpec,
     RuleProvenance,
+    TapDistanceSpec,
     UnknownDeckError,
 )
 
@@ -80,28 +88,36 @@ __all__ = [
     "CapacitorFlavour",
     "CapacitorVariant",
     "CompCoverageSpec",
+    "CutRC",
+    "NetSpaceSpec",
     "DerivedLayer",
     "DiodeDevice",
     "DrcRule",
     "ExtractionDeck",
     "FinFETExtractionDeck",
     "FinFETFlavour",
+    "HIGH_CORNER",
     "InvalidDeckOptionError",
     "InvalidLabelLayerError",
     "LayerExpr",
+    "LOW_CORNER",
     "LayerRC",
     "MOSFlavour",
     "MomCapacitorDevice",
+    "NOMINAL_CORNER",
     "ParasiticsDeck",
+    "RESISTANCE_CORNERS",
     "ResistorDevice",
     "ResistorFlavour",
     "RuleProvenance",
     "TerminalRelation",
     "SizeFilter",
+    "TapDistanceSpec",
     "UnknownDeckError",
     "UnknownExtractionDeckError",
     "UnsupportedDeviceMarker",
     "deck_names",
+    "describe_cut_resistance_gaps",
     "deck_source_path",
     "get_deck",
     "get_extraction_deck",
@@ -109,6 +125,7 @@ __all__ = [
     "get_nominal_dbu",
     "get_parasitics_deck",
     "get_unmodeled_rules",
+    "get_marker_blind_layers",
     "get_unchecked_rules",
     "get_unmodeled_voltage_markers",
     "known_extraction_deck_names",
@@ -294,6 +311,20 @@ def get_unchecked_rules(name: str) -> dict[str, tuple[tuple[int, int], str]]:
         "sg13cmos5l": sg13cmos5l.UNCHECKED_RULES,
         "sg13g2": sg13g2.UNCHECKED_RULES,
     }.get(name, {})
+
+
+def get_marker_blind_layers(name: str) -> list[tuple[int, int]]:
+    """Return the sorted ``(layer, datatype)`` area-marker layers whose
+    rule-switching ``name``'s deck does not model (issue #3815).
+
+    A marker such as sky130's ``areaid.ce`` (81/2) is accepted in a stream but
+    changes no rule's result; ``drc.py`` and ``klt deck rules`` surface the
+    declaration so that is discoverable. Decks that declare none (and
+    unregistered names) return an empty list.
+    """
+    from . import sky130
+
+    return {"sky130": sorted(sky130.MARKER_BLIND_LAYERS)}.get(name, [])
 
 
 def _nominal_dbu_registry() -> dict[str, float]:

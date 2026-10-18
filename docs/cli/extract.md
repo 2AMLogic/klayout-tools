@@ -876,8 +876,18 @@ nameable by an ordinary in-cell label (step 1) and reachable by the parent's
 routing, so it goes through the normal resolution path.
 
 To carry such a terminal into the black box, either draw and label a
-substrate tie inside the cell, or declare the port via `--abstract-cell-lef`
-with `PORT` geometry that lands on drawn conductor.
+substrate tie inside the cell, or declare the port via `--abstract-cell-lef`.
+
+**LEF merge (issue #3749).** A LEF `MACRO` of the matched cell's name is
+consulted even when the cell *does* draw labels: every LEF `PIN` whose name
+the labels did not supply is appended to the label-derived pin list (labels
+win on any name present in both; `abstracted_cells[].lef_path` names the LEF
+when at least one pin was merged, `resolution_source` stays
+`in_cell_labels`). This is how a std cell's `VNB` — drawn on a label layer
+the deck does not read — reaches the `.SUBCKT`. A merged pin on a
+`pwell`/`psub` LEF layer that lands on no conductor connects to the deck's
+substrate global net (`vsubs`) instead of an isolated per-instance net, and
+the warning above is not emitted for that cell. No new flag or JSON field.
 
 Dropping the port only loses *that terminal's* connectivity on *that*
 instance. It must not perturb anything else, and since issue #1911 it does
@@ -1672,7 +1682,7 @@ which draws:
 | `double` | PLUS pad left, MINUS pad right, both on `mmax`         | same metal, same y (pad centre height), far apart in x          |
 | `none`   | no pads; pins inside the outer `mmax` bars             | same metal, at *opposite* y edges of the marker                 |
 
-`klt extract` classifies from exactly that (`extract.py`'s
+`klt extract` classifies from exactly that (`extract_passive_regions.py`'s
 `_mom_feed_variant`): different port metals that overlap → `same`; same
 metal and ≥ 50% of the marker width apart in x, then ports within 25% of the
 marker height in y → `double`, or ≥ 75% → `none`. A port layout matching none
@@ -2913,7 +2923,7 @@ running KLayout's own native rule-deck runner (`run_drc_klayout_engine`,
 script and diffing its violations against the compiled `DrcRule` deck's own
 results on the same golden layouts — see [`docs/cli/drc.md`](drc.md) →
 "Engine" → `"klayout"`. This section is the LVS-device-extraction
-counterpart: `klayout_tools.extract.run_extract_klayout_engine` (a Python
+counterpart: `tests/helpers/extract_klayout_oracle.py`'s `run_extract_klayout_engine` (a Python
 helper, not yet a `klt extract --engine` CLI flag — see "Scope" below) drives
 `sky130.lvs` — sky130's single, directly-runnable native LVS/device-
 extraction deck, resolved via `klayout_tools.pdk.lvs_deck_file` from the
@@ -4979,6 +4989,27 @@ pattern as the DRC decks and the SPICE model-binding table (#214). Each changed
 coefficient carries an inline citation (source file + field name) in its deck
 comment.
 
+**Via/contact cut resistance and interconnect-resistance corners (issue
+#3053).** `gf180mcu` and `sky130` also curate, in `PARASITICS.cuts`
+(`CutRC` rows, importable from `klayout_tools.decks`), the per-cut resistance
+of each via/contact layer between adjacent metal levels, from the same
+magic tech file's `contact` rows, plus the PDK's published high-R
+(`variants (hrhc),(hrlc)`) and low-R (`variants (lrhc),(lrlc)`) corners for
+both cuts and metal sheet resistance (`LayerRC.sheet_res_high_ohm_sq` /
+`sheet_res_low_ohm_sq`). Corners are named `nominal` / `high` / `low`
+(`CutRC.resistance(corner)`, `LayerRC.sheet_res(corner)`); a corner the PDK
+does not publish is `None`, never zero. Cut values are per layer: gf180mcu
+prices every cut at 4.5 ohm nominal (15 ohm high-R, 3.3x), sky130 ranges from
+0.38 ohm (`via4`) to 9.3 ohm (`mcon`). **A published 0 ohm is stored as
+published** (gf180mcu's low-R corner prices every cut at 0): `klt power`
+treats a `resistance_ohm: 0` edge as an ideal short, so the low-R corner
+means ideal-short cuts and nothing is clamped. `sg13g2` and `sg13cmos5l` are
+not yet curated for cuts; `describe_cut_resistance_gaps(deck, n_metals)`
+reports every uncurated adjacent metal pair rather than leaving it silently
+zero. These tables are data only for now: neither `klt extract` nor `klt power`
+reads them (deck defaulting for `klt power` is tracked in #3400, via-array
+cut-count scaling in #3401).
+
 `sg13g2`'s `PARASITICS` table covers its full seven-level metal stack
 (Metal1-TopMetal2, `EXTRACTION_DECK.metals[0:7]`) and all six adjacent-pair
 vertical-overlap coefficients (issue #1281, extending #1277's initial
@@ -5835,7 +5866,9 @@ table row (35 blocks omitted, `reader_warning_count` 0). The remaining 3
 unannotated drivers are `clkload0/Y`, `clkload1/Y` and `clkload2/Y`: the
 unconnected outputs of CTS dummy-load cells. They drive no DEF net, so there is
 no wire for the SPEF to annotate; this is an inherent limit, not an extraction
-defect, and `annotation_complete` stays `false` for it.
+defect. Since issue #3662 `klt sta` reports such no-net drivers separately
+(`floating_driver_count`/`floating_driver_sample`) and no longer counts them
+against `annotation_complete` (see `docs/cli/sta.md`).
 
 **Port PIN name ≠ NET name (issue #3257).** For a DEF `- PortA + NET netA`
 record, the `*PORTS` list and the net's `*P` entry use the PIN name
@@ -5856,9 +5889,15 @@ supply nets (`VGND`/`VPWR` islands) that the DEF only declares in
 **Unlabelled `$N` nets (issue #3580).** The same omission applies to a
 unique-named, non-port net spelled `$<digits>` (an unlabelled layout net) that
 is absent from the DEF `NETS` section; OpenSTA rejects its `*D_NET` block
-(`STA-1650`) just the same. Labelled nets that are not in the DEF are kept.
-`warnings[]` lists the omitted names. Nothing changes without
-`--def-net-connections`.
+(`STA-1650`) just the same. `warnings[]` lists the omitted names. Nothing
+changes without `--def-net-connections`.
+
+**Sub-cell label nets (issue #3662).** With `--def-net-connections` the DEF is
+the authority on which nets the design has, so the omission is no longer
+limited to duplicate-named or `$N` nets: *every* net that is neither a declared
+port nor in the DEF `NETS` section is omitted. This covers labels found only
+below the top cell (`Z`, `ZN`, internal nodes of instanced standard cells),
+which OpenSTA otherwise discards with `STA-1650`.
 
 **Parasitic model (default, non-`--distributed-rc`).** The SPEF carries a
 single lumped capacitance per net, hung on the net's hub node, and no wire
@@ -6873,6 +6912,7 @@ network integrity" below.
 | `distributed_rc`       | boolean         | `true` only when `--distributed-rc` was given (issue #977). `false` otherwise, `--critical-net`-only runs included. |
 | `resistance_paths`     | array\<object\> | Additive field (issue #2765), **present only when `--resistance-path` was given** (absent otherwise). One shortest-series-path-resistance result per query, in request order — see "Point-to-point series resistance over a distributed ladder (`--resistance-path`)" above for the entry shape and status values. |
 | `model`                | object          | Machine-readable declaration of the parasitic model's own scope — static text, the same regardless of the file/deck (issue #728). See "Parasitic model scope (`parasitics.model`)" below. |
+| `model_revision`       | integer         | Additive field (issue #2957). Revision of the R/C extraction model itself, bumped by a code constant whenever a change alters the R or C values extracted from identical input. Compare it across klt versions to tell "tool bumped, model unchanged" from "model changed". `1` = 0.6.0 and earlier; `2` = 0.7.0 onward (series-R squares counted per conductor fragment rather than per merged net, #2392). Present only with `--parasitics`; `schema_version` is unchanged. |
 | `mom_crosscheck`       | object \| null  | Additive field (issue #798). `null` unless `--mom-net <net>` was given, in which case it is the swap-and-measure report for that one net — see "`klt mom` cross-check for one net" above and the field list below. |
 | `mom_rlc_override`     | object \| null  | Additive field (issue #988). `null` unless `--mom-rlc-net <net>` was given, in which case it is the substitution report for that one net — see "Substitute a caller-supplied `klt mom` R/L/C for a critical net" above and the field list below. |
 | `substrate_dc_tie`     | object          | Additive field (issue #1263, extended by issue #1503). The DC reference written for every synthesized substrate net — see "Substrate DC reference" above and the field list below. Always present (never `null`); `nets` is `[]` when this extraction synthesized no substrate identity at all. |

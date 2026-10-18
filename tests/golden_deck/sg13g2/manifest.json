@@ -953,6 +953,112 @@
       ]
     }
   },
+  "psd.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            14,
+            0
+          ]
+        },
+        {
+          "box": [
+            2410,
+            0,
+            4410,
+            4000
+          ],
+          "layer": [
+            14,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      14,
+      0
+    ],
+    "threshold_dbu": 310,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            14,
+            0
+          ]
+        },
+        {
+          "box": [
+            2210,
+            0,
+            4210,
+            4000
+          ],
+          "layer": [
+            14,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "psd.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            410,
+            4000
+          ],
+          "layer": [
+            14,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      14,
+      0
+    ],
+    "threshold_dbu": 310,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            210,
+            4000
+          ],
+          "layer": [
+            14,
+            0
+          ]
+        }
+      ]
+    }
+  },
   "topmetal1.space.1": {
     "check": "space",
     "clean": {

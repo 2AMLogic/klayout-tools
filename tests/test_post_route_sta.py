@@ -624,7 +624,8 @@ def test_sta_script_lines_wrap_read_spef_in_annotation_evidence():
     # `report_parasitic_annotation` is wrapped in `catch` so an OpenSTA
     # build without the command degrades the derived fields to null rather
     # than aborting the run.
-    assert any(ln.startswith("catch {report_parasitic_annotation}") for ln in lines)
+    assert any("catch {report_parasitic_annotation" in ln for ln in lines)
+    assert any("report_parasitic_annotation -report_unannotated" in ln for ln in lines)
 
 
 def test_sta_script_lines_no_spef_has_no_annotation_evidence():
@@ -1013,6 +1014,254 @@ def test_parse_parasitic_annotation_missing_block_is_unknown():
     assert post_route_sta._parse_parasitic_annotation("nothing here") == (None, None)
 
 
+def _listed_stdout(unannotated, partial, floating):
+    parts = [
+        _parasitic_block(
+            "\n".join(
+                [
+                    f"Found {len(unannotated)} unannotated drivers.",
+                    *[f" {pin}" for pin in unannotated],
+                    f"Found {len(partial)} partially unannotated drivers.",
+                    *[f" {pin}" for pin in partial],
+                ]
+            )
+        )
+    ]
+    if floating is not None:
+        parts.append(
+            "\n".join(
+                [
+                    post_route_sta._FLOATING_DRIVERS_BEGIN,
+                    *[f"KLT_FLOATING_DRIVER {pin}" for pin in floating],
+                    post_route_sta._FLOATING_DRIVERS_END,
+                ]
+            )
+        )
+    return "\n".join(parts)
+
+
+def test_parse_parasitic_driver_pins_lists_both_groups():
+    stdout = _listed_stdout(["clkload1/Z", "u2/X"], ["u3/Y"], None)
+
+    assert post_route_sta._parse_parasitic_driver_pins(stdout) == (
+        ["clkload1/Z", "u2/X"],
+        ["u3/Y"],
+    )
+    assert post_route_sta._parse_parasitic_driver_pins("nothing") == (None, None)
+
+
+def test_parse_floating_drivers_absent_block_is_none():
+    assert post_route_sta._parse_floating_drivers("nothing") is None
+    stdout = _listed_stdout([], [], ["clkload1/Z"])
+    assert post_route_sta._parse_floating_drivers(stdout) == ["clkload1/Z"]
+
+
+def _annotation_from(stdout_tail):
+    completed = post_route_sta._OpenRoadResult(
+        returncode=0,
+        stdout="\n".join(
+            [
+                post_route_sta._SPEF_NET_CHECK_BEGIN,
+                "1 1",
+                "1 1",
+                post_route_sta._SPEF_NET_CHECK_END,
+                post_route_sta._DELAY_PRE_BEGIN,
+                _UNANNOTATED_PATH,
+                post_route_sta._DELAY_PRE_END,
+                post_route_sta._DELAY_POST_BEGIN,
+                _ANNOTATED_PATH,
+                post_route_sta._DELAY_POST_END,
+                stdout_tail,
+            ]
+        ),
+        stderr="",
+        engine_log=None,
+    )
+    return post_route_sta._spef_annotation_block(completed, ["n"])
+
+
+def test_floating_no_net_drivers_do_not_gate_annotation_complete():
+    """Issue #3662: unannotated drivers that sit on no net are reported
+    separately and excluded from the completeness predicate; partial drivers
+    stay non-gating but are listed."""
+    block = _annotation_from(
+        _listed_stdout(
+            ["clkload1/Z", "clkload1/ZN"], ["u3/Y"], ["clkload1/Z", "clkload1/ZN"]
+        )
+    )
+
+    assert block["annotation_complete"] is True
+    assert block["unannotated_driver_count"] == 2
+    assert block["floating_driver_count"] == 2
+    assert block["floating_driver_sample"] == ["clkload1/Z", "clkload1/ZN"]
+    assert block["unannotated_driver_sample"] == []
+    assert block["partially_unannotated_driver_sample"] == ["u3/Y"]
+
+
+def test_floating_predicate_covers_dangling_driver_only_nets():
+    """Issue #3669: an output pin is floating when it has no net OR its net
+    holds only that pin and no port; a net with a load or port is not."""
+    tcl = "\n".join(post_route_sta._parasitic_annotation_lines())
+
+    assert "get_nets -quiet -of_objects $klt_pin" in tcl
+    assert "[llength [get_pins -quiet -of_objects $klt_net]] <= 1" in tcl
+    assert "[llength [get_ports -quiet -of_objects $klt_net]] == 0" in tcl
+
+
+def test_timed_unannotated_driver_still_gates():
+    block = _annotation_from(_listed_stdout(["clkload1/Z", "u2/X"], [], ["clkload1/Z"]))
+
+    assert block["annotation_complete"] is False
+    assert block["floating_driver_count"] == 1
+    assert block["unannotated_driver_sample"] == ["u2/X"]
+    assert "1 driver(s)" in block["annotation_warning"]
+
+
+def _with_driver_nets(stdout, rows):
+    return "\n".join(
+        [
+            stdout,
+            post_route_sta._DRIVER_NETS_BEGIN,
+            *[f"KLT_DRIVER_NET {pin} {n} {net}" for pin, n, net in rows],
+            post_route_sta._DRIVER_NETS_END,
+        ]
+    )
+
+
+def test_floating_match_ignores_escape_backslashes():
+    """Issue #3668: `report_parasitic_annotation` and `get_full_name` can
+    spell the same bus pin differently (`\\[0\\]` vs `[0]`); a spelling
+    difference must not hide a floating pin."""
+    block = _annotation_from(_listed_stdout(["clkload\\[0\\]/Z"], [], ["clkload[0]/Z"]))
+
+    assert block["annotation_complete"] is True
+    assert block["floating_driver_count"] == 1
+    assert block["unannotated_driver_sample"] == []
+
+
+def test_gating_driver_detail_names_pin_and_net_status():
+    stdout = _with_driver_nets(
+        _listed_stdout(["clkload1/Z", "u2/X", "u7/Y"], [], ["clkload1/Z"]),
+        [("u2/X", 1, "dangling_n")],
+    )
+    block = _annotation_from(stdout)
+
+    assert block["annotation_complete"] is False
+    assert block["unannotated_driver_detail"] == [
+        {"pin": "u2/X", "net_status": "single_pin_net", "net": "dangling_n"},
+        {"pin": "u7/Y", "net_status": "net_with_other_pins", "net": None},
+    ]
+    assert "u2/X" in block["annotation_warning"]
+    assert "single_pin_net" in block["annotation_warning"]
+
+
+def test_single_pin_net_driver_is_not_treated_as_floating():
+    """Widening "floating" to a one-pin net would let a driver whose only
+    other connection is a port pass the strict gate; it must keep gating."""
+    stdout = _with_driver_nets(_listed_stdout(["u2/X"], [], []), [("u2/X", 1, "c0_r")])
+    block = _annotation_from(stdout)
+
+    assert block["annotation_complete"] is False
+    assert block["floating_driver_count"] == 0
+
+
+# Verbatim stdout tail of the module's own `_parasitic_annotation_lines`
+# against OpenROAD 26Q3-1510-g6cb3f2b704 + sky130_fd_sc_hd tt_025C_1v80 on a
+# reduced DEF (2 flops; `dum1` CTS-style clkbuf with its output on no net;
+# `dum2` with its output on a single-pin net `dummy_o`; flop Q net `c0_r`
+# reaching port `c0`), with a SPEF that omits `d`, `ff1/Q` and the dummy nets.
+# Issue #3668: hypothesis 1 (OpenSTA returns a real net for the dummy output)
+# does not hold -- both dummy outputs are listed floating -- and the evidence
+# loop, uncaught, died on dum1's NULL net before reaching dum2.
+_REAL_DUMMY_LOAD_CAPTURE = """\
+===KLT_STA_PARASITIC_ANNOTATION_BEGIN===
+Found 4 unannotated drivers.
+ d
+ dum1/X
+ dum2/X
+ ff1/Q
+Found 2 partially unannotated drivers.
+ clk
+  ff1/CLK
+  dum1/A
+  dum2/A
+ ff0/Q
+  c0
+===KLT_STA_PARASITIC_ANNOTATION_END===
+===KLT_STA_FLOATING_DRIVERS_BEGIN===
+[WARNING STA-0101] object 'NULL' not found.
+[WARNING STA-0361] net 'NULL' not found.
+KLT_FLOATING_DRIVER dum1/X
+KLT_FLOATING_DRIVER dum2/X
+===KLT_STA_FLOATING_DRIVERS_END===
+===KLT_STA_DRIVER_NETS_BEGIN===
+KLT_DRIVER_NET ff1/Q 1 q2
+[WARNING STA-0101] object 'NULL' not found.
+[ERROR STA-2204] get_property NULL is not an object.
+KLT_DRIVER_NET dum2/X 1 dummy_o
+===KLT_STA_DRIVER_NETS_END===
+"""
+
+
+def test_real_capture_dummy_loads_are_floating_and_real_drivers_gate():
+    """Issue #3668, measured on real OpenSTA: dummy-load outputs on no net and
+    on a single-pin net are floating; `d` (port) and `ff1/Q` (net reaching a
+    port) have no parasitics in this SPEF and still gate."""
+    block = _annotation_from(_REAL_DUMMY_LOAD_CAPTURE)
+
+    assert block["floating_driver_sample"] == ["dum1/X", "dum2/X"]
+    assert block["unannotated_driver_sample"] == ["d", "ff1/Q"]
+    assert block["annotation_complete"] is False
+    assert block["partially_unannotated_driver_count"] == 2
+    assert [d["pin"] for d in block["unannotated_driver_detail"]] == ["d", "ff1/Q"]
+
+
+def test_real_capture_dummy_loads_only_is_complete():
+    """Same capture with only the dummy loads unannotated -> complete."""
+    stdout = _REAL_DUMMY_LOAD_CAPTURE.replace(
+        "Found 4 unannotated drivers.\n d\n dum1/X\n dum2/X\n ff1/Q\n",
+        "Found 2 unannotated drivers.\n dum1/X\n dum2/X\n",
+    )
+    block = _annotation_from(stdout)
+
+    assert block["annotation_complete"] is True
+    assert block["floating_driver_count"] == 2
+    assert block["unannotated_driver_sample"] == []
+
+
+def test_driver_net_evidence_loop_survives_a_null_net():
+    """OpenSTA returns a one-element NULL-net list for an output pin on no net;
+    the per-pin `catch` keeps one such pin from dropping later evidence."""
+    tcl = "\n".join(post_route_sta._parasitic_annotation_lines())
+    loop = tcl.split(post_route_sta._DRIVER_NETS_BEGIN, 1)[1]
+
+    assert loop.index("foreach klt_pin") < loop.index("catch {")
+
+
+def test_driver_detail_is_null_without_pin_listing():
+    block = _annotation_from(
+        _parasitic_block(
+            "Found 2 unannotated drivers.\nFound 0 partially unannotated drivers."
+        )
+    )
+
+    assert block["unannotated_driver_detail"] is None
+
+
+def test_unlisted_unannotated_drivers_keep_gating_without_pin_listing():
+    """A build without `-report_unannotated` prints only the counts: the raw
+    count keeps gating and the new fields degrade to null / empty."""
+    block = _annotation_from(
+        _parasitic_block(
+            "Found 2 unannotated drivers.\nFound 0 partially unannotated drivers."
+        )
+    )
+
+    assert block["annotation_complete"] is False
+    assert block["floating_driver_count"] is None
+    assert block["floating_driver_sample"] is None
+
+
 def test_parse_parasitic_annotation_unsupported_command_is_unknown():
     """An OpenSTA build without `report_parasitic_annotation` leaves the
     `catch`-guarded block empty -- both fields degrade to null."""
@@ -1152,6 +1401,11 @@ def test_run_sta_response_envelope(tmp_path, monkeypatch):
     assert provenance["pdk"]["name"] == "sky130A"
     assert provenance["deck"]["name"] == "sky130_fd_sc_hd__tt_025C_1v80"
     assert provenance["input"]["content_hash"] is not None
+    # Issue #3785: the Liberty behind `deck.content_hash` is located by the
+    # `{path, scope}` envelope -- never an absolute host path.
+    assert set(provenance["deck"]["path"]) == {"path", "scope"}
+    assert provenance["deck"]["path"]["scope"] in {"repo", "external"}
+    assert str(tmp_path) not in json.dumps(provenance["deck"])
 
 
 # --------------------------------------------------------------------------- #
@@ -1279,6 +1533,10 @@ def test_run_sta_corners_produces_per_corner_array(tmp_path, monkeypatch):
     assert tt_entry["fmax_mhz"] == 500.0
     assert tt_entry["spef_annotation"] is None
     assert tt_entry["deck"]["name"] == "sky130_fd_sc_hd__tt_025C_1v80"
+    # Issue #3785: each corner's deck block locates its own Liberty.
+    for entry in corners:
+        assert set(entry["deck"]["path"]) == {"path", "scope"}
+        assert str(tmp_path) not in json.dumps(entry["deck"])
 
     assert ss_entry["worst_slack_ns"] == -0.42
     assert ss_entry["total_negative_slack_ns"] == -3.5
@@ -4711,6 +4969,27 @@ def test_live_engine_input_transitions_bad_port_rejected(tmp_path):
     assert message.startswith("constraints.input_transitions rejected")
     assert "constraints.input_transitions['nope']" in message
     assert "constraints.input_transitions['q_a']" in message
+
+
+@_LIVE_ONLY
+def test_live_engine_input_transitions_whole_bus_key_rejected(tmp_path):
+    """Issue #3498: the port check keys ports by exact full name, so a
+    whole-bus (or wildcard) key that could be read as ambiguous is rejected
+    as not found, naming the offending ``input_transitions`` key."""
+    request_path = _live_verilog_request(
+        tmp_path, input_transitions={"bus": 0.1, "b*": 0.1}
+    )
+    with pytest.raises(PostRouteStaError) as exc_info:
+        run_sta(request_path, pdk_variant="sky130A")
+    message = str(exc_info.value)
+    assert message.startswith("constraints.input_transitions rejected")
+    assert (
+        "constraints.input_transitions['bus']: no port with exactly this name"
+        in message
+    )
+    assert (
+        "constraints.input_transitions['b*']: no port with exactly this name" in message
+    )
 
 
 @_LIVE_ONLY

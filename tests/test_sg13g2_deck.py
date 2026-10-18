@@ -2173,3 +2173,69 @@ def test_golden_pairs_cover_every_provenanced_sg13g2_device_rule():
     entry) added without a matching golden-pair test fails this assertion
     loudly instead of silently under-covering."""
     assert _provenanced_device_rule_ids() == _GOLDEN_PAIR_TESTED_RULE_IDS
+
+
+# --------------------------------------------------------------------------- #
+# pSD width/space/area (issue #3787)
+# --------------------------------------------------------------------------- #
+
+
+def _psd_gds(tmp_path: Path, boxes_um: list[tuple[float, float, float, float]]) -> str:
+    layout = kdb.Layout()
+    layout.dbu = _DBU_UM
+    top = layout.create_cell("TOP")
+    layer = layout.layer(14, 0)
+    for box in boxes_um:
+        top.shapes(layer).insert(_box_um(*box))
+    return _write_gds(layout, tmp_path / "psd.gds")
+
+
+def _psd_rule_ids(report: dict) -> set[str]:
+    return {v["rule"] for v in report["violations"]}
+
+
+def test_sg13g2_psd_rules_cite_the_maximal_runset():
+    rules = {r.id: r for r in sg13g2_deck_module.DECK if r.scope == "pSD"}
+    assert {k: r.provenance.rule_id for k, r in rules.items()} == {
+        "psd.width.1": "pSD.a",
+        "psd.space.1": "pSD.b",
+        "psd.area.1": "pSD.k",
+    }
+    for rule in rules.values():
+        assert rule.provenance.source_path.endswith("rule_decks/sg13g2_maximal.drc")
+
+
+def test_run_drc_sg13g2_psd_width_violation(tmp_path: Path):
+    report = run_drc(_psd_gds(tmp_path, [(0, 0, 0.2, 2.0)]), "sg13g2")
+    assert "psd.width.1" in _psd_rule_ids(report)
+
+
+def test_run_drc_sg13g2_psd_space_violation(tmp_path: Path):
+    report = run_drc(
+        _psd_gds(tmp_path, [(0, 0, 1.0, 1.0), (1.2, 0, 2.2, 1.0)]), "sg13g2"
+    )
+    assert _psd_rule_ids(report) == {"psd.space.1"}
+
+
+def test_run_drc_sg13g2_psd_area_violation(tmp_path: Path):
+    report = run_drc(_psd_gds(tmp_path, [(0, 0, 0.1, 0.1)]), "sg13g2")
+    assert "psd.area.1" in _psd_rule_ids(report)
+
+
+def test_run_drc_sg13g2_psd_clean_and_no_longer_uncovered(tmp_path: Path):
+    report = run_drc(_psd_gds(tmp_path, [(0, 0, 1.0, 1.0)]), "sg13g2")
+    assert report["status"] == "clean", report["violations"]
+    assert [14, 0] not in [
+        list(layer) for layer in report["coverage"]["layers_in_stream_without_rules"]
+    ]
+
+
+def test_run_drc_sg13g2_psd_subminimum_area_inside_merged_shape_is_clean(
+    tmp_path: Path,
+):
+    """Area is per merged polygon: a small box fused into a larger pSD shape
+    must not be flagged on its own."""
+    report = run_drc(
+        _psd_gds(tmp_path, [(0, 0, 1.0, 1.0), (1.0, 0.0, 1.1, 0.4)]), "sg13g2"
+    )
+    assert "psd.area.1" not in _psd_rule_ids(report)

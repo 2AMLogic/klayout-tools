@@ -59,3 +59,17 @@ def chparam_lines(parameters: dict[str, int | str], top: str) -> list[str]:
         for name, value in parameters.items()
     )
     return [f"chparam {sets} {top}"]
+
+
+def read_verilog_line(path: object) -> str:
+    """The Yosys ``read_verilog`` line for RTL source ``path`` (issue #3797).
+
+    ``.sv``/``.svh`` sources (case-insensitive) are read with ``-sv`` so
+    ordinary SystemVerilog (``logic``, ``always_ff``) parses; every other
+    extension keeps the plain Verilog-2005 front end, so existing ``.v``
+    designs are parsed exactly as before.
+    """
+    text = str(path)
+    if text.lower().endswith((".sv", ".svh")):
+        return f"read_verilog -sv {text}"
+    return f"read_verilog {text}"
