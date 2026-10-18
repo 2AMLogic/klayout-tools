@@ -12132,6 +12132,29 @@ def test_normalize_gf180_capacitor_derives_area_perimeter_from_si_metres():
     assert out.strip() == "C1 1 2 0 cap_mim_2f0_m4m5_noshield A=4P P=8U"
 
 
+@pytest.mark.parametrize(
+    "model",
+    [
+        "cap_nmos_03v3",
+        "cap_pmos_03v3",
+        "cap_nmos_06v0",
+        "cap_pmos_06v0",
+        "cap_nmos_03v3_b",
+        "cap_pmos_03v3_b",
+        "cap_nmos_06v0_b",
+        "cap_pmos_06v0_b",
+    ],
+)
+def test_normalize_gf180_mos_capacitor_derives_area_perimeter(model):
+    # Issue #2919: the PDK's MOS-cap subcircuits (`c_length`/`c_width`, metres)
+    # convert to the same `A`/`P` card the extractor reports for a 2.0 x 0.8 um
+    # gate (A=1.6 um^2, P=5.6 um), so a MOS-cap reference compares.
+    out = normalize_reference_netlist(
+        f"XC1 1 2 {model} c_length=2e-6 c_width=0.8e-6\n", deck="gf180mcu"
+    )
+    assert out.strip() == f"C1 1 2 0 {model} A=1.6P P=5.6U"
+
+
 def test_normalize_capacitor_wrong_terminal_count_fails():
     with pytest.raises(NormalizeError, match="expected 2 terminals"):
         normalize_reference_netlist(
@@ -12472,6 +12495,15 @@ def test_build_device_binding_map_derived_fallback_shape():
         "cap_mim_1f0_m4m5_noshield",
         "cap_mim_1f5_m4m5_noshield",
         "cap_mim_2f0_m4m5_noshield",
+        # MOS capacitors (issue #2919) -- curated in `_CAPACITOR_MODEL_TABLE`.
+        "cap_nmos_03v3",
+        "cap_pmos_03v3",
+        "cap_nmos_06v0",
+        "cap_pmos_06v0",
+        "cap_nmos_03v3_b",
+        "cap_pmos_03v3_b",
+        "cap_nmos_06v0_b",
+        "cap_pmos_06v0_b",
     }
     assert set(build_device_binding_map("sky130")) == {
         "sky130_fd_pr__nfet_01v8",
