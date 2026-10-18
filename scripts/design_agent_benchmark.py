@@ -3018,7 +3018,7 @@ def _cmd_validate_layout(args: argparse.Namespace) -> int:
     runs: list[dict[str, Any]] = []
     run_results = []
     for raw in args.runs:
-        for run in json.loads(Path(raw).read_text()):
+        for run in layout.load_run_records(Path(raw)):
             result = (
                 layout.validate_run(run, protocol, tasks.get(run.get("task_id")))
                 if protocol_result["valid"]
@@ -3053,6 +3053,48 @@ def _cmd_validate_layout(args: argparse.Namespace) -> int:
         )
     )
     return 0 if ok else 1
+
+
+def _cmd_run_layout(args: argparse.Namespace) -> int:
+    """Run (or resume) the layout-flow benchmark executor (issue #3026)."""
+    import design_agent_benchmark_layout_exec as executor
+
+    repo_root = Path(args.repo_root)
+    protocol = executor.layout.load_protocol(Path(args.protocol))
+    protocol_result = executor.layout.validate_protocol(protocol)
+    if not protocol_result["valid"]:
+        print(json.dumps({"protocol": protocol_result}, indent=2))
+        return 1
+    try:
+        tasks = executor.load_tasks(
+            repo_root / "benchmarks" / "design-agent" / "layout-corpus",
+            repo_root,
+            args.task or None,
+        )
+        provider = (
+            executor.reference_layout_provider
+            if args.provider == "reference"
+            else executor.make_live_layout_provider()
+        )
+        agent_id = args.agent_id or args.provider
+        summary = executor.run_layout_benchmark(
+            protocol=protocol,
+            tasks=tasks,
+            agents=[
+                (executor.AgentSpec(agent_id, args.provider, args.model), provider)
+            ],
+            arms=args.arm or executor.ARM_ORDER,
+            replicates=args.replicates,
+            out_dir=Path(args.out_dir),
+            repo_root=repo_root,
+            timeout_s=args.agent_timeout_s,
+            tool_call_budget=args.agent_tool_budget,
+        )
+    except executor.LayoutExecutorError as exc:
+        print(f"run-layout: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(summary, indent=2))
+    return 0 if summary["run_set"]["valid"] else 1
 
 
 def _resolve_agent_timeout(provider: str, value: float | None) -> float:
@@ -3227,6 +3269,48 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     layout_parser.set_defaults(func=_cmd_validate_layout)
+
+    run_layout_parser = subparsers.add_parser(
+        "run-layout",
+        help=(
+            "run (or resume) the layout-flow benchmark executor (issue #3026): "
+            "draw-only / gen-only / gen+refine over the frozen layout corpus"
+        ),
+    )
+    run_layout_parser.add_argument(
+        "--protocol",
+        default=str(REPO_ROOT / "benchmarks" / "design-agent" / "layout-protocol.json"),
+    )
+    run_layout_parser.add_argument("--repo-root", default=str(REPO_ROOT))
+    run_layout_parser.add_argument(
+        "--out-dir",
+        required=True,
+        help="ledger directory (runs.jsonl, journal.jsonl, runs/); re-running "
+        "with the same directory resumes",
+    )
+    run_layout_parser.add_argument(
+        "--provider",
+        choices=["reference", "interactive-agent"],
+        default="reference",
+        help="reference replays the frozen gen recipe (no credentials); "
+        "interactive-agent drives a live `claude` session per run",
+    )
+    run_layout_parser.add_argument("--agent-id", default=None)
+    run_layout_parser.add_argument("--model", default=None)
+    run_layout_parser.add_argument(
+        "--task", action="append", default=[], help="corpus task id (repeatable)"
+    )
+    run_layout_parser.add_argument(
+        "--arm",
+        action="append",
+        default=[],
+        choices=["draw-only", "gen-only", "gen+refine"],
+        help="restrict to these arms (repeatable)",
+    )
+    run_layout_parser.add_argument("--replicates", type=int, default=1)
+    run_layout_parser.add_argument("--agent-timeout-s", type=float, default=None)
+    run_layout_parser.add_argument("--agent-tool-budget", type=int, default=None)
+    run_layout_parser.set_defaults(func=_cmd_run_layout)
 
     run_parser = subparsers.add_parser(
         "run", help="run N attempts per task and report pass@k per tier"

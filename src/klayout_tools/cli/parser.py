@@ -4920,6 +4920,25 @@ def _add_deck_parser(subparsers: argparse._SubParsersAction) -> None:
     _add_format_arg(hash_parser)
     hash_parser.set_defaults(func=deck_cmd.run_hash)
 
+    path_parser = deck_sub.add_parser(
+        "path",
+        help="print the installed path of a deck's standalone DRC script",
+        description=(
+            "Print the absolute path of a built-in deck's standalone KLayout "
+            "DRC-DSL script (issue #3789) -- a file usable as `klt drc "
+            "--engine klayout --deck-file <path>` from a wheel / `uv tool` "
+            "install, where the repo-relative src/ path does not exist. Only "
+            "asap7 ships such a script; the Python rule-table decks exit 1."
+        ),
+    )
+    path_parser.add_argument(
+        "--deck",
+        required=True,
+        help="built-in deck name whose script path to print (asap7)",
+    )
+    _add_format_arg(path_parser)
+    path_parser.set_defaults(func=deck_cmd.run_path)
+
     info_parser = deck_sub.add_parser(
         "info",
         help="report the installed build's own deck content hash, device "
