@@ -41,6 +41,8 @@ from klayout_tools.decks.asap7_rules import (
     DENSITY_DISPOSITION,
     DRM_SOURCE,
     NOT_IMPLEMENTED,
+    PAD_DISPOSITION,
+    PAD_LAYER,
     RULE_IDS,
     RULES,
     SHIPPED_CELL_DEVIATION_RECORDS,
@@ -54,6 +56,8 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DOCS = _REPO_ROOT / "docs" / "cli" / "drc.md"
 _ASAP7_ROOT = _REPO_ROOT / "pdks" / "lambdapdk" / "lambdapdk" / "asap7"
 _ASAP7_LYP = _ASAP7_ROOT / "base" / "setup" / "klayout" / "asap7.lyp"
+_ASAP7_LAYERMAP = _ASAP7_ROOT / "base" / "apr" / "asap7.layermap"
+_ASAP7_TECH_LEF = _ASAP7_ROOT / "base" / "apr" / "asap7_tech.lef"
 
 HAVE_KLAYOUT_BINARY = shutil.which("klayout") is not None
 _needs_klayout = pytest.mark.skipif(
@@ -221,7 +225,9 @@ def test_docs_list_every_rule_and_gap():
         assert f"`{gap.id}`" in section, gap.id
     for cell in SHIPPED_CELL_DEVIATIONS:
         assert f"`{cell}`" in section, cell
-    assert f"--expect-rule-categories {len(RULE_IDS)}" in section
+    counts = re.findall(r"--expect-rule-categories (\d+)", section)
+    assert counts, "no --expect-rule-categories example in the ASAP7 section"
+    assert {int(n) for n in counts} == {len(RULE_IDS)}, counts
     assert f"--expect-rule-categories {len(RULE_IDS)}" in _deck_text()
 
 
@@ -263,6 +269,102 @@ def test_density_disposition_is_documented_without_thresholds():
     assert "lambdapdk v0.2.17" in density
     assert "states no density rule" in density
     assert "DENSITY_DISPOSITION" in density
+
+
+def test_pad_disposition_is_documented():
+    """PAD is read as DRM mask 96/0 and has no rule of its own (#3807): the
+    docs state the number, the pinned files that disagree, and the absence."""
+    assert PAD_LAYER == (96, 0)
+    assert "has no rule for the PAD layer itself" in PAD_DISPOSITION
+    assert "pad     = input(96, 0)" in _deck_text()
+    section = _docs_asap7_section()
+    start = section.index("**PAD (`96/0`)")
+    pad = section[start : section.index("\n### ", start)]
+    for text in (
+        "Table 2.3.1",
+        "asap7.layermap",
+        "asap7.lyp",
+        "asap7_tech.lef",
+        "95/251",
+        "no rule for the PAD layer itself",
+        "coverage.unchecked_rules",
+    ):
+        assert text in pad, text
+
+
+@_needs_asap7
+def test_pad_number_facts_in_pinned_pdk():
+    """The facts behind the PAD disposition, pinned so a lambdapdk bump that
+    changes them fails visibly (#3807)."""
+    layermap = _ASAP7_LAYERMAP.read_text()
+    pad_lines = [
+        ln.split()
+        for ln in layermap.splitlines()
+        if ln.split()[:2]
+        and ln.split()[1].startswith("Pad/")
+        and not ln.lstrip().startswith("#")
+    ]
+    assert {ln[1]: ln[2] for ln in pad_lines} == {
+        "Pad/SPNET": "95/251",
+        "Pad/PIN": "95/251",
+        "Pad/LEFPIN": "95/251",
+    }
+    assert any(
+        ln.split()[:2] == ["NAME", "V9"] or ln.split()[:1] == ["V9"]
+        for ln in layermap.splitlines()
+    )
+    assert re.search(r"^\s*#.*Pad/NET\s+95/1", layermap, re.M)
+    lyp_names = {
+        name.lower() for name, _, _ in _LYP_ENTRY_RE.findall(_ASAP7_LYP.read_text())
+    }
+    assert "pad" not in lyp_names and "v9" in lyp_names
+    lef = _ASAP7_TECH_LEF.read_text()
+    block = lef[lef.index("LAYER Pad") :]
+    block = block[: block.index("END Pad")]
+    assert "TYPE ROUTING" in block and "MINIMUMDENSITY 20" in block
+    assert not re.search(r"\b96\b", block)
+
+
+def _pad_layout(path: Path, *, with_pad: bool) -> Path:
+    layout = kdb.Layout()
+    layout.dbu = fx.DBU_UM
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(95, 0)).insert(kdb.Box(0, 0, 160, 160))
+    if with_pad:
+        top.shapes(layout.layer(*PAD_LAYER)).insert(kdb.Box(0, 0, 4000, 4000))
+    layout.write(str(path))
+    return path
+
+
+@_needs_klayout
+def test_pad_reported_unchecked_only_when_layer_is_present(tmp_path, capsys):
+    _, without = _run_cli(capsys, _pad_layout(tmp_path / "no_pad.gds", with_pad=False))
+    assert without["coverage"]["unchecked_rules"] == []
+    _, with_pad = _run_cli(capsys, _pad_layout(tmp_path / "pad.gds", with_pad=True))
+    assert with_pad["coverage"]["unchecked_rules"] == [
+        {"rule": "PAD.*", "layer": "96/0", "description": PAD_DISPOSITION}
+    ]
+
+
+@_needs_klayout
+def test_pad_unchecked_not_reported_for_a_different_deck(tmp_path, capsys):
+    deck = tmp_path / "other.drc"
+    deck.write_text(DECK_PATH.read_text() + "\n# edited\n")
+    gds = _pad_layout(tmp_path / "pad.gds", with_pad=True)
+    code = main(
+        [
+            "drc",
+            str(gds),
+            "--engine",
+            "klayout",
+            "--deck-file",
+            str(deck),
+            "--format",
+            "json",
+        ]
+    )
+    assert code in (0, 3)
+    assert json.loads(capsys.readouterr().out)["coverage"]["unchecked_rules"] == []
 
 
 def test_fixture_layers_match_deck():
@@ -401,6 +503,35 @@ def test_cli_envelope_unmodeled_rules_match_gaps_and_docs(tmp_path, capsys):
     assert unmodeled == sorted(g.id for g in NOT_IMPLEMENTED)
     # Both directions: the docs table and the envelope list the same ids.
     assert set(unmodeled) == _docs_not_implemented_ids()
+
+
+@_needs_klayout
+@pytest.mark.parametrize(
+    "shapes",
+    [
+        pytest.param([fx.box("LIG", 0, 0, 100, 20)], id="lig-only"),
+        pytest.param(
+            [fx.box("LIG", 0, 0, 100, 20), fx.box("M1", 0, 0, 100, 36)],
+            id="lig-m1-tap-or-filler",
+        ),
+        pytest.param(
+            [fx.box("LIG", 0, 0, 100, 20), fx.box("GATE", 40, -10, 60, 30)],
+            id="lig-gate-no-active",
+        ),
+    ],
+)
+def test_cli_lig_without_lisd_returns_a_verdict(tmp_path, capsys, shapes):
+    """#3811: LIG with no LISD/SDT (a tap or filler cell) used to SIGSEGV
+    KLayout in the props_ne net separation; it must give a verdict, with the
+    full rule set still declared."""
+    gds = tmp_path / "lig_only.gds"
+    fx.write_shapes(str(gds), shapes)
+    code, payload = _run_cli(
+        capsys, gds, "--expect-rule-categories", str(len(RULE_IDS))
+    )
+    assert code in (0, 3), payload
+    assert payload["status"] in ("clean", "violations")
+    assert payload["coverage_assertion"]["satisfied"] is True
 
 
 @_needs_klayout

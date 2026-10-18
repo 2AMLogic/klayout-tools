@@ -641,6 +641,28 @@ def test_klayout_engine_no_report_file_raises(tmp_path, monkeypatch):
         run_drc_klayout_engine(gds, deck_file)
 
 
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "expected"),
+    [
+        (-11, "", "SIGSEGV"),
+        (0, "ERROR: Signal number: 11\nAddress: 0x0\n", "SIGSEGV"),
+    ],
+)
+def test_klayout_engine_no_report_names_crash_signal(
+    tmp_path, monkeypatch, returncode, stdout, expected
+):
+    """A klayout crash (#3811) is named as such, with klayout's output kept."""
+    _stub_klayout_drc_subprocess(
+        monkeypatch, write_report=False, returncode=returncode, stdout=stdout
+    )
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    with pytest.raises(DrcError, match=rf"klayout crashed \({expected}\)") as info:
+        run_drc_klayout_engine(gds, deck_file)
+    assert stdout.strip() in str(info.value)
+
+
 # --------------------------------------------------------------------------- #
 # A partially-executed deck must never read as clean (issue #1941)
 #
@@ -928,13 +950,118 @@ def test_klayout_engine_unparseable_report_raises_not_silently_clean(
         run_drc_klayout_engine(gds, deck_file)
 
 
-def test_klayout_engine_top_unsupported_raises(tmp_path, monkeypatch):
+def _write_multi_top_gds(path: Path) -> str:
+    """Two top cells (A, B) sharing subcell C; A also owns a shape."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    a = layout.create_cell("A")
+    b = layout.create_cell("B")
+    c = layout.create_cell("C")
+    for parent in (a, b):
+        parent.insert(kdb.CellInstArray(c.cell_index(), kdb.Trans()))
+    c.shapes(layout.layer(1, 0)).insert(kdb.Box(0, 0, 100, 1000))
+    layout.write(str(path))
+    return str(path)
+
+
+def _input_arg(cmd) -> str:
+    return next(a for a in cmd if a.startswith("input=")).split("=", 1)[1]
+
+
+def test_klayout_engine_multi_top_without_top_raises_before_launch(
+    tmp_path, monkeypatch
+):
+    cmds: list = []
+    _stub_klayout_drc_subprocess(monkeypatch, captured_cmds=cmds)
+    gds = _write_multi_top_gds(tmp_path / "multi.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    with pytest.raises(DrcError, match="--top") as excinfo:
+        run_drc_klayout_engine(gds, deck_file)
+
+    assert excinfo.value.code == "multiple_top_cells"
+    assert "A, B" in str(excinfo.value)
+    assert cmds == []
+
+
+def test_klayout_engine_top_prunes_stream_for_deck(tmp_path, monkeypatch):
+    cmds: list = []
+    seen: dict = {}
+
+    def fake_run(cmd, capture_output, text, timeout):
+        cmds.append(cmd)
+        pruned = kdb.Layout()
+        pruned.read(_input_arg(cmd))
+        seen["tops"] = [c.name for c in pruned.top_cells()]
+        seen["cells"] = sorted(c.name for c in pruned.each_cell())
+        report = next(a for a in cmd if a.startswith("report=")).split("=", 1)[1]
+        with open(report, "w", encoding="utf-8") as handle:
+            handle.write(_EMPTY_RDB)
+        return fake_completed()
+
+    monkeypatch.setattr(engine_module.subprocess, "run", fake_run)
+    gds = _write_multi_top_gds(tmp_path / "multi.gds")
+    before = Path(gds).read_bytes()
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    run_drc_klayout_engine(gds, deck_file, top="A")
+
+    assert _input_arg(cmds[0]) != gds
+    assert seen["tops"] == ["A"]
+    assert seen["cells"] == ["A", "C"]
+    assert Path(gds).read_bytes() == before
+
+
+def test_klayout_engine_top_child_of_single_top_prunes_stream(tmp_path, monkeypatch):
+    cmds: list = []
+    seen: dict = {}
+
+    def fake_run(cmd, capture_output, text, timeout):
+        cmds.append(cmd)
+        pruned = kdb.Layout()
+        pruned.read(_input_arg(cmd))
+        seen["tops"] = [c.name for c in pruned.top_cells()]
+        report = next(a for a in cmd if a.startswith("report=")).split("=", 1)[1]
+        with open(report, "w", encoding="utf-8") as handle:
+            handle.write(_EMPTY_RDB)
+        return fake_completed()
+
+    monkeypatch.setattr(engine_module.subprocess, "run", fake_run)
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    sub = layout.create_cell("SUB")
+    top.insert(kdb.CellInstArray(sub.cell_index(), kdb.Trans()))
+    sub.shapes(layout.layer(1, 0)).insert(kdb.Box(0, 0, 100, 1000))
+    gds = str(tmp_path / "single.gds")
+    layout.write(gds)
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    run_drc_klayout_engine(gds, deck_file, top="SUB")
+
+    assert _input_arg(cmds[0]) != gds
+    assert seen["tops"] == ["SUB"]
+
+
+def test_klayout_engine_unknown_top_raises(tmp_path, monkeypatch):
     _stub_klayout_drc_subprocess(monkeypatch)
+    gds = _write_multi_top_gds(tmp_path / "multi.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    with pytest.raises(DrcError, match="top cell not found in stream: NOPE"):
+        run_drc_klayout_engine(gds, deck_file, top="NOPE")
+
+
+def test_klayout_engine_single_top_passes_original_path(tmp_path, monkeypatch):
+    cmds: list = []
+    _stub_klayout_drc_subprocess(monkeypatch, captured_cmds=cmds)
     gds = _write_gds(tmp_path / "test.gds")
     deck_file = _write_deck_file(tmp_path / "deck.lydrc")
 
-    with pytest.raises(DrcError, match="does not support --top"):
-        run_drc_klayout_engine(gds, deck_file, top="TOP")
+    run_drc_klayout_engine(gds, deck_file)
+    run_drc_klayout_engine(gds, deck_file, top="TOP")
+
+    assert [_input_arg(c) for c in cmds] == [gds, gds]
 
 
 def test_klayout_engine_missing_deck_file_raises(tmp_path, monkeypatch):
@@ -2961,3 +3088,54 @@ def test_request_document_negative_control(tmp_path, monkeypatch, capsys):
     assert main(["drc", str(request), "--format", "json"]) != 1
     data = json.loads(capsys.readouterr().out)
     assert data["negative_control"]["status"] == "passed"
+
+
+# --------------------------------------------------------------------------- #
+# issue #3816: missing-deck-globals warning
+# --------------------------------------------------------------------------- #
+
+_GATED_DECK_TEXT = (
+    'if not defined? $feol\n  $feol = "false"\nend\nthreads($thr) if $thr\n'
+)
+
+
+def test_klayout_engine_warns_when_required_deck_globals_not_supplied(
+    tmp_path, monkeypatch
+):
+    _stub_klayout_drc_subprocess(monkeypatch)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.drc", _GATED_DECK_TEXT)
+    baseline = run_drc_klayout_engine(
+        gds, _write_deck_file(tmp_path / "plain.drc"), deck_vars=None
+    )
+
+    report = run_drc_klayout_engine(gds, deck_file)
+
+    assert "warnings" not in baseline
+    (warning,) = report["warnings"]
+    assert warning["category"] == "deck_globals_not_supplied"
+    assert warning["count"] == 1
+    assert "thr" in warning["text"] and "klt pdk decks" in warning["text"]
+    # Additive only: verdict fields match a run that has no warning.
+    assert report["status"] == baseline["status"]
+    assert report["violation_count"] == baseline["violation_count"]
+
+
+def test_klayout_engine_no_warning_when_deck_var_supplied(tmp_path, monkeypatch):
+    _stub_klayout_drc_subprocess(monkeypatch)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.drc", _GATED_DECK_TEXT)
+
+    report = run_drc_klayout_engine(gds, deck_file, deck_vars={"thr": "2"})
+
+    assert "warnings" not in report
+
+
+def test_klayout_engine_no_warning_for_self_contained_deck(tmp_path, monkeypatch):
+    _stub_klayout_drc_subprocess(monkeypatch)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(
+        tmp_path / "deck.lydrc", "source($input)\nreport('x', $report)\n"
+    )
+
+    assert "warnings" not in run_drc_klayout_engine(gds, deck_file)

@@ -2503,6 +2503,9 @@ def _run_single_corner(
     provenance = build_provenance(
         deck_name=deck_name,
         deck_path=liberty_path,
+        deck_path_envelope=repo_relative_path(
+            liberty_path, repo_root=find_repo_root(request_dir)
+        ),
         pdk=pdk_info,
         input_path=netlist_path,
         # Issue #2027: `klt place-and-route`'s single pinned input is the
