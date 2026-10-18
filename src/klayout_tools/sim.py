@@ -87,7 +87,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from typing import IO, Any, NamedTuple
@@ -6154,14 +6154,16 @@ def _ic_cards(point: CornerPoint) -> list[str]:
     """One file-scope ``.ic`` card per node of the point's start state."""
     return [
         f".ic v({node})={volts!r}"
-        for node, volts in sorted(point.initial_conditions.items())
+        for node, volts in sorted(
+            (getattr(point, "initial_conditions", None) or {}).items()
+        )
     ]
 
 
 def _ic_analysis_args(point: CornerPoint, args: str) -> str:
     """``args`` with ``uic`` appended for a point carrying a start state,
     unless the request already spells it; untouched otherwise."""
-    if not point.initial_conditions:
+    if not getattr(point, "initial_conditions", None):
         return args
     if "uic" in str(args).lower().split():
         return args
@@ -6873,6 +6875,21 @@ def _open_resume_checkpoint(
     return pre_completed, loaded_engine_version, checkpoint
 
 
+def _key_in_initial_conditions(
+    payload: dict[str, Any], corner_points: Sequence[CornerPoint]
+) -> None:
+    """Issue #3881: a start state changes the transient result, so a changed
+    map must not reuse a stored one. Keyed in only when present, leaving every
+    legacy fingerprint untouched."""
+    ics = {
+        point.corner_id: point.initial_conditions
+        for point in corner_points
+        if point.initial_conditions
+    }
+    if ics:
+        payload["initial_conditions"] = ics
+
+
 def _checkpoint_fingerprint(
     *,
     netlist_path: str,
@@ -6962,15 +6979,7 @@ def _checkpoint_fingerprint(
         payload["nodeset"] = {
             point.corner_id: point.nodeset for point in corner_points if point.nodeset
         }
-    if any(point.initial_conditions for point in corner_points):
-        # Issue #3881: a start state changes the transient result, so a
-        # changed map must not reuse a stored one. Keyed in only when
-        # present, leaving every legacy fingerprint untouched.
-        payload["initial_conditions"] = {
-            point.corner_id: point.initial_conditions
-            for point in corner_points
-            if point.initial_conditions
-        }
+    _key_in_initial_conditions(payload, corner_points)
     if corner_section_libs:
         # Issue #2522: a corner's per-section libraries determine its device
         # models exactly as `models.lib` does, so editing one must invalidate
