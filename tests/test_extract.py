@@ -503,6 +503,14 @@ def test_layout_with_no_devices_succeeds_with_zero_count(tmp_path):
         "sky130_fd_pr__model__cap_mim",
         "sky130_fd_pr__model__cap_mim_m4",
         "resistor",
+        "diode_pw2nd_05v5",
+        "diode_pw2nd_05v5_lvt",
+        "diode_pw2nd_05v5_nvt",
+        "diode_pw2nd_11v0",
+        "diode_pd2nw_05v5",
+        "diode_pd2nw_05v5_lvt",
+        "diode_pd2nw_05v5_hvt",
+        "diode_pd2nw_11v0",
     ]
 
 
@@ -599,6 +607,14 @@ def test_synthetic_inverter_extracts_two_devices(tmp_path):
         "sky130_fd_pr__model__cap_mim",
         "sky130_fd_pr__model__cap_mim_m4",
         "resistor",
+        "diode_pw2nd_05v5",
+        "diode_pw2nd_05v5_lvt",
+        "diode_pw2nd_05v5_nvt",
+        "diode_pw2nd_11v0",
+        "diode_pd2nw_05v5",
+        "diode_pd2nw_05v5_lvt",
+        "diode_pd2nw_05v5_hvt",
+        "diode_pd2nw_11v0",
     ]
     assert report["pdk"] is None
     assert report["warnings"] == []
@@ -3586,6 +3602,14 @@ def test_sky130_synthetic_bjt_extracts_one_pnp_device(tmp_path):
         "sky130_fd_pr__model__cap_mim",
         "sky130_fd_pr__model__cap_mim_m4",
         "resistor",
+        "diode_pw2nd_05v5",
+        "diode_pw2nd_05v5_lvt",
+        "diode_pw2nd_05v5_nvt",
+        "diode_pw2nd_11v0",
+        "diode_pd2nw_05v5",
+        "diode_pd2nw_05v5_lvt",
+        "diode_pd2nw_05v5_hvt",
+        "diode_pd2nw_11v0",
     ]
 
     (device,) = report["devices"]
@@ -4577,7 +4601,16 @@ def test_diodes_field_defaults_empty_and_is_a_no_op():
     )
     assert deck.diodes == ()
     assert deck.device_classes == ("nfet", "pfet")
-    assert get_extraction_deck("sky130").diodes == ()
+    assert {d.name for d in get_extraction_deck("sky130").diodes} == {
+        "diode_pw2nd_05v5",
+        "diode_pw2nd_05v5_lvt",
+        "diode_pw2nd_05v5_nvt",
+        "diode_pw2nd_11v0",
+        "diode_pd2nw_05v5",
+        "diode_pd2nw_05v5_lvt",
+        "diode_pd2nw_05v5_hvt",
+        "diode_pd2nw_11v0",
+    }
 
 
 def test_diode_with_no_drawn_terminal_is_a_deck_authoring_error(tmp_path):
@@ -6739,6 +6772,14 @@ def test_cli_missing_deck_flag_is_a_clean_error(tmp_path, capsys):
                 "sky130_fd_pr__model__cap_mim",
                 "sky130_fd_pr__model__cap_mim_m4",
                 "resistor",
+                "diode_pw2nd_05v5",
+                "diode_pw2nd_05v5_lvt",
+                "diode_pw2nd_05v5_nvt",
+                "diode_pw2nd_11v0",
+                "diode_pd2nw_05v5",
+                "diode_pd2nw_05v5_lvt",
+                "diode_pd2nw_05v5_hvt",
+                "diode_pd2nw_11v0",
             ),
         ),
         # gf180mcu declares one bipolar entry, generic `bjt` (issue #223 --
@@ -9849,6 +9890,14 @@ def test_sky130_inv_1_spot_check(tmp_path):
         "sky130_fd_pr__model__cap_mim",
         "sky130_fd_pr__model__cap_mim_m4",
         "resistor",
+        "diode_pw2nd_05v5",
+        "diode_pw2nd_05v5_lvt",
+        "diode_pw2nd_05v5_nvt",
+        "diode_pw2nd_11v0",
+        "diode_pd2nw_05v5",
+        "diode_pd2nw_05v5_lvt",
+        "diode_pd2nw_05v5_hvt",
+        "diode_pd2nw_11v0",
     ]
 
     devices = {d["class"]: d for d in report["devices"]}
