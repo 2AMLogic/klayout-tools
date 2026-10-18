@@ -251,6 +251,8 @@ def test_missing_extension_reason_names_the_extension(monkeypatch):
     assert "not installed" in reason
     # Actionable, not merely descriptive: it names the install path.
     assert "uv sync --group statime" in reason
+    # ...and the installed-package alternative.
+    assert "klt sta" in reason
 
 
 def test_engine_failure_reason_carries_the_sta_error_message(monkeypatch):
