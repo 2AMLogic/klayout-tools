@@ -22,6 +22,19 @@ not `klt --version`, if you need to detect this kind of drift. See
   non-positive-integer value is rejected with
   `error.code: "batch_max_concurrent_jobs_invalid"`. No `schema_version` bump.
 
+- **`klt deck info` reports the DRC deck as its own artifact** (issue #3826):
+  an entry for a deck that ships a standalone KLayout DRC deck file (`asap7`)
+  gains an additive `drc_deck` object (`{path_kind, content_hash, released,
+  release}`) hashed from `asap7.drc`, distinct from the extraction deck
+  module's `content_hash`; text output labels them `extraction deck` /
+  `drc deck`. `scripts/generate_deck_history.py` now records the `.drc` hash
+  per release (entries marked `"artifact": "drc_deck"`), so
+  `provenance.deck.released` is `true` for a DRC run on a released build; the
+  `0.7.0` `.drc` hash (`a14ce43a...`) now resolves. `docs/cli/drc.md` gains an
+  "ASAP7 capability by release" table and the git-pin note for `0.7.0`
+  users. Decks with no `.drc` file omit `drc_deck`; `schema_version` stays
+  `1`.
+
 - **`provenance.input.paths` set binding for `klt signoff`** (issue #3044,
   documented in `docs/cli/signoff.md` "Binding a set of artifacts"): additive.
   Not in `klt 0.7.0` — a `0.7.0` build grades a `paths`-only envelope
@@ -35,6 +48,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   on Metal1.text (8/25), so promote them with `label_layers: {"metal0":
   [8, 25]}`; without it the verdict is `match` with `device.body_unverified`
   warnings and one pin.
+
+- **`openroad` Docker wrapper forwards `PLATFORM_DIR` and `OPENROAD_*`**
+  (issue #3821): `scripts/install-openroad-docker.sh` now writes a wrapper that
+  passes `-e PLATFORM_DIR` (when set) and `-e <name>` for each caller variable
+  starting with `OPENROAD_` to `docker run`, so Tcl reading
+  `$::env(PLATFORM_DIR)` no longer fails. Nothing else in the argv changes.
+  Hosts with an older wrapper should re-run
+  `scripts/install-openroad-docker.sh` to upgrade it in place.
 
 - **`klt sta` driving cell / output load, and `*NAME_MAP` SPEFs** (issue
   #3742): `constraints.driving_cell` / `.driving_cells` emit
@@ -173,6 +194,16 @@ not `klt --version`, if you need to detect this kind of drift. See
   null`, `error` blames the absent side) instead of a silent `pass`; absent on
   both sides stays `pass`. `schematic_status` / `extracted_status` may now be
   `"absent"`. Additive: `delta[].status` stays `pass|fail|error`.
+- **`klt extract --deck gf180mcu` recognises MOS capacitors** (issue #2919,
+  deliverable B): a `Comp` island with a poly gate under `MOS_CAP_MK` (166/5)
+  extracts as one of twelve `cap_{nmos,pmos}_{03v3,06v0}[_dn|_b]` capacitor
+  devices (`a` = gate, `b` = source/drain, `A`/`P` on the gate region) instead
+  of vanishing (`_b` forms) or being read as a transistor (the rest). New
+  `MosCapacitorDevice` deck entry; `klt deck devices` lists the classes
+  (`kind: "mos_capacitor"`) and `device_classes` grows by the same twelve names.
+  `unsupported_devices[]` now reports only marker components the recogniser could
+  not classify. Model name, nets, `C`, `A` and `P` cross-checked against the PDK's
+  own LVS runset. Additive; no `schema_version` bump.
 - **`klt extract --resistance-graph`: opt-in terminal-aware resistance graph**
   (issue #2982, Stage 3.D5 increment 3): adds `parasitics.nets[].resistance_graph`
   (`status`, `terminals`, `pair_resistance_ohm`, `legacy_resistance_ohm`,

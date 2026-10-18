@@ -27,7 +27,12 @@ to the release that shipped it.
   for one to be recognised, so a near-miss layout does not have to be
   diagnosed by reading the deck module's Python source.
 
-All five verbs emit through the shared envelope helpers in :mod:`.output` -- see
+- ``path`` (issue #3789) -- print the absolute path of a deck's standalone
+  KLayout DRC-DSL script (today only ``asap7``), usable as
+  ``klt drc --engine klayout --deck-file <path>`` from an installed package
+  where the repo-relative ``src/...`` path does not exist.
+
+All six verbs emit through the shared envelope helpers in :mod:`.output` -- see
 ``docs/json-contract.md``.
 
 Exit codes:
@@ -43,7 +48,8 @@ from __future__ import annotations
 
 import argparse
 
-from .._provenance import UnknownProvenanceDeckError, deck_identity
+from .._provenance import UnknownProvenanceDeckError, deck_identity, sha256_file
+from ..decks import deck_names
 from ..decks.history import (
     DeckHistoryError,
     deck_devices,
@@ -92,6 +98,51 @@ def run_hash(args: argparse.Namespace) -> int:
     }
     emit_success(payload, args.format, _print_hash_text)
     return 0
+
+
+def run_path(args: argparse.Namespace) -> int:
+    # Only decks that ship a standalone DRC-DSL script have a path to report;
+    # the Python rule-table decks (sky130, ...) are not files `--deck-file`
+    # can consume. Lazy import: asap7_rules is cheap but only this verb needs it.
+    from ..decks.asap7_rules import DECK_PATH
+
+    standalone = {"asap7": DECK_PATH}
+    if args.deck not in standalone:
+        if args.deck in deck_names():
+            return emit_error(
+                "deck path",
+                f"deck '{args.deck}' is a Python rule table, not a standalone "
+                "deck file; no path to report "
+                f"(decks with a standalone script: {', '.join(sorted(standalone))})",
+                args.format,
+            )
+        return emit_error(
+            "deck path",
+            f"unknown deck '{args.deck}' (known decks: {', '.join(deck_names())})",
+            args.format,
+        )
+
+    path = standalone[args.deck]
+    digest = sha256_file(str(path))
+    if digest is None:
+        return emit_error(
+            "deck path",
+            f"deck '{args.deck}' script is missing from this install: {path}",
+            args.format,
+        )
+    payload = {
+        "schema_version": 1,
+        "deck": args.deck,
+        "path": str(path.resolve()),
+        "content_hash": f"sha256:{digest}",
+    }
+    emit_success(payload, args.format, _print_path_text)
+    return 0
+
+
+def _print_path_text(report: dict) -> None:
+    # Bare path on stdout so `$(klt deck path --deck asap7)` just works.
+    print(report["path"])
 
 
 def _print_hash_text(report: dict) -> None:
@@ -244,12 +295,20 @@ def _provenance_text(provenance: dict | None) -> str:
 def _print_info_text(report: dict) -> None:
     for entry in report["decks"]:
         print(f"deck: {entry['deck']}")
-        print(f"  content_hash: {entry['content_hash']}")
+        print(f"  extraction deck content_hash: {entry['content_hash']}")
         print(f"  device_classes: {', '.join(entry['device_classes'])}")
-        print(f"  released: {entry['released']}")
-        release = entry["release"]
-        if release is not None:
-            print(
-                f"  release: {release['package_version']} "
-                f"({release['git_tag']}, {release['git_commit']})"
-            )
+        _print_info_artifact(entry, indent="  ")
+        drc_deck = entry.get("drc_deck")
+        if drc_deck is not None:
+            print(f"  drc deck content_hash: {drc_deck['content_hash']}")
+            _print_info_artifact(drc_deck, indent="  drc deck ")
+
+
+def _print_info_artifact(artifact: dict, *, indent: str) -> None:
+    print(f"{indent}released: {artifact['released']}")
+    release = artifact["release"]
+    if release is not None:
+        print(
+            f"{indent}release: {release['package_version']} "
+            f"({release['git_tag']}, {release['git_commit']})"
+        )
