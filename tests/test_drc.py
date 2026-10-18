@@ -1328,6 +1328,62 @@ def test_run_drc_gf180mcu_dualgate_still_warns_for_unsplit_rules(tmp_path):
     ]
 
 
+def _make_gf180mcu_dualgate_boxes_layout(boxes) -> kdb.Layout:
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    li = layout.layer(55, 0)
+    layout.set_info(li, kdb.LayerInfo(55, 0))
+    for box in boxes:
+        top.shapes(li).insert(box)
+    return layout
+
+
+def test_run_drc_gf180mcu_dualgate_width_and_space(tmp_path):
+    """DV.5 (0.7um width) and DV.2 (0.44um space) on Dualgate (issue #3791)."""
+    path = tmp_path / "dg.gds"
+    # 0.5um-wide sliver, and two legal-width boxes only 0.3um apart.
+    _make_gf180mcu_dualgate_boxes_layout(
+        [
+            kdb.Box(0, 0, 500, 2000),
+            kdb.Box(5000, 0, 6000, 2000),
+            kdb.Box(6300, 0, 7300, 2000),
+        ]
+    ).write(str(path))
+
+    counts = run_drc(str(path), "gf180mcu")["rule_counts"]
+
+    assert counts.get("dualgate.width.1", 0) == 1
+    assert counts.get("dualgate.space.1", 0) == 1
+
+    clean = tmp_path / "dg_clean.gds"
+    _make_gf180mcu_dualgate_boxes_layout(
+        [kdb.Box(0, 0, 1000, 2000), kdb.Box(1500, 0, 2500, 2000)]
+    ).write(str(clean))
+    counts = run_drc(str(clean), "gf180mcu")["rule_counts"]
+    assert counts.get("dualgate.width.1", 0) == 0
+    assert counts.get("dualgate.space.1", 0) == 0
+
+
+def test_run_drc_gf180mcu_coverage_lists_unmodeled_rules(tmp_path):
+    """gf180mcu discloses the untranscribed Dualgate/_MV rules (issue #3791),
+    and none of them is also a transcribed rule."""
+    path = tmp_path / "dg_unmodeled.gds"
+    _make_gf180mcu_dualgate_boxes_layout([kdb.Box(0, 0, 1000, 2000)]).write(str(path))
+
+    unmodeled = run_drc(str(path), "gf180mcu")["coverage"]["unmodeled_rules"]
+
+    assert unmodeled == sorted(unmodeled)
+    for rule_id in ("DV.1", "DV.3", "DV.6", "DV.7", "DV.8", "DV.9"):
+        assert rule_id in unmodeled
+    for rule_id in ("DF.6_MV", "PL.5a_MV", "PL.5b_MV"):
+        assert rule_id in unmodeled
+    transcribed = {
+        rule.provenance.rule_id for rule in get_deck("gf180mcu") if rule.provenance
+    }
+    assert transcribed.isdisjoint(unmodeled)
+
+
 def _make_sky130_hvi_drc_layout(*, overlap: bool) -> kdb.Layout:
     """One `diff` (65/20) square, wide enough to clear this deck's own
     `diff.width.1` (`difftap.1`, 0.15um) threshold, with an `hvi` (75/20)

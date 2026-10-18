@@ -1252,6 +1252,112 @@
       ]
     }
   },
+  "dualgate.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            55,
+            0
+          ]
+        },
+        {
+          "box": [
+            2540,
+            0,
+            4540,
+            4000
+          ],
+          "layer": [
+            55,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      55,
+      0
+    ],
+    "threshold_dbu": 440,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            55,
+            0
+          ]
+        },
+        {
+          "box": [
+            2340,
+            0,
+            4340,
+            4000
+          ],
+          "layer": [
+            55,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "dualgate.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            800,
+            4000
+          ],
+          "layer": [
+            55,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      55,
+      0
+    ],
+    "threshold_dbu": 700,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            600,
+            4000
+          ],
+          "layer": [
+            55,
+            0
+          ]
+        }
+      ]
+    }
+  },
   "metal1.enclosing.contact.1": {
     "check": "enclosing",
     "clean": {

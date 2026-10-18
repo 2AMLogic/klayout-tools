@@ -1506,6 +1506,31 @@ DECK: list[DrcRule] = [
         voltage_independent=True,
     ),
     DrcRule(
+        id="dualgate.width.1",
+        description="minimum Dualgate (5V/6V thick-oxide marker) width",
+        layer=(55, 0),  # Dualgate
+        check="width",
+        threshold_dbu=700,  # 0.7 um
+        # Official `rule_decks/dualgate.drc` rule "DV.5": `dualgate.width(0.7.um,
+        # euclidian)` -- the same primitive/metric `width_check` uses. Not an
+        # approximation (issue #3791).
+        scope="7.5 Comp",  # no Dualgate DRM table in _GF180MCU_DRM_CSV (#566)
+        provenance=_gf180mcu_klayout_deck_provenance("dualgate", "DV.5"),
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="dualgate.space.1",
+        description="minimum Dualgate (5V/6V thick-oxide marker) spacing",
+        layer=(55, 0),  # Dualgate
+        check="space",
+        threshold_dbu=440,  # 0.44 um
+        # Official `rule_decks/dualgate.drc` rule "DV.2": `dualgate.space(0.44.um,
+        # euclidian)` (issue #3791).
+        scope="7.5 Comp",  # no Dualgate DRM table in _GF180MCU_DRM_CSV (#566)
+        provenance=_gf180mcu_klayout_deck_provenance("dualgate", "DV.2"),
+        voltage_independent=True,
+    ),
+    DrcRule(
         id="nplus.space.pcomp.1",
         description="minimum Nplus implant space to PCOMP (p-type diffusion)",
         layer=(32, 0),  # Nplus -- reporting identity, shared with the rules above
@@ -2176,12 +2201,66 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
 # `Dualgate` is *also* read correctly today (not part of either gap above) by
 # the `DiodeDevice` entries further below, each via its own
 # `requires=(..., Dualgate)` field (issue #542).
+#: Official gf180mcu rule ids this curated deck knowingly does *not*
+#: transcribe (issue #3791): the Dualgate (`dualgate.drc`) rules that need
+#: compound/cross-layer expressions `DrcRule` cannot evaluate (DV.1, DV.3,
+#: DV.6-DV.9) and the 5V/6V `_MV` columns of the Comp/Poly2/Nwell/LPW
+#: families, of which only DF.1a/DF.3a/DF.13/DF.14 are transcribed. Listed as
+#: `coverage.unmodeled_rules` so a `clean` verdict on a Dualgate layout is not
+#: read as full 5V/6V coverage. Remove an id here when its rule is added.
+UNMODELED_RULES: tuple[str, ...] = (
+    "DF.15a_MV",
+    "DF.15b_MV",
+    "DF.16_MV",
+    "DF.17_MV",
+    "DF.19_MV",
+    "DF.1b_MV",
+    "DF.2a_MV",
+    "DF.3c_MV",
+    "DF.4a_MV",
+    "DF.4b_MV",
+    "DF.4c_MV",
+    "DF.4d_MV",
+    "DF.4e_MV",
+    "DF.5_MV",
+    "DF.6_MV",
+    "DF.7_MV",
+    "DF.8_MV",
+    "DV.1",
+    "DV.3",
+    "DV.6",
+    "DV.7",
+    "DV.8",
+    "DV.9",
+    "LPW.1_MV",
+    "LPW.2a_MV",
+    "LPW.2b_MV",
+    "NW.1a_MV",
+    "NW.1b_MV",
+    "NW.2a_MV",
+    "NW.2b_MV",
+    "NW.5_MV",
+    "NW.6_MV",
+    "NW.7_MV",
+    "PL.1_MV",
+    "PL.1a_MV",
+    "PL.2_MV",
+    "PL.3b_MV",
+    "PL.4_MV",
+    "PL.5a_MV",
+    "PL.5b_MV",
+    "PL.7_MV",
+)
+
 UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {
     (55, 0): (
         "Dualgate (55/0) marks gf180mcu's 5V/6V thick-oxide voltage domain. "
         "This curated deck models it for the DF.1a/DF.3a COMP width/space "
-        "rules and (issue #1111) MOS device recognition/model binding "
-        "(nfet_06v0/pfet_06v0 under --pdk) only; every other DRC rule still "
+        "rules, the Dualgate DV.2/DV.5 width/space rules (issue #3791) and "
+        "(issue #1111) MOS device recognition/model binding "
+        "(nfet_06v0/pfet_06v0 under --pdk) only; the other Dualgate DV rules "
+        "and _MV columns are listed in coverage.unmodeled_rules, and every "
+        "other DRC rule still "
         "applies the 3.3V/_LV thresholds regardless of Dualgate's presence "
         "(e.g. DF.6 COMP extend beyond gate 0.24 vs. 0.40, PL.5a/PL.5b field "
         "poly to COMP 0.10 vs. 0.30 -- all in um, and neither transcribed in "

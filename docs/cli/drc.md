@@ -1050,6 +1050,14 @@ rule still encodes the 3.3 V column, which is what
 warns about — see that section for how the warning's gate distinguishes
 them.
 
+**Dualgate's own rules (issue #3791).** The deck checks `Dualgate` (55/0)
+itself only for `dualgate.width.1` (`DV.5`, 0.7 um) and `dualgate.space.1`
+(`DV.2`, 0.44 um), plus `dualgate.ongrid.1`. The remaining official
+`dualgate.drc` rules (`DV.1`, `DV.3`, `DV.6`, `DV.7`, `DV.8`, `DV.9`, which
+need compound or cross-layer expressions) and the other `_MV` columns are not
+transcribed; they are listed in `coverage.unmodeled_rules`, so a `clean`
+verdict on a layout that draws `Dualgate` does not mean full 5 V/6 V coverage.
+
 ### Fixed-size rules: `"width"` with a maximum (`threshold_max_dbu`, issue #2370)
 
 A `"width"` rule normally encodes one bound — the minimum, `threshold_dbu`,
