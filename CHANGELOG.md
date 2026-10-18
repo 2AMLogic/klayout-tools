@@ -14,6 +14,12 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sim` can replace a named `.subckt` of the include closure** (issue
+  #3919): the additive request field `netlist_overrides.subckt[]`
+  (`{name, replacement}`) strips that definition from a per-run copy of the
+  file defining it and includes the replacement in its place; the report gains
+  an additive `environment.netlist_overrides` record. Local backends only.
+  See `docs/cli/sim.md`.
 - **`klt deck info` reports the DRC deck as its own artifact** (issue #3826):
   an entry for a deck that ships a standalone KLayout DRC deck file (`asap7`)
   gains an additive `drc_deck` object (`{path_kind, content_hash, released,

@@ -2647,6 +2647,51 @@ top-level `.meas` form — most notably an operating-point quantity — is
 declared as a `measurements[].expr` expression rather than smuggled in through
 the netlist body; see "Measurements that are not `.meas` cards" below.
 
+## Replacing a subcircuit of the include closure (`netlist_overrides`, [#3919](https://github.com/2AMLogic/klayout-tools/issues/3919))
+
+ngspice keeps the **first** of two same-named `.subckt` definitions, so a
+second definition appended to the deck cannot replace a hierarchical block
+(a large array, say) that the `netlist`'s `.include` closure already defines.
+`request.netlist_overrides` expresses the swap without a hand-preprocessed
+copy of the included file:
+
+```json
+"netlist_overrides": {
+  "subckt": [{"name": "SRAM_ARRAY", "replacement": "models/sram_array_reduced.sp"}]
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `netlist_overrides.subckt[].name` | string | Subcircuit to replace (case-insensitive, as SPICE is). |
+| `netlist_overrides.subckt[].replacement` | string | File holding the replacement `.subckt` of the same name; resolved against the request's directory. |
+
+`klt sim` finds the single file in the resolved `.include` closure (the
+netlist itself included) that defines `.subckt <name>`, writes a copy with
+only that `.subckt` … `.ends` block removed and `.include <replacement>` in
+its place, and re-points the `.include` chain down to it at the copies. The
+caller's files are never edited, and a copied file's own relative `.include`
+targets are made absolute. Matching is lexical (`.subckt`/`.ends` with
+nesting depth), and `.include`s under `$VAR` or the PDK root are left to the
+executing host and are not searched.
+
+The request is refused with a `SimError` (nonzero exit, nothing run) when the
+name is defined nowhere in the closure, is defined more than once, the
+replacement file is missing or does not define the name, or the field is
+malformed. Without the field, requests and reports are unchanged.
+
+`environment.netlist_overrides.subckt[]` records, per override: `name`,
+`source` and `replacement` (`{path, scope}`), `original_sha256` and
+`stripped_sha256` of the file that held the definition, and
+`replacement_sha256`.
+
+**Backends.** Local only (`local`, `local-parallel`): the rewritten closure
+is not forwarded to `remote`/`batch` workers, so an explicit off-host
+backend (or a fleet shard) is refused with a message naming the limitation.
+Under a host-default `$KLT_SIM_BACKEND=batch`, a single-corner request runs
+locally; a multi-corner one is refused — pass `--backend local` explicitly
+to run it on this host.
+
 ## Saved signal set (`save all`)
 
 ngspice's `.save` card **restricts** the batch run's saved node/branch set —
