@@ -2167,40 +2167,6 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
     (241, 0): "Schottky_diode",
 }
 
-# Voltage-domain marker layers this deck draws but does not *fully* model the
-# DRC/extraction scoping of (issue #552): `Dualgate` (55/0) selects gf180mcu's
-# 5V/6V thick-oxide domain, whose DRM publishes a second, 30-60% larger column
-# of thresholds and a distinct set of MOS models.
-#
-# What is modelled as of issue #1110: the `DF.1a`/`DF.3a` `Comp` width/space
-# rules ship as `_LV`/`_MV` rule *pairs* (`comp.width.1`/`comp.width.mv.1`,
-# `comp.space.1`/`comp.space.mv.1`), each half scoped to the right side of the
-# marker via `DerivedLayer`'s `"not_interacting"`/`"overlapping"` modes -- so
-# a `Comp` shape drawn inside `Dualgate` is now checked against 0.30/0.36 um,
-# not 0.22/0.28 um, and `drc.py` no longer counts geometry those four rules
-# checked toward this warning's gate.
-#
-# What is NOT modelled, and is what this entry now warns about: every other
-# DRC rule above still encodes the 3.3V column only and never reads
-# `Dualgate` -- including DRM rules with an `_MV` column this deck has not
-# transcribed at all yet (`DF.6` COMP extend beyond gate 0.24 vs. 0.40,
-# `PL.5a`/`PL.5b` field poly to COMP 0.10 vs. 0.30).
-#
-# What issue #1111 (#552's option 2) additionally closed: `EXTRACTION_DECK`
-# below now declares one `mos_flavours` entry keyed on this same `Dualgate`
-# marker (see `MOSFlavour`'s own docstring in `decks/__init__.py`), so a
-# transistor drawn entirely inside `Dualgate` extracts bound to the real
-# `nfet_06v0`/`pfet_06v0` models (`--pdk`-resolved SPICE output) instead of
-# the default 3.3V ones -- `extract.py`'s own MOS `voltage_domain_warnings`
-# no longer fires for this marker (it only ever warned about the *MOS*
-# binding gap; the DRC-rule gap above is unaffected and still fires via
-# `drc.py`'s own per-rule `coverage.voltage_domain_warnings` gate). This
-# registry entry stays -- and its description below is updated to drop the
-# now-closed MOS claim -- because the DRC-rule residue above remains real.
-#
-# `Dualgate` is *also* read correctly today (not part of either gap above) by
-# the `DiodeDevice` entries further below, each via its own
-# `requires=(..., Dualgate)` field (issue #542).
 #: Official gf180mcu rule ids this curated deck knowingly does *not*
 #: transcribe (issue #3791): the Dualgate (`dualgate.drc`) rules that need
 #: compound/cross-layer expressions `DrcRule` cannot evaluate (DV.1, DV.3,
@@ -2252,6 +2218,40 @@ UNMODELED_RULES: tuple[str, ...] = (
     "PL.7_MV",
 )
 
+# Voltage-domain marker layers this deck draws but does not *fully* model the
+# DRC/extraction scoping of (issue #552): `Dualgate` (55/0) selects gf180mcu's
+# 5V/6V thick-oxide domain, whose DRM publishes a second, 30-60% larger column
+# of thresholds and a distinct set of MOS models.
+#
+# What is modelled as of issue #1110: the `DF.1a`/`DF.3a` `Comp` width/space
+# rules ship as `_LV`/`_MV` rule *pairs* (`comp.width.1`/`comp.width.mv.1`,
+# `comp.space.1`/`comp.space.mv.1`), each half scoped to the right side of the
+# marker via `DerivedLayer`'s `"not_interacting"`/`"overlapping"` modes -- so
+# a `Comp` shape drawn inside `Dualgate` is now checked against 0.30/0.36 um,
+# not 0.22/0.28 um, and `drc.py` no longer counts geometry those four rules
+# checked toward this warning's gate.
+#
+# What is NOT modelled, and is what this entry now warns about: every other
+# DRC rule above still encodes the 3.3V column only and never reads
+# `Dualgate` -- including DRM rules with an `_MV` column this deck has not
+# transcribed at all yet (`DF.6` COMP extend beyond gate 0.24 vs. 0.40,
+# `PL.5a`/`PL.5b` field poly to COMP 0.10 vs. 0.30).
+#
+# What issue #1111 (#552's option 2) additionally closed: `EXTRACTION_DECK`
+# below now declares one `mos_flavours` entry keyed on this same `Dualgate`
+# marker (see `MOSFlavour`'s own docstring in `decks/__init__.py`), so a
+# transistor drawn entirely inside `Dualgate` extracts bound to the real
+# `nfet_06v0`/`pfet_06v0` models (`--pdk`-resolved SPICE output) instead of
+# the default 3.3V ones -- `extract.py`'s own MOS `voltage_domain_warnings`
+# no longer fires for this marker (it only ever warned about the *MOS*
+# binding gap; the DRC-rule gap above is unaffected and still fires via
+# `drc.py`'s own per-rule `coverage.voltage_domain_warnings` gate). This
+# registry entry stays -- and its description below is updated to drop the
+# now-closed MOS claim -- because the DRC-rule residue above remains real.
+#
+# `Dualgate` is *also* read correctly today (not part of either gap above) by
+# the `DiodeDevice` entries further below, each via its own
+# `requires=(..., Dualgate)` field (issue #542).
 UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {
     (55, 0): (
         "Dualgate (55/0) marks gf180mcu's 5V/6V thick-oxide voltage domain. "
