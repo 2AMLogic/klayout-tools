@@ -3116,17 +3116,14 @@ def _compare_pdk_stamps(
     # Issue #3946: say *why* a pair is not comparable (a closed vocabulary,
     # documented in docs/cli/sim.md) so a reader can tell the submitter's own
     # configuration from a runner-side gap without opening the raw capture.
-    reason = None
     if not worker_ok:
-        reason = "worker_stamp_unavailable"
-    elif client is None:
-        reason = "client_stamp_unavailable"
-    elif client.get("variant") != worker_pdk.get("variant"):
-        reason = "variant_differs"
-    elif client.get("stamp_scheme") != worker_pdk.get("stamp_scheme"):
-        reason = "scheme_differs"
-    if reason is not None:
-        return {"status": "not_comparable", "reason": reason}
+        return {"status": "not_comparable", "reason": "worker_stamp_unavailable"}
+    if client is None:
+        return {"status": "not_comparable", "reason": "client_stamp_unavailable"}
+    if client.get("variant") != worker_pdk.get("variant"):
+        return {"status": "not_comparable", "reason": "variant_differs"}
+    if client.get("stamp_scheme") != worker_pdk.get("stamp_scheme"):
+        return {"status": "not_comparable", "reason": "scheme_differs"}
     if client.get("stamp_sha256") == worker_pdk.get("stamp_sha256"):
         return {"status": "match"}
     return {
