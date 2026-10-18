@@ -6607,7 +6607,7 @@ def _remap_def_net_connections(
     if port_pins is None:
         return remapped
     return DefNetConnections(
-        remapped,
+        {net: tuple(pins) for net, pins in remapped.items()},
         {after_by_before.get(net, net): pins for net, pins in port_pins.items()},
     )
 
