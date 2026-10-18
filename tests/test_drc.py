@@ -1465,7 +1465,9 @@ def test_run_drc_sg13g2_coverage_lists_unmodeled_pad_and_latchup_rules(tmp_path)
     assert unmodeled == sorted(unmodeled)
     assert {"Pad.a1", "Pad.d", "Pad.jR", "LU.a", "LU.d1"} <= set(unmodeled)
     assert all(r.startswith(("Pad.", "LU.")) for r in unmodeled)
-    assert get_unmodeled_rules("gf180mcu") == []
+    assert not any(
+        r.startswith(("Pad.", "LU.")) for r in get_unmodeled_rules("gf180mcu")
+    )
 
 
 def test_run_drc_sky130_hvi_marker_no_warning_without_overlap(tmp_path):
@@ -10911,6 +10913,23 @@ def test_list_deck_rules_context2_keys_only_when_set():
     assert dig["context2_sized_by_um"] == 0.0
     plain = rules["nwell.enclosing.pactiv.1"]["derived_layer"]
     assert not any(k.startswith("context2") for k in plain)
+
+
+def test_run_drc_gf180mcu_coverage_names_unmodeled_thick_metal_families(tmp_path):
+    """Issue #3796: a clean gf180mcu verdict must say the MT30.*/MSLOT.*
+    families were never enforced; decks declaring none stay unaffected."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    # 1.0 um wide Metal3 line (42/0): fine for the modeled rules, would fail MT30.1a.
+    top.shapes(layout.layer(42, 0)).insert(kdb.Box(0, 0, 1000, 5000))
+    path = tmp_path / "thick_metal_probe.gds"
+    layout.write(str(path))
+
+    unmodeled = run_drc(str(path), "gf180mcu")["coverage"]["unmodeled_rules"]
+
+    assert {"MT30.1a", "MT30.2", "MT30.3", "MT30.4", "MSLOT.1"} <= set(unmodeled)
+    assert "MT30.1a" not in run_drc(str(path), "sky130")["coverage"]["unmodeled_rules"]
 
 
 def _make_sky130_marker_layout(*, marker: bool) -> kdb.Layout:
