@@ -2253,6 +2253,11 @@ klt drc layout.gds --engine klayout \
     --expect-rule-categories 263 --format json
 ```
 
+`asap7` is deliberately not a curated DRC deck, so it is absent from
+`klt drc --help`'s `--deck` list and `klt drc --deck asap7` exits 1 with an
+error naming this route; `klt deck info` reports it as
+`provides: ["extraction", "klayout_drc"]`.
+
 `--pdk asap7` does not resolve this deck: `klt pdk` finds an ASAP7 process
 tree (#2759) but not a deck inside it, so pass `--deck-file`. The output is
 the standard `--engine klayout` envelope described in "Engine" above.
@@ -2291,6 +2296,30 @@ The 0.00025 um dbu from `asap7.lyt` represents every DRM value.
 **Layers.** GDS numbers are those the pinned `asap7.lyp` names (`fin
 drawing - 2/0`, ...), which equal the DRM mask IDs (Tables 2.1.1-2.4.1). A
 test cross-checks the deck against the fetched `.lyp`.
+
+**PAD (`96/0`) and the PAD layer's rules (#3807).** PAD is the one layer the
+deck reads that `asap7.lyp` does not name. The deck reads it as DRM mask `96`
+(Table 2.3.1, cited from the deck; not re-read against the PDF for #3807),
+and the DRM is the authoritative source because the deck is transcribed from
+it. The pinned lambdapdk v0.2.17 files do not agree and do not settle it:
+`asap7.layermap` names `Pad` only as `Pad/SPNET|PIN|LEFPIN 95/251` (its
+`Pad/NET 95/1` line is commented out), which puts it on V9's number `95`;
+`asap7.lyp` has no PAD entry; `asap7_tech.lef` defines a `Pad` routing layer
+with no stream number. The deck is not renumbered to `95`, which would collide
+with V9. A test pins these file facts so a pin bump that changes them fails.
+
+**The deck has no rule for the PAD layer itself.** The DRM states none (no
+width, spacing, area, enclosure-by-V9 or density rule for PAD); the only PAD
+rules are `V9.PAD.EN.2` and `V9.AUX.1` (Table 3.19.1). The tech LEF's `Pad`
+width (0.04 um), spacing table and 20 % / 80 % density are router settings,
+not DRM rules (see "Density"), so no threshold is taken from them. A `clean`
+verdict therefore says nothing about shapes on PAD, and a pad pitch or array
+constraint cannot be stated. `klt drc --engine klayout` with the packaged
+`asap7.drc` reports this in `coverage.unchecked_rules` as
+`{"rule": "PAD.*", "layer": "96/0", "description": ...}` whenever the layout
+has shapes on `96/0`; a layout without them reports `[]` as before. The
+declaration is `asap7_rules.UNCHECKED_AREAS`, and the rule-category contract
+(`--expect-rule-categories`) is unchanged.
 
 ### Rule ids (the contract)
 
@@ -3151,7 +3180,7 @@ for which skipped rules make a run partial and which do not.
 | `unchecked_rules`                  | array\<object\> | `{"rule": string, "layer": "<layer>/<datatype>", "description": string}` — foundry rules the deck knows about but cannot evaluate (issue #3012; `sg13cmos5l`'s net-aware `NW.b1` was the first, now checked by `net_space`, #3572, so the map is currently empty), listed only when the rule's layer is in the stream, so a `clean` is not read as covering them. Purely informational: does not change `status`. Sorted by rule id. Additive; `[]` for decks that declare none. |
 | `marker_blind_layers_in_stream`    | array\<string\> | `"<layer>/<datatype>"` area-marker layers present in the stream that the selected deck declares it does **not** model rule-switching for (issue #3815; sky130: `81/2` `areaid.ce`). The curated deck evaluates every rule uniformly, so the marker changes no result — a `clean` or an identical violation set with and without the marker is not marker-aware evidence. Purely informational: does not change `status`, violations or the exit code. Sorted; `[]` when none is present or the deck declares none. Curated engine only. Additive. Deck-static counterpart: `klt deck rules` `marker_blind_layers`. |
 | `deck_scope`                       | array\<string\> | Every distinct DRM section / official rule-id prefix the selected deck's rules claim to implement — a static property of the deck, independent of the input stream (issue #566). Sorted alphabetically. |
-| `unmodeled_rules`                  | array\<string\> | Curated engine only: official foundry-runset rule ids the selected deck knowingly does **not** transcribe (issue #3031) — a static property of the deck. sky130: `m1.5`, `m2.5`, `via.5a`, `via2.5`, `via3.5`. See below. Sorted alphabetically; empty for a deck that declares none. |
+| `unmodeled_rules`                  | array\<string\> | Curated engine only: official foundry-runset rule ids the selected deck knowingly does **not** transcribe (issue #3031) — a static property of the deck. sky130: `m1.5`, `m2.5`, `via.5a`, `via2.5`, `via3.5`; sg13g2: the `Pad.*` and `LU.*` ids. See below. Sorted alphabetically; empty for a deck that declares none. |
 | `rule_categories`                  | array\<string\> | KLayout engine only: declared RDB categories, never execution proof. |
 | `nothing_checked`                  | boolean         | Whether this run checked *nothing at all*, so its `status` says nothing about the layout — the shared convention in [`../json-contract.md`](../json-contract.md). See below. |
 | `nothing_checked_reasons`          | array\<string\> | Why, using the shared reason codes. Empty exactly when `nothing_checked` is `false`. |
@@ -3318,6 +3347,16 @@ each family's primary (stricter-margin, all-edges) rule. A layout can
 therefore pass `klt drc --deck sky130` and still fail the runset on exactly
 these. The field is purely additive and deck-static (identical across inputs);
 re-check those enclosures with the PDK's own `sky130A_mr.drc` before signoff.
+
+For sg13g2 the list is the runset's pad rules (`Pad.a1`, `Pad.aR`, `Pad.bR`,
+`Pad.d`, `Pad.dR`, `Pad.d1R`, `Pad.gR`, `Pad.jR`, `Pad.kR`; the `*R` ids are
+recommended-only) and latch-up rules (`LU.a`, `LU.c`, `LU.c1`, `LU.d`,
+`LU.d1`; gated by `$latchUpRules`) from `sg13g2_maximal.drc` (issue #3854), so
+a `clean` sg13g2 verdict says nothing about pads or latch-up. ESD structures
+are not in this list because the runset has no ESD rule id to name: the deck
+also has no ESD device class (protection diodes and clamps extract as nothing;
+see `device_classes` in `klt deck info --deck sg13g2`), so a clean verdict says
+nothing about them either.
 
 #### `coverage.deck_scope`
 

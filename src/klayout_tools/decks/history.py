@@ -302,6 +302,10 @@ def deck_info(name: str | None = None) -> dict[str, Any]:
       capable of recognising (``ExtractionDeck.device_classes``), e.g.
       whether ``diode_nd2ps_06v0``/``diode_pd2nw_06v0`` are wired up at all --
       independent of whether any given layout actually contains one.
+    - ``provides`` -- which capabilities this deck supplies (issue #3783),
+      any of ``curated_drc`` (``klt drc --deck`` / ``klt deck rules``),
+      ``klayout_drc`` (a shipped KLayout DRC script run via ``--engine
+      klayout --deck-file``) and ``extraction``.
     - ``released`` -- the same tri-state signal as
       ``provenance.deck.released`` (:func:`is_deck_hash_released`): ``True``
       when this exact content hash shipped in a tagged release, ``False``
@@ -320,6 +324,7 @@ def deck_info(name: str | None = None) -> dict[str, Any]:
     from .._provenance import sha256_file
     from . import (
         UnknownExtractionDeckError,
+        deck_provides,
         deck_source_path,
         get_extraction_deck,
         known_extraction_deck_names,
@@ -356,6 +361,7 @@ def deck_info(name: str | None = None) -> dict[str, Any]:
                 "deck": deck_name,
                 "content_hash": content_hash,
                 "device_classes": list(deck.device_classes),
+                "provides": deck_provides(deck_name),
                 "released": released,
                 "release": release,
             }

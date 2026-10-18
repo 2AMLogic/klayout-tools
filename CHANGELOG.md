@@ -14,6 +14,28 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`provenance.input.paths` set binding for `klt signoff`** (issue #3044,
+  documented in `docs/cli/signoff.md` "Binding a set of artifacts"): additive.
+  Not in `klt 0.7.0` — a `0.7.0` build grades a `paths`-only envelope
+  `unanchored_evidence`; it first ships in the first release after `v0.7.0`.
+
+- **`klt lvs --deck sg13cmos5l` now matches the PDK's own stdcells** (issue
+  #3831): `sg13cmos5l_inv_1` draws no `nSD`, so its well tie (unimplanted
+  Activ in NWell) was not recognised and the compare reported
+  `device.unmatched`/`net.merged`/`net.split`. The deck now declares
+  `tap_nplus_complement=(14, 0)` (the sg13g2 #2591 form). Its pin names sit
+  on Metal1.text (8/25), so promote them with `label_layers: {"metal0":
+  [8, 25]}`; without it the verdict is `match` with `device.body_unverified`
+  warnings and one pin.
+
+- **`klt sta` driving cell / output load, and `*NAME_MAP` SPEFs** (issue
+  #3742): `constraints.driving_cell` / `.driving_cells` emit
+  `set_driving_cell` and `constraints.output_load_pf` / `.output_loads` emit
+  `set_load` (additive; omitted fields leave the generated Tcl unchanged).
+  The `spef_annotation` name check now resolves `*NAME_MAP` indices (and a
+  non-`/` `*DIVIDER`), so a name-mapped OpenROAD SPEF no longer reports 0
+  design nets annotated. `propagated_clock` already existed (issue #2739).
+
 - 2026-10-17 — **`klt signoff --attest` / `--inventory` are not installable
   from 0.7.0** (issue #3805): the attestation producer for T1 items 1, 9 and
   10 (#2844) is on `main` but in no tagged release, so
