@@ -1730,10 +1730,9 @@ def _validate_batch_models_lib(request: dict[str, Any]) -> None:
     The runner resolves ``models.lib`` on its own box, where this host's
     ``/home/<user>/.volare/...`` does not exist, so the job would pay for an
     instance launch and then fail with ``model library not found``. Not
-    refused: PDK-relative libs, ``$VAR`` forms (the runner expands them, except ``$PDK`` with no
-    ``models.pdk``), and
-    any request with ``options.stage_model_inputs: true`` (the library ships
-    with the job).
+    refused: PDK-relative libs, ``$VAR`` forms (the runner expands them, except
+    ``$PDK`` with no ``models.pdk``), and any request with
+    ``options.stage_model_inputs: true`` (the library ships with the job).
     """
     from . import sim_staging
     from .sim import SimError
