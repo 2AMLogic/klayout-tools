@@ -10,31 +10,19 @@ ngspice (and no SPICE grid, local or fleet) is needed.
 from __future__ import annotations
 
 import json
-import shutil
 import types
 from pathlib import Path
 
 import pytest
 
 from helpers.subprocess_fakes import fake_completed
-from klayout_tools import _paths as paths_module
 from klayout_tools import sim, sim_batch
 
-pytestmark = pytest.mark.usefixtures("real_build_identity_git")
+pytestmark = pytest.mark.usefixtures(
+    "real_build_identity_git", "bare_name_ngspice_resolution"
+)
 
 _CARD = {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"}
-
-
-@pytest.fixture(autouse=True)
-def _bare_name_ngspice_resolution(monkeypatch):
-    real_which = shutil.which
-
-    def fake_which(cmd, *args, **kwargs):
-        if cmd == "ngspice":
-            return cmd
-        return real_which(cmd, *args, **kwargs)
-
-    monkeypatch.setattr(paths_module.shutil, "which", fake_which)
 
 
 def _write_body(tmp_path: Path) -> None:
