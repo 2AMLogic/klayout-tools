@@ -6822,3 +6822,145 @@ def test_live_engine_spef_map_distinguishes_interconnect_corners(tmp_path):
     assert nom["corner"] == heavy_entry["corner"] == "tt_025C_1v80"
     assert nom["worst_hold_slack_ns"] != heavy_entry["worst_hold_slack_ns"]
     assert report["provenance"]["input"]["content_hash"] is not None
+
+
+def _write_placed_buffered_def(tmp_path) -> str:
+    """The captured buffered DEF with every component and pin given a
+    location, so OpenROAD's `estimate_parasitics -placement` has geometry to
+    extract (the captured DEF is deliberately unplaced)."""
+    import re
+
+    text = _CLOCK_CAPTURES["defs"]["buffered"]
+    counter = iter(range(1, 1000))
+
+    def place_component(match):
+        x = 10_000 * next(counter)
+        return f"{match.group(1)} + PLACED ( {x} 20000 ) N ;"
+
+    text = re.sub(
+        r"^(    - \S+ sky130_fd_sc_hd__\S+) ;$", place_component, text, flags=re.M
+    )
+
+    def place_pin(match):
+        x = 5_000 * next(counter)
+        return (
+            f"{match.group(1)} + LAYER met2 ( -70 0 ) ( 70 140 ) + PLACED ( {x} 0 ) N ;"
+        )
+
+    text = re.sub(
+        r"^(    - \S+ \+ NET .* \+ USE SIGNAL) ;$", place_pin, text, flags=re.M
+    )
+    text = text.replace(
+        "COMPONENTS 6 ;", "DIEAREA ( 0 0 ) ( 100000 100000 ) ;\nCOMPONENTS 6 ;"
+    )
+    return _write(tmp_path / "placed.def", text)
+
+
+def _openroad_write_spef(tmp_path, def_path: str) -> str:
+    """Have OpenROAD itself estimate placement parasitics on `def_path` and
+    `write_spef` them -- the real writer's `*NAME_MAP` form, which the
+    hand-written unit fixture only imitates."""
+    liberty_path, _corner, pdk_info = post_route_sta._resolve_liberty(
+        "sky130_fd_sc_hd", "tt_025C_1v80", variant="sky130A"
+    )
+    tech_lef, cell_lef = post_route_sta._resolve_lef("sky130_fd_sc_hd", pdk_info)
+    spef_path = tmp_path / "openroad.spef"
+    script = _write(
+        tmp_path / "write_spef.tcl",
+        "\n".join(
+            [
+                f"read_lef {tech_lef}",
+                f"read_lef {cell_lef}",
+                f"read_def {def_path}",
+                f"read_liberty {liberty_path}",
+                "create_clock -name clk -period 2.0 [get_ports clk]",
+                "set_wire_rc -layer met2",
+                "estimate_parasitics -placement",
+                f"write_spef {spef_path}",
+            ]
+        )
+        + "\n",
+    )
+    completed = post_route_sta._run_openroad(
+        script, str(tmp_path / "write_spef.json"), error_cls=PostRouteStaError
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert spef_path.is_file(), completed.stdout + completed.stderr
+    return str(spef_path)
+
+
+@pytest.mark.skipif(
+    _live_sky130_env() is None,
+    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
+    "KLT_SKIP_OPENROAD_TESTS unset",
+)
+def test_live_engine_spef_name_map_annotation(tmp_path):
+    """Engine integration (issue #3776, closing the live-verification gap of
+    #3755): a SPEF written by OpenROAD's own `write_spef` (so with its real
+    `*NAME_MAP`) must annotate every net of the design it was extracted
+    from."""
+    def_path = _write_placed_buffered_def(tmp_path)
+    spef_path = _openroad_write_spef(tmp_path, def_path)
+    assert "*NAME_MAP" in Path(spef_path).read_text(encoding="utf-8")
+
+    report = run_sta(
+        _write_request(
+            tmp_path / "request.json",
+            {
+                "def": def_path,
+                "spef": spef_path,
+                "pdk": {"cell_library": "sky130_fd_sc_hd", "corner": "tt_025C_1v80"},
+                "constraints": _propagated_constraints(propagated_clock=True),
+            },
+        ),
+        pdk_variant="sky130A",
+    )
+
+    annotation = report["spef_annotation"]
+    assert annotation["design_nets_total"] > 0
+    assert annotation["design_nets_annotated"] > 0
+    assert annotation["design_nets_annotated"] == annotation["design_nets_total"]
+    assert annotation["design_nets_missing_sample"] == []
+
+
+@pytest.mark.skipif(
+    _live_sky130_env() is None,
+    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
+    "KLT_SKIP_OPENROAD_TESTS unset",
+)
+def test_live_engine_driving_cell_and_output_load(tmp_path):
+    """Engine integration (issue #3776): OpenSTA accepts the generated
+    `set_driving_cell -lib_cell/-pin/-from_pin` and `set_load` commands, and
+    the output load measurably moves slack (so acceptance is not vacuous)."""
+    paths = _write_clock_fixtures(tmp_path)
+
+    def run(**constraint_overrides) -> dict:
+        return run_sta(
+            _write_request(
+                tmp_path / "request.json",
+                {
+                    "def": paths["buffered.def"],
+                    "pdk": {
+                        "cell_library": "sky130_fd_sc_hd",
+                        "corner": "tt_025C_1v80",
+                    },
+                    "constraints": _propagated_constraints(
+                        output_delay_ns=0.1, **constraint_overrides
+                    ),
+                },
+            ),
+            pdk_variant="sky130A",
+        )
+
+    baseline = run()
+    loaded = run(output_load_pf=0.5)
+    driven = run(
+        driving_cell={"cell": "sky130_fd_sc_hd__buf_2", "pin": "X"},
+        driving_cells={
+            "d1": {"cell": "sky130_fd_sc_hd__inv_2", "pin": "Y", "input_pin": "A"}
+        },
+        output_load_pf=0.5,
+    )
+
+    assert loaded["worst_slack_ns"] < baseline["worst_slack_ns"]
+    assert driven["worst_slack_ns"] is not None
