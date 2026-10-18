@@ -390,7 +390,8 @@ Resolves one install/variant.
   },
   "broken_symlinks": [],
   "has_pcell_library": true,
-  "ambiguous_roots": []
+  "ambiguous_roots": [],
+  "alternative_variants": []
 }
 ```
 
@@ -406,6 +407,7 @@ Resolves one install/variant.
 | `broken_symlinks` | array | Dangling symlinks found under any resolved `assets` directory (issue #1406). `[]` when the install is clean. |
 | `has_pcell_library` | boolean | The variant ships at least one Python package under `libs.tech/klayout/python/` (issue #1535) — the PDK's own KLayout PCell library. See below. |
 | `ambiguous_roots` | array | Later candidate roots in the search order that **also** hold a variant of the resolved name (issue #2564) — `[{"root", "resolved_via"}]`, in search order. `[]` for the common single-install case, and always `[]` when `--pdk-root` pinned the root (the search is disabled). See below. |
+| `alternative_variants` | array | Additive (issue #3814): sorted names of the *other* variants in the chosen root when no variant was selected (no `--pdk`, no `$PDK`) and the first variant was taken as the default. `[]` when a variant was pinned or the root holds only one. See below. |
 | `compatibility` | object | Additive (issue #2759): whether the install's version identity matches the one a klt technology package declares. See "Package compatibility" below. |
 
 ### Package compatibility (`compatibility`, issue #2759)
@@ -499,6 +501,23 @@ Callers that surface this to a human render it via
 one-line warning (naming the absolute root read, every root skipped, and the
 remedy) or `None` when unambiguous. `klt sim` prints it to stderr; see
 [`sim.md`](sim.md)'s "Model library resolution".
+
+### Silent default among several variants (`alternative_variants`, issue #3814)
+
+With no `--pdk` and no `$PDK`, `find` takes the first variant in sorted order.
+A root holding `gf180mcuA`–`gf180mcuD` therefore resolves to `gf180mcuA` — the
+choice itself is unchanged, but it is no longer silent:
+
+```json
+"alternative_variants": ["gf180mcuB", "gf180mcuC", "gf180mcuD"]
+```
+
+The field is `[]` whenever the variant was explicitly selected (`--pdk` /
+`$PDK`) or the root holds a single variant. In text mode `klt pdk find`
+prints a one-line warning to stderr (rendered by
+`klayout_tools.pdk.alternative_variants_warning(report)`) only when the field
+is non-empty; the exit code stays `0`. The remedy is to set `$PDK` or pass
+`--pdk`.
 
 ### PCell libraries (`has_pcell_library`, issue #1535)
 
