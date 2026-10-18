@@ -21,6 +21,12 @@ not `klt --version`, if you need to detect this kind of drift. See
   `environment.remote.max_concurrent_jobs` records the value only when set; a
   non-positive-integer value is rejected with
   `error.code: "batch_max_concurrent_jobs_invalid"`. No `schema_version` bump.
+- **`klt sim` can replace a named `.subckt` of the include closure** (issue
+  #3919): the additive request field `netlist_overrides.subckt[]`
+  (`{name, replacement}`) strips that definition from a per-run copy of the
+  file defining it and includes the replacement in its place; the report gains
+  an additive `environment.netlist_overrides` record. Local backends only.
+  See `docs/cli/sim.md`.
 - **`klt signoff` item 5 derives spec-row coverage from the cited envelope**
   (issue #3778): `klt sim` measurements accept an optional `spec_row` string
   (echoed on the rollup entry only when declared). A citation with `rows`
@@ -50,7 +56,6 @@ not `klt --version`, if you need to detect this kind of drift. See
   `harness_log` print `s3://<bucket>/...` literally. `job_id` and `region`
   remain, so `--attach` still works; the receipt and `--submit-only`/`--status`
   outputs keep `bucket`.
-
 - **`klt deck info` reports the DRC deck as its own artifact** (issue #3826):
   an entry for a deck that ships a standalone KLayout DRC deck file (`asap7`)
   gains an additive `drc_deck` object (`{path_kind, content_hash, released,
