@@ -172,6 +172,32 @@ def deck_names() -> list[str]:
     return sorted(set(_registry()) | set(_extraction_registry()))
 
 
+def drc_deck_names() -> list[str]:
+    """Every deck name :func:`get_deck` accepts (a curated Python rule table),
+    sorted -- the subset of :func:`deck_names` that ``klt drc --deck`` and
+    ``klt deck rules --deck`` can run (issue #3783). ``asap7`` is absent: its
+    DRC is a KLayout script, not a curated rule table (#2760)."""
+    return sorted(_registry())
+
+
+def deck_provides(name: str) -> list[str]:
+    """The capabilities deck ``name`` supplies in this build (issue #3783):
+    any of ``curated_drc`` (a rule table :func:`get_deck` accepts),
+    ``klayout_drc`` (a shipped KLayout DRC-DSL script) and ``extraction``
+    (:func:`get_extraction_deck`). Derived from the registries, not a
+    parallel table."""
+    from . import asap7_rules
+
+    provides = []
+    if name in _registry():
+        provides.append("curated_drc")
+    if name == "asap7" and asap7_rules.DECK_PATH.is_file():
+        provides.append("klayout_drc")
+    if name in _extraction_registry():
+        provides.append("extraction")
+    return sorted(provides)
+
+
 def _registry() -> dict[str, list[DrcRule]]:
     from . import gf180mcu, sg13cmos5l, sg13g2, sky130
 
@@ -206,6 +232,12 @@ def get_deck(name: str) -> list[DrcRule]:
         return decks[name]
     except KeyError:
         available = ", ".join(sorted(decks))
+        if name in _extraction_registry():
+            raise UnknownDeckError(
+                f"deck '{name}' has no curated DRC rule table "
+                f"(available: {available}); its DRC is a KLayout script: "
+                "use `klt drc --engine klayout --deck-file <deck>.drc`"
+            ) from None
         raise UnknownDeckError(
             f"unknown deck '{name}' (available: {available})"
         ) from None
@@ -307,9 +339,12 @@ def get_unchecked_rules(name: str) -> dict[str, tuple[tuple[int, int], str]]:
     in the stream, so a ``clean`` verdict is not misread as covering it.
     Decks that declare none (and unregistered names) return an empty map.
     """
-    from . import sg13cmos5l
+    from . import sg13cmos5l, sg13g2
 
-    return {"sg13cmos5l": sg13cmos5l.UNCHECKED_RULES}.get(name, {})
+    return {
+        "sg13cmos5l": sg13cmos5l.UNCHECKED_RULES,
+        "sg13g2": sg13g2.UNCHECKED_RULES,
+    }.get(name, {})
 
 
 def get_marker_blind_layers(name: str) -> list[tuple[int, int]]:

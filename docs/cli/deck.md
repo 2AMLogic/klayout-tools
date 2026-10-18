@@ -226,6 +226,7 @@ klt deck info --deck gf180mcu # one deck only
         "nfet", "pfet", "bjt", "cap_mim_2f0_m4m5_noshield", "resistor",
         "diode_nd2ps_06v0", "diode_pd2nw_06v0"
       ],
+      "provides": ["curated_drc", "extraction"],
       "released": false,
       "release": null
     }
@@ -245,6 +246,14 @@ klt deck info --deck gf180mcu # one deck only
   predates diode support entirely. It says what the deck **can find**; it
   does not say what a layout must **draw** for one to be found — that is
   [`klt deck devices`](#klt-deck-devices) below.
+- `provides` — which capabilities the deck supplies (issue #3783), any of
+  `curated_drc` (runnable by `klt drc --deck` and `klt deck rules`),
+  `klayout_drc` (a shipped KLayout DRC script, run with `klt drc --engine
+  klayout --deck-file`) and `extraction`. `asap7` reports
+  `["extraction", "klayout_drc"]`: it has no curated DRC rule table, so
+  `klt drc --deck asap7` and `klt deck rules --deck asap7` exit 1 (never a
+  false `clean`) and point at the KLayout-script route. The field is
+  additive; `schema_version` stays 1.
 - `released` / `release` — the same tri-state signal as
   `provenance.deck.released` (`true`/`false`/`null`; see above), plus, when
   `true`, the `{git_tag, git_commit, package_version}` of the release that
