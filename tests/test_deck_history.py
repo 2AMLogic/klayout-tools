@@ -761,6 +761,7 @@ def test_deck_devices_covers_every_declared_device_class_of_every_deck():
         declared |= {entry.class_name for entry in deck.bipolars}
         declared |= {entry.name for entry in deck.capacitors}
         declared |= {entry.name for entry in deck.mom_capacitors}
+        declared |= {entry.name for entry in deck.mos_capacitors}
         declared |= {entry.name for entry in deck.resistors}
         declared |= {entry.name for entry in deck.diodes}
         assert reported == declared, name

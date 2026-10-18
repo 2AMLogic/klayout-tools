@@ -165,6 +165,16 @@ not `klt --version`, if you need to detect this kind of drift. See
   null`, `error` blames the absent side) instead of a silent `pass`; absent on
   both sides stays `pass`. `schematic_status` / `extracted_status` may now be
   `"absent"`. Additive: `delta[].status` stays `pass|fail|error`.
+- **`klt extract --deck gf180mcu` recognises MOS capacitors** (issue #2919,
+  deliverable B): a `Comp` island with a poly gate under `MOS_CAP_MK` (166/5)
+  extracts as one of twelve `cap_{nmos,pmos}_{03v3,06v0}[_dn|_b]` capacitor
+  devices (`a` = gate, `b` = source/drain, `A`/`P` on the gate region) instead
+  of vanishing (`_b` forms) or being read as a transistor (the rest). New
+  `MosCapacitorDevice` deck entry; `klt deck devices` lists the classes
+  (`kind: "mos_capacitor"`) and `device_classes` grows by the same twelve names.
+  `unsupported_devices[]` now reports only marker components the recogniser could
+  not classify. Model name, nets, `C`, `A` and `P` cross-checked against the PDK's
+  own LVS runset. Additive; no `schema_version` bump.
 - **`klt extract --resistance-graph`: opt-in terminal-aware resistance graph**
   (issue #2982, Stage 3.D5 increment 3): adds `parasitics.nets[].resistance_graph`
   (`status`, `terminals`, `pair_resistance_ohm`, `legacy_resistance_ohm`,

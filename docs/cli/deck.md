@@ -470,7 +470,7 @@ field by field, which two separate passes on a real design had to do
 - `name` — the `devices[].class` label this class extracts as (the same
   strings `klt deck info`'s `device_classes` lists).
 - `kind` — the recognition family: `mos`, `bipolar`, `capacitor`,
-  `mom_capacitor`, `resistor`, `diode`.
+  `mom_capacitor`, `mos_capacitor`, `resistor`, `diode`.
 - `marker` — the class's device-recognition marker layer, or `null` for a
   markerless (drawn-geometry-only) class or one whose marker is derived.
 - `marker_expression` — `null` unless the marker is a derived `LayerExpr`
