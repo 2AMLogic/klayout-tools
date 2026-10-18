@@ -108,6 +108,7 @@ from . import (
     sim_snm_meas,
     sim_steps,
     sim_stimulus,
+    sim_subckt_override,
     sim_supply_waveform,
     sim_tian,
     sim_transfer_meas,
@@ -2686,6 +2687,7 @@ class _ResolvedSimRequest:
     monte_carlo_stats: Any
     netlist_identity: Any
     netlist_identity_error: Any
+    netlist_overrides_report: Any
     netlist_path: Any
     netlist_source: Any
     ngspice_binary: Any
@@ -3157,6 +3159,21 @@ def _prepare_sim_request(
         explicit_points=explicit_points_wire is not None,
     )
 
+    # Issue #3919: `.subckt` override of the include closure. Applied on top of
+    # the (possibly gated) netlist; refused up front on an off-host backend.
+    dispatch_netlist_path, netlist_overrides_report = _maybe_override_subckts(
+        request,
+        dispatch_netlist_path,
+        request_dir=request_dir,
+        # The rewritten closure cannot leave this host, so an env-sourced
+        # off-host default yields to local (an explicit choice is refused).
+        backend=_yield_host_default_backend(
+            backend, backend_from_host_default, reason_ok=False
+        ),
+        explicit_points=explicit_points_wire is not None,
+        repo_root=repo_root,
+    )
+
     # Issue #2706: fail fast (before any probe or backend dispatch) when a
     # supply override targets a source with an explicit transient waveform.
     _validate_supply_override_targets(netlist_path, corner_points)
@@ -3263,6 +3280,7 @@ def _prepare_sim_request(
         monte_carlo_stats=monte_carlo_stats,
         netlist_identity=netlist_identity,
         netlist_identity_error=netlist_identity_error,
+        netlist_overrides_report=netlist_overrides_report,
         netlist_path=netlist_path,
         netlist_source=netlist_source,
         ngspice_binary=ngspice_binary,
@@ -3357,6 +3375,7 @@ def _run_sim_corners(
     monte_carlo_stats = resolved.monte_carlo_stats
     netlist_identity = resolved.netlist_identity
     netlist_identity_error = resolved.netlist_identity_error
+    netlist_overrides_report = resolved.netlist_overrides_report
     netlist_path = resolved.netlist_path
     netlist_source = resolved.netlist_source
     ngspice_binary = resolved.ngspice_binary
@@ -3427,6 +3446,12 @@ def _run_sim_corners(
         [point for point in corner_points if point.corner_id not in pre_completed]
         if resume
         else corner_points
+    )
+    _refuse_override_on_host_default(
+        netlist_overrides_report,
+        backend=backend,
+        backend_from_host_default=backend_from_host_default,
+        n_points=len(dispatch_points),
     )
     # A single-unit run under a host default stays here: one corner does not
     # repay a Spot instance's minutes of boot, and it is exactly the "probe
@@ -3965,6 +3990,9 @@ def _run_sim_corners(
     environment.update(
         sim_stimulus.environment_entry(stimulus_signals, stimulus_by_corner)
     )
+    # Additive/optional (issue #3919): only present when the request declares
+    # `netlist_overrides` -- see docs/cli/sim.md.
+    environment.update(_netlist_overrides_environment(netlist_overrides_report))
     if monte_carlo_info is not None:
         # Additive/optional: only present when the request declares
         # `monte_carlo` -- the seed contract's request-level echo, per
@@ -4351,6 +4379,7 @@ _KNOWN_REQUEST_KEYS = frozenset(
         "models",
         "monte_carlo",
         "netlist",
+        "netlist_overrides",
         "netlist_source",
         "options",
         "remote",
@@ -6385,6 +6414,74 @@ def _apply_mismatch_instance_gating(
         "negative_control": not any(r["randomised"] for r in rows),
     }
     return gated_path, report
+
+
+def _netlist_overrides_environment(report: Any) -> dict[str, Any]:
+    return {} if report is None else {"netlist_overrides": report}
+
+
+def _refuse_override_on_host_default(
+    report: Any,
+    *,
+    backend: str,
+    backend_from_host_default: bool,
+    n_points: int,
+) -> None:
+    """Issue #3919: a multi-corner request with ``netlist_overrides`` cannot
+    follow a host-default off-host backend (the rewritten closure stays here)."""
+    if (
+        report is not None
+        and backend_from_host_default
+        and backend in _OFFHOST_BACKENDS
+        and n_points > 1
+    ):
+        raise SimError(
+            "request.netlist_overrides cannot run on the host-default "
+            f"{backend!r} backend (the rewritten include closure is not "
+            "forwarded to remote/batch workers) and this request has "
+            f"{n_points} corners; run a single corner, or pass "
+            "--backend local explicitly"
+        )
+
+
+def _maybe_override_subckts(
+    request: dict[str, Any],
+    netlist_path: str,
+    *,
+    request_dir: str,
+    backend: str,
+    explicit_points: bool,
+    repo_root: str | None,
+) -> tuple[str, dict[str, Any] | None]:
+    """Apply ``request.netlist_overrides`` (issue #3919): returns
+    ``(netlist_to_dispatch, environment_entry)``; unchanged and ``None`` when
+    absent. Raises :class:`SimError` before any corner is dispatched."""
+    import atexit
+
+    if "netlist_overrides" not in request:
+        return netlist_path, None
+    if backend in _OFFHOST_BACKENDS or explicit_points:
+        raise SimError(
+            "request.netlist_overrides is only supported on local backends "
+            f"(got backend {backend!r}); the rewritten include closure is not "
+            "forwarded to remote/batch workers"
+        )
+    try:
+        overrides = sim_subckt_override.parse_spec(
+            request["netlist_overrides"], request_dir
+        )
+        work_dir = _tmp_work_dir()
+        atexit.register(_cleanup_dir, work_dir)
+        new_path, entries = sim_subckt_override.apply_overrides(
+            netlist_path,
+            overrides,
+            work_dir=work_dir,
+            roots=sim_staging.host_resolved_roots(request),
+            repo_root=repo_root,
+        )
+    except sim_subckt_override.OverrideError as exc:
+        raise SimError(str(exc)) from exc
+    return new_path, {"subckt": entries}
 
 
 def _validate_monte_carlo_spec(mc_spec: dict[str, Any]) -> tuple[int, int, str]:

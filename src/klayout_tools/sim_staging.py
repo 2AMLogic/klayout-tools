@@ -1151,6 +1151,17 @@ class _Stager:
         return resolved
 
 
+def resolve_include_target(
+    target: str, *, origin: str, roots: Sequence[str] = ()
+) -> str | None:
+    """Absolute local path an ``.include`` ``target`` carried by ``origin``
+    names, by the same rule :func:`stage_netlist` follows; ``None`` when the
+    executing host owns its resolution (an env-var or PDK-root target)."""
+    return _Stager(reserved_names=(), roots=tuple(roots))._resolve(
+        target, origin=origin
+    )
+
+
 def _read_text(path: str) -> tuple[str, bool]:
     """``(text, decodable)`` for ``path``: UTF-8 when it decodes, else a
     lossy latin-1 read flagged ``False``.
