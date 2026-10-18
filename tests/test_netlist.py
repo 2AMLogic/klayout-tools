@@ -909,6 +909,42 @@ def test_block_mode_uncomments_subckt_and_drops_trailing_end(
     }
 
 
+def test_block_mode_rejoins_wrapped_header_continuations(
+    tmp_path, argv_log, monkeypatch
+):
+    body = (
+        "* stub netlist\n**.subckt block a b\n*+ c d\n**+ e f\n.something x\n"
+        "**.ends\n.end"
+    )
+    monkeypatch.setenv("NETLIST_BODY", body)
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "block.spice"
+
+    report = run_netlist(schematic, str(output), xschem_binary=binary, block=True)
+
+    assert output.read_text(encoding="utf-8") == (
+        "* stub netlist\n.subckt block a b\n+ c d\n+ e f\n.something x\n.ends\n"
+    )
+    assert report["block"]["warning"] is None
+
+
+def test_block_mode_leaves_non_adjacent_continuation_comment_alone(
+    tmp_path, argv_log, monkeypatch
+):
+    body = "* stub netlist\n**.subckt block a b\n.something x\n*+ note\n**.ends\n.end"
+    monkeypatch.setenv("NETLIST_BODY", body)
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "block.spice"
+
+    run_netlist(schematic, str(output), xschem_binary=binary, block=True)
+
+    assert output.read_text(encoding="utf-8") == (
+        "* stub netlist\n.subckt block a b\n.something x\n*+ note\n.ends\n"
+    )
+
+
 def test_without_block_flag_testbench_shape_is_unchanged(
     tmp_path, argv_log, monkeypatch
 ):

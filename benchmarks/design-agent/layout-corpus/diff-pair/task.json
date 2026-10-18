@@ -1,0 +1,64 @@
+{
+  "schema": "klt.design_agent_benchmark.layout_task/1",
+  "id": "diff-pair",
+  "title": "NMOS differential pair",
+  "pdk": "sky130",
+  "description": "Two matched sky130 NMOS, W/L = 8/0.5 um each. The generators draw label-free cells, so only the substrate is a top-level pin; gate/source/drain nets are internal and LVS compares topology and device W/L.",
+  "block_spec": {
+    "spec_class": "other",
+    "io_nodes": [
+      "D1",
+      "D2",
+      "G1",
+      "G2",
+      "S",
+      "VSS"
+    ],
+    "target_specs": null
+  },
+  "frozen_netlist": {
+    "path": "benchmarks/design-agent/layout-corpus/diff-pair/netlist.spice",
+    "sha256": "7f3c0ae6b0265f0d7ec461c9bfb762c9b00f12f3368ea8902af4c895abf9d65c"
+  },
+  "reference_layout": {
+    "path": "benchmarks/design-agent/layout-corpus/diff-pair/reference.gds",
+    "sha256": "40c304a790ad2b74e4ece701efb8a9150a06ef18a65ce092676bce192cdf3526",
+    "cell_name": "diffpair_cell"
+  },
+  "generator_recipe": {
+    "path": "benchmarks/design-agent/layout-corpus/diff-pair/recipe.json",
+    "sha256": "6cd887a4f82603a6253303eb8910fd17b8a9b2609338d8341224d51f398e4750"
+  },
+  "negative_controls": [
+    {
+      "id": "met1-width",
+      "path": "benchmarks/design-agent/layout-corpus/diff-pair/neg-drc.gds",
+      "sha256": "419ba2eb15936692512314a1e54cb72aae9d930e64e09f5cc3993631d52decca",
+      "expected_failure": "drc"
+    },
+    {
+      "id": "resized-device",
+      "path": "benchmarks/design-agent/layout-corpus/diff-pair/neg-lvs.gds",
+      "sha256": "a6a118da69e5dd5180a9cd8dc1a9da2eb06c4429c7f1670ec3f90029d5a50d7d",
+      "expected_failure": "lvs"
+    }
+  ],
+  "agent_inputs": [
+    "benchmarks/design-agent/layout-corpus/diff-pair/netlist.spice"
+  ],
+  "eligibility": {
+    "rules": {
+      "frozen_netlist": "netlist.spice is a hand-written reference, hashed in task.json; the scorer reads it from the repo, never from an agent sandbox.",
+      "reference_layout_valid": "reference.gds is the recipe's output; the corpus gate re-runs klt drc (sky130 deck: clean) and klt lvs (match) on it.",
+      "generator_reachable": "recipe.json lists only klt gen / klt gen-compose steps; the gate re-runs it and requires a DRC-clean, LVS-matching layout.",
+      "negative_controls": "neg-drc.gds fails only DRC (met1 width sliver) and neg-lvs.gds fails only LVS (resized device); the gate checks each check fires alone.",
+      "open_pdk": "sky130A via open_pdks; no proprietary data."
+    },
+    "arms": {
+      "draw-only": "diff-pair is a bounded layout of a few devices with a netlist-defined target; klt draw primitives can express a legal layout of it, and the gate scores it identically.",
+      "gen-only": "Reachable with klt gen / gen-compose alone: recipe.json is the existence proof and uses no draw verb.",
+      "gen+refine": "Seeded from the gen-only result (protocol seeding decision); every refinement edit is expressible with klt draw (base_gds / erase_um) or gen-compose."
+    }
+  },
+  "notes": null
+}

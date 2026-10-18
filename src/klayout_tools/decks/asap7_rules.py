@@ -637,6 +637,34 @@ DENSITY_DISPOSITION = (
     "density threshold, window or fill requirement, so the deck checks none"
 )
 
+#: PAD stream layer the deck reads (``pad = input(96, 0)``): DRM mask 96
+#: (Table 2.3.1). The DRM is the authority the deck is transcribed from. The
+#: pinned lambdapdk v0.2.17 files do not settle the number: ``asap7.layermap``
+#: names ``Pad`` only as ``Pad/SPNET|PIN|LEFPIN 95/251`` (its ``Pad/NET`` line
+#: is commented out), which collides with V9's ``95``; ``asap7.lyp`` has no
+#: PAD entry; ``asap7_tech.lef`` gives layer ``Pad`` no stream number. The
+#: deck is not renumbered to 95 for that reason.
+PAD_LAYER = (96, 0)
+
+#: PAD-layer disposition (#3807). The DRM has no rule for PAD itself: the
+#: only PAD rules are ``V9.PAD.EN.2`` and ``V9.AUX.1`` (Table 3.19.1). The
+#: tech LEF's ``Pad`` width, spacing table and 20 % / 80 % density are
+#: router settings outside the DRM (see ``DENSITY_DISPOSITION``) and are not
+#: taken as rules.
+PAD_DISPOSITION = (
+    "the ASAP7 DRM (" + DRM_SOURCE + ") has no rule for the PAD layer itself "
+    "(no width, spacing, area, enclosure-by-V9 or density); the deck reads "
+    "PAD (stream 96/0, DRM mask 96) only as the layer enclosing V9 "
+    "(V9.PAD.EN.2, V9.AUX.1), so shapes on PAD are not checked"
+)
+
+#: Unchecked areas surfaced as ``coverage.unchecked_rules`` by
+#: ``klt drc --engine klayout`` when the packaged deck runs on a layout with
+#: shapes on the layer: ``{id: (layer, datatype, description)}``.
+UNCHECKED_AREAS: dict[str, tuple[int, int, str]] = {
+    "PAD.*": (PAD_LAYER[0], PAD_LAYER[1], PAD_DISPOSITION),
+}
+
 
 @dataclass(frozen=True)
 class Asap7CellDeviation:
