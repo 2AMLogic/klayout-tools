@@ -46,6 +46,8 @@ import math
 from dataclasses import dataclass, field
 from typing import Any
 
+from ._unionfind import UnionFind
+
 #: Cross-net short-candidate threshold (ohms). An injected parasitic
 #: resistor whose two endpoints resolve to *different* original nets at or
 #: below this value is reported as a short candidate. The comparison is
@@ -375,22 +377,12 @@ def _union_find_connectivity(
     tracked (an edge touching an unlisted uid is ignored -- callers pass
     the node set of one net, and edges are pre-filtered to it).
     """
-    parent = {uid: uid for uid in uids}
-
-    def find(uid: int) -> int:
-        root = uid
-        while parent[root] != root:
-            root = parent[root]
-        while parent[uid] != root:
-            parent[uid], uid = root, parent[uid]
-        return root
-
+    known = set(uids)
+    groups = UnionFind(uids)
     for a, b in edges:
-        if a in parent and b in parent:
-            ra, rb = find(a), find(b)
-            if ra != rb:
-                parent[ra] = rb
-    return {uid: find(uid) for uid in uids}
+        if a in known and b in known:
+            groups.union(a, b)
+    return {uid: groups.find(uid) for uid in uids}
 
 
 @dataclass
