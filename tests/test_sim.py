@@ -41,37 +41,9 @@ from klayout_tools import pdk, remote_transport, sim, sim_batch, sim_remote, sim
 from klayout_tools import remote_launcher as rl
 from klayout_tools.cli import main
 
-pytestmark = pytest.mark.usefixtures("real_build_identity_git")
-
-
-@pytest.fixture(autouse=True)
-def _bare_name_ngspice_resolution(monkeypatch):
-    """Issue #2423: ``sim.py`` now resolves the ``ngspice`` binary via
-    :func:`klayout_tools._paths.resolve_tool_binary` (``shutil.which``)
-    *before* dispatching any corner, rather than hardcoding the bare name
-    ``ngspice`` in ``argv[0]`` -- and, since ``ngspice`` is `klt sim`'s
-    *default* engine, that resolution now runs for every mocked-
-    ``subprocess.run`` test in this module too (not just ones that opt into
-    an ``engine: "netgen"``-style non-default engine, as `klt lvs`'s
-    analogous #2373 stub only had to cover). Several tests below are
-    explicitly designed to need "no binary required" (this module's own
-    ``# run_sim with a stubbed ngspice subprocess (no binary required)``
-    section header) -- this autouse fixture keeps that promise true even on
-    a host with no real ``ngspice`` install, by stubbing resolution to
-    return the bare name unchanged (mirrors ``test_equiv.py``'s identically-
-    named fixture, issue #2423). A real ``subprocess.run(["ngspice", ...])``
-    still resolves via the OS's own ``PATH`` search exactly as before this
-    issue, so tests that genuinely need a real ``ngspice`` (already gated on
-    their own ``shutil.which("ngspice")``-based skip) are unaffected.
-    """
-    real_which = shutil.which
-
-    def fake_which(cmd, *args, **kwargs):
-        if cmd == "ngspice":
-            return cmd
-        return real_which(cmd, *args, **kwargs)
-
-    monkeypatch.setattr(paths_module.shutil, "which", fake_which)
+pytestmark = pytest.mark.usefixtures(
+    "real_build_identity_git", "bare_name_ngspice_resolution"
+)
 
 
 #: `KLT_SKIP_NGSPICE_TESTS=1` (local-only, set by `npm run check:ci` -- never
@@ -11789,6 +11761,110 @@ def test_run_sim_osdi_preload_steps_a_host_default_offhost_backend_back_to_local
 
     assert len(report["corners"]) == 3
     assert all(f"pre_osdi {osdi}" in deck for deck in decks)
+
+
+@pytest.mark.parametrize("backend", ["remote", "batch"])
+@pytest.mark.parametrize(
+    "entry", ["$PDK_ROOT/ihp/osdi/psp103.osdi", "${PDK_ROOT}/ihp/osdi/psp103.osdi"]
+)
+def test_run_sim_runner_resolved_osdi_preload_goes_offhost_unchecked(
+    tmp_path, monkeypatch, backend, entry
+):
+    """Issue #3819: an image-baked `.osdi` need not exist on the submitter."""
+    monkeypatch.delenv("PDK_ROOT", raising=False)
+    seen: dict = {}
+
+    def fake_backend(**kwargs):
+        seen.update(kwargs)
+        return [], "46", None
+
+    monkeypatch.setitem(sim._BACKENDS, backend, fake_backend)
+    request = _osdi_request(
+        tmp_path, [entry], corners={"temperature_c": [-40, 27, 125]}
+    )
+
+    report = sim.run_sim(str(request), backend=backend)
+
+    assert seen["request_dir"] == str(tmp_path)
+    environment = report["environment"]
+    assert "osdi_preload" not in environment  # nothing hashed on this host
+    assert environment["osdi_preload_runner_resolved"] == [
+        {"entry": entry, "reason": "env_var"}
+    ]
+
+
+def test_run_sim_osdi_preload_under_models_pdk_root_goes_offhost(tmp_path, monkeypatch):
+    seen: dict = {}
+
+    def fake_backend(**kwargs):
+        seen.update(kwargs)
+        return [], "46", None
+
+    monkeypatch.setitem(sim._BACKENDS, "batch", fake_backend)
+    entry = "/opt/pdk/ihp/osdi/psp103.osdi"
+    request = _osdi_request(
+        tmp_path,
+        [entry],
+        corners={"temperature_c": [-40, 27]},
+        models={"pdk_root": "/opt/pdk"},
+    )
+
+    report = sim.run_sim(str(request), backend="batch")
+
+    assert report["environment"]["osdi_preload_runner_resolved"] == [
+        {"entry": entry, "reason": "pdk_root"}
+    ]
+
+
+def test_run_sim_runner_resolved_osdi_keeps_a_host_default_batch_backend(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv(sim.BACKEND_ENV, "batch")
+    monkeypatch.delenv("PDK_ROOT", raising=False)
+    seen: dict = {}
+
+    def fake_backend(**kwargs):
+        seen.update(kwargs)
+        return [], "46", None
+
+    monkeypatch.setitem(sim._BACKENDS, "batch", fake_backend)
+    request = _osdi_request(
+        tmp_path,
+        ["$PDK_ROOT/ihp/osdi/psp103.osdi"],
+        corners={"temperature_c": [-40, 27, 125]},
+    )
+
+    sim.run_sim(str(request))
+
+    assert seen  # dispatched to batch rather than stepping aside to local
+
+
+def test_run_sim_mixed_osdi_preload_still_refuses_the_host_local_entry(
+    tmp_path, monkeypatch
+):
+    def must_not_dispatch(*args, **kwargs):
+        raise AssertionError("the batch backend must not be reached")
+
+    monkeypatch.setitem(sim._BACKENDS, "batch", must_not_dispatch)
+    _write_osdi(tmp_path)
+    request = _osdi_request(
+        tmp_path,
+        ["$PDK_ROOT/ihp/osdi/a.osdi", "psp103.osdi"],
+        corners={"temperature_c": [-40, 27, 125]},
+    )
+    with pytest.raises(
+        sim.SimError, match="options.osdi_preload is not supported for backend 'batch'"
+    ):
+        sim.run_sim(str(request), backend="batch")
+
+
+def test_run_sim_runner_resolved_osdi_is_still_checked_on_the_local_backend(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("PDK_ROOT", str(tmp_path / "pdkroot"))
+    request = _osdi_request(tmp_path, ["$PDK_ROOT/ihp/osdi/psp103.osdi"])
+    with pytest.raises(sim.SimError, match="osdi_preload file not found"):
+        sim.run_sim(str(request), backend="local")
 
 
 def test_run_sim_osdi_preload_is_refused_for_the_xyce_engine(tmp_path, monkeypatch):

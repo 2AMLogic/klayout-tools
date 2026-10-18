@@ -105,6 +105,7 @@ from . import (
     sim_noise,
     sim_passes,
     sim_portable,
+    sim_snm_meas,
     sim_steps,
     sim_stimulus,
     sim_supply_waveform,
@@ -1434,6 +1435,8 @@ def _resolve_analysis_and_measurements(
     sim_transfer_meas.validate_transfer_context(measurements_spec, analysis)
     # Issue #3160: a tian metric combines the named passes of `analysis.passes`.
     sim_tian.validate_tian_context(measurements_spec, analysis)
+    # Issue #3895: and an snm margin is a DC-sweep quantity.
+    sim_snm_meas.validate_snm_context(measurements_spec, analysis)
     # Issue #2938: a `noise` entry is lowered to an `expr` (plus helper
     # lines) so everything downstream treats it as one.
     sim_noise.validate_noise_context(measurements_spec, analysis)
@@ -2689,6 +2692,7 @@ class _ResolvedSimRequest:
     ngspice_init_lines: Any
     ngspice_options: Any
     osdi_preload: Any
+    osdi_runner_environment: Any
     portable_artifacts: Any
     preflight_warning: Any
     provenance_pdk: Any
@@ -2703,6 +2707,7 @@ class _ResolvedSimRequest:
     stage_model_inputs: Any
     stimulus_lines: Any
     stimulus_signals: Any
+    stimulus_by_corner: Any
     sweep_started: Any
     threads_per_worker: Any
     timeout_s: Any
@@ -2848,7 +2853,14 @@ def _prepare_sim_request(
     # so a typo'd path is always named; `engine: "xyce"` then refuses the
     # option outright in `_enforce_xyce_support_boundary` below rather than
     # silently dropping it.
-    osdi_preload = _resolve_osdi_preload(options, request_dir)
+    # Issue #3819: entries the executing host resolves for itself (a literal
+    # `$PDK_ROOT/<rel>`, or a path under `models.pdk_root`) name an
+    # image-baked `.osdi`; they are existence-checked here only when the run
+    # stays on this host (see below).
+    osdi_runner_resolved = sim_staging.runner_resolved_osdi(request, request_dir)
+    osdi_preload = _resolve_osdi_preload(
+        options, request_dir, skip_indices=frozenset(osdi_runner_resolved)
+    )
     # Issue #2668: opt-in staging of the request's own model inputs for the
     # off-host backends. Validated for every backend (a typo'd value is
     # always named) but only *acts* off-host -- `local`/`local-parallel`
@@ -2863,6 +2875,8 @@ def _prepare_sim_request(
     # instead. Otherwise a host-default off-host backend steps aside to
     # `local`, like every other "this run cannot leave this host" case; an
     # explicit choice is never second-guessed, so it is refused by name.
+    # Runner-resolved entries (issue #3819) need neither staging nor a local
+    # file, so only the host-local ones count here.
     backend = _yield_host_default_backend(
         backend,
         backend_from_host_default,
@@ -2876,8 +2890,13 @@ def _prepare_sim_request(
             "resolved on the off-host instance -- run OSDI-model sweeps with "
             "backend 'local' or 'local-parallel', or set "
             "options.stage_model_inputs: true to upload binaries built for "
-            "the runner's platform and ngspice OSDI ABI"
+            "the runner's platform and ngspice OSDI ABI, or name an "
+            "image-baked `.osdi` as `$PDK_ROOT/<rel>` (or under "
+            "models.pdk_root) so the runner resolves it"
         )
+    osdi_preload, osdi_runner_environment = _finalize_osdi_preload(
+        options, request_dir, backend, osdi_preload, osdi_runner_resolved
+    )
     # Issue #3041: an `engine_version` pin is checked before any corner runs
     # where this process can see the engine (local backends); off-host
     # backends are checked against the report's `engine_version` afterwards.
@@ -3035,7 +3054,7 @@ def _prepare_sim_request(
         corners_spec=corners_spec,
         monte_carlo_declared=monte_carlo_spec is not None,
         fail_fast_probe=fail_fast_probe,
-        osdi_preload_declared=bool(osdi_preload),
+        osdi_preload_declared=bool(osdi_preload or osdi_runner_resolved),
         expr_measurements_declared=bool(_expr_measurements(measurements_spec)),
         save_mode_declared=save_mode_declared,
         save_vectors_declared=save_vectors_declared,
@@ -3052,6 +3071,7 @@ def _prepare_sim_request(
         transfer_declared=bool(
             sim_transfer_meas.transfer_measurements(measurements_spec)
         ),
+        snm_declared=bool(sim_snm_meas.snm_measurements(measurements_spec)),
     )
     monte_carlo_info: dict[str, Any] | None = None
     monte_carlo_stats: dict[str, Any] | None = None
@@ -3127,6 +3147,11 @@ def _prepare_sim_request(
     _validate_supply_override_targets(netlist_path, corner_points)
     # Issue #3035: the same for a `corners.params` name no `.param` declares.
     _validate_param_targets(netlist_path, corner_points)
+    # Issue #3918: a supply-relative `crossings.level` needs its `frac_of`
+    # key in every corner's supply map -- refused here, not mid-sweep.
+    sim_crossings.validate_supply_relative_levels(
+        measurements_spec, [point.supply_v for point in corner_points]
+    )
     # Issue #2482: the same pre-dispatch check for a step's own `alter`
     # overrides (plus a clash with the corner's own supply axis).
     sim_steps.validate_alter_targets(analysis, netlist_path, corner_points)
@@ -3134,10 +3159,21 @@ def _prepare_sim_request(
     # Issue #2977: the declarative timed stimulus, validated and expanded
     # before any corner is dispatched (an off-host worker re-expands it
     # from the forwarded request).
-    stimulus_signals = _resolve_stimulus(
+    stimulus_signals, stimulus_by_corner = _resolve_stimulus(
         request, analysis, engine, netlist_path, corner_points
     )
-    stimulus_lines = sim_stimulus.deck_lines(stimulus_signals)
+    stimulus_lines = (
+        sim_stimulus.corner_deck_lines(
+            {
+                sim_stimulus.supply_key(point.supply_v): stimulus_by_corner[
+                    point.corner_id
+                ]
+                for point in corner_points
+            }
+        )
+        if stimulus_by_corner
+        else sim_stimulus.deck_lines(stimulus_signals)
+    )
 
     # Issue #2522: a `corners.process` bundle may name its own model library
     # per section. Resolved (and existence-checked) per host, from the refs
@@ -3218,6 +3254,7 @@ def _prepare_sim_request(
         ngspice_init_lines=ngspice_init_lines,
         ngspice_options=ngspice_options,
         osdi_preload=osdi_preload,
+        osdi_runner_environment=osdi_runner_environment,
         portable_artifacts=portable_artifacts,
         preflight_warning=preflight_warning,
         provenance_pdk=provenance_pdk,
@@ -3232,6 +3269,7 @@ def _prepare_sim_request(
         stage_model_inputs=stage_model_inputs,
         stimulus_lines=stimulus_lines,
         stimulus_signals=stimulus_signals,
+        stimulus_by_corner=stimulus_by_corner,
         sweep_started=sweep_started,
         threads_per_worker=threads_per_worker,
         timeout_s=timeout_s,
@@ -3310,6 +3348,7 @@ def _run_sim_corners(
     ngspice_init_lines = resolved.ngspice_init_lines
     ngspice_options = resolved.ngspice_options
     osdi_preload = resolved.osdi_preload
+    osdi_runner_environment = resolved.osdi_runner_environment
     portable_artifacts = resolved.portable_artifacts
     preflight_warning = resolved.preflight_warning
     provenance_pdk = resolved.provenance_pdk
@@ -3324,6 +3363,7 @@ def _run_sim_corners(
     stage_model_inputs = resolved.stage_model_inputs
     stimulus_lines = resolved.stimulus_lines
     stimulus_signals = resolved.stimulus_signals
+    stimulus_by_corner = resolved.stimulus_by_corner
     sweep_started = resolved.sweep_started
     threads_per_worker = resolved.threads_per_worker
     timeout_s = resolved.timeout_s
@@ -3580,6 +3620,13 @@ def _run_sim_corners(
             checkpoint=checkpoint,
             probe_abort=probe_abort,
             **local_engine_kwargs,
+            # Issue #3896: a `max_units_per_job` split reroute keeps its shard
+            # map even without --resume (no checkpoint to take it from).
+            **(
+                {"shard_fingerprint": _checkpoint_fingerprint(**fingerprint_inputs)}
+                if backend == "batch"
+                else {}
+            ),
         )
     elif backend in _OFFHOST_BACKENDS:
         # Real fleet dispatch (Epic #375 Phase 1B, #377, wired in here by
@@ -3855,6 +3902,10 @@ def _run_sim_corners(
             repo_root=repo_root,
         )
     )
+    # Additive/optional (issue #3819): `.osdi` entries the executing host
+    # resolved itself -- named, never hashed; the worker's own report is
+    # the source of what actually loaded.
+    environment.update(_osdi_runner_environment_fields(osdi_runner_environment))
     # Additive/optional (issue #2668): `staged_model_inputs`, only present
     # when `options.stage_model_inputs` staged model inputs for an off-host
     # backend -- see `_preflight_staged_model_inputs`.
@@ -3888,7 +3939,9 @@ def _run_sim_corners(
     environment["backend"] = backend_provenance
     # Issue #2977: additive, only when declared; the schedule as applied (skew
     # and transition times resolved, PWL points included) -- see docs/cli/sim.md.
-    environment.update(sim_stimulus.environment_entry(stimulus_signals))
+    environment.update(
+        sim_stimulus.environment_entry(stimulus_signals, stimulus_by_corner)
+    )
     if monte_carlo_info is not None:
         # Additive/optional: only present when the request declares
         # `monte_carlo` -- the seed contract's request-level echo, per
@@ -4509,7 +4562,42 @@ def _needs_models_lib(point: CornerPoint) -> bool:
     return any(lib is None for lib in declared)
 
 
-def _resolve_osdi_preload(options: dict[str, Any], request_dir: str) -> tuple[str, ...]:
+def _finalize_osdi_preload(
+    options: dict[str, Any],
+    request_dir: str,
+    backend: str,
+    osdi_preload: tuple[str, ...],
+    osdi_runner_resolved: dict[int, str],
+) -> tuple[tuple[str, ...], list[dict[str, str]]]:
+    """Settle ``osdi_preload`` once the backend is known (issue #3819).
+
+    Off-host, the runner-resolved entries are reported by name in
+    ``environment.osdi_preload_runner_resolved`` and the already-resolved
+    host-local ones stand. A run that stays on this host reads every entry
+    here, so the full existence check and expansion apply, exactly as before.
+    """
+    if backend not in _OFFHOST_BACKENDS:
+        return _resolve_osdi_preload(options, request_dir), []
+    return osdi_preload, [
+        {"entry": options["osdi_preload"][index], "reason": reason}
+        for index, reason in sorted(osdi_runner_resolved.items())
+    ]
+
+
+def _osdi_runner_environment_fields(
+    osdi_runner_environment: list[dict[str, str]],
+) -> dict[str, Any]:
+    """The ``environment`` fragment for runner-resolved ``.osdi`` entries."""
+    if not osdi_runner_environment:
+        return {}
+    return {"osdi_preload_runner_resolved": osdi_runner_environment}
+
+
+def _resolve_osdi_preload(
+    options: dict[str, Any],
+    request_dir: str,
+    skip_indices: frozenset[int] = frozenset(),
+) -> tuple[str, ...]:
     """Resolve ``options.osdi_preload`` (issue #2513) to absolute paths of
     compiled OSDI shared libraries the generated deck must ``pre_osdi``.
 
@@ -4533,6 +4621,11 @@ def _resolve_osdi_preload(options: dict[str, Any], request_dir: str) -> tuple[st
     :func:`_resolve_models_lib`'s ``model library not found`` -- rather than
     left to surface as a per-corner ngspice error deep inside the run.
 
+    ``skip_indices`` (issue #3819) are entries the executing host resolves
+    itself (see :func:`sim_staging.runner_resolved_osdi`): validated as
+    paths but neither expanded nor existence-checked, and omitted from the
+    result.
+
     Returns ``()`` when the option is absent or an empty list, which leaves
     every generated deck byte-identical to before this issue.
     """
@@ -4550,6 +4643,8 @@ def _resolve_osdi_preload(options: dict[str, Any], request_dir: str) -> tuple[st
             raise SimError(
                 f"request.options.osdi_preload[{index}] must be a non-empty path"
             )
+        if index in skip_indices:
+            continue
         path = _resolve_relative(entry, request_dir)
         if not os.path.isfile(path):
             raise SimError(f"osdi_preload file not found: {path}")
@@ -6964,6 +7059,7 @@ def _refuse_xyce_control_block_measurements(
     cycle_mean_declared: bool,
     energy_declared: bool,
     transfer_declared: bool = False,
+    snm_declared: bool = False,
 ) -> None:
     """The ``engine: "xyce"`` refusals for measurement forms that exist only
     as commands in klt's generated ngspice ``.control`` block (``expr``,
@@ -7018,6 +7114,14 @@ def _refuse_xyce_control_block_measurements(
         raise SimError(
             "measurements[].transfer is not supported for engine 'xyce': the "
             "AC vectors are dumped by ngspice `let`/`write` commands inside a "
+            "`.control` block, and the Xyce deck has none; use engine "
+            "'ngspice'"
+        )
+    if snm_declared:
+        # Issue #3895: same `.control` let/write boundary as `transfer`.
+        raise SimError(
+            "measurements[].snm is not supported for engine 'xyce': the sweep "
+            "vectors are dumped by ngspice `let`/`write` commands inside a "
             "`.control` block, and the Xyce deck has none; use engine "
             "'ngspice'"
         )
@@ -7101,6 +7205,7 @@ def _enforce_xyce_support_boundary(
     cycle_mean_declared: bool = False,
     energy_declared: bool = False,
     transfer_declared: bool = False,
+    snm_declared: bool = False,
 ) -> None:
     """Refuse the ``engine: "xyce"`` combinations the v1 path does not
     implement (issue #2016) -- up front, with the same clean
@@ -7167,6 +7272,7 @@ def _enforce_xyce_support_boundary(
         cycle_mean_declared=cycle_mean_declared,
         energy_declared=energy_declared,
         transfer_declared=transfer_declared,
+        snm_declared=snm_declared,
     )
     for declared, message in (
         # Issue #2732: `save_mode` selects whether klt's generated ngspice
@@ -8061,13 +8167,28 @@ def _resolve_stimulus(
     engine: str,
     netlist_path: str,
     corner_points: list[CornerPoint],
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, list[dict[str, Any]]] | None]:
     """The request's resolved ``stimulus`` signals (issue #2977), every
-    problem raised as a coded :class:`SimError` before any corner runs."""
+    problem raised as a coded :class:`SimError` before any corner runs.
+
+    The second item is ``{corner_id: signals}`` when a level is written
+    supply-relative (issue #3918, resolved against each corner's
+    ``supply_v``), else ``None`` -- the first item is then the one schedule
+    every corner shares."""
+    by_corner: dict[str, list[dict[str, Any]]] | None = None
     try:
-        signals = sim_stimulus.resolve_stimulus(request, analysis)
+        if sim_stimulus.has_supply_relative(request):
+            by_corner = {
+                point.corner_id: sim_stimulus.resolve_stimulus(
+                    request, analysis, point.supply_v
+                )
+                for point in corner_points
+            }
+            signals = next(iter(by_corner.values()), [])
+        else:
+            signals = sim_stimulus.resolve_stimulus(request, analysis)
         if not signals:
-            return []
+            return [], None
         if engine != "ngspice":
             raise sim_stimulus.StimulusError(
                 f"request.stimulus is not supported for engine {engine!r}; "
@@ -8082,7 +8203,7 @@ def _resolve_stimulus(
         )
     except sim_stimulus.StimulusError as exc:
         raise SimError(str(exc), code=exc.code) from exc
-    return signals
+    return signals, by_corner
 
 
 def _stimulus_existing_elements(netlist_path: str) -> set[str]:
@@ -9020,7 +9141,9 @@ def _run_corner(
     # Issue #2868: crossings series are read from this corner's own working
     # directory now, before it is cleaned up below -- so the reduced array is
     # what leaves the corner, on every backend, whatever `keep_artifacts` is.
-    crossings = sim_crossings.extract_corner_crossings(measurements_spec, corner_dir)
+    crossings = sim_crossings.extract_corner_crossings(
+        measurements_spec, corner_dir, point.supply_v
+    )
     # Issue #3033: same for the energy reduction.
     energy = sim_energy.extract_corner_energy(measurements_spec, corner_dir)
     cycle_means = sim_cycle_mean.extract_corner_cycle_means(
@@ -9029,6 +9152,7 @@ def _run_corner(
     transfers = sim_transfer_meas.extract_corner_transfers(
         measurements_spec, corner_dir
     )
+    snms = sim_snm_meas.extract_corner_snms(measurements_spec, corner_dir)
     # Issue #3160: each pass's rawfile is decoded once, shared by the tian
     # reduction below and the corner's `passes` field.
     pass_results = (
@@ -9049,6 +9173,7 @@ def _run_corner(
             energy=energy,
             cycle_means=cycle_means,
             transfers=transfers,
+            snms=snms,
             tians=tians,
             engine_diagnostics=diagnostics,
         )
@@ -9357,6 +9482,7 @@ def _corner_measurement_results(
     energy: dict[int, sim_energy.EnergyOutcome] | None = None,
     cycle_means: dict[int, sim_cycle_mean.CycleMeanOutcome] | None = None,
     transfers: dict[int, sim_transfer_meas.TransferOutcome] | None = None,
+    snms: dict[int, sim_snm_meas.SnmOutcome] | None = None,
     tians: dict[int, sim_tian.TianOutcome] | None = None,
     engine_diagnostics: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
@@ -9411,6 +9537,7 @@ def _corner_measurement_results(
         (sim_cycle_mean.is_cycle_mean, _cycle_mean_measurement_result, cycle_means),
         (sim_transfer_meas.is_transfer, _transfer_measurement_result, transfers),
         (sim_tian.is_tian, _tian_measurement_result, tians),
+        (sim_snm_meas.is_snm, _snm_measurement_result, snms),
     )
     for position, spec in enumerate(measurements_spec):
         sidecar = next(
@@ -9737,6 +9864,63 @@ def _transfer_measurement_result(
         "status": m_status,
         "margin": margin,
         "transfer": outcome.report(spec),
+    }
+    return result, grading_diagnostics
+
+
+def _snm_measurement_result(
+    spec: dict[str, Any],
+    outcome: sim_snm_meas.SnmOutcome | None,
+    *,
+    save_mode: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """One ``snm`` measurement's response entry (issue #3895).
+
+    ``value`` is the butterfly SNM in volts, graded through
+    :func:`_grade_measurement_value` like any scalar; the request echo and the
+    two per-eye sides ride the additive ``snm`` sibling. A failure is
+    ``status: "error"``, ``value: null`` (so it can never pass a limit) with a
+    ``code: "measurement"`` diagnostic whose message starts with a
+    ``[<reason>]`` token from :data:`klayout_tools.sim_snm_meas.ERROR_CODES`."""
+    name = spec["name"]
+    unit = spec.get("unit")
+    if outcome is None or outcome.value is None:
+        message = (
+            outcome.error
+            if outcome is not None and outcome.error is not None
+            else f"measurement '{name}' produced no snm value"
+        )
+        reason = (
+            outcome.code
+            if outcome is not None and outcome.code is not None
+            else "snm_vector_missing"
+        )
+        if save_mode == "netlist" and reason == "snm_vector_missing":
+            message += SAVE_MODE_NETLIST_NO_VALUE_HINT
+        result = {
+            "name": name,
+            "value": None,
+            "unit": unit,
+            "status": "error",
+            "margin": None,
+        }
+        return result, [
+            {
+                "severity": "error",
+                "code": "measurement",
+                "message": f"[{reason}] {message}",
+            }
+        ]
+    m_status, margin, grading_diagnostics = _grade_measurement_value(
+        spec, outcome.value
+    )
+    result = {
+        "name": name,
+        "value": outcome.value,
+        "unit": unit,
+        "status": m_status,
+        "margin": margin,
+        "snm": outcome.report(spec),
     }
     return result, grading_diagnostics
 
@@ -10227,7 +10411,7 @@ def _write_corner_deck(
     lines.extend(_corner_lib_lines(point, models_lib))
     lines.append(f".include {netlist_path}")
     # Issue #2977: the request's declared `stimulus`, expanded to PWL sources.
-    lines.extend(stimulus_lines)
+    lines.extend(sim_stimulus.lines_for_corner(stimulus_lines, point.supply_v))
     # Issue #3338: the two-port's per-port z0 + AC-source cards.
     lines.extend(sim_twoport.deck_lines(analysis))
     lines.append(f".temp {point.temperature_c}")
@@ -10417,6 +10601,11 @@ def _corner_deck_control_lines(
        (:func:`klayout_tools.sim_transfer_meas.control_lines`), after the
        cycle_mean lines; same ``set filetype=ascii`` rule. None of this
        appears without a transfer entry.
+    9. Per unique ``measurements[].snm`` ``x``/``y1``/``y2`` triple (issue
+       #3895), three ``let`` lines and one ``write`` of the vectors
+       (:func:`klayout_tools.sim_snm_meas.control_lines`), after the transfer
+       lines; same ``set filetype=ascii`` rule. None of this appears without
+       an snm entry.
 
     An ``analysis_steps[]`` request (issue #2482) replaces step 3's analysis
     and 4's ``expr`` lines with the ordered step sequence
@@ -10460,6 +10649,7 @@ def _corner_deck_control_lines(
     energy_lines = sim_energy.control_lines(measurements_spec, corner_dir)
     cycle_mean_lines = sim_cycle_mean.control_lines(measurements_spec, corner_dir)
     transfer_lines = sim_transfer_meas.control_lines(measurements_spec, corner_dir)
+    snm_lines = sim_snm_meas.control_lines(measurements_spec, corner_dir)
     complex_vector_lines = sim_complex_vectors.control_lines(
         complex_vectors, corner_dir
     )
@@ -10469,6 +10659,7 @@ def _corner_deck_control_lines(
         or energy_lines
         or cycle_mean_lines
         or transfer_lines
+        or snm_lines
         or complex_vector_lines
     ):
         lines.append("set filetype=ascii")
@@ -10490,6 +10681,7 @@ def _corner_deck_control_lines(
     lines.extend(energy_lines)
     lines.extend(cycle_mean_lines)
     lines.extend(transfer_lines)
+    lines.extend(snm_lines)
     lines.extend(complex_vector_lines)
     lines.append("quit")
     lines.append(".endc")

@@ -1272,6 +1272,13 @@ resolved against the entry's `cwd`.
 
 #### Binding a set of artifacts: `provenance.input.paths`
 
+> **Availability.** `provenance.input.paths` is **not** in `klt 0.7.0`; it
+> first ships in the first release after `v0.7.0`. A build without it ignores
+> `paths`, falls through to the single-`provenance.input.path` rule, and
+> grades a `paths`-only envelope `unanchored_evidence`. That is that build's
+> expected behavior, not a malformed envelope — pin `klt` to a release (or dev
+> build) that has the binding before relying on it.
+
 Item 1's claim is about a *set* — the schematic sources and the netlist
 derived from them — and items 9/10 are about a set of testbench or hygiene
 files. Binding only the derived artifact leaves source edits undetected;
@@ -2589,7 +2596,7 @@ envelope graded all three `met`. Issue #2044 closes that:
 | Item | Partition graded | Accepted kinds | The artifact the doc names |
 |---|---|---|---|
 | **5** — Full corner verification vs a ratified spec | `analog` | `sim` | "PVT corner-matrix simulation results covering every spec row at its bound corners" |
-| **5** | `digital` | `sta`, `functional-verification`, **or** `sim` | Multi-corner STA plus a bit-exact functional regression for the RTL flow (both first-class evidence kinds since #1959); `sim` for the full-custom sub-case, which satisfies item 5 "instead by PVT corner-matrix SPICE simulation" |
+| **5** | `digital` | `sta` **and** `functional-verification`, **or** `sim` alone | Multi-corner STA plus a bit-exact functional regression for the RTL flow (both first-class evidence kinds since #1959); `sim` for the full-custom sub-case, which satisfies item 5 "instead by PVT corner-matrix SPICE simulation" |
 | **6** — Statistical claims carry Monte Carlo evidence | both | `yield` | "A `klt yield` JSON report … is the machine-checkable evidence for this item" (kind-independent — item 6 applies to whichever spec rows are statistical, regardless of block kind) |
 | **8** — Characterization report | both | `generic` | The purpose-built generic evidence envelope (issue #1152): "`klt signoff --manifest` grades it via an opt-in generic evidence envelope" — the doc's substitute for the `klt` verb this item does not have |
 
@@ -2683,6 +2690,18 @@ new. Outcomes:
 - a malformed list, an empty list, malformed `spec_rows`, duplicate row ids,
   or a citation naming an undeclared or `gap` row -> `unmet` /
   `invalid_evidence` for item 5 only.
+
+**Digital item 5 needs both RTL-flow kinds (issue #3741).** The tier text
+reads "multi-corner STA **plus** a bit-exact functional test suite", so on a
+digital partition a passing citation set that includes `sta` or
+`functional-verification` must include both: a set missing one grades `unmet` /
+`partial_coverage` with `detail.missing_kinds` (e.g.
+`["functional-verification"]`). This applies to a single string/dict entry
+too, which is aggregated like a one-member list. A failing member still reports
+its own reason first. A `sim`-only entry (the full-custom digital sub-case) is
+exempt, and analog item 5 is unchanged. `detail.missing_kinds` is additive, so
+there is no `schema_version` bump; note that a digital manifest citing only
+`sta` (or only `functional-verification`) for item 5 now grades `unmet`.
 
 Every list-form item also carries `citations_graded` (per-citation status).
 Without `spec_rows`, several passing citations grade `met` as the union of
@@ -3468,7 +3487,7 @@ actually ran and failed):
 | `"check_errored"`         | no  | The evidence resolved to a `klt` `error` envelope — the underlying command itself failed to run to completion. |
 | `"check_failed"`          | no  | The evidence resolved to a recognised, non-error envelope, but that check's own verdict did not pass (e.g. DRC violations, an LVS mismatch, a failed sim corner). For item 11's compound citation this covers a failing `lvs` part beside an ERC half that proves nothing about power delivery either; a failing `lvs` part beside a *complete, continuous* supply spec renders `"lvs_did_not_pass"` below instead (issue #2495). |
 | `"stale_evidence"`        | no  | The check passed, but its `provenance.input.content_hash` did not match the manifest's pinned `content_hash` — it ran against a different layout revision than the one being claimed. **Item 11 only** (issue #2496): also rendered when the cited `erc` part's own **spec** document — read separately, since the envelope echoes the spec's path but not its declarations — no longer matches that run's own `provenance.spec.content_hash` (issue #2049): the spec was edited after `klt erc` ran, so the declarations item 11 is grading are not the ones the cited run actually checked. **Items 1, 2, 9 and 10, artifact-anchored `generic` citations** (issue #2718): also rendered when the pin matches the envelope but the audited artifact itself no longer re-hashes to that value (`input_verified: false`), meaning the artifact was edited after it was attested. |
-| `"unverifiable_provenance"` | no  | The check passed, and the manifest pins a `content_hash`, but the resolved envelope carries no input hash at all (`null`) — a `functional-verification` envelope (no `provenance` block by design) or an unprovenanced `generic` envelope. Distinct from `"stale_evidence"`: no revision was ever recorded to compare against, so the remedy is to re-produce the evidence with a producer that records provenance, not to re-run the same one again. **Item 11 only** (issue #2496): also rendered when the cited `erc` part's spec document could not be verified at all — the envelope carries no `provenance.spec.content_hash` (it predates issue #2049), or the document could no longer be hashed on this second read. **Items 1, 2, 9 and 10, artifact-anchored `generic` citations** (issue #2718): also rendered when the artifact `provenance.input.path` names cannot be found or read from the grading context (`input_verified: null`), so the binding is only the envelope's own claim. |
+| `"unverifiable_provenance"` | no  | The check passed, and the manifest pins a `content_hash`, but the resolved envelope carries no input hash at all (`null`) — a `functional-verification` envelope (no `provenance` block by design) or an unprovenanced `generic` envelope. Distinct from `"stale_evidence"`: no revision was ever recorded to compare against, so the remedy is to re-produce the evidence with a producer that records provenance, not to re-run the same one again. The item carries `detail.content_hash_pin: "unverifiable"` and a `detail.content_hash_pin_note` naming the envelope kind (issue #3747). **Item 11 only** (issue #2496): also rendered when the cited `erc` part's spec document could not be verified at all — the envelope carries no `provenance.spec.content_hash` (it predates issue #2049), or the document could no longer be hashed on this second read. **Items 1, 2, 9 and 10, artifact-anchored `generic` citations** (issue #2718): also rendered when the artifact `provenance.input.path` names cannot be found or read from the grading context (`input_verified: null`), so the binding is only the envelope's own claim. |
 | `"wrong_kind"`            | yes | The evidence resolved to a recognised, *passing* envelope, but its classified kind is not one this item accepts — item 3 requires `"drc"` and item 4 requires `"lvs"` (issue #1987: a `klt extract` report, which cannot fail, no longer satisfies either), item 5 requires `"sim"` for an analog partition and `"sta"`/`"functional-verification"`/`"sim"` for a digital one, item 6 requires `"yield"`, and item 8 requires `"generic"` (issue #2044 — see "Items 5, 6 and 8 are kind-restricted too" above), item 7 requires `"pex"` for an analog partition and `"pex"` or `"functional-verification"` for a digital one (see "Item 7 is kind-restricted, per block kind" above), items 3-7 and 11 reject a `"generic"` citation (see "Generic evidence (opt-in, non-`klt`-native)" above; items 1, 2, 9 and 10 refuse a bare one as `"unanchored_evidence"` instead), every item other than item 11 rejects an `"erc"`, `"place-and-route"`, `"socket-check"` or `"lef-abstract"` citation (see "Item 11 is compound" above), and **every** item rejects a `"power"` citation. For item 11 this also covers a cited *set* that is missing the `erc` or `lvs` artifact it names. The cited check did not fail on its own terms; it simply does not prove what this item requires. |
 | `"unanchored_evidence"`   | yes | **(issue #2718)** **Items 1, 2, 9 and 10 only.** The evidence resolved to a *passing* `generic` envelope, but it is not bound to an audited artifact. Either the envelope declares no `t1_item` (or a non-integer one), or it names no usable `provenance.input.path`, or the manifest entry pins no `content_hash`. The envelope's `status` is then only its author's word. Add the binding; there is nothing to re-run. A non-integer `t1_item` renders this for item 8 too. See "Items 1, 2, 9, and 10: bind them to an audited artifact" above. |
 | `"stale_artifact"`        | no  | **(issue #2887)** **Items 1 and 2 only.** An artifact-anchored `generic` attestation carries a `provenance.regeneration` claim whose `regenerated_hash` (the hash the attester's own CI got by re-running the generator) differs from the hash the bound artifact re-hashes to. The attested bytes are intact, but they are not what the generator produces: the committed netlist or stream is out of date with its sources, or the generator is nondeterministic. Distinct from `"stale_evidence"`, which means the artifact changed *after* it was attested. `klt signoff` never runs the generator. Regenerate and commit the artifact, then re-attest. See "Items 1 and 2: attesting that the artifact was regenerated" above. |
@@ -4174,6 +4193,16 @@ live hash to compare). It is disclosure only: `status` and `reason` stay
 pin is visible now rather than only after the sample size is raised. The key
 is absent when the entry pins no `content_hash`, on every other refusal, and
 on `met` items.
+
+**An unverifiable pin explains itself (issue #3747).** When the entry pins
+`content_hash` and the resolved envelope carries no input hash at all (a
+`functional-verification` envelope or an unprovenanced `generic` one), the
+`unmet` / `unverifiable_provenance` item carries
+`detail.content_hash_pin: "unverifiable"` plus `detail.content_hash_pin_note`
+(the envelope kind and the missing `provenance.input.content_hash`), so the
+pin itself is visible as the cause. Disclosure only: `status` and `reason` are
+unchanged, and the keys are absent when the entry pins nothing or the pin is
+`stale`.
 
 **Why the third is a disclosure rather than a refusal.** `klt yield` itself
 draws that line: an undeclared control is a run-level warning with "no

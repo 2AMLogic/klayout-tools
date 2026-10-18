@@ -15,7 +15,7 @@
   "properties": {
     "schema_version": {"type": "integer", "const": 1},
     "engine": {"enum": ["klayout", "netgen"], "description": "Echo of the request's engine (default klayout)."},
-    "layout": {"type": "string", "description": "Echo of layout.file or layout.netlist."},
+    "layout": {"$ref": "#/$defs/path_value", "description": "Echo of layout.file or layout.netlist."},
     "label_layers": {
       "type": "object",
       "description": "Present only when a non-empty layout.label_layers override was applied: {role: [layer, datatype] | null}.",
@@ -26,7 +26,7 @@
         ]
       }
     },
-    "reference": {"type": "string", "description": "Echo of reference.netlist."},
+    "reference": {"$ref": "#/$defs/path_value", "description": "Echo of reference.netlist."},
     "top": {"type": "string", "description": "Layout side's resolved top circuit name."},
     "reference_top": {"type": "string", "description": "Reference side's resolved top circuit name."},
     "reference_conversion": {
@@ -91,6 +91,20 @@
   },
   "additionalProperties": true,
   "$defs": {
+    "path_value": {
+      "description": "A path string, or under request.portable_paths (issue #3798) a {path, scope} object (scope 'repo' or 'external'); PDK files become '$PDK_ROOT/...' strings.",
+      "oneOf": [
+        {"type": "string"},
+        {
+          "type": "object",
+          "required": ["path", "scope"],
+          "properties": {
+            "path": {"type": ["string", "null"]},
+            "scope": {"enum": ["repo", "external"]}
+          }
+        }
+      ]
+    },
     "status": {
       "enum": ["match", "mismatch", "inconclusive"],
       "description": "match / mismatch are the engine's verdict; inconclusive means the requested compare could not be performed (combine_devices retry budget exhausted)."
@@ -170,10 +184,10 @@
       "properties": {
         "engine": {"enum": ["klayout", "netgen"]},
         "engine_version": {"type": ["string", "null"]},
-        "netgen_binary": {"type": ["string", "null"], "description": "Resolved netgen executable; null for the klayout engine."},
+        "netgen_binary": {"oneOf": [{"$ref": "#/$defs/path_value"}, {"type": "null"}], "description": "Resolved netgen executable; null for the klayout engine."},
         "layout_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "reference_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "extracted_netlist": {"type": ["string", "null"]}
+        "extracted_netlist": {"oneOf": [{"$ref": "#/$defs/path_value"}, {"type": "null"}]}
       },
       "additionalProperties": true
     },
@@ -219,7 +233,7 @@
             "required": ["library", "path", "cells"],
             "properties": {
               "library": {"type": ["string", "null"]},
-              "path": {"type": "string"},
+              "path": {"$ref": "#/$defs/path_value"},
               "cells": {"type": "integer", "minimum": 0}
             },
             "additionalProperties": true

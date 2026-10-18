@@ -28,7 +28,7 @@ from test_functional_verification import (
     _stub_runner,
     _write_request,
 )
-from test_signoff import _manifest, _write
+from test_signoff import STA_MULTI_CORNER_CLEAN_ENVELOPE, _manifest, _write
 
 _ALL_SKIPPED_XML = (
     '<testsuites><testsuite><testcase name="skipped">'
@@ -48,8 +48,10 @@ def _assert_signoff_verdict(tmp_path, envelope, *, passed):
     annotated = copy.deepcopy(envelope)
     annotated["environment"] = {"sdf": {"annotated": True, "corner": "typ"}}
     sdf_path = _write(tmp_path, "functional-sdf.json", annotated)
+    # Digital item 5 needs STA plus the functional suite (issue #3741).
+    sta_path = _write(tmp_path, "sta.json", STA_MULTI_CORNER_CLEAN_ENVELOPE)
     report = build_tier_report(
-        _manifest(kind="digital", evidence={"5": path, "7": sdf_path})
+        _manifest(kind="digital", evidence={"5": [path, sta_path], "7": sdf_path})
     )
     for item in (item for item in report["items"] if item["id"] in (5, 7)):
         assert item["status"] == ("met" if passed else "unmet")

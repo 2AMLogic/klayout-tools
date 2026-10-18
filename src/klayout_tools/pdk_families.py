@@ -98,6 +98,20 @@ PDK_VARIANT_FAMILY_ALIASES: dict[str, str] = {
 }
 
 
+def pdk_variant_install_names(family: str) -> list[str]:
+    """Install directory names that :data:`PDK_VARIANT_FAMILY_ALIASES` maps to
+    ``family`` (the inverse lookup): ``"sg13g2"`` -> ``["ihp-sg13g2"]``.
+
+    ``[]`` for any name that is not an alias *value* -- ``"sky130"`` is never
+    guessed into ``"sky130A"``.
+    """
+    return [
+        install
+        for install, alias_family in PDK_VARIANT_FAMILY_ALIASES.items()
+        if alias_family == family
+    ]
+
+
 def pdk_variant_family(variant: str) -> str:
     """The PDK-family portion of a resolved ``--pdk`` variant name (e.g.
     ``"sky130A"`` -> ``"sky130"``, ``"gf180mcuC"`` -> ``"gf180mcu"``,

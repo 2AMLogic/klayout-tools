@@ -538,6 +538,12 @@ observations are `null` (never the client's values) and `capture` is `ok`,
 `absent` or `malformed`. See [`docs/cli/sim.md`](cli/sim.md) "Worker-observed
 environment" for the field names and limits.
 
+**No bucket in batch reports (issue #3777).** `environment.remote` (and each
+`fleet[]` member) no longer carries `bucket` on any batch verb. The bucket name
+embeds the fleet's AWS account number and reports are committed as evidence.
+`job_id` and `region` remain; see [`docs/cli/sim.md`](cli/sim.md) "Reports omit
+the bucket".
+
 `klt erc` (issue #1968) is a partial exception on `pdk`: its `--pdk` selects
 a built-in antenna-ratio limit table baked into `erc.py` itself (see
 [`docs/cli/erc.md`](cli/erc.md)'s "Sky130 antenna-ratio limits"), not an
@@ -838,6 +844,11 @@ stability statement, concrete precedents, and drift-detection guidance, and
     Populated by `klt sim` today; the underlying detection lives in
     `klayout_tools.pdk.find_pdk` (`ambiguous_roots`) and is available to
     every verb that resolves a PDK — see `docs/cli/pdk.md`.
+  - `alternative_variants` (issue #3814) — additive field on `klt pdk find`'s
+    payload (not part of `provenance`): sorted names of the other variants in
+    the chosen root when no variant was selected (`--pdk`/`$PDK` unset);
+    `[]` otherwise. Resolution and exit code are unchanged; text mode warns on
+    stderr. See `docs/cli/pdk.md`.
   - `commit` (issue #3786) — present **only** when the install carries a
     `.fetched-commit` record (40-hex upstream commit, written by
     `scripts/fetch-*.sh` from the tarball's pax header); absent otherwise, so
