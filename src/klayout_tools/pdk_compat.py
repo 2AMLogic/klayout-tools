@@ -43,7 +43,9 @@ _MANIFEST_PIN_SOURCE = (
 )
 
 #: File the lambdapdk fetch writes at the archive root, holding the release.
+_FULL_COMMIT = re.compile(r"[0-9a-f]{40}")
 LAMBDAPDK_MARKER = ".fetched-version"
+FETCHED_COMMIT_MARKER = ".fetched-commit"
 
 #: How many directory levels above a variant directory to look for
 #: :data:`LAMBDAPDK_MARKER` (lambdapdk nests ``<root>/lambdapdk/<process>``).
@@ -118,6 +120,28 @@ def read_fetched_marker(variant_dir: str) -> str | None:
             except OSError:
                 return None
             return value or None
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    return None
+
+
+def read_fetched_commit(variant_dir: str) -> str | None:
+    """Return the upstream commit recorded by ``scripts/fetch-*.sh`` in the
+    nearest :data:`FETCHED_COMMIT_MARKER` (same search as
+    :func:`read_fetched_marker`), or ``None`` when absent, unreadable, or not
+    a 40-hex id (issue #3786). Never guessed."""
+    current = os.path.abspath(variant_dir)
+    for _ in range(_MARKER_SEARCH_DEPTH + 1):
+        marker = os.path.join(current, FETCHED_COMMIT_MARKER)
+        if os.path.isfile(marker):
+            try:
+                with open(marker, encoding="utf-8") as handle:
+                    value = handle.read().strip()
+            except (OSError, UnicodeDecodeError):
+                return None
+            return value if _FULL_COMMIT.fullmatch(value) else None
         parent = os.path.dirname(current)
         if parent == current:
             break

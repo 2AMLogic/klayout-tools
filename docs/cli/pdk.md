@@ -180,6 +180,18 @@ and joined with `"; "`. When the file is absent, unreadable, or empty, `version`
 is `null` — **never guessed**. Flat, single-PDK installs (below) ship no
 `SOURCES` file at all, so `version` is always `null` for those today.
 
+### Upstream commit (`commit`)
+
+A tag-tarball install (`scripts/fetch-pdks.sh`, `scripts/fetch-ihp-sg13g2.sh`)
+reports `version: "fetched:<tag>"`, which names a tag, not the commit behind
+it. After the checksum passes, those scripts read the 40-hex commit id from the
+tarball's pax global header (`git archive` writes it) and record it in a
+`.fetched-commit` file beside `.fetched-version`. `klt pdk find` reports it as
+`commit`: a 40-hex string, or `null` when no valid record exists (older
+installs, tarballs without the header, other install kinds) — never guessed.
+`version` is unchanged. The fleet-bundle `.pdk-store.json` is written outside
+this repo (2AMLogic/2am); recording a commit there is out of scope here.
+
 ## PDK layouts: what resolves and what doesn't
 
 Issue #522's own framing — the resolver had only ever been exercised against
@@ -365,6 +377,7 @@ Resolves one install/variant.
   "root": "/usr/share/pdk",
   "variant": "sky130A",
   "version": "open_pdks 0fe599b; sky130 41c0908",
+  "commit": null,
   "resolved_via": "PDK_ROOT environment variable",
   "assets": {
     "ngspice": "/usr/share/pdk/sky130A/libs.tech/ngspice",
@@ -386,6 +399,7 @@ Resolves one install/variant.
 | `root` | string | Absolute install root. |
 | `variant` | string | Resolved variant name. |
 | `version` | string \| null | Version stamp from `SOURCES`, or `null`. |
+| `commit` | string \| null | Additive (issue #3786): 40-hex upstream commit from `.fetched-commit` (written by `scripts/fetch-*.sh`), or `null`. |
 | `resolved_via` | string | Which resolution step matched (see table above). |
 | `assets` | object | Tool area → absolute directory. |
 | `broken_symlinks` | array | Dangling symlinks found under any resolved `assets` directory (issue #1406). `[]` when the install is clean. |
