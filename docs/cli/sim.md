@@ -1407,21 +1407,38 @@ that ran and errored are checkpointed like on `local`.
 Works for `hosts == 1` and `hosts > 1`.
 
 **Sharded resume re-attaches to jobs that already ran** (`hosts > 1`, or a
-`max_units_per_job` split under `--resume`). Each shard's job id is recorded in
-`<artifacts-dir>/batch-shards.json` (schema_version 1: the request
-fingerprint, the shard count, and per shard its `index`, `job_id` and a digest
-of its corner ids) *before* the shard is submitted. A re-run with `--resume`
-and the same `--outdir` re-attaches to every recorded shard through the
-`--attach` path: a `done` job is collected, a live one is polled, and only a
+`max_units_per_job` / `job_ceiling_check: "split"` split). Every sharded run
+-- with or without `--resume` -- records its shards in
+`<artifacts-dir>/batch-shards.json` (schema_version 1) *before* the first
+shard is submitted: the request fingerprint, the shard count, where the jobs
+live (`bucket`, `jobs_prefix`, `region`, `profile`) and per shard its `index`,
+`job_id`, a digest of its corner ids and its client-side lifecycle:
+
+| field | meaning |
+| --- | --- |
+| `state` | `pending` (id minted, not submitted), `submitted`, `launching` (`launch` started, outcome unknown), `launched`, `collected` |
+| `submitted_at`, `launch_started_at`, `launched_at`, `collected_at` | ISO-8601 UTC, `null` until that step is reached |
+
+A client stopped mid-run (terminal timeout, session end) therefore leaves a
+durable record of which jobs were never launched; the end-of-run stderr line
+names the map and how many shards are `submitted` but not launched. A re-run
+with `--resume` and the same `--outdir` re-attaches to every recorded shard
+through the `--attach` path: a `done` job is collected, a live one is polled,
+a shard still in `state: "submitted"` is **launched** first -- but only while
+the fleet has published no `status.json` for it, and never from `launching` or
+`launched` (a possibly-launched job is polled, not launched again) -- and only a
 shard with no usable job (never submitted, outputs gone, or a terminally
 `failed` job) is submitted again under a new id, overwriting its entry. Each
-`environment.remote.fleet[]` entry carries `resumed: true|false`.
+`environment.remote.fleet[]` entry carries `resumed: true|false`. A map
+written before these fields existed carries no `state` and is only ever polled.
 
 The fingerprint is the resume checkpoint's own, so a changed request (units,
 seed, `hosts`, netlist) or an unreadable `batch-shards.json` is refused with
 exit 1 and error code `resume_fingerprint_mismatch` before any S3 write; delete
 the file or drop `--resume`. Without `--resume` an existing map is ignored and
 overwritten. The map is removed when the sweep finishes with no unrun corner.
+`--attach` still takes a single job id; recover a split request with
+`--resume`.
 
 The dispatch-time fail-fast probe is skipped for `batch` —
 probing *this* host's ngspice says nothing about the fleet instance's
