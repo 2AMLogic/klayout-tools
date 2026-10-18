@@ -51,6 +51,15 @@ _PIN_PLACED_RE = re.compile(
 )
 
 
+def _port_bits(name: str, msb: str, lsb: str) -> list[str]:
+    """``name`` itself, or ``name[i]`` for each bit of its ``[msb:lsb]`` range."""
+    if msb == "":
+        return [name]
+    hi, lo = int(msb), int(lsb)
+    step = -1 if hi >= lo else 1
+    return [f"{name}[{i}]" for i in range(hi, lo + step, step)]
+
+
 def netlist_top_ports(netlist_path: str, module_name: str) -> list[str] | None:
     """Port bit names (``a[3]`` for a bus bit) of ``module_name`` in the
     Verilog at ``netlist_path``, or ``None`` when the file or module cannot
@@ -74,14 +83,7 @@ def netlist_top_ports(netlist_path: str, module_name: str) -> list[str] | None:
             break
         for msb, lsb, names in _PORT_DECL_RE.findall(line):
             for name in _PORT_NAME_RE.findall(names):
-                name = name.lstrip("\\")
-                if msb == "":
-                    bits = [name]
-                else:
-                    hi, lo = int(msb), int(lsb)
-                    step = -1 if hi >= lo else 1
-                    bits = [f"{name}[{i}]" for i in range(hi, lo + step, step)]
-                for bit in bits:
+                for bit in _port_bits(name.lstrip("\\"), msb, lsb):
                     if bit not in ports:
                         ports.append(bit)
     return ports if found else None
