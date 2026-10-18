@@ -3113,13 +3113,20 @@ def _compare_pdk_stamps(
         and worker_pdk.get("stamp_scheme")
         and worker_pdk.get("stamp_sha256")
     )
-    if (
-        not worker_ok
-        or client is None
-        or client.get("variant") != worker_pdk.get("variant")
-        or client.get("stamp_scheme") != worker_pdk.get("stamp_scheme")
-    ):
-        return {"status": "not_comparable"}
+    # Issue #3946: say *why* a pair is not comparable (a closed vocabulary,
+    # documented in docs/cli/sim.md) so a reader can tell the submitter's own
+    # configuration from a runner-side gap without opening the raw capture.
+    reason = None
+    if not worker_ok:
+        reason = "worker_stamp_unavailable"
+    elif client is None:
+        reason = "client_stamp_unavailable"
+    elif client.get("variant") != worker_pdk.get("variant"):
+        reason = "variant_differs"
+    elif client.get("stamp_scheme") != worker_pdk.get("stamp_scheme"):
+        reason = "scheme_differs"
+    if reason is not None:
+        return {"status": "not_comparable", "reason": reason}
     if client.get("stamp_sha256") == worker_pdk.get("stamp_sha256"):
         return {"status": "match"}
     return {
@@ -3212,7 +3219,10 @@ def _read_worker_environment(
         "image_manifest": None,
         "model_inputs": None,
         "diagnostics": [],
-        "pdk_stamp_comparison": {"status": "not_comparable"},
+        "pdk_stamp_comparison": {
+            "status": "not_comparable",
+            "reason": "worker_stamp_unavailable",
+        },
     }
     if local_dir is None:
         return unknown

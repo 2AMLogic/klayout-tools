@@ -1826,14 +1826,22 @@ contents), size-capped, serialised with a JSON encoder, errors recorded as
 | `omp_num_threads` | The worker's effective `OMP_NUM_THREADS`, `null` when unset. |
 | `image_manifest` | Allowlisted fields of a worker-local manifest (`$KLT_IMAGE_MANIFEST`, `/etc/klt-image-manifest.json`, `/opt/klt/image-manifest.json`), or `null` when none exists. This is the worker's own file, not the submitter's AMI selection metadata (`ami_id`, `data/remote-sim-ami-manifest.json`); a selected image is not evidence of the model bytes executed. Whether an image pins its PDK revision is reported only if the worker manifest says so (`pdk_pinned`); otherwise unknown. |
 | `diagnostics` | Bounded list of capture problems (missing binary, unreadable stamp, ...). |
-| `pdk_stamp_comparison` | `status` of `match`, `mismatch` (with `warning`) or `not_comparable`. |
+| `pdk_stamp_comparison` | `status` of `match`, `mismatch` (with `warning`) or `not_comparable` (with `reason`: `worker_stamp_unavailable`, `client_stamp_unavailable`, `variant_differs` or `scheme_differs`). |
 | `engine_build_comparison` | Issue #3095. `status` of `match`, `mismatch` (with `warning`) or `not_comparable`: the worker's `simulator.version_banner` against the local `environment.engine_build.version_banner` (whitespace-normalised). `not_comparable` when either side has no banner — never a proven mismatch. A match proves the same banner, not identical build options. |
 
 `pdk_stamp_comparison` compares the worker's stamp with the `SOURCES` stamp the
 submitter resolves locally (`models.pdk_root` or `$PDK_ROOT`) and reports a
 `mismatch` only when both sides give the **same variant under the same stamp
 scheme**; a missing stamp or an unlike scheme is `not_comparable`, never a
-proven mismatch. A matching stamp does not prove model-closure equality
+proven mismatch. The `reason` says which: `client_stamp_unavailable` means the
+submitter has no readable local `SOURCES` (set `models.pdk` and
+`models.pdk_root` / `$PDK_ROOT`); `worker_stamp_unavailable` means the runner
+reported no stamp (older worker or absent capture); `variant_differs` /
+`scheme_differs` mean the two sides name different variants or stamp schemes.
+The text summary prints `pdk_stamp: <status> (<reason>)` (plus the `mismatch`
+warning) and `models_staged: <bool>` for batch runs; set
+`options.stage_model_inputs` to execute the submitter's model files
+(`models_staged: true`). A matching stamp does not prove model-closure equality
 (see #3071), and a matching major version (`engine_version`, the top-level
 simulator version) does not imply the same build: compare `version_banner`
 and `selected_path` for build identity (`engine_build_comparison` does this

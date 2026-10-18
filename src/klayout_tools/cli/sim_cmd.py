@@ -422,6 +422,29 @@ def _print_pdk(report: dict) -> None:
         )
 
 
+def _print_worker_pdk(report: dict) -> None:
+    """Surface the batch runner's PDK stamp comparison in text output (issue
+    #3946). Which library the simulator read used to be JSON-only
+    (`environment.remote.worker_environment`), so a run on a different PDK
+    revision than the one the client resolved read like a run on the client's.
+    No-op for a report without a worker capture (non-batch backends)."""
+    remote = (report.get("environment") or {}).get("remote") or {}
+    worker = remote.get("worker_environment")
+    if not isinstance(worker, dict):
+        return
+    comparison = worker.get("pdk_stamp_comparison")
+    if isinstance(comparison, dict) and comparison.get("status"):
+        line = f"pdk_stamp: {comparison['status']}"
+        if comparison.get("reason"):
+            line += f" ({comparison['reason']})"
+        print(line)
+        if comparison.get("warning"):
+            print(f"warning: {comparison['warning']}")
+    pdk = worker.get("pdk")
+    if isinstance(pdk, dict):
+        print(f"models_staged: {str(pdk.get('models_staged') is True).lower()}")
+
+
 def _print_deck_text(report: dict) -> None:
     """Text courtesy rendering for a deck-list report (issue #2804): one
     line per unit -- id, status, exit code, and where its streams landed --
@@ -486,6 +509,7 @@ def _print_text(report: dict) -> None:
     # the repo prints `<outside repo>`, never an absolute home path.
     print(f"models_lib: {render_path_field(env['models_lib'])}")
     _print_pdk(report)
+    _print_worker_pdk(report)
 
     budget = env.get("budget")
     if budget is not None:

@@ -4747,15 +4747,19 @@ def test_pdk_stamp_mismatch_warns_only_when_comparable(tmp_path, monkeypatch):
     assert comparison({**base, "stamp_sha256": same})["status"] == "match"
     mismatch = comparison({**base, "stamp_sha256": "b" * 64})
     assert mismatch["status"] == "mismatch" and "warning" in mismatch
-    # unlike scheme, other variant, missing stamp: never a proven mismatch
-    for pdk in (
-        {**base, "stamp_scheme": "git-rev", "stamp_sha256": "b" * 64},
-        {**base, "variant": "gf180mcuD", "stamp_sha256": "b" * 64},
-        {**base, "stamp_sha256": None},
-        {"variant": "sky130A"},
+    # unlike scheme, other variant, missing stamp: never a proven mismatch,
+    # and the reason (issue #3946) says which
+    for pdk, reason in (
+        (
+            {**base, "stamp_scheme": "git-rev", "stamp_sha256": "b" * 64},
+            "scheme_differs",
+        ),
+        ({**base, "variant": "gf180mcuD", "stamp_sha256": "b" * 64}, "variant_differs"),
+        ({**base, "stamp_sha256": None}, "worker_stamp_unavailable"),
+        ({"variant": "sky130A"}, "worker_stamp_unavailable"),
     ):
         result = comparison(pdk)
-        assert result == {"status": "not_comparable"}
+        assert result == {"status": "not_comparable", "reason": reason}
 
 
 def test_pdk_stamp_not_comparable_without_a_local_stamp(tmp_path, monkeypatch):
@@ -4767,7 +4771,17 @@ def test_pdk_stamp_not_comparable_without_a_local_stamp(tmp_path, monkeypatch):
         request={"netlist": "body.spice", "models": {"pdk": "sky130A"}},
     )
     assert env["worker_environment"]["pdk_stamp_comparison"] == {
-        "status": "not_comparable"
+        "status": "not_comparable",
+        "reason": "client_stamp_unavailable",
+    }
+
+
+def test_pdk_stamp_absent_capture_reports_worker_reason(tmp_path, monkeypatch):
+    env = _worker_env(tmp_path, monkeypatch, {})
+    assert env["worker_environment"]["capture"] == "absent"
+    assert env["worker_environment"]["pdk_stamp_comparison"] == {
+        "status": "not_comparable",
+        "reason": "worker_stamp_unavailable",
     }
 
 
@@ -7277,3 +7291,46 @@ def test_cli_max_concurrent_jobs_flag_overrides_the_request(tmp_path, monkeypatc
 
     assert seen[0]["batch"]["max_concurrent_jobs"] == 2
     assert seen[0]["batch"]["bucket"] == FAKE_BUCKET
+
+
+def _worker_report(comparison, models_staged=False):
+    return {
+        "environment": {
+            "remote": {
+                "worker_environment": {
+                    "pdk": {"models_staged": models_staged},
+                    "pdk_stamp_comparison": comparison,
+                }
+            }
+        }
+    }
+
+
+def test_text_summary_prints_pdk_stamp_lines(capsys):
+    from klayout_tools.cli.sim_cmd import _print_worker_pdk
+
+    _print_worker_pdk(
+        _worker_report({"status": "not_comparable", "reason": "scheme_differs"})
+    )
+    assert capsys.readouterr().out.splitlines() == [
+        "pdk_stamp: not_comparable (scheme_differs)",
+        "models_staged: false",
+    ]
+    _print_worker_pdk(
+        _worker_report({"status": "mismatch", "warning": "stamps differ"}, True)
+    )
+    assert capsys.readouterr().out.splitlines() == [
+        "pdk_stamp: mismatch",
+        "warning: stamps differ",
+        "models_staged: true",
+    ]
+    _print_worker_pdk(_worker_report({"status": "match"}))
+    assert capsys.readouterr().out.splitlines()[0] == "pdk_stamp: match"
+
+
+def test_text_summary_pdk_stamp_silent_without_worker_capture(capsys):
+    from klayout_tools.cli.sim_cmd import _print_worker_pdk
+
+    _print_worker_pdk({"environment": {"remote": None}})
+    _print_worker_pdk({"environment": {}})
+    assert capsys.readouterr().out == ""
