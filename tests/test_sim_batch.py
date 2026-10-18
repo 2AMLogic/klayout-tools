@@ -325,8 +325,12 @@ def test_job_cmd_tees_stderr_into_outputs(tmp_path):
     # klt's --format json error envelope goes to stderr, so it must reach a
     # collected file -- while still being forwarded to harness.log.
     assert sb.BATCH_STDERR_FILENAME == "stderr.log"
-    assert '2> >(tee "$EDA_OUTPUT_DIR/stderr.log" >&2)' in spec.cmd
-    assert spec.cmd.endswith("; rc=$?; wait $! 2>/dev/null; exit $rc")
+    # Issue #3818: the tee is the job command's first statement, so it also
+    # covers the preflight, and an EXIT trap drains it and fills in report.json.
+    assert spec.cmd.startswith('exec 2> >(tee "$EDA_OUTPUT_DIR/stderr.log" >&2); ')
+    assert "trap _klt_job_exit EXIT" in spec.cmd
+    assert spec.cmd.endswith(' > "$EDA_OUTPUT_DIR/report.json"')
+    assert spec.cmd.count(' > "$EDA_OUTPUT_DIR/report.json"') == 1
 
 
 def test_job_cmd_stderr_capture_runs_under_bash_c(tmp_path):
@@ -334,33 +338,126 @@ def test_job_cmd_stderr_capture_runs_under_bash_c(tmp_path):
     harness does (with a stand-in for `klt`): stdout lands in report.json,
     stderr lands in stderr.log *and* on the outer stderr, and the job's
     exit code is klt's own."""
-    import shutil
-    import subprocess
-
-    bash = shutil.which("bash")
-    if bash is None:
-        pytest.skip("bash not available")
     spec = sb._build_batch_job_spec(
         {"models": {}, "options": {"max_workers": 1}},
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
         keep_artifacts=False,
+        client_version="0.7.0",
     )
-    tail = spec.cmd[spec.cmd.index(' > "$EDA_OUTPUT_DIR/') :]
-    fake_klt = 'printf "{}\\n"; printf "warn\\n{\\n}\\n" >&2; exit 4'
-    out_dir = tmp_path / "out"
-    out_dir.mkdir()
-    proc = subprocess.run(
-        [bash, "-c", "{ " + fake_klt + "; }" + tail],
-        env={"EDA_OUTPUT_DIR": str(out_dir), "PATH": os.environ.get("PATH", "")},
-        capture_output=True,
-        text=True,
+    klt = (
+        "#!/bin/bash\n"
+        'if [ "$1" = "--version" ]; then echo "klt 0.7.0"; exit 0; fi\n'
+        'printf "{}\\n"; printf "warn\\n{\\n}\\n" >&2; exit 4\n'
     )
+    proc, out_dir, _ = _run_job_cmd_with_fake_klt(tmp_path, spec, klt)
     assert proc.returncode == 4
     assert (out_dir / "report.json").read_text() == "{}\n"
     assert (out_dir / "stderr.log").read_text() == "warn\n{\n}\n"
     assert "warn" in proc.stderr
+
+
+def _exit_trap_spec(tmp_path, **request_extra):
+    return sb._build_batch_job_spec(
+        {"models": {}, "options": {"max_workers": 1}, **request_extra},
+        str(_write_body(tmp_path)),
+        corner_count=1,
+        timeout_s=30.0,
+        keep_artifacts=False,
+        client_version="0.7.0",
+    )
+
+
+_FAKE_KLT_HEAD = (
+    '#!/bin/bash\nif [ "$1" = "--version" ]; then echo "klt 0.7.0"; exit 0; fi\n'
+)
+
+
+def test_job_cmd_is_valid_bash_syntax(tmp_path):
+    import shutil
+
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash not available")
+    for keep in (False, True):
+        spec = sb._build_batch_job_spec(
+            {"models": {}},
+            str(_write_body(tmp_path)),
+            corner_count=1,
+            timeout_s=30.0,
+            keep_artifacts=keep,
+            client_version="0.7.0",
+        )
+        proc = subprocess.run(
+            [bash, "-n", "-c", spec.cmd], capture_output=True, text=True
+        )
+        assert proc.returncode == 0, proc.stderr
+
+
+def test_job_cmd_exit_trap_writes_envelope_when_klt_leaves_no_report(tmp_path):
+    """Issue #3818: a job that exits non-zero with an empty report.json and no
+    klt envelope still tells the submitter why, in report.json."""
+    klt = _FAKE_KLT_HEAD + ('echo "Traceback: boom \\"quoted\\" {x}" >&2; exit 2\n')
+    proc, out_dir, _ = _run_job_cmd_with_fake_klt(
+        tmp_path, _exit_trap_spec(tmp_path), klt
+    )
+    assert proc.returncode == 2
+    report = json.loads((out_dir / "report.json").read_text())
+    assert report["schema_version"] == 1
+    assert report["error"]["command"] == "sim"
+    assert report["error"]["code"] == sb.BATCH_JOB_COMMAND_FAILED_CODE
+    assert "exited 2" in report["error"]["message"]
+    assert "Traceback" in report["error"]["message"]
+    assert "Traceback" in (out_dir / "stderr.log").read_text()
+    kind, error = sb._classify_collected_report(report)
+    assert kind == "error" and error["code"] == sb.BATCH_JOB_COMMAND_FAILED_CODE
+
+
+def test_job_cmd_exit_trap_keeps_stderr_log_for_a_pre_klt_sim_failure(tmp_path):
+    """The tee starts on the first line, so stderr from before `klt sim` (here
+    the runner preflight rejecting a mismatched runner) reaches stderr.log, and
+    the preflight's own envelope is not overwritten."""
+    klt = '#!/bin/bash\nif [ "$1" = "--version" ]; then echo "klt 0.8.1"; exit 0; fi\n'
+    proc, out_dir, marker = _run_job_cmd_with_fake_klt(
+        tmp_path, _exit_trap_spec(tmp_path), klt
+    )
+    assert proc.returncode == sb._BATCH_PREFLIGHT_REJECT_EXIT
+    assert not marker.exists()
+    assert "fleet runner runs klt" in (out_dir / "stderr.log").read_text()
+    error = json.loads((out_dir / "report.json").read_text())["error"]
+    assert error["code"] == sb.BATCH_RUNNER_MISMATCH_CODE
+
+
+def test_job_cmd_exit_trap_preserves_existing_report_and_klt_envelope(tmp_path):
+    envelope = '{"schema_version": 1, "error": {"command": "sim", "message": "m"}}'
+    # klt's own envelope on stdout (report.json): kept as is.
+    klt = _FAKE_KLT_HEAD + f"echo '{envelope}'; exit 3\n"
+    proc, out_dir, _ = _run_job_cmd_with_fake_klt(
+        tmp_path, _exit_trap_spec(tmp_path), klt
+    )
+    assert proc.returncode == 3
+    assert (out_dir / "report.json").read_text() == envelope + "\n"
+    # klt's own envelope on stderr (empty report.json): recovery reads it from
+    # stderr.log, so the trap must not mask it.
+    klt = _FAKE_KLT_HEAD + f"echo '{envelope}' >&2; exit 3\n"
+    (tmp_path / "second").mkdir()
+    proc, out_dir, _ = _run_job_cmd_with_fake_klt(
+        tmp_path / "second", _exit_trap_spec(tmp_path), klt
+    )
+    assert proc.returncode == 3
+    assert (out_dir / "report.json").read_text() == ""
+    assert envelope in (out_dir / "stderr.log").read_text()
+
+
+def test_job_cmd_exit_trap_leaves_a_successful_run_unchanged(tmp_path):
+    klt = _FAKE_KLT_HEAD + "echo '{\"corners\": [{}]}'; echo note >&2; exit 0\n"
+    proc, out_dir, _ = _run_job_cmd_with_fake_klt(
+        tmp_path, _exit_trap_spec(tmp_path), klt
+    )
+    assert proc.returncode == 0
+    assert (out_dir / "report.json").read_text() == '{"corners": [{}]}\n'
+    assert (out_dir / "stderr.log").read_text() == "note\n"
 
 
 def test_job_cmd_runs_one_worker_per_physical_core_on_the_job_instance(tmp_path):
@@ -373,7 +470,9 @@ def test_job_cmd_runs_one_worker_per_physical_core_on_the_job_instance(tmp_path)
     )
     assert '${EDA_PHYSICAL_CORES:+--max-workers "$EDA_PHYSICAL_CORES"}' in spec.cmd
     # ...and it lands before the redirect, as a klt argument.
-    assert spec.cmd.index("--max-workers") < spec.cmd.index("> ")
+    assert spec.cmd.index("--max-workers") < spec.cmd.index(
+        ' > "$EDA_OUTPUT_DIR/report.json"'
+    )
 
 
 def test_job_cmd_physical_core_workers_expand_as_intended_in_a_shell(tmp_path):
