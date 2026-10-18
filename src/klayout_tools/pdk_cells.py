@@ -191,6 +191,7 @@ def list_cell_libraries(
                     "nominal_corner": str | None,
                     "supplies_v": [float, ...],
                     "voltage_class": "core" | "io" | None,
+                    "corners": [str, ...],   # shipped liberty corner names
                     # "compatible": bool,   -- present only when supply= is given
                 },
                 ...
@@ -347,10 +348,16 @@ def resolve_liberty_for_cell_library(
         if os.path.isfile(single_underscore_path):
             liberty_path = single_underscore_path
     if not os.path.isfile(liberty_path):
+        shipped = [c["name"] for c in list_lib_corners(cell_library, info)]
+        available = (
+            f"available corners: {', '.join(shipped)}"
+            if shipped
+            else "no liberty corners found in its lib/ directory"
+        )
         raise error_cls(
             f"liberty not found for deck: no '{corner}' corner for "
             f"'{cell_library}' under resolved PDK install '{info['variant']}' "
-            f"(expected '{liberty_path}')"
+            f"({available})"
         )
     return liberty_path, corner, info
 
@@ -369,6 +376,10 @@ def _scan_cell_libraries(libs_ref: str) -> list[dict[str, Any]]:
             continue
         nominal = _nominal_supply(lib_dir)
         flavors, flavors_status = _device_flavors(name, lib_dir)
+        corners = sorted(
+            c["name"]
+            for c in list_lib_corners(name, {"assets": {"libs_ref": libs_ref}})
+        )
         libraries.append(
             {
                 "name": name,
@@ -378,6 +389,7 @@ def _scan_cell_libraries(libs_ref: str) -> list[dict[str, Any]]:
                 "nominal_corner": nominal["corner"],
                 "supplies_v": nominal["supplies_v"],
                 "voltage_class": _voltage_class(nominal["voltage"]),
+                "corners": corners,
             }
         )
     return libraries
@@ -569,7 +581,9 @@ def list_lib_corners(
     - ``name`` -- a unique, Tcl-safe corner tag for OpenSTA's own
       ``define_corners``/``read_liberty -corner`` pair, derived from the
       ``.lib`` file's own **filename** (stripping the leading
-      ``f"{cell_library}__"`` prefix and the ``.lib`` suffix) -- deliberately
+      ``f"{cell_library}__"`` prefix -- or, failing that, IHP's single-underscore
+      ``f"{cell_library}_"`` -- and the ``.lib`` suffix, so the name is the
+      one :func:`resolve_liberty_for_cell_library` accepts) -- deliberately
       **never** the file's own ``default_operating_conditions`` Liberty
       attribute :func:`_parse_lib_corner` reads for ``nominal_corner``: that
       attribute is not guaranteed unique across a library's own shipped
@@ -593,6 +607,7 @@ def list_lib_corners(
         return []
 
     prefix = f"{cell_library}__"
+    single_prefix = f"{cell_library}_"
     corners: list[dict[str, str]] = []
     for filename in sorted(os.listdir(lib_views_dir)):
         if not filename.endswith(".lib"):
@@ -600,7 +615,11 @@ def list_lib_corners(
         stem = filename[: -len(".lib")]
         if stem.endswith(_CCSNOISE_LIB_SUFFIX):
             continue
-        name = stem[len(prefix) :] if stem.startswith(prefix) else stem
+        name = stem
+        for candidate in (prefix, single_prefix):
+            if stem.startswith(candidate):
+                name = stem[len(candidate) :]
+                break
         corners.append({"name": name, "path": os.path.join(lib_views_dir, filename)})
     return corners
 
