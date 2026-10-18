@@ -355,6 +355,7 @@
         "klayout_tools.place_and_route_gds_merge",
         "klayout_tools.place_and_route_min_area",
         "klayout_tools.place_and_route_pdn_fit",
+        "klayout_tools.place_and_route_pins",
         "klayout_tools.place_and_route_portable",
         "klayout_tools.place_and_route_power_audit",
         "klayout_tools.place_and_route_reports",
