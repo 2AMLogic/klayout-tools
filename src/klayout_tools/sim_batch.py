@@ -3943,6 +3943,39 @@ def _poll_status_interruptibly(
         _signal_handlers_restore(prev_handlers)
 
 
+def _ignore_phase(state: str) -> None:
+    """The ``on_phase`` default: no shard map to tell."""
+
+
+def _launch_attached_if_unlaunched(
+    config: BatchConfig,
+    job_id: str,
+    *,
+    runner: remote_transport.CommandRunner | None,
+    now: Callable[[], str],
+    notify: Callable[[str], None],
+) -> str | None:
+    """Launch a re-attached job the shard map says was never launched (issue
+    #3896), but only while the fleet has published no ``status.json`` -- one
+    that exists means a launch already happened, and a second would
+    double-bill. Returns the launch timestamp, or ``None`` when no launch was
+    needed."""
+    run = runner if runner is not None else _run_subprocess
+    if _read_status(config, job_id, run) is not None:
+        notify("launched")
+        return None
+    notify("launching")
+    launch_job(config, job_id, runner=runner)
+    launched_at = now()
+    notify("launched")
+    sys.stderr.write(
+        f"klt sim: batch job {job_id} had been submitted but never "
+        "launched; launched it\n"
+    )
+    sys.stderr.flush()
+    return launched_at
+
+
 def _run_batch_job(
     *,
     config: BatchConfig,
@@ -3999,6 +4032,7 @@ def _run_batch_job(
     ``client_status_terminal_at``, ``client_collected_at``; ``now`` is the
     clock seam). A phase that was not reached is ``None``, never fabricated.
     """
+    notify = on_phase if on_phase is not None else _ignore_phase
     if attach:
         if not job_exists(config, job_id, runner=runner):
             raise BatchError(
@@ -4014,21 +4048,9 @@ def _run_batch_job(
             "client_collected_at": None,
         }
         if launch_if_unlaunched:
-            run = runner if runner is not None else _run_subprocess
-            if _read_status(config, job_id, run) is None:
-                if on_phase is not None:
-                    on_phase("launching")
-                launch_job(config, job_id, runner=runner)
-                attach_timestamps["client_launched_at"] = now()
-                if on_phase is not None:
-                    on_phase("launched")
-                sys.stderr.write(
-                    f"klt sim: batch job {job_id} had been submitted but never "
-                    "launched; launched it\n"
-                )
-                sys.stderr.flush()
-            elif on_phase is not None:
-                on_phase("launched")
+            attach_timestamps["client_launched_at"] = _launch_attached_if_unlaunched(
+                config, job_id, runner=runner, now=now, notify=notify
+            )
         return _poll_and_collect(
             config=config,
             job_id=job_id,
@@ -4060,15 +4082,12 @@ def _run_batch_job(
         "client_collected_at": None,
     }
     submit_job(config, job_id, spec, runner=runner)
-    if on_phase is not None:
-        on_phase("submitted")
+    notify("submitted")
     _report_progress(job_id, "submitted")
-    if on_phase is not None:
-        on_phase("launching")
+    notify("launching")
     launch_job(config, job_id, runner=runner)
     timestamps["client_launched_at"] = now()
-    if on_phase is not None:
-        on_phase("launched")
+    notify("launched")
     # Issue #2978: name the job on stderr the moment it exists, so a caller
     # killed by an outer wall-clock limit knows what it orphaned.
     sys.stderr.write(
@@ -4400,6 +4419,59 @@ def _feature_diagnostic_field(config: BatchConfig) -> dict[str, Any]:
     return {"request_feature_diagnostic": config.feature_diagnostic}
 
 
+def _open_shard_manifest(
+    artifacts_dir: str,
+    shard_fingerprint: str | None,
+    hosts: int,
+    *,
+    resume: bool,
+    config: BatchConfig,
+) -> _ShardManifest | None:
+    """Open the run's shard map, recording where the jobs live (issue #3896);
+    ``None`` when the request has no fingerprint to key it by."""
+    if shard_fingerprint is None:
+        return None
+    return _ShardManifest.open(
+        artifacts_dir,
+        shard_fingerprint,
+        hosts,
+        resume=resume,
+        location={
+            "bucket": getattr(config, "bucket", None),
+            "jobs_prefix": getattr(config, "jobs_prefix", None),
+            "region": getattr(config, "region", None),
+            "profile": getattr(config, "profile", None),
+        },
+    )
+
+
+def _prerecord_shards(
+    manifest: _ShardManifest | None, shard_indexes: dict[str, int]
+) -> None:
+    """Give every shard an entry before the first one is submitted (issue
+    #3896), so a client stopped mid-run leaves a record of the shards it
+    never reached, not only of those it got to."""
+    if manifest is None:
+        return
+    for digest, index in shard_indexes.items():
+        prior = manifest.prior.get(str(index))
+        if prior is None or prior["units_sha256"] != digest:
+            manifest.record(index, new_job_id(), digest)
+
+
+def _warn_unlaunched(manifest: _ShardManifest | None, hosts: int) -> None:
+    """Tell the caller about shards left submitted but never launched, and how
+    to launch them (issue #3896)."""
+    if manifest is None or not manifest.unlaunched():
+        return
+    print(
+        f"klt sim: {manifest.unlaunched()} of {hosts} batch job(s) were "
+        f"submitted but never launched; rerun with --resume and the "
+        f"same outdir to launch them (shard map: {manifest.path})",
+        file=sys.stderr,
+    )
+
+
 def _run_batch_fleet(
     *,
     corner_points: list[CornerPoint],
@@ -4462,21 +4534,8 @@ def _run_batch_fleet(
         config = _resolve_batch_config(
             request, corner_count=len(corner_points), timeout_s=timeout_s
         )
-    manifest = (
-        _ShardManifest.open(
-            artifacts_dir,
-            shard_fingerprint,
-            hosts,
-            resume=resume,
-            location={
-                "bucket": getattr(config, "bucket", None),
-                "jobs_prefix": getattr(config, "jobs_prefix", None),
-                "region": getattr(config, "region", None),
-                "profile": getattr(config, "profile", None),
-            },
-        )
-        if shard_fingerprint is not None
-        else None
+    manifest = _open_shard_manifest(
+        artifacts_dir, shard_fingerprint, hosts, resume=resume, config=config
     )
     shard_indexes = {
         _units_digest(points): index
@@ -4496,14 +4555,7 @@ def _run_batch_fleet(
         backend="batch",
     )
 
-    if manifest is not None:
-        # Issue #3896: every shard has an entry before the first one is
-        # submitted, so a client stopped mid-run leaves a record of the
-        # shards it never reached, not only of those it got to.
-        for digest, index in shard_indexes.items():
-            prior = manifest.prior.get(str(index))
-            if prior is None or prior["units_sha256"] != digest:
-                manifest.record(index, new_job_id(), digest)
+    _prerecord_shards(manifest, shard_indexes)
 
     def _run_shard(
         shard_points: list[CornerPoint],
@@ -4580,13 +4632,7 @@ def _run_batch_fleet(
             measurements_spec=measurements_spec,
         )
     finally:
-        if manifest is not None and manifest.unlaunched():
-            print(
-                f"klt sim: {manifest.unlaunched()} of {hosts} batch job(s) were "
-                f"submitted but never launched; rerun with --resume and the "
-                f"same outdir to launch them (shard map: {manifest.path})",
-                file=sys.stderr,
-            )
+        _warn_unlaunched(manifest, hosts)
 
 
 def _mark_collected(
