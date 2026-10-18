@@ -207,6 +207,42 @@ rediscover a gap by failure.
 | IHP-Open-PDK SG13G2 | open_pdks-layout (nested, `PDK_ROOT` at the clone root) or flat (`PDK_ROOT` at `ihp-sg13g2/` itself) | ✅ (issue #522) | ✅ curated deck (`sg13g2`, issue #905) — a starter subset, see below | ✅ `"klayout"` engine (curated deck, device coverage below) or `"netgen"` engine with a resolved `netgen_setup_file` (issue #522) and a `netgen` binary |
 | IHP-Open-PDK SG13CMOS5L | flat (same shape as SG13G2 above) | ✅ (issue #1399) | ✅ curated deck (`sg13cmos5l`, issue #1408) — a starter subset, see below — or `klt drc --engine klayout` against the PDK's own native `ihp-sg13cmos5l.drc` via `drc_deck_file` (issue #1399) | ✅ `"klayout"` engine (curated deck, device coverage below) or `"netgen"` engine with a resolved `netgen_setup_file` and a `netgen` binary (issue #1399) |
 | lambdapdk (`scripts/fetch-pdks.sh`, any process incl. its own `ihp130`) | `lambdapdk/<process>/{libs,base}` — no `libs.tech`/`libs.ref` marker at all | ❌ never resolved by this module — point tools at `pdks/lambdapdk/...` paths directly | ❌ | ❌ |
+| Any upstream checkout that ships a `klt-pdk.json` (e.g. the public ASAP7 sources) | descriptor-declared (root or nested variant dir) | ✅ (issue #3782) — assets and Liberty exactly as the descriptor maps them | ❌ | ❌ |
+
+### 4. Descriptor-declared tree (`klt-pdk.json`, issue #3782)
+
+A plain upstream checkout that matches no structural layout above can declare
+itself with an optional `klt-pdk.json` at the variant root (the `--pdk-root`
+directory itself, or a named subdirectory of it). When present it wins over
+`libs.tech/` and the ASAP7 shape, and nothing is guessed:
+
+```json
+{
+  "schema_version": 1,
+  "variant": "asap7",
+  "assets": {"libs_ref": "asap7sc7p5t_28", "klayout": null},
+  "liberty": {"asap7sc7p5t_28_R": {"tt": "LIB/asap7sc7p5t_28_R_TT_nldm.lib"}}
+}
+```
+
+- `variant` (optional) names a flat root; defaults to the directory basename.
+  A nested variant is always named by its directory.
+- `assets` maps the same keys as `klt pdk find` (`ngspice`, `xschem`, `klayout`,
+  `magic`, `netgen`, `libs_ref`) to root-relative directories; omitted or `null`
+  keys stay `null` (no DRC/LVS support is implied).
+- `liberty` maps `cell_library` → `corner` → root-relative `.lib`. `klt
+  synthesize` / `place-and-route` / `post-route-sta` consult it before the
+  `lib/<cell_library>__<corner>.lib` convention; unmapped libraries keep the
+  convention. With several mapped corners, pass the corner explicitly.
+- Every path must be relative and stay under the root (`..`/absolute paths are
+  rejected; symlinks the checkout ships are followed). A malformed descriptor,
+  an escaping path, or a mapped `.lib` that does not exist is a
+  `PdkNotFoundError` naming the file and field — never a silent fallthrough.
+
+**Compressed Liberty policy.** `klt` never unpacks archives. Some upstream trees
+ship Liberty only as `.7z`; extract it in the pinned flow (or a fetch script)
+and point the descriptor at the plain `.lib`. When the mapped file is missing but
+a sibling `.7z` exists, the error says so.
 
 See [`../guides/pdk-family-port-checklist.md`](../guides/pdk-family-port-checklist.md)
 for the SG13G2→CMOS5L differences (metal stack, capacitors, devices,
@@ -403,6 +439,7 @@ Resolves one install/variant.
 | `version` | string \| null | Version stamp from `SOURCES`, or `null`. |
 | `commit` | string \| null | Additive (issue #3786): 40-hex upstream commit from `.fetched-commit` (written by `scripts/fetch-*.sh`), or `null`. |
 | `resolved_via` | string | Which resolution step matched (see table above). |
+| `layout` | string | Additive (issue #3782): the tree shape that matched — `open_pdks`, `asap7`, or `descriptor` (a `klt-pdk.json` was present). |
 | `assets` | object | Tool area → absolute directory. |
 | `broken_symlinks` | array | Dangling symlinks found under any resolved `assets` directory (issue #1406). `[]` when the install is clean. |
 | `has_pcell_library` | boolean | The variant ships at least one Python package under `libs.tech/klayout/python/` (issue #1535) — the PDK's own KLayout PCell library. See below. |
