@@ -6127,6 +6127,7 @@ def test_run_sta_evidence_input_verified_from_second_checkout(
     import shutil
 
     from klayout_tools.signoff import build_tier_report
+    from test_signoff import FUNCTIONAL_VERIFICATION_PASS_ENVELOPE
 
     monkeypatch.chdir(tmp_path)
     checkout_a = tmp_path / "a" / "repo"
@@ -6154,9 +6155,19 @@ def test_run_sta_evidence_input_verified_from_second_checkout(
         {k: report[k] for k in ("def_path", "verilog_path", "spef_path")}
     )
 
+    # Digital item 5 needs STA plus the functional suite (issue #3741).
+    fv_path = tmp_path / "fv.json"
+    fv_path.write_text(
+        json.dumps(FUNCTIONAL_VERIFICATION_PASS_ENVELOPE), encoding="utf-8"
+    )
+
     def grade(evidence: Path):
         result = build_tier_report(
-            {"block": "b", "kind": "digital", "evidence": {"5": str(evidence)}}
+            {
+                "block": "b",
+                "kind": "digital",
+                "evidence": {"5": [str(evidence), str(fv_path)]},
+            }
         )
         item = next(item for item in result["items"] if item["id"] == 5)
         return item["citation"]
