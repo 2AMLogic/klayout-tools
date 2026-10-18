@@ -214,11 +214,6 @@
       "complexity": 67
     },
     {
-      "file": "src/klayout_tools/extract.py",
-      "function": "run_extract_klayout_engine",
-      "complexity": 13
-    },
-    {
       "file": "src/klayout_tools/extract_abstract.py",
       "function": "_local_pin_candidate_points",
       "complexity": 16
@@ -852,6 +847,11 @@
       "file": "src/klayout_tools/yield_analysis.py",
       "function": "run_yield",
       "complexity": 11
+    },
+    {
+      "file": "tests/helpers/extract_klayout_oracle.py",
+      "function": "run_extract_klayout_engine",
+      "complexity": 13
     },
     {
       "file": "tests/helpers/magic_oracle.py",
