@@ -45,6 +45,7 @@
     "extract.probes_count": 0,
     "extract.schema_version": 3,
     "extract.single_terminal_nets_count": 23,
+    "extract.split_net_labels_count": 0,
     "extract.unbiased_pmos_body_nets_count": 0,
     "extract.unmodelled_poly_count": 0,
     "extract.unsupported_devices_count": 0,

@@ -617,7 +617,9 @@ def test_synthetic_inverter_extracts_two_devices(tmp_path):
         "diode_pd2nw_11v0",
     ]
     assert report["pdk"] is None
-    assert report["warnings"] == []
+    # Only the issue #3920 split-label warning (fixture's unstrapped `Y` pads).
+    assert len(report["warnings"]) == 1
+    assert "'Y' is drawn on 2 separate nets" in report["warnings"][0]
 
     prov = report["provenance"]
     assert set(prov.keys()) == {
@@ -6415,8 +6417,14 @@ def test_pdk_binding_reports_no_warnings_for_pure_mos_layout(tmp_path):
         output=str(tmp_path / "inv.spice"),
     )
     # The layout draws no `hvi` marker, so the issue #2417 missing-marker
-    # warning is expected; this test is about "parameter dropped" warnings.
-    assert [w for w in report["warnings"] if "no shapes in the layout" not in w] == []
+    # warning is expected, as is the issue #3920 split-label warning for the
+    # fixture's unstrapped `Y` pads; this test is about "parameter dropped"
+    # warnings.
+    assert [
+        w
+        for w in report["warnings"]
+        if "no shapes in the layout" not in w and "separate nets" not in w
+    ] == []
 
 
 def test_pdk_binding_warns_when_bipolar_geometry_params_are_dropped(tmp_path):
@@ -9414,7 +9422,9 @@ def test_unmodelled_poly_field_empty_when_no_warning_fires(tmp_path):
     path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
     report = run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
 
-    assert report["warnings"] == []
+    # Ignore the issue #3920 split-label warning the fixture's unstrapped `Y`
+    # pads raise; no unmodelled-device warning may fire.
+    assert [w for w in report["warnings"] if "separate nets" not in w] == []
     assert report["unmodelled_poly"] == []
 
 

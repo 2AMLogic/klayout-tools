@@ -1093,6 +1093,22 @@ def _evaluate_category_set_assertion(
     }
 
 
+def _unmodeled_rules_for_deck(deck_file: str) -> list[str]:
+    """Official rule ids the deck knowingly does not check (issue #3812).
+
+    The engine runs an arbitrary deck script, so identity is by content: only
+    a file byte-identical to the packaged ASAP7 deck gets that deck's gap
+    list. An edited copy or any other deck gets ``[]``."""
+    from .decks.asap7_rules import DECK_PATH, NOT_IMPLEMENTED
+
+    try:
+        if sha256_file(str(DECK_PATH)) != sha256_file(deck_file):
+            return []
+    except OSError:
+        return []
+    return sorted({gap.id for gap in NOT_IMPLEMENTED})
+
+
 def _packaged_asap7_unchecked_rules(
     deck_file: str, layout: Any
 ) -> list[dict[str, str]]:
@@ -1126,6 +1142,7 @@ def _klayout_engine_coverage(
     rule_categories: list[str],
     coverage_assertion: dict[str, Any] | None,
     unchecked_rules: list[dict[str, str]] | None = None,
+    unmodeled_rules: list[str] | None = None,
 ) -> dict[str, Any]:
     """The klayout engine's ``coverage`` block. Categories are declarations,
     not execution instrumentation, unless the caller's satisfied
@@ -1160,6 +1177,7 @@ def _klayout_engine_coverage(
         "voltage_domain_warnings": [],
         "unchecked_rules": unchecked_rules or [],
         "deck_scope": [],
+        "unmodeled_rules": unmodeled_rules or [],
         **build_check_coverage(checked=checked, unknown=unknown),
     }
 
@@ -1673,6 +1691,7 @@ def run_drc_klayout_engine(
         rule_categories,
         coverage_assertion,
         _packaged_asap7_unchecked_rules(deck_file, layout),
+        _unmodeled_rules_for_deck(deck_file),
     )
     deck_global_warnings = _missing_deck_globals_warning(deck_file, deck_vars)
     rollup = coverage_rollup({"coverage": coverage}, failed=bool(violations))
