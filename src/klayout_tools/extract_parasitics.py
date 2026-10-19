@@ -155,6 +155,15 @@ def parse_parasitic_variants(
 #: are never routed through :func:`spice_safe_net_name`.
 SPICE_HIERARCHY_SEPARATOR = "."
 
+#: Integer revision of the ``--parasitics`` R/C extraction model (issue #2957).
+#: Emitted as ``parasitics.model_revision``. Bump it whenever a change alters
+#: the R or C values extracted from identical input, so a consumer comparing
+#: two klt versions can tell "tool bumped, model unchanged" from "model
+#: changed". ``1`` is the 0.6.0-and-earlier model (series-R squares counted
+#: per merged net); ``2`` is 0.7.0's (squares counted per conductor fragment,
+#: #2392).
+PARASITICS_MODEL_REVISION = 2
+
 #: What :data:`SPICE_HIERARCHY_SEPARATOR` is rewritten to (issue #2145).
 #: ``_`` is an ordinary identifier character in every SPICE dialect and is
 #: the join several other extractors already use; ``/`` was rejected because
@@ -2626,6 +2635,7 @@ def _inject_parasitics(
         terminal_reports: list[dict[str, Any]] = []
         segment_reports: list[dict[str, Any]] = []
         rc_model = "lumped"
+        pin_order: int | None = None
         net_c_count = 0
         if (
             distributed_rc_nets is not None
@@ -2660,6 +2670,7 @@ def _inject_parasitics(
             # docstring) keeps that position's identity intact for free,
             # mirroring the star's own reuse.
             mid_index = len(order) // 2
+            pin_order = mid_index
 
             legs: list[kdb.Net] = [net] * len(order)
             leg_names: list[str] = [entry["net"]] * len(order)
@@ -2972,6 +2983,11 @@ def _inject_parasitics(
                 # resistors, in `order` sequence -- `[]` unless
                 # `rc_model == "distributed"`.
                 "segments": segment_reports,
+                # Additive field (issue #3937): the `order` of the terminal
+                # whose `leg_net` is the net's own name (the subcircuit
+                # pin) -- the ladder's middle node, `len(order) // 2`.
+                # `None` unless `rc_model == "distributed"`.
+                "pin_order": pin_order,
                 "coupled": [
                     {**c, "net": spice_safe_net_name(c["net"])}
                     for c in coupled_by_net.get(entry["net"], [])

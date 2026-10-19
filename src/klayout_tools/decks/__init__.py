@@ -28,7 +28,7 @@ provenance fields:
   :class:`DiodeDevice`, :class:`LayerExpr`, :class:`SizeFilter`,
   :class:`InvalidLabelLayerError`).
 - :mod:`klayout_tools.decks.parasitics` -- the parasitics domain
-  (:class:`LayerRC`, :class:`ParasiticsDeck`,
+  (:class:`LayerRC`, :class:`CutRC`, :class:`ParasiticsDeck`,
   :class:`UnknownExtractionDeckError`, :class:`InvalidDeckOptionError`).
 
 Every public name from those three modules is re-exported below, so
@@ -52,25 +52,35 @@ from .extraction import (
     InvalidLabelLayerError,
     LayerExpr,
     MomCapacitorDevice,
+    MosCapacitorDevice,
     MOSFlavour,
     ResistorDevice,
     ResistorFlavour,
     SizeFilter,
     TerminalRelation,
+    UnmodelledDeviceFamily,
     UnsupportedDeviceMarker,
 )
 from .finfet import FinFETExtractionDeck, FinFETFlavour
 from .parasitics import (
+    HIGH_CORNER,
+    LOW_CORNER,
+    NOMINAL_CORNER,
+    RESISTANCE_CORNERS,
+    CutRC,
     InvalidDeckOptionError,
     LayerRC,
     ParasiticsDeck,
     UnknownExtractionDeckError,
+    describe_cut_resistance_gaps,
 )
 from .rules import (
     CompCoverageSpec,
     DerivedLayer,
     DrcRule,
+    NetSpaceSpec,
     RuleProvenance,
+    TapDistanceSpec,
     UnknownDeckError,
 )
 
@@ -80,35 +90,47 @@ __all__ = [
     "CapacitorFlavour",
     "CapacitorVariant",
     "CompCoverageSpec",
+    "CutRC",
+    "NetSpaceSpec",
     "DerivedLayer",
     "DiodeDevice",
     "DrcRule",
     "ExtractionDeck",
     "FinFETExtractionDeck",
     "FinFETFlavour",
+    "HIGH_CORNER",
     "InvalidDeckOptionError",
     "InvalidLabelLayerError",
     "LayerExpr",
+    "LOW_CORNER",
     "LayerRC",
     "MOSFlavour",
     "MomCapacitorDevice",
+    "NOMINAL_CORNER",
     "ParasiticsDeck",
+    "RESISTANCE_CORNERS",
     "ResistorDevice",
     "ResistorFlavour",
     "RuleProvenance",
     "TerminalRelation",
     "SizeFilter",
+    "TapDistanceSpec",
     "UnknownDeckError",
     "UnknownExtractionDeckError",
+    "UnmodelledDeviceFamily",
+    "MosCapacitorDevice",
     "UnsupportedDeviceMarker",
     "deck_names",
+    "describe_cut_resistance_gaps",
     "deck_source_path",
     "get_deck",
     "get_extraction_deck",
     "get_layer_names",
     "get_nominal_dbu",
     "get_parasitics_deck",
+    "get_unmodeled_device_markers",
     "get_unmodeled_rules",
+    "get_marker_blind_layers",
     "get_unchecked_rules",
     "get_unmodeled_voltage_markers",
     "known_extraction_deck_names",
@@ -153,6 +175,32 @@ def deck_names() -> list[str]:
     return sorted(set(_registry()) | set(_extraction_registry()))
 
 
+def drc_deck_names() -> list[str]:
+    """Every deck name :func:`get_deck` accepts (a curated Python rule table),
+    sorted -- the subset of :func:`deck_names` that ``klt drc --deck`` and
+    ``klt deck rules --deck`` can run (issue #3783). ``asap7`` is absent: its
+    DRC is a KLayout script, not a curated rule table (#2760)."""
+    return sorted(_registry())
+
+
+def deck_provides(name: str) -> list[str]:
+    """The capabilities deck ``name`` supplies in this build (issue #3783):
+    any of ``curated_drc`` (a rule table :func:`get_deck` accepts),
+    ``klayout_drc`` (a shipped KLayout DRC-DSL script) and ``extraction``
+    (:func:`get_extraction_deck`). Derived from the registries, not a
+    parallel table."""
+    from . import asap7_rules
+
+    provides = []
+    if name in _registry():
+        provides.append("curated_drc")
+    if name == "asap7" and asap7_rules.DECK_PATH.is_file():
+        provides.append("klayout_drc")
+    if name in _extraction_registry():
+        provides.append("extraction")
+    return sorted(provides)
+
+
 def _registry() -> dict[str, list[DrcRule]]:
     from . import gf180mcu, sg13cmos5l, sg13g2, sky130
 
@@ -187,6 +235,12 @@ def get_deck(name: str) -> list[DrcRule]:
         return decks[name]
     except KeyError:
         available = ", ".join(sorted(decks))
+        if name in _extraction_registry():
+            raise UnknownDeckError(
+                f"deck '{name}' has no curated DRC rule table "
+                f"(available: {available}); its DRC is a KLayout script: "
+                "use `klt drc --engine klayout --deck-file <deck>.drc`"
+            ) from None
         raise UnknownDeckError(
             f"unknown deck '{name}' (available: {available})"
         ) from None
@@ -260,6 +314,22 @@ def get_unmodeled_voltage_markers(name: str) -> dict[tuple[int, int], str]:
     return _unmodeled_voltage_marker_registry().get(name, {})
 
 
+def get_unmodeled_device_markers(name: str) -> dict[tuple[int, int], str]:
+    """Return the ``(layer, datatype) -> description`` map of
+    device-recognition marker layers ``name``'s deck draws but has no native
+    recognition for (issue #3858) -- e.g. sg13g2's ``Recog.esd`` (99/30).
+
+    ``klt extract`` appends one prose ``warnings[]`` entry per registered
+    marker that carries shapes, so the missing device is not silent. Unlike
+    :func:`get_unmodeled_voltage_markers` the marker need not overlap any
+    extracted geometry. A deck with no such declaration (or an unregistered
+    name) returns an empty map rather than raising.
+    """
+    from . import sg13g2
+
+    return {"sg13g2": sg13g2.UNMODELED_DEVICE_MARKERS}.get(name, {})
+
+
 def get_unmodeled_rules(name: str) -> list[str]:
     """Return the sorted official rule ids ``name``'s deck knowingly does not
     transcribe (issue #3031), surfaced as ``klt drc``'s
@@ -288,9 +358,26 @@ def get_unchecked_rules(name: str) -> dict[str, tuple[tuple[int, int], str]]:
     in the stream, so a ``clean`` verdict is not misread as covering it.
     Decks that declare none (and unregistered names) return an empty map.
     """
-    from . import sg13cmos5l
+    from . import sg13cmos5l, sg13g2
 
-    return {"sg13cmos5l": sg13cmos5l.UNCHECKED_RULES}.get(name, {})
+    return {
+        "sg13cmos5l": sg13cmos5l.UNCHECKED_RULES,
+        "sg13g2": sg13g2.UNCHECKED_RULES,
+    }.get(name, {})
+
+
+def get_marker_blind_layers(name: str) -> list[tuple[int, int]]:
+    """Return the sorted ``(layer, datatype)`` area-marker layers whose
+    rule-switching ``name``'s deck does not model (issue #3815).
+
+    A marker such as sky130's ``areaid.ce`` (81/2) is accepted in a stream but
+    changes no rule's result; ``drc.py`` and ``klt deck rules`` surface the
+    declaration so that is discoverable. Decks that declare none (and
+    unregistered names) return an empty list.
+    """
+    from . import sky130
+
+    return {"sky130": sorted(sky130.MARKER_BLIND_LAYERS)}.get(name, [])
 
 
 def _nominal_dbu_registry() -> dict[str, float]:

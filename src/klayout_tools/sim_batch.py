@@ -56,9 +56,11 @@ collected ``outputs/`` tree.
 
 klt writes its ``--format json`` *error* envelope to **stderr**, not stdout
 (``cli.output.emit_error``), so the same ``cmd`` also tees stderr into
-``$EDA_OUTPUT_DIR/stderr.log`` -- still forwarding it to the harness's
-stderr, so ``harness.log`` is unchanged. A failed job's own error envelope
-is recovered from that file (see :func:`_recover_failed_job_corners`).
+``$EDA_OUTPUT_DIR/stderr.log`` from its first line -- still forwarding it to
+the harness's stderr, so ``harness.log`` is unchanged. A failed job's own
+error envelope is recovered from that file (see
+:func:`_recover_failed_job_corners`); an EXIT trap writes a fallback envelope
+to ``report.json`` when the job died with neither (issue #3818).
 
 Credentials, buckets, and the launch script
 -------------------------------------------
@@ -98,11 +100,18 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
-from . import _provenance, remote_transport, sim_staging, sim_transfer_meas
+from . import (
+    _provenance,
+    remote_transport,
+    sim_snm_meas,
+    sim_staging,
+    sim_transfer_meas,
+    sim_twoport,
+)
 from .remote_launcher import (
     ASSUMED_THREADS_PER_CORNER,
     RemoteLaunchError,
@@ -116,6 +125,7 @@ from .sim_remote import (
     _points_to_push,
     _rewrite_remote_artifact_paths,
     _run_sharded,
+    _shard_corner_points,
     _unrun_corner_report,
 )
 
@@ -167,6 +177,13 @@ BATCH_RUNNER_IDENTITY_FILENAME = "runner_identity.json"
 BATCH_RUNNER_MISMATCH_CODE = "batch_runner_version_mismatch"
 BATCH_RUNNER_UNKNOWN_CODE = "batch_runner_version_unknown"
 BATCH_RUNNER_FEATURE_CODE = "batch_runner_feature_unsupported"
+#: ``error.code`` of the envelope the job command's EXIT trap writes to
+#: ``report.json`` when the command exits non-zero having left neither a
+#: report nor a klt error envelope (issue #3818).
+BATCH_JOB_COMMAND_FAILED_CODE = "batch_job_command_failed"
+#: Top-level report diagnostic under ``runner_version_check: "warn"`` naming
+#: the request features the runner predates (issue #2901).
+BATCH_RUNNER_FEATURE_PREDATED_CODE = "batch_runner_request_feature_predated"
 #: A deck-list (``decks[]``, #2804) request needs a runner ``klt`` that knows
 #: the deck-list contract; the major.minor gate cannot see that (issue #3303).
 BATCH_RUNNER_LACKS_DECKS_CODE = "batch_runner_lacks_decks"
@@ -206,6 +223,8 @@ REQUEST_FEATURE_MIN_RUNNER_VERSION: dict[str, str | None] = {
     "options.ngspice_init": "0.7.0",
     # 8296828c options.osdi_preload (#2534); first in v0.7.0.
     "options.osdi_preload": "0.7.0",
+    # 07440b8f options.stage_model_inputs (#2668); first in v0.7.0.
+    "options.stage_model_inputs": "0.7.0",
     # d4d497ee ordered analysis_steps[] (#2482), 2026-10-09, after v0.7.0:
     # the only route to .meas cards on a noise analysis. Untagged.
     "analysis_steps[].measurements[] (noise analysis .meas cards)": None,
@@ -215,6 +234,10 @@ REQUEST_FEATURE_MIN_RUNNER_VERSION: dict[str, str | None] = {
 #: tail). The envelope is the last thing klt writes; anything earlier is
 #: progress/warning noise that is never parsed or copied into the JSON.
 _BATCH_STDERR_TAIL_BYTES = 64 * 1024
+
+#: Bytes of ``stderr.log`` the job command's EXIT trap quotes into the
+#: ``report.json`` envelope it writes when nothing else did (issue #3818).
+_BATCH_JOB_FAILURE_TAIL_BYTES = 1500
 
 #: ``$EDA_OUTPUT_DIR``-relative directory the job command points `klt sim`'s
 #: ``--outdir`` at when ``options.keep_artifacts`` is set, so per-corner
@@ -303,6 +326,10 @@ BATCH_JOB_CEILING_CODE = "batch_job_ceiling_exceeded"
 #: Machine-readable ``error.code`` of a ``max_units_per_job`` the fleet's
 #: ceiling cannot honor (issue #3446).
 BATCH_MAX_UNITS_CODE = "batch_max_units_per_job_invalid"
+
+#: Machine-readable ``error.code`` of an invalid
+#: ``request.batch.max_concurrent_jobs`` (issue #3914).
+BATCH_MAX_CONCURRENT_CODE = "batch_max_concurrent_jobs_invalid"
 
 #: The ``environment.remote.job_ceiling.basis`` value: the assessment is the
 #: request-derived fully-serial upper bound, never a measured runtime.
@@ -619,7 +646,13 @@ def _runner_gate_release(version: str) -> str | None:
 #: ``0.7.1.devN``). A ``0.7.1.devN`` runner built before the feature landed is
 #: indistinguishable from one built after, so it counts as supporting it.
 #: ``transfer`` (``measurements[].transfer``, #2923/#2924) was merged after
-#: ``v0.7.0`` too, so ``0.7.1`` is likewise its first release segment.
+#: ``v0.7.0`` too, so ``0.7.1`` is likewise its first release segment, as is
+#: ``stimulus`` (the declarative timed stimulus block, #2977), and
+#: ``dual_injection`` (``analysis.passes`` / ``measurements[].tian``,
+#: #3159/#3160/#3161), ``complex_vectors`` (``options.complex_vectors``,
+#: #3337), ``twoport`` (``analysis.kind: "twoport"``, #3338), and
+#: ``twoport_noise`` (``analysis.noise``, #3339), and ``snm``
+#: (``measurements[].snm``, #3895).
 _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
     "analysis_steps": (
         (0, 7, 1),
@@ -631,14 +664,119 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
             sim_transfer_meas.transfer_measurements(request.get("measurements") or [])
         ),
     ),
+    "snm": (
+        (0, 7, 1),
+        lambda request: bool(
+            sim_snm_meas.snm_measurements(request.get("measurements") or [])
+        ),
+    ),
+    "stimulus": (
+        (0, 7, 1),
+        lambda request: request.get("stimulus") is not None,
+    ),
+    "dual_injection": (
+        (0, 7, 1),
+        lambda request: _uses_dual_injection(request),
+    ),
+    "complex_vectors": (
+        (0, 7, 1),
+        lambda request: (
+            (request.get("options") or {}).get("complex_vectors") is not None
+        ),
+    ),
+    "twoport": (
+        (0, 7, 1),
+        lambda request: sim_twoport.is_twoport_request(request.get("analysis")),
+    ),
+    "twoport_noise": (
+        (0, 7, 1),
+        lambda request: sim_twoport.has_noise_request(request.get("analysis")),
+    ),
 }
 
 #: Registry features a runner must be *known* to support (issue #2924): a
 #: runner that predates one, or whose version cannot be read, is refused
 #: whatever ``runner_version_check`` says, because the alternative is a worker
 #: that accepts the request and omits the metric. Every other registry
-#: feature keeps the warn-and-run behaviour of #3249.
-_MANDATORY_RUNNER_FEATURES = frozenset({"transfer"})
+#: feature keeps the warn-and-run behaviour of #3249. ``stimulus`` is
+#: mandatory for the same reason: an older runner would ignore the key and
+#: simulate with the digital control lines undriven, exiting 0 with
+#: plausible-looking numbers (#2977). ``dual_injection`` is mandatory because
+#: an older runner would ignore ``analysis.passes`` and run a single AC pass,
+#: or drop the ``tian`` metrics (#3161). ``complex_vectors`` is mandatory
+#: because an older runner would ignore the option and return no sidecar
+#: (#3337). ``twoport`` is mandatory because an older runner would reject the
+#: unknown analysis kind or, worse, run it as a plain AC with no S-parameters
+#: (#3338). ``twoport_noise`` is mandatory because an older runner would reject
+#: ``analysis.noise`` as an unknown key or omit ``nf_db`` and the stability
+#: factors (#3339).
+_MANDATORY_RUNNER_FEATURES = frozenset(
+    {
+        "transfer",
+        "snm",
+        "stimulus",
+        "dual_injection",
+        "complex_vectors",
+        "twoport",
+        "twoport_noise",
+    }
+)
+
+
+def _uses_dual_injection(request: dict[str, Any]) -> bool:
+    analysis = request.get("analysis")
+    if isinstance(analysis, dict) and analysis.get("passes") is not None:
+        return True
+    return any(
+        isinstance(spec, dict) and spec.get("tian") is not None
+        for spec in request.get("measurements") or []
+    )
+
+
+def _uses_measurement_expr(request: dict[str, Any]) -> bool:
+    return any(
+        isinstance(spec, dict) and spec.get("expr") is not None
+        for spec in request.get("measurements") or []
+    )
+
+
+def _uses_process_section_objects(request: dict[str, Any]) -> bool:
+    bundles = (request.get("corners") or {}).get("process") or []
+    return any(
+        isinstance(section, dict)
+        for bundle in bundles
+        if isinstance(bundle, dict)
+        for section in bundle.get("sections") or []
+    )
+
+
+def _uses_option(name: str) -> Any:
+    return lambda request: bool((request.get("options") or {}).get(name))
+
+
+#: Detectors for the :data:`REQUEST_FEATURE_MIN_RUNNER_VERSION` entries that
+#: name a released version (issue #2901), keyed by the registry key's name
+#: before its `` (`` note. A ``None`` (unreleased) entry has no detector on
+#: purpose: it is never turned into "every runner is too old" -- the feature
+#: it describes is already gated by ``analysis_steps`` above.
+_RELEASED_FEATURE_DETECTORS: dict[str, Any] = {
+    "measurements[].expr": _uses_measurement_expr,
+    "corners.process[].sections[]": _uses_process_section_objects,
+    "options.ngspice_init": _uses_option("ngspice_init"),
+    "options.osdi_preload": _uses_option("osdi_preload"),
+    "options.stage_model_inputs": _uses_option("stage_model_inputs"),
+}
+
+# One registry, not two: the #3232 minimum versions feed the same table the
+# pre-launch, runner-side and post-run checks already read.
+for _key, _version in REQUEST_FEATURE_MIN_RUNNER_VERSION.items():
+    _name = _key.split(" (")[0]
+    if _version is not None:
+        _RUNNER_REQUEST_FEATURES[_name] = (
+            tuple(int(part) for part in _version.split(".")),  # type: ignore[assignment]
+            _RELEASED_FEATURE_DETECTORS[_name],
+        )
+del _key, _version, _name
 
 
 def _release_key(release: str) -> int | None:
@@ -1198,6 +1336,48 @@ def _feature_gate_shell(features: tuple[str, ...], client_version: str) -> str:
     )
 
 
+def _job_stderr_capture_prefix() -> str:
+    """The first line(s) of the batch job command (issue #3818): tee the whole
+    job's stderr into ``$EDA_OUTPUT_DIR/stderr.log`` -- forwarding it too, so
+    ``harness.log`` still sees it -- and install an EXIT trap.
+
+    Teeing from the first line (not only from the ``klt sim`` line) means a
+    failure *before* ``klt sim`` -- the generated preflight, a shell error --
+    leaves ``stderr.log`` behind. The harness runs ``bash -c "$JOB_CMD"``, so
+    process substitution is available.
+
+    The trap closes the shell's stderr so the tee drains (``wait``) before the
+    harness uploads ``outputs/``, then -- only when the command exited
+    non-zero, ``report.json`` is absent/empty and ``stderr.log`` holds no klt
+    error envelope (``"schema_version"``) -- writes one itself, carrying the
+    exit code and a bounded, JSON-safe tail of ``stderr.log``. So the
+    submitter's ``batch_job_failed`` message names the reason without S3
+    listing access. An existing envelope (the preflight's, klt's own) is never
+    overwritten, and the job's exit code is unchanged. Redirects here have no
+    space before ``>`` so the main command's ``> "$EDA_OUTPUT_DIR/report.json"``
+    stays the first such occurrence.
+    """
+    out = '"$EDA_OUTPUT_DIR/{}"'
+    stderr_path = out.format(BATCH_STDERR_FILENAME)
+    report_path = out.format(BATCH_REPORT_FILENAME)
+    body = (
+        "rc=$?; exec 2>&-; wait $tp 2>/dev/null; "
+        f'if [ "$rc" -ne 0 ] && [ ! -s {report_path} ] '
+        f"&& ! grep -q schema_version {stderr_path} 2>/dev/null; then "
+        f"tl=$(tail -c {_BATCH_JOB_FAILURE_TAIL_BYTES} {stderr_path} 2>/dev/null "
+        "| tr -c 'A-Za-z0-9._+:/=,() -' ' ' | tr -s ' '); "
+        'printf \'{"schema_version": 1, "error": {"command": "sim", '
+        f'"code": "{BATCH_JOB_COMMAND_FAILED_CODE}", '
+        '"message": "the job command exited %s before klt sim produced a '
+        "report; stderr tail: %s\"}}\\n' "
+        f'"$rc" "$tl" >{report_path}; fi'
+    )
+    return (
+        f"exec 2> >(tee {stderr_path} >&2); tp=$!; "
+        f"_klt_job_exit() {{ {body}; }}; trap _klt_job_exit EXIT; "
+    )
+
+
 def _build_batch_job_spec(
     remote_request: dict[str, Any],
     netlist_path: str,
@@ -1231,7 +1411,7 @@ def _build_batch_job_spec(
 
     ``inputs`` carries the netlist's resolved ``.include``/``.inc`` closure
     alongside the netlist itself (issue #2485), via the *same*
-    :func:`sim_staging.stage_sim_netlist` call
+    :func:`sim_staging.stage_sim_job` call
     :func:`sim_remote._build_remote_job_description` makes -- every staged
     file lands flat under ``inputs/`` (hence side by side in
     ``$EDA_INPUT_DIR``, the same property :data:`BATCH_NETLIST_FILENAME`
@@ -1257,16 +1437,22 @@ def _build_batch_job_spec(
         reserved_names=(BATCH_REQUEST_FILENAME,),
         backend="batch",
     )
-    command = _runner_preflight_script(
-        client_version if client_version is not None else _provenance._klt_version(),
-        enforce=version_check == "enforce",
-        capture=_worker_capture_command(
-            remote_request, [asset.name for asset in staged.model_assets]
-        ),
-        required_features=tuple(_request_features(remote_request)),
-    ) + (
-        f'klt sim "$EDA_INPUT_DIR/{BATCH_REQUEST_FILENAME}" '
-        "--backend local-parallel --format json"
+    command = (
+        _job_stderr_capture_prefix()
+        + _runner_preflight_script(
+            client_version
+            if client_version is not None
+            else _provenance._klt_version(),
+            enforce=version_check == "enforce",
+            capture=_worker_capture_command(
+                remote_request, [asset.name for asset in staged.model_assets]
+            ),
+            required_features=tuple(_request_features(remote_request)),
+        )
+        + (
+            f'klt sim "$EDA_INPUT_DIR/{BATCH_REQUEST_FILENAME}" '
+            "--backend local-parallel --format json"
+        )
     )
     # One ngspice per PHYSICAL core on the job instance. `local-parallel`'s
     # own default divides os.cpu_count() by _ASSUMED_THREADS_PER_NGSPICE (8),
@@ -1281,17 +1467,10 @@ def _build_batch_job_spec(
         command += ' ${EDA_PHYSICAL_CORES:+--max-workers "$EDA_PHYSICAL_CORES"}'
     if keep_artifacts:
         command += f' --outdir "$EDA_OUTPUT_DIR/{BATCH_ARTIFACTS_DIRNAME}"'
-    # stdout -> report.json (the success channel); stderr is teed into
-    # stderr.log (klt's error envelope lands there) *and* forwarded, so
-    # harness.log still sees it. The harness runs `bash -c "$JOB_CMD"`, so
-    # process substitution is available; `wait $!` lets the tee drain before
-    # the harness uploads outputs/, and `exit $rc` keeps klt's own exit code
-    # (0/3/4/...) as the job's.
-    command += (
-        f' > "$EDA_OUTPUT_DIR/{BATCH_REPORT_FILENAME}"'
-        f' 2> >(tee "$EDA_OUTPUT_DIR/{BATCH_STDERR_FILENAME}" >&2)'
-        "; rc=$?; wait $! 2>/dev/null; exit $rc"
-    )
+    # stdout -> report.json (the success channel); stderr was teed into
+    # stderr.log from the job command's first line (see
+    # _job_stderr_capture_prefix), so it also covers the preflight.
+    command += f' > "$EDA_OUTPUT_DIR/{BATCH_REPORT_FILENAME}"'
     return BatchJobSpec(
         cmd=command,
         tool=_batch_job_tool_label(remote_request),
@@ -1388,8 +1567,14 @@ class BatchConfig:
     #: units of one job; ``None`` -- the default -- leaves the split to
     #: ``job_ceiling_check: "split"`` (or to no split at all).
     max_units_per_job: int | None = None
+    #: ``request.batch.max_concurrent_jobs`` (issue #3914): opt-in bound on
+    #: the shard jobs in flight at once; ``None`` submits every shard at once.
+    max_concurrent_jobs: int | None = None
     #: ``request.batch.interrupted_grace_s`` (issue #2992); ``0`` disables.
     interrupted_grace_s: float = DEFAULT_INTERRUPTED_GRACE_S
+    #: Pre-launch ``warn`` diagnostic for request features the manifest's
+    #: runner predates (issue #2901); reported as a top-level diagnostic.
+    feature_diagnostic: dict[str, Any] | None = None
 
 
 def _read_fleet_config(provision_script: str) -> dict[str, str]:
@@ -1494,31 +1679,52 @@ def _validate_batch_pdk(request: dict[str, Any]) -> None:
 BATCH_MODELS_LIB_HOST_PATH_CODE = "models_lib_host_path"
 
 
-def _host_path_lib_refs(request: dict[str, Any]) -> list[tuple[str, str]]:
-    """Every ``(where, ref)`` model-library ref in ``request`` that is an
-    absolute host path: ``models.lib`` and each ``corners.process[].sections[]``
-    object's ``lib``. A ref that names an environment variable (``$PDK_ROOT/...``)
-    is left alone -- the runner expands it against its own environment -- but a
-    ``~`` is expanded on *this* host, so ``~/...`` is a host path too."""
+def _all_lib_refs(request: dict[str, Any]) -> list[tuple[str, str]]:
+    """Every ``(where, ref)`` string model-library ref in ``request``:
+    ``models.lib`` and each ``corners.process[].sections[]`` object's ``lib``."""
     refs: list[tuple[str, str]] = []
-
-    def check(where: str, ref: Any) -> None:
-        if not isinstance(ref, str) or "$" in ref:
-            return
-        if os.path.isabs(os.path.expanduser(ref)):
-            refs.append((where, ref))
-
     models = request.get("models")
-    if isinstance(models, dict):
-        check("models.lib", models.get("lib"))
+    if isinstance(models, dict) and isinstance(models.get("lib"), str):
+        refs.append(("models.lib", models["lib"]))
     corners = request.get("corners")
     process = corners.get("process") if isinstance(corners, dict) else None
     for i, entry in enumerate(process if isinstance(process, list) else []):
         sections = entry.get("sections") if isinstance(entry, dict) else None
         for j, section in enumerate(sections if isinstance(sections, list) else []):
-            if isinstance(section, dict):
-                check(f"corners.process[{i}].sections[{j}].lib", section.get("lib"))
+            if isinstance(section, dict) and isinstance(section.get("lib"), str):
+                refs.append((f"corners.process[{i}].sections[{j}].lib", section["lib"]))
     return refs
+
+
+def _host_path_lib_refs(request: dict[str, Any]) -> list[tuple[str, str]]:
+    """Every ``(where, ref)`` model-library ref in ``request`` that is an
+    absolute host path. A ref that names an environment variable
+    (``$PDK_ROOT/...``) is left alone -- the runner expands it against its own
+    environment (but see :func:`_unresolved_pdk_var_refs` for ``$PDK``) -- while
+    a ``~`` is expanded on *this* host, so ``~/...`` is a host path too."""
+    return [
+        (where, ref)
+        for where, ref in _all_lib_refs(request)
+        if "$" not in ref and os.path.isabs(os.path.expanduser(ref))
+    ]
+
+
+#: ``$PDK`` / ``${PDK}`` but not ``$PDK_ROOT`` or ``$PDKS``.
+_PDK_VAR_RE = re.compile(r"\$(?:PDK(?![A-Za-z0-9_])|\{PDK\})")
+
+#: ``SimError.code`` for a ``$PDK`` model-library ref the runner cannot expand
+#: (issue #3917).
+BATCH_MODELS_LIB_PDK_VAR_CODE = "models_lib_pdk_unresolved"
+
+
+def _unresolved_pdk_var_refs(request: dict[str, Any]) -> list[tuple[str, str]]:
+    """Model-library refs naming ``$PDK`` / ``${PDK}`` when the request declares
+    no ``models.pdk``: the runner exports ``PDK_ROOT`` always but ``PDK`` only
+    from the declared variant, so the reference would reach ngspice unexpanded."""
+    models = request.get("models")
+    if isinstance(models, dict) and models.get("pdk"):
+        return []
+    return [(w, r) for w, r in _all_lib_refs(request) if _PDK_VAR_RE.search(r)]
 
 
 def _pdk_relative_form(ref: str) -> str | None:
@@ -1536,20 +1742,32 @@ def _pdk_relative_form(ref: str) -> str | None:
 
 def _validate_batch_models_lib(request: dict[str, Any]) -> None:
     """Refuse an absolute host-path model library **before** any S3 write
-    (issue #3296).
+    (issue #3296), and an unexpandable ``$PDK`` ref (issue #3917).
 
     The runner resolves ``models.lib`` on its own box, where this host's
     ``/home/<user>/.volare/...`` does not exist, so the job would pay for an
     instance launch and then fail with ``model library not found``. Not
-    refused: PDK-relative libs, ``$VAR`` forms (the runner expands them), and
-    any request with ``options.stage_model_inputs: true`` (the library ships
-    with the job).
+    refused: PDK-relative libs, ``$VAR`` forms (the runner expands them, except
+    ``$PDK`` with no ``models.pdk``), and any request with
+    ``options.stage_model_inputs: true`` (the library ships with the job).
     """
     from . import sim_staging
     from .sim import SimError
 
     if sim_staging.stage_model_inputs_requested(request):
         return
+    pdk_var_refs = _unresolved_pdk_var_refs(request)
+    if pdk_var_refs:
+        raise SimError(
+            "backend 'batch': the runner does not define $PDK unless the request "
+            "declares models.pdk, so the model library would reach ngspice "
+            "unexpanded ("
+            + "; ".join(f"{where}={ref!r}" for where, ref in pdk_var_refs)
+            + "). Declare models.pdk, or write the variant literally "
+            '(or use {"pdk": "<variant>", "lib": "<path under the variant dir>"}); '
+            "nothing was submitted",
+            code=BATCH_MODELS_LIB_PDK_VAR_CODE,
+        )
     refs = _host_path_lib_refs(request)
     if not refs:
         return
@@ -1661,6 +1879,7 @@ def _resolve_batch_config(
     )
     job_ceiling_check = _resolve_job_ceiling_check(batch_spec)
     max_units_per_job = _resolve_max_units_per_job(batch_spec, job_ceiling_check)
+    max_concurrent_jobs = _resolve_max_concurrent_jobs(batch_spec)
     config = BatchConfig(
         provision_script=provision_script,
         bucket=bucket,
@@ -1696,6 +1915,7 @@ def _resolve_batch_config(
         max_job_seconds_source=max_job_seconds_source,
         job_ceiling_check=job_ceiling_check,
         max_units_per_job=max_units_per_job,
+        max_concurrent_jobs=max_concurrent_jobs,
         interrupted_grace_s=_resolve_interrupted_grace_s(batch_spec),
     )
     # Issue #2851: compare the runner klt the AMI manifest publishes with
@@ -1704,7 +1924,9 @@ def _resolve_batch_config(
     if check_runner:
         assessment = _assess_published_runner(request, config)
         _enforce_published_runner_version(assessment)
-        _enforce_published_runner_features(request, assessment)
+        diagnostic = _enforce_published_runner_features(request, assessment)
+        if diagnostic is not None:
+            config = replace(config, feature_diagnostic=diagnostic)
         # Issue #3251: refuse a PDK variant the published image does not ship.
         _validate_batch_pdk_variant(request, config.region)
     return config
@@ -1802,24 +2024,48 @@ def _enforce_published_runner_version(assessment: dict[str, Any]) -> None:
     print(f"klt sim: warning: {message}; submitting anyway", file=sys.stderr)
 
 
+def _feature_diagnostic(
+    missing: list[str], runner: str, client: str | None, source: str
+) -> dict[str, Any]:
+    """The top-level report diagnostic for request features a runner predates
+    (issue #2901): one entry naming every such feature and the runner
+    version; ``source`` is ``"manifest"`` (known before launch) or
+    ``"runner"`` (read from the job's identity file after the run)."""
+    return {
+        "code": BATCH_RUNNER_FEATURE_PREDATED_CODE,
+        "severity": "warning",
+        "message": (
+            f"the request uses {', '.join(missing)}, which the fleet runner "
+            f"(klt {runner}) predates; the runner may have ignored or "
+            "rejected it"
+        ),
+        "features": list(missing),
+        "runner_klt_version": runner,
+        "client_klt_version": client,
+        "source": source,
+    }
+
+
 def _enforce_published_runner_features(
     request: dict[str, Any], assessment: dict[str, Any]
-) -> None:
+) -> dict[str, Any] | None:
     """Refuse before any S3 write or launch when *every* image the AMI
     manifest publishes predates a request feature (issue #3249). An unknown
     runner version, a legacy entry, or one image that has the feature leaves
-    the decision to the runner-side preflight. ``warn`` only reports."""
+    the decision to the runner-side preflight. ``warn`` reports: it returns
+    the :func:`_feature_diagnostic` the report carries (issue #2901), else
+    ``None``."""
     from .sim import SimError
 
     features = _request_features(request)
     images = assessment["images"]
     if not features or not images:
-        return
+        return None
     gaps = [
         _missing_runner_features(features, image["klt_version"]) for image in images
     ]
     if any(not gap for gap in gaps):  # unknown (None) or complete (empty)
-        return
+        return None
     missing = sorted({name for gap in gaps for name in gap or ()})
     mandatory = bool(_MANDATORY_RUNNER_FEATURES.intersection(missing))
     versions = ", ".join(sorted({str(image["klt_version"]) for image in images}))
@@ -1839,7 +2085,9 @@ def _enforce_published_runner_features(
         )
     if assessment["check"] != "enforce":
         print(f"klt sim: warning: {message}; submitting anyway", file=sys.stderr)
-        return
+        return _feature_diagnostic(
+            missing, versions, assessment["client_klt_version"], "manifest"
+        )
     raise SimError(
         f"backend 'batch' refused before submission: {message} -- the request "
         "was not submitted and no instance was launched (rebuild the runner "
@@ -1909,6 +2157,24 @@ def _resolve_job_ceiling_check(batch_spec: dict[str, Any]) -> str:
             "request.batch.job_ceiling_check must be one of "
             f"{', '.join(repr(m) for m in JOB_CEILING_CHECK_MODES)} "
             f"(got {value!r})"
+        )
+    return value
+
+
+def _resolve_max_concurrent_jobs(batch_spec: dict[str, Any]) -> int | None:
+    """``request.batch.max_concurrent_jobs`` (issue #3914): a positive integer
+    bound on the shard jobs in flight at once, else
+    :class:`~klayout_tools.sim.SimError` before any S3 write."""
+    from .sim import SimError
+
+    value = batch_spec.get("max_concurrent_jobs")
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise SimError(
+            "request.batch.max_concurrent_jobs must be a positive integer "
+            f"(got {value!r})",
+            code=BATCH_MAX_CONCURRENT_CODE,
         )
     return value
 
@@ -2147,16 +2413,32 @@ def _resolve_interrupted_grace_s(batch_spec: dict[str, Any]) -> float:
 # --------------------------------------------------------------------------- #
 
 
+# One slot per concurrent CLI spawn across every shard thread. A hosts=96 run
+# otherwise keeps ~96 ``aws`` processes alive on the submitting host (each poll
+# is a fresh CLI start-up), which saturates a small worker. Held only around the
+# spawn, never around poll sleeps, so threads queue for a slot instead.
+_SPAWN_SLOTS = min(os.cpu_count() or 1, 8)
+_SPAWN_SEMAPHORE = threading.BoundedSemaphore(_SPAWN_SLOTS)
+
+
 def _run_subprocess(
     argv: list[str], timeout_s: float
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout_s)
+    with _SPAWN_SEMAPHORE:
+        return subprocess.run(argv, capture_output=True, text=True, timeout=timeout_s)
 
 
 def job_uri(config: BatchConfig, job_id: str) -> str:
     """``s3://<bucket>/<jobs-prefix>/<job-id>`` -- the one prefix every key
     this module reads or writes lives under."""
     return f"s3://{config.bucket}/{config.jobs_prefix}/{job_id}"
+
+
+def report_job_uri(config: BatchConfig, job_id: str) -> str:
+    """:func:`job_uri` with the bucket elided, for text that lands in a
+    committable report (#3777): the bucket name embeds the fleet's AWS
+    account number, so it must never reach ``--report-out`` evidence."""
+    return job_uri(config, job_id).replace(config.bucket, "<bucket>", 1)
 
 
 def new_job_id() -> str:
@@ -2181,10 +2463,14 @@ def _run_checked(
     label: str,
     *,
     classify: Callable[[str], str | None] | None = None,
+    redact: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run one transport command; any non-zero exit becomes a
     :class:`BatchError`. ``classify``, when given, maps the failed command's
     stderr to the error's machine-readable ``code`` (``None`` = unclassified).
+    ``redact`` (the bucket name) is replaced by ``<bucket>`` in the error
+    message -- after classification, so ``classify`` sees the raw stderr --
+    because the message can reach committed reports (issue #3890).
     """
     try:
         result = runner(argv, timeout_s)
@@ -2194,9 +2480,12 @@ def _run_checked(
         raise BatchError(f"{label} could not be spawned: {exc}") from exc
     if result.returncode != 0:
         detail = (result.stderr or "").strip()
+        code = classify(detail) if classify is not None else None
+        if redact:
+            detail = detail.replace(redact, "<bucket>")
         raise BatchError(
             f"{label} failed (exit {result.returncode}): {detail}",
-            code=classify(detail) if classify is not None else None,
+            code=code,
         )
     return result
 
@@ -2299,6 +2588,7 @@ def submit_job(
                 ),
                 _BATCH_AWS_TIMEOUT_S,
                 f"aws s3 cp ({item.label} input)",
+                redact=config.bucket,
             )
         job_json_path = os.path.join(staging, "job.json")
         with open(job_json_path, "w", encoding="utf-8") as handle:
@@ -2315,6 +2605,7 @@ def submit_job(
             ),
             _BATCH_AWS_TIMEOUT_S,
             "aws s3 cp (job.json)",
+            redact=config.bucket,
         )
 
 
@@ -2389,6 +2680,7 @@ def launch_job(
                 _BATCH_LAUNCH_TIMEOUT_S,
                 "batch-fleet-provision.sh launch",
                 classify=_classify_launch_failure,
+                redact=config.bucket,
             )
             return
         except BatchError as exc:
@@ -2437,6 +2729,15 @@ BATCH_HEARTBEAT_INTERVAL_S = 300.0
 #: ``BatchError.code`` for ``--attach`` to a job id with no ``job.json`` in
 #: the bucket (never submitted, wrong bucket/profile, or already expired).
 BATCH_UNKNOWN_JOB_CODE = "batch_unknown_job"
+
+#: Filename of the shard map a sharded batch run keeps under its artifacts
+#: directory (issue #3300): which job id each shard was submitted as, so a
+#: ``--resume`` re-run re-attaches instead of paying for the shard again.
+BATCH_SHARDS_FILENAME = "batch-shards.json"
+
+#: ``SimError.code`` for ``--resume`` against a shard map that belongs to a
+#: different request (or is unreadable): refused before any S3 write.
+BATCH_SHARD_MANIFEST_CODE = "resume_fingerprint_mismatch"
 
 
 def _heartbeat(job_id: str, state: str | None, elapsed_s: float) -> None:
@@ -2506,7 +2807,7 @@ def _check_interrupted_grace(
         f"{interrupted_s:.0f}s, past batch.interrupted_grace_s="
         f"{config.interrupted_grace_s:g}s, with no re-launch observed; "
         "it may still be recoverable on the fleet (check "
-        f"{job_uri(config, job_id)}/status.json) -- the client does "
+        f"{report_job_uri(config, job_id)}/status.json) -- the client does "
         "not re-launch it itself",
         interrupted_s=interrupted_s,
     )
@@ -2669,6 +2970,7 @@ def collect_outputs(
         ),
         _BATCH_AWS_TIMEOUT_S,
         "aws s3 cp (outputs)",
+        redact=config.bucket,
     )
     return local_dir
 
@@ -2751,7 +3053,6 @@ def _batch_environment(
     return {
         "provider": "aws-batch-fleet",
         "job_id": job_id,
-        "bucket": config.bucket,
         "region": status.get("region") or config.region,
         "instance_id": status.get("instance_id"),
         "instance_type": status.get("instance_type"),
@@ -2812,13 +3113,17 @@ def _compare_pdk_stamps(
         and worker_pdk.get("stamp_scheme")
         and worker_pdk.get("stamp_sha256")
     )
-    if (
-        not worker_ok
-        or client is None
-        or client.get("variant") != worker_pdk.get("variant")
-        or client.get("stamp_scheme") != worker_pdk.get("stamp_scheme")
-    ):
-        return {"status": "not_comparable"}
+    # Issue #3946: say *why* a pair is not comparable (a closed vocabulary,
+    # documented in docs/cli/sim.md) so a reader can tell the submitter's own
+    # configuration from a runner-side gap without opening the raw capture.
+    if not worker_ok:
+        return {"status": "not_comparable", "reason": "worker_stamp_unavailable"}
+    if client is None:
+        return {"status": "not_comparable", "reason": "client_stamp_unavailable"}
+    if client.get("variant") != worker_pdk.get("variant"):
+        return {"status": "not_comparable", "reason": "variant_differs"}
+    if client.get("stamp_scheme") != worker_pdk.get("stamp_scheme"):
+        return {"status": "not_comparable", "reason": "scheme_differs"}
     if client.get("stamp_sha256") == worker_pdk.get("stamp_sha256"):
         return {"status": "match"}
     return {
@@ -2847,6 +3152,50 @@ def _bounded_model_inputs(doc: dict[str, Any]) -> list[dict[str, str | None]] | 
     ]
 
 
+def _compare_engine_builds(
+    worker_simulator: dict[str, Any] | None, client_build: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Compare the worker's ``--version`` banner with the client's local
+    ``environment.engine_build`` banner (issue #3095). ``not_comparable``
+    unless both sides captured one -- never a proven mismatch. Whitespace is
+    normalised; a match proves the same banner, not the same build options."""
+    worker = (worker_simulator or {}).get("version_banner")
+    client = (client_build or {}).get("version_banner")
+    if not isinstance(worker, str) or not isinstance(client, str):
+        return {"status": "not_comparable"}
+    if not worker.strip() or not client.strip():
+        return {"status": "not_comparable"}
+    if " ".join(worker.split()) == " ".join(client.split()):
+        return {"status": "match"}
+    return {
+        "status": "mismatch",
+        "warning": (
+            "the worker's ngspice --version banner differs from the local "
+            "binary's; build options (e.g. FFT linkage) may differ, so "
+            "results derived from them can differ from a local run"
+        ),
+    }
+
+
+def attach_engine_build_comparison(
+    remote_environment: dict[str, Any] | None, client_build: dict[str, Any] | None
+) -> None:
+    """Add ``engine_build_comparison`` to each ``worker_environment`` block of
+    a batch ``environment.remote`` (single job or ``fleet[]``), in place."""
+    if not isinstance(remote_environment, dict):
+        return
+    entries = [remote_environment]
+    fleet = remote_environment.get("fleet")
+    if isinstance(fleet, list):
+        entries = [entry for entry in fleet if isinstance(entry, dict)]
+    for entry in entries:
+        worker_env = entry.get("worker_environment")
+        if isinstance(worker_env, dict):
+            worker_env["engine_build_comparison"] = _compare_engine_builds(
+                worker_env.get("simulator"), client_build
+            )
+
+
 def _read_worker_environment(
     local_dir: str | None, request: dict[str, Any] | None = None
 ) -> dict[str, Any]:
@@ -2867,7 +3216,10 @@ def _read_worker_environment(
         "image_manifest": None,
         "model_inputs": None,
         "diagnostics": [],
-        "pdk_stamp_comparison": {"status": "not_comparable"},
+        "pdk_stamp_comparison": {
+            "status": "not_comparable",
+            "reason": "worker_stamp_unavailable",
+        },
     }
     if local_dir is None:
         return unknown
@@ -3008,6 +3360,10 @@ def _read_runner_identity(
                 else "supported"
             ),
         }
+        if missing:
+            fields["request_feature_diagnostic"] = _feature_diagnostic(
+                missing, str(runner), client, "runner"
+            )
         if missing and warning is None:
             warning = (
                 f"the fleet runner ran klt {runner}, which predates the request "
@@ -3077,25 +3433,36 @@ def _read_log_head(path: str) -> str:
         return ""
 
 
-def _missing_include_diagnostic(log_text: str) -> dict[str, Any] | None:
-    """The ``missing_include`` diagnostic the local classifier would emit for
-    ``log_text`` (naming the file ngspice could not find), or ``None``."""
-    from .sim import _classify_diagnostics
+def _fatal_log_diagnostic(log_text: str) -> dict[str, Any] | None:
+    """The ngspice deck-abort diagnostic (``missing_include``, ``netlist``,
+    ``model_bin_range`` or ``ngspice_fatal``) the local classifier would emit
+    for ``log_text``, tagged ``analysis_started: false`` when the log shows no
+    analysis began (issue #3879), or ``None``."""
+    from .sim import (
+        _NGSPICE_FATAL_CODES,
+        _classify_diagnostics,
+        _mark_analysis_not_started,
+    )
 
     for diagnostic in _classify_diagnostics(log_text):
-        if diagnostic.get("code") == "missing_include":
+        if diagnostic.get("code") in _NGSPICE_FATAL_CODES:
+            _mark_analysis_not_started([diagnostic], log_text)
             return diagnostic
     return None
 
 
-def _surface_missing_include(corners: list[dict[str, Any]], collected: str) -> None:
-    """Add a ``missing_include`` diagnostic to every errored corner whose
-    retrieved engine log shows ngspice failing on a ``.include`` but whose
-    report (written by the runner's own, possibly older, ``klt``) carries no
-    such code -- otherwise the caller sees only ``measurement ... produced no
-    value``. Corners are matched to logs through ``artifacts.log``
-    (``<$EDA_OUTPUT_DIR>/artifacts/<rel>``); with exactly one log in the tree
-    it applies to every such corner. A no-op when no log was collected."""
+def _surface_log_fatal(corners: list[dict[str, Any]], collected: str) -> None:
+    """Add the ngspice deck-abort diagnostic (``missing_include``,
+    ``netlist``, ``model_bin_range``, ``ngspice_fatal``) to every errored
+    corner whose retrieved engine log shows ngspice failing while reading the
+    deck but whose report (written by the runner's own, possibly older,
+    ``klt``) carries no such code -- otherwise the caller sees only
+    ``measurement ... produced no value``. Corners are matched to logs through
+    ``artifacts.log`` (``<$EDA_OUTPUT_DIR>/artifacts/<rel>``); with exactly one
+    log in the tree it applies to every such corner. A no-op when no log was
+    collected."""
+    from .sim import _NGSPICE_FATAL_CODES
+
     logs = _find_engine_logs(collected)
     if not logs:
         return
@@ -3104,7 +3471,7 @@ def _surface_missing_include(corners: list[dict[str, Any]], collected: str) -> N
         if corner.get("status") != "error":
             continue
         diagnostics = corner.setdefault("diagnostics", [])
-        if any(d.get("code") == "missing_include" for d in diagnostics):
+        if any(d.get("code") in _NGSPICE_FATAL_CODES for d in diagnostics):
             continue
         log_path = None
         remote = (corner.get("artifacts") or {}).get("log")
@@ -3120,7 +3487,7 @@ def _surface_missing_include(corners: list[dict[str, Any]], collected: str) -> N
             log_path = logs[0]
         if log_path is None:
             continue
-        found = _missing_include_diagnostic(_read_log_head(log_path))
+        found = _fatal_log_diagnostic(_read_log_head(log_path))
         if found is not None:
             diagnostics.append(found)
 
@@ -3141,9 +3508,7 @@ def _engine_log_note(collected: str) -> tuple[str, dict[str, Any] | None]:
     lines = [line.rstrip() for line in text.splitlines() if line.strip()]
     tail = "\n".join(lines[-_BATCH_ENGINE_LOG_TAIL_LINES:])
     tail = tail[-_BATCH_ENGINE_LOG_TAIL_CHARS:]
-    return f"{os.path.basename(logs[0])} tail: {tail}", _missing_include_diagnostic(
-        text
-    )
+    return f"{os.path.basename(logs[0])} tail: {tail}", _fatal_log_diagnostic(text)
 
 
 def _job_failure_corners(
@@ -3447,6 +3812,185 @@ def _write_batch_receipt(path: str, receipt: dict[str, Any]) -> None:
             pass
 
 
+class _ShardManifest:
+    """The persisted shard-to-job-id map of a sharded batch run (issues #3300,
+    #3896).
+
+    ``<artifacts_dir>/batch-shards.json`` holds the request fingerprint (the
+    resume checkpoint's own, :func:`sim._checkpoint_fingerprint`), the shard
+    count, where the jobs live (``bucket``/``jobs_prefix``/``region``/
+    ``profile``, like ``batch-receipt.json``), and one entry per shard: its
+    index, the job id it was submitted as, a digest of the corner ids it
+    carries, and its client-side lifecycle -- ``state`` is ``pending`` (id
+    minted, not yet submitted), ``submitted``, ``launching`` (``launch_job``
+    started, outcome unknown), ``launched`` or ``collected``, with the
+    matching ``submitted_at`` / ``launch_started_at`` / ``launched_at`` /
+    ``collected_at`` (``null`` until reached). An entry is written *before*
+    the shard's ``submit_job``, so a client killed between minting the id and
+    submitting still leaves a mapping (the re-attach then finds no
+    ``job.json`` and falls back to a fresh submit). Writes are atomic
+    (temp + rename) and serialized: shard threads record concurrently.
+    """
+
+    def __init__(
+        self,
+        path: str,
+        fingerprint: str,
+        hosts: int,
+        prior: dict[str, dict[str, Any]] | None = None,
+        location: dict[str, Any] | None = None,
+    ) -> None:
+        self._path = path
+        self._fingerprint = fingerprint
+        self._hosts = hosts
+        self._location = location or {}
+        self._lock = threading.Lock()
+        self.prior: dict[str, dict[str, Any]] = prior or {}
+        self._entries: dict[str, dict[str, Any]] = {}
+
+    @classmethod
+    def open(
+        cls,
+        artifacts_dir: str,
+        fingerprint: str,
+        hosts: int,
+        *,
+        resume: bool,
+        location: dict[str, Any] | None = None,
+    ) -> _ShardManifest:
+        """Open the manifest for this run. Without ``resume`` any existing
+        file is ignored (and overwritten by the first write). With ``resume``
+        a missing file means nothing to re-attach to; an unreadable one, or
+        one written for a different request or shard count, raises
+        :class:`SimError` -- never a silent restart that would re-bill every
+        shard."""
+        from .sim import SimError
+
+        path = os.path.join(artifacts_dir, BATCH_SHARDS_FILENAME)
+        manifest = cls(path, fingerprint, hosts, location=location)
+        if not resume or not os.path.isfile(path):
+            return manifest
+        try:
+            with open(path, encoding="utf-8") as handle:
+                data = json.load(handle)
+            shards = {str(entry["index"]): dict(entry) for entry in data["shards"]}
+            stored_fingerprint = data["fingerprint"]
+            stored_hosts = data["hosts"]
+            if data.get("schema_version") != 1:
+                raise ValueError("unsupported schema_version")
+            for entry in shards.values():
+                str(entry["job_id"])
+                str(entry["units_sha256"])
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise SimError(
+                f"--resume: shard map {path} is unreadable ({exc}); delete it "
+                "or drop --resume (resuming would otherwise re-submit shards "
+                "that may already have finished)",
+                code=BATCH_SHARD_MANIFEST_CODE,
+            ) from exc
+        if stored_fingerprint != fingerprint or stored_hosts != hosts:
+            raise SimError(
+                f"--resume: shard map {path} was written for a different "
+                "request (units, seed, hosts, netlist or settings changed); "
+                "delete it or drop --resume",
+                code=BATCH_SHARD_MANIFEST_CODE,
+            )
+        manifest.prior = shards
+        return manifest
+
+    @property
+    def path(self) -> str:
+        return self._path
+
+    def record(self, index: int, job_id: str, units_sha256: str) -> None:
+        with self._lock:
+            self._entries[str(index)] = {
+                "index": index,
+                "job_id": job_id,
+                "units_sha256": units_sha256,
+                "state": "pending",
+                "submitted_at": None,
+                "launch_started_at": None,
+                "launched_at": None,
+                "collected_at": None,
+            }
+            self._flush_locked()
+
+    def planned_job_id(self, index: int) -> str | None:
+        """The job id :meth:`record` minted for ``index`` this run, if any."""
+        with self._lock:
+            entry = self._entries.get(str(index))
+            return None if entry is None else str(entry["job_id"])
+
+    #: lifecycle state -> the timestamp field it stamps.
+    _STATE_FIELDS = {
+        "submitted": "submitted_at",
+        "launching": "launch_started_at",
+        "launched": "launched_at",
+        "collected": "collected_at",
+    }
+
+    def mark(self, index: int, state: str) -> None:
+        """Advance shard ``index`` to ``state`` and stamp its timestamp. A
+        field already stamped (a re-attach to a shard the prior run took
+        further) is left as it was, and the state never moves backwards."""
+        key = str(index)
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                prior = self.prior.get(key)
+                if prior is None:
+                    return
+                entry = self._entries[key] = dict(prior)
+            order = list(self._STATE_FIELDS)
+            current = entry.get("state")
+            if current in order and order.index(current) >= order.index(state):
+                return
+            entry["state"] = state
+            field = self._STATE_FIELDS[state]
+            if entry.get(field) is None:
+                entry[field] = datetime.now(timezone.utc).isoformat()
+            self._flush_locked()
+
+    def unlaunched(self) -> int:
+        """Shards this run left submitted but never launched."""
+        with self._lock:
+            entries = {**self.prior, **self._entries}
+            return sum(1 for e in entries.values() if e.get("state") == "submitted")
+
+    def flush(self) -> None:
+        with self._lock:
+            self._flush_locked()
+
+    def _flush_locked(self) -> None:
+        # Entries of shards this run has not reached yet stay as the prior
+        # run left them, so a second interruption keeps their mapping.
+        entries = {**self.prior, **self._entries}
+        document = {
+            "schema_version": 1,
+            "fingerprint": self._fingerprint,
+            "hosts": self._hosts,
+            **self._location,
+            "shards": [entries[key] for key in sorted(entries, key=int)],
+        }
+        _write_batch_receipt(self._path, document)
+
+
+def _remove_shard_manifest(artifacts_dir: str) -> None:
+    """Drop a finished sweep's shard map -- nothing is left to re-attach to."""
+    try:
+        os.remove(os.path.join(artifacts_dir, BATCH_SHARDS_FILENAME))
+    except OSError:
+        pass
+
+
+def _units_digest(points: Sequence[CornerPoint]) -> str:
+    """Digest of a shard's ordered corner ids: a manifest entry only applies
+    to a re-run that hands the shard the same units."""
+    blob = json.dumps([point.corner_id for point in points]).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
+
+
 def _poll_status_interruptibly(
     config: BatchConfig,
     job_id: str,
@@ -3476,7 +4020,7 @@ def _poll_status_interruptibly(
     def _handle(signum: int, _frame: Any) -> None:
         raise BatchClientInterrupted(
             f"client terminated by {signal.Signals(signum).name} while waiting "
-            f"on job {job_id} (bucket {config.bucket}, region {config.region}); "
+            f"on job {job_id} (region {config.region}); "
             "the remote job is left running -- the fleet has no cancel",
             job_id=job_id,
             signum=signum,
@@ -3501,6 +4045,39 @@ def _poll_status_interruptibly(
         _signal_handlers_restore(prev_handlers)
 
 
+def _ignore_phase(state: str) -> None:
+    """The ``on_phase`` default: no shard map to tell."""
+
+
+def _launch_attached_if_unlaunched(
+    config: BatchConfig,
+    job_id: str,
+    *,
+    runner: remote_transport.CommandRunner | None,
+    now: Callable[[], str],
+    notify: Callable[[str], None],
+) -> str | None:
+    """Launch a re-attached job the shard map says was never launched (issue
+    #3896), but only while the fleet has published no ``status.json`` -- one
+    that exists means a launch already happened, and a second would
+    double-bill. Returns the launch timestamp, or ``None`` when no launch was
+    needed."""
+    run = runner if runner is not None else _run_subprocess
+    if _read_status(config, job_id, run) is not None:
+        notify("launched")
+        return None
+    notify("launching")
+    launch_job(config, job_id, runner=runner)
+    launched_at = now()
+    notify("launched")
+    sys.stderr.write(
+        f"klt sim: batch job {job_id} had been submitted but never "
+        "launched; launched it\n"
+    )
+    sys.stderr.flush()
+    return launched_at
+
+
 def _run_batch_job(
     *,
     config: BatchConfig,
@@ -3520,6 +4097,8 @@ def _run_batch_job(
     attach: bool = False,
     now: Callable[[], str] = _utc_now,
     receipt_name: str | None = None,
+    on_phase: Callable[[str], None] | None = None,
+    launch_if_unlaunched: bool = False,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """Submit, wait for, and collect **one** batch job's worth of corners --
     the shared body of the single-job ``batch`` backend (:func:`_run_batch`)
@@ -3543,19 +4122,36 @@ def _run_batch_job(
     ``job.json`` (else :data:`BATCH_UNKNOWN_JOB_CODE`) and the call goes
     straight to polling and collecting. A job Spot-reclaimed mid-run is
     still waited on, never re-launched (see :func:`poll_status`).
+    ``launch_if_unlaunched`` (issue #3896; attach only) is for a job the
+    shard map records as submitted but never launched: it is launched first,
+    but only while the fleet has published no ``status.json`` -- one that
+    exists means a launch already happened, and a second would double-bill.
+    ``on_phase`` is told ``"submitted"``, ``"launching"`` and ``"launched"``
+    as the job reaches each, so a shard map can record them durably.
 
     The returned environment also carries client-observed wall-clock
     timestamps (``client_submitted_at``, ``client_launched_at``,
     ``client_status_terminal_at``, ``client_collected_at``; ``now`` is the
     clock seam). A phase that was not reached is ``None``, never fabricated.
     """
+    notify = on_phase if on_phase is not None else _ignore_phase
     if attach:
         if not job_exists(config, job_id, runner=runner):
             raise BatchError(
-                f"no batch job {job_id!r} in bucket {config.bucket!r} under "
+                f"no batch job {job_id!r} in the configured bucket under "
                 f"prefix {config.jobs_prefix!r} (never submitted, wrong "
                 "bucket/profile/region, or expired)",
                 code=BATCH_UNKNOWN_JOB_CODE,
+            )
+        attach_timestamps: dict[str, str | None] = {
+            "client_submitted_at": None,
+            "client_launched_at": None,
+            "client_status_terminal_at": None,
+            "client_collected_at": None,
+        }
+        if launch_if_unlaunched:
+            attach_timestamps["client_launched_at"] = _launch_attached_if_unlaunched(
+                config, job_id, runner=runner, now=now, notify=notify
             )
         return _poll_and_collect(
             config=config,
@@ -3567,12 +4163,7 @@ def _run_batch_job(
             measurements_spec=measurements_spec,
             runner=runner,
             sleep=sleep,
-            timestamps={
-                "client_submitted_at": None,
-                "client_launched_at": None,
-                "client_status_terminal_at": None,
-                "client_collected_at": None,
-            },
+            timestamps=attach_timestamps,
             now=now,
         )
     spec = _prepare_batch_job_spec(
@@ -3593,9 +4184,12 @@ def _run_batch_job(
         "client_collected_at": None,
     }
     submit_job(config, job_id, spec, runner=runner)
+    notify("submitted")
     _report_progress(job_id, "submitted")
+    notify("launching")
     launch_job(config, job_id, runner=runner)
     timestamps["client_launched_at"] = now()
+    notify("launched")
     # Issue #2978: name the job on stderr the moment it exists, so a caller
     # killed by an outer wall-clock limit knows what it orphaned.
     sys.stderr.write(
@@ -3684,7 +4278,6 @@ def _poll_and_collect(
             {
                 "provider": "aws-batch-fleet",
                 "job_id": job_id,
-                "bucket": config.bucket,
                 "region": config.region,
                 "state": exc.last_state,
                 **(
@@ -3731,7 +4324,7 @@ def _poll_and_collect(
         check_ngspice_options_echo(request, report)
         environment = {**environment, **_read_job_identity(collected, request)}
         corners = report.get("corners") or []
-        _surface_missing_include(corners, collected)
+        _surface_log_fatal(corners, collected)
         if keep_artifacts:
             _install_batch_artifacts(
                 corners, collected_dir=collected, artifacts_dir=artifacts_dir
@@ -3764,6 +4357,7 @@ def _run_batch(
     probe_abort: dict[str, Any] | None = None,
     request_dir: str | None = None,
     attach_job_id: str | None = None,
+    shard_fingerprint: str | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``batch`` backend: submit the whole corner matrix to 2am's EDA
     batch fleet as one job and collect its report back out of S3.
@@ -3784,13 +4378,14 @@ def _run_batch(
     report when a job fails); the rest are already embedded in ``request``
     or resolved by the job instance itself, exactly as for ``remote``.
 
-    ``deadline``/``initial_ppid``/``checkpoint``/``probe_abort`` are
+    ``deadline``/``initial_ppid``/``probe_abort`` are
     likewise accepted but not honored, for the same reason ``_run_remote``
-    does not honor them: the corner dispatch loop runs in a *different*
-    process on a machine this function only observes through ``status.json``
-    (``checkpoint`` is therefore unused here: ``run_sim`` records the
-    returned reports into the resume checkpoint after dispatch, skipping
-    ``lost_shard`` corners -- issue #3367). The batch path's own wall-clock
+    does not honor them (``checkpoint`` only supplies the resume fingerprint
+    for a split reroute's shard map, issue #3300): the corner dispatch loop
+    runs in a *different* process on a machine this function only observes
+    through ``status.json`` (``run_sim`` records the returned reports into
+    the resume checkpoint after dispatch, skipping ``lost_shard`` corners --
+    issue #3367). The batch path's own wall-clock
     bound is ``request.batch.poll_timeout_s``, whose overrun reports every
     unit through the same unrun-corner shape.
 
@@ -3801,6 +4396,11 @@ def _run_batch(
     the assessment is reported as ``environment.remote.job_ceiling``. The
     ``hosts > 1`` path (:func:`_run_batch_fleet`) is unchanged.
 
+    ``shard_fingerprint`` (issue #3896) is the request's resume fingerprint for
+    a split reroute that has no checkpoint (a run without ``--resume``): it
+    makes the split write its shard map anyway, so a stopped client leaves
+    a record of which jobs were submitted and which launched.
+
     ``attach_job_id`` (issue #2978) re-attaches to that already-submitted job
     instead of submitting a new one: no job-ceiling assessment, no upload, no
     launch. The request supplies the corner list and measurement grading, so
@@ -3809,7 +4409,7 @@ def _run_batch(
     from .sim import SimError
 
     del analysis, models_lib, max_workers  # see docstring
-    del deadline, initial_ppid, checkpoint, probe_abort  # not honored
+    del deadline, initial_ppid, probe_abort  # not honored
 
     config = _resolve_batch_config(
         request, corner_count=len(corner_points), timeout_s=timeout_s
@@ -3870,11 +4470,18 @@ def _run_batch(
                 measurements_spec=measurements_spec,
                 request_dir=request_dir,
                 config=config,
+                shard_fingerprint=shard_fingerprint
+                or (None if checkpoint is None else checkpoint.fingerprint),
+                resume=checkpoint is not None,
             )
         except BatchError as exc:
             raise SimError(f"batch backend failed: {exc}", code=exc.code) from exc
         if environment is not None:
-            environment = {**environment, "job_ceiling": job_ceiling}
+            environment = {
+                **environment,
+                "job_ceiling": job_ceiling,
+                **_feature_diagnostic_field(config),
+            }
         return corners, engine_version, environment
     try:
         corners, engine_version, environment = _run_batch_job(
@@ -3895,8 +4502,75 @@ def _run_batch(
     if environment is not None:
         # Additive (issue #2833): the assessment and the ceiling's provenance
         # ride every one-job batch report, exceeded or not.
-        environment = {**environment, "job_ceiling": job_ceiling}
+        environment = {
+            **environment,
+            "job_ceiling": job_ceiling,
+            **_feature_diagnostic_field(config),
+        }
     return corners, engine_version, environment
+
+
+def _feature_diagnostic_field(config: BatchConfig) -> dict[str, Any]:
+    """``environment.remote.request_feature_diagnostic`` for the pre-launch
+    ``warn`` result (issue #2901); empty when there is none, so a post-run one
+    from :func:`_read_runner_identity` is left alone. ``run_sim`` hoists it to
+    the report's top-level ``diagnostics[]``."""
+    if config.feature_diagnostic is None:
+        return {}
+    return {"request_feature_diagnostic": config.feature_diagnostic}
+
+
+def _open_shard_manifest(
+    artifacts_dir: str,
+    shard_fingerprint: str | None,
+    hosts: int,
+    *,
+    resume: bool,
+    config: BatchConfig,
+) -> _ShardManifest | None:
+    """Open the run's shard map, recording where the jobs live (issue #3896);
+    ``None`` when the request has no fingerprint to key it by."""
+    if shard_fingerprint is None:
+        return None
+    return _ShardManifest.open(
+        artifacts_dir,
+        shard_fingerprint,
+        hosts,
+        resume=resume,
+        location={
+            "bucket": getattr(config, "bucket", None),
+            "jobs_prefix": getattr(config, "jobs_prefix", None),
+            "region": getattr(config, "region", None),
+            "profile": getattr(config, "profile", None),
+        },
+    )
+
+
+def _prerecord_shards(
+    manifest: _ShardManifest | None, shard_indexes: dict[str, int]
+) -> None:
+    """Give every shard an entry before the first one is submitted (issue
+    #3896), so a client stopped mid-run leaves a record of the shards it
+    never reached, not only of those it got to."""
+    if manifest is None:
+        return
+    for digest, index in shard_indexes.items():
+        prior = manifest.prior.get(str(index))
+        if prior is None or prior["units_sha256"] != digest:
+            manifest.record(index, new_job_id(), digest)
+
+
+def _warn_unlaunched(manifest: _ShardManifest | None, hosts: int) -> None:
+    """Tell the caller about shards left submitted but never launched, and how
+    to launch them (issue #3896)."""
+    if manifest is None or not manifest.unlaunched():
+        return
+    print(
+        f"klt sim: {manifest.unlaunched()} of {hosts} batch job(s) were "
+        f"submitted but never launched; rerun with --resume and the "
+        f"same outdir to launch them (shard map: {manifest.path})",
+        file=sys.stderr,
+    )
 
 
 def _run_batch_fleet(
@@ -3912,6 +4586,8 @@ def _run_batch_fleet(
     measurements_spec: list[dict[str, Any]],
     request_dir: str | None = None,
     config: BatchConfig | None = None,
+    shard_fingerprint: str | None = None,
+    resume: bool = False,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``batch`` backend's ``hosts > 1`` dispatch: one **job** per shard.
 
@@ -3934,6 +4610,17 @@ def _run_batch_fleet(
     ``config`` is for :func:`_run_batch`'s split reroute (issue #3446), which
     has already resolved it (and run the once-per-request runner check); a
     direct caller leaves it ``None``.
+
+    ``shard_fingerprint`` (issue #3300) is the request's resume fingerprint;
+    given, each shard's job id is recorded in ``batch-shards.json`` under
+    ``artifacts_dir`` *before* the shard is submitted. With ``resume`` a
+    shard the manifest already maps is re-attached
+    (``_run_batch_job(attach=True)``) -- ``done`` collected, live polled --
+    and only a shard with no usable job (never submitted, outputs gone, or
+    terminally failed) is submitted again under a fresh id. A manifest from a
+    different request is refused (:data:`BATCH_SHARD_MANIFEST_CODE`) before
+    any S3 write. Every ``environment.remote.fleet[]`` entry carries
+    ``resumed: true|false``.
     """
     from .sim import SimError
 
@@ -3948,6 +4635,14 @@ def _run_batch_fleet(
         config = _resolve_batch_config(
             request, corner_count=len(corner_points), timeout_s=timeout_s
         )
+    manifest = _open_shard_manifest(
+        artifacts_dir, shard_fingerprint, hosts, resume=resume, config=config
+    )
+    shard_indexes = {
+        _units_digest(points): index
+        for index, points in enumerate(_shard_corner_points(corner_points, hosts))
+        if points
+    }
     # Stage (and discard) the whole job closure once, before any shard's
     # first S3 write: an unstageable include or model input (issue #2668)
     # must refuse the submit, not surface as K lost shards after some of
@@ -3961,13 +4656,19 @@ def _run_batch_fleet(
         backend="batch",
     )
 
-    def _shard_runner(
+    _prerecord_shards(manifest, shard_indexes)
+
+    def _run_shard(
         shard_points: list[CornerPoint],
+        job_id: str,
+        *,
+        attach: bool,
+        index: int | None = None,
+        launch_if_unlaunched: bool = False,
     ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
         # The job id doubles as the shard's artifacts subdirectory, so
         # per-shard artifact trees never collide and each one is traceable
         # back to the S3 prefix it was collected from.
-        job_id = new_job_id()
         shard_artifacts_dir = (
             os.path.join(artifacts_dir, job_id) if keep_artifacts else artifacts_dir
         )
@@ -3985,14 +4686,124 @@ def _run_batch_fleet(
             explicit_points=shard_points,
             request_dir=request_dir,
             receipt_name=f"batch-receipt-{job_id}.json",
+            attach=attach,
+            launch_if_unlaunched=launch_if_unlaunched,
+            on_phase=None
+            if manifest is None or index is None
+            else lambda state: manifest.mark(index, state),
         )
 
-    return _run_sharded(
-        shard_runner=_shard_runner,
-        corner_points=corner_points,
-        hosts=hosts,
-        measurements_spec=measurements_spec,
-    )
+    def _shard_runner(
+        shard_points: list[CornerPoint],
+    ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
+        digest = _units_digest(shard_points)
+        index = shard_indexes[digest]
+        prior = manifest.prior.get(str(index)) if manifest is not None else None
+        job_id = None if manifest is None else manifest.planned_job_id(index)
+        if prior is not None and prior["units_sha256"] == digest:
+            result = _try_reattach_shard(
+                lambda: _run_shard(
+                    shard_points,
+                    str(prior["job_id"]),
+                    attach=True,
+                    index=index,
+                    # Only an entry that says "submitted" (launch never
+                    # started) is launched; older maps carry no state.
+                    launch_if_unlaunched=prior.get("state") == "submitted",
+                ),
+                job_id=str(prior["job_id"]),
+            )
+            if result is not None:
+                _mark_collected(manifest, index, result)
+                return _mark_resumed(result, True)
+            job_id = None
+        if job_id is None:
+            job_id = new_job_id()
+            if manifest is not None:
+                manifest.record(index, job_id, digest)
+        result = _run_shard(shard_points, job_id, attach=False, index=index)
+        _mark_collected(manifest, index, result)
+        return _mark_resumed(result, False)
+
+    try:
+        corners, engine_version, environment = _run_sharded(
+            shard_runner=_shard_runner,
+            corner_points=corner_points,
+            hosts=hosts,
+            measurements_spec=measurements_spec,
+            max_concurrent=config.max_concurrent_jobs,
+        )
+        if environment is not None and config.max_concurrent_jobs is not None:
+            environment = {
+                **environment,
+                "max_concurrent_jobs": config.max_concurrent_jobs,
+            }
+        return corners, engine_version, environment
+    finally:
+        _warn_unlaunched(manifest, hosts)
+
+
+def _mark_collected(
+    manifest: _ShardManifest | None,
+    index: int,
+    result: tuple[list[dict[str, Any]], str | None, dict[str, Any] | None],
+) -> None:
+    """Record a shard whose outputs were actually collected (issue #3896);
+    a failed or timed-out job returns unrun corners and stays ``launched``."""
+    environment = result[2]
+    if manifest is not None and environment and environment.get("client_collected_at"):
+        manifest.mark(index, "collected")
+
+
+def _try_reattach_shard(
+    attach: Callable[
+        [], tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]
+    ],
+    *,
+    job_id: str,
+) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None] | None:
+    """Re-attach to a shard's recorded job (issue #3300), or ``None`` when the
+    caller should submit it afresh: the job was never submitted, its outputs
+    cannot be collected, or it ended in a terminal failure. A client
+    interrupt is never swallowed, and a poll-budget overrun is returned as
+    is -- that job may still be running, so resubmitting would bill it twice.
+    """
+    try:
+        result = attach()
+    except BatchClientInterrupted:
+        raise
+    except BatchError as exc:
+        print(
+            f"klt sim: notice: cannot re-attach batch job {job_id} ({exc}); "
+            "submitting that shard again",
+            file=sys.stderr,
+        )
+        return None
+    corners = result[0]
+    if corners and all(
+        any(
+            d.get("code") == "batch_job_failed" for d in corner.get("diagnostics") or []
+        )
+        for corner in corners
+    ):
+        print(
+            f"klt sim: notice: batch job {job_id} had failed; submitting "
+            "that shard again",
+            file=sys.stderr,
+        )
+        return None
+    return result
+
+
+def _mark_resumed(
+    result: tuple[list[dict[str, Any]], str | None, dict[str, Any] | None],
+    resumed: bool,
+) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
+    """Stamp the additive ``resumed`` flag on a shard's ``fleet[]`` entry."""
+    corners, engine_version, environment = result
+    if environment is not None:
+        environment = {**environment, "resumed": resumed}
+    return corners, engine_version, environment
 
 
 #: Re-exported so ``sim.py``'s own module namespace keeps the same
@@ -4002,6 +4813,7 @@ __all__ = [
     "BATCH_ARTIFACTS_DIRNAME",
     "BATCH_INTERRUPTED_CODE",
     "BATCH_JOB_CEILING_CODE",
+    "BATCH_MAX_CONCURRENT_CODE",
     "BATCH_MAX_UNITS_CODE",
     "BATCH_JOB_TOOL",
     "BATCH_CONCURRENCY_CAP_CODE",
@@ -4009,6 +4821,8 @@ __all__ = [
     "BATCH_UNKNOWN_JOB_CODE",
     "BATCH_NETLIST_FILENAME",
     "BATCH_RECEIPT_FILENAME",
+    "BATCH_SHARDS_FILENAME",
+    "BATCH_SHARD_MANIFEST_CODE",
     "BATCH_REPORT_FILENAME",
     "BATCH_RUNNER_IDENTITY_FILENAME",
     "BATCH_RUNNER_FEATURE_CODE",
@@ -4029,6 +4843,7 @@ __all__ = [
     "collect_outputs",
     "job_exists",
     "job_uri",
+    "report_job_uri",
     "launch_job",
     "new_job_id",
     "poll_status",

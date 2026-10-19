@@ -120,6 +120,11 @@ ERC_CASES = [
     ("ties", _set("ties", 0, "well_boxess")([]), "ties[0].well_boxess"),
     ("ties-wrong-section", _set("ties", 0, "roles")([]), "ties[0].roles"),
     (
+        "ties-complement-typo",
+        _set("ties", 0, "well_complement_off")("10/0"),
+        "ties[0].well_complement_off",
+    ),
+    (
         "ties_disclosure",
         _set("ties_disclosure", "resaon")("x"),
         "ties_disclosure.resaon",

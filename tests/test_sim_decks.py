@@ -1276,6 +1276,26 @@ class TestBatchDispatch:
             u["diagnostics"][0]["code"] == "batch_poll_timeout" for u in report["units"]
         )
 
+    def test_interrupted_reports_every_unit_with_interrupted_s(
+        self, tmp_path, monkeypatch
+    ):
+        write_stub_engine(tmp_path)
+
+        def interrupted(config, job_id, **kwargs):
+            raise sb.BatchJobInterrupted("job stayed interrupted", interrupted_s=123.45)
+
+        install_fake_batch(monkeypatch, _FakeFleet({}))
+        monkeypatch.setattr(sb, "poll_status", interrupted)
+        report = run_local(tmp_path, batch_deck_request(tmp_path), outdir="out")
+        assert report["status"] == "error"
+        assert all(
+            u["diagnostics"][0]["code"] == sb.BATCH_JOB_INTERRUPTED_CODE
+            for u in report["units"]
+        )
+        remote = report["environment"]["remote"]
+        assert remote["interrupted_s"] == 123.5
+        assert remote["state"] == "interrupted"
+
     def test_batch_error_raises_sim_error(self, tmp_path, monkeypatch):
         write_stub_engine(tmp_path)
         install_fake_batch(monkeypatch, _FakeFleet({"state": "done"}))
@@ -1416,6 +1436,7 @@ def argparse_namespace(request: str):
         fail_fast_probe=None,
         fail_on_diagnostic=None,
         max_units_per_job=None,
+        max_concurrent_jobs=None,
         op_lint=False,
         op_lint_corner=None,
         format="text",

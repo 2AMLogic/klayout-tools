@@ -40,7 +40,7 @@ imports back from here or from ``place_and_route.py``, and none is ever
 monkeypatched through ``place_and_route.<name>``. The handful of names still
 defined in (or re-exported through) ``place_and_route.py`` itself
 (``PlaceAndRouteError``,
-``read_lef_header``, ``_resolve_gds_view``, ``_resolve_layer_map``) are
+``read_lef_header``, ``_resolve_gds_view``) are
 imported *inside* the function that uses them, deferred rather than at
 module scope, both because ``place_and_route.py`` in turn imports this
 module's own :func:`_merge_def_to_gds` back (module scope, no cycle -- this
@@ -232,17 +232,13 @@ def _lef_net_layer_gds_map(map_path: str | None) -> dict[str, tuple[int, int]]:
 
     File shape is the same whitespace-delimited
     ``<lef_layer_name> <comma-separated purposes> <gds_layer> <gds_datatype>``
-    ``lef_abstract.py``'s own :func:`~klayout_tools.lef_abstract.
-    _load_gds_to_lef_layer_map` parses -- this is the same file read in the
-    opposite direction (LEF name -> GDS pair, restricted to the one purpose
-    that names drawn routing), kept local here for the same
-    "each verb module is self-contained" reason :func:`~klayout_tools.
-    place_and_route._resolve_layer_map` is duplicated between the two
-    modules.
+    :func:`~klayout_tools.pdk.load_gds_to_lef_layer_map` parses -- this is
+    the same file read in the opposite direction (LEF name -> GDS pair,
+    restricted to the one purpose that names drawn routing).
 
     Returns ``{}`` for ``None`` (no map file resolved) or an unreadable/
     malformed file -- callers treat that as "cannot resolve", never as an
-    error, matching :func:`~klayout_tools.place_and_route._resolve_layer_map`'s
+    error, matching :func:`~klayout_tools.pdk.resolve_klayout_layer_map`'s
     own degrade-gracefully posture.
     """
     if map_path is None:
@@ -459,7 +455,7 @@ def _merge_def_to_gds(
 
     Returns ``{"path": <str | None>, "resolution": <str>, "def_net_names":
     {...}, "min_area_repair": {...}}``. ``path``/``resolution`` describe the
-    :func:`~klayout_tools.place_and_route._resolve_layer_map` result actually
+    :func:`~klayout_tools.pdk.resolve_klayout_layer_map` result actually
     applied (or not) to this merge, so the caller can surface it in the
     response envelope's ``layer_map`` field (issue #1029) -- a caller has no
     other way to tell whether the merged GDS's routing shapes got a
@@ -487,15 +483,15 @@ def _merge_def_to_gds(
     # import makes that visible.
     import klayout.db as kdb
 
+    from .pdk import resolve_klayout_layer_map
     from .place_and_route import (
         PlaceAndRouteError,
         _resolve_gds_view,
-        _resolve_layer_map,
         read_lef_header,
     )
 
     cell_gds = _resolve_gds_view(pdk_info, cell_library)
-    layer_map_path, layer_map_resolution = _resolve_layer_map(pdk_info)
+    layer_map_path, layer_map_resolution = resolve_klayout_layer_map(pdk_info)
 
     opts = kdb.LoadLayoutOptions()
     lefdef_config = opts.lefdef_config

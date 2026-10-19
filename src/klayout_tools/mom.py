@@ -28,6 +28,7 @@ from . import pdk_stackup
 from ._layout import load_layout, select_top_cells
 from ._native import _load_native_extension
 from ._paths import _load_spec_json, _parse_layer_datatype, _reject_unknown_keys
+from .touchstone import TOUCHSTONE_VERSION, format_s2p
 
 #: Mirrors ``native/mom/src/contract.rs``'s ``DEFAULT_PANEL_SIZE_UM`` -- kept
 #: in sync manually (no shared source of truth across the Rust/Python
@@ -636,24 +637,6 @@ def run_mom(
     return result
 
 
-#: Touchstone spec version this writer targets when both ports share one
-#: reference impedance -- the common case (see ``write_touchstone_s2p``'s
-#: docstring). Cited so a reader can check this module against the spec:
-#: "Touchstone(R) File Format Specification", Rev 1.1, IBIS Open Forum
-#: (2002-04-24), section 4 ("Option Line") + section 8 (2-port data
-#: ordering).
-TOUCHSTONE_VERSION = "1.1"
-
-
-def _touchstone_float(value: float) -> str:
-    """Render ``value`` losslessly -- ``repr()`` is the shortest decimal
-    string that round-trips a Python ``float`` exactly, so this avoids the
-    magnitude/phase (``MA``) conversion's lossy trig round-trip the
-    acceptance criteria explicitly rule out, and any precision loss a fixed
-    ``%f``/``%e`` width could introduce."""
-    return repr(float(value))
-
-
 def write_touchstone_s2p(report: dict[str, Any]) -> str:
     """Serialise ``run_mom``'s de-embedded two-port S-parameters (issue
     #894 -- ``report["full_wave_sweep"][i]["s_parameters"]``, present only
@@ -711,26 +694,23 @@ def write_touchstone_s2p(report: dict[str, Any]) -> str:
             "Touchstone export section"
         )
 
-    lines = [
-        "! klt mom Touchstone (.s2p) export -- issue #1518",
-        f"! Touchstone Rev {TOUCHSTONE_VERSION} -- frequency unit Hz, "
-        "S-parameters, RI (real/imaginary) format",
-        f"! file: {report.get('file', '<unknown>')}",
-        f"! spec: {report.get('spec', '<unknown>')}",
-        f"# HZ S RI R {_touchstone_float(z1)}",
-    ]
-    for point in full_wave_sweep:
-        s = point["s_parameters"]
-        fields = [
-            point["frequency_hz"],
-            s["s11_real"],
-            s["s11_imag"],
-            s["s21_real"],
-            s["s21_imag"],
-            s["s12_real"],
-            s["s12_imag"],
-            s["s22_real"],
-            s["s22_imag"],
-        ]
-        lines.append(" ".join(_touchstone_float(f) for f in fields))
-    return "\n".join(lines) + "\n"
+    points = [point["s_parameters"] for point in full_wave_sweep]
+
+    def column(name: str) -> list[complex]:
+        return [complex(s[f"{name}_real"], s[f"{name}_imag"]) for s in points]
+
+    return format_s2p(
+        [point["frequency_hz"] for point in full_wave_sweep],
+        column("s11"),
+        column("s21"),
+        column("s12"),
+        column("s22"),
+        z1,
+        comments=[
+            "klt mom Touchstone (.s2p) export -- issue #1518",
+            f"Touchstone Rev {TOUCHSTONE_VERSION} -- frequency unit Hz, "
+            "S-parameters, RI (real/imaginary) format",
+            f"file: {report.get('file', '<unknown>')}",
+            f"spec: {report.get('spec', '<unknown>')}",
+        ],
+    )

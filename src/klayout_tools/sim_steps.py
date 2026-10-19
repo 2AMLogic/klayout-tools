@@ -75,6 +75,8 @@ import math
 import re
 from typing import Any
 
+from .sim_errors import SimError
+
 #: The internal ``analysis["kind"]`` a resolved step sequence carries. Never
 #: a request value: the request declares ``analysis_steps[]`` instead, and
 #: :func:`resolve_analysis_steps` folds it into this one internal object so
@@ -140,25 +142,19 @@ _STEP_MARKER_RE = re.compile(
 )
 
 
-def _error(message: str) -> Exception:
-    from .sim import SimError
-
-    return SimError(message)
-
-
 def _refuse_crossings(spec: dict[str, Any]) -> None:
     """Issue #2868: a ``crossings`` series reads one transient plot's
     rawfile; no per-step equivalent is implemented, so it is refused by
     name rather than silently reduced to something else."""
     if spec.get("crossings") is not None:
-        raise _error(
+        raise SimError(
             f"measurement {spec.get('name')!r}: 'crossings' is not supported "
             "with analysis_steps -- use the scalar analysis "
             '(kind "tran") for a threshold-crossing series'
         )
     if spec.get("energy") is not None:
         # Issue #3033: same reason -- one transient plot's rawfile.
-        raise _error(
+        raise SimError(
             f"measurement {spec.get('name')!r}: 'energy' is not supported "
             "with analysis_steps -- use the scalar analysis "
             '(kind "tran") for a source-energy measurement'
@@ -172,7 +168,7 @@ def _refuse_optional(spec: dict[str, Any]) -> None:
     ``derived_input_unavailable`` causes that must stay errors, so the flag is
     refused by name rather than silently ignored."""
     if spec.get("optional") is True:
-        raise _error(
+        raise SimError(
             f"measurement {spec.get('name')!r}: 'optional' is not supported "
             "with analysis_steps -- use the scalar analysis for a measurement "
             "that may legitimately be absent"
@@ -183,7 +179,7 @@ def _refuse_cycle_mean(spec: dict[str, Any]) -> None:
     """Issue #2947: like ``crossings``, a ``cycle_mean`` reads one transient
     plot's rawfile and has no per-step equivalent -- refused by name."""
     if spec.get("cycle_mean") is not None:
-        raise _error(
+        raise SimError(
             f"measurement {spec.get('name')!r}: 'cycle_mean' is not supported "
             "with analysis_steps -- use the scalar analysis "
             '(kind "tran") for a cycle-aligned mean'
@@ -194,7 +190,7 @@ def _refuse_noise(spec: dict[str, Any]) -> None:
     """Issue #2938: a ``noise`` measurement reads one noise analysis'
     spectrum plot; no per-step equivalent is implemented."""
     if spec.get("noise") is not None:
-        raise _error(
+        raise SimError(
             f"measurement {spec.get('name')!r}: 'noise' is not supported "
             "with analysis_steps -- use the scalar analysis "
             '(kind "noise") for a noise-spectrum measurement'
@@ -239,14 +235,14 @@ def resolve_analysis_steps(
     keys, an empty sequence) raises before any corner is dispatched.
     """
     if request.get("analysis") is not None:
-        raise _error(
+        raise SimError(
             "request declares both 'analysis' and 'analysis_steps': they are "
             "alternative forms (one analysis per corner vs. an ordered "
             "sequence of named steps) -- declare exactly one"
         )
     raw_steps = request.get("analysis_steps")
     if not isinstance(raw_steps, list) or not raw_steps:
-        raise _error(
+        raise SimError(
             "request.analysis_steps must be a non-empty array of step objects "
             '({"name", "analysis": {"kind", "args"}, "alter"?, "measurements"?})'
         )
@@ -274,16 +270,16 @@ def _resolve_step(
 ) -> dict[str, Any]:
     """One step's name, analysis and overrides, normalised."""
     if not isinstance(raw, dict):
-        raise _error(f"analysis_steps[{index}] must be an object")
+        raise SimError(f"analysis_steps[{index}] must be an object")
     name = raw.get("name")
     if not isinstance(name, str) or not _NAME_RE.match(name):
-        raise _error(
+        raise SimError(
             f"analysis_steps[{index}].name must match [A-Za-z_][A-Za-z0-9_]* "
             f"(got {name!r}): it becomes part of ngspice vector names and of "
             "'<step>.<measurement>' references"
         )
     if name.lower() in known:
-        raise _error(
+        raise SimError(
             f"analysis_steps[{index}] reuses step name {name!r} (compared "
             "case-insensitively): step names must be unique"
         )
@@ -297,7 +293,7 @@ def _resolve_step(
     reset = raw.get("reset")
     if reset is not None:
         if not isinstance(reset, bool):
-            raise _error(f"step {name!r}: reset must be a boolean (got {reset!r})")
+            raise SimError(f"step {name!r}: reset must be a boolean (got {reset!r})")
         if reset:
             # Only present when true, so a no-reset sequence resolves (and
             # fingerprints) exactly as before.
@@ -311,19 +307,19 @@ def _resolve_step_analysis(analysis: Any, step: str) -> tuple[str, str]:
         or "kind" not in analysis
         or "args" not in analysis
     ):
-        raise _error(f"step {step!r}: analysis requires 'kind' and 'args'")
+        raise SimError(f"step {step!r}: analysis requires 'kind' and 'args'")
     kind = analysis["kind"]
     args = analysis["args"]
     from .sim import reject_unsupported_analysis
 
     reject_unsupported_analysis(kind)
     if not isinstance(kind, str) or kind.lower() not in STEP_ANALYSIS_KINDS:
-        raise _error(
+        raise SimError(
             f"step {step!r}: analysis.kind {kind!r} is not a supported step "
             f"analysis (supported: {', '.join(STEP_ANALYSIS_KINDS)})"
         )
     if not isinstance(args, str) or "\n" in args or "\r" in args:
-        raise _error(
+        raise SimError(
             f"step {step!r}: analysis.args must be a single-line string (it is "
             "emitted verbatim as one control command)"
         )
@@ -333,7 +329,7 @@ def _resolve_step_analysis(analysis: Any, step: str) -> tuple[str, str]:
 def _resolve_pwl_alter(value: dict[str, Any], target: str, step: str) -> dict[str, Any]:
     """Validate a ``{"pwl": [t0, v0, t1, v1, ...]}`` alter value."""
     if set(value) != {"pwl"}:
-        raise _error(
+        raise SimError(
             f"step {step!r}: alter value for {target!r} as an object must have "
             f'exactly one key, "pwl" (got {sorted(value)!r})'
         )
@@ -349,14 +345,14 @@ def _resolve_pwl_alter(value: dict[str, Any], target: str, step: str) -> dict[st
             for v in vector
         )
     ):
-        raise _error(
+        raise SimError(
             f"step {step!r}: alter pwl for {target!r} must be an even-length "
             "flat list of finite numbers [t0, v0, t1, v1, ...] with at least "
             f"2 points (got {vector!r})"
         )
     times = vector[0::2]
     if any(b < a for a, b in zip(times, times[1:], strict=False)):
-        raise _error(
+        raise SimError(
             f"step {step!r}: alter pwl for {target!r} has decreasing times "
             f"{times!r}; times must be non-decreasing"
         )
@@ -368,7 +364,7 @@ def _resolve_alter(alter: Any, step: str) -> list[list[Any]]:
     if alter is None:
         return []
     if not isinstance(alter, dict):
-        raise _error(
+        raise SimError(
             f"step {step!r}: alter must be an object mapping a source/element "
             'name to its value, e.g. {"VIN": 3.3}'
         )
@@ -377,7 +373,7 @@ def _resolve_alter(alter: Any, step: str) -> list[list[Any]]:
     for target, value in alter.items():
         base = target[: -len(_AC_SUFFIX)] if is_ac_alter_target(target) else target
         if is_ac_alter_target(target) and base[:1].lower() in tuple("rcl"):
-            raise _error(
+            raise SimError(
                 f"step {step!r}: alter target {target!r}: the .ac form sets a "
                 "source's AC magnitude, so it takes a V or I source name "
                 "(R/C/L elements have no AC magnitude)"
@@ -388,17 +384,17 @@ def _resolve_alter(alter: Any, step: str) -> list[list[Any]]:
                 if "." in target
                 else ""
             )
-            raise _error(
+            raise SimError(
                 f"step {step!r}: alter target {target!r} is not a top-level "
                 "independent source or passive element name (V/I/R/C/L "
                 "followed by [A-Za-z0-9_]); hierarchical and device-parameter "
                 f"targets are not supported{suffix_hint}"
             )
         if target.lower() in seen:
-            raise _error(f"step {step!r}: alter target {target!r} is repeated")
+            raise SimError(f"step {step!r}: alter target {target!r} is repeated")
         seen.add(target.lower())
         if isinstance(value, dict) and is_ac_alter_target(target):
-            raise _error(
+            raise SimError(
                 f"step {step!r}: alter target {target!r}: the .ac form takes a "
                 "finite number (an AC magnitude), not a pwl object"
             )
@@ -409,7 +405,7 @@ def _resolve_alter(alter: Any, step: str) -> list[list[Any]]:
             or not isinstance(value, (int, float))
             or not math.isfinite(value)
         ):
-            raise _error(
+            raise SimError(
                 f"step {step!r}: alter value for {target!r} must be a finite "
                 f'number or a {{"pwl": [t0, v0, t1, v1, ...]}} object '
                 f"(got {value!r})"
@@ -425,13 +421,15 @@ def _resolve_step_measurements(
     known: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """One step's measurements, flattened and named ``<step>.<name>``."""
-    from .sim import _validate_measurement_form
+    from .sim_validate import _validate_measurement_form
 
     specs = raw.get("measurements")
     if specs is None:
         return []
     if not isinstance(specs, list) or not all(isinstance(s, dict) for s in specs):
-        raise _error(f"step {step['name']!r}: measurements must be an array of objects")
+        raise SimError(
+            f"step {step['name']!r}: measurements must be an array of objects"
+        )
     resolved: list[dict[str, Any]] = []
     local_names: set[str] = set()
     for spec in specs:
@@ -442,13 +440,13 @@ def _resolve_step_measurements(
         _refuse_noise(spec)
         local = spec["name"]
         if not isinstance(local, str) or not _NAME_RE.match(local):
-            raise _error(
+            raise SimError(
                 f"step {step['name']!r}: measurement name {local!r} must match "
                 "[A-Za-z_][A-Za-z0-9_]* (it is referenced as "
                 f"'{step['name']}.<name>' and becomes an ngspice vector name)"
             )
         if local.lower() in local_names:
-            raise _error(
+            raise SimError(
                 f"step {step['name']!r}: measurement name {local!r} is declared "
                 "more than once (compared case-insensitively)"
             )
@@ -503,29 +501,29 @@ def _meas_command(card: str, local: str, step: dict[str, Any]) -> str:
     ``run_sim``'s own ``.meas``-type check never sees it -- it is applied
     here instead, before the kind-match check, so a ``.meas op`` card on an
     ``op`` step is refused up front exactly like a top-level one."""
-    from .sim import _validate_meas_card
+    from .sim_validate import _validate_meas_card
 
     if "\n" in card or "\r" in card:
-        raise _error(
+        raise SimError(
             f"step {step['name']!r}: measurement {local!r} spice card must be one line"
         )
     match = _MEAS_CARD_RE.match(card)
     if match is None:
-        raise _error(
+        raise SimError(
             f"step {step['name']!r}: measurement {local!r} spice must be a "
             "'.meas <type> <name> ...' card"
         )
     meas_type, card_name, rest = match.groups()
     _validate_meas_card(local, card)
     if meas_type.lower() != step["kind"]:
-        raise _error(
+        raise SimError(
             f"step {step['name']!r}: measurement {local!r} is a '.meas "
             f"{meas_type}' card but the step runs '{step['kind']}' -- a "
             "step-scoped card measures that step's own analysis, so its type "
             "must match (use 'expr' for an op quantity)"
         )
     if card_name.lower() != local.lower():
-        raise _error(
+        raise SimError(
             f"step {step['name']!r}: measurement {local!r} declares a .meas "
             f"card named {card_name!r} -- the card's name must equal the "
             "measurement's name"
@@ -555,7 +553,7 @@ def _substitute_refs(
         if match.group("vec") is not None:
             return _replace_spectrum(match, target, owner, spectrum_steps)
         if target is None:
-            raise _error(
+            raise SimError(
                 f"measurement {owner!r} references {step_ref}.{meas_ref}, but "
                 f"{step_ref!r} is not an earlier step: a reference may only "
                 "name a step declared before it (unknown, forward and "
@@ -563,7 +561,7 @@ def _substitute_refs(
             )
         meas = target["measurements"].get(meas_ref.lower())
         if meas is None:
-            raise _error(
+            raise SimError(
                 f"measurement {owner!r} references {step_ref}.{meas_ref}, but "
                 f"step {target['name']!r} declares no measurement {meas_ref!r}"
             )
@@ -587,25 +585,25 @@ def _replace_spectrum(
     step_ref, qualifier, vec = match.group("step", "meas", "vec")
     text = f"{step_ref}.{qualifier}.{vec}"
     if qualifier.lower() != _SPECTRUM_QUALIFIER:
-        raise _error(
+        raise SimError(
             f"measurement {owner!r} references {text}, but the only "
             f"three-part step reference is '<step>.{_SPECTRUM_QUALIFIER}."
             "<vector>' (a noise step's spectrum plot)"
         )
     if target is None:
-        raise _error(
+        raise SimError(
             f"measurement {owner!r} references {text}, but {step_ref!r} is "
             "not an earlier step: a reference may only name a step declared "
             "before it (unknown, forward and self references are refused)"
         )
     if target["kind"].lower() != "noise":
-        raise _error(
+        raise SimError(
             f"measurement {owner!r} references {text}, but step "
             f"{target['name']!r} runs '{target['kind']}', not 'noise' -- only "
             "a noise step has a spectrum plot"
         )
     if vec.lower() not in NOISE_SPECTRUM_VECTORS:
-        raise _error(
+        raise SimError(
             f"measurement {owner!r} references {text}, but {vec!r} is not a "
             f"noise spectrum vector of step {target['name']!r} (expected one "
             f"of: {', '.join(NOISE_SPECTRUM_VECTORS)})"
@@ -620,7 +618,7 @@ def _resolve_derived_measurements(
 ) -> list[dict[str, Any]]:
     """The top-level ``measurements[]`` of a step request: derived ``expr``
     entries evaluated after every step, in declared order."""
-    from .sim import _validate_measurement_forms
+    from .sim_validate import _validate_measurement_forms
 
     specs = request.get("measurements") or []
     _validate_measurement_forms(specs)
@@ -633,7 +631,7 @@ def _resolve_derived_measurements(
         _refuse_cycle_mean(spec)
         _refuse_noise(spec)
         if spec.get("spice") is not None:
-            raise _error(
+            raise SimError(
                 f"measurement {name!r}: with analysis_steps, a top-level "
                 "measurement is a derived expression ('expr'); a file-scope "
                 ".meas card would run after every step's analysis -- declare "
@@ -646,7 +644,7 @@ def _resolve_derived_measurements(
             spec["expr"], name, position, derived_names, known
         )
         if not references and not spectrum_steps:
-            raise _error(
+            raise SimError(
                 f"measurement {name!r} references no step result: with "
                 "analysis_steps, a top-level measurement combines "
                 "'<step>.<measurement>' results (e.g. "
@@ -684,7 +682,7 @@ def _derived_name_refs(
         if token in lowered:
             target = lowered.index(token)
             if target >= position:
-                raise _error(
+                raise SimError(
                     f"measurement {name!r} references derived measurement "
                     f"{derived_names[target]!r}, which is not declared before "
                     "it (forward and self references are refused)"
@@ -694,7 +692,7 @@ def _derived_name_refs(
             continue
         owners = [s["name"] for s in known.values() if token in s["measurements"]]
         if owners:
-            raise _error(
+            raise SimError(
                 f"measurement {name!r} uses the bare name {match.group(1)!r}, "
                 "which is a step-scoped measurement: qualify it with its step "
                 f"(e.g. {owners[0]}.{match.group(1)}) -- derived measurements "
@@ -711,7 +709,7 @@ def _check_log_keys_unique(specs: list[dict[str, Any]]) -> None:
     for spec in specs:
         key = spec["log_key"]
         if key in seen:
-            raise _error(
+            raise SimError(
                 f"measurements {seen[key]!r} and {spec['name']!r} are "
                 f"ambiguous: both are harvested from the log as {key!r} "
                 "(step-scoped results print as '<step>__<name>', derived ones "
@@ -729,7 +727,7 @@ def refuse_unsupported_options(
     if not is_steps_analysis(analysis):
         return
     if want_waveforms or plot_requested:
-        raise _error(
+        raise SimError(
             "options.waveforms / --plot are not supported with analysis_steps: "
             "the waveform artifact captures one analysis per corner, and a "
             "step sequence runs several -- drop the option, or run the step "
@@ -779,7 +777,7 @@ def validate_alter_targets(
     for step in analysis["steps"]:
         for target, _value in step["alter"]:
             if target in params:
-                raise _error(
+                raise SimError(
                     f"step {step['name']!r}: alter target {target!r} names a "
                     f".param, not an element: ngspice's alter cannot change a "
                     "parameter (expressions that read it were evaluated when "
@@ -816,7 +814,7 @@ def _check_ac_alter_targets_exist(analysis: dict[str, Any], netlist_path: str) -
         known |= included
     for step, target in pairs:
         if target[: -len(_AC_SUFFIX)].strip().lower() not in known:
-            raise _error(
+            raise SimError(
                 f"step {step!r}: alter target {target!r} names no element in "
                 "the netlist -- ngspice would ignore it and solve at the "
                 "nominal AC magnitude"
@@ -831,7 +829,7 @@ def _check_alter_target(
     value: Any = None,
 ) -> None:
     if target.lower() in supply_targets:
-        raise _error(
+        raise SimError(
             f"step {step!r}: alter target {target!r} is also a "
             "corners.supply_v axis -- the step would silently override the "
             "corner's own supply value; alter a different source, or drop it "
@@ -843,7 +841,7 @@ def _check_alter_target(
             declared = (
                 f"a {waveform.upper()} waveform" if waveform else "no PWL waveform"
             )
-            raise _error(
+            raise SimError(
                 f"step {step!r}: alter target {target!r} is declared with "
                 f'{declared}; the {{"pwl": [...]}} form only retargets a '
                 "V/I source the netlist declares with a pwl(...) waveform"
@@ -855,7 +853,7 @@ def _check_alter_target(
             if waveform == "pwl"
             else " -- declare it as a plain DC value"
         )
-        raise _error(
+        raise SimError(
             f"step {step!r}: alter target {target!r} is declared with an "
             f"explicit {waveform.upper()} waveform, and ngspice's alter has no "
             f"effect on it{hint}"
