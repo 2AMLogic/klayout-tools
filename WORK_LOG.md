@@ -2,6 +2,12 @@
 
 Merged pull requests and closed issues from the last 30 days at initialization. Guide appends newly recorded events in later updates.
 
+### 2026-10-19
+
+- **PR #3950**: build(deps): Bump mcp from 2.2.0 to 2.3.0 in the uv-minor-patch group across 1 directory
+- **PR #3658**: docs: reconcile mom CLI and validation docs with shipped winding support
+- **Issue #3655** (closed): Reconcile epic #1519 acceptance and documentation criteria before closing
+
 ### 2026-10-18
 
 - **PR #3947**: feat(sim): explain not_comparable PDK stamps and show them in batch text summary
