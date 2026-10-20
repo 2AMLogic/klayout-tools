@@ -248,6 +248,10 @@ sized to be reviewable by hand):
 - Two same-net supply rails that need an explicit strap (the failure mode in
   #3920).
 
+A hand-authored instance of this example (not derived from the reporter's
+generator) lives in [`examples/row-mix-gf180/`](../../examples/row-mix-gf180/);
+its README records what was executed and what was not.
+
 ### 4.2 What it must exercise
 
 | Concern | Specification |
