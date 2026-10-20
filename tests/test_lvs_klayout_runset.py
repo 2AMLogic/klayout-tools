@@ -18,6 +18,7 @@ import pytest
 
 from klayout_tools import lvs_runset
 from klayout_tools.coverage import coverage_validation_error
+from klayout_tools.env_provenance import find_absolute_path_fields
 from klayout_tools.lvs import LvsError, check_lvs_report, run_lvs
 
 SPICE_ONE = ".subckt TOP\nM1 c b a d NMOS L=0.2u W=0.4u\n.ends\n"
@@ -391,3 +392,19 @@ def test_cli_deck_var_parsing():
     assert _parse_deck_vars(None) == {}
     with pytest.raises(LvsError, match="invalid --deck-var"):
         _parse_deck_vars(["novalue"])
+
+
+def test_portable_paths_runset_has_no_absolute_paths(tmp_path, fake_klayout):
+    default = run_lvs(_request(tmp_path, 1))
+    assert find_absolute_path_fields(default)
+    assert os.path.isabs(default["environment"]["klayout_binary"])
+
+    portable = run_lvs(_request(tmp_path, 1, portable_paths=True))
+    assert find_absolute_path_fields(portable) == []
+    assert portable["environment"]["klayout_binary"] == "klayout"
+    assert portable["status"] == default["status"]
+
+
+def test_portable_paths_runset_rejects_non_boolean(tmp_path, fake_klayout):
+    with pytest.raises(LvsError):
+        run_lvs(_request(tmp_path, 1, portable_paths="yes"))
