@@ -2918,6 +2918,34 @@ def _recessed_stub_lengths_um(
     return stub_a_um, stub_b_um
 
 
+def _ring_opening_conflict(
+    points: list[tuple[float, float]],
+    ring_pins: list[tuple[dict[str, Any], dict[str, Any]]],
+    *,
+    offsets_um: dict[str, dict[str, float]],
+    placed_bboxes_um: dict[str, dict[str, float]],
+    width_um: float,
+) -> str | None:
+    """Ring-opening check (#434): the first conflict reason, or ``None``.
+
+    For every pin on a block whose ring declares an opening, the drawn
+    backbone must reach that pin *through* the opening -- every other crossing
+    of the ring's metal is the same short the closed-ring check
+    (:func:`_closed_ring_pins`) rejects.
+    """
+    for pin, block in ring_pins:
+        conflict = _ring_gap_route_conflict(
+            points,
+            block,
+            offsets_um[pin["block"]],
+            placed_bboxes_um[pin["block"]],
+            width_um,
+        )
+        if conflict is not None:
+            return conflict
+    return None
+
+
 def route_two_pin(
     pin_a: dict[str, Any],
     pin_b: dict[str, Any],
@@ -3484,20 +3512,16 @@ def route_two_pin(
     )
     margin_eps_um = 1e-6
 
-    # Ring-opening check (#434): for every pin on a block whose ring declares
-    # an opening, the drawn backbone must reach that pin *through* the opening
-    # -- every other crossing of the ring's metal is the same short the
-    # closed-ring check above rejects.
-    for pin, block in ring_pins:
-        conflict = _ring_gap_route_conflict(
-            points,
-            block,
-            offsets_um[pin["block"]],
-            placed_bboxes_um[pin["block"]],
-            width_um,
-        )
-        if conflict is not None:
-            return _unroutable(conflict)
+    # Ring-opening check (#434): see _ring_opening_conflict.
+    ring_conflict = _ring_opening_conflict(
+        points,
+        ring_pins,
+        offsets_um=offsets_um,
+        placed_bboxes_um=placed_bboxes_um,
+        width_um=width_um,
+    )
+    if ring_conflict is not None:
+        return _unroutable(ring_conflict)
 
     # Obstacle-overlap check (#199 case 1): sum how much of the drawn backbone
     # lies inside each block's bbox *interior* (a boundary touch doesn't
