@@ -142,6 +142,20 @@ xschem's release notes). It applies to `--check` too, which fails with this
 cause instead of reporting `drifted`, and nothing is written. Under
 `--backend batch` the same code is returned.
 
+## An unresolved symbol is a failure, not a netlist
+
+When an instance refers to a symbol xschem cannot find, xschem still writes a
+"fresh" `.spice`; the only trace is a comment line such as
+`*  E1 -  no_such_device  IS MISSING !!!!`, and the device is absent from the
+netlist. After the export (and after `--block` post-processing) the netlist is
+scanned — **including** `*` comment lines, since the marker lives in one — for
+`IS MISSING`. A hit is an error (exit `1`) with
+`error.code: "unresolved_symbol"`; the message names the first offending line
+number and text. It applies to `--check` too, which fails with this cause
+instead of reporting `drifted`, and nothing is written. Under `--backend batch`
+the same code is returned. This is on by default; there is no flag. xschem's
+ERC pass and its stdout/stderr are not consulted.
+
 ## Success is the output file, not the exit status
 
 `xschem -n -s -q -x` returns a **non-zero** status after a *successful* batch
@@ -262,6 +276,7 @@ envelope's `error.code` classifies it:
 | `batch_job_timeout` | The harness stopped the job at its `timeout_seconds`. |
 | `batch_job_failed` | The job failed, or left no usable report or netlist. When the runner's own `klt netlist` reported an error, its message is quoted (and its `error.code` used, when it has one). |
 | `unevaluated_expr` | The netlist still contains a literal `expr(...)` (see above). Also returned by the local backend. |
+| `unresolved_symbol` | The netlist contains an `IS MISSING` marker: xschem could not resolve a symbol (see above). Also returned by the local backend. |
 | `batch_input_too_large` | The input tree is above the size cap (below). Raised before any upload. |
 
 **What is uploaded.** The job instance holds no forge credential and cannot
