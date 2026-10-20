@@ -464,8 +464,8 @@ def test_run_sim_deck_list_flag_errors_take_no_lock_and_create_nothing(
 ):
     request = _deck_request_path(tmp_path)
     holder_factory(tmp_path / ".klt" / "sim")
-    with pytest.raises(sim.SimError, match="--resume"):
-        sim.run_sim(str(request), resume=True)
+    with pytest.raises(sim.SimError, match="--dry-run"):
+        sim.run_sim(str(request), dry_run=True)
     assert not (tmp_path / ".klt" / "sim" / "tt_27c").exists()
 
 
