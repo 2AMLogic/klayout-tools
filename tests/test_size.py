@@ -42,7 +42,7 @@ from pathlib import Path
 import pytest
 
 from helpers.subprocess_fakes import fake_completed
-from klayout_tools import size
+from klayout_tools import size, size_topology
 from klayout_tools.cli import main
 from klayout_tools.pdk import PdkNotFoundError, find_pdk
 
@@ -2056,7 +2056,7 @@ def test_run_size_topology_invalid_max_joint_iterations_raises(tmp_path):
 
 
 def test_parse_topology_budget_defaults_to_unity_mirror_ratio():
-    budget = size._parse_topology_budget({"tail_current_a": 2e-5})
+    budget = size_topology._parse_topology_budget({"tail_current_a": 2e-5})
 
     assert budget["tail_mirror_ratio"] == 1.0
     assert budget["reference_current_a"] == pytest.approx(2e-5)
@@ -2068,7 +2068,7 @@ def test_parse_topology_budget_mirror_ratio_scales_reference_current():
     knob: a 4:1 tail mirror sources the same tail current from a quarter of
     the reference current, while each input-pair leg still carries half the
     tail current."""
-    budget = size._parse_topology_budget(
+    budget = size_topology._parse_topology_budget(
         {"tail_current_a": 2e-5, "tail_mirror_ratio": 4}
     )
 
@@ -2077,15 +2077,15 @@ def test_parse_topology_budget_mirror_ratio_scales_reference_current():
 
 
 def test_topology_instances_cover_every_role_with_one_control_each():
-    roles = {role for _key, _inst, role, _ctl in size.TOPOLOGY_INSTANCES}
+    roles = {role for _key, _inst, role, _ctl in size_topology.TOPOLOGY_INSTANCES}
     assert roles == set(size.TOPOLOGY_ROLES)
     for role in size.TOPOLOGY_ROLES:
         controls = [
             key
-            for key, _inst, entry_role, is_control in size.TOPOLOGY_INSTANCES
+            for key, _inst, entry_role, is_control in size_topology.TOPOLOGY_INSTANCES
             if entry_role == role and is_control
         ]
-        assert controls == [size._ROLE_CONTROL_INSTANCE[role]]
+        assert controls == [size_topology._ROLE_CONTROL_INSTANCE[role]]
 
 
 def test_invert_curve_interpolates_within_the_swept_range():
@@ -2093,7 +2093,7 @@ def test_invert_curve_interpolates_within_the_swept_range():
         {"w_um": 1.0, "gm_id": 5.0},
         {"w_um": 4.0, "gm_id": 15.0},
     ]
-    w_um, feasible, note = size._invert_curve(curve, 10.0)
+    w_um, feasible, note = size_topology._invert_curve(curve, 10.0)
 
     assert feasible is True
     assert note == ""
@@ -2105,7 +2105,7 @@ def test_invert_curve_clamps_to_the_closest_boundary_when_unreachable():
         {"w_um": 1.0, "gm_id": 5.0},
         {"w_um": 4.0, "gm_id": 15.0},
     ]
-    w_um, feasible, note = size._invert_curve(curve, 40.0)
+    w_um, feasible, note = size_topology._invert_curve(curve, 40.0)
 
     assert feasible is False
     assert w_um == 4.0
@@ -2159,7 +2159,7 @@ def test_parse_topology_log_groups_instances_and_node_voltages():
         ]
     )
 
-    points, nodes = size._parse_topology_log(log_text)
+    points, nodes = size_topology._parse_topology_log(log_text)
 
     assert points["tail"]["gm_s"] == pytest.approx(1.5e-4)
     assert points["input_a"]["id_a"] == pytest.approx(1.0e-5)
@@ -2174,15 +2174,15 @@ def test_write_topology_deck_assembles_the_real_coupled_circuit(tmp_path):
     """The joint deck must be the *actual* topology -- six instances, a
     diode-connected tail replica, the DC-only feedback network that holds
     the output at the common-mode point -- not a per-device surrogate."""
-    devices = size._parse_topology_devices(
+    devices = size_topology._parse_topology_devices(
         _base_topology_request()["devices"], "diff_pair_mirror_tail"
     )
-    budget = size._parse_topology_budget(
+    budget = size_topology._parse_topology_budget(
         {"tail_current_a": 2e-5, "tail_mirror_ratio": 4}
     )
     deck_path = tmp_path / "joint.cir"
 
-    size._write_topology_deck(
+    size_topology._write_topology_deck(
         deck_path=str(deck_path),
         devices=devices,
         widths_um={"tail": 3.0, "input_pair": 4.0, "mirror": 5.0},
@@ -2208,7 +2208,7 @@ def test_write_topology_deck_assembles_the_real_coupled_circuit(tmp_path):
     assert "Lfb out inn" in deck
     assert "Cfb inn cm" in deck
     # Every instance instrumented, plus the coupled node voltages.
-    for key, _instance, _role, _control in size.TOPOLOGY_INSTANCES:
+    for key, _instance, _role, _control in size_topology.TOPOLOGY_INSTANCES:
         assert f"KLT_SIZE_INSTANCE {key}" in deck
     assert "print v(out)" in deck
 
@@ -2260,11 +2260,11 @@ def test_run_size_topology_solves_every_device_jointly(tmp_path):
     # Three solved widths shared by six reported instances.
     assert set(report["roles"]) == set(size.TOPOLOGY_ROLES)
     assert set(report["devices"]) == {
-        key for key, _i, _r, _c in size.TOPOLOGY_INSTANCES
+        key for key, _i, _r, _c in size_topology.TOPOLOGY_INSTANCES
     }
     for role in size.TOPOLOGY_ROLES:
         assert report["roles"][role]["w_um"] > 0
-    for key, _instance, role, _control in size.TOPOLOGY_INSTANCES:
+    for key, _instance, role, _control in size_topology.TOPOLOGY_INSTANCES:
         entry = report["devices"][key]
         assert entry["role"] == role
         assert entry["operating_point"]["w_um"] == report["roles"][role]["w_um"]
@@ -2280,7 +2280,7 @@ def test_run_size_topology_solves_every_device_jointly(tmp_path):
     # diode-connected surrogate.
     tol = report["tolerance"]["gm_id_rel"]
     for role in size.TOPOLOGY_ROLES:
-        control = report["devices"][size._ROLE_CONTROL_INSTANCE[role]]
+        control = report["devices"][size_topology._ROLE_CONTROL_INSTANCE[role]]
         assert abs(control["margins"]["gm_id_rel_error"]) <= tol
         assert control["operating_point"]["gm_id"] == pytest.approx(
             report["roles"][role]["target_gm_id"], rel=tol
@@ -2500,7 +2500,7 @@ def _measure_canary_gm_id(tmp_path: Path) -> dict[str, float]:
     current: str | None = None
     for raw in log.read_text(errors="replace").splitlines():
         line = raw.strip()
-        marker = size._INSTANCE_MARKER_RE.match(line)
+        marker = size_topology._INSTANCE_MARKER_RE.match(line)
         if marker:
             current = marker.group(1)
             values[current] = {}
@@ -2639,7 +2639,7 @@ def test_reproduces_canary_5t_ota_topology_jointly(tmp_path):
     # (1) Reproduces the spec, confirmed by ngspice on the assembled circuit.
     tol = report["tolerance"]["gm_id_rel"]
     for role in size.TOPOLOGY_ROLES:
-        control = report["devices"][size._ROLE_CONTROL_INSTANCE[role]]
+        control = report["devices"][size_topology._ROLE_CONTROL_INSTANCE[role]]
         assert control["operating_point"]["gm_id"] == pytest.approx(
             reference_gm_id[role], rel=tol
         ), f"{role}: {control['rationale']}"
@@ -2739,7 +2739,7 @@ def _measure_bandgap_bias_mirror_gm_id(tmp_path: Path) -> dict[str, float]:
     current: str | None = None
     for raw in log.read_text(errors="replace").splitlines():
         line = raw.strip()
-        marker = size._INSTANCE_MARKER_RE.match(line)
+        marker = size_topology._INSTANCE_MARKER_RE.match(line)
         if marker:
             current = marker.group(1)
             values[current] = {}
@@ -2921,7 +2921,7 @@ def _measure_pll_charge_pump_gm_id(tmp_path: Path) -> dict[str, dict[str, float]
     current: str | None = None
     for raw in log.read_text(errors="replace").splitlines():
         line = raw.strip()
-        marker = size._INSTANCE_MARKER_RE.match(line)
+        marker = size_topology._INSTANCE_MARKER_RE.match(line)
         if marker:
             current = marker.group(1)
             values[current] = {}
