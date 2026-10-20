@@ -878,14 +878,20 @@ collects:
 | `job_id`, `bucket`, `region`, `jobs_prefix`, `job_uri` | Where the job lives |
 | `launched_at` | UTC time the launch returned |
 | `request_sha256` | Digest of the request document, to tie a later read back to it |
-| `unit_count` | Corners × Monte Carlo samples in the job |
-| `job_ceiling` | The pre-submit whole-job-ceiling assessment (same object as `environment.remote.job_ceiling`) |
+| `unit_count` | Corners × Monte Carlo samples in the job (the number of `decks` for a deck-list request) |
+| `job_ceiling` | The pre-submit whole-job-ceiling assessment (same object as `environment.remote.job_ceiling`); `null` for a deck-list request, which does not assess one |
 
 It is one job only. Anything it cannot represent as one job fails **before any
 S3 write** with `error.code: "submit_only_unsupported"`: a non-`batch`
 backend, `--hosts`/`remote.hosts` > 1 (a sharded run would need one job id per
-shard), `--plot`, or a deck-list request. `--resume` is already refused on the
-batch backend.
+shard), or `--plot`. `--resume` is already refused on the batch backend.
+
+A **deck-list request** (`decks`, [#3958](https://github.com/2AMLogic/klayout-tools/issues/3958))
+is one job with one job id, so it supports the same flow: `--submit-only`
+uploads and launches the single deck job and returns the payload above
+(`unit_count` = number of decks, `job_ceiling: null`), `--job-status` reads its
+state, and `--attach` (below) collects the deck report. A long seeded deck
+campaign can therefore detach from the launching session and be collected later.
 
 `--job-status JOB_ID` makes one `status.json` read (the positional request only
 supplies the bucket/region/profile) and exits `0` whatever the *job's* state —
@@ -945,8 +951,12 @@ job was submitted from — the request supplies the unit list and the
 measurement limits; it is not re-uploaded. A job id with no `job.json` in the
 bucket fails with exit `1` and `error.code: "batch_unknown_job"`. `--attach`
 applies to a single-job `batch` run only: it is refused for other backends,
-for sharded (`hosts > 1`) runs, for deck-list requests, and with
-`--batch-set` or `--submit-only`.
+for sharded (`hosts > 1`) runs, and with `--batch-set` or `--submit-only`.
+For a deck-list request, `--attach` returns the same deck report a blocking
+run would (unit trees installed under the outdir, `environment.remote` filled
+in); the request must declare the same decks the job ran, or it fails with
+`error.code: "attach_request_mismatch"`. `--resume` and `--wait-for-capacity`
+are refused with either flag.
 
 ### Capacity refusal and `batch_no_capacity`
 
@@ -2120,7 +2130,10 @@ The corner-only CLI knobs are likewise refused for deck requests:
 `--hosts`, `--budget-s`, `--plot`, `--fail-fast-probe`, and
 `--fail-on-diagnostic`. `--resume` (`options.resume`) is **accepted** on
 `local`, `local-parallel` and `batch` with deck-specific semantics — see
-"Resuming a deck run" below — and refused on `remote`.
+"Resuming a deck run" below — and refused on `remote`. `--submit-only` and
+`--attach <job_id>` apply to a deck list on the `batch` backend (one job, one
+job id; see "Asynchronous submit and status"); they cannot be combined with
+`--resume`.
 
 ### Preservation and isolation
 

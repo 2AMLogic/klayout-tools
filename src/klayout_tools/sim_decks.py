@@ -85,7 +85,14 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
-from . import _provenance, remote_transport, sim_batch, sim_remote, sim_staging
+from . import (
+    _provenance,
+    remote_transport,
+    sim_batch,
+    sim_batch_async,
+    sim_remote,
+    sim_staging,
+)
 from .remote_launcher import ASSUMED_THREADS_PER_CORNER, RemoteLauncher
 
 #: Top-level request field that marks a deck-list request.
@@ -1817,22 +1824,15 @@ def _recover_failed_deck_job(
     )
 
 
-def _run_decks_batch(
+def _prepare_decks_batch(
     request: dict[str, Any],
     files: list[sim_staging.StagedFile],
     worker_request: dict[str, Any],
-    *,
-    outdir: str,
-) -> dict[str, Any]:
-    """Submit the deck list to 2am's EDA batch fleet as one job and collect
-    its report -- the batch analog of :func:`_run_decks_remote`, reusing
-    the batch transport primitives (submit/launch/poll/collect and the
-    runner-identity preflight) exactly as the corner backend does. Job
-    timeout is the fully-serial worst case (every unit's own timeout, one
-    after another) plus slack; the fleet's own ``$EDA_JOB_CONCURRENCY``
-    sizing still makes a real run far faster."""
-    from .sim import SimError
-
+) -> tuple[sim_batch.BatchConfig, sim_batch.BatchJobSpec]:
+    """Resolve the batch config and build the one job spec for a deck list,
+    before any S3 write. Job timeout is the fully-serial worst case (every
+    unit's own timeout, one after another) plus slack; the fleet's own
+    ``$EDA_JOB_CONCURRENCY`` sizing still makes a real run far faster."""
     units = worker_request[DECKS_FIELD]
     serial_worst_s = sum(unit["timeout_s"] for unit in units)
     config = sim_batch._resolve_batch_config(
@@ -1862,66 +1862,166 @@ def _run_decks_batch(
             ),
         ),
     )
+    return config, spec
+
+
+def _collect_decks_batch(
+    config: sim_batch.BatchConfig,
+    job_id: str,
+    worker_request: dict[str, Any],
+    *,
+    outdir: str,
+) -> dict[str, Any]:
+    """Poll ``job_id`` to a terminal state and collect its deck report --
+    the second half of a blocking batch run, and the whole of ``--attach``.
+    Raises :class:`~klayout_tools.sim_batch.BatchError` on a transport
+    failure; a failed or timed-out job returns a report instead."""
+    units = worker_request[DECKS_FIELD]
+    try:
+        status = sim_batch.poll_status(config, job_id)
+    except sim_batch.BatchPollTimeout as exc:
+        _install_unit_trees(units, outdir=outdir, source_root=None)
+        return _synthesized_deck_report(
+            worker_request,
+            code=(
+                "batch_job_interrupted"
+                if isinstance(exc, sim_batch.BatchJobInterrupted)
+                else "batch_poll_timeout"
+            ),
+            message=str(exc),
+            outdir=outdir,
+            environment={
+                "provider": "aws-batch-fleet",
+                "job_id": job_id,
+                "region": config.region,
+                "state": exc.last_state,
+                **(
+                    {"interrupted_s": round(exc.interrupted_s, 1)}
+                    if isinstance(exc, sim_batch.BatchJobInterrupted)
+                    else {}
+                ),
+            },
+        )
+    environment = {
+        **sim_batch._batch_environment(config, job_id, status),
+        **sim_batch._read_runner_identity(None),
+    }
+    if status.get("state") != "done" and (
+        sim_batch._status_exit_code(status)
+        not in sim_batch._BATCH_SIM_SUCCESS_EXIT_CODES
+    ):
+        recovered = _recover_failed_deck_job(
+            config, job_id, worker_request, status, outdir=outdir, runner=None
+        )
+        recovered["outdir"] = os.path.abspath(outdir)
+        recovered.setdefault("environment", {})["remote"] = environment
+        return recovered
+    with tempfile.TemporaryDirectory(prefix="klt-batch-outputs-") as collected:
+        sim_batch.collect_outputs(config, job_id, collected)
+        report = _read_deck_report(collected)
+        environment = {
+            **sim_batch._batch_environment(config, job_id, status),
+            **sim_batch._read_runner_identity(collected),
+        }
+        _install_unit_trees(
+            units,
+            outdir=outdir,
+            source_root=os.path.join(collected, sim_batch.BATCH_ARTIFACTS_DIRNAME),
+        )
+    report["outdir"] = os.path.abspath(outdir)
+    report["backend"] = "batch"
+    report.setdefault("environment", {})["remote"] = environment
+    return report
+
+
+def _run_decks_batch(
+    request: dict[str, Any],
+    files: list[sim_staging.StagedFile],
+    worker_request: dict[str, Any],
+    *,
+    outdir: str,
+) -> dict[str, Any]:
+    """Submit the deck list to 2am's EDA batch fleet as one job and collect
+    its report -- the batch analog of :func:`_run_decks_remote`, reusing
+    the batch transport primitives (submit/launch/poll/collect and the
+    runner-identity preflight) exactly as the corner backend does."""
+    from .sim import SimError
+
+    config, spec = _prepare_decks_batch(request, files, worker_request)
     job_id = sim_batch.new_job_id()
     try:
         sim_batch.submit_job(config, job_id, spec)
         sim_batch.launch_job(config, job_id)
-        try:
-            status = sim_batch.poll_status(config, job_id)
-        except sim_batch.BatchPollTimeout as exc:
-            _install_unit_trees(units, outdir=outdir, source_root=None)
-            return _synthesized_deck_report(
-                worker_request,
-                code=(
-                    "batch_job_interrupted"
-                    if isinstance(exc, sim_batch.BatchJobInterrupted)
-                    else "batch_poll_timeout"
-                ),
-                message=str(exc),
-                outdir=outdir,
-                environment={
-                    "provider": "aws-batch-fleet",
-                    "job_id": job_id,
-                    "region": config.region,
-                    "state": exc.last_state,
-                    **(
-                        {"interrupted_s": round(exc.interrupted_s, 1)}
-                        if isinstance(exc, sim_batch.BatchJobInterrupted)
-                        else {}
-                    ),
-                },
-            )
-        environment = {
-            **sim_batch._batch_environment(config, job_id, status),
-            **sim_batch._read_runner_identity(None),
-        }
-        if status.get("state") != "done" and (
-            sim_batch._status_exit_code(status)
-            not in sim_batch._BATCH_SIM_SUCCESS_EXIT_CODES
-        ):
-            recovered = _recover_failed_deck_job(
-                config, job_id, worker_request, status, outdir=outdir, runner=None
-            )
-            recovered["outdir"] = os.path.abspath(outdir)
-            recovered.setdefault("environment", {})["remote"] = environment
-            return recovered
-        with tempfile.TemporaryDirectory(prefix="klt-batch-outputs-") as collected:
-            sim_batch.collect_outputs(config, job_id, collected)
-            report = _read_deck_report(collected)
-            environment = {
-                **sim_batch._batch_environment(config, job_id, status),
-                **sim_batch._read_runner_identity(collected),
-            }
-            _install_unit_trees(
-                units,
-                outdir=outdir,
-                source_root=os.path.join(collected, sim_batch.BATCH_ARTIFACTS_DIRNAME),
-            )
+        return _collect_decks_batch(config, job_id, worker_request, outdir=outdir)
     except sim_batch.BatchError as exc:
         raise SimError(f"batch backend failed: {exc}", code=exc.code) from exc
-    report["outdir"] = os.path.abspath(outdir)
-    report["backend"] = "batch"
-    report.setdefault("environment", {})["remote"] = environment
+
+
+def _submit_decks_batch_only(
+    request: dict[str, Any],
+    files: list[sim_staging.StagedFile],
+    worker_request: dict[str, Any],
+    *,
+    artifacts_dir: str | None,
+) -> dict[str, Any]:
+    """``--submit-only`` for a deck list (issue #3958): upload and launch the
+    one deck job and return its identity without polling or collecting.
+    ``job_ceiling`` is ``None`` -- the deck path does not assess one."""
+    from .sim import SimError
+
+    try:
+        config, spec = _prepare_decks_batch(request, files, worker_request)
+    except sim_batch.BatchError as exc:
+        raise SimError(f"batch backend failed: {exc}", code=exc.code) from exc
+    return sim_batch_async.launch_prepared_job(
+        request=request,
+        config=config,
+        spec=spec,
+        unit_count=len(worker_request[DECKS_FIELD]),
+        job_ceiling=None,
+        artifacts_dir=artifacts_dir,
+    )
+
+
+def _attach_decks_batch(
+    request: dict[str, Any],
+    worker_request: dict[str, Any],
+    job_id: str,
+    *,
+    outdir: str,
+) -> dict[str, Any]:
+    """``--attach <job_id>`` for a deck list (issue #3958): stage, upload and
+    launch nothing; confirm the job exists, then poll and collect it exactly
+    as a blocking run would. The request must be the one the job was
+    submitted from -- it names the unit directories installed under
+    ``outdir``; a collected report whose units differ is refused."""
+    from .sim import SimError
+
+    units = worker_request[DECKS_FIELD]
+    serial_worst_s = sum(unit["timeout_s"] for unit in units)
+    try:
+        config = sim_batch._resolve_batch_config(
+            request, corner_count=1, timeout_s=serial_worst_s
+        )
+        if not sim_batch.job_exists(config, job_id):
+            raise sim_batch.BatchError(
+                f"no batch job {job_id!r} in the configured bucket under "
+                f"prefix {config.jobs_prefix!r} (never submitted, wrong "
+                "bucket/profile/region, or expired)",
+                code=sim_batch.BATCH_UNKNOWN_JOB_CODE,
+            )
+        report = _collect_decks_batch(config, job_id, worker_request, outdir=outdir)
+    except sim_batch.BatchError as exc:
+        raise SimError(f"batch backend failed: {exc}", code=exc.code) from exc
+    expected = [unit["id"] for unit in units]
+    actual = [unit.get("id") for unit in report["units"]]
+    if actual != expected:
+        raise SimError(
+            f"batch job {job_id!r} ran decks {actual} but this request "
+            f"declares {expected}: --attach needs the request the job was "
+            "submitted from",
+            code="attach_request_mismatch",
+        )
     return report
 
 
@@ -1946,6 +2046,8 @@ def run_deck_request(
     max_workers: int | None = None,
     artifacts_dir: str | None = None,
     resume: bool = False,
+    submit_only: bool = False,
+    attach_job_id: str | None = None,
 ) -> dict[str, Any]:
     """Run a validated-in-shape deck-list request on ``backend`` and return
     the deck-list report (the dict ``klt sim`` emits through the shared
@@ -1964,6 +2066,12 @@ def run_deck_request(
     every unit whose ``<outdir>/<id>/unit.json`` completion record matches
     the unit's current key and still verifies on disk, and reports it with
     ``resumed: true``; the rest run as usual.
+
+    ``submit_only`` / ``attach_job_id`` (issue #3958; ``batch`` only -- the
+    caller refuses every other combination) split the one deck job at the
+    launch/poll seam: submit-only returns the ``status: "submitted"``
+    payload of :func:`sim_batch_async.launch_prepared_job`; attach collects
+    an already-submitted job's report.
     """
     from .sim import (
         SimError,
@@ -1973,6 +2081,12 @@ def run_deck_request(
         apply_engine_host,
     )
 
+    if resume and (submit_only or attach_job_id is not None):
+        raise SimError(
+            "--resume/options.resume cannot be combined with --submit-only or "
+            "--attach for a deck-list request -- the submitted job is one "
+            "unit of work that is collected whole"
+        )
     if max_workers is not None and (
         not isinstance(max_workers, int)
         or isinstance(max_workers, bool)
@@ -2016,6 +2130,14 @@ def run_deck_request(
         files, worker_request = stage_deck_job(request, request_dir=request_dir)
         if backend == "remote":
             report = _run_decks_remote(request, files, worker_request, outdir=outdir)
+        elif submit_only:
+            return _submit_decks_batch_only(
+                request, files, worker_request, artifacts_dir=artifacts_dir
+            )
+        elif attach_job_id is not None:
+            report = _attach_decks_batch(
+                request, worker_request, attach_job_id, outdir=outdir
+            )
         elif not pending:
             report = _build_deck_report(
                 units=[],

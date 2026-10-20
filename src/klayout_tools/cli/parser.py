@@ -664,7 +664,7 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
             "identity (job_id, bucket, region, launched_at, request_sha256) "
             "and exit 0 immediately -- no polling, no collection (issue "
             "#3073). Read the job later with --job-status. One job only: "
-            "refused with --hosts > 1, --resume, --plot, a deck request, or "
+            "refused with --hosts > 1, --resume, --plot, or "
             "a non-batch backend. See docs/cli/sim.md 'Asynchronous submit'."
         ),
     )

@@ -132,7 +132,6 @@ def submit_only(
         unit_count=len(corner_points), per_unit_timeout_s=timeout_s, config=config
     )
     _enforce_job_ceiling(job_ceiling)
-    job_id = new_job_id()
     try:
         spec = _prepare_batch_job_spec(
             request,
@@ -144,6 +143,37 @@ def submit_only(
             want_waveforms=want_waveforms,
             request_dir=request_dir,
         )
+    except BatchError as exc:
+        raise SimError(f"batch backend failed: {exc}", code=exc.code) from exc
+    return launch_prepared_job(
+        request=request,
+        config=config,
+        spec=spec,
+        unit_count=len(corner_points),
+        job_ceiling=job_ceiling,
+        artifacts_dir=artifacts_dir,
+        runner=runner,
+    )
+
+
+def launch_prepared_job(
+    *,
+    request: dict[str, Any],
+    config: BatchConfig,
+    spec: Any,
+    unit_count: int,
+    job_ceiling: dict[str, Any] | None,
+    artifacts_dir: str | None = None,
+    runner: remote_transport.CommandRunner | None = None,
+) -> dict[str, Any]:
+    """Upload and launch an already-built job spec, then return the
+    ``status: "submitted"`` payload. Shared by the corner and deck-list
+    paths (issue #3958); ``job_ceiling`` is ``None`` where the path does not
+    assess one (the deck-list path today)."""
+    from .sim import SimError
+
+    job_id = new_job_id()
+    try:
         submit_job(config, job_id, spec, runner=runner)
         launch_job(config, job_id, runner=runner)
     except BatchError as exc:
@@ -174,7 +204,7 @@ def submit_only(
         "job_uri": job_uri(config, job_id),
         "launched_at": launched_at,
         "request_sha256": digest,
-        "unit_count": len(corner_points),
+        "unit_count": unit_count,
         "job_ceiling": job_ceiling,
     }
 
