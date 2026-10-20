@@ -777,8 +777,9 @@ class _ResistanceGraphCollector:
     method is a no-op when ``enabled`` is false, so the caller stays
     branch-free and the default path does no graph work and adds no key."""
 
-    def __init__(self, enabled: bool) -> None:
+    def __init__(self, enabled: bool, r_cut_ohm: float | None = None) -> None:
         self._enabled = enabled
+        self._r_cut_ohm = r_cut_ohm
         self._roles: dict[
             Any, list[tuple[str, float | None, kdb.Region, kdb.Region | None]]
         ] = {}
@@ -810,6 +811,7 @@ class _ResistanceGraphCollector:
                 *self._landings[net],
                 dbu,
                 entry["resistance_ohm"],
+                self._r_cut_ohm,
             )
 
 
@@ -817,6 +819,37 @@ def _copy_resistance_graph(entry: dict[str, Any], report_net: dict[str, Any]) ->
     """Carry the opt-in ``resistance_graph`` key onto a report net, if present."""
     if "resistance_graph" in entry:
         report_net["resistance_graph"] = entry["resistance_graph"]
+
+
+def _with_selected_resistance(report: dict[str, Any]) -> dict[str, Any]:
+    """Add the additive scalar-selection provenance (issue #2983).
+
+    The graph result is selected only when the net has exactly two terminals,
+    the solve is ``ok`` and the pair resistance is a number. Anything else
+    (``unsupported``, ``skipped``, three or more terminals, a disconnected
+    pair) keeps the legacy scalar, and ``resistance_source_reason`` says why.
+    ``resistance_ohm`` itself is never changed; this only reports which value
+    a caller that wants the topology-aware scalar should read."""
+    terminals = report["terminals"]
+    pair = report["pair_resistance_ohm"]
+    selected: float | None = None
+    if report["status"] != "ok":
+        reason = f"graph_status_{report['status']}"
+    elif len(terminals) != 2:
+        reason = "terminal_count_not_two"
+    else:
+        selected = pair[0][1]
+        reason = (
+            "pair_resistance_unavailable" if selected is None else "two_terminal_graph"
+        )
+    if selected is None:
+        report["selected_resistance_ohm"] = report["legacy_resistance_ohm"]
+        report["resistance_source"] = "legacy"
+    else:
+        report["selected_resistance_ohm"] = selected
+        report["resistance_source"] = "graph"
+    report["resistance_source_reason"] = reason
+    return report
 
 
 def _resistance_graph_report(
@@ -854,25 +887,27 @@ def _resistance_graph_report(
     )
     if interior:
         # Coverage gap, reported rather than solved with a wrong attachment.
-        return {
-            "status": "unsupported",
-            "terminals": [],
-            "pair_resistance_ohm": [],
-            "legacy_resistance_ohm": legacy_resistance_ohm,
-            "nodes": 0,
-            "edges": 0,
-            "diagnostics": [
-                {
-                    "code": "unsupported_geometry",
-                    "message": (
-                        f"{len(interior)} contact/via landing(s) lie in the "
-                        "interior of a conductor; ports are only attached at "
-                        "conductor edges"
-                    ),
-                    "detail": {"interior_landings": interior},
-                }
-            ],
-        }
+        return _with_selected_resistance(
+            {
+                "status": "unsupported",
+                "terminals": [],
+                "pair_resistance_ohm": [],
+                "legacy_resistance_ohm": legacy_resistance_ohm,
+                "nodes": 0,
+                "edges": 0,
+                "diagnostics": [
+                    {
+                        "code": "unsupported_geometry",
+                        "message": (
+                            f"{len(interior)} contact/via landing(s) lie in the "
+                            "interior of a conductor; ports are only attached at "
+                            "conductor edges"
+                        ),
+                        "detail": {"interior_landings": interior},
+                    }
+                ],
+            }
+        )
     role_inputs = [
         RoleInput(name, sheet_res, tuple(region.merged().each()))
         for name, sheet_res, region, _drawn in roles
@@ -889,7 +924,7 @@ def _resistance_graph_report(
         {"code": d.code, "message": d.message, "detail": d.detail} for d in reported
     ]
     diagnostics.sort(key=lambda d: (d["code"], d["message"]))
-    return {
+    report = {
         "status": matrix.status,
         "terminals": list(matrix.terminals),
         "pair_resistance_ohm": [list(row) for row in matrix.pair_resistance_ohm],
@@ -898,6 +933,7 @@ def _resistance_graph_report(
         "edges": len(graph.edges),
         "diagnostics": diagnostics,
     }
+    return _with_selected_resistance(report)
 
 
 def _instance_drawn_mask(
@@ -1082,6 +1118,7 @@ def _compute_parasitics(
     via_index: list[int] | None = None,
     capacitor_top_regions: dict[str, kdb.Region] | None = None,
     resistance_graph: bool = False,
+    resistance_graph_r_cut_ohm: float | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Compute one first-order lumped ``(R, C)`` per net, plus net-to-net
     vertical-overlap coupling capacitance, from the extracted per-net/
@@ -1524,7 +1561,9 @@ def _compute_parasitics(
     contact_layer_index = layer_index.get("contact")
     # `resistance_graph` (issue #2982): each net's per-role geometry and
     # landings, kept only when the opt-in flag is on.
-    graph_collector = _ResistanceGraphCollector(resistance_graph)
+    graph_collector = _ResistanceGraphCollector(
+        resistance_graph, resistance_graph_r_cut_ohm
+    )
 
     for net in nets:
         r_ohm = 0.0
