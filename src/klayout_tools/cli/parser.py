@@ -20,6 +20,7 @@ from . import (
     components_cmd,
     deck_cmd,
     design_centering_cmd,
+    diff_cmd,
     draw_cmd,
     drc_cmd,
     economy_cmd,
@@ -32,8 +33,10 @@ from . import (
     gen_cmd,
     gen_compose_cmd,
     kb_cmd,
+    keepout_check_cmd,
     layers_cmd,
     layout_metrics_cmd,
+    layout_plan_cmd,
     lef_abstract_cmd,
     lvs_cmd,
     mcp_cmd,
@@ -51,6 +54,7 @@ from . import (
     signoff_cmd,
     sim_cmd,
     sim_merge_cmd,
+    sim_plan_cmd,
     size_cmd,
     socket_check_cmd,
     sta_cmd,
@@ -90,6 +94,14 @@ def _parasitic_variant_arg(value: str) -> str:
     outside the closed grammar is a usage error (exit 2)."""
     parse_parasitic_variants([value], argparse.ArgumentTypeError)
     return value
+
+
+def _drc_deck_names_str() -> str:
+    """Like :func:`_deck_names_str` but only the curated-DRC decks -- the
+    names ``get_deck`` accepts (issue #3783); ``asap7`` is extraction-only."""
+    from ..decks import drc_deck_names
+
+    return ", ".join(drc_deck_names())
 
 
 def _deck_names_str() -> str:
@@ -200,6 +212,21 @@ def _add_pdk_args(
     parser.add_argument("--pdk-root", dest="pdk_root", default=None, help=pdk_root_help)
 
 
+def _add_expect_version_arg(parser: argparse.ArgumentParser) -> None:
+    """Register ``--expect-version`` on ``klt pdk find``/``check`` (issue #3810)."""
+    parser.add_argument(
+        "--expect-version",
+        dest="expect_version",
+        default=None,
+        metavar="STAMP_OR_SHA",
+        help=(
+            "assert the installed PDK identity: an open_pdks commit SHA "
+            "(>= 7 hex) or SOURCES stamp, or a fetched-version string. Exit 6 "
+            "(payload still emitted) on mismatch or unknown identity"
+        ),
+    )
+
+
 def create_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="klt",
@@ -223,6 +250,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_layers_parser(subparsers)
 
     _add_stats_parser(subparsers)
+    _add_diff_parser(subparsers)
 
     _add_economy_parser(subparsers)
 
@@ -242,6 +270,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_lef_abstract_parser(subparsers)
 
     _add_ring_check_parser(subparsers)
+    _add_keepout_check_parser(subparsers)
     _add_tap_distance_parser(subparsers)
 
     _add_layout_metrics_parser(subparsers)
@@ -282,11 +311,14 @@ def create_parser() -> argparse.ArgumentParser:
 
     _add_gen_compose_parser(subparsers)
 
+    _add_layout_plan_parser(subparsers)
+
     _add_draw_parser(subparsers)
 
     _add_sim_parser(subparsers)
 
     _add_sim_merge_parser(subparsers)
+    _add_sim_plan_parser(subparsers)
 
     _add_pex_parser(subparsers)
 
@@ -635,7 +667,7 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
             "identity (job_id, bucket, region, launched_at, request_sha256) "
             "and exit 0 immediately -- no polling, no collection (issue "
             "#3073). Read the job later with --job-status. One job only: "
-            "refused with --hosts > 1, --resume, --plot, a deck request, or "
+            "refused with --hosts > 1, --resume, --plot, or "
             "a non-batch backend. See docs/cli/sim.md 'Asynchronous submit'."
         ),
     )
@@ -746,6 +778,20 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     sim_parser.add_argument(
+        "--max-concurrent-jobs",
+        dest="max_concurrent_jobs",
+        type=int,
+        default=None,
+        help=(
+            "backend `batch`, sharded runs: keep at most this many shard "
+            "jobs in flight at once and start the rest as earlier ones "
+            "finish, so a large split does not exceed the fleet's instance "
+            "cap (default: the request's `batch.max_concurrent_jobs`, else "
+            "every shard is submitted at once); overrides the request "
+            "field when given. See docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
         "--budget-s",
         dest="budget_s",
         type=float,
@@ -768,7 +814,13 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
             "resume from a matching on-disk checkpoint (--outdir/"
             "checkpoint.json), skipping corners already completed by a "
             "prior interrupted run of this same request; overrides the "
-            "request's own `options.resume` when given. See docs/cli/sim.md."
+            "request's own `options.resume` when given. For a `decks` "
+            "request, skips each unit whose <outdir>/<id>/unit.json "
+            "completion record still matches and verifies (local, "
+            "local-parallel, batch). With --batch-set, forwarded to every "
+            "request: a sharded request re-attaches to the shard jobs "
+            "recorded in its own directory and resubmits only the lost "
+            "ones. See docs/cli/sim.md."
         ),
     )
     sim_parser.add_argument(
@@ -909,6 +961,35 @@ def _add_sim_merge_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(merge_parser)
     merge_parser.set_defaults(func=sim_merge_cmd.run)
+
+
+def _add_sim_plan_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``sim-plan`` verb (issue #3423).
+
+    The producer side of ``sim-merge``: splits one request by process corner
+    into shard requests plus the manifest ``sim-merge`` consumes. See
+    docs/cli/sim.md "Planning shards".
+    """
+    plan_parser = subparsers.add_parser(
+        "sim-plan",
+        help="split a klt sim request into per-process shards and a sim-merge manifest",
+        description=(
+            "Write one request per corners.process entry plus the shard "
+            "manifest for `klt sim-merge`, next to the source request. The "
+            "manifest's corner ids come from the same expansion `klt sim` "
+            "runs. Monte Carlo and deck-list requests are refused. See "
+            "docs/cli/sim.md 'Planning shards'."
+        ),
+    )
+    plan_parser.add_argument("request", help="klt sim request JSON to split")
+    plan_parser.add_argument(
+        "--axis",
+        choices=["process"],
+        default="process",
+        help="axis to shard by (default: process)",
+    )
+    _add_format_arg(plan_parser)
+    plan_parser.set_defaults(func=sim_plan_cmd.run)
 
 
 def _add_size_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -1150,6 +1231,26 @@ def _add_power_parser(subparsers: argparse._SubParsersAction) -> None:
             "top cell to analyse when the stream has more than one "
             "(required in that case -- klt power operates on exactly one "
             "top cell, unlike klt layers' default of summing across all)"
+        ),
+    )
+    power_parser.add_argument(
+        "--deck",
+        default=None,
+        help=(
+            f"parasitics deck (currently: {_deck_names_str()}) that supplies "
+            "'vias[].resistance_ohm' for any via whose spec entry omits it "
+            "(issue #3400); an explicit spec value always wins. Also "
+            "populates provenance.deck"
+        ),
+    )
+    power_parser.add_argument(
+        "--resistance-corner",
+        default=None,
+        choices=("nominal", "high", "low"),
+        help=(
+            "which of --deck's published interconnect-resistance corners "
+            "defaults a via's resistance (default: nominal). Distinct from "
+            "`klt stackup --corner`'s tech-LEF min/nom/max; requires --deck"
         ),
     )
     _add_format_arg(power_parser)
@@ -3002,6 +3103,32 @@ def _add_lvs_parser(subparsers: argparse._SubParsersAction) -> None:
             "(exit 1) otherwise"
         ),
     )
+    lvs_parser.add_argument(
+        "--deck-file",
+        dest="deck_file",
+        default=None,
+        metavar="PATH",
+        help=(
+            "path to the PDK's KLayout LVS runset for request.engine "
+            "'klayout-runset' (issue #3206); fills request.deck_file, and "
+            "is a clean error (exit 1) if the request already sets it or "
+            "uses another engine. A relative PATH resolves against the "
+            "current directory"
+        ),
+    )
+    lvs_parser.add_argument(
+        "--deck-var",
+        dest="deck_var",
+        action="append",
+        metavar="NAME=VALUE",
+        default=None,
+        help=(
+            "extra '-rd NAME=VALUE' global passed to the runset (engine "
+            "'klayout-runset' only; issue #3206). Repeatable; fills "
+            "request.deck_vars, and is a clean error (exit 1) if the "
+            "request already sets it or uses another engine"
+        ),
+    )
     _add_format_arg(lvs_parser)
     lvs_parser.set_defaults(func=lvs_cmd.run)
 
@@ -3269,6 +3396,22 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "splitting device-representation effects from parasitics. Not "
             "supported with --measure-command. Off by default -- "
             "byte-identical to today's behavior."
+        ),
+    )
+    pex_parser.add_argument(
+        "--extract-only",
+        dest="extract_only",
+        action="store_true",
+        default=False,
+        help=(
+            "extract and report without any measurement leg (issue #3739): "
+            "no testbench or --measure-command is needed, so no placeholder "
+            "measurement lands in delta[]. The response carries "
+            "extraction/body_bias/provenance as usual, testbenches and delta "
+            'are empty, measurement.mode is "extract-only" and status is '
+            "not_checked (exit 4). Cannot be combined with testbenches, "
+            "--measure-command, --reference-netlist, --measure-timeout-s, "
+            "--device-only-leg or --flatten-schematic. Off by default."
         ),
     )
     pex_parser.add_argument(
@@ -3641,6 +3784,30 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
             "existing directory. Only meaningful with --manifest/--fleet. "
             "See docs/cli/signoff.md's 'Grading outside a git checkout' "
             "section."
+        ),
+    )
+    signoff_parser.add_argument(
+        "--allow-generator-exec",
+        action="store_true",
+        help=(
+            "opt in (default off) to running an operator-approved T1 item "
+            "1/2 regeneration generator on the batch runner and "
+            "byte-comparing its output with the committed artifact. Needs "
+            "--generator-approvals (or $KLT_SIGNOFF_GENERATOR_APPROVALS): "
+            "a manifest can never approve its own generator. Trusted-code "
+            "policy, not isolation. Only meaningful with --manifest/--fleet. "
+            "See docs/cli/signoff.md's 'Executing approved generators' "
+            "section."
+        ),
+    )
+    signoff_parser.add_argument(
+        "--generator-approvals",
+        metavar="FILE",
+        help=(
+            "trusted approvals JSON binding each runnable generator's "
+            "interpreter, script content hash, allowed arguments and "
+            "artifact -- operator configuration outside the manifest. Only "
+            "valid with --allow-generator-exec."
         ),
     )
     signoff_parser.add_argument(
@@ -4338,6 +4505,44 @@ def _add_flow_verify_args(
     )
 
 
+def _add_layout_plan_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``layout-plan`` verb with a nested ``execute`` subcommand,
+    mirroring ``wave``'s grouped-verb pattern (see ``_add_wave_parser``).
+
+    A shell wrapper over ``layout_plan_execute.execute_layout_plan_document``;
+    see docs/cli/layout-plan-execute.md.
+    """
+    layout_plan_parser = subparsers.add_parser(
+        "layout-plan",
+        help="execute a netlist-driven klt.layout_plan.request/1 document",
+        description=(
+            "Execute a validated `klt.layout_plan.request/1` document onto "
+            "`klt gen` + `klt gen-compose`, producing a generated/placed/"
+            "routed GDS. Takes a request-document path. See "
+            "docs/cli/layout-plan-execute.md."
+        ),
+    )
+    layout_plan_sub = layout_plan_parser.add_subparsers(
+        dest="layout_plan_command", metavar="<subcommand>"
+    )
+    layout_plan_parser.set_defaults(func=_no_subcommand_handler(layout_plan_parser))
+
+    execute_parser = layout_plan_sub.add_parser(
+        "execute",
+        help="execute a layout-plan request into a composed GDS",
+        description=(
+            "Run a klt.layout_plan.request/1 document: resolve per-group "
+            "params from the netlist, place, route and write the GDS. Exit "
+            "3 when placed but some nets are unrouted or unmapped."
+        ),
+    )
+    execute_parser.add_argument(
+        "request", help="path to a klt.layout_plan.request/1 JSON file"
+    )
+    _add_format_arg(execute_parser)
+    execute_parser.set_defaults(func=layout_plan_cmd.run_execute)
+
+
 def _add_wave_parser(subparsers: argparse._SubParsersAction) -> None:
     """Register the ``wave`` verb with nested ``build``/``query``
     subcommands (Epic #1585, issue #1601), mirroring ``pdk``/``deck``'s
@@ -4408,7 +4613,7 @@ def _add_wave_parser(subparsers: argparse._SubParsersAction) -> None:
 
 def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
     """Register the ``pdk`` verb with nested ``find``/``list``/``env``/
-    ``cells``/``macros``/``corners``/``em-limits``/``pcell-check``/``stackup``
+    ``cells``/``macros``/``decks``/``corners``/``em-limits``/``pcell-check``/``stackup``
     subcommands.
 
     The other verbs are flat; ``pdk`` groups discovery operations under one
@@ -4445,6 +4650,7 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
         pdk_help="variant to resolve (e.g. sky130A); overrides $PDK",
         pdk_root_help="explicit install root; overrides $PDK_ROOT and the search order",
     )
+    _add_expect_version_arg(find_parser)
     _add_format_arg(find_parser)
     find_parser.set_defaults(func=pdk_cmd.run_find)
 
@@ -4504,6 +4710,7 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
         pdk_help="variant to resolve (e.g. sky130A); overrides $PDK",
         pdk_root_help="explicit install root; overrides $PDK_ROOT and the search order",
     )
+    _add_expect_version_arg(check_parser)
     _add_format_arg(check_parser)
     check_parser.set_defaults(func=pdk_cmd.run_check)
 
@@ -4539,10 +4746,11 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
 
     macros_parser = pdk_sub.add_parser(
         "macros",
-        help="report hard-macro IP libraries (`*_fd_ip_*`) and their views",
+        help="report hard-macro IP libraries (`*_fd_ip_*` or lef+lib) and their views",
         description=(
             "Report, per hard-macro IP library (libs.ref entries named "
-            "`*_fd_ip_*`, e.g. an SRAM/ROM compiler output) under the "
+            "`*_fd_ip_*`, or ones shipping both `lef` and `lib` views such as "
+            "IHP's `sg13g2_sram`; e.g. an SRAM/ROM compiler output) under the "
             "resolved variant: which views it ships (GDS, LEF, Liberty "
             "(`lib`), CDL, SPICE, Verilog). This is the sibling command to "
             "`klt pdk cells`, which deliberately excludes these libraries -- "
@@ -4556,6 +4764,26 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(macros_parser)
     macros_parser.set_defaults(func=pdk_cmd.run_macros)
+
+    decks_parser = pdk_sub.add_parser(
+        "decks",
+        help="list the KLayout DRC decks a PDK ships and the -rd globals each reads",
+        description=(
+            "List the `.lydrc`/`.drc` KLayout DRC deck files under the "
+            "resolved variant's libs.tech/klayout/drc, which one `klt drc "
+            "--pdk` runs (`is_default`), and a best-effort static scan of the "
+            "`-rd` globals each consumes (`required_by_caller`, `default`). "
+            "Use it to pick a sibling deck for `klt drc --deck-file` and the "
+            "`--deck-var` flags it needs."
+        ),
+    )
+    _add_pdk_args(
+        decks_parser,
+        pdk_help="variant to resolve (e.g. sky130A); overrides $PDK",
+        pdk_root_help="explicit install root; overrides $PDK_ROOT and the search order",
+    )
+    _add_format_arg(decks_parser)
+    decks_parser.set_defaults(func=pdk_cmd.run_decks)
 
     corners_parser = pdk_sub.add_parser(
         "corners",
@@ -4785,6 +5013,25 @@ def _add_deck_parser(subparsers: argparse._SubParsersAction) -> None:
     _add_format_arg(hash_parser)
     hash_parser.set_defaults(func=deck_cmd.run_hash)
 
+    path_parser = deck_sub.add_parser(
+        "path",
+        help="print the installed path of a deck's standalone DRC script",
+        description=(
+            "Print the absolute path of a built-in deck's standalone KLayout "
+            "DRC-DSL script (issue #3789) -- a file usable as `klt drc "
+            "--engine klayout --deck-file <path>` from a wheel / `uv tool` "
+            "install, where the repo-relative src/ path does not exist. Only "
+            "asap7 ships such a script; the Python rule-table decks exit 1."
+        ),
+    )
+    path_parser.add_argument(
+        "--deck",
+        required=True,
+        help="built-in deck name whose script path to print (asap7)",
+    )
+    _add_format_arg(path_parser)
+    path_parser.set_defaults(func=deck_cmd.run_path)
+
     info_parser = deck_sub.add_parser(
         "info",
         help="report the installed build's own deck content hash, device "
@@ -4838,7 +5085,10 @@ def _add_deck_parser(subparsers: argparse._SubParsersAction) -> None:
     rules_parser.add_argument(
         "--deck",
         required=True,
-        help=f"built-in deck name whose rules to list (e.g. {_deck_names_str()})",
+        help=(
+            "built-in curated-DRC deck name whose rules to list "
+            f"(e.g. {_drc_deck_names_str()})"
+        ),
     )
     rules_parser.add_argument(
         "--rule",
@@ -5314,6 +5564,36 @@ def _add_stats_parser(subparsers: argparse._SubParsersAction) -> None:
     stats_parser.set_defaults(func=stats_cmd.run)
 
 
+def _add_diff_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``diff`` verb: compare two layout streams for equal geometry."""
+    diff_parser = subparsers.add_parser(
+        "diff",
+        help="compare two GDSII/OASIS streams for equal geometry, labels and hierarchy",
+        description=(
+            "Compare two layout streams shape-for-shape. Ignores stream "
+            "timestamps, element order and library name; never ignores "
+            "coordinates, path widths, text, instance transforms, the "
+            "database unit or cell names. Exit 0 = equivalent, 3 = layouts "
+            "differ, 1 = unreadable file or unknown --top."
+        ),
+    )
+    diff_parser.add_argument("file_a", help="first GDSII or OASIS layout file")
+    diff_parser.add_argument("file_b", help="second GDSII or OASIS layout file")
+    diff_parser.add_argument(
+        "--top",
+        default=None,
+        help="compare only this cell's hierarchy (must exist in both streams)",
+    )
+    diff_parser.add_argument(
+        "--max-items",
+        type=int,
+        default=50,
+        help="cap on listed differences per list (counts stay exact; default 50)",
+    )
+    _add_format_arg(diff_parser)
+    diff_parser.set_defaults(func=diff_cmd.run)
+
+
 def _add_economy_parser(subparsers: argparse._SubParsersAction) -> None:
     """Register the ``economy`` verb: quantitative layout-density report (#1012)."""
     economy_parser = subparsers.add_parser(
@@ -5470,7 +5750,7 @@ def _add_layout_metrics_parser(subparsers: argparse._SubParsersAction) -> None:
         default=None,
         help=(
             "DRC deck to run for the drc.violation_count field (currently: "
-            f"{_deck_names_str()}). Omit to skip DRC entirely."
+            f"{_drc_deck_names_str()}). Omit to skip DRC entirely."
         ),
     )
     layout_metrics_parser.add_argument(
@@ -5547,8 +5827,11 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
         "--deck",
         default=None,
         help=(
-            f"DRC deck to run (currently: {_deck_names_str()}). Required for "
-            "--engine curated (the default); ignored for --engine klayout. "
+            f"DRC deck to run (currently: {_drc_deck_names_str()}). Required "
+            "for --engine curated (the default); ignored for --engine "
+            "klayout. ASAP7 DRC is a KLayout script, not a curated deck: "
+            "run it with --engine klayout --deck-file "
+            "src/klayout_tools/decks/asap7.drc (docs/cli/drc.md, 'ASAP7 deck'). "
             "Not validated by argparse -- an unknown deck name exits 1 with "
             "a clean error, per docs/cli/drc.md's exit-code contract, "
             "rather than argparse's usage-error exit 2."
@@ -5559,14 +5842,19 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
         default=None,
         help=(
             "top cell to check when the stream has more than one; omit to "
-            "check every top cell. Not supported yet for --engine klayout."
+            "check every top cell. With --engine klayout, a stream with "
+            "several top cells requires --top (the deck runs against that "
+            "cell's subtree only)."
         ),
     )
     drc_parser.add_argument(
         "--engine",
-        choices=("curated", "klayout"),
+        choices=("curated", "klayout", "both"),
         default="curated",
         help=(
+            "'both' (issue #3973): run the curated deck (--deck) and the "
+            "PDK-native deck on the same layout and report where they "
+            "differ; an unavailable native run is not_checked, never clean. "
             "'curated' (default): klt's own pip-only Region-primitive deck "
             "(--deck required). 'klayout' (issue #565, opt-in): shells out "
             "to a standalone klayout binary on PATH to run a PDK-native "
@@ -6157,6 +6445,76 @@ def _add_ring_check_parser(subparsers: argparse._SubParsersAction) -> None:
     ring_check_parser.set_defaults(func=ring_check_cmd.run)
 
 
+def _add_keepout_check_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``keepout-check`` verb: no forbidden shapes near a guard."""
+    keepout_parser = subparsers.add_parser(
+        "keepout-check",
+        help="assert no forbidden-layer shape lies within a margin of a cell/region",
+        description=(
+            "Assert that no shape on a forbidden layer set lies within a "
+            "margin of a guarded cell or region (a keep-out around a spiral "
+            "inductor, a sensitive analog block, ...) and report each "
+            "intruding shape with its layer and micrometre coordinates. The "
+            "guard is the bounding box of every placement of the --cells "
+            "names and/or the --region window, sized outward by --margin; "
+            "the guarded cells' own shapes are never counted. Purely "
+            "geometric; fully headless via KLayout's batch database API. "
+            "See docs/cli/keepout-check.md."
+        ),
+    )
+    keepout_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
+    keepout_parser.add_argument(
+        "--forbidden",
+        "--layers",
+        dest="forbidden",
+        required=True,
+        help=(
+            "forbidden layer set as a path to a JSON file, or an inline JSON "
+            "array of [layer, datatype] pairs (e.g. '[[67, 20]]'). Not "
+            "validated by argparse -- an empty/malformed value exits 1."
+        ),
+    )
+    keepout_parser.add_argument(
+        "--margin",
+        required=True,
+        help=(
+            "keep-out margin in micrometres (>= 0); a shape at distance "
+            "exactly the margin is clear. Not validated by argparse -- a "
+            "non-numeric or negative value exits 1."
+        ),
+    )
+    keepout_parser.add_argument(
+        "--cells",
+        action="append",
+        default=None,
+        metavar="CELL",
+        help=(
+            "repeatable exact cell name to guard (every placement under each "
+            "checked top cell, by bounding box). At least one of --cells / "
+            "--region is required."
+        ),
+    )
+    keepout_parser.add_argument(
+        "--region",
+        default=None,
+        help=(
+            "guarded window as an inline JSON array of four micrometre "
+            "coordinates [left, bottom, right, top]; may be combined with "
+            "--cells"
+        ),
+    )
+    keepout_parser.add_argument(
+        "--top",
+        default=None,
+        help=(
+            "top cell to check when the stream has more than one; omit to "
+            "check every top cell"
+        ),
+    )
+    _add_format_arg(keepout_parser)
+    keepout_parser.set_defaults(func=keepout_check_cmd.run)
+
+
 def _add_netlist_parser(subparsers: argparse._SubParsersAction) -> None:
     """Register the ``netlist`` verb: xschem schematic -> SPICE netlist, and
     the ``--check`` staleness gate over a committed netlist (issue #55)."""
@@ -6382,7 +6740,7 @@ def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
         default=None,
         help=(
             "PDK antenna-ratio limit table to check each level's "
-            "antenna_ratio against (currently: sky130). Optional -- omit "
+            "antenna_ratio against (currently: sky130, ihp-sg13g2). Optional -- omit "
             "to still report every level's antenna_ratio, just with "
             "verdict 'unchecked' everywhere. Not validated by argparse -- "
             "an unknown name exits 1 with a clean error, per "

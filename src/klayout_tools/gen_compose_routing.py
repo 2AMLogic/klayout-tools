@@ -47,6 +47,7 @@ from __future__ import annotations
 import math
 from typing import Any, NamedTuple
 
+from ._unionfind import UnionFind
 from .decks import (
     ExtractionDeck,
     UnknownDeckError,
@@ -2017,8 +2018,10 @@ def _drawn_leg_footprint_region(
 
     region = _drawn_route_region(points_um, width_um, dbu)
 
-    landing_half_dbu = int(round((_VIA_LANDING_SIZE_UM / 2.0) / dbu))
     for drop in via_drops:
+        landing_half_dbu = int(
+            round((_VIA_LANDING_SIZE_UM + _drop_array_extra_um(drop)) / 2.0 / dbu)
+        )
         landing_layers = drop.get("landing_layers")
         if (
             route_layer is not None
@@ -2088,11 +2091,13 @@ def _drawn_leg_intermediate_pad_regions(
     if route_layer is None:
         return regions
 
-    landing_half_dbu = int(round((_VIA_LANDING_SIZE_UM / 2.0) / dbu))
     for drop in via_drops:
         landing_layers = drop.get("landing_layers")
         if not landing_layers:
             continue
+        landing_half_dbu = int(
+            round((_VIA_LANDING_SIZE_UM + _drop_array_extra_um(drop)) / 2.0 / dbu)
+        )
         cx = int(round(drop["x_um"] / dbu))
         cy = int(round(drop["y_um"] / dbu))
         box = kdb.Box(
@@ -2367,6 +2372,364 @@ def _zero_junction_stubs(
         0.0 if port_a.get("junction") else stub_a_um,
         0.0 if port_b.get("junction") else stub_b_um,
     )
+
+
+# Self-net pad-crossing check (#433) and self-net drawn-metal check
+# (#453/#469), factored into a closure parameterised on which layer (and,
+# since issue #1620, which width) is under test: issue #1168 retries
+# these two checks (and only these two -- the ones the checks' own
+# rejection text below points a caller at a "layer_role with a metal2/via
+# stack") against an optional ``cross_block_route_layer`` when the
+# primary ``route_layer`` rejects, so a same-block bus that must cross an
+# intermediate pad on the same drawing layer can escape to the configured
+# second metal instead of failing outright. See the retry drive code just
+# below this def.
+def _same_layer_short_reason(
+    effective_route_layer: tuple[int, int] | None,
+    effective_block_geometry: dict[str, dict[str, Any] | None] | None,
+    effective_width_um: float,
+    *,
+    pin_a: dict[str, Any],
+    pin_b: dict[str, Any],
+    blocks: dict[str, dict[str, Any]],
+    offsets_um: dict[str, dict[str, float]],
+    points: list[tuple[float, float]],
+    waypoints_um: list[tuple[float, float]] | None,
+    a: tuple[float, float],
+    b: tuple[float, float],
+    va: tuple[int, int],
+    dir_a: int,
+    dir_b: int,
+    own_a: str,
+    own_b: str,
+    block_a: dict[str, Any],
+    block_b: dict[str, Any],
+    same_block_self_net: bool,
+    margin_eps_um: float,
+) -> str | None:
+    # Looked up at call time, as ``route_two_pin`` does: the test suite's
+    # ``klayout_tools.gen_compose.<name>`` re-export takes effect here.
+    from .gen_compose import _port_has_geometry
+
+    # Self-net pad-crossing check (#433): the whole-block bbox check below
+    # skips a self-net's own block entirely (a same-block net's backbone
+    # is, by construction, always inside its own block's bbox -- that
+    # check would otherwise reject every self-net). But skipping it also
+    # means nothing else was checking whether the backbone runs straight
+    # over one of that block's *other* pads -- exactly what happens
+    # bussing an array's unit devices (e.g. chaining a bjt_array's
+    # emitters): a same-layer pad in the backbone's path shorts to it,
+    # silently, since a self-net was never compared against the block's
+    # own ports[] at all. Approximate each other port on this block as a
+    # square pad footprint (side length its own reported ``width_um``,
+    # centered on its position), *inflated* by the route's own trace
+    # half-width on every side -- ``_segment_bbox_interior_overlap_um``
+    # treats a backbone segment as a zero-width centerline, but the wire
+    # actually drawn is ``width_um`` wide, so a centerline that merely
+    # passes within ``width_um / 2`` of a pad's edge still draws metal on
+    # top of it. This Minkowski-sum inflation is what makes the check
+    # actually catch pads much narrower than the route (e.g. a bjt_array
+    # base contact's reported ``width_um`` alone is too small to reach a
+    # jog stubbed out by the route's own width -- only their sum is).
+    # Reject the route if the backbone overlaps this inflated footprint's
+    # interior -- mirroring the bbox-interior accounting above, just
+    # against a pad instead of a whole block.
+    #
+    # Same-direction degenerate-jog check (#453): the inflated-footprint
+    # test above models each other port as a square of side its
+    # *reported* ``width_um``. For an array unit's own pad that badly
+    # *under*-estimates the real drawn metal in the port's facing
+    # direction -- e.g. a bjt_array base-tie tap draws li1 metal several
+    # times taller than its reported ``width_um`` (the reported width is
+    # roughly the contact size, not the pad extent). When both pins face
+    # the *same* direction and share the coordinate along that facing
+    # axis (same row for a vertical facing, same column for a horizontal
+    # one), ``manhattan_backbone()`` collapses to a single straight jog
+    # lifted just one stub width (``width_um``) to the ports' outward
+    # side -- so a route wide enough that the jog clears the under-sized
+    # reported square still plows straight through the real pad of any
+    # intervening same-facing port. That is exactly the reproduction in
+    # #453 (bussing two same-row north-facing bjt_array emitters across
+    # the intervening unit's north-facing base-tie pad composed
+    # ``routed: true`` and DRC-clean while extraction showed the whole
+    # array's shared base node absorbed into the emitter net). Treat any
+    # other same-layer port that faces the same direction and sits
+    # strictly between the two pins along the perpendicular axis (on the
+    # same row/column) as crossed: its pad opens toward the jog, so
+    # bussing across it draws a silent short regardless of how small its
+    # reported ``width_um`` is.
+    if same_block_self_net:
+        own_ports = blocks[own_a].get("ports") or {}
+        own_offset = offsets_um[own_a]
+        route_half_um = effective_width_um / 2.0
+        skip_port_names = {pin_a["port"], pin_b["port"]}
+        facing_vertical = va[1] != 0
+        # A degenerate single-jog backbone only forms when both pins face
+        # the same direction *and* share their facing-axis coordinate
+        # (same row for a vertical facing, same column for a horizontal
+        # one).
+        same_line = (
+            abs(a[1] - b[1]) < 1e-9 if facing_vertical else abs(a[0] - b[0]) < 1e-9
+        )
+        # Like the channel-width heuristic and the #461 stub lift above,
+        # this conservative fallback is a statement about the
+        # *degenerate single-jog shape* -- it rejects on port positions
+        # alone, without consulting `points`, precisely because that
+        # fixed shape is known to run straight along the ports' own
+        # row/column. Supplying waypoints_um (#634) replaces that shape
+        # with the caller's own path, so the premise no longer holds and
+        # the fallback would reject route-arounds that never go near the
+        # intervening pad. The waypoint-drawn path is still checked
+        # against the same pads by the inflated-footprint test below and
+        # by the drawn-metal check (#453/#469) -- both of which measure
+        # the actual `points`, so a caller whose waypoints really do
+        # cross a pad is still rejected.
+        conservative_same_dir = waypoints_um is None and dir_a == dir_b and same_line
+        for other_name, other_port in own_ports.items():
+            if other_name in skip_port_names or not _port_has_geometry(other_port):
+                continue
+            other_layer = (
+                other_port["layer"]["layer"],
+                other_port["layer"]["datatype"],
+            )
+            if (
+                effective_route_layer is not None
+                and other_layer != effective_route_layer
+            ):
+                continue  # a pad on a different physical layer can't short
+            px = float(other_port["x_um"]) + own_offset["x"]
+            py = float(other_port["y_um"]) + own_offset["y"]
+
+            # #453: an intervening same-facing pad on the jog's own
+            # row/column is crossed no matter how small its reported
+            # footprint is.
+            other_dir = int(other_port.get("direction_deg", 0)) % 360
+            if conservative_same_dir and other_dir == dir_a:
+                if facing_vertical:
+                    between = (
+                        min(a[0], b[0]) < px < max(a[0], b[0]) and abs(py - a[1]) < 1e-9
+                    )
+                else:
+                    between = (
+                        min(a[1], b[1]) < py < max(a[1], b[1]) and abs(px - a[0]) < 1e-9
+                    )
+                if between:
+                    axis = "row" if facing_vertical else "column"
+                    return (
+                        f"self-net between two same-facing ports on the "
+                        f"same {axis} jogs directly over block "
+                        f"'{own_a}''s own port '{other_name}' (same "
+                        "facing direction, same drawing layer) -- "
+                        "bussing this net across the block would draw a "
+                        "silent short to that pad's real drawn metal, "
+                        "which extends past its reported width_um "
+                        "footprint in its facing direction; route to a "
+                        "layer_role with a metal2/via stack instead "
+                        "(or configure routing.cross_block_layer_role, "
+                        "issue #1168), or wire this net externally"
+                    )
+
+            pad_w = other_port.get("width_um")
+            if (
+                not isinstance(pad_w, (int, float))
+                or isinstance(pad_w, bool)
+                or (pad_w <= 0)
+            ):
+                # no reported pad size -- fall back to trace width
+                pad_w = effective_width_um
+            half = float(pad_w) / 2.0 + route_half_um
+            pad_bbox_um = {
+                "x0": px - half,
+                "y0": py - half,
+                "x1": px + half,
+                "y1": py + half,
+            }
+            crossed_um = sum(
+                _segment_bbox_interior_overlap_um(seg_p0, seg_p1, pad_bbox_um)
+                for seg_p0, seg_p1 in zip(points, points[1:], strict=False)
+            )
+            if crossed_um > margin_eps_um:
+                return (
+                    f"self-net backbone crosses {crossed_um:.4g}um "
+                    f"through block '{own_a}''s own port '{other_name}' "
+                    "on the same drawing layer -- bussing this net "
+                    "across the block would draw a silent short to that "
+                    "pad; route to a layer_role with a metal2/via stack "
+                    "instead (or configure "
+                    "routing.cross_block_layer_role, issue #1168), or "
+                    "wire this net externally"
+                )
+
+    # Self-net drawn-metal check (#453/#469): check 3 above models each
+    # other port as a square built from its *reported* ``width_um``,
+    # which is a port's contact/access size -- not the extent of the pad
+    # metal drawn around it. A bjt_array base tie, for instance, reports
+    # ``width_um: 0.22`` (``CONTACT_SIZE_UM``) for a pad whose drawn
+    # local metal is 0.42um x 0.68um. So the modelled square (and even
+    # its same-direction same-row/column fallback, which only fires for a
+    # degenerate single-jog backbone) systematically under-states the
+    # real obstacle and misses any short outside that narrow shape --
+    # notably a same-facing pair on *different* rows/columns, or a route
+    # wide enough to reach an adjacent row's pad. Compare the route's
+    # *drawn* metal against the block's own *drawn* shapes on the route
+    # layer instead: every merged shape except the two the endpoints land
+    # on is an obstacle, and overlapping one (positive area -- an edge
+    # touch is a spacing question for `klt drc`, not a short) is the same
+    # silent short, just measured against geometry the reported port
+    # model cannot see. This is independent of, and composes with, check
+    # 3: either can catch a case the other misses.
+    if same_block_self_net and effective_block_geometry is not None:
+        geometry = effective_block_geometry.get(own_a)
+        if geometry is not None:
+            drawn = _self_net_drawn_short(
+                points,
+                geometry,
+                a,
+                b,
+                effective_width_um,
+                blocks[own_a].get("ports") or {},
+                offsets_um[own_a],
+            )
+            if drawn is not None:
+                overlap_um2, crossed_names = drawn
+                if not crossed_names:
+                    where = "drawn geometry (no port of its own sits on it)"
+                else:
+                    noun = "port" if len(crossed_names) == 1 else "ports"
+                    where = f"{noun} " + ", ".join(f"'{n}'" for n in crossed_names)
+                return (
+                    f"self-net's drawn {effective_width_um}um metal overlaps "
+                    f"{overlap_um2:.4g}um^2 of block '{own_a}''s own "
+                    f"drawn pad metal on the route layer ({where}) -- "
+                    "bussing this net across the block would draw a "
+                    "silent short to that pad (its drawn metal is "
+                    "larger than the contact size its port reports); "
+                    "route to a layer_role with a metal2/via stack "
+                    "instead (or configure "
+                    "routing.cross_block_layer_role, issue #1168), or "
+                    "wire this net externally"
+                )
+
+    # Own-block escape check (issue #1527): the two checks above only
+    # ever ran for a same-block self-net -- a leg whose two pins sit on
+    # *different* blocks skipped both entirely. But such a leg still
+    # draws an approach stub inside each endpoint's own block on its way
+    # out (the whole-block bbox check further below deliberately exempts
+    # exactly that stub, via each own-pin's `_port_edge_margin_um`
+    # allowance, so a normal approach is never rejected for "crossing my
+    # own block") -- and nothing checked whether that stub crosses a
+    # *different* net already drawn inside that same block. That is
+    # precisely the gap a coordinate-tapped `blocks[].cell` port opens:
+    # the tap sits on one of the block's own internal wires, so the one
+    # region a leg is guaranteed to cross is the one region no obstacle
+    # model covered.
+    #
+    # Scoped to a `blocks[].cell` endpoint only (`block.get("source") ==
+    # "cell"`), deliberately *not* every block. A `cell` block's every
+    # `ports[]` entry is hand-declared by the caller directly onto the
+    # stream's own geometry (`_parse_cell_block`) -- so, for that block
+    # kind, "every merged shape my own port does not land on is a
+    # genuinely different net" is a sound assumption. It is not sound for
+    # a `generator_report` block: e.g. `mos_array`'s own `dummy` columns
+    # (added by default) draw real, unreported metal pads flanking the
+    # array purely for layout matching, which `klt extract`'s own
+    # dummy-suppression convention (#295/#462) already excludes from the
+    # netlist -- this check cannot tell that apart from an actual
+    # obstacle, and a first attempt at this issue that ran unconditionally
+    # rejected several previously-`routed: true` fixtures that route
+    # straight over such dummy geometry (verified against this repo's own
+    # `mos_array`/`bjt_array` composition tests) for a "short" `klt
+    # extract` would never actually see. A generator that reports
+    # everything it draws as either a port or a suppressed dummy has no
+    # such gap to begin with, so it is left to the coarser whole-block
+    # bbox check (#199) below, unchanged. Compare each endpoint's own
+    # drawn leg against its *own* block's other drawn shapes on the route
+    # layer, excluding only the shape that endpoint's own port lands on
+    # -- unlike the same-block check above, the *other* endpoint is not
+    # on this block at all, so nothing else needs excluding here.
+    if not same_block_self_net and effective_block_geometry is not None:
+        for own_id, pin, point, block in (
+            (own_a, pin_a, a, block_a),
+            (own_b, pin_b, b, block_b),
+        ):
+            if block.get("source") != "cell":
+                continue
+            geometry = effective_block_geometry.get(own_id)
+            if geometry is None:
+                continue
+            drawn = _self_net_drawn_short(
+                points,
+                geometry,
+                point,
+                point,
+                effective_width_um,
+                block.get("ports") or {},
+                offsets_um[own_id],
+            )
+            if drawn is not None:
+                overlap_um2, crossed_names = drawn
+                if not crossed_names:
+                    where = "drawn geometry (no port of its own sits on it)"
+                else:
+                    noun = "port" if len(crossed_names) == 1 else "ports"
+                    where = f"{noun} " + ", ".join(f"'{n}'" for n in crossed_names)
+                return (
+                    f"leg's drawn {effective_width_um}um metal overlaps "
+                    f"{overlap_um2:.4g}um^2 of block '{own_id}''s own "
+                    f"drawn geometry on the route layer ({where}) near "
+                    f"its own port '{pin['port']}' -- the escape from "
+                    f"this port would draw a silent short to another net "
+                    f"already present inside block '{own_id}' (issue "
+                    "#1527); tap a different point on the intended net, "
+                    "supply waypoints_um that route the approach clear of "
+                    "the obstruction, or route to a layer_role with a "
+                    "metal2/via stack instead (or configure "
+                    "routing.cross_block_layer_role, issue #1168)"
+                )
+    return None
+
+
+# Ring-gap reach allowance (issue #1902): see the call site in
+# ``route_two_pin`` for the derivation of ``ring_pin_blocks``.
+def _own_block_allowance_um(
+    own_id: str,
+    point: tuple[float, float],
+    direction_deg: int,
+    bbox: dict[str, float],
+    *,
+    ring_pin_blocks: dict[str, dict[str, Any]],
+    stub_um: float,
+) -> float:
+    margin = max(0.0, _port_edge_margin_um(point, direction_deg, bbox))
+    ring_block = ring_pin_blocks.get(own_id)
+    if ring_block is None:
+        return margin
+    for side in _ring_gap_ports(ring_block):
+        side_dir = RING_SIDE_DIRECTIONS[side]
+        reach = max(0.0, _port_edge_margin_um(point, side_dir, bbox))
+        if side_dir != direction_deg:
+            reach += stub_um
+        margin = max(margin, reach)
+    return margin
+
+
+def _route_touches_drawn_geometry(
+    geometry: dict[str, Any],
+    *,
+    points: list[tuple[float, float]],
+    effective_width_um: float,
+    drawn_route_by_dbu: dict[float, Any],
+) -> bool:
+    """Whether this leg's drawn metal actually overlaps ``geometry``'s
+    own drawn shapes (positive area -- a bare edge touch is a ``klt drc``
+    spacing question, not a short, the same convention
+    :func:`_self_net_drawn_short` applies)."""
+    dbu = geometry["dbu"]
+    drawn = drawn_route_by_dbu.get(dbu)
+    if drawn is None:
+        drawn = _drawn_route_region(points, effective_width_um, dbu)
+        drawn_route_by_dbu[dbu] = drawn
+    return not (geometry["region"] & drawn).is_empty()
 
 
 def route_two_pin(
@@ -2834,7 +3197,6 @@ def route_two_pin(
     from .gen_compose import (
         _DIRECTION_VECTORS,
         _endpoint_stub_widen_um,
-        _port_has_geometry,
         _self_net_cross_layer_lane_waypoints_um,
     )
 
@@ -3065,302 +3427,6 @@ def route_two_pin(
     # cross-block leg's real footprint would be checked against too small an
     # inflation.
 
-    # Self-net pad-crossing check (#433) and self-net drawn-metal check
-    # (#453/#469), factored into a closure parameterised on which layer (and,
-    # since issue #1620, which width) is under test: issue #1168 retries
-    # these two checks (and only these two -- the ones the checks' own
-    # rejection text below points a caller at a "layer_role with a metal2/via
-    # stack") against an optional ``cross_block_route_layer`` when the
-    # primary ``route_layer`` rejects, so a same-block bus that must cross an
-    # intermediate pad on the same drawing layer can escape to the configured
-    # second metal instead of failing outright. See the retry drive code just
-    # below this def.
-    def _same_layer_short_reason(
-        effective_route_layer: tuple[int, int] | None,
-        effective_block_geometry: dict[str, dict[str, Any] | None] | None,
-        effective_width_um: float,
-    ) -> str | None:
-        # Self-net pad-crossing check (#433): the whole-block bbox check below
-        # skips a self-net's own block entirely (a same-block net's backbone
-        # is, by construction, always inside its own block's bbox -- that
-        # check would otherwise reject every self-net). But skipping it also
-        # means nothing else was checking whether the backbone runs straight
-        # over one of that block's *other* pads -- exactly what happens
-        # bussing an array's unit devices (e.g. chaining a bjt_array's
-        # emitters): a same-layer pad in the backbone's path shorts to it,
-        # silently, since a self-net was never compared against the block's
-        # own ports[] at all. Approximate each other port on this block as a
-        # square pad footprint (side length its own reported ``width_um``,
-        # centered on its position), *inflated* by the route's own trace
-        # half-width on every side -- ``_segment_bbox_interior_overlap_um``
-        # treats a backbone segment as a zero-width centerline, but the wire
-        # actually drawn is ``width_um`` wide, so a centerline that merely
-        # passes within ``width_um / 2`` of a pad's edge still draws metal on
-        # top of it. This Minkowski-sum inflation is what makes the check
-        # actually catch pads much narrower than the route (e.g. a bjt_array
-        # base contact's reported ``width_um`` alone is too small to reach a
-        # jog stubbed out by the route's own width -- only their sum is).
-        # Reject the route if the backbone overlaps this inflated footprint's
-        # interior -- mirroring the bbox-interior accounting above, just
-        # against a pad instead of a whole block.
-        #
-        # Same-direction degenerate-jog check (#453): the inflated-footprint
-        # test above models each other port as a square of side its
-        # *reported* ``width_um``. For an array unit's own pad that badly
-        # *under*-estimates the real drawn metal in the port's facing
-        # direction -- e.g. a bjt_array base-tie tap draws li1 metal several
-        # times taller than its reported ``width_um`` (the reported width is
-        # roughly the contact size, not the pad extent). When both pins face
-        # the *same* direction and share the coordinate along that facing
-        # axis (same row for a vertical facing, same column for a horizontal
-        # one), ``manhattan_backbone()`` collapses to a single straight jog
-        # lifted just one stub width (``width_um``) to the ports' outward
-        # side -- so a route wide enough that the jog clears the under-sized
-        # reported square still plows straight through the real pad of any
-        # intervening same-facing port. That is exactly the reproduction in
-        # #453 (bussing two same-row north-facing bjt_array emitters across
-        # the intervening unit's north-facing base-tie pad composed
-        # ``routed: true`` and DRC-clean while extraction showed the whole
-        # array's shared base node absorbed into the emitter net). Treat any
-        # other same-layer port that faces the same direction and sits
-        # strictly between the two pins along the perpendicular axis (on the
-        # same row/column) as crossed: its pad opens toward the jog, so
-        # bussing across it draws a silent short regardless of how small its
-        # reported ``width_um`` is.
-        if same_block_self_net:
-            own_ports = blocks[own_a].get("ports") or {}
-            own_offset = offsets_um[own_a]
-            route_half_um = effective_width_um / 2.0
-            skip_port_names = {pin_a["port"], pin_b["port"]}
-            facing_vertical = va[1] != 0
-            # A degenerate single-jog backbone only forms when both pins face
-            # the same direction *and* share their facing-axis coordinate
-            # (same row for a vertical facing, same column for a horizontal
-            # one).
-            same_line = (
-                abs(a[1] - b[1]) < 1e-9 if facing_vertical else abs(a[0] - b[0]) < 1e-9
-            )
-            # Like the channel-width heuristic and the #461 stub lift above,
-            # this conservative fallback is a statement about the
-            # *degenerate single-jog shape* -- it rejects on port positions
-            # alone, without consulting `points`, precisely because that
-            # fixed shape is known to run straight along the ports' own
-            # row/column. Supplying waypoints_um (#634) replaces that shape
-            # with the caller's own path, so the premise no longer holds and
-            # the fallback would reject route-arounds that never go near the
-            # intervening pad. The waypoint-drawn path is still checked
-            # against the same pads by the inflated-footprint test below and
-            # by the drawn-metal check (#453/#469) -- both of which measure
-            # the actual `points`, so a caller whose waypoints really do
-            # cross a pad is still rejected.
-            conservative_same_dir = (
-                waypoints_um is None and dir_a == dir_b and same_line
-            )
-            for other_name, other_port in own_ports.items():
-                if other_name in skip_port_names or not _port_has_geometry(other_port):
-                    continue
-                other_layer = (
-                    other_port["layer"]["layer"],
-                    other_port["layer"]["datatype"],
-                )
-                if (
-                    effective_route_layer is not None
-                    and other_layer != effective_route_layer
-                ):
-                    continue  # a pad on a different physical layer can't short
-                px = float(other_port["x_um"]) + own_offset["x"]
-                py = float(other_port["y_um"]) + own_offset["y"]
-
-                # #453: an intervening same-facing pad on the jog's own
-                # row/column is crossed no matter how small its reported
-                # footprint is.
-                other_dir = int(other_port.get("direction_deg", 0)) % 360
-                if conservative_same_dir and other_dir == dir_a:
-                    if facing_vertical:
-                        between = (
-                            min(a[0], b[0]) < px < max(a[0], b[0])
-                            and abs(py - a[1]) < 1e-9
-                        )
-                    else:
-                        between = (
-                            min(a[1], b[1]) < py < max(a[1], b[1])
-                            and abs(px - a[0]) < 1e-9
-                        )
-                    if between:
-                        axis = "row" if facing_vertical else "column"
-                        return (
-                            f"self-net between two same-facing ports on the "
-                            f"same {axis} jogs directly over block "
-                            f"'{own_a}''s own port '{other_name}' (same "
-                            "facing direction, same drawing layer) -- "
-                            "bussing this net across the block would draw a "
-                            "silent short to that pad's real drawn metal, "
-                            "which extends past its reported width_um "
-                            "footprint in its facing direction; route to a "
-                            "layer_role with a metal2/via stack instead "
-                            "(or configure routing.cross_block_layer_role, "
-                            "issue #1168), or wire this net externally"
-                        )
-
-                pad_w = other_port.get("width_um")
-                if (
-                    not isinstance(pad_w, (int, float))
-                    or isinstance(pad_w, bool)
-                    or (pad_w <= 0)
-                ):
-                    # no reported pad size -- fall back to trace width
-                    pad_w = effective_width_um
-                half = float(pad_w) / 2.0 + route_half_um
-                pad_bbox_um = {
-                    "x0": px - half,
-                    "y0": py - half,
-                    "x1": px + half,
-                    "y1": py + half,
-                }
-                crossed_um = sum(
-                    _segment_bbox_interior_overlap_um(seg_p0, seg_p1, pad_bbox_um)
-                    for seg_p0, seg_p1 in zip(points, points[1:], strict=False)
-                )
-                if crossed_um > margin_eps_um:
-                    return (
-                        f"self-net backbone crosses {crossed_um:.4g}um "
-                        f"through block '{own_a}''s own port '{other_name}' "
-                        "on the same drawing layer -- bussing this net "
-                        "across the block would draw a silent short to that "
-                        "pad; route to a layer_role with a metal2/via stack "
-                        "instead (or configure "
-                        "routing.cross_block_layer_role, issue #1168), or "
-                        "wire this net externally"
-                    )
-
-        # Self-net drawn-metal check (#453/#469): check 3 above models each
-        # other port as a square built from its *reported* ``width_um``,
-        # which is a port's contact/access size -- not the extent of the pad
-        # metal drawn around it. A bjt_array base tie, for instance, reports
-        # ``width_um: 0.22`` (``CONTACT_SIZE_UM``) for a pad whose drawn
-        # local metal is 0.42um x 0.68um. So the modelled square (and even
-        # its same-direction same-row/column fallback, which only fires for a
-        # degenerate single-jog backbone) systematically under-states the
-        # real obstacle and misses any short outside that narrow shape --
-        # notably a same-facing pair on *different* rows/columns, or a route
-        # wide enough to reach an adjacent row's pad. Compare the route's
-        # *drawn* metal against the block's own *drawn* shapes on the route
-        # layer instead: every merged shape except the two the endpoints land
-        # on is an obstacle, and overlapping one (positive area -- an edge
-        # touch is a spacing question for `klt drc`, not a short) is the same
-        # silent short, just measured against geometry the reported port
-        # model cannot see. This is independent of, and composes with, check
-        # 3: either can catch a case the other misses.
-        if same_block_self_net and effective_block_geometry is not None:
-            geometry = effective_block_geometry.get(own_a)
-            if geometry is not None:
-                drawn = _self_net_drawn_short(
-                    points,
-                    geometry,
-                    a,
-                    b,
-                    effective_width_um,
-                    blocks[own_a].get("ports") or {},
-                    offsets_um[own_a],
-                )
-                if drawn is not None:
-                    overlap_um2, crossed_names = drawn
-                    if not crossed_names:
-                        where = "drawn geometry (no port of its own sits on it)"
-                    else:
-                        noun = "port" if len(crossed_names) == 1 else "ports"
-                        where = f"{noun} " + ", ".join(f"'{n}'" for n in crossed_names)
-                    return (
-                        f"self-net's drawn {effective_width_um}um metal overlaps "
-                        f"{overlap_um2:.4g}um^2 of block '{own_a}''s own "
-                        f"drawn pad metal on the route layer ({where}) -- "
-                        "bussing this net across the block would draw a "
-                        "silent short to that pad (its drawn metal is "
-                        "larger than the contact size its port reports); "
-                        "route to a layer_role with a metal2/via stack "
-                        "instead (or configure "
-                        "routing.cross_block_layer_role, issue #1168), or "
-                        "wire this net externally"
-                    )
-
-        # Own-block escape check (issue #1527): the two checks above only
-        # ever ran for a same-block self-net -- a leg whose two pins sit on
-        # *different* blocks skipped both entirely. But such a leg still
-        # draws an approach stub inside each endpoint's own block on its way
-        # out (the whole-block bbox check further below deliberately exempts
-        # exactly that stub, via each own-pin's `_port_edge_margin_um`
-        # allowance, so a normal approach is never rejected for "crossing my
-        # own block") -- and nothing checked whether that stub crosses a
-        # *different* net already drawn inside that same block. That is
-        # precisely the gap a coordinate-tapped `blocks[].cell` port opens:
-        # the tap sits on one of the block's own internal wires, so the one
-        # region a leg is guaranteed to cross is the one region no obstacle
-        # model covered.
-        #
-        # Scoped to a `blocks[].cell` endpoint only (`block.get("source") ==
-        # "cell"`), deliberately *not* every block. A `cell` block's every
-        # `ports[]` entry is hand-declared by the caller directly onto the
-        # stream's own geometry (`_parse_cell_block`) -- so, for that block
-        # kind, "every merged shape my own port does not land on is a
-        # genuinely different net" is a sound assumption. It is not sound for
-        # a `generator_report` block: e.g. `mos_array`'s own `dummy` columns
-        # (added by default) draw real, unreported metal pads flanking the
-        # array purely for layout matching, which `klt extract`'s own
-        # dummy-suppression convention (#295/#462) already excludes from the
-        # netlist -- this check cannot tell that apart from an actual
-        # obstacle, and a first attempt at this issue that ran unconditionally
-        # rejected several previously-`routed: true` fixtures that route
-        # straight over such dummy geometry (verified against this repo's own
-        # `mos_array`/`bjt_array` composition tests) for a "short" `klt
-        # extract` would never actually see. A generator that reports
-        # everything it draws as either a port or a suppressed dummy has no
-        # such gap to begin with, so it is left to the coarser whole-block
-        # bbox check (#199) below, unchanged. Compare each endpoint's own
-        # drawn leg against its *own* block's other drawn shapes on the route
-        # layer, excluding only the shape that endpoint's own port lands on
-        # -- unlike the same-block check above, the *other* endpoint is not
-        # on this block at all, so nothing else needs excluding here.
-        if not same_block_self_net and effective_block_geometry is not None:
-            for own_id, pin, point, block in (
-                (own_a, pin_a, a, block_a),
-                (own_b, pin_b, b, block_b),
-            ):
-                if block.get("source") != "cell":
-                    continue
-                geometry = effective_block_geometry.get(own_id)
-                if geometry is None:
-                    continue
-                drawn = _self_net_drawn_short(
-                    points,
-                    geometry,
-                    point,
-                    point,
-                    effective_width_um,
-                    block.get("ports") or {},
-                    offsets_um[own_id],
-                )
-                if drawn is not None:
-                    overlap_um2, crossed_names = drawn
-                    if not crossed_names:
-                        where = "drawn geometry (no port of its own sits on it)"
-                    else:
-                        noun = "port" if len(crossed_names) == 1 else "ports"
-                        where = f"{noun} " + ", ".join(f"'{n}'" for n in crossed_names)
-                    return (
-                        f"leg's drawn {effective_width_um}um metal overlaps "
-                        f"{overlap_um2:.4g}um^2 of block '{own_id}''s own "
-                        f"drawn geometry on the route layer ({where}) near "
-                        f"its own port '{pin['port']}' -- the escape from "
-                        f"this port would draw a silent short to another net "
-                        f"already present inside block '{own_id}' (issue "
-                        "#1527); tap a different point on the intended net, "
-                        "supply waypoints_um that route the approach clear of "
-                        "the obstruction, or route to a layer_role with a "
-                        "metal2/via stack instead (or configure "
-                        "routing.cross_block_layer_role, issue #1168)"
-                    )
-        return None
-
     # Drive the retry (#1168): try the primary route_layer first -- the
     # overwhelmingly common case (no configured cross-block layer, or a leg
     # that never crosses another same-layer pad) resolves here with no
@@ -3377,13 +3443,53 @@ def route_two_pin(
     # drawing layer. Everything downstream (obstacle-overlap check 5,
     # via-drop check 6, stub-widen) uses whichever layer wins here.
     effective_route_layer = route_layer
-    short_reason = _same_layer_short_reason(route_layer, block_geometry, width_um)
+    short_reason = _same_layer_short_reason(
+        route_layer,
+        block_geometry,
+        width_um,
+        pin_a=pin_a,
+        pin_b=pin_b,
+        blocks=blocks,
+        offsets_um=offsets_um,
+        points=points,
+        waypoints_um=waypoints_um,
+        a=a,
+        b=b,
+        va=va,
+        dir_a=dir_a,
+        dir_b=dir_b,
+        own_a=own_a,
+        own_b=own_b,
+        block_a=block_a,
+        block_b=block_b,
+        same_block_self_net=same_block_self_net,
+        margin_eps_um=margin_eps_um,
+    )
     if short_reason is not None and cross_block_route_layer is not None:
         cross_effective_width_um = (
             cross_block_width_um if cross_block_width_um is not None else width_um
         )
         cross_short_reason = _same_layer_short_reason(
-            cross_block_route_layer, cross_block_geometry, cross_effective_width_um
+            cross_block_route_layer,
+            cross_block_geometry,
+            cross_effective_width_um,
+            pin_a=pin_a,
+            pin_b=pin_b,
+            blocks=blocks,
+            offsets_um=offsets_um,
+            points=points,
+            waypoints_um=waypoints_um,
+            a=a,
+            b=b,
+            va=va,
+            dir_a=dir_a,
+            dir_b=dir_b,
+            own_a=own_a,
+            own_b=own_b,
+            block_a=block_a,
+            block_b=block_b,
+            same_block_self_net=same_block_self_net,
+            margin_eps_um=margin_eps_um,
         )
         if cross_short_reason is None:
             effective_route_layer = cross_block_route_layer
@@ -3467,32 +3573,28 @@ def route_two_pin(
     # block -- see `manhattan_backbone`'s own per-pin stub).
     ring_pin_blocks = {pin["block"]: block for pin, block in ring_pins}
 
-    def _own_block_allowance_um(
-        own_id: str,
-        point: tuple[float, float],
-        direction_deg: int,
-        bbox: dict[str, float],
-    ) -> float:
-        margin = max(0.0, _port_edge_margin_um(point, direction_deg, bbox))
-        ring_block = ring_pin_blocks.get(own_id)
-        if ring_block is None:
-            return margin
-        for side in _ring_gap_ports(ring_block):
-            side_dir = RING_SIDE_DIRECTIONS[side]
-            reach = max(0.0, _port_edge_margin_um(point, side_dir, bbox))
-            if side_dir != direction_deg:
-                reach += stub_um
-            margin = max(margin, reach)
-        return margin
-
     allowances_um: dict[str, float] = {}
     if not same_block_self_net:
         allowances_um[own_a] = (
-            _own_block_allowance_um(own_a, a, dir_a, placed_bboxes_um[own_a])
+            _own_block_allowance_um(
+                own_a,
+                a,
+                dir_a,
+                placed_bboxes_um[own_a],
+                ring_pin_blocks=ring_pin_blocks,
+                stub_um=stub_um,
+            )
             + obstacle_half_um
         )
         allowances_um[own_b] = (
-            _own_block_allowance_um(own_b, b, dir_b, placed_bboxes_um[own_b])
+            _own_block_allowance_um(
+                own_b,
+                b,
+                dir_b,
+                placed_bboxes_um[own_b],
+                ring_pin_blocks=ring_pin_blocks,
+                stub_um=stub_um,
+            )
             + obstacle_half_um
         )
 
@@ -3522,18 +3624,6 @@ def route_two_pin(
     # actually reaches the geometry test below.
     drawn_route_by_dbu: dict[float, Any] = {}
 
-    def _route_touches_drawn_geometry(geometry: dict[str, Any]) -> bool:
-        """Whether this leg's drawn metal actually overlaps ``geometry``'s
-        own drawn shapes (positive area -- a bare edge touch is a ``klt drc``
-        spacing question, not a short, the same convention
-        :func:`_self_net_drawn_short` applies)."""
-        dbu = geometry["dbu"]
-        drawn = drawn_route_by_dbu.get(dbu)
-        if drawn is None:
-            drawn = _drawn_route_region(points, effective_width_um, dbu)
-            drawn_route_by_dbu[dbu] = drawn
-        return not (geometry["region"] & drawn).is_empty()
-
     # Per-block exemptions, decided once per block rather than per segment --
     # both are properties of the whole leg against one block, not of a single
     # segment against it.
@@ -3548,7 +3638,12 @@ def route_two_pin(
                 # so the route cannot short to it -- a bbox crossing here is
                 # a false positive, not a real obstacle.
                 exempt_block_ids.add(other_id)
-            elif not _route_touches_drawn_geometry(geometry):
+            elif not _route_touches_drawn_geometry(
+                geometry,
+                points=points,
+                effective_width_um=effective_width_um,
+                drawn_route_by_dbu=drawn_route_by_dbu,
+            ):
                 # #1681: this block *does* draw on effective_route_layer, but
                 # not anywhere this leg's own drawn metal actually reaches --
                 # the classic case being a `guard_ring` block whose hollow
@@ -3770,12 +3865,14 @@ def route_two_pin(
                 # per entry, so a multi-level drop is just N single-level
                 # drops stacked at the identical (x, y).
                 for via_layer, metal_a, metal_b in ladder:
+                    drop_array = _drop_array(port, via_layer)
                     via_drops.append(
                         {
                             "x_um": pos[0],
                             "y_um": pos[1],
                             "via_layer": via_layer,
                             "landing_layers": (metal_a, metal_b),
+                            **({"array": drop_array} if drop_array else {}),
                             # block_id (#1520): which endpoint's own block
                             # this drop's landing pad lands on -- lets a
                             # caller-side conflict check (compose()'s own
@@ -4614,20 +4711,7 @@ def route_bundle(
         )
 
     pin_count = len(pins)
-    parent = list(range(pin_count))
-
-    def _find(index: int) -> int:
-        while parent[index] != index:
-            parent[index] = parent[parent[index]]
-            index = parent[index]
-        return index
-
-    def _union(left: int, right: int) -> bool:
-        root_left, root_right = _find(left), _find(right)
-        if root_left == root_right:
-            return False
-        parent[max(root_left, root_right)] = min(root_left, root_right)
-        return True
+    uf = UnionFind(range(pin_count), min_root=True)
 
     components = pin_count
 
@@ -4638,7 +4722,7 @@ def route_bundle(
     for index, pin in enumerate(pins):
         key = (pin["block"], pin["port"])
         if key in first_seen:
-            if _union(first_seen[key], index):
+            if uf.union(first_seen[key], index):
                 components -= 1
         else:
             first_seen[key] = index
@@ -4908,7 +4992,7 @@ def route_bundle(
                     result = retry
                     reason = None
         if reason is None and result["routed"]:
-            if _union(i, j):
+            if uf.union(i, j):
                 components -= 1
             total_length_um += result["route_length_um"]
             legs.append(
@@ -4946,7 +5030,7 @@ def route_bundle(
     for i, j in candidates:
         if components == 1:
             break
-        if _find(i) == _find(j):
+        if uf.find(i) == uf.find(j):
             continue  # already connected through other legs -- no leg needed
         if (
             frozenset(
@@ -5003,7 +5087,7 @@ def route_bundle(
                     reason = None
 
         if reason is None and result["routed"]:
-            _union(i, j)
+            uf.union(i, j)
             components -= 1
             total_length_um += result["route_length_um"]
             legs.append(
@@ -5058,7 +5142,7 @@ def route_bundle(
     # --- Unroutable: report which pins were stranded and why ----------------
     groups: dict[int, list[int]] = {}
     for index in range(pin_count):
-        groups.setdefault(_find(index), []).append(index)
+        groups.setdefault(uf.find(index), []).append(index)
     # The largest component is "the net"; every pin outside it is stranded.
     main_root = max(groups, key=lambda root: (len(groups[root]), -root))
     stranded = sorted(
@@ -5147,27 +5231,14 @@ def _declare_only_bundle_result(pins: list[dict[str, Any]]) -> dict[str, Any]:
     byte-reproducible leg list run to run.
     """
     pin_count = len(pins)
-    parent = list(range(pin_count))
-
-    def _find(index: int) -> int:
-        while parent[index] != index:
-            parent[index] = parent[parent[index]]
-            index = parent[index]
-        return index
-
-    def _union(left: int, right: int) -> bool:
-        root_left, root_right = _find(left), _find(right)
-        if root_left == root_right:
-            return False
-        parent[max(root_left, root_right)] = min(root_left, root_right)
-        return True
+    uf = UnionFind(range(pin_count), min_root=True)
 
     components = pin_count
     first_seen: dict[tuple[str, str], int] = {}
     for index, pin in enumerate(pins):
         key = (pin["block"], pin["port"])
         if key in first_seen:
-            if _union(first_seen[key], index):
+            if uf.union(first_seen[key], index):
                 components -= 1
         else:
             first_seen[key] = index
@@ -5179,9 +5250,9 @@ def _declare_only_bundle_result(pins: list[dict[str, Any]]) -> dict[str, Any]:
         for j in range(i + 1, pin_count):
             if components == 1:
                 break
-            if _find(i) == _find(j):
+            if uf.find(i) == uf.find(j):
                 continue
-            _union(i, j)
+            uf.union(i, j)
             components -= 1
             legs.append(
                 {
@@ -5202,3 +5273,27 @@ def _declare_only_bundle_result(pins: list[dict[str, Any]]) -> dict[str, Any]:
         "reason": _DECLARE_ONLY_REASON,
         "status": "unrouted",
     }
+
+
+def _drop_array(
+    port: dict[str, Any], via_layer: tuple[int, int]
+) -> dict[str, Any] | None:
+    """The ``{"rows", "cols", "pitch_um"}`` cut array a port asks for on
+    ``via_layer`` (a label-derived port with ``access.via_array``, #2927), or
+    ``None`` for the ordinary single-cut drop."""
+    spec = port.get("via_array")
+    if not isinstance(spec, dict):
+        return None
+    pitch = (spec.get("pitch_um") or {}).get(f"{via_layer[0]}/{via_layer[1]}")
+    if pitch is None:
+        return None
+    return {"rows": spec["rows"], "cols": spec["cols"], "pitch_um": pitch}
+
+
+def _drop_array_extra_um(drop: dict[str, Any]) -> float:
+    """Extra side length (um) a drop's cut array adds to its landing pad over
+    the single-cut pad: ``(max(rows, cols) - 1) * pitch``; ``0.0`` without one."""
+    array = drop.get("array")
+    if not array:
+        return 0.0
+    return (max(array["rows"], array["cols"]) - 1) * array["pitch_um"]

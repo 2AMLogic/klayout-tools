@@ -392,7 +392,19 @@ def test_sim_real_producer_measurement_coverage(
     report = sim.run_sim(str(request))
     _assert_contract(report, state)
     assert report["status"] == status
-    result = _assert_signoff(tmp_path, report, passed=status == "pass", item=5)
+    # Issue #3769 narrows the "deliberate no-limit characterization counts as
+    # checked" contract for signoff only: `klt sim` still reports `pass`, but
+    # `klt signoff` / item 5 refuse an envelope where no measurement carries a
+    # bound (`no_limits_checked`). `klt sim`'s own status is unchanged.
+    has_limit = any("limits" in m for m in measurements)
+    result = _assert_signoff(
+        tmp_path, report, passed=status == "pass" and has_limit, item=5
+    )
+    if status == "pass" and not has_limit:
+        assert result["checks"][0]["detail"]["no_limits_checked"] == {
+            "measurements_declared": 1,
+            "measurements_with_limits": 0,
+        }
     if status == "pass_partial":
         # `klt signoff` never reads a real, self-reported `pass_partial`
         # verdict as fully qualifying evidence -- it is named

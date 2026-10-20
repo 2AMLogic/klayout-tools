@@ -18,7 +18,9 @@ Exit codes (see ``docs/cli/pex.md`` for the full table):
         block here rather than aborting with exit 1 (issue #1030), and a
         flat-schematic-DUT-vs-`.SUBCKT`-wrapped-extraction mismatch, which
         reports a named ``flat_dut_mismatch`` block the same way (issue
-        #1255, Gap 2)
+        #1255, Gap 2), and a same-pins-different-order mismatch, which
+        reports a named ``pin_order_mismatch`` block the same way (issue
+        #2890)
 (2 is reserved for argparse usage errors, as with every other ``klt``
 subcommand. Exit codes 3/4 mirror `klt sim`'s own precedent -- see
 docs/cli/sim.md's "Exit codes" section.)
@@ -140,6 +142,9 @@ def run(args: argparse.Namespace) -> int:
             # splitting `delta[]` into representation and parasitic parts.
             # `False` when the flag was never given.
             device_only_leg=args.device_only_leg,
+            # `--extract-only` (issue #3739): extract and report, no
+            # measurement leg. `False` when the flag was never given.
+            extract_only=args.extract_only,
         )
     except PexError as exc:
         # Issue #2889: a classified error (today: `schematic_flatten_*`)
@@ -199,7 +204,8 @@ def _parse_measure_command(raw: str | None) -> list[str] | None:
 
 
 def _print_mismatch(mismatch: dict | None, name: str) -> None:
-    """Print ``mismatch`` (``pin_count_mismatch`` or ``flat_dut_mismatch`` --
+    """Print ``mismatch`` (``pin_count_mismatch``, ``flat_dut_mismatch`` or
+    ``pin_order_mismatch`` --
     both share the same structured shape: ``subcircuit``, a ``schematic``
     and ``extracted`` per-side detail dict, ``ngspice_message``, and
     ``detail``) under its own ``<name>:`` heading, or nothing at all when
@@ -260,6 +266,22 @@ def _device_only_desc(row: dict) -> str:
     )
 
 
+def _print_measurement(measurement: dict) -> None:
+    """The text report's ``measurement:`` line(s): ``--extract-only``
+    (issue #3739) and ``--measure-command`` runs only."""
+    if measurement.get("mode") == "extract-only":
+        print("measurement: extract-only  (nothing measured; no delta rows)")
+    if measurement.get("mode") == "command":
+        print(f"measurement: command  {shlex.join(measurement['command'])}")
+        for side, entry in (measurement.get("sides") or {}).items():
+            print(
+                f"  {side}: {render_path_field(entry['netlist'])}  "
+                f"exit={entry['exit_status']}  "
+                f"corners={entry['corner_count']}  "
+                f"measurements={', '.join(entry['measurement_names'])}"
+            )
+
+
 def _print_text(report: dict) -> None:
     # Issue #1261: `layout`/`netlist`/`reference_netlist` are the
     # `{path, scope}` shape `env_provenance.repo_relative_path` defines --
@@ -310,15 +332,7 @@ def _print_text(report: dict) -> None:
     # a testbench-mode report's `measurement` block carries no information
     # the `testbenches:` section below does not already show.
     measurement = report.get("measurement") or {}
-    if measurement.get("mode") == "command":
-        print(f"measurement: command  {shlex.join(measurement['command'])}")
-        for side, entry in (measurement.get("sides") or {}).items():
-            print(
-                f"  {side}: {render_path_field(entry['netlist'])}  "
-                f"exit={entry['exit_status']}  "
-                f"corners={entry['corner_count']}  "
-                f"measurements={', '.join(entry['measurement_names'])}"
-            )
+    _print_measurement(measurement)
 
     # Additive (issue #1030): only printed when the extracted-side deck was
     # rejected for a schematic/extracted top-level pin-list mismatch.
@@ -326,6 +340,9 @@ def _print_text(report: dict) -> None:
     # Additive (issue #1255, Gap 2): only printed when the schematic DUT is
     # flat (no `.SUBCKT` wrapper) against a `.SUBCKT`-wrapped extraction.
     _print_mismatch(report.get("flat_dut_mismatch"), "flat_dut_mismatch")
+    # Additive (issue #2890): only printed when both sides declare the same
+    # pins in a different order.
+    _print_mismatch(report.get("pin_order_mismatch"), "pin_order_mismatch")
 
     testbenches = report["testbenches"]
     if testbenches:

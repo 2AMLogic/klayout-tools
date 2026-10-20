@@ -235,12 +235,17 @@ from .functional_verification_sdf import (
     _normalize_sdf_header_triples,
     _parse_toplevel_ports,
     _reject_sdf_escaped_divider_interconnects,
+    _reject_sdf_unresolvable_interconnect_instances,
     _reject_sdf_with_functional_models,
     _resolve_sdf_option,
     _scan_sdf_diagnostics,
     _split_sdf_bus_port_interconnects,
     _write_sdf_annotate_shim,
     _write_sdf_dut_wrapper,
+)
+from .functional_verification_sdf_rename import (
+    _apply_sdf_escaped_divider_rename,
+    _sdf_renamed_report,
 )
 from .reset_coverage import ResetCoverageError, sequential_elements
 
@@ -2927,6 +2932,9 @@ def run_functional_verification(
     sdf_pre_dropped_counts: dict[str, int] = {}
     # Per-class dropped cell arcs, for a class that names them (issue #2885).
     sdf_pre_dropped_arcs: dict[str, list[dict[str, str]]] = {}
+    # Instances renamed by issue #2897's escaped-divider rewrite, reported
+    # as `environment.sdf.renamed` (absent when empty).
+    sdf_renamed: list[dict[str, str]] = []
     if coverage_requested:
         build_args += list(COVERAGE_BUILD_ARGS)
     if sdf is not None:
@@ -2937,11 +2945,17 @@ def run_functional_verification(
         _check_sdf_engine_capability(_engine_version(engine))
         # Issue #1890: an escaped identifier containing a literal
         # occurrence of the SDF's own DIVIDER character in an INTERCONNECT
-        # entry crashes vvp outright (a genuine Icarus upstream limitation,
-        # not something the wrapper/shim below can work around) -- caught
-        # here, before any build artifact is written, rather than surfacing
-        # as a bare SIGABRT core dump four layers down.
+        # entry crashes vvp outright (a genuine Icarus upstream limitation)
+        # -- caught here, before any build artifact is written, rather than
+        # surfacing as a bare SIGABRT core dump four layers down. Narrowed
+        # by issue #2897 to a *pin/port* of that shape: an *instance* of
+        # that shape is renamed below instead.
         _reject_sdf_escaped_divider_interconnects(sdf["file"])
+        # Issue #3740: an INTERCONNECT endpoint naming an instance the
+        # netlist does not have aborts vvp the same way -- caught here too.
+        _reject_sdf_unresolvable_interconnect_instances(
+            sdf["file"], sources, hdl_toplevel
+        )
         if parameters:
             # cocotb's own Icarus parameter-override syntax is always
             # `-P<hdl_toplevel>.<name>=<value>` (its Runner, not this
@@ -2985,7 +2999,20 @@ def run_functional_verification(
         # which `iverilog -T typ` (the default corner) rejects as `Chosen
         # value not defined`. Always-on, header-only, and a no-op on an SDF
         # whose header is already complete.
-        annotate_source_path = _apply_sdf_header_normalization(sdf["file"], output_dir)
+        # Issue #2897: an instance name that is an escaped identifier
+        # containing a literal `.` (or the SDF's own DIVIDER) -- a flattened
+        # `generate` array's `\g[0].sub.u1` -- crashes vvp in an
+        # INTERCONNECT endpoint and fails to resolve in a CELL's INSTANCE,
+        # under either DIVIDER. Renamed to a plain identifier consistently
+        # in build-dir copies of the SDF and of every source declaring it
+        # (the caller's own files are untouched); reported as
+        # `environment.sdf.renamed`. A no-op on any other SDF.
+        annotate_source_path, sources, sdf_renamed = _apply_sdf_escaped_divider_rename(
+            sdf["file"], sources, output_dir
+        )
+        annotate_source_path = _apply_sdf_header_normalization(
+            annotate_source_path, output_dir
+        )
         annotate_source_path = _apply_sdf_interconnect_only_drop(
             annotate_source_path, output_dir, sdf_pre_dropped_counts, sdf["entries"]
         )
@@ -3287,6 +3314,9 @@ def run_functional_verification(
                     "dropped": _sdf_dropped_report(
                         sdf_dropped_counts, sdf_pre_dropped_arcs
                     ),
+                    # Additive (issue #2897): `{from, to}` per escaped-
+                    # divider instance renamed for annotation.
+                    **_sdf_renamed_report(sdf_renamed),
                 }
             ),
         },

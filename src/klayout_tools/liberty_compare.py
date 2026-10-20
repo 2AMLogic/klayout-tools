@@ -50,6 +50,7 @@ chosen.
 
 from __future__ import annotations
 
+import functools
 import itertools
 import os
 import re
@@ -132,10 +133,37 @@ def parse_liberty(path: str) -> Group:
             text = handle.read()
     except OSError as exc:
         raise LibertyCompareError(f"could not read '{path}': {exc}") from exc
+    return parse_liberty_text(text, source=path)
+
+
+def parse_liberty_text(text: str, source: str = "<liberty text>") -> Group:
+    """Parse already-read Liberty ``text`` into its top-level ``library``
+    :class:`Group`; ``source`` only names the text in error messages.
+
+    The text entry point for callers that hold the file contents rather than
+    a path (:func:`parse_liberty` itself reads the file, then calls this).
+    Raises :class:`LibertyCompareError` for text with no ``library()`` group
+    or an unclosed group -- never returns a partial tree.
+    """
+    try:
+        return _parse_text_cached(text)
+    except LibertyCompareError:
+        return _parse_text(text, source)  # re-parse so the error names ``source``
+
+
+def _parse_text(text: str, source: str) -> Group:
     text = _COMMENT_RE.sub(" ", text).replace("\\\r\n", " ").replace("\\\n", " ")
     tokens = _TOKEN_RE.findall(text)
-    parser = _Parser(tokens, path)
-    return parser.library()
+    return _Parser(tokens, source).library()
+
+
+@functools.lru_cache(maxsize=2)
+def _parse_text_cached(text: str) -> Group:
+    """Parse once per distinct text: a run that reads the same ~13 MB library
+    for several steps (restructure, dont_use validation, leakage) would
+    otherwise re-parse it each time (~1.8 s per read). The returned tree is
+    shared, so callers must treat it as read-only."""
+    return _parse_text(text, "<liberty text>")
 
 
 class _Parser:

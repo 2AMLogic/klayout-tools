@@ -257,12 +257,6 @@
     {
       "file": "src/klayout_tools/drc.py",
       "code": "assignment",
-      "message": "Incompatible types in assignment (expression has type \"Element[str] | None\", variable has type \"Element[str]\")",
-      "count": 1
-    },
-    {
-      "file": "src/klayout_tools/drc.py",
-      "code": "assignment",
       "message": "Incompatible types in assignment (expression has type \"list[list[int]] | None\", variable has type \"list[list[Any]]\")",
       "count": 1
     },
@@ -273,7 +267,13 @@
       "count": 1
     },
     {
-      "file": "src/klayout_tools/equiv.py",
+      "file": "src/klayout_tools/drc_klayout_engine.py",
+      "code": "assignment",
+      "message": "Incompatible types in assignment (expression has type \"Element[str] | None\", variable has type \"Element[str]\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/equiv_sequential.py",
       "code": "arg-type",
       "message": "Argument \"resume_block\" to \"_resume_report_from_committed_stage1\" has incompatible type \"dict[str, Any] | None\"; expected \"dict[str, Any]\"",
       "count": 1
@@ -467,7 +467,7 @@
     {
       "file": "src/klayout_tools/gen_compose_routing.py",
       "code": "no-redef",
-      "message": "Name \"ladder\" already defined on line 523",
+      "message": "Name \"ladder\" already defined on line 524",
       "count": 1
     },
     {
@@ -822,7 +822,7 @@
       "file": "src/klayout_tools/gen_pcells/diff_pair.py",
       "code": "attr-defined",
       "message": "\"_DiffPairPCell\" has no attribute \"TypeBoolean\"",
-      "count": 7
+      "count": 8
     },
     {
       "file": "src/klayout_tools/gen_pcells/diff_pair.py",
@@ -840,7 +840,7 @@
       "file": "src/klayout_tools/gen_pcells/diff_pair.py",
       "code": "attr-defined",
       "message": "\"_DiffPairPCell\" has no attribute \"TypeLayer\"",
-      "count": 9
+      "count": 10
     },
     {
       "file": "src/klayout_tools/gen_pcells/diff_pair.py",
@@ -1422,7 +1422,7 @@
       "file": "src/klayout_tools/gen_pcells/mos_array.py",
       "code": "attr-defined",
       "message": "\"_MosArrayPCell\" has no attribute \"TypeBoolean\"",
-      "count": 9
+      "count": 11
     },
     {
       "file": "src/klayout_tools/gen_pcells/mos_array.py",
@@ -1440,7 +1440,7 @@
       "file": "src/klayout_tools/gen_pcells/mos_array.py",
       "code": "attr-defined",
       "message": "\"_MosArrayPCell\" has no attribute \"TypeLayer\"",
-      "count": 12
+      "count": 13
     },
     {
       "file": "src/klayout_tools/gen_pcells/mos_array.py",
@@ -2151,7 +2151,7 @@
       "count": 1
     },
     {
-      "file": "src/klayout_tools/lvs.py",
+      "file": "src/klayout_tools/lvs_combine.py",
       "code": "assignment",
       "message": "Incompatible types in assignment (expression has type \"bool\", variable has type \"None\")",
       "count": 2
@@ -2175,19 +2175,19 @@
       "count": 1
     },
     {
-      "file": "src/klayout_tools/lvs.py",
+      "file": "src/klayout_tools/lvs_combine.py",
       "code": "misc",
       "message": "Property \"supports_parallel_combination\" defined in \"DeviceClass\" is read-only",
       "count": 1
     },
     {
-      "file": "src/klayout_tools/lvs.py",
+      "file": "src/klayout_tools/lvs_combine.py",
       "code": "misc",
       "message": "Property \"supports_serial_combination\" defined in \"DeviceClass\" is read-only",
       "count": 1
     },
     {
-      "file": "src/klayout_tools/lvs.py",
+      "file": "src/klayout_tools/lvs_gate_level.py",
       "code": "union-attr",
       "message": "Item \"None\" of \"Any | None\" has no attribute \"each_circuit\"",
       "count": 1

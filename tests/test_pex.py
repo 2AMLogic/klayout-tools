@@ -48,6 +48,7 @@ from klayout_tools.pex import (
     _normalize_measurement_document,
     _pin_count_mismatch,
     _pin_count_mismatch_from_report,
+    _pin_order_mismatch,
     _prepare_extracted_request,
     _reference_is_hierarchical,
     _rewrite_dut_include,
@@ -1799,6 +1800,124 @@ def test_run_pex_flat_dut_mismatch_skips_extracted_side_entirely(
     assert mismatch["subcircuit"] == "RES"
     assert mismatch["schematic"]["netlist"] == dut
     assert mismatch["schematic"]["pin_count"] is None
+    assert mismatch["extracted"]["pins"] == ["RA", "RB"]
+
+
+def test_pin_order_mismatch_reports_same_set_different_order(tmp_path):
+    schematic, extracted = _write_pair(tmp_path, ["b", "a", "vdd"], ["a", "b", "vdd"])
+    mismatch = _pin_order_mismatch(
+        reference_netlist=schematic, extracted_netlist=extracted, top_cell="RES"
+    )
+    assert mismatch is not None
+    assert mismatch["subcircuit"] == "RES"
+    assert mismatch["schematic"]["pins"] == ["b", "a", "vdd"]
+    assert mismatch["extracted"]["pins"] == ["a", "b", "vdd"]
+    assert mismatch["ngspice_message"] is None
+    assert "(b, a, vdd)" in mismatch["detail"]
+    assert "(a, b, vdd)" in mismatch["detail"]
+
+
+def test_pin_order_mismatch_none_when_order_agrees(tmp_path):
+    schematic, extracted = _write_pair(tmp_path, ["a", "b"], ["a", "b"])
+    assert (
+        _pin_order_mismatch(
+            reference_netlist=schematic, extracted_netlist=extracted, top_cell="RES"
+        )
+        is None
+    )
+
+
+def test_pin_order_mismatch_ignores_case_only_differences(tmp_path):
+    schematic, extracted = _write_pair(tmp_path, ["RA", "RB"], ["ra", "rb"])
+    assert (
+        _pin_order_mismatch(
+            reference_netlist=schematic, extracted_netlist=extracted, top_cell="RES"
+        )
+        is None
+    )
+    schematic, extracted = _write_pair(tmp_path, ["RB", "RA"], ["ra", "rb"])
+    assert (
+        _pin_order_mismatch(
+            reference_netlist=schematic, extracted_netlist=extracted, top_cell="RES"
+        )
+        is not None
+    )
+
+
+def test_pin_order_mismatch_none_when_counts_or_sets_differ(tmp_path):
+    schematic, extracted = _write_pair(tmp_path, ["b", "a"], ["a", "b", "vsub"])
+    assert (
+        _pin_order_mismatch(
+            reference_netlist=schematic, extracted_netlist=extracted, top_cell="RES"
+        )
+        is None
+    )
+    assert (
+        _pin_count_mismatch(reference_netlist=schematic, extracted_netlist=extracted)
+        is not None
+    )
+    schematic, extracted = _write_pair(tmp_path, ["b", "a"], ["a", "c"])
+    assert (
+        _pin_order_mismatch(
+            reference_netlist=schematic, extracted_netlist=extracted, top_cell="RES"
+        )
+        is None
+    )
+
+
+def test_pin_order_mismatch_none_for_flat_schematic(tmp_path):
+    dut = _write_flat_dut(tmp_path)
+    extracted = tmp_path / "extracted.spice"
+    extracted.write_text(".SUBCKT RES RA RB\nR1 RA RB 1\n.ENDS RES\n")
+    assert (
+        _pin_order_mismatch(
+            reference_netlist=dut, extracted_netlist=str(extracted), top_cell="RES"
+        )
+        is None
+    )
+
+
+def test_run_pex_pin_order_mismatch_skips_extracted_side(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """Issue #2890: same pins, different order -> flagged pre-flight, the
+    extracted leg is never simulated, rows error (exit 4 path)."""
+    import klayout_tools.pex as pex_module
+
+    calls = {"n": 0}
+
+    def _fake_run_sim(*_args, **_kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {
+                "corners": [
+                    {"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.4)]}
+                ],
+                "corner_count": 1,
+                "measurements": [{"name": "vout"}],
+            }
+        raise AssertionError("extracted leg must not run on pin_order_mismatch")
+
+    monkeypatch.setattr(pex_module, "run_sim", _fake_run_sim)
+    dut = tmp_path / "schematic_dut.spice"
+    dut.write_text(".SUBCKT RES RB RA\nR1 RA RB 289.2\n.ENDS RES\n")
+    tb = tmp_path / "testbench.spice"
+    tb.write_text(
+        f'.include "{dut}"\n.model res_generic_po r\n'
+        "Vdd RA 0 DC 1.8\nXres RB RA RES\nRload RB 0 1k\n"
+    )
+    request = _write_request(tmp_path / "request.json", tb)
+
+    report = run_pex(resistor_layout, [str(request)], "sky130")
+
+    assert calls["n"] == 1
+    assert report["status"] == "error"
+    assert all(row["status"] == "error" for row in report["delta"])
+    assert report["pin_count_mismatch"] is None
+    assert report["flat_dut_mismatch"] is None
+    mismatch = report["pin_order_mismatch"]
+    assert mismatch is not None
+    assert mismatch["schematic"]["pins"] == ["RB", "RA"]
     assert mismatch["extracted"]["pins"] == ["RA", "RB"]
 
 
@@ -6020,3 +6139,150 @@ def test_cli_device_only_leg_with_measure_command_is_a_json_error(
         "--device-only-leg is not supported"
         in json.loads(captured.err)["error"]["message"]
     )
+
+
+# --- `--extract-only` (issue #3739) ----------------------------------------
+
+
+def test_run_pex_extract_only_reports_extraction_without_measuring(
+    tmp_path, resistor_layout
+):
+    netlist = tmp_path / "res.spice"
+    report = run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        output=str(netlist),
+        artifacts_dir=str(tmp_path / "art"),
+        extract_only=True,
+    )
+
+    assert netlist.is_file()
+    assert report["extraction"]["device_count"] >= 1
+    assert report["body_bias"]
+    assert report["provenance"]
+    assert report["testbenches"] == []
+    assert report["delta"] == []
+    assert report["measurement"] == {
+        "mode": "extract-only",
+        "command": None,
+        "timeout_s": None,
+        "sides": None,
+    }
+    assert report["status"] == "not_checked"
+    assert report["coverage"]["nothing_checked_reasons"] == ["no_delta_rows"]
+    assert report["reference_netlist"] == {"path": None, "scope": "absent"}
+    assert report["reference_netlist_sha256"] is None
+    assert report["pin_count_mismatch"] is None
+    assert report["flat_dut_mismatch"] is None
+    assert report["model_mismatch"] is None
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "needle"),
+    [
+        ({"measure_command": ["true"]}, "--measure-command"),
+        ({"reference_netlist": "x.spice"}, "--reference-netlist"),
+        ({"measure_timeout_s": 5.0}, "--measure-timeout-s"),
+        ({"device_only_leg": True}, "--device-only-leg"),
+        ({"flatten_schematic": True}, "--flatten-schematic"),
+        ({"testbench_paths": ["tb.json"]}, "a testbench request"),
+    ],
+)
+def test_run_pex_extract_only_rejects_measurement_options(
+    tmp_path, resistor_layout, kwargs, needle
+):
+    testbenches = kwargs.pop("testbench_paths", [])
+    with pytest.raises(PexError, match=f"--extract-only cannot be combined.*{needle}"):
+        run_pex(
+            resistor_layout,
+            testbenches,
+            "sky130",
+            output=str(tmp_path / "res.spice"),
+            artifacts_dir=str(tmp_path / "art"),
+            extract_only=True,
+            **kwargs,
+        )
+
+
+def test_cli_pex_extract_only_json_and_exit_code(tmp_path, resistor_layout, capsys):
+    exit_code = main(
+        [
+            "pex",
+            resistor_layout,
+            "--deck",
+            "sky130",
+            "--extract-only",
+            "-o",
+            str(tmp_path / "res.spice"),
+            "--outdir",
+            str(tmp_path / "art"),
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 4
+    report = json.loads(capsys.readouterr().out)
+    assert report["measurement"]["mode"] == "extract-only"
+    assert report["status"] == "not_checked"
+
+
+def test_cli_pex_extract_only_text_prints_mode(tmp_path, resistor_layout, capsys):
+    main(
+        [
+            "pex",
+            resistor_layout,
+            "--deck",
+            "sky130",
+            "--extract-only",
+            "-o",
+            str(tmp_path / "res.spice"),
+            "--outdir",
+            str(tmp_path / "art"),
+        ]
+    )
+    assert "measurement: extract-only" in capsys.readouterr().out
+
+
+def test_cli_pex_extract_only_conflict_is_clean_error(
+    tmp_path, resistor_layout, capsys
+):
+    exit_code = main(
+        [
+            "pex",
+            resistor_layout,
+            "--deck",
+            "sky130",
+            "--extract-only",
+            "--device-only-leg",
+            "--format",
+            "json",
+        ]
+    )
+    assert exit_code == 1
+    assert (
+        "--extract-only cannot be combined"
+        in json.loads(capsys.readouterr().err)["error"]["message"]
+    )
+
+
+def test_signoff_refuses_extract_only_report_as_evidence(tmp_path, resistor_layout):
+    """Issue #3739: an `--extract-only` envelope is not comparison evidence."""
+    from klayout_tools.signoff import build_signoff
+
+    report = run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        output=str(tmp_path / "res.spice"),
+        artifacts_dir=str(tmp_path / "art"),
+        extract_only=True,
+    )
+    path = tmp_path / "pex.json"
+    path.write_text(json.dumps(report))
+
+    check = build_signoff([str(path)])["checks"][0]
+
+    assert check["passed"] is False
+    assert check["detail"]["nothing_checked_reasons"] == ["no_delta_rows"]

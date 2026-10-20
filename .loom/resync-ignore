@@ -42,24 +42,14 @@
 # hermit-patterns, builder-pr (both copies), sweep-lease-fence,
 # verify-proposal-refs and pr-worktree stay pinned below but were RE-PORTED
 # onto current upstream in the same change (only their local delta remains).
-# curator/judge/doctor (#668) wait for #2711; dep-recheck-fingerprint stays.
+# curator/judge/doctor (#668) were unpinned by #1966 PR 2; dep-recheck-fingerprint stays.
 
-# #668: curator.md/judge.md/doctor.md's "Stale `loom:curating`/`loom:reviewing`/
-# `loom:treating` Claim Check" sections carry a local-only "Frozen-Timeline
-# Fallback" -- a `RECLAIM_MARKER`/`RECLAIM_COUNT` cross-check plus a
-# `gh issue|pr view --json labels,updatedAt` ground-truth read -- added after a
-# live-verified false-positive livelock on issue #509 (2026-08-10): a real
-# label toggle was confirmed via `gh issue view --json labels`, but
-# `/events`/`/timeline` kept returning the same stale `labeled` event for
-# several minutes, so `CLAIMED_AT` never advanced and the same "Reclaiming
-# stale claim..." comment fired 30+ times. This mitigation was never
-# upstreamed into rjwalters/loom's own templates, so an unpinned resync would
-# silently drop it and reintroduce the livelock. If the upstream Loom project
-# ever adopts an equivalent mitigation, these pins can be dropped and the
-# files resynced normally.
-commands/loom/curator.md
-commands/loom/judge.md
-commands/loom/doctor.md
+# #668 (RETIRED by #1966 PR 2): commands/loom/{curator,judge,doctor}.md used to
+# be pinned whole-file to protect an inline "Frozen-Timeline Fallback" (the
+# 2026-08-10 reclaim livelock on #509). That protection now lives in the
+# pinned scripts/claim-staleness.sh below (#1966 PR 1, covered by
+# scripts/tests/test-claim-staleness.sh T23-T32), which the upstream role
+# files already drive, so the three role files track upstream again.
 
 # #1292: hermit-patterns.md's `stateless_ceremony` AST detector carries two
 # local-only exclusions added by #1288 (closing #920) — exclusion 4 skips
@@ -173,7 +163,7 @@ scripts/tests/test-dep-recheck-fingerprint.sh
 # anywhere in it), so an unpinned resync would silently revert it -- the same
 # reversion pattern as #606/#662/#1292/#1316/#1356/#1546/#1674/#1898. The #668
 # whole-file pins above stay until PR 2 of #1966 unpins them, which the
-# operator gated on THIS pin landing and being verified. If the upstream Loom
+# operator gated on THIS pin landing and being verified (done). If the upstream Loom
 # project ever adopts an equivalent frozen-timeline guard, these pins can be
 # dropped and the files resynced normally.
 scripts/claim-staleness.sh

@@ -225,6 +225,7 @@ def _unrun_corner_report(
         "temperature_c": point.temperature_c,
         **({"params": dict(point.params)} if point.params else {}),
         **({"nodeset": dict(point.nodeset)} if point.nodeset else {}),
+        **({"options": dict(point.options)} if point.options else {}),
         "status": "error",
         "runtime_s": 0.0,
         "engine_exit_code": None,
@@ -256,12 +257,37 @@ def _lost_shard_corner(
     return report
 
 
+def _await_shards(
+    pool: ThreadPoolExecutor,
+    future_to_index: dict[Any, int],
+    results: list[Any],
+    lost_reasons: list[str | None],
+) -> None:
+    """Collect shard futures into ``results`` / ``lost_reasons`` as they finish.
+
+    An interrupt while waiting cancels the not-yet-started futures first: with
+    a ``max_concurrent_jobs`` cap, the pool's implicit ``shutdown(wait=True)``
+    would otherwise launch every still-queued shard as a new billable job.
+    """
+    try:
+        for future in as_completed(future_to_index):
+            index = future_to_index[future]
+            try:
+                results[index] = future.result()
+            except Exception as exc:  # noqa: BLE001 - "shard never returned"
+                lost_reasons[index] = str(exc)
+    except BaseException:
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+
+
 def _run_sharded(
     *,
     shard_runner: ShardRunner,
     corner_points: list[CornerPoint],
     hosts: int,
     measurements_spec: list[dict[str, Any]],
+    max_concurrent: int | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The fleet shard/merge engine: slice ``corner_points`` into ``hosts``
     contiguous shards (:func:`_shard_corner_points`), run each shard through
@@ -280,6 +306,11 @@ def _run_sharded(
     never aborts a sibling shard, mirroring `local-parallel`'s per-corner
     failure isolation one level up. An empty shard (``hosts`` exceeds the
     unit count) is never handed to ``shard_runner`` at all.
+
+    ``max_concurrent`` (issue #3914) bounds how many shards are in flight at
+    once -- the pool size becomes ``min(hosts, max_concurrent)`` and the
+    remaining shards start as earlier ones finish; ``None`` runs every shard
+    at once, as before.
 
     ``engine_version`` is derived the same "last non-``None`` wins, in
     corner-list order" way every backend already computes it -- shards are
@@ -311,16 +342,14 @@ def _run_sharded(
     ] = [None] * len(shards)
     lost_reasons: list[str | None] = [None] * len(shards)
 
-    with ThreadPoolExecutor(max_workers=max(1, hosts)) as pool:
+    workers = max(1, hosts)
+    if max_concurrent is not None:
+        workers = min(workers, max(1, max_concurrent))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
         future_to_index = {
             pool.submit(_run_one, shard): index for index, shard in enumerate(shards)
         }
-        for future in as_completed(future_to_index):
-            index = future_to_index[future]
-            try:
-                results[index] = future.result()
-            except Exception as exc:  # noqa: BLE001 - "shard never returned"
-                lost_reasons[index] = str(exc)
+        _await_shards(pool, future_to_index, results, lost_reasons)
 
     corners: list[dict[str, Any]] = []
     engine_version: str | None = None
@@ -568,14 +597,17 @@ def _points_to_push(
     A non-default ``monte_carlo.seed_scope`` (issue #2899) is resolved
     client-side: a runner older than the field would silently drop it and
     re-derive ``per_corner`` seeds, so the already-derived seeds are shipped
-    instead (the same wire a fleet shard uses). The default forwards the
-    request unchanged.
+    instead (the same wire a fleet shard uses). A declared
+    ``monte_carlo.mismatch_scale`` (issue #3942) is resolved the same way, so
+    an older runner cannot silently run an unscaled sweep. The default
+    forwards the request unchanged.
     """
     if explicit_points is not None:
         return explicit_points
     mc_spec = request.get("monte_carlo")
-    if isinstance(mc_spec, dict) and mc_spec.get("seed_scope", "per_corner") != (
-        "per_corner"
+    if isinstance(mc_spec, dict) and (
+        mc_spec.get("seed_scope", "per_corner") != "per_corner"
+        or "mismatch_scale" in mc_spec
     ):
         return corner_points
     return None
@@ -964,7 +996,7 @@ def _build_remote_job_description(
     collected artifacts directory.
 
     The include closure (issue #2485) is resolved by
-    :func:`sim_staging.stage_sim_netlist` -- the *same* call
+    :func:`sim_staging.stage_sim_job` -- the *same* call
     ``sim_batch._build_batch_job_spec`` makes, so the two independently
     built input lists cannot drift apart on include handling. Each staged
     file lands beside ``netlist.cir`` in the job directory under a flat
