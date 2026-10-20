@@ -216,7 +216,11 @@ def run_sim_set(
     the aggregate envelope. Per-request failures are entries, never raised.
 
     ``capacity_retries`` (default 0: off) re-submits a request refused with a
-    capacity code up to that many more times, with doubling backoff."""
+    capacity code up to that many more times, with doubling backoff.
+
+    ``resume=True`` in ``run_kwargs`` reaches every request's ``run`` call; each
+    request resumes from its own directory, so a sharded request re-attaches to
+    the shard jobs recorded there (issue #4005)."""
     if not request_paths:
         raise SimError("--batch-set needs at least one request file")
     if isinstance(max_in_flight, bool) or max_in_flight < 1:

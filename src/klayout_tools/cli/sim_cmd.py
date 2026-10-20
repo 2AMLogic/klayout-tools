@@ -265,7 +265,6 @@ def _run_batch_set(args: argparse.Namespace) -> int:
         flag
         for flag, value in (
             ("a positional request", args.request),
-            ("--resume", args.resume),
             ("--attach", getattr(args, "attach_job_id", None)),
             ("--plot", args.plot),
             ("--op-lint", getattr(args, "op_lint", False)),
@@ -302,6 +301,7 @@ def _run_batch_set(args: argparse.Namespace) -> int:
             max_workers=args.max_workers,
             hosts=args.hosts,
             budget_s=args.budget_s,
+            resume=args.resume,
             fail_fast_probe=args.fail_fast_probe,
             fail_on_diagnostic=args.fail_on_diagnostic,
         )
