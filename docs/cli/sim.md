@@ -5562,6 +5562,30 @@ a corner grid. A stock ngspice without the module still produces the
     echo the dispatched `corner_id` and `params`, otherwise the request fails
     with error code `params_unsupported_worker` and reports no result. Update
     the runner image, or use a local backend.
+- **`corners.temperature_param`** (`string`, optional, [#3994](https://github.com/2AMLogic/klayout-tools/issues/3994))
+  — binds a top-level `.param` to the grid temperature. For every point the deck
+  gets `alterparam <name>=<temperature_c>` next to any `corners.params` row, before
+  the single `reset`, so a deck that reads `temp_c` (per-instance `dtemp` offsets,
+  temperature-coefficient measures) sees the point's temperature. It adds no axis
+  and no cross product: `temperature_c: [-40, 27, 125]` with
+  `temperature_param: "temp_c"` is three points.
+
+  ```json
+  {"corners": {"temperature_c": [-40, 27, 125], "temperature_param": "temp_c"}}
+  ```
+
+  - **Rules.** The name follows the `corners.params` rules (lowercased, not `mc_*`)
+    and may not also be a `corners.params` or `corners.supply_v` key, nor be
+    combined with `corners.units`. An undeclared name is a `SimError` before
+    dispatch, `engine: "xyce"` is refused, and the bound parameter appears in each
+    corner's `params` and `corner_id` exactly like a `corners.params` entry. A
+    request without the field is unchanged. It rides the batch/remote path through
+    the same `params` echo check as `corners.params`.
+  - **The other asks in the same report are already covered:** a `.noise`
+    analysis is `analysis.noise` on `kind: "twoport"` (#3339), a seeded Monte
+    Carlo is `monte_carlo.seed` (no `setseed` needed), and a `batch_concurrency_cap`
+    refusal is retried with `batch.capacity_wait_s` / `--wait-for-capacity`
+    (default off).
 - **`corners.options`** (`object`, optional, [#3125](https://github.com/2AMLogic/klayout-tools/issues/3125))
   — a solver-tolerance axis: ngspice `.options` names mapped to equal-length,
   nonempty arrays of finite numbers, zipped by index and expanded innermost
