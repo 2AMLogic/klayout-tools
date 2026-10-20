@@ -253,6 +253,7 @@
       "kind": "verb",
       "description": "`klt layout_plan` implementation: core modules plus CLI adapter.",
       "modules": [
+        "klayout_tools.cli.layout_plan_cmd",
         "klayout_tools.layout_plan",
         "klayout_tools.layout_plan_execute"
       ]
@@ -646,6 +647,11 @@
       "consumer": "tap_distance",
       "exporter": "cli-infra",
       "reason": "CLI adapter uses the shared output envelope and --region parser, as every verb does."
+    },
+    {
+      "consumer": "layout_plan",
+      "exporter": "cli-infra",
+      "reason": "CLI adapter uses the shared output envelope, as every verb does."
     },
     {
       "consumer": "tap_distance",
