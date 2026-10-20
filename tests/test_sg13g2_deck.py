@@ -71,6 +71,62 @@ def _write_gds(layout: kdb.Layout, path: Path) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# NWell width/space + NW.b1 unchecked marker (issue #3571)
+# --------------------------------------------------------------------------- #
+
+
+def _nwell_layout(tmp_path: Path, name: str, boxes) -> str:
+    layout = kdb.Layout()
+    layout.dbu = _DBU_UM
+    top = layout.create_cell("TOP")
+    for box in boxes:
+        top.shapes(layout.layer(31, 0)).insert(_box_um(*box))
+    return _write_gds(layout, tmp_path / name)
+
+
+def test_run_drc_sg13g2_nwell_width_clean_and_violation(tmp_path: Path):
+    """A 3x3 um NWell is clean; a 0.5 um-wide one trips `nwell.width.1`
+    (NW.a, 0.62 um). `31/0` is no longer unruled."""
+    ok = run_drc(_nwell_layout(tmp_path, "nw_ok.gds", [(0, 0, 3, 3)]), "sg13g2")
+    assert ok["status"] == "clean"
+    assert "nwell.width.1" in ok["coverage"]["rules_checked"]
+    assert "31/0" not in ok["coverage"]["layers_in_stream_without_rules"]
+
+    bad = run_drc(_nwell_layout(tmp_path, "nw_bad.gds", [(0, 0, 0.5, 3)]), "sg13g2")
+    assert bad["status"] == "violations"
+    assert bad["rule_counts"].get("nwell.width.1", 0) >= 1
+
+
+def test_run_drc_sg13g2_nwell_space_violation(tmp_path: Path):
+    """Two wells 0.4 um apart (< NW.b's 0.62 um) trip `nwell.space.1`."""
+    path = _nwell_layout(tmp_path, "nw_sp.gds", [(0, 0, 3, 3), (3.4, 0, 6.4, 3)])
+    report = run_drc(path, "sg13g2")
+    assert report["rule_counts"].get("nwell.space.1", 0) >= 1
+
+
+def test_run_drc_sg13g2_two_wells_report_nw_b1_unchecked(tmp_path: Path):
+    """Issue #3571 repro: two 3x3 um wells 1.0 um apart pass the geometric
+    rules, but the net-aware NW.b1 (1.80 um) is named in
+    `coverage.unchecked_rules` so the `clean` is not read as covering it."""
+    path = _nwell_layout(tmp_path, "nw_b1.gds", [(0, 0, 3, 3), (4, 0, 7, 3)])
+    report = run_drc(path, "sg13g2")
+    assert report["status"] == "clean"
+    unchecked = report["coverage"]["unchecked_rules"]
+    assert [u["rule"] for u in unchecked] == ["NW.b1"]
+    assert unchecked[0]["layer"] == "31/0"
+
+
+def test_run_drc_sg13g2_no_nwell_no_unchecked_marker(tmp_path: Path):
+    """No NWell in the stream -> no NW.b1 marker."""
+    layout = kdb.Layout()
+    layout.dbu = _DBU_UM
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(8, 0)).insert(_box_um(0, 0, 0.21, 4))
+    report = run_drc(_write_gds(layout, tmp_path / "no_nw.gds"), "sg13g2")
+    assert report["coverage"]["unchecked_rules"] == []
+
+
+# --------------------------------------------------------------------------- #
 # Provenance populated (issue #905 AC: "every compiled rule cites its
 # SG13G2 PDK source line")
 # --------------------------------------------------------------------------- #
@@ -2183,3 +2239,174 @@ def test_run_drc_sg13g2_psd_subminimum_area_inside_merged_shape_is_clean(
         _psd_gds(tmp_path, [(0, 0, 1.0, 1.0), (1.0, 0.0, 1.1, 0.4)]), "sg13g2"
     )
     assert "psd.area.1" not in _psd_rule_ids(report)
+
+
+# --------------------------------------------------------------------------- #
+# NWell enclosure/space to implanted Activ: NW.c/d/e/f* (issue #3585)
+# --------------------------------------------------------------------------- #
+
+
+def _nwell_activ_layout(
+    tmp_path: Path,
+    name: str,
+    *,
+    implant: tuple[int, int],
+    activ,
+    nwell=(0, 0, 4, 4),
+    thick_gate_ox=None,
+    digbnd=None,
+) -> str:
+    """NWell + one implanted Activ box (+ optional ThickGateOx / DigiBnd), um."""
+    layout = kdb.Layout()
+    layout.dbu = _DBU_UM
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(31, 0)).insert(_box_um(*nwell))
+    top.shapes(layout.layer(1, 0)).insert(_box_um(*activ))
+    top.shapes(layout.layer(*implant)).insert(_box_um(*activ))
+    if thick_gate_ox is not None:
+        top.shapes(layout.layer(44, 0)).insert(_box_um(*thick_gate_ox))
+    if digbnd is not None:
+        top.shapes(layout.layer(16, 0)).insert(_box_um(*digbnd))
+    return _write_gds(layout, tmp_path / name)
+
+
+_NW_PREFIXES = ("nwell.enclosing.", "nwell.space.nactiv", "nwell.space.pactiv")
+
+
+def _nw_fired(counts) -> set[str]:
+    return {k for k in counts if k.startswith(_NW_PREFIXES)}
+
+
+# (rule family, implant layer, ThickGateOx, DigiBnd) -> (rule id, threshold um)
+_NW_RULES = {
+    ("enclosing", (14, 0), False, False): ("nwell.enclosing.pactiv.1", 0.31),
+    ("enclosing", (14, 0), True, False): ("nwell.enclosing.pactiv.hv.1", 0.62),
+    ("enclosing", (14, 0), True, True): ("nwell.enclosing.pactiv.dig.1", 0.31),
+    ("enclosing", (7, 0), False, False): ("nwell.enclosing.nactiv.1", 0.24),
+    ("enclosing", (7, 0), True, False): ("nwell.enclosing.nactiv.hv.1", 0.62),
+    ("enclosing", (7, 0), True, True): ("nwell.enclosing.nactiv.dig.1", 0.24),
+    ("space", (7, 0), False, False): ("nwell.space.nactiv.1", 0.31),
+    ("space", (7, 0), True, False): ("nwell.space.nactiv.hv.1", 0.62),
+    ("space", (7, 0), True, True): ("nwell.space.nactiv.dig.1", 0.31),
+    ("space", (14, 0), False, False): ("nwell.space.pactiv.1", 0.24),
+    ("space", (14, 0), True, False): ("nwell.space.pactiv.hv.1", 0.62),
+    ("space", (14, 0), True, True): ("nwell.space.pactiv.dig.1", 0.24),
+}
+
+
+def test_sg13g2_deck_carries_every_nw_c_d_e_f_rule_with_provenance():
+    """Issue #3585: all 12 NW.c/d/e/f* rules are `DrcRule`s with this deck's
+    own thresholds and a PDK rule-id citation -- none dropped."""
+    by_id = {r.id: r for r in sg13g2_deck_module.DECK}
+    assert len(sg13g2_deck_module.DECK) == len(by_id)
+    cited = set()
+    for rule_id, um in _NW_RULES.values():
+        rule = by_id[rule_id]
+        assert rule.threshold_dbu == round(um * 1000)
+        assert rule.provenance is not None
+        cited.add(rule.provenance.rule_id)
+    assert cited == {
+        "NW.c",
+        "NW.c1",
+        "NW.c1.dig",
+        "NW.d",
+        "NW.d1",
+        "NW.d1.dig",
+        "NW.e",
+        "NW.e1",
+        "NW.e1.dig",
+        "NW.f",
+        "NW.f1",
+        "NW.f1.digibnd",
+    }
+
+
+@pytest.mark.parametrize(
+    ("family", "implant", "hv", "dig"), list(_NW_RULES), ids=lambda v: str(v)
+)
+def test_run_drc_sg13g2_nwell_c_d_e_f_threshold_edges(
+    tmp_path: Path, family, implant, hv, dig
+):
+    """Each rule: 0.01 um short of its threshold trips only that rule; exactly
+    at the threshold is clean (so the violating and clean case per rule)."""
+    rule_id, um = _NW_RULES[(family, implant, hv, dig)]
+
+    def run(value: float) -> dict:
+        if family == "enclosing":
+            activ = (value, value, 4 - value, 4 - value)
+            gox = (-1, -1, 5, 5) if hv else None
+            digbnd = (-1, -1, 5, 5) if dig else None
+        else:
+            left = 4 + value
+            activ = (left, 0, left + 2, 2)
+            gox = (left - 1, -1, left + 3, 3) if hv else None
+            digbnd = (3, -2, 12, 4) if dig else None
+        path = _nwell_activ_layout(
+            tmp_path,
+            f"{rule_id}_{value}.gds",
+            implant=implant,
+            activ=activ,
+            thick_gate_ox=gox,
+            digbnd=digbnd,
+        )
+        return run_drc(path, "sg13g2")
+
+    bad = run(round(um - 0.01, 3))
+    assert bad["status"] == "violations"
+    assert _nw_fired(bad["rule_counts"]) == {rule_id}
+    ok = run(um)
+    assert ok["status"] == "clean", ok["rule_counts"]
+    assert rule_id in ok["coverage"]["rules_checked"]
+
+
+@pytest.mark.parametrize("family", ["enclosing", "space"])
+@pytest.mark.parametrize("implant", [(7, 0), (14, 0)])
+def test_run_drc_sg13g2_nwell_digbnd_split_falls_back_to_hv_rule(
+    tmp_path: Path, family, implant
+):
+    """Outside DigiBnd the 0.62 um `.hv.1` rule holds HV Activ to the stricter
+    value; `.dig.1` is silent on the same geometry."""
+    hv_id, hv_um = _NW_RULES[(family, implant, True, False)]
+    dig_id, dig_um = _NW_RULES[(family, implant, True, True)]
+    if family == "enclosing":
+        activ = (dig_um, dig_um, 4 - dig_um, 4 - dig_um)
+        gox = (-1, -1, 5, 5)
+    else:
+        left = 4 + dig_um
+        activ = (left, 0, left + 2, 2)
+        gox = (left - 1, -1, left + 3, 3)
+    path = _nwell_activ_layout(
+        tmp_path,
+        f"nodig_{family}_{implant[0]}.gds",
+        implant=implant,
+        activ=activ,
+        thick_gate_ox=gox,
+    )
+    assert _nw_fired(run_drc(path, "sg13g2")["rule_counts"]) == {hv_id}
+
+
+def test_run_drc_sg13g2_pactiv_straddling_well_edge_and_outside(tmp_path: Path):
+    """A P+ Activ crossing the well edge is an escape (NW.c); a substrate tap
+    or N+ Activ wholly outside NWell is not an enclosure violation."""
+    straddle = _nwell_activ_layout(
+        tmp_path, "pa_straddle.gds", implant=(14, 0), activ=(3, 1, 5, 3)
+    )
+    assert run_drc(straddle, "sg13g2")["rule_counts"].get("nwell.enclosing.pactiv.1", 0)
+    for implant in ((14, 0), (7, 0)):
+        outside = _nwell_activ_layout(
+            tmp_path, f"outside_{implant[0]}.gds", implant=implant, activ=(6, 1, 7, 2)
+        )
+        report = run_drc(outside, "sg13g2")
+        assert not [k for k in report["rule_counts"] if k.startswith("nwell.enc")]
+
+
+@pytest.mark.parametrize("implant", [(7, 0), (14, 0)])
+def test_run_drc_sg13g2_nwell_space_ignores_activ_inside_well(tmp_path: Path, implant):
+    """Well tie / P+ wholly inside NWell is the enclosure rules' job, not a
+    space violation."""
+    path = _nwell_activ_layout(
+        tmp_path, f"nws_inside_{implant[0]}.gds", implant=implant, activ=(1, 1, 3, 3)
+    )
+    report = run_drc(path, "sg13g2")
+    assert not [k for k in report["rule_counts"] if k.startswith("nwell.space.n")]
+    assert not [k for k in report["rule_counts"] if k.startswith("nwell.space.p")]

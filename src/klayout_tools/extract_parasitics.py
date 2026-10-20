@@ -2635,6 +2635,7 @@ def _inject_parasitics(
         terminal_reports: list[dict[str, Any]] = []
         segment_reports: list[dict[str, Any]] = []
         rc_model = "lumped"
+        pin_order: int | None = None
         net_c_count = 0
         if (
             distributed_rc_nets is not None
@@ -2669,6 +2670,7 @@ def _inject_parasitics(
             # docstring) keeps that position's identity intact for free,
             # mirroring the star's own reuse.
             mid_index = len(order) // 2
+            pin_order = mid_index
 
             legs: list[kdb.Net] = [net] * len(order)
             leg_names: list[str] = [entry["net"]] * len(order)
@@ -2981,6 +2983,11 @@ def _inject_parasitics(
                 # resistors, in `order` sequence -- `[]` unless
                 # `rc_model == "distributed"`.
                 "segments": segment_reports,
+                # Additive field (issue #3937): the `order` of the terminal
+                # whose `leg_net` is the net's own name (the subcircuit
+                # pin) -- the ladder's middle node, `len(order) // 2`.
+                # `None` unless `rc_model == "distributed"`.
+                "pin_order": pin_order,
                 "coupled": [
                     {**c, "net": spice_safe_net_name(c["net"])}
                     for c in coupled_by_net.get(entry["net"], [])

@@ -1495,6 +1495,20 @@ _CAPACITOR_MODEL_TABLE: dict[tuple[str, str], dict[str, str]] = {
         "cap_mim_1f0_m4m5_noshield": "cap_mim_1f0_m4m5_noshield",
         "cap_mim_1f5_m4m5_noshield": "cap_mim_1f5_m4m5_noshield",
         "cap_mim_2f0_m4m5_noshield": "cap_mim_2f0_m4m5_noshield",
+        # MOS capacitors (issue #2919): the PDK ships `.subckt cap_nmos_03v3
+        # 1 2 c_length=l c_width=w dtemp=0` (and the pmos/06v0/`_b` forms) in
+        # `libs.tech/ngspice/sm141064.ngspice`, same `c_` spellings as the
+        # MiM. The `_dn` classes have no subcircuit of their own (the runset
+        # folds them onto the plain name unless CONSIDER_DN_DW_FEATURES), so
+        # they stay unbound.
+        "cap_nmos_03v3": "cap_nmos_03v3",
+        "cap_pmos_03v3": "cap_pmos_03v3",
+        "cap_nmos_06v0": "cap_nmos_06v0",
+        "cap_pmos_06v0": "cap_pmos_06v0",
+        "cap_nmos_03v3_b": "cap_nmos_03v3_b",
+        "cap_pmos_03v3_b": "cap_pmos_03v3_b",
+        "cap_nmos_06v0_b": "cap_nmos_06v0_b",
+        "cap_pmos_06v0_b": "cap_pmos_06v0_b",
     },
     # sg13g2's two declared MIM capacitor classes (issue #1470; classes
     # recognised by issue #1456). Confirmed against a real fetched

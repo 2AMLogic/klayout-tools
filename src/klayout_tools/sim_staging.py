@@ -310,6 +310,38 @@ def client_pdk_root() -> str | None:
     return os.path.abspath(os.path.expanduser(candidate))
 
 
+_PDK_ROOT_LITERAL_PREFIXES = ("$PDK_ROOT/", "${PDK_ROOT}/")
+
+
+def runner_resolved_osdi(request: dict[str, Any], request_dir: str) -> dict[int, str]:
+    """``{index: reason}`` for every ``options.osdi_preload`` entry the
+    *executing* host resolves for itself (issue #3819), by the same two
+    reasons the include rule reports: ``"env_var"`` for a literal
+    ``$PDK_ROOT/<rel>`` and ``"pdk_root"`` for a path under
+    ``models.pdk_root``. Such an entry names an image-baked ``.osdi``: it is
+    not existence-checked, staged or hashed on this host. Malformed entries
+    are left to the callers' own validation.
+    """
+    from ._paths import _resolve_relative
+
+    raw = (request.get("options") or {}).get("osdi_preload")
+    if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
+        return {}
+    roots = host_resolved_roots(request)
+    found: dict[int, str] = {}
+    for index, entry in enumerate(raw):
+        if not isinstance(entry, str) or not entry.strip():
+            continue
+        if entry.startswith(_PDK_ROOT_LITERAL_PREFIXES):
+            found[index] = "env_var"
+        elif "$" not in entry and any(
+            _is_under(os.path.abspath(_resolve_relative(entry, request_dir)), root)
+            for root in roots
+        ):
+            found[index] = "pdk_root"
+    return found
+
+
 def stage_netlist(
     netlist_path: str,
     *,
@@ -545,7 +577,7 @@ def _stage_model_closure(
 ) -> StagedSimJob:
     roots = _collect_model_roots(request, request_dir)
     lib_names: dict[str, str] = {}
-    osdi_names: list[str] = []
+    staged_osdi: list[str] = []
     root_by_name: dict[str, _ModelRoot] = {}
     for root in roots:
         mode = _MODE_BINARY if root.kind == "osdi" else _MODE_MODEL
@@ -554,7 +586,7 @@ def _stage_model_closure(
         )
         root_by_name.setdefault(name, root)
         if root.kind == "osdi":
-            osdi_names.append(name)
+            staged_osdi.append(name)
         else:
             lib_names[root.ref] = name
 
@@ -576,6 +608,7 @@ def _stage_model_closure(
             )
         )
 
+    osdi_names = _osdi_forward_order(request, request_dir, staged_osdi)
     worker = _rewrite_worker_request(request, lib_names, osdi_names)
     return StagedSimJob(
         netlist=netlist,
@@ -685,6 +718,7 @@ def _osdi_roots(request: dict[str, Any], request_dir: str) -> list[_ModelRoot]:
     raw = (request.get("options") or {}).get("osdi_preload")
     if raw is None:
         return []
+    runner_resolved = runner_resolved_osdi(request, request_dir)
     if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
         raise ModelStagingError(
             "options.osdi_preload must be an array of paths to compiled "
@@ -695,6 +729,8 @@ def _osdi_roots(request: dict[str, Any], request_dir: str) -> list[_ModelRoot]:
         field_name = f"options.osdi_preload[{index}]"
         if not isinstance(entry, str) or not entry.strip():
             raise ModelStagingError(f"{field_name} must be a non-empty path")
+        if index in runner_resolved:
+            continue
         path = os.path.abspath(_resolve_relative(entry, request_dir))
         if not os.path.isfile(path):
             raise ModelStagingError(
@@ -704,11 +740,27 @@ def _osdi_roots(request: dict[str, Any], request_dir: str) -> list[_ModelRoot]:
     return roots
 
 
+def _osdi_forward_order(
+    request: dict[str, Any], request_dir: str, staged: list[str]
+) -> list[str]:
+    """The worker's ``options.osdi_preload``: staged names for host-local
+    entries, runner-resolved entries (issue #3819) unexpanded, declared order."""
+    raw = (request.get("options") or {}).get("osdi_preload") or []
+    runner_resolved = runner_resolved_osdi(request, request_dir)
+    staged_iter = iter(staged)
+    return [
+        entry if index in runner_resolved else next(staged_iter)
+        for index, entry in enumerate(raw)
+    ]
+
+
 def _rewrite_worker_request(
     request: dict[str, Any], lib_names: dict[str, str], osdi_names: list[str]
 ) -> dict[str, Any]:
     """A deep copy of ``request`` with every model reference replaced by
-    its staged job-relative name, plus :data:`STAGED_MODEL_INPUTS_FIELD`."""
+    its staged job-relative name, plus :data:`STAGED_MODEL_INPUTS_FIELD`.
+    ``osdi_names`` is the complete preload list in declared order, runner-
+    resolved entries (issue #3819) verbatim among the staged names."""
     worker = copy.deepcopy(request)
     models = worker.get("models")
     if isinstance(models, dict) and models.get("lib") in lib_names:
@@ -1097,6 +1149,17 @@ class _Stager:
         if any(_is_under(resolved, root) for root in self.roots):
             return None
         return resolved
+
+
+def resolve_include_target(
+    target: str, *, origin: str, roots: Sequence[str] = ()
+) -> str | None:
+    """Absolute local path an ``.include`` ``target`` carried by ``origin``
+    names, by the same rule :func:`stage_netlist` follows; ``None`` when the
+    executing host owns its resolution (an env-var or PDK-root target)."""
+    return _Stager(reserved_names=(), roots=tuple(roots))._resolve(
+        target, origin=origin
+    )
 
 
 def _read_text(path: str) -> tuple[str, bool]:

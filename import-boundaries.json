@@ -105,6 +105,7 @@
       "modules": [
         "klayout_tools.cli.drc_cmd",
         "klayout_tools.drc",
+        "klayout_tools.drc_crosscheck",
         "klayout_tools.drc_klayout_engine"
       ]
     },
@@ -179,7 +180,8 @@
         "klayout_tools.cli.functional_verification_cmd",
         "klayout_tools.functional_verification",
         "klayout_tools.functional_verification_initial_state",
-        "klayout_tools.functional_verification_sdf"
+        "klayout_tools.functional_verification_sdf",
+        "klayout_tools.functional_verification_sdf_rename"
       ]
     },
     "gen": {
@@ -213,6 +215,7 @@
         "klayout_tools.cli.gen_compose_cmd",
         "klayout_tools.gen_compose",
         "klayout_tools.gen_compose_port_access",
+        "klayout_tools.gen_compose_port_request",
         "klayout_tools.gen_compose_routing"
       ]
     },
@@ -252,6 +255,7 @@
       "kind": "verb",
       "description": "`klt layout_plan` implementation: core modules plus CLI adapter.",
       "modules": [
+        "klayout_tools.cli.layout_plan_cmd",
         "klayout_tools.layout_plan",
         "klayout_tools.layout_plan_execute"
       ]
@@ -329,6 +333,7 @@
         "klayout_tools.pdk_capabilities",
         "klayout_tools.pdk_cells",
         "klayout_tools.pdk_compat",
+        "klayout_tools.pdk_descriptor",
         "klayout_tools.pdk_families",
         "klayout_tools.pdk_models",
         "klayout_tools.pdk_pcell",
@@ -354,9 +359,12 @@
         "klayout_tools.place_and_route_gds_merge",
         "klayout_tools.place_and_route_min_area",
         "klayout_tools.place_and_route_pdn_fit",
+        "klayout_tools.place_and_route_pins",
+        "klayout_tools.place_and_route_portable",
         "klayout_tools.place_and_route_power_audit",
         "klayout_tools.place_and_route_reports",
         "klayout_tools.place_and_route_request",
+        "klayout_tools.place_and_route_script",
         "klayout_tools.place_and_route_sta"
       ]
     },
@@ -424,6 +432,7 @@
         "klayout_tools._provenance",
         "klayout_tools._report_verify",
         "klayout_tools._text",
+        "klayout_tools._unionfind",
         "klayout_tools._vendor",
         "klayout_tools._vendor.mutation_variants",
         "klayout_tools._version_scheme",
@@ -436,6 +445,7 @@
         "klayout_tools.op_sanity",
         "klayout_tools.output_lock",
         "klayout_tools.resistor_mesh",
+        "klayout_tools.routing_pitch",
         "klayout_tools.touchstone",
         "klayout_tools.verilog_netlist"
       ]
@@ -485,9 +495,13 @@
         "klayout_tools.sim_raw",
         "klayout_tools.sim_remote",
         "klayout_tools.sim_set",
+        "klayout_tools.sim_snm",
+        "klayout_tools.sim_snm_meas",
         "klayout_tools.sim_staging",
         "klayout_tools.sim_steps",
         "klayout_tools.sim_stimulus",
+        "klayout_tools.sim_subckt_override",
+        "klayout_tools.sim_supply_relative",
         "klayout_tools.sim_supply_waveform",
         "klayout_tools.sim_tian",
         "klayout_tools.sim_transfer",
@@ -501,7 +515,8 @@
       "description": "`klt size` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.size_cmd",
-        "klayout_tools.size"
+        "klayout_tools.size",
+        "klayout_tools.size_topology"
       ]
     },
     "reset_coverage": {
@@ -636,6 +651,11 @@
       "consumer": "tap_distance",
       "exporter": "cli-infra",
       "reason": "CLI adapter uses the shared output envelope and --region parser, as every verb does."
+    },
+    {
+      "consumer": "layout_plan",
+      "exporter": "cli-infra",
+      "reason": "CLI adapter uses the shared output envelope, as every verb does."
     },
     {
       "consumer": "tap_distance",
@@ -911,6 +931,11 @@
       "consumer": "lvs",
       "exporter": "netlist",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "lvs",
+      "exporter": "place_and_route",
+      "reason": "Issue #3798: klt lvs reuses place_and_route_portable.portable_response for its opt-in portable_paths rewrite rather than a second path walker."
     },
     {
       "consumer": "lvs",
@@ -1249,6 +1274,12 @@
     }
   ],
   "shared_private_permissions": [
+    {
+      "consumer": "klayout_tools.place_and_route_portable",
+      "exporter": "klayout_tools.env_provenance",
+      "symbol": "_absolute_paths_in",
+      "reason": "Issue #3820: portable_paths reuses env_provenance's absolute-path scanner so response rewriting matches the provenance scrub exactly rather than duplicating the regex."
+    },
     {
       "consumer": "klayout_tools.tap_distance",
       "exporter": "klayout_tools.erc",
@@ -1967,6 +1998,18 @@
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
+        "consumer": "klayout_tools.op_sanity",
+        "exporter": "klayout_tools.sim",
+        "symbol": "_scale_supply_waveforms",
+        "reason": "op-lint rescales `supply_waveforms` rails with the same helper the sweep uses (issue #3624); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.op_sanity",
+        "exporter": "klayout_tools.sim",
+        "symbol": "_supply_alter_lines",
+        "reason": "op-lint emits `alter` lines for supply rails with the same helper the sweep uses (issue #3624); remove by making the symbol public or moving it to a shared module."
+      },
+      {
         "consumer": "klayout_tools.pdk_pcell",
         "exporter": "klayout_tools.gen",
         "symbol": "_PARAM_TYPE_NAMES",
@@ -2022,12 +2065,6 @@
       },
       {
         "consumer": "klayout_tools.place_and_route",
-        "exporter": "klayout_tools._openroad_engine",
-        "symbol": "_timing_violation_report_lines",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.place_and_route",
         "exporter": "klayout_tools._paths",
         "symbol": "_count_spef_nets_annotated",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
@@ -2045,15 +2082,21 @@
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
-        "consumer": "klayout_tools.place_and_route",
-        "exporter": "klayout_tools.synthesize",
-        "symbol": "_ABC_DONT_USE_GLOBS",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
         "consumer": "klayout_tools.place_and_route_gds_merge",
         "exporter": "klayout_tools.extract",
         "symbol": "_DEF_NET_NAME_PROPERTY_ID",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.place_and_route_script",
+        "exporter": "klayout_tools._openroad_engine",
+        "symbol": "_timing_violation_report_lines",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.place_and_route_script",
+        "exporter": "klayout_tools.synthesize",
+        "symbol": "_ABC_DONT_USE_GLOBS",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
@@ -2226,6 +2269,12 @@
       },
       {
         "consumer": "klayout_tools.size",
+        "exporter": "klayout_tools.sim",
+        "symbol": "_resolve_models_lib",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.size_topology",
         "exporter": "klayout_tools.sim",
         "symbol": "_resolve_models_lib",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."

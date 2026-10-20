@@ -36,6 +36,7 @@ from . import (
     keepout_check_cmd,
     layers_cmd,
     layout_metrics_cmd,
+    layout_plan_cmd,
     lef_abstract_cmd,
     lvs_cmd,
     mcp_cmd,
@@ -211,6 +212,21 @@ def _add_pdk_args(
     parser.add_argument("--pdk-root", dest="pdk_root", default=None, help=pdk_root_help)
 
 
+def _add_expect_version_arg(parser: argparse.ArgumentParser) -> None:
+    """Register ``--expect-version`` on ``klt pdk find``/``check`` (issue #3810)."""
+    parser.add_argument(
+        "--expect-version",
+        dest="expect_version",
+        default=None,
+        metavar="STAMP_OR_SHA",
+        help=(
+            "assert the installed PDK identity: an open_pdks commit SHA "
+            "(>= 7 hex) or SOURCES stamp, or a fetched-version string. Exit 6 "
+            "(payload still emitted) on mismatch or unknown identity"
+        ),
+    )
+
+
 def create_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="klt",
@@ -294,6 +310,8 @@ def create_parser() -> argparse.ArgumentParser:
     _add_gen_parser(subparsers)
 
     _add_gen_compose_parser(subparsers)
+
+    _add_layout_plan_parser(subparsers)
 
     _add_draw_parser(subparsers)
 
@@ -649,7 +667,7 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
             "identity (job_id, bucket, region, launched_at, request_sha256) "
             "and exit 0 immediately -- no polling, no collection (issue "
             "#3073). Read the job later with --job-status. One job only: "
-            "refused with --hosts > 1, --resume, --plot, a deck request, or "
+            "refused with --hosts > 1, --resume, --plot, or "
             "a non-batch backend. See docs/cli/sim.md 'Asynchronous submit'."
         ),
     )
@@ -760,6 +778,20 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     sim_parser.add_argument(
+        "--max-concurrent-jobs",
+        dest="max_concurrent_jobs",
+        type=int,
+        default=None,
+        help=(
+            "backend `batch`, sharded runs: keep at most this many shard "
+            "jobs in flight at once and start the rest as earlier ones "
+            "finish, so a large split does not exceed the fleet's instance "
+            "cap (default: the request's `batch.max_concurrent_jobs`, else "
+            "every shard is submitted at once); overrides the request "
+            "field when given. See docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
         "--budget-s",
         dest="budget_s",
         type=float,
@@ -782,7 +814,10 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
             "resume from a matching on-disk checkpoint (--outdir/"
             "checkpoint.json), skipping corners already completed by a "
             "prior interrupted run of this same request; overrides the "
-            "request's own `options.resume` when given. See docs/cli/sim.md."
+            "request's own `options.resume` when given. For a `decks` "
+            "request, skips each unit whose <outdir>/<id>/unit.json "
+            "completion record still matches and verifies (local, "
+            "local-parallel, batch). See docs/cli/sim.md."
         ),
     )
     sim_parser.add_argument(
@@ -4452,6 +4487,44 @@ def _add_flow_verify_args(
     )
 
 
+def _add_layout_plan_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``layout-plan`` verb with a nested ``execute`` subcommand,
+    mirroring ``wave``'s grouped-verb pattern (see ``_add_wave_parser``).
+
+    A shell wrapper over ``layout_plan_execute.execute_layout_plan_document``;
+    see docs/cli/layout-plan-execute.md.
+    """
+    layout_plan_parser = subparsers.add_parser(
+        "layout-plan",
+        help="execute a netlist-driven klt.layout_plan.request/1 document",
+        description=(
+            "Execute a validated `klt.layout_plan.request/1` document onto "
+            "`klt gen` + `klt gen-compose`, producing a generated/placed/"
+            "routed GDS. Takes a request-document path. See "
+            "docs/cli/layout-plan-execute.md."
+        ),
+    )
+    layout_plan_sub = layout_plan_parser.add_subparsers(
+        dest="layout_plan_command", metavar="<subcommand>"
+    )
+    layout_plan_parser.set_defaults(func=_no_subcommand_handler(layout_plan_parser))
+
+    execute_parser = layout_plan_sub.add_parser(
+        "execute",
+        help="execute a layout-plan request into a composed GDS",
+        description=(
+            "Run a klt.layout_plan.request/1 document: resolve per-group "
+            "params from the netlist, place, route and write the GDS. Exit "
+            "3 when placed but some nets are unrouted or unmapped."
+        ),
+    )
+    execute_parser.add_argument(
+        "request", help="path to a klt.layout_plan.request/1 JSON file"
+    )
+    _add_format_arg(execute_parser)
+    execute_parser.set_defaults(func=layout_plan_cmd.run_execute)
+
+
 def _add_wave_parser(subparsers: argparse._SubParsersAction) -> None:
     """Register the ``wave`` verb with nested ``build``/``query``
     subcommands (Epic #1585, issue #1601), mirroring ``pdk``/``deck``'s
@@ -4559,6 +4632,7 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
         pdk_help="variant to resolve (e.g. sky130A); overrides $PDK",
         pdk_root_help="explicit install root; overrides $PDK_ROOT and the search order",
     )
+    _add_expect_version_arg(find_parser)
     _add_format_arg(find_parser)
     find_parser.set_defaults(func=pdk_cmd.run_find)
 
@@ -4618,6 +4692,7 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
         pdk_help="variant to resolve (e.g. sky130A); overrides $PDK",
         pdk_root_help="explicit install root; overrides $PDK_ROOT and the search order",
     )
+    _add_expect_version_arg(check_parser)
     _add_format_arg(check_parser)
     check_parser.set_defaults(func=pdk_cmd.run_check)
 
@@ -4653,10 +4728,11 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
 
     macros_parser = pdk_sub.add_parser(
         "macros",
-        help="report hard-macro IP libraries (`*_fd_ip_*`) and their views",
+        help="report hard-macro IP libraries (`*_fd_ip_*` or lef+lib) and their views",
         description=(
             "Report, per hard-macro IP library (libs.ref entries named "
-            "`*_fd_ip_*`, e.g. an SRAM/ROM compiler output) under the "
+            "`*_fd_ip_*`, or ones shipping both `lef` and `lib` views such as "
+            "IHP's `sg13g2_sram`; e.g. an SRAM/ROM compiler output) under the "
             "resolved variant: which views it ships (GDS, LEF, Liberty "
             "(`lib`), CDL, SPICE, Verilog). This is the sibling command to "
             "`klt pdk cells`, which deliberately excludes these libraries -- "
@@ -4918,6 +4994,25 @@ def _add_deck_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(hash_parser)
     hash_parser.set_defaults(func=deck_cmd.run_hash)
+
+    path_parser = deck_sub.add_parser(
+        "path",
+        help="print the installed path of a deck's standalone DRC script",
+        description=(
+            "Print the absolute path of a built-in deck's standalone KLayout "
+            "DRC-DSL script (issue #3789) -- a file usable as `klt drc "
+            "--engine klayout --deck-file <path>` from a wheel / `uv tool` "
+            "install, where the repo-relative src/ path does not exist. Only "
+            "asap7 ships such a script; the Python rule-table decks exit 1."
+        ),
+    )
+    path_parser.add_argument(
+        "--deck",
+        required=True,
+        help="built-in deck name whose script path to print (asap7)",
+    )
+    _add_format_arg(path_parser)
+    path_parser.set_defaults(func=deck_cmd.run_path)
 
     info_parser = deck_sub.add_parser(
         "info",
@@ -5736,9 +5831,12 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     drc_parser.add_argument(
         "--engine",
-        choices=("curated", "klayout"),
+        choices=("curated", "klayout", "both"),
         default="curated",
         help=(
+            "'both' (issue #3973): run the curated deck (--deck) and the "
+            "PDK-native deck on the same layout and report where they "
+            "differ; an unavailable native run is not_checked, never clean. "
             "'curated' (default): klt's own pip-only Region-primitive deck "
             "(--deck required). 'klayout' (issue #565, opt-in): shells out "
             "to a standalone klayout binary on PATH to run a PDK-native "

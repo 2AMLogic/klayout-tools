@@ -95,10 +95,16 @@ from typing import Any
 from .lef_header import parse_lef_header
 from .pdk_compat import (
     check_compatibility,
+    check_expected_version,
     read_fetched_commit,
     read_fetched_marker,
 )
-from .pdk_families import family_subset, pdk_variant_family
+from .pdk_descriptor import DescriptorError, has_descriptor, load_descriptor
+from .pdk_families import (
+    family_subset,
+    pdk_variant_family,
+    pdk_variant_install_names,
+)
 
 #: The ciel/volare stores, in resolution order (step 3). ``~`` is expanded at
 #: call time against ``$HOME``. Exposed at module scope so tests can override
@@ -152,7 +158,11 @@ class PdkNotFoundError(Exception):
     """
 
 
-def find_pdk(variant: str | None = None, root: str | None = None) -> dict[str, Any]:
+def find_pdk(
+    variant: str | None = None,
+    root: str | None = None,
+    expect_version: str | None = None,
+) -> dict[str, Any]:
     """Resolve one PDK install/variant and return its discovery payload.
 
     ``variant`` (the ``--pdk`` flag) selects a variant explicitly and beats
@@ -219,10 +229,23 @@ def find_pdk(variant: str | None = None, root: str | None = None) -> dict[str, A
     explicit ``root=`` disables the search entirely, so it is always ``[]``.
     Additive field; see ``docs/json-contract.md``.
 
+    ``alternative_variants`` (issue #3814) lists the sorted names of the
+    *other* variants in the chosen root when the variant was **not**
+    explicitly selected (no ``variant=`` and no ``$PDK``) -- the "silent
+    default" case, where ``variants[0]`` was picked and e.g.
+    ``gf180mcuB``-``D`` sat unmentioned beside ``gf180mcuA``. ``[]`` when the
+    variant was pinned or the root holds a single variant. Resolution is
+    unchanged; render :func:`alternative_variants_warning` to surface it.
+    Additive field; see ``docs/json-contract.md``.
+
     ``compatibility`` (issue #2759) compares the install's version identity
     with the one a klt technology package declares it was built for
     (:mod:`klayout_tools.pdk_compat`). Warning-only: ``mismatch``/``unknown``
     never change resolution or exit codes. Additive field.
+
+    ``expect_version`` (issue #3810) adds a ``version_expectation`` object --
+    ``{"status": match|mismatch|unknown, "expected", "installed"}`` -- only
+    when given; see :func:`klayout_tools.pdk_compat.check_expected_version`.
 
     Raises :class:`PdkNotFoundError` when nothing resolves.
     """
@@ -237,16 +260,28 @@ def find_pdk(variant: str | None = None, root: str | None = None) -> dict[str, A
         if effective_variant is not None:
             chosen = by_name.get(effective_variant)
             if chosen is None:
+                # An exact directory-name match always wins; otherwise accept
+                # the deck/family spelling (`sg13g2` -> `ihp-sg13g2`).
+                chosen = next(
+                    (
+                        by_name[alias]
+                        for alias in pdk_variant_install_names(effective_variant)
+                        if alias in by_name
+                    ),
+                    None,
+                )
+            if chosen is None:
                 continue
         else:
             chosen = variants[0]  # variants are sorted → deterministic default
         variant_dir = chosen["_dir"]
         assets = _asset_dirs(variant_dir)
-        return {
+        report: dict[str, Any] = {
             "schema_version": 1,
             "root": root_path,
             "variant": chosen["name"],
             "version": chosen["version"],
+            "layout": chosen["_layout"],
             "commit": chosen["_commit"],
             "resolved_via": resolved_via,
             "assets": assets,
@@ -255,8 +290,18 @@ def find_pdk(variant: str | None = None, root: str | None = None) -> dict[str, A
             "ambiguous_roots": _ambiguous_roots(
                 candidates[index + 1 :], chosen["name"], root_path
             ),
+            "alternative_variants": (
+                []
+                if effective_variant is not None
+                else [v["name"] for v in variants if v["name"] != chosen["name"]]
+            ),
             "compatibility": _compatibility_for(chosen),
         }
+        if expect_version is not None:
+            report["version_expectation"] = check_expected_version(
+                expect_version, variant_dir, chosen["_sources"]
+            )
+        return report
 
     raise PdkNotFoundError(_not_found_message(candidates, effective_variant))
 
@@ -313,6 +358,23 @@ def ambiguity_warning(report: dict[str, Any]) -> str | None:
         "first-match-wins, so a pinned open_pdks build may not be the one "
         "this run read -- pin the root explicitly (--pdk-root, or a "
         "request's models.pdk_root) to disable the search and choose "
+        "deliberately."
+    )
+
+
+def alternative_variants_warning(report: dict[str, Any]) -> str | None:
+    """Render a one-line warning for a :func:`find_pdk` report whose
+    ``alternative_variants`` is non-empty, or ``None`` otherwise (issue #3814).
+
+    Pure formatter, like :func:`ambiguity_warning`: the caller prints it.
+    """
+    others = report.get("alternative_variants") or []
+    if not others:
+        return None
+    return (
+        f"klt: warning: no PDK variant selected; defaulted to "
+        f"{report['variant']!r} but {report['root']} also holds "
+        f"{', '.join(others)}. Set $PDK or pass --pdk to choose "
         "deliberately."
     )
 
@@ -411,6 +473,19 @@ def _abspath(path: str) -> str:
     return os.path.abspath(os.path.expanduser(path))
 
 
+def _descriptor_load(directory: str) -> dict[str, Any]:
+    """:func:`load_descriptor`, surfacing a bad descriptor as ``PdkNotFoundError``
+    (issue #3782) so it is never silently skipped in favour of another layout."""
+    try:
+        return load_descriptor(directory)
+    except DescriptorError as exc:
+        raise PdkNotFoundError(str(exc)) from exc
+
+
+def _descriptor_variant(directory: str) -> str | None:
+    return _descriptor_load(directory)["variant"]
+
+
 def _probe_root(root_path: str) -> list[dict[str, Any]]:
     """Return the variants under ``root_path``, trying the nested (open_pdks)
     layout first and falling back to the flat, single-PDK layout (issue
@@ -432,7 +507,9 @@ def _probe_root(root_path: str) -> list[dict[str, Any]]:
     variants: list[dict[str, Any]] = []
     for name in sorted(os.listdir(root_path)):
         variant_dir = os.path.join(root_path, name)
-        if os.path.isdir(os.path.join(variant_dir, "libs.tech")):
+        if has_descriptor(variant_dir):
+            layout = "descriptor"
+        elif os.path.isdir(os.path.join(variant_dir, "libs.tech")):
             layout = "open_pdks"
         elif _is_asap7_tree(variant_dir):
             layout = "asap7"
@@ -472,13 +549,19 @@ def _probe_flat_variant(root_path: str) -> list[dict[str, Any]]:
     read directly off its directory name) -- when ``root_path`` itself ships
     a ``libs.tech/`` directory, or ``[]`` otherwise.
     """
-    if os.path.isdir(os.path.join(root_path, "libs.tech")):
+    if has_descriptor(root_path):
+        layout = "descriptor"
+    elif os.path.isdir(os.path.join(root_path, "libs.tech")):
         layout = "open_pdks"
     elif _is_asap7_tree(root_path):
         layout = "asap7"
     else:
         return []
-    name = os.path.basename(root_path.rstrip(os.sep)) or root_path
+    name = (
+        (_descriptor_variant(root_path) if layout == "descriptor" else None)
+        or os.path.basename(root_path.rstrip(os.sep))
+        or root_path
+    )
     return [
         {
             "name": name,
@@ -629,7 +712,11 @@ def variant_dir_of(pdk: dict[str, Any]) -> str | None:
     if (
         nested
         and os.path.isdir(nested)
-        and (os.path.isdir(os.path.join(nested, "libs.tech")) or _is_asap7_tree(nested))
+        and (
+            has_descriptor(nested)
+            or os.path.isdir(os.path.join(nested, "libs.tech"))
+            or _is_asap7_tree(nested)
+        )
     ):
         return nested
     return root
@@ -640,7 +727,11 @@ def tree_of(path: str) -> str | None:
     (open_pdks ``libs.tech`` or ASAP7 shape), or ``None``."""
     current = os.path.dirname(os.path.realpath(path))
     while True:
-        if os.path.isdir(os.path.join(current, "libs.tech")) or _is_asap7_tree(current):
+        if (
+            has_descriptor(current)
+            or os.path.isdir(os.path.join(current, "libs.tech"))
+            or _is_asap7_tree(current)
+        ):
             return current
         parent = os.path.dirname(current)
         if parent == current:
@@ -651,6 +742,8 @@ def tree_of(path: str) -> str | None:
 def _asset_dirs(variant_dir: str) -> dict[str, str | None]:
     """Map each tool area to its absolute directory, or ``None`` if absent."""
     assets: dict[str, str | None] = {}
+    if has_descriptor(variant_dir):
+        return _descriptor_load(variant_dir)["assets"]
     layout = _ASSET_LAYOUT
     if _is_asap7_tree(variant_dir):
         layout = _ASAP7_ASSET_LAYOUT
@@ -1711,6 +1804,10 @@ def _read_text(path: str) -> str | None:
 #: surface them -- see docs/cli/pdk.md "klt pdk macros".
 _HARD_MACRO_LIB_MARKER = "_fd_ip_"
 
+#: Name suffixes of I/O-pad libraries (`sky130_fd_io`, `gf180mcu_fd_io`,
+#: `sg13g2_io`), which ship `lef`+`lib` views but are not hard macros.
+_IO_PAD_LIB_SUFFIXES = ("_fd_io", "_io")
+
 #: View subdirectories under a `libs_ref/<lib>` entry that
 #: :func:`list_hard_macro_libraries` reports presence of, keyed by the name
 #: surfaced in the JSON ``views`` object. Presence is a plain
@@ -1739,7 +1836,9 @@ def list_hard_macro_libraries(
     Resolves one PDK install/variant exactly as :func:`find_pdk` does (same
     ``variant``/``root`` args, same :class:`PdkNotFoundError` on no match),
     then scans its ``libs_ref`` asset for hard-macro IP libraries -- entries
-    whose name contains ``_fd_ip_`` (see :data:`_HARD_MACRO_LIB_MARKER`).
+    whose name contains ``_fd_ip_`` (see :data:`_HARD_MACRO_LIB_MARKER`) or
+    that structurally ship ``lef`` + ``lib`` views and are not standard-cell
+    or I/O-pad libraries (e.g. IHP's ``sg13g2_sram``).
     This is the sibling command to `klt pdk cells`, not an alternate mode of
     it (see docs/cli/pdk.md "klt pdk macros" for why): `klt pdk cells`
     deliberately excludes hard-macro IP libraries, and this command's own
@@ -1779,7 +1878,7 @@ def list_hard_macro_libraries(
         }
 
     An empty ``macros`` list is a successful result (the variant ships no
-    `_fd_ip_`-named library), not an error.
+    hard-macro library), not an error.
 
     Raises :class:`PdkNotFoundError` when no PDK install resolves.
     """
@@ -1796,13 +1895,29 @@ def list_hard_macro_libraries(
 
 
 def _scan_hard_macro_libraries(libs_ref: str) -> list[dict[str, Any]]:
-    """Enumerate `_fd_ip_`-named entries under ``libs_ref``, name-sorted."""
+    """Enumerate hard-macro IP libraries under ``libs_ref``, name-sorted.
+
+    A library is a hard macro when its name contains ``_fd_ip_`` (open_pdks
+    convention) or, structurally, when it ships both ``lef/`` and ``lib/``
+    views and is neither a standard-cell library nor an I/O-pad library
+    (IHP's ``sg13g2_sram``).
+    """
+    from .pdk_cells import _STD_CELL_LIB_MARKERS
+
     if not os.path.isdir(libs_ref):
         return []
     macros: list[dict[str, Any]] = []
     for name in sorted(os.listdir(libs_ref)):
         lib_dir = os.path.join(libs_ref, name)
-        if not os.path.isdir(lib_dir) or _HARD_MACRO_LIB_MARKER not in name:
+        if not os.path.isdir(lib_dir):
+            continue
+        structural = (
+            os.path.isdir(os.path.join(lib_dir, "lef"))
+            and os.path.isdir(os.path.join(lib_dir, "lib"))
+            and not any(marker in name for marker in _STD_CELL_LIB_MARKERS)
+            and not name.endswith(_IO_PAD_LIB_SUFFIXES)
+        )
+        if _HARD_MACRO_LIB_MARKER not in name and not structural:
             continue
         macros.append(
             {

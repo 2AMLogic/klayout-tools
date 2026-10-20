@@ -41,37 +41,9 @@ from klayout_tools import pdk, remote_transport, sim, sim_batch, sim_remote, sim
 from klayout_tools import remote_launcher as rl
 from klayout_tools.cli import main
 
-pytestmark = pytest.mark.usefixtures("real_build_identity_git")
-
-
-@pytest.fixture(autouse=True)
-def _bare_name_ngspice_resolution(monkeypatch):
-    """Issue #2423: ``sim.py`` now resolves the ``ngspice`` binary via
-    :func:`klayout_tools._paths.resolve_tool_binary` (``shutil.which``)
-    *before* dispatching any corner, rather than hardcoding the bare name
-    ``ngspice`` in ``argv[0]`` -- and, since ``ngspice`` is `klt sim`'s
-    *default* engine, that resolution now runs for every mocked-
-    ``subprocess.run`` test in this module too (not just ones that opt into
-    an ``engine: "netgen"``-style non-default engine, as `klt lvs`'s
-    analogous #2373 stub only had to cover). Several tests below are
-    explicitly designed to need "no binary required" (this module's own
-    ``# run_sim with a stubbed ngspice subprocess (no binary required)``
-    section header) -- this autouse fixture keeps that promise true even on
-    a host with no real ``ngspice`` install, by stubbing resolution to
-    return the bare name unchanged (mirrors ``test_equiv.py``'s identically-
-    named fixture, issue #2423). A real ``subprocess.run(["ngspice", ...])``
-    still resolves via the OS's own ``PATH`` search exactly as before this
-    issue, so tests that genuinely need a real ``ngspice`` (already gated on
-    their own ``shutil.which("ngspice")``-based skip) are unaffected.
-    """
-    real_which = shutil.which
-
-    def fake_which(cmd, *args, **kwargs):
-        if cmd == "ngspice":
-            return cmd
-        return real_which(cmd, *args, **kwargs)
-
-    monkeypatch.setattr(paths_module.shutil, "which", fake_which)
+pytestmark = pytest.mark.usefixtures(
+    "real_build_identity_git", "bare_name_ngspice_resolution"
+)
 
 
 #: `KLT_SKIP_NGSPICE_TESTS=1` (local-only, set by `npm run check:ci` -- never
@@ -1842,6 +1814,125 @@ def test_points_to_push_resolves_non_default_scope_client_side():
     assert sim_remote._points_to_push(base, points, explicit) is explicit
 
 
+# --------------------------------------------------------------------------- #
+# monte_carlo.mismatch_scale (issue #3942)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("value", [True, -1, -0.5, float("nan"), float("inf"), "2"])
+def test_mismatch_scale_rejects_bad_values(value):
+    with pytest.raises(sim.SimError, match="monte_carlo.mismatch_scale"):
+        sim._resolve_mismatch_scale({"mismatch_scale": value}, "sky130A")
+
+
+@pytest.mark.parametrize("pdk", ["sg13g2", None, "bogus"])
+def test_mismatch_scale_refuses_unsupported_family(pdk):
+    with pytest.raises(sim.SimError, match="mismatch_scale.*family"):
+        sim._resolve_mismatch_scale({"mismatch_scale": 2}, pdk)
+
+
+def test_mismatch_scale_resolves_per_family_param():
+    assert sim._resolve_mismatch_scale({}, "sky130A") is None
+    assert sim._resolve_mismatch_scale({"mismatch_scale": 0}, "sky130A") == (
+        0.0,
+        "mc_mm_switch",
+    )
+    assert sim._resolve_mismatch_scale({"mismatch_scale": 2.5}, "gf180mcuD") == (
+        2.5,
+        "sw_stat_mismatch",
+    )
+
+
+def test_mismatch_scale_default_shape_is_unchanged():
+    points = sim._expand_corners({"process": ["tt"]}, [])
+    sampled, info = sim._expand_monte_carlo(
+        points, {"n": 2, "seed": 1, "vary": "mismatch"}
+    )
+    assert "mismatch_scale" not in info and "mismatch_param" not in info
+    assert all("mismatch_scale" not in p.mc_seed for p in sampled)
+
+
+def test_mismatch_scale_echo_and_deck_card_follows_the_lib(tmp_path):
+    points = sim._expand_corners({"process": ["tt_mm"]}, [])
+    sampled, info = sim._expand_monte_carlo(
+        points,
+        {"n": 2, "seed": 1, "vary": "mismatch"},
+        mismatch_scale=(2.5, "mc_mm_switch"),
+    )
+    assert info["mismatch_scale"] == 2.5
+    assert info["mismatch_param"] == "mc_mm_switch"
+    lines = _write_deck(tmp_path, sampled[0])
+    card = ".param mc_mm_switch=2.5"
+    assert lines.count(card) == 1
+    # Last definition wins, so it must follow the `.lib` that sets the switch
+    # (and the body `.include`, which may too).
+    lib = next(i for i, ln in enumerate(lines) if ln.startswith(".lib"))
+    body = next(i for i, ln in enumerate(lines) if ln.startswith(".include"))
+    assert lines.index(card) > max(lib, body)
+
+
+def test_mismatch_scale_zero_deck_card_is_integral(tmp_path):
+    points = sim._expand_corners({"process": ["typical"]}, [])
+    sampled, _ = sim._expand_monte_carlo(
+        points,
+        {"n": 1, "seed": 1, "vary": "mismatch"},
+        mismatch_scale=(0.0, "sw_stat_mismatch"),
+    )
+    assert ".param sw_stat_mismatch=0" in _write_deck(tmp_path, sampled[0])
+
+
+def test_mismatch_scale_without_declaration_adds_no_deck_card(tmp_path):
+    points = sim._expand_corners({"process": ["tt_mm"]}, [])
+    sampled, _ = sim._expand_monte_carlo(
+        points, {"n": 1, "seed": 1, "vary": "mismatch"}
+    )
+    assert not any("mc_mm_switch" in ln for ln in _write_deck(tmp_path, sampled[0]))
+
+
+def test_mismatch_scale_rides_the_fleet_wire():
+    points = sim._expand_corners({"process": ["tt_mm"]}, [])
+    sampled, _ = sim._expand_monte_carlo(
+        points,
+        {"n": 1, "seed": 1, "vary": "mismatch"},
+        mismatch_scale=(3.0, "mc_mm_switch"),
+    )
+    back = sim._corner_points_from_wire(sim._corner_points_to_wire(sampled))
+    assert back[0].mc_seed["mismatch_scale"] == 3.0
+    assert back[0].mc_seed["mismatch_param"] == "mc_mm_switch"
+
+
+def test_mismatch_scale_changes_checkpoint_fingerprint(tmp_path):
+    netlist = tmp_path / "n.cir"
+    netlist.write_text("* x\n.end\n")
+    points = sim._expand_corners({"process": ["tt_mm"]}, [])
+
+    def fp(scale):
+        sampled, _ = sim._expand_monte_carlo(
+            points,
+            {"n": 2, "seed": 1, "vary": "mismatch"},
+            mismatch_scale=None if scale is None else (scale, "mc_mm_switch"),
+        )
+        return sim._checkpoint_fingerprint(
+            netlist_path=str(netlist),
+            models_lib=None,
+            analysis={"type": "op"},
+            measurements_spec=[],
+            corner_points=sampled,
+            timeout_s=1.0,
+            engine="ngspice",
+        )
+
+    assert len({fp(None), fp(0.0), fp(3.0)}) == 3
+
+
+def test_points_to_push_resolves_mismatch_scale_client_side():
+    from klayout_tools import sim_remote
+
+    points = sim._expand_corners({"process": ["tt_mm"]}, [])
+    mc = {"n": 1, "seed": 1, "vary": "mismatch", "mismatch_scale": 0}
+    assert sim_remote._points_to_push({"monte_carlo": mc}, points, None) is points
+
+
 def test_expand_monte_carlo_is_reproducible_given_the_same_seed():
     corner_points = sim._expand_corners({"process": ["tt"]}, [])
     mc_spec = {"n": 5, "seed": 20260801, "vary": "both"}
@@ -3105,6 +3196,38 @@ def test_rollup_measurements_worst_case_is_most_negative_margin():
     assert entry["status"] == "fail"
     assert entry["worst_case"]["corner_id"] == "b"
     assert entry["worst_case"]["value"] == 1.25
+
+
+def test_rollup_measurements_echoes_spec_row_only_when_declared():
+    corners = [
+        {
+            "corner_id": "a",
+            "measurements": [
+                {"name": "vref", "value": 1.2, "margin": 0.01, "status": "pass"},
+                {"name": "iq", "value": 1.0, "margin": 0.5, "status": "pass"},
+            ],
+        }
+    ]
+    tagged, untagged = sim._rollup_measurements(
+        [
+            {"name": "vref", "limits": {"max": 1.21}, "spec_row": "vref_acc"},
+            {"name": "iq", "limits": {"max": 2.0}},
+        ],
+        corners,
+    )
+
+    assert tagged["spec_row"] == "vref_acc"
+    assert "spec_row" not in untagged
+
+
+@pytest.mark.parametrize("bad", ["", "  ", 3, ["x"]])
+def test_validate_spec_row_rejects_non_string_or_empty(bad):
+    with pytest.raises(sim.SimError, match="spec_row"):
+        sim._validate_spec_row(bad, "request.measurements['m'].spec_row")
+
+
+def test_validate_spec_row_accepts_a_row_id():
+    assert sim._validate_spec_row("vref_acc", "field") == "vref_acc"
 
 
 def test_rollup_measurements_error_outranks_fail():
@@ -11791,6 +11914,110 @@ def test_run_sim_osdi_preload_steps_a_host_default_offhost_backend_back_to_local
     assert all(f"pre_osdi {osdi}" in deck for deck in decks)
 
 
+@pytest.mark.parametrize("backend", ["remote", "batch"])
+@pytest.mark.parametrize(
+    "entry", ["$PDK_ROOT/ihp/osdi/psp103.osdi", "${PDK_ROOT}/ihp/osdi/psp103.osdi"]
+)
+def test_run_sim_runner_resolved_osdi_preload_goes_offhost_unchecked(
+    tmp_path, monkeypatch, backend, entry
+):
+    """Issue #3819: an image-baked `.osdi` need not exist on the submitter."""
+    monkeypatch.delenv("PDK_ROOT", raising=False)
+    seen: dict = {}
+
+    def fake_backend(**kwargs):
+        seen.update(kwargs)
+        return [], "46", None
+
+    monkeypatch.setitem(sim._BACKENDS, backend, fake_backend)
+    request = _osdi_request(
+        tmp_path, [entry], corners={"temperature_c": [-40, 27, 125]}
+    )
+
+    report = sim.run_sim(str(request), backend=backend)
+
+    assert seen["request_dir"] == str(tmp_path)
+    environment = report["environment"]
+    assert "osdi_preload" not in environment  # nothing hashed on this host
+    assert environment["osdi_preload_runner_resolved"] == [
+        {"entry": entry, "reason": "env_var"}
+    ]
+
+
+def test_run_sim_osdi_preload_under_models_pdk_root_goes_offhost(tmp_path, monkeypatch):
+    seen: dict = {}
+
+    def fake_backend(**kwargs):
+        seen.update(kwargs)
+        return [], "46", None
+
+    monkeypatch.setitem(sim._BACKENDS, "batch", fake_backend)
+    entry = "/opt/pdk/ihp/osdi/psp103.osdi"
+    request = _osdi_request(
+        tmp_path,
+        [entry],
+        corners={"temperature_c": [-40, 27]},
+        models={"pdk_root": "/opt/pdk"},
+    )
+
+    report = sim.run_sim(str(request), backend="batch")
+
+    assert report["environment"]["osdi_preload_runner_resolved"] == [
+        {"entry": entry, "reason": "pdk_root"}
+    ]
+
+
+def test_run_sim_runner_resolved_osdi_keeps_a_host_default_batch_backend(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv(sim.BACKEND_ENV, "batch")
+    monkeypatch.delenv("PDK_ROOT", raising=False)
+    seen: dict = {}
+
+    def fake_backend(**kwargs):
+        seen.update(kwargs)
+        return [], "46", None
+
+    monkeypatch.setitem(sim._BACKENDS, "batch", fake_backend)
+    request = _osdi_request(
+        tmp_path,
+        ["$PDK_ROOT/ihp/osdi/psp103.osdi"],
+        corners={"temperature_c": [-40, 27, 125]},
+    )
+
+    sim.run_sim(str(request))
+
+    assert seen  # dispatched to batch rather than stepping aside to local
+
+
+def test_run_sim_mixed_osdi_preload_still_refuses_the_host_local_entry(
+    tmp_path, monkeypatch
+):
+    def must_not_dispatch(*args, **kwargs):
+        raise AssertionError("the batch backend must not be reached")
+
+    monkeypatch.setitem(sim._BACKENDS, "batch", must_not_dispatch)
+    _write_osdi(tmp_path)
+    request = _osdi_request(
+        tmp_path,
+        ["$PDK_ROOT/ihp/osdi/a.osdi", "psp103.osdi"],
+        corners={"temperature_c": [-40, 27, 125]},
+    )
+    with pytest.raises(
+        sim.SimError, match="options.osdi_preload is not supported for backend 'batch'"
+    ):
+        sim.run_sim(str(request), backend="batch")
+
+
+def test_run_sim_runner_resolved_osdi_is_still_checked_on_the_local_backend(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("PDK_ROOT", str(tmp_path / "pdkroot"))
+    request = _osdi_request(tmp_path, ["$PDK_ROOT/ihp/osdi/psp103.osdi"])
+    with pytest.raises(sim.SimError, match="osdi_preload file not found"):
+        sim.run_sim(str(request), backend="local")
+
+
 def test_run_sim_osdi_preload_is_refused_for_the_xyce_engine(tmp_path, monkeypatch):
     def must_not_run(*args, **kwargs):
         raise AssertionError("no corner may be dispatched")
@@ -14286,6 +14513,17 @@ def test_run_sim_dry_run_missing_netlist_raises(tmp_path):
     )
     with pytest.raises(sim.SimError, match="netlist not found"):
         sim.run_sim(str(request), dry_run=True)
+
+
+def test_run_sim_dry_run_batch_refuses_unresolved_pdk_var(tmp_path, monkeypatch):
+    """Issue #3917: the dry-run reports the refusal a real batch submit raises."""
+    monkeypatch.delenv(sim.BACKEND_ENV, raising=False)
+    request = _dry_run_mc_request(
+        tmp_path, models={"lib": "$PDK_ROOT/$PDK/libs.tech/ngspice/sm.ngspice"}
+    )
+    with pytest.raises(sim.SimError) as excinfo:
+        sim.run_sim(str(request), backend="batch", dry_run=True)
+    assert excinfo.value.code == "models_lib_pdk_unresolved"
 
 
 def test_run_sim_dry_run_refuses_deck_requests(tmp_path):

@@ -230,6 +230,21 @@ def _stub_klayout_drc_subprocess(
 # --------------------------------------------------------------------------- #
 
 
+def test_unmodeled_rules_only_for_the_packaged_asap7_deck(tmp_path):
+    from klayout_tools.decks.asap7_rules import DECK_PATH, NOT_IMPLEMENTED
+
+    expected = sorted(g.id for g in NOT_IMPLEMENTED)
+    assert engine_module._unmodeled_rules_for_deck(str(DECK_PATH)) == expected
+    copy = tmp_path / "copy.drc"
+    copy.write_bytes(DECK_PATH.read_bytes())
+    assert engine_module._unmodeled_rules_for_deck(str(copy)) == expected
+    edited = tmp_path / "edited.drc"
+    edited.write_bytes(DECK_PATH.read_bytes() + b"\n# edited\n")
+    assert engine_module._unmodeled_rules_for_deck(str(edited)) == []
+    stub = _write_deck_file(tmp_path / "stub.drc")
+    assert engine_module._unmodeled_rules_for_deck(stub) == []
+
+
 def test_klayout_engine_clean_report(tmp_path, monkeypatch):
     _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_EMPTY_RDB)
     gds = _write_gds(tmp_path / "test.gds")
@@ -256,6 +271,7 @@ def test_klayout_engine_clean_report(tmp_path, monkeypatch):
         "voltage_domain_warnings": [],
         "unchecked_rules": [],
         "deck_scope": [],
+        "unmodeled_rules": [],
         "nothing_checked": False,
         "schema_version": 1,
         "known": False,

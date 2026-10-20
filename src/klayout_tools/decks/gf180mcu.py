@@ -103,7 +103,8 @@ which is also where the ``_LV``/``_MV`` rule-id suffixes come from. Their
 other ``DF.*``-family entries cite.
 
 Their **end-of-line** companions (``CO.6a``/``CO.6b``, ``Vn.3c``/``Vn.3d``,
-``Vn.4b``/``Vn.4c``) are deliberately **not** transcribed: each conditions a
+``Vn.4b``/``Vn.4c``) are deliberately **not** transcribed (disclosed in
+``coverage.unmodeled_rules``, issue #3968): each conditions a
 0.06um margin on a narrow-metal (< 0.34um) end-of-line predicate, expressed
 in the PDK deck via ``first_edges``/``second_edges``/``extended_in``
 edge-set operations that :class:`~klayout_tools.decks.DrcRule`'s
@@ -540,6 +541,7 @@ from . import (
     DrcRule,
     ExtractionDeck,
     LayerRC,
+    MosCapacitorDevice,
     MOSFlavour,
     ParasiticsDeck,
     ResistorDevice,
@@ -845,7 +847,8 @@ DECK: list[DrcRule] = [
         # zero-overlap escape term, see `_run_check`'s `outside_region` in
         # `drc.py`), so this transcription is exact, not an approximation.
         # The end-of-line companions "CO.6a"/"CO.6b" are *not* modeled -- see
-        # the module docstring's end-of-line coverage note (issue #551).
+        # the module docstring's end-of-line coverage note (issue #551) and
+        # `_METAL_EOL_UNMODELED_RULES` (issue #3968).
         provenance=_gf180mcu_klayout_deck_provenance("contact", "CO.6"),
     ),
     DrcRule(
@@ -1506,6 +1509,31 @@ DECK: list[DrcRule] = [
         voltage_independent=True,
     ),
     DrcRule(
+        id="dualgate.width.1",
+        description="minimum Dualgate (5V/6V thick-oxide marker) width",
+        layer=(55, 0),  # Dualgate
+        check="width",
+        threshold_dbu=700,  # 0.7 um
+        # Official `rule_decks/dualgate.drc` rule "DV.5": `dualgate.width(0.7.um,
+        # euclidian)` -- the same primitive/metric `width_check` uses. Not an
+        # approximation (issue #3791).
+        scope="7.5 Comp",  # no Dualgate DRM table in _GF180MCU_DRM_CSV (#566)
+        provenance=_gf180mcu_klayout_deck_provenance("dualgate", "DV.5"),
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="dualgate.space.1",
+        description="minimum Dualgate (5V/6V thick-oxide marker) spacing",
+        layer=(55, 0),  # Dualgate
+        check="space",
+        threshold_dbu=440,  # 0.44 um
+        # Official `rule_decks/dualgate.drc` rule "DV.2": `dualgate.space(0.44.um,
+        # euclidian)` (issue #3791).
+        scope="7.5 Comp",  # no Dualgate DRM table in _GF180MCU_DRM_CSV (#566)
+        provenance=_gf180mcu_klayout_deck_provenance("dualgate", "DV.2"),
+        voltage_independent=True,
+    ),
+    DrcRule(
         id="nplus.space.pcomp.1",
         description="minimum Nplus implant space to PCOMP (p-type diffusion)",
         layer=(32, 0),  # Nplus -- reporting identity, shared with the rules above
@@ -1955,7 +1983,7 @@ _OFFGRID_ROWS: tuple[tuple[str, tuple[int, int], str], ...] = (
 #: undrawn here.
 OFFGRID_UNCHECKED_LAYERS: dict[str, str] = {
     "lvpwell": "LVPWELL (204/0) -- not in this deck's curated layer set",
-    "esd": "ESD (24/0) -- not in this deck's curated layer set",
+    "esd": "ESD (24/0) -- drawn for ESD.* rules; no ongrid rule emitted for it",
     "fhres": "FHRES (227/0) -- not in this deck's curated layer set",
     "mvsd": "MVSD (210/0) -- not in this deck's curated layer set",
     "mvpsd": "MVPSD (11/39) -- not in this deck's curated layer set",
@@ -2094,6 +2122,234 @@ DECK += [
     ),
 ]
 
+# ---------------------------------------------------------------------------
+# ESD implant (`ESD.*`) and guard-ring marker (`GR.*`) rules -- `esd.rb`,
+# `guard_ring.rb` (issue #3792)
+# ---------------------------------------------------------------------------
+#
+# Until issue #3792 this deck carried neither group, so a grounded-gate NMOS
+# clamp with a sub-0.6um ESD implant, or a COMP closer than 10um to a
+# GUARD_RING_MK marker, read `clean` with those rules never evaluated.
+#
+# Transcribed (the check kinds that express them exactly, from the drawn
+# layers ESD 24/0 and GUARD_RING_MK 167/5):
+#
+# - `ESD.1`/`ESD.2`: ESD width / space, 0.6um.
+# - `ESD.4b`: `esd.overlap(comp, 0.45)`.
+# - `ESD.5a`/`ESD.5b`: min ESD area / min area of a hole in ESD, 0.49um^2.
+# - `ESD.8`: `esd.separation(nplus.or(pplus), 0.3)`, one rule per implant
+#   (a union of two layers has no single-layer spelling; the violating
+#   distances are the same).
+# - `GR.2`: `<layer>.separation(guard_ring_mk, 10)` for COMP, Nwell, Poly2 and
+#   Metal1-5/MetalTop (the runset gates the metal levels on the stack depth;
+#   an absent level is simply inapplicable here).
+#
+# Everything else in the two files is in `UNTRANSCRIBED_RULES` below, with the
+# reason, and `klt drc` lists each in `coverage.unmodeled_rules` so a clean
+# report cannot be read as covering them (informational; `status` is unchanged).
+_ESD = (24, 0)  # ESD
+_GUARD_RING_MK = (167, 5)  # GUARD_RING_MK
+_ESD_PROVENANCE_FILE = "esd"
+_GR_PROVENANCE_FILE = "guard_ring"
+
+DECK += [
+    DrcRule(
+        id="esd.width.1",
+        description="minimum ESD implant width",
+        layer=_ESD,
+        check="width",
+        threshold_dbu=600,  # 0.6 um
+        # esd.rb "ESD.1": `esd.width(0.6.um, euclidian)`
+        scope="ESD",
+        provenance=_gf180mcu_klayout_deck_provenance(_ESD_PROVENANCE_FILE, "ESD.1"),
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="esd.space.1",
+        description="minimum ESD implant spacing",
+        layer=_ESD,
+        check="space",
+        threshold_dbu=600,  # 0.6 um
+        # esd.rb "ESD.2": `esd.space(0.6.um, euclidian)`
+        scope="ESD",
+        provenance=_gf180mcu_klayout_deck_provenance(_ESD_PROVENANCE_FILE, "ESD.2"),
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="esd.overlap.comp.1",
+        description="minimum overlap of an ESD implant edge to a COMP",
+        layer=_ESD,
+        other_layer=(22, 0),  # Comp
+        check="overlap",
+        threshold_dbu=450,  # 0.45 um
+        # esd.rb "ESD.4b": `esd.overlap(comp, 0.45.um, euclidian)`
+        scope="ESD",
+        provenance=_gf180mcu_klayout_deck_provenance(_ESD_PROVENANCE_FILE, "ESD.4b"),
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="esd.area.1",
+        description="minimum ESD implant area",
+        layer=_ESD,
+        check="area",
+        threshold_dbu=0,  # unused by "area" -- see area_min_dbu2
+        area_min_dbu2=490_000,  # 0.49 um^2
+        # esd.rb "ESD.5a": `esd.with_area(nil, 0.49.um)`
+        scope="ESD",
+        provenance=_gf180mcu_klayout_deck_provenance(_ESD_PROVENANCE_FILE, "ESD.5a"),
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="esd.holes_area.1",
+        description="minimum field area enclosed by ESD implant",
+        layer=_ESD,
+        check="area",
+        threshold_dbu=0,  # unused by "area" -- see area_min_dbu2
+        area_min_dbu2=490_000,  # 0.49 um^2
+        derived_layer=DerivedLayer(
+            base=_ESD,
+            sized_by_um=0.0,  # unused by "holes" mode
+            mode="holes",
+        ),
+        # esd.rb "ESD.5b": `esd.holes.with_area(nil, 0.49.um)`
+        scope="ESD",
+        provenance=_gf180mcu_klayout_deck_provenance(_ESD_PROVENANCE_FILE, "ESD.5b"),
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="esd.separation.nplus.1",
+        description="minimum ESD implant spacing to Nplus",
+        layer=_ESD,
+        other_layer=(32, 0),  # Nplus
+        check="separation",
+        threshold_dbu=300,  # 0.3 um
+        # esd.rb "ESD.8": `esd.separation(nplus.or(pplus), 0.3.um)` (Nplus half)
+        scope="ESD",
+        provenance=_gf180mcu_klayout_deck_provenance(_ESD_PROVENANCE_FILE, "ESD.8"),
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="esd.separation.pplus.1",
+        description="minimum ESD implant spacing to Pplus",
+        layer=_ESD,
+        other_layer=(31, 0),  # Pplus
+        check="separation",
+        threshold_dbu=300,  # 0.3 um
+        # esd.rb "ESD.8": `esd.separation(nplus.or(pplus), 0.3.um)` (Pplus half)
+        scope="ESD",
+        provenance=_gf180mcu_klayout_deck_provenance(_ESD_PROVENANCE_FILE, "ESD.8"),
+        voltage_independent=True,
+    ),
+]
+
+DECK += [
+    DrcRule(
+        id=f"{stem}.separation.guard_ring_mk.1",
+        description=f"minimum {name} spacing to GUARD_RING_MK",
+        layer=layer,
+        other_layer=_GUARD_RING_MK,
+        check="separation",
+        threshold_dbu=10_000,  # 10 um
+        # guard_ring.rb "GR.2": `<layer>.separation(guard_ring_mk, 10.um)`
+        scope="GR",
+        provenance=_gf180mcu_klayout_deck_provenance(_GR_PROVENANCE_FILE, "GR.2"),
+        voltage_independent=True,
+    )
+    for stem, name, layer in (
+        ("comp", "Comp", (22, 0)),
+        ("nwell", "Nwell", (21, 0)),
+        ("poly2", "Poly2", (30, 0)),
+        ("metal1", "Metal1", (34, 0)),
+        ("metal2", "Metal2", (36, 0)),
+        ("metal3", "Metal3", (42, 0)),
+        ("metal4", "Metal4", (46, 0)),
+        ("metal5", "Metal5", (81, 0)),
+        ("metaltop", "MetalTop", (53, 0)),
+    )
+]
+
+#: Upstream `esd.rb` / `guard_ring.rb` rule ids this deck knowingly does not
+#: transcribe, with the reason each is out of reach of the existing check kinds
+#: (issue #3792). `UNMODELED_RULES` below surfaces every key (plus the MT30/MSLOT
+#: ids) as `coverage.unmodeled_rules` (informational, not graded, so `status` stays
+#: `clean`). Remove an id when its rule is added.
+UNTRANSCRIBED_RULES: dict[str, str] = {
+    "ESD.3a": "measured to NCOMP, a derived layer (COMP inside Nplus), not a drawn one",
+    "ESD.3b": (
+        "`esd.not_outside(pcomp)`: PCOMP is derived and the rule is a "
+        "min/max-space polygon selector"
+    ),
+    "ESD.4a": (
+        "edge-to-edge enclosure of NCOMP edges filtered by `not_interacting(pcomp)`"
+    ),
+    "ESD.6": "needs `tgate` edges (MOS gate recognition) and a projection check",
+    "ESD.7": "`esd.not_outside(pcomp)`: PCOMP is derived",
+    "ESD.9": "`esd.not_overlapping(dualgate)`: no polygon-selector check kind",
+    "ESD.10": "needs LVS_IO (119/5) and a COMP & ESD derivation",
+    "ESD.pl": "needs `tgate` edges (MOS gate recognition) on Dualgate poly",
+    "GR.1": (
+        "`guard_ring_mk.not_in(comp.interacting(guard_ring_mk))`: no "
+        "polygon-selector check kind"
+    ),
+    "GR.3": "`guard_ring_comp.not_in(pplus)`: no polygon-selector check kind",
+    "GR.4": "metal width restricted to `not_outside(guard_ring_mk)` shapes",
+    "GR.6": "COMP width restricted to `not_outside(guard_ring_mk)` shapes",
+    "GR.11": "`guard_ring_mk.not_interacting(pad)`: no polygon-selector check kind",
+}
+
+
+#: Official gf180mcu DRM rule ids this curated deck knowingly does *not*
+#: transcribe (issue #3796): the thick-MetalTop (30 kA / "MT30") option, the
+#: wide-metal/die-level MetalTop rules, and the metal-slotting rules
+#: (DRM sections 7.15, 7.16, 14.6.3; the PDK's native
+#: `metaltop_30k.rb`/`mslot.rb`/`density.rb` decks encode them). This deck
+#: models only standard-thickness MetalTop (`metaltop.width.1` = MT.1,
+#: `metaltop.space.1` = MT.2a) and has no PDK-variant selection, so a layout
+#: that is `klt drc --deck gf180mcu` clean can still fail these on a 30K
+#: variant such as `gf180mcuA`. `coverage.unmodeled_rules` (and `klt deck
+#: info`/`klt deck rules`) list them rather than let a clean verdict read as
+#: full coverage. Remove an id here when its rule is added.
+_MT_MSLOT_UNMODELED_RULES: tuple[str, ...] = (
+    "MSLOT.1",
+    "MSLOT.2",
+    "MSLOT.3",
+    "MSLOT.4",
+    "MSLOT.5",
+    "MSLOT.6",
+    "MSLOT.7",
+    "MSLOT.8",
+    "MT.2b",
+    "MT.3",
+    "MT.4",
+    "MT30.1a",
+    "MT30.1b",
+    "MT30.2",
+    "MT30.3",
+    "MT30.4",
+    "MT30.5",
+    "MT30.6",
+    "MT30.7",
+    "MT30.8",
+)
+
+#: Metal1-5 wide-metal spacing and the narrow-line end-of-line companions this
+#: deck does not transcribe (issue #3968). `Mn.2b` ("space to wide Metaln",
+#: length and width > 10um) needs a wide-metal predicate and `CO.6a`/`CO.6b`,
+#: `Vn.3c`/`Vn.3d`, `Vn.4b`/`Vn.4c` an end-of-line (narrow metal < 0.34um)
+#: predicate, neither of which `DrcRule`'s vocabulary can express. Ids are the
+#: native runset's (`M1.2b`...`M5.2b`; via ids are stack-keyed, so no `V5.*`
+#: for this fixed 5LM stack). Remove an id here when its rule is added.
+_METAL_EOL_UNMODELED_RULES: tuple[str, ...] = (
+    "CO.6a",
+    "CO.6b",
+    "M1.2b",
+    "M2.2b",
+    "M3.2b",
+    "M4.2b",
+    "M5.2b",
+    *(f"V{n}.{rule}" for n in (1, 2, 3, 4) for rule in ("3c", "3d", "4b", "4c")),
+)
+
 # (layer, datatype) -> upstream layer name, from gf180mcu.lyp's layer-map
 # (google/globalfoundries-pdk-libs-gf180mcu_fd_pv), used only to render
 # violations[].layer as e.g. "Poly2" instead of the bare "30/0" fallback --
@@ -2140,7 +2396,76 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
     (80, 5): "efuse_mk",
     (125, 5): "plfuse",
     (241, 0): "Schottky_diode",
+    (24, 0): "ESD",
+    (167, 5): "GUARD_RING_MK",
 }
+
+#: Official gf180mcu rule ids this curated deck knowingly does *not*
+#: transcribe (issue #3791): the Dualgate (`dualgate.drc`) rules that need
+#: compound/cross-layer expressions `DrcRule` cannot evaluate (DV.1, DV.3,
+#: DV.6-DV.9) and the 5V/6V `_MV` columns of the Comp/Poly2/Nwell/LPW
+#: families, of which only DF.1a/DF.3a/DF.13/DF.14 are transcribed. Listed as
+#: `coverage.unmodeled_rules` so a `clean` verdict on a Dualgate layout is not
+#: read as full 5V/6V coverage. Remove an id here when its rule is added.
+_UNMODELED_DUALGATE_RULES: tuple[str, ...] = (
+    "DF.15a_MV",
+    "DF.15b_MV",
+    "DF.16_MV",
+    "DF.17_MV",
+    "DF.19_MV",
+    "DF.1b_MV",
+    "DF.2a_MV",
+    "DF.3c_MV",
+    "DF.4a_MV",
+    "DF.4b_MV",
+    "DF.4c_MV",
+    "DF.4d_MV",
+    "DF.4e_MV",
+    "DF.5_MV",
+    "DF.6_MV",
+    "DF.7_MV",
+    "DF.8_MV",
+    "DV.1",
+    "DV.3",
+    "DV.6",
+    "DV.7",
+    "DV.8",
+    "DV.9",
+    "LPW.1_MV",
+    "LPW.2a_MV",
+    "LPW.2b_MV",
+    "NW.1a_MV",
+    "NW.1b_MV",
+    "NW.2a_MV",
+    "NW.2b_MV",
+    "NW.5_MV",
+    "NW.6_MV",
+    "NW.7_MV",
+    "PL.1_MV",
+    "PL.1a_MV",
+    "PL.2_MV",
+    "PL.3b_MV",
+    "PL.4_MV",
+    "PL.5a_MV",
+    "PL.5b_MV",
+    "PL.7_MV",
+)
+
+#: Everything this deck knowingly does not transcribe, surfaced by
+#: `decks.get_unmodeled_rules` as `coverage.unmodeled_rules`: the untranscribed
+#: ESD/guard-ring ids (issue #3792), the thick-MetalTop and metal-slotting ids
+#: (issue #3796), the Metal1-5 wide-metal/end-of-line ids (issue #3968) and
+#: the Dualgate ids (issue #3791).
+UNMODELED_RULES: tuple[str, ...] = tuple(
+    sorted(
+        (
+            *UNTRANSCRIBED_RULES,
+            *_MT_MSLOT_UNMODELED_RULES,
+            *_METAL_EOL_UNMODELED_RULES,
+            *_UNMODELED_DUALGATE_RULES,
+        )
+    )
+)
 
 # Voltage-domain marker layers this deck draws but does not *fully* model the
 # DRC/extraction scoping of (issue #552): `Dualgate` (55/0) selects gf180mcu's
@@ -2180,8 +2505,11 @@ UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {
     (55, 0): (
         "Dualgate (55/0) marks gf180mcu's 5V/6V thick-oxide voltage domain. "
         "This curated deck models it for the DF.1a/DF.3a COMP width/space "
-        "rules and (issue #1111) MOS device recognition/model binding "
-        "(nfet_06v0/pfet_06v0 under --pdk) only; every other DRC rule still "
+        "rules, the Dualgate DV.2/DV.5 width/space rules (issue #3791) and "
+        "(issue #1111) MOS device recognition/model binding "
+        "(nfet_06v0/pfet_06v0 under --pdk) only; the other Dualgate DV rules "
+        "and _MV columns are listed in coverage.unmodeled_rules, and every "
+        "other DRC rule still "
         "applies the 3.3V/_LV thresholds regardless of Dualgate's presence "
         "(e.g. DF.6 COMP extend beyond gate 0.24 vs. 0.40, PL.5a/PL.5b field "
         "poly to COMP 0.10 vs. 0.30 -- all in um, and neither transcribed in "
@@ -2688,6 +3016,102 @@ _GF180MCU_MOS_LVS_SOURCE_PATH = (
     "libs.tech/klayout/tech/lvs/rule_decks/mos_extraction.lvs"
 )
 
+
+# MOS capacitors (issue #2919): `cap_nmos_*`/`cap_pmos_*`, a poly-over-COMP
+# gate whose COMP is covered by `MOS_CAP_MK` (166/5). Transcribed from
+# `rule_decks/moscap_derivations.lvs` / `moscap_extraction.lvs` at the pinned
+# `_GF180MCU_LVS_COMMIT` (read from a real fetched f6eeac7 install):
+#
+# - plain `cap_nmos_<v>` = an NMOS-style gate (Nplus COMP) outside Nwell and
+#   outside DNWELL; `cap_pmos_<v>` = a PMOS-style gate (Pplus COMP) inside
+#   Nwell and outside DNWELL. `_dn` = the same inside DNWELL. (The runset's
+#   `CONSIDER_DN_DW_FEATURES` option, default off, folds a `_dn` gate onto the
+#   plain model name; this deck always reports the `_dn` name -- the model that
+#   geometry really is -- so a `klt lvs` reference using `_dn` matches.)
+# - `_b` (`cap_nmos_<v>_b` = `ngate_*_base.and(nwell)`, `cap_pmos_<v>_b` =
+#   `pgate_*_base.and(ptap)`) is the "same-polarity well" form: an Nplus gate
+#   inside Nwell / a Pplus gate outside it. `_b` is not DNWELL-split.
+# - `<v>`: `03v3` outside `Dualgate` (55/0), `06v0` inside it. The two
+#   `capacitor(...)` area coefficients are 4.4e-15 F/um^2 (03v3) and 2.3e-15
+#   F/um^2 (06v0).
+# - `moscap_exclude` marker set: transcribed below as `_MOS_CAP_EXCLUDES`,
+#   minus `lvs_source` (100/8): this curated deck deliberately reads nothing
+#   else on layer number 100 (its `dummy` convention marker is 100/50, see
+#   `test_gf180mcu_dummy_marker_does_not_collide_with_any_read_layer`), and an
+#   LVS-source annotation over a MOS capacitor is not modelled.
+#
+# Deliberate approximations: the runset subtracts the excluded markers
+# geometrically from the gate; here an island overlapping any of them at all is
+# not a capacitor (the same island-level policy `MOSFlavour` documents). The
+# well/body terminal the runset names (`P2`) takes no part in the device -- the
+# runset's terminals are the poly (`tA`) and the diffusion (`tB`).
+_MOS_CAP_EXCLUDES: tuple[tuple[int, int], ...] = (
+    (62, 0),  # resistor
+    (24, 0),  # esd
+    (49, 0),  # sab
+    (96, 1),  # fusewindow_d
+    (220, 0),  # polyfuse
+    (110, 5),  # res_mk
+    (115, 5),  # diode_mk
+    (127, 5),  # drc_bjt
+    (5, 0),  # nat
+    (24, 5),  # esd_mk
+    (80, 5),  # efuse_mk
+    (125, 5),  # plfuse
+    (210, 0),  # mvsd
+    (11, 39),  # mvpsd
+    (226, 0),  # ldmos_xtor
+    (241, 0),  # schottky_diode
+)
+
+_NPLUS = (32, 0)
+_PPLUS = (31, 0)
+_DNWELL = (12, 0)
+_DUALGATE = (55, 0)
+
+
+def _mos_cap(
+    name: str, implant: tuple[int, int], in_well: bool, voltage: str, deep: bool | None
+) -> MosCapacitorDevice:
+    """One `MosCapacitorDevice`; `deep` is `True`/`False` for a DNWELL
+    requirement/exclusion, `None` for the `_b` forms that do not split on it."""
+    thick = voltage == "06v0"
+    other = _PPLUS if implant == _NPLUS else _NPLUS
+    requires: tuple[tuple[int, int], ...] = ((_DUALGATE,) if thick else ()) + (
+        (_DNWELL,) if deep else ()
+    )
+    excludes = (
+        (other,)
+        + (() if thick else (_DUALGATE,))
+        + ((_DNWELL,) if deep is False else ())
+        + _MOS_CAP_EXCLUDES
+    )
+    return MosCapacitorDevice(
+        name=name,
+        marker=(166, 5),  # MOS_CAP_MK
+        implant=implant,
+        in_well=in_well,
+        area_cap_f_um2=2.3e-15 if thick else 4.4e-15,
+        requires=requires,
+        excludes=excludes,
+        provenance=_gf180mcu_lvs_provenance(
+            "libs.tech/klayout/tech/lvs/rule_decks/moscap_extraction.lvs", name
+        ),
+    )
+
+
+_MOS_CAPACITORS: tuple[MosCapacitorDevice, ...] = tuple(
+    _mos_cap(f"cap_{kind}_{volt}{suffix}", implant, in_well, volt, deep)
+    for volt in ("03v3", "06v0")
+    for kind, implant, in_well in (("nmos", _NPLUS, False), ("pmos", _PPLUS, True))
+    for suffix, deep in (("", False), ("_dn", True))
+) + tuple(
+    _mos_cap(f"cap_{kind}_{volt}_b", implant, in_well, volt, None)
+    for volt in ("03v3", "06v0")
+    for kind, implant, in_well in (("nmos", _NPLUS, True), ("pmos", _PPLUS, False))
+)
+
+
 EXTRACTION_DECK = ExtractionDeck(
     active=(22, 0),  # Comp
     poly=(30, 0),  # Poly2
@@ -3116,8 +3540,11 @@ EXTRACTION_DECK = ExtractionDeck(
         ),
     ),
     # Issue #2919: MOS capacitors (`cap_nmos_*`/`cap_pmos_*`) are marked by
-    # `MOS_CAP_MK` (166/5) and have no device class here yet, so they would
-    # otherwise vanish from the netlist with a clean `extracted` status.
+    # `MOS_CAP_MK` (166/5); see `_MOS_CAPACITORS` above. Marker components the
+    # recogniser could not classify (no gate, mixed implant, an excluded
+    # marker) stay reported here, so they cannot vanish from the netlist with
+    # a clean `extracted` status.
+    mos_capacitors=_MOS_CAPACITORS,
     unsupported_device_markers=(
         UnsupportedDeviceMarker(
             marker=(166, 5),  # MOS_CAP_MK

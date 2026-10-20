@@ -52,11 +52,13 @@ from .extraction import (
     InvalidLabelLayerError,
     LayerExpr,
     MomCapacitorDevice,
+    MosCapacitorDevice,
     MOSFlavour,
     ResistorDevice,
     ResistorFlavour,
     SizeFilter,
     TerminalRelation,
+    UnmodelledDeviceFamily,
     UnsupportedDeviceMarker,
 )
 from .finfet import FinFETExtractionDeck, FinFETFlavour
@@ -115,6 +117,8 @@ __all__ = [
     "TapDistanceSpec",
     "UnknownDeckError",
     "UnknownExtractionDeckError",
+    "UnmodelledDeviceFamily",
+    "MosCapacitorDevice",
     "UnsupportedDeviceMarker",
     "deck_names",
     "describe_cut_resistance_gaps",
@@ -124,6 +128,7 @@ __all__ = [
     "get_layer_names",
     "get_nominal_dbu",
     "get_parasitics_deck",
+    "get_unmodeled_device_markers",
     "get_unmodeled_rules",
     "get_marker_blind_layers",
     "get_unchecked_rules",
@@ -309,6 +314,22 @@ def get_unmodeled_voltage_markers(name: str) -> dict[tuple[int, int], str]:
     return _unmodeled_voltage_marker_registry().get(name, {})
 
 
+def get_unmodeled_device_markers(name: str) -> dict[tuple[int, int], str]:
+    """Return the ``(layer, datatype) -> description`` map of
+    device-recognition marker layers ``name``'s deck draws but has no native
+    recognition for (issue #3858) -- e.g. sg13g2's ``Recog.esd`` (99/30).
+
+    ``klt extract`` appends one prose ``warnings[]`` entry per registered
+    marker that carries shapes, so the missing device is not silent. Unlike
+    :func:`get_unmodeled_voltage_markers` the marker need not overlap any
+    extracted geometry. A deck with no such declaration (or an unregistered
+    name) returns an empty map rather than raising.
+    """
+    from . import sg13g2
+
+    return {"sg13g2": sg13g2.UNMODELED_DEVICE_MARKERS}.get(name, {})
+
+
 def get_unmodeled_rules(name: str) -> list[str]:
     """Return the sorted official rule ids ``name``'s deck knowingly does not
     transcribe (issue #3031), surfaced as ``klt drc``'s
@@ -337,9 +358,12 @@ def get_unchecked_rules(name: str) -> dict[str, tuple[tuple[int, int], str]]:
     in the stream, so a ``clean`` verdict is not misread as covering it.
     Decks that declare none (and unregistered names) return an empty map.
     """
-    from . import sg13cmos5l
+    from . import sg13cmos5l, sg13g2
 
-    return {"sg13cmos5l": sg13cmos5l.UNCHECKED_RULES}.get(name, {})
+    return {
+        "sg13cmos5l": sg13cmos5l.UNCHECKED_RULES,
+        "sg13g2": sg13g2.UNCHECKED_RULES,
+    }.get(name, {})
 
 
 def get_marker_blind_layers(name: str) -> list[tuple[int, int]]:

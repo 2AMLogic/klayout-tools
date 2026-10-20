@@ -70,6 +70,7 @@ from .netlist import (
     STATUS_GENERATED,
     NetlistError,
     _check_no_unevaluated_expr,
+    _check_no_unresolved_symbol,
     _check_result,
     _netlist_block,
     _sha256_file_hash,
@@ -814,7 +815,8 @@ def _collect(
         runner_error=runner_error,
         note=note,
         stderr_tail=stderr_tail,
-        harness_log=sim_batch.job_uri(config, job_id).rstrip("/") + "/harness.log",
+        harness_log=sim_batch.report_job_uri(config, job_id).rstrip("/")
+        + "/harness.log",
     )
 
 
@@ -920,6 +922,7 @@ def run_netlist_batch(
         data = _rewrite_runner_paths(data, _read_tree_roots(collected), tree.root)
         # The runner's klt gates too; this keeps the guarantee client-side.
         _check_no_unevaluated_expr(data, report["xschem"].get("version"))
+        _check_no_unresolved_symbol(data)
         remote = {
             **sim_batch._batch_environment(config, job_id, status),
             **sim_batch._read_runner_identity(collected),

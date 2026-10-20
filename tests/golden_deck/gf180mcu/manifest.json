@@ -1252,6 +1252,112 @@
       ]
     }
   },
+  "dualgate.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            55,
+            0
+          ]
+        },
+        {
+          "box": [
+            2540,
+            0,
+            4540,
+            4000
+          ],
+          "layer": [
+            55,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      55,
+      0
+    ],
+    "threshold_dbu": 440,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            55,
+            0
+          ]
+        },
+        {
+          "box": [
+            2340,
+            0,
+            4340,
+            4000
+          ],
+          "layer": [
+            55,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "dualgate.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            800,
+            4000
+          ],
+          "layer": [
+            55,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      55,
+      0
+    ],
+    "threshold_dbu": 700,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            600,
+            4000
+          ],
+          "layer": [
+            55,
+            0
+          ]
+        }
+      ]
+    }
+  },
   "metal1.enclosing.contact.1": {
     "check": "enclosing",
     "clean": {
@@ -5033,6 +5139,851 @@
           "layer": [
             41,
             0
+          ]
+        }
+      ]
+    }
+  },
+  "comp.separation.guard_ring_mk.1": {
+    "check": "separation",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            22,
+            0
+          ]
+        },
+        {
+          "box": [
+            12100,
+            0,
+            14100,
+            4000
+          ],
+          "layer": [
+            167,
+            5
+          ]
+        },
+        {
+          "box": [
+            -100,
+            -100,
+            2100,
+            4100
+          ],
+          "layer": [
+            241,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      22,
+      0
+    ],
+    "threshold_dbu": 10000,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            22,
+            0
+          ]
+        },
+        {
+          "box": [
+            11900,
+            0,
+            13900,
+            4000
+          ],
+          "layer": [
+            167,
+            5
+          ]
+        },
+        {
+          "box": [
+            -100,
+            -100,
+            2100,
+            4100
+          ],
+          "layer": [
+            241,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "esd.separation.nplus.1": {
+    "check": "separation",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            24,
+            0
+          ]
+        },
+        {
+          "box": [
+            2400,
+            0,
+            4400,
+            4000
+          ],
+          "layer": [
+            32,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      24,
+      0
+    ],
+    "threshold_dbu": 300,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            24,
+            0
+          ]
+        },
+        {
+          "box": [
+            2200,
+            0,
+            4200,
+            4000
+          ],
+          "layer": [
+            32,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "esd.separation.pplus.1": {
+    "check": "separation",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            24,
+            0
+          ]
+        },
+        {
+          "box": [
+            2400,
+            0,
+            4400,
+            4000
+          ],
+          "layer": [
+            31,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      24,
+      0
+    ],
+    "threshold_dbu": 300,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            24,
+            0
+          ]
+        },
+        {
+          "box": [
+            2200,
+            0,
+            4200,
+            4000
+          ],
+          "layer": [
+            31,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "esd.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            24,
+            0
+          ]
+        },
+        {
+          "box": [
+            2700,
+            0,
+            4700,
+            4000
+          ],
+          "layer": [
+            24,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      24,
+      0
+    ],
+    "threshold_dbu": 600,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            24,
+            0
+          ]
+        },
+        {
+          "box": [
+            2500,
+            0,
+            4500,
+            4000
+          ],
+          "layer": [
+            24,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "esd.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            700,
+            4000
+          ],
+          "layer": [
+            24,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      24,
+      0
+    ],
+    "threshold_dbu": 600,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            500,
+            4000
+          ],
+          "layer": [
+            24,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "metal1.separation.guard_ring_mk.1": {
+    "check": "separation",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            34,
+            0
+          ]
+        },
+        {
+          "box": [
+            12100,
+            0,
+            14100,
+            4000
+          ],
+          "layer": [
+            167,
+            5
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      34,
+      0
+    ],
+    "threshold_dbu": 10000,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            34,
+            0
+          ]
+        },
+        {
+          "box": [
+            11900,
+            0,
+            13900,
+            4000
+          ],
+          "layer": [
+            167,
+            5
+          ]
+        }
+      ]
+    }
+  },
+  "metal2.separation.guard_ring_mk.1": {
+    "check": "separation",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            36,
+            0
+          ]
+        },
+        {
+          "box": [
+            12100,
+            0,
+            14100,
+            4000
+          ],
+          "layer": [
+            167,
+            5
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      36,
+      0
+    ],
+    "threshold_dbu": 10000,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            36,
+            0
+          ]
+        },
+        {
+          "box": [
+            11900,
+            0,
+            13900,
+            4000
+          ],
+          "layer": [
+            167,
+            5
+          ]
+        }
+      ]
+    }
+  },
+  "metal3.separation.guard_ring_mk.1": {
+    "check": "separation",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            42,
+            0
+          ]
+        },
+        {
+          "box": [
+            12100,
+            0,
+            14100,
+            4000
+          ],
+          "layer": [
+            167,
+            5
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      42,
+      0
+    ],
+    "threshold_dbu": 10000,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            42,
+            0
+          ]
+        },
+        {
+          "box": [
+            11900,
+            0,
+            13900,
+            4000
+          ],
+          "layer": [
+            167,
+            5
+          ]
+        }
+      ]
+    }
+  },
+  "metal4.separation.guard_ring_mk.1": {
+    "check": "separation",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            46,
+            0
+          ]
+        },
+        {
+          "box": [
+            12100,
+            0,
+            14100,
+            4000
+          ],
+          "layer": [
+            167,
+            5
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      46,
+      0
+    ],
+    "threshold_dbu": 10000,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            46,
+            0
+          ]
+        },
+        {
+          "box": [
+            11900,
+            0,
+            13900,
+            4000
+          ],
+          "layer": [
+            167,
+            5
+          ]
+        }
+      ]
+    }
+  },
+  "metal5.separation.guard_ring_mk.1": {
+    "check": "separation",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            81,
+            0
+          ]
+        },
+        {
+          "box": [
+            12100,
+            0,
+            14100,
+            4000
+          ],
+          "layer": [
+            167,
+            5
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      81,
+      0
+    ],
+    "threshold_dbu": 10000,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            81,
+            0
+          ]
+        },
+        {
+          "box": [
+            11900,
+            0,
+            13900,
+            4000
+          ],
+          "layer": [
+            167,
+            5
+          ]
+        }
+      ]
+    }
+  },
+  "metaltop.separation.guard_ring_mk.1": {
+    "check": "separation",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            53,
+            0
+          ]
+        },
+        {
+          "box": [
+            12100,
+            0,
+            14100,
+            4000
+          ],
+          "layer": [
+            167,
+            5
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      53,
+      0
+    ],
+    "threshold_dbu": 10000,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            53,
+            0
+          ]
+        },
+        {
+          "box": [
+            11900,
+            0,
+            13900,
+            4000
+          ],
+          "layer": [
+            167,
+            5
+          ]
+        }
+      ]
+    }
+  },
+  "nwell.separation.guard_ring_mk.1": {
+    "check": "separation",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            21,
+            0
+          ]
+        },
+        {
+          "box": [
+            12100,
+            0,
+            14100,
+            4000
+          ],
+          "layer": [
+            167,
+            5
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      21,
+      0
+    ],
+    "threshold_dbu": 10000,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            21,
+            0
+          ]
+        },
+        {
+          "box": [
+            11900,
+            0,
+            13900,
+            4000
+          ],
+          "layer": [
+            167,
+            5
+          ]
+        }
+      ]
+    }
+  },
+  "poly2.separation.guard_ring_mk.1": {
+    "check": "separation",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            30,
+            0
+          ]
+        },
+        {
+          "box": [
+            12100,
+            0,
+            14100,
+            4000
+          ],
+          "layer": [
+            167,
+            5
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      30,
+      0
+    ],
+    "threshold_dbu": 10000,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            30,
+            0
+          ]
+        },
+        {
+          "box": [
+            11900,
+            0,
+            13900,
+            4000
+          ],
+          "layer": [
+            167,
+            5
           ]
         }
       ]

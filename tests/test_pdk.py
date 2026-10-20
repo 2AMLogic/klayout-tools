@@ -380,6 +380,67 @@ def test_ambiguity_warning_is_none_when_unambiguous(tmp_path, monkeypatch):
     assert pdk.ambiguity_warning(pdk.find_pdk(variant="sky130A")) is None
 
 
+def _make_gf180_root(tmp_path):
+    root = tmp_path / "gf"
+    for name in ("gf180mcuA", "gf180mcuB", "gf180mcuC", "gf180mcuD"):
+        _make_install(root, name)
+    return root
+
+
+def test_find_lists_alternative_variants_when_unselected(tmp_path):
+    root = _make_gf180_root(tmp_path)
+
+    report = pdk.find_pdk(root=str(root))
+
+    assert report["variant"] == "gf180mcuA"
+    assert report["alternative_variants"] == ["gf180mcuB", "gf180mcuC", "gf180mcuD"]
+    warning = pdk.alternative_variants_warning(report)
+    assert warning is not None
+    assert "gf180mcuA" in warning and "gf180mcuB" in warning
+    assert "$PDK" in warning and "--pdk" in warning
+
+
+def test_find_alternative_variants_empty_when_pinned(tmp_path, monkeypatch):
+    root = _make_gf180_root(tmp_path)
+
+    explicit = pdk.find_pdk(root=str(root), variant="gf180mcuB")
+    assert explicit["alternative_variants"] == []
+    assert pdk.alternative_variants_warning(explicit) is None
+
+    monkeypatch.setenv("PDK", "gf180mcuC")
+    via_env = pdk.find_pdk(root=str(root))
+    assert via_env["variant"] == "gf180mcuC"
+    assert via_env["alternative_variants"] == []
+
+
+def test_find_alternative_variants_empty_for_single_variant(tmp_path):
+    root = tmp_path / "one"
+    _make_install(root, "sky130A")
+
+    report = pdk.find_pdk(root=str(root))
+
+    assert report["alternative_variants"] == []
+    assert pdk.alternative_variants_warning(report) is None
+
+
+def test_cli_find_warns_on_stderr_for_alternative_variants(tmp_path, capsys):
+    root = _make_gf180_root(tmp_path)
+
+    exit_code = main(["pdk", "find", "--pdk-root", str(root)])
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "klt: warning: no PDK variant selected" in captured.err
+
+    exit_code = main(["pdk", "find", "--pdk-root", str(root), "--format", "json"])
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert json.loads(captured.out)["alternative_variants"] == [
+        "gf180mcuB",
+        "gf180mcuC",
+        "gf180mcuD",
+    ]
+
+
 def test_pdk_root_nonexistent_falls_through(tmp_path, monkeypatch):
     # $PDK_ROOT set but pointing at a nonexistent dir: skip to the store.
     monkeypatch.setenv("PDK_ROOT", str(tmp_path / "does-not-exist"))
@@ -1744,6 +1805,55 @@ def test_macros_excludes_std_cell_and_other_libraries(tmp_path):
     report = pdk.list_hard_macro_libraries(root=str(root))
 
     assert [macro["name"] for macro in report["macros"]] == ["sky130_fd_ip_sram_1k"]
+
+
+def test_macros_reports_structural_lef_lib_library_without_fd_ip(tmp_path):
+    """IHP's `sg13g2_sram` has no `_fd_ip_` in its name but ships lef+lib."""
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "ihp-sg13g2", assets=("libs_ref",))
+    _make_macro_library(variant_dir, "sg13g2_sram", views=("cdl", "gds", "lef", "lib"))
+    _make_macro_library(variant_dir, "sg13g2_stdcell")
+    _make_macro_library(variant_dir, "sg13g2_io")
+    (variant_dir / "libs.ref" / "sg13g2_pr").mkdir(parents=True)
+
+    report = pdk.list_hard_macro_libraries(root=str(root))
+
+    assert [m["name"] for m in report["macros"]] == ["sg13g2_sram"]
+
+
+def test_macros_fd_ip_library_without_lib_view_still_reported(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    _make_macro_library(variant_dir, "sky130_fd_ip_sram_1k", views=("gds",))
+
+    report = pdk.list_hard_macro_libraries(root=str(root))
+
+    assert [m["name"] for m in report["macros"]] == ["sky130_fd_ip_sram_1k"]
+
+
+def test_variant_family_alias_resolves_ihp_install(tmp_path):
+    root = tmp_path / "install"
+    _make_install(root, "ihp-sg13g2")
+
+    info = pdk.find_pdk(variant="sg13g2", root=str(root))
+
+    assert info["variant"] == "ihp-sg13g2"
+
+
+def test_variant_family_alias_exact_name_wins(tmp_path):
+    root = tmp_path / "install"
+    _make_install(root, "ihp-sg13g2")
+    _make_install(root, "sg13g2")
+
+    assert pdk.find_pdk(variant="sg13g2", root=str(root))["variant"] == "sg13g2"
+
+
+def test_variant_family_alias_does_not_guess_sky130(tmp_path):
+    root = tmp_path / "install"
+    _make_install(root, "sky130A")
+
+    with pytest.raises(pdk.PdkNotFoundError):
+        pdk.find_pdk(variant="sky130", root=str(root))
 
 
 def test_macros_only_hard_macro_ip_present_no_std_cell(tmp_path):

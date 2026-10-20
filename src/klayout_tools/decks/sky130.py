@@ -1132,7 +1132,7 @@ DECK: list[DrcRule] = [
         threshold_dbu=300,  # 0.3 um
         # sky130A_mr.drc rule "m3.2": non_huge_m3.space(0.3, euclidian)
         # -> "m3.2 : min. m3 spacing : 0.3um"
-        # (the wide-metal 0.4um exception, "m3.3cd", is not modelled here --
+        # (the wide-metal 0.4um exception, "m3.3ab", is not modelled here --
         # the same approximation met1.space.1/met2.space.1 above already
         # make for their own wide-metal exceptions.)
         scope="m3",  # sky130A_mr.drc "m3.*" rule-id family (#566)
@@ -2060,10 +2060,15 @@ MARKER_BLIND_LAYERS: tuple[tuple[int, int], ...] = ((81, 2),)
 #: transcribe (issue #3031): the "2-adjacent-edges-relaxed" enclosure
 #: refinements, which need a per-edge-pair primitive ``DrcRule`` does not have
 #: (see the "primary rule only" notes on ``met1.enclosing.mcon.1``,
-#: ``via.enclosing.met1.1`` and their ``met2``/``met3`` siblings). A layout can
-#: be ``klt drc --deck sky130`` clean yet fail the foundry runset on exactly
-#: these, so ``coverage.unmodeled_rules`` lists them rather than let a clean
-#: verdict read as full coverage. Remove an id here when its rule is added.
+#: ``via.enclosing.met1.1`` and their ``met2``/``met3`` siblings), and the
+#: width/spacing/overlap checks on the thick-oxide and marker layers (``hvi``,
+#: ``hvntm``, ``hvtp``, ``hvtr``, ``pad``, ``rdl``; issue #3802), which the
+#: deck gives only ongrid/angle rules. A layout can be ``klt drc --deck
+#: sky130`` clean yet fail the foundry runset on exactly these, so
+#: ``coverage.unmodeled_rules`` lists them rather than let a clean verdict read
+#: as full coverage. The open ``sky130A_mr.drc`` defines no latch-up or ESD
+#: rules, so there is no id to list for those (see ``docs/cli/drc.md``).
+#: Remove an id here when its rule is added.
 UNMODELED_RULES: tuple[str, ...] = (
     # Implant/npc/well rules (issue #2934) scoped to compound layer
     # expressions (diff.and(psdm), npsdm enclosing diff/tap, gate, ...) that
@@ -2072,8 +2077,21 @@ UNMODELED_RULES: tuple[str, ...] = (
     "difftap.11",
     "difftap.8",
     "difftap.9",
+    "hvi.1",
+    "hvi.2a",
+    "hvntm.1",
+    "hvntm.2",
+    "hvtp.1",
+    "hvtp.2",
+    "hvtr.1",
+    "hvtr.2",
+    "hvtr.2_a",
+    "m1.3ab",
     "m1.5",
+    "m2.3ab",
     "m2.5",
+    "m3.3ab",
+    "m4.5ab",
     "n/psdm.10a",
     "n/psdm.10b",
     "n/psdm.5a",
@@ -2082,6 +2100,9 @@ UNMODELED_RULES: tuple[str, ...] = (
     "n/psdm.7",
     "n/psdm.8",
     "npc.4",
+    "pad.2",
+    "rdl.1",
+    "rdl.2",
     "via.5a",
     "via2.5",
     "via3.5",

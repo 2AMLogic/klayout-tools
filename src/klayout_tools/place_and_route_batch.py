@@ -403,7 +403,7 @@ def _job_failure(
             message += f" [output recovery: {detail}]"
         message += (
             " -- full log: "
-            + sim_batch.job_uri(config, job_id).rstrip("/")
+            + sim_batch.report_job_uri(config, job_id).rstrip("/")
             + "/harness.log"
         )
         tail = _remote_stderr_tail(collected)

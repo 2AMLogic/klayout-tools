@@ -1328,6 +1328,62 @@ def test_run_drc_gf180mcu_dualgate_still_warns_for_unsplit_rules(tmp_path):
     ]
 
 
+def _make_gf180mcu_dualgate_boxes_layout(boxes) -> kdb.Layout:
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    li = layout.layer(55, 0)
+    layout.set_info(li, kdb.LayerInfo(55, 0))
+    for box in boxes:
+        top.shapes(li).insert(box)
+    return layout
+
+
+def test_run_drc_gf180mcu_dualgate_width_and_space(tmp_path):
+    """DV.5 (0.7um width) and DV.2 (0.44um space) on Dualgate (issue #3791)."""
+    path = tmp_path / "dg.gds"
+    # 0.5um-wide sliver, and two legal-width boxes only 0.3um apart.
+    _make_gf180mcu_dualgate_boxes_layout(
+        [
+            kdb.Box(0, 0, 500, 2000),
+            kdb.Box(5000, 0, 6000, 2000),
+            kdb.Box(6300, 0, 7300, 2000),
+        ]
+    ).write(str(path))
+
+    counts = run_drc(str(path), "gf180mcu")["rule_counts"]
+
+    assert counts.get("dualgate.width.1", 0) == 1
+    assert counts.get("dualgate.space.1", 0) == 1
+
+    clean = tmp_path / "dg_clean.gds"
+    _make_gf180mcu_dualgate_boxes_layout(
+        [kdb.Box(0, 0, 1000, 2000), kdb.Box(1500, 0, 2500, 2000)]
+    ).write(str(clean))
+    counts = run_drc(str(clean), "gf180mcu")["rule_counts"]
+    assert counts.get("dualgate.width.1", 0) == 0
+    assert counts.get("dualgate.space.1", 0) == 0
+
+
+def test_run_drc_gf180mcu_coverage_lists_unmodeled_rules(tmp_path):
+    """gf180mcu discloses the untranscribed Dualgate/_MV rules (issue #3791),
+    and none of them is also a transcribed rule."""
+    path = tmp_path / "dg_unmodeled.gds"
+    _make_gf180mcu_dualgate_boxes_layout([kdb.Box(0, 0, 1000, 2000)]).write(str(path))
+
+    unmodeled = run_drc(str(path), "gf180mcu")["coverage"]["unmodeled_rules"]
+
+    assert unmodeled == sorted(unmodeled)
+    for rule_id in ("DV.1", "DV.3", "DV.6", "DV.7", "DV.8", "DV.9"):
+        assert rule_id in unmodeled
+    for rule_id in ("DF.6_MV", "PL.5a_MV", "PL.5b_MV"):
+        assert rule_id in unmodeled
+    transcribed = {
+        rule.provenance.rule_id for rule in get_deck("gf180mcu") if rule.provenance
+    }
+    assert transcribed.isdisjoint(unmodeled)
+
+
 def _make_sky130_hvi_drc_layout(*, overlap: bool) -> kdb.Layout:
     """One `diff` (65/20) square, wide enough to clear this deck's own
     `diff.width.1` (`difftap.1`, 0.15um) threshold, with an `hvi` (75/20)
@@ -1425,8 +1481,21 @@ def test_run_drc_sky130_coverage_lists_unmodeled_rules(tmp_path):
         "difftap.11",
         "difftap.8",
         "difftap.9",
+        "hvi.1",
+        "hvi.2a",
+        "hvntm.1",
+        "hvntm.2",
+        "hvtp.1",
+        "hvtp.2",
+        "hvtr.1",
+        "hvtr.2",
+        "hvtr.2_a",
+        "m1.3ab",
         "m1.5",
+        "m2.3ab",
         "m2.5",
+        "m3.3ab",
+        "m4.5ab",
         "n/psdm.10a",
         "n/psdm.10b",
         "n/psdm.5a",
@@ -1435,10 +1504,34 @@ def test_run_drc_sky130_coverage_lists_unmodeled_rules(tmp_path):
         "n/psdm.7",
         "n/psdm.8",
         "npc.4",
+        "pad.2",
+        "rdl.1",
+        "rdl.2",
         "via.5a",
         "via2.5",
         "via3.5",
     ]
+    assert get_unmodeled_rules("no-such-deck") == []
+
+
+def test_run_drc_sg13g2_coverage_lists_unmodeled_pad_and_latchup_rules(tmp_path):
+    """A clean sg13g2 verdict must disclose the un-transcribed `Pad.*` and
+    `LU.*` runset rules (issue #3854); sorted, and other decks unaffected."""
+    path = tmp_path / "sg13g2_unmodeled.gds"
+    _make_sky130_nwell_hvi_layout(None).write(str(path))
+
+    unmodeled = run_drc(str(path), "sg13g2")["coverage"]["unmodeled_rules"]
+
+    assert unmodeled == sorted(unmodeled)
+    assert {"Pad.a1", "Pad.d", "Pad.jR", "LU.a", "LU.d1"} <= set(unmodeled)
+    assert all(r.startswith(("Pad.", "LU.")) for r in unmodeled)
+    # gf180mcu discloses its own untranscribed remainder (MT30/MSLOT, issue
+    # #3796; ESD.*/GR.*, issue #3792); a deck with no recorded remainder still
+    # reports none.
+    gf = get_unmodeled_rules("gf180mcu")
+    assert gf == sorted(gf)
+    assert {"ESD.7", "ESD.10", "MT30.1a", "MSLOT.1"} <= set(gf)
+    assert not any(r.startswith(("Pad.", "LU.")) for r in gf)
     assert get_unmodeled_rules("no-such-deck") == []
 
 
@@ -7238,15 +7331,16 @@ def test_run_drc_threshold_max_dbu_validated_even_when_layer_absent(
 
 
 def test_run_drc_sg13g2_every_rule_has_provenance():
-    """Every one of sg13g2's 48 curated `DrcRule` entries carries a populated
+    """Every one of sg13g2's 62 curated `DrcRule` entries carries a populated
     `provenance` citation (issue #905's own acceptance criterion: "every
     compiled rule cites its SG13G2 PDK source line", extended by issue #1243's
-    Metal3-TopMetal2 stack, issue #2581's 6.11 MIM group and issue #3787's pSD
-    group) -- not just the
-    32 width/space rules `tests/test_golden_deck.py`'s generic check already
+    Metal3-TopMetal2 stack, issue #2581's 6.11 MIM group, issue #3787's pSD
+    group, issue #3571's NWell rules and issue #3585's NW.c/d/e/f* NWell
+    enclosure/space rules) -- not just the
+    36 width/space rules `tests/test_golden_deck.py`'s generic check already
     covers."""
     deck = get_deck("sg13g2")
-    assert len(deck) == 48
+    assert len(deck) == 62
     for rule in deck:
         assert rule.provenance is not None, f"sg13g2/{rule.id}: no provenance"
         assert rule.provenance.source_repo == "IHP-GmbH/IHP-Open-PDK"
@@ -8396,9 +8490,28 @@ def test_run_drc_sg13g2_mim_rules_cite_the_6_11_mim_group():
     for rule in mim_rules.values():
         assert rule.check == "enclosing"
         assert rule.provenance.source_path.endswith("beol/6_11_mim.drc")
+    # `nwell.width.1` (issue #3571) and the NW.c/c1/d/d1/e/e1 (+ `.dig`) rules
+    # (issue #3585) legitimately cite the maximal runset: they are not
+    # implemented in the modular `5_1_nwell.drc`. Only NW.f1 / NW.f1.digibnd
+    # (`nwell.space.pactiv.hv.1` and `nwell.space.pactiv.dig.1`) cite the modular deck.
     assert {
         rule.id for rule in deck if "maximal" in (rule.provenance.source_path or "")
-    } == {"psd.width.1", "psd.space.1", "psd.area.1"}  # issue #3787
+    } == {
+        "psd.width.1",  # #3787
+        "psd.space.1",
+        "psd.area.1",
+        "nwell.width.1",  # #3571
+        "nwell.enclosing.pactiv.1",  # #3585
+        "nwell.enclosing.pactiv.hv.1",
+        "nwell.enclosing.pactiv.dig.1",
+        "nwell.enclosing.nactiv.1",
+        "nwell.enclosing.nactiv.hv.1",
+        "nwell.enclosing.nactiv.dig.1",
+        "nwell.space.nactiv.1",
+        "nwell.space.nactiv.hv.1",
+        "nwell.space.nactiv.dig.1",
+        "nwell.space.pactiv.1",
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -9033,7 +9146,10 @@ def test_request_document_format_flag_is_not_an_input_flag(tmp_path, capsys):
         ('{"file": 3}', "must be a string"),
         ('{"file": "x.gds", "timeout_s": "soon"}', "must be a number"),
         ('{"file": "x.gds", "deck_vars": ["FEOL=true"]}', "must be a JSON object"),
-        ('{"file": "x.gds", "engine": "nope"}', "must be 'curated' or 'klayout'"),
+        (
+            '{"file": "x.gds", "engine": "nope"}',
+            "must be 'curated', 'klayout' or 'both'",
+        ),
         ('{"file": "x.gds", "deck_vars": {"A=B": "1"}}', "cannot represent one"),
         ('{"file": "x.gds",', "neither an existing file"),
         ('{"not": "an object"', "neither an existing file"),
@@ -10865,6 +10981,26 @@ def test_list_deck_rules_context2_keys_only_when_set():
     assert dig["context2_sized_by_um"] == 0.0
     plain = rules["nwell.enclosing.pactiv.1"]["derived_layer"]
     assert not any(k.startswith("context2") for k in plain)
+
+
+def test_run_drc_gf180mcu_coverage_names_unmodeled_thick_metal_families(tmp_path):
+    """Issue #3796: a clean gf180mcu verdict must say the MT30.*/MSLOT.*
+    families were never enforced; decks declaring none stay unaffected."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    # 1.0 um wide Metal3 line (42/0): fine for the modeled rules, would fail MT30.1a.
+    top.shapes(layout.layer(42, 0)).insert(kdb.Box(0, 0, 1000, 5000))
+    path = tmp_path / "thick_metal_probe.gds"
+    layout.write(str(path))
+
+    unmodeled = run_drc(str(path), "gf180mcu")["coverage"]["unmodeled_rules"]
+
+    assert {"MT30.1a", "MT30.2", "MT30.3", "MT30.4", "MSLOT.1"} <= set(unmodeled)
+    assert "MT30.1a" not in run_drc(str(path), "sky130")["coverage"]["unmodeled_rules"]
+    # Issue #3968: wide-metal / narrow-line end-of-line ids are disclosed too.
+    assert {"M2.2b", "CO.6a", "CO.6b", "V2.3c", "V2.4c"} <= set(unmodeled)
+    assert "M2.2b" not in run_drc(str(path), "sky130")["coverage"]["unmodeled_rules"]
 
 
 def _make_sky130_marker_layout(*, marker: bool) -> kdb.Layout:

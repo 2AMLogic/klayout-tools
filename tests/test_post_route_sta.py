@@ -6127,6 +6127,7 @@ def test_run_sta_evidence_input_verified_from_second_checkout(
     import shutil
 
     from klayout_tools.signoff import build_tier_report
+    from test_signoff import FUNCTIONAL_VERIFICATION_PASS_ENVELOPE
 
     monkeypatch.chdir(tmp_path)
     checkout_a = tmp_path / "a" / "repo"
@@ -6154,9 +6155,19 @@ def test_run_sta_evidence_input_verified_from_second_checkout(
         {k: report[k] for k in ("def_path", "verilog_path", "spef_path")}
     )
 
+    # Digital item 5 needs STA plus the functional suite (issue #3741).
+    fv_path = tmp_path / "fv.json"
+    fv_path.write_text(
+        json.dumps(FUNCTIONAL_VERIFICATION_PASS_ENVELOPE), encoding="utf-8"
+    )
+
     def grade(evidence: Path):
         result = build_tier_report(
-            {"block": "b", "kind": "digital", "evidence": {"5": str(evidence)}}
+            {
+                "block": "b",
+                "kind": "digital",
+                "evidence": {"5": [str(evidence), str(fv_path)]},
+            }
         )
         item = next(item for item in result["items"] if item["id"] == 5)
         return item["citation"]
@@ -6889,6 +6900,23 @@ def _openroad_write_spef(tmp_path, def_path: str) -> str:
     return str(spef_path)
 
 
+def test_electrical_check_tcl_ends_redirect_on_error_path():
+    """Issue #3621: a throw after `sta::redirect_string_begin` leaves the
+    redirect active, swallowing every later `puts`; the failure branch must
+    end it (guarded) before the UNSUPPORTED marker is printed."""
+    lines = post_route_sta._electrical_check_lines()
+
+    unsupported = f'  puts "{post_route_sta._ELECTRICAL_UNSUPPORTED}"'
+    for i, line in enumerate(lines):
+        if line == unsupported:
+            assert lines[i - 1] == "  catch {sta::redirect_string_end}"
+            assert lines[i - 2] == "} klt_elec_msg]} {"
+    assert lines.count(unsupported) == 2
+
+
+_ELECTRICAL_FIXTURE = Path(__file__).parent / "fixtures" / "sta_electrical_checks"
+
+
 @pytest.mark.skipif(
     _live_sky130_env() is None,
     reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
@@ -6964,3 +6992,163 @@ def test_live_engine_driving_cell_and_output_load(tmp_path):
 
     assert loaded["worst_slack_ns"] < baseline["worst_slack_ns"]
     assert driven["worst_slack_ns"] is not None
+
+
+@pytest.mark.skipif(
+    _live_sky130_env() is None,
+    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
+    "KLT_SKIP_OPENROAD_TESTS unset",
+)
+def test_live_engine_electrical_checks_match_hand_run(tmp_path):
+    """Engine integration (issue #3005 AC4 / #3621): the fast-corner routed
+    DEF/SPEF fixture reports the violation counts recorded from a hand-run
+    `report_check_types -max_slew -max_capacitance -violators` (see the
+    fixture README for the script and output)."""
+    request = json.loads((_ELECTRICAL_FIXTURE / "request.json").read_text())
+    request["def"] = str(_ELECTRICAL_FIXTURE / request["def"])
+    request["spef"] = str(_ELECTRICAL_FIXTURE / request["spef"])
+    report = run_sta(
+        _write_request(tmp_path / "request.json", request), pdk_variant="sky130A"
+    )
+
+    checks = report["electrical_checks"]
+    assert checks["parasitics_source"] == "spef"
+    assert checks["max_transition"]["coverage"] == "checked"
+    assert checks["max_transition"]["violation_count"] == 1
+    assert checks["max_transition"]["worst_pin"] == "ff1/Q"
+    assert checks["max_capacitance"]["coverage"] == "checked"
+    assert checks["max_capacitance"]["violation_count"] == 1
+    assert checks["max_capacitance"]["worst_pin"] == "ff1/Q"
+
+
+# -- constraints.power_activity / power_basis (issue #3744) -------------------#
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        (None, None),
+        ({"activity": 0.1}, {"activity": 0.1}),
+        ({"duty": 0.5}, {"duty": 0.5}),
+        ({"activity": 0, "duty": 1}, {"activity": 0.0, "duty": 1.0}),
+    ],
+)
+def test_validate_power_activity_accepts(value, expected):
+    constraints = {} if value is None else {"power_activity": value}
+    assert post_route_sta._validate_power_activity(constraints) == expected
+
+
+@pytest.mark.parametrize(
+    "value, match",
+    [
+        ({}, "at least one"),
+        ([], "must be an object"),
+        ("0.1", "must be an object"),
+        ({"activity": True}, "activity must be a finite number"),
+        ({"activity": -0.1}, "activity must be >= 0"),
+        ({"activity": float("nan")}, "activity must be a finite number"),
+        ({"activity": float("inf")}, "activity must be a finite number"),
+        ({"duty": 1.5}, r"duty must be in \[0, 1\]"),
+        ({"duty": "0.5"}, "duty must be a finite number"),
+        ({"activity": 0.1, "density": 1}, "unknown key"),
+    ],
+)
+def test_validate_power_activity_rejects(value, match):
+    with pytest.raises(PostRouteStaError, match=match):
+        post_route_sta._validate_power_activity({"power_activity": value})
+
+
+def test_run_sta_power_activity_validation_runs_before_engine(tmp_path, monkeypatch):
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        constraints=_propagated_constraints(power_activity={"duty": 2}),
+    )
+    calls: list = []
+    monkeypatch.setattr(
+        post_route_sta.subprocess, "run", lambda *a, **k: calls.append(a)
+    )
+    with pytest.raises(PostRouteStaError, match="power_activity.duty"):
+        run_sta(request_path)
+    assert calls == []
+
+
+def test_power_activity_lines_empty_without_request():
+    assert post_route_sta._power_activity_lines(None) == []
+
+
+def test_sta_script_lines_power_activity_before_report_power_metric():
+    kwargs = dict(
+        tech_lef="/pdk/tech.lef",
+        cell_lef="/pdk/cells.lef",
+        liberty_path="/pdk/lib.lib",
+        clock_port="clk",
+        clock_period_ns=2.5,
+    )
+    baseline = post_route_sta._sta_script_lines(def_path="/d/top.def", **kwargs)
+    assert not any("set_power_activity" in line for line in baseline)
+    lines = post_route_sta._sta_script_lines(
+        def_path="/d/top.def", power_activity={"duty": 0.5, "activity": 0.1}, **kwargs
+    )
+    assert lines.index("set_power_activity -global -activity 0.1 -duty 0.5") < (
+        lines.index("report_power_metric")
+    )
+    assert [x for x in lines if "set_power_activity" not in x] == baseline
+
+    net_kwargs = dict(verilog_path="/d/top.v", hdl_toplevel="top", **kwargs)
+    net_base = post_route_sta._sta_netlist_script_lines(**net_kwargs)
+    net = post_route_sta._sta_netlist_script_lines(
+        power_activity={"duty": 0.25}, **net_kwargs
+    )
+    assert net.index("set_power_activity -global -duty 0.25") < net.index(
+        "report_power_metric"
+    )
+    assert [x for x in net if "set_power_activity" not in x] == net_base
+
+
+def test_run_sta_power_basis_engine_default_and_global(tmp_path, monkeypatch):
+    request_path = _setup_success_env(
+        tmp_path, monkeypatch, constraints=_propagated_constraints()
+    )
+    scripts = _stub_openroad_clock_capture(monkeypatch, {None: "propagated_buffered"})
+    report = run_sta(request_path)
+    assert report["power_basis"] == {
+        "activity_source": "engine_default",
+        "activity": None,
+        "duty": None,
+        "parasitics": "estimate_only",
+    }
+    assert "set_power_activity" not in scripts[0]
+
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        constraints=_propagated_constraints(power_activity={"activity": 0.2}),
+    )
+    scripts = _stub_openroad_clock_capture(monkeypatch, {None: "propagated_buffered"})
+    report = run_sta(request_path)
+    assert report["power_basis"] == {
+        "activity_source": "global",
+        "activity": 0.2,
+        "duty": None,
+        "parasitics": "estimate_only",
+    }
+    assert "set_power_activity -global -activity 0.2" in scripts[0]
+
+
+def test_run_sta_power_basis_per_corner_entry(tmp_path, monkeypatch):
+    request_path = _setup_multi_corner_env(
+        tmp_path,
+        monkeypatch,
+        constraints=_propagated_constraints(power_activity={"activity": 0.1}),
+    )
+    scripts = _stub_openroad_clock_capture(
+        monkeypatch,
+        {None: "propagated_buffered", "ss_100C_1v60": "propagated_buffered"},
+    )
+    report = run_sta(request_path)
+    assert len(scripts) == 2
+    assert all("set_power_activity -global -activity 0.1" in s for s in scripts)
+    for entry in report["corners"]:
+        assert entry["power_basis"]["activity_source"] == "global"
+        assert entry["power_basis"]["activity"] == 0.1

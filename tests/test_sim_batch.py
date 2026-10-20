@@ -1486,6 +1486,53 @@ def test_absolute_per_section_lib_is_refused(tmp_path):
 
 
 @pytest.mark.parametrize(
+    "lib", ["$PDK_ROOT/$PDK/libs.tech/ngspice/sm.ngspice", "${PDK_ROOT}/${PDK}/x.lib"]
+)
+def test_unresolved_pdk_var_is_refused_before_submit(tmp_path, lib):
+    request = _lib_request(tmp_path, models={"lib": lib})
+    with pytest.raises(sim.SimError) as excinfo:
+        sb._resolve_batch_config(request, corner_count=1, timeout_s=30.0)
+    assert excinfo.value.code == "models_lib_pdk_unresolved"
+    assert "$PDK" in str(excinfo.value)
+    assert "models.pdk" in str(excinfo.value)
+
+
+def test_unresolved_pdk_var_in_section_lib_is_refused(tmp_path):
+    request = _lib_request(
+        tmp_path,
+        corners={
+            "process": [
+                {
+                    "name": "tt",
+                    "sections": [{"lib": "$PDK_ROOT/$PDK/m.lib", "section": "tt"}],
+                }
+            ]
+        },
+    )
+    with pytest.raises(sim.SimError) as excinfo:
+        sb._resolve_batch_config(request, corner_count=1, timeout_s=30.0)
+    assert excinfo.value.code == "models_lib_pdk_unresolved"
+    assert "corners.process[0].sections[0].lib" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"models": {"pdk": "gf180mcuD", "lib": "$PDK_ROOT/$PDK/libs.tech/x.lib"}},
+        {"models": {"lib": "$PDK_ROOT/gf180mcuD/libs.tech/x.lib"}},
+        {"models": {"lib": "$PDKS/x.lib"}},
+        {
+            "models": {"lib": "$PDK_ROOT/$PDK/x.lib"},
+            "options": {"stage_model_inputs": True},
+        },
+    ],
+)
+def test_pdk_var_check_leaves_other_forms_alone(tmp_path, extra):
+    request = _lib_request(tmp_path, **extra)
+    assert sb._resolve_batch_config(request, corner_count=1, timeout_s=30.0).bucket
+
+
+@pytest.mark.parametrize(
     "extra",
     [
         {"models": {"pdk": "gf180mcuD", "lib": "libs.tech/ngspice/sm141064.ngspice"}},
@@ -1717,7 +1764,8 @@ def test_run_sim_batch_backend_end_to_end(tmp_path, monkeypatch):
     remote_block = report["environment"]["remote"]
     assert remote_block["provider"] == "aws-batch-fleet"
     assert remote_block["instance_id"] == "i-0fake"
-    assert remote_block["bucket"] == FAKE_BUCKET
+    assert "bucket" not in remote_block
+    assert FAKE_BUCKET not in json.dumps(report)
     assert remote_block["job_id"].startswith("klt-sim-")
 
     # Exactly one launch, and the uploaded request is a `local-parallel`
@@ -2471,6 +2519,65 @@ def test_collection_failure_on_a_done_job_still_raises(tmp_path, monkeypatch):
         _run_failed_job(tmp_path, monkeypatch, runner)
 
 
+_LEAKY_STDERR = (
+    f"An error occurred (AccessDenied): arn:aws:s3:::{FAKE_BUCKET}/x; {FAKE_BUCKET}"
+)
+
+
+def test_run_checked_redacts_the_bucket_from_the_error_message():
+    runner = _FakeRunner()
+    runner.default = fake_completed(returncode=1, stderr=_LEAKY_STDERR)
+
+    with pytest.raises(sb.BatchError) as excinfo:
+        sb._run_checked(runner, ["aws"], 1.0, "step", redact=FAKE_BUCKET)
+
+    assert FAKE_BUCKET not in str(excinfo.value)
+    assert str(excinfo.value).count("<bucket>") == 2
+
+
+def test_run_checked_classifies_on_the_unredacted_stderr():
+    runner = _FakeRunner()
+    runner.default = fake_completed(returncode=1, stderr=_LEAKY_STDERR)
+
+    with pytest.raises(sb.BatchError) as excinfo:
+        sb._run_checked(
+            runner,
+            ["aws"],
+            1.0,
+            "step",
+            classify=lambda detail: "seen" if FAKE_BUCKET in detail else None,
+            redact=FAKE_BUCKET,
+        )
+
+    assert excinfo.value.code == "seen"
+
+
+@pytest.mark.parametrize("redact", [None, ""])
+def test_run_checked_without_a_bucket_leaves_the_message_alone(redact):
+    runner = _FakeRunner()
+    runner.default = fake_completed(returncode=1, stderr="AccessDenied boom")
+
+    with pytest.raises(sb.BatchError, match="failed \\(exit 1\\): AccessDenied boom"):
+        sb._run_checked(runner, ["aws"], 1.0, "step", redact=redact)
+
+
+def test_collection_failure_note_in_the_deck_report_omits_the_bucket(
+    tmp_path, monkeypatch
+):
+    runner = _FakeRunner()
+    runner.default = fake_completed(
+        _status("failed", exit_code="1", detail="job command exited 1")
+    )
+    runner.queue("outputs/", fake_completed(returncode=1, stderr=_LEAKY_STDERR))
+
+    corners, _, _ = _run_failed_job(tmp_path, monkeypatch, runner)
+
+    for corner in corners:
+        message = corner["diagnostics"][0]["message"]
+        assert "output recovery" in message
+        assert FAKE_BUCKET not in message
+
+
 def test_timed_out_job_recovers_an_envelope_but_keeps_its_code(tmp_path, monkeypatch):
     runner = _FakeRunner()
     runner.default = fake_completed(_status("timeout", exit_code="124"))
@@ -2519,6 +2626,9 @@ def test_poll_timeout_reports_submitted_and_launched_only(tmp_path, monkeypatch)
     assert environment["client_launched_at"] == "2026-10-15T17:00:01.000000Z"
     assert environment["client_status_terminal_at"] is None
     assert environment["client_collected_at"] is None
+    # #3777: the bucket embeds an AWS account number; reports are committable.
+    assert "bucket" not in environment
+    assert FAKE_BUCKET not in json.dumps(environment)
 
 
 def test_successful_job_reports_ordered_client_timestamps(tmp_path, monkeypatch):
@@ -3193,6 +3303,54 @@ def test_default_runner_is_the_only_subprocess_seam(monkeypatch):
     )
     sb._run_subprocess(["true"], 1.0)
     assert calls == [["true"]]
+
+
+def test_default_runner_caps_concurrent_spawns(monkeypatch):
+    """96 shard threads going through the default runner never have more than
+    the spawn cap of CLI processes in flight, but still run concurrently."""
+    import threading
+    import time
+
+    cap = 4
+    monkeypatch.setattr(sb, "_SPAWN_SEMAPHORE", threading.BoundedSemaphore(cap))
+    lock = threading.Lock()
+    state = {"now": 0, "max": 0}
+
+    def fake_run(argv, **kwargs):
+        with lock:
+            state["now"] += 1
+            state["max"] = max(state["max"], state["now"])
+        time.sleep(0.01)
+        with lock:
+            state["now"] -= 1
+        return fake_completed()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    threads = [
+        threading.Thread(target=sb._run_subprocess, args=(["aws"], 1.0))
+        for _ in range(96)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert 1 < state["max"] <= cap
+
+
+def test_default_runner_releases_slot_on_exception(monkeypatch):
+    import threading
+
+    sem = threading.BoundedSemaphore(1)
+    monkeypatch.setattr(sb, "_SPAWN_SEMAPHORE", sem)
+
+    def boom(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, 1.0)
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    for _ in range(2):
+        with pytest.raises(subprocess.TimeoutExpired):
+            sb._run_subprocess(["aws"], 1.0)
+    assert sem.acquire(blocking=False)
 
 
 # --------------------------------------------------------------------------- #
@@ -4589,15 +4747,19 @@ def test_pdk_stamp_mismatch_warns_only_when_comparable(tmp_path, monkeypatch):
     assert comparison({**base, "stamp_sha256": same})["status"] == "match"
     mismatch = comparison({**base, "stamp_sha256": "b" * 64})
     assert mismatch["status"] == "mismatch" and "warning" in mismatch
-    # unlike scheme, other variant, missing stamp: never a proven mismatch
-    for pdk in (
-        {**base, "stamp_scheme": "git-rev", "stamp_sha256": "b" * 64},
-        {**base, "variant": "gf180mcuD", "stamp_sha256": "b" * 64},
-        {**base, "stamp_sha256": None},
-        {"variant": "sky130A"},
+    # unlike scheme, other variant, missing stamp: never a proven mismatch,
+    # and the reason (issue #3946) says which
+    for pdk, reason in (
+        (
+            {**base, "stamp_scheme": "git-rev", "stamp_sha256": "b" * 64},
+            "scheme_differs",
+        ),
+        ({**base, "variant": "gf180mcuD", "stamp_sha256": "b" * 64}, "variant_differs"),
+        ({**base, "stamp_sha256": None}, "worker_stamp_unavailable"),
+        ({"variant": "sky130A"}, "worker_stamp_unavailable"),
     ):
         result = comparison(pdk)
-        assert result == {"status": "not_comparable"}
+        assert result == {"status": "not_comparable", "reason": reason}
 
 
 def test_pdk_stamp_not_comparable_without_a_local_stamp(tmp_path, monkeypatch):
@@ -4609,7 +4771,17 @@ def test_pdk_stamp_not_comparable_without_a_local_stamp(tmp_path, monkeypatch):
         request={"netlist": "body.spice", "models": {"pdk": "sky130A"}},
     )
     assert env["worker_environment"]["pdk_stamp_comparison"] == {
-        "status": "not_comparable"
+        "status": "not_comparable",
+        "reason": "client_stamp_unavailable",
+    }
+
+
+def test_pdk_stamp_absent_capture_reports_worker_reason(tmp_path, monkeypatch):
+    env = _worker_env(tmp_path, monkeypatch, {})
+    assert env["worker_environment"]["capture"] == "absent"
+    assert env["worker_environment"]["pdk_stamp_comparison"] == {
+        "status": "not_comparable",
+        "reason": "worker_stamp_unavailable",
     }
 
 
@@ -6821,6 +6993,143 @@ def test_without_resume_an_existing_shard_map_is_overwritten(tmp_path, monkeypat
     assert [e["resumed"] for e in environment["fleet"]] == [False, False]
 
 
+def test_shard_map_records_every_shard_before_the_first_submit(tmp_path, monkeypatch):
+    _, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
+    seen: list[list[dict]] = []
+
+    def _first_submit(config, job_id, spec, *, runner=None):
+        seen.append(json.loads(manifest_path.read_text())["shards"])
+        raise sb.BatchError("client died")
+
+    monkeypatch.setattr(sb, "submit_job", _first_submit)
+    fleet()
+    assert [e["state"] for e in seen[0]] == ["pending", "pending"]
+    assert all(e["submitted_at"] is None for e in seen[0])
+
+
+def test_shard_map_tracks_launch_state_and_is_self_describing(tmp_path, monkeypatch):
+    _, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
+    fleet()
+    document = json.loads(manifest_path.read_text())
+    assert document["bucket"] == FAKE_BUCKET
+    for entry in document["shards"]:
+        assert entry["state"] == "collected"
+        assert all(entry[k] for k in ("submitted_at", "launched_at", "collected_at"))
+
+
+def test_failed_launch_leaves_the_shard_unlaunched_and_says_so(
+    tmp_path, monkeypatch, capsys
+):
+    _, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
+    real_launch = sb.launch_job
+    launched: list[str] = []
+
+    def _launch(config, job_id, **kwargs):
+        if launched:
+            raise sb.BatchError("client died")
+        launched.append(job_id)
+        return real_launch(config, job_id, **kwargs)
+
+    monkeypatch.setattr(sb, "launch_job", _launch)
+    fleet()
+    states = sorted(e["state"] for e in json.loads(manifest_path.read_text())["shards"])
+    assert states == ["collected", "launching"]
+    # "launching" (outcome unknown) is not counted as never-launched.
+    assert "never launched" not in capsys.readouterr().err
+
+
+def _unlaunch(manifest_path, index, state):
+    document = json.loads(manifest_path.read_text())
+    entry = document["shards"][index]
+    entry.update(state=state, launched_at=None, collected_at=None)
+    manifest_path.write_text(json.dumps(document))
+    return entry["job_id"]
+
+
+def test_resume_launches_a_submitted_never_launched_shard_once(tmp_path, monkeypatch):
+    runner, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
+    fleet()
+    job_id = _unlaunch(manifest_path, 1, "submitted")
+    launches_before = len(_launches(runner))
+    runner.queue(f"{job_id}/status.json", fake_completed(returncode=1))
+
+    _, _, environment = fleet(resume=True)
+
+    new_launches = _launches(runner)[launches_before:]
+    assert [argv[3] for argv in new_launches] == [job_id]
+    assert [e["resumed"] for e in environment["fleet"]] == [True, True]
+    assert environment["fleet"][1]["client_launched_at"]
+    assert json.loads(manifest_path.read_text())["shards"][1]["state"] == "collected"
+
+
+@pytest.mark.parametrize(
+    ("state", "status_published"),
+    [("launching", False), ("launched", False), ("submitted", True)],
+    ids=["launch-outcome-unknown", "already-launched", "fleet-published-status"],
+)
+def test_resume_never_relaunches_a_possibly_launched_shard(
+    tmp_path, monkeypatch, state, status_published
+):
+    runner, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
+    fleet()
+    job_id = _unlaunch(manifest_path, 1, state)
+    launches_before = len(_launches(runner))
+    if not status_published:
+        runner.queue(f"{job_id}/status.json", fake_completed(returncode=1))
+
+    fleet(resume=True)
+
+    assert len(_launches(runner)) == launches_before
+
+
+def test_stderr_names_the_map_when_shards_were_never_launched(
+    tmp_path, monkeypatch, capsys
+):
+    _, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
+    real_mark = sb._ShardManifest.mark
+
+    def _stop_before_launch(self, index, state):
+        if state == "launching" and index == 1:
+            raise KeyboardInterrupt
+        return real_mark(self, index, state)
+
+    monkeypatch.setattr(sb._ShardManifest, "mark", _stop_before_launch)
+    with pytest.raises(KeyboardInterrupt):
+        fleet()
+    err = capsys.readouterr().err
+    assert "1 of 2 batch job(s) were submitted but never launched" in err
+    assert str(manifest_path) in err
+    states = sorted(e["state"] for e in json.loads(manifest_path.read_text())["shards"])
+    assert "submitted" in states
+
+
+def test_split_reroute_without_a_checkpoint_writes_the_shard_map(tmp_path, monkeypatch):
+    """Issue #3896: a `max_units_per_job` split with no --resume (so no
+    checkpoint) still keeps a shard map when handed a fingerprint."""
+    _split_runner(monkeypatch)
+    monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
+    artifacts = tmp_path / "artifacts"
+
+    sb._run_batch(
+        corner_points=_corner_points(10),
+        netlist_path=str(_write_body(tmp_path)),
+        models_lib=None,
+        analysis={"kind": "tran", "args": "1n 1u"},
+        measurements_spec=_measurements_spec(),
+        timeout_s=120.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        artifacts_dir=str(artifacts),
+        max_workers=None,
+        request=_ceiling_request(tmp_path, max_units_per_job=4),
+        shard_fingerprint="fp-split",
+    )
+
+    document = json.loads((artifacts / sb.BATCH_SHARDS_FILENAME).read_text())
+    assert document["fingerprint"] == "fp-split"
+    assert [e["state"] for e in document["shards"]] == ["collected"] * 3
+
+
 @pytest.mark.parametrize("lose_a_corner", [False, True])
 def test_shard_map_is_removed_only_when_the_sweep_finishes(
     tmp_path, monkeypatch, lose_a_corner
@@ -6838,3 +7147,190 @@ def test_shard_map_is_removed_only_when_the_sweep_finishes(
         _install_fake_batch(monkeypatch, lost_ids={lost}, fleet=True)
         _run(path, tmp_path, hosts=2)
     assert manifest_path.exists() is lose_a_corner
+
+
+# --------------------------------------------------------------------------- #
+# batch.max_concurrent_jobs / --max-concurrent-jobs (issue #3914)
+# --------------------------------------------------------------------------- #
+
+
+def _concurrency_probe(monkeypatch):
+    """Replace ``_run_batch_job`` with a fake that records how many shard
+    jobs are in flight at once; returns the peak/total recorder."""
+    import threading
+    import time
+
+    state = {"active": 0, "peak": 0, "calls": 0}
+    lock = threading.Lock()
+
+    def _fake(**kwargs):
+        points = kwargs["explicit_points"]
+        with lock:
+            state["active"] += 1
+            state["calls"] += 1
+            state["peak"] = max(state["peak"], state["active"])
+        time.sleep(0.02)
+        with lock:
+            state["active"] -= 1
+        corners = [{"corner_id": f"t{int(p.temperature_c)}"} for p in points]
+        return corners, None, {"job_id": kwargs["job_id"]}
+
+    monkeypatch.setattr(sb, "_run_batch_job", _fake)
+    return state
+
+
+def _run_capped_fleet(tmp_path, *, units, hosts, **batch):
+    return sb._run_batch_fleet(
+        corner_points=_corner_points(units),
+        netlist_path=str(_write_body(tmp_path)),
+        timeout_s=60.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        artifacts_dir=str(tmp_path / "artifacts"),
+        request=_ceiling_request(tmp_path, **batch),
+        hosts=hosts,
+        measurements_spec=_measurements_spec(),
+        request_dir=str(tmp_path),
+    )
+
+
+def test_max_concurrent_jobs_bounds_in_flight_shards(tmp_path, monkeypatch):
+    state = _concurrency_probe(monkeypatch)
+
+    corners, _, environment = _run_capped_fleet(
+        tmp_path, units=10, hosts=10, max_concurrent_jobs=3
+    )
+
+    assert state["calls"] == 10
+    assert state["peak"] <= 3
+    assert [c["corner_id"] for c in corners] == [f"t{i}" for i in range(10)]
+    assert len(environment["fleet"]) == 10
+    assert environment["max_concurrent_jobs"] == 3
+
+
+def test_max_concurrent_jobs_interrupt_cancels_queued_shards(tmp_path, monkeypatch):
+    from klayout_tools import sim_remote
+
+    state = _concurrency_probe(monkeypatch)
+    real_as_completed = sim_remote.as_completed
+
+    def _interrupting(futures):
+        for future in real_as_completed(futures):
+            yield future
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(sim_remote, "as_completed", _interrupting)
+
+    with pytest.raises(KeyboardInterrupt):
+        _run_capped_fleet(tmp_path, units=10, hosts=10, max_concurrent_jobs=1)
+
+    assert state["calls"] < 10
+
+
+def test_max_concurrent_jobs_one_is_serial(tmp_path, monkeypatch):
+    state = _concurrency_probe(monkeypatch)
+
+    _run_capped_fleet(tmp_path, units=4, hosts=4, max_concurrent_jobs=1)
+
+    assert state["peak"] == 1
+
+
+def test_max_concurrent_jobs_unset_is_unchanged(tmp_path, monkeypatch):
+    state = _concurrency_probe(monkeypatch)
+
+    _, _, environment = _run_capped_fleet(tmp_path, units=4, hosts=4)
+
+    assert state["calls"] == 4
+    assert "max_concurrent_jobs" not in environment
+
+
+def test_max_concurrent_jobs_above_shard_count_has_no_effect(tmp_path, monkeypatch):
+    state = _concurrency_probe(monkeypatch)
+
+    corners, _, _ = _run_capped_fleet(
+        tmp_path, units=3, hosts=3, max_concurrent_jobs=50
+    )
+
+    assert state["calls"] == 3
+    assert len(corners) == 3
+
+
+@pytest.mark.parametrize("bad", [0, -3, 2.5, "8", True])
+def test_max_concurrent_jobs_bad_value_is_rejected_before_s3(
+    tmp_path, monkeypatch, bad
+):
+    runner = _FakeRunner()
+    with pytest.raises(sim.SimError) as excinfo:
+        _run_one_batch(
+            tmp_path,
+            monkeypatch,
+            runner,
+            units=3,
+            timeout_s=30.0,
+            max_concurrent_jobs=bad,
+        )
+
+    assert runner.calls == []
+    assert excinfo.value.code == sb.BATCH_MAX_CONCURRENT_CODE
+
+
+def test_cli_max_concurrent_jobs_flag_overrides_the_request(tmp_path, monkeypatch):
+    from klayout_tools.cli import main
+
+    seen: list[dict] = []
+
+    def _capture(**kwargs):
+        seen.append(kwargs["request"])
+        raise sim.SimError("stop here")
+
+    monkeypatch.setitem(sim._BACKENDS, "batch", _capture)
+    _write_body(tmp_path)
+    path = _write_request(tmp_path, _ceiling_request(tmp_path, max_concurrent_jobs=5))
+
+    main(["sim", str(path), "--max-concurrent-jobs", "2", "--format", "json"])
+
+    assert seen[0]["batch"]["max_concurrent_jobs"] == 2
+    assert seen[0]["batch"]["bucket"] == FAKE_BUCKET
+
+
+def _worker_report(comparison, models_staged=False):
+    return {
+        "environment": {
+            "remote": {
+                "worker_environment": {
+                    "pdk": {"models_staged": models_staged},
+                    "pdk_stamp_comparison": comparison,
+                }
+            }
+        }
+    }
+
+
+def test_text_summary_prints_pdk_stamp_lines(capsys):
+    from klayout_tools.cli.sim_cmd import _print_worker_pdk
+
+    _print_worker_pdk(
+        _worker_report({"status": "not_comparable", "reason": "scheme_differs"})
+    )
+    assert capsys.readouterr().out.splitlines() == [
+        "pdk_stamp: not_comparable (scheme_differs)",
+        "models_staged: false",
+    ]
+    _print_worker_pdk(
+        _worker_report({"status": "mismatch", "warning": "stamps differ"}, True)
+    )
+    assert capsys.readouterr().out.splitlines() == [
+        "pdk_stamp: mismatch",
+        "warning: stamps differ",
+        "models_staged: true",
+    ]
+    _print_worker_pdk(_worker_report({"status": "match"}))
+    assert capsys.readouterr().out.splitlines()[0] == "pdk_stamp: match"
+
+
+def test_text_summary_pdk_stamp_silent_without_worker_capture(capsys):
+    from klayout_tools.cli.sim_cmd import _print_worker_pdk
+
+    _print_worker_pdk({"environment": {"remote": None}})
+    _print_worker_pdk({"environment": {}})
+    assert capsys.readouterr().out == ""
