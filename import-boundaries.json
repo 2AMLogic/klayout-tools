@@ -515,7 +515,8 @@
       "description": "`klt size` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.size_cmd",
-        "klayout_tools.size"
+        "klayout_tools.size",
+        "klayout_tools.size_topology"
       ]
     },
     "reset_coverage": {
@@ -2268,6 +2269,12 @@
       },
       {
         "consumer": "klayout_tools.size",
+        "exporter": "klayout_tools.sim",
+        "symbol": "_resolve_models_lib",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.size_topology",
         "exporter": "klayout_tools.sim",
         "symbol": "_resolve_models_lib",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
