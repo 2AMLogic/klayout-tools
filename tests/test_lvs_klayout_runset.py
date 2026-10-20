@@ -155,13 +155,59 @@ def test_zero_devices_recognized_is_not_clean(tmp_path, fake_klayout):
 
 
 def test_nonzero_exit_is_an_error(tmp_path, fake_klayout):
+    fake_klayout["write_db"] = False  # crashed before writing a db
     fake_klayout["returncode"] = 1
     fake_klayout["stdout"] = "boom"
     with pytest.raises(LvsError, match="exited with status 1"):
         run_lvs(_request(tmp_path, 1))
 
 
+def test_nonzero_exit_with_database_reports_the_mismatch(tmp_path, fake_klayout):
+    # sky130.lvs exits 1 itself when compare() is false (issue #3987).
+    fake_klayout["returncode"] = 1
+    fake_klayout["stdout"] = "ERROR : Netlists don't match\n"
+    report = run_lvs(_request(tmp_path, 2))
+    assert report["status"] == "mismatch"
+    assert "device.unmatched" in {m["category"] for m in report["mismatches"]}
+    assert report["device_census"]["layout"]["NMOS"] == 2
+    assert report["provenance"]["runset"]["exit_status"] == 1
+    assert report["provenance"]["runset"]["engine_error_lines"] == [
+        "ERROR : Netlists don't match"
+    ]
+
+
+def test_nonzero_exit_with_matching_database_is_a_match(tmp_path, fake_klayout):
+    fake_klayout["returncode"] = 1
+    report = run_lvs(_request(tmp_path, 1))
+    assert report["status"] == "match"
+    assert report["provenance"]["runset"]["exit_status"] == 1
+
+
+def test_zero_exit_records_exit_status(tmp_path, fake_klayout):
+    report = run_lvs(_request(tmp_path, 1))
+    assert report["provenance"]["runset"]["exit_status"] == 0
+
+
+def test_nonzero_exit_with_unusable_database_is_an_error(
+    tmp_path, monkeypatch, fake_klayout
+):
+    fake_klayout["returncode"] = 1
+    fake_klayout["stdout"] = "ERROR: died after extraction\n"
+
+    def no_xref(path):
+        raise LvsError("database has no cross-reference")
+
+    monkeypatch.setattr(lvs_runset, "read_lvsdb_verdict", no_xref)
+    with pytest.raises(LvsError) as ei:
+        run_lvs(_request(tmp_path, 1))
+    msg = str(ei.value)
+    assert msg.startswith("last error: ERROR: died after extraction")
+    assert "exited with status 1" in msg
+    assert "klayout application 0.30.12" in msg
+
+
 def test_nonzero_exit_leads_with_last_error_line(tmp_path, fake_klayout):
+    fake_klayout["write_db"] = False  # crashed before writing a db
     fake_klayout["returncode"] = 1
     fake_klayout["stdout"] = (
         "extracting...\nERROR: undefined method `purge_devices' for RBA::Netlist\n"
@@ -176,6 +222,7 @@ def test_nonzero_exit_leads_with_last_error_line(tmp_path, fake_klayout):
 
 
 def test_nonzero_exit_without_error_lines_has_no_cause_prefix(tmp_path, fake_klayout):
+    fake_klayout["write_db"] = False  # crashed before writing a db
     fake_klayout["returncode"] = 1
     fake_klayout["stdout"] = "boom"
     with pytest.raises(LvsError) as ei:
@@ -186,6 +233,7 @@ def test_nonzero_exit_without_error_lines_has_no_cause_prefix(tmp_path, fake_kla
 def test_unreadable_app_version_does_not_mask_error(
     tmp_path, monkeypatch, fake_klayout
 ):
+    fake_klayout["write_db"] = False  # crashed before writing a db
     fake_klayout["returncode"] = 1
     fake_klayout["stdout"] = "ERROR: bad"
     monkeypatch.setattr(lvs_runset, "_application_version", lambda binary: None)
