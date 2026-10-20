@@ -1494,7 +1494,7 @@ def test_run_drc_sky130_coverage_lists_unmodeled_rules(tmp_path):
         "m1.5",
         "m2.3ab",
         "m2.5",
-        "m3.3cd",
+        "m3.3ab",
         "m4.5ab",
         "n/psdm.10a",
         "n/psdm.10b",

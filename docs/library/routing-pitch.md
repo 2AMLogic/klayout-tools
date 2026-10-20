@@ -20,7 +20,7 @@ tables; it is not a second rule engine.
 
 Supported rule classes: ordinary width and space. **Not representable** (so a
 result is always `partial`): wide-metal spacing (sky130 `m1.3ab`, `m2.3ab`,
-`m3.3cd`, `m4.5ab`; gf180mcu `Mn.2b`) and end-of-line rules (gf180mcu `CO.6a/b`,
+`m3.3ab`, `m4.5ab`; gf180mcu `Mn.2b`) and end-of-line rules (gf180mcu `CO.6a/b`,
 `Vn.3c/d`, `Vn.4b/c`). They are listed in `unmodeled`; extending `DrcRule` to
 model them is a separate deck-vocabulary change.
 

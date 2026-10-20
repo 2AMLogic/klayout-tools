@@ -3457,7 +3457,7 @@ runset (issue #3031). For sky130 these are:
   `via.5a`, `via2.5`, `via3.5`, ...), which need a per-edge-pair primitive
   `DrcRule` does not have; the deck checks only each family's primary
   (stricter-margin, all-edges) rule;
-- the wide-metal spacing exceptions (`m1.3ab`, `m2.3ab`, `m3.3cd`, `m4.5ab`),
+- the wide-metal spacing exceptions (`m1.3ab`, `m2.3ab`, `m3.3ab`, `m4.5ab`),
   which need a wide-metal predicate `DrcRule` does not have; the deck checks
   only each metal's ordinary minimum spacing;
 - the width, spacing and overlap rules on the thick-oxide and marker layers
