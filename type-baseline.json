@@ -467,7 +467,7 @@
     {
       "file": "src/klayout_tools/gen_compose_routing.py",
       "code": "no-redef",
-      "message": "Name \"ladder\" already defined on line 524",
+      "message": "Name \"ladder\" already defined on line 525",
       "count": 1
     },
     {
