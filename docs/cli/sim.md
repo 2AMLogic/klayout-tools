@@ -2234,7 +2234,7 @@ sanctioned detached path). For deck-list requests today, `--backend batch`
 blocks until the job is collected, `--submit-only` and `--attach` are
 **refused** (they exist for corner requests only), and `--resume` re-issues
 only the units without a valid record. Detached deck submission is a
-separate gap, tracked outside this feature.
+separate gap, tracked in [#3958](https://github.com/2AMLogic/klayout-tools/issues/3958).
 
 ### Runner support for `decks[]` on the batch backend (issue #3303)
 
