@@ -257,8 +257,12 @@
       "hvtr.1",
       "hvtr.2",
       "hvtr.2_a",
+      "m1.3ab",
       "m1.5",
+      "m2.3ab",
       "m2.5",
+      "m3.3ab",
+      "m4.5ab",
       "n/psdm.10a",
       "n/psdm.10b",
       "n/psdm.5a",
@@ -840,7 +844,7 @@
     "pdk": null,
     "deck": {
       "name": "sky130",
-      "content_hash": "sha256:b5c789a52e6dc7e8bee78d958fa2c80f5085bbadb2fefabe2929358dd3b3834f",
+      "content_hash": "sha256:ba0f97887e3d231aec8b54f1f52f2941ded0228f0234b6759712bcaca0e942e6",
       "released": null
     },
     "input": {
