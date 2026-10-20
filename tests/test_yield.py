@@ -2587,3 +2587,168 @@ def test_a_one_sided_limit_supports_a_sigma_target(tmp_path):
     m = run_yield(path)["measurements"][0]
     assert m["capability"]["limiting_side"] == "lower"
     assert m["sigma_target"]["met"] is True
+
+
+# --------------------------------------------------------------------------- #
+# `klt yield-csv`: derive a sample set from a per-draw CSV (issue #2931)
+# --------------------------------------------------------------------------- #
+
+from klayout_tools.yield_analysis import derive_sample_set_from_csv  # noqa: E402
+
+_CSV = (
+    "point_id,draw_index,status,metric,result\r\n"
+    "0,0,ok,gain,60.5\r\n"
+    "0,1,ok,gain,61.0\r\n"
+    "0,2,fail,gain,\r\n"
+    "0,3,ok,gain,\r\n"
+    "0,4,ok,gain,nan\r\n"
+    "0,0,ok,bw,1e6\r\n"
+    "0,1,ok,bw,2.5e6\r\n"
+)
+
+
+def _write_csv(tmp_path, text=_CSV, name="trials.csv", encoding="utf-8-sig"):
+    path = tmp_path / name
+    path.write_bytes(text.encode(encoding))
+    return str(path)
+
+
+def _csv_kwargs(**extra):
+    kw = dict(group_by="metric", value="result", status_col="status", pass_value="ok")
+    kw.update(extra)
+    return kw
+
+
+def test_csv_derivation_counts_and_hash(tmp_path):
+    path = _write_csv(tmp_path)
+    doc = derive_sample_set_from_csv(path, **_csv_kwargs(draw_col="draw_index"))
+    by_name = {m["name"]: m for m in doc["measurements"]}
+    assert by_name["gain"]["samples"] == [60.5, 61.0]
+    # failed status + empty cell + nan are errored, never dropped or sampled
+    assert by_name["gain"]["errored"] == 3
+    assert by_name["bw"]["samples"] == [1e6, 2.5e6]
+    csv_info = doc["derivation"]["csv"]
+    with open(path, "rb") as f:
+        assert (
+            csv_info["content_hash"] == "sha256:" + hashlib.sha256(f.read()).hexdigest()
+        )
+    assert csv_info["rows"] == 7
+
+
+def test_csv_equivalent_to_hand_built_sample_set(tmp_path):
+    path = _write_csv(tmp_path)
+    derived = derive_sample_set_from_csv(path, **_csv_kwargs(), limits={"min": 61.0})
+    hand = {
+        "measurements": [
+            {
+                "name": "gain",
+                "samples": [60.5, 61.0],
+                "errored": 3,
+                "limits": {"min": 61.0},
+            },
+            {
+                "name": "bw",
+                "samples": [1e6, 2.5e6],
+                "errored": 0,
+                "limits": {"min": 61.0},
+            },
+        ]
+    }
+    hand_path = tmp_path / "hand.json"
+    hand_path.write_text(json.dumps(hand))
+    derived_path = tmp_path / "derived.json"
+    derived_path.write_text(json.dumps(derived))
+    assert _read_samples(str(derived_path)) == _read_samples(str(hand_path))
+
+
+def test_csv_row_order_does_not_change_counts(tmp_path):
+    lines = _CSV.splitlines(keepends=True)
+    shuffled = lines[:1] + lines[1:][::-1]
+    a = derive_sample_set_from_csv(_write_csv(tmp_path), **_csv_kwargs())
+    b = derive_sample_set_from_csv(
+        _write_csv(tmp_path, "".join(shuffled), "b.csv"), **_csv_kwargs()
+    )
+    for ma in a["measurements"]:
+        mb = next(m for m in b["measurements"] if m["name"] == ma["name"])
+        assert sorted(ma["samples"]) == sorted(mb["samples"])
+        assert ma["errored"] == mb["errored"]
+
+
+def test_csv_duplicate_draw_rejected(tmp_path):
+    text = "g,d,v\na,0,1\na,0,2\n"
+    with pytest.raises(YieldError, match="duplicate draw"):
+        derive_sample_set_from_csv(
+            _write_csv(tmp_path, text), group_by="g", value="v", draw_col="d"
+        )
+
+
+@pytest.mark.parametrize(
+    "text,kwargs,match",
+    [
+        ("", {}, "empty"),
+        ("g,v\n", {}, "no data rows"),
+        ("g,x\na,1\n", {}, "no column"),
+        ("g,v\na,\n", {}, "no usable draws"),
+        ("g,v\na,inf\n", {}, "no usable draws"),
+        ("g,v\na,1\n", {"status_col": "g"}, "--pass-value"),
+    ],
+)
+def test_csv_errors(tmp_path, text, kwargs, match):
+    with pytest.raises(YieldError, match=match):
+        derive_sample_set_from_csv(
+            _write_csv(tmp_path, text), **{"group_by": "g", "value": "v", **kwargs}
+        )
+
+
+def test_csv_missing_file(tmp_path):
+    with pytest.raises(YieldError, match="not found"):
+        derive_sample_set_from_csv(str(tmp_path / "nope.csv"), group_by="g", value="v")
+
+
+def test_csv_cli_json_envelope(tmp_path, capsys):
+    path = _write_csv(tmp_path)
+    assert (
+        main(
+            [
+                "yield-csv",
+                path,
+                "--group-by",
+                "metric",
+                "--value",
+                "result",
+                "--status-col",
+                "status",
+                "--pass-value",
+                "ok",
+                "--min",
+                "1",
+                "--format",
+                "json",
+            ]
+        )
+        == 0
+    )
+    out = json.loads(capsys.readouterr().out)
+    assert out["measurements"][0]["limits"] == {"min": 1.0}
+    assert out["derivation"]["csv"]["content_hash"].startswith("sha256:")
+
+
+def test_csv_cli_error_envelope(tmp_path, capsys):
+    path = _write_csv(tmp_path)
+    assert (
+        main(
+            [
+                "yield-csv",
+                path,
+                "--group-by",
+                "nope",
+                "--value",
+                "result",
+                "--format",
+                "json",
+            ]
+        )
+        == 1
+    )
+    err = json.loads(capsys.readouterr().err)
+    assert err["error"]["command"] == "yield-csv"

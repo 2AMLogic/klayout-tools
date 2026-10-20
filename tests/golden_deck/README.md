@@ -7,8 +7,8 @@ Declarative, rule-id-keyed golden violate/clean fixture manifest for
 -- issue #1420's other addition -- uses the
 `"isolated"` check kind as of issue #1654, so it no longer falls within this
 manifest's width/space-only scope), `sg13g2.py`'s width/space
-`DrcRule` entries (32, issue #905/#911 initial 14, grown to 32 by issue
-#1247), and **all** of `gf180mcu.py`'s
+`DrcRule` entries (34, issue #905/#911 initial 14, grown to 32 by issue
+#1247, +2 for issue #3787's `psd.width.1`/`psd.space.1`), and **all** of `gf180mcu.py`'s
 `DrcRule` entries (46: 14 width, 15 space, 15 enclosing, 2 separation --
 recounted for issue #1110, which both added two rules and corrected a stale
 width/space/separation split in this line, then grown further by issue
@@ -62,15 +62,20 @@ tests/golden_deck/
   gf180mcu/manifest.json   # 46 entries (full DRC deck, issue #904;
                             # +2 for issue #1110's DF.1a/DF.3a _LV/_MV split,
                             # +2 for issue #1688's metal4.width.1/
-                            # metal4.space.1 pair)
-  sg13g2/manifest.json     # 32 entries (issue #905/#911, Epic #711 Phase 3b
+                            # metal4.space.1 pair,
+                            # +2 for issue #3484's nplus.space.pcomp.far.1/
+                            # pplus.enclosing.comp.far.1 well-distance split)
+  sg13g2/manifest.json     # 36 entries (+2 for issue #3571's
+                            # nwell.width.1/nwell.space.1; issue #905/#911, Epic #711 Phase 3b
                             # -- see that deck's own module docstring; width/
                             # space only, same split as sky130 -- its 5
                             # enclosing/separation rules ship as hand-written
                             # pairs in tests/test_drc.py instead; grown from
                             # 14 to 32 by issue #1247's extended
-                            # metals/vias-to-TopMetal2 stack)
-  sg13cmos5l/manifest.json # 27 entries (issue #1400, width/space/enclosing
+                            # metals/vias-to-TopMetal2 stack; +2 for
+                            # issue #3787's psd.width.1/psd.space.1)
+  sg13cmos5l/manifest.json # 29 entries (+2 for issue #3012's
+                            # nwell.width.1/nwell.space.1; issue #1400, width/space/enclosing
                             # on Activ/GatPoly/Metal1; issue #1417 extends
                             # coverage to the Metal2-TopMetal1 stack's width/
                             # space rules plus every via level's width/space/

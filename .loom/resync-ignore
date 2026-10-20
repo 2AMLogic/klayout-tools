@@ -22,48 +22,34 @@
 # locally-added `.loom/scripts/tests/test-*.sh` suite needs CI wiring, see
 # `.loom/docs/local-test-suite-wiring.md` instead (issue #1532).
 
-# #606: champion-epic.md carries a local-only "Re-approval Guard and Rejection
-# Idempotency" section (originally #532/#533) that stops duplicate Phase 1
-# issue creation on an already-approved epic (epic #375 had its Phase 1
-# created three times — #379-381, #376-378, #529-531 — before this guard
-# existed) and caps unrevised-rejection loops (#520, rejected 3x with
-# identical feedback) with an N=2 escalation to loom:operator-only. This
-# section was never upstreamed into rjwalters/loom's own champion-epic.md
-# template, so an unpinned resync silently reverted it once already (commit
-# 71d46d0, 2026-08-05) — this pin is what prevents a recurrence. If the
-# upstream Loom project ever adopts an equivalent mechanism, this pin can be
-# dropped and the file resynced normally.
-commands/loom/champion-epic.md
+# 2am#4345 pin audit (operator ruling 2026-10-15, Q5 option 1) RETIRED these
+# pins; each file now carries the installed v0.19.1160 upstream content:
+#   - commands/loom/champion-epic.md (#606): upstream Step 2.75 (#6601), the
+#     unrevised-epic cap (#5865), OPERATOR_RULED (#7921) and ALREADY_ROUTED
+#     hold skip (#7734) cover it; the 4 drift suites pass only on upstream.
+#   - commands/loom/champion.md (#662): upstream drops held epics itself (#7734).
+#   - scripts/verdict-staleness-guard.sh + test (#1356): fixed upstream as
+#     rjwalters/loom#6799.
+#   - commands/loom/champion-pr-merge.md + docs/label-state-machine.md (#1749,
+#     #2549): the frozen copy re-added `loom:operator` to migrated holds,
+#     stripped `loom:blocked` in Capped-PR Recovery and merged without the head
+#     pin (#11871/#11888/#11945); #1749's propagation is obsolete (the daemon
+#     never dispatches an issue with an open linked PR, #4123/#8865) and #2549's
+#     exit-code wiring is upstream. The repo-owned
+#     test-champion-pr-hold-issue-propagation.sh is deleted with it.
+#   - scripts/check-promotion-landed.sh + test (#2193): upstream refuses to
+#     write over any hold (#11512, #11795).
+# hermit-patterns, builder-pr (both copies), sweep-lease-fence,
+# verify-proposal-refs and pr-worktree stay pinned below but were RE-PORTED
+# onto current upstream in the same change (only their local delta remains).
+# curator/judge/doctor (#668) were unpinned by #1966 PR 2; dep-recheck-fingerprint stays.
 
-# #662: champion.md's Priority 4 (epic-discovery) query carries a local-only
-# 5-clause `select()` exclusion filter (loom:evaluating/loom:operator-only/
-# loom:blocked/loom:issue/loom:building), matching the filter already used by
-# Priorities 2/3, added by #609 (closing #608) so that already-escalated
-# epics (e.g. epic #520, repeatedly rejected and capped to
-# loom:operator-only) stop being re-surfaced by Champion on every pass. This
-# filter was never upstreamed into rjwalters/loom's own champion.md template,
-# so an unpinned resync silently reverted it once already (commit 1ae78c6,
-# 2026-08-09) — this pin is what prevents a recurrence. If the upstream Loom
-# project ever adopts an equivalent filter, this pin can be dropped and the
-# file resynced normally.
-commands/loom/champion.md
-
-# #668: curator.md/judge.md/doctor.md's "Stale `loom:curating`/`loom:reviewing`/
-# `loom:treating` Claim Check" sections carry a local-only "Frozen-Timeline
-# Fallback" -- a `RECLAIM_MARKER`/`RECLAIM_COUNT` cross-check plus a
-# `gh issue|pr view --json labels,updatedAt` ground-truth read -- added after a
-# live-verified false-positive livelock on issue #509 (2026-08-10): a real
-# label toggle was confirmed via `gh issue view --json labels`, but
-# `/events`/`/timeline` kept returning the same stale `labeled` event for
-# several minutes, so `CLAIMED_AT` never advanced and the same "Reclaiming
-# stale claim..." comment fired 30+ times. This mitigation was never
-# upstreamed into rjwalters/loom's own templates, so an unpinned resync would
-# silently drop it and reintroduce the livelock. If the upstream Loom project
-# ever adopts an equivalent mitigation, these pins can be dropped and the
-# files resynced normally.
-commands/loom/curator.md
-commands/loom/judge.md
-commands/loom/doctor.md
+# #668 (RETIRED by #1966 PR 2): commands/loom/{curator,judge,doctor}.md used to
+# be pinned whole-file to protect an inline "Frozen-Timeline Fallback" (the
+# 2026-08-10 reclaim livelock on #509). That protection now lives in the
+# pinned scripts/claim-staleness.sh below (#1966 PR 1, covered by
+# scripts/tests/test-claim-staleness.sh T23-T32), which the upstream role
+# files already drive, so the three role files track upstream again.
 
 # #1292: hermit-patterns.md's `stateless_ceremony` AST detector carries two
 # local-only exclusions added by #1288 (closing #920) — exclusion 4 skips
@@ -106,24 +92,6 @@ commands/loom/hermit-patterns.md
 # `--merge-method`) reach this repo, which only allows merge commits —
 # hardcoded squash 405'd every merge here. Do NOT re-add these paths without
 # re-checking the ladder above.
-
-# #1356: verdict-staleness-guard.sh (and its test) carry a local-only fix
-# dropping the nonexistent `merged` field from its `gh pr view --json` request
-# and deriving merged-ness from `state == "MERGED"` instead. `gh pr view` has
-# no `merged` field and `gh` validates the field list up front, so upstream's
-# `--json headRefOid,labels,state,merged` fails the WHOLE call with
-# `Unknown JSON field: "merged"` on every currently shipping `gh` (reproduced
-# on 2.96.0 and 2.98.0) — which silently darkened step 0 of every Judge pass
-# (the Stale-Verdict Sweep) and Champion's verdict-freshness check for every
-# verdict-bearing PR. The companion test stubs `gh`'s field-list validation so
-# the regression cannot return. This fix was never upstreamed into
-# rjwalters/loom's own templates, so an unpinned resync would silently revert
-# it — the same reversion that already happened to #606 (commit 71d46d0),
-# #662 (commit 1ae78c6), and #1316 (commit 1edbd2b). If the upstream Loom
-# project ever adopts an equivalent fix, these pins can be dropped and the
-# files resynced normally.
-scripts/verdict-staleness-guard.sh
-scripts/tests/test-verdict-staleness-guard.sh
 
 # #1546: scripts/dep-recheck-fingerprint.sh's FORMULA_VERSION guard (originally
 # #1544/#1545, commit a6f9997) — a literal `FORMULA_VERSION="v1"` constant
@@ -174,46 +142,32 @@ scripts/tests/test-verdict-staleness-guard.sh
 scripts/dep-recheck-fingerprint.sh
 scripts/tests/test-dep-recheck-fingerprint.sh
 
-# #1749: champion-pr-merge.md carries a local-only propagation from a held
-# PR's `loom:operator` state onto the issue(s) it would close — when the
-# merge-risk hold (criterion #2) or the critical-file hold (criterion #3)
-# applies `loom:operator` to a PR, the linked issue(s) (via
-# `closingIssuesReferences`) are marked `loom:blocked` with a machine-
-# parseable `Blocked by #<PR>` comment, and the release paths remove it again.
-# Without this, the daemon's work-finder kept re-dispatching a no-op sweep on
-# the issue every cycle even though its sole open PR was already held for
-# human merge (`loom-daemon`'s `PARK_LABELS` hard-skips `loom:blocked`, but
-# had no signal that the issue was, transitively, also stuck on a human) —
-# confirmed recurring three times on issue #1651 / PR #1659 before this fix.
-# This was never upstreamed into rjwalters/loom's own champion-pr-merge.md /
-# label-state-machine.md templates, so an unpinned resync would silently drop
-# it — the same reversion pattern as #606/#662/#1292/#1316/#1356/#1546/#1674.
-# If the upstream Loom project ever adopts an equivalent propagation, these
-# pins can be dropped and the files resynced normally. Re-verified 2026-09-27
-# (#2549) against rjwalters/loom @ d1a43413: upstream's
-# defaults/.claude/commands/loom/champion-pr-merge.md still has no `Blocked by
-# #<PR>` / `loom:operator`-to-issue propagation, so the pin stays.
-#
-# #2549 BROADENS what this pin holds, so read the pin as "this file is now
-# locally maintained", not just "it carries one extra propagation". Freezing
-# champion-pr-merge.md at its 2026-09 baseline also froze the merge-step wiring
-# for merge-pr.sh's newer exit codes, which kept moving upstream: exit 4
-# (#8508, `--redate-stale-checks` performed the #8248 freshness guard's own
-# remedy) and exit 5 (#8896, `--auto`'s bounded settle-wait expired) are
-# re-queue signals, NOT merge failures, and the pinned copy's `MERGE_RC`
-# branching only knew exit 3 — so a PR whose CI merely outran
-# LOOM_AUTO_MERGE_TIMEOUT was narrated and labelled as a failed merge. The
-# exit-4/exit-5 branches, the `Exception: exit codes 3, 4 and 5` section, and
-# the link to `.loom/docs/merge-pr-exit-code-exceptions.md` (which supersedes
-# the formerly-inline squash/merge-ancestry trap note) were hand-ported from
-# upstream in #2549. `.loom/scripts/tests/test-merge-pr-head-mismatch.sh` is
-# the oracle for all of this — it asserts the wiring against this pinned file,
-# so when merge-pr.sh grows another exit code, that suite fails and the new
-# branch must be hand-ported here too. Whoever eventually drops this pin must
-# confirm the resynced upstream file still carries the exit-code wiring as
-# well as an equivalent operator-state propagation.
-commands/loom/champion-pr-merge.md
-docs/label-state-machine.md
+# #1966 (PR 1 of the operator's two-PR "Option B, gated" plan, ruled
+# 2026-09-18): scripts/claim-staleness.sh (and its test) carry the local-only
+# frozen-timeline protection that the #668 pin above has so far kept as inline
+# prose in curator.md/judge.md/doctor.md -- relocated into the shared script
+# upstream's role files already drive, mirroring the #1546 pin's shape (an
+# isolated script pin instead of whole role-file pins). When the `check`
+# subcommand reaches a `stale`/`stale-bounded-fallback` verdict it now (a)
+# re-reads the issue/PR resource itself (labels + updated_at, a NON-timeline
+# read) and fails safe to `unknown` if that read fails or is rate-limited, and
+# (b) runs a reclaim-loop guard: a trusted reclaim comment newer than
+# CLAIMED_AT (the #668 `<!-- loom:reclaimed claim=... -->` marker or
+# upstream's marker-less "Reclaiming ... claim" prose) plus a ground-truth
+# updated_at past CLAIMED_AT means /timeline is frozen, so the verdict is
+# downgraded to `fresh` (FROZEN_TIMELINE=true) -- one reclaim per frozen
+# CLAIMED_AT instead of the 30+ that hit #509 on 2026-08-10. The test's
+# T23-T32 cases reproduce #509 and the fail-safe paths. Upstream's
+# defaults/scripts/claim-staleness.sh has no equivalent (verified 2026-10-02
+# against rjwalters/loom @ 65442ba48: no `updatedAt`/`frozen`/`RECLAIM`
+# anywhere in it), so an unpinned resync would silently revert it -- the same
+# reversion pattern as #606/#662/#1292/#1316/#1356/#1546/#1674/#1898. The #668
+# whole-file pins above stay until PR 2 of #1966 unpins them, which the
+# operator gated on THIS pin landing and being verified (done). If the upstream Loom
+# project ever adopts an equivalent frozen-timeline guard, these pins can be
+# dropped and the files resynced normally.
+scripts/claim-staleness.sh
+scripts/tests/test-claim-staleness.sh
 
 # #1674: builder-pr.md carries a local-only "Quoting a `Closes #N`-shaped
 # example inside a PR body closes an UNRELATED issue" section (added after
@@ -230,21 +184,24 @@ docs/label-state-machine.md
 # the file resynced normally.
 commands/loom/builder-pr.md
 
-# #1898: verify-proposal-refs.sh and tests/test-verify-proposal-refs.sh carry
-# a fix for a SIGPIPE race under `set -o pipefail` and a subshell-in-pipe cache
-# bug (closing #1863 via PR #1881), both issues that produced flaky false
-# "MISSING FILE" reports on paths that actually exist, especially early-sorting
-# paths like `docs/...` entries. The fix replaces a `full_tree()` helper
-# function and `full_tree | grep -qFx` pipe with a direct `FULL_TREE_CACHE`
-# assignment and here-string match (`grep -qFx "$path" <<< "$FULL_TREE_CACHE"`),
-# and restores `Fixture 5b` (8-iteration flake-detection loop) to the test suite.
-# A same-day resync commit (fcbf52f8, 2026-09-15T17:03:12Z) reverted both halves
-# of that fix back to the buggy pre-#1881 state, so this pin prevents an
-# unlimited stream of recurrences of the same reversion pattern as #606/#662/
-# #1292/#1316/#1356/#1546/#1674. This fix was never upstreamed into
-# rjwalters/loom's own templates, so an unpinned resync would keep reverting it.
-# If the upstream Loom project ever adopts an equivalent SIGPIPE race fix and
-# flake-detection test, this pin can be dropped and the files resynced normally.
+# #2128 (commit d0b770ad): verify-proposal-refs.sh and
+# tests/test-verify-proposal-refs.sh carry a local-only check of BARE
+# `name.ext:L` / `name.ext:L-M` citations (no directory). A bare basename is
+# considered only when its extension is in a known-extension set (so prose
+# and host:port strings are not read as files); it is then resolved to a
+# unique tracked path and its line range checked, reported as MISSING when no
+# tracked file has that name and AMBIGUOUS when several do. Fixtures 6-9b and
+# the bare-sibling case in the test suite assert it. Upstream checks only
+# directory-qualified paths, so an unpinned resync would silently drop the
+# check (17 local cases fail against upstream's script).
+#
+# History: this pin was added for #1898 (the SIGPIPE race / subshell cache
+# bug, #1863 / PR #1881, reverted by resync fcbf52f8). That fix IS upstream
+# now (rjwalters/loom#7736 / #7771, `full_tree_contains`), so #1898 no longer
+# needs the pin; the 2am#4345 audit (2026-10-15) re-ported both files onto
+# v0.19.1160 upstream with only the #2128 delta on top.
+# Drop this pin only when upstream resolves bare `name.ext:L` citations
+# (unique-basename resolution with MISSING/AMBIGUOUS reporting).
 scripts/verify-proposal-refs.sh
 scripts/tests/test-verify-proposal-refs.sh
 
@@ -262,35 +219,11 @@ scripts/tests/test-verify-proposal-refs.sh
 # rjwalters/loom's own pr-worktree.sh template (klayout-tools is a uv-based
 # Python project; upstream's own template has no Python-specific setup
 # step), so an unpinned resync would silently drop it -- the same reversion
-# pattern as #606/#662/#1292/#1316/#1356/#1546/#1674/#1898. If the upstream
+# pattern as #606/#662/#1292/#1316/#1356/#1546/#1674/#1898 (#1898 since
+# upstreamed). If the upstream
 # Loom project ever adopts an equivalent post-worktree-hook call from
 # pr-worktree.sh, this pin can be dropped and the file resynced normally.
 scripts/pr-worktree.sh
-
-# #2193: check-promotion-landed.sh (and its test) carry a local-only "Step 1c"
-# guard that treats a current `loom:operator-only` label exactly like the
-# `loom:building`/`loom:blocked` labels its Step 1b later-lifecycle guard
-# already recognized -- DECISION=OK (or ALREADY_ESCALATED when this script's
-# own `<!-- champion:promotion-landed-mismatch -->` marker comment shows a
-# prior run raised the escalation), never a label write. Upstream's version
-# checks `loom:operator-only` ONLY inside the tier-UNRECOVERABLE escalation
-# branch, so an issue with a stale `Champion Review: APPROVED` comment, no
-# `loom:issue`, and a recoverable tier took the DECISION=COMPLETED branch and
-# re-applied `loom:issue` + tier on top of a live human escalation. Observed
-# live on issue #1779 (2026-09-20): approved 2026-09-14, weeks of legitimate
-# loom:blocked/loom:curated dependency cycling, correctly re-escalated to
-# loom:operator-only,loom:operator-decision, then overwritten ~15 hours later
-# by Pass 0c -- bypassing a pending human ruling, caught and reverted by hand
-# before a Builder claimed it. This contradicts champion-issue-promo.md /
-# champion-pr-merge.md's own "When NOT to Promote" rule (Champion must never
-# write loom:issue onto a loom:operator-only issue). The fix was not upstreamed
-# into rjwalters/loom's own check-promotion-landed.sh template, so an unpinned
-# resync would silently revert it -- the same reversion pattern as
-# #606/#662/#1292/#1316/#1356/#1546/#1674/#1898/#2020. If the upstream Loom
-# project ever adopts an equivalent guard, these pins can be dropped and the
-# files resynced normally.
-scripts/check-promotion-landed.sh
-scripts/tests/test-check-promotion-landed.sh
 
 # #2237 (2026-09-21): sweep-lease-fence.sh's `check` subcommand (and its test
 # suite, and the pre-push call site in builder-pr.md) carry a local-only
@@ -317,7 +250,8 @@ scripts/tests/test-check-promotion-landed.sh
 #
 # The fix was not upstreamed into rjwalters/loom's own sweep-lease-fence.sh
 # template, so an unpinned resync would silently revert it -- the same
-# reversion pattern as #606/#662/#1292/#1316/#1356/#1546/#1674/#1898/#2020/
+# reversion pattern as #606/#662/#1292/#1316/#1356/#1546/#1674/#1898 (since
+# upstreamed)/#2020/
 # #2193. `roles/builder-pr.md` is pinned here too because `.loom/roles/` is
 # resynced from upstream's own `defaults/roles/` tree, NOT regenerated from
 # this repo's `.claude/commands/loom/` copy -- an unpinned `roles/` file is

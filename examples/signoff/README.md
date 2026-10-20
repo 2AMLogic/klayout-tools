@@ -191,6 +191,9 @@ resolvable sky130A install.
 uv run python3 examples/signoff/generate.py
 ```
 
+In a *consumer* repo (no checkout of this one), use the uv-first, version-pinned
+recipe in [Regenerating signoff evidence in a consumer repo](../../docs/cli/signoff.md#regenerating-signoff-evidence-in-a-consumer-repo).
+
 Byte-identical from any checkout for a fixed `klt`/KLayout build: the GDS is
 written with timestamps suppressed (a default GDS write stamps modification
 times, which would move `block.gds`'s content hash — and therefore item 3's
