@@ -3538,6 +3538,224 @@ def _endpoint_stub_widen_entries(
     return stub_widen
 
 
+def _routed_result(
+    points: list[tuple[float, float]],
+    via_drops: list[dict[str, Any]],
+    stub_widen: list[dict[str, Any]],
+    effective_route_layer: tuple[int, int] | None,
+    effective_width_um: float,
+) -> dict[str, Any]:
+    """The success result for an untracked (``channel_track == 0``) leg."""
+    return {
+        "routed": True,
+        "route_length_um": _polyline_length_um(points),
+        "points_um": points,
+        "via_drops": via_drops,
+        "stub_widen": stub_widen,
+        "route_layer": effective_route_layer,
+        "width_um": effective_width_um,
+        "channel_track": 0,
+        "reason": None,
+    }
+
+
+def _same_block_cross_layer_retry(
+    reroute: Any,
+    leg_conflict: Any,
+    points: list[tuple[float, float]],
+    via_drops: list[dict[str, Any]],
+    stub_widen: list[dict[str, Any]],
+    *,
+    a: tuple[float, float],
+    b: tuple[float, float],
+    own_bbox_um: dict[str, float],
+    same_block_self_net: bool,
+    waypoints_um: list[tuple[float, float]] | None,
+    cross_block_route_layer: tuple[int, int] | None,
+    effective_route_layer: tuple[int, int] | None,
+    effective_width_um: float,
+) -> dict[str, Any] | None:
+    """Same-block cross-layer conflict retry (issue #1393).
+
+    Returns the final result when the retry fires (a routed lane, or the
+    unroutable wording), ``None`` when it is not armed or the fixed shape has
+    no conflict. ``leg_conflict`` is an optional callable with the same
+    signature as :func:`route_bundle`'s own ``leg_conflict`` parameter
+    (``(points_um, via_drops, stub_widen, route_layer) -> str | None``).
+
+    Only armed when ``leg_conflict`` was supplied AND this leg is a
+    same-block self-net's fixed-shape attempt that resolved on
+    ``cross_block_route_layer`` -- every other leg (an inter-block net, a
+    same-block self-net that never needed the cross-layer fallback, or a
+    caller-/detour-supplied ``waypoints_um`` path) skips this entirely, so
+    :func:`route_bundle`'s own ``leg_conflict`` check (#1057/#1386) remains
+    the sole, unchanged decision-maker for every one of those cases.
+
+    When the fixed-shape path conflicts -- a *different* same-block self-net
+    that also needed the cross layer already claimed the identical lane --
+    this generalises the bounded detour search of :func:`_bounded_detour_retry`
+    but not its lane shape: :func:`_self_net_cross_layer_lane_waypoints_um`
+    proposes up to ``_MAX_SAME_BLOCK_CROSS_LAYER_LANES`` single-corner
+    waypoints that route fully *around the outside* of the block both pins
+    sit on (the collision is with another net's *drawn metal*, not a placed
+    block), each routed by ``reroute`` with the corner as its sole
+    ``waypoints_um`` entry (without threading ``leg_conflict`` further -- the
+    one-level recursion bound is enforced by the ``waypoints_um is None``
+    gate). ``leg_conflict`` is then re-checked against *that* lane's actual
+    drawn points before it is accepted. A retried lane is **not** pinned to
+    ``cross_block_route_layer``: the recursive call re-runs the whole layer
+    resolution against the lane's own drawn path, so a lane that loops clear
+    of the block naturally resolves back onto the primary ``route_layer``,
+    leaving the cross layer free for the *first* self-net that still needs
+    it. When no lane clears the conflict either, the reported ``reason`` is
+    ``leg_conflict``'s own wording plus a note that the detour was tried.
+    """
+    # `_self_net_cross_layer_lane_waypoints_um` is looked up dynamically
+    # (rather than called as this module's own same-name function, defined
+    # above) so a caller that monkeypatches `klayout_tools.gen_compose.<name>`
+    # (the test suite's own re-export, preserved from before issue #1708's
+    # split) still takes effect here, exactly as before the split.
+    from .gen_compose import _self_net_cross_layer_lane_waypoints_um
+
+    retry_eligible = (
+        leg_conflict is not None
+        and same_block_self_net
+        and waypoints_um is None
+        and cross_block_route_layer is not None
+        and effective_route_layer == cross_block_route_layer
+    )
+    conflict_reason = (
+        leg_conflict(points, via_drops, stub_widen, effective_route_layer)
+        if retry_eligible
+        else None
+    )
+    if conflict_reason is None:
+        return None
+    lanes = _self_net_cross_layer_lane_waypoints_um(
+        a, b, own_bbox_um, effective_width_um
+    )
+    for lane in lanes:
+        retry = reroute(waypoints_um=lane)
+        if not retry["routed"]:
+            continue
+        lane_conflict = leg_conflict(
+            retry["points_um"],
+            retry.get("via_drops", []),
+            retry.get("stub_widen", []),
+            retry.get("route_layer"),
+        )
+        if lane_conflict is None:
+            return retry
+    return _unroutable(
+        conflict_reason + " -- a bounded same-block cross-layer detour "
+        f"({len(lanes)} alternate lane{'' if len(lanes) == 1 else 's'} "
+        "looped clear of the block's own bbox) was tried first, and "
+        "each one still conflicted"
+    )
+
+
+def _channel_track_retry(
+    reroute: Any,
+    leg_conflict: Any,
+    points: list[tuple[float, float]],
+    via_drops: list[dict[str, Any]],
+    stub_widen: list[dict[str, Any]],
+    *,
+    pin_a: dict[str, Any],
+    pin_b: dict[str, Any],
+    va: tuple[int, int],
+    vb: tuple[int, int],
+    waypoints_um: list[tuple[float, float]] | None,
+    channel_offset_um: float,
+    cross_block_route_layer: tuple[int, int] | None,
+    effective_route_layer: tuple[int, int] | None,
+    effective_width_um: float,
+) -> dict[str, Any] | None:
+    """Channel track retry (issue #1467): the final result, or ``None``.
+
+    Only armed for the untracked (``channel_offset_um == 0.0``) top-level
+    attempt at an inter-block leg whose fixed shape is the shared-channel
+    horizontal jog -- both ports facing the identical vertical direction --
+    with no caller-supplied ``waypoints_um`` and a ``leg_conflict`` supplied.
+    Every other leg (a vertical-jog/column channel, a mixed-orientation
+    corner, a same-block self-net -- #1393's own case, see
+    :func:`_same_block_cross_layer_retry` -- or a caller-/detour-supplied
+    path) returns ``None``, as does a fixed shape with no conflict.
+
+    The fixed one-jog shape lands every net sharing one channel on the exact
+    same mid coordinate, so the *first* net processed wins the channel and
+    every other net contending for it is rejected. This retries the
+    *identical* pin pair on successive channel tracks -- the horizontal jog
+    shifted ``_CHANNEL_TRACK_PITCH_WIDTHS * width_um`` farther from the row
+    per track, away from the ports' facing direction -- via ``reroute`` with
+    ``channel_offset_um`` set accordingly, up to ``_MAX_CHANNEL_TRACKS``
+    tracks. Each candidate track is routed through *every* check again and
+    then re-checked against ``leg_conflict``; the first track that clears
+    both is accepted and reports its ``channel_track``. This is the online
+    equivalent of the classic left-edge interval-packing channel-router
+    algorithm: first-fit, decided lazily on rejection.
+
+    When every track still conflicts and a ``cross_block_route_layer`` is
+    configured and not yet used, exhaustion instead reports the untracked
+    fixed shape as routed on the primary layer (issue #1680) so
+    :func:`route_bundle`'s own ``leg_conflict`` check and its
+    ``_retry_leg_on_cross_layer`` fallback get the chance to resolve it on the
+    cross layer -- returning a terminal unroutable result here would make that
+    bundle-level retry unreachable, since it only ever fires once
+    ``route_two_pin`` has already reported a leg as routed. Otherwise the leg
+    is reported unroutable with ``leg_conflict``'s own wording plus a note
+    naming how many tracks were tried.
+    """
+    channel_track_eligible = (
+        leg_conflict is not None
+        and waypoints_um is None
+        and channel_offset_um == 0.0
+        and pin_a["block"] != pin_b["block"]
+        and va[1] != 0
+        and vb[1] != 0
+        and va[1] == vb[1]
+    )
+    channel_track_reason = (
+        leg_conflict(points, via_drops, stub_widen, effective_route_layer)
+        if channel_track_eligible
+        else None
+    )
+    if channel_track_reason is None:
+        return None
+    pitch_um = _CHANNEL_TRACK_PITCH_WIDTHS * effective_width_um
+    direction_sign = 1 if va[1] > 0 else -1
+    for track_index in range(1, _MAX_CHANNEL_TRACKS + 1):
+        retry = reroute(
+            leg_conflict=leg_conflict,
+            channel_offset_um=direction_sign * pitch_um * track_index,
+        )
+        if not retry["routed"]:
+            continue
+        track_conflict = leg_conflict(
+            retry["points_um"],
+            retry.get("via_drops", []),
+            retry.get("stub_widen", []),
+            retry.get("route_layer"),
+        )
+        if track_conflict is None:
+            retry["channel_track"] = track_index
+            return retry
+    if (
+        cross_block_route_layer is not None
+        and effective_route_layer != cross_block_route_layer
+    ):
+        return _routed_result(
+            points, via_drops, stub_widen, effective_route_layer, effective_width_um
+        )
+    return _unroutable(
+        channel_track_reason
+        + f" -- {_MAX_CHANNEL_TRACKS} alternate channel tracks (this "
+        "leg's shared-channel horizontal jog shifted farther from "
+        "the row, one route width's worth of clearance per track) "
+        "were tried first, and each one still conflicted"
+    )
+
+
 def route_two_pin(
     pin_a: dict[str, Any],
     pin_b: dict[str, Any],
@@ -3995,16 +4213,10 @@ def route_two_pin(
     which width to draw each leg's geometry at.
     """
     # `_endpoint_stub_widen_um`/`_self_net_cross_layer_lane_waypoints_um` are
-    # looked up dynamically (rather than called as this module's own
-    # same-name functions, defined above) so a caller that monkeypatches
-    # `klayout_tools.gen_compose.<name>` (the test suite's own re-export,
-    # preserved from before issue #1708's split) still takes effect here,
-    # exactly as before the split.
-    from .gen_compose import (
-        _DIRECTION_VECTORS,
-        _endpoint_stub_widen_um,
-        _self_net_cross_layer_lane_waypoints_um,
-    )
+    # looked up dynamically inside `_endpoint_stub_widen_entries`/
+    # `_same_block_cross_layer_retry` (see their comments) so a monkeypatch of
+    # `klayout_tools.gen_compose.<name>` still takes effect.
+    from .gen_compose import _DIRECTION_VECTORS
 
     block_a = blocks[pin_a["block"]]
     block_b = blocks[pin_b["block"]]
@@ -4189,7 +4401,9 @@ def route_two_pin(
     # measured against each block's allowance (_own_pin_allowances_um),
     # exempting blocks it cannot short to (_exempt_obstacle_block_ids).
     obstacle_half_um = effective_width_um / 2.0
-    obstacle_bboxes_um = _inflated_obstacle_bboxes_um(placed_bboxes_um, obstacle_half_um)
+    obstacle_bboxes_um = _inflated_obstacle_bboxes_um(
+        placed_bboxes_um, obstacle_half_um
+    )
     navigable_regions_by_block_um = _navigable_regions_by_block_um(
         obstacle_bboxes_um, blocks, offsets_um
     )
@@ -4331,170 +4545,48 @@ def route_two_pin(
         effective_route_layer,
     )
 
-    # Same-block cross-layer conflict retry (#1393, see docstring): only
-    # armed when leg_conflict was supplied AND this leg is a same-block
-    # self-net's fixed-shape attempt that resolved on cross_block_route_layer
-    # -- every other leg (an inter-block net, a same-block self-net that
-    # never needed the cross-layer fallback, or a caller-/detour-supplied
-    # waypoints_um path) skips this block entirely and returns below exactly
-    # as before this issue, so route_bundle's own leg_conflict check (#1057/
-    # #1386) remains the sole, unchanged decision-maker for every one of
-    # those cases.
-    retry_eligible = (
-        leg_conflict is not None
-        and same_block_self_net
-        and waypoints_um is None
-        and cross_block_route_layer is not None
-        and effective_route_layer == cross_block_route_layer
+    # Same-block cross-layer conflict retry (#1393) and channel track retry
+    # (#1467): see _same_block_cross_layer_retry / _channel_track_retry.
+    cross_layer_retry = _same_block_cross_layer_retry(
+        reroute,
+        leg_conflict,
+        points,
+        via_drops,
+        stub_widen,
+        a=a,
+        b=b,
+        own_bbox_um=placed_bboxes_um[own_a],
+        same_block_self_net=same_block_self_net,
+        waypoints_um=waypoints_um,
+        cross_block_route_layer=cross_block_route_layer,
+        effective_route_layer=effective_route_layer,
+        effective_width_um=effective_width_um,
     )
-    conflict_reason = (
-        leg_conflict(points, via_drops, stub_widen, effective_route_layer)
-        if retry_eligible
-        else None
-    )
-    if conflict_reason is not None:
-        lanes = _self_net_cross_layer_lane_waypoints_um(
-            a, b, placed_bboxes_um[own_a], effective_width_um
-        )
-        for lane in lanes:
-            retry = route_two_pin(
-                pin_a,
-                pin_b,
-                blocks,
-                offsets_um,
-                placed_bboxes_um,
-                width_um,
-                route_layer,
-                extraction_deck,
-                block_geometry,
-                waypoints_um=lane,
-                cross_block_route_layer=cross_block_route_layer,
-                cross_block_geometry=cross_block_geometry,
-                cross_block_width_um=cross_block_width_um,
-                block_geometry_for=block_geometry_for,
-                cross_block_geometry_for=cross_block_geometry_for,
-                grid_um=grid_um,
-            )
-            if not retry["routed"]:
-                continue
-            lane_conflict = leg_conflict(
-                retry["points_um"],
-                retry.get("via_drops", []),
-                retry.get("stub_widen", []),
-                retry.get("route_layer"),
-            )
-            if lane_conflict is None:
-                return retry
-        return _unroutable(
-            conflict_reason + " -- a bounded same-block cross-layer detour "
-            f"({len(lanes)} alternate lane{'' if len(lanes) == 1 else 's'} "
-            "looped clear of the block's own bbox) was tried first, and "
-            "each one still conflicted"
-        )
+    if cross_layer_retry is not None:
+        return cross_layer_retry
 
-    # Channel track retry (#1467, see docstring): only armed for the
-    # untracked (channel_offset_um == 0.0) top-level attempt at an
-    # inter-block leg whose fixed shape is the shared-channel horizontal jog
-    # -- both ports facing the identical vertical direction -- with no
-    # caller-supplied waypoints_um. Every other leg (a vertical-jog/column
-    # channel, a mixed-orientation corner, a same-block self-net -- #1393's
-    # own case -- or a caller-/detour-supplied path) skips this block
-    # entirely, exactly as before this issue.
-    channel_track_eligible = (
-        leg_conflict is not None
-        and waypoints_um is None
-        and channel_offset_um == 0.0
-        and pin_a["block"] != pin_b["block"]
-        and va[1] != 0
-        and vb[1] != 0
-        and va[1] == vb[1]
+    track_retry = _channel_track_retry(
+        reroute,
+        leg_conflict,
+        points,
+        via_drops,
+        stub_widen,
+        pin_a=pin_a,
+        pin_b=pin_b,
+        va=va,
+        vb=vb,
+        waypoints_um=waypoints_um,
+        channel_offset_um=channel_offset_um,
+        cross_block_route_layer=cross_block_route_layer,
+        effective_route_layer=effective_route_layer,
+        effective_width_um=effective_width_um,
     )
-    channel_track_reason = (
-        leg_conflict(points, via_drops, stub_widen, effective_route_layer)
-        if channel_track_eligible
-        else None
-    )
-    if channel_track_reason is not None:
-        pitch_um = _CHANNEL_TRACK_PITCH_WIDTHS * effective_width_um
-        direction_sign = 1 if va[1] > 0 else -1
-        for track_index in range(1, _MAX_CHANNEL_TRACKS + 1):
-            retry = route_two_pin(
-                pin_a,
-                pin_b,
-                blocks,
-                offsets_um,
-                placed_bboxes_um,
-                width_um,
-                route_layer,
-                extraction_deck,
-                block_geometry,
-                cross_block_route_layer=cross_block_route_layer,
-                cross_block_geometry=cross_block_geometry,
-                cross_block_width_um=cross_block_width_um,
-                leg_conflict=leg_conflict,
-                block_geometry_for=block_geometry_for,
-                cross_block_geometry_for=cross_block_geometry_for,
-                channel_offset_um=direction_sign * pitch_um * track_index,
-                grid_um=grid_um,
-            )
-            if not retry["routed"]:
-                continue
-            track_conflict = leg_conflict(
-                retry["points_um"],
-                retry.get("via_drops", []),
-                retry.get("stub_widen", []),
-                retry.get("route_layer"),
-            )
-            if track_conflict is None:
-                retry["channel_track"] = track_index
-                return retry
-        if (
-            cross_block_route_layer is not None
-            and effective_route_layer != cross_block_route_layer
-        ):
-            # Every channel track is exhausted, but a caller-configured
-            # `cross_block_route_layer` may still resolve this leg on a
-            # different physical layer with no route-vs-route collision at
-            # all (issue #1680) -- exactly what would already happen for a
-            # non-`channel_track_eligible` leg (see the untracked "routed:
-            # True" fallthrough below). Report the untracked fixed shape as
-            # routed here too, so `route_bundle()`'s own `leg_conflict`
-            # check runs against it and its `_retry_leg_on_cross_layer`
-            # fallback gets the chance it would otherwise never see --
-            # returning a terminal "routed": False from *inside*
-            # route_two_pin (as below) would make that bundle-level retry
-            # unreachable, since it only ever fires when `result["routed"]`
-            # is already True.
-            return {
-                "routed": True,
-                "route_length_um": _polyline_length_um(points),
-                "points_um": points,
-                "via_drops": via_drops,
-                "stub_widen": stub_widen,
-                "route_layer": effective_route_layer,
-                "width_um": effective_width_um,
-                "channel_track": 0,
-                "reason": None,
-            }
-        return _unroutable(
-            channel_track_reason
-            + f" -- {_MAX_CHANNEL_TRACKS} alternate channel tracks (this "
-            "leg's shared-channel horizontal jog shifted farther from "
-            "the row, one route width's worth of clearance per track) "
-            "were tried first, and each one still conflicted"
-        )
+    if track_retry is not None:
+        return track_retry
 
-    return {
-        "routed": True,
-        "route_length_um": _polyline_length_um(points),
-        "points_um": points,
-        "via_drops": via_drops,
-        "stub_widen": stub_widen,
-        "route_layer": effective_route_layer,
-        "width_um": effective_width_um,
-        "channel_track": 0,
-        "reason": None,
-    }
+    return _routed_result(
+        points, via_drops, stub_widen, effective_route_layer, effective_width_um
+    )
 
 
 def _pin_ref(pin: dict[str, Any]) -> str:
