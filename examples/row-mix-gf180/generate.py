@@ -290,6 +290,211 @@ def validate(
     return chains
 
 
+class _Ctx:
+    """Resolved geometry context shared by the ``build_cell`` drawing steps."""
+
+    def __init__(
+        self,
+        w: _Writer,
+        chains: dict[str, Chain],
+        by_name: dict[str, Device],
+        pitch_um: float,
+        port_x: dict[str, float],
+        label_nets: set[str] | None,
+        strap_vss: bool,
+    ) -> None:
+        self.w, self.chains, self.by_name = w, chains, by_name
+        self.pitch_um, self.port_x = pitch_um, port_x
+        self.label_nets, self.strap_vss = label_nets, strap_vss
+        self.n_nodes = max(len(c.nodes) for c in chains.values())
+        self.content = (self.n_nodes - 1) * NODE_PITCH + 2 * HALF_NODE
+        self.x0 = round((pitch_um - self.content) / 2 / 0.005) * 0.005 + HALF_NODE
+        self.rows = {"n": Y_N, "p": Y_P}
+        self.yc = {r: (y[0] + y[1]) / 2 for r, y in self.rows.items()}
+
+    def node_x(self, k: int) -> float:
+        return round(self.x0 + k * NODE_PITCH, 3)
+
+    def gate_x(self, k: int) -> float:
+        return round(self.x0 + (k + 0.5) * NODE_PITCH, 3)
+
+
+def _draw_wells_and_rails(c: _Ctx) -> None:
+    """Well, implants, tie strips and supply rails."""
+    w, pitch_um = c.w, c.pitch_um
+    w.box(NWELL, 0, Y_P[0] - 0.45, pitch_um, Y_TIE_VDD[1] + 0.20)
+    w.box(NPLUS, 0, Y_N[0] - IMPLANT_MARGIN, pitch_um, Y_N[1] + IMPLANT_MARGIN)
+    w.box(PPLUS, 0, Y_P[0] - IMPLANT_MARGIN, pitch_um, Y_P[1] + IMPLANT_MARGIN)
+    w.box(
+        PPLUS,
+        0,
+        Y_RAIL_VSS[0] - IMPLANT_MARGIN,
+        pitch_um,
+        Y_RAIL_VSS[1] + IMPLANT_MARGIN,
+    )
+    w.box(
+        NPLUS, 0, Y_TIE_VDD[0] - IMPLANT_MARGIN, pitch_um, Y_TIE_VDD[1] + IMPLANT_MARGIN
+    )
+    tie_x0, tie_x1 = c.x0 - HALF_NODE, round(c.x0 + c.content - HALF_NODE, 3)
+    for ys in (Y_RAIL_VSS, Y_TIE_VDD):
+        w.box(COMP, tie_x0, ys[0], tie_x1, ys[1])
+        w.box(M1, 0, ys[0], pitch_um, ys[1])
+    for k in range(c.n_nodes):
+        for ys in (Y_RAIL_VSS, Y_TIE_VDD):
+            w.centered(
+                CONTACT, c.node_x(k), (ys[0] + ys[1]) / 2, CONTACT_SZ, CONTACT_SZ
+            )
+
+
+def _draw_diffusion(c: _Ctx) -> dict[str, dict[int, str]]:
+    """Diffusion islands; returns the gate net at each (row, gap)."""
+    row_gates: dict[str, dict[int, str]] = {"n": {}, "p": {}}
+    for row, chain in c.chains.items():
+        y0, y1 = c.rows[row]
+        island_start = 0
+        for gap, (kind, dev_name) in enumerate(chain.links + [("end", "")]):
+            if kind in ("break", "end"):
+                c.w.box(
+                    COMP,
+                    c.node_x(island_start) - HALF_NODE,
+                    y0,
+                    c.node_x(gap) + HALF_NODE,
+                    y1,
+                )
+                island_start = gap + 1
+            else:
+                row_gates[row][gap] = c.by_name[dev_name].gate
+    return row_gates
+
+
+def _gate_pads(
+    c: _Ctx, gap: int, gn: str | None, gp: str | None
+) -> list[tuple[str, float, float | None]]:
+    """Draw the poly for one gate gap; return its (net, x, pad-y) pads."""
+    gx = c.gate_x(gap)
+    if gn is not None and gn == gp:
+        ylo, yhi = Y_N[0] - POLY_ENDCAP, Y_P[1] + POLY_ENDCAP
+        if gn in GATE_TRACKS:
+            ty = GATE_TRACKS[gn]
+            ylo, yhi = min(ylo, ty - POLY_PAD / 2), max(yhi, ty + POLY_PAD / 2)
+        c.w.box(POLY, gx - GATE_L / 2, ylo, gx + GATE_L / 2, yhi)
+        return [(gn, gx, GATE_TRACKS.get(gn))]
+    pads: list[tuple[str, float, float | None]] = []
+    for row, g in (("n", gn), ("p", gp)):
+        if g is None:
+            continue
+        y0, y1 = c.rows[row]
+        ylo, yhi = y0 - POLY_ENDCAP, y1 + POLY_ENDCAP
+        ty = GATE_TRACKS.get(g)
+        if g in SUPPLY:  # dummy gate tied to its own rail
+            ty = Y_DUMMY_N_PAD if row == "n" else Y_DUMMY_P_PAD
+        if ty is not None:
+            ylo, yhi = min(ylo, ty - POLY_PAD / 2), max(yhi, ty + POLY_PAD / 2)
+        c.w.box(POLY, gx - GATE_L / 2, ylo, gx + GATE_L / 2, yhi)
+        pads.append((g, gx, ty))
+    return pads
+
+
+def _draw_gates(c: _Ctx, row_gates: dict[str, dict[int, str]]) -> None:
+    """Poly per gate gap, with contact pads and M1 gate routing."""
+    for gap in sorted(set(row_gates["n"]) | set(row_gates["p"])):
+        gn, gp = row_gates["n"].get(gap), row_gates["p"].get(gap)
+        for g, px, ty in _gate_pads(c, gap, gn, gp):
+            if ty is None:
+                continue
+            c.w.centered(POLY, px, ty, POLY_PAD, POLY_PAD)
+            c.w.centered(CONTACT, px, ty, CONTACT_SZ, CONTACT_SZ)
+            c.w.centered(M1, px, ty, CONTACT_PAD_M1, CONTACT_PAD_M1)
+            _route_gate(c.w, g, px, ty, c.port_x, c.pitch_um, c.label_nets)
+
+
+def _draw_supply_node(c: _Ctx, net: str, k: int, x: float, y: float) -> None:
+    rail = Y_RAIL_VSS if net == "VSS" else Y_TIE_VDD
+    if net == "VSS" and not c.strap_vss and k == 0:
+        return
+    c.w.box(
+        M1,
+        x - CONTACT_PAD_M1 / 2,
+        min(rail[0], y),
+        x + CONTACT_PAD_M1 / 2,
+        max(rail[1], y),
+    )
+
+
+def _draw_signal_node(
+    c: _Ctx, net: str, row: str, x: float, y: float, trunk_nodes: dict[str, list[float]]
+) -> None:
+    w = c.w
+    route = NET_ROUTES[net]
+    w.centered(VIA1, x, y, VIA_SZ, VIA_SZ)
+    if route == "vertical":
+        other = "p" if row == "n" else "n"
+        if row == "n":
+            w.box(M2, x - M2_W / 2, y - 0.14, x + M2_W / 2, c.yc[other] + 0.14)
+        return
+    lo, hi = sorted((y, route))
+    w.box(
+        M2,
+        x - M2_W / 2,
+        lo - 0.14 if lo == y else lo - M2_W / 2,
+        x + M2_W / 2,
+        hi + 0.14 if hi == y else hi + M2_W / 2,
+    )
+    trunk_nodes.setdefault(net, []).append(x)
+
+
+def _draw_nodes(c: _Ctx) -> dict[str, list[float]]:
+    """Diffusion node contacts and per-node routing; returns M2 trunk anchors."""
+    occurrences: dict[str, int] = {}
+    for chain in c.chains.values():
+        for net in chain.nodes:
+            occurrences[net] = occurrences.get(net, 0) + 1
+    ports_all = {"A", "B", "C", "S", "SB", "Y", *SUPPLY}
+    trunk_nodes: dict[str, list[float]] = {}
+    for row, chain in c.chains.items():
+        for k, net in enumerate(chain.nodes):
+            if occurrences[net] == 1 and net not in ports_all:
+                continue  # internal series node: shared diffusion only
+            x, y = c.node_x(k), c.yc[row]
+            c.w.centered(CONTACT, x, y, CONTACT_SZ, CONTACT_SZ)
+            c.w.centered(M1, x, y, CONTACT_PAD_M1, CONTACT_PAD_M1)
+            if net in SUPPLY:
+                _draw_supply_node(c, net, k, x, y)
+            else:
+                _draw_signal_node(c, net, row, x, y, trunk_nodes)
+    return trunk_nodes
+
+
+def _draw_trunks(c: _Ctx, trunk_nodes: dict[str, list[float]]) -> None:
+    """M2 trunks joining a net's nodes, plus the gate-link vias."""
+    w = c.w
+    for net, xs in trunk_nodes.items():
+        ty = NET_ROUTES[net]
+        link_x = GATE_LINKS.get(net)
+        if link_x is not None:
+            xs = xs + [link_x]
+        w.box(M2, min(xs) - M2_W / 2, ty - M2_W / 2, max(xs) + M2_W / 2, ty + M2_W / 2)
+        if link_x is not None:
+            w.centered(VIA1, link_x, ty, VIA_SZ, VIA_SZ)
+            w.centered(M1, link_x, ty, CONTACT_PAD_M1, CONTACT_PAD_M1)
+    for net, link_x in GATE_LINKS.items():
+        if net not in NET_ROUTES or not isinstance(NET_ROUTES[net], float):
+            # n2: bar lands on the vertical, via on the existing M2 vertical
+            ty = GATE_TRACKS[net]
+            w.centered(VIA1, link_x, ty, VIA_SZ, VIA_SZ)
+            w.centered(M1, link_x, ty, CONTACT_PAD_M1, CONTACT_PAD_M1)
+
+
+def _draw_labels(c: _Ctx) -> None:
+    wanted = c.label_nets
+    if wanted is None or "VSS" in wanted:
+        c.w.label(M1_LABEL, "VSS", 0.30, sum(Y_RAIL_VSS) / 2)
+    if wanted is None or "VDD" in wanted:
+        c.w.label(M1_LABEL, "VDD", 0.30, sum(Y_TIE_VDD) / 2)
+    if wanted is None or "Y" in wanted:
+        c.w.label(M2_LABEL, "Y", c.node_x(8), Y_PIN_Y)
+
+
 def build_cell(
     layout: kdb.Layout,
     name: str = "row_mix_gf180",
@@ -308,169 +513,13 @@ def build_cell(
     by_name = {d.name: d for d in devices}
 
     cell = layout.create_cell(name)
-    w = _Writer(layout, cell)
-
-    content = (
-        max(len(c.nodes) for c in chains.values()) - 1
-    ) * NODE_PITCH + 2 * HALF_NODE
-    x0 = round((pitch_um - content) / 2 / 0.005) * 0.005 + HALF_NODE
-
-    def node_x(k: int) -> float:
-        return round(x0 + k * NODE_PITCH, 3)
-
-    def gate_x(k: int) -> float:
-        return round(x0 + (k + 0.5) * NODE_PITCH, 3)
-
-    rows = {"n": Y_N, "p": Y_P}
-    yc = {r: (y[0] + y[1]) / 2 for r, y in rows.items()}
-
-    # --- well, implants, tie strips, rails ---------------------------------
-    w.box(NWELL, 0, Y_P[0] - 0.45, pitch_um, Y_TIE_VDD[1] + 0.20)
-    w.box(NPLUS, 0, Y_N[0] - IMPLANT_MARGIN, pitch_um, Y_N[1] + IMPLANT_MARGIN)
-    w.box(PPLUS, 0, Y_P[0] - IMPLANT_MARGIN, pitch_um, Y_P[1] + IMPLANT_MARGIN)
-    w.box(
-        PPLUS,
-        0,
-        Y_RAIL_VSS[0] - IMPLANT_MARGIN,
-        pitch_um,
-        Y_RAIL_VSS[1] + IMPLANT_MARGIN,
+    c = _Ctx(
+        _Writer(layout, cell), chains, by_name, pitch_um, port_x, label_nets, strap_vss
     )
-    w.box(
-        NPLUS, 0, Y_TIE_VDD[0] - IMPLANT_MARGIN, pitch_um, Y_TIE_VDD[1] + IMPLANT_MARGIN
-    )
-    tie_x0, tie_x1 = x0 - HALF_NODE, round(x0 + content - HALF_NODE, 3)
-    for ys in (Y_RAIL_VSS, Y_TIE_VDD):
-        w.box(COMP, tie_x0, ys[0], tie_x1, ys[1])
-        w.box(M1, 0, ys[0], pitch_um, ys[1])
-    n_nodes = max(len(c.nodes) for c in chains.values())
-    for k in range(n_nodes):
-        for ys in (Y_RAIL_VSS, Y_TIE_VDD):
-            w.centered(CONTACT, node_x(k), (ys[0] + ys[1]) / 2, CONTACT_SZ, CONTACT_SZ)
-
-    # --- diffusion islands, gates ------------------------------------------
-    gate_pad_done: set[tuple[str, int]] = set()
-    row_gates: dict[str, dict[int, str]] = {"n": {}, "p": {}}
-    for row, chain in chains.items():
-        y0, y1 = rows[row]
-        k = 0
-        island_start = 0
-        for gap, (kind, dev_name) in enumerate(chain.links + [("end", "")]):
-            if kind in ("break", "end"):
-                w.box(
-                    COMP,
-                    node_x(island_start) - HALF_NODE,
-                    y0,
-                    node_x(gap) + HALF_NODE,
-                    y1,
-                )
-                island_start = gap + 1
-            else:
-                row_gates[row][gap] = by_name[dev_name].gate
-        del k
-
-    # poly per gate gap
-    for gap in sorted(set(row_gates["n"]) | set(row_gates["p"])):
-        gn, gp = row_gates["n"].get(gap), row_gates["p"].get(gap)
-        gx = gate_x(gap)
-        if gn is not None and gn == gp:
-            ylo, yhi = Y_N[0] - POLY_ENDCAP, Y_P[1] + POLY_ENDCAP
-            for g in (gn,):
-                if g in GATE_TRACKS:
-                    ty = GATE_TRACKS[g]
-                    ylo, yhi = min(ylo, ty - POLY_PAD / 2), max(yhi, ty + POLY_PAD / 2)
-            w.box(POLY, gx - GATE_L / 2, ylo, gx + GATE_L / 2, yhi)
-            pads = [(gn, gx, GATE_TRACKS.get(gn))]
-        else:
-            pads = []
-            for row, g in (("n", gn), ("p", gp)):
-                if g is None:
-                    continue
-                y0, y1 = rows[row]
-                ylo, yhi = y0 - POLY_ENDCAP, y1 + POLY_ENDCAP
-                ty = GATE_TRACKS.get(g)
-                if g in SUPPLY:  # dummy gate tied to its own rail
-                    ty = Y_DUMMY_N_PAD if row == "n" else Y_DUMMY_P_PAD
-                if ty is not None:
-                    ylo, yhi = min(ylo, ty - POLY_PAD / 2), max(yhi, ty + POLY_PAD / 2)
-                w.box(POLY, gx - GATE_L / 2, ylo, gx + GATE_L / 2, yhi)
-                pads.append((g, gx, ty))
-        for g, px, ty in pads:
-            if ty is None:
-                continue
-            w.centered(POLY, px, ty, POLY_PAD, POLY_PAD)
-            w.centered(CONTACT, px, ty, CONTACT_SZ, CONTACT_SZ)
-            w.centered(M1, px, ty, CONTACT_PAD_M1, CONTACT_PAD_M1)
-            gate_pad_done.add((g, gap))
-            _route_gate(w, g, px, ty, port_x, pitch_um, label_nets)
-
-    # --- diffusion node contacts and routing -------------------------------
-    occurrences: dict[str, int] = {}
-    for chain in chains.values():
-        for net in chain.nodes:
-            occurrences[net] = occurrences.get(net, 0) + 1
-    ports_all = {"A", "B", "C", "S", "SB", "Y", *SUPPLY}
-    trunk_nodes: dict[str, list[float]] = {}
-    for row, chain in chains.items():
-        for k, net in enumerate(chain.nodes):
-            if occurrences[net] == 1 and net not in ports_all:
-                continue  # internal series node: shared diffusion only
-            x, y = node_x(k), yc[row]
-            w.centered(CONTACT, x, y, CONTACT_SZ, CONTACT_SZ)
-            w.centered(M1, x, y, CONTACT_PAD_M1, CONTACT_PAD_M1)
-            if net in SUPPLY:
-                rail = Y_RAIL_VSS if net == "VSS" else Y_TIE_VDD
-                if net == "VSS" and not strap_vss and k == 0:
-                    continue
-                w.box(
-                    M1,
-                    x - CONTACT_PAD_M1 / 2,
-                    min(rail[0], y),
-                    x + CONTACT_PAD_M1 / 2,
-                    max(rail[1], y),
-                )
-                continue
-            route = NET_ROUTES[net]
-            w.centered(VIA1, x, y, VIA_SZ, VIA_SZ)
-            if route == "vertical":
-                other = "p" if row == "n" else "n"
-                if row == "n":
-                    w.box(M2, x - M2_W / 2, y - 0.14, x + M2_W / 2, yc[other] + 0.14)
-            else:
-                lo, hi = sorted((y, route))
-                w.box(
-                    M2,
-                    x - M2_W / 2,
-                    lo - 0.14 if lo == y else lo - M2_W / 2,
-                    x + M2_W / 2,
-                    hi + 0.14 if hi == y else hi + M2_W / 2,
-                )
-                trunk_nodes.setdefault(net, []).append(x)
-    for net, xs in trunk_nodes.items():
-        ty = NET_ROUTES[net]
-        link_x = GATE_LINKS.get(net)
-        if link_x is not None:
-            xs = xs + [link_x]
-        w.box(M2, min(xs) - M2_W / 2, ty - M2_W / 2, max(xs) + M2_W / 2, ty + M2_W / 2)
-        if link_x is not None:
-            w.centered(VIA1, link_x, ty, VIA_SZ, VIA_SZ)
-            w.centered(M1, link_x, ty, CONTACT_PAD_M1, CONTACT_PAD_M1)
-    for net, link_x in GATE_LINKS.items():
-        if net not in NET_ROUTES or not isinstance(NET_ROUTES[net], float):
-            # n2: bar lands on the vertical, via on the existing M2 vertical
-            ty = GATE_TRACKS[net]
-            w.centered(VIA1, link_x, ty, VIA_SZ, VIA_SZ)
-            w.centered(M1, link_x, ty, CONTACT_PAD_M1, CONTACT_PAD_M1)
-
-    # --- labels -------------------------------------------------------------
-    def want(net: str) -> bool:
-        return label_nets is None or net in label_nets
-
-    if want("VSS"):
-        w.label(M1_LABEL, "VSS", 0.30, sum(Y_RAIL_VSS) / 2)
-    if want("VDD"):
-        w.label(M1_LABEL, "VDD", 0.30, sum(Y_TIE_VDD) / 2)
-    if want("Y"):
-        w.label(M2_LABEL, "Y", node_x(8), Y_PIN_Y)
+    _draw_wells_and_rails(c)
+    _draw_gates(c, _draw_diffusion(c))
+    _draw_trunks(c, _draw_nodes(c))
+    _draw_labels(c)
     return cell
 
 
