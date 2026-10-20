@@ -1082,3 +1082,16 @@ def test_unevaluated_expr_in_collected_netlist_fails_on_batch(
     assert main(_argv(repo, output, "--backend", "batch")) == 1
     assert _error(capsys)["code"] == "unevaluated_expr"
     assert not output.exists()
+
+
+def test_unresolved_symbol_in_collected_netlist_fails_on_batch(
+    repo, fake, no_local_xschem, tmp_path, capsys
+):
+    """Parity with the local backend (issue #3964): same stable `error.code`."""
+    fake.statuses = [_status("done")]
+    fake.outputs = _runner_outputs("* n\n*  E1 -  no_such  IS MISSING !!!!\n.end\n")
+    output = tmp_path / "out.spice"
+
+    assert main(_argv(repo, output, "--backend", "batch")) == 1
+    assert _error(capsys)["code"] == "unresolved_symbol"
+    assert not output.exists()

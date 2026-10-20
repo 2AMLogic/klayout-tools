@@ -584,11 +584,15 @@ VERSION_PROBE_TIMEOUT_S = 10.0
 #: ``error.code`` of the content gate (:func:`_check_no_unevaluated_expr`).
 UNEVALUATED_EXPR_CODE = "unevaluated_expr"
 
+#: ``error.code`` of the content gate (:func:`_check_no_unresolved_symbol`).
+UNRESOLVED_SYMBOL_CODE = "unresolved_symbol"
+
 #: Oldest xschem reported (issue #3482; not verified against xschem's release
 #: notes) to evaluate a symbol's ``expr()`` attributes while netlisting.
 MIN_EXPR_XSCHEM_VERSION = "3.4.5"
 
 _UNEVALUATED_EXPR_RE = re.compile(rb"\bexpr\s*\(")
+_UNRESOLVED_SYMBOL_RE = re.compile(rb"\bIS MISSING\b")
 _XSCHEM_VERSION_RE = re.compile(r"\d+\.\d+\.\d+")
 
 
@@ -628,6 +632,27 @@ def _check_no_unevaluated_expr(data: bytes, version: str | None) -> None:
             "evaluate expr() (unverified). ngspice cannot load this netlist, "
             "so none was written; use a newer xschem.",
             code=UNEVALUATED_EXPR_CODE,
+        )
+
+
+def _check_no_unresolved_symbol(data: bytes) -> None:
+    """Fail when xschem could not resolve a symbol (issue #3964).
+
+    xschem still writes a "fresh" ``.spice`` for an instance whose symbol does
+    not exist, marking it only with a comment line such as
+    ``*  E1 -  no_such_device  IS MISSING !!!!``. Unlike the expr gate this one
+    must match comment lines: the marker lives in one.
+    """
+    for number, line in enumerate(data.split(b"\n"), start=1):
+        if not _UNRESOLVED_SYMBOL_RE.search(line):
+            continue
+        snippet = line.decode("utf-8", errors="replace").strip()
+        raise NetlistError(
+            f"the netlist has an unresolved symbol at line {number}: "
+            f"{snippet!r}. xschem could not find a symbol an instance refers "
+            "to, so the device is missing from the netlist and none was "
+            "written; fix the symbol path or library.",
+            code=UNRESOLVED_SYMBOL_CODE,
         )
 
 
@@ -910,6 +935,7 @@ def run_netlist(
 
         version = _probe_xschem_version(xschem_binary)
         _check_no_unevaluated_expr(fresh_data, version)
+        _check_no_unresolved_symbol(fresh_data)
 
         payload: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
