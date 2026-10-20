@@ -9142,7 +9142,10 @@ def test_request_document_format_flag_is_not_an_input_flag(tmp_path, capsys):
         ('{"file": 3}', "must be a string"),
         ('{"file": "x.gds", "timeout_s": "soon"}', "must be a number"),
         ('{"file": "x.gds", "deck_vars": ["FEOL=true"]}', "must be a JSON object"),
-        ('{"file": "x.gds", "engine": "nope"}', "must be 'curated', 'klayout' or 'both'"),
+        (
+            '{"file": "x.gds", "engine": "nope"}',
+            "must be 'curated', 'klayout' or 'both'",
+        ),
         ('{"file": "x.gds", "deck_vars": {"A=B": "1"}}', "cannot represent one"),
         ('{"file": "x.gds",', "neither an existing file"),
         ('{"not": "an object"', "neither an existing file"),
