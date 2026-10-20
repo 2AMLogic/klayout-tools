@@ -5138,6 +5138,20 @@ def _temperature_param_name(corners_spec: dict[str, Any]) -> str | None:
     return name
 
 
+def _bind_temperature_param(
+    param_row: dict[str, int | float],
+    temperature_param: str | None,
+    temperature_c: float,
+) -> dict[str, int | float]:
+    """``param_row`` with the grid temperature bound to ``temperature_param``
+    (issue #3994), name-sorted like every params row; ``param_row`` unchanged
+    when the request binds no temperature parameter."""
+    if not temperature_param:
+        return param_row
+    bound = {**param_row, temperature_param: _normalize_param_value(temperature_c)}
+    return dict(sorted(bound.items()))
+
+
 def _expand_param_axis(
     corners_spec: dict[str, Any],
 ) -> list[dict[str, int | float]]:
@@ -5611,9 +5625,7 @@ def _expand_corners(
     # exclusion rules so a selector can be checked against the declared names.
     param_rows = _expand_param_axis(corners_spec)
     temperature_param = _temperature_param_name(corners_spec)
-    declared_params = set(param_rows[0])
-    if temperature_param:
-        declared_params.add(temperature_param)
+    declared_params = set(param_rows[0]).union(filter(None, [temperature_param]))
     _validate_exclude_params(exclude_spec, declared_params)
     # Issue #3125: the solver-option axis, innermost of all.
     option_rows = _expand_options_axis(corners_spec)
@@ -5628,17 +5640,9 @@ def _expand_corners(
                     for param_row, option_row in itertools.product(
                         param_rows, option_rows
                     ):
-                        if temperature_param:
-                            param_row = dict(
-                                sorted(
-                                    {
-                                        **param_row,
-                                        temperature_param: _normalize_param_value(
-                                            temperature_c
-                                        ),
-                                    }.items()
-                                )
-                            )
+                        param_row = _bind_temperature_param(
+                            param_row, temperature_param, temperature_c
+                        )
                         point = CornerPoint(
                             process,
                             point_supply,
