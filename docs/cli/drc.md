@@ -6,6 +6,7 @@ report violations as structured data.
 ```
 klt drc <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l [--top <cell>] [--rules '<id|glob>,...'] [--pdk <variant> [--pdk-root <path>]] [--format text|json]
 klt drc --deck sky130|gf180mcu|sg13g2|sg13cmos5l --list-rules [--format text|json]
+klt drc <file> --engine both --deck <name> [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--format text|json]
 klt drc <file> --engine klayout [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--timeout-s <seconds>] [--allow-deck-errors] [--allow-missing-host-tools] [--min-klayout-version <X.Y.Z>] [--negative-control <layout> [--negative-control-categories <A,B>]] [--expect-rule-categories <N> | --expect-rule-categories-file <path>] [--format text|json]
 klt drc <file> --deck <name> --waivers <waivers.json> [--format text|json]
 klt drc <request.json>|-|'{...}' [--format text|json]
@@ -1401,6 +1402,61 @@ Neither kind uses `threshold_dbu`, `other_layer`, or `derived_layer`. Both
 are vacuous when their layer is absent (no polygons, so no vertices and no
 corners), so an absent layer classifies as `inapplicable`, like every other
 single-layer kind.
+
+### `"both"` — cross-check the two engines (issue #3973)
+
+```
+klt drc <file> --engine both --deck <name> [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--format text|json]
+```
+
+Runs the curated deck (`--deck`) and the PDK-native deck on the **same
+layout** and reports where they differ. It is a comparison surface over the
+two existing engines, not a third verification engine: the response embeds
+both raw reports **verbatim** under `reports.curated` / `reports.native`
+(each keeps its own `status`, coverage and findings), and adds an `identity`
+block (layout `content_hash`, PDK, curated and native deck identity, klt and
+klayout versions) and a `comparison` block. If the two runs hashed different
+layouts or resolved different PDK variants, the command fails (exit 1)
+rather than comparing them. `--rules` and `--waivers` are refused (the
+cross-check compares whole-deck reports); the native-engine flags
+(`--deck-var`, `--timeout-s`, `--allow-deck-errors`, ...) pass through. The
+request document accepts `"engine": "both"`.
+
+Comparison is by **region, not by rule id or count**: zero vs non-zero plus
+bbox overlap (the precedent is `docs/design/magic-oracle.md`), so 1 vs 2
+markers over the same spot agree. Only rules an explicit mapping group pairs
+up (`drc_crosscheck.RULE_MAPPING`, curated rule ids ↔ native RDB categories)
+are compared. **The shipped mapping is empty**: a wrong pairing manufactures
+false agreement or disagreement, so groups are added one at a time with a
+verified equivalence. Until then every real run is `not_comparable`, and the
+per-engine reports are the useful output.
+
+| `comparison.state` | Meaning |
+|---|---|
+| `agree_clean` | every mapped group covered by both sides, no findings, and **no unmapped rule ran on either side** |
+| `agree_violations` | as above, both sides flag the same regions |
+| `disagreement` | in a covered mapped group, one engine flagged a region the other did not (`groups[].only_curated` / `only_native` list the bboxes) |
+| `not_comparable` | a group not covered by both sides, no groups, or rules on either side outside the mapping (`unmapped.curated` / `unmapped.native`) — an unmapped rule can never produce `agree_*` |
+| `native_unavailable` | no native deck, no `klayout` binary, or missing host tools; `reports.native` is `null` |
+| `engine_failed` | the native run raised any other error; `reports.native` is `null` |
+
+`status` is `violations` if either engine found some, else the first
+no-verdict token, else `clean_partial`/`clean`. A native run that did not
+complete is `not_checked` (exit 4) — **never clean** — and does not mask
+curated violations (still `violations`, exit 3). Exit codes are the usual
+0/3/4, derived from each embedded report's own rollup code. A curated-side
+error (bad file, unknown deck) is an ordinary exit-1 error.
+
+**Live comparison prerequisite (documented, not run here).** A live
+comparison needs: the `klayout` binary on `PATH`; an open PDK checkout whose
+native deck the packaged PDK resolver finds (e.g. `klt pdk` for `gf180mcuD`),
+or an explicit `--deck-file`; and the deck's host tools (`--allow-missing-host-tools`
+only for a debug probe). The case to try first is the study's wide-metal
+gf180mcu gap (`docs/design/custom-transistor-layout-study.md` §4.3 item 5):
+a wide-metal layout where the native deck flags spacing the curated deck does
+not model. Expected outcome today: `not_comparable` with the native finding
+visible in `reports.native` — i.e. the gap is exposed, not silently passed. No
+live run is required for merge.
 
 ## Coverage
 

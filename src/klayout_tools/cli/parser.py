@@ -5790,9 +5790,12 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     drc_parser.add_argument(
         "--engine",
-        choices=("curated", "klayout"),
+        choices=("curated", "klayout", "both"),
         default="curated",
         help=(
+            "'both' (issue #3973): run the curated deck (--deck) and the "
+            "PDK-native deck on the same layout and report where they "
+            "differ; an unavailable native run is not_checked, never clean. "
             "'curated' (default): klt's own pip-only Region-primitive deck "
             "(--deck required). 'klayout' (issue #565, opt-in): shells out "
             "to a standalone klayout binary on PATH to run a PDK-native "
