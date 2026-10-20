@@ -440,6 +440,68 @@ def test_no_value_message_default_mode_is_unchanged():
     )
 
 
+@pytest.mark.parametrize(
+    "code", ["timeout", "engine_killed", "timestep_too_small", "nonconvergence"]
+)
+def test_effective_save_mode_drops_hint_when_an_error_diagnostic_explains_it(code):
+    diagnostics = [{"severity": "error", "code": code, "message": "x"}]
+
+    assert sim._effective_save_mode("netlist", diagnostics) == "all"
+
+
+def test_effective_save_mode_keeps_hint_for_no_such_vector():
+    # `no_such_vector` is the very symptom the hint explains (a signal the
+    # netlist's `.save` cards no longer retain), so it must not suppress it.
+    diagnostics = [{"severity": "error", "code": "no_such_vector", "message": "x"}]
+
+    assert sim._effective_save_mode("netlist", diagnostics) == "netlist"
+
+
+@pytest.mark.parametrize("severity", ["info", "warning"])
+def test_effective_save_mode_keeps_hint_without_an_error_diagnostic(severity):
+    diagnostics = [{"severity": severity, "code": "note", "message": "x"}]
+
+    assert sim._effective_save_mode("netlist", diagnostics) == "netlist"
+    assert sim._effective_save_mode("netlist", []) == "netlist"
+    assert sim._effective_save_mode("all", []) == "all"
+
+
+def _no_value_messages(tmp_path, monkeypatch, run) -> list[str]:
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [_CARD],
+            "options": {"save_mode": "netlist"},
+        },
+    )
+    monkeypatch.setattr(sim.subprocess, "run", run)
+    report = sim.run_sim(str(request))
+    (corner,) = report["corners"]
+    return [d["message"] for d in corner["diagnostics"] if d["code"] == "measurement"]
+
+
+def test_timed_out_corner_measurement_has_no_save_mode_hint(tmp_path, monkeypatch):
+    def run(cmd, capture_output, text, timeout, cwd=None, env=None):
+        raise sim.subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
+
+    messages = _no_value_messages(tmp_path, monkeypatch, run)
+
+    assert messages
+    assert not any('options.save_mode is "netlist"' in m for m in messages)
+
+
+def test_clean_run_with_missing_value_keeps_save_mode_hint(tmp_path, monkeypatch):
+    def run(cmd, capture_output, text, timeout, cwd=None, env=None):
+        return fake_completed("** ngspice-99\n")
+
+    messages = _no_value_messages(tmp_path, monkeypatch, run)
+
+    assert any('options.save_mode is "netlist"' in m for m in messages)
+
+
 @pytest.mark.parametrize("spec", [_CARD, _EXPR])
 def test_no_value_message_netlist_mode_names_the_opt_out(spec):
     message = sim._no_value_message(spec, save_mode="netlist")

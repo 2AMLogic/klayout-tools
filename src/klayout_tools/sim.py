@@ -9545,7 +9545,7 @@ def _run_corner(
             analysis=analysis,
             log_text=log_text,
             is_xyce=is_xyce,
-            save_mode=save_mode,
+            save_mode=_effective_save_mode(save_mode, diagnostics),
             crossings=crossings,
             energy=energy,
             cycle_means=cycle_means,
@@ -10602,6 +10602,24 @@ def _harvest_measurement_value(
     if value is None:
         return measurement_values.get(str(name).lower())
     return value
+
+
+def _effective_save_mode(save_mode: str, diagnostics: list[dict[str, Any]]) -> str:
+    """The save mode the no-value wording should assume (issue #3963).
+
+    The ``save_mode: "netlist"`` hint blames a signal the netlist's ``.save``
+    cards no longer retain. When the corner already carries an error-severity
+    engine diagnostic (``timeout``, ``engine_killed``, ``timestep_too_small``,
+    ...), the missing value has a known cause and the hint would mislead, so
+    the default wording is used instead. ``no_such_vector`` is exempt: it is
+    the retention symptom the hint exists to explain. The diagnostics
+    themselves are kept."""
+    if any(
+        d.get("severity") == "error" and d.get("code") != "no_such_vector"
+        for d in diagnostics
+    ):
+        return DEFAULT_SAVE_MODE
+    return save_mode
 
 
 def _no_value_message(
