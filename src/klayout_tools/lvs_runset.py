@@ -15,9 +15,13 @@ and then reads KLayout's cross-reference database back with
 ``klayout.db.LayoutVsSchematic.read()`` + ``xref()``.
 
 **The verdict comes from the database, never from the process.** A PDK
-driver exits ``0`` when the netlists do not match; a non-zero exit is
-therefore only ever treated as "the runset failed to run" (an application
-error), and a zero exit proves nothing. Per circuit pair the cross-reference
+driver may exit ``0`` when the netlists do not match, and another (sky130's
+``sky130.lvs``) exits non-zero itself; so the exit status proves nothing
+either way. A non-zero exit that left a readable cross-reference database is
+reported from that database (the exit status is recorded at
+``provenance.runset.exit_status``); only a non-zero exit with no database, or
+one with no cross-reference, is "the runset failed to run" (an application
+error). Per circuit pair the cross-reference
 carries a ``Status``; the run is a ``"match"`` only when every circuit pair
 is ``Match``/``MatchWithWarning`` and none has an unpaired circuit.
 
@@ -246,8 +250,8 @@ def _run_runset(
     work_dir: str,
 ) -> tuple[str, subprocess.CompletedProcess[str]]:
     """Launch the runset; return ``(lvsdb_path, completed)``. Raises
-    ``LvsError`` for a launch failure, timeout, a non-zero exit, or no
-    database written."""
+    ``LvsError`` for a launch failure, timeout, or no database written (a
+    non-zero exit that did write one is returned; the caller reads it)."""
     from .lvs import LvsError
 
     # The app runs with cwd=work_dir (below), so path arguments must not
@@ -290,17 +294,8 @@ def _run_runset(
         ) from exc
 
     output = (completed.stdout or "") + (completed.stderr or "")
-    if completed.returncode != 0:
-        errors = _error_lines(output)
-        cause = f"last error: {errors[-1]}\n" if errors else ""
-        app_version = _application_version(binary) or "unknown"
-        module_version = _module_version()
-        raise LvsError(
-            f"{cause}klayout exited with status {completed.returncode} while "
-            f"running the LVS runset -- no trustworthy verdict (klayout "
-            f"application {app_version}, pip klayout module "
-            f"{module_version}). klayout's own output:\n{output.strip()}"
-        )
+    if completed.returncode != 0 and not os.path.isfile(report_path):
+        raise LvsError(_nonzero_exit_message(binary, completed))
     if not os.path.isfile(report_path):
         raise LvsError(
             "the LVS runset did not write an .lvsdb database -- it likely "
@@ -308,6 +303,23 @@ def _run_runset(
             f"klayout's own output:\n{output.strip()}"
         )
     return report_path, completed
+
+
+def _nonzero_exit_message(
+    binary: str, completed: subprocess.CompletedProcess[str]
+) -> str:
+    """Error text for a runset that exited non-zero without a usable verdict."""
+    output = (completed.stdout or "") + (completed.stderr or "")
+    errors = _error_lines(output)
+    cause = f"last error: {errors[-1]}\n" if errors else ""
+    app_version = _application_version(binary) or "unknown"
+    module_version = _module_version()
+    return (
+        f"{cause}klayout exited with status {completed.returncode} while "
+        f"running the LVS runset -- no trustworthy verdict (klayout "
+        f"application {app_version}, pip klayout module "
+        f"{module_version}). klayout's own output:\n{output.strip()}"
+    )
 
 
 def _class_census(netlist: kdb.Netlist | None) -> tuple[list[str], dict[str, int]]:
@@ -743,7 +755,7 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
     """Run ``request`` through the PDK runset and return the ``klt lvs``
     envelope. See this module's docstring; request fields are documented in
     ``docs/cli/lvs.md`` ("klayout-runset")."""
-    from .lvs import SCHEMA_VERSION
+    from .lvs import SCHEMA_VERSION, LvsError
 
     layout, reference, deck_file, deck_vars, options = _validate_request(
         request, request_dir
@@ -764,7 +776,14 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
             timeout_s=timeout_s,
             work_dir=work_dir,
         )
-        verdict = read_lvsdb_verdict(lvsdb_path)
+        try:
+            verdict = read_lvsdb_verdict(lvsdb_path)
+        except LvsError as exc:
+            if completed.returncode == 0:
+                raise
+            # A crash after extraction left a db with no cross-reference:
+            # keep the exit-status diagnosis, not just the db-read message.
+            raise LvsError(_nonzero_exit_message(binary, completed)) from exc
     finally:
         import shutil
 
@@ -791,6 +810,7 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
         "deck_vars": deck_vars,
         "content_hash": _sha_prefixed(deck_file),
         "klayout_application_version": _application_version(binary),
+        "exit_status": completed.returncode,
         "engine_error_lines": _error_lines(
             (completed.stdout or "") + (completed.stderr or "")
         ),
