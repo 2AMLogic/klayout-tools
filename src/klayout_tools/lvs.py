@@ -4795,7 +4795,7 @@ def _prune_extra_top_circuits(netlist: kdb.Netlist, keep: kdb.Circuit) -> None:
     # recursively deletes its children -- including ``keep`` -- leaving a
     # destroyed handle. Instead, keep ``keep`` plus everything reachable from
     # it, and non-recursively ``remove`` every other circuit.
-    reachable: set[int] = set()
+    reachable: set[str] = set()
     stack = [keep]
     while stack:
         current = stack.pop()
