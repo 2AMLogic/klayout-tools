@@ -5303,6 +5303,71 @@ def test_cli_batch_set_all_pass_exits_zero_and_refuses_other_backend(
     assert exc.value.code == 2
 
 
+def test_sim_set_forwards_resume_to_every_request(tmp_path):
+    from klayout_tools import sim_set
+
+    paths = _write_set(tmp_path, 3)
+    seen: list[tuple[str, object, str]] = []
+
+    def fake_run(path, **kwargs):
+        seen.append((path, kwargs.get("resume"), kwargs["artifacts_dir"]))
+        return _fake_report()
+
+    sim_set.run_sim_set(paths, outdir=str(tmp_path / "out"), run=fake_run, resume=True)
+    assert [p for p, _, _ in seen] == paths
+    assert all(resume is True for _, resume, _ in seen)
+    # Each request resumes from its own directory (where batch-shards.json lives).
+    assert [d for _, _, d in seen] == [
+        str(tmp_path / "out" / f"req{i}") for i in range(3)
+    ]
+
+    seen.clear()
+    sim_set.run_sim_set(paths, outdir=str(tmp_path / "out2"), run=fake_run)
+    assert all(not resume for _, resume, _ in seen)
+
+
+def test_cli_batch_set_accepts_resume_and_forwards_it(tmp_path, monkeypatch, capsys):
+    from klayout_tools import sim_set
+    from klayout_tools.cli import main
+
+    seen: list[object] = []
+
+    def fake_run(path, **kwargs):
+        seen.append(kwargs.get("resume"))
+        return _fake_report()
+
+    monkeypatch.setattr(
+        sim_set.run_sim_set,
+        "__kwdefaults__",
+        {**sim_set.run_sim_set.__kwdefaults__, "run": fake_run},
+    )
+    paths = _write_set(tmp_path, 2)
+
+    code = main(["sim", "--batch-set", *paths, "--resume", "--format", "json"])
+
+    assert code == 0
+    assert seen == [True, True]
+    assert json.loads(capsys.readouterr().out)["status"] == "pass"
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        ["--attach", "job-1"],
+        ["--plot", "plots"],
+        ["--op-lint"],
+        ["--submit-only"],
+        ["--job-status", "job-1"],
+        ["--wait-for-capacity", "5"],
+    ],
+)
+def test_cli_batch_set_still_refuses_other_single_request_flags(tmp_path, flags):
+    from klayout_tools.cli import main
+
+    paths = _write_set(tmp_path, 1)
+    assert main(["sim", "--batch-set", *paths, "--resume", *flags]) == 2
+
+
 # --------------------------------------------------------------------------- #
 # measurements[].crossings through the batch fleet (issue #2868)
 # --------------------------------------------------------------------------- #

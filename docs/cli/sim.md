@@ -1080,8 +1080,18 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   unchanged.
 - **Batch only, never local.** The backend is forced to `batch` (`--backend`
   other than `batch` is a usage error, exit `2`); a refused or failed request is
-  reported, never re-run on local ngspice. `--resume`, `--plot` and
-  `--op-lint` cannot be combined with it.
+  reported, never re-run on local ngspice. `--plot` and `--op-lint` cannot be
+  combined with it.
+- **Resuming a set (`--resume`).** `--resume` is forwarded to every request and
+  each one resumes from its own directory, `<outdir>/<request-stem>/`. Re-run
+  the same set with the same `-o`: a sharded request re-attaches to the shard
+  jobs recorded in its `batch-shards.json` (`fleet[].resumed: true`) and
+  resubmits only the shards it cannot collect; a request with no prior
+  directory runs fresh. A deck-list or non-sharded request that cannot resume
+  becomes an ordinary `error` entry, as it does for a single request. A shard
+  still `interrupted` is re-polled first, so resuming it can wait up to another
+  `batch.interrupted_grace_s` (default 1800 s) before its replacement is
+  submitted. The aggregate envelope is unchanged.
 - **Per-request reports.** Each request writes its full single-request report
   to `report.json` in its own directory, `<outdir>/<request-stem>/` (without
   `-o`: `.klt/sim/<request-stem>/` next to the request file).
