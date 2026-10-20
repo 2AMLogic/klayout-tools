@@ -105,6 +105,7 @@
       "modules": [
         "klayout_tools.cli.drc_cmd",
         "klayout_tools.drc",
+        "klayout_tools.drc_crosscheck",
         "klayout_tools.drc_klayout_engine"
       ]
     },
