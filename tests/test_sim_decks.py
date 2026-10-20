@@ -1308,6 +1308,231 @@ class TestBatchDispatch:
             run_local(tmp_path, batch_deck_request(tmp_path), outdir="out")
 
 
+class TestBatchAsync:
+    """`--submit-only` / `--attach <job_id>` on a deck list (issue #3958): one
+    job, one job id, split at the launch/poll seam."""
+
+    @staticmethod
+    def install(monkeypatch, fleet: _FakeFleet, *, job_exists: bool = True) -> list:
+        """The fleet fake, plus the names `sim_batch_async` bound at import
+        and a recorded call log (`submit`, `launch`, `poll`, `collect`)."""
+        from klayout_tools import sim_batch_async as sba
+
+        calls: list[str] = []
+        install_fake_batch(monkeypatch, fleet)
+
+        def record(name, fn):
+            def wrapper(*args, **kwargs):
+                calls.append(name)
+                return fn(*args, **kwargs)
+
+            return wrapper
+
+        monkeypatch.setattr(sb, "submit_job", record("submit", fleet.submit))
+        monkeypatch.setattr(sba, "submit_job", sb.submit_job)
+        monkeypatch.setattr(sb, "launch_job", record("launch", fleet.launch))
+        monkeypatch.setattr(sba, "launch_job", sb.launch_job)
+        monkeypatch.setattr(sb, "poll_status", record("poll", fleet.poll))
+        monkeypatch.setattr(sb, "collect_outputs", record("collect", fleet.collect))
+        monkeypatch.setattr(sb, "job_exists", lambda *a, **k: job_exists)
+        return calls
+
+    @staticmethod
+    def run(tmp_path, request, **kwargs):
+        write_request(tmp_path, request)
+        return sim.run_sim(str(tmp_path / "request.json"), **kwargs)
+
+    def test_submit_only_returns_identity_without_polling(self, tmp_path, monkeypatch):
+        write_stub_engine(tmp_path)
+        calls = self.install(monkeypatch, _FakeFleet({"state": "done"}))
+        result = self.run(
+            tmp_path,
+            batch_deck_request(tmp_path),
+            submit_only=True,
+            artifacts_dir=str(tmp_path / "out"),
+        )
+        assert result["status"] == "submitted"
+        assert result["job_id"].startswith("klt-sim-")
+        assert result["unit_count"] == 2
+        assert result["job_ceiling"] is None
+        assert len(result["request_sha256"]) == 64
+        assert result["bucket"] == "fake-bucket"
+        assert {"job_uri", "launched_at", "region"} <= set(result)
+        assert calls == ["submit", "launch"]
+        receipt = json.loads((tmp_path / "out" / sb.BATCH_RECEIPT_FILENAME).read_text())
+        assert receipt["job_id"] == result["job_id"]
+        assert receipt["request_sha256"] == result["request_sha256"]
+
+    def test_submit_only_without_artifacts_dir_writes_no_receipt(
+        self, tmp_path, monkeypatch
+    ):
+        write_stub_engine(tmp_path)
+        self.install(monkeypatch, _FakeFleet({"state": "done"}))
+        self.run(tmp_path, batch_deck_request(tmp_path), submit_only=True)
+        assert not list(tmp_path.rglob(sb.BATCH_RECEIPT_FILENAME))
+        assert not (tmp_path / ".klt").exists()
+
+    def test_attach_collects_the_submitted_job_like_a_blocking_run(
+        self, tmp_path, monkeypatch
+    ):
+        write_stub_engine(tmp_path)
+        fleet = _FakeFleet({"state": "done", "exit_code": "0"})
+        calls = self.install(monkeypatch, fleet)
+        request = batch_deck_request(tmp_path)
+        submitted = self.run(tmp_path, request, submit_only=True)
+        calls.clear()
+
+        attached = self.run(
+            tmp_path,
+            request,
+            attach_job_id=submitted["job_id"],
+            artifacts_dir=str(tmp_path / "attached"),
+        )
+        # Nothing staged, uploaded or launched; just poll + collect.
+        assert calls == ["poll", "collect"]
+        blocking = self.run(tmp_path, request, artifacts_dir=str(tmp_path / "blocking"))
+        for report in (attached, blocking):
+            assert report["mode"] == "decks"
+            assert report["backend"] == "batch"
+            assert report["environment"]["remote"]["provider"] == "aws-batch-fleet"
+        assert attached["status"] == blocking["status"] == "pass"
+        assert [u["id"] for u in attached["units"]] == [
+            u["id"] for u in blocking["units"]
+        ]
+        outdir = Path(attached["outdir"])
+        assert outdir.name == "attached"
+        assert (outdir / attached["units"][0]["stdout"]).is_file()
+
+    def test_attach_unknown_job_id(self, tmp_path, monkeypatch):
+        write_stub_engine(tmp_path)
+        calls = self.install(
+            monkeypatch, _FakeFleet({"state": "done"}), job_exists=False
+        )
+        with pytest.raises(sim.SimError) as err:
+            self.run(tmp_path, batch_deck_request(tmp_path), attach_job_id="nope-1")
+        assert err.value.code == sb.BATCH_UNKNOWN_JOB_CODE
+        assert calls == []
+
+    def test_attach_with_changed_request_is_refused(self, tmp_path, monkeypatch):
+        write_stub_engine(tmp_path)
+        self.install(monkeypatch, _FakeFleet({"state": "done", "exit_code": "0"}))
+        request = batch_deck_request(tmp_path)
+        submitted = self.run(tmp_path, request, submit_only=True)
+        request["decks"] = request["decks"][:1]
+        with pytest.raises(sim.SimError) as err:
+            self.run(tmp_path, request, attach_job_id=submitted["job_id"])
+        assert err.value.code == "attach_request_mismatch"
+
+    def test_attach_to_failed_job_recovers_like_a_blocking_run(
+        self, tmp_path, monkeypatch
+    ):
+        write_stub_engine(tmp_path)
+        fleet = _FakeFleet({"state": "failed", "exit_code": "1", "detail": "boom"})
+        fleet.fail_collect = True
+        self.install(monkeypatch, fleet)
+        report = self.run(
+            tmp_path,
+            batch_deck_request(tmp_path),
+            attach_job_id="klt-sim-1",
+            artifacts_dir=str(tmp_path / "out"),
+        )
+        assert report["status"] == "error"
+        assert report["units"][0]["diagnostics"][0]["code"] == "batch_job_failed"
+
+    def test_attach_to_interrupted_job_reports_interrupted(self, tmp_path, monkeypatch):
+        write_stub_engine(tmp_path)
+        fleet = _FakeFleet({"state": "done"})
+        self.install(monkeypatch, fleet)
+
+        def interrupted(config, job_id, **kwargs):
+            raise sb.BatchJobInterrupted("interrupted too long", interrupted_s=9.0)
+
+        monkeypatch.setattr(sb, "poll_status", interrupted)
+        report = self.run(
+            tmp_path,
+            batch_deck_request(tmp_path),
+            attach_job_id="klt-sim-1",
+            artifacts_dir=str(tmp_path / "out"),
+        )
+        assert report["units"][0]["diagnostics"][0]["code"] == "batch_job_interrupted"
+
+    @pytest.mark.parametrize(
+        ("kwargs", "match", "code"),
+        [
+            (
+                {"submit_only": True, "backend": "local"},
+                "requires backend 'batch'",
+                "submit_only_unsupported",
+            ),
+            (
+                {"submit_only": True, "hosts": 2},
+                "submits one job",
+                "submit_only_unsupported",
+            ),
+            (
+                {"submit_only": True, "plot_dir": "plots"},
+                "--plot",
+                "submit_only_unsupported",
+            ),
+            (
+                {"submit_only": True, "resume": True},
+                "--resume",
+                "submit_only_unsupported",
+            ),
+            (
+                {"submit_only": True, "attach_job_id": "klt-sim-1"},
+                "mutually exclusive",
+                None,
+            ),
+            (
+                {"attach_job_id": "klt-sim-1", "backend": "local"},
+                "--attach requires backend 'batch'",
+                None,
+            ),
+            (
+                {"attach_job_id": "klt-sim-1", "hosts": 2},
+                "--attach requires backend 'batch'",
+                None,
+            ),
+            (
+                {"attach_job_id": "klt-sim-1", "plot_dir": "plots"},
+                "--plot",
+                None,
+            ),
+            (
+                {"attach_job_id": "klt-sim-1", "capacity_wait_s": 60.0},
+                "--wait-for-capacity",
+                None,
+            ),
+        ],
+    )
+    def test_refusals_fire_before_any_transport_call(
+        self, tmp_path, monkeypatch, kwargs, match, code
+    ):
+        write_stub_engine(tmp_path)
+        calls = self.install(monkeypatch, _FakeFleet({"state": "done"}))
+        kwargs = {"backend": "batch", **kwargs}
+        with pytest.raises(sim.SimError, match=match) as err:
+            self.run(tmp_path, batch_deck_request(tmp_path), **kwargs)
+        if code is not None:
+            assert err.value.code == code
+        assert calls == []
+
+    def test_job_status_reads_a_deck_jobs_id(self, tmp_path, monkeypatch):
+        from klayout_tools import sim_batch_async as sba
+
+        write_stub_engine(tmp_path)
+        monkeypatch.setattr(
+            sba,
+            "_read_status",
+            lambda config, job_id, run: {"state": "running", "detail": "d"},
+        )
+        status = sba.read_job_status(batch_deck_request(tmp_path), "klt-sim-1")
+        assert status["job_id"] == "klt-sim-1"
+        assert status["state"] == "running"
+        assert status["terminal"] is False
+
+
 # --------------------------------------------------------------------------- #
 # run_sim / CLI integration
 # --------------------------------------------------------------------------- #
