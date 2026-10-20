@@ -1383,6 +1383,41 @@ def load_request(request_path: str) -> dict[str, Any]:
     return request
 
 
+def _reject_linearize_in_steps(request: dict[str, Any]) -> None:
+    """Issue #4014: ``linearize`` is a scalar-``tran``-only field."""
+    holders = [("analysis", request.get("analysis"))]
+    holders.extend(
+        (f"analysis_steps[{i}]", step)
+        for i, step in enumerate(request.get("analysis_steps") or [])
+    )
+    for where, holder in holders:
+        if isinstance(holder, dict) and "linearize" in holder:
+            raise SimError(
+                f"{where}.linearize is not supported with analysis_steps[]: "
+                "`linearize` is only available on a scalar `tran` analysis "
+                '(analysis: {"kind": "tran", ..., "linearize": true})'
+            )
+
+
+def _validate_linearize(analysis: dict[str, Any]) -> None:
+    """Issue #4014: ``analysis.linearize`` must be a boolean on a ``tran``."""
+    if "linearize" not in analysis:
+        return
+    value = analysis["linearize"]
+    if not isinstance(value, bool):
+        raise SimError(
+            f"analysis.linearize must be a boolean (got {value!r}); "
+            "set true to resample the transient waveforms onto a uniform "
+            "time grid before the expr measurements are evaluated"
+        )
+    if value and str(analysis.get("kind", "")).lower() != "tran":
+        raise SimError(
+            'analysis.linearize requires analysis.kind "tran" '
+            f"(got {analysis.get('kind')!r}): `linearize` resamples a "
+            "transient waveform and has no meaning for other analyses"
+        )
+
+
 def _resolve_analysis_and_measurements(
     request: dict[str, Any],
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -1395,6 +1430,7 @@ def _resolve_analysis_and_measurements(
     :func:`klayout_tools.sim_steps.resolve_analysis_steps`.
     """
     if request.get("analysis_steps") is not None:
+        _reject_linearize_in_steps(request)
         return sim_steps.resolve_analysis_steps(request)
     analysis = request.get("analysis") or {}
     # Issue #3338: `kind: "twoport"` compiles to an `ac` analysis; resolved
@@ -1406,6 +1442,7 @@ def _resolve_analysis_and_measurements(
     # Issue #3159: `analysis.passes` (AC only) is validated and normalised
     # here, before any engine launch; absent `passes` returns `analysis` as is.
     analysis = sim_passes.resolve_analysis(analysis)
+    _validate_linearize(analysis)
     measurements_spec = request.get("measurements", [])
     # Issue #2533: `spice` (a verbatim top-level `.meas` card) and `expr` (an
     # expression evaluated after the analysis, inside the generated
@@ -3144,6 +3181,7 @@ def _prepare_sim_request(
         nodeset_declared=bool(nodeset_rules),
         initial_conditions_declared=bool(ic_rules),
         analysis_steps_declared=sim_steps.is_steps_analysis(analysis),
+        linearize_declared=analysis.get("linearize") is True,
         crossings_declared=bool(
             sim_crossings.crossings_measurements(measurements_spec)
         ),
@@ -7631,6 +7669,7 @@ def _enforce_xyce_support_boundary(
     nodeset_declared: bool = False,
     initial_conditions_declared: bool = False,
     analysis_steps_declared: bool = False,
+    linearize_declared: bool = False,
     crossings_declared: bool = False,
     cycle_mean_declared: bool = False,
     energy_declared: bool = False,
@@ -7648,6 +7687,14 @@ def _enforce_xyce_support_boundary(
     """
     if engine != "xyce":
         return
+    if linearize_declared:
+        # Issue #4014: `linearize` is an ngspice control command; the Xyce
+        # deck has no `.control` block to carry it.
+        raise SimError(
+            "analysis.linearize is not supported for engine 'xyce': it is an "
+            "ngspice `.control` command, which the Xyce deck does not have; "
+            "use engine 'ngspice' or drop the field"
+        )
     if analysis_steps_declared:
         # Issue #2482: an ordered step sequence is `alter`/analysis/`let`
         # commands inside one ngspice `.control` block. The Xyce deck has no
@@ -11151,6 +11198,12 @@ def _corner_deck_control_lines(
     lines.append(f"{analysis['kind']} {_ic_analysis_args(point, analysis['args'])}")
     if raw_path is not None:
         lines.append(f"write {raw_path}")
+    if analysis.get("linearize") is True:
+        # Issue #4014: resample onto a uniform grid, after any rawfile
+        # `write` (which keeps the solver's own points) and before the
+        # `expr` lets, so time-weighted sums are not biased by the
+        # adaptive timestep distribution.
+        lines.append("linearize")
     expr_specs = _expr_measurements(measurements_spec)
     if expr_specs and analysis["kind"] == "noise":
         # Issue #2893: after `noise`, ngspice's current plot is the integrated
