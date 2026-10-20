@@ -14,6 +14,18 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt pex` `pin_order_mismatch`** (issue #2890, documented in
+  [`docs/cli/pex.md`](docs/cli/pex.md) "Pin order must match"): additive. A new
+  top-level `pin_order_mismatch` block fires when the schematic and extracted
+  headers for the top subcircuit have the same pin count and the same pin set
+  (compared case-insensitively) but a different order, which would silently
+  mis-wire the testbench's positional `X...` line on the extracted leg. Same
+  shape as `pin_count_mismatch` (`subcircuit`, `schematic`/`extracted`,
+  `ngspice_message` always `null`, `detail`); mutually exclusive with
+  `pin_count_mismatch` and `flat_dut_mismatch`; `null` in `--measure-command`
+  mode. The extracted leg is skipped, `status` is `"error"` and the exit code
+  is `4`. Purely additive: no `schema_version` bump.
+
 - **`klt gen-compose` `pins[].request`** (issue #3971, documented in
   `docs/cli/gen-compose.md` "Requested port coordinates"): additive. A `pins[]`
   entry may carry `request: {x_um?, y_um?, layer_role?}` to place the pin at a
