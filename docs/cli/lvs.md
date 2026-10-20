@@ -248,14 +248,21 @@ ignored.
 The application runs with its working directory set to klt's temporary work
 dir, so runset side files (e.g. `<top>_extracted.cir`) never land in the
 caller's tree; relative `deck_vars` values resolve against that dir, so pass
-absolute paths. On a non-zero exit, `error.message` leads with the runset's
-last `ERROR` line, names the `klayout` application and pip module versions
-(a mismatch is a common cause), then carries the full runset log.
+absolute paths. On a non-zero exit that yields no usable verdict,
+`error.message` leads with the runset's last `ERROR` line, names the `klayout`
+application and pip module versions (a mismatch is a common cause), then
+carries the full runset log.
 
 **The verdict is taken from the `.lvsdb`, not the process.** The database is
 read back with `klayout.db.LayoutVsSchematic.read()` + `xref()`. A PDK driver
-may exit `0` on a non-matching pair, so exit status is only used to detect a
-runset that failed to run (non-zero exit, or no database written: exit 1).
+may exit `0` on a non-matching pair, and another (sky130's `sky130.lvs`) exits
+non-zero itself on one, so the exit status never decides the verdict: a
+non-zero exit that left a readable database with a cross-reference is reported
+from it (`status: "mismatch"` with the usual `mismatches[]`, `counts`,
+`device_census` and `net_correspondence`), and the runset's exit status is
+recorded at `provenance.runset.exit_status` (`0` on a clean exit). A runset
+that failed to run is an application error (exit 1): no database written, or
+a non-zero exit whose database is unreadable or has no cross-reference.
 `status` is `match` only when every circuit pair is `Match`/`MatchWithWarning`;
 unmatched devices, nets, pins and circuits become `mismatches[]` entries using
 the shared categories (`device.unmatched`, `device.property`, `net.unmatched`,
