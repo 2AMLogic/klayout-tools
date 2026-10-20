@@ -14,6 +14,16 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sim --resume` for deck-list requests** (issue #3957, documented in
+  `docs/cli/sim.md`): additive. Every deck unit now writes an atomic
+  `<outdir>/<id>/unit.json` completion record; with `--resume` /
+  `options.resume` on `local`, `local-parallel` or `batch`, a unit whose record
+  matches its deck/include/input hashes, `timeout_s` and engine version and
+  whose outputs still verify is skipped (`units[].resumed: true`,
+  `environment.resume.resumed_units`). `remote` still refuses it. `unit.json`
+  is now a reserved unit-relative name. No `decks[].seed` field was added:
+  the documented seeding measurements show `trnoise` is not replayable on
+  ngspice-42.
 - **`klt sim` deck-list `--submit-only` / `--attach`** (issue #3958,
   documented in `docs/cli/sim.md`): a `decks` request on the `batch` backend
   is one job with one job id, so it can now be detached and re-attached like a

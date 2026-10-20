@@ -462,6 +462,8 @@ def _print_deck_text(report: dict) -> None:
     env = report["environment"]
     print(f"engine: {env['engine']} {env['engine_version'] or '-'}")
     print(f"outdir: {report['outdir']}")
+    if env.get("resume"):
+        print(f"resume: skipped {env['resume']['resumed_units']} complete unit(s)")
     if env.get("remote"):
         remote = env["remote"]
         provider = remote.get("provider", "remote")
@@ -469,8 +471,9 @@ def _print_deck_text(report: dict) -> None:
         print(f"remote: {provider} {instance}")
     for unit in report["units"]:
         exit_desc = "-" if unit["exit_code"] is None else str(unit["exit_code"])
+        resumed_tag = " (resumed)" if unit.get("resumed") else ""
         print(
-            f"  {unit['id']} [{unit['status']}] exit={exit_desc} "
+            f"  {unit['id']} [{unit['status']}]{resumed_tag} exit={exit_desc} "
             f"duration={unit['duration_s']}s  {unit['stdout']}"
         )
         for diagnostic in unit["diagnostics"]:

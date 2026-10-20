@@ -811,7 +811,10 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
             "resume from a matching on-disk checkpoint (--outdir/"
             "checkpoint.json), skipping corners already completed by a "
             "prior interrupted run of this same request; overrides the "
-            "request's own `options.resume` when given. See docs/cli/sim.md."
+            "request's own `options.resume` when given. For a `decks` "
+            "request, skips each unit whose <outdir>/<id>/unit.json "
+            "completion record still matches and verifies (local, "
+            "local-parallel, batch). See docs/cli/sim.md."
         ),
     )
     sim_parser.add_argument(

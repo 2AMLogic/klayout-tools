@@ -47,6 +47,9 @@ import time
 
 def main() -> int:
     argv = sys.argv[1:]
+    if argv == ["--version"]:
+        print("ngspice-46 stub banner")
+        return 0
     if not argv or argv[0] != "-b" or len(argv) != 2:
         print("stub: expected `-b <deck>`", file=sys.stderr)
         return 2
@@ -1307,6 +1310,39 @@ class TestBatchDispatch:
         with pytest.raises(sim.SimError, match="batch backend failed"):
             run_local(tmp_path, batch_deck_request(tmp_path), outdir="out")
 
+    def test_resume_submits_only_units_without_a_valid_record(
+        self, tmp_path, monkeypatch
+    ):
+        fleet = install_fake_batch(
+            monkeypatch, _FakeFleet({"state": "done", "exit_code": "0"})
+        )
+        request = batch_deck_request(tmp_path)
+        first = _resume(tmp_path, request, backend="batch")
+        assert [u["resumed"] for u in first["units"]] == [False, False]
+        # The fleet-produced unit.json came back with the unit tree.
+        assert (Path(first["outdir"]) / "tt_27c" / "unit.json").is_file()
+
+        # Nothing changed: no job is submitted at all.
+        fleet.spec = None
+        again = _resume(tmp_path, request, backend="batch")
+        assert fleet.spec is None
+        assert again["status"] == "pass" and again["unit_count"] == 2
+        assert [u["resumed"] for u in again["units"]] == [True, True]
+        assert again["backend"] == "batch"
+
+        # One unit's timeout changed: the job carries only that unit; the
+        # other keeps its tree and is reported resumed, in request order.
+        request["decks"][0]["timeout_s"] = 31
+        third = _resume(tmp_path, request, backend="batch")
+        assert fleet.spec is not None
+        worker = next(json.loads(i.content) for i in fleet.spec.inputs if i.content)
+        assert [u["id"] for u in worker["decks"]] == ["tt_27c"]
+        assert [(u["id"], u["resumed"]) for u in third["units"]] == [
+            ("tt_27c", False),
+            ("ss_125c", True),
+        ]
+        assert third["status"] == "pass"
+
 
 class TestBatchAsync:
     """`--submit-only` / `--attach <job_id>` on a deck list (issue #3958): one
@@ -1538,6 +1574,172 @@ class TestBatchAsync:
 # --------------------------------------------------------------------------- #
 
 
+def _resume(tmp_path: Path, request: dict, outdir: str = "out", **kwargs) -> dict:
+    write_request(tmp_path, request)
+    return sim.run_sim(
+        str(tmp_path / "request.json"),
+        backend=kwargs.pop("backend", "local"),
+        artifacts_dir=str(tmp_path / outdir),
+        resume=True,
+        **kwargs,
+    )
+
+
+class TestResume:
+    """Issue #3957: ``--resume`` for deck-list requests via ``unit.json``."""
+
+    def test_rerun_skips_all_and_reports_resumed(self, tmp_path):
+        request = deck_request(tmp_path)
+        first = _resume(tmp_path, request)
+        assert [u["resumed"] for u in first["units"]] == [False, False]
+        assert first["environment"]["resume"]["resumed_units"] == 0
+        unit_dir = Path(first["outdir"]) / "tt_27c"
+        stamp = (unit_dir / "stdout.bin").stat().st_mtime_ns
+        second = _resume(tmp_path, request)
+        assert [u["resumed"] for u in second["units"]] == [True, True]
+        assert second["environment"]["resume"] == {
+            "resumed_units": 2,
+            "resumed_ids": ["tt_27c", "ss_125c"],
+        }
+        assert second["status"] == "pass" and second["passed"] == 2
+        assert second["environment"]["engine_version"] == "46"
+        assert (unit_dir / "stdout.bin").stat().st_mtime_ns == stamp
+        assert second["units"][0]["outputs"] == ["out/measure.raw"]
+
+    def test_unit_record_written_without_resume(self, tmp_path):
+        report = run_local(tmp_path, deck_request(tmp_path))
+        record = json.loads(
+            (Path(report["outdir"]) / "tt_27c" / "unit.json").read_text()
+        )
+        assert record["result"]["status"] == "pass"
+        assert "resumed" not in report["units"][0]
+        assert "resume" not in report["environment"]
+        assert not list(Path(report["outdir"]).rglob("unit.json.tmp*"))
+
+    def test_changed_deck_reruns_only_that_unit(self, tmp_path):
+        request = deck_request(
+            tmp_path,
+            decks=[
+                {"id": "seed1", "deck": "a.spice"},
+                {"id": "seed2", "deck": "b.spice"},
+            ],
+        )
+        (tmp_path / "a.spice").write_text("* .param seed=1\n", encoding="utf-8")
+        (tmp_path / "b.spice").write_text("* .param seed=2\n", encoding="utf-8")
+        _resume(tmp_path, request)
+        (tmp_path / "b.spice").write_text("* .param seed=3\n", encoding="utf-8")
+        second = _resume(tmp_path, request)
+        assert [u["resumed"] for u in second["units"]] == [True, False]
+
+    def test_changed_input_timeout_and_include_rerun(self, tmp_path):
+        request = deck_request(tmp_path)
+        _resume(tmp_path, request)
+        (tmp_path / "extra.spice").write_text("* edited\n", encoding="utf-8")
+        assert [u["resumed"] for u in _resume(tmp_path, request)["units"]] == [
+            False,
+            False,
+        ]
+        request["decks"][0]["timeout_s"] = 31
+        assert [u["resumed"] for u in _resume(tmp_path, request)["units"]] == [
+            False,
+            True,
+        ]
+
+    def test_engine_version_change_reruns(self, tmp_path):
+        request = deck_request(tmp_path)
+        _resume(tmp_path, request)
+        stub = tmp_path / "stub-ngspice"
+        stub.write_text(
+            stub.read_text().replace("ngspice-46", "ngspice-47"), encoding="utf-8"
+        )
+        again = _resume(tmp_path, request)
+        assert [u["resumed"] for u in again["units"]] == [False, False]
+        assert again["units"][0]["engine_version"] == "47"
+
+    @pytest.mark.parametrize(
+        "damage", ["truncate", "garbage-json", "delete-output", "edit-output", "fail"]
+    )
+    def test_invalid_record_or_output_reruns_without_aborting(self, tmp_path, damage):
+        request = deck_request(tmp_path)
+        first = _resume(tmp_path, request)
+        unit_dir = Path(first["outdir"]) / "tt_27c"
+        record = unit_dir / "unit.json"
+        if damage == "truncate":
+            record.write_text(record.read_text()[:40], encoding="utf-8")
+        elif damage == "garbage-json":
+            record.write_text("[1, 2]", encoding="utf-8")
+        elif damage == "delete-output":
+            (unit_dir / "out" / "measure.raw").unlink()
+        elif damage == "edit-output":
+            (unit_dir / "out" / "measure.raw").write_bytes(b"x")
+        else:
+            data = json.loads(record.read_text())
+            data["result"]["status"] = "error"
+            record.write_text(json.dumps(data), encoding="utf-8")
+        second = _resume(tmp_path, request)
+        assert [u["resumed"] for u in second["units"]] == [False, True]
+        assert second["status"] == "pass"
+        assert (unit_dir / "out" / "measure.raw").stat().st_size == 300
+
+    def test_failed_unit_is_never_skipped(self, tmp_path):
+        (tmp_path / "bad.spice").write_text("* stub-exit: 3\n", encoding="utf-8")
+        request = deck_request(tmp_path, decks=[{"id": "bad", "deck": "bad.spice"}])
+        assert _resume(tmp_path, request)["status"] == "error"
+        again = _resume(tmp_path, request)
+        assert again["units"][0]["resumed"] is False
+
+    def test_duplicate_deck_bytes_and_unrelated_dirs(self, tmp_path):
+        (tmp_path / "same.spice").write_text("* same\n", encoding="utf-8")
+        request = deck_request(
+            tmp_path,
+            decks=[
+                {"id": "a", "deck": "same.spice"},
+                {"id": "b", "deck": "same.spice"},
+            ],
+        )
+        outdir = tmp_path / "out"
+        (outdir / "unrelated").mkdir(parents=True)
+        (outdir / "unrelated" / "keep.txt").write_text("keep", encoding="utf-8")
+        _resume(tmp_path, request)
+        shutil.rmtree(outdir / "b")
+        again = _resume(tmp_path, request)
+        assert [u["resumed"] for u in again["units"]] == [True, False]
+        assert (outdir / "unrelated" / "keep.txt").read_text() == "keep"
+
+    def test_options_resume_field_enables_it(self, tmp_path):
+        request = deck_request(tmp_path)
+        request["options"]["resume"] = True
+        run_local(tmp_path, request)
+        again = run_local(tmp_path, request)
+        assert [u["resumed"] for u in again["units"]] == [True, True]
+
+    def test_local_parallel_resume(self, tmp_path):
+        request = deck_request(tmp_path)
+        _resume(tmp_path, request, backend="local-parallel")
+        again = _resume(tmp_path, request, backend="local-parallel", max_workers=2)
+        assert [u["resumed"] for u in again["units"]] == [True, True]
+
+    def test_unit_record_is_a_reserved_name(self, tmp_path):
+        request = deck_request(
+            tmp_path,
+            decks=[{"id": "u", "deck": "deck.spice", "outputs": ["unit.json"]}],
+        )
+        write_request(tmp_path, request)
+        with pytest.raises(sim.SimError, match="unit.json"):
+            sim.run_sim(str(tmp_path / "request.json"), backend="local")
+
+    def test_atomic_write_failure_is_a_warning(self, tmp_path, monkeypatch):
+        def boom(*args, **kwargs):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(sd.os, "replace", boom)
+        report = run_local(tmp_path, deck_request(tmp_path))
+        assert report["status"] == "pass"
+        codes = [d["code"] for d in report["units"][0]["diagnostics"]]
+        assert "unit_record_unwritten" in codes
+        assert not list(Path(report["outdir"]).rglob("unit.json*"))
+
+
 class TestRunSimIntegration:
     def test_corner_flags_rejected_for_deck_requests(self, tmp_path):
         write_stub_engine(tmp_path)
@@ -1546,9 +1748,11 @@ class TestRunSimIntegration:
         outdir = str(tmp_path / "out")
         with pytest.raises(sim.SimError, match="--hosts"):
             sim.run_sim(request_path, backend="local", hosts=2, artifacts_dir=outdir)
-        with pytest.raises(sim.SimError, match="--resume"):
+        # --resume is accepted on local/local-parallel/batch for deck
+        # requests (issue #3957); only `remote` still refuses it.
+        with pytest.raises(sim.SimError, match="--resume.*remote"):
             sim.run_sim(
-                request_path, backend="local", resume=True, artifacts_dir=outdir
+                request_path, backend="remote", resume=True, artifacts_dir=outdir
             )
         with pytest.raises(sim.SimError, match="--budget-s"):
             sim.run_sim(

@@ -248,6 +248,29 @@ engine's behaviour has not been verified for this finding, so the field is
 never emitted for `engine: "xyce"`. See also "Monte Carlo sampling" below,
 whose `unseeded_sources` disclosure scans the same sources.
 
+#### How a per-unit seed reaches a transient-noise stream (measured, [#3957](https://github.com/2AMLogic/klayout-tools/issues/3957))
+
+**`trnoise` is not replayable through any of ngspice-42's seeding routes.**
+Measured 2026-10-20 on a local `ngspice-42` with `ngspice -b` (deck:
+`V1 n 0 dc 0 trnoise(1m 1u 0 0)` + `R1 n 0 1k`, `.tran 1u 200u`,
+`.meas tran rm RMS v(n)`; each variant run twice with seed 1 and once with
+seed 2):
+
+| Seeding route | seed=1 run A | seed=1 run B | seed=2 |
+| --- | --- | --- | --- |
+| `.spiceinit` containing `setseed N` | 7.70e-04 | 8.63e-04 | 8.21e-04 |
+| `setseed N` first in `.control` | 8.33e-04 | 9.26e-04 | 8.15e-04 |
+| `.options seed=N` | 8.37e-04 | 8.28e-04 | 8.59e-04 |
+
+The same seed gave a different RMS in every route. **Caveat: n=1 pair per
+route, one ngspice build.** Not measured: `trrandom`, other ngspice builds,
+the batch fleet's build. So klt cannot promise independent, replayable
+per-seed streams for `trnoise`, and deck-list requests have no `seed` field:
+a seed written into a deck is just deck bytes (it keys `--resume`, see
+"Resuming a deck run"), not a statement that the stream replays. What the
+per-unit `rndseed` of Monte Carlo corner mode *does* cover is
+`agauss`/`gauss`/`random()` sampling only (see "Monte Carlo sampling").
+
 ### Measurement output precision (`measureprec` / `numdgt`)
 
 ngspice prints a measurement with a fixed number of digits, and `klt sim`
@@ -2104,10 +2127,13 @@ A deck-list request must not also declare `netlist`, `corners`, `analysis`,
 should run, so it is rejected by name.
 
 The corner-only CLI knobs are likewise refused for deck requests:
-`--hosts`, `--resume`, `--budget-s`, `--plot`, `--fail-fast-probe`, and
-`--fail-on-diagnostic`. `--submit-only` and `--attach <job_id>` apply to a
-deck list on the `batch` backend (one job, one job id; see "Asynchronous submit
-and status").
+`--hosts`, `--budget-s`, `--plot`, `--fail-fast-probe`, and
+`--fail-on-diagnostic`. `--resume` (`options.resume`) is **accepted** on
+`local`, `local-parallel` and `batch` with deck-specific semantics — see
+"Resuming a deck run" below — and refused on `remote`. `--submit-only` and
+`--attach <job_id>` apply to a deck list on the `batch` backend (one job, one
+job id; see "Asynchronous submit and status"); they cannot be combined with
+`--resume`.
 
 ### Preservation and isolation
 
@@ -2129,11 +2155,13 @@ and status").
   file and is left alone; any other `.lib` shape (no arguments, more than
   two, unbalanced quotes) is rejected by name.
 - **Units are isolated.** Each unit runs in its own directory
-  (`<outdir>/<id>/`), recreated fresh every run. Its deck, declared
+  (`<outdir>/<id>/`), recreated fresh every run (except a unit `--resume`
+  skips, which is left untouched). Its deck, declared
   inputs, and staged closure are copied there under the declared names, so
   two units may share filenames freely. `stdout.bin` and `stderr.bin` at
   the unit root are reserved for the captured streams: no deck, input,
-  staged include, or declared output may claim them. `ngspice -b <deck>`
+  staged include, or declared output may claim them; so does `unit.json`,
+  the completion record `--resume` reads. `ngspice -b <deck>`
   runs with the unit directory as `cwd` — the invocation a local `ngspice -b` in the
   caller's own harness would be.
 - **Streams are evidence, untouched.** Each unit's engine stdout and
@@ -2170,8 +2198,56 @@ directory of the request is left alone.
 | `status` | `"pass"` when every unit exited 0 within its timeout; `"error"` otherwise. klt never grades the deck's electrical result. |
 | `unit_count` / `passed` / `errored` / `timed_out` | Counts over `units[]`. |
 | `units[]` | One entry per deck, in request order: `id`, `status` (`"pass"` / `"error"` / `"timeout"`), `exit_code` (`null` when the engine never launched), `timed_out`, `duration_s`, `engine_version` (best-effort from the engine's own stdout banner — recorded per unit and top-level as engine identity), `deck` (unit-relative name as run), `deck_sha256`, `stdout`, `stderr`, `outputs`, `missing_outputs`, `host_resolved` (include targets left to the executing host), `diagnostics[]` (`timeout`, `engine_exit`, `engine_not_found`; off-host job failures carry `batch_job_failed` / `batch_job_timeout` / `batch_poll_timeout`, with the job's own klt error envelope attached where one was recoverable, or `remote_job_failed` when the `remote` backend's SSH run fails — the unit trees already written on the instance are pulled back before teardown, so `stdout`/`stderr`/`outputs` point at whatever evidence was recovered and the message says which streams came back). |
+| `units[].resumed` | Present only under `--resume` (additive): `true` for a unit skipped because a valid earlier result was found (its other fields are that earlier run's, verbatim), `false` for a unit that ran. |
 | `outdir` | Absolute path of the artifacts directory on the reporting host. |
+| `environment.resume` | Present only under `--resume` (additive): `{"resumed_units": <count skipped>, "resumed_ids": [...]}`. |
 | `environment` | `engine`, `engine_version`, `ngspice_binary`, `engine_host` (`"local"`/`"worker"`; off-host runs also `client_ngspice_binary`, and `ngspice_binary` is then the worker's, see "Which machine ran it"), `klt_version`, `max_workers`; off-host runs add `remote` — the same block corner reports carry (`provider`, `instance_id`/`instance_type`, `job_id`/`region` for batch, `runner_klt_version` identity, ...). |
+
+### Resuming a deck run (`--resume`, [#3957](https://github.com/2AMLogic/klayout-tools/issues/3957))
+
+A long seeded campaign (many CPU-minutes per unit) can be re-issued after an
+interruption — or from another session — without re-simulating what already
+finished. Every unit, on every backend, writes `<outdir>/<id>/unit.json`
+**atomically** (temp file + rename, after its streams and outputs are on
+disk), so an interrupted run leaves either no record or a whole one. With
+`--resume` (or `options.resume: true`) on `local`, `local-parallel` or
+`batch`, a unit is **skipped** only when all of these hold:
+
+- `unit.json` exists, parses, and has the current record version;
+- its recorded key equals the unit's current key: `deck_sha256`, the content
+  hashes of the declared `inputs[]` and staged `.include`/`.lib` closure,
+  declared `outputs[]`, `timeout_s`, and `engine_version` (probed from the
+  local `ngspice --version`; **not compared on `batch`**, where the fleet's
+  engine cannot be probed before submit — a unit produced by a different
+  engine build is still skipped there);
+- it recorded `status: "pass"` with no `missing_outputs`;
+- every declared output still exists with its recorded SHA-256, and
+  `stdout.bin`/`stderr.bin` exist.
+
+Anything else — no record, a truncated or unparseable one, a changed deck,
+include, `timeout_s` or engine version, a non-`pass` status, a deleted or
+edited output — means "not complete": that unit re-runs and its directory is
+replaced, and **nothing else is touched or aborted** (units not in the
+request, and units that verify, are left alone; stale records are never
+deleted on their own). Skipped units appear in `units[]` with `resumed: true`
+and the earlier run's recorded streams/outputs paths, and
+`environment.resume.resumed_units` counts them. On `batch`, only the
+non-skipped units are submitted; if every unit is skipped nothing is
+submitted. Units that never came back from the fleet (`lost_shard`, a failed
+job) have no record and re-run.
+
+There is no separate seed field. A seed the caller bakes into the deck (a
+`.param`, a `trrandom` seed argument, a referenced source file) is part of
+`deck_sha256`, so "same deck and seed set" is the key. To reuse results from
+an earlier session, pass its directory as `--outdir`.
+
+**Detachment.** klt provides no local detached runner (the AWS dispatch
+workers forbid `nohup`/`setsid`-style launchers; the batch fleet is the
+sanctioned detached path). For deck-list requests today, `--backend batch`
+blocks until the job is collected, `--submit-only` and `--attach` are
+**refused** (they exist for corner requests only), and `--resume` re-issues
+only the units without a valid record. Detached deck submission is a
+separate gap, tracked in [#3958](https://github.com/2AMLogic/klayout-tools/issues/3958).
 
 ### Runner support for `decks[]` on the batch backend (issue #3303)
 
