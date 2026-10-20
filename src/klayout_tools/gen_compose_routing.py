@@ -3010,6 +3010,304 @@ def _select_route_layer(
     return effective_route_layer, effective_width_um, short_reason
 
 
+def _inflated_obstacle_bboxes_um(
+    placed_bboxes_um: dict[str, dict[str, float]], half_um: float
+) -> dict[str, dict[str, float]]:
+    """Every placed bbox inflated by ``half_um`` on every side (#999, #1620).
+
+    The obstacle-overlap check treats the backbone as a zero-width
+    centerline, but the wire actually drawn is ``width_um`` wide -- it extends
+    ``width_um / 2`` past the centerline on every side, the same Minkowski-sum
+    inflation the self-net pad-crossing check (#433) and the ring-opening
+    check (:func:`_ring_gap_route_conflict`) already apply. A centerline that
+    clears a block's bbox edge by less than ``width_um / 2`` therefore still
+    draws metal on top of that block even though a zero-width test reports no
+    crossing at all -- most commonly a same-facing port pair's connecting jog
+    running parallel to, and just outside, its own origin block's edge.
+    ``half_um`` is sized from whichever width the leg actually ends up drawn
+    at (:func:`_select_route_layer`), not unconditionally from the primary
+    plane's own ``width_um``.
+    """
+    return {
+        block_id: {
+            "x0": bbox["x0"] - half_um,
+            "y0": bbox["y0"] - half_um,
+            "x1": bbox["x1"] + half_um,
+            "y1": bbox["y1"] + half_um,
+        }
+        for block_id, bbox in placed_bboxes_um.items()
+    }
+
+
+def _navigable_regions_by_block_um(
+    block_ids: Any,
+    blocks: dict[str, dict[str, Any]],
+    offsets_um: dict[str, dict[str, float]],
+) -> dict[str, list[dict[str, float]]]:
+    """Per-block ``navigable_regions`` in composed coordinates (#1531/#1835).
+
+    A block may declare one or more rectangles of its own interior as a
+    navigable channel (e.g. ``mos_array``'s ``interior_channel_um``) --
+    reported in the block's own local frame, oriented but not yet translated
+    by ``_parse_blocks`` (mirroring ``bbox_um``), so translate each one by
+    this block's own ``offsets_um`` entry here, the same translation every
+    other per-block geometry (ports, ``bbox_um``) already receives before
+    comparison against real composed coordinates. Empty/absent for every
+    block that predates this field -- the obstacle-overlap loop then behaves
+    exactly as before (see :func:`_segment_obstacle_overlap_um`'s own
+    docstring).
+    """
+    navigable_regions_by_block_um: dict[str, list[dict[str, float]]] = {}
+    for block_id in block_ids:
+        local_regions = blocks.get(block_id, {}).get("navigable_regions") or []
+        if not local_regions:
+            continue
+        offset = offsets_um.get(block_id, {"x": 0.0, "y": 0.0})
+        navigable_regions_by_block_um[block_id] = [
+            {
+                "x0": region["x0"] + offset["x"],
+                "y0": region["y0"] + offset["y"],
+                "x1": region["x1"] + offset["x"],
+                "y1": region["y1"] + offset["y"],
+            }
+            for region in local_regions
+        ]
+    return navigable_regions_by_block_um
+
+
+def _own_pin_allowances_um(
+    *,
+    own_a: str,
+    own_b: str,
+    a: tuple[float, float],
+    b: tuple[float, float],
+    dir_a: int,
+    dir_b: int,
+    placed_bboxes_um: dict[str, dict[str, float]],
+    ring_pins: list[tuple[dict[str, Any], dict[str, Any]]],
+    stub_um: float,
+    obstacle_half_um: float,
+) -> dict[str, float]:
+    """Per-block crossing allowance for the two pins' own blocks (#199, #1902).
+
+    A pin's own block always gets an allowance equal to that port's own edge
+    margin (:func:`_port_edge_margin_um`) -- crossing exactly that much is
+    just "the route reached the pin", not a fault. Each allowance is bumped by
+    ``obstacle_half_um`` (the route's half-width) to compensate for the bbox
+    inflation (#999): without it, the inflated bbox would eat into the
+    own-pin's normal approach margin and reject routes that were always fine
+    (the approach stub's own dip into its own block is a statement about
+    *insertion depth*, not about the wire's width). A same-block self-net has
+    no allowance (it is expected to cross its own block).
+
+    Ring-gap reach allowance (issue #1902): ``_port_edge_margin_um`` alone
+    states an own-pin allowance as if the backbone always approaches from the
+    port's own facing side -- true for most blocks, but not for a
+    guard/collector-ringed block whose only way in is a declared
+    ``ring_gap_side`` opening (#434) on a *different* side than the port
+    faces. ``ring_pins`` lists exactly those (pin, block) pairs, and by the
+    time this is reached every one of them has already cleared
+    :func:`_ring_opening_conflict` -- so the crossing from that opening's own
+    side to the port is a validated, unavoidable path, not evidence the
+    backbone plowed through something it shouldn't have. See
+    :func:`_own_block_allowance_um`.
+    """
+    allowances_um: dict[str, float] = {}
+    if own_a == own_b:
+        return allowances_um
+    ring_pin_blocks = {pin["block"]: block for pin, block in ring_pins}
+    allowances_um[own_a] = (
+        _own_block_allowance_um(
+            own_a,
+            a,
+            dir_a,
+            placed_bboxes_um[own_a],
+            ring_pin_blocks=ring_pin_blocks,
+            stub_um=stub_um,
+        )
+        + obstacle_half_um
+    )
+    allowances_um[own_b] = (
+        _own_block_allowance_um(
+            own_b,
+            b,
+            dir_b,
+            placed_bboxes_um[own_b],
+            ring_pin_blocks=ring_pin_blocks,
+            stub_um=stub_um,
+        )
+        + obstacle_half_um
+    )
+    return allowances_um
+
+
+def _exempt_obstacle_block_ids(
+    obstacle_block_ids: Any,
+    layer_geometry_for: Any,
+    *,
+    own_a: str,
+    same_block_self_net: bool,
+    points: list[tuple[float, float]],
+    effective_width_um: float,
+) -> set[str]:
+    """Blocks the leg cannot short to on its drawn layer (#1656/#1681).
+
+    Decided once per block rather than per segment -- both exemptions are
+    properties of the whole leg against one block, not of a single segment
+    against it. ``layer_geometry_for`` is whichever lazy per-block geometry
+    cache matches the layer the leg landed on; ``None`` (a direct unit-test
+    caller, or ``route_layer is None``) falls back to the pre-#1656 bbox-only
+    behaviour, so no block is exempt.
+    """
+    exempt_block_ids: set[str] = set()
+    # #1681: the leg's own drawn metal, as the composed cell would draw it --
+    # the same `_drawn_route_region` construction `_self_net_drawn_short`
+    # tests a self-net's backbone against. Built at most once per distinct
+    # `dbu` (every block read from a PDK-family layout shares one in
+    # practice, so this is one region per leg) and only when some block
+    # actually reaches the geometry test below.
+    drawn_route_by_dbu: dict[float, Any] = {}
+    if layer_geometry_for is not None:
+        for other_id in obstacle_block_ids:
+            if same_block_self_net and other_id == own_a:
+                continue
+            geometry = layer_geometry_for(other_id).get(other_id)
+            if geometry is None:
+                # #1656: this block draws nothing on effective_route_layer,
+                # so the route cannot short to it -- a bbox crossing here is
+                # a false positive, not a real obstacle.
+                exempt_block_ids.add(other_id)
+            elif not _route_touches_drawn_geometry(
+                geometry,
+                points=points,
+                effective_width_um=effective_width_um,
+                drawn_route_by_dbu=drawn_route_by_dbu,
+            ):
+                # #1681: this block *does* draw on effective_route_layer, but
+                # not anywhere this leg's own drawn metal actually reaches --
+                # the classic case being a `guard_ring` block whose hollow
+                # interior holds the content block a route legitimately
+                # starts inside. A bbox is a solid proxy for a shape that is
+                # not solid, so the crossing it reports here is a false
+                # positive exactly as #1656's "draws nothing" one was.
+                exempt_block_ids.add(other_id)
+    return exempt_block_ids
+
+
+def _blocking_crossings_um(
+    points: list[tuple[float, float]],
+    obstacle_bboxes_um: dict[str, dict[str, float]],
+    navigable_regions_by_block_um: dict[str, list[dict[str, float]]],
+    allowances_um: dict[str, float],
+    exempt_block_ids: set[str],
+    *,
+    own_a: str,
+    same_block_self_net: bool,
+    margin_eps_um: float,
+) -> dict[str, float]:
+    """Per-block backbone crossing that exceeds its allowance (#199 case 1).
+
+    Sums how much of the drawn backbone lies inside each block's bbox
+    *interior* (a boundary touch doesn't count -- see
+    :func:`_segment_obstacle_overlap_um`), then keeps each block whose total
+    exceeds how much crossing is unavoidable there: the pin's own-block
+    allowance, or zero for every other block -- *any* amount of crossing a
+    third block means the backbone plowed through a block it shouldn't have.
+    """
+    overlap_by_block_um: dict[str, float] = {}
+    for seg_p0, seg_p1 in zip(points, points[1:], strict=False):
+        for other_id, other_bbox in obstacle_bboxes_um.items():
+            if same_block_self_net and other_id == own_a:
+                continue  # a self-net is expected to cross its own block
+            if other_id in exempt_block_ids:
+                continue
+            length = _segment_obstacle_overlap_um(
+                seg_p0,
+                seg_p1,
+                other_bbox,
+                navigable_regions_by_block_um.get(other_id),
+            )
+            if length > 0.0:
+                overlap_by_block_um[other_id] = (
+                    overlap_by_block_um.get(other_id, 0.0) + length
+                )
+
+    return {
+        other_id: crossed_um
+        for other_id, crossed_um in overlap_by_block_um.items()
+        if crossed_um > allowances_um.get(other_id, 0.0) + margin_eps_um
+    }
+
+
+def _far_side_crossings_um(
+    points: list[tuple[float, float]],
+    obstacle_bboxes_um: dict[str, dict[str, float]],
+    navigable_regions_by_block_um: dict[str, list[dict[str, float]]],
+    exempt_block_ids: set[str],
+    *,
+    own_a: str,
+    own_b: str,
+    a: tuple[float, float],
+    b: tuple[float, float],
+    dir_a: int,
+    dir_b: int,
+    same_block_self_net: bool,
+    obstacle_half_um: float,
+    margin_eps_um: float,
+) -> dict[str, float]:
+    """Far-side approach check (issue #1895): crossing behind a pin's port.
+
+    The per-block allowance is :func:`_port_edge_margin_um`, which measures
+    the unavoidable approach depth on the side the port *faces*. The
+    comparison it feeds is against the backbone's *total* crossing of that
+    block, with no account of where in the block that crossing sits -- so a
+    backbone that never approaches from the facing side at all, and instead
+    tunnels in from the opposite one, is funded by an allowance describing
+    metal on the other side of the block entirely. On a tall block that
+    allowance is large: #1895's reproduction reaches a north-facing gate pad
+    6.43um below its own block's top edge by running in from the south,
+    straight across the source strap underneath it, and passes the allowance
+    check with 2.96um of crossing against a 6.61um allowance -- ``routed:
+    true``, no warning, and a real drawn short ``klt extract`` recovers as
+    one merged net.
+
+    So measure the crossing on the *far* side of the port separately
+    (:func:`_port_approach_side_bbox_um`) and hold it to the inflation
+    compensation alone (``obstacle_half_um``, #999's own half-width term --
+    what it takes for a route running just outside the block to graze the
+    inflated bbox), never to the facing-side margin. A normal approach -- in
+    along the port's own facing direction, however deep -- is entirely on the
+    near side and is unaffected, so this rejects only the crossing the margin
+    never described. Scoped exactly as the allowance itself is: a same-block
+    self-net (no allowance; it is expected to cross its own block) and a
+    block exempted by :func:`_exempt_obstacle_block_ids` (#1656/#1681: it
+    draws nothing this leg's metal can short to on this layer) are both
+    skipped.
+    """
+    far_side_um: dict[str, float] = {}
+    if not same_block_self_net:
+        for own_id, own_point, own_dir in ((own_a, a, dir_a), (own_b, b, dir_b)):
+            if own_id in exempt_block_ids:
+                continue
+            far_bbox = _port_approach_side_bbox_um(
+                own_point, own_dir, obstacle_bboxes_um[own_id]
+            )
+            if far_bbox is None:
+                continue
+            crossed_um = sum(
+                _segment_obstacle_overlap_um(
+                    seg_p0,
+                    seg_p1,
+                    far_bbox,
+                    navigable_regions_by_block_um.get(own_id),
+                )
+                for seg_p0, seg_p1 in zip(points, points[1:], strict=False)
+            )
+            if crossed_um > obstacle_half_um + margin_eps_um:
+                far_side_um[own_id] = max(far_side_um.get(own_id, 0.0), crossed_um)
+    return far_side_um
+
+
 def route_two_pin(
     pin_a: dict[str, Any],
     pin_b: dict[str, Any],
@@ -3655,91 +3953,28 @@ def route_two_pin(
     if short_reason is not None:
         return _unroutable(short_reason)
 
-    # obstacle_half_um/obstacle_bboxes_um/allowances_um (#999, relocated here
-    # by #1620): every bbox this check tests against is inflated by
-    # `effective_width_um / 2` on every side, sized from whichever layer this
-    # leg actually landed on above -- see the check's own docstring section
-    # further up this function for the full rationale.
+    # Obstacle-overlap check (#199 case 1, #999, #1167, #1531, #1656, #1681,
+    # #1895, #1902): every bbox tested is inflated by half the width this leg
+    # actually draws at (_inflated_obstacle_bboxes_um); the leg is then
+    # measured against each block's allowance (_own_pin_allowances_um),
+    # exempting blocks it cannot short to (_exempt_obstacle_block_ids).
     obstacle_half_um = effective_width_um / 2.0
-    obstacle_bboxes_um = {
-        block_id: {
-            "x0": bbox["x0"] - obstacle_half_um,
-            "y0": bbox["y0"] - obstacle_half_um,
-            "x1": bbox["x1"] + obstacle_half_um,
-            "y1": bbox["y1"] + obstacle_half_um,
-        }
-        for block_id, bbox in placed_bboxes_um.items()
-    }
-
-    # navigable_regions (issues #1531/#1835): a block may declare one or more
-    # rectangles of its own interior as a navigable channel (e.g.
-    # `mos_array`'s `interior_channel_um`) -- reported in the block's own
-    # local frame, oriented but not yet translated by `_parse_blocks`
-    # (mirroring `bbox_um`), so translate each one by this block's own
-    # `offsets_um` entry here, the same translation every other per-block
-    # geometry (ports, bbox_um) already receives before comparison against
-    # real composed coordinates. Empty/absent for every block that predates
-    # this field -- the obstacle-overlap loop below then behaves exactly as
-    # before (see `_segment_obstacle_overlap_um`'s own docstring).
-    navigable_regions_by_block_um: dict[str, list[dict[str, float]]] = {}
-    for block_id in obstacle_bboxes_um:
-        local_regions = blocks.get(block_id, {}).get("navigable_regions") or []
-        if not local_regions:
-            continue
-        offset = offsets_um.get(block_id, {"x": 0.0, "y": 0.0})
-        navigable_regions_by_block_um[block_id] = [
-            {
-                "x0": region["x0"] + offset["x"],
-                "y0": region["y0"] + offset["y"],
-                "x1": region["x1"] + offset["x"],
-                "y1": region["y1"] + offset["y"],
-            }
-            for region in local_regions
-        ]
-
-    # Ring-gap reach allowance (issue #1902): `_port_edge_margin_um` alone
-    # states an own-pin allowance as if the backbone always approaches from
-    # the port's own facing side -- true for most blocks, but not for a
-    # guard/collector-ringed block whose only way in is a declared
-    # `ring_gap_side` opening (#434) on a *different* side than the port
-    # faces. `ring_pins` above already lists exactly those (pin, block)
-    # pairs, and by the time this point is reached every one of them has
-    # already cleared `_ring_gap_route_conflict` -- so the crossing from that
-    # opening's own side to the port is a validated, unavoidable path, not
-    # evidence the backbone plowed through something it shouldn't have.
-    # Widen the allowance for such a pin to the larger of the two: the
-    # port's own facing-side margin (unchanged for every other block), or
-    # the distance from the port to the *gapped* side's own edge, plus one
-    # more stub width when that side is not the one the port already faces
-    # (the backbone still draws its normal facing-direction approach stub
-    # before turning towards the opening, on top of the reach across the
-    # block -- see `manhattan_backbone`'s own per-pin stub).
-    ring_pin_blocks = {pin["block"]: block for pin, block in ring_pins}
-
-    allowances_um: dict[str, float] = {}
-    if not same_block_self_net:
-        allowances_um[own_a] = (
-            _own_block_allowance_um(
-                own_a,
-                a,
-                dir_a,
-                placed_bboxes_um[own_a],
-                ring_pin_blocks=ring_pin_blocks,
-                stub_um=stub_um,
-            )
-            + obstacle_half_um
-        )
-        allowances_um[own_b] = (
-            _own_block_allowance_um(
-                own_b,
-                b,
-                dir_b,
-                placed_bboxes_um[own_b],
-                ring_pin_blocks=ring_pin_blocks,
-                stub_um=stub_um,
-            )
-            + obstacle_half_um
-        )
+    obstacle_bboxes_um = _inflated_obstacle_bboxes_um(placed_bboxes_um, obstacle_half_um)
+    navigable_regions_by_block_um = _navigable_regions_by_block_um(
+        obstacle_bboxes_um, blocks, offsets_um
+    )
+    allowances_um = _own_pin_allowances_um(
+        own_a=own_a,
+        own_b=own_b,
+        a=a,
+        b=b,
+        dir_a=dir_a,
+        dir_b=dir_b,
+        placed_bboxes_um=placed_bboxes_um,
+        ring_pins=ring_pins,
+        stub_um=stub_um,
+        obstacle_half_um=obstacle_half_um,
+    )
 
     # #1656: pick whichever lazy per-block geometry cache (if any) matches
     # the layer this leg actually landed on above -- `block_geometry_for`
@@ -3759,113 +3994,39 @@ def route_two_pin(
     else:
         layer_geometry_for = None
 
-    # #1681: the leg's own drawn metal, as the composed cell would draw it --
-    # the same `_drawn_route_region` construction `_self_net_drawn_short`
-    # tests a self-net's backbone against. Built at most once per distinct
-    # `dbu` (every block read from a PDK-family layout shares one in
-    # practice, so this is one region per leg) and only when some block
-    # actually reaches the geometry test below.
-    drawn_route_by_dbu: dict[float, Any] = {}
-
-    # Per-block exemptions, decided once per block rather than per segment --
-    # both are properties of the whole leg against one block, not of a single
-    # segment against it.
-    exempt_block_ids: set[str] = set()
-    if layer_geometry_for is not None:
-        for other_id in obstacle_bboxes_um:
-            if same_block_self_net and other_id == own_a:
-                continue
-            geometry = layer_geometry_for(other_id).get(other_id)
-            if geometry is None:
-                # #1656: this block draws nothing on effective_route_layer,
-                # so the route cannot short to it -- a bbox crossing here is
-                # a false positive, not a real obstacle.
-                exempt_block_ids.add(other_id)
-            elif not _route_touches_drawn_geometry(
-                geometry,
-                points=points,
-                effective_width_um=effective_width_um,
-                drawn_route_by_dbu=drawn_route_by_dbu,
-            ):
-                # #1681: this block *does* draw on effective_route_layer, but
-                # not anywhere this leg's own drawn metal actually reaches --
-                # the classic case being a `guard_ring` block whose hollow
-                # interior holds the content block a route legitimately
-                # starts inside. A bbox is a solid proxy for a shape that is
-                # not solid, so the crossing it reports here is a false
-                # positive exactly as #1656's "draws nothing" one was.
-                exempt_block_ids.add(other_id)
-
-    overlap_by_block_um: dict[str, float] = {}
-    for seg_p0, seg_p1 in zip(points, points[1:], strict=False):
-        for other_id, other_bbox in obstacle_bboxes_um.items():
-            if same_block_self_net and other_id == own_a:
-                continue  # a self-net is expected to cross its own block
-            if other_id in exempt_block_ids:
-                continue
-            length = _segment_obstacle_overlap_um(
-                seg_p0,
-                seg_p1,
-                other_bbox,
-                navigable_regions_by_block_um.get(other_id),
-            )
-            if length > 0.0:
-                overlap_by_block_um[other_id] = (
-                    overlap_by_block_um.get(other_id, 0.0) + length
-                )
-
-    blocking_um = {
-        other_id: crossed_um
-        for other_id, crossed_um in overlap_by_block_um.items()
-        if crossed_um > allowances_um.get(other_id, 0.0) + margin_eps_um
-    }
-
-    # Far-side approach check (issue #1895): the per-block allowance above is
-    # `_port_edge_margin_um`, which measures the unavoidable approach depth on
-    # the side the port *faces*. The comparison it feeds is against the
-    # backbone's *total* crossing of that block, with no account of where in
-    # the block that crossing sits -- so a backbone that never approaches from
-    # the facing side at all, and instead tunnels in from the opposite one, is
-    # funded by an allowance describing metal on the other side of the block
-    # entirely. On a tall block that allowance is large: #1895's reproduction
-    # reaches a north-facing gate pad 6.43um below its own block's top edge by
-    # running in from the south, straight across the source strap underneath
-    # it, and passes this check with 2.96um of crossing against a 6.61um
-    # allowance -- `routed: true`, no warning, and a real drawn short `klt
-    # extract` recovers as one merged net.
-    #
-    # So measure the crossing on the *far* side of the port separately
-    # (`_port_approach_side_bbox_um`) and hold it to the inflation
-    # compensation alone (`obstacle_half_um`, #999's own half-width term --
-    # what it takes for a route running just outside the block to graze the
-    # inflated bbox), never to the facing-side margin. A normal approach --
-    # in along the port's own facing direction, however deep -- is entirely
-    # on the near side and is unaffected, so this rejects only the crossing
-    # the margin never described. Scoped exactly as the allowance itself is:
-    # a same-block self-net (no allowance; it is expected to cross its own
-    # block) and a block exempted above (#1656/#1681: it draws nothing this
-    # leg's metal can short to on this layer) are both skipped.
-    far_side_um: dict[str, float] = {}
-    if not same_block_self_net:
-        for own_id, own_point, own_dir in ((own_a, a, dir_a), (own_b, b, dir_b)):
-            if own_id in exempt_block_ids:
-                continue
-            far_bbox = _port_approach_side_bbox_um(
-                own_point, own_dir, obstacle_bboxes_um[own_id]
-            )
-            if far_bbox is None:
-                continue
-            crossed_um = sum(
-                _segment_obstacle_overlap_um(
-                    seg_p0,
-                    seg_p1,
-                    far_bbox,
-                    navigable_regions_by_block_um.get(own_id),
-                )
-                for seg_p0, seg_p1 in zip(points, points[1:], strict=False)
-            )
-            if crossed_um > obstacle_half_um + margin_eps_um:
-                far_side_um[own_id] = max(far_side_um.get(own_id, 0.0), crossed_um)
+    exempt_block_ids = _exempt_obstacle_block_ids(
+        obstacle_bboxes_um,
+        layer_geometry_for,
+        own_a=own_a,
+        same_block_self_net=same_block_self_net,
+        points=points,
+        effective_width_um=effective_width_um,
+    )
+    blocking_um = _blocking_crossings_um(
+        points,
+        obstacle_bboxes_um,
+        navigable_regions_by_block_um,
+        allowances_um,
+        exempt_block_ids,
+        own_a=own_a,
+        same_block_self_net=same_block_self_net,
+        margin_eps_um=margin_eps_um,
+    )
+    far_side_um = _far_side_crossings_um(
+        points,
+        obstacle_bboxes_um,
+        navigable_regions_by_block_um,
+        exempt_block_ids,
+        own_a=own_a,
+        own_b=own_b,
+        a=a,
+        b=b,
+        dir_a=dir_a,
+        dir_b=dir_b,
+        same_block_self_net=same_block_self_net,
+        obstacle_half_um=obstacle_half_um,
+        margin_eps_um=margin_eps_um,
+    )
 
     # Bounded detour search (#1167): a backbone rejected *only* for crossing
     # blocks neither of its two pins sits on is not a routing failure -- it is
