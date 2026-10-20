@@ -1012,11 +1012,17 @@ def run_lvs(
     if engine == RUNSET_ENGINE:
         # Issue #2849: the PDK's own runset does extraction and compare; the
         # verdict is read back from its .lvsdb (see lvs_runset.py).
-        return _finish_response(
-            run_lvs_klayout_runset(request, request_dir),
-            portable=portable_paths,
-            request_dir=request_dir,
+        runset_report = run_lvs_klayout_runset(request, request_dir)
+        binary = runset_report.get("environment", {}).get("klayout_binary")
+        response = _finish_response(
+            runset_report, portable=portable_paths, request_dir=request_dir
         )
+        if portable_paths and isinstance(binary, str):
+            # Issue #3988: keep the tool's identity (its name) instead of
+            # the generic external-path object; the version is recorded
+            # separately in ``engine_version``.
+            response["environment"]["klayout_binary"] = os.path.basename(binary)
+        return response
 
     # `layout.deck_options` (issue #600) mirrors `klt extract --deck-option`'s
     # resolved `{key: value}` mapping, one layer down: this is a JSON object
