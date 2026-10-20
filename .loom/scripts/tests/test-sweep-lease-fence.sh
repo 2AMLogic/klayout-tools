@@ -40,15 +40,19 @@
 #   (q) a yield record for a DIFFERENT sweep on the SAME host does not
 #       exclude a later, legitimately-reclaimed lease from that host --
 #       matched by exact (host, sweep), not by host alone (#6485)
-#   (t) --sweep-id (#2237): an EXPIRED lease on THIS host belonging to a
-#       DIFFERENT sweep run -> PASS, not ABORT EXPIRED -- the #2226 incident
-#       shape. Plus the companions that pin the flag's exact blast radius:
-#       same host + MATCHING sweep id still ABORTs 3; the fresh same-host/
-#       different-sweep case still PASSes (never a new abort); a matching
-#       sweep id on a fresh lease still PASSes; and the flag is inert on a
-#       DIFFERENT host (expired -> PASS per #6783, fresh -> ABORT 4).
-#   (u) omitting --sweep-id leaves every outcome byte-for-byte at the
-#       pre-#2237 host-only behavior (the backward-compatibility contract)
+#   (u) `forge check-branch` reports the branch already exists (no closed-PR
+#       evidence: the #9447 racing claimant's fresh push) -> ABORT
+#       BRANCH_COLLISION (exit 5), and the lease legs STILL run and report
+#       (#9453 Phase 4, #10027)
+#   (v) `forge check-branch` fails closed (exit 5) -> also ABORT
+#       BRANCH_COLLISION -- unlike the lease checks, this leg fails CLOSED
+#   (w) the daemon reports a closed PR's preserved head (exit 6) -> not a
+#       collision; the exit follows the lease legs (#10027). Which branches
+#       qualify (closed-unmerged tip, no open PR on it, no open linked PR on
+#       the issue) is decided and unit-tested in forge_check_branch.rs.
+#   (y) missing daemon binary / clap usage error (an old daemon) -> exit 6
+#       BRANCH_PROBE_UNAVAILABLE, not 5 (#10027)
+#   (z) --branch passthrough and default (#10027)
 #   (s) LOOM_REPO unset (the common case -- this script has no --repo CLI
 #       flag) leaves `repo_args` a genuinely empty array; expanding
 #       `"${repo_args[@]}"` unguarded there is an "unbound variable" under
@@ -67,45 +71,10 @@ TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_DIR="$(cd "$TEST_DIR/.." && pwd)"
 SCRIPT="$SCRIPTS_DIR/sweep-lease-fence.sh"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-NC='\033[0m'
+# shellcheck source=lib/assert.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
-TESTS_RUN=0
-TESTS_PASSED=0
-TESTS_FAILED=0
 
-assert_eq() {
-    local expected="$1" actual="$2" msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if [[ "$expected" == "$actual" ]]; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Expected: '$expected'"
-        echo "    Actual:   '$actual'"
-    fi
-}
-
-# assert_contains/assert_not_contains use a pure-bash substring match (no
-# forked printf|grep pipeline) so a transient fork/exec failure under
-# run-ci-suites.sh's parallel suite pool can never masquerade as a genuine
-# content mismatch (#7819, #7874).
-assert_contains() {
-    local haystack="$1" needle="$2" msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if [[ "$haystack" == *"$needle"* ]]; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Expected substring: '$needle'"
-        echo "    In: '$haystack'"
-    fi
-}
 
 assert_true() {
     local cond="$1" msg="$2"
@@ -128,7 +97,7 @@ STUB_DIR="$(mktemp -d)"
 trap 'rm -rf "$STUB_DIR" 2>/dev/null || true' EXIT
 
 # --- Stub gh on PATH ---------------------------------------------------
-#   gh api [-R repo] repos/{owner}/{repo}/issues/<N>/comments --paginate --jq FILTER
+#   gh api repos/{owner}/{repo}/issues/<N>/comments --paginate --jq FILTER
 #       -> apply the REAL `jq` (compact, one value per line -- exactly what
 #          `gh api --jq` emits) to $STUB_DIR/comments.json (or "[]"), so the
 #          script's own filter string is genuinely exercised, not a
@@ -143,7 +112,9 @@ if [[ "$1" == "api" ]]; then
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --jq) filter="$2"; shift 2 ;;
-      -R) shift 2 ;;
+      -R|--repo)
+        # Real `gh api` has no -R/--repo flag (#9552): fail exactly like it.
+        echo "unknown shorthand flag: 'R' in -R" >&2; exit 1 ;;
       --paginate) shift ;;
       *)
         if [[ -z "$path" ]]; then path="$1"; fi
@@ -151,6 +122,7 @@ if [[ "$1" == "api" ]]; then
         ;;
     esac
   done
+  echo "$path" >> "$D/api-paths.log"
   if [[ "$path" == repos/*/issues/*/comments ]]; then
     if [[ -f "$D/comments-fail" ]]; then
       echo "stub gh: comments fetch failed" >&2
@@ -171,9 +143,15 @@ chmod +x "$STUB_DIR/gh"
 
 export LOOM_TEST_STUB_DIR="$STUB_DIR"
 export PATH="$STUB_DIR:$PATH"
+# #9548: the subject filters lease markers through `forge trusted-comments`.
+# shellcheck source=lib/trust-stub.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/trust-stub.sh"
+loom_trust_stub "$STUB_DIR"
 
 reset_state() {
-    rm -f "$STUB_DIR"/comments.json "$STUB_DIR"/comments-fail
+    rm -f "$STUB_DIR"/comments.json "$STUB_DIR"/comments-fail \
+        "$STUB_DIR"/check-branch-rc "$STUB_DIR"/check-branch-stdout \
+        "$STUB_DIR"/check-branch-args.log "$STUB_DIR"/check-branch-legacy-rc
     unset LOOM_LEASE_FENCE_NOW LOOM_HOST_ID LOOM_LEASE_TTL_MINUTES HOSTNAME \
         LOOM_LEASE_PUBLISH_HOSTNAME LOOM_REPO 2> /dev/null || true
 }
@@ -368,121 +346,6 @@ LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host
 assert_eq "0" "$RC" "(q) a stale yield for a DIFFERENT (older) sweep on the same host does not block this host's brand new lease"
 assert_contains "$ERR" "sweep=sweep-new" "(q) stderr confirms the match is the new sweep's lease, not the old yielded one"
 
-# --- (t) --sweep-id (#2237) ------------------------------------------------
-# The regression case: the freshest (and only) lease on the issue is EXPIRED
-# and was written on THIS very host, but by a DIFFERENT, already-dead sweep
-# run. Pre-#2237 the host-only ownership test read that as "MY OWN renewal
-# loop died" and aborted 3 -- permanently, since a dead sweep's never-renewed,
-# never-yielded record can never stop being the freshest comment. This is the
-# #2226 incident shape (sweep-issue-2226-1789988240 fenced out by
-# sweep-issue-2226-1789985384's expired lease on the same host).
-reset_state
-cat > "$STUB_DIR/comments.json" <<'JSON'
-[
-  {"id": 1, "updated_at": "2026-08-15T15:30:00Z", "body": "<!-- loom:lease host=studio-host sweep=sweep-issue-2226-1789985384 -->\nprose"}
-]
-JSON
-LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host --sweep-id sweep-issue-2226-1789988240
-assert_eq "0" "$RC" "(t) expired lease, SAME host but a DIFFERENT sweep-id -> exit 0 (PASS, not ABORT -- #2237)"
-assert_contains "$ERR" "PASS" "(t) stderr reports a PASS, not an ABORT"
-assert_contains "$ERR" "EXPIRED" "(t) stderr still names the EXPIRED condition it is passing through"
-assert_contains "$ERR" "DIFFERENT sweep" "(t) stderr explains that the abandoned lease belongs to another sweep run"
-assert_contains "$ERR" "sweep-issue-2226-1789985384" "(t) stderr names the abandoned predecessor's sweep id"
-assert_contains "$ERR" "sweep-issue-2226-1789988240" "(t) stderr names this dispatch's own sweep id"
-
-# Same fixture, but the sweep-id MATCHES: this really is this dispatch's own
-# lease and its renewal loop really did die -> the EXPIRED abort must survive.
-reset_state
-cat > "$STUB_DIR/comments.json" <<'JSON'
-[
-  {"id": 1, "updated_at": "2026-08-15T15:30:00Z", "body": "<!-- loom:lease host=studio-host sweep=sweep-own -->\nprose"}
-]
-JSON
-LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host --sweep-id sweep-own
-assert_eq "3" "$RC" "(t) expired lease, same host AND matching sweep-id -> exit 3 (ABORT EXPIRED still fires)"
-assert_contains "$ERR" "ABORT: EXPIRED" "(t) stderr still distinguishes EXPIRED for a genuinely own, dead lease"
-
-# A FRESH lease on this host from a different sweep run. This PASSed before
-# #2237 (host-only match) and must still PASS -- the flag only ever REMOVES
-# aborts. It is reported as the fail-open "no lease of my own" case, never as
-# a verified ownership match.
-reset_state
-cat > "$STUB_DIR/comments.json" <<'JSON'
-[
-  {"id": 1, "updated_at": "2026-08-15T15:51:00Z", "body": "<!-- loom:lease host=studio-host sweep=sweep-peer-on-same-host -->\nprose"}
-]
-JSON
-LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host --sweep-id sweep-mine
-assert_eq "0" "$RC" "(t) FRESH lease, same host but a different sweep-id -> exit 0 (PASS, never a new ABORT)"
-assert_contains "$ERR" "FRESH" "(t) stderr names the FRESH condition"
-assert_contains "$ERR" "no lease record of its own" "(t) stderr reports it as fail-open, not as a verified ownership match"
-
-# A FRESH lease that matches on BOTH host and sweep-id -> the ordinary
-# verified-ownership PASS, with the sweep id echoed in the reason.
-reset_state
-cat > "$STUB_DIR/comments.json" <<'JSON'
-[
-  {"id": 1, "updated_at": "2026-08-15T15:51:00Z", "body": "<!-- loom:lease host=studio-host sweep=sweep-mine -->\nprose"}
-]
-JSON
-LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host --sweep-id sweep-mine
-assert_eq "0" "$RC" "(t) FRESH lease matching host AND sweep-id -> exit 0 (verified-ownership PASS)"
-assert_contains "$ERR" "lease fence OK" "(t) stderr reports the verified-ownership PASS reason"
-assert_contains "$ERR" "sweep id matches" "(t) stderr records that the sweep id was checked too"
-
-# --sweep-id is inert on a DIFFERENT host: a different host is not this
-# dispatch regardless of sweep id, so #6783 (expired -> PASS) and exit 4
-# (fresh -> SUPERSEDED) both behave exactly as they do without the flag.
-reset_state
-cat > "$STUB_DIR/comments.json" <<'JSON'
-[{"id": 1, "updated_at": "2026-08-15T15:30:00Z", "body": "<!-- loom:lease host=dead-host sweep=sweep-elsewhere -->\nprose"}]
-JSON
-LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host --sweep-id sweep-mine
-assert_eq "0" "$RC" "(t) expired lease on a DIFFERENT host, with --sweep-id -> exit 0 (#6783 unchanged)"
-assert_contains "$ERR" "DIFFERENT host" "(t) the different-host expired reason, not the different-sweep one"
-reset_state
-cat > "$STUB_DIR/comments.json" <<'JSON'
-[{"id": 1, "updated_at": "2026-08-15T15:51:00Z", "body": "<!-- loom:lease host=other-host sweep=sweep-elsewhere -->\nprose"}]
-JSON
-LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host --sweep-id sweep-mine
-assert_eq "4" "$RC" "(t) fresh lease on a DIFFERENT host, with --sweep-id -> exit 4 (SUPERSEDED unchanged)"
-
-# An EMPTY --sweep-id is treated exactly like omitting the flag: a reader may
-# not invent its own run identity, so "" selects the host-only comparison
-# rather than being compared literally against the lease's sweep= field.
-reset_state
-cat > "$STUB_DIR/comments.json" <<'JSON'
-[{"id": 1, "updated_at": "2026-08-15T15:30:00Z", "body": "<!-- loom:lease host=studio-host sweep=sweep-a -->\nprose"}]
-JSON
-LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host --sweep-id ""
-assert_eq "3" "$RC" "(t) an EMPTY --sweep-id falls back to host-only comparison -> exit 3, as if omitted"
-
-# --- (u) omitting --sweep-id preserves the pre-#2237 behavior exactly ------
-# The (t) different-sweep fixtures, re-run with NO --sweep-id: every outcome
-# must match the host-only contract cases (b)/(a) above, unchanged.
-reset_state
-cat > "$STUB_DIR/comments.json" <<'JSON'
-[{"id": 1, "updated_at": "2026-08-15T15:30:00Z", "body": "<!-- loom:lease host=studio-host sweep=sweep-issue-2226-1789985384 -->\nprose"}]
-JSON
-LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host
-assert_eq "3" "$RC" "(u) --sweep-id omitted: an expired same-host lease still aborts 3 (host-only, pre-#2237 behavior)"
-reset_state
-cat > "$STUB_DIR/comments.json" <<'JSON'
-[{"id": 1, "updated_at": "2026-08-15T15:51:00Z", "body": "<!-- loom:lease host=studio-host sweep=sweep-peer-on-same-host -->\nprose"}]
-JSON
-LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host
-assert_eq "0" "$RC" "(u) --sweep-id omitted: a fresh same-host lease still passes (host-only, pre-#2237 behavior)"
-assert_contains "$ERR" "lease fence OK" "(u) --sweep-id omitted: the PASS reason is the unchanged host-only one"
-TESTS_RUN=$((TESTS_RUN + 1))
-if [[ "$ERR" != *"sweep id matches"* ]]; then
-    TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "  ${GREEN}PASS${NC}: (u) --sweep-id omitted: the PASS reason claims no sweep-id check"
-else
-    TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "  ${RED}FAIL${NC}: (u) --sweep-id omitted: the PASS reason claims no sweep-id check"
-    echo "    stderr: $ERR"
-fi
-
 # --- (s) LOOM_REPO unset -> empty `repo_args[@]` must never surface as
 # "unbound variable" and must not be mistaken for a genuine fetch failure
 # (#7957). First on the ambient (test-runner) bash -- always runs, though it
@@ -527,7 +390,7 @@ if [[ -x /bin/bash ]]; then
     fi
 fi
 if [[ -n "$LEGACY_BASH" ]]; then
-    OUT="$("$LEGACY_BASH" "$SCRIPT" check 6309 --host studio-host 2>"$STUB_DIR/stderr-legacy.log")"
+    OUT="$(LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" "$LEGACY_BASH" "$SCRIPT" check 6309 --host studio-host 2>"$STUB_DIR/stderr-legacy.log")"
     RC=$?
     ERR="$(cat "$STUB_DIR/stderr-legacy.log" 2> /dev/null || true)"
     assert_eq "0" "$RC" "(s) bash 3.2: LOOM_REPO unset -> exit 0 (real PASS, not a crash)"
@@ -573,6 +436,261 @@ assert_true "$([[ "$RC" -ne 0 ]] && echo true || echo false)" "(k) unknown comma
 HELP_RC=$?
 assert_true "$([[ -s "$STUB_DIR/help.out" ]] && echo true || echo false)" "(l) --help prints usage text"
 assert_eq "1" "$HELP_RC" "(l) --help exits 1 (usage-exit convention, matches sweep-lease-renew.sh)"
+
+# --- (m) LOOM_REPO set -> the repo is addressed in the endpoint PATH, never
+# via `-R` (#9552). `gh api` has no -R flag, so the old `-R $LOOM_REPO`
+# splice made every fetch fail and the fence fail OPEN. A fresh peer lease
+# must still be fenced against when LOOM_REPO is set.
+reset_state
+: > "$STUB_DIR/api-paths.log"
+cat > "$STUB_DIR/comments.json" <<'JSON'
+[{"id": 1, "updated_at": "2026-08-15T15:51:00Z", "body": "<!-- loom:lease host=other-host sweep=sweep-b -->\nprose"}]
+JSON
+LOOM_REPO=acme/widget LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host
+assert_eq "4" "$RC" "(m) LOOM_REPO set: a fresh peer lease is still fenced (exit 4), not failed open"
+assert_eq "repos/acme/widget/issues/6309/comments" "$(cat "$STUB_DIR/api-paths.log")" "(m) LOOM_REPO set: the endpoint path names the repo"
+reset_state
+: > "$STUB_DIR/api-paths.log"
+LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host
+assert_eq "repos/{owner}/{repo}/issues/6309/comments" "$(cat "$STUB_DIR/api-paths.log")" "(m) LOOM_REPO unset: gh's {owner}/{repo} placeholder is used"
+
+# --- (t) #9548: a fresh foreign lease from an UNTRUSTED author is prose ----
+reset_state
+cat > "$STUB_DIR/comments.json" <<'JSON'
+[
+  {"id": 1, "updated_at": "2026-08-15T15:50:00Z", "body": "<!-- loom:lease host=studio-host sweep=sweep-a -->\nprose"},
+  {"id": 2, "updated_at": "2026-08-15T15:51:00Z", "user": {"login": "drive-by", "type": "User"}, "author_association": "NONE", "body": "<!-- loom:lease host=other-host sweep=sweep-b -->"},
+  {"id": 3, "updated_at": "2026-08-15T15:51:30Z", "user": {"login": "other-fleet[bot]", "type": "Bot"}, "author_association": "NONE", "body": "<!-- loom:lease host=other-host sweep=sweep-c -->"}
+]
+JSON
+LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host
+assert_eq "0" "$RC" "(t) untrusted fresher leases do not supersede this sweep's own (PASS)"
+LOOM_TEST_NO_TRUST_VERB=1 LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host
+assert_eq "0" "$RC" "(t) no trust filter -> unverifiable, fails open (PASS)"
+assert_contains "$ERR" "could not be authenticated" "(t) stderr names the missing authentication"
+
+# --- (u) #9453 Phase 4 / #10027: `forge check-branch` reports the branch
+# already exists on origin, and there is no closed-PR evidence (the #9447
+# racing claimant's fresh push) -> ABORT BRANCH_COLLISION (exit 5). The lease
+# legs still run and report (#10027): the lease fixture below, on its own,
+# would PASS, and that verdict is printed alongside the abort.
+reset_state
+: > "$STUB_DIR/api-paths.log"
+echo "0" > "$STUB_DIR/check-branch-rc"
+echo "2026-09-29T03:48:22+00:00" > "$STUB_DIR/check-branch-stdout"
+cat > "$STUB_DIR/comments.json" <<'JSON'
+[{"id": 1, "updated_at": "2026-08-15T15:50:00Z", "body": "<!-- loom:lease host=studio-host sweep=sweep-a -->\nprose"}]
+JSON
+LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host
+assert_eq "5" "$RC" "(u) confirmed branch collision -> exit 5 (ABORT BRANCH_COLLISION)"
+assert_contains "$ERR" "BRANCH_COLLISION" "(u) stderr names the collision"
+assert_contains "$ERR" "feature/issue-6309" "(u) stderr names the colliding branch"
+assert_contains "$ERR" "suffix branch" "(u) stderr forbids the #9447 suffix-branch fallback"
+assert_contains "$(cat "$STUB_DIR/api-paths.log" 2>/dev/null || true)" "issues/6309/comments" "(u) the lease-comment fetch still ran -- the branch leg no longer suppresses it (#10027)"
+assert_contains "$ERR" "lease fence OK" "(u) the lease verdict is printed alongside the branch abort"
+assert_contains "$ERR" "VERDICT: issue #6309 branch-exit=5 (feature/issue-6309) lease-exit=0" "(u) the summary line reports both verdicts"
+
+# (u2) branch collision AND a superseding peer lease: 5 keeps precedence, but
+# the SUPERSEDED verdict is still reported.
+reset_state
+echo "0" > "$STUB_DIR/check-branch-rc"
+cat > "$STUB_DIR/comments.json" <<'JSON'
+[{"id": 1, "updated_at": "2026-08-15T15:50:00Z", "body": "<!-- loom:lease host=other-host sweep=sweep-b -->"}]
+JSON
+LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host
+assert_eq "5" "$RC" "(u2) collision + superseded lease -> exit 5 (branch abort keeps precedence)"
+assert_contains "$ERR" "ABORT: SUPERSEDED" "(u2) the lease abort is still reported"
+assert_contains "$ERR" "branch-exit=5 (feature/issue-6309) lease-exit=4" "(u2) the summary line reports both verdicts"
+
+# --- (v) #9453 Phase 4: `forge check-branch` itself fails (exit 5, fail
+# CLOSED) -> also ABORT BRANCH_COLLISION. Unlike every lease-comment failure
+# above (which all fail OPEN), an unverifiable branch answer still aborts --
+# the asymmetry this script's header doc calls out explicitly.
+reset_state
+echo "5" > "$STUB_DIR/check-branch-rc"
+LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host
+assert_eq "5" "$RC" "(v) branch probe failure -> exit 5 (ABORT BRANCH_COLLISION, fail CLOSED)"
+assert_contains "$ERR" "BRANCH_COLLISION" "(v) stderr names the collision even though it is unverified"
+assert_contains "$ERR" "lease-exit=0" "(v) the lease legs still ran and reported (#10027)"
+
+# --- (w) #10027: the daemon reports a closed PR's preserved head (exit 6) ->
+# not a collision; the exit follows the lease legs. --------------------------
+LEASE_OWN='[{"id": 1, "updated_at": "2026-08-15T15:50:00Z", "body": "<!-- loom:lease host=studio-host sweep=sweep-a -->"}]'
+LEASE_PEER='[{"id": 1, "updated_at": "2026-08-15T15:50:00Z", "body": "<!-- loom:lease host=other-host sweep=sweep-b -->"}]'
+reset_state
+echo "6" > "$STUB_DIR/check-branch-rc"
+echo "721" > "$STUB_DIR/check-branch-stdout"
+echo "$LEASE_OWN" > "$STUB_DIR/comments.json"
+LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host
+assert_eq "0" "$RC" "(w) closed PR's preserved head + own fresh lease -> exit 0 (not a collision)"
+assert_contains "$ERR" "BRANCH OK: 721" "(w) stderr relays the daemon's closed-head answer"
+assert_contains "$ERR" "branch-exit=0 (feature/issue-6309) lease-exit=0" "(w) the summary line reports both verdicts (closed head is not a collision)"
+assert_contains "$(cat "$STUB_DIR/check-branch-args.log")" "--closed-pr-head" "(w) the closed-head classification was asked of the daemon"
+echo "$LEASE_PEER" > "$STUB_DIR/comments.json"
+LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host
+assert_eq "4" "$RC" "(w) closed PR's preserved head + superseding peer lease -> exit 4 (the lease verdict decides)"
+
+# --- (y) #10027: daemon cannot answer at all -> exit 6, not 5 ----------------
+reset_state
+echo "2" > "$STUB_DIR/check-branch-rc"
+echo "error: unrecognized subcommand 'check-branch'" > "$STUB_DIR/check-branch-stdout"
+echo "$LEASE_OWN" > "$STUB_DIR/comments.json"
+LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host
+assert_eq "6" "$RC" "(y) unrecognized subcommand -> exit 6 (BRANCH_PROBE_UNAVAILABLE), not 5"
+assert_contains "$ERR" "BRANCH_PROBE_UNAVAILABLE" "(y) stderr names the unavailable probe"
+assert_contains "$ERR" "lease fence OK" "(y) the lease legs still ran"
+echo "$LEASE_PEER" > "$STUB_DIR/comments.json"
+LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host
+assert_eq "4" "$RC" "(y) probe unavailable + superseded lease -> exit 4 (a definitive lease abort outranks 6)"
+echo "$LEASE_OWN" > "$STUB_DIR/comments.json"
+LOOM_DAEMON_BIN="$STUB_DIR/no-such-loom-daemon" LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host
+assert_eq "6" "$RC" "(y) missing daemon binary -> exit 6, not 5"
+
+# --- (y2) #10027 rollout: an older daemon still answers the legacy question ---
+# Default branch + clap usage error on the new flags -> re-ask flagless; the
+# old daemon's answer is mapped exactly as before #10027.
+reset_state
+echo "2" > "$STUB_DIR/check-branch-rc"
+echo "1" > "$STUB_DIR/check-branch-legacy-rc"
+echo "$LEASE_OWN" > "$STUB_DIR/comments.json"
+LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host
+assert_eq "0" "$RC" "(y2) old daemon, legacy re-ask verifies absence -> PASS (no rollout stall)"
+assert_eq "forge check-branch 6309" "$(tail -n 1 "$STUB_DIR/check-branch-args.log")" "(y2) the legacy flagless question was re-asked"
+echo "0" > "$STUB_DIR/check-branch-legacy-rc"
+LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host
+assert_eq "5" "$RC" "(y2) old daemon, legacy re-ask finds the branch -> exit 5 BRANCH_COLLISION (fail closed, as before)"
+echo "1" > "$STUB_DIR/check-branch-legacy-rc"
+LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --branch topic/x --host studio-host
+assert_eq "6" "$RC" "(y2) a non-default --branch is never re-asked the legacy question -> exit 6"
+
+# --- (z) #10027: --branch passthrough / default -------------------------------
+reset_state
+echo "$LEASE_OWN" > "$STUB_DIR/comments.json"
+LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host
+assert_eq "forge check-branch 6309 --branch feature/issue-6309 --closed-pr-head" "$(cat "$STUB_DIR/check-branch-args.log")" "(z) the default branch is feature/issue-<N>"
+: > "$STUB_DIR/check-branch-args.log"
+LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --branch topic/mining-log --host studio-host
+assert_eq "0" "$RC" "(z) custom absent branch + own lease -> exit 0"
+assert_eq "forge check-branch 6309 --branch topic/mining-log --closed-pr-head" "$(cat "$STUB_DIR/check-branch-args.log")" "(z) --branch is passed through to the daemon"
+echo "0" > "$STUB_DIR/check-branch-rc"
+LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --branch topic/mining-log --host studio-host
+assert_eq "5" "$RC" "(z) an existing custom branch is a collision -> exit 5"
+assert_contains "$ERR" "topic/mining-log may already exist" "(z) the collision message names the requested branch"
+
+# --- (sid) --sweep-id (#2237) ------------------------------------------------
+# The regression case: the freshest (and only) lease on the issue is EXPIRED
+# and was written on THIS very host, but by a DIFFERENT, already-dead sweep
+# run. Pre-#2237 the host-only ownership test read that as "MY OWN renewal
+# loop died" and aborted 3 -- permanently, since a dead sweep's never-renewed,
+# never-yielded record can never stop being the freshest comment. This is the
+# #2226 incident shape (sweep-issue-2226-1789988240 fenced out by
+# sweep-issue-2226-1789985384's expired lease on the same host).
+reset_state
+cat > "$STUB_DIR/comments.json" <<'JSON'
+[
+  {"id": 1, "updated_at": "2026-08-15T15:30:00Z", "body": "<!-- loom:lease host=studio-host sweep=sweep-issue-2226-1789985384 -->\nprose"}
+]
+JSON
+LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host --sweep-id sweep-issue-2226-1789988240
+assert_eq "0" "$RC" "(sid) expired lease, SAME host but a DIFFERENT sweep-id -> exit 0 (PASS, not ABORT -- #2237)"
+assert_contains "$ERR" "PASS" "(sid) stderr reports a PASS, not an ABORT"
+assert_contains "$ERR" "EXPIRED" "(sid) stderr still names the EXPIRED condition it is passing through"
+assert_contains "$ERR" "DIFFERENT sweep" "(sid) stderr explains that the abandoned lease belongs to another sweep run"
+assert_contains "$ERR" "sweep-issue-2226-1789985384" "(sid) stderr names the abandoned predecessor's sweep id"
+assert_contains "$ERR" "sweep-issue-2226-1789988240" "(sid) stderr names this dispatch's own sweep id"
+
+# Same fixture, but the sweep-id MATCHES: this really is this dispatch's own
+# lease and its renewal loop really did die -> the EXPIRED abort must survive.
+reset_state
+cat > "$STUB_DIR/comments.json" <<'JSON'
+[
+  {"id": 1, "updated_at": "2026-08-15T15:30:00Z", "body": "<!-- loom:lease host=studio-host sweep=sweep-own -->\nprose"}
+]
+JSON
+LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host --sweep-id sweep-own
+assert_eq "3" "$RC" "(sid) expired lease, same host AND matching sweep-id -> exit 3 (ABORT EXPIRED still fires)"
+assert_contains "$ERR" "ABORT: EXPIRED" "(sid) stderr still distinguishes EXPIRED for a genuinely own, dead lease"
+
+# A FRESH lease on this host from a different sweep run. This PASSed before
+# #2237 (host-only match) and must still PASS -- the flag only ever REMOVES
+# aborts. It is reported as the fail-open "no lease of my own" case, never as
+# a verified ownership match.
+reset_state
+cat > "$STUB_DIR/comments.json" <<'JSON'
+[
+  {"id": 1, "updated_at": "2026-08-15T15:51:00Z", "body": "<!-- loom:lease host=studio-host sweep=sweep-peer-on-same-host -->\nprose"}
+]
+JSON
+LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host --sweep-id sweep-mine
+assert_eq "0" "$RC" "(sid) FRESH lease, same host but a different sweep-id -> exit 0 (PASS, never a new ABORT)"
+assert_contains "$ERR" "FRESH" "(sid) stderr names the FRESH condition"
+assert_contains "$ERR" "no lease record of its own" "(sid) stderr reports it as fail-open, not as a verified ownership match"
+
+# A FRESH lease that matches on BOTH host and sweep-id -> the ordinary
+# verified-ownership PASS, with the sweep id echoed in the reason.
+reset_state
+cat > "$STUB_DIR/comments.json" <<'JSON'
+[
+  {"id": 1, "updated_at": "2026-08-15T15:51:00Z", "body": "<!-- loom:lease host=studio-host sweep=sweep-mine -->\nprose"}
+]
+JSON
+LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host --sweep-id sweep-mine
+assert_eq "0" "$RC" "(sid) FRESH lease matching host AND sweep-id -> exit 0 (verified-ownership PASS)"
+assert_contains "$ERR" "lease fence OK" "(sid) stderr reports the verified-ownership PASS reason"
+assert_contains "$ERR" "sweep id matches" "(sid) stderr records that the sweep id was checked too"
+
+# --sweep-id is inert on a DIFFERENT host: a different host is not this
+# dispatch regardless of sweep id, so #6783 (expired -> PASS) and exit 4
+# (fresh -> SUPERSEDED) both behave exactly as they do without the flag.
+reset_state
+cat > "$STUB_DIR/comments.json" <<'JSON'
+[{"id": 1, "updated_at": "2026-08-15T15:30:00Z", "body": "<!-- loom:lease host=dead-host sweep=sweep-elsewhere -->\nprose"}]
+JSON
+LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host --sweep-id sweep-mine
+assert_eq "0" "$RC" "(sid) expired lease on a DIFFERENT host, with --sweep-id -> exit 0 (#6783 unchanged)"
+assert_contains "$ERR" "DIFFERENT host" "(sid) the different-host expired reason, not the different-sweep one"
+reset_state
+cat > "$STUB_DIR/comments.json" <<'JSON'
+[{"id": 1, "updated_at": "2026-08-15T15:51:00Z", "body": "<!-- loom:lease host=other-host sweep=sweep-elsewhere -->\nprose"}]
+JSON
+LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host --sweep-id sweep-mine
+assert_eq "4" "$RC" "(sid) fresh lease on a DIFFERENT host, with --sweep-id -> exit 4 (SUPERSEDED unchanged)"
+
+# An EMPTY --sweep-id is treated exactly like omitting the flag: a reader may
+# not invent its own run identity, so "" selects the host-only comparison
+# rather than being compared literally against the lease's sweep= field.
+reset_state
+cat > "$STUB_DIR/comments.json" <<'JSON'
+[{"id": 1, "updated_at": "2026-08-15T15:30:00Z", "body": "<!-- loom:lease host=studio-host sweep=sweep-a -->\nprose"}]
+JSON
+LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host --sweep-id ""
+assert_eq "3" "$RC" "(sid) an EMPTY --sweep-id falls back to host-only comparison -> exit 3, as if omitted"
+
+# --- (sid-omitted) omitting --sweep-id preserves the pre-#2237 behavior exactly ------
+# The (sid) different-sweep fixtures, re-run with NO --sweep-id: every outcome
+# must match the host-only contract cases (b)/(a) above, unchanged.
+reset_state
+cat > "$STUB_DIR/comments.json" <<'JSON'
+[{"id": 1, "updated_at": "2026-08-15T15:30:00Z", "body": "<!-- loom:lease host=studio-host sweep=sweep-issue-2226-1789985384 -->\nprose"}]
+JSON
+LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host
+assert_eq "3" "$RC" "(sid-omitted) --sweep-id omitted: an expired same-host lease still aborts 3 (host-only, pre-#2237 behavior)"
+reset_state
+cat > "$STUB_DIR/comments.json" <<'JSON'
+[{"id": 1, "updated_at": "2026-08-15T15:51:00Z", "body": "<!-- loom:lease host=studio-host sweep=sweep-peer-on-same-host -->\nprose"}]
+JSON
+LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host
+assert_eq "0" "$RC" "(sid-omitted) --sweep-id omitted: a fresh same-host lease still passes (host-only, pre-#2237 behavior)"
+assert_contains "$ERR" "lease fence OK" "(sid-omitted) --sweep-id omitted: the PASS reason is the unchanged host-only one"
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$ERR" != *"sweep id matches"* ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: (sid-omitted) --sweep-id omitted: the PASS reason claims no sweep-id check"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: (sid-omitted) --sweep-id omitted: the PASS reason claims no sweep-id check"
+    echo "    stderr: $ERR"
+fi
 
 echo ""
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed"

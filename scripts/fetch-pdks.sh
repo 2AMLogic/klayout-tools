@@ -33,10 +33,21 @@ sha256_of() {
     fi
 }
 
+# Upstream commit id from a GitHub tag tarball's pax global header (`git
+# archive` writes `comment=<40-hex>` there). Prints nothing when absent --
+# never guessed (issue #3786).
+tarball_commit() {
+    local sha
+    sha="$(gzip -dc "$1" 2>/dev/null | head -c 1024 | grep -aoE 'comment=[0-9a-f]{40}' | head -n1 | cut -d= -f2 || true)"
+    [[ "$sha" =~ ^[0-9a-f]{40}$ ]] && printf '%s\n' "$sha"
+    return 0
+}
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PDKS_DIR="$REPO_ROOT/pdks"
 DEST="$PDKS_DIR/lambdapdk"
 MARKER="$DEST/.fetched-version"
+COMMIT_MARKER="$DEST/.fetched-commit"
 
 FORCE=0
 [[ "${1:-}" == "--force" ]] && FORCE=1
@@ -65,6 +76,8 @@ if [[ "$actual_sha256" != "$LAMBDAPDK_SHA256" ]]; then
     exit 1
 fi
 
+commit="$(tarball_commit "$tmp/lambdapdk.tar.gz")"
+
 echo "Extracting ..."
 mkdir -p "$tmp/extract"
 tar -xzf "$tmp/lambdapdk.tar.gz" -C "$tmp/extract" --strip-components=1
@@ -73,6 +86,9 @@ rm -rf "$DEST"
 mkdir -p "$PDKS_DIR"
 mv "$tmp/extract" "$DEST"
 echo "$LAMBDAPDK_VERSION" > "$MARKER"
+if [[ -n "$commit" ]]; then
+    printf '%s\n' "$commit" >"$COMMIT_MARKER"
+fi
 
 echo "Done: $DEST"
 du -sh "$DEST"

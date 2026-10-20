@@ -51,6 +51,13 @@ _BODY = (
 # --------------------------------------------------------------------------- #
 
 
+def _write_output(path: Path, content: str | bytes) -> None:
+    if isinstance(content, bytes):
+        path.write_bytes(content)
+    else:
+        path.write_text(content, encoding="utf-8")
+
+
 class _FakeRunner:
     """Records every argv, keeps a copy of every uploaded file, answers
     `status.json` reads from a queue, and materializes ``outputs`` into the
@@ -61,7 +68,7 @@ class _FakeRunner:
         self.keep_dir = keep_dir
         self.uploads: dict[str, Path] = {}
         self.statuses: list[str] = []
-        self.outputs: dict[str, str] = {}
+        self.outputs: dict[str, str | bytes] = {}
         self.failures: dict[str, object] = {}
 
     def __call__(self, argv: list[str], timeout_s: float) -> object:
@@ -91,7 +98,7 @@ class _FakeRunner:
                 for name, content in self.outputs.items():
                     path = Path(destination) / name
                     path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_text(content, encoding="utf-8")
+                    _write_output(path, content)
                 return fake_completed()
         return fake_completed()
 
@@ -416,6 +423,83 @@ def test_batch_root_narrows_the_tree(repo, fake, tmp_path):
     assert tree.schematic == "block.sch"
 
 
+def _package(repo, **kwargs):
+    return nb.package_tree(
+        str(repo / "design" / "block.sch"),
+        rcfile=kwargs.pop("rcfile", None),
+        pdk="sky130A",
+        batch_root=None,
+        **kwargs,
+    )
+
+
+def test_include_selects_only_matching_files(repo):
+    tree = _package(repo, include=["design/block.*"])
+    assert tree.files == ("design/block.sch", "design/block.sym")
+    assert tree.schematic == "design/block.sch"
+
+
+def test_bare_directory_include_selects_everything_under_it(repo):
+    assert _package(repo, include=["design"]).files == (
+        "design/block.sch",
+        "design/block.sym",
+        "design/xschemrc",
+    )
+
+
+def test_exclude_drops_matching_files(repo):
+    tree = _package(repo, exclude=["README.md", "design/*.sym"])
+    assert tree.files == ("design/block.sch", "design/xschemrc")
+    assert tree.total_bytes == sum((repo / rel).stat().st_size for rel in tree.files)
+
+
+def test_excluded_schematic_is_refused(repo):
+    with pytest.raises(nb.NetlistError, match="schematic .*left out"):
+        _package(repo, exclude=["design/block.sch"])
+    with pytest.raises(nb.NetlistError, match="schematic .*left out"):
+        _package(repo, include=["README.md"])
+
+
+def test_excluded_project_rcfile_is_refused(repo):
+    with pytest.raises(nb.NetlistError, match="--rcfile .*left out"):
+        _package(
+            repo,
+            rcfile=str(repo / "design" / "xschemrc"),
+            exclude=["design/xschemrc"],
+        )
+
+
+def test_filter_brings_an_oversized_root_under_the_cap(repo):
+    (repo / "big.bin").write_bytes(b"x" * 4096)
+    _git(repo, "add", "big.bin")
+    with pytest.raises(nb.NetlistError) as excinfo:
+        _package(repo, max_bytes=1024)
+    assert excinfo.value.code == nb.BATCH_INPUT_TOO_LARGE_CODE
+    assert "--batch-include" in str(excinfo.value)
+    tree = _package(repo, exclude=["big.bin"], max_bytes=1024)
+    assert "big.bin" not in tree.files
+
+
+def test_filter_flags_reach_the_upload_and_report(
+    repo, fake, no_local_xschem, tmp_path, capsys
+):
+    fake.statuses = [_status("done")]
+    fake.outputs = _runner_outputs(_BODY.format(sch=f"{RUNNER_TREE}/design/block.sch"))
+    argv = _argv(
+        repo,
+        tmp_path / "o.spice",
+        "--backend",
+        "batch",
+        "--batch-exclude",
+        "README.md",
+        "--batch-exclude",
+        "design/*.sym",
+    )
+    assert main(argv) == 0
+    remote = json.loads(capsys.readouterr().out)["environment"]["remote"]
+    assert remote["input_files"] == 2
+
+
 def test_size_cap_refuses_before_any_aws_call(
     repo, fake, no_local_xschem, monkeypatch, tmp_path, capsys
 ):
@@ -732,6 +816,19 @@ def test_no_capacity_keeps_its_code(repo, fake, no_local_xschem, tmp_path, capsy
     assert no_local_xschem == []
 
 
+def test_concurrency_cap_keeps_its_code(repo, fake, no_local_xschem, tmp_path, capsys):
+    fake.failures["launch --job"] = fake_completed(
+        returncode=1,
+        stderr="error: 8 instance(s) already running + 1 requested exceeds "
+        "BATCH_MAX_CONCURRENT_INSTANCES=8",
+    )
+    code, error = _run_failing(repo, tmp_path, capsys)
+    assert code == 1
+    assert error["code"] == sim_batch.BATCH_CONCURRENCY_CAP_CODE
+    assert _job_id(fake) in error["message"]
+    assert no_local_xschem == []
+
+
 def test_poll_timeout(repo, fake, no_local_xschem, monkeypatch, tmp_path, capsys):
     fake.statuses = [_status("running")]
     clock = iter(range(0, 10**9, 1000))
@@ -748,6 +845,32 @@ def test_poll_timeout(repo, fake, no_local_xschem, monkeypatch, tmp_path, capsys
     assert error["code"] == nb.BATCH_POLL_TIMEOUT_CODE
     assert _job_id(fake) in error["message"]
     assert "running" in error["message"]
+    assert no_local_xschem == []
+
+
+def test_interrupted_past_grace_is_a_distinct_code_with_no_progress(
+    repo, fake, no_local_xschem, monkeypatch, tmp_path, capsys
+):
+    fake.statuses = [_status("interrupted")]
+    clock = iter(range(0, 10**9, 1000))
+    real_poll = sim_batch.poll_status
+
+    def _fast_poll(config, job_id, **kwargs):
+        kwargs["monotonic"] = lambda: float(next(clock))
+        kwargs["sleep"] = lambda s: None
+        return real_poll(config, job_id, **kwargs)
+
+    monkeypatch.setattr(sim_batch, "poll_status", _fast_poll)
+    code = main(_argv(repo, tmp_path / "o.spice", "--backend", "batch"))
+    stderr = capsys.readouterr().err
+    error = json.loads(stderr)["error"]
+    assert code == 1
+    assert error["code"] == sim_batch.BATCH_JOB_INTERRUPTED_CODE
+    assert error["code"] != nb.BATCH_POLL_TIMEOUT_CODE
+    assert _job_id(fake) in error["message"]
+    # `progress=False`: stderr is the error envelope alone (it parsed whole
+    # above), with no progress line before or after it.
+    assert stderr.startswith("{") and stderr.rstrip().endswith("}")
     assert no_local_xschem == []
 
 
@@ -776,6 +899,65 @@ def test_terminal_failed_carries_the_runner_error(
     assert "xschem produced no fresh netlist file" in error["message"]
     assert _job_id(fake) in error["message"]
     assert no_local_xschem == []
+
+
+def test_failed_job_without_envelope_carries_the_stderr_tail(
+    repo, fake, no_local_xschem, tmp_path, capsys
+):
+    noise = "x" * 5000
+    fake.statuses = [_status("failed", exit_code="2")]
+    fake.outputs = {
+        "stderr.log": noise
+        + "\n\x1b[31mtar: design/missing.sym: Cannot open\x1b[0m\x07\n"
+    }
+    code, error = _run_failing(repo, tmp_path, capsys)
+    assert code == 1
+    assert error["code"] == nb.BATCH_JOB_FAILED_CODE
+    tail = error["remote_stderr_tail"]
+    assert "tar: design/missing.sym: Cannot open" in tail
+    assert "\x1b" not in tail and "\x07" not in tail
+    assert len(tail.encode("utf-8")) <= nb.REMOTE_STDERR_TAIL_BYTES
+    assert error["remote_exit_code"] == 2
+    assert error["harness_log"].endswith(f"/{_job_id(fake)}/harness.log")
+    assert "tar: design/missing.sym" in error["message"]
+    assert error["harness_log"] in error["message"]
+
+
+def test_failed_job_stderr_tail_survives_invalid_utf8(
+    repo, fake, no_local_xschem, tmp_path, capsys
+):
+    fake.statuses = [_status("failed", exit_code="1")]
+    fake.outputs = {"stderr.log": b"boom \xff\xfe done\n"}
+    code, error = _run_failing(repo, tmp_path, capsys)
+    assert code == 1
+    assert "boom" in error["remote_stderr_tail"]
+    assert "done" in error["remote_stderr_tail"]
+
+
+def test_failed_job_with_no_stderr_log_has_no_tail(
+    repo, fake, no_local_xschem, tmp_path, capsys
+):
+    fake.statuses = [_status("failed", exit_code="1")]
+    code, error = _run_failing(repo, tmp_path, capsys)
+    assert code == 1
+    assert "remote_stderr_tail" not in error
+    assert error["remote_exit_code"] == 1
+    assert "harness.log" in error["harness_log"]
+
+
+def test_failed_job_with_envelope_adds_no_extra_fields(
+    repo, fake, no_local_xschem, tmp_path, capsys
+):
+    fake.statuses = [_status("failed", exit_code="1")]
+    fake.outputs = {
+        "stderr.log": json.dumps(
+            {"schema_version": 1, "error": {"command": "netlist", "message": "m"}},
+            indent=2,
+        )
+        + "\n"
+    }
+    code, error = _run_failing(repo, tmp_path, capsys)
+    assert set(error) == {"command", "message", "code"}
 
 
 def test_terminal_timeout(repo, fake, no_local_xschem, tmp_path, capsys):
@@ -850,3 +1032,66 @@ def test_rewrite_leaves_paths_outside_the_runner_tree_alone():
         "** sym_path: /opt/pdk/sky130A/libs.tech/xschem/nfet.sym",
         "** sym_path: /work/here/design/sub.sym",
     ]
+
+
+def test_manifest_published_runner_mismatch_is_refused_before_upload(
+    repo, fake, no_local_xschem, monkeypatch, tmp_path, capsys
+):
+    """Issue #2851: `klt netlist`'s batch path resolves its config through
+    the same `sim_batch._resolve_batch_config`, so a runner version the AMI
+    manifest already publishes as incompatible is refused before any upload,
+    with the same code the runner-side gate uses."""
+    manifest = tmp_path / "ami-manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "images": [
+                    {
+                        "pdk": "sky130A",
+                        "region": "us-east-1",
+                        "ami_id": "ami-0123456789abcdef0",
+                        "pdk_snapshot": "sky130A-2026.10.01",
+                        "ngspice_version": "46",
+                        "built_at": "2026-10-01T00:00:00Z",
+                        "klt_version": "0.1.0",
+                        "klt_ref": "v0.1.0",
+                    }
+                ],
+            }
+        )
+    )
+    monkeypatch.setenv("KLT_AMI_MANIFEST", str(manifest))
+    code, error = _run_failing(repo, tmp_path, capsys)
+    assert code == 1
+    assert error["code"] == sim_batch.BATCH_RUNNER_MISMATCH_CODE
+    assert "0.1.0" in error["message"]
+    assert fake.calls == []
+    assert no_local_xschem == []
+
+
+def test_unevaluated_expr_in_collected_netlist_fails_on_batch(
+    repo, fake, no_local_xschem, tmp_path, capsys
+):
+    """Parity with the local backend (issue #3482): the gate also fires on the
+    netlist the runner returned, with the same stable `error.code`."""
+    fake.statuses = [_status("done")]
+    fake.outputs = _runner_outputs("* n\nX1 a b nfet ad=expr(1+2)\n.end\n")
+    output = tmp_path / "out.spice"
+
+    assert main(_argv(repo, output, "--backend", "batch")) == 1
+    assert _error(capsys)["code"] == "unevaluated_expr"
+    assert not output.exists()
+
+
+def test_unresolved_symbol_in_collected_netlist_fails_on_batch(
+    repo, fake, no_local_xschem, tmp_path, capsys
+):
+    """Parity with the local backend (issue #3964): same stable `error.code`."""
+    fake.statuses = [_status("done")]
+    fake.outputs = _runner_outputs("* n\n*  E1 -  no_such  IS MISSING !!!!\n.end\n")
+    output = tmp_path / "out.spice"
+
+    assert main(_argv(repo, output, "--backend", "batch")) == 1
+    assert _error(capsys)["code"] == "unresolved_symbol"
+    assert not output.exists()

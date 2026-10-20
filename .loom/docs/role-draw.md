@@ -59,7 +59,9 @@ on one tap (`claude/opus`, `claude/fable`) share its availability.
 The daemon reads each config tier separately: machine defaults
 (`~/.local/share/loom/config/defaults.json`, where fleet-gitops renders
 `config.defaults` plus host-class and host overrides), `.loom/config.json`,
-`.loom-project/project.json`, then `.loom-local/local.json`. A higher tier
+`.loom-project/project.json`, the per-repo fleet tier
+`.loom-local/fleet-repo.json` (the fleet config's `repos[].config`, written by
+the fleet sync, #11738), then `.loom-local/local.json`. A higher tier
 replaces a role's table **per attempt**, so a host can replace `judge` attempt
 1 without restating attempt 2 or any other role. `null` at a higher tier clears
 that role (or, for `roleDraw: null`, every role). `excludeProviders` follows the
@@ -104,9 +106,19 @@ toolless launch, a non-zero exit and a timeout. A success resets it to 1. A
 pre-spawn skip counts neither way. The count lives in daemon memory, so a
 restart starts every role at attempt 1.
 
-Sweep dispatch and `worker run` phases draw attempt 1. The `/<model>` segment
-is pinned only on role ticks; a sweep uses the drawn runtime and profile with
-its own model resolution.
+Sweep dispatch and `worker run` phases draw attempt 1.
+
+### Which launch paths honor the drawn `/<model>` (#12748)
+
+| Launch path | Drawn model |
+|---|---|
+| Role tick (role runner) | Pinned with `--model`, below only the runner's own override. |
+| Daemon stage step (`begin_step_spawn`): Curator, Judge, Doctor, Champion, **Builder** | Pinned with `--model`: the same draw → reconcile with the admitted runtime → refuse a provable runtime conflict (`model_runtime_mismatch`) path for every role. With no drawn model the role's own resolver (Builder: experiment/default) applies unchanged. |
+| Private Codex containment (step and role tick) | Account selection is made for the drawn candidate's model, and the launch uses that same model. A selection held for a different model is released and re-made, never reused. |
+| Issue sweep (`/loom:sweep` dispatch) | Draws the runtime and profile only; it uses its own model resolution and does not pin `/<model>` (`loom.role_draw.model_pinned` stays `false`). |
+| `worker run --role builder\|doctor` | Takes an explicit tap (runtime + profile) and passes no `--model`; a drawn `/<model>` is not applied. Inspected for #12748 and left unchanged: no current path needs it. |
+
+A native runtime's `/` segment is its profile, so it never becomes a model.
 
 ## Reproducibility and telemetry
 
@@ -123,9 +135,26 @@ inputs, each roll (`Σw`, roll, pick), passed-over picks and the final pick:
 - on the `# LOOM_RUNTIME_PREFERENCE` marker as `source=role-draw draw=attempt:…,
   table:a2@repo-config,seed:…,sum:…,roll:…,pick:…`;
 - on `role_tick.outcome` as `role_draw` (see
-  [telemetry-schema.md](telemetry-schema.md)), and in SigNoz as
-  `loom.role_draw.*` attributes, so success and blocked rates group by
-  `loom.role` × `loom.role_draw.pick` × `loom.result`.
+  [telemetry-schema.md](telemetry-schema.md)), mapped to `loom.role_draw.*`
+  attributes. That record stays in the host's `role-tick-telemetry.jsonl`
+  and is not shipped to the collector.
+
+What reaches SigNoz (#11726 follow-up):
+
+- **Role ticks:** the tick's exported `loom.role_attempt` span (`loom.sweep_id`
+  `role-*`) carries `loom.role_draw.pick`, `.attempt`, `.table_attempt`,
+  `.layer` and, when the pick pins one, `.model`. Success and blocked rates
+  group by `loom.role` × `loom.role_draw.pick` × `loom.result` from that span.
+  A tick that `rolePreference` decided carries none of these keys.
+- **Sweeps:** `sweep.outcome` carries `loom.role_draw.pick` and
+  `loom.role_draw.model_pinned` (always `false` today, because a sweep does not
+  pin the drawn `/model`). Both are absent when no `roleDraw` table decided the
+  sweep.
+- **Steps:** the `loom.dispatch.step` span of a spawned step carries
+  `loom.step.model_selected` (the model the draw's pick named) and
+  `loom.step.model_launched` (the `--model` the child was given). Selected is a
+  fact about the draw record only; launched is what ran. Either is absent when
+  there is none.
 
 ## Explain view
 

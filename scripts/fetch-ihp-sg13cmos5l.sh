@@ -76,7 +76,22 @@
 # already have gone through if simulation (not just layout/DRC/LVS) is the
 # goal.
 #
-# Usage: scripts/fetch-ihp-sg13cmos5l.sh [--force]
+# KNOWN-INCOMPLETE SIBLING (issue #3133): the pinned `dev` subtree expects an
+# ihp-sg13g2 sibling at (or near) the same `dev` commit, but
+# `fetch-ihp-sg13g2.sh` installs release v0.3.0, which predates the merge of
+# SG13CMOS5L into `dev`. Some symlink targets (e.g. moscap models, pycell
+# helpers, LVS helpers) may therefore be absent and the links dangle -- 262 of
+# 530 as of commit 159527a5, 2026-10 (re-measure with this script's summary).
+# After extraction, and on the cached re-run path, this script counts dangling
+# symlinks under the install, prints a sample and the sibling's version marker,
+# and warns loudly. It still exits 0 (the models-only use case works without
+# the missing targets) unless `--strict` is given, which exits 3 when any
+# link dangles. If any dangling link is under libs.tech/klayout/tech/lvs/, the
+# warning also says the PDK-native LVS runset is unrunnable. Repinning the
+# sibling is a separate, human decision: it changes a checksummed pin used by
+# CI. `klt pdk check` also reports these.
+#
+# Usage: scripts/fetch-ihp-sg13cmos5l.sh [--force] [--strict]
 
 set -euo pipefail
 
@@ -102,7 +117,7 @@ sha256_of() {
 }
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PDKS_DIR="$REPO_ROOT/pdks"
+PDKS_DIR="${IHP_PDKS_DIR:-$REPO_ROOT/pdks}"
 SIBLING_ROOT="$PDKS_DIR/ihp-open-pdk"
 SG13G2_DIR="$SIBLING_ROOT/ihp-sg13g2"
 DEST="$SIBLING_ROOT/ihp-sg13cmos5l"
@@ -125,12 +140,55 @@ if [[ ! -d "$SG13G2_DIR/libs.tech" || ! -d "$SG13G2_DIR/libs.ref" ]]; then
 fi
 
 FORCE=0
-[[ "${1:-}" == "--force" ]] && FORCE=1
+STRICT=0
+for arg in "$@"; do
+    case "$arg" in
+        --force) FORCE=1 ;;
+        --strict) STRICT=1 ;;
+        *) echo "error: unknown argument: $arg" >&2
+           echo "usage: scripts/fetch-ihp-sg13cmos5l.sh [--force] [--strict]" >&2
+           exit 2 ;;
+    esac
+done
+
+# Count dangling symlinks under $DEST (`-L` and not `-e`, the same definition
+# as pdk.py's _find_broken_symlinks), print a sample and the sibling's version
+# marker. Sets DANGLING_COUNT; returns 0 if clean, 1 if any dangle.
+report_dangling() {
+    local list sibling_ver
+    list="$(find "$DEST" -type l ! -exec test -e {} \; -print 2>/dev/null | sort)"
+    DANGLING_COUNT=0
+    [[ -n "$list" ]] && DANGLING_COUNT="$(printf '%s\n' "$list" | wc -l | tr -d ' ')"
+    sibling_ver="$(cat "$SG13G2_DIR/.fetched-version" 2>/dev/null || echo unknown)"
+    if [[ "$DANGLING_COUNT" -eq 0 ]]; then
+        echo "Symlink check: no dangling symlinks under $DEST (ihp-sg13g2 sibling @ $sibling_ver)"
+        return 0
+    fi
+    echo "WARNING: $DANGLING_COUNT dangling symlink(s) under $DEST" >&2
+    echo "  ihp-sg13g2 sibling version: $sibling_ver (pinned subtree expects a matching dev commit;" >&2
+    echo "  release v0.3.0 is known-incomplete -- see this script's header and pdks/README.md)" >&2
+    echo "  first 10 (run 'klt pdk check' for the full report):" >&2
+    printf '%s\n' "$list" | head -n 10 | sed "s|^$DEST/|    |" >&2
+    if grep -q '/libs\.tech/klayout/tech/lvs/' <<<"$list"; then
+        echo "  LVS: links under libs.tech/klayout/tech/lvs/ dangle, so the PDK-native LVS runset" >&2
+        echo "  (sg13cmos5l.lvs, 'klt lvs' engine klayout-runset) cannot run; use --strict when fetching for LVS" >&2
+    fi
+    return 1
+}
+
+finish_dangling() {
+    if ! report_dangling && [[ $STRICT -eq 1 ]]; then
+        echo "error: --strict: install is incomplete ($DANGLING_COUNT dangling symlinks)" >&2
+        exit 3
+    fi
+    return 0
+}
 
 if [[ -f "$MARKER" && $FORCE -eq 0 ]]; then
     have="$(cat "$MARKER")"
     if [[ "$have" == "$IHP_SG13CMOS5L_COMMIT" ]]; then
         echo "ihp-sg13cmos5l @ $IHP_SG13CMOS5L_COMMIT already present at $DEST (use --force to refetch)"
+        finish_dangling
         exit 0
     fi
     echo "ihp-sg13cmos5l @ $have present; updating to $IHP_SG13CMOS5L_COMMIT"
@@ -167,6 +225,14 @@ mkdir -p "$SIBLING_ROOT"
 mv "$tmp/extract" "$DEST"
 echo "$IHP_SG13CMOS5L_COMMIT" >"$MARKER"
 
-echo "Done: $DEST"
+if report_dangling; then
+    echo "Done: $DEST"
+else
+    echo "Extracted (INCOMPLETE -- $DANGLING_COUNT dangling symlinks): $DEST"
+fi
 du -sh "$DEST"
 echo "  PDK_ROOT=$SIBLING_ROOT PDK=ihp-sg13cmos5l"
+if [[ $DANGLING_COUNT -gt 0 && $STRICT -eq 1 ]]; then
+    echo "error: --strict: install is incomplete ($DANGLING_COUNT dangling symlinks)" >&2
+    exit 3
+fi

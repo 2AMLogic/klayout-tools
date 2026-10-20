@@ -43,11 +43,24 @@
 # this script first if `ihp-sg13cmos5l` support is the goal.
 #
 # Usage: scripts/fetch-ihp-sg13g2.sh [--force]
+#
+# Environment knobs (both optional; unset = the in-repo defaults):
+#   IHP_PDKS_DIR=<dir>            install into <dir>/ihp-open-pdk instead of
+#                                 <checkout>/pdks/ihp-open-pdk (same name and
+#                                 meaning as in fetch-ihp-sg13cmos5l.sh), for
+#                                 shared/read-only tool checkouts.
+#   IHP_OPEN_PDK_PIN_FILE=<file>  KEY=VALUE file supplying
+#                                 IHP_OPEN_PDK_VERSION and IHP_OPEN_PDK_SHA256
+#                                 so a consumer's recorded pin and the fetched
+#                                 artifact cannot drift. Parsed, never sourced
+#                                 ('#' comments, blank lines, CRLF and unknown
+#                                 keys are tolerated; duplicates are rejected).
+#                                 A missing/incomplete/malformed file exits
+#                                 non-zero before any download.
 
 set -euo pipefail
 
 IHP_OPEN_PDK_VERSION="0.3.0"
-IHP_OPEN_PDK_URL="https://github.com/IHP-GmbH/IHP-Open-PDK/archive/refs/tags/v${IHP_OPEN_PDK_VERSION}.tar.gz"
 # Computed by downloading the pinned tag archive once and hashing it:
 #   curl -fL -o /tmp/ihp-open-pdk-v0.3.0.tar.gz \
 #     https://github.com/IHP-GmbH/IHP-Open-PDK/archive/refs/tags/v0.3.0.tar.gz
@@ -56,6 +69,51 @@ IHP_OPEN_PDK_URL="https://github.com/IHP-GmbH/IHP-Open-PDK/archive/refs/tags/v${
 # using the same recipe (with the new version substituted) -- the script
 # fails closed on mismatch, so a stale value here blocks every fetch.
 IHP_OPEN_PDK_SHA256="f6afb7a8d2adf3e40acd3fd2c7892fc93510e6f760565409a8df2b5b242254fc"
+
+# Optional caller-supplied pin (IHP_OPEN_PDK_PIN_FILE). Parsed with a read
+# loop restricted to the two known keys -- never sourced, so the caller's file
+# cannot execute code here. Fails closed before anything is downloaded.
+if [[ -n "${IHP_OPEN_PDK_PIN_FILE:-}" ]]; then
+    pin_file="$IHP_OPEN_PDK_PIN_FILE"
+    if [[ ! -f "$pin_file" || ! -r "$pin_file" ]]; then
+        echo "error: IHP_OPEN_PDK_PIN_FILE '$pin_file' is not a readable file" >&2
+        exit 1
+    fi
+    pin_version="" pin_sha256=""
+    while IFS='=' read -r key value || [[ -n "$key" ]]; do
+        key="${key%$'\r'}"
+        value="${value%$'\r'}"
+        case "$key" in
+            IHP_OPEN_PDK_VERSION)
+                if [[ -n "$pin_version" ]]; then
+                    echo "error: duplicate IHP_OPEN_PDK_VERSION in $pin_file" >&2
+                    exit 1
+                fi
+                pin_version="$value" ;;
+            IHP_OPEN_PDK_SHA256)
+                if [[ -n "$pin_sha256" ]]; then
+                    echo "error: duplicate IHP_OPEN_PDK_SHA256 in $pin_file" >&2
+                    exit 1
+                fi
+                pin_sha256="$value" ;;
+        esac
+    done <"$pin_file"
+    if [[ -z "$pin_version" || -z "$pin_sha256" ]]; then
+        echo "error: $pin_file must set both IHP_OPEN_PDK_VERSION and IHP_OPEN_PDK_SHA256" >&2
+        exit 1
+    fi
+    if [[ ! "$pin_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "error: IHP_OPEN_PDK_VERSION '$pin_version' in $pin_file is not X.Y.Z" >&2
+        exit 1
+    fi
+    if [[ ! "$pin_sha256" =~ ^[0-9a-fA-F]{64}$ ]]; then
+        echo "error: IHP_OPEN_PDK_SHA256 in $pin_file is not 64 hex characters" >&2
+        exit 1
+    fi
+    IHP_OPEN_PDK_VERSION="$pin_version"
+    IHP_OPEN_PDK_SHA256="$(printf '%s' "$pin_sha256" | tr 'A-F' 'a-f')"
+fi
+IHP_OPEN_PDK_URL="https://github.com/IHP-GmbH/IHP-Open-PDK/archive/refs/tags/v${IHP_OPEN_PDK_VERSION}.tar.gz"
 
 # Detect a portable sha256 command (macOS ships shasum, Linux sha256sum).
 # Mirrors scripts/fetch-pdks.sh's / .loom/scripts/verify-install.sh's
@@ -71,10 +129,21 @@ sha256_of() {
     fi
 }
 
+# Upstream commit id from a GitHub tag tarball's pax global header (`git
+# archive` writes `comment=<40-hex>` there). Prints nothing when absent --
+# never guessed (issue #3786).
+tarball_commit() {
+    local sha
+    sha="$(gzip -dc "$1" 2>/dev/null | head -c 1024 | grep -aoE 'comment=[0-9a-f]{40}' | head -n1 | cut -d= -f2 || true)"
+    [[ "$sha" =~ ^[0-9a-f]{40}$ ]] && printf '%s\n' "$sha"
+    return 0
+}
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PDKS_DIR="$REPO_ROOT/pdks"
+PDKS_DIR="${IHP_PDKS_DIR:-$REPO_ROOT/pdks}"
 DEST="$PDKS_DIR/ihp-open-pdk"
 MARKER="$DEST/.fetched-version"
+COMMIT_MARKER="$DEST/.fetched-commit"
 
 FORCE=0
 [[ "${1:-}" == "--force" ]] && FORCE=1
@@ -103,6 +172,8 @@ if [[ "$actual_sha256" != "$IHP_OPEN_PDK_SHA256" ]]; then
     exit 1
 fi
 
+commit="$(tarball_commit "$tmp/ihp-open-pdk.tar.gz")"
+
 echo "Extracting ..."
 mkdir -p "$tmp/extract"
 tar -xzf "$tmp/ihp-open-pdk.tar.gz" -C "$tmp/extract" --strip-components=1
@@ -111,6 +182,9 @@ rm -rf "$DEST"
 mkdir -p "$PDKS_DIR"
 mv "$tmp/extract" "$DEST"
 echo "$IHP_OPEN_PDK_VERSION" >"$MARKER"
+if [[ -n "$commit" ]]; then
+    printf '%s\n' "$commit" >"$COMMIT_MARKER"
+fi
 
 echo "Done: $DEST"
 du -sh "$DEST"
