@@ -7643,6 +7643,17 @@ def _refuse_xyce_nodeset(declared: bool) -> None:
         )
 
 
+def _refuse_xyce_linearize(declared: bool) -> None:
+    """Issue #4014: `linearize` is an ngspice control command; the Xyce deck
+    has no `.control` block to carry it."""
+    if declared:
+        raise SimError(
+            "analysis.linearize is not supported for engine 'xyce': it is an "
+            "ngspice `.control` command, which the Xyce deck does not have; "
+            "use engine 'ngspice' or drop the field"
+        )
+
+
 def _refuse_xyce_options_axis(corners_spec: dict[str, Any]) -> None:
     """The ``engine: "xyce"`` refusal for ``corners.options`` (issue #3125):
     the axis is a generated ngspice ``.options`` card."""
@@ -7687,14 +7698,7 @@ def _enforce_xyce_support_boundary(
     """
     if engine != "xyce":
         return
-    if linearize_declared:
-        # Issue #4014: `linearize` is an ngspice control command; the Xyce
-        # deck has no `.control` block to carry it.
-        raise SimError(
-            "analysis.linearize is not supported for engine 'xyce': it is an "
-            "ngspice `.control` command, which the Xyce deck does not have; "
-            "use engine 'ngspice' or drop the field"
-        )
+    _refuse_xyce_linearize(linearize_declared)
     if analysis_steps_declared:
         # Issue #2482: an ordered step sequence is `alter`/analysis/`let`
         # commands inside one ngspice `.control` block. The Xyce deck has no
