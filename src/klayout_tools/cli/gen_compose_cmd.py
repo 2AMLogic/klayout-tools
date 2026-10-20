@@ -50,7 +50,13 @@ def run(args: argparse.Namespace) -> int:
     try:
         report = compose(request, request_dir=request_dir)
     except GenComposeError as exc:
-        return emit_error("gen-compose", str(exc), args.format)
+        return emit_error(
+            "gen-compose",
+            str(exc),
+            args.format,
+            code=exc.code,
+            details=exc.details,
+        )
 
     emit_success(report, args.format, _print_text)
     # Partial success: every block placed, but the router left some nets
