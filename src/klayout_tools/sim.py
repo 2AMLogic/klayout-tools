@@ -286,6 +286,8 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "unsupported_model_level",
         "osdi_abi_mismatch",
         "osdi_load_failed",
+        # The analysis never completed (engine abort trailer), issue #2846.
+        "analysis_aborted",
         # Per-corner run outcomes synthesized by `_run_corner` itself.
         "timeout",
         "engine_killed",
@@ -1443,6 +1445,24 @@ def _resolve_analysis_and_measurements(
     # lines) so everything downstream treats it as one.
     sim_noise.validate_noise_context(measurements_spec, analysis)
     return analysis, sim_noise.lower_measurements(measurements_spec, analysis)
+
+
+def _reject_param_braces(analysis: dict[str, Any], engine: str) -> None:
+    """Reject a ``{...}`` brace reference in a scalar ``analysis.args``
+    (issue #2846). ngspice emits the analysis as a ``.control`` command and
+    does not expand ``.param`` braces in control mode, so ``tran 2e-06
+    {stop_s}`` aborts the analysis. Xyce emits a ``.tran`` dot card where
+    braces are valid, so this check is skipped for ``engine == "xyce"``."""
+    args = analysis.get("args")
+    if engine != "xyce" and isinstance(args, str) and re.search(r"[{}]", args):
+        raise SimError(
+            f"request.analysis.args {args!r} contains a '{{...}}' brace "
+            "reference: ngspice runs the analysis as a .control command, "
+            "which does not expand .param braces (the analysis aborts with "
+            "'TSTOP is invalid'), and klt does not expand them. Write the "
+            "numeric value literally in analysis.args (or use engine 'xyce', "
+            "whose .tran card accepts braces)"
+        )
 
 
 def _report_path(path: str | None, *, repo_root: str | None) -> dict[str, Any]:
@@ -2875,6 +2895,7 @@ def _prepare_sim_request(
     # `analysis_steps[]` sequence, resolved -- every structural error raised
     # -- here, before any corner is dispatched.
     analysis, measurements_spec = _resolve_analysis_and_measurements(request)
+    _reject_param_braces(analysis, engine)
     for spec in measurements_spec:
         if spec.get("spice") is not None:
             _validate_meas_card(spec["name"], spec["spice"])
@@ -9645,6 +9666,15 @@ def _run_corner(
             }
         )
 
+    # Issue #2846: the engine's abort trailer gets its own analysis-level
+    # diagnostic, always at `severity: "error"`, reported alongside (not
+    # instead of) the per-measurement ones. Appended before
+    # `disqualifying` is sampled so `fail_on_diagnostic` can name it.
+    aborted_re = _XYCE_SIMULATION_ABORTED_RE if is_xyce else _SIMULATION_ABORTED_RE
+    aborted_diagnostic = _analysis_aborted_diagnostic(log_text, aborted_re)
+    if aborted_diagnostic is not None:
+        diagnostics.append(aborted_diagnostic)
+
     # A recovered `singular_matrix`/`nonconvergence` classification (the
     # engine's own stepping-recovery narration -- routine noise on the way
     # to a *successful* analysis, not evidence the run failed) does not
@@ -9675,7 +9705,7 @@ def _run_corner(
         measurements_spec,
         measurement_results,
         log_text,
-        aborted_re=(_XYCE_SIMULATION_ABORTED_RE if is_xyce else _SIMULATION_ABORTED_RE),
+        aborted_re=aborted_re,
         waveform_complete=waveform_complete,
     ):
         _downgrade_stepping_diagnostics(diagnostics, bool(measurements_spec))
@@ -12216,6 +12246,42 @@ def _recovered_from_stepping(
     if aborted_re.search(log_text):
         return False
     return True
+
+
+_ABORT_CONTEXT_LINES = 12
+_ABORT_MAX_QUOTED = 4
+_ABORT_ERROR_LINE_RE = re.compile(r"\b(?:error|fatal)\b", re.IGNORECASE)
+
+
+def _analysis_aborted_diagnostic(
+    log_text: str,
+    aborted_re: re.Pattern[str],
+) -> dict[str, str] | None:
+    """The analysis-level ``analysis_aborted`` diagnostic (issue #2846), or
+    ``None`` when the engine's abort trailer is absent.
+
+    Quotes the engine's own error line(s) preceding the trailer. Always
+    ``severity: "error"``: the trailer means the analysis never produced a
+    trustworthy result regardless of which measurement values happen to be
+    parseable -- the same rule :func:`_recovered_from_stepping` applies
+    (issue #205). A stepping-recovered corner has no trailer, so it never
+    gets this diagnostic at all.
+    """
+    match = aborted_re.search(log_text or "")
+    if match is None:
+        return None
+    lines = log_text[: match.end()].splitlines()
+    window = lines[-_ABORT_CONTEXT_LINES:]
+    quoted = [ln.strip() for ln in window if _ABORT_ERROR_LINE_RE.search(ln)]
+    trailer = lines[-1].strip() if lines else ""
+    if trailer and trailer not in quoted:
+        quoted.append(trailer)
+    quoted = quoted[-_ABORT_MAX_QUOTED:]
+    return {
+        "severity": "error",
+        "code": "analysis_aborted",
+        "message": "analysis aborted by the engine: " + " | ".join(quoted),
+    }
 
 
 def _capture_only_waveform_complete(

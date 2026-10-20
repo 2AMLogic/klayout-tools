@@ -4565,7 +4565,8 @@ error, exit 1).
     (case-insensitive).
   - `analysis.kind` must be one of `op`, `dc`, `ac`, `tran`, `noise`, `sp`,
     `tf`, `pz`, or `sens`. A kind may repeat across steps.
-  - `analysis.args` is a single-line string.
+  - `analysis.args` is a single-line string with no `{...}` brace
+    references (see "Failure classification" below).
 - **`alter`** maps a top-level source or passive element (`V`/`I`/`R`/`C`/`L`
   name) to a finite number. The overrides are applied as `alter` commands
   before that step's solve, in declaration order.
@@ -6494,6 +6495,15 @@ is what tells `klt sim` the difference.
 
 ## Failure classification: from the log, never the exit code
 
+**`{name}` references in `analysis.args` are rejected (ngspice).** The
+analysis is emitted as a `.control` command, where ngspice does not expand
+`.param` braces (`tran 2e-06 {stop_s}` aborts with `TSTOP is invalid`), and
+`klt` does not expand them either: the request fails validation (exit 1)
+with a message to write the numeric value literally. This applies to the
+scalar `analysis` and to every `analysis_steps[]` step. Xyce is unaffected:
+its analysis is a `.tran` dot card, where braces are valid, so they are
+passed through.
+
 `ngspice -b` reliably exits `0` even when a `.meas` fails or the matrix is
 singular (verified empirically against ngspice 46 while building this
 command — see the spike's "Failure signalling" survey row). Every corner's
@@ -6511,6 +6521,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `unsupported_model_level` | ngspice's `Only MOS device levels ... are supported in this binary` (e.g. ASAP7 BSIM-CMG `level = 72` without an OSDI module); reported as `prerequisite missing: ...` and suppresses the follow-on `model_bin_range`. See "ASAP7 FinFET (BSIM-CMG) simulation". |
 | `osdi_abi_mismatch` | `NGSPICE only supports OSDI v0.N but ...` — ngspice too old for the compiled module's OSDI ABI. |
 | `osdi_load_failed` | `Error: Library <x>.osdi couldn't be loaded!` — the module is unreadable or not loadable by this ngspice. |
+| `analysis_aborted` | The engine's own abort trailer (`... simulation(s) aborted`; Xyce: `Simulation aborted due to error`) is in the log: the analysis never completed. The message quotes the engine's error line(s) (e.g. `Error: TSTOP is invalid, must be greater than zero.`), and it is reported *in addition to* the per-measurement `measurement` diagnostics, so a harness can tell "the simulator never ran" from "the event never happened" (issue #2846). Always `severity: "error"`, even if some or all `measurements[]` values were parsed before the abort: the trailer means no trustworthy result. A corner whose singular-matrix/nonconvergence narration was recovered by stepping (issue #205) has no trailer and so never gets this code. |
 | `timeout`          | The per-corner `options.timeout_s` budget was exceeded; the process is killed. |
 | `engine_killed`    | The engine process died from a signal the harness did not send (OOM killer, host reaper, reclaimed worker). `corners[].engine_killed_by_signal` names it (issue #2848). Always `error`; accepted by `options.fail_on_diagnostic`. A harness `timeout` is never reported this way. The message quotes the last ~20 lines of engine output (issue #3067). |
 | `engine_aborted`   | The engine exited with a non-zero code (`corners[].engine_exit_code`) without a classifiable cause in its log. (A clean exit that wrote no log, or a non-zero exit with no log file at all, is reported as `unknown` with the exit status and output tail, issue #3016.) Always `error`; accepted by `options.fail_on_diagnostic`. The message carries the exit code and the last ~20 lines of engine stderr/stdout/log, also with `keep_artifacts: false` and on the batch backend. When a corner carries `engine_aborted` or `engine_killed`, its per-measurement `measurement ... produced no value` diagnostics are omitted (the measurement results stay `error`), so `diagnostics[0]` names the cause (issue #3067). |
