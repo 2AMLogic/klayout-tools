@@ -1251,6 +1251,22 @@ def test_deck_rules_gf180mcu_lists_unmodeled_thick_metal_families_apart_from_rul
     assert one["unmodeled_rules"] == unmodeled
 
 
+def test_deck_rules_gf180mcu_lists_wide_metal_and_eol_ids_apart_from_rules():
+    """Issue #3968: Mn.2b wide-metal and the narrow-line end-of-line ids."""
+    report = history.deck_rules("gf180mcu")
+
+    unmodeled = report["unmodeled_rules"]
+    expected = {"CO.6a", "CO.6b"}
+    expected |= {f"M{n}.2b" for n in range(1, 6)}
+    expected |= {f"V{n}.{r}" for n in range(1, 5) for r in ("3c", "3d", "4b", "4c")}
+    assert expected <= set(unmodeled)
+    # Stack-keyed: the 6LM-only Via5 ids are not disclosed for this 5LM deck.
+    assert not any(rule.startswith("V5.") for rule in unmodeled)
+    assert unmodeled == sorted(set(unmodeled))
+    assert not set(unmodeled) & {entry["id"] for entry in report["rules"]}
+    assert not expected & set(history.deck_rules("sky130")["unmodeled_rules"])
+
+
 def test_deck_info_reports_unmodeled_rules_per_deck(_history_table):
     entry = history.deck_info(name="gf180mcu")["decks"][0]
     assert "MT30.1a" in entry["unmodeled_rules"]

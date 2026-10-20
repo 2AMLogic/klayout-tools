@@ -293,7 +293,9 @@ klt deck info --deck gf180mcu # one deck only
   transcribe (issue #3796), the same static list `klt drc` reports as
   `coverage.unmodeled_rules`; `[]` for a deck that declares none. For gf180mcu
   this is the thick-MetalTop `MT30.*`, `MT.2b`/`MT.3`/`MT.4` and `MSLOT.*`
-  families (the example above is abbreviated). Additive and optional for
+  families, plus the Metal1–5 wide-metal `M1.2b`–`M5.2b` and the narrow-line
+  end-of-line `CO.6a`/`CO.6b`/`Vn.3c`/`Vn.3d`/`Vn.4b`/`Vn.4c` ids (issue #3968) (the example above is abbreviated). A clean `klt drc` result covers only the
+  modeled rules, not full native-runset coverage. Additive and optional for
   consumers.
 
 - `drc_deck` — present only for a deck that ships a standalone KLayout DRC
