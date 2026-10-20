@@ -2946,6 +2946,70 @@ def _ring_opening_conflict(
     return None
 
 
+def _select_route_layer(
+    route_layer: tuple[int, int] | None,
+    block_geometry: dict[str, dict[str, Any] | None] | None,
+    width_um: float,
+    cross_block_route_layer: tuple[int, int] | None,
+    cross_block_geometry: dict[str, dict[str, Any] | None] | None,
+    cross_block_width_um: float | None,
+    **short_kwargs: Any,
+) -> tuple[tuple[int, int] | None, float, str | None]:
+    """Same-layer-short retry (#1168/#1620): ``(layer, width_um, reason)``.
+
+    Tries the primary ``route_layer`` first -- the overwhelmingly common case
+    (no configured cross-block layer, or a leg that never crosses another
+    same-layer pad) resolves here with no behaviour change. Only when the
+    primary layer's checks 3/4 (:func:`_same_layer_short_reason`) object AND a
+    ``cross_block_route_layer`` is configured is the *identical* pair of
+    checks retried against that second layer; if the crossed pad sits on the
+    primary layer (the overwhelmingly common case), the ``effective_route_
+    layer != other_layer`` guard inside :func:`_same_layer_short_reason`
+    naturally exempts it on the retry, since a pad on ``route_layer`` cannot
+    short a backbone now drawn on ``cross_block_route_layer``. Any *other*
+    obstacle that also happens to sit on the cross layer is still caught by
+    the same checks, run again in full -- this is not a bypass, it is the
+    identical short-detection logic evaluated against a different drawing
+    layer. Everything downstream (obstacle-overlap check 5, via-drop check 6,
+    stub-widen) uses whichever layer wins here.
+
+    ``reason`` is non-``None`` only when neither layer resolves the leg (the
+    caller reports the net unroutable). The returned width (#1620) is the
+    width the leg actually draws at -- ``cross_block_width_um`` once the retry
+    switched to ``cross_block_route_layer`` (falling back to ``width_um``
+    when the caller left it unset), ``width_um`` otherwise. Everything that
+    sizes drawn/checked geometry (obstacle-overlap inflation, the detour-lane
+    clearance, stub-widen) uses it, not the bare ``width_um`` parameter, so a
+    wider cross-block leg's own footprint is judged and drawn consistently.
+    ``short_kwargs`` are the per-leg keyword arguments
+    :func:`_same_layer_short_reason` takes after its three positional ones.
+    """
+    effective_route_layer = route_layer
+    short_reason = _same_layer_short_reason(
+        route_layer, block_geometry, width_um, **short_kwargs
+    )
+    if short_reason is not None and cross_block_route_layer is not None:
+        cross_effective_width_um = (
+            cross_block_width_um if cross_block_width_um is not None else width_um
+        )
+        cross_short_reason = _same_layer_short_reason(
+            cross_block_route_layer,
+            cross_block_geometry,
+            cross_effective_width_um,
+            **short_kwargs,
+        )
+        if cross_short_reason is None:
+            effective_route_layer = cross_block_route_layer
+            short_reason = None
+    effective_width_um = (
+        (cross_block_width_um if cross_block_width_um is not None else width_um)
+        if cross_block_route_layer is not None
+        and effective_route_layer == cross_block_route_layer
+        else width_um
+    )
+    return effective_route_layer, effective_width_um, short_reason
+
+
 def route_two_pin(
     pin_a: dict[str, Any],
     pin_b: dict[str, Any],
@@ -3562,26 +3626,14 @@ def route_two_pin(
     # cross-block leg's real footprint would be checked against too small an
     # inflation.
 
-    # Drive the retry (#1168): try the primary route_layer first -- the
-    # overwhelmingly common case (no configured cross-block layer, or a leg
-    # that never crosses another same-layer pad) resolves here with no
-    # behaviour change from before this issue. Only when the primary layer's
-    # checks object AND a cross_block_route_layer is configured is the
-    # *identical* pair of checks retried against that second layer; if the
-    # crossed pad sits on the primary layer (the overwhelmingly common case),
-    # the `effective_route_layer != other_layer` guard inside the closure
-    # above naturally exempts it on the retry, since a pad on `route_layer`
-    # cannot short a backbone now drawn on `cross_block_route_layer`. Any
-    # *other* obstacle that also happens to sit on the cross layer is still
-    # caught by the same checks, run again in full -- this is not a bypass,
-    # it is the identical short-detection logic evaluated against a different
-    # drawing layer. Everything downstream (obstacle-overlap check 5,
-    # via-drop check 6, stub-widen) uses whichever layer wins here.
-    effective_route_layer = route_layer
-    short_reason = _same_layer_short_reason(
+    # Same-layer-short retry (#1168/#1620): see _select_route_layer.
+    effective_route_layer, effective_width_um, short_reason = _select_route_layer(
         route_layer,
         block_geometry,
         width_um,
+        cross_block_route_layer,
+        cross_block_geometry,
+        cross_block_width_um,
         pin_a=pin_a,
         pin_b=pin_b,
         blocks=blocks,
@@ -3600,52 +3652,8 @@ def route_two_pin(
         same_block_self_net=same_block_self_net,
         margin_eps_um=margin_eps_um,
     )
-    if short_reason is not None and cross_block_route_layer is not None:
-        cross_effective_width_um = (
-            cross_block_width_um if cross_block_width_um is not None else width_um
-        )
-        cross_short_reason = _same_layer_short_reason(
-            cross_block_route_layer,
-            cross_block_geometry,
-            cross_effective_width_um,
-            pin_a=pin_a,
-            pin_b=pin_b,
-            blocks=blocks,
-            offsets_um=offsets_um,
-            points=points,
-            waypoints_um=waypoints_um,
-            a=a,
-            b=b,
-            va=va,
-            dir_a=dir_a,
-            dir_b=dir_b,
-            own_a=own_a,
-            own_b=own_b,
-            block_a=block_a,
-            block_b=block_b,
-            same_block_self_net=same_block_self_net,
-            margin_eps_um=margin_eps_um,
-        )
-        if cross_short_reason is None:
-            effective_route_layer = cross_block_route_layer
-            short_reason = None
     if short_reason is not None:
         return _unroutable(short_reason)
-
-    # effective_width_um (#1620): the width this leg actually draws at --
-    # cross_block_width_um once the retry above switched effective_route_layer
-    # to cross_block_route_layer (falling back to width_um when the caller
-    # left cross_block_width_um unset), width_um otherwise. Everything below
-    # that sizes drawn/checked geometry (obstacle-overlap inflation, the
-    # detour-lane clearance, stub-widen) uses this, not the bare width_um
-    # parameter, so a wider cross-block leg's own footprint is judged and
-    # drawn consistently.
-    effective_width_um = (
-        (cross_block_width_um if cross_block_width_um is not None else width_um)
-        if cross_block_route_layer is not None
-        and effective_route_layer == cross_block_route_layer
-        else width_um
-    )
 
     # obstacle_half_um/obstacle_bboxes_um/allowances_um (#999, relocated here
     # by #1620): every bbox this check tests against is inflated by
