@@ -2808,6 +2808,62 @@ def _closed_ring_pins(
     return ring_pins, None
 
 
+def _channel_width_reason(
+    pin_a: dict[str, Any],
+    pin_b: dict[str, Any],
+    *,
+    placed_bboxes_um: dict[str, dict[str, float]],
+    a: tuple[float, float],
+    b: tuple[float, float],
+    va: tuple[int, int],
+    vb: tuple[int, int],
+    width_um: float,
+    waypoints_um: list[tuple[float, float]] | None,
+) -> str | None:
+    """Channel-width check (check 1): the unroutable reason, or ``None``.
+
+    A jog perpendicular to the ports' facing axis has to squeeze through the
+    channel between the two blocks. When both ports face x and their y differs
+    (a vertical jog is required), the channel is the horizontal gap;
+    symmetric for both-y. Only meaningful for distinct blocks (a self-net has
+    no inter-block channel).
+
+    Skipped entirely when the caller supplies ``waypoints_um`` (#634), for the
+    same reason the #461 recessed-stub lift is: this heuristic is a statement
+    about the *fixed one-jog shape*, computed from the raw port positions and
+    the inter-block gap rather than from the path actually drawn. Once
+    waypoints are supplied that jog is never drawn at all --
+    :func:`manhattan_backbone` routes through the caller's own points -- so a
+    narrow channel the caller's path deliberately avoids (routing over the
+    row, say) is not a reason to reject the net. Tightly packed rows, where
+    the gap is narrower than the route width, are exactly the case a caller
+    most needs a route-around for, so leaving this check unconditional
+    silently defeated ``waypoints_um`` precisely where it is most useful. The
+    path that does get drawn is still fully checked afterwards: the
+    obstacle-overlap check (#199 case 1) rejects any backbone that actually
+    crosses a block's interior, including through this same channel.
+    """
+    if waypoints_um is not None or pin_a["block"] == pin_b["block"]:
+        return None
+    bbox_a = placed_bboxes_um[pin_a["block"]]
+    bbox_b = placed_bboxes_um[pin_b["block"]]
+    if va[1] == 0 and vb[1] == 0 and abs(a[1] - b[1]) > 1e-9:
+        gap = _block_gap_um(bbox_a, bbox_b, axis="x")
+        if 0.0 <= gap < width_um:
+            return (
+                f"vertical jog needs a channel >= width {width_um}um "
+                f"but the gap between blocks is only {gap:.4g}um"
+            )
+    elif va[0] == 0 and vb[0] == 0 and abs(a[0] - b[0]) > 1e-9:
+        gap = _block_gap_um(bbox_a, bbox_b, axis="y")
+        if 0.0 <= gap < width_um:
+            return (
+                f"horizontal jog needs a channel >= width {width_um}um "
+                f"but the gap between blocks is only {gap:.4g}um"
+            )
+    return None
+
+
 def route_two_pin(
     pin_a: dict[str, Any],
     pin_b: dict[str, Any],
@@ -3324,43 +3380,20 @@ def route_two_pin(
     if ring_reason is not None:
         return _unroutable(ring_reason)
 
-    # Routability heuristic: a jog perpendicular to the ports' facing axis has
-    # to squeeze through the channel between the two blocks. When both ports
-    # face x and their y differs (a vertical jog is required), the channel is
-    # the horizontal gap; symmetric for both-y. Only meaningful for distinct
-    # blocks (a self-net has no inter-block channel).
-    #
-    # Skipped entirely when the caller supplies waypoints_um (#634), for the
-    # same reason the #461 stub lift below is: this heuristic is a statement
-    # about the *fixed one-jog shape*, computed from the raw port positions
-    # and the inter-block gap rather than from the path actually drawn. Once
-    # waypoints are supplied that jog is never drawn at all -- manhattan_
-    # backbone routes through the caller's own points -- so a narrow channel
-    # the caller's path deliberately avoids (routing over the row, say) is
-    # not a reason to reject the net. Tightly packed rows, where the gap is
-    # narrower than the route width, are exactly the case a caller most needs
-    # a route-around for, so leaving this check unconditional silently
-    # defeated waypoints_um precisely where it is most useful. The path that
-    # does get drawn is still fully checked below: the obstacle-overlap check
-    # (#199 case 1) rejects any backbone that actually crosses a block's
-    # interior, including through this same channel.
-    if waypoints_um is None and pin_a["block"] != pin_b["block"]:
-        bbox_a = placed_bboxes_um[pin_a["block"]]
-        bbox_b = placed_bboxes_um[pin_b["block"]]
-        if va[1] == 0 and vb[1] == 0 and abs(a[1] - b[1]) > 1e-9:
-            gap = _block_gap_um(bbox_a, bbox_b, axis="x")
-            if 0.0 <= gap < width_um:
-                return _unroutable(
-                    f"vertical jog needs a channel >= width {width_um}um "
-                    f"but the gap between blocks is only {gap:.4g}um"
-                )
-        elif va[0] == 0 and vb[0] == 0 and abs(a[0] - b[0]) > 1e-9:
-            gap = _block_gap_um(bbox_a, bbox_b, axis="y")
-            if 0.0 <= gap < width_um:
-                return _unroutable(
-                    f"horizontal jog needs a channel >= width {width_um}um "
-                    f"but the gap between blocks is only {gap:.4g}um"
-                )
+    # Channel-width check (check 1): see _channel_width_reason.
+    channel_reason = _channel_width_reason(
+        pin_a,
+        pin_b,
+        placed_bboxes_um=placed_bboxes_um,
+        a=a,
+        b=b,
+        va=va,
+        vb=vb,
+        width_um=width_um,
+        waypoints_um=waypoints_um,
+    )
+    if channel_reason is not None:
+        return _unroutable(channel_reason)
 
     # Recessed same-direction vertical ports (#461): a gate landing pad now
     # sits *above* its own gate port, so a port facing +y no longer sits on
