@@ -148,3 +148,8 @@ native/*/target/
 # repo-remote per-repo config (issue #2277): instance sizing + pinned instance id.
 # Contains no credentials; kept out of git because it is machine-local state.
 .env
+
+# pytest-cov output (issue #3223)
+.coverage
+.coverage.*
+coverage.json

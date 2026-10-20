@@ -36,6 +36,10 @@ klt = "klayout_tools.cli:main"
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    # Report-only coverage measurement (issue #3223): one CI leg runs pytest
+    # with --cov and publishes per-module line+branch numbers. See
+    # docs/guides/test-coverage.md.
+    "pytest-cov>=5.0",
     "ruff>=0.14",
     # Type-check ratchet (issue #3221): scripts/check_type_baseline.py.
     # Pinned to a major so diagnostics (and thus type-baseline.json) stay
@@ -256,6 +260,21 @@ path = "hatch_build.py"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+# Report-only coverage (issue #3223): no `fail_under` on purpose -- measure
+# first, ratchet later. `_vendor/` is third-party code kept byte-exact.
+[tool.coverage.run]
+source = ["klayout_tools"]
+branch = true
+omit = ["*/klayout_tools/_vendor/*"]
+
+[tool.coverage.report]
+show_missing = false
+skip_empty = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]
 
 [tool.mypy]
 # Baseline-ratchet type check (issue #3221); see scripts/check_type_baseline.py
