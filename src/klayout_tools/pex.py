@@ -783,6 +783,25 @@ def _pin_count_mismatch(
     }
 
 
+def _no_preflight_mismatch(*diagnostics: dict[str, Any] | None) -> bool:
+    """True when none of the pre-flight mismatch diagnostics fired, i.e. the
+    extracted-side simulation is worth attempting."""
+    return all(d is None for d in diagnostics)
+
+
+def _pin_order_preflight(
+    command_mode: bool,
+    earlier: tuple[dict[str, Any] | None, ...],
+    **kwargs: Any,
+) -> dict[str, Any] | None:
+    """The ``pin_order_mismatch`` pre-flight (issue #2890), gated: ``None`` in
+    ``--measure-command`` mode, and once an earlier (mutually exclusive)
+    pre-flight diagnostic has fired; otherwise :func:`_pin_order_mismatch`."""
+    if command_mode or not _no_preflight_mismatch(*earlier):
+        return None
+    return _pin_order_mismatch(**kwargs)
+
+
 def _pin_order_mismatch(
     *,
     reference_netlist: str,
@@ -3183,13 +3202,13 @@ def run_pex(
     # and the schematic must declare the subcircuit), and `None` in
     # `--measure-command` mode for the same reason. It skips the extracted
     # leg and yields `status: "error"` / exit 4, like its siblings.
-    pin_order_mismatch: dict[str, Any] | None = None
-    if not command_mode and flat_dut_mismatch is None and pin_count_mismatch is None:
-        pin_order_mismatch = _pin_order_mismatch(
-            reference_netlist=reference_netlist_path,
-            extracted_netlist=extracted_netlist_path,
-            top_cell=extract_report["top"],
-        )
+    pin_order_mismatch = _pin_order_preflight(
+        command_mode,
+        (flat_dut_mismatch, pin_count_mismatch),
+        reference_netlist=reference_netlist_path,
+        extracted_netlist=extracted_netlist_path,
+        top_cell=extract_report["top"],
+    )
 
     # `--measure-command` mode (issue #2478): `testbench_paths` is empty (it
     # is validated so above), so the per-testbench loop below is a no-op and
@@ -3257,10 +3276,8 @@ def run_pex(
         # simulation attempt could add either way. Skip it entirely and fall
         # through to the `extracted_report is None` branch below, exactly as
         # an unrunnable extracted side already does.
-        if (
-            flat_dut_mismatch is None
-            and pin_count_mismatch is None
-            and pin_order_mismatch is None
+        if _no_preflight_mismatch(
+            flat_dut_mismatch, pin_count_mismatch, pin_order_mismatch
         ):
             try:
                 extracted_request_path = _prepare_extracted_request(
