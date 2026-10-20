@@ -161,6 +161,32 @@ def test_build_entries_records_commit_and_tag(_tagged_repo, monkeypatch):
     assert entry["git_commit"] == expected_commit
 
 
+def test_build_entries_records_standalone_drc_deck_file(tmp_path, monkeypatch):
+    """Issue #3826: ``<name>.drc`` at a tag is a separate hashed artifact."""
+    repo = _make_repo(tmp_path)
+    decks_dir = repo / "src" / "klayout_tools" / "decks"
+    _write_pyproject(repo, "0.1.0")
+    (decks_dir / "asap7.py").write_text("MODULE = 1\n")
+    (decks_dir / "asap7.drc").write_text("# drc deck\n")
+    (decks_dir / "sky130.py").write_text("DECK = 1\n")
+    _commit(repo, "v0.1.0")
+    monkeypatch.setattr(gdh, "REPO_ROOT", repo)
+
+    entries = gdh.build_entries()
+
+    (drc,) = [e for e in entries if e.get("artifact") == "drc_deck"]
+    assert drc["deck"] == "asap7"
+    assert (
+        drc["content_hash"] == "sha256:" + hashlib.sha256(b"# drc deck\n").hexdigest()
+    )
+    module = [e for e in entries if e["deck"] == "asap7" and "artifact" not in e]
+    assert len(module) == 1
+    assert module[0]["content_hash"] != drc["content_hash"]
+    # sky130 has no .drc file -> no artifact entry for it.
+    assert not [e for e in entries if e["deck"] == "sky130" and "artifact" in e]
+    assert gdh.build_entries() == entries  # deterministic
+
+
 # --------------------------------------------------------------------------- #
 # main() -- writes _history.json, idempotent, fails loudly with no tags
 # --------------------------------------------------------------------------- #

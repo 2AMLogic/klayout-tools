@@ -46,6 +46,8 @@ import math
 from dataclasses import dataclass, field
 from typing import Any
 
+from ._unionfind import UnionFind
+
 #: Cross-net short-candidate threshold (ohms). An injected parasitic
 #: resistor whose two endpoints resolve to *different* original nets at or
 #: below this value is reported as a short candidate. The comparison is
@@ -166,7 +168,10 @@ class IntegrityNet:
     reconciliation then reports ``not_applicable`` instead of comparing
     unequal quantities. (The current MoM substitution stays checkable: it
     rewrites the declared entry *before* injection, so declared and
-    emitted still describe the same capacitance.)
+    emitted still describe the same capacitance.) ``network_dropped``
+    (``--parasitic-variant``, issue #3056) marks a net whose series R and
+    ground C were both deliberately omitted: its lone node then has no
+    emitted element by design, so it is not reported as an orphan.
     """
 
     net_id: int
@@ -176,6 +181,7 @@ class IntegrityNet:
     declared_capacitance_ff: float = 0.0
     capacitance_checkable: bool = True
     capacitance_reason: str | None = None
+    network_dropped: bool = False
 
 
 @dataclass
@@ -299,6 +305,7 @@ class IntegrityRecordBuilder:
         *,
         capacitance_checkable: bool = True,
         capacitance_reason: str | None = None,
+        network_dropped: bool = False,
     ) -> None:
         self._nets.append(
             IntegrityNet(
@@ -309,6 +316,7 @@ class IntegrityRecordBuilder:
                 declared_capacitance_ff=declared_capacitance_ff,
                 capacitance_checkable=capacitance_checkable,
                 capacitance_reason=capacitance_reason,
+                network_dropped=network_dropped,
             )
         )
 
@@ -369,22 +377,12 @@ def _union_find_connectivity(
     tracked (an edge touching an unlisted uid is ignored -- callers pass
     the node set of one net, and edges are pre-filtered to it).
     """
-    parent = {uid: uid for uid in uids}
-
-    def find(uid: int) -> int:
-        root = uid
-        while parent[root] != root:
-            root = parent[root]
-        while parent[uid] != root:
-            parent[uid], uid = root, parent[uid]
-        return root
-
+    known = set(uids)
+    groups = UnionFind(uids)
     for a, b in edges:
-        if a in parent and b in parent:
-            ra, rb = find(a), find(b)
-            if ra != rb:
-                parent[ra] = rb
-    return {uid: find(uid) for uid in uids}
+        if a in known and b in known:
+            groups.union(a, b)
+    return {uid: groups.find(uid) for uid in uids}
 
 
 @dataclass
@@ -602,7 +600,10 @@ def _check_islands(
 
 
 def _check_orphans(
-    record: ParasiticNetworkRecord, uid_set: set[int], attached: set[int]
+    record: ParasiticNetworkRecord,
+    uid_set: set[int],
+    attached: set[int],
+    net: IntegrityNet,
 ) -> dict[str, Any]:
     """Orphan nodes: nodes of the net's universe with no element attached
     at all. A node attached even only by a capacitor is a legitimate
@@ -610,7 +611,11 @@ def _check_orphans(
     here even though they establish no DC connectivity. ``attached`` is
     the record-wide set :func:`_index_record` builds once.
     """
-    orphans = sorted(record.nodes[uid].name for uid in uid_set if uid not in attached)
+    orphans = sorted(
+        record.nodes[uid].name
+        for uid in uid_set
+        if uid not in attached and not net.network_dropped
+    )
     capped, truncated = _cap_details(
         [{"node": name} for name in orphans], record.max_detail_items
     )
@@ -813,7 +818,7 @@ def check_parasitic_network(record: ParasiticNetworkRecord) -> dict[str, Any]:
         own_resistors = index.resistors_by_owner.get(net.net_id, [])
         open_block = _check_open(record, net, reps)
         islands_block = _check_islands(record, net, uid_set, reps)
-        orphans_block = _check_orphans(record, uid_set, index.attached)
+        orphans_block = _check_orphans(record, uid_set, index.attached, net)
         suspicious_block = _check_suspicious_resistors(record, own_resistors)
         shorts_block = _check_short_candidates(record, own_resistors)
         capacitance_block = _check_capacitance(

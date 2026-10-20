@@ -401,6 +401,7 @@ def test_version_report_shape():
         "git_tag",
         "dirty",
         "is_release",
+        "reinstall_spec",
         "grading_ruleset_id",
         "klayout_version",
         "klayout_version_expected",
@@ -429,6 +430,45 @@ def test_cli_version_json(capsys):
 def test_cli_version_text(capsys):
     assert main(["version"]) == 0
     assert capsys.readouterr().out.strip() == f"klt {build_identity.build_version()}"
+
+
+_SHA = "4f1c8a9b2d3e5f60718293a4b5c6d7e8f9a0b1c2"
+
+
+@pytest.mark.parametrize(
+    ("ident", "expected"),
+    [
+        (
+            {"is_release": True, "git_commit": _SHA, "dirty": False},
+            "klayout-tools==0.2.0",
+        ),
+        (
+            {"is_release": False, "git_commit": _SHA, "dirty": False},
+            f"klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@{_SHA}",
+        ),
+        ({"is_release": False, "git_commit": _SHA, "dirty": True}, None),
+        ({"is_release": False, "git_commit": _SHA, "dirty": None}, None),
+        ({"is_release": None, "git_commit": None, "dirty": None}, None),
+    ],
+    ids=["release", "clean-dev", "dirty", "dirty-unknown", "unknown"],
+)
+def test_reinstall_spec_cases(ident, expected):
+    assert build_identity.reinstall_spec(ident, "0.2.0") == expected
+
+
+def test_version_text_says_when_not_reinstallable(monkeypatch, capsys):
+    monkeypatch.setattr(
+        build_identity,
+        "identity",
+        lambda: {
+            "git_commit": None,
+            "git_tag": None,
+            "dirty": None,
+            "is_release": None,
+        },
+    )
+    assert main(["version"]) == 0
+    assert "not reinstallable" in capsys.readouterr().err
 
 
 def test_cli_version_flag_matches_the_version_verb(monkeypatch, capsys):
