@@ -296,6 +296,37 @@ together with the same request field, a flag with any other engine, a
 `--deck-var` without `=`, or either flag with `--check`, is an application
 error (exit 1). A relative `--deck-file` resolves against the current directory.
 
+#### sky130 runset recipe: xschem-exported netlists
+
+A SPICE netlist exported from xschem writes devices as subcircuit calls
+(`X<name> ... sky130_fd_pr__nfet_g5v0d10v5 L=0.5 W=4 ...`) with lengths in
+micrometres and no unit suffix. A sky130 runset that reads the two globals
+below needs both set for such a reference; pass them as `deck_vars` (values are
+strings):
+
+```json
+"deck_vars": {"convert_subckts": "true", "scale": "true"}
+```
+
+or the equivalent flags `--deck-var convert_subckts=true --deck-var scale=true`.
+
+- `convert_subckts=true` — turns each `X` device call into a device. Without it
+  the reader keeps the line as a call to an undefined subcircuit, so the
+  reference circuit has no devices and every net merges into one (a single
+  net named like `'AMPOUT,BUF1,DM,DP,...'`).
+- `scale=true` — reads the reference's bare `L=0.5` as micrometres. Without it
+  the layout side reports `L=0.5` µm while the reference is stored as 0.5 m
+  (`L=500000` in database units), so every device is unmatched even though the
+  topologies are identical. See the µm-vs-`.option scale` discussion elsewhere
+  in this document for the same unit issue on the other engines.
+
+The two failures look alike in the report: every net, pin and device is
+unmatched, with no hint of the cause. A total mismatch on a pair you expect to
+be topologically identical is the cue to check these two variables first. With
+both set, the reporter's pair came back `match` (11/11 devices, 10/10 nets);
+this is the reporter's observation, not something CI re-runs (the standalone
+`klayout` application and the sky130 runset are not available there).
+
 ### FinFET decks: ASAP7 (issues #2761, #2813)
 
 A `layout.deck` naming a FinFET extraction deck (today `asap7`) compares
