@@ -14,6 +14,17 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt gen-compose` `pins[].request`** (issue #3971, documented in
+  `docs/cli/gen-compose.md` "Requested port coordinates"): additive. A `pins[]`
+  entry may carry `request: {x_um?, y_um?, layer_role?}` to place the pin at a
+  caller-selected composed-frame coordinate via a short stub on the port's own
+  layer. `pins[]` / `ports[]` entries gain `requested` / `achieved` only when a
+  request was made; requests without the field are unchanged. Infeasible
+  requests fail (exit 1) with distinct `error.code`s: `port_request_invalid`,
+  `port_request_unsupported_layer`, `port_request_off_grid`,
+  `port_request_out_of_bounds`, `port_request_conflict`,
+  `port_request_on_connectivity_port`.
+
 - **gf180mcu discloses wide-metal and narrow-line end-of-line coverage gaps**
   (issue #3968, documented in `docs/cli/drc.md` and `docs/cli/deck.md`):
   additive. `coverage.unmodeled_rules`, `klt deck info` and `klt deck rules`

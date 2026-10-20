@@ -181,6 +181,7 @@ import os
 from collections.abc import Callable
 from typing import Any
 
+from . import gen_compose_port_request as _pr
 from ._layout import write_layout
 from ._paths import _resolve_relative
 from ._provenance import build_provenance, layout_geometry_digest
@@ -384,7 +385,22 @@ class GenComposeError(Exception):
     unsupported ``placement.strategy``, and a GDS read/write failure -- the
     CLI turns this into a clean stderr message + exit code 1, never a
     traceback (see ``docs/cli/gen-compose.md``'s exit code table).
+
+    ``code`` / ``details`` are an optional machine-readable classification
+    (``error.code`` and extra ``error`` fields in the JSON envelope); only the
+    ``pins[].request`` failures (#3971) set them today.
     """
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        code: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.details = details
 
 
 def load_generator_report_arg(
@@ -2431,9 +2447,31 @@ def _parse_pins(
         pin_entry: dict[str, Any] = {"net": net, "block": block_id, "port": port}
         if _check_pin_vs_connectivity(index, net, block_id, port, connectivity_pairs):
             pin_entry["router_labelled"] = True
+        _attach_port_request(pin_entry, entry, index)
         pins.append(pin_entry)
 
     return pins
+
+
+def _attach_port_request(
+    pin_entry: dict[str, Any], entry: dict[str, Any], index: int
+) -> None:
+    """Parse ``entry["request"]`` (#3971) onto ``pin_entry`` when present.
+
+    A request on a port ``connectivity[]`` already routes is rejected: the
+    router owns that port's position, so a coordinate request cannot move it.
+    """
+    if "request" not in entry:
+        return
+    where = f"request.pins[{index}] (net '{entry['net']}')"
+    if pin_entry.get("router_labelled"):
+        raise GenComposeError(
+            f"{where} names port '{entry['port']}' on block '{entry['block']}', "
+            "which is wired by connectivity[]; a coordinate request cannot move "
+            "a routed port",
+            code=_pr.CODE_ON_CONNECTIVITY_PORT,
+        )
+    pin_entry["request"] = _pr.parse_port_request(entry["request"], where)
 
 
 def _check_pin_vs_connectivity(
@@ -2545,6 +2583,64 @@ def _plan_pin_label(
     return True, placement
 
 
+def _label_promoted_pins(
+    promoted_pins: list[dict[str, Any]],
+    blocks: dict[str, dict[str, Any]],
+    offsets_um: dict[str, dict[str, float]],
+    variant: Any,
+    port_request_plans: dict[int, dict[str, Any]],
+    routed_geometry: list[dict[str, Any]],
+    notes: list[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Label every ``pins[]`` entry (#210); returns ``(label placements,
+    response pins)``.
+
+    An entry with a planned ``request`` (#3971) is labelled at its achieved
+    coordinate, its stub is appended to ``routed_geometry`` (drawn by
+    :func:`_write_composed_gds` like any other path), and its response entry
+    reports ``requested`` / ``achieved``.
+    """
+    pin_placements: list[dict[str, Any]] = []
+    response_pins: list[dict[str, Any]] = []
+    for pin_index, entry in enumerate(promoted_pins):
+        block_id = entry["block"]
+        port = blocks[block_id]["ports"].get(entry["port"])
+        plan = port_request_plans.get(pin_index)
+        if plan is not None:
+            port = {
+                **port,
+                "x_um": plan["achieved"]["x_um"] - offsets_um[block_id]["x"],
+                "y_um": plan["achieved"]["y_um"] - offsets_um[block_id]["y"],
+            }
+        labelled, placement = _plan_pin_label(entry, port, variant, offsets_um, notes)
+        if placement is not None:
+            pin_placements.append(placement)
+        response_pin: dict[str, Any] = {
+            "net": entry["net"],
+            "block": block_id,
+            "port": entry["port"],
+            "labelled": labelled,
+        }
+        if plan is not None:
+            stub = plan["stub"]
+            routed_geometry.append(
+                {
+                    "net": entry["net"],
+                    "points_um": stub["points_um"],
+                    "width_um": stub["width_um"],
+                    "via_drops": [],
+                    "stub_widen": [],
+                    "route_layer": stub["layer"],
+                    "label_layer": None,
+                    "label": False,
+                }
+            )
+            response_pin["requested"] = plan["requested"]
+            response_pin["achieved"] = plan["achieved"]
+        response_pins.append(response_pin)
+    return pin_placements, response_pins
+
+
 #: Allowed keys in ``request.pdk`` (spike section 2). Any other key is an
 #: application error rather than a silent fallback -- see #328: a typo such
 #: as ``{"pdk": {"name": "gf180mcuD"}}`` (``name`` being what ``klt gen``'s
@@ -2565,6 +2661,7 @@ def promote_composed_ports(
     promoted_pins: list[dict[str, Any]],
     blocks: dict[str, dict[str, Any]],
     offsets_um: dict[str, dict[str, float]],
+    port_request_plans: dict[int, dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Build the composed cell's own ``ports[]`` from the request's ``pins[]``
     (#1189), in the composed (post-placement) coordinate frame.
@@ -2597,7 +2694,7 @@ def promote_composed_ports(
     ports: list[dict[str, Any]] = []
     notes: list[str] = []
     seen: set[str] = set()
-    for entry in promoted_pins:
+    for pin_index, entry in enumerate(promoted_pins):
         net_label = entry["net"]
         block_id = entry["block"]
         port_name = entry["port"]
@@ -2626,6 +2723,12 @@ def promote_composed_ports(
                 "port": port_name,
             }
         )
+        plan = (port_request_plans or {}).get(pin_index)
+        if plan is not None:  # pins[].request (#3971): report the achieved spot
+            ports[-1]["x_um"] = plan["achieved"]["x_um"]
+            ports[-1]["y_um"] = plan["achieved"]["y_um"]
+            ports[-1]["requested"] = plan["requested"]
+            ports[-1]["achieved"] = plan["achieved"]
     return ports, notes
 
 
@@ -4241,33 +4344,46 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     # unlike connectivity[]'s single shared routing.layer_role). A port whose
     # layer has no ExtractionDeck label convention is a partial success: a
     # drc_hints note, pin not labelled -- never a hard failure.
-    pin_placements: list[dict[str, Any]] = []
-    response_pins: list[dict[str, Any]] = []
-    for entry in promoted_pins:
-        net_label = entry["net"]
-        block_id = entry["block"]
-        port_name = entry["port"]
-        port = blocks[block_id]["ports"].get(port_name)
-        labelled, placement = _plan_pin_label(
-            entry, port, pdk_info["variant"], offsets_um, notes
+    # pins[].request (#3971): stubs to caller-selected coordinates, planned
+    # (and validated) only when some entry asks -- otherwise this block is a
+    # no-op and nothing above is read a second time.
+    port_request_plans: dict[int, dict[str, Any]] = {}
+    if any("request" in entry for entry in promoted_pins):
+        port_request_plans = _pr.plan_port_requests(
+            promoted_pins,
+            blocks=blocks,
+            offsets_um=offsets_um,
+            placed_bboxes_um=placed_bboxes_um,
+            resolve_layer=lambda role: _resolve_override_layer(
+                role, "request.pins[].request.layer_role"
+            ),
+            grid_for_layer=lambda layer: _pdk_mfg_grid_um(pdk_info, layer),
+            min_width_for_layer=lambda layer: (
+                _min_width_um_for_layer(pdk_info["variant"], layer) or (None,)
+            )[0],
+            min_spacing_for_layer=lambda layer: (
+                _min_spacing_um_for_layer(layer) or (None,)
+            )[0],
+            block_geometry=_own_block_layer_geometry,
+            routed_regions=accepted_route_regions,
+            dbu=_route_dbu(),
         )
-        if placement is not None:
-            pin_placements.append(placement)
-        response_pins.append(
-            {
-                "net": net_label,
-                "block": block_id,
-                "port": port_name,
-                "labelled": labelled,
-            }
-        )
+    pin_placements, response_pins = _label_promoted_pins(
+        promoted_pins,
+        blocks,
+        offsets_um,
+        pdk_info["variant"],
+        port_request_plans,
+        routed_geometry,
+        notes,
+    )
 
     # The composed cell's own ports[] (#1189) -- promoted from the pins[]
     # entries above, in the composed frame, so this whole response can be fed
     # straight back into another gen-compose run's blocks[].generator_report
     # and its top-level nets addressed by name from the level above.
     composed_ports, promote_notes = promote_composed_ports(
-        promoted_pins, blocks, offsets_um
+        promoted_pins, blocks, offsets_um, port_request_plans
     )
     notes.extend(promote_notes)
 
@@ -4781,7 +4897,12 @@ def _write_composed_gds(
                 kdb.CellInstArray(sub_cell.cell_index(), kdb.Trans(rot, mirrx, ox, oy))
             )
 
-    if routed_geometry and route_layer is not None:
+    # A pins[].request stub (#3971) carries its own `route_layer`, so a request
+    # with no routing plane at all still draws it.
+    if routed_geometry and (
+        route_layer is not None
+        or any(route.get("route_layer") for route in routed_geometry)
+    ):
         # Per-entry drawing layer (#1168): each `routed_geometry` entry may
         # carry its own "route_layer"/"label_layer" -- the *effective* layer
         # that particular leg drew on, which can differ from the request's
@@ -4817,6 +4938,7 @@ def _write_composed_gds(
             if not points or len(points) < 2:
                 continue
             entry_route_layer = route.get("route_layer", route_layer) or route_layer
+            assert entry_route_layer is not None  # route_layer or the entry's own
             entry_label_layer = route.get("label_layer", label_layer)
             layer_index = _layer_index(entry_route_layer)
             path_points = [
