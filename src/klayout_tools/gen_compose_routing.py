@@ -44,6 +44,7 @@ ring-gap-port check).
 
 from __future__ import annotations
 
+import functools
 import math
 from typing import Any, NamedTuple
 
@@ -3308,6 +3309,132 @@ def _far_side_crossings_um(
     return far_side_um
 
 
+def _bounded_detour_retry(
+    reroute: Any,
+    blocking_um: dict[str, float],
+    *,
+    own_a: str,
+    own_b: str,
+    a: tuple[float, float],
+    b: tuple[float, float],
+    va: tuple[int, int],
+    vb: tuple[int, int],
+    placed_bboxes_um: dict[str, dict[str, float]],
+    effective_width_um: float,
+    waypoints_um: list[tuple[float, float]] | None,
+) -> tuple[dict[str, Any] | None, str]:
+    """Bounded detour search (#1167): ``(routed_retry, detour_note)``.
+
+    A backbone rejected *only* for crossing blocks neither of its two pins
+    sits on is not a routing failure -- it is the fixed one-jog shape being
+    the wrong shape. Before reporting the net unroutable, retry it around
+    those obstacles on up to ``_MAX_DETOUR_LANES`` alternate lanes
+    (:func:`_detour_lane_waypoints_um`), shortest first, and keep the first
+    that passes (returned as ``routed_retry``). Each retry goes back through
+    :func:`route_two_pin` (via ``reroute``) with the lane as ``waypoints_um``,
+    so every routability check -- rings, pad crossings, drawn-metal shorts,
+    the obstacle check, via drops -- applies to the detour exactly as it does
+    to any other path; nothing is waived to make a detour fit. Recursion is
+    bounded at one level by construction: the retry supplies ``waypoints_um``,
+    and a waypoint-supplied path is never itself detoured (a caller who
+    supplies a path owns it -- #634 -- and the detour retry is such a caller).
+
+    Scoped to *unrelated* blocks on purpose. A backbone that plows through
+    one of its own two pins' blocks (the same-facing port pair) is a
+    statement about which port faces which way, not about something sitting
+    in the channel; the remedy there stays the caller-supplied
+    ``waypoints_um`` of #634, whose routability the caller -- not this
+    heuristic -- vouches for. ``detour_note`` is non-empty only when lanes
+    were tried and none routed; it is appended to the rejection reason.
+    """
+    if not (
+        blocking_um and waypoints_um is None and not ({own_a, own_b} & set(blocking_um))
+    ):
+        return None, ""
+    lanes = _detour_lane_waypoints_um(
+        (a, va, placed_bboxes_um[own_a]),
+        (b, vb, placed_bboxes_um[own_b]),
+        [placed_bboxes_um[other_id] for other_id in blocking_um],
+        placed_bboxes_um,
+        effective_width_um,
+    )
+    for lane in lanes:
+        retry = reroute(waypoints_um=lane)
+        if retry["routed"]:
+            return retry, ""
+    detour_note = ""
+    if lanes:
+        detour_note = (
+            f" -- a bounded detour around it ({len(lanes)} alternate "
+            f"lane{'' if len(lanes) == 1 else 's'} placed clear of every "
+            "block between the two pins) was tried first, and each one "
+            "still crossed a placed block"
+        )
+    return None, detour_note
+
+
+def _obstacle_rejection_reason(
+    far_side_um: dict[str, float],
+    blocking_um: dict[str, float],
+    allowances_um: dict[str, float],
+    detour_note: str,
+    *,
+    pin_a: dict[str, Any],
+    pin_b: dict[str, Any],
+    own_a: str,
+    own_b: str,
+    dir_a: int,
+    dir_b: int,
+    effective_width_um: float,
+    obstacle_half_um: float,
+) -> str | None:
+    """Unroutable wording for the first far-side/blocking crossing, or ``None``."""
+    for own_id, crossed_um in far_side_um.items():
+        own_port = pin_a["port"] if own_id == own_a else pin_b["port"]
+        own_dir = dir_a if own_id == own_a else dir_b
+        allowed_um = allowances_um.get(own_id, 0.0)
+        return (
+            f"backbone's {effective_width_um}um-wide drawn path crosses "
+            f"{crossed_um:.4g}um of block '{own_id}''s interior on the side "
+            f"*away* from its own pin '{own_port}' (which faces "
+            f"{own_dir}deg) -- that pin's {allowed_um:.4g}um edge margin "
+            "only describes the approach on the side it faces, so this "
+            "route reaches the pin from behind, crossing whatever the "
+            "block draws in between (another device's terminal, a strap) "
+            "and drawing a silent short to it (issue #1895); connect this "
+            "pin from the side its port faces, supply waypoints_um that "
+            "bring the approach around to that side, or route to a "
+            "layer_role with a metal2/via stack instead (or configure "
+            "routing.cross_block_layer_role, issue #1168)"
+        )
+
+    for other_id, crossed_um in blocking_um.items():
+        allowed_um = allowances_um.get(other_id, 0.0)
+        if other_id in (own_a, own_b):
+            reason = (
+                f"backbone's {effective_width_um}um-wide drawn path crosses "
+                f"{crossed_um:.4g}um through its own pin's block '{other_id}' "
+                f"-- more than that pin's own {allowed_um:.4g}um edge margin "
+                f"(including {obstacle_half_um:.4g}um for the route's own "
+                "half-width), so the route plows through, or clips the edge "
+                "of, the block's interior (e.g. a same-facing port pair "
+                "reaching a pin on the block's far side, crossing another "
+                "pin on the way, or a connecting jog running close enough "
+                "alongside the block's own edge that the drawn wire's width "
+                "still overlaps it) rather than approaching the pin cleanly"
+            )
+        else:
+            reason = (
+                f"backbone's {effective_width_um}um-wide drawn path crosses "
+                f"{crossed_um:.4g}um through unrelated block '{other_id}''s "
+                "bbox (including its own edge, within half the route's "
+                "width) -- the route is not point-to-point between only the "
+                "two connected blocks"
+            )
+        return reason + detour_note
+    return None
+
+
 def route_two_pin(
     pin_a: dict[str, Any],
     pin_b: dict[str, Any],
@@ -4028,107 +4155,59 @@ def route_two_pin(
         margin_eps_um=margin_eps_um,
     )
 
-    # Bounded detour search (#1167): a backbone rejected *only* for crossing
-    # blocks neither of its two pins sits on is not a routing failure -- it is
-    # the fixed one-jog shape being the wrong shape. Before reporting the net
-    # unroutable, retry it around those obstacles on up to _MAX_DETOUR_LANES
-    # alternate lanes (_detour_lane_waypoints_um), shortest first, and keep the
-    # first that passes. Each retry goes back through *this same function* with
-    # the lane as waypoints_um, so every routability check above -- rings, pad
-    # crossings, drawn-metal shorts, this very obstacle check, via drops --
-    # applies to the detour exactly as it does to any other path; nothing is
-    # waived to make a detour fit. Recursion is bounded at one level by
-    # construction: the retry supplies waypoints_um, and a waypoint-supplied
-    # path is never itself detoured (a caller who supplies a path owns it --
-    # #634 -- and the detour retry is such a caller).
-    #
-    # Scoped to *unrelated* blocks on purpose. A backbone that plows through
-    # one of its own two pins' blocks (the same-facing port pair) is a
-    # statement about which port faces which way, not about something sitting
-    # in the channel; the remedy there stays the caller-supplied waypoints_um
-    # of #634, whose routability the caller -- not this heuristic -- vouches
-    # for.
-    detour_note = ""
-    if blocking_um and waypoints_um is None and not ({own_a, own_b} & set(blocking_um)):
-        lanes = _detour_lane_waypoints_um(
-            (a, va, placed_bboxes_um[own_a]),
-            (b, vb, placed_bboxes_um[own_b]),
-            [placed_bboxes_um[other_id] for other_id in blocking_um],
-            placed_bboxes_um,
-            effective_width_um,
-        )
-        for lane in lanes:
-            retry = route_two_pin(
-                pin_a,
-                pin_b,
-                blocks,
-                offsets_um,
-                placed_bboxes_um,
-                width_um,
-                route_layer,
-                extraction_deck,
-                block_geometry,
-                waypoints_um=lane,
-                cross_block_route_layer=cross_block_route_layer,
-                cross_block_geometry=cross_block_geometry,
-                cross_block_width_um=cross_block_width_um,
-                block_geometry_for=block_geometry_for,
-                cross_block_geometry_for=cross_block_geometry_for,
-                grid_um=grid_um,
-            )
-            if retry["routed"]:
-                return retry
-        if lanes:
-            detour_note = (
-                f" -- a bounded detour around it ({len(lanes)} alternate "
-                f"lane{'' if len(lanes) == 1 else 's'} placed clear of every "
-                "block between the two pins) was tried first, and each one "
-                "still crossed a placed block"
-            )
+    # Bounded detour search (#1167): see _bounded_detour_retry. `reroute`
+    # re-enters this function with the same leg inputs (the one-level
+    # recursion every retry below shares).
+    reroute = functools.partial(
+        route_two_pin,
+        pin_a,
+        pin_b,
+        blocks,
+        offsets_um,
+        placed_bboxes_um,
+        width_um,
+        route_layer,
+        extraction_deck,
+        block_geometry,
+        cross_block_route_layer=cross_block_route_layer,
+        cross_block_geometry=cross_block_geometry,
+        cross_block_width_um=cross_block_width_um,
+        block_geometry_for=block_geometry_for,
+        cross_block_geometry_for=cross_block_geometry_for,
+        grid_um=grid_um,
+    )
+    detour_retry, detour_note = _bounded_detour_retry(
+        reroute,
+        blocking_um,
+        own_a=own_a,
+        own_b=own_b,
+        a=a,
+        b=b,
+        va=va,
+        vb=vb,
+        placed_bboxes_um=placed_bboxes_um,
+        effective_width_um=effective_width_um,
+        waypoints_um=waypoints_um,
+    )
+    if detour_retry is not None:
+        return detour_retry
 
-    for own_id, crossed_um in far_side_um.items():
-        own_port = pin_a["port"] if own_id == own_a else pin_b["port"]
-        own_dir = dir_a if own_id == own_a else dir_b
-        allowed_um = allowances_um.get(own_id, 0.0)
-        return _unroutable(
-            f"backbone's {effective_width_um}um-wide drawn path crosses "
-            f"{crossed_um:.4g}um of block '{own_id}''s interior on the side "
-            f"*away* from its own pin '{own_port}' (which faces "
-            f"{own_dir}deg) -- that pin's {allowed_um:.4g}um edge margin "
-            "only describes the approach on the side it faces, so this "
-            "route reaches the pin from behind, crossing whatever the "
-            "block draws in between (another device's terminal, a strap) "
-            "and drawing a silent short to it (issue #1895); connect this "
-            "pin from the side its port faces, supply waypoints_um that "
-            "bring the approach around to that side, or route to a "
-            "layer_role with a metal2/via stack instead (or configure "
-            "routing.cross_block_layer_role, issue #1168)"
-        )
-
-    for other_id, crossed_um in blocking_um.items():
-        allowed_um = allowances_um.get(other_id, 0.0)
-        if other_id in (own_a, own_b):
-            reason = (
-                f"backbone's {effective_width_um}um-wide drawn path crosses "
-                f"{crossed_um:.4g}um through its own pin's block '{other_id}' "
-                f"-- more than that pin's own {allowed_um:.4g}um edge margin "
-                f"(including {obstacle_half_um:.4g}um for the route's own "
-                "half-width), so the route plows through, or clips the edge "
-                "of, the block's interior (e.g. a same-facing port pair "
-                "reaching a pin on the block's far side, crossing another "
-                "pin on the way, or a connecting jog running close enough "
-                "alongside the block's own edge that the drawn wire's width "
-                "still overlaps it) rather than approaching the pin cleanly"
-            )
-        else:
-            reason = (
-                f"backbone's {effective_width_um}um-wide drawn path crosses "
-                f"{crossed_um:.4g}um through unrelated block '{other_id}''s "
-                "bbox (including its own edge, within half the route's "
-                "width) -- the route is not point-to-point between only the "
-                "two connected blocks"
-            )
-        return _unroutable(reason + detour_note)
+    obstacle_reason = _obstacle_rejection_reason(
+        far_side_um,
+        blocking_um,
+        allowances_um,
+        detour_note,
+        pin_a=pin_a,
+        pin_b=pin_b,
+        own_a=own_a,
+        own_b=own_b,
+        dir_a=dir_a,
+        dir_b=dir_b,
+        effective_width_um=effective_width_um,
+        obstacle_half_um=obstacle_half_um,
+    )
+    if obstacle_reason is not None:
+        return _unroutable(obstacle_reason)
 
     # Via-drop resolution (#454, check 5 -- see docstring; generalized to a
     # multi-hop ladder by issue #1567): only consulted when both a
