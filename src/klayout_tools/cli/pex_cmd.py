@@ -18,7 +18,9 @@ Exit codes (see ``docs/cli/pex.md`` for the full table):
         block here rather than aborting with exit 1 (issue #1030), and a
         flat-schematic-DUT-vs-`.SUBCKT`-wrapped-extraction mismatch, which
         reports a named ``flat_dut_mismatch`` block the same way (issue
-        #1255, Gap 2)
+        #1255, Gap 2), and a same-pins-different-order mismatch, which
+        reports a named ``pin_order_mismatch`` block the same way (issue
+        #2890)
 (2 is reserved for argparse usage errors, as with every other ``klt``
 subcommand. Exit codes 3/4 mirror `klt sim`'s own precedent -- see
 docs/cli/sim.md's "Exit codes" section.)
@@ -202,7 +204,8 @@ def _parse_measure_command(raw: str | None) -> list[str] | None:
 
 
 def _print_mismatch(mismatch: dict | None, name: str) -> None:
-    """Print ``mismatch`` (``pin_count_mismatch`` or ``flat_dut_mismatch`` --
+    """Print ``mismatch`` (``pin_count_mismatch``, ``flat_dut_mismatch`` or
+    ``pin_order_mismatch`` --
     both share the same structured shape: ``subcircuit``, a ``schematic``
     and ``extracted`` per-side detail dict, ``ngspice_message``, and
     ``detail``) under its own ``<name>:`` heading, or nothing at all when
@@ -337,6 +340,9 @@ def _print_text(report: dict) -> None:
     # Additive (issue #1255, Gap 2): only printed when the schematic DUT is
     # flat (no `.SUBCKT` wrapper) against a `.SUBCKT`-wrapped extraction.
     _print_mismatch(report.get("flat_dut_mismatch"), "flat_dut_mismatch")
+    # Additive (issue #2890): only printed when both sides declare the same
+    # pins in a different order.
+    _print_mismatch(report.get("pin_order_mismatch"), "pin_order_mismatch")
 
     testbenches = report["testbenches"]
     if testbenches:
