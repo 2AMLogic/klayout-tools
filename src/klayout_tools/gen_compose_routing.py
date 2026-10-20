@@ -3435,6 +3435,109 @@ def _obstacle_rejection_reason(
     return None
 
 
+def _resolve_via_drops(
+    effective_route_layer: tuple[int, int] | None,
+    extraction_deck: ExtractionDeck | None,
+    endpoints: tuple[
+        tuple[dict[str, Any], dict[str, Any], tuple[float, float]],
+        tuple[dict[str, Any], dict[str, Any], tuple[float, float]],
+    ],
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Via-drop resolution (check 6, #454; multi-hop ladder since #1567).
+
+    Returns ``(via_drops, reason)``. Only consulted when both a route layer
+    and an ``extraction_deck`` are given (pre-#454 callers that pass neither
+    draw exactly as before, no via-drop). For each endpoint (``(pin, port,
+    position)``) whose own reported layer differs from the route layer,
+    either resolve the connecting via-drop ladder (drop needed and available
+    -- possibly more than one via, issue #1567), find nothing to do (not a
+    metals-stack level -- an unrelated role, unchanged legacy behavior), or
+    report ``reason`` (a drop is needed but not resolvable; the caller rejects
+    the whole net as unroutable). Uses ``effective_route_layer`` (#1168): when
+    the same-layer-short retry switched this leg to
+    ``cross_block_route_layer``, every endpoint whose own pad sits on the
+    *primary* ``route_layer`` now needs exactly the drop this already knows
+    how to resolve -- no separate cross-block via-drop mechanism.
+    """
+    via_drops: list[dict[str, Any]] = []
+    if effective_route_layer is not None and extraction_deck is not None:
+        for pin, port, pos in endpoints:
+            port_layer = _port_own_layer(port)
+            if port_layer is None:
+                continue  # no reported layer -- draw directly, legacy behavior
+            ladder, drop_error = _resolve_via_drop_layer(
+                extraction_deck, effective_route_layer, port_layer
+            )
+            if drop_error is not None:
+                return via_drops, (
+                    f"pin '{pin['port']}' on block '{pin['block']}' is drawn "
+                    f"on layer {port_layer}, which routing.layer_role's "
+                    f"{effective_route_layer} cannot reach: {drop_error}"
+                )
+            if ladder is not None:
+                # One via_drops entry per hop (issue #1567): a single-hop
+                # ladder (the pre-#1567 case) produces exactly the one entry
+                # it always did; a multi-hop ladder produces one entry per
+                # via, each with its own pair of landing-pad layers
+                # (``landing_layers``) -- :func:`_write_composed_gds` draws a
+                # via square plus a landing pad on each of those two layers
+                # per entry, so a multi-level drop is just N single-level
+                # drops stacked at the identical (x, y).
+                for via_layer, metal_a, metal_b in ladder:
+                    drop_array = _drop_array(port, via_layer)
+                    via_drops.append(
+                        {
+                            "x_um": pos[0],
+                            "y_um": pos[1],
+                            "via_layer": via_layer,
+                            "landing_layers": (metal_a, metal_b),
+                            **({"array": drop_array} if drop_array else {}),
+                            # block_id (#1520): which endpoint's own block
+                            # this drop's landing pad lands on -- lets a
+                            # caller-side conflict check (compose()'s own
+                            # _leg_conflict) test the pad against *that*
+                            # block's own drawn geometry, not just against
+                            # other already-accepted nets.
+                            "block_id": pin["block"],
+                        }
+                    )
+    return via_drops, None
+
+
+def _endpoint_stub_widen_entries(
+    endpoints: tuple[
+        tuple[dict[str, Any], dict[str, Any], tuple[float, float], int, float],
+        tuple[dict[str, Any], dict[str, Any], tuple[float, float], int, float],
+    ],
+    effective_width_um: float,
+    effective_route_layer: tuple[int, int] | None,
+) -> list[dict[str, Any]]:
+    """Stub-widen entries (#496) for both endpoints.
+
+    See :func:`_endpoint_stub_widen_um`. Computed independently of the
+    via-drop resolution (it needs no ``ExtractionDeck`` -- only the route
+    layer, to compare against each port's own reported layer). Each endpoint
+    is ``(pin, port, position, direction_deg, stub_len_um)``.
+    """
+    # `_endpoint_stub_widen_um` is looked up dynamically (rather than called
+    # as this module's own same-name function, defined above) so a caller
+    # that monkeypatches `klayout_tools.gen_compose.<name>` (the test suite's
+    # own re-export, preserved from before issue #1708's split) still takes
+    # effect here, exactly as before the split.
+    from .gen_compose import _endpoint_stub_widen_um
+
+    stub_widen: list[dict[str, Any]] = []
+    for pin, port, pos, direction, stub_len_um in endpoints:
+        widen = _endpoint_stub_widen_um(
+            port, pos, direction, stub_len_um, effective_width_um, effective_route_layer
+        )
+        if widen is not None:
+            # block_id (#1520): same purpose as via_drops' own block_id.
+            widen["block_id"] = pin["block"]
+            stub_widen.append(widen)
+    return stub_widen
+
+
 def route_two_pin(
     pin_a: dict[str, Any],
     pin_b: dict[str, Any],
@@ -4209,79 +4312,24 @@ def route_two_pin(
     if obstacle_reason is not None:
         return _unroutable(obstacle_reason)
 
-    # Via-drop resolution (#454, check 5 -- see docstring; generalized to a
-    # multi-hop ladder by issue #1567): only consulted when both a
-    # route_layer and an extraction_deck are given (pre-#454 callers that
-    # pass neither draw exactly as before, no via-drop). For each endpoint
-    # whose own reported layer differs from route_layer, either resolve the
-    # connecting via-drop ladder (drop needed and available -- possibly more
-    # than one via, issue #1567), find nothing to do (not a metals-stack
-    # level -- an unrelated role, unchanged legacy behavior), or reject the
-    # whole net as unroutable (a drop is needed but not resolvable). Uses
-    # ``effective_route_layer`` (#1168): when the same-layer-short retry
-    # above switched this leg to ``cross_block_route_layer``, every endpoint
-    # whose own pad sits on the *primary* ``route_layer`` now needs exactly
-    # the drop this loop already knows how to resolve -- no separate
-    # cross-block via-drop mechanism.
-    via_drops: list[dict[str, Any]] = []
-    if effective_route_layer is not None and extraction_deck is not None:
-        for pin, port, pos in ((pin_a, port_a, a), (pin_b, port_b, b)):
-            port_layer = _port_own_layer(port)
-            if port_layer is None:
-                continue  # no reported layer -- draw directly, legacy behavior
-            ladder, drop_error = _resolve_via_drop_layer(
-                extraction_deck, effective_route_layer, port_layer
-            )
-            if drop_error is not None:
-                return _unroutable(
-                    f"pin '{pin['port']}' on block '{pin['block']}' is drawn "
-                    f"on layer {port_layer}, which routing.layer_role's "
-                    f"{effective_route_layer} cannot reach: {drop_error}"
-                )
-            if ladder is not None:
-                # One via_drops entry per hop (issue #1567): a single-hop
-                # ladder (the pre-#1567 case) produces exactly the one entry
-                # it always did; a multi-hop ladder produces one entry per
-                # via, each with its own pair of landing-pad layers
-                # (``landing_layers``) -- :func:`_write_composed_gds` draws a
-                # via square plus a landing pad on each of those two layers
-                # per entry, so a multi-level drop is just N single-level
-                # drops stacked at the identical (x, y).
-                for via_layer, metal_a, metal_b in ladder:
-                    drop_array = _drop_array(port, via_layer)
-                    via_drops.append(
-                        {
-                            "x_um": pos[0],
-                            "y_um": pos[1],
-                            "via_layer": via_layer,
-                            "landing_layers": (metal_a, metal_b),
-                            **({"array": drop_array} if drop_array else {}),
-                            # block_id (#1520): which endpoint's own block
-                            # this drop's landing pad lands on -- lets a
-                            # caller-side conflict check (compose()'s own
-                            # _leg_conflict) test the pad against *that*
-                            # block's own drawn geometry, not just against
-                            # other already-accepted nets.
-                            "block_id": pin["block"],
-                        }
-                    )
+    # Via-drop resolution (check 6, #454/#1567/#1168): see _resolve_via_drops.
+    via_drops, via_drop_reason = _resolve_via_drops(
+        effective_route_layer,
+        extraction_deck,
+        ((pin_a, port_a, a), (pin_b, port_b, b)),
+    )
+    if via_drop_reason is not None:
+        return _unroutable(via_drop_reason)
 
-    # Stub-widen (#496): see _endpoint_stub_widen_um's own docstring. Computed
-    # independently of the via-drop loop above (it needs no ExtractionDeck --
-    # only route_layer, to compare against each port's own reported layer),
-    # for both endpoints.
-    stub_widen: list[dict[str, Any]] = []
-    for pin, port, pos, direction, stub_len_um in (
-        (pin_a, port_a, a, dir_a, stub_a_um),
-        (pin_b, port_b, b, dir_b, stub_b_um),
-    ):
-        widen = _endpoint_stub_widen_um(
-            port, pos, direction, stub_len_um, effective_width_um, effective_route_layer
-        )
-        if widen is not None:
-            # block_id (#1520): same purpose as via_drops' own block_id above.
-            widen["block_id"] = pin["block"]
-            stub_widen.append(widen)
+    # Stub-widen (#496): see _endpoint_stub_widen_entries.
+    stub_widen = _endpoint_stub_widen_entries(
+        (
+            (pin_a, port_a, a, dir_a, stub_a_um),
+            (pin_b, port_b, b, dir_b, stub_b_um),
+        ),
+        effective_width_um,
+        effective_route_layer,
+    )
 
     # Same-block cross-layer conflict retry (#1393, see docstring): only
     # armed when leg_conflict was supplied AND this leg is a same-block
