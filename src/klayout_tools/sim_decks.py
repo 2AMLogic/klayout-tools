@@ -101,11 +101,22 @@ DECK_MODE = "decks"
 DECK_STDOUT_FILENAME = "stdout.bin"
 DECK_STDERR_FILENAME = "stderr.bin"
 
+#: Unit-relative completion record (issue #3957): written atomically after a
+#: unit's streams and declared outputs are on disk, and consulted by
+#: ``--resume`` to decide whether a valid result already exists.
+UNIT_RECORD_FILENAME = "unit.json"
+
+#: Bumped only when the record's own shape changes incompatibly; a record
+#: carrying any other value is "not complete" (the unit re-runs).
+UNIT_RECORD_VERSION = 1
+
 #: Unit-relative names the runner itself writes (the captured engine
 #: streams). No staged file or declared output may claim them -- a stream
 #: write would silently overwrite the one, and the other would misreport a
 #: stream as a declared output.
-_RESERVED_UNIT_NAMES = frozenset({DECK_STDOUT_FILENAME, DECK_STDERR_FILENAME})
+_RESERVED_UNIT_NAMES = frozenset(
+    {DECK_STDOUT_FILENAME, DECK_STDERR_FILENAME, UNIT_RECORD_FILENAME}
+)
 
 #: Exit codes a remote deck job may return with a parseable report on
 #: stdout: 0 (every unit passed) and 4 (at least one unit errored/timed
@@ -873,6 +884,7 @@ def run_deck_unit(
         if parent:
             os.makedirs(parent, exist_ok=True)
     _copy_unit_files(unit, unit_dir=unit_dir, staging_root=staging_root)
+    input_key = _unit_input_key(unit, staging_root=staging_root)
 
     deck_name = unit["deck"]["name"]
     diagnostics: list[dict[str, str]] = []
@@ -898,7 +910,7 @@ def run_deck_unit(
     )
     status = _unit_status(spawn, diagnostics)
     outputs, missing_outputs = _resolve_declared_outputs(unit, unit_dir=unit_dir)
-    return {
+    result = {
         "id": unit["id"],
         "status": status,
         "exit_code": spawn.exit_code,
@@ -914,6 +926,211 @@ def run_deck_unit(
         "host_resolved": list(unit.get("host_resolved", ())),
         "diagnostics": diagnostics,
     }
+    _write_unit_record(
+        unit_dir,
+        key={**input_key, "engine_version": engine_version},
+        result=result,
+        diagnostics=diagnostics,
+    )
+    return result
+
+
+# --------------------------------------------------------------------------- #
+# Completion records and --resume (issue #3957)
+# --------------------------------------------------------------------------- #
+
+
+def _staged_source(ref: dict[str, Any], staging_root: str) -> str:
+    source = ref["staged"]
+    return source if os.path.isabs(source) else os.path.join(staging_root, source)
+
+
+def _unit_input_key(unit: dict[str, Any], *, staging_root: str) -> dict[str, Any]:
+    """The engine-independent part of a unit's resume key: the content
+    hashes of its deck, declared inputs and staged include closure (by
+    unit-relative name), its declared outputs, and its timeout. A seed the
+    caller bakes into the deck is part of ``deck_sha256``, so "same deck
+    and seed set" needs no field of its own."""
+
+    def hashes(refs: list[dict[str, Any]]) -> dict[str, str | None]:
+        return {
+            ref["name"]: _provenance.sha256_file(_staged_source(ref, staging_root))
+            for ref in refs
+        }
+
+    return {
+        "engine": "ngspice",
+        "deck": unit["deck"]["name"],
+        "deck_sha256": hashes([unit["deck"]])[unit["deck"]["name"]],
+        "inputs": hashes(unit["inputs"]),
+        "includes": hashes(unit["includes"]),
+        "outputs": sorted(unit.get("outputs", ())),
+        "timeout_s": unit["timeout_s"],
+    }
+
+
+def _write_unit_record(
+    unit_dir: str,
+    *,
+    key: dict[str, Any],
+    result: dict[str, Any],
+    diagnostics: list[dict[str, str]],
+) -> None:
+    """Write ``<unit_dir>/unit.json`` atomically (temp file + ``os.replace``,
+    the discipline ``sim._Checkpoint._flush_locked`` uses), so an interrupted
+    run leaves either no record or a whole one. A write failure costs only
+    the unit's resumability: it is a warning diagnostic, never a failed
+    unit."""
+    record = {
+        "record_version": UNIT_RECORD_VERSION,
+        "key": key,
+        "output_sha256": {
+            relative: _provenance.sha256_file(os.path.join(unit_dir, relative))
+            for relative in result["outputs"]
+        },
+        "result": result,
+    }
+    final = os.path.join(unit_dir, UNIT_RECORD_FILENAME)
+    temp = f"{final}.tmp-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    try:
+        with open(temp, "w", encoding="utf-8") as handle:
+            json.dump(record, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, final)
+    except (OSError, TypeError, ValueError) as exc:
+        diagnostics.append(
+            {
+                "severity": "warning",
+                "code": "unit_record_unwritten",
+                "message": f"could not write {UNIT_RECORD_FILENAME} ({exc}) -- "
+                "this unit cannot be skipped by --resume",
+            }
+        )
+        try:
+            os.remove(temp)
+        except OSError:
+            pass
+
+
+def _keys_match(recorded: Any, current: dict[str, Any]) -> bool:
+    """Equal on every field; ``engine_version`` only when the current side
+    knows it (the batch fleet's engine cannot be probed before submit)."""
+    if not isinstance(recorded, dict):
+        return False
+    for field, value in current.items():
+        if field == "engine_version" and value is None:
+            continue
+        if recorded.get(field) != value:
+            return False
+    return True
+
+
+def _load_complete_unit(
+    unit: dict[str, Any], *, unit_dir: str, key: dict[str, Any]
+) -> dict[str, Any] | None:
+    """The recorded result of a unit that is verifiably complete for ``key``,
+    else ``None`` ("not complete -- run it"). Complete means the record
+    parses, is this version, matches the key, recorded ``pass``, and every
+    declared output and both streams still exist (outputs with their
+    recorded hash). Anything missing, partial, unparseable or mismatched is
+    simply "not complete": nothing is deleted here and nothing raises."""
+    try:
+        with open(
+            os.path.join(unit_dir, UNIT_RECORD_FILENAME), encoding="utf-8"
+        ) as handle:
+            record = json.load(handle)
+        result = record["result"]
+        if (
+            record["record_version"] != UNIT_RECORD_VERSION
+            or result["id"] != unit["id"]
+            or result["status"] != "pass"
+            or result["missing_outputs"]
+            or not _keys_match(record["key"], key)
+        ):
+            return None
+        recorded_hashes = record["output_sha256"]
+        if sorted(recorded_hashes) != sorted(result["outputs"]) or sorted(
+            result["outputs"]
+        ) != sorted(unit.get("outputs", ())):
+            return None
+        for relative, digest in recorded_hashes.items():
+            if _provenance.sha256_file(os.path.join(unit_dir, relative)) != digest:
+                return None
+        for stream in (DECK_STDOUT_FILENAME, DECK_STDERR_FILENAME):
+            if not os.path.isfile(os.path.join(unit_dir, stream)):
+                return None
+        return {**result, "resumed": True}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+def _find_resumable(
+    units: list[dict[str, Any]],
+    *,
+    staging_root: str,
+    outdir: str,
+    engine_version: str | None,
+) -> dict[int, dict[str, Any]]:
+    """Index -> recorded result for every unit already complete under
+    ``outdir``."""
+    resumed: dict[int, dict[str, Any]] = {}
+    for index, unit in enumerate(units):
+        key = {
+            **_unit_input_key(unit, staging_root=staging_root),
+            "engine_version": engine_version,
+        }
+        done = _load_complete_unit(
+            unit, unit_dir=os.path.join(outdir, unit["id"]), key=key
+        )
+        if done is not None:
+            resumed[index] = done
+    return resumed
+
+
+def _apply_resume(
+    report: dict[str, Any],
+    units: list[dict[str, Any]],
+    resumed: dict[int, dict[str, Any]],
+) -> dict[str, Any]:
+    """Fold skipped units into a report that covers only the units that ran:
+    request-order ``units`` (``resumed: false`` on the ones that ran),
+    recomputed counts, and the additive ``environment.resume`` block."""
+    ran = {item["id"]: item for item in report["units"]}
+    merged = []
+    for index, unit in enumerate(units):
+        if index in resumed:
+            merged.append(resumed[index])
+        elif unit["id"] in ran:
+            merged.append({**ran[unit["id"]], "resumed": False})
+    report["units"] = merged
+    _recount(report)
+    environment = report.setdefault("environment", {})
+    if not environment.get("engine_version"):
+        environment["engine_version"] = next(
+            (item["engine_version"] for item in merged if item["engine_version"]),
+            None,
+        )
+    environment["resume"] = {
+        "resumed_units": len(resumed),
+        "resumed_ids": [units[index]["id"] for index in sorted(resumed)],
+    }
+    return report
+
+
+def _recount(report: dict[str, Any]) -> None:
+    filled = report["units"]
+    errored = sum(1 for item in filled if item["status"] == "error")
+    timed_out = sum(1 for item in filled if item["status"] == "timeout")
+    report.update(
+        {
+            "status": "error" if (errored or timed_out) else "pass",
+            "unit_count": len(filled),
+            "passed": sum(1 for item in filled if item["status"] == "pass"),
+            "errored": errored,
+            "timed_out": timed_out,
+        }
+    )
 
 
 class _EngineSpawn:
@@ -1728,12 +1945,13 @@ def run_deck_request(
     backend: str,
     max_workers: int | None = None,
     artifacts_dir: str | None = None,
+    resume: bool = False,
 ) -> dict[str, Any]:
     """Run a validated-in-shape deck-list request on ``backend`` and return
     the deck-list report (the dict ``klt sim`` emits through the shared
     JSON envelope). Called by ``sim.run_sim`` when the request carries
     ``decks``; the caller-facing flags the corner machinery owns
-    (``--hosts``, ``--resume``, ``--budget-s``, ``--plot``,
+    (``--hosts``, ``--budget-s``, ``--plot``,
     ``--fail-fast-probe``, ``--fail-on-diagnostic``) are rejected by
     ``run_sim`` before reaching here.
 
@@ -1741,9 +1959,15 @@ def run_deck_request(
     outputs) is written -- there is no keep_artifacts switch, because the
     streams *are* the result. It defaults to a ``.klt/sim/`` directory next
     to the request file, the same convention as the corner backend.
+
+    ``resume`` (``local``/``local-parallel``/``batch``; issue #3957) skips
+    every unit whose ``<outdir>/<id>/unit.json`` completion record matches
+    the unit's current key and still verifies on disk, and reports it with
+    ``resumed: true``; the rest run as usual.
     """
     from .sim import (
         SimError,
+        _probe_engine_version,
         _resolve_max_workers,
         _resolve_ngspice_binary,
         apply_engine_host,
@@ -1764,6 +1988,27 @@ def run_deck_request(
     ngspice_binary = _resolve_ngspice_binary(options, request_dir)
     outdir = resolve_deck_outdir(artifacts_dir, request_dir)
 
+    resumed: dict[int, dict[str, Any]] = {}
+    if resume:
+        if backend == "remote":
+            raise SimError(
+                "options.resume is not yet supported for backend 'remote' -- "
+                "use resume with backend 'local', 'local-parallel' or 'batch'"
+            )
+        resumed = _find_resumable(
+            units,
+            staging_root=request_dir,
+            outdir=outdir,
+            # The fleet's engine cannot be probed before submit; its units
+            # are matched on everything else (see docs/cli/sim.md).
+            engine_version=(
+                None
+                if backend == "batch"
+                else _probe_engine_version("ngspice", ngspice_binary)
+            ),
+        )
+    pending = [unit for index, unit in enumerate(units) if index not in resumed]
+
     if backend == "remote" or backend == "batch":
         # Validate the whole staged closure before anything billable: an
         # unstageable include or missing file is a submit-time SimError,
@@ -1771,8 +2016,33 @@ def run_deck_request(
         files, worker_request = stage_deck_job(request, request_dir=request_dir)
         if backend == "remote":
             report = _run_decks_remote(request, files, worker_request, outdir=outdir)
+        elif not pending:
+            report = _build_deck_report(
+                units=[],
+                results=[],
+                backend=backend,
+                outdir=outdir,
+                ngspice_binary=ngspice_binary,
+                max_workers=1,
+            )
         else:
-            report = _run_decks_batch(request, files, worker_request, outdir=outdir)
+            pending_ids = {unit["id"] for unit in pending}
+            pending_request = {
+                **request,
+                DECKS_FIELD: [
+                    entry
+                    for entry in request[DECKS_FIELD]
+                    if entry.get("id") in pending_ids
+                ],
+            }
+            files, worker_request = stage_deck_job(
+                pending_request, request_dir=request_dir
+            )
+            report = _run_decks_batch(
+                pending_request, files, worker_request, outdir=outdir
+            )
+        if resume:
+            _apply_resume(report, units, resumed)
         apply_engine_host(
             report.setdefault("environment", {}),
             backend=backend,
@@ -1785,13 +2055,15 @@ def run_deck_request(
     else:
         workers = _resolve_max_workers(max_workers)
     report = _run_decks_local(
-        units,
+        pending,
         staging_root=request_dir,
         outdir=outdir,
         ngspice_binary=ngspice_binary,
         max_workers=workers,
         backend=backend,
     )
+    if resume:
+        _apply_resume(report, units, resumed)
     apply_engine_host(
         report["environment"], backend=backend, client_ngspice_binary=None
     )

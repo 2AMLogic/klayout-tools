@@ -2093,9 +2093,9 @@ def run_sim(
     - **Deck-list requests** (issue #2804): a ``decks`` list of
       caller-composed ngspice decks, transported -- never composed,
       parsed, or graded -- to the selected backend. Same parameters,
-      minus the corner-only ones: ``--hosts``/``--resume``/
-      ``--budget-s``/``--plot``/``--fail-fast-probe``/
-      ``--fail-on-diagnostic`` are refused by name (see
+      minus the corner-only ones: ``--hosts``/``--budget-s``/``--plot``/
+      ``--fail-fast-probe``/``--fail-on-diagnostic`` (and ``--resume`` on
+      ``remote``) are refused by name (see
       :func:`klayout_tools.sim_decks.run_deck_request` and
       docs/cli/sim.md's "Pre-composed decks" section, which also
       documents the deck report's shape).
@@ -2418,9 +2418,13 @@ def _dispatch_deck_request(
             "deck-list requests -- one off-host job runs the whole deck "
             "list across its own worker pool (options.max_workers)"
         )
-    if resume:
+    if resume is None:
+        resume = bool((request.get("options") or {}).get("resume", False))
+    if resume and resolved_backend == "remote":
         raise SimError(
-            "--resume/options.resume is not supported for deck-list requests"
+            "--resume/options.resume is not yet supported for deck-list "
+            "requests on backend 'remote' -- use backend 'local', "
+            "'local-parallel' or 'batch'"
         )
     if budget_s is not None:
         raise SimError(
@@ -2459,6 +2463,7 @@ def _dispatch_deck_request(
         backend=resolved_backend,
         max_workers=max_workers,
         artifacts_dir=artifacts_dir,
+        resume=bool(resume),
     )
 
 
