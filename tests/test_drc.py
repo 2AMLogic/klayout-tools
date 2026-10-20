@@ -10991,6 +10991,9 @@ def test_run_drc_gf180mcu_coverage_names_unmodeled_thick_metal_families(tmp_path
 
     assert {"MT30.1a", "MT30.2", "MT30.3", "MT30.4", "MSLOT.1"} <= set(unmodeled)
     assert "MT30.1a" not in run_drc(str(path), "sky130")["coverage"]["unmodeled_rules"]
+    # Issue #3968: wide-metal / narrow-line end-of-line ids are disclosed too.
+    assert {"M2.2b", "CO.6a", "CO.6b", "V2.3c", "V2.4c"} <= set(unmodeled)
+    assert "M2.2b" not in run_drc(str(path), "sky130")["coverage"]["unmodeled_rules"]
 
 
 def _make_sky130_marker_layout(*, marker: bool) -> kdb.Layout:

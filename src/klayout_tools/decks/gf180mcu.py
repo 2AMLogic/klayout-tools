@@ -103,7 +103,8 @@ which is also where the ``_LV``/``_MV`` rule-id suffixes come from. Their
 other ``DF.*``-family entries cite.
 
 Their **end-of-line** companions (``CO.6a``/``CO.6b``, ``Vn.3c``/``Vn.3d``,
-``Vn.4b``/``Vn.4c``) are deliberately **not** transcribed: each conditions a
+``Vn.4b``/``Vn.4c``) are deliberately **not** transcribed (disclosed in
+``coverage.unmodeled_rules``, issue #3968): each conditions a
 0.06um margin on a narrow-metal (< 0.34um) end-of-line predicate, expressed
 in the PDK deck via ``first_edges``/``second_edges``/``extended_in``
 edge-set operations that :class:`~klayout_tools.decks.DrcRule`'s
@@ -846,7 +847,8 @@ DECK: list[DrcRule] = [
         # zero-overlap escape term, see `_run_check`'s `outside_region` in
         # `drc.py`), so this transcription is exact, not an approximation.
         # The end-of-line companions "CO.6a"/"CO.6b" are *not* modeled -- see
-        # the module docstring's end-of-line coverage note (issue #551).
+        # the module docstring's end-of-line coverage note (issue #551) and
+        # `_METAL_EOL_UNMODELED_RULES` (issue #3968).
         provenance=_gf180mcu_klayout_deck_provenance("contact", "CO.6"),
     ),
     DrcRule(
@@ -2330,6 +2332,24 @@ _MT_MSLOT_UNMODELED_RULES: tuple[str, ...] = (
     "MT30.8",
 )
 
+#: Metal1-5 wide-metal spacing and the narrow-line end-of-line companions this
+#: deck does not transcribe (issue #3968). `Mn.2b` ("space to wide Metaln",
+#: length and width > 10um) needs a wide-metal predicate and `CO.6a`/`CO.6b`,
+#: `Vn.3c`/`Vn.3d`, `Vn.4b`/`Vn.4c` an end-of-line (narrow metal < 0.34um)
+#: predicate, neither of which `DrcRule`'s vocabulary can express. Ids are the
+#: native runset's (`M1.2b`...`M5.2b`; via ids are stack-keyed, so no `V5.*`
+#: for this fixed 5LM stack). Remove an id here when its rule is added.
+_METAL_EOL_UNMODELED_RULES: tuple[str, ...] = (
+    "CO.6a",
+    "CO.6b",
+    "M1.2b",
+    "M2.2b",
+    "M3.2b",
+    "M4.2b",
+    "M5.2b",
+    *(f"V{n}.{rule}" for n in (1, 2, 3, 4) for rule in ("3c", "3d", "4b", "4c")),
+)
+
 # (layer, datatype) -> upstream layer name, from gf180mcu.lyp's layer-map
 # (google/globalfoundries-pdk-libs-gf180mcu_fd_pv), used only to render
 # violations[].layer as e.g. "Poly2" instead of the bare "30/0" fallback --
@@ -2434,12 +2454,14 @@ _UNMODELED_DUALGATE_RULES: tuple[str, ...] = (
 #: Everything this deck knowingly does not transcribe, surfaced by
 #: `decks.get_unmodeled_rules` as `coverage.unmodeled_rules`: the untranscribed
 #: ESD/guard-ring ids (issue #3792), the thick-MetalTop and metal-slotting ids
-#: (issue #3796) and the Dualgate ids (issue #3791).
+#: (issue #3796), the Metal1-5 wide-metal/end-of-line ids (issue #3968) and
+#: the Dualgate ids (issue #3791).
 UNMODELED_RULES: tuple[str, ...] = tuple(
     sorted(
         (
             *UNTRANSCRIBED_RULES,
             *_MT_MSLOT_UNMODELED_RULES,
+            *_METAL_EOL_UNMODELED_RULES,
             *_UNMODELED_DUALGATE_RULES,
         )
     )
