@@ -139,6 +139,33 @@ resolve under the one shared root the normal open_pdks-multi-variant way
 PDK_ROOT=pdks/ihp-open-pdk PDK=ihp-sg13cmos5l klt pdk find
 ```
 
+**Known-incomplete sibling (issue #3133).** The pinned `ihp-sg13cmos5l`
+subtree is a `dev` commit, but `fetch-ihp-sg13g2.sh` installs the `ihp-sg13g2`
+sibling at release `v0.3.0`, which predates the SG13CMOS5L merge. Some
+symlink targets may exist only on `dev`, so on a clean install 262 of 530
+links dangled (as of `159527a5`, 2026-10; re-measure). The fetcher now counts
+dangling links after extraction and on the cached re-run, prints a sample and
+the sibling version, and warns loudly; it still exits 0 (models-only use
+works) unless `--strict` is passed (exit 3). When a dangling link is under
+`libs.tech/klayout/tech/lvs/`, the warning also says the PDK-native LVS runset
+cannot run (use `--strict` when fetching for LVS). `klt pdk check` reports the
+same condition. Repinning the sibling is a separate human decision (it changes a
+checksummed pin used by CI).
+
+**Relocating the install and pinning from a consumer repo (issue #3809).**
+`scripts/fetch-ihp-sg13g2.sh` takes two optional environment knobs, for
+consumers whose tool checkout is shared or read-only:
+
+- `IHP_PDKS_DIR=<dir>` installs into `<dir>/ihp-open-pdk` (marker and the
+  "already present" check follow it). Same name and meaning as in
+  `fetch-ihp-sg13cmos5l.sh`. Unset keeps `<checkout>/pdks`.
+- `IHP_OPEN_PDK_PIN_FILE=<file>` reads `IHP_OPEN_PDK_VERSION=X.Y.Z` and
+  `IHP_OPEN_PDK_SHA256=<64 hex>` from a `KEY=VALUE` file (parsed, never
+  sourced; `#` comments, blank lines, CRLF and unknown keys are tolerated,
+  duplicate keys are rejected), so the consumer's recorded pin is the one
+  fetched. A missing, unreadable, incomplete or malformed file exits non-zero
+  before any download; the SHA-256 check still fails closed.
+
 **Fetching the PDK alone does not make it simulatable.** `fetch-ihp-sg13g2.sh`
 ships the PDK's Verilog-A compact-model *sources*
 (`libs.tech/verilog-a/{psp103,psp103_nqs,r3_cmc,mosvar}`) but no compiled
@@ -150,6 +177,30 @@ compile the models into `libs.tech/ngspice/osdi/`, and preflight-check the
 #1628) — it fails closed with the concrete version floor named, rather than
 letting a too-old ngspice reject every model deep in a simulation run with
 an opaque `NGSPICE only supports OSDI v0.3 but ... targets v0.4!`.
+
+### ASAP7 BSIM-CMG OSDI module (`asap7-sim/`)
+
+lambdapdk's ASAP7 models (`asap7/base/spice/hspice/7nm_{TT,FF,SS}_160803.pm`)
+are BSIM-CMG `level = 72` cards, which stock ngspice rejects
+(`Only MOS device levels ... are supported in this binary`). ngspice runs
+BSIM-CMG only as a compiled OSDI module, so ASAP7 simulation has its own
+provisioning command (issue #2814), parallel to the SG13G2 one above:
+
+```bash
+scripts/fetch-asap7-sim-toolchain.sh        # --force to rebuild
+```
+
+It fetches a commit-pinned, checksum-verified BSIM-CMG 111.0.0 Verilog-A
+source (dwarning/VA-Models `code/bsimcmg/vacode111`, ECL-2.0) into
+`pdks/asap7-sim/bsimcmg-va/`, compiles it with the same pinned
+OpenVAF-Reloaded build as the SG13G2 script to `pdks/asap7-sim/osdi/bsimcmg.osdi`,
+and load-verifies the module in the `ngspice` on `PATH` (`pre_osdi` +
+`devhelp`), failing closed with the missing capability named. Everything it
+writes is under the ignored `pdks/*` store — no compiler, source or `.osdi`
+is tracked. The pinned compiler is Linux x86-64; elsewhere point
+`OPENVAF_R_BIN` at a compatible `openvaf-r`. See
+[`docs/cli/sim.md`](../docs/cli/sim.md) ("ASAP7 FinFET (BSIM-CMG)
+simulation") for the card adaptation and the `options.osdi_preload` request.
 
 ### `ihp130` (lambdapdk) vs. SG13G2 (IHP-Open-PDK) — do not conflate these
 

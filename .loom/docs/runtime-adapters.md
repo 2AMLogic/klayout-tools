@@ -31,6 +31,7 @@ roles with no `runtimeRequirements`.
 - [The seven contract points](#the-seven-contract-points)
 - [Phase 1: the `spawn-worker.sh` runtime-dispatch seam](#phase-1-the-spawn-workersh-runtime-dispatch-seam)
 - [Session containers (pointer only)](#session-containers-pointer-only)
+- [Hook settings ownership](#hook-settings-ownership)
 - [Fork mapping table](#fork-mapping-table)
 - [Non-goals](#non-goals)
 - [Related](#related)
@@ -92,7 +93,7 @@ tier-1/tier-2:
   transcript, and no account/usage-pool integration (points 2 and 4 are
   skipped outright). Point 3 (Error classification) is satisfied by the
   **generic-transient fallthrough only**: a tier-3 runtime gets no bespoke
-  pattern table in `classify-error.sh`. Passing its name as the
+  pattern table in the native classifier (`loom-daemon classify-error`). Passing its name as the
   `classify_error` provider argument is safe by construction — an
   unregistered provider matches no table and resolves through the shared
   engine's exit-code-first ordering and generic transients, exactly like any
@@ -312,7 +313,12 @@ tiering is the seed for how a non-Claude runtime should choose which concrete
 model a tier maps to.
 
 **The Codex adapter deliberately does NOT do this yet (#4468).** It ships
-*model-mapping minimalism*: `LOOM_MODEL` is forwarded verbatim to `codex -m`, an
+*model-mapping minimalism*: `LOOM_MODEL` is forwarded to `codex -m` (split on the first
+`@`: a `model@effort` rung suffix, #8387, is never forwarded; the base becomes `-m` and
+the suffix becomes `-c model_reasoning_effort=<suffix>` at the lowest precedence:
+explicit `-c` > `--effort` > `LOOM_EFFORT` > suffix; an empty base falls through to
+`LOOM_CODEX_MODEL`/no `-m`, an empty suffix is ignored; the same split applies to
+`LOOM_CODEX_MODEL`, and an explicit `-m foo@high` arg is passed through unchanged), an
 explicit `-m`/`--model` wins, `LOOM_CODEX_MODEL` supplies an optional static
 adapter default, and with none of those set **no `-m` flag is emitted at all** so
 the Codex CLI/profile default is preserved (exactly `spawn-claude.sh`'s
@@ -1262,6 +1268,24 @@ sweep, role-runner and epic dispatch surfaces strip them from any child that
 cannot use them. Contract, per-runtime mapping and the red line:
 [`llm-gateway.md`](llm-gateway.md).
 
+### Weighted per-stage, per-attempt draw (`runtimes.roleDraw`, issue #11726)
+
+`runtimes.roleDraw.<role>` replaces the ordered `rolePreference` list for a
+stage with a seeded, weighted draw per attempt, for example
+`"judge": [{"attempt": 1, "draw": {"claude/opus": 80, "claude/fable": 10,
+"codex": 10}}, {"attempt": 2, "draw": {"claude/fable": 100}}]`, plus
+`runtimes.excludeProviders` to drop a runtime from every table on a host. The
+draw orders the candidates by weight and runs the walk below over that order,
+so admission, availability, the launch-failure hold and the ceiling apply
+unchanged, and an unavailable candidate is excluded with the rest
+renormalised. A failed or blocked role tick moves the role to the next
+attempt's table. A role with no table keeps `rolePreference`; an operator pin
+still wins. A candidate key is `<runtime>[:<profile>][/<model-or-profile>]`:
+`claude` ≡ the `"claude"` entry, `opencode:zai-flash` ≡
+`{"runtime":"opencode","modelProfile":"zai-flash"}`, and `claude/opus` adds a
+`--model` pin. The full contract, the per-tier merge, telemetry and `loom-daemon
+roles draw --explain` are in [role-draw.md](role-draw.md).
+
 ### Ordered runtime preference with fall-through (issue #8436)
 
 The precedence chain above is **static**: it picks a runtime without asking
@@ -1323,6 +1347,16 @@ or Doctor**, however high it sits in the list. For build work
 entry is recorded as skipped with reason `not-admitted(worktreeIsolation)`, which
 is materially different from "Codex had no credential" and should be read that
 way.
+
+**Model-profile resolution and the unknown-profile failure (#11638).** A launch
+resolves its profile name from, in order: an explicit request (`--profile`, or a
+preference tap's `modelProfile`), `LOOM_MODEL_PROFILE`, `runtimes.defaultModelProfile`,
+then the built-in `zai-flash` fallback. The name is then looked up in
+`runtimes.modelProfiles` (which shadows) and the bundled set. A name found in
+neither is a **hard exit 78**, never a fallback to `zai-flash`: the message names
+the profile looked up, where the name came from, and the sorted known profile
+names (names only, never credential values). `loom-daemon worker profile-check
+<name>` reproduces it.
 
 **Model-profile role exclusion (`excludedRoles`, #11400).** A model profile may
 list roles it must never run, e.g. `"excludedRoles": ["judge", "curator"]` on the
@@ -2180,9 +2214,21 @@ drains it to the OTLP queue and retires the file. Journals are written only
 when the workspace exports traces (an `otlp` exporter is configured);
 otherwise observe records are dropped.
 
-Not in this slice (tracked on #11300): marking the pool from the live 429,
-loopback proxying of uncontained launches, and injecting the OpenCode base URL
-through `XDG_CONFIG_HOME`.
+**Live seat marking.** A 429 or quota-exhaustion response is classified at the
+proxy and bad-marks the launch's pool account at once (`bad_mark_at_proxy`),
+before the harness's own retry ladder runs out. The mark is model-class-scoped,
+its cooldown comes from the response's reset text or the account's configured
+window, and a per-launch guard only ever escalates (a bare 429, then a quota
+exhaustion), so one launch writes each level once. A launch with no pool
+account (an explicit env credential) is never marked. See
+[`token-pool.md` § "API-key account pool"](token-pool.md#api-key-account-pool-for-native-harnesses-zaiopencode-pi-kimi--84018563).
+
+**Uncontained native launches and OpenCode.** Slice 3 shipped the loopback-only
+proxy for uncontained native launches and the `credentialProxy.baseUrlConfig`
+injection of the proxy URL into the launch's provisioned OpenCode config (see
+the sections above). The remaining #11300 item is operator-run: a 48 h canary on
+one seat, checking the Z.ai Plan Overview page for a risk notice, before any
+fleet rollout.
 
 ### Containerized dispatch mode for Claude sweeps (issue #7429, epic #6896 Phase 3)
 
@@ -2463,6 +2509,16 @@ mounts follow the same [`MOUNT-CONTRACT.md`](https://github.com/rjwalters/loom/b
 mirror the per-sweep `--cpus`/`--memory` shape above. Migrating the
 docker-requiring callers (build-gate, sim/build wrappers) onto the seam is
 issue #7854; elastic executor *placement* stays with #3979.
+
+## Hook settings ownership
+
+Loom does not write a consumer repo's `.claude/settings.json` on resync. Loom
+hooks reach a Claude session through launch-time `--settings` (daemon-dispatched
+sessions, never persisted) and user-scope `~/.claude/settings.json` entries; the
+project file stays repo-owned, and resync only reports hooks it does not wire
+(`report_unwired_hooks`). A hook that no non-mutating surface can carry is not
+delivered. Conflict, uninstall, malformed-file and upgrade behaviour are in
+[ADR-0026](https://github.com/rjwalters/loom/blob/main/docs/adr/0026-consumer-hook-settings-ownership.md).
 
 ## Fork mapping table
 

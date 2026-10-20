@@ -76,6 +76,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -673,12 +674,205 @@ def ami_pdk_key(pdk: str, *, backend: str = "remote") -> str:
     )
 
 
+#: Shape a manifest entry's published ``klt_version`` must have (issue
+#: #2851): a ``klt --version`` build string with the leading ``klt `` removed
+#: (``0.7.0``, ``0.7.1.dev3+gabc1234``). Mirrors the ``pattern`` in
+#: docs/schemas/remote-sim-ami-manifest.schema.json.
+_MANIFEST_KLT_VERSION_RE = re.compile(r"[0-9][A-Za-z0-9._+-]{0,79}")
+
+#: Marker the AMI build's user-data prints (``<marker>[<klt version>]``) after
+#: installing ``klayout-tools`` from the pinned ``--klt-ref``, so
+#: ``scripts/aws/build-remote-sim-ami.sh`` can read the version it actually
+#: installed out of the build instance's console output (issue #2851). See
+#: :func:`parse_build_klt_version`.
+BUILD_KLT_VERSION_MARKER = "klt-remote-sim-ami-klt-version="
+
+
+def _manifest_runner_field(image: dict[str, Any], key: str) -> str | None:
+    """A manifest entry's optional runner-identity field (``klt_version`` /
+    ``klt_ref``, issue #2851), or ``None`` -- explicitly *unknown* -- when the
+    entry predates the field or carries something unusable. A malformed
+    ``klt_version`` is unknown rather than an error: it only ever feeds the
+    batch backend's advisory pre-launch check, which must fall back to the
+    runner-side preflight instead of refusing on a value it cannot read."""
+    value = image.get(key)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    value = value.strip()
+    if key == "klt_version" and not _MANIFEST_KLT_VERSION_RE.fullmatch(value):
+        return None
+    return value
+
+
+def _manifest_pdk_variants(image: dict[str, Any]) -> list[str] | None:
+    """The ``pdk_variants`` a manifest entry publishes (issue #3251), or
+    ``None`` -- explicitly unknown -- when the entry is a legacy one without
+    the field or the value is not a non-empty list of non-empty strings."""
+    value = image.get("pdk_variants")
+    if (
+        not isinstance(value, list)
+        or not value
+        or not all(isinstance(item, str) and item.strip() for item in value)
+    ):
+        return None
+    return [item.strip() for item in value]
+
+
+def _latest_image(candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    # Most recently built wins -- `built_at` is an ISO-8601 string per the
+    # manifest schema (see scripts/aws/build-remote-sim-ami.sh), so plain
+    # string comparison is chronological.
+    return max(candidates, key=lambda image: image.get("built_at", ""))
+
+
+def published_runner_identities(
+    pdk: str | None,
+    region: str | None,
+    manifest_path: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    """The runner identity of every image the manifest currently publishes
+    for ``pdk``/``region`` -- the most recently built entry per
+    ``(pdk key, region)`` pair, exactly the entry :func:`resolve_ami` would
+    pick for that pair (issue #2851).
+
+    ``None`` for ``pdk`` or ``region`` widens the selection to every PDK key
+    or every region: the batch fleet chooses its own Spot pool, so a client
+    that does not pin a region cannot know which region's image it gets.
+    Each item is ``{"pdk", "region", "ami_id", "klt_version", "klt_ref",
+    "pdk_variants"}``; the last three are ``None`` for a legacy entry
+    (``pdk_variants`` is the list of PDK variant directories the image
+    ships, issue #3251). Raises
+    :class:`RemoteLaunchError` when the manifest cannot be loaded or ``pdk``
+    has no AMI family, like :func:`resolve_ami`.
+    """
+    key = ami_pdk_key(pdk) if pdk else None
+    manifest = load_ami_manifest(manifest_path)
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for image in manifest.get("images") or []:
+        if not isinstance(image, dict) or not image.get("ami_id"):
+            continue
+        if key is not None and image.get("pdk") != key:
+            continue
+        if region is not None and image.get("region") != region:
+            continue
+        groups.setdefault((str(image.get("pdk")), str(image.get("region"))), []).append(
+            image
+        )
+    identities = []
+    for (image_pdk, image_region), candidates in sorted(groups.items()):
+        latest = _latest_image(candidates)
+        identities.append(
+            {
+                "pdk": image_pdk,
+                "region": image_region,
+                "ami_id": latest["ami_id"],
+                "klt_version": _manifest_runner_field(latest, "klt_version"),
+                "klt_ref": _manifest_runner_field(latest, "klt_ref"),
+                "pdk_variants": _manifest_pdk_variants(latest),
+            }
+        )
+    return identities
+
+
+def parse_build_klt_version(console: str) -> str | None:
+    """The ``klt`` version an AMI build installed, read from the build
+    instance's console output, or ``None`` when no well-formed marker is
+    present (issue #2851).
+
+    The build's user-data prints ``<BUILD_KLT_VERSION_MARKER>[<version>]``
+    right after installing ``klayout-tools`` from the pinned ``--klt-ref``.
+    Under ``set -x`` the same text also appears in the trace of that
+    ``echo``; both carry the same expanded value, and the last occurrence
+    wins.
+    """
+    pattern = re.escape(BUILD_KLT_VERSION_MARKER) + r"\[([^\]\s]*)\]"
+    matches = re.findall(pattern, console)
+    if not matches:
+        return None
+    value = matches[-1].strip()
+    if value.startswith("klt "):
+        value = value[4:]
+    return value if _MANIFEST_KLT_VERSION_RE.fullmatch(value) else None
+
+
+def ami_manifest_entry(
+    *,
+    pdk: str,
+    region: str,
+    ami_id: str,
+    pdk_snapshot: str,
+    ngspice_version: str,
+    built_at: str,
+    klt_version: str,
+    klt_ref: str,
+    pdk_variants: list[str] | None = None,
+) -> dict[str, Any]:
+    """One AMI-manifest ``images[]`` entry, as
+    ``scripts/aws/build-remote-sim-ami.sh`` publishes it (issue #2851).
+
+    ``klt_version`` is the version the build installed from ``klt_ref`` (the
+    script's pinned ``--klt-ref``) and is what the batch backend's pre-launch
+    check compares; ``klt_ref`` is audit provenance. Both are required for a
+    new entry, so a build can never publish an image whose runner identity
+    is unknown; they stay optional in the schema only so historical entries
+    still load. Raises :class:`RemoteLaunchError` for an unusable value.
+
+    ``pdk_variants`` (issue #3251) optionally lists the PDK variant
+    directories the image ships (e.g. ``["gf180mcuD"]``); the batch backend
+    refuses a request for an unlisted variant before any S3 write. It is
+    left out of the entry when not given, so the entry stays loadable by
+    older clients.
+    """
+    version = (klt_version or "").strip()
+    if version.startswith("klt "):
+        version = version[4:]
+    if not _MANIFEST_KLT_VERSION_RE.fullmatch(version):
+        raise RemoteLaunchError(
+            f"klt_version {klt_version!r} is not a klt build version "
+            "(expected e.g. 0.7.0 or 0.7.1.dev3+gabc1234)"
+        )
+    ref = (klt_ref or "").strip()
+    if not ref or any(ch.isspace() for ch in ref):
+        raise RemoteLaunchError(
+            f"klt_ref {klt_ref!r} must be a non-empty git ref without whitespace"
+        )
+    entry: dict[str, Any] = {
+        "pdk": pdk,
+        "region": region,
+        "ami_id": ami_id,
+        "pdk_snapshot": pdk_snapshot,
+        "ngspice_version": ngspice_version,
+        "built_at": built_at,
+        "klt_version": version,
+        "klt_ref": ref,
+    }
+    if pdk_variants is not None:
+        variants = [v.strip() for v in pdk_variants]
+        if (
+            not variants
+            or not all(variants)
+            or any(ch.isspace() for v in variants for ch in v)
+        ):
+            raise RemoteLaunchError(
+                f"pdk_variants {pdk_variants!r} must be a non-empty list of "
+                "PDK variant directory names without whitespace"
+            )
+        entry["pdk_variants"] = variants
+    return entry
+
+
 def resolve_ami(
     pdk: str, region: str, manifest_path: str | Path | None = None
-) -> dict[str, str]:
+) -> dict[str, str | None]:
     """Resolve ``pdk``/``region`` to the manifest's most recently built
     published AMI, returning ``{"ami_id": ..., "pdk_snapshot": ...,
-    "ngspice_version": ..., "built_at": ...}``.
+    "ngspice_version": ..., "built_at": ..., "klt_version": ...,
+    "klt_ref": ...}``.
+
+    ``klt_version``/``klt_ref`` (issue #2851) are the ``klt`` build baked
+    into the image and the git ref it was installed from; both are ``None``
+    -- explicitly unknown -- for a legacy entry published before the build
+    script recorded them.
 
     ``pdk`` is the request's ``models.pdk`` -- a *local variant* name -- and is
     mapped to the manifest key by :func:`ami_pdk_key` (``"gf180mcuC"`` ->
@@ -708,15 +902,14 @@ def resolve_ami(
             "region, or pick a region the manifest already publishes to"
         )
 
-    # Most recently built wins -- `built_at` is an ISO-8601 string per the
-    # manifest schema (see scripts/aws/build-remote-sim-ami.sh), so plain
-    # string comparison is chronological.
-    latest = max(candidates, key=lambda image: image.get("built_at", ""))
+    latest = _latest_image(candidates)
     return {
         "ami_id": latest["ami_id"],
         "pdk_snapshot": latest.get("pdk_snapshot", latest.get("built_at", "")),
         "ngspice_version": latest.get("ngspice_version", ""),
         "built_at": latest.get("built_at", ""),
+        "klt_version": _manifest_runner_field(latest, "klt_version"),
+        "klt_ref": _manifest_runner_field(latest, "klt_ref"),
     }
 
 
@@ -1232,7 +1425,7 @@ class RemoteLauncher:
         self.instance_id: str | None = None
         self.instance_type: str | None = None
         self.wave_plan: WavePlan | None = None
-        self.ami: dict[str, str] | None = None
+        self.ami: dict[str, str | None] | None = None
         self.estimated_hourly_cost_usd: float | None = None
         self.used_spot: bool | None = None
         self.spin_up_s: float | None = None

@@ -83,7 +83,7 @@ def _stub_ngspice_discovery(monkeypatch) -> None:
     """Issue #2675: `sim.py` resolves the `ngspice` binary (issue #2423)
     *before* dispatching any corner, i.e. before the `subprocess.run` stubs
     below take effect. Stub resolution to the bare name (mirrors
-    `test_sim.py`'s `_bare_name_ngspice_resolution`) and drop any host
+    the conftest `bare_name_ngspice_resolution` fixture) and drop any host
     `$KLT_NGSPICE_BINARY`, so these tests do not need a real install.
     Production discovery is untouched; only called by tests that also stub
     `subprocess.run`."""

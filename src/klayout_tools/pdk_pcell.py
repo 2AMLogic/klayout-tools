@@ -259,7 +259,7 @@ def list_pdk_pcells(
     unavailable: list[dict[str, Any]] = []
     if lib_dir is not None:
         loaded, unavailable = _load_libraries(lib_dir)
-        libraries = [_describe_library(entry) for entry in loaded]
+        libraries = _describe_loaded(loaded, unavailable)
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -489,10 +489,17 @@ def _load_libraries(
 
     loaded: list[dict[str, Any]] = []
     unavailable: list[dict[str, Any]] = []
-    for package in _pcell_packages_in(memo_key):
+    packages = _pcell_packages_in(memo_key)
+    #: Sibling packages whose import was run by an earlier package's import
+    #: *and* registered a library: the vendor's own ``register()`` already ran
+    #: then, so constructing its library class again would replace the
+    #: registered library and destroy the handle taken for it (issue #2944).
+    registered_by_sibling: set[str] = set()
+    for package in packages:
         package_dir = os.path.join(memo_key, package)
         _apply_sys_path_hint(memo_key, package)
         before = set(kdb.Library.library_names())
+        modules_before = set(sys.modules)
         try:
             module = importlib.import_module(package)
         except Exception as exc:  # noqa: BLE001 - reported, never re-raised
@@ -500,7 +507,11 @@ def _load_libraries(
             continue
 
         new_names = set(kdb.Library.library_names()) - before
-        if not new_names:
+        if new_names:
+            registered_by_sibling.update(
+                _siblings_imported_by(packages, package, modules_before)
+            )
+        elif package not in registered_by_sibling:
             failure = _instantiate_library_classes(module, package, kdb)
             new_names = set(kdb.Library.library_names()) - before
             if not new_names and failure is not None:
@@ -514,9 +525,39 @@ def _load_libraries(
             if handle is not None:
                 loaded.append({"library": name, "package": package, "handle": handle})
 
+    # A later package's registration may have replaced an earlier library of
+    # the same name; re-resolve so no destroyed handle is handed out.
+    loaded = _reresolve_handles(loaded, kdb)
+
     loaded.sort(key=lambda entry: entry["library"])
     _LOAD_MEMO[memo_key] = (loaded, unavailable)
     return loaded, unavailable
+
+
+def _siblings_imported_by(
+    packages: list[str], package: str, modules_before: set[str]
+) -> set[str]:
+    """Return the other ``packages`` first imported as a side effect of
+    importing ``package`` (``modules_before`` is ``sys.modules`` beforehand)."""
+    return {
+        other
+        for other in packages
+        if other != package and other in sys.modules and other not in modules_before
+    }
+
+
+def _reresolve_handles(loaded: list[dict[str, Any]], kdb: Any) -> list[dict[str, Any]]:
+    """Re-fetch each library's live handle, dropping any no longer registered.
+
+    A later package's registration may have replaced an earlier library of the
+    same name, destroying the handle taken for it.
+    """
+    live: list[dict[str, Any]] = []
+    for entry in loaded:
+        handle = kdb.Library.library_by_name(entry["library"])
+        if handle is not None:
+            live.append({**entry, "handle": handle})
+    return live
 
 
 def _apply_sys_path_hint(lib_dir: str, package: str) -> None:
@@ -742,6 +783,30 @@ def _describe_library(entry: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _describe_loaded(
+    loaded: list[dict[str, Any]], unavailable: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Describe every loaded library; a vendor failure while doing so (e.g. a
+    handle destroyed by a re-registration) lands in ``unavailable`` rather
+    than escaping as a traceback (issue #2944)."""
+    libraries: list[dict[str, Any]] = []
+    for entry in loaded:
+        try:
+            libraries.append(_describe_library(entry))
+        except Exception as exc:  # noqa: BLE001 - vendor code, never a traceback
+            unavailable.append(
+                {
+                    "package": entry["package"],
+                    "missing_dependency": None,
+                    "reason": (
+                        f"PDK PCell library '{entry['library']}' failed while "
+                        f"being described: {type(exc).__name__}: {exc}"
+                    ),
+                }
+            )
+    return libraries
+
+
 def _describe_params(declaration: Any) -> list[dict[str, Any]]:
     if declaration is None:  # pragma: no cover - defensive
         return []
@@ -836,9 +901,15 @@ def _produce_pdk_pcell(
     import klayout.db as kdb
 
     handle = entry["handle"]
-    declaration = handle.layout().pcell_declaration(pcell_name)
-    if declaration is None:
+    try:
+        declaration = handle.layout().pcell_declaration(pcell_name)
         available = sorted(handle.layout().pcell_names())
+    except Exception as exc:  # noqa: BLE001 - vendor code, never a traceback
+        raise PdkPCellError(
+            f"PDK PCell library '{entry['library']}' is unusable: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+    if declaration is None:
         raise PdkPCellError(
             f"unknown PCell '{pcell_name}' in PDK PCell library "
             f"'{entry['library']}' -- available: "

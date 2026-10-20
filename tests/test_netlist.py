@@ -45,11 +45,21 @@ from klayout_tools.netlist import (
 # xschem stubs
 # --------------------------------------------------------------------------- #
 
+#: Answers ``--version`` before anything is logged, so the version probe never
+#: clobbers the argv log of the real run. Silent when ``STUB_VERSION`` is unset.
+_STUB_VERSION_ANSWER = r"""#!/bin/sh
+if [ "$1" = "--version" ]; then
+  [ -n "$STUB_VERSION" ] && echo "XSCHEM V$STUB_VERSION"
+  exit 0
+fi
+"""
+
 #: Shared prologue: record the full argv (one arg per line, so a test can
 #: assert on exact flags) and work out where the netlist is meant to go from
 #: the invocation itself.
-_STUB_PREAMBLE = r"""#!/bin/sh
-printf '%s\n' "$@" > "$ARGV_LOG"
+_STUB_PREAMBLE = (
+    _STUB_VERSION_ANSWER
+    + r"""printf '%s\n' "$@" > "$ARGV_LOG"
 out_dir=""
 schematic=""
 prev=""
@@ -60,6 +70,7 @@ for arg in "$@"; do
 done
 stem=$(basename "$schematic" .sch)
 """
+)
 
 #: The normal case, and issue #55's first sharp edge: a *successful* batch
 #: netlist that exits non-zero. If `klt netlist` ever regresses to trusting
@@ -898,6 +909,42 @@ def test_block_mode_uncomments_subckt_and_drops_trailing_end(
     }
 
 
+def test_block_mode_rejoins_wrapped_header_continuations(
+    tmp_path, argv_log, monkeypatch
+):
+    body = (
+        "* stub netlist\n**.subckt block a b\n*+ c d\n**+ e f\n.something x\n"
+        "**.ends\n.end"
+    )
+    monkeypatch.setenv("NETLIST_BODY", body)
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "block.spice"
+
+    report = run_netlist(schematic, str(output), xschem_binary=binary, block=True)
+
+    assert output.read_text(encoding="utf-8") == (
+        "* stub netlist\n.subckt block a b\n+ c d\n+ e f\n.something x\n.ends\n"
+    )
+    assert report["block"]["warning"] is None
+
+
+def test_block_mode_leaves_non_adjacent_continuation_comment_alone(
+    tmp_path, argv_log, monkeypatch
+):
+    body = "* stub netlist\n**.subckt block a b\n.something x\n*+ note\n**.ends\n.end"
+    monkeypatch.setenv("NETLIST_BODY", body)
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "block.spice"
+
+    run_netlist(schematic, str(output), xschem_binary=binary, block=True)
+
+    assert output.read_text(encoding="utf-8") == (
+        "* stub netlist\n.subckt block a b\n.something x\n*+ note\n.ends\n"
+    )
+
+
 def test_without_block_flag_testbench_shape_is_unchanged(
     tmp_path, argv_log, monkeypatch
 ):
@@ -977,3 +1024,351 @@ def test_cli_text_prints_block_summary_and_warning(
     assert code == 0
     assert "block: subckt_uncommented=False" in out
     assert "block: WARNING:" in out
+
+
+# --------------------------------------------------------------------------- #
+# Issue #3010: --check is independent of the checkout path
+# --------------------------------------------------------------------------- #
+
+_PATHED_BODY = (
+    "** sch_path: {root}/a/x.sch\n"
+    "**.subckt x a b\n"
+    "* expanding   symbol:  sub.sym # of pins=2\n"
+    "** sym_path: {root}/a/sub.sym\n"
+    "** sch_path: {root}/a/sub.sch\n"
+    "R1 a b 1k\n"
+    "**.ends\n"
+    ".end"
+)
+
+
+def test_check_ignores_a_different_checkout_path(tmp_path, argv_log, monkeypatch):
+    """The issue #3010 reproduction: generated in /work/A, checked from
+    /work/B. Only xschem's path comments differ, so it is a match."""
+    monkeypatch.setenv("NETLIST_BODY", _PATHED_BODY.format(root="/work/B"))
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "block.spice"
+    output.write_text(_PATHED_BODY.format(root="/work/A") + "\n", encoding="utf-8")
+
+    report = run_netlist(schematic, str(output), check=True, xschem_binary=binary)
+
+    assert report["status"] == "match"
+    assert report["drift"]["path_comments_differ"] is True
+    assert report["drift"]["diff"] == []
+
+
+def test_check_still_reports_drift_beside_a_path_difference(
+    tmp_path, argv_log, monkeypatch
+):
+    monkeypatch.setenv("NETLIST_BODY", _PATHED_BODY.format(root="/work/B"))
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "block.spice"
+    output.write_text(
+        _PATHED_BODY.format(root="/work/A").replace("1k", "2k") + "\n",
+        encoding="utf-8",
+    )
+
+    report = run_netlist(schematic, str(output), check=True, xschem_binary=binary)
+
+    assert report["status"] == "drifted"
+    assert report["drift"]["path_comments_differ"] is False
+    assert any(line.startswith("-R1 a b 2k") for line in report["drift"]["diff"])
+
+
+def test_identical_netlist_does_not_flag_path_comments(tmp_path, argv_log):
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "block.spice"
+    output.write_text(_NETLIST_BODY + "\n", encoding="utf-8")
+
+    report = run_netlist(schematic, str(output), check=True, xschem_binary=binary)
+
+    assert report["status"] == "match"
+    assert report["drift"]["path_comments_differ"] is False
+
+
+def test_check_ignores_continuation_layout(tmp_path, argv_log, monkeypatch):
+    """Issue #3324: re-wrapped ``+`` continuations and whitespace runs match."""
+    monkeypatch.setenv(
+        "NETLIST_BODY", "M1 d g s b nfet  w=1 l=2\n* a + b\nR1 a b 1k\n.end"
+    )
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "block.spice"
+    output.write_bytes(
+        b"M1 d g s b nfet\r\n+ w=1\r\n+   l=2   \r\n* a + b\r\nR1 a b 1k\r\n.end\r\n"
+    )
+
+    report = run_netlist(schematic, str(output), check=True, xschem_binary=binary)
+
+    assert report["status"] == "match"
+    assert report["drift"]["layout_differs"] is True
+    assert report["drift"]["diff"] == []
+
+
+def test_check_still_reports_drift_beside_layout_difference(
+    tmp_path, argv_log, monkeypatch
+):
+    monkeypatch.setenv("NETLIST_BODY", "M1 d g s b nfet w=1 l=2\n.end")
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "block.spice"
+    output.write_text("M1 d g s b nfet\n+ w=1 l=3\n.end\n", encoding="utf-8")
+
+    report = run_netlist(schematic, str(output), check=True, xschem_binary=binary)
+
+    assert report["status"] == "drifted"
+    assert report["drift"]["layout_differs"] is False
+    assert report["drift"]["diff"]
+
+
+def test_identical_netlist_does_not_flag_layout(tmp_path, argv_log):
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "block.spice"
+    output.write_text(_NETLIST_BODY + "\n", encoding="utf-8")
+
+    report = run_netlist(schematic, str(output), check=True, xschem_binary=binary)
+
+    assert report["drift"]["layout_differs"] is False
+
+
+def test_path_normalization_keeps_the_file_name():
+    """Only the directory is ignored: a subcircuit taken from a different
+    schematic file still compares unequal."""
+    normalize = netlist_module._normalize_path_comments
+    a = b"** sch_path: /work/A/a/x.sch\nR1 a b 1k\n"
+    b = b"** sch_path: /other/place/a/x.sch  \nR1 a b 1k\n"
+    c = b"** sch_path: /work/A/a/y.sch\nR1 a b 1k\n"
+    assert normalize(a) == normalize(b) == b"** sch_path: x.sch\nR1 a b 1k\n"
+    assert normalize(a) != normalize(c)
+    # Not a path comment: untouched.
+    assert normalize(b"* sch_path: /x/y.sch\n") == b"* sch_path: /x/y.sch\n"
+
+
+# --------------------------------------------------------------------------- #
+# Unevaluated expr() content gate and xschem version (issue #3482)
+# --------------------------------------------------------------------------- #
+
+_EXPR_BODY = (
+    "* stub netlist\n.subckt block a b\n"
+    "XM1 a b c d nfet ad=expr('int((@nf + 1)/2) * @W / @nf * 0.29')\n.ends\n.end"
+)
+
+
+def test_unevaluated_expr_fails_with_stable_code(tmp_path, argv_log, monkeypatch):
+    monkeypatch.setenv("NETLIST_BODY", _EXPR_BODY)
+    monkeypatch.setenv("STUB_VERSION", "3.4.4")
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "block.spice"
+
+    with pytest.raises(NetlistError) as excinfo:
+        run_netlist(schematic, str(output), xschem_binary=binary)
+
+    assert excinfo.value.code == "unevaluated_expr"
+    message = str(excinfo.value)
+    assert "line 3" in message
+    assert "3.4.4" in message
+    assert "3.4.5" in message
+    assert not output.exists()
+
+
+def test_unevaluated_expr_fails_check_instead_of_drifting(
+    tmp_path, argv_log, monkeypatch
+):
+    monkeypatch.setenv("NETLIST_BODY", _EXPR_BODY)
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "block.spice"
+    output.write_text("* committed\n", encoding="utf-8")
+
+    with pytest.raises(NetlistError) as excinfo:
+        run_netlist(schematic, str(output), check=True, xschem_binary=binary)
+
+    assert excinfo.value.code == "unevaluated_expr"
+    assert "unknown" in str(excinfo.value)
+    assert output.read_text(encoding="utf-8") == "* committed\n"
+
+
+def test_unevaluated_expr_applies_after_block_mode(tmp_path, argv_log, monkeypatch):
+    monkeypatch.setenv("NETLIST_BODY", _EXPR_BODY)
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+
+    with pytest.raises(NetlistError, match="unevaluated expr"):
+        run_netlist(
+            schematic, str(tmp_path / "b.spice"), xschem_binary=binary, block=True
+        )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "* ad=expr(1+2)\n.subckt block a b\n.ends\n.end",
+        "** note: expr(x)\n.subckt block a b\n.ends\n.end",
+        "X1 a b nfet myexpr(3)\n.end",
+    ],
+)
+def test_expr_in_comment_or_longer_identifier_does_not_trigger(
+    tmp_path, argv_log, monkeypatch, body
+):
+    monkeypatch.setenv("NETLIST_BODY", body)
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+
+    report = run_netlist(schematic, str(tmp_path / "b.spice"), xschem_binary=binary)
+
+    assert report["status"] == "generated"
+
+
+def test_whitespace_before_paren_still_triggers(tmp_path, argv_log, monkeypatch):
+    monkeypatch.setenv("NETLIST_BODY", "X1 a b nfet ad=expr (1)\n.end")
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+
+    with pytest.raises(NetlistError, match="unevaluated expr"):
+        run_netlist(schematic, str(tmp_path / "b.spice"), xschem_binary=binary)
+
+
+# --------------------------------------------------------------------------- #
+# Unresolved-symbol content gate (issue #3964)
+# --------------------------------------------------------------------------- #
+
+_MISSING_BODY = (
+    "* stub netlist\n.subckt block a b\n"
+    "*  E1 -  no_such_device  IS MISSING !!!!\n.ends\n.end"
+)
+
+
+def test_unresolved_symbol_fails_with_stable_code(tmp_path, argv_log, monkeypatch):
+    monkeypatch.setenv("NETLIST_BODY", _MISSING_BODY)
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "block.spice"
+
+    with pytest.raises(NetlistError) as excinfo:
+        run_netlist(schematic, str(output), xschem_binary=binary)
+
+    assert excinfo.value.code == "unresolved_symbol"
+    message = str(excinfo.value)
+    assert "line 3" in message
+    assert "no_such_device  IS MISSING" in message
+    assert not output.exists()
+
+
+def test_unresolved_symbol_fails_check_instead_of_drifting(
+    tmp_path, argv_log, monkeypatch
+):
+    monkeypatch.setenv("NETLIST_BODY", _MISSING_BODY)
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "block.spice"
+    output.write_text("* committed\n", encoding="utf-8")
+
+    with pytest.raises(NetlistError) as excinfo:
+        run_netlist(schematic, str(output), check=True, xschem_binary=binary)
+
+    assert excinfo.value.code == "unresolved_symbol"
+    assert output.read_text(encoding="utf-8") == "* committed\n"
+
+
+def test_unresolved_symbol_applies_with_block_mode(tmp_path, argv_log, monkeypatch):
+    monkeypatch.setenv("NETLIST_BODY", _MISSING_BODY)
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+
+    with pytest.raises(NetlistError) as excinfo:
+        run_netlist(
+            schematic, str(tmp_path / "b.spice"), xschem_binary=binary, block=True
+        )
+
+    assert excinfo.value.code == "unresolved_symbol"
+
+
+def test_missing_word_elsewhere_does_not_trigger(tmp_path, argv_log, monkeypatch):
+    monkeypatch.setenv(
+        "NETLIST_BODY", "* a pin is missing a label\n.subckt block a b\n.ends\n.end"
+    )
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+
+    report = run_netlist(schematic, str(tmp_path / "b.spice"), xschem_binary=binary)
+
+    assert report["status"] == "generated"
+
+
+def test_clean_netlist_reports_xschem_version(tmp_path, argv_log, monkeypatch):
+    monkeypatch.setenv("STUB_VERSION", "3.4.7")
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+
+    report = run_netlist(schematic, str(tmp_path / "b.spice"), xschem_binary=binary)
+
+    assert report["status"] == "generated"
+    assert report["xschem"]["version"] == "3.4.7"
+    # The probe must not have replaced the real run's recorded argv.
+    assert "-x" in _recorded_argv(argv_log)
+
+
+def test_version_is_null_when_probe_output_is_garbage(tmp_path, argv_log, monkeypatch):
+    monkeypatch.setenv("STUB_VERSION", "not-a-version")
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+
+    report = run_netlist(schematic, str(tmp_path / "b.spice"), xschem_binary=binary)
+
+    assert report["xschem"]["version"] is None
+
+
+def test_version_is_null_when_probe_hangs(tmp_path, argv_log, monkeypatch):
+    monkeypatch.setattr(netlist_module, "VERSION_PROBE_TIMEOUT_S", 0.3)
+    schematic = _write_schematic(tmp_path)
+    hang_on_version = (
+        '#!/bin/sh\nif [ "$1" = "--version" ]; then trap \'\' TERM; '
+        "while : ; do sleep 0.05; done; fi\n"
+        + _STUB_NONZERO_EXIT.split("\n", 1)[1].split("fi\n", 1)[1]
+    )
+    binary = _write_stub(tmp_path, hang_on_version)
+
+    report = run_netlist(schematic, str(tmp_path / "b.spice"), xschem_binary=binary)
+
+    assert report["status"] == "generated"
+    assert report["xschem"]["version"] is None
+
+
+def test_check_ignores_subckt_comment_port_order(tmp_path, argv_log, monkeypatch):
+    """Issue #3743: xschem versions list the ``**.subckt`` comment's ports in
+    different orders; that comment alone is not drift."""
+    monkeypatch.setenv(
+        "NETLIST_BODY", "**.subckt ota inp inn out\n.subckt ota inp inn out\n.end"
+    )
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "block.spice"
+    output.write_text(
+        "**.subckt ota out inn inp\n.subckt ota inp inn out\n.end\n", encoding="utf-8"
+    )
+
+    report = run_netlist(schematic, str(output), check=True, xschem_binary=binary)
+
+    assert report["status"] == "match"
+    assert report["drift"]["layout_differs"] is True
+
+
+def test_check_still_drifts_on_subckt_card_port_order(tmp_path, argv_log, monkeypatch):
+    monkeypatch.setenv(
+        "NETLIST_BODY", "**.subckt ota inp inn out\n.subckt ota inp inn out\n.end"
+    )
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "block.spice"
+    output.write_text(
+        "**.subckt ota inp inn out\n.subckt ota out inn inp\n.end\n", encoding="utf-8"
+    )
+
+    report = run_netlist(schematic, str(output), check=True, xschem_binary=binary)
+
+    assert report["status"] == "drifted"

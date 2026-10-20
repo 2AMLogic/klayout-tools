@@ -31,9 +31,11 @@ back-reference into ``extract.py``).
 from __future__ import annotations
 
 import json
-from typing import Any
+from pathlib import Path
+from typing import Any, cast
 
 from ._provenance import sha256_file
+from .signoff_runset import runset_disclosure, runset_refusal
 
 #: Issue #2025, T1 item 11 ("Power delivery (structural)") only. Six
 #: reasons, not one, for the same reason
@@ -623,6 +625,7 @@ def _lvs_reference_carries_supplies(
 
 def _resolve_power_delivery_parts(
     specs: list[dict[str, Any]],
+    repo_root: str | Path | None = None,
 ) -> tuple[dict[str, dict[str, Any]] | None, str | None]:
     """Resolve every part of T1 item 11's compound citation (issue #2025) and
     index the resolutions by :func:`~klayout_tools.signoff._classify` kind --
@@ -659,7 +662,7 @@ def _resolve_power_delivery_parts(
 
     by_kind: dict[str, dict[str, Any]] = {}
     for spec in specs:
-        resolution, reason = _resolve_evidence(spec)
+        resolution, reason = _resolve_evidence(spec, repo_root)
         if resolution is None:
             return None, reason
         kind = resolution["kind"]
@@ -1071,6 +1074,28 @@ def _resolve_erc_supply_spec(
         return None, _REASON_SUPPLY_NOT_CONTINUOUS, {}
 
     return supply_spec, None, {}
+
+
+def _lvs_half_verdict(
+    envelope: dict[str, Any], supply_spec: dict[str, Any] | None
+) -> tuple[str, str, None, dict[str, Any]] | None:
+    """The ``"unmet"`` verdict for an LVS citation that cannot be item 11's
+    LVS half, or ``None`` when it can (issue #2870 added the runset gate).
+
+    A report that did not pass renders :func:`_failed_lvs_verdict`'s reason. A
+    passing PDK-runset report must also be pinned and re-hash clean
+    (:func:`~klayout_tools.signoff_runset.runset_refusal`); a curated-deck
+    report is never refused here.
+    """
+    from .signoff import _check_passed
+
+    if not _check_passed("lvs", cast(Any, envelope)):
+        reason, detail = _failed_lvs_verdict(envelope, supply_spec)
+        return "unmet", reason, None, detail
+    runset_reason = runset_refusal(envelope)
+    if runset_reason is not None:
+        return "unmet", runset_reason, None, runset_disclosure(envelope) or {}
+    return None
 
 
 def _failed_lvs_verdict(
@@ -1625,6 +1650,7 @@ def _grade_power_delivery(
     *,
     partition_kind: str,
     power_port_policy: dict[str, Any] | None = None,
+    repo_root: str | Path | None = None,
 ) -> tuple[str, str | None, dict[str, Any] | None, dict[str, Any]]:
     """Grade T1 item 11 ("Power delivery (structural)", issue #2025) against
     the **set** of evidence entries cited for it, and return ``(status,
@@ -1742,9 +1768,9 @@ def _grade_power_delivery(
     those unrelated findings
     newly fatal.
     """
-    from .signoff import _REASON_WRONG_KIND, _check_passed, _citation
+    from .signoff import _REASON_WRONG_KIND, _citation
 
-    by_kind, reason = _resolve_power_delivery_parts(specs)
+    by_kind, reason = _resolve_power_delivery_parts(specs, repo_root)
     if by_kind is None:
         return "unmet", reason, None, {}
 
@@ -1762,9 +1788,9 @@ def _grade_power_delivery(
     # the already-resolved ERC part plus the spec document it names, so
     # doing it unconditionally changes nothing but the reason rendered.
     supply_spec, reason, detail = _resolve_erc_supply_spec(erc)
-    if not _check_passed("lvs", lvs["envelope"]):
-        lvs_reason, lvs_detail = _failed_lvs_verdict(lvs["envelope"], supply_spec)
-        return "unmet", lvs_reason, None, lvs_detail
+    lvs_verdict = _lvs_half_verdict(lvs["envelope"], supply_spec)
+    if lvs_verdict is not None:
+        return lvs_verdict
     if supply_spec is None:
         return "unmet", reason, None, detail
 
@@ -1875,6 +1901,7 @@ def _build_power_delivery_item(
     evidence: dict[str, Any],
     graded_by_build: bool = True,
     power_port_policy: dict[str, Any] | None = None,
+    repo_root: str | Path | None = None,
 ) -> dict[str, Any]:
     """Render T1 item 11's report entry (issue #2025) -- the compound
     counterpart of :func:`~klayout_tools.signoff._build_tier_item`, which
@@ -1931,6 +1958,7 @@ def _build_power_delivery_item(
                 specs,
                 partition_kind=partition_kind,
                 power_port_policy=power_port_policy,
+                repo_root=repo_root,
             )
 
     return {

@@ -44,6 +44,8 @@ import json
 import os
 from typing import Any
 
+from ._verilog_params import chparam_lines, read_verilog_line
+
 #: The memory outcome vocabulary, per module and overall. Fixed (a caller may
 #: branch on it); see ``docs/cli/synthesize.md`` for each value's meaning.
 MEMORY_STATUSES = (
@@ -78,6 +80,7 @@ def memory_evidence_script_text(
     pre_lowering_stats_path: str,
     adder_sources: tuple[str, ...] = (),
     adder_techmap_path: str | None = None,
+    parameters: dict[str, int | str] | None = None,
 ) -> str:
     """The side invocation's ``.ys`` text.
 
@@ -92,7 +95,8 @@ def memory_evidence_script_text(
     never modify the design. No liberty is read -- nothing here is
     technology-mapped.
     """
-    lines = [f"read_verilog {path}" for path in sources]
+    lines = [read_verilog_line(path) for path in sources]
+    lines += chparam_lines(parameters or {}, hdl_toplevel)
     lines.append(f"hierarchy -check -top {hdl_toplevel}")
     lines.append(f"tee -q -o {blackbox_list_path} select -list =A:blackbox =A:whitebox")
     lines.append("proc")
@@ -340,6 +344,7 @@ def collect_memory_evidence(
     adder_sources: tuple[str, ...] = (),
     adder_techmap_path: str | None = None,
     repo_root: str | None = None,
+    parameters: dict[str, int | str] | None = None,
 ) -> tuple[dict[str, Any], list[str] | None]:
     """Run the side evidence invocation and return ``(memory_mapping,
     blackbox_modules)`` for the response.
@@ -348,8 +353,9 @@ def collect_memory_evidence(
     change nor pre-empt production errors. **Never raises**: a Yosys
     failure, timeout, or unreadable stage degrades ``memory_mapping`` to
     ``status: "indeterminate"`` with the failure in ``reason`` (and
-    ``blackbox_modules`` to ``None``). Like the trial/baseline scripts, the
-    evidence script embeds absolute paths only and runs with no ``cwd``.
+    ``blackbox_modules`` to ``None``). The evidence script embeds absolute
+    paths only, but the RTL may not (``$readmemh "reference/x.hex"``), so
+    the run uses ``cwd=repo_root`` -- the same cwd as the main Yosys run.
     """
     from .synthesize import (
         SynthesizeError,
@@ -382,9 +388,10 @@ def collect_memory_evidence(
                 pre_lowering_stats_path=pre_lowering_path,
                 adder_sources=adder_sources,
                 adder_techmap_path=adder_techmap_path,
+                parameters=parameters,
             ),
         )
-        _run_yosys(script_path)
+        _run_yosys(script_path, cwd=repo_root)
     except (SynthesizeError, OSError) as exc:
         reason = _scrub_paths(f"memory evidence invocation failed: {exc}", repo_root)
         return _indeterminate(reason, reported_script), None

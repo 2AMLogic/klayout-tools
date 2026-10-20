@@ -59,6 +59,13 @@ one-time trusted-publisher registration below — it only states *when* to run
 the mechanical sequence that section and the rest of this doc already
 describe.
 
+**Versioning rule for the batch runner:** a change that breaks the batch
+runner contract (a request key, report field or job-command shape the fleet
+runner must understand) ships in a minor release (`vX.Y.0`), never a patch,
+and every minor release is published to PyPI and gets a rebaked runner
+image -- the runner version gate compares major.minor only (#3184, see
+`docs/cli/sim.md` "Runner/client `klt` version skew").
+
 **Interim answer, between releases**: `CHANGELOG.md`'s `## Unreleased` →
 `### Fixed since release` section is the source of truth for "is fix X
 installable yet" — every dated, issue-numbered entry there has landed on
@@ -176,7 +183,12 @@ Let `X.Y.Z` be the new version.
    The workflow builds the tagged commit with `uv build` and publishes the
    resulting sdist/wheel with `uv publish` under PyPI trusted publishing.
 
-4. **Regenerate the deck history table** now that the new tag exists (the
+4. **Fill in availability notes.** Replace "the next release after 0.7.0"
+   in the `--attest` / `--inventory` availability notes in
+   `docs/cli/signoff.md` with `X.Y.Z` (and likewise for any later "not in
+   release" note), in the same release PR or a follow-up.
+
+5. **Regenerate the deck history table** now that the new tag exists (the
    generator can only see tags that have already been pushed — see
    `docs/cli/deck.md`'s "Regenerating" section):
 

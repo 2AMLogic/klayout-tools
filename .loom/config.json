@@ -8,6 +8,7 @@
   },
   "forge": {
     "type": "auto",
+    "trustedCommenters": ["rjwalters"],
     "gitea": {
       "api_url": null,
       "known_hosts": []
