@@ -2376,6 +2376,36 @@ def run_sim(
     )
 
 
+def _refuse_corner_only_deck_flags(
+    budget_s: float | None,
+    plot_dir: str | None,
+    fail_fast_probe: bool | None,
+    fail_on_diagnostic: list[str] | tuple[str, ...] | None,
+) -> None:
+    """Refuse, by name, the corner-only flags a deck-list request has no
+    machinery for (see :func:`_dispatch_deck_request`)."""
+    if budget_s is not None:
+        raise SimError(
+            "--budget-s/options.wall_clock_budget_s is not supported for "
+            "deck-list requests -- bound each unit with decks[].timeout_s "
+            "instead"
+        )
+    if plot_dir is not None:
+        raise SimError(
+            "--plot writes waveform artifacts, which deck-list requests do not produce"
+        )
+    if fail_fast_probe:
+        raise SimError(
+            "--fail-fast-probe calibrates the corner engine, which "
+            "deck-list requests do not run"
+        )
+    if fail_on_diagnostic:
+        raise SimError(
+            "--fail-on-diagnostic grades corner diagnostics, which "
+            "deck-list requests do not produce"
+        )
+
+
 def _dispatch_deck_request(
     request: dict[str, Any],
     *,
@@ -2435,26 +2465,9 @@ def _dispatch_deck_request(
             "requests on backend 'remote' -- use backend 'local', "
             "'local-parallel' or 'batch'"
         )
-    if budget_s is not None:
-        raise SimError(
-            "--budget-s/options.wall_clock_budget_s is not supported for "
-            "deck-list requests -- bound each unit with decks[].timeout_s "
-            "instead"
-        )
-    if plot_dir is not None:
-        raise SimError(
-            "--plot writes waveform artifacts, which deck-list requests do not produce"
-        )
-    if fail_fast_probe:
-        raise SimError(
-            "--fail-fast-probe calibrates the corner engine, which "
-            "deck-list requests do not run"
-        )
-    if fail_on_diagnostic:
-        raise SimError(
-            "--fail-on-diagnostic grades corner diagnostics, which "
-            "deck-list requests do not produce"
-        )
+    _refuse_corner_only_deck_flags(
+        budget_s, plot_dir, fail_fast_probe, fail_on_diagnostic
+    )
     request_dir = os.path.dirname(os.path.abspath(request_path))
     # Issue #3168: a deck run always writes (and a remote/batch pull replaces)
     # unit trees under its outdir, so it owns that root unconditionally --

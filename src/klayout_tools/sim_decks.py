@@ -2038,6 +2038,68 @@ def resolve_deck_outdir(artifacts_dir: str | None, request_dir: str) -> str:
     return artifacts_dir or os.path.join(request_dir, ".klt", "sim")
 
 
+def _resolve_resumed(
+    units: list[dict[str, Any]],
+    *,
+    backend: str,
+    request_dir: str,
+    outdir: str,
+    ngspice_binary: str,
+) -> dict[int, dict[str, Any]]:
+    """The ``--resume`` lookup of :func:`run_deck_request`: unit index ->
+    completion record for every unit that can be skipped."""
+    from .sim import SimError, _probe_engine_version
+
+    if backend == "remote":
+        raise SimError(
+            "options.resume is not yet supported for backend 'remote' -- "
+            "use resume with backend 'local', 'local-parallel' or 'batch'"
+        )
+    return _find_resumable(
+        units,
+        staging_root=request_dir,
+        outdir=outdir,
+        # The fleet's engine cannot be probed before submit; its units
+        # are matched on everything else (see docs/cli/sim.md).
+        engine_version=(
+            None
+            if backend == "batch"
+            else _probe_engine_version("ngspice", ngspice_binary)
+        ),
+    )
+
+
+def _run_decks_batch_pending(
+    request: dict[str, Any],
+    pending: list[dict[str, Any]],
+    *,
+    request_dir: str,
+    backend: str,
+    outdir: str,
+    ngspice_binary: str,
+) -> dict[str, Any]:
+    """Submit only the ``pending`` units as one batch job (an empty report
+    when a resume left nothing to run)."""
+    if not pending:
+        return _build_deck_report(
+            units=[],
+            results=[],
+            backend=backend,
+            outdir=outdir,
+            ngspice_binary=ngspice_binary,
+            max_workers=1,
+        )
+    pending_ids = {unit["id"] for unit in pending}
+    pending_request = {
+        **request,
+        DECKS_FIELD: [
+            entry for entry in request[DECKS_FIELD] if entry.get("id") in pending_ids
+        ],
+    }
+    files, worker_request = stage_deck_job(pending_request, request_dir=request_dir)
+    return _run_decks_batch(pending_request, files, worker_request, outdir=outdir)
+
+
 def run_deck_request(
     request: dict[str, Any],
     *,
@@ -2075,7 +2137,6 @@ def run_deck_request(
     """
     from .sim import (
         SimError,
-        _probe_engine_version,
         _resolve_max_workers,
         _resolve_ngspice_binary,
         apply_engine_host,
@@ -2102,25 +2163,17 @@ def run_deck_request(
     ngspice_binary = _resolve_ngspice_binary(options, request_dir)
     outdir = resolve_deck_outdir(artifacts_dir, request_dir)
 
-    resumed: dict[int, dict[str, Any]] = {}
-    if resume:
-        if backend == "remote":
-            raise SimError(
-                "options.resume is not yet supported for backend 'remote' -- "
-                "use resume with backend 'local', 'local-parallel' or 'batch'"
-            )
-        resumed = _find_resumable(
+    resumed = (
+        _resolve_resumed(
             units,
-            staging_root=request_dir,
+            backend=backend,
+            request_dir=request_dir,
             outdir=outdir,
-            # The fleet's engine cannot be probed before submit; its units
-            # are matched on everything else (see docs/cli/sim.md).
-            engine_version=(
-                None
-                if backend == "batch"
-                else _probe_engine_version("ngspice", ngspice_binary)
-            ),
+            ngspice_binary=ngspice_binary,
         )
+        if resume
+        else {}
+    )
     pending = [unit for index, unit in enumerate(units) if index not in resumed]
 
     if backend == "remote" or backend == "batch":
@@ -2138,30 +2191,14 @@ def run_deck_request(
             report = _attach_decks_batch(
                 request, worker_request, attach_job_id, outdir=outdir
             )
-        elif not pending:
-            report = _build_deck_report(
-                units=[],
-                results=[],
+        else:
+            report = _run_decks_batch_pending(
+                request,
+                pending,
+                request_dir=request_dir,
                 backend=backend,
                 outdir=outdir,
                 ngspice_binary=ngspice_binary,
-                max_workers=1,
-            )
-        else:
-            pending_ids = {unit["id"] for unit in pending}
-            pending_request = {
-                **request,
-                DECKS_FIELD: [
-                    entry
-                    for entry in request[DECKS_FIELD]
-                    if entry.get("id") in pending_ids
-                ],
-            }
-            files, worker_request = stage_deck_job(
-                pending_request, request_dir=request_dir
-            )
-            report = _run_decks_batch(
-                pending_request, files, worker_request, outdir=outdir
             )
         if resume:
             _apply_resume(report, units, resumed)
