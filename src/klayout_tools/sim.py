@@ -5110,6 +5110,34 @@ def _normalize_param_row(
     return dict(sorted(row.items()))
 
 
+def _temperature_param_name(corners_spec: dict[str, Any]) -> str | None:
+    """The validated, lowercased ``corners.temperature_param`` name (issue
+    #3994), or ``None`` when the request does not bind one. It is refused if
+    ``corners.params`` or ``corners.supply_v`` already uses the name."""
+    raw = corners_spec.get("temperature_param")
+    if raw is None:
+        return None
+    if "units" in corners_spec:
+        raise SimError(
+            "corners.temperature_param cannot be combined with corners.units: "
+            "put the parameter in each unit's `params` instead"
+        )
+    name = _validate_param_name(raw, "corners.temperature_param")
+    declared = {str(key).lower() for key in (corners_spec.get("params") or {})}
+    if name in declared:
+        raise SimError(
+            f"corners.temperature_param name {name!r} is also a corners.params "
+            "key: a name may be bound by only one of the two"
+        )
+    supply = {str(key).lower() for key in (corners_spec.get("supply_v") or {})}
+    if name in supply:
+        raise SimError(
+            f"corners.temperature_param name {name!r} is also a "
+            "corners.supply_v key: a name may be in only one of the two maps"
+        )
+    return name
+
+
 def _expand_param_axis(
     corners_spec: dict[str, Any],
 ) -> list[dict[str, int | float]]:
@@ -5582,7 +5610,10 @@ def _expand_corners(
     # Issue #3035: the innermost axis. Its rows are validated before the
     # exclusion rules so a selector can be checked against the declared names.
     param_rows = _expand_param_axis(corners_spec)
+    temperature_param = _temperature_param_name(corners_spec)
     declared_params = set(param_rows[0])
+    if temperature_param:
+        declared_params.add(temperature_param)
     _validate_exclude_params(exclude_spec, declared_params)
     # Issue #3125: the solver-option axis, innermost of all.
     option_rows = _expand_options_axis(corners_spec)
@@ -5597,6 +5628,17 @@ def _expand_corners(
                     for param_row, option_row in itertools.product(
                         param_rows, option_rows
                     ):
+                        if temperature_param:
+                            param_row = dict(
+                                sorted(
+                                    {
+                                        **param_row,
+                                        temperature_param: _normalize_param_value(
+                                            temperature_c
+                                        ),
+                                    }.items()
+                                )
+                            )
                         point = CornerPoint(
                             process,
                             point_supply,
@@ -7492,9 +7534,10 @@ def _refuse_xyce_params_axis(corners_spec: dict[str, Any]) -> None:
     """The ``engine: "xyce"`` refusal for ``corners.params``. Split out of
     :func:`_enforce_xyce_support_boundary` to keep that gate under the
     complexity limit."""
-    if corners_spec.get("params"):
+    if corners_spec.get("params") or corners_spec.get("temperature_param"):
         raise SimError(
-            "engine 'xyce' does not support corners.params: the parameter "
+            "engine 'xyce' does not support corners.params or "
+            "corners.temperature_param: the parameter "
             "axis is applied with ngspice's `alterparam` + `reset` control "
             "commands, which Xyce has no netlist equivalent of -- use engine "
             "'ngspice'"
