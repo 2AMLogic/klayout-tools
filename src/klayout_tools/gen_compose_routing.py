@@ -2732,6 +2732,82 @@ def _route_touches_drawn_geometry(
     return not (geometry["region"] & drawn).is_empty()
 
 
+def _closed_ring_pins(
+    pin_a: dict[str, Any],
+    pin_b: dict[str, Any],
+    *,
+    block_a: dict[str, Any],
+    block_b: dict[str, Any],
+    port_a: dict[str, Any],
+    port_b: dict[str, Any],
+    a: tuple[float, float],
+    b: tuple[float, float],
+    offsets_um: dict[str, dict[str, float]],
+    route_layer: tuple[int, int] | None,
+    cross_block_route_layer: tuple[int, int] | None,
+    extraction_deck: ExtractionDeck | None,
+) -> tuple[list[tuple[dict[str, Any], dict[str, Any]]], str | None]:
+    """Guard/collector-ring check (check 2, #199 case 2).
+
+    Returns ``(ring_pins, reason)``. ``reason`` is the unroutable wording when
+    a block with a *closed* ring drawn around it (any ``TAP_*``/``COLL_*``
+    port reported, no ``GAP_*`` opening) is reached at a non-tap port -- the
+    route would cross the ring's own metal loop on the way in for a
+    destination pin, or on the way out for a source pin, since the ring fully
+    encloses the block either way. Only meaningful for distinct blocks: a
+    self-net's two ports already both sit inside the same ring, so it draws no
+    *additional* ring crossing (``ring_pins`` is empty and ``reason`` is
+    ``None``).
+
+    A block whose ring declares an opening (``params.ring_gap_side``, #434) is
+    not rejected here: it is collected into ``ring_pins`` instead, and the
+    drawn backbone is checked against the ring's own geometry afterwards (see
+    :func:`_ring_opening_conflict`) -- the route is allowed only if it
+    actually passes through that opening.
+
+    Both of those are *plane*-conditional since issue #1960: a leg drawn
+    entirely on a level the ring has no conductor on -- and whose via-drop
+    landing pads all stay clear of the ring's trace -- physically flies over
+    the loop and merges with nothing, so it is neither rejected here nor
+    measured against the ring's geometry later. See
+    :func:`_leg_plane_clears_ring` for exactly what "clears" requires; an
+    unresolvable or same-plane answer keeps the identical rejection this
+    check has always emitted.
+    """
+    ring_pins: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    if pin_a["block"] != pin_b["block"]:
+        for pin, block in ((pin_a, block_a), (pin_b, block_b)):
+            if not _block_has_ring_taps(block) or pin["port"].startswith(
+                _RING_TAP_PORT_PREFIXES
+            ):
+                continue
+            if _leg_plane_clears_ring(
+                block,
+                pin,
+                offsets_um[pin["block"]],
+                ((pin_a, port_a, a), (pin_b, port_b, b)),
+                (route_layer, cross_block_route_layer)
+                if cross_block_route_layer is not None
+                else (route_layer,),
+                extraction_deck,
+            ):
+                continue
+            if _ring_gap_ports(block):
+                ring_pins.append((pin, block))
+                continue
+            return ring_pins, (
+                f"block '{pin['block']}' has a closed guard/collector ring "
+                f"(reports a TAP_*/COLL_* port and no GAP_* opening) -- a "
+                f"route to its non-tap port '{pin['port']}' would cross the "
+                "ring's own metal loop and merge this net with the ring's "
+                "tap net; route to the ring's own tap port instead, "
+                "regenerate the block with a routing opening in the ring "
+                "(params.ring_gap_side/ring_gap_um), or regenerate it with "
+                "add_guard_ring/add_collector_ring: false"
+            )
+    return ring_pins, None
+
+
 def route_two_pin(
     pin_a: dict[str, Any],
     pin_b: dict[str, Any],
@@ -3229,58 +3305,24 @@ def route_two_pin(
     vb = _DIRECTION_VECTORS[dir_b]
     stub_um = width_um
 
-    # Guard/collector-ring check (#199 case 2): a block with a *closed* ring
-    # drawn around it (any TAP_*/COLL_* port reported, no GAP_* opening)
-    # cannot be reached at any other port without the route crossing the
-    # ring's own metal loop -- on the way in for a destination pin, or on the
-    # way out for a source pin, since the ring fully encloses the block either
-    # way. Only meaningful for distinct blocks: a self-net's two ports already
-    # both sit inside the same ring, so it draws no *additional* ring crossing.
-    #
-    # A block whose ring declares an opening (params.ring_gap_side, #434) is
-    # not rejected here: it is collected instead, and the drawn backbone is
-    # checked against the ring's own geometry below, once `points` exists --
-    # the route is allowed only if it actually passes through that opening.
-    #
-    # Both of those are *plane*-conditional since issue #1960: a leg drawn
-    # entirely on a level the ring has no conductor on -- and whose via-drop
-    # landing pads all stay clear of the ring's trace -- physically flies
-    # over the loop and merges with nothing, so it is neither rejected here
-    # nor measured against the ring's geometry below. See
-    # :func:`_leg_plane_clears_ring` for exactly what "clears" requires; an
-    # unresolvable or same-plane answer keeps the identical rejection this
-    # branch has always emitted.
-    ring_pins: list[tuple[dict[str, Any], dict[str, Any]]] = []
-    if pin_a["block"] != pin_b["block"]:
-        for pin, block in ((pin_a, block_a), (pin_b, block_b)):
-            if not _block_has_ring_taps(block) or pin["port"].startswith(
-                _RING_TAP_PORT_PREFIXES
-            ):
-                continue
-            if _leg_plane_clears_ring(
-                block,
-                pin,
-                offsets_um[pin["block"]],
-                ((pin_a, port_a, a), (pin_b, port_b, b)),
-                (route_layer, cross_block_route_layer)
-                if cross_block_route_layer is not None
-                else (route_layer,),
-                extraction_deck,
-            ):
-                continue
-            if _ring_gap_ports(block):
-                ring_pins.append((pin, block))
-                continue
-            return _unroutable(
-                f"block '{pin['block']}' has a closed guard/collector ring "
-                f"(reports a TAP_*/COLL_* port and no GAP_* opening) -- a "
-                f"route to its non-tap port '{pin['port']}' would cross the "
-                "ring's own metal loop and merge this net with the ring's "
-                "tap net; route to the ring's own tap port instead, "
-                "regenerate the block with a routing opening in the ring "
-                "(params.ring_gap_side/ring_gap_um), or regenerate it with "
-                "add_guard_ring/add_collector_ring: false"
-            )
+    # Guard/collector-ring check (#199 case 2, #434, #1960): see
+    # _closed_ring_pins.
+    ring_pins, ring_reason = _closed_ring_pins(
+        pin_a,
+        pin_b,
+        block_a=block_a,
+        block_b=block_b,
+        port_a=port_a,
+        port_b=port_b,
+        a=a,
+        b=b,
+        offsets_um=offsets_um,
+        route_layer=route_layer,
+        cross_block_route_layer=cross_block_route_layer,
+        extraction_deck=extraction_deck,
+    )
+    if ring_reason is not None:
+        return _unroutable(ring_reason)
 
     # Routability heuristic: a jog perpendicular to the ports' facing axis has
     # to squeeze through the channel between the two blocks. When both ports
