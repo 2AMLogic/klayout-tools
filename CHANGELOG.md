@@ -14,6 +14,17 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sim` deck-list `--submit-only` / `--attach`** (issue #3958,
+  documented in `docs/cli/sim.md`): a `decks` request on the `batch` backend
+  is one job with one job id, so it can now be detached and re-attached like a
+  corner request. `--submit-only` returns the existing `status: "submitted"`
+  payload with `unit_count` = number of decks and `job_ceiling: null` (the deck
+  path assesses none) and writes the same `batch-receipt.json`; `--attach
+  <job_id>` polls and collects that job into the usual deck report, with
+  `error.code: "batch_unknown_job"` for an unknown id and the new
+  `"attach_request_mismatch"` when the request's decks differ from the job's.
+  Previously both were refused for deck lists. Additive; no `schema_version`
+  bump.
 - **`batch.max_concurrent_jobs` / `klt sim --max-concurrent-jobs`** (issue
   #3914, documented in `docs/cli/sim.md`): additive, opt-in bound on the shard
   jobs a sharded `batch` run keeps in flight at once, so a large split no

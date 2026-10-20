@@ -2300,8 +2300,10 @@ def run_sim(
     one ``batch`` job, then returns its identity (``job_id``, ``bucket``,
     ``launched_at``, ...) *instead of the report*, without polling or
     collecting; read it later with :func:`sim_batch_async.read_job_status`.
+    A deck-list request is one job too (issue #3958): ``submit_only`` and
+    ``attach_job_id`` apply to it on ``batch`` with ``job_ceiling: null``.
     Anything it cannot represent as one job (another backend, ``hosts > 1``,
-    ``resume``, ``plot_dir``, a deck-list request) raises :class:`SimError`
+    ``resume``, ``plot_dir``) raises :class:`SimError`
     with code ``submit_only_unsupported`` before any S3 write.
 
     **Output-directory ownership (issue #2770).** A run that writes
@@ -2329,8 +2331,6 @@ def run_sim(
     # corner dir and ngspice would never find its deck. Absolutise once here.
     if artifacts_dir is not None:
         artifacts_dir = os.path.abspath(artifacts_dir)
-    if attach_job_id is not None and sim_decks.DECKS_FIELD in request:
-        raise SimError("--attach does not apply to deck-list requests")
     if capacity_wait_s is not None and sim_decks.DECKS_FIELD in request:
         raise SimError("--wait-for-capacity does not apply to deck-list requests")
     if sim_decks.DECKS_FIELD in request:
@@ -2338,11 +2338,6 @@ def run_sim(
             raise SimError(
                 "--dry-run does not apply to deck-list requests (`decks`); "
                 "it validates corner/Monte Carlo requests only"
-            )
-        if submit_only:
-            raise SimError(
-                "--submit-only is not supported for deck-list requests",
-                code=SUBMIT_ONLY_UNSUPPORTED_CODE,
             )
         return _dispatch_deck_request(
             request,
@@ -2356,6 +2351,8 @@ def run_sim(
             plot_dir=plot_dir,
             fail_fast_probe=fail_fast_probe,
             fail_on_diagnostic=fail_on_diagnostic,
+            submit_only=submit_only,
+            attach_job_id=attach_job_id,
             _ownership=_ownership,
         )
     return _run_sim_corners(
@@ -2392,6 +2389,8 @@ def _dispatch_deck_request(
     plot_dir: str | None,
     fail_fast_probe: bool | None,
     fail_on_diagnostic: list[str] | tuple[str, ...] | None,
+    submit_only: bool = False,
+    attach_job_id: str | None = None,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """Route a deck-list request to :mod:`klayout_tools.sim_decks`,
@@ -2411,6 +2410,16 @@ def _dispatch_deck_request(
     # enforces it), so the host-default's ngspice-only condition holds.
     resolved_backend = _yield_host_default_backend(
         resolved_backend, from_host_default, reason_ok=True
+    )
+    # Issue #3958: a deck list is one batch job with one job id, so
+    # --submit-only / --attach apply -- under the corner path's own
+    # refusals, all before the first S3 write.
+    if submit_only:
+        _refuse_unsupported_submit_only(
+            resolved_backend, 1 if hosts is None else hosts, resume, plot_dir
+        )
+    _apply_attach(
+        {}, attach_job_id, resolved_backend, 1 if hosts is None else hosts, submit_only
     )
     if hosts is not None and hosts != 1:
         raise SimError(
@@ -2446,7 +2455,8 @@ def _dispatch_deck_request(
     # Issue #3168: a deck run always writes (and a remote/batch pull replaces)
     # unit trees under its outdir, so it owns that root unconditionally --
     # after the flag checks above, which must fail without locking anything.
-    if _ownership is not None:
+    # A submit-only run collects nothing, so it owns no unit trees.
+    if _ownership is not None and not submit_only:
         _own_persistent_roots(
             _ownership,
             sim_decks.resolve_deck_outdir(artifacts_dir, request_dir),
@@ -2459,6 +2469,8 @@ def _dispatch_deck_request(
         backend=resolved_backend,
         max_workers=max_workers,
         artifacts_dir=artifacts_dir,
+        submit_only=submit_only,
+        attach_job_id=attach_job_id,
     )
 
 
