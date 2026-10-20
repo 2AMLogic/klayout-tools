@@ -1447,14 +1447,14 @@ def _resolve_analysis_and_measurements(
     return analysis, sim_noise.lower_measurements(measurements_spec, analysis)
 
 
-def _reject_param_braces(analysis: dict[str, Any]) -> None:
+def _reject_param_braces(analysis: dict[str, Any], engine: str) -> None:
     """Reject a ``{...}`` brace reference in a scalar ``analysis.args``
     (issue #2846). ngspice emits the analysis as a ``.control`` command and
     does not expand ``.param`` braces in control mode, so ``tran 2e-06
     {stop_s}`` aborts the analysis. Xyce emits a ``.tran`` dot card where
-    braces are valid, so the caller skips this check for it."""
+    braces are valid, so this check is skipped for ``engine == "xyce"``."""
     args = analysis.get("args")
-    if isinstance(args, str) and re.search(r"[{}]", args):
+    if engine != "xyce" and isinstance(args, str) and re.search(r"[{}]", args):
         raise SimError(
             f"request.analysis.args {args!r} contains a '{{...}}' brace "
             "reference: ngspice runs the analysis as a .control command, "
@@ -2895,8 +2895,7 @@ def _prepare_sim_request(
     # `analysis_steps[]` sequence, resolved -- every structural error raised
     # -- here, before any corner is dispatched.
     analysis, measurements_spec = _resolve_analysis_and_measurements(request)
-    if engine != "xyce":
-        _reject_param_braces(analysis)
+    _reject_param_braces(analysis, engine)
     for spec in measurements_spec:
         if spec.get("spice") is not None:
             _validate_meas_card(spec["name"], spec["spice"])
