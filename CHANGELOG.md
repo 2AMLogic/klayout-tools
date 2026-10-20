@@ -24,6 +24,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   `port_request_unsupported_layer`, `port_request_off_grid`,
   `port_request_out_of_bounds`, `port_request_conflict`,
   `port_request_on_connectivity_port`.
+
+- **gf180mcu discloses wide-metal and narrow-line end-of-line coverage gaps**
+  (issue #3968, documented in `docs/cli/drc.md` and `docs/cli/deck.md`):
+  additive. `coverage.unmodeled_rules`, `klt deck info` and `klt deck rules`
+  now also list `M1.2b`–`M5.2b`, `CO.6a`/`CO.6b` and `V1`–`V4`
+  `.3c`/`.3d`/`.4b`/`.4c`. Disclosure only: no rule is enforced, and
+  `status`, exit codes and `schema_version` are unchanged.
+
 - **`klt sim --resume` for deck-list requests** (issue #3957, documented in
   `docs/cli/sim.md`): additive. Every deck unit now writes an atomic
   `<outdir>/<id>/unit.json` completion record; with `--resume` /
