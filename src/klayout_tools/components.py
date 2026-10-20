@@ -224,18 +224,8 @@ def run_components_report(
     return {
         "schema_version": 1,
         "file": layout_path,
-        "conductors": [
-            {"name": spec["name"], "layer": list(spec["layer"])}
-            for spec in conductor_specs
-        ],
-        "vias": [
-            {
-                "name": spec["name"],
-                "layer": list(spec["layer"]),
-                "between": list(spec["between"]),
-            }
-            for spec in via_specs
-        ],
+        "conductors": [_echo_spec(spec) for spec in conductor_specs],
+        "vias": [_echo_spec(spec, between=list(spec["between"])) for spec in via_specs],
         "label_layers": [
             {
                 "name": spec["name"],
@@ -252,6 +242,37 @@ def run_components_report(
     }
 
 
+def _echo_spec(spec: dict[str, Any], **extra: Any) -> dict[str, Any]:
+    """Envelope form of a conductor/via spec; ``and``/``not`` only if set."""
+    echoed: dict[str, Any] = {"name": spec["name"], "layer": list(spec["layer"])}
+    echoed.update(extra)
+    for key in ("and", "not"):
+        if spec.get(key) is not None:
+            echoed[key] = [list(layer) for layer in spec[key]]
+    return echoed
+
+
+def _qualified_region(layout: Any, cell: Any, spec: dict[str, Any]) -> Any:
+    """The spec's layer region after its optional ``and`` then ``not`` booleans.
+
+    Plain boolean (not ``interacting``): a shape straddling a qualifier
+    layer's edge is split, so only the overlapping/non-overlapping part
+    survives. A qualifier layer absent from the layout is an empty region
+    (``and`` then empties the entry, ``not`` is a no-op).
+    """
+    region = _region(layout, cell, spec["layer"])
+    for key in ("and", "not"):
+        layers = spec.get(key)
+        if layers is None:
+            continue
+        mask = _region(layout, cell, layers[0])
+        for layer in layers[1:]:
+            mask = mask + _region(layout, cell, layer)
+        mask = mask.merged()
+        region = region & mask if key == "and" else region - mask
+    return region
+
+
 def _components_for_cell(
     kdb: Any,
     layout: Any,
@@ -265,14 +286,14 @@ def _components_for_cell(
     """Compute every connected component for one top ``cell``."""
     conductor_regions: dict[str, Any] = {}
     for spec in conductor_specs:
-        region = _region(layout, cell, spec["layer"])
+        region = _qualified_region(layout, cell, spec)
         if clip_box is not None:
             region &= kdb.Region(clip_box)
         conductor_regions[spec["name"]] = region
 
     via_regions: dict[str, Any] = {}
     for spec in via_specs:
-        region = _region(layout, cell, spec["layer"])
+        region = _qualified_region(layout, cell, spec)
         if clip_box is not None:
             region &= kdb.Region(clip_box)
         via_regions[spec["name"]] = region
@@ -457,7 +478,9 @@ def _validate_conductors(conductors: list[dict[str, Any]]) -> list[dict[str, Any
             raise ComponentsError(f"duplicate conductor name: {name!r}")
         seen_names.add(name)
         layer = _require_layer(entry, "conductors", name)
-        specs.append({"name": name, "layer": layer})
+        spec = {"name": name, "layer": layer}
+        spec.update(_require_qualifiers(entry, "conductors", name))
+        specs.append(spec)
     return specs
 
 
@@ -497,9 +520,9 @@ def _validate_vias(
                     f"via {name!r} 'between' references unknown conductor "
                     f"{conductor_name!r}"
                 )
-        specs.append(
-            {"name": name, "layer": layer, "between": (conductor_a, conductor_b)}
-        )
+        spec = {"name": name, "layer": layer, "between": (conductor_a, conductor_b)}
+        spec.update(_require_qualifiers(entry, "vias", name))
+        specs.append(spec)
     return specs
 
 
@@ -542,15 +565,45 @@ def _require_name(entry: Any, field: str) -> str:
     return name
 
 
+def _layer_pair(value: Any) -> tuple[int, int] | None:
+    if (
+        isinstance(value, (list, tuple))
+        and len(value) == 2
+        and all(isinstance(v, int) and not isinstance(v, bool) for v in value)
+    ):
+        return (value[0], value[1])
+    return None
+
+
 def _require_layer(entry: dict[str, Any], field: str, name: str) -> tuple[int, int]:
     layer = entry.get("layer")
-    if (
-        not isinstance(layer, list)
-        or len(layer) != 2
-        or not all(isinstance(v, int) and not isinstance(v, bool) for v in layer)
-    ):
+    pair = _layer_pair(layer) if isinstance(layer, list) else None
+    if pair is None:
         raise ComponentsError(
             f"{field} entry {name!r} 'layer' must be a [layer, datatype] pair "
             f"of integers, got {layer!r}"
         )
-    return (layer[0], layer[1])
+    return pair
+
+
+def _require_qualifiers(
+    entry: dict[str, Any], field: str, name: str
+) -> dict[str, list[tuple[int, int]]]:
+    """Validate the optional ``and``/``not`` boolean layer lists of an entry."""
+    qualifiers: dict[str, list[tuple[int, int]]] = {}
+    for key in ("and", "not"):
+        if key not in entry:
+            continue
+        value = entry[key]
+        pairs = (
+            [_layer_pair(v) if isinstance(v, list) else None for v in value]
+            if isinstance(value, list)
+            else []
+        )
+        if not pairs or any(p is None for p in pairs):
+            raise ComponentsError(
+                f"{field} entry {name!r} {key!r} must be a non-empty list of "
+                f"[layer, datatype] integer pairs, got {value!r}"
+            )
+        qualifiers[key] = pairs  # type: ignore[assignment]
+    return qualifiers

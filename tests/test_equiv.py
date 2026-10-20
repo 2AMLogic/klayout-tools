@@ -84,7 +84,7 @@ import pytest
 
 from helpers.subprocess_fakes import fake_completed
 from klayout_tools import _paths as paths_module
-from klayout_tools import equiv
+from klayout_tools import equiv, equiv_sequential, pdk_cells
 from klayout_tools import pdk as pdk_module
 from klayout_tools import synthesize as synthesize_module
 from klayout_tools.cli import main
@@ -1987,7 +1987,7 @@ def test_unconfirmed_sequential_counterexample_downgrades_to_inconclusive(
         ),
     )
     monkeypatch.setattr(
-        equiv,
+        equiv_sequential,
         "_parse_module_ports",
         lambda netlist_path, module_name: {
             "clk": "input",
@@ -2027,7 +2027,9 @@ def test_unconfirmed_sequential_counterexample_downgrades_to_inconclusive(
         )
 
     monkeypatch.setattr(
-        equiv, "_confirm_sequential_counterexample", _fake_confirm_not_reproduced
+        equiv_sequential,
+        "_confirm_sequential_counterexample",
+        _fake_confirm_not_reproduced,
     )
 
     report = run_equiv(request_path)
@@ -2068,7 +2070,7 @@ def test_confirmed_by_simulation_none_keeps_sequential_counterexample_status(
         ),
     )
     monkeypatch.setattr(
-        equiv,
+        equiv_sequential,
         "_parse_module_ports",
         lambda netlist_path, module_name: {
             "clk": "input",
@@ -2101,7 +2103,9 @@ def test_confirmed_by_simulation_none_keeps_sequential_counterexample_status(
         )
 
     monkeypatch.setattr(
-        equiv, "_confirm_sequential_counterexample", _fake_confirm_unavailable
+        equiv_sequential,
+        "_confirm_sequential_counterexample",
+        _fake_confirm_unavailable,
     )
 
     report = run_equiv(request_path)
@@ -2167,7 +2171,7 @@ def test_sequential_engine_scripts_include_extra_opt_pass(tmp_path):
     gate = _side([_write(tmp_path / "gate.v", _SEQ_GATE_SIMPLE_DFF_RTL_BUFFERED)])
 
     stage1_path = str(tmp_path / "stage1.ys")
-    equiv._write_sequential_stage1_script(
+    equiv_sequential._write_sequential_stage1_script(
         script_path=stage1_path,
         gold=gold,
         gate=gate,
@@ -2187,7 +2191,7 @@ def test_sequential_engine_scripts_include_extra_opt_pass(tmp_path):
     assert flatten_idx < opt_idx < equiv_make_idx
 
     stage2_path = str(tmp_path / "stage2.ys")
-    equiv._write_sequential_stage2_script(
+    equiv_sequential._write_sequential_stage2_script(
         script_path=stage2_path,
         gold=gold,
         gate=gate,
@@ -2226,7 +2230,7 @@ def test_sequential_stage1_script_emits_blacklist_when_given(tmp_path):
     gate = _side([_write(tmp_path / "gate.v", _SEQ_GATE_SIMPLE_DFF_RTL_BUFFERED)])
 
     plain_path = str(tmp_path / "plain.ys")
-    equiv._write_sequential_stage1_script(
+    equiv_sequential._write_sequential_stage1_script(
         script_path=plain_path,
         gold=gold,
         gate=gate,
@@ -2239,7 +2243,7 @@ def test_sequential_stage1_script_emits_blacklist_when_given(tmp_path):
 
     blacklist_path = str(tmp_path / "bl.txt")
     refined_path = str(tmp_path / "refined.ys")
-    equiv._write_sequential_stage1_script(
+    equiv_sequential._write_sequential_stage1_script(
         script_path=refined_path,
         gold=gold,
         gate=gate,
@@ -2270,13 +2274,15 @@ def test_parse_unproven_equiv_signals_strips_gold_gate_suffixes():
         ]
     )
 
-    names = equiv._parse_unproven_equiv_signals(stdout)
+    names = equiv_sequential._parse_unproven_equiv_signals(stdout)
 
     # Bit-select tokens (`[3]`) carry no `_gold`/`_gate` suffix and are
     # dropped; the multi-bit port itself is still reported by its base name
     # so the caller can recognise (and refuse to blacklist) it.
     assert names == {"_560_.B", "result"}
-    assert equiv._parse_unproven_equiv_signals("nothing to see here") == set()
+    assert (
+        equiv_sequential._parse_unproven_equiv_signals("nothing to see here") == set()
+    )
 
 
 @pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
@@ -2423,7 +2429,7 @@ def test_parse_module_ports_matches_escaped_identifier_ports(tmp_path):
         encoding="utf-8",
     )
 
-    ports = equiv._parse_module_ports(str(netlist), "gold")
+    ports = equiv_sequential._parse_module_ports(str(netlist), "gold")
 
     assert ports == {
         "clk": "input",
@@ -2530,7 +2536,7 @@ def test_verilog_ident_escapes_only_when_required(name, expected):
     emitted verbatim (so every existing generated testbench is byte-for-byte
     unchanged); anything else becomes a whitespace-terminated Verilog
     escaped identifier."""
-    assert equiv._verilog_ident(name) == expected
+    assert equiv_sequential._verilog_ident(name) == expected
 
 
 @pytest.mark.parametrize("bad_depth", [0, -1, "4", 1.5, True])
@@ -3056,17 +3062,14 @@ def _find_any_cell_library() -> tuple[str, str, str, str] | None:
     which is always the bare corner suffix (e.g. ``"tt_025C_1v80"``, never
     ``"<cell_library>__tt_025C_1v80"``) regardless of what a library's `.lib`
     file's `default_operating_conditions` attribute reports (issue #820)."""
-    try:
-        result = pdk_module.list_pdks()
-    except Exception:
-        return None
+    result = pdk_module.list_pdks()
     for install in result["installs"]:
         for variant in install["variants"]:
             try:
-                libraries = pdk_module.list_cell_libraries(
+                libraries = pdk_cells.list_cell_libraries(
                     variant=variant["name"], root=install["root"]
                 )
-            except Exception:
+            except pdk_module.PdkNotFoundError:
                 continue
             for library in libraries["libraries"]:
                 return (
@@ -3638,13 +3641,13 @@ def test_sequential_replay_backend_disagreement_is_flagged(tmp_path, monkeypatch
     ):
         return (replies[backend], None, {})
 
-    monkeypatch.setattr(equiv, "_run_replay_backend", _fake_replay)
+    monkeypatch.setattr(equiv_sequential, "_run_replay_backend", _fake_replay)
     monkeypatch.setattr(
-        equiv, "_sim_backend_version", lambda backend, binary=None: "0.0"
+        equiv_sequential, "_sim_backend_version", lambda backend, binary=None: "0.0"
     )
 
     diagnostics: list[dict] = []
-    equiv._confirm_sequential_counterexample(
+    equiv_sequential._confirm_sequential_counterexample(
         counterexample=counterexample,
         ports={"q": "output"},
         netlist_path=str(tmp_path / "netlist.v"),
@@ -3690,13 +3693,13 @@ def test_sequential_replay_two_state_start_state_is_explained(tmp_path, monkeypa
     ):
         return (replies[backend], None, {})
 
-    monkeypatch.setattr(equiv, "_run_replay_backend", _fake_replay)
+    monkeypatch.setattr(equiv_sequential, "_run_replay_backend", _fake_replay)
     monkeypatch.setattr(
-        equiv, "_sim_backend_version", lambda backend, binary=None: "0.0"
+        equiv_sequential, "_sim_backend_version", lambda backend, binary=None: "0.0"
     )
 
     diagnostics: list[dict] = []
-    equiv._confirm_sequential_counterexample(
+    equiv_sequential._confirm_sequential_counterexample(
         counterexample=counterexample,
         ports={"q": "output"},
         netlist_path=str(tmp_path / "netlist.v"),
