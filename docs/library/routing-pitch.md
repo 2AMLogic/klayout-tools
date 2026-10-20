@@ -33,7 +33,7 @@ Errors (`RoutingPitchError`): unknown deck, unknown layer, or a
 from klayout_tools.routing_pitch import routing_pitch_bound
 
 r = routing_pitch_bound("sky130", "met1", requested_width_um=0.14)
-pitch = r.min_pitch_um          # 0.28 -- must not be smaller than this
+pitch = r.min_pitch_um  # 0.28 -- must not be smaller than this
 # Place two met1 tracks at `pitch` (or larger), write the GDS, then:
 #   klt drc layout.gds --deck sky130 --format json
 ```

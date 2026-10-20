@@ -445,6 +445,7 @@
         "klayout_tools.op_sanity",
         "klayout_tools.output_lock",
         "klayout_tools.resistor_mesh",
+        "klayout_tools.routing_pitch",
         "klayout_tools.touchstone",
         "klayout_tools.verilog_netlist"
       ]
