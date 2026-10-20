@@ -395,6 +395,78 @@ def test_job_cmd_is_valid_bash_syntax(tmp_path):
         assert proc.returncode == 0, proc.stderr
 
 
+def _bash_n(script):
+    import shutil
+
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash not available")
+    return subprocess.run([bash, "-n", "-c", script], capture_output=True, text=True)
+
+
+@pytest.mark.parametrize("enforce", [True, False])
+@pytest.mark.parametrize(
+    "features",
+    [
+        pytest.param(("measurements[].expr",), id="one"),
+        pytest.param(tuple(sb._RUNNER_REQUEST_FEATURES), id="all"),
+    ],
+)
+def test_runner_preflight_with_required_features_is_valid_bash(features, enforce):
+    """Issue #3993: the feature gate's per-feature `if ...; fi` snippets must be
+    `;`-separated, or a request using any gated feature fails to parse."""
+    script = sb._runner_preflight_script(
+        "0.7.1.dev2264+gcba5e957d9ed", enforce=enforce, required_features=features
+    )
+    proc = _bash_n(script)
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_job_cmd_with_gated_request_features_is_valid_bash(tmp_path):
+    """Issue #3993: ngspice_init + measurement expr is the reporter's shape."""
+    for keep in (False, True):
+        spec = sb._build_batch_job_spec(
+            {
+                "models": {},
+                "options": {"ngspice_init": "x"},
+                "measurements": [{"name": "a", "expr": "1"}],
+                "analysis": {"kind": "op"},
+            },
+            str(_write_body(tmp_path)),
+            corner_count=1,
+            timeout_s=30.0,
+            keep_artifacts=keep,
+            client_version="0.7.1.dev2264+gcba5e957d9ed",
+        )
+        proc = _bash_n(spec.cmd)
+        assert proc.returncode == 0, proc.stderr
+
+
+def test_job_cmd_with_gated_features_refuses_an_older_runner(tmp_path):
+    """Issue #3993: with the parse error fixed, the preflight actually runs and
+    names the feature an older runner predates."""
+    spec = sb._build_batch_job_spec(
+        {
+            "models": {},
+            "options": {"ngspice_init": "x"},
+            "measurements": [{"name": "a", "expr": "1"}],
+            "analysis_steps": [],
+        },
+        str(_write_body(tmp_path)),
+        corner_count=1,
+        timeout_s=30.0,
+        keep_artifacts=False,
+        client_version="0.7.1.dev2264+gcba5e957d9ed",
+    )
+    klt = '#!/bin/bash\nif [ "$1" = "--version" ]; then echo "klt 0.7.0"; exit 0; fi\n'
+    proc, out_dir, marker = _run_job_cmd_with_fake_klt(tmp_path, spec, klt)
+    assert proc.returncode == sb._BATCH_PREFLIGHT_REJECT_EXIT, proc.stderr
+    report = json.loads((out_dir / "report.json").read_text())
+    assert report["error"]["code"] == sb.BATCH_RUNNER_FEATURE_CODE
+    assert "analysis_steps" in report["error"]["message"]
+    assert not marker.exists()
+
+
 def test_job_cmd_exit_trap_writes_envelope_when_klt_leaves_no_report(tmp_path):
     """Issue #3818: a job that exits non-zero with an empty report.json and no
     klt envelope still tells the submitter why, in report.json."""

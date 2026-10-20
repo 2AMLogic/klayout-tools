@@ -1320,7 +1320,7 @@ def _feature_gate_shell(features: tuple[str, ...], client_version: str) -> str:
     for name in features:
         key = _feature_release_key(name)
         checks.append(
-            f'if [ "$rk" -lt {key} ]; then fmiss="${{fmiss}}${{fmiss:+, }}{name}"; fi'
+            f'if [ "$rk" -lt {key} ]; then fmiss="${{fmiss}}${{fmiss:+, }}{name}"; fi;'
         )
     return (
         'fmiss=; if [ -n "$rfull" ]; then '
