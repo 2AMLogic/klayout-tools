@@ -4084,6 +4084,8 @@ def test_every_recognized_kind_declares_a_typed_shape():
         # Issue #2839: T1 item 11's port-accessibility evidence.
         "socket-check",
         "lef-abstract",
+        # Issue #4015: T1 item 1's netlist-evidence half.
+        "synthesize",
         "generic",
         "error",
     }
@@ -17206,3 +17208,110 @@ def test_explicit_bytes_hash_kind_matches_default(tmp_path):
     item = _item(build_tier_report(_anchored_manifest(1, envelope_path, digest)), 1)
 
     assert item["status"] == "met"
+
+
+# --------------------------------------------------------------------------- #
+# `klt synthesize` evidence (issue #4015): opt-in kind scoped to T1 item 1.
+# --------------------------------------------------------------------------- #
+
+
+def _synthesize_envelope(**structural) -> dict:
+    return {
+        "schema_version": 1,
+        "status": "ok",
+        "netlist_path": "build/top.v",
+        "netlist_sha256": "ab" * 32,
+        "structural": {
+            "latches": 0,
+            "expected_latches": 0,
+            "unexpected_latches": 0,
+            "comb_loops": 0,
+            "multi_driven": 0,
+            "has_critical": False,
+            **structural,
+        },
+        "warnings": {"count": 2},
+        "provenance": {"input": {"content_hash": "sha256:rtlA", "role": "rtl"}},
+    }
+
+
+def _synth_item_1(tmp_path, envelope, *, content_hash=None, item="1.digital"):
+    entry = _write(tmp_path, "synth.json", envelope)
+    if content_hash is not None:
+        entry = {"file": entry, "content_hash": content_hash}
+    result = build_tier_report(_manifest(kind="digital", evidence={item: entry}))
+    return next(
+        row
+        for row in result["items"]
+        if row["id"] == int(item.split(".")[0]) and row["tier"] == "T1"
+    )
+
+
+def test_synthesize_response_classifies_as_synthesize():
+    assert signoff_module._classify(_synthesize_envelope(), "s.json") == "synthesize"
+
+
+def test_synthesize_shape_does_not_capture_other_kinds():
+    for envelope in (ERC_CLEAN_ENVELOPE, EXTRACT_ENVELOPE, DRC_CLEAN_ENVELOPE):
+        assert signoff_module._classify(envelope, "x.json") != "synthesize"
+    assert not signoff_module._is_synthesize_shape(EXTRACT_ENVELOPE)
+
+
+def test_synthesize_citation_grades_item_1_met_with_matching_pin(tmp_path):
+    item = _synth_item_1(tmp_path, _synthesize_envelope(), content_hash="sha256:rtlA")
+
+    assert item["status"] == "met"
+    assert item["citation"]["kind"] == "synthesize"
+
+
+@pytest.mark.parametrize("field", ["unexpected_latches", "comb_loops", "multi_driven"])
+def test_synthesize_structural_defect_grades_item_1_unmet(tmp_path, field):
+    item = _synth_item_1(tmp_path, _synthesize_envelope(**{field: 1}))
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "check_failed"
+
+
+def test_synthesize_stale_pin_renders_stale_evidence(tmp_path):
+    item = _synth_item_1(
+        tmp_path, _synthesize_envelope(), content_hash="sha256:other-rtl"
+    )
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "stale_evidence"
+
+
+@pytest.mark.parametrize("item_id", ["2", "3", "9"])
+def test_synthesize_citation_for_other_items_is_wrong_kind(tmp_path, item_id):
+    item = _synth_item_1(tmp_path, _synthesize_envelope(), item=item_id)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "wrong_kind"
+
+
+def test_synthesize_with_warnings_but_zero_counts_passes(tmp_path):
+    envelope = _synthesize_envelope(latches=1, expected_latches=1)
+    envelope["warnings"] = {"count": 40}
+
+    assert _synth_item_1(tmp_path, envelope)["status"] == "met"
+
+
+def test_synthesize_detail_surfaces_graded_netlist(tmp_path):
+    path = _write(tmp_path, "synth.json", _synthesize_envelope(comb_loops=2))
+
+    result = signoff_module.build_signoff([path])
+
+    check = result["checks"][0]
+    assert check["kind"] == "synthesize"
+    assert check["passed"] is False
+    assert check["detail"]["netlist_path"] == "build/top.v"
+    assert check["detail"]["structural"]["comb_loops"] == 2
+
+
+def test_synthesize_citation_for_analog_item_1_is_wrong_kind(tmp_path):
+    path = _write(tmp_path, "synth.json", _synthesize_envelope())
+    result = build_tier_report(_manifest(kind="analog", evidence={"1": path}))
+
+    item = next(row for row in result["items"] if row["id"] == 1)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "wrong_kind"

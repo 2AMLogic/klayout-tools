@@ -298,6 +298,22 @@ class _LefAbstractEnvelope(_LefAbstractRequired, total=False):
     provenance: dict[str, Any] | None
 
 
+class _SynthesizeRequired(_EnvelopeCommon):
+    # Issue #4015: `klt synthesize` (docs/cli/synthesize.md). `structural`
+    # plus `netlist_sha256`/`netlist_path` are the fields `_classify`
+    # recognises this shape by; `status` and `structural`'s counts are what
+    # `_check_passed` grades.
+    status: str
+    structural: dict[str, Any]
+    netlist_sha256: str
+    netlist_path: Any
+
+
+class _SynthesizeEnvelope(_SynthesizeRequired, total=False):
+    metrics: dict[str, Any]
+    provenance: dict[str, Any] | None
+
+
 class _GenericRequired(_EnvelopeCommon):
     # `kind` and `status` are the two fields docs/cli/signoff.md's "Generic
     # evidence" section declares required; `summary`/`source` are explicitly
@@ -345,6 +361,7 @@ _EvidenceEnvelope = (
     | _PlaceAndRouteEnvelope
     | _SocketCheckEnvelope
     | _LefAbstractEnvelope
+    | _SynthesizeEnvelope
     | _GenericEnvelope
     | _ErrorEnvelope
 )
@@ -369,6 +386,7 @@ _ENVELOPE_SHAPES: dict[str, Any] = {
     "place-and-route": _PlaceAndRouteEnvelope,
     "socket-check": _SocketCheckEnvelope,
     "lef-abstract": _LefAbstractEnvelope,
+    "synthesize": _SynthesizeEnvelope,
     "generic": _GenericEnvelope,
     "error": _ErrorEnvelope,
 }

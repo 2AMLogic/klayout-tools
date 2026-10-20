@@ -2273,8 +2273,8 @@ Two mechanisms close that gap, both driven by the same content hash:
    drift from it:
 
    ```json
-   "opt_in_evidence_kinds": {"generic": [1, 2, 8, 9, 10], "power": [], "erc": [11], "place-and-route": [11], "socket-check": [11], "lef-abstract": [11]},
-   "opt_in_kinds_by_item": {"1": ["generic"], "2": ["generic"], "8": ["generic"], "9": ["generic"], "10": ["generic"], "11": ["erc", "place-and-route", "socket-check", "lef-abstract"]}
+   "opt_in_evidence_kinds": {"generic": [1, 2, 8, 9, 10], "power": [], "erc": [11], "place-and-route": [11], "socket-check": [11], "lef-abstract": [11], "synthesize": [1]},
+   "opt_in_kinds_by_item": {"1": ["generic", "synthesize"], "2": ["generic"], "8": ["generic"], "9": ["generic"], "10": ["generic"], "11": ["erc", "place-and-route", "socket-check", "lef-abstract"]}
    ```
 
    `opt_in_evidence_kinds` maps kind to the item ids it may satisfy; an
@@ -3221,6 +3221,33 @@ supply names, not separately to the LVS reference's.
 **`socket-check` and `lef-abstract` are accepted by item 11 alone**, like
 `erc`/`place-and-route`: any other item renders `wrong_kind` for them.
 
+### Item 1 (digital) accepts `synthesize` evidence
+
+A [`klt synthesize`](synthesize.md) response (issue #4015) is recognised by
+its top-level `structural` object plus `netlist_sha256` and `netlist_path`,
+and may satisfy **T1 item 1 of a digital partition** alone — it is the
+netlist-evidence half of "Design sources" for an RTL-flow block. Cite it
+under `evidence["1.digital"]`; an analog partition, and every item other
+than 1, renders `wrong_kind`.
+
+It grades `met` when `status` is `"ok"` **and** `structural.unexpected_latches`,
+`structural.comb_loops` and `structural.multi_driven` are all `0`. (`status`
+is only ever `"ok"` — a failed run raises instead of emitting a response —
+so the structural counts are the real verdict.) A non-zero count renders
+`check_failed`; synthesis warnings alone do not fail it. Freshness uses the
+usual `content_hash` pin against `provenance.input.content_hash`.
+
+**`input_verified` stays `null`.** `synthesize` is not in the input-artifact
+re-hash table because multi-source HDL has no single input path, so the
+pinned hash is compared to the envelope's recorded one but never re-hashed
+against the sources on disk. The RTL sources' committedness remains
+ungraded.
+
+```json
+{"block": "spi_slave", "kind": "digital",
+ "evidence": {"1.digital": {"file": "build/synth.json", "content_hash": "sha256:…"}}}
+```
+
 ### No T1 item accepts `power` evidence
 
 `klt power`'s IR-drop/EM verdict (issue #1321, Phase 2 of epic #712 —
@@ -3463,7 +3490,7 @@ distinguishable from "no samples document was ever named" (see
 | --------------- | --------------- | ------------------------------------------------------------------------------------- |
 | `file`          | string \| null  | The evidence file path, for a file-backed entry; `null` for a command-backed entry (no static file backs it). |
 | `command`       | string \| null  | The executed argv, joined for display, for a command-backed entry; `null` for a file-backed entry (no command was run to produce it). |
-| `kind`          | string          | `"drc"`, `"lvs"`, `"extract"`, `"sim"`, `"yield"`, `"pex"`, `"sta"`, `"functional-verification"`, `"erc"`, `"place-and-route"`, `"socket-check"`, `"lef-abstract"`, or `"generic"` — the resolved envelope's classified kind. For item 11's compound citation this is the **leading** part's kind (always `"erc"`); see `parts` below. |
+| `kind`          | string          | `"drc"`, `"lvs"`, `"extract"`, `"sim"`, `"yield"`, `"pex"`, `"sta"`, `"functional-verification"`, `"erc"`, `"place-and-route"`, `"socket-check"`, `"lef-abstract"`, `"synthesize"`, or `"generic"` — the resolved envelope's classified kind. For item 11's compound citation this is the **leading** part's kind (always `"erc"`); see `parts` below. |
 | `check_status`  | string \| null  | The resolved envelope's own `status` field.                                           |
 | `content_hash`  | string \| null  | The resolved envelope's `provenance.input.content_hash`, when populated; for a `yield` envelope (which populates no `provenance` block), the hash of the samples document it names instead — see "`klt yield` evidence and content hashing" above. |
 | `input_verified`| boolean \| null | Whether that `content_hash` was itself checked against the **input artifact the envelope names**, or only against the envelope's own claim about it (issue #2196): `true` — re-hashed and matched; `false` — re-hashed and disagreed; `null` — nothing was re-hashed (no recorded hash, no resolvable input path for this kind, or a path that does not resolve to a readable file from the grading context). **Always present**, `null` included: an omitted key would leave the unverified case exactly as silent as it was before this field existed. Never consulted by any grading rule — see "A pinned hash is checked against the artifact, not only against the envelope" above. |
