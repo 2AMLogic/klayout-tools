@@ -573,9 +573,9 @@ fixture:
 Fixture: a 2-turn square spiral (8 segments), starting side 60 µm, 15 µm
 pitch growth per turn, 2×2 µm cross-section, `filament_size_um = 1.0`
 (2×2 filaments per segment). Each segment is modeled as its own PEEC
-conductor (multi-box-per-conductor spirals are
-[#1841](https://github.com/2AMLogic/klayout-tools/issues/1841)'s separate,
-still-open scope); the total spiral inductance is the signed sum
+conductor (this fixture predates the series-path winding support of
+[#2730](https://github.com/2AMLogic/klayout-tools/issues/2730), which models
+a spiral as one conductor — see "Series-path winding" below); the total spiral inductance is the signed sum
 `sum_i sum_j sign_i * sign_j * L[i][j]` over the full partial-inductance
 matrix, `sign_i` correcting for the segments whose physical winding
 direction runs opposite to `discretize_bars`' box-low-to-high filament
@@ -795,6 +795,44 @@ establish); the remaining gap to the oracle is expected to keep shrinking
 the same way `docs/design/mom-iterative-solver.md`'s own refinement
 discussion frames the tradeoff for the capacitance solve.
 
+### 3. Series-path winding (issue #2730)
+
+A single open U winding (centreline (0,100) → (0,0) → (120,0) → (120,100) µm,
+2×2 µm section, three tiled legs) swept as **one** conductor: the retarded
+fill meshes each leg with its own direction, length and radius instead of
+collapsing the turns to one straight wire. The oracle for the low-frequency
+limit is the static series-path PEEC solve of
+[#2729](https://github.com/2AMLogic/klayout-tools/issues/2729) on the same
+request; the independent full-wave oracle is NEC2++ (see
+[`mom-cross-validation.md`](mom-cross-validation.md#bent-path-driving-point-mode)).
+PyPEEC is a *static* oracle and is not used for any full-wave number.
+
+| Check | Measured | Bound |
+|---|---|---|
+| `Im(Z)/ω` at 1 kHz (0.5 µm cells) vs static PEEC `L` (0.271445 nH) | 0.256567 nH, **5.48%** below | 7% |
+| …after the analytic self-term offset (+0.014894 nH) | **0.0058%** | 1% |
+| `Z` at 5 GHz, cells 4 → 2 → 1 → 0.5 µm | 8.7755 → 8.1426 → 8.0630 → 8.0603 `j` Ω | steps 0.633 → 0.0796 → 0.00265 strictly shrinking; last step < 0.5% of `|Z|` (0.033%) |
+| L-path vs sum of its two perpendicular legs (Rust) | equal to 1e-9 | exact structure |
+| U-path vs signed-leg reduction `Σ s_i s_j Z_ij` (Rust) | equal to 1e-9 | exact structure |
+| Mutual to a parallel bar vs signed-leg sum (Rust) | equal to 1e-9 | exact structure |
+
+**The 5.48% is a kernel convention, not discretisation error.** The retarded
+fill's reduced thin-wire kernel is a *surface-current* wire of the equal-area
+radius `a` (self term `ln(2l/a) − 1`); PEEC's filament bundle is the
+uniform-current square bar (`ln(2l/GMD) − 1`, `GMD = 0.44705 w`). Per leg the
+static value therefore exceeds the full-wave limit by
+`µ0/(2π) · l · ln(a/GMD)`; over the 320 µm of centreline that is 14.894 pH,
+and adding it closes the gap to 0.0058%. Inter-leg mutuals agree between the
+two solvers. The same offset is present for straight bars, so winding results should
+be read as thin-wire-kernel numbers: for static-accurate inductance use
+`compute_inductance`.
+
+**Cell size must resolve the wire.** The point-collocation self term
+overestimates by roughly `cell / a` until cells are comparable to the
+equivalent radius (4 µm cells on `a = 1.13 µm`: 8.9% off the converged value;
+1 µm: 0.033%). The default `segment_size_um` is therefore too coarse for a
+narrow winding; choose it near the trace width.
+
 ## What is *not* validated here
 
 - **Absolute accuracy of a general layout.** These are canonical fixtures
@@ -818,16 +856,18 @@ discussion frames the tradeoff for the capacitance solve.
   "The external PyPEEC comparison" above) — but it remains one for every
   other fixture in this document, which is checked against closed forms and
   in-repo re-implementations only.
-- **Multi-box-per-conductor PEEC/full-wave geometry.** Every conductor must
-  still reduce to exactly one bar-shaped box —
-  [#1841](https://github.com/2AMLogic/klayout-tools/issues/1841) (a separate,
-  still-open increment) is what would let a single electrical conductor span
-  several boxes (e.g. a coax shield's wall segments, or a real spiral
-  modeled as one continuous net rather than one conductor per segment, as
-  the spiral fixture above does). Ports, S-parameter de-embedding
-  ([#894](https://github.com/2AMLogic/klayout-tools/issues/894)), and
-  skin-effect (frequency-dependent resistance/capacitance) behavior remain
-  later phases of #701.
+- **Geometry beyond bar boxes and series-path windings.** Multi-box
+  conductors ([#1841](https://github.com/2AMLogic/klayout-tools/issues/1841))
+  and connected, non-branching windings (#2728-#2730) are supported.
+  Branching or coax-shield current distribution, curved polygons, and
+  closed loops are rejected, not validated.
+- **Winding terminals, ports and S-parameters.** A winding combined with
+  `ports` is rejected; no `Z0`/`gamma`/S-parameters are reported for
+  windings. Winding accuracy is limited to series `Z` (no shunt C or
+  self-resonance), cell size about the trace width, the documented 5.5%
+  thin-wire vs PEEC kernel offset, and `k*length` well below 1.
+- **Skin effect.** Frequency-dependent resistance/capacitance behavior
+  remains out of scope.
 
 ## See also
 
@@ -845,4 +885,5 @@ discussion frames the tradeoff for the capacitance solve.
   the full-wave frequency sweep (Phase 2a); [#894](https://github.com/2AMLogic/klayout-tools/issues/894)
   (port definition/de-embedding) and
   [#895](https://github.com/2AMLogic/klayout-tools/issues/895)
-  (cross-validation against an external solver) are its planned follow-ons.
+  (cross-validation against an external solver) are its delivered
+  follow-ons.

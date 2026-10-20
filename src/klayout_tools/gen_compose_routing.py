@@ -45,8 +45,9 @@ ring-gap-port check).
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, NamedTuple
 
+from ._unionfind import UnionFind
 from .decks import (
     ExtractionDeck,
     UnknownDeckError,
@@ -759,6 +760,34 @@ def _polyline_length_um(points: list[tuple[float, float]]) -> float:
     return total
 
 
+def _snap_jog_to_grid(value: float, lo: float, hi: float, grid_um: float) -> float:
+    """Snap a backbone jog coordinate onto ``grid_um`` (issue #3079).
+
+    Returns ``value`` unchanged (bit-identical) when ``grid_um <= 0`` or it is
+    already on the grid. Otherwise the nearest grid line is used, trying the
+    other neighbour when the nearest would cross a stub end -- i.e. flip which
+    side of ``[lo, hi]`` (the two stub-end coordinates) the jog sits on. When
+    neither neighbour keeps that relation (stubs closer than one grid step),
+    the unsnapped value is kept and the residual off-grid vertex is reported by
+    the caller's compose-time note.
+    """
+    if grid_um <= 0.0:
+        return value
+    ratio = value / grid_um
+    if abs(ratio - round(ratio)) < 1e-6:
+        return value
+    lo, hi = min(lo, hi), max(lo, hi)
+    floor_k = math.floor(ratio)
+    candidates = sorted((floor_k, floor_k + 1), key=lambda k: (abs(k - ratio), k))
+    for k in candidates:
+        snapped = k * grid_um
+        if (snapped >= lo - 1e-9) == (value >= lo - 1e-9) and (
+            snapped <= hi + 1e-9
+        ) == (value <= hi + 1e-9):
+            return snapped
+    return value
+
+
 def manhattan_backbone(
     a: tuple[float, float],
     dir_a_deg: int,
@@ -770,6 +799,7 @@ def manhattan_backbone(
     stub_b_um: float | None = None,
     waypoints: list[tuple[float, float]] | None = None,
     channel_offset_um: float = 0.0,
+    grid_um: float = 0.0,
 ) -> list[tuple[float, float]]:
     """Generate a two-pin Manhattan backbone from port ``a`` to port ``b``.
 
@@ -818,6 +848,16 @@ def manhattan_backbone(
     run against the resulting path and reject it exactly as they would any
     other backbone if it does not.
 
+    ``grid_um`` (#3079), when ``> 0``, snaps the derived jog coordinate
+    (``mx``/``my``, after ``channel_offset_um`` is added) onto the
+    manufacturing grid: the midpoint of two on-grid stub ends is half a grid
+    step off-grid whenever their sum is an odd multiple of the grid, which
+    ``klt drc`` reports as ``*.ongrid.1`` at every bend. The jog is a free
+    coordinate between the stubs, so the snap moves it by at most half a grid
+    step and never across a stub end (see :func:`_snap_jog_to_grid`).
+    Caller-supplied ``waypoints`` are used verbatim, never snapped. Default
+    ``0.0`` reproduces the unsnapped shape exactly.
+
     Returns the cleaned ordered ``(x, y)`` waypoint list (um). ``pya.Path``
     renders each interior corner as a square miter that fully fills the bend,
     so no separate bend-insertion pass is needed -- the corner *is* the bend.
@@ -851,9 +891,11 @@ def manhattan_backbone(
     mid: list[tuple[float, float]] = []
     if a_horizontal and b_horizontal:
         mx = (sa[0] + sb[0]) / 2.0 + channel_offset_um
+        mx = _snap_jog_to_grid(mx, sa[0], sb[0], grid_um)
         mid = [(mx, sa[1]), (mx, sb[1])]
     elif not a_horizontal and not b_horizontal:
         my = (sa[1] + sb[1]) / 2.0 + channel_offset_um
+        my = _snap_jog_to_grid(my, sa[1], sb[1], grid_um)
         mid = [(sa[0], my), (sb[0], my)]
     else:
         # One port faces x, the other y -> a single corner joins the stubs.
@@ -1976,8 +2018,10 @@ def _drawn_leg_footprint_region(
 
     region = _drawn_route_region(points_um, width_um, dbu)
 
-    landing_half_dbu = int(round((_VIA_LANDING_SIZE_UM / 2.0) / dbu))
     for drop in via_drops:
+        landing_half_dbu = int(
+            round((_VIA_LANDING_SIZE_UM + _drop_array_extra_um(drop)) / 2.0 / dbu)
+        )
         landing_layers = drop.get("landing_layers")
         if (
             route_layer is not None
@@ -2047,11 +2091,13 @@ def _drawn_leg_intermediate_pad_regions(
     if route_layer is None:
         return regions
 
-    landing_half_dbu = int(round((_VIA_LANDING_SIZE_UM / 2.0) / dbu))
     for drop in via_drops:
         landing_layers = drop.get("landing_layers")
         if not landing_layers:
             continue
+        landing_half_dbu = int(
+            round((_VIA_LANDING_SIZE_UM + _drop_array_extra_um(drop)) / 2.0 / dbu)
+        )
         cx = int(round(drop["x_um"] / dbu))
         cy = int(round(drop["y_um"] / dbu))
         box = kdb.Box(
@@ -2318,6 +2364,16 @@ def _unroutable(reason: str) -> dict[str, Any]:
     }
 
 
+def _zero_junction_stubs(
+    port_a: dict[str, Any], port_b: dict[str, Any], stub_a_um: float, stub_b_um: float
+) -> tuple[float, float]:
+    """Approach stubs with a plane-change junction's (#2930) zeroed."""
+    return (
+        0.0 if port_a.get("junction") else stub_a_um,
+        0.0 if port_b.get("junction") else stub_b_um,
+    )
+
+
 def route_two_pin(
     pin_a: dict[str, Any],
     pin_b: dict[str, Any],
@@ -2336,6 +2392,7 @@ def route_two_pin(
     block_geometry_for: Any = None,
     cross_block_geometry_for: Any = None,
     channel_offset_um: float = 0.0,
+    grid_um: float = 0.0,
 ) -> dict[str, Any]:
     """Route one two-pin net and report the result.
 
@@ -2941,6 +2998,10 @@ def route_two_pin(
             stub_a_um = max(stub_um, a[1] - jog_y)
             stub_b_um = max(stub_um, b[1] - jog_y)
 
+    # A plane-change junction (#2930) is a free point, not a block pad: its
+    # port has no approach stub, so the path meets it exactly at the waypoint.
+    stub_a_um, stub_b_um = _zero_junction_stubs(port_a, port_b, stub_a_um, stub_b_um)
+
     points = manhattan_backbone(
         a,
         dir_a,
@@ -2951,6 +3012,7 @@ def route_two_pin(
         stub_b_um=stub_b_um,
         waypoints=waypoints_um,
         channel_offset_um=channel_offset_um,
+        grid_um=grid_um,
     )
     margin_eps_um = 1e-6
 
@@ -3618,6 +3680,7 @@ def route_two_pin(
                 cross_block_width_um=cross_block_width_um,
                 block_geometry_for=block_geometry_for,
                 cross_block_geometry_for=cross_block_geometry_for,
+                grid_um=grid_um,
             )
             if retry["routed"]:
                 return retry
@@ -3712,12 +3775,14 @@ def route_two_pin(
                 # per entry, so a multi-level drop is just N single-level
                 # drops stacked at the identical (x, y).
                 for via_layer, metal_a, metal_b in ladder:
+                    drop_array = _drop_array(port, via_layer)
                     via_drops.append(
                         {
                             "x_um": pos[0],
                             "y_um": pos[1],
                             "via_layer": via_layer,
                             "landing_layers": (metal_a, metal_b),
+                            **({"array": drop_array} if drop_array else {}),
                             # block_id (#1520): which endpoint's own block
                             # this drop's landing pad lands on -- lets a
                             # caller-side conflict check (compose()'s own
@@ -3787,6 +3852,7 @@ def route_two_pin(
                 cross_block_width_um=cross_block_width_um,
                 block_geometry_for=block_geometry_for,
                 cross_block_geometry_for=cross_block_geometry_for,
+                grid_um=grid_um,
             )
             if not retry["routed"]:
                 continue
@@ -3848,6 +3914,7 @@ def route_two_pin(
                 block_geometry_for=block_geometry_for,
                 cross_block_geometry_for=cross_block_geometry_for,
                 channel_offset_um=direction_sign * pitch_um * track_index,
+                grid_um=grid_um,
             )
             if not retry["routed"]:
                 continue
@@ -3943,6 +4010,338 @@ def _pin_position_um(
     return (float(x_um) + offset["x"], float(y_um) + offset["y"])
 
 
+def _leg_conflict_reason(result: dict[str, Any], leg_conflict: Any) -> str | None:
+    """Why a :func:`route_two_pin` result cannot stand as a bundle leg, else ``None``.
+
+    The router's own rejection reason when it did not route; otherwise the
+    caller-supplied ``leg_conflict`` verdict on the drawn geometry (``None``
+    when there is no conflict hook).
+    """
+    if not result["routed"]:
+        return result["reason"]
+    if leg_conflict is None:
+        return None
+    return leg_conflict(
+        result["points_um"],
+        result.get("via_drops", []),
+        result.get("stub_widen", []),
+        result.get("route_layer"),
+    )
+
+
+def _changes_plane(leg_spec: dict[str, Any]) -> bool:
+    """Whether an explicit leg carries a plane-bearing waypoint (#2930)."""
+    return any(plane is not None for plane in leg_spec.get("waypoint_layers") or ())
+
+
+def _pin_failed_pair(
+    pinned_failed_pairs: set[frozenset[tuple[str, str]]],
+    pins: list[dict[str, Any]],
+    i: int,
+    j: int,
+) -> None:
+    """Block the pin pair of a rejected layer-pinned leg from automatic re-pickup."""
+    pinned_failed_pairs.add(
+        frozenset(
+            (
+                (pins[i]["block"], pins[i]["port"]),
+                (pins[j]["block"], pins[j]["port"]),
+            )
+        )
+    )
+
+
+def _segments_field(result: dict[str, Any]) -> dict[str, Any]:
+    """Per-plane drawing payloads of a plane-changing leg (#2930), if any."""
+    return {"segments": result["segments"]} if result.get("segments") else {}
+
+
+# Plane-bearing waypoints (#2930): a leg whose `waypoints_um` carries a
+# `[x, y, "layer_role"]` triple changes routing plane at that point. It is
+# split there into one same-plane segment per plane, each routed by the
+# ordinary `route_two_pin()` (so every routability check -- obstacles, rings,
+# own-block shorts, the via-drop resolution -- applies to each segment on the
+# plane it is drawn on) between two ends that are either a real pin or a
+# *junction*: a synthetic one-port, zero-area block placed at the waypoint
+# whose port sits on the plane the route continues on. The segment arriving at
+# a junction therefore drops to the junction's plane through the very same
+# #454/#1567 via ladder it would use to reach a block's pad, and the segment
+# leaving it starts on that plane with no drop -- no new via or pad geometry
+# exists. The result is one leg whose `segments` carry each plane's drawing
+# payload.
+
+
+class _PlaneChangeContext(NamedTuple):
+    """The ``route_bundle()`` state a plane-changing leg is routed against."""
+
+    pins: list[dict[str, Any]]
+    blocks: dict[str, dict[str, Any]]
+    offsets_um: dict[str, dict[str, float]]
+    placed_bboxes_um: dict[str, dict[str, float]]
+    route_layer: tuple[int, int] | None
+    extraction_deck: ExtractionDeck | None
+    block_geometry_for: Any
+    geometry_for_layer: Any
+    leg_conflict: Any
+    grid_um: float
+
+
+def _split_at_plane_changes(
+    waypoints: list[tuple[float, float]],
+    waypoint_layers: list[dict[str, Any] | None],
+    start_layer: tuple[int, int],
+    start_width_um: float,
+) -> list[dict[str, Any]]:
+    """Split a waypoint path into one same-plane segment per plane (#2930).
+
+    A segment carries its ``layer``, ``width_um`` and the plain ``waypoints``
+    that steer it, plus ``start_junction`` / ``end_junction`` (the index of the
+    plane-bearing waypoint it begins / ends at) where it does not begin / end
+    at a real pin. A waypoint naming the plane already in force changes
+    nothing.
+    """
+    segments: list[dict[str, Any]] = []
+    current: dict[str, Any] = {
+        "layer": start_layer,
+        "width_um": start_width_um,
+        "waypoints": [],
+    }
+    for k, waypoint in enumerate(waypoints):
+        plane = waypoint_layers[k]
+        if plane is None or plane["layer"] == current["layer"]:
+            current["waypoints"].append(waypoint)
+            continue
+        current["end_junction"] = k
+        segments.append(current)
+        current = {
+            "layer": plane["layer"],
+            "width_um": plane["width_um"],
+            "waypoints": [],
+            "start_junction": k,
+        }
+    segments.append(current)
+    return segments
+
+
+def _junction_scope(
+    ctx: _PlaneChangeContext,
+    waypoints: list[tuple[float, float]],
+    waypoint_layers: list[dict[str, Any] | None],
+    junction_ids: dict[int, str],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """``blocks`` / offsets / bboxes extended with one junction block per id."""
+    scoped_blocks = dict(ctx.blocks)
+    scoped_offsets = dict(ctx.offsets_um)
+    scoped_bboxes = dict(ctx.placed_bboxes_um)
+    for k, junction_id in junction_ids.items():
+        x, y = waypoints[k]
+        plane = waypoint_layers[k]
+        assert plane is not None  # junctions exist only at plane-bearing waypoints
+        plane_layer = plane["layer"]
+        scoped_blocks[junction_id] = {
+            "port_names": {"J"},
+            "ports": {
+                "J": {
+                    "x_um": 0.0,
+                    "y_um": 0.0,
+                    "direction_deg": 0,
+                    "layer": {"layer": plane_layer[0], "datatype": plane_layer[1]},
+                    "junction": True,
+                }
+            },
+        }
+        scoped_offsets[junction_id] = {"x": x, "y": y}
+        scoped_bboxes[junction_id] = {"x0": x, "y0": y, "x1": x, "y1": y}
+    return scoped_blocks, scoped_offsets, scoped_bboxes
+
+
+def _junction_aware_fetch(plane_fetch: Any, junction_blocks: set[str]) -> Any:
+    """Wrap a per-block geometry reader so a junction answers for itself.
+
+    A junction owns no drawn geometry: answer for it here instead of asking
+    compose()'s per-block reader, which only knows real blocks.
+    """
+    if plane_fetch is None:
+        return None
+
+    def _fetch(block_id: str) -> Any:
+        if block_id in junction_blocks:
+            return {block_id: None}
+        return plane_fetch(block_id)
+
+    return _fetch
+
+
+def _plane_segment_geometry(
+    ctx: _PlaneChangeContext,
+    fetch: Any,
+    seg_pins: tuple[dict[str, str], ...],
+    junction_blocks: set[str],
+    i: int,
+    j: int,
+) -> Any:
+    """Own-block geometry for a segment's real-pin ends (last such pin wins)."""
+    if fetch is None:
+        return None
+    geometry = None
+    for pin in seg_pins:
+        block = pin["block"]
+        if block in junction_blocks:
+            continue
+        if (
+            block == ctx.pins[i]["block"] == ctx.pins[j]["block"]
+            or ctx.blocks[block].get("source") == "cell"
+        ):
+            geometry = fetch(block)
+    return geometry
+
+
+def _null_junction_block_ids(result: dict[str, Any], junction_blocks: set[str]) -> None:
+    """Drops landing on a junction are not on any block's own geometry: null
+    the block id so compose()'s own-block pad check skips them."""
+    for key in ("via_drops", "stub_widen"):
+        for item in result.get(key, []):
+            if item.get("block_id") in junction_blocks:
+                item["block_id"] = None
+
+
+def _route_plane_segment(
+    ctx: _PlaneChangeContext,
+    scoped: tuple[dict[str, Any], dict[str, Any], dict[str, Any]],
+    seg: dict[str, Any],
+    ends: tuple[dict[str, str], dict[str, str]],
+    junction_blocks: set[str],
+    pin_indices: tuple[int, int],
+) -> tuple[dict[str, Any], str | None]:
+    """Route one same-plane segment; returns ``(route_two_pin result, reason)``."""
+    seg_a, seg_b = ends
+    plane_fetch = (
+        ctx.block_geometry_for
+        if seg["layer"] == ctx.route_layer or ctx.geometry_for_layer is None
+        else ctx.geometry_for_layer(seg["layer"])
+    )
+    fetch = _junction_aware_fetch(plane_fetch, junction_blocks)
+    scoped_blocks, scoped_offsets, scoped_bboxes = scoped
+    result = route_two_pin(
+        seg_a,
+        seg_b,
+        scoped_blocks,
+        scoped_offsets,
+        scoped_bboxes,
+        seg["width_um"],
+        seg["layer"],
+        ctx.extraction_deck,
+        _plane_segment_geometry(ctx, fetch, ends, junction_blocks, *pin_indices),
+        waypoints_um=seg["waypoints"],
+        leg_conflict=ctx.leg_conflict,
+        block_geometry_for=fetch,
+        grid_um=ctx.grid_um,
+    )
+    _null_junction_block_ids(result, junction_blocks)
+    return result, _leg_conflict_reason(result, ctx.leg_conflict)
+
+
+def _route_plane_change_leg(
+    ctx: _PlaneChangeContext,
+    i: int,
+    j: int,
+    leg_spec: dict[str, Any],
+    start_layer: tuple[int, int] | None,
+    start_width_um: float,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Route a leg split at its plane-bearing waypoints (#2930).
+
+    Returns ``(result, None)`` with ``result["segments"]`` carrying each
+    plane's drawing payload, or ``(None, reason)`` when the pinned leg cannot
+    be routed.
+    """
+    waypoints = list(leg_spec["waypoints_um"])
+    waypoint_layers = leg_spec["waypoint_layers"]
+    if start_layer is None or ctx.extraction_deck is None:
+        return None, (
+            "a plane-bearing waypoint needs a resolved routing layer and "
+            "PDK extraction deck to build the via ladder between planes"
+        )
+
+    segments = _split_at_plane_changes(
+        waypoints, waypoint_layers, start_layer, start_width_um
+    )
+    junction_ids = {
+        k: f"__plane_change_{k}__"
+        for seg in segments
+        for k in (seg.get("start_junction"), seg.get("end_junction"))
+        if k is not None
+    }
+    junction_blocks = set(junction_ids.values())
+    scoped = _junction_scope(ctx, waypoints, waypoint_layers, junction_ids)
+
+    drawn: list[dict[str, Any]] = []
+    total_um = 0.0
+    for seg in segments:
+        start_k, end_k = seg.get("start_junction"), seg.get("end_junction")
+        seg_a = (
+            {"block": junction_ids[start_k], "port": "J"}
+            if start_k is not None
+            else ctx.pins[i]
+        )
+        seg_b = (
+            {"block": junction_ids[end_k], "port": "J"}
+            if end_k is not None
+            else ctx.pins[j]
+        )
+        if not seg["waypoints"]:
+            # Always take the caller-steered path (#634) -- the fixed one-jog
+            # shape assumes two block ports facing each other, not a free
+            # junction. Anchoring on the junction gives a single deterministic
+            # elbow (x first, then y) from the pin's stub.
+            anchor_k = start_k if start_k is not None else end_k
+            assert anchor_k is not None  # a plane-changing leg has a junction
+            seg = {**seg, "waypoints": [waypoints[anchor_k]]}
+        result, reason = _route_plane_segment(
+            ctx, scoped, seg, (seg_a, seg_b), junction_blocks, (i, j)
+        )
+        if reason is not None:
+            return None, _plane_change_failure(reason, start_k, end_k, waypoints)
+        total_um += result["route_length_um"]
+        drawn.append(
+            {
+                "points_um": result["points_um"],
+                "via_drops": result.get("via_drops", []),
+                "stub_widen": result.get("stub_widen", []),
+                "route_layer": result.get("route_layer"),
+                "width_um": result.get("width_um", seg["width_um"]),
+            }
+        )
+
+    first = drawn[0]
+    return {
+        "routed": True,
+        "route_length_um": total_um,
+        "points_um": [pt for part in drawn for pt in part["points_um"]],
+        "via_drops": first["via_drops"],
+        "stub_widen": first["stub_widen"],
+        "route_layer": first["route_layer"],
+        "width_um": first["width_um"],
+        "channel_track": 0,
+        "segments": drawn,
+        "reason": None,
+    }, None
+
+
+def _plane_change_failure(
+    reason: str,
+    start_k: int | None,
+    end_k: int | None,
+    waypoints: list[tuple[float, float]],
+) -> str:
+    """Prefix a segment's rejection reason with the plane change it ended at."""
+    at = end_k if end_k is not None else start_k
+    if at is None:
+        return reason
+    x, y = waypoints[at]
+    return f"plane change at waypoints_um[{at}] ({x:g}, {y:g}): {reason}"
+
+
 def route_bundle(
     pins: list[dict[str, Any]],
     blocks: dict[str, dict[str, Any]],
@@ -3959,6 +4358,7 @@ def route_bundle(
     cross_block_width_um: float | None = None,
     explicit_legs: list[dict[str, Any]] | None = None,
     geometry_for_layer: Any = None,
+    grid_um: float = 0.0,
 ) -> dict[str, Any]:
     """Route one ``connectivity[]`` net of *any* pin count (issue #1073).
 
@@ -4221,20 +4621,7 @@ def route_bundle(
         )
 
     pin_count = len(pins)
-    parent = list(range(pin_count))
-
-    def _find(index: int) -> int:
-        while parent[index] != index:
-            parent[index] = parent[parent[index]]
-            index = parent[index]
-        return index
-
-    def _union(left: int, right: int) -> bool:
-        root_left, root_right = _find(left), _find(right)
-        if root_left == root_right:
-            return False
-        parent[max(root_left, root_right)] = min(root_left, root_right)
-        return True
+    uf = UnionFind(range(pin_count), min_root=True)
 
     components = pin_count
 
@@ -4245,7 +4632,7 @@ def route_bundle(
     for index, pin in enumerate(pins):
         key = (pin["block"], pin["port"])
         if key in first_seen:
-            if _union(first_seen[key], index):
+            if uf.union(first_seen[key], index):
                 components -= 1
         else:
             first_seen[key] = index
@@ -4343,6 +4730,7 @@ def route_bundle(
             waypoints_um=leg_waypoints_um,
             leg_conflict=leg_conflict,
             block_geometry_for=cross_block_geometry_for,
+            grid_um=grid_um,
         )
         if not retry["routed"]:
             return None
@@ -4364,6 +4752,18 @@ def route_bundle(
     # The automatic candidate loop below skips them: see the explicit-legs
     # loop's own comment for why.
     pinned_failed_pairs: set[frozenset[tuple[str, str]]] = set()
+    plane_change_ctx = _PlaneChangeContext(
+        pins=pins,
+        blocks=blocks,
+        offsets_um=offsets_um,
+        placed_bboxes_um=placed_bboxes_um,
+        route_layer=route_layer,
+        extraction_deck=extraction_deck,
+        block_geometry_for=block_geometry_for,
+        geometry_for_layer=geometry_for_layer,
+        leg_conflict=leg_conflict,
+        grid_um=grid_um,
+    )
 
     # Explicit legs (#1529): caller-steered pin pairs, routed and seeded into
     # the spanning tree *before* the automatic nearest-first search below.
@@ -4403,7 +4803,22 @@ def route_bundle(
         leg_width_um = leg_spec.get("width_um")
         leg_effective_width_um = width_um if leg_width_um is None else leg_width_um
         geometry, cross_geometry = _leg_geometry(i, j)
-        if leg_route_layer is not None:
+        if _changes_plane(leg_spec):
+            # Plane-bearing waypoints (#2930): pinned to its named planes
+            # like any layer-pinned leg -- no cross-block retry, no automatic
+            # re-pickup of the pin pair if a segment is rejected.
+            result, reason = _route_plane_change_leg(
+                plane_change_ctx,
+                i,
+                j,
+                leg_spec,
+                leg_route_layer if leg_route_layer is not None else route_layer,
+                leg_effective_width_um,
+            )
+            if result is None:
+                result = {"routed": False}
+                _pin_failed_pair(pinned_failed_pairs, pins, i, j)
+        elif leg_route_layer is not None:
             override_layer = leg_route_layer
             override_geometry = (
                 geometry
@@ -4434,15 +4849,9 @@ def route_bundle(
                 waypoints_um=leg_spec.get("waypoints_um"),
                 leg_conflict=leg_conflict,
                 block_geometry_for=override_geometry_for,
+                grid_um=grid_um,
             )
-            reason = None if result["routed"] else result["reason"]
-            if result["routed"] and leg_conflict is not None:
-                reason = leg_conflict(
-                    result["points_um"],
-                    result.get("via_drops", []),
-                    result.get("stub_widen", []),
-                    result.get("route_layer"),
-                )
+            reason = _leg_conflict_reason(result, leg_conflict)
             if reason is not None or not result["routed"]:
                 # "Explicit wins, no retry" is only a real guarantee if the
                 # automatic candidate loop below cannot quietly reconnect the
@@ -4477,27 +4886,23 @@ def route_bundle(
                 leg_conflict=leg_conflict,
                 block_geometry_for=block_geometry_for,
                 cross_block_geometry_for=cross_block_geometry_for,
+                grid_um=grid_um,
             )
-            reason = None if result["routed"] else result["reason"]
-            if result["routed"] and leg_conflict is not None:
-                reason = leg_conflict(
-                    result["points_um"],
-                    result.get("via_drops", []),
-                    result.get("stub_widen", []),
-                    result.get("route_layer"),
+            reason = _leg_conflict_reason(result, leg_conflict)
+            if (
+                result["routed"]
+                and leg_conflict is not None
+                and reason is not None
+                and result.get("route_layer") != cross_block_route_layer
+            ):
+                retry = _retry_leg_on_cross_layer(
+                    i, j, cross_geometry, leg_spec.get("waypoints_um")
                 )
-                if (
-                    reason is not None
-                    and result.get("route_layer") != cross_block_route_layer
-                ):
-                    retry = _retry_leg_on_cross_layer(
-                        i, j, cross_geometry, leg_spec.get("waypoints_um")
-                    )
-                    if retry is not None:
-                        result = retry
-                        reason = None
+                if retry is not None:
+                    result = retry
+                    reason = None
         if reason is None and result["routed"]:
-            if _union(i, j):
+            if uf.union(i, j):
                 components -= 1
             total_length_um += result["route_length_um"]
             legs.append(
@@ -4514,6 +4919,7 @@ def route_bundle(
                     "route_layer": result.get("route_layer"),
                     "width_um": result.get("width_um", width_um),
                     "channel_track": result.get("channel_track", 0),
+                    **_segments_field(result),
                 }
             )
         else:
@@ -4534,7 +4940,7 @@ def route_bundle(
     for i, j in candidates:
         if components == 1:
             break
-        if _find(i) == _find(j):
+        if uf.find(i) == uf.find(j):
             continue  # already connected through other legs -- no leg needed
         if (
             frozenset(
@@ -4571,6 +4977,7 @@ def route_bundle(
             leg_conflict=leg_conflict,
             block_geometry_for=block_geometry_for,
             cross_block_geometry_for=cross_block_geometry_for,
+            grid_um=grid_um,
         )
         reason = None if result["routed"] else result["reason"]
         if result["routed"] and leg_conflict is not None:
@@ -4590,7 +4997,7 @@ def route_bundle(
                     reason = None
 
         if reason is None and result["routed"]:
-            _union(i, j)
+            uf.union(i, j)
             components -= 1
             total_length_um += result["route_length_um"]
             legs.append(
@@ -4645,7 +5052,7 @@ def route_bundle(
     # --- Unroutable: report which pins were stranded and why ----------------
     groups: dict[int, list[int]] = {}
     for index in range(pin_count):
-        groups.setdefault(_find(index), []).append(index)
+        groups.setdefault(uf.find(index), []).append(index)
     # The largest component is "the net"; every pin outside it is stranded.
     main_root = max(groups, key=lambda root: (len(groups[root]), -root))
     stranded = sorted(
@@ -4734,27 +5141,14 @@ def _declare_only_bundle_result(pins: list[dict[str, Any]]) -> dict[str, Any]:
     byte-reproducible leg list run to run.
     """
     pin_count = len(pins)
-    parent = list(range(pin_count))
-
-    def _find(index: int) -> int:
-        while parent[index] != index:
-            parent[index] = parent[parent[index]]
-            index = parent[index]
-        return index
-
-    def _union(left: int, right: int) -> bool:
-        root_left, root_right = _find(left), _find(right)
-        if root_left == root_right:
-            return False
-        parent[max(root_left, root_right)] = min(root_left, root_right)
-        return True
+    uf = UnionFind(range(pin_count), min_root=True)
 
     components = pin_count
     first_seen: dict[tuple[str, str], int] = {}
     for index, pin in enumerate(pins):
         key = (pin["block"], pin["port"])
         if key in first_seen:
-            if _union(first_seen[key], index):
+            if uf.union(first_seen[key], index):
                 components -= 1
         else:
             first_seen[key] = index
@@ -4766,9 +5160,9 @@ def _declare_only_bundle_result(pins: list[dict[str, Any]]) -> dict[str, Any]:
         for j in range(i + 1, pin_count):
             if components == 1:
                 break
-            if _find(i) == _find(j):
+            if uf.find(i) == uf.find(j):
                 continue
-            _union(i, j)
+            uf.union(i, j)
             components -= 1
             legs.append(
                 {
@@ -4789,3 +5183,27 @@ def _declare_only_bundle_result(pins: list[dict[str, Any]]) -> dict[str, Any]:
         "reason": _DECLARE_ONLY_REASON,
         "status": "unrouted",
     }
+
+
+def _drop_array(
+    port: dict[str, Any], via_layer: tuple[int, int]
+) -> dict[str, Any] | None:
+    """The ``{"rows", "cols", "pitch_um"}`` cut array a port asks for on
+    ``via_layer`` (a label-derived port with ``access.via_array``, #2927), or
+    ``None`` for the ordinary single-cut drop."""
+    spec = port.get("via_array")
+    if not isinstance(spec, dict):
+        return None
+    pitch = (spec.get("pitch_um") or {}).get(f"{via_layer[0]}/{via_layer[1]}")
+    if pitch is None:
+        return None
+    return {"rows": spec["rows"], "cols": spec["cols"], "pitch_um": pitch}
+
+
+def _drop_array_extra_um(drop: dict[str, Any]) -> float:
+    """Extra side length (um) a drop's cut array adds to its landing pad over
+    the single-cut pad: ``(max(rows, cols) - 1) * pitch``; ``0.0`` without one."""
+    array = drop.get("array")
+    if not array:
+        return 0.0
+    return (max(array["rows"], array["cols"]) - 1) * array["pitch_um"]
