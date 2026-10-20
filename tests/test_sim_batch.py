@@ -7075,6 +7075,158 @@ def test_resume_submits_only_the_shard_whose_job_is_gone(tmp_path, monkeypatch):
     assert rewritten["shards"][1]["job_id"] != gone
 
 
+_SET_MEASUREMENT = {
+    "name": "vout",
+    "expr": "v(out)",
+    "unit": "V",
+    "limits": {"min": 0.0},
+}
+
+
+def _graded_report_document(document: dict) -> dict:
+    """Rename a fixture report's corners to the request's real ids
+    (`default/1.800V/<T>C`, which resume keys its checkpoint on, not the
+    fixture's `tt_1.800_<T>`) and give each a passing, limit-checked `vout`, so
+    a set entry grades `pass` rather than `not_checked` (nothing measured)."""
+    for corner in document["corners"]:
+        temperature = re.search(r"(\d+)C?$", corner["corner_id"]).group(1)
+        corner["corner_id"] = f"default/1.800V/{temperature}C"
+        corner["measurements"] = [
+            {"name": "vout", "value": 1.0, "unit": "V", "status": "pass", "margin": 1.0}
+        ]
+    return document
+
+
+def _grade_shard_reports(runner, monkeypatch, *, fail_upload: int | None = None):
+    """Wrap the shard-fixture transport so every shard report is graded
+    (`_graded_report_document`), and the `fail_upload`-th shard job uploaded
+    (0-based) ends `failed` -- the run leaves its shard map behind, as an
+    interrupted one does."""
+    inner = sb._run_subprocess
+    uploads: list[str] = []
+
+    def graded(argv, timeout_s):
+        if "inputs/request.json" in " ".join(argv):
+            destination = argv[argv.index("cp") + 2]
+            uploads.append(job_id_of(destination))
+            if fail_upload is not None and len(uploads) == fail_upload + 1:
+                runner.queue(
+                    f"{uploads[-1]}/status.json",
+                    fake_completed(_status("failed", exit_code="1")),
+                )
+        result = inner(argv, timeout_s)
+        for files in runner.outputs_by_job.values():
+            files["report.json"] = json.dumps(
+                _graded_report_document(json.loads(files["report.json"]))
+            )
+        return result
+
+    monkeypatch.setattr(sb, "_run_subprocess", graded)
+
+
+def _sharded_set_request(tmp_path: Path, name: str, **overrides) -> str:
+    """A 4-unit, 2-host batch request file (units differ by temperature, so
+    the fixture's per-shard reports line up with the real corner ids)."""
+    request = _batch_request(
+        tmp_path,
+        corners={"supply_v": {"vdd": [1.8]}, "temperature_c": [0, 1, 2, 3]},
+        measurements=[_SET_MEASUREMENT],
+        remote={"hosts": 2},
+        **overrides,
+    )
+    path = tmp_path / name
+    path.write_text(json.dumps(request))
+    return str(path)
+
+
+def test_sim_set_resume_reattaches_finished_shards_and_resubmits_the_missing_one(
+    tmp_path, monkeypatch
+):
+    from klayout_tools import sim_set
+
+    runner, _, _ = _shard_resume_fixture(tmp_path, monkeypatch)
+    _grade_shard_reports(runner, monkeypatch, fail_upload=1)
+    _write_body(tmp_path)
+    paths = [_sharded_set_request(tmp_path, "req0.json")]
+    outdir = str(tmp_path / "out")
+
+    first = sim_set.run_sim_set(paths, outdir=outdir)
+    assert [entry["status"] for entry in first["requests"]] == ["error"]
+    manifest_path = tmp_path / "out" / "req0" / sb.BATCH_SHARDS_FILENAME
+    assert manifest_path.exists()  # one shard never completed: map retained
+    launches_before = len(_launches(runner))
+    assert launches_before == 2
+
+    # The failed job is still failed on the fleet when the set is re-run.
+    failed = json.loads(manifest_path.read_text())["shards"][1]["job_id"]
+    runner.queue(
+        f"{failed}/status.json", fake_completed(_status("failed", exit_code="1"))
+    )
+    resumed = sim_set.run_sim_set(paths, outdir=outdir, resume=True)
+
+    assert len(_launches(runner)) == launches_before + 1
+    entry = resumed["requests"][0]
+    assert entry["status"] == "pass"
+    assert resumed["status"] == "pass"
+    report = json.loads(Path(entry["report"]).read_text())
+    fleet = report["environment"]["remote"]["fleet"]
+    assert [shard["resumed"] for shard in fleet] == [True, False]
+    assert not manifest_path.exists()  # swept clean: nothing left to re-attach
+
+
+def test_sim_set_resume_error_entry_does_not_sink_a_resuming_sibling(
+    tmp_path, monkeypatch
+):
+    """Under ``--batch-set --resume`` the only per-request resume refusal on the
+    batch backend is a shard map that belongs to another request; a non-sharded
+    sibling resumes (here: runs fresh) and completes. One entry's error is an
+    ordinary ``error`` entry and the set is ``error``, never an exception."""
+    from klayout_tools import sim_set
+
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {
+        "report.json": json.dumps(
+            _graded_report_document(
+                json.loads(_sim_report(corner_ids=("tt_1.800_0", "tt_1.800_1")))
+            )
+        )
+    }
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    _write_body(tmp_path)
+    sharded = _sharded_set_request(tmp_path, "req0.json")
+    single = tmp_path / "req1.json"
+    single.write_text(
+        json.dumps(
+            _batch_request(
+                tmp_path,
+                corners={"supply_v": {"vdd": [1.8]}, "temperature_c": [0, 1]},
+                measurements=[_SET_MEASUREMENT],
+            )
+        )
+    )
+    outdir = tmp_path / "out"
+    foreign_map = outdir / "req0" / sb.BATCH_SHARDS_FILENAME
+    foreign_map.parent.mkdir(parents=True)
+    foreign_map.write_text(
+        json.dumps({"schema_version": 1, "fingerprint": "someone-else", "hosts": 2})
+    )
+
+    report = sim_set.run_sim_set(
+        [sharded, str(single)], outdir=str(outdir), resume=True
+    )
+
+    refused, sibling = report["requests"]
+    assert refused["status"] == "error"
+    assert refused["report"] is None
+    assert refused["error"]["code"] == sb.BATCH_SHARD_MANIFEST_CODE
+    assert refused["error"]["message"]
+    assert sibling["status"] == "pass"
+    assert sibling["error"] is None
+    assert report["status"] == "error"
+    assert len(_launches(runner)) == 1  # only the sibling reached the fleet
+
+
 def test_resume_resubmits_a_shard_whose_job_terminally_failed(tmp_path, monkeypatch):
     runner, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
     fleet()

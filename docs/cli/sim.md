@@ -1087,8 +1087,12 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   the same set with the same `-o`: a sharded request re-attaches to the shard
   jobs recorded in its `batch-shards.json` (`fleet[].resumed: true`) and
   resubmits only the shards it cannot collect; a request with no prior
-  directory runs fresh. A deck-list or non-sharded request that cannot resume
-  becomes an ordinary `error` entry, as it does for a single request. A shard
+  directory runs fresh. A non-sharded or deck-list request resumes through its
+  own checkpoint (the set always runs on `batch`, which supports `--resume`
+  for both). A request whose resume is refused -- a shard map written for a
+  different request or hosts count (`resume_fingerprint_mismatch`), or an
+  unreadable one -- becomes an ordinary `error` entry, as it does for a single
+  request, and its siblings still run. A shard
   still `interrupted` is re-polled first, so resuming it can wait up to another
   `batch.interrupted_grace_s` (default 1800 s) before its replacement is
   submitted. The aggregate envelope is unchanged.
