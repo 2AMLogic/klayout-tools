@@ -4,11 +4,11 @@ import hashlib
 import json
 
 import pytest
-from tests.test_gen_compose import _gen_block, _make_install
 
 from klayout_tools import extract, pdk
 from klayout_tools.cli import main
 from klayout_tools.gen_compose import GenComposeError, compose
+from test_gen_compose import _gen_block, _make_install
 
 
 @pytest.fixture(autouse=True)
