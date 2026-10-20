@@ -66,7 +66,7 @@ Addresses acceptance criterion 1.
 | --- | --- | --- |
 | SPICE → flat device/net digest | `src/klayout_tools/netlist_digest.py` (Phase A) | Library only, no verb |
 | Declarative plan contract + validator | `src/klayout_tools/layout_plan.py`, `docs/cli/layout-plan.md` (Phase B) | `klt.layout_plan.request/1` |
-| Plan execution onto `klt gen` + `klt gen-compose` | `src/klayout_tools/layout_plan_execute.py`, `docs/cli/layout-plan-execute.md` (Phase C) | Library only; the doc states "There is no `klt layout-plan execute` verb" |
+| Plan execution onto `klt gen` + `klt gen-compose` | `src/klayout_tools/layout_plan_execute.py`, `docs/cli/layout-plan-execute.md` (Phase C) | Library plus `klt layout-plan execute` shell verb (#3970) |
 | N-pin (bundle) routing | `gen_compose.route_bundle` (#1073, Phase D) | Spanning tree of two-pin legs, each through `route_two_pin`'s checks |
 | Channel track assignment | `docs/design/gen-compose-track-assignment.md` (#1467) | Reactive per-channel y-offset retry on one layer |
 | Waypoint / A\* steering for a leg | `docs/cli/gen-compose.md` | Bounded; "not a general obstacle-avoiding router" |
@@ -91,7 +91,7 @@ horizontal pitch. What that needs and the current path does not do:
 | **G3. Fixed-pitch grid routing with static obstacles** whose pitch makes "different nets on different nodes" legal by construction | `gen-compose` routing is a fixed one-jog backbone plus bounded retry/A\*; it rejects or reports obstacle conflicts rather than planning on a rules-derived grid | Engine capability |
 | **G4. Ports at caller-set x** (off-grid), joined to the grid by a jog | `gen-compose` takes port coordinates from the block's own report; there is no "pin at x" request on the compose path. #3885 solved the analogous problem for the OpenROAD digital flow only | Mostly contract/ergonomics |
 | **G5. Deterministic byte-identical output** | Already a stated guarantee of the existing generators | Not a gap |
-| **G6. A shell verb for plan execution** | Library only today | **CLI ergonomics**, not engine |
+| **G6. A shell verb for plan execution** | Library plus `klt layout-plan execute` (#3970) | **CLI ergonomics**, not engine |
 
 **Distinguishing ergonomics from engine.** G6 and most of G4 are ergonomics: the
 logic exists or is a small extension, and the missing piece is a verb or a

@@ -36,6 +36,7 @@ from . import (
     keepout_check_cmd,
     layers_cmd,
     layout_metrics_cmd,
+    layout_plan_cmd,
     lef_abstract_cmd,
     lvs_cmd,
     mcp_cmd,
@@ -309,6 +310,8 @@ def create_parser() -> argparse.ArgumentParser:
     _add_gen_parser(subparsers)
 
     _add_gen_compose_parser(subparsers)
+
+    _add_layout_plan_parser(subparsers)
 
     _add_draw_parser(subparsers)
 
@@ -4482,6 +4485,44 @@ def _add_flow_verify_args(
             f"{docs}). Requires --check; a clean error (exit 1) otherwise"
         ),
     )
+
+
+def _add_layout_plan_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``layout-plan`` verb with a nested ``execute`` subcommand,
+    mirroring ``wave``'s grouped-verb pattern (see ``_add_wave_parser``).
+
+    A shell wrapper over ``layout_plan_execute.execute_layout_plan_document``;
+    see docs/cli/layout-plan-execute.md.
+    """
+    layout_plan_parser = subparsers.add_parser(
+        "layout-plan",
+        help="execute a netlist-driven klt.layout_plan.request/1 document",
+        description=(
+            "Execute a validated `klt.layout_plan.request/1` document onto "
+            "`klt gen` + `klt gen-compose`, producing a generated/placed/"
+            "routed GDS. Takes a request-document path. See "
+            "docs/cli/layout-plan-execute.md."
+        ),
+    )
+    layout_plan_sub = layout_plan_parser.add_subparsers(
+        dest="layout_plan_command", metavar="<subcommand>"
+    )
+    layout_plan_parser.set_defaults(func=_no_subcommand_handler(layout_plan_parser))
+
+    execute_parser = layout_plan_sub.add_parser(
+        "execute",
+        help="execute a layout-plan request into a composed GDS",
+        description=(
+            "Run a klt.layout_plan.request/1 document: resolve per-group "
+            "params from the netlist, place, route and write the GDS. Exit "
+            "3 when placed but some nets are unrouted or unmapped."
+        ),
+    )
+    execute_parser.add_argument(
+        "request", help="path to a klt.layout_plan.request/1 JSON file"
+    )
+    _add_format_arg(execute_parser)
+    execute_parser.set_defaults(func=layout_plan_cmd.run_execute)
 
 
 def _add_wave_parser(subparsers: argparse._SubParsersAction) -> None:
