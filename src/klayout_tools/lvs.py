@@ -2771,7 +2771,7 @@ def _validate_portable_paths(value: Any) -> bool:
 
 
 def _run_runset_response(
-    request: str, request_dir: str, portable_paths: bool
+    request: dict[str, Any], request_dir: str, portable_paths: bool
 ) -> dict[str, Any]:
     """Run the ``klayout-runset`` engine and finish its response.
 
