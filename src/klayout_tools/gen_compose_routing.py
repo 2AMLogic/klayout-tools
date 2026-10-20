@@ -2864,6 +2864,60 @@ def _channel_width_reason(
     return None
 
 
+def _recessed_stub_lengths_um(
+    pin_a: dict[str, Any],
+    pin_b: dict[str, Any],
+    *,
+    block_a: dict[str, Any],
+    block_b: dict[str, Any],
+    placed_bboxes_um: dict[str, dict[str, float]],
+    a: tuple[float, float],
+    b: tuple[float, float],
+    dir_a: int,
+    dir_b: int,
+    va: tuple[int, int],
+    stub_um: float,
+    waypoints_um: list[tuple[float, float]] | None,
+) -> tuple[float, float]:
+    """Per-endpoint approach-stub lengths, lifted for recessed ports (#461).
+
+    A gate landing pad now sits *above* its own gate port, so a port facing
+    +y no longer sits on its block's top edge -- it is inset by the pad's own
+    height. Two such ports bussed across a row connect through a horizontal
+    jog; left at the default one-width stub that jog runs at pad height,
+    straight through both blocks' poly. Lift each stub so the jog clears both
+    blocks' tops (or bottoms, for -y). Scoped to ring-free blocks: a ringed
+    block routes through its declared gap at port level, never over its own
+    top. For the pre-#461 geometry (gate port exactly on the block edge) this
+    reduces to the default stub, so no existing route changes. Skipped
+    entirely when the caller supplies ``waypoints_um`` (#634): the automatic
+    jog this lift exists to clear is not drawn at all in that case
+    (:func:`manhattan_backbone` routes through the caller's own points
+    instead), so stretching the stub here would just move the endpoint the
+    caller's waypoints are relative to, out from under them.
+    """
+    stub_a_um = stub_b_um = stub_um
+    if (
+        waypoints_um is None
+        and pin_a["block"] != pin_b["block"]
+        and dir_a == dir_b
+        and va[0] == 0
+        and not _block_has_ring_taps(block_a)
+        and not _block_has_ring_taps(block_b)
+    ):
+        bbox_a = placed_bboxes_um[pin_a["block"]]
+        bbox_b = placed_bboxes_um[pin_b["block"]]
+        if dir_a == 90:
+            jog_y = max(bbox_a["y1"], bbox_b["y1"]) + stub_um
+            stub_a_um = max(stub_um, jog_y - a[1])
+            stub_b_um = max(stub_um, jog_y - b[1])
+        else:  # dir 270
+            jog_y = min(bbox_a["y0"], bbox_b["y0"]) - stub_um
+            stub_a_um = max(stub_um, a[1] - jog_y)
+            stub_b_um = max(stub_um, b[1] - jog_y)
+    return stub_a_um, stub_b_um
+
+
 def route_two_pin(
     pin_a: dict[str, Any],
     pin_b: dict[str, Any],
@@ -3395,40 +3449,22 @@ def route_two_pin(
     if channel_reason is not None:
         return _unroutable(channel_reason)
 
-    # Recessed same-direction vertical ports (#461): a gate landing pad now
-    # sits *above* its own gate port, so a port facing +y no longer sits on
-    # its block's top edge -- it is inset by the pad's own height. Two such
-    # ports bussed across a row connect through a horizontal jog; left at the
-    # default one-width stub that jog runs at pad height, straight through
-    # both blocks' poly. Lift each stub so the jog clears both blocks' tops
-    # (or bottoms, for -y). Scoped to ring-free blocks: a ringed block routes
-    # through its declared gap at port level, never over its own top. For the
-    # pre-#461 geometry (gate port exactly on the block edge) this reduces to
-    # the default stub, so no existing route changes. Skipped entirely when
-    # the caller supplies waypoints_um (#634): the automatic jog this lift
-    # exists to clear is not drawn at all in that case (manhattan_backbone
-    # routes through the caller's own points instead), so stretching the
-    # stub here would just move the endpoint the caller's waypoints are
-    # relative to, out from under them.
-    stub_a_um = stub_b_um = stub_um
-    if (
-        waypoints_um is None
-        and pin_a["block"] != pin_b["block"]
-        and dir_a == dir_b
-        and va[0] == 0
-        and not _block_has_ring_taps(block_a)
-        and not _block_has_ring_taps(block_b)
-    ):
-        bbox_a = placed_bboxes_um[pin_a["block"]]
-        bbox_b = placed_bboxes_um[pin_b["block"]]
-        if dir_a == 90:
-            jog_y = max(bbox_a["y1"], bbox_b["y1"]) + stub_um
-            stub_a_um = max(stub_um, jog_y - a[1])
-            stub_b_um = max(stub_um, jog_y - b[1])
-        else:  # dir 270
-            jog_y = min(bbox_a["y0"], bbox_b["y0"]) - stub_um
-            stub_a_um = max(stub_um, a[1] - jog_y)
-            stub_b_um = max(stub_um, b[1] - jog_y)
+    # Recessed same-direction vertical ports (#461): see
+    # _recessed_stub_lengths_um.
+    stub_a_um, stub_b_um = _recessed_stub_lengths_um(
+        pin_a,
+        pin_b,
+        block_a=block_a,
+        block_b=block_b,
+        placed_bboxes_um=placed_bboxes_um,
+        a=a,
+        b=b,
+        dir_a=dir_a,
+        dir_b=dir_b,
+        va=va,
+        stub_um=stub_um,
+        waypoints_um=waypoints_um,
+    )
 
     # A plane-change junction (#2930) is a free point, not a block pad: its
     # port has no approach stub, so the path meets it exactly at the waypoint.
