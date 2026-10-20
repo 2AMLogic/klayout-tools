@@ -204,6 +204,13 @@ Let `X.Y.Z` be the new version.
    `tests/test_deck_history.py::test_checked_in_history_table_covers_every_release`
    on the next `main` checkout.
 
+**Changelog convention for deck changes.** Any `CHANGELOG.md` entry that
+alters a built-in deck's content hash (rules added, removed or adjusted in
+`sky130`, `gf180mcu`, `sg13g2`, ...) must include the literal phrase
+`deck hash changes`, so consumers pinning `provenance.deck.content_hash` can
+search for it. Hashes are stable only per package version; see
+`docs/cli/deck.md` "Reproducing a run under a pinned deck".
+
 ## Verifying a release
 
 - Watch the run under the repo's **Actions** tab (`Publish to PyPI` workflow).

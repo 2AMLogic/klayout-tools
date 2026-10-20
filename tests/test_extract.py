@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import dataclasses
 import difflib
+import hashlib
 import io
 import json
 import os
@@ -26839,6 +26840,206 @@ def test_cli_resistance_graph_json(tmp_path, capsys):
     out = json.loads(capsys.readouterr().out)
     assert out["parasitics"]["nets"][0]["resistance_graph"]["status"] == "ok"
     code = main(["extract", path, "--deck", "sky130", "--resistance-graph"])
+    assert code != 0
+
+
+# ---------------------------------------------------------------------------
+# Scalar selection from the resistance graph (issue #2983, final increment of
+# #2458). `resistance_ohm` is never replaced; the graph value is reported in the
+# additive `selected_resistance_ohm` with `resistance_source` provenance.
+# ---------------------------------------------------------------------------
+
+_STRAP_FIXTURES = Path(__file__).parent / "fixtures" / "resistance_graph_strap"
+_MET1_RS_OHM_SQ = 0.125  # sky130 PARASITICS met1 sheet resistance
+
+
+def _strap_fixture(name: str) -> str:
+    """Path of a committed strap GDS, after checking it against the manifest."""
+    manifest = json.loads((_STRAP_FIXTURES / "manifest.json").read_text())
+    path = _STRAP_FIXTURES / f"{name}.gds"
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    assert digest == manifest["files"][path.name]["sha256"]
+    return str(path)
+
+
+def _selected(path, tmp_path, r_cut):
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "sel.spice"),
+        parasitics=True,
+        resistance_graph=True,
+        resistance_graph_r_cut_ohm=r_cut,
+    )
+    (entry,) = report["parasitics"]["nets"]
+    return entry, entry["resistance_graph"]
+
+
+def _make_two_level_series_layout() -> kdb.Layout:
+    """F5: li1 0..4 um, met1 2..4 um, one mcon landing at their shared end
+    edge, terminals at the li1 far end (licon1) and the met1 far end (via)."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(67, 20)).insert(kdb.Box(0, 0, 4000, 170))
+    top.shapes(layout.layer(68, 20)).insert(kdb.Box(2000, 0, 4000, 170))
+    top.shapes(layout.layer(67, 5)).insert(kdb.Text("S", kdb.Trans(1000, 85)))
+    top.shapes(layout.layer(66, 44)).insert(kdb.Box(0, 0, 170, 170))
+    top.shapes(layout.layer(67, 44)).insert(kdb.Box(3830, 0, 4000, 170))
+    top.shapes(layout.layer(68, 44)).insert(kdb.Box(2000, 0, 2170, 170))
+    return layout
+
+
+def test_selected_resistance_graph_value_for_a_two_terminal_net(tmp_path):
+    entry, graph = _selected(_strap_fixture("single_level"), tmp_path, None)
+    expected = _LI1_RS_OHM_SQ * 5000 / 170
+    assert graph["resistance_source"] == "graph"
+    assert graph["resistance_source_reason"] == "two_terminal_graph"
+    assert graph["selected_resistance_ohm"] == pytest.approx(expected, rel=1e-6)
+    assert graph["selected_resistance_ohm"] == graph["pair_resistance_ohm"][0][1]
+    assert entry["resistance_ohm"] == graph["legacy_resistance_ohm"]
+
+
+def test_selection_without_r_cut_falls_back_to_legacy_never_an_ideal_via(tmp_path):
+    """The shipped decks give no per-cut resistance and no value is assumed:
+    a cross-level net keeps the legacy scalar and says why."""
+    entry, graph = _selected(_strap_fixture("strapped"), tmp_path, None)
+    assert graph["status"] == "unsupported"
+    assert [d["code"] for d in graph["diagnostics"]] == ["via_resistance_unknown"] * 2
+    assert graph["resistance_source"] == "legacy"
+    assert graph["resistance_source_reason"] == "graph_status_unsupported"
+    assert graph["selected_resistance_ohm"] == entry["resistance_ohm"]
+
+
+def test_strapping_both_ends_never_raises_the_selected_resistance(tmp_path):
+    """Measured-layout regression for the #2458 defect, on committed hashed
+    GDS: the legacy series-sum scalar rises when the same conductor is strapped
+    across a second level; the selected graph value falls (ideal via) and stays
+    below the single-level value for a finite per-cut resistance."""
+    base_entry, base = _selected(_strap_fixture("single_level"), tmp_path, 0.0)
+    strapped_entry, ideal = _selected(_strap_fixture("strapped"), tmp_path, 0.0)
+    _, finite = _selected(_strap_fixture("strapped"), tmp_path, 10.0)
+    assert strapped_entry["resistance_ohm"] > base_entry["resistance_ohm"]  # defect
+    r_li1 = _LI1_RS_OHM_SQ * 5000 / 170
+    r_met1 = _MET1_RS_OHM_SQ * 5000 / 170
+    for result, vias in ((ideal, 0.0), (finite, 20.0)):
+        assert result["resistance_source"] == "graph"
+        assert result["selected_resistance_ohm"] == pytest.approx(
+            1 / (1 / r_li1 + 1 / (r_met1 + vias)), rel=1e-6
+        )
+        assert result["selected_resistance_ohm"] <= base["selected_resistance_ohm"]
+    assert ideal["selected_resistance_ohm"] < finite["selected_resistance_ohm"]
+
+
+@pytest.mark.parametrize(("r_cut", "extra"), [(0.0, 0.0), (10.0, 10.0)])
+def test_selected_resistance_two_level_series_f5_f5v(tmp_path, r_cut, extra):
+    path = _write_gds(_make_two_level_series_layout(), tmp_path / "f5.gds")
+    _, graph = _selected(path, tmp_path, r_cut)
+    expected = _LI1_RS_OHM_SQ * 4000 / 170 + _MET1_RS_OHM_SQ * 2000 / 170 + extra
+    assert graph["resistance_source"] == "graph"
+    assert graph["selected_resistance_ohm"] == pytest.approx(expected, rel=1e-6)
+
+
+def test_overlap_without_landing_leaves_the_selected_resistance_unchanged(tmp_path):
+    """F6: a met1 strip over the li1 strip with no via is a different net and
+    adds no path (no overlap-only classification)."""
+    layout = _make_li1_strip_layout()
+    layout.top_cell().shapes(layout.layer(68, 20)).insert(kdb.Box(1000, 0, 4000, 170))
+    path = _write_gds(layout, tmp_path / "f6.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "f6.spice"),
+        parasitics=True,
+        resistance_graph=True,
+    )
+    selected = [
+        e["resistance_graph"]["selected_resistance_ohm"]
+        for e in report["parasitics"]["nets"]
+        if e["resistance_graph"]["status"] == "ok"
+    ]
+    assert selected == [pytest.approx(_LI1_RS_OHM_SQ * 5000 / 170, rel=1e-6)]
+
+
+def test_selection_fallbacks_keep_the_legacy_scalar_with_a_reason(tmp_path):
+    path = _write_gds(_make_hierarchy_layout(), tmp_path / "hier.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "h.spice"),
+        parasitics=True,
+        resistance_graph=True,
+    )
+    for entry in report["parasitics"]["nets"]:
+        graph = entry["resistance_graph"]
+        assert graph["resistance_source"] == "legacy"
+        assert graph["resistance_source_reason"] == "graph_status_skipped"
+        assert graph["selected_resistance_ohm"] == entry["resistance_ohm"]
+
+
+@pytest.mark.parametrize(
+    ("status", "terminals", "pair", "source", "reason"),
+    [
+        ("ok", ["a", "b", "c"], [[0, 1, 2]] * 3, "legacy", "terminal_count_not_two"),
+        (
+            "ok",
+            ["a", "b"],
+            [[0.0, None], [None, 0.0]],
+            "legacy",
+            "pair_resistance_unavailable",
+        ),
+        ("ok", ["a", "b"], [[0.0, 5.0], [5.0, 0.0]], "graph", "two_terminal_graph"),
+        ("unsupported", [], [], "legacy", "graph_status_unsupported"),
+    ],
+)
+def test_selection_rule_unit(status, terminals, pair, source, reason):
+    from klayout_tools.extract_parasitics import _with_selected_resistance
+
+    result = _with_selected_resistance(
+        {
+            "status": status,
+            "terminals": terminals,
+            "pair_resistance_ohm": pair,
+            "legacy_resistance_ohm": 42.0,
+        }
+    )
+    assert result["resistance_source"] == source
+    assert result["resistance_source_reason"] == reason
+    assert result["selected_resistance_ohm"] == (5.0 if source == "graph" else 42.0)
+
+
+def test_resistance_graph_r_cut_is_validated():
+    with pytest.raises(ExtractError, match="--resistance-graph-r-cut requires"):
+        run_extract(
+            "/nonexistent.gds",
+            "sky130",
+            parasitics=True,
+            resistance_graph_r_cut_ohm=0.0,
+        )
+    for bad in (-1.0, float("inf"), float("nan")):
+        with pytest.raises(ExtractError, match="finite number >= 0"):
+            run_extract(
+                "/nonexistent.gds",
+                "sky130",
+                parasitics=True,
+                resistance_graph=True,
+                resistance_graph_r_cut_ohm=bad,
+            )
+
+
+def test_cli_resistance_graph_r_cut(tmp_path, capsys):
+    path = _strap_fixture("strapped")
+    out = ["-o", str(tmp_path / "cli.spice")]
+    argv = ["extract", path, "--deck", "sky130", "--parasitics", "--resistance-graph"]
+    code = main(argv + out + ["--resistance-graph-r-cut", "0", "--format", "json"])
+    assert code == 0
+    graph = json.loads(capsys.readouterr().out)["parasitics"]["nets"][0][
+        "resistance_graph"
+    ]
+    assert graph["resistance_source"] == "graph"
+    code = main(
+        ["extract", path, "--deck", "sky130", "--parasitics"]
+        + ["--resistance-graph-r-cut", "0"]
+    )
     assert code != 0
 
 

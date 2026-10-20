@@ -366,6 +366,7 @@ _REQUEST_FIELD_DESTS = {
         "parasitic_variants",
         "parasitics_top_cell_only",
         "resistance_graph",
+        "resistance_graph_r_cut",
         "distributed_rc",
         "substrate_tie_ohms",
         "resistance_paths",
@@ -478,6 +479,7 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             "parasitic_variants": _str_list("parasitic_variants"),
             "parasitics_top_cell_only": _bool("parasitics_top_cell_only"),
             "resistance_graph": _bool("resistance_graph"),
+            "resistance_graph_r_cut": _number("resistance_graph_r_cut"),
             "distributed_rc": _bool("distributed_rc"),
             "substrate_tie_ohms": _number("substrate_tie_ohms"),
             "resistance_paths": _request_resistance_paths(request),
@@ -664,6 +666,9 @@ def run(args: argparse.Namespace) -> int:
             # `parasitics.nets[].resistance_graph`. `False` when the flag
             # was never given, unchanged from every call site before it.
             resistance_graph=args.resistance_graph,
+            # `--resistance-graph-r-cut` (issue #2983): per-cut via
+            # resistance for the graph; `None` when never given.
+            resistance_graph_r_cut_ohm=args.resistance_graph_r_cut,
             # `--distributed-rc` (issue #977, Epic #709 Phase 2b): replaces
             # the star/Gamma-shunt R/C model with a distributed ladder for
             # every `--critical-net`-named net. `False` when the flag was

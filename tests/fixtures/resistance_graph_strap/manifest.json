@@ -1,0 +1,12 @@
+{
+  "schema": "resistance_graph_strap.manifest.v1",
+  "description": "Issue #2983 measured-layout regression: one 5 um x 0.17 um sky130 li1 strip labelled S with a licon1 terminal at each end ('single_level'), and the same strip with a met1 strap of identical outline joined by an mcon at each end ('strapped'). Strapping must not raise the selected two-terminal resistance (the legacy series-sum scalar does).",
+  "files": {
+    "single_level.gds": {
+      "sha256": "16a69cb9f9b5f6c0dd1383f363d9d1ff5126a168b54b9e99a3e34400c5ccb2d6"
+    },
+    "strapped.gds": {
+      "sha256": "346fdad227ffc92cae299b31978befa818c6b7326713e5f96f642a7fc64d1ed5"
+    }
+  }
+}
