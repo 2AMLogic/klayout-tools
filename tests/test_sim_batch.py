@@ -7567,7 +7567,10 @@ def test_fleet_without_capacity_wait_is_one_attempt(tmp_path, monkeypatch, capsy
         c["diagnostics"][0]["code"] if c.get("diagnostics") else None for c in corners
     ]
     assert sorted(codes, key=str) == [None, "lost_shard"]
-    assert clock.sleeps == []
+    # ``time.sleep`` is patched module-wide, so short poll-loop sleeps from
+    # other threads are recorded too; a capacity backoff is never below
+    # _CAPACITY_BACKOFF_BASE_S / 2, so any sleep that long would be one.
+    assert [s for s in clock.sleeps if s >= sb._CAPACITY_BACKOFF_BASE_S / 2] == []
     assert "waiting for capacity" not in capsys.readouterr().err
 
 
