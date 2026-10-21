@@ -32,6 +32,7 @@ from . import (
     functional_verification_cmd,
     gen_cmd,
     gen_compose_cmd,
+    interface_check_cmd,
     kb_cmd,
     keepout_check_cmd,
     layers_cmd,
@@ -264,6 +265,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_precheck_parser(subparsers)
 
     _add_socket_check_parser(subparsers)
+    _add_interface_check_parser(subparsers)
 
     _add_reset_coverage_parser(subparsers)
 
@@ -6278,6 +6280,64 @@ def _add_socket_check_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(socket_check_parser)
     socket_check_parser.set_defaults(func=socket_check_cmd.run)
+
+
+def _add_interface_check_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``interface-check`` verb: do two blocks' pins mate?"""
+    parser = subparsers.add_parser(
+        "interface-check",
+        help="check that block A's labelled pins land on block B's pads at a placement",
+        description=(
+            "Check that two separately generated blocks mate: pair the text "
+            "labels of A and B whose string fully matches --pins, translate "
+            "B by --place into A's frame (in memory; no assembled layout is "
+            "written), and report per pin the offset between A's and B's "
+            "pad on the pin layer. A pin is ok when the pads overlap or are "
+            "within --tol-um, misaligned otherwise, and no_partner when it "
+            "exists in only one stream. See docs/cli/interface-check.md."
+        ),
+    )
+    parser.add_argument("a", help="path to block A (GDSII or OASIS)")
+    parser.add_argument("b", help="path to block B (GDSII or OASIS)")
+    parser.add_argument(
+        "--place",
+        required=True,
+        metavar="DX,DY",
+        help="translation of B into A's frame in micrometres, e.g. '120.5,0'",
+    )
+    parser.add_argument(
+        "--pins",
+        required=True,
+        metavar="REGEX",
+        help="regex that must fully match a label string for it to be checked",
+    )
+    parser.add_argument(
+        "--pin-layer-a",
+        default=None,
+        metavar="L/D",
+        help="layer of A's pads (default: each label's own layer)",
+    )
+    parser.add_argument(
+        "--pin-layer-b",
+        default=None,
+        metavar="L/D",
+        help="layer of B's pads (default: each label's own layer)",
+    )
+    parser.add_argument(
+        "--tol-um",
+        type=float,
+        default=0.0,
+        metavar="UM",
+        help="largest pad-to-pad gap still counted as mated (default 0: overlap/touch)",
+    )
+    parser.add_argument(
+        "--top-a", default=None, help="top cell of A (required if several)"
+    )
+    parser.add_argument(
+        "--top-b", default=None, help="top cell of B (required if several)"
+    )
+    _add_format_arg(parser)
+    parser.set_defaults(func=interface_check_cmd.run)
 
 
 def _add_tap_distance_parser(subparsers: argparse._SubParsersAction) -> None:
