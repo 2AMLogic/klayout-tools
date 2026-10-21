@@ -2430,6 +2430,19 @@ has shapes on `96/0`; a layout without them reports `[]` as before. The
 declaration is `asap7_rules.UNCHECKED_AREAS`, and the rule-category contract
 (`--expect-rule-categories`) is unchanged.
 
+### Checking abutment-designed cells
+
+`klt drc` judges the top cell alone, in free space. A standard cell built to
+be abutted in a row can therefore report width or pitch violations
+(`FIN.W.2`, `GATE.S.3`, `NSELECT.W.1`, `PSELECT.W.1`, `WELL.W.1`) that a
+placed row does not have, because its shapes end at the cell outline. The
+shipped-cell gate avoids this by placing each cell between two `INVx1`
+neighbours. `coverage.isolation_only_rules` names these rules, with
+`"reason": "isolation_only"`, whenever their layer is present, so a boundary
+artifact is not read as a real violation. To check the abutted context, instance
+the cell two or three times edge to edge in a new top cell and run `klt drc`
+on that; the marker stays, because it describes the check, not the outcome.
+
 ### Rule ids (the contract)
 
 Each RDB category is the DRM rule name verbatim (DRM section 1.2.3). Where the
@@ -3289,6 +3302,7 @@ for which skipped rules make a run partial and which do not.
 | `rules_skipped`                    | array\<string\> | Rule ids silently skipped because a layer they read was absent from this stream — `layer`/`other_layer`, or a `derived_layer` input (with one documented exception: a `"not_interacting"` derived rule still runs when its marker layer is absent, see "Voltage-domain rule pairs" above). Sorted alphabetically. |
 | `voltage_domain_warnings`          | array\<object\> | `{"marker": "<layer>/<datatype>", "description": string}` — see below. Sorted by marker `(layer, datatype)`. |
 | `unchecked_rules`                  | array\<object\> | `{"rule": string, "layer": "<layer>/<datatype>", "description": string}` — foundry rules the deck knows about but cannot evaluate (issue #3012; `sg13cmos5l`'s net-aware `NW.b1` was the first, now checked by `net_space`, #3572, so the map is currently empty), listed only when the rule's layer is in the stream, so a `clean` is not read as covering them. Purely informational: does not change `status`. Sorted by rule id. Additive; `[]` for decks that declare none. |
+| `isolation_only_rules`             | array\<object\> | `{"rule": string, "layer": "<layer>/<datatype>", "reason": "isolation_only", "description": string}` — `--engine klayout` with the packaged `asap7.drc` only (issue #4029): boundary-sensitive rules (`FIN.W.2`, `GATE.S.3`, `NSELECT.W.1`, `PSELECT.W.1`, `WELL.W.1`) whose layer is in the stream. `klt drc` judges the top cell in free space, so a shape ending at the cell outline can trip them for a cell built to be abutted; see "Checking abutment-designed cells". Describes the check, not the outcome: listed on `clean` and `violations` runs alike, and purely informational (does not change `status`, violations or the exit code). Sorted by rule id; `[]` for any other deck or a byte-different deck file. Additive. |
 | `marker_blind_layers_in_stream`    | array\<string\> | `"<layer>/<datatype>"` area-marker layers present in the stream that the selected deck declares it does **not** model rule-switching for (issue #3815; sky130: `81/2` `areaid.ce`). The curated deck evaluates every rule uniformly, so the marker changes no result — a `clean` or an identical violation set with and without the marker is not marker-aware evidence. Purely informational: does not change `status`, violations or the exit code. Sorted; `[]` when none is present or the deck declares none. Curated engine only. Additive. Deck-static counterpart: `klt deck rules` `marker_blind_layers`. |
 | `deck_scope`                       | array\<string\> | Every distinct DRM section / official rule-id prefix the selected deck's rules claim to implement — a static property of the deck, independent of the input stream (issue #566). Sorted alphabetically. |
 | `unmodeled_rules`                  | array\<string\> | Official foundry-runset rule ids the selected deck knowingly does **not** transcribe (issue #3031) — a static property of the deck. For sky130 this includes the enclosure refinements and the thick-oxide/marker-layer width and spacing rules (`UNMODELED_RULES` in `decks/sky130.py` is the authoritative list); sg13g2: the `Pad.*` and `LU.*` ids; gf180mcu: `MT30.*`, `MT.2b`/`MT.3`/`MT.4`, `MSLOT.*`, the Metal1–5 wide-metal `M1.2b`–`M5.2b` and narrow-line end-of-line `CO.6a`/`CO.6b`, `V1.3c`–`V4.4c` ids (issue #3968), and the untranscribed `ESD.*`/`GR.*` remainder (issues #3796, #3792). `--engine klayout` with the packaged `asap7.drc`: the ids under "Not implemented" in the ASAP7 deck section; any other deck script gets `[]`. See below. Sorted alphabetically; empty for a deck that declares none. |

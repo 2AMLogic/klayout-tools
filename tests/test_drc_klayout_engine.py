@@ -272,6 +272,7 @@ def test_klayout_engine_clean_report(tmp_path, monkeypatch):
         "unchecked_rules": [],
         "deck_scope": [],
         "unmodeled_rules": [],
+        "isolation_only_rules": [],
         "nothing_checked": False,
         "schema_version": 1,
         "known": False,

@@ -40,6 +40,7 @@ from klayout_tools.decks.asap7_rules import (
     DECK_PATH,
     DENSITY_DISPOSITION,
     DRM_SOURCE,
+    ISOLATION_ONLY_RULES,
     NOT_IMPLEMENTED,
     PAD_DISPOSITION,
     PAD_LAYER,
@@ -365,6 +366,70 @@ def test_pad_unchecked_not_reported_for_a_different_deck(tmp_path, capsys):
     )
     assert code in (0, 3)
     assert json.loads(capsys.readouterr().out)["coverage"]["unchecked_rules"] == []
+
+
+def _isolation_layout(path: Path, layers: list[tuple[int, int]]) -> Path:
+    layout = kdb.Layout()
+    layout.dbu = fx.DBU_UM
+    top = layout.create_cell("TOP")
+    for layer in layers:
+        top.shapes(layout.layer(*layer)).insert(kdb.Box(0, 0, 160, 160))
+    layout.write(str(path))
+    return path
+
+
+@_needs_klayout
+def test_isolation_only_rules_follow_layers_present(tmp_path, capsys):
+    """#4029: the boundary-sensitive rules are named only for layers in the
+    stream, and never change the verdict."""
+    _, none = _run_cli(capsys, _pad_layout(tmp_path / "a.gds", with_pad=False))
+    assert none["coverage"]["isolation_only_rules"] == []
+    gds = _isolation_layout(tmp_path / "b.gds", [(1, 0), (13, 0)])
+    _, report = _run_cli(capsys, gds)
+    assert [
+        (r["rule"], r["layer"], r["reason"])
+        for r in report["coverage"]["isolation_only_rules"]
+    ] == [
+        ("PSELECT.W.1", "13/0", "isolation_only"),
+        ("WELL.W.1", "1/0", "isolation_only"),
+    ]
+
+
+@_needs_klayout
+def test_isolation_only_rules_empty_for_a_different_deck(tmp_path, capsys):
+    deck = tmp_path / "other.drc"
+    deck.write_text(DECK_PATH.read_text() + "\n# edited\n")
+    gds = _isolation_layout(tmp_path / "w.gds", [(1, 0)])
+    code = main(
+        [
+            "drc",
+            str(gds),
+            "--engine",
+            "klayout",
+            "--deck-file",
+            str(deck),
+            "--format",
+            "json",
+        ]
+    )
+    assert code in (0, 3)
+    out = json.loads(capsys.readouterr().out)
+    assert out["coverage"]["isolation_only_rules"] == []
+
+
+def test_isolation_only_rules_are_documented():
+    assert set(ISOLATION_ONLY_RULES) == {
+        "FIN.W.2",
+        "GATE.S.3",
+        "NSELECT.W.1",
+        "PSELECT.W.1",
+        "WELL.W.1",
+    }
+    for rule in ISOLATION_ONLY_RULES:
+        assert rule in RULE_IDS
+    docs = (Path(__file__).resolve().parents[1] / "docs/cli/drc.md").read_text()
+    assert "Checking abutment-designed cells" in docs
+    assert "isolation_only_rules" in docs
 
 
 def test_fixture_layers_match_deck():
