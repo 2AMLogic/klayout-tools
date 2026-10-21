@@ -1650,21 +1650,18 @@ def _deck_batch_command(version_check: str) -> str:
     (unit streams are the result, not an opt-in artifact) and the report
     redirected to ``report.json`` (stdout is not a clean channel back --
     see ``sim_batch._build_batch_job_spec``)."""
-    command = (
-        sim_batch._runner_preflight_script(
+    return (
+        sim_batch._job_stderr_capture_prefix()
+        + sim_batch._runner_preflight_script(
             _provenance._klt_version(),
             enforce=version_check == "enforce",
         )
         + sim_batch._deck_preflight_lines()
-    ) + (
-        f'klt sim "$EDA_INPUT_DIR/{remote_transport.REMOTE_REQUEST_FILENAME}" '
+        + f'klt sim "$EDA_INPUT_DIR/{remote_transport.REMOTE_REQUEST_FILENAME}" '
         "--backend local-parallel --format json"
         f' --outdir "$EDA_OUTPUT_DIR/{sim_batch.BATCH_ARTIFACTS_DIRNAME}"'
         f' > "$EDA_OUTPUT_DIR/{sim_batch.BATCH_REPORT_FILENAME}"'
-        f' 2> >(tee "$EDA_OUTPUT_DIR/{sim_batch.BATCH_STDERR_FILENAME}" >&2)'
-        "; rc=$?; wait $! 2>/dev/null; exit $rc"
     )
-    return command
 
 
 def _read_deck_report(local_dir: str) -> dict[str, Any]:
@@ -1764,7 +1761,8 @@ def _recover_failed_deck_job(
     cleared (no previous run's files may pose as this job's evidence).
     Never resubmits and never raises -- a collection problem is recorded on
     the units while the primary job failure stays authoritative. The caller
-    fills in the report's ``outdir`` and the ``environment.remote`` block."""
+    fills in the report's ``outdir``; ``environment.remote`` carries the
+    runner identity read from the collected outputs."""
     units = worker_request[DECKS_FIELD]
     state = str(status.get("state") or "")
     code = "batch_job_timeout" if state == "timeout" else "batch_job_failed"
@@ -1788,7 +1786,17 @@ def _recover_failed_deck_job(
             try:
                 report = _read_deck_report(collected)
             except sim_batch.BatchError:
-                pass
+                # Not a deck report: the preflight (or klt itself) writes
+                # its klt error envelope to report.json, so classify that
+                # before falling back to the stderr tee.
+                try:
+                    kind, runner_error = sim_batch._classify_collected_report(
+                        sim_batch.read_collected_report(collected)
+                    )
+                except sim_batch.BatchError:
+                    kind = "unusable"
+                if kind != "error":
+                    runner_error = None
             else:
                 _install_unit_trees(
                     units,
@@ -1797,8 +1805,10 @@ def _recover_failed_deck_job(
                         collected, sim_batch.BATCH_ARTIFACTS_DIRNAME
                     ),
                 )
+                report.setdefault("environment", {})["remote"] = environment
                 return report
-            runner_error, note = sim_batch._read_stderr_envelope(collected)
+            if runner_error is None:
+                runner_error, note = sim_batch._read_stderr_envelope(collected)
     except (sim_batch.BatchError, OSError) as exc:
         note = str(exc)
     _install_unit_trees(units, outdir=outdir, source_root=None)
@@ -1914,7 +1924,6 @@ def _collect_decks_batch(
             config, job_id, worker_request, status, outdir=outdir, runner=None
         )
         recovered["outdir"] = os.path.abspath(outdir)
-        recovered.setdefault("environment", {})["remote"] = environment
         return recovered
     with tempfile.TemporaryDirectory(prefix="klt-batch-outputs-") as collected:
         sim_batch.collect_outputs(config, job_id, collected)
