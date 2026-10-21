@@ -3219,7 +3219,9 @@ def attach_staged_model_comparison(
     client_stamp = _client_pdk_stamp(request)
     for entry in entries:
         worker_env = entry.get("worker_environment")
-        pdk = worker_env.get("pdk") if isinstance(worker_env, dict) else None
+        if not isinstance(worker_env, dict):
+            continue
+        pdk = worker_env.get("pdk")
         if isinstance(pdk, dict) and pdk.get("models_staged") is True:
             worker_env["pdk_stamp_comparison"] = _compare_staged_model_inputs(
                 staged_model_inputs, worker_env.get("model_inputs"), client_stamp

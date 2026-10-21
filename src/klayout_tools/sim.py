@@ -4000,14 +4000,12 @@ def _run_sim_corners(
     status = graded["status"]
 
     engine_build = _engine_build_with_comparison(
-        ngspice_binary, remote_environment, backend
+        ngspice_binary,
+        remote_environment,
+        backend,
+        staged_model_environment.get("staged_model_inputs"),
+        request,
     )
-    if remote_environment is not None and backend == "batch":
-        attach_staged_model_comparison(
-            remote_environment,
-            staged_model_environment.get("staged_model_inputs"),
-            request,
-        )
 
     environment: dict[str, Any] = {
         "engine": engine,
@@ -11318,12 +11316,16 @@ def _engine_build_with_comparison(
     ngspice_binary: str | None,
     remote_environment: dict[str, Any] | None,
     backend: str,
+    staged_model_inputs: list[dict[str, Any]] | None = None,
+    request: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Probe the local build and, for a batch sweep, compare it with each
-    worker's build in ``remote_environment`` (issue #3095)."""
+    worker's build in ``remote_environment`` (issue #3095), and the staged
+    model digests with what each worker hashed (issue #4020)."""
     engine_build = _probe_engine_build(ngspice_binary)
     if remote_environment is not None and backend == "batch":
         attach_engine_build_comparison(remote_environment, engine_build)
+        attach_staged_model_comparison(remote_environment, staged_model_inputs, request)
     return engine_build
 
 
